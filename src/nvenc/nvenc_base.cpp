@@ -29,6 +29,7 @@
 namespace {
 
   std::array<std::atomic<int>, 3> observed_codec_max_widths {};
+  std::array<std::atomic<int>, 3> observed_codec_max_heights {};
 
   GUID quality_preset_guid_from_number(unsigned number) {
     if (number > 7) {
@@ -99,6 +100,14 @@ namespace nvenc {
     }
     const int width = observed_codec_max_widths[video_format].load(std::memory_order_relaxed);
     return width > 0 ? std::optional<int> {width} : std::nullopt;
+  }
+
+  std::optional<int> max_encode_height_for_codec(int video_format) {
+    if (video_format < 0 || video_format >= static_cast<int>(observed_codec_max_heights.size())) {
+      return std::nullopt;
+    }
+    const int height = observed_codec_max_heights[video_format].load(std::memory_order_relaxed);
+    return height > 0 ? std::optional<int> {height} : std::nullopt;
   }
 
   nvenc_hdr_metadata_t hdr_metadata_from_sunshine(
@@ -257,12 +266,18 @@ namespace nvenc {
     {
       auto supported_width = get_encoder_cap(NV_ENC_CAPS_WIDTH_MAX);
       auto supported_height = get_encoder_cap(NV_ENC_CAPS_HEIGHT_MAX);
-      if (supported_width > 0 && client_config.videoFormat >= 0 && client_config.videoFormat < static_cast<int>(observed_codec_max_widths.size())) {
-        const int previous = observed_codec_max_widths[client_config.videoFormat].exchange(
+      if (supported_width > 0 && supported_height > 0 &&
+          client_config.videoFormat >= 0 &&
+          client_config.videoFormat < static_cast<int>(observed_codec_max_widths.size())) {
+        const int previous_width = observed_codec_max_widths[client_config.videoFormat].exchange(
           supported_width,
           std::memory_order_relaxed
         );
-        if (previous != supported_width) {
+        const int previous_height = observed_codec_max_heights[client_config.videoFormat].exchange(
+          supported_height,
+          std::memory_order_relaxed
+        );
+        if (previous_width != supported_width || previous_height != supported_height) {
           BOOST_LOG(info) << "NvEnc: codec " << client_config.videoFormat
                           << " maximum encode dimensions " << supported_width << 'x'
                           << supported_height;

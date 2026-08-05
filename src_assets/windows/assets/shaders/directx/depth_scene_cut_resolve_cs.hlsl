@@ -1,7 +1,6 @@
-// Live Host SBS V2 cut-only state resolver. It intentionally writes the established 32-word
-// adaptive-state buffer so telemetry and Dump 3D remain wire-compatible, but only cut-related
-// slots have live authority. Subject, stretch, adaptive-pop, and legacy zero-plane slots retain
-// their unavailable/default values and are never consumed by V2 geometry.
+// Live Host SBS V2 cut-state resolver. It writes the authenticated 32-word CutBridgeState
+// transport consumed by telemetry, Dump 3D, and offline boundary planning. Reserved compatibility
+// slots retain their declared defaults and are never consumed by V2 geometry.
 
 RWStructuredBuffer<float4> CutBridgeState : register(u0);
 RWStructuredBuffer<uint> SceneCutEvidence : register(u1);
@@ -13,18 +12,31 @@ RWStructuredBuffer<uint> SceneCutEvidence : register(u1);
 
 [numthreads(1, 1, 1)]
 void main() {
-    float4 s = CutBridgeState[SBS_STATE_VECTOR_SUBJECT_RECENTER_DELTA];
-    float4 s1 = CutBridgeState[SBS_STATE_VECTOR_STRETCH_LO];
-    float4 s2 = CutBridgeState[SBS_STATE_VECTOR_ZERO_ANCHOR_SHIFT_PX];
-    float4 telemetry = CutBridgeState[SBS_STATE_VECTOR_LATCHED_EDGE_FRACTION];
+    float4 s = CutBridgeState[SBS_STATE_VECTOR_SCENE_AGE];
+    float4 s1 = CutBridgeState[SBS_STATE_VECTOR_DEPTH_CHANGE_BASELINE_EMA];
+    float4 s2 = CutBridgeState[SBS_STATE_VECTOR_CUT_FLAGS];
+    float4 telemetry = CutBridgeState[SBS_STATE_VECTOR_CURRENT_DEPTH_CHANGE_FRACTION];
     uint4 health_counters = asuint(CutBridgeState[SBS_STATE_VECTOR_HARD_CUT_COUNT]);
     float4 telemetry_flags = CutBridgeState[SBS_STATE_VECTOR_RANGE_COLLAPSED];
-    float4 current_diagnostics = 0.0f;
-    SBS_STATE_CURRENT_EDGE_FRACTION(current_diagnostics) = -1.0f;
-    SBS_STATE_CURRENT_ZERO_ANCHOR_CANDIDATE_SHIFT_PX(current_diagnostics) = -1.0f;
+    float4 current_diagnostics =
+        CutBridgeState[SBS_STATE_VECTOR_STRUCTURAL_CHANGE_FRACTION];
+    float4 analysis_diagnostics =
+        CutBridgeState[SBS_STATE_VECTOR_CURRENT_STRUCTURAL_SUPPORT_FRACTION];
+    if (asuint(SBS_STATE_CUT_CONTRACT_TAG_BITS(s)) != SBS_CUT_CONTRACT_TAG) {
+        s = SbsAdaptiveStateInitialVector(0u);
+        s1 = SbsAdaptiveStateInitialVector(1u);
+        s2 = SbsAdaptiveStateInitialVector(2u);
+        telemetry = SbsAdaptiveStateInitialVector(3u);
+        health_counters = asuint(SbsAdaptiveStateInitialVector(4u));
+        telemetry_flags = SbsAdaptiveStateInitialVector(5u);
+        current_diagnostics = SbsAdaptiveStateInitialVector(6u);
+        analysis_diagnostics = SbsAdaptiveStateInitialVector(7u);
+    }
+    SBS_STATE_CUT_CONTRACT_TAG_BITS(s) = asfloat(SBS_CUT_CONTRACT_TAG);
+    current_diagnostics = 0.0f;
     SBS_STATE_STRUCTURAL_CHANGE_FRACTION(current_diagnostics) = -1.0f;
     SBS_STATE_RAW_RGB_CHANGE_FRACTION(current_diagnostics) = -1.0f;
-    float4 analysis_diagnostics = 0.0f;
+    analysis_diagnostics = 0.0f;
     SBS_STATE_CURRENT_STRUCTURAL_SUPPORT_FRACTION(analysis_diagnostics) = -1.0f;
     SBS_STATE_PREVIOUS_STRUCTURAL_SUPPORT_FRACTION(analysis_diagnostics) = -1.0f;
     SBS_STATE_COMMON_STRUCTURAL_SUPPORT_FRACTION(analysis_diagnostics) = -1.0f;
@@ -35,7 +47,10 @@ void main() {
     if (total > 0.5f) {
         bool initialized = SBS_STATE_INITIALIZED(s) > 0.5f;
         float previous_scene_age = SBS_STATE_SCENE_AGE(s);
-        float scene_age = initialized ? min(previous_scene_age + 1.0f, 65535.0f) : 0.0f;
+        uint stream_frame_delta = clamp(
+            SceneCutEvidence[CUT_EVIDENCE_STREAM_FRAME_DELTA], 1u, 65535u);
+        float scene_age = initialized ?
+            min(previous_scene_age + (float)stream_frame_delta, 65535.0f) : 0.0f;
         float change_fraction =
             (float)SceneCutEvidence[CUT_EVIDENCE_DEPTH_CHANGE] / total;
         float structural_change_fraction =
@@ -163,7 +178,7 @@ void main() {
         bool relative_geometry_spike =
             cut_latched && !geometry_armed &&
             !appearance_veto &&
-            scene_age >= CUT_ARM_SETTLE_UPDATES &&
+            scene_age >= CUT_ARM_SETTLE_STREAM_FRAMES &&
             change_fraction >= DEPTH_CUT_RELATIVE_FLOOR &&
             (change_fraction >= depth_change_baseline + DEPTH_CUT_RELATIVE_MARGIN ||
              change_fraction >=
@@ -252,7 +267,7 @@ void main() {
                          APPEARANCE_CUT_BASELINE_ALPHA);
             }
             if (!cut_latched) {
-                if (scene_age >= CUT_ARM_SETTLE_UPDATES) {
+                if (scene_age >= CUT_ARM_SETTLE_STREAM_FRAMES) {
                     cut_flags = CUT_FLAG_GEOMETRY_ARMED | CUT_FLAG_APPEARANCE_ARMED;
                 }
             } else {
@@ -309,18 +324,19 @@ void main() {
             appearance_change_baseline;
         if (shot_cut) {
             SBS_STATE_HARD_CUT_COUNT(health_counters) =
-                min(SBS_STATE_HARD_CUT_COUNT(health_counters) + 1u, 0xfffffffeu);
+                min(SBS_STATE_HARD_CUT_COUNT(health_counters) + 1u,
+                    SBS_ADAPTIVE_STATE_COUNTER_MAX);
             SBS_STATE_HARD_CUT_PULSE(telemetry_flags) = 1.0f;
         }
     }
 
-    CutBridgeState[SBS_STATE_VECTOR_SUBJECT_RECENTER_DELTA] = s;
-    CutBridgeState[SBS_STATE_VECTOR_STRETCH_LO] = s1;
-    CutBridgeState[SBS_STATE_VECTOR_ZERO_ANCHOR_SHIFT_PX] = s2;
-    CutBridgeState[SBS_STATE_VECTOR_LATCHED_EDGE_FRACTION] = telemetry;
+    CutBridgeState[SBS_STATE_VECTOR_SCENE_AGE] = s;
+    CutBridgeState[SBS_STATE_VECTOR_DEPTH_CHANGE_BASELINE_EMA] = s1;
+    CutBridgeState[SBS_STATE_VECTOR_CUT_FLAGS] = s2;
+    CutBridgeState[SBS_STATE_VECTOR_CURRENT_DEPTH_CHANGE_FRACTION] = telemetry;
     CutBridgeState[SBS_STATE_VECTOR_HARD_CUT_COUNT] = asfloat(health_counters);
     CutBridgeState[SBS_STATE_VECTOR_RANGE_COLLAPSED] = telemetry_flags;
-    CutBridgeState[SBS_STATE_VECTOR_CURRENT_EDGE_FRACTION] = current_diagnostics;
+    CutBridgeState[SBS_STATE_VECTOR_STRUCTURAL_CHANGE_FRACTION] = current_diagnostics;
     CutBridgeState[SBS_STATE_VECTOR_CURRENT_STRUCTURAL_SUPPORT_FRACTION] =
         analysis_diagnostics;
 

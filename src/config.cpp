@@ -153,20 +153,6 @@ namespace config {
     {},  // prep commands
   };
 
-  const std::vector<depth_model_info> &depth_model_registry() {
-    // Built-in DA-V2 model definitions referenced by profile depth_model names.
-    // Keep the general depth-model roster independent of Host SBS V2's authenticated live subset.
-    // V2 joins its calibration after the exact selected name/URL/model bytes are known; changing
-    // an experimental manifest must never add, remove, or redirect a production model.
-    static const std::vector<depth_model_info> registry = {
-      {"depth_anything_v2_fp16",
-       "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx"},
-      {"depth_anything_v2_base_fp16",
-       "https://huggingface.co/onnx-community/depth-anything-v2-base/resolve/main/onnx/model_fp16.onnx"},
-    };
-    return registry;
-  }
-
   bool endline(char ch) {
     return ch == '\r' || ch == '\n';
   }
@@ -651,69 +637,14 @@ namespace config {
     int_f(vars, "max_bitrate", video.max_bitrate);
     double_between_f(vars, "minimum_fps_target", video.minimum_fps_target, {0.0, 1000.0});
 
-    // Apply the selected offline/evaluator analysis profile first, then explicit sbs_3d_* keys.
-    // The three controls shared with live V2 (pop, packed width, and CUDA Graph) deliberately
-    // have no profile-prefixed aliases. Reinitializing also clears stale values on reload.
-    std::string sbs_profile = "apollo";
-    string_f(vars, "sbs_3d_profile", sbs_profile);
-    if (sbs_profile.empty() || sbs_profile.size() > 64 || sbs_profile.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != std::string::npos) {
-      BOOST_LOG(warning) << "Invalid sbs_3d_profile name '" << sbs_profile
-                         << "'; use 1-64 letters, digits, '_' or '-'. Using 'apollo'.";
-      sbs_profile = "apollo";
-    }
-    if (sbs_profile == "vd3d") {
-      BOOST_LOG(warning) << "SBS profile 'vd3d' was retired; using 'apollo'.";
-      sbs_profile = "apollo";
-    }
-    for (const auto *shared_key : {"pop_strength", "max_encode_width", "cuda_graph"}) {
-      const std::string deprecated_key =
-        "sbs_3d_profile_" + sbs_profile + "_" + shared_key;
-      if (vars.erase(deprecated_key) != 0u) {
-        BOOST_LOG(warning) << "Ignoring deprecated SBS profile key '" << deprecated_key
-                           << "'; use top-level 'sbs_3d_" << shared_key << "' instead.";
-      }
-    }
-    auto apply_sbs_values = [&](
-                              video_t::sbs_t &target,
-                              const std::string &prefix,
-                              const bool include_shared_controls
-                            ) {
-      // Pop, the packed-output cap, and CUDA Graph are one set of explicit top-level controls
-      // shared by live V2 and offline work. A legacy analysis profile must not silently override
-      // live behavior through profile-prefixed duplicates.
-      if (include_shared_controls) {
-        double_between_f(vars, prefix + "pop_strength", target.pop_strength, {0.25, 2.0});
-        int_between_f(vars, prefix + "max_encode_width", target.max_encode_width, {256, 16384});
-        bool_f(vars, prefix + "cuda_graph", target.cuda_graph);
-      }
-      bool_f(vars, prefix + "adaptive_pop", target.adaptive_pop);
-      double_between_f(vars, prefix + "adaptive_pop_max", target.adaptive_pop_max, {0.25, 2.0});
-      double_between_f(vars, prefix + "ema", target.ema, {0.01, 1.0});
-      double_between_f(vars, prefix + "ema_edge_change", target.ema_edge_change, {0.0, 1.0});
-      double_between_f(vars, prefix + "ema_edge_gradient", target.ema_edge_gradient, {0.0, 1.0});
-      double_between_f(vars, prefix + "ema_edge_strength", target.ema_edge_strength, {0.0, 1.0});
-      int_f(vars, prefix + "depth_short_side", target.depth_short_side);
-      double_between_f(vars, prefix + "depth_max_aspect", target.depth_max_aspect, {1.0, 8.0});
-      double_between_f(vars, prefix + "minmax_ema", target.minmax_ema, {0.001, 1.0});
-      double_between_f(vars, prefix + "subject_recenter", target.subject_recenter, {0.0, 1.0});
-      bool_f(vars, prefix + "subject_stretch", target.subject_stretch);
-      string_f(vars, prefix + "zero_plane", target.zero_plane);
-      string_f(vars, prefix + "depth_model", target.depth_model);
-      string_f(vars, prefix + "depth_model_url", target.depth_model_url);
-    };
-
+    // Explicit SBS controls shared by live V2 and offline conversion. The removed legacy
+    // evaluator's analysis/geometry keys (profiles, zero plane, subject shaping, adaptive pop,
+    // EMA levers, dynamic depth sizing) no longer exist; the Depth Coordinate V2 pipeline uses
+    // its fixed calibration. Reinitializing also clears stale values on reload.
     video.sbs = {};
-    video.sbs.profile = sbs_profile;
-    apply_sbs_values(video.sbs, "sbs_3d_profile_" + sbs_profile + "_", false);
-    apply_sbs_values(video.sbs, "sbs_3d_", true);
-    if (video.sbs.zero_plane != "subject" && video.sbs.zero_plane != "median" && video.sbs.zero_plane != "background") {
-      // Fall back to the shipped default rather than a hard-coded mode, so a typo cannot silently
-      // opt a user out of the validated default.
-      BOOST_LOG(warning) << "Invalid sbs_3d_zero_plane value '" << video.sbs.zero_plane
-                         << "'; use subject, median, or background. Using "
-                         << video_t::sbs_t {}.zero_plane << '.';
-      video.sbs.zero_plane = video_t::sbs_t {}.zero_plane;
-    }
+    double_between_f(vars, "sbs_3d_pop_strength", video.sbs.pop_strength, {0.25, 2.0});
+    int_between_f(vars, "sbs_3d_max_encode_width", video.sbs.max_encode_width, {256, 16384});
+    bool_f(vars, "sbs_3d_cuda_graph", video.sbs.cuda_graph);
     video.sbs.max_encode_width &= ~1;
 
     path_f(vars, "pkey", nvhttp.pkey);

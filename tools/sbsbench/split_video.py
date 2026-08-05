@@ -3,7 +3,7 @@
 split_video - turn a short video into a fixed frame sequence for the SBS benchmark clip set.
 
 A benchmark clip is just a directory of frame PNGs; this produces one deterministically from a
-video so every A/B run feeds the exact same input (see docs/sbs-benchmark-plan.md). Uses the
+video so every A/B run feeds the exact same input (see tools/sbsbench/DATASETS.md). Uses the
 ffmpeg bundled with imageio-ffmpeg (no system ffmpeg needed), or a system ffmpeg if on PATH.
 
 Usage:

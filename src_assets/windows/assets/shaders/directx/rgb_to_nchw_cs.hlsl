@@ -1,7 +1,6 @@
 Texture2D<float4> InputTexture : register(t0);
 RWStructuredBuffer<float> OutputBuffer : register(u0);
 RWStructuredBuffer<float> OutputAppearanceOrdinal : register(u1);
-SamplerState LinearSampler : register(s0);
 
 #include "include/depth_constants.hlsl"
 #include "include/depth_color.hlsl"
@@ -10,12 +9,33 @@ SamplerState LinearSampler : register(s0);
 // mip 0, so one bilinear SampleLevel tap aliases whenever the source is appreciably larger than
 // the model grid (3840x2160 -> 770x434 is almost 5x in each axis). Exact overlap weights preserve
 // thin features that sparse quadrant taps can miss at that ratio.
-float4 SampleModelFootprint(uint2 target_pixel, uint2 source_size, float2 center_uv) {
+float3 LoadModelColor(int2 source_pixel, uint2 source_size) {
+    source_pixel = clamp(source_pixel, int2(0, 0), int2(source_size) - 1);
+    return DepthColorToSrgb(InputTexture.Load(int3(source_pixel, 0)).rgb, color_mode);
+}
+
+float3 SampleModelColorBilinear(float2 center_uv, uint2 source_size) {
+    float2 source_position = center_uv * float2(source_size) - 0.5f;
+    int2 lo = int2(floor(source_position));
+    float2 blend = frac(source_position);
+    float3 top = lerp(
+        LoadModelColor(lo, source_size),
+        LoadModelColor(lo + int2(1, 0), source_size),
+        blend.x);
+    float3 bottom = lerp(
+        LoadModelColor(lo + int2(0, 1), source_size),
+        LoadModelColor(lo + int2(1, 1), source_size),
+        blend.x);
+    return lerp(top, bottom, blend.y);
+}
+
+float3 SampleModelFootprint(uint2 target_pixel, uint2 source_size, float2 center_uv) {
     uint2 target_size = uint2(target_w, target_h);
     if (any(source_size < target_size)) {
-        // The normal estimator contract never upscales, but retain the old pixel-center bilinear
-        // behavior for a capped/native edge case rather than applying a box smaller than a texel.
-        return InputTexture.SampleLevel(LinearSampler, center_uv, 0);
+        // The authenticated production shapes never upscale. Retain pixel-center bilinear
+        // behavior for diagnostic/native edge cases, but interpolate in model (display-referred)
+        // color so capture transfer cannot change the result.
+        return SampleModelColorBilinear(center_uv, source_size);
     }
 
     float2 source_scale =
@@ -25,7 +45,7 @@ float4 SampleModelFootprint(uint2 target_pixel, uint2 source_size, float2 center
     int2 first = max(int2(floor(source_lo)), int2(0, 0));
     int2 end = min(int2(ceil(source_hi)), int2(source_size));
 
-    float4 weighted_sum = 0.0f;
+    float3 weighted_sum = 0.0f;
     [loop]
     for (int source_y = first.y; source_y < end.y; ++source_y) {
         float y_coverage = max(
@@ -38,9 +58,12 @@ float4 SampleModelFootprint(uint2 target_pixel, uint2 source_size, float2 center
                 min(source_hi.x, (float)(source_x + 1)) -
                     max(source_lo.x, (float)source_x),
                 0.0f);
-            weighted_sum +=
-                InputTexture.Load(int3(source_x, source_y, 0)) *
-                (x_coverage * y_coverage);
+            // The model was trained on display-referred images resized in encoded color. Apply
+            // linear/HDR conversion to every source cell before spatial integration; averaging
+            // capture-domain linear light first makes isolated HDR highlights contaminate an
+            // entire model texel and makes equivalent SDR capture modes disagree.
+            weighted_sum += LoadModelColor(
+                int2(source_x, source_y), source_size) * (x_coverage * y_coverage);
         }
     }
 
@@ -62,11 +85,9 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     uint source_w, source_h;
     InputTexture.GetDimensions(source_w, source_h);
     uint2 source_size = uint2(source_w, source_h);
-    float4 pixel = SampleModelFootprint(DTid.xy, source_size, uv);
+    float3 pixel = SampleModelFootprint(DTid.xy, source_size, uv);
 
-    // Preserve one exposure-ordinal signal BEFORE the model's HDR tonemapper. Reinhard uses a
-    // per-pixel luminance divisor, so maxRGB reconstructed from the post-tone-map NCHW tensor is
-    // not rank invariant: a global exposure change can reverse two differently coloured pixels.
+    // Preserve one exposure-ordinal signal independently from the model's HDR tonemapper.
     //
     // Point sampling is deliberate. A nonlinear exposure curve followed by spatial mixing can
     // also reverse the ordering of two mixtures even when the curve is globally monotone. At a
@@ -78,14 +99,7 @@ void main(uint3 DTid : SV_DispatchThreadID) {
         source_size - 1u);
     float3 capture_rgb = InputTexture.Load(int3(source_point, 0)).rgb;
     OutputAppearanceOrdinal[base_idx] =
-        max(capture_rgb.r, max(capture_rgb.g, capture_rgb.b));
-
-    // HDR capture is scRGB: LINEAR light with Rec.709 primaries (so primaries already match
-    // the SDR-trained model; only the transfer function differs). Compress highlights with
-    // luminance-preserving Reinhard (1.0 scRGB = 80 nits) so highlights don't blind the first conv,
-    // then gamma-encode to sRGB so midtones land where ImageNet normalization expects them
-    // (feeding linear light makes the image far too dark and degrades the depth estimate).
-    pixel.rgb = DepthColorToSrgb(pixel.rgb, color_mode);
+        DepthAppearanceOrdinal(capture_rgb, color_mode);
 
     // ImageNet Normalization
     float r = (pixel.r - 0.485f) / 0.229f;

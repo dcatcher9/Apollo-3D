@@ -433,8 +433,8 @@ void main(uint3 id : SV_DispatchThreadID) {
     ComPtr<ID3D11Buffer> state_buffer;
     ComPtr<ID3D11ShaderResourceView> state_srv;
     ComPtr<ID3D11UnorderedAccessView> state_uav;
-    ComPtr<ID3D11Buffer> legacy_buffer;
-    ComPtr<ID3D11ShaderResourceView> legacy_srv;
+    ComPtr<ID3D11Buffer> cut_state_buffer;
+    ComPtr<ID3D11ShaderResourceView> cut_state_srv;
     ComPtr<ID3D11Texture2D> coordinate_texture;
     ComPtr<ID3D11ShaderResourceView> coordinate_srv;
     ComPtr<ID3D11UnorderedAccessView> coordinate_uav;
@@ -728,7 +728,7 @@ void main(uint3 id : SV_DispatchThreadID) {
             !relative_filename(raw_file) || raw_file != "raw_" + frame.frame_id + ".f32" ||
             !sha256_is_lower_hex(frame.raw_sha256) ||
             !sha256_is_lower_hex(frame.source_sha256) ||
-            frame.cut_generation > 0xfffffffdu) {
+            frame.cut_generation > sbs_adaptive_state::counter_max) {
           error = "v2 GPU replay frame identity/hash/generation is invalid";
           return false;
         }
@@ -902,16 +902,11 @@ void main(uint3 id : SV_DispatchThreadID) {
           return false;
         }
       }
-      auto legacy_words = sbs_adaptive_state::words_t {};
-      for (std::size_t index = 0; index < legacy_words.size(); ++index) {
-        legacy_words[index] = std::bit_cast<std::uint32_t>(
-          sbs_adaptive_state::initial_values[index]
-        );
-      }
+      auto cut_state_words = sbs_adaptive_state::initial_words;
       if (!create_structured_buffer(
             device.Get(), sizeof(float) * 4u,
-            static_cast<UINT>(sbs_adaptive_state::vector_count), legacy_words.data(), false,
-            legacy_buffer, legacy_srv, unused_uav
+            static_cast<UINT>(sbs_adaptive_state::vector_count), cut_state_words.data(), false,
+            cut_state_buffer, cut_state_srv, unused_uav
           ) ||
           !create_float_texture(
             device.Get(), width, height,
@@ -943,7 +938,7 @@ void main(uint3 id : SV_DispatchThreadID) {
             device.Get(), width, height,
             encoded_texture, encoded_srv, encoded_uav
           )) {
-        error = "cannot create v2 GPU replay textures or legacy cut buffer";
+        error = "cannot create V2 GPU replay textures or cut-state buffer";
         return false;
       }
       return true;
@@ -1036,18 +1031,14 @@ void main(uint3 id : SV_DispatchThreadID) {
         frame.cut_pulse ||
         frame.cut_generation != frames[sequence_index - 1u].cut_generation
       );
-      auto legacy_words = sbs_adaptive_state::words_t {};
-      for (std::size_t index = 0; index < legacy_words.size(); ++index) {
-        legacy_words[index] = std::bit_cast<std::uint32_t>(
-          sbs_adaptive_state::initial_values[index]
-        );
-      }
-      legacy_words[sbs_adaptive_state::index(
+      auto cut_state_words = sbs_adaptive_state::initial_words;
+      cut_state_words[sbs_adaptive_state::index(
         sbs_adaptive_state::word_e::hard_cut_count)] = frame.cut_generation;
-      legacy_words[sbs_adaptive_state::index(
+      cut_state_words[sbs_adaptive_state::index(
         sbs_adaptive_state::word_e::hard_cut_pulse)] =
           std::bit_cast<std::uint32_t>(frame.cut_pulse ? 1.0f : 0.0f);
-      context->UpdateSubresource(legacy_buffer.Get(), 0, nullptr, legacy_words.data(), 0, 0);
+      context->UpdateSubresource(
+        cut_state_buffer.Get(), 0, nullptr, cut_state_words.data(), 0, 0);
 
       ID3D11Buffer *constant_buffers[] = {
         common_constants_by_color[source_color_mode].Get(), v2_constants.Get()
@@ -1055,7 +1046,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       context->CSSetConstantBuffers(0, 2, constant_buffers);
 
       // Reproduce the two authenticated shared passes that feed live V2. The replay resets their
-      // accumulators explicitly because it does not run the legacy percentile-EMA clear pass.
+      // accumulators explicitly because replay starts from an authenticated state snapshot.
       const std::array<std::uint32_t, 3> initial_minmax {{0xffffffffu, 0u, 0u}};
       const UINT clear_histogram[4] = {0u, 0u, 0u, 0u};
       context->UpdateSubresource(
@@ -1095,7 +1086,7 @@ void main(uint3 id : SV_DispatchThreadID) {
 
       context->CSSetShader(state_shader.Get(), nullptr, 0);
       ID3D11ShaderResourceView *state_srvs[] = {
-        frame_srv.Get(), legacy_srv.Get(), histogram_srv.Get(),
+        frame_srv.Get(), cut_state_srv.Get(), histogram_srv.Get(),
       };
       context->CSSetShaderResources(0, 3, state_srvs);
       context->CSSetUnorderedAccessViews(0, 1, state_uav.GetAddressOf(), nullptr);
@@ -1230,8 +1221,10 @@ void main(uint3 id : SV_DispatchThreadID) {
       const std::uint32_t camera_center_integrity =
         state_words[v2::camera_center_integrity_bits];
       const float container_scale = float_state(v2::container_scale);
+      const bool renderer_authorization_valid =
+        state_words[v2::renderer_authorization_bits] ==
+          (frame_valid ? v2::contract_tag : 0u);
       const bool mapping_state_reserved_valid =
-        state_words[v2::mapping_state_reserved_0] == 0u &&
         state_words[v2::mapping_state_reserved_1] == 0u &&
         state_words[v2::mapping_state_reserved_2] == 0u;
       const std::uint32_t calibration_revision =
@@ -1243,13 +1236,13 @@ void main(uint3 id : SV_DispatchThreadID) {
         calibration_revision,
         camera_center_integrity
       );
-      const bool camera_valid = camera_integrity_valid && mapping_state_reserved_valid &&
+      const bool camera_valid = camera_integrity_valid && renderer_authorization_valid &&
+        mapping_state_reserved_valid &&
         v2::convergence_curve_is_valid(convergence_curve) &&
         inverse_scale > 0.0f &&
         calibration_revision > 0u &&
         v2::calibration_revision_is_valid(calibration_revision);
-      const float effective_gain = frame_valid ?
-                                     constants.requested_gain * container_scale : 0.0f;
+      const float effective_gain = frame_valid ? constants.requested_gain : 0.0f;
       const float observed_mean = input_valid ? float_stat(v2::frame_stat_mean) : 0.0f;
       const float observed_std = input_valid ?
                                    float_stat(v2::frame_stat_population_std) : 0.0f;
@@ -1267,12 +1260,12 @@ void main(uint3 id : SV_DispatchThreadID) {
           (frame_valid && !camera_valid) ||
           (camera_valid && std::abs(latched_scale - constants.raw_coordinate_scale) >
                              2.0e-6f) ||
-          (!frame_valid && container_scale != 1.0f) ||
+          container_scale != 1.0f ||
           (confirmed_cut && !frame_valid && camera_valid)) {
         error = "v2 GPU replay state violates frame/camera validity semantics";
         return false;
       }
-      if (!mapping_state_reserved_valid) {
+      if (!renderer_authorization_valid || !mapping_state_reserved_valid) {
         error = "v2 GPU replay produced invalid persistent mapping state";
         return false;
       }
@@ -1292,32 +1285,13 @@ void main(uint3 id : SV_DispatchThreadID) {
       float predicted_zero_translation = 0.0f;
       if (frame_valid && camera_valid && observed_std > 0.0f) {
         candidate_center_drift = (observed_mean - center) * inverse_scale;
-        predicted_zero_translation = effective_gain * (
-          v2_curve(candidate_center_drift, constants.far_tau, constants.near_log_tau) -
-          convergence_curve
+        predicted_zero_translation = v2::pointwise_container(
+          effective_gain * (
+            v2_curve(candidate_center_drift, constants.far_tau, constants.near_log_tau) -
+            convergence_curve
+          ),
+          constants.direct_container_limit
         );
-      }
-
-      if (frame_valid && camera_valid) {
-        const float minimum_curve = v2_curve(
-          (observed_raw_minimum - center) * inverse_scale,
-          constants.far_tau,
-          constants.near_log_tau
-        ) - convergence_curve;
-        const float maximum_curve = v2_curve(
-          (observed_raw_maximum - center) * inverse_scale,
-          constants.far_tau,
-          constants.near_log_tau
-        ) - convergence_curve;
-        const float maximum_requested = constants.requested_gain *
-          std::max(std::abs(minimum_curve), std::abs(maximum_curve));
-        const float expected_container_scale = maximum_requested > 0.0f ?
-          std::min(1.0f, constants.direct_container_limit / maximum_requested) : 1.0f;
-        if (!std::isfinite(expected_container_scale) ||
-            std::abs(container_scale - expected_container_scale) > 2.0e-5f) {
-          error = "v2 GPU replay hard container did not use the fixed tau-2 curve";
-          return false;
-        }
       }
 
       float pre_limiter_max = 0.0f;
@@ -1338,6 +1312,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       bool row_majorant_illegally_lowered = false;
       float horizontal_slope_max = 0.0f;
       float final_vertical_shear_max = 0.0f;
+      bool pointwise_container_mismatch = false;
       const float limiter_tolerance = std::max(
         1.0e-12f,
         constants.max_horizontal_slope / static_cast<float>(width) * 1.0e-9f
@@ -1347,6 +1322,15 @@ void main(uint3 id : SV_DispatchThreadID) {
         v2::max_vertical_shear / static_cast<float>(width) * 1.0e-9f
       );
       for (std::size_t index = 0; index < element_count; ++index) {
+        const float expected_candidate = frame_valid ? v2::pointwise_container(
+          constants.requested_gain * (
+            v2_curve(canonical[index], constants.far_tau, constants.near_log_tau) -
+            convergence_curve
+          ),
+          constants.direct_container_limit
+        ) : 0.0f;
+        pointwise_container_mismatch |=
+          std::abs(candidate[index] - expected_candidate) > 2.0e-6f;
         pre_limiter_max = std::max(pre_limiter_max, std::abs(ownership[index]));
         final_max = std::max(final_max, std::abs(final_values[index]));
         const float ownership_raise = ownership[index] - candidate[index];
@@ -1399,7 +1383,8 @@ void main(uint3 id : SV_DispatchThreadID) {
           return false;
         }
       }
-      if (ownership_illegally_lowered || vertical_majorant_illegally_lowered ||
+      if (pointwise_container_mismatch || ownership_illegally_lowered ||
+          vertical_majorant_illegally_lowered ||
           vertical_conditioned_above_majorant ||
           row_majorant_illegally_lowered ||
           pre_limiter_max > direct_container_limit + 2.0e-7f ||
@@ -1422,8 +1407,8 @@ void main(uint3 id : SV_DispatchThreadID) {
                        std::any_of(canonical.begin(), canonical.end(), [](const float value) {
                          return value != 0.0f;
                        })))) {
-        error = "v2 GPU replay violated ownership, vertical-share, row-majorant, flat, container, or "
-                "spatial-bound contract";
+        error = "v2 GPU replay violated pointwise-container, ownership, vertical-share, "
+                "row-majorant, flat, or spatial-bound contract";
         return false;
       }
 
@@ -1516,7 +1501,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       result.vertical_majorant = vertical_majorant_srv;
       result.vertical_conditioned = vertical_conditioned_srv;
       result.encoded_final_parallax = encoded_srv;
-      result.legacy_subject_state = legacy_srv;
+      result.cut_state = cut_state_srv;
       result.raw_values = std::move(raw_values);
       result.canonical_values = canonical;
       result.candidate_parallax_values = candidate;
@@ -1643,7 +1628,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         // Authenticated shared histogram inputs plus production state/geometry passes. The
         // replay's coordinate_main dispatch is
         // diagnostic report materialization, exactly like live Dump 3D, and is intentionally
-        // excluded from this authenticated nine-entry source closure.
+        // excluded from the authenticated producer source closure.
         {"shader_sequence", {
           "depth_minmax_cs.hlsl",
           "depth_hist_cs.hlsl",

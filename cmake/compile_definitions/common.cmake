@@ -94,6 +94,7 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/host_sbs_shader_cache.cpp"
         "${CMAKE_SOURCE_DIR}/src/host_sbs_shader_cache.h"
         "${CMAKE_SOURCE_DIR}/src/depth_coordinate_v2.h"
+        "${CMAKE_SOURCE_DIR}/src/host_sbs_resolution.h"
         "${CMAKE_SOURCE_DIR}/src/video_depth_estimator.cpp"
         "${CMAKE_SOURCE_DIR}/src/video_depth_estimator.h"
         "${CMAKE_SOURCE_DIR}/src/sbs_perf.cpp"

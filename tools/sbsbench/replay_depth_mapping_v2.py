@@ -3,8 +3,8 @@
 
 This tool is intentionally an experiment gate, not a production implementation.  It derives a
 final one-eye parallax field from the dump's exact raw-depth bytes, encodes that field using the
-``SBS_DIRECT_PARALLAX`` harness contract, then runs Apollo's real reprojection, forward-coverage,
-inverse-map, and standard sbsbench scorer.  ``source.png`` is the dump's diagnostic color preview;
+direct-replay contract, then runs Apollo's real inverse renderer and standard sbsbench scorer.
+``source.png`` is the dump's diagnostic color preview;
 the recomputed geometry is deterministic for those bytes, while their originating ONNX model is
 authoritative only when the capture manifest binds both hashes.  This is **not** an exact
 captured-state replay: shot-latched center and temporal state can differ from the values used by
@@ -329,10 +329,6 @@ def _build_parser() -> argparse.ArgumentParser:
                         default=REPO / "cmake-build-relwithdebinfo")
     parser.add_argument("--conf", type=Path, default=SCRIPT_DIR / "bench.conf")
     parser.add_argument(
-        "--harness-model", default="depth_anything_v2_fp16",
-        help=("model used by the harness' mandatory legacy estimator; it does not attest or "
-              "regenerate the dump's raw-depth geometry"))
-    parser.add_argument(
         "--allow-unverified-model-provenance", action="store_true",
         help=("permit exact replay of raw_depth.f32 when the capture did not record a bound "
               "ONNX SHA-256; the report remains explicitly unverified"))
@@ -432,7 +428,7 @@ def main(argv: list[str] | None = None) -> int:
         result.parallax.astype("<f4").tofile(output / "conditioned_parallax.f32")
 
         report = {
-            "schema": 8,
+            "schema": 9,
             "experiment": "depth-mapping-v2-raw-recomputed-direct-parallax-experiment",
             "captured_state_replay": False,
             "captured_state_limitation": (
@@ -453,13 +449,6 @@ def main(argv: list[str] | None = None) -> int:
             "shadow_state_capture": shadow_state_capture,
             "dump_manifest_capture": dump_manifest_capture,
             "mapping_calibration": mapping_calibration,
-            "harness_legacy_estimator": {
-                "model": args.harness_model,
-                "geometry_role": (
-                    "none; direct canonical order and conditioned parallax replace its geometry"
-                ),
-                "provenance_role": "none",
-            },
             "color_replay": (
                 "dump source.png diagnostic preview; deterministic raw-depth recomputation and "
                 "real D3D warp, but not captured-state or HDR color-fidelity replay"
@@ -486,7 +475,6 @@ def main(argv: list[str] | None = None) -> int:
         harness_command = [
             str(executable), str(args.conf.resolve()), "--sbs-bench",
             "--frames", str(frames), "--out", str(harness),
-            "--model", args.harness_model,
             "--direct-parallax-root", str(direct_root),
         ]
         _run_checked(harness_command, args.build_dir.resolve(), output / "harness.log")

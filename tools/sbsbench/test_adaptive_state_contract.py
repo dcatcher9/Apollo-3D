@@ -17,10 +17,9 @@ class AdaptiveStateContractTests(unittest.TestCase):
     def test_schema_version_pins_the_complete_contract(self):
         # A stored schema number promises every meaning in this manifest, not merely its word
         # count. Intentional layout/key/flag changes must therefore bump the schema and add a new
-        # reviewed golden digest instead of silently redefining schema 3.
+        # reviewed golden digest instead of silently redefining the current schema.
         expected_digest_by_schema = {
-            3: "4fb65e50c9ad7039c9b6407f2e772a30052a0dea06499fd3b49b260336c1c4d1",
-            4: "8b4de0656dfe0beb398adb4534d9a2cb2d115ec5ab38cfeb7c80b5c3f118e20a",
+            6: "28632d48b49c5495ba23d821ea89935cd49087a5665bfe1c7f32a89a0ea90f6e",
         }
         canonical = json.dumps(
             contract.CONTRACT, sort_keys=True, separators=(",", ":")
@@ -38,8 +37,8 @@ class AdaptiveStateContractTests(unittest.TestCase):
                 "-c",
                 (
                     "import tools.sbsbench.adaptive_clip_report;"
-                    "import tools.sbsbench.run_whole_clip;"
-                    "import tools.sbsbench.scene_plan"
+                    "import tools.sbsbench.cut_state_contract;"
+                    "import tools.sbsbench.run_eval"
                 ),
             ],
             cwd=REPO,
@@ -64,14 +63,32 @@ class AdaptiveStateContractTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_manifest_is_exact_and_carries_confirmation_state(self):
-        self.assertEqual(contract.TRACE_SCHEMA, 4)
+        self.assertEqual(contract.TRACE_SCHEMA, 6)
+        self.assertEqual(contract.CUT_CONTRACT_TAG, 0x28632D48)
+        self.assertEqual(
+            contract.TRACE_SOURCE,
+            "video_depth_estimator.CutBridgeState",
+        )
+        self.assertEqual(
+            contract.TRACE_CAPTURE,
+            "every-source-frame-after-complete-estimator-update",
+        )
         self.assertEqual(len(contract.FIELD_SPECS), 32)
+        self.assertEqual(
+            contract.FIELD_SPECS[0], ("cut_contract_tag_bits", "uint32")
+        )
+        self.assertEqual(
+            contract.CONFIG_KEYS,
+            frozenset({"model", "pop_strength", "depth_reuse_interval"}),
+        )
         self.assertEqual(contract.FIELD_SPECS[10], ("cut_flags", "float32"))
+        self.assertEqual(contract.FIELD_ENCODINGS[10], "uint_valued_float")
         self.assertEqual(
             contract.FIELD_SPECS[23],
             ("appearance_change_baseline_ema", "float32"),
         )
         self.assertEqual(contract.FIELD_SPECS[31], ("analysis_flags", "uint32"))
+        self.assertEqual(contract.FIELD_ENCODINGS[31], "uint_valued_float")
         self.assertEqual(contract.CUT_FLAG_APPEARANCE_RECOVERY, 32)
         self.assertEqual(contract.CUT_FLAG_GEOMETRY_CONFIRMATION_PENDING, 64)
         self.assertIn("appearance_recovery", contract.FRAME_KEYS)

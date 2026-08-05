@@ -11,19 +11,14 @@ RWTexture2D<float> Output : register(u0);
 
 bool CanonicalCoordinate(uint index, out float coordinate) {
     coordinate = 0.0f;
-    float4 active = ShadowState[0];
-    float4 control = ShadowState[1];
     float4 mapping_state = ShadowState[2];
-    if (!V2CameraStateValid(active, control, mapping_state)) {
+    if (asuint(V2_STATE_RENDERER_AUTHORIZATION_BITS(mapping_state)) != V2_CONTRACT_TAG) {
         return false;
     }
-    // Current-frame validity is independent of the retained scene camera. Unusable depth maps
-    // flat, while the next usable no-cut field resumes the same coordinate without a gauge jump.
-    if (V2_STATE_FRAME_VALID(control) < 0.5f) {
-        return false;
-    }
-    // State resolve has already made validity/collapse atomic with the camera update. Re-reading
-    // FrameStats here would duplicate that policy per texel and risk drift.
+    float4 active = ShadowState[0];
+    // State resolve has already authenticated the current scene camera and made current-frame
+    // validity atomic with it. The versioned authorization token above is the only state guard
+    // needed in this per-texel pass.
     float raw = InputBuffer[index];
     bool valid = !isnan(raw) && !isinf(raw);
     if (!valid) {
@@ -52,7 +47,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     float requested = v2_requested_gain *
         (V2Curve(coordinate) -
          V2_STATE_CONVERGENCE_CURVE(active));
-    float candidate = requested * V2_STATE_CONTAINER_SCALE(active);
+    float candidate = V2PointwiseContainer(requested);
     if (!V2Finite(coordinate) || !V2Finite(candidate)) {
         candidate = 0.0f;
     }

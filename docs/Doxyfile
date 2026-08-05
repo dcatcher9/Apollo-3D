@@ -22,17 +22,16 @@
 # doxygen -x_noenv [configFile]
 
 # project metadata
-DOCSET_BUNDLE_ID = dev.lizardbyte.Sunshine
-DOCSET_PUBLISHER_ID = dev.lizardbyte.Sunshine.documentation
-PROJECT_BRIEF = "Windows XR streaming host for Artemis."
-PROJECT_ICON = ../sunshine.ico
-PROJECT_LOGO = ../sunshine.png
-PROJECT_NAME = Sunshine
+DOCSET_BUNDLE_ID = io.github.dcatcher9.Sunshine3D
+DOCSET_PUBLISHER_ID = io.github.dcatcher9.Sunshine3D.documentation
+PROJECT_BRIEF = "Realtime 2D-to-3D streaming for Android XR devices and AR glasses."
+PROJECT_ICON = ../sunshine3d.ico
+PROJECT_LOGO = ../sunshine3d.png
+PROJECT_NAME = "Sunshine 3D"
 
 # project specific settings
 DOT_GRAPH_MAX_NODES = 60
 # IMAGE_PATH = ../docs/images
-PREDEFINED += SUNSHINE_BUILD_WAYLAND
 PREDEFINED += SUNSHINE_TRAY=1
 
 # TODO: Enable this when we have complete documentation
@@ -41,22 +40,26 @@ WARN_IF_UNDOCUMENTED = NO
 # files and directories to process
 USE_MDFILE_AS_MAINPAGE = ../README.md
 INPUT = ../README.md \
-        getting_started.md \
-        changelog.md \
-        ../DOCKER_README.md \
-        third_party_packages.md \
-        gamestream_migration.md \
         legal.md \
         configuration.md \
         app_examples.md \
-        awesome_sunshine.md \
-        guides.md \
-        performance_tuning.md \
+        host-sbs.md \
+        host-sbs-scene-cuts.md \
+        sbs-3d-roadmap.md \
+        sbs-local-ar-glasses.md \
+        whole-clip-sbs-pipeline.md \
         api.md \
         troubleshooting.md \
         building.md \
         contributing.md \
-        ../third-party/doxyconfig/docs/source_code.md \
+        ../tools/sbsbench/README.md \
+        ../tools/sbsbench/DUMP_FORMAT.md \
+        ../tools/sbsbench/DATASETS.md \
+        ../tools/sbsbench/METRICS.md \
+        ../tools/sbsbench/ORACLES.md \
+        ../tools/sbsbench/NVIDIA_FLIP_APPEARANCE_ORACLE.md \
+        ../tools/sbsbench/RAFT_STEREO_ORACLE.md \
+        ../tools/sbsbench/SEA_RAFT_TEMPORAL_ORACLE.md \
         ../src
 
 # extra css

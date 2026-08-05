@@ -75,7 +75,7 @@ namespace {
       {"codec", "hevc_nvenc"},
       {"planner", {
                     {"implementation", "native-offline-scene-planner"},
-                    {"scene_plan_contract", "scene-plan-v1"},
+                    {"scene_plan_contract", "scene-plan-v2"},
                   }},
       {"python_dependency", false},
     };

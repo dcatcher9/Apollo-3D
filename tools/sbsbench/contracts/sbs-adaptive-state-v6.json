@@ -1,8 +1,8 @@
 {
-  "schema": 4,
-  "source": "depth_subject_resolve_cs.SubjectState",
-  "capture": "every-source-frame-after-estimator-update",
-  "render_prefix_words": 12,
+  "schema": 6,
+  "source": "video_depth_estimator.CutBridgeState",
+  "capture": "every-source-frame-after-complete-estimator-update",
+  "counter_max": 4294967294,
   "header_keys": [
     "record",
     "schema",
@@ -14,11 +14,7 @@
   ],
   "config_keys": [
     "model",
-    "profile",
     "pop_strength",
-    "adaptive_pop",
-    "adaptive_pop_max",
-    "zero_plane",
     "depth_reuse_interval"
   ],
   "frame_keys": [
@@ -26,9 +22,6 @@
     "frame_id",
     "source_index",
     "depth_updated",
-    "absolute_effective_pop",
-    "scene_camera_override",
-    "resolved_zero_anchor_shift_px",
     "geometry_armed",
     "appearance_armed",
     "geometry_low_once",
@@ -38,7 +31,6 @@
     "geometry_confirmation_pending",
     "hard_cut_pulse",
     "hard_cut_count",
-    "external_cut_count",
     "empty_raw_count",
     "collapsed_raw_count",
     "values"
@@ -62,38 +54,62 @@
     "localized_appearance_proposal": 6,
     "geometry_confirmation_candidate": 7
   },
+  "compact_cut_trace": {
+    "fields": [
+      "cut_contract_tag_bits",
+      "scene_age",
+      "initialized",
+      "depth_change_baseline_ema",
+      "cut_flags",
+      "model_input_history_state",
+      "hard_cut_pulse",
+      "hard_cut_count"
+    ],
+    "roles": {
+      "production": {
+        "schema": 5,
+        "source": "depth_scene_cut_resolve_cs.CutBridgeState",
+        "capture": "every-source-frame-after-cut-state-resolve"
+      },
+      "gpu_replay": {
+        "schema": 6,
+        "source": "depth_coordinate_v2_gpu_replay.authenticated_cut_projection",
+        "capture": "every-source-frame-from-authenticated-cut-input"
+      }
+    }
+  },
   "fields": [
-    {"index": 0, "name": "subject_recenter_delta", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 0, "name": "cut_contract_tag_bits", "type": "uint32", "gpu_encoding": "uint_bits", "initial": "contract_tag"},
     {"index": 1, "name": "scene_age", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
-    {"index": 2, "name": "subject_depth_ema", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 2, "name": "reserved_cut_bridge_2", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
     {"index": 3, "name": "initialized", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
-    {"index": 4, "name": "stretch_lo", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
-    {"index": 5, "name": "stretch_inv_range", "type": "float32", "gpu_encoding": "float", "initial": 1.0},
+    {"index": 4, "name": "reserved_cut_bridge_4", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 5, "name": "reserved_cut_bridge_5", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
     {"index": 6, "name": "depth_change_baseline_ema", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
-    {"index": 7, "name": "adaptive_pop_ratio", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
-    {"index": 8, "name": "zero_anchor_shift_px", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
-    {"index": 9, "name": "zero_anchor_valid", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
-    {"index": 10, "name": "cut_flags", "type": "float32", "gpu_encoding": "uint_valued_float", "initial": 0.0},
+    {"index": 7, "name": "reserved_cut_bridge_7", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 8, "name": "reserved_cut_bridge_8", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 9, "name": "reserved_cut_bridge_9", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 10, "name": "cut_flags", "type": "float32", "gpu_encoding": "uint_valued_float", "initial": 0},
     {"index": 11, "name": "model_input_history_state", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
-    {"index": 12, "name": "latched_edge_fraction", "type": "float32", "gpu_encoding": "float", "initial": -1.0},
+    {"index": 12, "name": "reserved_cut_bridge_12", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
     {"index": 13, "name": "current_depth_change_fraction", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
     {"index": 14, "name": "valid_depth_fraction", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
     {"index": 15, "name": "effective_raw_range_width", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
-    {"index": 16, "name": "hard_cut_count", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0.0},
-    {"index": 17, "name": "external_cut_count", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0.0},
-    {"index": 18, "name": "empty_raw_count", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0.0},
-    {"index": 19, "name": "collapsed_raw_count", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0.0},
+    {"index": 16, "name": "hard_cut_count", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0},
+    {"index": 17, "name": "reserved_cut_bridge_17", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0},
+    {"index": 18, "name": "empty_raw_count", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0},
+    {"index": 19, "name": "collapsed_raw_count", "type": "uint32", "gpu_encoding": "uint_bits", "initial": 0},
     {"index": 20, "name": "range_collapsed", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
     {"index": 21, "name": "depth_ready", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
     {"index": 22, "name": "hard_cut_pulse", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
     {"index": 23, "name": "appearance_change_baseline_ema", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
-    {"index": 24, "name": "current_edge_fraction", "type": "float32", "gpu_encoding": "float", "initial": -1.0},
-    {"index": 25, "name": "current_zero_anchor_candidate_shift_px", "type": "float32", "gpu_encoding": "float", "initial": -1.0},
+    {"index": 24, "name": "reserved_cut_bridge_24", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
+    {"index": 25, "name": "reserved_cut_bridge_25", "type": "float32", "gpu_encoding": "float", "initial": 0.0},
     {"index": 26, "name": "structural_change_fraction", "type": "float32", "gpu_encoding": "float", "initial": -1.0},
     {"index": 27, "name": "raw_rgb_change_fraction", "type": "float32", "gpu_encoding": "float", "initial": -1.0},
     {"index": 28, "name": "current_structural_support_fraction", "type": "float32", "gpu_encoding": "float", "initial": -1.0},
     {"index": 29, "name": "previous_structural_support_fraction", "type": "float32", "gpu_encoding": "float", "initial": -1.0},
     {"index": 30, "name": "common_structural_support_fraction", "type": "float32", "gpu_encoding": "float", "initial": -1.0},
-    {"index": 31, "name": "analysis_flags", "type": "uint32", "gpu_encoding": "uint_valued_float", "initial": 0.0}
+    {"index": 31, "name": "analysis_flags", "type": "uint32", "gpu_encoding": "uint_valued_float", "initial": 0}
   ]
 }

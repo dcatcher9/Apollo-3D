@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""Analyze a continuous Host SBS adaptive-state trace.
+"""Analyze a continuous Host SBS V2 cut-state trace.
 
 The native ``--sbs-bench`` whole-clip mode writes ``adaptive_state.jsonl``.  Its first
-record freezes the exact GPU state layout and resolved Host SBS configuration; every later
+record freezes the exact GPU state layout and relevant Host SBS configuration; every later
 record contains one source-frame sample.  This module validates that contract, joins source
 presentation timing, segments the clip on the detector's explicit hard-cut pulse, and writes
 machine-readable CSV/JSON plus a self-contained HTML report.
 
-The report is deliberately diagnostic.  With enough independently classified shots it may
-show robust quantiles for the *scene-risk classifier's* low/high endpoints.  It never recommends
-a pop floor, pop ceiling, or zero-plane mode: those choices need final-SBS comfort/artifact
-evidence and cannot be inferred safely from the controller's own output.
+The report is deliberately diagnostic. It describes cut proposals, accepted boundaries, detector
+arming, and model-health counters; it does not claim authority over V2 geometry or camera policy.
 """
 
 from __future__ import annotations
@@ -30,6 +28,8 @@ if __package__:
     from .adaptive_state_contract import (
         ANALYSIS_FLAG_BITS,
         CONFIG_KEYS,
+        COUNTER_MAX,
+        CUT_CONTRACT_TAG,
         CUT_FLAG_APPEARANCE_ARMED,
         CUT_FLAG_APPEARANCE_QUIET_ONCE,
         CUT_FLAG_APPEARANCE_RECOVERY,
@@ -38,10 +38,12 @@ if __package__:
         CUT_FLAG_GEOMETRY_LOW_ONCE,
         CUT_FLAG_LATCHED,
         FIELD_DESCRIPTORS,
+        FIELD_ENCODINGS,
         FIELD_NAMES,
         FIELD_SPECS,
         FRAME_KEYS,
         HEADER_KEYS,
+        INITIAL_VALUES,
         KNOWN_ANALYSIS_FLAG_MASK,
         KNOWN_CUT_FLAG_MASK,
         TRACE_CAPTURE,
@@ -52,6 +54,8 @@ else:
     from adaptive_state_contract import (
         ANALYSIS_FLAG_BITS,
         CONFIG_KEYS,
+        COUNTER_MAX,
+        CUT_CONTRACT_TAG,
         CUT_FLAG_APPEARANCE_ARMED,
         CUT_FLAG_APPEARANCE_QUIET_ONCE,
         CUT_FLAG_APPEARANCE_RECOVERY,
@@ -60,23 +64,21 @@ else:
         CUT_FLAG_GEOMETRY_LOW_ONCE,
         CUT_FLAG_LATCHED,
         FIELD_DESCRIPTORS,
+        FIELD_ENCODINGS,
         FIELD_NAMES,
         FIELD_SPECS,
         FRAME_KEYS,
         HEADER_KEYS,
+        INITIAL_VALUES,
         KNOWN_ANALYSIS_FLAG_MASK,
         KNOWN_CUT_FLAG_MASK,
         TRACE_CAPTURE,
         TRACE_SCHEMA,
         TRACE_SOURCE,
     )
-SETTLE_DEPTH_UPDATES = 8
-MIN_CLASSIFIED_SHOTS_FOR_ENDPOINTS = 10
 CUT_BURST_DEPTH_UPDATES = 8
 LONG_DISARMED_SECONDS = 2.0
 LONG_DISARMED_SOURCE_FRAMES = 60
-ANCHOR_DRIFT_EPSILON_PX = 1e-5
-POP_DRIFT_EPSILON = 1e-6
 UINT64_MAX = (1 << 64) - 1
 _UINT64_MAX_DECIMAL = str(UINT64_MAX)
 
@@ -141,33 +143,21 @@ def _boolean(value: Any, description: str) -> bool:
     return value
 
 
-def _same_float(left: float, right: float) -> bool:
-    return math.isclose(left, right, rel_tol=2e-6, abs_tol=2e-6)
-
-
 def _validate_config(config: Any) -> dict[str, Any]:
     if not isinstance(config, dict) or set(config) != CONFIG_KEYS:
         actual = sorted(config) if isinstance(config, dict) else type(config).__name__
         raise TraceContractError(
             f"trace config must have exact keys {sorted(CONFIG_KEYS)}, got {actual}")
-    for key in ("model", "profile"):
-        if not isinstance(config[key], str) or not config[key]:
-            raise TraceContractError(f"trace config.{key} must be a non-empty string")
-    if config["zero_plane"] not in {"subject", "median", "background"}:
-        raise TraceContractError(
-            "trace config.zero_plane must be subject, median, or background")
-    pop_floor = _finite_number(config["pop_strength"], "trace config.pop_strength")
-    pop_ceiling = _finite_number(
-        config["adaptive_pop_max"], "trace config.adaptive_pop_max")
-    if pop_floor <= 0.0 or pop_ceiling < pop_floor:
-        raise TraceContractError(
-            "trace pop range must be positive and ceiling must be at least the floor")
-    _boolean(config["adaptive_pop"], "trace config.adaptive_pop")
+    if not isinstance(config["model"], str) or not config["model"]:
+        raise TraceContractError("trace config.model must be a non-empty string")
+    pop_strength = _finite_number(config["pop_strength"], "trace config.pop_strength")
+    if not 0.25 <= pop_strength <= 2.0:
+        raise TraceContractError("trace config.pop_strength must be in [0.25, 2.0]")
     interval = config["depth_reuse_interval"]
     if (not isinstance(interval, int) or isinstance(interval, bool) or
-            not 1 <= interval <= 8):
+            interval != 1):
         raise TraceContractError(
-            "trace config.depth_reuse_interval must be an integer from 1 to 8")
+            "trace config.depth_reuse_interval must be exactly 1")
     return dict(config)
 
 
@@ -216,23 +206,28 @@ def _validate_frame(payload: Any, line_number: int, config: dict[str, Any]) -> d
             f"trace values at line {line_number} must contain exactly "
             f"{len(FIELD_SPECS)} entries")
     decoded: dict[str, float | int] = {}
-    for index, ((name, kind), value) in enumerate(zip(FIELD_SPECS, values)):
+    for index, ((name, kind), encoding, value) in enumerate(
+            zip(FIELD_SPECS, FIELD_ENCODINGS, values)):
         description = f"trace values[{index}] ({name}) at line {line_number}"
         decoded[name] = (
             _uint32(value, description)
-            if kind == "uint32" else _finite_number(value, description)
+            if encoding in {"uint_bits", "uint_valued_float"} else
+            _finite_number(value, description)
+        )
+    if decoded["cut_contract_tag_bits"] != CUT_CONTRACT_TAG:
+        raise TraceContractError(
+            f"trace cut contract tag at line {line_number} is not schema-{TRACE_SCHEMA}"
         )
 
     depth_updated = _boolean(
         payload["depth_updated"], f"trace depth_updated at line {line_number}")
-    expected_depth_updated = (
-        source_index % int(config["depth_reuse_interval"]) == 0
-    )
-    if depth_updated != expected_depth_updated:
+    if not depth_updated:
         raise TraceContractError(
-            f"trace depth_updated at line {line_number} disagrees with "
-            f"depth_reuse_interval={config['depth_reuse_interval']} for "
-            f"source_index={source_index}")
+            f"trace depth_updated at line {line_number} must be true")
+    for name, initial in INITIAL_VALUES.items():
+        if name.startswith("reserved_") and decoded[name] != initial:
+            raise TraceContractError(
+                f"trace reserved field {name} at line {line_number} is non-default")
     derived_bools = {
         name: _boolean(payload[name], f"trace {name} at line {line_number}")
         for name in (
@@ -246,14 +241,6 @@ def _validate_frame(payload: Any, line_number: int, config: dict[str, Any]) -> d
             "hard_cut_pulse",
         )
     }
-    scene_camera_override = _boolean(
-        payload["scene_camera_override"],
-        f"trace scene_camera_override at line {line_number}",
-    )
-    resolved_zero_anchor = _finite_number(
-        payload["resolved_zero_anchor_shift_px"],
-        f"trace resolved_zero_anchor_shift_px at line {line_number}",
-    )
     cut_flags_value = float(decoded["cut_flags"])
     if (cut_flags_value < 0.0 or
             abs(cut_flags_value - round(cut_flags_value)) > 1e-6):
@@ -267,6 +254,10 @@ def _validate_frame(payload: Any, line_number: int, config: dict[str, Any]) -> d
     if analysis_flags & ~KNOWN_ANALYSIS_FLAG_MASK:
         raise TraceContractError(
             f"trace analysis_flags at line {line_number} contains unknown schema bits")
+    hard_cut_pulse = float(decoded["hard_cut_pulse"])
+    if hard_cut_pulse not in (0.0, 1.0):
+        raise TraceContractError(
+            f"trace hard_cut_pulse at line {line_number} must be exactly 0 or 1")
     expected_bools = {
         "geometry_armed": bool(cut_flags & CUT_FLAG_GEOMETRY_ARMED),
         "appearance_armed": bool(cut_flags & CUT_FLAG_APPEARANCE_ARMED),
@@ -277,7 +268,7 @@ def _validate_frame(payload: Any, line_number: int, config: dict[str, Any]) -> d
         "geometry_confirmation_pending": bool(
             cut_flags & CUT_FLAG_GEOMETRY_CONFIRMATION_PENDING
         ),
-        "hard_cut_pulse": float(decoded["hard_cut_pulse"]) > 0.5,
+        "hard_cut_pulse": hard_cut_pulse > 0.5,
     }
     for key, expected in expected_bools.items():
         if derived_bools[key] != expected:
@@ -285,48 +276,21 @@ def _validate_frame(payload: Any, line_number: int, config: dict[str, Any]) -> d
                 f"trace {key} duplicate disagrees with values at line {line_number}")
     for name in (
         "hard_cut_count",
-        "external_cut_count",
         "empty_raw_count",
         "collapsed_raw_count",
     ):
+        if decoded[name] > COUNTER_MAX:
+            raise TraceContractError(
+                f"trace {name} at line {line_number} exceeds the counter contract")
         duplicate = _uint32(payload[name], f"trace {name} at line {line_number}")
         if duplicate != decoded[name]:
             raise TraceContractError(
                 f"trace {name} duplicate disagrees with values at line {line_number}")
 
-    absolute_pop = _finite_number(
-        payload["absolute_effective_pop"],
-        f"trace absolute_effective_pop at line {line_number}")
-    if scene_camera_override:
-        if not 0.25 <= absolute_pop <= 2.0:
-            raise TraceContractError(
-                f"trace scene-camera pop at line {line_number} is outside [0.25, 2.0]")
-        if not -1.39635933 <= resolved_zero_anchor <= 8.58230571:
-            raise TraceContractError(
-                f"trace scene-camera anchor at line {line_number} is outside "
-                "the native source-pixel bound")
-    else:
-        expected_pop = float(config["pop_strength"])
-        if config["adaptive_pop"]:
-            expected_pop *= max(float(decoded["adaptive_pop_ratio"]), 1.0)
-        if not _same_float(absolute_pop, expected_pop):
-            raise TraceContractError(
-                f"trace absolute_effective_pop at line {line_number} disagrees with "
-                f"the resolved config/state ({absolute_pop} != {expected_pop})")
-        if not _same_float(
-            resolved_zero_anchor, float(decoded["zero_anchor_shift_px"])
-        ):
-            raise TraceContractError(
-                f"trace resolved zero anchor at line {line_number} disagrees with "
-                "the production state without a scene-camera override")
-
     return {
         "frame_id": frame_id,
         "source_index": source_index,
         "depth_updated": depth_updated,
-        "absolute_effective_pop": absolute_pop,
-        "scene_camera_override": scene_camera_override,
-        "resolved_zero_anchor_shift_px": resolved_zero_anchor,
         **decoded,
         # The positional ABI stores these flags as float32, but downstream policy consumes the
         # independently authenticated JSON booleans. Keep the typed values authoritative after
@@ -405,7 +369,7 @@ class IncrementalTraceDecoder:
 
 
 def load_trace(path: str | os.PathLike[str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Load and validate an exact schema-4 adaptive JSONL trace."""
+    """Load and validate an exact schema-6 adaptive JSONL trace."""
     trace_path = Path(path)
     decoder = IncrementalTraceDecoder()
     frames: list[dict[str, Any]] = []
@@ -598,30 +562,12 @@ def join_timeline(
     return joined, timing_meta
 
 
-def _percentile(values: Iterable[float], percentile: float) -> float:
-    ordered = sorted(float(value) for value in values)
-    if not ordered:
-        raise ValueError("cannot take percentile of an empty sequence")
-    if len(ordered) == 1:
-        return ordered[0]
-    position = (len(ordered) - 1) * percentile / 100.0
-    low = int(math.floor(position))
-    high = int(math.ceil(position))
-    if low == high:
-        return ordered[low]
-    weight = position - low
-    return ordered[low] * (1.0 - weight) + ordered[high] * weight
-
-
 def _frame_end(frame: dict[str, Any]) -> float:
     return float(frame["timestamp_seconds"]) + float(frame["duration_seconds"])
 
 
 def _cut_event(frame: dict[str, Any]) -> bool:
-    # With --depth-every N the GPU state is intentionally reused on intervening color frames.
-    # One-update fields (including the pulse) consequently remain visible in that reused state;
-    # only the source frame that actually advanced depth is a new accepted cut event.
-    return bool(frame["depth_updated"] and frame["hard_cut_pulse"])
+    return bool(frame["hard_cut_pulse"])
 
 
 def _counter_delta(previous: int, current: int) -> int:
@@ -665,38 +611,6 @@ def _shot_summary(
     shot: list[dict[str, Any]],
 ) -> dict[str, Any]:
     first, last = shot[0], shot[-1]
-    settled = [
-        frame for frame in shot
-        if (frame["depth_updated"] and frame["initialized"] > 0.5 and
-            frame["scene_age"] >= SETTLE_DEPTH_UPDATES)
-    ]
-    classified = [
-        frame for frame in settled if frame["latched_edge_fraction"] >= 0.0
-    ]
-    reference = classified[0] if classified else (settled[0] if settled else None)
-    anchor_reference = (
-        reference if reference is not None and reference["zero_anchor_valid"] > 0.5
-        else next(
-            (frame for frame in settled if frame["zero_anchor_valid"] > 0.5),
-            None,
-        )
-    )
-    anchor_drift = (
-        max(
-            abs(float(frame["zero_anchor_shift_px"]) -
-                float(anchor_reference["zero_anchor_shift_px"]))
-            for frame in settled if frame["zero_anchor_valid"] > 0.5
-        )
-        if anchor_reference is not None else None
-    )
-    pop_drift = (
-        max(
-            abs(float(frame["adaptive_pop_ratio"]) -
-                float(reference["adaptive_pop_ratio"]))
-            for frame in settled
-        )
-        if reference is not None else None
-    )
     valid_fractions = [
         float(frame["valid_depth_fraction"]) for frame in shot
         if frame["depth_updated"]
@@ -715,25 +629,6 @@ def _shot_summary(
         "depth_updates": sum(bool(frame["depth_updated"]) for frame in shot),
         "starts_with_cut": _cut_event(first),
         "hard_cut_count_at_start": int(first["hard_cut_count"]),
-        "classified": bool(classified),
-        "classification_frame_id": (
-            classified[0]["frame_id"] if classified else None
-        ),
-        "latched_edge_fraction": (
-            float(classified[0]["latched_edge_fraction"]) if classified else None
-        ),
-        "classified_pop_ratio": (
-            float(classified[0]["adaptive_pop_ratio"]) if classified else None
-        ),
-        "classified_absolute_pop": (
-            float(classified[0]["absolute_effective_pop"]) if classified else None
-        ),
-        "settled_anchor_shift_px": (
-            float(anchor_reference["zero_anchor_shift_px"])
-            if anchor_reference is not None else None
-        ),
-        "post_settle_anchor_drift_px": anchor_drift,
-        "post_settle_pop_ratio_drift": pop_drift,
         "min_valid_depth_fraction": min(valid_fractions) if valid_fractions else None,
         "max_depth_change_fraction": max(
             float(frame["current_depth_change_fraction"]) for frame in shot
@@ -773,14 +668,14 @@ def find_anomalies(
         anomalies.append(_anomaly(
             "initialization_failure",
             "error",
-            "The depth/subject state never initialized.",
+            "The depth/cut state never initialized.",
             frames[0],
         ))
     elif initialized[0]["source_index"] > 1:
         anomalies.append(_anomaly(
             "initialization_delay",
             "warning",
-            "Depth/subject initialization took more than two source frames.",
+            "Depth/cut-state initialization took more than two source frames.",
             initialized[0],
             delayed_source_frames=initialized[0]["source_index"],
         ))
@@ -801,7 +696,6 @@ def find_anomalies(
 
     if any(int(frames[0][name]) != 0 for name in (
             "hard_cut_count",
-            "external_cut_count",
     )):
         anomalies.append(_anomaly(
             "nonzero_initial_counter",
@@ -837,8 +731,6 @@ def find_anomalies(
     for frame in frames[1:]:
         hard_delta = _counter_delta(
             int(previous["hard_cut_count"]), int(frame["hard_cut_count"]))
-        external_delta = _counter_delta(
-            int(previous["external_cut_count"]), int(frame["external_cut_count"]))
         previous_hard_saturated = int(previous["hard_cut_count"]) >= 0xFFFFFFFE
         if (not previous_hard_saturated and
                 ((hard_delta == 1) != _cut_event(frame) or hard_delta > 1)):
@@ -849,15 +741,6 @@ def find_anomalies(
                 frame,
                 counter_delta=hard_delta,
                 pulse=_cut_event(frame),
-            ))
-        if external_delta:
-            anomalies.append(_anomaly(
-                "external_cut_request",
-                "info",
-                "An external cut/reset request was observed.",
-                frame,
-                count_delta=external_delta,
-                cumulative_count=int(frame["external_cut_count"]),
             ))
         for counter, kind, message in (
             ("empty_raw_count", "empty_raw_depth",
@@ -887,51 +770,6 @@ def find_anomalies(
             run[0],
             end_frame_id=run[-1]["frame_id"],
         ))
-
-    pop_floor = float(frames[0].get("_configured_pop_floor", 0.0))
-    pop_ceiling = float(frames[0].get("_configured_pop_ceiling", math.inf))
-    for run in _contiguous_runs(
-            frames,
-            lambda frame: (
-                float(frame["absolute_effective_pop"]) < pop_floor - 2e-6 or
-                float(frame["absolute_effective_pop"]) > pop_ceiling + 2e-6
-            )):
-        anomalies.append(_anomaly(
-            "adaptive_pop_out_of_configured_range",
-            "error",
-            "The inferred effective pop left the configured floor/ceiling range.",
-            run[0],
-            end_frame_id=run[-1]["frame_id"],
-            observed_min=min(float(frame["absolute_effective_pop"]) for frame in run),
-            observed_max=max(float(frame["absolute_effective_pop"]) for frame in run),
-            configured_floor=pop_floor,
-            configured_ceiling=pop_ceiling,
-        ))
-
-    shot_summaries = [
-        _shot_summary(index, shot) for index, shot in enumerate(shots, 1)
-    ]
-    for shot, summary in zip(shots, shot_summaries):
-        if (summary["post_settle_anchor_drift_px"] is not None and
-                summary["post_settle_anchor_drift_px"] > ANCHOR_DRIFT_EPSILON_PX):
-            anomalies.append(_anomaly(
-                "post_settle_anchor_drift",
-                "warning",
-                "The shot-latched zero-plane anchor moved after settling.",
-                shot[0],
-                shot=summary["shot"],
-                max_drift_px=summary["post_settle_anchor_drift_px"],
-            ))
-        if (summary["post_settle_pop_ratio_drift"] is not None and
-                summary["post_settle_pop_ratio_drift"] > POP_DRIFT_EPSILON):
-            anomalies.append(_anomaly(
-                "post_settle_adaptive_pop_drift",
-                "warning",
-                "The scene-latched adaptive-pop ratio moved after settling.",
-                shot[0],
-                shot=summary["shot"],
-                max_drift=summary["post_settle_pop_ratio_drift"],
-            ))
 
     pulses = [frame for frame in frames if _cut_event(frame)]
     depth_update_ordinal: dict[int, int] = {}
@@ -1010,47 +848,8 @@ def analyze_trace(
         frame["accepted_cut_event"] = _cut_event(frame)
         frame["geometry_armed"] = bool(frame["geometry_armed"])
         frame["appearance_armed"] = bool(frame["appearance_armed"])
-        frame["_configured_pop_floor"] = float(header["config"]["pop_strength"])
-        frame["_configured_pop_ceiling"] = float(header["config"]["adaptive_pop_max"])
 
     anomalies = find_anomalies(frames, shots)
-    classified_edges = [
-        float(row["latched_edge_fraction"])
-        for row in shot_rows
-        if row["classified"] and row["latched_edge_fraction"] is not None
-    ]
-    if len(classified_edges) >= MIN_CLASSIFIED_SHOTS_FOR_ENDPOINTS:
-        low = _percentile(classified_edges, 10.0)
-        high = _percentile(classified_edges, 90.0)
-        endpoint_status = (
-            "advisory" if high - low > 1e-6 else "insufficient_variation"
-        )
-        endpoint_advisory: dict[str, Any] = {
-            "status": endpoint_status,
-            "classified_shots": len(classified_edges),
-            "minimum_classified_shots": MIN_CLASSIFIED_SHOTS_FOR_ENDPOINTS,
-            "pop_risk_low_q10": low,
-            "pop_risk_high_q90": high,
-            "observed_edge_min": min(classified_edges),
-            "observed_edge_median": statistics.median(classified_edges),
-            "observed_edge_max": max(classified_edges),
-            "note": (
-                "These are observed scene-risk endpoint quantiles only. Validate any endpoint "
-                "change with controlled core/extended A/B runs."
-            ),
-        }
-    else:
-        endpoint_advisory = {
-            "status": "insufficient_shots",
-            "classified_shots": len(classified_edges),
-            "minimum_classified_shots": MIN_CLASSIFIED_SHOTS_FOR_ENDPOINTS,
-            "pop_risk_low_q10": None,
-            "pop_risk_high_q90": None,
-            "note": (
-                "At least ten independently classified shots are required before endpoint "
-                "quantiles are shown."
-            ),
-        }
 
     first, last = frames[0], frames[-1]
     config = dict(header["config"])
@@ -1073,27 +872,8 @@ def analyze_trace(
             0.0, _frame_end(last) - float(first["timestamp_seconds"])),
         "shot_count": len(shot_rows),
         "hard_cut_pulse_count": sum(_cut_event(frame) for frame in frames),
-        "external_cut_count": int(last["external_cut_count"]),
         "empty_raw_count": int(last["empty_raw_count"]),
         "collapsed_raw_count": int(last["collapsed_raw_count"]),
-        "adaptive_pop_observed": {
-            "absolute_min": min(float(frame["absolute_effective_pop"]) for frame in frames),
-            "absolute_max": max(float(frame["absolute_effective_pop"]) for frame in frames),
-            "ratio_min": min(float(frame["adaptive_pop_ratio"]) for frame in frames),
-            "ratio_max": max(float(frame["adaptive_pop_ratio"]) for frame in frames),
-            "configured_floor": config["pop_strength"],
-            "configured_ceiling": config["adaptive_pop_max"],
-        },
-        "pop_risk_endpoint_advisory": endpoint_advisory,
-        "parameter_policy": {
-            "pop_floor_recommendation": "not_inferred",
-            "pop_ceiling_recommendation": "not_inferred",
-            "zero_plane_recommendation": "not_inferred",
-            "reason": (
-                "Controller output is circular evidence for its own artistic/safety endpoints. "
-                "Use final-SBS artifact, comfort, and headset evidence."
-            ),
-        },
         "anomaly_count": len(anomalies),
         "anomaly_counts": {
             kind: sum(item["kind"] == kind for item in anomalies)
@@ -1124,7 +904,6 @@ FRAME_CSV_FIELDS = (
     "shot",
     "depth_updated",
     "accepted_cut_event",
-    "absolute_effective_pop",
     "geometry_armed",
     "appearance_armed",
     "geometry_low_once",
@@ -1148,14 +927,6 @@ SHOT_CSV_FIELDS = (
     "depth_updates",
     "starts_with_cut",
     "hard_cut_count_at_start",
-    "classified",
-    "classification_frame_id",
-    "latched_edge_fraction",
-    "classified_pop_ratio",
-    "classified_absolute_pop",
-    "settled_anchor_shift_px",
-    "post_settle_anchor_drift_px",
-    "post_settle_pop_ratio_drift",
     "min_valid_depth_fraction",
     "max_depth_change_fraction",
 )
@@ -1257,7 +1028,6 @@ def _write_html(
     shots: list[dict[str, Any]],
     anomalies: list[dict[str, Any]],
 ) -> None:
-    advisory = summary["pop_risk_endpoint_advisory"]
     config = summary["config"]
     anomaly_rows = "".join(
         "<tr>"
@@ -1273,33 +1043,29 @@ def _write_html(
         "<tr>"
         f"<td>{row['shot']}</td><td>{_fmt(row['start_seconds'])}</td>"
         f"<td>{_fmt(row['duration_seconds'])}</td><td>{row['source_frames']}</td>"
-        f"<td>{_fmt(row['latched_edge_fraction'], 4)}</td>"
-        f"<td>{_fmt(row['classified_absolute_pop'], 3)}</td>"
-        f"<td>{_fmt(row['settled_anchor_shift_px'], 3)}</td>"
-        f"<td>{_fmt(row['post_settle_anchor_drift_px'], 6)}</td>"
+        f"<td>{row['depth_updates']}</td>"
+        f"<td>{_fmt(row['min_valid_depth_fraction'], 4)}</td>"
+        f"<td>{_fmt(row['max_depth_change_fraction'], 4)}</td>"
         "</tr>"
         for row in shots
     )
     charts = "".join((
-        _chart_svg(frames, "absolute_effective_pop", "Absolute effective pop", "#64d3ff"),
-        _chart_svg(
-            frames, "latched_edge_fraction", "Latched scene-risk edge fraction",
-            "#f5b942", ignore_negative=True),
         _chart_svg(
             frames, "current_depth_change_fraction", "Current depth-change fraction",
             "#f06e9c"),
-        _chart_svg(frames, "zero_anchor_shift_px", "Zero-plane anchor shift (px)", "#9be564"),
+        _chart_svg(
+            frames, "structural_change_fraction", "Structural change fraction",
+            "#f5b942", ignore_negative=True),
+        _chart_svg(
+            frames, "raw_rgb_change_fraction", "Raw RGB change fraction",
+            "#64d3ff", ignore_negative=True),
+        _chart_svg(
+            frames, "valid_depth_fraction", "Valid depth fraction", "#9be564"),
     ))
-    endpoint_values = (
-        f"<b>Q10 low:</b> {_fmt(advisory['pop_risk_low_q10'], 4)} &nbsp; "
-        f"<b>Q90 high:</b> {_fmt(advisory['pop_risk_high_q90'], 4)}"
-        if advisory["pop_risk_low_q10"] is not None else
-        "No endpoint quantiles are shown."
-    )
     document = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Host SBS whole-clip adaptive report</title>
+<title>Host SBS whole-clip cut-state report</title>
 <style>
 :root{{--bg:#0b1017;--panel:#131b25;--line:#283747;--ink:#edf6ff;--muted:#94a8ba;
 --accent:#64d3ff;--ok:#74d89b;--warn:#f5b942;--error:#ff7383}}
@@ -1322,7 +1088,7 @@ text-transform:uppercase}}.severity.warning{{background:#4a3916;color:#ffd979}}
 .severity.error{{background:#4b2029;color:#ff9dab}}.ok{{color:var(--ok)}}
 @media(max-width:850px){{.cards,.charts{{grid-template-columns:1fr}}main{{padding:18px}}}}
 </style></head><body><main>
-<h1>Host SBS whole-clip adaptive report</h1>
+<h1>Host SBS whole-clip cut-state report</h1>
 <p class="muted">{html.escape(summary['source_name'])} · generated
 {html.escape(summary['generated_utc'])}</p>
 <div class="cards">
@@ -1331,20 +1097,15 @@ text-transform:uppercase}}.severity.warning{{background:#4a3916;color:#ffd979}}
 <div class="card">Shots<b>{summary['shot_count']}</b></div>
 <div class="card">Flagged intervals/events<b>{summary['anomaly_count']}</b></div>
 </div>
-<h2>Resolved controller</h2>
-<div class="notice"><b>{html.escape(config['profile'])}</b> ·
-{html.escape(config['model'])} · pop {_fmt(config['pop_strength'], 2)}
-to {_fmt(config['adaptive_pop_max'], 2)} · zero plane
-<code>{html.escape(config['zero_plane'])}</code>
-<p>{html.escape(summary['parameter_policy']['reason'])}</p></div>
-<h2>Adaptive timeline</h2><p class="muted">Red dashed lines are accepted hard-cut pulses.</p>
+<h2>Trace configuration</h2>
+<div class="notice"><b>{html.escape(config['model'])}</b> · configured pop
+{_fmt(config['pop_strength'], 2)} · depth interval {config['depth_reuse_interval']}
+<p>This trace reports V2 cut detection and model health. It does not infer or override geometry.</p></div>
+<h2>Cut-state timeline</h2><p class="muted">Red dashed lines are accepted hard-cut pulses.</p>
 <div class="charts">{charts}</div>
-<h2>Scene-risk endpoint coverage</h2>
-<div class="notice"><b>Status: {html.escape(advisory['status'])}</b>
-<p>{endpoint_values}</p><p>{html.escape(advisory['note'])}</p></div>
 <h2>Shots</h2><div style="overflow:auto"><table><thead><tr>
 <th>Shot</th><th>Start (s)</th><th>Duration (s)</th><th>Frames</th>
-<th>Latched edge</th><th>Effective pop</th><th>Anchor (px)</th><th>Anchor drift</th>
+<th>Depth updates</th><th>Min valid depth</th><th>Max depth change</th>
 </tr></thead><tbody>{shot_rows}</tbody></table></div>
 <h2>Anomalies</h2><div style="overflow:auto"><table><thead><tr>
 <th>Severity</th><th>Kind</th><th>Time (s)</th><th>Observation</th>
@@ -1384,7 +1145,7 @@ def generate_outputs(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Generate a Host SBS whole-clip adaptive-state report.")
+        description="Generate a Host SBS whole-clip cut-state report.")
     parser.add_argument("trace", help="adaptive_state.jsonl from the native harness")
     parser.add_argument("--out", required=True, help="report output directory")
     parser.add_argument("--timeline", help="optional schema-1 source PTS manifest")

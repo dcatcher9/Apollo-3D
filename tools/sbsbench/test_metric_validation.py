@@ -30,6 +30,15 @@ CHANNELS = [
 ]
 
 
+def cut_state_values(*, initialized=True, flags=3, history=1.0):
+    values = [0] * len(sbsbench.CUT_STATE_FIELDS)
+    values[0] = sbsbench.cut_state_contract.CUT_CONTRACT_TAG
+    values[sbsbench.CUT_STATE_FIELDS.index("initialized")] = 1.0 if initialized else 0.0
+    values[sbsbench.CUT_STATE_FIELDS.index("cut_flags")] = int(flags)
+    values[sbsbench.CUT_STATE_FIELDS.index("model_input_history_state")] = float(history)
+    return values
+
+
 def mapping_shape(eye_width=64, height=32):
     """Return a complete unit-content warp-map shape contract."""
     return {
@@ -1018,7 +1027,7 @@ class LabelProvenanceTests(unittest.TestCase):
                 "sbs_stereo_window_metrics.py": "window-v1\n",
                 "sbs_warp_shear_metrics.py": "shear-v1\n",
                 "direct_geometry_contract.py": "direct-geometry-v1\n",
-                "subject_state_contract.py": "subject-state-v1\n",
+                "cut_state_contract.py": "cut-state-v1\n",
                 "thresholds.json": "{}\n",
                 "run_eval.py": "runner-v1\n",
                 "rescore_run.py": "rescorer-v1\n",
@@ -1048,14 +1057,9 @@ class LabelProvenanceTests(unittest.TestCase):
             "engine_sha256": "engine-sha",
             "onnx_sha256": "onnx-sha",
             "preprocess_source_closure_sha256": "preprocess-sha",
-            "profile": "apollo",
             "extra_args": ["--pop-strength", "1.25"],
             "depth_step": 1,
             "depth_compensation": "none",
-            "literal_bestv2": False,
-            "adaptive_pop": False,
-            "adaptive_pop_max": 1.3,
-            "zero_plane": "median",
             "metric_runtime": {"python": "3.x", "numpy": "2.x", "pillow": "11.x"},
             "scored_artifact_sha256": {"clip": "artifacts"},
             "training_label_gate": {"passed": True},
@@ -1212,11 +1216,9 @@ class ReportEvidenceContractTests(unittest.TestCase):
                     json.dump({
                         "schema": run_eval.whole_clip_raw_contract.HARNESS_CONTRACT_SCHEMA,
                         "model": "depth_anything_v2_fp16",
-                        "profile": "apollo",
                         "depth_step": "current-once",
                         "depth_reuse_interval": 1,
-                        "depth_compensation": "none",
-                        "literal_bestv2": False,
+                        "pop_strength": 1.2,
                         "cuda_graph": True,
                         "cuda_graph_captured": True,
                         "parallax_v2_shadow": False,
@@ -1229,26 +1231,20 @@ class ReportEvidenceContractTests(unittest.TestCase):
                                 run_eval.PARALLAX_V2_CONTRACT_SCHEMA,
                             "legacy_levers_applied": False,
                         },
-                        "adaptive_pop": True,
-                        "adaptive_pop_max": 1.3,
-                        "zero_plane": "median",
-                        "subject_state": {
-                            "file": "subject_state.json",
-                            "schema": sbsbench.SUBJECT_STATE_SCHEMA,
-                            "capture": "every-source-frame-after-estimator-update",
+                        "cut_state": {
+                            "file": "cut_state.json",
+                            "schema": sbsbench.CUT_STATE_SCHEMA,
+                            "capture": sbsbench.cut_state_contract.CAPTURE,
                         },
                     }, stream)
-                with open(os.path.join(artifact_dir, "subject_state.json"), "w",
+                with open(os.path.join(artifact_dir, "cut_state.json"), "w",
                           encoding="utf-8") as stream:
                     json.dump({
-                        "schema": sbsbench.SUBJECT_STATE_SCHEMA,
-                        "source": "depth_subject_resolve_cs.SubjectState",
-                        "capture": "every-source-frame-after-estimator-update",
-                        "fields": list(sbsbench.SUBJECT_STATE_FIELDS),
-                        "frames": [{"frame_id": "00000", "values": [
-                            0.0, 0.0, 0.5, 1.0, 0.0, 1.0,
-                            0.0, 1.0, 0.0, 1.0, 3.0, 1.0, 0.0, 0.0,
-                        ]}],
+                        "schema": sbsbench.CUT_STATE_SCHEMA,
+                        "source": sbsbench.cut_state_contract.SOURCE,
+                        "capture": sbsbench.cut_state_contract.CAPTURE,
+                        "fields": list(sbsbench.CUT_STATE_FIELDS),
+                        "frames": [{"frame_id": "00000", "values": cut_state_values()}],
                     }, stream)
                 with open(os.path.join(artifact_dir, "sbs_perf.json"), "w",
                           encoding="utf-8") as stream:
@@ -1265,7 +1261,7 @@ class ReportEvidenceContractTests(unittest.TestCase):
                 "git_sha": "fixture",
                 "git_dirty": False,
                 "clip_set_sha1": {"demo": clip_hash},
-                "mode": "profile",
+                "mode": "canonical-v2",
                 "suite": "core",
                 "clips_root": clips_root,
                 "extra_args": [],
@@ -1278,22 +1274,20 @@ class ReportEvidenceContractTests(unittest.TestCase):
                 "engine_sha256": "engine",
                 "onnx_sha256": "onnx",
                 "model": "depth_anything_v2_fp16",
-                "profile": "apollo",
+                "depth_model_url": "https://example.invalid/depth-anything-v2.onnx",
                 "eval_schema": run_eval.EVAL_SCHEMA,
                 "preprocess_profile": None,
                 "preprocess_source_closure_sha256": "0" * 64,
+                "parallax_v2_source_closure_sha256": "1" * 64,
                 "depth_coordinate_v2_calibration_id": None,
                 "depth_step": "current-once",
                 "depth_reuse_interval": 1,
                 "depth_compensation": "none",
-                "literal_bestv2": False,
+                "pop_strength": 1.2,
                 "cuda_graph": True,
                 "parallax_v2_shadow": False,
                 "parallax_v2_render": True,
                 "parallax_v2_live": True,
-                "adaptive_pop": True,
-                "adaptive_pop_max": 1.3,
-                "zero_plane": "median",
                 "training_labels": run_eval.training_label_manifest(thresholds),
                 "run_kind": "comparison-only",
                 "timestamp": "2026-07-17T00:00:00",
@@ -1307,17 +1301,12 @@ class ReportEvidenceContractTests(unittest.TestCase):
                 entry_meta = {
                     "name": "current-schema report fixture",
                     "model": "depth_anything_v2_fp16",
-                    "profile": "apollo",
-                    "depth_compensation": "none",
-                    "literal_bestv2": False,
+                    "pop_strength": 1.2,
                     "cuda_graph": True,
                     "cuda_graph_captured": True,
                     "parallax_v2_shadow": False,
                     "parallax_v2_render": True,
                     "parallax_v2_live": True,
-                    "adaptive_pop": True,
-                    "adaptive_pop_max": 1.3,
-                    "zero_plane": "median",
                     "source_frame_count": 1,
                     "scored_artifact_sha256": artifact_hash,
                     "content_type": "synthetic",

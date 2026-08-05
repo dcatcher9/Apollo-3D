@@ -29,6 +29,7 @@ extern "C" {
 #include "config.h"
 #include "globals.h"
 #include "gpu_workload_arbiter.h"
+#include "host_sbs_resolution.h"
 #include "input.h"
 #include "logging.h"
 #include "network.h"
@@ -1389,6 +1390,26 @@ namespace rtsp_stream {
       }
 
       config.monitor.sbs_mode = session.sbs_mode;
+      const auto host_sbs_rejection =
+        models::host_sbs_v2_source_resolution_rejection_reason(
+          static_cast<std::uint32_t>(config.monitor.width),
+          static_cast<std::uint32_t>(config.monitor.height)
+        );
+      if (config.monitor.sbs_mode == video::SBS_AI &&
+          !host_sbs_rejection.empty()) {
+        const auto fitted = models::fit_host_sbs_v2_depth_tensor_shape(
+          static_cast<std::uint32_t>(config.monitor.width),
+          static_cast<std::uint32_t>(config.monitor.height)
+        );
+        throw std::invalid_argument(std::format(
+          "Host SBS V2 viewport {}x{} is unsupported: {}; fitted depth tensor {}x{}",
+          config.monitor.width,
+          config.monitor.height,
+          host_sbs_rejection,
+          fitted.width,
+          fitted.height
+        ));
+      }
 
       configuredBitrateKbps = required_int(detail::announce_int_field::configured_bitrate_kbps, "x-ml-video.configuredBitrateKbps"sv);
 

@@ -6,7 +6,9 @@
 #include "offline_sbs_worker.h"
 
 #include "crypto.h"
+#include "depth_coordinate_v2.h"
 #include "generated/sbs_adaptive_state_contract.h"
+#include "host_sbs_shader_cache.h"
 #include "offline_sbs_contract.h"
 #include "offline_scene_planner.h"
 
@@ -307,6 +309,37 @@ namespace offline_sbs {
       return path.lexically_normal();
     }
 
+    template<class Input>
+    nlohmann::json parse_json_without_duplicate_keys(Input &&input) {
+      std::map<int, std::set<std::string>> object_keys;
+      const auto callback = [&object_keys](
+                              const int depth,
+                              const nlohmann::json::parse_event_t event,
+                              nlohmann::json &parsed) {
+        if (event == nlohmann::json::parse_event_t::object_start) {
+          object_keys[depth].clear();
+        } else if (event == nlohmann::json::parse_event_t::key) {
+          if (depth <= 0 || !parsed.is_string()) {
+            throw worker_error("JSON object key has invalid parser depth or type");
+          }
+          auto owner = object_keys.find(depth - 1);
+          if (owner == object_keys.end()) {
+            throw worker_error("JSON object key has no owning object");
+          }
+          const auto &key = parsed.get_ref<const std::string &>();
+          if (!owner->second.insert(key).second) {
+            throw worker_error("JSON object contains duplicate key '" + key + "'");
+          }
+        } else if (event == nlohmann::json::parse_event_t::object_end) {
+          object_keys.erase(depth);
+        }
+        return true;
+      };
+      return nlohmann::json::parse(
+        std::forward<Input>(input), callback, true, false
+      );
+    }
+
     nlohmann::json read_json(
       const fs::path &path,
       const std::uintmax_t max_bytes = max_small_contract_bytes
@@ -324,7 +357,7 @@ namespace offline_sbs {
         throw worker_error("cannot open JSON contract: " + path_utf8(path));
       }
       try {
-        return nlohmann::json::parse(stream);
+        return parse_json_without_duplicate_keys(stream);
       } catch (const std::exception &exception) {
         throw worker_error(
           "cannot parse JSON contract " + path_utf8(path) + ": " +
@@ -2716,7 +2749,7 @@ namespace offline_sbs {
         throw worker_error(std::string(description) + " is empty");
       }
       try {
-        return nlohmann::json::parse(bytes);
+        return parse_json_without_duplicate_keys(bytes);
       } catch (const std::exception &exception) {
         throw worker_error(
           "cannot parse " + std::string(description) + ": " +
@@ -3150,6 +3183,19 @@ namespace offline_sbs {
         ) == 0u;
     }
 
+    template<std::size_t Size>
+    bool json_object_has_exact_keys(
+      const nlohmann::json &value,
+      const std::array<std::string_view, Size> &keys
+    ) {
+      if (!value.is_object() || value.size() != keys.size()) {
+        return false;
+      }
+      return std::ranges::all_of(keys, [&](const std::string_view key) {
+        return value.contains(std::string {key});
+      });
+    }
+
     scene_frame_t parse_trace_frame(
       const nlohmann::json &value,
       const frame_timing_t &timing,
@@ -3157,10 +3203,59 @@ namespace offline_sbs {
       const std::uint64_t cache_bytes
     ) {
       using sbs_adaptive_state::word_e;
-      if (!value.is_object() || value.value("record", "") != "frame" || value.value("frame_id", "") != frame_id(timing.sequence) || value.value("source_index", max_sequence) != timing.sequence - 1 || !value.contains("values") || !value["values"].is_array() || value["values"].size() != sbs_adaptive_state::word_count) {
+      if (!json_object_has_exact_keys(value, sbs_adaptive_state::frame_keys) ||
+          value.value("record", "") != "frame" ||
+          value.value("frame_id", "") != frame_id(timing.sequence) ||
+          value.value("source_index", max_sequence) != timing.sequence - 1 ||
+          !value["values"].is_array() ||
+          value["values"].size() != sbs_adaptive_state::word_count) {
         throw worker_error("adaptive trace frame identity/schema mismatch");
       }
       const auto &words = value["values"];
+      const auto is_uint32 = [](const nlohmann::json &encoded) {
+        return encoded.is_number_unsigned() &&
+               encoded.get<std::uint64_t>() <=
+                 std::numeric_limits<std::uint32_t>::max();
+      };
+      for (const auto &field : sbs_adaptive_state::fields) {
+        const auto &encoded = words[sbs_adaptive_state::index(field.word)];
+        if (field.gpu_encoding == sbs_adaptive_state::gpu_encoding_e::uint_bits ||
+            field.gpu_encoding ==
+              sbs_adaptive_state::gpu_encoding_e::uint_valued_float) {
+          if (!is_uint32(encoded)) {
+            throw worker_error("adaptive trace integer field encoding mismatch");
+          }
+          continue;
+        }
+        if (!encoded.is_number()) {
+          throw worker_error("adaptive trace float field encoding mismatch");
+        }
+        const auto decoded = encoded.get<double>();
+        if (!std::isfinite(decoded) ||
+            std::abs(decoded) > std::numeric_limits<float>::max()) {
+          throw worker_error("adaptive trace contains a non-finite float field");
+        }
+      }
+      for (const auto word : sbs_adaptive_state::reserved_words) {
+        const auto index = sbs_adaptive_state::index(word);
+        const auto &field = sbs_adaptive_state::fields[index];
+        const auto matches =
+          field.gpu_encoding == sbs_adaptive_state::gpu_encoding_e::uint_bits ?
+            words[index].get<std::uint32_t>() ==
+              sbs_adaptive_state::initial_words[index] :
+            words[index].get<float>() == field.initial_value;
+        if (!matches) {
+          throw worker_error("adaptive trace reserved field is non-default");
+        }
+      }
+      const auto &cut_contract_tag = words[sbs_adaptive_state::index(
+        word_e::cut_contract_tag_bits
+      )];
+      if (!is_uint32(cut_contract_tag) ||
+          cut_contract_tag.get<std::uint32_t>() !=
+            sbs_adaptive_state::cut_contract_tag) {
+        throw worker_error("adaptive trace cut contract tag mismatch");
+      }
       const auto scalar = [&](const word_e word) -> std::optional<float> {
         const auto index = sbs_adaptive_state::index(word);
         if (words[index].is_null()) {
@@ -3172,20 +3267,13 @@ namespace offline_sbs {
         }
         return result;
       };
-      const auto signed_scalar = [&](const word_e word) -> std::optional<float> {
-        const auto index = sbs_adaptive_state::index(word);
-        if (words[index].is_null()) {
-          return std::nullopt;
-        }
-        const auto result = words[index].get<float>();
-        return std::isfinite(result) ? std::optional<float>(result) :
-                                       std::nullopt;
-      };
       scene_frame_t frame;
       frame.sequence = timing.sequence;
       frame.frame_id = frame_id(timing.sequence);
       frame.depth_updated = value.at("depth_updated").get<bool>();
-      frame.hard_cut_pulse = value.value("hard_cut_pulse", false);
+      if (!frame.depth_updated) {
+        throw worker_error("adaptive trace uses the retired depth-reuse cadence");
+      }
       frame.depth_change_fraction = scalar(word_e::current_depth_change_fraction);
       frame.raw_rgb_change_fraction = scalar(word_e::raw_rgb_change_fraction);
       frame.structural_change_fraction = scalar(word_e::structural_change_fraction);
@@ -3195,25 +3283,6 @@ namespace offline_sbs {
         scalar(word_e::previous_structural_support_fraction);
       frame.common_structural_support_fraction =
         scalar(word_e::common_structural_support_fraction);
-      frame.edge_fraction = scalar(word_e::current_edge_fraction);
-      frame.zero_anchor_candidate_shift_px =
-        signed_scalar(word_e::current_zero_anchor_candidate_shift_px);
-      frame.production_zero_anchor_shift_px =
-        signed_scalar(word_e::zero_anchor_shift_px);
-      frame.zero_anchor_valid =
-        words[sbs_adaptive_state::index(word_e::zero_anchor_valid)].get<float>() >
-        0.5f;
-      frame.depth_ready =
-        words[sbs_adaptive_state::index(word_e::depth_ready)].get<float>() > 0.5f;
-      frame.initialized =
-        words[sbs_adaptive_state::index(word_e::initialized)].get<float>() > 0.5f;
-      frame.range_collapsed =
-        words[sbs_adaptive_state::index(word_e::range_collapsed)].get<float>() >
-        0.5f;
-      frame.valid_depth_fraction =
-        words[sbs_adaptive_state::index(word_e::valid_depth_fraction)].get<float>();
-      frame.scene_age =
-        words[sbs_adaptive_state::index(word_e::scene_age)].get<float>();
       const auto cut_flags_value =
         words[sbs_adaptive_state::index(word_e::cut_flags)].get<float>();
       const auto analysis_flags =
@@ -3222,13 +3291,69 @@ namespace offline_sbs {
       if (!adaptive_trace_flags_valid(cut_flags_value, analysis_flags)) {
         throw worker_error("adaptive trace contains invalid or unknown flags");
       }
+      const auto cut_flags = static_cast<std::uint32_t>(cut_flags_value);
+      const auto require_boolean_duplicate = [&](const char *name, const bool expected) {
+        if (!value.at(name).is_boolean() || value.at(name).get<bool>() != expected) {
+          throw worker_error(
+            std::string {"adaptive trace duplicate disagrees for "} + name
+          );
+        }
+      };
+      require_boolean_duplicate(
+        "geometry_armed",
+        (cut_flags & sbs_adaptive_state::cut_flag_geometry_armed) != 0u
+      );
+      require_boolean_duplicate(
+        "appearance_armed",
+        (cut_flags & sbs_adaptive_state::cut_flag_appearance_armed) != 0u
+      );
+      require_boolean_duplicate(
+        "geometry_low_once",
+        (cut_flags & sbs_adaptive_state::cut_flag_geometry_low_once) != 0u
+      );
+      require_boolean_duplicate(
+        "appearance_quiet_once",
+        (cut_flags & sbs_adaptive_state::cut_flag_appearance_quiet_once) != 0u
+      );
+      require_boolean_duplicate(
+        "cut_latched",
+        (cut_flags & sbs_adaptive_state::cut_flag_latched) != 0u
+      );
+      require_boolean_duplicate(
+        "appearance_recovery",
+        (cut_flags & sbs_adaptive_state::cut_flag_appearance_recovery) != 0u
+      );
+      require_boolean_duplicate(
+        "geometry_confirmation_pending",
+        (cut_flags &
+         sbs_adaptive_state::cut_flag_geometry_confirmation_pending) != 0u
+      );
+      const auto pulse_value = words[sbs_adaptive_state::index(
+        word_e::hard_cut_pulse
+      )].get<float>();
+      if (pulse_value != 0.0f && pulse_value != 1.0f) {
+        throw worker_error("adaptive trace hard-cut pulse is not exactly 0 or 1");
+      }
+      frame.hard_cut_pulse = pulse_value > 0.5f;
+      require_boolean_duplicate("hard_cut_pulse", frame.hard_cut_pulse);
+      for (const auto &[name, word] : std::array {
+             std::pair {"hard_cut_count", word_e::hard_cut_count},
+             std::pair {"empty_raw_count", word_e::empty_raw_count},
+             std::pair {"collapsed_raw_count", word_e::collapsed_raw_count},
+           }) {
+        const auto expected = words[sbs_adaptive_state::index(word)].get<std::uint32_t>();
+        if (expected > sbs_adaptive_state::counter_max ||
+            !is_uint32(value.at(name)) ||
+            value.at(name).get<std::uint32_t>() != expected) {
+          throw worker_error(
+            std::string {"adaptive trace counter duplicate disagrees for "} + name
+          );
+        }
+      }
       frame.analysis_flags = analysis_flags;
       frame.pts_seconds = time_base.seconds(timing.pts);
       frame.duration_seconds = time_base.seconds(timing.duration);
       frame.cache_bytes = cache_bytes;
-      if (!std::isfinite(frame.valid_depth_fraction) || !std::isfinite(frame.scene_age)) {
-        throw worker_error("adaptive trace contains non-finite planner inputs");
-      }
       return frame;
     }
 
@@ -3250,13 +3375,19 @@ namespace offline_sbs {
           ensure_open(child);
           header = parse_line(read_complete_line(child));
         }
-        if (header.value("record", "") != "header" || header.value("schema", 0u) != sbs_adaptive_state::schema_version || !header.contains("fields") || !header["fields"].is_array() || header["fields"].size() != sbs_adaptive_state::word_count) {
+        if (!json_object_has_exact_keys(header, sbs_adaptive_state::header_keys) ||
+            header.value("record", "") != "header" ||
+            !header["schema"].is_number_unsigned() ||
+            header["schema"].get<std::uint64_t>() !=
+              sbs_adaptive_state::schema_version ||
+            !header["fields"].is_array() ||
+            header["fields"].size() != sbs_adaptive_state::word_count) {
           throw worker_error("adaptive trace header has the wrong schema or word count");
         }
         for (std::size_t index = 0; index < sbs_adaptive_state::fields.size(); ++index) {
           const auto &expected = sbs_adaptive_state::fields[index];
           const auto &field = header["fields"][index];
-          if (!field.is_object() ||
+          if (!field.is_object() || field.size() != 2u ||
               field.value("name", "") != expected.name ||
               field.value("type", "") != expected.json_type) {
             throw worker_error(
@@ -3274,6 +3405,26 @@ namespace offline_sbs {
             !header.contains("analysis_flag_bits") ||
             header["analysis_flag_bits"] != expected_flags) {
           throw worker_error("adaptive trace attribution differs");
+        }
+        if (!header.contains("config") || !header["config"].is_object() ||
+            header["config"].size() != sbs_adaptive_state::config_keys.size()) {
+          throw worker_error("adaptive trace config contract differs");
+        }
+        const auto &config = header["config"];
+        for (const auto key : sbs_adaptive_state::config_keys) {
+          if (!config.contains(std::string {key})) {
+            throw worker_error("adaptive trace config contract differs");
+          }
+        }
+        const auto model = config.value("model", "");
+        const auto pop_strength = config.value(
+          "pop_strength", std::numeric_limits<double>::quiet_NaN()
+        );
+        const auto depth_reuse_interval = config.value("depth_reuse_interval", 0);
+        if (model.empty() || !std::isfinite(pop_strength) ||
+            pop_strength < 0.25 || pop_strength > 2.0 ||
+            depth_reuse_interval != 1) {
+          throw worker_error("adaptive trace config values are unsupported");
         }
         return header;
       }
@@ -3331,7 +3482,7 @@ namespace offline_sbs {
             try {
               const auto bytes =
                 read_bounded_bytes(snapshot, max_snapshot_bytes);
-              auto value = nlohmann::json::parse(bytes);
+              auto value = parse_json_without_duplicate_keys(bytes);
               remove_file_checked(snapshot);
               return value;
             } catch (const worker_error &) {
@@ -3397,7 +3548,7 @@ namespace offline_sbs {
 
       nlohmann::json parse_line(const std::string &line) {
         try {
-          return nlohmann::json::parse(line);
+          return parse_json_without_duplicate_keys(line);
         } catch (const std::exception &exception) {
           throw worker_error(
             std::string {"invalid adaptive trace JSON: "} + exception.what()
@@ -3431,12 +3582,13 @@ namespace offline_sbs {
       const auto value = read_json(
         cache_directory / "scene_cache_contract.json"
       );
-      if (value.value("schema", 0) != 2 || value.value("status", "") != "running" || value.value("first_sequence", 0) != 1 || value.value("processed_count", 0ull) != sequence || !value.value("atomic_frame_publication", false)) {
+      if (value.value("schema", 0u) != scene_cache_contract_schema || value.value("status", "") != "running" || value.value("first_sequence", 0) != 1 || value.value("processed_count", 0ull) != sequence || !value.value("atomic_frame_publication", false)) {
         throw worker_error("running scene-cache sequence contract mismatch");
       }
       const auto &source = value.at("source");
       const auto &depth = value.at("depth");
       const auto &state = value.at("state");
+      const auto &render = value.at("render_config");
       const auto &packed = value.at("packed_sbs");
       cache_contract_t result;
       result.processed_count = sequence;
@@ -3452,7 +3604,11 @@ namespace offline_sbs {
         media.color == media_color_e::sdr ?
           "sRGB-BMP-WIC" :
           "linear-scRGB-f32-pfm";
-      if (result.source_width != media.width || result.source_height != media.height || source.at("frame_format").get<std::string>() != expected_frame_format || result.sbs_width == 0 || result.sbs_height == 0 || result.sbs_width % 2 != 0 || packed.at("eye_width").get<std::uint32_t>() * 2 != result.sbs_width || packed.at("eye_height").get<std::uint32_t>() != result.sbs_height || result.extension != (media.color == media_color_e::sdr ? "png" : "pfm") || depth.at("dtype").get<std::string>() != "float32-le" || depth.at("dxgi_format").get<std::string>() != "R32_FLOAT" || depth.at("semantics").get<std::string>() != "depth-coordinate-v2-signed-final-parallax-source-u" || state.at("schema").get<int>() != 2 || state.at("word_count").get<int>() != 12 || result.state_bytes != 48) {
+      const auto depth_width = depth.at("width").get<std::uint32_t>();
+      const auto depth_height = depth.at("height").get<std::uint32_t>();
+      const auto expected_depth_bytes =
+        static_cast<std::uint64_t>(depth_width) * depth_height * sizeof(float);
+      if (result.source_width != media.width || result.source_height != media.height || source.at("frame_format").get<std::string>() != expected_frame_format || result.sbs_width == 0 || result.sbs_height == 0 || result.sbs_width % 2 != 0 || packed.at("eye_width").get<std::uint32_t>() * 2 != result.sbs_width || packed.at("eye_height").get<std::uint32_t>() != result.sbs_height || !packed.at("atomic_replay_publication").get<bool>() || result.extension != (media.color == media_color_e::sdr ? "png" : "pfm") || depth_width == 0u || depth_height == 0u || result.depth_bytes != expected_depth_bytes || depth.at("dtype").get<std::string>() != "float32-le" || depth.at("dxgi_format").get<std::string>() != "R32_FLOAT" || depth.at("semantics").get<std::string>() != "depth-coordinate-v2-signed-final-parallax-source-u" || state.at("schema").get<int>() != 2 || state.at("contract_schema").get<std::uint32_t>() != models::depth_coordinate_v2::contract_schema || state.at("contract_tag").get<std::uint32_t>() != models::depth_coordinate_v2::contract_tag || state.at("word_count").get<std::size_t>() != models::depth_coordinate_v2::state_words_t {}.size() || result.state_bytes != sizeof(models::depth_coordinate_v2::state_words_t) || render.at("renderer").get<std::string>() != "depth-coordinate-v2-live-signed-parallax" || render.at("producer_source_closure_sha256").get<std::string>() != models::depth_coordinate_v2::shader_source_closure_sha256 || render.at("renderer_source_closure_sha256").get<std::string>() != models::host_sbs_shader_cache::parallax_v2_live_renderer_source_closure_sha256) {
         throw worker_error("scene-cache media/layout contract mismatch");
       }
       const auto stem = "frame_" + frame_id(sequence);
@@ -3467,15 +3623,13 @@ namespace offline_sbs {
 
     nlohmann::json scene_plan_json(const scene_plan_t &scene) {
       return {
-        {"schema", 1},
-        {"version", "scene-plan-v1"},
-        {"cache_contract_schema", 2},
+        {"schema", 2},
+        {"version", "scene-plan-v2"},
+        {"cache_contract_schema", scene_cache_contract_schema},
         {"scenes", nlohmann::json::array({
                      {
                        {"start_sequence", scene.start_sequence},
                        {"end_sequence_exclusive", scene.end_sequence_exclusive},
-                       {"absolute_pop_strength", scene.absolute_pop_strength},
-                       {"zero_anchor_shift_px", scene.zero_anchor_shift_px},
                      },
                    })},
       };
@@ -3521,26 +3675,8 @@ namespace offline_sbs {
       return {
         {"source_frame_count", evidence.source_frame_count},
         {"depth_update_count", evidence.depth_update_count},
-        {"settled_depth_update_count", evidence.settled_depth_update_count},
-        {"usable_settled_depth_update_count",
-         evidence.usable_settled_depth_update_count},
-        {"valid_edge_sample_count", evidence.valid_edge_sample_count},
-        {"valid_anchor_sample_count", evidence.valid_anchor_sample_count},
-        {"excluded_edge_sample_count", evidence.excluded_edge_sample_count},
-        {"excluded_anchor_sample_count", evidence.excluded_anchor_sample_count},
         {"appearance_veto_count", evidence.appearance_veto_count},
-        {"edge_p50", evidence.edge_p50},
-        {"edge_p90", evidence.edge_p90},
-        {"edge_p95", evidence.edge_p95},
-        {"edge_max", evidence.edge_max},
-        {"anchor_p10", evidence.anchor_p10},
-        {"anchor_p50", evidence.anchor_p50},
-        {"anchor_p90", evidence.anchor_p90},
         {"depth_change_max", evidence.depth_change_max},
-        {"risk_value", evidence.risk_value},
-        {"risk_quantile", evidence.risk_quantile},
-        {"pop_risk_low", evidence.pop_risk_low},
-        {"pop_risk_high", evidence.pop_risk_high},
       };
     }
 
@@ -3554,16 +3690,9 @@ namespace offline_sbs {
         {"cache_bytes", scene.cache_bytes},
         {"start_pts_seconds", scene.start_pts_seconds},
         {"end_pts_seconds_exclusive", scene.end_pts_seconds_exclusive},
-        {"absolute_pop_strength", scene.absolute_pop_strength},
-        {"zero_anchor_shift_px", scene.zero_anchor_shift_px},
-        {"pop_origin", scene.pop_origin},
-        {"pop_fallback", scene.pop_fallback},
-        {"zero_origin", scene.zero_origin},
-        {"zero_fallback", scene.zero_fallback},
         {"evidence", scene_evidence_json(scene.evidence)},
         {"boundary", boundary_json(scene.boundary)},
         {"ground_truth", scene.ground_truth},
-        {"comfort_optimal", scene.comfort_optimal},
         {"cut_state_semantics", scene.cut_state_semantics},
         {"known_limit", scene.known_limit},
       };
@@ -3576,13 +3705,6 @@ namespace offline_sbs {
         {"start_sequence", scene.start_sequence},
         {"end_sequence_exclusive", scene.end_sequence_exclusive},
         {"frame_count", scene.frame_count},
-        {"absolute_pop_strength", scene.absolute_pop_strength},
-        {"zero_anchor_shift_px", scene.zero_anchor_shift_px},
-        {"pop_origin", scene.pop_origin},
-        {"zero_origin", scene.zero_origin},
-        {"risk_value", scene.evidence.risk_value},
-        {"edge_p90", scene.evidence.edge_p90},
-        {"anchor_p50", scene.evidence.anchor_p50},
         {"boundary", {
                        {"decision", boundary_decision_name(scene.boundary.decision)},
                        {"final_sequence", scene.boundary.final_sequence},
@@ -5067,18 +5189,18 @@ namespace offline_sbs {
         boundary_values.push_back(boundary_json(boundary));
       }
       return {
-        {"schema", 1},
-        {"version", "whole-clip-scene-audit-v1"},
+        {"schema", 2},
+        {"version", "whole-clip-scene-audit-v2"},
         {"status", status},
         {"claims", {
                      {"ground_truth", false},
-                     {"comfort_optimal", false},
                      {"best_parameters", false},
                    }},
         {"policy", {
                      {"implementation", "native-offline-scene-planner"},
-                     {"version", "scene-plan-v1"},
+                     {"version", "scene-plan-v2"},
                      {"lookahead", true},
+                     {"boundary_only", true},
                      {"python_dependency", false},
                    }},
         {"cache", {
@@ -5186,8 +5308,6 @@ namespace offline_sbs {
         path_utf8(output),
         "--artifacts",
         "conversion",
-        "--bounded-adaptive-state",
-        "--parallax-v2-live",
         "--render-cache",
         path_utf8(cache),
         "--scene-plan",
@@ -5278,13 +5398,14 @@ namespace offline_sbs {
       const auto &adaptive_state = contract.at("adaptive_state");
       if (
         !adaptive_state.is_object() ||
-        adaptive_state.value("transport", "") != "atomic-latest-v1" ||
+        adaptive_state.value("transport", "") != "none" ||
         adaptive_state.value("retained_history", true) ||
-        adaptive_state.value("frame_count", 0ull) != scene.frame_count ||
-        contract.contains("subject_state")
+        adaptive_state.value("frame_count", 1ull) != 0ull ||
+        adaptive_state.size() != 3u ||
+        contract.contains("cut_state")
       ) {
         throw worker_error(
-          "scene replay did not use its bounded adaptive-state transport"
+          "scene replay falsely attributed adaptive-state evidence"
         );
       }
       const auto &sbs = contract.at("sbs");
@@ -5297,8 +5418,6 @@ namespace offline_sbs {
       // files now so even a clip with many short scenes cannot accumulate one trace snapshot
       // or progress file per scene while the job is still running.
       for (const auto &path : {
-             output / "adaptive_state_header.json",
-             output / "adaptive_state_frame.json",
              output / "follow_progress.json",
              output / "sbs_perf.json",
              output / "whole_clip_contract.json",
@@ -5696,6 +5815,13 @@ namespace offline_sbs {
       throw worker_error("scene-cache budget policy is invalid");
     }
     spec.allow_administrative_split = policy == "split";
+    const auto &planner = value.at("planner");
+    if (
+      required_string(planner, "implementation") != "native-offline-scene-planner" ||
+      required_string(planner, "scene_plan_contract") != "scene-plan-v2"
+    ) {
+      throw worker_error("worker scene planner contract is unsupported");
+    }
     return spec;
   }
 
@@ -5716,7 +5842,7 @@ namespace offline_sbs {
       );
     }
     try {
-      auto spec = parse_worker_spec(nlohmann::json::parse(bytes));
+      auto spec = parse_worker_spec(parse_json_without_duplicate_keys(bytes));
       spec.authenticated_spec_sha256 = actual_sha256;
       return spec;
     } catch (const worker_error &) {
@@ -7109,8 +7235,15 @@ namespace offline_sbs {
       );
       const auto capabilities = read_json(capabilities_path);
       const auto &native = capabilities.at("native_whole_clip");
-      if (capabilities.value("schema", 0) != 1 || native.value("follow_protocol_schema", 0) != 1 || native.value("adaptive_state_schema", 0u) != sbs_adaptive_state::schema_version || native.value("scene_cache_contract_schema", 0) != 2 || native.value("renderer", "") != "depth-coordinate-v2-live-signed-parallax" || !native.value("render_cache_follow", false) || !native.value("render_skips_tensorrt", false) || !native.value("atomic_sbs_publication", false)) {
+      if (capabilities.value("schema", 0) != 1 || native.value("follow_protocol_schema", 0) != 1 || native.value("adaptive_state_schema", 0u) != sbs_adaptive_state::schema_version || native.value("adaptive_state_contract_tag", 0u) != sbs_adaptive_state::cut_contract_tag || native.value("adaptive_state_contract_canonical_sha256", "") != sbs_adaptive_state::contract_canonical_sha256 || native.value("scene_cache_contract_schema", 0u) != scene_cache_contract_schema || native.value("renderer", "") != "depth-coordinate-v2-live-signed-parallax" || !native.value("render_cache_follow", false) || !native.value("render_skips_tensorrt", false) || !native.value("atomic_sbs_publication", false)) {
         throw worker_error("native SBS harness lacks the required replay contract");
+      }
+      const auto &scene_plan_capability = native.at("scene_plan");
+      if (scene_plan_capability.value("schema", 0) != 2 ||
+          scene_plan_capability.value("version", "") != "scene-plan-v2" ||
+          !scene_plan_capability.value("one_scene_per_replay", false) ||
+          !scene_plan_capability.value("boundary_only", false)) {
+        throw worker_error("native SBS harness lacks boundary-only scene planning");
       }
       nlohmann::json expected_analysis_flag_bits = nlohmann::json::object();
       for (const auto &flag : sbs_adaptive_state::analysis_flag_bits) {
@@ -7167,7 +7300,6 @@ namespace offline_sbs {
         "--artifacts",
         "adaptive",
         "--bounded-adaptive-state",
-        "--parallax-v2-live",
       };
       if (spec.operation == "convert") {
         analysis_command.insert(
@@ -7273,20 +7405,7 @@ namespace offline_sbs {
           if (planner || !trace_header.is_object()) {
             throw worker_error("scene planner initialization is invalid");
           }
-          // Under the V2 live renderer the header's pop/adaptive/zero-plane fields are inert
-          // configuration echoes; the planner still consumes them so its scene BOUNDARIES pace
-          // caching/replay and the plan keeps its absolute_pop_strength/zero_anchor_shift_px
-          // schema, but the renderer applies none of those geometry outputs.
-          const auto &config = trace_header.at("config");
           scene_planner_config_t planner_config;
-          planner_config.pop_strength =
-            config.at("pop_strength").get<float>();
-          planner_config.adaptive_pop =
-            config.at("adaptive_pop").get<bool>();
-          planner_config.adaptive_pop_max =
-            config.at("adaptive_pop_max").get<float>();
-          planner_config.zero_plane =
-            config.at("zero_plane").get<std::string>();
           planner_config.max_open_cache_bytes = max_open_cache_bytes;
           planner_config.max_open_frames = default_max_open_scene_frames;
           planner_config.allow_administrative_split =
@@ -7576,7 +7695,7 @@ namespace offline_sbs {
         );
       }
       // Offline conversion runs the production V2 pipeline: the harness must attest the
-      // depth-coordinate V2 live signed-parallax render, not the legacy estimator.
+      // depth-coordinate V2 live signed-parallax render, not cached scene geometry.
       const auto &analysis_runtime = analysis_contract.at("resolved_runtime");
       if (
         !analysis_runtime.is_object() ||
@@ -7587,13 +7706,36 @@ namespace offline_sbs {
           "analysis did not attest the depth-coordinate V2 live signed-parallax render"
         );
       }
+      const auto &trace_config = trace_header.at("config");
+      if (
+        !trace_config.is_object() ||
+        trace_config.value("model", "") != analysis_runtime.value("model", "") ||
+        trace_config.value("model", "") != analysis_contract.value("model", "") ||
+        trace_config.value(
+          "depth_reuse_interval", 0
+        ) != analysis_runtime.value("depth_reuse_interval", 0) ||
+        trace_config.value(
+          "pop_strength", std::numeric_limits<double>::quiet_NaN()
+        ) != analysis_runtime.value(
+          "pop_strength", std::numeric_limits<double>::infinity()
+        )
+      ) {
+        throw worker_error(
+          "adaptive trace config disagrees with the authenticated analysis runtime"
+        );
+      }
       const auto &analysis_state = analysis_contract.at("adaptive_state");
       if (
         !analysis_state.is_object() ||
+        analysis_state.size() != 7u ||
         analysis_state.value("transport", "") != "atomic-latest-v1" ||
+        analysis_state.value("header_file", "") != "adaptive_state_header.json" ||
+        analysis_state.value("frame_file", "") != "adaptive_state_frame.json" ||
         analysis_state.value("retained_history", true) ||
+        analysis_state.value("schema", 0u) != sbs_adaptive_state::schema_version ||
+        analysis_state.value("capture", "") != sbs_adaptive_state::capture ||
         analysis_state.value("frame_count", 0ull) != media.frames.size() ||
-        analysis_contract.contains("subject_state")
+        analysis_contract.contains("cut_state")
       ) {
         throw worker_error(
           "analysis did not attest its bounded adaptive-state transport"

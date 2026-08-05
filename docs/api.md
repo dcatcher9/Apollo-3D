@@ -1,90 +1,90 @@
-# API
+# Web API
 
-Apollo has a RESTful configuration API which is used by the Web UI.
+Sunshine 3D's Web UI uses an HTTPS JSON API. It is an administration interface for the Windows
+host, not a public remote-control protocol. Keep it on the host or a trusted local network.
 
-Requests from this PC or an allowed trusted local network use the Web UI's local trust boundary
-and do not require a credential sign-in. When WAN Web UI access is explicitly enabled, authenticate
-with `POST /api/login`, then send the returned `auth` cookie on later WAN requests. Unsafe methods
-always require browser source metadata that exactly matches the HTTPS request host and port. The
-examples below include the required `Origin` header for non-browser clients. Reverse proxies must
-preserve the original `Host` value.
+Requests from this PC or a network allowed by `origin_web_ui_allowed` use the local trust boundary
+and do not require a sign-in. If WAN Web UI access is explicitly enabled, authenticate with
+`POST /api/login` and retain the returned `auth` cookie. State-changing requests must also carry an
+`Origin` header whose HTTPS host and port match the request. A reverse proxy must preserve `Host`.
+
+The API is consumed by the bundled Web UI and may evolve with it. Integrations should tolerate new
+response fields and should never write configuration files behind Sunshine 3D's back.
 
 @htmlonly
 <script src="api.js"></script>
 @endhtmlonly
 
-## GET /api/apps
+## Pairing and authentication
+
+| Method | Route | Purpose |
+|---|---|---|
+| `POST` | `/api/login` | Authenticate WAN Web UI access |
+| `POST` | `/api/pin` | Complete primary four-digit PIN pairing |
+| `POST` | `/api/otp` | Create the secondary QR/one-time pairing payload |
+| `POST` | `/api/password` | Change Web UI credentials |
+
+## Applications and host control
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET`, `POST` | `/api/apps` | List or save applications |
+| `POST` | `/api/apps/close` | Close the active application |
+| `POST` | `/api/apps/delete` | Delete an application entry |
+| `POST` | `/api/apps/reorder` | Reorder applications |
+| `POST` | `/api/covers/upload` | Upload or fetch an application cover |
+| `GET` | `/api/logs` | Read the current host log |
+| `POST` | `/api/restart` | Restart Sunshine 3D |
+| `POST` | `/api/quit` | Stop Sunshine 3D |
+
+## Devices and presentation
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/api/clients/list` | List paired and active clients |
+| `POST` | `/api/clients/update` | Change a client's permissions |
+| `POST` | `/api/clients/disconnect` | Disconnect the active client |
+| `POST` | `/api/clients/unpair` | Remove one paired client |
+| `POST` | `/api/clients/unpair-all` | Remove every paired client |
+| `GET`, `POST` | `/api/ar-glasses` | Inspect or select the Windows local-AR display |
+
+## Configuration
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET`, `POST` | `/api/config` | Read or save host configuration |
+| `GET` | `/api/configLocale` | Read locale metadata |
+
+The field-level contract is documented in [Configuration](configuration.md).
+
+## Offline Host 3D conversion
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/api/offline-sbs/capabilities` | Report whether the native worker and codecs are available |
+| `GET`, `POST` | `/api/offline-sbs/jobs` | List jobs or create a conversion |
+| `GET` | `/api/offline-sbs/jobs/{id}` | Read one job |
+| `POST` | `/api/offline-sbs/jobs/{id}/cancel` | Cancel one job |
+| `GET` | `/api/offline-sbs/jobs/{id}/scene-audit` | Download its bounded scene audit |
+
+The job schema, path restrictions, media behavior, and GPU lease are owned by
+[Offline Host 3D conversion](whole-clip-sbs-pipeline.md). Do not infer them from this route index.
+
+## Generated examples
+
+The following endpoint sections are connected to the source-level Doxygen examples.
+
+### GET /api/apps
 @copydoc confighttp::getApps()
 
-## POST /api/apps
+### POST /api/apps
 @copydoc confighttp::saveApp()
 
-## POST /api/apps/close
-@copydoc confighttp::closeApp()
-
-## POST /api/apps/delete
-@copydoc confighttp::deleteApp()
-
-## POST /api/apps/reorder
-@copydoc confighttp::reorderApps()
-
-## GET /api/clients/list
+### GET /api/clients/list
 @copydoc confighttp::getClients()
 
-## POST /api/clients/unpair
-@copydoc confighttp::unpair()
-
-## POST /api/clients/unpair-all
-@copydoc confighttp::unpairAll()
-
-## POST /api/clients/update
-@copydoc confighttp::updateClient()
-
-## POST /api/clients/disconnect
-@copydoc confighttp::disconnect()
-
-## GET /api/ar-glasses
-@copydoc confighttp::getArGlassDevices()
-
-## POST /api/ar-glasses
-@copydoc confighttp::setArGlassDevice()
-
-## GET /api/config
-@copydoc confighttp::getConfig()
-
-## GET /api/configLocale
-@copydoc confighttp::getLocale()
-
-## POST /api/config
+### POST /api/config
 @copydoc confighttp::saveConfig()
 
-## POST /api/covers/upload
-@copydoc confighttp::uploadCover()
-
-## GET /api/logs
-@copydoc confighttp::getLogs()
-
-## POST /api/password
-@copydoc confighttp::savePassword()
-
-## POST /api/pin
+### POST /api/pin
 @copydoc confighttp::savePin()
-
-## POST /api/restart
-@copydoc confighttp::restart()
-
-## POST /api/quit
-@copydoc confighttp::quit()
-
-<div class="section_buttons">
-
-| Previous                                    |                                  Next |
-|:--------------------------------------------|--------------------------------------:|
-| [Performance Tuning](performance_tuning.md) | [Troubleshooting](troubleshooting.md) |
-
-</div>
-
-<details style="display: none;">
-  <summary></summary>
-  [TOC]
-</details>

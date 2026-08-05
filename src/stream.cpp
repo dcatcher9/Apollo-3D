@@ -34,6 +34,7 @@ extern "C" {
 #include "config.h"
 #include "crypto.h"
 #include "globals.h"
+#include "host_sbs_resolution.h"
 #include "input.h"
 #include "logging.h"
 #include "network.h"
@@ -746,7 +747,8 @@ namespace stream {
     std::atomic<crypto::PERM> permission;
     // Runtime request latch, updated by 0x3003 before the encode rebuild completes. Dump 3D is
     // accepted only while the requesting session is explicitly in Host SBS AI mode.
-    std::atomic<int> requested_sbs_mode {::video::SBS_OFF};
+    std::shared_ptr<std::atomic<int>> requested_sbs_mode =
+      std::make_shared<std::atomic<int>>(::video::SBS_OFF);
 
     safe::mail_raw_t::event_t<bool> shutdown_event;
     safe::signal_t controlEnd;
@@ -950,6 +952,33 @@ namespace stream {
             continue;
           }
 
+          const auto host_sbs_rejects_geometry = [&]() {
+            return session.requested_sbs_mode->load(std::memory_order_acquire) ==
+                     ::video::SBS_AI &&
+                   !models::host_sbs_v2_source_resolution_is_supported(
+                static_cast<std::uint32_t>(job->change.width),
+                static_cast<std::uint32_t>(job->change.height)
+              );
+          };
+          // The quality request was validated on the control thread, but a Host SBS toggle can
+          // race it while the serialized display worker is waiting. Check before touching the
+          // desktop, then check again after the potentially slow display operation below.
+          if (host_sbs_rejects_geometry()) {
+            BOOST_LOG(warning)
+              << "Rejecting live video mode "sv << job->change.width << 'x'
+              << job->change.height
+              << " because Host SBS V2 became active before the transaction committed."sv;
+            reject_live_video_mode(
+              job->mail,
+              job->effective_mode,
+              job->change.request_id,
+              live_video_mode_ack_e::rejected_invalid
+            );
+            std::lock_guard lock(state.mutex);
+            (void) state.serial_gate.finish(transaction_id);
+            continue;
+          }
+
           auto result = proc::live_video_mode_result_e::unchanged;
           if (proc::proc.live_video_mode_needs_display_change(
                 job->change.width,
@@ -970,6 +999,38 @@ namespace stream {
             if (state.stopping) {
               return;
             }
+          }
+          if ((result == proc::live_video_mode_result_e::applied ||
+               result == proc::live_video_mode_result_e::unchanged) &&
+              host_sbs_rejects_geometry()) {
+            BOOST_LOG(warning)
+              << "Host SBS V2 became active while live video mode "sv
+              << job->change.width << 'x' << job->change.height
+              << " was being applied; rejecting the transaction."sv;
+            if (display_changed && job->effective_mode) {
+              const auto previous = job->effective_mode->current();
+              const auto rollback = proc::proc.apply_live_video_mode(
+                previous.width,
+                previous.height,
+                previous.framerateX100 * 10,
+                job->launch_session_id
+              );
+              if (rollback != proc::live_video_mode_result_e::applied &&
+                  rollback != proc::live_video_mode_result_e::unchanged) {
+                BOOST_LOG(error)
+                  << "Could not restore the prior desktop after rejecting a raced Host SBS "sv
+                     "quality transaction."sv;
+              }
+            }
+            reject_live_video_mode(
+              job->mail,
+              job->effective_mode,
+              job->change.request_id,
+              live_video_mode_ack_e::rejected_invalid
+            );
+            std::lock_guard lock(state.mutex);
+            (void) state.serial_gate.finish(transaction_id);
+            continue;
           }
           switch (result) {
             case proc::live_video_mode_result_e::applied:
@@ -1813,11 +1874,44 @@ namespace stream {
                            << " from ["sv << session::client_name(*session) << "]; ignored"sv;
         return;
       }
+      if (mode == ::video::SBS_AI) {
+        const auto effective_mode = session->config.monitor.effective_mode ?
+                                      session->config.monitor.effective_mode->current() :
+                                      ::video::effective_video_mode_t {
+                                        session->config.monitor.width,
+                                        session->config.monitor.height,
+                                        session->config.monitor.framerateX100,
+                                        session->config.monitor.bitrate,
+                                      };
+        const auto host_sbs_rejection =
+          effective_mode.width > 0 && effective_mode.height > 0 ?
+            models::host_sbs_v2_source_resolution_rejection_reason(
+              static_cast<std::uint32_t>(effective_mode.width),
+              static_cast<std::uint32_t>(effective_mode.height)
+            ) :
+            std::string_view {"source extent is empty"};
+        if (!host_sbs_rejection.empty()) {
+          const auto fitted = effective_mode.width > 0 && effective_mode.height > 0 ?
+                                models::fit_host_sbs_v2_depth_tensor_shape(
+                                  static_cast<std::uint32_t>(effective_mode.width),
+                                  static_cast<std::uint32_t>(effective_mode.height)
+                                ) :
+                                models::depth_tensor_shape_t {};
+          BOOST_LOG(warning) << "Rejecting Host SBS V2 toggle at "sv
+                             << effective_mode.width << 'x' << effective_mode.height
+                             << " for ["sv << session::client_name(*session)
+                             << "]: "sv << host_sbs_rejection
+                             << "; fitted depth tensor "sv << fitted.width << 'x'
+                             << fitted.height << '.';
+          session->mail->event<int>(mail::sbs_depth_status)->raise(0);
+          return;
+        }
+      }
       std::string_view mode_name = mode == ::video::SBS_OFF ? "OFF"sv : "AI"sv;
       BOOST_LOG(info) << "type [IDX_SET_SBS_MODE]: client requested host SBS "sv << mode_name
                       << " ("sv << (int) mode << ") for ["sv
                       << session::client_name(*session) << ']';
-      session->requested_sbs_mode.store((int) mode, std::memory_order_release);
+      session->requested_sbs_mode->store((int) mode, std::memory_order_release);
       if (mode != ::video::SBS_AI && session->video->sbs_debug_dump_pending) {
         session->video->sbs_debug_dump_pending->store(false, std::memory_order_release);
       }
@@ -1939,6 +2033,17 @@ namespace stream {
         reject("resolution must be even and within 2..16384"sv);
         return;
       }
+      const auto host_sbs_rejection =
+        models::host_sbs_v2_source_resolution_rejection_reason(
+          static_cast<std::uint32_t>(width),
+          static_cast<std::uint32_t>(height)
+        );
+      if (session->requested_sbs_mode->load(std::memory_order_acquire) ==
+            ::video::SBS_AI &&
+          !host_sbs_rejection.empty()) {
+        reject(std::format("Host SBS V2 rejects this resolution: {}", host_sbs_rejection));
+        return;
+      }
       if (!is_valid_live_video_mode_framerate_x100(framerate_x100)) {
         reject("frame rate must be within 1..1000 Hz"sv);
         return;
@@ -1999,7 +2104,7 @@ namespace stream {
     server->map(control_packet::sbs_debug_dump, [](session_t *session, const std::string_view &) {
       if (!sbs_debug_dump_request_allowed(
             config::sunshine.diagnostics_enabled,
-            session->requested_sbs_mode.load(std::memory_order_acquire),
+            session->requested_sbs_mode->load(std::memory_order_acquire),
             (bool) session->video->sbs_debug_dump_pending
           )) {
         BOOST_LOG(warning) << "Ignoring Dump 3D request outside Host SBS AI for ["sv
@@ -3667,10 +3772,11 @@ namespace stream {
       session->video->effective_mode = session->config.monitor.effective_mode;
       session->config.monitor.sbs_debug_dump_pending =
         session->video->sbs_debug_dump_pending;
-      session->requested_sbs_mode.store(
+      session->requested_sbs_mode->store(
         session->config.monitor.sbs_mode,
         std::memory_order_relaxed
       );
+      session->config.monitor.requested_sbs_mode = session->requested_sbs_mode;
 
       session->audio = std::make_shared<audio_channel_t>();
       session->audio->packet_duration = config.audio.packetDuration;

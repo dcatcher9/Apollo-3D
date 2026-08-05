@@ -1,6 +1,7 @@
 #pragma once
 
 #include "config.h"
+#include "host_sbs_resolution.h"
 
 #include <chrono>
 #include <cstdint>
@@ -28,7 +29,7 @@ namespace models {
     std::string preprocess_source_closure_sha256;
   };
 
-  /** Immutable identity of the nine-root producer closure behind a live parallax-v2 result. */
+  /** Immutable identity of the complete producer closure behind a Host SBS parallax result. */
   struct parallax_v2_shader_provenance_t {
     std::uint32_t source_closure_schema = 0;
     std::uint32_t source_compile_flags = 0;
@@ -53,36 +54,6 @@ namespace models {
     return color_space != input_color_space::srgb;
   }
 
-  struct depth_tensor_shape_t {
-    int width = 0;
-    int height = 0;
-
-    constexpr bool valid() const noexcept {
-      return width > 0 && height > 0;
-    }
-
-    constexpr bool operator==(const depth_tensor_shape_t &) const = default;
-  };
-
-  /** Fit one patch-aligned depth tensor to the source aspect using the same native-size and
-   * TensorRT-profile bounds as the production estimator. Invalid source dimensions return 0x0.
-   */
-  depth_tensor_shape_t fit_depth_tensor_shape(
-    std::uint32_t source_width,
-    std::uint32_t source_height,
-    int short_side,
-    float max_aspect
-  );
-
-  /** Selects the additional GPU products required by a caller. The live Host SBS path requires
-   * the authenticated V2 coordinate field; the evaluator/offline converter retains its legacy
-   * normalization outputs and must not be constrained by the live model/shape allowlist.
-   */
-  enum class depth_estimator_usage_e {
-    host_sbs_v2,
-    legacy_evaluation,
-  };
-
   /** Build and warm the active model and prewarm fixed-shape Host SBS shader bytecode. */
   bool prepare_tensorrt_model(
     const std::filesystem::path &assets_dir,
@@ -92,12 +63,12 @@ namespace models {
   engine_build_status tensorrt_model_prepare_status(const config::depth_model_info &model);
 
   /**
-   * @brief Result of one estimate call: the depth map for the reprojection (t1), plus the
-   *        permanent Bestv2 subject state (t2).
+   * @brief Result of one estimate call: private cut-analysis depth, cut state, and the
+   *        authenticated Host SBS parallax field/state.
    */
   struct estimate_result {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject;  ///< permanent Bestv2 subject state (t2 of the reprojection)
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> cut_state;  ///< Cut-analysis state shared with telemetry and coordinate production.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_frame_state;  ///< {min,max,initialized,frame_state}; frame_state 0 means an all-invalid completion held the prior depth.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask;  ///< Edge-selective EMA snap mask.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth;  ///< Raw model output buffer, before normalization/EMA/curvature; primarily for the offline evaluator.
@@ -138,7 +109,7 @@ namespace models {
 
   /** Fail-closed CPU authentication for a completed live V2 result.
    *
-   * This verifies the complete model/preprocess/shape and nine-root producer source identities, the
+   * This verifies the complete model/preprocess/shape and producer source identities, the
    * presence of every production V2 resource, and the fixed-pop gain relation. Dump-only canonical
    * coordinate evidence is deliberately excluded. It does not map GPU state; the live shader
    * authenticates the per-frame contract tag before sampling geometry.
@@ -215,22 +186,20 @@ namespace models {
 
   /**
    * One opportunistic, nonblocking readback of the append-only diagnostic portion of
-   * SubjectState. Live samples may be skipped or coalesced while the GPU is busy; absence of a
-   * sample is not evidence that the controller did not update.
-   * SubjectState[0..2] remain the production warp contract; diagnostics begin at element 3.
+   * cut-analysis state. Live samples may be skipped or coalesced while the GPU is busy; absence
+   * of a sample is not evidence that the detector did not update.
    */
   struct depth_telemetry_sample {
     int depth_width = 0;
     int depth_height = 0;
-    float adaptive_pop_ratio = 1.0f;
-    float edge_fraction = -1.0f;
+    float adaptive_pop_ratio = 1.0f;  ///< Retained wire field; V2 always publishes 1.
+    float edge_fraction = -1.0f;  ///< Retained wire field; unavailable in V2.
     float change_fraction = 0.0f;
-    float zero_anchor_shift_px = 0.0f;
-    float subject_depth = 0.0f;
+    float zero_anchor_shift_px = 0.0f;  ///< Retained wire field; unavailable in V2.
+    float subject_depth = 0.0f;  ///< Retained wire field; unavailable in V2.
     float valid_depth_fraction = 0.0f;
     float effective_range_width = 0.0f;
-    // Append-only current-frame evidence. These remain independent of the shot-latched controls
-    // above so offline/live diagnostics can validate a boundary with two-sided evidence.
+    // Current-frame cut evidence used to distinguish detector state from incoming observations.
     float current_edge_fraction = -1.0f;
     float current_zero_anchor_candidate_shift_px = -1.0f;
     float structural_change_fraction = -1.0f;
@@ -263,8 +232,9 @@ namespace models {
      * @param device D3D11 Device used for the capture pipeline
      * @param context D3D11 Device Context
      * @param assets_dir Path to the assets directory (for model loading)
-     * @param cfg Tuning knobs; see config::video_t::sbs_t (the estimator uses the depth-side
-     *            fields: ema, depth_short_side, depth_max_aspect, and minmax_ema).
+     * @param cfg Shared SBS controls; see config::video_t::sbs_t (the estimator consumes
+     *            pop_strength and cuda_graph; the depth-side analysis parameters are the fixed
+     *            config::host_sbs_v2_live_calibration values).
      * @param model The selected depth model: name/url (which engine to load/build) plus the
      *            DA-V2-compatible model contract (pixel_values -> predicted_depth).
      */
@@ -273,8 +243,7 @@ namespace models {
       Microsoft::WRL::ComPtr<ID3D11DeviceContext> context,
       const std::filesystem::path &assets_dir,
       const config::video_t::sbs_t &cfg,
-      const config::depth_model_info &model,
-      depth_estimator_usage_e usage
+      const config::depth_model_info &model
     );
 
     ~video_depth_estimator();
@@ -301,7 +270,7 @@ namespace models {
     video_depth_estimator &operator=(const video_depth_estimator &) = delete;
 
     /**
-     * @brief Estimate depth (and the subject-tracking state) for the given RGB frame.
+     * @brief Estimate private analysis depth and the authenticated Host SBS parallax field.
      *
      * @param input_srv D3D11 ShaderResourceView containing the RGB image (usually B8G8R8A8_UNORM or R8G8B8A8_UNORM).
      * @param snapshot_debug_inputs Copy the completed frame's exact model input and raw output
@@ -319,8 +288,8 @@ namespace models {
     /**
      * @brief Finish and consume exactly one inference previously submitted by estimate_depth().
      *
-     * It synchronizes the estimator stream, applies normalization/EMA/subject tracking exactly
-     * once, and does not enqueue another inference. The offline evaluator uses this as its
+     * It synchronizes the estimator stream and applies normalization, EMA, cut analysis, and
+     * coordinate production exactly once without enqueueing another inference. The offline evaluator uses this as its
      * exact current-frame quality path; production uses the separate idle-recovery entry point.
      */
     estimate_result finish_pending_depth_for_evaluation(input_color_space color_space = input_color_space::srgb);

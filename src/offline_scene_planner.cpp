@@ -22,8 +22,6 @@ namespace offline_sbs {
 
     constexpr float depth_cut_high = 0.60f;
     constexpr float depth_cut_corroborate = 0.25f;
-    constexpr float zero_anchor_min_px = -1.39635933f;
-    constexpr float zero_anchor_max_px = 8.58230571f;
 
     bool finite(float value) {
       return std::isfinite(value);
@@ -58,14 +56,10 @@ namespace offline_sbs {
       if (!has_flag(frame, analysis_structureless_transition)) {
         return false;
       }
-      // Schema v4 exports the resolver's post-floor candidate bit. Older
-      // complete traces can still prove that the second, persistent
-      // structureless endpoint was accepted through the causal pulse itself.
-      // The bare structureless bit is insufficient: it is also set on the
-      // first update whose depth/appearance histories are intentionally held.
-      return
-        has_flag(frame, analysis_geometry_confirmation_candidate) ||
-        frame.hard_cut_pulse;
+      // The bare structureless bit is insufficient: it is also set on the first update whose
+      // depth/appearance histories are intentionally held. Exact schema-6 traces export the
+      // resolver's post-floor candidate bit, which is the sole bypass for the structural floor.
+      return has_flag(frame, analysis_geometry_confirmation_candidate);
     }
 
     bool geometry_structure_corroborated(const scene_frame_t &frame) {
@@ -115,7 +109,7 @@ namespace offline_sbs {
         return false;
       }
       // Missing structure can hide an ordinary absolute or relative geometry
-      // decision. Missing raw RGB alone cannot: schema v4 already exports the
+      // decision. Missing raw RGB alone cannot: schema 6 already exports the
       // producer-qualified appearance bit, and a measured sub-floor
       // structural value is authoritative.
       return
@@ -132,33 +126,6 @@ namespace offline_sbs {
         depth / depth_cut_corroborate :
         0.0f;
       return std::max(geometry, appearance);
-    }
-
-    float quantile(std::vector<float> values, float q) {
-      if (values.empty()) {
-        throw scene_plan_error("cannot take a quantile of an empty sequence");
-      }
-      std::sort(values.begin(), values.end());
-      if (values.size() == 1) {
-        return values.front();
-      }
-      const auto position = static_cast<double>(values.size() - 1) * q;
-      const auto lower = static_cast<std::size_t>(std::floor(position));
-      const auto upper = static_cast<std::size_t>(std::ceil(position));
-      if (lower == upper) {
-        return values[lower];
-      }
-      const auto fraction = static_cast<float>(position - lower);
-      return values[lower] + (values[upper] - values[lower]) * fraction;
-    }
-
-    float smoothstep(float low, float high, float value) {
-      const auto t = std::clamp((value - low) / (high - low), 0.0f, 1.0f);
-      return t * t * (3.0f - 2.0f * t);
-    }
-
-    bool valid_anchor(float value) {
-      return finite(value) && value >= zero_anchor_min_px && value <= zero_anchor_max_px;
     }
 
     template<class T>
@@ -223,25 +190,6 @@ namespace offline_sbs {
 
   scene_planner_t::scene_planner_t(scene_planner_config_t config):
       config_(std::move(config)) {
-    if (!finite(config_.pop_strength) ||
-        !finite(config_.adaptive_pop_max) ||
-        !finite(config_.risk_quantile) ||
-        !finite(config_.pop_risk_low) ||
-        !finite(config_.pop_risk_high)) {
-      throw scene_plan_error("scene planner numeric configuration must be finite");
-    }
-    if (config_.pop_strength < 0.25f || config_.pop_strength > 2.0f) {
-      throw scene_plan_error("pop_strength must be in [0.25, 2.0]");
-    }
-    if (config_.adaptive_pop_max < config_.pop_strength ||
-        config_.adaptive_pop_max > 2.0f) {
-      throw scene_plan_error("adaptive_pop_max must be at least pop_strength and at most 2.0");
-    }
-    if (config_.zero_plane != "subject" &&
-        config_.zero_plane != "median" &&
-        config_.zero_plane != "background") {
-      throw scene_plan_error("zero_plane must be subject, median, or background");
-    }
     if (config_.minimum_scene_frames == 0) {
       throw scene_plan_error("minimum_scene_frames must be at least one");
     }
@@ -250,19 +198,11 @@ namespace offline_sbs {
         "max_open_frames must be at least minimum_scene_frames"
       );
     }
-    if (config_.risk_quantile <= 0.0f || config_.risk_quantile > 1.0f) {
-      throw scene_plan_error("risk_quantile must be in (0, 1]");
-    }
-    if (config_.pop_risk_low < 0.0f ||
-        config_.pop_risk_low >= config_.pop_risk_high) {
-      throw scene_plan_error("pop-risk endpoints must be ordered and non-negative");
-    }
     constexpr auto ordinal_max =
       static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max());
     if (config_.lookbehind_depth_updates > ordinal_max ||
         config_.lookahead_depth_updates > ordinal_max ||
         config_.duplicate_pulse_distance_updates > ordinal_max ||
-        config_.settle_depth_updates > ordinal_max ||
         add_overflows(
           config_.lookbehind_depth_updates,
           config_.lookahead_depth_updates
@@ -327,17 +267,6 @@ namespace offline_sbs {
       frame.common_structural_support_fraction,
       "common_structural_support_fraction"
     );
-    validate_optional(frame.edge_fraction, "edge_fraction");
-    validate_optional(frame.zero_anchor_candidate_shift_px, "zero_anchor_candidate_shift_px");
-    validate_optional(frame.production_zero_anchor_shift_px, "production_zero_anchor_shift_px");
-    if (!finite(frame.valid_depth_fraction) ||
-        frame.valid_depth_fraction < 0.0f ||
-        frame.valid_depth_fraction > 1.0f) {
-      throw scene_plan_error("valid_depth_fraction must be in [0, 1]");
-    }
-    if (!finite(frame.scene_age) || frame.scene_age < 0.0f) {
-      throw scene_plan_error("scene_age must be finite and non-negative");
-    }
     if (frame.pts_seconds && !finite(*frame.pts_seconds)) {
       throw scene_plan_error("pts_seconds must be finite when present");
     }
@@ -418,7 +347,7 @@ namespace offline_sbs {
     ++next_sequence_;
 
     const auto &stored = frames_.back();
-    // A held color frame carries the previous SubjectState pulse. It is not a
+    // A held color frame carries the previous cut-bridge pulse. It is not a
     // second causal proposal.
     if (stored.sample.depth_updated && stored.sample.hard_cut_pulse) {
       add_proposal(stored);
@@ -900,8 +829,8 @@ namespace offline_sbs {
     boundary.budget_forced = true;
     boundary.decision = boundary_decision_e::administrative_cache_split;
     boundary.reason =
-      "the opt-in split policy inserted an explicit camera boundary before a "
-      "semantic cut; the next segment receives a new scene-wide camera plan";
+      "the opt-in split policy inserted an explicit cache/replay boundary before a "
+      "semantic cut; V2 geometry remains unchanged across the split";
     boundary_audit_.push_back(boundary);
     result.push_back(finalize_prefix(prefix_count, std::move(boundary)));
     if (open_cache_bytes_ > limit) {
@@ -945,93 +874,11 @@ namespace offline_sbs {
     }
     open_cache_bytes_ -= released_bytes;
 
-    std::vector<const scene_frame_t *> settled;
-    std::optional<std::int64_t> first_depth_ordinal;
     std::size_t depth_updates = 0;
     for (const auto &tracked : scene_frames) {
-      if (!tracked.sample.depth_updated) {
-        continue;
+      if (tracked.sample.depth_updated) {
+        ++depth_updates;
       }
-      ++depth_updates;
-      if (!first_depth_ordinal) {
-        first_depth_ordinal = tracked.depth_update_ordinal;
-      }
-      if (
-        tracked.depth_update_ordinal >= *first_depth_ordinal &&
-        static_cast<std::uint64_t>(
-          tracked.depth_update_ordinal - *first_depth_ordinal
-        ) >= config_.settle_depth_updates
-      ) {
-        settled.push_back(&tracked.sample);
-      }
-    }
-    const auto usable_depth = [&](const scene_frame_t &frame) {
-      return frame.initialized &&
-             frame.depth_ready &&
-             frame.valid_depth_fraction > 0.0f &&
-             !frame.range_collapsed;
-    };
-
-    std::vector<float> edge_values;
-    std::vector<float> anchor_values;
-    std::size_t usable_settled_count = 0;
-    for (const auto *frame : settled) {
-      if (!usable_depth(*frame)) {
-        continue;
-      }
-      ++usable_settled_count;
-      if (usable_metric(frame->edge_fraction)) {
-        edge_values.push_back(*frame->edge_fraction);
-      }
-      if (frame->zero_anchor_valid &&
-          frame->zero_anchor_candidate_shift_px &&
-          valid_anchor(*frame->zero_anchor_candidate_shift_px)) {
-        anchor_values.push_back(*frame->zero_anchor_candidate_shift_px);
-      }
-    }
-
-    float absolute_pop = config_.pop_strength;
-    std::string pop_origin;
-    std::optional<std::string> pop_fallback;
-    std::optional<float> risk_value;
-    if (!config_.adaptive_pop) {
-      pop_origin = "configured-fixed";
-    } else if (!edge_values.empty()) {
-      const auto risk = quantile(edge_values, config_.risk_quantile);
-      risk_value = risk;
-      const auto confidence =
-        1.0f - smoothstep(config_.pop_risk_low, config_.pop_risk_high, risk);
-      absolute_pop = std::clamp(
-        config_.pop_strength +
-          (config_.adaptive_pop_max - config_.pop_strength) * confidence,
-        config_.pop_strength,
-        config_.adaptive_pop_max
-      );
-      pop_origin = "whole-finalized-scene-edge-risk";
-    } else {
-      pop_origin = "conservative-floor-fallback";
-      pop_fallback = "no settled valid instantaneous edge-risk samples";
-    }
-
-    float zero_anchor = 0.0f;
-    std::string zero_origin;
-    std::optional<std::string> zero_fallback;
-    if (!anchor_values.empty()) {
-      zero_anchor = quantile(anchor_values, 0.50f);
-      zero_origin = "whole-finalized-scene-median-candidate";
-    } else {
-      bool found = false;
-      for (const auto &tracked : scene_frames) {
-        const auto &frame = tracked.sample;
-        if (frame.zero_anchor_valid &&
-            frame.production_zero_anchor_shift_px &&
-            valid_anchor(*frame.production_zero_anchor_shift_px)) {
-          zero_anchor = *frame.production_zero_anchor_shift_px;
-          found = true;
-        }
-      }
-      zero_origin = found ? "production-latched-fallback" : "neutral-fallback";
-      zero_fallback = "no settled valid zero-anchor candidate samples";
     }
 
     std::vector<float> depth_changes;
@@ -1052,39 +899,9 @@ namespace offline_sbs {
     result.end_sequence_exclusive = scene_frames.back().sample.sequence + 1;
     result.frame_count = scene_frames.size();
     result.cache_bytes = released_bytes;
-    result.absolute_pop_strength = absolute_pop;
-    result.zero_anchor_shift_px = zero_anchor;
-    result.pop_origin = std::move(pop_origin);
-    result.pop_fallback = std::move(pop_fallback);
-    result.zero_origin = std::move(zero_origin);
-    result.zero_fallback = std::move(zero_fallback);
     result.evidence.source_frame_count = scene_frames.size();
     result.evidence.depth_update_count = depth_updates;
-    result.evidence.settled_depth_update_count = settled.size();
-    result.evidence.usable_settled_depth_update_count = usable_settled_count;
-    result.evidence.valid_edge_sample_count = edge_values.size();
-    result.evidence.valid_anchor_sample_count = anchor_values.size();
-    result.evidence.excluded_edge_sample_count =
-      settled.size() - edge_values.size();
-    result.evidence.excluded_anchor_sample_count =
-      settled.size() - anchor_values.size();
     result.evidence.appearance_veto_count = appearance_veto_count;
-    result.evidence.risk_quantile = config_.risk_quantile;
-    result.evidence.pop_risk_low = config_.pop_risk_low;
-    result.evidence.pop_risk_high = config_.pop_risk_high;
-    result.evidence.risk_value = risk_value;
-    if (!edge_values.empty()) {
-      result.evidence.edge_p50 = quantile(edge_values, 0.50f);
-      result.evidence.edge_p90 = quantile(edge_values, 0.90f);
-      result.evidence.edge_p95 = quantile(edge_values, 0.95f);
-      result.evidence.edge_max =
-        *std::max_element(edge_values.begin(), edge_values.end());
-    }
-    if (!anchor_values.empty()) {
-      result.evidence.anchor_p10 = quantile(anchor_values, 0.10f);
-      result.evidence.anchor_p50 = quantile(anchor_values, 0.50f);
-      result.evidence.anchor_p90 = quantile(anchor_values, 0.90f);
-    }
     if (!depth_changes.empty()) {
       result.evidence.depth_change_max =
         *std::max_element(depth_changes.begin(), depth_changes.end());

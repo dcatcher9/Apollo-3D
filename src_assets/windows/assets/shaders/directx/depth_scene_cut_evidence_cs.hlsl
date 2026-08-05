@@ -1,14 +1,12 @@
-// Live Host SBS V2 scene-cut evidence. This is the cut-only counterpart of
-// depth_subject_hist_cs: it preserves the calibrated depth, appearance, ordinal, exposure, and
-// structural-support evidence exactly, but does not build subject/stretch histograms or measure
-// legacy adaptive-pop edge risk.
+// Live Host SBS V2 scene-cut evidence. It reduces calibrated depth, appearance, ordinal,
+// exposure, and structural-support signals without any subject, stretch, or adaptive-pop work.
 
 Texture2D<float>         DepthTexture : register(t0);  // normalized cut-analysis depth
 Texture2D<float>         PreviousDepth : register(t1);  // last structurally reliable endpoint
 StructuredBuffer<float>  CurrentModelInput : register(t2);  // completed NCHW ImageNet input
 StructuredBuffer<float>  PreviousModelInput : register(t3);
 StructuredBuffer<float4> MinMaxEma : register(t4);  // w = current-frame validity
-StructuredBuffer<float>  CurrentAppearanceOrdinal : register(t5);  // capture-domain maxRGB
+StructuredBuffer<float>  CurrentAppearanceOrdinal : register(t5);  // scene-linear maxRGB
 StructuredBuffer<float>  PreviousAppearanceOrdinal : register(t6);
 RWStructuredBuffer<uint> SceneCutEvidence : register(u0);
 
@@ -22,7 +20,7 @@ static const int2 STRUCTURE_ORDINAL_OFFSETS[5] = {
 };
 
 groupshared uint g_evidence[CUT_EVIDENCE_WORD_COUNT];
-// A 16x16 group plus a one-pixel halo of the pre-tone-map point maxRGB ordinal signal.
+// A 16x16 group plus a one-pixel halo of the point-sampled scene-linear maxRGB ordinal.
 groupshared float g_current_appearance_ordinal[STRUCTURE_TILE_TEXELS];
 groupshared float g_previous_appearance_ordinal[STRUCTURE_TILE_TEXELS];
 
@@ -52,7 +50,7 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
         g_evidence[lin] = 0u;
     }
 
-    // Cooperatively load the same 18x18 ordinal tile as the legacy evaluator. The final 68 halo
+    // Cooperatively load the 18x18 ordinal tile. The final 68 halo
     // samples are handled by the first 68 threads' second iteration.
     for (uint tile_idx = lin; tile_idx < STRUCTURE_TILE_TEXELS; tile_idx += 256u) {
         uint tile_x = tile_idx % STRUCTURE_TILE_WIDTH;
@@ -111,10 +109,18 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
             for (int second = first + 1; second < 5; ++second) {
                 float current_delta = current_samples[first] - current_samples[second];
                 float previous_delta = previous_samples[first] - previous_samples[second];
+                float current_scale =
+                    max(abs(current_samples[first]), abs(current_samples[second]));
+                float previous_scale =
+                    max(abs(previous_samples[first]), abs(previous_samples[second]));
                 bool current_reliable =
-                    abs(current_delta) >= STRUCTURAL_ORDINAL_CONTRAST_FLOOR;
+                    abs(current_delta) >=
+                        max(STRUCTURAL_ORDINAL_NOISE_FLOOR,
+                            STRUCTURAL_ORDINAL_RELATIVE_CONTRAST_FLOOR * current_scale);
                 bool previous_reliable =
-                    abs(previous_delta) >= STRUCTURAL_ORDINAL_CONTRAST_FLOOR;
+                    abs(previous_delta) >=
+                        max(STRUCTURAL_ORDINAL_NOISE_FLOOR,
+                            STRUCTURAL_ORDINAL_RELATIVE_CONTRAST_FLOOR * previous_scale);
                 current_comparisons += current_reliable ? 1u : 0u;
                 previous_comparisons += previous_reliable ? 1u : 0u;
                 bool common_reliable = current_reliable && previous_reliable;

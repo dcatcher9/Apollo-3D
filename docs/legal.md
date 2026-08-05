@@ -1,34 +1,20 @@
-# Legal
+# Legal and redistribution
 
-> [!CAUTION]
-> This documentation is for informational purposes only and is not intended as legal advice. If you have
-> any legal questions or concerns about using Sunshine, we recommend consulting with a lawyer.
+Sunshine 3D is distributed under the **GNU General Public License v3.0 only**. The authoritative
+license text is [LICENSE](../LICENSE); notices retained from this project and its upstream lineage
+are in [NOTICE](../NOTICE).
 
-Sunshine is licensed under the GPL-3.0 license, which allows for free use and modification of the software.
-The full text of the license can be reviewed [here](https://github.com/LizardByte/Sunshine/blob/master/LICENSE).
+GPL-3.0 permits use, study, modification, and redistribution under its terms. It does not mean that
+commercial redistribution has “no limitations.” A distributor is responsible for source-code,
+license, notice, installation-information, and other obligations that apply to its distribution.
 
-## Commercial Use
-Sunshine can be used in commercial applications without any limitations. This means that businesses and organizations
-can use Sunshine to create and sell products or services without needing to seek permission or pay a fee.
+Sunshine 3D also interacts with components that may have separate terms, including NVIDIA drivers,
+TensorRT, codecs, FFmpeg builds, media containers, model files, fonts, and platform SDKs. The GPL
+license for this repository does not grant patent, trademark, model-data, or third-party binary
+rights that those components may require. Packagers must review the exact artifacts they ship.
 
-However, it is important to note that the GPL-3.0 license does not grant any rights to distribute or sell the encoders
-contained within Sunshine. If you plan to sell access to Sunshine as part of their distribution, you are responsible
-for obtaining the necessary licenses to do so. This may include obtaining a license from the
-Motion Picture Experts Group (MPEG-LA) and/or any other necessary licensing requirements.
+“Sunshine 3D,” upstream project names, and third-party names identify their respective software;
+license permission is not an endorsement or a trademark grant.
 
-In summary, while Sunshine is free to use, it is the user's responsibility to ensure compliance with all applicable
-licensing requirements when redistributing the software as part of a commercial offering. If you have any questions or
-concerns about using Sunshine in a commercial setting, we recommend consulting with a lawyer.
-
-<div class="section_buttons">
-
-| Previous                                        |                              Next |
-|:------------------------------------------------|----------------------------------:|
-| [Gamestream Migration](gamestream_migration.md) | [Configuration](configuration.md) |
-
-</div>
-
-<details style="display: none;">
-  <summary></summary>
-  [TOC]
-</details>
+This page is a project summary, not legal advice. Consult qualified counsel for a specific product,
+jurisdiction, or redistribution plan.

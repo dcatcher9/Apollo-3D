@@ -32,8 +32,9 @@ from PIL import Image
 
 try:
     from . import direct_geometry_contract as direct_geometry
-    from . import subject_state_contract
+    from . import cut_state_contract
     from . import whole_clip_raw_contract
+    from .adaptive_state_contract import COUNTER_MAX as CUT_COUNTER_MAX
     from .depth_coordinate_v2_contract import (
         CONTRACT_CANONICAL_SHA256, CONTRACT_PATH, CONTRACT_SCHEMA)
     from .depth_mapping_v2 import (
@@ -51,8 +52,9 @@ try:
     )
 except ImportError:  # Direct execution from tools/sbsbench.
     import direct_geometry_contract as direct_geometry  # type: ignore
-    import subject_state_contract  # type: ignore
+    import cut_state_contract  # type: ignore
     import whole_clip_raw_contract  # type: ignore
+    from adaptive_state_contract import COUNTER_MAX as CUT_COUNTER_MAX  # type: ignore
     from depth_coordinate_v2_contract import (  # type: ignore
         CONTRACT_CANONICAL_SHA256, CONTRACT_PATH, CONTRACT_SCHEMA)
     from depth_mapping_v2 import (  # type: ignore
@@ -82,7 +84,7 @@ GPU_INPUT_MANIFEST_MODE = "depth-coordinate-v2-production-gpu-sequence-v10"
 SEQUENCE_MAPPING_CONFIG_KEYS = frozenset(asdict(MappingV2Config()).keys())
 NUMPY_COMPARISON_SCHEMA = 3
 PRODUCER_EVIDENCE_SCHEMA = 1
-PRODUCER_EVIDENCE_BINDING = "self-contained-schema36-schema23-raw-producer-v1"
+PRODUCER_EVIDENCE_BINDING = "self-contained-schema36-schema24-raw-producer-v1"
 PRODUCER_EVIDENCE_DIR = "gpu_input/provenance"
 SEQUENCE_CONTRACT_FILE = "depth_coordinate_v2_sequence_contract.json"
 STATE_TRACE_FILE = "depth_coordinate_v2_state_trace.json"
@@ -103,21 +105,20 @@ IMPLEMENTATION_SOURCE_FILES = (
     "src_assets/windows/assets/shaders/directx/depth_coordinate_v2_ownership_cs.hlsl",
     "src_assets/windows/assets/shaders/directx/depth_coordinate_v2_vertical_limit_cs.hlsl",
     "src_assets/windows/assets/shaders/directx/depth_coordinate_v2_limit_cs.hlsl",
-    "src_assets/windows/assets/shaders/directx/sbs_reprojection_ps.hlsl",
-    "src_assets/windows/assets/shaders/directx/sbs_forward_coverage_cs.hlsl",
+    "src_assets/windows/assets/shaders/directx/sbs_direct_replay_ps.hlsl",
+    "src_assets/windows/assets/shaders/directx/sbs_reprojection_v2_live_ps.hlsl",
+    "src_assets/windows/assets/shaders/directx/sbs_reprojection_v2_diagnostics_ps.hlsl",
     "src_assets/windows/assets/shaders/directx/include/depth_color.hlsl",
     "src_assets/windows/assets/shaders/directx/include/depth_constants.hlsl",
     "src_assets/windows/assets/shaders/directx/include/depth_coordinate_v2.hlsl",
     "src_assets/windows/assets/shaders/directx/include/depth_coordinate_v2_contract.generated.hlsl",
     "src_assets/windows/assets/shaders/directx/include/sbs_adaptive_state_contract.generated.hlsl",
-    "src_assets/windows/assets/shaders/directx/include/sbs_warp_common.hlsl",
-    "src_assets/windows/assets/shaders/directx/include/bestv2_curve.hlsl",
     "tools/sbsbench/depth_coordinate_v2_contract.py",
     "tools/sbsbench/depth_mapping_v2.py",
     "tools/sbsbench/depth_mapping_v2_temporal.py",
     "tools/sbsbench/direct_geometry_contract.py",
     "tools/sbsbench/run_eval.py",
-    "tools/sbsbench/subject_state_contract.py",
+    "tools/sbsbench/cut_state_contract.py",
     "tools/sbsbench/whole_clip_raw_contract.py",
     "tools/sbsbench/replay_depth_mapping_v2_sequence.py",
 )
@@ -406,10 +407,10 @@ def _load_authenticated_cut_pulses(
 
     if len(frame_ids) != len(cut_counts):
         raise ValueError("cut pulse frame/count sequences have different lengths")
-    state_path = raw_sequence / "subject_state.json"
+    state_path = raw_sequence / "cut_state.json"
     if not state_path.exists():
         return [False] * len(frame_ids)
-    trace = subject_state_contract.load_trace(str(state_path))
+    trace = cut_state_contract.load_trace(str(state_path))
     if set(trace) != set(frame_ids):
         raise ValueError(
             f"{state_path}: trace/raw frame IDs disagree while loading cut pulses")
@@ -551,13 +552,13 @@ def _materialize_producer_evidence_bundle(
         "results_json": raw_sequence.parent / "results.json",
         "harness_contract": raw_sequence / "contract.json",
         "raw_shape": raw_sequence / "raw_shape.json",
-        "subject_state": raw_sequence / "subject_state.json",
+        "cut_state": raw_sequence / "cut_state.json",
     }
     filenames = {
         "results_json": "results.json",
         "harness_contract": "contract.json",
         "raw_shape": "raw_shape.json",
-        "subject_state": "subject_state.json",
+        "cut_state": "cut_state.json",
     }
     references: Dict[str, Dict[str, str]] = {}
     for key, source in source_paths.items():
@@ -876,7 +877,8 @@ def _validate_gpu_input_manifest_evidence(
                 not isinstance(row.get("source_sha256"), str) or
                 re.fullmatch(r"[0-9a-f]{64}", row["source_sha256"]) is None or
                 raw_record.get("frame_id") != frame_id or
-                type(row.get("hard_cut_count")) is not int or row["hard_cut_count"] < 0 or
+                type(row.get("hard_cut_count")) is not int or
+                not 0 <= row["hard_cut_count"] <= CUT_COUNTER_MAX or
                 type(row.get("hard_cut_pulse")) is not bool):
             raise ValueError(f"GPU input manifest frame {index} has invalid evidence")
         raw_path = reference_path.parent / expected_file
@@ -920,7 +922,7 @@ def _validate_producer_evidence_bundle(
 
     expected_keys = {
         "schema", "binding", "clip", "results_json", "harness_contract", "raw_shape",
-        "raw_artifact_manifest", "subject_state",
+        "raw_artifact_manifest", "cut_state",
     }
     if (not isinstance(reference, dict) or set(reference) != expected_keys or
             reference.get("schema") != PRODUCER_EVIDENCE_SCHEMA or
@@ -930,7 +932,7 @@ def _validate_producer_evidence_bundle(
     documents: Dict[str, Dict[str, Any]] = {}
     document_paths: Dict[str, Path] = {}
     for key in ("results_json", "harness_contract", "raw_shape",
-                "raw_artifact_manifest", "subject_state"):
+                "raw_artifact_manifest", "cut_state"):
         item = reference.get(key)
         if (not isinstance(item, dict) or set(item) != {"file", "sha256"} or
                 not isinstance(item.get("sha256"), str) or
@@ -1000,11 +1002,11 @@ def _validate_producer_evidence_bundle(
     expected_bytes = expected_shape["width"] * expected_shape["height"] * 4
     cut_control = input_contract.get("cut_control_evidence")
     if (not isinstance(cut_control, dict) or
-            reference["subject_state"]["sha256"] != cut_control.get("sha256")):
-        raise ValueError("sequence copied subject state is not the authenticated cut authority")
-    cut_trace = subject_state_contract.load_trace(str(document_paths["subject_state"]))
+            reference["cut_state"]["sha256"] != cut_control.get("sha256")):
+        raise ValueError("sequence copied cut-state artifact is not the authenticated cut authority")
+    cut_trace = cut_state_contract.load_trace(str(document_paths["cut_state"]))
     if set(cut_trace) != {int(row["frame_id"]) for row in manifest_rows}:
-        raise ValueError("sequence copied subject state frame set disagrees with raw evidence")
+        raise ValueError("sequence copied cut-state frame set disagrees with raw evidence")
     for manifest_row, input_row, gpu_row in zip(manifest_rows, input_rows, gpu_rows):
         if (input_row != {"frame_id": manifest_row["frame_id"],
                          "sha256": manifest_row["sha256"]} or
@@ -1015,7 +1017,7 @@ def _validate_producer_evidence_bundle(
         cut_row = cut_trace[int(manifest_row["frame_id"])]
         if (gpu_row.get("hard_cut_count") != int(cut_row["hard_cut_count"]) or
                 gpu_row.get("hard_cut_pulse") != (cut_row["hard_cut_pulse"] > 0.5)):
-            raise ValueError("sequence GPU cut evidence disagrees with production subject state")
+            raise ValueError("sequence GPU cut evidence disagrees with production cut state")
         raw_path = output / "gpu_input" / manifest_row["file"]
         try:
             raw_size = raw_path.stat().st_size
@@ -1097,7 +1099,7 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
     cut_control = input_contract.get("cut_control_evidence")
     if (not isinstance(cut_control, dict) or
             set(cut_control) != {"kind", "sha256"} or
-            cut_control.get("kind") != "subject-state-hard-cut-generation" or
+            cut_control.get("kind") != "cut-state-hard-cut-generation" or
             not isinstance(cut_control.get("sha256"), str) or
             sha_pattern.fullmatch(cut_control["sha256"]) is None):
         raise ValueError("sequence cut controller evidence is not the live hard-cut generation")
@@ -1245,7 +1247,7 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
             raise ValueError(f"sequence contract frame {row['frame_id']} disagrees with state")
 
         # Re-read the authenticated interchange bytes rather than trusting trace summaries. This
-        # independently proves the hard container and both axis bounds for every field.
+        # independently proves the pointwise soft container and both axis bounds for every field.
         frame_text = row["frame_id"]
         value_count = raw_shape["height"] * raw_shape["width"]
         order_path = output / "harness" / f"depth_{frame_text}.f32"
@@ -1286,15 +1288,14 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
     harness = _read_json(output / "harness" / "contract.json")
     direct_geometry.validate_artifacts(str(output / "harness"), harness, set(frame_ids))
     gpu_execution = harness.get("depth_coordinate_v2_gpu")
-    expected_subject_state = subject_state_contract.contract_reference(
-        subject_state_contract.GPU_REPLAY_SCHEMA)
+    expected_cut_state = cut_state_contract.contract_reference(gpu_replay=True)
     if (not isinstance(gpu_execution, dict) or
             not np.isclose(float(harness.get("pop_strength", -1.0)),
                            float(mapping["pop_strength"]), rtol=0.0, atol=1.0e-7) or
             gpu_execution.get("enabled") is not True or
             gpu_execution.get("execution") !=
             "authenticated-raw-source-color-histogram-plus-seven-v2-compute-shaders-persistent-state-v7" or
-            gpu_execution.get("legacy_estimator_executed") is not False or
+            gpu_execution.get("tensorrt_executed") is not False or
             gpu_execution.get("render_authority") != "gpu-canonical-and-final-fields" or
             gpu_execution.get("numpy_role") != "comparison-only" or
             gpu_execution.get("calibration_contract_canonical_sha256") !=
@@ -1302,7 +1303,7 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
             gpu_execution.get("pop_strength_authority") !=
             "contract.pop_strength-only" or
             gpu_execution.get("adaptive_pop_applied") is not False or
-            harness.get("subject_state") != expected_subject_state or
+            harness.get("cut_state") != expected_cut_state or
             gpu_execution.get("input_manifest_sha256") !=
             gpu_input_ref.get("sha256") or
             gpu_execution.get("state_trace") != {
@@ -1441,7 +1442,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         harness_command = [
             str(executable), str(conf), "--sbs-bench",
             "--frames", str(replay_frames), "--out", str(harness),
-            "--model", str(run_model["model"]),
             "--pop-strength", str(config.pop_strength),
             "--depth-coordinate-v2-manifest", str(gpu_manifest_path),
         ]

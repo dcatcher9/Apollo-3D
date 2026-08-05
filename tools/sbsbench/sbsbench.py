@@ -4,7 +4,7 @@ sbsbench - validated visual metrics for Apollo's host SBS 3D output.
 
 Runs on real "Dump 3D" output (the actual sbs.png the client receives plus its authenticated
 semantic-depth artifact), so the numbers reflect the LIVE pipeline, not a CPU replica -- this is
-the whole point vs. warpsim (see docs/sbs-benchmark-plan.md). Direct-geometry experiments retain
+the whole point vs. warpsim (see tools/sbsbench/METRICS.md). Direct-geometry experiments retain
 unbounded canonical order as float32 instead of substituting their conditioned displacement.
 Each metric is a number that should move with a real quality change, so improvements can be A/B'd
 against a baseline.
@@ -55,7 +55,7 @@ import sbs_interocular_photometric_rivalry  # noqa: E402
 import sbs_stereo_window_metrics  # noqa: E402
 import sbs_warp_shear_metrics  # noqa: E402
 import direct_geometry_contract as direct_geometry  # noqa: E402
-import subject_state_contract  # noqa: E402
+import cut_state_contract  # noqa: E402
 
 TEMPORAL_MIN_SUPPORT = 0.1
 # Minimum GT boundary support (percent of valid pixels) for depth_gt_edge_f1 to gate.
@@ -81,11 +81,10 @@ EVIDENCE_SUPPORT_REQUIREMENTS = {
     "interocular_exposure_rivalry_evidence_sufficient": 100.0,
     "interocular_color_gain_rivalry_evidence_sufficient": 100.0,
     "shot_state_contract_support": 1.0,
-    "exposure_shot_state_contract_support": 1.0,
     "latched_motion_contract_support": 1.0,
 }
-SUBJECT_STATE_SCHEMA = subject_state_contract.SCHEMA
-SUBJECT_STATE_FIELDS = subject_state_contract.FIELDS
+CUT_STATE_SCHEMA = cut_state_contract.SCHEMA
+CUT_STATE_FIELDS = cut_state_contract.FIELDS
 
 
 # ---------------------------------------------------------------------------- io
@@ -195,14 +194,14 @@ def indexed_files(pattern, prefix):
     return out
 
 
-def load_subject_state_trace(path):
+def load_cut_state_trace(path):
     """Load an exact legacy-state or native cut-compatibility trace."""
-    return subject_state_contract.load_trace(path)
+    return cut_state_contract.load_trace(path)
 
 
-def subject_state_trace_schema(path):
+def cut_state_trace_schema(path):
     """Return the authenticated compatibility-trace role schema."""
-    return subject_state_contract.trace_schema(path)
+    return cut_state_contract.trace_schema(path)
 
 
 def validate_exposure_only_source(src_by_id, contract):
@@ -301,14 +300,9 @@ def apply_shot_state_contract(rows, frame_ids, trace, contract):
 
     A pulse is independently observable as both an initialized scene-age reset and entry into the
     CUT_LATCHED flag. The mismatch metric catches a missing expected cut, any extra cut, and
-    disagreement between those two state-machine effects. Exposure-only clips additionally
-    require the already-settled zero anchor and adaptive-pop ratio to remain bit-stable.
-
-    Initialization evidence is the cut analysis itself: ``initialized`` plus a valid model-input
-    history. The production V2 cut-only bridge (2026-08) retains the legacy zero-plane slots at
-    their unavailable defaults -- it never dispatches the subject/zero-anchor analysis -- so
-    ``zero_anchor_valid`` is deliberately not part of shot_state_initialized_ok. Exposure-only
-    stability still scores the (constant-by-default) anchor/pop words for bit-stability.
+    disagreement between those two state-machine effects. Initialization evidence is the cut
+    analysis itself: ``initialized`` plus an available model-input history state. The compact
+    trace intentionally contains no deleted V1 subject, adaptive-pop, or zero-plane authority.
     """
     monitor_from = contract["monitor_from_frame"]
     expected_pulses = set(contract["expected_pulse_frames"])
@@ -321,14 +315,12 @@ def apply_shot_state_contract(rows, frame_ids, trace, contract):
     extra = sorted(set(trace) - set(frame_ids))
     if missing or extra:
         raise ValueError(
-            f"subject-state/source frame-id mismatch: missing={missing}, extra={extra}")
+            f"cut-state/source frame-id mismatch: missing={missing}, extra={extra}")
 
     stable_from = contract.get("stable_from_frame", monitor_from)
     stable_ids = [frame_id for frame_id in monitor_ids if frame_id >= stable_from]
     if kind == "exposure-only" and not stable_ids:
         raise ValueError("exposure shot-state contract has no settled stability frames")
-    reference = trace[stable_ids[0]] if kind == "exposure-only" else None
-
     relative_escape_ok = None
     if kind == "latched-motion-hard-cut":
         setup = contract["setup_pulse_frame"]
@@ -378,8 +370,6 @@ def apply_shot_state_contract(rows, frame_ids, trace, contract):
             (previous_flags != 16 or age_reset))
         accepted = bool(age_reset)
         row["shot_state_contract_support"] = 1.0
-        if kind == "exposure-only" and frame_id >= stable_from:
-            row["exposure_shot_state_contract_support"] = 1.0
         if kind == "latched-motion-hard-cut":
             row["latched_motion_contract_support"] = 1.0
             row["shot_state_relative_escape_ok"] = (
@@ -390,12 +380,7 @@ def apply_shot_state_contract(rows, frame_ids, trace, contract):
         row["shot_state_trace_inconsistent"] = 1.0 if age_reset != latch_entry else 0.0
         row["shot_state_initialized_ok"] = (
             100.0 if current["initialized"] > 0.5 and
-            current["model_input_history_valid"] > 0.5 else 0.0)
-        if kind == "exposure-only" and frame_id >= stable_from:
-            row["shot_state_zero_anchor_drift_px"] = abs(
-                current["zero_anchor_shift_px"] - reference["zero_anchor_shift_px"])
-            row["shot_state_adaptive_pop_drift"] = abs(
-                current["adaptive_pop_ratio"] - reference["adaptive_pop_ratio"])
+            current["model_input_history_state"] > 0.5 else 0.0)
         accepted_count += int(accepted)
         expected_count += int(expected)
         previous = current
@@ -404,8 +389,6 @@ def apply_shot_state_contract(rows, frame_ids, trace, contract):
         "shot_state_accepted_pulse": float(accepted_count),
         "shot_state_expected_pulse": float(expected_count),
     }
-    if kind == "exposure-only":
-        summary["exposure_shot_state_contract_support"] = float(len(stable_ids))
     if kind == "latched-motion-hard-cut":
         summary["latched_motion_contract_support"] = float(len(monitor_ids))
         summary["shot_state_relative_escape_ok"] = (
@@ -1398,7 +1381,6 @@ HARD_MAX_AGG = {
     "exact_local_polarity_component_pct",
     "source_coverage_worst_patch_bad_pct", "image_integrity_worst_patch_bad_pct",
     "shot_state_pulse_mismatch", "shot_state_trace_inconsistent",
-    "shot_state_zero_anchor_drift_px", "shot_state_adaptive_pop_drift",
 }
 HARD_MIN_AGG = {
     "exact_binocular_support_pct", "source_coverage_pct", "image_integrity_pct",
@@ -2712,16 +2694,12 @@ def measure_sequence(seq_dir, frames_dir=None, compact=False):
             f"spatial metric frame order changed: expected={frame_ids}, got={measured_ids}")
     shot_state_summary = {}
     if shot_state_contract:
-        trace_path = os.path.join(seq_dir, "subject_state.json")
-        trace = load_subject_state_trace(trace_path)
-        # Native coordinate-v2 replay exports only authenticated pulse/generation compatibility
-        # words. Do not manufacture legacy subject/anchor/adaptive-pop evidence from its zeroed
-        # placeholder fields; the sequence wrapper scores V2 cut/state evidence separately.
-        if subject_state_trace_schema(trace_path) == SUBJECT_STATE_SCHEMA:
+        trace_path = os.path.join(seq_dir, "cut_state.json")
+        trace = load_cut_state_trace(trace_path)
+        # Coordinate-V2 replay exports authenticated cut-state compatibility words only.
+        if cut_state_trace_schema(trace_path) == CUT_STATE_SCHEMA:
             for row in rows:
                 row["shot_state_contract_support"] = 0.0
-                if shot_state_contract.get("kind") == "exposure-only":
-                    row["exposure_shot_state_contract_support"] = 0.0
                 if shot_state_contract.get("kind") == "latched-motion-hard-cut":
                     row["latched_motion_contract_support"] = 0.0
             shot_state_summary = apply_shot_state_contract(
@@ -2874,13 +2852,9 @@ def metric_evidence_state(metric, spec, observed, clip_meta=None):
     clip_meta = clip_meta or {}
     requirement = spec.get("requires", "always")
     if requirement in {
-            "shot_state_contract_support", "exposure_shot_state_contract_support",
-            "latched_motion_contract_support"}:
+            "shot_state_contract_support", "latched_motion_contract_support"}:
         contract = clip_meta.get("shot_state_contract")
         if not isinstance(contract, dict):
-            return "unsupported"
-        if (requirement == "exposure_shot_state_contract_support" and
-                contract.get("kind") != "exposure-only"):
             return "unsupported"
         if (requirement == "latched_motion_contract_support" and
                 contract.get("kind") != "latched-motion-hard-cut"):

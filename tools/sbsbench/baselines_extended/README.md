@@ -1,6 +1,6 @@
 # Extended-suite baselines
 
-These are the committed Apollo-profile baselines for the prepared public suite. Refresh them only
-for an intentional evaluator or accepted-pipeline change with
-`--suite extended --update-baselines`, then inspect and commit the resulting JSON files. A normal
-gated extended run refuses to report PASS while any baseline is missing or stale.
+The retired Host SBS V1 snapshots were removed. Run the V2 extended suite with
+`--suite extended --comparison-only` until a complete result has been reviewed. Publish a new
+baseline set only with `--suite extended --update-baselines`; the baseline-gated command fails
+closed while any required snapshot is absent.

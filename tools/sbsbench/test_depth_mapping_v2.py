@@ -21,12 +21,12 @@ from depth_mapping_v2 import (  # noqa: E402
     _scene_histogram_128,
     asymmetric_curve,
     calibrate_coordinate,
-    container_scale_for_curve_range,
     curve_relative_coordinate,
     decode_direct_parallax,
     encode_direct_parallax,
     generate_depth_mapping_v2,
     horizontal_lipschitz_majorant,
+    pointwise_soft_container,
     select_scene_coordinate,
     vertical_lipschitz_majorant,
     vertical_lipschitz_minorant,
@@ -162,7 +162,7 @@ class DepthMappingV2Test(unittest.TestCase):
                 "source_u_safety_scale", "collapse_relative_epsilon"):
             self.assertNotIn(removed, names)
 
-    def test_fixed_near_curve_and_container_use_the_same_tau(self):
+    def test_fixed_near_curve_feeds_the_pointwise_soft_container(self):
         canonical = np.concatenate((np.full(25, 12.0), np.full(75, -4.0))).reshape(10, 10)
         config = MappingV2Config(
             raw_coordinate_scale=0.5, pop_strength=20.0, gain_per_pop=0.01,
@@ -170,12 +170,16 @@ class DepthMappingV2Test(unittest.TestCase):
         raw = canonical * config.raw_coordinate_scale
         result = generate_depth_mapping_v2(raw, config)
         base_curve = asymmetric_curve(canonical, config)
-        expected_base, _ = container_scale_for_curve_range(
-            float(np.min(base_curve)), float(np.max(base_curve)), config)
-        self.assertAlmostEqual(result.diagnostics.container_scale, expected_base)
+        self.assertEqual(result.diagnostics.container_scale, 1.0)
         np.testing.assert_allclose(
             result.desired_parallax,
             (base_curve * config.parallax_gain).astype(np.float32), rtol=1.0e-6)
+        np.testing.assert_allclose(
+            result.pre_limiter_parallax,
+            pointwise_soft_container(
+                base_curve * config.parallax_gain,
+                config.direct_container_limit).astype(np.float32),
+            rtol=1.0e-6)
 
     def test_fallback_convergence_is_separate_curve_coordinate_and_exactly_zero(self):
         raw = np.asarray([[-2.0, 0.0, 2.0]], dtype=np.float64)
@@ -211,18 +215,29 @@ class DepthMappingV2Test(unittest.TestCase):
         np.testing.assert_allclose(
             original.parallax, transformed.parallax, rtol=2.0e-5, atol=2.0e-5)
 
-    def test_hard_container_is_derived_without_mutating_requested_gain(self):
+    def test_pointwise_container_bounds_without_mutating_requested_gain(self):
         raw = np.asarray([[-100.0, 0.0, 100.0]], dtype=np.float64)
         config = MappingV2Config(
             raw_coordinate_scale=0.5, pop_strength=20.0, gain_per_pop=0.01,
             max_horizontal_slope=0.99, direct_container_limit=0.04)
         result = generate_depth_mapping_v2(raw, config)
         self.assertEqual(result.diagnostics.requested_gain, config.parallax_gain)
-        self.assertLess(result.diagnostics.container_scale, 1.0)
-        self.assertAlmostEqual(
-            result.diagnostics.effective_gain,
-            config.parallax_gain * result.diagnostics.container_scale)
+        self.assertEqual(result.diagnostics.container_scale, 1.0)
+        self.assertEqual(result.diagnostics.effective_gain, config.parallax_gain)
+        self.assertLessEqual(
+            float(np.max(np.abs(result.pre_limiter_parallax))), 0.04000001)
         self.assertLessEqual(float(np.max(np.abs(result.parallax))), 0.04000001)
+
+    def test_pointwise_container_is_odd_monotone_and_does_not_scale_other_values(self):
+        values = np.asarray([-1000.0, -0.01, 0.0, 0.01, 1000.0])
+        contained = pointwise_soft_container(values, 0.04)
+        self.assertTrue(np.all(np.diff(contained) > 0.0))
+        self.assertLessEqual(float(np.max(np.abs(contained))), 0.04)
+        self.assertEqual(float(contained[2]), 0.0)
+        self.assertAlmostEqual(float(contained[1]), -float(contained[3]))
+        unchanged = pointwise_soft_container(np.asarray([0.01]), 0.04)
+        with_outlier = pointwise_soft_container(np.asarray([0.01, 1.0e6]), 0.04)
+        self.assertEqual(float(unchanged[0]), float(with_outlier[0]))
 
     def test_horizontal_majorant_never_lowers_and_honors_step(self):
         field = np.asarray([[0.0, -1.0, -1.0, 0.5], [-0.2, 0.7, -0.8, -0.9]])

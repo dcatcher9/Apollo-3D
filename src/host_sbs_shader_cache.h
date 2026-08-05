@@ -29,8 +29,6 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec depth_minmax {"depth_minmax_cs.hlsl"};
   inline constexpr shader_spec depth_minmax_ema {"depth_minmax_ema_cs.hlsl"};
   inline constexpr shader_spec depth_hist {"depth_hist_cs.hlsl"};
-  inline constexpr shader_spec depth_subject_hist {"depth_subject_hist_cs.hlsl"};
-  inline constexpr shader_spec depth_subject_resolve {"depth_subject_resolve_cs.hlsl"};
   inline constexpr shader_spec depth_valid_history {"depth_valid_history_cs.hlsl"};
   inline constexpr shader_spec depth_scene_cut_evidence {"depth_scene_cut_evidence_cs.hlsl"};
   inline constexpr shader_spec depth_scene_cut_resolve {"depth_scene_cut_resolve_cs.hlsl"};
@@ -65,19 +63,27 @@ namespace models::host_sbs_shader_cache {
     "sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"
   };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
-    "ee553e2322d7b5f519587ae611ae1e665d1a9b2fb21181f82cb6ab13d55d781d";
+    "19c88dbb3a1079f94e0792bc965569ea988166c698a5d305d27e5c6d2e4c4223";
   inline constexpr std::string_view parallax_v2_diagnostic_source_closure_sha256 =
-    "ab3cd80ee5bef3ea6649e088aabb5c68014e9c1f37aea0eca8670f41eaa8f28e";
+    "29a4cae2dcde8de5ddd264f92beb603e134c6e5ea3ce6e6010129042d5d2ae70";
   inline constexpr std::string_view sbs_flat_fallback_source_closure_sha256 =
     "7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4";
 
+  // Identity-only minimal closure used to match the model/preprocess calibration. Production
+  // bytecode is never compiled from this smaller snapshot: rgb_to_nchw is compiled with every
+  // other producer root from parallax_v2_producer_specs below.
   inline constexpr std::array preprocess_specs {
     rgb_to_nchw,
   };
 
-  // Production live V2 set. The normalized depth is private scene-cut evidence; subject shaping,
-  // adaptive pop, and legacy zero-plane shaders are intentionally absent.
-  inline constexpr std::array core_specs {
+  // Complete production V2 producer set. The normalized depth is private scene-cut evidence; the
+  // retired subject shaping, adaptive pop, and zero-plane shaders no longer exist. Every root is
+  // compiled from this one authenticated snapshot so shared preprocessing/analysis passes cannot
+  // be sampled from a weaker closure and then silently reused by live geometry.
+  inline constexpr std::array parallax_v2_producer_specs {
+    // Authenticate the complete path from captured RGB preprocessing through cut/history state
+    // and final coordinate limiting. Compile every shared pass from this single immutable
+    // snapshot so no separately sampled source body can feed authenticated V2 geometry.
     rgb_to_nchw,
     buffer_to_tex,
     depth_ema_motion,
@@ -87,27 +93,6 @@ namespace models::host_sbs_shader_cache {
     depth_scene_cut_evidence,
     depth_scene_cut_resolve,
     depth_valid_history,
-  };
-
-  // Offline conversion/evaluation keeps the established legacy state contract and rendering
-  // controls. It is compiled lazily by those callers and is not part of Host SBS prewarm.
-  inline constexpr std::array legacy_evaluation_specs {
-    rgb_to_nchw,
-    buffer_to_tex,
-    depth_ema_motion,
-    depth_minmax,
-    depth_minmax_ema,
-    depth_hist,
-    depth_subject_hist,
-    depth_subject_resolve,
-    depth_valid_history,
-  };
-
-  inline constexpr std::array parallax_v2_producer_specs {
-    // The raw-range histogram is now an authenticated scene-camera input. Keep both its exact
-    // min/max producer and binning pass in the same closure as the coordinate producer.
-    depth_minmax,
-    depth_hist,
     depth_coordinate_v2_moments,
     depth_coordinate_v2_frame_resolve,
     depth_coordinate_v2_state_resolve,
@@ -171,6 +156,6 @@ namespace models::host_sbs_shader_cache {
     const shader_spec &spec
   );
 
-  /** Precompile the production Host SBS V2 shader set (never dump-only diagnostics). */
+  /** Precompile the production Host SBS V2 shader and fail-flat fallback sets. */
   bool prewarm(const std::filesystem::path &assets_dir);
 }  // namespace models::host_sbs_shader_cache

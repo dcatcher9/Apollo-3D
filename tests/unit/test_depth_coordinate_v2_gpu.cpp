@@ -2192,7 +2192,7 @@ TEST(DepthCoordinateV2GpuTest, SevenCoordinatePassReplayLatchesRecoversAndRelatc
   raw_fields.push_back(base);  // acquire
   raw_fields.push_back(base);  // same shot, transient extreme
   raw_fields.back().back() = 1000.0f;
-  raw_fields.push_back(base);  // same shot, hard container must recover
+  raw_fields.push_back(base);  // same shot, an outlier must not rescale this field
   const std::size_t foreground_count = element_count / 4u;
   raw_fields.emplace_back(element_count, 0.0f);  // confirmed cut, broad foreground
   std::fill_n(raw_fields.back().begin(), foreground_count, 20.0f);
@@ -2355,39 +2355,15 @@ TEST(DepthCoordinateV2GpuTest, SevenCoordinatePassReplayLatchesRecoversAndRelatc
     }
   }
 
-  // The map and hard container use the same immutable tau-2 curve.
-  const auto curve = [](const float coordinate, const float near_tau) {
-    if (coordinate < 0.0f) {
-      return v2::far_tau * std::expm1(coordinate / v2::far_tau);
-    }
-    if (coordinate <= 1.0f) {
-      return coordinate;
-    }
-    return 1.0f + near_tau * std::log1p((coordinate - 1.0f) / near_tau);
-  };
-  const float dense_center = rows[3]["center"].get<float>();
-  const float dense_inverse_scale = rows[3]["inverse_scale"].get<float>();
-  const float dense_min_u =
-    (rows[3]["observed_raw_minimum"].get<float>() - dense_center) *
-    dense_inverse_scale;
-  const float dense_max_u =
-    (rows[3]["observed_raw_maximum"].get<float>() - dense_center) *
-    dense_inverse_scale;
-  const auto expected_container = [&](const float near_tau) {
-    const float maximum_requested = requested_gain * std::max(
-      std::abs(curve(dense_min_u, near_tau)),
-      std::abs(curve(dense_max_u, near_tau))
-    );
-    return maximum_requested > 0.0f ?
-      std::min(1.0f, v2::direct_container_limit / maximum_requested) : 1.0f;
-  };
-  const float base_container = expected_container(v2::near_log_tau);
-  EXPECT_NEAR(rows[3]["container_scale"].get<float>(), base_container, 2.0e-5f);
-
-  EXPECT_LT(rows[1]["container_scale"].get<float>(), 1.0f);
-  EXPECT_FLOAT_EQ(rows[2]["container_scale"].get<float>(), 1.0f);
+  // The ABI field remains present but the source-U container is pointwise and stateless.
   for (const auto &row : rows) {
     EXPECT_FLOAT_EQ(row["requested_gain"].get<float>(), requested_gain);
+    EXPECT_FLOAT_EQ(row["container_scale"].get<float>(), 1.0f);
+    if (row["frame_valid"].get<bool>()) {
+      EXPECT_FLOAT_EQ(row["effective_gain"].get<float>(), requested_gain);
+      EXPECT_LE(row["pre_limiter_max_abs_source_u"].get<float>(),
+                v2::direct_container_limit + 2.0e-7f);
+    }
   }
   EXPECT_EQ(rows[4]["input_valid"], false);
   EXPECT_EQ(rows[4]["collapsed"], false);

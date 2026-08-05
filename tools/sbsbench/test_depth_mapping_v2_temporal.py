@@ -19,8 +19,9 @@ from depth_coordinate_v2_contract import (  # noqa: E402
     CALIBRATED_DEFAULTS, CONTRACT_CANONICAL_SHA256, MODEL_CALIBRATIONS)
 from depth_mapping_v2 import (  # noqa: E402
     MappingV2Config,
-    asymmetric_curve, container_scale_for_curve_range,
-    curve_relative_coordinate, horizontal_lipschitz_majorant,
+    asymmetric_curve, curve_relative_coordinate, generate_depth_mapping_v2,
+    horizontal_lipschitz_majorant,
+    pointwise_soft_container,
     vertical_lipschitz_majorant,
     vertical_lipschitz_minorant)
 from depth_mapping_v2_temporal import (  # noqa: E402
@@ -369,7 +370,7 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
         self.assertTrue(relatched.reset)
         self.assertAlmostEqual(relatched.state.center, first.center)
 
-    def test_exact_sequence_map_and_hard_container_share_fixed_tau(self):
+    def test_exact_sequence_map_uses_pointwise_soft_container(self):
         canonical = np.concatenate((np.full(25, 12.0), np.full(75, -4.0))).reshape(10, 10)
         config = MappingV2Config(
             raw_coordinate_scale=0.5, pop_strength=2.0, gain_per_pop=0.10)
@@ -377,9 +378,19 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
             [canonical * config.raw_coordinate_scale], [0], [False], "unit-cut", config)
         row = result.state_trace["frames"][0]
         base_curve = asymmetric_curve(canonical, config)
-        expected_base, _ = container_scale_for_curve_range(
-            float(np.min(base_curve)), float(np.max(base_curve)), config)
-        self.assertAlmostEqual(row["container_scale"], expected_base)
+        mapping = generate_depth_mapping_v2(
+            canonical * config.raw_coordinate_scale,
+            config,
+        )
+        self.assertEqual(row["container_scale"], 1.0)
+        np.testing.assert_allclose(
+            mapping.pre_limiter_parallax,
+            pointwise_soft_container(
+                base_curve * config.parallax_gain,
+                config.direct_container_limit).astype(np.float32),
+            atol=2.0e-6)
+        np.testing.assert_allclose(
+            result.parallax_fields[0], mapping.parallax, atol=2.0e-6)
 
     def test_exact_sequence_latches_accepted_stage_camera_until_confirmed_cut(self):
         accepted = self._separated_three_stage_field()
@@ -443,7 +454,7 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
             parallax_for_state(raw, CoordinateState(0.0, 1.0, 0.0, False)),
             np.zeros(raw.shape))
 
-    def test_exact_sequence_latches_recovers_container_flattens_and_relatches(self):
+    def test_exact_sequence_latches_soft_bounds_flattens_and_relatches(self):
         base = np.asarray([[-1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]])
         spike = np.asarray([[-1000.0, 0.0, 1000.0], [-1000.0, 0.0, 1000.0]])
         collapsed = np.full(base.shape, 7.0)
@@ -462,12 +473,11 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
         self.assertEqual(rows[1]["center"], rows[0]["center"])
         self.assertEqual(rows[1]["latched_scale"], rows[0]["latched_scale"])
 
-        self.assertLess(rows[1]["container_scale"], 1.0)
-        self.assertEqual(rows[2]["container_scale"], 1.0)
+        self.assertTrue(all(row["container_scale"] == 1.0 for row in rows))
         requested = config.parallax_gain
         self.assertTrue(all(row["requested_gain"] == requested for row in rows))
-        self.assertAlmostEqual(
-            rows[1]["effective_gain"], requested * rows[1]["container_scale"])
+        self.assertEqual(rows[1]["effective_gain"], requested)
+        self.assertLessEqual(rows[1]["pre_limiter_max_abs_source_u"], 0.04)
 
         self.assertTrue(rows[3]["collapsed"])
         self.assertFalse(rows[3]["frame_valid"])
@@ -517,7 +527,8 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
             config,
             convergence_curve=row["convergence_curve"],
         )
-        candidate = curved * row["effective_gain"]
+        candidate = pointwise_soft_container(
+            curved * row["effective_gain"], config.direct_container_limit)
         max_vertical_step = config.max_vertical_shear / raw.shape[1]
         upper = vertical_lipschitz_majorant(candidate, max_vertical_step)
         lower = vertical_lipschitz_minorant(candidate, max_vertical_step)

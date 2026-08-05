@@ -26,10 +26,10 @@ Otsu stage-boundary selector. It acquires immediately and remains latched until 
 The resulting center is the exact zero plane because convergence remains zero. It cannot select
 rendered geometry; the latter policies remain here only as falsifiers for the design decision.
 
-Every policy resets immediately on a confirmed cut.  Source-U safety is an independent fail-safe: it may
-only reduce the whole-field gain during a shot and is reset at the next cut.  The report uses
+Every policy resets immediately on a confirmed cut. Source-U safety is a stateless pointwise
+soft container, so one extreme texel cannot rescale the rest of a shot. The report uses
 pre-reprojection one-eye source-U parallax so it does not confuse coordinate motion with holes,
-occlusion, or image motion.  A subsampled raw field is sufficient for policy comparisons and
+occlusion, or image motion. A subsampled raw field is sufficient for policy comparisons and
 makes whole-suite runs inexpensive.
 """
 
@@ -52,10 +52,10 @@ try:
         MappingV2Config,
         asymmetric_curve,
         calibrate_coordinate,
-        container_scale_for_curve_range,
         curve_relative_coordinate,
         encode_direct_parallax,
         horizontal_lipschitz_majorant,
+        pointwise_soft_container,
         select_scene_coordinate,
         vertical_share_coefficients,
         vertical_lipschitz_majorant,
@@ -64,17 +64,17 @@ try:
     from .depth_coordinate_v2_contract import (
         CALIBRATED_DEFAULTS as V2_DEFAULTS, CONTRACT_CANONICAL_SHA256,
         CONTRACT_PATH, CONTRACT_SCHEMA, MODEL_CALIBRATIONS)
-    from . import subject_state_contract, whole_clip_raw_contract
+    from . import cut_state_contract, whole_clip_raw_contract
 except ImportError:  # Direct execution from tools/sbsbench.
     from depth_mapping_v2 import (  # type: ignore
         DIRECT_PARALLAX_SOURCE_U_LIMIT,
         MappingV2Config,
         asymmetric_curve,
         calibrate_coordinate,
-        container_scale_for_curve_range,
         curve_relative_coordinate,
         encode_direct_parallax,
         horizontal_lipschitz_majorant,
+        pointwise_soft_container,
         select_scene_coordinate,
         vertical_share_coefficients,
         vertical_lipschitz_majorant,
@@ -83,7 +83,7 @@ except ImportError:  # Direct execution from tools/sbsbench.
     from depth_coordinate_v2_contract import (  # type: ignore
         CALIBRATED_DEFAULTS as V2_DEFAULTS, CONTRACT_CANONICAL_SHA256,
         CONTRACT_PATH, CONTRACT_SCHEMA, MODEL_CALIBRATIONS)
-    import subject_state_contract  # type: ignore
+    import cut_state_contract  # type: ignore
     import whole_clip_raw_contract  # type: ignore
 
 
@@ -91,9 +91,9 @@ RAW_PATTERN = re.compile(r"raw_(\d+)\.f32$")
 SELECTED_POLICY = "first"
 RESEARCH_POLICIES = ("aggregate", "slow")
 POLICY_STUDY_POLICIES = (SELECTED_POLICY, *RESEARCH_POLICIES)
-V2_STATE_TRACE_SCHEMA = 16
+V2_STATE_TRACE_SCHEMA = 17
 V2_STATE_TRACE_POLICY = (
-    "immediate-first-usable-otsu-valley-zero-fixed-scale-fixed-near-curve-retained-camera-source-ownership-container-vertical-share75-row-majorant-v15"
+    "immediate-first-usable-otsu-valley-zero-fixed-scale-fixed-near-curve-retained-camera-source-ownership-pointwise-soft-container-vertical-share75-row-majorant-v16"
 )
 V2_GPU_SHADER_SEQUENCE = (
     "depth_minmax_cs.hlsl",
@@ -346,7 +346,8 @@ def parallax_for_state(
     _, curved = curve_relative_coordinate(
         raw, state.center, state.scale, config,
         convergence_curve=state.convergence_curve)
-    parallax = curved * config.parallax_gain
+    parallax = pointwise_soft_container(
+        curved * config.parallax_gain, config.direct_container_limit)
     if not np.isfinite(parallax).all():
         raise ValueError("temporal mapping produced non-finite parallax")
     return parallax
@@ -388,25 +389,6 @@ def _file_sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
-
-
-def _frame_container_scale(
-        raw_minimum: float,
-        raw_maximum: float,
-        center: float,
-        scale: float,
-        convergence_curve: float,
-        config: MappingV2Config) -> float:
-    """Mirror the shader's hard container using the same fixed curve as rendering."""
-
-    endpoint_coordinates = np.asarray([
-        (float(raw_minimum) - center) / scale,
-        (float(raw_maximum) - center) / scale,
-    ])
-    endpoints = asymmetric_curve(endpoint_coordinates, config) - convergence_curve
-    container_scale, _ = container_scale_for_curve_range(
-        float(endpoints[0]), float(endpoints[1]), config)
-    return container_scale
 
 
 def validate_v2_state_trace(
@@ -588,8 +570,8 @@ def validate_v2_state_trace(
         )
         if row["cut_attribution"] != expected_attribution:
             raise ValueError(f"v2 state trace {frame_id} cut attribution is inconsistent")
-        if not 0.0 <= row["container_scale"] <= 1.0:
-            raise ValueError(f"v2 state trace {frame_id} has invalid container scale")
+        if row["container_scale"] != 1.0:
+            raise ValueError(f"v2 state trace {frame_id} has non-identity container scale")
         if requested_gain is None:
             requested_gain = row["requested_gain"]
         elif not math.isclose(row["requested_gain"], requested_gain,
@@ -630,13 +612,7 @@ def validate_v2_state_trace(
                     rel_tol=0.0, abs_tol=2.0e-7):
                 raise ValueError(
                     f"v2 state trace {frame_id} has an unknown convergence selection")
-            expected_container = _frame_container_scale(
-                row["observed_raw_minimum"], row["observed_raw_maximum"],
-                row["center"], row["latched_scale"], row["convergence_curve"], mapping)
-            if not math.isclose(row["container_scale"], expected_container,
-                                rel_tol=3.0e-5, abs_tol=3.0e-7):
-                raise ValueError(f"v2 state trace {frame_id} frame container is inconsistent")
-            expected_gain = row["requested_gain"] * row["container_scale"]
+            expected_gain = row["requested_gain"]
             if not math.isclose(row["effective_gain"], expected_gain, rel_tol=3.0e-5,
                                 abs_tol=3.0e-7):
                 raise ValueError(f"v2 state trace {frame_id} effective gain is inconsistent")
@@ -1120,7 +1096,7 @@ def generate_first_latch_exact_sequence(
 
     This independently mirrors only the selected policy: the first usable field selects a camera,
     the authenticated model/shape scale stays fixed, unusable no-cut frames retain that camera
-    while rendering flat, and the hard container remains frame-local. The native producer owns
+    while rendering flat, and the pointwise soft container remains stateless. The native producer owns
     rendered fields; this result may only compare against them.
     """
 
@@ -1137,7 +1113,7 @@ def generate_first_latch_exact_sequence(
     if not isinstance(cut_source, str) or not cut_source:
         raise ValueError("cut_source must identify the cut evidence")
     if confirmed_cut_counts is None:
-        # Direct unit/research callers do not necessarily have a production subject-state trace.
+        # Direct unit/research callers do not necessarily have a production cut-state trace.
         # Give them the same monotonic generation semantics, starting at zero.
         derived_counts: List[int] = []
         generation = 0
@@ -1220,14 +1196,13 @@ def generate_first_latch_exact_sequence(
                 calibration_revision = _exact_counter_increment(calibration_revision)
                 camera_valid = True
 
-            container_scale = _frame_container_scale(
-                candidate.raw_min, candidate.raw_max,
-                active_center, active_scale, convergence_curve, config)
+            container_scale = 1.0
             canonical64, curved = curve_relative_coordinate(
                 raw, active_center, active_scale, config,
                 convergence_curve=convergence_curve)
-            effective_gain = config.parallax_gain * container_scale
-            candidate_parallax = curved * effective_gain
+            effective_gain = config.parallax_gain
+            candidate_parallax = pointwise_soft_container(
+                curved * effective_gain, config.direct_container_limit)
             if source_rgb_fields is not None:
                 candidate_for_ownership = candidate_parallax.astype("<f4")
                 ownership_refined = ownership_refine_candidate(
@@ -1289,14 +1264,15 @@ def generate_first_latch_exact_sequence(
         vertical_majorant_sha = _field_sha256(vertical_majorant)
         vertical_conditioned_sha = _field_sha256(vertical_conditioned)
         parallax_sha = _field_sha256(encoded)
-        effective_gain = (config.parallax_gain * container_scale
-                          if frame_valid else 0.0)
+        effective_gain = config.parallax_gain if frame_valid else 0.0
         candidate_center_drift_u = (
             (candidate.center - active_center) / active_scale
             if frame_valid and candidate is not None else 0.0)
         predicted_zero_translation = (
-            effective_gain * float(asymmetric_curve(
-                np.asarray(candidate_center_drift_u), config) - convergence_curve)
+            float(pointwise_soft_container(
+                np.asarray(config.parallax_gain * float(asymmetric_curve(
+                    np.asarray(candidate_center_drift_u), config) - convergence_curve)),
+                config.direct_container_limit))
             if frame_valid else 0.0)
         frame_id_text = f"{frame_id:05d}"
         cut_attribution = (
@@ -1378,37 +1354,6 @@ def generate_first_latch_exact_sequence(
     )
 
 
-def _gain_limits(
-        raw_depth: np.ndarray,
-        state: CoordinateState,
-        config: MappingV2Config,
-        max_collar_texels: Optional[int]) -> Tuple[float, float, float, float]:
-    """Return absolute, collar, and combined gain limits plus unit-gain edge step."""
-
-    raw = np.asarray(raw_depth, dtype=np.float64)
-    _, unit = curve_relative_coordinate(
-        raw, state.center, state.scale, config,
-        convergence_curve=state.convergence_curve)
-    _, absolute_unit = container_scale_for_curve_range(
-        float(np.min(unit)),
-        float(np.max(unit)),
-        config,
-        gain=1.0,
-    )
-    absolute_limit = (
-        config.direct_container_limit / absolute_unit if absolute_unit > 0.0 else math.inf)
-    if raw.shape[1] < 2:
-        adjacent_unit = 0.0
-    else:
-        adjacent_unit = float(np.max(np.abs(np.diff(unit, axis=1))))
-    max_step = config.max_horizontal_slope / raw.shape[1]
-    max_vertical_step = config.max_vertical_shear / raw.shape[1]
-    collar_limit = math.inf
-    if max_collar_texels is not None and adjacent_unit > 0.0:
-        collar_limit = max_collar_texels * max_step / adjacent_unit
-    return absolute_limit, collar_limit, min(absolute_limit, collar_limit), adjacent_unit
-
-
 def _limiter_burden(
         raw_depth: np.ndarray,
         state: CoordinateState,
@@ -1418,7 +1363,8 @@ def _limiter_burden(
     _, unit = curve_relative_coordinate(
         raw, state.center, state.scale, config,
         convergence_curve=state.convergence_curve)
-    desired = unit * gain
+    desired = pointwise_soft_container(
+        unit * gain, config.direct_container_limit)
     max_step = config.max_horizontal_slope / raw.shape[1]
     max_vertical_step = config.max_vertical_shear / raw.shape[1]
     adjacent = (float(np.max(np.abs(np.diff(desired, axis=1))))
@@ -1434,10 +1380,7 @@ def _limiter_burden(
     limited = horizontal_lipschitz_majorant(vertical_conditioned, max_step)
     correction = limited - desired
     tolerance = max(1.0e-12, max_step * 1.0e-9)
-    limited_min = min(
-        float(np.min(limited)),
-        -config.far_tau * gain,
-    )
+    limited_min = float(np.min(limited))
     limited_max = float(np.max(limited))
     absolute_max = max(abs(limited_min), abs(limited_max))
     return {
@@ -1462,31 +1405,17 @@ def evaluate_gain_ownership(
         requested_gain: float,
         max_collar_texels: Optional[int],
         config: MappingV2Config) -> Dict[str, object]:
-    """Compare immutable requested gain with the recoverable frame-local hard container."""
+    """Measure the immutable requested gain after the stateless pointwise container."""
 
-    fixed_reports: List[Dict[str, float]] = []
-    capped_reports: List[Dict[str, float]] = []
-    absolute_limits: List[float] = []
-    collar_limits: List[float] = []
-    instantaneous_limits: List[float] = []
-    active_limits: List[float] = []
-    absolute_violations = 0
+    if not (len(raw_fields) == len(states) == len(cuts)):
+        raise ValueError("gain ownership inputs must have identical lengths")
+    contained_reports: List[Dict[str, float]] = []
     collar_violations = 0
-    for raw, state, cut in zip(raw_fields, states, cuts):
-        absolute_limit, collar_limit, safe_limit, _ = _gain_limits(
-            raw, state, config, max_collar_texels)
-        effective_gain = min(requested_gain, safe_limit)
-        fixed = _limiter_burden(raw, state, requested_gain, config)
-        capped = _limiter_burden(raw, state, effective_gain, config)
-        fixed_reports.append(fixed)
-        capped_reports.append(capped)
-        absolute_limits.append(absolute_limit)
-        collar_limits.append(collar_limit)
-        instantaneous_limits.append(safe_limit)
-        active_limits.append(safe_limit)
-        if requested_gain > absolute_limit:
-            absolute_violations += 1
-        if math.isfinite(collar_limit) and requested_gain > collar_limit:
+    for raw, state in zip(raw_fields, states):
+        report = _limiter_burden(raw, state, requested_gain, config)
+        contained_reports.append(report)
+        if (max_collar_texels is not None and
+                report["estimated_collar_texels"] > max_collar_texels):
             collar_violations += 1
 
     def burden_summary(values: Sequence[Dict[str, float]]) -> Dict[str, float]:
@@ -1513,26 +1442,16 @@ def evaluate_gain_ownership(
                 value["conditioner_correction_source_u_min"] for value in values),
         }
 
-    finite_absolute = [value for value in absolute_limits if math.isfinite(value)]
-    finite_collar = [value for value in collar_limits if math.isfinite(value)]
-    finite_safe = [value for value in instantaneous_limits if math.isfinite(value)]
     return {
         "requested_gain": requested_gain,
         "max_collar_texels": max_collar_texels,
-        "fixed_requested": burden_summary(fixed_reports),
-        "requested_capped_by_frame_container": burden_summary(capped_reports),
-        "fixed_absolute_violation_frames": absolute_violations,
-        "fixed_collar_violation_frames": collar_violations,
-        "absolute_safe_gain_range": [min(finite_absolute, default=math.inf),
-                                     max(finite_absolute, default=math.inf)],
-        "collar_safe_gain_range": [min(finite_collar, default=math.inf),
-                                   max(finite_collar, default=math.inf)],
-        "instantaneous_max_safe_gain_range": [min(finite_safe, default=math.inf),
-                                              max(finite_safe, default=math.inf)],
-        "frame_safe_gain_min": min(active_limits),
-        "frame_safe_gain_max": max(active_limits),
-        "note": ("requested gain is immutable; only the current frame's hard representation "
-                 "container may reduce effective gain"),
+        "pointwise_contained": burden_summary(contained_reports),
+        "source_u_envelope_violation_frames": sum(
+            report["source_u_envelope_feasible"] < 0.5
+            for report in contained_reports),
+        "collar_diagnostic_violation_frames": collar_violations,
+        "note": ("requested gain is immutable; the pointwise soft container enforces the "
+                 "source-U bound without frame- or shot-global gain adaptation"),
     }
 
 
@@ -1585,10 +1504,10 @@ def _load_cut_indices(
     # Controller evidence must be the detector state that production actually emitted. Committed
     # expected_pulse_frames are ground truth for scoring only: allowing labels to drive this list
     # would make a missed or late live cut look perfect in the v2 replay.
-    state_path = clip_dir / "subject_state.json"
+    state_path = clip_dir / "cut_state.json"
     if not state_path.exists():
         return cuts, counts, "first-frame-only"
-    trace = subject_state_contract.load_trace(str(state_path))
+    trace = cut_state_contract.load_trace(str(state_path))
     if set(trace) != set(frame_ids):
         raise ValueError(
             f"{state_path}: trace/raw frame IDs disagree: "
@@ -1605,7 +1524,7 @@ def _load_cut_indices(
                     f"{frame_id}, got {previous_count} -> {count}")
             cuts[index] = pulse or count != previous_count
         previous_count = count
-    return cuts, counts, "subject-state-hard-cut-generation"
+    return cuts, counts, "cut-state-hard-cut-generation"
 
 
 def simulate_source_timeline(
@@ -1878,13 +1797,13 @@ def _clip_sequence_input_contract(
     }
     mismatched = {name: sorted(ids) for name, ids in artifact_sets.items()
                   if ids != expected_ids}
-    state_path = clip_dir / "subject_state.json"
+    state_path = clip_dir / "cut_state.json"
     if not state_path.exists():
-        mismatched["subject_state"] = []
+        mismatched["cut_state"] = []
     else:
-        state_ids = set(subject_state_contract.load_trace(str(state_path)))
+        state_ids = set(cut_state_contract.load_trace(str(state_path)))
         if state_ids != expected_ids:
-            mismatched["subject_state"] = sorted(state_ids)
+            mismatched["cut_state"] = sorted(state_ids)
     if mismatched:
         raise ValueError(
             f"{clip_dir}: selected raw IDs do not equal complete output identities: {mismatched}")
@@ -1918,7 +1837,7 @@ def _clip_sequence_input_contract(
     ]
     committed_meta = Path(__file__).resolve().parent / "clips" / clip_dir.name / "meta.json"
     cut_control_evidence = {
-        "kind": "subject-state-hard-cut-generation",
+        "kind": "cut-state-hard-cut-generation",
         "sha256": _file_sha256(state_path),
     }
     cut_expectation_evidence = (
@@ -2224,31 +2143,23 @@ def summarize(clips: Sequence[Dict[str, object]]) -> Dict[str, object]:
                     for clip in clips]
     if gain_entries:
         summary["gain_ownership"] = {
-            "fixed_absolute_violation_frames": sum(
-                int(entry["fixed_absolute_violation_frames"]) for entry in gain_entries),
-            "fixed_collar_violation_frames": sum(
-                int(entry["fixed_collar_violation_frames"]) for entry in gain_entries),
-            "fixed_requested_collar_texels_max": max(
-                float(entry["fixed_requested"]["estimated_collar_texels_max"])
+            "source_u_envelope_violation_frames": sum(
+                int(entry["source_u_envelope_violation_frames"])
                 for entry in gain_entries),
-            "safe_capped_collar_texels_max": max(
-                float(entry["requested_capped_by_shot_safety"]
-                      ["estimated_collar_texels_max"])
+            "collar_diagnostic_violation_frames": sum(
+                int(entry["collar_diagnostic_violation_frames"])
                 for entry in gain_entries),
-            "fixed_requested_conditioner_correction_source_u_max": max(
-                float(entry["fixed_requested"]["conditioner_correction_source_u_max"])
+            "pointwise_contained_collar_texels_max": max(
+                float(entry["pointwise_contained"]["estimated_collar_texels_max"])
                 for entry in gain_entries),
-            "safe_capped_conditioner_correction_source_u_max": max(
-                float(entry["requested_capped_by_shot_safety"]
+            "pointwise_contained_conditioner_correction_source_u_max": max(
+                float(entry["pointwise_contained"]
                       ["conditioner_correction_source_u_max"])
                 for entry in gain_entries),
-            "fixed_absolute_parallax_source_u_max": max(
-                float(entry["fixed_requested"]["absolute_parallax_source_u_max"])
+            "pointwise_contained_absolute_parallax_source_u_max": max(
+                float(entry["pointwise_contained"]
+                      ["absolute_parallax_source_u_max"])
                 for entry in gain_entries),
-            "active_shot_safe_gain_min": min(
-                float(entry["active_shot_safe_gain_min"]) for entry in gain_entries),
-            "active_shot_safe_gain_max": max(
-                float(entry["active_shot_safe_gain_max"]) for entry in gain_entries),
         }
     return summary
 

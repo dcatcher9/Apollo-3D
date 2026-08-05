@@ -18,6 +18,15 @@ import run_eval  # noqa: E402
 import sbsbench  # noqa: E402
 
 
+def cut_state_values(*, initialized=True, flags=3, history=1.0):
+    values = [0] * len(sbsbench.CUT_STATE_FIELDS)
+    values[0] = sbsbench.cut_state_contract.CUT_CONTRACT_TAG
+    values[sbsbench.CUT_STATE_FIELDS.index("initialized")] = 1.0 if initialized else 0.0
+    values[sbsbench.CUT_STATE_FIELDS.index("cut_flags")] = int(flags)
+    values[sbsbench.CUT_STATE_FIELDS.index("model_input_history_state")] = float(history)
+    return values
+
+
 class RescoreMetadataTests(unittest.TestCase):
     def _fixture(self, root):
         clips_root = os.path.join(root, "clips")
@@ -47,11 +56,9 @@ class RescoreMetadataTests(unittest.TestCase):
         contract = {
             "schema": run_eval.whole_clip_raw_contract.HARNESS_CONTRACT_SCHEMA,
             "model": "depth_anything_v2_fp16",
-            "profile": "apollo",
             "depth_step": "current-once",
             "depth_reuse_interval": 1,
-            "depth_compensation": "none",
-            "literal_bestv2": False,
+            "pop_strength": 1.2,
             "cuda_graph": True,
             "cuda_graph_captured": True,
             "parallax_v2_shadow": False,
@@ -63,28 +70,22 @@ class RescoreMetadataTests(unittest.TestCase):
                 "contract_schema": run_eval.PARALLAX_V2_CONTRACT_SCHEMA,
                 "legacy_levers_applied": False,
             },
-            "adaptive_pop": True,
-            "adaptive_pop_max": 1.3,
-            "zero_plane": "median",
-            "subject_state": {
-                "file": "subject_state.json", "schema": sbsbench.SUBJECT_STATE_SCHEMA,
-                "capture": "every-source-frame-after-estimator-update",
+            "cut_state": {
+                "file": "cut_state.json", "schema": sbsbench.CUT_STATE_SCHEMA,
+                "capture": sbsbench.cut_state_contract.CAPTURE,
             },
         }
         with open(os.path.join(artifact_dir, "contract.json"), "w",
                   encoding="utf-8") as stream:
             json.dump(contract, stream)
-        with open(os.path.join(artifact_dir, "subject_state.json"), "w",
+        with open(os.path.join(artifact_dir, "cut_state.json"), "w",
                   encoding="utf-8") as stream:
             json.dump({
-                "schema": sbsbench.SUBJECT_STATE_SCHEMA,
-                "source": "depth_subject_resolve_cs.SubjectState",
-                "capture": "every-source-frame-after-estimator-update",
-                "fields": list(sbsbench.SUBJECT_STATE_FIELDS),
-                "frames": [{"frame_id": "00000", "values": [
-                    0.0, 0.0, 0.5, 1.0, 0.0, 1.0,
-                    0.0, 1.0, 0.0, 1.0, 3.0, 1.0, 0.0, 0.0,
-                ]}],
+                "schema": sbsbench.CUT_STATE_SCHEMA,
+                "source": sbsbench.cut_state_contract.SOURCE,
+                "capture": sbsbench.cut_state_contract.CAPTURE,
+                "fields": list(sbsbench.CUT_STATE_FIELDS),
+                "frames": [{"frame_id": "00000", "values": cut_state_values()}],
             }, stream)
         artifact_hash = run_eval.scored_artifact_sha256(artifact_dir)
         data = {
@@ -93,10 +94,9 @@ class RescoreMetadataTests(unittest.TestCase):
                 "clip_set_sha1": {"demo": run_eval.sha1_dir(source_dir)},
                 "scored_artifact_sha256": {"demo": artifact_hash},
                 **{key: contract[key] for key in (
-                    "model", "profile", "depth_step", "depth_reuse_interval",
-                    "depth_compensation", "literal_bestv2", "cuda_graph",
-                    "parallax_v2_shadow", "parallax_v2_render",
-                    "adaptive_pop", "adaptive_pop_max", "zero_plane")},
+                    "model", "depth_step", "depth_reuse_interval",
+                    "pop_strength", "cuda_graph",
+                    "parallax_v2_shadow", "parallax_v2_render")},
             },
             "clips": {"demo": {"meta": {
                 "name": "forged cache",

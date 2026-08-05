@@ -2,7 +2,7 @@
 
 The temporal replay must not infer provenance from whatever ``raw_*.f32`` files happen to be
 present beside a results file.  Schema-36 ``run_eval.py`` records this manifest after the
-schema-19 production harness finishes, rechecks it after scoring, and stores it in
+schema-20 production harness finishes, rechecks it after scoring, and stores it in
 ``results.json``.  Consumers validate the same shared contract before reading a tensor.
 """
 
@@ -21,10 +21,10 @@ except ImportError:  # Direct execution from tools/sbsbench.
 
 
 EVALUATOR_SCHEMA = 36
-HARNESS_CONTRACT_SCHEMA = 19
+HARNESS_CONTRACT_SCHEMA = 20
 MANIFEST_SCHEMA = 1
 RESULTS_META_KEY = "whole_clip_raw_artifacts"
-BINDING = "schema-36-results-to-schema-19-harness-raw-f32-v1"
+BINDING = "schema-36-results-to-schema-20-harness-raw-f32-v1"
 RAW_SHAPE_SCHEMA = 1
 RAW_STAGE = "raw model output before transform/normalization/EMA/curvature"
 

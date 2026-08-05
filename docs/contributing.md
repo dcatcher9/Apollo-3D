@@ -1,212 +1,83 @@
-# Contributing
-Read our contribution guide in our organization level
-[docs](https://docs.lizardbyte.dev/latest/developers/contributing.html).
+# Contributing to Sunshine 3D
 
-## Recommended Tools
+Sunshine 3D is a Windows/NVIDIA XR-streaming fork with a deliberately narrower product contract
+than upstream Sunshine. A useful change should preserve that boundary and include evidence
+appropriate to its risk.
 
-| Tool                                                                                                                                                                           | Description                                                                                                                                                                           |
-|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------|
-| <a href="https://www.jetbrains.com/clion/"><img src="https://resources.jetbrains.com/storage/products/company/brand/logos/CLion_icon.svg" width="30" height="30"></a><br>CLion | Recommended IDE for C and C++ development. Free for non-commercial use. |
+## Before editing
 
-## Project Patterns
+1. Read [CLAUDE.md](../CLAUDE.md) for the repository workflow and build commands.
+2. Read the one document that owns the contract being changed. In particular:
+   - [Host SBS pipeline](host-sbs.md) owns live/offline V2 geometry and HDR;
+   - [Host SBS scene cuts](host-sbs-scene-cuts.md) owns cut evidence and state;
+   - [Offline Host 3D conversion](whole-clip-sbs-pipeline.md) owns the native job workflow; and
+   - [sbsbench](../tools/sbsbench/README.md) owns evaluation artifacts and gates.
+3. Preserve unrelated working-tree changes. Do not reset or reformat files outside the change.
 
-### Web UI
-* The Web UI uses [Vite](https://vitejs.dev) as its build system.
-* The HTML pages used by the Web UI are found in `./src_assets/common/assets/web`.
-* [EJS](https://www.npmjs.com/package/vite-plugin-ejs) is used as a templating system for the pages
-  (check `template_header.html` and `template_header_main.html`).
-* The Style System is provided by [Bootstrap](https://getbootstrap.com).
-* The JS framework used by the more interactive pages is [Vue.js](https://vuejs.org).
+Do not reintroduce Linux/macOS host behavior, AMD/Intel/software encoders, the Host SBS V1
+renderer, a CPU depth fallback, or duplicate algorithm policy in a second document.
 
-#### Building
+## Build and test
 
-@tabs{
-  @tab{CMake | ```bash
-    cmake -B build -G Ninja -S . --target web-ui
-    ninja -C build web-ui
-    ```}
-  @tab{Manual | ```bash
-    npm run dev
-    ```}
-}
-
-### Localization
-Sunshine and related LizardByte projects are being localized into various languages.
-The default language is `en` (English).
-
-![](https://app.lizardbyte.dev/dashboard/crowdin/LizardByte_graph.svg)
-
-@admonition{Community | We are looking for language coordinators to help approve translations.
-The goal is to have the bars above filled with green!
-If you are interesting, please reach out to us on our Discord server.}
-
-#### CrowdIn
-The translations occur on [CrowdIn][crowdin-url].
-Anyone is free to contribute to the localization there.
-
-##### Translation Basics
-* The brand names *LizardByte* and *Sunshine* should never be translated.
-* Other brand names should never be translated. Examples include *AMD*, *Intel*, and *NVIDIA*.
-
-##### CrowdIn Integration
-How does it work?
-
-When a change is made to Sunshine source code, a workflow generates new translation templates
-that get pushed to CrowdIn automatically.
-
-When translations are updated on CrowdIn, a push gets made to the *l10n_master* branch and a PR is made against the
-*master* branch. Once the PR is merged, all updated translations are part of the project and will be included in the
-next release.
-
-#### Extraction
-
-##### Web UI
-Sunshine uses [Vue I18n](https://vue-i18n.intlify.dev) for localizing the UI.
-The following is a simple example of how to use it.
-
-* Add the string to the `./src_assets/common/assets/web/public/assets/locale/en.json` file, in English.
-  ```json
-  {
-   "index": {
-     "welcome": "Hello, Sunshine!"
-   }
-  }
-  ```
-
-  > [!NOTE]
-  > The JSON keys should be sorted alphabetically. You can use [jsonabc](https://novicelab.org/jsonabc)
-  > to sort the keys.
-
-  > [!IMPORTANT]
-  > Due to the integration with Crowdin, it is important to only add strings to the *en.json* file,
-  > and to not modify any other language files. After the PR is merged, the translations can take place
-  > on [CrowdIn][crowdin-url]. Once the translations are complete, a PR will be made
-  > to merge the translations into Sunshine.
-
-* Use the string in the Vue component.
-  ```html
-  <template>
-    <div>
-      <p>{{ $t('index.welcome') }}</p>
-    </div>
-  </template>
-  ```
-
-  > [!TIP]
-  > More formatting examples can be found in the
-  > [Vue I18n guide](https://kazupon.github.io/vue-i18n/guide/formatting.html).
-
-##### C++
-
-There should be minimal cases where strings need to be extracted from C++ source code; however it may be necessary in
-some situations. For example the system tray icon could be localized as it is user interfacing.
-
-* Wrap the string to be extracted in a function as shown.
-  ```cpp
-  #include <boost/locale.hpp>
-  #include <string>
-
-  std::string msg = boost::locale::translate("Hello world!");
-  ```
-
-> [!TIP]
-> More examples can be found in the documentation for
-> [boost locale](https://www.boost.org/doc/libs/1_70_0/libs/locale/doc/html/messages_formatting.html).
-
-> [!WARNING]
-> The below is for information only. Contributors should never include manually updated template files, or
-> manually compiled language files in Pull Requests.
-
-Strings are automatically extracted from the code to the `locale/sunshine.po` template file. The generated file is
-used by CrowdIn to generate language specific template files. The file is generated using the
-`.github/workflows/localize.yml` workflow and is run on any push event into the `master` branch. Jobs are only run if
-any of the following paths are modified.
-
-```yaml
-- 'src/**'
-```
-
-When testing locally it may be desirable to manually extract, initialize, update, and compile strings. Python is
-required for this, along with the python dependencies in the `./scripts/requirements.txt` file. Additionally,
-[xgettext](https://www.gnu.org/software/gettext) must be installed.
-
-* Extract, initialize, and update
-  ```bash
-  python ./scripts/_locale.py --extract --init --update
-  ```
-
-* Compile
-  ```bash
-  python ./scripts/_locale.py --compile
-  ```
-
-> [!IMPORTANT]
-> Due to the integration with CrowdIn, it is important to not include any extracted or compiled files in
-> Pull Requests. The files are automatically generated and updated by the workflow. Once the PR is merged, the
-> translations can take place on [CrowdIn][crowdin-url]. Once the translations are
-> complete, a PR will be made to merge the translations into Sunshine.
-
-### Testing
-
-#### Clang Format
-Source code is tested against the `.clang-format` file for linting errors. The workflow file responsible for clang
-format testing is `.github/workflows/cpp-clang-format-lint.yml`.
-
-Option 1:
-```bash
-find ./ -iname *.cpp -o -iname *.h -iname *.m -iname *.mm | xargs clang-format -i
-```
-
-Option 2 (will modify files):
-```bash
-python ./scripts/update_clang_format.py
-```
-
-#### Unit Testing
-Sunshine uses [Google Test](https://github.com/google/googletest) for unit testing. Google Test is included in the
-repo as a submodule. The test sources are located in the `./tests` directory.
-
-The tests need to be compiled into an executable, and then run. The tests are built using the normal build process, but
-can be disabled by setting the `BUILD_TESTS` CMake option to `OFF`.
-
-To run the tests, execute the following command.
+Use the Windows MSYS2 UCRT64 `RelWithDebInfo` build described in [Building](building.md):
 
 ```bash
-./build/tests/test_sunshine
+export PATH="/c/Program Files/nodejs:$PATH"
+cmake -B cmake-build-relwithdebinfo -G Ninja -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo
+ninja -C cmake-build-relwithdebinfo
 ```
 
-To see all available options, run the tests with the `--help` flag.
+Run the relevant native tests:
+
+```powershell
+cmake-build-relwithdebinfo\tests\test_sunshine.exe
+```
+
+Run evaluator tests when `tools/sbsbench` changes:
+
+```powershell
+python -m unittest discover -s tools/sbsbench -p "test_*.py"
+```
+
+Host SBS changes also require a matched GPU A/B through the current evaluator and headset review.
+The exact qualification workflow is in [sbsbench](../tools/sbsbench/README.md). A visual change is
+not accepted from a stretched debug PNG alone.
+
+## Change discipline
+
+- Follow `.clang-format`, `.flake8`, and `.prettierrc.json` for their respective languages.
+- Keep generated HLSL/C++ contracts synchronized with their canonical JSON manifest and generator.
+- Update configuration parsing, Web UI controls, English localization, generated/reference docs,
+  and tests together when a public option changes.
+- Add tests for observable behavior and contract boundaries. Avoid source-text tombstones whose
+  only assertion is that deleted V1 code remains absent.
+- Use explicit provenance for benchmark evidence. Do not regenerate baselines from a dirty or
+  unauthenticated build.
+- Update only the owning Markdown document and link to it from other guides.
+
+## Web UI
+
+The Vue/Vite Web UI lives in `src_assets/common/assets/web`. The CMake build runs its production
+build. For focused UI work:
 
 ```bash
-./build/tests/test_sunshine --help
+npm run build
+npm run dev
 ```
 
-> [!TIP]
-> See the googletest [FAQ](https://google.github.io/googletest/faq.html) for more information on how to use Google Test.
+Add English text to `public/assets/locale/en.json`; do not hand-edit generated translations. Test
+rendered pages through a scoped `http://localhost` development server rather than a `file://` URL.
 
-We use [gcovr](https://www.gcovr.com) to generate code coverage reports,
-and [Codecov](https://about.codecov.io) to analyze the reports for all PRs and commits.
+## Pull-request evidence
 
-Codecov will fail a PR if the total coverage is reduced too much, or if not enough of the diff is covered by tests.
-In some cases, the code cannot be covered when running the tests inside of GitHub runners. For example, any test that
-needs access to the GPU will not be able to run. In these cases, the coverage can be omitted by adding comments to the
-code. See the [gcovr documentation](https://gcovr.com/en/stable/guide/exclusion-markers.html#exclusion-markers) for
-more information.
+Describe:
 
-Even if your changes cannot be covered in the CI, we still encourage you to write the tests for them. This will allow
-maintainers to run the tests locally.
+- the user-visible problem and supported mode;
+- the root cause;
+- the files and contracts intentionally changed;
+- native/Python/Web UI tests run;
+- GPU evaluator control and treatment identifiers for Host SBS work; and
+- remaining limitations or headset checks.
 
-[crowdin-url]: https://translate.lizardbyte.dev
-
-<div class="section_buttons">
-
-| Previous                |                                                         Next |
-|:------------------------|-------------------------------------------------------------:|
-| [Building](building.md) | [Source Code](../third-party/doxyconfig/docs/source_code.md) |
-
-</div>
-
-<details style="display: none;">
-  <summary></summary>
-  [TOC]
-</details>
+Sunshine 3D is licensed under GPL-3.0-only. Contributions must be compatible with
+[the repository license](../LICENSE).

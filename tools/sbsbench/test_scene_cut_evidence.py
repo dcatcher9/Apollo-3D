@@ -94,8 +94,10 @@ class SceneCutEvidenceTests(unittest.TestCase):
         width, height = 32, 24
         x = np.arange(width, dtype=np.float32)[None, :]
         y = np.arange(height, dtype=np.float32)[:, None]
-        horizontal = np.broadcast_to(0.1 + 0.03 * x, (height, width))
-        vertical = np.broadcast_to(0.1 + 0.03 * y, (height, width))
+        # Keep adjacent contrast above the production 4% relative reliability floor across the
+        # field; an additive ramp deliberately becomes unreliable toward its bright end.
+        horizontal = np.broadcast_to(0.05 * np.power(1.08, x), (height, width))
+        vertical = np.broadcast_to(0.05 * np.power(1.08, y), (height, width))
         self.assertGreater(
             evidence.structural_change_fraction(vertical, horizontal),
             0.75,

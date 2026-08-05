@@ -1,5 +1,5 @@
 {
-  "schema": 23,
+  "schema": 25,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -12,12 +12,47 @@
     "source_macro_count": 0,
     "source_specs": [
       {
+        "source_file": "rgb_to_nchw_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "buffer_to_tex_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_ema_motion_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
         "source_file": "depth_minmax_cs.hlsl",
         "source_entrypoint": "main",
         "source_target": "cs_5_0"
       },
       {
+        "source_file": "depth_minmax_ema_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
         "source_file": "depth_hist_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_scene_cut_evidence_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_scene_cut_resolve_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_valid_history_cs.hlsl",
         "source_entrypoint": "main",
         "source_target": "cs_5_0"
       },
@@ -57,7 +92,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "86729f7ed5492a5d74bcb952ab873b84ba70b0fb7c468399760124f46ce74d26"
+    "source_closure_sha256": "fd3a5c17e4e689de659bb862e38d648c9f12cad13e317052f8a7a1dce0c52d15"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,
@@ -113,7 +148,7 @@
         "source_target": "cs_5_0",
         "source_compile_flags": 34816,
         "source_macro_count": 0,
-        "source_closure_sha256": "5e7c210aaf090645cb12d703e2484c201db840ad541f59095a2eabbfcea2eb4a",
+        "source_closure_sha256": "d765bf19eb493f302752b1881f62e5d07fa82a073cfba3811fed50f5a5264124",
         "model_input_schema": 1,
         "dtype": "float32-le",
         "layout": "NCHW",
@@ -298,7 +333,7 @@
       },
       {
         "index": 9,
-        "name": "mapping_state_reserved_0",
+        "name": "renderer_authorization_bits",
         "type": "uint32",
         "gpu_encoding": "uint_bits",
         "initial": 0

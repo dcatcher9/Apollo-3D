@@ -39,6 +39,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         )
         cls._set_state_word(document, "camera_center_integrity_bits", checksum)
         document["decoded"]["camera_center_integrity_bits"] = checksum
+        authorization = (document["decoded"]["contract_tag"]
+                         if document["named_values"]["frame_valid"] > 0.5 else 0)
+        cls._set_state_word(document, "renderer_authorization_bits", authorization)
+        document["decoded"]["renderer_authorization_bits"] = authorization
 
     def setUp(self):
         manifest = coordinate.load_contract()
@@ -50,13 +54,13 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "center": 2.0,
             "inverse_scale": 2.0,
             "convergence_curve": 0.0,
-            "container_scale": 0.9,
+            "container_scale": 1.0,
             "calibration_revision": 4,
             "frame_valid": 1.0,
             "confirmed_cut_count": 3,
             "contract_tag_bits": tag,
             "camera_center_integrity_bits": 0,
-            "mapping_state_reserved_0": 0,
+            "renderer_authorization_bits": tag,
             "mapping_state_reserved_1": 0,
             "mapping_state_reserved_2": 0,
         }
@@ -134,9 +138,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "latched_scale": 0.5,
                 "convergence_curve": values["convergence_curve"],
                 "container_scale": values["container_scale"],
-                "effective_gain": requested_gain * values["container_scale"],
+                "effective_gain": requested_gain,
                 "camera_center_integrity_bits":
                     values["camera_center_integrity_bits"],
+                "renderer_authorization_bits": values["renderer_authorization_bits"],
             },
             "adaptation_semantics": {
                 "coordinate":
@@ -145,7 +150,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     "selected-upper-valley-or-mean-center-is-zero-plane",
                 "requested_gain": "immutable-cfg-pop-strength",
                 "container_scale":
-                    "frame-local-hard-direct-parallax-attenuation-recoverable-next-frame",
+                    "abi-retained-identity-pointwise-soft-container-is-map-local",
                 "near_curve":
                     "fixed-contract-logarithmic-tau-independent-of-content-occupancy",
                 "spatial_conditioner":
@@ -228,7 +233,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     "max_horizontal_slope and vertical shear <= max_vertical_shear; q may "
                     "raise or lower candidate and is the live position authority",
                 "parallax_v2_inverse":
-                    "12-step contractive fixed point; no forward-warp owner/visibility splat and no synthetic fill",
+                    "11-step contractive fixed point; no forward-warp owner/visibility splat and no synthetic fill",
                 "collar_defocus": {
                     "enabled": False,
                     "role": ("disabled after live hand-boundary halo regression; live color "
@@ -299,7 +304,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertEqual(set(decoded), {
             "center", "inverse_scale", "convergence_curve", "container_scale",
             "calibration_revision", "frame_valid", "confirmed_cut_count", "contract_tag_bits",
-            "camera_center_integrity_bits", "mapping_state_reserved_0",
+            "camera_center_integrity_bits", "renderer_authorization_bits",
             "mapping_state_reserved_1", "mapping_state_reserved_2",
         })
         stats = dump_contract.validate_shadow_frame_stats_document(self.frame_stats)
@@ -616,6 +621,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         flat_state["decoded"]["frame_valid"] = False
         flat_state["decoded"]["container_scale"] = 1.0
         flat_state["decoded"]["effective_gain"] = 0.0
+        self._seal_camera_center(flat_state)
         dump_contract.validate_shadow_state_document(flat_state)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -703,23 +709,25 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             dump_contract.validate_shadow_state_document(changed)
 
         changed = copy.deepcopy(self.state)
-        changed["named_values"]["container_scale"] = 1.1
-        changed["fields"][3]["value"] = 1.1
-        changed["decoded"]["container_scale"] = 1.1
-        changed["decoded"]["effective_gain"] = (
-            changed["constants"]["requested_gain"] * 1.1)
+        changed["named_values"]["container_scale"] = 0.9
+        changed["fields"][3]["value"] = 0.9
+        changed["decoded"]["container_scale"] = 0.9
+        # V2's effective gain is the literal request; attenuation is pointwise in the map.
+        # Keep the derived field internally consistent so validation reaches the invalid
+        # compatibility-state value rather than failing earlier on a stale V1 derivation.
+        changed["decoded"]["effective_gain"] = changed["constants"]["requested_gain"]
         with self.assertRaisesRegex(ValueError, "out of range"):
             dump_contract.validate_shadow_state_document(changed)
 
-    def test_center_integrity_and_reserved_mapping_state_fail_closed(self):
+    def test_center_integrity_authorization_and_reserved_mapping_state_fail_closed(self):
         changed = copy.deepcopy(self.state)
         self._set_state_word(changed, "center", 2.25)
         with self.assertRaisesRegex(ValueError, "center integrity checksum"):
             dump_contract.validate_shadow_state_document(changed)
 
         changed = copy.deepcopy(self.state)
-        self._set_state_word(changed, "mapping_state_reserved_0", 1)
-        with self.assertRaisesRegex(ValueError, "reserved mapping state"):
+        self._set_state_word(changed, "renderer_authorization_bits", 1)
+        with self.assertRaisesRegex(ValueError, "renderer authorization"):
             dump_contract.validate_shadow_state_document(changed)
 
         changed = copy.deepcopy(self.state)
@@ -755,6 +763,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "camera_center_integrity_bits": dump_contract.camera_center_integrity_bits(
                 0.0, 0.0, 0.0,
                 changed["named_values"]["calibration_revision"]),
+            "renderer_authorization_bits": 0,
         }
         for name, value in replacements.items():
             changed["named_values"][name] = value
@@ -767,6 +776,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         changed["decoded"]["effective_gain"] = 0.0
         changed["decoded"]["camera_center_integrity_bits"] = (
             replacements["camera_center_integrity_bits"])
+        changed["decoded"]["renderer_authorization_bits"] = 0
         dump_contract.validate_shadow_state_document(changed)
         self.assertEqual(
             changed["decoded"]["requested_gain"], changed["constants"]["requested_gain"])
@@ -779,6 +789,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         retained["decoded"]["frame_valid"] = False
         retained["decoded"]["container_scale"] = 1.0
         retained["decoded"]["effective_gain"] = 0.0
+        self._set_state_word(retained, "renderer_authorization_bits", 0)
+        retained["decoded"]["renderer_authorization_bits"] = 0
         dump_contract.validate_shadow_state_document(retained)
         self.assertTrue(retained["decoded"]["camera_valid"])
 

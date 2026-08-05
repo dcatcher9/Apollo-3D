@@ -127,13 +127,13 @@ namespace video {
     std::uint32_t sampled_frame_id = 0;
   };
 
-  /** Apply the profile fields shared by unavailable, ready, and failed telemetry snapshots. V2
+  /** Apply the configured fields shared by unavailable, ready, and failed telemetry snapshots. V2
    * has fixed pop and no legacy zero-plane/adaptive-pop authority; telemetry v1 receives a stable
    * neutral plane placeholder because its VALID_CONFIG contract requires a nonzero legacy mode.
    */
-  void apply_sbs_telemetry_profile(
+  void apply_sbs_telemetry_config(
     sbs_telemetry_snapshot_t &snapshot,
-    const config::video_t::sbs_t &profile
+    const config::video_t::sbs_t &settings
   ) noexcept;
 
   /** Allocate a nonzero renderer generation. Called for every encode-device rebuild/reset. */
@@ -335,6 +335,11 @@ namespace video {
     // this out of process-global state prevents a request from a 2D/retiring session being
     // consumed by a different Host SBS encoder.
     std::shared_ptr<std::atomic<bool>> sbs_debug_dump_pending;
+
+    // APPEND-ONLY. Session-shared requested Host SBS mode. The encode loop uses this only for a
+    // final geometry compatibility check, closing the race between asynchronous 0x3007 quality
+    // transactions and 0x3003 mode toggles.
+    std::shared_ptr<std::atomic<int>> requested_sbs_mode;
   };
 
   // Preserve standard NTSC rates instead of approximating them as finite decimal fractions.
@@ -391,12 +396,13 @@ namespace video {
     int base_height,
     int video_format,
     int configured_max_width,
-    int runtime_max_width = 0
+    int runtime_max_width = 0,
+    int runtime_max_height = 0
   );
 
   /**
-   * Clamp a requested encode size to what the codec can actually encode, scaling the height to
-   * preserve the aspect ratio. A live 0x3007 mode change is deliberately not width-checked on the
+   * Clamp a requested encode size to what the codec can actually encode, scaling both axes to
+   * preserve the aspect ratio. A live 0x3007 mode change is deliberately not capability-checked on the
    * control thread, because a rejected-but-creatable mode is worse than a capped one: a failed
    * non-SBS encoder creation tears the whole session down, while capping cannot fail.
    */
@@ -404,16 +410,11 @@ namespace video {
     int width,
     int height,
     int video_format,
-    int runtime_max_width = 0
+    int runtime_max_width = 0,
+    int runtime_max_height = 0
   );
 
-  /* Resolve an offline/evaluator profile model against config::depth_model_registry(), else
-     synthesize it from the model/url escape hatch. This function has no live-model authority. */
-  config::depth_model_info depth_model_for_profile(const config::video_t::sbs_t &profile);
-
-  /** Return the authenticated production model for live Host SBS V2. Model/profile overrides are
-   * explicitly offline/evaluator-only and therefore cannot masquerade as live controls.
-   */
+  /** Return the single model identity authenticated by the Host SBS contract. */
   config::depth_model_info host_sbs_v2_depth_model();
   using img_event_t = std::shared_ptr<safe::event_t<std::shared_ptr<platf::img_t>>>;
 

@@ -245,7 +245,8 @@ static std::size_t allocated_context_count(const engine_slot &slot) {
 // repeated failures bounded by kMaxContextsPerEngine.
 static void quarantine_execution_context_locked(
   const std::string &engine_key,
-  nvinfer1::IExecutionContext *&context
+  nvinfer1::IExecutionContext *&context,
+  const bool was_warmed
 ) {
   if (!context) {
     return;
@@ -253,6 +254,9 @@ static void quarantine_execution_context_locked(
   auto &slot = g_engines[engine_key];
   if (slot.context_count > 0) {
     --slot.context_count;
+  }
+  if (was_warmed && slot.warmed_context_count > 0) {
+    --slot.warmed_context_count;
   }
   ++slot.quarantined_context_count;
   context = nullptr;
@@ -290,77 +294,6 @@ static nvinfer1::Dims make_input_dims(int h, int w) {
   d.d[2] = h;
   d.d[3] = w;
   return d;
-}
-
-// Round x to the nearest positive multiple of `patch` (the model's spatial patch size; 14 for the
-// Depth Anything family). Model input dims must be patch-aligned or TensorRT rejects the shape.
-static int round_to_patch(float x, int patch = 14) {
-  return std::max(patch, (int) std::round(x / patch) * patch);
-}
-
-// Pick the largest patch-aligned short side that fits both native/profile limits, deriving the
-// long side from the source aspect instead of rounding/capping both axes independently. Independent
-// rounding turned 5120x2160 into 1008x420 (2.400:1); this returns 994x420 (2.367:1), keeping the
-// model grid much closer to the 2.370:1 source without wasting a meaningful amount of inference.
-static std::pair<int, int> aspect_aligned_dims(float aspect, int short_side, int max_w, int max_h, int patch = 14) {
-  aspect = std::max(aspect, 1e-6f);
-  max_w = std::max(patch, (max_w / patch) * patch);
-  max_h = std::max(patch, (max_h / patch) * patch);
-  const int requested_short = round_to_patch((float) short_side, patch);
-  if (aspect >= 1.0f) {
-    for (int h = std::min(requested_short, max_h); h >= patch; h -= patch) {
-      const int w = round_to_patch((float) h * aspect, patch);
-      if (w <= max_w) {
-        return {w, h};
-      }
-    }
-  } else {
-    for (int w = std::min(requested_short, max_w); w >= patch; w -= patch) {
-      const int h = round_to_patch((float) w / aspect, patch);
-      if (h <= max_h) {
-        return {w, h};
-      }
-    }
-  }
-  return {patch, patch};
-}
-
-models::depth_tensor_shape_t models::fit_depth_tensor_shape(
-  const std::uint32_t source_width,
-  const std::uint32_t source_height,
-  const int short_side,
-  const float max_aspect
-) {
-  if (source_width == 0u || source_height == 0u) {
-    return {};
-  }
-
-  const float aspect = static_cast<float>(source_width) /
-                       static_cast<float>(source_height);
-  const float bounded_max_aspect = std::max(1.0f, max_aspect);
-  const float fitted_aspect = aspect >= 1.0f ?
-                                std::min(aspect, bounded_max_aspect) :
-                                1.0f / std::min(1.0f / aspect, bounded_max_aspect);
-  const int bounded_short_side = std::clamp(
-    short_side,
-    14,
-    depth_engine_max_dim
-  );
-  const int max_width = static_cast<int>(std::min<std::uint32_t>(
-    source_width,
-    depth_engine_max_dim
-  ));
-  const int max_height = static_cast<int>(std::min<std::uint32_t>(
-    source_height,
-    depth_engine_max_dim
-  ));
-  const auto [width, height] = aspect_aligned_dims(
-    fitted_aspect,
-    bounded_short_side,
-    max_width,
-    max_height
-  );
-  return {width, height};
 }
 
 // Ensure the shared runtime exists, deserialize the compatible engine into its global slot if not
@@ -431,6 +364,8 @@ static bool validate_engine_io_locked(nvinfer1::ICudaEngine *engine, engine_slot
   bool have_out = false;
   bool input_fp32 = false;
   bool output_fp32 = false;
+  bool input_mode_ok = false;
+  bool output_mode_ok = false;
   for (int i = 0; i < engine->getNbIOTensors(); i++) {
     const char *name = engine->getIOTensorName(i);
     if (!name) {
@@ -444,6 +379,10 @@ static bool validate_engine_io_locked(nvinfer1::ICudaEngine *engine, engine_slot
     if (std::string_view(name) == "pixel_values") {
       have_in = true;
       input_fp32 = type == nvinfer1::DataType::kFLOAT;
+      input_mode_ok = is_input;
+      if (!input_mode_ok) {
+        BOOST_LOG(error) << "Depth model tensor 'pixel_values' is not an input; rejecting the engine.";
+      }
       if (!input_fp32) {
         BOOST_LOG(error) << "Depth model input 'pixel_values' is " << tensor_dtype_name(type)
                          << ", not FP32; rejecting the engine. Use a keep_io_types (FP32 I/O) model.";
@@ -451,6 +390,10 @@ static bool validate_engine_io_locked(nvinfer1::ICudaEngine *engine, engine_slot
     } else if (std::string_view(name) == "predicted_depth") {
       have_out = true;
       output_fp32 = type == nvinfer1::DataType::kFLOAT;
+      output_mode_ok = !is_input;
+      if (!output_mode_ok) {
+        BOOST_LOG(error) << "Depth model tensor 'predicted_depth' is not an output; rejecting the engine.";
+      }
       if (!output_fp32) {
         BOOST_LOG(error) << "Depth model output 'predicted_depth' is " << tensor_dtype_name(type)
                          << ", not FP32; rejecting the engine.";
@@ -461,8 +404,49 @@ static bool validate_engine_io_locked(nvinfer1::ICudaEngine *engine, engine_slot
     BOOST_LOG(error) << "Depth model is missing the expected tensor name(s) 'pixel_values'/'predicted_depth'; "
                         "rejecting the engine.";
   }
-  slot.io_compatible = have_in && have_out && input_fp32 && output_fp32;
+  slot.io_compatible = have_in && have_out && input_fp32 && output_fp32 &&
+                       input_mode_ok && output_mode_ok;
   return slot.io_compatible;
+}
+
+// Detach a resident engine that deserialized successfully but violates the fixed model I/O
+// contract, so rebuilding its on-disk plan can actually replace it. TensorRT objects cannot be
+// destroyed safely across the MinGW/MSVC ABI boundary; pooled contexts and the engine are
+// therefore deliberately leaked and quarantined. Never detach while another estimator owns a
+// context from this slot: that session may still be executing against the resident engine.
+// Caller holds g_trt_mutex.
+static bool detach_incompatible_engine_locked(const std::string &engine_key) {
+  auto found = g_engines.find(engine_key);
+  if (found == g_engines.end()) {
+    return true;
+  }
+  auto &slot = found->second;
+  if (!slot.engine) {
+    slot.io_validated = false;
+    slot.io_compatible = false;
+    return allocated_context_count(slot) == 0 && slot.context_pool.empty();
+  }
+
+  if (slot.context_pool.size() > slot.context_count) {
+    BOOST_LOG(error) << "TensorRT engine slot accounting is corrupt; refusing unsafe replacement.";
+    return false;
+  }
+  const std::size_t checked_out = slot.context_count - slot.context_pool.size();
+  if (checked_out != 0) {
+    BOOST_LOG(error) << "Cannot replace incompatible TensorRT engine while " << checked_out
+                     << " execution context(s) are still owned by active sessions.";
+    return false;
+  }
+
+  slot.quarantined_context_count += slot.context_pool.size();
+  slot.context_pool.clear();
+  slot.context_count = 0;
+  slot.warmed_context_count = 0;
+  slot.engine = nullptr;  // intentionally leaked; see the ABI note above
+  slot.io_validated = false;
+  slot.io_compatible = false;
+  g_trt_context_available.notify_all();
+  return true;
 }
 
 static bool warmup_execution_context(
@@ -843,9 +827,21 @@ namespace models {
     bool pooled = false;
     bool create_context = false;
     bool resident_warmed_context = false;
+    bool engine_repair_allowed = true;
     {
       std::lock_guard<std::mutex> lock(g_trt_mutex);
       engine = acquire_engine_locked(engine_key, engine_path, exec_context, pooled);
+      auto &slot = g_engines[engine_key];
+      if (engine && !validate_engine_io_locked(engine, slot)) {
+        if (exec_context) {
+          slot.context_pool.push_back(exec_context);
+          exec_context = nullptr;
+          pooled = false;
+          g_trt_context_available.notify_all();
+        }
+        engine_repair_allowed = detach_incompatible_engine_locked(engine_key);
+        engine = nullptr;
+      }
     }
 
     // An existing file is not proof of a usable TensorRT plan: interrupted legacy writes, a
@@ -853,6 +849,11 @@ namespace models {
     // Remove only a slot with no resident engine/contexts, rebuild atomically from ONNX, and retry
     // once. This turns the former permanent flat-SBS state into a self-healing startup path.
     if (!engine) {
+      if (!engine_repair_allowed) {
+        BOOST_LOG(error) << "Cached TensorRT plan is incompatible but still owned by an active "
+                            "session; refusing to replace it unsafely.";
+        return false;
+      }
       {
         std::lock_guard<std::mutex> lock(g_trt_mutex);
         auto found = g_engines.find(engine_key);
@@ -878,8 +879,10 @@ namespace models {
       if (!validate_engine_io_locked(engine, slot)) {
         if (exec_context) {
           slot.context_pool.push_back(exec_context);
+          exec_context = nullptr;
           g_trt_context_available.notify_all();
         }
+        detach_incompatible_engine_locked(engine_key);
         return false;
       }
       if (!exec_context) {
@@ -912,7 +915,7 @@ namespace models {
         // This context cannot be destroyed across the MinGW/MSVC ABI boundary, but it must never
         // enter the reusable pool: pooled contexts are assumed warmed and skip this operation.
         std::lock_guard<std::mutex> lock(g_trt_mutex);
-        quarantine_execution_context_locked(engine_key, exec_context);
+        quarantine_execution_context_locked(engine_key, exec_context, false);
         BOOST_LOG(error) << "Startup depth-model context warmup failed.";
         return false;
       }
@@ -946,7 +949,7 @@ namespace models {
   struct video_depth_estimator::impl {
     Microsoft::WRL::ComPtr<ID3D11Device> device;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
-    const depth_estimator_usage_e usage;
+    const std::filesystem::path shader_root;
 
     nvinfer1::ICudaEngine *engine = nullptr;
     nvinfer1::IExecutionContext *exec_context = nullptr;
@@ -974,11 +977,6 @@ namespace models {
     bool graph_signature_warmed = false;
     bool graph_capture_failed = false;
     bool valid = false;  // all mandatory engine, shader, and session resources are ready
-    float subject_recenter;  // recenter strength consumed by depth_subject_resolve_cs
-    bool subject_stretch;  // apply the shape_depth_for_pop 5/95 disparity stretch
-    bool adaptive_pop;
-    float adaptive_pop_max_ratio;
-    float zero_plane_mode;  // 1 subject, 2 median depth, 3 far/mid-background
     float parallax_v2_raw_coordinate_scale = 0.0f;
     const float parallax_v2_requested_pop_strength;
     const float parallax_v2_requested_gain;
@@ -1034,7 +1032,7 @@ namespace models {
 
     // D3D11 timing for the work around TensorRT. CUDA events above deliberately measure only
     // the inference enqueue; these timestamp queries expose the resize/normalization input pass
-    // and the depth normalization/EMA/subject passes without ever synchronizing the CPU. A ring
+    // and the depth normalization/EMA/cut-analysis passes without ever synchronizing the CPU. A ring
     // is required because query results commonly become available several source frames later.
     struct d3d_perf_slot {
       Microsoft::WRL::ComPtr<ID3D11Query> disjoint;
@@ -1244,12 +1242,12 @@ namespace models {
       if (telemetry_readback_ready) {
         return true;
       }
-      if (telemetry_readback_init_failed || !subject_buf) {
+      if (telemetry_readback_init_failed || !cut_state_buf) {
         return false;
       }
 
       D3D11_BUFFER_DESC source_desc {};
-      subject_buf->GetDesc(&source_desc);
+      cut_state_buf->GetDesc(&source_desc);
       if (source_desc.ByteWidth < telemetry_state_float_count * sizeof(float)) {
         BOOST_LOG(error) << "Host SBS telemetry source is smaller than its append-only state contract.";
         telemetry_readback_init_failed = true;
@@ -1292,7 +1290,16 @@ namespace models {
       const auto scalar = [&](const word_e word) {
         return std::bit_cast<float>(words[sbs_adaptive_state::index(word)]);
       };
+      if (words[sbs_adaptive_state::index(word_e::cut_contract_tag_bits)] !=
+          sbs_adaptive_state::cut_contract_tag) {
+        return false;
+      }
       for (const auto &field : sbs_adaptive_state::fields) {
+        const auto word_index = sbs_adaptive_state::index(field.word);
+        if (field.name.starts_with("reserved_") &&
+            words[word_index] != sbs_adaptive_state::initial_words[word_index]) {
+          return false;
+        }
         if (
           field.gpu_encoding != sbs_adaptive_state::gpu_encoding_e::uint_bits &&
           !std::isfinite(scalar(field.word))
@@ -1304,6 +1311,7 @@ namespace models {
       const float scene_age = scalar(word_e::scene_age);
       const float cut_flags = scalar(word_e::cut_flags);
       const float analysis_flags = scalar(word_e::analysis_flags);
+      const float hard_cut_pulse = scalar(word_e::hard_cut_pulse);
       if (
         scene_age < 0.0f ||
         cut_flags < 0.0f ||
@@ -1312,27 +1320,35 @@ namespace models {
         analysis_flags < 0.0f ||
         analysis_flags >
           static_cast<float>(sbs_adaptive_state::known_analysis_flag_mask) ||
-        std::trunc(analysis_flags) != analysis_flags
+        std::trunc(analysis_flags) != analysis_flags ||
+        (hard_cut_pulse != 0.0f && hard_cut_pulse != 1.0f) ||
+        words[sbs_adaptive_state::index(word_e::hard_cut_count)] >
+          sbs_adaptive_state::counter_max ||
+        words[sbs_adaptive_state::index(word_e::empty_raw_count)] >
+          sbs_adaptive_state::counter_max ||
+        words[sbs_adaptive_state::index(word_e::collapsed_raw_count)] >
+          sbs_adaptive_state::counter_max
       ) {
         return false;
       }
 
       sample.depth_width = depth_width;
       sample.depth_height = depth_height;
-      sample.adaptive_pop_ratio =
-        std::max(scalar(word_e::adaptive_pop_ratio), 1.0f);
-      sample.edge_fraction = scalar(word_e::latched_edge_fraction);
+      // Protocol-13 telemetry retains these pre-V2 columns for client wire compatibility. The
+      // V2 cut bridge has no adaptive-pop, subject, or zero-anchor authority, so publish explicit
+      // unavailable/default values instead of decoding reserved GPU words.
+      sample.adaptive_pop_ratio = 1.0f;
+      sample.edge_fraction = -1.0f;
       sample.change_fraction = scalar(word_e::current_depth_change_fraction);
       sample.valid_depth_fraction = scalar(word_e::valid_depth_fraction);
       sample.effective_range_width = scalar(word_e::effective_raw_range_width);
-      sample.current_edge_fraction = scalar(word_e::current_edge_fraction);
-      sample.current_zero_anchor_candidate_shift_px =
-        scalar(word_e::current_zero_anchor_candidate_shift_px);
+      sample.current_edge_fraction = -1.0f;
+      sample.current_zero_anchor_candidate_shift_px = -1.0f;
       sample.structural_change_fraction =
         scalar(word_e::structural_change_fraction);
       sample.raw_rgb_change_fraction = scalar(word_e::raw_rgb_change_fraction);
-      sample.zero_anchor_shift_px = scalar(word_e::zero_anchor_shift_px);
-      sample.subject_depth = scalar(word_e::subject_depth_ema);
+      sample.zero_anchor_shift_px = 0.0f;
+      sample.subject_depth = 0.0f;
       sample.scene_age = static_cast<std::uint32_t>(std::min(
         scene_age,
         static_cast<float>(std::numeric_limits<std::uint32_t>::max())
@@ -1341,22 +1357,23 @@ namespace models {
         cut_flags,
         static_cast<float>(std::numeric_limits<std::uint32_t>::max())
       ));
-      // SubjectState[4] stores counters as uint bits so they remain exact past float's 24-bit
+      // The cut bridge stores counters as uint bits so they remain exact past float's 24-bit
       // integer range. The shader saturates them one value below UINT_MAX.
       sample.hard_cut_count =
         words[sbs_adaptive_state::index(word_e::hard_cut_count)];
-      sample.external_cut_count =
-        words[sbs_adaptive_state::index(word_e::external_cut_count)];
+      // Protocol 13 retains this wire slot for older clients. V2 has no external-reset
+      // controller, so its compatibility value is permanently zero rather than a fake counter.
+      sample.external_cut_count = 0u;
       sample.empty_raw_count =
         words[sbs_adaptive_state::index(word_e::empty_raw_count)];
       sample.collapsed_raw_count =
         words[sbs_adaptive_state::index(word_e::collapsed_raw_count)];
       sample.sampled_frame_id = sampled_frame_id;
       sample.profile_initialized = scalar(word_e::initialized) > 0.5f;
-      sample.anchor_valid = scalar(word_e::zero_anchor_valid) > 0.5f;
+      sample.anchor_valid = false;
       sample.range_collapsed = scalar(word_e::range_collapsed) > 0.5f;
       sample.depth_ready = scalar(word_e::depth_ready) > 0.5f;
-      sample.hard_cut_pulse = scalar(word_e::hard_cut_pulse) > 0.5f;
+      sample.hard_cut_pulse = hard_cut_pulse > 0.5f;
       return true;
     }
 
@@ -1443,8 +1460,8 @@ namespace models {
           }
           // The caller invokes this only after submitting the SBS warp and encoder/local-output
           // draw. D3D11 command ordering therefore puts this low-priority diagnostic copy behind
-          // every frame-critical consumer of SubjectState.
-          context->CopyResource(slot.staging.Get(), subject_buf.Get());
+          // every frame-critical consumer of the cut bridge.
+          context->CopyResource(slot.staging.Get(), cut_state_buf.Get());
           context->End(slot.completion.Get());
           slot.pending = true;
           slot.sampled_frame_id = sampled_frame_id;
@@ -1632,8 +1649,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_minmax_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_minmax_ema_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_hist_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_subject_hist_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_subject_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_scene_cut_evidence_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_scene_cut_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_valid_history_cs;
@@ -1645,7 +1660,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_coordinate_diagnostic_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_vertical_limit_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_limit_cs;
-    Microsoft::WRL::ComPtr<ID3D11SamplerState> linear_sampler;
     Microsoft::WRL::ComPtr<ID3D11Buffer> cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_cbuffer;
 
@@ -1681,17 +1695,13 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> minmax_ema_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> hist_buf;  // 256 uint bins for percentile normalization
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> hist_uav;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> subject_hist_buf;  // 256 weighted bins for subject tracking
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_hist_uav;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> subject_plain_buf;  // 256 bins + nine evidence counters
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_plain_uav;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> scene_cut_evidence_buf;  // nine cut-only counters (live V2)
+    Microsoft::WRL::ComPtr<ID3D11Buffer> scene_cut_evidence_buf;  // nine counters + frame delta
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> scene_cut_evidence_uav;
-    // Established 32-word analysis ABI. Live V2 writes only cut/health fields; offline evaluation
-    // additionally owns subject, adaptive-pop, stretch, and zero-plane fields.
-    Microsoft::WRL::ComPtr<ID3D11Buffer> subject_buf;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subject_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subject_srv;
+    // Established 32-word analysis ABI. V2 writes only its cut/health fields; the retired
+    // subject/adaptive/stretch/zero-plane words keep their initial values.
+    Microsoft::WRL::ComPtr<ID3D11Buffer> cut_state_buf;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> cut_state_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> cut_state_srv;
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_uav;
@@ -1707,10 +1717,9 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> ema_motion_mask_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask_srv;
 
-    // GPU-only raw-coordinate V2 producer. Live Host SBS requires these resources; the legacy
-    // evaluation mode leaves them unallocated. The canonical-coordinate texture is exceptional:
-    // it is allocated and written only for an explicit Dump 3D snapshot. The authenticated final
-    // field is the sole live position authority.
+    // GPU-only raw-coordinate V2 producer. The canonical-coordinate texture is exceptional: its
+    // shader, texture, and views are created only for an explicit Dump 3D snapshot. The
+    // authenticated final field is the sole live position authority.
     Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_partials_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_partials_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_partials_srv;
@@ -1756,6 +1765,8 @@ namespace models {
     input_color_space pending_color_space = input_color_space::srgb;
     bool has_previous_frame = false;
     std::uint64_t pending_frame_id = 0;
+    std::uint64_t last_postprocessed_frame_id = 0;
+    bool has_last_postprocessed_frame_id = false;
     bool stream_error_logged = false;
     bool terminal_failure = false;
     bool execution_context_poisoned = false;
@@ -1763,12 +1774,8 @@ namespace models {
     bool depth_context_pooled = false;  // context reused from the pool (modules already loaded -> skip warmup)
     bool context_warmed = false;  // only warmed contexts may return to context_pool
 
-    bool host_v2_required() const {
-      return usage == depth_estimator_usage_e::host_sbs_v2;
-    }
-
     bool live_v2_producer_unavailable() const {
-      return host_v2_required() && parallax_v2_producer_failed;
+      return parallax_v2_producer_failed;
     }
 
     // Host V2 fails flat on any producer error. Only async execution/query failures quarantine the
@@ -1776,10 +1783,7 @@ namespace models {
     void mark_terminal_failure(const bool poison_execution_context = false) {
       execution_context_poisoned =
         execution_context_poisoned || poison_execution_context;
-      // Live V2 cannot safely resume after any producer-contract failure. The legacy evaluator
-      // keeps its historical retry behavior for recoverable D3D/interop setup failures, but an
-      // asynchronous CUDA/TensorRT fault poisons the execution context in either mode.
-      terminal_failure = terminal_failure || host_v2_required() || poison_execution_context;
+      terminal_failure = true;
     }
 
     bool create_shader(
@@ -1799,51 +1803,20 @@ namespace models {
       Microsoft::WRL::ComPtr<ID3D11DeviceContext> c,
       const std::filesystem::path &assets_dir,
       const config::video_t::sbs_t &cfg,
-      const config::depth_model_info &model,
-      const depth_estimator_usage_e estimator_usage
+      const config::depth_model_info &model
     ):
         device(d),
         context(c),
-        usage(estimator_usage),
-        ema_alpha((float) (estimator_usage == depth_estimator_usage_e::host_sbs_v2 ?
-                             config::host_sbs_v2_live_calibration::depth_ema : cfg.ema)),
-        ema_edge_change((float) (estimator_usage == depth_estimator_usage_e::host_sbs_v2 ?
-                                   config::host_sbs_v2_live_calibration::edge_change :
-                                   cfg.ema_edge_change)),
-        ema_edge_gradient((float) (estimator_usage == depth_estimator_usage_e::host_sbs_v2 ?
-                                     config::host_sbs_v2_live_calibration::edge_gradient :
-                                     cfg.ema_edge_gradient)),
-        ema_edge_strength((float) (estimator_usage == depth_estimator_usage_e::host_sbs_v2 ?
-                                     config::host_sbs_v2_live_calibration::edge_strength :
-                                     cfg.ema_edge_strength)),
-        depth_short_side(estimator_usage == depth_estimator_usage_e::host_sbs_v2 ?
-                           config::host_sbs_v2_live_calibration::depth_short_side :
-                           std::max(196, cfg.depth_short_side)),
-        max_aspect((float) (estimator_usage == depth_estimator_usage_e::host_sbs_v2 ?
-                              config::host_sbs_v2_live_calibration::depth_max_aspect :
-                              std::max(1.0, cfg.depth_max_aspect))),
-        minmax_alpha((float) (estimator_usage == depth_estimator_usage_e::host_sbs_v2 ?
-                                config::host_sbs_v2_live_calibration::minmax_ema :
-                                cfg.minmax_ema)),
+        shader_root(assets_dir / "shaders" / "directx"),
+        ema_alpha((float) config::host_sbs_v2_live_calibration::depth_ema),
+        ema_edge_change((float) config::host_sbs_v2_live_calibration::edge_change),
+        ema_edge_gradient((float) config::host_sbs_v2_live_calibration::edge_gradient),
+        ema_edge_strength((float) config::host_sbs_v2_live_calibration::edge_strength),
+        depth_short_side(config::host_sbs_v2_live_calibration::depth_short_side),
+        max_aspect((float) config::host_sbs_v2_live_calibration::depth_max_aspect),
+        minmax_alpha((float) config::host_sbs_v2_live_calibration::minmax_ema),
         cuda_graph_enabled(cfg.cuda_graph),
         diagnostics_enabled(config::sunshine.diagnostics_enabled),
-        subject_recenter(estimator_usage == depth_estimator_usage_e::legacy_evaluation ?
-                           (float) cfg.subject_recenter : 0.0f),
-        subject_stretch(estimator_usage == depth_estimator_usage_e::legacy_evaluation &&
-                        cfg.subject_stretch),
-        adaptive_pop(estimator_usage == depth_estimator_usage_e::legacy_evaluation &&
-                     cfg.adaptive_pop),
-        adaptive_pop_max_ratio(estimator_usage == depth_estimator_usage_e::legacy_evaluation ?
-                                 (float) (std::max(cfg.adaptive_pop_max, cfg.pop_strength) /
-                                          std::max(cfg.pop_strength, 0.25)) :
-                                 1.0f),
-        // The legacy evaluator maps an unrecognized value to median because its harness can
-        // assign sbs_cfg directly and bypass config validation. Live V2 has no legacy zero-plane
-        // parameter, so its shared cbuffer slot is explicitly inert.
-        zero_plane_mode(estimator_usage == depth_estimator_usage_e::legacy_evaluation ?
-                          (cfg.zero_plane == "subject" ? 1.0f :
-                           cfg.zero_plane == "background" ? 3.0f : 2.0f) :
-                          0.0f),
         parallax_v2_requested_pop_strength(
           depth_coordinate_v2::requested_pop_strength(
             static_cast<float>(cfg.pop_strength)
@@ -1865,8 +1838,27 @@ namespace models {
         if (cuda_device_for_d3d(cuda, device.Get(), cuda_device)) {
           cuda_ctx = primary_context(cuda, cuda_device);
           if (cuda_ctx) {
-            cuda.cuCtxSetCurrent(cuda_ctx);
-            cuda.cuStreamCreate(&cu_stream, CU_STREAM_NON_BLOCKING);
+            const auto context_result = cuda.cuCtxSetCurrent(cuda_ctx);
+            if (context_result != CUDA_SUCCESS) {
+              BOOST_LOG(error)
+                << "Depth estimator failed: could not select the D3D adapter's CUDA context ("
+                << context_result << ").";
+              cuda_ctx = nullptr;
+            } else {
+              const auto stream_result =
+                cuda.cuStreamCreate(&cu_stream, CU_STREAM_NON_BLOCKING);
+              if (stream_result != CUDA_SUCCESS || !cu_stream) {
+                BOOST_LOG(error)
+                  << "Depth estimator failed: CUDA stream creation failed ("
+                  << stream_result << ").";
+                // CUDA documents a null stream on failure, but defensively destroy any handle it
+                // returned before rejecting construction so no wrong/partial stream can survive.
+                if (cu_stream && cuda.cuStreamDestroy) {
+                  cuda.cuStreamDestroy(cu_stream);
+                }
+                cu_stream = nullptr;
+              }
+            }
           }
         }
       }
@@ -1882,6 +1874,7 @@ namespace models {
       }
       auto model_path = artifact.engine_path;
       engine_key = std::to_string(cuda_device) + ":" + artifact.name;
+      bool engine_repair_allowed = true;
 
       {  // Scope this lock to the g_engines/g_runtime access only: it MUST be released before
          // warmup_inference() at the end of the ctor (which re-locks g_trt_mutex) -- a
@@ -1901,8 +1894,11 @@ namespace models {
           if (exec_context) {
             slot.context_pool.push_back(exec_context);
             exec_context = nullptr;
+            depth_context_pooled = false;
+            context_warmed = false;
             g_trt_context_available.notify_all();
           }
+          engine_repair_allowed = detach_incompatible_engine_locked(engine_key);
           engine = nullptr;
         }
 
@@ -1912,6 +1908,11 @@ namespace models {
       if (!engine) {
         // The startup preparation normally repairs this already. The constructor also serves the
         // standalone evaluator, so retain the same one-shot self-heal when it is the first owner.
+        if (!engine_repair_allowed) {
+          BOOST_LOG(error) << "Depth estimator cannot replace an incompatible TensorRT plan "
+                              "while another session still owns its execution context.";
+          return;
+        }
         {
           std::lock_guard<std::mutex> lock(g_trt_mutex);
           auto found = g_engines.find(engine_key);
@@ -1921,7 +1922,8 @@ namespace models {
         }
         std::error_code ec;
         std::filesystem::remove(model_path, ec);
-        BOOST_LOG(warning) << "Depth estimator found an unreadable TensorRT plan; rebuilding " << model_path.filename() << '.';
+        BOOST_LOG(warning) << "Depth estimator found an unreadable or incompatible TensorRT plan; rebuilding "
+                           << model_path.filename() << '.';
         if (!ensure_tensorrt_engine_for_device(assets_dir, model, cuda, cuda_device, artifact)) {
           return;
         }
@@ -1933,11 +1935,19 @@ namespace models {
           context_warmed = depth_context_pooled;
           auto &slot = g_engines[engine_key];
           if (!validate_engine_io_locked(engine, slot)) {
+            if (exec_context) {
+              slot.context_pool.push_back(exec_context);
+              exec_context = nullptr;
+              depth_context_pooled = false;
+              context_warmed = false;
+              g_trt_context_available.notify_all();
+            }
+            detach_incompatible_engine_locked(engine_key);
             engine = nullptr;
           }
         }
         if (!engine) {
-          BOOST_LOG(error) << "Depth estimator failed: rebuilt TensorRT plan could not be deserialized.";
+          BOOST_LOG(error) << "Depth estimator failed: rebuilt TensorRT plan is unreadable or incompatible.";
           return;
         }
       }
@@ -2012,13 +2022,17 @@ namespace models {
         }
       }
 
-      // Live Host SBS and the legacy evaluator share preprocessing and the private normalized
-      // depth used by cut evidence. Their analysis roots diverge below: live V2 compiles only the
-      // cut detector, while offline/evaluation retains subject, adaptive-pop, and zero-plane work.
+      // Preprocessing plus the private normalized depth consumed by cut evidence. The only
+      // analysis roots are the compact scene-cut detector passes.
       const auto preprocess_sources = host_sbs_shader_cache::snapshot_sources(
-        assets_dir / "shaders" / "directx",
+        shader_root,
         host_sbs_shader_cache::preprocess_specs
       );
+      if (!preprocess_sources) {
+        BOOST_LOG(error)
+          << "Depth estimator failed: the calibrated RGB-preprocess source closure is unavailable.";
+        return;
+      }
       const std::string preprocess_source_closure_sha256 =
         host_sbs_shader_cache::source_closure_sha256(preprocess_sources);
       const auto *coordinate_calibration =
@@ -2037,214 +2051,183 @@ namespace models {
         model_coordinate_calibration->preprocess.source_closure_sha256 ==
           preprocess_source_closure_sha256 ?
           model_coordinate_calibration : nullptr;
-      if (coordinate_calibration) {
-        parallax_v2_raw_coordinate_scale = coordinate_calibration->raw_coordinate_scale;
-      }
-      raw_model_provenance = std::make_shared<const raw_model_provenance_t>(
-        raw_model_provenance_t {
-          .depth_model = model.name,
-          .depth_model_url = model.url,
-          .onnx_sha256 = artifact.source_sha256,
-          .preprocess_profile = coordinate_calibration ?
-                                  std::string {
-                                    coordinate_calibration->preprocess.profile
-                                  } :
-                                  std::string {},
-          .preprocess_source_closure_sha256 = preprocess_source_closure_sha256,
-        }
-      );
-
-      const auto &analysis_specs = host_v2_required() ?
-                                     host_sbs_shader_cache::core_specs :
-                                     host_sbs_shader_cache::legacy_evaluation_specs;
-      const auto shader_sources = host_sbs_shader_cache::snapshot_sources(
-        assets_dir / "shaders" / "directx",
-        analysis_specs
-      );
-      const bool common_shaders_ok =
-        preprocess_sources &&
-        shader_sources &&
-        create_shader(preprocess_sources, host_sbs_shader_cache::rgb_to_nchw, rgb_to_nchw_cs) &&
-        create_shader(shader_sources, host_sbs_shader_cache::buffer_to_tex, buffer_to_tex_cs) &&
-        create_shader(shader_sources, host_sbs_shader_cache::depth_ema_motion, depth_ema_motion_cs) &&
-        create_shader(shader_sources, host_sbs_shader_cache::depth_minmax, depth_minmax_cs) &&
-        create_shader(shader_sources, host_sbs_shader_cache::depth_minmax_ema, depth_minmax_ema_cs) &&
-        create_shader(shader_sources, host_sbs_shader_cache::depth_hist, depth_hist_cs) &&
-        create_shader(shader_sources, host_sbs_shader_cache::depth_valid_history, depth_valid_history_cs);
-      const bool analysis_shaders_ok = host_v2_required() ?
-        create_shader(
-          shader_sources,
-          host_sbs_shader_cache::depth_scene_cut_evidence,
-          depth_scene_cut_evidence_cs
-        ) &&
-          create_shader(
-            shader_sources,
-            host_sbs_shader_cache::depth_scene_cut_resolve,
-            depth_scene_cut_resolve_cs
-          ) :
-        create_shader(
-          shader_sources,
-          host_sbs_shader_cache::depth_subject_hist,
-          depth_subject_hist_cs
-        ) &&
-          create_shader(
-            shader_sources,
-            host_sbs_shader_cache::depth_subject_resolve,
-            depth_subject_resolve_cs
-          );
-      const bool core_shaders_ok = common_shaders_ok && analysis_shaders_ok;
-      if (!core_shaders_ok) {
-        BOOST_LOG(error) << "Depth estimator failed: required Bestv2 shader initialization failed.";
-        return;
-      }
-      if (host_v2_required() && !coordinate_calibration) {
+      if (!coordinate_calibration) {
         parallax_v2_producer_failed = true;
         BOOST_LOG(error)
           << "Host SBS V2 cannot authenticate uncalibrated depth model '"
           << model.name << "' (ONNX SHA-256 " << artifact.source_sha256
           << ", preprocess source SHA-256 " << preprocess_source_closure_sha256
           << "); Host SBS will fail flat.";
-      } else if (host_v2_required()) {
-          const auto shadow_sources = host_sbs_shader_cache::snapshot_sources(
-            assets_dir / "shaders" / "directx",
-            host_sbs_shader_cache::parallax_v2_producer_specs
-          );
-          static_assert(
-            depth_coordinate_v2::shader_source_closure_schema ==
-            host_sbs_shader_cache::source_closure_schema
-          );
-          static_assert(
-            depth_coordinate_v2::shader_source_compile_flags ==
-            host_sbs_shader_cache::shader_compile_flags
-          );
-          static_assert(depth_coordinate_v2::shader_source_macro_count == 0u);
-          static_assert(
-            depth_coordinate_v2::shader_source_specs.size() ==
-            host_sbs_shader_cache::parallax_v2_producer_specs.size()
-          );
-          bool shader_specs_match = true;
-          for (std::size_t index = 0;
-               index < depth_coordinate_v2::shader_source_specs.size();
-               ++index) {
-            const auto &contract_spec = depth_coordinate_v2::shader_source_specs[index];
-            const auto &runtime_spec =
-              host_sbs_shader_cache::parallax_v2_producer_specs[index];
-            shader_specs_match =
-              shader_specs_match &&
-              contract_spec.source_file == runtime_spec.filename &&
-              contract_spec.source_entrypoint == runtime_spec.entrypoint &&
-              contract_spec.source_target == runtime_spec.target;
-          }
-          const std::string shader_source_closure_sha256 =
-            shadow_sources ?
-              host_sbs_shader_cache::source_closure_sha256(shadow_sources) :
-              std::string {};
-          const bool shader_identity_matches =
-            shader_specs_match &&
-            shader_source_closure_sha256 ==
-              depth_coordinate_v2::shader_source_closure_sha256;
-          parallax_v2_producer_shaders_ready =
-            shadow_sources && shader_identity_matches &&
-            // Recompile these shared passes from the authenticated V2 snapshot. Host V2 then
-            // cannot accidentally feed geometry with a common-shader body outside its closure.
-            create_shader(
-              shadow_sources,
-              host_sbs_shader_cache::depth_minmax,
-              depth_minmax_cs
-            ) &&
-            create_shader(
-              shadow_sources,
-              host_sbs_shader_cache::depth_hist,
-              depth_hist_cs
-            ) &&
-            create_shader(
-              shadow_sources,
-              host_sbs_shader_cache::depth_coordinate_v2_moments,
-              depth_coordinate_v2_moments_cs
-            ) &&
-            create_shader(
-              shadow_sources,
-              host_sbs_shader_cache::depth_coordinate_v2_frame_resolve,
-              depth_coordinate_v2_frame_resolve_cs
-            ) &&
-            create_shader(
-              shadow_sources,
-              host_sbs_shader_cache::depth_coordinate_v2_state_resolve,
-              depth_coordinate_v2_state_resolve_cs
-            ) &&
-            create_shader(
-              shadow_sources,
-              host_sbs_shader_cache::depth_coordinate_v2_map,
-              depth_coordinate_v2_map_cs
-            ) &&
-            create_shader(
-              shadow_sources,
-              host_sbs_shader_cache::depth_coordinate_v2_ownership,
-              depth_coordinate_v2_ownership_cs
-            ) &&
-            create_shader(
-              shadow_sources,
-              host_sbs_shader_cache::depth_coordinate_v2_vertical_limit,
-              depth_coordinate_v2_vertical_limit_cs
-            ) &&
-            create_shader(
-              shadow_sources,
-              host_sbs_shader_cache::depth_coordinate_v2_limit,
-              depth_coordinate_v2_limit_cs
-            );
-          if (parallax_v2_producer_shaders_ready) {
-            parallax_v2_shader_provenance =
-              std::make_shared<const parallax_v2_shader_provenance_t>(
-                parallax_v2_shader_provenance_t {
-                  .source_closure_schema =
-                    depth_coordinate_v2::shader_source_closure_schema,
-                  .source_compile_flags =
-                    depth_coordinate_v2::shader_source_compile_flags,
-                  .source_macro_count =
-                    depth_coordinate_v2::shader_source_macro_count,
-                  .source_closure_sha256 = shader_source_closure_sha256,
-                }
-              );
-            BOOST_LOG(info)
-              << "Host SBS parallax-v2 GPU producer compiled for model '" << model.name
-              << "' (fixed raw coordinate scale " << parallax_v2_raw_coordinate_scale
-              << ", requested pop " << parallax_v2_requested_pop_strength
-              << ", requested gain " << parallax_v2_requested_gain
-              << "); completed fields remain separately authenticated before rendering.";
-            const auto diagnostic_sources = host_sbs_shader_cache::snapshot_sources(
-              assets_dir / "shaders" / "directx",
-              host_sbs_shader_cache::parallax_v2_diagnostic_specs
-            );
-            if (!diagnostic_sources ||
-                !create_shader(
-                  diagnostic_sources,
-                  host_sbs_shader_cache::depth_coordinate_v2_coordinate_diagnostic,
-                  depth_coordinate_v2_coordinate_diagnostic_cs
-                )) {
-              // Dump diagnostics must never become a live-render dependency. A later Dump 3D
-              // request will be rejected explicitly, while authenticated V2 rendering continues.
-              BOOST_LOG(warning)
-                << "Host SBS V2 canonical-coordinate Dump 3D shader is unavailable; "
-                   "live rendering remains active.";
-            }
-          } else {
-            parallax_v2_producer_failed = true;
-            BOOST_LOG(error)
-              << "Host SBS V2 shader initialization or source-identity verification failed; "
-                 "Host SBS will fail flat.";
-          }
+        return;
       }
-      if (host_v2_required()) {
-        BOOST_LOG(info)
-          << "Host SBS V2 cut-only GPU analysis enabled; subject, adaptive-pop, stretch, and "
-             "legacy zero-plane work is not compiled or dispatched for live streams.";
-      } else {
-        BOOST_LOG(info)
-          << "Legacy evaluator subject shaping enabled (recenter " << subject_recenter << ").";
-        BOOST_LOG(info) << "Legacy evaluator zero-plane mode: " << cfg.zero_plane
-                        << (zero_plane_mode > 0.5f ?
-                              " (shot-latched experimental anchor)." : ".");
+      parallax_v2_raw_coordinate_scale = coordinate_calibration->raw_coordinate_scale;
+      raw_model_provenance = std::make_shared<const raw_model_provenance_t>(
+        raw_model_provenance_t {
+          .depth_model = model.name,
+          .depth_model_url = model.url,
+          .onnx_sha256 = artifact.source_sha256,
+          .preprocess_profile = std::string {
+            coordinate_calibration->preprocess.profile
+          },
+          .preprocess_source_closure_sha256 = preprocess_source_closure_sha256,
+        }
+      );
+
+      const auto producer_sources = host_sbs_shader_cache::snapshot_sources(
+        shader_root,
+        host_sbs_shader_cache::parallax_v2_producer_specs
+      );
+      static_assert(
+        depth_coordinate_v2::shader_source_closure_schema ==
+        host_sbs_shader_cache::source_closure_schema
+      );
+      static_assert(
+        depth_coordinate_v2::shader_source_compile_flags ==
+        host_sbs_shader_cache::shader_compile_flags
+      );
+      static_assert(depth_coordinate_v2::shader_source_macro_count == 0u);
+      static_assert(
+        depth_coordinate_v2::shader_source_specs.size() ==
+        host_sbs_shader_cache::parallax_v2_producer_specs.size()
+      );
+      bool shader_specs_match = true;
+      for (std::size_t index = 0;
+           index < depth_coordinate_v2::shader_source_specs.size();
+           ++index) {
+        const auto &contract_spec = depth_coordinate_v2::shader_source_specs[index];
+        const auto &runtime_spec =
+          host_sbs_shader_cache::parallax_v2_producer_specs[index];
+        shader_specs_match =
+          shader_specs_match &&
+          contract_spec.source_file == runtime_spec.filename &&
+          contract_spec.source_entrypoint == runtime_spec.entrypoint &&
+          contract_spec.source_target == runtime_spec.target;
       }
+      const std::string shader_source_closure_sha256 =
+        producer_sources ?
+          host_sbs_shader_cache::source_closure_sha256(producer_sources) :
+          std::string {};
+      const bool shader_identity_matches =
+        shader_specs_match &&
+        shader_source_closure_sha256 ==
+          depth_coordinate_v2::shader_source_closure_sha256;
+
+      // Create every compute object from bytecode keyed by the one authenticated producer
+      // snapshot. Startup prewarm populates these exact cache entries, so the constructor neither
+      // recompiles rgb_to_nchw from its identity-only calibration closure nor compiles the shared
+      // analysis roots once as "core" and then again as V2.
+      const bool producer_shaders_ok =
+        producer_sources && shader_identity_matches &&
+        create_shader(
+          producer_sources,
+          host_sbs_shader_cache::rgb_to_nchw,
+          rgb_to_nchw_cs
+        ) &&
+        create_shader(
+          producer_sources,
+          host_sbs_shader_cache::buffer_to_tex,
+          buffer_to_tex_cs
+        ) &&
+        create_shader(
+          producer_sources,
+          host_sbs_shader_cache::depth_ema_motion,
+          depth_ema_motion_cs
+        ) &&
+        create_shader(
+          producer_sources,
+          host_sbs_shader_cache::depth_minmax,
+          depth_minmax_cs
+        ) &&
+        create_shader(
+          producer_sources,
+          host_sbs_shader_cache::depth_minmax_ema,
+          depth_minmax_ema_cs
+        ) &&
+        create_shader(
+          producer_sources,
+          host_sbs_shader_cache::depth_hist,
+          depth_hist_cs
+        ) &&
+        create_shader(
+          producer_sources,
+          host_sbs_shader_cache::depth_scene_cut_evidence,
+          depth_scene_cut_evidence_cs
+        ) &&
+        create_shader(
+          producer_sources,
+          host_sbs_shader_cache::depth_scene_cut_resolve,
+          depth_scene_cut_resolve_cs
+        ) &&
+        create_shader(
+          producer_sources,
+          host_sbs_shader_cache::depth_valid_history,
+          depth_valid_history_cs
+        ) &&
+        create_shader(
+          producer_sources,
+          host_sbs_shader_cache::depth_coordinate_v2_moments,
+          depth_coordinate_v2_moments_cs
+        ) &&
+        create_shader(
+          producer_sources,
+          host_sbs_shader_cache::depth_coordinate_v2_frame_resolve,
+          depth_coordinate_v2_frame_resolve_cs
+        ) &&
+        create_shader(
+          producer_sources,
+          host_sbs_shader_cache::depth_coordinate_v2_state_resolve,
+          depth_coordinate_v2_state_resolve_cs
+        ) &&
+        create_shader(
+          producer_sources,
+          host_sbs_shader_cache::depth_coordinate_v2_map,
+          depth_coordinate_v2_map_cs
+        ) &&
+        create_shader(
+          producer_sources,
+          host_sbs_shader_cache::depth_coordinate_v2_ownership,
+          depth_coordinate_v2_ownership_cs
+        ) &&
+        create_shader(
+          producer_sources,
+          host_sbs_shader_cache::depth_coordinate_v2_vertical_limit,
+          depth_coordinate_v2_vertical_limit_cs
+        ) &&
+        create_shader(
+          producer_sources,
+          host_sbs_shader_cache::depth_coordinate_v2_limit,
+          depth_coordinate_v2_limit_cs
+        );
+      if (!producer_shaders_ok) {
+        parallax_v2_producer_failed = true;
+        BOOST_LOG(error)
+          << "Host SBS V2 shader initialization or source-identity verification failed; "
+             "Host SBS will fail flat.";
+        return;
+      }
+
+      parallax_v2_producer_shaders_ready = true;
+      parallax_v2_shader_provenance =
+        std::make_shared<const parallax_v2_shader_provenance_t>(
+          parallax_v2_shader_provenance_t {
+            .source_closure_schema =
+              depth_coordinate_v2::shader_source_closure_schema,
+            .source_compile_flags =
+              depth_coordinate_v2::shader_source_compile_flags,
+            .source_macro_count =
+              depth_coordinate_v2::shader_source_macro_count,
+            .source_closure_sha256 = shader_source_closure_sha256,
+          }
+        );
+      BOOST_LOG(info)
+        << "Host SBS parallax-v2 GPU producer loaded for model '" << model.name
+        << "' (fixed raw coordinate scale " << parallax_v2_raw_coordinate_scale
+        << ", requested pop " << parallax_v2_requested_pop_strength
+        << ", requested gain " << parallax_v2_requested_gain
+        << "); completed fields remain separately authenticated before rendering.";
+      BOOST_LOG(info)
+        << "Host SBS V2 cut-only GPU analysis enabled; no subject, adaptive-pop, stretch, or "
+           "zero-plane work is compiled or dispatched.";
       // Min/max reduction accumulator, pre-seeded to the reduction identity
       // {min = 0xFFFFFFFF, max = 0, valid = 0}. depth_minmax_ema_cs resets it after each frame.
       {
@@ -2301,72 +2284,45 @@ namespace models {
       }
 
       // The state buffer keeps the established 32-word ABI for offline traces, Dump 3D, and live
-      // telemetry. Live V2 allocates only nine cut counters; legacy evaluation additionally owns
-      // the two 256-bin subject/stretch histograms.
+      // telemetry. V2 allocates nine cut counters plus the source-stream frame delta beside it.
       {
         D3D11_BUFFER_DESC bd = {};
         bd.Usage = D3D11_USAGE_DEFAULT;
         bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
         bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
         bd.StructureByteStride = sizeof(uint32_t);
-        if (host_v2_required()) {
-          uint32_t initial_cut_evidence[9] = {};
-          bd.ByteWidth = sizeof(initial_cut_evidence);
-          D3D11_SUBRESOURCE_DATA cut_sd = {initial_cut_evidence, 0, 0};
-          device->CreateBuffer(&bd, &cut_sd, &scene_cut_evidence_buf);
-          if (scene_cut_evidence_buf) {
-            device->CreateUnorderedAccessView(
-              scene_cut_evidence_buf.Get(),
-              nullptr,
-              &scene_cut_evidence_uav
-            );
-          }
-        } else {
-          uint32_t init_hist[256] = {};
-          bd.ByteWidth = sizeof(init_hist);
-          D3D11_SUBRESOURCE_DATA sd = {init_hist, 0, 0};
-          device->CreateBuffer(&bd, &sd, &subject_hist_buf);
-          if (subject_hist_buf) {
-            device->CreateUnorderedAccessView(subject_hist_buf.Get(), nullptr, &subject_hist_uav);
-          }
-          uint32_t init_plain[265] = {};
-          bd.ByteWidth = sizeof(init_plain);
-          D3D11_SUBRESOURCE_DATA plain_sd = {init_plain, 0, 0};
-          device->CreateBuffer(&bd, &plain_sd, &subject_plain_buf);
-          if (subject_plain_buf) {
-            device->CreateUnorderedAccessView(subject_plain_buf.Get(), nullptr, &subject_plain_uav);
-          }
+        uint32_t initial_cut_evidence[10] = {};
+        bd.ByteWidth = sizeof(initial_cut_evidence);
+        D3D11_SUBRESOURCE_DATA cut_sd = {initial_cut_evidence, 0, 0};
+        device->CreateBuffer(&bd, &cut_sd, &scene_cut_evidence_buf);
+        if (scene_cut_evidence_buf) {
+          device->CreateUnorderedAccessView(
+            scene_cut_evidence_buf.Get(),
+            nullptr,
+            &scene_cut_evidence_uav
+          );
         }
 
-        const auto &init_state = sbs_adaptive_state::initial_values;
+        const auto &init_state = sbs_adaptive_state::initial_words;
         bd.ByteWidth = sizeof(init_state);
         bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
         bd.StructureByteStride = sizeof(float) * 4;
         D3D11_SUBRESOURCE_DATA sd2 = {init_state.data(), 0, 0};
-        device->CreateBuffer(&bd, &sd2, &subject_buf);
-        if (subject_buf) {
-          device->CreateUnorderedAccessView(subject_buf.Get(), nullptr, &subject_uav);
-          device->CreateShaderResourceView(subject_buf.Get(), nullptr, &subject_srv);
+        device->CreateBuffer(&bd, &sd2, &cut_state_buf);
+        if (cut_state_buf) {
+          device->CreateUnorderedAccessView(cut_state_buf.Get(), nullptr, &cut_state_uav);
+          device->CreateShaderResourceView(cut_state_buf.Get(), nullptr, &cut_state_srv);
         }
       }
 
-      D3D11_SAMPLER_DESC samp_desc = {};
-      samp_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-      samp_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
-      samp_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
-      samp_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-      device->CreateSamplerState(&samp_desc, &linear_sampler);
-
-      const bool analysis_ready = host_v2_required() ?
-        depth_scene_cut_evidence_cs && depth_scene_cut_resolve_cs && scene_cut_evidence_uav :
-        depth_subject_hist_cs && depth_subject_resolve_cs &&
-          subject_hist_uav && subject_plain_uav;
+      const bool analysis_ready =
+        depth_scene_cut_evidence_cs && depth_scene_cut_resolve_cs && scene_cut_evidence_uav;
       valid = engine && exec_context && cu_stream && rgb_to_nchw_cs && buffer_to_tex_cs &&
               depth_minmax_cs && depth_minmax_ema_cs && depth_hist_cs && depth_valid_history_cs &&
               minmax_raw_uav && minmax_ema_uav && minmax_ema_srv && hist_uav &&
-              analysis_ready && subject_uav && subject_srv && linear_sampler;
+              analysis_ready && cut_state_uav && cut_state_srv;
       if (!valid) {
-        BOOST_LOG(error) << "Depth estimator failed: required engine or Bestv2 GPU resource initialization failed.";
+        BOOST_LOG(error) << "Depth estimator failed: required engine or Host SBS GPU resource initialization failed.";
         return;
       }
 
@@ -2414,7 +2370,7 @@ namespace models {
       }
       if (!warmup_execution_context(cuda, cuda_ctx, exec_context)) {
         std::lock_guard<std::mutex> lock(g_trt_mutex);
-        quarantine_execution_context_locked(engine_key, exec_context);
+        quarantine_execution_context_locked(engine_key, exec_context, false);
         return false;
       }
       {
@@ -2490,7 +2446,9 @@ namespace models {
               << "Quarantining a TensorRT execution context after CUDA/TensorRT execution or "
                  "teardown failure.";
           }
-          quarantine_execution_context_locked(engine_key, exec_context);
+          quarantine_execution_context_locked(
+            engine_key, exec_context, context_warmed
+          );
         }
       }
       // TRT runtime/engines are cached globally, do not destroy them here.
@@ -2789,7 +2747,7 @@ namespace models {
       context->CSSetShader(depth_coordinate_v2_state_resolve_cs.Get(), nullptr, 0);
       ID3D11ShaderResourceView *state_srvs[3] = {
         depth_coordinate_v2_frame_stats_srv.Get(),
-        subject_srv.Get(),
+        cut_state_srv.Get(),
         depth_coordinate_v2_histogram_snapshot_srv.Get(),
       };
       context->CSSetShaderResources(0, 3, state_srvs);
@@ -2890,10 +2848,28 @@ namespace models {
           depth_coordinate_v2_coordinate_srv) {
         return true;
       }
-      if (!parallax_v2_producer_active ||
-          !depth_coordinate_v2_coordinate_diagnostic_cs ||
-          target_w <= 0 || target_h <= 0) {
+      if (!parallax_v2_producer_active || target_w <= 0 || target_h <= 0) {
         return false;
+      }
+      if (!depth_coordinate_v2_coordinate_diagnostic_cs) {
+        const auto diagnostic_sources = host_sbs_shader_cache::snapshot_sources(
+          shader_root,
+          host_sbs_shader_cache::parallax_v2_diagnostic_specs
+        );
+        if (!diagnostic_sources ||
+            !create_shader(
+              diagnostic_sources,
+              host_sbs_shader_cache::depth_coordinate_v2_coordinate_diagnostic,
+              depth_coordinate_v2_coordinate_diagnostic_cs
+            )) {
+          if (!depth_coordinate_v2_coordinate_diagnostic_error_logged) {
+            BOOST_LOG(warning)
+              << "Host SBS V2 canonical-coordinate Dump 3D shader is unavailable; "
+                 "live rendering remains active.";
+            depth_coordinate_v2_coordinate_diagnostic_error_logged = true;
+          }
+          return false;
+        }
       }
 
       D3D11_TEXTURE2D_DESC desc {};
@@ -2986,7 +2962,7 @@ namespace models {
     ) {
       estimate_result r;
       r.depth = output_srv();
-      r.subject = subject_srv;
+      r.cut_state = cut_state_srv;
       r.depth_frame_state = minmax_ema_srv;
       r.ema_motion_mask = ema_motion_mask_srv;
       r.raw_model_depth = tensor_out_srv;
@@ -3162,15 +3138,15 @@ namespace models {
 
       D3D11_BUFFER_DESC cb_desc = {};
       cb_desc.Usage = D3D11_USAGE_IMMUTABLE;
-      cb_desc.ByteWidth = 64;  // shared depth-pass cbuffer (16 floats/uints; see below)
+      cb_desc.ByteWidth = 48;  // shared depth-pass cbuffer (12 floats/uints; see below)
       cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 
-      // Shared depth-pass constants, 16 scalars = 4 float4 registers. THIS fill is the
+      // Shared depth-pass constants, 12 scalars = 3 float4 registers. THIS fill is the
       // single source of truth for the canonical layout in
       // shaders/directx/include/depth_constants.hlsl -- every cbf[N] below must stay
       // slot-for-slot with the include (which every depth shader #includes). To add a
       // field: append it here AND to the include.
-      uint32_t cb[16] = {};
+      uint32_t cb[12] = {};
       float *cbf = (float *) cb;
       cb[0] = (uint32_t) target_w;
       cb[1] = (uint32_t) target_h;
@@ -3181,11 +3157,6 @@ namespace models {
       cbf[6] = ema_edge_change;
       cbf[7] = ema_edge_gradient;
       cbf[8] = ema_edge_strength;
-      cbf[9] = subject_recenter;  // subject recenter strength (depth_subject_resolve_cs)
-      cbf[10] = subject_stretch ? 1.0f : 0.0f;
-      cbf[11] = adaptive_pop ? 1.0f : 0.0f;
-      cbf[12] = adaptive_pop_max_ratio;
-      cbf[13] = zero_plane_mode;
       D3D11_SUBRESOURCE_DATA sd = {cb, 0, 0};
       cbuffer.Reset();
       device->CreateBuffer(&cb_desc, &sd, &cbuffer);
@@ -3242,7 +3213,7 @@ namespace models {
           minmax_ema_uav.Get(),
           minmax_raw_uav.Get(),
           hist_uav.Get(),
-          subject_uav.Get(),
+          cut_state_uav.Get(),
         };
         context->CSSetUnorderedAccessViews(0, 4, ema_uavs, nullptr);
         context->Dispatch(1, 1, 1);
@@ -3295,9 +3266,32 @@ namespace models {
       context->CSSetUnorderedAccessViews(0, 1, null_uav2, nullptr);
       context->CSSetShaderResources(0, 4, null_srvs);
 
-      // 3s. Analyze the freshly normalized private cut field. Live V2 dispatches only compact
-      // evidence + cut resolve; the evaluator retains its established subject/geometry analysis.
+      // 3s. Analyze the freshly normalized private cut field: compact evidence + cut resolve.
       {
+        // Scene refractory time is measured in source-stream frames, not completed depth
+        // observations. Seed the otherwise GPU-written evidence buffer on the same immediate
+        // context; UpdateSubresource is ordered before the following dispatch and adds no sync.
+        std::uint64_t stream_frame_delta = 1u;
+        if (has_last_postprocessed_frame_id &&
+            pending_frame_id > last_postprocessed_frame_id) {
+          stream_frame_delta = pending_frame_id - last_postprocessed_frame_id;
+        }
+        std::array<std::uint32_t, 10> scene_cut_evidence_seed {};
+        scene_cut_evidence_seed[9] = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+          stream_frame_delta,
+          65535u
+        ));
+        context->UpdateSubresource(
+          scene_cut_evidence_buf.Get(),
+          0,
+          nullptr,
+          scene_cut_evidence_seed.data(),
+          0,
+          0
+        );
+        last_postprocessed_frame_id = pending_frame_id;
+        has_last_postprocessed_frame_id = true;
+
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
         ID3D11ShaderResourceView *analysis_srvs[7] = {
           depth_srv.Get(),
@@ -3309,22 +3303,13 @@ namespace models {
           previous_appearance_ordinal_srv.Get()
         };
         context->CSSetShaderResources(0, 7, analysis_srvs);
-        if (host_v2_required()) {
-          context->CSSetShader(depth_scene_cut_evidence_cs.Get(), nullptr, 0);
-          context->CSSetUnorderedAccessViews(
-            0,
-            1,
-            scene_cut_evidence_uav.GetAddressOf(),
-            nullptr
-          );
-        } else {
-          context->CSSetShader(depth_subject_hist_cs.Get(), nullptr, 0);
-          ID3D11UnorderedAccessView *hist_uavs[2] = {
-            subject_hist_uav.Get(),
-            subject_plain_uav.Get()
-          };
-          context->CSSetUnorderedAccessViews(0, 2, hist_uavs, nullptr);
-        }
+        context->CSSetShader(depth_scene_cut_evidence_cs.Get(), nullptr, 0);
+        context->CSSetUnorderedAccessViews(
+          0,
+          1,
+          scene_cut_evidence_uav.GetAddressOf(),
+          nullptr
+        );
         context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
 
         ID3D11UnorderedAccessView *null_uavs_h2[2] = {nullptr, nullptr};
@@ -3340,27 +3325,14 @@ namespace models {
         };
         context->CSSetShaderResources(0, 7, null_analysis_srvs);
 
-        if (host_v2_required()) {
-          context->CSSetShader(depth_scene_cut_resolve_cs.Get(), nullptr, 0);
-          ID3D11UnorderedAccessView *cut_uavs[2] = {
-            subject_uav.Get(),
-            scene_cut_evidence_uav.Get()
-          };
-          context->CSSetUnorderedAccessViews(0, 2, cut_uavs, nullptr);
-          context->Dispatch(1, 1, 1);
-          context->CSSetUnorderedAccessViews(0, 2, null_uavs_h2, nullptr);
-        } else {
-          context->CSSetShader(depth_subject_resolve_cs.Get(), nullptr, 0);
-          ID3D11UnorderedAccessView *subj_uavs[3] = {
-            subject_hist_uav.Get(),
-            subject_uav.Get(),
-            subject_plain_uav.Get()
-          };
-          context->CSSetUnorderedAccessViews(0, 3, subj_uavs, nullptr);
-          context->Dispatch(1, 1, 1);
-          ID3D11UnorderedAccessView *null_uavs2[3] = {nullptr, nullptr, nullptr};
-          context->CSSetUnorderedAccessViews(0, 3, null_uavs2, nullptr);
-        }
+        context->CSSetShader(depth_scene_cut_resolve_cs.Get(), nullptr, 0);
+        ID3D11UnorderedAccessView *cut_uavs[2] = {
+          cut_state_uav.Get(),
+          scene_cut_evidence_uav.Get()
+        };
+        context->CSSetUnorderedAccessViews(0, 2, cut_uavs, nullptr);
+        context->Dispatch(1, 1, 1);
+        context->CSSetUnorderedAccessViews(0, 2, null_uavs_h2, nullptr);
 
         // tensor_in_buf, appearance_ordinal_buf and depth_tex still own the matched inputs/result
         // for this completed inference. Advance the complete appearance/depth tuple only when the
@@ -3373,7 +3345,7 @@ namespace models {
           minmax_ema_srv.Get(),
           tensor_in_srv.Get(),
           appearance_ordinal_srv.Get(),
-          subject_srv.Get(),
+          cut_state_srv.Get(),
           depth_srv.Get()
         };
         ID3D11UnorderedAccessView *history_uavs[3] = {
@@ -3396,8 +3368,8 @@ namespace models {
         context->CSSetUnorderedAccessViews(0, 3, null_history_uavs, nullptr);
       }
 
-      // Production V2 runs after the shared scene-cut bridge so the only legacy-analysis input is
-      // its confirmed-cut generation (with the same-frame pulse retained for attribution).
+      // Production V2 runs after the shared scene-cut bridge and consumes its confirmed-cut
+      // generation, with the same-frame pulse retained for attribution.
       if (parallax_v2_producer_active) {
         // This nested interval covers exactly the seven V2 compute passes. It remains inside the
         // inclusive depth_postprocess_gpu interval so existing benchmark semantics do not move.
@@ -3537,7 +3509,7 @@ namespace models {
       if (!preflighted && cu_stream && cuda.cuStreamQuery) {
         auto q = cuda.cuStreamQuery(cu_stream);
         if (q == CUDA_ERROR_NOT_READY) {
-          // Reuse the last normalized depth and subject state while inference is busy.
+          // Reuse the last normalized depth and cut state while inference is busy.
           if (diagnostics_enabled) {
             throughput_stats_busy_drops++;
           }
@@ -3730,16 +3702,14 @@ namespace models {
                        SUCCEEDED(device->CreateShaderResourceView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_srv));
 
         if (!resources_ok) {
-          BOOST_LOG(error) << "Depth estimator D3D11 resource creation failed"
-                           << (host_v2_required() ?
-                                 "; Host SBS V2 will fail flat." :
-                                 "; evaluation may retry on a later frame.");
+          BOOST_LOG(error)
+            << "Depth estimator D3D11 resource creation failed; Host SBS V2 will fail flat.";
           target_w = target_h = 0;
           mark_terminal_failure();
           return {};
         }
 
-        if (host_v2_required() && !ensure_parallax_v2_resources()) {
+        if (!ensure_parallax_v2_resources()) {
           mark_terminal_failure();
           return {};
         }
@@ -3850,7 +3820,6 @@ namespace models {
         appearance_ordinal_uav.Get()
       };
       context->CSSetUnorderedAccessViews(0, 2, preprocess_uavs, nullptr);
-      context->CSSetSamplers(0, 1, linear_sampler.GetAddressOf());
 
       context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
 
@@ -3932,10 +3901,8 @@ namespace models {
         if (!bindings_ok) {
           mark_terminal_failure();
           if (!stream_error_logged) {
-            BOOST_LOG(error) << "TensorRT shape/tensor binding failed"
-                             << (host_v2_required() ?
-                                   "; Host SBS V2 will fail flat." :
-                                   "; evaluation may retry on a later frame.");
+            BOOST_LOG(error)
+              << "TensorRT shape/tensor binding failed; Host SBS V2 will fail flat.";
             stream_error_logged = true;
           }
         }
@@ -3998,10 +3965,9 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context,
     const std::filesystem::path &assets_dir,
     const config::video_t::sbs_t &cfg,
-    const config::depth_model_info &model,
-    const depth_estimator_usage_e usage
+    const config::depth_model_info &model
   ):
-      pimpl(std::make_unique<impl>(device, context, assets_dir, cfg, model, usage)) {}
+      pimpl(std::make_unique<impl>(device, context, assets_dir, cfg, model)) {}
 
   video_depth_estimator::~video_depth_estimator() = default;
 

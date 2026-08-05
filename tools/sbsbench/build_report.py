@@ -1190,22 +1190,14 @@ def run_label(run, run_dir, default):
 CTRL_MODE = CTRL["meta"].get("mode")
 TREAT_MODE = TREAT["meta"].get("mode")
 IS_MODE_CMP = bool(CTRL_MODE and TREAT_MODE and CTRL_MODE != TREAT_MODE)
-CTRL_PROFILES = {e.get("meta", {}).get("profile") for e in CTRL["clips"].values()
-                 if e.get("meta", {}).get("profile")}
-TREAT_PROFILES = {e.get("meta", {}).get("profile") for e in TREAT["clips"].values()
-                  if e.get("meta", {}).get("profile")}
-IS_PROFILE_CMP = bool(CTRL_PROFILES and TREAT_PROFILES and CTRL_PROFILES != TREAT_PROFILES)
 IS_COMPARISON_ONLY = (TREAT.get("meta", {}).get("run_kind") == "comparison-only" or
                       TREAT.get("verdict") == "comparison_only")
-IS_TRADEOFF_CMP = IS_MODE_CMP or IS_PROFILE_CMP
+IS_TRADEOFF_CMP = IS_MODE_CMP
 CTRL_NAME = run_label(CTRL, ctrl_dir, "control")
 TREAT_NAME = run_label(TREAT, treat_dir, "treatment")
 # Short tags for inline value labels and image captions (arrow is always CTRL -> TREAT).
-CTRL_TAG = (CTRL_MODE if IS_MODE_CMP else
-            next(iter(CTRL_PROFILES)) if IS_PROFILE_CMP and len(CTRL_PROFILES) == 1 else "control")
-TREAT_TAG = (TREAT_MODE if IS_MODE_CMP else
-             next(iter(TREAT_PROFILES)) if IS_PROFILE_CMP and len(TREAT_PROFILES) == 1 else
-             "treatment")
+CTRL_TAG = CTRL_MODE if IS_MODE_CMP else "control"
+TREAT_TAG = TREAT_MODE if IS_MODE_CMP else "treatment"
 
 
 def treatment_name():
@@ -1304,8 +1296,6 @@ HARD_DISPLAY = (
     ("shot_state_trace_inconsistent", "Shot trace consistency", ""),
     ("shot_state_initialized_ok", "Shot state initialized", "%"),
     ("shot_state_relative_escape_ok", "Latched relative escape", "%"),
-    ("shot_state_zero_anchor_drift_px", "Exposure zero-anchor drift", " px"),
-    ("shot_state_adaptive_pop_drift", "Exposure adaptive-pop drift", ""),
 )
 
 HARD_SUPPORT_KEYS = {
@@ -1323,8 +1313,6 @@ HARD_SUPPORT_KEYS = {
     "shot_state_trace_inconsistent": "shot_state_contract_support",
     "shot_state_initialized_ok": "shot_state_contract_support",
     "shot_state_relative_escape_ok": "latched_motion_contract_support",
-    "shot_state_zero_anchor_drift_px": "exposure_shot_state_contract_support",
-    "shot_state_adaptive_pop_drift": "exposure_shot_state_contract_support",
 }
 
 SUPPORTING_HEATMAP_AXES = (
@@ -1823,7 +1811,7 @@ METRIC_DEFS = [
          "Explicit prediction-to-GT sign check; a negative fit is a catastrophic near/far inversion.",
          "must remain 100%"),
     ("shot_state_accepted_pulse", "shot_pulses",
-         "Accepted production shot-state pulses reconstructed from initialized scene-age resets in the benchmark-only GPU SubjectState trace.",
+         "Accepted production shot-state pulses reconstructed from initialized scene-age resets in the benchmark-only GPU cut-state trace.",
          "must match the clip contract"),
     ("shot_state_expected_pulse", "expected_shot_pulses",
          "Expected shot-pulse count declared by the authenticated synthetic clip contract.",
@@ -1835,17 +1823,11 @@ METRIC_DEFS = [
          "Disagreement between an initialized scene-age reset and entry into the production cut-latched state flag.",
          "must remain zero"),
     ("shot_state_initialized_ok", "shot_state_initialized",
-         "The monitored trace has initialized subject state, a valid zero-plane anchor, and valid matched model-input history.",
+         "The monitored trace has initialized cut state and available matched model-input history.",
          "must remain 100%"),
     ("shot_state_relative_escape_ok", "relative_escape",
          "The setup cut remains latched with both proposal arms closed through persistent motion, then the later accepted cut arrives only after the relative-geometry refractory window.",
          "must remain 100%"),
-    ("shot_state_zero_anchor_drift_px", "exposure_anchor_drift",
-         "Absolute source-pixel movement of the settled shot-latched zero-plane anchor during an exactly authenticated global-exposure sequence.",
-         "must remain zero"),
-    ("shot_state_adaptive_pop_drift", "exposure_pop_drift",
-         "Absolute change in the settled shot-latched adaptive-pop ratio during an exactly authenticated global-exposure sequence.",
-         "must remain zero"),
 ]
 _ROLE_ORDER = {"hard": 0, "primary": 1, "diagnostic": 2, "reported": 3}
 
@@ -2394,7 +2376,7 @@ code{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px s
 python tools/sbsbench/run_eval.py --label treat --extra __TREAT_ARGS__     # treatment
 python tools/sbsbench/generate_report.py &lt;build&gt;/sbs_eval/ctrl &lt;build&gt;/sbs_eval/treat report.html</pre>
     <p style="color:var(--muted);font-size:13px;margin-top:12px">Metrics: <code>tools/sbsbench/sbsbench.py</code>
-    &middot; gate: <code>thresholds.json</code> &middot; plan: <code>docs/sbs-benchmark-plan.md</code></p>
+    &middot; gate: <code>thresholds.json</code> &middot; policy: <code>tools/sbsbench/METRICS.md</code></p>
   </section>
 
   <details class="fold bar-fold">
@@ -2412,9 +2394,8 @@ models = ", ".join(sorted({m for r in (CTRL, TREAT)
                            for m in {e["meta"].get("model", "?") for e in r["clips"].values()}}))
 if IS_TRADEOFF_CMP:
     h1 = f"{CTRL_NAME} vs. {TREAT_NAME}"
-    comparison_kind = "modes" if IS_MODE_CMP else "profiles"
     displayed_verdict = AB_DECISION["verdict"].replace("_", " ")
-    lede = (f"Comparing two pipeline {comparison_kind} on identical clips: <b>{CTRL_NAME}</b> against "
+    lede = (f"Comparing two pipeline modes on identical clips: <b>{CTRL_NAME}</b> against "
             f"<b>{TREAT_NAME}</b>. The canonical report verdict is "
             f"<b>{html.escape(displayed_verdict)}</b>; read the per-axis split, gate, and matched "
             f"per-clip evidence below.")
@@ -2454,7 +2435,7 @@ HTML = (HTML.replace("__H1__", h1).replace("__LEDE__", lede)
         .replace("__CHARTS__", scorecard_charts())
         .replace("__METRICS__", metrics_section())
         .replace("__FOOTER__", clean_footer())
-        .replace("__TREAT_ARGS__", " ".join(TREAT["meta"].get("extra_args") or ["profile defaults"])))
+        .replace("__TREAT_ARGS__", " ".join(TREAT["meta"].get("extra_args") or ["canonical defaults"])))
 os.makedirs(os.path.dirname(os.path.abspath(out_html)), exist_ok=True)
 with open(out_html, "w", encoding="utf-8") as f:
     f.write(HTML)

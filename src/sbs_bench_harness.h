@@ -4,7 +4,8 @@
  *
  * Runs the REAL depth estimator + the REAL SBS composite shaders over a fixed directory of
  * input frames and writes the resulting per-eye SBS PNGs, deterministically and without a
- * game or a connected client. This is the Tier-1 harness from docs/sbs-benchmark-plan.md:
+ * game or a connected client. This is the production-path harness documented in
+ * tools/sbsbench/README.md:
  * it closes the offline-sim-vs-headset gap by exercising production code paths, and its
  * output is scored by tools/sbsbench/sbsbench.py.
  */

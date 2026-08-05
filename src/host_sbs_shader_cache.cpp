@@ -449,26 +449,6 @@ namespace models::host_sbs_shader_cache {
 
   bool prewarm(const std::filesystem::path &assets_dir) {
     const auto shader_root = assets_dir / "shaders" / "directx";
-    const auto preprocess_sources = snapshot_sources(
-      shader_root,
-      preprocess_specs
-    );
-    const auto sources = snapshot_sources(
-      shader_root,
-      core_specs
-    );
-    if (!preprocess_sources || !sources || !get(preprocess_sources, rgb_to_nchw)) {
-      return false;
-    }
-    for (const auto &spec : core_specs) {
-      if (spec.filename == rgb_to_nchw.filename) {
-        continue;
-      }
-      if (!get(sources, spec)) {
-        return false;
-      }
-    }
-
     const auto parallax_v2_sources = snapshot_sources(
       shader_root,
       parallax_v2_producer_specs
@@ -493,10 +473,22 @@ namespace models::host_sbs_shader_cache {
         return false;
       }
     }
+    const auto flat_fallback_sources = snapshot_sources(
+      shader_root,
+      sbs_flat_fallback_specs
+    );
+    if (!flat_fallback_sources) {
+      return false;
+    }
+    for (const auto &spec : sbs_flat_fallback_specs) {
+      if (!get(flat_fallback_sources, spec)) {
+        return false;
+      }
+    }
     BOOST_LOG(info)
       << "Prewarmed the complete Host SBS V2 shader set ("
-      << core_specs.size() + parallax_v2_producer_specs.size() +
-           parallax_v2_live_renderer_specs.size()
+      << parallax_v2_producer_specs.size() + parallax_v2_live_renderer_specs.size() +
+           sbs_flat_fallback_specs.size()
       << " production shaders; dump-only shaders remain lazy).";
     return true;
   }

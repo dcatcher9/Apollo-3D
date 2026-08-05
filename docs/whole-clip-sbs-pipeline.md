@@ -2,9 +2,14 @@
 
 Sunshine 3D can convert a supported video into a compressed packed side-by-side (SBS) video from
 the **Convert** page in its Web UI. Unlike live Host 3D, the offline path can wait for a scene to
-be understood before committing that scene's camera. It uses bounded lookahead to revise proposed
-cut locations, then selects one adaptive-pop value and one zero plane from evidence collected
-across the whole scene.
+be understood before committing its boundary and replay cache. It uses bounded lookahead to revise
+proposed cut locations, then replays the finalized scene through the same Depth Coordinate V2
+geometry used by live Host SBS.
+
+Offline lookahead has no independent geometry authority. `sbs_3d_pop_strength` remains the literal
+requested strength, and each finalized scene acquires the same V2 raw center described in
+[Host SBS pipeline](host-sbs.md). The planner can revise a boundary; it cannot modify the renderer's
+curve, pop, ownership, cliff conditioning, or scene-center policy.
 
 The production implementation is a native C++ job manager inside Sunshine 3D plus an isolated
 `sunshine.exe` child worker. It does **not** invoke Python, require Python to be installed, or
@@ -13,7 +18,9 @@ install a separate Windows Service.
 > [!IMPORTANT]
 > Offline Host 3D currently requires Windows, an NVIDIA GPU with TensorRT support, and NVIDIA
 > NVENC support for the selected H.265 or AV1 output. There is no software-encode or CPU-depth
-> fallback in the production job.
+> fallback in the production job. Its source must also pass the shared
+> [authenticated resolution fitting](host-sbs.md#authenticated-resolution-fitting) contract; an
+> unsupported fitted tensor aborts the job rather than producing a flat video.
 
 ## Why the offline path is scene based
 
@@ -24,15 +31,16 @@ boundary briefly and check the frames around it:
 2. A bounded native lookahead window checks the proposal's appearance and depth-geometry evidence.
    It can move the boundary, reject a flash that returns to the same scene, or retain a qualified
    later geometry change.
-3. Once the boundary is finalized, the planner evaluates the completed scene's depth-edge risk,
-   anchor distribution, validity, and fallback evidence.
-4. It commits a single absolute pop strength and source-pixel zero-plane shift for that scene.
-5. The scene is replayed from its exact cached depth/state without another TensorRT inference,
+3. Once the boundary is finalized, the worker closes the exact depth/state cache for that scene.
+4. It records the literal configured pop and acquires the V2 scene center from the first usable
+   field after the finalized boundary. It does not derive another scene-level geometry curve.
+5. The scene is replayed from that exact cache without another TensorRT inference,
    encoded, and released from the cache.
 
-This produces a stable camera within each detected scene while keeping storage bounded. Cut
-detection is still an estimator, not ground truth. The scene audit records why each boundary and
-camera decision was made instead of claiming that the result is automatically comfort-optimal.
+This produces the same shot-stable V2 camera contract as live Host SBS while keeping storage
+bounded. Cut detection is still an estimator, not ground truth. The scene audit records why each
+boundary was moved, retained, rejected, or forced by a resource limit; it does not claim to have
+optimized the scene's pop or convergence.
 
 ```mermaid
 flowchart LR
@@ -40,7 +48,7 @@ flowchart LR
     PROBE["FFprobe<br/>timeline · streams · color · HDR"]
     ANALYZE["Continuous native analysis<br/>one TensorRT inference pass"]
     LOOK["Bounded lookahead<br/>revise or reject cut proposal"]
-    CAMERA["Whole-scene decision<br/>adaptive pop · zero plane"]
+    CAMERA["V2 scene acquisition<br/>literal pop · raw center"]
     REPLAY["Exact depth/state replay<br/>zero TensorRT enqueues"]
     ENCODE["One continuous NVENC process<br/>H.265 or AV1"]
     MUX["Stream-copy final mux<br/>audio · subtitles · metadata · chapters"]
@@ -121,9 +129,9 @@ account, login prompt, daemon, or installed Windows Service; a host intentionall
 without Web UI credentials remains that way.
 
 1. Enter an absolute path to a video readable by the Windows account running Sunshine 3D.
-2. Enter a new output filename. Sunshine writes only inside its managed offline-export directory
+2. Enter a new output filename. Sunshine 3D writes only inside its managed offline-export directory
    and refuses path traversal or overwrite.
-3. Select **H.265 / HEVC** or **AV1**. Both production options use NVENC. Sunshine checks
+3. Select **H.265 / HEVC** or **AV1**. Both production options use NVENC. Sunshine 3D checks
    packaged codec support at startup, then runs the hardware preflight only after this job has
    acquired the exclusive offline GPU lease. For AV1, the worker writes the lowest defined level
    that fits NVENC's 64-pixel-aligned packed coded raster and the fastest source frame interval;
@@ -133,7 +141,7 @@ without Web UI credentials remains that way.
 5. Start the job and monitor its current phase, source progress, and committed scene decisions.
 
 Only one offline job runs at a time. The job manager keeps durable job state, supports
-cancellation, and marks an unfinished job as interrupted after a Sunshine restart; it does not
+cancellation, and marks an unfinished job as interrupted after a Sunshine 3D restart; it does not
 claim to resume partially encoded work.
 
 Host startup performs no NVENC work, so it cannot contend with a client that connects immediately.
@@ -188,7 +196,7 @@ Static HDR is supported rather than tone-mapped to SDR:
   metadata are carried through and verified after encoding; and
 - the output is rejected if its static HDR contract does not match the source.
 
-Sunshine fails closed before TensorRT starts when it sees Dolby Vision, HDR10+, SMPTE ST 2094,
+Sunshine 3D fails closed before TensorRT starts when it sees Dolby Vision, HDR10+, SMPTE ST 2094,
 other dynamic HDR metadata, ambiguous high-bit-depth non-PQ/HLG input, missing required BT.2020
 tags, or rotation. Input must also retain one fixed supported raster geometry for the job. Dynamic
 HDR is not silently flattened to static HDR.
@@ -201,7 +209,7 @@ Native jobs retain machine-readable evidence under their managed job directory:
 |---|---|
 | `source-contract.json` | Compact source raster, color, static-HDR, timeline range, duration extrema, and exact timing SHA-256 |
 | `native-capabilities.json` | Required cache/replay and atomic-publication capabilities |
-| `scene-audit.json` | Committed scenes, revised/rejected boundaries, camera settings, warnings, and cache use |
+| `scene-audit.json` | Committed scenes, revised/rejected boundaries, warnings, and cache use |
 | `output-contract.json` | Compact final codec, raster, HDR, timeline range, duration extrema, and exact timing SHA-256 |
 | `timeline-contract.json` | Aggregate no-drift evidence for copied auxiliary streams and chapters |
 | worker progress/result/log files | Durable status, failure provenance, and child-process diagnostics |
@@ -223,11 +231,11 @@ during final equivalence validation, so that phase has an explicit peak contract
 records and 256 MiB of logical packet-timing payload.
 
 The native worker also avoids retaining duplicate state histories. Standalone benchmark tooling
-may request `adaptive_state.jsonl`, but managed offline jobs use an atomic latest-record transport:
-one bounded header and one replace-in-place frame snapshot. During analysis, the worker consumes
-and deletes each snapshot before it admits the next source frame. Scene replay does not consume
-the state records; its harness atomically overwrites the same fixed snapshot for every frame and
-the worker removes it after consuming that scene's contract. `subject_state.json` remains an
+may request `adaptive_state.jsonl`, but managed offline analysis uses an atomic latest-record
+transport: one bounded header and one replace-in-place frame snapshot. During analysis, the worker
+consumes and deletes each snapshot before it admits the next source frame. Scene replay runs no cut
+resolver and therefore emits no adaptive-state transport; the analysis trace remains authoritative.
+`cut_state.json` remains an
 evaluation-only artifact and is not generated or advertised by whole-clip jobs. Raw analysis
 transport lives below `native-work`, which the manager removes after every reaped outcome. Each
 worker-owned FFmpeg, FFprobe, and native-harness diagnostic pipe retains an 8 MiB prefix/tail log
@@ -240,36 +248,33 @@ to drain so there is no disk overshoot or child backpressure deadlock. Together 
 keep both managed storage and probe memory bounded without weakening frame-by-frame timeline,
 color, HDR, codec, or stream-copy validation.
 
-### Live versus offline adaptive-state readback
+### Live versus offline state readback
 
 The live Host 3D telemetry shown by a client is intentionally opportunistic. It uses a three-slot
 GPU staging/query ring, never flushes or waits for a result, skips a busy slot, coalesces to the
 newest completed sample, and sends telemetry on an unreliable sequenced channel. Under GPU or
-network load, samples can therefore be missing even though the adaptive controller continued to
-update normally.
+network load, samples can therefore be missing even though the GPU cut detector and V2 scene state
+continued to update normally. This transport carries cut evidence and depth health, not renderer
+geometry.
 
 Offline evaluation has a different contract: it performs a blocking state read after each
 estimator update and backpressures the next source frame until the worker has consumed that exact
-snapshot. Its adaptive trace is complete for every admitted source frame. Do not compare live and
+snapshot. Its cut/state trace is complete for every admitted source frame. Do not compare live and
 offline sample counts or cadence one-for-one, and do not diagnose a controller mismatch from a
 gap in live telemetry. Compare values only at matching sampled frame identities; use the offline
-trace when complete cut/pop/zero-plane history is required.
+trace when complete cut attribution and depth-health history are required.
 
-Ordinary depth-only boundary refinement uses the same `0.005` exposure-invariant structural-change
-floor as the live resolver. A persistent structureless transition is the explicit exception: the
-offline planner accepts that bypass only when the trace also carries the producer's
-geometry-candidate bit or the causal hard-cut pulse. The structureless bit by itself is ambiguous
-because it labels both the first low-detail update, whose endpoint is deliberately held, and the
-persistent successor. Consequently, an older or partial trace missing structural/candidate
-diagnostics can preserve its own non-vetoed causal proposal as an audited fallback, but it cannot
-prove or relocate the held endpoint with full live-detector parity. Missing raw-RGB magnitude
-alone does not downgrade a boundary whose depth and exposure-invariant structural evidence are
-complete; raw RGB is neither the geometry gate nor a substitute for it.
+Boundary refinement consumes the same authenticated evidence fields and structural-corroboration
+semantics as the live resolver; [Host SBS scene cuts](host-sbs-scene-cuts.md) is their only
+threshold and state-machine authority. A persistent structureless transition is the explicit
+offline exception: it may bypass the otherwise impossible structural test only when the complete
+trace carries the producer's `geometry_confirmation_candidate` bit. A hard-cut pulse is not a
+substitute for that evidence, and an older or partial trace missing the candidate field fails
+closed instead of inventing planner parity.
 
-The scene audit explicitly records that its boundaries are not ground truth and that its selected
-parameters are not proven to be universally optimal. Use the evidence to find suspicious cuts,
-administrative splits, parameter-range saturation, anchor fallbacks, invalid depth, and scenes
-whose measured range suggests recalibration.
+The scene audit explicitly records that its boundaries are not ground truth. Use the evidence to
+find suspicious cuts, administrative splits, invalid depth, and scenes whose frame-local container
+repeatedly saturates.
 
 The serialized job contract is deliberately bounded: `worker-result.json` is at most 16 MiB,
 `scene-audit.json` is at most 32 MiB, and a clip may contain at most 1,920 finalized scenes or
@@ -323,28 +328,17 @@ request. A package must install the tools either:
 - in a `tools` directory beside `sunshine.exe`.
 
 A trusted host-side configuration may supply absolute overrides, but this is not a per-job or
-browser-controlled field. Sunshine verifies that each path is a regular file with the expected
+browser-controlled field. Sunshine 3D verifies that each path is a regular file with the expected
 filename and probes its version before enabling offline jobs.
 
 The FFmpeg build must provide the required input demuxers/decoders, concat support, the filters
 used by the static-HDR path, Matroska/MP4 muxing, and `hevc_nvenc`/`av1_nvenc`. Packagers remain
 responsible for the FFmpeg build's redistribution terms. If the trusted tools are absent or fail
-their probe, offline conversion is unavailable; ordinary Sunshine streaming remains available.
+their probe, offline conversion is unavailable; ordinary Sunshine 3D streaming remains available.
 
-## Developer Python tools are not the application runtime
+## Evaluator boundary
 
-Files under `tools/sbsbench/`, including `run_whole_clip.py`, are developer reference,
-experimentation, reporting, and regression tools. They may use Python, resolve developer-installed
-media tools, expose software-codec experiments, or retain large lossless raster intermediates.
-None of those behaviors expands the production Web UI's supported runtime contract.
-
-For example, a developer can still create an inspectable reference run:
-
-```powershell
-python tools/sbsbench/run_whole_clip.py D:\video\movie.mkv `
-  --out E:\ApolloDev\whole_clip\movie-reference
-```
-
-Use [the SBS benchmark guide](../tools/sbsbench/README.md) for developer commands. Production
-users should start conversion from Sunshine 3D's **Convert** page; installing Python does not
-enable or change that feature.
+`tools/sbsbench` measures Host SBS geometry and state; it does not implement another whole-clip
+planner or production media workflow. Production users start conversion from Sunshine 3D's
+**Convert** page. Developers can exercise the native worker with the smoke test above without
+installing Python.

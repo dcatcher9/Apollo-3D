@@ -21,7 +21,7 @@ class CompareRunsTests(unittest.TestCase):
                 "clip_set_sha1": {"clip": "0123456789ab"},
                 "eval_schema": compare_runs.run_eval.EVAL_SCHEMA,
                 "suite": "core",
-                "mode": "profile",
+                "mode": "canonical-v2",
                 "run_kind": "comparison-only",
                 "metric_sha256": compare_runs.run_eval.metric_contract_sha(),
                 "label_contract_sha256": compare_runs.run_eval.label_contract_sha(),

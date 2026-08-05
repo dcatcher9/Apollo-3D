@@ -6,7 +6,7 @@
 RWStructuredBuffer<float4> MinMaxEma : register(u0);  // [0]={min,max,initialized,frame_state}
 RWByteAddressBuffer        MinMaxRaw : register(u1);  // min bits, max bits, valid count
 RWStructuredBuffer<uint>   Histogram : register(u2);  // permanent P2/P98 histogram from depth_hist_cs
-// Append-only diagnostics. SubjectState[0..2] remain the production warp contract:
+// Cut/health bridge. Geometry does not consume this state directly:
 //   [3].zw = valid-depth fraction, effective EMA range width
 //   [4].zw = empty-raw count, collapsed-raw count (stored as uint bits)
 //   [5].xy = current range-collapsed flag, depth-ready flag
@@ -25,7 +25,7 @@ void main() {
     bool valid_bounds = valid_count > 0u && !isnan(new_min) && !isinf(new_min) &&
                         !isnan(new_max) && !isinf(new_max) && new_max >= new_min;
     float4 telemetry =
-        DiagnosticState[SBS_STATE_VECTOR_LATCHED_EDGE_FRACTION];
+        DiagnosticState[SBS_STATE_VECTOR_CURRENT_DEPTH_CHANGE_FRACTION];
     uint4 health_counters =
         asuint(DiagnosticState[SBS_STATE_VECTOR_HARD_CUT_COUNT]);
     float4 telemetry_flags =
@@ -78,10 +78,12 @@ void main() {
                            new_max - new_min <= collapse_scale * 1.0e-5f;
     if (!valid_bounds) {
         SBS_STATE_EMPTY_RAW_COUNT(health_counters) =
-            min(SBS_STATE_EMPTY_RAW_COUNT(health_counters) + 1u, 0xfffffffeu);
+            min(SBS_STATE_EMPTY_RAW_COUNT(health_counters) + 1u,
+                SBS_ADAPTIVE_STATE_COUNTER_MAX);
     } else if (range_collapsed) {
         SBS_STATE_COLLAPSED_RAW_COUNT(health_counters) =
-            min(SBS_STATE_COLLAPSED_RAW_COUNT(health_counters) + 1u, 0xfffffffeu);
+            min(SBS_STATE_COLLAPSED_RAW_COUNT(health_counters) + 1u,
+                SBS_ADAPTIVE_STATE_COUNTER_MAX);
     }
     SBS_STATE_VALID_DEPTH_FRACTION(telemetry) =
         (float)valid_count / (float)max(target_w * target_h, 1u);
@@ -114,7 +116,7 @@ void main() {
     SBS_STATE_RANGE_COLLAPSED(telemetry_flags) =
         range_collapsed ? 1.0f : 0.0f;
     SBS_STATE_DEPTH_READY(telemetry_flags) = s.z > 0.5f ? 1.0f : 0.0f;
-    DiagnosticState[SBS_STATE_VECTOR_LATCHED_EDGE_FRACTION] = telemetry;
+    DiagnosticState[SBS_STATE_VECTOR_CURRENT_DEPTH_CHANGE_FRACTION] = telemetry;
     DiagnosticState[SBS_STATE_VECTOR_HARD_CUT_COUNT] =
         asfloat(health_counters);
     DiagnosticState[SBS_STATE_VECTOR_RANGE_COLLAPSED] = telemetry_flags;

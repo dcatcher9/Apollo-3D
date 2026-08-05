@@ -468,7 +468,7 @@ function New-WorkerSpec {
     codec = $Codec
     planner = [ordered] @{
       implementation = 'native-offline-scene-planner'
-      scene_plan_contract = 'scene-plan-v1'
+      scene_plan_contract = 'scene-plan-v2'
     }
     python_dependency = $false
   }
@@ -1056,12 +1056,11 @@ title=Smoke chapter
 
   $auditPath = Join-Path $successWorker.ResultDirectory 'scene-audit.json'
   $audit = Read-JsonFile -Path $auditPath
-  Assert-Contract ($audit.schema -eq 1) 'scene audit schema changed'
-  Assert-Contract ($audit.version -eq 'whole-clip-scene-audit-v1') 'scene audit version changed'
+  Assert-Contract ($audit.schema -eq 2) 'scene audit schema changed'
+  Assert-Contract ($audit.version -eq 'whole-clip-scene-audit-v2') 'scene audit version changed'
   Assert-Contract ($audit.status -eq 'complete') 'scene audit is not complete'
   Assert-Contract (@($audit.scenes).Count -eq [long] $result.scene_count) 'full scene audit count differs from result'
   Assert-Contract ($audit.claims.ground_truth -eq $false) 'scene audit incorrectly claims ground truth'
-  Assert-Contract ($audit.claims.comfort_optimal -eq $false) 'scene audit incorrectly claims comfort optimality'
   Assert-Contract ($audit.claims.best_parameters -eq $false) 'scene audit incorrectly claims globally best parameters'
   Assert-Contract (
     [long] $audit.cache.peak_cache_plus_raster_bytes -le
@@ -1125,13 +1124,13 @@ title=Smoke chapter
     [long] $adaptiveContract.frame_count -eq 16
   ) 'offline analysis did not attest its bounded adaptive-state transport'
   Assert-Contract (
-    $result.analysis_contract.PSObject.Properties.Name -notcontains 'subject_state'
-  ) 'whole-clip contract still advertises the suppressed subject-state trace'
+    $result.analysis_contract.PSObject.Properties.Name -notcontains 'cut_state'
+  ) 'whole-clip contract still advertises the suppressed cut-state trace'
   $rawAdaptiveHistory = @(Get-ChildItem -LiteralPath (
       Join-Path $successWorker.JobDirectory 'native-work'
     ) -Recurse -File | Where-Object {
       $_.Name -eq 'adaptive_state.jsonl' -or
-      $_.Name -eq 'subject_state.json'
+      $_.Name -eq 'cut_state.json'
     })
   Assert-Contract (
     $rawAdaptiveHistory.Count -eq 0

@@ -83,8 +83,8 @@ def compatibility_error(control, treatment):
             return f"{side} run has no metadata object"
         if not isinstance(run.get("clips"), dict):
             return f"{side} run has no clips object"
-        if run["meta"].get("mode") != "profile":
-            return f"{side} mode must be 'profile', got {run['meta'].get('mode')!r}"
+        if run["meta"].get("mode") != "canonical-v2":
+            return f"{side} mode must be 'canonical-v2', got {run['meta'].get('mode')!r}"
         if run["meta"].get("suite") not in valid_suites:
             return (f"{side} suite must be one of {sorted(valid_suites)!r}, "
                     f"got {run['meta'].get('suite')!r}")

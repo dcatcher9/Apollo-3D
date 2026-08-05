@@ -1,249 +1,181 @@
-# Troubleshooting
+# Troubleshooting Sunshine 3D
 
-## General
+Sunshine 3D supports Windows 11 with NVIDIA NVENC. Advice for Linux, macOS, AMD, Intel, and
+software encoding does not apply to this fork.
 
-### Forgotten Credentials
-If you forgot your credentials to the web UI, try this.
+## Start with the log
 
-@tabs{
-  @tab{General | ```bash
-    sunshine --creds {new-username} {new-password}
-    ```
-  }
-  @tab{AppImage | ```bash
-    ./sunshine.AppImage --creds {new-username} {new-password}
-    ```
-  }
-  @tab{Flatpak | ```bash
-    flatpak run --command=sunshine dev.lizardbyte.app.Sunshine --creds {new-username} {new-password}
-    ```
-  }
-}
+Open **Troubleshooting** in the Web UI and download the current log. Keep the timestamp of the
+failure and the client mode that was active: **2D**, **Client 3D**, **Raw SBS**, or **Host 3D**.
+Startup encoder probes intentionally try unsupported combinations and can print errors; diagnose
+the later selected encoder and stream, not an isolated probe line.
 
-> [!TIP]
-> Remember to replace `{new-username}` and `{new-password}` with your new credentials.
-> Do not include the curly braces.
+For a repeatable Host 3D visual defect, switch to Host 3D and use **Dump 3D**. A completed dump is
+an atomic source/depth/render package. Its numeric contract and replay commands are documented in
+[Dump 3D and exact replay](../tools/sbsbench/DUMP_FORMAT.md).
 
-### Unusual Mouse Behavior
-If you experience unusual mouse behavior, try attaching a physical mouse to the Sunshine host.
+## Web UI or pairing
 
-### Web UI Access
-Can't access the web UI?
+### The Web UI does not open
 
-1. Check firewall rules.
+1. Open `https://localhost:47990` on the host.
+2. Confirm that only one `sunshine.exe` process is running; the installed copy and a development
+   build cannot own the same ports simultaneously.
+3. Check Windows Defender Firewall and the Web UI address policy.
+4. If a reverse proxy is used, preserve the original HTTPS `Host` and `Origin` values.
 
-### Controller works on Steam but not in games
-One trick might be to change Steam settings and check or uncheck the configuration to support Xbox/PlayStation
-controllers and leave only support for Generic controllers.
+Local trusted access does not require a sign-in. WAN access does when it is explicitly enabled.
 
-Also, if you have many controllers already directly connected to the host, it might help to disable them so that the
-Sunshine-provided controller (connected to the guest) is the "first" one. In Linux this can be achieved on USB
-devices by finding the device in `/sys/bus/usb/devices/` and writing `0` to the `authorized` file.
+### PIN pairing fails
 
-### Network performance test
+Use the four-digit PIN shown by Moonlight 3D in Sunshine 3D's **Enter PIN** card. PIN is the
+primary flow; QR/OTP is secondary. Verify that the PC and headset can reach one another and that
+the client is using the modern encrypted protocol. The first successfully paired client receives
+full permissions; later clients may need launch/input permissions granted in the Web UI.
 
-For real-time game streaming the most important characteristic of the network
-path between server and client is not pure bandwidth but rather stability and
-consistency (low latency with low variance, minimal or no packet loss).
+### Reset WAN credentials
 
-The network can be tested using the multi-platform tool [iPerf3](https://iperf.fr).
+Stop the running host and run the packaged binary from an elevated Windows terminal:
 
-On the Sunshine host `iperf3` is started in server mode:
-
-```bash
-iperf3 -s
+```powershell
+sunshine.exe --creds <new-user> <new-password>
 ```
 
-On the client device iperf3 is asked to perform a 60-second UDP test in a reverse
-direction (from server to client) at a given bitrate (e.g. 50 Mbps):
+This changes Web UI credentials; it does not pair or unpair Moonlight 3D clients.
 
-```bash
-iperf3 -c {HostIpAddress} -t 60 -u -R -b 50M
+## Connection, latency, and stutter
+
+### Separate network loss from host load
+
+The client overlay and host log should be read together:
+
+- rising network latency, packet loss, or decode queueing points to the link or client;
+- rising capture, depth-inference, warp, or encode time points to the host GPU;
+- a stream that throttles from 90 to 72 FPS should report the new delivered cadence on both ends;
+  the host must follow the client rather than continue producing unused 90-FPS work.
+
+Enable `diagnostics = enabled` only while measuring. It adds bounded GPU timing and system
+sampling; turn it off for ordinary use. See [Configuration](configuration.md#diagnostics).
+
+### Network checks
+
+Prefer Ethernet for the PC and strong Wi-Fi for the headset. A stable link with low jitter matters
+more than peak bandwidth. To test the reverse PC-to-headset path with a client that provides
+iPerf3:
+
+```powershell
+# PC
+iperf3.exe -s
+
+# client
+iperf3 -c <PC-address> -t 60 -u -R -b 50M
 ```
 
-Watch the output on the client for packet loss and jitter values. Both should be
-(very) low. Ideally, packet loss remains less than 5% and jitter below 1 ms.
+Increase the test bitrate toward the intended stream rate. Packet loss should remain near zero;
+large jitter or loss warrants lowering bitrate before changing encoder or 3D settings.
 
-For Android clients use
-[PingMaster](https://play.google.com/store/apps/details?id=com.appplanex.pingmasternetworktools).
+### Host GPU is saturated
 
-For iOS clients use [HE.NET Network Tools](https://apps.apple.com/us/app/he-net-network-tools/id858241710).
+- Keep the NVIDIA driver current.
+- Do not force an adapter that is different from the display's capture adapter.
+- Leave `sbs_3d_cuda_graph = true`; disable it only for a controlled driver diagnosis.
+- Reduce stream resolution or bitrate before selecting slower NVENC quality options.
+- Close other GPU-heavy applications while collecting Host 3D performance evidence.
+- Do not use an unoptimized Debug build for streaming tests.
 
-If you are testing a remote connection (over the internet), you will need to
-forward the port 5201 (TCP and UDP) from your host.
+NVIDIA Fast Sync can help some 2D workloads but is not a universal stutter fix. Test changes one at
+a time and keep before/after logs.
 
-### Packet loss (Buffer overrun)
-If the host PC (running Sunshine) has a much faster connection to the network
-than the slowest segment of the network path to the client device (running
-Artemis), massive packet loss can occur: Sunshine emits its stream in bursts
-every 16 ms (for 60 fps), but those bursts can't be passed on fast enough to the
-client and must be buffered by one of the network devices inbetween. If the
-bitrate is high enough, these buffers will overflow and data will be discarded.
+## Virtual display
 
-This can easily happen if e.g., the host has a 2.5 Gbit/s connection and the
-client only 1 Gbit/s or Wi-Fi. Similarly, a 1 Gbps host may be too fast for a
-client having only a 100 Mbps interface.
+### Virtual Display is unavailable
 
-As a workaround the transmission speed of the host NIC can be reduced: 1 Gbps
-instead of 2.5 or 100 Mbps instead of 1 Gbps. A technically more advanced
-solution would be to configure traffic shaping rules at the OS level, so that
-only Sunshine's traffic is slowed down.
+Confirm that the bundled SudoVDA driver is installed and that Sunshine 3D is running with the
+privileges required to create and remove a monitor. Launch the built-in **Virtual Display** app;
+Raw SBS and negotiated portrait/landscape modes depend on that managed session.
 
-Such a solution on Linux could look like that:
+### Taskbar running indicators disappear after disconnect
 
-```bash
-# 1) Remove existing qdisc (pfifo_fast)
-sudo tc qdisc del dev <NIC> root
+Windows Explorer can fail to rebuild taskbar buttons after a virtual monitor is removed. Enable
+**Restart Explorer after virtual-display removal** in **Configuration > Essentials**, or set:
 
-# 2) Add HTB root qdisc with default class 1:1
-sudo tc qdisc add dev <NIC> root handle 1: htb default 1
-
-# 3) Create class 1:1 for full 10 Gbit/s (all other traffic)
-sudo tc class add dev <NIC> parent 1: classid 1:1 htb \
-    rate 10000mbit ceil 10000mbit burst 32k
-
-# 4) Create class 1:10 for Sunshine game stream at 1 Gbit/s
-sudo tc class add dev <NIC> parent 1: classid 1:10 htb \
-    rate 1000mbit ceil 1000mbit burst 32k
-
-# 5) Filter UDP source port 47998 into class 1:10
-sudo tc filter add dev <NIC> protocol ip parent 1: prio 1 \
-    u32 match ip protocol 17 0xff \
-    match ip sport 47998 0xffff flowid 1:10
+```ini
+virtual_display_restart_explorer = on
 ```
 
-In that way only the Sunshine traffic is limited by 1 Gbit. This is not persistent on reboots.
-If you use a different port for the game stream, you need to adjust the last command.
+The option is off by default because restarting Explorer closes the taskbar briefly, may close File
+Explorer windows, and can interrupt file operations hosted by Explorer. It runs only after a
+confirmed final virtual-display removal, not during warm reconnect or display replacement.
 
-Sunshine versions > 0.23.1 include improved networking code that should
-alleviate or even solve this issue (without reducing the NIC speed).
+## Host 3D
 
-### Packet loss (MTU)
-Although unlikely, some guests might work better with a lower
-[MTU](https://en.wikipedia.org/wiki/Maximum_transmission_unit) from the host.
-For example, an LG TV was found to have 30–60% packet loss when the host had MTU
-set to 1500 and 1472, but 0% packet loss with a MTU of 1428 set in the network card
-serving the stream (a Linux PC). It's unclear how that helped precisely, so it's a last
-resort suggestion.
+### Host 3D is flat
 
-## Linux
+Look for model/engine, authenticated tensor-shape, D3D11/CUDA interop, or shader-authorization
+errors. V2 fails flat when current geometry is invalid; it does not silently fall back to the
+deleted V1 renderer or CPU depth. Rebuild the TensorRT engine after changing the model, TensorRT
+version, GPU, or authenticated shape contract.
 
-### Hardware Encoding fails
-Due to legal concerns, Mesa has disabled hardware decoding and encoding by default.
+### Depth or pop changes after a cut
 
-```txt
-Error: Could not open codec [h264_vaapi]: Function not implemented
-```
+V2 holds one scene camera and literal configured pop until an accepted scene cut. Capture the cut
+state and exact frame identity rather than tuning unrelated geometry constants. The evidence and
+rearm rules are owned by [Host SBS scene cuts](host-sbs-scene-cuts.md).
 
-If you see the above error in the Sunshine logs, compiling *Mesa* manually may be required. See the official Mesa3D
-[Compiling and Installing](https://docs.mesa3d.org/install.html) documentation for instructions.
+### Transparent crowns, duplicated edges, or stretched object rims
 
-> [!IMPORTANT]
-> You must re-enable the disabled encoders. You can do so by passing the following argument to the build
-> system. You may also want to enable decoders, however, that is not required for Sunshine and is not covered here.
-> ```bash
-> -Dvideo-codecs=h264enc,h265enc
-> ```
+These are generally occlusion/ownership or raw monocular-depth boundary failures, not encoder
+blur. Capture a Dump 3D package and compare `raw_depth.f32`, ownership-refined parallax,
+vertical-conditioned parallax, final parallax, and the two-eye warp map. PNG heat maps stretch
+their own ranges and cannot prove the size of a depth cliff.
 
-> [!NOTE]
-> Other build options are listed in the
-> [meson options](https://gitlab.freedesktop.org/mesa/mesa/-/blob/main/meson_options.txt) file.
+The current limitations and qualification order are tracked in
+[SBS 3D status and roadmap](sbs-3d-roadmap.md).
 
-### Input not working
-After installation, the `udev` rules need to be reloaded. Our post-install script tries to do this for you
-automatically, but if it fails, you may need to restart your system.
+### HDR looks washed out or depth fails in highlights
 
-If the input is still not working, you may need to add your user to the `input` group.
+Verify Windows HDR state, a 10-bit-capable codec, NVIDIA encode support, and client HDR support.
+The Host 3D neural input uses the production HDR-to-SDR preprocessing contract while the encoded
+color remains HDR. Do not compare a tone-mapped debug PNG with the original HDR color numerically.
 
-```bash
-sudo usermod -aG input $USER
-```
+## Offline conversion
 
-### KMS Streaming fails
-If screencasting fails with KMS, you may need to run the following to force unprivileged screencasting.
+### Offline job manager is unavailable
 
-```bash
-sudo setcap -r $(readlink -f $(which sunshine))
-```
+Open the **Convert** page and read its named prerequisite failure. Production conversion needs:
 
-> [!NOTE]
-> The above command will not work with the AppImage or Flatpak packages. Please refer to the
-> [AppImage setup](md_docs_2getting__started.html#appimage) or
-> [Flatpak setup](md_docs_2getting__started.html#flatpak) for more specific instructions.
+- the native isolated worker in the same Sunshine 3D build;
+- approved `ffmpeg.exe` and `ffprobe.exe` beside `sunshine.exe` or in its sibling `tools` folder;
+- compatible input media;
+- TensorRT/D3D11 Host 3D readiness; and
+- NVENC support for the selected H.265 or AV1 output.
 
-### KMS streaming fails on Nvidia GPUs
-If KMS screen capture results in a black screen being streamed, you may need to
-set the parameter `modeset=1` for Nvidia's kernel module. This can be done by
-adding the following directive to the kernel command line:
+The job manager does not search `PATH`, need Python, or require a separate Windows service. Path,
+HDR, cache, and cancellation behavior are documented in
+[Offline Host 3D conversion](whole-clip-sbs-pipeline.md).
 
-```bash
-nvidia_drm.modeset=1
-```
+### Conversion waits or refuses to start
 
-Consult your distribution's documentation for details on how to do this. (Most
-often grub is used to load the kernel and set its command line.)
+Offline conversion owns an exclusive GPU lease. Stop live streaming and any local AR presentation,
+then retry. A codec preflight can reject AV1 or 10-bit output even when ordinary H.264 streaming is
+available.
 
-### AMD encoding latency issues
-If you notice unexpectedly high encoding latencies (e.g., in Artemis's
-performance overlay) or strong fluctuations thereof, your system's Mesa
-libraries are outdated (<24.2). This is particularly problematic at higher
-resolutions (4K).
+## Input and audio
 
-Starting with Mesa-24.2, applications can request a
-[low-latency mode](https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/30039)
-by running them with a special
-[environment variable](https://docs.mesa3d.org/envvars.html#envvar-AMD_DEBUG):
-```bash
-export AMD_DEBUG=lowlatencyenc
-```
-Sunshine sets this variable automatically, no manual
-configuration is needed.
+### No gamepad
 
-To check whether low-latency mode is being used, one can watch the VCLK and DCLK
-frequencies in amdgpu_top. Without this encoder tuning both clock frequencies
-will fluctuate strongly, whereas with active low-latency encoding they will stay
-high as long as the encoder is used.
+Verify that the bundled ViGEmBus driver is installed. If several physical controllers are already
+connected, the virtual controller may not be the device a game selects; disconnect unused devices
+or choose the controller inside the game.
 
-### Gamescope compatibility
-Some users have reported stuttering issues when streaming games running within Gamescope.
+### Application launch is denied
 
-## macOS
+Check the application's command, working directory, and permissions. Enable elevation only for an
+application that actually requires it. Network and removable drives may not be visible to the
+account or context that starts Sunshine 3D.
 
-### Dynamic session lookup failed
-If you get this error:
+### No streamed audio
 
-> Dynamic session lookup supported but failed: launchd did not provide a socket path, verify that
-> org.freedesktop.dbus-session.plist is loaded!
-
-Try this.
-```bash
-launchctl load -w /Library/LaunchAgents/org.freedesktop.dbus-session.plist
-```
-
-## Windows
-
-### No gamepad detected
-Verify that you've installed [Nefarius Virtual Gamepad](https://github.com/nefarius/ViGEmBus/releases/latest).
-
-### Permission denied
-Since Sunshine runs as a service on Windows, it may not have the same level of access that your regular user account
-has. You may get permission denied errors when attempting to launch a game or application from a non-system drive.
-
-You will need to modify the security permissions on your disk. Ensure that user/principal SYSTEM has full
-permissions on the disk.
-
-### Stuttering
-If you experience stuttering using NVIDIA, try disabling `vsync:fast` in the NVIDIA Control Panel.
-
-<div class="section_buttons">
-
-| Previous      |                    Next |
-|:--------------|------------------------:|
-| [API](api.md) | [Building](building.md) |
-
-</div>
-
-<details style="display: none;">
-  <summary></summary>
-  [TOC]
-</details>
+Inspect the selected `audio_sink` and `virtual_sink`. Use the packaged `audio-info.exe` to list
+Windows endpoint names and IDs. A virtual sink is required when the host speakers should remain
+muted while audio is captured.

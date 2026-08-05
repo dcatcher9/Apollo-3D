@@ -7,7 +7,7 @@
 StructuredBuffer<float4> MinMaxEma : register(t0);  // w = current-frame validity
 StructuredBuffer<float> CurrentModelInput : register(t1);
 StructuredBuffer<float> CurrentAppearanceOrdinal : register(t2);
-StructuredBuffer<float4> SubjectState : register(t3);  // [2].w: 0 empty, 1 advance, 2/4 hold, 3 low
+StructuredBuffer<float4> CutBridgeState : register(t3);  // [2].w: 0 empty, 1 advance, 2/4 hold, 3 low
 Texture2D<float> CurrentDepth : register(t4);
 RWStructuredBuffer<float> PreviousModelInput : register(u0);
 RWStructuredBuffer<float> PreviousAppearanceOrdinal : register(u1);
@@ -21,13 +21,13 @@ void main(uint3 dtid : SV_DispatchThreadID) {
     if (dtid.x >= target_w || dtid.y >= target_h ||
         MinMaxEma[0].w < 0.5f ||
         ((SBS_STATE_MODEL_INPUT_HISTORY_STATE(
-              SubjectState[SBS_STATE_VECTOR_MODEL_INPUT_HISTORY_STATE]) > 1.5f &&
+              CutBridgeState[SBS_STATE_VECTOR_MODEL_INPUT_HISTORY_STATE]) > 1.5f &&
           SBS_STATE_MODEL_INPUT_HISTORY_STATE(
-              SubjectState[SBS_STATE_VECTOR_MODEL_INPUT_HISTORY_STATE]) < 2.5f) ||
+              CutBridgeState[SBS_STATE_VECTOR_MODEL_INPUT_HISTORY_STATE]) < 2.5f) ||
          (SBS_STATE_MODEL_INPUT_HISTORY_STATE(
-              SubjectState[SBS_STATE_VECTOR_MODEL_INPUT_HISTORY_STATE]) > 3.5f &&
+              CutBridgeState[SBS_STATE_VECTOR_MODEL_INPUT_HISTORY_STATE]) > 3.5f &&
           SBS_STATE_MODEL_INPUT_HISTORY_STATE(
-              SubjectState[SBS_STATE_VECTOR_MODEL_INPUT_HISTORY_STATE]) < 4.5f)))
+              CutBridgeState[SBS_STATE_VECTOR_MODEL_INPUT_HISTORY_STATE]) < 4.5f)))
         return;
 
     uint plane = target_w * target_h;

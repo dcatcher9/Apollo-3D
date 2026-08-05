@@ -1,5 +1,6 @@
 <script setup>
 import { ref } from 'vue'
+import Checkbox from '../../Checkbox.vue'
 const props = defineProps([
   'config'
 ])
@@ -17,11 +18,18 @@ const config = ref(props.config)
     </div>
 
     <div class="mb-3">
-      <label for="sbs_3d_profile" class="form-label">{{ $t('config.sbs_3d_profile') }}</label>
-      <input id="sbs_3d_profile" class="form-control" type="text" placeholder="apollo"
-             v-model="config.sbs_3d_profile" />
-      <div class="form-text">{{ $t('config.sbs_3d_profile_desc') }}</div>
+      <label for="sbs_3d_max_encode_width" class="form-label">{{ $t('config.sbs_3d_max_encode_width') }}</label>
+      <input id="sbs_3d_max_encode_width" class="form-control" type="number" min="256" max="16384" step="2"
+             placeholder="8192" v-model.number="config.sbs_3d_max_encode_width" />
+      <div class="form-text">{{ $t('config.sbs_3d_max_encode_width_desc') }}</div>
     </div>
+
+    <Checkbox
+      id="sbs_3d_cuda_graph"
+      locale-prefix="config"
+      v-model="config.sbs_3d_cuda_graph"
+      default="true"
+    ></Checkbox>
 
   </div>
 </template>

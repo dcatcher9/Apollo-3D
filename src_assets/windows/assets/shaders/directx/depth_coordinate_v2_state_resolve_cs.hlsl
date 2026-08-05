@@ -4,7 +4,7 @@
 // camera without replacing it from a usable field on the same update.
 
 StructuredBuffer<float4> FrameStats : register(t0);
-StructuredBuffer<float4> LegacyState : register(t1);
+StructuredBuffer<float4> CutBridgeState : register(t1);
 StructuredBuffer<uint> RawHistogram256 : register(t2);
 RWStructuredBuffer<float4> ShadowState : register(u0);
 
@@ -23,6 +23,9 @@ void ResetMappingState(inout float4 mapping_state) {
 
 void StoreCameraState(float4 active, float4 control, inout float4 mapping_state) {
     V2SealCameraCenter(active, control, mapping_state);
+    // Seal the fully validated, current-frame-ready decision once. Per-texel producers and the
+    // packed renderer consume this versioned token instead of repeating the full state checksum.
+    V2SealRendererAuthorization(control, mapping_state);
     ShadowState[0] = active;
     ShadowState[1] = control;
     ShadowState[2] = mapping_state;
@@ -189,20 +192,24 @@ void main(uint3 id : SV_DispatchThreadID) {
     float4 mapping_state = ShadowState[2];
     bool contract_matches = asuint(V2_STATE_CONTRACT_TAG_BITS(control)) == V2_CONTRACT_TAG;
 
-    // Observe both signals. A persistent generation change recovers a cut if the transient pulse
-    // fell between shadow updates; a pulse alone remains sufficient on the frame it is emitted.
-    float4 legacy_cut = LegacyState[SBS_STATE_VECTOR_HARD_CUT_PULSE];
-    float4 legacy_health = LegacyState[SBS_STATE_VECTOR_HARD_CUT_COUNT];
-    uint current_cut_count = asuint(SBS_STATE_HARD_CUT_COUNT(legacy_health));
+    float4 cut_header = CutBridgeState[SBS_STATE_VECTOR_CUT_CONTRACT_TAG_BITS];
+    bool cut_contract_matches =
+        asuint(SBS_STATE_CUT_CONTRACT_TAG_BITS(cut_header)) == SBS_CUT_CONTRACT_TAG;
+    float4 cut_pulse = 0.0f;
+    float4 cut_health = 0.0f;
+    uint current_cut_count = 0u;
+    if (cut_contract_matches) {
+        cut_pulse = CutBridgeState[SBS_STATE_VECTOR_HARD_CUT_PULSE];
+        cut_health = CutBridgeState[SBS_STATE_VECTOR_HARD_CUT_COUNT];
+        current_cut_count = asuint(SBS_STATE_HARD_CUT_COUNT(cut_health));
+    }
     uint previous_cut_count = contract_matches ?
         asuint(V2_STATE_CONFIRMED_CUT_COUNT(control)) : current_cut_count;
-    bool confirmed_cut = SBS_STATE_HARD_CUT_PULSE(legacy_cut) > 0.5f ||
-        (contract_matches && current_cut_count != previous_cut_count);
     if (!contract_matches) {
         // Never inherit counters or calibration state from an unknown same-sized buffer. The
-        // current observed cut generation becomes the new authenticated baseline.
+        // current authenticated cut generation becomes the new baseline when it is available.
         active = float4(0.0f, 0.0f, v2_convergence_curve_default, 1.0f);
-        control = float4(asfloat(0u), 0.0f, asfloat(current_cut_count),
+        control = float4(asfloat(0u), 0.0f, asfloat(previous_cut_count),
                          asfloat(V2_CONTRACT_TAG));
         ResetMappingState(mapping_state);
     }
@@ -211,11 +218,25 @@ void main(uint3 id : SV_DispatchThreadID) {
     if (contract_matches && !camera_initialized && !empty_camera) {
         // Same-tag corruption must not become a permanent pseudo-camera.
         active = float4(0.0f, 0.0f, v2_convergence_curve_default, 1.0f);
-        control = float4(asfloat(0u), 0.0f, asfloat(current_cut_count),
+        control = float4(asfloat(0u), 0.0f, asfloat(previous_cut_count),
                          asfloat(V2_CONTRACT_TAG));
         ResetMappingState(mapping_state);
     }
     V2_STATE_CONTRACT_TAG_BITS(control) = asfloat(V2_CONTRACT_TAG);
+
+    // The cut buffer is an independently authenticated producer. A stale or same-sized foreign
+    // buffer makes this frame unavailable, but it must not erase a previously valid scene camera.
+    if (!cut_contract_matches) {
+        V2_STATE_CONFIRMED_CUT_COUNT(control) = asfloat(previous_cut_count);
+        PublishUnavailable(active, control, mapping_state, false);
+        StoreCameraState(active, control, mapping_state);
+        return;
+    }
+
+    // Observe both authenticated signals. A persistent generation change recovers a cut if the
+    // transient pulse fell between shadow updates; a pulse alone remains sufficient on its frame.
+    bool confirmed_cut = SBS_STATE_HARD_CUT_PULSE(cut_pulse) > 0.5f ||
+        (contract_matches && current_cut_count != previous_cut_count);
     V2_STATE_CONFIRMED_CUT_COUNT(control) = asfloat(current_cut_count);
 
     float4 frame0 = FrameStats[V2_FRAME_STATS_VECTOR_MEAN];
@@ -252,26 +273,10 @@ void main(uint3 id : SV_DispatchThreadID) {
             IncrementExactCounter(asuint(V2_STATE_CALIBRATION_REVISION(control))));
     }
 
-    // V2Curve is monotone, so the raw frame endpoints are the exact current curve extrema. This
-    // hard representation cap is deliberately frame-local: a transient extreme shrinks only its
-    // own field and ordinary following frames recover to full requested gain.
-    float minimum_curve = V2Curve(
-        (V2_FRAME_STATS_MINIMUM(frame0) - V2_STATE_CENTER(active)) *
-        V2_STATE_INVERSE_SCALE(active)) - V2_STATE_CONVERGENCE_CURVE(active);
-    float maximum_curve = V2Curve(
-        (V2_FRAME_STATS_MAXIMUM(frame0) - V2_STATE_CENTER(active)) *
-        V2_STATE_INVERSE_SCALE(active)) - V2_STATE_CONVERGENCE_CURVE(active);
-    float maximum_requested = v2_requested_gain * max(abs(minimum_curve), abs(maximum_curve));
-    float container_scale = maximum_requested > 0.0f ?
-        min(1.0f, v2_direct_container_limit / maximum_requested) : 1.0f;
-    if (!V2Finite(minimum_curve) || !V2Finite(maximum_curve) ||
-        !V2Finite(maximum_requested) || !V2Finite(container_scale) ||
-        container_scale <= 0.0f) {
-        PublishUnavailable(active, control, mapping_state, confirmed_cut || acquiring);
-    } else {
-        V2_STATE_CONTAINER_SCALE(active) = container_scale;
-        V2_STATE_FRAME_VALID(control) = 1.0f;
-    }
+    // Keep the ABI field fixed at identity. The map pass applies the strict representation bound
+    // independently per texel, so one raw outlier can no longer pump the whole frame's pop.
+    V2_STATE_CONTAINER_SCALE(active) = 1.0f;
+    V2_STATE_FRAME_VALID(control) = 1.0f;
 
     StoreCameraState(active, control, mapping_state);
 }

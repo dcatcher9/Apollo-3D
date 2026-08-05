@@ -168,13 +168,13 @@ TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
          .scene_decisions = {
            {
              {"index", 0},
-             {"pop", 1.25},
-             {"zero_plane", 0.47},
+             {"start_sequence", 1},
+             {"end_sequence_exclusive", 7},
            },
            {
              {"index", 1},
-             {"pop", 1.5},
-             {"zero_plane", 0.51},
+             {"start_sequence", 7},
+             {"end_sequence_exclusive", 13},
            },
          },
        });
@@ -207,7 +207,7 @@ TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
   EXPECT_EQ(terminal.progress.processed_frames, 12u);
   EXPECT_EQ(terminal.progress.current_scene["index"], 1);
   ASSERT_EQ(terminal.progress.scene_decisions.size(), 2u);
-  EXPECT_DOUBLE_EQ(terminal.progress.scene_decisions[1]["pop"], 1.5);
+  EXPECT_EQ(terminal.progress.scene_decisions[1]["start_sequence"], 7);
   EXPECT_EQ(terminal.worker_result["scene_count"], 2);
 
   const auto summaries = service.list();
@@ -229,7 +229,7 @@ TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
   EXPECT_EQ(persisted["progress"]["processed_frames"], 12);
   EXPECT_EQ(persisted["progress"]["current_scene"]["index"], 1);
   ASSERT_EQ(persisted["scene_decisions"].size(), 2u);
-  EXPECT_DOUBLE_EQ(persisted["scene_decisions"][0]["zero_plane"], 0.47);
+  EXPECT_EQ(persisted["scene_decisions"][0]["end_sequence_exclusive"], 7);
   service.shutdown();
 }
 
@@ -1059,7 +1059,7 @@ TEST(OfflineSbsJob, ServesOnlyTheBoundedManagerOwnedSceneAudit) {
   write_nonempty(input, "source");
   write_nonempty(
     decoy,
-    R"({"schema":1,"version":"whole-clip-scene-audit-v1","scenes":[{"scene_id":"decoy"}],"boundary_revisions":[]})"
+    R"({"schema":2,"version":"whole-clip-scene-audit-v2","scenes":[{"scene_id":"decoy"}],"boundary_revisions":[]})"
   );
 
   offline_sbs::job_service_t service {
@@ -1076,7 +1076,7 @@ TEST(OfflineSbsJob, ServesOnlyTheBoundedManagerOwnedSceneAudit) {
       });
       write_nonempty(
         context.result_directory / "scene-audit.json",
-        R"({"schema":1,"version":"whole-clip-scene-audit-v1","status":"complete","scenes":[{"scene_id":"managed"}],"boundary_revisions":[]})"
+        R"({"schema":2,"version":"whole-clip-scene-audit-v2","status":"complete","scenes":[{"scene_id":"managed"}],"boundary_revisions":[]})"
       );
       return offline_sbs::worker_outcome_t {
         .completed = true,
@@ -1126,8 +1126,8 @@ TEST(OfflineSbsJob, ServesOnlyTheBoundedManagerOwnedSceneAudit) {
   write_nonempty(
     managed_audit,
     nlohmann::json {
-      {"schema", 1},
-      {"version", "whole-clip-scene-audit-v1"},
+      {"schema", 2},
+      {"version", "whole-clip-scene-audit-v2"},
       {"status", "complete"},
       {"scenes", nlohmann::json::array({{{"scene_id", "managed"}}})},
       {"boundary_revisions", std::move(excessive_boundaries)},
@@ -1164,7 +1164,7 @@ TEST(OfflineSbsJob, RetainsAnAttestedPartialAuditAfterWorkerFailure) {
       });
       write_nonempty(
         context.result_directory / "scene-audit.json",
-        R"({"schema":1,"version":"whole-clip-scene-audit-v1","status":"running","scenes":[{"scene_id":1}],"boundary_revisions":[]})"
+        R"({"schema":2,"version":"whole-clip-scene-audit-v2","status":"running","scenes":[{"scene_id":1}],"boundary_revisions":[]})"
       );
       return offline_sbs::worker_outcome_t {
         .error = "injected failure after one finalized scene",

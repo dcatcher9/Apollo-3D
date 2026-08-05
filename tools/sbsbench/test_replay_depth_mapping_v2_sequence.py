@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image
 
 try:
-    from . import subject_state_contract, whole_clip_raw_contract
+    from . import cut_state_contract, whole_clip_raw_contract
     from .depth_coordinate_v2_contract import CALIBRATED_DEFAULTS, MODEL_CALIBRATIONS
     from .depth_mapping_v2_temporal import (
         _clip_sequence_input_contract,
@@ -37,7 +37,7 @@ try:
         _validate_frame_source_attestation, _validate_gpu_input_manifest_evidence,
         _validate_metric_contract_evidence, _validate_producer_evidence_bundle)
 except ImportError:  # Direct execution from tools/sbsbench.
-    import subject_state_contract  # type: ignore
+    import cut_state_contract  # type: ignore
     import whole_clip_raw_contract  # type: ignore
     from depth_coordinate_v2_contract import (  # type: ignore
         CALIBRATED_DEFAULTS, MODEL_CALIBRATIONS)
@@ -108,34 +108,52 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
         self.assertNotIn("maximum_abs_candidate_log_scale_drift", summary)
         self.assertNotIn("maximum_abs_candidate_scale_ratio_deviation", summary)
 
-    def test_native_cut_compatibility_trace_has_a_distinct_fail_closed_role(self):
+    def test_native_cut_compatibility_trace_has_one_fail_closed_contract(self):
         with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "subject_state.json"
-            values = [0.0] * len(subject_state_contract.FIELDS)
-            values[subject_state_contract.FIELDS.index("hard_cut_pulse")] = 1.0
-            values[subject_state_contract.FIELDS.index("hard_cut_count")] = 4.0
+            path = Path(temporary) / "cut_state.json"
+            values = [0] * len(cut_state_contract.FIELDS)
+            values[0] = cut_state_contract.CUT_CONTRACT_TAG
+            values[cut_state_contract.FIELDS.index("hard_cut_pulse")] = 1
+            values[cut_state_contract.FIELDS.index("hard_cut_count")] = 4
             payload = {
-                "schema": subject_state_contract.GPU_REPLAY_SCHEMA,
-                "source": subject_state_contract.GPU_REPLAY_SOURCE,
-                "capture": subject_state_contract.GPU_REPLAY_CAPTURE,
-                "fields": list(subject_state_contract.FIELDS),
+                "schema": cut_state_contract.SCHEMA,
+                "source": cut_state_contract.SOURCE,
+                "capture": cut_state_contract.CAPTURE,
+                "fields": list(cut_state_contract.FIELDS),
                 "frames": [{"frame_id": "00001", "values": values}],
             }
             path.write_text(json.dumps(payload), encoding="utf-8")
-            trace = subject_state_contract.load_trace(str(path))
-            self.assertEqual(subject_state_contract.trace_schema(str(path)), 3)
+            trace = cut_state_contract.load_trace(str(path))
+            self.assertEqual(cut_state_contract.trace_schema(str(path)), 5)
             self.assertEqual(trace[1]["hard_cut_pulse"], 1.0)
             self.assertEqual(trace[1]["hard_cut_count"], 4.0)
             self.assertEqual(
-                subject_state_contract.contract_reference(3),
-                {"file": "subject_state.json", "schema": 3,
-                 "capture": subject_state_contract.GPU_REPLAY_CAPTURE},
+                cut_state_contract.contract_reference(),
+                {"file": "cut_state.json", "schema": 5,
+                 "capture": cut_state_contract.CAPTURE},
+            )
+            self.assertEqual(
+                cut_state_contract.contract_reference(gpu_replay=True),
+                {"file": "cut_state.json", "schema": 6,
+                 "capture": cut_state_contract.GPU_REPLAY_CAPTURE},
             )
 
-            payload["source"] = subject_state_contract.LEGACY_SOURCE
+            payload.update({
+                "schema": cut_state_contract.GPU_REPLAY_SCHEMA,
+                "source": cut_state_contract.GPU_REPLAY_SOURCE,
+                "capture": cut_state_contract.GPU_REPLAY_CAPTURE,
+            })
             path.write_text(json.dumps(payload), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "invalid subject-state trace contract"):
-                subject_state_contract.load_trace(str(path))
+            self.assertEqual(cut_state_contract.trace_schema(str(path)), 6)
+            self.assertEqual(
+                cut_state_contract.load_trace(str(path))[1]["hard_cut_count"],
+                4.0,
+            )
+
+            payload["source"] = "depth_scene_cut_resolve_cs.WrongState"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "invalid cut-state trace"):
+                cut_state_contract.load_trace(str(path))
 
     def test_implementation_hash_surface_covers_transitive_gpu_and_renderer_sources(self):
         self.assertEqual(len(IMPLEMENTATION_SOURCE_FILES), len(set(IMPLEMENTATION_SOURCE_FILES)))
@@ -147,12 +165,10 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             "src_assets/windows/assets/shaders/directx/include/depth_constants.hlsl",
             "src_assets/windows/assets/shaders/directx/depth_coordinate_v2_ownership_cs.hlsl",
             "src_assets/windows/assets/shaders/directx/include/depth_color.hlsl",
-            "src_assets/windows/assets/shaders/directx/include/sbs_warp_common.hlsl",
-            "src_assets/windows/assets/shaders/directx/sbs_reprojection_ps.hlsl",
-            "src_assets/windows/assets/shaders/directx/sbs_forward_coverage_cs.hlsl",
+            "src_assets/windows/assets/shaders/directx/sbs_direct_replay_ps.hlsl",
             "tools/sbsbench/direct_geometry_contract.py",
             "tools/sbsbench/run_eval.py",
-            "tools/sbsbench/subject_state_contract.py",
+            "tools/sbsbench/cut_state_contract.py",
             "tools/sbsbench/whole_clip_raw_contract.py",
         }.issubset(IMPLEMENTATION_SOURCE_FILES))
 
@@ -192,13 +208,15 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
         (clip / "sbs_00001.png").write_bytes(b"sbs")
         (clip / "depth_00001.png").write_bytes(b"depth")
         np.zeros(width * height, dtype="<f4").tofile(clip / "warp_map_00001.f32")
-        (clip / "subject_state.json").write_text(json.dumps({
-            "schema": subject_state_contract.SCHEMA,
-            "source": "depth_subject_resolve_cs.SubjectState",
-            "capture": "every-source-frame-after-estimator-update",
-            "fields": list(subject_state_contract.FIELDS),
-            "frames": [{"frame_id": "00001", "values": [0.0] * len(
-                subject_state_contract.FIELDS)}],
+        (clip / "cut_state.json").write_text(json.dumps({
+            "schema": cut_state_contract.SCHEMA,
+            "source": cut_state_contract.SOURCE,
+            "capture": cut_state_contract.CAPTURE,
+            "fields": list(cut_state_contract.FIELDS),
+            "frames": [{"frame_id": "00001", "values": [
+                cut_state_contract.CUT_CONTRACT_TAG,
+                *([0] * (len(cut_state_contract.FIELDS) - 1)),
+            ]}],
         }), encoding="utf-8")
         raw_manifest = whole_clip_raw_contract.build_manifest(clip, [1], {
             "model": calibration.depth_model,
@@ -249,7 +267,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             self.assertEqual(
                 evidence["input_shape_authority"], "schema-36-per-clip-raw-manifest")
             self.assertEqual(evidence["eval_schema"], 36)
-            self.assertEqual(evidence["contract_schema"], 19)
+            self.assertEqual(evidence["contract_schema"], 20)
             self.assertEqual(evidence["raw_hash_authority"]["binding"],
                              whole_clip_raw_contract.BINDING)
             self.assertEqual(evidence["depth_model_url"], MODEL_CALIBRATIONS[0].depth_model_url)
@@ -260,7 +278,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                 MODEL_CALIBRATIONS[0].preprocess.source_closure_sha256)
             self.assertEqual(
                 evidence["cut_control_evidence"]["kind"],
-                "subject-state-hard-cut-generation")
+                "cut-state-hard-cut-generation")
             self.assertEqual(evidence["cut_expectation_evidence"], {
                 "kind": "none", "sha256": None,
             })
@@ -406,9 +424,8 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             cases = (
                 ("custom", "custom-local-model", "", ""),
-                ("base", "depth_anything_v2_base_fp16",
-                 "https://huggingface.co/onnx-community/depth-anything-v2-base/resolve/"
-                 "main/onnx/model_fp16.onnx", ""),
+                ("remote", "custom-remote-model",
+                 "https://example.invalid/custom-remote-model.onnx", ""),
             )
             for name, model, producer_url, evaluator_expected_url in cases:
                 with self.subTest(model=model):
@@ -483,13 +500,15 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             (unsupported / "depth_00001.png").write_bytes(b"depth")
             np.zeros(width * height, dtype="<f4").tofile(
                 unsupported / "warp_map_00001.f32")
-            (unsupported / "subject_state.json").write_text(json.dumps({
-                "schema": subject_state_contract.SCHEMA,
-                "source": "depth_subject_resolve_cs.SubjectState",
-                "capture": "every-source-frame-after-estimator-update",
-                "fields": list(subject_state_contract.FIELDS),
-                "frames": [{"frame_id": "00001", "values": [0.0] * len(
-                    subject_state_contract.FIELDS)}],
+            (unsupported / "cut_state.json").write_text(json.dumps({
+                "schema": cut_state_contract.SCHEMA,
+                "source": cut_state_contract.SOURCE,
+                "capture": cut_state_contract.CAPTURE,
+                "fields": list(cut_state_contract.FIELDS),
+                "frames": [{"frame_id": "00001", "values": [
+                    cut_state_contract.CUT_CONTRACT_TAG,
+                    *([0] * (len(cut_state_contract.FIELDS) - 1)),
+                ]}],
             }), encoding="utf-8")
             manifest = whole_clip_raw_contract.build_manifest(unsupported, [1], {
                 "model": calibration.depth_model,
@@ -585,26 +604,27 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             self.assertEqual(source, "first-frame-only")
 
             # Persistent generation remains authoritative even if the one-frame pulse is absent.
-            values = [0.0] * len(subject_state_contract.FIELDS)
-            pulse_index = subject_state_contract.FIELDS.index("hard_cut_pulse")
-            count_index = subject_state_contract.FIELDS.index("hard_cut_count")
+            values = [0] * len(cut_state_contract.FIELDS)
+            values[0] = cut_state_contract.CUT_CONTRACT_TAG
+            pulse_index = cut_state_contract.FIELDS.index("hard_cut_pulse")
+            count_index = cut_state_contract.FIELDS.index("hard_cut_count")
             frames = []
             for frame_id, count in ((1, 4), (2, 5), (3, 5)):
                 row = list(values)
-                row[pulse_index] = 0.0
-                row[count_index] = float(count)
+                row[pulse_index] = 0
+                row[count_index] = count
                 frames.append({"frame_id": f"{frame_id:05d}", "values": row})
-            (scene_cut / "subject_state.json").write_text(json.dumps({
-                "schema": subject_state_contract.SCHEMA,
-                "source": "depth_subject_resolve_cs.SubjectState",
-                "capture": "every-source-frame-after-estimator-update",
-                "fields": list(subject_state_contract.FIELDS),
+            (scene_cut / "cut_state.json").write_text(json.dumps({
+                "schema": cut_state_contract.SCHEMA,
+                "source": cut_state_contract.SOURCE,
+                "capture": cut_state_contract.CAPTURE,
+                "fields": list(cut_state_contract.FIELDS),
                 "frames": frames,
             }), encoding="utf-8")
             cuts, counts, source = _load_cut_indices(scene_cut, [1, 2, 3])
             self.assertEqual(cuts, [True, True, False])
             self.assertEqual(counts, [4, 5, 5])
-            self.assertEqual(source, "subject-state-hard-cut-generation")
+            self.assertEqual(source, "cut-state-hard-cut-generation")
             self.assertEqual(
                 _load_authenticated_cut_pulses(scene_cut, [1, 2, 3], counts),
                 [False, False, False],
@@ -625,10 +645,10 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
 
             malformed = root / "unit_malformed_trace"
             malformed.mkdir()
-            (malformed / "subject_state.json").write_text(
-                json.dumps({"schema": subject_state_contract.SCHEMA, "frames": []}),
+            (malformed / "cut_state.json").write_text(
+                json.dumps({"schema": cut_state_contract.SCHEMA, "frames": []}),
                 encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "invalid subject-state trace contract"):
+            with self.assertRaisesRegex(ValueError, "invalid cut-state trace"):
                 _load_cut_indices(malformed, [1])
 
     def test_gpu_manifest_materializes_current_color_and_preserves_count_only_cut(self):
@@ -668,7 +688,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                 [1, 2],
                 [4, 5],
                 [False, False],
-                "subject-state-hard-cut-generation",
+                "cut-state-hard-cut-generation",
                 (height, width),
                 run_model,
                 MappingV2Config(
@@ -730,7 +750,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             }
             validated = _validate_gpu_input_manifest_evidence(
                 output, reference, manifest["mapping_config"],
-                "subject-state-hard-cut-generation", input_contract)
+                "cut-state-hard-cut-generation", input_contract)
             self.assertEqual(validated["schema"], GPU_INPUT_MANIFEST_SCHEMA)
             for name in (
                     "model", "shape", "frame_hash", "source_hash",
@@ -773,7 +793,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         _validate_gpu_input_manifest_evidence(
                             output, reference, manifest["mapping_config"],
-                            "subject-state-hard-cut-generation", input_contract)
+                            "cut-state-hard-cut-generation", input_contract)
             raw_copy = output / "gpu_input" / "raw_00001.f32"
             original_raw = raw_copy.read_bytes()
             raw_copy.write_bytes(b"tampered")
@@ -782,7 +802,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "raw tensor"):
                 _validate_gpu_input_manifest_evidence(
                     output, reference, manifest["mapping_config"],
-                    "subject-state-hard-cut-generation", input_contract)
+                    "cut-state-hard-cut-generation", input_contract)
             raw_copy.write_bytes(original_raw)
             stale = json.loads(manifest_path.read_text(encoding="utf-8"))
             stale["schema"] = 1
@@ -791,7 +811,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "does not bind"):
                 _validate_gpu_input_manifest_evidence(
                     output, reference, manifest["mapping_config"],
-                    "subject-state-hard-cut-generation", input_contract)
+                    "cut-state-hard-cut-generation", input_contract)
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             _validate_frame_source_attestation(output, rows[1], "00002")
             (output / "input_frames" / "frame_00002.png").write_bytes(b"tampered-current-input")
@@ -817,14 +837,14 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             config = MappingV2Config(raw_coordinate_scale=calibration.raw_coordinate_scale)
             _, gpu_path = _materialize_gpu_replay_inputs(
                 output, {1: source}, dict(_raw_files(clip)), [1], [0], [False],
-                "subject-state-hard-cut-generation", shape, run_model, config)
+                "cut-state-hard-cut-generation", shape, run_model, config)
             gpu_reference = {
                 "file": "gpu_input/manifest.json", "schema": GPU_INPUT_MANIFEST_SCHEMA,
                 "sha256": whole_clip_raw_contract.file_sha256(gpu_path),
             }
             gpu_manifest = _validate_gpu_input_manifest_evidence(
                 output, gpu_reference, json.loads(gpu_path.read_text())["mapping_config"],
-                "subject-state-hard-cut-generation", input_contract)
+                "cut-state-hard-cut-generation", input_contract)
             validated = _validate_producer_evidence_bundle(
                 output, producer_reference, input_contract, gpu_manifest)
             self.assertEqual(validated["calibration_status"], "calibrated")
@@ -837,9 +857,9 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             shutil.rmtree(eval_root)
             _validate_producer_evidence_bundle(
                 output, producer_reference, input_contract, gpu_manifest)
-            subject_path = output / producer_reference["subject_state"]["file"]
-            subject_path.write_text("{}", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "subject_state hash mismatch"):
+            cut_path = output / producer_reference["cut_state"]["file"]
+            cut_path.write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "cut_state hash mismatch"):
                 _validate_producer_evidence_bundle(
                     output, producer_reference, input_contract, gpu_manifest)
 
@@ -883,7 +903,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                 "tools/sbsbench/sbs_stereo_window_metrics.py",
                 "tools/sbsbench/sbs_warp_shear_metrics.py",
                 "tools/sbsbench/direct_geometry_contract.py",
-                "tools/sbsbench/subject_state_contract.py",
+                "tools/sbsbench/cut_state_contract.py",
                 "tools/sbsbench/thresholds.json",
             ])
         self.assertRegex(evidence["sha256"], r"^[0-9a-f]{16}$")

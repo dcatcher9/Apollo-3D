@@ -8,7 +8,6 @@ degrading into a positional decode with the wrong meaning.
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 from typing import Any
 
@@ -16,57 +15,39 @@ from typing import Any
 CONTRACT_PATH = (
     Path(__file__).resolve().parent
     / "contracts"
-    / "sbs-adaptive-state-v4.json"
+    / "sbs-adaptive-state-v6.json"
 )
+
+try:
+    from .generate_adaptive_state_contract import (  # type: ignore
+        contract_digest,
+        contract_tag,
+        validate_contract,
+    )
+except ImportError:
+    from generate_adaptive_state_contract import (  # type: ignore
+        contract_digest,
+        contract_tag,
+        validate_contract,
+    )
 
 
 def _load_contract() -> dict[str, Any]:
     with CONTRACT_PATH.open(encoding="utf-8") as stream:
         contract = json.load(stream)
-    fields = contract.get("fields")
-    if not isinstance(fields, list) or not fields:
-        raise RuntimeError("adaptive-state contract requires a non-empty fields list")
-    indices = [field.get("index") for field in fields]
-    if indices != list(range(len(fields))):
-        raise RuntimeError("adaptive-state contract field indices must be contiguous and ordered")
-    names = [field.get("name") for field in fields]
-    if any(not isinstance(name, str) or not name for name in names):
-        raise RuntimeError("adaptive-state contract field names must be non-empty strings")
-    if len(set(names)) != len(names):
-        raise RuntimeError("adaptive-state contract field names must be unique")
-    for field in fields:
-        if field.get("type") not in {"float32", "uint32"}:
-            raise RuntimeError(f"invalid adaptive-state JSON type for {field.get('name')}")
-        if field.get("gpu_encoding") not in {
-            "float", "uint_bits", "uint_valued_float"
-        }:
-            raise RuntimeError(f"invalid adaptive-state GPU encoding for {field.get('name')}")
-        initial = field.get("initial")
-        if (not isinstance(initial, (int, float)) or isinstance(initial, bool) or
-                not math.isfinite(float(initial))):
-            raise RuntimeError(f"invalid adaptive-state initial value for {field.get('name')}")
-    if len(fields) % 4:
-        raise RuntimeError("adaptive-state word count must contain complete float4 vectors")
-    render_prefix = contract.get("render_prefix_words")
-    if (not isinstance(render_prefix, int) or
-            not 0 < render_prefix <= len(fields) or render_prefix % 4):
-        raise RuntimeError("adaptive-state render prefix must contain complete float4 vectors")
-    for section in ("cut_flag_bits", "analysis_flag_bits"):
-        bits = contract.get(section)
-        if not isinstance(bits, dict) or not bits:
-            raise RuntimeError(f"adaptive-state contract requires {section}")
-        values = list(bits.values())
-        if (any(not isinstance(bit, int) or isinstance(bit, bool) or not 0 <= bit < 32
-                for bit in values) or len(set(values)) != len(values)):
-            raise RuntimeError(f"adaptive-state {section} must contain unique uint32 bit indices")
-    return contract
+    try:
+        return validate_contract(contract)
+    except ValueError as exc:
+        raise RuntimeError(f"invalid adaptive-state contract: {exc}") from exc
 
 
 CONTRACT = _load_contract()
+CUT_CONTRACT_TAG = contract_tag(CONTRACT)
+CONTRACT_CANONICAL_SHA256 = contract_digest(CONTRACT)
+COUNTER_MAX = int(CONTRACT["counter_max"])
 TRACE_SCHEMA = int(CONTRACT["schema"])
 TRACE_SOURCE = str(CONTRACT["source"])
 TRACE_CAPTURE = str(CONTRACT["capture"])
-RENDER_PREFIX_WORDS = int(CONTRACT["render_prefix_words"])
 FIELD_SPECS = tuple(
     (str(field["name"]), str(field["type"]))
     for field in CONTRACT["fields"]
@@ -86,6 +67,11 @@ ANALYSIS_FLAG_BITS = {
 }
 KNOWN_CUT_FLAG_MASK = sum(1 << bit for bit in CUT_FLAG_BITS.values())
 KNOWN_ANALYSIS_FLAG_MASK = sum(1 << bit for bit in ANALYSIS_FLAG_BITS.values())
+COMPACT_CUT_TRACE_FIELDS = tuple(CONTRACT["compact_cut_trace"]["fields"])
+COMPACT_CUT_TRACE_ROLES = {
+    name: dict(role)
+    for name, role in CONTRACT["compact_cut_trace"]["roles"].items()
+}
 
 
 def flag_mask(bits: dict[str, int], name: str) -> int:
@@ -101,3 +87,9 @@ CUT_FLAG_APPEARANCE_RECOVERY = flag_mask(CUT_FLAG_BITS, "appearance_recovery")
 CUT_FLAG_GEOMETRY_CONFIRMATION_PENDING = flag_mask(
     CUT_FLAG_BITS, "geometry_confirmation_pending"
 )
+FIELD_ENCODINGS = tuple(
+    str(field["gpu_encoding"]) for field in CONTRACT["fields"]
+)
+INITIAL_VALUES = {
+    str(field["name"]): field["initial"] for field in CONTRACT["fields"]
+}

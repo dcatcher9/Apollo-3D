@@ -609,27 +609,6 @@ TEST_F(ConfigConsistencyTest, DummyConfigOptionsDoNotExist) {
   }
 }
 
-TEST_F(ConfigConsistencyTest, LegacyZeroPlaneOverrideIsExplicitlyScopedToOffline) {
-  const auto main_source = file_handler::read_file("src/main.cpp");
-  const auto config_header = file_handler::read_file("src/config.h");
-  const auto roadmap = file_handler::read_file("docs/sbs-3d-roadmap.md");
-
-  EXPECT_NE(
-    main_source.find("is an offline/evaluator-only setting; live Host SBS V2"),
-    std::string::npos
-  );
-  EXPECT_NE(main_source.find("name.starts_with(\"sbs_3d_profile_\")"), std::string::npos);
-  EXPECT_NE(main_source.find("name.ends_with(\"_zero_plane\")"), std::string::npos);
-  EXPECT_NE(
-    config_header.find("Offline/evaluator anchor only; live V2"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    roadmap.find("Historical/offline only since Host SBS V2 shipped"),
-    std::string::npos
-  );
-}
-
 TEST_F(ConfigConsistencyTest, TestFrameworkDetectsMissingOptions) {
   const auto cppOptions = extractConfigCppOptions();
   const auto htmlOptions = extractConfigHtmlOptions();

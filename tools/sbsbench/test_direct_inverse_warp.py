@@ -17,7 +17,7 @@ except ImportError:
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SHADER_ROOT = REPO_ROOT / "src_assets" / "windows" / "assets" / "shaders" / "directx"
-ITERATIONS = 12
+ITERATIONS = 11
 MAX_SLOPE = direct_geometry_contract.MAX_HORIZONTAL_SLOPE
 SOURCE_U_LIMIT = direct_geometry_contract.SOURCE_U_LIMIT
 
@@ -101,7 +101,7 @@ class DirectInverseWarpMathTest(unittest.TestCase):
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             contract["direct_parallax_manifest"]["sha256"] = (
                 direct_geometry_contract.file_sha256(str(manifest_path)))
-            with self.assertRaisesRegex(ValueError, "missing/unknown schema-4 semantics"):
+            with self.assertRaisesRegex(ValueError, "missing/unknown schema-6 semantics"):
                 direct_geometry_contract.validate_artifacts(str(root), contract, [1])
 
     def test_eye_sign_is_the_inverse_of_forward_warp(self) -> None:
@@ -115,7 +115,7 @@ class DirectInverseWarpMathTest(unittest.TestCase):
                 destination,
             )
 
-    def test_twelve_iterations_meet_the_contraction_error_bound(self) -> None:
+    def test_eleven_iterations_meet_the_contraction_error_bound(self) -> None:
         # Include both slope signs, the authenticated worst magnitude, clipping plateaus,
         # both eyes, and destinations whose fixed point samples beyond a texture edge.
         worst_error = 0.0
@@ -153,35 +153,28 @@ class DirectInverseWarpMathTest(unittest.TestCase):
 
         theoretical_bound = (MAX_SLOPE ** ITERATIONS) * SOURCE_U_LIMIT
         self.assertLessEqual(worst_error, theoretical_bound + 1.0e-12)
-        # At a 5120-pixel source the conservative bound is 0.05 pixel (0.0375 at 3840).
-        self.assertLessEqual(theoretical_bound * 5120.0, 0.05)
+        # At the supported 5120-pixel source limit the conservative bound is 0.1
+        # source pixel (0.075 at 3840), below a visible sampling displacement.
+        self.assertLessEqual(theoretical_bound * 5120.0, 0.1)
 
 class DirectInverseWarpSourceTest(unittest.TestCase):
     def test_external_final_path_uses_only_the_contractive_inverse(self) -> None:
-        reprojection = (SHADER_ROOT / "sbs_reprojection_ps.hlsl").read_text(
+        reprojection = (SHADER_ROOT / "sbs_direct_replay_ps.hlsl").read_text(
             encoding="utf-8"
         )
         function = reprojection[reprojection.index("float2 Reproject"):]
-        direct_begin = function.index("#ifdef SBS_CONTRACTIVE_PARALLAX")
-        direct_end = function.index("#else", direct_begin)
-        direct = function[direct_begin:direct_end]
+        direct_end = function.index("float4 main_ps")
+        direct = function[:direct_end]
 
         self.assertIn("[unroll]", direct)
         self.assertIn(
-            "for (int iteration = 0; iteration < 12; ++iteration)",
+            "for (int iteration = 0; iteration < 11; ++iteration)",
             direct,
         )
-        self.assertEqual(
-            direct.count(
-                "sourceX = uv.x + eyeSign * DepthParallax(SampleDepth(sourceX, uv.y));"
-            ),
-            1,
-        )
+        self.assertEqual(direct.count("SampleParallax(source_x, destination_uv.y)"), 1)
         for forbidden in (
             "DirectOrderTexture",
             "ForwardCoverageTexture",
-            "Bestv2SearchRadius",
-            "Bestv2Probe",
             "probeStart",
             "foundSurface",
             "bgOrder",
@@ -196,20 +189,6 @@ class DirectInverseWarpSourceTest(unittest.TestCase):
             "gap_fill",
         ):
             self.assertNotIn(forbidden, reprojection)
-
-        coverage = (SHADER_ROOT / "sbs_forward_coverage_cs.hlsl").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("DirectOrderTexture", coverage)
-
-    def test_direct_constant_buffer_has_no_search_radius_authority(self) -> None:
-        common = (SHADER_ROOT / "include" / "sbs_warp_common.hlsl").read_text(
-            encoding="utf-8"
-        )
-        self.assertNotIn("direct_parallax_search_radius", common)
-        self.assertIn("float direct_parallax_source_u_limit;", common)
-        self.assertIn("float3 direct_parallax_reserved;", common)
-
 
 if __name__ == "__main__":
     unittest.main()

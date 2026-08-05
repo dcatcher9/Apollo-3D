@@ -3,7 +3,6 @@ import ast
 import glob
 import hashlib
 import json
-import math
 import os
 import shutil
 import subprocess
@@ -25,7 +24,6 @@ import audit_depth_transform  # noqa: E402
 import audit_depth_confidence  # noqa: E402
 import make_synth_clips  # noqa: E402
 import prepare_public_datasets  # noqa: E402
-import prepare_flow_ema_reference  # noqa: E402
 import run_eval  # noqa: E402
 import rescore_run  # noqa: E402
 import sbsbench  # noqa: E402
@@ -146,7 +144,7 @@ class EvalContractTests(unittest.TestCase):
                     "order_maximum": order,
                 })
             manifest = {
-                **run_eval._DIRECT_GEOMETRY_MANIFEST_V4,
+                **run_eval._DIRECT_GEOMETRY_MANIFEST_V6,
                 "fields": fields,
             }
             manifest_path = os.path.join(
@@ -158,7 +156,7 @@ class EvalContractTests(unittest.TestCase):
                 "schema": run_eval.direct_geometry.CONTRACT_SCHEMA,
                 "warp_input": run_eval.direct_geometry.WARP_INPUT,
                 "direct_parallax_frames": 2,
-                "direct_parallax": run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V4,
+                "direct_parallax": run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V6,
                 "direct_parallax_manifest": {
                     "file": "direct_parallax_manifest.json",
                     "schema": run_eval.direct_geometry.MANIFEST_SCHEMA,
@@ -173,7 +171,7 @@ class EvalContractTests(unittest.TestCase):
 
             old_contract = json.loads(json.dumps(contract))
             old_contract["schema"] = 20
-            with self.assertRaisesRegex(ValueError, "requires harness contract schema 23"):
+            with self.assertRaisesRegex(ValueError, "requires harness contract schema 25"):
                 run_eval.validate_direct_parallax_manifest(
                     artifact_dir, old_contract, {1, 2}, depth_files)
             old_contract = json.loads(json.dumps(contract))
@@ -211,7 +209,7 @@ class EvalContractTests(unittest.TestCase):
             order_values.tofile(depth_path)
             parallax_values.tofile(parallax_path)
             manifest = {
-                **run_eval._DIRECT_GEOMETRY_MANIFEST_V4,
+                **run_eval._DIRECT_GEOMETRY_MANIFEST_V6,
                 "fields": [{
                     "frame_id": "00001",
                     "width": 12,
@@ -234,7 +232,7 @@ class EvalContractTests(unittest.TestCase):
                     "schema": run_eval.direct_geometry.CONTRACT_SCHEMA,
                     "warp_input": run_eval.direct_geometry.WARP_INPUT,
                     "direct_parallax_frames": 1,
-                    "direct_parallax": run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V4,
+                    "direct_parallax": run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V6,
                     "direct_parallax_manifest": {
                         "file": "direct_parallax_manifest.json",
                         "schema": run_eval.direct_geometry.MANIFEST_SCHEMA,
@@ -282,17 +280,17 @@ class EvalContractTests(unittest.TestCase):
         self.assertGreater(canonical_order[0, 2], canonical_order[0, 1])
         self.assertLess(conditioned[0, 2], conditioned[0, 1])
         self.assertEqual(
-            run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V4["depth_artifact_semantics"],
+            run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V6["depth_artifact_semantics"],
             "canonical-pre-limiter-order-float32-v1")
         self.assertFalse(
-            run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V4["renderer_uses_order"])
+            run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V6["renderer_uses_order"])
         self.assertEqual(
-            run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V4["order_role"],
-            "diagnostic-semantic-depth-and-forward-coverage-only-v1")
+            run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V6["order_role"],
+            "diagnostic-semantic-depth-only-v1")
         self.assertNotIn(
-            "occlusion_order", run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V4)
+            "occlusion_order", run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V6)
         self.assertNotIn(
-            "displacement_high_is_near", run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V4)
+            "displacement_high_is_near", run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V6)
 
     def test_clip_hash_covers_stereo_reference_and_contract(self):
         with tempfile.TemporaryDirectory() as clip:
@@ -507,25 +505,26 @@ class EvalContractTests(unittest.TestCase):
             "structureless_white_history_bridge", (255, 255, 255))
 
     @staticmethod
-    def subject_state(age, flags, anchor=2.5, pop=1.25, history=1.0):
+    def cut_state(age, flags, history=1.0):
         return {
-            "subject_recenter_delta": 0.0, "scene_age": float(age),
-            "subject_depth_ema": 0.55, "initialized": 1.0,
-            "stretch_lo": 0.1, "stretch_inv_range": 1.25,
-            "depth_change_baseline_ema": 0.08, "adaptive_pop_ratio": float(pop),
-            "zero_anchor_shift_px": float(anchor), "zero_anchor_valid": 1.0,
-            "cut_flags": float(flags), "model_input_history_valid": float(history),
+            "cut_contract_tag_bits": sbsbench.cut_state_contract.CUT_CONTRACT_TAG,
+            "scene_age": float(age),
+            "reserved_cut_bridge_2": 0.0, "initialized": 1.0,
+            "reserved_cut_bridge_4": 0.0, "reserved_cut_bridge_5": 0.0,
+            "depth_change_baseline_ema": 0.08, "reserved_cut_bridge_7": 0.0,
+            "reserved_cut_bridge_8": 0.0, "reserved_cut_bridge_9": 0.0,
+            "cut_flags": float(flags), "model_input_history_state": float(history),
         }
 
     def test_shot_state_contract_observes_exactly_one_real_cut(self):
         rows = [{"_frame_id": frame_id} for frame_id in range(1, 7)]
         trace = {
-            1: self.subject_state(0, 3),
-            2: self.subject_state(1, 3),
-            3: self.subject_state(2, 3),
-            4: self.subject_state(0, 16, anchor=3.0, pop=1.0),
-            5: self.subject_state(1, 16, anchor=3.0, pop=1.0),
-            6: self.subject_state(2, 16, anchor=3.0, pop=1.0),
+            1: self.cut_state(0, 3),
+            2: self.cut_state(1, 3),
+            3: self.cut_state(2, 3),
+            4: self.cut_state(0, 16),
+            5: self.cut_state(1, 16),
+            6: self.cut_state(2, 16),
         }
         summary = sbsbench.apply_shot_state_contract(
             rows, list(range(1, 7)), trace, {
@@ -540,14 +539,10 @@ class EvalContractTests(unittest.TestCase):
         self.assertEqual(
             sbsbench.aggregate(rows)["shot_state_accepted_pulse"], 1.0)
 
-    def test_v2_cut_only_trace_without_zero_anchor_is_still_initialized(self):
-        # The production V2 cut-only bridge never dispatches the legacy subject/zero-anchor
-        # analysis, so its schema-2 compatibility trace keeps zero_anchor_valid at the
-        # unavailable default. Initialization evidence is the cut analysis itself.
+    def test_v2_cut_state_requires_model_input_history(self):
         rows = [{"_frame_id": frame_id} for frame_id in range(1, 5)]
         trace = {
-            frame_id: dict(self.subject_state(frame_id - 1, 3 if frame_id < 4 else 3),
-                           zero_anchor_valid=0.0, zero_anchor_shift_px=0.0)
+            frame_id: self.cut_state(frame_id - 1, 3)
             for frame_id in range(1, 5)
         }
         sbsbench.apply_shot_state_contract(
@@ -559,7 +554,7 @@ class EvalContractTests(unittest.TestCase):
             min(row["shot_state_initialized_ok"] for row in rows
                 if "shot_state_initialized_ok" in row), 100.0)
         uninitialized_rows = [{"_frame_id": frame_id} for frame_id in range(1, 5)]
-        trace[3] = dict(trace[3], model_input_history_valid=0.0)
+        trace[3] = dict(trace[3], model_input_history_state=0.0)
         sbsbench.apply_shot_state_contract(
             uninitialized_rows, list(range(1, 5)), trace, {
                 "kind": "hard-cut", "monitor_from_frame": 2,
@@ -571,14 +566,14 @@ class EvalContractTests(unittest.TestCase):
     def test_structureless_bridge_contract_observes_bounded_slate_and_return_cuts(self):
         rows = [{"_frame_id": frame_id} for frame_id in range(1, 23)]
         trace = {
-            frame_id: self.subject_state(frame_id - 1, 3)
+            frame_id: self.cut_state(frame_id - 1, 3)
             for frame_id in range(1, 18)
         }
-        trace[18] = self.subject_state(0, 16)
-        trace[19] = self.subject_state(1, 16)
-        trace[20] = self.subject_state(2, 19)
-        trace[21] = self.subject_state(0, 16)
-        trace[22] = self.subject_state(1, 16)
+        trace[18] = self.cut_state(0, 16)
+        trace[19] = self.cut_state(1, 16)
+        trace[20] = self.cut_state(2, 19)
+        trace[21] = self.cut_state(0, 16)
+        trace[22] = self.cut_state(1, 16)
         contract = {
             "kind": "structureless-history-bridge", "monitor_from_frame": 2,
             "expected_pulse_frames": [18, 21], "flash_frame": 11,
@@ -593,7 +588,7 @@ class EvalContractTests(unittest.TestCase):
 
     def test_exposure_contract_rejects_relatched_state_and_latch_drift(self):
         rows = [{"_frame_id": frame_id} for frame_id in range(1, 7)]
-        trace = {frame_id: self.subject_state(frame_id - 1, 3)
+        trace = {frame_id: self.cut_state(frame_id - 1, 3)
                  for frame_id in range(1, 7)}
         contract = {
             "kind": "exposure-only", "monitor_from_frame": 2,
@@ -603,28 +598,21 @@ class EvalContractTests(unittest.TestCase):
         summary = sbsbench.apply_shot_state_contract(
             rows, list(range(1, 7)), trace, contract)
         self.assertEqual(summary["shot_state_accepted_pulse"], 0.0)
-        self.assertEqual(
-            max(row.get("shot_state_zero_anchor_drift_px", 0.0) for row in rows), 0.0)
-        self.assertEqual(
-            max(row.get("shot_state_adaptive_pop_drift", 0.0) for row in rows), 0.0)
-
         reset_rows = [{"_frame_id": frame_id} for frame_id in range(1, 7)]
-        trace[5] = self.subject_state(0, 16, anchor=3.25, pop=1.0)
+        trace[5] = self.cut_state(0, 16)
         sbsbench.apply_shot_state_contract(
             reset_rows, list(range(1, 7)), trace, contract)
         reset = next(row for row in reset_rows if row["_frame_id"] == 5)
         self.assertEqual(reset["shot_state_pulse_mismatch"], 1.0)
-        self.assertGreater(reset["shot_state_zero_anchor_drift_px"], 0.0)
-        self.assertGreater(reset["shot_state_adaptive_pop_drift"], 0.0)
 
     def test_exposure_pulse_monitoring_cannot_hide_startup_relatched_state(self):
         rows = [{"_frame_id": frame_id} for frame_id in range(1, 6)]
         trace = {
-            1: self.subject_state(1, 3),
-            2: self.subject_state(0, 16),
-            3: self.subject_state(1, 16),
-            4: self.subject_state(2, 16),
-            5: self.subject_state(3, 16),
+            1: self.cut_state(1, 3),
+            2: self.cut_state(0, 16),
+            3: self.cut_state(1, 16),
+            4: self.cut_state(2, 16),
+            5: self.cut_state(3, 16),
         }
         summary = sbsbench.apply_shot_state_contract(
             rows, list(range(1, 6)), trace, {
@@ -634,22 +622,18 @@ class EvalContractTests(unittest.TestCase):
         self.assertEqual(summary["shot_state_accepted_pulse"], 1.0)
         startup = next(row for row in rows if row["_frame_id"] == 2)
         self.assertEqual(startup["shot_state_pulse_mismatch"], 1.0)
-        self.assertNotIn("shot_state_zero_anchor_drift_px", startup)
-        self.assertIn(
-            "shot_state_zero_anchor_drift_px",
-            next(row for row in rows if row["_frame_id"] == 4))
 
     def test_shot_trace_recognizes_later_cut_after_independent_rearm(self):
         rows = [{"_frame_id": frame_id} for frame_id in range(1, 9)]
         trace = {
-            1: self.subject_state(0, 3),
-            2: self.subject_state(1, 3),
-            3: self.subject_state(2, 3),
-            4: self.subject_state(0, 16),
-            5: self.subject_state(1, 17),
-            6: self.subject_state(2, 19),
-            7: self.subject_state(0, 16),
-            8: self.subject_state(1, 16),
+            1: self.cut_state(0, 3),
+            2: self.cut_state(1, 3),
+            3: self.cut_state(2, 3),
+            4: self.cut_state(0, 16),
+            5: self.cut_state(1, 17),
+            6: self.cut_state(2, 19),
+            7: self.cut_state(0, 16),
+            8: self.cut_state(1, 16),
         }
         summary = sbsbench.apply_shot_state_contract(
             rows, list(range(1, 9)), trace, {
@@ -667,14 +651,14 @@ class EvalContractTests(unittest.TestCase):
     def test_shot_trace_accepts_relative_cut_with_latched_flags_unchanged(self):
         rows = [{"_frame_id": frame_id} for frame_id in range(1, 13)]
         trace = {
-            1: self.subject_state(0, 3),
-            2: self.subject_state(1, 3),
-            3: self.subject_state(0, 16),
+            1: self.cut_state(0, 3),
+            2: self.cut_state(1, 3),
+            3: self.cut_state(0, 16),
         }
         for frame_id in range(4, 11):
-            trace[frame_id] = self.subject_state(frame_id - 3, 16)
-        trace[11] = self.subject_state(8, 80, history=4.0)
-        trace[12] = self.subject_state(0, 16)
+            trace[frame_id] = self.cut_state(frame_id - 3, 16)
+        trace[11] = self.cut_state(8, 80, history=4.0)
+        trace[12] = self.cut_state(0, 16)
         summary = sbsbench.apply_shot_state_contract(
             rows, list(range(1, 13)), trace, {
                 "kind": "hard-cut", "monitor_from_frame": 2,
@@ -689,14 +673,14 @@ class EvalContractTests(unittest.TestCase):
     def test_latched_motion_contract_proves_relative_escape_precondition(self):
         rows = [{"_frame_id": frame_id} for frame_id in range(1, 13)]
         trace = {
-            1: self.subject_state(0, 3),
-            2: self.subject_state(1, 3),
-            3: self.subject_state(0, 16),
+            1: self.cut_state(0, 3),
+            2: self.cut_state(1, 3),
+            3: self.cut_state(0, 16),
         }
         for frame_id in range(4, 11):
-            trace[frame_id] = self.subject_state(frame_id - 3, 16)
-        trace[11] = self.subject_state(8, 80, history=4.0)
-        trace[12] = self.subject_state(0, 16)
+            trace[frame_id] = self.cut_state(frame_id - 3, 16)
+        trace[11] = self.cut_state(8, 80, history=4.0)
+        trace[12] = self.cut_state(0, 16)
         contract = {
             "kind": "latched-motion-hard-cut", "monitor_from_frame": 2,
             "expected_pulse_frames": [3, 12],
@@ -712,7 +696,7 @@ class EvalContractTests(unittest.TestCase):
             row.get("shot_state_relative_escape_ok", 100.0)
             for row in rows if row["_frame_id"] >= 2), 100.0)
 
-        trace[11] = self.subject_state(8, 16)
+        trace[11] = self.cut_state(8, 16)
         failed_rows = [{"_frame_id": frame_id} for frame_id in range(1, 13)]
         failed = sbsbench.apply_shot_state_contract(
             failed_rows, list(range(1, 13)), trace, contract)
@@ -761,7 +745,7 @@ class EvalContractTests(unittest.TestCase):
             "sbs_interocular_phase_chroma.py",
             "sbs_interocular_photometric_rivalry.py", "sbs_stereo_window_metrics.py",
             "sbs_warp_shear_metrics.py", "direct_geometry_contract.py",
-            "subject_state_contract.py", "thresholds.json",
+            "cut_state_contract.py", "thresholds.json",
         })
 
     def test_label_contract_covers_parallel_result_association(self):
@@ -774,29 +758,14 @@ class EvalContractTests(unittest.TestCase):
             run_eval.label_contract_sha(),
             run_eval.sha256_files(run_eval.label_contract_files()))
 
-    def test_named_profiles_and_explicit_overrides_share_production_precedence(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
-            fh.write("sbs_3d_profile = cinema\n")
-            path = fh.name
-        try:
-            self.assertEqual(run_eval.expected_profile(path, []), "cinema")
-        finally:
-            os.unlink(path)
-
-    def test_apollo_is_the_unconfigured_default_profile(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
-            path = fh.name
-        try:
-            self.assertEqual(run_eval.expected_profile(path, []), "apollo")
-        finally:
-            os.unlink(path)
-
-    def test_committed_gate_tracks_the_production_default_profile(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        bench_conf = os.path.join(repo, "tools", "sbsbench", "bench.conf")
-        self.assertEqual(run_eval.expected_profile(bench_conf, []), "apollo")
-        with open(os.path.join(repo, "src", "config.h"), encoding="utf-8") as fh:
-            self.assertIn('std::string profile = "apollo"', fh.read())
+    def test_canonical_model_is_the_single_authenticated_calibration(self):
+        self.assertEqual(len(run_eval.MODEL_CALIBRATIONS), 1)
+        self.assertEqual(
+            run_eval.expected_depth_model(),
+            run_eval.MODEL_CALIBRATIONS[0].depth_model)
+        self.assertEqual(
+            run_eval.expected_depth_model_url(),
+            run_eval.MODEL_CALIBRATIONS[0].depth_model_url)
 
     def test_baseline_update_refuses_gpu_contention(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -806,7 +775,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("if args.update_baselines:", evaluator)
         self.assertIn("refusing --update-baselines while another sunshine.exe is running",
                       evaluator)
-        self.assertIn("--update-baselines requires the canonical profile/config", evaluator)
+        self.assertIn("--update-baselines requires the canonical config", evaluator)
         self.assertIn('meta.get("extra_args") != []', evaluator)
 
     def test_baseline_update_requires_clean_stable_head(self):
@@ -862,11 +831,9 @@ class EvalContractTests(unittest.TestCase):
                     run_eval.require_evaluation_identity_unchanged(
                         expected, "sunshine.exe", "build", "model", "bench.conf")
 
-    def test_uncalibrated_builtin_or_local_url_comes_from_harness_identity(self):
+    def test_uncalibrated_remote_or_local_url_comes_from_harness_identity(self):
         for model, url in (
-                ("depth_anything_v2_base_fp16",
-                 "https://huggingface.co/onnx-community/depth-anything-v2-base/resolve/"
-                 "main/onnx/model_fp16.onnx"),
+                ("custom-remote-model", "https://example.invalid/custom-remote-model.onnx"),
                 ("custom-midas", "")):
             with self.subTest(model=model):
                 identity = {
@@ -1265,7 +1232,6 @@ class EvalContractTests(unittest.TestCase):
         candidate = {
             "suite": "core",
             "model": "model",
-            "profile": "apollo",
             "eval_schema": run_eval.EVAL_SCHEMA,
             "depth_step": "current-once",
             "depth_compensation": "none",
@@ -1278,6 +1244,8 @@ class EvalContractTests(unittest.TestCase):
             "metric_runtime": {"python": "test"},
         }
         context = run_eval.baseline_required_context(candidate)
+        self.assertEqual(context["mode"], "canonical-v2")
+        self.assertNotIn("profile", context)
         self.assertEqual(context["metric_sha256"], "numeric-metrics")
         self.assertTrue(context["cuda_graph"])
         self.assertFalse(context["parallax_v2_shadow"])
@@ -1418,23 +1386,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("worst_hard_metric", report_text)
         self.assertIn("safety-worst per-clip aggregate", report_text)
 
-    def test_custom_profile_values_need_no_evaluator_code_change(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
-            fh.write("sbs_3d_profile = Cinema\n"
-                     "sbs_3d_profile_Cinema_depth_model = depth_anything_v2_base_fp16\n")
-            path = fh.name
-        try:
-            self.assertEqual(run_eval.expected_profile(path, []), "Cinema")
-            self.assertEqual(run_eval.expected_depth_model(path, "Cinema", []),
-                             "depth_anything_v2_base_fp16")
-            self.assertEqual(
-                run_eval.expected_depth_model(
-                    path, "Cinema", ["--model", "depth_anything_v2_fp8"]),
-                "depth_anything_v2_fp8")
-        finally:
-            os.unlink(path)
-
-    def test_live_sbs_contract_is_off_ai_with_startup_profile(self):
+    def test_live_sbs_contract_has_one_canonical_configuration(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "src", "video.h"), encoding="utf-8") as fh:
             video_header = fh.read()
@@ -1445,11 +1397,14 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:
             config = fh.read()
         self.assertIn(
-            'apply_sbs_values(video.sbs, "sbs_3d_profile_" + sbs_profile + "_", false)',
-            config)
-        self.assertIn('apply_sbs_values(video.sbs, "sbs_3d_", true)', config)
+            'double_between_f(vars, "sbs_3d_pop_strength", video.sbs.pop_strength, '
+            '{0.25, 2.0})', config)
+        self.assertIn(
+            'int_between_f(vars, "sbs_3d_max_encode_width", video.sbs.max_encode_width, '
+            '{256, 16384})', config)
+        self.assertIn('bool_f(vars, "sbs_3d_cuda_graph", video.sbs.cuda_graph)', config)
         self.assertNotIn("video.sbs_profiles", config)
-        self.assertIn('if (sbs_profile == "vd3d")', config)
+        self.assertNotIn("apply_sbs_values", config)
 
         with open(os.path.join(repo, "src", "stream.cpp"), encoding="utf-8") as fh:
             stream = fh.read()
@@ -1552,79 +1507,12 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('"onnx_sha256"', report)
         self.assertIn('--allow-executable-diff', report)
 
-    def test_apollo_bestv2_normalizes_pixel_shifts_by_source_geometry(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        shader = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
-                              "sbs_reprojection_ps.hlsl")
-        with open(shader, encoding="utf-8") as fh:
-            text = fh.read()
-        self.assertIn("LeftColorTexture.GetDimensions(sourceWidth, sourceHeight)", text)
-        self.assertIn("Bestv2ProbeSpacing((float)sourceWidth, (float)depthWidth)", text)
-        self.assertIn("s0, s1, s2, (float)sourceWidth, (float)sourceHeight", text)
-        reproject = text[text.index("float2 Reproject"):text.index("float4 main_ps")]
-        direct_begin = reproject.index("#ifdef SBS_CONTRACTIVE_PARALLAX")
-        legacy_begin = reproject.index("#else", direct_begin)
-        direct_inverse = reproject[direct_begin:legacy_begin]
-        legacy_search = reproject[legacy_begin:]
-        self.assertIn(
-            "DepthParallax(SampleDepth(sourceX, uv.y))",
-            direct_inverse,
-        )
-        self.assertNotIn("s0, s1, params", direct_inverse)
-        # The non-direct compile retains both original Bestv2 calls and their subject parameters.
-        self.assertIn(
-            "DepthParallax(\n        prevD, s0, s1, params, use_subject_stretch)",
-            legacy_search,
-        )
-        self.assertIn(
-            "DepthParallax(\n            d, s0, s1, params, use_subject_stretch)",
-            legacy_search,
-        )
-        self.assertNotIn("Bestv2SearchRadius((float)dw)", text)
-        # The window is sized from the frame's own resolved parallax, not from source geometry
-        # and a global worst case.
-        self.assertIn("Bestv2SearchRadius(params)", text)
-        self.assertNotIn("Bestv2SearchRadius((float)sourceWidth", text)
-
-    def test_forward_coverage_diagnostic_uses_source_geometry(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx")
-        with open(os.path.join(shader_dir, "sbs_forward_coverage_cs.hlsl"),
-                  encoding="utf-8") as fh:
-            text = fh.read()
-        self.assertIn("LeftColorTexture.GetDimensions(source_w, source_h)", text)
-        self.assertIn("s0, s1, s2, (float)source_w, (float)source_h", text)
-        self.assertNotIn("s0, s1, (float)eye_w", text)
-
-    def test_bestv2_scales_wide_sources_from_validated_calibration_width(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        common = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
-                              "include", "sbs_warp_common.hlsl")
-        with open(common, encoding="utf-8") as fh:
-            text = fh.read()
-        self.assertIn("BESTV2_CALIBRATION_WIDTH = 854.0f", text)
-        self.assertIn("return min(max(source_width, 1.0f), BESTV2_CALIBRATION_WIDTH)", text)
-        self.assertGreaterEqual(text.count("/ parallax_width"), 1)
-
-    def test_bestv2_preserves_angular_pop_across_source_aspects(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        common = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
-                              "include", "sbs_warp_common.hlsl")
-        with open(common, encoding="utf-8") as fh:
-            text = fh.read()
-        self.assertIn("BESTV2_REFERENCE_ASPECT = 5120.0f / 2160.0f", text)
-        self.assertIn("BESTV2_REFERENCE_ASPECT / aspect", text)
-        self.assertNotIn("fixed_height", text)
-        reference_aspect = 5120.0 / 2160.0
-        self.assertAlmostEqual(reference_aspect / (5120.0 / 2160.0), 1.0)
-        self.assertAlmostEqual(reference_aspect / (3840.0 / 2160.0), 4.0 / 3.0)
-        self.assertAlmostEqual(reference_aspect / (3552.0 / 3840.0), 2.562562563, places=6)
-
     def test_production_v2_pop_strength_has_one_configured_authority(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:
             config = fh.read()
-        self.assertIn('prefix + "pop_strength", target.pop_strength, {0.25, 2.0}', config)
+        self.assertIn(
+            '"sbs_3d_pop_strength", video.sbs.pop_strength, {0.25, 2.0}', config)
         with open(os.path.join(repo, "src", "config.h"), encoding="utf-8") as fh:
             config_header = fh.read()
         self.assertIn("double pop_strength = 1.20;", config_header)
@@ -1708,175 +1596,47 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
                   encoding="utf-8") as fh:
             estimator = fh.read()
-        self.assertIn("quarantine_execution_context_locked(engine_key, exec_context)", estimator)
+        self.assertIn(
+            "quarantine_execution_context_locked(engine_key, exec_context,",
+            estimator,
+        )
+        self.assertIn("--slot.warmed_context_count", estimator)
         self.assertIn("quarantined_context_count", estimator)
         self.assertIn("warmed_context_count", estimator)
         self.assertIn("if (context_warmed && !execution_context_poisoned)", estimator)
         self.assertIn('model.name + ".active-engine.json"', estimator)
         self.assertIn('{"onnx_sha256", artifact.source_sha256}', estimator)
 
-    def test_warp_search_window_is_the_frames_own_displacement_bound(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        common = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
-                              "include", "sbs_warp_common.hlsl")
-        with open(common, encoding="utf-8") as fh:
-            text = fh.read()
-        # The window must be built from the SAME resolved per-frame values the parallax mapping
-        # uses, never from the configured adaptive ceiling or a global anchor worst case.
-        self.assertIn("float Bestv2SearchRadius(Bestv2Params p) {", text)
-        self.assertIn("(BESTV2_SHIFT_PX_MIN - p.anchor_shift_px) * p.parallax_scale", text)
-        self.assertIn("(BESTV2_SHIFT_PX_MAX - p.anchor_shift_px) * p.parallax_scale", text)
-        self.assertIn("return reach * BESTV2_SEARCH_MARGIN;", text)
-        self.assertNotIn("clamp_abs", text)
-        self.assertNotIn("Bestv2SearchStrength", text)
-
-        # The declared extrema must really bound the shipped curve over its saturated domain.
-        d = np.linspace(0.0, 1.0, 200001)
-        shift = (-1.39635933 + d * (2.776208766 + d * (21.04503417 + d * (
-            -94.6673759 + d * (376.6610774 + d * (-645.141824 + d * (
-                482.8701123 - 133.5645677 * d)))))))
-        self.assertLessEqual(float(shift.max()), 8.58230571)
-        self.assertGreaterEqual(float(shift.min()), -1.39635933)
-
-        # A window narrowed against a wider one is only provably equivalent while the probes sit
-        # on one shared lattice, which requires k * spacing to be exact. The compiler turns the
-        # position into an accumulator seeded at each run's own start, so spacing is quantized to
-        # a power-of-two multiple and every partial sum stays exactly representable.
-        self.assertIn("float ulp = exp2(floor(log2(spacing)) - BESTV2_PROBE_SPACING_BITS);", text)
-        self.assertIn("return round(spacing / ulp) * ulp;", text)
-        shader = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
-                              "sbs_reprojection_ps.hlsl")
-        with open(shader, encoding="utf-8") as fh:
-            reproject = fh.read()
-        self.assertIn("float x = (float)(probeStart + i) * spacing;", reproject)
-        spacing = (2.0 * 1.30 / 19.4) * (0.004 + (10.1 * 0.35 + 0.006 * 4.0) / 854.0)
-        ulp = 2.0 ** (math.floor(math.log2(spacing)) - 10.0)
-        quantized = round(spacing / ulp) * ulp
-        self.assertLess(abs(quantized - spacing) / spacing, 2.0 ** -11)
-        # every probe index the loop can reach keeps k * spacing exactly representable
-        self.assertLess(round(spacing / ulp) * math.ceil(2.0 / spacing), 2 ** 24)
-
-    def test_warp_probe_work_caps_tall_mode_at_32_total_samples(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        common = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
-                              "include", "sbs_warp_common.hlsl")
-        with open(common, encoding="utf-8") as fh:
-            text = fh.read()
-        self.assertIn("BESTV2_MAX_DEPTH_PROBES", text)
-        self.assertIn("Bestv2MaxProbes", text)
-        self.assertIn("Bestv2ProbeIntervals", text)
-        self.assertIn("Bestv2ProbeStart", text)
-        self.assertNotIn("Bestv2ProbeSteps", text)
-        self.assertIn("int max_intervals = max(max_probes - 1, 1);", text)
-        self.assertIn("while (intervals > max_intervals)", text)
-        self.assertNotIn("return min(intervals, max_intervals);", text)
-
-        def max_probes(w, h):
-            return max(int(8.75e8 // (2.0 * w * h)), 5)
-
-        # The probe count is no longer chosen: spacing is fixed and the window is sized per frame,
-        # so the count follows from both. The budget only caps pathological rasters.
-        spacing = (2.0 * 1.30 / 19.4) * (0.004 + (10.1 * 0.35 + 0.006 * 4.0) / 854.0)
-
-        def lattice_probes(w, h, strength):
-            aspect_scale = min(max((5120.0 / 2160.0) / (w / h), 0.5), 3.0)
-            radius = aspect_scale * strength * (0.004 + (10.1 * 0.35 + 0.006 * 4.0) / 854.0)
-            # intervals + the loop's initial sample
-            return math.ceil(2.0 * radius / spacing) + 2
-
-        def capped_probe_layout(radius, probe_spacing, max_total_probes):
-            # Mirror Bestv2ProbeIntervals exactly. The caller performs one sample before
-            # consuming the returned intervals, so the interval budget is total - 1.
-            max_intervals = max(max_total_probes - 1, 1)
-            base_spacing = probe_spacing
-            span_in_base_cells = (2.0 * radius) / base_spacing
-            intervals = math.ceil(span_in_base_cells) + 1
-            if intervals > max_intervals:
-                span_intervals = max(max_intervals - 1, 1)
-                decimate = max(math.ceil(span_in_base_cells / span_intervals), 1)
-                probe_spacing = base_spacing * decimate
-                intervals = math.ceil((2.0 * radius) / probe_spacing) + 1
-                while intervals > max_intervals:
-                    decimate += 1
-                    probe_spacing = base_spacing * decimate
-                    intervals = math.ceil((2.0 * radius) / probe_spacing) + 1
-            return intervals, probe_spacing
-
-        self.assertEqual(max_probes(3552.0, 3840.0), 32)
-        self.assertGreater(lattice_probes(3552.0, 3840.0, 2.0), max_probes(3552.0, 3840.0))
-        for width, height in ((5120.0, 2160.0), (3840.0, 2160.0), (1920.0, 1080.0)):
-            self.assertLessEqual(lattice_probes(width, height, 2.0),
-                                 max_probes(width, height))
-
-        tall_aspect_scale = min(max((5120.0 / 2160.0) / (3552.0 / 3840.0), 0.5), 3.0)
-        tall_radius = tall_aspect_scale * 2.0 * (
-            0.004 + (10.1 * 0.35 + 0.006 * 4.0) / 854.0)
-        cases = (
-            # Representative tall-mode radius and its real 32-sample raster budget.
-            (tall_radius, spacing, max_probes(3552.0, 3840.0)),
-            # No search radius still has to account for the caller's initial sample.
-            (0.0, spacing, 5),
-            # After 2x decimation, ceil(61 / 2) + 1 is still 32 intervals. Meeting a
-            # 31-interval budget therefore requires 3x decimation; truncating the final
-            # right-edge bracket would satisfy the count while breaking coverage.
-            (30.5, 1.0, 32),
-            # A very dense pathological lattice against the minimum total budget.
-            (5000.25, 0.125, 5),
-        )
-        for radius, probe_spacing, total_cap in cases:
-            returned_intervals, effective_spacing = capped_probe_layout(
-                radius, probe_spacing, total_cap)
-            self.assertLessEqual(1 + returned_intervals, total_cap)
-            # ProbeStart floors the left edge to the global lattice. Verify several lattice
-            # phases, including the worst phase immediately below the next cell: the final probe
-            # must still reach beyond the right edge after budget-driven decimation.
-            for phase in (0.0, 0.01, 0.25, 0.5, 0.99, 1.0 - 1e-9):
-                left = phase * effective_spacing
-                right = left + 2.0 * radius
-                start = math.floor(left / effective_spacing)
-                end = (start + returned_intervals) * effective_spacing
-                self.assertLessEqual(start * effective_spacing, left)
-                self.assertGreaterEqual(end + 1e-9, right)
-        boundary_intervals, boundary_spacing = capped_probe_layout(30.5, 1.0, 32)
-        self.assertEqual((boundary_intervals, boundary_spacing), (22, 3.0))
-
-    def test_adaptive_pop_last_flag_wins(self):
-        conf = os.path.join(os.path.dirname(__file__), "bench.conf")
-        self.assertFalse(run_eval.expected_adaptive_pop(
-            conf, "apollo", ["--adaptive-pop", "--no-adaptive-pop"]))
-        self.assertTrue(run_eval.expected_adaptive_pop(
-            conf, "apollo", ["--no-adaptive-pop", "--adaptive-pop"]))
-
-    def test_literal_bestv2_is_harness_only_and_machine_verified(self):
+    def test_harness_contract_is_v2_only_and_machine_verified(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
-                               "include", "sbs_warp_common.hlsl"), encoding="utf-8") as fh:
+                               "sbs_reprojection_v2_live_ps.hlsl"), encoding="utf-8") as fh:
             shader = fh.read()
-        self.assertIn("float literal_bestv2;", shader)
-        self.assertIn("literal_mode > 0.5f", shader)
+        self.assertNotIn("literal_mode", shader)
+        self.assertIn("StructuredBuffer<float4> ParallaxState", shader)
 
         with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"), encoding="utf-8") as fh:
             harness = fh.read()
-        self.assertIn('a == "--literal-bestv2"', harness)
+        self.assertNotIn('a == "--literal-bestv2"', harness)
         self.assertIn('fs::path(o.out) / "contract.json"', harness)
         self.assertIn(
-            '(direct_parallax_mode ? direct_geometry_contract_schema : 19u)',
+            '(direct_parallax_mode ? direct_geometry_contract_schema : 20u)',
             harness)
-        self.assertIn('direct_geometry_contract_schema = 23u', harness)
-        self.assertIn('direct_geometry_manifest_schema = 4u', harness)
+        self.assertIn('direct_geometry_contract_schema = 25u', harness)
+        self.assertIn('direct_geometry_manifest_schema = 6u', harness)
         self.assertIn(
-            '"external-final-parallax-with-diagnostic-order-v4"',
+            '"external-final-parallax-with-diagnostic-order-v6"',
             harness)
-        self.assertIn('\\"depth_override_frames\\"', harness)
+        self.assertNotIn('\\"depth_override_frames\\"', harness)
         self.assertIn('\\"pop_strength\\"', harness)
-        self.assertIn('\\"zero_plane\\"', harness)
+        self.assertNotIn('\\"zero_plane\\"', harness)
         self.assertIn('"mapping_ps"', harness)
         self.assertIn('"warp_map_%s.f32"', harness)
         self.assertIn('fs::path(o.out) / "warp_map_shape.json"', harness)
         self.assertIn('raw_reproject_source_u_normalized', harness)
         self.assertIn('live_sample_transform', harness)
         self.assertIn('\\"warp_mapping\\"', harness)
-        self.assertIn('fs::path(o.out) / "subject_state.json"', harness)
+        self.assertIn('fs::path(o.out) / "cut_state.json"', harness)
 
         with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
                   encoding="utf-8") as fh:
@@ -1900,12 +1660,12 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('\\"retained_history\\":false', harness)
         whole_contract = harness[harness.index(
             'std::ofstream contract(fs::path(o.out) / "whole_clip_contract.json")'):]
-        self.assertNotIn('<< "  \\"subject_state\\":', whole_contract)
+        self.assertNotIn('<< "  \\"cut_state\\":', whole_contract)
 
         with open(os.path.join(repo, "src", "offline_sbs_worker.cpp"),
                   encoding="utf-8") as fh:
             worker = fh.read()
-        self.assertGreaterEqual(worker.count('"--bounded-adaptive-state"'), 2)
+        self.assertEqual(worker.count('"--bounded-adaptive-state"'), 1)
         self.assertIn("trace_tail_t trace(analysis_output, true)", worker)
         self.assertIn(
             'read_snapshot(child, "adaptive_state_frame.json")',
@@ -1914,29 +1674,25 @@ class EvalContractTests(unittest.TestCase):
             'remove_file_checked(snapshot)',
             worker)
 
-    def test_depth_reuse_cadence_is_explicit_and_machine_verified(self):
+    def test_depth_reuse_cadence_is_fixed_at_one_inference_per_frame(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"), encoding="utf-8") as fh:
             harness = fh.read()
-        self.assertIn('a == "--depth-every"', harness)
-        self.assertIn('a == "--depth-override-root"', harness)
-        self.assertIn("depth_compensation", harness)
-        with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
-                  encoding="utf-8") as fh:
-            evaluator = fh.read()
-        self.assertIn('"depth_compensation": depth_compensation', evaluator)
+        self.assertNotIn('a == "--depth-every"', harness)
+        self.assertNotIn('a == "--depth-override-root"', harness)
+        self.assertIn("int effective_depth_every = 1;", harness)
         self.assertIn("depth_reuse_interval", harness)
         with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
                   encoding="utf-8") as fh:
             evaluator = fh.read()
-        self.assertIn('extra_value(args.extra, "--depth-every", 1)', evaluator)
-        self.assertIn('f"reuse-{depth_reuse_interval}"', evaluator)
+        self.assertIn('"depth_compensation": depth_compensation', evaluator)
+        self.assertIn('depth_reuse_interval = 1', evaluator)
+        self.assertIn('depth_step = "current-once"', evaluator)
         self.assertGreaterEqual(
             evaluator.count("whole_clip_raw_contract.HARNESS_CONTRACT_SCHEMA"), 2)
-        self.assertIn('"subject_state.json"', evaluator)
+        self.assertIn('"cut_state.json"', evaluator)
         self.assertIn('"warp_map_*.f32"', evaluator)
         self.assertIn('expected_mapping_bytes = width * height * 4', evaluator)
-        self.assertIn('depth_override_root and not args.comparison_only', evaluator)
 
     def test_direct_parallax_is_harness_only_and_machine_verified(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1946,9 +1702,9 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('a == "--direct-parallax-root"', harness)
         self.assertNotIn('a == "--direct-candidate-root"', harness)
         self.assertNotIn('a == "--direct-candidate-fill"', harness)
-        self.assertIn('o.output_every != 1 || o.depth_every != 1', harness)
-        self.assertIn('o.literal_bestv2', harness)
-        self.assertIn('!o.depth_override_root.empty() || o.depth_override_all', harness)
+        self.assertIn('o.output_every != 1', harness)
+        self.assertNotIn('o.literal_bestv2', harness)
+        self.assertNotIn('depth_override_root', harness)
         self.assertNotIn('direct_parallax_max_abs * 1.10f', harness)
         self.assertIn('words remain reserved to preserve the 16-byte constant-buffer ABI', harness)
         self.assertIn(
@@ -1959,68 +1715,39 @@ class EvalContractTests(unittest.TestCase):
             '      models::depth_coordinate_v2::max_horizontal_slope', harness)
         self.assertIn('violates the generated horizontal slope contract', harness)
         self.assertIn('"order_" + output_id + ".f32"', harness)
-        self.assertIn('direct_order_srv.GetAddressOf()', harness)
         self.assertIn('"direct_parallax_manifest.json"', harness)
         self.assertNotIn('"direct_candidate_manifest.json"', harness)
         self.assertNotIn('SBS_DIRECT_CANDIDATE_PARALLAX', harness)
         self.assertNotIn('SBS_CANDIDATE_GAP_FILL', harness)
         self.assertIn(
-            '(direct_parallax_mode ? direct_geometry_contract_schema : 19u)',
+            '(direct_parallax_mode ? direct_geometry_contract_schema : 20u)',
             harness)
         self.assertIn('{"renderer_uses_order", false}', harness)
         self.assertIn(
-            '{"order_role", "diagnostic-semantic-depth-and-forward-coverage-only-v1"}',
+            '{"order_role", "diagnostic-semantic-depth-only-v1"}',
             harness)
         self.assertIn('("depth_" + output_id + ".f32")', harness)
         self.assertNotIn('"displacement_high_is_near"', harness)
 
         shader_root = os.path.join(
             repo, "src_assets", "windows", "assets", "shaders", "directx")
-        with open(os.path.join(shader_root, "include", "sbs_warp_common.hlsl"),
-                  encoding="utf-8") as fh:
-            common = fh.read()
-        self.assertIn("#ifdef SBS_DIRECT_PARALLAX", common)
-        self.assertNotIn("SBS_DIRECT_PARALLAX_SOURCE_U_LIMIT", common)
-        self.assertNotIn("direct_parallax_search_radius", common)
-        self.assertIn("float3 direct_parallax_reserved;", common)
-        self.assertIn(
-            "return (d * 2.0f - 1.0f) * direct_parallax_source_u_limit;", common)
-        with open(os.path.join(shader_root, "sbs_reprojection_ps.hlsl"),
+        with open(os.path.join(shader_root, "sbs_direct_replay_ps.hlsl"),
                   encoding="utf-8") as fh:
             reprojection = fh.read()
         self.assertNotIn("CanonicalOrderTexture", reprojection)
         self.assertNotIn("SBS_DIRECT_CANDIDATE_PARALLAX", reprojection)
         self.assertNotIn("SBS_CANDIDATE_GAP_FILL", reprojection)
-        direct_begin = reprojection.index(
-            "#ifdef SBS_CONTRACTIVE_PARALLAX", reprojection.index("float2 Reproject"))
-        direct_end = reprojection.index("#else", direct_begin)
-        direct_inverse = reprojection[direct_begin:direct_end]
-        self.assertIn("for (int iteration = 0; iteration < 12; ++iteration)",
+        direct_inverse = reprojection[reprojection.index("float2 Reproject"):
+                                      reprojection.index("float4 main_ps")]
+        self.assertIn("for (int iteration = 0; iteration < 11; ++iteration)",
                       direct_inverse)
         self.assertIn(
-            "sourceX = uv.x + eyeSign * DepthParallax(SampleDepth(sourceX, uv.y));",
+            "source_x = destination_uv.x + eye_sign *",
             direct_inverse)
-        self.assertNotIn("Bestv2SearchRadius", direct_inverse)
-        self.assertNotIn("Bestv2Probe", direct_inverse)
         self.assertNotIn("ForwardCoverageTexture", direct_inverse)
         self.assertNotIn("bgOrder", direct_inverse)
-        with open(os.path.join(shader_root, "sbs_forward_coverage_cs.hlsl"),
-                  encoding="utf-8") as fh:
-            coverage = fh.read()
-        self.assertIn("Texture2D<float> DirectOrderTexture : register(t5);", coverage)
-        self.assertIn("uint ordered =", coverage)
-        self.assertIn("CSSetShaderResources(5", harness)
-        production_mentions = set()
-        for path in glob.glob(os.path.join(repo, "src", "**", "*"), recursive=True):
-            if not os.path.isfile(path):
-                continue
-            with open(path, encoding="utf-8", errors="ignore") as source_file:
-                if "SBS_DIRECT_PARALLAX" in source_file.read():
-                    production_mentions.add(path)
-        self.assertEqual(
-            production_mentions, {
-                os.path.join(repo, "src", "sbs_bench_harness.cpp"),
-            })
+        self.assertNotIn("SBS_DIRECT_PARALLAX", reprojection)
+        self.assertIn("/sbs_direct_replay_ps.hlsl", harness)
 
         evaluator_path = os.path.join(repo, "tools", "sbsbench", "run_eval.py")
         with open(evaluator_path, encoding="utf-8") as fh:
@@ -2028,36 +1755,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn(
             'direct_parallax_root and not args.comparison_only', evaluator)
         self.assertIn(
-            'direct_parallax_root and depth_override_root', evaluator)
-        self.assertIn(
-            'direct_parallax_root and literal_bestv2', evaluator)
-        self.assertIn(
-            'direct_parallax_root and depth_reuse_interval != 1', evaluator)
-        self.assertIn(
             'validate_direct_parallax_manifest(', evaluator)
-
-    def test_zero_plane_modes_are_shot_latched_and_machine_verified(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        with open(os.path.join(repo, "src_assets", "windows", "assets", "shaders",
-                               "directx", "include", "sbs_warp_common.hlsl"),
-                  encoding="utf-8") as fh:
-            common = fh.read()
-        self.assertIn(
-            "p.anchor_shift_px = SBS_STATE_ZERO_ANCHOR_SHIFT_PX(s2);", common)
-        # `legacy` is removed, so there is no non-explicit plane left to bias for.
-        self.assertNotIn("convergence_bias", common)
-        self.assertNotIn("explicit_zero_plane", common)
-        self.assertNotIn("float subject_lock;", common)
-        self.assertNotIn("subject_lock *", common)
-        with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
-                  encoding="utf-8") as fh:
-            harness = fh.read()
-        self.assertIn('a == "--zero-plane"', harness)
-        self.assertIn('o.zero_plane != "background"', harness)
-        conf = os.path.join(os.path.dirname(__file__), "bench.conf")
-        self.assertEqual(run_eval.expected_profile_string(
-            conf, "apollo", "zero_plane", "median", ["--zero-plane", "background"],
-            "--zero-plane"), "background")
 
     def test_live_depth_pairing_is_bounded_with_retained_source_completion_owner(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -2239,26 +1937,6 @@ class EvalContractTests(unittest.TestCase):
                        "cuGraphExecDestroy"):
             self.assertIn(symbol, driver)
 
-    def test_shared_eval_controls_ignore_profile_prefixed_aliases(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
-            fh.write("sbs_3d_profile = cinema\n"
-                     "sbs_3d_profile_cinema_cuda_graph = false\n"
-                     "sbs_3d_profile_cinema_pop_strength = 1.8\n")
-            path = fh.name
-        try:
-            self.assertTrue(run_eval.expected_shared_bool(
-                path, "cuda_graph", True, [], "--cuda-graph"))
-            self.assertEqual(run_eval.expected_shared_number(
-                path, "pop_strength", 1.2, [], "--pop-strength"), 1.2)
-            self.assertFalse(run_eval.expected_shared_bool(
-                path, "cuda_graph", True,
-                ["--cuda-graph", "off"], "--cuda-graph"))
-            self.assertEqual(run_eval.expected_shared_number(
-                path, "pop_strength", 1.2,
-                ["--pop-strength", "1.6"], "--pop-strength"), 1.6)
-        finally:
-            os.unlink(path)
-
     def test_shared_eval_controls_read_explicit_top_level_values(self):
         with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
             fh.write("sbs_3d_cuda_graph = false\n"
@@ -2293,85 +1971,6 @@ class EvalContractTests(unittest.TestCase):
             harness = fh.read()
         self.assertIn('"ema_mask_%s.png"', harness)
 
-    def test_depth_override_manifest_requires_exact_frames_and_source_hash(self):
-        with tempfile.TemporaryDirectory() as root:
-            clips_root = os.path.join(root, "clips")
-            clip_dir = os.path.join(clips_root, "sample")
-            override_root = os.path.join(root, "override")
-            override_clip = os.path.join(override_root, "sample")
-            os.makedirs(clip_dir)
-            os.makedirs(override_clip)
-            for frame_id in range(3):
-                Image.fromarray(np.full((8, 12, 3), frame_id, np.uint8)).save(
-                    os.path.join(clip_dir, f"frame_{frame_id:05d}.png"))
-            Image.fromarray(np.full((4, 6), 32768, np.uint16)).save(
-                os.path.join(override_clip, "depth_00001.png"))
-            manifest = {
-                "schema": 3,
-                "method": "classical-tile-phase-flow",
-                "frame_policy": "held",
-                "depth_every": 2,
-                "clips": {"sample": {
-                    "override_frames": 1,
-                    "override_frame_ids": [1],
-                    "clip_sha1": run_eval.sha1_dir(clip_dir),
-                }},
-            }
-            with open(os.path.join(override_root, "manifest.json"), "w",
-                      encoding="utf-8") as fh:
-                json.dump(manifest, fh)
-            self.assertEqual(run_eval.validate_depth_override_manifest(
-                override_root, clips_root, ["sample"], 2), {"sample": 1})
-            os.remove(os.path.join(override_clip, "depth_00001.png"))
-            original_stderr = sys.stderr
-            try:
-                sys.stderr = io.StringIO()
-                with self.assertRaises(SystemExit):
-                    run_eval.validate_depth_override_manifest(
-                        override_root, clips_root, ["sample"], 2)
-            finally:
-                sys.stderr = original_stderr
-
-    def test_all_frame_depth_treatment_manifest_is_fail_closed(self):
-        with tempfile.TemporaryDirectory() as root:
-            clips_root = os.path.join(root, "clips")
-            clip_dir = os.path.join(clips_root, "sample")
-            override_root = os.path.join(root, "override")
-            override_clip = os.path.join(override_root, "sample")
-            os.makedirs(clip_dir)
-            os.makedirs(override_clip)
-            frame_ids = list(range(3))
-            for frame_id in frame_ids:
-                Image.fromarray(np.full((8, 12, 3), frame_id, np.uint8)).save(
-                    os.path.join(clip_dir, f"frame_{frame_id:05d}.png"))
-                Image.fromarray(np.full((4, 6), 32768, np.uint16)).save(
-                    os.path.join(override_clip, f"depth_{frame_id:05d}.png"))
-            manifest = {
-                "schema": 3,
-                "method": "flow-aware-ema-oracle",
-                "frame_policy": "all",
-                "depth_every": 1,
-                "clips": {"sample": {
-                    "override_frames": 3,
-                    "override_frame_ids": frame_ids,
-                    "clip_sha1": run_eval.sha1_dir(clip_dir),
-                }},
-            }
-            with open(os.path.join(override_root, "manifest.json"), "w",
-                      encoding="utf-8") as fh:
-                json.dump(manifest, fh)
-            self.assertEqual(run_eval.validate_depth_override_manifest(
-                override_root, clips_root, ["sample"], 1, True), {"sample": 3})
-            os.remove(os.path.join(override_clip, "depth_00002.png"))
-            original_stderr = sys.stderr
-            try:
-                sys.stderr = io.StringIO()
-                with self.assertRaises(SystemExit):
-                    run_eval.validate_depth_override_manifest(
-                        override_root, clips_root, ["sample"], 1, True)
-            finally:
-                sys.stderr = original_stderr
-
     def test_rescore_derives_depth_compensation_for_schema_upgrade(self):
         self.assertEqual(rescore_run.depth_compensation_from_meta({}), "none")
         self.assertEqual(rescore_run.depth_compensation_from_meta(
@@ -2403,27 +2002,9 @@ class EvalContractTests(unittest.TestCase):
     def test_warp_and_coverage_apply_per_eye_aspect_mapping(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx")
-        for name in ("sbs_reprojection_ps.hlsl", "sbs_forward_coverage_cs.hlsl"):
+        for name in ("sbs_reprojection_v2_live_ps.hlsl", "sbs_direct_replay_ps.hlsl"):
             with self.subTest(shader=name), open(os.path.join(shader_dir, name), encoding="utf-8") as fh:
                 self.assertIn("ContentToSourceUV", fh.read())
-
-    def test_hdr_depth_input_uses_validated_color_transform(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx")
-        with open(os.path.join(shader_dir, "include", "depth_color.hlsl"), encoding="utf-8") as fh:
-            color = fh.read()
-        self.assertIn("DepthHdrScRgbToSrgb", color)
-        self.assertIn("dot(c, float3(0.2126f, 0.7152f, 0.0722f))", color)
-        self.assertNotIn("c / (1.0f + c)", color)
-        for name in ("rgb_to_nchw_cs.hlsl",):
-            with self.subTest(shader=name), open(os.path.join(shader_dir, name), encoding="utf-8") as fh:
-                text = fh.read()
-                self.assertIn('include/depth_color.hlsl', text)
-                self.assertIn("DepthColorToSrgb", text)
-                footprint = text.find("float4 pixel = SampleModelFootprint")
-                transform = text.find("DepthColorToSrgb(pixel.rgb, color_mode)")
-                self.assertGreaterEqual(footprint, 0)
-                self.assertGreater(transform, footprint)
 
     def test_host_sbs_intermediate_follows_observed_capture_transfer(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -2471,46 +2052,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("0.2126f * r + 0.7152f * g", text)
         self.assertIn("const float tone_scale = 1.0f / (1.0f + luminance)", text)
         self.assertNotIn("c = c / (1.0f + c)", text)
-
-    def test_report_reuses_one_aggregate_decision_and_writes_sidecar(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        path = os.path.join(repo, "tools", "sbsbench", "build_report.py")
-        with open(path, encoding="utf-8") as fh:
-            text = fh.read()
-        self.assertIn("AB_METRIC_DECISION = sbsbench.evaluate_ab_decision(\n"
-                      "    ctrl_agg, treat_agg", text)
-        self.assertIn("AB_DECISION = sbsbench.gate_ab_decision(AB_METRIC_DECISION, CTRL, TREAT)",
-                      text)
-        self.assertIn("clip_meta={clip: TREAT", text)
-        self.assertIn("decision = AB_DECISION", text)
-        self.assertIn('"decision_clips": DECISION_CLIPS', text)
-        self.assertIn('"decision_scope": DECISION_SCOPE', text)
-        self.assertIn('"source_artifact_clips": SOURCE_ARTIFACT_CLIPS', text)
-        self.assertIn('"schema": 4', text)
-        self.assertIn('"control_depth_model_url"', text)
-        self.assertIn('"treatment_preprocess_profile"', text)
-        self.assertIn('"control_preprocess_source_closure_sha256"', text)
-        self.assertIn('"treatment_depth_coordinate_v2_calibration_id"', text)
-        self.assertIn('"report_sha256": REPORT_SHA', text)
-        self.assertIn('AB_DECISION["verdict"]', text)
-        self.assertIn('"canonical_gate"', text)
-        self.assertIn('displayed_verdict = AB_DECISION["verdict"]', text)
-        self.assertNotIn("Neither is a regression of the other", text)
-        self.assertIn('"suite", "run_kind",', text)
-        self.assertIn("IS_PROFILE_CMP", text)
-        self.assertIn("IS_TRADEOFF_CMP = IS_MODE_CMP or IS_PROFILE_CMP", text)
-        self.assertIn("def _metric_state_value(run, clip, key):", text)
-        self.assertIn("state = sbsbench.metric_evidence_state(key, spec, observed, metadata)",
-                      text)
-        self.assertIn('return "missing", None', text)
-        self.assertIn("def _metric_value(run, clip, key):", text)
-        self.assertIn("if not sbsbench.metric_value_valid(observed, key):", text)
-        self.assertIn("def _paired_mean_aggregate", text)
-        self.assertIn("a, b = _paired_mean_aggregate(k)", text)
-        evidence = text[text.index("def visual_evidence_section"):text.index(
-            "def source_artifact_section")]
-        self.assertNotIn("stereo_art_scale_std_error_pct", evidence)
-        self.assertNotIn("stereo_art_zero_std_error_pct", evidence)
 
     def test_report_preserves_missing_unsupported_and_support_units(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -2624,7 +2165,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertEqual(set(primary_style),
                          configured_primary | {"exact_visible_pop_spread_pct"})
         self.assertEqual(set(hard), configured_hard)
-        self.assertEqual(len(hard), 17)
+        self.assertEqual(len(hard), 15)
         self.assertEqual(set(supporting),
                          configured_diagnostic - {"exact_visible_pop_spread_pct"})
         self.assertIn("exact_local_polarity_component_pct", supporting)
@@ -2727,20 +2268,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertFalse(run_eval.metric_exempt_for_clip({"axis": "comfort"}, flat))
         self.assertFalse(run_eval.metric_exempt_for_clip({"axis": "stereo"}, {}))
 
-    def test_rejected_processors_and_ema_order_are_permanently_removed(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx")
-        for name in ("depth_guided_upsample_cs.hlsl", "depth_guide_downsample_cs.hlsl",
-                     "depth_curvature_cs.hlsl", os.path.join("include", "band_curve.hlsl")):
-            self.assertFalse(os.path.exists(os.path.join(shader_dir, name)))
-        with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:
-            config = fh.read()
-        for key in ("sbs_3d_ema_pixel_first", "sbs_3d_guided_upsample",
-                    "sbs_3d_foreground_curvature", "sbs_3d_minmax_snap",
-                    "sbs_3d_range_floor", "sbs_3d_shift_profile",
-                    "sbs_3d_subject_track"):
-            self.assertNotIn(key, config)
-
     def test_production_v2_pipeline_is_mandatory_and_fails_flat(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         paths = {
@@ -2751,8 +2278,8 @@ class EvalContractTests(unittest.TestCase):
         for key, path in paths.items():
             with open(path, encoding="utf-8") as fh:
                 text[key] = fh.read()
-        self.assertIn("const bool core_shaders_ok", text["estimator"])
-        self.assertIn("if (!core_shaders_ok)", text["estimator"])
+        self.assertIn("const bool producer_shaders_ok", text["estimator"])
+        self.assertIn("if (!producer_shaders_ok)", text["estimator"])
         self.assertIn(
             "if (!valid || terminal_failure || live_v2_producer_unavailable() || !input_srv)",
             text["estimator"],
@@ -2763,31 +2290,6 @@ class EvalContractTests(unittest.TestCase):
             "host_sbs_renderer = models::fail_host_sbs_renderer_flat(host_sbs_renderer);",
             text["display"],
         )
-
-    def test_bestv2_fast_curve_is_subpixel_and_live_only(self):
-        depth = np.linspace(0.0, 1.0, 100001, dtype=np.float64)
-        near = np.exp(-0.5 * ((depth - 0.85) / 0.24) ** 2)
-        middle = np.exp(-0.5 * ((depth - 0.50) / 0.28) ** 2)
-        far = np.exp(-0.5 * ((depth - 0.15) / 0.24) ** 2)
-        exact = (near * 9.99 + middle * 3.0 - far * 2.52) / (near + middle + far + 1e-6)
-        coeffs = (-1.39635933, 2.776208766, 21.04503417, -94.6673759,
-                  376.6610774, -645.141824, 482.8701123, -133.5645677)
-        approx = np.full_like(depth, coeffs[-1])
-        for coefficient in reversed(coeffs[:-1]):
-            approx = approx * depth + coefficient
-        self.assertLess(np.max(np.abs(approx - exact)), 0.01)
-
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders",
-                                  "directx")
-        with open(os.path.join(shader_dir, "include", "sbs_warp_common.hlsl"),
-                  encoding="utf-8") as fh:
-            warp_common = fh.read()
-        with open(os.path.join(shader_dir, "include", "bestv2_curve.hlsl"),
-                  encoding="utf-8") as fh:
-            curve = fh.read()
-        self.assertIn("Bestv2RawShiftPxFast(shaped_depth)", warp_common)
-        self.assertNotIn("Bestv2RawShiftPx(float", curve)
 
     def test_tensorrt_level_is_part_of_engine_recipe(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -2814,55 +2316,13 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("flags |= D3DCOMPILE_OPTIMIZATION_LEVEL3", live)
         self.assertIn("D3DCOMPILE_OPTIMIZATION_LEVEL3", harness)
 
-    def test_production_warp_has_no_retired_plane_lock_path(self):
+    def test_production_warp_uses_authenticated_inverse_mapping(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         shader = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
-                              "sbs_reprojection_ps.hlsl")
+                              "sbs_reprojection_v2_live_ps.hlsl")
         with open(shader, encoding="utf-8") as fh:
             text = fh.read()
-        self.assertNotIn("PlaneLockTexture", text)
-        self.assertNotIn("subject_plane_lock", text)
-
-        common = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
-                              "include", "sbs_warp_common.hlsl")
-        with open(common, encoding="utf-8") as fh:
-            common_text = fh.read()
-        self.assertNotIn("use_plane_lock", common_text)
-        self.assertIn("sample_uv = Reproject(src_uv, eyeSign, true)", text)
-        self.assertIn("sample_uv = Reproject(src_uv, eyeSign, false)", text)
-        self.assertIn("float mapping_ps(PS_INPUT input) : SV_TARGET", text)
-        self.assertIn("return sample_uv.x;", text)
-        self.assertNotIn("return saturate(sample_uv.x);", text)
-        self.assertNotIn("ReprojectResult", text)
-        self.assertIn("MakeBestv2Params", text)
-        self.assertIn(
-            "DepthParallax(\n            d, s0, s1, params, use_subject_stretch)",
-            text)
-        self.assertNotIn("DepthParallax(d, s0, s1, shaped", text)
-
-    def test_retired_geometry_is_absent_but_forward_coverage_diagnostic_remains(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        display = os.path.join(repo, "src", "platform", "windows", "display_vram.cpp")
-        with open(display, encoding="utf-8") as fh:
-            display_text = fh.read()
-        self.assertNotIn("sbs_vd3d", display_text)
-        self.assertNotIn("sbs_sharpen", display_text)
-        with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
-                  encoding="utf-8") as fh:
-            harness_text = fh.read()
-        self.assertIn("sbs_forward_coverage_cs.hlsl", harness_text)
-        self.assertIn("dispatch_coverage", harness_text)
-        for retired in ("subject_plane_lock", "subject_plane_width", "bestv2_sharpen",
-                        "ema_edge_dilation"):
-            self.assertNotIn(retired, harness_text)
-        shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders",
-                                  "directx")
-        for retired_shader in ("depth_plane_band_cs.hlsl", "depth_plane_combine_cs.hlsl",
-                               "depth_plane_filter_cs.hlsl", "depth_plane_reduce_cs.hlsl",
-                               "depth_plane_resolve_cs.hlsl", "sbs_sharpen_ps.hlsl"):
-            self.assertFalse(os.path.exists(os.path.join(shader_dir, retired_shader)))
-        self.assertFalse(os.path.exists(os.path.join(
-            shader_dir, "include", "depth_plane_constants.hlsl")))
+        self.assertIn("sample_uv = WarpAvailable() ? Reproject(source_uv, eye_sign)", text)
 
     def test_report_evidence_is_bounded_and_accepts_zero_based_frames(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -3014,7 +2474,7 @@ class EvalContractTests(unittest.TestCase):
                 "order_minimum": float(np.min(order)),
                 "order_maximum": float(np.max(order)),
             }
-            manifest = {**run_eval._DIRECT_GEOMETRY_MANIFEST_V4, "fields": [field]}
+            manifest = {**run_eval._DIRECT_GEOMETRY_MANIFEST_V6, "fields": [field]}
             manifest_path = os.path.join(seq, "direct_parallax_manifest.json")
             with open(manifest_path, "w", encoding="utf-8", newline="\n") as stream:
                 json.dump(manifest, stream, indent=2)
@@ -3023,7 +2483,7 @@ class EvalContractTests(unittest.TestCase):
                 "schema": run_eval.direct_geometry.CONTRACT_SCHEMA,
                 "warp_input": run_eval.direct_geometry.WARP_INPUT,
                 "direct_parallax_frames": 1,
-                "direct_parallax": run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V4,
+                "direct_parallax": run_eval._DIRECT_GEOMETRY_DESCRIPTOR_V6,
                 "direct_parallax_manifest": {
                     "file": "direct_parallax_manifest.json",
                     "schema": run_eval.direct_geometry.MANIFEST_SCHEMA,
@@ -3661,21 +3121,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertTrue(valid[:, 3:].all())
         self.assertEqual(set(np.unique(warped)), {0.0, 1.0})
         self.assertTrue((warped[:, 11:] == 1.0).all())
-
-    def test_flow_aware_ema_tracks_translated_depth_edge(self):
-        height, width = 24, 40
-        previous = np.zeros((height, width), np.float32)
-        previous[:, 12:] = 1.0
-        current = np.zeros_like(previous)
-        current[:, 15:] = 1.0
-        flow = np.zeros((height, width, 2), np.float32)
-        flow[..., 0] = 3.0
-        valid = np.ones((height, width), bool)
-        filtered, reliable, _ = prepare_flow_ema_reference.flow_aware_ema(
-            current, previous, previous, current, flow, valid,
-            0.5, 0.05, 0.02, 0.25)
-        self.assertGreater(float(reliable.mean()), 0.85)
-        self.assertTrue(np.array_equal(filtered, current))
 
     def test_depth_confidence_ignores_flat_depth(self):
         source = np.tile(np.linspace(0.0, 1.0, 96, dtype=np.float32), (48, 1))

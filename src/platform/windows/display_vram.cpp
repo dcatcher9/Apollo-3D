@@ -644,12 +644,6 @@ namespace platf::dxgi {
         if (sbs_mode != ::video::SBS_OFF) {
           const bool input_is_linear =
             img.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
-          // DDup does not reveal its capture format until the first real frame. Allocate (or
-          // correct) the packed target from that observed format so ordinary BGRA SDR does not
-          // remain in the conservative FP16 storage selected during device setup.
-          if (!ensure_sbs_intermediate_storage(input_is_linear)) {
-            return -1;
-          }
 
           // Perf benchmark: CPU wall time of the whole SBS block (estimator dispatch + composite
           // draw submission). GPU-side inference times are measured separately via CUDA events in
@@ -1013,8 +1007,9 @@ namespace platf::dxgi {
           const bool v2_live_resources_complete =
             est.shadow_final_parallax && est.shadow_state;
           const bool v2_live_warp_selected =
-            v2_renderer_selected && sbs_reprojection_v2_live_ps &&
-            v2_live_resources_complete;
+            v2_renderer_selected && matched_render_slot &&
+            models::parallax_v2_result_is_authenticated(est) &&
+            sbs_reprojection_v2_live_ps && v2_live_resources_complete;
           ID3D11ShaderResourceView *selected_parallax_field =
             v2_live_warp_selected ? est.shadow_final_parallax.Get() : nullptr;
           const bool timing_has_depth_warp =
@@ -1046,6 +1041,15 @@ namespace platf::dxgi {
                                                       matched_render_slot->color_space
                                                     ) :
                                                     input_is_linear;
+
+            // DDup reveals the current capture transfer only after the first real frame, while
+            // asynchronous depth completion can select an older buffered color frame. Size the
+            // packed target from the frame we are about to render, not from the newest capture.
+            // Repeated output deliberately skips this path so a transfer transition cannot
+            // reallocate and erase the last completed SBS image before it is presented.
+            if (!ensure_sbs_intermediate_storage(render_input_is_linear)) {
+              return -1;
+            }
 
             ID3D11ShaderResourceView *warp_depth = selected_parallax_field;
             dump_warp_depth = warp_depth;
@@ -1191,7 +1195,7 @@ namespace platf::dxgi {
               dump_frame.model_input = est.model_input_snapshot.Get();
               dump_frame.raw_depth = est.raw_model_depth_snapshot.Get();
               dump_frame.warp_depth = dump_warp_depth;
-              dump_frame.adaptive_state = est.subject.Get();
+              dump_frame.adaptive_state = est.cut_state.Get();
               dump_frame.depth_frame_state = est.depth_frame_state.Get();
               dump_frame.warp_map =
                 geometry_available ? sbs_debug_mapping_srv.Get() : nullptr;
@@ -1435,9 +1439,8 @@ namespace platf::dxgi {
       // resource creation the constructor does (it makes no immediate-context calls). Capture
       // owning ComPtrs so a presentation-session teardown never has to wait for construction.
       auto sbs_cfg = sbs_config;
-      // The estimator usage resolves the authenticated live tensor shapes and its private cut
-      // calibration. The full parsed configuration is retained here only because the same class
-      // also serves the explicitly selected legacy_evaluation path.
+      // Every estimator consumer uses the authenticated Host SBS tensor shapes and private cut
+      // analysis contract.
       BOOST_LOG(info) << "Host SBS enabled; initializing the per-stream GPU pipeline for resident model \""sv
                       << active.name
                       << "\" in the background (streaming flat until ready)..."sv;
@@ -1449,8 +1452,7 @@ namespace platf::dxgi {
           std::move(ctx),
           std::filesystem::path(SUNSHINE_ASSETS_DIR),
           sbs_cfg,
-          active,
-          models::depth_estimator_usage_e::host_sbs_v2
+          active
         );
       });
       depth_estimator_build = build_task.get_future();
@@ -1499,7 +1501,7 @@ namespace platf::dxgi {
       snapshot.status = status;
       snapshot.generation = sbs_telemetry_generation;
       snapshot.sequence = next_sbs_telemetry_sequence();
-      ::video::apply_sbs_telemetry_profile(snapshot, sbs_config);
+      ::video::apply_sbs_telemetry_config(snapshot, sbs_config);
       return snapshot;
     }
 
@@ -1863,7 +1865,6 @@ namespace platf::dxgi {
       matched_output_source_at = {};
       matched_output_source_timestamp.reset();
       matched_output_timeout_active = false;
-      depth_completion_poll_pending = false;
       BOOST_LOG(info) << "Host SBS intermediate storage finalized as "sv
                       << (input_is_linear ? "FP16 linear-capable."sv : "BGRA8 SDR."sv);
       return true;
@@ -2122,7 +2123,7 @@ namespace platf::dxgi {
       int width,
       int height,
       int sbs_mode_param = ::video::SBS_OFF,
-      const config::video_t::sbs_t &profile = {},
+      const config::video_t::sbs_t &settings = {},
       safe::mail_raw_t::event_t<int> depth_status_event = {},
       std::shared_ptr<safe::event_t<bool>> depth_pipeline_ready_event = {},
       safe::mail_raw_t::event_t<::video::sbs_telemetry_snapshot_t> telemetry_event = {},
@@ -2140,7 +2141,7 @@ namespace platf::dxgi {
         return -1;
       }
       sbs_mode = sbs_mode_param;
-      sbs_config = profile;
+      sbs_config = settings;
       host_sbs_renderer = models::host_sbs_renderer_e::awaiting_v2;
       diagnostics_enabled = config::sunshine.diagnostics_enabled;
       sbs_depth_status_event = std::move(depth_status_event);
@@ -2207,6 +2208,30 @@ namespace platf::dxgi {
         BOOST_LOG(error) << "Host SBS requires an identity-oriented source display. "
                          << "Use an explicit portrait resolution instead of Windows display "
                             "rotation.";
+        return -1;
+      }
+      const auto host_sbs_rejection =
+        display->width > 0 && display->height > 0 ?
+          models::host_sbs_v2_source_resolution_rejection_reason(
+            static_cast<std::uint32_t>(display->width),
+            static_cast<std::uint32_t>(display->height)
+          ) :
+          std::string_view {"source extent is empty"};
+      if (sbs_on && !host_sbs_rejection.empty()) {
+        // Launch, RTSP, and live controls have already preflighted the negotiated mode. Reaching
+        // this guard therefore means capture attached to a different surface/topology; never let
+        // that internal mismatch proceed to inference and become an unexplained flat stream.
+        const auto fitted = display->width > 0 && display->height > 0 ?
+                              models::fit_host_sbs_v2_depth_tensor_shape(
+                                static_cast<std::uint32_t>(display->width),
+                                static_cast<std::uint32_t>(display->height)
+                              ) :
+                              models::depth_tensor_shape_t {};
+        BOOST_LOG(error) << "Host SBS V2 rejects capture surface "sv
+                         << display->width << 'x' << display->height
+                         << ": "sv << host_sbs_rejection
+                         << "; fitted depth tensor "sv << fitted.width << 'x'
+                         << fitted.height << '.';
         return -1;
       }
 
@@ -2521,14 +2546,14 @@ namespace platf::dxgi {
       int width,
       int height,
       int sbs_mode_param,
-      const config::video_t::sbs_t &profile
+      const config::video_t::sbs_t &settings
     ) {
       return init_output(
         nullptr,
         width,
         height,
         sbs_mode_param,
-        profile,
+        settings,
         {},
         {},
         {},
@@ -2778,7 +2803,7 @@ namespace platf::dxgi {
     bool depth_estimator_failed = false;  ///< Build threw; stream flat, don't retry on this device.
     unsigned engine_poll_counter = 0;  ///< Rate-limits the startup model-preparation wait warning.
     int sbs_mode = ::video::SBS_OFF;  ///< Host SBS mode for this encode device (set in init_output).
-    config::video_t::sbs_t sbs_config {};  ///< Immutable profile snapshot for this device.
+    config::video_t::sbs_t sbs_config {};  ///< Immutable Host SBS settings for this device.
     bool diagnostics_enabled = false;  ///< Cached once per device; the disabled hot path only branches.
     safe::mail_raw_t::event_t<int> sbs_depth_status_event;
     std::shared_ptr<safe::event_t<bool>> sbs_depth_pipeline_ready_event;

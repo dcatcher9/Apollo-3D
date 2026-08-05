@@ -126,8 +126,8 @@ TEST(HostSbsCutOnlyGpuTest, ResolvesCutPulseAndClearsEvidence) {
 
   // Shared evidence contract order: total, depth, ordinal, RGB, current/previous/common support,
   // brightness rise/fall. This is a broad semantic replacement, not an exposure-like transition.
-  std::array<std::uint32_t, 9> evidence {
-    100u, 30u, 10u, 80u, 100u, 100u, 100u, 40u, 40u
+  std::array<std::uint32_t, 10> evidence {
+    100u, 30u, 10u, 80u, 100u, 100u, 100u, 40u, 40u, 1u
   };
   ComPtr<ID3D11Buffer> state_buffer;
   ComPtr<ID3D11UnorderedAccessView> state_uav;
@@ -159,10 +159,16 @@ TEST(HostSbsCutOnlyGpuTest, ResolvesCutPulseAndClearsEvidence) {
 
   dispatch();
   std::array<float, sbs_adaptive_state::word_count> resolved {};
-  std::array<std::uint32_t, 9> cleared {};
+  std::array<std::uint32_t, 10> cleared {};
   ASSERT_TRUE(read_buffer(device.Get(), context.Get(), state_buffer.Get(), resolved));
   ASSERT_TRUE(read_buffer(device.Get(), context.Get(), evidence_buffer.Get(), cleared));
   EXPECT_FLOAT_EQ(resolved[index(sbs_adaptive_state::word_e::scene_age)], 0.0f);
+  EXPECT_EQ(
+    std::bit_cast<std::uint32_t>(
+      resolved[index(sbs_adaptive_state::word_e::cut_contract_tag_bits)]
+    ),
+    sbs_adaptive_state::cut_contract_tag
+  );
   EXPECT_FLOAT_EQ(
     resolved[index(sbs_adaptive_state::word_e::cut_flags)],
     static_cast<float>(sbs_adaptive_state::cut_flag_latched)
@@ -181,6 +187,44 @@ TEST(HostSbsCutOnlyGpuTest, ResolvesCutPulseAndClearsEvidence) {
   EXPECT_EQ(
     std::bit_cast<std::uint32_t>(resolved[index(sbs_adaptive_state::word_e::hard_cut_count)]),
     1u
+  );
+
+  // A same-sized foreign cut buffer is replaced from the generated schema defaults.
+  auto corrupt_state = sbs_adaptive_state::initial_values;
+  corrupt_state[index(sbs_adaptive_state::word_e::cut_contract_tag_bits)] = 0.0f;
+  corrupt_state[index(sbs_adaptive_state::word_e::initialized)] = 1.0f;
+  corrupt_state[index(sbs_adaptive_state::word_e::scene_age)] = 123.0f;
+  context->UpdateSubresource(
+    state_buffer.Get(), 0, nullptr, corrupt_state.data(), 0, 0);
+  dispatch();
+  ASSERT_TRUE(read_buffer(device.Get(), context.Get(), state_buffer.Get(), resolved));
+  EXPECT_EQ(
+    std::bit_cast<std::uint32_t>(
+      resolved[index(sbs_adaptive_state::word_e::cut_contract_tag_bits)]
+    ),
+    sbs_adaptive_state::cut_contract_tag
+  );
+  EXPECT_FLOAT_EQ(resolved[index(sbs_adaptive_state::word_e::initialized)], 0.0f);
+  EXPECT_FLOAT_EQ(resolved[index(sbs_adaptive_state::word_e::scene_age)], 0.0f);
+
+  // Rearm age follows source-stream frames even when depth observations were skipped.
+  auto aged_state = sbs_adaptive_state::initial_values;
+  aged_state[index(sbs_adaptive_state::word_e::initialized)] = 1.0f;
+  std::array<std::uint32_t, 10> aged_evidence {
+    100u, 0u, 0u, 0u, 100u, 100u, 100u, 0u, 0u, 8u
+  };
+  context->UpdateSubresource(state_buffer.Get(), 0, nullptr, aged_state.data(), 0, 0);
+  context->UpdateSubresource(
+    evidence_buffer.Get(), 0, nullptr, aged_evidence.data(), 0, 0);
+  dispatch();
+  ASSERT_TRUE(read_buffer(device.Get(), context.Get(), state_buffer.Get(), resolved));
+  EXPECT_FLOAT_EQ(resolved[index(sbs_adaptive_state::word_e::scene_age)], 8.0f);
+  EXPECT_FLOAT_EQ(
+    resolved[index(sbs_adaptive_state::word_e::cut_flags)],
+    static_cast<float>(
+      sbs_adaptive_state::cut_flag_geometry_armed |
+      sbs_adaptive_state::cut_flag_appearance_armed
+    )
   );
 }
 #endif

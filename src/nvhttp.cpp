@@ -32,6 +32,7 @@
 #include "config.h"
 #include "file_handler.h"
 #include "globals.h"
+#include "host_sbs_resolution.h"
 #include "httpcommon.h"
 #include "logging.h"
 #include "network.h"
@@ -731,6 +732,23 @@ namespace nvhttp {
     const auto sbs_mode = parse_launch_int(launch_int_field::sbs_mode, get_arg(args, "sbsMode"));
     if (!enable_sops || !host_audio || !surround_info || !enable_hdr || !virtual_display || !scale_factor || !sbs_mode) {
       BOOST_LOG(warning) << "Rejecting invalid launch options for client ["sv << named_cert_p->name << ']';
+      return nullptr;
+    }
+    const auto host_sbs_rejection =
+      models::host_sbs_v2_source_resolution_rejection_reason(
+        static_cast<std::uint32_t>(parsed_mode->width),
+        static_cast<std::uint32_t>(parsed_mode->height)
+      );
+    if (*sbs_mode == video::SBS_AI && !host_sbs_rejection.empty()) {
+      const auto fitted = models::fit_host_sbs_v2_depth_tensor_shape(
+        static_cast<std::uint32_t>(parsed_mode->width),
+        static_cast<std::uint32_t>(parsed_mode->height)
+      );
+      BOOST_LOG(warning) << "Rejecting Host SBS V2 launch at "sv
+                         << parsed_mode->width << 'x' << parsed_mode->height
+                         << " for client ["sv << named_cert_p->name
+                         << "]: "sv << host_sbs_rejection << "; fitted depth tensor "sv
+                         << fitted.width << 'x' << fitted.height << '.';
       return nullptr;
     }
 

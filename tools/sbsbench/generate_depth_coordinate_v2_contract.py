@@ -96,7 +96,7 @@ EXPECTED_SHADOW_STATE_FIELD_NAMES = (
     "confirmed_cut_count",
     "contract_tag_bits",
     "camera_center_integrity_bits",
-    "mapping_state_reserved_0",
+    "renderer_authorization_bits",
     "mapping_state_reserved_1",
     "mapping_state_reserved_2",
 )
@@ -105,8 +105,15 @@ PREPROCESS_SHADER_ROOT = (
     ROOT / "src_assets" / "windows" / "assets" / "shaders" / "directx")
 PREPROCESS_SHADER_SPECS = (("rgb_to_nchw_cs.hlsl", "main", "cs_5_0"),)
 PARALLAX_V2_SHADER_SPECS = (
+    ("rgb_to_nchw_cs.hlsl", "main", "cs_5_0"),
+    ("buffer_to_tex_cs.hlsl", "main", "cs_5_0"),
+    ("depth_ema_motion_cs.hlsl", "main", "cs_5_0"),
     ("depth_minmax_cs.hlsl", "main", "cs_5_0"),
+    ("depth_minmax_ema_cs.hlsl", "main", "cs_5_0"),
     ("depth_hist_cs.hlsl", "main", "cs_5_0"),
+    ("depth_scene_cut_evidence_cs.hlsl", "main", "cs_5_0"),
+    ("depth_scene_cut_resolve_cs.hlsl", "main", "cs_5_0"),
+    ("depth_valid_history_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_moments_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_state_resolve_cs.hlsl", "main", "cs_5_0"),
@@ -1039,7 +1046,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--refresh-shader-identity",
         action="store_true",
-        help=("regenerate the non-circular HLSL tag, refresh the independent nine-root "
+        help=("regenerate the non-circular HLSL tag, refresh the independent complete "
               "shader closure digest in the manifest, then regenerate both language contracts"),
     )
     parser.add_argument("--manifest", type=Path, default=MANIFEST, help=argparse.SUPPRESS)
@@ -1052,8 +1059,8 @@ def main(argv: list[str] | None = None) -> int:
             verify_shader_source_closure=False,
         )
         # The GPU tag deliberately excludes only the shader-body digest, so this first HLSL
-        # generation is final. Hash its exact two-analysis-plus-seven-coordinate-shader closure,
-        # record that independent
+        # generation is final. Hash the complete preprocessing, cut/history, and seven-coordinate
+        # producer closure, record that independent
         # identity, and render again; the second HLSL must be byte-identical by construction.
         first_hlsl = render_hlsl(contract)
         _write_or_check(HLSL_TARGET, first_hlsl, False)

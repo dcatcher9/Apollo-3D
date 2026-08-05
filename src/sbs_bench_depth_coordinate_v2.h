@@ -11,7 +11,7 @@
  * pure row majorant. The encoded final texture is the live render input for the twelve-step
  * contractive inverse. A separate
  * diagnostic-only map entrypoint materializes canonical_values for the replay report; it is not
- * part of the nine-entry production source closure or live authentication.
+ * part of the authenticated production producer closure or live authentication.
  */
 #pragma once
 
@@ -30,9 +30,9 @@
 
 namespace sbs_bench {
 
-  inline constexpr unsigned depth_coordinate_v2_state_trace_schema = 16;
+  inline constexpr unsigned depth_coordinate_v2_state_trace_schema = 17;
   inline constexpr std::string_view depth_coordinate_v2_state_trace_policy =
-    "immediate-first-usable-otsu-valley-zero-fixed-scale-fixed-near-curve-retained-camera-source-ownership-container-vertical-share75-row-majorant-v15";
+    "immediate-first-usable-otsu-valley-zero-fixed-scale-fixed-near-curve-retained-camera-source-ownership-pointwise-soft-container-vertical-share75-row-majorant-v16";
   inline constexpr std::string_view depth_coordinate_v2_diagnostic_role =
     "non-controlling-fixed-scale-camera-audit-v4";
   inline constexpr std::string_view depth_coordinate_v2_gpu_authority =
@@ -49,7 +49,7 @@ namespace sbs_bench {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> vertical_majorant;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> vertical_conditioned;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> encoded_final_parallax;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> legacy_subject_state;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> cut_state;
     std::vector<float> raw_values;
     std::vector<float> canonical_values;
     std::vector<float> candidate_parallax_values;

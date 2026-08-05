@@ -20,14 +20,14 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     import generate_depth_coordinate_v2_contract as generator  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 11
-SHADOW_STATE_DUMP_SCHEMA = 13
+DUMP_MANIFEST_SCHEMA = 12
+SHADOW_STATE_DUMP_SCHEMA = 15
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 2
 LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
-    "ee553e2322d7b5f519587ae611ae1e665d1a9b2fb21181f82cb6ab13d55d781d"
+    "19c88dbb3a1079f94e0792bc965569ea988166c698a5d305d27e5c6d2e4c4223"
 )
 DIAGNOSTIC_SOURCE_CLOSURE_SHA256 = (
-    "ab3cd80ee5bef3ea6649e088aabb5c68014e9c1f37aea0eca8670f41eaa8f28e"
+    "29a4cae2dcde8de5ddd264f92beb603e134c6e5ea3ce6e6010129042d5d2ae70"
 )
 
 _CONTRACT = coordinate_contract.load_contract()
@@ -55,7 +55,7 @@ _DECODED_KEYS = {
     "frame_valid", "camera_valid", "calibration_revision", "confirmed_cut_count", "contract_tag",
     "requested_gain", "requested_pop_strength", "latched_scale",
     "convergence_curve", "container_scale", "effective_gain",
-    "camera_center_integrity_bits",
+    "camera_center_integrity_bits", "renderer_authorization_bits",
 }
 
 
@@ -152,7 +152,7 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
                 "selected-upper-valley-or-mean-center-is-zero-plane",
             "requested_gain": "immutable-cfg-pop-strength",
             "container_scale":
-                "frame-local-hard-direct-parallax-attenuation-recoverable-next-frame",
+                "abi-retained-identity-pointwise-soft-container-is-map-local",
             "near_curve":
                 "fixed-contract-logarithmic-tau-independent-of-content-occupancy",
             "spatial_conditioner":
@@ -237,9 +237,11 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
     )
     if typed["camera_center_integrity_bits"] != expected_camera_integrity:
         raise ValueError("shadow_state.json camera center integrity checksum disagrees")
+    expected_authorization = _CONTRACT_TAG if typed["frame_valid"] > 0.5 else 0
+    if typed["renderer_authorization_bits"] != expected_authorization:
+        raise ValueError("shadow_state.json renderer authorization disagrees with frame validity")
     if any(typed[name] != 0 for name in (
-            "mapping_state_reserved_0", "mapping_state_reserved_1",
-            "mapping_state_reserved_2")):
+            "mapping_state_reserved_1", "mapping_state_reserved_2")):
         raise ValueError("shadow_state.json has nonzero reserved mapping state")
 
     decoded = document.get("decoded")
@@ -255,7 +257,8 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
         decoded.get("calibration_revision"),
         "shadow_state.json decoded.calibration_revision",
     )
-    for key in ("confirmed_cut_count", "contract_tag", "camera_center_integrity_bits"):
+    for key in ("confirmed_cut_count", "contract_tag", "camera_center_integrity_bits",
+                "renderer_authorization_bits"):
         _uint32(decoded.get(key), f"shadow_state.json decoded.{key}")
     for key in ("requested_gain", "requested_pop_strength", "latched_scale",
                 "convergence_curve", "container_scale", "effective_gain"):
@@ -272,28 +275,27 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
                           if decoded["camera_valid"] else 0.0),
         "convergence_curve": typed["convergence_curve"],
         "container_scale": typed["container_scale"],
-        "effective_gain": (constants["requested_gain"] * typed["container_scale"]
+        "effective_gain": (constants["requested_gain"]
                            if decoded["frame_valid"] else 0.0),
         "camera_center_integrity_bits": expected_camera_integrity,
+        "renderer_authorization_bits": expected_authorization,
     }
     if any(
             (decoded.get(key) != value if key in {
                 "camera_valid", "calibration_revision", "confirmed_cut_count", "contract_tag",
-                "camera_center_integrity_bits",
+                "camera_center_integrity_bits", "renderer_authorization_bits",
             } else not _same_number(decoded.get(key), value))
             for key, value in expected_decoded.items()):
         raise ValueError("shadow_state.json decoded values disagree with the state words")
     convergence_valid = _same_number(
         typed["convergence_curve"], _DEFAULTS.convergence_curve_default)
-    if (not 0.0 <= typed["container_scale"] <= 1.0 or
+    if (typed["container_scale"] != 1.0 or
             not convergence_valid or
             decoded["effective_gain"] < 0.0 or
             decoded["effective_gain"] > float(decoded["requested_gain"]) + 1.0e-7 or
             (decoded["camera_valid"] and not _same_number(
                 decoded["latched_scale"], constants["raw_coordinate_scale"])) or
-            (decoded["frame_valid"] and
-             (not decoded["camera_valid"] or typed["container_scale"] <= 0.0)) or
-            (not decoded["frame_valid"] and typed["container_scale"] != 1.0) or
+            (decoded["frame_valid"] and not decoded["camera_valid"]) or
             (not decoded["camera_valid"] and
               (typed["center"] != 0.0 or typed["inverse_scale"] != 0.0 or
               not _same_number(
@@ -342,7 +344,7 @@ def validate_shadow_frame_stats_document(document: Any) -> Dict[str, float]:
 
 
 def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
-    """Validate the schema-11 V2 geometry fragment of ``dump_manifest.json``.
+    """Validate the schema-12 V2 geometry fragment of ``dump_manifest.json``.
 
     The full package contains legacy/color/model metadata owned by other contracts. This reader
     deliberately validates only the candidate -> full-resolution ownership refinement -> vertical
@@ -381,7 +383,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         if selected else None
     )
     expected_inverse = (
-        "12-step contractive fixed point; no forward-warp owner/visibility splat and no synthetic fill"
+        "11-step contractive fixed point; no forward-warp owner/visibility splat and no synthetic fill"
         if selected else None
     )
     expected_coordinate_role = (
@@ -590,7 +592,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
         raise ValueError("ownership refinement lowered the candidate field")
 
     # Exact float32 replicas of the production recurrences (validated bitwise against the
-    # GPU intermediates; see docs/host-sbs-v2-crown-compromise-trial.md).
+    # GPU intermediates; see docs/host-sbs.md#cliff-conditioning).
     vertical_step = np.float32(_DEFAULTS.max_vertical_shear / width)
     horizontal_step = np.float32(_DEFAULTS.max_horizontal_slope / width)
     share = np.float32(_DEFAULTS.vertical_majorant_share)

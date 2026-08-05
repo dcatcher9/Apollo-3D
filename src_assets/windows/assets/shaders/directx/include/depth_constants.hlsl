@@ -1,12 +1,9 @@
 #ifndef DEPTH_CONSTANTS_HLSL
 #define DEPTH_CONSTANTS_HLSL
 
-// Shared depth-pass constant buffer (register b0). ONE canonical layout for every depth-stage
-// compute shader (rgb_to_nchw, buffer_to_tex, depth_minmax_cs, depth_minmax_ema_cs,
-// depth_hist_cs, depth_subject_hist_cs, depth_subject_resolve_cs). MUST match the cb[0..15]
-// fill in ensure_cbuffers() in src/video_depth_estimator.cpp slot-for-slot. Each shader reads
-// only the fields it needs; the rest are inert. The 16 scalars occupy exactly 4 float4 registers.
-// Adding a field: append here + set the matching C++ slot.
+// Shared depth-pass constant buffer (register b0). This is the single layout used by inference
+// preprocessing, private cut-analysis depth, and the coordinate-V2 producer. It must match the
+// 12 words uploaded by ensure_cbuffers() in src/video_depth_estimator.cpp slot-for-slot.
 cbuffer Constants : register(b0) {
     uint  target_w;
     uint  target_h;
@@ -17,13 +14,7 @@ cbuffer Constants : register(b0) {
     float ema_edge_change;   // >0 enables motion-edge snap; normalized depth delta threshold
     float ema_edge_gradient; // minimum current normalized-depth gradient
     float ema_edge_strength; // extra blend toward current depth inside the motion mask
-    float subject_recenter;  // subject recenter strength (depth_subject_resolve)
-    float subject_stretch;   // > 0.5 = apply the disparity stretch (depth_subject_resolve)
-    float adaptive_pop;      // > 0.5 = maintain a scene-risk pop multiplier in SubjectState[1].w
-    float adaptive_pop_max_ratio; // absolute configured ceiling / base pop strength
-    float zero_plane_mode;   // 1 subject, 2 median, 3 background (shot-latched); 0 was legacy
-    float padding1;
-    float padding2;
+    float3 reserved;
 };
 
 // Spatial depth-gradient thresholds are calibrated on the patch-aligned 434-texel short side.
@@ -36,25 +27,13 @@ float DepthReferenceTexelScale() {
     return (float)min(target_w, target_h) / DEPTH_GRADIENT_REFERENCE_SHORT_SIDE;
 }
 
-// Adaptive-pop edge risk is accumulated in fixed point because InterlockedAdd is integer-only.
-// Each qualifying texel contributes min(reference_grad / 0.02,
-// EDGE_WEIGHT_MAX * current/reference) * EDGE_WEIGHT_SCALE. Below the cap, the smaller weight of
-// a coarser grid cancels its larger one-texel silhouette fraction. The cap needs the same scale or
-// saturated discontinuities would still change risk with resolution. The consumer recovers a
-// threshold-equivalent edge fraction by dividing the sum by EDGE_WEIGHT_SCALE * texel count.
-// Shared here because the producer (depth_subject_hist_cs) and the consumer
-// (depth_subject_resolve_cs) must agree exactly: a mismatch silently rescales scene risk and
-// changes which scenes receive extra pop. Do not duplicate these values.
-#define EDGE_GRADIENT_THRESHOLD 0.02f
-#define EDGE_WEIGHT_SCALE 256.0f
-#define EDGE_WEIGHT_MAX 8.0f
-
 // Scene-cut evidence contract. A broad RGB delta finds frame-wide appearance replacement, while
 // the ordinal producer compares all ten pairwise orderings in a center/left/right/up/down stencil
-// of capture-domain, point-sampled max(R,G,B). Sampling before the model's luminance-coupled HDR
-// tonemapper and before spatial filtering is part of the contract: maxRGB then commutes with an
-// identical monotone curve on every channel. Clipping creates ties, which abstain because a
-// comparison must have this much contrast in BOTH frames. Requiring BOTH frame-wide RGB
+// of point-sampled max(R,G,B), normalized to scene-linear units (encoded SDR is decoded; linear
+// SDR/scRGB is already in that domain). Sampling before the model's luminance-coupled HDR
+// tonemapper and before spatial filtering preserves ordering under a global monotone exposure
+// transform. Clipping creates ties, which abstain because a comparison must have reliable
+// relative contrast in BOTH frames. Requiring BOTH frame-wide RGB
 // replacement and ordinal structure rejects flashes/exposure and ordinary detailed motion
 // respectively. Depth geometry still corroborates the proposal. Conversely, broad RGB
 // replacement with ordinal evidence inside a narrower QUIET band explicitly vetoes
@@ -62,7 +41,7 @@ float DepthReferenceTexelScale() {
 // or HDR tone mapping is not scene geometry and must not reset the zero plane. A playing region
 // may contribute ordinary ordinal flips during the same update as a global exposure change, so a
 // support-qualified transition is also exposure-like when those flips remain a small fraction of
-// the much broader raw-RGB replacement and most changed texels move in the same capture-domain
+// the much broader raw-RGB replacement and most changed texels move in the same scene-linear
 // brightness direction. That exposure classification is evidence-backed only when enough texels
 // have reliable structure in the current frame, history frame, and their intersection. Reliable
 // structure disappearing is held
@@ -82,7 +61,8 @@ float DepthReferenceTexelScale() {
 #define LOCALIZED_RGB_CUT_BASELINE_MARGIN 0.12f
 #define LOCALIZED_RGB_CUT_BASELINE_MULTIPLIER 3.0f
 #define APPEARANCE_CUT_BASELINE_ALPHA 0.25f
-#define STRUCTURAL_ORDINAL_CONTRAST_FLOOR 0.01f
+#define STRUCTURAL_ORDINAL_RELATIVE_CONTRAST_FLOOR 0.04f
+#define STRUCTURAL_ORDINAL_NOISE_FLOOR 0.0001f
 #define STRUCTURAL_ORDINAL_MIN_COMMON 4u
 #define STRUCTURAL_ORDINAL_MIN_FLIPS 2u
 #define STRUCTURAL_COLOR_MIN_SUPPORT 0.01f
@@ -97,7 +77,7 @@ float DepthReferenceTexelScale() {
 // pixels undergoing the broad raw-RGB replacement. The ratio is evaluated only after the
 // current/previous/common structural-support checks above, so clipping or abstention cannot pass.
 #define STRUCTURAL_COLOR_EXPOSURE_MAX_FLIP_TO_RGB_RATIO 0.05f
-// A gain/exposure transition moves capture-domain maxRGB in one dominant direction. Count the
+// A gain/exposure transition moves scene-linear maxRGB in one dominant direction. Count the
 // sign only for texels already accepted by RAW_RGB_PIXEL_DELTA, then require one direction to own
 // this share of all such texels. Mixed-sign semantic replacement cannot use the ratio overlap
 // above to masquerade as exposure; ties and non-finite comparisons provide no support.

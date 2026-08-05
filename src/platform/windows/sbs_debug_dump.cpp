@@ -1065,8 +1065,11 @@ namespace platf::sbs_debug {
         std::bit_cast<std::uint32_t>(state[calibration_revision]);
       const auto camera_center_integrity_value =
         std::bit_cast<std::uint32_t>(state[camera_center_integrity_bits]);
+      const auto renderer_authorization_value =
+        std::bit_cast<std::uint32_t>(state[renderer_authorization_bits]);
+      const bool renderer_authorization_valid =
+        renderer_authorization_value == (state_frame_valid ? contract_tag : 0u);
       const bool mapping_state_reserved_valid =
-        std::bit_cast<std::uint32_t>(state[mapping_state_reserved_0]) == 0u &&
         std::bit_cast<std::uint32_t>(state[mapping_state_reserved_1]) == 0u &&
         std::bit_cast<std::uint32_t>(state[mapping_state_reserved_2]) == 0u;
       const bool camera_center_integrity_valid = camera_center_integrity_is_valid(
@@ -1077,7 +1080,8 @@ namespace platf::sbs_debug {
         camera_center_integrity_value
       );
       const bool camera_initialized =
-        camera_center_integrity_valid && mapping_state_reserved_valid &&
+        camera_center_integrity_valid && renderer_authorization_valid &&
+        mapping_state_reserved_valid &&
         convergence_curve_is_valid(state[convergence_curve]) &&
         state[inverse_scale] > 0.0f &&
         calibration_revision_value > 0u &&
@@ -1086,15 +1090,13 @@ namespace platf::sbs_debug {
         state[center] == 0.0f && state[inverse_scale] == 0.0f &&
         state[convergence_curve] == convergence_curve_default;
       const bool state_semantics_valid =
-        camera_center_integrity_valid && mapping_state_reserved_valid &&
+        camera_center_integrity_valid && renderer_authorization_valid &&
+        mapping_state_reserved_valid &&
         calibration_revision_is_valid(calibration_revision_value) &&
         (state[frame_valid] == 0.0f || state[frame_valid] == 1.0f) &&
-        state[container_scale] >= 0.0f && state[container_scale] <= 1.0f &&
+        state[container_scale] == 1.0f &&
         convergence_curve_is_valid(state[convergence_curve]) &&
-        (state_frame_valid ?
-           (camera_initialized && state[container_scale] > 0.0f) :
-           ((camera_initialized || camera_empty) &&
-            state[container_scale] == 1.0f)) &&
+        (state_frame_valid ? camera_initialized : (camera_initialized || camera_empty)) &&
         (!camera_initialized ||
          std::abs(1.0f / state[inverse_scale] -
                   completed.parallax_v2_raw_coordinate_scale) <= 1.0e-6f);
@@ -1150,7 +1152,7 @@ namespace platf::sbs_debug {
       }
 
       const float effective_gain_value = state_frame_valid ?
-        completed.parallax_v2_requested_gain * state[container_scale] : 0.0f;
+        completed.parallax_v2_requested_gain : 0.0f;
       const float latched_scale_value = camera_initialized ?
         1.0f / state[inverse_scale] : 0.0f;
       const auto confirmed_cut_count_value =
@@ -1168,6 +1170,7 @@ namespace platf::sbs_debug {
         {"container_scale", state[container_scale]},
         {"effective_gain", effective_gain_value},
         {"camera_center_integrity_bits", camera_center_integrity_value},
+        {"renderer_authorization_bits", renderer_authorization_value},
       };
       const nlohmann::json state_json {
         {"schema", shadow_state_dump_schema},
@@ -1209,7 +1212,7 @@ namespace platf::sbs_debug {
                                     {"coordinate", "immediate-first-usable-center-latched-until-cut-fixed-authenticated-scale-retained-across-unusable"},
                                     {"convergence_curve", "selected-upper-valley-or-mean-center-is-zero-plane"},
                                     {"requested_gain", "immutable-cfg-pop-strength"},
-                                    {"container_scale", "frame-local-hard-direct-parallax-attenuation-recoverable-next-frame"},
+                                    {"container_scale", "abi-retained-identity-pointwise-soft-container-is-map-local"},
                                     {"near_curve", "fixed-contract-logarithmic-tau-independent-of-content-occupancy"},
                                     {"spatial_conditioner", "fixed-75pct-vertical-majorant-share-then-horizontal-majorant"},
                                   }},
@@ -1382,7 +1385,7 @@ namespace platf::sbs_debug {
                                          }},
                       {"hard_cut_pulse", scalar(word_e::hard_cut_pulse) > 0.5f},
                       {"hard_cut_count", words[sbs_adaptive_state::index(word_e::hard_cut_count)]},
-                      {"external_cut_count", words[sbs_adaptive_state::index(word_e::external_cut_count)]},
+                      {"reserved_cut_bridge_17", words[sbs_adaptive_state::index(word_e::reserved_cut_bridge_17)]},
                       {"empty_raw_count", words[sbs_adaptive_state::index(word_e::empty_raw_count)]},
                       {"collapsed_raw_count", words[sbs_adaptive_state::index(word_e::collapsed_raw_count)]},
                       {"geometry_authority", false},
@@ -1529,7 +1532,7 @@ namespace platf::sbs_debug {
         {"channels", {"raw_reproject_source_u_normalized"}},
         {"validity", {
           {"content", "derive from content_scale_x/content_scale_y and packed output coordinate"},
-          {"inverse", "12-step contractive fixed-point solution of the signed final-parallax field"},
+          {"inverse", "11-step contractive fixed-point solution of the signed final-parallax field"},
           {"mask", "warp_mask.png red marks finite-source boundary extrapolation; V2 has no internal owner or synthetic-fill path"},
         }},
         {"live_sample_source_u_normalized", "clamp(raw_reproject_source_u_normalized, 0, 1)"},
@@ -1570,7 +1573,7 @@ namespace platf::sbs_debug {
       const std::string &effective_model_url
     ) {
       return {
-        {"schema", 2},
+        {"schema", 3},
         {"shared_configured", {
           {"pop_strength", cfg.pop_strength},
           {"max_packed_encode_width", cfg.max_encode_width},
@@ -1594,23 +1597,6 @@ namespace platf::sbs_debug {
             {"ema_edge_strength", config::host_sbs_v2_live_calibration::edge_strength},
             {"minmax_ema", config::host_sbs_v2_live_calibration::minmax_ema},
           }},
-        }},
-        {"offline_analysis_configured", {
-          {"profile", cfg.profile},
-          {"adaptive_pop", cfg.adaptive_pop},
-          {"adaptive_pop_max", cfg.adaptive_pop_max},
-          {"ema", cfg.ema},
-          {"ema_edge_change", cfg.ema_edge_change},
-          {"ema_edge_gradient", cfg.ema_edge_gradient},
-          {"ema_edge_strength", cfg.ema_edge_strength},
-          {"depth_short_side", cfg.depth_short_side},
-          {"depth_max_aspect", cfg.depth_max_aspect},
-          {"minmax_ema", cfg.minmax_ema},
-          {"subject_recenter", cfg.subject_recenter},
-          {"subject_stretch", cfg.subject_stretch},
-          {"zero_plane", cfg.zero_plane},
-          {"depth_model", cfg.depth_model},
-          {"depth_model_url", cfg.depth_model_url},
         }},
       };
     }
@@ -2095,7 +2081,7 @@ namespace platf::sbs_debug {
         const std::string warp_scalar_stage =
           "actual orientation-selective conditioned field sampled by live V2 reprojection";
         const std::string warp_scalar_description =
-          "Exact signed one-eye source-U after the fixed vertical upper/lower share and row majorant, sampled by the live V2 12-step contractive inverse.";
+          "Exact signed one-eye source-U after the fixed vertical upper/lower share and row majorant, sampled by the live V2 11-step contractive inverse.";
         // Bind every V2 geometry field to the exact bytes written into this transaction
         // directory. Metadata-only descriptors let a truncated or internally inconsistent
         // geometry dump validate cleanly, which silently poisons every downstream offline
@@ -2171,30 +2157,6 @@ namespace platf::sbs_debug {
           true,
           "raw-depth contract",
           "Dimensions, scalar statistics, and preview bounds."
-        );
-        artifacts["depth.png"] = artifact_description(
-          false,
-          false,
-          "removed V1 normalized-depth renderer artifact",
-          "Not captured: production Host SBS consumes the authenticated V2 parallax field directly."
-        );
-        artifacts["depth.f32"] = artifact_description(
-          false,
-          false,
-          "removed V1 normalized-depth renderer artifact",
-          "Not captured: production Host SBS consumes the authenticated V2 parallax field directly."
-        );
-        artifacts["depth_shape.json"] = artifact_description(
-          false,
-          false,
-          "removed V1 normalized-depth renderer artifact",
-          "Not captured: the V1 normalized-depth live renderer has been removed."
-        );
-        artifacts["depth_heat.png"] = artifact_description(
-          false,
-          false,
-          "removed V1 normalized-depth renderer artifact",
-          "Not captured: the V1 normalized-depth live renderer has been removed."
         );
         artifacts["warp_depth.png"] = artifact_description(
           true,
@@ -2507,7 +2469,7 @@ namespace platf::sbs_debug {
             *completed.parallax_v2_shader_provenance
           );
         nlohmann::json manifest {
-          {"schema", 11},
+          {"schema", 12},
           {"capture", "one matched, completed Host-SBS frame"},
           {"published_atomically", true},
           {"host_sbs_mode", "ai"},
@@ -2530,7 +2492,7 @@ namespace platf::sbs_debug {
                          {"parallax_v2_vertical_majorant_role", "least column-wise upper envelope v+ >= ownership-refined candidate with adjacent-row source-U change <= max_vertical_shear/target_width; diagnostic evidence only"},
                          {"parallax_v2_vertical_conditioned_role", "fixed 75/25 share of column upper/lower envelopes; may raise or lower candidate and feeds the row majorant"},
                          {"parallax_v2_conditioner_role", "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear; q may raise or lower candidate and is the live position authority"},
-                         {"parallax_v2_inverse", "12-step contractive fixed point; no forward-warp owner/visibility splat and no synthetic fill"},
+                         {"parallax_v2_inverse", "11-step contractive fixed point; no forward-warp owner/visibility splat and no synthetic fill"},
                          {"collar_defocus", nlohmann::json {
                               {"enabled", false},
                               {"role", "disabled after live hand-boundary halo regression; live color uses one linear sample at the inverse-warped coordinate"},
@@ -2632,7 +2594,7 @@ namespace platf::sbs_debug {
              << "raw_depth_max=" << raw_stats.maximum << '\n'
              << "raw_depth_preview_low_p02=" << raw_stats.preview_low << '\n'
              << "raw_depth_preview_high_p98=" << raw_stats.preview_high << '\n'
-             << "legacy_normalization_available="
+             << "cut_bridge_diagnostics_available="
              << (adaptive_available ? "true" : "false") << '\n'
              << "normalization_effective_lower=" << normalization.lower << '\n'
              << "normalization_effective_upper=" << normalization.upper << '\n'

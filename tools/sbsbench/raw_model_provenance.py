@@ -177,17 +177,20 @@ def inspect_dump(dump: Path) -> RawModelProvenance:
     if config_schema is None:
         if live_config is not None or offline_config is not None or shared_config is not None:
             raise ValueError("structured dump config is missing its schema")
-    elif config_schema == 2:
+    elif config_schema in (2, 3):
         if not isinstance(live_config, dict):
             raise ValueError("config.live_effective must be an object")
-        if not isinstance(offline_config, dict):
+        if config_schema == 2 and not isinstance(offline_config, dict):
             raise ValueError("config.offline_analysis_configured must be an object")
+        if config_schema == 3 and offline_config is not None:
+            raise ValueError("config schema 3 must not contain retired offline model selection")
         if not isinstance(shared_config, dict):
             raise ValueError("config.shared_configured must be an object")
     else:
         raise ValueError("structured dump config has unknown semantics")
-    # Schema-2 dumps separate effective live authority from configured offline analysis. Keep the
-    # flat-key fallback so historical captures remain auditable.
+    # Schema 2 separated effective live authority from the now-removed offline model selector.
+    # Schema 3 has one authenticated model authority. Keep both schema 2 and the flat-key fallback
+    # so historical captures remain auditable.
     effective_config = live_config if isinstance(live_config, dict) else config
     configured_analysis = offline_config if isinstance(offline_config, dict) else config
     effective_prefix = "config.live_effective" if live_config is not None else "config"

@@ -126,8 +126,8 @@ class RawModelProvenanceTests(unittest.TestCase):
                     "depth_model_url": self.CALIBRATION.depth_model_url,
                 },
                 "offline_analysis_configured": {
-                    "depth_model": "depth_anything_v2_base_fp16",
-                    "depth_model_url": "https://example.invalid/base.onnx",
+                    "depth_model": "experimental-offline-model",
+                    "depth_model_url": "https://example.invalid/experimental.onnx",
                 },
             }
             manifest[provenance.PROVENANCE_KEY] = self._proof(dump)
@@ -137,13 +137,30 @@ class RawModelProvenanceTests(unittest.TestCase):
             observed = provenance.inspect_dump(dump)
             self.assertTrue(observed.authoritative)
             self.assertEqual(observed.declared_model, self.CALIBRATION.depth_model)
-            self.assertEqual(observed.configured_model, "depth_anything_v2_base_fp16")
+            self.assertEqual(observed.configured_model, "experimental-offline-model")
             self.assertEqual(observed.declared_url, self.CALIBRATION.depth_model_url)
 
-            manifest["config"]["schema"] = 3
+            manifest["config"] = {
+                "schema": 3,
+                "shared_configured": {"pop_strength": 1.2},
+                "live_effective": {
+                    "depth_model": self.CALIBRATION.depth_model,
+                    "depth_model_url": self.CALIBRATION.depth_model_url,
+                },
+            }
             (dump / "dump_manifest.json").write_text(
                 json.dumps(manifest), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "unknown semantics"):
+            observed = provenance.inspect_dump(dump)
+            self.assertTrue(observed.authoritative)
+            self.assertEqual(observed.declared_model, self.CALIBRATION.depth_model)
+            self.assertIsNone(observed.configured_model)
+
+            manifest["config"]["offline_analysis_configured"] = {
+                "depth_model": "retired",
+            }
+            (dump / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "retired offline model selection"):
                 provenance.inspect_dump(dump)
 
             manifest["config"] = {"schema": 2}
@@ -241,23 +258,19 @@ class RawModelProvenanceTests(unittest.TestCase):
             self.assertIn("raw model provenance is unverified", stderr.getvalue())
             self.assertFalse(output.exists())
 
-    def test_model_flag_is_harness_only_and_old_ambiguous_flag_is_rejected(self):
+    def test_replay_has_no_model_selector(self):
         parser = replay._build_parser()
-        parsed = parser.parse_args([
-            "--dump", "dump", "--out", "out", "--harness-model", "midas",
-            "--allow-unverified-model-provenance",
-        ])
-        self.assertEqual(parsed.harness_model, "midas")
-        self.assertTrue(parsed.allow_unverified_model_provenance)
-        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
-            parser.parse_args(["--dump", "dump", "--out", "out", "--model", "midas"])
-        self.assertEqual(raised.exception.code, 2)
+        for option in ("--model", "--harness-model"):
+            with self.subTest(option=option), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as raised:
+                parser.parse_args(["--dump", "dump", "--out", "out", option, "midas"])
+            self.assertEqual(raised.exception.code, 2)
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
             parser.parse_args([
                 "--dump", "dump", "--out", "out", "--raw-scale-prior", "0.5"])
         self.assertEqual(raised.exception.code, 2)
 
-    def test_unverified_report_separates_raw_bytes_from_harness_model(self):
+    def test_unverified_report_keeps_raw_bytes_explicitly_unverified(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             dump, _ = self._dump(root)
@@ -268,18 +281,23 @@ class RawModelProvenanceTests(unittest.TestCase):
             conf = root / "bench.conf"
             conf.write_text("", encoding="utf-8")
             output = root / "output"
-            with mock.patch.object(replay, "_run_checked", side_effect=RuntimeError("stop")):
+            with mock.patch.object(
+                    replay, "_run_checked", side_effect=RuntimeError("stop")) as run_checked:
                 with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                     replay.main([
                         "--dump", str(dump), "--out", str(output),
                         "--build-dir", str(build), "--conf", str(conf),
-                        "--harness-model", "midas", "--allow-unverified-model-provenance",
+                        "--allow-unverified-model-provenance",
                         "--experimental-raw-coordinate-scale", "0.5",
                         "--skip-score",
                     ])
+            harness_command = run_checked.call_args.args[0]
+            self.assertNotIn("--model", harness_command)
+            self.assertNotIn("--harness-model", harness_command)
+            self.assertIn("--direct-parallax-root", harness_command)
             report = json.loads(
                 (output / "mapping_v2_report.json").read_text(encoding="utf-8"))
-            self.assertEqual(report["schema"], 8)
+            self.assertEqual(report["schema"], 9)
             self.assertEqual(report["mapping_metrics"]["schema"], 3)
             self.assertIn("may raise or lower", report["geometry_stages"][
                 "post_vertical_parallax.f32"])
@@ -294,10 +312,6 @@ class RawModelProvenanceTests(unittest.TestCase):
             self.assertIsNone(
                 report["mapping_calibration"]["preprocess_source_closure_sha256"])
             self.assertEqual(report["config"]["raw_coordinate_scale"], 0.5)
-            self.assertEqual(report["harness_legacy_estimator"]["model"], "midas")
-            self.assertEqual(report["harness_legacy_estimator"]["geometry_role"],
-                             "none; direct canonical order and conditioned parallax replace its geometry")
-            self.assertEqual(report["harness_legacy_estimator"]["provenance_role"], "none")
 
     def test_unverified_nonzero_floor_requires_experiment_only_flag(self):
         provenance_record = provenance.RawModelProvenance(

@@ -2,7 +2,7 @@
  * @file src/sbs_perf.h
  * @brief Lightweight per-stage performance collector for the host SBS 3D pipeline.
  *
- * The perf benchmark (see docs/sbs-benchmark-plan.md): each pipeline stage pushes timing
+ * The perf benchmark (see tools/sbsbench/METRICS.md): each pipeline stage pushes timing
  * samples in milliseconds; a rolling p50/p95/max summary is logged every N frames. The
  * offline harness can explicitly snapshot that window to JSON. Collection follows the global
  * `diagnostics` config switch; all entry points are cheap no-ops when disabled.

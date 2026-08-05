@@ -15,6 +15,7 @@
 #include "globals.h"
 #include "input.h"
 #include "logging.h"
+#include "host_sbs_resolution.h"
 #include "nvenc/nvenc_base.h"
 #include "platform/common.h"
 #include "process.h"
@@ -35,29 +36,54 @@ namespace video {
 
     sbs_telemetry_snapshot_t make_unavailable_sbs_telemetry_snapshot(
       std::uint32_t generation,
-      const config::video_t::sbs_t &profile
+      const config::video_t::sbs_t &settings
     ) {
       sbs_telemetry_snapshot_t snapshot;
       snapshot.status = sbs_telemetry_sample_status_e::unavailable;
       snapshot.generation = generation;
-      apply_sbs_telemetry_profile(snapshot, profile);
+      apply_sbs_telemetry_config(snapshot, settings);
       return snapshot;
+    }
+
+    sbs_output_dimensions_t fit_even_encode_dimensions(
+      const std::int64_t width,
+      const int height,
+      const int max_width,
+      const int max_height
+    ) noexcept {
+      if (width <= 0 || height <= 0) {
+        return {0, 0};
+      }
+      const int capped_width = std::max(2, max_width) & ~1;
+      const int capped_height = std::max(2, max_height) & ~1;
+      if (width <= capped_width && height <= capped_height) {
+        return {
+          std::max(2, static_cast<int>(width) & ~1),
+          std::max(2, height & ~1),
+        };
+      }
+      const double scale = std::min(
+        static_cast<double>(capped_width) / width,
+        static_cast<double>(capped_height) / height
+      );
+      return {
+        std::max(2, static_cast<int>(std::lround(width * scale)) & ~1),
+        std::max(2, static_cast<int>(std::lround(height * scale)) & ~1),
+      };
     }
   }  // namespace
 
-  void apply_sbs_telemetry_profile(
+  void apply_sbs_telemetry_config(
     sbs_telemetry_snapshot_t &snapshot,
-    const config::video_t::sbs_t &profile
+    const config::video_t::sbs_t &settings
   ) noexcept {
     snapshot.valid_fields |= sbs_telemetry_valid_field::config;
     snapshot.runtime_flags &= ~sbs_telemetry_runtime_flag::adaptive_enabled;
     // Telemetry v1 requires one of its three legacy plane values whenever VALID_CONFIG is set,
     // but it cannot represent V2's scene-latched raw center and fixed near curve. Keep the neutral
-    // compatibility value stable instead of reflecting profile.zero_plane: that setting belongs
-    // to offline/evaluation and changing it must never make live telemetry claim a geometry
-    // change that did not occur.
+    // compatibility value stable; V2 has no configurable zero-plane field for this protocol.
     snapshot.zero_plane_mode = 2;
-    snapshot.pop_floor = static_cast<float>(profile.pop_strength);
+    snapshot.pop_floor = static_cast<float>(settings.pop_strength);
     snapshot.pop_ceiling = snapshot.pop_floor;
     snapshot.effective_pop = snapshot.pop_floor;
   }
@@ -82,57 +108,55 @@ namespace video {
     int base_height,
     int video_format,
     int configured_max_width,
-    int runtime_max_width
+    int runtime_max_width,
+    int runtime_max_height
   ) {
-    // These are the capabilities reported by NV_ENC_CAPS_WIDTH_MAX on the production RTX 5080.
-    // The runtime value remains authoritative and may reduce either conservative default.
+    // These are the per-axis capabilities reported by the production RTX 5080. The runtime
+    // values remain authoritative and may reduce either conservative default.
     const int codec_max_width = video_format == 1 || video_format == 2 ? 8192 : 4096;
+    const int codec_max_height = video_format == 1 || video_format == 2 ? 8192 : 4096;
     int effective_max_width = std::min(configured_max_width, codec_max_width);
+    int effective_max_height = codec_max_height;
     if (runtime_max_width > 0) {
       effective_max_width = std::min(effective_max_width, runtime_max_width);
     }
-    const int capped_width = std::max(2, effective_max_width) & ~1;
-    const std::int64_t packed_width = static_cast<std::int64_t>(base_width) * 2;
-    if (packed_width <= capped_width) {
-      return {static_cast<int>(packed_width), base_height};
+    if (runtime_max_height > 0) {
+      effective_max_height = std::min(effective_max_height, runtime_max_height);
     }
-
-    const int scaled_height = std::max(
-      2,
-      static_cast<int>(std::lround(
-        static_cast<double>(base_height) * capped_width / packed_width
-      )) &
-        ~1
+    const std::int64_t packed_width = static_cast<std::int64_t>(base_width) * 2;
+    return fit_even_encode_dimensions(
+      packed_width,
+      base_height,
+      effective_max_width,
+      effective_max_height
     );
-    return {capped_width, scaled_height};
   }
 
   sbs_output_dimensions_t clamp_encode_dimensions(
     int width,
     int height,
     int video_format,
-    int runtime_max_width
+    int runtime_max_width,
+    int runtime_max_height
   ) {
-    // Same conservative per-codec ceiling as host_sbs_output_dimensions; the runtime NVENC
-    // capability remains authoritative when it is known.
+    // Same conservative per-axis ceilings as host_sbs_output_dimensions; runtime NVENC
+    // capabilities remain authoritative when known.
     const int codec_max_width = video_format == 1 || video_format == 2 ? 8192 : 4096;
+    const int codec_max_height = video_format == 1 || video_format == 2 ? 8192 : 4096;
     int effective_max_width = codec_max_width;
+    int effective_max_height = codec_max_height;
     if (runtime_max_width > 0) {
       effective_max_width = std::min(effective_max_width, runtime_max_width);
     }
-    const int capped_width = std::max(2, effective_max_width) & ~1;
-    if (width <= capped_width) {
-      return {width, height};
+    if (runtime_max_height > 0) {
+      effective_max_height = std::min(effective_max_height, runtime_max_height);
     }
-
-    const int scaled_height = std::max(
-      2,
-      static_cast<int>(std::lround(
-        static_cast<double>(height) * capped_width / width
-      )) &
-        ~1
+    return fit_even_encode_dimensions(
+      width,
+      height,
+      effective_max_width,
+      effective_max_height
     );
-    return {capped_width, scaled_height};
   }
 
   platf::capture_backend_e capture_backend_failover_t::preferred_backend() const noexcept {
@@ -172,20 +196,6 @@ namespace video {
     if (++early_ddup_failures_ >= 2) {
       preferred_backend_ = platf::capture_backend_e::wgc;
     }
-  }
-
-  // Resolve the profile-configured model name against the registry, else synthesize a custom
-  // entry from the sbs_3d_depth_model/_url escape hatch.
-  config::depth_model_info depth_model_for_profile(const config::video_t::sbs_t &profile) {
-    for (const auto &m : config::depth_model_registry()) {
-      if (m.name == profile.depth_model) {
-        return m;
-      }
-    }
-    config::depth_model_info custom;
-    custom.name = profile.depth_model;
-    custom.url = profile.depth_model_url;
-    return custom;
   }
 
   config::depth_model_info host_sbs_v2_depth_model() {
@@ -1239,6 +1249,26 @@ namespace video {
           current_sbs_mode = *m;
         }
       }
+      const auto host_sbs_rejection =
+        models::host_sbs_v2_source_resolution_rejection_reason(
+          static_cast<std::uint32_t>(base_width),
+          static_cast<std::uint32_t>(config.height)
+        );
+      if (current_sbs_mode != SBS_OFF && !host_sbs_rejection.empty()) {
+        // A mode toggle and a live quality transaction use independent control messages. Even
+        // though both handlers validate, their asynchronous commits can cross. Never construct an
+        // unauthenticated Host SBS geometry: keep the accepted quality in 2D and publish the
+        // authoritative requested-mode correction back to the control/session latch.
+        BOOST_LOG(warning)
+          << "Rejecting Host SBS V2 encode-session construction at "sv
+          << base_width << 'x' << config.height << ": "sv
+          << host_sbs_rejection << '.';
+        current_sbs_mode = SBS_OFF;
+        if (config.requested_sbs_mode) {
+          config.requested_sbs_mode->store(SBS_OFF, std::memory_order_release);
+        }
+        sbs_depth_status_event->raise(0);
+      }
       // Build the effective config for this encode session. SBS doubles the output width to
       // 2*base. If that exceeds the encoder's max width, cap the packed width and scale the
       // height proportionally to preserve the per-eye aspect. The SBS pipeline then renders
@@ -1260,20 +1290,24 @@ namespace video {
         session_config.sbs_config
       ));
       int runtime_max_width = nvenc::max_encode_width_for_codec(session_config.videoFormat).value_or(0);
+      int runtime_max_height = nvenc::max_encode_height_for_codec(session_config.videoFormat).value_or(0);
       if (current_sbs_mode != SBS_OFF) {
         const auto dimensions = host_sbs_output_dimensions(
           base_width,
           config.height,
           session_config.videoFormat,
           session_config.sbs_config.max_encode_width,
-          runtime_max_width
+          runtime_max_width,
+          runtime_max_height
         );
         session_config.width = dimensions.width;
         session_config.height = dimensions.height;
         const std::int64_t packed_width = static_cast<std::int64_t>(base_width) * 2;
-        if (session_config.width != packed_width) {
-          BOOST_LOG(info) << "Host SBS: requested packed width "sv << packed_width
-                          << " exceeds the effective encoder width limit; capping to "sv
+        if (session_config.width != packed_width ||
+            session_config.height != config.height) {
+          BOOST_LOG(info) << "Host SBS: requested packed dimensions "sv << packed_width
+                          << 'x' << config.height
+                          << " exceed the effective encoder limits; capping to "sv
                           << session_config.width << 'x'
                           << session_config.height << " (per-eye "sv
                           << (session_config.width / 2) << 'x' << session_config.height << ')';
@@ -1286,13 +1320,15 @@ namespace video {
           base_width,
           config.height,
           session_config.videoFormat,
-          runtime_max_width
+          runtime_max_width,
+          runtime_max_height
         );
         session_config.width = dimensions.width;
         session_config.height = dimensions.height;
-        if (dimensions.width != base_width) {
-          BOOST_LOG(info) << "Requested encode width "sv << base_width
-                          << " exceeds the effective encoder width limit; capping to "sv
+        if (dimensions.width != base_width || dimensions.height != config.height) {
+          BOOST_LOG(info) << "Requested encode dimensions "sv << base_width << 'x'
+                          << config.height
+                          << " exceed the effective encoder limits; capping to "sv
                           << session_config.width << 'x' << session_config.height;
         }
       }
@@ -1310,9 +1346,18 @@ namespace video {
                                           session_config.videoFormat
         )
                                           .value_or(0);
-        if (refreshed_max_width > 0 && refreshed_max_width < session_config.width && refreshed_max_width != runtime_max_width) {
-          BOOST_LOG(info) << "Host SBS learned a lower runtime NVENC width limit ("sv
-                          << refreshed_max_width
+        const int refreshed_max_height = nvenc::max_encode_height_for_codec(
+                                           session_config.videoFormat
+        )
+                                            .value_or(0);
+        const bool learned_stricter_limit =
+          (refreshed_max_width > 0 && refreshed_max_width < session_config.width) ||
+          (refreshed_max_height > 0 && refreshed_max_height < session_config.height);
+        if (learned_stricter_limit &&
+            (refreshed_max_width != runtime_max_width ||
+             refreshed_max_height != runtime_max_height)) {
+          BOOST_LOG(info) << "Host SBS learned lower runtime NVENC limits ("sv
+                          << refreshed_max_width << 'x' << refreshed_max_height
                           << "); retrying with aspect-preserving SBS scaling."sv;
           return true;
         }

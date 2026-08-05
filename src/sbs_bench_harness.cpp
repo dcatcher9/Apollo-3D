@@ -45,7 +45,9 @@
   #include "crypto.h"
   #include "depth_coordinate_v2.h"
   #include "generated/sbs_adaptive_state_contract.h"
+  #include "host_sbs_shader_cache.h"
   #include "logging.h"
+  #include "offline_sbs_contract.h"
   #include "sbs_perf.h"
   #include "sbs_bench_depth_coordinate_v2.h"
   #include "video.h"
@@ -69,11 +71,10 @@ namespace sbs_bench {
     constexpr float direct_parallax_max_horizontal_slope =
       models::depth_coordinate_v2::max_horizontal_slope;
     constexpr float direct_parallax_slope_tolerance = 2.0e-5f;
-    constexpr unsigned direct_geometry_contract_schema = 23u;
-    constexpr unsigned direct_geometry_manifest_schema = 4u;
+    constexpr unsigned direct_geometry_contract_schema = 25u;
+    constexpr unsigned direct_geometry_manifest_schema = 6u;
     constexpr std::string_view direct_geometry_warp_input =
-      "external-final-parallax-with-diagnostic-order-v4";
-
+      "external-final-parallax-with-diagnostic-order-v6";
     struct rgba_image {
       UINT w = 0, h = 0;
       std::vector<uint8_t> bgra;  // tightly packed B,G,R,A rows, top-to-bottom
@@ -904,50 +905,6 @@ namespace sbs_bench {
       return decode_wic_bgra(dec.Get(), out);
     }
 
-    bool load_depth_texture(ID3D11Device *dev, const fs::path &path,
-                            ComPtr<ID3D11Texture2D> &texture,
-                            ComPtr<ID3D11ShaderResourceView> &srv) {
-      ComPtr<IWICBitmapDecoder> dec;
-      if (FAILED(g_wic->CreateDecoderFromFilename(path.wstring().c_str(), nullptr, GENERIC_READ,
-                                                   WICDecodeMetadataCacheOnDemand, &dec))) {
-        return false;
-      }
-      ComPtr<IWICBitmapFrameDecode> frame;
-      ComPtr<IWICFormatConverter> conv;
-      if (FAILED(dec->GetFrame(0, &frame)) || FAILED(g_wic->CreateFormatConverter(&conv)) ||
-          FAILED(conv->Initialize(frame.Get(), GUID_WICPixelFormat16bppGray,
-                                  WICBitmapDitherTypeNone, nullptr, 0.0,
-                                  WICBitmapPaletteTypeCustom))) {
-        return false;
-      }
-      UINT width = 0, height = 0;
-      if (FAILED(conv->GetSize(&width, &height)) || !width || !height) {
-        return false;
-      }
-      std::vector<uint16_t> gray((size_t) width * height);
-      if (FAILED(conv->CopyPixels(nullptr, width * sizeof(uint16_t),
-                                  (UINT) (gray.size() * sizeof(uint16_t)),
-                                  (BYTE *) gray.data()))) {
-        return false;
-      }
-      std::vector<float> depth(gray.size());
-      std::transform(gray.begin(), gray.end(), depth.begin(), [](uint16_t value) {
-        return value / 65535.0f;
-      });
-      D3D11_TEXTURE2D_DESC desc = {};
-      desc.Width = width;
-      desc.Height = height;
-      desc.MipLevels = 1;
-      desc.ArraySize = 1;
-      desc.Format = DXGI_FORMAT_R32_FLOAT;
-      desc.SampleDesc.Count = 1;
-      desc.Usage = D3D11_USAGE_IMMUTABLE;
-      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-      D3D11_SUBRESOURCE_DATA data = {depth.data(), (UINT) (width * sizeof(float)), 0};
-      return SUCCEEDED(dev->CreateTexture2D(&desc, &data, &texture)) &&
-             SUCCEEDED(dev->CreateShaderResourceView(texture.Get(), nullptr, &srv));
-    }
-
     bool save_png(const fs::path &path, UINT w, UINT h, const std::vector<uint8_t> &bgra) {
       ComPtr<IWICStream> stream;
       if (FAILED(g_wic->CreateStream(&stream))) {
@@ -1010,49 +967,6 @@ namespace sbs_bench {
         return false;
       }
       return SUCCEEDED(fe->Commit()) && SUCCEEDED(enc->Commit());
-    }
-
-    // Read back an R32_FLOAT depth SRV and save it as a 16-bit grayscale PNG (values clamped to
-    // [0,1] scaled to 0-65535). 16-bit matters: the swim metric measures frame-to-frame depth
-    // deltas that sit below 1/255. The staging texture is cached across frames (constant size).
-    void dump_depth(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv, const fs::path &path, ComPtr<ID3D11Texture2D> &stage_cache) {
-      if (!srv) {
-        return;
-      }
-      ComPtr<ID3D11Resource> res;
-      srv->GetResource(&res);
-      ComPtr<ID3D11Texture2D> tex;
-      if (FAILED(res.As(&tex))) {
-        return;
-      }
-      D3D11_TEXTURE2D_DESC d = {};
-      tex->GetDesc(&d);
-      if (!stage_cache) {
-        D3D11_TEXTURE2D_DESC sd = d;
-        sd.Usage = D3D11_USAGE_STAGING;
-        sd.BindFlags = 0;
-        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        sd.MiscFlags = 0;
-        if (FAILED(dev->CreateTexture2D(&sd, nullptr, &stage_cache))) {
-          return;
-        }
-      }
-      ctx->CopyResource(stage_cache.Get(), tex.Get());
-      D3D11_MAPPED_SUBRESOURCE m = {};
-      if (FAILED(ctx->Map(stage_cache.Get(), 0, D3D11_MAP_READ, 0, &m))) {
-        return;
-      }
-      std::vector<uint16_t> gray((size_t) d.Width * d.Height);
-      for (UINT y = 0; y < d.Height; y++) {
-        const float *row = (const float *) ((const uint8_t *) m.pData + (size_t) y * m.RowPitch);
-        for (UINT x = 0; x < d.Width; x++) {
-          float v = row[x];
-          v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
-          gray[(size_t) y * d.Width + x] = (uint16_t) (v * 65535.0f + 0.5f);
-        }
-      }
-      ctx->Unmap(stage_cache.Get(), 0);
-      save_gray16_png(path, d.Width, d.Height, gray);
     }
 
     void dump_uint_mask(ID3D11Device *dev, ID3D11DeviceContext *ctx,
@@ -1211,8 +1125,8 @@ namespace sbs_bench {
 
     // V2 evaluation depth artifact. Under host_sbs_v2 the estimator's normalized depth SRV is a
     // private cut field with no geometry authority, so the scored depth_<frame>.png is produced
-    // from the authenticated raw model output instead. The container matches dump_depth exactly
-    // (16-bit grayscale PNG, values clamped to [0,1] scaled to 0-65535); the [0,1] normalization
+    // from the authenticated raw model output instead. The container matches the historical
+    // depth dump (16-bit grayscale PNG, values clamped to [0,1] scaled to 0-65535); the [0,1] normalization
     // est.depth received upstream is replicated here as an explicit per-frame finite min/max
     // normalization of the raw float buffer. Non-finite and degenerate-range values map to 0.
     bool dump_raw_model_depth_png(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv, int width, int height, const fs::path &path, ComPtr<ID3D11Buffer> &stage_cache) {
@@ -1334,21 +1248,64 @@ namespace sbs_bench {
       return save_gray16_png(path, d.Width, d.Height, gray);
     }
 
-    struct subject_state_record {
+    using adaptive_state_words_t = sbs_adaptive_state::words_t;
+    using render_state_words_t = models::depth_coordinate_v2::state_words_t;
+
+    bool valid_adaptive_state_words(const adaptive_state_words_t &words) {
+      using sbs_adaptive_state::word_e;
+      if (words[sbs_adaptive_state::index(word_e::cut_contract_tag_bits)] !=
+          sbs_adaptive_state::cut_contract_tag) {
+        return false;
+      }
+      for (const auto &field : sbs_adaptive_state::fields) {
+        const auto word_index = sbs_adaptive_state::index(field.word);
+        if (field.name.starts_with("reserved_") &&
+            words[word_index] != sbs_adaptive_state::initial_words[word_index]) {
+          return false;
+        }
+        if (field.gpu_encoding == sbs_adaptive_state::gpu_encoding_e::uint_bits) {
+          continue;
+        }
+        if (!std::isfinite(std::bit_cast<float>(
+              words[sbs_adaptive_state::index(field.word)]
+            ))) {
+          return false;
+        }
+      }
+      const auto scalar = [&](const word_e word) {
+        return std::bit_cast<float>(words[sbs_adaptive_state::index(word)]);
+      };
+      const float hard_cut_pulse = scalar(word_e::hard_cut_pulse);
+      const float cut_flags = scalar(word_e::cut_flags);
+      const float analysis_flags = scalar(word_e::analysis_flags);
+      return
+        (hard_cut_pulse == 0.0f || hard_cut_pulse == 1.0f) &&
+        cut_flags >= 0.0f &&
+        cut_flags <= static_cast<float>(sbs_adaptive_state::known_cut_flag_mask) &&
+        std::trunc(cut_flags) == cut_flags &&
+        analysis_flags >= 0.0f &&
+        analysis_flags <=
+          static_cast<float>(sbs_adaptive_state::known_analysis_flag_mask) &&
+        std::trunc(analysis_flags) == analysis_flags &&
+        words[sbs_adaptive_state::index(word_e::hard_cut_count)] <=
+          sbs_adaptive_state::counter_max &&
+        words[sbs_adaptive_state::index(word_e::empty_raw_count)] <=
+          sbs_adaptive_state::counter_max &&
+        words[sbs_adaptive_state::index(word_e::collapsed_raw_count)] <=
+          sbs_adaptive_state::counter_max;
+    }
+
+    struct cut_state_record {
       std::string frame_id;
-      std::array<float, 12> values {};
-      bool hard_cut_pulse = false;
-      std::uint32_t hard_cut_count = 0;
+      adaptive_state_words_t words {};
     };
 
     // Benchmark-only state trace. This readback is deliberately confined to the synchronous
     // offline harness; the live capture loop must remain free of staging copies and Map calls.
-    bool read_subject_state(ID3D11Device *dev, ID3D11DeviceContext *ctx,
-                            ID3D11ShaderResourceView *srv,
-                            ComPtr<ID3D11Buffer> &stage_cache,
-                            std::array<float, 12> &values,
-                            bool &hard_cut_pulse,
-                            std::uint32_t &hard_cut_count) {
+    bool read_cut_state(ID3D11Device *dev, ID3D11DeviceContext *ctx,
+                        ID3D11ShaderResourceView *srv,
+                        ComPtr<ID3D11Buffer> &stage_cache,
+                        adaptive_state_words_t &state_words) {
       if (!srv) {
         return false;
       }
@@ -1387,42 +1344,13 @@ namespace sbs_bench {
         return false;
       }
       const auto *words = static_cast<const std::uint32_t *>(mapped.pData);
-      std::memcpy(values.data(), words, values.size() * sizeof(float));
-      const float pulse = std::bit_cast<float>(
-        words[sbs_adaptive_state::index(sbs_adaptive_state::word_e::hard_cut_pulse)]
+      std::memcpy(
+        state_words.data(),
+        words,
+        state_words.size() * sizeof(std::uint32_t)
       );
-      hard_cut_count =
-        words[sbs_adaptive_state::index(sbs_adaptive_state::word_e::hard_cut_count)];
       ctx->Unmap(stage_cache.Get(), 0);
-      if (!std::isfinite(pulse) || (pulse != 0.0f && pulse != 1.0f) ||
-          !std::all_of(values.begin(), values.end(), [](float value) {
-            return std::isfinite(value);
-          })) {
-        return false;
-      }
-      hard_cut_pulse = pulse > 0.5f;
-      return true;
-    }
-
-    using adaptive_state_words_t = sbs_adaptive_state::words_t;
-    using render_state_words_t =
-      std::array<std::uint32_t, sbs_adaptive_state::render_prefix_word_count>;
-
-    constexpr float scene_anchor_shift_min = -1.39635933f;
-    constexpr float scene_anchor_shift_max = 8.58230571f;
-
-    bool valid_adaptive_state_words(const adaptive_state_words_t &words) {
-      for (const auto &field : sbs_adaptive_state::fields) {
-        if (field.gpu_encoding == sbs_adaptive_state::gpu_encoding_e::uint_bits) {
-          continue;
-        }
-        if (!std::isfinite(std::bit_cast<float>(
-              words[sbs_adaptive_state::index(field.word)]
-            ))) {
-          return false;
-        }
-      }
-      return true;
+      return valid_adaptive_state_words(state_words);
     }
 
     std::string scene_cache_frame_stem(std::size_t sequence) {
@@ -1440,9 +1368,6 @@ namespace sbs_bench {
       std::string model_name;
       std::string model_url;
       double pop_strength = 1.0;
-      double adaptive_pop_max = 1.0;
-      bool subject_stretch = true;
-      bool literal_bestv2 = false;
       bool simulate_hdr = false;
       double hdr_scale = 1.0;
       int depth_reuse_interval = 1;
@@ -1524,13 +1449,14 @@ namespace sbs_bench {
                                       const scene_cache_metadata &metadata,
                                       std::string_view status,
                                       std::size_t processed_count) {
-      // Schema 2: offline conversion caches the authenticated Depth Coordinate V2 geometry.
+      // Schema 3: offline conversion caches the authenticated Depth Coordinate V2 geometry and
+      // pins both halves of the path: the producer closure and the exact live renderer closure.
       // The "depth" section carries the SIGNED one-eye final-parallax field (source-U units,
-      // |value| <= the hard container limit), and "state" carries the 12-word ParallaxState the
+      // |value| <= the pointwise soft-container limit), and "state" carries the 12-word ParallaxState the
       // live renderer authenticates per pixel. Legacy pop/subject/adaptive knobs are gone; the
       // renderer identity and producer closure make the geometry provenance explicit.
       nlohmann::ordered_json contract = {
-        {"schema", 2},
+        {"schema", offline_sbs::scene_cache_contract_schema},
         {"status", status},
         {"source", {
           {"width", metadata.source_width},
@@ -1571,6 +1497,9 @@ namespace sbs_bench {
           {"renderer", "depth-coordinate-v2-live-signed-parallax"},
           {"producer_source_closure_sha256",
            std::string(models::depth_coordinate_v2::shader_source_closure_sha256)},
+          {"renderer_source_closure_sha256",
+           std::string(models::host_sbs_shader_cache::
+                         parallax_v2_live_renderer_source_closure_sha256)},
           {"pop_strength", metadata.pop_strength},
           {"simulate_hdr", metadata.simulate_hdr},
           {"hdr_scale", metadata.hdr_scale},
@@ -1845,6 +1774,26 @@ namespace sbs_bench {
              SUCCEEDED(dev->CreateShaderResourceView(texture.Get(), nullptr, &srv));
     }
 
+    float measured_horizontal_source_u_slope(
+      const std::vector<float> &values,
+      const UINT width,
+      const UINT height,
+      const double source_u_per_stored_unit
+    ) {
+      float maximum = 0.0f;
+      for (UINT y = 0; y < height; ++y) {
+        const auto row = static_cast<std::size_t>(y) * width;
+        for (UINT x = 1; x < width; ++x) {
+          const auto index = row + x;
+          const double slope = std::abs(
+            static_cast<double>(values[index]) - values[index - 1u]
+          ) * source_u_per_stored_unit * width;
+          maximum = std::max(maximum, static_cast<float>(slope));
+        }
+      }
+      return maximum;
+    }
+
     bool publish_float_field(const fs::path &path, const std::vector<float> &values) {
       if (values.empty()) {
         return false;
@@ -1858,24 +1807,20 @@ namespace sbs_bench {
       });
     }
 
-    // The cached 12 words are the live renderer's ParallaxState: three float4 vectors whose
-    // float-valued words must be finite, whose contract-tag word must match the compiled
-    // contract, and whose revision/integrity words are opaque uint bit patterns (they may not
-    // be reinterpreted as floats — an integrity hash can encode a NaN pattern legitimately).
+    // Re-authenticate the complete cached ParallaxState camera, checksum, frame authorization,
+    // and reserved-word contract before exposing its renderer token. Integer words remain raw
+    // bit patterns because an integrity checksum can legitimately encode non-finite float bits.
     bool create_cached_v2_state_srv(ID3D11Device *dev,
                                     const render_state_words_t &words,
                                     ComPtr<ID3D11Buffer> &buffer,
                                     ComPtr<ID3D11ShaderResourceView> &srv) {
       namespace v2 = models::depth_coordinate_v2;
-      constexpr std::size_t contract_tag_word = 7;  // V2_STATE_WORD_CONTRACT_TAG_BITS
-      constexpr std::array<std::size_t, 6> float_valued_words {0, 1, 2, 3, 5, 6};
-      if (words[contract_tag_word] != v2::contract_tag) {
+      static_assert(!v2::model_calibrations.empty());
+      if (!v2::parallax_state_words_are_authenticated(
+            words,
+            v2::model_calibrations.front().raw_coordinate_scale
+          )) {
         return false;
-      }
-      for (const auto index : float_valued_words) {
-        if (!std::isfinite(std::bit_cast<float>(words[index]))) {
-          return false;
-        }
       }
       D3D11_BUFFER_DESC desc {};
       desc.ByteWidth = sizeof(words);
@@ -1896,8 +1841,6 @@ namespace sbs_bench {
     struct scene_plan_entry {
       std::size_t start_sequence = 0;
       std::size_t end_sequence_exclusive = 0;
-      float absolute_pop_strength = 1.0f;
-      float zero_anchor_shift_px = 0.0f;
     };
 
     bool read_scene_cache_contract(const fs::path &directory,
@@ -1907,11 +1850,11 @@ namespace sbs_bench {
         std::ifstream stream(directory / "scene_cache_contract.json");
         nlohmann::json value;
         if (!stream || !(stream >> value) || !value.is_object() ||
-            value.at("schema").get<int>() != 2 ||
+            value.at("schema").get<unsigned>() != offline_sbs::scene_cache_contract_schema ||
             (value.at("status").get<std::string>() != "running" &&
              value.at("status").get<std::string>() != "complete") ||
             !value.at("processed_count").is_number_integer()) {
-          error = "scene cache contract is not a running/complete schema-2 contract";
+          error = "scene cache contract is not a running/complete schema-3 contract";
           return false;
         }
         const std::string status = value.at("status").get<std::string>();
@@ -2015,6 +1958,9 @@ namespace sbs_bench {
               "depth-coordinate-v2-live-signed-parallax" ||
             render.at("producer_source_closure_sha256").get<std::string>() !=
               models::depth_coordinate_v2::shader_source_closure_sha256 ||
+            render.at("renderer_source_closure_sha256").get<std::string>() !=
+              models::host_sbs_shader_cache::
+                parallax_v2_live_renderer_source_closure_sha256 ||
             !(metadata.pop_strength >= 0.25 &&
               metadata.pop_strength <= 2.0) ||
             metadata.depth_reuse_interval != 1 ||
@@ -2084,51 +2030,38 @@ namespace sbs_bench {
         std::ifstream stream(path);
         nlohmann::json value;
         if (!stream || !(stream >> value) || !value.is_object() ||
-            value.at("schema").get<int>() != 1 ||
-            value.at("version").get<std::string>() != "scene-plan-v1" ||
-            value.at("cache_contract_schema").get<int>() != 2 ||
+            value.at("schema").get<int>() != 2 ||
+            value.at("version").get<std::string>() != "scene-plan-v2" ||
+            value.at("cache_contract_schema").get<unsigned>() !=
+              offline_sbs::scene_cache_contract_schema ||
             !value.at("scenes").is_array() ||
             value.at("scenes").size() != 1u) {
-          error = "scene plan is not a scene-plan-v1 schema-1 document";
+          error = "scene plan is not a scene-plan-v2 schema-2 document";
           return false;
         }
         for (const auto &scene : value.at("scenes")) {
           if (!scene.is_object() ||
               !scene.at("start_sequence").is_number_integer() ||
-              !scene.at("end_sequence_exclusive").is_number_integer() ||
-              !scene.at("absolute_pop_strength").is_number() ||
-              !scene.at("zero_anchor_shift_px").is_number()) {
+              !scene.at("end_sequence_exclusive").is_number_integer()) {
             error = "scene plan contains a malformed scene";
             return false;
           }
           const auto start = scene.at("start_sequence").get<std::int64_t>();
           const auto end =
             scene.at("end_sequence_exclusive").get<std::int64_t>();
-          const double absolute_pop =
-            scene.at("absolute_pop_strength").get<double>();
-          const double anchor =
-            scene.at("zero_anchor_shift_px").get<double>();
           if (start <= 0 || end <= start ||
               static_cast<std::uint64_t>(end - 1) >
                 follow_max_sequence ||
               static_cast<std::uint64_t>(start) >
                 static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()) ||
               static_cast<std::uint64_t>(end) >
-                static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()) ||
-              !std::isfinite(absolute_pop) ||
-              absolute_pop < 0.25 ||
-              absolute_pop > 2.0 ||
-              !std::isfinite(anchor) ||
-              anchor < scene_anchor_shift_min ||
-              anchor > scene_anchor_shift_max) {
-            error = "scene plan has a gap, overlap, or out-of-range pop/zero value";
+                static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+            error = "scene plan has a gap, overlap, or out-of-range sequence";
             return false;
           }
           entries.push_back({
             static_cast<std::size_t>(start),
             static_cast<std::size_t>(end),
-            static_cast<float>(absolute_pop),
-            static_cast<float>(anchor),
           });
         }
         return true;
@@ -2190,7 +2123,7 @@ namespace sbs_bench {
     bool write_adaptive_state_header(
       std::ostream &out,
       const std::string_view model_name,
-      const config::video_t::sbs_t &cfg,
+      const double pop_strength,
       const int depth_reuse_interval
     ) {
       nlohmann::json fields = nlohmann::json::array();
@@ -2213,11 +2146,7 @@ namespace sbs_bench {
         {"analysis_flag_bits", std::move(analysis_flag_bits)},
         {"config", {
           {"model", model_name},
-          {"profile", cfg.profile},
-          {"pop_strength", cfg.pop_strength},
-          {"adaptive_pop", cfg.adaptive_pop},
-          {"adaptive_pop_max", cfg.adaptive_pop_max},
-          {"zero_plane", cfg.zero_plane},
+          {"pop_strength", pop_strength},
           {"depth_reuse_interval", depth_reuse_interval},
         }},
       };
@@ -2231,9 +2160,7 @@ namespace sbs_bench {
       std::string_view frame_id,
       std::size_t source_index,
       bool depth_updated,
-      const adaptive_state_words_t &words,
-      const config::video_t::sbs_t &cfg,
-      const scene_plan_entry *scene_camera = nullptr
+      const adaptive_state_words_t &words
     ) {
       using sbs_adaptive_state::word_e;
       const auto scalar = [&](const word_e word) {
@@ -2256,29 +2183,13 @@ namespace sbs_bench {
       ) {
         return false;
       }
-      const float effective_ratio = cfg.adaptive_pop ?
-                                      std::max(
-                                        scalar(word_e::adaptive_pop_ratio),
-                                        1.0f
-                                      ) :
-                                      1.0f;
-      const float absolute_effective_pop = scene_camera ?
-        scene_camera->absolute_pop_strength :
-        static_cast<float>(cfg.pop_strength) * effective_ratio;
-      if (!std::isfinite(absolute_effective_pop)) {
+      const float hard_cut_pulse = scalar(word_e::hard_cut_pulse);
+      if (hard_cut_pulse != 0.0f && hard_cut_pulse != 1.0f) {
         return false;
       }
-
       out << "{\"record\":\"frame\",\"frame_id\":" << json_string(frame_id)
           << ",\"source_index\":" << source_index
           << ",\"depth_updated\":" << (depth_updated ? "true" : "false")
-          << ",\"absolute_effective_pop\":" << absolute_effective_pop
-          << ",\"scene_camera_override\":"
-          << (scene_camera ? "true" : "false")
-          << ",\"resolved_zero_anchor_shift_px\":"
-          << (scene_camera ?
-                scene_camera->zero_anchor_shift_px :
-                scalar(word_e::zero_anchor_shift_px))
           << ",\"geometry_armed\":"
           << ((cut_flags & sbs_adaptive_state::cut_flag_geometry_armed) != 0u ?
                 "true" : "false")
@@ -2302,11 +2213,9 @@ namespace sbs_bench {
                sbs_adaptive_state::cut_flag_geometry_confirmation_pending) != 0u ?
                 "true" : "false")
           << ",\"hard_cut_pulse\":"
-          << (scalar(word_e::hard_cut_pulse) > 0.5f ? "true" : "false")
+          << (hard_cut_pulse > 0.5f ? "true" : "false")
           << ",\"hard_cut_count\":"
           << words[sbs_adaptive_state::index(word_e::hard_cut_count)]
-          << ",\"external_cut_count\":"
-          << words[sbs_adaptive_state::index(word_e::external_cut_count)]
           << ",\"empty_raw_count\":"
           << words[sbs_adaptive_state::index(word_e::empty_raw_count)]
           << ",\"collapsed_raw_count\":"
@@ -2354,10 +2263,10 @@ namespace sbs_bench {
       });
     }
 
-    bool write_subject_state_trace(
+    bool write_cut_state_trace(
       const fs::path &path,
-      const std::vector<subject_state_record> &records,
-      const bool authenticated_cut_compatibility
+      const std::vector<cut_state_record> &records,
+      const sbs_adaptive_state::compact_cut_trace_contract_t &trace_contract
     ) {
       std::ofstream out(path);
       if (!out) {
@@ -2366,40 +2275,40 @@ namespace sbs_bench {
       out.imbue(std::locale::classic());
       out << std::setprecision(std::numeric_limits<float>::max_digits10);
       out << "{\n"
-          << "  \"schema\": " << (authenticated_cut_compatibility ? 3 : 2) << ",\n"
-          << "  \"source\": "
-          << json_string(
-               authenticated_cut_compatibility ?
-                 "depth-coordinate-v2-gpu-input.LegacyState-cut-compatibility" :
-                 "depth_subject_resolve_cs.SubjectState"
-             )
-          << ",\n"
-          << "  \"capture\": "
-          << json_string(
-               authenticated_cut_compatibility ?
-                 "every-source-frame-from-authenticated-cut-input" :
-                 "every-source-frame-after-estimator-update"
-             )
-          << ",\n"
-          << "  \"fields\": [\"subject_recenter_delta\", \"scene_age\", "
-             "\"subject_depth_ema\", \"initialized\", \"stretch_lo\", "
-             "\"stretch_inv_range\", \"depth_change_baseline_ema\", "
-             "\"adaptive_pop_ratio\", \"zero_anchor_shift_px\", "
-             "\"zero_anchor_valid\", \"cut_flags\", "
-             "\"model_input_history_valid\", \"hard_cut_pulse\", "
-             "\"hard_cut_count\"],\n"
+          << "  \"schema\": " << trace_contract.schema << ",\n"
+          << "  \"source\": " << json_string(trace_contract.source) << ",\n"
+          << "  \"capture\": " << json_string(trace_contract.capture) << ",\n"
+          << "  \"fields\": [";
+      for (std::size_t index = 0;
+           index < sbs_adaptive_state::compact_cut_trace_fields.size();
+           ++index) {
+        if (index != 0u) {
+          out << ", ";
+        }
+        out << json_string(sbs_adaptive_state::compact_cut_trace_fields[index]);
+      }
+      out << "],\n"
           << "  \"frames\": [\n";
       for (size_t index = 0; index < records.size(); ++index) {
         const auto &record = records[index];
         out << "    {\"frame_id\": " << json_string(record.frame_id) << ", \"values\": [";
-        for (size_t value_index = 0; value_index < record.values.size(); ++value_index) {
+        for (std::size_t value_index = 0;
+             value_index < sbs_adaptive_state::compact_cut_trace_words.size();
+             ++value_index) {
           if (value_index != 0) {
             out << ", ";
           }
-          out << record.values[value_index];
+          const auto word = sbs_adaptive_state::compact_cut_trace_words[value_index];
+          const auto word_index = sbs_adaptive_state::index(word);
+          const auto &descriptor = sbs_adaptive_state::fields[word_index];
+          if (descriptor.gpu_encoding ==
+              sbs_adaptive_state::gpu_encoding_e::uint_bits) {
+            out << record.words[word_index];
+          } else {
+            out << std::bit_cast<float>(record.words[word_index]);
+          }
         }
-        out << ", " << (record.hard_cut_pulse ? 1 : 0)
-            << ", " << record.hard_cut_count << "]}"
+        out << "]}"
             << (index + 1 == records.size() ? "\n" : ",\n");
       }
       out << "  ]\n}\n";
@@ -2503,7 +2412,7 @@ namespace sbs_bench {
     }
 
     struct opts {
-      std::string frames, out, model, depth_override_root, direct_parallax_root;
+      std::string frames, out, direct_parallax_root;
       std::string depth_coordinate_v2_manifest, capabilities;
       std::string scene_cache, render_cache, scene_plan;
       artifact_mode_e artifacts = artifact_mode_e::evaluation;
@@ -2518,31 +2427,12 @@ namespace sbs_bench {
       int eye_h = 0;  // 0 -> match/derive from the input frame
       double output_scale = 1.0;  // per-eye linear scale vs source; preserves source aspect
       double pop_strength = -1.0;  // final shared stereo-parallax multiplier; <0 = conf
-      double adaptive_pop_max = -1.0;  // absolute ceiling; <0 = conf
-      std::string zero_plane;  // empty = conf; subject, median, or background
       bool simulate_hdr = false;  // decode sRGB frames into linear scRGB FP16 and use HDR paths
       double hdr_scale = 4.0;  // scRGB multiplier after sRGB EOTF (4.0 = 320-nit diffuse white)
       int max_width = 0;  // 0 -> use config max_encode_width
       int limit = 0;  // 0 -> all
       int output_every = 1;  // process every input for temporal state; dump only every Nth
-      int depth_every = 1;  // infer every Nth source frame; reuse depth between updates
-      // Apollo depth-pipeline A/B levers; <0 / false -> use the conf's value.
-      double subject_recenter = -1.0;  // global subject recenter override
-      int depth_short_side = 0;  // depth inference short-side override (0 = conf)
-      double ema = -1.0;  // per-pixel depth EMA override (1.0 = off)
-      double ema_edge_change = -1.0;
-      double ema_edge_gradient = -1.0;
-      double ema_edge_strength = -1.0;
-      int subject_stretch = -1;  // -1 = conf, 0 = off, 1 = on
-      double minmax_ema = -1.0;  // range-bounds EMA new-weight; <0 = conf
       int cuda_graph = -1;  // -1 = conf, 0 = ordinary enqueue, 1 = CUDA graph replay
-      int adaptive_pop = -1;  // -1 = conf, 0 = off, 1 = on
-      bool literal_bestv2 = false;  // reference-only: disable production resolution/pop scaling
-      bool depth_override_all = false;  // reference-only: replace every inferred depth frame
-      // Production offline mode: run the authenticated Depth Coordinate V2 producer via the
-      // host_sbs_v2 estimator and render its signed final field with the contractive inverse.
-      // Whole-clip analysis/conversion requires it; plain evaluation keeps the legacy oracle.
-      bool parallax_v2_live = false;
     };
 
     bool parse_opts(int argc, char **argv, opts &o) {
@@ -2595,8 +2485,6 @@ namespace sbs_bench {
             BOOST_LOG(error) << "sbs-bench: --artifacts must be evaluation, adaptive, or conversion";
             return false;
           }
-        } else if (a == "--model") {
-          o.model = next("--model");
         } else if (a == "--eye-w") {
           o.eye_w = std::stoi(next("--eye-w"));
         } else if (a == "--eye-h") {
@@ -2605,14 +2493,6 @@ namespace sbs_bench {
           o.output_scale = std::stod(next("--output-scale"));
         } else if (a == "--pop-strength") {
           o.pop_strength = std::stod(next("--pop-strength"));
-        } else if (a == "--adaptive-pop") {
-          o.adaptive_pop = 1;
-        } else if (a == "--no-adaptive-pop") {
-          o.adaptive_pop = 0;
-        } else if (a == "--adaptive-pop-max") {
-          o.adaptive_pop_max = std::stod(next("--adaptive-pop-max"));
-        } else if (a == "--zero-plane") {
-          o.zero_plane = next("--zero-plane");
         } else if (a == "--simulate-hdr") {
           o.simulate_hdr = true;
         } else if (a == "--hdr-scale") {
@@ -2623,34 +2503,10 @@ namespace sbs_bench {
           o.limit = std::stoi(next("--limit"));
         } else if (a == "--output-every") {
           o.output_every = std::max(1, std::stoi(next("--output-every")));
-        } else if (a == "--depth-every") {
-          o.depth_every = std::stoi(next("--depth-every"));
-        } else if (a == "--depth-override-root") {
-          o.depth_override_root = next("--depth-override-root");
         } else if (a == "--direct-parallax-root") {
           o.direct_parallax_root = next("--direct-parallax-root");
         } else if (a == "--depth-coordinate-v2-manifest") {
           o.depth_coordinate_v2_manifest = next("--depth-coordinate-v2-manifest");
-        } else if (a == "--depth-override-all") {
-          o.depth_override_all = true;
-        } else if (a == "--subject-recenter") {
-          o.subject_recenter = std::stod(next("--subject-recenter"));
-        } else if (a == "--depth-short-side") {
-          o.depth_short_side = std::stoi(next("--depth-short-side"));
-        } else if (a == "--subject-stretch") {
-          o.subject_stretch = 1;
-        } else if (a == "--no-subject-stretch") {
-          o.subject_stretch = 0;
-        } else if (a == "--ema") {
-          o.ema = std::stod(next("--ema"));
-        } else if (a == "--ema-edge-change") {
-          o.ema_edge_change = std::stod(next("--ema-edge-change"));
-        } else if (a == "--ema-edge-gradient") {
-          o.ema_edge_gradient = std::stod(next("--ema-edge-gradient"));
-        } else if (a == "--ema-edge-strength") {
-          o.ema_edge_strength = std::stod(next("--ema-edge-strength"));
-        } else if (a == "--minmax-ema") {
-          o.minmax_ema = std::stod(next("--minmax-ema"));
         } else if (a == "--cuda-graph") {
           std::string v = next("--cuda-graph");
           if (v == "on" || v == "1" || v == "true") {
@@ -2661,10 +2517,6 @@ namespace sbs_bench {
             BOOST_LOG(error) << "sbs-bench: --cuda-graph must be on or off";
             return false;
           }
-        } else if (a == "--literal-bestv2") {
-          o.literal_bestv2 = true;
-        } else if (a == "--parallax-v2-live") {
-          o.parallax_v2_live = true;
         } else {
           BOOST_LOG(error) << "sbs-bench: unknown arg '" << a << "'";
           return false;
@@ -2685,55 +2537,16 @@ namespace sbs_bench {
         BOOST_LOG(error) << "sbs-bench: --scene-cache and --render-cache are mutually exclusive";
         return false;
       }
-      // The V2 estimator applies the fixed live calibration and has no legacy zero-plane,
-      // subject shaping, adaptive pop, or EMA levers; silently accepting them would report
-      // A/B values that were never used. Depth cadence must stay 1 so the stateful cut/camera
-      // history sees every frame.
-      if (o.parallax_v2_live) {
-        if (!o.zero_plane.empty() || o.subject_recenter >= 0.0 || o.subject_stretch >= 0 ||
-            o.adaptive_pop >= 0 || o.adaptive_pop_max >= 0.0 || o.literal_bestv2 ||
-            o.ema >= 0.0 || o.ema_edge_change >= 0.0 || o.ema_edge_gradient >= 0.0 ||
-            o.ema_edge_strength >= 0.0 || o.minmax_ema >= 0.0 || o.depth_short_side != 0) {
-          BOOST_LOG(error)
-            << "sbs-bench: --parallax-v2-live uses the fixed production calibration and "
-               "rejects --zero-plane/--subject-*/--adaptive-pop*/--literal-bestv2/--ema*/"
-               "--minmax-ema/--depth-short-side";
-          return false;
-        }
-        if (o.depth_every != 1) {
-          BOOST_LOG(error)
-            << "sbs-bench: --parallax-v2-live requires --depth-every 1 (the V2 camera and "
-               "cut history are stateful per frame)";
-          return false;
-        }
-        if (!o.depth_override_root.empty() || o.depth_override_all) {
-          BOOST_LOG(error) << "sbs-bench: --parallax-v2-live forbids depth overrides";
-          return false;
-        }
-      }
-      // Offline conversion and whole-clip analysis are production paths: they must run the
-      // production V2 pipeline. Legacy remains only for the plain evaluation oracle.
-      if (!o.parallax_v2_live &&
-          (o.artifacts == artifact_mode_e::conversion || !o.scene_cache.empty() ||
-           !o.render_cache.empty())) {
-        BOOST_LOG(error)
-          << "sbs-bench: conversion artifacts and scene caches require --parallax-v2-live; "
-             "the legacy pipeline is evaluation-only";
-        return false;
-      }
       const unsigned direct_geometry_input_count =
         (!o.direct_parallax_root.empty() ? 1u : 0u) +
         (!o.depth_coordinate_v2_manifest.empty() ? 1u : 0u);
       if (direct_geometry_input_count > 0u) {
         if (o.artifacts != artifact_mode_e::evaluation || o.follow ||
             !o.scene_cache.empty() || !o.render_cache.empty() ||
-            !o.depth_override_root.empty() || o.depth_override_all ||
-            o.output_every != 1 || o.depth_every != 1 || o.literal_bestv2 ||
-            o.parallax_v2_live) {
+            o.output_every != 1) {
           BOOST_LOG(error)
-            << "sbs-bench: direct/v2 GPU replay requires evaluation artifacts, "
-               "depth/output cadence 1, and forbids follow, caches, depth overrides, "
-               "--literal-bestv2, and --parallax-v2-live";
+            << "sbs-bench: direct/v2 GPU replay requires evaluation artifacts, output "
+               "cadence 1, and forbids follow and caches";
           return false;
         }
         if (direct_geometry_input_count > 1u) {
@@ -2748,10 +2561,6 @@ namespace sbs_bench {
             o.scene_plan.empty()) {
           BOOST_LOG(error)
             << "sbs-bench: --render-cache requires conversion artifacts and --scene-plan";
-          return false;
-        }
-        if (!o.depth_override_root.empty() || o.depth_override_all) {
-          BOOST_LOG(error) << "sbs-bench: cache replay forbids depth overrides";
           return false;
         }
       } else if (!o.scene_plan.empty()) {
@@ -2774,9 +2583,8 @@ namespace sbs_bench {
           BOOST_LOG(error) << "sbs-bench: --follow-format must be png, bmp, or pfm";
           return false;
         }
-        if (o.limit != 0 || !o.depth_override_root.empty() ||
-            o.depth_override_all || o.output_every != 1) {
-          BOOST_LOG(error) << "sbs-bench: --follow forbids --limit, depth overrides, and --output-every != 1";
+        if (o.limit != 0 || o.output_every != 1) {
+          BOOST_LOG(error) << "sbs-bench: --follow forbids --limit and --output-every != 1";
           return false;
         }
         if (o.follow_format == "pfm" && o.simulate_hdr) {
@@ -2803,35 +2611,12 @@ namespace sbs_bench {
         BOOST_LOG(error) << "sbs-bench: --pop-strength must be between 0.25 and 2";
         return false;
       }
-      if (o.adaptive_pop_max >= 0.0 &&
-          !(o.adaptive_pop_max >= 0.25 && o.adaptive_pop_max <= 2.0)) {
-        BOOST_LOG(error) << "sbs-bench: --adaptive-pop-max must be between 0.25 and 2";
-        return false;
-      }
-      if (!o.zero_plane.empty() &&
-          o.zero_plane != "subject" && o.zero_plane != "median" &&
-          o.zero_plane != "background") {
-        BOOST_LOG(error) << "sbs-bench: --zero-plane must be subject, median, or background";
-        return false;
-      }
       if (!(o.hdr_scale > 0.0 && o.hdr_scale <= 64.0)) {
         BOOST_LOG(error) << "sbs-bench: --hdr-scale must be greater than 0 and at most 64";
         return false;
       }
-      if (o.depth_every < 1 || o.depth_every > 8) {
-        BOOST_LOG(error) << "sbs-bench: --depth-every must be between 1 and 8";
-        return false;
-      }
       if (o.artifacts == artifact_mode_e::conversion && o.output_every != 1) {
         BOOST_LOG(error) << "sbs-bench: conversion artifacts require --output-every 1";
-        return false;
-      }
-      if (o.ema_edge_change > 1.0 || o.ema_edge_gradient > 1.0 || o.ema_edge_strength > 1.0) {
-        BOOST_LOG(error) << "sbs-bench: EMA edge thresholds and strength must be <=1";
-        return false;
-      }
-      if (!o.depth_override_root.empty() && !fs::is_directory(o.depth_override_root)) {
-        BOOST_LOG(error) << "sbs-bench: --depth-override-root is not a directory";
         return false;
       }
       if (!o.direct_parallax_root.empty() && !fs::is_directory(o.direct_parallax_root)) {
@@ -2843,30 +2628,7 @@ namespace sbs_bench {
         BOOST_LOG(error) << "sbs-bench: --depth-coordinate-v2-manifest is not a file";
         return false;
       }
-      if (o.depth_override_all && o.depth_override_root.empty()) {
-        BOOST_LOG(error) << "sbs-bench: --depth-override-all requires --depth-override-root";
-        return false;
-      }
-      if (o.depth_override_all && o.depth_every != 1) {
-        BOOST_LOG(error) << "sbs-bench: --depth-override-all requires --depth-every 1";
-        return false;
-      }
       return true;
-    }
-
-    config::depth_model_info pick_model(const opts &o) {
-      const auto &reg = config::depth_model_registry();
-      std::string want = o.model;
-      if (!want.empty()) {
-        for (const auto &m : reg) {
-          if (m.name == want) {
-            return m;
-          }
-        }
-        BOOST_LOG(warning) << "sbs-bench: model '" << want
-                           << "' not in registry; using configured evaluator model";
-      }
-      return video::depth_model_for_profile(config::video.sbs);
     }
 
   }  // namespace
@@ -2895,8 +2657,11 @@ namespace sbs_bench {
           {"follow_protocol_schema", 1},
           {"follow_global_first_sequence", true},
           {"adaptive_state_schema", sbs_adaptive_state::schema_version},
+          {"adaptive_state_contract_tag", sbs_adaptive_state::cut_contract_tag},
+          {"adaptive_state_contract_canonical_sha256",
+           sbs_adaptive_state::contract_canonical_sha256},
           {"adaptive_analysis_flag_bits", std::move(adaptive_analysis_flag_bits)},
-          {"scene_cache_contract_schema", 2},
+          {"scene_cache_contract_schema", offline_sbs::scene_cache_contract_schema},
           {"scene_cache_packed_sbs_contract", true},
           {"renderer", "depth-coordinate-v2-live-signed-parallax"},
           {"parallax_v2_contract_schema",
@@ -2914,14 +2679,10 @@ namespace sbs_bench {
             {"source", "depth_coordinate_v2.ParallaxState[0..2]"},
           }},
           {"scene_plan", {
-            {"schema", 1},
-            {"version", "scene-plan-v1"},
+            {"schema", 2},
+            {"version", "scene-plan-v2"},
             {"one_scene_per_replay", true},
-            {"absolute_pop_strength", true},
-            {"source_pixel_zero_anchor", true},
-            // Scene boundaries still pace caching/replay; the planner's pop/zero-anchor
-            // outputs have no consumer in the V2 renderer and are recorded as inert.
-            {"geometry_outputs_applied", false},
+            {"boundary_only", true},
           }},
           {"render_cache_follow", true},
           {"render_skips_tensorrt", true},
@@ -3064,50 +2825,16 @@ namespace sbs_bench {
     if (o.pop_strength >= 0.0) {
       sbs_cfg.pop_strength = o.pop_strength;
     }
-    if (o.adaptive_pop >= 0) {
-      sbs_cfg.adaptive_pop = (o.adaptive_pop != 0);
-    }
-    if (o.adaptive_pop_max >= 0.0) {
-      sbs_cfg.adaptive_pop_max = o.adaptive_pop_max;
-    }
-    if (!o.zero_plane.empty()) {
-      sbs_cfg.zero_plane = o.zero_plane;
-    }
-    sbs_cfg.adaptive_pop_max = std::max(sbs_cfg.adaptive_pop_max, sbs_cfg.pop_strength);
-    if (o.subject_recenter >= 0.0) {
-      sbs_cfg.subject_recenter = o.subject_recenter;
-    }
-    if (o.depth_short_side > 0) {
-      sbs_cfg.depth_short_side = o.depth_short_side;
-    }
-    if (o.subject_stretch >= 0) {
-      sbs_cfg.subject_stretch = (o.subject_stretch != 0);
-    }
-    if (o.ema > 0.0) {
-      sbs_cfg.ema = o.ema;  // A/B lever: depth EMA (1.0 = off)
-    }
-    if (o.ema_edge_change >= 0.0) {
-      sbs_cfg.ema_edge_change = o.ema_edge_change;
-    }
-    if (o.ema_edge_gradient >= 0.0) {
-      sbs_cfg.ema_edge_gradient = o.ema_edge_gradient;
-    }
-    if (o.ema_edge_strength >= 0.0) {
-      sbs_cfg.ema_edge_strength = o.ema_edge_strength;
-    }
-    if (o.minmax_ema >= 0.0) {
-      sbs_cfg.minmax_ema = o.minmax_ema;
-    }
     if (o.cuda_graph >= 0) {
       sbs_cfg.cuda_graph = (o.cuda_graph != 0);
     }
     config::sunshine.diagnostics_enabled = true;  // benchmark processes always measure
     sbs_perf::set_enabled(true);
     sbs_perf::reset();
-    auto model = pick_model(o);
+    const auto model = video::host_sbs_v2_depth_model();
     const bool replay_mode = !o.render_cache.empty();
-    // Direct replay replaces the legacy Bestv2 mapping with an authenticated, horizontally
-    // contractive final field plus independent canonical order. Native V2 sequence replay runs
+    // Direct replay supplies an authenticated, horizontally contractive final field plus an
+    // independent canonical order. Native V2 sequence replay runs
     // the production seven-shader coordinate pipeline and feeds its exact final field through the
     // same fixed-point renderer contract.
     const bool depth_coordinate_v2_gpu_mode =
@@ -3115,7 +2842,11 @@ namespace sbs_bench {
     const bool external_direct_parallax_mode = !o.direct_parallax_root.empty();
     const bool direct_parallax_mode =
       external_direct_parallax_mode || depth_coordinate_v2_gpu_mode;
+    const auto &cut_state_trace_contract = depth_coordinate_v2_gpu_mode ?
+      sbs_adaptive_state::gpu_replay_cut_trace_contract :
+      sbs_adaptive_state::production_cut_trace_contract;
     const bool whole_clip_mode = o.artifacts != artifact_mode_e::evaluation;
+    const bool writes_adaptive_state = whole_clip_mode && !replay_mode;
     const bool hdr_texture_input = pfm_input || o.simulate_hdr;
     const std::string discovered_input_frame_format =
       pfm_input ?
@@ -3131,7 +2862,9 @@ namespace sbs_bench {
     std::vector<scene_plan_entry> scene_plan;
     std::size_t replay_first_sequence = 1u;
     std::size_t replay_frame_count = 0u;
-    int effective_depth_every = o.depth_every;
+    // The V2 camera and cut history are stateful per frame, so depth cadence is always one
+    // inference per source frame; the replay cache contract validates the same interval.
+    int effective_depth_every = 1;
     if (replay_mode) {
       std::string cache_error;
       if (!read_scene_cache_contract(
@@ -3196,17 +2929,22 @@ namespace sbs_bench {
       if (o.follow) {
         o.follow_count = replay_frame_count;
       }
-      // Schema-2 caches carry the complete V2 geometry: the replay child only needs the
-      // recorded pop for provenance plus the output geometry. No legacy adaptive/subject/
-      // literal knobs exist to restore, and the cached field is the sole position authority.
+      // Schema-3 caches carry the complete V2 geometry and authenticated renderer identity. The
+      // replay child only needs the recorded pop for provenance plus the output geometry. No
+      // per-scene geometry knobs exist
+      // to restore, and the cached field is the sole position authority.
+      if (replay_cache_metadata.model_name != model.name ||
+          replay_cache_metadata.model_url != model.url) {
+        BOOST_LOG(error)
+          << "sbs-bench: render cache model is not the authenticated Host SBS V2 model";
+        return 6;
+      }
       sbs_cfg.pop_strength = replay_cache_metadata.pop_strength;
       o.eye_w = replay_cache_metadata.eye_width;
       o.eye_h = replay_cache_metadata.eye_height;
       o.output_scale = replay_cache_metadata.output_scale;
       o.max_width = replay_cache_metadata.max_output_width;
       effective_depth_every = replay_cache_metadata.depth_reuse_interval;
-      model.name = replay_cache_metadata.model_name;
-      model.url = replay_cache_metadata.model_url;
     }
     const int max_width =
       o.max_width > 0 ? o.max_width : config::video.sbs.max_encode_width;
@@ -3232,7 +2970,7 @@ namespace sbs_bench {
       fs::path(o.out) / "adaptive_state_header.json";
     const fs::path adaptive_state_frame_path =
       fs::path(o.out) / "adaptive_state_frame.json";
-    if (whole_clip_mode) {
+    if (writes_adaptive_state) {
       if (o.bounded_adaptive_state) {
         std::error_code cleanup_error;
         fs::remove(adaptive_state_header_path, cleanup_error);
@@ -3243,7 +2981,7 @@ namespace sbs_bench {
                 return write_adaptive_state_header(
                   out,
                   model.name,
-                  sbs_cfg,
+                  sbs_cfg.pop_strength,
                   effective_depth_every
                 );
               }
@@ -3264,7 +3002,7 @@ namespace sbs_bench {
         if (!write_adaptive_state_header(
               adaptive_state_stream,
               model.name,
-              sbs_cfg,
+              sbs_cfg.pop_strength,
               effective_depth_every
             )) {
           BOOST_LOG(error)
@@ -3280,12 +3018,7 @@ namespace sbs_bench {
                     << ", model '" << model.name
                     << "', eye " << (o.eye_w > 0 ? std::to_string(o.eye_w) : "auto") << 'x'
                     << (o.eye_h > 0 ? std::to_string(o.eye_h) : "auto")
-                    << ", depth_step "
-                    << (effective_depth_every == 1 ? std::string("current-once") :
-                                                     "reuse-" + std::to_string(effective_depth_every))
-                    << ", profile " << sbs_cfg.profile
-                    << ", literal_bestv2 " << (o.literal_bestv2 ? "on" : "off")
-                    << ", depth_every " << effective_depth_every
+                    << ", depth_step current-once"
                     << (replay_mode ? ", cache replay (TensorRT skipped)" : "")
                     << (depth_coordinate_v2_gpu_mode ?
                           ", native depth-coordinate-v2 final-field GPU sequence replay" :
@@ -3303,63 +3036,94 @@ namespace sbs_bench {
       return 5;
     }
 
-    // Harness-only GPU timestamps. CPU submission time is not a useful warp-cost measurement.
+    // GPU timing is an evaluation diagnostic. Normal conversion must not Flush and wait on a
+    // timestamp fence every frame; its staging/encoder pipeline owns the required synchronization.
     ComPtr<ID3D11Query> warp_disjoint, warp_start, warp_end;
-    D3D11_QUERY_DESC qd = {D3D11_QUERY_TIMESTAMP_DISJOINT, 0};
-    dev->CreateQuery(&qd, &warp_disjoint);
-    qd.Query = D3D11_QUERY_TIMESTAMP;
-    dev->CreateQuery(&qd, &warp_start);
-    dev->CreateQuery(&qd, &warp_end);
-
-    const D3D_SHADER_MACRO scene_camera_macros[] = {
-      {"SBS_SCENE_CAMERA_OVERRIDE", "1"},
-      {nullptr, nullptr},
-    };
-    const D3D_SHADER_MACRO direct_parallax_macros[] = {
-      {"SBS_DIRECT_PARALLAX", "1"},
-      {"SBS_DIRECT_PARALLAX_CONTRACTIVE", "1"},
-      {nullptr, nullptr},
-    };
-    // Production offline mode: bind the estimator's signed V2 final field and ParallaxState
-    // directly. The branch shares the live renderer's 12-step contractive inverse and applies
-    // no legacy pop/zero-plane/scene-camera authority of its own, so it is used identically for
-    // the analysis pass and for scene-cache replay.
-    const D3D_SHADER_MACRO live_v2_macros[] = {
-      {"SBS_LIVE_V2_SIGNED_PARALLAX", "1"},
-      {nullptr, nullptr},
-    };
-    const auto *warp_macros = o.parallax_v2_live ? live_v2_macros :
-                              (direct_parallax_mode ? direct_parallax_macros :
-                                 (replay_mode ? scene_camera_macros : nullptr));
-    auto vs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_vs.hlsl", "main_vs", "vs_5_0");
-    auto ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "main_ps", "ps_5_0", warp_macros);
-    auto mask_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "mask_ps", "ps_5_0", warp_macros);
-    auto mapping_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "mapping_ps", "ps_5_0", warp_macros);
-    // The forward-coverage shader has no live-V2 branch and is never dispatched in that mode;
-    // compile it with the legacy macro set so the unused blob still builds.
-    auto coverage_cs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_forward_coverage_cs.hlsl", "main", "cs_5_0", o.parallax_v2_live ? nullptr : warp_macros);
-    auto warp_prefilter_cs_blob = compile(SUNSHINE_SHADERS_DIR "/depth_warp_prefilter_cs.hlsl", "main", "cs_5_0");
-    if (!vs_blob || !ps_blob || !mask_ps_blob || !mapping_ps_blob || !coverage_cs_blob ||
-        !warp_prefilter_cs_blob) {
-      return 6;
+    if (o.artifacts == artifact_mode_e::evaluation) {
+      D3D11_QUERY_DESC qd = {D3D11_QUERY_TIMESTAMP_DISJOINT, 0};
+      if (FAILED(dev->CreateQuery(&qd, &warp_disjoint))) {
+        warp_disjoint.Reset();
+      }
+      qd.Query = D3D11_QUERY_TIMESTAMP;
+      if (FAILED(dev->CreateQuery(&qd, &warp_start))) {
+        warp_start.Reset();
+      }
+      if (FAILED(dev->CreateQuery(&qd, &warp_end))) {
+        warp_end.Reset();
+      }
     }
+
+    // External final-field replay has a deliberately separate renderer. All native analysis and
+    // scene-cache replay use the exact production V2 renderer; diagnostic entry points remain in
+    // their dump-only shader so they cannot grow the live shader root.
+    const auto *diagnostic_shader = direct_parallax_mode ?
+      SUNSHINE_SHADERS_DIR "/sbs_direct_replay_ps.hlsl" :
+      SUNSHINE_SHADERS_DIR "/sbs_reprojection_v2_diagnostics_ps.hlsl";
     ComPtr<ID3D11VertexShader> vs;
     ComPtr<ID3D11PixelShader> ps, mask_ps, mapping_ps;
-    ComPtr<ID3D11ComputeShader> coverage_cs, warp_prefilter_cs;
-    if (FAILED(dev->CreateVertexShader(
-          vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &vs)) ||
-        FAILED(dev->CreatePixelShader(
-          ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &ps)) ||
-        FAILED(dev->CreatePixelShader(
-          mask_ps_blob->GetBufferPointer(), mask_ps_blob->GetBufferSize(), nullptr, &mask_ps)) ||
-        FAILED(dev->CreatePixelShader(mapping_ps_blob->GetBufferPointer(),
-          mapping_ps_blob->GetBufferSize(), nullptr, &mapping_ps)) ||
-        FAILED(dev->CreateComputeShader(coverage_cs_blob->GetBufferPointer(),
-          coverage_cs_blob->GetBufferSize(), nullptr, &coverage_cs)) ||
-        FAILED(dev->CreateComputeShader(warp_prefilter_cs_blob->GetBufferPointer(),
-          warp_prefilter_cs_blob->GetBufferSize(), nullptr, &warp_prefilter_cs)) ||
-        !vs || !ps || !mask_ps || !mapping_ps || !coverage_cs || !warp_prefilter_cs) {
-      BOOST_LOG(error) << "sbs-bench: D3D11 shader creation failed";
+    if (o.artifacts != artifact_mode_e::adaptive) {
+      if (direct_parallax_mode) {
+        auto vs_blob = compile(
+          SUNSHINE_SHADERS_DIR "/sbs_reprojection_vs.hlsl", "main_vs", "vs_5_0"
+        );
+        auto ps_blob = compile(
+          SUNSHINE_SHADERS_DIR "/sbs_direct_replay_ps.hlsl", "main_ps", "ps_5_0"
+        );
+        if (!vs_blob || !ps_blob ||
+            FAILED(dev->CreateVertexShader(
+              vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &vs)) ||
+            FAILED(dev->CreatePixelShader(
+              ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &ps))) {
+          BOOST_LOG(error) << "sbs-bench: direct replay shader creation failed";
+          return 6;
+        }
+      } else {
+        const auto live_sources =
+          models::host_sbs_shader_cache::snapshot_sources(
+            fs::path {SUNSHINE_SHADERS_DIR},
+            models::host_sbs_shader_cache::parallax_v2_live_renderer_specs
+          );
+        const auto closure =
+          models::host_sbs_shader_cache::source_closure_sha256(live_sources);
+        if (!live_sources ||
+            closure != models::host_sbs_shader_cache::
+                         parallax_v2_live_renderer_source_closure_sha256) {
+          BOOST_LOG(error)
+            << "sbs-bench: production V2 renderer source closure is unauthenticated";
+          return 6;
+        }
+        const auto vs_bytecode = models::host_sbs_shader_cache::get(
+          live_sources, models::host_sbs_shader_cache::sbs_reprojection_vertex
+        );
+        const auto ps_bytecode = models::host_sbs_shader_cache::get(
+          live_sources, models::host_sbs_shader_cache::parallax_v2_live_renderer
+        );
+        if (!vs_bytecode || !ps_bytecode ||
+            FAILED(dev->CreateVertexShader(
+              vs_bytecode->data(), vs_bytecode->size(), nullptr, &vs)) ||
+            FAILED(dev->CreatePixelShader(
+              ps_bytecode->data(), ps_bytecode->size(), nullptr, &ps))) {
+          BOOST_LOG(error) << "sbs-bench: authenticated V2 renderer creation failed";
+          return 6;
+        }
+      }
+    }
+    if (o.artifacts == artifact_mode_e::evaluation) {
+      auto mask_ps_blob = compile(diagnostic_shader, "mask_ps", "ps_5_0");
+      auto mapping_ps_blob = compile(diagnostic_shader, "mapping_ps", "ps_5_0");
+      if (!mask_ps_blob || !mapping_ps_blob ||
+          FAILED(dev->CreatePixelShader(
+            mask_ps_blob->GetBufferPointer(), mask_ps_blob->GetBufferSize(), nullptr, &mask_ps)) ||
+          FAILED(dev->CreatePixelShader(
+            mapping_ps_blob->GetBufferPointer(), mapping_ps_blob->GetBufferSize(), nullptr,
+            &mapping_ps)) ||
+          !mask_ps || !mapping_ps) {
+        BOOST_LOG(error) << "sbs-bench: diagnostic shader creation failed";
+        return 6;
+      }
+    }
+    if (o.artifacts != artifact_mode_e::adaptive && (!vs || !ps)) {
+      BOOST_LOG(error) << "sbs-bench: render shaders are unavailable";
       return 6;
     }
 
@@ -3397,9 +3161,9 @@ namespace sbs_bench {
 
     // ---- estimator ----
     // Cache and raw-v2 replay are deliberately pure D3D render passes: do not construct the
-    // TensorRT estimator. The v2 path uploads authenticated model output directly into the same
-    // seven authenticated production V2 compute shaders, and no legacy estimator may silently run beside
-    // it.
+    // TensorRT estimator. The GPU replay path uploads authenticated model output directly into
+    // the production V2 compute shaders. External final-parallax replay still runs the fixed
+    // production estimator so its cut-state and resolved-shape evidence remain representative.
     std::unique_ptr<models::video_depth_estimator> estimator;
     if (!replay_mode && !depth_coordinate_v2_gpu_mode) {
       estimator = std::make_unique<models::video_depth_estimator>(
@@ -3407,14 +3171,12 @@ namespace sbs_bench {
         ctx,
         fs::path(SUNSHINE_ASSETS_DIR),
         sbs_cfg,
-        model,
-        o.parallax_v2_live ? models::depth_estimator_usage_e::host_sbs_v2 :
-                             models::depth_estimator_usage_e::legacy_evaluation
+        model
       );
-      if (o.parallax_v2_live && estimator->has_terminal_failure()) {
+      if (estimator->has_terminal_failure()) {
         BOOST_LOG(error)
           << "sbs-bench: the production V2 estimator failed to initialize; refusing to "
-             "emit silently flat conversion output";
+             "emit output without authenticated cut-state and resolved-shape evidence";
         return 5;
       }
     }
@@ -3427,29 +3189,22 @@ namespace sbs_bench {
     ComPtr<ID3D11RenderTargetView> warp_mask_rtv;
     ComPtr<ID3D11Texture2D> warp_mapping_tex, warp_mapping_stage;
     ComPtr<ID3D11RenderTargetView> warp_mapping_rtv;
-    ComPtr<ID3D11Texture2D> coverage_tex;
-    ComPtr<ID3D11UnorderedAccessView> coverage_uav;
-    ComPtr<ID3D11ShaderResourceView> coverage_srv;
     D3D11_VIEWPORT vp = {};
     UINT sbs_w = 0, sbs_h = 0;
-    ComPtr<ID3D11Texture2D> depth_stage;  // dump_depth staging cache (depth size is constant)
-    ComPtr<ID3D11Texture2D> warp_depth_tex;
-    ComPtr<ID3D11UnorderedAccessView> warp_depth_uav;
-    ComPtr<ID3D11ShaderResourceView> warp_depth_srv;
     ComPtr<ID3D11Texture2D> ema_mask_stage;
     ComPtr<ID3D11Buffer> raw_depth_stage;
     ComPtr<ID3D11Texture2D> structure_field_stage;
-    ComPtr<ID3D11Buffer> subject_state_stage;
+    ComPtr<ID3D11Buffer> cut_state_stage;
     ComPtr<ID3D11Texture2D> scene_cache_depth_stage;
     ComPtr<ID3D11Buffer> scene_cache_state_stage;
-    // Evaluation keeps the legacy subject_state.json contract used by the bounded clip
-    // scorer. Whole-clip follow/conversion already emits the superset adaptive-state
+    // Evaluation keeps the compact cut-state trace used by the bounded clip scorer.
+    // Whole-clip follow/conversion already emits the superset adaptive-state
     // transport (JSONL for standalone tooling, atomic latest-record snapshots for the native
     // worker), so retaining a second per-frame vector there would make memory scale with clip
     // duration for no additional evidence.
-    std::vector<subject_state_record> subject_state_records;
+    std::vector<cut_state_record> cut_state_records;
     if (!whole_clip_mode) {
-      subject_state_records.reserve(frames.size());
+      cut_state_records.reserve(frames.size());
     }
     bool raw_shape_written = false;
     bool warp_mapping_shape_written = false;
@@ -3460,50 +3215,20 @@ namespace sbs_bench {
     int written = 0;
     models::estimate_result est;
     bool cuda_graph_captured = false;
-    bool have_depth_result = false;
     std::size_t tensorrt_enqueue_count = 0;
     bool scene_cache_contract_started = false;
     scene_cache_metadata scene_cache_metadata_value;
     std::size_t scene_plan_index = 0;
     UINT source_width = 0;
     UINT source_height = 0;
-    const fs::path depth_override_dir = o.depth_override_root.empty() ? fs::path() :
-                                          fs::path(o.depth_override_root) / fs::path(o.frames).filename();
     // Match the depth-override clip layout so a root may hold several clips without filename
     // collisions. External direct replay reads parallax_<id> plus order_<id>.
     const fs::path direct_geometry_root = fs::path(o.direct_parallax_root);
     const fs::path direct_parallax_dir = direct_geometry_root.empty() ? fs::path() :
                                            direct_geometry_root /
                                              fs::path(o.frames).filename();
-    size_t expected_depth_override_frames = 0;
-    size_t applied_depth_override_frames = 0;
     size_t applied_direct_parallax_frames = 0;
     nlohmann::ordered_json direct_parallax_fields = nlohmann::ordered_json::array();
-    if (!depth_override_dir.empty()) {
-      if (!fs::is_directory(depth_override_dir)) {
-        BOOST_LOG(error) << "sbs-bench: depth-override clip directory is missing: "
-                         << depth_override_dir;
-        return 7;
-      }
-      for (size_t fi = 0; fi < frames.size(); ++fi) {
-        expected_depth_override_frames += o.depth_override_all ||
-                                          (fi % (size_t) o.depth_every) != 0;
-      }
-      size_t actual_depth_override_frames = 0;
-      for (const auto &entry : fs::directory_iterator(depth_override_dir)) {
-        const auto filename = entry.path().filename().string();
-        if (entry.is_regular_file() && filename.starts_with("depth_") &&
-            entry.path().extension() == ".png") {
-          ++actual_depth_override_frames;
-        }
-      }
-      if (actual_depth_override_frames != expected_depth_override_frames) {
-        BOOST_LOG(error) << "sbs-bench: expected " << expected_depth_override_frames
-                         << " depth overrides in " << depth_override_dir << ", found "
-                         << actual_depth_override_frames;
-        return 7;
-      }
-    }
     if (!direct_parallax_dir.empty()) {
       if (!fs::is_directory(direct_parallax_dir)) {
         BOOST_LOG(error) << "sbs-bench: direct-parallax clip directory is missing: "
@@ -3662,10 +3387,13 @@ namespace sbs_bench {
       ComPtr<ID3D11Texture2D> in_tex;
       if (FAILED(dev->CreateTexture2D(&id, &isd, &in_tex))) {
         BOOST_LOG(error) << "sbs-bench: input tex fail";
-        continue;
+        return 6;
       }
       ComPtr<ID3D11ShaderResourceView> in_srv;
-      dev->CreateShaderResourceView(in_tex.Get(), nullptr, &in_srv);
+      if (FAILED(dev->CreateShaderResourceView(in_tex.Get(), nullptr, &in_srv))) {
+        BOOST_LOG(error) << "sbs-bench: input SRV creation failed";
+        return 6;
+      }
 
       // First frame: size the SBS target. Per eye = the input resolution by default (so the clip
       // size, not a fixed constant, drives eval cost); --eye-h pins a specific output height.
@@ -3703,20 +3431,18 @@ namespace sbs_bench {
         const float eye_aspect = (float) eye_w / (float) eye_h;
         const float content_scale_x = eye_aspect > aspect ? aspect / eye_aspect : 1.0f;
         const float content_scale_y = eye_aspect < aspect ? eye_aspect / aspect : 1.0f;
-        // Slot-for-slot mirror of the b2 `Constants` cbuffer in sbs_warp_common.hlsl; see the
-        // Slot 7 is the production invalid-completion draw guard. The synchronous evaluator has
-        // no previous packed target to preserve, so it always leaves the guard disabled.
-        float repro_params[8] = {
-          sbs_cfg.subject_stretch ? 1.0f : 0.0f,
+        // Exact b2 layout shared by the production V2 and direct-replay renderers.
+        float repro_params[4] = {
           content_scale_x,
           content_scale_y,
-          (float) sbs_cfg.pop_strength,
-          o.literal_bestv2 ? 1.0f : 0.0f,
-          sbs_cfg.adaptive_pop ? 1.0f : 0.0f,
-          (float) sbs_cfg.adaptive_pop_max,
-          0.0f  // preserve_previous_on_invalid
+          0.0f,
+          0.0f,
         };
         repro_cb = const_buffer(dev.Get(), repro_params);
+        if (!repro_cb) {
+          BOOST_LOG(error) << "sbs-bench: reprojection constant-buffer creation failed";
+          return 6;
+        }
         D3D11_TEXTURE2D_DESC td = {};
         td.Width = sbs_w;
         td.Height = sbs_h;
@@ -3728,9 +3454,12 @@ namespace sbs_bench {
         td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_DEFAULT;
         td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        dev->CreateTexture2D(&td, nullptr, &sbs_tex);
-        dev->CreateRenderTargetView(sbs_tex.Get(), nullptr, &sbs_rtv);
-        dev->CreateShaderResourceView(sbs_tex.Get(), nullptr, &sbs_srv);
+        if (FAILED(dev->CreateTexture2D(&td, nullptr, &sbs_tex)) ||
+            FAILED(dev->CreateRenderTargetView(sbs_tex.Get(), nullptr, &sbs_rtv)) ||
+            FAILED(dev->CreateShaderResourceView(sbs_tex.Get(), nullptr, &sbs_srv))) {
+          BOOST_LOG(error) << "sbs-bench: packed SBS target creation failed";
+          return 6;
+        }
         if (o.artifacts == artifact_mode_e::evaluation) {
           D3D11_TEXTURE2D_DESC mask_desc = td;
           mask_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -3749,23 +3478,15 @@ namespace sbs_bench {
             BOOST_LOG(error) << "sbs-bench: warp-mapping texture creation failed";
             return 6;
           }
-          D3D11_TEXTURE2D_DESC wd = td;
-          wd.Format = DXGI_FORMAT_R32_UINT;
-          wd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
-          if (FAILED(dev->CreateTexture2D(&wd, nullptr, &coverage_tex)) ||
-              FAILED(dev->CreateUnorderedAccessView(coverage_tex.Get(), nullptr,
-                                                    &coverage_uav)) ||
-              FAILED(dev->CreateShaderResourceView(coverage_tex.Get(), nullptr,
-                                                   &coverage_srv))) {
-            BOOST_LOG(error) << "sbs-bench: forward-coverage texture creation failed";
-            return 6;
-          }
         }
         D3D11_TEXTURE2D_DESC sd2 = td;
         sd2.Usage = D3D11_USAGE_STAGING;
         sd2.BindFlags = 0;
         sd2.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        dev->CreateTexture2D(&sd2, nullptr, &sbs_stage);
+        if (FAILED(dev->CreateTexture2D(&sd2, nullptr, &sbs_stage))) {
+          BOOST_LOG(error) << "sbs-bench: packed SBS staging texture creation failed";
+          return 6;
+        }
         vp = {0, 0, (float) sbs_w, (float) sbs_h, 0, 1};
         if (o.artifacts == artifact_mode_e::evaluation) {
           std::ofstream mapping_shape(fs::path(o.out) / "warp_map_shape.json");
@@ -3791,7 +3512,7 @@ namespace sbs_bench {
             << "  \"channels\": [\n"
             << "    \"raw_reproject_source_u_normalized\"\n"
             << "  ],\n"
-            << "  \"validity\": {\"content\": \"derive from content_scale_x/content_scale_y and packed output coordinate\", \"forward_coverage\": \"warp_mask_<frame-id>.png red == 0 inside content\"},\n"
+            << "  \"validity\": {\"content\": \"derive from content_scale_x/content_scale_y and packed output coordinate\", \"boundary_extrapolation\": \"warp_mask_<frame-id>.png red == 1 where the inverse sample left [0,1] source U\"},\n"
             << "  \"live_sample_source_u_normalized\": \"clamp(raw_reproject_source_u_normalized, 0, 1)\",\n"
             << "  \"derived_inverse_displacement_output_eye_px\": \"(raw_reproject_source_u_normalized - aspect_fitted_unwarped_source_u) * content_scale_x * eye_width\",\n"
             << "  \"derived_signed_binocular_disparity_px\": \"invert both eye maps at common source-U samples; x_right - x_left\"\n"
@@ -3816,13 +3537,10 @@ namespace sbs_bench {
       const auto input_color = hdr_texture_input ?
                                  models::input_color_space::scrgb_hdr :
                                  models::input_color_space::srgb;
-      const bool depth_updated = replay_mode ?
-        ((global_sequence - 1u) %
-          static_cast<std::size_t>(effective_depth_every)) == 0u :
-        (!have_depth_result ||
-         (fi % static_cast<std::size_t>(effective_depth_every)) == 0u);
+      // Depth cadence is fixed at one inference per source frame (the replay cache contract
+      // validates the same interval), so every frame is a depth update.
+      const bool depth_updated = true;
       adaptive_state_words_t words {};
-      const scene_plan_entry *active_scene_camera = nullptr;
       ComPtr<ID3D11Texture2D> cached_depth_texture;
       ComPtr<ID3D11Buffer> cached_state_buffer;
       depth_coordinate_v2_gpu_frame v2_gpu_frame;
@@ -3868,6 +3586,23 @@ namespace sbs_bench {
             << sequence;
           return 6;
         }
+        const float cached_parallax_measured_slope =
+          measured_horizontal_source_u_slope(
+            cached_parallax_values,
+            replay_cache_metadata.depth_width,
+            replay_cache_metadata.depth_height,
+            1.0
+          );
+        if (cached_parallax_measured_slope >
+            direct_parallax_max_horizontal_slope +
+              direct_parallax_slope_tolerance) {
+          BOOST_LOG(error)
+            << "sbs-bench: cached V2 parallax violates the horizontal slope contract for "
+               "sequence "
+            << sequence << " (" << cached_parallax_measured_slope << " > "
+            << direct_parallax_max_horizontal_slope << ')';
+          return 6;
+        }
         while (scene_plan_index < scene_plan.size() &&
                sequence >=
                  scene_plan[scene_plan_index].end_sequence_exclusive) {
@@ -3881,8 +3616,6 @@ namespace sbs_bench {
                            << sequence;
           return 6;
         }
-        const auto &scene = scene_plan[scene_plan_index];
-        active_scene_camera = &scene;
         if (!create_cached_v2_state_srv(
               dev.Get(),
               render_words,
@@ -3893,26 +3626,8 @@ namespace sbs_bench {
                            << sequence;
           return 6;
         }
-        // The cached words are V2 ParallaxState, not adaptive evidence; the replay trace keeps
-        // pure sentinels so it can never be mistaken for fresh detector evidence. The separate
-        // analysis trace remains authoritative for adaptive/cut history.
-        for (std::size_t index = 0; index < words.size(); ++index) {
-          words[index] = std::bit_cast<std::uint32_t>(
-            sbs_adaptive_state::initial_values[index]
-          );
-        }
-        constexpr std::array replay_unavailable_words {
-          sbs_adaptive_state::word_e::current_depth_change_fraction,
-          sbs_adaptive_state::word_e::valid_depth_fraction,
-          sbs_adaptive_state::word_e::effective_raw_range_width,
-        };
-        for (const auto word : replay_unavailable_words) {
-          words[sbs_adaptive_state::index(word)] =
-            std::bit_cast<std::uint32_t>(-1.0f);
-        }
         est.raw_width = static_cast<int>(replay_cache_metadata.depth_width);
         est.raw_height = static_cast<int>(replay_cache_metadata.depth_height);
-        have_depth_result = true;
       } else if (depth_coordinate_v2_gpu_mode) {
         std::string gpu_replay_error;
         if (!depth_coordinate_v2_gpu->dispatch(
@@ -3930,74 +3645,44 @@ namespace sbs_bench {
           return 7;
         }
         est.depth = v2_gpu_frame.encoded_final_parallax;
-        est.subject = v2_gpu_frame.legacy_subject_state;
+        est.cut_state = v2_gpu_frame.cut_state;
         est.raw_model_depth = v2_gpu_frame.raw_depth;
         est.raw_width = static_cast<int>(depth_coordinate_v2_gpu->width());
         est.raw_height = static_cast<int>(depth_coordinate_v2_gpu->height());
-        have_depth_result = true;
       } else {
-        if (depth_updated) {
-          // The V2 authentication contract rejects frame id 0, so the estimator is always fed
-          // the 1-based global sequence. The legacy path is insensitive to the offset.
-          const auto estimator_frame_id =
-            static_cast<std::uint64_t>(global_sequence);
-          estimator->estimate_depth(
-            in_srv.Get(),
-            input_color,
-            estimator_frame_id
-          );
-          est = estimator->finish_pending_depth_for_evaluation(input_color);
-          if (whole_clip_mode &&
-              (!est.completed_frame_valid ||
-               est.completed_frame_id != estimator_frame_id)) {
-            BOOST_LOG(error) << "sbs-bench: scheduled depth update for source frame "
-                             << output_id << " did not complete the expected current-frame oracle "
-                             << "(valid=" << (est.completed_frame_valid ? "true" : "false")
-                             << ", completed_frame_id=" << est.completed_frame_id
-                             << ", expected=" << estimator_frame_id << ')';
-            return 6;
-          }
-          if (o.parallax_v2_live) {
-            // Offline conversion must never degrade to silently flat output: every frame is
-            // required to publish the complete authenticated V2 geometry chain.
-            if (estimator->has_terminal_failure() ||
-                !models::parallax_v2_result_is_authenticated(est)) {
-              BOOST_LOG(error)
-                << "sbs-bench: frame " << output_id
-                << " did not publish authenticated V2 geometry (terminal="
-                << (estimator->has_terminal_failure() ? "true" : "false")
-                << "); aborting the run";
-              return 6;
-            }
-          }
-          cuda_graph_captured = cuda_graph_captured || est.cuda_graph_active;
-          ++tensorrt_enqueue_count;
-          have_depth_result = true;
-        } else {
-          // Match the live stream between depth ticks: color advances while all depth-derived
-          // geometry remains the last completed result. The views remain owned by the estimator
-          // and are valid until the next inference overwrites their backing resources.
+        // The V2 authentication contract rejects frame id 0, so the estimator is always fed
+        // the 1-based global sequence.
+        const auto estimator_frame_id =
+          static_cast<std::uint64_t>(global_sequence);
+        estimator->estimate_depth(
+          in_srv.Get(),
+          input_color,
+          estimator_frame_id
+        );
+        est = estimator->finish_pending_depth_for_evaluation(input_color);
+        if (whole_clip_mode &&
+            (!est.completed_frame_valid ||
+             est.completed_frame_id != estimator_frame_id)) {
+          BOOST_LOG(error) << "sbs-bench: scheduled depth update for source frame "
+                           << output_id << " did not complete the expected current-frame oracle "
+                           << "(valid=" << (est.completed_frame_valid ? "true" : "false")
+                           << ", completed_frame_id=" << est.completed_frame_id
+                           << ", expected=" << estimator_frame_id << ')';
+          return 6;
         }
-      }
-
-      // Offline motion-compensation reference: replace only explicitly supplied held-depth
-      // frames, while retaining the estimator's real subject/convergence state and production
-      // warp. This keeps the experiment on the actual shader path without pretending the Python
-      // flow prototype is production code.
-      ComPtr<ID3D11Texture2D> override_depth_texture;
-      ComPtr<ID3D11ShaderResourceView> override_depth_srv;
-      if (!depth_override_dir.empty() &&
-          (o.depth_override_all ||
-           (fi % static_cast<std::size_t>(effective_depth_every)) != 0)) {
-        const fs::path override_path = depth_override_dir / ("depth_" + output_id + ".png");
-        if (!fs::exists(override_path) ||
-            !load_depth_texture(dev.Get(), override_path, override_depth_texture,
-                                override_depth_srv)) {
-          BOOST_LOG(error) << "sbs-bench: missing or invalid depth override " << override_path;
-          return 7;
+        // Never degrade to silently flat output: every frame must publish the complete
+        // authenticated V2 geometry chain.
+        if (estimator->has_terminal_failure() ||
+            !models::parallax_v2_result_is_authenticated(est)) {
+          BOOST_LOG(error)
+            << "sbs-bench: frame " << output_id
+            << " did not publish authenticated V2 geometry (terminal="
+            << (estimator->has_terminal_failure() ? "true" : "false")
+            << "); aborting the run";
+          return 6;
         }
-        est.depth = override_depth_srv;
-        ++applied_depth_override_frames;
+        cuda_graph_captured = cuda_graph_captured || est.cuda_graph_active;
+        ++tensorrt_enqueue_count;
       }
 
       // Direct geometry replay consumes only the encoded slope-limited final field. Canonical
@@ -4087,21 +3772,13 @@ namespace sbs_bench {
                            << direct_parallax_source_u_limit << ')';
           return 7;
         }
-        float direct_parallax_measured_slope = 0.0f;
-        for (UINT y = 0; y < depth_desc.Height; ++y) {
-          const auto row = static_cast<std::size_t>(y) * depth_desc.Width;
-          for (UINT x = 1; x < depth_desc.Width; ++x) {
-            const auto index = row + x;
-            const double decoded_step = std::abs(
-              static_cast<double>(direct_parallax_values[index]) -
-              static_cast<double>(direct_parallax_values[index - 1u])
-            ) * 2.0 * direct_parallax_source_u_limit * depth_desc.Width;
-            direct_parallax_measured_slope = std::max(
-              direct_parallax_measured_slope,
-              static_cast<float>(decoded_step)
-            );
-          }
-        }
+        const float direct_parallax_measured_slope =
+          measured_horizontal_source_u_slope(
+            direct_parallax_values,
+            depth_desc.Width,
+            depth_desc.Height,
+            2.0 * direct_parallax_source_u_limit
+          );
         if (direct_parallax_measured_slope >
             direct_parallax_max_horizontal_slope + direct_parallax_slope_tolerance) {
           BOOST_LOG(error)
@@ -4139,14 +3816,12 @@ namespace sbs_bench {
       }
 
       // Export one state sample for every source frame, even when --output-every skips composite
-      // artifacts. This makes accepted shot pulses and the zero/pop latches directly testable
-      // without adding any synchronization or readback to production.
-      subject_state_record state_record;
-      state_record.frame_id = output_id;
+      // artifacts. This makes accepted shot pulses directly testable without adding any
+      // synchronization or readback to production.
       if (whole_clip_mode) {
         if (!replay_mode &&
-            !read_adaptive_state(dev.Get(), ctx.Get(), est.subject.Get(),
-                                 subject_state_stage, words)) {
+            !read_adaptive_state(dev.Get(), ctx.Get(), est.cut_state.Get(),
+                                 cut_state_stage, words)) {
           BOOST_LOG(error) << "sbs-bench: cannot read adaptive state for frame " << output_id;
           return 6;
         }
@@ -4180,12 +3855,6 @@ namespace sbs_bench {
             scene_cache_metadata_value.model_name = model.name;
             scene_cache_metadata_value.model_url = model.url;
             scene_cache_metadata_value.pop_strength = sbs_cfg.pop_strength;
-            scene_cache_metadata_value.adaptive_pop_max =
-              sbs_cfg.adaptive_pop_max;
-            scene_cache_metadata_value.subject_stretch =
-              sbs_cfg.subject_stretch;
-            scene_cache_metadata_value.literal_bestv2 =
-              o.literal_bestv2;
             scene_cache_metadata_value.simulate_hdr = o.simulate_hdr;
             scene_cache_metadata_value.hdr_scale = o.hdr_scale;
             scene_cache_metadata_value.depth_reuse_interval =
@@ -4235,7 +3904,7 @@ namespace sbs_bench {
           }
           const std::size_t sequence = fi + 1u;
           const std::string cache_stem = scene_cache_frame_stem(sequence);
-          // Schema-2 cache pair: the signed V2 final field plus its ParallaxState words,
+          // Schema-3 cache pair: the signed V2 final field plus its ParallaxState words,
           // exactly what the replay child re-authenticates and binds to the warp.
           render_state_words_t v2_state_words {};
           if (!read_v2_state_words(
@@ -4264,42 +3933,29 @@ namespace sbs_bench {
             return 6;
           }
         }
-        for (std::size_t index = 0; index < state_record.values.size(); ++index) {
-          state_record.values[index] = std::bit_cast<float>(words[index]);
+        if (!replay_mode) {
+          const auto write_frame = [&](std::ostream &out) {
+            return write_adaptive_state_frame(
+              out,
+              output_id,
+              fi,
+              depth_updated,
+              words
+            );
+          };
+          const bool adaptive_state_written =
+            o.bounded_adaptive_state ?
+              publish_adaptive_state_snapshot(
+                adaptive_state_frame_path,
+                write_frame
+              ) :
+              write_frame(adaptive_state_stream);
+          if (!adaptive_state_written) {
+            BOOST_LOG(error) << "sbs-bench: cannot write adaptive state for frame " << output_id;
+            return 6;
+          }
+          ++adaptive_state_frame_count;
         }
-        state_record.hard_cut_pulse =
-          std::bit_cast<float>(
-            words[sbs_adaptive_state::index(
-              sbs_adaptive_state::word_e::hard_cut_pulse
-            )]
-          ) > 0.5f;
-        state_record.hard_cut_count =
-          words[sbs_adaptive_state::index(
-            sbs_adaptive_state::word_e::hard_cut_count
-          )];
-        const auto write_frame = [&](std::ostream &out) {
-          return write_adaptive_state_frame(
-            out,
-            output_id,
-            replay_mode ? global_sequence - 1u : fi,
-            depth_updated,
-            words,
-            sbs_cfg,
-            active_scene_camera
-          );
-        };
-        const bool adaptive_state_written =
-          o.bounded_adaptive_state ?
-            publish_adaptive_state_snapshot(
-              adaptive_state_frame_path,
-              write_frame
-            ) :
-            write_frame(adaptive_state_stream);
-        if (!adaptive_state_written) {
-          BOOST_LOG(error) << "sbs-bench: cannot write adaptive state for frame " << output_id;
-          return 6;
-        }
-        ++adaptive_state_frame_count;
         if (!o.scene_cache.empty() &&
             !publish_scene_cache_contract(
               o.scene_cache,
@@ -4313,16 +3969,14 @@ namespace sbs_bench {
           return 6;
         }
       } else {
-        if (!read_subject_state(dev.Get(), ctx.Get(), est.subject.Get(),
-                                subject_state_stage, state_record.values,
-                                state_record.hard_cut_pulse,
-                                state_record.hard_cut_count)) {
-          BOOST_LOG(error) << "sbs-bench: cannot read subject state for frame " << output_id;
+        cut_state_record state_record;
+        state_record.frame_id = output_id;
+        if (!read_cut_state(dev.Get(), ctx.Get(), est.cut_state.Get(),
+                            cut_state_stage, state_record.words)) {
+          BOOST_LOG(error) << "sbs-bench: cannot read cut state for frame " << output_id;
           return 6;
         }
-      }
-      if (!whole_clip_mode) {
-        subject_state_records.push_back(std::move(state_record));
+        cut_state_records.push_back(std::move(state_record));
       }
 
       if (o.artifacts == artifact_mode_e::adaptive) {
@@ -4351,25 +4005,10 @@ namespace sbs_bench {
         continue;
       }
 
-      // Sampling output must never sample the depth/EMA/subject pipeline itself. Every source
+      // Sampling output must never sample the depth/EMA/cut pipeline itself. Every source
       // frame above was inferred and consumed; only expensive composite/readback is skipped.
       if ((fi % (size_t) o.output_every) != 0) {
         continue;
-      }
-
-      ComPtr<ID3D11Buffer> scene_camera_cb;
-      if (active_scene_camera) {
-        float scene_camera_params[4] = {
-          active_scene_camera->absolute_pop_strength,
-          active_scene_camera->zero_anchor_shift_px,
-          1.0f,
-          0.0f,
-        };
-        scene_camera_cb = const_buffer(dev.Get(), scene_camera_params);
-        if (!scene_camera_cb) {
-          BOOST_LOG(error) << "sbs-bench: cannot create immutable scene camera constants";
-          return 6;
-        }
       }
 
       // Composite (mirrors display_vram::convert()'s SBS block): probe reprojection.
@@ -4379,82 +4018,14 @@ namespace sbs_bench {
         ctx->Begin(warp_disjoint.Get());
         ctx->End(warp_start.Get());
       }
-      // V2-live binds the authenticated signed final field plus ParallaxState; the legacy and
-      // replay paths keep the normalized depth plus SubjectState. The warp prefilter is a
-      // legacy-depth conditioner and must never touch the V2 field.
+      // V2-live analysis/conversion (and cache replay) bind the authenticated signed final
+      // field plus ParallaxState; direct replay binds its uploaded encoded field with the
+      // estimator's cut-compat state.
       ID3D11ShaderResourceView *warp_depth =
-        o.parallax_v2_live ? est.shadow_final_parallax.Get() :
-        (direct_parallax_mode ? direct_parallax_srv.Get() : est.depth.Get());
+        direct_parallax_mode ? direct_parallax_srv.Get() :
+                               est.shadow_final_parallax.Get();
       ID3D11ShaderResourceView *warp_state =
-        o.parallax_v2_live ? est.shadow_state.Get() : est.subject.Get();
-      if (est.depth && !direct_parallax_mode && !o.parallax_v2_live) {
-        ComPtr<ID3D11Resource> depth_resource;
-        est.depth->GetResource(&depth_resource);
-        ComPtr<ID3D11Texture2D> depth_texture;
-        if (FAILED(depth_resource.As(&depth_texture))) {
-          BOOST_LOG(error) << "sbs-bench: warp prefilter input is not a texture";
-          return 6;
-        }
-        D3D11_TEXTURE2D_DESC depth_desc {};
-        depth_texture->GetDesc(&depth_desc);
-        bool recreate_warp_depth = !warp_depth_tex || !warp_depth_uav || !warp_depth_srv;
-        if (!recreate_warp_depth) {
-          D3D11_TEXTURE2D_DESC current_desc {};
-          warp_depth_tex->GetDesc(&current_desc);
-          recreate_warp_depth = current_desc.Width != depth_desc.Width ||
-                                current_desc.Height != depth_desc.Height ||
-                                current_desc.Format != depth_desc.Format;
-        }
-        if (recreate_warp_depth) {
-          depth_desc.Usage = D3D11_USAGE_DEFAULT;
-          depth_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
-          depth_desc.CPUAccessFlags = 0;
-          depth_desc.MiscFlags = 0;
-          warp_depth_tex.Reset();
-          warp_depth_uav.Reset();
-          warp_depth_srv.Reset();
-          if (FAILED(dev->CreateTexture2D(&depth_desc, nullptr, &warp_depth_tex)) || FAILED(dev->CreateUnorderedAccessView(warp_depth_tex.Get(), nullptr, &warp_depth_uav)) || FAILED(dev->CreateShaderResourceView(warp_depth_tex.Get(), nullptr, &warp_depth_srv))) {
-            BOOST_LOG(error) << "sbs-bench: warp prefilter resource creation failed";
-            return 6;
-          }
-        }
-        ctx->CSSetShader(warp_prefilter_cs.Get(), nullptr, 0);
-        ctx->CSSetShaderResources(0, 1, est.depth.GetAddressOf());
-        ctx->CSSetUnorderedAccessViews(0, 1, warp_depth_uav.GetAddressOf(), nullptr);
-        ctx->Dispatch((depth_desc.Width + 15u) / 16u, (depth_desc.Height + 15u) / 16u, 1u);
-        ID3D11UnorderedAccessView *null_prefilter_uav = nullptr;
-        ID3D11ShaderResourceView *null_prefilter_srv = nullptr;
-        ctx->CSSetUnorderedAccessViews(0, 1, &null_prefilter_uav, nullptr);
-        ctx->CSSetShaderResources(0, 1, &null_prefilter_srv);
-        warp_depth = warp_depth_srv.Get();
-      }
-      auto dispatch_coverage = [&](ID3D11ComputeShader *shader,
-                                   ID3D11UnorderedAccessView *coverage_view) {
-        const UINT clear_winner[4] = {0, 0, 0, 0};
-        ctx->ClearUnorderedAccessViewUint(coverage_view, clear_winner);
-        ctx->CSSetShader(shader, nullptr, 0);
-        ctx->CSSetSamplers(0, 1, sampler.GetAddressOf());
-        ID3D11ShaderResourceView *cs_srvs[] = {in_srv.Get(), warp_depth, warp_state};
-        ctx->CSSetShaderResources(0, 3, cs_srvs);
-        if (direct_order_srv) {
-          ctx->CSSetShaderResources(5, 1, direct_order_srv.GetAddressOf());
-        }
-        ctx->CSSetUnorderedAccessViews(0, 1, &coverage_view, nullptr);
-        ctx->CSSetConstantBuffers(2, 1, repro_cb.GetAddressOf());
-        if (scene_camera_cb) {
-          ctx->CSSetConstantBuffers(3, 1, scene_camera_cb.GetAddressOf());
-        }
-        if (direct_parallax_cb) {
-          ctx->CSSetConstantBuffers(4, 1, direct_parallax_cb.GetAddressOf());
-        }
-        ctx->Dispatch(((sbs_w / 2u) + 15u) / 16u, (sbs_h + 15u) / 16u, 1u);
-        ID3D11UnorderedAccessView *null_uav[] = {nullptr};
-        ID3D11ShaderResourceView *null_cs_srvs[] = {nullptr, nullptr, nullptr};
-        ctx->CSSetUnorderedAccessViews(0, 1, null_uav, nullptr);
-        ctx->CSSetShaderResources(0, 3, null_cs_srvs);
-        ID3D11ShaderResourceView *null_direct_order = nullptr;
-        ctx->CSSetShaderResources(5, 1, &null_direct_order);
-      };
+        direct_parallax_mode ? est.cut_state.Get() : est.shadow_state.Get();
       ctx->OMSetRenderTargets(1, sbs_rtv.GetAddressOf(), nullptr);
       ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
       ctx->VSSetShader(vs.Get(), nullptr, 0);
@@ -4466,9 +4037,6 @@ namespace sbs_bench {
       ctx->PSSetShaderResources(0, 3, srvs);
       ID3D11Buffer *cb = repro_cb.Get();
       ctx->PSSetConstantBuffers(2, 1, &cb);
-      if (scene_camera_cb) {
-        ctx->PSSetConstantBuffers(3, 1, scene_camera_cb.GetAddressOf());
-      }
       if (direct_parallax_cb) {
         ctx->PSSetConstantBuffers(4, 1, direct_parallax_cb.GetAddressOf());
       }
@@ -4504,12 +4072,8 @@ namespace sbs_bench {
 
       if (o.artifacts == artifact_mode_e::evaluation) {
         // Offline-only mask pass, deliberately outside the production warp timestamp/CPU sample.
-        // It exports R=pre-fill disocclusion. This evidence must not perturb perf conclusions.
-        // The forward-coverage shader has no V2 branch; live V2 never executes it.
-        const bool run_forward_coverage = est.depth && !o.parallax_v2_live;
-        if (run_forward_coverage) {
-          dispatch_coverage(coverage_cs.Get(), coverage_uav.Get());
-        }
+        // A contractive map has no internal holes; R marks finite-boundary extrapolation samples
+        // that main_ps clamps to the nearest source column.
         ctx->OMSetRenderTargets(1, warp_mask_rtv.GetAddressOf(), nullptr);
         ctx->VSSetShader(vs.Get(), nullptr, 0);
         ctx->PSSetShader(mask_ps.Get(), nullptr, 0);
@@ -4518,10 +4082,9 @@ namespace sbs_bench {
         ID3D11ShaderResourceView *mask_srvs[] = {
           in_srv.Get(),
           warp_depth,
-          warp_state,
-          run_forward_coverage ? coverage_srv.Get() : nullptr
+          warp_state
         };
-        ctx->PSSetShaderResources(0, 4, mask_srvs);
+        ctx->PSSetShaderResources(0, 3, mask_srvs);
         ctx->PSSetConstantBuffers(2, 1, &cb);
         ctx->Draw(3, 0);
         ctx->OMSetRenderTargets(1, null_rtv, nullptr);
@@ -4560,8 +4123,8 @@ namespace sbs_bench {
                            fs::path(o.out) / mask_name, warp_mask_stage);
       }
 
-      // Preserve real HDR conversion as linear scRGB float interchange. SDR and the legacy
-      // synthetic-HDR evaluator retain their existing PNG artifact behavior.
+      // Preserve real HDR conversion as linear scRGB float interchange. SDR and the
+      // synthetic-HDR compatibility mode retain their PNG artifact behavior.
       ctx->CopyResource(sbs_stage.Get(), final_sbs_tex);
       D3D11_MAPPED_SUBRESOURCE m = {};
       bool output_completed = false;
@@ -4646,11 +4209,11 @@ namespace sbs_bench {
                 << output_id;
               return 7;
             }
-          } else if (o.parallax_v2_live) {
-            // Under host_sbs_v2 the estimator's normalized depth is a private cut field with no
-            // geometry authority; scoring it against GT depth would be meaningless. The scored
-            // depth artifact is the authenticated raw model output, normalized per frame into the
-            // same 16-bit grayscale container dump_depth writes.
+          } else {
+            // The estimator's normalized depth is a private cut field with no geometry
+            // authority; scoring it against GT depth would be meaningless. The scored depth
+            // artifact is the authenticated raw model output, normalized per frame into the
+            // same 16-bit grayscale container dump_depth historically wrote.
             char dname[64];
             snprintf(dname, sizeof(dname), "depth_%s.png", output_id.c_str());
             if (!est.raw_model_depth) {
@@ -4679,14 +4242,11 @@ namespace sbs_bench {
               BOOST_LOG(error) << "sbs-bench: failed writing " << sname;
               return 6;
             }
-          } else {
-            char dname[64];
-            snprintf(dname, sizeof(dname), "depth_%s.png", output_id.c_str());
-            dump_depth(
-              dev.Get(), ctx.Get(), est.depth.Get(), fs::path(o.out) / dname, depth_stage
-            );
           }
-          if (sbs_cfg.ema_edge_change > 0.0) {
+          // The fixed live calibration keeps the edge-selective EMA enabled, so the moving-edge
+          // snap mask remains a per-frame evaluation artifact.
+          static_assert(config::host_sbs_v2_live_calibration::edge_change > 0.0);
+          {
             char mname[64];
             snprintf(mname, sizeof(mname), "ema_mask_%s.png", output_id.c_str());
             dump_uint_mask(dev.Get(), ctx.Get(), est.ema_motion_mask.Get(),
@@ -4780,11 +4340,6 @@ namespace sbs_bench {
         return 8;
       }
     }
-    if (applied_depth_override_frames != expected_depth_override_frames) {
-      BOOST_LOG(error) << "sbs-bench: applied " << applied_depth_override_frames
-                       << " of " << expected_depth_override_frames << " expected depth overrides";
-      return 7;
-    }
     if (direct_parallax_mode &&
         applied_direct_parallax_frames != completed_frame_count) {
       BOOST_LOG(error) << "sbs-bench: applied " << applied_direct_parallax_frames
@@ -4805,12 +4360,12 @@ namespace sbs_bench {
         }},
         {"displacement_semantics", "signed-source-u-positive-nearward-not-order"},
         {"maximum_horizontal_source_u_slope", direct_parallax_max_horizontal_slope},
-        {"renderer_inverse", "contractive-fixed-point-12-iterations-v1"},
+        {"renderer_inverse", "contractive-fixed-point-11-iterations-v1"},
         {"renderer_uses_order", false},
         {"order_dtype", "float32-le"},
         {"order_range", "finite-unbounded"},
         {"order_high_is_near", true},
-        {"order_role", "diagnostic-semantic-depth-and-forward-coverage-only-v1"},
+        {"order_role", "diagnostic-semantic-depth-only-v1"},
         {"depth_artifact_semantics", "canonical-pre-limiter-order-float32-v1"},
         {"parallax_artifact_semantics", "encoded-conditioned-final-parallax-float32-v1"},
         {"fields", direct_parallax_fields},
@@ -4833,13 +4388,13 @@ namespace sbs_bench {
       return 8;
     }
     if (!whole_clip_mode) {
-      if (subject_state_records.size() != completed_frame_count ||
-          !write_subject_state_trace(
-            fs::path(o.out) / "subject_state.json",
-            subject_state_records,
-            depth_coordinate_v2_gpu_mode
+      if (cut_state_records.size() != completed_frame_count ||
+          !write_cut_state_trace(
+            fs::path(o.out) / "cut_state.json",
+            cut_state_records,
+            cut_state_trace_contract
           )) {
-        BOOST_LOG(error) << "sbs-bench: failed writing complete subject_state.json";
+        BOOST_LOG(error) << "sbs-bench: failed writing complete cut_state.json";
         return 8;
       }
     }
@@ -4852,35 +4407,19 @@ namespace sbs_bench {
           << "sbs-bench: ordinary evaluation completed without exact raw-model provenance";
         return 8;
       }
-      // Machine-readable execution contract. Evaluation must not scrape human log prose: custom
-      // profile names are case-sensitive and fidelity runs must prove literal Bestv2 was active.
+      // Machine-readable execution contract. Evaluation must not scrape human log prose. The
+      // Schema 20 attests the V2-only configuration surface (the direct-replay schema stays
+      // pinned by its validator).
       std::ofstream contract(fs::path(o.out) / "contract.json");
       if (contract) {
         contract << "{\n"
                  << "  \"schema\": "
-                 << (direct_parallax_mode ? direct_geometry_contract_schema : 19u)
+                 << (direct_parallax_mode ? direct_geometry_contract_schema : 20u)
                  << ",\n"
                  << "  \"model\": " << json_string(model.name) << ",\n"
-                 << "  \"profile\": " << json_string(sbs_cfg.profile) << ",\n"
-                 << "  \"depth_step\": "
-                 << json_string(o.depth_every == 1 ? std::string("current-once") : "reuse-" + std::to_string(o.depth_every))
-                 << ",\n"
-                 << "  \"depth_reuse_interval\": " << o.depth_every << ",\n"
-                 << "  \"depth_compensation\": "
-                 << json_string(o.depth_override_root.empty() ? "none" :
-                                (o.depth_override_all ? "external-treatment" :
-                                                        "external-reference"))
-                 << ",\n"
-                 << "  \"depth_override_frames\": " << applied_depth_override_frames << ",\n"
-                 << "  \"ema\": " << sbs_cfg.ema << ",\n"
-                 << "  \"ema_edge_change\": " << sbs_cfg.ema_edge_change << ",\n"
-                 << "  \"ema_edge_gradient\": " << sbs_cfg.ema_edge_gradient << ",\n"
-                 << "  \"ema_edge_strength\": " << sbs_cfg.ema_edge_strength << ",\n"
-                 << "  \"pop_strength\": " << sbs_cfg.pop_strength << ",\n"
-                 << "  \"adaptive_pop\": " << (sbs_cfg.adaptive_pop ? "true" : "false") << ",\n"
-                 << "  \"adaptive_pop_max\": " << sbs_cfg.adaptive_pop_max << ",\n"
-                 << "  \"zero_plane\": " << json_string(sbs_cfg.zero_plane) << ",\n"
-                 << "  \"literal_bestv2\": " << (o.literal_bestv2 ? "true" : "false") << ",\n";
+                 << "  \"depth_step\": \"current-once\",\n"
+                 << "  \"depth_reuse_interval\": 1,\n"
+                 << "  \"pop_strength\": " << sbs_cfg.pop_strength << ",\n";
         if (!direct_parallax_mode) {
           const auto &provenance = *est.raw_model_provenance;
           contract
@@ -4917,7 +4456,7 @@ namespace sbs_bench {
                       "\"maximum_horizontal_source_u_slope\": "
                    << direct_parallax_max_horizontal_slope << ", "
                       "\"renderer_inverse\": "
-                      "\"contractive-fixed-point-12-iterations-v1\", "
+                      "\"contractive-fixed-point-11-iterations-v1\", "
                       "\"renderer_uses_order\": false, ";
           contract <<
                       "\"order_file_pattern\": \"order_<frame-id>.f32\", "
@@ -4925,7 +4464,7 @@ namespace sbs_bench {
                       "\"order_range\": \"finite-unbounded\", "
                        "\"order_high_is_near\": true, "
                        "\"order_role\": "
-                   << json_string("diagnostic-semantic-depth-and-forward-coverage-only-v1")
+                   << json_string("diagnostic-semantic-depth-only-v1")
                    << ", "
                        "\"depth_artifact_file_pattern\": \"depth_<frame-id>.f32\", "
                        "\"depth_artifact_semantics\": "
@@ -4937,8 +4476,8 @@ namespace sbs_bench {
                        "\"timing_scope\": "
                    << json_string(
                         depth_coordinate_v2_gpu_mode ?
-                          "native-depth-coordinate-v2; legacy estimator bypassed" :
-                          "quality-only; legacy estimator still executes"
+                          "native-depth-coordinate-v2-gpu-replay; tensorrt-not-executed" :
+                          "quality-only; production-v2-estimator-executes-for-cut-state-and-shape-evidence"
                       )
                    << "},\n";
         }
@@ -4949,7 +4488,7 @@ namespace sbs_bench {
                "\"execution\": "
             << json_string(sbs_bench::depth_coordinate_v2_gpu_execution)
             << ", "
-               "\"legacy_estimator_executed\": false, "
+               "\"tensorrt_executed\": false, "
                "\"input_manifest_sha256\": "
             << json_string(depth_coordinate_v2_gpu->manifest_sha256())
             << ", \"state_trace\": {\"file\": "
@@ -4964,13 +4503,17 @@ namespace sbs_bench {
                 "\"pop_strength_authority\": \"contract.pop_strength-only\", "
                 "\"adaptive_pop_applied\": false},\n";
         }
-        if (o.parallax_v2_live) {
+        if (!direct_parallax_mode) {
           contract
             << "  \"parallax_v2_live\": {\"enabled\": true, "
                "\"renderer\": \"depth-coordinate-v2-live-signed-parallax\", "
                "\"producer_source_closure_sha256\": "
             << json_string(std::string(
                  models::depth_coordinate_v2::shader_source_closure_sha256))
+            << ", \"renderer_source_closure_sha256\": "
+            << json_string(std::string(
+                 models::host_sbs_shader_cache::
+                   parallax_v2_live_renderer_source_closure_sha256))
             << ", \"contract_schema\": "
             << models::depth_coordinate_v2::contract_schema
             << ", \"legacy_levers_applied\": false, "
@@ -4980,20 +4523,16 @@ namespace sbs_bench {
         }
         contract << "  \"parallax_v2_shadow\": false,\n"
                  << "  \"parallax_v2_render\": "
-                 << ((depth_coordinate_v2_gpu_mode || o.parallax_v2_live) ? "true" : "false")
+                 << (external_direct_parallax_mode ? "false" : "true")
                  << ",\n"
                  << "  \"cuda_graph\": " << (sbs_cfg.cuda_graph ? "true" : "false") << ",\n"
                  << "  \"cuda_graph_captured\": " << (cuda_graph_captured ? "true" : "false") << ",\n"
-                 << "  \"subject_state\": {\"file\": \"subject_state.json\", "
-                    "\"schema\": " << (depth_coordinate_v2_gpu_mode ? 3 : 2)
+                 << "  \"cut_state\": {\"file\": \"cut_state.json\", "
+                    "\"schema\": " << cut_state_trace_contract.schema
                  << ", \"capture\": "
-                 << json_string(
-                      depth_coordinate_v2_gpu_mode ?
-                        "every-source-frame-from-authenticated-cut-input" :
-                        "every-source-frame-after-estimator-update"
-                    )
+                 << json_string(cut_state_trace_contract.capture)
                  << "},\n"
-                 << "  \"warp_mask\": {\"red\": \"forward_disocclusion_before_fill\"},\n"
+                 << "  \"warp_mask\": {\"red\": \"finite_boundary_extrapolation\"},\n"
                  << "  \"warp_mapping\": {\n"
                  << "    \"file_pattern\": \"warp_map_<frame-id>.f32\",\n"
                  << "    \"shape_contract\": \"warp_map_shape.json\",\n"
@@ -5001,7 +4540,7 @@ namespace sbs_bench {
                  << "    \"layout\": \"row-major\",\n"
                  << "    \"channels\": [\"raw_reproject_source_u_normalized\"],\n"
                  << "    \"live_sample_transform\": \"clamp(raw_reproject_source_u_normalized, 0, 1)\",\n"
-                 << "    \"validity_companion\": \"warp_mask_<frame-id>.png:red=forward_disocclusion_before_fill; content validity derives from warp_map_shape.json\"\n"
+                 << "    \"validity_companion\": \"warp_mask_<frame-id>.png:red=finite_boundary_extrapolation; content validity derives from warp_map_shape.json\"\n"
                  << "  }\n"
                  << "}\n";
       }
@@ -5016,18 +4555,23 @@ namespace sbs_bench {
         }
       }
     } else {
-      if (!o.bounded_adaptive_state) {
-        adaptive_state_stream.flush();
-      }
-      if (
-        (!o.bounded_adaptive_state && !adaptive_state_stream.good()) ||
-        adaptive_state_frame_count != completed_frame_count
-      ) {
-        BOOST_LOG(error) << "sbs-bench: adaptive-state trace is incomplete";
+      if (writes_adaptive_state) {
+        if (!o.bounded_adaptive_state) {
+          adaptive_state_stream.flush();
+        }
+        if (
+          (!o.bounded_adaptive_state && !adaptive_state_stream.good()) ||
+          adaptive_state_frame_count != completed_frame_count
+        ) {
+          BOOST_LOG(error) << "sbs-bench: adaptive-state trace is incomplete";
+          return 8;
+        }
+        if (!o.bounded_adaptive_state) {
+          adaptive_state_stream.close();
+        }
+      } else if (adaptive_state_frame_count != 0u) {
+        BOOST_LOG(error) << "sbs-bench: cache replay fabricated adaptive-state evidence";
         return 8;
-      }
-      if (!o.bounded_adaptive_state) {
-        adaptive_state_stream.close();
       }
       if (o.artifacts == artifact_mode_e::conversion &&
           written != static_cast<int>(completed_frame_count)) {
@@ -5084,10 +4628,6 @@ namespace sbs_bench {
         contract_content_scale_y =
           eye_aspect < source_aspect ? eye_aspect / source_aspect : 1.0f;
       }
-      const std::string depth_override_mode =
-        o.depth_override_root.empty() ?
-          "none" :
-          (o.depth_override_all ? "external-treatment" : "external-reference");
       const std::string input_frame_format =
         pfm_input ?
           "linear-scRGB-f32-pfm" :
@@ -5128,16 +4668,21 @@ namespace sbs_bench {
         << "  \"tensorrt_enqueue_count\": " << tensorrt_enqueue_count << ",\n"
         << "  \"depth_provenance\": "
         << json_string(replay_mode ?
-                         "scene-cache-contract-schema-2:signed-final-parallax-R32_FLOAT" :
-                         "video_depth_estimator")
+                         "scene-cache-contract-schema-" +
+                           std::to_string(offline_sbs::scene_cache_contract_schema) +
+                           ":signed-final-parallax-R32_FLOAT" :
+                         std::string {"video_depth_estimator"})
         << ",\n"
-        << "  \"subject_state_provenance\": "
+        << "  \"pipeline_state_provenance\": "
         << json_string(replay_mode ?
-                         "scene-cache-contract-schema-2:parallax-state-12-words" :
-                         "depth_subject_resolve_cs")
+                         "scene-cache-contract-schema-" +
+                           std::to_string(offline_sbs::scene_cache_contract_schema) +
+                           ":parallax-state-12-words" :
+                         std::string {
+                           "video_depth_estimator:cut-and-health-state-32-words"
+                         })
         << ",\n"
         << "  \"model\": " << json_string(model.name) << ",\n"
-        << "  \"profile\": " << json_string(sbs_cfg.profile) << ",\n"
         << "  \"source_frame_count\": " << completed_frame_count << ",\n"
         << "  \"source_width\": " << source_width << ",\n"
         << "  \"source_height\": " << source_height << ",\n"
@@ -5146,36 +4691,18 @@ namespace sbs_bench {
         << "  \"resolved_runtime\": {\n"
         << "    \"model\": " << json_string(model.name) << ",\n"
         << "    \"model_url\": " << json_string(model.url) << ",\n"
-        << "    \"profile\": " << json_string(sbs_cfg.profile) << ",\n"
         << "    \"pop_strength\": " << sbs_cfg.pop_strength << ",\n"
-        << "    \"adaptive_pop\": "
-        << (sbs_cfg.adaptive_pop ? "true" : "false") << ",\n"
-        << "    \"adaptive_pop_max\": " << sbs_cfg.adaptive_pop_max << ",\n"
-        << "    \"zero_plane\": " << json_string(sbs_cfg.zero_plane) << ",\n"
-        << "    \"depth_short_side\": " << sbs_cfg.depth_short_side << ",\n"
-        << "    \"depth_max_aspect\": " << sbs_cfg.depth_max_aspect << ",\n"
         << "    \"depth_width\": " << est.raw_width << ",\n"
         << "    \"depth_height\": " << est.raw_height << ",\n"
         << "    \"depth_reuse_interval\": " << effective_depth_every << ",\n"
-        << "    \"subject_recenter\": " << sbs_cfg.subject_recenter << ",\n"
-        << "    \"subject_stretch\": "
-        << (sbs_cfg.subject_stretch ? "true" : "false") << ",\n"
-        << "    \"ema\": " << sbs_cfg.ema << ",\n"
-        << "    \"minmax_ema\": " << sbs_cfg.minmax_ema << ",\n"
-        << "    \"ema_edge_change\": " << sbs_cfg.ema_edge_change << ",\n"
-        << "    \"ema_edge_gradient\": " << sbs_cfg.ema_edge_gradient << ",\n"
-        << "    \"ema_edge_strength\": " << sbs_cfg.ema_edge_strength << ",\n"
         << "    \"cuda_graph\": "
         << (sbs_cfg.cuda_graph ? "true" : "false") << ",\n"
         << "    \"parallax_v2_shadow\": false,\n"
         << "    \"parallax_v2_render\": "
-        << ((depth_coordinate_v2_gpu_mode || o.parallax_v2_live) ? "true" : "false") << ",\n"
-        << "    \"parallax_v2_live\": "
-        << (o.parallax_v2_live ? "true" : "false") << ",\n"
+        << "true,\n"
+        << "    \"parallax_v2_live\": true,\n"
         << "    \"cuda_graph_captured\": "
         << (cuda_graph_captured ? "true" : "false") << ",\n"
-        << "    \"literal_bestv2\": "
-        << (o.literal_bestv2 ? "true" : "false") << ",\n"
         << "    \"simulate_hdr\": " << (o.simulate_hdr ? "true" : "false") << ",\n"
         << "    \"hdr_scale\": " << o.hdr_scale << ",\n"
         << "    \"input_color_space\": "
@@ -5252,23 +4779,19 @@ namespace sbs_bench {
         << "    \"output_sbs_height\": " << contract_sbs_height << ",\n"
         << "    \"content_scale_x\": " << contract_content_scale_x << ",\n"
         << "    \"content_scale_y\": " << contract_content_scale_y << ",\n"
-        << "    \"depth_override_mode\": " << json_string(depth_override_mode) << ",\n"
-        << "    \"depth_override_all\": "
-        << (o.depth_override_all ? "true" : "false") << ",\n"
-        << "    \"expected_depth_override_frames\": "
-        << expected_depth_override_frames << ",\n"
-        << "    \"applied_depth_override_frames\": "
-        << applied_depth_override_frames << ",\n"
         << "    \"scene_cache_write\": "
         << (!o.scene_cache.empty() ? "true" : "false") << ",\n"
         << "    \"scene_cache_replay\": "
         << (replay_mode ? "true" : "false") << ",\n"
         << "    \"scene_cache_contract_schema\": "
-        << ((!o.scene_cache.empty() || replay_mode) ? "2" : "null") << ",\n"
+        << ((!o.scene_cache.empty() || replay_mode) ?
+              std::to_string(offline_sbs::scene_cache_contract_schema) :
+              "null")
+        << ",\n"
         << "    \"scene_plan_schema\": "
-        << (replay_mode ? "1" : "null") << ",\n"
+        << (replay_mode ? "2" : "null") << ",\n"
         << "    \"scene_plan_version\": "
-        << (replay_mode ? json_string("scene-plan-v1") : "null") << ",\n"
+        << (replay_mode ? json_string("scene-plan-v2") : "null") << ",\n"
         << "    \"scene_start_sequence\": "
         << (replay_mode ?
               std::to_string(scene_plan.front().start_sequence) :
@@ -5290,21 +4813,33 @@ namespace sbs_bench {
               "null")
         << "\n"
         << "  },\n"
-        << "  \"adaptive_state\": {"
-        << (
-             o.bounded_adaptive_state ?
-               "\"transport\":\"atomic-latest-v1\","
-               "\"header_file\":\"adaptive_state_header.json\","
-               "\"frame_file\":\"adaptive_state_frame.json\","
-               "\"retained_history\":false," :
-               "\"transport\":\"jsonl-v1\","
-               "\"file\":\"adaptive_state.jsonl\","
-               "\"retained_history\":true,"
-           )
-        << "\"schema\":" << sbs_adaptive_state::schema_version
-        << ",\"capture\":" << json_string(sbs_adaptive_state::capture)
-        << ",\"frame_count\":"
-        << adaptive_state_frame_count << "},\n"
+        << "  \"adaptive_state\": {";
+      if (replay_mode) {
+        // The analysis child already emitted the authoritative cut trace. Replaying cached V2
+        // geometry runs no cut resolver, so publishing a synthetic CutBridgeState trace here
+        // would be false attribution and unnecessary durable I/O.
+        contract
+          << "\"transport\":\"none\","
+             "\"retained_history\":false,"
+             "\"frame_count\":0";
+      } else {
+        contract
+          << (
+               o.bounded_adaptive_state ?
+                 "\"transport\":\"atomic-latest-v1\","
+                 "\"header_file\":\"adaptive_state_header.json\","
+                 "\"frame_file\":\"adaptive_state_frame.json\","
+                 "\"retained_history\":false," :
+                 "\"transport\":\"jsonl-v1\","
+                 "\"file\":\"adaptive_state.jsonl\","
+                 "\"retained_history\":true,"
+             )
+          << "\"schema\":" << sbs_adaptive_state::schema_version
+          << ",\"capture\":" << json_string(sbs_adaptive_state::capture)
+          << ",\"frame_count\":" << adaptive_state_frame_count;
+      }
+      contract
+        << "},\n"
         << "  \"sbs\": {\"enabled\": "
         << (o.artifacts == artifact_mode_e::conversion ? "true" : "false")
         << ", \"file_pattern\": "

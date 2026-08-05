@@ -10,10 +10,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 23u;
-  inline constexpr std::uint32_t contract_tag = 0x2F52B6E0u;
-  inline constexpr std::string_view contract_canonical_sha256 = "6a27019e526298fc708b400dbb9bfc66238c7f40978d0dcc254aaf27b7b8fa13";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "2f52b6e0eda5e12d426bee3d0cf1f7a003e93fed7b7db7e48c264efbe73e9493";
+  inline constexpr std::uint32_t contract_schema = 25u;
+  inline constexpr std::uint32_t contract_tag = 0x7AEBF6CAu;
+  inline constexpr std::string_view contract_canonical_sha256 = "328d8f71424d6005ac0bd5025b4857efe95aa36fa683ab3c554a33b5309dcd05";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "7aebf6ca0c5bb5d6de7f33d4ea75a2524da5f73c5a566527512dec32632a50d4";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -25,7 +25,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t shader_source_closure_schema = 2u;
   inline constexpr std::uint32_t shader_source_compile_flags = 34816u;
   inline constexpr std::uint32_t shader_source_macro_count = 0u;
-  inline constexpr std::string_view shader_source_closure_sha256 = "86729f7ed5492a5d74bcb952ab873b84ba70b0fb7c468399760124f46ce74d26";
+  inline constexpr std::string_view shader_source_closure_sha256 = "fd3a5c17e4e689de659bb862e38d648c9f12cad13e317052f8a7a1dce0c52d15";
 
   struct shader_source_spec_t {
     std::string_view source_file;
@@ -33,9 +33,16 @@ namespace models::depth_coordinate_v2 {
     std::string_view source_target;
   };
 
-  inline constexpr std::array<shader_source_spec_t, 9> shader_source_specs {{
+  inline constexpr std::array<shader_source_spec_t, 16> shader_source_specs {{
+    {"rgb_to_nchw_cs.hlsl", "main", "cs_5_0"},
+    {"buffer_to_tex_cs.hlsl", "main", "cs_5_0"},
+    {"depth_ema_motion_cs.hlsl", "main", "cs_5_0"},
     {"depth_minmax_cs.hlsl", "main", "cs_5_0"},
+    {"depth_minmax_ema_cs.hlsl", "main", "cs_5_0"},
     {"depth_hist_cs.hlsl", "main", "cs_5_0"},
+    {"depth_scene_cut_evidence_cs.hlsl", "main", "cs_5_0"},
+    {"depth_scene_cut_resolve_cs.hlsl", "main", "cs_5_0"},
+    {"depth_valid_history_cs.hlsl", "main", "cs_5_0"},
     {"depth_coordinate_v2_moments_cs.hlsl", "main", "cs_5_0"},
     {"depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"},
     {"depth_coordinate_v2_state_resolve_cs.hlsl", "main", "cs_5_0"},
@@ -112,7 +119,7 @@ namespace models::depth_coordinate_v2 {
         "cs_5_0",
         34816u,
         0u,
-        "5e7c210aaf090645cb12d703e2484c201db840ad541f59095a2eabbfcea2eb4a",
+        "d765bf19eb493f302752b1881f62e5d07fa82a073cfba3811fed50f5a5264124",
         1u,
         "float32-le",
         "NCHW",
@@ -259,7 +266,7 @@ namespace models::depth_coordinate_v2 {
     confirmed_cut_count = 6u,
     contract_tag_bits = 7u,
     camera_center_integrity_bits = 8u,
-    mapping_state_reserved_0 = 9u,
+    renderer_authorization_bits = 9u,
     mapping_state_reserved_1 = 10u,
     mapping_state_reserved_2 = 11u,
     count = 12u,
@@ -278,7 +285,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::size_t confirmed_cut_count = state_index(state_word_e::confirmed_cut_count);
   inline constexpr std::size_t contract_tag_bits = state_index(state_word_e::contract_tag_bits);
   inline constexpr std::size_t camera_center_integrity_bits = state_index(state_word_e::camera_center_integrity_bits);
-  inline constexpr std::size_t mapping_state_reserved_0 = state_index(state_word_e::mapping_state_reserved_0);
+  inline constexpr std::size_t renderer_authorization_bits = state_index(state_word_e::renderer_authorization_bits);
   inline constexpr std::size_t mapping_state_reserved_1 = state_index(state_word_e::mapping_state_reserved_1);
   inline constexpr std::size_t mapping_state_reserved_2 = state_index(state_word_e::mapping_state_reserved_2);
 
@@ -307,7 +314,7 @@ namespace models::depth_coordinate_v2 {
     {state_word_e::confirmed_cut_count, "confirmed_cut_count", "uint32", state_gpu_encoding_e::uint_bits, 0u},
     {state_word_e::contract_tag_bits, "contract_tag_bits", "uint32", state_gpu_encoding_e::uint_bits, contract_tag},
     {state_word_e::camera_center_integrity_bits, "camera_center_integrity_bits", "uint32", state_gpu_encoding_e::uint_bits, 0u},
-    {state_word_e::mapping_state_reserved_0, "mapping_state_reserved_0", "uint32", state_gpu_encoding_e::uint_bits, 0u},
+    {state_word_e::renderer_authorization_bits, "renderer_authorization_bits", "uint32", state_gpu_encoding_e::uint_bits, 0u},
     {state_word_e::mapping_state_reserved_1, "mapping_state_reserved_1", "uint32", state_gpu_encoding_e::uint_bits, 0u},
     {state_word_e::mapping_state_reserved_2, "mapping_state_reserved_2", "uint32", state_gpu_encoding_e::uint_bits, 0u},
   }};
@@ -322,7 +329,7 @@ namespace models::depth_coordinate_v2 {
     "confirmed_cut_count",
     "contract_tag_bits",
     "camera_center_integrity_bits",
-    "mapping_state_reserved_0",
+    "renderer_authorization_bits",
     "mapping_state_reserved_1",
     "mapping_state_reserved_2",
   }};

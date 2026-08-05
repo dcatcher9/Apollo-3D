@@ -2752,7 +2752,7 @@ namespace offline_sbs {
         {"codec", context.codec},
         {"planner", {
           {"implementation", "native-offline-scene-planner"},
-          {"scene_plan_contract", "scene-plan-v1"},
+          {"scene_plan_contract", "scene-plan-v2"},
         }},
         {"python_dependency", false},
       };
@@ -5832,8 +5832,8 @@ namespace offline_sbs {
       const bool complete_audit = audit_status == "complete";
       const bool partial_audit = audit_status == "running";
       if (
-        audit->value("schema", 0) != 1 ||
-        audit->value("version", "") != "whole-clip-scene-audit-v1" ||
+        audit->value("schema", 0) != 2 ||
+        audit->value("version", "") != "whole-clip-scene-audit-v2" ||
         (
           completed_job ?
             !complete_audit :

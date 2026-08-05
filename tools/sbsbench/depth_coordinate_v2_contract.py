@@ -47,8 +47,15 @@ SHADER_IMPLEMENTATION_KEYS = {
     "source_closure_sha256",
 }
 SHADER_SOURCE_SPECS = (
+    ("rgb_to_nchw_cs.hlsl", "main", "cs_5_0"),
+    ("buffer_to_tex_cs.hlsl", "main", "cs_5_0"),
+    ("depth_ema_motion_cs.hlsl", "main", "cs_5_0"),
     ("depth_minmax_cs.hlsl", "main", "cs_5_0"),
+    ("depth_minmax_ema_cs.hlsl", "main", "cs_5_0"),
     ("depth_hist_cs.hlsl", "main", "cs_5_0"),
+    ("depth_scene_cut_evidence_cs.hlsl", "main", "cs_5_0"),
+    ("depth_scene_cut_resolve_cs.hlsl", "main", "cs_5_0"),
+    ("depth_valid_history_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_moments_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_state_resolve_cs.hlsl", "main", "cs_5_0"),

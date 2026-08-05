@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 make_synth_clips - generate the failure-mode clips the movie recordings don't cover
-(docs/sbs-benchmark-plan.md clip table). Deterministic (fixed seed) and synthetic/spliced, so
+(tools/sbsbench/DATASETS.md core-suite table). Deterministic (fixed seed) and synthetic/spliced, so
 they add no licensing surface. The generated frames are COMMITTED (clips/); rerun this only when
 changing a clip's design, and regenerate baselines in the same commit.
 
@@ -83,7 +83,7 @@ DESC = {
     ),
     "exposure_flash_strobe": (
         "Static synthetic depth scene under exact global RGB gain flashes/strobe: exposure must "
-        "not reset shot-latched subject, pop, or zero-plane state. Shot-state expectations "
+        "not reset the cut detector or valid depth history. Cut-state expectations were "
         "re-verified against the V2 cut-only analysis trace on 2026-08-04 (no pulses, "
         "unchanged)."
     ),

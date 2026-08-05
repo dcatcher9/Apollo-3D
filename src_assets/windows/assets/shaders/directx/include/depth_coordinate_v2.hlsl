@@ -47,9 +47,18 @@ void V2SealCameraCenter(float4 active, float4 control, inout float4 mapping_stat
 }
 
 bool V2MappingStateValid(float4 mapping_state) {
-    return asuint(V2_STATE_MAPPING_STATE_RESERVED_0(mapping_state)) == 0u &&
-        asuint(V2_STATE_MAPPING_STATE_RESERVED_1(mapping_state)) == 0u &&
+    return asuint(V2_STATE_MAPPING_STATE_RESERVED_1(mapping_state)) == 0u &&
         asuint(V2_STATE_MAPPING_STATE_RESERVED_2(mapping_state)) == 0u;
+}
+
+bool V2RendererAuthorizationValid(float4 control, float4 mapping_state) {
+    uint expected = V2_STATE_FRAME_VALID(control) > 0.5f ? V2_CONTRACT_TAG : 0u;
+    return asuint(V2_STATE_RENDERER_AUTHORIZATION_BITS(mapping_state)) == expected;
+}
+
+void V2SealRendererAuthorization(float4 control, inout float4 mapping_state) {
+    V2_STATE_RENDERER_AUTHORIZATION_BITS(mapping_state) = asfloat(
+        V2_STATE_FRAME_VALID(control) > 0.5f ? V2_CONTRACT_TAG : 0u);
 }
 
 bool V2ConvergenceCurveValid(float value) {
@@ -70,11 +79,11 @@ bool V2CameraStateValid(
         V2Finite(V2_STATE_CENTER(active)) &&
         V2ApproximatelyEqual(V2_STATE_INVERSE_SCALE(active), expected_inverse_scale) &&
         V2ConvergenceCurveValid(V2_STATE_CONVERGENCE_CURVE(active)) &&
-        V2Finite(container_scale) && container_scale > 0.0f && container_scale <= 1.0f &&
+        V2Finite(container_scale) && container_scale == 1.0f &&
         (frame_valid == 0.0f || frame_valid == 1.0f) &&
-        (frame_valid > 0.5f || container_scale == 1.0f) &&
         V2CalibrationRevisionValid(revision) &&
         V2CameraCenterIntegrityValid(active, control, mapping_state) &&
+        V2RendererAuthorizationValid(control, mapping_state) &&
         V2MappingStateValid(mapping_state);
 }
 
@@ -92,6 +101,7 @@ bool V2EmptyCameraStateValid(
         (revision == 0u || V2CalibrationRevisionValid(revision)) &&
         V2_STATE_FRAME_VALID(control) == 0.0f &&
         V2CameraCenterIntegrityValid(active, control, mapping_state) &&
+        V2RendererAuthorizationValid(control, mapping_state) &&
         V2MappingStateValid(mapping_state);
 }
 
@@ -123,10 +133,42 @@ float V2CurveWithNearTau(float coordinate, float near_tau) {
     return 1.0f + near_tau * V2Log1p((coordinate - 1.0f) / near_tau);
 }
 
-// The fixed curve is shared by the hard-container resolver and the map pass. Keeping one curve
-// prevents content occupancy from changing the relative depth of an otherwise identical scene.
+// The fixed curve and pointwise container live in the map pass. Keeping one curve prevents
+// content occupancy from changing the relative depth of an otherwise identical scene.
 float V2Curve(float coordinate) {
     return V2CurveWithNearTau(coordinate, v2_near_log_tau);
+}
+
+// Bound each texel independently instead of shrinking the whole frame to accommodate one raw
+// outlier.  The fourth-order soft container is odd, monotone, has unit derivative at the zero
+// plane, and approaches (but does not reach) the representation limit:
+//
+//   contained(x) = x / fourth_root(1 + (x / limit)^4)
+//
+// Its derivative is positive and no greater than one, so it cannot introduce a steeper cliff.
+// The final clamp is only a floating-point safety belt for the strict packed-field contract.
+float V2PointwiseContainer(float requested) {
+    if (!V2Finite(requested) ||
+        !V2Finite(v2_direct_container_limit) ||
+        v2_direct_container_limit <= 0.0f) {
+        return 0.0f;
+    }
+    // Factor the larger magnitude out of the fourth root. This is algebraically identical
+    // to the expression above but never forms an unbounded normalized^4 intermediate.
+    float requested_magnitude = abs(requested);
+    float smaller = min(requested_magnitude, v2_direct_container_limit);
+    float larger = max(requested_magnitude, v2_direct_container_limit);
+    float ratio = smaller / larger;
+    float ratio_squared = ratio * ratio;
+    float inverse_fourth_root = rsqrt(sqrt(
+        1.0f + ratio_squared * ratio_squared));
+    float contained_magnitude = smaller * inverse_fourth_root;
+    float contained = requested < 0.0f ? -contained_magnitude : contained_magnitude;
+    return clamp(
+        contained,
+        -v2_direct_container_limit,
+        v2_direct_container_limit
+    );
 }
 
 #endif

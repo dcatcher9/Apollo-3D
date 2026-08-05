@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
 """
 run_eval - one-command offline SBS benchmark: harness every committed clip through the real
-pipeline, score it, and gate the result against the committed baselines.
+pipeline, score it, and optionally gate the result against reviewed V2 baselines.
 
-This is the entry point for the eval->fix->eval loop (docs/sbs-benchmark-plan.md): it needs no
+This is the entry point for the eval->fix->eval loop (tools/sbsbench/README.md): it needs no
 choreography knowledge (build dir, conf, per-clip commands, thresholds all resolved here), emits
 a machine-readable results.json with provenance, and its EXIT CODE is the verdict:
 
-  0  no regressions vs baseline (or no baselines yet)
+  0  comparison completed, or no regressions vs a complete baseline set
   1  at least one metric regressed past its threshold  -> results.json lists them
   2  setup/run error (engines missing, harness failed, ...)
 
 Typical use:
-  python tools/sbsbench/run_eval.py                     # eval vs committed baselines
-  python tools/sbsbench/run_eval.py --jobs 1            # serial CPU scoring reference
-  python tools/sbsbench/run_eval.py --update-baselines  # after an INTENDED change: re-baseline
-  python tools/sbsbench/run_eval.py --extra --pop-strength 1.25  # pass supported A/B levers
+  python tools/sbsbench/run_eval.py --comparison-only   # current V2 quality/perf evidence
+  python tools/sbsbench/run_eval.py --comparison-only --jobs 1  # serial CPU scoring reference
+  python tools/sbsbench/run_eval.py --update-baselines  # publish reviewed V2 baselines
 
 GPU harnesses run serially so their performance evidence remains valid. CPU metric scoring runs
 concurrently across clips (up to eight jobs by default). Results land in
 <build-dir>/sbs_eval/<label>/ (SBS+depth frames per clip + results.json).
-Baselines/thresholds/conf are committed next to this script; changing bench.conf or the clip set
-invalidates the baselines -- regenerate them in the same commit.
+Thresholds and configuration are committed next to this script. A baseline-gated invocation fails
+closed until every required clip has a reviewed V2 baseline.
 """
 import argparse
 import copy
@@ -58,7 +57,7 @@ sys.path.insert(0, SCRIPT_DIR)
 import sbsbench  # noqa: E402  (metric implementations)
 import eval_parallel  # noqa: E402  (evaluator scheduling; deliberately not metric math)
 import direct_geometry_contract as direct_geometry  # noqa: E402
-import subject_state_contract  # noqa: E402
+import cut_state_contract  # noqa: E402
 import whole_clip_raw_contract  # noqa: E402
 from depth_coordinate_v2_contract import (  # noqa: E402
     CONTRACT_SCHEMA as PARALLAX_V2_CONTRACT_SCHEMA,
@@ -69,29 +68,13 @@ from generate_depth_coordinate_v2_contract import (  # noqa: E402
     shader_source_closure_sha256,
 )
 
-EVAL_SCHEMA = whole_clip_raw_contract.EVALUATOR_SCHEMA  # schema 36; harness 19 or direct 22
+EVAL_SCHEMA = whole_clip_raw_contract.EVALUATOR_SCHEMA  # schema 36; harness 20 or direct 25
 PARALLAX_V2_LIVE_RENDERER = "depth-coordinate-v2-live-signed-parallax"
-# Levers consumed only by the removed-from-gating legacy evaluator. The gate runs the
-# production Depth Coordinate V2 pipeline (--parallax-v2-live), whose calibration is fixed;
-# the native harness rejects these, so fail before any GPU work with a clear message.
-LEGACY_EVALUATION_ONLY_OPTIONS = (
-    "--adaptive-pop",
-    "--adaptive-pop-max",
-    "--depth-short-side",
-    "--ema",
-    "--ema-edge-change",
-    "--ema-edge-gradient",
-    "--ema-edge-strength",
-    "--literal-bestv2",
-    "--minmax-ema",
-    "--no-adaptive-pop",
-    "--no-subject-stretch",
-    "--subject-recenter",
-    "--subject-stretch",
-    "--zero-plane",
-)
 BASELINE_SNAPSHOT_SCHEMA = 1
 BASELINE_SNAPSHOT_FILE = "baseline_snapshot.json"
+RETIRED_BASELINE_META_KEYS = frozenset({
+    "profile", "literal_bestv2", "adaptive_pop", "adaptive_pop_max", "zero_plane",
+})
 TRAINING_LABEL_STATUS = "qualified"
 TRAINING_LABEL_ROLES = {"reward", "risk", "hard"}
 CONTENT_TYPES = {
@@ -226,9 +209,9 @@ def scored_artifact_digests(directory):
     """Hash authenticated and numeric-only artifact sets in one file traversal."""
     scored_fixed = {
         "contract.json", "sbs_perf.json", "warp_map_shape.json", "hdr_output_stats.json",
-        "subject_state.json", "direct_parallax_manifest.json",
+        "cut_state.json", "direct_parallax_manifest.json",
     }
-    numeric_fixed = {"warp_map_shape.json", "hdr_output_stats.json", "subject_state.json"}
+    numeric_fixed = {"warp_map_shape.json", "hdr_output_stats.json", "cut_state.json"}
     frame_pattern = re.compile(
         r"^(?:sbs|depth|structure|parallax|warp_map|warp_mask)_\d+\.(?:png|f32)$")
     paths = sorted(
@@ -383,7 +366,7 @@ def metric_contract_files():
         os.path.join(SCRIPT_DIR, "sbs_stereo_window_metrics.py"),
         os.path.join(SCRIPT_DIR, "sbs_warp_shear_metrics.py"),
         os.path.join(SCRIPT_DIR, "direct_geometry_contract.py"),
-        os.path.join(SCRIPT_DIR, "subject_state_contract.py"),
+        os.path.join(SCRIPT_DIR, "cut_state_contract.py"),
         os.path.join(SCRIPT_DIR, "thresholds.json"),
     ]
 
@@ -493,10 +476,10 @@ def label_context_sha(meta):
         "engine_sha256", "onnx_sha256", "depth_model_url", "preprocess_profile",
         "preprocess_source_closure_sha256",
         "depth_coordinate_v2_calibration_id", "depth_coordinate_v2_raw_shape",
-        "profile", "extra_args", "depth_step",
-        "depth_compensation", "warp_input", "literal_bestv2", "adaptive_pop", "adaptive_pop_max",
+        "extra_args", "depth_step",
+        "depth_compensation", "warp_input",
         "parallax_v2_shadow", "parallax_v2_render", "parallax_v2_live",
-        "zero_plane", "training_labels", "training_label_gate", "metric_runtime",
+        "training_labels", "training_label_gate", "metric_runtime",
         "scored_artifact_sha256", "baseline_snapshot_sha256",
     )
     return sha256_json({key: meta.get(key) for key in keys})
@@ -914,6 +897,11 @@ def _validate_baseline_manifest(baseline, clip, source, required_common, clip_ha
     if meta.get("git_dirty") is not False:
         raise ValueError(
             f"{clip}: committed baseline was produced from a dirty or unauthenticated worktree")
+    retired = sorted(RETIRED_BASELINE_META_KEYS.intersection(meta))
+    if retired:
+        raise ValueError(
+            f"{clip}: committed baseline still claims retired Host SBS V1 controls {retired}; "
+            "regenerate it with the canonical V2 evaluator")
     required = {**required_common, "clip_sha1": clip_hashes[clip]}
     mismatches = {key: (meta.get(key), value) for key, value in required.items()
                   if meta.get(key) != value}
@@ -1021,11 +1009,15 @@ def validate_baseline_snapshot(snapshot, clips, required_common, clip_hashes):
 def baseline_required_context(candidate_meta):
     """Project candidate metadata onto the contract required of its canonical baseline."""
     return {
-        "mode": "profile",
+        "mode": "canonical-v2",
         "run_kind": "baseline-update",
         "suite": candidate_meta.get("suite"),
         "model": candidate_meta.get("model"),
-        "profile": candidate_meta.get("profile"),
+        "depth_model_url": candidate_meta.get("depth_model_url"),
+        "preprocess_source_closure_sha256":
+            candidate_meta.get("preprocess_source_closure_sha256"),
+        "parallax_v2_source_closure_sha256":
+            candidate_meta.get("parallax_v2_source_closure_sha256"),
         "eval_schema": candidate_meta.get("eval_schema"),
         "depth_step": candidate_meta.get("depth_step"),
         "depth_compensation": candidate_meta.get("depth_compensation"),
@@ -1095,63 +1087,6 @@ def conf_value(path, name, default=None):
 def metric_exempt_for_clip(spec, clip_meta):
     """Expected-flat clips diagnose false stereo instead of gating the stereo-volume axis."""
     return bool(clip_meta.get("expected_flat")) and spec.get("axis") == "stereo"
-
-
-def validate_depth_override_manifest(root, clips_dir, clips, depth_every, override_all=False):
-    """Validate an offline depth treatment before the harness can consume any of it.
-
-    The override is deliberately fail-closed: a partial or stale directory must never be
-    indistinguishable from a valid treatment. Returns the expected applied-frame count per clip.
-    """
-    manifest_path = os.path.join(root, "manifest.json")
-    try:
-        with open(manifest_path, encoding="utf-8") as fh:
-            manifest = json.load(fh)
-    except (OSError, ValueError) as exc:
-        fail(f"invalid depth-override manifest {manifest_path}: {exc}")
-    expected_header = {
-        "schema": 3,
-        "method": ("flow-aware-ema-oracle" if override_all else
-                   "classical-tile-phase-flow"),
-        "depth_every": depth_every,
-        "frame_policy": "all" if override_all else "held",
-    }
-    header_mismatch = {key: (value, manifest.get(key)) for key, value in expected_header.items()
-                       if manifest.get(key) != value}
-    if header_mismatch:
-        fail(f"incompatible depth-override manifest: {header_mismatch}")
-    manifest_clips = manifest.get("clips")
-    if not isinstance(manifest_clips, dict):
-        fail("depth-override manifest clips must be an object")
-
-    counts = {}
-    for clip in clips:
-        clip_info = manifest_clips.get(clip)
-        if not isinstance(clip_info, dict):
-            fail(f"depth-override manifest lacks clip {clip}")
-        clip_dir = os.path.join(clips_dir, clip)
-        clip_sha = sha1_dir(clip_dir)
-        if clip_info.get("clip_sha1") != clip_sha:
-            fail(f"{clip}: depth override source hash mismatch: "
-                 f"{clip_info.get('clip_sha1')} != {clip_sha}")
-        source_ids = sorted(sbsbench.indexed_files(
-            os.path.join(clip_dir, "frame_*.*"), "frame_"))
-        expected_ids = (source_ids if override_all else
-                        [frame_id for position, frame_id in enumerate(source_ids)
-                         if position % depth_every != 0])
-        recorded_ids = clip_info.get("override_frame_ids")
-        if recorded_ids != expected_ids:
-            fail(f"{clip}: manifest override-frame identities differ: "
-                 f"expected={expected_ids}, recorded={recorded_ids}")
-        actual_ids = sorted(sbsbench.indexed_files(
-            os.path.join(root, clip, "depth_*.png"), "depth_"))
-        if actual_ids != expected_ids:
-            fail(f"{clip}: depth-override frame identities differ: "
-                 f"expected={expected_ids}, actual={actual_ids}")
-        if clip_info.get("override_frames") != len(expected_ids):
-            fail(f"{clip}: manifest override-frame count is inconsistent")
-        counts[clip] = len(expected_ids)
-    return counts
 
 
 def score_clip_gates(rows, agg, thresholds, clip_meta):
@@ -1677,12 +1612,12 @@ def _require_matching_result(observed, expected, path):
         raise ValueError(mismatch)
 
 
-_DIRECT_GEOMETRY_DESCRIPTOR_V4 = direct_geometry.GEOMETRY_DESCRIPTOR
-_DIRECT_GEOMETRY_MANIFEST_V4 = direct_geometry.MANIFEST_HEADER
+_DIRECT_GEOMETRY_DESCRIPTOR_V6 = direct_geometry.GEOMETRY_DESCRIPTOR
+_DIRECT_GEOMETRY_MANIFEST_V6 = direct_geometry.MANIFEST_HEADER
 
 
 def validate_direct_parallax_manifest(artifact_dir, contract, source_ids, depth_files=None):
-    """Authenticate schema-23 displacement plus diagnostic canonical-depth artifacts."""
+    """Authenticate schema-25 displacement plus diagnostic canonical-depth artifacts."""
 
     validated = direct_geometry.validate_artifacts(artifact_dir, contract, source_ids)
     if depth_files is not None and depth_files != validated["depth_files"]:
@@ -1698,8 +1633,8 @@ def authoritative_remeasurement_clip_meta(
     ``results.json`` is only a cache.  In particular, an edited ``expected_flat`` flag or a
     forged ``source_frame_count`` can change metric applicability and label completeness.  This
     function deliberately does not read the cached per-clip metadata while constructing the
-    replacement.  The source ``meta.json``, the harness contract (schema 19 for production depth,
-    schema 23 for authenticated displacement plus diagnostic-order replay), and the complete set of metric
+    replacement.  The source ``meta.json``, the harness contract (schema 20 for production depth,
+    schema 25 for authenticated displacement plus diagnostic-order replay), and the complete set of metric
     artifact identities are the authorities.
     """
     run_meta = results.get("meta")
@@ -1778,8 +1713,7 @@ def authoritative_remeasurement_clip_meta(
     validate_cuda_graph_execution_mode(
         contract.get("cuda_graph"), contract.get("cuda_graph_captured"))
     contract_keys = (
-        "model", "profile", "depth_compensation", "literal_bestv2", "cuda_graph",
-        "cuda_graph_captured", "adaptive_pop", "adaptive_pop_max", "zero_plane",
+        "model", "pop_strength", "cuda_graph", "cuda_graph_captured",
         "parallax_v2_shadow", "parallax_v2_render",
     )
     if direct_parallax_run:
@@ -1802,7 +1736,7 @@ def authoritative_remeasurement_clip_meta(
                 live_contract.get("legacy_levers_applied") is not False):
             raise ValueError(
                 f"clips.{clip}: harness contract does not attest the production V2 live "
-                "signed-parallax renderer (--parallax-v2-live)")
+                "signed-parallax renderer")
         if contract.get("parallax_v2_render") is not True:
             raise ValueError(
                 f"clips.{clip}: parallax_v2_render must be true for a V2 live evaluation run")
@@ -1814,24 +1748,28 @@ def authoritative_remeasurement_clip_meta(
     for key in contract_keys:
         if key not in contract:
             raise ValueError(f"clips.{clip}: harness contract is missing {key}")
-    gpu_v2 = contract.get("depth_coordinate_v2_gpu")
-    subject_schema = (
-        subject_state_contract.GPU_REPLAY_SCHEMA
-        if isinstance(gpu_v2, dict) and gpu_v2.get("enabled") is True
-        else subject_state_contract.SCHEMA)
-    expected_subject_state = subject_state_contract.contract_reference(subject_schema)
-    if contract.get("subject_state") != expected_subject_state:
+    gpu_replay_descriptor = contract.get("depth_coordinate_v2_gpu")
+    if gpu_replay_descriptor is None:
+        gpu_replay = False
+    elif (not isinstance(gpu_replay_descriptor, dict) or
+          gpu_replay_descriptor.get("enabled") is not True):
         raise ValueError(
-            f"clips.{clip}: missing/unknown subject-state trace contract")
-    state_trace = sbsbench.load_subject_state_trace(
-        os.path.join(artifact_dir, expected_subject_state["file"]))
+            f"clips.{clip}: depth_coordinate_v2_gpu must be an enabled object when present")
+    else:
+        gpu_replay = True
+    expected_cut_state = cut_state_contract.contract_reference(
+        gpu_replay=gpu_replay)
+    if contract.get("cut_state") != expected_cut_state:
+        raise ValueError(
+            f"clips.{clip}: missing/unknown cut-state trace contract")
+    state_trace = sbsbench.load_cut_state_trace(
+        os.path.join(artifact_dir, expected_cut_state["file"]))
     if set(state_trace) != source_ids:
         raise ValueError(
-            f"clips.{clip}: subject-state/source frame-id mismatch: "
+            f"clips.{clip}: cut-state/source frame-id mismatch: "
             f"state={sorted(state_trace)}, source={sorted(source_ids)}")
-    for key in ("model", "profile", "depth_compensation", "warp_input", "literal_bestv2", "cuda_graph",
-                "parallax_v2_shadow", "parallax_v2_render",
-                "adaptive_pop", "adaptive_pop_max", "zero_plane", "depth_step",
+    for key in ("model", "warp_input", "cuda_graph", "pop_strength",
+                "parallax_v2_shadow", "parallax_v2_render", "depth_step",
                 "depth_reuse_interval"):
         if key in run_meta:
             if key not in contract:
@@ -2189,38 +2127,8 @@ def require_current_build(build_dir):
         fail("cannot build the current Sunshine executable: " + output[-2000:])
 
 
-def expected_profile(conf, extra):
-    """Resolve the startup offline/evaluator analysis profile."""
-    profile = conf_value(conf, "sbs_3d_profile", "apollo")
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", profile):
-        fail(f"invalid sbs_3d_profile {profile!r}")
-    return profile
-
-
-def expected_profile_number(conf, profile, key, default, extra, cli_key, cast=float):
-    value = conf_value(conf, f"sbs_3d_profile_{profile}_{key}", default)
-    value = conf_value(conf, f"sbs_3d_{key}", value)
-    value = extra_value(extra, cli_key, value)
-    try:
-        return cast(value)
-    except (TypeError, ValueError):
-        fail(f"invalid numeric value for {key}: {value!r}")
-
-
-def expected_profile_bool(conf, profile, key, default, extra, cli_key):
-    value = conf_value(conf, f"sbs_3d_profile_{profile}_{key}", default)
-    value = conf_value(conf, f"sbs_3d_{key}", value)
-    value = extra_value(extra, cli_key, value)
-    normalized = str(value).strip().lower()
-    if normalized in ("true", "yes", "on", "1"):
-        return True
-    if normalized in ("false", "no", "off", "0"):
-        return False
-    fail(f"invalid boolean value for {key}: {value!r}")
-
-
 def expected_shared_number(conf, key, default, extra, cli_key, cast=float):
-    """Resolve a shared live/offline control with no profile-prefixed alias."""
+    """Resolve one canonical top-level live/offline control."""
     value = conf_value(conf, f"sbs_3d_{key}", default)
     value = extra_value(extra, cli_key, value)
     try:
@@ -2230,7 +2138,7 @@ def expected_shared_number(conf, key, default, extra, cli_key, cast=float):
 
 
 def expected_shared_bool(conf, key, default, extra, cli_key):
-    """Resolve a shared live/offline boolean with no profile-prefixed alias."""
+    """Resolve one canonical top-level live/offline boolean."""
     value = conf_value(conf, f"sbs_3d_{key}", default)
     value = extra_value(extra, cli_key, value)
     normalized = str(value).strip().lower()
@@ -2241,39 +2149,18 @@ def expected_shared_bool(conf, key, default, extra, cli_key):
     fail(f"invalid boolean value for {key}: {value!r}")
 
 
-def expected_profile_string(conf, profile, key, default, extra, cli_key):
-    value = conf_value(conf, f"sbs_3d_profile_{profile}_{key}", default)
-    value = conf_value(conf, f"sbs_3d_{key}", value)
-    return str(extra_value(extra, cli_key, value)).strip()
+def expected_depth_model():
+    """Return the sole authenticated production model from the generated V2 contract."""
+    if len(MODEL_CALIBRATIONS) != 1:
+        fail("Depth Coordinate V2 must define exactly one production model calibration")
+    return MODEL_CALIBRATIONS[0].depth_model
 
 
-def expected_adaptive_pop(conf, profile, extra):
-    """Resolve the flag-style harness override after the production config layers."""
-    value = expected_profile_bool(conf, profile, "adaptive_pop", True, [], "")
-    enabled_at = max((i for i, item in enumerate(extra) if item == "--adaptive-pop"),
-                     default=-1)
-    disabled_at = max((i for i, item in enumerate(extra) if item == "--no-adaptive-pop"),
-                      default=-1)
-    if enabled_at >= 0 or disabled_at >= 0:
-        value = enabled_at > disabled_at
-    return value
-
-
-def expected_depth_model(conf, profile, extra):
-    """Resolve the model with the same profile-first, explicit-override order as production."""
-    model = "depth_anything_v2_fp16"
-    model = conf_value(conf, f"sbs_3d_profile_{profile}_depth_model", model)
-    model = conf_value(conf, "sbs_3d_depth_model", model)
-    return extra_value(extra, "--model", model)
-
-
-def expected_depth_model_url(conf, profile, model):
-    """Resolve the configured model URL; it is part of v2 calibration identity."""
-    known = [entry.depth_model_url for entry in MODEL_CALIBRATIONS
-             if entry.depth_model == model]
-    default = known[0] if len(known) == 1 else ""
-    value = conf_value(conf, f"sbs_3d_profile_{profile}_depth_model_url", default)
-    return str(conf_value(conf, "sbs_3d_depth_model_url", value)).strip()
+def expected_depth_model_url():
+    """Return the URL bound to the sole authenticated production model."""
+    if len(MODEL_CALIBRATIONS) != 1:
+        fail("Depth Coordinate V2 must define exactly one production model calibration")
+    return MODEL_CALIBRATIONS[0].depth_model_url
 
 
 def git(args):
@@ -2447,8 +2334,7 @@ def run_engine_preflight(exe, conf, build_dir, frames_dir, model):
     """Build/resolve an engine outside measured clips, then require a fresh exact manifest."""
     with tempfile.TemporaryDirectory(prefix="sbs-engine-preflight-", dir=build_dir) as out_dir:
         cmd = [exe, os.path.abspath(conf), "--sbs-bench", "--frames", frames_dir,
-               "--out", out_dir, "--model", model, "--limit", "1",
-               "--parallax-v2-live"]
+               "--out", out_dir, "--limit", "1"]
         try:
             result = subprocess.run(
                 cmd, cwd=build_dir, capture_output=True, text=True, timeout=900,
@@ -2485,7 +2371,7 @@ def main():
     ap.add_argument("--report-out",
                     help="report path (default: <this run>/report.html; requires --report-control)")
     ap.add_argument("--report-allow-config-diff", action="store_true",
-                    help="allow an explicit profile-vs-profile report with different config hashes; "
+                    help="allow an explicit config-vs-config report with different config hashes; "
                          "clips and metrics must still match")
     ap.add_argument("--report-allow-model-diff", action="store_true",
                     help="allow an explicit depth-model A/B report; clips and metrics must match")
@@ -2507,22 +2393,9 @@ def main():
     if args.comparison_only and args.update_baselines:
         fail("--comparison-only and --update-baselines are mutually exclusive")
     if args.update_baselines and args.extra:
-        fail("--update-baselines requires the canonical profile/config with no --extra overrides; "
+        fail("--update-baselines requires the canonical config with no --extra overrides; "
              "move an accepted setting into bench.conf or production defaults first")
     baseline_source_head = require_clean_baseline_update(args.update_baselines)
-    rejected_legacy = sorted(
-        {flag for flag in args.extra if flag in LEGACY_EVALUATION_ONLY_OPTIONS})
-    if rejected_legacy:
-        fail("legacy-evaluator-only lever(s) " + ", ".join(rejected_legacy) +
-             " are no longer supported: the gate runs the production Depth Coordinate V2 "
-             "pipeline (--parallax-v2-live), which uses the fixed live calibration and "
-             "rejects them")
-    if "--depth-override-root" in args.extra or "--depth-override-all" in args.extra:
-        fail("depth-override runs are a legacy-evaluator-only feature: the gate now runs the "
-             "production Depth Coordinate V2 pipeline (--parallax-v2-live), and the native "
-             "harness forbids depth overrides with it; check out an evaluator revision that "
-             "predates the V2 gate migration for that reference workflow")
-    literal_bestv2 = "--literal-bestv2" in args.extra
     direct_parallax_root = ""
     direct_parallax_flags = [
         index for index, value in enumerate(args.extra)
@@ -2535,49 +2408,14 @@ def main():
             fail("--direct-parallax-root needs a value")
         direct_parallax_root = os.path.abspath(args.extra[index + 1])
         args.extra[index + 1] = direct_parallax_root
-    depth_override_root = ""
-    if "--depth-override-root" in args.extra:
-        index = len(args.extra) - 1 - args.extra[::-1].index("--depth-override-root")
-        if index + 1 >= len(args.extra):
-            fail("--depth-override-root needs a value")
-        depth_override_root = args.extra[index + 1]
-        depth_override_root = os.path.abspath(depth_override_root)
-        # The harness runs with build_dir as cwd, so make this experimental artifact root
-        # unambiguous before forwarding it.
-        args.extra[index + 1] = depth_override_root
-    depth_override_all = "--depth-override-all" in args.extra
-    depth_compensation = ("external-treatment" if depth_override_all else
-                          "external-reference" if depth_override_root else "none")
-    try:
-        depth_reuse_interval = int(extra_value(args.extra, "--depth-every", 1))
-    except (TypeError, ValueError):
-        fail("--depth-every must be an integer")
-    if depth_reuse_interval != 1:
-        fail("--depth-every cadence treatments are legacy-evaluator-only: the production V2 "
-             "camera and cut history are stateful per frame, so the gate requires "
-             "--depth-every 1")
-    depth_step = ("current-once" if depth_reuse_interval == 1 else
-                  f"reuse-{depth_reuse_interval}")
-    if literal_bestv2 and not args.comparison_only:
-        fail("--literal-bestv2 is reference-only and requires --comparison-only")
-    if depth_override_root and not args.comparison_only:
-        fail("--depth-override-root is reference-only and requires --comparison-only")
+    # Depth cadence is fixed by the V2 pipeline: one inference per source frame.
+    depth_compensation = "none"
+    depth_reuse_interval = 1
+    depth_step = "current-once"
     if direct_parallax_root and not args.comparison_only:
         fail("--direct-parallax-root is reference-only and requires --comparison-only")
     if direct_parallax_root and not os.path.isdir(direct_parallax_root):
         fail(f"--direct-parallax-root is not a directory: {direct_parallax_root}")
-    if direct_parallax_root and depth_override_root:
-        fail("--direct-parallax-root and --depth-override-root are mutually exclusive")
-    if direct_parallax_root and literal_bestv2:
-        fail("--direct-parallax-root and --literal-bestv2 are mutually exclusive")
-    if direct_parallax_root and depth_reuse_interval != 1:
-        fail("--direct-parallax-root requires --depth-every 1")
-    if depth_override_all and not depth_override_root:
-        fail("--depth-override-all requires --depth-override-root")
-    if depth_override_all and depth_reuse_interval != 1:
-        fail("--depth-override-all requires --depth-every 1")
-    if depth_override_root and depth_reuse_interval == 1 and not depth_override_all:
-        fail("--depth-override-root requires --depth-every greater than 1")
 
     exe = os.path.join(args.build_dir, "sunshine.exe")
     default_clips, default_baselines = suite_defaults(args.suite)
@@ -2609,9 +2447,6 @@ def main():
         }
     except ValueError as exc:
         fail(str(exc))
-    depth_override_counts = (validate_depth_override_manifest(
-        depth_override_root, clips_dir, clips, depth_reuse_interval, depth_override_all)
-        if depth_override_root else {clip: 0 for clip in clips})
     try:
         baseline_required_clips = clips_requiring_committed_baselines(
             clips, source_clip_meta)
@@ -2625,23 +2460,11 @@ def main():
         if missing_baselines:
             fail(f"missing committed baseline(s) in {base_dir}: {missing_baselines}. "
                  "Use --comparison-only for a matched A/B or --update-baselines after validation.")
-    expected_config_profile = expected_profile(args.conf, args.extra)
-    expected_ema = expected_profile_number(
-        args.conf, expected_config_profile, "ema", 0.5, args.extra, "--ema")
-    expected_ema_edge_change = expected_profile_number(
-        args.conf, expected_config_profile, "ema_edge_change", 0.05, args.extra,
-        "--ema-edge-change")
-    expected_ema_edge_gradient = expected_profile_number(
-        args.conf, expected_config_profile, "ema_edge_gradient", 0.02, args.extra,
-        "--ema-edge-gradient")
-    expected_ema_edge_strength = expected_profile_number(
-        args.conf, expected_config_profile, "ema_edge_strength", 0.25, args.extra,
-        "--ema-edge-strength")
     expected_cuda_graph = expected_shared_bool(
         args.conf, "cuda_graph", True, args.extra, "--cuda-graph")
     # These persisted fields describe this evaluator invocation, not live Host SBS configuration.
     # The default clip gate runs the production Depth Coordinate V2 renderer
-    # (--parallax-v2-live). Authenticated direct-geometry replay keeps its own schema-23
+    # renderer. Authenticated direct-geometry replay keeps its own schema-24
     # comparison-only contract and stays off the live flag.
     expected_v2_shadow = False
     expected_v2_live = not direct_parallax_root
@@ -2659,23 +2482,13 @@ def main():
         "structure_file_pattern": "structure_<frame-id>.png",
         "structure_normalization": "per-frame-finite-minmax-16bit",
     }
-    expected_adaptive = expected_adaptive_pop(args.conf, expected_config_profile, args.extra)
-    expected_adaptive_max = expected_profile_number(
-        args.conf, expected_config_profile, "adaptive_pop_max", 2.00, args.extra,
-        "--adaptive-pop-max")
     expected_pop = expected_shared_number(
         args.conf, "pop_strength", 1.20, args.extra, "--pop-strength")
-    expected_adaptive_max = max(expected_adaptive_max, expected_pop)
-    # These fallbacks mirror the C++ defaults in src/config.h and must move with them, or the
-    # harness contract check rejects every clip before any measurement runs.
-    expected_zero_plane = expected_profile_string(
-        args.conf, expected_config_profile, "zero_plane", "median", args.extra,
-        "--zero-plane")
-    if expected_zero_plane not in ("subject", "median", "background"):
-        fail(f"invalid zero_plane value: {expected_zero_plane!r}")
-    expected_model = expected_depth_model(args.conf, expected_config_profile, args.extra)
-    expected_model_url = expected_depth_model_url(
-        args.conf, expected_config_profile, expected_model)
+    expected_model = expected_depth_model()
+    expected_model_url = expected_depth_model_url()
+    expected_preprocess_source_sha = shader_source_closure_sha256()
+    expected_v2_source_sha = expected_v2_live_contract[
+        "producer_source_closure_sha256"] if expected_v2_live else None
 
     conf_sha = sha256_files([os.path.abspath(args.conf)])
     metric_sha = metric_contract_sha()
@@ -2695,10 +2508,12 @@ def main():
     baseline_snapshot = None
     if not args.update_baselines and not args.comparison_only:
         required_baseline_context = baseline_required_context({
-            "mode": "profile",
+            "mode": "canonical-v2",
             "suite": args.suite,
             "model": expected_model,
-            "profile": expected_config_profile,
+            "depth_model_url": expected_model_url,
+            "preprocess_source_closure_sha256": expected_preprocess_source_sha,
+            "parallax_v2_source_closure_sha256": expected_v2_source_sha,
             "eval_schema": EVAL_SCHEMA,
             "depth_step": depth_step,
             "depth_compensation": depth_compensation,
@@ -2744,6 +2559,10 @@ def main():
             key: evaluation_identity[key]
             for key in ("engine_name", "engine_sha256", "onnx_sha256")
         }
+        if preprocess_source_sha != expected_preprocess_source_sha:
+            fail(
+                "runtime preprocess shader closure differs from the current source tree; "
+                "rebuild before evaluating")
     except (OSError, KeyError, TypeError, ValueError) as exc:
         fail(f"cannot record exact runtime-pipeline provenance: {exc}")
     v2_calibrations = [
@@ -2776,26 +2595,22 @@ def main():
         "git_sha": git(["rev-parse", "--short", "HEAD"]),
         "git_dirty": bool(git(["status", "--porcelain"])),
         "clip_set_sha1": clip_hashes,
-        "mode": "profile", "suite": args.suite, "clips_root": clips_dir,
+        "mode": "canonical-v2", "suite": args.suite, "clips_root": clips_dir,
         "extra_args": args.extra,
         "conf": os.path.relpath(args.conf, REPO),
-        "model": expected_model, "profile": expected_config_profile,
+        "model": expected_model,
         "depth_model_url": expected_model_url,
         "preprocess_profile": (
             v2_calibration.preprocess.profile if v2_calibration is not None else None),
         "preprocess_source_closure_sha256": (
             preprocess_source_sha),
+        "parallax_v2_source_closure_sha256": expected_v2_source_sha,
         "depth_coordinate_v2_calibration_id": (
             v2_calibration.calibration_id if v2_calibration is not None else None),
         "depth_coordinate_v2_raw_shape": None,
-        # One explicit v2 artistic authority. The legacy adaptive-pop fields remain below for
-        # production-v1 scoring, but exact v2 replay must inherit this resolved profile/global
-        # value unless its caller records an explicit CLI override.
+        # One explicit v2 artistic authority; exact v2 replay must inherit this resolved
+        # global value unless its caller records an explicit CLI override.
         "pop_strength": expected_pop,
-        "adaptive_pop": expected_adaptive,
-        "adaptive_pop_max": expected_adaptive_max,
-        "zero_plane": expected_zero_plane,
-        "literal_bestv2": literal_bestv2,
         "cuda_graph": expected_cuda_graph,
         "parallax_v2_shadow": expected_v2_shadow,
         "parallax_v2_render": expected_v2_render,
@@ -2835,10 +2650,7 @@ def main():
             fail(str(exc))
         shutil.rmtree(out_dir, ignore_errors=True)  # a reused label must not retain stale frame IDs
         cmd = [exe, os.path.abspath(args.conf), "--sbs-bench",
-               "--frames", clip_dir, "--out", out_dir,
-               "--model", expected_model]
-        if expected_v2_live:
-            cmd.append("--parallax-v2-live")
+               "--frames", clip_dir, "--out", out_dir]
         cmd += args.extra
         print(f"[{clip}] harness...", flush=True)
         try:
@@ -2855,29 +2667,27 @@ def main():
         if not os.path.exists(contract_path):
             fail(f"{clip}: harness did not write contract.json")
         contract = json.load(open(contract_path, encoding="utf-8"))
+        gpu_replay_descriptor = contract.get("depth_coordinate_v2_gpu")
+        if gpu_replay_descriptor is None:
+            gpu_replay = False
+        elif (not isinstance(gpu_replay_descriptor, dict) or
+              gpu_replay_descriptor.get("enabled") is not True):
+            fail(f"{clip}: depth_coordinate_v2_gpu must be an enabled object when present")
+        else:
+            gpu_replay = True
         expected_contract = {
             "schema": (direct_geometry.CONTRACT_SCHEMA if direct_parallax_root else
                        whole_clip_raw_contract.HARNESS_CONTRACT_SCHEMA),
             "model": expected_model,
-            "profile": expected_config_profile,
             "depth_step": depth_step,
             "depth_reuse_interval": depth_reuse_interval,
-            "depth_compensation": depth_compensation,
-            "depth_override_frames": depth_override_counts[clip],
-            "ema": expected_ema,
-            "ema_edge_change": expected_ema_edge_change,
-            "ema_edge_gradient": expected_ema_edge_gradient,
-            "ema_edge_strength": expected_ema_edge_strength,
             "pop_strength": expected_pop,
-            "adaptive_pop": expected_adaptive,
-            "adaptive_pop_max": expected_adaptive_max,
-            "zero_plane": expected_zero_plane,
-            "literal_bestv2": literal_bestv2,
             "cuda_graph": expected_cuda_graph,
             "parallax_v2_shadow": expected_v2_shadow,
             "parallax_v2_render": expected_v2_render,
             "cuda_graph_captured": expected_cuda_graph,
-            "subject_state": subject_state_contract.contract_reference(),
+            "cut_state": cut_state_contract.contract_reference(
+                gpu_replay=gpu_replay),
         }
         if direct_parallax_root:
             expected_contract.update({
@@ -2905,16 +2715,11 @@ def main():
             )
         except ValueError as exc:
             fail(f"{clip}: {exc}")
-        clip_meta = {"model": contract["model"], "profile": contract["profile"],
-                     "depth_compensation": contract["depth_compensation"],
-                     "literal_bestv2": contract["literal_bestv2"],
+        clip_meta = {"model": contract["model"],
                      "cuda_graph": contract["cuda_graph"],
                      "parallax_v2_shadow": contract["parallax_v2_shadow"],
                      "parallax_v2_render": contract["parallax_v2_render"],
                      "pop_strength": contract["pop_strength"],
-                     "adaptive_pop": contract["adaptive_pop"],
-                     "adaptive_pop_max": contract["adaptive_pop_max"],
-                     "zero_plane": contract["zero_plane"],
                      "cuda_graph_captured": contract["cuda_graph_captured"]}
         if direct_parallax_root:
             clip_meta["warp_input"] = contract["warp_input"]
@@ -2931,12 +2736,12 @@ def main():
         source_ids = set(source_by_id)
         clip_meta["source_frame_count"] = len(source_ids)
         try:
-            state_trace = sbsbench.load_subject_state_trace(
-                os.path.join(out_dir, contract["subject_state"]["file"]))
+            state_trace = sbsbench.load_cut_state_trace(
+                os.path.join(out_dir, contract["cut_state"]["file"]))
         except ValueError as exc:
             fail(f"{clip}: {exc}")
         if set(state_trace) != source_ids:
-            fail(f"{clip}: subject-state/source frame-id mismatch "
+            fail(f"{clip}: cut-state/source frame-id mismatch "
                  f"state={sorted(state_trace)} source={sorted(source_ids)}")
         sbs_by_id = sbsbench.indexed_files(os.path.join(out_dir, "sbs_*.png"), "sbs_")
         sbs_ids = set(sbs_by_id)
@@ -2963,7 +2768,7 @@ def main():
             except ValueError as exc:
                 fail(f"{clip}: {exc}")
         if (contract.get("warp_mask") != {
-                "red": "forward_disocclusion_before_fill"}):
+                "red": "finite_boundary_extrapolation"}):
             fail(f"{clip}: missing/unknown warp-mask channel contract")
         if (not source_ids or source_ids != sbs_ids or source_ids != depth_ids
                 or source_ids != raw_ids or source_ids != mask_ids
@@ -2978,10 +2783,8 @@ def main():
             fail(f"{clip}: structure artifact frame-id mismatch "
                  f"structure={sorted(structure_ids)} "
                  f"expected={sorted(expected_structure_ids)}")
-        if expected_ema_edge_change > 0.0 and ema_mask_ids != source_ids:
+        if ema_mask_ids != source_ids:
             fail(f"{clip}: incomplete EMA motion-mask artifacts: {sorted(ema_mask_ids)}")
-        if expected_ema_edge_change <= 0.0 and ema_mask_ids:
-            fail(f"{clip}: unexpected EMA motion-mask artifacts while feature is disabled")
         if not os.path.exists(os.path.join(out_dir, "raw_shape.json")):
             fail(f"{clip}: raw_shape.json missing")
         if not direct_parallax_root:
@@ -3018,7 +2821,7 @@ def main():
             "live_sample_transform": (
                 "clamp(raw_reproject_source_u_normalized, 0, 1)"),
             "validity_companion": ("warp_mask_<frame-id>.png:red="
-                                   "forward_disocclusion_before_fill; content validity derives "
+                                   "finite_boundary_extrapolation; content validity derives "
                                    "from warp_map_shape.json"),
         }
         if contract.get("warp_mapping") != expected_mapping_contract:
@@ -3037,7 +2840,8 @@ def main():
             "validity": {
                 "content": ("derive from content_scale_x/content_scale_y and packed output "
                             "coordinate"),
-                "forward_coverage": "warp_mask_<frame-id>.png red == 0 inside content",
+                "boundary_extrapolation": ("warp_mask_<frame-id>.png red == 1 where the "
+                                           "inverse sample left [0,1] source U"),
             },
             "live_sample_source_u_normalized": (
                 "clamp(raw_reproject_source_u_normalized, 0, 1)"),

@@ -44,6 +44,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             21: "f2d736f76207df5bf4ac624e04c0c4f977278551463013edb85a70def5172b6d",
             22: "800a82953af68f903ddf386cc0e1f49cf6fb3a1f44e56339bc9ca2122e393849",
             23: "6a27019e526298fc708b400dbb9bfc66238c7f40978d0dcc254aaf27b7b8fa13",
+            24: "af622986d64d49c3a084730c20838189fd579c1af54d7bb61f2c681647c155bb",
+            25: "328d8f71424d6005ac0bd5025b4857efe95aa36fa683ab3c554a33b5309dcd05",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -51,10 +53,10 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x2F52B6E0)
+        self.assertEqual(generator.contract_tag(contract), 0x7AEBF6CA)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "2f52b6e0eda5e12d426bee3d0cf1f7a003e93fed7b7db7e48c264efbe73e9493",
+            "7aebf6ca0c5bb5d6de7f33d4ea75a2524da5f73c5a566527512dec32632a50d4",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -90,7 +92,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             [
                 "center", "inverse_scale", "convergence_curve", "container_scale",
                 "calibration_revision", "frame_valid", "confirmed_cut_count", "contract_tag_bits",
-                "camera_center_integrity_bits", "mapping_state_reserved_0",
+                "camera_center_integrity_bits", "renderer_authorization_bits",
                 "mapping_state_reserved_1", "mapping_state_reserved_2",
             ],
         )
@@ -102,7 +104,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 ("confirmed_cut_count", 0),
                 ("contract_tag_bits", generator.CONTRACT_TAG_SENTINEL),
                 ("camera_center_integrity_bits", 0),
-                ("mapping_state_reserved_0", 0),
+                ("renderer_authorization_bits", 0),
                 ("mapping_state_reserved_1", 0),
                 ("mapping_state_reserved_2", 0),
             ],

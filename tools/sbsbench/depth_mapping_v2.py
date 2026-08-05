@@ -9,8 +9,8 @@ the center immediately; later valid, invalid, and fast-motion frames hold it unt
 There is no pending state or late correction. It is exactly the zero
 plane: curve-space convergence remains zero for both accepted and fallback selections.  The near
 curve remains fixed, so framing and content occupancy cannot select different transfer functions.
-Only the hard representation container adapts per frame; requested gain never becomes mutable
-shot state.
+The hard representation container is pointwise and stateless; requested gain never becomes
+mutable shot state and a raw outlier cannot shrink unrelated geometry.
 """
 
 from dataclasses import asdict, dataclass
@@ -505,21 +505,23 @@ def curve_relative_coordinate(
     return canonical, curved
 
 
-def container_scale_for_curve_range(
-        curve_min: float,
-        curve_max: float,
-        config: MappingV2Config = MappingV2Config(),
-        *,
-        gain: Optional[float] = None,
-        ) -> Tuple[float, float]:
-    _validate_config(config)
-    resolved_gain = config.parallax_gain if gain is None else _finite_positive("gain", gain)
-    if not math.isfinite(curve_min) or not math.isfinite(curve_max) or curve_min > curve_max:
-        raise ValueError("curve range must be finite and ordered")
-    requested_maximum = resolved_gain * max(abs(curve_min), abs(curve_max))
-    container_scale = 1.0 if requested_maximum <= config.direct_container_limit else (
-        config.direct_container_limit / requested_maximum)
-    return container_scale, requested_maximum
+def pointwise_soft_container(
+        requested: np.ndarray,
+        limit: float = DIRECT_PARALLAX_SOURCE_U_LIMIT) -> np.ndarray:
+    """Apply the live fourth-order soft representation bound independently per texel."""
+
+    values = np.asarray(requested, dtype=np.float64)
+    if np.iscomplexobj(requested) or not np.isfinite(values).all():
+        raise ValueError("requested parallax must be finite and real-valued")
+    bound = _finite_positive("limit", limit)
+    magnitudes = np.abs(values)
+    smaller = np.minimum(magnitudes, bound)
+    larger = np.maximum(magnitudes, bound)
+    ratio = smaller / larger
+    ratio_squared = ratio * ratio
+    fourth_root = np.sqrt(np.sqrt(1.0 + ratio_squared * ratio_squared))
+    contained = np.copysign(smaller / fourth_root, values)
+    return np.clip(contained, -bound, bound)
 
 
 def horizontal_lipschitz_majorant(field: np.ndarray, max_step: float) -> np.ndarray:
@@ -676,9 +678,8 @@ def generate_depth_mapping_v2(
     canonical = (raw - scene_coordinate.selected_center) / calibration.scale
     curve_relative = asymmetric_curve(canonical, config) - convergence_curve
     requested = curve_relative * config.parallax_gain
-    container_scale, _ = container_scale_for_curve_range(
-        float(np.min(curve_relative)), float(np.max(curve_relative)), config)
-    conditioned = requested * container_scale
+    container_scale = 1.0
+    conditioned = pointwise_soft_container(requested, config.direct_container_limit)
     vertical_majorant = vertical_lipschitz_majorant(conditioned, max_vertical_step)
     vertical_minorant = vertical_lipschitz_minorant(conditioned, max_vertical_step)
     # The contract is consumed by a float32 HLSL shader. Canonicalize both coefficients to the
@@ -721,7 +722,7 @@ def generate_depth_mapping_v2(
         convergence_curve=convergence_curve,
         curve_far_limit=-config.far_tau - convergence_curve, curve_near_limit=None,
         requested_gain=config.parallax_gain,
-        effective_gain=config.parallax_gain * container_scale,
+        effective_gain=config.parallax_gain,
         container_source_u_limit=config.direct_container_limit,
         container_scale=container_scale,
         max_horizontal_slope=config.max_horizontal_slope,
@@ -774,12 +775,12 @@ __all__ = [
     "SceneCoordinateSelection",
     "asymmetric_curve",
     "calibrate_coordinate",
-    "container_scale_for_curve_range",
     "curve_relative_coordinate",
     "decode_direct_parallax",
     "encode_direct_parallax",
     "generate_depth_mapping_v2",
     "horizontal_lipschitz_majorant",
+    "pointwise_soft_container",
     "select_scene_coordinate",
     "vertical_lipschitz_majorant",
     "vertical_lipschitz_minorant",

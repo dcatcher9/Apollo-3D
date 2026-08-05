@@ -24,6 +24,9 @@ namespace nvenc {
   /** Last per-codec width capability reported by the active NVENC driver probe. */
   std::optional<int> max_encode_width_for_codec(int video_format);
 
+  /** Last per-codec height capability reported by the active NVENC driver probe. */
+  std::optional<int> max_encode_height_for_codec(int video_format);
+
   struct nvenc_hdr_metadata_t {
     std::optional<MASTERING_DISPLAY_INFO> mastering_display;
     std::optional<CONTENT_LIGHT_LEVEL> content_light_level;

@@ -342,28 +342,6 @@
       "hard_min": 100.0,
       "trigger_min": 100.0
     },
-    "shot_state_zero_anchor_drift_px": {
-      "scope": "conformance",
-      "role": "hard",
-      "axis": "shot-state",
-      "requires": "exposure_shot_state_contract_support",
-      "better": "lower",
-      "rel_tol": 0.0,
-      "abs_floor": 0.000001,
-      "hard_max": 0.000001,
-      "trigger": 0.000001
-    },
-    "shot_state_adaptive_pop_drift": {
-      "scope": "conformance",
-      "role": "hard",
-      "axis": "shot-state",
-      "requires": "exposure_shot_state_contract_support",
-      "better": "lower",
-      "rel_tol": 0.0,
-      "abs_floor": 0.000001,
-      "hard_max": 0.000001,
-      "trigger": 0.000001
-    },
     "exact_disparity_plateau_far_pct": {
       "scope": "perceptual",
       "role": "diagnostic",

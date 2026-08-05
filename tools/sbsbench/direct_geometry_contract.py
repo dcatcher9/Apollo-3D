@@ -2,8 +2,8 @@
 
 The renderer consumes only the conditioned parallax field.  Its authenticated horizontal slope
 makes the eye map strictly monotone, so a fixed-point inverse has one source and no visibility
-choice.  The pre-limiter canonical coordinate is retained solely as diagnostic semantic depth and
-as ordering for the separate forward-coverage diagnostic.  Keeping the schema in one module
+choice.  The pre-limiter canonical coordinate is retained solely as diagnostic semantic depth.
+Keeping the schema in one module
 prevents the producer, replay wrapper, and evaluator from silently assigning it a rendering role.
 """
 
@@ -24,9 +24,9 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     from depth_coordinate_v2_contract import CALIBRATED_DEFAULTS as V2_DEFAULTS  # type: ignore
 
 
-CONTRACT_SCHEMA = 23
-MANIFEST_SCHEMA = 4
-WARP_INPUT = "external-final-parallax-with-diagnostic-order-v4"
+CONTRACT_SCHEMA = 25
+MANIFEST_SCHEMA = 6
+WARP_INPUT = "external-final-parallax-with-diagnostic-order-v6"
 SOURCE_U_LIMIT = V2_DEFAULTS.direct_container_limit
 MAX_HORIZONTAL_SLOPE = V2_DEFAULTS.max_horizontal_slope
 _SERIALIZED_F32_MAX_HORIZONTAL_SLOPE = float(np.float32(MAX_HORIZONTAL_SLOPE))
@@ -42,20 +42,23 @@ GEOMETRY_DESCRIPTOR = {
     "decode_source_u_one_eye": _DECODE_EXPRESSION,
     "displacement_semantics": "signed-source-u-positive-nearward-not-order",
     "maximum_horizontal_source_u_slope": MAX_HORIZONTAL_SLOPE,
-    "renderer_inverse": "contractive-fixed-point-12-iterations-v1",
+    "renderer_inverse": "contractive-fixed-point-11-iterations-v1",
     "renderer_uses_order": False,
     "order_file_pattern": "order_<frame-id>.f32",
     "order_dtype": "float32-le",
     "order_range": "finite-unbounded",
     "order_high_is_near": True,
-    "order_role": "diagnostic-semantic-depth-and-forward-coverage-only-v1",
+    "order_role": "diagnostic-semantic-depth-only-v1",
     "depth_artifact_file_pattern": "depth_<frame-id>.f32",
     "depth_artifact_semantics": "canonical-pre-limiter-order-float32-v1",
     "parallax_artifact_file_pattern": "parallax_<frame-id>.f32",
     "parallax_artifact_semantics": "encoded-conditioned-final-parallax-float32-v1",
-    "timing_scope": "quality-only; legacy estimator still executes",
+    "timing_scope": (
+        "quality-only; production-v2-estimator-executes-for-cut-state-and-shape-evidence"),
 }
-GPU_SEQUENCE_TIMING_SCOPE = "native-depth-coordinate-v2; legacy estimator bypassed"
+GPU_SEQUENCE_TIMING_SCOPE = "native-depth-coordinate-v2-gpu-replay; tensorrt-not-executed"
+_COMPAT_EXTERNAL_TIMING_SCOPE = "quality-only; legacy estimator still executes"
+_COMPAT_GPU_SEQUENCE_TIMING_SCOPE = "native-depth-coordinate-v2; legacy estimator bypassed"
 
 MANIFEST_HEADER = {
     "schema": MANIFEST_SCHEMA,
@@ -69,12 +72,12 @@ MANIFEST_HEADER = {
     # round trip here instead of requiring a JSON decimal to compare bit-for-bit with its
     # generated float32 value.
     "maximum_horizontal_source_u_slope": _SERIALIZED_F32_MAX_HORIZONTAL_SLOPE,
-    "renderer_inverse": "contractive-fixed-point-12-iterations-v1",
+    "renderer_inverse": "contractive-fixed-point-11-iterations-v1",
     "renderer_uses_order": False,
     "order_dtype": "float32-le",
     "order_range": "finite-unbounded",
     "order_high_is_near": True,
-    "order_role": "diagnostic-semantic-depth-and-forward-coverage-only-v1",
+    "order_role": "diagnostic-semantic-depth-only-v1",
     "depth_artifact_semantics": "canonical-pre-limiter-order-float32-v1",
     "parallax_artifact_semantics": "encoded-conditioned-final-parallax-float32-v1",
 }
@@ -125,7 +128,12 @@ def validate_artifacts(
     gpu_sequence = contract.get("depth_coordinate_v2_gpu")
     if isinstance(gpu_sequence, dict) and gpu_sequence.get("enabled") is True:
         expected_descriptor["timing_scope"] = GPU_SEQUENCE_TIMING_SCOPE
-    if contract.get("direct_parallax") != expected_descriptor:
+        compatibility_timing_scope = _COMPAT_GPU_SEQUENCE_TIMING_SCOPE
+    else:
+        compatibility_timing_scope = _COMPAT_EXTERNAL_TIMING_SCOPE
+    compatibility_descriptor = dict(expected_descriptor)
+    compatibility_descriptor["timing_scope"] = compatibility_timing_scope
+    if contract.get("direct_parallax") not in (expected_descriptor, compatibility_descriptor):
         raise ValueError("direct-parallax contract has missing/unknown field semantics")
 
     reference = contract.get("direct_parallax_manifest")

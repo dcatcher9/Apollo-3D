@@ -117,11 +117,10 @@ Host 3D and Client 3D both avoid per-frame depth pumping, but they use different
 controllers:
 
 - **Host 3D V2** applies the configured pop strength literally. On the first usable depth field and
-  after an accepted scene cut, it latches the model's scene center as the zero-disparity plane and
-  holds it for the shot. It also selects one near-foreground shoulder from the scene's foreground
-  occupancy. That shoulder preserves sparse “wow” objects without boosting a large near layer; it
-  does not change pop strength or continuously move the screen plane. Legacy adaptive-pop and
-  configurable zero-plane controls do not alter live Host 3D V2 geometry.
+  after an accepted scene cut, it chooses a conservative raw center as the zero-disparity plane and
+  holds it for the shot. Its coordinate scale and near/far curve are fixed; it does not change pop
+  strength or continuously move the screen plane. Its one live geometry control is the configured
+  pop strength.
 - **Client 3D** retains scene-aware adaptive pop and its shot-stable median zero plane. With the
   shipping defaults it chooses a shot-level multiplier between `1.20×` and `2.00×`, using less
   relief for edge-dense depth and more for lower-risk scenes.
@@ -129,7 +128,7 @@ controllers:
 ```mermaid
 flowchart TD
     CUT["Accepted scene cut"]
-    CUT --> HOST["Host 3D V2<br/>latch scene center and near shoulder"]
+    CUT --> HOST["Host 3D V2<br/>acquire one raw scene center"]
     CUT --> CLIENT["Client 3D<br/>resolve median plane and edge risk"]
     HOST --> HOSTHOLD["Hold configured pop and geometry<br/>until the next cut"]
     CLIENT --> CLIENTHOLD["Choose and hold adaptive pop<br/>until the next cut"]
@@ -161,9 +160,9 @@ views are available.
 | Feature | What it provides |
 |---|---|
 | **Private virtual display** | An on-demand SudoVDA desktop negotiated from the client’s selected resolution, refresh rate, HDR state, and scale |
-| **Host AI 3D** | A GPU-resident D3D11 → TensorRT → SBS → NVENC pipeline with temporal depth handling and occlusion-aware reprojection |
-| **Offline Host 3D conversion** | Converts video to compressed H.265 or AV1 SBS using bounded scene lookahead and whole-scene adaptive-pop and zero-plane decisions |
-| **Scene-aware 3D stability** | Selects one depth-edge-aware pop multiplier after a shot settles and holds a median-depth screen plane to reduce pumping and convergence drift |
+| **Host AI 3D** | A GPU-resident D3D11 → TensorRT → bounded inverse-warp → NVENC pipeline with matched-frame depth and conservative foreground ownership |
+| **Offline Host 3D conversion** | Converts video to compressed H.265 or AV1 SBS using bounded cut lookahead and the same V2 geometry as live Host 3D |
+| **Scene-aware 3D stability** | Host V2 holds one raw scene center with literal configured pop; Client 3D separately holds its adaptive pop and median plane for the shot |
 | **Responsive quality controls** | Live resolution, frame-rate, and bitrate updates without rebuilding the application, capture, or virtual-display session when the selected mode supports it |
 | **Modern video path** | Native H.264 NVENC as the baseline; HEVC, AV1, and 10-bit HDR are enabled only when their capabilities are available |
 | **Secure pairing and permissions** | PIN-first pairing, a secondary QR option for compatible clients, encrypted protocol 13 sessions, and per-device launch/input/clipboard permissions |
@@ -222,15 +221,16 @@ packaging details.
 
 | Topic | Guide |
 |---|---|
-| Install, pair, and stream | [Getting started](./docs/getting_started.md) |
+| Install, pair, and stream | [Quick start](#quick-start) |
 | Host settings | [Configuration reference](./docs/configuration.md) |
 | Local AR glasses | [Local AR glasses](./docs/sbs-local-ar-glasses.md) |
-| Host AI 3D design and status | [SBS 3D roadmap](./docs/sbs-3d-roadmap.md) |
+| Host AI 3D design | [Host SBS pipeline](./docs/host-sbs.md) |
+| Host AI 3D scene cuts | [Host SBS scene cuts](./docs/host-sbs-scene-cuts.md) |
+| Host AI 3D status and limitations | [SBS 3D roadmap](./docs/sbs-3d-roadmap.md) |
 | Offline Host 3D video conversion | [Offline conversion pipeline](./docs/whole-clip-sbs-pipeline.md) |
 | Reproducible quality evaluation | [SBS benchmark tools](./tools/sbsbench/README.md) |
 | Common failures | [Troubleshooting](./docs/troubleshooting.md) |
 | Developer architecture and validation | [CLAUDE.md](./CLAUDE.md) |
-| Local Galaxy XR development loop | [AGENTS.md](./AGENTS.md) |
 
 ## Project lineage
 

@@ -59,15 +59,6 @@ namespace offline_sbs {
     std::optional<float> current_structural_support_fraction;
     std::optional<float> previous_structural_support_fraction;
     std::optional<float> common_structural_support_fraction;
-    std::optional<float> edge_fraction;
-    std::optional<float> zero_anchor_candidate_shift_px;
-    std::optional<float> production_zero_anchor_shift_px;
-    bool zero_anchor_valid = false;
-    bool depth_ready = false;
-    bool initialized = false;
-    bool range_collapsed = true;
-    float valid_depth_fraction = 0.0f;
-    float scene_age = -1.0f;
     std::uint32_t analysis_flags = 0;
     std::optional<double> pts_seconds;
     std::optional<double> duration_seconds;
@@ -75,18 +66,10 @@ namespace offline_sbs {
   };
 
   struct scene_planner_config_t {
-    float pop_strength = 1.0f;
-    bool adaptive_pop = true;
-    float adaptive_pop_max = 2.0f;
-    std::string zero_plane = "median";
     std::size_t lookbehind_depth_updates = 4;
     std::size_t lookahead_depth_updates = 8;
     std::size_t duplicate_pulse_distance_updates = 2;
-    std::size_t settle_depth_updates = 8;
     std::size_t minimum_scene_frames = 2;
-    float risk_quantile = 0.90f;
-    float pop_risk_low = 0.04f;
-    float pop_risk_high = 0.20f;
     std::uint64_t max_open_cache_bytes = 8ull * 1024ull * 1024ull * 1024ull;
     std::size_t max_open_frames = default_max_open_scene_frames;
     bool allow_administrative_split = false;
@@ -133,25 +116,8 @@ namespace offline_sbs {
   struct scene_evidence_t {
     std::size_t source_frame_count = 0;
     std::size_t depth_update_count = 0;
-    std::size_t settled_depth_update_count = 0;
-    std::size_t usable_settled_depth_update_count = 0;
-    std::size_t valid_edge_sample_count = 0;
-    std::size_t valid_anchor_sample_count = 0;
-    std::size_t excluded_edge_sample_count = 0;
-    std::size_t excluded_anchor_sample_count = 0;
     std::size_t appearance_veto_count = 0;
-    std::optional<float> edge_p50;
-    std::optional<float> edge_p90;
-    std::optional<float> edge_p95;
-    std::optional<float> edge_max;
-    std::optional<float> anchor_p10;
-    std::optional<float> anchor_p50;
-    std::optional<float> anchor_p90;
     std::optional<float> depth_change_max;
-    std::optional<float> risk_value;
-    float risk_quantile = 0.90f;
-    float pop_risk_low = 0.04f;
-    float pop_risk_high = 0.20f;
   };
 
   struct scene_plan_t {
@@ -163,20 +129,12 @@ namespace offline_sbs {
     std::uint64_t cache_bytes = 0;
     std::optional<double> start_pts_seconds;
     std::optional<double> end_pts_seconds_exclusive;
-    float absolute_pop_strength = 1.0f;
-    float zero_anchor_shift_px = 0.0f;
-    std::string pop_origin;
-    std::optional<std::string> pop_fallback;
-    std::string zero_origin;
-    std::optional<std::string> zero_fallback;
     scene_evidence_t evidence;
     boundary_audit_t boundary;
     bool ground_truth = false;
-    bool comfort_optimal = false;
     std::string cut_state_semantics = "causal-production-unrevised";
     std::string known_limit =
-      "a rejected or shifted causal cut can retain its original subject "
-      "recenter/stretch reset; scene pop and resolved anchor are corrected";
+      "offline lookahead revises cache/replay boundaries only; V2 geometry remains unchanged";
   };
 
   class scene_plan_error: public std::runtime_error {
@@ -216,7 +174,7 @@ namespace offline_sbs {
 
   /**
    * Delays each causal cut proposal until bounded future depth evidence arrives,
-   * then emits immutable, scene-wide camera settings. It never labels its
+   * then emits immutable cache/replay boundaries. It never labels its
    * decisions as ground truth and retains only the unresolved scene.
    */
   class scene_planner_t {

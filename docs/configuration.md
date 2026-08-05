@@ -8,10 +8,10 @@ By providing the host authority (URI + port), you can easily open each configura
 @endhtmlonly
 }
 
-Apollo works with the default settings for most users. In some cases you may want to configure it further.
+Sunshine 3D works with the default settings for most users. In some cases you may want to configure it further.
 
 The default location for the configuration file is listed below. You can use another location if you
-choose by passing the full configuration file path as the first argument when you start Apollo.
+choose by passing the full configuration file path as the first argument when you start Sunshine 3D.
 
 **Example**
 ```powershell
@@ -27,7 +27,7 @@ location by modifying the configuration file.
 |---------|-------------------------------------------------|
 | Windows | @code{}%ProgramFiles%\\Apollo\\config@endcode   |
 
-Although the configuration UI is recommended, Apollo can also be configured manually by
+Although the configuration UI is recommended, Sunshine 3D can also be configured manually by
 editing the `conf` file in a text editor. Use the examples as reference.
 
 ## Essentials
@@ -48,7 +48,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            The locale used for Apollo's user interface.
+            The locale used for Sunshine 3D's user interface.
         </td>
     </tr>
     <tr>
@@ -162,7 +162,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Example</td>
         <td colspan="2">@code{}
-            sunshine_name = Apollo
+            sunshine_name = Sunshine 3D
             @endcode</td>
     </tr>
 </table>
@@ -229,7 +229,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td colspan="2">
             Controls runtime performance diagnostics. These diagnostics retain concise frame-pacing,
             AI inference, SBS warp, encoder/network, and local-display measurements. When disabled,
-            Apollo does not allocate GPU timing queries or perform diagnostic per-frame clock,
+            Sunshine 3D does not allocate GPU timing queries or perform diagnostic per-frame clock,
             counter, or filesystem work.
         </td>
     </tr>
@@ -302,14 +302,14 @@ editing the `conf` file in a text editor. Use the examples as reference.
 ### enable_pairing
 
 <table>
-    <tr><td>Description</td><td>Allow new Artemis devices to pair with Apollo.</td></tr>
+    <tr><td>Description</td><td>Allow new Moonlight 3D/Artemis devices to pair with Sunshine 3D.</td></tr>
     <tr><td>Default</td><td><code>enabled</code></td></tr>
 </table>
 
 ### enable_discovery
 
 <table>
-    <tr><td>Description</td><td>Advertise Apollo for automatic discovery. When disabled, clients must add the host address manually.</td></tr>
+    <tr><td>Description</td><td>Advertise Sunshine 3D for automatic discovery. When disabled, clients must add the host address manually.</td></tr>
     <tr><td>Default</td><td><code>enabled</code></td></tr>
 </table>
 
@@ -538,7 +538,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            When enabled, Apollo will pass through high resolution scroll events from Artemis clients.
+            When enabled, Sunshine 3D passes through high-resolution scroll events from Moonlight 3D/Artemis clients.
             <br>
             This can be useful to disable for older applications that scroll too fast with high resolution scroll
             events.
@@ -564,7 +564,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            When enabled, Apollo will pass through native pen/touch events from Artemis clients.
+            When enabled, Sunshine 3D passes through native pen/touch events from Moonlight 3D/Artemis clients.
             <br>
             This can be useful to disable for older applications without native pen/touch support.
         </td>
@@ -648,7 +648,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
     <tr>
         <td>Default</td>
-        <td colspan="2">Apollo will select the default Windows audio device.</td>
+        <td colspan="2">Sunshine 3D selects the default Windows audio device.</td>
     </tr>
     <tr>
         <td>Example (Windows)</td>
@@ -664,13 +664,13 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            The virtual Windows audio device, such as Steam Streaming Speakers. This allows Apollo to stream audio,
+            The virtual Windows audio device, such as Steam Streaming Speakers. This allows Sunshine 3D to stream audio,
             while muting the speakers.
             @tip{See [audio_sink](#audio_sink)!}
             @tip{These are some options for virtual sound devices.
             * Steam Streaming Speakers
               * Steam must be installed.
-              * Apollo installs the driver on Windows when Steam is available; otherwise use
+              * Sunshine 3D installs the driver on Windows when Steam is available; otherwise use
                 Steam Remote Play once to install it.
             * [Virtual Audio Cable](https://vb-audio.com/Cable)
             }
@@ -708,7 +708,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
     <tr>
         <td>Default</td>
-        <td colspan="2">Apollo will select the default NVIDIA video card.</td>
+        <td colspan="2">Sunshine 3D selects the default NVIDIA video card.</td>
     </tr>
     <tr>
         <td>Example (Windows)</td>
@@ -725,7 +725,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td>Description</td>
         <td colspan="2">
             Select the Windows display device to stream.
-            @tip{During Apollo startup, the log lists the available display devices:
+            @tip{During Sunshine 3D startup, the log lists the available display devices:
             @code{}
             Info: Currently available display devices:
             [
@@ -780,7 +780,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
     <tr>
         <td>Default</td>
-        <td colspan="2">Apollo will select the default display.</td>
+        <td colspan="2">Sunshine 3D selects the default display.</td>
     </tr>
     <tr>
         <td>Example</td>
@@ -796,7 +796,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            The maximum bitrate (in Kbps) that Apollo will encode the stream at. If set to 0, it uses the bitrate requested by Artemis.
+            The maximum bitrate (in Kbps) that Sunshine 3D encodes. If set to 0, it uses the bitrate requested by Moonlight 3D/Artemis.
         </td>
     </tr>
     <tr>
@@ -819,7 +819,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Apollo saves bandwidth when content on screen is static or has a low frame rate. Because many clients expect a constant stream of video frames, duplicate frames are sent when needed. This setting controls the lowest effective frame rate a stream can reach.
+            Sunshine 3D saves bandwidth when content on screen is static or has a low frame rate. Because many clients expect a constant stream of video frames, duplicate frames are sent when needed. This setting controls the lowest effective frame rate a stream can reach.
         </td>
     </tr>
     <tr>
@@ -885,7 +885,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Set the address family that Apollo will use.
+            Set the address family that Sunshine 3D uses.
         </td>
     </tr>
     <tr>
@@ -917,12 +917,12 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Optionally bind Apollo's HTTP, RTSP, control, audio, and video services to one local IP
+            Optionally bind Sunshine 3D's HTTP, RTSP, control, audio, and video services to one local IP
             address. This can prevent traffic from using an unintended interface on hosts with
             multiple Ethernet, Wi-Fi, or VPN adapters. Leave empty to listen on all interfaces.
             The address must be IPv4 when <code>address_family = ipv4</code>, or IPv6 when
             <code>address_family = both</code>. An invalid explicit address prevents the network
-            services from starting; Apollo never falls back to all interfaces in that case.
+            services from starting; Sunshine 3D never falls back to all interfaces in that case.
         </td>
     </tr>
     <tr>
@@ -943,7 +943,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Set the family of ports used by Apollo.
+            Set the family of ports used by Sunshine 3D.
             Changing this value will offset other ports as shown in config UI.
         </td>
     </tr>
@@ -1030,7 +1030,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            How long, in milliseconds, to retain a launched app, virtual display, and host streaming setup after the remote client disconnects. Apollo permits one active remote stream; another launch is rejected until the current stream has fully stopped. A reconnect during this window resumes the same desktop without rebuilding it or losing its windows. When the grace expires, Apollo terminates the retained remote app. Set to 0 to terminate immediately unless the accepted session is still completing its RTSP/control handshake; Apollo preserves that handoff for at least @code{ping_timeout}. Valid range: 0 to 600000 (10 minutes).
+            How long, in milliseconds, to retain a launched app, virtual display, and host streaming setup after the remote client disconnects. Sunshine 3D permits one active remote stream; another launch is rejected until the current stream has fully stopped. A reconnect during this window resumes the same desktop without rebuilding it or losing its windows. When the grace expires, Sunshine 3D terminates the retained remote app. Set to 0 to terminate immediately unless the accepted session is still completing its RTSP/control handshake; Sunshine 3D preserves that handoff for at least @code{ping_timeout}. Valid range: 0 to 600000 (10 minutes).
         </td>
     </tr>
     <tr>
@@ -1132,7 +1132,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            The path where the Apollo log is stored.
+            The path where the Sunshine 3D log is stored.
         </td>
     </tr>
     <tr>
@@ -1205,7 +1205,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            The file where Apollo's current state is stored.
+            The file where Sunshine 3D's current state is stored.
         </td>
     </tr>
     <tr>
@@ -1256,7 +1256,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
 ### sbs_3d_max_encode_width
 
 <table>
-    <tr><td>Description</td><td>Cap the packed Host 3D output width. The effective limit is the lower of this value and the selected codec's runtime NVENC capability; Sunshine 3D preserves each eye's aspect when it must scale down.</td></tr>
+    <tr><td>Description</td><td>Cap the packed Host 3D output width. The final output also respects the selected codec's runtime NVENC width and height capabilities; Sunshine 3D preserves each eye's aspect when either axis must scale down.</td></tr>
     <tr><td>Default</td><td><code>8192</code></td></tr>
     <tr><td>Range</td><td><code>256</code>-<code>16384</code> (rounded down to an even value)</td></tr>
 </table>
@@ -1264,15 +1264,8 @@ editing the `conf` file in a text editor. Use the examples as reference.
 ### sbs_3d_cuda_graph
 
 <table>
-    <tr><td>Description</td><td>Enable TensorRT CUDA Graph replay for Host 3D and evaluator inference. Leave enabled for normal use; disable only for driver diagnosis or a controlled performance comparison. Unsupported systems fall back automatically.</td></tr>
+    <tr><td>Description</td><td>Enable TensorRT CUDA Graph replay for Host 3D, offline conversion, and evaluator inference. Leave enabled for normal use; disable only for driver diagnosis or a controlled performance comparison. Unsupported systems fall back automatically.</td></tr>
     <tr><td>Default</td><td><code>true</code></td></tr>
-</table>
-
-### sbs_3d_profile
-
-<table>
-    <tr><td>Description</td><td><code>sbs_3d_profile</code> selects profile-prefixed model, tensor-shape, adaptive-pop, subject, normalization, and zero-plane settings for offline conversion and evaluator compatibility. Pop strength, maximum packed width, and CUDA Graph are deliberately not profile fields; their explicit top-level settings are shared by live V2 and offline work. Live Host 3D V2 always uses authenticated DAV2 Small, authenticated tensor shapes, fixed private cut calibration, and the literal pop strength above; legacy analysis keys do not change its geometry.</td></tr>
-    <tr><td>Profile default</td><td><code>apollo</code></td></tr>
 </table>
 
 ## NVIDIA NVENC Encoder
@@ -1287,7 +1280,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
             Higher numbers improve compression (quality at given bitrate) at the cost of increased encoding latency.
             Recommended to change only when limited by network or decoder, otherwise similar effect can be accomplished
             by increasing bitrate.
-            This option applies to Apollo's native NVENC path.
+            This option applies to Sunshine 3D's native NVENC path.
         </td>
     </tr>
     <tr>
@@ -1343,7 +1336,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
             This allows to detect more motion vectors, better distribute bitrate across the frame and more strictly
             adhere to bitrate limits. Disabling it is not recommended since this can lead to occasional bitrate
             overshoot and subsequent packet loss.
-            This option applies to Apollo's native NVENC path.
+            This option applies to Sunshine 3D's native NVENC path.
         </td>
     </tr>
     <tr>
@@ -1381,7 +1374,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td colspan="2">
             Assign higher QP values to flat regions of the video.
             Recommended to enable when streaming at lower bitrates.
-            This option applies to Apollo's native NVENC path.
+            This option applies to Sunshine 3D's native NVENC path.
             @warning{Enabling this option may reduce performance.}
         </td>
     </tr>
@@ -1408,7 +1401,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
             Replace HEVC P pictures with unidirectional B pictures whose reference lists contain only past pictures.
             This can improve compression quality without the reordering delay of conventional B pictures.
             The option is ignored for H.264 and AV1 and falls back to ordinary P pictures when unsupported by the GPU.
-            This option applies to HEVC on Apollo's native NVENC path.
+            This option applies to HEVC on Sunshine 3D's native NVENC path.
         </td>
     </tr>
     <tr>
@@ -1432,11 +1425,11 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td>Description</td>
         <td colspan="2">
             Percentage increase over a single-frame VBV/HRD buffer.
-            Apollo defaults to 100, which doubles the buffer to provide headroom for variable-complexity frames while
+            Sunshine 3D defaults to 100, which doubles the buffer to provide headroom for variable-complexity frames while
             retaining low-latency rate control. Set 0 to restore a strict single-frame buffer. Larger values may improve
             quality during complex scenes, but can also lead to packet loss if the network lacks enough headroom for
             bitrate spikes. Maximum accepted value is 400, which corresponds to a 5x encoded-frame upper size limit.
-            This option applies to Apollo's native NVENC path.
+            This option applies to Sunshine 3D's native NVENC path.
             @warning{Can lead to network packet loss.}
         </td>
     </tr>
@@ -1468,7 +1461,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
             in Windows. Currently, NVIDIA drivers may freeze in encoder when HAGS is enabled, realtime priority is used
             and VRAM utilization is close to maximum. Disabling this option lowers the priority to high, sidestepping
             the freeze at the cost of reduced capture performance when the GPU is heavily loaded.
-            This option applies to Apollo's native NVENC path.
+            This option applies to Sunshine 3D's native NVENC path.
         </td>
     </tr>
     <tr>
@@ -1492,8 +1485,8 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td>Description</td>
         <td colspan="2">
             Adaptive P-State algorithm which NVIDIA drivers employ doesn't work well with low latency streaming,
-            so Apollo requests high power mode explicitly.
-            This option applies to Apollo's native NVENC path.
+            so Sunshine 3D requests high power mode explicitly.
+            This option applies to Sunshine 3D's native NVENC path.
             @warning{Disabling this is not recommended since this can lead to significantly increased encoding latency.}
             @note{Applies to Windows only.}
         </td>
@@ -1518,10 +1511,10 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Apollo can't capture fullscreen OpenGL and Vulkan programs at full frame rate unless they present on
-            top of DXGI. With this option enabled Apollo changes the global Vulkan/OpenGL present method to
-            "Prefer layered on DXGI Swapchain". This system-wide setting is reverted when Apollo exits.
-            This option applies to Apollo's native NVENC path.
+            Sunshine 3D can't capture fullscreen OpenGL and Vulkan programs at full frame rate unless they present on
+            top of DXGI. With this option enabled Sunshine 3D changes the global Vulkan/OpenGL present method to
+            "Prefer layered on DXGI Swapchain". This system-wide setting is reverted when Sunshine 3D exits.
+            This option applies to Sunshine 3D's native NVENC path.
         </td>
     </tr>
     <tr>

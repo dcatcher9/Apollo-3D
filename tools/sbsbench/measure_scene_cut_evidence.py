@@ -3,8 +3,8 @@
 
 The appearance paths mirror production: source RGB is resized with D3D11-style source-texel
 footprint integration for the broad model-input delta, while the exposure ordinal is point
-sampled in the capture domain before tone mapping or spatial filtering. The ordinal is compared
-with the cross-5/all-10-pairs census, and the first structurally unsupported update retains the
+sampled before spatial filtering and normalized to scene-linear max-RGB. The ordinal is compared
+with the cross-5/all-10-pairs relative-contrast census, and the first unsupported update retains the
 last supported appearance/depth history. Persistence advances it on the next update. The depth
 path compares the harness's normalized 16-bit depth dumps at the same 0.05 texel threshold used by
 production.
@@ -34,6 +34,8 @@ FRAME_RE = re.compile(r"^frame_(\d+)\.(?:jpg|jpeg|png)$", re.IGNORECASE)
 DEPTH_RE = re.compile(r"^depth_(\d+)\.png$", re.IGNORECASE)
 ORDINAL_OFFSETS = ((0, 0), (-1, 0), (1, 0), (0, -1), (0, 1))
 STRUCTURAL_SUPPORT_FLOOR = 0.01
+STRUCTURAL_ORDINAL_RELATIVE_CONTRAST_FLOOR = 0.04
+STRUCTURAL_ORDINAL_NOISE_FLOOR = 0.0001
 
 
 def numbered_files(root: Path, pattern: re.Pattern[str]) -> dict[int, Path]:
@@ -137,7 +139,7 @@ def model_rgb(path: Path, width: int, height: int) -> np.ndarray:
 
 
 def point_resize_max_rgb(rgb: np.ndarray, width: int, height: int) -> np.ndarray:
-    """Match rgb_to_nchw_cs's capture-domain point maxRGB output."""
+    """Point-sample maxRGB before appearance-transfer normalization."""
     if rgb.ndim != 3 or rgb.shape[2] != 3:
         raise ValueError(f"expected HxWx3 RGB input, got {rgb.shape}")
     source_height, source_width, _ = rgb.shape
@@ -157,7 +159,12 @@ def point_resize_max_rgb(rgb: np.ndarray, width: int, height: int) -> np.ndarray
 def appearance_ordinal(path: Path, width: int, height: int) -> np.ndarray:
     with Image.open(path) as image:
         rgb = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
-    return point_resize_max_rgb(rgb, width, height)
+    encoded = point_resize_max_rgb(rgb, width, height)
+    return np.where(
+        encoded <= 0.04045,
+        encoded / 12.92,
+        np.power((encoded + 0.055) / 1.055, 2.4),
+    ).astype(np.float32)
 
 
 def ordinal_samples(values: np.ndarray) -> tuple[np.ndarray, ...]:
@@ -172,7 +179,8 @@ def ordinal_samples(values: np.ndarray) -> tuple[np.ndarray, ...]:
 def structural_evidence_fractions(
         current: np.ndarray,
         previous: np.ndarray,
-        contrast_floor: float = 0.01) -> tuple[float, float, float, float]:
+        relative_contrast_floor: float =
+        STRUCTURAL_ORDINAL_RELATIVE_CONTRAST_FLOOR) -> tuple[float, float, float, float]:
     """Return shader-equivalent change/current/previous/common support fractions."""
     if current.shape != previous.shape or current.ndim != 2:
         raise ValueError(
@@ -188,8 +196,18 @@ def structural_evidence_fractions(
         for second in range(first + 1, 5):
             current_delta = current_samples[first] - current_samples[second]
             previous_delta = previous_samples[first] - previous_samples[second]
-            current_reliable = np.abs(current_delta) >= contrast_floor
-            previous_reliable = np.abs(previous_delta) >= contrast_floor
+            current_threshold = np.maximum(
+                STRUCTURAL_ORDINAL_NOISE_FLOOR,
+                relative_contrast_floor * np.maximum(
+                    np.abs(current_samples[first]),
+                    np.abs(current_samples[second])))
+            previous_threshold = np.maximum(
+                STRUCTURAL_ORDINAL_NOISE_FLOOR,
+                relative_contrast_floor * np.maximum(
+                    np.abs(previous_samples[first]),
+                    np.abs(previous_samples[second])))
+            current_reliable = np.abs(current_delta) >= current_threshold
+            previous_reliable = np.abs(previous_delta) >= previous_threshold
             current_support += current_reliable
             previous_support += previous_reliable
             reliable = current_reliable & previous_reliable
@@ -207,10 +225,11 @@ def structural_evidence_fractions(
 def structural_change_fraction(
         current: np.ndarray,
         previous: np.ndarray,
-        contrast_floor: float = 0.01) -> float:
+        relative_contrast_floor: float =
+        STRUCTURAL_ORDINAL_RELATIVE_CONTRAST_FLOOR) -> float:
     """Shader-equivalent maxRGB cross-5 ordinal-change fraction."""
     return structural_evidence_fractions(
-        current, previous, contrast_floor)[0]
+        current, previous, relative_contrast_floor)[0]
 
 
 def raw_rgb_change_fraction(
@@ -244,7 +263,8 @@ def depth_change_fraction(
 def measure_clip(
         clip_dir: Path,
         artifact_dir: Path,
-        contrast_floor: float = 0.01,
+        relative_contrast_floor: float =
+        STRUCTURAL_ORDINAL_RELATIVE_CONTRAST_FLOOR,
         depth_threshold: float = 0.05,
         rgb_threshold: float = 0.20) -> list[dict[str, int | float | str]]:
     source_files = numbered_files(clip_dir, FRAME_RE)
@@ -286,7 +306,7 @@ def measure_clip(
             structural = structural_evidence_fractions(
                 ordinal,
                 previous_ordinal,
-                contrast_floor,
+                relative_contrast_floor,
             )
             hold_appearance_history = (
                 not appearance_history_held and
@@ -320,7 +340,8 @@ def measure_clip(
 def measure_suite(
         clips_root: Path,
         artifacts_root: Path,
-        contrast_floor: float = 0.01,
+        relative_contrast_floor: float =
+        STRUCTURAL_ORDINAL_RELATIVE_CONTRAST_FLOOR,
         depth_threshold: float = 0.05,
         rgb_threshold: float = 0.20) -> list[dict[str, int | float | str]]:
     records: list[dict[str, int | float | str]] = []
@@ -328,7 +349,8 @@ def measure_suite(
         artifact_dir = artifacts_root / clip_dir.name
         if artifact_dir.is_dir():
             records.extend(measure_clip(
-                clip_dir, artifact_dir, contrast_floor, depth_threshold, rgb_threshold))
+                clip_dir, artifact_dir, relative_contrast_floor,
+                depth_threshold, rgb_threshold))
     if not records:
         raise ValueError(
             f"no matching clip/artifact directories under {clips_root} and {artifacts_root}")
@@ -366,7 +388,9 @@ def main() -> int:
     parser.add_argument(
         "--artifacts-root", type=Path, required=True,
         help="read-only harness run containing per-clip depth PNGs and raw_shape.json")
-    parser.add_argument("--contrast-floor", type=float, default=0.01)
+    parser.add_argument(
+        "--relative-contrast-floor", type=float,
+        default=STRUCTURAL_ORDINAL_RELATIVE_CONTRAST_FLOOR)
     parser.add_argument("--depth-threshold", type=float, default=0.05)
     parser.add_argument("--rgb-threshold", type=float, default=0.20)
     parser.add_argument(
@@ -381,7 +405,7 @@ def main() -> int:
         records = measure_suite(
             args.clips_root.resolve(),
             args.artifacts_root.resolve(),
-            args.contrast_floor,
+            args.relative_contrast_floor,
             args.depth_threshold,
             args.rgb_threshold,
         )
