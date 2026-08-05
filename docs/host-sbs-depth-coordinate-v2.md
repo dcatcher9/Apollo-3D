@@ -370,15 +370,17 @@ confirmed `{generation, pulse}` consumed by V2. It does not compile or dispatch 
 stretch, adaptive-pop, or zero-plane analysis shaders. The cut detector's normalized depth is
 private evidence and never becomes live geometry.
 
-Legacy reprojection and normalization shader sources remain in the repository because the offline
-converter and evaluation harness still compile their established pipelines. Their presence on disk
-does not make V1 selectable in a live Host SBS stream. The corresponding `sbs_3d_*` configuration
-keys remain accepted for offline/evaluator compatibility but cannot override live V2 geometry,
-model identity, tensor shapes, or private cut calibration.
+Offline conversion now runs this same V2 pipeline: `--sbs-bench --parallax-v2-live` constructs
+the `host_sbs_v2` estimator, caches the signed final-parallax field plus ParallaxState per frame
+(scene-cache contract schema 2), and renders with the shared 12-step contractive inverse
+(`SBS_LIVE_V2_SIGNED_PARALLAX`). Conversion refuses the legacy pipeline outright. Legacy
+reprojection and normalization shader sources remain only for the `run_eval.py` evaluation
+oracle; the corresponding `sbs_3d_*` configuration keys are evaluator-only and cannot override
+live or offline V2 geometry, model identity, tensor shapes, or private cut calibration.
 
 ## Boundaries
 
-This production cutover changes neither Client SBS nor offline conversion. Any future client backend must
+This production cutover does not change Client SBS. Any future client backend must
 authenticate and calibrate its own model bytes, preprocessing, tensor shape, direction, raw scale,
 curve, gain, container, and slope. Offline conversion may reuse the coordinate and conditioned-field
 semantics, but scene lookahead and encoder policy remain separate owners.

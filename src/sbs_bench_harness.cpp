@@ -1399,8 +1399,13 @@ namespace sbs_bench {
                                       const scene_cache_metadata &metadata,
                                       std::string_view status,
                                       std::size_t processed_count) {
+      // Schema 2: offline conversion caches the authenticated Depth Coordinate V2 geometry.
+      // The "depth" section carries the SIGNED one-eye final-parallax field (source-U units,
+      // |value| <= the hard container limit), and "state" carries the 12-word ParallaxState the
+      // live renderer authenticates per pixel. Legacy pop/subject/adaptive knobs are gone; the
+      // renderer identity and producer closure make the geometry provenance explicit.
       nlohmann::ordered_json contract = {
-        {"schema", 1},
+        {"schema", 2},
         {"status", status},
         {"source", {
           {"width", metadata.source_width},
@@ -1416,27 +1421,32 @@ namespace sbs_bench {
           {"dtype", "float32-le"},
           {"layout", "row-major"},
           {"row_order", "top-down"},
+          {"semantics", "depth-coordinate-v2-signed-final-parallax-source-u"},
+          {"source_u_limit",
+           static_cast<double>(models::depth_coordinate_v2::direct_container_limit)},
           {"file_pattern", "frame_%010d.depth.r32f"},
           {"bytes_per_frame",
            static_cast<std::uint64_t>(metadata.depth_width) *
              metadata.depth_height * sizeof(float)},
         }},
         {"state", {
-          {"schema", 1},
-          {"source", "depth_subject_resolve_cs.SubjectState[0..2]"},
+          {"schema", 2},
+          {"source", "depth_coordinate_v2.ParallaxState[0..2]"},
           {"word_count", render_state_words_t {}.size()},
           {"dtype", "uint32-le"},
           {"layout", "raw-word-order"},
+          {"contract_schema", models::depth_coordinate_v2::contract_schema},
+          {"contract_tag", models::depth_coordinate_v2::contract_tag},
           {"file_pattern", "frame_%010d.state.u32"},
           {"bytes_per_frame", sizeof(render_state_words_t)},
         }},
         {"render_config", {
           {"model", metadata.model_name},
           {"model_url", metadata.model_url},
+          {"renderer", "depth-coordinate-v2-live-signed-parallax"},
+          {"producer_source_closure_sha256",
+           std::string(models::depth_coordinate_v2::shader_source_closure_sha256)},
           {"pop_strength", metadata.pop_strength},
-          {"adaptive_pop_max", metadata.adaptive_pop_max},
-          {"subject_stretch", metadata.subject_stretch},
-          {"literal_bestv2", metadata.literal_bestv2},
           {"simulate_hdr", metadata.simulate_hdr},
           {"hdr_scale", metadata.hdr_scale},
           {"depth_reuse_interval", metadata.depth_reuse_interval},
@@ -1505,7 +1515,8 @@ namespace sbs_bench {
       const fs::path &path,
       ComPtr<ID3D11Texture2D> &stage_cache,
       UINT expected_width,
-      UINT expected_height
+      UINT expected_height,
+      bool signed_container = false
     ) {
       static_assert(std::endian::native == std::endian::little);
       if (!srv) {
@@ -1564,8 +1575,15 @@ namespace sbs_bench {
       }
       ctx->Unmap(stage_cache.Get(), 0);
       valid = valid &&
-              std::all_of(values.begin(), values.end(), [](float value) {
-                return std::isfinite(value) && value >= 0.0f && value <= 1.0f;
+              std::all_of(values.begin(), values.end(), [signed_container](float value) {
+                if (!std::isfinite(value)) {
+                  return false;
+                }
+                if (signed_container) {
+                  return std::fabs(value) <=
+                         models::depth_coordinate_v2::direct_container_limit;
+                }
+                return value >= 0.0f && value <= 1.0f;
               });
       return valid &&
              publish_file_atomically(path, [&](const fs::path &temporary_path) {
@@ -1577,20 +1595,64 @@ namespace sbs_bench {
              });
     }
 
-    bool cache_render_state_atomically(const adaptive_state_words_t &words,
-                                       const fs::path &path) {
-      static_assert(std::endian::native == std::endian::little);
-      if (!valid_adaptive_state_words(words)) {
+    // Read the live renderer's 12-word ParallaxState back from the estimator's structured
+    // buffer for durable caching. Validation matches create_cached_v2_state_srv: the replay
+    // child re-authenticates the exact bytes written here.
+    bool read_v2_state_words(ID3D11Device *dev, ID3D11DeviceContext *ctx,
+                             ID3D11ShaderResourceView *srv,
+                             ComPtr<ID3D11Buffer> &stage_cache,
+                             render_state_words_t &words) {
+      if (!srv) {
         return false;
       }
-      render_state_words_t render_words {};
-      std::copy_n(words.begin(), render_words.size(), render_words.begin());
+      ComPtr<ID3D11Resource> resource;
+      srv->GetResource(&resource);
+      ComPtr<ID3D11Buffer> buffer;
+      if (FAILED(resource.As(&buffer))) {
+        return false;
+      }
+      D3D11_BUFFER_DESC desc {};
+      buffer->GetDesc(&desc);
+      if (desc.ByteWidth < sizeof(render_state_words_t) ||
+          desc.StructureByteStride != 4 * sizeof(float)) {
+        return false;
+      }
+      bool recreate = !stage_cache;
+      if (!recreate) {
+        D3D11_BUFFER_DESC stage_desc {};
+        stage_cache->GetDesc(&stage_desc);
+        recreate = stage_desc.ByteWidth != desc.ByteWidth;
+      }
+      if (recreate) {
+        D3D11_BUFFER_DESC stage_desc = desc;
+        stage_desc.Usage = D3D11_USAGE_STAGING;
+        stage_desc.BindFlags = 0;
+        stage_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stage_desc.MiscFlags = 0;
+        stage_cache.Reset();
+        if (FAILED(dev->CreateBuffer(&stage_desc, nullptr, &stage_cache))) {
+          return false;
+        }
+      }
+      ctx->CopyResource(stage_cache.Get(), buffer.Get());
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(ctx->Map(stage_cache.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+        return false;
+      }
+      std::memcpy(words.data(), mapped.pData, sizeof(words));
+      ctx->Unmap(stage_cache.Get(), 0);
+      return true;
+    }
+
+    bool cache_v2_state_atomically(const render_state_words_t &words,
+                                   const fs::path &path) {
+      static_assert(std::endian::native == std::endian::little);
+      namespace v2 = models::depth_coordinate_v2;
+      if (words[7] != v2::contract_tag) {  // V2_STATE_WORD_CONTRACT_TAG_BITS
+        return false;
+      }
       return publish_file_atomically(path, [&](const fs::path &temporary_path) {
-        return write_bytes_durably(
-          temporary_path,
-          render_words.data(),
-          sizeof(render_words)
-        );
+        return write_bytes_durably(temporary_path, words.data(), sizeof(words));
       });
     }
 
@@ -1671,14 +1733,24 @@ namespace sbs_bench {
       });
     }
 
-    bool create_cached_state_srv(ID3D11Device *dev,
-                                 const render_state_words_t &words,
-                                 ComPtr<ID3D11Buffer> &buffer,
-                                 ComPtr<ID3D11ShaderResourceView> &srv) {
-      if (!std::all_of(words.begin(), words.end(), [](std::uint32_t word) {
-            return std::isfinite(std::bit_cast<float>(word));
-          })) {
+    // The cached 12 words are the live renderer's ParallaxState: three float4 vectors whose
+    // float-valued words must be finite, whose contract-tag word must match the compiled
+    // contract, and whose revision/integrity words are opaque uint bit patterns (they may not
+    // be reinterpreted as floats — an integrity hash can encode a NaN pattern legitimately).
+    bool create_cached_v2_state_srv(ID3D11Device *dev,
+                                    const render_state_words_t &words,
+                                    ComPtr<ID3D11Buffer> &buffer,
+                                    ComPtr<ID3D11ShaderResourceView> &srv) {
+      namespace v2 = models::depth_coordinate_v2;
+      constexpr std::size_t contract_tag_word = 7;  // V2_STATE_WORD_CONTRACT_TAG_BITS
+      constexpr std::array<std::size_t, 6> float_valued_words {0, 1, 2, 3, 5, 6};
+      if (words[contract_tag_word] != v2::contract_tag) {
         return false;
+      }
+      for (const auto index : float_valued_words) {
+        if (!std::isfinite(std::bit_cast<float>(words[index]))) {
+          return false;
+        }
       }
       D3D11_BUFFER_DESC desc {};
       desc.ByteWidth = sizeof(words);
@@ -1691,8 +1763,7 @@ namespace sbs_bench {
       view.Format = DXGI_FORMAT_UNKNOWN;
       view.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
       view.Buffer.FirstElement = 0;
-      view.Buffer.NumElements =
-        static_cast<UINT>(words.size() / 4u);
+      view.Buffer.NumElements = static_cast<UINT>(words.size() / 4u);
       return SUCCEEDED(dev->CreateBuffer(&desc, &initial, &buffer)) &&
              SUCCEEDED(dev->CreateShaderResourceView(buffer.Get(), &view, &srv));
     }
@@ -1711,11 +1782,11 @@ namespace sbs_bench {
         std::ifstream stream(directory / "scene_cache_contract.json");
         nlohmann::json value;
         if (!stream || !(stream >> value) || !value.is_object() ||
-            value.at("schema").get<int>() != 1 ||
+            value.at("schema").get<int>() != 2 ||
             (value.at("status").get<std::string>() != "running" &&
              value.at("status").get<std::string>() != "complete") ||
             !value.at("processed_count").is_number_integer()) {
-          error = "scene cache contract is not a running/complete schema-1 contract";
+          error = "scene cache contract is not a running/complete schema-2 contract";
           return false;
         }
         const std::string status = value.at("status").get<std::string>();
@@ -1758,9 +1829,6 @@ namespace sbs_bench {
         metadata.model_name = render.at("model").get<std::string>();
         metadata.model_url = render.at("model_url").get<std::string>();
         metadata.pop_strength = render.at("pop_strength").get<double>();
-        metadata.adaptive_pop_max = render.at("adaptive_pop_max").get<double>();
-        metadata.subject_stretch = render.at("subject_stretch").get<bool>();
-        metadata.literal_bestv2 = render.at("literal_bestv2").get<bool>();
         metadata.simulate_hdr = render.at("simulate_hdr").get<bool>();
         metadata.hdr_scale = render.at("hdr_scale").get<double>();
         metadata.depth_reuse_interval =
@@ -1798,7 +1866,18 @@ namespace sbs_bench {
             depth.at("file_pattern").get<std::string>() !=
               "frame_%010d.depth.r32f" ||
             depth.at("bytes_per_frame").get<std::uint64_t>() != depth_bytes ||
-            state.at("schema").get<int>() != 1 ||
+            depth.at("semantics").get<std::string>() !=
+              "depth-coordinate-v2-signed-final-parallax-source-u" ||
+            depth.at("source_u_limit").get<double>() !=
+              static_cast<double>(
+                models::depth_coordinate_v2::direct_container_limit) ||
+            state.at("schema").get<int>() != 2 ||
+            state.at("source").get<std::string>() !=
+              "depth_coordinate_v2.ParallaxState[0..2]" ||
+            state.at("contract_schema").get<std::uint32_t>() !=
+              models::depth_coordinate_v2::contract_schema ||
+            state.at("contract_tag").get<std::uint32_t>() !=
+              models::depth_coordinate_v2::contract_tag ||
             state.at("word_count").get<std::size_t>() !=
               render_state_words_t {}.size() ||
             state.at("dtype").get<std::string>() != "uint32-le" ||
@@ -1807,12 +1886,13 @@ namespace sbs_bench {
               "frame_%010d.state.u32" ||
             state.at("bytes_per_frame").get<std::size_t>() !=
               sizeof(render_state_words_t) ||
+            render.at("renderer").get<std::string>() !=
+              "depth-coordinate-v2-live-signed-parallax" ||
+            render.at("producer_source_closure_sha256").get<std::string>() !=
+              models::depth_coordinate_v2::shader_source_closure_sha256 ||
             !(metadata.pop_strength >= 0.25 &&
               metadata.pop_strength <= 2.0) ||
-            !(metadata.adaptive_pop_max >= metadata.pop_strength &&
-              metadata.adaptive_pop_max <= 2.0) ||
-            metadata.depth_reuse_interval < 1 ||
-            metadata.depth_reuse_interval > 8 ||
+            metadata.depth_reuse_interval != 1 ||
             !(metadata.output_scale > 0.0 && metadata.output_scale <= 4.0) ||
             metadata.max_output_width <= 0 ||
             !metadata.output_eye_width ||
@@ -1827,7 +1907,6 @@ namespace sbs_bench {
               "sbs_%010d." + metadata.output_file_extension ||
             !packed.at("atomic_replay_publication").get<bool>() ||
             !std::isfinite(metadata.pop_strength) ||
-            !std::isfinite(metadata.adaptive_pop_max) ||
             !std::isfinite(metadata.hdr_scale) ||
             !std::isfinite(metadata.output_scale)) {
           error = "scene cache contract contains an unsupported layout or render configuration";
@@ -1882,7 +1961,7 @@ namespace sbs_bench {
         if (!stream || !(stream >> value) || !value.is_object() ||
             value.at("schema").get<int>() != 1 ||
             value.at("version").get<std::string>() != "scene-plan-v1" ||
-            value.at("cache_contract_schema").get<int>() != 1 ||
+            value.at("cache_contract_schema").get<int>() != 2 ||
             !value.at("scenes").is_array() ||
             value.at("scenes").size() != 1u) {
           error = "scene plan is not a scene-plan-v1 schema-1 document";
@@ -2335,6 +2414,10 @@ namespace sbs_bench {
       int adaptive_pop = -1;  // -1 = conf, 0 = off, 1 = on
       bool literal_bestv2 = false;  // reference-only: disable production resolution/pop scaling
       bool depth_override_all = false;  // reference-only: replace every inferred depth frame
+      // Production offline mode: run the authenticated Depth Coordinate V2 producer via the
+      // host_sbs_v2 estimator and render its signed final field with the contractive inverse.
+      // Whole-clip analysis/conversion requires it; plain evaluation keeps the legacy oracle.
+      bool parallax_v2_live = false;
     };
 
     bool parse_opts(int argc, char **argv, opts &o) {
@@ -2455,6 +2538,8 @@ namespace sbs_bench {
           }
         } else if (a == "--literal-bestv2") {
           o.literal_bestv2 = true;
+        } else if (a == "--parallax-v2-live") {
+          o.parallax_v2_live = true;
         } else {
           BOOST_LOG(error) << "sbs-bench: unknown arg '" << a << "'";
           return false;
@@ -2475,6 +2560,42 @@ namespace sbs_bench {
         BOOST_LOG(error) << "sbs-bench: --scene-cache and --render-cache are mutually exclusive";
         return false;
       }
+      // The V2 estimator applies the fixed live calibration and has no legacy zero-plane,
+      // subject shaping, adaptive pop, or EMA levers; silently accepting them would report
+      // A/B values that were never used. Depth cadence must stay 1 so the stateful cut/camera
+      // history sees every frame.
+      if (o.parallax_v2_live) {
+        if (!o.zero_plane.empty() || o.subject_recenter >= 0.0 || o.subject_stretch >= 0 ||
+            o.adaptive_pop >= 0 || o.adaptive_pop_max >= 0.0 || o.literal_bestv2 ||
+            o.ema >= 0.0 || o.ema_edge_change >= 0.0 || o.ema_edge_gradient >= 0.0 ||
+            o.ema_edge_strength >= 0.0 || o.minmax_ema >= 0.0 || o.depth_short_side != 0) {
+          BOOST_LOG(error)
+            << "sbs-bench: --parallax-v2-live uses the fixed production calibration and "
+               "rejects --zero-plane/--subject-*/--adaptive-pop*/--literal-bestv2/--ema*/"
+               "--minmax-ema/--depth-short-side";
+          return false;
+        }
+        if (o.depth_every != 1) {
+          BOOST_LOG(error)
+            << "sbs-bench: --parallax-v2-live requires --depth-every 1 (the V2 camera and "
+               "cut history are stateful per frame)";
+          return false;
+        }
+        if (!o.depth_override_root.empty() || o.depth_override_all) {
+          BOOST_LOG(error) << "sbs-bench: --parallax-v2-live forbids depth overrides";
+          return false;
+        }
+      }
+      // Offline conversion and whole-clip analysis are production paths: they must run the
+      // production V2 pipeline. Legacy remains only for the plain evaluation oracle.
+      if (!o.parallax_v2_live &&
+          (o.artifacts == artifact_mode_e::conversion || !o.scene_cache.empty() ||
+           !o.render_cache.empty())) {
+        BOOST_LOG(error)
+          << "sbs-bench: conversion artifacts and scene caches require --parallax-v2-live; "
+             "the legacy pipeline is evaluation-only";
+        return false;
+      }
       const unsigned direct_geometry_input_count =
         (!o.direct_parallax_root.empty() ? 1u : 0u) +
         (!o.depth_coordinate_v2_manifest.empty() ? 1u : 0u);
@@ -2482,11 +2603,12 @@ namespace sbs_bench {
         if (o.artifacts != artifact_mode_e::evaluation || o.follow ||
             !o.scene_cache.empty() || !o.render_cache.empty() ||
             !o.depth_override_root.empty() || o.depth_override_all ||
-            o.output_every != 1 || o.depth_every != 1 || o.literal_bestv2) {
+            o.output_every != 1 || o.depth_every != 1 || o.literal_bestv2 ||
+            o.parallax_v2_live) {
           BOOST_LOG(error)
             << "sbs-bench: direct/v2 GPU replay requires evaluation artifacts, "
-               "depth/output cadence 1, and forbids follow, caches, depth overrides, and "
-               "--literal-bestv2";
+               "depth/output cadence 1, and forbids follow, caches, depth overrides, "
+               "--literal-bestv2, and --parallax-v2-live";
           return false;
         }
         if (direct_geometry_input_count > 1u) {
@@ -2649,17 +2771,22 @@ namespace sbs_bench {
           {"follow_global_first_sequence", true},
           {"adaptive_state_schema", sbs_adaptive_state::schema_version},
           {"adaptive_analysis_flag_bits", std::move(adaptive_analysis_flag_bits)},
-          {"scene_cache_contract_schema", 1},
+          {"scene_cache_contract_schema", 2},
           {"scene_cache_packed_sbs_contract", true},
+          {"renderer", "depth-coordinate-v2-live-signed-parallax"},
+          {"parallax_v2_contract_schema",
+           models::depth_coordinate_v2::contract_schema},
           {"scene_cache_depth", {
             {"dtype", "float32-le"},
             {"layout", "row-major"},
             {"dxgi_format", "R32_FLOAT"},
+            {"semantics", "depth-coordinate-v2-signed-final-parallax-source-u"},
           }},
           {"scene_cache_state", {
-            {"schema", 1},
+            {"schema", 2},
             {"word_count", render_state_words_t {}.size()},
             {"dtype", "uint32-le"},
+            {"source", "depth_coordinate_v2.ParallaxState[0..2]"},
           }},
           {"scene_plan", {
             {"schema", 1},
@@ -2667,6 +2794,9 @@ namespace sbs_bench {
             {"one_scene_per_replay", true},
             {"absolute_pop_strength", true},
             {"source_pixel_zero_anchor", true},
+            // Scene boundaries still pace caching/replay; the planner's pop/zero-anchor
+            // outputs have no consumer in the V2 renderer and are recorded as inert.
+            {"geometry_outputs_applied", false},
           }},
           {"render_cache_follow", true},
           {"render_skips_tensorrt", true},
@@ -2941,11 +3071,10 @@ namespace sbs_bench {
       if (o.follow) {
         o.follow_count = replay_frame_count;
       }
+      // Schema-2 caches carry the complete V2 geometry: the replay child only needs the
+      // recorded pop for provenance plus the output geometry. No legacy adaptive/subject/
+      // literal knobs exist to restore, and the cached field is the sole position authority.
       sbs_cfg.pop_strength = replay_cache_metadata.pop_strength;
-      sbs_cfg.adaptive_pop = true;
-      sbs_cfg.adaptive_pop_max = replay_cache_metadata.adaptive_pop_max;
-      sbs_cfg.subject_stretch = replay_cache_metadata.subject_stretch;
-      o.literal_bestv2 = replay_cache_metadata.literal_bestv2;
       o.eye_w = replay_cache_metadata.eye_width;
       o.eye_h = replay_cache_metadata.eye_height;
       o.output_scale = replay_cache_metadata.output_scale;
@@ -3066,13 +3195,24 @@ namespace sbs_bench {
       {"SBS_DIRECT_PARALLAX_CONTRACTIVE", "1"},
       {nullptr, nullptr},
     };
-    const auto *warp_macros = direct_parallax_mode ? direct_parallax_macros :
-                              (replay_mode ? scene_camera_macros : nullptr);
+    // Production offline mode: bind the estimator's signed V2 final field and ParallaxState
+    // directly. The branch shares the live renderer's 12-step contractive inverse and applies
+    // no legacy pop/zero-plane/scene-camera authority of its own, so it is used identically for
+    // the analysis pass and for scene-cache replay.
+    const D3D_SHADER_MACRO live_v2_macros[] = {
+      {"SBS_LIVE_V2_SIGNED_PARALLAX", "1"},
+      {nullptr, nullptr},
+    };
+    const auto *warp_macros = o.parallax_v2_live ? live_v2_macros :
+                              (direct_parallax_mode ? direct_parallax_macros :
+                                 (replay_mode ? scene_camera_macros : nullptr));
     auto vs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_vs.hlsl", "main_vs", "vs_5_0");
     auto ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "main_ps", "ps_5_0", warp_macros);
     auto mask_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "mask_ps", "ps_5_0", warp_macros);
     auto mapping_ps_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_reprojection_ps.hlsl", "mapping_ps", "ps_5_0", warp_macros);
-    auto coverage_cs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_forward_coverage_cs.hlsl", "main", "cs_5_0", warp_macros);
+    // The forward-coverage shader has no live-V2 branch and is never dispatched in that mode;
+    // compile it with the legacy macro set so the unused blob still builds.
+    auto coverage_cs_blob = compile(SUNSHINE_SHADERS_DIR "/sbs_forward_coverage_cs.hlsl", "main", "cs_5_0", o.parallax_v2_live ? nullptr : warp_macros);
     auto warp_prefilter_cs_blob = compile(SUNSHINE_SHADERS_DIR "/depth_warp_prefilter_cs.hlsl", "main", "cs_5_0");
     if (!vs_blob || !ps_blob || !mask_ps_blob || !mapping_ps_blob || !coverage_cs_blob ||
         !warp_prefilter_cs_blob) {
@@ -3143,8 +3283,15 @@ namespace sbs_bench {
         fs::path(SUNSHINE_ASSETS_DIR),
         sbs_cfg,
         model,
-        models::depth_estimator_usage_e::legacy_evaluation
+        o.parallax_v2_live ? models::depth_estimator_usage_e::host_sbs_v2 :
+                             models::depth_estimator_usage_e::legacy_evaluation
       );
+      if (o.parallax_v2_live && estimator->has_terminal_failure()) {
+        BOOST_LOG(error)
+          << "sbs-bench: the production V2 estimator failed to initialize; refusing to "
+             "emit silently flat conversion output";
+        return 5;
+      }
     }
 
     // Per-run state built lazily on the first frame (once we know the input size).
@@ -3168,6 +3315,7 @@ namespace sbs_bench {
     ComPtr<ID3D11Buffer> raw_depth_stage;
     ComPtr<ID3D11Buffer> subject_state_stage;
     ComPtr<ID3D11Texture2D> scene_cache_depth_stage;
+    ComPtr<ID3D11Buffer> scene_cache_state_stage;
     // Evaluation keeps the legacy subject_state.json contract used by the bounded clip
     // scorer. Whole-clip follow/conversion already emits the superset adaptive-state
     // transport (JSONL for standalone tooling, atomic latest-record snapshots for the native
@@ -3556,6 +3704,7 @@ namespace sbs_bench {
         const std::size_t sequence = global_sequence;
         const std::string cache_stem = scene_cache_frame_stem(sequence);
         render_state_words_t render_words {};
+        std::vector<float> cached_parallax_values;
         if (!read_exact_file(
               fs::path(o.render_cache) / (cache_stem + ".state.u32"),
               render_words.data(),
@@ -3567,10 +3716,30 @@ namespace sbs_bench {
               replay_cache_metadata.depth_width,
               replay_cache_metadata.depth_height,
               cached_depth_texture,
-              est.depth
+              est.shadow_final_parallax,
+              /* require_unit_range */ false,
+              nullptr,
+              nullptr,
+              nullptr,
+              &cached_parallax_values
             )) {
-          BOOST_LOG(error) << "sbs-bench: invalid cached depth/state pair for global sequence "
+          BOOST_LOG(error) << "sbs-bench: invalid cached parallax/state pair for global sequence "
                            << sequence;
+          return 6;
+        }
+        // The cached field is the signed one-eye source-U displacement; enforce the hard
+        // container bound the authenticated producer guarantees before rendering with it.
+        if (!std::all_of(
+              cached_parallax_values.begin(),
+              cached_parallax_values.end(),
+              [](float value) {
+                return std::fabs(value) <=
+                       models::depth_coordinate_v2::direct_container_limit;
+              }
+            )) {
+          BOOST_LOG(error)
+            << "sbs-bench: cached V2 parallax exceeds the source-U container for sequence "
+            << sequence;
           return 6;
         }
         while (scene_plan_index < scene_plan.size() &&
@@ -3588,29 +3757,20 @@ namespace sbs_bench {
         }
         const auto &scene = scene_plan[scene_plan_index];
         active_scene_camera = &scene;
-        if (!create_cached_state_srv(
+        if (!create_cached_v2_state_srv(
               dev.Get(),
               render_words,
               cached_state_buffer,
-              est.subject
+              est.shadow_state
             )) {
-          BOOST_LOG(error) << "sbs-bench: cannot create cached SubjectState for sequence "
+          BOOST_LOG(error) << "sbs-bench: cannot create cached ParallaxState for sequence "
                            << sequence;
           return 6;
         }
-        std::copy(
-          render_words.begin(),
-          render_words.end(),
-          words.begin()
-        );
-        // Analysis diagnostics deliberately are not part of the render cache. Keep their
-        // unavailable sentinels explicit so a replay trace cannot be mistaken for fresh detector
-        // evidence; the separate analysis trace remains authoritative.
-        for (
-          std::size_t index = sbs_adaptive_state::render_prefix_word_count;
-          index < words.size();
-          ++index
-        ) {
+        // The cached words are V2 ParallaxState, not adaptive evidence; the replay trace keeps
+        // pure sentinels so it can never be mistaken for fresh detector evidence. The separate
+        // analysis trace remains authoritative for adaptive/cut history.
+        for (std::size_t index = 0; index < words.size(); ++index) {
           words[index] = std::bit_cast<std::uint32_t>(
             sbs_adaptive_state::initial_values[index]
           );
@@ -3651,21 +3811,38 @@ namespace sbs_bench {
         have_depth_result = true;
       } else {
         if (depth_updated) {
+          // The V2 authentication contract rejects frame id 0, so the estimator is always fed
+          // the 1-based global sequence. The legacy path is insensitive to the offset.
+          const auto estimator_frame_id =
+            static_cast<std::uint64_t>(global_sequence);
           estimator->estimate_depth(
             in_srv.Get(),
             input_color,
-            static_cast<std::uint64_t>(fi)
+            estimator_frame_id
           );
           est = estimator->finish_pending_depth_for_evaluation(input_color);
           if (whole_clip_mode &&
               (!est.completed_frame_valid ||
-               est.completed_frame_id != static_cast<std::uint64_t>(fi))) {
+               est.completed_frame_id != estimator_frame_id)) {
             BOOST_LOG(error) << "sbs-bench: scheduled depth update for source frame "
                              << output_id << " did not complete the expected current-frame oracle "
                              << "(valid=" << (est.completed_frame_valid ? "true" : "false")
                              << ", completed_frame_id=" << est.completed_frame_id
-                             << ", expected=" << fi << ')';
+                             << ", expected=" << estimator_frame_id << ')';
             return 6;
+          }
+          if (o.parallax_v2_live) {
+            // Offline conversion must never degrade to silently flat output: every frame is
+            // required to publish the complete authenticated V2 geometry chain.
+            if (estimator->has_terminal_failure() ||
+                !models::parallax_v2_result_is_authenticated(est)) {
+              BOOST_LOG(error)
+                << "sbs-bench: frame " << output_id
+                << " did not publish authenticated V2 geometry (terminal="
+                << (estimator->has_terminal_failure() ? "true" : "false")
+                << "); aborting the run";
+              return 6;
+            }
           }
           cuda_graph_captured = cuda_graph_captured || est.cuda_graph_active;
           ++tensorrt_enqueue_count;
@@ -3932,17 +4109,28 @@ namespace sbs_bench {
           }
           const std::size_t sequence = fi + 1u;
           const std::string cache_stem = scene_cache_frame_stem(sequence);
-          if (!cache_depth_texture_atomically(
+          // Schema-2 cache pair: the signed V2 final field plus its ParallaxState words,
+          // exactly what the replay child re-authenticates and binds to the warp.
+          render_state_words_t v2_state_words {};
+          if (!read_v2_state_words(
                 dev.Get(),
                 ctx.Get(),
-                est.depth.Get(),
+                est.shadow_state.Get(),
+                scene_cache_state_stage,
+                v2_state_words
+              ) ||
+              !cache_depth_texture_atomically(
+                dev.Get(),
+                ctx.Get(),
+                est.shadow_final_parallax.Get(),
                 fs::path(o.scene_cache) / (cache_stem + ".depth.r32f"),
                 scene_cache_depth_stage,
                 scene_cache_metadata_value.depth_width,
-                scene_cache_metadata_value.depth_height
+                scene_cache_metadata_value.depth_height,
+                /* signed_container */ true
               ) ||
-              !cache_render_state_atomically(
-                words,
+              !cache_v2_state_atomically(
+                v2_state_words,
                 fs::path(o.scene_cache) / (cache_stem + ".state.u32")
               )) {
             BOOST_LOG(error) << "sbs-bench: cannot durably publish scene cache pair "
@@ -4065,9 +4253,15 @@ namespace sbs_bench {
         ctx->Begin(warp_disjoint.Get());
         ctx->End(warp_start.Get());
       }
+      // V2-live binds the authenticated signed final field plus ParallaxState; the legacy and
+      // replay paths keep the normalized depth plus SubjectState. The warp prefilter is a
+      // legacy-depth conditioner and must never touch the V2 field.
       ID3D11ShaderResourceView *warp_depth =
-        direct_parallax_mode ? direct_parallax_srv.Get() : est.depth.Get();
-      if (est.depth && !direct_parallax_mode) {
+        o.parallax_v2_live ? est.shadow_final_parallax.Get() :
+        (direct_parallax_mode ? direct_parallax_srv.Get() : est.depth.Get());
+      ID3D11ShaderResourceView *warp_state =
+        o.parallax_v2_live ? est.shadow_state.Get() : est.subject.Get();
+      if (est.depth && !direct_parallax_mode && !o.parallax_v2_live) {
         ComPtr<ID3D11Resource> depth_resource;
         est.depth->GetResource(&depth_resource);
         ComPtr<ID3D11Texture2D> depth_texture;
@@ -4114,7 +4308,7 @@ namespace sbs_bench {
         ctx->ClearUnorderedAccessViewUint(coverage_view, clear_winner);
         ctx->CSSetShader(shader, nullptr, 0);
         ctx->CSSetSamplers(0, 1, sampler.GetAddressOf());
-        ID3D11ShaderResourceView *cs_srvs[] = {in_srv.Get(), warp_depth, est.subject.Get()};
+        ID3D11ShaderResourceView *cs_srvs[] = {in_srv.Get(), warp_depth, warp_state};
         ctx->CSSetShaderResources(0, 3, cs_srvs);
         if (direct_order_srv) {
           ctx->CSSetShaderResources(5, 1, direct_order_srv.GetAddressOf());
@@ -4142,7 +4336,7 @@ namespace sbs_bench {
       ctx->RSSetViewports(1, &vp);
       ctx->PSSetSamplers(0, 1, sampler.GetAddressOf());
 
-      ID3D11ShaderResourceView *srvs[] = {in_srv.Get(), warp_depth, est.subject.Get()};
+      ID3D11ShaderResourceView *srvs[] = {in_srv.Get(), warp_depth, warp_state};
       ctx->PSSetShaderResources(0, 3, srvs);
       ID3D11Buffer *cb = repro_cb.Get();
       ctx->PSSetConstantBuffers(2, 1, &cb);
@@ -4185,7 +4379,9 @@ namespace sbs_bench {
       if (o.artifacts == artifact_mode_e::evaluation) {
         // Offline-only mask pass, deliberately outside the production warp timestamp/CPU sample.
         // It exports R=pre-fill disocclusion. This evidence must not perturb perf conclusions.
-        if (est.depth) {
+        // The forward-coverage shader has no V2 branch; live V2 never executes it.
+        const bool run_forward_coverage = est.depth && !o.parallax_v2_live;
+        if (run_forward_coverage) {
           dispatch_coverage(coverage_cs.Get(), coverage_uav.Get());
         }
         ctx->OMSetRenderTargets(1, warp_mask_rtv.GetAddressOf(), nullptr);
@@ -4196,8 +4392,8 @@ namespace sbs_bench {
         ID3D11ShaderResourceView *mask_srvs[] = {
           in_srv.Get(),
           warp_depth,
-          est.subject.Get(),
-          est.depth ? coverage_srv.Get() : nullptr
+          warp_state,
+          run_forward_coverage ? coverage_srv.Get() : nullptr
         };
         ctx->PSSetShaderResources(0, 4, mask_srvs);
         ctx->PSSetConstantBuffers(2, 1, &cb);
@@ -4216,7 +4412,7 @@ namespace sbs_bench {
         ID3D11ShaderResourceView *mapping_srvs[] = {
           in_srv.Get(),
           warp_depth,
-          est.subject.Get()
+          warp_state
         };
         ctx->PSSetShaderResources(0, 3, mapping_srvs);
         ctx->PSSetConstantBuffers(2, 1, &cb);
@@ -4609,9 +4805,21 @@ namespace sbs_bench {
                 "\"pop_strength_authority\": \"contract.pop_strength-only\", "
                 "\"adaptive_pop_applied\": false},\n";
         }
+        if (o.parallax_v2_live) {
+          contract
+            << "  \"parallax_v2_live\": {\"enabled\": true, "
+               "\"renderer\": \"depth-coordinate-v2-live-signed-parallax\", "
+               "\"producer_source_closure_sha256\": "
+            << json_string(std::string(
+                 models::depth_coordinate_v2::shader_source_closure_sha256))
+            << ", \"contract_schema\": "
+            << models::depth_coordinate_v2::contract_schema
+            << ", \"legacy_levers_applied\": false},\n";
+        }
         contract << "  \"parallax_v2_shadow\": false,\n"
                  << "  \"parallax_v2_render\": "
-                 << (depth_coordinate_v2_gpu_mode ? "true" : "false") << ",\n"
+                 << ((depth_coordinate_v2_gpu_mode || o.parallax_v2_live) ? "true" : "false")
+                 << ",\n"
                  << "  \"cuda_graph\": " << (sbs_cfg.cuda_graph ? "true" : "false") << ",\n"
                  << "  \"cuda_graph_captured\": " << (cuda_graph_captured ? "true" : "false") << ",\n"
                  << "  \"subject_state\": {\"file\": \"subject_state.json\", "
@@ -4758,12 +4966,12 @@ namespace sbs_bench {
         << "  \"tensorrt_enqueue_count\": " << tensorrt_enqueue_count << ",\n"
         << "  \"depth_provenance\": "
         << json_string(replay_mode ?
-                         "scene-cache-contract-schema-1:R32_FLOAT" :
+                         "scene-cache-contract-schema-2:signed-final-parallax-R32_FLOAT" :
                          "video_depth_estimator")
         << ",\n"
         << "  \"subject_state_provenance\": "
         << json_string(replay_mode ?
-                         "scene-cache-contract-schema-1:canonical-12-words" :
+                         "scene-cache-contract-schema-2:parallax-state-12-words" :
                          "depth_subject_resolve_cs")
         << ",\n"
         << "  \"model\": " << json_string(model.name) << ",\n"
@@ -4799,7 +5007,9 @@ namespace sbs_bench {
         << (sbs_cfg.cuda_graph ? "true" : "false") << ",\n"
         << "    \"parallax_v2_shadow\": false,\n"
         << "    \"parallax_v2_render\": "
-        << (depth_coordinate_v2_gpu_mode ? "true" : "false") << ",\n"
+        << ((depth_coordinate_v2_gpu_mode || o.parallax_v2_live) ? "true" : "false") << ",\n"
+        << "    \"parallax_v2_live\": "
+        << (o.parallax_v2_live ? "true" : "false") << ",\n"
         << "    \"cuda_graph_captured\": "
         << (cuda_graph_captured ? "true" : "false") << ",\n"
         << "    \"literal_bestv2\": "
@@ -4892,7 +5102,7 @@ namespace sbs_bench {
         << "    \"scene_cache_replay\": "
         << (replay_mode ? "true" : "false") << ",\n"
         << "    \"scene_cache_contract_schema\": "
-        << ((!o.scene_cache.empty() || replay_mode) ? "1" : "null") << ",\n"
+        << ((!o.scene_cache.empty() || replay_mode) ? "2" : "null") << ",\n"
         << "    \"scene_plan_schema\": "
         << (replay_mode ? "1" : "null") << ",\n"
         << "    \"scene_plan_version\": "

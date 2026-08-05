@@ -3431,7 +3431,7 @@ namespace offline_sbs {
       const auto value = read_json(
         cache_directory / "scene_cache_contract.json"
       );
-      if (value.value("schema", 0) != 1 || value.value("status", "") != "running" || value.value("first_sequence", 0) != 1 || value.value("processed_count", 0ull) != sequence || !value.value("atomic_frame_publication", false)) {
+      if (value.value("schema", 0) != 2 || value.value("status", "") != "running" || value.value("first_sequence", 0) != 1 || value.value("processed_count", 0ull) != sequence || !value.value("atomic_frame_publication", false)) {
         throw worker_error("running scene-cache sequence contract mismatch");
       }
       const auto &source = value.at("source");
@@ -3452,7 +3452,7 @@ namespace offline_sbs {
         media.color == media_color_e::sdr ?
           "sRGB-BMP-WIC" :
           "linear-scRGB-f32-pfm";
-      if (result.source_width != media.width || result.source_height != media.height || source.at("frame_format").get<std::string>() != expected_frame_format || result.sbs_width == 0 || result.sbs_height == 0 || result.sbs_width % 2 != 0 || packed.at("eye_width").get<std::uint32_t>() * 2 != result.sbs_width || packed.at("eye_height").get<std::uint32_t>() != result.sbs_height || result.extension != (media.color == media_color_e::sdr ? "png" : "pfm") || depth.at("dtype").get<std::string>() != "float32-le" || depth.at("dxgi_format").get<std::string>() != "R32_FLOAT" || state.at("schema").get<int>() != 1 || state.at("word_count").get<int>() != 12 || result.state_bytes != 48) {
+      if (result.source_width != media.width || result.source_height != media.height || source.at("frame_format").get<std::string>() != expected_frame_format || result.sbs_width == 0 || result.sbs_height == 0 || result.sbs_width % 2 != 0 || packed.at("eye_width").get<std::uint32_t>() * 2 != result.sbs_width || packed.at("eye_height").get<std::uint32_t>() != result.sbs_height || result.extension != (media.color == media_color_e::sdr ? "png" : "pfm") || depth.at("dtype").get<std::string>() != "float32-le" || depth.at("dxgi_format").get<std::string>() != "R32_FLOAT" || depth.at("semantics").get<std::string>() != "depth-coordinate-v2-signed-final-parallax-source-u" || state.at("schema").get<int>() != 2 || state.at("word_count").get<int>() != 12 || result.state_bytes != 48) {
         throw worker_error("scene-cache media/layout contract mismatch");
       }
       const auto stem = "frame_" + frame_id(sequence);
@@ -3469,7 +3469,7 @@ namespace offline_sbs {
       return {
         {"schema", 1},
         {"version", "scene-plan-v1"},
-        {"cache_contract_schema", 1},
+        {"cache_contract_schema", 2},
         {"scenes", nlohmann::json::array({
                      {
                        {"start_sequence", scene.start_sequence},
@@ -5187,6 +5187,7 @@ namespace offline_sbs {
         "--artifacts",
         "conversion",
         "--bounded-adaptive-state",
+        "--parallax-v2-live",
         "--render-cache",
         path_utf8(cache),
         "--scene-plan",
@@ -7108,7 +7109,7 @@ namespace offline_sbs {
       );
       const auto capabilities = read_json(capabilities_path);
       const auto &native = capabilities.at("native_whole_clip");
-      if (capabilities.value("schema", 0) != 1 || native.value("follow_protocol_schema", 0) != 1 || native.value("adaptive_state_schema", 0u) != sbs_adaptive_state::schema_version || native.value("scene_cache_contract_schema", 0) != 1 || !native.value("render_cache_follow", false) || !native.value("render_skips_tensorrt", false) || !native.value("atomic_sbs_publication", false)) {
+      if (capabilities.value("schema", 0) != 1 || native.value("follow_protocol_schema", 0) != 1 || native.value("adaptive_state_schema", 0u) != sbs_adaptive_state::schema_version || native.value("scene_cache_contract_schema", 0) != 2 || native.value("renderer", "") != "depth-coordinate-v2-live-signed-parallax" || !native.value("render_cache_follow", false) || !native.value("render_skips_tensorrt", false) || !native.value("atomic_sbs_publication", false)) {
         throw worker_error("native SBS harness lacks the required replay contract");
       }
       nlohmann::json expected_analysis_flag_bits = nlohmann::json::object();
@@ -7166,6 +7167,7 @@ namespace offline_sbs {
         "--artifacts",
         "adaptive",
         "--bounded-adaptive-state",
+        "--parallax-v2-live",
       };
       if (spec.operation == "convert") {
         analysis_command.insert(
@@ -7271,6 +7273,10 @@ namespace offline_sbs {
           if (planner || !trace_header.is_object()) {
             throw worker_error("scene planner initialization is invalid");
           }
+          // Under the V2 live renderer the header's pop/adaptive/zero-plane fields are inert
+          // configuration echoes; the planner still consumes them so its scene BOUNDARIES pace
+          // caching/replay and the plan keeps its absolute_pop_strength/zero_anchor_shift_px
+          // schema, but the renderer applies none of those geometry outputs.
           const auto &config = trace_header.at("config");
           scene_planner_config_t planner_config;
           planner_config.pop_strength =
@@ -7567,6 +7573,18 @@ namespace offline_sbs {
       if (analysis_contract.value("schema", 0) != 1 || analysis_contract.value("artifact_mode", "") != "adaptive" || analysis_contract.value("source_frame_count", 0ull) != media.frames.size() || analysis_contract.value("source_first_sequence", 0ull) != 1 || analysis_contract.value("inference_mode", "") != "single-pass-tensorrt" || !analysis_contract.value("depth_inference_enabled", false) || analysis_contract.value("scheduled_depth_update_count", 0ull) != media.frames.size() || analysis_contract.value("tensorrt_enqueue_count", 0ull) != media.frames.size()) {
         throw worker_error(
           "analysis did not attest exactly one TensorRT enqueue per source frame"
+        );
+      }
+      // Offline conversion runs the production V2 pipeline: the harness must attest the
+      // depth-coordinate V2 live signed-parallax render, not the legacy estimator.
+      const auto &analysis_runtime = analysis_contract.at("resolved_runtime");
+      if (
+        !analysis_runtime.is_object() ||
+        !analysis_runtime.value("parallax_v2_render", false) ||
+        !analysis_runtime.value("parallax_v2_live", false)
+      ) {
+        throw worker_error(
+          "analysis did not attest the depth-coordinate V2 live signed-parallax render"
         );
       }
       const auto &analysis_state = analysis_contract.at("adaptive_state");

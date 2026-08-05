@@ -23,8 +23,10 @@ tensor shapes fail flat. There is no V1 fallback. See
 Live V2 uses a dedicated cut-only evidence and resolve path to produce the confirmed scene-cut
 `{generation, pulse}` it consumes. The private normalized cut field has no live geometry authority,
 and live streams do not compile or dispatch legacy subject, adaptive-pop, zero-plane, or warp
-analysis. Legacy renderer/shader sources remain in the tree for offline conversion and evaluation
-harnesses; their presence does not make V1 selectable in Host SBS.
+analysis. Offline conversion (`run_whole_clip.py` and the Web-UI offline job) now runs the same
+authenticated V2 producer and its signed-parallax renderer (`--parallax-v2-live`); legacy
+renderer/shader sources remain in the tree only for the `run_eval.py` evaluation oracle and do
+not make V1 selectable anywhere.
 
 Approved AR glasses connected as a Windows monitor also use an automatic local presenter; see
 `docs/sbs-local-ar-glasses.md`. That path reuses the production depth and warp without NVENC.

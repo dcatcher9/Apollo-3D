@@ -482,7 +482,7 @@ class StreamingScenePlannerTests(unittest.TestCase):
         document = planning.native_scene_plan_document(scene)
         self.assertEqual(document["schema"], 1)
         self.assertEqual(document["version"], "scene-plan-v1")
-        self.assertEqual(document["cache_contract_schema"], 1)
+        self.assertEqual(document["cache_contract_schema"], 2)
         self.assertEqual(len(document["scenes"]), 1)
         self.assertEqual(
             document["scenes"][0]["absolute_pop_strength"],

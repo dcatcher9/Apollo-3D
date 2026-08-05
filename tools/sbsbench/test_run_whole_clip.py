@@ -280,9 +280,10 @@ class WholeClipCapabilityTests(unittest.TestCase):
                 "follow_protocol_schema": 1,
                 "follow_global_first_sequence": True,
                 "adaptive_state_schema": whole.ADAPTIVE_TRACE_SCHEMA,
-                "scene_cache_contract_schema": 1,
+                "scene_cache_contract_schema": 2,
+                "renderer": "depth-coordinate-v2-live-signed-parallax",
                 "scene_cache_state": {
-                    "schema": 1,
+                    "schema": 2,
                     "word_count": 12,
                 },
                 "scene_plan": {
@@ -306,6 +307,8 @@ class WholeClipCapabilityTests(unittest.TestCase):
             (("native_whole_clip", "follow_protocol_schema"), True),
             (("native_whole_clip", "follow_global_first_sequence"), 1),
             (("native_whole_clip", "scene_plan", "schema"), 1.0),
+            (("native_whole_clip", "scene_cache_contract_schema"), 1),
+            (("native_whole_clip", "renderer"), "legacy-warp"),
         )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -349,6 +352,10 @@ class WholeClipNativeContractTests(unittest.TestCase):
             "schema": 1,
             "artifact_mode": mode,
             "source_frame_count": count,
+            "resolved_runtime": {
+                "parallax_v2_render": True,
+                "parallax_v2_live": True,
+            },
             "adaptive_state": {
                 "file": whole.TRACE_NAME,
                 "schema": whole.ADAPTIVE_TRACE_SCHEMA,
@@ -401,7 +408,7 @@ class WholeClipSceneCacheTests(unittest.TestCase):
             root = Path(temporary)
             ledger = whole.SceneCacheLedger(root, 1000)
             contract = {
-                "schema": 1,
+                "schema": 2,
                 "processed_count": 1,
                 "depth": {"bytes_per_frame": 752},
                 "state": {"bytes_per_frame": 48},
@@ -433,7 +440,7 @@ class WholeClipSceneCacheTests(unittest.TestCase):
             ledger = whole.SceneCacheLedger(root, 1000)
             with self.assertRaisesRegex(whole.WholeClipError, "size mismatch"):
                 ledger.acknowledge_pair(1, {
-                    "schema": 1,
+                    "schema": 2,
                     "processed_count": 1,
                     "depth": {"bytes_per_frame": 2},
                     "state": {"bytes_per_frame": 48},
@@ -515,13 +522,27 @@ class WholeClipOrchestrationTests(unittest.TestCase):
             "movie.mkv",
             "--out", "result",
             "--fps", "24",
-            "--extra", "--", "--zero-plane", "subject",
+            "--extra", "--", "--pop-strength", "1.25",
         ])
         self.assertEqual(args.out, "result")
         self.assertEqual(args.fps, 24)
-        self.assertEqual(args.extra, ["--zero-plane", "subject"])
+        self.assertEqual(args.extra, ["--pop-strength", "1.25"])
         with self.assertRaisesRegex(whole.WholeClipError, "owned"):
             whole.validate_native_extra(["--limit=5"])
+
+    def test_parallax_v2_live_is_wrapper_owned(self):
+        with self.assertRaisesRegex(whole.WholeClipError, "owned"):
+            whole.validate_native_extra(["--parallax-v2-live"])
+
+    def test_legacy_geometry_extras_are_rejected_as_evaluation_only(self):
+        with self.assertRaisesRegex(
+                whole.WholeClipError, r"legacy-evaluation-only.*run_eval\.py"):
+            whole.validate_native_extra(["--zero-plane", "subject"])
+        for option in sorted(whole.LEGACY_EVALUATION_ONLY_OPTIONS):
+            with self.subTest(option=option):
+                with self.assertRaisesRegex(
+                        whole.WholeClipError, "legacy-evaluation-only"):
+                    whole.validate_native_extra([option])
 
     def test_run_uses_bounded_scene_pipeline_and_cleans_success_work(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -600,7 +621,7 @@ class WholeClipOrchestrationTests(unittest.TestCase):
                         whole, "generate_report_outputs",
                         return_value={"available": True}):
                 result = whole.run(self._args(
-                    source, output, sunshine, conf, "--zero-plane", "subject"))
+                    source, output, sunshine, conf, "--pop-strength", "1.25"))
 
             self.assertEqual(result["status"], "complete")
             self.assertEqual(len(calls), 1)
@@ -609,7 +630,7 @@ class WholeClipOrchestrationTests(unittest.TestCase):
                 whole.FrameDirectoryFollowProducer,
             )
             self.assertEqual(
-                calls[0]["native_extra"], ["--zero-plane", "subject"])
+                calls[0]["native_extra"], ["--pop-strength", "1.25"])
             self.assertFalse((output / "work").exists())
             manifest = json.loads(
                 (output / whole.MANIFEST_NAME).read_text(encoding="utf-8"))

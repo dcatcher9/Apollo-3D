@@ -151,12 +151,14 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
   README). Run
   it from `cmake-build-relwithdebinfo` so `assets/` resolves.
 - **Whole-clip analysis/conversion** — `tools/sbsbench/run_whole_clip.py` keeps one native Host SBS
-  estimator alive across a complete video or numbered frame sequence, exports adaptive-pop,
-  zero-plane, cut, depth-health, per-frame, and per-shot evidence, and can encode a packed-SBS
-  H.265/HEVC or AV1 video. Use it for continuous-content investigation and offline conversion;
-  keep `run_eval.py` as the authenticated regression gate. The offline path synchronously
-  completes each requested inference and is therefore a deterministic current-frame quality
-  oracle, not an exact replay of live Host SBS's bounded asynchronous drop/repeat timing. See
+  estimator alive across a complete video or numbered frame sequence, exports cut, depth-health,
+  per-frame, and per-shot evidence, and can encode a packed-SBS H.265/HEVC or AV1 video. It runs
+  the production Depth Coordinate V2 pipeline (`--parallax-v2-live`: `host_sbs_v2` estimator,
+  signed final-parallax scene cache schema 2, shared contractive-inverse renderer); legacy
+  geometry levers are rejected and remain evaluator-only in `run_eval.py`, which stays the
+  authenticated regression gate. The offline path synchronously completes each requested
+  inference and is therefore a deterministic current-frame quality oracle, not an exact replay of
+  live Host SBS's bounded asynchronous drop/repeat timing. See
   [docs/whole-clip-sbs-pipeline.md](docs/whole-clip-sbs-pipeline.md).
 - **Perf** — the global `diagnostics = enabled` config knob ([src/sbs_perf.cpp](src/sbs_perf.cpp));
   shipped config defaults it off and `E:\ApolloDev\config\sunshine.conf` enables it. It logs a rolling

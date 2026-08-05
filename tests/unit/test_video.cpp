@@ -3668,7 +3668,7 @@ TEST(DirectxShaderSourceTest, WholeClipReplayKeepsCanonicalStateAndUsesAnOffline
   EXPECT_NE(harness.find("ERROR_SHARING_VIOLATION"), std::string::npos);
   EXPECT_NE(harness.find("ERROR_LOCK_VIOLATION"), std::string::npos);
   const auto state_contract = harness.find("{\"state\", {");
-  const auto state_schema = harness.find("{\"schema\", 1}", state_contract);
+  const auto state_schema = harness.find("{\"schema\", 2}", state_contract);
   ASSERT_NE(state_contract, std::string::npos);
   ASSERT_NE(state_schema, std::string::npos);
   EXPECT_LT(state_contract, state_schema);
@@ -3695,10 +3695,11 @@ TEST(DirectxShaderSourceTest, WholeClipReplayKeepsCanonicalStateAndUsesAnOffline
   EXPECT_LT(live_estimator_guard, live_estimator_construction);
   EXPECT_NE(
     harness.find(
-      "const auto *warp_macros = direct_parallax_mode ? direct_parallax_macros"
+      "const auto *warp_macros = o.parallax_v2_live ? live_v2_macros"
     ),
     std::string::npos
   );
+  EXPECT_NE(harness.find("SBS_LIVE_V2_SIGNED_PARALLAX"), std::string::npos);
   EXPECT_NE(
     harness.find("(replay_mode ? scene_camera_macros : nullptr)"),
     std::string::npos
@@ -3774,7 +3775,7 @@ TEST(DirectxShaderSourceTest, WholeClipReplayKeepsCanonicalStateAndUsesAnOffline
     std::string::npos
   );
   EXPECT_NE(
-    harness.find("\"scene-cache-contract-schema-1:R32_FLOAT\""),
+    harness.find("\"scene-cache-contract-schema-2:signed-final-parallax-R32_FLOAT\""),
     std::string::npos
   );
   EXPECT_EQ(

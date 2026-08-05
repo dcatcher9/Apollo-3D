@@ -69,9 +69,30 @@ RESERVED_NATIVE_OPTIONS = {
     "--limit",
     "--out",
     "--output-every",
+    "--parallax-v2-live",
     "--render-cache",
     "--scene-cache",
     "--scene-plan",
+}
+# The V2 live renderer uses the fixed production calibration; the native harness rejects
+# these legacy geometry/EMA levers under --parallax-v2-live, so fail before launch with a
+# clear message instead of surfacing a native argument error mid-pipeline.
+LEGACY_EVALUATION_ONLY_OPTIONS = {
+    "--adaptive-pop",
+    "--adaptive-pop-max",
+    "--depth-every",
+    "--depth-short-side",
+    "--ema",
+    "--ema-edge-change",
+    "--ema-edge-gradient",
+    "--ema-edge-strength",
+    "--literal-bestv2",
+    "--minmax-ema",
+    "--no-adaptive-pop",
+    "--no-subject-stretch",
+    "--subject-recenter",
+    "--subject-stretch",
+    "--zero-plane",
 }
 
 sys.path.insert(0, str(SCRIPT_DIR))
@@ -921,8 +942,8 @@ class SceneCacheLedger:
             raise WholeClipError(f"scene cache pair {sequence} was already acknowledged")
         if sequence <= 0:
             raise WholeClipError("scene cache sequence must be positive")
-        if contract.get("schema") != 1:
-            raise WholeClipError("scene cache contract schema is not 1")
+        if contract.get("schema") != 2:
+            raise WholeClipError("scene cache contract schema is not 2")
         processed_count = contract.get("processed_count")
         if (
             not isinstance(processed_count, int) or
@@ -1044,6 +1065,26 @@ def validate_packed_sbs_contract(
     contract: dict[str, Any],
     expected_extension: str,
 ) -> tuple[int, int]:
+    if contract.get("schema") != 2:
+        raise WholeClipError(
+            f"scene cache contract schema is not 2: {contract.get('schema')!r}")
+    state = contract.get("state")
+    if (
+        not isinstance(state, dict) or
+        state.get("schema") != 2 or
+        state.get("word_count") != 12 or
+        state.get("source") != "depth_coordinate_v2.ParallaxState[0..2]"
+    ):
+        raise WholeClipError(
+            "scene cache contract lacks the schema-2 12-word ParallaxState descriptor")
+    depth = contract.get("depth")
+    if (
+        not isinstance(depth, dict) or
+        depth.get("semantics") !=
+            "depth-coordinate-v2-signed-final-parallax-source-u"
+    ):
+        raise WholeClipError(
+            "scene cache contract lacks the V2 signed final-parallax depth semantics")
     packed = contract.get("packed_sbs")
     if not isinstance(packed, dict):
         raise WholeClipError("scene cache contract lacks packed_sbs geometry")
@@ -1058,6 +1099,14 @@ def validate_packed_sbs_contract(
     render_config = contract.get("render_config")
     if not isinstance(render_config, dict):
         raise WholeClipError("scene cache contract lacks render_config")
+    if render_config.get("renderer") != "depth-coordinate-v2-live-signed-parallax":
+        raise WholeClipError(
+            "scene cache render_config does not name the V2 live signed-parallax "
+            f"renderer: {render_config.get('renderer')!r}")
+    if render_config.get("depth_reuse_interval") != 1:
+        raise WholeClipError(
+            "scene cache render_config depth_reuse_interval must be 1 under the "
+            f"V2 live renderer: {render_config.get('depth_reuse_interval')!r}")
     simulate_hdr = bool(render_config.get("simulate_hdr"))
     expected_format = (
         "linear-scRGB-f32-pfm"
@@ -1794,6 +1843,11 @@ def validate_native_extra(options: list[str]) -> None:
         if name in RESERVED_NATIVE_OPTIONS:
             raise WholeClipError(
                 f"{name} is owned by the whole-clip wrapper and cannot be passed via --extra")
+        if name in LEGACY_EVALUATION_ONLY_OPTIONS:
+            raise WholeClipError(
+                f"{name} is a legacy-evaluation-only lever (run_eval.py); the whole-clip "
+                "pipeline runs the fixed V2 live calibration (--parallax-v2-live) and the "
+                "native harness rejects it")
 
 
 def query_native_capabilities(
@@ -1815,8 +1869,10 @@ def query_native_capabilities(
         ("native_whole_clip", "follow_protocol_schema"): 1,
         ("native_whole_clip", "follow_global_first_sequence"): True,
         ("native_whole_clip", "adaptive_state_schema"): ADAPTIVE_TRACE_SCHEMA,
-        ("native_whole_clip", "scene_cache_contract_schema"): 1,
-        ("native_whole_clip", "scene_cache_state", "schema"): 1,
+        ("native_whole_clip", "scene_cache_contract_schema"): 2,
+        ("native_whole_clip", "renderer"):
+            "depth-coordinate-v2-live-signed-parallax",
+        ("native_whole_clip", "scene_cache_state", "schema"): 2,
         ("native_whole_clip", "scene_cache_state", "word_count"): 12,
         ("native_whole_clip", "scene_plan", "schema"): 1,
         ("native_whole_clip", "scene_plan", "version"): "scene-plan-v1",
@@ -2425,6 +2481,15 @@ def validate_native_outputs(
         raise WholeClipError(
             "whole-clip contract source count mismatch: "
             f"{contract.get('source_frame_count')!r} != {expected_count}")
+    resolved_runtime = contract.get("resolved_runtime")
+    if (
+        not isinstance(resolved_runtime, dict) or
+        resolved_runtime.get("parallax_v2_render") is not True or
+        resolved_runtime.get("parallax_v2_live") is not True
+    ):
+        raise WholeClipError(
+            "whole-clip contract does not attest the depth-coordinate V2 live "
+            "signed-parallax render (--parallax-v2-live)")
     adaptive_contract = contract.get("adaptive_state")
     if not isinstance(adaptive_contract, dict):
         raise WholeClipError("whole-clip contract lacks the adaptive-state descriptor")
@@ -2789,6 +2854,7 @@ def render_cached_scene(
         "--follow-count", str(count),
         "--out", os.fspath(native_out),
         "--artifacts", "conversion",
+        "--parallax-v2-live",
         "--render-cache", os.fspath(cache_dir),
         "--scene-plan", os.fspath(plan_path),
     ]
@@ -2876,10 +2942,13 @@ def render_cached_scene(
         resolved_runtime = native_contract.get("resolved_runtime")
         expected_runtime = {
             "scene_cache_replay": True,
+            "scene_cache_contract_schema": 2,
             "scene_plan_schema": 1,
             "scene_plan_version": "scene-plan-v1",
             "scene_start_sequence": start,
             "scene_end_sequence_exclusive": end,
+            "parallax_v2_render": True,
+            "parallax_v2_live": True,
         }
         if not isinstance(resolved_runtime, dict):
             contract_mismatches["resolved_runtime"] = {
@@ -2898,10 +2967,8 @@ def render_cached_scene(
             not isinstance(sbs, dict) or
             sbs.get("enabled") is not True or
             sbs.get("frame_count") != count or
-            sbs.get("file_pattern") !=
-                f"sbs_<frame-id>.{extension}" or
-            (sbs.get("width"), sbs.get("height")) !=
-                expected_sbs_dimensions
+            sbs.get("file_pattern") != f"sbs_<frame-id>.{extension}" or
+            (sbs.get("width"), sbs.get("height")) != expected_sbs_dimensions
         ):
             contract_mismatches["sbs"] = {
                 "expected": {
@@ -3045,6 +3112,7 @@ def run_streaming_scene_pipeline(
         "--follow-count", str(frame_count),
         "--out", os.fspath(artifacts_dir),
         "--artifacts", "adaptive",
+        "--parallax-v2-live",
     ]
     if conversion:
         analysis_command += ["--scene-cache", os.fspath(cache_dir)]
@@ -3733,255 +3801,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.scene_cache_max_bytes <= 0:
         parser.error("--scene-cache-max-bytes must be a positive integer")
     return args
-
-
-def _run_spooled_legacy(args: argparse.Namespace) -> dict[str, Any]:
-    source = Path(args.input).expanduser().resolve()
-    output_dir = Path(args.out).expanduser().resolve()
-    if not source.exists():
-        raise WholeClipError(f"input does not exist: {source}")
-    if not (source.is_file() or source.is_dir()):
-        raise WholeClipError(f"input must be a video file or frame directory: {source}")
-    require_new_or_empty_directory(output_dir)
-
-    build_dir = Path(args.build_dir).expanduser().resolve()
-    sunshine = (
-        Path(args.sunshine).expanduser().resolve()
-        if args.sunshine else build_dir / "sunshine.exe"
-    )
-    conf = Path(args.conf).expanduser().resolve()
-    output_video = (
-        Path(args.sbs_video).expanduser().resolve() if args.sbs_video else None
-    )
-    if not sunshine.is_file():
-        raise WholeClipError(f"sunshine executable does not exist: {sunshine}")
-    if not conf.is_file():
-        raise WholeClipError(f"configuration file does not exist: {conf}")
-    validate_native_extra(args.extra)
-
-    artifact_mode = "conversion" if output_video else "adaptive"
-    work_dir = output_dir / "work"
-    artifacts_dir = output_dir / "artifacts"
-    if output_video:
-        validate_output_target(output_video, args.codec, work_dir)
-    work_dir.mkdir()
-    artifacts_dir.mkdir()
-    manifest_path = output_dir / MANIFEST_NAME
-    manifest: dict[str, Any] = {
-        "schema": 1,
-        "status": "initializing",
-        "source": {
-            "path": os.fspath(source),
-            "kind": "frames" if source.is_dir() else "video",
-        },
-        "sunshine": {
-            "path": os.fspath(sunshine),
-            "sha256": sha256_file(sunshine),
-        },
-        "configuration": {
-            "path": os.fspath(conf),
-            "sha256": sha256_file(conf),
-        },
-        "artifact_mode": artifact_mode,
-        "native_extra": list(args.extra),
-        "commands": {},
-    }
-    write_json_atomic(manifest_path, manifest)
-
-    succeeded = False
-    timeline: dict[str, Any] | None = None
-    generated_frames_dir: Path | None = None
-    video_encode_attempted = False
-    try:
-        ffmpeg = None
-        source_video: Path | None = None
-        if source.is_file():
-            source_video = source
-            try:
-                ffmpeg = resolve_pipeline_ffmpeg(build_dir)
-            except RuntimeError as exc:
-                raise WholeClipError(str(exc)) from exc
-            metadata = inspect_video_metadata(source)
-            reject_unsupported_video(metadata)
-            frames_dir = work_dir / "frames"
-            generated_frames_dir = frames_dir
-            source_width, source_height = video_dimensions(metadata)
-            try:
-                manifest["disk_preflight"] = disk_spool_preflight(
-                    output_dir,
-                    frame_count=estimated_video_frame_count(metadata),
-                    source_width=source_width,
-                    source_height=source_height,
-                    source_spooled=True,
-                    conversion=output_video is not None,
-                    native_extra=args.extra,
-                )
-            except DiskSpaceError as exc:
-                manifest["disk_preflight"] = exc.preflight
-                raise
-            write_json_atomic(manifest_path, manifest)
-            timeline, decode_command = decode_video(
-                ffmpeg, source, frames_dir, work_dir / "decode.log", metadata)
-            frames = frame_directory_files(frames_dir)
-            manifest["ffmpeg"] = {
-                "path": ffmpeg,
-                "metadata": metadata,
-            }
-            manifest["commands"]["decode"] = decode_command
-            manifest["source"]["sha256"] = sha256_file(source)
-            manifest["source"]["size_bytes"] = source.stat().st_size
-        else:
-            frames_dir = source
-            frames = frame_directory_files(frames_dir)
-            source_width, source_height = frame_dimensions(frames[0])
-            try:
-                manifest["disk_preflight"] = disk_spool_preflight(
-                    output_dir,
-                    frame_count=len(frames),
-                    source_width=source_width,
-                    source_height=source_height,
-                    source_spooled=False,
-                    conversion=output_video is not None,
-                    native_extra=args.extra,
-                )
-            except DiskSpaceError as exc:
-                manifest["disk_preflight"] = exc.preflight
-                raise
-            timeline = build_frame_directory_timeline(
-                frames, frame_directory_fps(source, args.fps))
-            manifest["source"]["sha256"] = sha256_frame_set(source, frames)
-            manifest["source"]["frame_count"] = len(frames)
-            if output_video:
-                try:
-                    ffmpeg = resolve_pipeline_ffmpeg(build_dir)
-                except RuntimeError as exc:
-                    raise WholeClipError(str(exc)) from exc
-                manifest["ffmpeg"] = {"path": ffmpeg}
-
-        timeline_path = output_dir / TIMELINE_NAME
-        write_json_atomic(timeline_path, timeline)
-        manifest["timeline"] = {
-            "file": TIMELINE_NAME,
-            "sha256": sha256_file(timeline_path),
-            "frame_count": timeline["frame_count"],
-            "variable_frame_rate": timeline["variable_frame_rate"],
-            "first_pts_time": timeline["first_pts_time"],
-        }
-        manifest["status"] = "decoded"
-        write_json_atomic(manifest_path, manifest)
-
-        harness_command = [
-            os.fspath(sunshine),
-            os.fspath(conf),
-            "--sbs-bench",
-            "--frames", os.fspath(frames_dir),
-            "--out", os.fspath(artifacts_dir),
-            "--artifacts", artifact_mode,
-            *args.extra,
-        ]
-        manifest["commands"]["harness"] = harness_command
-        write_json_atomic(manifest_path, manifest)
-        run_logged_command(harness_command, build_dir, output_dir / "harness.log")
-        native_contract = validate_native_outputs(
-            artifacts_dir, timeline, artifact_mode)
-        contract_path = artifacts_dir / NATIVE_CONTRACT_NAME
-        trace_path = artifacts_dir / TRACE_NAME
-        manifest["native_contract"] = {
-            "file": f"artifacts/{NATIVE_CONTRACT_NAME}",
-            "sha256": sha256_file(contract_path),
-            "value": native_contract,
-        }
-        manifest["runtime_provenance"] = runtime_provenance(
-            build_dir, native_contract)
-        manifest["adaptive_trace"] = {
-            "file": f"artifacts/{TRACE_NAME}",
-            "sha256": sha256_file(trace_path),
-        }
-        manifest["status"] = "harness_complete"
-        write_json_atomic(manifest_path, manifest)
-
-        manifest["report"] = generate_report_outputs(
-            trace_path, output_dir, timeline, source.name)
-        if output_video:
-            assert ffmpeg is not None
-            video_encode_attempted = True
-            video_commands = encode_sbs_video(
-                ffmpeg,
-                artifacts_dir,
-                timeline,
-                source_video,
-                output_video,
-                args.codec,
-                work_dir,
-            )
-            manifest["commands"]["video"] = video_commands
-            video_validation = validate_encoded_timeline(
-                ffmpeg,
-                output_video,
-                timeline,
-                work_dir / "video-validate.log",
-            )
-            manifest["commands"]["video_validation"] = video_validation["command"]
-            manifest["sbs_video"] = {
-                "path": os.fspath(output_video),
-                "container": _container_for(output_video),
-                "codec": args.codec,
-                "sha256": sha256_file(output_video),
-                "size_bytes": output_video.stat().st_size,
-                "audio": "source-stream-copy" if source_video else "none",
-                "timeline_validation": {
-                    key: value for key, value in video_validation.items()
-                    if key not in ("command", "log")
-                },
-            }
-            if args.keep_sbs_frames:
-                manifest["cleanup"] = {
-                    "sbs_frames": {
-                        "kept": True,
-                        "removed": 0,
-                    },
-                }
-            else:
-                removed = remove_expected_sbs_frames(artifacts_dir, timeline)
-                manifest["cleanup"] = {
-                    "sbs_frames": {
-                        "kept": False,
-                        "removed": removed,
-                    },
-                }
-
-        manifest["status"] = "complete"
-        succeeded = True
-        write_json_atomic(manifest_path, manifest)
-        return manifest
-    except Exception as exc:
-        if not args.keep_work:
-            failure_cleanup: dict[str, Any] = {}
-            if generated_frames_dir and generated_frames_dir.is_dir():
-                # This exact directory was created below a previously empty output root.
-                shutil.rmtree(generated_frames_dir)
-                failure_cleanup["source_frame_spool_removed"] = True
-            removed_sbs = remove_available_expected_sbs_frames(
-                artifacts_dir, timeline)
-            failure_cleanup["sbs_frames_removed"] = removed_sbs
-            if video_encode_attempted and output_video and output_video.is_file():
-                output_video.unlink()
-                failure_cleanup["partial_sbs_video_removed"] = True
-            manifest["failure_cleanup"] = failure_cleanup
-        else:
-            manifest["failure_cleanup"] = {
-                "kept": True,
-                "reason": "--keep-work",
-            }
-        manifest["status"] = "failed"
-        manifest["error"] = str(exc)
-        write_json_atomic(manifest_path, manifest)
-        if isinstance(exc, WholeClipError):
-            raise
-        raise WholeClipError(str(exc)) from exc
-    finally:
-        if succeeded and not args.keep_work:
-            shutil.rmtree(work_dir)
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
