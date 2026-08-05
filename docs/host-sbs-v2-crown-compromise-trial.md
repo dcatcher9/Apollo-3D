@@ -308,8 +308,9 @@ the exact 3x3 linear-clamp kernel, negative and greater-than-one color values, o
 saturated masks, negative-correction bypass, image boundaries, both eyes, and a nonzero inverse
 warp. This avoids the former six-pixel-period/short-texture blind spot.
 
-The default `tools/sbsbench/run_eval.py` gate intentionally sets `parallax_v2_render = false`; it
-is the legacy comparison pipeline. Updating its baselines would not validate C75 or the live collar
+The default `tools/sbsbench/run_eval.py` gate now runs the production V2 renderer
+(`--parallax-v2-live`) and records `parallax_v2_render = true`; its committed baselines were
+regenerated accordingly (2026-08-04). Updating its baselines would not validate C75 or the live collar
 filter. The manifest-driven direct-parallax harness validates V2 geometry but compiles a different
 pixel shader and does not bind the live candidate mask. Therefore neither path should be cited as
 live collar-filter evidence. A dedicated authenticated live-V2 clip path is still needed before

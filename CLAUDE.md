@@ -100,7 +100,7 @@ SBS change by eyeballing the headset; produce the before/after numbers. See
   worst frame), 2 = setup error.** Results + provenance (git sha, models, clip hashes) land in
   `<build-dir>/sbs_eval/<label>/results.json`. After an INTENDED metric change, re-baseline with
   `--update-baselines` and commit the baselines together with the change. Supported A/B levers
-  pass through, for example `--extra --pop-strength 1.25` or `--extra --depth-short-side 392`.
+  pass through, for example `--extra --pop-strength 1.25`.
   GPU harnesses remain serial so their timing evidence is uncontended; authenticated CPU scoring
   is ordered but parallel across clips (`--jobs`, default up to eight, `--jobs 1` for the serial
   reference), and report remeasurement inherits the same job count.

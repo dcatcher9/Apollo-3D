@@ -15,7 +15,7 @@ Typical use:
   python tools/sbsbench/run_eval.py                     # eval vs committed baselines
   python tools/sbsbench/run_eval.py --jobs 1            # serial CPU scoring reference
   python tools/sbsbench/run_eval.py --update-baselines  # after an INTENDED change: re-baseline
-  python tools/sbsbench/run_eval.py --extra --zero-plane background  # pass supported A/B levers
+  python tools/sbsbench/run_eval.py --extra --pop-strength 1.25  # pass supported A/B levers
 
 GPU harnesses run serially so their performance evidence remains valid. CPU metric scoring runs
 concurrently across clips (up to eight jobs by default). Results land in
@@ -29,7 +29,6 @@ import datetime
 import glob
 import hashlib
 import json
-import math
 import ntpath
 import os
 import platform
@@ -61,12 +60,36 @@ import eval_parallel  # noqa: E402  (evaluator scheduling; deliberately not metr
 import direct_geometry_contract as direct_geometry  # noqa: E402
 import subject_state_contract  # noqa: E402
 import whole_clip_raw_contract  # noqa: E402
-from depth_coordinate_v2_contract import MODEL_CALIBRATIONS  # noqa: E402
+from depth_coordinate_v2_contract import (  # noqa: E402
+    CONTRACT_SCHEMA as PARALLAX_V2_CONTRACT_SCHEMA,
+    MODEL_CALIBRATIONS,
+)
 from generate_depth_coordinate_v2_contract import (  # noqa: E402
+    PARALLAX_V2_SHADER_SPECS,
     shader_source_closure_sha256,
 )
 
 EVAL_SCHEMA = whole_clip_raw_contract.EVALUATOR_SCHEMA  # schema 36; harness 19 or direct 22
+PARALLAX_V2_LIVE_RENDERER = "depth-coordinate-v2-live-signed-parallax"
+# Levers consumed only by the removed-from-gating legacy evaluator. The gate runs the
+# production Depth Coordinate V2 pipeline (--parallax-v2-live), whose calibration is fixed;
+# the native harness rejects these, so fail before any GPU work with a clear message.
+LEGACY_EVALUATION_ONLY_OPTIONS = (
+    "--adaptive-pop",
+    "--adaptive-pop-max",
+    "--depth-short-side",
+    "--ema",
+    "--ema-edge-change",
+    "--ema-edge-gradient",
+    "--ema-edge-strength",
+    "--literal-bestv2",
+    "--minmax-ema",
+    "--no-adaptive-pop",
+    "--no-subject-stretch",
+    "--subject-recenter",
+    "--subject-stretch",
+    "--zero-plane",
+)
 BASELINE_SNAPSHOT_SCHEMA = 1
 BASELINE_SNAPSHOT_FILE = "baseline_snapshot.json"
 TRAINING_LABEL_STATUS = "qualified"
@@ -472,7 +495,7 @@ def label_context_sha(meta):
         "depth_coordinate_v2_calibration_id", "depth_coordinate_v2_raw_shape",
         "profile", "extra_args", "depth_step",
         "depth_compensation", "warp_input", "literal_bestv2", "adaptive_pop", "adaptive_pop_max",
-        "parallax_v2_shadow", "parallax_v2_render",
+        "parallax_v2_shadow", "parallax_v2_render", "parallax_v2_live",
         "zero_plane", "training_labels", "training_label_gate", "metric_runtime",
         "scored_artifact_sha256", "baseline_snapshot_sha256",
     )
@@ -1009,6 +1032,7 @@ def baseline_required_context(candidate_meta):
         "cuda_graph": candidate_meta.get("cuda_graph"),
         "parallax_v2_shadow": candidate_meta.get("parallax_v2_shadow"),
         "parallax_v2_render": candidate_meta.get("parallax_v2_render"),
+        "parallax_v2_live": candidate_meta.get("parallax_v2_live"),
         "conf_sha256": candidate_meta.get("conf_sha256"),
         "metric_sha256": candidate_meta.get("metric_sha256"),
         "metric_runtime": candidate_meta.get("metric_runtime"),
@@ -1766,7 +1790,25 @@ def authoritative_remeasurement_clip_meta(
                 artifact_dir, contract, source_ids, scored_images["depth"])
         except ValueError as exc:
             raise ValueError(f"clips.{clip}: {exc}") from exc
+    else:
+        # Ordinary schema-19 evaluation runs execute the production Depth Coordinate V2
+        # renderer; a legacy-pipeline result must never be remeasured as current evidence.
+        live_contract = contract.get("parallax_v2_live")
+        if (not isinstance(live_contract, dict) or
+                live_contract.get("enabled") is not True or
+                live_contract.get("renderer") != PARALLAX_V2_LIVE_RENDERER or
+                live_contract.get("legacy_levers_applied") is not False):
+            raise ValueError(
+                f"clips.{clip}: harness contract does not attest the production V2 live "
+                "signed-parallax renderer (--parallax-v2-live)")
+        if contract.get("parallax_v2_render") is not True:
+            raise ValueError(
+                f"clips.{clip}: parallax_v2_render must be true for a V2 live evaluation run")
     authoritative = {key: contract[key] for key in contract_keys if key in contract}
+    if not direct_parallax_run:
+        # Recorded as the validated boolean attestation; the full renderer descriptor stays in
+        # the harness contract so a clip-meta/baseline merge cannot shadow the run-level flag.
+        authoritative["parallax_v2_live"] = True
     for key in contract_keys:
         if key not in contract:
             raise ValueError(f"clips.{clip}: harness contract is missing {key}")
@@ -2403,7 +2445,8 @@ def run_engine_preflight(exe, conf, build_dir, frames_dir, model):
     """Build/resolve an engine outside measured clips, then require a fresh exact manifest."""
     with tempfile.TemporaryDirectory(prefix="sbs-engine-preflight-", dir=build_dir) as out_dir:
         cmd = [exe, os.path.abspath(conf), "--sbs-bench", "--frames", frames_dir,
-               "--out", out_dir, "--model", model, "--limit", "1"]
+               "--out", out_dir, "--model", model, "--limit", "1",
+               "--parallax-v2-live"]
         try:
             result = subprocess.run(
                 cmd, cwd=build_dir, capture_output=True, text=True, timeout=900,
@@ -2430,7 +2473,7 @@ def main():
     ap.add_argument("--baseline-dir", help="override suite baseline directory")
     ap.add_argument("--label", default=None, help="run label (default: timestamp)")
     ap.add_argument("--extra", nargs=argparse.REMAINDER, default=[],
-                    help="extra harness args, e.g. --extra --zero-plane background")
+                    help="extra harness args, e.g. --extra --pop-strength 1.25")
     ap.add_argument("--update-baselines", action="store_true",
                     help="write this run as the new committed baselines (use after intended changes)")
     ap.add_argument("--comparison-only", action="store_true",
@@ -2465,6 +2508,18 @@ def main():
         fail("--update-baselines requires the canonical profile/config with no --extra overrides; "
              "move an accepted setting into bench.conf or production defaults first")
     baseline_source_head = require_clean_baseline_update(args.update_baselines)
+    rejected_legacy = sorted(
+        {flag for flag in args.extra if flag in LEGACY_EVALUATION_ONLY_OPTIONS})
+    if rejected_legacy:
+        fail("legacy-evaluator-only lever(s) " + ", ".join(rejected_legacy) +
+             " are no longer supported: the gate runs the production Depth Coordinate V2 "
+             "pipeline (--parallax-v2-live), which uses the fixed live calibration and "
+             "rejects them")
+    if "--depth-override-root" in args.extra or "--depth-override-all" in args.extra:
+        fail("depth-override runs are a legacy-evaluator-only feature: the gate now runs the "
+             "production Depth Coordinate V2 pipeline (--parallax-v2-live), and the native "
+             "harness forbids depth overrides with it; check out an evaluator revision that "
+             "predates the V2 gate migration for that reference workflow")
     literal_bestv2 = "--literal-bestv2" in args.extra
     direct_parallax_root = ""
     direct_parallax_flags = [
@@ -2495,8 +2550,10 @@ def main():
         depth_reuse_interval = int(extra_value(args.extra, "--depth-every", 1))
     except (TypeError, ValueError):
         fail("--depth-every must be an integer")
-    if not 1 <= depth_reuse_interval <= 8:
-        fail("--depth-every must be between 1 and 8")
+    if depth_reuse_interval != 1:
+        fail("--depth-every cadence treatments are legacy-evaluator-only: the production V2 "
+             "camera and cut history are stateful per frame, so the gate requires "
+             "--depth-every 1")
     depth_step = ("current-once" if depth_reuse_interval == 1 else
                   f"reuse-{depth_reuse_interval}")
     if literal_bestv2 and not args.comparison_only:
@@ -2581,10 +2638,20 @@ def main():
     expected_cuda_graph = expected_shared_bool(
         args.conf, "cuda_graph", True, args.extra, "--cuda-graph")
     # These persisted fields describe this evaluator invocation, not live Host SBS configuration.
-    # The default clip gate intentionally remains the legacy comparison pipeline; authenticated
-    # V2 sequence replay records render=true in its own manifest-driven path.
+    # The default clip gate runs the production Depth Coordinate V2 renderer
+    # (--parallax-v2-live). Authenticated direct-geometry replay keeps its own schema-23
+    # comparison-only contract and stays off the live flag.
     expected_v2_shadow = False
-    expected_v2_render = False
+    expected_v2_live = not direct_parallax_root
+    expected_v2_render = expected_v2_live
+    expected_v2_live_contract = {
+        "enabled": True,
+        "renderer": PARALLAX_V2_LIVE_RENDERER,
+        "producer_source_closure_sha256": shader_source_closure_sha256(
+            specs=PARALLAX_V2_SHADER_SPECS),
+        "contract_schema": PARALLAX_V2_CONTRACT_SCHEMA,
+        "legacy_levers_applied": False,
+    }
     expected_adaptive = expected_adaptive_pop(args.conf, expected_config_profile, args.extra)
     expected_adaptive_max = expected_profile_number(
         args.conf, expected_config_profile, "adaptive_pop_max", 2.00, args.extra,
@@ -2631,6 +2698,7 @@ def main():
             "cuda_graph": expected_cuda_graph,
             "parallax_v2_shadow": expected_v2_shadow,
             "parallax_v2_render": expected_v2_render,
+            "parallax_v2_live": expected_v2_live,
             "conf_sha256": conf_sha,
             "metric_sha256": metric_sha,
             "label_contract_sha256": label_sha,
@@ -2724,6 +2792,7 @@ def main():
         "cuda_graph": expected_cuda_graph,
         "parallax_v2_shadow": expected_v2_shadow,
         "parallax_v2_render": expected_v2_render,
+        "parallax_v2_live": expected_v2_live,
         "depth_compensation": depth_compensation,
         "eval_schema": EVAL_SCHEMA, "depth_step": depth_step,
         "depth_reuse_interval": depth_reuse_interval,
@@ -2761,6 +2830,8 @@ def main():
         cmd = [exe, os.path.abspath(args.conf), "--sbs-bench",
                "--frames", clip_dir, "--out", out_dir,
                "--model", expected_model]
+        if expected_v2_live:
+            cmd.append("--parallax-v2-live")
         cmd += args.extra
         print(f"[{clip}] harness...", flush=True)
         try:
@@ -2808,6 +2879,8 @@ def main():
                     sbsbench.indexed_files(
                         os.path.join(clip_dir, "frame_*.*"), "frame_")),
             })
+        else:
+            expected_contract["parallax_v2_live"] = expected_v2_live_contract
         mismatched = {key: (expected, contract.get(key))
                       for key, expected in expected_contract.items()
                       if contract.get(key) != expected}
@@ -2838,6 +2911,11 @@ def main():
                      "cuda_graph_captured": contract["cuda_graph_captured"]}
         if direct_parallax_root:
             clip_meta["warp_input"] = contract["warp_input"]
+        else:
+            # The exact renderer descriptor was already matched against expected_contract
+            # above; the clip record keeps the boolean attestation so merging clip metadata
+            # into run/baseline metadata cannot shadow the run-level flag with an object.
+            clip_meta["parallax_v2_live"] = True
 
         # A valid harness result has one source, raw-model, warp-input depth, and SBS artifact for
         # every numeric frame identity. This catches dropped/renumbered outputs before metrics run.

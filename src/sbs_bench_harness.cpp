@@ -1209,6 +1209,65 @@ namespace sbs_bench {
       ctx->Unmap(stage_cache.Get(), 0);
     }
 
+    // V2 evaluation depth artifact. Under host_sbs_v2 the estimator's normalized depth SRV is a
+    // private cut field with no geometry authority, so the scored depth_<frame>.png is produced
+    // from the authenticated raw model output instead. The container matches dump_depth exactly
+    // (16-bit grayscale PNG, values clamped to [0,1] scaled to 0-65535); the [0,1] normalization
+    // est.depth received upstream is replicated here as an explicit per-frame finite min/max
+    // normalization of the raw float buffer. Non-finite and degenerate-range values map to 0.
+    bool dump_raw_model_depth_png(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv, int width, int height, const fs::path &path, ComPtr<ID3D11Buffer> &stage_cache) {
+      if (!srv || width <= 0 || height <= 0) {
+        return false;
+      }
+      ComPtr<ID3D11Resource> res;
+      srv->GetResource(&res);
+      ComPtr<ID3D11Buffer> buf;
+      if (FAILED(res.As(&buf))) {
+        return false;
+      }
+      D3D11_BUFFER_DESC d = {};
+      buf->GetDesc(&d);
+      if (d.ByteWidth < (UINT) ((size_t) width * height * sizeof(float))) {
+        return false;
+      }
+      if (!stage_cache) {
+        D3D11_BUFFER_DESC sd = d;
+        sd.Usage = D3D11_USAGE_STAGING;
+        sd.BindFlags = 0;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        sd.MiscFlags = 0;
+        if (FAILED(dev->CreateBuffer(&sd, nullptr, &stage_cache))) {
+          return false;
+        }
+      }
+      ctx->CopyResource(stage_cache.Get(), buf.Get());
+      D3D11_MAPPED_SUBRESOURCE m = {};
+      if (FAILED(ctx->Map(stage_cache.Get(), 0, D3D11_MAP_READ, 0, &m))) {
+        return false;
+      }
+      const auto *values = (const float *) m.pData;
+      const size_t count = (size_t) width * height;
+      float lo = std::numeric_limits<float>::infinity();
+      float hi = -std::numeric_limits<float>::infinity();
+      for (size_t i = 0; i < count; i++) {
+        const float v = values[i];
+        if (std::isfinite(v)) {
+          lo = std::min(lo, v);
+          hi = std::max(hi, v);
+        }
+      }
+      const float range = hi - lo;
+      std::vector<uint16_t> gray(count);
+      for (size_t i = 0; i < count; i++) {
+        const float raw = values[i];
+        float v = (std::isfinite(raw) && range > 0.0f) ? (raw - lo) / range : 0.0f;
+        v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+        gray[i] = (uint16_t) (v * 65535.0f + 0.5f);
+      }
+      ctx->Unmap(stage_cache.Get(), 0);
+      return save_gray16_png(path, (UINT) width, (UINT) height, gray);
+    }
+
     struct subject_state_record {
       std::string frame_id;
       std::array<float, 12> values {};
@@ -4519,6 +4578,24 @@ namespace sbs_bench {
                 << "sbs-bench: cannot publish authenticated direct geometry artifacts for frame "
                 << output_id;
               return 7;
+            }
+          } else if (o.parallax_v2_live) {
+            // Under host_sbs_v2 the estimator's normalized depth is a private cut field with no
+            // geometry authority; scoring it against GT depth would be meaningless. The scored
+            // depth artifact is the authenticated raw model output, normalized per frame into the
+            // same 16-bit grayscale container dump_depth writes.
+            char dname[64];
+            snprintf(dname, sizeof(dname), "depth_%s.png", output_id.c_str());
+            if (!est.raw_model_depth) {
+              BOOST_LOG(error) << "sbs-bench: v2 evaluation frame " << output_id
+                               << " published no authenticated raw model depth";
+              return 6;
+            }
+            if (!dump_raw_model_depth_png(dev.Get(), ctx.Get(), est.raw_model_depth.Get(),
+                                          est.raw_width, est.raw_height,
+                                          fs::path(o.out) / dname, raw_depth_stage)) {
+              BOOST_LOG(error) << "sbs-bench: failed writing " << dname;
+              return 6;
             }
           } else {
             char dname[64];

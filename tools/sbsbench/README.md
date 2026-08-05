@@ -297,6 +297,13 @@ Wire extensions: `0x3003` byte 0 selects host SBS mode (`bytes 1..3` are reserve
 `0x3004` requests a debug dump, and `0x3006` reports depth-engine status. Apollo builds, loads,
 creates a reusable execution context for, and warms the single selected model at startup.
 
+The evaluation gate runs the production Depth Coordinate V2 pipeline: `run_eval.py` appends
+`--parallax-v2-live` to every harness invocation (including the engine preflight), so the scored
+frames come from the `host_sbs_v2` estimator and the live signed-parallax renderer, and every
+per-clip `contract.json` must attest `parallax_v2_live` /
+`parallax_v2_render = true`. Committed baselines were regenerated for the V2 renderer
+(2026-08-04); legacy-pipeline results are not comparable to them.
+
 ```
 python tools/sbsbench/run_eval.py                     # all committed clips vs committed baselines
 python tools/sbsbench/run_eval.py --jobs 1            # serial CPU-scoring reference
@@ -304,7 +311,6 @@ python tools/sbsbench/run_eval.py --update-baselines  # accepted defaults only; 
 python tools/sbsbench/run_eval.py --extra --pop-strength 1.40   # pass supported A/B levers
 python tools/sbsbench/run_eval.py --label profile-b --conf profile-b.conf --report-control cmake-build-relwithdebinfo/sbs_eval/profile-a --report-allow-config-diff
 python tools/sbsbench/run_eval.py --label model-b --conf model-b.conf --report-control cmake-build-relwithdebinfo/sbs_eval/model-a --report-allow-config-diff --report-allow-model-diff
-python tools/sbsbench/run_eval.py --label cadence-b --report-control cmake-build-relwithdebinfo/sbs_eval/cadence-a --report-allow-depth-step-diff --extra --depth-every 2
 python tools/sbsbench/run_eval.py --label code-b --report-control cmake-build-relwithdebinfo/sbs_eval/code-a --report-allow-executable-diff
 python tools/sbsbench/run_eval.py --comparison-only --label ab-control  # fresh A/B; no committed gate
 python tools/sbsbench/run_eval.py --suite extended --label public-control # prepared public suite
@@ -374,73 +380,35 @@ and then the explicit `sbs_3d_depth_model` override, exactly like production. Th
 `--mode` model selector. Never compare reports using different model/config hashes as if they were
 a controlled feature A/B.
 
-Legacy/offline harness A/B levers (after `--extra`):
+Harness A/B levers (after `--extra`):
 
-These switches exercise the retained evaluator pipeline unless a Mapping-V2 replay command is
-used explicitly. They do not re-enable V1 or change live Host SBS, whose only geometry control is
-the literal `sbs_3d_pop_strength` consumed by the authenticated V2 contract.
+`run_eval.py` always passes `--parallax-v2-live`: every gated or comparison-only clip runs the
+production `host_sbs_v2` estimator (all nine producer passes) and renders its authenticated signed
+final-parallax field through the live 12-step contractive inverse. The V2 pipeline uses the fixed
+production calibration, so the gate accepts only these harness levers via `--extra`:
 
-- `--pop-strength F` — multiply the final shared stereo-parallax field (`0.25`-`2`; default
-  `1.20`, the adaptive floor). This is the user-facing pop control. It is separate from the internal
-  854-pixel Bestv2 calibration that keeps apparent depth stable across source resolutions. Below
-  854 pixels, production preserves Bestv2's literal pixel shift and independently applies the
-  reference-aspect correction; non-16:9 low-resolution inputs therefore receive both effects.
-  This behavior requires a dedicated 4:3 A/B before changing.
-  **Gotcha: `--pop-strength F` alone collapses the adaptive band.** The harness applies
-  `adaptive_pop_max = max(adaptive_pop_max, pop_strength)`, so raising only the floor makes the
-  adaptive ratio 1.0 and you have measured a FIXED gain, with the search radius sized to it. To
-  test a ceiling, pass `--adaptive-pop-max` and leave `--pop-strength` alone.
-  **Also note the `depth_gt_*` metrics are structurally invariant to pop**, zero-plane,
-  subject-recenter and stretch changes: they are computed on the pre-warp depth map, which
-  none of those levers touch. Their neutrality on such a run is a tautology, not evidence of
-  safety. They do respond to `--depth-short-side`, `--ema*`, `--minmax-ema` and model changes.
-- `--literal-bestv2` — comparison-only reference mode. It bypasses the retained evaluator's resolution,
-  aspect, and pop scaling and writes the fact to `contract.json`; never use it for quality gates or
-  committed baselines.
-- `--depth-override-root DIR` — comparison-only offline reference that replaces explicitly
-  supplied processed-depth frames while retaining the real subject state and production warp.
-  Generate classical-flow reuse-2 references with `prepare_depth_motion_reference.py`; this is
-  an experiment boundary, not a production feature or a permitted committed baseline. The
-  schema-3 manifest binds the treatment to the exact source hash, policy and override-frame IDs;
-  missing, extra or stale override frames fail the run before scoring.
-- `--depth-override-all` requires `--depth-override-root` and `--depth-every 1`; it replaces every
-  inferred depth frame for a spatial/temporal processor oracle. `prepare_flow_ema_reference.py`
-  builds the exact-flow EMA oracle used to reject recursive and one-frame flow history. It requires
-  exact `gt_flow` sidecars and a source run made with `--ema 1 --ema-edge-change 0`.
-- Within the legacy/offline harness, Bestv2 is the only disparity field. It uses the preset's source-pixel FG/MG/BG shifts
-  (`-9/-3/+2.4`), `.35` parallax
-  balance, `1.11/1.05` multipliers, `.008` zero-parallax trim, dynamic convergence `.006`,
-  `.071` safety cap. Rejected subject-plane lock and per-eye sharpen paths have been removed.
-  Before subject state initializes, output
-  remains flat instead of using the removed legacy divergence/focal-plane fallback.
-- `--depth-short-side N` — depth inference short side (default 432). Use 336 to A/B
-  back to the old under-resolved default.
+- `--pop-strength F` — the one production geometry control (`0.25`-`2`; default `1.20`). Live
+  Host SBS consumes the same value literally as `sbs_3d_pop_strength` through the authenticated V2
+  contract.
 - `--simulate-hdr --hdr-scale F` — direct-harness color-path smoke: decode the PNG source into
   linear FP16 scRGB, scale its luminance (`4` = 320-nit diffuse white), run the HDR depth and warp
   paths, and write a tone-mapped PNG plus `hdr_output_stats.json`. This checks FP16 preservation,
   finite values through the pre-encode SBS stage. It is not a
   PQ/NVENC/headset colorimetric evaluation; do not compare its PNG metrics to SDR baselines.
-- `--ema F` — per-pixel depth EMA override (`1.0` = off).
-- `--ema-edge-change F --ema-edge-gradient F --ema-edge-strength F`
-  — accepted flowless moving-edge EMA (`0.05`, `0.02`, `0.25`). It preserves ordinary EMA outside a deterministic
-  depth-transition mask and blends masked pixels toward current depth. A 16-bit
-  `ema_mask_<frame>.png` locality artifact is required whenever enabled.
-- `--subject-recenter F` — subject depth-field recenter strength.
-- `--subject-stretch` — shape_depth_for_pop 5/95 percentile stretch (default on in the permanent
-  Bestv2 subject path).
-- `--no-subject-stretch` — disable that stretch for an accepted-feature ablation.
-- `--zero-plane subject|median|background` — choose a shot-latched screen-plane anchor.
-  All three preserve symmetric eye geometry and the disparity scale, and update only at startup or
-  a hard scene cut. `median` is the legacy evaluator's headset-validated default; `subject` and
-  `background` are experimental camera-offset treatments. The historical per-frame `legacy` mode
-  was removed because its moving anchor caused visible convergence wobble.
 - `--cuda-graph on|off` — capture and replay the TensorRT enqueue when the mapped D3D tensor
   addresses remain stable. The first enqueue for a new address/shape is an uncaptured warmup.
 
-Live Host SBS uses `sbs_3d_pop_strength = F` literally. Current V2 live qualification and exact
-mapping replay use `F = 1.0` unless a treatment explicitly declares another value. The retained
-adaptive-pop and zero-plane switches above are evaluator/offline controls only; they do not modify
-production V2 geometry.
+The legacy evaluator's geometry/EMA levers — `--zero-plane`, `--subject-recenter`,
+`--subject-stretch`/`--no-subject-stretch`, `--adaptive-pop`/`--no-adaptive-pop`,
+`--adaptive-pop-max`, `--literal-bestv2`, `--ema*`, `--minmax-ema`, `--depth-short-side`, a
+`--depth-every` cadence other than 1, and the `--depth-override-root`/`--depth-override-all`
+reference treatments (`prepare_depth_motion_reference.py`, `prepare_flow_ema_reference.py`) — are
+rejected by `run_eval.py` with an explanatory error, and the native harness refuses them under
+`--parallax-v2-live`. They still exist only for a manual `sunshine --sbs-bench` invocation without
+`--parallax-v2-live`, which exercises the retained legacy evaluator and is not the gate.
+
+Live Host SBS uses `sbs_3d_pop_strength = F` literally. The retained legacy switches above are
+manual-evaluator controls only; they do not modify production V2 geometry.
 CUDA Graph replay is enabled by default through the top-level shared control. Use
 `sbs_3d_cuda_graph = false` only
 for driver diagnosis or a controlled performance A/B; unsupported/capture-failed systems already
@@ -479,16 +447,21 @@ Percent/normalized outputs are preferred; raw pixel diagnostics are never compar
 resolutions. Harness depth is 16-bit so
 sub-1/255 changes remain measurable.
 
-**Eval schema 36 / harness contract 19:** `run_eval.py` pins the profile, model, and zero-plane
-mode explicitly, records the exact Sunshine executable, runtime HLSL tree, engine, and ONNX
+**Eval schema 36 / harness contract 19:** `run_eval.py` pins the profile and model explicitly,
+requires the `contract.json` `parallax_v2_live` attestation of the production
+`depth-coordinate-v2-live-signed-parallax` renderer (with `parallax_v2_render = true`; the legacy
+knob echoes remain in the contract as inert configuration defaults), records the exact Sunshine
+executable, runtime HLSL tree, engine, and ONNX
 hashes, and has no alternate warp selector. A normal report requires all four to match;
 `--report-allow-executable-diff` explicitly permits a code/shader A/B, while
 `--report-allow-model-diff` permits an engine/ONNX A/B.
-By default the
-harness submits and consumes exactly one inference per source frame, so EMA and normalization
-update once. `--depth-every N` is an explicit comparison-only cadence treatment: color advances
-while the last completed depth/subject geometry is reused, and the contract records `reuse-N`.
-Source, raw-model (`raw_*.f32`), pre-warp depth (`depth_*.png`), exact scalar-R32 **raw**
+The harness submits and consumes exactly one inference per source frame; the V2 camera and cut
+history are stateful per frame, so the gate requires `--depth-every 1` and rejects the historical
+`reuse-N` cadence treatment.
+Source, raw-model (`raw_*.f32`), scored depth (`depth_*.png` — under the V2 gate this is the
+authenticated raw model output, per-frame finite min/max-normalized into the same 16-bit
+grayscale container, because the V2 estimator's internal normalized depth is a private cut field
+with no geometry authority), exact scalar-R32 **raw**
 `Reproject` source-U coordinates
 (`warp_map_*.f32` plus `warp_map_shape.json`) are joined with SBS artifacts by
 numeric frame identity, never list position. `warp_mask_*.png` remains a raw validity companion
