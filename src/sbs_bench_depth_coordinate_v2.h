@@ -8,7 +8,7 @@
  * entrypoints used by video_depth_estimator. Its
  * candidate texture is retained as immutable pre-conditioner evidence. The column pass publishes
  * both an upper-envelope diagnostic and the authenticated 75/25 vertical share consumed by the
- * pure row majorant. The encoded final texture is the live render input for the twelve-step
+ * pure row majorant. The encoded final texture is the live render input for the eleven-step
  * contractive inverse. A separate
  * diagnostic-only map entrypoint materializes canonical_values for the replay report; it is not
  * part of the authenticated production producer closure or live authentication.
