@@ -3265,7 +3265,11 @@ def main():
         os.makedirs(base_dir, exist_ok=True)
         pending_baselines = []
         for path, payload in baseline_updates.items():
-            tmp = path + ".tmp"
+            # Stage outside the tracked baselines/ directory: staging inside it makes the
+            # subsequent clean-worktree check see this run's own temp files and refuse every
+            # baseline update. out_root shares the drive, so os.replace stays atomic.
+            tmp = os.path.join(
+                out_root, os.path.basename(path) + ".baseline.tmp")
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, indent=2)
             pending_baselines.append((tmp, path))
