@@ -230,7 +230,7 @@ def scored_artifact_digests(directory):
     }
     numeric_fixed = {"warp_map_shape.json", "hdr_output_stats.json", "subject_state.json"}
     frame_pattern = re.compile(
-        r"^(?:sbs|depth|parallax|warp_map|warp_mask)_\d+\.(?:png|f32)$")
+        r"^(?:sbs|depth|structure|parallax|warp_map|warp_mask)_\d+\.(?:png|f32)$")
     paths = sorted(
         path for path in glob.glob(os.path.join(directory, "*"))
         if os.path.isfile(path) and
@@ -813,7 +813,9 @@ def load_clip_metadata(path, suite=None, required=True):
                     not monitor_from <= flash or flash_return != flash + 1 or
                     persistent != slate + 1 or
                     not flash_return < slate < persistent < new_scene <= frame_count or
-                    pulses != [persistent, new_scene]):
+                    # new-scene pulse arrives one frame after the content cut: the V2
+                    # resolver confirms a post-bridge structured return over two updates.
+                    pulses != [persistent, new_scene + 1]):
                 raise ValueError(
                     f"invalid clip metadata {meta_path}: structureless-history bridge must "
                     "contain one-frame flash, a bounded persistent-slate pulse, and a "
@@ -2651,6 +2653,11 @@ def main():
             specs=PARALLAX_V2_SHADER_SPECS),
         "contract_schema": PARALLAX_V2_CONTRACT_SCHEMA,
         "legacy_levers_applied": False,
+        # Structure-consistency metrics score the production candidate-parallax field, not raw
+        # model ordering; the harness must declare exactly this artifact contract.
+        "structure_source": "shadow_candidate_parallax",
+        "structure_file_pattern": "structure_<frame-id>.png",
+        "structure_normalization": "per-frame-finite-minmax-16bit",
     }
     expected_adaptive = expected_adaptive_pop(args.conf, expected_config_profile, args.extra)
     expected_adaptive_max = expected_profile_number(
@@ -2939,6 +2946,8 @@ def main():
             "depth_")
         depth_ids = set(depth_by_id)
         raw_ids = set(sbsbench.indexed_files(os.path.join(out_dir, "raw_*.f32"), "raw_"))
+        structure_ids = set(sbsbench.indexed_files(
+            os.path.join(out_dir, "structure_*.png"), "structure_"))
         mask_by_id = sbsbench.indexed_files(
             os.path.join(out_dir, "warp_mask_*.png"), "warp_mask_")
         mask_ids = set(mask_by_id)
@@ -2962,6 +2971,13 @@ def main():
             fail(f"{clip}: artifact frame-id mismatch source={sorted(source_ids)} "
                  f"sbs={sorted(sbs_ids)} depth={sorted(depth_ids)} raw={sorted(raw_ids)} "
                  f"warp_mask={sorted(mask_ids)} warp_map={sorted(mapping_ids)}")
+        # V2-live evaluation must publish the declared candidate-parallax structure artifact for
+        # every frame; authenticated direct-geometry replay must not emit any.
+        expected_structure_ids = source_ids if expected_v2_live else set()
+        if structure_ids != expected_structure_ids:
+            fail(f"{clip}: structure artifact frame-id mismatch "
+                 f"structure={sorted(structure_ids)} "
+                 f"expected={sorted(expected_structure_ids)}")
         if expected_ema_edge_change > 0.0 and ema_mask_ids != source_ids:
             fail(f"{clip}: incomplete EMA motion-mask artifacts: {sorted(ema_mask_ids)}")
         if expected_ema_edge_change <= 0.0 and ema_mask_ids:

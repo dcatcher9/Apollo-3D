@@ -1,6 +1,6 @@
 {
   "name": "sustained_motion_scene_cut",
-  "description": "A setup cut latches shot state; broad persistent horizontal motion prevents either proposal arm from rearming, then a real scene cut must survive one held-endpoint update before the relative-depth escape pulses.",
+  "description": "A setup cut latches shot state; broad persistent horizontal motion prevents either proposal arm from rearming, then a real scene cut must survive one held-endpoint update before the relative-depth escape pulses. Shot-state expectations re-verified against the V2 cut-only analysis trace on 2026-08-04 (pulse schedule unchanged).",
   "evaluation_role": "conformance-only",
   "shot_state_contract": {
     "kind": "latched-motion-hard-cut",

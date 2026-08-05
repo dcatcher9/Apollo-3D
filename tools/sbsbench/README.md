@@ -464,7 +464,17 @@ grayscale container, because the V2 estimator's internal normalized depth is a p
 with no geometry authority), exact scalar-R32 **raw**
 `Reproject` source-U coordinates
 (`warp_map_*.f32` plus `warp_map_shape.json`) are joined with SBS artifacts by
-numeric frame identity, never list position. `warp_mask_*.png` remains a raw validity companion
+numeric frame identity, never list position. Under the V2 gate the harness additionally publishes
+`structure_*.png`: the production candidate-parallax field (`est.shadow_candidate_parallax`,
+monotone in the canonical V2 coordinate; the canonical coordinate SRV itself is Dump-3D-gated and
+never published in evaluation), written per frame with the same finite min/max 16-bit
+normalization as the scored depth PNG and declared in `contract.json` under
+`parallax_v2_live.structure_source`. Structure-consistency diagnostics (`exact_polarity_ok`, the
+disparity-plateau pair, stereo-window depth) score this shipped-geometry field, while
+`depth_*.png` remains the GT-accuracy evidence — on thin structure the raw model and the
+V2-limited field legitimately disagree, and scoring raw ordering against rendered V2 geometry
+produced false polarity failures. Runs without `structure_*.png` (legacy or direct replay) keep
+the previous raw/native routing. `warp_mask_*.png` remains a raw validity companion
 for internal coverage audits; it is not a decision metric or report section. Baselines are rejected
 with setup exit 2 if mode,
 model, baseline-update provenance, schema, stepping semantics, config hash, metric

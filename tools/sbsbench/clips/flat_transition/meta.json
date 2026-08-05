@@ -1,6 +1,6 @@
 {
   "name": "flat_transition",
-  "description": "Textured depth scene cutting to a static flat page: normalization recovery and false-stereo decay.",
+  "description": "Textured depth scene cutting to a static flat page: normalization recovery and false-stereo decay. Shot-state expectations re-verified against the V2 cut-only analysis trace on 2026-08-04 (pulse schedule unchanged).",
   "gt_depth_kind": "disparity",
   "shot_state_contract": {
     "kind": "hard-cut",

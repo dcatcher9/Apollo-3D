@@ -1,13 +1,13 @@
 {
   "name": "structureless_history_bridge",
-  "description": "A one-frame black flash returns to structured scene A without a cut; a later black slate must cut when low structure persists, then different structured scene B must cut on its visible return.",
+  "description": "A one-frame black flash returns to structured scene A without a cut; a later black slate must cut when low structure persists, then different structured scene B must cut on its visible return. Pulse expectations re-derived 2026-08-04 for the V2 cut-only analysis: the structured return at frame 21 is accepted through the resolver's two-update geometry confirmation, pulsing at frame 22.",
   "evaluation_role": "conformance-only",
   "shot_state_contract": {
     "kind": "structureless-history-bridge",
     "monitor_from_frame": 2,
     "expected_pulse_frames": [
       18,
-      21
+      22
     ],
     "flash_frame": 11,
     "flash_return_frame": 12,

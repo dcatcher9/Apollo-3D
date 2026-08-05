@@ -457,7 +457,7 @@ class EvalContractTests(unittest.TestCase):
         contract = committed_meta["shot_state_contract"]
         self.assertEqual(committed_meta["evaluation_role"], "conformance-only")
         self.assertEqual(contract["kind"], "structureless-history-bridge")
-        self.assertEqual(contract["expected_pulse_frames"], [18, 21])
+        self.assertEqual(contract["expected_pulse_frames"], [18, 22])
         self.assertEqual(contract["uniform_rgb"], list(uniform_rgb))
         committed_frames = sbsbench.indexed_files(
             os.path.join(committed, "frame_*.*"), "frame_")
@@ -539,6 +539,34 @@ class EvalContractTests(unittest.TestCase):
             max(row.get("shot_state_trace_inconsistent", 0.0) for row in rows), 0.0)
         self.assertEqual(
             sbsbench.aggregate(rows)["shot_state_accepted_pulse"], 1.0)
+
+    def test_v2_cut_only_trace_without_zero_anchor_is_still_initialized(self):
+        # The production V2 cut-only bridge never dispatches the legacy subject/zero-anchor
+        # analysis, so its schema-2 compatibility trace keeps zero_anchor_valid at the
+        # unavailable default. Initialization evidence is the cut analysis itself.
+        rows = [{"_frame_id": frame_id} for frame_id in range(1, 5)]
+        trace = {
+            frame_id: dict(self.subject_state(frame_id - 1, 3 if frame_id < 4 else 3),
+                           zero_anchor_valid=0.0, zero_anchor_shift_px=0.0)
+            for frame_id in range(1, 5)
+        }
+        sbsbench.apply_shot_state_contract(
+            rows, list(range(1, 5)), trace, {
+                "kind": "hard-cut", "monitor_from_frame": 2,
+                "expected_pulse_frames": [],
+            })
+        self.assertEqual(
+            min(row["shot_state_initialized_ok"] for row in rows
+                if "shot_state_initialized_ok" in row), 100.0)
+        uninitialized_rows = [{"_frame_id": frame_id} for frame_id in range(1, 5)]
+        trace[3] = dict(trace[3], model_input_history_valid=0.0)
+        sbsbench.apply_shot_state_contract(
+            uninitialized_rows, list(range(1, 5)), trace, {
+                "kind": "hard-cut", "monitor_from_frame": 2,
+                "expected_pulse_frames": [],
+            })
+        broken = next(row for row in uninitialized_rows if row["_frame_id"] == 3)
+        self.assertEqual(broken["shot_state_initialized_ok"], 0.0)
 
     def test_structureless_bridge_contract_observes_bounded_slate_and_return_cuts(self):
         rows = [{"_frame_id": frame_id} for frame_id in range(1, 23)]
@@ -1923,8 +1951,12 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('!o.depth_override_root.empty() || o.depth_override_all', harness)
         self.assertNotIn('direct_parallax_max_abs * 1.10f', harness)
         self.assertIn('words remain reserved to preserve the 16-byte constant-buffer ABI', harness)
-        self.assertIn('direct_parallax_source_u_limit =\n      models::depth_coordinate_v2::direct_container_limit', harness)
-        self.assertIn('direct_parallax_max_horizontal_slope =\n      models::depth_coordinate_v2::max_horizontal_slope', harness)
+        self.assertIn(
+            'direct_parallax_source_u_limit =\n'
+            '      models::depth_coordinate_v2::direct_container_limit', harness)
+        self.assertIn(
+            'direct_parallax_max_horizontal_slope =\n'
+            '      models::depth_coordinate_v2::max_horizontal_slope', harness)
         self.assertIn('violates the generated horizontal slope contract', harness)
         self.assertIn('"order_" + output_id + ".f32"', harness)
         self.assertIn('direct_order_srv.GetAddressOf()', harness)
@@ -1959,8 +1991,8 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn("CanonicalOrderTexture", reprojection)
         self.assertNotIn("SBS_DIRECT_CANDIDATE_PARALLAX", reprojection)
         self.assertNotIn("SBS_CANDIDATE_GAP_FILL", reprojection)
-        direct_begin = reprojection.index("#ifdef SBS_CONTRACTIVE_PARALLAX",
-                                           reprojection.index("float2 Reproject"))
+        direct_begin = reprojection.index(
+            "#ifdef SBS_CONTRACTIVE_PARALLAX", reprojection.index("float2 Reproject"))
         direct_end = reprojection.index("#else", direct_begin)
         direct_inverse = reprojection[direct_begin:direct_end]
         self.assertIn("for (int iteration = 0; iteration < 12; ++iteration)",

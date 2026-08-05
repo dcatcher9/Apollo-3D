@@ -1,6 +1,6 @@
 {
   "name": "exposure_flash_strobe",
-  "description": "Static synthetic depth scene under exact global RGB gain flashes/strobe: exposure must not reset shot-latched subject, pop, or zero-plane state.",
+  "description": "Static synthetic depth scene under exact global RGB gain flashes/strobe: exposure must not reset shot-latched subject, pop, or zero-plane state. Shot-state expectations re-verified against the V2 cut-only analysis trace on 2026-08-04 (no pulses, unchanged).",
   "evaluation_role": "conformance-only",
   "shot_state_contract": {
     "kind": "exposure-only",

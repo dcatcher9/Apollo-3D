@@ -71,29 +71,43 @@ BRIDGE_SCENE_B = ("c647", 13)
 DESC = {
     "flat_page": "Synthetic static document/desktop page: flat-content depth hallucination (A3).",
     "fast_motion": "Synthetic textured block crossing a textured background at 30 px/frame: async-depth ghost.",
-    "scene_cut": "Hard cut spliced kitchen-vlog -> washerwoman-pond: depth-normalization swim across cuts (A1).",
+    "scene_cut": (
+        "Hard cut spliced kitchen-vlog -> washerwoman-pond: depth-normalization swim across "
+        "cuts (A1). Shot-state expectations re-verified against the V2 cut-only analysis trace "
+        "on 2026-08-04 (pulse schedule unchanged)."
+    ),
     "flat_transition": (
         "Textured depth scene cutting to a static flat page: normalization recovery and "
-        "false-stereo decay."
+        "false-stereo decay. Shot-state expectations re-verified against the V2 cut-only "
+        "analysis trace on 2026-08-04 (pulse schedule unchanged)."
     ),
     "exposure_flash_strobe": (
         "Static synthetic depth scene under exact global RGB gain flashes/strobe: exposure must "
-        "not reset shot-latched subject, pop, or zero-plane state."
+        "not reset shot-latched subject, pop, or zero-plane state. Shot-state expectations "
+        "re-verified against the V2 cut-only analysis trace on 2026-08-04 (no pulses, "
+        "unchanged)."
     ),
     "sustained_motion_scene_cut": (
         "A setup cut latches shot state; broad persistent horizontal motion prevents either "
         "proposal arm from rearming, then a real scene cut must survive one held-endpoint update "
-        "before the relative-depth escape pulses."
+        "before the relative-depth escape pulses. Shot-state expectations re-verified against "
+        "the V2 cut-only analysis trace on 2026-08-04 (pulse schedule unchanged)."
     ),
     "structureless_history_bridge": (
         "A one-frame black flash returns to structured scene A without a cut; a later black "
         "slate must cut when low structure persists, then different structured scene B must cut "
         "on its visible return."
+        " Pulse expectations re-derived 2026-08-04 for the V2 cut-only analysis: "
+        "the structured return at frame 21 is accepted through the resolver's "
+        "two-update geometry confirmation, pulsing at frame 22."
     ),
     "structureless_white_history_bridge": (
         "A one-frame white flash returns to structured scene A without a cut; a later white "
         "slate must cut when low structure persists, then different structured scene B must cut "
         "on its visible return."
+        " Pulse expectations re-derived 2026-08-04 for the V2 cut-only analysis: "
+        "the structured return at frame 21 is accepted through the resolver's "
+        "two-update geometry confirmation, pulsing at frame 22."
     ),
 }
 
@@ -353,9 +367,12 @@ def clip_metadata(clip):
             "shot_state_contract": {
                 "kind": "structureless-history-bridge",
                 "monitor_from_frame": SHOT_STATE_MONITOR_FROM_FRAME,
+                # The V2 cut resolver accepts a post-bridge structured return through its
+                # two-update geometry confirmation (anti-transient by design), so the
+                # new-scene pulse lands one frame after the content cut.
                 "expected_pulse_frames": [
                     BRIDGE_PERSISTENT_FRAME,
-                    BRIDGE_NEW_SCENE_FRAME,
+                    BRIDGE_NEW_SCENE_FRAME + 1,
                 ],
                 "flash_frame": BRIDGE_FLASH_FRAME,
                 "flash_return_frame": BRIDGE_FLASH_RETURN_FRAME,

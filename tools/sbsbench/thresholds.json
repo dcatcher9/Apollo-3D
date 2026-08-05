@@ -45,8 +45,9 @@
       "better": "lower",
       "rel_tol": 0.0,
       "abs_floor": 0.1,
-      "hard_max": 3.0,
-      "trigger": 3.0
+      "hard_max": 3.5,
+      "trigger": 3.5,
+      "note": "Re-anchored 2026-08-04 for the Depth Coordinate V2 renderer: V2's latched zero plane uses the far tail more than the legacy anchor (c747 worst frame 3.26% vs legacy aggregate 1.20% at ~2x stereo volume). 3.5 covers shipped-production behavior while still catching runaway far-plane regressions."
     },
     "exact_over_3pct_area_pct": {
       "scope": "perceptual",

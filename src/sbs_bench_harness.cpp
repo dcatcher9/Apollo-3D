@@ -1268,6 +1268,72 @@ namespace sbs_bench {
       return save_gray16_png(path, (UINT) width, (UINT) height, gray);
     }
 
+    // V2 evaluation structure artifact. Structure-consistency metrics (polarity/plateau) must
+    // score the geometry the shipped V2 renderer intends, not raw model ordering: on thin
+    // structure the raw model and the V2-limited field legitimately disagree. The canonical
+    // coordinate SRV (est.shadow_coordinate) is Dump-3D-gated and never published in evaluation
+    // mode, so this dumps est.shadow_candidate_parallax instead -- the always-published signed
+    // candidate parallax, monotone in the canonical coordinate. Container matches
+    // dump_raw_model_depth_png exactly: 16-bit grayscale PNG under an explicit per-frame finite
+    // min/max normalization; non-finite and degenerate-range values map to 0.
+    bool dump_structure_field_png(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv, const fs::path &path, ComPtr<ID3D11Texture2D> &stage_cache) {
+      if (!srv) {
+        return false;
+      }
+      ComPtr<ID3D11Resource> res;
+      srv->GetResource(&res);
+      ComPtr<ID3D11Texture2D> tex;
+      if (FAILED(res.As(&tex))) {
+        return false;
+      }
+      D3D11_TEXTURE2D_DESC d = {};
+      tex->GetDesc(&d);
+      if (d.Format != DXGI_FORMAT_R32_FLOAT || !d.Width || !d.Height) {
+        return false;
+      }
+      if (!stage_cache) {
+        D3D11_TEXTURE2D_DESC sd = d;
+        sd.Usage = D3D11_USAGE_STAGING;
+        sd.BindFlags = 0;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        sd.MiscFlags = 0;
+        if (FAILED(dev->CreateTexture2D(&sd, nullptr, &stage_cache))) {
+          return false;
+        }
+      }
+      ctx->CopyResource(stage_cache.Get(), tex.Get());
+      D3D11_MAPPED_SUBRESOURCE m = {};
+      if (FAILED(ctx->Map(stage_cache.Get(), 0, D3D11_MAP_READ, 0, &m))) {
+        return false;
+      }
+      const size_t count = (size_t) d.Width * d.Height;
+      float lo = std::numeric_limits<float>::infinity();
+      float hi = -std::numeric_limits<float>::infinity();
+      for (UINT y = 0; y < d.Height; y++) {
+        const float *row = (const float *) ((const uint8_t *) m.pData + (size_t) y * m.RowPitch);
+        for (UINT x = 0; x < d.Width; x++) {
+          const float v = row[x];
+          if (std::isfinite(v)) {
+            lo = std::min(lo, v);
+            hi = std::max(hi, v);
+          }
+        }
+      }
+      const float range = hi - lo;
+      std::vector<uint16_t> gray(count);
+      for (UINT y = 0; y < d.Height; y++) {
+        const float *row = (const float *) ((const uint8_t *) m.pData + (size_t) y * m.RowPitch);
+        for (UINT x = 0; x < d.Width; x++) {
+          const float raw = row[x];
+          float v = (std::isfinite(raw) && range > 0.0f) ? (raw - lo) / range : 0.0f;
+          v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+          gray[(size_t) y * d.Width + x] = (uint16_t) (v * 65535.0f + 0.5f);
+        }
+      }
+      ctx->Unmap(stage_cache.Get(), 0);
+      return save_gray16_png(path, d.Width, d.Height, gray);
+    }
+
     struct subject_state_record {
       std::string frame_id;
       std::array<float, 12> values {};
@@ -3372,6 +3438,7 @@ namespace sbs_bench {
     ComPtr<ID3D11ShaderResourceView> warp_depth_srv;
     ComPtr<ID3D11Texture2D> ema_mask_stage;
     ComPtr<ID3D11Buffer> raw_depth_stage;
+    ComPtr<ID3D11Texture2D> structure_field_stage;
     ComPtr<ID3D11Buffer> subject_state_stage;
     ComPtr<ID3D11Texture2D> scene_cache_depth_stage;
     ComPtr<ID3D11Buffer> scene_cache_state_stage;
@@ -4597,6 +4664,21 @@ namespace sbs_bench {
               BOOST_LOG(error) << "sbs-bench: failed writing " << dname;
               return 6;
             }
+            // Structure-consistency evidence: the V2 candidate parallax the renderer is actually
+            // shaped by, in the same per-frame min/max 16-bit container as the raw depth PNG.
+            char sname[64];
+            snprintf(sname, sizeof(sname), "structure_%s.png", output_id.c_str());
+            if (!est.shadow_candidate_parallax) {
+              BOOST_LOG(error) << "sbs-bench: v2 evaluation frame " << output_id
+                               << " published no candidate-parallax structure field";
+              return 6;
+            }
+            if (!dump_structure_field_png(dev.Get(), ctx.Get(),
+                                          est.shadow_candidate_parallax.Get(),
+                                          fs::path(o.out) / sname, structure_field_stage)) {
+              BOOST_LOG(error) << "sbs-bench: failed writing " << sname;
+              return 6;
+            }
           } else {
             char dname[64];
             snprintf(dname, sizeof(dname), "depth_%s.png", output_id.c_str());
@@ -4891,7 +4973,10 @@ namespace sbs_bench {
                  models::depth_coordinate_v2::shader_source_closure_sha256))
             << ", \"contract_schema\": "
             << models::depth_coordinate_v2::contract_schema
-            << ", \"legacy_levers_applied\": false},\n";
+            << ", \"legacy_levers_applied\": false, "
+               "\"structure_source\": \"shadow_candidate_parallax\", "
+               "\"structure_file_pattern\": \"structure_<frame-id>.png\", "
+               "\"structure_normalization\": \"per-frame-finite-minmax-16bit\"},\n";
         }
         contract << "  \"parallax_v2_shadow\": false,\n"
                  << "  \"parallax_v2_render\": "

@@ -173,8 +173,17 @@ void main() {
             appearance_proposal &&
             !appearance_veto &&
             change_fraction >= DEPTH_CUT_CORROBORATE;
+        // A structureless reference cannot corroborate structure by construction: every ordinal
+        // pair against a uniform slate has zero contrast, so structural change is exactly zero
+        // no matter how different the returning scene is. Requiring it here made the return cut
+        // after a bridged flash/slate unreachable and held the slate-acquired camera forever.
+        // The waiver is confined to the structureless-bridge scene state and the return arm
+        // still demands reliable current structure plus the full geometry-change bar.
+        bool reference_structureless =
+            model_input_history_valid && !previous_structure_reliable;
         bool geometry_structure_corroborated =
             persistent_structureless_transition ||
+            reference_structureless ||
             structural_change_fraction >= STRUCTURAL_GEOMETRY_CUT_FLOOR;
         bool geometry_confirmation_candidate =
             !appearance_veto &&

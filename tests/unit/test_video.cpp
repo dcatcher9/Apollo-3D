@@ -282,8 +282,13 @@ namespace {
       appearance_proposal &&
       !appearance_veto &&
       depth_change_fraction >= 0.25f;
+    // Mirrors the shader's structureless-reference waiver: a uniform slate reference produces
+    // exactly zero structural change, so the bridge-return arm must not require it.
+    const bool reference_structureless =
+      model_input_history_valid && !previous_structure_reliable;
     const bool geometry_structure_corroborated =
       persistent_structureless_transition ||
+      reference_structureless ||
       structural_change_fraction >= 0.005f;
     const bool geometry_confirmation_candidate =
       !appearance_veto &&
@@ -2955,7 +2960,9 @@ TEST(HostSbsSceneCutTest, StructurelessGapBridgesSaturatedFlashAndFindsDifferent
     persistent_flat,
     0.60f,
     0.01f,
-    0.005f,
+    // A uniform slate reference yields exactly zero structural change (every ordinal pair
+    // has zero contrast); the return cut is reachable via the structureless-reference waiver.
+    0.0f,
     0.90f,
     0.0f,
     0.0f
@@ -2968,7 +2975,9 @@ TEST(HostSbsSceneCutTest, StructurelessGapBridgesSaturatedFlashAndFindsDifferent
     persistent_flat,
     0.60f,
     0.01f,
-    0.005f,
+    // A uniform slate reference yields exactly zero structural change (every ordinal pair
+    // has zero contrast); the return cut is reachable via the structureless-reference waiver.
+    0.0f,
     0.90f,
     0.0f,
     0.0f

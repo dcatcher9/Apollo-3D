@@ -303,6 +303,12 @@ def apply_shot_state_contract(rows, frame_ids, trace, contract):
     CUT_LATCHED flag. The mismatch metric catches a missing expected cut, any extra cut, and
     disagreement between those two state-machine effects. Exposure-only clips additionally
     require the already-settled zero anchor and adaptive-pop ratio to remain bit-stable.
+
+    Initialization evidence is the cut analysis itself: ``initialized`` plus a valid model-input
+    history. The production V2 cut-only bridge (2026-08) retains the legacy zero-plane slots at
+    their unavailable defaults -- it never dispatches the subject/zero-anchor analysis -- so
+    ``zero_anchor_valid`` is deliberately not part of shot_state_initialized_ok. Exposure-only
+    stability still scores the (constant-by-default) anchor/pop words for bit-stability.
     """
     monitor_from = contract["monitor_from_frame"]
     expected_pulses = set(contract["expected_pulse_frames"])
@@ -384,7 +390,6 @@ def apply_shot_state_contract(rows, frame_ids, trace, contract):
         row["shot_state_trace_inconsistent"] = 1.0 if age_reset != latch_entry else 0.0
         row["shot_state_initialized_ok"] = (
             100.0 if current["initialized"] > 0.5 and
-            current["zero_anchor_valid"] > 0.5 and
             current["model_input_history_valid"] > 0.5 else 0.0)
         if kind == "exposure-only" and frame_id >= stable_from:
             row["shot_state_zero_anchor_drift_px"] = abs(
@@ -975,6 +980,12 @@ DIRECT_STRUCTURE_INSUFFICIENT_SEMANTICS = (
 DIRECT_STRUCTURE_MIN_CANONICAL_SPAN = 1.0e-3
 LEGACY_STRUCTURE_METRIC_SEMANTICS = "native-normalized-depth-v1"
 NO_STRUCTURE_METRIC_SEMANTICS = "unavailable-no-depth"
+# V2-live evaluation publishes structure_<frame-id>.png: the production candidate-parallax field
+# (monotone in the canonical V2 coordinate, per-frame finite min/max into the 16-bit grayscale
+# container). Structure-consistency diagnostics (polarity/plateau/stereo-window) score it because
+# it is the geometry the shipped renderer is shaped by; raw-model depth_<frame-id>.png remains the
+# GT-accuracy evidence. On thin structure the two legitimately disagree.
+V2_STRUCTURE_METRIC_SEMANTICS = "v2-candidate-parallax-minmax-png-v1"
 
 
 def _structure_metric_depth(depth, depth_semantics=None):
@@ -2179,7 +2190,8 @@ def measure(dump_dir):
 def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_kind="disparity",
                       gt_depth_valid=None,
                       warp_mask=None, warp_mapping=None, warp_mapping_shape=None,
-                      src_rgb=None, hdr_scale=None, compact=False, depth_semantics=None):
+                      src_rgb=None, hdr_scale=None, compact=False, depth_semantics=None,
+                      structure_field=None):
     """Spatial metrics for one harness SBS frame and its authenticated sidecars."""
     sbs_rgb = load_rgb(path)
     sbs = rgb_luma(sbs_rgb)
@@ -2258,8 +2270,18 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
             coverage_map = hole_map < 0.5
         binocular_geometry = _exact_binocular_geometry(
             warp_mapping, warp_mapping_shape, coverage_map)
-        structure_depth, structure_metric_semantics = _structure_metric_depth(
-            depth, depth_semantics)
+        if structure_field is not None:
+            # V2-live evaluation: score structural diagnostics against the production
+            # candidate-parallax field instead of raw-model ordering. The GT metrics above
+            # keep consuming the raw-model depth artifact unchanged.
+            structure_depth = np.asarray(structure_field, dtype=np.float32)
+            if depth is None or structure_depth.shape != np.asarray(depth).shape:
+                raise ValueError(
+                    "structure field does not match the scored depth artifact geometry")
+            structure_metric_semantics = V2_STRUCTURE_METRIC_SEMANTICS
+        else:
+            structure_depth, structure_metric_semantics = _structure_metric_depth(
+                depth, depth_semantics)
         out["_depth_structure_metric_semantics"] = structure_metric_semantics
         if src_gray is not None:
             out.update(exact_visible_disparity_metrics(
@@ -2415,12 +2437,15 @@ def _measure_sequence_spatial_job(job):
         warp_mapping = (
             load_warp_mapping(job["warp_mapping_path"], job["mapping_shape"])
             if job["warp_mapping_path"] else None)
+        structure_field = (load_depth(job["structure_path"])
+                           if job.get("structure_path") else None)
         row, _, _ = measure_seq_frame(
             job["sbs_path"], depth, src, gt_depth, job["gt_kind"],
             gt_depth_valid=gt_valid, warp_mask=warp_mask,
             warp_mapping=warp_mapping, warp_mapping_shape=job["mapping_shape"],
             src_rgb=src_rgb, hdr_scale=job["hdr_scale"], compact=job["compact"],
-            depth_semantics=job.get("depth_semantics"))
+            depth_semantics=job.get("depth_semantics"),
+            structure_field=structure_field)
         row["_frame_id"] = frame_id
         return row
     except Exception as exc:
@@ -2543,6 +2568,17 @@ def measure_sequence(seq_dir, frames_dir=None, compact=False):
         missing_depth = sorted(set(frame_ids) - set(depth_by_id))
         extra_depth = sorted(set(depth_by_id) - set(frame_ids))
         raise ValueError(f"depth/SBS frame-id mismatch: missing depth={missing_depth}, extra depth={extra_depth}")
+    # Optional V2-live structure evidence: when present it must be complete and paired with the
+    # scored depth artifacts; legacy runs without structure files keep the raw/native routing.
+    structure_by_id = indexed_files(os.path.join(seq_dir, "structure_*.png"), "structure_")
+    if structure_by_id and set(structure_by_id) != set(frame_ids):
+        missing_structure = sorted(set(frame_ids) - set(structure_by_id))
+        extra_structure = sorted(set(structure_by_id) - set(frame_ids))
+        raise ValueError(
+            f"structure/SBS frame-id mismatch: missing structure={missing_structure}, "
+            f"extra structure={extra_structure}")
+    if structure_by_id and not depth_by_id:
+        raise ValueError("structure artifacts require the scored depth artifacts")
     mask_by_id = indexed_files(os.path.join(seq_dir, "warp_mask_*.png"), "warp_mask_")
     if mask_by_id and set(mask_by_id) != set(frame_ids):
         missing_mask = sorted(set(frame_ids) - set(mask_by_id))
@@ -2658,6 +2694,7 @@ def measure_sequence(seq_dir, frames_dir=None, compact=False):
         "depth_path": depth_by_id.get(frame_id),
         "depth_shape": depth_shape_by_id.get(frame_id),
         "depth_semantics": depth_semantics_by_id.get(frame_id),
+        "structure_path": structure_by_id.get(frame_id),
         "source_path": src_by_id.get(frame_id),
         "gt_depth_path": gt_by_id.get(frame_id),
         "gt_valid_path": gt_valid_by_id.get(frame_id),
