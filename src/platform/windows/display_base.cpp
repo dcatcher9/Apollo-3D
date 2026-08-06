@@ -54,7 +54,7 @@ namespace platf::dxgi {
     constexpr std::size_t dirty_rect_grid_height = 18;
     constexpr std::size_t dirty_rect_grid_size =
       dirty_rect_grid_width * dirty_rect_grid_height;
-    constexpr double dirty_rect_persistent_fraction = 0.75;
+    constexpr double dirty_rect_persistent_peak_fraction = 0.75;
   }  // namespace
 
   /**
@@ -242,18 +242,23 @@ namespace platf::dxgi {
 
     struct persistent_summary_t {
       std::size_t tile_count {};
+      std::uint64_t peak_hits {};
+      std::uint64_t threshold_hits {};
       RECT bounding_rect {};
     };
 
     [[nodiscard]] persistent_summary_t persistent_summary() const noexcept {
       persistent_summary_t summary;
-      if (frame_count == 0) {
+      summary.peak_hits = *std::max_element(activity_hits.begin(), activity_hits.end());
+      if (summary.peak_hits == 0) {
         return summary;
       }
-      const auto threshold = std::max<std::uint64_t>(
+      // Desktop presentation cadence can exceed video cadence. Compare tiles with the dominant
+      // spatial cadence instead of rejecting 24/30/60 FPS video against every DDup acquisition.
+      summary.threshold_hits = std::max<std::uint64_t>(
         1,
         static_cast<std::uint64_t>(
-          std::ceil(frame_count * dirty_rect_persistent_fraction)
+          std::ceil(summary.peak_hits * dirty_rect_persistent_peak_fraction)
         )
       );
       auto min_x = dirty_rect_grid_width;
@@ -261,7 +266,7 @@ namespace platf::dxgi {
       std::size_t max_x = 0;
       std::size_t max_y = 0;
       for (std::size_t index = 0; index < activity_hits.size(); ++index) {
-        if (activity_hits[index] < threshold) {
+        if (activity_hits[index] < summary.threshold_hits) {
           continue;
         }
         ++summary.tile_count;
@@ -356,7 +361,12 @@ namespace platf::dxgi {
         << " dirty_area_mean_pct="sv << mean_percent(total_dirty_area)
         << " dirty_area_max_pct="sv << percent(maximum_dirty_area)
         << " largest_rect_pct="sv << percent(maximum_single_rect_area)
-        << " persistent_threshold_pct="sv << (dirty_rect_persistent_fraction * 100.0)
+        << " activity_peak_hits="sv << persistent.peak_hits
+        << " activity_peak_frame_pct="sv
+        << (100.0 * persistent.peak_hits / denominator)
+        << " persistent_threshold_hits="sv << persistent.threshold_hits
+        << " persistent_threshold_of_peak_pct="sv
+        << (dirty_rect_persistent_peak_fraction * 100.0)
         << " persistent_tiles_pct="sv
         << (100.0 * persistent.tile_count / dirty_rect_grid_size)
         << " persistent_bbox="sv << rect_text(persistent.bounding_rect)

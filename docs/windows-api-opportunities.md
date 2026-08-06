@@ -611,8 +611,12 @@ Important fields:
 - `coalesced_pct` shows how often Windows merged dirty regions; high values can include unchanged
   pixels and weaken spatial conclusions.
 - `dirty_area_mean_pct` and `dirty_area_max_pct` show how much of the surface Windows marks.
-- `persistent_tiles_pct` is the fraction of a 32x18 grid dirtied in at least 75% of acquired
-  presentation frames.
+- `activity_peak_hits` and `activity_peak_frame_pct` report the most-active tile's cadence. The
+  percentage can be below 75% when video cadence is lower than desktop presentation cadence.
+- `persistent_threshold_of_peak_pct` records the configured 75% ratio, and
+  `persistent_threshold_hits` is that fraction of `activity_peak_hits`, rounded up.
+  `persistent_tiles_pct` selects grid tiles that reach this peak-relative threshold, so 24/30/60
+  FPS video is not rejected merely because the desktop presents at a higher rate.
 - `persistent_bbox=L:T-R:B` is the quantized bounding rectangle of those persistent tiles, in the
   unrotated Desktop Duplication surface coordinates.
 - `protected_seen=1` means at least one presentation in the interval reported DRM masking, so the
@@ -625,6 +629,11 @@ rectangle and occupies substantially less than the full surface, while full-scre
 predictably. A full-surface, empty, or rapidly jumping box means dirty metadata is not a sufficient
 ROI detector on that driver. This first probe intentionally does not aggregate `GetFrameMoveRects`;
 scrolling is therefore diagnostic only and is not a pass/fail case yet.
+
+The 75% threshold is relative to the most-active tile, not to all acquired presentations. Read it
+alongside `activity_peak_hits`: a one-shot update has a peak of one and is not evidence of persistent
+video, while a small animation running faster than the video can become the reference cadence. The
+probe intentionally exposes those cases rather than adding an unvalidated classifier.
 
 ### Phase 1 — The overlay compositing framework
 
