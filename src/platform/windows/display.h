@@ -7,10 +7,12 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <vector>
 
 // platform includes
 #include <d3d11.h>
@@ -82,6 +84,7 @@ namespace platf::dxgi {
   }  // namespace video
 
   class hwdevice_t;
+  class dirty_rect_probe_t;
 
   class gpu_cursor_t {
   public:
@@ -289,6 +292,9 @@ namespace platf::dxgi {
     capture_e release_frame();
 
     ~duplication_t();
+
+  private:
+    std::unique_ptr<dirty_rect_probe_t> dirty_rect_probe;
   };
 
   /**

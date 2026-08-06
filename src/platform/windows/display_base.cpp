@@ -3,7 +3,11 @@
  * @brief Definitions for the Windows display base code.
  */
 // standard includes
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <iomanip>
+#include <sstream>
 #include <thread>
 
 // platform includes
@@ -42,11 +46,382 @@ namespace platf {
 
 namespace platf::dxgi {
 
+  namespace {
+    constexpr auto dirty_rect_log_interval = 2s;
+    constexpr std::size_t dirty_rect_log_sample_limit = 8;
+    constexpr UINT dirty_rect_metadata_limit = 8U * 1024U * 1024U;
+    constexpr std::size_t dirty_rect_grid_width = 32;
+    constexpr std::size_t dirty_rect_grid_height = 18;
+    constexpr std::size_t dirty_rect_grid_size =
+      dirty_rect_grid_width * dirty_rect_grid_height;
+    constexpr double dirty_rect_persistent_fraction = 0.75;
+  }  // namespace
+
+  /**
+   * Diagnostics-only Desktop Duplication dirty-rectangle probe.
+   *
+   * The scratch vector retains its high-water allocation behind a fixed safety cap. Each
+   * presentation is aggregated into a 32x18 activity grid; formatting and logging happen every two
+   * seconds. Probe failures never affect capture because the acquired texture remains authoritative.
+   */
+  class dirty_rect_probe_t {
+  public:
+    dirty_rect_probe_t(UINT width, UINT height, DXGI_MODE_ROTATION rotation):
+        width {width},
+        height {height},
+        rotation {rotation},
+        next_log {std::chrono::steady_clock::now() + dirty_rect_log_interval} {
+    }
+
+    void tick() noexcept {
+      try {
+        maybe_log(S_OK);
+      } catch (...) {
+        // Diagnostics must never change capture success or terminate the capture thread.
+        ++failure_count;
+      }
+    }
+
+    void observe(IDXGIOutputDuplication *dup, const DXGI_OUTDUPL_FRAME_INFO &frame_info) noexcept {
+      // Cursor-only acquisitions carry no new desktop damage, but still close elapsed windows.
+      if (frame_info.LastPresentTime.QuadPart == 0) {
+        tick();
+        return;
+      }
+
+      latest_count = 0;
+      try {
+        protected_seen = protected_seen || frame_info.ProtectedContentMaskedOut;
+        maximum_metadata_bytes = std::max(
+          maximum_metadata_bytes,
+          frame_info.TotalMetadataBufferSize
+        );
+        UINT buffer_bytes = frame_info.TotalMetadataBufferSize;
+        if (buffer_bytes == 0) {
+          record_frame(frame_info);
+          maybe_log(S_OK);
+          return;
+        }
+        if (buffer_bytes > dirty_rect_metadata_limit) {
+          ++failure_count;
+          maybe_log(DXGI_ERROR_MORE_DATA);
+          return;
+        }
+
+        resize_for_bytes(buffer_bytes);
+        UINT required_bytes = 0;
+        auto status = dup->GetFrameDirtyRects(
+          buffer_bytes,
+          buffer_bytes == 0 ? nullptr : scratch.data(),
+          &required_bytes
+        );
+
+        if (status == DXGI_ERROR_MORE_DATA && required_bytes <= dirty_rect_metadata_limit) {
+          resize_for_bytes(required_bytes);
+          buffer_bytes = static_cast<UINT>(scratch.size() * sizeof(RECT));
+          status = dup->GetFrameDirtyRects(
+            buffer_bytes,
+            buffer_bytes == 0 ? nullptr : scratch.data(),
+            &required_bytes
+          );
+        }
+
+        if (FAILED(status)) {
+          ++failure_count;
+          maybe_log(status);
+          return;
+        }
+        if (required_bytes % sizeof(RECT) != 0 || required_bytes > scratch.size() * sizeof(RECT)) {
+          ++failure_count;
+          maybe_log(E_UNEXPECTED);
+          return;
+        }
+        latest_count = required_bytes / sizeof(RECT);
+        record_frame(frame_info);
+        maybe_log(S_OK);
+      } catch (...) {
+        // Diagnostics must never change capture success or terminate the capture thread.
+        latest_count = 0;
+        ++failure_count;
+      }
+    }
+
+  private:
+    void resize_for_bytes(UINT bytes) {
+      const auto rect_count =
+        (static_cast<std::size_t>(bytes) + sizeof(RECT) - 1) / sizeof(RECT);
+      if (scratch.size() < rect_count) {
+        scratch.resize(rect_count);
+      }
+    }
+
+    [[nodiscard]] RECT clipped(RECT rect) const noexcept {
+      rect.left = std::clamp<LONG>(rect.left, 0, static_cast<LONG>(width));
+      rect.top = std::clamp<LONG>(rect.top, 0, static_cast<LONG>(height));
+      rect.right = std::clamp<LONG>(rect.right, 0, static_cast<LONG>(width));
+      rect.bottom = std::clamp<LONG>(rect.bottom, 0, static_cast<LONG>(height));
+      return rect;
+    }
+
+    [[nodiscard]] static std::uint64_t area(const RECT &rect) noexcept {
+      if (rect.right <= rect.left || rect.bottom <= rect.top) {
+        return 0;
+      }
+      return static_cast<std::uint64_t>(rect.right - rect.left) *
+             static_cast<std::uint64_t>(rect.bottom - rect.top);
+    }
+
+    void mark_activity(const RECT &input) noexcept {
+      const auto rect = clipped(input);
+      if (area(rect) == 0 || width == 0 || height == 0) {
+        return;
+      }
+
+      const auto first_x = std::min<std::size_t>(
+        dirty_rect_grid_width - 1,
+        static_cast<std::uint64_t>(rect.left) * dirty_rect_grid_width / width
+      );
+      const auto last_x = std::min<std::size_t>(
+        dirty_rect_grid_width - 1,
+        (static_cast<std::uint64_t>(rect.right) * dirty_rect_grid_width - 1) / width
+      );
+      const auto first_y = std::min<std::size_t>(
+        dirty_rect_grid_height - 1,
+        static_cast<std::uint64_t>(rect.top) * dirty_rect_grid_height / height
+      );
+      const auto last_y = std::min<std::size_t>(
+        dirty_rect_grid_height - 1,
+        (static_cast<std::uint64_t>(rect.bottom) * dirty_rect_grid_height - 1) / height
+      );
+      for (auto y = first_y; y <= last_y; ++y) {
+        for (auto x = first_x; x <= last_x; ++x) {
+          const auto index = y * dirty_rect_grid_width + x;
+          if (activity_frame_marks[index] != activity_frame_generation) {
+            activity_frame_marks[index] = activity_frame_generation;
+            ++activity_hits[index];
+          }
+        }
+      }
+    }
+
+    void record_frame(const DXGI_OUTDUPL_FRAME_INFO &frame_info) noexcept {
+      ++frame_count;
+      accumulated_frames_sum += frame_info.AccumulatedFrames;
+      maximum_accumulated_frames = std::max(
+        maximum_accumulated_frames,
+        frame_info.AccumulatedFrames
+      );
+      total_rect_count += latest_count;
+      maximum_rect_count = std::max(maximum_rect_count, latest_count);
+      if (latest_count == 0) {
+        ++empty_frame_count;
+      }
+      if (frame_info.RectsCoalesced) {
+        ++coalesced_frame_count;
+      }
+
+      if (++activity_frame_generation == 0) {
+        activity_frame_marks.fill(0);
+        activity_frame_generation = 1;
+      }
+      std::uint64_t dirty_area = 0;
+      std::uint64_t largest_rect = 0;
+      for (std::size_t i = 0; i < latest_count; ++i) {
+        const auto rect = clipped(scratch[i]);
+        const auto rect_area = area(rect);
+        dirty_area += rect_area;
+        largest_rect = std::max(largest_rect, rect_area);
+        mark_activity(rect);
+      }
+      const auto surface_area = static_cast<std::uint64_t>(width) * height;
+      dirty_area = std::min(dirty_area, surface_area);
+      total_dirty_area += dirty_area;
+      maximum_dirty_area = std::max(maximum_dirty_area, dirty_area);
+      maximum_single_rect_area = std::max(maximum_single_rect_area, largest_rect);
+    }
+
+    struct persistent_summary_t {
+      std::size_t tile_count {};
+      RECT bounding_rect {};
+    };
+
+    [[nodiscard]] persistent_summary_t persistent_summary() const noexcept {
+      persistent_summary_t summary;
+      if (frame_count == 0) {
+        return summary;
+      }
+      const auto threshold = std::max<std::uint64_t>(
+        1,
+        static_cast<std::uint64_t>(
+          std::ceil(frame_count * dirty_rect_persistent_fraction)
+        )
+      );
+      auto min_x = dirty_rect_grid_width;
+      auto min_y = dirty_rect_grid_height;
+      std::size_t max_x = 0;
+      std::size_t max_y = 0;
+      for (std::size_t index = 0; index < activity_hits.size(); ++index) {
+        if (activity_hits[index] < threshold) {
+          continue;
+        }
+        ++summary.tile_count;
+        const auto x = index % dirty_rect_grid_width;
+        const auto y = index / dirty_rect_grid_width;
+        min_x = std::min(min_x, x);
+        min_y = std::min(min_y, y);
+        max_x = std::max(max_x, x);
+        max_y = std::max(max_y, y);
+      }
+      if (summary.tile_count != 0) {
+        summary.bounding_rect = {
+          static_cast<LONG>(min_x * width / dirty_rect_grid_width),
+          static_cast<LONG>(min_y * height / dirty_rect_grid_height),
+          static_cast<LONG>(
+            ((max_x + 1) * width + dirty_rect_grid_width - 1) /
+            dirty_rect_grid_width
+          ),
+          static_cast<LONG>(
+            ((max_y + 1) * height + dirty_rect_grid_height - 1) /
+            dirty_rect_grid_height
+          ),
+        };
+      }
+      return summary;
+    }
+
+    [[nodiscard]] std::string rect_text(const RECT &rect) const {
+      if (area(rect) == 0) {
+        return "none";
+      }
+      std::ostringstream out;
+      out << rect.left << ':' << rect.top << '-' << rect.right << ':' << rect.bottom;
+      return out.str();
+    }
+
+    [[nodiscard]] std::string latest_sample() const {
+      std::ostringstream sample;
+      sample << '[';
+      const auto sample_count = std::min<std::size_t>(
+        latest_count,
+        dirty_rect_log_sample_limit
+      );
+      for (std::size_t i = 0; i < sample_count; ++i) {
+        if (i != 0) {
+          sample << ',';
+        }
+        const auto &rect = scratch[i];
+        sample << rect.left << ':' << rect.top << '-' << rect.right << ':' << rect.bottom;
+      }
+      if (latest_count > sample_count) {
+        sample << ",+" << (latest_count - sample_count) << " more";
+      }
+      sample << ']';
+      return sample.str();
+    }
+
+    void maybe_log(HRESULT status) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now < next_log) {
+        return;
+      }
+
+      const auto surface_area = std::max<std::uint64_t>(
+        1,
+        static_cast<std::uint64_t>(width) * height
+      );
+      const auto denominator = std::max<std::uint64_t>(frame_count, 1);
+      const auto persistent = persistent_summary();
+      const auto percent = [surface_area](std::uint64_t pixels) {
+        return 100.0 * static_cast<double>(pixels) / surface_area;
+      };
+      const auto mean_percent = [surface_area, denominator](std::uint64_t total) {
+        return 100.0 * static_cast<double>(total) / surface_area / denominator;
+      };
+      const auto mean = [denominator](std::uint64_t total) {
+        return static_cast<double>(total) / denominator;
+      };
+
+      BOOST_LOG(debug)
+        << std::fixed << std::setprecision(2)
+        << "Desktop Duplication dirty-rect probe: surface="sv << width << 'x' << height
+        << " rotation="sv << static_cast<unsigned>(rotation)
+        << " window_frames="sv << frame_count
+        << " failures="sv << failure_count
+        << " empty_pct="sv << (100.0 * empty_frame_count / denominator)
+        << " coalesced_pct="sv << (100.0 * coalesced_frame_count / denominator)
+        << " accumulated_mean="sv << mean(accumulated_frames_sum)
+        << " accumulated_max="sv << maximum_accumulated_frames
+        << " rects_mean="sv << mean(total_rect_count)
+        << " rects_max="sv << maximum_rect_count
+        << " dirty_area_mean_pct="sv << mean_percent(total_dirty_area)
+        << " dirty_area_max_pct="sv << percent(maximum_dirty_area)
+        << " largest_rect_pct="sv << percent(maximum_single_rect_area)
+        << " persistent_threshold_pct="sv << (dirty_rect_persistent_fraction * 100.0)
+        << " persistent_tiles_pct="sv
+        << (100.0 * persistent.tile_count / dirty_rect_grid_size)
+        << " persistent_bbox="sv << rect_text(persistent.bounding_rect)
+        << " metadata_bytes_max="sv << maximum_metadata_bytes
+        << " last_status=0x"sv << util::hex(status).to_string_view()
+        << " latest_count="sv << latest_count
+        << " latest="sv << latest_sample()
+        << " protected_seen="sv << protected_seen;
+
+      reset_window(now);
+    }
+
+    void reset_window(std::chrono::steady_clock::time_point now) noexcept {
+      latest_count = 0;
+      frame_count = 0;
+      failure_count = 0;
+      empty_frame_count = 0;
+      coalesced_frame_count = 0;
+      accumulated_frames_sum = 0;
+      maximum_accumulated_frames = 0;
+      total_rect_count = 0;
+      maximum_rect_count = 0;
+      total_dirty_area = 0;
+      maximum_dirty_area = 0;
+      maximum_single_rect_area = 0;
+      maximum_metadata_bytes = 0;
+      protected_seen = false;
+      activity_hits.fill(0);
+      activity_frame_marks.fill(0);
+      activity_frame_generation = 1;
+      next_log = now + dirty_rect_log_interval;
+    }
+
+    UINT width;
+    UINT height;
+    DXGI_MODE_ROTATION rotation;
+    std::vector<RECT> scratch;
+    UINT latest_count {};
+    std::uint64_t frame_count {};
+    std::uint64_t failure_count {};
+    std::uint64_t empty_frame_count {};
+    std::uint64_t coalesced_frame_count {};
+    std::uint64_t accumulated_frames_sum {};
+    UINT maximum_accumulated_frames {};
+    std::uint64_t total_rect_count {};
+    UINT maximum_rect_count {};
+    std::uint64_t total_dirty_area {};
+    std::uint64_t maximum_dirty_area {};
+    std::uint64_t maximum_single_rect_area {};
+    UINT maximum_metadata_bytes {};
+    bool protected_seen {};
+    std::array<std::uint64_t, dirty_rect_grid_size> activity_hits {};
+    std::array<std::uint64_t, dirty_rect_grid_size> activity_frame_marks {};
+    std::uint64_t activity_frame_generation {1};
+    std::chrono::steady_clock::time_point next_log;
+  };
+
   /**
    * DDAPI-specific initialization goes here.
    */
   int duplication_t::init(display_base_t *display, const ::video::config_t &config) {
     HRESULT status;
+
+    // A failed reinitialization must not expose diagnostics from the previous duplication object.
+    dirty_rect_probe.reset();
 
     // Capture format will be determined from the first call to AcquireNextFrame()
     display->capture_format = DXGI_FORMAT_UNKNOWN;
@@ -129,6 +504,17 @@ namespace platf::dxgi {
       BOOST_LOG(info) << "Requested frame rate [" << display->client_frame_rate << "fps]";
     }
     display->display_refresh_rate_rounded = lround(display_refresh_rate_decimal);
+
+    if (config::sunshine.diagnostics_enabled && config::sunshine.min_log_level <= debug.default_severity()) {
+      dirty_rect_probe = std::make_unique<dirty_rect_probe_t>(
+        dup_desc.ModeDesc.Width,
+        dup_desc.ModeDesc.Height,
+        dup_desc.Rotation
+      );
+      BOOST_LOG(debug) << "Desktop Duplication dirty-rect probe enabled (2-second summaries in capture-surface coordinates)"sv;
+    } else {
+      dirty_rect_probe.reset();
+    }
     return 0;
   }
 
@@ -151,8 +537,14 @@ namespace platf::dxgi {
         }
 
         has_frame = true;
+        if (dirty_rect_probe) {
+          dirty_rect_probe->observe(dup.get(), frame_info);
+        }
         return capture_e::ok;
       case DXGI_ERROR_WAIT_TIMEOUT:
+        if (dirty_rect_probe) {
+          dirty_rect_probe->tick();
+        }
         return capture_e::timeout;
       case WAIT_ABANDONED:
       case DXGI_ERROR_ACCESS_LOST:
@@ -168,6 +560,7 @@ namespace platf::dxgi {
     auto capture_status = release_frame();
 
     dup.reset(dup_p);
+    dirty_rect_probe.reset();
 
     return capture_status;
   }
