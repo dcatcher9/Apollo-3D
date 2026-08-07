@@ -10,10 +10,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 25u;
-  inline constexpr std::uint32_t contract_tag = 0x7AEBF6CAu;
-  inline constexpr std::string_view contract_canonical_sha256 = "328d8f71424d6005ac0bd5025b4857efe95aa36fa683ab3c554a33b5309dcd05";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "7aebf6ca0c5bb5d6de7f33d4ea75a2524da5f73c5a566527512dec32632a50d4";
+  inline constexpr std::uint32_t contract_schema = 26u;
+  inline constexpr std::uint32_t contract_tag = 0x4498BD67u;
+  inline constexpr std::string_view contract_canonical_sha256 = "abb75ebabf6928c39771621da43b88f739fa3cf2ea83b18c02cdb20745aaa4b8";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "4498bd676c9b996710d69aed892bdbb047e8e27db9aebd22553421191f6754ef";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -25,7 +25,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t shader_source_closure_schema = 2u;
   inline constexpr std::uint32_t shader_source_compile_flags = 34816u;
   inline constexpr std::uint32_t shader_source_macro_count = 0u;
-  inline constexpr std::string_view shader_source_closure_sha256 = "fd3a5c17e4e689de659bb862e38d648c9f12cad13e317052f8a7a1dce0c52d15";
+  inline constexpr std::string_view shader_source_closure_sha256 = "ab242fac7fa7f4a7360c65b443054a88d7ba092d95c13159b165f77bb4b5fd74";
 
   struct shader_source_spec_t {
     std::string_view source_file;
@@ -53,8 +53,8 @@ namespace models::depth_coordinate_v2 {
   }};
 
   inline constexpr float collapse_abs_epsilon = 1e-06f;
-  inline constexpr float far_tau = 0.15f;
-  inline constexpr float near_log_tau = 2.0f;
+  inline constexpr float far_tau = 0.75f;
+  inline constexpr float near_log_tau = 0.5f;
   inline constexpr float gain_per_pop = 0.00375f;
   inline constexpr float reference_pop_strength = 1.0f;
   inline constexpr float direct_container_limit = 0.04f;
@@ -62,7 +62,6 @@ namespace models::depth_coordinate_v2 {
   inline constexpr float max_vertical_shear = 2.0f;
   inline constexpr float vertical_majorant_share = 0.75f;
   inline constexpr float convergence_curve_default = 0.0f;
-  inline constexpr float stage_valley_ratio_max = 0.75f;
   inline constexpr std::string_view direct_parallax_decode_expression = "(encoded * 2 - 1) * 0.04";
   static_assert(convergence_curve_default == 0.0f);
   static_assert(max_horizontal_slope > 0.0f && max_horizontal_slope < 1.0f);
@@ -106,11 +105,11 @@ namespace models::depth_coordinate_v2 {
 
   inline constexpr std::array<model_calibration_t, 1> model_calibrations {{
     {
-      "dav2-small-fp16-standardized-ui-shapes-v2",
+      "dav2-small-fp16-standardized-ui-shapes-v3",
       "depth_anything_v2_fp16",
       "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx",
       "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
-      0.5f,
+      2.25f,
       {
         "apollo-dav2-area-hdr-srgb-imagenet-v1",
         2u,
@@ -134,12 +133,12 @@ namespace models::depth_coordinate_v2 {
   }};
 
   inline constexpr std::array<model_calibrated_shape_t, 6> model_calibrated_shapes {{
-    {"dav2-small-fp16-standardized-ui-shapes-v2", 770u, 434u},
-    {"dav2-small-fp16-standardized-ui-shapes-v2", 1022u, 434u},
-    {"dav2-small-fp16-standardized-ui-shapes-v2", 1036u, 434u},
-    {"dav2-small-fp16-standardized-ui-shapes-v2", 434u, 770u},
-    {"dav2-small-fp16-standardized-ui-shapes-v2", 434u, 1022u},
-    {"dav2-small-fp16-standardized-ui-shapes-v2", 434u, 1036u},
+    {"dav2-small-fp16-standardized-ui-shapes-v3", 770u, 434u},
+    {"dav2-small-fp16-standardized-ui-shapes-v3", 1022u, 434u},
+    {"dav2-small-fp16-standardized-ui-shapes-v3", 1036u, 434u},
+    {"dav2-small-fp16-standardized-ui-shapes-v3", 434u, 770u},
+    {"dav2-small-fp16-standardized-ui-shapes-v3", 434u, 1022u},
+    {"dav2-small-fp16-standardized-ui-shapes-v3", 434u, 1036u},
   }};
 
   constexpr bool model_calibration_supports_shape(

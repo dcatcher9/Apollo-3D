@@ -65,16 +65,16 @@ named contract:
 
 | Contract | Current schema | Scope |
 |---|---:|---|
-| Depth Coordinate V2 | 25 | Calibrated producer, authorization state, constants, and complete shader closure |
+| Depth Coordinate V2 | 26 | Calibrated producer, authorization state, constants, and complete shader closure |
 | Direct-geometry harness | 25 | Independent comparison-only replay input |
 | Dump manifest | 12 | One Dump 3D package and its artifact authority |
-| V2 state dump | 15 | Serialized scene-camera and renderer-authorization state |
+| V2 state dump | 16 | Serialized scene-camera and renderer-authorization state |
 | V2 frame statistics | 2 | Serialized frame-local statistics |
 | Warp-map shape | 2 | Renderer-specific exact source-map layout and mask meaning |
 | Raw-model provenance | 3 | Model/input/preprocess-to-raw binding |
 | Evaluator | 36 | `run_eval.py` gating and result semantics |
 | Production harness | 20 | Ordinary V2 clip artifact contract |
-| Direct sequence replay | 17 | Whole-shot exact direct-geometry replay |
+| Direct sequence replay | 18 | Whole-shot exact direct-geometry replay |
 
 The direct-geometry harness uses schema 25. It is not an older copy of the Depth
 Coordinate contract and must not be renumbered when that production contract changes. In this

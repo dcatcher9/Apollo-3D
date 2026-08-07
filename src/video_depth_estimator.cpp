@@ -1726,11 +1726,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_frame_stats_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_frame_stats_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_frame_stats_srv;
-    // Exact 256-bin raw histogram snapshot taken before depth_minmax_ema_cs clears the shared
-    // percentile histogram. The V2 state resolver pairs adjacent bins into its 128-bin oracle.
-    Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_histogram_snapshot_buf;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>
-      depth_coordinate_v2_histogram_snapshot_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_state_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_state_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_state_srv;
@@ -2476,8 +2471,6 @@ namespace models {
       depth_coordinate_v2_frame_stats_buf.Reset();
       depth_coordinate_v2_frame_stats_uav.Reset();
       depth_coordinate_v2_frame_stats_srv.Reset();
-      depth_coordinate_v2_histogram_snapshot_buf.Reset();
-      depth_coordinate_v2_histogram_snapshot_srv.Reset();
       depth_coordinate_v2_state_buf.Reset();
       depth_coordinate_v2_state_uav.Reset();
       depth_coordinate_v2_state_srv.Reset();
@@ -2579,32 +2572,14 @@ namespace models {
                             depth_coordinate_v2_frame_stats_uav
                           );
 
-      // SRV-only copy target for the shared raw histogram. CopyResource stays entirely on the
-      // GPU queue and, unlike a second histogram dispatch, adds no extra scan or synchronization.
-      D3D11_BUFFER_DESC histogram_snapshot_desc {};
-      histogram_snapshot_desc.Usage = D3D11_USAGE_DEFAULT;
-      histogram_snapshot_desc.ByteWidth = 256u * sizeof(std::uint32_t);
-      histogram_snapshot_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-      histogram_snapshot_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-      histogram_snapshot_desc.StructureByteStride = sizeof(std::uint32_t);
       resources_ok = resources_ok &&
-                     SUCCEEDED(device->CreateBuffer(
-                       &histogram_snapshot_desc,
-                       nullptr,
-                       &depth_coordinate_v2_histogram_snapshot_buf
-                     )) &&
-                     SUCCEEDED(device->CreateShaderResourceView(
-                       depth_coordinate_v2_histogram_snapshot_buf.Get(),
-                       nullptr,
-                       &depth_coordinate_v2_histogram_snapshot_srv
-                     )) &&
-                          create_float4_buffer(
-                            state_vector_count,
-                            state_initial_words.data(),
-                            depth_coordinate_v2_state_buf,
-                            depth_coordinate_v2_state_srv,
-                            depth_coordinate_v2_state_uav
-                          );
+                     create_float4_buffer(
+                       state_vector_count,
+                       state_initial_words.data(),
+                       depth_coordinate_v2_state_buf,
+                       depth_coordinate_v2_state_srv,
+                       depth_coordinate_v2_state_uav
+                     );
 
       D3D11_TEXTURE2D_DESC texture_desc {};
       texture_desc.Width = static_cast<UINT>(target_w);
@@ -2745,16 +2720,15 @@ namespace models {
       // cut. The model scale is fixed. An unusable no-cut frame publishes flat without erasing
       // the retained camera.
       context->CSSetShader(depth_coordinate_v2_state_resolve_cs.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *state_srvs[3] = {
+      ID3D11ShaderResourceView *state_srvs[2] = {
         depth_coordinate_v2_frame_stats_srv.Get(),
         cut_state_srv.Get(),
-        depth_coordinate_v2_histogram_snapshot_srv.Get(),
       };
-      context->CSSetShaderResources(0, 3, state_srvs);
+      context->CSSetShaderResources(0, 2, state_srvs);
       context->CSSetUnorderedAccessViews(
         0, 1, depth_coordinate_v2_state_uav.GetAddressOf(), nullptr);
       context->Dispatch(1, 1, 1);
-      context->CSSetShaderResources(0, 3, null_srvs3);
+      context->CSSetShaderResources(0, 2, null_srvs3);
       context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
 
       // Raw depth -> immutable pre-limiter candidate. The full-size canonical-coordinate field
@@ -3195,16 +3169,6 @@ namespace models {
           context->CSSetUnorderedAccessViews(0, 2, null_uavs_h, nullptr);
           context->CSSetShaderResources(0, 1, &null_srv1);
 
-          // Preserve the exact raw histogram for the scene-latched V2 stage-boundary oracle
-          // before pass B clears the shared accumulator. This is a 1 KiB GPU copy with no
-          // readback, fence, or CPU/GPU synchronization.
-          if (parallax_v2_producer_active &&
-              depth_coordinate_v2_histogram_snapshot_buf) {
-            context->CopyResource(
-              depth_coordinate_v2_histogram_snapshot_buf.Get(),
-              hist_buf.Get()
-            );
-          }
         }
 
         // Pass B: fold into the EMA'd bounds and reset the accumulators (1 thread).

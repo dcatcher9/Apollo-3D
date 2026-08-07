@@ -36,7 +36,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
 
 <table>
     <tr><td>Description</td><td>Set the literal 3D separation strength used by new live Host 3D V2 streams. Higher values create more depth but may be harder to focus. This shared value is also the base strength for new offline conversions.</td></tr>
-    <tr><td>Default</td><td><code>1.20</code></td></tr>
+    <tr><td>Default</td><td><code>1.75</code></td></tr>
     <tr><td>Range</td><td><code>0.25</code>-<code>2.00</code></td></tr>
 </table>
 

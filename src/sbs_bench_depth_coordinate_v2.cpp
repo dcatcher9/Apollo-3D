@@ -403,8 +403,6 @@ void main(uint3 id : SV_DispatchThreadID) {
     std::vector<input_frame> frames;
     std::vector<nlohmann::ordered_json> trace_rows;
 
-    ComPtr<ID3D11ComputeShader> minmax_shader;
-    ComPtr<ID3D11ComputeShader> histogram_shader;
     ComPtr<ID3D11ComputeShader> moments_shader;
     ComPtr<ID3D11ComputeShader> frame_shader;
     ComPtr<ID3D11ComputeShader> state_shader;
@@ -419,11 +417,6 @@ void main(uint3 id : SV_DispatchThreadID) {
     ComPtr<ID3D11Buffer> encode_constants;
     ComPtr<ID3D11Buffer> raw_buffer;
     ComPtr<ID3D11ShaderResourceView> raw_srv;
-    ComPtr<ID3D11Buffer> minmax_raw_buffer;
-    ComPtr<ID3D11UnorderedAccessView> minmax_raw_uav;
-    ComPtr<ID3D11Buffer> histogram_buffer;
-    ComPtr<ID3D11ShaderResourceView> histogram_srv;
-    ComPtr<ID3D11UnorderedAccessView> histogram_uav;
     ComPtr<ID3D11Buffer> partial_buffer;
     ComPtr<ID3D11ShaderResourceView> partial_srv;
     ComPtr<ID3D11UnorderedAccessView> partial_uav;
@@ -778,9 +771,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         const shader_cache::shader_spec *spec;
         ComPtr<ID3D11ComputeShader> *shader;
       };
-      const std::array<shader_target, 9> targets {{
-        {&shader_cache::depth_minmax, &minmax_shader},
-        {&shader_cache::depth_hist, &histogram_shader},
+      const std::array<shader_target, 7> targets {{
         {&shader_cache::depth_coordinate_v2_moments, &moments_shader},
         {&shader_cache::depth_coordinate_v2_frame_resolve, &frame_shader},
         {&shader_cache::depth_coordinate_v2_state_resolve, &state_shader},
@@ -853,14 +844,9 @@ void main(uint3 id : SV_DispatchThreadID) {
       }
       ComPtr<ID3D11ShaderResourceView> unused_srv;
       ComPtr<ID3D11UnorderedAccessView> unused_uav;
-      const std::array<std::uint32_t, 256> empty_histogram {};
       if (!create_structured_buffer(
             device.Get(), sizeof(float), width * height, nullptr, false,
             raw_buffer, raw_srv, unused_uav
-          ) ||
-          !create_structured_buffer(
-            device.Get(), sizeof(std::uint32_t), 256u, empty_histogram.data(), true,
-            histogram_buffer, histogram_srv, histogram_uav
           ) ||
           !create_structured_buffer(
             device.Get(), sizeof(float) * 4u, reduce_groups * 2u, nullptr, true,
@@ -878,29 +864,6 @@ void main(uint3 id : SV_DispatchThreadID) {
           )) {
         error = "cannot create v2 GPU replay structured resources";
         return false;
-      }
-      {
-        const std::array<std::uint32_t, 3> initial_minmax {{0xffffffffu, 0u, 0u}};
-        D3D11_BUFFER_DESC description {};
-        description.Usage = D3D11_USAGE_DEFAULT;
-        description.ByteWidth = static_cast<UINT>(sizeof(initial_minmax));
-        description.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-        description.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
-        D3D11_SUBRESOURCE_DATA initial_data {initial_minmax.data(), 0u, 0u};
-        D3D11_UNORDERED_ACCESS_VIEW_DESC view {};
-        view.Format = DXGI_FORMAT_R32_TYPELESS;
-        view.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-        view.Buffer.NumElements = static_cast<UINT>(initial_minmax.size());
-        view.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
-        if (FAILED(device->CreateBuffer(
-              &description, &initial_data, minmax_raw_buffer.ReleaseAndGetAddressOf()
-            )) ||
-            FAILED(device->CreateUnorderedAccessView(
-              minmax_raw_buffer.Get(), &view, minmax_raw_uav.ReleaseAndGetAddressOf()
-            )) || !minmax_raw_uav) {
-          error = "cannot create v2 GPU replay raw min/max resource";
-          return false;
-        }
       }
       auto cut_state_words = sbs_adaptive_state::initial_words;
       if (!create_structured_buffer(
@@ -1045,29 +1008,6 @@ void main(uint3 id : SV_DispatchThreadID) {
       };
       context->CSSetConstantBuffers(0, 2, constant_buffers);
 
-      // Reproduce the two authenticated shared passes that feed live V2. The replay resets their
-      // accumulators explicitly because replay starts from an authenticated state snapshot.
-      const std::array<std::uint32_t, 3> initial_minmax {{0xffffffffu, 0u, 0u}};
-      const UINT clear_histogram[4] = {0u, 0u, 0u, 0u};
-      context->UpdateSubresource(
-        minmax_raw_buffer.Get(), 0u, nullptr, initial_minmax.data(), 0u, 0u);
-      context->ClearUnorderedAccessViewUint(histogram_uav.Get(), clear_histogram);
-
-      context->CSSetShader(minmax_shader.Get(), nullptr, 0);
-      context->CSSetShaderResources(0, 1, raw_srv.GetAddressOf());
-      context->CSSetUnorderedAccessViews(0, 1, minmax_raw_uav.GetAddressOf(), nullptr);
-      context->Dispatch(reduce_groups, 1u, 1u);
-      unbind(1u, 1u);
-
-      context->CSSetShader(histogram_shader.Get(), nullptr, 0);
-      context->CSSetShaderResources(0, 1, raw_srv.GetAddressOf());
-      ID3D11UnorderedAccessView *histogram_uavs[] = {
-        histogram_uav.Get(), minmax_raw_uav.Get(),
-      };
-      context->CSSetUnorderedAccessViews(0, 2, histogram_uavs, nullptr);
-      context->Dispatch(reduce_groups, 1u, 1u);
-      unbind(1u, 2u);
-
       context->CSSetShader(moments_shader.Get(), nullptr, 0);
       ID3D11ShaderResourceView *moments_srvs[] = {raw_srv.Get()};
       ID3D11UnorderedAccessView *moments_uavs[] = {partial_uav.Get()};
@@ -1086,12 +1026,12 @@ void main(uint3 id : SV_DispatchThreadID) {
 
       context->CSSetShader(state_shader.Get(), nullptr, 0);
       ID3D11ShaderResourceView *state_srvs[] = {
-        frame_srv.Get(), cut_state_srv.Get(), histogram_srv.Get(),
+        frame_srv.Get(), cut_state_srv.Get(),
       };
-      context->CSSetShaderResources(0, 3, state_srvs);
+      context->CSSetShaderResources(0, 2, state_srvs);
       context->CSSetUnorderedAccessViews(0, 1, state_uav.GetAddressOf(), nullptr);
       context->Dispatch(1u, 1u, 1u);
-      unbind(3u, 1u);
+      unbind(2u, 1u);
 
       ID3D11ShaderResourceView *map_srvs[] = {raw_srv.Get(), state_srv.Get()};
 
@@ -1625,13 +1565,10 @@ void main(uint3 id : SV_DispatchThreadID) {
           {"width", impl_->width},
           {"height", impl_->height},
         }},
-        // Authenticated shared histogram inputs plus production state/geometry passes. The
-        // replay's coordinate_main dispatch is
+        // Production state/geometry passes. The replay's coordinate_main dispatch is
         // diagnostic report materialization, exactly like live Dump 3D, and is intentionally
         // excluded from the authenticated producer source closure.
         {"shader_sequence", {
-          "depth_minmax_cs.hlsl",
-          "depth_hist_cs.hlsl",
           "depth_coordinate_v2_moments_cs.hlsl",
           "depth_coordinate_v2_frame_resolve_cs.hlsl",
           "depth_coordinate_v2_state_resolve_cs.hlsl",

@@ -428,7 +428,7 @@ def main(argv: list[str] | None = None) -> int:
         result.parallax.astype("<f4").tofile(output / "conditioned_parallax.f32")
 
         report = {
-            "schema": 9,
+            "schema": 10,
             "experiment": "depth-mapping-v2-raw-recomputed-direct-parallax-experiment",
             "captured_state_replay": False,
             "captured_state_limitation": (

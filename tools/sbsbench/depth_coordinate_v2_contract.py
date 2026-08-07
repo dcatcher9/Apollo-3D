@@ -26,7 +26,6 @@ CALIBRATED_DEFAULT_NAMES = (
     "max_vertical_shear",
     "vertical_majorant_share",
     "convergence_curve_default",
-    "stage_valley_ratio_max",
 )
 
 
@@ -78,7 +77,6 @@ class CalibratedDefaults:
     max_vertical_shear: float
     vertical_majorant_share: float
     convergence_curve_default: float
-    stage_valley_ratio_max: float
 
 
 @dataclass(frozen=True)
@@ -306,8 +304,6 @@ def load_contract(path: Path = CONTRACT_PATH) -> dict[str, Any]:
             raise ValueError(f"depth-coordinate-v2 default {name} must be positive")
     if defaults["max_horizontal_slope"] >= 1.0:
         raise ValueError("max_horizontal_slope must be below one")
-    if not 0.0 < float(defaults["stage_valley_ratio_max"]) <= 1.0:
-        raise ValueError("stage_valley_ratio_max must be in (0, 1]")
     majorant_share = _float32(defaults["vertical_majorant_share"])
     minorant_share = _float32(_float32(1.0) - majorant_share)
     if majorant_share <= 0.0 or minorant_share <= 0.0:

@@ -435,7 +435,7 @@
             id: "essential",
             name: "Essentials",
             options: {
-              "sbs_3d_pop_strength": 1.20,
+              "sbs_3d_pop_strength": 1.75,
             },
           },
           {
@@ -642,7 +642,7 @@
         const host3dStrength = host3dStrengthText === "" ? NaN : Number(host3dStrengthText);
         this.config.sbs_3d_pop_strength = Number.isFinite(host3dStrength)
           ? Math.min(2, Math.max(0.25, host3dStrength))
-          : 1.2;
+          : 1.75;
         let config = JSON.parse(JSON.stringify(this.config));
         config.global_prep_cmd = this.global_prep_cmd.filter(cmd => (cmd.do && cmd.do.trim()) || (cmd.undo && cmd.undo.trim()));
         return config;

@@ -21,8 +21,8 @@ The policy-study CLI compares one selected baseline with two rejected research a
 
 ``generate_first_latch_exact_sequence`` is the selected NumPy comparison reference. It is
 deliberately a separate state machine: it never constructs the research controller and never
-iterates the aggregate/slow policy set.  On acquisition it applies the conservative three-class
-Otsu stage-boundary selector. It acquires immediately and remains latched until a confirmed cut.
+iterates the aggregate/slow policy set. On acquisition it uses the arithmetic mean, acquires
+immediately, and remains latched until a confirmed cut.
 The resulting center is the exact zero plane because convergence remains zero. It cannot select
 rendered geometry; the latter policies remain here only as falsifiers for the design decision.
 
@@ -91,13 +91,11 @@ RAW_PATTERN = re.compile(r"raw_(\d+)\.f32$")
 SELECTED_POLICY = "first"
 RESEARCH_POLICIES = ("aggregate", "slow")
 POLICY_STUDY_POLICIES = (SELECTED_POLICY, *RESEARCH_POLICIES)
-V2_STATE_TRACE_SCHEMA = 17
+V2_STATE_TRACE_SCHEMA = 18
 V2_STATE_TRACE_POLICY = (
-    "immediate-first-usable-otsu-valley-zero-fixed-scale-fixed-near-curve-retained-camera-source-ownership-pointwise-soft-container-vertical-share75-row-majorant-v16"
+    "immediate-first-usable-arithmetic-mean-zero-fixed-scale-fixed-near-curve-retained-camera-source-ownership-pointwise-soft-container-vertical-share75-row-majorant-v17"
 )
 V2_GPU_SHADER_SEQUENCE = (
-    "depth_minmax_cs.hlsl",
-    "depth_hist_cs.hlsl",
     "depth_coordinate_v2_moments_cs.hlsl",
     "depth_coordinate_v2_frame_resolve_cs.hlsl",
     "depth_coordinate_v2_state_resolve_cs.hlsl",
@@ -204,9 +202,8 @@ class ExactSequenceResult:
     of the column upper/lower envelopes, and then the least row-wise horizontal majorant. An
     unusable field publishes flat geometry for the current color while retaining the
     scene camera unless an authenticated cut also arrives. The logarithmic near curve is fixed by
-    the contract and is never selected from frame occupancy. A well-separated upper histogram
-    valley may choose the scene stage boundary only at acquisition; ambiguous evidence falls back
-    to the arithmetic mean. There is deliberately no timed or frame-counted hold policy.
+    the contract and is never selected from frame occupancy. Acquisition always uses the
+    arithmetic mean; there is deliberately no classifier, timed hold, or frame-counted hold policy.
     """
 
     frame_ids: Tuple[int, ...]
@@ -443,7 +440,7 @@ def validate_v2_state_trace(
             raise ValueError("v2 state trace has invalid NumPy producer evidence")
         expected_method = "frame-moment-proxies-not-matched-pixel-affine-v2"
     elif producer_authority == (
-            "authenticated-raw-source-color-histogram-plus-seven-v2-compute-shaders-persistent-gpu-state-v7"):
+            "authenticated-raw-source-color-plus-seven-v2-compute-shaders-persistent-gpu-state-v8"):
         digest_pattern = re.compile(r"[0-9a-f]{64}")
         if (set(producer) != {
                 "authority", "manifest_sha256", "contract_canonical_sha256",
@@ -2257,7 +2254,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "requested_gain": requested_gain,
             "experimental_max_collar_texels": args.experimental_max_collar_texels,
             "collar_role": "diagnostic-only; never selected geometry",
-            "policy": ("requested gain is immutable; the hard representation container is "
+            "policy": ("requested gain is immutable; the soft representation container is "
                        "derived independently for every usable frame and can recover"),
             "zero_plane_order": (
                 "curve-space convergence is separately latched and currently exactly zero"),

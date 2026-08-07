@@ -3,18 +3,16 @@
 #ifndef DEPTH_COORDINATE_V2_CONTRACT_GENERATED_HLSL
 #define DEPTH_COORDINATE_V2_CONTRACT_GENERATED_HLSL
 
-#define V2_CONTRACT_SCHEMA 25u
-#define V2_CONTRACT_TAG 0x7AEBF6CAu
+#define V2_CONTRACT_SCHEMA 26u
+#define V2_CONTRACT_TAG 0x4498BD67u
 #define V2_SHADOW_STATE_WORD_COUNT 12u
 #define V2_SHADOW_STATE_VECTOR_COUNT 3u
 #define V2_DIRECT_CONTAINER_LIMIT 0.04f
 #define V2_MAX_VERTICAL_SHEAR 2.0f
 #define V2_VERTICAL_MAJORANT_SHARE 0.75f
-#define V2_STAGE_VALLEY_RATIO_MAX 0.75f
 #define V2_CONVERGENCE_CURVE_DEFAULT 0.0f
 static const float v2_max_vertical_shear = V2_MAX_VERTICAL_SHEAR;
 static const float v2_vertical_majorant_share = V2_VERTICAL_MAJORANT_SHARE;
-static const float v2_stage_valley_ratio_max = V2_STAGE_VALLEY_RATIO_MAX;
 
 cbuffer DepthCoordinateV2Constants : register(b1) {
     float v2_raw_coordinate_scale;

@@ -3,8 +3,6 @@
 
 #include "include/depth_coordinate_v2_contract.generated.hlsl"
 
-#define V2_STAGE_HISTOGRAM_SOURCE_BIN_COUNT 256u
-#define V2_STAGE_HISTOGRAM_BIN_COUNT 128u
 
 bool V2Finite(float value) {
     return !isnan(value) && !isinf(value);

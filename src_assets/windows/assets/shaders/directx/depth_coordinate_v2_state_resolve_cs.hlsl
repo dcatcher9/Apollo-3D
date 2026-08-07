@@ -5,7 +5,6 @@
 
 StructuredBuffer<float4> FrameStats : register(t0);
 StructuredBuffer<float4> CutBridgeState : register(t1);
-StructuredBuffer<uint> RawHistogram256 : register(t2);
 RWStructuredBuffer<float4> ShadowState : register(u0);
 
 #include "include/depth_constants.hlsl"
@@ -29,145 +28,6 @@ void StoreCameraState(float4 active, float4 control, inout float4 mapping_state)
     ShadowState[0] = active;
     ShadowState[1] = control;
     ShadowState[2] = mapping_state;
-}
-
-uint StageBinCount(uint bin) {
-    return RawHistogram256[bin * 2u] + RawHistogram256[bin * 2u + 1u];
-}
-
-float SmoothedStageBin(uint bin) {
-    // Exactly one zero-padded `same` [0.25, 0.50, 0.25] pass. Smoothing is deliberately
-    // acceptance-only: Otsu and all class masses use the original paired counts.
-    float value = 0.5f * (float)StageBinCount(bin);
-    if (bin > 0u) {
-        value += 0.25f * (float)StageBinCount(bin - 1u);
-    }
-    if (bin + 1u < V2_STAGE_HISTOGRAM_BIN_COUNT) {
-        value += 0.25f * (float)StageBinCount(bin + 1u);
-    }
-    return value;
-}
-
-bool ResolveStageBoundary(
-    float minimum,
-    float maximum,
-    uint expected_count,
-    float arithmetic_mean,
-    out float center
-) {
-    center = arithmetic_mean;
-    float raw_range = maximum - minimum;
-    if (expected_count == 0u || !V2Finite(raw_range) || raw_range <= 0.0f) {
-        return false;
-    }
-
-    uint histogram_count = 0u;
-    float total_moment = 0.0f;
-    [loop]
-    for (uint bin = 0u; bin < V2_STAGE_HISTOGRAM_BIN_COUNT; ++bin) {
-        uint count = StageBinCount(bin);
-        histogram_count += count;
-        float x = ((float)bin + 0.5f) / (float)V2_STAGE_HISTOGRAM_BIN_COUNT;
-        total_moment += (float)count * x;
-    }
-    // depth_hist_cs intentionally ignores negative raw values while the Welford pass accepts all
-    // finite values. Never infer a boundary unless both independent passes counted the same exact
-    // field; calibrated DAV2 output satisfies this contract.
-    if (histogram_count != expected_count) {
-        return false;
-    }
-
-    float global_mean = total_moment / (float)histogram_count;
-    float best_score = -1.0f;
-    uint best_first_split = 0u;
-    uint best_upper_split = 0u;
-    bool found = false;
-    uint far_count = 0u;
-    float far_moment = 0.0f;
-    [loop]
-    for (uint first_split = 0u;
-         first_split + 2u < V2_STAGE_HISTOGRAM_BIN_COUNT;
-         ++first_split) {
-        uint first_count = StageBinCount(first_split);
-        far_count += first_count;
-        far_moment += (float)first_count *
-            (((float)first_split + 0.5f) / (float)V2_STAGE_HISTOGRAM_BIN_COUNT);
-
-        uint middle_count = 0u;
-        float middle_moment = 0.0f;
-        [loop]
-        for (uint upper_split = first_split + 1u;
-             upper_split + 1u < V2_STAGE_HISTOGRAM_BIN_COUNT;
-             ++upper_split) {
-            uint current_count = StageBinCount(upper_split);
-            middle_count += current_count;
-            middle_moment += (float)current_count *
-                (((float)upper_split + 0.5f) /
-                 (float)V2_STAGE_HISTOGRAM_BIN_COUNT);
-            uint near_count = histogram_count - far_count - middle_count;
-            // Each original-count class must carry at least N/128 mass. Use multiplied integer
-            // comparisons so non-divisible N has the exact mathematical ceil behavior.
-            if (far_count * V2_STAGE_HISTOGRAM_BIN_COUNT < histogram_count ||
-                middle_count * V2_STAGE_HISTOGRAM_BIN_COUNT < histogram_count ||
-                near_count * V2_STAGE_HISTOGRAM_BIN_COUNT < histogram_count) {
-                continue;
-            }
-
-            float near_moment = total_moment - far_moment - middle_moment;
-            float far_delta = far_moment / (float)far_count - global_mean;
-            float middle_delta = middle_moment / (float)middle_count - global_mean;
-            float near_delta = near_moment / (float)near_count - global_mean;
-            float score = (float)far_count * far_delta * far_delta +
-                (float)middle_count * middle_delta * middle_delta +
-                (float)near_count * near_delta * near_delta;
-            // Ascending loops plus a strict comparison specify the tie break: retain the first
-            // lexicographic (first_split, upper_split) pair with the maximum score.
-            if (V2Finite(score) && score > best_score) {
-                best_score = score;
-                best_first_split = first_split;
-                best_upper_split = upper_split;
-                found = true;
-            }
-        }
-    }
-    if (!found) {
-        return false;
-    }
-
-    float middle_peak = 0.0f;
-    [loop]
-    for (uint bin = best_first_split + 1u; bin <= best_upper_split; ++bin) {
-        middle_peak = max(middle_peak, SmoothedStageBin(bin));
-    }
-    float near_peak = 0.0f;
-    [loop]
-    for (uint bin = best_upper_split + 1u;
-         bin < V2_STAGE_HISTOGRAM_BIN_COUNT;
-         ++bin) {
-        near_peak = max(near_peak, SmoothedStageBin(bin));
-    }
-    float weaker_peak = min(middle_peak, near_peak);
-    float valley = max(
-        SmoothedStageBin(best_upper_split),
-        SmoothedStageBin(best_upper_split + 1u));
-    if (weaker_peak <= 0.0f ||
-        valley / weaker_peak > v2_stage_valley_ratio_max) {
-        return false;
-    }
-
-    float threshold = minimum +
-        (((float)best_upper_split + 0.5f) /
-         (float)V2_STAGE_HISTOGRAM_BIN_COUNT) * raw_range;
-    // Preserve the conservative adoption predicate: the former knee placement must still lie
-    // above the arithmetic mean. Once accepted, however, the separated upper valley itself is
-    // the zero plane. This keeps a dominant middle subject near the screen while an isolated
-    // near stage (for example a reaching hand) retains its relative relief.
-    float acceptance_center = threshold - v2_raw_coordinate_scale;
-    if (!V2Finite(acceptance_center) || acceptance_center <= arithmetic_mean) {
-        return false;
-    }
-    center = threshold;
-    return true;
 }
 
 void PublishUnavailable(
@@ -259,13 +119,11 @@ void main(uint3 id : SV_DispatchThreadID) {
             StoreCameraState(active, control, mapping_state);
             return;
         }
+        // The arithmetic mean provides the occupancy behavior we need without a discrete scene
+        // classifier: a small near object remains prominent, while a large near region naturally
+        // pulls the zero plane toward itself. The wider calibrated coordinate scale keeps framing
+        // and letterbox regions from collapsing the rest of the scene onto the far shelf.
         float acquired_center = V2_FRAME_STATS_MEAN(frame0);
-        ResolveStageBoundary(
-            V2_FRAME_STATS_MINIMUM(frame0),
-            V2_FRAME_STATS_MAXIMUM(frame0),
-            (uint)V2_FRAME_STATS_VALID_COUNT(frame1),
-            V2_FRAME_STATS_MEAN(frame0),
-            acquired_center);
         active = float4(
             acquired_center, inverse_scale, v2_convergence_curve_default, 1.0f);
         ResetMappingState(mapping_state);

@@ -63,6 +63,9 @@ from depth_coordinate_v2_contract import (  # noqa: E402
     CONTRACT_SCHEMA as PARALLAX_V2_CONTRACT_SCHEMA,
     MODEL_CALIBRATIONS,
 )
+from depth_coordinate_v2_dump_contract import (  # noqa: E402
+    LIVE_RENDERER_SOURCE_CLOSURE_SHA256,
+)
 from generate_depth_coordinate_v2_contract import (  # noqa: E402
     PARALLAX_V2_SHADER_SPECS,
     shader_source_closure_sha256,
@@ -1018,6 +1021,8 @@ def baseline_required_context(candidate_meta):
             candidate_meta.get("preprocess_source_closure_sha256"),
         "parallax_v2_source_closure_sha256":
             candidate_meta.get("parallax_v2_source_closure_sha256"),
+        "parallax_v2_renderer_source_closure_sha256":
+            candidate_meta.get("parallax_v2_renderer_source_closure_sha256"),
         "eval_schema": candidate_meta.get("eval_schema"),
         "depth_step": candidate_meta.get("depth_step"),
         "depth_compensation": candidate_meta.get("depth_compensation"),
@@ -1727,7 +1732,7 @@ def authoritative_remeasurement_clip_meta(
         except ValueError as exc:
             raise ValueError(f"clips.{clip}: {exc}") from exc
     else:
-        # Ordinary schema-19 evaluation runs execute the production Depth Coordinate V2
+        # Ordinary schema-20 evaluation runs execute the production Depth Coordinate V2
         # renderer; a legacy-pipeline result must never be remeasured as current evidence.
         live_contract = contract.get("parallax_v2_live")
         if (not isinstance(live_contract, dict) or
@@ -2464,7 +2469,7 @@ def main():
         args.conf, "cuda_graph", True, args.extra, "--cuda-graph")
     # These persisted fields describe this evaluator invocation, not live Host SBS configuration.
     # The default clip gate runs the production Depth Coordinate V2 renderer
-    # renderer. Authenticated direct-geometry replay keeps its own schema-24
+    # renderer. Authenticated direct-geometry replay keeps its own schema-25
     # comparison-only contract and stays off the live flag.
     expected_v2_shadow = False
     expected_v2_live = not direct_parallax_root
@@ -2474,6 +2479,7 @@ def main():
         "renderer": PARALLAX_V2_LIVE_RENDERER,
         "producer_source_closure_sha256": shader_source_closure_sha256(
             specs=PARALLAX_V2_SHADER_SPECS),
+        "renderer_source_closure_sha256": LIVE_RENDERER_SOURCE_CLOSURE_SHA256,
         "contract_schema": PARALLAX_V2_CONTRACT_SCHEMA,
         "legacy_levers_applied": False,
         # Structure-consistency metrics score the production candidate-parallax field, not raw
@@ -2483,12 +2489,14 @@ def main():
         "structure_normalization": "per-frame-finite-minmax-16bit",
     }
     expected_pop = expected_shared_number(
-        args.conf, "pop_strength", 1.20, args.extra, "--pop-strength")
+        args.conf, "pop_strength", 1.75, args.extra, "--pop-strength")
     expected_model = expected_depth_model()
     expected_model_url = expected_depth_model_url()
     expected_preprocess_source_sha = shader_source_closure_sha256()
     expected_v2_source_sha = expected_v2_live_contract[
         "producer_source_closure_sha256"] if expected_v2_live else None
+    expected_v2_renderer_source_sha = expected_v2_live_contract[
+        "renderer_source_closure_sha256"] if expected_v2_live else None
 
     conf_sha = sha256_files([os.path.abspath(args.conf)])
     metric_sha = metric_contract_sha()
@@ -2514,6 +2522,8 @@ def main():
             "depth_model_url": expected_model_url,
             "preprocess_source_closure_sha256": expected_preprocess_source_sha,
             "parallax_v2_source_closure_sha256": expected_v2_source_sha,
+            "parallax_v2_renderer_source_closure_sha256":
+                expected_v2_renderer_source_sha,
             "eval_schema": EVAL_SCHEMA,
             "depth_step": depth_step,
             "depth_compensation": depth_compensation,
@@ -2605,6 +2615,8 @@ def main():
         "preprocess_source_closure_sha256": (
             preprocess_source_sha),
         "parallax_v2_source_closure_sha256": expected_v2_source_sha,
+        "parallax_v2_renderer_source_closure_sha256":
+            expected_v2_renderer_source_sha,
         "depth_coordinate_v2_calibration_id": (
             v2_calibration.calibration_id if v2_calibration is not None else None),
         "depth_coordinate_v2_raw_shape": None,

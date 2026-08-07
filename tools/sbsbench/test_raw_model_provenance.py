@@ -297,7 +297,7 @@ class RawModelProvenanceTests(unittest.TestCase):
             self.assertIn("--direct-parallax-root", harness_command)
             report = json.loads(
                 (output / "mapping_v2_report.json").read_text(encoding="utf-8"))
-            self.assertEqual(report["schema"], 9)
+            self.assertEqual(report["schema"], 10)
             self.assertEqual(report["mapping_metrics"]["schema"], 3)
             self.assertIn("may raise or lower", report["geometry_stages"][
                 "post_vertical_parallax.f32"])

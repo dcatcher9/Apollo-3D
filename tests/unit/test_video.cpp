@@ -592,16 +592,16 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   }
   EXPECT_FLOAT_EQ(v2::max_horizontal_slope, 0.5f);
   EXPECT_FLOAT_EQ(v2::convergence_curve_default, 0.0f);
-  EXPECT_FLOAT_EQ(v2::stage_valley_ratio_max, 0.75f);
   EXPECT_TRUE(v2::convergence_curve_is_valid(0.0f));
   EXPECT_FALSE(v2::convergence_curve_is_valid(-0.1f));
-  EXPECT_FLOAT_EQ(v2::near_log_tau, 2.0f);
+  EXPECT_FLOAT_EQ(v2::far_tau, 0.75f);
+  EXPECT_FLOAT_EQ(v2::near_log_tau, 0.5f);
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 25u);
+  EXPECT_EQ(v2::contract_schema, 26u);
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
-  EXPECT_EQ(v2::shadow_state_dump_schema, 15u);
+  EXPECT_EQ(v2::shadow_state_dump_schema, 16u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
   EXPECT_EQ(v2::capture_provenance_manifest_key, "raw_model_provenance");
   EXPECT_EQ(
@@ -735,6 +735,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
     nullptr
   );
   EXPECT_EQ(small_calibration.depth_model, "depth_anything_v2_fp16");
+  EXPECT_FLOAT_EQ(small_calibration.raw_coordinate_scale, 2.25f);
   EXPECT_EQ(small_calibration.preprocess.profile, "apollo-dav2-area-hdr-srgb-imagenet-v1");
   EXPECT_EQ(
     small_calibration.preprocess.source_closure_schema,

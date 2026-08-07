@@ -48,11 +48,13 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         manifest = coordinate.load_contract()
         tag = generator.contract_tag(manifest)
         defaults = coordinate.CALIBRATED_DEFAULTS
-        width, height = coordinate.MODEL_CALIBRATIONS[0].calibrated_input_shapes[0]
+        calibration = coordinate.MODEL_CALIBRATIONS[0]
+        width, height = calibration.calibrated_input_shapes[0]
+        raw_scale = calibration.raw_coordinate_scale
         texel_count = width * height
         values = {
             "center": 2.0,
-            "inverse_scale": 2.0,
+            "inverse_scale": 1.0 / raw_scale,
             "convergence_curve": 0.0,
             "container_scale": 1.0,
             "calibration_revision": 4,
@@ -91,7 +93,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         requested_pop = 1.0
         requested_gain = defaults.gain_per_pop * requested_pop
         constants = {
-            "raw_coordinate_scale": 0.5,
+            "raw_coordinate_scale": raw_scale,
             "collapse_abs_epsilon": defaults.collapse_abs_epsilon,
             "far_tau": defaults.far_tau,
             "near_log_tau": defaults.near_log_tau,
@@ -106,7 +108,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "max_vertical_shear": defaults.max_vertical_shear,
             "vertical_majorant_share": defaults.vertical_majorant_share,
             "convergence_curve_default": defaults.convergence_curve_default,
-            "stage_valley_ratio_max": defaults.stage_valley_ratio_max,
         }
         self.state = {
             "schema": dump_contract.SHADOW_STATE_DUMP_SCHEMA,
@@ -135,7 +136,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "contract_tag": tag,
                 "requested_gain": constants["requested_gain"],
                 "requested_pop_strength": constants["requested_pop_strength"],
-                "latched_scale": 0.5,
+                "latched_scale": raw_scale,
                 "convergence_curve": values["convergence_curve"],
                 "container_scale": values["container_scale"],
                 "effective_gain": requested_gain,
@@ -147,7 +148,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "coordinate":
                     "immediate-first-usable-center-latched-until-cut-fixed-authenticated-scale-retained-across-unusable",
                 "convergence_curve":
-                    "selected-upper-valley-or-mean-center-is-zero-plane",
+                    "arithmetic-mean-center-is-zero-plane",
                 "requested_gain": "immutable-cfg-pop-strength",
                 "container_scale":
                     "abi-retained-identity-pointwise-soft-container-is-map-local",

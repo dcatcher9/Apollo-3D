@@ -46,6 +46,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             23: "6a27019e526298fc708b400dbb9bfc66238c7f40978d0dcc254aaf27b7b8fa13",
             24: "af622986d64d49c3a084730c20838189fd579c1af54d7bb61f2c681647c155bb",
             25: "328d8f71424d6005ac0bd5025b4857efe95aa36fa683ab3c554a33b5309dcd05",
+            26: "abb75ebabf6928c39771621da43b88f739fa3cf2ea83b18c02cdb20745aaa4b8",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -53,10 +54,10 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x7AEBF6CA)
+        self.assertEqual(generator.contract_tag(contract), 0x4498BD67)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "7aebf6ca0c5bb5d6de7f33d4ea75a2524da5f73c5a566527512dec32632a50d4",
+            "4498bd676c9b996710d69aed892bdbb047e8e27db9aebd22553421191f6754ef",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -132,7 +133,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(mapping.max_vertical_shear, defaults.max_vertical_shear)
         self.assertEqual(mapping.direct_container_limit, defaults.direct_container_limit)
         self.assertEqual(defaults.convergence_curve_default, 0.0)
-        self.assertEqual(defaults.stage_valley_ratio_max, 0.75)
+        self.assertEqual(defaults.far_tau, 0.75)
+        self.assertEqual(defaults.near_log_tau, 0.5)
         self.assertEqual(defaults.reference_pop_strength, 1.0)
         self.assertEqual(DIRECT_PARALLAX_SOURCE_U_LIMIT, defaults.direct_container_limit)
 
@@ -142,7 +144,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(
             calibration.onnx_sha256,
             "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04")
-        self.assertEqual(calibration.raw_coordinate_scale, 0.5)
+        self.assertEqual(calibration.raw_coordinate_scale, 2.25)
         self.assertEqual(
             calibration.preprocess.profile, "apollo-dav2-area-hdr-srgb-imagenet-v1")
         self.assertEqual(calibration.preprocess.source_closure_schema, 2)
@@ -156,7 +158,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.shader_source_closure_sha256())
         self.assertEqual(
             calibration.calibration_id,
-            "dav2-small-fp16-standardized-ui-shapes-v2",
+            "dav2-small-fp16-standardized-ui-shapes-v3",
         )
         self.assertEqual(
             calibration.calibrated_input_shapes,
@@ -311,7 +313,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertIn("#define V2_MAX_VERTICAL_SHEAR 2.0f", hlsl)
         self.assertIn(
             "static const float v2_max_vertical_shear = V2_MAX_VERTICAL_SHEAR;", hlsl)
-        self.assertIn("#define V2_STAGE_VALLEY_RATIO_MAX 0.75f", hlsl)
+        self.assertNotIn("V2_STAGE_VALLEY_RATIO_MAX", hlsl)
         self.assertNotIn("V2_STAGE_CONVERGENCE_CURVE", hlsl)
         self.assertIn(
             f"V2_DIRECT_CONTAINER_LIMIT {contract['calibrated_defaults']['direct_container_limit']}f",
@@ -324,7 +326,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertIn("model_calibration_supports_shape", cpp)
         for width, height in python_contract.MODEL_CALIBRATIONS[0].calibrated_input_shapes:
             self.assertIn(
-                '{"dav2-small-fp16-standardized-ui-shapes-v2", '
+                '{"dav2-small-fp16-standardized-ui-shapes-v3", '
                 f'{width}u, {height}u}}',
                 cpp,
             )

@@ -1,5 +1,5 @@
 {
-  "schema": 25,
+  "schema": 26,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -92,28 +92,27 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "fd3a5c17e4e689de659bb862e38d648c9f12cad13e317052f8a7a1dce0c52d15"
+    "source_closure_sha256": "ab242fac7fa7f4a7360c65b443054a88d7ba092d95c13159b165f77bb4b5fd74"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,
-    "far_tau": 0.15,
-    "near_log_tau": 2.0,
+    "far_tau": 0.75,
+    "near_log_tau": 0.5,
     "gain_per_pop": 0.00375,
     "reference_pop_strength": 1.0,
     "direct_container_limit": 0.04,
     "max_horizontal_slope": 0.5,
     "max_vertical_shear": 2.0,
     "vertical_majorant_share": 0.75,
-    "convergence_curve_default": 0.0,
-    "stage_valley_ratio_max": 0.75
+    "convergence_curve_default": 0.0
   },
   "model_calibrations": [
     {
-      "calibration_id": "dav2-small-fp16-standardized-ui-shapes-v2",
+      "calibration_id": "dav2-small-fp16-standardized-ui-shapes-v3",
       "depth_model": "depth_anything_v2_fp16",
       "depth_model_url": "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx",
       "onnx_sha256": "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
-      "raw_coordinate_scale": 0.5,
+      "raw_coordinate_scale": 2.25,
       "calibrated_input_shapes": [
         {
           "width": 770,

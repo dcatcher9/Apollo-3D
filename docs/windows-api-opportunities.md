@@ -138,9 +138,10 @@ inference, three things go wrong at once:
    In stereo this is actively uncomfortable, and for the cursor it destroys pointing accuracy.
 
 The conservative treatment is: **keep a known overlay out of scene inference, then composite it
-after the warp into both eyes at an authored disparity.** Everything in
-[W1](#w1-composite-the-cursor-after-the-warp-candidate-defect) through
-[W3](#w3-exclude-overlay-masks-from-depth-statistics) is an application of that one rule.
+after the warp into both eyes at an authored disparity.** [W1](#w1-composite-the-cursor-after-the-warp-candidate-defect)
+and [W2](#w2-subtitles-burned-into-the-picture) apply that rule. The deferred
+[W3](#w3-overlay-masks-in-scene-cut-evidence-deferred) would reuse their masks only if traces later
+prove a separate scene-cut-evidence defect.
 
 ---
 
@@ -301,30 +302,22 @@ bright fringe.
 
 ---
 
-### W3. Exclude overlay masks from depth statistics
+### W3. Overlay masks in scene-cut evidence (deferred)
 
-**This is the least obvious item here and possibly the highest value per line changed.**
+The earlier proposal to exclude overlays from per-frame geometry statistics is obsolete. Current V2
+does not normalize geometry from a moving min/max or histogram. It latches the arithmetic mean of
+the first usable field as the scene center and holds it until a confirmed cut, so ordinary subtitle
+appearance cannot repeatedly pump the whole-frame mapping through that path.
 
-**Problem.** Subtitles and the cursor are extreme outliers in luminance and in inferred depth. The V2
-pipeline computes scene-wide statistics — a raw min/max EMA, histograms, and a scene-latched raw
-centre — and those outliers contaminate them.
+Min/max and histogram work that remains in the pipeline belongs to scene-cut evidence, not V2
+geometry. Only revisit an overlay mask there if authenticated traces show subtitles or the cursor
+causing false cut proposals despite the exposure/structure guards in
+[Host SBS scene cuts](host-sbs-scene-cuts.md). Do not add mask plumbing to the geometry reductions
+without such evidence.
 
-The visible consequence is not local. Every time a subtitle appears or disappears, the scene
-statistics shift, and with them the depth mapping of the **entire frame**. The image appears to
-breathe in and out in sync with the subtitles.
-
-**Approach.** Carry the overlay mask produced in W1/W2 into the reduction shaders and exclude masked
-texels from the min/max EMA, the histograms, and the scene-centre latch. The cost is one mask read in
-each reduction.
-
-**Gotcha.** The scene-cut detector is designed to resist brightness-only changes — [Host SBS scene
-cuts](host-sbs-scene-cuts.md) states that brightness alone must not reset stereo geometry — so it
-probably does not false-trigger on a subtitle appearing. **Statistical contamination is a separate
-path and is not protected by that design.** Do not assume the cut detector's robustness covers this.
-
-**Acceptance.** With a subtitled clip, global depth statistics should remain stable across subtitle
-on/off transitions. This is directly measurable: the `swim` metric on frames where only the subtitle
-changed should approach the noise floor.
+**Acceptance if revisited.** A subtitled conformance clip must show that the mask reduces false cut
+evidence without hiding a real localized player cut. The rendered `swim` metric should remain at the
+noise floor across subtitle-only transitions before and after the change.
 
 ---
 
@@ -641,7 +634,7 @@ probe intentionally exposes those cases rather than adding an unvalidated classi
 |---|---|---|
 | 1.1 | [W1 — cursor after the warp](#w1-composite-the-cursor-after-the-warp-candidate-defect) | Medium cross-backend change: first create an independent WGC cursor layer, then build the post-warp compositor. |
 | 1.2 | [W2a — subtitle zero-parallax mask](#w2a-burned-in-subtitles--zero-parallax-mask) | Reuses 1.1's compositing stage and its mask plumbing. Gated by 0.2. Ship the offline scene-buffered detector first; the live causal detector can follow. |
-| 1.3 | [W3 — exclude masks from depth statistics](#w3-exclude-overlay-masks-from-depth-statistics) | Needs the masks that 1.1 and 1.2 produce. Small change, removes a whole-frame artifact. |
+| 1.3 | [W3 — masks in scene-cut evidence (deferred)](#w3-overlay-masks-in-scene-cut-evidence-deferred) | No geometry change is scheduled. Reuse the masks from 1.1/1.2 only if authenticated traces prove false cut evidence. |
 | 1.4 | [W12 — foreground/media classifier](#w12-foreground-process-and-media-state-classifier) | Evidence source only; it may choose a validated route but may not silently change V2 strength. |
 | 1.5 | [W13 — damage-guided depth reuse](#w13-damage-guided-depth-reuse-new-review-addition) | Start only with cursor-only reuse after W1. Broader reuse remains gated on move metadata and independent damage classification. |
 

@@ -14,6 +14,7 @@ import glob
 import hashlib
 import io
 import json
+import math
 import ntpath
 import os
 import re
@@ -31,6 +32,8 @@ import zlib
 import numpy as np
 from PIL import Image
 
+from depth_coordinate_v2_contract import MODEL_CALIBRATIONS
+
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MANIFEST_PATH = os.path.join(HERE, "datasets", "manifest.json")
@@ -38,6 +41,19 @@ CONTENT_TYPES = {
     "ai-generated", "anime", "unclassified", "synthetic",
     "real-capture", "animation", "simulation",
 }
+
+# Keep the external decision suite on the exact live/offline Host SBS V2 shape contract. Dataset
+# pixels may be centered on a larger black canvas, but are never resized or cropped. These values
+# mirror host_sbs_v2_live_calibration and the dynamic TensorRT profile; focused tests bind them to
+# the native declarations so a production fitter change cannot silently leave preparation stale.
+PRODUCTION_DEPTH_SHORT_SIDE = 432
+PRODUCTION_DEPTH_MAX_ASPECT = 4.0
+PRODUCTION_V2_CALIBRATION = MODEL_CALIBRATIONS[0]
+PRODUCTION_DEPTH_PATCH = PRODUCTION_V2_CALIBRATION.preprocess.patch_multiple
+PRODUCTION_DEPTH_MAX_DIM = PRODUCTION_V2_CALIBRATION.preprocess.maximum_dimension
+PRODUCTION_V2_TENSOR_SHAPES = frozenset(
+    PRODUCTION_V2_CALIBRATION.calibrated_input_shapes)
+PREPARATION_GEOMETRY_SCHEMA = 1
 ADAPTER_SELECTION_CONTRACTS = {
     "tum_rgbd_zip": {
         "source_fields": ("rgb_timestamp", "depth_timestamp"),
@@ -75,6 +91,102 @@ ADAPTER_EVIDENCE_EXTENSIONS = {
 
 def fail(message):
     raise RuntimeError(message)
+
+
+def _positive_manifest_dimension(value, description):
+    if type(value) is not int or value <= 0:
+        fail(f"{description} must be a positive integer")
+    return value
+
+
+def _round_to_patch(value, patch=PRODUCTION_DEPTH_PATCH):
+    """Match C++ std::round for the fitter's positive dimensions."""
+    return max(patch, int(math.floor(float(value) / patch + 0.5)) * patch)
+
+
+def fit_host_sbs_v2_depth_tensor_shape(source_width, source_height):
+    """Python mirror of ``fit_host_sbs_v2_depth_tensor_shape`` for dataset preflight."""
+    if type(source_width) is not int or type(source_height) is not int:
+        return (0, 0)
+    if source_width <= 0 or source_height <= 0:
+        return (0, 0)
+
+    patch = PRODUCTION_DEPTH_PATCH
+    aspect = source_width / source_height
+    if aspect >= 1.0:
+        fitted_aspect = min(aspect, PRODUCTION_DEPTH_MAX_ASPECT)
+    else:
+        fitted_aspect = 1.0 / min(1.0 / aspect, PRODUCTION_DEPTH_MAX_ASPECT)
+    bounded_short = min(max(PRODUCTION_DEPTH_SHORT_SIDE, patch),
+                        PRODUCTION_DEPTH_MAX_DIM)
+    max_width = max(patch, (min(source_width, PRODUCTION_DEPTH_MAX_DIM) // patch) * patch)
+    max_height = max(patch, (min(source_height, PRODUCTION_DEPTH_MAX_DIM) // patch) * patch)
+    requested_short = _round_to_patch(bounded_short, patch)
+
+    if fitted_aspect >= 1.0:
+        for height in range(min(requested_short, max_height), patch - 1, -patch):
+            width = _round_to_patch(height * fitted_aspect, patch)
+            if width <= max_width:
+                return (width, height)
+    else:
+        for width in range(min(requested_short, max_width), patch - 1, -patch):
+            height = _round_to_patch(width / fitted_aspect, patch)
+            if height <= max_height:
+                return (width, height)
+    return (patch, patch)
+
+
+def preparation_geometry_contract(clip_id, clip):
+    """Validate and resolve one manifest-owned identity or center-padding transform."""
+    source = clip.get("source_shape")
+    if source is None:
+        return None  # Backward-compatible unit fixtures using manifest schema 1/2.
+    if not isinstance(source, dict) or set(source) != {"width", "height"}:
+        fail(f"{clip_id}: source_shape must contain exactly width and height")
+    source_width = _positive_manifest_dimension(
+        source.get("width"), f"{clip_id}.source_shape.width")
+    source_height = _positive_manifest_dimension(
+        source.get("height"), f"{clip_id}.source_shape.height")
+
+    canvas = clip.get("evaluation_canvas")
+    if canvas is None:
+        canvas_width, canvas_height = source_width, source_height
+        method = "identity"
+    else:
+        if not isinstance(canvas, dict) or set(canvas) != {"width", "height"}:
+            fail(f"{clip_id}: evaluation_canvas must contain exactly width and height")
+        canvas_width = _positive_manifest_dimension(
+            canvas.get("width"), f"{clip_id}.evaluation_canvas.width")
+        canvas_height = _positive_manifest_dimension(
+            canvas.get("height"), f"{clip_id}.evaluation_canvas.height")
+        if canvas_width < source_width or canvas_height < source_height:
+            fail(f"{clip_id}: evaluation_canvas cannot crop the declared source_shape")
+        if (canvas_width, canvas_height) == (source_width, source_height):
+            fail(f"{clip_id}: redundant evaluation_canvas must be omitted")
+        method = "center-pad-black-no-resize"
+
+    left = (canvas_width - source_width) // 2
+    top = (canvas_height - source_height) // 2
+    right = canvas_width - source_width - left
+    bottom = canvas_height - source_height - top
+    tensor_width, tensor_height = fit_host_sbs_v2_depth_tensor_shape(
+        canvas_width, canvas_height)
+    if (tensor_width, tensor_height) not in PRODUCTION_V2_TENSOR_SHAPES:
+        fail(
+            f"{clip_id}: prepared canvas {canvas_width}x{canvas_height} fits unsupported "
+            f"V2 tensor {tensor_width}x{tensor_height}")
+
+    return {
+        "schema": PREPARATION_GEOMETRY_SCHEMA,
+        "method": method,
+        "source_shape": {"width": source_width, "height": source_height},
+        "canvas_shape": {"width": canvas_width, "height": canvas_height},
+        "content_offset": {"x": left, "y": top},
+        "padding": {"left": left, "top": top, "right": right, "bottom": bottom},
+        "canvas_fill_rgb": [0, 0, 0],
+        "source_pixels": "bit-exact-no-resize-no-crop",
+        "depth_tensor_shape": {"width": tensor_width, "height": tensor_height},
+    }
 
 
 def safe_path_component(value, description):
@@ -116,7 +228,7 @@ def sha256(path):
 def load_manifest(path):
     with open(path, encoding="utf-8") as fh:
         data = json.load(fh)
-    if data.get("schema") not in (1, 2):
+    if data.get("schema") not in (1, 2, 3):
         fail(f"unsupported dataset manifest schema: {data.get('schema')}")
     datasets, clips = data.get("datasets", {}), data.get("clips", {})
     safe_path_component(data.get("prepared_suite"), "prepared suite")
@@ -127,6 +239,9 @@ def load_manifest(path):
                     spec["filename"], f"{dataset_id}.{archive_id} archive filename")
     for clip_id, clip in clips.items():
         safe_path_component(clip_id, "clip ID")
+        if data.get("schema") >= 3 and "source_shape" not in clip:
+            fail(f"{clip_id}: manifest schema 3 requires source_shape")
+        preparation_geometry_contract(clip_id, clip)
         if clip.get("content_type") not in CONTENT_TYPES:
             fail(f"{clip_id}: content_type must be one of {sorted(CONTENT_TYPES)}")
         try:
@@ -333,6 +448,144 @@ def _write_image_bytes(data, path, rgb=False):
     with Image.open(io.BytesIO(data)) as image:
         image = image.convert("RGB" if rgb else image.mode)
         image.save(path, compress_level=3)
+
+
+_PADDED_IMAGE_DIRECTORIES = frozenset({
+    ".", "gt_depth", "gt_right", "gt_depth_valid", "gt_depth_valid_all",
+    "gt_depth_valid_nonocc", "gt_occlusion", "gt_outofframe",
+})
+
+
+def _prepared_frame_evidence(directory):
+    return sorted(
+        path for path in glob.glob(
+            os.path.join(directory, "**", "frame_*.*"), recursive=True)
+        if os.path.isfile(path))
+
+
+def _evidence_directory(directory, path):
+    relative_parent = os.path.relpath(os.path.dirname(path), directory).replace("\\", "/")
+    return relative_parent
+
+
+def _validate_spatial_shape(clip_id, path, actual, expected):
+    if tuple(actual) != tuple(expected):
+        relative = os.path.relpath(path).replace("\\", "/")
+        fail(
+            f"{clip_id}: prepared evidence {relative} has spatial shape "
+            f"{tuple(actual)}, expected {tuple(expected)}")
+
+
+def validate_prepared_evidence_geometry(clip_id, directory, width, height):
+    """Require every prepared source/reference sidecar to share one canvas geometry."""
+    paths = _prepared_frame_evidence(directory)
+    if not paths:
+        fail(f"{clip_id}: prepared clip contains no frame evidence")
+    expected = (height, width)
+    for path in paths:
+        suffix = os.path.splitext(path)[1].lower()
+        if suffix == ".png":
+            with Image.open(path) as image:
+                actual = (image.height, image.width)
+        elif suffix == ".npy":
+            value = np.load(path, allow_pickle=False, mmap_mode="r")
+            if value.ndim != 2:
+                fail(f"{clip_id}: padded NPY evidence must be one spatial plane: {path}")
+            actual = value.shape
+        elif suffix == ".npz":
+            with np.load(path, allow_pickle=False) as archive:
+                if set(archive.files) != {"flow", "valid"}:
+                    fail(f"{clip_id}: flow evidence must contain exactly flow and valid: {path}")
+                flow, valid = archive["flow"], archive["valid"]
+            if flow.ndim != 3 or flow.shape[2] != 2 or valid.ndim != 2:
+                fail(f"{clip_id}: flow evidence has invalid array ranks: {path}")
+            _validate_spatial_shape(clip_id, path, flow.shape[:2], expected)
+            actual = valid.shape
+        else:
+            fail(f"{clip_id}: unsupported prepared evidence format: {path}")
+        _validate_spatial_shape(clip_id, path, actual, expected)
+
+
+def _center_pad_array(value, geometry, fill=0):
+    source = geometry["source_shape"]
+    canvas = geometry["canvas_shape"]
+    offset = geometry["content_offset"]
+    expected = (source["height"], source["width"])
+    if value.shape[:2] != expected:
+        raise ValueError(f"array shape {value.shape[:2]} does not match source {expected}")
+    shape = (canvas["height"], canvas["width"], *value.shape[2:])
+    padded = np.full(shape, fill, dtype=value.dtype)
+    y, x = offset["y"], offset["x"]
+    padded[y:y + source["height"], x:x + source["width"], ...] = value
+    return padded
+
+
+def apply_center_padding(clip_id, directory, geometry):
+    """Center-pad every source/reference artifact without resampling any original pixel."""
+    if geometry["method"] != "center-pad-black-no-resize":
+        return
+    source = geometry["source_shape"]
+    canvas = geometry["canvas_shape"]
+    x, y = geometry["content_offset"]["x"], geometry["content_offset"]["y"]
+    for path in _prepared_frame_evidence(directory):
+        suffix = os.path.splitext(path)[1].lower()
+        evidence_directory = _evidence_directory(directory, path)
+        if suffix == ".png":
+            if evidence_directory not in _PADDED_IMAGE_DIRECTORIES:
+                fail(
+                    f"{clip_id}: no padding semantics declared for "
+                    f"{evidence_directory}/{os.path.basename(path)}")
+            with Image.open(path) as image:
+                image.load()
+                _validate_spatial_shape(
+                    clip_id, path, (image.height, image.width),
+                    (source["height"], source["width"]))
+                original = image.copy()
+                mode = image.mode
+            # Out-of-frame is the sole inverted mask: padded pixels have no source-camera GT.
+            fill = 255 if evidence_directory == "gt_outofframe" else 0
+            padded = Image.new(mode, (canvas["width"], canvas["height"]), fill)
+            padded.paste(original, (x, y))
+            padded.save(path, compress_level=3)
+        elif suffix == ".npy":
+            if evidence_directory != "gt_depth":
+                fail(f"{clip_id}: no padding semantics declared for NPY evidence {path}")
+            value = np.load(path, allow_pickle=False)
+            if value.ndim != 2:
+                fail(f"{clip_id}: depth NPY must be one spatial plane: {path}")
+            np.save(path, _center_pad_array(value, geometry, fill=0))
+        elif suffix == ".npz":
+            if evidence_directory != "gt_flow":
+                fail(f"{clip_id}: no padding semantics declared for NPZ evidence {path}")
+            with np.load(path, allow_pickle=False) as archive:
+                if set(archive.files) != {"flow", "valid"}:
+                    fail(f"{clip_id}: flow evidence must contain exactly flow and valid: {path}")
+                flow = archive["flow"]
+                valid = archive["valid"]
+            if flow.ndim != 3 or flow.shape[2] != 2 or valid.ndim != 2:
+                fail(f"{clip_id}: flow evidence has invalid array ranks: {path}")
+            np.savez_compressed(
+                path,
+                flow=_center_pad_array(flow, geometry, fill=0),
+                valid=_center_pad_array(valid.astype(bool), geometry, fill=False),
+            )
+        else:
+            fail(f"{clip_id}: unsupported prepared evidence format: {path}")
+
+
+def finalize_prepared_geometry(clip_id, clip, directory):
+    """Authenticate extracted native geometry, apply its canvas, and bind final dimensions."""
+    geometry = preparation_geometry_contract(clip_id, clip)
+    if geometry is None:
+        return None
+    source = geometry["source_shape"]
+    validate_prepared_evidence_geometry(
+        clip_id, directory, source["width"], source["height"])
+    apply_center_padding(clip_id, directory, geometry)
+    canvas = geometry["canvas_shape"]
+    validate_prepared_evidence_geometry(
+        clip_id, directory, canvas["width"], canvas["height"])
+    return geometry
 
 
 def prepared_evidence_sha256(directory):
@@ -732,7 +985,7 @@ def prepare_vkitti2(clip_id, clip, dataset, archives, out_dir, suite):
         depth_tar.close()
 
 
-def prepared_clip_metadata(manifest, clip, selection):
+def prepared_clip_metadata(manifest, clip, selection, preparation_geometry=None):
     """Build the source-semantic metadata shared by extraction and metadata-only refreshes."""
     dataset = manifest["datasets"][clip["dataset"]]
     has_gt_depth = clip["adapter"] != "spring_http_range_zip"
@@ -757,6 +1010,8 @@ def prepared_clip_metadata(manifest, clip, selection):
             meta[key] = clip[key]
     if "prepared_evidence_sha256" in clip:
         meta["prepared_evidence_sha256"] = clip["prepared_evidence_sha256"]
+    if preparation_geometry is not None:
+        meta["preparation_geometry"] = preparation_geometry
     return meta
 
 
@@ -863,6 +1118,13 @@ def refresh_prepared_clip_metadata(manifest, clip_id, clip, prepared_root):
     if not isinstance(existing, dict):
         fail(f"{clip_id}: prepared metadata root must be an object")
     selection = validate_prepared_selection(clip_id, clip, existing.get("selection"))
+    preparation_geometry = preparation_geometry_contract(clip_id, clip)
+    if preparation_geometry is not None:
+        if existing.get("preparation_geometry") != preparation_geometry:
+            fail(f"{clip_id}: prepared metadata has stale preparation_geometry")
+        canvas = preparation_geometry["canvas_shape"]
+        validate_prepared_evidence_geometry(
+            clip_id, final, canvas["width"], canvas["height"])
 
     adapter = clip["adapter"]
     try:
@@ -898,7 +1160,13 @@ def refresh_prepared_clip_metadata(manifest, clip_id, clip, prepared_root):
     if any(spec.get("access") == "http_range_zip" for spec in archive_specs):
         authenticate_prepared_range_evidence(clip_id, clip, final)
 
-    refreshed = {**existing, **prepared_clip_metadata(manifest, clip, selection)}
+    refreshed = {
+        **existing,
+        **prepared_clip_metadata(
+            manifest, clip, selection, preparation_geometry=preparation_geometry),
+    }
+    if preparation_geometry is None:
+        refreshed.pop("preparation_geometry", None)
     refreshed.pop("required_gt_stereo", None)
     descriptor, temporary = tempfile.mkstemp(
         prefix="meta.", suffix=".json.tmp", dir=final, text=True)
@@ -951,7 +1219,11 @@ def prepare_clip(manifest, clip_id, clip, downloads_dir, prepared_root):
                                         manifest["prepared_suite"])
         else:
             fail(f"unsupported adapter: {clip['adapter']}")
-        meta = prepared_clip_metadata(manifest, clip, selection)
+        preparation_geometry = finalize_prepared_geometry(
+            clip_id, clip, temp)
+        meta = prepared_clip_metadata(
+            manifest, clip, selection,
+            preparation_geometry=preparation_geometry)
         with open(os.path.join(temp, "meta.json"), "w", encoding="utf-8") as fh:
             json.dump(meta, fh, indent=2)
         if os.path.isdir(final):

@@ -1200,8 +1200,12 @@ class EvalContractTests(unittest.TestCase):
 
     def test_baseline_context_is_validated_before_harness_use(self):
         with tempfile.TemporaryDirectory() as baseline_dir:
-            context = {"eval_schema": run_eval.EVAL_SCHEMA, "metric_sha256": "metric",
-                       "run_kind": "baseline-update"}
+            context = {
+                "eval_schema": run_eval.EVAL_SCHEMA,
+                "metric_sha256": "metric",
+                "parallax_v2_renderer_source_closure_sha256": "renderer-a",
+                "run_kind": "baseline-update",
+            }
             payload = {
                 "meta": {**context, "clip_sha1": "cliphash", "extra_args": [],
                          "git_dirty": False},
@@ -1227,11 +1231,20 @@ class EvalContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "stale/incompatible"):
                 run_eval.preflight_baselines(
                     baseline_dir, ["clip"], context, {"clip": "cliphash"})
+            payload["meta"]["eval_schema"] = run_eval.EVAL_SCHEMA
+            payload["meta"]["parallax_v2_renderer_source_closure_sha256"] = "renderer-b"
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            with self.assertRaisesRegex(ValueError, "stale/incompatible"):
+                run_eval.preflight_baselines(
+                    baseline_dir, ["clip"], context, {"clip": "cliphash"})
 
     def test_numeric_baseline_context_excludes_reusable_label_implementation(self):
         candidate = {
             "suite": "core",
             "model": "model",
+            "parallax_v2_source_closure_sha256": "producer-sha",
+            "parallax_v2_renderer_source_closure_sha256": "renderer-sha",
             "eval_schema": run_eval.EVAL_SCHEMA,
             "depth_step": "current-once",
             "depth_compensation": "none",
@@ -1247,6 +1260,10 @@ class EvalContractTests(unittest.TestCase):
         self.assertEqual(context["mode"], "canonical-v2")
         self.assertNotIn("profile", context)
         self.assertEqual(context["metric_sha256"], "numeric-metrics")
+        self.assertEqual(
+            context["parallax_v2_source_closure_sha256"], "producer-sha")
+        self.assertEqual(
+            context["parallax_v2_renderer_source_closure_sha256"], "renderer-sha")
         self.assertTrue(context["cuda_graph"])
         self.assertFalse(context["parallax_v2_shadow"])
         self.assertTrue(context["parallax_v2_render"])
@@ -1515,7 +1532,28 @@ class EvalContractTests(unittest.TestCase):
             '"sbs_3d_pop_strength", video.sbs.pop_strength, {0.25, 2.0}', config)
         with open(os.path.join(repo, "src", "config.h"), encoding="utf-8") as fh:
             config_header = fh.read()
-        self.assertIn("double pop_strength = 1.20;", config_header)
+        self.assertIn("double pop_strength = 1.75;", config_header)
+        with open(os.path.join(repo, "src_assets", "common", "assets", "web",
+                               "config.html"), encoding="utf-8") as fh:
+            web_config = fh.read()
+        self.assertIn('"sbs_3d_pop_strength": 1.75,', web_config)
+        self.assertIn(": 1.75;", web_config)
+        with open(os.path.join(repo, "docs", "configuration.md"),
+                  encoding="utf-8") as fh:
+            configuration_doc = fh.read()
+        pop_doc = configuration_doc[configuration_doc.index("### sbs_3d_pop_strength"):]
+        self.assertIn("<td><code>1.75</code></td>", pop_doc.split("\n## ", 1)[0])
+        with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
+                  encoding="utf-8") as fh:
+            run_eval_source = fh.read()
+        self.assertIn(
+            'args.conf, "pop_strength", 1.75, args.extra, "--pop-strength"',
+            run_eval_source,
+        )
+        self.assertIn(
+            '"renderer_source_closure_sha256": LIVE_RENDERER_SOURCE_CLOSURE_SHA256',
+            run_eval_source,
+        )
 
         with open(os.path.join(repo, "src", "depth_coordinate_v2.h"),
                   encoding="utf-8") as fh:
@@ -3280,6 +3318,122 @@ class EvalContractTests(unittest.TestCase):
         pairs = prepare_public_datasets.associate_timestamps(rgb, depth, 0.03)
         self.assertEqual([(p[1], p[3]) for p in pairs], [("r0", "d0"), ("r1", "d1")])
 
+    def test_public_dataset_v4_canvases_fit_only_authenticated_production_shapes(self):
+        manifest = prepare_public_datasets.load_manifest(
+            prepare_public_datasets.MANIFEST_PATH)
+        self.assertEqual(manifest["schema"], 3)
+        self.assertEqual(manifest["prepared_suite"], "extended-v4")
+        self.assertEqual(
+            prepare_public_datasets.PRODUCTION_V2_TENSOR_SHAPES,
+            frozenset({
+                (770, 434), (1022, 434), (1036, 434),
+                (434, 770), (434, 1022), (434, 1036),
+            }),
+        )
+        padded = {
+            "bonn_person_walk": ((640, 480), (854, 480), (770, 434)),
+            "bonn_person_close": ((640, 480), (854, 480), (770, 434)),
+            "tartanair_house_easy": ((640, 640), (1138, 640), (770, 434)),
+            "tartanair_house_motion": ((640, 640), (1138, 640), (770, 434)),
+            "vkitti_drive_clone": ((1242, 375), (1242, 520), (1036, 434)),
+            "vkitti_drive_rain": ((1242, 375), (1242, 520), (1036, 434)),
+        }
+        for clip_id, clip in manifest["clips"].items():
+            with self.subTest(clip=clip_id):
+                geometry = prepare_public_datasets.preparation_geometry_contract(
+                    clip_id, clip)
+                canvas = geometry["canvas_shape"]
+                tensor = geometry["depth_tensor_shape"]
+                fitted = prepare_public_datasets.fit_host_sbs_v2_depth_tensor_shape(
+                    canvas["width"], canvas["height"])
+                self.assertIn(fitted, prepare_public_datasets.PRODUCTION_V2_TENSOR_SHAPES)
+                self.assertEqual(fitted, (tensor["width"], tensor["height"]))
+                if clip_id in padded:
+                    source_expected, canvas_expected, tensor_expected = padded[clip_id]
+                    source = geometry["source_shape"]
+                    self.assertEqual((source["width"], source["height"]), source_expected)
+                    self.assertEqual((canvas["width"], canvas["height"]), canvas_expected)
+                    self.assertEqual(fitted, tensor_expected)
+                    self.assertEqual(geometry["method"], "center-pad-black-no-resize")
+                else:
+                    self.assertEqual(geometry["method"], "identity")
+
+    def test_public_dataset_python_fitter_is_bound_to_native_production_constants(self):
+        with open(os.path.join(run_eval.REPO, "src", "config.h"), encoding="utf-8") as stream:
+            config_source = stream.read()
+        with open(os.path.join(run_eval.REPO, "src", "model_manager.h"),
+                  encoding="utf-8") as stream:
+            model_source = stream.read()
+        self.assertRegex(config_source, r"depth_short_side\s*=\s*432\s*;")
+        self.assertRegex(config_source, r"depth_max_aspect\s*=\s*4\.0\s*;")
+        self.assertRegex(model_source, r"depth_engine_max_dim\s*=\s*1036\s*;")
+        self.assertEqual(prepare_public_datasets.PRODUCTION_DEPTH_PATCH, 14)
+
+    def test_public_dataset_center_padding_preserves_pixels_and_sidecar_coordinates(self):
+        geometry = {
+            "method": "center-pad-black-no-resize",
+            "source_shape": {"width": 3, "height": 2},
+            "canvas_shape": {"width": 7, "height": 5},
+            "content_offset": {"x": 2, "y": 1},
+        }
+        rgb = np.arange(18, dtype=np.uint8).reshape(2, 3, 3)
+        depth = (np.arange(6, dtype=np.uint16).reshape(2, 3) + 1) * 100
+        valid = np.array([[True, False, True], [True, True, False]])
+        flow = np.arange(12, dtype=np.float32).reshape(2, 3, 2)
+        with tempfile.TemporaryDirectory() as directory:
+            for subdirectory in (
+                    "gt_depth", "gt_depth_valid", "gt_outofframe", "gt_flow"):
+                os.makedirs(os.path.join(directory, subdirectory))
+            Image.fromarray(rgb, "RGB").save(os.path.join(directory, "frame_00000.png"))
+            Image.fromarray(depth).save(
+                os.path.join(directory, "gt_depth", "frame_00000.png"))
+            Image.fromarray(valid.astype(np.uint8) * 255, "L").save(
+                os.path.join(directory, "gt_depth_valid", "frame_00000.png"))
+            Image.fromarray(np.zeros((2, 3), np.uint8), "L").save(
+                os.path.join(directory, "gt_outofframe", "frame_00000.png"))
+            np.savez_compressed(
+                os.path.join(directory, "gt_flow", "frame_00000.npz"),
+                flow=flow, valid=valid)
+
+            prepare_public_datasets.apply_center_padding("fixture", directory, geometry)
+            prepare_public_datasets.validate_prepared_evidence_geometry(
+                "fixture", directory, 7, 5)
+
+            with Image.open(os.path.join(directory, "frame_00000.png")) as image:
+                padded_rgb = np.asarray(image)
+            with Image.open(os.path.join(
+                    directory, "gt_depth", "frame_00000.png")) as image:
+                padded_depth = np.asarray(image)
+            with Image.open(os.path.join(
+                    directory, "gt_depth_valid", "frame_00000.png")) as image:
+                padded_valid = np.asarray(image) != 0
+            with Image.open(os.path.join(
+                    directory, "gt_outofframe", "frame_00000.png")) as image:
+                padded_outside = np.asarray(image) != 0
+            with np.load(os.path.join(
+                    directory, "gt_flow", "frame_00000.npz"), allow_pickle=False) as archive:
+                padded_flow = archive["flow"]
+                padded_flow_valid = archive["valid"]
+
+            interior = np.s_[1:3, 2:5]
+            np.testing.assert_array_equal(padded_rgb[interior], rgb)
+            np.testing.assert_array_equal(padded_depth[interior], depth)
+            np.testing.assert_array_equal(padded_valid[interior], valid)
+            np.testing.assert_array_equal(padded_flow[interior], flow)
+            np.testing.assert_array_equal(padded_flow_valid[interior], valid)
+            self.assertFalse(np.any(padded_rgb[:, :2]))
+            self.assertFalse(np.any(padded_depth[:, :2]))
+            self.assertFalse(np.any(padded_valid[:, :2]))
+            self.assertFalse(np.any(padded_flow[:, :2]))
+            self.assertFalse(np.any(padded_flow_valid[:, :2]))
+            self.assertTrue(np.all(padded_outside[:, :2]))
+            self.assertFalse(np.any(padded_outside[interior]))
+
+    def test_public_dataset_native_unsupported_shape_requires_a_canvas(self):
+        clip = {"source_shape": {"width": 640, "height": 480}}
+        with self.assertRaisesRegex(RuntimeError, r"fits unsupported V2 tensor 574x434"):
+            prepare_public_datasets.preparation_geometry_contract("bonn", clip)
+
     def test_public_dataset_manifest_paths_are_single_safe_components(self):
         self.assertEqual(
             prepare_public_datasets.safe_path_component("clip-name", "clip ID"),
@@ -3572,15 +3726,15 @@ class EvalContractTests(unittest.TestCase):
         extended_clips, extended_baselines = run_eval.suite_defaults("extended")
         self.assertTrue(core_clips.endswith(os.path.join("sbsbench", "clips")))
         self.assertTrue(core_baselines.endswith(os.path.join("sbsbench", "baselines")))
-        self.assertIn(os.path.join("prepared", "extended-v3"), extended_clips)
+        self.assertIn(os.path.join("prepared", "extended-v4"), extended_clips)
         self.assertTrue(extended_baselines.endswith("baselines_extended"))
 
     def test_dataset_suite_revision_cannot_overwrite_evaluator_suite(self):
         published = run_eval.published_clip_metadata({
-            "suite": "extended-v3", "dataset": "Example", "name": "clip",
+            "suite": "extended-v4", "dataset": "Example", "name": "clip",
         })
         self.assertNotIn("suite", published)
-        self.assertEqual(published["source_suite"], "extended-v3")
+        self.assertEqual(published["source_suite"], "extended-v4")
         self.assertEqual({**{"suite": "extended"}, **published}["suite"], "extended")
 
     def test_rescore_uses_canonical_metric_contract_hash(self):

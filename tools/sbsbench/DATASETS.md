@@ -48,7 +48,7 @@ The default cache is `E:\ApolloDev\sbs_bench\datasets`. Set `APOLLO_SBS_DATASETS
 `--refresh-metadata-only`; the preparer verifies the existing frame/reference layout and pinned
 decoded-evidence hashes before publishing updated metadata.
 
-`extended-v3` contains twelve inspected 24-frame clips:
+`extended-v4` contains twelve inspected 24-frame clips:
 
 | Clip | Dataset | Evidence and coverage |
 |---|---|---|
@@ -68,6 +68,20 @@ decoded-evidence hashes before publishing updated metadata.
 “Public” describes provenance and external storage, not captured reality. Bonn clips are declared
 `real-capture`; TartanAir and Virtual KITTI are `simulation`; Sintel and Spring are `animation`.
 The evaluator never folds those categories into one unlabeled “real” average.
+
+The production V2 tensor contract supports the standard XR landscape, ultrawide, and portrait
+families. Six public sources use different native canvases: Bonn is `640x480`, TartanAir is
+`640x640`, and Virtual KITTI is `1242x375`. Preparation centers those original pixels without
+resizing or cropping on deterministic black production-compatible canvases (`854x480`,
+`1138x640`, and `1242x520`, respectively). Every depth, flow, stereo, and validity sidecar receives
+the identical translation. Added metric-depth samples are invalid zero, added flow is zero with
+`valid=false`, and added out-of-frame masks are asserted. `meta.json` records the source shape,
+canvas, offsets, padding, and fitted authenticated tensor for each clip.
+
+Canvas pixels remain part of ordinary stereo and hard-safety scoring because the renderer really
+sees them. They are excluded only from reference metrics through the associated validity contract.
+This keeps the benchmark on the production fitter without asserting that dataset-native tensor
+shapes are calibrated product resolutions.
 
 Bonn derivatives remain local because its official page requests citation without granting
 redistribution. TartanAir V2 and Spring are CC BY 4.0. Large Spring and Sintel archives use pinned
@@ -137,9 +151,11 @@ python tools/sbsbench/split_video.py clip.mp4 `
   --width 854 --jpg --max 24
 ```
 
-Drop `--width` and `--jpg` for full-resolution PNG evidence. Evaluation never resizes source frames;
-the harness output follows the input size. Results from a small prepared clip are not numerically
-comparable with a full-resolution run, although a matched A/B at either resolution is valid.
+Drop `--width` and `--jpg` for full-resolution PNG evidence. The harness never resizes source
+frames; its output follows the prepared input size. A manifest-owned public-data adapter may add a
+recorded black canvas as described above, but it preserves every source/reference pixel bit-exact
+and performs no interpolation. Results from a small prepared clip are not numerically comparable
+with a full-resolution run, although a matched A/B at either resolution is valid.
 
 Before accepting a new clip:
 

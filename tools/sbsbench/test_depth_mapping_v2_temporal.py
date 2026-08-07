@@ -392,7 +392,7 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
         np.testing.assert_allclose(
             result.parallax_fields[0], mapping.parallax, atol=2.0e-6)
 
-    def test_exact_sequence_latches_accepted_stage_camera_until_confirmed_cut(self):
+    def test_exact_sequence_latches_arithmetic_mean_camera_until_confirmed_cut(self):
         accepted = self._separated_three_stage_field()
         moved = accepted + 8.0
         ambiguous = np.linspace(20.0, 23.0, accepted.size).reshape(accepted.shape)
@@ -401,7 +401,7 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
             "unit-cut", MappingV2Config(pop_strength=1.0))
         first, held, relatched = result.state_trace["frames"]
 
-        self.assertGreater(first["center"], first["observed_mean"])
+        self.assertAlmostEqual(first["center"], first["observed_mean"])
         self.assertEqual(first["convergence_curve"], 0.0)
         self.assertEqual(held["center"], first["center"])
         self.assertEqual(held["convergence_curve"], first["convergence_curve"])
@@ -512,6 +512,8 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
         raw = np.repeat(row_values[:, None], 67, axis=1)
         config = MappingV2Config(
             raw_coordinate_scale=0.5,
+            far_tau=0.15,
+            near_log_tau=2.0,
             pop_strength=1.0,
             gain_per_pop=0.0075,
             vertical_majorant_share=0.7,
@@ -594,7 +596,7 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
             "gpu-frame-moments-and-rendered-fields-v5")
         native["producer"] = {
             "authority":
-                "authenticated-raw-source-color-histogram-plus-seven-v2-compute-shaders-persistent-gpu-state-v7",
+                "authenticated-raw-source-color-plus-seven-v2-compute-shaders-persistent-gpu-state-v8",
             "manifest_sha256": "0" * 64,
             "contract_canonical_sha256": CONTRACT_CANONICAL_SHA256,
             "tensor_shape": {"width": width, "height": height},
@@ -604,20 +606,15 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
         }
         validate_v2_state_trace(native, result.frame_ids)
 
-        # The native producer authenticates the shared raw-range and histogram passes before the
-        # seven coordinate passes. Omitting those inputs used to make every real native trace fail
-        # the Python gate even though this synthetic fixture (built from the Python constant)
-        # passed.  Keep the exact boundary explicit and prove that the former six-only trace is
-        # rejected.
-        self.assertEqual(
-            V2_GPU_SHADER_SEQUENCE[:2],
-            ("depth_minmax_cs.hlsl", "depth_hist_cs.hlsl"),
-        )
-        missing_histogram_inputs = copy.deepcopy(native)
-        missing_histogram_inputs["producer"]["shader_sequence"] = list(
-            V2_GPU_SHADER_SEQUENCE[2:])
+        # The native producer now contains exactly the seven passes that consume or produce V2
+        # state/geometry. Reintroducing either former histogram-only pass must fail attribution.
+        self.assertNotIn("depth_minmax_cs.hlsl", V2_GPU_SHADER_SEQUENCE)
+        self.assertNotIn("depth_hist_cs.hlsl", V2_GPU_SHADER_SEQUENCE)
+        extra_histogram_input = copy.deepcopy(native)
+        extra_histogram_input["producer"]["shader_sequence"] = [
+            "depth_hist_cs.hlsl", *V2_GPU_SHADER_SEQUENCE]
         with self.assertRaisesRegex(ValueError, "invalid native GPU producer evidence"):
-            validate_v2_state_trace(missing_histogram_inputs, result.frame_ids)
+            validate_v2_state_trace(extra_histogram_input, result.frame_ids)
 
         changed = copy.deepcopy(native)
         changed["producer"]["tensor_shape"]["width"] += 16

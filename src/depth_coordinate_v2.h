@@ -12,8 +12,6 @@
 #include "generated/depth_coordinate_v2_contract.h"
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t stage_histogram_source_bin_count = 256u;
-  inline constexpr std::uint32_t stage_histogram_bin_count = 128u;
 
   constexpr bool convergence_curve_is_valid(const float value) {
     return value == convergence_curve_default;
@@ -23,7 +21,7 @@ namespace models::depth_coordinate_v2 {
   // layout change must bump the relevant value without pretending the coordinate math changed.
   // Dump 3D retains the historical `shadow_*` filenames as a compatibility schema; these values
   // now describe production V2 evidence, not an alternate renderer.
-  inline constexpr std::uint32_t shadow_state_dump_schema = 15u;
+  inline constexpr std::uint32_t shadow_state_dump_schema = 16u;
   inline constexpr std::uint32_t shadow_frame_stats_dump_schema = 2u;
   inline constexpr std::uint32_t reserved_calibration_revision = 0xffffffffu;
 

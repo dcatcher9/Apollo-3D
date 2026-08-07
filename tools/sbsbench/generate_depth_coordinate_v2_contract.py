@@ -46,7 +46,6 @@ EXPECTED_DEFAULT_NAMES = (
     "max_vertical_shear",
     "vertical_majorant_share",
     "convergence_curve_default",
-    "stage_valley_ratio_max",
 )
 EXPECTED_DEFAULT_KEYS = set(EXPECTED_DEFAULT_NAMES)
 EXPECTED_MODEL_CALIBRATION_KEYS = {
@@ -347,8 +346,6 @@ def validate_contract(
             raise ValueError(f"calibrated default {name} must be positive")
     if calibrated_defaults["max_horizontal_slope"] >= 1.0:
         raise ValueError("max_horizontal_slope must be below one")
-    if not 0.0 < float(calibrated_defaults["stage_valley_ratio_max"]) <= 1.0:
-        raise ValueError("stage_valley_ratio_max must be in (0, 1]")
     majorant_share = _float32(calibrated_defaults["vertical_majorant_share"])
     minorant_share = _float32(_float32(1.0) - majorant_share)
     if majorant_share <= 0.0 or minorant_share <= 0.0:
@@ -971,8 +968,6 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"{_float_literal(defaults['max_vertical_shear'])}",
         f"#define V2_VERTICAL_MAJORANT_SHARE "
         f"{_float_literal(defaults['vertical_majorant_share'])}",
-        f"#define V2_STAGE_VALLEY_RATIO_MAX "
-        f"{_float_literal(defaults['stage_valley_ratio_max'])}",
         # The live pixel shader authenticates the published convergence curve against this
         # compile-time contract value. It must never read the producer constant buffer, which is
         # not bound at the warp draw's pixel stage.
@@ -980,7 +975,6 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"{_float_literal(defaults['convergence_curve_default'])}",
         "static const float v2_max_vertical_shear = V2_MAX_VERTICAL_SHEAR;",
         "static const float v2_vertical_majorant_share = V2_VERTICAL_MAJORANT_SHARE;",
-        "static const float v2_stage_valley_ratio_max = V2_STAGE_VALLEY_RATIO_MAX;",
         "",
         f"cbuffer {constant_buffer['name']} : register({constant_buffer['register']}) {{",
     ]

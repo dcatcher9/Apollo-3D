@@ -394,8 +394,11 @@ namespace stream {
    * always describe the mode that is REALLY in effect, never the request:
    *  - on `applied`, that is the running encode session after every host-side transformation, so a
    *    width capped to the codec ceiling reports the capped value and its aspect-scaled height.
-   *    `applied_width`/`applied_height` are base (per-eye) values, before any SBS doubling, and
-   *    `applied_bitrate_kbps` is the derived encoder budget rather than the requested wire budget.
+   *    With Host SBS active, `applied_width`/`applied_height` are the base per-eye values before
+   *    the host's SBS doubling. With Host SBS off they are the effective encoded desktop values
+   *    verbatim; this includes a Raw Full client whose desktop is already packed `2W x H`, because
+   *    the host deliberately has no Raw-SBS presentation knowledge. `applied_bitrate_kbps` is the
+   *    derived encoder budget rather than the requested wire budget.
    *  - on every refusal, that is the mode the session kept, so the client can resynchronize its UI
    *    to reality instead of being handed zeros or its own rejected request back.
    */

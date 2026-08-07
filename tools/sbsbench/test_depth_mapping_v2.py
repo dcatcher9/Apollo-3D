@@ -15,13 +15,8 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from depth_coordinate_v2_contract import CALIBRATED_DEFAULTS  # noqa: E402
 from depth_mapping_v2 import (  # noqa: E402
     MappingV2Config,
-    SCENE_HISTOGRAM_BINS,
-    SCENE_HISTOGRAM_SOURCE_BINS,
-    _otsu_three_class_split,
-    _scene_histogram_128,
     asymmetric_curve,
     calibrate_coordinate,
-    curve_relative_coordinate,
     decode_direct_parallax,
     encode_direct_parallax,
     generate_depth_mapping_v2,
@@ -53,85 +48,16 @@ class DepthMappingV2Test(unittest.TestCase):
         self.assertAlmostEqual(calibration.observed_std, expected_std)
         self.assertEqual(calibration.scale, 0.5)
 
-    @staticmethod
-    def _separated_three_stage_field() -> np.ndarray:
-        rng = np.random.default_rng(123)
-        return np.concatenate((
-            rng.normal(1.0, 0.2, 7680),
-            rng.normal(2.0, 0.2, 3200),
-            rng.normal(4.0, 0.2, 1920),
-        )).reshape(100, 128)
-
-    def test_scene_histogram_exactly_merges_existing_gpu_256_bin_layout(self):
-        raw = np.arange(SCENE_HISTOGRAM_SOURCE_BINS, dtype=np.float32).reshape(16, 16)
-        counts, raw_min, raw_max = _scene_histogram_128(raw)
-        self.assertEqual(counts.shape, (SCENE_HISTOGRAM_BINS,))
-        np.testing.assert_array_equal(counts, np.full(SCENE_HISTOGRAM_BINS, 2))
-        self.assertEqual(raw_min, 0.0)
-        self.assertEqual(raw_max, 255.0)
-        # Inclusive classes and strict ascending tie retention are part of GPU parity.
-        self.assertEqual(_otsu_three_class_split(counts)[:2], (41, 84))
-
-    def test_scene_selector_adopts_only_a_deep_upper_valley(self):
-        raw = self._separated_three_stage_field()
+    def test_scene_selector_uses_arithmetic_mean_without_histogram_staging(self):
+        raw = np.asarray([[-1.0, 0.0, 1.0, 8.0]], dtype=np.float64)
         selection = select_scene_coordinate(raw)
-        self.assertTrue(selection.adopted)
-        self.assertEqual(selection.reason, "accepted-upper-stage-boundary")
-        self.assertEqual(selection.lower_split_bin, 36)
-        self.assertEqual(selection.upper_split_bin, 72)
-        self.assertEqual(selection.class_counts, (7654, 3226, 1920))
-        self.assertLessEqual(selection.valley_ratio, 0.75)
-        self.assertAlmostEqual(
-            selection.candidate_center + MappingV2Config().raw_coordinate_scale,
-            selection.upper_split_raw)
-        self.assertEqual(selection.selected_center, selection.upper_split_raw)
-        self.assertGreater(selection.candidate_center, selection.observed_mean)
+        self.assertEqual(selection.selected_center, float(np.mean(raw)))
         self.assertEqual(selection.convergence_curve, 0.0)
-        canonical_zero, curved_zero = curve_relative_coordinate(
-            np.asarray([[selection.selected_center]]),
-            selection.selected_center,
-            MappingV2Config().raw_coordinate_scale,
-            convergence_curve=selection.convergence_curve,
-        )
-        self.assertEqual(float(canonical_zero[0, 0]), 0.0)
-        self.assertEqual(float(curved_zero[0, 0]), 0.0)
 
         result = generate_depth_mapping_v2(raw)
         self.assertAlmostEqual(result.diagnostics.center_mean, selection.observed_mean)
         self.assertAlmostEqual(result.diagnostics.selected_center, selection.selected_center)
         self.assertEqual(result.diagnostics.scene_coordinate, selection)
-        self.assertEqual(result.diagnostics.convergence_curve, 0.0)
-
-    def test_scene_selector_abstains_on_shallow_valley_and_preserves_mean_semantics(self):
-        raw = np.linspace(1.0, 4.0, 12800, dtype=np.float32).reshape(100, 128)
-        selection = select_scene_coordinate(raw)
-        self.assertFalse(selection.adopted)
-        self.assertEqual(selection.reason, "upper-valley-not-separated")
-        self.assertEqual(selection.valley_ratio, 1.0)
-        self.assertEqual(selection.selected_center, selection.observed_mean)
-        self.assertEqual(selection.convergence_curve, 0.0)
-
-    def test_scene_selector_abstains_when_boundary_center_is_not_above_mean(self):
-        rng = np.random.default_rng(456)
-        raw = np.concatenate((
-            rng.normal(1.0, 0.2, 1500),
-            rng.normal(2.0, 0.25, 1800),
-            rng.normal(4.0, 0.25, 9500),
-        )).reshape(100, 128)
-        selection = select_scene_coordinate(raw)
-        self.assertFalse(selection.adopted)
-        self.assertEqual(selection.reason, "candidate-not-above-mean")
-        self.assertLessEqual(selection.valley_ratio, 0.75)
-        self.assertLess(selection.candidate_center, selection.observed_mean)
-        self.assertEqual(selection.selected_center, selection.observed_mean)
-
-    def test_scene_selector_falls_back_if_reused_gpu_histogram_is_incomplete(self):
-        raw = np.asarray([[-1.0, 0.0, 1.0, 2.0]], dtype=np.float64)
-        selection = select_scene_coordinate(raw)
-        self.assertFalse(selection.adopted)
-        self.assertEqual(selection.reason, "incomplete-gpu-histogram")
-        self.assertEqual(selection.histogram_total, 3)
-        self.assertEqual(selection.selected_center, float(np.mean(raw)))
 
     def test_collapse_is_absolute_and_keeps_requested_gain_diagnostic(self):
         config = MappingV2Config(

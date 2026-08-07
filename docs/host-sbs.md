@@ -39,7 +39,7 @@ diagnostics that explain how the final field was produced.
 
 ## Authenticated production contract
 
-The generated Depth Coordinate contract is the machine-readable authority. At schema 25, live
+The generated Depth Coordinate contract is the machine-readable authority. At schema 26, live
 Host SBS admits the following production calibration:
 
 | Property | Production value |
@@ -47,11 +47,11 @@ Host SBS admits the following production calibration:
 | Model | Depth Anything V2 Small FP16 |
 | Model key | `depth_anything_v2_fp16` |
 | Tensor shapes | `770x434`, `1022x434`, `1036x434`, and their portrait transposes |
-| Raw coordinate scale | `0.5` DAV2 units |
+| Raw coordinate scale | `2.25` DAV2 units |
 | Gain per pop unit | `0.00375` source U |
 | Direct parallax container | `0.04` source U per eye |
-| Far exponential tau | `0.15` |
-| Near logarithmic tau | `2.0` |
+| Far exponential tau | `0.75` |
+| Near logarithmic tau | `0.5` |
 | Maximum horizontal slope | `0.5` |
 | Maximum vertical shear | `2.0` |
 | Vertical upper-envelope share | `0.75` |
@@ -101,14 +101,13 @@ For each finite raw DAV2 field, the producer calculates exact extrema, arithmeti
 population standard deviation. Standard deviation is validity evidence only. A field with
 `sigma <= 1e-6` is collapsed and cannot produce current-frame geometry.
 
-At startup or after a confirmed cut, the first usable field acquires one scene center. The
-acquisition pass evaluates a conservative three-class histogram split. It accepts the upper
-valley only when every class has sufficient support, the valley is no more than `0.75` of the
-weaker adjacent peak, and the candidate center moves upward from the arithmetic mean. Ambiguous
-evidence uses the arithmetic mean.
+At startup or after a confirmed cut, the first usable field acquires its arithmetic mean as the
+scene center. This gives occupancy-weighted behavior without a discrete scene classifier: a small
+near object barely moves the center and retains relief, while a large near region naturally pulls
+the zero plane toward itself and is not boosted as an isolated object.
 
 ```text
-u = (raw_depth - scene_center) / 0.5
+u = (raw_depth - scene_center) / 2.25
 ```
 
 The selected center is the exact zero-disparity plane. There is no additional convergence offset.
@@ -119,13 +118,15 @@ normalization, or adaptive pop multiplier.
 The fixed monotone curve is:
 
 ```text
-             0.15 * (exp(u / 0.15) - 1)          u < 0
+             0.75 * (exp(u / 0.75) - 1)          u < 0
 F(u) =       u                                    0 <= u <= 1
-             1 + 2 * log(1 + (u - 1) / 2)        u > 1
+             1 + 0.5 * log(1 + (u - 1) / 0.5)    u > 1
 ```
 
-It is continuous, monotone, and unbounded on the near branch. In particular, it does not clamp the
-nearest objects into a flat slab.
+It is continuous, monotone, and unbounded on the near branch. The wider linear coordinate region
+preserves middle-layer ordering; the far shelf is deliberately lower-value than the middle and
+near zones, and the near logarithm compresses extreme foreground without clamping it into a flat
+slab.
 
 ## Pop and the pointwise soft container
 

@@ -4,8 +4,7 @@
  *
  * This is deliberately not a second mapping implementation. The helper loads authenticated raw
  * DAV2 fields and hard-cut generations, keeps one GPU state buffer alive for the sequence, and
- * dispatches the same authenticated raw min/max + histogram inputs and seven V2 coordinate
- * entrypoints used by video_depth_estimator. Its
+ * dispatches the same seven V2 coordinate entrypoints used by video_depth_estimator. Its
  * candidate texture is retained as immutable pre-conditioner evidence. The column pass publishes
  * both an upper-envelope diagnostic and the authenticated 75/25 vertical share consumed by the
  * pure row majorant. The encoded final texture is the live render input for the eleven-step
@@ -30,15 +29,15 @@
 
 namespace sbs_bench {
 
-  inline constexpr unsigned depth_coordinate_v2_state_trace_schema = 17;
+  inline constexpr unsigned depth_coordinate_v2_state_trace_schema = 18;
   inline constexpr std::string_view depth_coordinate_v2_state_trace_policy =
-    "immediate-first-usable-otsu-valley-zero-fixed-scale-fixed-near-curve-retained-camera-source-ownership-pointwise-soft-container-vertical-share75-row-majorant-v16";
+    "immediate-first-usable-arithmetic-mean-zero-fixed-scale-fixed-near-curve-retained-camera-source-ownership-pointwise-soft-container-vertical-share75-row-majorant-v17";
   inline constexpr std::string_view depth_coordinate_v2_diagnostic_role =
     "non-controlling-fixed-scale-camera-audit-v4";
   inline constexpr std::string_view depth_coordinate_v2_gpu_authority =
-    "authenticated-raw-source-color-histogram-plus-seven-v2-compute-shaders-persistent-gpu-state-v7";
+    "authenticated-raw-source-color-plus-seven-v2-compute-shaders-persistent-gpu-state-v8";
   inline constexpr std::string_view depth_coordinate_v2_gpu_execution =
-    "authenticated-raw-source-color-histogram-plus-seven-v2-compute-shaders-persistent-state-v7";
+    "authenticated-raw-source-color-plus-seven-v2-compute-shaders-persistent-state-v8";
 
   struct depth_coordinate_v2_gpu_frame {
     std::string frame_id;

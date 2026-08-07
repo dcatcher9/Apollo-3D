@@ -1483,6 +1483,11 @@ TEST(DepthCoordinateV2GpuTest, OwnershipIsResolutionAndPixelPhaseInvariant) {
     fs::path(SUNSHINE_SOURCE_DIR) / "tools/sbsbench/contracts/depth-coordinate-v2-v1.json";
   const std::string contract_bytes = read_bytes(contract_source);
   ASSERT_FALSE(contract_bytes.empty());
+  // Express the synthetic cliff in canonical units so a model raw-scale recalibration cannot
+  // silently move this ownership test below the production strong-cliff threshold.
+  constexpr float canonical_depth_step = 40.0f;
+  const float raw_depth_step =
+    canonical_depth_step * calibration.raw_coordinate_scale;
 
   constexpr std::array source_sizes {
     std::pair {1280u, 720u},
@@ -1511,7 +1516,7 @@ TEST(DepthCoordinateV2GpuTest, OwnershipIsResolutionAndPixelPhaseInvariant) {
         std::fill(
           raw.begin() + static_cast<std::size_t>(y) * width + splits[index],
           raw.begin() + static_cast<std::size_t>(y + 1u) * width,
-          20.0f
+          raw_depth_step
         );
       }
       const std::string frame_id = "0000" + std::to_string(index + 1u);
@@ -1591,6 +1596,9 @@ TEST(DepthCoordinateV2GpuTest, OwnershipIsResolutionAndPixelPhaseInvariant) {
         output.candidate_parallax_values[boundary + 1u] -
         output.candidate_parallax_values[boundary];
       ASSERT_GT(full_jump, 0.0f);
+      const float cliff_floor =
+        8.0f * v2::max_horizontal_slope / static_cast<float>(width);
+      ASSERT_GE(full_jump + 1.0e-8f, cliff_floor);
       const float correction_fraction = correction / full_jump;
       const float expected_fraction =
         (static_cast<float>(splits[index]) * source_scale -
@@ -2015,7 +2023,7 @@ TEST(DepthCoordinateV2GpuTest, OwnershipExecutesOnPortraitTensorAndSource) {
   EXPECT_NEAR(correction_fraction, expected_fraction, 2.0e-4f);
 }
 
-TEST(DepthCoordinateV2GpuTest, StageBoundaryAdoptsAtCutAndHoldsAcrossLaterFramesOnGpu) {
+TEST(DepthCoordinateV2GpuTest, ArithmeticMeanCenterLatchesAtCutAndHoldsAcrossLaterFramesOnGpu) {
   namespace fs = std::filesystem;
   namespace v2 = models::depth_coordinate_v2;
 
@@ -2042,10 +2050,8 @@ TEST(DepthCoordinateV2GpuTest, StageBoundaryAdoptsAtCutAndHoldsAcrossLaterFrames
   const std::uint32_t height = shape_it->height;
   const std::size_t element_count = static_cast<std::size_t>(width) * height;
 
-  // Three broad, separated stages make both Otsu splits and the upper-valley acceptance
-  // deterministic. This exact distribution selects merged bin 76. The historical
-  // T-scale value still owns acceptance, while the accepted valley itself is now zero:
-  // 0.5 + (76.5 / 128) * 5.0 = 3.48828125.
+  // A deliberately multimodal field proves that acquisition uses the arithmetic mean rather
+  // than restaging around a histogram valley.
   std::vector<float> acquired(element_count);
   const std::size_t far_count = element_count * 4u / 10u;
   const std::size_t middle_count = element_count * 4u / 10u;
@@ -2126,7 +2132,12 @@ TEST(DepthCoordinateV2GpuTest, StageBoundaryAdoptsAtCutAndHoldsAcrossLaterFrames
   const auto trace = nlohmann::ordered_json::parse(read_bytes(trace_path));
   ASSERT_EQ(trace.at("frames").size(), fields.size());
   const auto &rows = trace.at("frames");
-  constexpr float first_center = 3.48828125f;
+  double center_sum = 0.0;
+  for (const float value : acquired) {
+    center_sum += value;
+  }
+  const float first_center = static_cast<float>(
+    center_sum / static_cast<double>(acquired.size()));
   EXPECT_NEAR(rows[0]["center"].get<float>(), first_center, 2.0e-5f);
   EXPECT_FLOAT_EQ(
     rows[0]["convergence_curve"].get<float>(), v2::convergence_curve_default);
@@ -2316,13 +2327,13 @@ TEST(DepthCoordinateV2GpuTest, SevenCoordinatePassReplayLatchesRecoversAndRelatc
   ASSERT_EQ(trace.at("frames").size(), raw_fields.size());
   ASSERT_EQ(trace.at("frame_fields").size(), 41u);
   EXPECT_EQ(trace["producer"]["authority"],
-            "authenticated-raw-source-color-histogram-plus-seven-v2-compute-shaders-persistent-gpu-state-v7");
+            "authenticated-raw-source-color-plus-seven-v2-compute-shaders-persistent-gpu-state-v8");
   EXPECT_EQ(trace["producer"]["tensor_shape"]["width"], replay->width());
   EXPECT_EQ(trace["producer"]["tensor_shape"]["height"], replay->height());
-  ASSERT_EQ(trace["producer"]["shader_sequence"].size(), 9u);
-  EXPECT_EQ(trace["producer"]["shader_sequence"][4],
+  ASSERT_EQ(trace["producer"]["shader_sequence"].size(), 7u);
+  EXPECT_EQ(trace["producer"]["shader_sequence"][2],
             "depth_coordinate_v2_state_resolve_cs.hlsl");
-  EXPECT_EQ(trace["producer"]["shader_sequence"][6],
+  EXPECT_EQ(trace["producer"]["shader_sequence"][4],
             "depth_coordinate_v2_ownership_cs.hlsl");
   EXPECT_EQ(trace["producer"]["contract_canonical_sha256"],
             v2::contract_canonical_sha256);

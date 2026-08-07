@@ -78,7 +78,7 @@ REPO = SCRIPT_DIR.parent.parent
 # this lossless-only so decoder-specific JPEG rounding cannot flip the ownership shader's hard
 # edge/contrast gates while both sides still attest the same compressed source bytes.
 FRAME_PATTERN = re.compile(r"frame_(\d+)\.png$", re.IGNORECASE)
-SEQUENCE_CONTRACT_SCHEMA = 17
+SEQUENCE_CONTRACT_SCHEMA = 18
 GPU_INPUT_MANIFEST_SCHEMA = 8
 GPU_INPUT_MANIFEST_MODE = "depth-coordinate-v2-production-gpu-sequence-v10"
 SEQUENCE_MAPPING_CONFIG_KEYS = frozenset(asdict(MappingV2Config()).keys())
@@ -1046,7 +1046,7 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
     if (set(document) != expected_root or document.get("schema") != SEQUENCE_CONTRACT_SCHEMA or
             document.get("experiment") != "depth-coordinate-v2-whole-clip-exact-replay" or
             document.get("mapping_implementation") !=
-            "authenticated-raw-source-color-histogram-plus-seven-v2-compute-shaders-persistent-gpu-state-v7" or
+            "authenticated-raw-source-color-plus-seven-v2-compute-shaders-persistent-gpu-state-v8" or
             document.get("unusable_depth_semantics") !=
             "current-color-flat-retain-camera-unless-cut-v2"):
         raise ValueError("sequence contract has missing or unknown semantics")
@@ -1294,7 +1294,7 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
                            float(mapping["pop_strength"]), rtol=0.0, atol=1.0e-7) or
             gpu_execution.get("enabled") is not True or
             gpu_execution.get("execution") !=
-            "authenticated-raw-source-color-histogram-plus-seven-v2-compute-shaders-persistent-state-v7" or
+            "authenticated-raw-source-color-plus-seven-v2-compute-shaders-persistent-state-v8" or
             gpu_execution.get("tensorrt_executed") is not False or
             gpu_execution.get("render_authority") != "gpu-canonical-and-final-fields" or
             gpu_execution.get("numpy_role") != "comparison-only" or
@@ -1488,7 +1488,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "schema": SEQUENCE_CONTRACT_SCHEMA,
             "experiment": "depth-coordinate-v2-whole-clip-exact-replay",
             "mapping_implementation":
-                "authenticated-raw-source-color-histogram-plus-seven-v2-compute-shaders-persistent-gpu-state-v7",
+                "authenticated-raw-source-color-plus-seven-v2-compute-shaders-persistent-gpu-state-v8",
             "input_contract": input_contract,
             "mapping_config": asdict(config),
             "pop_strength_authority": pop_strength_authority,
