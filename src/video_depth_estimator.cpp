@@ -518,6 +518,18 @@ namespace models {
       return false;
     }
 
+    const bool has_overlay_plan = static_cast<bool>(result.overlay_plan);
+    if (has_overlay_plan != result.overlay_zero_plane_applied) {
+      return false;
+    }
+    if (has_overlay_plan &&
+        (!result.overlay_plan->has_zero_plane_geometry() ||
+         result.overlay_plan->source_frame_id != result.completed_frame_id ||
+         result.overlay_plan->input_region != result.input_region ||
+         result.overlay_plan->color_space != result.color_space)) {
+      return false;
+    }
+
     const auto &input_region = result.input_region;
     const auto full_source_shape = fit_host_sbs_v2_depth_tensor_shape(
       input_region.source_width,
@@ -1667,6 +1679,8 @@ namespace models {
     CUdeviceptr trt_bound_output = 0;
 
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> rgb_to_nchw_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_overlay_sanitize_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_overlay_exclusion_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_ema_motion_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_minmax_cs;
@@ -1683,6 +1697,8 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_coordinate_diagnostic_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_vertical_limit_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_limit_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader>
+      depth_coordinate_v2_overlay_zero_plane_cs;
     Microsoft::WRL::ComPtr<ID3D11Buffer> cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_cbuffer;
 
@@ -1698,6 +1714,14 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> previous_appearance_ordinal_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> previous_appearance_ordinal_srv;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> previous_appearance_ordinal_uav;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> tensor_analysis_exclusion_tex;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_analysis_exclusion_srv;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_analysis_exclusion_uav;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> previous_tensor_analysis_exclusion_tex;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>
+      previous_tensor_analysis_exclusion_srv;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>
+      previous_tensor_analysis_exclusion_uav;
 
     Microsoft::WRL::ComPtr<ID3D11Buffer> tensor_out_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_out_srv;
@@ -1711,7 +1735,7 @@ namespace models {
     unsigned model_input_snapshot_retry_frames = 0;
 
     // GPU-resident min/max for per-frame disparity normalization (no CPU readback).
-    Microsoft::WRL::ComPtr<ID3D11Buffer> minmax_raw_buf;  // min bits, max bits, valid count
+    Microsoft::WRL::ComPtr<ID3D11Buffer> minmax_raw_buf;  // min/max bits, valid and unmasked-eligible counts
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> minmax_raw_uav;
     Microsoft::WRL::ComPtr<ID3D11Buffer> minmax_ema_buf;  // float4 {min,max,initialized,frame_state}
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> minmax_ema_uav;
@@ -1772,6 +1796,16 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_coordinate_v2_final_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_final_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_final_srv;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D>
+      depth_coordinate_v2_overlay_conditioned_tex;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>
+      depth_coordinate_v2_overlay_conditioned_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>
+      depth_coordinate_v2_overlay_conditioned_srv;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_overlay_rects_buf;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>
+      depth_coordinate_v2_overlay_rects_srv;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_overlay_cbuffer;
     bool depth_coordinate_v2_coordinate_diagnostic_error_logged = false;
 
     CUgraphicsResource cuda_in_res = nullptr;
@@ -1780,6 +1814,17 @@ namespace models {
     // asynchronous raw-depth completion has run the full-resolution ownership pass; this adds no
     // color copy and keeps every RGB/depth lookup on the same D3D11 command stream.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> pending_source_srv;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> pending_overlay_mask_srv;
+    std::optional<host_sbs_overlay_plan_t> pending_overlay_plan;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> sanitized_source_tex;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sanitized_source_srv;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> sanitized_source_uav;
+    UINT sanitized_source_width = 0u;
+    UINT sanitized_source_height = 0u;
+    DXGI_FORMAT sanitized_source_format = DXGI_FORMAT_UNKNOWN;
+    bool overlay_resource_error_logged = false;
+    bool tensor_analysis_exclusion_may_be_nonzero = false;
+    bool tensor_analysis_exclusion_history_may_be_nonzero = false;
     input_color_space pending_color_space = input_color_space::srgb;
     depth_input_region_t pending_input_region {};
     depth_input_domain_tracker_t processed_input_domain;
@@ -1817,6 +1862,209 @@ namespace models {
         return {};
       }
       return requested;
+    }
+
+    static DXGI_FORMAT overlay_sanitized_format(
+      ID3D11ShaderResourceView *input_srv
+    ) noexcept {
+      if (!input_srv) {
+        return DXGI_FORMAT_UNKNOWN;
+      }
+      D3D11_SHADER_RESOURCE_VIEW_DESC view_desc {};
+      input_srv->GetDesc(&view_desc);
+      switch (view_desc.Format) {
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+          // A shader load exposes logical RGBA values for either source layout. Storing those
+          // values into RGBA8 preserves every unmasked 8-bit channel exactly while providing the
+          // typed-UAV support that BGRA8 itself lacks on D3D11.
+          return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:
+          return DXGI_FORMAT_R16G16B16A16_FLOAT;
+        default:
+          return DXGI_FORMAT_UNKNOWN;
+      }
+    }
+
+    bool overlay_mask_matches_frame(
+      const host_sbs_overlay_plan_t *overlay_plan,
+      ID3D11ShaderResourceView *overlay_mask,
+      const std::uint64_t mask_generation,
+      const std::uint64_t frame_id,
+      const depth_input_region_t &input_region,
+      const input_color_space color_space,
+      const D3D11_TEXTURE2D_DESC &input_desc
+    ) const noexcept {
+      if (!overlay_plan || !overlay_mask ||
+          !overlay_plan->has_zero_plane_geometry() ||
+          !overlay_plan->valid_for(frame_id, input_region, color_space) ||
+          mask_generation != overlay_plan->analysis_exclusion_generation ||
+          overlay_plan->analysis_width != input_desc.Width ||
+          overlay_plan->analysis_height != input_desc.Height) {
+        return false;
+      }
+
+      D3D11_SHADER_RESOURCE_VIEW_DESC mask_view_desc {};
+      overlay_mask->GetDesc(&mask_view_desc);
+      if (mask_view_desc.Format != DXGI_FORMAT_R8_UNORM ||
+          mask_view_desc.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D ||
+          mask_view_desc.Texture2D.MostDetailedMip != 0u ||
+          mask_view_desc.Texture2D.MipLevels != 1u) {
+        return false;
+      }
+
+      Microsoft::WRL::ComPtr<ID3D11Resource> mask_resource;
+      overlay_mask->GetResource(&mask_resource);
+      Microsoft::WRL::ComPtr<ID3D11Texture2D> mask_texture;
+      if (FAILED(mask_resource.As(&mask_texture)) || !mask_texture) {
+        return false;
+      }
+      D3D11_TEXTURE2D_DESC mask_desc {};
+      mask_texture->GetDesc(&mask_desc);
+      if (mask_desc.Width != input_desc.Width ||
+          mask_desc.Height != input_desc.Height ||
+          mask_desc.MipLevels != 1u || mask_desc.ArraySize != 1u ||
+          mask_desc.SampleDesc.Count != 1u ||
+          (mask_desc.Format != DXGI_FORMAT_R8_UNORM &&
+           mask_desc.Format != DXGI_FORMAT_R8_TYPELESS)) {
+        return false;
+      }
+
+      Microsoft::WRL::ComPtr<ID3D11Device> mask_device;
+      overlay_mask->GetDevice(&mask_device);
+      return mask_device.Get() == device.Get();
+    }
+
+    bool ensure_overlay_sanitized_source(
+      ID3D11ShaderResourceView *input_srv,
+      const D3D11_TEXTURE2D_DESC &input_desc
+    ) {
+      const auto format = overlay_sanitized_format(input_srv);
+      if (format == DXGI_FORMAT_UNKNOWN) {
+        return false;
+      }
+      if (sanitized_source_tex && sanitized_source_srv && sanitized_source_uav &&
+          sanitized_source_width == input_desc.Width &&
+          sanitized_source_height == input_desc.Height &&
+          sanitized_source_format == format) {
+        return true;
+      }
+
+      sanitized_source_tex.Reset();
+      sanitized_source_srv.Reset();
+      sanitized_source_uav.Reset();
+      sanitized_source_width = 0u;
+      sanitized_source_height = 0u;
+      sanitized_source_format = DXGI_FORMAT_UNKNOWN;
+
+      UINT format_support = 0u;
+      if (FAILED(device->CheckFormatSupport(format, &format_support)) ||
+          (format_support & D3D11_FORMAT_SUPPORT_SHADER_SAMPLE) == 0u ||
+          (format_support & D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW) == 0u) {
+        return false;
+      }
+
+      D3D11_TEXTURE2D_DESC desc {};
+      desc.Width = input_desc.Width;
+      desc.Height = input_desc.Height;
+      desc.MipLevels = 1u;
+      desc.ArraySize = 1u;
+      desc.Format = format;
+      desc.SampleDesc.Count = 1u;
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+      const bool created =
+        SUCCEEDED(device->CreateTexture2D(
+          &desc, nullptr, sanitized_source_tex.ReleaseAndGetAddressOf())) &&
+        SUCCEEDED(device->CreateShaderResourceView(
+          sanitized_source_tex.Get(), nullptr,
+          sanitized_source_srv.ReleaseAndGetAddressOf())) &&
+        SUCCEEDED(device->CreateUnorderedAccessView(
+          sanitized_source_tex.Get(), nullptr,
+          sanitized_source_uav.ReleaseAndGetAddressOf()));
+      if (!created) {
+        sanitized_source_tex.Reset();
+        sanitized_source_srv.Reset();
+        sanitized_source_uav.Reset();
+        return false;
+      }
+      sanitized_source_width = input_desc.Width;
+      sanitized_source_height = input_desc.Height;
+      sanitized_source_format = format;
+      return true;
+    }
+
+    bool dispatch_overlay_analysis(
+      ID3D11ShaderResourceView *input_srv,
+      ID3D11ShaderResourceView *overlay_mask,
+      const D3D11_TEXTURE2D_DESC &input_desc
+    ) {
+      if (!depth_overlay_sanitize_cs || !depth_overlay_exclusion_cs ||
+          !overlay_zero_plane_resources_ready() ||
+          !tensor_analysis_exclusion_tex || !tensor_analysis_exclusion_srv ||
+          !tensor_analysis_exclusion_uav ||
+          !previous_tensor_analysis_exclusion_tex ||
+          !previous_tensor_analysis_exclusion_srv ||
+          !previous_tensor_analysis_exclusion_uav ||
+          !ensure_overlay_sanitized_source(input_srv, input_desc)) {
+        if (!overlay_resource_error_logged) {
+          BOOST_LOG(warning)
+            << "Host SBS overlay analysis resources are unavailable; using ordinary unmasked "
+               "V2 for affected frames.";
+          overlay_resource_error_logged = true;
+        }
+        return false;
+      }
+
+      ID3D11ShaderResourceView *source_srvs[2] = {
+        input_srv,
+        overlay_mask,
+      };
+      ID3D11UnorderedAccessView *sanitize_uavs[2] = {
+        sanitized_source_uav.Get(),
+        nullptr,
+      };
+      context->CSSetShader(depth_overlay_sanitize_cs.Get(), nullptr, 0);
+      context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
+      context->CSSetShaderResources(0, 2, source_srvs);
+      context->CSSetUnorderedAccessViews(0, 2, sanitize_uavs, nullptr);
+      context->Dispatch(
+        (input_desc.Width + 15u) / 16u,
+        (input_desc.Height + 15u) / 16u,
+        1u
+      );
+
+      ID3D11ShaderResourceView *null_srvs[2] = {nullptr, nullptr};
+      ID3D11UnorderedAccessView *null_uavs[2] = {nullptr, nullptr};
+      context->CSSetShaderResources(0, 2, null_srvs);
+      context->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
+
+      ID3D11ShaderResourceView *mask_srvs[2] = {
+        nullptr,
+        overlay_mask,
+      };
+      ID3D11UnorderedAccessView *exclusion_uavs[2] = {
+        nullptr,
+        tensor_analysis_exclusion_uav.Get(),
+      };
+      context->CSSetShader(depth_overlay_exclusion_cs.Get(), nullptr, 0);
+      context->CSSetShaderResources(0, 2, mask_srvs);
+      context->CSSetUnorderedAccessViews(0, 2, exclusion_uavs, nullptr);
+      context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
+      context->CSSetShaderResources(0, 2, null_srvs);
+      context->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
+      tensor_analysis_exclusion_may_be_nonzero = true;
+      return true;
+    }
+
+    void clear_current_overlay_analysis() {
+      if (tensor_analysis_exclusion_may_be_nonzero &&
+          tensor_analysis_exclusion_uav) {
+        const UINT zero[4] = {0u, 0u, 0u, 0u};
+        context->ClearUnorderedAccessViewUint(
+          tensor_analysis_exclusion_uav.Get(), zero);
+      }
+      tensor_analysis_exclusion_may_be_nonzero = false;
     }
 
     // Host V2 fails flat on any producer error. Only async execution/query failures quarantine the
@@ -2247,6 +2495,34 @@ namespace models {
         return;
       }
 
+      // Burned-in-overlay treatment is authenticated by the same complete source closure but is
+      // optional at runtime. Shader-object creation failure disables W2 only; ordinary unmasked
+      // V2 continues through the mandatory producer objects above.
+      const bool overlay_shaders_ok =
+        create_shader(
+          producer_sources,
+          host_sbs_shader_cache::depth_overlay_sanitize,
+          depth_overlay_sanitize_cs
+        ) &&
+        create_shader(
+          producer_sources,
+          host_sbs_shader_cache::depth_overlay_exclusion,
+          depth_overlay_exclusion_cs
+        ) &&
+        create_shader(
+          producer_sources,
+          host_sbs_shader_cache::depth_coordinate_v2_overlay_zero_plane,
+          depth_coordinate_v2_overlay_zero_plane_cs
+        );
+      if (!overlay_shaders_ok) {
+        depth_overlay_sanitize_cs.Reset();
+        depth_overlay_exclusion_cs.Reset();
+        depth_coordinate_v2_overlay_zero_plane_cs.Reset();
+        BOOST_LOG(warning)
+          << "Host SBS overlay-analysis shaders are unavailable; ordinary unmasked V2 remains "
+             "active.";
+      }
+
       parallax_v2_producer_shaders_ready = true;
       parallax_v2_shader_provenance =
         std::make_shared<const parallax_v2_shader_provenance_t>(
@@ -2267,12 +2543,14 @@ namespace models {
         << ", requested gain " << parallax_v2_requested_gain
         << "); completed fields remain separately authenticated before rendering.";
       BOOST_LOG(info)
-        << "Host SBS V2 cut-only GPU analysis enabled; no subject, adaptive-pop, stretch, or "
-           "zero-plane work is compiled or dispatched.";
+        << "Host SBS V2 cut-only GPU analysis enabled; subject, adaptive-pop, and stretch "
+           "paths remain absent; authenticated burned-in-overlay treatment is available only "
+           "for exact-frame mask plans.";
       // Min/max reduction accumulator, pre-seeded to the reduction identity
-      // {min = 0xFFFFFFFF, max = 0, valid = 0}. depth_minmax_ema_cs resets it after each frame.
+      // {min = 0xFFFFFFFF, max = 0, valid = 0, eligible = 0}.
+      // depth_minmax_ema_cs resets it after each frame.
       {
-        uint32_t init_raw[3] = {0xFFFFFFFFu, 0u, 0u};
+        uint32_t init_raw[4] = {0xFFFFFFFFu, 0u, 0u, 0u};
         D3D11_BUFFER_DESC bd = {};
         bd.Usage = D3D11_USAGE_DEFAULT;
         bd.ByteWidth = sizeof(init_raw);
@@ -2285,7 +2563,7 @@ namespace models {
         uav.Format = DXGI_FORMAT_R32_TYPELESS;
         uav.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
         uav.Buffer.FirstElement = 0;
-        uav.Buffer.NumElements = 3;
+        uav.Buffer.NumElements = 4;
         uav.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
         device->CreateUnorderedAccessView(minmax_raw_buf.Get(), &uav, &minmax_raw_uav);
       }
@@ -2538,7 +2816,23 @@ namespace models {
       depth_coordinate_v2_final_tex.Reset();
       depth_coordinate_v2_final_uav.Reset();
       depth_coordinate_v2_final_srv.Reset();
+      depth_coordinate_v2_overlay_conditioned_tex.Reset();
+      depth_coordinate_v2_overlay_conditioned_uav.Reset();
+      depth_coordinate_v2_overlay_conditioned_srv.Reset();
+      depth_coordinate_v2_overlay_rects_buf.Reset();
+      depth_coordinate_v2_overlay_rects_srv.Reset();
+      depth_coordinate_v2_overlay_cbuffer.Reset();
       pending_source_srv.Reset();
+      pending_overlay_mask_srv.Reset();
+      pending_overlay_plan.reset();
+      tensor_analysis_exclusion_may_be_nonzero = false;
+      tensor_analysis_exclusion_history_may_be_nonzero = false;
+      sanitized_source_tex.Reset();
+      sanitized_source_srv.Reset();
+      sanitized_source_uav.Reset();
+      sanitized_source_width = 0u;
+      sanitized_source_height = 0u;
+      sanitized_source_format = DXGI_FORMAT_UNKNOWN;
     }
 
     void fail_parallax_v2_producer(std::string_view reason) {
@@ -2701,6 +2995,69 @@ namespace models {
         return false;
       }
 
+      // W2 is optional at runtime. Pre-create every zero-plane resource as one unit so a later
+      // accepted mask can never sanitize DAV2 input unless its completed field is also guaranteed
+      // to reach the post-limit conditioner. Allocation failure leaves ordinary unmasked V2
+      // fully active and is not part of the one-way fail-flat latch.
+      bool overlay_zero_plane_resources_ok =
+        depth_coordinate_v2_overlay_zero_plane_cs &&
+        create_float_texture(
+          depth_coordinate_v2_overlay_conditioned_tex,
+          &depth_coordinate_v2_overlay_conditioned_srv,
+          depth_coordinate_v2_overlay_conditioned_uav
+        );
+      if (overlay_zero_plane_resources_ok) {
+        D3D11_BUFFER_DESC rect_desc {};
+        rect_desc.Usage = D3D11_USAGE_DEFAULT;
+        rect_desc.ByteWidth = static_cast<UINT>(
+          sizeof(host_sbs_overlay_geometry_t::loose_rects));
+        rect_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        rect_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        rect_desc.StructureByteStride = sizeof(depth_source_rect_t);
+        const std::array<depth_source_rect_t, host_sbs_overlay_max_loose_rects>
+          empty_rects {};
+        D3D11_SUBRESOURCE_DATA rect_data {empty_rects.data(), 0u, 0u};
+        overlay_zero_plane_resources_ok =
+          SUCCEEDED(device->CreateBuffer(
+            &rect_desc,
+            &rect_data,
+            &depth_coordinate_v2_overlay_rects_buf
+          )) &&
+          SUCCEEDED(device->CreateShaderResourceView(
+            depth_coordinate_v2_overlay_rects_buf.Get(),
+            nullptr,
+            &depth_coordinate_v2_overlay_rects_srv
+          ));
+      }
+      if (overlay_zero_plane_resources_ok) {
+        const host_sbs_overlay_zero_plane_constants_t empty_constants {};
+        D3D11_BUFFER_DESC overlay_constants_desc {};
+        overlay_constants_desc.Usage = D3D11_USAGE_DEFAULT;
+        overlay_constants_desc.ByteWidth = sizeof(empty_constants);
+        overlay_constants_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA overlay_constants_data {
+          &empty_constants, 0u, 0u};
+        overlay_zero_plane_resources_ok = SUCCEEDED(device->CreateBuffer(
+          &overlay_constants_desc,
+          &overlay_constants_data,
+          &depth_coordinate_v2_overlay_cbuffer
+        ));
+      }
+      if (!overlay_zero_plane_resources_ok) {
+        depth_coordinate_v2_overlay_conditioned_tex.Reset();
+        depth_coordinate_v2_overlay_conditioned_uav.Reset();
+        depth_coordinate_v2_overlay_conditioned_srv.Reset();
+        depth_coordinate_v2_overlay_rects_buf.Reset();
+        depth_coordinate_v2_overlay_rects_srv.Reset();
+        depth_coordinate_v2_overlay_cbuffer.Reset();
+        if (!overlay_resource_error_logged) {
+          BOOST_LOG(warning)
+            << "Host SBS overlay zero-plane resources are unavailable; ordinary unmasked V2 "
+               "remains active.";
+          overlay_resource_error_logged = true;
+        }
+      }
+
       const float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
       context->ClearUnorderedAccessViewFloat(depth_coordinate_v2_candidate_uav.Get(), clear);
       context->ClearUnorderedAccessViewFloat(depth_coordinate_v2_ownership_uav.Get(), clear);
@@ -2713,6 +3070,10 @@ namespace models {
         clear
       );
       context->ClearUnorderedAccessViewFloat(depth_coordinate_v2_final_uav.Get(), clear);
+      if (depth_coordinate_v2_overlay_conditioned_uav) {
+        context->ClearUnorderedAccessViewFloat(
+          depth_coordinate_v2_overlay_conditioned_uav.Get(), clear);
+      }
       parallax_v2_producer_active = true;
       BOOST_LOG(info)
         << "Host SBS V2 GPU producer active at " << target_w << 'x' << target_h
@@ -2724,9 +3085,89 @@ namespace models {
       return true;
     }
 
-    void dispatch_parallax_v2_producer(d3d_perf_slot *perf_slot) {
+    bool overlay_zero_plane_resources_ready() const noexcept {
+      return depth_coordinate_v2_overlay_zero_plane_cs &&
+             depth_coordinate_v2_overlay_conditioned_tex &&
+             depth_coordinate_v2_overlay_conditioned_uav &&
+             depth_coordinate_v2_overlay_conditioned_srv &&
+             depth_coordinate_v2_overlay_rects_buf &&
+             depth_coordinate_v2_overlay_rects_srv &&
+             depth_coordinate_v2_overlay_cbuffer;
+    }
+
+    bool dispatch_overlay_zero_plane(
+      const host_sbs_overlay_plan_t &plan
+    ) {
+      if (!overlay_zero_plane_resources_ready() ||
+          !plan.has_zero_plane_geometry() ||
+          !plan.valid_for(
+            pending_frame_id,
+            pending_input_region,
+            pending_color_space
+          )) {
+        return false;
+      }
+
+      context->UpdateSubresource(
+        depth_coordinate_v2_overlay_rects_buf.Get(),
+        0u,
+        nullptr,
+        plan.geometry.loose_rects.data(),
+        0u,
+        0u
+      );
+      const host_sbs_overlay_zero_plane_constants_t overlay_constants {
+        .analysis_width = plan.analysis_width,
+        .analysis_height = plan.analysis_height,
+        .loose_rect_count = plan.geometry.loose_rect_count,
+        .reserved = 0u,
+      };
+      context->UpdateSubresource(
+        depth_coordinate_v2_overlay_cbuffer.Get(),
+        0u,
+        nullptr,
+        &overlay_constants,
+        0u,
+        0u
+      );
+
+      ID3D11Buffer *constant_buffers[3] = {
+        cbuffer.Get(),
+        depth_coordinate_v2_cbuffer.Get(),
+        depth_coordinate_v2_overlay_cbuffer.Get(),
+      };
+      ID3D11ShaderResourceView *inputs[2] = {
+        depth_coordinate_v2_final_srv.Get(),
+        depth_coordinate_v2_overlay_rects_srv.Get(),
+      };
+      context->CSSetShader(
+        depth_coordinate_v2_overlay_zero_plane_cs.Get(), nullptr, 0u);
+      context->CSSetConstantBuffers(0u, 3u, constant_buffers);
+      context->CSSetShaderResources(0u, 2u, inputs);
+      context->CSSetUnorderedAccessViews(
+        0u,
+        1u,
+        depth_coordinate_v2_overlay_conditioned_uav.GetAddressOf(),
+        nullptr
+      );
+      context->Dispatch(
+        (static_cast<UINT>(target_w) + 15u) / 16u,
+        (static_cast<UINT>(target_h) + 15u) / 16u,
+        1u
+      );
+
+      ID3D11ShaderResourceView *null_srvs[2] = {nullptr, nullptr};
+      ID3D11UnorderedAccessView *null_uav = nullptr;
+      ID3D11Buffer *null_constant = nullptr;
+      context->CSSetShaderResources(0u, 2u, null_srvs);
+      context->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
+      context->CSSetConstantBuffers(2u, 1u, &null_constant);
+      return true;
+    }
+
+    bool dispatch_parallax_v2_producer(d3d_perf_slot *perf_slot) {
       if (!parallax_v2_producer_active) {
-        return;
+        return false;
       }
 
       ID3D11Buffer *constant_buffers[2] = {
@@ -2737,7 +3178,12 @@ namespace models {
 
       // Stable frame mean/std/min/max.
       context->CSSetShader(depth_coordinate_v2_moments_cs.Get(), nullptr, 0);
-      context->CSSetShaderResources(0, 1, tensor_out_srv.GetAddressOf());
+      ID3D11ShaderResourceView *moments_srvs[2] = {
+        tensor_out_srv.Get(),
+        tensor_analysis_exclusion_may_be_nonzero ?
+          tensor_analysis_exclusion_srv.Get() : nullptr,
+      };
+      context->CSSetShaderResources(0, 2, moments_srvs);
       context->CSSetUnorderedAccessViews(
         0,
         1,
@@ -2747,7 +3193,7 @@ namespace models {
       context->Dispatch(reduce_groups, 1, 1);
       ID3D11ShaderResourceView *null_srvs3[3] = {nullptr, nullptr, nullptr};
       ID3D11UnorderedAccessView *null_uavs2[2] = {nullptr, nullptr};
-      context->CSSetShaderResources(0, 1, null_srvs3);
+      context->CSSetShaderResources(0, 2, null_srvs3);
       context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
 
       context->CSSetShader(depth_coordinate_v2_frame_resolve_cs.Get(), nullptr, 0);
@@ -2800,11 +3246,13 @@ namespace models {
       // safe identity copy; ordinary production pairing always supplies it.
       if (pending_source_srv) {
         context->CSSetShader(depth_coordinate_v2_ownership_cs.Get(), nullptr, 0);
-        ID3D11ShaderResourceView *ownership_srvs[2] = {
+        ID3D11ShaderResourceView *ownership_srvs[3] = {
           depth_coordinate_v2_candidate_srv.Get(),
           pending_source_srv.Get(),
+          tensor_analysis_exclusion_may_be_nonzero ?
+            tensor_analysis_exclusion_srv.Get() : nullptr,
         };
-        context->CSSetShaderResources(0, 2, ownership_srvs);
+        context->CSSetShaderResources(0, 3, ownership_srvs);
         context->CSSetUnorderedAccessViews(
           0,
           1,
@@ -2819,7 +3267,7 @@ namespace models {
         if (perf_slot) {
           context->End(perf_slot->ownership_end.Get());
         }
-        context->CSSetShaderResources(0, 2, null_srvs3);
+        context->CSSetShaderResources(0, 3, null_srvs3);
         context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
       } else {
         context->CopyResource(
@@ -2859,8 +3307,12 @@ namespace models {
       context->CSSetShaderResources(0, 1, null_srvs3);
       context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
 
+      const bool overlay_zero_plane_applied =
+        pending_overlay_plan && dispatch_overlay_zero_plane(*pending_overlay_plan);
+
       ID3D11Buffer *null_constant = nullptr;
       context->CSSetConstantBuffers(1, 1, &null_constant);
+      return overlay_zero_plane_applied;
     }
 
     bool ensure_parallax_v2_coordinate_diagnostic_resource() {
@@ -2980,7 +3432,10 @@ namespace models {
       bool model_input_snapshot_valid = false,
       bool coordinate_snapshot_valid = false,
       depth_input_region_t completed_input_region = {},
-      bool input_domain_reset = false
+      input_color_space completed_color_space = input_color_space::srgb,
+      bool input_domain_reset = false,
+      bool completed_overlay_zero_plane_applied = false,
+      std::optional<host_sbs_overlay_plan_t> completed_overlay_plan = std::nullopt
     ) {
       estimate_result r;
       r.depth = output_srv();
@@ -3003,7 +3458,10 @@ namespace models {
         r.shadow_ownership_refined_parallax = depth_coordinate_v2_ownership_srv;
         r.shadow_vertical_majorant = depth_coordinate_v2_vertical_majorant_srv;
         r.shadow_vertical_conditioned = depth_coordinate_v2_vertical_conditioned_srv;
-        r.shadow_final_parallax = depth_coordinate_v2_final_srv;
+        r.shadow_final_parallax =
+          completed_overlay_zero_plane_applied && completed_overlay_plan ?
+            depth_coordinate_v2_overlay_conditioned_srv :
+            depth_coordinate_v2_final_srv;
         r.shadow_state = depth_coordinate_v2_state_srv;
         r.shadow_frame_stats = depth_coordinate_v2_frame_stats_srv;
         r.parallax_v2_shader_provenance = parallax_v2_shader_provenance;
@@ -3020,7 +3478,10 @@ namespace models {
       r.cuda_graph_active = inference_graph_exec != nullptr && !graph_capture_failed;
       if (completed_frame_valid) {
         r.input_region = completed_input_region;
+        r.color_space = completed_color_space;
         r.input_domain_reset = input_domain_reset;
+        r.overlay_zero_plane_applied = completed_overlay_zero_plane_applied;
+        r.overlay_plan = std::move(completed_overlay_plan);
       }
       return r;
     }
@@ -3109,7 +3570,8 @@ namespace models {
       }
       auto *d3d_timer = diagnostics_enabled ? begin_d3d_perf(true, false) : nullptr;
       const bool input_domain_reset = prepare_pending_input_domain();
-      normalize_depth_output(d3d_timer);
+      const bool completed_overlay_zero_plane_applied =
+        normalize_depth_output(d3d_timer);
       mark_d3d_post_end(d3d_timer);
       bool raw_snapshot_valid = false;
       bool model_input_snapshot_valid = false;
@@ -3139,10 +3601,13 @@ namespace models {
       end_d3d_perf(d3d_timer);
       const auto completed_frame_id = pending_frame_id;
       const auto completed_input_region = pending_input_region;
+      const auto completed_color_space = pending_color_space;
+      auto completed_overlay_plan = std::move(pending_overlay_plan);
       has_previous_frame = false;  // the output buffer has been consumed; never fold it twice
       // normalize_depth_output() has submitted and unbound every D3D11 read of this exact source.
       // Drop our retained reference only after the ownership pass has consumed it.
       pending_source_srv.Reset();
+      pending_overlay_mask_srv.Reset();
       if (diagnostics_enabled) {
         throughput_stats_completions++;
       }
@@ -3154,7 +3619,10 @@ namespace models {
         model_input_snapshot_valid,
         coordinate_snapshot_valid,
         completed_input_region,
-        input_domain_reset
+        completed_color_space,
+        input_domain_reset,
+        completed_overlay_zero_plane_applied,
+        std::move(completed_overlay_plan)
       );
     }
 
@@ -3198,7 +3666,7 @@ namespace models {
       // Domain changes are rare (video selection/extent or full-frame fallback). Reset every
       // history that could otherwise compare browser pixels with video-local pixels. All writes
       // are ordered on the owning immediate context; there is no CPU readback or synchronization.
-      const std::uint32_t raw_identity[3] = {0xFFFFFFFFu, 0u, 0u};
+      const std::uint32_t raw_identity[4] = {0xFFFFFFFFu, 0u, 0u, 0u};
       const float zero4[4] = {0.0f, 0.0f, 0.0f, 0.0f};
       const std::uint32_t zero_uint4[4] = {0u, 0u, 0u, 0u};
       const std::array<std::uint32_t, 256> zero_hist {};
@@ -3232,6 +3700,11 @@ namespace models {
       if (previous_appearance_ordinal_uav) {
         context->ClearUnorderedAccessViewFloat(previous_appearance_ordinal_uav.Get(), zero4);
       }
+      if (previous_tensor_analysis_exclusion_uav) {
+        context->ClearUnorderedAccessViewUint(
+          previous_tensor_analysis_exclusion_uav.Get(), zero_uint4);
+      }
+      tensor_analysis_exclusion_history_may_be_nonzero = false;
       if (depth_uav) {
         context->ClearUnorderedAccessViewFloat(depth_uav.Get(), zero4);
       }
@@ -3285,35 +3758,40 @@ namespace models {
     // Normalize the finished raw disparity in tensor_out_buf into depth_tex: the scale
     // passes (min/max reduction, permanent percentile histogram, EMA fold) followed by the
     // mapping/temporal-EMA pass. GPU-resident throughout, no CPU readback.
-    void normalize_depth_output(d3d_perf_slot *perf_slot) {
+    bool normalize_depth_output(d3d_perf_slot *perf_slot) {
       // 3a. Per-frame scale (GPU-resident; no CPU readback). Depth Anything V2's
       // relative output is affine-invariant, so this is required for a stable parallax scale.
       if (depth_minmax_cs && depth_minmax_ema_cs && minmax_raw_uav && minmax_ema_uav) {
         // Pass A: parallel reduction of the raw disparity -> min/max (uint bits).
         context->CSSetShader(depth_minmax_cs.Get(), nullptr, 0);
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-        context->CSSetShaderResources(0, 1, tensor_out_srv.GetAddressOf());
+        ID3D11ShaderResourceView *reduction_srvs[2] = {
+          tensor_out_srv.Get(),
+          tensor_analysis_exclusion_may_be_nonzero ?
+            tensor_analysis_exclusion_srv.Get() : nullptr,
+        };
+        context->CSSetShaderResources(0, 2, reduction_srvs);
         context->CSSetUnorderedAccessViews(0, 1, minmax_raw_uav.GetAddressOf(), nullptr);
         context->Dispatch(reduce_groups, 1, 1);
 
         ID3D11UnorderedAccessView *null_uav1 = nullptr;
-        ID3D11ShaderResourceView *null_srv1 = nullptr;
+        ID3D11ShaderResourceView *null_reduction_srvs[2] = {nullptr, nullptr};
         context->CSSetUnorderedAccessViews(0, 1, &null_uav1, nullptr);
-        context->CSSetShaderResources(0, 1, &null_srv1);
+        context->CSSetShaderResources(0, 2, null_reduction_srvs);
 
         // Pass A2 (percentile mode): 256-bin histogram over the raw range, so pass B
         // can replace the outlier-sensitive min/max with robust percentile bounds.
         if (depth_hist_cs && hist_uav) {
           context->CSSetShader(depth_hist_cs.Get(), nullptr, 0);
           context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-          context->CSSetShaderResources(0, 1, tensor_out_srv.GetAddressOf());
+          context->CSSetShaderResources(0, 2, reduction_srvs);
           ID3D11UnorderedAccessView *hist_uavs[2] = {hist_uav.Get(), minmax_raw_uav.Get()};
           context->CSSetUnorderedAccessViews(0, 2, hist_uavs, nullptr);
           context->Dispatch(reduce_groups, 1, 1);
 
           ID3D11UnorderedAccessView *null_uavs_h[2] = {nullptr, nullptr};
           context->CSSetUnorderedAccessViews(0, 2, null_uavs_h, nullptr);
-          context->CSSetShaderResources(0, 1, &null_srv1);
+          context->CSSetShaderResources(0, 2, null_reduction_srvs);
 
         }
 
@@ -3339,18 +3817,21 @@ namespace models {
       if (ema_edge_change > 0.0f && ema_edge_gradient > 0.0f) {
         context->CSSetShader(depth_ema_motion_cs.Get(), nullptr, 0);
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-        ID3D11ShaderResourceView *mask_srvs[3] = {
+        ID3D11ShaderResourceView *mask_srvs[4] = {
           tensor_out_srv.Get(),
           minmax_ema_srv.Get(),
-          depth_previous_srv.Get()
+          depth_previous_srv.Get(),
+          tensor_analysis_exclusion_may_be_nonzero ?
+            tensor_analysis_exclusion_srv.Get() : nullptr,
         };
-        context->CSSetShaderResources(0, 3, mask_srvs);
+        context->CSSetShaderResources(0, 4, mask_srvs);
         context->CSSetUnorderedAccessViews(0, 1, ema_motion_mask_uav.GetAddressOf(), nullptr);
         context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
         ID3D11UnorderedAccessView *null_mask_uav = nullptr;
-        ID3D11ShaderResourceView *null_mask_srvs[3] = {nullptr, nullptr, nullptr};
+        ID3D11ShaderResourceView *null_mask_srvs[4] = {
+          nullptr, nullptr, nullptr, nullptr};
         context->CSSetUnorderedAccessViews(0, 1, &null_mask_uav, nullptr);
-        context->CSSetShaderResources(0, 3, null_mask_srvs);
+        context->CSSetShaderResources(0, 4, null_mask_srvs);
       } else {
         context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), clear_mask);
       }
@@ -3403,16 +3884,20 @@ namespace models {
         has_last_postprocessed_frame_id = true;
 
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-        ID3D11ShaderResourceView *analysis_srvs[7] = {
+        ID3D11ShaderResourceView *analysis_srvs[9] = {
           depth_srv.Get(),
           depth_cut_history_srv.Get(),
           tensor_in_srv.Get(),
           tensor_previous_input_srv.Get(),
           minmax_ema_srv.Get(),
           appearance_ordinal_srv.Get(),
-          previous_appearance_ordinal_srv.Get()
+          previous_appearance_ordinal_srv.Get(),
+          tensor_analysis_exclusion_may_be_nonzero ?
+            tensor_analysis_exclusion_srv.Get() : nullptr,
+          tensor_analysis_exclusion_history_may_be_nonzero ?
+            previous_tensor_analysis_exclusion_srv.Get() : nullptr,
         };
-        context->CSSetShaderResources(0, 7, analysis_srvs);
+        context->CSSetShaderResources(0, 9, analysis_srvs);
         context->CSSetShader(depth_scene_cut_evidence_cs.Get(), nullptr, 0);
         context->CSSetUnorderedAccessViews(
           0,
@@ -3424,7 +3909,9 @@ namespace models {
 
         ID3D11UnorderedAccessView *null_uavs_h2[2] = {nullptr, nullptr};
         context->CSSetUnorderedAccessViews(0, 2, null_uavs_h2, nullptr);
-        ID3D11ShaderResourceView *null_analysis_srvs[7] = {
+        ID3D11ShaderResourceView *null_analysis_srvs[9] = {
+          nullptr,
+          nullptr,
           nullptr,
           nullptr,
           nullptr,
@@ -3433,7 +3920,7 @@ namespace models {
           nullptr,
           nullptr
         };
-        context->CSSetShaderResources(0, 7, null_analysis_srvs);
+        context->CSSetShaderResources(0, 9, null_analysis_srvs);
 
         context->CSSetShader(depth_scene_cut_resolve_cs.Get(), nullptr, 0);
         ID3D11UnorderedAccessView *cut_uavs[2] = {
@@ -3451,44 +3938,57 @@ namespace models {
         // rather than the empty slate. State 3 advances an accepted persistent-low endpoint.
         context->CSSetShader(depth_valid_history_cs.Get(), nullptr, 0);
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-        ID3D11ShaderResourceView *history_srvs[5] = {
+        ID3D11ShaderResourceView *history_srvs[6] = {
           minmax_ema_srv.Get(),
           tensor_in_srv.Get(),
           appearance_ordinal_srv.Get(),
           cut_state_srv.Get(),
-          depth_srv.Get()
+          depth_srv.Get(),
+          tensor_analysis_exclusion_may_be_nonzero ?
+            tensor_analysis_exclusion_srv.Get() : nullptr,
         };
-        ID3D11UnorderedAccessView *history_uavs[3] = {
+        ID3D11UnorderedAccessView *history_uavs[4] = {
           tensor_previous_input_uav.Get(),
           previous_appearance_ordinal_uav.Get(),
-          depth_cut_history_uav.Get()
+          depth_cut_history_uav.Get(),
+          (tensor_analysis_exclusion_may_be_nonzero ||
+           tensor_analysis_exclusion_history_may_be_nonzero) ?
+            previous_tensor_analysis_exclusion_uav.Get() : nullptr,
         };
-        context->CSSetShaderResources(0, 5, history_srvs);
-        context->CSSetUnorderedAccessViews(0, 3, history_uavs, nullptr);
+        context->CSSetShaderResources(0, 6, history_srvs);
+        context->CSSetUnorderedAccessViews(0, 4, history_uavs, nullptr);
         context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
-        ID3D11ShaderResourceView *null_history_srvs[5] = {
+        tensor_analysis_exclusion_history_may_be_nonzero =
+          tensor_analysis_exclusion_history_may_be_nonzero ||
+          tensor_analysis_exclusion_may_be_nonzero;
+        ID3D11ShaderResourceView *null_history_srvs[6] = {
+          nullptr,
           nullptr,
           nullptr,
           nullptr,
           nullptr,
           nullptr
         };
-        ID3D11UnorderedAccessView *null_history_uavs[3] = {nullptr, nullptr, nullptr};
-        context->CSSetShaderResources(0, 5, null_history_srvs);
-        context->CSSetUnorderedAccessViews(0, 3, null_history_uavs, nullptr);
+        ID3D11UnorderedAccessView *null_history_uavs[4] = {
+          nullptr, nullptr, nullptr, nullptr};
+        context->CSSetShaderResources(0, 6, null_history_srvs);
+        context->CSSetUnorderedAccessViews(0, 4, null_history_uavs, nullptr);
       }
 
       // Production V2 runs after the shared scene-cut bridge and consumes its confirmed-cut
       // generation, with the same-frame pulse retained for attribution.
       if (parallax_v2_producer_active) {
-        // This nested interval covers exactly the seven V2 compute passes. It remains inside the
-        // inclusive depth_postprocess_gpu interval so existing benchmark semantics do not move.
+        // This nested interval covers the seven base V2 coordinate passes and the optional
+        // post-limit overlay conditioner. It remains inside the inclusive depth_postprocess_gpu
+        // interval so existing benchmark semantics do not move.
         mark_d3d_parallax_start(perf_slot);
       }
-      dispatch_parallax_v2_producer(perf_slot);
+      const bool overlay_zero_plane_applied =
+        dispatch_parallax_v2_producer(perf_slot);
       if (parallax_v2_producer_active) {
         mark_d3d_parallax_end(perf_slot);
       }
+      return overlay_zero_plane_applied;
     }
 
     // Diagnostics-only accounting for achieved inference throughput and busy drops. Callers
@@ -3576,7 +4076,8 @@ namespace models {
       input_color_space color_space,
       std::uint64_t frame_id,
       bool snapshot_raw_model_depth,
-      depth_input_region_t input_region
+      depth_input_region_t input_region,
+      depth_overlay_mask_input_t overlay_mask
     ) {
       if (!valid || terminal_failure || live_v2_producer_unavailable() || !input_srv) {
         return {};
@@ -3587,7 +4088,10 @@ namespace models {
       bool model_input_snapshot_valid = false;
       bool coordinate_snapshot_valid = false;
       depth_input_region_t completed_input_region {};
+      input_color_space completed_color_space = input_color_space::srgb;
       bool completed_input_domain_reset = false;
+      bool completed_overlay_zero_plane_applied = false;
+      std::optional<host_sbs_overlay_plan_t> completed_overlay_plan;
 
       auto &cuda = cuda_driver_api::get();
       if (!cuda.is_valid()) {
@@ -3652,6 +4156,23 @@ namespace models {
       if (!input_region.valid()) {
         return make_result();
       }
+      std::optional<host_sbs_overlay_plan_t> overlay_plan_snapshot;
+      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> overlay_mask_snapshot;
+      std::uint64_t overlay_mask_generation = 0u;
+      if (overlay_mask.plan) {
+        overlay_plan_snapshot.emplace(*overlay_mask.plan);
+        overlay_mask_snapshot = overlay_mask.tight_dilated_mask;
+        overlay_mask_generation = overlay_mask.mask_generation;
+      }
+      const bool overlay_identity_matches = overlay_mask_matches_frame(
+        overlay_plan_snapshot ? &*overlay_plan_snapshot : nullptr,
+        overlay_mask_snapshot.Get(),
+        overlay_mask_generation,
+        frame_id,
+        input_region,
+        color_space,
+        input_desc
+      );
       const auto requested_shape = models::fit_depth_tensor_shape(
         input_desc.Width,
         input_desc.Height,
@@ -3823,6 +4344,42 @@ namespace models {
                        SUCCEEDED(device->CreateUnorderedAccessView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_uav)) &&
                        SUCCEEDED(device->CreateShaderResourceView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_srv));
 
+        // Optional W2 current/history masks. Every modified core shader treats an unbound mask
+        // SRV as zero, so allocation failure preserves byte-for-byte ordinary V2 inputs and does
+        // not enter the one-way fail-flat latch.
+        const bool overlay_mask_resources_ok =
+          SUCCEEDED(device->CreateTexture2D(
+            &mask_desc, nullptr, &tensor_analysis_exclusion_tex)) &&
+          SUCCEEDED(device->CreateUnorderedAccessView(
+            tensor_analysis_exclusion_tex.Get(), nullptr,
+            &tensor_analysis_exclusion_uav)) &&
+          SUCCEEDED(device->CreateShaderResourceView(
+            tensor_analysis_exclusion_tex.Get(), nullptr,
+            &tensor_analysis_exclusion_srv)) &&
+          SUCCEEDED(device->CreateTexture2D(
+            &mask_desc, nullptr,
+            &previous_tensor_analysis_exclusion_tex)) &&
+          SUCCEEDED(device->CreateUnorderedAccessView(
+            previous_tensor_analysis_exclusion_tex.Get(), nullptr,
+            &previous_tensor_analysis_exclusion_uav)) &&
+          SUCCEEDED(device->CreateShaderResourceView(
+            previous_tensor_analysis_exclusion_tex.Get(), nullptr,
+            &previous_tensor_analysis_exclusion_srv));
+        if (!overlay_mask_resources_ok) {
+          tensor_analysis_exclusion_tex.Reset();
+          tensor_analysis_exclusion_uav.Reset();
+          tensor_analysis_exclusion_srv.Reset();
+          previous_tensor_analysis_exclusion_tex.Reset();
+          previous_tensor_analysis_exclusion_uav.Reset();
+          previous_tensor_analysis_exclusion_srv.Reset();
+          if (!overlay_resource_error_logged) {
+            BOOST_LOG(warning)
+              << "Host SBS overlay exclusion resources are unavailable; ordinary unmasked V2 "
+                 "remains active.";
+            overlay_resource_error_logged = true;
+          }
+        }
+
         if (!resources_ok) {
           BOOST_LOG(error)
             << "Depth estimator D3D11 resource creation failed; Host SBS V2 will fail flat.";
@@ -3842,6 +4399,16 @@ namespace models {
         context->ClearUnorderedAccessViewFloat(depth_cut_history_uav.Get(), clear_color);
         const UINT clear_uint[4] = {0u, 0u, 0u, 0u};
         context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), clear_uint);
+        if (tensor_analysis_exclusion_uav) {
+          context->ClearUnorderedAccessViewUint(
+            tensor_analysis_exclusion_uav.Get(), clear_uint);
+        }
+        if (previous_tensor_analysis_exclusion_uav) {
+          context->ClearUnorderedAccessViewUint(
+            previous_tensor_analysis_exclusion_uav.Get(), clear_uint);
+        }
+        tensor_analysis_exclusion_may_be_nonzero = false;
+        tensor_analysis_exclusion_history_may_be_nonzero = false;
 
         auto res1 = cuda.cuGraphicsD3D11RegisterResource(&cuda_in_res, tensor_in_buf.Get(), 0);
         auto res2 = cuda.cuGraphicsD3D11RegisterResource(&cuda_out_res, tensor_out_buf.Get(), 0);
@@ -3886,10 +4453,13 @@ namespace models {
           return {};
         }
         completed_input_domain_reset = prepare_pending_input_domain();
-        normalize_depth_output(d3d_timer);
+        completed_overlay_zero_plane_applied = normalize_depth_output(d3d_timer);
+        completed_overlay_plan = std::move(pending_overlay_plan);
+        completed_color_space = pending_color_space;
         // The ownership dispatch has now consumed and unbound the completed frame's source SRV.
         // It is safe to release before preprocessing the newly accepted source frame.
         pending_source_srv.Reset();
+        pending_overlay_mask_srv.Reset();
         // Restore the newly supplied frame's transfer mode before its full-resolution preprocess.
         ensure_cbuffers(color_space);
         if (!cbuffer) {
@@ -3950,15 +4520,32 @@ namespace models {
           model_input_snapshot_valid,
           coordinate_snapshot_valid,
           completed_input_region,
-          completed_input_domain_reset
+          completed_color_space,
+          completed_input_domain_reset,
+          completed_overlay_zero_plane_applied,
+          std::move(completed_overlay_plan)
         );
       }
 
-      // 1. D3D11 Compute Shader: Resize & Normalize to NCHW FP32 Buffer (for CURRENT frame)
+      // Overlay sanitation and conservative max-pooling are part of model preprocessing and are
+      // included in the existing depth_preprocess_gpu interval when diagnostics are enabled.
       mark_d3d_pre_start(d3d_timer);
+      ID3D11ShaderResourceView *analysis_input_srv = input_srv;
+      std::optional<host_sbs_overlay_plan_t> accepted_overlay_plan;
+      if (overlay_identity_matches &&
+          dispatch_overlay_analysis(input_srv, overlay_mask_snapshot.Get(), input_desc)) {
+        analysis_input_srv = sanitized_source_srv.Get();
+        accepted_overlay_plan = overlay_plan_snapshot;
+      } else {
+        // Validation/resource failure is atomic: neither exclusion nor the later zero-field
+        // consumer receives authority, and the calibrated ordinary source path remains intact.
+        clear_current_overlay_analysis();
+      }
+
+      // 1. D3D11 Compute Shader: Resize & Normalize to NCHW FP32 Buffer (for CURRENT frame)
       context->CSSetShader(rgb_to_nchw_cs.Get(), nullptr, 0);
       context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-      context->CSSetShaderResources(0, 1, &input_srv);
+      context->CSSetShaderResources(0, 1, &analysis_input_srv);
       ID3D11UnorderedAccessView *preprocess_uavs[2] = {
         tensor_in_uav.Get(),
         appearance_ordinal_uav.Get()
@@ -3991,7 +4578,10 @@ namespace models {
           model_input_snapshot_valid,
           coordinate_snapshot_valid,
           completed_input_region,
-          completed_input_domain_reset
+          completed_color_space,
+          completed_input_domain_reset,
+          completed_overlay_zero_plane_applied,
+          std::move(completed_overlay_plan)
         );
       }
 
@@ -4085,7 +4675,13 @@ namespace models {
         // Retain the exact private matched-frame color SRV across asynchronous TensorRT execution.
         // The next normalize_depth_output() uses it only for local, full-resolution ownership
         // evidence and releases it immediately after submitting that D3D11 pass.
-        pending_source_srv = input_srv;
+        pending_source_srv = analysis_input_srv;
+        pending_overlay_plan = std::move(accepted_overlay_plan);
+        if (pending_overlay_plan) {
+          pending_overlay_mask_srv = overlay_mask_snapshot;
+        } else {
+          pending_overlay_mask_srv.Reset();
+        }
         pending_color_space = color_space;
         pending_frame_id = frame_id;
         pending_input_region = input_region;
@@ -4094,6 +4690,8 @@ namespace models {
         }
       } else {
         pending_source_srv.Reset();
+        pending_overlay_mask_srv.Reset();
+        pending_overlay_plan.reset();
       }
 
       return make_result(
@@ -4104,7 +4702,10 @@ namespace models {
         model_input_snapshot_valid,
         coordinate_snapshot_valid,
         completed_input_region,
-        completed_input_domain_reset
+        completed_color_space,
+        completed_input_domain_reset,
+        completed_overlay_zero_plane_applied,
+        std::move(completed_overlay_plan)
       );
     }
   };
@@ -4138,14 +4739,16 @@ namespace models {
     input_color_space color_space,
     std::uint64_t frame_id,
     bool snapshot_debug_inputs,
-    depth_input_region_t input_region
+    depth_input_region_t input_region,
+    depth_overlay_mask_input_t overlay_mask
   ) {
     return pimpl->estimate(
       input_srv,
       color_space,
       frame_id,
       snapshot_debug_inputs,
-      input_region
+      input_region,
+      std::move(overlay_mask)
     );
   }
 

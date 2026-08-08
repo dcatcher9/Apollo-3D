@@ -9,9 +9,11 @@ StructuredBuffer<float> CurrentModelInput : register(t1);
 StructuredBuffer<float> CurrentAppearanceOrdinal : register(t2);
 StructuredBuffer<float4> CutBridgeState : register(t3);  // [2].w: 0 empty, 1 advance, 2/4 hold, 3 low
 Texture2D<float> CurrentDepth : register(t4);
+Texture2D<uint> CurrentTensorExclusion : register(t5);
 RWStructuredBuffer<float> PreviousModelInput : register(u0);
 RWStructuredBuffer<float> PreviousAppearanceOrdinal : register(u1);
 RWTexture2D<float> PreviousReliableDepth : register(u2);
+RWTexture2D<uint> PreviousTensorExclusion : register(u3);
 
 #include "include/depth_constants.hlsl"
 #include "include/sbs_adaptive_state_contract.generated.hlsl"
@@ -37,4 +39,5 @@ void main(uint3 dtid : SV_DispatchThreadID) {
     PreviousModelInput[idx + 2u * plane] = CurrentModelInput[idx + 2u * plane];
     PreviousAppearanceOrdinal[idx] = CurrentAppearanceOrdinal[idx];
     PreviousReliableDepth[dtid.xy] = CurrentDepth[dtid.xy];
+    PreviousTensorExclusion[dtid.xy] = CurrentTensorExclusion[dtid.xy];
 }

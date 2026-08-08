@@ -24,6 +24,12 @@ namespace models::host_sbs_shader_cache {
   };
 
   inline constexpr shader_spec rgb_to_nchw {"rgb_to_nchw_cs.hlsl"};
+  inline constexpr shader_spec depth_overlay_sanitize {
+    "depth_overlay_analysis_cs.hlsl", "sanitize_main", "cs_5_0"
+  };
+  inline constexpr shader_spec depth_overlay_exclusion {
+    "depth_overlay_analysis_cs.hlsl", "exclusion_main", "cs_5_0"
+  };
   inline constexpr shader_spec buffer_to_tex {"buffer_to_tex_cs.hlsl"};
   inline constexpr shader_spec depth_ema_motion {"depth_ema_motion_cs.hlsl"};
   inline constexpr shader_spec depth_minmax {"depth_minmax_cs.hlsl"};
@@ -44,6 +50,9 @@ namespace models::host_sbs_shader_cache {
   };
   inline constexpr shader_spec depth_coordinate_v2_vertical_limit {"depth_coordinate_v2_vertical_limit_cs.hlsl"};
   inline constexpr shader_spec depth_coordinate_v2_limit {"depth_coordinate_v2_limit_cs.hlsl"};
+  inline constexpr shader_spec depth_coordinate_v2_overlay_zero_plane {
+    "depth_coordinate_v2_overlay_zero_plane_cs.hlsl"
+  };
   inline constexpr shader_spec parallax_v2_live_renderer {
     "sbs_reprojection_v2_live_ps.hlsl", "main_ps", "ps_5_0"
   };
@@ -63,9 +72,9 @@ namespace models::host_sbs_shader_cache {
     "sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"
   };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
-    "6db46dec0560656b9be0e176718a75f6059882792972221e2f028285073138a1";
+    "115ddcf1cf8058064516421d9ea2c0d34631af999184ef62effe5ad9cd28e79e";
   inline constexpr std::string_view parallax_v2_diagnostic_source_closure_sha256 =
-    "eaaf6bd0a445cf97301bdd048b8157adc249ba8e23591ae2230642c91735060e";
+    "7977b2e9adaf33e24b091af7acf2377f1c52300246f27c76a2d39f4189046fe8";
   inline constexpr std::string_view sbs_flat_fallback_source_closure_sha256 =
     "7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4";
 
@@ -77,14 +86,16 @@ namespace models::host_sbs_shader_cache {
   };
 
   // Complete production V2 producer set. The normalized depth is private scene-cut evidence; the
-  // retired subject shaping, adaptive pop, and zero-plane shaders no longer exist. Every root is
-  // compiled from this one authenticated snapshot so shared preprocessing/analysis passes cannot
-  // be sampled from a weaker closure and then silently reused by live geometry.
+  // retired subject shaping and adaptive-pop paths remain absent. The optional burned-in-overlay
+  // sanitizer/exclusion and post-limit zero-plane conditioner share this authenticated snapshot,
+  // so no analysis or geometry pass can be sampled from a weaker closure.
   inline constexpr std::array parallax_v2_producer_specs {
     // Authenticate the complete path from captured RGB preprocessing through cut/history state
     // and final coordinate limiting. Compile every shared pass from this single immutable
     // snapshot so no separately sampled source body can feed authenticated V2 geometry.
     rgb_to_nchw,
+    depth_overlay_sanitize,
+    depth_overlay_exclusion,
     buffer_to_tex,
     depth_ema_motion,
     depth_minmax,
@@ -100,6 +111,7 @@ namespace models::host_sbs_shader_cache {
     depth_coordinate_v2_ownership,
     depth_coordinate_v2_vertical_limit,
     depth_coordinate_v2_limit,
+    depth_coordinate_v2_overlay_zero_plane,
   };
 
   // The canonical-coordinate field is not a production input or output. Keep its alternate

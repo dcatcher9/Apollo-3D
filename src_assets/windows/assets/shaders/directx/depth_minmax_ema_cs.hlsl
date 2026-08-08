@@ -4,7 +4,7 @@
 //
 // w is this-frame validity: 0 = invalid/hold, 1 = valid with history, 2 = first valid frame.
 RWStructuredBuffer<float4> MinMaxEma : register(u0);  // [0]={min,max,initialized,frame_state}
-RWByteAddressBuffer        MinMaxRaw : register(u1);  // min bits, max bits, valid count
+RWByteAddressBuffer        MinMaxRaw : register(u1);  // min/max bits, valid + eligible counts
 RWStructuredBuffer<uint>   Histogram : register(u2);  // permanent P2/P98 histogram from depth_hist_cs
 // Cut/health bridge. Geometry does not consume this state directly:
 //   [3].zw = valid-depth fraction, effective EMA range width
@@ -22,7 +22,9 @@ void main() {
     float new_min = asfloat(MinMaxRaw.Load(0));
     float new_max = asfloat(MinMaxRaw.Load(4));
     uint valid_count = MinMaxRaw.Load(8);
-    bool valid_bounds = valid_count > 0u && !isnan(new_min) && !isinf(new_min) &&
+    uint eligible_count = MinMaxRaw.Load(12);
+    bool valid_bounds = eligible_count > 0u && valid_count == eligible_count &&
+                        !isnan(new_min) && !isinf(new_min) &&
                         !isnan(new_max) && !isinf(new_max) && new_max >= new_min;
     float4 telemetry =
         DiagnosticState[SBS_STATE_VECTOR_CURRENT_DEPTH_CHANGE_FRACTION];
@@ -86,7 +88,7 @@ void main() {
                 SBS_ADAPTIVE_STATE_COUNTER_MAX);
     }
     SBS_STATE_VALID_DEPTH_FRACTION(telemetry) =
-        (float)valid_count / (float)max(target_w * target_h, 1u);
+        (float)valid_count / (float)max(eligible_count, 1u);
 
     float4 s = MinMaxEma[0];
     if (!valid_bounds) {
@@ -125,4 +127,5 @@ void main() {
     MinMaxRaw.Store(0, 0xFFFFFFFFu);
     MinMaxRaw.Store(4, 0u);
     MinMaxRaw.Store(8, 0u);
+    MinMaxRaw.Store(12, 0u);
 }

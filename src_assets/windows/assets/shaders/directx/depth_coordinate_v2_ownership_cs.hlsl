@@ -11,6 +11,7 @@
 
 Texture2D<float> Candidate : register(t0);
 Texture2D<float4> SourceColor : register(t1);
+Texture2D<uint> TensorExclusion : register(t2);
 RWTexture2D<float> OwnershipRefined : register(u0);
 
 #include "include/depth_constants.hlsl"
@@ -21,6 +22,9 @@ bool LoadCandidate(int2 position, out float value) {
     value = 0.0f;
     if (position.x < 0 || position.y < 0 ||
         position.x >= (int)target_w || position.y >= (int)target_h) {
+        return false;
+    }
+    if (TensorExclusion[position] != 0u) {
         return false;
     }
     value = Candidate.Load(int3(position, 0));
@@ -347,9 +351,17 @@ void main(uint3 id : SV_DispatchThreadID) {
     }
 
     int2 position = int2(id.xy);
-    float center;
-    if (!LoadCandidate(position, center)) {
+    float center = Candidate.Load(int3(position, 0));
+    if (!V2Finite(center)) {
         OwnershipRefined[id.xy] = 0.0f;
+        return;
+    }
+    // Exclusion is an exact no-op for the center cell. The tensor cell is outside every
+    // ownership decision, but its candidate value still has to pass unchanged through this
+    // intermediate field so the later zero-plane conditioner remains the sole overlay-depth
+    // authority. LoadCandidate intentionally remains exclusion-aware for every neighbor/stencil.
+    if (TensorExclusion[position] != 0u) {
+        OwnershipRefined[id.xy] = center;
         return;
     }
 

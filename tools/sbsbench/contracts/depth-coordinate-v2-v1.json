@@ -1,5 +1,5 @@
 {
-  "schema": 26,
+  "schema": 27,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -14,6 +14,16 @@
       {
         "source_file": "rgb_to_nchw_cs.hlsl",
         "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_overlay_analysis_cs.hlsl",
+        "source_entrypoint": "sanitize_main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_overlay_analysis_cs.hlsl",
+        "source_entrypoint": "exclusion_main",
         "source_target": "cs_5_0"
       },
       {
@@ -90,9 +100,14 @@
         "source_file": "depth_coordinate_v2_limit_cs.hlsl",
         "source_entrypoint": "main",
         "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_coordinate_v2_overlay_zero_plane_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "ab242fac7fa7f4a7360c65b443054a88d7ba092d95c13159b165f77bb4b5fd74"
+    "source_closure_sha256": "352f9b8de5e063427d48780130680756cba8b84cb2885ee9cd63a7a2e46b1f0f"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,

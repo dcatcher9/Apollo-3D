@@ -1,6 +1,7 @@
 #pragma once
 
 #include "config.h"
+#include "host_sbs_overlay_geometry.h"
 #include "host_sbs_resolution.h"
 
 #include <chrono>
@@ -10,6 +11,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <wrl/client.h>
 
 namespace models {
@@ -101,6 +103,67 @@ namespace models {
     }
 
     constexpr bool operator==(const depth_input_region_t &) const = default;
+  };
+
+  /**
+   * Immutable, exact-frame authority for one burned-in-overlay treatment.
+   *
+   * The plan deliberately owns no D3D object. A producer supplies the full-analysis-domain
+   * tight/dilated R8_UNORM mask separately, while this payload can safely travel with the
+   * asynchronous depth completion and later final-field consumer. Missing or mismatched identity
+   * disables the complete treatment for that frame; a loose rectangle is never accepted without
+   * its matching inference exclusion.
+   */
+  struct host_sbs_overlay_plan_t {
+    std::uint64_t plan_generation = 0u;
+    std::uint64_t source_frame_id = 0u;
+    depth_input_region_t input_region {};
+    input_color_space color_space = input_color_space::srgb;
+    std::uint32_t analysis_width = 0u;
+    std::uint32_t analysis_height = 0u;
+    bool analysis_exclusion_present = false;
+    std::uint64_t analysis_exclusion_generation = 0u;
+    host_sbs_overlay_geometry_t geometry {};
+
+    constexpr bool valid_payload() const noexcept {
+      const auto color_value = static_cast<std::uint32_t>(color_space);
+      return plan_generation != 0u && source_frame_id != 0u && input_region.valid() &&
+             color_value <= static_cast<std::uint32_t>(input_color_space::scrgb_hdr) &&
+             analysis_width == input_region.width() &&
+             analysis_height == input_region.height() &&
+             analysis_exclusion_present && analysis_exclusion_generation != 0u &&
+             geometry.valid(analysis_width, analysis_height);
+    }
+
+    constexpr bool has_zero_plane_geometry() const noexcept {
+      return valid_payload() && !geometry.empty();
+    }
+
+    constexpr bool valid_for(
+      const std::uint64_t frame_id,
+      const depth_input_region_t &region,
+      const input_color_space input_color
+    ) const noexcept {
+      return valid_payload() && source_frame_id == frame_id &&
+             input_region == region && color_space == input_color;
+    }
+
+    constexpr bool operator==(const host_sbs_overlay_plan_t &) const = default;
+  };
+
+  static_assert(std::is_standard_layout_v<host_sbs_overlay_plan_t>);
+  static_assert(std::is_trivially_copyable_v<host_sbs_overlay_plan_t>);
+
+  /** Estimator-only pairing of a pure plan with its full-resolution 0/255 R8_UNORM mask. */
+  struct depth_overlay_mask_input_t {
+    std::shared_ptr<const host_sbs_overlay_plan_t> plan;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tight_dilated_mask;
+    std::uint64_t mask_generation = 0u;
+
+    explicit operator bool() const noexcept {
+      return plan && tight_dilated_mask && mask_generation != 0u &&
+             mask_generation == plan->analysis_exclusion_generation;
+    }
   };
 
   /** Stable semantic identity used to assign an ROI analysis generation.
@@ -223,7 +286,10 @@ namespace models {
     float parallax_v2_requested_pop_strength = 0.0f;  ///< Fixed V2 request from cfg.pop_strength only; no legacy adaptive ratio or ceiling is consumed.
     float parallax_v2_requested_gain = 0.0f;  ///< One-eye source-U gain before safety attenuation.
     depth_input_region_t input_region {};  ///< Exact source domain that owns this completion.
+    input_color_space color_space = input_color_space::srgb;  ///< Exact transfer domain used for this completion.
     bool input_domain_reset = false;  ///< Temporal/camera state was reset before this completion.
+    std::optional<host_sbs_overlay_plan_t> overlay_plan;  ///< Allocation-free exact accepted overlay authority for this completion; empty on absent/mismatched treatment.
+    bool overlay_zero_plane_applied = false;  ///< True only when final_parallax is the authenticated post-limit conditioned field for overlay_plan.
   };
 
   /** Fail-closed CPU authentication for a completed live V2 result.
@@ -403,7 +469,8 @@ namespace models {
       input_color_space color_space = input_color_space::srgb,
       std::uint64_t frame_id = 0,
       bool snapshot_debug_inputs = false,
-      depth_input_region_t input_region = {}
+      depth_input_region_t input_region = {},
+      depth_overlay_mask_input_t overlay_mask = {}
     );
 
     /**

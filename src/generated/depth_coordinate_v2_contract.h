@@ -10,10 +10,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 26u;
-  inline constexpr std::uint32_t contract_tag = 0x4498BD67u;
-  inline constexpr std::string_view contract_canonical_sha256 = "abb75ebabf6928c39771621da43b88f739fa3cf2ea83b18c02cdb20745aaa4b8";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "4498bd676c9b996710d69aed892bdbb047e8e27db9aebd22553421191f6754ef";
+  inline constexpr std::uint32_t contract_schema = 27u;
+  inline constexpr std::uint32_t contract_tag = 0x1A28FDA1u;
+  inline constexpr std::string_view contract_canonical_sha256 = "6ecebd79f92c7bce3fbaf80c5c9e52fe2193e65baf1574f5b99fbf3a6f0a681e";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "1a28fda150d9ab42c7b6bc866168c6604a168b48044a563c657f95f44dbd3cdb";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -25,7 +25,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t shader_source_closure_schema = 2u;
   inline constexpr std::uint32_t shader_source_compile_flags = 34816u;
   inline constexpr std::uint32_t shader_source_macro_count = 0u;
-  inline constexpr std::string_view shader_source_closure_sha256 = "ab242fac7fa7f4a7360c65b443054a88d7ba092d95c13159b165f77bb4b5fd74";
+  inline constexpr std::string_view shader_source_closure_sha256 = "352f9b8de5e063427d48780130680756cba8b84cb2885ee9cd63a7a2e46b1f0f";
 
   struct shader_source_spec_t {
     std::string_view source_file;
@@ -33,8 +33,10 @@ namespace models::depth_coordinate_v2 {
     std::string_view source_target;
   };
 
-  inline constexpr std::array<shader_source_spec_t, 16> shader_source_specs {{
+  inline constexpr std::array<shader_source_spec_t, 19> shader_source_specs {{
     {"rgb_to_nchw_cs.hlsl", "main", "cs_5_0"},
+    {"depth_overlay_analysis_cs.hlsl", "sanitize_main", "cs_5_0"},
+    {"depth_overlay_analysis_cs.hlsl", "exclusion_main", "cs_5_0"},
     {"buffer_to_tex_cs.hlsl", "main", "cs_5_0"},
     {"depth_ema_motion_cs.hlsl", "main", "cs_5_0"},
     {"depth_minmax_cs.hlsl", "main", "cs_5_0"},
@@ -50,6 +52,7 @@ namespace models::depth_coordinate_v2 {
     {"depth_coordinate_v2_ownership_cs.hlsl", "main", "cs_5_0"},
     {"depth_coordinate_v2_vertical_limit_cs.hlsl", "main", "cs_5_0"},
     {"depth_coordinate_v2_limit_cs.hlsl", "main", "cs_5_0"},
+    {"depth_coordinate_v2_overlay_zero_plane_cs.hlsl", "main", "cs_5_0"},
   }};
 
   inline constexpr float collapse_abs_epsilon = 1e-06f;

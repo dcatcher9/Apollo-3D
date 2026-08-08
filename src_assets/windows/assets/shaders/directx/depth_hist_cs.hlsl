@@ -6,8 +6,9 @@
 // CPU readback; dispatched only when percentile normalization is enabled.
 
 StructuredBuffer<float>  InputBuffer : register(t0);
+Texture2D<uint>          TensorExclusion : register(t1);
 RWStructuredBuffer<uint> Histogram   : register(u0);  // 256 bins, reset by depth_minmax_ema_cs
-RWByteAddressBuffer      MinMaxRaw   : register(u1);  // read-only: min bits, max bits, valid count
+RWByteAddressBuffer      MinMaxRaw   : register(u1);  // read-only: min/max bits, valid + eligible counts
 
 // Shared depth-pass cbuffer (slots 11-12 = the percentile bounds consumed by depth_minmax_ema_cs).
 #include "include/depth_constants.hlsl"
@@ -25,13 +26,19 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
     float vmin = asfloat(MinMaxRaw.Load(0));
     float vmax = asfloat(MinMaxRaw.Load(4));
     uint valid_count = MinMaxRaw.Load(8);
-    bool valid_bounds = valid_count > 0u && !isnan(vmin) && !isinf(vmin) &&
+    uint eligible_count = MinMaxRaw.Load(12);
+    bool valid_bounds = eligible_count > 0u && valid_count == eligible_count &&
+                        !isnan(vmin) && !isinf(vmin) &&
                         !isnan(vmax) && !isinf(vmax) && vmax >= vmin;
     float inv_range = valid_bounds ? (float)NUM_BINS / max(vmax - vmin, 1e-12f) : 0.0f;
 
     uint count = target_w * target_h;
     [loop]
     for (uint idx = dtid.x; idx < count; idx += reduce_threads) {
+        uint2 position = uint2(idx % target_w, idx / target_w);
+        if (TensorExclusion[position] != 0u) {
+            continue;
+        }
         float v = InputBuffer[idx];
         if (valid_bounds && !isnan(v) && !isinf(v) && v >= 0.0f) {
             uint bin = min((uint)((v - vmin) * inv_range), NUM_BINS - 1u);

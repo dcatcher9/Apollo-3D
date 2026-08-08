@@ -1242,11 +1242,19 @@ namespace platf::dxgi {
                  "package exists."sv;
             sbs_dumper.reject_pending_request();
           }
+          if (snapshot_debug_inputs && est.overlay_plan) {
+            BOOST_LOG(warning)
+              << "Dump 3D request rejected: schema 13 cannot authenticate the active "sv
+                 "burned-in-overlay mask, sanitized DAV2 input, loose zero-plane rectangles, "sv
+                 "or conditioned final field."sv;
+            sbs_dumper.reject_pending_request();
+          }
           if (!repeat_matched_output) {
             const bool complete_dump_snapshot =
               matched_render_slot && dump_warp_depth && est.model_input_snapshot &&
               est.raw_model_depth_snapshot && est.raw_model_provenance &&
-              v2_renderer_selected && models::parallax_v2_result_is_authenticated(est);
+              !est.overlay_plan && v2_renderer_selected &&
+              models::parallax_v2_result_is_authenticated(est);
             const bool dump_frame_valid =
               complete_dump_snapshot &&
               sbs_dumper.preflight_requested_v2_frame(
@@ -1328,6 +1336,8 @@ namespace platf::dxgi {
                 dump_frame.depth_input_region = est.input_region;
                 dump_frame.depth_video_plan = matched_render_slot->depth_video_plan;
                 dump_frame.input_domain_reset = est.input_domain_reset;
+                dump_frame.overlay_conditioning_active =
+                  static_cast<bool>(est.overlay_plan);
                 dump_frame.window_video_border =
                   matched_render_slot->window_video_border;
                 dump_frame.window_video_observer_status =

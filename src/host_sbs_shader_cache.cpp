@@ -456,10 +456,9 @@ namespace models::host_sbs_shader_cache {
     if (!parallax_v2_sources) {
       return false;
     }
+    bool all_compiled = true;
     for (const auto &spec : parallax_v2_producer_specs) {
-      if (!get(parallax_v2_sources, spec)) {
-        return false;
-      }
+      all_compiled = static_cast<bool>(get(parallax_v2_sources, spec)) && all_compiled;
     }
     const auto parallax_v2_live_sources = snapshot_sources(
       shader_root,
@@ -469,9 +468,7 @@ namespace models::host_sbs_shader_cache {
       return false;
     }
     for (const auto &spec : parallax_v2_live_renderer_specs) {
-      if (!get(parallax_v2_live_sources, spec)) {
-        return false;
-      }
+      all_compiled = static_cast<bool>(get(parallax_v2_live_sources, spec)) && all_compiled;
     }
     const auto flat_fallback_sources = snapshot_sources(
       shader_root,
@@ -481,15 +478,13 @@ namespace models::host_sbs_shader_cache {
       return false;
     }
     for (const auto &spec : sbs_flat_fallback_specs) {
-      if (!get(flat_fallback_sources, spec)) {
-        return false;
-      }
+      all_compiled = static_cast<bool>(get(flat_fallback_sources, spec)) && all_compiled;
     }
     BOOST_LOG(info)
       << "Prewarmed the complete Host SBS V2 shader set ("
       << parallax_v2_producer_specs.size() + parallax_v2_live_renderer_specs.size() +
            sbs_flat_fallback_specs.size()
       << " production shaders; dump-only shaders remain lazy).";
-    return true;
+    return all_compiled;
   }
 }  // namespace models::host_sbs_shader_cache

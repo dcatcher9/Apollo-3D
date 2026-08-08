@@ -3269,6 +3269,13 @@ namespace platf::sbs_debug {
     if (!button_request.consumed() && !by_file) {
       return false;
     }
+    if (completed.overlay_conditioning_active) {
+      // Consume rather than defer: publishing a later ordinary frame would falsely attribute a
+      // request made for an overlay-conditioned frame. A future dump schema must carry the exact
+      // mask, sanitized input, loose rectangles, generations, and conditioner output first.
+      reject_pending_request();
+      return false;
+    }
 
     try {
       const std::uint64_t retry_token = async_->allow_retries_and_token();

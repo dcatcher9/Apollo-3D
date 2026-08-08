@@ -47,6 +47,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             24: "af622986d64d49c3a084730c20838189fd579c1af54d7bb61f2c681647c155bb",
             25: "328d8f71424d6005ac0bd5025b4857efe95aa36fa683ab3c554a33b5309dcd05",
             26: "abb75ebabf6928c39771621da43b88f739fa3cf2ea83b18c02cdb20745aaa4b8",
+            27: "6ecebd79f92c7bce3fbaf80c5c9e52fe2193e65baf1574f5b99fbf3a6f0a681e",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -54,10 +55,10 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x4498BD67)
+        self.assertEqual(generator.contract_tag(contract), 0x1A28FDA1)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "4498bd676c9b996710d69aed892bdbb047e8e27db9aebd22553421191f6754ef",
+            "1a28fda150d9ab42c7b6bc866168c6604a168b48044a563c657f95f44dbd3cdb",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(

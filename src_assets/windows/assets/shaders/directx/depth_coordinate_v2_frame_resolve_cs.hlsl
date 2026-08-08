@@ -1,6 +1,8 @@
 // Merge per-group Welford records into two frame-stat float4 vectors:
 //   [0] = {mean, population_std, minimum, maximum}
-//   [1] = {valid_count, texel_count, valid, reserved}
+//   [1] = {valid_count, eligible_count, valid, reserved}
+// `eligible_count` is the physical tensor count when no overlay mask is active and the unmasked
+// tensor count otherwise. Every admitted texel must be finite before the frame can publish.
 
 StructuredBuffer<float4> Partials : register(t0);
 RWStructuredBuffer<float4> FrameStats : register(u0);
@@ -16,10 +18,13 @@ void main(uint3 id : SV_DispatchThreadID) {
     float minimum = 3.402823466e+38f;
     float maximum = -3.402823466e+38f;
     uint count = 0u;
+    uint eligible_count = 0u;
 
     [loop]
     for (uint group = 0u; group < group_count; ++group) {
         float4 record = Partials[group * 2u];
+        float4 range_record = Partials[group * 2u + 1u];
+        eligible_count += (uint)max(range_record.y, 0.0f);
         uint right_count = (uint)max(record.z, 0.0f);
         if (right_count == 0u) {
             continue;
@@ -30,7 +35,7 @@ void main(uint3 id : SV_DispatchThreadID) {
             mean = right_mean;
             m2 = right_m2;
             minimum = record.w;
-            maximum = Partials[group * 2u + 1u].x;
+            maximum = range_record.x;
             count = right_count;
         } else {
             uint merged_count = count + right_count;
@@ -39,15 +44,15 @@ void main(uint3 id : SV_DispatchThreadID) {
             m2 += right_m2 + delta * delta *
                 ((float)count * (float)right_count / (float)merged_count);
             minimum = min(minimum, record.w);
-            maximum = max(maximum, Partials[group * 2u + 1u].x);
+            maximum = max(maximum, range_record.x);
             count = merged_count;
         }
     }
 
-    uint texel_count = target_w * target_h;
+    uint texel_count = eligible_count;
     float variance = count > 0u ? max(m2 / (float)count, 0.0f) : 0.0f;
     float stddev = sqrt(variance);
-    bool valid = count == texel_count && count > 0u && !isnan(mean) && !isinf(mean) &&
+    bool valid = count == texel_count && texel_count > 0u && !isnan(mean) && !isinf(mean) &&
         !isnan(stddev) && !isinf(stddev) &&
         !isnan(minimum) && !isinf(minimum) &&
         !isnan(maximum) && !isinf(maximum) && maximum >= minimum;

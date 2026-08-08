@@ -105,6 +105,8 @@ PREPROCESS_SHADER_ROOT = (
 PREPROCESS_SHADER_SPECS = (("rgb_to_nchw_cs.hlsl", "main", "cs_5_0"),)
 PARALLAX_V2_SHADER_SPECS = (
     ("rgb_to_nchw_cs.hlsl", "main", "cs_5_0"),
+    ("depth_overlay_analysis_cs.hlsl", "sanitize_main", "cs_5_0"),
+    ("depth_overlay_analysis_cs.hlsl", "exclusion_main", "cs_5_0"),
     ("buffer_to_tex_cs.hlsl", "main", "cs_5_0"),
     ("depth_ema_motion_cs.hlsl", "main", "cs_5_0"),
     ("depth_minmax_cs.hlsl", "main", "cs_5_0"),
@@ -120,6 +122,7 @@ PARALLAX_V2_SHADER_SPECS = (
     ("depth_coordinate_v2_ownership_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_vertical_limit_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_limit_cs.hlsl", "main", "cs_5_0"),
+    ("depth_coordinate_v2_overlay_zero_plane_cs.hlsl", "main", "cs_5_0"),
 )
 SOURCE_CLOSURE_DOMAIN = b"apollo-host-sbs-source-closure-v2\n"
 SHADER_COMPILE_FLAGS = 0x00008800
@@ -1053,8 +1056,8 @@ def main(argv: list[str] | None = None) -> int:
             verify_shader_source_closure=False,
         )
         # The GPU tag deliberately excludes only the shader-body digest, so this first HLSL
-        # generation is final. Hash the complete preprocessing, cut/history, and seven-coordinate
-        # producer closure, record that independent
+        # generation is final. Hash the complete preprocessing, overlay, cut/history, and
+        # coordinate-producer closure, record that independent
         # identity, and render again; the second HLSL must be byte-identical by construction.
         first_hlsl = render_hlsl(contract)
         _write_or_check(HLSL_TARGET, first_hlsl, False)

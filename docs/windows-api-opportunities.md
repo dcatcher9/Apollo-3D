@@ -265,6 +265,16 @@ every glyph stroke. No alpha extraction or subtitle re-rendering is required. Th
 behind burned-in glyphs is not present in the source and cannot be recovered exactly; only the
 inference-only copy receives an approximate local fill.
 
+**Implementation status.** The schema-27 known-mask consumer and its component-level authenticated
+tests are implemented: exact-frame R8 mask validation, inference-only sanitization, conservative
+tensor exclusion, current/previous cut and history exclusion, sanitized ownership, and the
+post-limit zero-plane core/collar all fail together to ordinary V2 when any product is unavailable.
+The high-resolution fixture now publishes a tight overlay mask plus an exact subtitle-free authored
+plate and authenticates transition/cut integrity. An end-to-end DAV2 trace against that clean plate
+is still required to quantify residual learned-receptive-field influence. The automatic
+full-resolution detector that produces plans for arbitrary live/offline content is also pending; no
+production path guesses a mask from DAV2-resolution pixels.
+
 Every geometry pass that re-reads color after DAV2 must share this separation. In particular, the
 current depth-edge ownership pass must read the sanitized inference copy or abstain on excluded
 tensor cells; reading the untouched source there would let the same text edges influence geometry
@@ -381,12 +391,13 @@ Four new metrics belong in the metric contract
 - **Text sharpness preservation**: the ratio of horizontal gradient energy in the text region after
   the warp to before it. Resampled glyphs lose high-frequency energy.
 
-These loose-region metrics gate final presentation, not the future sanitizer by themselves. Before
-the inference-exclusion producer ships, extend the high-resolution transition fixture with an exact
-tight/dilated overlay mask and the subtitle-free authored background. Use that oracle to verify that
-the sanitized tensor no longer carries glyph/outline structure, that subtitle-only transitions do
-not perturb cut or scene-center traces, and that the real broad cut remains visible. Do not infer a
-sanitizer pass merely from good final zero-plane metrics.
+These loose-region metrics gate final presentation, not the sanitizer by themselves. The
+high-resolution transition fixture therefore also publishes an authenticated exact tight overlay
+mask and subtitle-free authored background. Component tests already prove exact mask pooling,
+sanitizer isolation, current/previous exclusion, and preservation of a broad unmasked cut. Before
+automatic detection ships, an end-to-end DAV2 trace must compare sanitized analysis against that
+clean oracle and bound subtitle-only changes in cut and scene-center evidence. Good final
+zero-plane metrics alone remain insufficient evidence for a sanitizer pass.
 
 The existing `swim` metric already covers subtitle depth instability (its definition — frame-to-frame
 depth change where the source is static — is exactly this case), and `rim_over` already covers the
@@ -784,7 +795,7 @@ beyond the conservative collar; the crop-local final field alone is not sufficie
 | # | Item | Why here |
 |---|---|---|
 | 1.1 | [W1 — cursor after the warp](#w1-composite-the-cursor-after-the-warp-candidate-defect) | Medium cross-backend change: first create an independent WGC cursor layer, then build the post-warp compositor. |
-| 1.2 | [W2a — subtitle zero-parallax mask](#w2a-burned-in-subtitles--zero-parallax-mask) | Independent of W1: full-resolution detection, an inference-only sanitized copy, exact-frame exclusion, and a slope-safe final-field consumer. Gated by 0.3. Ship the offline scene-buffered producer first; the live causal producer can follow. |
+| 1.2 | [W2a — subtitle zero-parallax mask](#w2a-burned-in-subtitles--zero-parallax-mask) | Known-mask schema-27 sanitizer/exclusion/final-field consumer and oracle evidence are implemented independently of W1. Automatic full-resolution detection remains: ship the offline scene-buffered producer first; the live causal producer can follow. |
 | 1.3 | [W3 — further overlay-mask reuse (deferred)](#w3-further-overlay-mask-reuse-in-scene-evidence-deferred) | W2a exclusion from cut evidence and scene-center moments is part of 1.2. Only unrelated overlay-mask reuse remains deferred and evidence-gated. |
 | 1.4 | [W12 — foreground/media classifier](#w12-foreground-process-and-media-state-classifier) | Evidence source only; it may choose a validated route but may not silently change V2 strength. |
 | 1.5 | [W13 — damage-guided depth reuse](#w13-damage-guided-depth-reuse-new-review-addition) | Start only with cursor-only reuse after W1. Broader reuse remains gated on move metadata and independent damage classification. |

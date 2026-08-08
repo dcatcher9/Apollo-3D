@@ -47,6 +47,8 @@ SHADER_IMPLEMENTATION_KEYS = {
 }
 SHADER_SOURCE_SPECS = (
     ("rgb_to_nchw_cs.hlsl", "main", "cs_5_0"),
+    ("depth_overlay_analysis_cs.hlsl", "sanitize_main", "cs_5_0"),
+    ("depth_overlay_analysis_cs.hlsl", "exclusion_main", "cs_5_0"),
     ("buffer_to_tex_cs.hlsl", "main", "cs_5_0"),
     ("depth_ema_motion_cs.hlsl", "main", "cs_5_0"),
     ("depth_minmax_cs.hlsl", "main", "cs_5_0"),
@@ -62,6 +64,7 @@ SHADER_SOURCE_SPECS = (
     ("depth_coordinate_v2_ownership_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_vertical_limit_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_limit_cs.hlsl", "main", "cs_5_0"),
+    ("depth_coordinate_v2_overlay_zero_plane_cs.hlsl", "main", "cs_5_0"),
 )
 
 

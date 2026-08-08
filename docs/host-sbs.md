@@ -16,6 +16,8 @@ flowchart LR
     IA2["Foreground Chromium IA2 observation"]
     MATCH["Exact matched-frame ROI selection"]
     DOMAIN["Full frame or authenticated inward-trimmed ROI"]
+    OVERLAY["Exact-frame burned-in overlay plan (optional)"]
+    SANITIZE["Inference-only local fill and tensor exclusion"]
     PREPROCESS["HDR/SDR model preprocessing"]
     DAV2["Authenticated DAV2 Small inference"]
     CUT["Cut-only evidence and scene epoch"]
@@ -25,14 +27,17 @@ flowchart LR
     OWNER["Conservative ownership correction"]
     VERTICAL["75/25 vertical envelope share"]
     ROW["Horizontal majorant"]
+    ZERO["Post-limit zero-plane core and outside collar"]
     INVERSE["11-step contractive inverse"]
     COLOR["One native linear-color sample"]
     ENCODE["Packed SBS and NVENC"]
 
-    CAPTURE --> MATCH --> DOMAIN --> PREPROCESS --> DAV2
+    CAPTURE --> MATCH --> DOMAIN --> SANITIZE --> PREPROCESS --> DAV2
+    OVERLAY -. exact-frame optional authority .-> SANITIZE
     IA2 -. optional authority .-> MATCH
     DAV2 --> CUT --> CAMERA
-    DAV2 --> CAMERA --> CURVE --> CONTAINER --> OWNER --> VERTICAL --> ROW --> INVERSE
+    DAV2 --> CAMERA --> CURVE --> CONTAINER --> OWNER --> VERTICAL --> ROW --> ZERO --> INVERSE
+    OVERLAY -. exact-frame optional authority .-> ZERO
     CAPTURE --> COLOR
     INVERSE --> COLOR --> ENCODE
 ```
@@ -43,7 +48,7 @@ diagnostics that explain how the final field was produced.
 
 ## Authenticated production contract
 
-The generated Depth Coordinate contract is the machine-readable authority. At schema 26, live
+The generated Depth Coordinate contract is the machine-readable authority. At schema 27, live
 Host SBS admits the following production calibration:
 
 | Property | Production value |
@@ -126,6 +131,23 @@ surround do not pull the video's scene center. Entering or leaving ROI analysis,
 identity or dimensions, or changing its input transfer domain resets the temporal and scene-camera
 state before the new domain is used. Translating the same ROI without changing its dimensions is
 not a new analysis domain, so an ordinary window move does not by itself reacquire the camera.
+
+An authenticated burned-in-overlay plan adds a second, frame-local exclusion inside either
+analysis domain. The original color remains untouched. A separate inference-only texture locally
+fills the tight/dilated R8 mask before DAV2, and exact positive-overlap pooling marks every affected
+tensor cell ineligible for extrema, histogram/normalization, EMA motion, current/previous cut
+evidence, ownership, V2 moments, and scene-center acquisition. In schema 27 the internal
+`frame_stats.texel_count` word therefore means the number of eligible, unmasked tensor cells; with
+no overlay plan it remains the physical tensor texel count. Any non-finite admitted cell makes that
+frame ineligible instead of silently changing its denominator.
+
+After the ordinary vertical and horizontal limiters, a separate authenticated compute pass clamps
+the final field to exact zero throughout each loose overlay rectangle. It spends the required
+horizontal/vertical transition entirely outside that core using the existing slope bounds. The
+inverse is identity in the core and samples the untouched source subtitle/logo pixels without an
+extra resample. The analysis sanitizer and final-field conditioner are one atomic optional bundle:
+missing, stale, mismatched, or unavailable mask/geometry resources disable both for that frame and
+leave ordinary V2 unchanged.
 
 ```text
 u = (raw_depth - scene_center) / 2.25
@@ -330,6 +352,11 @@ authenticated live shader closure. The required full-source inverse map lets the
 that samples beyond the conservative collar return to identity. `window_video_border.json` remains
 the semantic observation from which the ROI was planned, not independent geometry authority.
 
+Schema 13 does not yet carry a burned-in-overlay mask, sanitizer input, plan generation, loose
+rectangles, or conditioned-field provenance. A pending Dump 3D request is therefore explicitly
+rejected on an overlay-conditioned frame rather than publishing unauthenticated evidence or
+silently retrying on a later unrelated frame.
+
 The ordinary replay command rejects ROI packages until its harness accepts the full source, crop,
 region constants, and ROI renderer together; it must never reinterpret crop-local depth as a
 full-frame field.
@@ -356,8 +383,10 @@ plan live in [Host SBS scene cuts](host-sbs-scene-cuts.md).
   not exact composited visibility. Canvas or WebGL players, protected video, disabled accessibility,
   background tabs/windows, non-Chromium applications, and partially off-monitor video use
   full-frame V2 when they provide no valid rectangle. CSS or browser overlays captured inside an
-  otherwise authorized rectangle become part of the crop's real analysis content; Host SBS does not
-  reconstruct an unoccluded video or derive a visible-region mask.
+  otherwise authorized rectangle remain analysis content unless a separately authenticated
+  burned-in-overlay plan masks them. The known-mask consumer exists, but the automatic
+  subtitle/logo detector is not yet production authority; Host SBS does not reconstruct an
+  unoccluded video.
 - Unsupported model or fitted-tensor setup is rejected before Host SBS starts. A bad per-frame
   shader/state/field identity renders that current frame flat rather than attempting a best-effort
   geometry fallback.

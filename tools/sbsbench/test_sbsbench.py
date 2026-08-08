@@ -1610,8 +1610,9 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(shader_dir, "depth_minmax_ema_cs.hlsl"),
                   encoding="utf-8") as fh:
             bounds = fh.read()
-        self.assertIn("valid_count > 0u", bounds)
+        self.assertIn("eligible_count > 0u && valid_count == eligible_count", bounds)
         self.assertIn("MinMaxRaw.Store(8, 0u)", bounds)
+        self.assertIn("MinMaxRaw.Store(12, 0u)", bounds)
         self.assertIn("s.w = 0.0f", bounds)
         self.assertIn("s.w = 2.0f", bounds)
         with open(os.path.join(shader_dir, "buffer_to_tex_cs.hlsl"),

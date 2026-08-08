@@ -87,6 +87,8 @@ namespace platf::sbs_debug {
     std::optional<models::depth_video_region_plan_t> depth_video_plan;
     /** True when this completion was the first frame after its analysis domain was rearmed. */
     bool input_domain_reset = false;
+    /** Schema 13 cannot authenticate an overlay mask/plan or conditioned final field. */
+    bool overlay_conditioning_active = false;
     /** Optional, diagnostic-only browser-video border stamped onto matched_frame_id. */
     std::optional<window_video_border_snapshot> window_video_border;
     std::string window_video_observer_status = "not-observed";

@@ -60,7 +60,10 @@ windows/tabs, equal-largest videos, stale or ambiguous accessibility data, WGC, 
 fits, and partially off-monitor rectangles use full-frame V2.
 
 The route has no compositor-visible-region oracle. A CSS/player overlay captured inside an otherwise
-authorized rectangle is analyzed as part of that crop; the host does not reconstruct hidden video.
+authorized rectangle is analyzed as part of that crop unless an exact-frame burned-in-overlay plan
+supplies the authenticated analysis mask and zero-plane geometry. The known-mask consumer is now
+part of Depth Coordinate schema 27; automatic full-resolution subtitle/logo detection is still
+pending, and the host does not reconstruct hidden video.
 
 The crop owns DAV2, ownership, scene center, cuts, and temporal histories, while the renderer keeps
 the full color frame. ROI parallax is converted back to full-source pixel scale; its interior is
@@ -70,6 +73,12 @@ Dump 3D schema 13 serializes the crop-local model/depth fields and their authent
 placement separately. ROI packages require the exact full-source inverse map so the screen-plane
 surround beyond the collar can be verified rather than inferred. A full-capture semantic video
 rectangle remains canonical full-frame V2.
+
+For an accepted known mask, the original source color stays untouched. An inference-only local fill
+feeds DAV2, affected tensor cells abstain from cuts/center/ownership, and the final post-limit field
+is exactly zero inside loose rectangles with the required slope-safe transition outside. Missing or
+mismatched analysis and geometry products disable the whole treatment for that frame and preserve
+ordinary V2. Dump 3D schema 13 rejects such active frames until it can serialize that authority.
 
 ### Foreground crowns and disocclusion
 

@@ -8,6 +8,8 @@ StructuredBuffer<float>  PreviousModelInput : register(t3);
 StructuredBuffer<float4> MinMaxEma : register(t4);  // w = current-frame validity
 StructuredBuffer<float>  CurrentAppearanceOrdinal : register(t5);  // scene-linear maxRGB
 StructuredBuffer<float>  PreviousAppearanceOrdinal : register(t6);
+Texture2D<uint>           CurrentTensorExclusion : register(t7);
+Texture2D<uint>           PreviousTensorExclusion : register(t8);
 RWStructuredBuffer<uint> SceneCutEvidence : register(u0);
 
 #include "include/depth_constants.hlsl"
@@ -23,6 +25,8 @@ groupshared uint g_evidence[CUT_EVIDENCE_WORD_COUNT];
 // A 16x16 group plus a one-pixel halo of the point-sampled scene-linear maxRGB ordinal.
 groupshared float g_current_appearance_ordinal[STRUCTURE_TILE_TEXELS];
 groupshared float g_previous_appearance_ordinal[STRUCTURE_TILE_TEXELS];
+groupshared uint g_current_exclusion[STRUCTURE_TILE_TEXELS];
+groupshared uint g_previous_exclusion[STRUCTURE_TILE_TEXELS];
 
 float3 CurrentModelColor(uint2 p) {
     uint plane = target_w * target_h;
@@ -60,10 +64,19 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
         uint source_index = (uint)source_y * target_w + (uint)source_x;
         g_current_appearance_ordinal[tile_idx] = CurrentAppearanceOrdinal[source_index];
         g_previous_appearance_ordinal[tile_idx] = PreviousAppearanceOrdinal[source_index];
+        g_current_exclusion[tile_idx] =
+            CurrentTensorExclusion[uint2(source_x, source_y)];
+        g_previous_exclusion[tile_idx] =
+            PreviousTensorExclusion[uint2(source_x, source_y)];
     }
     GroupMemoryBarrierWithGroupSync();
 
-    if (dtid.x < target_w && dtid.y < target_h && MinMaxEma[0].w > 0.5f) {
+    uint tile_center = (tid.y + 1u) * STRUCTURE_TILE_WIDTH + tid.x + 1u;
+    bool center_admitted =
+        g_current_exclusion[tile_center] == 0u &&
+        g_previous_exclusion[tile_center] == 0u;
+    if (dtid.x < target_w && dtid.y < target_h &&
+        MinMaxEma[0].w > 0.5f && center_admitted) {
         InterlockedAdd(g_evidence[CUT_EVIDENCE_TOTAL], 1u);
 
         float d = DepthTexture[dtid.xy];
@@ -71,7 +84,6 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
             InterlockedAdd(g_evidence[CUT_EVIDENCE_DEPTH_CHANGE], 1u);
         }
 
-        uint tile_center = (tid.y + 1u) * STRUCTURE_TILE_WIDTH + tid.x + 1u;
         float3 current_color = CurrentModelColor(dtid.xy);
         float3 previous_color = PreviousModelColor(dtid.xy);
         float3 raw_rgb_delta = abs(current_color - previous_color);
@@ -91,6 +103,8 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
 
         float current_samples[5];
         float previous_samples[5];
+        bool current_sample_admitted[5];
+        bool previous_sample_admitted[5];
         [unroll]
         for (int sample_index = 0; sample_index < 5; ++sample_index) {
             int2 offset = STRUCTURE_ORDINAL_OFFSETS[sample_index];
@@ -98,6 +112,14 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
                 (int)tile_center + offset.y * STRUCTURE_TILE_WIDTH + offset.x;
             current_samples[sample_index] = g_current_appearance_ordinal[tile_index];
             previous_samples[sample_index] = g_previous_appearance_ordinal[tile_index];
+            // Every ordinal stencil endpoint uses the same current/previous union as its center.
+            // Otherwise one frame's overlay cell could still inflate the opposite endpoint's
+            // structural-support denominator even though that pair cannot produce common evidence.
+            bool sample_admitted =
+                g_current_exclusion[tile_index] == 0u &&
+                g_previous_exclusion[tile_index] == 0u;
+            current_sample_admitted[sample_index] = sample_admitted;
+            previous_sample_admitted[sample_index] = sample_admitted;
         }
         uint current_comparisons = 0u;
         uint previous_comparisons = 0u;
@@ -114,10 +136,14 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
                 float previous_scale =
                     max(abs(previous_samples[first]), abs(previous_samples[second]));
                 bool current_reliable =
+                    current_sample_admitted[first] &&
+                    current_sample_admitted[second] &&
                     abs(current_delta) >=
                         max(STRUCTURAL_ORDINAL_NOISE_FLOOR,
                             STRUCTURAL_ORDINAL_RELATIVE_CONTRAST_FLOOR * current_scale);
                 bool previous_reliable =
+                    previous_sample_admitted[first] &&
+                    previous_sample_admitted[second] &&
                     abs(previous_delta) >=
                         max(STRUCTURAL_ORDINAL_NOISE_FLOOR,
                             STRUCTURAL_ORDINAL_RELATIVE_CONTRAST_FLOOR * previous_scale);

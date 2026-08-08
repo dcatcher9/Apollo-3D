@@ -2,7 +2,7 @@
 """Replay a complete depth-coordinate-v2 shot timeline through Apollo's exact D3D SBS path.
 
 Unlike the single-dump witness, this tool uploads every authenticated raw DAV2 field and cut signal
-to one persistent native GPU state. Shared range/histogram passes plus seven V2 coordinate shaders
+to one persistent native GPU state. Shared range/histogram passes plus seven base V2 coordinate shaders
 resolve the fixed raw coordinate and scene camera, apply one exact frame-local container and the
 source-color ownership refinement, then compute the vertical upper/lower envelopes, their
 authenticated 75/25 share, and one row majorant before handing the final-parallax field directly

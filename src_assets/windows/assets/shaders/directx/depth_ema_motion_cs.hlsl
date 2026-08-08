@@ -3,6 +3,7 @@
 StructuredBuffer<float>  InputBuffer : register(t0);
 StructuredBuffer<float4> MinMaxEma   : register(t1);  // [0]={P2,P98,initialized,frame_state}
 Texture2D<float>          PreviousDepth : register(t2);
+Texture2D<uint>           TensorExclusion : register(t3);
 RWTexture2D<uint>         MotionMask : register(u0);
 
 #include "include/depth_constants.hlsl"
@@ -26,6 +27,23 @@ float CurrentDepth(int2 p) {
 
 bool IsMovingEdge(int2 p) {
     p = ClampPixel(p);
+    if (TensorExclusion[p] != 0u) {
+        return false;
+    }
+
+    static const int2 neighbor_offsets[4] = {
+        int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1)
+    };
+    [unroll]
+    for (int neighbor_index = 0; neighbor_index < 4; ++neighbor_index) {
+        int2 neighbor = ClampPixel(p + neighbor_offsets[neighbor_index]);
+        if (TensorExclusion[neighbor] != 0u) {
+            // The moving-edge classifier is a five-cell stencil. An artificial sanitizer fill
+            // boundary must not make an adjacent admitted texel snap toward current depth.
+            return false;
+        }
+    }
+
     float current = CurrentDepth(p);
     float change = abs(current - PreviousDepth[p]);
     float gradient = 0.0f;

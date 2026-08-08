@@ -54,6 +54,20 @@ active ROI, but repeated ineligible observations while already full-frame are no
 semantic rectangle exactly equal to the capture extent is already that canonical full-frame domain:
 it creates no crop, ROI transition, history reset, or camera reacquisition.
 
+Within either domain, an exact-frame burned-in-overlay plan may exclude tensor cells without
+creating a new scene domain. The tight/dilated full-resolution mask is max-pooled with exact
+positive-overlap resize support. Every excluded cell abstains from normalized-depth change, raw
+appearance, ordinal evidence, EMA-motion snapping, V2 moments, and scene-center acquisition. Cut
+comparisons use the union of current and previous exclusion masks for the center and all four
+ordinal neighbors, so appearance, replacement, or disappearance of a subtitle/logo cannot leak
+through an endpoint. All evidence fractions use the remaining eligible support as their
+denominator. A partially non-finite eligible set invalidates the update rather than quietly
+shrinking that denominator; a wholly excluded frame preserves the prior scene state.
+
+The exclusion plan is frame-local authority, not a history reset. A missing, mismatched, stale, or
+resource-incomplete plan uses the ordinary unmasked path atomically; it never sanitizes pixels
+without also guaranteeing the post-limit zero-plane treatment for those same source pixels.
+
 ## Appearance proposals
 
 A broad appearance proposal requires:

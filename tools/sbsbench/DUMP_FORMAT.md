@@ -125,7 +125,7 @@ named contract:
 
 | Contract | Current schema | Scope |
 |---|---:|---|
-| Depth Coordinate V2 | 26 | Calibrated producer, authorization state, constants, and complete shader closure |
+| Depth Coordinate V2 | 27 | Calibrated producer, optional known-mask overlay analysis/conditioning, authorization state, constants, and complete shader closure |
 | Direct-geometry harness | 25 | Independent comparison-only replay input |
 | Dump manifest | 13 | One Dump 3D package, analysis domain, and artifact authority |
 | Depth-input region | 1 | Full-source or crop-local analysis placement and live renderer embedding |
@@ -175,13 +175,14 @@ environment still initializes the pinned production model, but its generated geo
 by the authenticated direct fields and has no provenance or geometry role in this experiment.
 
 Production accepts only the model identities and fitted tensor shapes bound by coordinate schema
-25. The canonical allowlist and custom-resolution behavior are documented once under
+27. The canonical allowlist and custom-resolution behavior are documented once under
 [authenticated resolution fitting](../../docs/host-sbs.md#authenticated-resolution-fitting).
 
 ## Exact sequence replay
 
 `replay_depth_mapping_v2_sequence.py` uploads an authenticated raw sequence and cut generations to
-one persistent GPU state, dispatches the same seven V2 coordinate compute passes as production,
+one persistent GPU state, dispatches the same seven base V2 coordinate compute passes as production
+(overlay-active live dumps are rejected until this package carries their mask/conditioner authority),
 and renders the final field through the exact D3D harness:
 
 ```powershell

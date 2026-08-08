@@ -7,7 +7,8 @@
 // ordering, so InterlockedMin/InterlockedMax on the raw bit pattern yields the correct min/max.
 
 StructuredBuffer<float> InputBuffer : register(t0);
-RWByteAddressBuffer     MinMaxOut   : register(u0);  // [0]=min bits, [4]=max bits, [8]=valid count
+Texture2D<uint>         TensorExclusion : register(t1);
+RWByteAddressBuffer     MinMaxOut   : register(u0);  // [0]=min bits, [4]=max bits, [8]=valid count, [12]=eligible count
 
 #include "include/depth_constants.hlsl"
 
@@ -15,6 +16,7 @@ RWByteAddressBuffer     MinMaxOut   : register(u0);  // [0]=min bits, [4]=max bi
 groupshared uint g_min[GROUP_SIZE];
 groupshared uint g_max[GROUP_SIZE];
 groupshared uint g_valid[GROUP_SIZE];
+groupshared uint g_eligible[GROUP_SIZE];
 
 [numthreads(GROUP_SIZE, 1, 1)]
 void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
@@ -22,10 +24,16 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
     uint lmin = 0xFFFFFFFFu;
     uint lmax = 0u;
     uint lvalid = 0u;
+    uint leligible = 0u;
 
     // Grid-stride: each thread folds in every reduce_threads-th element.
     [loop]
     for (uint idx = dtid.x; idx < count; idx += reduce_threads) {
+        uint2 position = uint2(idx % target_w, idx / target_w);
+        if (TensorExclusion[position] != 0u) {
+            continue;
+        }
+        leligible++;
         float v = InputBuffer[idx];
         if (!isnan(v) && !isinf(v) && v >= 0.0f) {
             uint u = asuint(v);
@@ -38,6 +46,7 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
     g_min[tid.x] = lmin;
     g_max[tid.x] = lmax;
     g_valid[tid.x] = lvalid;
+    g_eligible[tid.x] = leligible;
     GroupMemoryBarrierWithGroupSync();
 
     [unroll]
@@ -46,6 +55,7 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
             g_min[tid.x] = min(g_min[tid.x], g_min[tid.x + s]);
             g_max[tid.x] = max(g_max[tid.x], g_max[tid.x + s]);
             g_valid[tid.x] += g_valid[tid.x + s];
+            g_eligible[tid.x] += g_eligible[tid.x + s];
         }
         GroupMemoryBarrierWithGroupSync();
     }
@@ -56,5 +66,6 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
             MinMaxOut.InterlockedMax(4, g_max[0]);
             MinMaxOut.InterlockedAdd(8, g_valid[0]);
         }
+        MinMaxOut.InterlockedAdd(12, g_eligible[0]);
     }
 }

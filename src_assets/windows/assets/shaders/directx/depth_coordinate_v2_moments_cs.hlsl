@@ -1,9 +1,10 @@
 // Numerically stable per-group Welford moments over raw DAV2 output. Two float4 records per group:
 //   [2*g+0] = {mean, M2, count, minimum}
-//   [2*g+1] = {maximum, 0, 0, 0}
+//   [2*g+1] = {maximum, eligible_count, 0, 0}
 // Every group overwrites its records, so no accumulator clear or CPU readback is required.
 
 StructuredBuffer<float> InputBuffer : register(t0);
+Texture2D<uint> TensorExclusion : register(t1);
 RWStructuredBuffer<float4> Partials : register(u0);
 
 #include "include/depth_constants.hlsl"
@@ -14,6 +15,7 @@ groupshared float g_m2[GROUP_SIZE];
 groupshared float g_minimum[GROUP_SIZE];
 groupshared float g_maximum[GROUP_SIZE];
 groupshared uint g_count[GROUP_SIZE];
+groupshared uint g_eligible[GROUP_SIZE];
 
 [numthreads(GROUP_SIZE, 1, 1)]
 void main(uint3 dtid : SV_DispatchThreadID,
@@ -25,9 +27,15 @@ void main(uint3 dtid : SV_DispatchThreadID,
     float minimum = 3.402823466e+38f;
     float maximum = -3.402823466e+38f;
     uint count = 0u;
+    uint eligible = 0u;
 
     [loop]
     for (uint index = dtid.x; index < element_count; index += reduce_threads) {
+        uint2 position = uint2(index % target_w, index / target_w);
+        if (TensorExclusion[position] != 0u) {
+            continue;
+        }
+        eligible++;
         float value = InputBuffer[index];
         if (!isnan(value) && !isinf(value)) {
             count++;
@@ -45,12 +53,14 @@ void main(uint3 dtid : SV_DispatchThreadID,
     g_minimum[tid.x] = minimum;
     g_maximum[tid.x] = maximum;
     g_count[tid.x] = count;
+    g_eligible[tid.x] = eligible;
     GroupMemoryBarrierWithGroupSync();
 
     [unroll]
     for (uint stride = GROUP_SIZE / 2u; stride > 0u; stride >>= 1u) {
         if (tid.x < stride) {
             uint right_count = g_count[tid.x + stride];
+            g_eligible[tid.x] += g_eligible[tid.x + stride];
             if (right_count > 0u) {
                 uint left_count = g_count[tid.x];
                 if (left_count == 0u) {
@@ -77,6 +87,7 @@ void main(uint3 dtid : SV_DispatchThreadID,
     if (tid.x == 0u) {
         Partials[gid.x * 2u] = float4(
             g_mean[0], g_m2[0], (float)g_count[0], g_minimum[0]);
-        Partials[gid.x * 2u + 1u] = float4(g_maximum[0], 0.0f, 0.0f, 0.0f);
+        Partials[gid.x * 2u + 1u] =
+            float4(g_maximum[0], (float)g_eligible[0], 0.0f, 0.0f);
     }
 }
