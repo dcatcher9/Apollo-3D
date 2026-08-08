@@ -74,7 +74,10 @@ The worker does not decode the complete clip into a directory of PNG frames.
   consumed depth/state cache records.
 - The persistent encoder writes one compressed video-only intermediate with source-derived
   presentation timestamps. A final stream-copy mux adds compatible source audio, subtitles,
-  attachments, metadata, dispositions, and chapters without re-encoding the video.
+  attachments, metadata, non-subtitle dispositions, and chapters without re-encoding the video.
+  Copied subtitle streams remain available but have all dispositions cleared, preventing
+  default/forced disposition flags from driving automatic selection over the packed SBS raster.
+  A player's explicit language or user policy may still select such a stream.
 - The completed file is probed and validated before the job manager atomically publishes it. An
   existing destination is never overwritten.
 
@@ -170,7 +173,8 @@ The final mux:
 
 - stream-copies compatible source audio and subtitle streams;
 - preserves compatible Matroska attachments;
-- maps source container and stream metadata, dispositions, and chapters;
+- maps source container and stream metadata, non-subtitle dispositions, and chapters;
+- clears copied subtitle dispositions with FFmpeg `-disposition:s 0` while preserving the streams;
 - does not re-encode the already compressed SBS video; and
 - supports Matroska (`.mkv`) and MP4 (`.mp4`) outputs.
 
@@ -183,8 +187,8 @@ them unchanged.
 MP4 uses the source video time-base denominator as its track timescale, so video PTS and duration
 must match exactly. Matroska may choose another time base; each video, auxiliary-stream, and
 chapter timestamp may differ by at most one output tick, and the verifier separately rejects any
-cumulative duration drift. Packet counts, codecs, metadata, and stream dispositions are also
-checked before publication.
+cumulative duration drift. Packet counts, codecs, metadata, and non-subtitle stream dispositions
+are also checked before publication; copied subtitle dispositions are required to be empty.
 
 ## HDR contract
 

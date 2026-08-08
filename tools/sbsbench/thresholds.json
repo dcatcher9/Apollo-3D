@@ -1,6 +1,6 @@
 {
   "_doc": "Compact SBS metric policy shared by run_eval.py and the report. A baseline movement is a regression only when it exceeds max(abs_floor, baseline*rel_tol). Hard bounds are non-tradeable. scope separates perceptual candidates from renderer conformance, GT-only validation, and temporal-only evaluation. Model-label export remains fail closed: only label_status=qualified is learnable; all current candidates are experimental.",
-  "_scope_note": "perceptual risk metrics may become DA-V2 augmentation labels after controlled-corruption and headset validation. Stereo volume is a style descriptor, not an unbounded reward: select the strongest scale only after independent safety/coherence/artifact constraints pass. conformance metrics catch renderer/transport contract bugs and are never perceptual labels. gt-only metrics require authenticated reference depth/disparity. temporal-only metrics evaluate sequences and are not single-frame policy labels.",
+  "_scope_note": "perceptual risk metrics may become DA-V2 augmentation labels after controlled-corruption and headset validation. Stereo volume is a style descriptor, not an unbounded reward: select the strongest scale only after independent safety/coherence/artifact constraints pass. conformance metrics catch renderer/transport contract bugs and are never perceptual labels. gt-only metrics require authenticated reference depth/disparity or an authored subtitle region. temporal-only metrics evaluate sequences and are not single-frame policy labels.",
   "_comfort_note": "Disparity percentages are normalized image disparity, not retinal angle. The existing +/-3% tails and over-limit burden are retained as experimental safety heuristics until calibrated for a fixed display FOV and headset/user study.",
   "metrics": {
     "exact_visible_pop_spread_pct": {
@@ -279,6 +279,50 @@
       "better": "higher",
       "rel_tol": 0.3,
       "abs_floor": 0.5
+    },
+    "subtitle_region_binocular_support_pct": {
+      "scope": "gt-only",
+      "role": "hard",
+      "axis": "subtitle-geometry",
+      "requires": "subtitle_region_authored_count",
+      "better": "higher",
+      "rel_tol": 0.0,
+      "abs_floor": 0.5,
+      "hard_min": 95.0,
+      "trigger_min": 95.0,
+      "note": "Conservative minimum of mutually valid canonical-sample coverage and mutually rendered output-area coverage over the authored subtitle region. Empty authored masks abstain; non-empty masks with lost or collapsed support fail closed."
+    },
+    "subtitle_target_disparity_rms_error_pct": {
+      "scope": "gt-only",
+      "role": "hard",
+      "axis": "subtitle-geometry",
+      "requires": "subtitle_region_support_count",
+      "better": "lower",
+      "rel_tol": 0.0,
+      "abs_floor": 0.005,
+      "hard_max": 0.02,
+      "trigger": 0.02,
+      "note": "Output-area-weighted RMS error from the authenticated signed subtitle target, in reference-aspect disparity percent."
+    },
+    "subtitle_disparity_variance_pct2": {
+      "scope": "gt-only",
+      "role": "diagnostic",
+      "axis": "subtitle-geometry",
+      "requires": "subtitle_region_support_count",
+      "better": "lower",
+      "rel_tol": 0.2,
+      "abs_floor": 0.001,
+      "note": "Output-area-weighted variance in squared reference-aspect disparity percent; requires an authenticated loose subtitle-region mask."
+    },
+    "subtitle_sharpness_preservation_pct": {
+      "scope": "gt-only",
+      "role": "diagnostic",
+      "axis": "subtitle-integrity",
+      "requires": "subtitle_region_support_count",
+      "better": "higher",
+      "rel_tol": 0.05,
+      "abs_floor": 2.0,
+      "note": "Worse-eye post/pre horizontal-gradient energy ratio in an authenticated loose subtitle-region mask."
     },
     "shot_state_accepted_pulse": {
       "scope": "conformance",

@@ -246,6 +246,54 @@ TEST(OfflineSbsWorker, ParsesNativeSpecAndNeverBuildsPythonCommands) {
   ));
 }
 
+TEST(OfflineSbsWorker, PreservesSubtitleStreamsButClearsTheirDispositions) {
+  const auto spec = offline_sbs::parse_worker_spec(worker_spec_json());
+  const auto media = offline_sbs::parse_ffprobe_contract(sdr_probe());
+  const nlohmann::json inventory {
+    {"streams", nlohmann::json::array({
+                  {
+                    {"index", 0},
+                    {"codec_type", "video"},
+                    {"codec_name", "h264"},
+                    {"time_base", "1/1000"},
+                    {"disposition", {{"default", 1}}},
+                  },
+                  {
+                    {"index", 1},
+                    {"codec_type", "subtitle"},
+                    {"codec_name", "subrip"},
+                    {"time_base", "1/1000"},
+                    {"tags", {{"language", "eng"}}},
+                    {"disposition", {{"default", 1}, {"forced", 1}}},
+                  },
+                })},
+  };
+
+  const auto command = offline_sbs::build_mux_command_for_test(
+    spec,
+    media,
+    inventory,
+    "C:/state/jobs/one/encoded-video.mp4"
+  );
+
+  EXPECT_TRUE(contains_argument_pair(command, "-map", "1:s?"));
+  EXPECT_TRUE(contains_argument_pair(
+    command,
+    "-metadata:s:s:0",
+    "language=eng"
+  ));
+  EXPECT_TRUE(contains_argument_pair(command, "-disposition:s", "0"));
+  EXPECT_TRUE(contains_argument_pair(
+    command,
+    "-disposition:v:0",
+    "default"
+  ));
+  EXPECT_EQ(
+    std::find(command.begin(), command.end(), "-disposition:s:0"),
+    command.end()
+  );
+}
+
 TEST(OfflineSbsWorker, AuthenticatesExactSpecBytesBeforeParsing) {
   const auto path =
     fs::temp_directory_path() /

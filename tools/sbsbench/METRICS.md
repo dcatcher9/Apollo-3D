@@ -17,13 +17,13 @@ Every entry in [thresholds.json](thresholds.json) has one scope and one role:
 | `scope: style` | Describes visible stereo volume; never an unbounded reward |
 | `scope: perceptual` | Candidate viewing-risk evidence; experimental until headset-qualified |
 | `scope: conformance` | Exact renderer, transport, and state contract evidence |
-| `scope: gt-only` | Requires authenticated depth/disparity reference |
+| `scope: gt-only` | Requires authenticated depth/disparity or authored-region reference |
 | `scope: temporal-only` | Requires a sequence and does not become a single-frame model label |
 | `role: hard` | Non-tradeable fail-closed constraint |
 | `role: primary` | Independent quality axis used in a decision |
 | `role: diagnostic` | Supports interpretation but cannot decide alone |
 
-The current compact policy exposes 37 metrics: 15 hard constraints, four primary axes, and 18
+The current compact policy exposes 41 metrics: 17 hard constraints, four primary axes, and 20
 diagnostics. There are no qualified training labels. A metric must explicitly declare both a
 training label and `label_status: qualified`; all current perceptual candidates remain
 experimental, so label export abstains.
@@ -129,6 +129,49 @@ The affine fit rejects negative scale and requires at least 5% valid support. Ed
 when `depth_gt_edge_support_pct >= 1.0`; below that it remains diagnostic because tiny weak-gradient
 changes can flip binary membership without meaningful geometry movement.
 
+## Ground-truth subtitle-region metrics
+
+Subtitle metrics consume explicit source-coordinate masks from
+`gt_subtitle_region/frame_<id>.png` only when `meta.json` declares
+`required_gt_subtitle_region: true` plus an explicit finite `subtitle_target_disparity_pct` inside
+`[-3.5, 3.0]`. The masks are loose binary regions, not detected glyph masks;
+one mask may contain several disjoint rectangles for simultaneous top notes, dialogue, or bilingual
+stacks. A mask exists for every source frame so frame identity stays exact; frames without visible
+subtitles use an empty mask. The evaluator never detects text automatically. It loads both the
+source and same-size GT mask at their full source resolution before canonical exact-map sampling;
+this matches the W2 runtime contract that subtitle detection happens before inference downscaling.
+
+| Metric | Meaning | Preferred direction |
+|---|---|---|
+| `subtitle_region_binocular_support_pct` | Conservative minimum of valid canonical-sample coverage and mutually rendered output-area coverage over the authored region | Must remain at or above 95% |
+| `subtitle_target_disparity_rms_error_pct` | Output-area-weighted RMS error from the authenticated signed target, in reference-aspect disparity percent | Must remain at or below 0.02% |
+| `subtitle_disparity_variance_pct2` | Output-area-weighted disparity variance within the explicit region, in squared reference-aspect image-disparity percent | Lower; zero is a constant plane |
+| `subtitle_sharpness_preservation_pct` | Worse-eye registered post-warp/pre-warp horizontal-gradient energy ratio | Higher; 100% preserves source energy |
+| `subtitle_region_support_count` | Unique mutually visible source samples inside the explicit region | Evidence context |
+| `subtitle_region_authored_count` | Canonical samples selected by the authored region before warp validity | Applicability context |
+
+Disparity comes from the exact mutually visible inverse-warp correspondences, not image matching,
+and is resolution-normalized before its target error and variance are taken. Variance alone cannot
+distinguish the intended plane from a wrong constant plane, so target RMS error is the hard
+zero-plane gate; all current subtitle fixtures authenticate a `0.0` target. The independent support
+gate prevents a fold or hole from hiding bad geometry by leaving only 16 easy samples, and its
+output-area term prevents a map from compressing every canonical source sample into a narrow strip
+while claiming 100% count support. Every non-empty authored frame must retain at least 95% of both
+canonical samples and nominal mutually rendered area. Invalid samples do not become zero-disparity
+votes. A genuinely empty authored mask has zero authored support and legitimately abstains.
+
+Sharpness registers each rendered eye back to the same canonical source grid, then divides its
+horizontal first-difference energy by the unwarped source energy on identical supported mask pairs.
+The clip aggregate keeps the worst frame: minimum binocular support, maximum target error and
+disparity variance, and minimum sharpness preservation. Sharpness is not capped at 100%; an
+overshoot remains visible for interpretation alongside the existing integrity/ringing evidence.
+
+At least 16 mutually visible region samples are required. Sharpness additionally needs at least 16
+supported horizontal pairs and mean source-gradient energy of one 8-bit code step squared. Missing,
+unauthenticated, empty, or textureless evidence is `n/a`, never zero. The source identity hash covers
+the mask pixels, `required_gt_subtitle_region`, `subtitle_target_disparity_pct`, and any strict
+`subtitle_transition_contract` semantics.
+
 ## Evidence floors
 
 Evidence minima are part of the contract:
@@ -138,6 +181,10 @@ Evidence minima are part of the contract:
 - cross-row shear requires 512 qualified pixels;
 - texture integrity requires at least 0.1% independently textured support; and
 - vertical alignment requires at least 2% overlapping texture-tile support.
+- each non-empty subtitle region must retain at least 95% mutually visible canonical samples and
+  nominal mutually rendered output area;
+- subtitle-region geometry and sharpness require at least 16 mutually visible samples (and 16
+  horizontal pairs for sharpness); empty authored masks abstain.
 
 These are conservative screening floors, not statistical-independence proofs. Lower support
 abstains.

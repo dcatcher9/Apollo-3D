@@ -4810,10 +4810,16 @@ namespace offline_sbs {
             actual[index]->tags,
             std::string(type) + " stream"
           );
-          if (wanted[index]->disposition != actual[index]->disposition) {
+          const auto expected_disposition =
+            type == "subtitle" ? nlohmann::json::object() : wanted[index]->disposition;
+          if (expected_disposition != actual[index]->disposition) {
             throw worker_error(
               "output " + std::string(type) +
-              " stream disposition differs from source"
+              (
+                type == "subtitle" ?
+                  " stream disposition was not cleared" :
+                  " stream disposition differs from source"
+              )
             );
           }
           if (type == "video") {
@@ -5069,7 +5075,7 @@ namespace offline_sbs {
                                         });
         };
       const auto append_stream_contracts =
-        [&](const std::string_view type, const std::string_view ffmpeg_type) {
+        [&](const std::string_view type, const std::string_view ffmpeg_type, const bool preserve_disposition = true) {
           const auto streams = streams_of_type(source_inventory, type);
           for (std::size_t index = 0; index < streams.size(); ++index) {
             const auto stream_index = std::to_string(index);
@@ -5077,16 +5083,26 @@ namespace offline_sbs {
               "-metadata:s:" + std::string(ffmpeg_type) + ":" + stream_index,
               streams[index]->tags
             );
-            append_disposition(
-              "-disposition:" + std::string(ffmpeg_type) + ":" + stream_index,
-              streams[index]->disposition
-            );
+            if (preserve_disposition) {
+              append_disposition(
+                "-disposition:" + std::string(ffmpeg_type) + ":" + stream_index,
+                streams[index]->disposition
+              );
+            }
           }
         };
       append_metadata("-metadata", source_inventory.format_tags);
       append_stream_contracts("video", "v");
       append_stream_contracts("audio", "a");
-      append_stream_contracts("subtitle", "s");
+      const auto subtitle_streams = streams_of_type(source_inventory, "subtitle");
+      append_stream_contracts("subtitle", "s", false);
+      if (!subtitle_streams.empty()) {
+        // A player cannot safely render one soft-subtitle plane over a packed SBS
+        // raster. Preserve the streams and their metadata, but remove default/forced
+        // disposition signals that can drive automatic selection. A player may still
+        // select a stream through explicit language or user policy.
+        command.insert(command.end(), {"-disposition:s", "0"});
+      }
       if (container == "matroska") {
         append_stream_contracts("attachment", "t");
       }
@@ -5545,6 +5561,20 @@ namespace offline_sbs {
     return can_consume_packet_probe_bytes(
       consumed_bytes,
       additional_bytes
+    );
+  }
+
+  std::vector<std::string> build_mux_command_for_test(
+    const worker_spec_t &spec,
+    const media_contract_t &media,
+    const nlohmann::json &source_inventory,
+    const fs::path &encoded_video
+  ) {
+    return build_mux_command(
+      spec,
+      media,
+      parse_stream_inventory(source_inventory),
+      encoded_video
     );
   }
 

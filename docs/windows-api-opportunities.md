@@ -45,8 +45,8 @@ important corrections:
   evidence, but it must not silently change geometry strength.
 - **Offline subtitle analysis must remain scene-bounded.** The offline converter is designed around
   scene-level buffered look-ahead. A new whole-clip pre-pass would duplicate work and cross the
-  current ownership boundary; stable masks should instead be learned and revised inside the scene
-  buffer.
+  current ownership boundary. Per-frame tight masks must sanitize input before that frame reaches
+  DAV2; the scene buffer may then revise candidates and finalize the stable loose geometry mask.
 - W8, W10, W11, and W9 are not host-only changes. They require protocol and Moonlight 3D work, so
   they cannot be treated as local edits to one Windows source file.
 
@@ -148,11 +148,14 @@ inference, three things go wrong at once:
    depth instead floats at an inferred depth that disagrees with what it annotates or points at.
    In stereo this is actively uncomfortable, and for the cursor it destroys pointing accuracy.
 
-The conservative treatment is: **keep a known overlay out of scene inference, then composite it
-after the warp into both eyes at an authored disparity.** [W1](#w1-composite-the-cursor-after-the-warp-candidate-defect)
-and [W2](#w2-subtitles-burned-into-the-picture) apply that rule. The deferred
-[W3](#w3-overlay-masks-in-scene-cut-evidence-deferred) would reuse their masks only if traces later
-prove a separate scene-cut-evidence defect.
+The conservative treatment has two forms. A separately available overlay such as the DDup cursor
+stays out of inference and is composited after the warp at an authored disparity. A burned-in
+overlay cannot be separated from the delivered color: keep that original color untouched for final
+rendering, make a sanitized **inference-only** copy, exclude its overlay cells from scene evidence,
+and force a loose rectangle around it to the authored plane in the final parallax field. The inverse
+warp then samples the original pixels without moving them. [W1](#w1-composite-the-cursor-after-the-warp-candidate-defect)
+uses the first form and [W2](#w2-subtitles-burned-into-the-picture) uses the second; W2 does not
+depend on W1's sprite compositor.
 
 ---
 
@@ -209,15 +212,13 @@ Two consequences for an implementer:
 
 - **The burned-in treatment below is the whole subtitle story**, not one branch of three. It applies
   to the offline conversion path and the live capture path alike.
-- **A latent footgun to close.** The offline mux pass still copies any subtitle stream that happens to
-  exist in the source, with `-map 1:s?` and `-c copy`
-  ([offline_sbs_worker.cpp:5018](../src/offline_sbs_worker.cpp:5018)). Since nothing will render such
-  a stream correctly over an SBS-packed frame — a player drawing it once across the packed image puts
-  half a sentence in each eye — a source carrying both hardsubs and a soft track can produce an
-  output whose soft track auto-renders and looks broken. Clear the default disposition on copied
-  subtitle streams (ffmpeg `-disposition:s 0`) so no player auto-selects one, while still preserving
-  the data for anyone who wants it. Dropping the streams entirely is the alternative; preserving them
-  disabled is the friendlier choice and costs nothing.
+- **The soft-track safeguard is implemented.** The offline mux pass still preserves any subtitle
+  stream present in the source with `-map 1:s?` and `-c copy`, but now appends FFmpeg
+  `-disposition:s 0`. Nothing can render one soft-subtitle plane correctly over an SBS-packed frame,
+  so clearing every copied subtitle disposition prevents default/forced flags from driving
+  auto-selection while keeping the stream data available to anyone who explicitly wants it. A
+  player's language or explicit user policy may still select the stream; this is a best-effort
+  safeguard, not a presentation feature.
 
 Note that the render pass already excludes subtitles with `-sn`
 ([offline_sbs_worker.cpp:3991](../src/offline_sbs_worker.cpp:3991), alongside `-an` and `-dn`). That
@@ -237,39 +238,99 @@ Chinese-language content, and CJK glyphs carry far denser strokes than Latin one
 resampling damage and the rim artifact are more visible than they would be on Latin text. Tune and
 test against CJK, not against English.
 
-**Approach.** Do not try to warp text well. Exclude it.
+**Approach.** Do not try to infer or warp text well. Give analysis and final rendering different
+views of the same captured frame:
 
-Inside the detected subtitle region, force the parallax to a constant, and choose that constant to be
-**zero**. Zero parallax means the region is identical in both eyes, which in turn means no
-resampling, no disocclusion, and bit-exact glyphs, at essentially zero runtime cost — the region is
-simply not warped. Screen-plane placement is also the conservative standard in stereoscopic
-authoring.
+1. Preserve the exact source color unchanged. This remains the only color sampled by the final
+   inverse warp.
+2. Detect overlay evidence on that source at full resolution. Build a stroke-tight mask, dilate it
+   enough to cover glyph outlines, and locally fill only those pixels in a separate inference copy.
+   The fill need only avoid presenting text edges to DAV2; it is never displayed and is not claimed
+   to reconstruct the hidden picture.
+3. Conservatively max-pool the dilated mask into tensor cells: if any contributing source pixel is
+   masked, that tensor cell is excluded. DAV2 consumes the sanitized copy. Scene-cut comparisons use
+   the union of the current and previous exclusion masks. Every color, ordinal, or depth reduction
+   used for cut evidence or V2 frame statistics, including the moments that latch scene center,
+   ignores excluded cells. Subtitle, logo, watermark, or HUD appearance and disappearance therefore
+   cannot manufacture a cut or move the scene's authored center.
+4. Separately derive one or more **loose rectangles** for geometry. Apply exactly **zero** to the
+   final authoritative parallax field throughout each rectangle, after the authenticated V2 limiter,
+   and satisfy the production slope bounds with an outside-only collar. The fixed-point inverse is
+   the identity in that zero core and therefore samples the untouched source color at the same
+   coordinate, so the original burned-in text remains visible, sharp, and identical between eyes.
 
-Make the constant a configuration knob rather than a hard zero, so a small negative parallax (text
-slightly in front of the screen plane) can be selected later if content that pops out is found to
-conflict with the text.
+These are deliberately two masks. The tight/dilated mask protects inference and statistics while
+discarding as little scene evidence as possible. The loose rectangle avoids a parallax cliff at
+every glyph stroke. No alpha extraction or subtitle re-rendering is required. The picture that was
+behind burned-in glyphs is not present in the source and cannot be recovered exactly; only the
+inference-only copy receives an approximate local fill.
+
+Every geometry pass that re-reads color after DAV2 must share this separation. In particular, the
+current depth-edge ownership pass must read the sanitized inference copy or abstain on excluded
+tensor cells; reading the untouched source there would let the same text edges influence geometry
+again. The original-color SRV is reserved for detection and final display.
+
+The first authored plane is zero (screen plane). A later experiment may expose one global constant
+for all overlapping overlay rectangles, but independently authored overlapping planes are unsafe.
 
 **Gotchas — these determine whether the result is good or bad.**
 
-- **Feather the mask edge.** A hard discontinuity in the parallax field will tear under the
-  contractive inverse warp. Feathered over a few tens of pixels it becomes a gentle depth ramp
-  instead.
-- **Use a loose feathered rectangle, not a glyph-tight mask.** A tight mask is the intuitive choice
+- **Put the transition outside the loose rectangle.** The complete rectangle is the exact-zero
+  core; do not spend part of it ramping back toward scene depth. A hard discontinuity would violate
+  the contractive inverse-warp assumptions, so clamp the original final field by its allowed
+  horizontal/vertical distance from the rectangle. This produces an outside-only, slope-safe collar
+  rather than multiplying parallax by a visually chosen feather.
+- **Leave a sampling safety margin.** The exact-zero core must extend by at least one final-field
+  sample/texel footprint beyond the detected overlay coverage. Bilinear sampling at the last glyph
+  edge must not mix in the outside collar.
+- **Use a loose rectangle, not a glyph-tight geometry mask.** A tight mask is the intuitive choice
   and it is wrong: it places a parallax cliff at every single stroke edge. The loose rectangle costs
   only a small patch of background near the subtitles being flattened toward the screen plane, which
   is acceptable cardboarding. This is the single most important design decision in this item.
-- Do not attempt inpainting behind the text. It is not needed: a region held at constant parallax
-  translates rigidly, so the text stays sharp without any recovery of what is behind it.
+- Do not inpaint the final color or pretend to recover the occluded background. Local fill exists
+  only in the sanitized inference copy. In the final color path, zero parallax makes the inverse
+  mapping the identity throughout the loose core and preserves the source pixels as delivered.
 
 **Detection.** Subtitles have a strong joint signature: high contrast (white or yellow, usually with
 a dark outline), **piecewise static in time** (a line persists for one to five seconds then changes
 abruptly), and dense in stroke gradients. The discriminating combination is *temporally
-piecewise-static* **and** *high gradient*; contrast alone will also select station logos, watermarks,
-and HUD elements — though since those deserve the same treatment, that particular false positive is
-cheap.
+piecewise-static* **and** *high gradient*. Station logos, watermarks, and screen-locked HUD elements
+share the same screen-space overlay treatment and do not need a separate semantic classifier; a
+small false-positive rectangle around one of them is usually useful rather than harmful.
 
-Both the temporal-difference and gradient machinery already exist on the GPU in the depth pipeline;
-prefer reusing them over adding a new pass.
+**Resolution contract:** measure luma gradients and temporal stability from the exact
+full-resolution video/source pixels **before** `rgb_to_nchw_cs.hlsl` area-resizes them to the DAV2
+tensor (commonly 770x434). Never detect text from the DAV2 input, raw depth, depth EMA mask, or any
+other model-resolution field: dense CJK strokes and dark outlines can already have been averaged
+away there. A GPU pass may pool the resulting full-resolution votes into tiles immediately, and a
+later pass may turn those tile statistics into loose rectangles, but edge extraction and temporal
+comparison must happen first at source-pixel resolution. Published rectangles remain half-open
+full-resolution source/ROI coordinates.
+
+The exact source-color SRV and its SDR/linear/HDR conversion policy are reusable from the current
+pipeline. The existing motion-edge mask is a model-resolution *depth* signal, while scene-cut RGB
+and ordinal evidence is model-resolution and reduced to global counters; neither is spatial
+subtitle evidence. Add one bounded full-resolution color-analysis pass, pool only compact tile
+statistics or rectangles, and never read a full-resolution mask back to the CPU.
+
+A minimal detector computes display-referred luma, local gradient/outline strength, and same-screen-
+coordinate temporal stability in that full-resolution pass, then pools compact tile counts and
+bounds. Connected components over eligible neighboring tiles produce stroke candidates; a small
+close/dilation joins glyphs and stacked lines. A subtitle candidate is piecewise stable and then
+replaced in roughly the same region. A logo, watermark, or HUD is persistently screen-locked. Camera
+cuts reset output authority, although the old rectangle may remain an unverified prior for rapid
+reacquisition. Position may rank candidates but must never be the deciding gate.
+
+A locked-off shot containing a real sign can be visually indistinguishable from a screen overlay for
+several frames. Fail closed in that case. Authorize only after the candidate either changes as a
+piecewise subtitle block or remains fixed while independently supported background motion or a real
+scene transition occurs around it. The detector may therefore take a short bounded interval to
+acquire; it must not flatten uncertain scene text merely to react on the first frame.
+
+All per-frame detector products carry the same source sequence, dimensions, transfer domain, and
+full-frame/ROI analysis-domain identity as the inference submission. Current and previous exclusion
+masks advance together with the corresponding model-input/depth history. A missing or mismatched
+product disables W2a treatment for that frame rather than borrowing a stale mask.
 
 Three properties of real hardsubbed content that a naive detector gets wrong:
 
@@ -282,12 +343,15 @@ Three properties of real hardsubbed content that a naive detector gets wrong:
   are the norm in this content, so a height prior calibrated on single-line English will clip the
   second line and leave half the text being warped.
 
-**The offline path can use stronger look-ahead without adding a whole-clip pre-pass.** Keep detection
-inside the existing scene buffer: revise provisional cut boundaries with look-ahead, accumulate
-piecewise-static high-gradient regions across that confirmed scene, then render the scene with its
-stable mask. Carry a conservative band prior across adjacent scenes only as a hint, never as an
-unverified mask. The live path remains causal and needs hysteresis. Build the shared mask consumer
-first, then give the scene-buffered and live paths separate producers.
+**The offline path can use stronger look-ahead without adding a whole-clip pre-pass.** Each frame's
+tight/dilated mask, sanitized inference copy, and pooled exclusion cells must be bound to that exact
+source frame *before* its DAV2 submission. Keep a bounded number of source frames if temporal
+confirmation requires look-ahead; an unsanitized inference result cannot be repaired retroactively.
+Within the existing scene buffer, revise candidates with look-ahead and finalize a stable loose-
+rectangle set for the physical scene before rendering it. Carry a conservative prior across
+adjacent scenes only as a hint, never as an unverified mask. The live path remains causal and needs
+hysteresis. Both paths may share the detector and final-field consumer; neither needs W1's cursor
+sprite compositor.
 
 **Acceptance and measurement.** The repository already contains evidence of this failure mode:
 `flat_page` is a synthetic static document page whose stated purpose is
@@ -296,16 +360,33 @@ first, then give the scene-buffered and live paths separate producers.
 [make_synth_clips.py:8](../tools/sbsbench/make_synth_clips.py:8)). That clip is full-page text, not
 overlaid subtitles, so it is evidence but not a gate.
 
-Add a subtitled clip to `tools/sbsbench/make_synth_clips.py` — an existing movie clip with white,
-dark-outlined text composited over it — so the change has a gate. Include a CJK variant, since it is
-the harder case.
+Phase 0.3 adds four deterministic, movie-like fixtures through
+`tools/sbsbench/make_synth_clips.py`: dense dark-outlined CJK subtitles, a tall bilingual stack,
+simultaneous disjoint top-and-bottom regions, and a 2560x1440 fine-stroke CJK sequence with
+empty/appear/replace/disappear states plus a real broad cut. The high-resolution probe retains only
+about 53% of its authored edge energy after a 770x434 round trip, directly covering the
+pre-downscale-detection requirement. Together the fixtures gate stroke density, height,
+multi-region layout, temporal transitions, and cut visibility without an external movie clip.
 
-Two new metrics are worth adding, and belong in the metric contract
+Four new metrics belong in the metric contract
 ([METRICS.md](../tools/sbsbench/METRICS.md)):
 
+- **Authored-region binocular support**, a hard minimum over both valid canonical samples and
+  mutually rendered output area. This prevents a mostly missing or horizontally collapsed subtitle
+  from passing on a handful of surviving identity samples.
 - **Disparity variance within the text region**, which should be approximately zero.
+- **Absolute target-disparity error within the text region.** Variance alone accepts a perfectly
+  rigid but wrong nonzero plane, so `subtitle_target_disparity_rms_error_pct` must be a hard gate
+  against the authored zero target.
 - **Text sharpness preservation**: the ratio of horizontal gradient energy in the text region after
   the warp to before it. Resampled glyphs lose high-frequency energy.
+
+These loose-region metrics gate final presentation, not the future sanitizer by themselves. Before
+the inference-exclusion producer ships, extend the high-resolution transition fixture with an exact
+tight/dilated overlay mask and the subtitle-free authored background. Use that oracle to verify that
+the sanitized tensor no longer carries glyph/outline structure, that subtitle-only transitions do
+not perturb cut or scene-center traces, and that the real broad cut remains visible. Do not infer a
+sanitizer pass merely from good final zero-plane metrics.
 
 The existing `swim` metric already covers subtitle depth instability (its definition — frame-to-frame
 depth change where the source is static — is exactly this case), and `rim_over` already covers the
@@ -313,22 +394,23 @@ bright fringe.
 
 ---
 
-### W3. Overlay masks in scene-cut evidence (deferred)
+### W3. Further overlay-mask reuse in scene evidence (deferred)
 
-The earlier proposal to exclude overlays from per-frame geometry statistics is obsolete. Current V2
-does not normalize geometry from a moving min/max or histogram. It latches the arithmetic mean of
-the first usable field as the scene center and holds it until a confirmed cut, so ordinary subtitle
-appearance cannot repeatedly pump the whole-frame mapping through that path.
+W2a's own exclusion is not deferred. Its conservative tensor-cell mask is part of the burned-in
+subtitle treatment and must gate both current/previous scene-cut evidence and the V2 moments that
+latch scene center. Otherwise the detector can remove text from DAV2 while subtitle appearance,
+replacement, or its approximate fill still perturbs the scene state.
 
-Min/max and histogram work that remains in the pipeline belongs to scene-cut evidence, not V2
-geometry. Only revisit an overlay mask there if authenticated traces show subtitles or the cursor
-causing false cut proposals despite the exposure/structure guards in
-[Host SBS scene cuts](host-sbs-scene-cuts.md). Do not add mask plumbing to the geometry reductions
-without such evidence.
+What remains deferred here is reuse for unrelated overlays or generic scene regions. Do not feed a
+cursor mask, HWND rectangle, browser chrome, or broad UI classifier into cut/geometry reductions
+without authenticated traces proving that specific defect. Current V2 does not use a moving
+min/max or histogram to normalize geometry, and broad masks can hide a genuine localized player
+cut. The W2a mask is narrow because it is backed by full-resolution, screen-locked edge evidence.
 
-**Acceptance if revisited.** A subtitled conformance clip must show that the mask reduces false cut
-evidence without hiding a real localized player cut. The rendered `swim` metric should remain at the
-noise floor across subtitle-only transitions before and after the change.
+**Acceptance.** A subtitled conformance clip must show that the W2a mask prevents subtitle-only
+transitions from proposing a cut or changing the latched scene center without hiding a real
+localized player cut. Common unmasked cells, not the full tensor area, own cut denominators. The
+rendered `swim` metric should remain at the noise floor across subtitle-only transitions.
 
 ---
 
@@ -671,7 +753,7 @@ infrastructure before its consumers, and put cheap de-risking probes before expe
 |---|---|---|
 | 0.1 | **Completed and retired:** dirty-rectangle investigation (part of [W6](#w6-video-roi-detection)) | It proved that DDup damage can resemble a video rectangle, then disproved it as semantic authority on pause, partial updates, and dynamic pages. The probe/tracker code was removed. |
 | 0.2 | **Implemented:** Chromium IA2 video-border attribution | The isolated helper selects the largest visible `<video>`, survives pause, fails closed on ambiguity, and publishes no COM work onto streaming threads. Host SBS validates causal ordering and binds the observation to one matched frame; the production ROI may consume it, while the optional dump artifact remains diagnostic only. |
-| 0.3 | Subtitled synthetic clips and the two new metrics ([W2a](#w2a-burned-in-subtitles--zero-parallax-mask)) | Repo process requires measuring before changing. Without a gate there is no way to demonstrate the subtitle mask works. Build the CJK and bilingual-stacked variants here, since they are the real content. |
+| 0.3 | Subtitled synthetic clips and four new metrics ([W2a](#w2a-burned-in-subtitles--zero-parallax-mask)) | Repo process requires measuring before changing. Variance alone cannot prove the authored zero plane, and surviving sample count alone cannot prove local binocular coverage, so target-error and authored-region support are hard gates. Dense-CJK, tall-bilingual, disjoint top-plus-bottom, and high-resolution transition/cut fixtures cover both real content shapes and pre-downscale temporal evidence. |
 
 #### Evaluate W6 border attribution
 
@@ -697,13 +779,13 @@ translation must retain scene state; ROI/full, identity, size, and transfer-doma
 reset it. Capture a schema-13 ROI Dump 3D and require its full-source inverse map to be identity
 beyond the conservative collar; the crop-local final field alone is not sufficient evidence.
 
-### Phase 1 — The overlay compositing framework
+### Phase 1 — Overlay treatment
 
 | # | Item | Why here |
 |---|---|---|
 | 1.1 | [W1 — cursor after the warp](#w1-composite-the-cursor-after-the-warp-candidate-defect) | Medium cross-backend change: first create an independent WGC cursor layer, then build the post-warp compositor. |
-| 1.2 | [W2a — subtitle zero-parallax mask](#w2a-burned-in-subtitles--zero-parallax-mask) | Reuses 1.1's compositing stage and its mask plumbing. Gated by 0.3. Ship the offline scene-buffered detector first; the live causal detector can follow. |
-| 1.3 | [W3 — masks in scene-cut evidence (deferred)](#w3-overlay-masks-in-scene-cut-evidence-deferred) | No geometry change is scheduled. Reuse the masks from 1.1/1.2 only if authenticated traces prove false cut evidence. |
+| 1.2 | [W2a — subtitle zero-parallax mask](#w2a-burned-in-subtitles--zero-parallax-mask) | Independent of W1: full-resolution detection, an inference-only sanitized copy, exact-frame exclusion, and a slope-safe final-field consumer. Gated by 0.3. Ship the offline scene-buffered producer first; the live causal producer can follow. |
+| 1.3 | [W3 — further overlay-mask reuse (deferred)](#w3-further-overlay-mask-reuse-in-scene-evidence-deferred) | W2a exclusion from cut evidence and scene-center moments is part of 1.2. Only unrelated overlay-mask reuse remains deferred and evidence-gated. |
 | 1.4 | [W12 — foreground/media classifier](#w12-foreground-process-and-media-state-classifier) | Evidence source only; it may choose a validated route but may not silently change V2 strength. |
 | 1.5 | [W13 — damage-guided depth reuse](#w13-damage-guided-depth-reuse-new-review-addition) | Start only with cursor-only reuse after W1. Broader reuse remains gated on move metadata and independent damage classification. |
 
@@ -740,10 +822,9 @@ These were identified during analysis but not confirmed against code. Verify bef
    ([offline_sbs_worker.cpp:5028](../src/offline_sbs_worker.cpp:5028)), so any stereo signalling must
    be added deliberately. This is worth settling independently of subtitles: it is what lets any
    player recognise the file as side-by-side rather than as a very wide 2D video.
-2. **Do sources in practice carry a soft subtitle stream alongside burned-in subtitles?** This sets
-   the priority of the disposition guard in [W2](#w2-subtitles-burned-into-the-picture). If such
-   sources are rare, the guard is a one-line precaution; if they are common, a user will hit the
-   broken auto-rendered overlay early.
+2. **How often do sources carry a soft subtitle stream alongside burned-in subtitles?** The
+   disposition safeguard in [W2](#w2-subtitles-burned-into-the-picture) is unconditional either way;
+   this question now measures how often it prevents disposition-driven broken auto-rendering.
 3. **How broadly does Chromium IA2 video geometry work in practice?** The target Edge pages produced
    stable playing, paused, multi-video, maximise, and restore rectangles, but canvas/WebGL players,
    CSS occlusion, accessibility policy, iframe structure, and browser overhead still need a larger
@@ -778,7 +859,7 @@ Every location below was confirmed against the current working tree on August 7,
 | [nvenc_base.cpp:363](../src/nvenc/nvenc_base.cpp:363) | lookahead explicitly disabled |
 | [nvenc_base.cpp:369](../src/nvenc/nvenc_base.cpp:369) | `enableAQ` is the only adaptive quantisation; no QP map (W8) |
 | [offline_sbs_worker.cpp:3991](../src/offline_sbs_worker.cpp:3991) | render pass drops subtitle streams with `-sn`; no effect on burned-in text (W2) |
-| [offline_sbs_worker.cpp:5018](../src/offline_sbs_worker.cpp:5018) | mux pass copies subtitle streams back with `-map 1:s?` — the disposition footgun (W2) |
+| [offline_sbs_worker.cpp:5018](../src/offline_sbs_worker.cpp:5018) | mux pass copies subtitle streams with `-map 1:s?` and clears their dispositions (W2) |
 | [host_sbs_resolution.h:19](../src/host_sbs_resolution.h:19) | source upper bounds: 5120 long side, 5120×2160 area |
 | [host_sbs_resolution.h:151](../src/host_sbs_resolution.h:151) | the gate authenticates the **fitted tensor shape**, so it is aspect-driven |
 | [DATASETS.md:18](../tools/sbsbench/DATASETS.md:18) | `flat_page` targets flat-content depth hallucination |

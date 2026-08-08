@@ -367,6 +367,7 @@ def metric_contract_files():
         os.path.join(SCRIPT_DIR, "sbs_interocular_phase_chroma.py"),
         os.path.join(SCRIPT_DIR, "sbs_interocular_photometric_rivalry.py"),
         os.path.join(SCRIPT_DIR, "sbs_stereo_window_metrics.py"),
+        os.path.join(SCRIPT_DIR, "sbs_subtitle_metrics.py"),
         os.path.join(SCRIPT_DIR, "sbs_warp_shear_metrics.py"),
         os.path.join(SCRIPT_DIR, "direct_geometry_contract.py"),
         os.path.join(SCRIPT_DIR, "cut_state_contract.py"),
@@ -590,6 +591,136 @@ def finalize_whole_clip_raw_identity(meta, manifests):
     return summaries
 
 
+def validate_subtitle_transition_contract(path, contract):
+    """Validate the authored high-resolution subtitle transition schedule exactly."""
+    expected_keys = {
+        "kind", "source_size_px", "detector_target_size_px",
+        "authored_glyph_stroke_width_px", "authored_outline_radius_px",
+        "empty_frame_ranges", "appear_frames", "subtitle_only_replacement_frames",
+        "disappear_frames", "broad_scene_cut_frames",
+        "overlay_replacement_at_scene_cut_frames", "subtitle_state_by_frame",
+        "scene_state_by_frame",
+    }
+    if not isinstance(contract, dict) or set(contract) != expected_keys:
+        raise ValueError(
+            "subtitle_transition_contract must be an exact object with keys "
+            f"{sorted(expected_keys)!r}")
+    if contract.get("kind") != "highres-empty-appear-replace-disappear-hard-cut":
+        raise ValueError("unsupported subtitle_transition_contract kind")
+
+    def positive_pair(name):
+        value = contract.get(name)
+        if (not isinstance(value, list) or len(value) != 2 or
+                any(not isinstance(item, int) or isinstance(item, bool) or item <= 0
+                    for item in value)):
+            raise ValueError(f"subtitle_transition_contract {name} must be two positive integers")
+        return value
+
+    source_size = positive_pair("source_size_px")
+    detector_size = positive_pair("detector_target_size_px")
+    if any(target > source for target, source in zip(detector_size, source_size)):
+        raise ValueError(
+            "subtitle_transition_contract detector target cannot exceed source size")
+    for name in ("authored_glyph_stroke_width_px", "authored_outline_radius_px"):
+        value = contract.get(name)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"subtitle_transition_contract {name} must be a positive integer")
+
+    source_by_id = sbsbench.indexed_files(os.path.join(path, "frame_*.*"), "frame_")
+    source_by_id = {
+        frame_id: frame_path for frame_id, frame_path in source_by_id.items()
+        if frame_path.lower().endswith((".png", ".jpg", ".jpeg"))
+    }
+    frame_count = len(source_by_id)
+    if set(source_by_id) != set(range(1, frame_count + 1)):
+        raise ValueError(
+            "subtitle_transition_contract requires contiguous one-based source frame IDs")
+    subtitle_states = contract.get("subtitle_state_by_frame")
+    scene_states = contract.get("scene_state_by_frame")
+    for name, states in (
+            ("subtitle_state_by_frame", subtitle_states),
+            ("scene_state_by_frame", scene_states)):
+        if (not isinstance(states, list) or len(states) != frame_count or
+                any(not isinstance(state, str) or not state for state in states)):
+            raise ValueError(
+                f"subtitle_transition_contract {name} must contain one non-empty string per "
+                "source frame")
+
+    def event_frames(name):
+        frames = contract.get(name)
+        if (not isinstance(frames, list) or
+                any(not isinstance(frame, int) or isinstance(frame, bool) or
+                    not 1 <= frame <= frame_count for frame in frames) or
+                len(set(frames)) != len(frames)):
+            raise ValueError(
+                f"subtitle_transition_contract {name} must contain unique in-range integers")
+        return frames
+
+    appear = event_frames("appear_frames")
+    replacements = event_frames("subtitle_only_replacement_frames")
+    disappear = event_frames("disappear_frames")
+    scene_cuts = event_frames("broad_scene_cut_frames")
+    cut_replacements = event_frames("overlay_replacement_at_scene_cut_frames")
+    if not set(cut_replacements).issubset(scene_cuts):
+        raise ValueError(
+            "subtitle_transition_contract overlay replacements at cuts must be scene cuts")
+
+    ranges = contract.get("empty_frame_ranges")
+    if (not isinstance(ranges, list) or
+            any(not isinstance(pair, list) or len(pair) != 2 or
+                any(not isinstance(frame, int) or isinstance(frame, bool)
+                    for frame in pair) or not 1 <= pair[0] <= pair[1] <= frame_count
+                for pair in ranges)):
+        raise ValueError(
+            "subtitle_transition_contract empty_frame_ranges must contain in-range pairs")
+    authored_empty = {
+        frame for start, end in ranges for frame in range(start, end + 1)
+    }
+    state_empty = {
+        frame for frame, state in enumerate(subtitle_states, 1) if state == "empty"
+    }
+    if authored_empty != state_empty:
+        raise ValueError(
+            "subtitle_transition_contract empty ranges disagree with subtitle states")
+
+    expected_appear = [
+        frame for frame in range(2, frame_count + 1)
+        if subtitle_states[frame - 2] == "empty" and subtitle_states[frame - 1] != "empty"
+    ]
+    expected_disappear = [
+        frame for frame in range(2, frame_count + 1)
+        if subtitle_states[frame - 2] != "empty" and subtitle_states[frame - 1] == "empty"
+    ]
+    expected_scene_cuts = [
+        frame for frame in range(2, frame_count + 1)
+        if scene_states[frame - 2] != scene_states[frame - 1]
+    ]
+    expected_replacements = [
+        frame for frame in range(2, frame_count + 1)
+        if (subtitle_states[frame - 2] != "empty" and
+            subtitle_states[frame - 1] != "empty" and
+            subtitle_states[frame - 2] != subtitle_states[frame - 1] and
+            scene_states[frame - 2] == scene_states[frame - 1])
+    ]
+    expected_cut_replacements = [
+        frame for frame in expected_scene_cuts
+        if subtitle_states[frame - 2] != subtitle_states[frame - 1]
+    ]
+    if (appear != expected_appear or disappear != expected_disappear or
+            replacements != expected_replacements or scene_cuts != expected_scene_cuts or
+            cut_replacements != expected_cut_replacements):
+        raise ValueError(
+            "subtitle_transition_contract event lists disagree with per-frame states")
+
+    expected_size = tuple(source_size)
+    for frame_path in source_by_id.values():
+        with Image.open(frame_path) as image:
+            if image.size != expected_size:
+                raise ValueError(
+                    "subtitle_transition_contract source_size_px disagrees with source frames")
+    return contract
+
+
 def load_clip_metadata(path, suite=None, required=True):
     """Load and validate clip metadata before any GPU work starts.
 
@@ -622,10 +753,33 @@ def load_clip_metadata(path, suite=None, required=True):
         # Existing external prepared caches are immutable inputs. Migrate the retired spelling in
         # memory, but never publish or interpret it as consumed ground-truth evidence.
         meta["reference_stereo_available"] = meta.pop("required_gt_stereo")
-    requirement_keys = ("required_gt_depth", "required_gt_flow")
+    requirement_keys = (
+        "required_gt_depth", "required_gt_flow", "required_gt_subtitle_region")
     for key in requirement_keys:
         if key in meta and not isinstance(meta[key], bool):
             raise ValueError(f"invalid clip metadata {meta_path}: {key} must be boolean")
+    if "subtitle_target_disparity_pct" in meta:
+        try:
+            meta["subtitle_target_disparity_pct"] = (
+                sbsbench.sbs_subtitle_metrics.validate_subtitle_target_disparity_pct(
+                    meta["subtitle_target_disparity_pct"]))
+        except ValueError as exc:
+            raise ValueError(f"invalid clip metadata {meta_path}: {exc}") from exc
+    if (meta.get("required_gt_subtitle_region") is True and
+            "subtitle_target_disparity_pct" not in meta):
+        raise ValueError(
+            f"invalid clip metadata {meta_path}: required_gt_subtitle_region needs explicit "
+            "subtitle_target_disparity_pct")
+    if "subtitle_transition_contract" in meta:
+        if meta.get("required_gt_subtitle_region") is not True:
+            raise ValueError(
+                f"invalid clip metadata {meta_path}: subtitle_transition_contract requires "
+                "required_gt_subtitle_region=true")
+        try:
+            validate_subtitle_transition_contract(
+                path, meta["subtitle_transition_contract"])
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"invalid clip metadata {meta_path}: {exc}") from exc
     if ("reference_stereo_available" in meta and
             not isinstance(meta["reference_stereo_available"], bool)):
         raise ValueError(
@@ -644,7 +798,7 @@ def load_clip_metadata(path, suite=None, required=True):
             any(meta.get(key) is True for key in requirement_keys)):
         raise ValueError(
             f"invalid clip metadata {meta_path}: conformance-only clips cannot declare "
-            "consumed depth/flow ground truth")
+            "consumed depth/flow ground truth or subtitle-region ground truth")
     if suite == "extended":
         if not isinstance(meta.get("dataset"), str) or not meta["dataset"].strip():
             raise ValueError(f"invalid extended clip metadata {meta_path}: dataset is required")
@@ -660,12 +814,13 @@ def load_clip_metadata(path, suite=None, required=True):
         if not has_consumed_gt and not (
                 is_reference_only and meta.get("reference_stereo_available") is True):
             raise ValueError(
-                f"invalid extended clip metadata {meta_path}: declare consumed depth/flow GT, "
+                f"invalid extended clip metadata {meta_path}: declare consumed depth/flow GT "
+                "or subtitle-region GT, "
                 "or explicitly mark a diagnostic stereo pair evaluation_role=reference-only")
         if is_reference_only and has_consumed_gt:
             raise ValueError(
                 f"invalid extended clip metadata {meta_path}: reference-only clips cannot "
-                "declare consumed depth/flow GT")
+                "declare consumed depth/flow GT or subtitle-region GT")
         if meta.get("required_gt_depth") and meta.get("gt_depth_kind") not in {
                 "disparity", "metric", "depth"}:
             raise ValueError(
@@ -820,6 +975,8 @@ def load_clip_metadata(path, suite=None, required=True):
     reference_patterns = {
         "required_gt_depth": os.path.join(path, "gt_depth", "frame_*.*"),
         "required_gt_flow": os.path.join(path, "gt_flow", "frame_*.npz"),
+        "required_gt_subtitle_region": os.path.join(
+            path, "gt_subtitle_region", "frame_*.png"),
         "reference_stereo_available": os.path.join(path, "gt_right", "frame_*.*"),
     }
     for key, pattern in reference_patterns.items():
@@ -827,6 +984,39 @@ def load_clip_metadata(path, suite=None, required=True):
             raise ValueError(
                 f"invalid clip metadata {meta_path}: {key} is true but no matching "
                 "reference sidecars exist")
+    if meta.get("required_gt_subtitle_region"):
+        source_by_id = sbsbench.indexed_files(
+            os.path.join(path, "frame_*.*"), "frame_")
+        source_by_id = {
+            frame_id: frame_path for frame_id, frame_path in source_by_id.items()
+            if frame_path.lower().endswith((".png", ".jpg", ".jpeg"))
+        }
+        region_by_id = sbsbench.indexed_files(
+            os.path.join(path, "gt_subtitle_region", "frame_*.png"), "frame_")
+        if set(region_by_id) != set(source_by_id):
+            missing = sorted(set(source_by_id) - set(region_by_id))
+            extra = sorted(set(region_by_id) - set(source_by_id))
+            raise ValueError(
+                f"invalid clip metadata {meta_path}: GT-subtitle-region/source frame-id "
+                f"mismatch: missing region={missing}, extra region={extra}")
+        for frame_id in sorted(source_by_id):
+            try:
+                with Image.open(source_by_id[frame_id]) as source_image:
+                    source_shape = (source_image.height, source_image.width)
+                region = sbsbench.load_binary_source_mask(
+                    region_by_id[frame_id], source_shape)
+                transition_contract = meta.get("subtitle_transition_contract")
+                if transition_contract is not None:
+                    expected_nonempty = (
+                        transition_contract["subtitle_state_by_frame"][frame_id - 1] !=
+                        "empty")
+                    if bool(np.any(region)) != expected_nonempty:
+                        raise ValueError(
+                            "subtitle_transition_contract state disagrees with authored mask")
+            except (OSError, ValueError) as exc:
+                raise ValueError(
+                    f"invalid clip metadata {meta_path}: malformed GT subtitle region for "
+                    f"frame {frame_id}: {exc}") from exc
     return meta
 
 
@@ -834,7 +1024,9 @@ def published_clip_metadata(source_meta):
     """Select reportable source metadata without colliding with evaluator provenance."""
     keys = (
         "name", "description", "expected_flat", "gt_depth_kind", "required_gt_depth",
-        "required_gt_flow", "reference_stereo_available", "dataset", "homepage", "citation",
+        "required_gt_flow", "required_gt_subtitle_region", "reference_stereo_available",
+        "subtitle_target_disparity_pct", "subtitle_transition_contract",
+        "dataset", "homepage", "citation",
         "license_note", "content_type", "evaluation_role", "source_url", "source_window",
         "source_artifacts", "shot_state_contract",
     )
@@ -853,7 +1045,7 @@ def source_evidence_digests(path):
     semantic_sidecars = (
         "gt_depth", "gt_depth_valid", "gt_depth_valid_all", "gt_depth_valid_nonocc",
         "gt_flow", "gt_right", "gt_occlusion", "gt_outofframe", "gt_right_disparity",
-        "gt_detail", "gt_match", "gt_sky",
+        "gt_detail", "gt_match", "gt_sky", "gt_subtitle_region",
     )
     files = glob.glob(os.path.join(path, "frame_*"))
     for directory in semantic_sidecars:
@@ -869,6 +1061,9 @@ def source_evidence_digests(path):
     meta = load_clip_metadata(path, required=False)
     semantic = {k: meta[k] for k in ("expected_flat", "gt_depth_kind", "dataset",
                                      "required_gt_depth", "required_gt_flow",
+                                     "required_gt_subtitle_region",
+                                     "subtitle_target_disparity_pct",
+                                     "subtitle_transition_contract",
                                      "reference_stereo_available", "evaluation_role",
                                      "content_type", "shot_state_contract") if k in meta}
     semantic_bytes = json.dumps(semantic, sort_keys=True).encode()

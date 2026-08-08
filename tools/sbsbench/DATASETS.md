@@ -22,6 +22,10 @@ iteration and contains real/curated content plus deterministic failure-mode prob
 | `sustained_motion_scene_cut` | A true replacement during persistent motion |
 | `structureless_history_bridge` | Black flash, persistent black, and supported scene return |
 | `structureless_white_history_bridge` | Saturated-white version of the structureless bridge |
+| `subtitle_cjk_dense` | Dense, outlined CJK burned-in subtitles over moving imagery |
+| `subtitle_bilingual_tall_stack` | Unusually tall four-line CJK/English subtitle stacks |
+| `subtitle_top_bottom_disjoint` | Simultaneous disjoint top-note and bottom-dialogue regions |
+| `subtitle_cjk_highres_transitions` | 1440p thin CJK strokes plus subtitle transitions and a true scene cut |
 
 The normative pulse schedule and detector expectations are maintained in
 [Host SBS scene cuts](../../docs/host-sbs-scene-cuts.md), not duplicated here.
@@ -31,6 +35,22 @@ Generate the deterministic fixtures with:
 ```powershell
 python tools/sbsbench/make_synth_clips.py
 ```
+
+The four subtitle fixtures can be regenerated without rewriting any older fixture:
+
+```powershell
+python tools/sbsbench/make_synth_clips.py subtitle_cjk_dense `
+  subtitle_bilingual_tall_stack subtitle_top_bottom_disjoint `
+  subtitle_cjk_highres_transitions
+```
+
+`subtitle_cjk_highres_transitions` is a lossless `2560x1440` probe with authored three-pixel CJK
+strokes and a two-pixel dark outline. Scaling it to the `770x434` detector canvas is approximately
+3.3x in each dimension, making the strokes genuinely sub-pixel there. Its exact metadata schedule
+is frames 1–4 empty, 5–8 cue A, 9–12 subtitle-only cue B replacement, 13–16 empty after a
+disappearance, 17–20 cue C, and 21–24 a broad scene replacement with cue C changing to cue D.
+The scene-cut contract expects the single genuine cut at frame 21, so excluding subtitle pixels
+cannot excuse missing the broad replacement outside the loose overlay region.
 
 ## Public extended suite
 
@@ -123,6 +143,26 @@ invalid, occluded, non-finite, and unsupported resize pixels never enter accurac
 `meta.json` must declare `gt_depth_kind`. Missing GT means the metric is not applicable—it is never
 inferred and never replaced by zero. `flat_page` and `fast_motion` contain deterministic synthetic
 disparity truth; the five legacy `c*` clips remain no-reference.
+
+### Subtitle region
+
+`gt_subtitle_region/frame_*.png` stores an 8-bit single-channel binary mask aligned exactly to its
+source frame: background is `0` and an authored subtitle region is `255`. Every source frame in a
+clip that declares `required_gt_subtitle_region: true` must have one same-sized mask with the same
+frame ID; missing, extra, differently sized, or non-`L`/non-binary sidecars are a dataset error.
+The same metadata must explicitly declare `subtitle_target_disparity_pct`. It is signed
+`x_right - x_left` disparity in the evaluator's reference-aspect image percentage and must be finite
+within `[-3.5, 3.0]`; all current subtitle fixtures author the screen plane as `0.0`.
+
+The mask is the union of one or more **loose rectangles around complete visual subtitle blocks**.
+It is deliberately not a glyph segmentation: nearby background padding belongs to the region so a
+future zero-parallax consumer does not put a disparity boundary around every stroke. Simultaneous
+top and bottom subtitles remain separate rectangles in the same binary mask. This sidecar records
+the unfeathered authored support; any feathering policy belongs to the consuming renderer rather
+than dataset truth. An empty mask represents a frame without visible subtitles. Masks retain full
+source-frame resolution, matching the runtime plan to detect burned-in pixels before inference
+downscaling. Their pixels, requirement flag, authored target disparity, and any strict
+`subtitle_transition_contract` schedule are part of clip identity.
 
 ### Flow
 

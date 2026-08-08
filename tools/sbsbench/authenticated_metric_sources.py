@@ -13,6 +13,8 @@ import os
 import numpy as np
 from PIL import Image
 
+import sbs_subtitle_metrics
+
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CLIPS_ROOT = os.path.join(SCRIPT_DIR, "clips")
@@ -52,6 +54,22 @@ def discover_clips(roots):
                 meta = json.load(stream)
             if not meta.get("name"):
                 raise ValueError(f"unauthenticated clip {clip_dir}: missing name metadata")
+            if "required_gt_subtitle_region" in meta and not isinstance(
+                    meta["required_gt_subtitle_region"], bool):
+                raise ValueError(
+                    f"unauthenticated clip {clip_dir}: "
+                    "required_gt_subtitle_region must be boolean")
+            if meta.get("required_gt_subtitle_region") is True:
+                if "subtitle_target_disparity_pct" not in meta:
+                    raise ValueError(
+                        f"unauthenticated clip {clip_dir}: required_gt_subtitle_region "
+                        "needs explicit subtitle_target_disparity_pct")
+                try:
+                    meta["subtitle_target_disparity_pct"] = (
+                        sbs_subtitle_metrics.validate_subtitle_target_disparity_pct(
+                            meta["subtitle_target_disparity_pct"]))
+                except ValueError as exc:
+                    raise ValueError(f"unauthenticated clip {clip_dir}: {exc}") from exc
             if meta.get("suite"):
                 if "required_gt_stereo" in meta:
                     retired = meta.pop("required_gt_stereo")
@@ -67,7 +85,10 @@ def discover_clips(roots):
                     meta["reference_stereo_available"] = retired
                 required = ("dataset", "citation", "license_note")
                 missing = [key for key in required if not meta.get(key)]
-                evidence_keys = ("required_gt_depth", "required_gt_flow")
+                evidence_keys = (
+                    "required_gt_depth", "required_gt_flow",
+                    "required_gt_subtitle_region",
+                )
                 has_consumed_gt = any(meta.get(key) is True for key in evidence_keys)
                 if (not has_consumed_gt and meta.get("reference_stereo_available") is True and
                         "evaluation_role" not in meta):
@@ -78,14 +99,17 @@ def discover_clips(roots):
                                    (is_reference_only and has_diagnostic_pair)):
                     raise ValueError(
                         f"unauthenticated extended clip {clip_dir}: missing provenance "
-                        f"{missing}, consumed depth/flow GT, or an explicit reference-only pair")
+                        f"{missing}, consumed depth/flow GT or subtitle-region GT, or an "
+                        "explicit reference-only pair")
                 if is_reference_only and has_consumed_gt:
                     raise ValueError(
                         f"unauthenticated extended clip {clip_dir}: reference-only clips "
-                        "cannot declare consumed depth/flow GT")
+                        "cannot declare consumed depth/flow GT or subtitle-region GT")
                 reference_patterns = {
                     "required_gt_depth": os.path.join(clip_dir, "gt_depth", "frame_*.*"),
                     "required_gt_flow": os.path.join(clip_dir, "gt_flow", "frame_*.npz"),
+                    "required_gt_subtitle_region": os.path.join(
+                        clip_dir, "gt_subtitle_region", "frame_*.png"),
                     "reference_stereo_available": os.path.join(
                         clip_dir, "gt_right", "frame_*.*"),
                 }

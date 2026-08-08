@@ -1025,6 +1025,7 @@ class LabelProvenanceTests(unittest.TestCase):
                 "sbs_interocular_phase_chroma.py": "phase-chroma-v1\n",
                 "sbs_interocular_photometric_rivalry.py": "photometric-v1\n",
                 "sbs_stereo_window_metrics.py": "window-v1\n",
+                "sbs_subtitle_metrics.py": "subtitle-v1\n",
                 "sbs_warp_shear_metrics.py": "shear-v1\n",
                 "direct_geometry_contract.py": "direct-geometry-v1\n",
                 "cut_state_contract.py": "cut-state-v1\n",

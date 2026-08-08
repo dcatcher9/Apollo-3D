@@ -901,6 +901,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                 "tools/sbsbench/sbs_interocular_phase_chroma.py",
                 "tools/sbsbench/sbs_interocular_photometric_rivalry.py",
                 "tools/sbsbench/sbs_stereo_window_metrics.py",
+                "tools/sbsbench/sbs_subtitle_metrics.py",
                 "tools/sbsbench/sbs_warp_shear_metrics.py",
                 "tools/sbsbench/direct_geometry_contract.py",
                 "tools/sbsbench/cut_state_contract.py",

@@ -744,7 +744,8 @@ class EvalContractTests(unittest.TestCase):
             "sbsbench.py", "sbs_interocular_metrics.py",
             "sbs_interocular_phase_chroma.py",
             "sbs_interocular_photometric_rivalry.py", "sbs_stereo_window_metrics.py",
-            "sbs_warp_shear_metrics.py", "direct_geometry_contract.py",
+            "sbs_subtitle_metrics.py", "sbs_warp_shear_metrics.py",
+            "direct_geometry_contract.py",
             "cut_state_contract.py", "thresholds.json",
         })
 
@@ -2203,7 +2204,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertEqual(set(primary_style),
                          configured_primary | {"exact_visible_pop_spread_pct"})
         self.assertEqual(set(hard), configured_hard)
-        self.assertEqual(len(hard), 15)
+        self.assertEqual(len(hard), 17)
         self.assertEqual(set(supporting),
                          configured_diagnostic - {"exact_visible_pop_spread_pct"})
         self.assertIn("exact_local_polarity_component_pct", supporting)

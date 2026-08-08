@@ -201,6 +201,12 @@ namespace offline_sbs {
     std::uintmax_t consumed_bytes,
     std::uintmax_t additional_bytes
   );
+  std::vector<std::string> build_mux_command_for_test(
+    const worker_spec_t &spec,
+    const media_contract_t &media,
+    const nlohmann::json &source_inventory,
+    const std::filesystem::path &encoded_video
+  );
 
   struct streaming_probe_test_result_t {
     media_contract_t media;
