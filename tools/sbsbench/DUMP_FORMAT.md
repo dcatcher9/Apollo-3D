@@ -15,6 +15,8 @@ published as successful dumps.
 | Artifact | Meaning |
 |---|---|
 | `source.png` | Source color frame paired with this depth result |
+| `depth_input_source.png` | Spatial preview of the full source or exact inward crop submitted to DAV2; diagnostic only |
+| `depth_input_region.json` | Hashed authority for analysis placement, tensor extent, ROI authorization, embedding scale, and exterior collar |
 | `model_input.f32` | Exact ImageNet-normalized NCHW model tensor |
 | `model_input.png` | Inverse-normalized, viewable model-input preview |
 | `model_input_shape.json` | Tensor shape and layout |
@@ -38,8 +40,23 @@ compatibility views. Production V2 may omit them, and the renderer never consume
 | `warp_depth.f32` | Compatibility name for the actual scalar field sampled by reprojection |
 
 Each floating-point field has a shape document and, where generated, a stretched PNG preview.
-Only the final parallax field has rendering authority. Independently normalized previews cannot
-prove absolute scale or compare two dumps quantitatively; use the `.f32` artifacts.
+In full-source mode the final parallax field is the rendering position authority. In video-region
+mode it is crop-local ROI-U, so rendering authority is the pair
+`{shadow_final_parallax.f32, depth_input_region.json}`. Independently normalized previews cannot
+prove absolute scale or compare two dumps quantitatively; use the hashed numeric artifacts.
+
+The package deliberately carries two spatial domains:
+
+| Domain | Artifacts |
+|---|---|
+| Full matched source/output | `source.png`, `sbs.png`, `warp_map.f32`, `warp_mask.png` |
+| Analysis source | `depth_input_source.png`; full source in ordinary mode, inward ROI crop in video-region mode |
+| Crop-local tensor | `model_input.*`, `raw_depth.*`, every `shadow_*` field, and `warp_depth.*` |
+
+`dimensions.source` remains the full capture. `dimensions.analysis_source` is the exact same-format
+texture submitted to preprocessing and ownership. Every tensor field must match the authenticated
+model extent recorded by `depth_input_region.json`; a consumer must never stretch crop-local depth
+over the full source.
 
 ### Warp and rendered artifacts
 
@@ -50,7 +67,7 @@ prove absolute scale or compare two dumps quantitatively; use the `.f32` artifac
 | `warp_displacement_heat.png` | Derived eye-pixel displacement visualization |
 | `warp_mask.png` | Finite-source-boundary mask, not an internal visibility mask |
 | `sbs.png` | Packed SBS output shown to the encoder/client |
-| `window_video_border.json` | Optional matched-source, half-open browser-video rectangle and identity; diagnostic only |
+| `window_video_border.json` | Matched-source browser-video rectangle and identity; optional for full-source dumps, required and hashed for ROI dumps |
 | `dump_manifest.json` | Effective model, producer, renderer, color, state, and artifact authority |
 | `adaptive_state.json` | Compatibility-shaped cut/depth-health telemetry |
 | `meta.txt` | Human-readable summary; never the machine authority |
@@ -68,7 +85,9 @@ the source extent, matched frame ID, HWND/process/document/video identity, obser
 latest-heartbeat age, uninterrupted geometry age, and source-content age at capture. Validation
 requires a fresh heartbeat and proves that the exact geometry run began no later than the source
 content. A stale, noncausal, out-of-bounds, identity-incomplete, or frame-mismatched snapshot is
-omitted; it never invalidates the otherwise authenticated V2 package.
+omitted from an ordinary full-source package. An ROI-active package instead requires and hashes the
+artifact because `depth_input_region.json` cross-checks its semantic rectangle and exact
+HWND/process/document/video identity.
 The manifest summary always records the declared observer and screen-to-capture mapping status so
 an omitted optional artifact has a machine-readable reason.
 Package verification opens and validates the file whenever the manifest advertises it as
@@ -76,8 +95,24 @@ available, and cross-checks its frame ID and source extent against `dump_manifes
 malformed, or mismatched advertised artifact fails verification. An unavailable artifact remains
 non-authoritative and is not consulted.
 
-This artifact has no geometry or renderer authority. In particular, its presence does not imply
-that production cropped depth inference, masked pixels outside the video, or moved the zero plane.
+The border artifact has no renderer authority by itself. `depth_input_region.json` (schema 1) is
+the authority that distinguishes `full-source` from `video-region`.
+
+For ROI it records the semantic rectangle, deterministic inward inference rectangle, independent
+analysis generation/domain-reset state, tensor extent, observer authorization, exact float renderer
+scale, and signed outside-only slope collar. The inference rectangle must be the production
+planner's centered inward fit, never padding, stretching, or outward expansion, and may trim at
+most 2% of semantic area.
+
+ROI verification requires hashes for the region, semantic border, and full-source inverse map. It
+recomputes the deterministic float32 planner and renderer constants, validates crop/full dimensions,
+and examines the selected `warp_map.f32`. On full-source samples beyond maximum conservative collar
+support, the raw inverse map must equal the unwarped source coordinate within 0.005 output-eye pixel.
+The report records maximum embedded parallax, horizontal/vertical collar burden in source pixels,
+exterior sample count, beyond-collar count/fraction, and maximum identity error. A near-full ROI may
+honestly report zero beyond-collar raster samples when its entire visible surround lies inside the
+required slope collar.
+
 The existing `sbs_stereo_window_metrics.py` metric scores the fitted display's outer lateral
 border. It cannot be applied unchanged to this inner rectangle: a video-frame metric must restrict
 support to the rectangle and measure subject disparity relative to the visible frame's own
@@ -92,7 +127,8 @@ named contract:
 |---|---:|---|
 | Depth Coordinate V2 | 26 | Calibrated producer, authorization state, constants, and complete shader closure |
 | Direct-geometry harness | 25 | Independent comparison-only replay input |
-| Dump manifest | 12 | One Dump 3D package and its artifact authority |
+| Dump manifest | 13 | One Dump 3D package, analysis domain, and artifact authority |
+| Depth-input region | 1 | Full-source or crop-local analysis placement and live renderer embedding |
 | V2 state dump | 16 | Serialized scene-camera and renderer-authorization state |
 | V2 frame statistics | 2 | Serialized frame-local statistics |
 | Warp-map shape | 2 | Renderer-specific exact source-map layout and mask meaning |
@@ -167,6 +203,12 @@ explicit pop treatment may vary.
 This native GPU sequence replay consumes the authenticated raw tensors directly and does not
 execute TensorRT. Its timing therefore covers coordinate-state production and rendering, not model
 inference.
+
+Schema-13 dumps capture both ordinary full-frame and foreground-Chromium ROI domains. The standalone
+`replay_depth_mapping_v2.py` command still supports only full-source dumps: it fails closed on an ROI
+package before creating output because the direct replay harness does not yet consume
+`depth_input_region.json`, crop-local temporal state, full-source scale, or the outside-only collar.
+This restriction applies to replay, not to capture or package verification.
 
 The state trace records field validity, retained scene-camera validity, confirmed-cut attribution,
 the ABI-retained `container_scale = 1.0`, effective requested gain, and source/render identity. The

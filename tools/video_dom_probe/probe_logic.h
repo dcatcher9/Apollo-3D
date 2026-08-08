@@ -1,10 +1,11 @@
 /**
- * Pure parsing, geometry, and selection helpers for video-dom-info.
+ * Pure parsing, geometry, selection, and machine-acquisition policy for video-dom-info.
  */
 
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -13,6 +14,99 @@
 #include <vector>
 
 namespace video_dom_probe {
+  struct machine_event_generations_t {
+    std::uint64_t foreground {};
+    std::uint64_t object {};
+  };
+
+  struct machine_event_policy_t {
+    bool discard_completed_scan {};
+    bool invalidate_semantic_state {};
+    bool request_follow_up_audit {};
+  };
+
+  // Object WinEvents are deliberately advisory: dynamic pages can continuously create,
+  // relocate, or destroy unrelated accessible objects while a complete census is running.
+  // Preserve an independently validated semantic observation and schedule another audit.
+  // A foreground transition changes the authority boundary and must invalidate the result.
+  [[nodiscard]] inline machine_event_policy_t machine_event_policy(
+    machine_event_generations_t before,
+    machine_event_generations_t after
+  ) noexcept {
+    if (after.foreground != before.foreground) {
+      return {
+        .discard_completed_scan = true,
+        .invalidate_semantic_state = true,
+        .request_follow_up_audit = true,
+      };
+    }
+
+    return {
+      .request_follow_up_audit = after.object != before.object,
+    };
+  }
+
+  enum class cached_selection_phase_e {
+    provisional,
+    established,
+  };
+
+  struct cached_refresh_policy_t {
+    bool retain_selection {};
+    cached_selection_phase_e next_phase {cached_selection_phase_e::provisional};
+    bool publish_ok {};
+    bool request_follow_up_audit {};
+  };
+
+  // A complete census authorizes only a provisional selection. The following machine tick
+  // must authenticate the retained document/video objects again before the selection becomes
+  // externally authoritative. Unrelated object WinEvents remain advisory, matching established
+  // cache behavior, while a foreground transition is always a hard authority-boundary veto.
+  [[nodiscard]] inline cached_refresh_policy_t cached_refresh_policy(
+    cached_selection_phase_e current_phase,
+    bool exact_refresh_succeeded,
+    machine_event_policy_t events
+  ) noexcept {
+    if (!exact_refresh_succeeded || events.discard_completed_scan ||
+        events.invalidate_semantic_state) {
+      return {
+        .request_follow_up_audit = events.request_follow_up_audit,
+      };
+    }
+
+    return {
+      .retain_selection = true,
+      .next_phase = current_phase == cached_selection_phase_e::provisional ?
+                      cached_selection_phase_e::established : current_phase,
+      .publish_ok = true,
+      .request_follow_up_audit = events.request_follow_up_audit,
+    };
+  }
+
+  enum class uncached_scan_outcome_e {
+    warming_up,
+    traversal_incomplete,
+    accessibility_unavailable,
+    other,
+  };
+
+  // Retry an interrupted tree walk promptly, but retain the deliberate long backoff after the
+  // cold-accessibility limit so a Chromium provider without ExtendedProperties is not hammered.
+  [[nodiscard]] inline constexpr std::chrono::milliseconds uncached_scan_retry_delay(
+    uncached_scan_outcome_e outcome
+  ) noexcept {
+    using namespace std::chrono_literals;
+    switch (outcome) {
+      case uncached_scan_outcome_e::warming_up:
+      case uncached_scan_outcome_e::traversal_incomplete:
+        return 1s;
+      case uncached_scan_outcome_e::accessibility_unavailable:
+      case uncached_scan_outcome_e::other:
+        return 15s;
+    }
+    return 15s;
+  }
+
   struct rect_t {
     long left {};
     long top {};
@@ -236,6 +330,45 @@ namespace video_dom_probe {
     std::optional<std::size_t> index;
     selection_reason_e reason {selection_reason_e::none};
   };
+
+  [[nodiscard]] inline bool selection_can_stage_provisional(
+    const selection_t &selection
+  ) noexcept {
+    return selection.index.has_value() &&
+           (selection.reason == selection_reason_e::single ||
+            selection.reason == selection_reason_e::largest);
+  }
+
+  struct complete_census_policy_t {
+    bool stage_selection {};
+    bool revoke_cached_selection {};
+    cached_selection_phase_e phase {cached_selection_phase_e::provisional};
+    bool publish_ok {};
+  };
+
+  // A matching established cache was independently refreshed immediately before the census, so
+  // replacing its retained handles does not reduce its authority. Every new unique selection is
+  // provisional and must stay unpublished until cached_refresh_policy() runs on the next tick.
+  [[nodiscard]] inline complete_census_policy_t complete_census_policy(
+    const selection_t &selection,
+    bool matches_established_selection
+  ) noexcept {
+    if (!selection_can_stage_provisional(selection)) {
+      return {.revoke_cached_selection = true};
+    }
+    if (matches_established_selection) {
+      return {
+        .stage_selection = true,
+        .phase = cached_selection_phase_e::established,
+        .publish_ok = true,
+      };
+    }
+    return {
+      .stage_selection = true,
+      .phase = cached_selection_phase_e::provisional,
+      .publish_ok = false,
+    };
+  }
 
   [[nodiscard]] inline selection_t select_candidate(std::span<const video_candidate_t> candidates) {
     std::vector<std::size_t> eligible;

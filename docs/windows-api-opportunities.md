@@ -52,9 +52,12 @@ important corrections:
 
 The Desktop Duplication dirty-rectangle investigation in Phase 0.1 is complete and rejected as a
 video-boundary authority. W6 now uses a supervised Chromium IAccessible2 helper to bind a fresh,
-causally-prior `<video>` element rectangle observation to a matched Host-SBS frame. That rectangle is diagnostic border
-evidence only; it does **not** crop capture, change DAV2 input, or change rendering/depth behavior.
-Later W6 geometry work remains a proposal until the stereo-window policy passes its own gate.
+causally-prior `<video>` element rectangle observation to a matched Host-SBS frame. The production
+Desktop-Duplication route now uses that result for a strict foreground-browser ROI when its aspect
+can reach the current authenticated tensor with at most 2% inward area trimming. It never pads, expands,
+or stretches the detected video. Observer, rectangle, fit, and crop-resource eligibility failures
+leave the route on ordinary full-frame V2; internal base-V2 authentication failures still render
+flat. The optional `window_video_border.json` artifact is diagnostic only.
 
 ## Context an implementer needs
 
@@ -65,8 +68,9 @@ its configuration surface were deleted in commit `cf478187`. An invalid or unaut
 renders **flat** SBS; there is no alternate renderer and no fallback geometry.
 
 The live path is, in order: desktop capture (DXGI Desktop Duplication, with a Windows.Graphics.Capture
-path alongside it) → cursor blend → `convert()` → DAV2 depth inference → V2 coordinate mapping →
-signed final parallax → an 11-iteration contractive inverse warp → SBS packing → NVENC.
+path alongside it) → cursor blend → exact foreground-video attribution or full-frame selection →
+`convert()` → DAV2 depth inference → V2 coordinate mapping → signed final parallax → an
+11-iteration contractive inverse warp → SBS packing → NVENC.
 
 Only three configuration keys survive on this surface: `sbs_3d_pop_strength`,
 `sbs_3d_max_encode_width`, `sbs_3d_cuda_graph`. Do not reintroduce removed keys; the deletion was
@@ -87,11 +91,16 @@ The practical consequences:
   ([src/host_sbs_resolution.h:19](../src/host_sbs_resolution.h:19)). There is no lower bound beyond
   non-empty.
 - An **arbitrary** aspect ratio (an ROI of, say, 1123×649) will usually fit a shape that is not in
-  the shipped calibration and will **fail closed to flat SBS**.
+  the shipped calibration and cannot be submitted directly.
 
-Therefore any ROI feature must snap its detected rectangle to an authenticated aspect before
-submitting it, rather than warping the exact detected pixel rect. In practice this is cheap, because
-video content is almost always 16:9 or 2.39:1.
+The implemented Chromium ROI keeps the full-frame session's already authenticated tensor shape. If
+the exact detected rectangle misses that aspect slightly, it may trim inward by at most 2% of its
+area while retaining the largest centered portion. It never expands into a player frame, pads the tensor, or
+stretches pixels. A larger mismatch or invalid rectangle selects ordinary full-frame V2; it does not
+turn an otherwise supported Host SBS stream flat.
+
+An exact semantic rectangle equal to the full capture is canonical full-frame V2. It bypasses crop,
+trim, ROI-domain reset, and ROI embedding.
 
 ### Non-negotiable repo process
 
@@ -325,7 +334,8 @@ noise floor across subtitle-only transitions before and after the change.
 
 ### W4. A window model from Win32 and DWM
 
-This is the enabling infrastructure for W5, W6, and W7. It has no user-visible effect on its own.
+This is the enabling infrastructure for W5, W7, and future generic or occlusion-aware extensions to
+W6. The strict foreground-Chromium ROI does not depend on this top-level window model.
 
 **Approach.** Maintain a live model of the desktop's window layout in the host:
 
@@ -386,9 +396,11 @@ off until those precision tests pass.
 
 ### W6. Video ROI detection
 
-**Goal.** When video plays inside a browser/player window, or a game runs in a desktop window, find
-that dynamic-content rectangle so a later milestone can apply stereo conversion there while leaving
-the rest of the desktop flat.
+**Goal and current boundary.** The implemented route finds the unique largest visible Chromium
+`<video>` in the foreground browser, performs one crop-local V2 analysis, and leaves the surrounding
+desktop at zero parallax beyond the required edge collar. Generic player windows, background
+browsers, windowed games, occlusion reasoning, and multiple simultaneous 3D regions remain later
+work.
 
 **Rejected damage-metadata route.** Target-machine traces initially looked promising: a windowed
 video repeatedly produced `820:510-2471:1439`, and maximise produced approximately the full capture.
@@ -419,41 +431,55 @@ ninja -C cmake-build-relwithdebinfo video-dom-info
 cmake-build-relwithdebinfo/tools/video-dom-info.exe --all-scans --interval-ms 1000
 ```
 
-Keep Chrome or Edge in the foreground during the measurement. The probe lists every exact video
-node, but marks a candidate only after two complete scans select the same document identity, video
-identity, and rectangle. Unrelated DOM churn is intentionally ignored. From the available,
-fully-contained videos whose area is at least 5% of the foreground browser client, it selects the
-unique largest visible rectangle; equal-area leaders remain ambiguous. Paused video needs no
-stale-identity exception: its same DOM node and rectangle should remain present in each fresh scan.
+Keep Chrome or Edge in the foreground during the measurement. The human diagnostic mode lists every
+exact video node and applies a two-census display filter. Production machine mode instead stages a
+unique candidate after one complete census, retains its document/video COM nodes without publishing
+authority, and promotes it only when the next 100 ms tick independently confirms the same identities,
+states, and rectangle. This avoids requiring a second expensive whole-tree walk while preserving a
+separate observation boundary. From the available, fully-contained videos whose area is at least 5%
+of the foreground browser client, it selects the unique largest visible rectangle; equal-area leaders
+remain ambiguous. Paused video needs no stale-identity exception: its same DOM node and rectangle
+remain available to the cached-object check.
+
 Partial clipping, an incomplete or changing tree walk, a foreground change, and unexpected COM
-failures expose no initial candidate. After selection, the machine mode retains the selected
-document/video COM nodes for a cheap 100 ms exact-identity/geometry check. A transient incomplete
-full census cannot erase that independently revalidated cache. A foreground change or failed cache
-check invalidates immediately; unrelated object events request a coalesced audit without erasing a
-still-valid cached video, so dynamic controls and ads do not create a permanent rescan loop. A
-complete fallback audit runs every 15 seconds. Because audits are coalesced to at most one per three
-seconds, a newly appearing larger video can replace a still-valid old selection only after that
-bounded audit and semantic confirmation. This lag is acceptable for diagnostic evidence, but must
-be eliminated or explicitly handled before the rectangle gains rendering authority. Sunshine
-supervises the helper out of process, accepts only a strict versioned record with a fresh heartbeat,
-and kills/restarts a silent helper. The streaming path performs one atomic snapshot read and no COM,
-IPC wait, image readback, or allocation.
+failures expose no initial candidate. An unselected incomplete census retries within one second;
+confirmed accessibility unavailability retains the 15-second backoff so Chromium is not continuously
+walked. After promotion, a transient incomplete full census cannot erase an independently revalidated
+cache. A foreground change or failed cache check invalidates immediately; unrelated object events
+request a coalesced audit without erasing a still-valid cached video, so dynamic controls and ads do
+not create a permanent rescan loop. A complete fallback audit runs every 15 seconds. Because audits
+are coalesced to at most one per three seconds, a newly appearing larger video can replace a
+still-valid old selection only after that bounded audit and semantic confirmation. Until replacement
+is confirmed, only the independently revalidated current identity is eligible; a foreground change
+or stale/failed validation immediately returns production to full-frame V2. Sunshine supervises the
+helper out of process, accepts only a strict versioned record with a fresh heartbeat, and
+kills/restarts a silent helper. The streaming path performs one atomic snapshot read and no COM, IPC
+wait, or GPU-to-CPU image readback.
 
-With `diagnostics = enabled`, Host SBS clips at most one physical pixel of Chromium/DPI endpoint
-overflow, converts the physical screen rectangle to an identity-oriented single-output capture,
-and binds a causally-prior geometry run to one private matched color slot. The latest helper
-heartbeat may be newer than paused source content, but the exact HWND/process/document/video/rect
-tuple must have remained continuously valid since no later than that content timestamp. Any status,
-identity, or one-pixel rectangle change starts a new run. DDup uses `LastPresentTime`, never a later
-cursor-only timestamp. The host also rechecks foreground HWND and PID immediately before binding.
-Dump 3D records that frame-bound border and the
-observer/mapping failure reason when unavailable. This is bounded-fresh diagnostic attribution,
-not proof of simultaneous compositor geometry: WinEvent delivery can lag briefly. Failure continues
-ordinary full-frame V2, and the border does not crop DAV2 or alter the renderer.
+While Host SBS is active, it clips at most one physical pixel of Chromium/DPI endpoint overflow,
+converts the physical screen rectangle to an identity-oriented single-output capture, and binds a
+causally-prior geometry run to one private matched color slot. The latest helper heartbeat may be
+newer than paused source content, but the exact HWND/process/document/video/rect tuple must have
+remained continuously valid since no later than that content timestamp. Any status, identity, or
+one-pixel rectangle change starts a new run. DDup uses `LastPresentTime`, never a later cursor-only
+timestamp. The host also rechecks foreground HWND and PID immediately before binding.
 
-The matched-frame diagnostic currently authorizes only Desktop Duplication. WGC has no
-`LastPresentTime` equivalent for separating content from cursor-only compositor frames and therefore
-fails closed to no border.
+An exact semantic rectangle equal to the full capture is first canonicalized to ordinary full-frame
+V2, with no crop, trim, ROI-domain reset, or active-ROI dump rejection. Otherwise the production slot
+may trim the video rectangle inward by at most 2% of its area so its aspect maps to the current
+full-frame authenticated tensor. It never trims more, grows into browser chrome, pads, or stretches.
+A same-format D3D11 crop becomes the only DAV2 and ownership source for that frame; scene cuts,
+center, and temporal histories are crop-local. The full captured texture remains the color source.
+After V2, local parallax is multiplied by `ROI_width / source_width` to preserve pixel shift, and an
+outside-only signed collar decays at the production slope limits to exact zero beyond the collar
+without changing any ROI-interior value.
+
+This live route currently authorizes only Desktop Duplication. WGC has no `LastPresentTime`
+equivalent for separating content from cursor-only compositor frames and therefore uses full-frame
+V2. Diagnostics may record the frame-bound semantic border and the observer/mapping failure reason,
+but that observation is not the live renderer authority by itself. Dump 3D schema 13 records the
+crop-local analysis field, authoritative full-source placement/collar contract, and exact
+full-source inverse map as distinct evidence.
 
 A paused page captured before the first valid geometry run still has no matched-frame border. The
 host waits for a real `LastPresentTime`; once the geometry predates a presented content frame,
@@ -464,29 +490,36 @@ Chromium's IA2 rectangle is still a semantic element box, not proof that every p
 CSS clipping/occlusion, canvas or WebGL players, protected content, and disabled accessibility can
 all defeat it. Reading extended IA2 attributes enables Chromium's richer accessibility
 serialization process-wide, so browser CPU and memory overhead remain part of live qualification.
+If an overlay is actually captured inside an otherwise authorized semantic rectangle, it is ordinary
+crop content for DAV2; this route does not recover the unoccluded video or construct a visible mask.
 
 NVIDIA RTX Video does not provide an alternate public discovery API. Chromium already owns the
 decoded texture and content rectangle and explicitly enables NVIDIA processing on that D3D11 video
 stream. The driver is therefore receiving identified application-owned video, not discovering an
 external DOM rectangle that Sunshine can query.
 
-**The hard part is not detection.**
+**The rendering policy is deliberately minimal.**
 
-- **Stereo window and frame violation.** Warping a sub-rectangle makes its border a stereo window.
-  Content inside with crossed, in-front-of-screen disparity that is cut by that border produces contradictory occlusion
-  and disparity cues. The floating-window treatment that is currently deferred for the full-screen
-  case becomes **mandatory** here. The cheaper alternative is biasing the ROI's zero plane so all its
-  content sits at or behind the screen plane.
-- **Disocclusion at the ROI edge is better than full-screen, not worse.** Full-screen warping can
-  only clamp at the frame edge. Inside an ROI, the pixels that should be revealed are actually
-  present — they are the surrounding desktop. Sampling them is geometrically imperfect (that content
-  is at screen depth, not video depth) but far better than smearing.
-- **Aspect snapping is mandatory.** See
-  [the resolution constraint](#a-resolution-constraint-that-will-bite-roi-work). Submit an
-  authenticated aspect, not the raw detected rect, or the frame fails closed to flat.
-- **Latency during window motion.** If the ROI lags a window drag, the warp is applied to the wrong
-  pixels for several frames, which is a visible glitch. Shrink fast and grow slow, and use the
-  `EVENT_SYSTEM_MOVESIZESTART` / `MOVESIZEEND` hooks from W4 to drop to flat during an active drag.
+- **Stereo window and frame violation remains a content limitation.** The renderer does not pull the
+  ROI boundary to zero from inside, because that would compress legitimate video depth. It preserves
+  every interior value and spends only the minimum slope-limited collar outside the fitted analysis
+  rectangle before reaching the desktop's exact zero plane. A foreground object visibly cut by the
+  fitted or DOM edge can still produce contradictory occlusion cues; monocular input cannot recover
+  the hidden part of that object.
+- **Full-source color remains available at the edge.** The renderer does not clamp sampling to the
+  crop or stretch the cropped image. The outside collar can sample the captured browser/desktop
+  pixels that are actually present, then ordinary zero-parallax surroundings remain unchanged.
+- **Aspect adaptation is inward-only and bounded.** See
+  [the resolution constraint](#a-resolution-constraint-that-will-bite-roi-work). At most 2% of the
+  detected area may be removed to reach the current authenticated aspect. A larger mismatch uses
+  full-frame V2.
+- **Motion is exact-frame attributed.** Rendering consumes only the rectangle attached to the same
+  private color/depth slot. Analysis-domain changes reset temporal/camera state, while a pure
+  position change of the same-sized ROI retains it. Stale or partially off-monitor geometry uses
+  full-frame V2 rather than warping the old rectangle.
+- **Fullscreen canonicalization is not an ROI transition.** When the semantic rectangle equals the
+  full capture, the ordinary full-frame domain continues without crop, temporal reset, or dump
+  rejection.
 
 **A reality that will dominate user reports.** Hardware-DRM content — Netflix, Disney+, Prime — is
 black in Desktop Duplication. The pixels are not obtainable, so no amount of detection makes ROI
@@ -495,8 +528,9 @@ before a user discovers it.
 
 **Status.** The dirty-region detector is retired. IA2 helper supervision, largest-video selection,
 one-pixel endpoint tolerance, screen-to-capture validation, matched-frame attribution, transition
-logging, and optional Dump 3D border evidence are implemented. Cropping and border-sensitive
-rendering remain unimplemented until the stereo-window policy is measured and chosen.
+logging, bounded inward aspect trim, same-format DAV2/ownership crop, crop-local state, full-source
+rendering, and the outside-only zero-plane collar are implemented. Active ROI frames are represented
+by Dump 3D schema 13; ordinary replay remains fail-closed until it consumes both coordinate domains.
 
 ---
 
@@ -598,9 +632,9 @@ found by those tests.
 silently change pop strength. V2 no longer has movie/game profiles.
 
 Use this signal to choose only among explicit rendering routes whose contracts are independently
-validated: ordinary full-frame V2, conservative desktop planes, or a latched video ROI. Ambiguous or
-stale evidence returns to full-frame V2. Any future automatic strength change needs a separate UI
-contract and evaluation gate.
+validated: ordinary full-frame V2, conservative desktop planes, or the exact matched-frame Chromium
+video ROI. Ambiguous or stale evidence returns to full-frame V2. Any future automatic strength
+change needs a separate UI contract and evaluation gate.
 
 ---
 
@@ -636,26 +670,32 @@ infrastructure before its consumers, and put cheap de-risking probes before expe
 | # | Item | Why first |
 |---|---|---|
 | 0.1 | **Completed and retired:** dirty-rectangle investigation (part of [W6](#w6-video-roi-detection)) | It proved that DDup damage can resemble a video rectangle, then disproved it as semantic authority on pause, partial updates, and dynamic pages. The probe/tracker code was removed. |
-| 0.2 | **Implemented:** Chromium IA2 video-border attribution | The isolated helper selects the largest visible `<video>`, survives pause, fails closed on ambiguity, and publishes no COM work onto streaming threads. With diagnostics enabled, Host SBS validates causal ordering and binds the observation to one matched frame for logs and Dump 3D only. |
+| 0.2 | **Implemented:** Chromium IA2 video-border attribution | The isolated helper selects the largest visible `<video>`, survives pause, fails closed on ambiguity, and publishes no COM work onto streaming threads. Host SBS validates causal ordering and binds the observation to one matched frame; the production ROI may consume it, while the optional dump artifact remains diagnostic only. |
 | 0.3 | Subtitled synthetic clips and the two new metrics ([W2a](#w2a-burned-in-subtitles--zero-parallax-mask)) | Repo process requires measuring before changing. Without a gate there is no way to demonstrate the subtitle mask works. Build the CJK and bilingual-stacked variants here, since they are the real content. |
 
 #### Evaluate W6 border attribution
 
-Set `diagnostics = enabled`, use the Desktop Duplication capture backend, and start Host SBS with
-Edge or Chrome in the foreground. Test one main video plus smaller previews, pause/resume,
-local-only pixel updates, dynamic sidebars, maximise/restore, browser zoom, and a negative-coordinate
-monitor. The host log should publish only transitions for a validated half-open
-capture rectangle. A Dump 3D taken after a lock should contain `window_video_border.json` with the
-same matched frame ID as its source, raw depth, final parallax, and SBS artifacts. Fullscreen endpoint
-rounding of at most one physical pixel is clipped; a larger overflow, partial clipping, stale helper
-heartbeat, window move, or equal largest videos must expose no border. An incomplete walk cannot
-create or replace a border; it may only preserve a previously selected object that still passes the
-independent exact cached-object check. In every rejected case live output remains ordinary
-full-frame V2.
+Use the Desktop Duplication capture backend and start Host SBS with Edge or Chrome in the
+foreground. Test one main video plus smaller previews, pause/resume, local-only pixel updates,
+dynamic sidebars, maximise/restore, browser zoom, and a negative-coordinate monitor. The host log
+should publish only transitions for a validated half-open capture rectangle. Fullscreen endpoint
+rounding of at most one physical pixel is clipped; larger overflow, partial clipping, stale helper
+heartbeat, unsupported aspect, or equal-largest videos must select ordinary full-frame V2. An
+incomplete walk cannot create or replace a border; it may only preserve a previously selected object
+that still passes the independent exact cached-object check.
 
-This gate checks attribution, not image quality. Before the border can alter rendering, evaluate the
-final parallax at both lateral video edges and choose an explicit floating-window or behind-screen
-policy. Flattening outside the rectangle without that policy is not permitted.
+An exact full-capture rectangle must canonicalize to ordinary full-frame V2 with no crop, trim,
+analysis-domain reset, or ROI embedding. This route-level fallback is distinct from the
+base fail-closed contract: a model, provenance, state, field, or renderer authentication failure must
+render flat rather than retrying through full-frame geometry.
+
+For accepted ROIs, verify that aspect fitting removes at most 2% of the detected area from inside the
+video, uses the current authenticated tensor, and never pads or stretches. Inspect both disparity
+signs at all four edges: the ROI interior must remain unchanged, the outside-only collar must respect
+the production slope limits, and the farther surround must be exactly zero. A pure window
+translation must retain scene state; ROI/full, identity, size, and transfer-domain changes must
+reset it. Capture a schema-13 ROI Dump 3D and require its full-source inverse map to be identity
+beyond the conservative collar; the crop-local final field alone is not sufficient evidence.
 
 ### Phase 1 — The overlay compositing framework
 
@@ -671,9 +711,9 @@ policy. Flattening outside the rectangle without that policy is not permitted.
 
 | # | Item | Why here |
 |---|---|---|
-| 2.1 | [W4 — window model](#w4-a-window-model-from-win32-and-dwm) | Enabling infrastructure for everything below. No user-visible effect alone. |
+| 2.1 | [W4 — window model](#w4-a-window-model-from-win32-and-dwm) | Enabling infrastructure for W5, W7, and broader W6 extensions. No user-visible effect alone. |
 | 2.2 | [W5 — authored window planes](#w5-window-z-order-as-authored-desktop-planes) | Potentially high value, but only behind a high-precision desktop/content classifier. Needs 2.1. |
-| 2.3 | [W6 — video ROI](#w6-video-roi-detection) | Semantic border attribution is complete. A rendering ROI still needs 2.1's complete window model plus a qualified stereo-window/floating-window policy; detection alone does not authorize cropping. |
+| 2.3 | [W6 — video ROI](#w6-video-roi-detection) | The strict foreground-Chromium/DDup ROI is implemented without a generic window model. Broader players, background windows, games, occlusion-aware geometry, or multi-window composition still depend on later W4/W5 work. |
 | 2.4 | [W7 — AR transparency](#w7-local-ar-transparency-from-window-geometry) | Nearly free once 2.1 and 2.2 exist. |
 
 ### Phase 3 — Larger bets, in decreasing confidence

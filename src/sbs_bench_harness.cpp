@@ -3431,12 +3431,17 @@ namespace sbs_bench {
         const float eye_aspect = (float) eye_w / (float) eye_h;
         const float content_scale_x = eye_aspect > aspect ? aspect / eye_aspect : 1.0f;
         const float content_scale_y = eye_aspect < aspect ? eye_aspect / aspect : 1.0f;
-        // Exact b2 layout shared by the production V2 and direct-replay renderers.
-        float repro_params[4] = {
+        // Exact production b2 layout. Bench/replay stays full-frame, so ROI is disabled and the
+        // second register carries the canonical full-source rectangle.
+        float repro_params[8] = {
           content_scale_x,
           content_scale_y,
           0.0f,
           0.0f,
+          0.0f,
+          0.0f,
+          1.0f,
+          1.0f,
         };
         repro_cb = const_buffer(dev.Get(), repro_params);
         if (!repro_cb) {

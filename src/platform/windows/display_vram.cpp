@@ -30,6 +30,7 @@
 #include "src/config.h"
 #include "src/depth_coordinate_v2.h"
 #include "src/generated/sbs_adaptive_state_contract.h"
+#include "src/host_sbs_resolution.h"
 #include "src/host_sbs_shader_cache.h"
 #include "src/logging.h"
 #include "src/model_manager.h"
@@ -57,6 +58,19 @@ namespace platf::dxgi {
     float source_sdr_white_scrgb;
     float padding;
   };
+
+  /** Slot-for-slot CPU mirror of HostSbsV2Geometry at pixel-shader b2. */
+  struct alignas(16) host_sbs_v2_geometry_t {
+    float content_scale_x = 1.0f;
+    float content_scale_y = 1.0f;
+    float video_roi_active = 0.0f;
+    float reserved = 0.0f;
+    float video_roi_left = 0.0f;
+    float video_roi_top = 0.0f;
+    float video_roi_right = 1.0f;
+    float video_roi_bottom = 1.0f;
+  };
+  static_assert(sizeof(host_sbs_v2_geometry_t) == 32u);
 
   template<class T>
   buf_t make_buffer(device_t::pointer device, const T &t) {
@@ -786,10 +800,11 @@ namespace platf::dxgi {
               mark_sbs_matched_copy_end(gpu_timer, matched_copy_submitted);
               if (matched_copy_submitted) {
                 est = depth_estimator->estimate_depth(
-                  matched_candidate_slot->srv.get(),
+                  matched_candidate_slot->depth_input_srv(),
                   input_color_space,
                   frame_id,
-                  snapshot_debug_inputs
+                  snapshot_debug_inputs,
+                  matched_candidate_slot->depth_input_region
                 );
                 if (est.completed_frame_valid) {
                   matched_render_slot = find_pending_matched_slot(est.completed_frame_id);
@@ -888,6 +903,57 @@ namespace platf::dxgi {
           } else {
             mark_sbs_matched_copy_end(gpu_timer, false);
             depth_completion_poll_pending = false;
+          }
+
+          // The asynchronous completion owns both the buffered color frame and the exact source
+          // domain submitted to DAV2. Never reinterpret a crop-local field as full-frame (or as a
+          // newer/moved crop) even if the numeric frame ID lookup happened to succeed.
+          if (
+            matched_render_slot &&
+            (
+              !est.completed_frame_valid ||
+              est.completed_frame_id != matched_render_slot->frame_id ||
+              !est.input_region.valid() ||
+              est.input_region != matched_render_slot->depth_input_region
+            )
+          ) {
+            BOOST_LOG(error)
+              << "Host SBS rejected a depth completion whose input region does not match "sv
+                 "its exact buffered color frame; rendering current-frame identity."sv;
+            matched_render_slot = nullptr;
+            est = {};
+            render_input_srv = img_ctx.encoder_input_res.get();
+            matched_output_valid = false;
+            matched_output_source_at = {};
+            matched_output_source_timestamp.reset();
+            matched_output_input_region = {};
+            matched_output_color_space = models::input_color_space::srgb;
+          } else if (
+            matched_render_slot && matched_candidate_slot &&
+            matched_candidate_slot->pending &&
+            (
+              !matched_render_slot->depth_input_region.same_analysis_domain(
+                matched_candidate_slot->depth_input_region
+              ) ||
+              matched_render_slot->color_space != matched_candidate_slot->color_space
+            )
+          ) {
+            // estimate_depth may retire domain A while enqueueing the first frame of domain B in
+            // the same call. Once B is observed, do not resurrect or repeat A; show current flat
+            // color until the exact B completion arrives and rearms its scene camera.
+            matched_render_slot = nullptr;
+            est = {};
+            render_input_srv = img_ctx.encoder_input_res.get();
+          } else if (matched_render_slot && est.input_domain_reset) {
+            // Cut counters and scene-camera history are domain-scoped. The first ROI/full/transfer
+            // completion starts a fresh telemetry sample without pretending the rearm was an
+            // editorial cut.
+            sbs_telemetry_has_sample = false;
+            sbs_telemetry_last_hard_cut_count = 0;
+            sbs_telemetry_min_frame_id = std::max(
+              sbs_telemetry_min_frame_id,
+              est.completed_frame_id
+            );
           }
 
           // A poisoned CUDA/TensorRT producer cannot recover by repeating its last stereo pair:
@@ -1059,6 +1125,13 @@ namespace platf::dxgi {
 
             ID3D11ShaderResourceView *warp_depth = selected_parallax_field;
             dump_warp_depth = warp_depth;
+            if (!update_sbs_constant_buffer(
+                  sbs_content_scale_x,
+                  sbs_content_scale_y,
+                  v2_live_warp_selected ? &est.input_region : nullptr
+                )) {
+              return -1;
+            }
             ID3D11Buffer *sbs_constants = sbs_reprojection_cbuffer.get();
 
             // Only an authenticated V2 stream selects the production warp. Awaiting, stale, and
@@ -1113,6 +1186,17 @@ namespace platf::dxgi {
               matched_output_source_at = matched_render_slot->captured_at;
               matched_output_source_timestamp =
                 matched_render_slot->source_timestamp;
+              matched_output_input_region = est.input_region;
+              matched_output_color_space = matched_render_slot->color_space;
+            } else {
+              // This draw overwrote the packed intermediate with flat identity. Never leave the
+              // previous warped frame's attribution attached to those new pixels: a following
+              // repeat must not present or count the flat texture as an ROI/full-frame V2 result.
+              matched_output_valid = false;
+              matched_output_source_at = {};
+              matched_output_source_timestamp.reset();
+              matched_output_input_region = {};
+              matched_output_color_space = models::input_color_space::srgb;
             }
           }
 
@@ -1196,76 +1280,101 @@ namespace platf::dxgi {
                 }
               }
 
-              sbs_debug::frame dump_frame;
-              dump_frame.source = render_input_srv;
-              dump_frame.model_input = est.model_input_snapshot.Get();
-              dump_frame.raw_depth = est.raw_model_depth_snapshot.Get();
-              dump_frame.warp_depth = dump_warp_depth;
-              dump_frame.adaptive_state = est.cut_state.Get();
-              dump_frame.depth_frame_state = est.depth_frame_state.Get();
-              dump_frame.warp_map =
-                geometry_available ? sbs_debug_mapping_srv.Get() : nullptr;
-              dump_frame.warp_mask =
-                geometry_available ? sbs_debug_mask_srv.Get() : nullptr;
-              dump_frame.sbs = final_sbs_srv;
-              dump_frame.shadow_coordinate = est.shadow_coordinate.Get();
-              dump_frame.shadow_candidate_parallax =
-                est.shadow_candidate_parallax.Get();
-              dump_frame.shadow_ownership_refined_parallax =
-                est.shadow_ownership_refined_parallax.Get();
-              dump_frame.shadow_vertical_majorant =
-                est.shadow_vertical_majorant.Get();
-              dump_frame.shadow_vertical_conditioned =
-                est.shadow_vertical_conditioned.Get();
-              dump_frame.shadow_final_parallax = est.shadow_final_parallax.Get();
-              dump_frame.shadow_state = est.shadow_state.Get();
-              dump_frame.shadow_frame_stats = est.shadow_frame_stats.Get();
-              dump_frame.raw_model_provenance = est.raw_model_provenance;
-              dump_frame.parallax_v2_shader_provenance =
-                est.parallax_v2_shader_provenance;
-              dump_frame.model_width = est.raw_width;
-              dump_frame.model_height = est.raw_height;
-              dump_frame.raw_width = est.raw_width;
-              dump_frame.raw_height = est.raw_height;
-              dump_frame.matched_frame_id = est.completed_frame_id;
-              dump_frame.window_video_border =
-                matched_render_slot->window_video_border;
-              dump_frame.window_video_observer_status =
-                video_dom::status_name(matched_render_slot->window_video_status);
-              dump_frame.window_video_mapping_status =
-                video_dom::mapping_status_name(
-                  matched_render_slot->window_video_mapping_status
+              const bool roi_mapping_unavailable =
+                est.input_region.video_region && !geometry_available;
+              if (roi_mapping_unavailable) {
+                BOOST_LOG(warning)
+                  << "Dump 3D request rejected: the authenticated window-video ROI frame "sv
+                     "does not have its required full-source inverse map and zero-plane "sv
+                     "evidence."sv;
+                sbs_dumper.reject_pending_request();
+              }
+
+              if (!roi_mapping_unavailable) {
+                sbs_debug::frame dump_frame;
+                dump_frame.source = render_input_srv;
+                dump_frame.depth_input_source =
+                  matched_render_slot->depth_input_srv();
+                dump_frame.model_input = est.model_input_snapshot.Get();
+                dump_frame.raw_depth = est.raw_model_depth_snapshot.Get();
+                dump_frame.warp_depth = dump_warp_depth;
+                dump_frame.adaptive_state = est.cut_state.Get();
+                dump_frame.depth_frame_state = est.depth_frame_state.Get();
+                dump_frame.warp_map =
+                  geometry_available ? sbs_debug_mapping_srv.Get() : nullptr;
+                dump_frame.warp_mask =
+                  geometry_available ? sbs_debug_mask_srv.Get() : nullptr;
+                dump_frame.sbs = final_sbs_srv;
+                dump_frame.shadow_coordinate = est.shadow_coordinate.Get();
+                dump_frame.shadow_candidate_parallax =
+                  est.shadow_candidate_parallax.Get();
+                dump_frame.shadow_ownership_refined_parallax =
+                  est.shadow_ownership_refined_parallax.Get();
+                dump_frame.shadow_vertical_majorant =
+                  est.shadow_vertical_majorant.Get();
+                dump_frame.shadow_vertical_conditioned =
+                  est.shadow_vertical_conditioned.Get();
+                dump_frame.shadow_final_parallax = est.shadow_final_parallax.Get();
+                dump_frame.shadow_state = est.shadow_state.Get();
+                dump_frame.shadow_frame_stats = est.shadow_frame_stats.Get();
+                dump_frame.raw_model_provenance = est.raw_model_provenance;
+                dump_frame.parallax_v2_shader_provenance =
+                  est.parallax_v2_shader_provenance;
+                dump_frame.model_width = est.raw_width;
+                dump_frame.model_height = est.raw_height;
+                dump_frame.raw_width = est.raw_width;
+                dump_frame.raw_height = est.raw_height;
+                dump_frame.matched_frame_id = est.completed_frame_id;
+                dump_frame.depth_input_region = est.input_region;
+                dump_frame.depth_video_plan = matched_render_slot->depth_video_plan;
+                dump_frame.input_domain_reset = est.input_domain_reset;
+                dump_frame.window_video_border =
+                  matched_render_slot->window_video_border;
+                dump_frame.window_video_observer_status =
+                  video_dom::status_name(matched_render_slot->window_video_status);
+                dump_frame.window_video_mapping_status =
+                  video_dom::mapping_status_name(
+                    matched_render_slot->window_video_mapping_status
+                  );
+                dump_frame.cuda_graph_active = est.cuda_graph_active;
+                dump_frame.parallax_v2_producer_active =
+                  est.parallax_v2_producer_active;
+                dump_frame.parallax_v2_render_selected =
+                  v2_renderer_selected;
+                dump_frame.parallax_v2_live_renderer_source_closure_sha256 =
+                  v2_renderer_selected ?
+                    sbs_reprojection_v2_live_source_closure_sha256 :
+                    std::string {};
+                dump_frame.parallax_v2_raw_coordinate_scale =
+                  est.parallax_v2_raw_coordinate_scale;
+                dump_frame.parallax_v2_requested_pop_strength =
+                  est.parallax_v2_requested_pop_strength;
+                dump_frame.parallax_v2_requested_gain =
+                  est.parallax_v2_requested_gain;
+                dump_frame.color_space = matched_render_slot->color_space;
+                dump_frame.depth_model = est.raw_model_provenance ?
+                                           est.raw_model_provenance->depth_model :
+                                           ::video::host_sbs_v2_depth_model().name;
+                sbs_dumper.maybe_dump(
+                  device.get(),
+                  device_ctx.get(),
+                  dump_frame,
+                  sbs_config
                 );
-              dump_frame.cuda_graph_active = est.cuda_graph_active;
-              dump_frame.parallax_v2_producer_active =
-                est.parallax_v2_producer_active;
-              dump_frame.parallax_v2_render_selected =
-                v2_renderer_selected;
-              dump_frame.parallax_v2_live_renderer_source_closure_sha256 =
-                v2_renderer_selected ?
-                  sbs_reprojection_v2_live_source_closure_sha256 :
-                  std::string {};
-              dump_frame.parallax_v2_raw_coordinate_scale =
-                est.parallax_v2_raw_coordinate_scale;
-              dump_frame.parallax_v2_requested_pop_strength =
-                est.parallax_v2_requested_pop_strength;
-              dump_frame.parallax_v2_requested_gain =
-                est.parallax_v2_requested_gain;
-              dump_frame.color_space = matched_render_slot->color_space;
-              dump_frame.depth_model = est.raw_model_provenance ?
-                                         est.raw_model_provenance->depth_model :
-                                         ::video::host_sbs_v2_depth_model().name;
-              sbs_dumper.maybe_dump(
-                device.get(),
-                device_ctx.get(),
-                dump_frame,
-                sbs_config
-              );
+              }
             }
           }
 
           if (diagnostics_enabled) {
             ++matched_stats_calls;
+            const bool video_roi_output =
+              repeat_matched_output ?
+                matched_output_valid && matched_output_input_region.video_region :
+                matched_render_slot && selected_parallax_field &&
+                  est.input_region.video_region;
+            if (video_roi_output) {
+              ++matched_stats_video_roi_route_outputs;
+            }
             const auto now = std::chrono::steady_clock::now();
             if (now - matched_stats_started >= std::chrono::seconds(5)) {
               const double avg_age_ms = matched_stats_completions ?
@@ -1274,10 +1383,16 @@ namespace platf::dxgi {
               const double repeat_pct = matched_stats_calls ?
                                           100.0 * matched_stats_repeats / matched_stats_calls :
                                           0.0;
+              const double video_roi_pct = matched_stats_calls ?
+                                               100.0 * matched_stats_video_roi_route_outputs /
+                                                 matched_stats_calls :
+                                               0.0;
               BOOST_LOG(info) << "SBS cadence: frames="sv << matched_stats_calls
                               << " completed="sv << matched_stats_completions
                               << " repeats="sv << matched_stats_repeats
-                              << " ("sv << repeat_pct << "%) age_ms_avg/max="sv
+                              << " ("sv << repeat_pct << "%) video_roi_route_outputs="sv
+                              << matched_stats_video_roi_route_outputs << " ("sv
+                              << video_roi_pct << "%) age_ms_avg/max="sv
                               << avg_age_ms << '/' << matched_stats_age_max_ms;
               reset_matched_stats(now);
             }
@@ -1375,6 +1490,8 @@ namespace platf::dxgi {
       matched_output_valid = false;
       matched_output_source_at = {};
       matched_output_source_timestamp.reset();
+      matched_output_input_region = {};
+      matched_output_color_space = models::input_color_space::srgb;
       matched_output_timeout_active = false;
       depth_completion_poll_pending = false;
       sbs_dumper.cancel_pending_request();
@@ -1490,15 +1607,50 @@ namespace platf::dxgi {
       }
     }
 
-    void update_sbs_constant_buffer(float content_scale_x, float content_scale_y) {
-      // Slot-for-slot mirror of HostSbsV2Geometry in sbs_reprojection_v2_live_ps.hlsl.
-      float sbs_params[4] {
-        content_scale_x,
-        content_scale_y,
-        0.0f,
-        0.0f,
-      };
-      sbs_reprojection_cbuffer = make_buffer(device.get(), sbs_params);
+    bool update_sbs_constant_buffer(
+      const float content_scale_x,
+      const float content_scale_y,
+      const models::depth_input_region_t *input_region = nullptr
+    ) {
+      host_sbs_v2_geometry_t geometry;
+      geometry.content_scale_x = content_scale_x;
+      geometry.content_scale_y = content_scale_y;
+      if (input_region && input_region->video_region && input_region->valid()) {
+        const auto source_width = static_cast<float>(input_region->source_width);
+        const auto source_height = static_cast<float>(input_region->source_height);
+        geometry.video_roi_active = 1.0f;
+        geometry.video_roi_left = static_cast<float>(input_region->left) / source_width;
+        geometry.video_roi_top = static_cast<float>(input_region->top) / source_height;
+        geometry.video_roi_right = static_cast<float>(input_region->right) / source_width;
+        geometry.video_roi_bottom = static_cast<float>(input_region->bottom) / source_height;
+      }
+
+      if (!sbs_reprojection_cbuffer) {
+        D3D11_BUFFER_DESC desc {};
+        desc.ByteWidth = sizeof(geometry);
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA initial {};
+        initial.pSysMem = &geometry;
+        buf_t::pointer buffer = nullptr;
+        const auto status = device->CreateBuffer(&desc, &initial, &buffer);
+        if (FAILED(status)) {
+          BOOST_LOG(error) << "Failed to create Host SBS V2 geometry constants [0x"sv
+                           << util::hex(status).to_string_view() << ']';
+          return false;
+        }
+        sbs_reprojection_cbuffer = buf_t {buffer};
+      } else {
+        device_ctx->UpdateSubresource(
+          sbs_reprojection_cbuffer.get(),
+          0,
+          nullptr,
+          &geometry,
+          0,
+          0
+        );
+      }
+      return true;
     }
 
     std::uint32_t next_sbs_telemetry_sequence() {
@@ -1646,7 +1798,10 @@ namespace platf::dxgi {
       if (result.failed) {
         publish_sbs_telemetry_failure();
       }
-      if (result.sample) {
+      if (
+        result.sample &&
+        result.sample->sampled_frame_id >= sbs_telemetry_min_frame_id
+      ) {
         publish_sbs_telemetry_sample(*result.sample);
       }
     }
@@ -1807,18 +1962,36 @@ namespace platf::dxgi {
       slot->pending = true;
     }
 
+    struct video_depth_crop_failure_key_t {
+      std::uint32_t width = 0u;
+      std::uint32_t height = 0u;
+      DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+      std::uint32_t sample_count = 0u;
+      std::uint32_t sample_quality = 0u;
+
+      bool operator==(const video_depth_crop_failure_key_t &) const = default;
+    };
+
     struct matched_frame_slot_t {
       texture2d_t texture;
       shader_res_t srv;
+      texture2d_t depth_crop_texture;
+      shader_res_t depth_crop_srv;
       std::uint64_t frame_id = 0;
       models::input_color_space color_space = models::input_color_space::srgb;
       std::optional<std::chrono::steady_clock::time_point> source_timestamp;
       std::chrono::steady_clock::time_point captured_at {};
       std::optional<sbs_debug::window_video_border_snapshot> window_video_border;
+      std::optional<models::depth_video_region_plan_t> depth_video_plan;
+      models::depth_input_region_t depth_input_region {};
       video_dom::status_e window_video_status = video_dom::status_e::stopped;
       video_dom::mapping_status_e window_video_mapping_status =
         video_dom::mapping_status_e::invalid_video_rect;
       bool pending = false;
+
+      ID3D11ShaderResourceView *depth_input_srv() noexcept {
+        return depth_input_region.video_region ? depth_crop_srv.get() : srv.get();
+      }
     };
 
     bool ensure_sbs_intermediate_storage(const bool input_is_linear) {
@@ -1882,6 +2055,8 @@ namespace platf::dxgi {
       matched_output_valid = false;
       matched_output_source_at = {};
       matched_output_source_timestamp.reset();
+      matched_output_input_region = {};
+      matched_output_color_space = models::input_color_space::srgb;
       matched_output_timeout_active = false;
       BOOST_LOG(info) << "Host SBS intermediate storage finalized as "sv
                       << (input_is_linear ? "FP16 linear-capable."sv : "BGRA8 SDR."sv);
@@ -1904,6 +2079,199 @@ namespace platf::dxgi {
         }
       }
       return nullptr;
+    }
+
+    static models::depth_input_region_t full_depth_input_region(
+      const D3D11_TEXTURE2D_DESC &source_desc
+    ) noexcept {
+      return models::depth_input_region_t {
+        .source_width = source_desc.Width,
+        .source_height = source_desc.Height,
+        .left = 0u,
+        .top = 0u,
+        .right = source_desc.Width,
+        .bottom = source_desc.Height,
+        .analysis_generation = 0u,
+        .video_region = false,
+      };
+    }
+
+    std::uint64_t video_depth_analysis_generation(
+      const models::video_depth_domain_key_t &key
+    ) noexcept {
+      return video_depth_generation_tracker.select(key);
+    }
+
+    bool copy_video_depth_crop(
+      matched_frame_slot_t &slot,
+      const D3D11_TEXTURE2D_DESC &source_desc,
+      const models::depth_source_rect_t &rect
+    ) {
+      if (!slot.texture || source_desc.MipLevels != 1u || source_desc.ArraySize != 1u ||
+          source_desc.SampleDesc.Count != 1u || !rect.valid()) {
+        return false;
+      }
+
+      const video_depth_crop_failure_key_t failure_key {
+        .width = rect.width(),
+        .height = rect.height(),
+        .format = source_desc.Format,
+        .sample_count = source_desc.SampleDesc.Count,
+        .sample_quality = source_desc.SampleDesc.Quality,
+      };
+      if (
+        video_depth_crop_failure_key &&
+        *video_depth_crop_failure_key == failure_key &&
+        video_depth_crop_retry_frames > 0u
+      ) {
+        --video_depth_crop_retry_frames;
+        return false;
+      }
+
+      bool recreate = !slot.depth_crop_texture || !slot.depth_crop_srv;
+      if (!recreate) {
+        D3D11_TEXTURE2D_DESC crop_desc {};
+        slot.depth_crop_texture->GetDesc(&crop_desc);
+        recreate = crop_desc.Width != rect.width() ||
+                   crop_desc.Height != rect.height() ||
+                   crop_desc.Format != source_desc.Format ||
+                   crop_desc.SampleDesc.Count != source_desc.SampleDesc.Count ||
+                   crop_desc.SampleDesc.Quality != source_desc.SampleDesc.Quality;
+      }
+      if (recreate) {
+        auto crop_desc = source_desc;
+        crop_desc.Width = rect.width();
+        crop_desc.Height = rect.height();
+        crop_desc.MipLevels = 1u;
+        crop_desc.ArraySize = 1u;
+        crop_desc.Usage = D3D11_USAGE_DEFAULT;
+        crop_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        crop_desc.CPUAccessFlags = 0u;
+        crop_desc.MiscFlags = 0u;
+
+        texture2d_t crop_texture;
+        auto status = device->CreateTexture2D(&crop_desc, nullptr, &crop_texture);
+        shader_res_t crop_srv;
+        if (SUCCEEDED(status)) {
+          status = device->CreateShaderResourceView(
+            crop_texture.get(),
+            nullptr,
+            &crop_srv
+          );
+        }
+        if (FAILED(status)) {
+          video_depth_crop_failure_key = failure_key;
+          video_depth_crop_retry_frames = 120u;
+          // A crop allocation failure disables this exact ROI route uniformly across both
+          // matched slots. Keeping a cached crop in only one slot would alternate ROI/full
+          // domains and prevent either asynchronous completion from becoming renderable.
+          for (auto &matched_slot : matched_frame_slots) {
+            matched_slot.depth_crop_srv.reset();
+            matched_slot.depth_crop_texture.reset();
+          }
+          BOOST_LOG(warning)
+            << "Host SBS could not allocate the video-only depth crop "sv
+            << rect.width() << 'x' << rect.height() << " [0x"sv
+            << util::hex(status).to_string_view()
+            << "]; this frame uses full-source V2."sv;
+          return false;
+        }
+        video_depth_crop_failure_key.reset();
+        video_depth_crop_retry_frames = 0u;
+        slot.depth_crop_texture = std::move(crop_texture);
+        slot.depth_crop_srv = std::move(crop_srv);
+      }
+
+      const D3D11_BOX source_box {
+        rect.left,
+        rect.top,
+        0u,
+        rect.right,
+        rect.bottom,
+        1u,
+      };
+      device_ctx->CopySubresourceRegion(
+        slot.depth_crop_texture.get(),
+        0u,
+        0u,
+        0u,
+        0u,
+        slot.texture.get(),
+        0u,
+        &source_box
+      );
+      return true;
+    }
+
+    void select_depth_input_region(
+      matched_frame_slot_t &slot,
+      const D3D11_TEXTURE2D_DESC &source_desc
+    ) {
+      slot.depth_video_plan.reset();
+      slot.depth_input_region = full_depth_input_region(source_desc);
+
+      if (slot.window_video_border) {
+        const auto &border = *slot.window_video_border;
+        const models::depth_source_rect_t semantic_rect {
+          static_cast<std::uint32_t>(border.left),
+          static_cast<std::uint32_t>(border.top),
+          static_cast<std::uint32_t>(border.right),
+          static_cast<std::uint32_t>(border.bottom),
+        };
+        const auto active_shape = models::fit_host_sbs_v2_depth_tensor_shape(
+          source_desc.Width,
+          source_desc.Height
+        );
+        auto plan = models::plan_host_sbs_v2_video_region(
+          semantic_rect,
+          source_desc.Width,
+          source_desc.Height,
+          active_shape
+        );
+        if (plan && copy_video_depth_crop(slot, source_desc, plan->source_rect)) {
+          const models::video_depth_domain_key_t key {
+            .source_width = source_desc.Width,
+            .source_height = source_desc.Height,
+            .semantic_width = semantic_rect.width(),
+            .semantic_height = semantic_rect.height(),
+            .crop_width = plan->source_rect.width(),
+            .crop_height = plan->source_rect.height(),
+            .hwnd = border.hwnd,
+            .process_id = border.process_id,
+            .document_id = border.document_id,
+            .video_id = border.video_id,
+          };
+          slot.depth_input_region = models::depth_input_region_t {
+            .source_width = source_desc.Width,
+            .source_height = source_desc.Height,
+            .left = plan->source_rect.left,
+            .top = plan->source_rect.top,
+            .right = plan->source_rect.right,
+            .bottom = plan->source_rect.bottom,
+            .analysis_generation = video_depth_analysis_generation(key),
+            .video_region = true,
+          };
+          slot.depth_video_plan = std::move(plan);
+        }
+      }
+
+      if (!slot.depth_input_region.video_region) {
+        video_depth_generation_tracker.select_full_source();
+      }
+      if (
+        matched_output_valid &&
+        (
+          !slot.depth_input_region.same_analysis_domain(matched_output_input_region) ||
+          slot.color_space != matched_output_color_space
+        )
+      ) {
+        matched_output_valid = false;
+        matched_output_source_at = {};
+        matched_output_source_timestamp.reset();
+        matched_output_input_region = {};
+        matched_output_color_space = models::input_color_space::srgb;
+        matched_output_timeout_active = false;
+      }
     }
 
     std::optional<sbs_debug::window_video_border_snapshot>
@@ -2066,6 +2434,21 @@ namespace platf::dxgi {
             << border.geometry_continuity_ms_at_capture -
                  border.source_content_age_ms_at_capture
             << '.';
+          if (slot.depth_video_plan) {
+            const auto &plan = *slot.depth_video_plan;
+            BOOST_LOG(info)
+              << "Host SBS video-only DAV2 region active: crop="sv
+              << plan.source_rect.left << ':' << plan.source_rect.top << '-'
+              << plan.source_rect.right << ':' << plan.source_rect.bottom
+              << " tensor="sv << plan.tensor_shape.width << 'x'
+              << plan.tensor_shape.height << " inward_trim_pct="sv
+              << plan.trimmed_area_fraction * 100.0f
+              << "; scene cuts and scene center are video-local."sv;
+          } else {
+            BOOST_LOG(info)
+              << "Host SBS video border is not eligible for the active authenticated tensor; "sv
+                 "using ordinary full-frame V2."sv;
+          }
         }
         last_window_video_border = slot.window_video_border;
         last_window_video_status = slot.window_video_status;
@@ -2164,6 +2547,22 @@ namespace platf::dxgi {
         slot.window_video_status,
         slot.window_video_mapping_status
       );
+      select_depth_input_region(slot, source_desc);
+      if (
+        !sbs_telemetry_input_domain_valid ||
+        !slot.depth_input_region.same_analysis_domain(sbs_telemetry_input_region) ||
+        slot.color_space != sbs_telemetry_input_color_space
+      ) {
+        // Stop an old-domain staging readback from publishing while the renderer is deliberately
+        // flat and waiting for this newly observed ROI/full/transfer domain. The first completion
+        // in the new domain establishes the new cut-counter baseline.
+        sbs_telemetry_input_region = slot.depth_input_region;
+        sbs_telemetry_input_color_space = slot.color_space;
+        sbs_telemetry_input_domain_valid = true;
+        sbs_telemetry_min_frame_id = frame_id;
+        sbs_telemetry_has_sample = false;
+        sbs_telemetry_last_hard_cut_count = 0;
+      }
       slot.pending = false;
       return true;
     }
@@ -2183,10 +2582,57 @@ namespace platf::dxgi {
     }
 
     bool ensure_sbs_debug_geometry_resources() {
-      if (sbs_debug_geometry_ready) {
-        return true;
+      if (!sbs_intermediate_texture) {
+        return false;
       }
-      if (sbs_debug_geometry_init_attempted || !sbs_intermediate_texture) {
+      D3D11_TEXTURE2D_DESC intermediate_desc {};
+      sbs_intermediate_texture->GetDesc(&intermediate_desc);
+      if (sbs_debug_geometry_ready) {
+        D3D11_TEXTURE2D_DESC mapping_desc {};
+        D3D11_TEXTURE2D_DESC mask_desc {};
+        if (sbs_debug_mapping_texture) {
+          sbs_debug_mapping_texture->GetDesc(&mapping_desc);
+        }
+        if (sbs_debug_mask_texture) {
+          sbs_debug_mask_texture->GetDesc(&mask_desc);
+        }
+        const bool cached_resources_match =
+          sbs_debug_mapping_texture && sbs_debug_mapping_rtv && sbs_debug_mapping_srv &&
+          sbs_debug_mask_texture && sbs_debug_mask_rtv && sbs_debug_mask_srv &&
+          mapping_desc.Width == intermediate_desc.Width &&
+          mapping_desc.Height == intermediate_desc.Height &&
+          mapping_desc.Format == DXGI_FORMAT_R32_FLOAT &&
+          mapping_desc.MipLevels == intermediate_desc.MipLevels &&
+          mapping_desc.ArraySize == intermediate_desc.ArraySize &&
+          mapping_desc.SampleDesc.Count == intermediate_desc.SampleDesc.Count &&
+          mapping_desc.SampleDesc.Quality == intermediate_desc.SampleDesc.Quality &&
+          mask_desc.Width == intermediate_desc.Width &&
+          mask_desc.Height == intermediate_desc.Height &&
+          mask_desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM &&
+          mask_desc.MipLevels == intermediate_desc.MipLevels &&
+          mask_desc.ArraySize == intermediate_desc.ArraySize &&
+          mask_desc.SampleDesc.Count == intermediate_desc.SampleDesc.Count &&
+          mask_desc.SampleDesc.Quality == intermediate_desc.SampleDesc.Quality;
+        if (cached_resources_match) {
+          return true;
+        }
+
+        // The packed intermediate can be resized/reformatted without reinitializing the output
+        // object. Never render dump-only evidence into stale targets from the prior extent.
+        BOOST_LOG(warning)
+          << "Dump 3D geometry resources no longer match the packed output; recreating them."sv;
+        sbs_debug_v2_mapping_ps.Reset();
+        sbs_debug_v2_mask_ps.Reset();
+        sbs_debug_mapping_texture.Reset();
+        sbs_debug_mapping_rtv.Reset();
+        sbs_debug_mapping_srv.Reset();
+        sbs_debug_mask_texture.Reset();
+        sbs_debug_mask_rtv.Reset();
+        sbs_debug_mask_srv.Reset();
+        sbs_debug_geometry_ready = false;
+        sbs_debug_geometry_init_attempted = false;
+      }
+      if (sbs_debug_geometry_init_attempted) {
         return false;
       }
       sbs_debug_geometry_init_attempted = true;
@@ -2225,8 +2671,7 @@ namespace platf::dxgi {
         return false;
       }
 
-      D3D11_TEXTURE2D_DESC desc {};
-      sbs_intermediate_texture->GetDesc(&desc);
+      D3D11_TEXTURE2D_DESC desc = intermediate_desc;
       desc.Usage = D3D11_USAGE_DEFAULT;
       desc.CPUAccessFlags = 0;
       desc.MiscFlags = 0;
@@ -2331,6 +2776,7 @@ namespace platf::dxgi {
       matched_stats_calls = 0;
       matched_stats_completions = 0;
       matched_stats_repeats = 0;
+      matched_stats_video_roi_route_outputs = 0;
       matched_stats_age_sum_ms = 0.0;
       matched_stats_age_max_ms = 0.0;
     }
@@ -2381,11 +2827,18 @@ namespace platf::dxgi {
       sbs_telemetry_generation = telemetry_generation;
       sbs_telemetry_sequence = 0;
       sbs_telemetry_last_sampled_frame_id = 0;
+      sbs_telemetry_min_frame_id = 0;
       sbs_telemetry_last_hard_cut_count = 0;
       sbs_telemetry_has_sample = false;
+      sbs_telemetry_input_region = {};
+      sbs_telemetry_input_color_space = models::input_color_space::srgb;
+      sbs_telemetry_input_domain_valid = false;
       sbs_telemetry_producer_failure_published = false;
       sbs_telemetry_last_copy = {};
       matched_frame_slots = {};
+      video_depth_generation_tracker = {};
+      video_depth_crop_failure_key.reset();
+      video_depth_crop_retry_frames = 0u;
       last_window_video_border.reset();
       last_window_video_status.reset();
       last_window_video_mapping_status.reset();
@@ -2393,6 +2846,8 @@ namespace platf::dxgi {
       matched_output_valid = false;
       matched_output_source_at = {};
       matched_output_source_timestamp.reset();
+      matched_output_input_region = {};
+      matched_output_color_space = models::input_color_space::srgb;
       matched_output_timeout_active = false;
       depth_completion_poll_pending = false;
       sbs_intermediate_is_linear = false;
@@ -2424,11 +2879,10 @@ namespace platf::dxgi {
   }
       const bool sbs_on = sbs_mode != ::video::SBS_OFF;
 #if !defined(SUNSHINE_TESTS)
-      if (sbs_on && diagnostics_enabled) {
+      if (sbs_on) {
         // Cross-process accessibility traversal is isolated in the supervised helper. This lease
         // only exposes an atomic snapshot to the matched-frame path and cannot block streaming.
-        // Until the border has rendering authority, keep its browser overhead opt-in with the
-        // existing diagnostics switch.
+        // A missing, stale, or ambiguous rectangle simply selects ordinary full-frame V2.
         if (!video_dom_lease) {
           video_dom_lease.emplace();
         }
@@ -2652,8 +3106,9 @@ namespace platf::dxgi {
           content_scale_y = eye_aspect / source_aspect;
         }
       }
-      update_sbs_constant_buffer(content_scale_x, content_scale_y);
-      if (!sbs_reprojection_cbuffer) {
+      sbs_content_scale_x = content_scale_x;
+      sbs_content_scale_y = content_scale_y;
+      if (!update_sbs_constant_buffer(content_scale_x, content_scale_y)) {
         BOOST_LOG(error) << "Failed to create the Host SBS V2 geometry constants";
         return -1;
       }
@@ -2907,7 +3362,11 @@ namespace platf::dxgi {
       // sessions never pay for it.
 
       // Rebuilt by init_output() once the source/output aspect relationship is known.
-      update_sbs_constant_buffer(1.0f, 1.0f);
+      sbs_content_scale_x = 1.0f;
+      sbs_content_scale_y = 1.0f;
+      if (!update_sbs_constant_buffer(1.0f, 1.0f)) {
+        return -1;
+      }
 
       return 0;
     }
@@ -3045,8 +3504,13 @@ namespace platf::dxgi {
     std::uint32_t sbs_telemetry_generation = 0;
     std::uint32_t sbs_telemetry_sequence = 0;
     std::uint64_t sbs_telemetry_last_sampled_frame_id = 0;
+    std::uint64_t sbs_telemetry_min_frame_id = 0;
     std::uint32_t sbs_telemetry_last_hard_cut_count = 0;
     bool sbs_telemetry_has_sample = false;
+    models::depth_input_region_t sbs_telemetry_input_region {};
+    models::input_color_space sbs_telemetry_input_color_space =
+      models::input_color_space::srgb;
+    bool sbs_telemetry_input_domain_valid = false;
     bool sbs_telemetry_producer_failure_published = false;
     std::chrono::steady_clock::time_point sbs_telemetry_last_copy {};
     vs_t sbs_reprojection_vs;
@@ -3055,6 +3519,8 @@ namespace platf::dxgi {
     models::host_sbs_renderer_e host_sbs_renderer =
       models::host_sbs_renderer_e::awaiting_v2;
     buf_t sbs_reprojection_cbuffer;
+    float sbs_content_scale_x = 1.0f;
+    float sbs_content_scale_y = 1.0f;
     texture2d_t sbs_intermediate_texture;
     render_target_t sbs_intermediate_rtv;
     shader_res_t sbs_intermediate_srv;
@@ -3074,6 +3540,9 @@ namespace platf::dxgi {
     D3D11_VIEWPORT sbs_viewport;
     std::array<matched_frame_slot_t, 2> matched_frame_slots;
     std::optional<video_dom::lease_t> video_dom_lease;
+    models::video_depth_analysis_generation_tracker_t video_depth_generation_tracker;
+    std::optional<video_depth_crop_failure_key_t> video_depth_crop_failure_key;
+    unsigned video_depth_crop_retry_frames = 0u;
     std::optional<sbs_debug::window_video_border_snapshot>
       last_window_video_border;
     std::optional<video_dom::status_e> last_window_video_status;
@@ -3082,12 +3551,16 @@ namespace platf::dxgi {
     bool matched_output_valid = false;
     std::chrono::steady_clock::time_point matched_output_source_at {};
     std::optional<std::chrono::steady_clock::time_point> matched_output_source_timestamp;
+    models::depth_input_region_t matched_output_input_region {};
+    models::input_color_space matched_output_color_space =
+      models::input_color_space::srgb;
     bool matched_output_timeout_active = false;
     bool depth_completion_poll_pending = false;
     std::chrono::steady_clock::time_point matched_stats_started {};
     unsigned matched_stats_calls = 0;
     unsigned matched_stats_completions = 0;
     unsigned matched_stats_repeats = 0;
+    unsigned matched_stats_video_roi_route_outputs = 0;
     double matched_stats_age_sum_ms = 0.0;
     double matched_stats_age_max_ms = 0.0;
     std::chrono::steady_clock::time_point matched_unknown_frame_error_last {};

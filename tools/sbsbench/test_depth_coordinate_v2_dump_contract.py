@@ -19,6 +19,7 @@ import generate_depth_coordinate_v2_contract as generator  # noqa: E402
 from replay_depth_mapping_v2 import (  # noqa: E402
     _inspect_optional_shadow_state,
     _inspect_optional_v2_dump_manifest,
+    _require_supported_replay_domain,
 )
 
 
@@ -209,6 +210,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         }
         self.manifest = {
             "schema": dump_contract.DUMP_MANIFEST_SCHEMA,
+            "matched_frame_id": 41,
             "renderer": {
                 "authority":
                     "authenticated-parallax-v2-orientation-selective-conditioned-field",
@@ -265,6 +267,26 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "rendered_output_selected": True,
             },
             "dimensions": {
+                "source": {
+                    "width": 1920, "height": 1080,
+                    "format": "DXGI_FORMAT_B8G8R8A8_UNORM", "format_value": 87,
+                },
+                "analysis_source": {
+                    "width": 1920, "height": 1080,
+                    "format": "DXGI_FORMAT_B8G8R8A8_UNORM", "format_value": 87,
+                },
+                "model_input": {
+                    "width": 770, "height": 434, "channels": 3,
+                    "layout": "NCHW", "dtype": "float32-le",
+                },
+                "raw_depth": {
+                    "width": 770, "height": 434,
+                    "format": "float32-le structured buffer",
+                },
+                "warp_depth": {
+                    "width": 770, "height": 434,
+                    "format": "DXGI_FORMAT_R32_FLOAT", "format_value": 41,
+                },
                 "shadow_candidate_parallax": {
                     "width": 770, "height": 434,
                     "format": "DXGI_FORMAT_R32_FLOAT", "format_value": 41,
@@ -295,6 +317,81 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     **({"sha256": "0" * 64} if name.endswith(".f32") else {}),
                 }
                 for name, (stage, required) in vertical_descriptions.items()
+            },
+            "depth_input_region": {
+                "available": True,
+                "artifact": "depth_input_region.json",
+                "mode": "full-source",
+                "geometry_authority": True,
+                "renderer_authority": True,
+            },
+            "window_video_border": {
+                "available": False,
+                "artifact": None,
+                "observer_status": "no-video",
+                "mapping_status": "invalid-video-rect",
+                "geometry_authority": False,
+                "renderer_authority": False,
+            },
+        }
+        self.manifest["artifacts"].update({
+            "depth_input_region.json": {
+                "available": True,
+                "required": True,
+                "stage": "depth analysis input region",
+                "description": "authoritative test input-region artifact",
+                "sha256": "0" * 64,
+            },
+            "depth_input_source.png": {
+                "available": True,
+                "required": False,
+                "stage": "model-depth input source preview",
+                "description": (
+                    "Spatially exact full-source or cropped color input submitted to the "
+                    "calibrated preprocess; transfer-aware PNG is diagnostic only and never "
+                    "numeric model authority."),
+            },
+            "window_video_border.json": {
+                "available": False,
+                "required": False,
+                "stage": "matched-frame window-video border",
+                "description": "diagnostic test artifact",
+            },
+        })
+        self.depth_input_region = {
+            "schema": dump_contract.DEPTH_INPUT_REGION_SCHEMA,
+            "capture":
+                "same matched source/color/model/depth/render frame as the parent Dump 3D package",
+            "role":
+                "authoritative analysis-domain placement and live-render embedding contract",
+            "matched_frame_id": 41,
+            "mode": "full-source",
+            "authorization": None,
+            "coordinate_space": {
+                "name": "matched-source-pixels",
+                "rect_semantics": "half-open [left, top, right, bottom)",
+                "source_extent_px": {"width": 1920, "height": 1080},
+                "semantic_rect_px": None,
+                "inference_rect_px": {
+                    "left": 0, "top": 0, "right": 1920, "bottom": 1080,
+                },
+            },
+            "analysis": {
+                "analysis_generation": 0,
+                "input_domain_reset": False,
+                "tensor_extent_px": {"width": 770, "height": 434},
+                "trimmed_area_fraction": 0.0,
+                "crop_method": "full-source",
+                "scene_analysis_domain": "full-source",
+            },
+            "renderer": {
+                "final_parallax_units": "full-source-u",
+                "full_source_parallax_scale": 1.0,
+                "inside_inference_rect": "no taper",
+                "outside": None,
+                "source_sampling":
+                    "full matched source; never clamp to inference rectangle",
+                "inverse_iterations": 11,
             },
         }
 
@@ -331,6 +428,102 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertIn("completed.shadow_vertical_majorant", native)
         self.assertIn('"shadow_vertical_conditioned"', native)
         self.assertIn("completed.shadow_vertical_conditioned", native)
+
+    def test_depth_input_region_accepts_real_integer_floor_roi_and_float32_fitter(self):
+        region = copy.deepcopy(self.depth_input_region)
+        region["mode"] = "video-region"
+        region["authorization"] = {
+            "observer_generation": 901,
+            "hwnd": "0x60736",
+            "process_id": 34056,
+            "document_id": -28681,
+            "video_id": -28624,
+        }
+        coordinate_space = region["coordinate_space"]
+        coordinate_space["source_extent_px"] = {"width": 3840, "height": 2160}
+        coordinate_space["semantic_rect_px"] = {
+            "left": 277, "top": 415, "right": 2813, "bottom": 1842,
+        }
+        coordinate_space["inference_rect_px"] = {
+            "left": 279, "top": 415, "right": 2810, "bottom": 1842,
+        }
+        trim = 1.0 - (2531 * 1427) / (2536 * 1427)
+        region["analysis"].update({
+            "analysis_generation": 17,
+            "input_domain_reset": True,
+            "trimmed_area_fraction": trim,
+            "crop_method": "same-format D3D11 CopySubresourceRegion",
+            "scene_analysis_domain": "inference-rectangle-only",
+        })
+        runtime_scale, vertical_slope = dump_contract._roi_renderer_constants(
+            (279, 415, 2810, 1842), 3840, 2160, 770, 434)
+        region["renderer"].update({
+            "final_parallax_units": "roi-local-source-u",
+            "full_source_parallax_scale": runtime_scale,
+            "outside": {
+                "construction": "signed soft-threshold collar",
+                "horizontal_slope_source_u_per_source_u": 0.5,
+                "vertical_slope_source_u_per_source_v": vertical_slope,
+                "beyond_collar": "exact zero parallax",
+            },
+        })
+
+        decoded = dump_contract.validate_depth_input_region_document(
+            region, matched_frame_id=41, source_width=3840, source_height=2160,
+            tensor_width=770, tensor_height=434)
+        self.assertEqual(decoded["inference_width"], 2531)
+        self.assertEqual(decoded["analysis_generation"], 17)
+        self.assertEqual(decoded["authorization"]["observer_generation"], 901)
+        self.assertNotEqual(
+            decoded["authorization"]["observer_generation"],
+            decoded["analysis_generation"])
+        self.assertEqual(
+            dump_contract._fit_host_sbs_v2_depth_tensor_shape(1160, 496),
+            (1008, 434))
+        self.assertEqual(
+            dump_contract._fit_host_sbs_v2_depth_tensor_shape(496, 872),
+            (434, 756))
+
+        moved = copy.deepcopy(region)
+        moved["coordinate_space"]["inference_rect_px"]["left"] += 1
+        moved["coordinate_space"]["inference_rect_px"]["right"] += 1
+        with self.assertRaisesRegex(ValueError, "deterministic authenticated inward fit"):
+            dump_contract.validate_depth_input_region_document(moved)
+
+    def test_depth_input_region_rejects_forged_tensor_trim_scale_slope_and_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_synthetic_roi_geometry_dump(root)
+            valid = json.loads((root / "depth_input_region.json").read_text())
+            mutations = {
+                "unknown-key": (lambda value: value.update({"future": 1}), "unknown layout"),
+                "noncanonical-hwnd": (
+                    lambda value: value["authorization"].update({"hwnd": "0xabcdef"}),
+                    "canonical uppercase hexadecimal"),
+                "wrong-tensor": (
+                    lambda value: value["analysis"]["tensor_extent_px"].update({"width": 756}),
+                    "deterministic authenticated inward fit"),
+                "wrong-trim": (
+                    lambda value: value["analysis"].update({"trimmed_area_fraction": 0.01}),
+                    "inconsistent video-region analysis"),
+                "wrong-scale": (
+                    lambda value: value["renderer"].update({
+                        "full_source_parallax_scale":
+                            value["renderer"]["full_source_parallax_scale"] + 1.0e-5}),
+                    "inconsistent video-region analysis"),
+                "wrong-slope": (
+                    lambda value: value["renderer"]["outside"].update({
+                        "vertical_slope_source_u_per_source_v":
+                            value["renderer"]["outside"]
+                            ["vertical_slope_source_u_per_source_v"] + 1.0e-5}),
+                    "inconsistent exterior collar semantics"),
+            }
+            for name, (mutate, expected) in mutations.items():
+                with self.subTest(name=name):
+                    changed = copy.deepcopy(valid)
+                    mutate(changed)
+                    with self.assertRaisesRegex(ValueError, expected):
+                        dump_contract.validate_depth_input_region_document(changed)
 
     def test_manifest_rejects_missing_or_misattributed_vertical_intermediate(self):
         changed = copy.deepcopy(self.manifest)
@@ -389,9 +582,17 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             final[:, col] = np.maximum(final[:, col], final[:, col + 1] - horizontal_step)
 
         manifest = copy.deepcopy(self.manifest)
-        for name in manifest["dimensions"]:
+        for name in (
+                "model_input", "raw_depth", "warp_depth",
+                "shadow_candidate_parallax", "shadow_ownership_refined_parallax",
+                "shadow_vertical_majorant", "shadow_vertical_conditioned",
+                "shadow_final_parallax"):
             manifest["dimensions"][name] = dict(
                 manifest["dimensions"][name], width=width, height=height)
+        input_region = copy.deepcopy(self.depth_input_region)
+        input_region["analysis"]["tensor_extent_px"] = {
+            "width": width, "height": height,
+        }
         fields = {
             "shadow_candidate_parallax": candidate,
             "shadow_ownership_refined_parallax": ownership,
@@ -404,9 +605,292 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             (root / f"{name}.f32").write_bytes(payload)
             manifest["artifacts"][f"{name}.f32"]["sha256"] = hashlib.sha256(
                 payload).hexdigest()
+        warp_payload = final.astype("<f4").tobytes()
+        (root / "warp_depth.f32").write_bytes(warp_payload)
+        manifest["artifacts"]["warp_depth.f32"] = {
+            "available": True,
+            "required": True,
+            "stage": "actual orientation-selective conditioned field sampled by live V2 reprojection",
+            "description": "authenticated test warp field",
+            "sha256": hashlib.sha256(warp_payload).hexdigest(),
+        }
+        region_payload = json.dumps(input_region).encode("utf-8")
+        (root / "depth_input_region.json").write_bytes(region_payload)
+        manifest["artifacts"]["depth_input_region.json"]["sha256"] = hashlib.sha256(
+            region_payload).hexdigest()
         (root / "dump_manifest.json").write_text(
             json.dumps(manifest), encoding="utf-8")
         return manifest, fields
+
+    def _write_synthetic_roi_geometry_dump(self, root, *, near_full=False):
+        import hashlib
+
+        import numpy as np
+
+        source_width, source_height = ((774, 436) if near_full else (960, 540))
+        tensor_width, tensor_height = 770, 434
+        if near_full:
+            semantic = {"left": 1, "top": 1, "right": 773, "bottom": 435}
+            inference = {"left": 2, "top": 1, "right": 772, "bottom": 435}
+        else:
+            semantic = {"left": 94, "top": 53, "right": 866, "bottom": 487}
+            inference = {"left": 95, "top": 53, "right": 865, "bottom": 487}
+        trim = np.float32(1.0 - (770 * 434) / (772 * 434)).item()
+
+        manifest = copy.deepcopy(self.manifest)
+        manifest["depth_input_region"]["mode"] = "video-region"
+        manifest["renderer"].update({
+            "authority":
+                "authenticated crop-local parallax-v2 conditioned field plus depth-input-region embedding",
+            "mapping_artifacts_match_selected_renderer": True,
+            "parallax_v2_position_field":
+                "shadow_final_parallax + depth_input_region embedding",
+            "parallax_v2_ownership_refined_role":
+                "conservative full-resolution crop-local source-contour foreground ownership "
+                "applied to candidate before the vertical conditioner; may only raise uniquely "
+                "owned far-side boundary texels",
+            "parallax_v2_conditioner_role":
+                "least row-wise crop-local q >= shadow_vertical_conditioned with horizontal "
+                "slope <= max_horizontal_slope and vertical shear <= max_vertical_shear; q "
+                "plus depth_input_region embedding is live position authority",
+        })
+        manifest["dimensions"].update({
+            "source": {
+                "width": source_width, "height": source_height,
+                "format": "DXGI_FORMAT_R16G16B16A16_FLOAT", "format_value": 10,
+            },
+            "analysis_source": {
+                "width": 770, "height": 434,
+                "format": "DXGI_FORMAT_R16G16B16A16_FLOAT", "format_value": 10,
+            },
+            "packed_sbs": {
+                "width": 2 * source_width, "height": source_height,
+                "format": "DXGI_FORMAT_B8G8R8A8_UNORM", "format_value": 87,
+            },
+            "eye": {"width": source_width, "height": source_height},
+            "content_fit": {"scale_x": 1.0, "scale_y": 1.0},
+            "warp_map": {
+                "width": 2 * source_width, "height": source_height,
+                "format": "DXGI_FORMAT_R32_FLOAT", "format_value": 41,
+            },
+        })
+        for name in (
+                "model_input", "raw_depth", "warp_depth",
+                "shadow_candidate_parallax", "shadow_ownership_refined_parallax",
+                "shadow_vertical_majorant", "shadow_vertical_conditioned",
+                "shadow_final_parallax"):
+            manifest["dimensions"][name] = dict(
+                manifest["dimensions"][name],
+                width=tensor_width, height=tensor_height)
+
+        constant = np.full(
+            (tensor_height, tensor_width), 0.01 if near_full else 0.001,
+            dtype=np.float32)
+        fields = {
+            "shadow_candidate_parallax": constant,
+            "shadow_ownership_refined_parallax": constant,
+            "shadow_vertical_majorant": constant,
+            "shadow_vertical_conditioned": constant,
+            "shadow_final_parallax": constant,
+        }
+        for name, values in fields.items():
+            payload = values.astype("<f4").tobytes()
+            (root / f"{name}.f32").write_bytes(payload)
+            manifest["artifacts"][f"{name}.f32"]["sha256"] = hashlib.sha256(
+                payload).hexdigest()
+        warp_depth_payload = constant.astype("<f4").tobytes()
+        (root / "warp_depth.f32").write_bytes(warp_depth_payload)
+        manifest["artifacts"]["warp_depth.f32"] = {
+            "available": True,
+            "required": True,
+            "stage":
+                "crop-local orientation-selective conditioned field embedded by live V2 reprojection",
+            "description": "authenticated test crop-local warp field",
+            "sha256": hashlib.sha256(warp_depth_payload).hexdigest(),
+        }
+
+        runtime_scale, vertical_slope = dump_contract._roi_renderer_constants(
+            (inference["left"], inference["top"],
+             inference["right"], inference["bottom"]),
+            source_width, source_height,
+            tensor_width, tensor_height)
+        region = copy.deepcopy(self.depth_input_region)
+        region.update({
+            "mode": "video-region",
+            "authorization": {
+                "observer_generation": 901,
+                "hwnd": "0x60736",
+                "process_id": 34056,
+                "document_id": -28681,
+                "video_id": -28624,
+            },
+        })
+        region["coordinate_space"].update({
+            "source_extent_px": {"width": source_width, "height": source_height},
+            "semantic_rect_px": semantic,
+            "inference_rect_px": inference,
+        })
+        region["analysis"].update({
+            "analysis_generation": 17,
+            "input_domain_reset": True,
+            "tensor_extent_px": {"width": tensor_width, "height": tensor_height},
+            "trimmed_area_fraction": trim,
+            "crop_method": "same-format D3D11 CopySubresourceRegion",
+            "scene_analysis_domain": "inference-rectangle-only",
+        })
+        region["renderer"].update({
+            "final_parallax_units": "roi-local-source-u",
+            "full_source_parallax_scale": runtime_scale,
+            "outside": {
+                "construction": "signed soft-threshold collar",
+                "horizontal_slope_source_u_per_source_u": 0.5,
+                "vertical_slope_source_u_per_source_v": vertical_slope,
+                "beyond_collar": "exact zero parallax",
+            },
+        })
+        region_payload = json.dumps(region).encode("utf-8")
+        (root / "depth_input_region.json").write_bytes(region_payload)
+        manifest["artifacts"]["depth_input_region.json"]["sha256"] = hashlib.sha256(
+            region_payload).hexdigest()
+
+        border = {
+            "schema": dump_contract.WINDOW_VIDEO_BORDER_SCHEMA,
+            "capture":
+                "same matched source/color/depth/render frame as the parent Dump 3D package",
+            "role":
+                "diagnostic-only window-video border evidence; no geometry or renderer authority",
+            "matched_frame_id": 41,
+            "coordinate_space": {
+                "name": "matched-source-pixels",
+                "rect_semantics": "half-open [left, top, right, bottom)",
+                "source_extent_px": {"width": source_width, "height": source_height},
+                "capture_rect_px": semantic,
+            },
+            "identity": {
+                "hwnd": "0x60736",
+                "process_id": 34056,
+                "document_id": -28681,
+                "video_id": -28624,
+                "generation": 901,
+            },
+            "freshness": {
+                "latest_heartbeat_age_ms_at_capture": 3,
+                "maximum_heartbeat_age_ms": 2500,
+                "geometry_continuity_ms_at_capture": 1000,
+                "source_content_age_ms_at_capture": 3,
+                "fresh": True,
+                "causal_geometry": True,
+            },
+        }
+        border_payload = json.dumps(border).encode("utf-8")
+        (root / "window_video_border.json").write_bytes(border_payload)
+        manifest["window_video_border"] = {
+            "available": True,
+            "artifact": "window_video_border.json",
+            "observer_status": "ok",
+            "mapping_status": "ok",
+            "geometry_authority": False,
+            "renderer_authority": False,
+        }
+        manifest["artifacts"]["window_video_border.json"] = {
+            "available": True,
+            "required": True,
+            "stage": "matched-frame window-video border",
+            "description": "authenticated test semantic border",
+            "sha256": hashlib.sha256(border_payload).hexdigest(),
+        }
+
+        packed_u = ((np.arange(2 * source_width, dtype=np.float32) + np.float32(0.5)) /
+                    np.float32(2 * source_width))
+        right_eye = packed_u > np.float32(0.5)
+        unwarped = np.where(
+            right_eye,
+            (packed_u - np.float32(0.5)) * np.float32(2.0),
+            packed_u * np.float32(2.0),
+        ).astype(np.float32)
+        eye_sign = np.where(right_eye, np.float32(1.0), np.float32(-1.0))
+        roi_left = np.float32(inference["left"]) / np.float32(source_width)
+        roi_top = np.float32(inference["top"]) / np.float32(source_height)
+        roi_right = np.float32(inference["right"]) / np.float32(source_width)
+        roi_bottom = np.float32(inference["bottom"]) / np.float32(source_height)
+        embedded = np.float32(runtime_scale) * constant[0, 0]
+        warp_map = np.empty((source_height, 2 * source_width), dtype=np.float32)
+        for row in range(source_height):
+            source_v = np.float32((row + 0.5) / source_height)
+            projected_v = np.clip(source_v, roi_top, roi_bottom)
+            outside_y = np.abs(source_v - projected_v)
+            source_x = unwarped.copy()
+            for _ in range(11):
+                projected_x = np.clip(source_x, roi_left, roi_right)
+                budget = (np.float32(0.5) * np.abs(source_x - projected_x) +
+                          np.float32(vertical_slope) * outside_y)
+                effective = np.where(
+                    budget < np.abs(embedded),
+                    np.copysign(np.abs(embedded) - budget, embedded),
+                    np.float32(0.0),
+                ).astype(np.float32)
+                source_x = (unwarped + eye_sign * effective).astype(np.float32)
+            warp_map[row] = source_x
+        map_payload = warp_map.astype("<f4").tobytes()
+        (root / "warp_map.f32").write_bytes(map_payload)
+        manifest["artifacts"]["warp_map.f32"] = {
+            "available": True,
+            "required": True,
+            "stage": "exact full-source inverse-warp mapping",
+            "description": "authenticated test full-source inverse map",
+            "sha256": hashlib.sha256(map_payload).hexdigest(),
+        }
+        manifest["artifacts"]["warp_map_shape.json"] = {
+            "available": True,
+            "required": True,
+            "stage": "inverse-warp mapping contract",
+            "description": "authenticated test map shape",
+        }
+        shape = {
+            "schema": 2,
+            "width": 2 * source_width,
+            "height": source_height,
+            "eye_width": source_width,
+            "eye_height": source_height,
+            "source_width": source_width,
+            "source_height": source_height,
+            "content_scale_x": 1.0,
+            "content_scale_y": 1.0,
+            "dtype": "float32-le",
+            "layout": "row-major",
+            "channels": ["raw_reproject_source_u_normalized"],
+            "validity": {
+                "content":
+                    "derive from content_scale_x/content_scale_y and packed output coordinate",
+                "inverse":
+                    "11-step contractive fixed-point solution of crop-local q embedded by "
+                    "depth_input_region.json scale and outside-only zero-plane collar",
+                "mask": (
+                    "warp_mask.png red marks finite-source boundary extrapolation; V2 has no "
+                    "internal owner or synthetic-fill path"),
+            },
+            "live_sample_source_u_normalized":
+                "clamp(raw_reproject_source_u_normalized, 0, 1)",
+            "derived_inverse_displacement_output_eye_px":
+                "(raw_reproject_source_u_normalized - aspect_fitted_unwarped_source_u) * content_scale_x * eye_width",
+            "derived_signed_binocular_disparity_px":
+                "invert both eye maps at common source-U samples; x_right - x_left",
+            "displacement_preview": {
+                "file": "warp_displacement_heat.png",
+                "range_px": [-1.0, 1.0],
+                "normalization": "symmetric finite-content p98 absolute displacement",
+                "negative": "blue",
+                "zero": "green",
+                "positive": "red",
+                "bars": "black",
+                "nonfinite": "magenta",
+            },
+        }
+        (root / "warp_map_shape.json").write_text(
+            json.dumps(shape), encoding="utf-8")
+        (root / "dump_manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8")
+        return manifest, region, warp_map
 
     @staticmethod
     def _advertise_window_video_border(root, manifest, *, available=True):
@@ -477,6 +961,125 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             self.assertEqual(summary["width"], 16)
             self.assertEqual(summary["height"], 12)
             self.assertFalse(summary["window_video_border_verified"])
+
+    def test_roi_geometry_verifier_authenticates_region_border_map_and_zero_plane(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_synthetic_roi_geometry_dump(root)
+            summary = dump_contract.verify_v2_dump_geometry(root)
+
+            self.assertEqual(summary["depth_input_region"]["mode"], "video-region")
+            self.assertTrue(summary["window_video_border_verified"])
+            self.assertEqual(
+                summary["depth_input_region"]["authorization"]["observer_generation"],
+                901)
+            self.assertNotEqual(
+                summary["depth_input_region"]["analysis_generation"], 901)
+            evidence = summary["roi_exterior_zero_evidence"]
+            self.assertTrue(evidence["applicable"])
+            self.assertTrue(evidence["has_exterior_zero_plane"])
+            self.assertGreater(evidence["beyond_collar_sample_count"], 0)
+            self.assertEqual(evidence["max_abs_identity_error_output_eye_px"], 0.0)
+            self.assertEqual(
+                summary["depth_input_region"]["inference_rect"],
+                (95, 53, 865, 487))
+
+    def test_roi_geometry_verifier_rejects_hashed_authority_and_zero_map_tampering(self):
+        import hashlib
+
+        import numpy as np
+
+        mutations = (
+            "region-hash", "border-hash", "map-hash", "map-nonzero",
+            "authorization-mismatch", "semantic-mismatch")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                manifest, _, warp_map = self._write_synthetic_roi_geometry_dump(root)
+                if mutation == "region-hash":
+                    document = json.loads((root / "depth_input_region.json").read_text())
+                    document["analysis"]["analysis_generation"] += 1
+                    (root / "depth_input_region.json").write_text(json.dumps(document))
+                    expected = "depth_input_region.json content hash mismatch"
+                elif mutation in {
+                        "border-hash", "authorization-mismatch", "semantic-mismatch"}:
+                    document = json.loads((root / "window_video_border.json").read_text())
+                    if mutation == "semantic-mismatch":
+                        document["coordinate_space"]["capture_rect_px"]["right"] -= 1
+                    else:
+                        document["identity"]["generation"] += 1
+                    payload = json.dumps(document).encode("utf-8")
+                    (root / "window_video_border.json").write_bytes(payload)
+                    expected = ("window_video_border.json content hash mismatch"
+                                if mutation == "border-hash" else
+                                "authorization disagrees" if mutation == "authorization-mismatch"
+                                else "semantic rectangle disagrees")
+                    if mutation != "border-hash":
+                        manifest["artifacts"]["window_video_border.json"]["sha256"] = (
+                            hashlib.sha256(payload).hexdigest())
+                        (root / "dump_manifest.json").write_text(json.dumps(manifest))
+                else:
+                    changed = warp_map.copy()
+                    changed[0, 0] = np.float32(changed[0, 0] + 0.01)
+                    payload = changed.astype("<f4").tobytes()
+                    (root / "warp_map.f32").write_bytes(payload)
+                    expected = ("warp_map.f32 content hash mismatch" if mutation == "map-hash"
+                                else "nonzero beyond conservative collar support")
+                    if mutation == "map-nonzero":
+                        manifest["artifacts"]["warp_map.f32"]["sha256"] = hashlib.sha256(
+                            payload).hexdigest()
+                        (root / "dump_manifest.json").write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(ValueError, expected):
+                    dump_contract.verify_v2_dump_geometry(root)
+
+    def test_roi_geometry_verifier_reports_when_collar_covers_all_exterior_samples(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_synthetic_roi_geometry_dump(root, near_full=True)
+            summary = dump_contract.verify_v2_dump_geometry(root)
+            evidence = summary["roi_exterior_zero_evidence"]
+            self.assertFalse(evidence["applicable"])
+            self.assertFalse(evidence["has_exterior_zero_plane"])
+            self.assertEqual(evidence["beyond_collar_sample_count"], 0)
+            self.assertGreater(evidence["exterior_content_sample_count"], 0)
+            self.assertGreater(evidence["max_horizontal_collar_source_px"], 0.0)
+
+    def test_roi_manifest_dimensions_and_replay_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, _, _ = self._write_synthetic_roi_geometry_dump(root)
+            decoded = dump_contract.validate_v2_dump_manifest_document(manifest)
+            self.assertEqual(decoded["position_authority"], [
+                "shadow_final_parallax", "depth_input_region"])
+            self.assertEqual(
+                manifest["dimensions"]["source"]["format"],
+                "DXGI_FORMAT_R16G16B16A16_FLOAT")
+            with self.assertRaisesRegex(ValueError, "ROI-active Dump 3D replay"):
+                _require_supported_replay_domain({"status": "validated", **decoded})
+            replay_source = (SCRIPT_DIR / "replay_depth_mapping_v2.py").read_text(
+                encoding="utf-8")
+            self.assertLess(
+                replay_source.index("_require_supported_replay_domain(dump_manifest_capture)"),
+                replay_source.index("_new_output_directory(output)"))
+
+            changed = copy.deepcopy(manifest)
+            changed["dimensions"]["analysis_source"]["width"] += 1
+            (root / "dump_manifest.json").write_text(json.dumps(changed))
+            with self.assertRaisesRegex(ValueError, "analysis-source dimensions"):
+                dump_contract.verify_v2_dump_geometry(root)
+
+            changed = copy.deepcopy(manifest)
+            changed["dimensions"]["analysis_source"].update({
+                "format": "DXGI_FORMAT_B8G8R8A8_UNORM",
+                "format_value": 87,
+            })
+            with self.assertRaisesRegex(ValueError, "analysis-source dimensions"):
+                dump_contract.validate_v2_dump_manifest_document(changed)
+
+            changed = copy.deepcopy(manifest)
+            changed["dimensions"]["model_input"]["layout"] = "NHWC"
+            with self.assertRaisesRegex(ValueError, "crop-local tensor dimensions"):
+                dump_contract.validate_v2_dump_manifest_document(changed)
 
     def test_geometry_verifier_cross_validates_advertised_window_video_border(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -694,8 +1297,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "shadow_vertical_conditioned",
                 "shadow_final_parallax"):
             inactive["dimensions"][name] = None
-        for descriptor in inactive["artifacts"].values():
-            descriptor["available"] = False
+        for name, descriptor in inactive["artifacts"].items():
+            if name.startswith("shadow_"):
+                descriptor["available"] = False
         decoded = dump_contract.validate_v2_dump_manifest_document(inactive)
         self.assertFalse(decoded["vertical_majorant_available"])
 

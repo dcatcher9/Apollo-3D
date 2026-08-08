@@ -36,6 +36,24 @@ supported ordering may stay the same or collapse into an abstaining tie, but it 
 This does not claim invariance to local tone mapping, codec noise, color-matrix changes, or
 independently transformed channels.
 
+### Analysis-domain ownership
+
+Ordinary V2 computes every item above from the full captured frame. When the foreground-Chromium
+video ROI is authorized for an exact matched frame, the same-format cropped video texture is the
+entire analysis domain: DAV2 input, normalized-depth comparison, appearance and ordinal evidence,
+scene center, baselines, and history all exclude browser chrome and the surrounding desktop. The
+full captured color texture remains available only to the final renderer.
+
+Evidence from different domains must never be compared. Entering or leaving ROI mode, changing the
+authorized video identity or crop dimensions, or changing the input transfer domain clears cut
+history, baselines, pending confirmation, and the scene camera before analysis resumes. Translation
+of the same crop without a size change retains the analysis domain and its histories; the exact
+matched-frame rectangle still determines where that frame is rendered. A missing, stale,
+unsupported, or partially off-monitor ROI selects full-frame V2. That resets state when leaving an
+active ROI, but repeated ineligible observations while already full-frame are not domain changes. A
+semantic rectangle exactly equal to the capture extent is already that canonical full-frame domain:
+it creates no crop, ROI transition, history reset, or camera reacquisition.
+
 ## Appearance proposals
 
 A broad appearance proposal requires:
@@ -181,9 +199,15 @@ The committed conformance clips must prove at least these contracts:
   produces exactly one pulse on its confirmed endpoint;
 - a settling jump after an accepted cut cannot immediately repulse;
 - a structureless flash returning to the same endpoint is suppressed, while a real different
-  return remains detectable; and
+  return remains detectable;
 - localized video/player replacement passes only when it is a sharp surprise above its ordinary
-  motion baseline.
+  motion baseline;
+- full-frame-to-ROI, ROI-to-full-frame, identity, crop-size, and transfer-domain changes clear old
+  evidence instead of emitting a synthetic cut;
+- a pure on-screen translation of the same-sized ROI retains the camera and cut histories while
+  binding geometry to the new exact matched-frame rectangle; and
+- an exact full-capture semantic rectangle remains in the ordinary full-frame domain without a
+  reset or camera reacquisition.
 
 Run the production evaluator and the scene-cut unit tests after changing the evidence shader,
 thresholds, state resolver, preprocessing order, or history layout:
@@ -211,6 +235,11 @@ Exercise each sequence for at least 20 seconds and finish with five seconds of a
     after the first.
 12. A structureless flash/slate that returns both to the original scene and to a different scene.
 13. A localized video/player replacement inside an otherwise stable desktop.
+14. Enter and leave the foreground-Chromium ROI route, including an unsupported-aspect fallback.
+15. Move a same-sized video window without changing its content, then resize it across an analysis
+    domain boundary.
+16. Maximize the semantic video rectangle to the exact capture extent and verify ordinary full-frame
+    continuity rather than an ROI transition.
 
 Repeat representative cases in SDR and HDR and across authenticated landscape, ultrawide, and
 portrait tensor shapes. Record frame identity, all evidence fractions, reason flags, arm/latch
@@ -219,4 +248,5 @@ disparity percentiles.
 
 The live contract passes when exposure-only changes never reacquire the camera, sustained motion
 never pumps it, each qualified editorial cut creates exactly one camera acquisition, a cut during
-persistent motion remains observable, and diagnostics add no GPU queue stall.
+persistent motion remains observable, ROI-domain transitions cannot compare incompatible history,
+pure ROI translation does not reacquire the camera, and diagnostics add no GPU queue stall.

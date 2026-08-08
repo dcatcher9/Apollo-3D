@@ -43,6 +43,28 @@ namespace {
     bool operator==(const rgba16_bits_t &) const = default;
   };
 
+  struct bgra8_t {
+    std::uint8_t b;
+    std::uint8_t g;
+    std::uint8_t r;
+    std::uint8_t a;
+
+    bool operator==(const bgra8_t &) const = default;
+  };
+
+  struct host_sbs_v2_geometry_t {
+    float content_scale_x = 1.0f;
+    float content_scale_y = 1.0f;
+    float video_roi_active = 0.0f;
+    float reserved = 0.0f;
+    float video_roi_left = 0.0f;
+    float video_roi_top = 0.0f;
+    float video_roi_right = 1.0f;
+    float video_roi_bottom = 1.0f;
+  };
+
+  static_assert(sizeof(host_sbs_v2_geometry_t) == 32u);
+
   class live_v2_warp_fixture_t {
   public:
     bool initialize(std::string &error, const bool flat_identity = false) {
@@ -164,25 +186,6 @@ namespace {
         return false;
       }
 
-      // Exact 16-byte mirror of HostSbsV2Geometry at b2. Unit content scale maps each packed eye
-      // to the entire mono source; the reserved words must not become hidden geometry authority.
-      constexpr std::array<float, 4> constants {
-        1.0f, 1.0f, 0.0f, 0.0f,
-      };
-      D3D11_BUFFER_DESC constant_desc {};
-      constant_desc.ByteWidth = sizeof(constants);
-      constant_desc.Usage = D3D11_USAGE_IMMUTABLE;
-      constant_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-      D3D11_SUBRESOURCE_DATA constant_data {};
-      constant_data.pSysMem = constants.data();
-      if (FAILED(device->CreateBuffer(
-            &constant_desc,
-            &constant_data,
-            &constant_buffer
-          ))) {
-        error = "could not create live V2 render constants";
-        return false;
-      }
       return true;
     }
 
@@ -199,7 +202,8 @@ namespace {
       std::vector<std::byte> &packed_output,
       std::string &error,
       const UINT depth_width = 0u,
-      const UINT depth_height = 0u
+      const UINT depth_height = 0u,
+      const host_sbs_v2_geometry_t &geometry = host_sbs_v2_geometry_t {}
     ) {
       const UINT resolved_depth_width = depth_width == 0u ? source_width : depth_width;
       const UINT resolved_depth_height = depth_height == 0u ? source_height : depth_height;
@@ -285,6 +289,25 @@ namespace {
         return false;
       }
 
+      // Exact 32-byte mirror of HostSbsV2Geometry at b2. Creating one immutable buffer for each
+      // draw also proves that ROI geometry belongs to that exact matched render rather than to
+      // mutable fixture state retained from an earlier frame.
+      ComPtr<ID3D11Buffer> geometry_buffer;
+      D3D11_BUFFER_DESC geometry_desc {};
+      geometry_desc.ByteWidth = sizeof(geometry);
+      geometry_desc.Usage = D3D11_USAGE_IMMUTABLE;
+      geometry_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+      D3D11_SUBRESOURCE_DATA geometry_data {};
+      geometry_data.pSysMem = &geometry;
+      if (FAILED(device->CreateBuffer(
+            &geometry_desc,
+            &geometry_data,
+            &geometry_buffer
+          ))) {
+        error = "could not create live V2 render constants";
+        return false;
+      }
+
       const UINT packed_width = source_width * 2u;
       D3D11_TEXTURE2D_DESC output_desc {};
       output_desc.Width = packed_width;
@@ -329,7 +352,7 @@ namespace {
         nullptr,
       };
       ID3D11SamplerState *samplers[] = {sampler.Get()};
-      ID3D11Buffer *constants[] = {constant_buffer.Get()};
+      ID3D11Buffer *constants[] = {geometry_buffer.Get()};
       context->IASetInputLayout(nullptr);
       context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
       context->VSSetShader(vertex_shader.Get(), nullptr, 0);
@@ -415,8 +438,119 @@ namespace {
     ComPtr<ID3D11VertexShader> vertex_shader;
     ComPtr<ID3D11PixelShader> pixel_shader;
     ComPtr<ID3D11SamplerState> sampler;
-    ComPtr<ID3D11Buffer> constant_buffer;
   };
+
+  template <typename Pixel>
+  bool copy_texture_region_exact(
+    const DXGI_FORMAT format,
+    const UINT source_width,
+    const UINT source_height,
+    const std::vector<Pixel> &source_pixels,
+    const D3D11_BOX &source_box,
+    std::vector<Pixel> &cropped_pixels,
+    std::string &error
+  ) {
+    const UINT crop_width = source_box.right - source_box.left;
+    const UINT crop_height = source_box.bottom - source_box.top;
+    if (source_width == 0u || source_height == 0u || crop_width == 0u ||
+        crop_height == 0u || source_box.right > source_width ||
+        source_box.bottom > source_height || source_box.front != 0u ||
+        source_box.back != 1u ||
+        source_pixels.size() !=
+          static_cast<std::size_t>(source_width) * source_height) {
+      error = "invalid D3D11 crop-copy test input";
+      return false;
+    }
+
+    constexpr D3D_FEATURE_LEVEL requested[] = {D3D_FEATURE_LEVEL_11_0};
+    D3D_FEATURE_LEVEL actual {};
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    if (FAILED(D3D11CreateDevice(
+          nullptr,
+          D3D_DRIVER_TYPE_WARP,
+          nullptr,
+          0,
+          requested,
+          static_cast<UINT>(std::size(requested)),
+          D3D11_SDK_VERSION,
+          &device,
+          &actual,
+          &context
+        )) ||
+        actual < D3D_FEATURE_LEVEL_11_0) {
+      error = "D3D11 WARP feature level 11 crop-copy initialization failed";
+      return false;
+    }
+
+    D3D11_TEXTURE2D_DESC source_desc {};
+    source_desc.Width = source_width;
+    source_desc.Height = source_height;
+    source_desc.MipLevels = 1u;
+    source_desc.ArraySize = 1u;
+    source_desc.Format = format;
+    source_desc.SampleDesc.Count = 1u;
+    source_desc.Usage = D3D11_USAGE_DEFAULT;
+    D3D11_SUBRESOURCE_DATA source_data {};
+    source_data.pSysMem = source_pixels.data();
+    source_data.SysMemPitch = source_width * sizeof(Pixel);
+    ComPtr<ID3D11Texture2D> source_texture;
+    if (FAILED(device->CreateTexture2D(
+          &source_desc,
+          &source_data,
+          &source_texture
+        ))) {
+      error = "could not create the source texture for exact crop copy";
+      return false;
+    }
+
+    auto crop_desc = source_desc;
+    crop_desc.Width = crop_width;
+    crop_desc.Height = crop_height;
+    ComPtr<ID3D11Texture2D> crop_texture;
+    if (FAILED(device->CreateTexture2D(&crop_desc, nullptr, &crop_texture))) {
+      error = "could not create the same-format crop texture";
+      return false;
+    }
+    context->CopySubresourceRegion(
+      crop_texture.Get(),
+      0,
+      0,
+      0,
+      0,
+      source_texture.Get(),
+      0,
+      &source_box
+    );
+
+    auto staging_desc = crop_desc;
+    staging_desc.Usage = D3D11_USAGE_STAGING;
+    staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> staging;
+    if (FAILED(device->CreateTexture2D(&staging_desc, nullptr, &staging))) {
+      error = "could not create the exact crop staging texture";
+      return false;
+    }
+    context->CopyResource(staging.Get(), crop_texture.Get());
+
+    D3D11_MAPPED_SUBRESOURCE mapped {};
+    if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+      error = "could not read the exact crop-copy result";
+      return false;
+    }
+    cropped_pixels.resize(static_cast<std::size_t>(crop_width) * crop_height);
+    const std::size_t row_bytes = static_cast<std::size_t>(crop_width) * sizeof(Pixel);
+    for (UINT y = 0; y < crop_height; ++y) {
+      std::memcpy(
+        cropped_pixels.data() + static_cast<std::size_t>(y) * crop_width,
+        static_cast<const std::byte *>(mapped.pData) +
+          static_cast<std::size_t>(y) * mapped.RowPitch,
+        row_bytes
+      );
+    }
+    context->Unmap(staging.Get(), 0);
+    return true;
+  }
 
   models::depth_coordinate_v2::state_words_t make_live_state(
     const bool frame_valid,
@@ -548,6 +682,70 @@ namespace {
     return top + ty * (bottom - top);
   }
 
+  float sample_effective_parallax(
+    const std::vector<float> &roi_local_parallax,
+    const UINT depth_width,
+    const UINT depth_height,
+    const UINT source_width,
+    const UINT source_height,
+    const float source_u,
+    const float source_v,
+    const host_sbs_v2_geometry_t &geometry
+  ) {
+    if (geometry.video_roi_active == 0.0f) {
+      return sample_linear_clamp(
+        roi_local_parallax,
+        depth_width,
+        depth_height,
+        source_u,
+        source_v
+      );
+    }
+
+    const float projected_u = std::clamp(
+      source_u,
+      geometry.video_roi_left,
+      geometry.video_roi_right
+    );
+    const float projected_v = std::clamp(
+      source_v,
+      geometry.video_roi_top,
+      geometry.video_roi_bottom
+    );
+    const float roi_width = geometry.video_roi_right - geometry.video_roi_left;
+    const float roi_height = geometry.video_roi_bottom - geometry.video_roi_top;
+    const float local_u =
+      (projected_u - geometry.video_roi_left) / roi_width;
+    const float local_v =
+      (projected_v - geometry.video_roi_top) / roi_height;
+    const float local_parallax = sample_linear_clamp(
+      roi_local_parallax,
+      depth_width,
+      depth_height,
+      local_u,
+      local_v
+    );
+    const float full_source_parallax = roi_width * local_parallax;
+    const float source_height_in_source_u =
+      static_cast<float>(source_height) / static_cast<float>(source_width);
+    const float roi_pixel_aspect =
+      (roi_width * static_cast<float>(source_width)) /
+      (roi_height * static_cast<float>(source_height));
+    const float vertical_slope =
+      models::depth_coordinate_v2::max_vertical_shear * roi_pixel_aspect *
+      (static_cast<float>(depth_height) / static_cast<float>(depth_width));
+    const float collar_budget =
+      models::depth_coordinate_v2::max_horizontal_slope *
+        std::abs(source_u - projected_u) +
+      vertical_slope *
+        std::abs(source_v - projected_v) * source_height_in_source_u;
+    const float magnitude = std::abs(full_source_parallax);
+    if (collar_budget >= magnitude) {
+      return 0.0f;
+    }
+    return std::copysign(magnitude - collar_budget, full_source_parallax);
+  }
+
   rgba32f_t one_tap_reference(
     const std::vector<rgba32f_t> &source,
     const UINT width,
@@ -570,6 +768,105 @@ namespace {
     EXPECT_NEAR(actual.a, expected.a, tolerance) << where << " a";
   }
 }  // namespace
+
+TEST(HostSbsVideoRegionCropGpuTest, CopySubresourceRegionPreservesExactBgra8Pixels) {
+  constexpr UINT source_width = 11u;
+  constexpr UINT source_height = 8u;
+  constexpr D3D11_BOX crop_box {
+    2u, 1u, 0u,
+    9u, 7u, 1u,
+  };
+  constexpr UINT crop_width = crop_box.right - crop_box.left;
+  constexpr UINT crop_height = crop_box.bottom - crop_box.top;
+  constexpr bgra8_t outside_sentinel {0xdeu, 0xadu, 0xbeu, 0x4du};
+  std::vector<bgra8_t> source(
+    static_cast<std::size_t>(source_width) * source_height,
+    outside_sentinel
+  );
+  std::vector<bgra8_t> expected;
+  expected.reserve(static_cast<std::size_t>(crop_width) * crop_height);
+  for (UINT y = crop_box.top; y < crop_box.bottom; ++y) {
+    for (UINT x = crop_box.left; x < crop_box.right; ++x) {
+      const bgra8_t pixel {
+        static_cast<std::uint8_t>(3u + 17u * x + 11u * y),
+        static_cast<std::uint8_t>(5u + 7u * x + 29u * y),
+        static_cast<std::uint8_t>(9u + 31u * x + 13u * y),
+        0xffu,
+      };
+      source[static_cast<std::size_t>(y) * source_width + x] = pixel;
+      expected.push_back(pixel);
+    }
+  }
+
+  std::string error;
+  std::vector<bgra8_t> cropped;
+  ASSERT_TRUE(copy_texture_region_exact(
+    DXGI_FORMAT_B8G8R8A8_UNORM,
+    source_width,
+    source_height,
+    source,
+    crop_box,
+    cropped,
+    error
+  )) << error;
+  ASSERT_EQ(cropped.size(), expected.size());
+  for (std::size_t index = 0; index < expected.size(); ++index) {
+    EXPECT_EQ(cropped[index], expected[index]) << "crop pixel " << index;
+    EXPECT_NE(cropped[index], outside_sentinel) << "crop pixel " << index;
+  }
+}
+
+TEST(HostSbsVideoRegionCropGpuTest, CopySubresourceRegionPreservesExactRgba16fBits) {
+  constexpr UINT source_width = 10u;
+  constexpr UINT source_height = 9u;
+  constexpr D3D11_BOX crop_box {
+    1u, 2u, 0u,
+    8u, 7u, 1u,
+  };
+  constexpr UINT crop_width = crop_box.right - crop_box.left;
+  constexpr UINT crop_height = crop_box.bottom - crop_box.top;
+  constexpr rgba16_bits_t outside_sentinel {
+    0x7bffu,
+    0xfbffu,
+    0x0001u,
+    0x0000u,
+  };
+  std::vector<rgba16_bits_t> source(
+    static_cast<std::size_t>(source_width) * source_height,
+    outside_sentinel
+  );
+  std::vector<rgba16_bits_t> expected;
+  expected.reserve(static_cast<std::size_t>(crop_width) * crop_height);
+  for (UINT y = crop_box.top; y < crop_box.bottom; ++y) {
+    for (UINT x = crop_box.left; x < crop_box.right; ++x) {
+      const rgba16_bits_t pixel {
+        static_cast<std::uint16_t>(0x3000u + 13u * x + 7u * y),
+        static_cast<std::uint16_t>(0x3400u + 5u * x + 17u * y),
+        static_cast<std::uint16_t>(0x3800u + 19u * x + 3u * y),
+        0x3c00u,
+      };
+      source[static_cast<std::size_t>(y) * source_width + x] = pixel;
+      expected.push_back(pixel);
+    }
+  }
+
+  std::string error;
+  std::vector<rgba16_bits_t> cropped;
+  ASSERT_TRUE(copy_texture_region_exact(
+    DXGI_FORMAT_R16G16B16A16_FLOAT,
+    source_width,
+    source_height,
+    source,
+    crop_box,
+    cropped,
+    error
+  )) << error;
+  ASSERT_EQ(cropped.size(), expected.size());
+  for (std::size_t index = 0; index < expected.size(); ++index) {
+    EXPECT_EQ(cropped[index], expected[index]) << "crop pixel " << index;
+    EXPECT_NE(cropped[index], outside_sentinel) << "crop pixel " << index;
+  }
+}
 
 TEST(HostSbsV2LiveWarpGpuTest, ExecutesAuthenticatedPixelContract) {
   constexpr UINT width = 8u;
@@ -712,6 +1009,221 @@ TEST(HostSbsV2LiveWarpGpuTest, ExecutesAuthenticatedPixelContract) {
   for (std::size_t index = 0; index < scrgb_output.size(); ++index) {
     EXPECT_EQ(scrgb_output[index], scrgb_pixel) << "packed pixel " << index;
   }
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, RoiLocalFieldUsesMinimumSlopeConstrainedOutsideCollar) {
+  namespace v2 = models::depth_coordinate_v2;
+  constexpr UINT source_width = 512u;
+  constexpr UINT source_height_for_contract = 256u;
+  constexpr UINT depth_width = 64u;
+  constexpr UINT depth_height = 32u;
+  constexpr float local_parallax = 0.04f;
+  constexpr host_sbs_v2_geometry_t geometry {
+    .video_roi_active = 1.0f,
+    .video_roi_left = 0.25f,
+    .video_roi_top = 0.25f,
+    .video_roi_right = 0.75f,
+    .video_roi_bottom = 0.75f,
+  };
+  const std::vector<float> positive_field(
+    static_cast<std::size_t>(depth_width) * depth_height,
+    local_parallax
+  );
+  const std::vector<float> negative_field(
+    positive_field.size(),
+    -local_parallax
+  );
+
+  const auto effective = [&](const std::vector<float> &field, float u, float v) {
+    return sample_effective_parallax(
+      field,
+      depth_width,
+      depth_height,
+      source_width,
+      source_height_for_contract,
+      u,
+      v,
+      geometry
+    );
+  };
+
+  constexpr float roi_width = 0.5f;
+  constexpr float expected_full_source_parallax =
+    roi_width * local_parallax;
+  // ROI-local q is not tapered or otherwise changed. Only the coordinate-unit conversion from
+  // local video U to full-source U scales its renderer displacement.
+  EXPECT_FLOAT_EQ(effective(positive_field, 0.50f, 0.50f), expected_full_source_parallax);
+  EXPECT_FLOAT_EQ(
+    effective(positive_field, geometry.video_roi_left, 0.50f),
+    expected_full_source_parallax
+  );
+  EXPECT_FLOAT_EQ(
+    effective(positive_field, 0.50f, 0.50f) / roi_width,
+    local_parallax
+  );
+  EXPECT_FLOAT_EQ(
+    effective(negative_field, 0.50f, 0.50f),
+    -expected_full_source_parallax
+  );
+
+  auto narrow_geometry = geometry;
+  narrow_geometry.video_roi_left = 0.375f;
+  narrow_geometry.video_roi_right = 0.625f;
+  EXPECT_FLOAT_EQ(
+    sample_effective_parallax(
+      positive_field,
+      depth_width,
+      depth_height,
+      source_width,
+      source_height_for_contract,
+      0.50f,
+      0.50f,
+      narrow_geometry
+    ),
+    0.25f * local_parallax
+  );
+
+  // The left/right collar is the fastest continuous decay admitted by the authenticated 0.5
+  // row slope. At |p|=0.02 its exact support is 0.04 full-source U beyond either ROI edge.
+  constexpr float left_zero =
+    geometry.video_roi_left -
+    expected_full_source_parallax / v2::max_horizontal_slope;
+  constexpr float right_zero =
+    geometry.video_roi_right +
+    expected_full_source_parallax / v2::max_horizontal_slope;
+  EXPECT_NEAR(effective(positive_field, left_zero, 0.50f), 0.0f, 1.0e-7f);
+  EXPECT_NEAR(effective(negative_field, left_zero, 0.50f), 0.0f, 1.0e-7f);
+  EXPECT_NEAR(effective(positive_field, right_zero, 0.50f), 0.0f, 1.0e-7f);
+  EXPECT_FLOAT_EQ(effective(positive_field, left_zero - 0.001f, 0.50f), 0.0f);
+  EXPECT_FLOAT_EQ(effective(negative_field, right_zero + 0.001f, 0.50f), 0.0f);
+  EXPECT_NEAR(
+    effective(positive_field, geometry.video_roi_left - 0.01f, 0.50f),
+    expected_full_source_parallax - 0.01f * v2::max_horizontal_slope,
+    1.0e-7f
+  );
+  EXPECT_NEAR(
+    effective(negative_field, geometry.video_roi_left - 0.01f, 0.50f),
+    -expected_full_source_parallax + 0.01f * v2::max_horizontal_slope,
+    1.0e-7f
+  );
+
+  // Dense finite differences cover both ROI boundaries and both zero joins. They prove that the
+  // local-to-full conversion plus signed collar never exceeds the same global row slope that
+  // makes the production fixed-point inverse contractive.
+  constexpr float sample_step = 1.0f / 4096.0f;
+  for (const auto *field : {&positive_field, &negative_field}) {
+    float previous = effective(*field, 0.0f, 0.50f);
+    for (float u = sample_step; u <= 1.0f; u += sample_step) {
+      const float current = effective(*field, u, 0.50f);
+      EXPECT_LE(
+        std::abs(current - previous),
+        v2::max_horizontal_slope * sample_step + 2.0e-7f
+      ) << "u=" << u;
+      previous = current;
+    }
+  }
+
+  // Top/bottom use source-width units just like the producer's vertical shear. At this 2:1
+  // source aspect, 0.02 parallax reaches zero 0.02 source-V outside the edge. A corner spends
+  // the horizontal and vertical budgets together, producing the minimum anisotropic diamond.
+  constexpr float top_zero = geometry.video_roi_top - 0.02f;
+  EXPECT_NEAR(effective(positive_field, 0.50f, top_zero), 0.0f, 1.0e-7f);
+  EXPECT_FLOAT_EQ(effective(positive_field, 0.50f, top_zero - 0.001f), 0.0f);
+  EXPECT_FLOAT_EQ(effective(positive_field, 0.229f, 0.239f), 0.0f);
+
+  // Run the real GPU shader against a source-U color ramp. The complete packed output must match
+  // an independent CPU inverse using the same ROI-local texture and effective collar field.
+  constexpr UINT render_height = 1u;
+  std::vector<rgba32f_t> source(source_width);
+  for (UINT x = 0; x < source_width; ++x) {
+    const float u = (static_cast<float>(x) + 0.5f) /
+                    static_cast<float>(source_width);
+    source[x] = {u, 0.2f + 0.3f * u, 0.8f - 0.2f * u, 1.0f};
+  }
+  std::string error;
+  live_v2_warp_fixture_t warp;
+  ASSERT_TRUE(warp.initialize(error)) << error;
+  std::vector<std::byte> packed_bytes;
+  const std::array<float, 4> sentinel_clear {0.91f, 0.13f, 0.77f, 0.42f};
+  ASSERT_TRUE(warp.render(
+    DXGI_FORMAT_R32G32B32A32_FLOAT,
+    sizeof(rgba32f_t),
+    source_width,
+    render_height,
+    source.data(),
+    positive_field,
+    std::vector<float>(positive_field.size(), 0.0f),
+    make_live_state(true, true),
+    sentinel_clear,
+    packed_bytes,
+    error,
+    depth_width,
+    depth_height,
+    geometry
+  )) << error;
+  const auto packed = unpack_rgba32f(packed_bytes);
+  ASSERT_EQ(packed.size(), source_width * 2u);
+  for (UINT eye = 0; eye < 2u; ++eye) {
+    const float eye_sign = eye == 0u ? -1.0f : 1.0f;
+    for (UINT x = 0; x < source_width; ++x) {
+      const float destination_u =
+        (static_cast<float>(x) + 0.5f) / static_cast<float>(source_width);
+      float source_u = destination_u;
+      for (int iteration = 0; iteration < 11; ++iteration) {
+        source_u = destination_u + eye_sign * sample_effective_parallax(
+          positive_field,
+          depth_width,
+          depth_height,
+          source_width,
+          render_height,
+          source_u,
+          0.5f,
+          geometry
+        );
+      }
+      const auto expected = sample_linear_clamp(
+        source,
+        source_width,
+        render_height,
+        std::clamp(source_u, 0.0f, 1.0f),
+        0.5f
+      );
+      const std::size_t packed_index = eye * source_width + x;
+      expect_rgba_near(
+        packed[packed_index],
+        expected,
+        3.0e-5f,
+        "ROI collar eye=" + std::to_string(eye) + ", x=" + std::to_string(x)
+      );
+    }
+  }
+
+  constexpr UINT center_x = source_width / 2u - 1u;
+  const float center_destination_u =
+    (static_cast<float>(center_x) + 0.5f) / static_cast<float>(source_width);
+  EXPECT_NEAR(
+    (center_destination_u - packed[center_x].r) / roi_width,
+    local_parallax,
+    4.0e-5f
+  );
+  EXPECT_NEAR(
+    (packed[source_width + center_x].r - center_destination_u) / roi_width,
+    local_parallax,
+    4.0e-5f
+  );
+  constexpr UINT identity_x = 48u;
+  expect_rgba_near(
+    packed[identity_x],
+    source[identity_x],
+    3.0e-6f,
+    "left eye beyond collar"
+  );
+  expect_rgba_near(
+    packed[source_width + identity_x],
+    source[identity_x],
+    3.0e-6f,
+    "right eye beyond collar"
+  );
 }
 
 TEST(HostSbsV2LiveWarpGpuTest, CandidateFieldCannotBlurOrAlterLiveColor) {

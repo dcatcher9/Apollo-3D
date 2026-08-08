@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <string_view>
 #include <utility>
 
@@ -29,6 +30,41 @@ namespace models {
 
     constexpr bool operator==(const depth_tensor_shape_t &) const = default;
   };
+
+  /** Half-open source-pixel rectangle selected for video-only depth inference. */
+  struct depth_source_rect_t {
+    std::uint32_t left = 0u;
+    std::uint32_t top = 0u;
+    std::uint32_t right = 0u;
+    std::uint32_t bottom = 0u;
+
+    constexpr std::uint32_t width() const noexcept {
+      return right > left ? right - left : 0u;
+    }
+
+    constexpr std::uint32_t height() const noexcept {
+      return bottom > top ? bottom - top : 0u;
+    }
+
+    constexpr bool valid() const noexcept {
+      return width() > 0u && height() > 0u;
+    }
+
+    constexpr bool operator==(const depth_source_rect_t &) const = default;
+  };
+
+  struct depth_video_region_plan_t {
+    depth_source_rect_t source_rect {};
+    depth_tensor_shape_t tensor_shape {};
+    float trimmed_area_fraction = 0.0f;
+
+    constexpr bool operator==(const depth_video_region_plan_t &) const = default;
+  };
+
+  // A small inward trim may exclude a Chromium/player frame without materially cropping the
+  // picture. Larger adaptation is rejected so the ordinary full-frame route remains the fallback.
+  inline constexpr float host_sbs_v2_max_video_region_trim_fraction = 0.02f;
+
 
   namespace host_sbs_resolution_detail {
     inline int round_to_patch(const float value, const int patch = 14) {
@@ -164,6 +200,108 @@ namespace models {
              source_width,
              source_height
            ).empty();
+  }
+
+  /**
+   * Select a video-only input for one already-active authenticated tensor shape.
+   *
+   * A non-fullscreen rectangle is kept only when it already has the exact tensor aspect. A near
+   * miss may trim inward by at most 2% of its area and must then pass the ordinary fitter again.
+   * This deliberately removes a thin player/frame border instead of admitting it to DAV2. It is
+   * not a generic aspect converter: there is no stretching or padding, and a material mismatch
+   * returns no plan (full-frame fallback). A full-capture rectangle is always ordinary full-frame
+   * V2 and therefore returns no ROI plan.
+   */
+  inline std::optional<depth_video_region_plan_t> plan_host_sbs_v2_video_region(
+    const depth_source_rect_t video_rect,
+    const std::uint32_t source_width,
+    const std::uint32_t source_height,
+    const depth_tensor_shape_t required_shape,
+    const float maximum_trim_fraction =
+      host_sbs_v2_max_video_region_trim_fraction
+  ) noexcept {
+    if (!video_rect.valid() || video_rect.right > source_width ||
+        video_rect.bottom > source_height ||
+        !host_sbs_v2_depth_shape_is_authenticated(required_shape) ||
+        !std::isfinite(maximum_trim_fraction) ||
+        maximum_trim_fraction < 0.0f) {
+      return std::nullopt;
+    }
+    // A semantic video that already covers the complete captured source is the ordinary
+    // full-frame domain. Do not trim a few edge pixels merely because patch-size rounding makes
+    // the model tensor's aspect differ slightly from the source raster.
+    if (video_rect.left == 0u && video_rect.top == 0u &&
+        video_rect.right == source_width && video_rect.bottom == source_height) {
+      return std::nullopt;
+    }
+    const auto exact_shape = fit_host_sbs_v2_depth_tensor_shape(
+      video_rect.width(),
+      video_rect.height()
+    );
+    const std::uint64_t width = video_rect.width();
+    const std::uint64_t height = video_rect.height();
+    const std::uint64_t target_width = static_cast<std::uint32_t>(required_shape.width);
+    const std::uint64_t target_height = static_cast<std::uint32_t>(required_shape.height);
+    if (exact_shape == required_shape &&
+        width * target_height == height * target_width &&
+        host_sbs_v2_source_resolution_is_supported(
+          video_rect.width(),
+          video_rect.height()
+        )) {
+      return depth_video_region_plan_t {video_rect, exact_shape, 0.0f};
+    }
+
+    std::uint64_t fitted_width = width;
+    std::uint64_t fitted_height = height;
+    if (width * target_height > height * target_width) {
+      fitted_width = height * target_width / target_height;
+    } else if (width * target_height < height * target_width) {
+      fitted_height = width * target_height / target_width;
+    }
+    if (fitted_width > width || fitted_height > height ||
+        fitted_width < target_width || fitted_height < target_height) {
+      return std::nullopt;
+    }
+
+    const std::uint64_t original_area = width * height;
+    const std::uint64_t fitted_area = fitted_width * fitted_height;
+    const float trimmed_fraction = static_cast<float>(
+      1.0 - static_cast<double>(fitted_area) / static_cast<double>(original_area)
+    );
+    if (trimmed_fraction > maximum_trim_fraction) {
+      return std::nullopt;
+    }
+
+    const auto remove_x = static_cast<std::uint32_t>(width - fitted_width);
+    const auto remove_y = static_cast<std::uint32_t>(height - fitted_height);
+    const auto left = video_rect.left + remove_x / 2u;
+    const auto top = video_rect.top + remove_y / 2u;
+    const depth_source_rect_t fitted_rect {
+      left,
+      top,
+      left + static_cast<std::uint32_t>(fitted_width),
+      top + static_cast<std::uint32_t>(fitted_height),
+    };
+    if (fitted_rect.left < video_rect.left || fitted_rect.top < video_rect.top ||
+        fitted_rect.right > video_rect.right || fitted_rect.bottom > video_rect.bottom) {
+      return std::nullopt;
+    }
+    const auto verified_shape = fit_host_sbs_v2_depth_tensor_shape(
+      fitted_rect.width(),
+      fitted_rect.height()
+    );
+    if (verified_shape != required_shape ||
+        !host_sbs_v2_source_resolution_is_supported(
+          fitted_rect.width(),
+          fitted_rect.height()
+        )) {
+      return std::nullopt;
+    }
+    return depth_video_region_plan_t {
+      fitted_rect,
+      verified_shape,
+      trimmed_fraction,
+    };
   }
 
 }  // namespace models

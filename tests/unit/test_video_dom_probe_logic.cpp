@@ -1,6 +1,6 @@
 /**
  * @file tests/unit/test_video_dom_probe_logic.cpp
- * @brief Tests for the diagnostics-only Chromium video DOM probe logic.
+ * @brief Tests for Chromium video DOM probe parsing, selection, and machine-mode policy.
  */
 
 #include "tools/video_dom_probe/probe_logic.h"
@@ -56,6 +56,173 @@ TEST(VideoDomProbeLogic, RejectsMalformedOrConflictingAttributes) {
   EXPECT_FALSE(probe::match_video_tag(L"tag:v\\ideo;").valid);
   EXPECT_FALSE(probe::match_video_tag(L"tag:video;tag:div;").valid);
   EXPECT_FALSE(probe::match_video_tag(std::wstring_view(L"tag:video\0tag:div", 17)).valid);
+}
+
+TEST(VideoDomProbeLogic, ObjectChurnBetweenScansPreservesStableSemanticsAndRequestsAudit) {
+  const auto policy = probe::machine_event_policy(
+    {.foreground = 4, .object = 100},
+    {.foreground = 4, .object = 103}
+  );
+
+  EXPECT_FALSE(policy.discard_completed_scan);
+  EXPECT_FALSE(policy.invalidate_semantic_state);
+  EXPECT_TRUE(policy.request_follow_up_audit);
+}
+
+TEST(VideoDomProbeLogic, ObjectChurnDuringCompleteScanDoesNotDiscardObservation) {
+  const auto policy = probe::machine_event_policy(
+    {.foreground = 9, .object = 200},
+    {.foreground = 9, .object = 201}
+  );
+
+  EXPECT_FALSE(policy.discard_completed_scan);
+  EXPECT_FALSE(policy.invalidate_semantic_state);
+  EXPECT_TRUE(policy.request_follow_up_audit);
+}
+
+TEST(VideoDomProbeLogic, ForegroundChangeDiscardsObservationAndSemanticStability) {
+  const auto policy = probe::machine_event_policy(
+    {.foreground = 12, .object = 300},
+    {.foreground = 13, .object = 300}
+  );
+
+  EXPECT_TRUE(policy.discard_completed_scan);
+  EXPECT_TRUE(policy.invalidate_semantic_state);
+  EXPECT_TRUE(policy.request_follow_up_audit);
+}
+
+TEST(VideoDomProbeLogic, NoMachineEventsNeedNoFollowUpAudit) {
+  const auto policy = probe::machine_event_policy(
+    {.foreground = 20, .object = 400},
+    {.foreground = 20, .object = 400}
+  );
+
+  EXPECT_FALSE(policy.discard_completed_scan);
+  EXPECT_FALSE(policy.invalidate_semantic_state);
+  EXPECT_FALSE(policy.request_follow_up_audit);
+}
+
+TEST(VideoDomProbeLogic, CompleteUniqueCensusStagesUnpublishedProvisionalSelection) {
+  const probe::selection_t selection {
+    .index = 0,
+    .reason = probe::selection_reason_e::single,
+  };
+
+  const auto policy = probe::complete_census_policy(selection, false);
+  EXPECT_TRUE(policy.stage_selection);
+  EXPECT_FALSE(policy.revoke_cached_selection);
+  EXPECT_EQ(policy.phase, probe::cached_selection_phase_e::provisional);
+  EXPECT_FALSE(policy.publish_ok);
+}
+
+TEST(VideoDomProbeLogic, MatchingEstablishedSelectionRetainsEstablishedAuthority) {
+  const probe::selection_t selection {
+    .index = 1,
+    .reason = probe::selection_reason_e::largest,
+  };
+
+  const auto policy = probe::complete_census_policy(selection, true);
+  EXPECT_TRUE(policy.stage_selection);
+  EXPECT_FALSE(policy.revoke_cached_selection);
+  EXPECT_EQ(policy.phase, probe::cached_selection_phase_e::established);
+  EXPECT_TRUE(policy.publish_ok);
+}
+
+TEST(VideoDomProbeLogic, CompleteNegativeOrAmbiguousCensusRevokesCachedSelection) {
+  for (const auto selection : std::array {
+         probe::selection_t {},
+         probe::selection_t {.reason = probe::selection_reason_e::ambiguous},
+       }) {
+    const auto policy = probe::complete_census_policy(selection, false);
+    EXPECT_FALSE(policy.stage_selection);
+    EXPECT_TRUE(policy.revoke_cached_selection);
+    EXPECT_FALSE(policy.publish_ok);
+  }
+}
+
+TEST(VideoDomProbeLogic, NextTickExactRefreshPromotesProvisionalSelection) {
+  const auto policy = probe::cached_refresh_policy(
+    probe::cached_selection_phase_e::provisional,
+    true,
+    probe::machine_event_policy({.foreground = 3, .object = 8},
+                                {.foreground = 3, .object = 8})
+  );
+
+  EXPECT_TRUE(policy.retain_selection);
+  EXPECT_EQ(policy.next_phase, probe::cached_selection_phase_e::established);
+  EXPECT_TRUE(policy.publish_ok);
+  EXPECT_FALSE(policy.request_follow_up_audit);
+}
+
+TEST(VideoDomProbeLogic, FailedExactRefreshDropsProvisionalSelection) {
+  const auto policy = probe::cached_refresh_policy(
+    probe::cached_selection_phase_e::provisional,
+    false,
+    {}
+  );
+
+  EXPECT_FALSE(policy.retain_selection);
+  EXPECT_FALSE(policy.publish_ok);
+}
+
+TEST(VideoDomProbeLogic, ObjectChurnDoesNotBlockProvisionalPromotion) {
+  const auto events = probe::machine_event_policy(
+    {.foreground = 5, .object = 10},
+    {.foreground = 5, .object = 11}
+  );
+  const auto policy = probe::cached_refresh_policy(
+    probe::cached_selection_phase_e::provisional,
+    true,
+    events
+  );
+
+  EXPECT_TRUE(policy.retain_selection);
+  EXPECT_EQ(policy.next_phase, probe::cached_selection_phase_e::established);
+  EXPECT_TRUE(policy.publish_ok);
+  EXPECT_TRUE(policy.request_follow_up_audit);
+}
+
+TEST(VideoDomProbeLogic, ForegroundChangeVetoesProvisionalPromotion) {
+  const auto events = probe::machine_event_policy(
+    {.foreground = 5, .object = 10},
+    {.foreground = 6, .object = 10}
+  );
+  const auto policy = probe::cached_refresh_policy(
+    probe::cached_selection_phase_e::provisional,
+    true,
+    events
+  );
+
+  EXPECT_FALSE(policy.retain_selection);
+  EXPECT_FALSE(policy.publish_ok);
+  EXPECT_TRUE(policy.request_follow_up_audit);
+}
+
+TEST(VideoDomProbeLogic, EstablishedSelectionStaysEstablishedAfterExactRefresh) {
+  const auto policy = probe::cached_refresh_policy(
+    probe::cached_selection_phase_e::established,
+    true,
+    {}
+  );
+
+  EXPECT_TRUE(policy.retain_selection);
+  EXPECT_EQ(policy.next_phase, probe::cached_selection_phase_e::established);
+  EXPECT_TRUE(policy.publish_ok);
+}
+
+TEST(VideoDomProbeLogic, UncachedIncompleteRetriesFastButAccessibilityBacksOff) {
+  EXPECT_EQ(
+    probe::uncached_scan_retry_delay(
+      probe::uncached_scan_outcome_e::traversal_incomplete
+    ),
+    std::chrono::milliseconds {1000}
+  );
+  EXPECT_EQ(
+    probe::uncached_scan_retry_delay(
+      probe::uncached_scan_outcome_e::accessibility_unavailable
+    ),
+    std::chrono::milliseconds {15000}
+  );
 }
 
 TEST(VideoDomProbeLogic, RectangleMathHandlesPartialAndNegativeCoordinates) {

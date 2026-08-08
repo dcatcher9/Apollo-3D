@@ -7,7 +7,7 @@ only the current product, its known limitations, and work that may still be just
 
 | Path | Geometry owner | Status |
 |---|---|---|
-| Host SBS live stream | Sunshine 3D on Windows/NVIDIA | V2 production pipeline |
+| Host SBS live stream | Sunshine 3D on Windows/NVIDIA | V2 production pipeline, including a strict foreground-Chromium window-video ROI route |
 | Offline Host 3D conversion | Sunshine 3D isolated worker | Same V2 geometry with bounded cut lookahead and compressed H.265/AV1 output |
 | Client SBS | Moonlight 3D on Android XR | Separate client pipeline; unchanged by Host V2 |
 | Local AR glasses | Sunshine 3D local presenter | Reuses Host V2 without network encode/decode |
@@ -17,6 +17,13 @@ pop, a frame-local parallax container, conservative foreground ownership, bounde
 horizontal cliff conditioning, and a unique contractive inverse. Invalid or unauthenticated
 geometry renders flat; there is no older fallback.
 
+On Desktop Duplication, a fresh exact matched-frame rectangle for the unique largest `<video>` in
+the foreground Chrome or Edge document may replace full-frame analysis with one same-format crop.
+The detected rectangle can be trimmed inward by at most 2% of its area to the current authenticated
+tensor aspect; it is never padded or stretched. A rectangle equal to the capture extent canonicalizes
+to ordinary full-frame V2 with no crop or domain reset. Other ROI-eligibility failures also retain
+full-frame analysis; an internal base-V2 authentication failure still renders flat.
+
 The complete implementation contract is in [Host SBS pipeline](host-sbs.md). Scene-cut behavior is
 owned by [Host SBS scene cuts](host-sbs-scene-cuts.md).
 
@@ -24,7 +31,8 @@ owned by [Host SBS scene cuts](host-sbs-scene-cuts.md).
 
 - No endpoint normalization, min/max range EMA, subject stretch/recenter, adaptive pop, or
   configurable zero-plane translation.
-- No adaptive ROI or second inference over a tracked crop.
+- No damage-driven, image-tracked, generic-window, background-tab, or second-inference ROI. The
+  foreground-Chromium route replaces that frame's full analysis with one causally attributed crop.
 - No forward-owner render, multi-root visibility selector, post-warp blur, or synthetic hidden-pixel
   fill.
 - No CPU depth fallback or best-effort use of an unauthenticated model/shape.
@@ -39,7 +47,29 @@ These are architectural boundaries, not dormant feature flags.
 DAV2 is a relative monocular model. Fullscreen, windowed, or differently surrounded versions of
 the same image can produce materially different raw depth. More tensor pixels on the main subject
 do not guarantee a better boundary. Neutral padding and synthetic browser surrounds have not shown
-enough cross-scene reliability to ship.
+enough cross-scene reliability to ship. The Chromium ROI route avoids synthetic context: it uses an
+inward-only crop and falls back to the full frame when the current authenticated aspect cannot be
+reached with at most 2% area trimming.
+
+### Foreground browser ROI boundary
+
+The ROI is intentionally narrow in scope: foreground Chrome/Edge, Desktop Duplication, one uniquely
+largest accessible `<video>`, fully on one monitor, and an exact causally matched frame. Paused video
+is supported because selection follows DOM identity rather than playback activity. Background
+windows/tabs, equal-largest videos, stale or ambiguous accessibility data, WGC, unsupported aspect
+fits, and partially off-monitor rectangles use full-frame V2.
+
+The route has no compositor-visible-region oracle. A CSS/player overlay captured inside an otherwise
+authorized rectangle is analyzed as part of that crop; the host does not reconstruct hidden video.
+
+The crop owns DAV2, ownership, scene center, cuts, and temporal histories, while the renderer keeps
+the full color frame. ROI parallax is converted back to full-source pixel scale; its interior is
+unchanged, and an outside-only slope-limited collar reaches exact screen-plane disparity in the
+surround. The collar is the minimum continuity cost at a nonzero ROI edge, not inferred video depth.
+Dump 3D schema 13 serializes the crop-local model/depth fields and their authenticated full-source
+placement separately. ROI packages require the exact full-source inverse map so the screen-plane
+surround beyond the collar can be verified rather than inferred. A full-capture semantic video
+rectangle remains canonical full-frame V2.
 
 ### Foreground crowns and disocclusion
 
@@ -82,7 +112,9 @@ Before changing V2 geometry:
 3. Run the canonical core and extended evaluator suites and inspect both hard gates and diagnostic
    stereo/artifact movement.
 4. Check hair, shoulders, transparent rims, thin structures, flat pages, HDR, scene cuts, invalid
-   depth, and all authenticated aspect families.
+   depth, and all authenticated aspect families. For the Chromium ROI route, also check pause,
+   window translation and resize, exact full-capture canonicalization, multiple videos, inward
+   aspect trim, fallback, and both signs at every video edge.
 5. Confirm the result in Galaxy XR at the intended pop strength before changing the production
    contract or baselines.
 

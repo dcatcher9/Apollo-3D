@@ -54,6 +54,121 @@ namespace models {
     return color_space != input_color_space::srgb;
   }
 
+  /**
+   * Exact full-source placement of the image submitted to DAV2.
+   *
+   * video_region=false means the estimator input and final parallax cover the whole source and
+   * analysis_generation is zero.
+   * video_region=true means the estimator input is a same-format crop of source_rect while final
+   * color still covers source_width x source_height. analysis_generation changes only when the
+   * semantic video identity or crop extent changes; a pure position move may retain scene state.
+   */
+  struct depth_input_region_t {
+    std::uint32_t source_width = 0u;
+    std::uint32_t source_height = 0u;
+    std::uint32_t left = 0u;
+    std::uint32_t top = 0u;
+    std::uint32_t right = 0u;
+    std::uint32_t bottom = 0u;
+    std::uint64_t analysis_generation = 0u;
+    bool video_region = false;
+
+    constexpr std::uint32_t width() const noexcept {
+      return right > left ? right - left : 0u;
+    }
+
+    constexpr std::uint32_t height() const noexcept {
+      return bottom > top ? bottom - top : 0u;
+    }
+
+    constexpr bool valid() const noexcept {
+      if (source_width == 0u || source_height == 0u || left >= right || top >= bottom ||
+          right > source_width || bottom > source_height) {
+        return false;
+      }
+      if (video_region) {
+        return analysis_generation != 0u;
+      }
+      return left == 0u && top == 0u && right == source_width &&
+             bottom == source_height && analysis_generation == 0u;
+    }
+
+    constexpr bool same_analysis_domain(const depth_input_region_t &other) const noexcept {
+      return video_region == other.video_region &&
+             source_width == other.source_width && source_height == other.source_height &&
+             width() == other.width() && height() == other.height() &&
+             analysis_generation == other.analysis_generation;
+    }
+
+    constexpr bool operator==(const depth_input_region_t &) const = default;
+  };
+
+  /** Stable semantic identity used to assign an ROI analysis generation.
+   *
+   * Position and observer snapshot generation are deliberately absent. Moving the same video or
+   * receiving an otherwise-identical helper heartbeat does not create a new analysis domain.
+   */
+  struct video_depth_domain_key_t {
+    std::uint32_t source_width = 0u;
+    std::uint32_t source_height = 0u;
+    std::uint32_t semantic_width = 0u;
+    std::uint32_t semantic_height = 0u;
+    std::uint32_t crop_width = 0u;
+    std::uint32_t crop_height = 0u;
+    std::uint64_t hwnd = 0u;
+    std::uint32_t process_id = 0u;
+    std::int32_t document_id = 0;
+    std::int32_t video_id = 0;
+
+    constexpr bool operator==(const video_depth_domain_key_t &) const = default;
+  };
+
+  /** Assign monotonically changing nonzero generations to stable ROI semantic identities. */
+  class video_depth_analysis_generation_tracker_t {
+  public:
+    std::uint64_t select(const video_depth_domain_key_t &key) noexcept {
+      if (!key_ || *key_ != key) {
+        key_ = key;
+        if (++generation_ == 0u) {
+          ++generation_;
+        }
+      }
+      return generation_;
+    }
+
+    /** Mark the active route full-source; a later ROI must rearm even for the prior identity. */
+    void select_full_source() noexcept {
+      key_.reset();
+    }
+
+  private:
+    std::optional<video_depth_domain_key_t> key_;
+    std::uint64_t generation_ = 0u;
+  };
+
+  /** Pure transition decision used immediately before temporal/camera state is reset. */
+  class depth_input_domain_tracker_t {
+  public:
+    bool update(
+      const depth_input_region_t &region,
+      const input_color_space color_space
+    ) noexcept {
+      const bool changed = !initialized_ || color_space_ != color_space ||
+                           !region_.same_analysis_domain(region);
+      if (changed) {
+        region_ = region;
+        color_space_ = color_space;
+        initialized_ = true;
+      }
+      return changed;
+    }
+
+  private:
+    depth_input_region_t region_ {};
+    input_color_space color_space_ = input_color_space::srgb;
+    bool initialized_ = false;
+  };
+
   /** Build and warm the active model and prewarm fixed-shape Host SBS shader bytecode. */
   bool prepare_tensorrt_model(
     const std::filesystem::path &assets_dir,
@@ -79,9 +194,11 @@ namespace models {
     // ownership_refined_parallax is the full-resolution source-contour ownership result consumed
     // by the vertical pass, vertical_majorant is the upper-envelope diagnostic,
     // vertical_conditioned is the fixed upper/lower vertical share consumed by the pure row
-    // majorant, and final_parallax is the live position authority. coordinate is an optional
-    // Dump-3D-only snapshot, never a live resource or authentication prerequisite. The legacy
-    // `shadow_*` prefix remains for dump compatibility.
+    // majorant. final_parallax is full-source live position authority in ordinary mode; in ROI
+    // mode it is crop-local producer q and becomes renderer authority only with input_region's
+    // authenticated scale/collar embedding. coordinate is an optional Dump-3D-only snapshot,
+    // never a live resource or authentication prerequisite. The legacy `shadow_*` prefix remains
+    // for dump compatibility.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_coordinate;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_candidate_parallax;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_ownership_refined_parallax;
@@ -105,14 +222,17 @@ namespace models {
     float parallax_v2_raw_coordinate_scale = 0.0f;  ///< Fixed authenticated model/shape coordinate scale.
     float parallax_v2_requested_pop_strength = 0.0f;  ///< Fixed V2 request from cfg.pop_strength only; no legacy adaptive ratio or ceiling is consumed.
     float parallax_v2_requested_gain = 0.0f;  ///< One-eye source-U gain before safety attenuation.
+    depth_input_region_t input_region {};  ///< Exact source domain that owns this completion.
+    bool input_domain_reset = false;  ///< Temporal/camera state was reset before this completion.
   };
 
   /** Fail-closed CPU authentication for a completed live V2 result.
    *
-   * This verifies the complete model/preprocess/shape and producer source identities, the
-   * presence of every production V2 resource, and the fixed-pop gain relation. Dump-only canonical
-   * coordinate evidence is deliberately excluded. It does not map GPU state; the live shader
-   * authenticates the per-frame contract tag before sampling geometry.
+   * This verifies the complete model/preprocess/shape and producer source identities, the exact
+   * full-source/analysis-region shape relation, the presence of every production V2 resource, and
+   * the fixed-pop gain relation. Dump-only canonical coordinate evidence is deliberately excluded.
+   * It does not map GPU state; the live shader authenticates the per-frame contract tag before
+   * sampling geometry.
    */
   bool parallax_v2_result_is_authenticated(const estimate_result &result);
 
@@ -282,7 +402,8 @@ namespace models {
       ID3D11ShaderResourceView *input_srv,
       input_color_space color_space = input_color_space::srgb,
       std::uint64_t frame_id = 0,
-      bool snapshot_debug_inputs = false
+      bool snapshot_debug_inputs = false,
+      depth_input_region_t input_region = {}
     );
 
     /**

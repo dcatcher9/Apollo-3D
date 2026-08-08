@@ -1010,6 +1010,219 @@ TEST(ParallaxV2RendererTest, AuthenticationLatchesV2OrLiveFlat) {
   );
 }
 
+TEST(DepthInputRegionTest, RequiresCanonicalFullSourceOrAuthenticatedVideoIdentity) {
+  const models::depth_input_region_t full_source {
+    .source_width = 1920u,
+    .source_height = 1080u,
+    .left = 0u,
+    .top = 0u,
+    .right = 1920u,
+    .bottom = 1080u,
+  };
+  EXPECT_TRUE(full_source.valid());
+
+  auto partial_without_video_identity = full_source;
+  partial_without_video_identity.left = 100u;
+  EXPECT_FALSE(partial_without_video_identity.valid());
+
+  auto full_with_generation = full_source;
+  full_with_generation.analysis_generation = 1u;
+  EXPECT_FALSE(full_with_generation.valid());
+
+  const models::depth_input_region_t video_region {
+    .source_width = 3840u,
+    .source_height = 2160u,
+    .left = 820u,
+    .top = 510u,
+    .right = 2471u,
+    .bottom = 1439u,
+    .analysis_generation = 7u,
+    .video_region = true,
+  };
+  EXPECT_TRUE(video_region.valid());
+
+  auto video_without_identity = video_region;
+  video_without_identity.analysis_generation = 0u;
+  EXPECT_FALSE(video_without_identity.valid());
+
+  auto out_of_bounds = video_region;
+  out_of_bounds.right = out_of_bounds.source_width + 1u;
+  EXPECT_FALSE(out_of_bounds.valid());
+}
+
+TEST(DepthInputRegionTest, AnalysisDomainIgnoresOnlyPurePositionMoves) {
+  const models::depth_input_region_t original {
+    .source_width = 3840u,
+    .source_height = 2160u,
+    .left = 820u,
+    .top = 510u,
+    .right = 2471u,
+    .bottom = 1439u,
+    .analysis_generation = 7u,
+    .video_region = true,
+  };
+  auto moved = original;
+  moved.left += 100u;
+  moved.right += 100u;
+  EXPECT_TRUE(original.same_analysis_domain(moved));
+  EXPECT_NE(original, moved);
+
+  auto resized = original;
+  resized.right += 1u;
+  EXPECT_FALSE(original.same_analysis_domain(resized));
+
+  auto new_video = original;
+  new_video.analysis_generation += 1u;
+  EXPECT_FALSE(original.same_analysis_domain(new_video));
+
+  auto new_source = original;
+  new_source.source_width += 1u;
+  EXPECT_FALSE(original.same_analysis_domain(new_source));
+
+  auto full_source = original;
+  full_source.video_region = false;
+  full_source.left = 0u;
+  full_source.top = 0u;
+  full_source.right = full_source.source_width;
+  full_source.bottom = full_source.source_height;
+  full_source.analysis_generation = 0u;
+  EXPECT_FALSE(original.same_analysis_domain(full_source));
+}
+
+TEST(DepthInputRegionTest, DomainTransitionDecisionResetsExactlyOncePerStableChange) {
+  models::video_depth_analysis_generation_tracker_t generation_tracker;
+  models::depth_input_domain_tracker_t domain_tracker;
+  const models::depth_input_region_t full_source {
+    .source_width = 3840u,
+    .source_height = 2160u,
+    .left = 0u,
+    .top = 0u,
+    .right = 3840u,
+    .bottom = 2160u,
+  };
+  EXPECT_TRUE(domain_tracker.update(full_source, models::input_color_space::srgb));
+  EXPECT_FALSE(domain_tracker.update(full_source, models::input_color_space::srgb));
+
+  models::video_depth_domain_key_t key {
+    .source_width = 3840u,
+    .source_height = 2160u,
+    .semantic_width = 2682u,
+    .semantic_height = 1508u,
+    .crop_width = 2674u,
+    .crop_height = 1504u,
+    .hwnd = 0x1234u,
+    .process_id = 52u,
+    .document_id = 7,
+    .video_id = 11,
+  };
+  const auto first_generation = generation_tracker.select(key);
+  ASSERT_NE(first_generation, 0u);
+  models::depth_input_region_t roi {
+    .source_width = 3840u,
+    .source_height = 2160u,
+    .left = 580u,
+    .top = 326u,
+    .right = 3254u,
+    .bottom = 1830u,
+    .analysis_generation = first_generation,
+    .video_region = true,
+  };
+  ASSERT_TRUE(roi.valid());
+  EXPECT_TRUE(domain_tracker.update(roi, models::input_color_space::srgb));
+  EXPECT_FALSE(domain_tracker.update(roi, models::input_color_space::srgb));
+
+  // Observer generation is matched-frame provenance outside the stable key. An otherwise
+  // identical heartbeat therefore preserves both generation and estimator analysis state.
+  std::uint64_t observer_generation = 100u;
+  ++observer_generation;
+  EXPECT_EQ(generation_tracker.select(key), first_generation);
+  EXPECT_FALSE(domain_tracker.update(roi, models::input_color_space::srgb));
+  EXPECT_EQ(observer_generation, 101u);
+
+  auto moved = roi;
+  moved.left += 40u;
+  moved.right += 40u;
+  ASSERT_TRUE(moved.valid());
+  EXPECT_FALSE(domain_tracker.update(moved, models::input_color_space::srgb));
+
+  auto semantic_resize = key;
+  ++semantic_resize.semantic_width;
+  roi.analysis_generation = generation_tracker.select(semantic_resize);
+  EXPECT_NE(roi.analysis_generation, first_generation);
+  EXPECT_TRUE(domain_tracker.update(roi, models::input_color_space::srgb));
+  EXPECT_FALSE(domain_tracker.update(roi, models::input_color_space::srgb));
+
+  auto new_identity = semantic_resize;
+  ++new_identity.video_id;
+  roi.analysis_generation = generation_tracker.select(new_identity);
+  EXPECT_TRUE(domain_tracker.update(roi, models::input_color_space::srgb));
+  EXPECT_FALSE(domain_tracker.update(roi, models::input_color_space::srgb));
+
+  EXPECT_TRUE(domain_tracker.update(roi, models::input_color_space::linear_sdr));
+  EXPECT_FALSE(domain_tracker.update(roi, models::input_color_space::linear_sdr));
+
+  generation_tracker.select_full_source();
+  EXPECT_TRUE(domain_tracker.update(full_source, models::input_color_space::linear_sdr));
+  EXPECT_FALSE(domain_tracker.update(full_source, models::input_color_space::linear_sdr));
+  roi.analysis_generation = generation_tracker.select(new_identity);
+  EXPECT_TRUE(domain_tracker.update(roi, models::input_color_space::linear_sdr));
+  EXPECT_FALSE(domain_tracker.update(roi, models::input_color_space::linear_sdr));
+}
+
+TEST(DepthInputRegionTest, DumpSnapshotsPreserveFullOrRoiAnalysisDomain) {
+  const auto source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp"
+  );
+  ASSERT_FALSE(source.empty());
+  EXPECT_NE(
+    source.find("if (snapshot_debug_inputs)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("if (snapshot_raw_model_depth)"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    source.find("&& !pending_input_region.video_region"),
+    std::string::npos
+  );
+
+  const auto display_source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp"
+  );
+  ASSERT_FALSE(display_source.empty());
+  EXPECT_EQ(
+    display_source.find(".observer_generation = border.generation"),
+    std::string::npos
+  );
+  const auto estimator_header = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.h"
+  );
+  ASSERT_FALSE(estimator_header.empty());
+  EXPECT_NE(
+    estimator_header.find(
+      "Position and observer snapshot generation are deliberately absent"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display_source.find("dump_frame.depth_input_region = est.input_region"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display_source.find("dump_frame.depth_input_source ="),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display_source.find("matched_render_slot->depth_input_srv();"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    display_source.find("Dump 3D request rejected: window-video ROI rendering is active"),
+    std::string::npos
+  );
+}
+
 #ifdef _WIN32
 TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   using Microsoft::WRL::ComPtr;
@@ -1083,8 +1296,20 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   result.parallax_v2_raw_coordinate_scale = calibration.raw_coordinate_scale;
   result.parallax_v2_requested_pop_strength = 2.0f;
   result.parallax_v2_requested_gain = v2::requested_gain_for_config(2.0f);
+  result.input_region = {
+    .source_width = 1920u,
+    .source_height = 1080u,
+    .left = 0u,
+    .top = 0u,
+    .right = 1920u,
+    .bottom = 1080u,
+  };
   EXPECT_FALSE(result.shadow_coordinate);
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(result));
+
+  auto missing_input_region = result;
+  missing_input_region.input_region = {};
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_input_region));
 
   auto dump_augmented = result;
   dump_augmented.shadow_coordinate = view;
@@ -1106,21 +1331,60 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   missing_vertical_conditioned.shadow_vertical_conditioned.Reset();
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_vertical_conditioned));
 
-  const std::array supported_shapes {
-    std::pair {770, 434},
-    std::pair {1022, 434},
-    std::pair {1036, 434},
-    std::pair {434, 770},
-    std::pair {434, 1022},
-    std::pair {434, 1036},
+  struct supported_shape_t {
+    std::uint32_t source_width;
+    std::uint32_t source_height;
+    int depth_width;
+    int depth_height;
   };
-  for (const auto &[width, height] : supported_shapes) {
+  const std::array supported_shapes {
+    supported_shape_t {1920u, 1080u, 770, 434},
+    supported_shape_t {2560u, 1080u, 1022, 434},
+    supported_shape_t {3440u, 1440u, 1036, 434},
+    supported_shape_t {1080u, 1920u, 434, 770},
+    supported_shape_t {1080u, 2560u, 434, 1022},
+    supported_shape_t {1440u, 3440u, 434, 1036},
+  };
+  for (const auto &[source_width, source_height, width, height] : supported_shapes) {
     auto supported_shape = result;
     supported_shape.raw_width = width;
     supported_shape.raw_height = height;
+    supported_shape.input_region = {
+      .source_width = source_width,
+      .source_height = source_height,
+      .left = 0u,
+      .top = 0u,
+      .right = source_width,
+      .bottom = source_height,
+    };
     EXPECT_TRUE(models::parallax_v2_result_is_authenticated(supported_shape))
       << width << 'x' << height;
   }
+
+  auto video_region = result;
+  video_region.input_region = {
+    .source_width = 3840u,
+    .source_height = 2160u,
+    .left = 820u,
+    .top = 510u,
+    .right = 2471u,
+    .bottom = 1439u,
+    .analysis_generation = 7u,
+    .video_region = true,
+  };
+  EXPECT_TRUE(models::parallax_v2_result_is_authenticated(video_region));
+
+  auto missing_video_identity = video_region;
+  missing_video_identity.input_region.analysis_generation = 0u;
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_video_identity));
+
+  auto analysis_shape_mismatch = video_region;
+  analysis_shape_mismatch.input_region.right -= 300u;
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(analysis_shape_mismatch));
+
+  auto partial_full_source = result;
+  partial_full_source.input_region.left = 1u;
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(partial_full_source));
 
   auto wrong_shape = result;
   wrong_shape.raw_width = 1008;
@@ -1167,10 +1431,12 @@ TEST(ParallaxV2ContractTest, DumpDecodesExactCountersInsteadOfSubnormalFloats) {
   );
   EXPECT_NE(source.find("parallax_v2_coordinate_binding("), std::string::npos);
   EXPECT_NE(source.find("source_closure_sha256"), std::string::npos);
-  EXPECT_NE(
-    source.find("nlohmann::json manifest {\n          {\"schema\", 12}"),
-    std::string::npos
-  );
+  const auto manifest = source.find("nlohmann::json manifest {");
+  ASSERT_NE(manifest, std::string::npos);
+  EXPECT_NE(source.find("{\"schema\", 13}", manifest), std::string::npos);
+  EXPECT_NE(source.find("depth_input_region.json"), std::string::npos);
+  EXPECT_NE(source.find("depth_input_source.png"), std::string::npos);
+  EXPECT_NE(source.find("\"shadow_final_parallax + depth_input_region embedding\""), std::string::npos);
   EXPECT_NE(source.find("completed.parallax_v2_render_selected"), std::string::npos);
   EXPECT_NE(
     source.find("mapping_artifacts_match_selected_renderer"),

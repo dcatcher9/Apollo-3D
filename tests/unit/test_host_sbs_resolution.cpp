@@ -89,3 +89,93 @@ TEST(HostSbsResolutionTest, UsesTensorAuthenticationInsteadOfAStreamSizeAllowlis
     "source extent is empty"
   );
 }
+
+TEST(HostSbsResolutionTest, TrimsMeasuredBrowserVideoToTheActiveTensorAspect) {
+  const models::depth_source_rect_t video {820u, 510u, 2471u, 1439u};
+  const auto plan = models::plan_host_sbs_v2_video_region(
+    video,
+    3840u,
+    2160u,
+    {770, 434}
+  );
+  ASSERT_TRUE(plan);
+  EXPECT_EQ(plan->tensor_shape, (models::depth_tensor_shape_t {770, 434}));
+  EXPECT_GT(plan->trimmed_area_fraction, 0.0f);
+  EXPECT_LE(
+    plan->trimmed_area_fraction,
+    models::host_sbs_v2_max_video_region_trim_fraction
+  );
+  EXPECT_GE(plan->source_rect.left, video.left);
+  EXPECT_GE(plan->source_rect.top, video.top);
+  EXPECT_LE(plan->source_rect.right, video.right);
+  EXPECT_LE(plan->source_rect.bottom, video.bottom);
+  EXPECT_TRUE(
+    plan->source_rect.left > video.left || plan->source_rect.top > video.top ||
+    plan->source_rect.right < video.right || plan->source_rect.bottom < video.bottom
+  );
+}
+
+TEST(HostSbsResolutionTest, KeepsAnExactTensorAspectRectangle) {
+  const models::depth_source_rect_t video {100u, 200u, 1640u, 1068u};
+  const auto plan = models::plan_host_sbs_v2_video_region(
+    video,
+    3840u,
+    2160u,
+    {770, 434}
+  );
+  ASSERT_TRUE(plan);
+  EXPECT_EQ(plan->source_rect, video);
+  EXPECT_FLOAT_EQ(plan->trimmed_area_fraction, 0.0f);
+}
+
+TEST(HostSbsResolutionTest, KeepsAFullCaptureVideoOnTheOrdinaryFullFrameRoute) {
+  EXPECT_FALSE(models::plan_host_sbs_v2_video_region(
+    {0u, 0u, 3840u, 2160u},
+    3840u,
+    2160u,
+    {770, 434}
+  ));
+}
+
+TEST(HostSbsResolutionTest, TrimsOnlyAProvablySmallNearAspectMiss) {
+  // This slightly-wide rectangle rounds to an uncalibrated patch shape as-is. A narrow inward
+  // trim removes the player edge while mapping through the ordinary fitter to 16:9.
+  const models::depth_source_rect_t near_miss {100u, 100u, 1730u, 1010u};
+  ASSERT_NE(
+    models::fit_host_sbs_v2_depth_tensor_shape(
+      near_miss.width(), near_miss.height()),
+    (models::depth_tensor_shape_t {770, 434})
+  );
+  const auto plan = models::plan_host_sbs_v2_video_region(
+    near_miss,
+    3840u,
+    2160u,
+    {770, 434}
+  );
+  ASSERT_TRUE(plan);
+  EXPECT_EQ(plan->tensor_shape, (models::depth_tensor_shape_t {770, 434}));
+  EXPECT_GT(plan->trimmed_area_fraction, 0.0f);
+  EXPECT_LE(
+    plan->trimmed_area_fraction,
+    models::host_sbs_v2_max_video_region_trim_fraction
+  );
+  EXPECT_GE(plan->source_rect.left, near_miss.left);
+  EXPECT_GE(plan->source_rect.top, near_miss.top);
+  EXPECT_LE(plan->source_rect.right, near_miss.right);
+  EXPECT_LE(plan->source_rect.bottom, near_miss.bottom);
+}
+
+TEST(HostSbsResolutionTest, RejectsMaterialMismatchSmallVideoAndWrongDomainShape) {
+  EXPECT_FALSE(models::plan_host_sbs_v2_video_region(
+    {100u, 100u, 1700u, 1300u}, 3840u, 2160u, {770, 434}
+  ));
+  EXPECT_FALSE(models::plan_host_sbs_v2_video_region(
+    {0u, 0u, 640u, 360u}, 3840u, 2160u, {770, 434}
+  ));
+  EXPECT_FALSE(models::plan_host_sbs_v2_video_region(
+    {0u, 0u, 1920u, 1080u}, 3840u, 2160u, {1022, 434}
+  ));
+  EXPECT_FALSE(models::plan_host_sbs_v2_video_region(
+    {0u, 0u, 4000u, 2160u}, 3840u, 2160u, {770, 434}
+  ));
+}

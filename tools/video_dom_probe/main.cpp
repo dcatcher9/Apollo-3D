@@ -760,6 +760,9 @@ namespace {
   }
 
   struct cached_selection_t {
+    probe::cached_selection_phase_e phase {
+      probe::cached_selection_phase_e::provisional
+    };
     HWND window {};
     DWORD process_id {};
     probe::rect_t client_rect {};
@@ -836,12 +839,15 @@ namespace {
     };
   }
 
-  [[nodiscard]] std::optional<cached_selection_t> cache_selection(
+  [[nodiscard]] std::optional<cached_selection_t> cache_complete_ready_selection(
     const scan_result_t &result,
     const probe::selection_t &selection,
-    std::string semantics
+    std::string semantics,
+    probe::cached_selection_phase_e phase
   ) {
-    if (result.status != scan_status_e::ok || !selection.index ||
+    if (result.status != scan_status_e::warming_up ||
+        !result.extended_properties_ready ||
+        !probe::selection_can_stage_provisional(selection) ||
         *selection.index >= result.candidates.size()) {
       return std::nullopt;
     }
@@ -851,6 +857,7 @@ namespace {
       return std::nullopt;
     }
     return cached_selection_t {
+      .phase = phase,
       .window = result.window,
       .process_id = result.process_id,
       .client_rect = result.client_rect,
@@ -1087,7 +1094,9 @@ namespace {
           << "Usage: video-dom-info [--all-scans] [--interval-ms 50..10000]\n"
           << "       video-dom-info --machine [--interval-ms 50..1000]\n"
           << "Keep Chrome or Edge in the foreground while the probe runs.\n"
-          << "A cold Chromium accessibility tree needs two matching scans before status=ok.\n"
+          << "Machine mode stages a unique selection from one complete census and authorizes it "
+             "only after an exact cached-object refresh on the next tick.\n"
+          << "Human diagnostics retain the two-scan semantic display filter.\n"
           << "--machine emits only strict SUNSHINE_VIDEO_DOM_V1 TSV records on stdout.\n";
         return std::nullopt;
       } else {
@@ -1202,7 +1211,7 @@ namespace {
 
   int run_human(const options_t &options) {
     std::cout
-      << "video-dom-info is diagnostics only; it never changes capture or SBS output.\n"
+      << "This human mode is diagnostics only; production uses --machine.\n"
       << "Switch to a Chrome or Edge window. Press Ctrl+C to stop.\n";
 
     std::string last_fingerprint;
@@ -1248,8 +1257,6 @@ namespace {
 
   int run_machine(const options_t &options) {
     std::optional<cached_selection_t> cached;
-    std::string pending_semantic_fingerprint;
-    unsigned stable_ready_scans = 0;
     unsigned cold_warmup_scans = 0;
     machine_record_t current = invalid_machine_record("warming");
     machine_record_t last_emitted = invalid_machine_record("changed");
@@ -1287,8 +1294,6 @@ namespace {
           std::memory_order_relaxed
         );
         cached.reset();
-        pending_semantic_fingerprint.clear();
-        stable_ready_scans = 0;
         cold_warmup_scans = 0;
         next_full_scan = std::chrono::steady_clock::now();
         publish(invalid_machine_record("changed"), true);
@@ -1300,24 +1305,40 @@ namespace {
       const auto object_generation = object_change_generation.load(
         std::memory_order_relaxed
       );
-      if (object_generation != observed_object_generation) {
-        observed_object_generation = object_generation;
+      const auto tick_event_policy = probe::machine_event_policy(
+        {
+          .foreground = observed_foreground_generation,
+          .object = observed_object_generation,
+        },
+        {
+          .foreground = foreground_generation,
+          .object = object_generation,
+        }
+      );
+      observed_object_generation = object_generation;
+      if (tick_event_policy.request_follow_up_audit) {
         const auto earliest_event_audit =
           last_full_scan.time_since_epoch().count() == 0 ?
             now : std::max(now, last_full_scan + event_full_scan_min_interval);
         next_full_scan = std::min(next_full_scan, earliest_event_audit);
       }
       if (cached) {
-        if (!refresh_cached_selection(*cached)) {
+        const auto refresh_policy = probe::cached_refresh_policy(
+          cached->phase,
+          refresh_cached_selection(*cached),
+          tick_event_policy
+        );
+        if (!refresh_policy.retain_selection) {
           cached.reset();
-          pending_semantic_fingerprint.clear();
-          stable_ready_scans = 0;
           next_full_scan = now;
           publish(invalid_machine_record("changed"), true);
           std::this_thread::sleep_for(options.interval);
           continue;
         }
-        current = machine_record_for_cache(*cached);
+        cached->phase = refresh_policy.next_phase;
+        current = refresh_policy.publish_ok ?
+                    machine_record_for_cache(*cached) :
+                    invalid_machine_record("warming");
         if (now < next_full_scan) {
           publish(current);
           std::this_thread::sleep_for(options.interval);
@@ -1339,43 +1360,9 @@ namespace {
       // independently revalidated cache immediately before entering cross-process COM calls.
       publish(current, true);
       auto result = scan_foreground();
-      pump_messages();
-      const auto foreground_generation_after_scan = foreground_change_generation.load(
-        std::memory_order_relaxed
-      );
-      last_full_scan = std::chrono::steady_clock::now();
-      if (foreground_generation_after_scan != foreground_generation_before_scan) {
-        observed_foreground_generation = foreground_generation_after_scan;
-        observed_object_generation = object_change_generation.load(
-          std::memory_order_relaxed
-        );
-        cached.reset();
-        pending_semantic_fingerprint.clear();
-        stable_ready_scans = 0;
-        current = invalid_machine_record("changed");
-        publish(current, true);
-        next_full_scan = std::chrono::steady_clock::now() + options.interval;
-        continue;
-      }
-      const auto object_generation_after_scan = object_change_generation.load(
-        std::memory_order_relaxed
-      );
-      if (object_generation_after_scan != object_generation_before_scan) {
-        observed_object_generation = object_generation_after_scan;
-        if (cached && refresh_cached_selection(*cached)) {
-          current = machine_record_for_cache(*cached);
-          publish(current);
-        } else {
-          cached.reset();
-          pending_semantic_fingerprint.clear();
-          stable_ready_scans = 0;
-          publish(invalid_machine_record("changed"), true);
-        }
-        next_full_scan = last_full_scan + event_full_scan_min_interval;
-        std::this_thread::sleep_for(options.interval);
-        continue;
-      }
-
+      // Route queued descendant-object events from this census before pumping them. On the first
+      // scan (or a new foreground window) the previous monitored HWND is null or stale; pumping
+      // first would permanently discard churn that must request the three-second follow-up audit.
       monitored_window_value.store(
         reinterpret_cast<std::uintptr_t>(
           result.status == scan_status_e::unsupported_foreground ? nullptr :
@@ -1383,6 +1370,37 @@ namespace {
         ),
         std::memory_order_relaxed
       );
+      pump_messages();
+      const auto foreground_generation_after_scan = foreground_change_generation.load(
+        std::memory_order_relaxed
+      );
+      const auto object_generation_after_scan = object_change_generation.load(
+        std::memory_order_relaxed
+      );
+      last_full_scan = std::chrono::steady_clock::now();
+      const auto scan_event_policy = probe::machine_event_policy(
+        {
+          .foreground = foreground_generation_before_scan,
+          .object = object_generation_before_scan,
+        },
+        {
+          .foreground = foreground_generation_after_scan,
+          .object = object_generation_after_scan,
+        }
+      );
+      if (scan_event_policy.discard_completed_scan) {
+        observed_foreground_generation = foreground_generation_after_scan;
+        observed_object_generation = object_generation_after_scan;
+        cached.reset();
+        cold_warmup_scans = 0;
+        current = invalid_machine_record("changed");
+        publish(current, true);
+        next_full_scan = std::chrono::steady_clock::now() + options.interval;
+        continue;
+      }
+      const bool object_changed_during_scan =
+        scan_event_policy.request_follow_up_audit;
+
       if (
         result.status == scan_status_e::warming_up &&
         !result.extended_properties_ready
@@ -1401,47 +1419,57 @@ namespace {
         result.status == scan_status_e::warming_up &&
         result.extended_properties_ready;
       std::string semantics;
+      bool staged_provisional = false;
       if (ready_observation) {
         semantics = semantic_fingerprint(result, tentative_selection);
-        if (cached && semantics == cached->semantic_fingerprint) {
-          stable_ready_scans = 2;
-          pending_semantic_fingerprint = semantics;
-        } else if (semantics == pending_semantic_fingerprint) {
-          ++stable_ready_scans;
-        } else {
-          pending_semantic_fingerprint = semantics;
-          stable_ready_scans = 1;
-        }
-        if (stable_ready_scans >= 2) {
+        result.selection = tentative_selection;
+        const bool same_established_selection =
+          cached &&
+          cached->phase == probe::cached_selection_phase_e::established &&
+          semantics == cached->semantic_fingerprint;
+        const auto census_policy = probe::complete_census_policy(
+          tentative_selection,
+          same_established_selection
+        );
+        if (census_policy.stage_selection) {
+          auto replacement = cache_complete_ready_selection(
+            result,
+            tentative_selection,
+            semantics,
+            census_policy.phase
+          );
+          if (!replacement) {
+            result.status = scan_status_e::traversal_incomplete;
+            result.selection = {};
+          } else {
+            cached = std::move(replacement);
+            if (census_policy.publish_ok) {
+              // The same established object was authenticated before this census. Replacing its
+              // retained COM handles does not reduce its already-established authority.
+              result.status = scan_status_e::ok;
+            } else {
+              // Do not publish from the census alone. The next machine tick must strictly refresh
+              // these exact retained objects before this selection becomes authoritative.
+              staged_provisional = true;
+            }
+          }
+        } else if (census_policy.revoke_cached_selection) {
+          // A complete census is immediately authoritative for fail-closed negative results.
+          // Partial or equal-largest candidates are represented as ambiguous by select_video().
           result.status = scan_status_e::ok;
-          result.selection = tentative_selection;
+          cached.reset();
+        } else {
+          result.status = scan_status_e::traversal_incomplete;
+          result.selection = {};
         }
-      } else {
-        pending_semantic_fingerprint.clear();
-        stable_ready_scans = 0;
       }
 
       bool retained_cache_after_inconclusive_scan = false;
-      if (result.status == scan_status_e::ok && result.selection.index) {
-        auto replacement = cache_selection(result, result.selection, semantics);
-        if (!replacement) {
-          result.status = scan_status_e::traversal_incomplete;
-          result.selection = {};
-        } else {
-          cached = std::move(replacement);
-        }
-      }
-
-      if (result.status == scan_status_e::ok) {
-        if (!result.selection.index) {
-          // A complete, stable census authoritatively found no unique video.
-          cached.reset();
-        }
-      } else if (
+      if (!staged_provisional && result.status != scan_status_e::ok && (
         result.status == scan_status_e::warming_up ||
         result.status == scan_status_e::traversal_incomplete ||
         result.status == scan_status_e::accessibility_unavailable
-      ) {
+      )) {
         // A partial census cannot disprove an exact selected DOM object that still independently
         // authenticates. Keep it through transient provider/tree failures and retry the census.
         retained_cache_after_inconclusive_scan =
@@ -1449,52 +1477,110 @@ namespace {
         if (!retained_cache_after_inconclusive_scan) {
           cached.reset();
         }
-      } else {
+      } else if (!staged_provisional && result.status != scan_status_e::ok) {
         // Foreground/window failures invalidate the old browser identity immediately.
         cached.reset();
       }
 
-      current = retained_cache_after_inconclusive_scan ?
-                  machine_record_for_cache(*cached) :
-                  machine_record_for_result(result);
+      if (cached &&
+          cached->phase == probe::cached_selection_phase_e::established &&
+          (result.status == scan_status_e::ok ||
+           retained_cache_after_inconclusive_scan)) {
+        current = machine_record_for_cache(*cached);
+      } else if (cached &&
+                 cached->phase == probe::cached_selection_phase_e::provisional &&
+                 (staged_provisional || retained_cache_after_inconclusive_scan)) {
+        current = invalid_machine_record("warming");
+      } else {
+        current = machine_record_for_result(result);
+      }
       pump_messages();
+      const auto foreground_generation_before_publish = foreground_change_generation.load(
+        std::memory_order_relaxed
+      );
       const auto object_generation_before_publish = object_change_generation.load(
         std::memory_order_relaxed
       );
-      if (object_generation_before_publish != object_generation_after_scan) {
-        observed_object_generation = object_generation_before_publish;
-        if (cached && refresh_cached_selection(*cached)) {
-          current = machine_record_for_cache(*cached);
-          publish(current);
-        } else {
-          cached.reset();
-          pending_semantic_fingerprint.clear();
-          stable_ready_scans = 0;
-          publish(invalid_machine_record("changed"), true);
+      const auto publish_event_policy = probe::machine_event_policy(
+        {
+          .foreground = foreground_generation_after_scan,
+          .object = object_generation_after_scan,
+        },
+        {
+          .foreground = foreground_generation_before_publish,
+          .object = object_generation_before_publish,
         }
-        next_full_scan = last_full_scan + event_full_scan_min_interval;
-        std::this_thread::sleep_for(options.interval);
+      );
+      if (publish_event_policy.discard_completed_scan) {
+        observed_foreground_generation = foreground_generation_before_publish;
+        observed_object_generation = object_generation_before_publish;
+        cached.reset();
+        cold_warmup_scans = 0;
+        publish(invalid_machine_record("changed"), true);
+        next_full_scan = std::chrono::steady_clock::now() + options.interval;
         continue;
+      }
+      const bool object_changed_before_publish =
+        publish_event_policy.request_follow_up_audit;
+      const bool object_changed_before_observation =
+        object_changed_during_scan || object_changed_before_publish;
+      observed_object_generation = object_generation_before_publish;
+      if (object_changed_before_observation && cached) {
+        // Descendant DOM activity is not proof that the selected video changed. In particular,
+        // dynamic controls and adverts can emit location/reorder events throughout every full
+        // tree walk. Established authority is revalidated here. A newly staged provisional stays
+        // internal until the next machine tick; object churn neither promotes nor vetoes it, and
+        // the event still requests an earlier full audit below.
+        if (cached->phase == probe::cached_selection_phase_e::established) {
+          const auto refresh_policy = probe::cached_refresh_policy(
+            cached->phase,
+            refresh_cached_selection(*cached),
+            publish_event_policy
+          );
+          if (!refresh_policy.retain_selection) {
+            cached.reset();
+            publish(invalid_machine_record("changed"), true);
+            next_full_scan = last_full_scan + options.interval;
+            std::this_thread::sleep_for(options.interval);
+            continue;
+          }
+          cached->phase = refresh_policy.next_phase;
+          current = machine_record_for_cache(*cached);
+        }
       }
       publish(current);
       const auto object_generation_after_publish = object_change_generation.load(
         std::memory_order_relaxed
       );
-      const bool object_changed_during_scan =
+      const bool object_change_observed =
+        object_changed_before_observation ||
         object_generation_after_publish != observed_object_generation;
       observed_object_generation = object_generation_after_publish;
-      if (result.status == scan_status_e::ok) {
+      if (staged_provisional || result.status == scan_status_e::ok) {
         next_full_scan = last_full_scan +
-                         (object_changed_during_scan ? event_full_scan_min_interval :
-                                                       periodic_full_scan_interval);
-      } else if (ready_observation) {
-        next_full_scan = last_full_scan + options.interval;
+                         (object_change_observed ? event_full_scan_min_interval :
+                                                   periodic_full_scan_interval);
       } else if (retained_cache_after_inconclusive_scan) {
         next_full_scan = last_full_scan + event_full_scan_min_interval;
-      } else if (result.status == scan_status_e::warming_up) {
-        next_full_scan = last_full_scan + 1s;
       } else {
-        next_full_scan = last_full_scan + periodic_full_scan_interval;
+        const auto outcome =
+          result.status == scan_status_e::warming_up ?
+            probe::uncached_scan_outcome_e::warming_up :
+          result.status == scan_status_e::traversal_incomplete ?
+            probe::uncached_scan_outcome_e::traversal_incomplete :
+          result.status == scan_status_e::accessibility_unavailable ?
+            probe::uncached_scan_outcome_e::accessibility_unavailable :
+            probe::uncached_scan_outcome_e::other;
+        auto retry_delay = probe::uncached_scan_retry_delay(outcome);
+        if (object_change_observed) {
+          retry_delay = std::min(
+            retry_delay,
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+              event_full_scan_min_interval
+            )
+          );
+        }
+        next_full_scan = last_full_scan + retry_delay;
       }
       std::this_thread::sleep_for(options.interval);
     }

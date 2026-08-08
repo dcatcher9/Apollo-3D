@@ -13,8 +13,8 @@ namespace platf::sbs_debug {
 
   /**
    * A capture-space, half-open video rectangle stamped onto the same source frame later handed to
-   * Dump 3D. This is diagnostic evidence only; it never authorizes a crop, changes convergence,
-   * or alters live Host-SBS geometry.
+   * Dump 3D. The artifact remains diagnostic evidence; live crop/warp authority is separately
+   * authenticated as a depth_input_region_t bound to the same matched frame.
    */
   struct window_video_border_snapshot {
     std::uint64_t matched_frame_id = 0;

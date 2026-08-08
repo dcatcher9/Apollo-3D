@@ -17,6 +17,7 @@
 
 // local includes
 #include "src/config.h"
+#include "src/video_depth_estimator.h"
 #include "sbs_debug_dump_border.h"
 
 namespace models {
@@ -36,21 +37,26 @@ namespace platf::sbs_debug {
    *        belong to it.
    *
    * model_input and raw_depth are immutable estimator snapshots. warp_depth is the exact signed,
-   * anisotropically slope-limited final source-U parallax consumed by production V2. The
+   * anisotropically slope-limited final parallax consumed by production V2: full-source-U in the
+   * ordinary mode and ROI-local-U in video-region mode. ROI renderer authority is the pair of
+   * that crop-local field and depth_input_region's scale/outside-collar embedding. The
    * adaptive_state/depth_frame_state pair is optional comparison-only evidence from the retained
    * scene-cut bridge; it never authorizes a dump or controls live geometry. The immutable V2
    * candidate first produces shadow_ownership_refined_parallax from the full-resolution source
    * contour, then shadow_vertical_majorant (the exact upper-envelope diagnostic) and
    * shadow_vertical_conditioned (the fixed 75/25 vertical share), then the row majorant produces
-   * shadow_final_parallax. shadow_coordinate is allocated and written
-   * only for this explicit dump; it is never a live resource. V2 supplies an exact fixed-point
-   * inverse warp_map when its matching dump-only
+   * shadow_final_parallax. In ROI mode that final field remains crop-local and is not by itself a
+   * full-source position field. shadow_coordinate is allocated and written only for this explicit
+   * dump; it is never a live resource. V2 supplies an exact fixed-point inverse warp_map when its
+   * matching dump-only
    * shader is available. V2 has no internal owner/fill mask; warp_mask attributes only inverse
    * samples outside the finite source interval that the live renderer clamps to the nearest
    * boundary column.
    */
   struct frame {
     ID3D11ShaderResourceView *source = nullptr;
+    /** Exact full-frame or inward-cropped color texture submitted to DAV2 and ownership. */
+    ID3D11ShaderResourceView *depth_input_source = nullptr;
     ID3D11ShaderResourceView *model_input = nullptr;
     ID3D11ShaderResourceView *raw_depth = nullptr;
     ID3D11ShaderResourceView *warp_depth = nullptr;
@@ -75,6 +81,12 @@ namespace platf::sbs_debug {
     int raw_width = 0;
     int raw_height = 0;
     std::uint64_t matched_frame_id = 0;
+    /** Exact authenticated analysis domain bound to every model/depth/parallax artifact. */
+    models::depth_input_region_t depth_input_region {};
+    /** ROI planner result, present exactly when depth_input_region.video_region is true. */
+    std::optional<models::depth_video_region_plan_t> depth_video_plan;
+    /** True when this completion was the first frame after its analysis domain was rearmed. */
+    bool input_domain_reset = false;
     /** Optional, diagnostic-only browser-video border stamped onto matched_frame_id. */
     std::optional<window_video_border_snapshot> window_video_border;
     std::string window_video_observer_status = "not-observed";

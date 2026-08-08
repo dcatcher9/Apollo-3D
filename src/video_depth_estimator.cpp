@@ -518,6 +518,29 @@ namespace models {
       return false;
     }
 
+    const auto &input_region = result.input_region;
+    const auto full_source_shape = fit_host_sbs_v2_depth_tensor_shape(
+      input_region.source_width,
+      input_region.source_height
+    );
+    const auto analysis_shape = fit_host_sbs_v2_depth_tensor_shape(
+      input_region.width(),
+      input_region.height()
+    );
+    const depth_tensor_shape_t result_shape {result.raw_width, result.raw_height};
+    if (!input_region.valid() ||
+        !host_sbs_v2_source_resolution_is_supported(
+          input_region.source_width,
+          input_region.source_height
+        ) ||
+        !host_sbs_v2_source_resolution_is_supported(
+          input_region.width(),
+          input_region.height()
+        ) ||
+        full_source_shape != result_shape || analysis_shape != result_shape) {
+      return false;
+    }
+
     const auto &shader = *result.parallax_v2_shader_provenance;
     if (shader.source_closure_schema !=
           depth_coordinate_v2::shader_source_closure_schema ||
@@ -1758,6 +1781,8 @@ namespace models {
     // color copy and keeps every RGB/depth lookup on the same D3D11 command stream.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> pending_source_srv;
     input_color_space pending_color_space = input_color_space::srgb;
+    depth_input_region_t pending_input_region {};
+    depth_input_domain_tracker_t processed_input_domain;
     bool has_previous_frame = false;
     std::uint64_t pending_frame_id = 0;
     std::uint64_t last_postprocessed_frame_id = 0;
@@ -1771,6 +1796,27 @@ namespace models {
 
     bool live_v2_producer_unavailable() const {
       return parallax_v2_producer_failed;
+    }
+
+    static depth_input_region_t resolved_input_region(
+      depth_input_region_t requested,
+      const D3D11_TEXTURE2D_DESC &input_desc
+    ) noexcept {
+      if (!requested.video_region) {
+        requested.source_width = input_desc.Width;
+        requested.source_height = input_desc.Height;
+        requested.left = 0u;
+        requested.top = 0u;
+        requested.right = input_desc.Width;
+        requested.bottom = input_desc.Height;
+        requested.analysis_generation = 0u;
+        return requested;
+      }
+      if (!requested.valid() || requested.width() != input_desc.Width ||
+          requested.height() != input_desc.Height) {
+        return {};
+      }
+      return requested;
     }
 
     // Host V2 fails flat on any producer error. Only async execution/query failures quarantine the
@@ -2932,7 +2978,9 @@ namespace models {
       bool inference_enqueued = false,
       bool raw_snapshot_valid = false,
       bool model_input_snapshot_valid = false,
-      bool coordinate_snapshot_valid = false
+      bool coordinate_snapshot_valid = false,
+      depth_input_region_t completed_input_region = {},
+      bool input_domain_reset = false
     ) {
       estimate_result r;
       r.depth = output_srv();
@@ -2970,6 +3018,10 @@ namespace models {
       r.completed_frame_id = completed_frame_id;
       r.inference_enqueued = inference_enqueued;
       r.cuda_graph_active = inference_graph_exec != nullptr && !graph_capture_failed;
+      if (completed_frame_valid) {
+        r.input_region = completed_input_region;
+        r.input_domain_reset = input_domain_reset;
+      }
       return r;
     }
 
@@ -3056,11 +3108,14 @@ namespace models {
         return make_result();
       }
       auto *d3d_timer = diagnostics_enabled ? begin_d3d_perf(true, false) : nullptr;
+      const bool input_domain_reset = prepare_pending_input_domain();
       normalize_depth_output(d3d_timer);
       mark_d3d_post_end(d3d_timer);
       bool raw_snapshot_valid = false;
       bool model_input_snapshot_valid = false;
       bool coordinate_snapshot_valid = false;
+      // Dump 3D binds these immutable tensors to pending_input_region. For a video ROI they are
+      // intentionally crop-local; the package separately records the exact full-source embedding.
       if (snapshot_debug_inputs) {
         coordinate_snapshot_valid = dispatch_parallax_v2_coordinate_diagnostic();
         raw_snapshot_valid = snapshot_buffer(
@@ -3083,6 +3138,7 @@ namespace models {
       mark_d3d_pre_start(d3d_timer);
       end_d3d_perf(d3d_timer);
       const auto completed_frame_id = pending_frame_id;
+      const auto completed_input_region = pending_input_region;
       has_previous_frame = false;  // the output buffer has been consumed; never fold it twice
       // normalize_depth_output() has submitted and unbound every D3D11 read of this exact source.
       // Drop our retained reference only after the ownership pass has consumed it.
@@ -3096,7 +3152,9 @@ namespace models {
         false,
         raw_snapshot_valid,
         model_input_snapshot_valid,
-        coordinate_snapshot_valid
+        coordinate_snapshot_valid,
+        completed_input_region,
+        input_domain_reset
       );
     }
 
@@ -3134,6 +3192,94 @@ namespace models {
       D3D11_SUBRESOURCE_DATA sd = {cb, 0, 0};
       cbuffer.Reset();
       device->CreateBuffer(&cb_desc, &sd, &cbuffer);
+    }
+
+    void reset_temporal_state_for_input_domain() {
+      // Domain changes are rare (video selection/extent or full-frame fallback). Reset every
+      // history that could otherwise compare browser pixels with video-local pixels. All writes
+      // are ordered on the owning immediate context; there is no CPU readback or synchronization.
+      const std::uint32_t raw_identity[3] = {0xFFFFFFFFu, 0u, 0u};
+      const float zero4[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+      const std::uint32_t zero_uint4[4] = {0u, 0u, 0u, 0u};
+      const std::array<std::uint32_t, 256> zero_hist {};
+      const std::array<std::uint32_t, 10> zero_cut_evidence {};
+      if (minmax_raw_buf) {
+        context->UpdateSubresource(minmax_raw_buf.Get(), 0, nullptr, raw_identity, 0, 0);
+      }
+      if (minmax_ema_buf) {
+        context->UpdateSubresource(minmax_ema_buf.Get(), 0, nullptr, zero4, 0, 0);
+      }
+      if (hist_buf) {
+        context->UpdateSubresource(hist_buf.Get(), 0, nullptr, zero_hist.data(), 0, 0);
+      }
+      if (scene_cut_evidence_buf) {
+        context->UpdateSubresource(
+          scene_cut_evidence_buf.Get(), 0, nullptr, zero_cut_evidence.data(), 0, 0);
+      }
+      if (cut_state_buf) {
+        context->UpdateSubresource(
+          cut_state_buf.Get(),
+          0,
+          nullptr,
+          sbs_adaptive_state::initial_words.data(),
+          0,
+          0
+        );
+      }
+      if (tensor_previous_input_uav) {
+        context->ClearUnorderedAccessViewFloat(tensor_previous_input_uav.Get(), zero4);
+      }
+      if (previous_appearance_ordinal_uav) {
+        context->ClearUnorderedAccessViewFloat(previous_appearance_ordinal_uav.Get(), zero4);
+      }
+      if (depth_uav) {
+        context->ClearUnorderedAccessViewFloat(depth_uav.Get(), zero4);
+      }
+      if (depth_tex && depth_previous_tex) {
+        context->CopyResource(depth_previous_tex.Get(), depth_tex.Get());
+      }
+      if (depth_cut_history_uav) {
+        context->ClearUnorderedAccessViewFloat(depth_cut_history_uav.Get(), zero4);
+      }
+      if (ema_motion_mask_uav) {
+        context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), zero_uint4);
+      }
+      if (depth_coordinate_v2_state_buf) {
+        context->UpdateSubresource(
+          depth_coordinate_v2_state_buf.Get(),
+          0,
+          nullptr,
+          depth_coordinate_v2::state_initial_words.data(),
+          0,
+          0
+        );
+      }
+      for (auto *uav : {
+             depth_coordinate_v2_partials_uav.Get(),
+             depth_coordinate_v2_frame_stats_uav.Get(),
+             depth_coordinate_v2_coordinate_uav.Get(),
+             depth_coordinate_v2_candidate_uav.Get(),
+             depth_coordinate_v2_ownership_uav.Get(),
+             depth_coordinate_v2_vertical_majorant_uav.Get(),
+             depth_coordinate_v2_vertical_conditioned_uav.Get(),
+             depth_coordinate_v2_final_uav.Get(),
+           }) {
+        if (uav) {
+          context->ClearUnorderedAccessViewFloat(uav, zero4);
+        }
+      }
+      has_last_postprocessed_frame_id = false;
+    }
+
+    bool prepare_pending_input_domain() {
+      const bool changed = processed_input_domain.update(
+        pending_input_region,
+        pending_color_space
+      );
+      if (changed) {
+        reset_temporal_state_for_input_domain();
+      }
+      return changed;
     }
 
     // Normalize the finished raw disparity in tensor_out_buf into depth_tex: the scale
@@ -3429,7 +3575,8 @@ namespace models {
       ID3D11ShaderResourceView *input_srv,
       input_color_space color_space,
       std::uint64_t frame_id,
-      bool snapshot_raw_model_depth
+      bool snapshot_raw_model_depth,
+      depth_input_region_t input_region
     ) {
       if (!valid || terminal_failure || live_v2_producer_unavailable() || !input_srv) {
         return {};
@@ -3439,6 +3586,8 @@ namespace models {
       bool raw_snapshot_valid = false;
       bool model_input_snapshot_valid = false;
       bool coordinate_snapshot_valid = false;
+      depth_input_region_t completed_input_region {};
+      bool completed_input_domain_reset = false;
 
       auto &cuda = cuda_driver_api::get();
       if (!cuda.is_valid()) {
@@ -3489,16 +3638,31 @@ namespace models {
         }
       }
 
+      D3D11_TEXTURE2D_DESC input_desc = {0};
+      Microsoft::WRL::ComPtr<ID3D11Resource> input_res;
+      input_srv->GetResource(&input_res);
+      Microsoft::WRL::ComPtr<ID3D11Texture2D> input_tex;
+      if (SUCCEEDED(input_res.As(&input_tex))) {
+        input_tex->GetDesc(&input_desc);
+      }
+      if (input_desc.Width == 0u || input_desc.Height == 0u) {
+        return make_result();
+      }
+      input_region = resolved_input_region(input_region, input_desc);
+      if (!input_region.valid()) {
+        return make_result();
+      }
+      const auto requested_shape = models::fit_depth_tensor_shape(
+        input_desc.Width,
+        input_desc.Height,
+        depth_short_side,
+        max_aspect
+      );
+      const bool current_shape_matches =
+        target_w == 0 || target_h == 0 ||
+        (target_w == requested_shape.width && target_h == requested_shape.height);
+
       if (target_w == 0 || target_h == 0) {
-        // Shape is session-constant after the first valid frame. Avoid three COM calls on every
-        // accepted frame merely to rediscover a descriptor consumed only by this initialization.
-        D3D11_TEXTURE2D_DESC input_desc = {0};
-        Microsoft::WRL::ComPtr<ID3D11Resource> input_res;
-        input_srv->GetResource(&input_res);
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> input_tex;
-        if (SUCCEEDED(input_res.As(&input_tex))) {
-          input_tex->GetDesc(&input_desc);
-        }
         // The capture surface can report a 0x0 descriptor mid HDR/mode transition or
         // before the first real frame. Deriving the model resolution from that yields a
         // garbage size (NaN aspect -> integer-overflow -> clamps to the profile max) that would
@@ -3508,14 +3672,8 @@ namespace models {
         }
         // Keep the patch-aligned tensor as close as possible to source aspect while respecting
         // the TensorRT profile, configured aspect cap, and native size.
-        const auto fitted_shape = models::fit_depth_tensor_shape(
-          input_desc.Width,
-          input_desc.Height,
-          depth_short_side,
-          max_aspect
-        );
-        target_w = fitted_shape.width;
-        target_h = fitted_shape.height;
+        target_w = requested_shape.width;
+        target_h = requested_shape.height;
 
         // Threads for the min/max reduction; grid-stride handles any element count.
         int elems = target_w * target_h;
@@ -3727,6 +3885,7 @@ namespace models {
           mark_terminal_failure();
           return {};
         }
+        completed_input_domain_reset = prepare_pending_input_domain();
         normalize_depth_output(d3d_timer);
         // The ownership dispatch has now consumed and unbound the completed frame's source SRV.
         // It is safe to release before preprocessing the newly accepted source frame.
@@ -3742,6 +3901,8 @@ namespace models {
         // must not contaminate live
         // depth_postprocess_gpu samples.
         mark_d3d_post_end(d3d_timer);
+        // The snapshots retain the completed analysis domain. An ROI completion is crop-local and
+        // is authenticated together with its exact full-source embedding by Dump 3D.
         if (snapshot_raw_model_depth) {
           coordinate_snapshot_valid =
             dispatch_parallax_v2_coordinate_diagnostic();
@@ -3765,6 +3926,7 @@ namespace models {
           );
         }
         completed_frame_id = pending_frame_id;
+        completed_input_region = pending_input_region;
         completed_frame_valid = true;
         has_previous_frame = false;
         if (diagnostics_enabled) {
@@ -3772,6 +3934,24 @@ namespace models {
         }
       } else {
         mark_d3d_post_end(d3d_timer);
+      }
+
+      // The first ROI trial deliberately keeps one session tensor shape. A validated crop whose
+      // fitted shape differs is not allowed to poison the authenticated producer; consume any old
+      // completion above, skip this enqueue, and let the caller use its full-frame fallback.
+      if (!current_shape_matches) {
+        mark_d3d_pre_start(d3d_timer);
+        end_d3d_perf(d3d_timer);
+        return make_result(
+          completed_frame_valid,
+          completed_frame_id,
+          false,
+          raw_snapshot_valid,
+          model_input_snapshot_valid,
+          coordinate_snapshot_valid,
+          completed_input_region,
+          completed_input_domain_reset
+        );
       }
 
       // 1. D3D11 Compute Shader: Resize & Normalize to NCHW FP32 Buffer (for CURRENT frame)
@@ -3809,7 +3989,9 @@ namespace models {
           false,
           raw_snapshot_valid,
           model_input_snapshot_valid,
-          coordinate_snapshot_valid
+          coordinate_snapshot_valid,
+          completed_input_region,
+          completed_input_domain_reset
         );
       }
 
@@ -3906,6 +4088,7 @@ namespace models {
         pending_source_srv = input_srv;
         pending_color_space = color_space;
         pending_frame_id = frame_id;
+        pending_input_region = input_region;
         if (diagnostics_enabled) {
           throughput_stats_enqueues++;
         }
@@ -3919,7 +4102,9 @@ namespace models {
         enqueued,
         raw_snapshot_valid,
         model_input_snapshot_valid,
-        coordinate_snapshot_valid
+        coordinate_snapshot_valid,
+        completed_input_region,
+        completed_input_domain_reset
       );
     }
   };
@@ -3952,13 +4137,15 @@ namespace models {
     ID3D11ShaderResourceView *input_srv,
     input_color_space color_space,
     std::uint64_t frame_id,
-    bool snapshot_debug_inputs
+    bool snapshot_debug_inputs,
+    depth_input_region_t input_region
   ) {
     return pimpl->estimate(
       input_srv,
       color_space,
       frame_id,
-      snapshot_debug_inputs
+      snapshot_debug_inputs,
+      input_region
     );
   }
 

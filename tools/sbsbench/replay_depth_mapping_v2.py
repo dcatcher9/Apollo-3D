@@ -158,6 +158,15 @@ def _inspect_optional_v2_dump_manifest(dump: Path) -> Dict[str, Any]:
     }
 
 
+def _require_supported_replay_domain(capture: Dict[str, Any]) -> None:
+    if (capture.get("status") == "validated" and capture.get("active") and
+            capture.get("depth_input_mode") == "video-region"):
+        raise ValueError(
+            "ROI-active Dump 3D replay is not implemented: crop-local raw/parallax must "
+            "be embedded with depth_input_region.json and its full-source zero-plane "
+            "collar; refusing to reinterpret it as full-frame geometry")
+
+
 def _validate_direct_replay_contract(
         harness: Path, contract: Dict[str, Any], field_path: Path, order_path: Path,
         expected_width: int, expected_height: int) -> None:
@@ -376,6 +385,7 @@ def main(argv: list[str] | None = None) -> int:
         manifest_active = bool(
             dump_manifest_capture.get("status") == "validated" and
             dump_manifest_capture.get("active"))
+        _require_supported_replay_domain(dump_manifest_capture)
         state_captured = shadow_state_capture.get("status") == "validated"
         if manifest_active != state_captured:
             raise ValueError(
