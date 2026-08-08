@@ -99,6 +99,11 @@ class SubtitleSyntheticClipTests(unittest.TestCase):
         self.assertEqual(contract["detector_target_size_px"], [770, 434])
         self.assertEqual(contract["authored_glyph_stroke_width_px"], 3)
         self.assertEqual(contract["authored_outline_radius_px"], 2)
+        self.assertEqual(contract["outside_overlay_rgb_delta_threshold"], 40)
+        self.assertEqual(
+            contract["subtitle_only_outside_overlay_max_changed_fraction"], 0.05)
+        self.assertEqual(
+            contract["broad_scene_cut_outside_overlay_min_changed_fraction"], 0.90)
         self.assertEqual(contract["empty_frame_ranges"], [[1, 4], [13, 16]])
         self.assertEqual(contract["appear_frames"], [5, 17])
         self.assertEqual(contract["subtitle_only_replacement_frames"], [9])
@@ -121,44 +126,73 @@ class SubtitleSyntheticClipTests(unittest.TestCase):
         for frame_id, state in enumerate(
                 make_synth_clips.SUBTITLE_HIGHRES_STATE_BY_FRAME, 1):
             with self.subTest(frame_id=frame_id, state=state):
-                _, glyph, outline, region = (
+                _, glyph, outline, overlay, region = (
                     make_synth_clips._highres_subtitle_layers(frame_id))
                 if state == "empty":
                     self.assertFalse(np.any(glyph))
                     self.assertFalse(np.any(outline))
+                    self.assertEqual(set(np.unique(overlay).tolist()), {0})
                     self.assertEqual(set(np.unique(region).tolist()), {0})
                 else:
                     self.assertTrue(np.any(glyph))
                     self.assertTrue(np.any(outline))
+                    self.assertTrue(np.array_equal(
+                        overlay != 0, glyph | outline))
                     self.assertEqual(set(np.unique(region).tolist()), {0, 255})
+                    self.assertFalse(np.any((overlay != 0) & (region == 0)))
                     self.assertGreater(np.count_nonzero(region), 4 * np.count_nonzero(glyph))
 
-        # The first replacement changes only burned-in pixels over the same slowly moving shot.
+        # All declared subtitle-only boundaries retain only ordinary plate motion after excluding
+        # the exact previous/current overlay union.
+        subtitle_only_frames = sorted(set(
+            contract["appear_frames"] +
+            contract["subtitle_only_replacement_frames"] +
+            contract["disappear_frames"]))
+        for frame_id in subtitle_only_frames:
+            with self.subTest(subtitle_only_transition=frame_id):
+                before = make_synth_clips._highres_subtitle_layers(frame_id - 1)
+                after = make_synth_clips._highres_subtitle_layers(frame_id)
+                outside_overlay = ~((before[3] != 0) | (after[3] != 0))
+                before_scene = make_synth_clips.SUBTITLE_HIGHRES_SCENE_BY_FRAME[
+                    frame_id - 2]
+                after_scene = make_synth_clips.SUBTITLE_HIGHRES_SCENE_BY_FRAME[
+                    frame_id - 1]
+                before_rgb = make_synth_clips._highres_movie_background(
+                    frame_id - 1, before_scene)
+                after_rgb = make_synth_clips._highres_movie_background(
+                    frame_id, after_scene)
+                delta = np.max(np.abs(
+                    before_rgb.astype(np.int16) - after_rgb.astype(np.int16)), axis=2)
+                changed_fraction = np.mean(
+                    delta[outside_overlay] >
+                    contract["outside_overlay_rgb_delta_threshold"])
+                self.assertLessEqual(
+                    changed_fraction,
+                    contract["subtitle_only_outside_overlay_max_changed_fraction"])
+
+        # The first replacement really changes the authored overlay state.
         before_replace = make_synth_clips._highres_subtitle_layers(8)
         after_replace = make_synth_clips._highres_subtitle_layers(9)
         self.assertFalse(np.array_equal(before_replace[1], after_replace[1]))
-        replacement_outside = ~((before_replace[3] != 0) | (after_replace[3] != 0))
-        replacement_left = make_synth_clips._highres_movie_background(8, "dusk-city")
-        replacement_right = make_synth_clips._highres_movie_background(9, "dusk-city")
-        replacement_delta = np.max(np.abs(
-            replacement_left.astype(np.int16) - replacement_right.astype(np.int16)), axis=2)
-        self.assertLess(np.mean(replacement_delta[replacement_outside] > 40), 0.05)
 
         # Frame 21 replaces almost the entire scene outside both loose overlay rectangles, so a
         # future subtitle exclusion cannot turn the genuine cut into an apparent false positive.
         before_cut = make_synth_clips._highres_subtitle_layers(20)
         after_cut = make_synth_clips._highres_subtitle_layers(21)
         self.assertFalse(np.array_equal(before_cut[1], after_cut[1]))
-        cut_outside = ~((before_cut[3] != 0) | (after_cut[3] != 0))
+        cut_outside = ~((before_cut[4] != 0) | (after_cut[4] != 0))
         cut_left = make_synth_clips._highres_movie_background(20, "dusk-city")
         cut_right = make_synth_clips._highres_movie_background(21, "warm-interior")
         cut_delta = np.max(np.abs(
             cut_left.astype(np.int16) - cut_right.astype(np.int16)), axis=2)
-        self.assertGreater(np.mean(cut_delta[cut_outside] > 40), 0.90)
+        self.assertGreaterEqual(
+            np.mean(cut_delta[cut_outside] >
+                    contract["outside_overlay_rgb_delta_threshold"]),
+            contract["broad_scene_cut_outside_overlay_min_changed_fraction"])
 
         # The authored three-pixel strokes become sub-pixel at 770x434. A round trip back to the
         # source canvas makes the lost high-frequency energy directly comparable at one size.
-        _, glyph, _, _ = make_synth_clips._highres_subtitle_layers(5)
+        _, glyph, _, _, _ = make_synth_clips._highres_subtitle_layers(5)
         source = glyph.astype(np.uint8) * 255
         downscaled = np.asarray(Image.fromarray(source).resize(
             (make_synth_clips.SUBTITLE_DETECTOR_TARGET_W,
@@ -216,6 +250,8 @@ class SubtitleSyntheticClipTests(unittest.TestCase):
                         self.assertEqual(
                             metadata["subtitle_transition_contract"]["broad_scene_cut_frames"],
                             [21])
+                        self.assertIs(
+                            metadata["required_gt_subtitle_sanitizer_oracle"], True)
                     else:
                         expected_size = (make_synth_clips.W, make_synth_clips.H)
                         self.assertEqual(
@@ -238,6 +274,54 @@ class SubtitleSyntheticClipTests(unittest.TestCase):
                                 self.assertEqual(values, {0})
                             else:
                                 self.assertEqual(values, {0, 255})
+
+                    if clip == make_synth_clips.SUBTITLE_HIGHRES_CLIP:
+                        overlay_dir = os.path.join(generated, "gt_subtitle_overlay_mask")
+                        oracle_dir = os.path.join(generated, "gt_subtitle_free")
+                        self.assertEqual(sorted(os.listdir(overlay_dir)), expected_ids)
+                        self.assertEqual(sorted(os.listdir(oracle_dir)), expected_ids)
+                        for frame_id, filename in enumerate(expected_ids, 1):
+                            with Image.open(os.path.join(generated, filename)) as source_image:
+                                source = np.asarray(source_image)
+                            with Image.open(os.path.join(overlay_dir, filename)) as mask_image:
+                                self.assertEqual(mask_image.mode, "L")
+                                self.assertEqual(mask_image.size, expected_size)
+                                overlay = np.asarray(mask_image) != 0
+                            with Image.open(os.path.join(oracle_dir, filename)) as oracle_image:
+                                self.assertEqual(oracle_image.mode, "RGB")
+                                self.assertEqual(oracle_image.size, expected_size)
+                                oracle = np.asarray(oracle_image)
+                            self.assertTrue(np.array_equal(
+                                overlay, np.any(source != oracle, axis=2)))
+                            _, glyph, outline, authored_overlay, loose = (
+                                make_synth_clips._highres_subtitle_layers(frame_id))
+                            self.assertTrue(np.array_equal(overlay, glyph | outline))
+                            self.assertTrue(np.array_equal(
+                                authored_overlay != 0, overlay))
+                            self.assertFalse(np.any(overlay & (loose == 0)))
+
+                        before_id, cut_id = 20, 21
+                        with Image.open(os.path.join(
+                                oracle_dir, f"frame_{before_id:05d}.png")) as image:
+                            before_oracle = np.asarray(image, dtype=np.int16)
+                        with Image.open(os.path.join(
+                                oracle_dir, f"frame_{cut_id:05d}.png")) as image:
+                            cut_oracle = np.asarray(image, dtype=np.int16)
+                        with Image.open(os.path.join(
+                                overlay_dir, f"frame_{before_id:05d}.png")) as image:
+                            before_overlay = np.asarray(image) != 0
+                        with Image.open(os.path.join(
+                                overlay_dir, f"frame_{cut_id:05d}.png")) as image:
+                            cut_overlay = np.asarray(image) != 0
+                        outside_overlay = ~(before_overlay | cut_overlay)
+                        cut_delta = np.max(
+                            np.abs(cut_oracle - before_oracle), axis=2)
+                        self.assertGreaterEqual(
+                            np.mean(cut_delta[outside_overlay] > metadata[
+                                "subtitle_transition_contract"][
+                                    "outside_overlay_rgb_delta_threshold"]),
+                            metadata["subtitle_transition_contract"][
+                                "broad_scene_cut_outside_overlay_min_changed_fraction"])
 
 
 if __name__ == "__main__":

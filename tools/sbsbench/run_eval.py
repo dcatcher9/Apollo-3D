@@ -596,6 +596,9 @@ def validate_subtitle_transition_contract(path, contract):
     expected_keys = {
         "kind", "source_size_px", "detector_target_size_px",
         "authored_glyph_stroke_width_px", "authored_outline_radius_px",
+        "outside_overlay_rgb_delta_threshold",
+        "subtitle_only_outside_overlay_max_changed_fraction",
+        "broad_scene_cut_outside_overlay_min_changed_fraction",
         "empty_frame_ranges", "appear_frames", "subtitle_only_replacement_frames",
         "disappear_frames", "broad_scene_cut_frames",
         "overlay_replacement_at_scene_cut_frames", "subtitle_state_by_frame",
@@ -625,6 +628,27 @@ def validate_subtitle_transition_contract(path, contract):
         value = contract.get(name)
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"subtitle_transition_contract {name} must be a positive integer")
+    rgb_delta_threshold = contract.get("outside_overlay_rgb_delta_threshold")
+    if (not isinstance(rgb_delta_threshold, int) or isinstance(rgb_delta_threshold, bool) or
+            not 1 <= rgb_delta_threshold <= 255):
+        raise ValueError(
+            "subtitle_transition_contract outside_overlay_rgb_delta_threshold must be an "
+            "integer in [1, 255]")
+
+    fractions = {}
+    for name in (
+            "subtitle_only_outside_overlay_max_changed_fraction",
+            "broad_scene_cut_outside_overlay_min_changed_fraction"):
+        value = contract.get(name)
+        if (not isinstance(value, (int, float)) or isinstance(value, bool) or
+                not np.isfinite(value) or not 0.0 <= float(value) <= 1.0):
+            raise ValueError(
+                f"subtitle_transition_contract {name} must be finite and within [0, 1]")
+        fractions[name] = float(value)
+    if (fractions["subtitle_only_outside_overlay_max_changed_fraction"] >=
+            fractions["broad_scene_cut_outside_overlay_min_changed_fraction"]):
+        raise ValueError(
+            "subtitle_transition_contract subtitle-only maximum must be below broad-cut minimum")
 
     source_by_id = sbsbench.indexed_files(os.path.join(path, "frame_*.*"), "frame_")
     source_by_id = {
@@ -721,6 +745,119 @@ def validate_subtitle_transition_contract(path, contract):
     return contract
 
 
+def validate_subtitle_sanitizer_oracle(path, meta):
+    """Validate exact tight-overlay support and the authored subtitle-free RGB plate."""
+    if meta.get("required_gt_subtitle_region") is not True:
+        raise ValueError(
+            "required_gt_subtitle_sanitizer_oracle requires "
+            "required_gt_subtitle_region=true")
+    transition = meta.get("subtitle_transition_contract")
+    if transition is None:
+        raise ValueError(
+            "required_gt_subtitle_sanitizer_oracle requires subtitle_transition_contract")
+
+    source_by_id = sbsbench.indexed_files(os.path.join(path, "frame_*.*"), "frame_")
+    source_by_id = {
+        frame_id: frame_path for frame_id, frame_path in source_by_id.items()
+        if frame_path.lower().endswith((".png", ".jpg", ".jpeg"))
+    }
+    loose_by_id = sbsbench.indexed_files(
+        os.path.join(path, "gt_subtitle_region", "frame_*.png"), "frame_")
+    tight_by_id = sbsbench.indexed_files(
+        os.path.join(path, "gt_subtitle_overlay_mask", "frame_*.png"), "frame_")
+    oracle_by_id = sbsbench.indexed_files(
+        os.path.join(path, "gt_subtitle_free", "frame_*.png"), "frame_")
+    expected_ids = set(source_by_id)
+    for label, indexed in (
+            ("loose subtitle region", loose_by_id),
+            ("tight subtitle overlay mask", tight_by_id),
+            ("subtitle-free RGB oracle", oracle_by_id)):
+        if set(indexed) != expected_ids:
+            missing = sorted(expected_ids - set(indexed))
+            extra = sorted(set(indexed) - expected_ids)
+            raise ValueError(
+                f"subtitle sanitizer {label}/source frame-id mismatch: "
+                f"missing={missing}, extra={extra}")
+
+    for frame_id in sorted(source_by_id):
+        with Image.open(source_by_id[frame_id]) as source_image:
+            source_shape = (source_image.height, source_image.width)
+            source_rgb = np.asarray(source_image.convert("RGB"), dtype=np.uint8)
+        tight = sbsbench.load_binary_source_mask(tight_by_id[frame_id], source_shape)
+        loose = sbsbench.load_binary_source_mask(loose_by_id[frame_id], source_shape)
+        with Image.open(oracle_by_id[frame_id]) as oracle_image:
+            if oracle_image.format != "PNG" or oracle_image.mode != "RGB":
+                raise ValueError(
+                    "subtitle-free oracle must be an RGB PNG, got "
+                    f"format={oracle_image.format!r}, mode={oracle_image.mode!r}: "
+                    f"{oracle_by_id[frame_id]}")
+            if (oracle_image.height, oracle_image.width) != source_shape:
+                raise ValueError(
+                    "subtitle-free oracle dimensions do not match source: "
+                    f"{oracle_by_id[frame_id]}")
+            oracle_rgb = np.asarray(oracle_image, dtype=np.uint8)
+
+        if np.any(tight & ~loose):
+            raise ValueError(
+                f"tight subtitle overlay mask escapes loose subtitle region at frame {frame_id}")
+        changed = np.any(source_rgb != oracle_rgb, axis=2)
+        if not np.array_equal(changed, tight):
+            raise ValueError(
+                "tight subtitle overlay mask must exactly equal source/oracle RGB difference "
+                f"support at frame {frame_id}")
+        expected_nonempty = (
+            transition["subtitle_state_by_frame"][frame_id - 1] != "empty")
+        if bool(np.any(tight)) != expected_nonempty:
+            raise ValueError(
+                "subtitle_transition_contract state disagrees with tight overlay mask")
+
+    def outside_overlay_changed_fraction(frame_id):
+        previous_id = frame_id - 1
+        with Image.open(oracle_by_id[previous_id]) as image:
+            previous_rgb = np.asarray(image, dtype=np.int16)
+        with Image.open(oracle_by_id[frame_id]) as image:
+            current_rgb = np.asarray(image, dtype=np.int16)
+        source_shape = previous_rgb.shape[:2]
+        previous_tight = sbsbench.load_binary_source_mask(
+            tight_by_id[previous_id], source_shape)
+        current_tight = sbsbench.load_binary_source_mask(
+            tight_by_id[frame_id], source_shape)
+        outside_overlay = ~(previous_tight | current_tight)
+        if not np.any(outside_overlay):
+            raise ValueError(
+                f"subtitle sanitizer transition frame {frame_id} has no unmasked oracle support")
+        delta = np.max(np.abs(current_rgb - previous_rgb), axis=2)
+        return float(np.mean(
+            delta[outside_overlay] > transition["outside_overlay_rgb_delta_threshold"]))
+
+    # Appearance, replacement, and disappearance must remain local overlay events after the
+    # previous/current tight-mask union is removed. Normal plate motion has a bounded residual.
+    subtitle_only_frames = sorted(set(
+        transition["appear_frames"] +
+        transition["subtitle_only_replacement_frames"] +
+        transition["disappear_frames"]))
+    subtitle_only_max = transition[
+        "subtitle_only_outside_overlay_max_changed_fraction"]
+    for frame_id in subtitle_only_frames:
+        changed_fraction = outside_overlay_changed_fraction(frame_id)
+        if changed_fraction > subtitle_only_max:
+            raise ValueError(
+                f"subtitle-only transition changes too much subtitle-free oracle outside "
+                f"overlay masks at frame {frame_id}: changed_fraction={changed_fraction:.6f}")
+
+    # The authored scene oracle must retain every declared broad cut after both adjacent overlay
+    # supports are excluded. This prevents a fixture from "passing" because the text itself cut.
+    broad_cut_min = transition[
+        "broad_scene_cut_outside_overlay_min_changed_fraction"]
+    for frame_id in transition["broad_scene_cut_frames"]:
+        broad_fraction = outside_overlay_changed_fraction(frame_id)
+        if broad_fraction < broad_cut_min:
+            raise ValueError(
+                f"subtitle-free oracle does not retain a broad scene cut at frame {frame_id}: "
+                f"changed_fraction={broad_fraction:.6f}")
+    return True
+
+
 def load_clip_metadata(path, suite=None, required=True):
     """Load and validate clip metadata before any GPU work starts.
 
@@ -758,6 +895,11 @@ def load_clip_metadata(path, suite=None, required=True):
     for key in requirement_keys:
         if key in meta and not isinstance(meta[key], bool):
             raise ValueError(f"invalid clip metadata {meta_path}: {key} must be boolean")
+    if ("required_gt_subtitle_sanitizer_oracle" in meta and
+            not isinstance(meta["required_gt_subtitle_sanitizer_oracle"], bool)):
+        raise ValueError(
+            f"invalid clip metadata {meta_path}: "
+            "required_gt_subtitle_sanitizer_oracle must be boolean")
     if "subtitle_target_disparity_pct" in meta:
         try:
             meta["subtitle_target_disparity_pct"] = (
@@ -1017,6 +1159,13 @@ def load_clip_metadata(path, suite=None, required=True):
                 raise ValueError(
                     f"invalid clip metadata {meta_path}: malformed GT subtitle region for "
                     f"frame {frame_id}: {exc}") from exc
+    if meta.get("required_gt_subtitle_sanitizer_oracle"):
+        try:
+            validate_subtitle_sanitizer_oracle(path, meta)
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                f"invalid clip metadata {meta_path}: malformed subtitle sanitizer oracle: "
+                f"{exc}") from exc
     return meta
 
 
@@ -1025,7 +1174,8 @@ def published_clip_metadata(source_meta):
     keys = (
         "name", "description", "expected_flat", "gt_depth_kind", "required_gt_depth",
         "required_gt_flow", "required_gt_subtitle_region", "reference_stereo_available",
-        "subtitle_target_disparity_pct", "subtitle_transition_contract",
+        "required_gt_subtitle_sanitizer_oracle", "subtitle_target_disparity_pct",
+        "subtitle_transition_contract",
         "dataset", "homepage", "citation",
         "license_note", "content_type", "evaluation_role", "source_url", "source_window",
         "source_artifacts", "shot_state_contract",
@@ -1046,6 +1196,7 @@ def source_evidence_digests(path):
         "gt_depth", "gt_depth_valid", "gt_depth_valid_all", "gt_depth_valid_nonocc",
         "gt_flow", "gt_right", "gt_occlusion", "gt_outofframe", "gt_right_disparity",
         "gt_detail", "gt_match", "gt_sky", "gt_subtitle_region",
+        "gt_subtitle_overlay_mask", "gt_subtitle_free",
     )
     files = glob.glob(os.path.join(path, "frame_*"))
     for directory in semantic_sidecars:
@@ -1062,6 +1213,7 @@ def source_evidence_digests(path):
     semantic = {k: meta[k] for k in ("expected_flat", "gt_depth_kind", "dataset",
                                      "required_gt_depth", "required_gt_flow",
                                      "required_gt_subtitle_region",
+                                     "required_gt_subtitle_sanitizer_oracle",
                                      "subtitle_target_disparity_pct",
                                      "subtitle_transition_contract",
                                      "reference_stereo_available", "evaluation_role",

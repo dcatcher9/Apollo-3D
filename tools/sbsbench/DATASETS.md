@@ -52,6 +52,11 @@ disappearance, 17–20 cue C, and 21–24 a broad scene replacement with cue C c
 The scene-cut contract expects the single genuine cut at frame 21, so excluding subtitle pixels
 cannot excuse missing the broad replacement outside the loose overlay region.
 
+The same high-resolution fixture also carries the Phase 1.2 authored sanitizer oracle. Its tight
+mask is exactly the visible glyph-plus-outline support, while its subtitle-free RGB frames are the
+pre-composite moving movie plates. This is reference evidence for testing a future sanitized
+inference copy; it is not a synthetic sanitizer result.
+
 ## Public extended suite
 
 The decision suite is prepared reproducibly from public datasets and cached outside Git. The
@@ -163,6 +168,34 @@ than dataset truth. An empty mask represents a frame without visible subtitles. 
 source-frame resolution, matching the runtime plan to detect burned-in pixels before inference
 downscaling. Their pixels, requirement flag, authored target disparity, and any strict
 `subtitle_transition_contract` schedule are part of clip identity.
+
+### Subtitle sanitizer oracle
+
+`required_gt_subtitle_sanitizer_oracle: true` requires two additional full-resolution sidecars for
+every source frame:
+
+- `gt_subtitle_overlay_mask/frame_*.png` is an 8-bit single-channel `0`/`255` mask tightly covering
+  the authored glyph and outline pixels;
+- `gt_subtitle_free/frame_*.png` is the same-sized RGB PNG movie plate before those pixels were
+  composited.
+
+The tight mask must be wholly contained by `gt_subtitle_region`, and it must equal the exact
+per-pixel RGB difference support between the rendered source and subtitle-free oracle. Empty
+subtitle states therefore have an all-zero tight mask and a source frame identical to the oracle;
+non-empty states have non-empty tight support. The requirement currently applies only to
+`subtitle_cjk_highres_transitions` and requires its strict transition contract.
+
+Every declared appearance, subtitle-only replacement, and disappearance is rechecked on the
+subtitle-free oracle after excluding the union of the previous and current tight masks. At most 5%
+of the remaining pixels may change by more than 40 in one or more 8-bit RGB channels. The generated
+fixture's worst subtitle-only boundary is approximately 1.10%; the 5% contract leaves deterministic
+plate-motion margin without allowing an undeclared broad scene replacement.
+
+Every declared broad scene cut receives the complementary check over the same unmasked support:
+at least 90% of pixels must exceed that RGB-delta threshold. This authenticates the frame-21 scene
+cut independently of the simultaneous subtitle replacement. The threshold and both bounds live in
+the strict transition contract. Both sidecar directories and the requirement flag are part of clip
+identity.
 
 ### Flow
 

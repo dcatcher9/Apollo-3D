@@ -9,6 +9,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 
 import numpy as np
 from PIL import Image
@@ -31,6 +32,21 @@ def _frame_files(clip_dir):
         and os.path.splitext(path)[1].lower() in IMAGE_EXTENSIONS
         and os.path.basename(path).lower().startswith("frame_")
     )
+
+
+def _frame_ids(paths, label):
+    """Return numeric frame IDs while rejecting malformed or duplicate identities."""
+    ids = set()
+    pattern = re.compile(r"^frame_(\d+)\.[^.]+$", re.IGNORECASE)
+    for path in paths:
+        match = pattern.match(os.path.basename(path))
+        if match is None:
+            raise ValueError(f"malformed {label} frame name: {path}")
+        frame_id = int(match.group(1))
+        if frame_id in ids:
+            raise ValueError(f"duplicate {label} frame id {frame_id}: {path}")
+        ids.add(frame_id)
+    return ids
 
 
 def discover_clips(roots):
@@ -70,6 +86,29 @@ def discover_clips(roots):
                             meta["subtitle_target_disparity_pct"]))
                 except ValueError as exc:
                     raise ValueError(f"unauthenticated clip {clip_dir}: {exc}") from exc
+            if ("required_gt_subtitle_sanitizer_oracle" in meta and
+                    not isinstance(meta["required_gt_subtitle_sanitizer_oracle"], bool)):
+                raise ValueError(
+                    f"unauthenticated clip {clip_dir}: "
+                    "required_gt_subtitle_sanitizer_oracle must be boolean")
+            if meta.get("required_gt_subtitle_sanitizer_oracle") is True:
+                if (meta.get("required_gt_subtitle_region") is not True or
+                        "subtitle_transition_contract" not in meta):
+                    raise ValueError(
+                        f"unauthenticated clip {clip_dir}: "
+                        "required_gt_subtitle_sanitizer_oracle requires authored subtitle "
+                        "region and transition contracts")
+                source_ids = _frame_ids(frames, "source")
+                for directory in ("gt_subtitle_overlay_mask", "gt_subtitle_free"):
+                    sidecars = glob.glob(os.path.join(clip_dir, directory, "frame_*.png"))
+                    sidecar_ids = _frame_ids(sidecars, directory)
+                    if sidecar_ids != source_ids:
+                        missing = sorted(source_ids - sidecar_ids)
+                        extra = sorted(sidecar_ids - source_ids)
+                        raise ValueError(
+                            f"unauthenticated clip {clip_dir}: subtitle sanitizer "
+                            f"{directory}/source frame-id mismatch: missing={missing}, "
+                            f"extra={extra}")
             if meta.get("suite"):
                 if "required_gt_stereo" in meta:
                     retired = meta.pop("required_gt_stereo")

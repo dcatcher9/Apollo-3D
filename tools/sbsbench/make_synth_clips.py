@@ -89,6 +89,9 @@ SUBTITLE_DETECTOR_TARGET_W = 770
 SUBTITLE_DETECTOR_TARGET_H = 434
 SUBTITLE_HIGHRES_STROKE_PX = 3
 SUBTITLE_HIGHRES_OUTLINE_PX = 2
+SUBTITLE_HIGHRES_RGB_DELTA_THRESHOLD = 40
+SUBTITLE_HIGHRES_SUBTITLE_ONLY_MAX_CHANGED_FRACTION = 0.05
+SUBTITLE_HIGHRES_BROAD_CUT_MIN_CHANGED_FRACTION = 0.90
 SUBTITLE_HIGHRES_STATE_BY_FRAME = (
     ["empty"] * 4 +
     ["cue-a"] * 4 +
@@ -513,6 +516,20 @@ def _prepare_subtitle_output(clip):
     return out, region_out
 
 
+def _prepare_highres_subtitle_oracle_output(out):
+    """Create and clear the authored Phase 1.2 sanitizer-evidence sidecars."""
+    outputs = []
+    for name in ("gt_subtitle_overlay_mask", "gt_subtitle_free"):
+        directory = os.path.join(out, name)
+        os.makedirs(directory, exist_ok=True)
+        for filename in os.listdir(directory):
+            if filename.startswith("frame_") and filename.lower().endswith(
+                    (".png", ".jpg", ".jpeg")):
+                os.remove(os.path.join(directory, filename))
+        outputs.append(directory)
+    return tuple(outputs)
+
+
 def _subtitle_clip(clip, variant):
     out, region_out = _prepare_subtitle_output(clip)
     for frame_id in range(1, N + 1):
@@ -539,17 +556,18 @@ def subtitle_top_bottom_disjoint():
 
 
 def _highres_subtitle_layers(frame_id):
-    """Fine authored subtitle pixels and loose source-resolution region truth."""
+    """Fine authored subtitle pixels plus tight and loose source-resolution truth."""
     if frame_id < 1 or frame_id > N:
         raise ValueError(f"subtitle frame must be in [1, {N}]")
     glyph_rgb = np.zeros(
         (SUBTITLE_HIGHRES_H, SUBTITLE_HIGHRES_W, 3), dtype=np.uint8)
     glyph_mask = np.zeros((SUBTITLE_HIGHRES_H, SUBTITLE_HIGHRES_W), dtype=bool)
     outline_mask = np.zeros((SUBTITLE_HIGHRES_H, SUBTITLE_HIGHRES_W), dtype=bool)
+    overlay_mask = np.zeros((SUBTITLE_HIGHRES_H, SUBTITLE_HIGHRES_W), dtype=np.uint8)
     region_mask = np.zeros((SUBTITLE_HIGHRES_H, SUBTITLE_HIGHRES_W), dtype=np.uint8)
     state = SUBTITLE_HIGHRES_STATE_BY_FRAME[frame_id - 1]
     if state == "empty":
-        return glyph_rgb, glyph_mask, outline_mask, region_mask
+        return glyph_rgb, glyph_mask, outline_mask, overlay_mask, region_mask
 
     line = _render_authored_text(
         SUBTITLE_HIGHRES_TEXT[state], "cjk", SUBTITLE_HIGHRES_STROKE_PX)
@@ -566,6 +584,7 @@ def _highres_subtitle_layers(frame_id):
     glyph_mask[ys, xs] = block_glyph
     outline_mask[ys, xs] = block_outline
     glyph_rgb[ys, xs][block_glyph] = (248, 248, 244)
+    overlay_mask[glyph_mask | outline_mask] = 255
 
     # A loose rectangle remains much larger than the two/three-pixel authored edges. Empty frames
     # intentionally keep an all-zero sidecar rather than inventing a positional prior.
@@ -575,7 +594,7 @@ def _highres_subtitle_layers(frame_id):
         y - region_pad_y:y + block_height + region_pad_y,
         x - region_pad_x:x + block_width + region_pad_x,
     ] = 255
-    return glyph_rgb, glyph_mask, outline_mask, region_mask
+    return glyph_rgb, glyph_mask, outline_mask, overlay_mask, region_mask
 
 
 def _warm_interior_background(frame_id):
@@ -629,10 +648,12 @@ def _highres_movie_background(frame_id, scene):
 
 def subtitle_cjk_highres_transitions():
     out, region_out = _prepare_subtitle_output(SUBTITLE_HIGHRES_CLIP)
+    overlay_out, subtitle_free_out = _prepare_highres_subtitle_oracle_output(out)
     for frame_id in range(1, N + 1):
         scene = SUBTITLE_HIGHRES_SCENE_BY_FRAME[frame_id - 1]
-        frame = _highres_movie_background(frame_id, scene)
-        glyph_rgb, glyph_mask, outline_mask, region_mask = (
+        subtitle_free = _highres_movie_background(frame_id, scene)
+        frame = subtitle_free.copy()
+        glyph_rgb, glyph_mask, outline_mask, overlay_mask, region_mask = (
             _highres_subtitle_layers(frame_id))
         frame[outline_mask] = (7, 8, 11)
         frame[glyph_mask] = glyph_rgb[glyph_mask]
@@ -640,6 +661,11 @@ def subtitle_cjk_highres_transitions():
             os.path.join(out, f"frame_{frame_id:05d}.png"), compress_level=9)
         Image.fromarray(region_mask, mode="L").save(
             os.path.join(region_out, f"frame_{frame_id:05d}.png"), compress_level=9)
+        Image.fromarray(overlay_mask, mode="L").save(
+            os.path.join(overlay_out, f"frame_{frame_id:05d}.png"), compress_level=9)
+        Image.fromarray(subtitle_free).save(
+            os.path.join(subtitle_free_out, f"frame_{frame_id:05d}.png"),
+            compress_level=9)
 
 
 def flat_page():
@@ -894,6 +920,7 @@ def clip_metadata(clip):
     if clip == SUBTITLE_HIGHRES_CLIP:
         return {
             "required_gt_subtitle_region": True,
+            "required_gt_subtitle_sanitizer_oracle": True,
             "subtitle_target_disparity_pct": 0.0,
             "subtitle_transition_contract": {
                 "kind": "highres-empty-appear-replace-disappear-hard-cut",
@@ -902,6 +929,12 @@ def clip_metadata(clip):
                     SUBTITLE_DETECTOR_TARGET_W, SUBTITLE_DETECTOR_TARGET_H],
                 "authored_glyph_stroke_width_px": SUBTITLE_HIGHRES_STROKE_PX,
                 "authored_outline_radius_px": SUBTITLE_HIGHRES_OUTLINE_PX,
+                "outside_overlay_rgb_delta_threshold":
+                    SUBTITLE_HIGHRES_RGB_DELTA_THRESHOLD,
+                "subtitle_only_outside_overlay_max_changed_fraction":
+                    SUBTITLE_HIGHRES_SUBTITLE_ONLY_MAX_CHANGED_FRACTION,
+                "broad_scene_cut_outside_overlay_min_changed_fraction":
+                    SUBTITLE_HIGHRES_BROAD_CUT_MIN_CHANGED_FRACTION,
                 "empty_frame_ranges": [[1, 4], [13, 16]],
                 "appear_frames": [5, 17],
                 "subtitle_only_replacement_frames": [9],
@@ -918,7 +951,8 @@ def clip_metadata(clip):
             },
             "source_artifacts": [
                 "Authored three-pixel CJK strokes with a two-pixel dark outline; empty frames "
-                "have exact zero subtitle-region masks."
+                "have exact zero subtitle-region and tight overlay masks. The authenticated "
+                "subtitle-free RGB sidecar is the exact pre-composite movie plate."
             ],
         }
     raise ValueError(f"unknown synthetic clip {clip}")
