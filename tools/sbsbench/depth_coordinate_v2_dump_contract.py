@@ -21,6 +21,17 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
 
 
 DUMP_MANIFEST_SCHEMA = 12
+WINDOW_VIDEO_BORDER_SCHEMA = 2
+WINDOW_VIDEO_OBSERVER_STATUSES = frozenset({
+    "starting", "ok", "no-foreground", "unsupported", "unavailable",
+    "accessibility", "warming", "incomplete", "changed", "no-video",
+    "ambiguous", "helper-missing", "launch-failed", "helper-exited",
+    "protocol-error", "stale", "stopped",
+})
+WINDOW_VIDEO_MAPPING_STATUSES = frozenset({
+    "ok", "invalid-video-rect", "invalid-capture-rect", "unsupported-rotation",
+    "extent-mismatch", "foreground-mismatch", "outside-capture",
+})
 SHADOW_STATE_DUMP_SCHEMA = 16
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 2
 LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
@@ -71,6 +82,124 @@ def _uint32(value: Any, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 0xFFFFFFFF:
         raise ValueError(f"{label} must be a uint32")
     return value
+
+
+def _uint64(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 0xFFFFFFFFFFFFFFFF:
+        raise ValueError(f"{label} must be a uint64")
+    return value
+
+
+def _int32(value: Any, label: str) -> int:
+    if (isinstance(value, bool) or not isinstance(value, int) or
+            not -0x80000000 <= value <= 0x7FFFFFFF):
+        raise ValueError(f"{label} must be an int32")
+    return value
+
+
+def validate_window_video_border_document(
+        document: Any, *, matched_frame_id: int | None = None,
+        source_width: int | None = None, source_height: int | None = None) -> Dict[str, Any]:
+    """Validate optional, diagnostic-only matched-source video-border evidence."""
+
+    root_keys = {
+        "schema", "capture", "role", "matched_frame_id", "coordinate_space",
+        "identity", "freshness",
+    }
+    if not isinstance(document, dict) or set(document) != root_keys:
+        raise ValueError("window_video_border.json has an unknown layout")
+    if document.get("schema") != WINDOW_VIDEO_BORDER_SCHEMA:
+        raise ValueError("window_video_border.json has an unknown serialization schema")
+    if document.get("capture") != (
+            "same matched source/color/depth/render frame as the parent Dump 3D package"):
+        raise ValueError("window_video_border.json has unknown capture semantics")
+    if document.get("role") != (
+            "diagnostic-only window-video border evidence; no geometry or renderer authority"):
+        raise ValueError("window_video_border.json claims unknown authority")
+
+    frame_id = _uint64(document.get("matched_frame_id"), "matched frame id")
+    if frame_id == 0 or (matched_frame_id is not None and frame_id != matched_frame_id):
+        raise ValueError("window_video_border.json does not match the parent frame")
+
+    coordinate = document.get("coordinate_space")
+    if not isinstance(coordinate, dict) or set(coordinate) != {
+            "name", "rect_semantics", "source_extent_px", "capture_rect_px"}:
+        raise ValueError("window_video_border.json has an unknown coordinate layout")
+    if (coordinate.get("name") != "matched-source-pixels" or
+            coordinate.get("rect_semantics") != "half-open [left, top, right, bottom)"):
+        raise ValueError("window_video_border.json has unknown rectangle semantics")
+    extent = coordinate.get("source_extent_px")
+    rect = coordinate.get("capture_rect_px")
+    if (not isinstance(extent, dict) or set(extent) != {"width", "height"} or
+            not isinstance(rect, dict) or set(rect) != {"left", "top", "right", "bottom"}):
+        raise ValueError("window_video_border.json has malformed capture geometry")
+    width = _uint32(extent.get("width"), "source width")
+    height = _uint32(extent.get("height"), "source height")
+    if (width == 0 or height == 0 or
+            (source_width is not None and width != source_width) or
+            (source_height is not None and height != source_height)):
+        raise ValueError("window_video_border.json source extent does not match the dump")
+    left = _int32(rect.get("left"), "rectangle left")
+    top = _int32(rect.get("top"), "rectangle top")
+    right = _int32(rect.get("right"), "rectangle right")
+    bottom = _int32(rect.get("bottom"), "rectangle bottom")
+    if left < 0 or top < 0 or right <= left or bottom <= top or right > width or bottom > height:
+        raise ValueError("window_video_border.json rectangle is empty or out of bounds")
+
+    identity = document.get("identity")
+    if not isinstance(identity, dict) or set(identity) != {
+            "hwnd", "process_id", "document_id", "video_id", "generation"}:
+        raise ValueError("window_video_border.json has an unknown identity layout")
+    hwnd = identity.get("hwnd")
+    try:
+        hwnd_value = int(hwnd, 16) if isinstance(hwnd, str) and hwnd.startswith("0x") else 0
+    except ValueError:
+        hwnd_value = 0
+    process_id = _uint32(identity.get("process_id"), "process id")
+    document_id = _int32(identity.get("document_id"), "document id")
+    video_id = _int32(identity.get("video_id"), "video id")
+    generation = _uint64(identity.get("generation"), "generation")
+    if hwnd_value <= 0 or process_id == 0 or document_id == 0 or video_id == 0 or generation == 0:
+        raise ValueError("window_video_border.json has an incomplete identity")
+
+    freshness = document.get("freshness")
+    if not isinstance(freshness, dict) or set(freshness) != {
+            "latest_heartbeat_age_ms_at_capture", "maximum_heartbeat_age_ms",
+            "geometry_continuity_ms_at_capture", "source_content_age_ms_at_capture",
+            "fresh", "causal_geometry"}:
+        raise ValueError("window_video_border.json has an unknown freshness layout")
+    heartbeat_age_ms = _uint32(
+        freshness.get("latest_heartbeat_age_ms_at_capture"), "latest heartbeat age")
+    maximum_heartbeat_age_ms = _uint32(
+        freshness.get("maximum_heartbeat_age_ms"), "maximum heartbeat age")
+    geometry_continuity_ms = _uint64(
+        freshness.get("geometry_continuity_ms_at_capture"), "geometry continuity")
+    source_content_age_ms = _uint64(
+        freshness.get("source_content_age_ms_at_capture"), "source content age")
+    if (freshness.get("fresh") is not True or maximum_heartbeat_age_ms == 0 or
+            heartbeat_age_ms > maximum_heartbeat_age_ms):
+        raise ValueError("window_video_border.json is stale")
+    if (freshness.get("causal_geometry") is not True or
+            geometry_continuity_ms < source_content_age_ms):
+        raise ValueError("window_video_border.json geometry postdates the source content")
+    return {
+        "matched_frame_id": frame_id,
+        "source_width": width,
+        "source_height": height,
+        "left": left,
+        "top": top,
+        "right": right,
+        "bottom": bottom,
+        "hwnd": hwnd_value,
+        "process_id": process_id,
+        "document_id": document_id,
+        "video_id": video_id,
+        "generation": generation,
+        "latest_heartbeat_age_ms_at_capture": heartbeat_age_ms,
+        "maximum_heartbeat_age_ms": maximum_heartbeat_age_ms,
+        "geometry_continuity_ms_at_capture": geometry_continuity_ms,
+        "source_content_age_ms_at_capture": source_content_age_ms,
+    }
 
 
 def camera_center_integrity_bits(
@@ -512,6 +641,36 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
             raise ValueError("dump_manifest.json V2 geometry dimensions disagree")
     elif any(value is not None for value in geometry_dimensions):
         raise ValueError("dump_manifest.json exposes inactive V2 geometry dimensions")
+
+    border_summary = document.get("window_video_border")
+    border_descriptor = artifacts.get("window_video_border.json")
+    border_available = False
+    # Schema-12 packages created before this optional diagnostic existed omit both objects. Once
+    # either object advertises the feature, require the complete paired manifest contract.
+    if border_summary is not None or border_descriptor is not None:
+        if (not isinstance(border_summary, dict) or set(border_summary) != {
+                "available", "artifact", "observer_status", "mapping_status",
+                "geometry_authority", "renderer_authority"} or
+                not isinstance(border_descriptor, dict) or set(border_descriptor) != {
+                    "available", "required", "stage", "description"}):
+            raise ValueError("dump_manifest.json has an invalid window-video border contract")
+        border_available = border_summary.get("available")
+        if (not isinstance(border_available, bool) or
+                border_descriptor.get("available") is not border_available or
+                border_descriptor.get("required") is not False or
+                border_descriptor.get("stage") != "matched-frame window-video border" or
+                not isinstance(border_descriptor.get("description"), str) or
+                not border_descriptor["description"] or
+                border_summary.get("artifact") != (
+                    "window_video_border.json" if border_available else None) or
+                border_summary.get("observer_status") not in WINDOW_VIDEO_OBSERVER_STATUSES or
+                border_summary.get("mapping_status") not in WINDOW_VIDEO_MAPPING_STATUSES or
+                (border_available and (
+                    border_summary.get("observer_status") != "ok" or
+                    border_summary.get("mapping_status") != "ok")) or
+                border_summary.get("geometry_authority") is not False or
+                border_summary.get("renderer_authority") is not False):
+            raise ValueError("dump_manifest.json has an inconsistent window-video border contract")
     return {
         "active": active,
         "rendered_output_selected": selected,
@@ -520,6 +679,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         "ownership_refined_available": active,
         "vertical_majorant_available": active,
         "vertical_conditioned_available": active,
+        "window_video_border_available": border_available,
     }
 
 
@@ -567,6 +727,32 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
     dimensions = manifest["dimensions"]["shadow_final_parallax"]
     height, width = int(dimensions["height"]), int(dimensions["width"])
     artifacts = manifest["artifacts"]
+
+    border = None
+    if fragment["window_video_border_available"]:
+        frame_id = _uint64(manifest.get("matched_frame_id"), "dump manifest matched frame id")
+        source_dimensions = manifest["dimensions"].get("source")
+        if not isinstance(source_dimensions, dict):
+            raise ValueError(
+                "dump_manifest.json advertises a window-video border without source dimensions")
+        source_width = _uint32(source_dimensions.get("width"), "dump source width")
+        source_height = _uint32(source_dimensions.get("height"), "dump source height")
+        if frame_id == 0 or source_width == 0 or source_height == 0:
+            raise ValueError(
+                "dump_manifest.json has invalid window-video border parent geometry")
+        border_path = os.path.join(os.fspath(dump_dir), "window_video_border.json")
+        try:
+            with open(border_path, encoding="utf-8") as handle:
+                border_document = json.load(handle)
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(
+                "advertised window_video_border.json is missing or malformed") from error
+        border = validate_window_video_border_document(
+            border_document,
+            matched_frame_id=frame_id,
+            source_width=source_width,
+            source_height=source_height,
+        )
 
     fields: Dict[str, Any] = {}
     for name in _GEOMETRY_CHAIN_FIELDS:
@@ -629,6 +815,8 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
         "height": height,
         "texels": width * height,
         "chain_fields_verified": list(_GEOMETRY_CHAIN_FIELDS),
+        "window_video_border_verified": border is not None,
+        "window_video_border": border,
     }
 
 
@@ -638,7 +826,9 @@ __all__ = [
     "LIVE_RENDERER_SOURCE_CLOSURE_SHA256",
     "SHADOW_FRAME_STATS_DUMP_SCHEMA",
     "SHADOW_STATE_DUMP_SCHEMA",
+    "WINDOW_VIDEO_BORDER_SCHEMA",
     "camera_center_integrity_bits",
+    "validate_window_video_border_document",
     "validate_v2_dump_manifest_document",
     "validate_shadow_frame_stats_document",
     "validate_shadow_state_document",

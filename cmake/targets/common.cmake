@@ -5,6 +5,11 @@ add_executable(sunshine ${SUNSHINE_TARGET_FILES})
 foreach(dep ${SUNSHINE_TARGET_DEPENDENCIES})
     add_dependencies(sunshine ${dep})  # compile these before sunshine
 endforeach()
+if(TARGET video-dom-info)
+    # Host SBS supervises this out-of-process helper at runtime. A targeted `ninja sunshine`
+    # therefore has to produce the sibling tool as well as the main executable.
+    add_dependencies(sunshine video-dom-info)
+endif()
 
 # Apollo supports only the native Windows/NVIDIA host path.
 include(${CMAKE_MODULE_PATH}/targets/windows.cmake)

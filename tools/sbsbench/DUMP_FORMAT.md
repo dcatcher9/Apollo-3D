@@ -50,6 +50,7 @@ prove absolute scale or compare two dumps quantitatively; use the `.f32` artifac
 | `warp_displacement_heat.png` | Derived eye-pixel displacement visualization |
 | `warp_mask.png` | Finite-source-boundary mask, not an internal visibility mask |
 | `sbs.png` | Packed SBS output shown to the encoder/client |
+| `window_video_border.json` | Optional matched-source, half-open browser-video rectangle and identity; diagnostic only |
 | `dump_manifest.json` | Effective model, producer, renderer, color, state, and artifact authority |
 | `adaptive_state.json` | Compatibility-shaped cut/depth-health telemetry |
 | `meta.txt` | Human-readable summary; never the machine authority |
@@ -57,6 +58,30 @@ prove absolute scale or compare two dumps quantitatively; use the `.f32` artifac
 The V2 warp is an 11-step contractive inverse. Its mask marks requests beyond the finite source
 rectangle, which the renderer clamps to an edge column. V2 has no internal forward owner,
 multi-root selection, or synthesized fill.
+
+### Optional window-video border evidence
+
+When the Windows video-DOM observer has a fresh, uniquely identified rectangle stamped onto the
+same captured frame, Dump 3D writes `window_video_border.json` (schema 2). The rectangle uses
+half-open `[left, top, right, bottom)` coordinates in the exact `source.png` pixel space and binds
+the source extent, matched frame ID, HWND/process/document/video identity, observer generation,
+latest-heartbeat age, uninterrupted geometry age, and source-content age at capture. Validation
+requires a fresh heartbeat and proves that the exact geometry run began no later than the source
+content. A stale, noncausal, out-of-bounds, identity-incomplete, or frame-mismatched snapshot is
+omitted; it never invalidates the otherwise authenticated V2 package.
+The manifest summary always records the declared observer and screen-to-capture mapping status so
+an omitted optional artifact has a machine-readable reason.
+Package verification opens and validates the file whenever the manifest advertises it as
+available, and cross-checks its frame ID and source extent against `dump_manifest.json`. A missing,
+malformed, or mismatched advertised artifact fails verification. An unavailable artifact remains
+non-authoritative and is not consulted.
+
+This artifact has no geometry or renderer authority. In particular, its presence does not imply
+that production cropped depth inference, masked pixels outside the video, or moved the zero plane.
+The existing `sbs_stereo_window_metrics.py` metric scores the fitted display's outer lateral
+border. It cannot be applied unchanged to this inner rectangle: a video-frame metric must restrict
+support to the rectangle and measure subject disparity relative to the visible frame's own
+binocular disparity before reusing the existing component and perceptual weighting machinery.
 
 ## Current schema boundaries
 
@@ -71,6 +96,7 @@ named contract:
 | V2 state dump | 16 | Serialized scene-camera and renderer-authorization state |
 | V2 frame statistics | 2 | Serialized frame-local statistics |
 | Warp-map shape | 2 | Renderer-specific exact source-map layout and mask meaning |
+| Window-video border | 2 | Optional matched-source rectangle, identity, freshness, and causal-continuity evidence |
 | Raw-model provenance | 3 | Model/input/preprocess-to-raw binding |
 | Evaluator | 36 | `run_eval.py` gating and result semantics |
 | Production harness | 20 | Ordinary V2 clip artifact contract |

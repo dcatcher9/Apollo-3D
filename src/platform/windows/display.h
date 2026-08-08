@@ -84,8 +84,6 @@ namespace platf::dxgi {
   }  // namespace video
 
   class hwdevice_t;
-  class dirty_rect_probe_t;
-
   class gpu_cursor_t {
   public:
     gpu_cursor_t():
@@ -292,9 +290,6 @@ namespace platf::dxgi {
     capture_e release_frame();
 
     ~duplication_t();
-
-  private:
-    std::unique_ptr<dirty_rect_probe_t> dirty_rect_probe;
   };
 
   /**
@@ -327,6 +322,7 @@ namespace platf::dxgi {
     texture2d_t old_surface_delayed_destruction;
     std::chrono::steady_clock::time_point old_surface_timestamp;
     std::variant<std::monostate, texture2d_t, std::shared_ptr<platf::img_t>> last_frame_variant;
+    std::optional<std::chrono::steady_clock::time_point> last_content_timestamp;
   };
 
   /**

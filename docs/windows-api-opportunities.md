@@ -50,9 +50,11 @@ important corrections:
 - W8, W10, W11, and W9 are not host-only changes. They require protocol and Moonlight 3D work, so
   they cannot be treated as local edits to one Windows source file.
 
-The first completed investigation is the diagnostics-only Desktop Duplication dirty-rectangle probe
-in Phase 0.1. It changes no rendering or depth behavior. Later items remain proposals until their
-own evidence gates pass.
+The Desktop Duplication dirty-rectangle investigation in Phase 0.1 is complete and rejected as a
+video-boundary authority. W6 now uses a supervised Chromium IAccessible2 helper to bind a fresh,
+causally-prior `<video>` element rectangle observation to a matched Host-SBS frame. That rectangle is diagnostic border
+evidence only; it does **not** crop capture, change DAV2 input, or change rendering/depth behavior.
+Later W6 geometry work remains a proposal until the stereo-window policy passes its own gate.
 
 ## Context an implementer needs
 
@@ -384,42 +386,94 @@ off until those precision tests pass.
 
 ### W6. Video ROI detection
 
-**Goal.** When a video plays in a window that is not full-screen, apply the stereo conversion to just
-that rectangle, leaving the rest of the desktop flat.
+**Goal.** When video plays inside a browser/player window, or a game runs in a desktop window, find
+that dynamic-content rectangle so a later milestone can apply stereo conversion there while leaving
+the rest of the desktop flat.
 
-**Detection approaches, in recommended order.**
+**Rejected damage-metadata route.** Target-machine traces initially looked promising: a windowed
+video repeatedly produced `820:510-2471:1439`, and maximise produced approximately the full capture.
+Longer observation disproved dirty metadata as geometry authority. The same video alternated among
+its full `278:416-2812:1841` envelope, a lower-only `278:896-2812:1841` rectangle, and small internal
+updates; animated page furniture could also dominate a persistent-activity grid. These are all valid
+answers to “which pixels changed,” but none answers “where is the video element.” Paused video has no
+damage at all. The experimental exact-dirty-region tracker and its heuristics were therefore removed
+rather than expanded. Sunshine no longer calls `GetFrameDirtyRects` for video discovery.
 
-1. **Desktop Duplication dirty rectangles (probe implemented).** A playing video region may be
-   dirty on essentially every frame while the rest of the page changes intermittently. Phase 0.1 now
-   samples `GetFrameDirtyRects` immediately after acquire in
-   [`duplication_t::next_frame()`](../src/platform/windows/display_base.cpp:522), then reports
-   two-second dirty-area and persistent-grid summaries. This is evidence, not an ROI implementation:
-   high `RectsCoalesced` rates, diffuse damage, or unstable bounds invalidate the simple detector.
-   **Caveat, and the reason this needs a measurement probe before it is designed against:** when
-   video is presented through a hardware overlay (multi-plane overlay), that plane is composited by
-   the display controller rather than by DWM, and the consistency of damage metadata across drivers
-   is unverified.
-2. **Content-based temporal activity.** The robust fallback, and it reuses machinery the depth
-   pipeline already owns. Maintain a downsampled temporal activity map; video regions carry
-   persistent energy while static page content is near zero. Take the largest connected active
-   region with a plausible aspect ratio, then snap its edges to strong luminance edges — letterbox
-   bars are easy to find. Weakness: a paused video produces no signal, so the ROI must latch with
-   hysteresis rather than being recomputed from scratch.
-3. **`GlobalSystemMediaTransportControlsSessionManager` (WinRT).** Gives no rectangle, but answers
-   "is media actually playing, and in which process" almost for free. Excellent as a gate and to
-   constrain the search to one window.
-4. **UI Automation.** Can read a `<video>` element's `BoundingRectangle` directly, which is the most
-   precise option, but querying it activates the browser's accessibility tree — a real cost for a
-   host streaming at 90 fps — and cross-process COM traversal takes tens of milliseconds. If used,
-   query once on latch, never per frame.
-5. **Browser extension or DevTools protocol.** The accuracy ceiling: exact rects, `object-fit`
-   letterboxing, and play state. Rejected as a primary path because of installation friction and
-   because it covers only browsers.
+**Zero-extension Chromium semantic source.** `video-dom-info` walks the foreground Chrome or Edge
+MSAA tree in a supervised process, obtains IAccessible2 through `IServiceProvider`, and accepts only
+the exact escaped object attribute `tag:video`. Unlike dirty metadata, that identity and its
+`accLocation` rectangle remain present when a video is paused or only a small part changes. Standard
+UI Automation is not sufficient because Chromium exposes `<video>` as a generic `Group`; the HTML
+tag survives in the extended IA2 attributes.
+
+The helper scans only the foreground Chrome or Edge root. Background windows and background tabs
+are deliberately ignored even if media continues playing there. Among credible visible videos in
+the foreground document it selects the unique largest area; an exact tie is ambiguous. This is a
+visible-content rule rather than a playback-state rule, which is why pause does not discard the
+selected border.
+
+Build and run the opt-in probe from the configured RelWithDebInfo tree:
+
+```powershell
+ninja -C cmake-build-relwithdebinfo video-dom-info
+cmake-build-relwithdebinfo/tools/video-dom-info.exe --all-scans --interval-ms 1000
+```
+
+Keep Chrome or Edge in the foreground during the measurement. The probe lists every exact video
+node, but marks a candidate only after two complete scans select the same document identity, video
+identity, and rectangle. Unrelated DOM churn is intentionally ignored. From the available,
+fully-contained videos whose area is at least 5% of the foreground browser client, it selects the
+unique largest visible rectangle; equal-area leaders remain ambiguous. Paused video needs no
+stale-identity exception: its same DOM node and rectangle should remain present in each fresh scan.
+Partial clipping, an incomplete or changing tree walk, a foreground change, and unexpected COM
+failures expose no initial candidate. After selection, the machine mode retains the selected
+document/video COM nodes for a cheap 100 ms exact-identity/geometry check. A transient incomplete
+full census cannot erase that independently revalidated cache. A foreground change or failed cache
+check invalidates immediately; unrelated object events request a coalesced audit without erasing a
+still-valid cached video, so dynamic controls and ads do not create a permanent rescan loop. A
+complete fallback audit runs every 15 seconds. Because audits are coalesced to at most one per three
+seconds, a newly appearing larger video can replace a still-valid old selection only after that
+bounded audit and semantic confirmation. This lag is acceptable for diagnostic evidence, but must
+be eliminated or explicitly handled before the rectangle gains rendering authority. Sunshine
+supervises the helper out of process, accepts only a strict versioned record with a fresh heartbeat,
+and kills/restarts a silent helper. The streaming path performs one atomic snapshot read and no COM,
+IPC wait, image readback, or allocation.
+
+With `diagnostics = enabled`, Host SBS clips at most one physical pixel of Chromium/DPI endpoint
+overflow, converts the physical screen rectangle to an identity-oriented single-output capture,
+and binds a causally-prior geometry run to one private matched color slot. The latest helper
+heartbeat may be newer than paused source content, but the exact HWND/process/document/video/rect
+tuple must have remained continuously valid since no later than that content timestamp. Any status,
+identity, or one-pixel rectangle change starts a new run. DDup uses `LastPresentTime`, never a later
+cursor-only timestamp. The host also rechecks foreground HWND and PID immediately before binding.
+Dump 3D records that frame-bound border and the
+observer/mapping failure reason when unavailable. This is bounded-fresh diagnostic attribution,
+not proof of simultaneous compositor geometry: WinEvent delivery can lag briefly. Failure continues
+ordinary full-frame V2, and the border does not crop DAV2 or alter the renderer.
+
+The matched-frame diagnostic currently authorizes only Desktop Duplication. WGC has no
+`LastPresentTime` equivalent for separating content from cursor-only compositor frames and therefore
+fails closed to no border.
+
+A paused page captured before the first valid geometry run still has no matched-frame border. The
+host waits for a real `LastPresentTime`; once the geometry predates a presented content frame,
+later identical heartbeats retain the border through pause without letting cursor updates or a new
+rectangle retroactively authorize older desktop pixels.
+
+Chromium's IA2 rectangle is still a semantic element box, not proof that every pixel is visible:
+CSS clipping/occlusion, canvas or WebGL players, protected content, and disabled accessibility can
+all defeat it. Reading extended IA2 attributes enables Chromium's richer accessibility
+serialization process-wide, so browser CPU and memory overhead remain part of live qualification.
+
+NVIDIA RTX Video does not provide an alternate public discovery API. Chromium already owns the
+decoded texture and content rectangle and explicitly enables NVIDIA processing on that D3D11 video
+stream. The driver is therefore receiving identified application-owned video, not discovering an
+external DOM rectangle that Sunshine can query.
 
 **The hard part is not detection.**
 
 - **Stereo window and frame violation.** Warping a sub-rectangle makes its border a stereo window.
-  Content inside with negative parallax that is cut by that border produces contradictory occlusion
+  Content inside with crossed, in-front-of-screen disparity that is cut by that border produces contradictory occlusion
   and disparity cues. The floating-window treatment that is currently deferred for the full-screen
   case becomes **mandatory** here. The cheaper alternative is biasing the ROI's zero plane so all its
   content sits at or behind the screen plane.
@@ -439,10 +493,10 @@ black in Desktop Duplication. The pixels are not obtainable, so no amount of det
 conversion work there. YouTube, local files, and most non-DRM streams are fine. Say so in the UI
 before a user discovers it.
 
-**Probe status.** Phase 0.1 now instruments `GetFrameDirtyRects` without changing rendering. It
-reports two-second dirty-area summaries and a persistent 32x18 activity-grid bounding box. The next
-step is the live static/windowed/full-screen capture described in the evaluation section; no ROI
-design is authorized until those logs show stable spatial concentration.
+**Status.** The dirty-region detector is retired. IA2 helper supervision, largest-video selection,
+one-pixel endpoint tolerance, screen-to-capture validation, matched-frame attribution, transition
+logging, and optional Dump 3D border evidence are implemented. Cropping and border-sensitive
+rendering remain unimplemented until the stereo-window policy is measured and chosen.
 
 ---
 
@@ -577,63 +631,38 @@ the critical path, but only the cursor-only case is initially strong enough to s
 The ordering is driven by three things: fix defects before adding features, build shared
 infrastructure before its consumers, and put cheap de-risking probes before expensive design.
 
-### Phase 0 — Probes and gates (do these first; both are cheap)
+### Phase 0 — Probes and gates
 
 | # | Item | Why first |
 |---|---|---|
-| 0.1 | **Completed:** dirty-rect instrumentation probe (part of [W6](#w6-video-roi-detection)) | Diagnostics-only, no rendering change. Two-second windows report dirty area and a 32x18 persistent-activity bounding box. Live evidence now decides whether DDup metadata is useful on the target driver. |
-| 0.2 | Subtitled synthetic clips and the two new metrics ([W2a](#w2a-burned-in-subtitles--zero-parallax-mask)) | Repo process requires measuring before changing. Without a gate there is no way to demonstrate the subtitle mask works. Build the CJK and bilingual-stacked variants here, since they are the real content. |
+| 0.1 | **Completed and retired:** dirty-rectangle investigation (part of [W6](#w6-video-roi-detection)) | It proved that DDup damage can resemble a video rectangle, then disproved it as semantic authority on pause, partial updates, and dynamic pages. The probe/tracker code was removed. |
+| 0.2 | **Implemented:** Chromium IA2 video-border attribution | The isolated helper selects the largest visible `<video>`, survives pause, fails closed on ambiguity, and publishes no COM work onto streaming threads. With diagnostics enabled, Host SBS validates causal ordering and binds the observation to one matched frame for logs and Dump 3D only. |
+| 0.3 | Subtitled synthetic clips and the two new metrics ([W2a](#w2a-burned-in-subtitles--zero-parallax-mask)) | Repo process requires measuring before changing. Without a gate there is no way to demonstrate the subtitle mask works. Build the CJK and bilingual-stacked variants here, since they are the real content. |
 
-#### Evaluate the completed dirty-rectangle probe
+#### Evaluate W6 border attribution
 
-The probe is deliberately inactive in normal production. In `sunshine.conf`, use:
+Set `diagnostics = enabled`, use the Desktop Duplication capture backend, and start Host SBS with
+Edge or Chrome in the foreground. Test one main video plus smaller previews, pause/resume,
+local-only pixel updates, dynamic sidebars, maximise/restore, browser zoom, and a negative-coordinate
+monitor. The host log should publish only transitions for a validated half-open
+capture rectangle. A Dump 3D taken after a lock should contain `window_video_border.json` with the
+same matched frame ID as its source, raw depth, final parallax, and SBS artifacts. Fullscreen endpoint
+rounding of at most one physical pixel is clipped; a larger overflow, partial clipping, stale helper
+heartbeat, window move, or equal largest videos must expose no border. An incomplete walk cannot
+create or replace a border; it may only preserve a previously selected object that still passes the
+independent exact cached-object check. In every rejected case live output remains ordinary
+full-frame V2.
 
-```ini
-diagnostics = enabled
-min_log_level = debug
-```
-
-Use the Desktop Duplication capture backend, start Host SBS, and collect at least three 10–20 second
-segments: a static browser page, a windowed playing video, and the same video full-screen. Search
-`sunshine.log` for `Desktop Duplication dirty-rect probe`.
-
-Important fields:
-
-- `window_frames=0` is the expected static-desktop result; it is not a missing sample.
-- `failures=0` indicates that no probe operation failed in that interval.
-- `coalesced_pct` shows how often Windows merged dirty regions; high values can include unchanged
-  pixels and weaken spatial conclusions.
-- `dirty_area_mean_pct` and `dirty_area_max_pct` show how much of the surface Windows marks.
-- `activity_peak_hits` and `activity_peak_frame_pct` report the most-active tile's cadence. The
-  percentage can be below 75% when video cadence is lower than desktop presentation cadence.
-- `persistent_threshold_of_peak_pct` records the configured 75% ratio, and
-  `persistent_threshold_hits` is that fraction of `activity_peak_hits`, rounded up.
-  `persistent_tiles_pct` selects grid tiles that reach this peak-relative threshold, so 24/30/60
-  FPS video is not rejected merely because the desktop presents at a higher rate.
-- `persistent_bbox=L:T-R:B` is the quantized bounding rectangle of those persistent tiles, in the
-  unrotated Desktop Duplication surface coordinates.
-- `protected_seen=1` means at least one presentation in the interval reported DRM masking, so the
-  interval cannot support content conclusions.
-
-A static interval should report `window_frames=0`; cursor-only acquisitions and capture timeouts close
-the two-second window without being treated as desktop damage.
-The dirty-rect route is promising only if the windowed-video bounding box stays close to the video
-rectangle and occupies substantially less than the full surface, while full-screen video expands
-predictably. A full-surface, empty, or rapidly jumping box means dirty metadata is not a sufficient
-ROI detector on that driver. This first probe intentionally does not aggregate `GetFrameMoveRects`;
-scrolling is therefore diagnostic only and is not a pass/fail case yet.
-
-The 75% threshold is relative to the most-active tile, not to all acquired presentations. Read it
-alongside `activity_peak_hits`: a one-shot update has a peak of one and is not evidence of persistent
-video, while a small animation running faster than the video can become the reference cadence. The
-probe intentionally exposes those cases rather than adding an unvalidated classifier.
+This gate checks attribution, not image quality. Before the border can alter rendering, evaluate the
+final parallax at both lateral video edges and choose an explicit floating-window or behind-screen
+policy. Flattening outside the rectangle without that policy is not permitted.
 
 ### Phase 1 — The overlay compositing framework
 
 | # | Item | Why here |
 |---|---|---|
 | 1.1 | [W1 — cursor after the warp](#w1-composite-the-cursor-after-the-warp-candidate-defect) | Medium cross-backend change: first create an independent WGC cursor layer, then build the post-warp compositor. |
-| 1.2 | [W2a — subtitle zero-parallax mask](#w2a-burned-in-subtitles--zero-parallax-mask) | Reuses 1.1's compositing stage and its mask plumbing. Gated by 0.2. Ship the offline scene-buffered detector first; the live causal detector can follow. |
+| 1.2 | [W2a — subtitle zero-parallax mask](#w2a-burned-in-subtitles--zero-parallax-mask) | Reuses 1.1's compositing stage and its mask plumbing. Gated by 0.3. Ship the offline scene-buffered detector first; the live causal detector can follow. |
 | 1.3 | [W3 — masks in scene-cut evidence (deferred)](#w3-overlay-masks-in-scene-cut-evidence-deferred) | No geometry change is scheduled. Reuse the masks from 1.1/1.2 only if authenticated traces prove false cut evidence. |
 | 1.4 | [W12 — foreground/media classifier](#w12-foreground-process-and-media-state-classifier) | Evidence source only; it may choose a validated route but may not silently change V2 strength. |
 | 1.5 | [W13 — damage-guided depth reuse](#w13-damage-guided-depth-reuse-new-review-addition) | Start only with cursor-only reuse after W1. Broader reuse remains gated on move metadata and independent damage classification. |
@@ -644,7 +673,7 @@ probe intentionally exposes those cases rather than adding an unvalidated classi
 |---|---|---|
 | 2.1 | [W4 — window model](#w4-a-window-model-from-win32-and-dwm) | Enabling infrastructure for everything below. No user-visible effect alone. |
 | 2.2 | [W5 — authored window planes](#w5-window-z-order-as-authored-desktop-planes) | Potentially high value, but only behind a high-precision desktop/content classifier. Needs 2.1. |
-| 2.3 | [W6 — video ROI](#w6-video-roi-detection) | Needs 2.1 for window bounds and drag events, 0.1 for its detection route, and Phase 1's feathering discipline. Combines with 2.2 into the hybrid desktop mode. |
+| 2.3 | [W6 — video ROI](#w6-video-roi-detection) | Semantic border attribution is complete. A rendering ROI still needs 2.1's complete window model plus a qualified stereo-window/floating-window policy; detection alone does not authorize cropping. |
 | 2.4 | [W7 — AR transparency](#w7-local-ar-transparency-from-window-geometry) | Nearly free once 2.1 and 2.2 exist. |
 
 ### Phase 3 — Larger bets, in decreasing confidence
@@ -675,9 +704,10 @@ These were identified during analysis but not confirmed against code. Verify bef
    the priority of the disposition guard in [W2](#w2-subtitles-burned-into-the-picture). If such
    sources are rare, the guard is a one-line precaution; if they are common, a user will hit the
    broken auto-rendered overlay early.
-3. **Do Desktop Duplication dirty rectangles behave usefully when video is in a hardware overlay** on
-   the target RTX 5080 driver? Phase 0.1 now emits the required two-second summaries; the live
-   windowed/full-screen measurement is the remaining answer.
+3. **How broadly does Chromium IA2 video geometry work in practice?** The target Edge pages produced
+   stable playing, paused, multi-video, maximise, and restore rectangles, but canvas/WebGL players,
+   CSS occlusion, accessibility policy, iframe structure, and browser overhead still need a larger
+   qualification set. Every miss must remain a no-border/full-frame result.
 4. **What is the exact SBS packing order and coordinate convention in the current V2 renderer?**
    Any per-eye compositing work (W1, W2, W8) needs this exactly right, and it must be read from the
    current shaders rather than assumed from older documentation.
@@ -688,16 +718,22 @@ These were identified during analysis but not confirmed against code. Verify bef
 
 ## Verified code locations referenced here
 
-Every location below was confirmed against the current working tree on August 6, 2026.
+Every location below was confirmed against the current working tree on August 7, 2026.
 
 | Location | What it shows |
 |---|---|
-| [display_vram.cpp:513](../src/platform/windows/display_vram.cpp:513) | `convert()` — where the SBS depth pipeline runs |
-| [display_vram.cpp:4241](../src/platform/windows/display_vram.cpp:4241) | `display_ddup_vram_t::snapshot()` — capture, and where the cursor is blended |
-| [display_vram.cpp:4294](../src/platform/windows/display_vram.cpp:4294) | `blend_mouse_cursor_flag` |
-| [display_vram.cpp:4539](../src/platform/windows/display_vram.cpp:4539) | cursor VS/PS bind and `blend_alpha` — the pre-warp blend (W1) |
-| [display_vram.cpp:4749](../src/platform/windows/display_vram.cpp:4749) | `display_wgc_vram_t::snapshot()` — the second capture backend |
-| [display_base.cpp:542](../src/platform/windows/display_base.cpp:542) | `duplication_t::next_frame()` reads and summarizes `GetFrameDirtyRects` when diagnostics/debug logging are enabled (Phase 0.1/W6) |
+| [display_vram.cpp:514](../src/platform/windows/display_vram.cpp:514) | `convert()` — where the SBS depth pipeline runs |
+| [display_vram.cpp:4456](../src/platform/windows/display_vram.cpp:4456) | `display_ddup_vram_t::snapshot()` — capture, and where the cursor is blended |
+| [display_vram.cpp:4518](../src/platform/windows/display_vram.cpp:4518) | `blend_mouse_cursor_flag` |
+| [display_vram.cpp:4813](../src/platform/windows/display_vram.cpp:4813) | cursor blend state — the pre-warp blend (W1) |
+| [display_vram.cpp:4975](../src/platform/windows/display_vram.cpp:4975) | `display_wgc_vram_t::snapshot()` — the second capture backend |
+| [video_dom_probe/main.cpp:425](../tools/video_dom_probe/main.cpp:425) | bounded Chromium IA2 tree scan and exact `tag:video` discovery |
+| [video_dom_probe/main.cpp:1249](../tools/video_dom_probe/main.cpp:1249) | cached machine-mode validation, coalesced WinEvent audits, and strict heartbeat protocol |
+| [video_dom_client.cpp:317](../src/platform/windows/video_dom_client.cpp:317) | supervised unelevated helper lifecycle and atomic host snapshots |
+| [video_dom_client.cpp:668](../src/platform/windows/video_dom_client.cpp:668) | one-pixel-tolerant physical-screen to capture mapping |
+| [display_vram.cpp:1810](../src/platform/windows/display_vram.cpp:1810) | matched color slot owns its optional video border identity |
+| [display_vram.cpp:1910](../src/platform/windows/display_vram.cpp:1910) | causally-prior helper geometry is validated and bound to the matched frame |
+| [sbs_debug_dump.cpp:2107](../src/platform/windows/sbs_debug_dump.cpp:2107) | Dump 3D fails closed on stale or mismatched optional border evidence |
 | [display_wgc.cpp:140](../src/platform/windows/display_wgc.cpp:140) | WGC uses `CreateForMonitor` only; `CreateForWindow` unused (W9) |
 | [nvenc_base.cpp:363](../src/nvenc/nvenc_base.cpp:363) | lookahead explicitly disabled |
 | [nvenc_base.cpp:369](../src/nvenc/nvenc_base.cpp:369) | `enableAQ` is the only adaptive quantisation; no QP map (W8) |

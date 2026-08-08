@@ -359,6 +359,9 @@ namespace platf {
     std::int32_t row_pitch {};
 
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
+    // Timestamp of the captured desktop/content pixels, excluding cursor-only updates. Capture
+    // backends that cannot distinguish the two may leave this empty or equal to frame_timestamp.
+    std::optional<std::chrono::steady_clock::time_point> content_timestamp;
 
     virtual ~img_t() = default;
   };

@@ -408,6 +408,67 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             json.dumps(manifest), encoding="utf-8")
         return manifest, fields
 
+    @staticmethod
+    def _advertise_window_video_border(root, manifest, *, available=True):
+        manifest["matched_frame_id"] = 41
+        manifest["dimensions"]["source"] = {
+            "width": 1920,
+            "height": 1080,
+            "format": "DXGI_FORMAT_B8G8R8A8_UNORM",
+            "format_value": 87,
+        }
+        manifest["window_video_border"] = {
+            "available": available,
+            "artifact": "window_video_border.json" if available else None,
+            "observer_status": "ok" if available else "no-video",
+            "mapping_status": "ok" if available else "invalid-video-rect",
+            "geometry_authority": False,
+            "renderer_authority": False,
+        }
+        manifest["artifacts"]["window_video_border.json"] = {
+            "available": available,
+            "required": False,
+            "stage": "matched-frame window-video border",
+            "description": "diagnostic test artifact",
+        }
+        border = {
+            "schema": dump_contract.WINDOW_VIDEO_BORDER_SCHEMA,
+            "capture":
+                "same matched source/color/depth/render frame as the parent Dump 3D package",
+            "role":
+                "diagnostic-only window-video border evidence; no geometry or renderer authority",
+            "matched_frame_id": 41,
+            "coordinate_space": {
+                "name": "matched-source-pixels",
+                "rect_semantics": "half-open [left, top, right, bottom)",
+                "source_extent_px": {"width": 1920, "height": 1080},
+                "capture_rect_px": {
+                    "left": 160, "top": 90, "right": 1760, "bottom": 990,
+                },
+            },
+            "identity": {
+                "hwnd": "0x1234",
+                "process_id": 55,
+                "document_id": -7,
+                "video_id": -9,
+                "generation": 3,
+            },
+            "freshness": {
+                "latest_heartbeat_age_ms_at_capture": 120,
+                "maximum_heartbeat_age_ms": 1000,
+                "geometry_continuity_ms_at_capture": 5000,
+                "source_content_age_ms_at_capture": 1000,
+                "fresh": True,
+                "causal_geometry": True,
+            },
+        }
+        if available:
+            (root / "window_video_border.json").write_text(
+                json.dumps(border), encoding="utf-8")
+        (root / "dump_manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8")
+        return border
+
     def test_geometry_verifier_accepts_consistent_chain(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -415,6 +476,94 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             summary = dump_contract.verify_v2_dump_geometry(root)
             self.assertEqual(summary["width"], 16)
             self.assertEqual(summary["height"], 12)
+            self.assertFalse(summary["window_video_border_verified"])
+
+    def test_geometry_verifier_cross_validates_advertised_window_video_border(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, _ = self._write_synthetic_geometry_dump(root)
+            self._advertise_window_video_border(root, manifest)
+            summary = dump_contract.verify_v2_dump_geometry(root)
+            self.assertTrue(summary["window_video_border_verified"])
+            self.assertEqual(summary["window_video_border"]["matched_frame_id"], 41)
+            self.assertEqual(summary["window_video_border"]["right"], 1760)
+
+    def test_geometry_verifier_rejects_missing_malformed_and_mismatched_border(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, _ = self._write_synthetic_geometry_dump(root)
+            border = self._advertise_window_video_border(root, manifest)
+
+            (root / "window_video_border.json").unlink()
+            with self.assertRaisesRegex(ValueError, "missing or malformed"):
+                dump_contract.verify_v2_dump_geometry(root)
+
+            (root / "window_video_border.json").write_text("{", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "missing or malformed"):
+                dump_contract.verify_v2_dump_geometry(root)
+
+            changed = copy.deepcopy(border)
+            changed["matched_frame_id"] = 42
+            (root / "window_video_border.json").write_text(
+                json.dumps(changed), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "parent frame"):
+                dump_contract.verify_v2_dump_geometry(root)
+
+            changed = copy.deepcopy(border)
+            changed["coordinate_space"]["source_extent_px"]["width"] = 1919
+            (root / "window_video_border.json").write_text(
+                json.dumps(changed), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "source extent"):
+                dump_contract.verify_v2_dump_geometry(root)
+
+    def test_unavailable_window_video_border_has_no_package_authority(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, _ = self._write_synthetic_geometry_dump(root)
+            self._advertise_window_video_border(root, manifest, available=False)
+            # An unadvertised leftover is intentionally ignored: only the atomic manifest grants
+            # diagnostic-package authority to this optional artifact.
+            (root / "window_video_border.json").write_text("{", encoding="utf-8")
+            summary = dump_contract.verify_v2_dump_geometry(root)
+            self.assertFalse(summary["window_video_border_verified"])
+            self.assertIsNone(summary["window_video_border"])
+
+    def test_manifest_rejects_inconsistent_window_video_border_advertisement(self):
+        changed = copy.deepcopy(self.manifest)
+        changed["window_video_border"] = {
+            "available": True,
+            "artifact": "window_video_border.json",
+            "observer_status": "ok",
+            "mapping_status": "ok",
+            "geometry_authority": False,
+            "renderer_authority": False,
+        }
+        changed["artifacts"]["window_video_border.json"] = {
+            "available": False,
+            "required": False,
+            "stage": "matched-frame window-video border",
+            "description": "diagnostic test artifact",
+        }
+        with self.assertRaisesRegex(ValueError, "inconsistent window-video border"):
+            dump_contract.validate_v2_dump_manifest_document(changed)
+
+        changed = copy.deepcopy(self.manifest)
+        changed["window_video_border"] = {
+            "available": True,
+            "artifact": "window_video_border.json",
+            "observer_status": "stale",
+            "mapping_status": "ok",
+            "geometry_authority": False,
+            "renderer_authority": False,
+        }
+        changed["artifacts"]["window_video_border.json"] = {
+            "available": True,
+            "required": False,
+            "stage": "matched-frame window-video border",
+            "description": "diagnostic test artifact",
+        }
+        with self.assertRaisesRegex(ValueError, "inconsistent window-video border"):
+            dump_contract.validate_v2_dump_manifest_document(changed)
 
     def test_geometry_verifier_rejects_content_and_chain_tampering(self):
         import hashlib
@@ -852,6 +1001,84 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         })
         with self.assertRaisesRegex(ValueError, "canonical zero"):
             dump_contract.validate_shadow_frame_stats_document(changed)
+
+
+class WindowVideoBorderDumpContractTests(unittest.TestCase):
+    def setUp(self):
+        self.border = {
+            "schema": dump_contract.WINDOW_VIDEO_BORDER_SCHEMA,
+            "capture":
+                "same matched source/color/depth/render frame as the parent Dump 3D package",
+            "role":
+                "diagnostic-only window-video border evidence; no geometry or renderer authority",
+            "matched_frame_id": 41,
+            "coordinate_space": {
+                "name": "matched-source-pixels",
+                "rect_semantics": "half-open [left, top, right, bottom)",
+                "source_extent_px": {"width": 3840, "height": 2160},
+                "capture_rect_px": {
+                    "left": 320, "top": 180, "right": 3520, "bottom": 1980,
+                },
+            },
+            "identity": {
+                "hwnd": "0x1234",
+                "process_id": 55,
+                "document_id": -7,
+                "video_id": -9,
+                "generation": 3,
+            },
+            "freshness": {
+                "latest_heartbeat_age_ms_at_capture": 120,
+                "maximum_heartbeat_age_ms": 1000,
+                "geometry_continuity_ms_at_capture": 5000,
+                "source_content_age_ms_at_capture": 1000,
+                "fresh": True,
+                "causal_geometry": True,
+            },
+        }
+
+    def test_valid_border_is_bound_to_parent_frame_and_source_extent(self):
+        decoded = dump_contract.validate_window_video_border_document(
+            self.border, matched_frame_id=41, source_width=3840, source_height=2160)
+        self.assertEqual(decoded["left"], 320)
+        self.assertEqual(decoded["right"], 3520)
+        self.assertEqual(decoded["hwnd"], 0x1234)
+
+    def test_frame_extent_and_half_open_bounds_fail_closed(self):
+        with self.assertRaisesRegex(ValueError, "parent frame"):
+            dump_contract.validate_window_video_border_document(
+                self.border, matched_frame_id=40, source_width=3840, source_height=2160)
+        with self.assertRaisesRegex(ValueError, "source extent"):
+            dump_contract.validate_window_video_border_document(
+                self.border, matched_frame_id=41, source_width=1920, source_height=1080)
+        changed = copy.deepcopy(self.border)
+        changed["coordinate_space"]["capture_rect_px"]["right"] = 3841
+        with self.assertRaisesRegex(ValueError, "out of bounds"):
+            dump_contract.validate_window_video_border_document(changed)
+
+    def test_stale_or_incomplete_identity_fails_closed(self):
+        changed = copy.deepcopy(self.border)
+        changed["identity"]["video_id"] = 0
+        with self.assertRaisesRegex(ValueError, "incomplete identity"):
+            dump_contract.validate_window_video_border_document(changed)
+        changed = copy.deepcopy(self.border)
+        changed["freshness"]["latest_heartbeat_age_ms_at_capture"] = 1001
+        with self.assertRaisesRegex(ValueError, "stale"):
+            dump_contract.validate_window_video_border_document(changed)
+        changed = copy.deepcopy(self.border)
+        changed["freshness"]["geometry_continuity_ms_at_capture"] = 999
+        with self.assertRaisesRegex(ValueError, "postdates"):
+            dump_contract.validate_window_video_border_document(changed)
+
+    def test_unknown_fields_and_authority_claims_are_rejected(self):
+        changed = copy.deepcopy(self.border)
+        changed["normalized_rect"] = [0.0, 0.0, 1.0, 1.0]
+        with self.assertRaisesRegex(ValueError, "unknown layout"):
+            dump_contract.validate_window_video_border_document(changed)
+        changed = copy.deepcopy(self.border)
+        changed["role"] = "renderer authority"
+        with self.assertRaisesRegex(ValueError, "unknown authority"):
+            dump_contract.validate_window_video_border_document(changed)
 
 
 if __name__ == "__main__":

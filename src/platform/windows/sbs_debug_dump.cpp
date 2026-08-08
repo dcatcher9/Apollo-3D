@@ -1626,6 +1626,48 @@ namespace platf::sbs_debug {
       return descriptor;
     }
 
+    nlohmann::json window_video_border_document(
+      const window_video_border_snapshot &border
+    ) {
+      std::ostringstream hwnd;
+      hwnd << "0x" << std::hex << std::uppercase << border.hwnd;
+      return {
+        {"schema", window_video_border_schema},
+        {"capture", "same matched source/color/depth/render frame as the parent Dump 3D package"},
+        {"role", "diagnostic-only window-video border evidence; no geometry or renderer authority"},
+        {"matched_frame_id", border.matched_frame_id},
+        {"coordinate_space", {
+          {"name", "matched-source-pixels"},
+          {"rect_semantics", "half-open [left, top, right, bottom)"},
+          {"source_extent_px", {
+            {"width", border.source_width},
+            {"height", border.source_height},
+          }},
+          {"capture_rect_px", {
+            {"left", border.left},
+            {"top", border.top},
+            {"right", border.right},
+            {"bottom", border.bottom},
+          }},
+        }},
+        {"identity", {
+          {"hwnd", hwnd.str()},
+          {"process_id", border.process_id},
+          {"document_id", border.document_id},
+          {"video_id", border.video_id},
+          {"generation", border.generation},
+        }},
+        {"freshness", {
+          {"latest_heartbeat_age_ms_at_capture", border.latest_heartbeat_age_ms_at_capture},
+          {"maximum_heartbeat_age_ms", border.maximum_heartbeat_age_ms},
+          {"geometry_continuity_ms_at_capture", border.geometry_continuity_ms_at_capture},
+          {"source_content_age_ms_at_capture", border.source_content_age_ms_at_capture},
+          {"fresh", true},
+          {"causal_geometry", true},
+        }},
+      };
+    }
+
     std::string timestamp_string() {
       char text[32] = "unknown";
       const std::time_t now = std::time(nullptr);
@@ -2065,6 +2107,30 @@ namespace platf::sbs_debug {
         ) {
           break;
         }
+        bool window_video_border_available = false;
+        if (completed.window_video_border) {
+          const auto validation = validate_window_video_border(
+            *completed.window_video_border,
+            completed.matched_frame_id,
+            source.desc.Width,
+            source.desc.Height
+          );
+          if (validation == window_video_border_error::none) {
+            window_video_border_available = write_json(
+              paths.temporary / "window_video_border.json",
+              window_video_border_document(*completed.window_video_border)
+            );
+            if (!window_video_border_available) {
+              BOOST_LOG(warning)
+                << "SBS debug dump: optional matched-frame window-video border could not be written; continuing without it."sv;
+            }
+          } else {
+            BOOST_LOG(warning)
+              << "SBS debug dump: optional window-video border rejected ("sv
+              << window_video_border_error_name(validation)
+              << "); continuing without it."sv;
+          }
+        }
         const std::uint32_t eye_width = sbs.desc.Width / 2u;
         const std::uint32_t eye_height = sbs.desc.Height;
         const float source_aspect =
@@ -2189,6 +2255,12 @@ namespace platf::sbs_debug {
           adaptive_available ?
             "Comparison-only cut flags, counters, and normalization state; no live V2 geometry authority." :
             "Unavailable; scene-cut bridge evidence never gates an authenticated live V2 dump."
+        );
+        artifacts["window_video_border.json"] = artifact_description(
+          window_video_border_available,
+          false,
+          "matched-frame window-video border",
+          "Validated half-open capture rectangle, source extent, IA2 identity, and freshness; diagnostic only and never renderer authority."
         );
         artifacts["shadow_coordinate.f32"] = hashed_artifact_description(
           true,
@@ -2535,6 +2607,15 @@ namespace platf::sbs_debug {
                                    }},
           {"adaptive_summary", adaptive_available ? adaptive["decoded"] :
                                                      nlohmann::json {nullptr}},
+          {"window_video_border", {
+            {"available", window_video_border_available},
+            {"artifact", window_video_border_available ?
+              nlohmann::json("window_video_border.json") : nlohmann::json(nullptr)},
+            {"observer_status", completed.window_video_observer_status},
+            {"mapping_status", completed.window_video_mapping_status},
+            {"geometry_authority", false},
+            {"renderer_authority", false},
+          }},
           {"parallax_v2_shadow", {
                                     {"requested", false},
                                     {"active", true},
@@ -2606,6 +2687,12 @@ namespace platf::sbs_debug {
              << '\n'
              << "warp_mask_available=" << (warp_mask_available ? "true" : "false")
              << '\n'
+             << "window_video_border_available="
+             << (window_video_border_available ? "true" : "false") << '\n'
+             << "window_video_observer_status="
+             << completed.window_video_observer_status << '\n'
+             << "window_video_mapping_status="
+             << completed.window_video_mapping_status << '\n'
              << "parallax_v2_shadow_requested="
              << "false\n"
              << "parallax_v2_shadow_active=true\n"

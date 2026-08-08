@@ -3408,9 +3408,13 @@ namespace platf {
       QueryPerformanceFrequency(&frequency);
       return frequency.QuadPart;
     };
-    static const double frequency = get_frequency();
-    if (frequency) {
-      return std::chrono::nanoseconds((int64_t) ((performance_counter1 - performance_counter2) * frequency / std::nano::den));
+    static const std::int64_t frequency = get_frequency();
+    if (frequency > 0) {
+      const auto seconds = std::chrono::duration<long double> {
+        static_cast<long double>(performance_counter1 - performance_counter2) /
+        static_cast<long double>(frequency)
+      };
+      return std::chrono::duration_cast<std::chrono::nanoseconds>(seconds);
     }
     return {};
   }

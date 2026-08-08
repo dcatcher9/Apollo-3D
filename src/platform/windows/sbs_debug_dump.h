@@ -12,10 +12,12 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 
 // local includes
 #include "src/config.h"
+#include "sbs_debug_dump_border.h"
 
 namespace models {
   enum class input_color_space : std::uint32_t;
@@ -73,6 +75,10 @@ namespace platf::sbs_debug {
     int raw_width = 0;
     int raw_height = 0;
     std::uint64_t matched_frame_id = 0;
+    /** Optional, diagnostic-only browser-video border stamped onto matched_frame_id. */
+    std::optional<window_video_border_snapshot> window_video_border;
+    std::string window_video_observer_status = "not-observed";
+    std::string window_video_mapping_status = "not-mapped";
     bool cuda_graph_active = false;
     bool parallax_v2_producer_active = false;
     bool parallax_v2_render_selected = false;

@@ -596,6 +596,7 @@ namespace video {
           // trim allocated but unused portion of the pool based on timeouts
           trim_imgs();
           img_out->frame_timestamp.reset();
+          img_out->content_timestamp.reset();
           return true;
         } else {
           // sleep and retry if image pool is full

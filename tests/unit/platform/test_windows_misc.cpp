@@ -22,6 +22,23 @@
   #include <sddl.h>
 
 namespace {
+  TEST(WindowsQpcTimeTest, ConvertsPerformanceCounterTicksToNanoseconds) {
+    LARGE_INTEGER frequency {};
+    ASSERT_TRUE(QueryPerformanceFrequency(&frequency));
+    ASSERT_GT(frequency.QuadPart, 0);
+
+    EXPECT_NEAR(
+      platf::qpc_time_difference(frequency.QuadPart, 0).count(),
+      1'000'000'000LL,
+      1LL
+    );
+    EXPECT_NEAR(
+      platf::qpc_time_difference(0, frequency.QuadPart).count(),
+      -1'000'000'000LL,
+      1LL
+    );
+  }
+
   struct fake_token_job_launch_operations_t {
     bool assignment_succeeds = true;
     bool resume_succeeds = true;

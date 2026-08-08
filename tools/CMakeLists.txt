@@ -28,3 +28,19 @@ target_link_libraries(sunshinesvc
         wtsapi32
         ${PLATFORM_LIBRARIES})
 target_compile_options(sunshinesvc PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
+
+if(WIN32)
+    # Out-of-process Chromium IAccessible2 tag:video geometry helper. Keeping
+    # COM traversal outside Sunshine contains slow or hung providers.
+    add_executable(video-dom-info video_dom_probe/main.cpp)
+    set_target_properties(video-dom-info PROPERTIES CXX_STANDARD 23)
+    target_link_libraries(video-dom-info
+            dwmapi
+            ole32
+            oleacc
+            oleaut32
+            user32
+            uuid)
+    target_compile_options(video-dom-info PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
+    install(TARGETS video-dom-info RUNTIME DESTINATION "tools" COMPONENT application)
+endif()

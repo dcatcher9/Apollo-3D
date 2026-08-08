@@ -216,6 +216,50 @@ unbounded backlog; it continues with flat/current output according to the matche
 Telemetry readback is nonblocking and may drop samples under GPU load, while offline evaluation
 may intentionally block to obtain a complete trace.
 
+## Window-video border attribution
+
+With `diagnostics = enabled`, Windows Host SBS can bind a Chromium `<video>` element's physical
+screen rectangle observation to one matched color/depth frame. A supervised helper process obtains
+the semantic rectangle through
+Chromium's IAccessible2 tree; Sunshine never performs accessibility traversal or waits for the
+helper on the capture, inference, encode, or render thread. The host accepts only a fresh,
+identity-bearing result from the foreground Chrome or Edge document, maps the half-open rectangle
+to an identity-oriented single-output capture, and tolerates at most one physical pixel of browser
+endpoint rounding before clipping. Missing, stale, ambiguous, rotated, spanning, or mismatched
+geometry produces no border attribution.
+
+Selection targets what the user can see, not every media session on the machine. Only the
+foreground browser root is scanned; background browser windows and background tabs cannot
+authorize a rectangle. Within its visible document, the unique largest credible `<video>` is
+selected. Equal-largest candidates are ambiguous. Playback state is not required, so the same DOM
+identity and rectangle remain valid while the selected video is paused.
+
+This causal attribution is currently Desktop-Duplication-only. WGC does not expose an equivalent
+of `LastPresentTime` that separates desktop content from cursor-only compositor frames, so the
+window-video diagnostic abstains on WGC instead of claiming a false match.
+
+Immediately before attribution, the host also rechecks that the helper HWND still exists, remains
+the foreground root window, and still belongs to the reported process. This cheap Win32 guard
+closes the helper-heartbeat gap on Alt-Tab, close, and HWND reuse without putting COM on the stream.
+
+The border is diagnostic evidence, not a crop or geometry authority. It does not change DAV2 input,
+the scene camera, convergence, the final parallax field, or the live renderer. In particular, Host
+SBS does not flatten pixels outside the rectangle: doing so would turn the browser-video boundary
+into a new stereo window and could cut an in-front-of-screen surface at that boundary. A future
+windowed-video compositor must first define and qualify that stereo-window treatment.
+
+The host separately tracks the newest helper heartbeat and the beginning of the current exact
+`{HWND, process, document, video, rectangle}` run. The heartbeat must be fresh when the private
+matched color slot is created, while the uninterrupted geometry run must have begun no later than
+the source frame's content timestamp. Identical later heartbeats therefore preserve a video border
+through pause, but a changed identity or rectangle cannot be attached retroactively to older
+pixels. Desktop Duplication derives the content time from `LastPresentTime` only; a later
+cursor-only update cannot make old desktop pixels appear new. This proves causal ordering and
+bounded liveness, not simultaneous compositor geometry:
+WinEvent delivery can still lag the pixels by a short interval. Rendering and Dump 3D must never
+combine the latest browser rectangle with an older completed depth frame. If the helper becomes
+unavailable, the ordinary full-frame V2 path continues unchanged.
+
 ## Dump 3D and evaluation
 
 A current Dump 3D package records:
@@ -224,6 +268,8 @@ A current Dump 3D package records:
 - candidate, ownership-refined, vertical-envelope, and final parallax fields;
 - scene camera and cut attribution;
 - the exact inverse-warp map and finite-source mask; and
+- when available, the validated matched-frame window-video border and browser/document identity;
+  this optional artifact has no renderer authority; and
 - the rendered packed SBS image plus model, shader, state, color, and source provenance.
 
 Use `.f32` artifacts for quantitative comparisons. Independently stretched PNG previews can hide
@@ -244,6 +290,9 @@ plan live in [Host SBS scene cuts](host-sbs-scene-cuts.md).
   precision-first ownership pass abstains instead of risking a wrong snap.
 - Scene detection is inferred, not ground truth. Exposure, structureless frames, persistent motion,
   and rapid consecutive cuts require the separate guarded state machine.
+- Chromium accessibility exposes a semantic element box, not exact composited visibility. Canvas or
+  WebGL players, CSS clipping/occlusion, protected video, disabled accessibility, and non-Chromium
+  applications may provide no usable window-video border; Host SBS then remains full-frame.
 - Unsupported model or fitted-tensor setup is rejected before Host SBS starts. A bad per-frame
   shader/state/field identity renders that current frame flat rather than attempting a best-effort
   geometry fallback.
