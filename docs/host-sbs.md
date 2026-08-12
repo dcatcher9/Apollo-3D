@@ -13,8 +13,8 @@ conversion uses the same V2 geometry and is described in
 ```mermaid
 flowchart LR
     CAPTURE["Matched source frame"]
-    IA2["Foreground Chromium IA2 observation"]
-    MATCH["Exact matched-frame ROI selection"]
+    REGION["Chromium video or foreground-client observation"]
+    MATCH["Priority and exact matched-frame region selection"]
     DOMAIN["Full frame or authenticated inward-trimmed ROI"]
     PREPROCESS["HDR/SDR model preprocessing"]
     DAV2["Authenticated DAV2 Small inference"]
@@ -33,7 +33,7 @@ flowchart LR
     ENCODE["Packed SBS and NVENC"]
 
     CAPTURE --> MATCH --> DOMAIN --> PREPROCESS --> DAV2
-    IA2 -. optional authority .-> MATCH
+    REGION -. optional authority .-> MATCH
     DAV2 --> CUT --> CAMERA
     DAV2 --> CAMERA --> CURVE --> CONTAINER --> OWNER --> VERTICAL --> ROW --> PLANE --> INVERSE
     CAPTURE -. completed calibrated DAV2 observation .-> OCR --> LOCATOR
@@ -106,19 +106,21 @@ second resolution list.
 Portrait is an explicit `width < height` display mode. Host SBS does not rotate captured content;
 non-identity Windows display rotation is rejected before pipeline setup.
 
-The foreground-Chromium video route does not introduce another model shape. It keeps the current
-full-frame authenticated tensor shape and, only when necessary, trims the detected video rectangle
-inward by at most 2% of its area to match that shape's aspect ratio. It never expands the rectangle
-into browser chrome, pads the model input, or stretches video pixels. If that small inward fit cannot
-be proven, the frame uses ordinary full-frame V2.
+The window-region route does not introduce another model shape. It keeps the current full-frame
+authenticated tensor shape and, only when necessary, trims the selected Chromium-video or
+foreground-client rectangle inward by at most 2% of its area to match that shape's aspect ratio. It
+never expands the authority rectangle, pads the model input, or stretches source pixels. If that
+small inward fit cannot be proven, the frame uses ordinary full-frame V2.
 
-Authenticated true fullscreen is selected separately from the strict windowed-ROI candidate. The
+Chromium true fullscreen is selected separately from the strict semantic-video ROI candidate. The
 helper may recognize an available semantic `<video>` that covers the complete foreground browser
 client even when the element overscans that client, its owning document rectangle is clipped, or
 Chromium exposes multiple full-cover clones. The helper publishes the client rectangle as the
 fullscreen authority, and the host accepts that authority only when the client maps exactly to the
-capture extent. A maximized browser, an estimator full-source domain, or a failed windowed ROI does
-not prove fullscreen by itself. Once admitted, true fullscreen is canonical ordinary full-frame V2:
+capture extent. This semantic proof is distinct from the lower-priority generic foreground-client
+route. Any selected foreground client that independently equals the complete capture also
+canonicalizes to ordinary full-frame V2 rather than creating a redundant crop. Once admitted, either
+exact-full-capture case is canonical ordinary full-frame V2:
 it is not cropped or trimmed, does not enter a new ROI analysis domain, and does not require the ROI
 embedding branch. Dump 3D records it as the canonical full-source analysis domain.
 
@@ -149,12 +151,14 @@ scene center. This gives occupancy-weighted behavior without a discrete scene cl
 near object barely moves the center and retains relief, while a large near region naturally pulls
 the zero plane toward itself and is not boosted as an isolated object.
 
-For an authorized window-video ROI, extrema, mean, standard deviation, cut evidence, and all depth
-histories are computed from the cropped video analysis domain only. Browser chrome and the desktop
-surround do not pull the video's scene center. Entering or leaving ROI analysis, changing its
-identity or dimensions, or changing its input transfer domain resets the temporal and scene-camera
-state before the new domain is used. Translating the same ROI without changing its dimensions is
-not a new analysis domain, so an ordinary window move does not by itself reacquire the camera.
+For an authorized window-region ROI, extrema, mean, standard deviation, cut evidence, and all depth
+histories are computed from the cropped analysis domain only. Pixels outside the selected Chromium
+video or foreground client do not pull its scene center. Entering or leaving ROI analysis, changing
+its authority kind, identity or dimensions, or changing its input transfer domain resets the
+temporal and scene-camera state before the new domain is used. Chromium-video and foreground-client
+authority are distinct even if their rectangles happen to match. Translating the same ROI without
+changing its dimensions is not a new analysis domain, so an ordinary window move does not by itself
+reacquire the camera.
 
 ### OCR-box subtitle conditioner
 
@@ -354,8 +358,8 @@ There is no forward owner, multi-root visibility choice, inpaint pass, or synthe
 Only samples outside the finite source rectangle clamp to its nearest edge; the diagnostic mask
 reports that source-boundary condition rather than internal disocclusion.
 
-An ROI final-parallax texture remains local to the video analysis rectangle. Before the full-source
-inverse, the renderer converts that field to source-U units by multiplying it by
+An ROI final-parallax texture remains local to the selected window-region analysis rectangle. Before
+the full-source inverse, the renderer converts that field to source-U units by multiplying it by
 `ROI_width / source_width`; this preserves the intended pixel displacement rather than shrinking or
 amplifying it with the crop. The ROI interior is unchanged. Outside the rectangle, the renderer
 continues the signed boundary value only through the minimum collar permitted by the horizontal and
@@ -373,7 +377,7 @@ color. A confirmed cut invalidates the old camera; the next usable field acquire
 Model preparation, shader compilation, and the live renderer are fail-closed. Live shaders are
 compiled and cached at process startup. Dump-only resources are created lazily and cannot prevent a
 stream from starting. A failure in optional diagnostics has no rendering authority. An armed
-schema-27 dump preserves the selected path's same-frame authority resources with ordered D3D11
+schema-28 dump preserves the selected path's same-frame authority resources with ordered D3D11
 `CopyResource` operations;
 it adds no production GPU-to-CPU readback, flush, query wait, or synchronous Map. The explicit dump
 then uses the existing diagnostic readback path to publish files.
@@ -388,7 +392,27 @@ unbounded backlog; it continues with flat/current output according to the matche
 Telemetry readback is nonblocking and may drop samples under GPU load, while offline evaluation
 may intentionally block to obtain a complete trace.
 
-## Foreground Chromium window-video ROI
+## Foreground window-region ROI
+
+Windows Host SBS selects at most one optional analysis region for a matched Desktop Duplication
+frame. A causally authenticated Chromium `<video>` has first priority. When no Chromium video route
+is eligible, the root client rectangle of `GetForegroundWindow()` may authorize the same crop-local
+V2 path. This is geometric routing only: the generic route has no executable allowlist, media/game
+classifier, playback test, or occlusion reconstruction.
+
+The foreground observer resolves the top-level root, uses the client area rather than the title bar
+or DWM frame as the analysis rectangle, and validates its physical screen geometry under per-monitor
+DPI awareness. Screen rectangles are compared against raw
+`DXGI_OUTPUT_DESC::DesktopCoordinates`, including negative virtual-desktop origins, rather than a
+pointer-normalized offset. No rectangle is published for a null foreground, the shell or desktop,
+Sunshine's own window, an invalid/hidden/minimized/cloaked root, an excluded
+tool/no-activate/layered style, or invalid geometry. These cases select ordinary full-frame V2. A
+client must be wholly contained by the current identity-oriented capture output. A disjoint client
+on another monitor and a client that partially intersects or spans outputs both select full-frame
+V2; Host SBS never switches the capture monitor or crops the intersection. A client that exactly
+covers the capture canonicalizes to the ordinary full-source domain.
+
+### Chromium semantic source
 
 Windows Host SBS can bind a Chromium `<video>` observation to one matched color/depth frame. A
 supervised helper obtains semantic element and foreground-client rectangles through Chromium's
@@ -426,26 +450,27 @@ changes are hard vetoes, while unrelated descendant-object churn only requests a
 three-second audit. An uncached incomplete traversal retries within one second; confirmed
 accessibility unavailability retains the 15-second backoff.
 
-This causal attribution is currently Desktop-Duplication-only. WGC does not expose an equivalent
-of `LastPresentTime` that separates desktop content from cursor-only compositor frames, so WGC uses
-ordinary full-frame V2 instead of claiming a false match.
+Both authority sources are currently Desktop-Duplication-only. WGC does not expose an equivalent of
+`LastPresentTime` that separates desktop content from cursor-only compositor frames, so a missing
+content timestamp selects ordinary full-frame V2 instead of claiming a false match.
 
 Immediately before attribution, the host also rechecks that the helper HWND still exists, remains
 the foreground root window, and still belongs to the reported process. This cheap Win32 guard
 closes the helper-heartbeat gap on Alt-Tab, close, and HWND reuse without putting COM on the stream.
 
-After exact frame attribution, the host optionally trims the rectangle inward by at most 2% of its
-area to the current authenticated tensor aspect. A same-format D3D11 crop supplies both DAV2
+After exact frame attribution, the host optionally trims the selected rectangle inward by at most
+2% of its area to the current authenticated tensor aspect. A same-format D3D11 crop supplies both DAV2
 preprocessing and the full-resolution ownership pass; all cut, center, and history state is
 crop-local. The original full color texture remains the renderer source. The final ROI field is
 mapped back at its physical pixel scale, with the outside-only slope collar described above, and the
 desktop beyond that collar is exactly at zero parallax. Separately, the host grants the helper's
 true-fullscreen authority only when its foreground-client rectangle maps exactly to the capture;
-that case is canonical full-frame V2. A maximized window or full-source fallback without this
-semantic/client proof is not fullscreen authority. Missing, stale, ambiguous windowed selection,
-rotated, spanning, partially off-monitor, mismatched geometry, unsupported aspect fitting, or crop
-allocation failure selects ordinary full-frame V2 rather than a guessed ROI; an internal V2
-authentication failure remains fail-closed flat.
+that case is canonical full-frame V2. The generic foreground-client route follows the same
+canonicalization whenever its client rectangle equals the capture, without claiming Chromium
+semantic authority. Missing, stale or ambiguous selection, non-identity rotation, spanning,
+partially off-monitor, mismatched geometry, unsupported aspect fitting, or crop allocation failure
+selects ordinary full-frame V2 rather than a guessed ROI; an internal V2 authentication failure
+remains fail-closed flat.
 
 The host separately tracks the newest helper heartbeat and the beginning of the current exact
 `{HWND, process, document, video, rectangle}` run. The heartbeat must be fresh when the private
@@ -458,6 +483,17 @@ bounded liveness, not simultaneous compositor geometry: WinEvent delivery can st
 by a short interval. Rendering must never combine the latest browser rectangle with an older
 completed depth frame. If the helper becomes unavailable, the ordinary full-frame V2 path
 continues unchanged.
+
+The foreground-client observer applies the same causal rule without a helper heartbeat. It records
+the start of each uninterrupted exact `{HWND, process, client rectangle}` run. A newly focused,
+moved, or resized client cannot authorize content presented before that run began; the Desktop
+Duplication content timestamp must be at least as new as the run. The root and geometry must still
+be current when bound. This one-observation continuity gate prevents an Alt-Tab or window move from
+attaching new geometry to old pixels while avoiding a blocking drain or second capture. The current
+root/client is also sampled while inference is busy. Every ROI matched slot carries that exact live
+observation generation: focus, move, resize, desktop focus, and monitor changes revoke older pending
+completions and cached ROI output before warp or dump. A pure translation may reuse the DAV2 analysis
+history after a newly copied frame is authorized, but never the pre-move color/depth pair.
 
 ## Dump 3D and evaluation
 
@@ -481,10 +517,12 @@ in [the sbsbench guide](../tools/sbsbench/README.md).
   precision-first ownership pass abstains instead of risking a wrong snap.
 - Scene detection is inferred, not ground truth. Exposure, structureless frames, persistent motion,
   and rapid consecutive cuts require the separate guarded state machine.
-- The ROI route is foreground-Chromium-only. Chromium accessibility exposes a semantic element box,
-  not exact composited visibility. Canvas or WebGL players, protected video, disabled accessibility,
-  background tabs/windows, non-Chromium applications, and partially off-monitor video use
-  full-frame V2 when they provide no valid rectangle.
+- The ROI route uses at most one current-output region. Chromium accessibility exposes a semantic
+  element box, not exact composited visibility; when that route is unavailable, the generic
+  foreground-client route analyzes the whole client, including any captured application UI or
+  overlay. It does not classify applications or reconstruct pixels hidden by other windows. Shell,
+  desktop, invalid, stale, spanning, partially off-monitor, and background-window rectangles do not
+  authorize an ROI.
 - The automatic subtitle path accepts all six authenticated DAV2 fields (`770x434`, `1022x434`,
   `1036x434`, and their portrait transposes) and one coherent bottom stack of at most four line
   boxes. Any other fitted tensor copies ordinary V2. The

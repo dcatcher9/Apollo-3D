@@ -38,28 +38,31 @@ independently transformed channels.
 
 ### Analysis-domain ownership
 
-Ordinary V2 computes every item above from the full captured frame. When the foreground-Chromium
-video ROI is authorized for an exact matched frame, the same-format cropped video texture is the
-entire analysis domain: DAV2 input, normalized-depth comparison, appearance and ordinal evidence,
-scene center, baselines, and history all exclude browser chrome and the surrounding desktop. The
-full captured color texture remains available only to the final renderer.
+Ordinary V2 computes every item above from the full captured frame. When a window-region ROI is
+authorized for an exact matched frame, the same-format cropped texture is the entire analysis
+domain: DAV2 input, normalized-depth comparison, appearance and ordinal evidence, scene center,
+baselines, and history all exclude the surrounding desktop. A causally authenticated Chromium
+`<video>` has priority; otherwise a causally continuous foreground root client may provide the
+rectangle. The full captured color texture remains available only to the final renderer.
 
 Evidence from different domains must never be compared. Entering or leaving ROI mode, changing the
-authorized video identity or crop dimensions, or changing the input transfer domain clears cut
-history, baselines, pending confirmation, and the scene camera before analysis resumes. Translation
-of the same crop without a size change retains the analysis domain and its histories; the exact
-matched-frame rectangle still determines where that frame is rendered. A missing, stale,
-unsupported, or partially off-monitor ROI selects full-frame V2. That resets state when leaving an
+authority kind (`chromium_video` versus `foreground_client`), authorized identity or crop
+dimensions, or changing the input transfer domain clears cut history, baselines, pending
+confirmation, and the scene camera before analysis resumes. Translation of the same authority and
+same-sized crop retains the analysis domain and its histories; the exact matched-frame rectangle
+still determines where that frame is rendered. Translation nevertheless revokes any older
+positioned completion or cached ROI output; only a newly copied frame may reuse the retained
+histories. A missing, stale, unsupported, spanning,
+partially off-monitor, or other-monitor ROI selects full-frame V2. That resets state when leaving an
 active ROI, but repeated ineligible observations while already full-frame are not domain changes.
-Separately authenticated true fullscreen—an available semantic video covering the complete
-foreground browser client, with that client mapped exactly to the capture—is already the canonical
-full-frame domain: it creates no crop, ROI transition, history reset, or camera reacquisition. A
-maximized or otherwise full-source frame without that authority simply remains in the ordinary
-full-frame analysis domain; the bottom subtitle locator observes whichever domain V2 actually used.
-
-The helper labels relaxed full-client evidence `ok-fullscreen`, distinct from strict `ok` ROI
-evidence. The host rejects an `ok-fullscreen` subrectangle. Any real input-domain transition resets
-the subtitle locator together with the ordinary cut and camera histories.
+Any selected client rectangle that equals the complete capture is already the canonical full-frame
+domain: it creates no crop, ROI transition, history reset, or camera reacquisition. Chromium may
+reach that result through separate semantic fullscreen evidence; the generic foreground-client
+route reaches the same canonical result through exact geometry alone. The browser helper labels its
+relaxed full-client evidence `ok-fullscreen`, distinct from strict `ok` video-ROI evidence, and the
+host rejects an `ok-fullscreen` subrectangle. The bottom subtitle locator observes whichever domain
+V2 actually used. Any real input-domain transition resets the subtitle locator together with the
+ordinary cut and camera histories.
 
 The production subtitle path applies no overlay exclusion to cut evidence or DAV2. Subtitle
 appearance and disappearance remain ordinary scene evidence; the locator consumes the
@@ -229,9 +232,10 @@ The committed conformance clips must prove at least these contracts:
   evidence instead of emitting a synthetic cut;
 - a pure on-screen translation of the same-sized ROI retains the camera and cut histories while
   binding geometry to the new exact matched-frame rectangle;
-- an authenticated true-fullscreen client mapping remains in the ordinary full-frame domain without
-  a reset or camera reacquisition, while a merely maximized/full-source browser has no detector
-  authority;
+- any selected client that maps exactly to the capture remains in the ordinary full-frame domain
+  without a reset or camera reacquisition;
+- changing an ROI between Chromium-video and foreground-client authority clears detector lineage
+  even when its rectangle and dimensions match;
 - a stable lower OCR line stack acquires only after two compatible observations with distinct exact
   frame/domain identities; redispatching one record cannot self-confirm;
 - a hard cut clears pending/grace, preserves only same-frame rectangles that still overlap an old
@@ -265,12 +269,14 @@ Exercise each sequence for at least 20 seconds and finish with five seconds of a
     after the first.
 12. A structureless flash/slate that returns both to the original scene and to a different scene.
 13. A localized video/player replacement inside an otherwise stable desktop.
-14. Enter and leave the foreground-Chromium ROI route, including an unsupported-aspect fallback.
-15. Move a same-sized video window without changing its content, then resize it across an analysis
-    domain boundary.
-16. Enter semantic true fullscreen and verify that the foreground client maps exactly to the capture
-    and preserves ordinary full-frame continuity rather than creating an ROI transition; repeat with
-    only a maximized/full-source browser and verify no detector authority.
+14. Enter and leave both window-region ROI authorities, including Chromium priority and an
+    unsupported-aspect fallback.
+15. Move a same-sized foreground window without changing its content, then resize it across an
+    analysis-domain boundary and switch between Chromium-video and foreground-client authority.
+16. Enter both semantic Chromium fullscreen and generic exact-full-capture foreground-client routes;
+    verify that each preserves ordinary full-frame continuity rather than creating an ROI transition.
+    Repeat with desktop focus, a minimized window, a window on another monitor, and a spanning window;
+    each must remain ordinary full-frame V2 without switching the capture output.
 17. With no subtitle owner, land a cut and then an input-domain reset on an already-visible static
     subtitle; verify first-observation pending, second-distinct-observation acquisition, and exact
     Base on the pending frame.

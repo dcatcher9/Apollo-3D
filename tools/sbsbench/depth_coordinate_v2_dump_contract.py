@@ -20,7 +20,7 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     import generate_depth_coordinate_v2_contract as generator  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 27
+DUMP_MANIFEST_SCHEMA = 28
 SUBTITLE_OCR_RECORD_SCHEMA = coordinate_contract.SUBTITLE_OCR.record_schema
 SUBTITLE_OCR_RECORD_TAG = coordinate_contract.SUBTITLE_OCR.record_tag
 SUBTITLE_OCR_RECORD_WORD_COUNT = coordinate_contract.SUBTITLE_OCR.record_word_count
@@ -65,19 +65,9 @@ SUBTITLE_LOCATOR_EVENT_NONE = 0
 SUBTITLE_LOCATOR_EVENT_BIRTH = 1
 SUBTITLE_LOCATOR_EVENT_DEATH = 2
 SUBTITLE_LOCATOR_EVENT_HANDOFF = 3
-DEPTH_INPUT_REGION_SCHEMA = 1
-WINDOW_VIDEO_BORDER_SCHEMA = 2
-WINDOW_VIDEO_OBSERVER_STATUSES = frozenset({
-    "starting", "ok", "ok-fullscreen", "no-foreground", "unsupported", "unavailable",
-    "accessibility", "warming", "incomplete", "changed", "no-video",
-    "ambiguous", "helper-missing", "launch-failed", "helper-exited",
-    "protocol-error", "stale", "stopped",
-})
-_WINDOW_VIDEO_POSITIVE_OBSERVER_STATUSES = frozenset({"ok", "ok-fullscreen"})
-WINDOW_VIDEO_MAPPING_STATUSES = frozenset({
-    "ok", "invalid-video-rect", "invalid-capture-rect", "unsupported-rotation",
-    "extent-mismatch", "foreground-mismatch", "outside-capture",
-})
+DEPTH_INPUT_REGION_SCHEMA = 2
+WINDOW_REGION_SCHEMA = 1
+WINDOW_REGION_AUTHORITY_KINDS = frozenset({"chromium-video", "foreground-client"})
 SHADOW_STATE_DUMP_SCHEMA = 16
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 2
 LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
@@ -92,7 +82,7 @@ _STATE_FIELDS = tuple(_CONTRACT["shadow_state"]["fields"])
 _FRAME_STATS_FIELDS = tuple(_CONTRACT["frame_stats"]["fields"])
 _DEFAULTS = coordinate_contract.CALIBRATED_DEFAULTS
 _RESERVED_CALIBRATION_REVISION = 0xFFFFFFFF
-_MAXIMUM_VIDEO_REGION_TRIM_FRACTION = 0.02
+_MAXIMUM_WINDOW_REGION_TRIM_FRACTION = 0.02
 _ROI_EXTERIOR_ZERO_TOLERANCE_OUTPUT_EYE_PX = 0.005
 _PRODUCTION_DEPTH_SHORT_SIDE = 432
 _PRODUCTION_DEPTH_MAX_ASPECT = 4.0
@@ -820,7 +810,7 @@ def _fit_host_sbs_v2_depth_tensor_shape(width: int, height: int) -> tuple[int, i
     return patch, patch
 
 
-def _plan_host_sbs_v2_video_region(
+def _plan_host_sbs_v2_window_region(
         semantic: tuple[int, int, int, int], source_width: int, source_height: int,
         tensor_width: int, tensor_height: int
         ) -> tuple[tuple[int, int, int, int], float] | None:
@@ -857,7 +847,7 @@ def _plan_host_sbs_v2_video_region(
         return None
     trimmed_fraction = _float32(
         1.0 - (fitted_width * fitted_height) / (width * height))
-    if trimmed_fraction > _float32(_MAXIMUM_VIDEO_REGION_TRIM_FRACTION):
+    if trimmed_fraction > _float32(_MAXIMUM_WINDOW_REGION_TRIM_FRACTION):
         return None
     remove_x = width - fitted_width
     remove_y = height - fitted_height
@@ -923,7 +913,7 @@ def validate_depth_input_region_document(
     if frame_id == 0 or (matched_frame_id is not None and frame_id != matched_frame_id):
         raise ValueError("depth_input_region.json does not match the parent frame")
     mode = document.get("mode")
-    if mode not in {"full-source", "video-region"}:
+    if mode not in {"full-source", "window-region"}:
         raise ValueError("depth_input_region.json has an unknown analysis mode")
 
     coordinate = document.get("coordinate_space")
@@ -953,11 +943,16 @@ def validate_depth_input_region_document(
     authorization = None
     if authorization_value is not None:
         if not isinstance(authorization_value, dict) or set(authorization_value) != {
-                "observer_generation", "hwnd", "process_id", "document_id", "video_id"}:
+                "authority_kind", "observer_generation", "hwnd", "process_id",
+                "document_id", "video_id"}:
             raise ValueError("depth_input_region.json has an unknown authorization layout")
+        authority_kind = authorization_value.get("authority_kind")
+        if authority_kind not in WINDOW_REGION_AUTHORITY_KINDS:
+            raise ValueError("depth_input_region.json has an unknown authority kind")
         hwnd, hwnd_value = _canonical_hwnd(
             authorization_value.get("hwnd"), "depth input HWND")
         authorization = {
+            "authority_kind": authority_kind,
             "observer_generation": _uint64(
                 authorization_value.get("observer_generation"), "observer generation"),
             "hwnd": hwnd_value,
@@ -966,8 +961,15 @@ def validate_depth_input_region_document(
             "document_id": _int32(authorization_value.get("document_id"), "document id"),
             "video_id": _int32(authorization_value.get("video_id"), "video id"),
         }
-        if any(value == 0 for key, value in authorization.items() if key != "hwnd_text"):
+        if (authorization["observer_generation"] == 0 or authorization["hwnd"] == 0 or
+                authorization["process_id"] == 0):
             raise ValueError("depth_input_region.json has incomplete ROI authorization")
+        has_dom_identity = authorization["document_id"] != 0 and authorization["video_id"] != 0
+        if authority_kind == "chromium-video" and not has_dom_identity:
+            raise ValueError("depth_input_region.json has incomplete Chromium ROI authorization")
+        if authority_kind == "foreground-client" and (
+                authorization["document_id"] != 0 or authorization["video_id"] != 0):
+            raise ValueError("depth_input_region.json foreground authority carries DOM identity")
 
     analysis = document.get("analysis")
     if not isinstance(analysis, dict) or set(analysis) != {
@@ -1011,8 +1013,8 @@ def validate_depth_input_region_document(
     else:
         if (semantic is None or authorization is None or generation == 0 or
                 inference == (0, 0, width, height)):
-            raise ValueError("depth_input_region.json has incomplete video-region authority")
-        expected_plan = _plan_host_sbs_v2_video_region(
+            raise ValueError("depth_input_region.json has incomplete window-region authority")
+        expected_plan = _plan_host_sbs_v2_window_region(
             semantic, width, height, tensor_w, tensor_h)
         if expected_plan is None or expected_plan[0] != inference:
             raise ValueError(
@@ -1026,7 +1028,7 @@ def validate_depth_input_region_document(
                 analysis.get("scene_analysis_domain") != "inference-rectangle-only" or
                 renderer.get("final_parallax_units") != "roi-local-source-u" or
                 scale != expected_scale):
-            raise ValueError("depth_input_region.json has inconsistent video-region analysis")
+            raise ValueError("depth_input_region.json has inconsistent window-region analysis")
         outside = renderer.get("outside")
         if not isinstance(outside, dict) or set(outside) != {
                 "construction", "horizontal_slope_source_u_per_source_u",
@@ -1067,88 +1069,96 @@ def validate_depth_input_region_document(
     }
 
 
-def validate_window_video_border_document(
+def validate_window_region_document(
         document: Any, *, matched_frame_id: int | None = None,
         source_width: int | None = None, source_height: int | None = None) -> Dict[str, Any]:
-    """Validate optional, diagnostic-only matched-source video-border evidence."""
+    """Validate optional matched-source window-region provenance."""
 
     root_keys = {
-        "schema", "capture", "role", "matched_frame_id", "coordinate_space",
-        "identity", "freshness",
+        "schema", "capture", "role", "authority_kind", "matched_frame_id",
+        "coordinate_space", "identity", "freshness",
     }
     if not isinstance(document, dict) or set(document) != root_keys:
-        raise ValueError("window_video_border.json has an unknown layout")
-    if document.get("schema") != WINDOW_VIDEO_BORDER_SCHEMA:
-        raise ValueError("window_video_border.json has an unknown serialization schema")
+        raise ValueError("window_region.json has an unknown layout")
+    if document.get("schema") != WINDOW_REGION_SCHEMA:
+        raise ValueError("window_region.json has an unknown serialization schema")
     if document.get("capture") != (
             "same matched source/color/depth/render frame as the parent Dump 3D package"):
-        raise ValueError("window_video_border.json has unknown capture semantics")
+        raise ValueError("window_region.json has unknown capture semantics")
     if document.get("role") != (
-            "diagnostic-only window-video border evidence; no geometry or renderer authority"):
-        raise ValueError("window_video_border.json claims unknown authority")
+            "matched-window region provenance; no independent geometry or renderer authority"):
+        raise ValueError("window_region.json claims unknown authority")
+    authority_kind = document.get("authority_kind")
+    if authority_kind not in WINDOW_REGION_AUTHORITY_KINDS:
+        raise ValueError("window_region.json has an unknown authority kind")
 
     frame_id = _uint64(document.get("matched_frame_id"), "matched frame id")
     if frame_id == 0 or (matched_frame_id is not None and frame_id != matched_frame_id):
-        raise ValueError("window_video_border.json does not match the parent frame")
+        raise ValueError("window_region.json does not match the parent frame")
 
     coordinate = document.get("coordinate_space")
     if not isinstance(coordinate, dict) or set(coordinate) != {
             "name", "rect_semantics", "source_extent_px", "capture_rect_px"}:
-        raise ValueError("window_video_border.json has an unknown coordinate layout")
+        raise ValueError("window_region.json has an unknown coordinate layout")
     if (coordinate.get("name") != "matched-source-pixels" or
             coordinate.get("rect_semantics") != "half-open [left, top, right, bottom)"):
-        raise ValueError("window_video_border.json has unknown rectangle semantics")
+        raise ValueError("window_region.json has unknown rectangle semantics")
     extent = coordinate.get("source_extent_px")
     rect = coordinate.get("capture_rect_px")
     if (not isinstance(extent, dict) or set(extent) != {"width", "height"} or
             not isinstance(rect, dict) or set(rect) != {"left", "top", "right", "bottom"}):
-        raise ValueError("window_video_border.json has malformed capture geometry")
+        raise ValueError("window_region.json has malformed capture geometry")
     width = _uint32(extent.get("width"), "source width")
     height = _uint32(extent.get("height"), "source height")
     if (width == 0 or height == 0 or
             (source_width is not None and width != source_width) or
             (source_height is not None and height != source_height)):
-        raise ValueError("window_video_border.json source extent does not match the dump")
+        raise ValueError("window_region.json source extent does not match the dump")
     left = _int32(rect.get("left"), "rectangle left")
     top = _int32(rect.get("top"), "rectangle top")
     right = _int32(rect.get("right"), "rectangle right")
     bottom = _int32(rect.get("bottom"), "rectangle bottom")
     if left < 0 or top < 0 or right <= left or bottom <= top or right > width or bottom > height:
-        raise ValueError("window_video_border.json rectangle is empty or out of bounds")
+        raise ValueError("window_region.json rectangle is empty or out of bounds")
 
     identity = document.get("identity")
     if not isinstance(identity, dict) or set(identity) != {
             "hwnd", "process_id", "document_id", "video_id", "generation"}:
-        raise ValueError("window_video_border.json has an unknown identity layout")
-    hwnd, hwnd_value = _canonical_hwnd(identity.get("hwnd"), "window-video HWND")
+        raise ValueError("window_region.json has an unknown identity layout")
+    hwnd, hwnd_value = _canonical_hwnd(identity.get("hwnd"), "window-region HWND")
     process_id = _uint32(identity.get("process_id"), "process id")
     document_id = _int32(identity.get("document_id"), "document id")
     video_id = _int32(identity.get("video_id"), "video id")
     generation = _uint64(identity.get("generation"), "generation")
-    if hwnd_value <= 0 or process_id == 0 or document_id == 0 or video_id == 0 or generation == 0:
-        raise ValueError("window_video_border.json has an incomplete identity")
+    if hwnd_value <= 0 or process_id == 0 or generation == 0:
+        raise ValueError("window_region.json has an incomplete identity")
+    if authority_kind == "chromium-video" and (document_id == 0 or video_id == 0):
+        raise ValueError("window_region.json has incomplete Chromium identity")
+    if authority_kind == "foreground-client" and (document_id != 0 or video_id != 0):
+        raise ValueError("window_region.json foreground authority carries DOM identity")
 
     freshness = document.get("freshness")
     if not isinstance(freshness, dict) or set(freshness) != {
-            "latest_heartbeat_age_ms_at_capture", "maximum_heartbeat_age_ms",
+            "latest_observation_age_ms_at_capture", "maximum_observation_age_ms",
             "geometry_continuity_ms_at_capture", "source_content_age_ms_at_capture",
             "fresh", "causal_geometry"}:
-        raise ValueError("window_video_border.json has an unknown freshness layout")
-    heartbeat_age_ms = _uint32(
-        freshness.get("latest_heartbeat_age_ms_at_capture"), "latest heartbeat age")
-    maximum_heartbeat_age_ms = _uint32(
-        freshness.get("maximum_heartbeat_age_ms"), "maximum heartbeat age")
+        raise ValueError("window_region.json has an unknown freshness layout")
+    observation_age_ms = _uint32(
+        freshness.get("latest_observation_age_ms_at_capture"), "latest observation age")
+    maximum_observation_age_ms = _uint32(
+        freshness.get("maximum_observation_age_ms"), "maximum observation age")
     geometry_continuity_ms = _uint64(
         freshness.get("geometry_continuity_ms_at_capture"), "geometry continuity")
     source_content_age_ms = _uint64(
         freshness.get("source_content_age_ms_at_capture"), "source content age")
-    if (freshness.get("fresh") is not True or maximum_heartbeat_age_ms == 0 or
-            heartbeat_age_ms > maximum_heartbeat_age_ms):
-        raise ValueError("window_video_border.json is stale")
+    if (freshness.get("fresh") is not True or maximum_observation_age_ms == 0 or
+            observation_age_ms > maximum_observation_age_ms):
+        raise ValueError("window_region.json is stale")
     if (freshness.get("causal_geometry") is not True or
             geometry_continuity_ms < source_content_age_ms):
-        raise ValueError("window_video_border.json geometry postdates the source content")
+        raise ValueError("window_region.json geometry postdates the source content")
     return {
+        "authority_kind": authority_kind,
         "matched_frame_id": frame_id,
         "source_width": width,
         "source_height": height,
@@ -1162,8 +1172,8 @@ def validate_window_video_border_document(
         "document_id": document_id,
         "video_id": video_id,
         "generation": generation,
-        "latest_heartbeat_age_ms_at_capture": heartbeat_age_ms,
-        "maximum_heartbeat_age_ms": maximum_heartbeat_age_ms,
+        "latest_observation_age_ms_at_capture": observation_age_ms,
+        "maximum_observation_age_ms": maximum_observation_age_ms,
         "geometry_continuity_ms_at_capture": geometry_continuity_ms,
         "source_content_age_ms_at_capture": source_content_age_ms,
     }
@@ -1644,7 +1654,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
             "available", "artifact", "mode", "geometry_authority", "renderer_authority"} or
             input_summary.get("available") is not True or
             input_summary.get("artifact") != "depth_input_region.json" or
-            input_summary.get("mode") not in {"full-source", "video-region"} or
+            input_summary.get("mode") not in {"full-source", "window-region"} or
             input_summary.get("geometry_authority") is not True or
             input_summary.get("renderer_authority") is not True or
             not isinstance(input_descriptor, dict) or set(input_descriptor) != {
@@ -1684,17 +1694,17 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     if (not isinstance(requested, bool) or
             not isinstance(mapping_matches, bool) or
             (selected and not requested) or
-            (input_mode == "video-region" and not mapping_matches)):
+            (input_mode == "window-region" and not mapping_matches)):
         raise ValueError("dump_manifest.json has invalid V2 renderer request attribution")
 
     expected_position = (
         "shadow_final_parallax + depth_input_region embedding"
-        if selected and input_mode == "video-region" else
+        if selected and input_mode == "window-region" else
         "shadow_final_parallax" if selected else None
     )
     expected_authority = (
         ("authenticated crop-local parallax-v2 conditioned field plus depth-input-region embedding"
-         if input_mode == "video-region" else
+         if input_mode == "window-region" else
          "authenticated-parallax-v2-orientation-selective-conditioned-field")
         if selected else None
     )
@@ -1730,7 +1740,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     expected_ownership_role = (
         (("conservative full-resolution crop-local source-contour foreground ownership applied "
           "to candidate before the vertical conditioner; may only raise uniquely owned far-side "
-          "boundary texels") if input_mode == "video-region" else
+          "boundary texels") if input_mode == "window-region" else
          ("conservative full-resolution source-contour foreground ownership applied to candidate "
           "before the vertical conditioner; may only raise uniquely owned far-side boundary texels"))
         if selected else None
@@ -1746,7 +1756,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
           "shadow_base_final_parallax; SLR9 applies the analytic anisotropic rectangle "
           "budget/fade from same-frame current authority and publishes shadow_final_parallax, "
           "which plus depth_input_region embedding is live position authority")
-         if subtitle_live and input_mode == "video-region" else
+         if subtitle_live and input_mode == "window-region" else
          ("least row-wise q >= shadow_vertical_conditioned with horizontal slope <= "
           "max_horizontal_slope and vertical shear <= max_vertical_shear produces "
           "shadow_base_final_parallax; SLR9 applies the analytic anisotropic rectangle "
@@ -1756,7 +1766,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
          ("least row-wise crop-local q >= shadow_vertical_conditioned with horizontal slope <= "
           "max_horizontal_slope and vertical shear <= max_vertical_shear; q plus "
           "depth_input_region embedding is live position authority")
-         if input_mode == "video-region" else
+         if input_mode == "window-region" else
          ("least row-wise q >= shadow_vertical_conditioned with horizontal slope <= "
           "max_horizontal_slope and vertical shear <= max_vertical_shear; q may raise or lower "
           "candidate and is the live position authority"))
@@ -1911,7 +1921,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
             "shadow_base_final_parallax" in dimensions):
         raise ValueError("inactive subtitle conditioning exposes an SLR9 base field")
 
-    if input_mode == "video-region":
+    if input_mode == "window-region":
         warp_map_descriptor = artifacts.get("warp_map.f32")
         warp_map_shape_descriptor = artifacts.get("warp_map_shape.json")
         if (not isinstance(warp_map_descriptor, dict) or
@@ -1934,46 +1944,44 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
                 not isinstance(dimensions.get("warp_map"), dict)):
             raise ValueError("dump_manifest.json lacks authoritative ROI warp-map evidence")
 
-    border_summary = document.get("window_video_border")
-    border_descriptor = artifacts.get("window_video_border.json")
-    border_available = False
-    if (not isinstance(border_summary, dict) or set(border_summary) != {
+    region_summary = document.get("window_region")
+    region_descriptor = artifacts.get("window_region.json")
+    region_available = False
+    if (not isinstance(region_summary, dict) or set(region_summary) != {
             "available", "artifact", "observer_status", "mapping_status",
             "geometry_authority", "renderer_authority"} or
-            not isinstance(border_descriptor, dict)):
-        raise ValueError("dump_manifest.json has an invalid window-video border contract")
-    border_available = border_summary.get("available")
-    border_observer_status = border_summary.get("observer_status")
-    border_mapping_status = border_summary.get("mapping_status")
-    border_required = input_mode == "video-region"
-    expected_border_descriptor_keys = {"available", "required", "stage", "description"}
-    if border_required:
-        expected_border_descriptor_keys.add("sha256")
-    if (set(border_descriptor) != expected_border_descriptor_keys or
-            not isinstance(border_available, bool) or
-            border_descriptor.get("available") is not border_available or
-            border_descriptor.get("required") is not border_required or
-            border_descriptor.get("stage") != "matched-frame window-video border" or
-            not isinstance(border_descriptor.get("description"), str) or
-            not border_descriptor["description"] or
-            border_summary.get("artifact") != (
-                "window_video_border.json" if border_available else None) or
-            border_observer_status not in WINDOW_VIDEO_OBSERVER_STATUSES or
-            border_mapping_status not in WINDOW_VIDEO_MAPPING_STATUSES or
-            (border_available and (
-                border_observer_status not in _WINDOW_VIDEO_POSITIVE_OBSERVER_STATUSES or
-                border_mapping_status != "ok")) or
-            (border_required and (
-                not border_available or
-                not _is_sha256_hex(border_descriptor.get("sha256")))) or
-            border_summary.get("geometry_authority") is not False or
-            border_summary.get("renderer_authority") is not False):
-        raise ValueError("dump_manifest.json has an inconsistent window-video border contract")
-    if border_observer_status == "ok-fullscreen":
-        if (not border_available or border_mapping_status != "ok" or
+            not isinstance(region_descriptor, dict)):
+        raise ValueError("dump_manifest.json has an invalid window-region contract")
+    region_available = region_summary.get("available")
+    region_observer_status = region_summary.get("observer_status")
+    region_mapping_status = region_summary.get("mapping_status")
+    region_required = input_mode == "window-region"
+    expected_region_descriptor_keys = {"available", "required", "stage", "description"}
+    if region_required:
+        expected_region_descriptor_keys.add("sha256")
+    if (set(region_descriptor) != expected_region_descriptor_keys or
+            not isinstance(region_available, bool) or
+            region_descriptor.get("available") is not region_available or
+            region_descriptor.get("required") is not region_required or
+            region_descriptor.get("stage") != "matched-frame window region provenance" or
+            not isinstance(region_descriptor.get("description"), str) or
+            not region_descriptor["description"] or
+            region_summary.get("artifact") != (
+                "window_region.json" if region_available else None) or
+            not isinstance(region_observer_status, str) or not region_observer_status or
+            not isinstance(region_mapping_status, str) or not region_mapping_status or
+            (region_required and (
+                not region_available or region_observer_status != "ok" or
+                region_mapping_status != "ok" or
+                not _is_sha256_hex(region_descriptor.get("sha256")))) or
+            region_summary.get("geometry_authority") is not False or
+            region_summary.get("renderer_authority") is not False):
+        raise ValueError("dump_manifest.json has an inconsistent window-region contract")
+    if region_observer_status == "ok-fullscreen":
+        if (not region_available or region_mapping_status != "ok" or
                 input_mode != "full-source"):
             raise ValueError(
-                "ok-fullscreen window-video evidence requires an available mapped border, "
+                "ok-fullscreen Chromium evidence requires available mapped provenance, "
                 "and full-source depth input")
     return {
         "manifest_schema": schema,
@@ -1988,10 +1996,10 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         "depth_input_mode": input_mode,
         "position_authority": (
             ["shadow_final_parallax", "depth_input_region"]
-            if input_mode == "video-region" else ["shadow_final_parallax"]),
-        "window_video_border_available": border_available,
-        "window_video_border_observer_status": border_observer_status,
-        "window_video_border_mapping_status": border_mapping_status,
+            if input_mode == "window-region" else ["shadow_final_parallax"]),
+        "window_region_available": region_available,
+        "window_region_observer_status": region_observer_status,
+        "window_region_mapping_status": region_mapping_status,
         "subtitle_conditioning": subtitle_conditioning,
     }
 
@@ -2515,50 +2523,53 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
             analysis_source_dimensions.get("height") != input_region["inference_height"]):
         raise ValueError("analysis-source dimensions disagree with depth_input_region.json")
 
-    border = None
-    if fragment["window_video_border_available"]:
-        border_path = os.path.join(os.fspath(dump_dir), "window_video_border.json")
+    window_region = None
+    if fragment["window_region_available"]:
+        region_path = os.path.join(os.fspath(dump_dir), "window_region.json")
         try:
-            with open(border_path, "rb") as handle:
-                border_payload = handle.read()
-            border_document = json.loads(border_payload.decode("utf-8"))
+            with open(region_path, "rb") as handle:
+                region_payload = handle.read()
+            region_document = json.loads(region_payload.decode("utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ValueError(
-                "advertised window_video_border.json is missing or malformed") from error
-        border_descriptor = artifacts["window_video_border.json"]
-        if "sha256" in border_descriptor:
-            border_digest = hashlib.sha256(border_payload).hexdigest()
-            if border_digest != border_descriptor["sha256"]:
-                raise ValueError("window_video_border.json content hash mismatch")
-        border = validate_window_video_border_document(
-            border_document,
+                "advertised window_region.json is missing or malformed") from error
+        region_descriptor = artifacts["window_region.json"]
+        if "sha256" in region_descriptor:
+            region_digest = hashlib.sha256(region_payload).hexdigest()
+            if region_digest != region_descriptor["sha256"]:
+                raise ValueError("window_region.json content hash mismatch")
+        window_region = validate_window_region_document(
+            region_document,
             matched_frame_id=frame_id,
             source_width=source_width,
             source_height=source_height,
         )
-    if input_region["mode"] == "video-region":
-        if border is None:
-            raise ValueError("video-region dump has no authenticated semantic border")
+    if input_region["mode"] == "window-region":
+        if window_region is None:
+            raise ValueError("window-region dump has no authenticated provenance")
         if input_region["semantic_rect"] != (
-                border["left"], border["top"], border["right"], border["bottom"]):
-            raise ValueError("depth input semantic rectangle disagrees with window-video border")
+                window_region["left"], window_region["top"],
+                window_region["right"], window_region["bottom"]):
+            raise ValueError("depth input semantic rectangle disagrees with window provenance")
         authorization = input_region["authorization"]
         if authorization != {
-                "observer_generation": border["generation"],
-                "hwnd": border["hwnd"],
-                "hwnd_text": border["hwnd_text"],
-                "process_id": border["process_id"],
-                "document_id": border["document_id"],
-                "video_id": border["video_id"]}:
-            raise ValueError("depth input authorization disagrees with window-video border")
+                "authority_kind": window_region["authority_kind"],
+                "observer_generation": window_region["generation"],
+                "hwnd": window_region["hwnd"],
+                "hwnd_text": window_region["hwnd_text"],
+                "process_id": window_region["process_id"],
+                "document_id": window_region["document_id"],
+                "video_id": window_region["video_id"]}:
+            raise ValueError("depth input authorization disagrees with window provenance")
 
-    if fragment["window_video_border_observer_status"] == "ok-fullscreen":
-        if border is None:
-            raise ValueError("ok-fullscreen dump has no matched window-video border")
-        if (border["left"], border["top"], border["right"], border["bottom"]) != (
+    if fragment["window_region_observer_status"] == "ok-fullscreen":
+        if window_region is None or window_region["authority_kind"] != "chromium-video":
+            raise ValueError("ok-fullscreen dump has no matched Chromium provenance")
+        if (window_region["left"], window_region["top"],
+                window_region["right"], window_region["bottom"]) != (
                 0, 0, source_width, source_height):
             raise ValueError(
-                "ok-fullscreen window-video border is not the exact full source")
+                "ok-fullscreen window region is not the exact full source")
         if input_region["mode"] != "full-source":
             raise ValueError(
                 "ok-fullscreen dump is not bound to the full-source analysis domain")
@@ -2671,7 +2682,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
         raise ValueError("warp_depth.f32 is not the exact final crop-local position field")
 
     exterior_zero = None
-    if input_region["mode"] == "video-region":
+    if input_region["mode"] == "window-region":
         exterior_zero = _verify_roi_exterior_zero_warp_map(
             dump_dir,
             manifest,
@@ -2687,8 +2698,8 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
         "depth_input_region_verified": True,
         "depth_input_region": input_region,
         "roi_exterior_zero_evidence": exterior_zero,
-        "window_video_border_verified": border is not None,
-        "window_video_border": border,
+        "window_region_verified": window_region is not None,
+        "window_region": window_region,
         "subtitle_conditioning": subtitle_summary,
         "final_recurrence_verified": True,
     }
@@ -2726,12 +2737,13 @@ __all__ = [
     "SUBTITLE_OCR_RECORD_SCHEMA",
     "SUBTITLE_OCR_RECORD_TAG",
     "SUBTITLE_OCR_RECORD_WORD_COUNT",
-    "WINDOW_VIDEO_BORDER_SCHEMA",
+    "WINDOW_REGION_AUTHORITY_KINDS",
+    "WINDOW_REGION_SCHEMA",
     "camera_center_integrity_bits",
     "validate_depth_input_region_document",
     "validate_subtitle_locator_state",
     "validate_subtitle_ocr_record",
-    "validate_window_video_border_document",
+    "validate_window_region_document",
     "validate_v2_dump_manifest_document",
     "validate_shadow_frame_stats_document",
     "validate_shadow_state_document",

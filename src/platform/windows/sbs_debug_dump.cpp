@@ -2239,42 +2239,43 @@ namespace platf::sbs_debug {
       return descriptor;
     }
 
-    nlohmann::json window_video_border_document(
-      const window_video_border_snapshot &border
+    nlohmann::json window_region_document(
+      const window_region_snapshot &region
     ) {
       std::ostringstream hwnd;
-      hwnd << "0x" << std::hex << std::uppercase << border.hwnd;
+      hwnd << "0x" << std::hex << std::uppercase << region.hwnd;
       return {
-        {"schema", window_video_border_schema},
+        {"schema", window_region_schema},
         {"capture", "same matched source/color/depth/render frame as the parent Dump 3D package"},
-        {"role", "diagnostic-only window-video border evidence; no geometry or renderer authority"},
-        {"matched_frame_id", border.matched_frame_id},
+        {"role", "matched-window region provenance; no independent geometry or renderer authority"},
+        {"authority_kind", window_region_authority_kind_name(region.authority_kind)},
+        {"matched_frame_id", region.matched_frame_id},
         {"coordinate_space", {
           {"name", "matched-source-pixels"},
           {"rect_semantics", "half-open [left, top, right, bottom)"},
           {"source_extent_px", {
-            {"width", border.source_width},
-            {"height", border.source_height},
+            {"width", region.source_width},
+            {"height", region.source_height},
           }},
           {"capture_rect_px", {
-            {"left", border.left},
-            {"top", border.top},
-            {"right", border.right},
-            {"bottom", border.bottom},
+            {"left", region.left},
+            {"top", region.top},
+            {"right", region.right},
+            {"bottom", region.bottom},
           }},
         }},
         {"identity", {
           {"hwnd", hwnd.str()},
-          {"process_id", border.process_id},
-          {"document_id", border.document_id},
-          {"video_id", border.video_id},
-          {"generation", border.generation},
+          {"process_id", region.process_id},
+          {"document_id", region.document_id},
+          {"video_id", region.video_id},
+          {"generation", region.generation},
         }},
         {"freshness", {
-          {"latest_heartbeat_age_ms_at_capture", border.latest_heartbeat_age_ms_at_capture},
-          {"maximum_heartbeat_age_ms", border.maximum_heartbeat_age_ms},
-          {"geometry_continuity_ms_at_capture", border.geometry_continuity_ms_at_capture},
-          {"source_content_age_ms_at_capture", border.source_content_age_ms_at_capture},
+          {"latest_observation_age_ms_at_capture", region.latest_observation_age_ms_at_capture},
+          {"maximum_observation_age_ms", region.maximum_observation_age_ms},
+          {"geometry_continuity_ms_at_capture", region.geometry_continuity_ms_at_capture},
+          {"source_content_age_ms_at_capture", region.source_content_age_ms_at_capture},
           {"fresh", true},
           {"causal_geometry", true},
         }},
@@ -2329,30 +2330,37 @@ namespace platf::sbs_debug {
         }
         return {};
       }
-      if (!completed.depth_video_plan || !completed.window_video_border) {
-        return "ROI completion is missing its planner result or semantic border";
+      if (!completed.depth_video_plan || !completed.window_region) {
+        return "ROI completion is missing its planner result or window-region provenance";
       }
-      if (completed.window_video_observer_status != "ok" ||
-          completed.window_video_mapping_status != "ok") {
+      if (completed.window_region_observer_status != "ok" ||
+          completed.window_region_mapping_status != "ok") {
         return "ROI completion is not backed by an accepted observer/mapping state";
       }
-      const auto &border = *completed.window_video_border;
-      const auto border_validation = validate_window_video_border(
-        border,
+      const auto &provenance = *completed.window_region;
+      const auto expected_authority =
+        provenance.authority_kind == window_region_authority_kind_e::chromium_video ?
+          models::depth_analysis_authority_e::chromium_video :
+          models::depth_analysis_authority_e::foreground_client;
+      if (region.authority != expected_authority) {
+        return "ROI estimator authority kind does not match window-region provenance";
+      }
+      const auto provenance_validation = validate_window_region(
+        provenance,
         completed.matched_frame_id,
         region.source_width,
         region.source_height
       );
-      if (border_validation != window_video_border_error::none) {
-        return std::string {"ROI semantic border failed validation: "} +
-               window_video_border_error_name(border_validation);
+      if (provenance_validation != window_region_error::none) {
+        return std::string {"ROI window-region provenance failed validation: "} +
+               window_region_error_name(provenance_validation);
       }
 
       const models::depth_source_rect_t semantic_rect {
-        static_cast<std::uint32_t>(border.left),
-        static_cast<std::uint32_t>(border.top),
-        static_cast<std::uint32_t>(border.right),
-        static_cast<std::uint32_t>(border.bottom),
+          static_cast<std::uint32_t>(provenance.left),
+          static_cast<std::uint32_t>(provenance.top),
+          static_cast<std::uint32_t>(provenance.right),
+          static_cast<std::uint32_t>(provenance.bottom),
       };
       const models::depth_tensor_shape_t tensor_shape {
         completed.model_width,
@@ -2408,23 +2416,24 @@ namespace platf::sbs_debug {
       const bool roi = region.video_region;
       nlohmann::json authorization = nullptr;
       if (roi) {
-        const auto &border = *completed.window_video_border;
+        const auto &provenance = *completed.window_region;
         std::ostringstream hwnd;
-        hwnd << "0x" << std::hex << std::uppercase << border.hwnd;
+        hwnd << "0x" << std::hex << std::uppercase << provenance.hwnd;
         authorization = {
-          {"observer_generation", border.generation},
+          {"authority_kind", window_region_authority_kind_name(provenance.authority_kind)},
+          {"observer_generation", provenance.generation},
           {"hwnd", hwnd.str()},
-          {"process_id", border.process_id},
-          {"document_id", border.document_id},
-          {"video_id", border.video_id},
+          {"process_id", provenance.process_id},
+          {"document_id", provenance.document_id},
+          {"video_id", provenance.video_id},
         };
       }
       const nlohmann::json semantic_rect = roi ?
         source_rect_document(
-          static_cast<std::uint32_t>(completed.window_video_border->left),
-          static_cast<std::uint32_t>(completed.window_video_border->top),
-          static_cast<std::uint32_t>(completed.window_video_border->right),
-          static_cast<std::uint32_t>(completed.window_video_border->bottom)
+          static_cast<std::uint32_t>(completed.window_region->left),
+          static_cast<std::uint32_t>(completed.window_region->top),
+          static_cast<std::uint32_t>(completed.window_region->right),
+          static_cast<std::uint32_t>(completed.window_region->bottom)
         ) :
         nlohmann::json(nullptr);
       const nlohmann::json outside = roi ?
@@ -2449,11 +2458,11 @@ namespace platf::sbs_debug {
           static_cast<float>(region.left) / static_cast<float>(region.source_width) :
         1.0f;
       return {
-        {"schema", 1},
+        {"schema", 2},
         {"capture", "same matched source/color/model/depth/render frame as the parent Dump 3D package"},
         {"role", "authoritative analysis-domain placement and live-render embedding contract"},
         {"matched_frame_id", completed.matched_frame_id},
-        {"mode", roi ? "video-region" : "full-source"},
+        {"mode", roi ? "window-region" : "full-source"},
         {"authorization", authorization},
         {"coordinate_space", {
           {"name", "matched-source-pixels"},
@@ -3136,42 +3145,42 @@ namespace platf::sbs_debug {
         ) {
           break;
         }
-        bool window_video_border_available = false;
-        std::string window_video_border_sha256;
-        if (completed.window_video_border) {
-          const auto validation = validate_window_video_border(
-            *completed.window_video_border,
+        bool window_region_available = false;
+        std::string window_region_sha256;
+        if (completed.window_region) {
+          const auto validation = validate_window_region(
+            *completed.window_region,
             completed.matched_frame_id,
             source.desc.Width,
             source.desc.Height
           );
-          if (validation == window_video_border_error::none) {
-            window_video_border_available = write_json(
-              paths.temporary / "window_video_border.json",
-              window_video_border_document(*completed.window_video_border)
+          if (validation == window_region_error::none) {
+            window_region_available = write_json(
+              paths.temporary / "window_region.json",
+              window_region_document(*completed.window_region)
             );
-            if (!window_video_border_available) {
+            if (!window_region_available) {
               BOOST_LOG(warning)
-                << "SBS debug dump: optional matched-frame window-video border could not be written; continuing without it."sv;
+                << "SBS debug dump: optional matched-frame window-region provenance could not be written; continuing without it."sv;
             } else if (completed.depth_input_region.video_region) {
-              window_video_border_sha256 = models::file_sha256_hex(
-                paths.temporary / "window_video_border.json"
+              window_region_sha256 = models::file_sha256_hex(
+                paths.temporary / "window_region.json"
               );
             }
           } else {
             BOOST_LOG(warning)
-              << "SBS debug dump: optional window-video border rejected ("sv
-              << window_video_border_error_name(validation)
+              << "SBS debug dump: optional window-region provenance rejected ("sv
+              << window_region_error_name(validation)
               << "); continuing without it."sv;
           }
         }
         if (
           completed.depth_input_region.video_region &&
-          (!window_video_border_available || window_video_border_sha256.empty())
+          (!window_region_available || window_region_sha256.empty())
         ) {
           BOOST_LOG(warning)
-            << "SBS debug dump: ROI publication requires its exact matched-frame semantic "sv
-               "border and identity; publication aborted."sv;
+            << "SBS debug dump: ROI publication requires exact matched-frame window-region "sv
+               "provenance; publication aborted."sv;
           break;
         }
         const std::uint32_t eye_width = sbs.desc.Width / 2u;
@@ -3343,19 +3352,19 @@ namespace platf::sbs_debug {
             "Comparison-only cut flags, counters, and normalization state; no live V2 geometry authority." :
             "Unavailable; scene-cut bridge evidence never gates an authenticated live V2 dump."
         );
-        artifacts["window_video_border.json"] = video_region ?
+        artifacts["window_region.json"] = video_region ?
           hashed_artifact_description(
             true,
             true,
-            "matched-frame window-video border",
-            "Validated semantic rectangle, IA2 identity, freshness, and causal provenance from which the authoritative ROI input region was planned; not renderer authority by itself.",
-            window_video_border_sha256
+            "matched-frame window region provenance",
+            "Validated semantic rectangle, authority kind, stable identity, freshness, and causal provenance from which the authoritative ROI input region was planned; not renderer authority by itself.",
+            window_region_sha256
           ) :
           artifact_description(
-            window_video_border_available,
+            window_region_available,
             false,
-            "matched-frame window-video border",
-            "Validated half-open capture rectangle, source extent, IA2 identity, and freshness; diagnostic only and never renderer authority."
+            "matched-frame window region provenance",
+            "Validated half-open capture rectangle, source extent, authority kind, identity, and freshness; provenance only and never independent renderer authority."
           );
         artifacts["shadow_coordinate.f32"] = hashed_artifact_description(
           true,
@@ -3685,7 +3694,7 @@ namespace platf::sbs_debug {
             *completed.parallax_v2_shader_provenance
           );
         nlohmann::json manifest {
-          {"schema", 27},
+          {"schema", 28},
           {"capture", "one matched, completed Host-SBS frame"},
           {"capture_status", "complete"},
           {"published_atomically", true},
@@ -3768,16 +3777,16 @@ namespace platf::sbs_debug {
           {"depth_input_region", {
             {"available", true},
             {"artifact", "depth_input_region.json"},
-            {"mode", video_region ? "video-region" : "full-source"},
+            {"mode", video_region ? "window-region" : "full-source"},
             {"geometry_authority", true},
             {"renderer_authority", true},
           }},
-          {"window_video_border", {
-            {"available", window_video_border_available},
-            {"artifact", window_video_border_available ?
-              nlohmann::json("window_video_border.json") : nlohmann::json(nullptr)},
-            {"observer_status", completed.window_video_observer_status},
-            {"mapping_status", completed.window_video_mapping_status},
+          {"window_region", {
+            {"available", window_region_available},
+            {"artifact", window_region_available ?
+              nlohmann::json("window_region.json") : nlohmann::json(nullptr)},
+            {"observer_status", completed.window_region_observer_status},
+            {"mapping_status", completed.window_region_mapping_status},
             {"geometry_authority", false},
             {"renderer_authority", false},
           }},
@@ -3825,7 +3834,7 @@ namespace platf::sbs_debug {
              << "source_width=" << source.desc.Width << '\n'
              << "source_height=" << source.desc.Height << '\n'
              << "depth_input_mode="
-             << (video_region ? "video-region" : "full-source") << '\n'
+             << (video_region ? "window-region" : "full-source") << '\n'
              << "depth_input_left=" << completed.depth_input_region.left << '\n'
              << "depth_input_top=" << completed.depth_input_region.top << '\n'
              << "depth_input_right=" << completed.depth_input_region.right << '\n'
@@ -3864,12 +3873,12 @@ namespace platf::sbs_debug {
              << '\n'
              << "warp_mask_available=" << (warp_mask_available ? "true" : "false")
              << '\n'
-             << "window_video_border_available="
-             << (window_video_border_available ? "true" : "false") << '\n'
-             << "window_video_observer_status="
-             << completed.window_video_observer_status << '\n'
-             << "window_video_mapping_status="
-             << completed.window_video_mapping_status << '\n'
+             << "window_region_available="
+             << (window_region_available ? "true" : "false") << '\n'
+             << "window_region_observer_status="
+             << completed.window_region_observer_status << '\n'
+             << "window_region_mapping_status="
+             << completed.window_region_mapping_status << '\n'
              << "parallax_v2_shadow_requested="
              << "false\n"
              << "parallax_v2_shadow_active=true\n"

@@ -55,14 +55,22 @@ namespace models {
     return color_space != input_color_space::srgb;
   }
 
+  /** Semantic authority that selected one DAV2 analysis domain. */
+  enum class depth_analysis_authority_e : std::uint8_t {
+    full_source,
+    chromium_video,
+    foreground_client,
+  };
+
   /**
    * Exact full-source placement of the image submitted to DAV2.
    *
-   * video_region=false means the estimator input and final parallax cover the whole source and
-   * analysis_generation is zero.
-   * video_region=true means the estimator input is a same-format crop of source_rect while final
-   * color still covers source_width x source_height. analysis_generation changes only when the
-   * semantic video identity or crop extent changes; a pure position move may retain scene state.
+   * video_region=false means the estimator input and final parallax cover the whole source,
+   * authority is full_source, and analysis_generation is zero. video_region remains the legacy
+   * placement name consumed by the renderer and dump path; true now means any bounded analysis ROI.
+   * Such an ROI has a non-full-source authority and a nonzero analysis generation. Position alone
+   * is not part of the analysis domain, so moving an otherwise-identical authority may retain scene
+   * state.
    */
   struct depth_input_region_t {
     std::uint32_t source_width = 0u;
@@ -73,6 +81,7 @@ namespace models {
     std::uint32_t bottom = 0u;
     std::uint64_t analysis_generation = 0u;
     bool video_region = false;
+    depth_analysis_authority_e authority = depth_analysis_authority_e::full_source;
 
     constexpr std::uint32_t width() const noexcept {
       return right > left ? right - left : 0u;
@@ -88,14 +97,18 @@ namespace models {
         return false;
       }
       if (video_region) {
-        return analysis_generation != 0u;
+        return (authority == depth_analysis_authority_e::chromium_video ||
+                authority == depth_analysis_authority_e::foreground_client) &&
+               analysis_generation != 0u;
       }
-      return left == 0u && top == 0u && right == source_width &&
+      return authority == depth_analysis_authority_e::full_source &&
+             left == 0u && top == 0u && right == source_width &&
              bottom == source_height && analysis_generation == 0u;
     }
 
     constexpr bool same_analysis_domain(const depth_input_region_t &other) const noexcept {
       return video_region == other.video_region &&
+             authority == other.authority &&
              source_width == other.source_width && source_height == other.source_height &&
              width() == other.width() && height() == other.height() &&
              analysis_generation == other.analysis_generation;
@@ -106,10 +119,12 @@ namespace models {
 
   /** Stable semantic identity used to assign an ROI analysis generation.
    *
-   * Position and observer snapshot generation are deliberately absent. Moving the same video or
-   * receiving an otherwise-identical helper heartbeat does not create a new analysis domain.
+   * Authority kind participates in identity so a Chromium video and a foreground client can never
+   * share temporal state accidentally.
+   * Position and observer snapshot generation are deliberately absent. Moving the same authority
+   * or receiving an otherwise-identical observer heartbeat does not create a new analysis domain.
    */
-  struct video_depth_domain_key_t {
+  struct depth_analysis_domain_key_t {
     std::uint32_t source_width = 0u;
     std::uint32_t source_height = 0u;
     std::uint32_t semantic_width = 0u;
@@ -120,14 +135,15 @@ namespace models {
     std::uint32_t process_id = 0u;
     std::int32_t document_id = 0;
     std::int32_t video_id = 0;
+    depth_analysis_authority_e authority = depth_analysis_authority_e::full_source;
 
-    constexpr bool operator==(const video_depth_domain_key_t &) const = default;
+    constexpr bool operator==(const depth_analysis_domain_key_t &) const = default;
   };
 
   /** Assign monotonically changing nonzero generations to stable ROI semantic identities. */
-  class video_depth_analysis_generation_tracker_t {
+  class depth_analysis_generation_tracker_t {
   public:
-    std::uint64_t select(const video_depth_domain_key_t &key) noexcept {
+    std::uint64_t select(const depth_analysis_domain_key_t &key) noexcept {
       if (!key_ || *key_ != key) {
         key_ = key;
         if (++generation_ == 0u) {
@@ -143,7 +159,7 @@ namespace models {
     }
 
   private:
-    std::optional<video_depth_domain_key_t> key_;
+    std::optional<depth_analysis_domain_key_t> key_;
     std::uint64_t generation_ = 0u;
   };
 

@@ -133,7 +133,7 @@ def _inspect_optional_v2_dump_manifest(dump: Path) -> Dict[str, Any]:
 
 def _require_supported_replay_domain(capture: Dict[str, Any]) -> None:
     if (capture.get("status") == "validated" and capture.get("active") and
-            capture.get("depth_input_mode") == "video-region"):
+            capture.get("depth_input_mode") == "window-region"):
         raise ValueError(
             "ROI-active Dump 3D replay is not implemented: crop-local raw/parallax must "
             "be embedded with depth_input_region.json and its full-source zero-plane "

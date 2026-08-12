@@ -1031,7 +1031,7 @@ TEST(ParallaxV2RendererTest, AuthenticationLatchesV2OrLiveFlat) {
   );
 }
 
-TEST(DepthInputRegionTest, RequiresCanonicalFullSourceOrAuthenticatedVideoIdentity) {
+TEST(DepthInputRegionTest, RequiresCanonicalFullSourceOrAuthenticatedRoiAuthority) {
   const models::depth_input_region_t full_source {
     .source_width = 1920u,
     .source_height = 1080u,
@@ -1059,12 +1059,30 @@ TEST(DepthInputRegionTest, RequiresCanonicalFullSourceOrAuthenticatedVideoIdenti
     .bottom = 1439u,
     .analysis_generation = 7u,
     .video_region = true,
+    .authority = models::depth_analysis_authority_e::chromium_video,
   };
   EXPECT_TRUE(video_region.valid());
 
   auto video_without_identity = video_region;
   video_without_identity.analysis_generation = 0u;
   EXPECT_FALSE(video_without_identity.valid());
+
+  auto roi_without_authority = video_region;
+  roi_without_authority.authority = models::depth_analysis_authority_e::full_source;
+  EXPECT_FALSE(roi_without_authority.valid());
+
+  auto roi_with_unknown_authority = video_region;
+  roi_with_unknown_authority.authority =
+    static_cast<models::depth_analysis_authority_e>(0xFFu);
+  EXPECT_FALSE(roi_with_unknown_authority.valid());
+
+  auto foreground_region = video_region;
+  foreground_region.authority = models::depth_analysis_authority_e::foreground_client;
+  EXPECT_TRUE(foreground_region.valid());
+
+  auto full_with_roi_authority = full_source;
+  full_with_roi_authority.authority = models::depth_analysis_authority_e::foreground_client;
+  EXPECT_FALSE(full_with_roi_authority.valid());
 
   auto out_of_bounds = video_region;
   out_of_bounds.right = out_of_bounds.source_width + 1u;
@@ -1081,6 +1099,7 @@ TEST(DepthInputRegionTest, AnalysisDomainIgnoresOnlyPurePositionMoves) {
     .bottom = 1439u,
     .analysis_generation = 7u,
     .video_region = true,
+    .authority = models::depth_analysis_authority_e::chromium_video,
   };
   auto moved = original;
   moved.left += 100u;
@@ -1096,6 +1115,10 @@ TEST(DepthInputRegionTest, AnalysisDomainIgnoresOnlyPurePositionMoves) {
   new_video.analysis_generation += 1u;
   EXPECT_FALSE(original.same_analysis_domain(new_video));
 
+  auto new_authority = original;
+  new_authority.authority = models::depth_analysis_authority_e::foreground_client;
+  EXPECT_FALSE(original.same_analysis_domain(new_authority));
+
   auto new_source = original;
   new_source.source_width += 1u;
   EXPECT_FALSE(original.same_analysis_domain(new_source));
@@ -1107,11 +1130,38 @@ TEST(DepthInputRegionTest, AnalysisDomainIgnoresOnlyPurePositionMoves) {
   full_source.right = full_source.source_width;
   full_source.bottom = full_source.source_height;
   full_source.analysis_generation = 0u;
+  full_source.authority = models::depth_analysis_authority_e::full_source;
   EXPECT_FALSE(original.same_analysis_domain(full_source));
 }
 
+TEST(DepthInputRegionTest, GenerationIdentityIncludesAuthorityKind) {
+  models::depth_analysis_generation_tracker_t generation_tracker;
+  const models::depth_analysis_domain_key_t chromium {
+    .source_width = 1920u,
+    .source_height = 1080u,
+    .semantic_width = 1280u,
+    .semantic_height = 720u,
+    .crop_width = 1280u,
+    .crop_height = 720u,
+    .hwnd = 0x1234u,
+    .process_id = 52u,
+    .document_id = 7,
+    .video_id = 11,
+    .authority = models::depth_analysis_authority_e::chromium_video,
+  };
+  const auto chromium_generation = generation_tracker.select(chromium);
+  ASSERT_NE(chromium_generation, 0u);
+  EXPECT_EQ(generation_tracker.select(chromium), chromium_generation);
+
+  auto foreground = chromium;
+  foreground.authority = models::depth_analysis_authority_e::foreground_client;
+  const auto foreground_generation = generation_tracker.select(foreground);
+  EXPECT_NE(foreground_generation, chromium_generation);
+  EXPECT_EQ(generation_tracker.select(foreground), foreground_generation);
+}
+
 TEST(DepthInputRegionTest, DomainTransitionDecisionResetsExactlyOncePerStableChange) {
-  models::video_depth_analysis_generation_tracker_t generation_tracker;
+  models::depth_analysis_generation_tracker_t generation_tracker;
   models::depth_input_domain_tracker_t domain_tracker;
   const models::depth_input_region_t full_source {
     .source_width = 3840u,
@@ -1124,7 +1174,7 @@ TEST(DepthInputRegionTest, DomainTransitionDecisionResetsExactlyOncePerStableCha
   EXPECT_TRUE(domain_tracker.update(full_source, models::input_color_space::srgb));
   EXPECT_FALSE(domain_tracker.update(full_source, models::input_color_space::srgb));
 
-  models::video_depth_domain_key_t key {
+  models::depth_analysis_domain_key_t key {
     .source_width = 3840u,
     .source_height = 2160u,
     .semantic_width = 2682u,
@@ -1135,6 +1185,7 @@ TEST(DepthInputRegionTest, DomainTransitionDecisionResetsExactlyOncePerStableCha
     .process_id = 52u,
     .document_id = 7,
     .video_id = 11,
+    .authority = models::depth_analysis_authority_e::chromium_video,
   };
   const auto first_generation = generation_tracker.select(key);
   ASSERT_NE(first_generation, 0u);
@@ -1147,6 +1198,7 @@ TEST(DepthInputRegionTest, DomainTransitionDecisionResetsExactlyOncePerStableCha
     .bottom = 1830u,
     .analysis_generation = first_generation,
     .video_region = true,
+    .authority = models::depth_analysis_authority_e::chromium_video,
   };
   ASSERT_TRUE(roi.valid());
   EXPECT_TRUE(domain_tracker.update(roi, models::input_color_space::srgb));
@@ -1179,13 +1231,26 @@ TEST(DepthInputRegionTest, DomainTransitionDecisionResetsExactlyOncePerStableCha
   EXPECT_TRUE(domain_tracker.update(roi, models::input_color_space::srgb));
   EXPECT_FALSE(domain_tracker.update(roi, models::input_color_space::srgb));
 
+  auto foreground_key = new_identity;
+  foreground_key.document_id = 0;
+  foreground_key.video_id = 0;
+  foreground_key.authority = models::depth_analysis_authority_e::foreground_client;
+  const auto foreground_generation = generation_tracker.select(foreground_key);
+  EXPECT_NE(foreground_generation, roi.analysis_generation);
+  roi.analysis_generation = foreground_generation;
+  roi.authority = models::depth_analysis_authority_e::foreground_client;
+  EXPECT_TRUE(domain_tracker.update(roi, models::input_color_space::srgb));
+  EXPECT_FALSE(domain_tracker.update(roi, models::input_color_space::srgb));
+
   EXPECT_TRUE(domain_tracker.update(roi, models::input_color_space::linear_sdr));
   EXPECT_FALSE(domain_tracker.update(roi, models::input_color_space::linear_sdr));
 
   generation_tracker.select_full_source();
   EXPECT_TRUE(domain_tracker.update(full_source, models::input_color_space::linear_sdr));
   EXPECT_FALSE(domain_tracker.update(full_source, models::input_color_space::linear_sdr));
+  new_identity.authority = models::depth_analysis_authority_e::chromium_video;
   roi.analysis_generation = generation_tracker.select(new_identity);
+  roi.authority = models::depth_analysis_authority_e::chromium_video;
   EXPECT_TRUE(domain_tracker.update(roi, models::input_color_space::linear_sdr));
   EXPECT_FALSE(domain_tracker.update(roi, models::input_color_space::linear_sdr));
 }
@@ -1227,6 +1292,51 @@ TEST(DepthInputRegionTest, DumpSnapshotsPreserveFullOrRoiAnalysisDomain) {
     std::string::npos
   );
   EXPECT_NE(
+    display_source.find(
+      "foreground_window_tracker.update(foreground_window::sample())"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display_source.find("live_window_authority_generation"),
+    std::string::npos
+  );
+  const auto render_authority_check = display_source.find(
+    "window_region_authorized_for_render(*matched_render_slot)"
+  );
+  const auto renderer_latch = display_source.find(
+    "Authenticate the first completed V2 field"
+  );
+  const auto dump_snapshot = display_source.find("dump_frame.window_region =");
+  ASSERT_NE(render_authority_check, std::string::npos);
+  ASSERT_NE(renderer_latch, std::string::npos);
+  ASSERT_NE(dump_snapshot, std::string::npos);
+  EXPECT_LT(render_authority_check, renderer_latch);
+  EXPECT_LT(render_authority_check, dump_snapshot);
+  EXPECT_NE(
+    display_source.find("clear_cached_roi_output()"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display_source.find("output_desc.DesktopCoordinates.left"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    display_source.find("display->offset_x,"),
+    std::string::npos
+  );
+  const auto route_selection = display_source.find("auto browser_region =");
+  ASSERT_NE(route_selection, std::string::npos);
+  const auto browser_capture = display_source.find(
+    "capture_browser_window_region(", route_selection
+  );
+  const auto foreground_capture = display_source.find(
+    "capture_foreground_window_region(", route_selection
+  );
+  ASSERT_NE(browser_capture, std::string::npos);
+  ASSERT_NE(foreground_capture, std::string::npos);
+  EXPECT_LT(browser_capture, foreground_capture);
+  EXPECT_NE(
     display_source.find("dump_frame.depth_input_region = est.input_region"),
     std::string::npos
   );
@@ -1239,7 +1349,7 @@ TEST(DepthInputRegionTest, DumpSnapshotsPreserveFullOrRoiAnalysisDomain) {
     std::string::npos
   );
   EXPECT_EQ(
-    display_source.find("Dump 3D request rejected: window-video ROI rendering is active"),
+    display_source.find("Dump 3D request rejected: window-region ROI rendering is active"),
     std::string::npos
   );
 }
@@ -1404,6 +1514,7 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
     .bottom = 1439u,
     .analysis_generation = 7u,
     .video_region = true,
+    .authority = models::depth_analysis_authority_e::chromium_video,
   };
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(video_region));
 

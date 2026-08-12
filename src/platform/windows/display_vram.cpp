@@ -24,6 +24,7 @@
 
 // local includes
 #include "display.h"
+#include "foreground_window_region.h"
 #include "misc.h"
 #include "sbs_debug_dump.h"
 #include "video_dom_client.h"
@@ -687,6 +688,17 @@ namespace platf::dxgi {
                                            models::input_color_space::srgb;
           const auto current_source_timestamp = img_base.frame_timestamp;
           const auto current_content_timestamp = img_base.content_timestamp;
+          // Observe foreground continuity on every SBS conversion, not merely when TensorRT can
+          // accept a new matched frame. A focus-away/focus-back transition between accepted
+          // inferences must revoke stale ROI completions and cached output immediately.
+          if (models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)) {
+            D3D11_TEXTURE2D_DESC live_source_desc {};
+            img_ctx.encoder_texture->GetDesc(&live_source_desc);
+            (void) observe_live_window_authority(
+              live_source_desc,
+              current_content_timestamp
+            );
+          }
           const auto same_source = [](
                                      const std::optional<std::chrono::steady_clock::time_point> &left,
                                      const std::optional<std::chrono::steady_clock::time_point> &right
@@ -930,6 +942,24 @@ namespace platf::dxgi {
             matched_output_input_region = {};
             matched_output_color_space = models::input_color_space::srgb;
           } else if (
+            matched_render_slot && matched_render_slot->window_region &&
+            !window_region_authorized_for_render(*matched_render_slot)
+          ) {
+            if (matched_render_slot->depth_input_region.video_region) {
+              // The completion is still consumed and releases its pending slot, but geometry
+              // observed before a focus/move/resize/monitor transition cannot warp newer pixels.
+              clear_cached_roi_output();
+              matched_render_slot = nullptr;
+              est = {};
+              render_input_srv = img_ctx.encoder_input_res.get();
+            } else {
+              // Full-source depth is independent of optional exact-full window provenance.
+              matched_render_slot->window_region.reset();
+              matched_render_slot->window_region_observer_status = "not-observed";
+              matched_render_slot->window_region_mapping_status = "not-mapped";
+              matched_render_slot->live_window_authority_generation = 0u;
+            }
+          } else if (
             matched_render_slot && matched_candidate_slot &&
             matched_candidate_slot->pending &&
             (
@@ -1037,7 +1067,7 @@ namespace platf::dxgi {
             render_input_srv = img_ctx.encoder_input_res.get();
           }
           if (matched_render_slot) {
-            publish_window_video_border_transition(*matched_render_slot);
+            publish_window_region_transition(*matched_render_slot);
           }
           const auto repeat_source_age =
             matched_output_source_at.time_since_epoch().count() != 0 ?
@@ -1286,7 +1316,7 @@ namespace platf::dxgi {
                 est.input_region.video_region && !geometry_available;
               if (roi_mapping_unavailable) {
                 BOOST_LOG(warning)
-                  << "Dump 3D request rejected: the authenticated window-video ROI frame "sv
+                  << "Dump 3D request rejected: the authenticated window-region ROI frame "sv
                      "does not have its required full-source inverse map and zero-plane "sv
                      "evidence."sv;
                 sbs_dumper.reject_pending_request();
@@ -1335,14 +1365,11 @@ namespace platf::dxgi {
                 dump_frame.depth_input_region = est.input_region;
                 dump_frame.depth_video_plan = matched_render_slot->depth_video_plan;
                 dump_frame.input_domain_reset = est.input_domain_reset;
-                dump_frame.window_video_border =
-                  matched_render_slot->window_video_border;
-                dump_frame.window_video_observer_status =
-                  video_dom::status_name(matched_render_slot->window_video_status);
-                dump_frame.window_video_mapping_status =
-                  video_dom::mapping_status_name(
-                    matched_render_slot->window_video_mapping_status
-                  );
+                dump_frame.window_region = matched_render_slot->window_region;
+                dump_frame.window_region_observer_status =
+                  matched_render_slot->window_region_observer_status;
+                dump_frame.window_region_mapping_status =
+                  matched_render_slot->window_region_mapping_status;
                 dump_frame.cuda_graph_active = est.cuda_graph_active;
                 dump_frame.parallax_v2_producer_active =
                   est.parallax_v2_producer_active;
@@ -1988,12 +2015,19 @@ namespace platf::dxgi {
       models::input_color_space color_space = models::input_color_space::srgb;
       std::optional<std::chrono::steady_clock::time_point> source_timestamp;
       std::chrono::steady_clock::time_point captured_at {};
-      std::optional<sbs_debug::window_video_border_snapshot> window_video_border;
+      std::optional<sbs_debug::window_region_snapshot> window_region;
       std::optional<models::depth_video_region_plan_t> depth_video_plan;
       models::depth_input_region_t depth_input_region {};
-      video_dom::status_e window_video_status = video_dom::status_e::stopped;
-      video_dom::mapping_status_e window_video_mapping_status =
-        video_dom::mapping_status_e::invalid_video_rect;
+      std::string window_region_observer_status = "not-observed";
+      std::string window_region_mapping_status = "not-mapped";
+      std::uint64_t live_window_authority_generation = 0u;
+      std::uint64_t live_browser_authority_generation = 0u;
+      std::int32_t live_browser_screen_left = 0;
+      std::int32_t live_browser_screen_top = 0;
+      std::int32_t live_browser_screen_right = 0;
+      std::int32_t live_browser_screen_bottom = 0;
+      video_dom::geometry_authority_class_e live_browser_authority_class =
+        video_dom::geometry_authority_class_e::none;
       bool pending = false;
 
       ID3D11ShaderResourceView *depth_input_srv() noexcept {
@@ -2100,25 +2134,223 @@ namespace platf::dxgi {
         .bottom = source_desc.Height,
         .analysis_generation = 0u,
         .video_region = false,
+        .authority = models::depth_analysis_authority_e::full_source,
       };
     }
 
-    static bool window_video_border_has_route_authority(
-      const video_dom::status_e status,
-      const sbs_debug::window_video_border_snapshot &border,
-      const D3D11_TEXTURE2D_DESC &source_desc
+    std::uint64_t depth_analysis_generation(
+      const models::depth_analysis_domain_key_t &key
     ) noexcept {
-      const bool exactly_full_capture =
-        border.left == 0 && border.top == 0 &&
-        static_cast<std::uint32_t>(border.right) == source_desc.Width &&
-        static_cast<std::uint32_t>(border.bottom) == source_desc.Height;
-      return video_dom::allows_mapped_video_rect(status, exactly_full_capture);
+      return depth_analysis_generation_tracker.select(key);
     }
 
-    std::uint64_t video_depth_analysis_generation(
-      const models::video_depth_domain_key_t &key
+    struct browser_live_authority_key_t {
+      video_dom::status_e status {video_dom::status_e::starting};
+      std::uint64_t window = 0u;
+      std::uint32_t process_id = 0u;
+      std::int32_t document_id = 0;
+      std::int32_t video_id = 0;
+      video_dom::rect_t screen_rect {};
+
+      bool operator==(const browser_live_authority_key_t &) const = default;
+    };
+
+    void observe_live_browser_authority() {
+      std::optional<browser_live_authority_key_t> next;
+      if (video_dom_lease) {
+        const auto browser = video_dom_lease->latest();
+        constexpr auto maximum_age = std::chrono::milliseconds {2500};
+        if (
+          browser && video_dom::carries_video_geometry(browser->status) &&
+          video_dom::usable(*browser, std::chrono::steady_clock::now(), maximum_age)
+        ) {
+          next = browser_live_authority_key_t {
+            .status = browser->status,
+            .window = browser->window,
+            .process_id = browser->process_id,
+            .document_id = browser->document_id,
+            .video_id = browser->video_id,
+            .screen_rect = browser->screen_rect,
+          };
+        }
+      }
+      if (live_browser_authority == next) {
+        return;
+      }
+      const auto same_analysis_identity_shape = [](const auto &left, const auto &right) {
+        const auto width = [](const video_dom::rect_t rect) {
+          return static_cast<std::int64_t>(rect.right) - rect.left;
+        };
+        const auto height = [](const video_dom::rect_t rect) {
+          return static_cast<std::int64_t>(rect.bottom) - rect.top;
+        };
+        return left.window == right.window && left.process_id == right.process_id &&
+               left.document_id == right.document_id && left.video_id == right.video_id &&
+               video_dom::geometry_authority_class(left.status) ==
+                 video_dom::geometry_authority_class(right.status) &&
+               width(left.screen_rect) == width(right.screen_rect) &&
+               height(left.screen_rect) == height(right.screen_rect);
+      };
+      const bool analysis_rearm =
+        live_browser_authority &&
+        (!next || !same_analysis_identity_shape(*live_browser_authority, *next));
+      live_browser_authority = next;
+      if (++live_browser_authority_epoch == 0u) {
+        ++live_browser_authority_epoch;
+      }
+      if (
+        matched_output_valid &&
+        matched_output_input_region.authority ==
+          models::depth_analysis_authority_e::chromium_video
+      ) {
+        clear_cached_roi_output();
+      }
+      if (analysis_rearm || !next) {
+        depth_analysis_generation_tracker.select_full_source();
+      }
+    }
+
+    static bool same_window_analysis_identity_shape(
+      const foreground_window::snapshot_t &left,
+      const foreground_window::snapshot_t &right
     ) noexcept {
-      return video_depth_generation_tracker.select(key);
+      const auto width = [](const foreground_window::rect_t rect) {
+        return static_cast<std::int64_t>(rect.right) - rect.left;
+      };
+      const auto height = [](const foreground_window::rect_t rect) {
+        return static_cast<std::int64_t>(rect.bottom) - rect.top;
+      };
+      return left.window == right.window && left.process_id == right.process_id &&
+             left.monitor == right.monitor &&
+             width(left.client_screen_rect) == width(right.client_screen_rect) &&
+             height(left.client_screen_rect) == height(right.client_screen_rect);
+    }
+
+    void clear_cached_roi_output() noexcept {
+      if (!matched_output_valid || !matched_output_input_region.video_region) {
+        return;
+      }
+      matched_output_valid = false;
+      matched_output_source_at = {};
+      matched_output_source_timestamp.reset();
+      matched_output_input_region = {};
+      matched_output_color_space = models::input_color_space::srgb;
+      matched_output_timeout_active = false;
+    }
+
+    foreground_window::snapshot_t observe_live_window_authority(
+      const D3D11_TEXTURE2D_DESC &source_desc,
+      const std::optional<std::chrono::steady_clock::time_point> &content_timestamp
+    ) {
+      foreground_window::snapshot_t observed;
+      if (content_timestamp) {
+        observed = foreground_window_tracker.update(foreground_window::sample());
+      } else {
+        observed = foreground_window_tracker.update({
+          .status = foreground_window::status_e::no_foreground,
+          .observed_at = std::chrono::steady_clock::now(),
+        });
+      }
+
+      std::optional<foreground_window::snapshot_t> next_root;
+      if (foreground_window::carries_geometry(observed.status)) {
+        next_root = observed;
+      }
+      std::optional<foreground_window::snapshot_t> next_region;
+      DXGI_OUTPUT_DESC output_desc {};
+      if (
+        next_root &&
+        display && display->output &&
+        display->display_rotation == DXGI_MODE_ROTATION_IDENTITY &&
+        static_cast<std::uint32_t>(display->width) == source_desc.Width &&
+        static_cast<std::uint32_t>(display->height) == source_desc.Height &&
+        SUCCEEDED(display->output->GetDesc(&output_desc))
+      ) {
+        const foreground_window::capture_target_t target {
+          .screen_rect = {
+            output_desc.DesktopCoordinates.left,
+            output_desc.DesktopCoordinates.top,
+            output_desc.DesktopCoordinates.right,
+            output_desc.DesktopCoordinates.bottom,
+          },
+          .width = source_desc.Width,
+          .height = source_desc.Height,
+          .monitor = reinterpret_cast<std::uintptr_t>(output_desc.Monitor),
+          .identity_orientation = true,
+        };
+        // Liveness follows the current root/client geometry, not the content-causality gate. A
+        // move must revoke an old positioned completion immediately, while the later private-copy
+        // path still requires geometry_valid_since <= content_timestamp before authorizing a new
+        // foreground ROI. This separation preserves the position-independent DAV2 domain.
+        if (foreground_window::map_to_capture(observed, target)) {
+          next_region = observed;
+        }
+      }
+
+      const auto changed = [](const auto &before, const auto &after) {
+        return before.has_value() != after.has_value() ||
+               (before && after && before->generation != after->generation);
+      };
+      const bool root_changed = changed(live_window_authority, next_root);
+      const bool region_changed = changed(live_foreground_region, next_region);
+      const bool analysis_authority_changed =
+        live_window_authority &&
+        (!next_root ||
+         !same_window_analysis_identity_shape(*live_window_authority, *next_root));
+      if (root_changed || region_changed) {
+        clear_cached_roi_output();
+      }
+      if (
+        analysis_authority_changed ||
+        (live_foreground_region && !next_region) ||
+        !next_root
+      ) {
+        depth_analysis_generation_tracker.select_full_source();
+      }
+      live_window_authority = next_root;
+      live_foreground_region = next_region;
+      observe_live_browser_authority();
+      return observed;
+    }
+
+    bool window_region_matches_live_authority(
+      const sbs_debug::window_region_snapshot &region
+    ) const noexcept {
+      const auto &authority =
+        region.authority_kind == sbs_debug::window_region_authority_kind_e::chromium_video ?
+          live_window_authority :
+          live_foreground_region;
+      return authority && authority->window == region.hwnd &&
+             authority->process_id == region.process_id;
+    }
+
+    bool window_region_authorized_for_render(
+      const matched_frame_slot_t &slot
+    ) const noexcept {
+      if (!slot.window_region || !window_region_matches_live_authority(*slot.window_region) ||
+          slot.live_window_authority_generation == 0u) {
+        return false;
+      }
+      if (
+        slot.window_region->authority_kind ==
+        sbs_debug::window_region_authority_kind_e::chromium_video
+      ) {
+        const auto browser = video_dom_lease ? video_dom_lease->latest() : nullptr;
+        return live_window_authority->generation == slot.live_window_authority_generation &&
+               slot.live_browser_authority_generation == live_browser_authority_epoch &&
+               browser && video_dom::carries_video_geometry(browser->status) &&
+               browser->window == slot.window_region->hwnd &&
+               browser->process_id == slot.window_region->process_id &&
+               browser->document_id == slot.window_region->document_id &&
+               browser->video_id == slot.window_region->video_id &&
+               browser->screen_rect.left == slot.live_browser_screen_left &&
+               browser->screen_rect.top == slot.live_browser_screen_top &&
+               browser->screen_rect.right == slot.live_browser_screen_right &&
+               browser->screen_rect.bottom == slot.live_browser_screen_bottom &&
+               video_dom::geometry_authority_class(browser->status) ==
+                 slot.live_browser_authority_class;
+      }
+      return live_foreground_region->generation == slot.live_window_authority_generation;
     }
 
     bool copy_video_depth_crop(
@@ -2181,7 +2413,7 @@ namespace platf::dxgi {
         if (FAILED(status)) {
           video_depth_crop_failure_key = failure_key;
           video_depth_crop_retry_frames = 120u;
-          // A crop allocation failure disables this exact ROI route uniformly across both
+          // A crop allocation failure disables this exact window-region route uniformly across both
           // matched slots. Keeping a cached crop in only one slot would alternate ROI/full
           // domains and prevent either asynchronous completion from becoming renderable.
           for (auto &matched_slot : matched_frame_slots) {
@@ -2189,7 +2421,7 @@ namespace platf::dxgi {
             matched_slot.depth_crop_texture.reset();
           }
           BOOST_LOG(warning)
-            << "Host SBS could not allocate the video-only depth crop "sv
+            << "Host SBS could not allocate the window-region depth crop "sv
             << rect.width() << 'x' << rect.height() << " [0x"sv
             << util::hex(status).to_string_view()
             << "]; this frame uses full-source V2."sv;
@@ -2224,39 +2456,38 @@ namespace platf::dxgi {
 
     void select_depth_input_region(
       matched_frame_slot_t &slot,
-      const D3D11_TEXTURE2D_DESC &source_desc
+      const D3D11_TEXTURE2D_DESC &source_desc,
+      const bool finalize_full_source = true
     ) {
       slot.depth_video_plan.reset();
       slot.depth_input_region = full_depth_input_region(source_desc);
 
-      if (
-        slot.window_video_border &&
-        window_video_border_has_route_authority(
-          slot.window_video_status,
-          *slot.window_video_border,
-          source_desc
-        )
-      ) {
-        const auto &border = *slot.window_video_border;
+      if (slot.window_region) {
+        const auto &region = *slot.window_region;
         const models::depth_source_rect_t semantic_rect {
-          static_cast<std::uint32_t>(border.left),
-          static_cast<std::uint32_t>(border.top),
-          static_cast<std::uint32_t>(border.right),
-          static_cast<std::uint32_t>(border.bottom),
+          static_cast<std::uint32_t>(region.left),
+          static_cast<std::uint32_t>(region.top),
+          static_cast<std::uint32_t>(region.right),
+          static_cast<std::uint32_t>(region.bottom),
         };
-        const auto make_video_domain_key =
+        const auto authority =
+          region.authority_kind == sbs_debug::window_region_authority_kind_e::chromium_video ?
+            models::depth_analysis_authority_e::chromium_video :
+            models::depth_analysis_authority_e::foreground_client;
+        const auto make_domain_key =
           [&](const models::depth_source_rect_t analysis_rect) {
-            return models::video_depth_domain_key_t {
+            return models::depth_analysis_domain_key_t {
               .source_width = source_desc.Width,
               .source_height = source_desc.Height,
               .semantic_width = semantic_rect.width(),
               .semantic_height = semantic_rect.height(),
               .crop_width = analysis_rect.width(),
               .crop_height = analysis_rect.height(),
-              .hwnd = border.hwnd,
-              .process_id = border.process_id,
-              .document_id = border.document_id,
-              .video_id = border.video_id,
+              .hwnd = region.hwnd,
+              .process_id = region.process_id,
+              .document_id = region.document_id,
+              .video_id = region.video_id,
+              .authority = authority,
             };
           };
         const auto active_shape = models::fit_host_sbs_v2_depth_tensor_shape(
@@ -2270,7 +2501,7 @@ namespace platf::dxgi {
           active_shape
         );
         if (plan && copy_video_depth_crop(slot, source_desc, plan->source_rect)) {
-          const auto key = make_video_domain_key(plan->source_rect);
+          const auto key = make_domain_key(plan->source_rect);
           slot.depth_input_region = models::depth_input_region_t {
             .source_width = source_desc.Width,
             .source_height = source_desc.Height,
@@ -2278,16 +2509,28 @@ namespace platf::dxgi {
             .top = plan->source_rect.top,
             .right = plan->source_rect.right,
             .bottom = plan->source_rect.bottom,
-            .analysis_generation = video_depth_analysis_generation(key),
+            .analysis_generation = depth_analysis_generation(key),
             .video_region = true,
+            .authority = authority,
           };
           slot.depth_video_plan = std::move(plan);
         }
-
       }
 
       if (!slot.depth_input_region.video_region) {
-        video_depth_generation_tracker.select_full_source();
+        if (finalize_full_source) {
+          depth_analysis_generation_tracker.select_full_source();
+        }
+        if (
+          slot.window_region &&
+          !(
+            slot.window_region->left == 0 && slot.window_region->top == 0 &&
+            slot.window_region->right == slot.window_region->source_width &&
+            slot.window_region->bottom == slot.window_region->source_height
+          )
+        ) {
+          slot.window_region.reset();
+        }
       }
       if (
         matched_output_valid &&
@@ -2306,8 +2549,8 @@ namespace platf::dxgi {
     }
 
 
-    std::optional<sbs_debug::window_video_border_snapshot>
-    capture_window_video_border(
+    std::optional<sbs_debug::window_region_snapshot>
+    capture_browser_window_region(
       const D3D11_TEXTURE2D_DESC &source_desc,
       const std::uint64_t frame_id,
       const std::optional<std::chrono::steady_clock::time_point> &content_timestamp,
@@ -2371,11 +2614,16 @@ namespace platf::dxgi {
         return std::nullopt;
       }
 
+      DXGI_OUTPUT_DESC output_desc {};
+      if (!display->output || FAILED(display->output->GetDesc(&output_desc))) {
+        mapping_status = video_dom::mapping_status_e::invalid_capture_rect;
+        return std::nullopt;
+      }
       const video_dom::rect_t desktop_rect {
-        display->offset_x,
-        display->offset_y,
-        display->offset_x + display->width,
-        display->offset_y + display->height,
+        output_desc.DesktopCoordinates.left,
+        output_desc.DesktopCoordinates.top,
+        output_desc.DesktopCoordinates.right,
+        output_desc.DesktopCoordinates.bottom,
       };
       const auto mapped = video_dom::map_screen_rect_to_capture(
         observed->screen_rect,
@@ -2398,7 +2646,8 @@ namespace platf::dxgi {
       const auto source_content_age = std::chrono::duration_cast<std::chrono::milliseconds>(
         captured_at - *content_timestamp
       );
-      return sbs_debug::window_video_border_snapshot {
+      return sbs_debug::window_region_snapshot {
+        .authority_kind = sbs_debug::window_region_authority_kind_e::chromium_video,
         .matched_frame_id = frame_id,
         .source_width = source_desc.Width,
         .source_height = source_desc.Height,
@@ -2411,14 +2660,14 @@ namespace platf::dxgi {
         .document_id = observed->document_id,
         .video_id = observed->video_id,
         .generation = observed->generation,
-        .latest_heartbeat_age_ms_at_capture = static_cast<std::uint32_t>(
+        .latest_observation_age_ms_at_capture = static_cast<std::uint32_t>(
           std::clamp<std::int64_t>(
             heartbeat_age.count(),
             0,
             std::numeric_limits<std::uint32_t>::max()
           )
         ),
-        .maximum_heartbeat_age_ms = static_cast<std::uint32_t>(maximum_age.count()),
+        .maximum_observation_age_ms = static_cast<std::uint32_t>(maximum_age.count()),
         .geometry_continuity_ms_at_capture = static_cast<std::uint64_t>(
           std::max<std::int64_t>(geometry_continuity.count(), 0)
         ),
@@ -2428,11 +2677,103 @@ namespace platf::dxgi {
       };
     }
 
-    static bool same_window_video_border(
-      const sbs_debug::window_video_border_snapshot &left,
-      const sbs_debug::window_video_border_snapshot &right
+    std::optional<sbs_debug::window_region_snapshot>
+    capture_foreground_window_region(
+      const D3D11_TEXTURE2D_DESC &source_desc,
+      const std::uint64_t frame_id,
+      const std::optional<std::chrono::steady_clock::time_point> &content_timestamp,
+      const std::chrono::steady_clock::time_point captured_at,
+      const foreground_window::snapshot_t &snapshot,
+      std::string &observer_status,
+      std::string &mapping_status
+    ) {
+      constexpr auto maximum_age = std::chrono::milliseconds {250};
+      observer_status = foreground_window::status_name(snapshot.status);
+      mapping_status = "not-mapped";
+      if (
+        !display ||
+        !foreground_window::usable_for_content(
+          snapshot,
+          content_timestamp,
+          captured_at,
+          maximum_age
+        )
+      ) {
+        return std::nullopt;
+      }
+
+      DXGI_OUTPUT_DESC output_desc {};
+      if (!display->output || FAILED(display->output->GetDesc(&output_desc))) {
+        mapping_status = foreground_window::mapping_status_name(
+          foreground_window::mapping_status_e::invalid_capture_target
+        );
+        return std::nullopt;
+      }
+      const foreground_window::capture_target_t target {
+        .screen_rect = {
+          output_desc.DesktopCoordinates.left,
+          output_desc.DesktopCoordinates.top,
+          output_desc.DesktopCoordinates.right,
+          output_desc.DesktopCoordinates.bottom,
+        },
+        .width = source_desc.Width,
+        .height = source_desc.Height,
+        .monitor = reinterpret_cast<std::uintptr_t>(output_desc.Monitor),
+        .identity_orientation =
+          display->display_rotation == DXGI_MODE_ROTATION_IDENTITY,
+      };
+      const auto mapped = foreground_window::map_to_capture(snapshot, target);
+      mapping_status = foreground_window::mapping_status_name(mapped.status);
+      if (!mapped) {
+        return std::nullopt;
+      }
+
+      const auto observation_age = std::chrono::duration_cast<std::chrono::milliseconds>(
+        captured_at - snapshot.observed_at
+      );
+      const auto geometry_continuity = std::chrono::duration_cast<std::chrono::milliseconds>(
+        captured_at - snapshot.geometry_valid_since
+      );
+      const auto source_content_age = std::chrono::duration_cast<std::chrono::milliseconds>(
+        captured_at - *content_timestamp
+      );
+      return sbs_debug::window_region_snapshot {
+        .authority_kind = sbs_debug::window_region_authority_kind_e::foreground_client,
+        .matched_frame_id = frame_id,
+        .source_width = source_desc.Width,
+        .source_height = source_desc.Height,
+        .left = mapped.capture_pixels.left,
+        .top = mapped.capture_pixels.top,
+        .right = mapped.capture_pixels.right,
+        .bottom = mapped.capture_pixels.bottom,
+        .hwnd = snapshot.window,
+        .process_id = snapshot.process_id,
+        .document_id = 0,
+        .video_id = 0,
+        .generation = snapshot.generation,
+        .latest_observation_age_ms_at_capture = static_cast<std::uint32_t>(
+          std::clamp<std::int64_t>(
+            observation_age.count(),
+            0,
+            std::numeric_limits<std::uint32_t>::max()
+          )
+        ),
+        .maximum_observation_age_ms = static_cast<std::uint32_t>(maximum_age.count()),
+        .geometry_continuity_ms_at_capture = static_cast<std::uint64_t>(
+          std::max<std::int64_t>(geometry_continuity.count(), 0)
+        ),
+        .source_content_age_ms_at_capture = static_cast<std::uint64_t>(
+          std::max<std::int64_t>(source_content_age.count(), 0)
+        ),
+      };
+    }
+
+    static bool same_window_region(
+      const sbs_debug::window_region_snapshot &left,
+      const sbs_debug::window_region_snapshot &right
     ) noexcept {
-      return left.source_width == right.source_width &&
+      return left.authority_kind == right.authority_kind &&
+             left.source_width == right.source_width &&
              left.source_height == right.source_height &&
              left.left == right.left && left.top == right.top &&
              left.right == right.right && left.bottom == right.bottom &&
@@ -2440,87 +2781,90 @@ namespace platf::dxgi {
              left.document_id == right.document_id && left.video_id == right.video_id;
     }
 
-    void publish_window_video_border_transition(const matched_frame_slot_t &slot) {
+    void publish_window_region_transition(const matched_frame_slot_t &slot) {
       const bool observer_state_changed =
-        !last_window_video_status ||
-        *last_window_video_status != slot.window_video_status ||
-        !last_window_video_mapping_status ||
-        *last_window_video_mapping_status != slot.window_video_mapping_status;
-      if (slot.window_video_border) {
+        !last_window_region_observer_status ||
+        *last_window_region_observer_status != slot.window_region_observer_status ||
+        !last_window_region_mapping_status ||
+        *last_window_region_mapping_status != slot.window_region_mapping_status;
+      if (slot.window_region) {
         if (
-          !last_window_video_border ||
-          !same_window_video_border(*last_window_video_border, *slot.window_video_border) ||
+          !last_window_region ||
+          !same_window_region(*last_window_region, *slot.window_region) ||
           observer_state_changed
         ) {
-          const auto &border = *slot.window_video_border;
+          const auto &region = *slot.window_region;
           BOOST_LOG(info)
-            << "Host SBS window-video border attributed to matched frame "sv
-            << border.matched_frame_id << ": capture="sv
-            << border.left << ':' << border.top << '-' << border.right << ':'
-            << border.bottom << " source="sv << border.source_width << 'x'
-            << border.source_height << " hwnd=0x"sv
-            << util::hex(border.hwnd).to_string_view() << " pid="sv
-            << border.process_id << " document="sv << border.document_id
-            << " video="sv << border.video_id << " heartbeat_age_ms="sv
-            << border.latest_heartbeat_age_ms_at_capture
+            << "Host SBS window region attributed to matched frame "sv
+            << region.matched_frame_id << ": authority="sv
+            << sbs_debug::window_region_authority_kind_name(region.authority_kind)
+            << " capture="sv << region.left << ':' << region.top << '-'
+            << region.right << ':' << region.bottom << " source="sv
+            << region.source_width << 'x' << region.source_height << " hwnd=0x"sv
+            << util::hex(region.hwnd).to_string_view() << " pid="sv
+            << region.process_id << " document="sv << region.document_id
+            << " video="sv << region.video_id << " observation_age_ms="sv
+            << region.latest_observation_age_ms_at_capture
             << " geometry_before_content_ms="sv
-            << border.geometry_continuity_ms_at_capture -
-                 border.source_content_age_ms_at_capture
+            << region.geometry_continuity_ms_at_capture -
+                 region.source_content_age_ms_at_capture
             << '.';
           if (slot.depth_video_plan) {
             const auto &plan = *slot.depth_video_plan;
             BOOST_LOG(info)
-              << "Host SBS video-only DAV2 region active: crop="sv
+              << "Host SBS window-region DAV2 analysis active: crop="sv
               << plan.source_rect.left << ':' << plan.source_rect.top << '-'
               << plan.source_rect.right << ':' << plan.source_rect.bottom
               << " tensor="sv << plan.tensor_shape.width << 'x'
               << plan.tensor_shape.height << " inward_trim_pct="sv
               << plan.trimmed_area_fraction * 100.0f
-              << "; scene cuts and scene center are video-local."sv;
+              << "; scene cuts and scene center are region-local."sv;
           } else if (
-            border.left == 0 && border.top == 0 &&
-            border.right == border.source_width &&
-            border.bottom == border.source_height
+            region.left == 0 && region.top == 0 &&
+            region.right == region.source_width &&
+            region.bottom == region.source_height
           ) {
             BOOST_LOG(info)
-              << "Host SBS semantic video covers the exact capture extent; using canonical "sv
+              << "Host SBS window region covers the exact capture extent; using canonical "sv
                  "ordinary full-frame V2."sv;
-          } else if (slot.window_video_status == video_dom::status_e::ok_fullscreen) {
+          } else if (
+            region.authority_kind ==
+              sbs_debug::window_region_authority_kind_e::chromium_video &&
+            slot.window_region_observer_status == "ok-fullscreen"
+          ) {
             BOOST_LOG(info)
               << "Host SBS fullscreen-only browser-client authority does not map to the exact "sv
                  "capture extent; the windowed ROI remains disabled."sv;
           } else {
             BOOST_LOG(info)
-              << "Host SBS video border is not eligible for the active authenticated tensor; "sv
+              << "Host SBS window region is not eligible for the active authenticated tensor; "sv
                  "using ordinary full-frame V2."sv;
           }
         }
-        last_window_video_border = slot.window_video_border;
-        last_window_video_status = slot.window_video_status;
-        last_window_video_mapping_status = slot.window_video_mapping_status;
+        last_window_region = slot.window_region;
+        last_window_region_observer_status = slot.window_region_observer_status;
+        last_window_region_mapping_status = slot.window_region_mapping_status;
         return;
       }
 
-      if (last_window_video_border) {
+      if (last_window_region) {
         BOOST_LOG(info)
-          << "Host SBS window-video border released at matched frame "sv
-          << slot.frame_id << " (helper_status="sv
-          << video_dom::status_name(slot.window_video_status)
-          << ", mapping_status="sv
-          << video_dom::mapping_status_name(slot.window_video_mapping_status)
+          << "Host SBS window region released at matched frame "sv
+          << slot.frame_id << " (observer_status="sv
+          << slot.window_region_observer_status
+          << ", mapping_status="sv << slot.window_region_mapping_status
           << "); full-frame V2 remains active."sv;
-        last_window_video_border.reset();
+        last_window_region.reset();
       } else if (observer_state_changed) {
         BOOST_LOG(debug)
-          << "Host SBS window-video border unavailable at matched frame "sv
-          << slot.frame_id << " (helper_status="sv
-          << video_dom::status_name(slot.window_video_status)
-          << ", mapping_status="sv
-          << video_dom::mapping_status_name(slot.window_video_mapping_status)
+          << "Host SBS window region unavailable at matched frame "sv
+          << slot.frame_id << " (observer_status="sv
+          << slot.window_region_observer_status
+          << ", mapping_status="sv << slot.window_region_mapping_status
           << "); full-frame V2 remains active."sv;
       }
-      last_window_video_status = slot.window_video_status;
-      last_window_video_mapping_status = slot.window_video_mapping_status;
+      last_window_region_observer_status = slot.window_region_observer_status;
+      last_window_region_mapping_status = slot.window_region_mapping_status;
     }
 
     bool copy_matched_frame(
@@ -2578,21 +2922,153 @@ namespace platf::dxgi {
 
       const auto captured_at = std::chrono::steady_clock::now();
       device_ctx->CopyResource(slot.texture.get(), source);
+      // Recheck after the copy as the causal authority for this exact matched image. The earlier
+      // per-convert observation breaks continuity across busy periods; this second observation
+      // closes a focus/move/resize race between admission and CopyResource.
+      const auto copied_foreground_snapshot = observe_live_window_authority(
+        source_desc,
+        content_timestamp
+      );
+      const auto copied_browser_authority_epoch = live_browser_authority_epoch;
+      const auto copied_browser_authority = live_browser_authority;
+      const auto attributed_at = std::chrono::steady_clock::now();
       slot.frame_id = frame_id;
       slot.color_space = color_space;
       slot.source_timestamp = source_timestamp;
       // Production uses source age to bound V2 output repetition; this is no longer diagnostics-
       // only metadata. The aggregate age counters below remain gated by diagnostics_enabled.
       slot.captured_at = captured_at;
-      slot.window_video_border = capture_window_video_border(
+      slot.window_region.reset();
+      slot.window_region_observer_status = "not-observed";
+      slot.window_region_mapping_status = "not-mapped";
+      video_dom::status_e browser_status = video_dom::status_e::stopped;
+      video_dom::mapping_status_e browser_mapping_status =
+        video_dom::mapping_status_e::invalid_video_rect;
+      const bool foreground_causal_wait =
+        copied_foreground_snapshot.status == foreground_window::status_e::ok &&
+        live_foreground_region &&
+        copied_foreground_snapshot.window == live_foreground_region->window &&
+        copied_foreground_snapshot.process_id == live_foreground_region->process_id &&
+        copied_foreground_snapshot.monitor == live_foreground_region->monitor &&
+        same_window_analysis_identity_shape(
+          copied_foreground_snapshot,
+          *live_foreground_region
+        ) &&
+        content_timestamp &&
+        *content_timestamp < copied_foreground_snapshot.geometry_valid_since;
+      if (foreground_causal_wait) {
+        // The copied desktop content predates this same-size window move. Do not let either a
+        // stale Chromium rectangle or the generic foreground route rebind those pixels, and do
+        // not publish a false full-source domain transition. The next causally eligible copy can
+        // reuse the position-independent DAV2 analysis history.
+        return false;
+      }
+      auto browser_region = capture_browser_window_region(
         source_desc,
         frame_id,
         content_timestamp,
         captured_at,
-        slot.window_video_status,
-        slot.window_video_mapping_status
+        browser_status,
+        browser_mapping_status
       );
-      select_depth_input_region(slot, source_desc);
+      const bool browser_fullscreen_only_mismatch =
+        browser_region && browser_status == video_dom::status_e::ok_fullscreen &&
+        !(
+          browser_region->left == 0 && browser_region->top == 0 &&
+          browser_region->right == browser_region->source_width &&
+          browser_region->bottom == browser_region->source_height
+        );
+      if (browser_fullscreen_only_mismatch) {
+        browser_region.reset();
+      }
+      if (browser_region && !window_region_matches_live_authority(*browser_region)) {
+        browser_status = video_dom::status_e::changed;
+        browser_mapping_status = video_dom::mapping_status_e::foreground_mismatch;
+        browser_region.reset();
+      }
+
+      if (browser_region) {
+        slot.window_region = std::move(browser_region);
+        slot.window_region_observer_status = video_dom::status_name(browser_status);
+        slot.window_region_mapping_status =
+          video_dom::mapping_status_name(browser_mapping_status);
+      } else {
+        std::string foreground_observer_status;
+        std::string foreground_mapping_status;
+        slot.window_region = capture_foreground_window_region(
+          source_desc,
+          frame_id,
+          content_timestamp,
+          attributed_at,
+          copied_foreground_snapshot,
+          foreground_observer_status,
+          foreground_mapping_status
+        );
+        slot.window_region_observer_status = std::move(foreground_observer_status);
+        slot.window_region_mapping_status = std::move(foreground_mapping_status);
+      }
+      const bool retry_foreground_after_browser =
+        slot.window_region &&
+        slot.window_region->authority_kind ==
+          sbs_debug::window_region_authority_kind_e::chromium_video &&
+        !(
+          slot.window_region->left == 0 && slot.window_region->top == 0 &&
+          slot.window_region->right == slot.window_region->source_width &&
+          slot.window_region->bottom == slot.window_region->source_height
+        );
+      select_depth_input_region(
+        slot,
+        source_desc,
+        !retry_foreground_after_browser
+      );
+      if (!slot.depth_input_region.video_region && retry_foreground_after_browser) {
+        std::string foreground_observer_status;
+        std::string foreground_mapping_status;
+        slot.window_region = capture_foreground_window_region(
+          source_desc,
+          frame_id,
+          content_timestamp,
+          attributed_at,
+          copied_foreground_snapshot,
+          foreground_observer_status,
+          foreground_mapping_status
+        );
+        slot.window_region_observer_status = std::move(foreground_observer_status);
+        slot.window_region_mapping_status = std::move(foreground_mapping_status);
+        select_depth_input_region(slot, source_desc);
+      }
+      slot.live_window_authority_generation =
+        slot.window_region && window_region_matches_live_authority(*slot.window_region) ?
+          (
+            slot.window_region->authority_kind ==
+                sbs_debug::window_region_authority_kind_e::chromium_video ?
+              live_window_authority->generation :
+              live_foreground_region->generation
+          ) :
+          0u;
+      slot.live_browser_authority_generation =
+        slot.window_region &&
+            slot.window_region->authority_kind ==
+              sbs_debug::window_region_authority_kind_e::chromium_video ?
+          copied_browser_authority_epoch :
+          0u;
+      if (slot.live_browser_authority_generation != 0u && video_dom_lease) {
+        if (copied_browser_authority) {
+          slot.live_browser_screen_left = copied_browser_authority->screen_rect.left;
+          slot.live_browser_screen_top = copied_browser_authority->screen_rect.top;
+          slot.live_browser_screen_right = copied_browser_authority->screen_rect.right;
+          slot.live_browser_screen_bottom = copied_browser_authority->screen_rect.bottom;
+          slot.live_browser_authority_class =
+            video_dom::geometry_authority_class(copied_browser_authority->status);
+        }
+      }
+      if (slot.depth_input_region.video_region &&
+          slot.live_window_authority_generation == 0u) {
+        slot.window_region.reset();
+        slot.window_region_observer_status = "not-observed";
+        slot.window_region_mapping_status = "not-mapped";
+        select_depth_input_region(slot, source_desc);
+      }
       if (
         !sbs_telemetry_input_domain_valid ||
         !slot.depth_input_region.same_analysis_domain(sbs_telemetry_input_region) ||
@@ -2881,12 +3357,17 @@ namespace platf::dxgi {
       sbs_telemetry_producer_failure_published = false;
       sbs_telemetry_last_copy = {};
       matched_frame_slots = {};
-      video_depth_generation_tracker = {};
+      depth_analysis_generation_tracker = {};
+      foreground_window_tracker.reset();
+      live_window_authority.reset();
+      live_foreground_region.reset();
+      live_browser_authority.reset();
+      live_browser_authority_epoch = 0u;
       video_depth_crop_failure_key.reset();
       video_depth_crop_retry_frames = 0u;
-      last_window_video_border.reset();
-      last_window_video_status.reset();
-      last_window_video_mapping_status.reset();
+      last_window_region.reset();
+      last_window_region_observer_status.reset();
+      last_window_region_mapping_status.reset();
       sbs_frame_sequence = 0;
       matched_output_valid = false;
       matched_output_source_at = {};
@@ -3585,13 +4066,17 @@ namespace platf::dxgi {
     D3D11_VIEWPORT sbs_viewport;
     std::array<matched_frame_slot_t, 2> matched_frame_slots;
     std::optional<video_dom::lease_t> video_dom_lease;
-    models::video_depth_analysis_generation_tracker_t video_depth_generation_tracker;
+    models::depth_analysis_generation_tracker_t depth_analysis_generation_tracker;
+    foreground_window::continuity_tracker_t foreground_window_tracker;
+    std::optional<foreground_window::snapshot_t> live_window_authority;
+    std::optional<foreground_window::snapshot_t> live_foreground_region;
+    std::optional<browser_live_authority_key_t> live_browser_authority;
+    std::uint64_t live_browser_authority_epoch = 0u;
     std::optional<video_depth_crop_failure_key_t> video_depth_crop_failure_key;
     unsigned video_depth_crop_retry_frames = 0u;
-    std::optional<sbs_debug::window_video_border_snapshot>
-      last_window_video_border;
-    std::optional<video_dom::status_e> last_window_video_status;
-    std::optional<video_dom::mapping_status_e> last_window_video_mapping_status;
+    std::optional<sbs_debug::window_region_snapshot> last_window_region;
+    std::optional<std::string> last_window_region_observer_status;
+    std::optional<std::string> last_window_region_mapping_status;
     std::uint64_t sbs_frame_sequence = 0;
     bool matched_output_valid = false;
     std::chrono::steady_clock::time_point matched_output_source_at {};
@@ -5021,7 +5506,7 @@ namespace platf::dxgi {
       frame_timestamp = std::chrono::steady_clock::now() - qpc_time_difference(qpc_counter(), qpc_displayed);
     }
     if (frame_info.LastPresentTime.QuadPart != 0) {
-      // The content timestamp deliberately excludes cursor-only acquisitions. Window-video
+      // The content timestamp deliberately excludes cursor-only acquisitions. Window-region
       // geometry describes desktop pixels and must not be paired to an older surface merely
       // because the hardware cursor moved later.
       last_content_timestamp = std::chrono::steady_clock::now() - qpc_time_difference(
@@ -5563,7 +6048,7 @@ namespace platf::dxgi {
     if (img_out) {
       img_out->frame_timestamp = frame_timestamp;
       // WGC does not expose a LastPresentTime equivalent that distinguishes desktop content from
-      // cursor-only compositor frames. Window-video attribution therefore abstains on WGC.
+      // cursor-only compositor frames. Window-region attribution therefore abstains on WGC.
       img_out->content_timestamp.reset();
     }
 

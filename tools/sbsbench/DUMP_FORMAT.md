@@ -30,13 +30,13 @@ The core package contains:
 | `shadow_state.json`, `shadow_frame_stats.json` | Typed V2 state and current-frame statistics |
 | `warp_map.f32`, `warp_map_shape.json` | Exact inverse map; required for ROI packages |
 | `warp_mask.png` | Boundary-extrapolation diagnostic |
-| `window_video_border.json` | Required semantic observation for ROI packages |
+| `window_region.json` | Required semantic observation for ROI packages |
 | `sbs.png` | Packed stereo preview |
 | `subtitle_conditioning.json` | Required current subtitle-authority descriptor; canonical `none` or `subtitle-slr9` |
 | `subtitle_ocr_record.u32` | Active-only exact-frame OCR8 record: 208 little-endian uint32 words |
 | `subtitle_locator_state.u32` | Active-only compact SLR9 state: 80 little-endian uint32 words |
 
-All `.f32` files are little-endian float32. Schema 27 accepts the canonical inactive descriptor or
+All `.f32` files are little-endian float32. Schema 28 accepts the canonical inactive descriptor or
 the one current `subtitle-slr9` package. It binds Depth Coordinate V2 schema `46`, tag
 `0xd18ff0f3`, canonical SHA-256
 `8ab387f9bcda29e90455ce9e5b8677cef3cd7744fe03ee03202a4699fa7e4ead`, and producer
@@ -124,14 +124,28 @@ instead replays `dx = 0` everywhere and `dy = max(top - y, 0)`. Together with it
 full-width/to-bottom current cover, this gives the constant ribbon plane a collar only above its
 corrected top edge; never at a nominal side or bottom edge.
 
-## Analysis domains
+## Analysis domains and window provenance
 
-A full-source package uses analysis generation zero. A video-region package binds a nonzero
+A full-source package uses analysis generation zero. A window-region package binds a nonzero
 analysis generation, the exact inward crop, tensor extent, unit conversion, and outside-only collar
-in `depth_input_region.json`. Crop-local depth must never be interpreted as a full-source field.
-The required full-source inverse map proves that samples beyond the conservative collar return to
-identity. `window_video_border.json` is semantic planning evidence, not independent geometry
-authority.
+in `depth_input_region.json` schema `2`. Crop-local depth must never be interpreted as a full-source
+field. The required full-source inverse map proves that samples beyond the conservative collar
+return to identity.
+
+`window_region.json` schema `1` is the matched-frame provenance behind that planner input, not an
+independent geometry or renderer authority. Its `authority_kind` is decisive:
+
+- `chromium-video` requires HWND, PID, observer generation, and nonzero Chromium document/video
+  identities. Its freshness is the age of the latest semantic observation.
+- `foreground-client` requires HWND, PID, and observer generation, while document/video identities
+  are exactly zero because a native foreground window has no DOM identity. Its freshness is the age
+  of the latest native foreground-window observation.
+
+Both kinds bind the same half-open matched-source rectangle, source extent, causality checks, and
+exact deterministic inward-fit planner validation. An authoritative window-region package requires
+observer status `ok` and mapping status `ok`; diagnostic full-source packages may additionally
+carry available Chromium `ok-fullscreen` provenance. Non-authoritative/unavailable statuses remain
+diagnostic strings and never grant ROI authority.
 
 ## Strict verification
 
@@ -142,7 +156,7 @@ The maintained reader:
 3. verifies every required content hash and numeric extent;
 4. replays the ownership, vertical-share, and horizontal-majorant recurrences in float32 order;
 5. requires `warp_depth.f32` to equal the selected final field;
-6. validates ROI placement, semantic-border identity, inverse-map geometry, and the exterior
+6. validates ROI placement, authority-specific window identity, inverse-map geometry, and the exterior
    zero-plane evidence; and
 7. validates canonical inactive metadata, or the exact current OCR8/SLR9 model, shader, record,
    state, and artifact identities;

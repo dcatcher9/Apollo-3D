@@ -38,7 +38,7 @@ namespace platf::sbs_debug {
    *
    * model_input and raw_depth are immutable estimator snapshots. warp_depth is the exact signed,
    * anisotropically slope-limited final parallax consumed by production V2: full-source-U in the
-   * ordinary mode and ROI-local-U in video-region mode. ROI renderer authority is the pair of
+   * ordinary mode and ROI-local-U in window-region mode. ROI renderer authority is the pair of
    * that crop-local field and depth_input_region's scale/outside-collar embedding. The
    * adaptive_state/depth_frame_state pair is optional comparison-only evidence from the retained
    * scene-cut bridge; it never authorizes a dump or controls live geometry. The immutable V2
@@ -92,10 +92,10 @@ namespace platf::sbs_debug {
     std::optional<models::depth_video_region_plan_t> depth_video_plan;
     /** True when this completion was the first frame after its analysis domain was rearmed. */
     bool input_domain_reset = false;
-    /** Optional, diagnostic-only browser-video border stamped onto matched_frame_id. */
-    std::optional<window_video_border_snapshot> window_video_border;
-    std::string window_video_observer_status = "not-observed";
-    std::string window_video_mapping_status = "not-mapped";
+    /** Optional matched-window provenance stamped onto matched_frame_id. */
+    std::optional<window_region_snapshot> window_region;
+    std::string window_region_observer_status = "not-observed";
+    std::string window_region_mapping_status = "not-mapped";
     bool cuda_graph_active = false;
     bool parallax_v2_producer_active = false;
     bool parallax_v2_render_selected = false;
