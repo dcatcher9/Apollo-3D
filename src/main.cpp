@@ -17,6 +17,7 @@
 #include "entry_handler.h"
 #include "globals.h"
 #include "httpcommon.h"
+#include "host_sbs_shader_cache.h"
 #include "logging.h"
 #include "main.h"
 #include "nvhttp.h"
@@ -218,6 +219,13 @@ int main(int argc, char *argv[]) {
   // Prepare the pinned authenticated live TensorRT model in the background for the long-lived host.
   // Command modes such as --sbs-bench own their TensorRT lifecycle and must not race this work.
   // jthread joins before logging and process globals are torn down, preventing exit-time races.
+#ifdef _WIN32
+  // Configure persistence synchronously before display or stream workers can request bytecode.
+  // The executable-owned appdata directory is a trusted cache boundary; an arbitrary config-file
+  // path must never become a high-privilege DXBC input.
+  models::host_sbs_shader_cache::configure_persistent_cache(
+    platf::appdata() / "shader-cache" / "host-sbs-v1");
+#endif
   std::jthread model_prepare_thread([model = video::host_sbs_v2_depth_model(),
                                      adapter_name = config::video.adapter_name]() {
     BOOST_LOG(info) << "Preparing authenticated live depth model '"sv << model.name << "'..."sv;
@@ -227,6 +235,11 @@ int main(int argc, char *argv[]) {
           adapter_name
         )) {
       BOOST_LOG(error) << "Startup depth-model preparation failed for '"sv << model.name << "'."sv;
+    }
+    if (!models::prepare_ocr_tensorrt_model(SUNSHINE_ASSETS_DIR, adapter_name)) {
+      BOOST_LOG(warning)
+        << "Startup PP-OCRv6 tiny preparation failed; Host SBS will run without subtitle "sv
+           "conditioning."sv;
     }
   });
 

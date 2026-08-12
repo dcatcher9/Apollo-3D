@@ -48,6 +48,19 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             25: "328d8f71424d6005ac0bd5025b4857efe95aa36fa683ab3c554a33b5309dcd05",
             26: "abb75ebabf6928c39771621da43b88f739fa3cf2ea83b18c02cdb20745aaa4b8",
             27: "6ecebd79f92c7bce3fbaf80c5c9e52fe2193e65baf1574f5b99fbf3a6f0a681e",
+            28: "3946f21026d74d888463ca1c154a137fd0743a23f25a1bd94c3aa1d4d2348196",
+            29: "95625e562bad0e079a2171cded69eabc1f172bf8531936e42945e1729e5fefa6",
+            30: "2cd2eb2cb33c6d1d4f848c09ee8fb1086dbbe1d8fd6402c63fc091033d137414",
+            31: "ee65f33be2c6be14efb97326320f2319d2f7fe4c1020e2968cfbc5b564300762",
+            32: "05f89957e3475aa541363e6d0c3bdf0bf4e07258a14ac18fe67e954d91174d21",
+            33: "8df1cfe9f1a7171e6bd17a8105dcd4cd3f7159c99af1a3f3154bde676859a59a",
+            34: "1924d9f30129b2d0e24feb7bd5b7ca3e030a09fb44cee9b4bda291b7efeb4bf6",
+            35: "d2086c46537f9f9b356fddad55a2eb9af205eda7c1406d416b5d50db777e342e",
+            36: "2662745d69bac7b27881712427aa5eaebae78ce754b534147684995fb50e4ba2",
+            37: "0e36d9d34ffac20c7f20686926b3450676123ea10d757d4c5f04d04c8225db67",
+            38: "ba4940356916270d435961d28ff0b4a52442cd45f718a0dc48491927d3f8a58e",
+            39: "b6c7b68e27009b35317f14d3aca1aba7f461d68e00dc2d5352195a815d75b81a",
+            40: "5c7116be0004e33e24f150430d85e06b9eb66782b4fc3b059501e04093835d9e",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -55,10 +68,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x1A28FDA1)
+        self.assertEqual(generator.contract_tag(contract), 0xF7C853C2)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "1a28fda150d9ab42c7b6bc866168c6604a168b48044a563c657f95f44dbd3cdb",
+            "f7c853c22015d4bc3e34980da4d7e52e20f8379dcb7cc463a207e18989dfff17",
+        )
+        self.assertEqual(
+            contract["shader_implementation"]["source_closure_sha256"],
+            "861f800db1cc06a6d25b80d18bb1b7bf4bc469ed1ccfacfd96a0b384bfb2a7a1",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -156,6 +173,9 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(calibration.preprocess.source_macro_count, 0)
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
+            "d765bf19eb493f302752b1881f62e5d07fa82a073cfba3811fed50f5a5264124")
+        self.assertEqual(
+            calibration.preprocess.source_closure_sha256,
             generator.shader_source_closure_sha256())
         self.assertEqual(
             calibration.calibration_id,
@@ -179,6 +199,121 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             calibration)
         self.assertIsNone(python_contract.find_model_calibration(
             calibration.depth_model, calibration.depth_model_url, "0" * 64))
+
+    def test_subtitle_ocr_contract_binds_model_profile_tensor_and_record_abis(self):
+        ocr = python_contract.SUBTITLE_OCR
+        self.assertEqual(ocr.schema, 1)
+        self.assertEqual(ocr.logical_model, "ppocrv6_tiny_det")
+        self.assertEqual(
+            ocr.onnx_sha256,
+            "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8")
+        self.assertEqual(
+            ocr.engine_recipe,
+            "trt-strong-fp32-tf32-fixed960x160-level5-v1")
+        self.assertEqual(
+            ocr.preprocess_profile,
+            "apollo-ppocrv6-bottom-6x1-bgr-imagenet-v1")
+        self.assertEqual(ocr.source_crop, "bottom-6:1")
+        self.assertEqual(ocr.input_name, "x")
+        self.assertEqual((ocr.input_dtype, ocr.input_layout), ("float32", "NCHW"))
+        self.assertEqual(ocr.input_shape, (1, 3, 160, 960))
+        self.assertEqual(ocr.input_channels, ("B", "G", "R"))
+        self.assertEqual(ocr.imagenet_mean, (0.485, 0.456, 0.406))
+        self.assertEqual(ocr.imagenet_std, (0.229, 0.224, 0.225))
+        self.assertEqual(ocr.output_name, "fetch_name_0")
+        self.assertEqual((ocr.output_dtype, ocr.output_layout), ("float32", "NCHW"))
+        self.assertEqual(ocr.output_shape, (1, 1, 160, 960))
+        self.assertEqual((ocr.record_schema, ocr.record_tag), (1, 0x3652434F))
+        self.assertEqual((ocr.record_word_count, ocr.raw_box_offset), (208, 16))
+        self.assertEqual((ocr.final_box_offset, ocr.final_box_capacity), (144, 8))
+        self.assertEqual(
+            (ocr.field_width, ocr.field_height, ocr.roi_top, ocr.roi_bottom),
+            (770, 434, 325, 430))
+        self.assertEqual((ocr.locator_schema, ocr.locator_tag), (6, 0x36524C53))
+        self.assertEqual(
+            (ocr.locator_word_count, ocr.locator_owner_offset,
+             ocr.locator_pending_offset, ocr.locator_current_offset),
+            (80, 32, 48, 64))
+
+        contract = generator.load_contract(verify_shader_source_closure=False)
+        cpp = generator.render_cpp(contract)
+        hlsl = generator.render_hlsl(contract)
+        for token in (
+                'subtitle_ocr_model_name = "ppocrv6_tiny_det"',
+                'subtitle_ocr_onnx_sha256 = '
+                '"193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8"',
+                'subtitle_ocr_preprocess_profile = '
+                '"apollo-ppocrv6-bottom-6x1-bgr-imagenet-v1"',
+                'subtitle_ocr_input_name = "x"',
+                'subtitle_ocr_output_name = "fetch_name_0"',
+                'std::array<double, 3> subtitle_ocr_imagenet_mean {{0.485, 0.456, 0.406}}',
+                'subtitle_ocr_output_width = 960u',
+                'subtitle_ocr_record_tag = 0x3652434Fu',
+                'subtitle_locator_state_tag = 0x36524C53u'):
+            self.assertIn(token, cpp)
+        for token in (
+                '#define V2_OCR_INPUT_WIDTH 960u',
+                '#define V2_OCR_OUTPUT_WIDTH 960u',
+                '#define V2_OCR_IMAGENET_MEAN_B 0.485f',
+                '#define V2_OCR_IMAGENET_STD_R 0.225f',
+                '#define V2_OCR_RECORD_TAG 0x3652434Fu',
+                '#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x36524C53u'):
+            self.assertIn(token, hlsl)
+
+        shader_root = (REPO / "src_assets" / "windows" / "assets" /
+                       "shaders" / "directx")
+        preprocess_source = (shader_root / "host_sbs_ocr_preprocess_cs.hlsl").read_text(
+            encoding="utf-8")
+        boxes_source = (shader_root / "host_sbs_ocr_boxes_cs.hlsl").read_text(
+            encoding="utf-8")
+        locator_source = (shader_root / "host_sbs_subtitle_locator_cs.hlsl").read_text(
+            encoding="utf-8")
+        for source in (preprocess_source, boxes_source, locator_source):
+            self.assertIn(
+                '#include "include/depth_coordinate_v2_contract.generated.hlsl"', source)
+        for token in (
+                "#define OCR_WIDTH V2_OCR_INPUT_WIDTH",
+                "V2_OCR_IMAGENET_MEAN_B", "V2_OCR_IMAGENET_STD_R"):
+            self.assertIn(token, preprocess_source)
+        for token in (
+                "#define OCR_WIDTH V2_OCR_OUTPUT_WIDTH",
+                "#define OCR6_WORDS V2_OCR_RECORD_WORD_COUNT",
+                "#define OCR6_TAG V2_OCR_RECORD_TAG"):
+            self.assertIn(token, boxes_source)
+        for token in (
+                "MAX_LINES = V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY",
+                "V2_SUBTITLE_LOCATOR_STATE_SCHEMA",
+                "V2_SUBTITLE_LOCATOR_CURRENT_OFFSET"):
+            self.assertIn(token, locator_source)
+
+    def test_subtitle_ocr_contract_rejects_model_tensor_profile_and_abi_drift(self):
+        original = generator.load_contract(verify_shader_source_closure=False)
+        mutations = {
+            "model-hash": lambda value: value["subtitle_ocr"].update(
+                {"onnx_sha256": "0" * 64}),
+            "profile": lambda value: value["subtitle_ocr"].update(
+                {"preprocess_profile": "generic-rgb"}),
+            "channels": lambda value: value["subtitle_ocr"]["input_tensor"].update(
+                {"channels": ["R", "G", "B"]}),
+            "output-width": lambda value: value["subtitle_ocr"]["output_tensor"].update(
+                {"shape": [1, 1, 160, 120]}),
+            "ocr-tag": lambda value: value["subtitle_ocr"]["ocr_record"].update(
+                {"tag": 0}),
+            "locator-words": lambda value: value["subtitle_ocr"]["locator_state"].update(
+                {"word_count": 96}),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                changed = copy.deepcopy(original)
+                mutate(changed)
+                with self.assertRaisesRegex(ValueError, "subtitle_ocr"):
+                    generator.validate_contract(
+                        changed, verify_shader_source_closure=False)
+                with tempfile.TemporaryDirectory() as temporary:
+                    path = Path(temporary) / "contract.json"
+                    path.write_text(json.dumps(changed), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "subtitle_ocr"):
+                        python_contract.load_contract(path)
 
     def test_generated_native_and_hlsl_contracts_are_current(self):
         result = subprocess.run(

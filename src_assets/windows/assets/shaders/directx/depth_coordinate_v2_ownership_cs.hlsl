@@ -358,7 +358,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     }
     // Exclusion is an exact no-op for the center cell. The tensor cell is outside every
     // ownership decision, but its candidate value still has to pass unchanged through this
-    // intermediate field so the later zero-plane conditioner remains the sole overlay-depth
+    // intermediate field so the later subtitle conditioner remains the sole text-depth
     // authority. LoadCandidate intentionally remains exclusion-aware for every neighbor/stencil.
     if (TensorExclusion[position] != 0u) {
         OwnershipRefined[id.xy] = center;

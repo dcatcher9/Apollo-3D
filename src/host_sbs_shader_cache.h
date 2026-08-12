@@ -1,6 +1,6 @@
 /**
  * @file src/host_sbs_shader_cache.h
- * @brief Process-wide bytecode cache for the fixed-shape Host SBS depth shaders.
+ * @brief Closure-keyed memory and persistent bytecode cache for fixed-shape Host SBS shaders.
  */
 #pragma once
 
@@ -24,12 +24,6 @@ namespace models::host_sbs_shader_cache {
   };
 
   inline constexpr shader_spec rgb_to_nchw {"rgb_to_nchw_cs.hlsl"};
-  inline constexpr shader_spec depth_overlay_sanitize {
-    "depth_overlay_analysis_cs.hlsl", "sanitize_main", "cs_5_0"
-  };
-  inline constexpr shader_spec depth_overlay_exclusion {
-    "depth_overlay_analysis_cs.hlsl", "exclusion_main", "cs_5_0"
-  };
   inline constexpr shader_spec buffer_to_tex {"buffer_to_tex_cs.hlsl"};
   inline constexpr shader_spec depth_ema_motion {"depth_ema_motion_cs.hlsl"};
   inline constexpr shader_spec depth_minmax {"depth_minmax_cs.hlsl"};
@@ -50,8 +44,20 @@ namespace models::host_sbs_shader_cache {
   };
   inline constexpr shader_spec depth_coordinate_v2_vertical_limit {"depth_coordinate_v2_vertical_limit_cs.hlsl"};
   inline constexpr shader_spec depth_coordinate_v2_limit {"depth_coordinate_v2_limit_cs.hlsl"};
-  inline constexpr shader_spec depth_coordinate_v2_overlay_zero_plane {
-    "depth_coordinate_v2_overlay_zero_plane_cs.hlsl"
+  inline constexpr shader_spec host_sbs_ocr_preprocess {
+    "host_sbs_ocr_preprocess_cs.hlsl", "main", "cs_5_0"
+  };
+  inline constexpr shader_spec host_sbs_ocr_cells {
+    "host_sbs_ocr_boxes_cs.hlsl", "cells_main", "cs_5_0"
+  };
+  inline constexpr shader_spec host_sbs_ocr_resolve {
+    "host_sbs_ocr_boxes_cs.hlsl", "resolve_main", "cs_5_0"
+  };
+  inline constexpr shader_spec host_sbs_subtitle_locator_resolve {
+    "host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"
+  };
+  inline constexpr shader_spec host_sbs_subtitle_condition {
+    "host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"
   };
   inline constexpr shader_spec parallax_v2_live_renderer {
     "sbs_reprojection_v2_live_ps.hlsl", "main_ps", "ps_5_0"
@@ -72,9 +78,9 @@ namespace models::host_sbs_shader_cache {
     "sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"
   };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
-    "115ddcf1cf8058064516421d9ea2c0d34631af999184ef62effe5ad9cd28e79e";
+    "914fc624955c5e3b41f867429acb17a03c34ba71e41f7cbfab00fd939aafff9b";
   inline constexpr std::string_view parallax_v2_diagnostic_source_closure_sha256 =
-    "7977b2e9adaf33e24b091af7acf2377f1c52300246f27c76a2d39f4189046fe8";
+    "d2dada0490e727d88fdda802a9eb6759b34e9501c91835363ebdb0196e3d5c4b";
   inline constexpr std::string_view sbs_flat_fallback_source_closure_sha256 =
     "7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4";
 
@@ -86,16 +92,14 @@ namespace models::host_sbs_shader_cache {
   };
 
   // Complete production V2 producer set. The normalized depth is private scene-cut evidence; the
-  // retired subject shaping and adaptive-pop paths remain absent. The optional burned-in-overlay
-  // sanitizer/exclusion and post-limit zero-plane conditioner share this authenticated snapshot,
+  // retired subject shaping, hard-mask sanitizer/exclusion, and adaptive-pop paths remain absent.
+  // The OCR6 producer and compact SLR6 post-limit conditioner share this authenticated snapshot,
   // so no analysis or geometry pass can be sampled from a weaker closure.
   inline constexpr std::array parallax_v2_producer_specs {
     // Authenticate the complete path from captured RGB preprocessing through cut/history state
     // and final coordinate limiting. Compile every shared pass from this single immutable
     // snapshot so no separately sampled source body can feed authenticated V2 geometry.
     rgb_to_nchw,
-    depth_overlay_sanitize,
-    depth_overlay_exclusion,
     buffer_to_tex,
     depth_ema_motion,
     depth_minmax,
@@ -111,7 +115,11 @@ namespace models::host_sbs_shader_cache {
     depth_coordinate_v2_ownership,
     depth_coordinate_v2_vertical_limit,
     depth_coordinate_v2_limit,
-    depth_coordinate_v2_overlay_zero_plane,
+    host_sbs_ocr_preprocess,
+    host_sbs_ocr_cells,
+    host_sbs_ocr_resolve,
+    host_sbs_subtitle_locator_resolve,
+    host_sbs_subtitle_condition,
   };
 
   // The canonical-coordinate field is not a production input or output. Keep its alternate
@@ -145,6 +153,24 @@ namespace models::host_sbs_shader_cache {
   using source_snapshot_t = std::shared_ptr<const source_snapshot>;
   using bytecode_t = std::shared_ptr<const std::vector<unsigned char>>;
 
+  struct cache_statistics_t {
+    std::uint64_t memory_hits = 0u;
+    std::uint64_t persistent_hits = 0u;
+    std::uint64_t compiled = 0u;
+    std::uint64_t persistent_writes = 0u;
+    std::uint64_t rejected_artifacts = 0u;
+  };
+
+  /**
+   * Select the writable directory used for closure-keyed bytecode artifacts. An empty path
+   * disables persistence without affecting the process-local cache. The caller must configure
+   * this once, before prewarm() or any concurrent get() calls.
+   */
+  void configure_persistent_cache(const std::filesystem::path &directory);
+
+  /** Monotonic process counters used by startup logging and focused cache tests. */
+  cache_statistics_t cache_statistics() noexcept;
+
   /**
    * Own the selected roots and their authenticated quoted-include graph as one immutable source
    * snapshot. Only dependencies reachable from `specs` participate; unrelated optional shaders
@@ -162,12 +188,15 @@ namespace models::host_sbs_shader_cache {
    */
   std::string source_closure_sha256(const source_snapshot_t &sources);
 
-  /** Return cached bytecode, compiling this exact source snapshot once process-wide if needed. */
+  /**
+   * Return cached bytecode, loading a validated closure-keyed artifact or compiling this exact
+   * source snapshot once process-wide if needed.
+   */
   bytecode_t get(
     const source_snapshot_t &sources,
     const shader_spec &spec
   );
 
-  /** Precompile the production Host SBS V2 shader and fail-flat fallback sets. */
+  /** Precompile the production V2/fail-flat shader sets. */
   bool prewarm(const std::filesystem::path &assets_dir);
 }  // namespace models::host_sbs_shader_cache

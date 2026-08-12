@@ -31,6 +31,8 @@ CALIBRATED_DEFAULT_NAMES = (
 
 def _float32(value: float) -> float:
     return struct.unpack("<f", struct.pack("<f", float(value)))[0]
+
+
 MODEL_CALIBRATION_KEYS = {
     "calibration_id", "depth_model", "depth_model_url", "onnx_sha256",
     "raw_coordinate_scale", "calibrated_input_shapes", "preprocess",
@@ -47,8 +49,6 @@ SHADER_IMPLEMENTATION_KEYS = {
 }
 SHADER_SOURCE_SPECS = (
     ("rgb_to_nchw_cs.hlsl", "main", "cs_5_0"),
-    ("depth_overlay_analysis_cs.hlsl", "sanitize_main", "cs_5_0"),
-    ("depth_overlay_analysis_cs.hlsl", "exclusion_main", "cs_5_0"),
     ("buffer_to_tex_cs.hlsl", "main", "cs_5_0"),
     ("depth_ema_motion_cs.hlsl", "main", "cs_5_0"),
     ("depth_minmax_cs.hlsl", "main", "cs_5_0"),
@@ -64,8 +64,46 @@ SHADER_SOURCE_SPECS = (
     ("depth_coordinate_v2_ownership_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_vertical_limit_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_limit_cs.hlsl", "main", "cs_5_0"),
-    ("depth_coordinate_v2_overlay_zero_plane_cs.hlsl", "main", "cs_5_0"),
+    ("host_sbs_ocr_preprocess_cs.hlsl", "main", "cs_5_0"),
+    ("host_sbs_ocr_boxes_cs.hlsl", "cells_main", "cs_5_0"),
+    ("host_sbs_ocr_boxes_cs.hlsl", "resolve_main", "cs_5_0"),
+    ("host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"),
+    ("host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"),
 )
+EXPECTED_SUBTITLE_OCR = {
+    "schema": 1,
+    "logical_model": "ppocrv6_tiny_det",
+    "model_url": (
+        "https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det_onnx/resolve/"
+        "2ba1506c0380b8f0b03dd142459aac66d4421f6c/inference.onnx?download=true"),
+    "onnx_sha256": "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8",
+    "engine_recipe": "trt-strong-fp32-tf32-fixed960x160-level5-v1",
+    "preprocess_profile": "apollo-ppocrv6-bottom-6x1-bgr-imagenet-v1",
+    "source_crop": "bottom-6:1",
+    "input_tensor": {
+        "name": "x", "dtype": "float32", "layout": "NCHW",
+        "shape": [1, 3, 160, 960], "channels": ["B", "G", "R"],
+        "imagenet_mean": [0.485, 0.456, 0.406],
+        "imagenet_std": [0.229, 0.224, 0.225],
+    },
+    "output_tensor": {
+        "name": "fetch_name_0", "dtype": "float32", "layout": "NCHW",
+        "shape": [1, 1, 160, 960],
+    },
+    "ocr_record": {
+        "schema": 1, "tag": 0x3652434F, "word_count": 208,
+        "header_word_count": 16, "box_word_count": 8,
+        "raw_box_offset": 16, "raw_box_capacity": 16,
+        "final_box_offset": 144, "final_box_capacity": 8,
+        "field_width": 770, "field_height": 434,
+        "roi_top": 325, "roi_bottom": 430,
+    },
+    "locator_state": {
+        "schema": 6, "tag": 0x36524C53, "word_count": 80,
+        "header_word_count": 32, "rectangle_capacity": 4,
+        "owner_offset": 32, "pending_offset": 48, "current_offset": 64,
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -121,6 +159,102 @@ class ShaderImplementation:
     source_macro_count: int
     source_specs: tuple[tuple[str, str, str], ...]
     source_closure_sha256: str
+
+
+@dataclass(frozen=True)
+class SubtitleOcrContract:
+    schema: int
+    logical_model: str
+    model_url: str
+    onnx_sha256: str
+    engine_recipe: str
+    preprocess_profile: str
+    source_crop: str
+    input_name: str
+    input_dtype: str
+    input_layout: str
+    input_shape: tuple[int, int, int, int]
+    input_channels: tuple[str, str, str]
+    imagenet_mean: tuple[float, float, float]
+    imagenet_std: tuple[float, float, float]
+    output_name: str
+    output_dtype: str
+    output_layout: str
+    output_shape: tuple[int, int, int, int]
+    record_schema: int
+    record_tag: int
+    record_word_count: int
+    record_header_word_count: int
+    box_word_count: int
+    raw_box_offset: int
+    raw_box_capacity: int
+    final_box_offset: int
+    final_box_capacity: int
+    field_width: int
+    field_height: int
+    roi_top: int
+    roi_bottom: int
+    locator_schema: int
+    locator_tag: int
+    locator_word_count: int
+    locator_header_word_count: int
+    locator_rectangle_capacity: int
+    locator_owner_offset: int
+    locator_pending_offset: int
+    locator_current_offset: int
+
+
+def _subtitle_ocr_contract(contract: dict[str, Any]) -> SubtitleOcrContract:
+    value = contract.get("subtitle_ocr")
+    if value != EXPECTED_SUBTITLE_OCR:
+        raise ValueError(
+            "depth-coordinate-v2 subtitle_ocr identity or ABI does not match the current "
+            "authenticated PP-OCRv6/OCR6/SLR6 contract")
+    input_tensor = value["input_tensor"]
+    output_tensor = value["output_tensor"]
+    record = value["ocr_record"]
+    locator = value["locator_state"]
+    return SubtitleOcrContract(
+        schema=value["schema"],
+        logical_model=value["logical_model"],
+        model_url=value["model_url"],
+        onnx_sha256=value["onnx_sha256"],
+        engine_recipe=value["engine_recipe"],
+        preprocess_profile=value["preprocess_profile"],
+        source_crop=value["source_crop"],
+        input_name=input_tensor["name"],
+        input_dtype=input_tensor["dtype"],
+        input_layout=input_tensor["layout"],
+        input_shape=tuple(input_tensor["shape"]),
+        input_channels=tuple(input_tensor["channels"]),
+        imagenet_mean=tuple(float(item) for item in input_tensor["imagenet_mean"]),
+        imagenet_std=tuple(float(item) for item in input_tensor["imagenet_std"]),
+        output_name=output_tensor["name"],
+        output_dtype=output_tensor["dtype"],
+        output_layout=output_tensor["layout"],
+        output_shape=tuple(output_tensor["shape"]),
+        record_schema=record["schema"],
+        record_tag=record["tag"],
+        record_word_count=record["word_count"],
+        record_header_word_count=record["header_word_count"],
+        box_word_count=record["box_word_count"],
+        raw_box_offset=record["raw_box_offset"],
+        raw_box_capacity=record["raw_box_capacity"],
+        final_box_offset=record["final_box_offset"],
+        final_box_capacity=record["final_box_capacity"],
+        field_width=record["field_width"],
+        field_height=record["field_height"],
+        roi_top=record["roi_top"],
+        roi_bottom=record["roi_bottom"],
+        locator_schema=locator["schema"],
+        locator_tag=locator["tag"],
+        locator_word_count=locator["word_count"],
+        locator_header_word_count=locator["header_word_count"],
+        locator_rectangle_capacity=locator["rectangle_capacity"],
+        locator_owner_offset=locator["owner_offset"],
+        locator_pending_offset=locator["pending_offset"],
+        locator_current_offset=locator["current_offset"],
+    )
 
 
 def _shader_implementation(contract: dict[str, Any]) -> ShaderImplementation:
@@ -313,6 +447,7 @@ def load_contract(path: Path = CONTRACT_PATH) -> dict[str, Any]:
         raise ValueError(
             "vertical_majorant_share and its complement must remain positive in float32")
     _shader_implementation(contract)
+    _subtitle_ocr_contract(contract)
     _model_calibrations(contract)
     return contract
 
@@ -330,6 +465,7 @@ CAPTURE_PROVENANCE_SCHEMA = int(_CONTRACT["capture_provenance"]["schema"])
 CAPTURE_PROVENANCE_KEY = str(_CONTRACT["capture_provenance"]["manifest_key"])
 CAPTURE_PROVENANCE_BINDING = str(_CONTRACT["capture_provenance"]["binding"])
 SHADER_IMPLEMENTATION = _shader_implementation(_CONTRACT)
+SUBTITLE_OCR = _subtitle_ocr_contract(_CONTRACT)
 MODEL_CALIBRATIONS = _model_calibrations(_CONTRACT)
 
 
@@ -354,6 +490,7 @@ __all__ = [
     "CONTRACT_PATH",
     "CONTRACT_CANONICAL_SHA256",
     "CONTRACT_SCHEMA",
+    "EXPECTED_SUBTITLE_OCR",
     "CAPTURE_PROVENANCE_BINDING",
     "CAPTURE_PROVENANCE_KEY",
     "CAPTURE_PROVENANCE_SCHEMA",
@@ -367,6 +504,8 @@ __all__ = [
     "SHADER_IMPLEMENTATION_KEYS",
     "SHADER_SOURCE_SPECS",
     "ShaderImplementation",
+    "SUBTITLE_OCR",
+    "SubtitleOcrContract",
     "find_model_calibration",
     "load_contract",
 ]

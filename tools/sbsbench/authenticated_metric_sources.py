@@ -14,9 +14,6 @@ import re
 import numpy as np
 from PIL import Image
 
-import sbs_subtitle_metrics
-
-
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CLIPS_ROOT = os.path.join(SCRIPT_DIR, "clips")
 DATASET_MANIFEST = os.path.join(SCRIPT_DIR, "datasets", "manifest.json")
@@ -49,6 +46,22 @@ def _frame_ids(paths, label):
     return ids
 
 
+def _load_binary_mask(path, shape):
+    """Load an authenticated source-sized 8-bit L PNG containing only 0/255."""
+    with Image.open(path) as image:
+        if image.format != "PNG" or image.mode != "L":
+            raise ValueError(
+                f"mask must be an 8-bit single-channel PNG, got "
+                f"format={image.format!r}, mode={image.mode!r}: {path}")
+        values = np.asarray(image, dtype=np.uint8)
+    if values.shape != shape:
+        raise ValueError(
+            f"mask dimensions {values.shape} do not match source {shape}: {path}")
+    if not np.all((values == 0) | (values == 255)):
+        raise ValueError(f"mask contains values other than 0/255: {path}")
+    return values == 255
+
+
 def discover_clips(roots):
     """Find direct child clip directories with authenticated metadata and source frames."""
     clips = []
@@ -75,17 +88,51 @@ def discover_clips(roots):
                 raise ValueError(
                     f"unauthenticated clip {clip_dir}: "
                     "required_gt_subtitle_region must be boolean")
-            if meta.get("required_gt_subtitle_region") is True:
-                if "subtitle_target_disparity_pct" not in meta:
+            if ("required_gt_subtitle_tight_mask" in meta and
+                    not isinstance(meta["required_gt_subtitle_tight_mask"], bool)):
+                raise ValueError(
+                    f"unauthenticated clip {clip_dir}: "
+                    "required_gt_subtitle_tight_mask must be boolean")
+            if meta.get("required_gt_subtitle_tight_mask") is True:
+                if meta.get("required_gt_subtitle_region") is not True:
                     raise ValueError(
-                        f"unauthenticated clip {clip_dir}: required_gt_subtitle_region "
-                        "needs explicit subtitle_target_disparity_pct")
-                try:
-                    meta["subtitle_target_disparity_pct"] = (
-                        sbs_subtitle_metrics.validate_subtitle_target_disparity_pct(
-                            meta["subtitle_target_disparity_pct"]))
-                except ValueError as exc:
-                    raise ValueError(f"unauthenticated clip {clip_dir}: {exc}") from exc
+                        f"unauthenticated clip {clip_dir}: "
+                        "required_gt_subtitle_tight_mask requires authored subtitle region")
+                source_ids = _frame_ids(frames, "source")
+                sidecars_by_name = {}
+                for directory in ("gt_subtitle_region", "gt_subtitle_overlay_mask"):
+                    sidecars = glob.glob(os.path.join(clip_dir, directory, "frame_*.png"))
+                    sidecar_ids = _frame_ids(sidecars, directory)
+                    if sidecar_ids != source_ids:
+                        missing = sorted(source_ids - sidecar_ids)
+                        extra = sorted(sidecar_ids - source_ids)
+                        raise ValueError(
+                            f"unauthenticated clip {clip_dir}: subtitle tight-mask "
+                            f"{directory}/source frame-id mismatch: missing={missing}, "
+                            f"extra={extra}")
+                    sidecars_by_name[directory] = {
+                        int(re.search(r"frame_(\d+)", os.path.basename(path)).group(1)): path
+                        for path in sidecars
+                    }
+                source_by_id = {
+                    int(re.search(r"frame_(\d+)", os.path.basename(path)).group(1)): path
+                    for path in frames
+                }
+                for frame_id in sorted(source_ids):
+                    with Image.open(source_by_id[frame_id]) as source:
+                        source_shape = (source.height, source.width)
+                    loose = _load_binary_mask(
+                        sidecars_by_name["gt_subtitle_region"][frame_id], source_shape)
+                    tight = _load_binary_mask(
+                        sidecars_by_name["gt_subtitle_overlay_mask"][frame_id], source_shape)
+                    if np.any(tight & ~loose):
+                        raise ValueError(
+                            f"unauthenticated clip {clip_dir}: tight subtitle overlay mask "
+                            f"escapes loose region at frame {frame_id}")
+                    if bool(np.any(tight)) != bool(np.any(loose)):
+                        raise ValueError(
+                            f"unauthenticated clip {clip_dir}: tight/loose subtitle masks "
+                            f"disagree on empty state at frame {frame_id}")
             if ("required_gt_subtitle_sanitizer_oracle" in meta and
                     not isinstance(meta["required_gt_subtitle_sanitizer_oracle"], bool)):
                 raise ValueError(
@@ -126,7 +173,7 @@ def discover_clips(roots):
                 missing = [key for key in required if not meta.get(key)]
                 evidence_keys = (
                     "required_gt_depth", "required_gt_flow",
-                    "required_gt_subtitle_region",
+                    "required_gt_subtitle_region", "required_gt_subtitle_tight_mask",
                 )
                 has_consumed_gt = any(meta.get(key) is True for key in evidence_keys)
                 if (not has_consumed_gt and meta.get("reference_stereo_available") is True and
@@ -149,6 +196,8 @@ def discover_clips(roots):
                     "required_gt_flow": os.path.join(clip_dir, "gt_flow", "frame_*.npz"),
                     "required_gt_subtitle_region": os.path.join(
                         clip_dir, "gt_subtitle_region", "frame_*.png"),
+                    "required_gt_subtitle_tight_mask": os.path.join(
+                        clip_dir, "gt_subtitle_overlay_mask", "frame_*.png"),
                     "reference_stereo_available": os.path.join(
                         clip_dir, "gt_right", "frame_*.*"),
                 }

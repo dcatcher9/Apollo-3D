@@ -19,6 +19,7 @@
 #include <src/generated/sbs_adaptive_state_contract.h>
 #include <src/depth_coordinate_v2.h>
 #include <src/host_sbs_shader_cache.h>
+#include <src/platform/windows/video_dom_client.h>
 #include <src/video.h>
 #include <src/video_colorspace.h>
 #include <src/video_depth_estimator.h>
@@ -522,6 +523,11 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
   };
   EXPECT_TRUE(has_producer_shader(cache::depth_scene_cut_evidence));
   EXPECT_TRUE(has_producer_shader(cache::depth_scene_cut_resolve));
+  EXPECT_TRUE(has_producer_shader(cache::host_sbs_ocr_preprocess));
+  EXPECT_TRUE(has_producer_shader(cache::host_sbs_ocr_cells));
+  EXPECT_TRUE(has_producer_shader(cache::host_sbs_ocr_resolve));
+  EXPECT_TRUE(has_producer_shader(cache::host_sbs_subtitle_locator_resolve));
+  EXPECT_TRUE(has_producer_shader(cache::host_sbs_subtitle_condition));
 
   const auto diagnostic_sources = cache::snapshot_sources(
     shader_root,
@@ -562,6 +568,97 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
   EXPECT_EQ(cache::parallax_v2_live_diagnostic_specs.size(), 2u);
 }
 
+TEST(DirectxShaderTest, PersistentHostSbsCacheSurvivesProcessEquivalentRoots) {
+  namespace cache = models::host_sbs_shader_cache;
+  const auto unique = std::to_string(
+    std::chrono::steady_clock::now().time_since_epoch().count());
+  const auto temporary_root =
+    std::filesystem::temp_directory_path() /
+    ("apollo-host-sbs-shader-cache-test-" + unique);
+  const auto cache_directory = temporary_root / "cache";
+  struct cleanup_t {
+    std::filesystem::path root;
+    ~cleanup_t() {
+      cache::configure_persistent_cache({});
+      std::error_code ignored;
+      std::filesystem::remove_all(root, ignored);
+    }
+  } cleanup {temporary_root};
+
+  constexpr cache::shader_spec spec {
+    "persistent_cache_test_cs.hlsl", "main", "cs_5_0"};
+  constexpr std::array specs {spec};
+  constexpr std::string_view source =
+    "RWStructuredBuffer<uint> Output : register(u0);\n"
+    "[numthreads(1, 1, 1)]\n"
+    "void main(uint3 id : SV_DispatchThreadID) { Output[id.x] = 7u; }\n";
+  const auto make_snapshot = [&](const std::string &name) {
+    const auto root = temporary_root / name;
+    std::error_code error;
+    std::filesystem::create_directories(root, error);
+    EXPECT_FALSE(error);
+    std::ofstream output(root / spec.filename, std::ios::binary | std::ios::trunc);
+    output.write(source.data(), static_cast<std::streamsize>(source.size()));
+    output.close();
+    EXPECT_TRUE(output.good());
+    return cache::snapshot_sources(root, specs);
+  };
+
+  cache::configure_persistent_cache(cache_directory);
+  const auto initial = cache::cache_statistics();
+  const auto first_sources = make_snapshot("root-a");
+  ASSERT_TRUE(first_sources);
+  const auto first = cache::get(first_sources, spec);
+  ASSERT_TRUE(first);
+  const auto after_first = cache::cache_statistics();
+  EXPECT_EQ(after_first.compiled - initial.compiled, 1u);
+  EXPECT_EQ(after_first.persistent_writes - initial.persistent_writes, 1u);
+
+  // A different install root with the same authenticated closure models a fresh process: the
+  // process-local key misses because it includes the root, while the persistent key intentionally
+  // does not. No FXC invocation is needed.
+  const auto second_sources = make_snapshot("root-b");
+  ASSERT_TRUE(second_sources);
+  const auto second = cache::get(second_sources, spec);
+  ASSERT_TRUE(second);
+  EXPECT_EQ(*first, *second);
+  const auto after_second = cache::cache_statistics();
+  EXPECT_EQ(after_second.persistent_hits - after_first.persistent_hits, 1u);
+  EXPECT_EQ(after_second.compiled, after_first.compiled);
+
+  std::vector<std::filesystem::path> artifacts;
+  for (const auto &entry : std::filesystem::directory_iterator(cache_directory)) {
+    if (entry.is_regular_file() && entry.path().extension() == ".dxbc") {
+      artifacts.push_back(entry.path());
+    }
+  }
+  ASSERT_EQ(artifacts.size(), 1u);
+  {
+    std::ofstream corrupt(artifacts.front(), std::ios::binary | std::ios::trunc);
+    corrupt << "corrupt";
+  }
+  const auto third_sources = make_snapshot("root-c");
+  ASSERT_TRUE(third_sources);
+  const auto third = cache::get(third_sources, spec);
+  ASSERT_TRUE(third);
+  EXPECT_EQ(*first, *third);
+  const auto after_third = cache::cache_statistics();
+  EXPECT_EQ(
+    after_third.rejected_artifacts - after_second.rejected_artifacts, 1u);
+  EXPECT_EQ(after_third.compiled - after_second.compiled, 1u);
+  EXPECT_EQ(
+    after_third.persistent_writes - after_second.persistent_writes, 1u);
+
+  const auto fourth_sources = make_snapshot("root-d");
+  ASSERT_TRUE(fourth_sources);
+  const auto fourth = cache::get(fourth_sources, spec);
+  ASSERT_TRUE(fourth);
+  EXPECT_EQ(*first, *fourth);
+  const auto after_fourth = cache::cache_statistics();
+  EXPECT_EQ(after_fourth.persistent_hits - after_third.persistent_hits, 1u);
+  EXPECT_EQ(after_fourth.compiled, after_third.compiled);
+}
+
 TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   namespace v2 = models::depth_coordinate_v2;
   EXPECT_FALSE(models::input_color_space_is_linear(models::input_color_space::srgb));
@@ -600,7 +697,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 27u);
+  EXPECT_EQ(v2::contract_schema, 40u);
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
   EXPECT_EQ(v2::shadow_state_dump_schema, 16u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
@@ -1170,83 +1267,6 @@ TEST(DepthInputRegionTest, DomainTransitionDecisionResetsExactlyOncePerStableCha
   EXPECT_FALSE(domain_tracker.update(roi, models::input_color_space::linear_sdr));
 }
 
-TEST(HostSbsOverlayPlanTest, RequiresExactFrameDomainTransferAndMaskIdentity) {
-  const models::depth_input_region_t region {
-    .source_width = 2560u,
-    .source_height = 1440u,
-    .left = 320u,
-    .top = 180u,
-    .right = 2240u,
-    .bottom = 1260u,
-    .analysis_generation = 4u,
-    .video_region = true,
-  };
-  models::host_sbs_overlay_plan_t plan {
-    .plan_generation = 9u,
-    .source_frame_id = 41u,
-    .input_region = region,
-    .color_space = models::input_color_space::srgb,
-    .analysis_width = 1920u,
-    .analysis_height = 1080u,
-    .analysis_exclusion_present = true,
-    .analysis_exclusion_generation = 17u,
-  };
-  plan.geometry.loose_rects[0] = models::depth_source_rect_t {
-    .left = 500u,
-    .top = 850u,
-    .right = 1420u,
-    .bottom = 1010u,
-  };
-  plan.geometry.loose_rect_count = 1u;
-
-  ASSERT_TRUE(plan.valid_payload());
-  ASSERT_TRUE(plan.has_zero_plane_geometry());
-  EXPECT_TRUE(plan.valid_for(41u, region, models::input_color_space::srgb));
-  EXPECT_FALSE(plan.valid_for(42u, region, models::input_color_space::srgb));
-  EXPECT_FALSE(plan.valid_for(41u, region, models::input_color_space::linear_sdr));
-
-  auto moved_region = region;
-  ++moved_region.left;
-  ++moved_region.right;
-  ASSERT_TRUE(moved_region.valid());
-  ASSERT_EQ(moved_region.width(), region.width());
-  ASSERT_EQ(moved_region.height(), region.height());
-  EXPECT_FALSE(plan.valid_for(41u, moved_region, models::input_color_space::srgb));
-
-  auto missing_mask_identity = plan;
-  missing_mask_identity.analysis_exclusion_generation = 0u;
-  EXPECT_FALSE(missing_mask_identity.valid_payload());
-
-  auto stale_unused_rect = plan;
-  stale_unused_rect.geometry.loose_rects[1] = models::depth_source_rect_t {
-    .left = 1u, .top = 1u, .right = 2u, .bottom = 2u};
-  EXPECT_FALSE(stale_unused_rect.valid_payload());
-}
-
-TEST(HostSbsOverlayPlanTest, EmptyGeometryIsAnalysisPayloadButNotLivePlaneAuthority) {
-  const models::depth_input_region_t region {
-    .source_width = 1280u,
-    .source_height = 720u,
-    .left = 0u,
-    .top = 0u,
-    .right = 1280u,
-    .bottom = 720u,
-  };
-  const models::host_sbs_overlay_plan_t plan {
-    .plan_generation = 2u,
-    .source_frame_id = 7u,
-    .input_region = region,
-    .color_space = models::input_color_space::srgb,
-    .analysis_width = 1280u,
-    .analysis_height = 720u,
-    .analysis_exclusion_present = true,
-    .analysis_exclusion_generation = 3u,
-  };
-  EXPECT_TRUE(plan.valid_payload());
-  EXPECT_TRUE(plan.valid_for(7u, region, models::input_color_space::srgb));
-  EXPECT_FALSE(plan.has_zero_plane_geometry());
-}
-
 TEST(DepthInputRegionTest, DumpSnapshotsPreserveFullOrRoiAnalysisDomain) {
   const auto source = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp"
@@ -1385,43 +1405,6 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   EXPECT_FALSE(result.shadow_coordinate);
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(result));
 
-  models::host_sbs_overlay_plan_t overlay_plan;
-  overlay_plan.plan_generation = 1u;
-  overlay_plan.source_frame_id = result.completed_frame_id;
-  overlay_plan.input_region = result.input_region;
-  overlay_plan.color_space = models::input_color_space::srgb;
-  overlay_plan.analysis_width = result.input_region.width();
-  overlay_plan.analysis_height = result.input_region.height();
-  overlay_plan.analysis_exclusion_present = true;
-  overlay_plan.analysis_exclusion_generation = 1u;
-  overlay_plan.geometry.loose_rects[0] = models::depth_source_rect_t {
-    .left = 400u, .top = 800u, .right = 1520u, .bottom = 1000u};
-  overlay_plan.geometry.loose_rect_count = 1u;
-
-  auto overlay_without_conditioner = result;
-  overlay_without_conditioner.overlay_plan = overlay_plan;
-  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(
-    overlay_without_conditioner));
-
-  auto applied_without_plan = result;
-  applied_without_plan.overlay_zero_plane_applied = true;
-  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(applied_without_plan));
-
-  auto conditioned_overlay = overlay_without_conditioner;
-  conditioned_overlay.overlay_zero_plane_applied = true;
-  EXPECT_TRUE(models::parallax_v2_result_is_authenticated(conditioned_overlay));
-
-  auto wrong_overlay_frame = conditioned_overlay;
-  auto wrong_plan = overlay_plan;
-  ++wrong_plan.source_frame_id;
-  wrong_overlay_frame.overlay_plan = wrong_plan;
-  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_overlay_frame));
-
-  auto wrong_overlay_transfer = conditioned_overlay;
-  wrong_overlay_transfer.color_space = models::input_color_space::linear_sdr;
-  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(
-    wrong_overlay_transfer));
-
   auto missing_input_region = result;
   missing_input_region.input_region = {};
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_input_region));
@@ -1548,7 +1531,7 @@ TEST(ParallaxV2ContractTest, DumpDecodesExactCountersInsteadOfSubnormalFloats) {
   EXPECT_NE(source.find("source_closure_sha256"), std::string::npos);
   const auto manifest = source.find("nlohmann::json manifest {");
   ASSERT_NE(manifest, std::string::npos);
-  EXPECT_NE(source.find("{\"schema\", 13}", manifest), std::string::npos);
+  EXPECT_NE(source.find("{\"schema\", 21}", manifest), std::string::npos);
   EXPECT_NE(source.find("depth_input_region.json"), std::string::npos);
   EXPECT_NE(source.find("depth_input_source.png"), std::string::npos);
   EXPECT_NE(source.find("\"shadow_final_parallax + depth_input_region embedding\""), std::string::npos);
@@ -1571,38 +1554,6 @@ TEST(ParallaxV2ContractTest, DumpDecodesExactCountersInsteadOfSubnormalFloats) {
   EXPECT_NE(source.find("{\"shared_configured\", {"), std::string::npos);
   EXPECT_NE(source.find("{\"live_effective\", {"), std::string::npos);
   EXPECT_EQ(source.find("{\"offline_analysis_configured\", {"), std::string::npos);
-}
-
-TEST(ParallaxV2ContractTest, OverlayConditioningCannotPublishSchemaThirteenDump) {
-  const auto display = read_source_file(
-    SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp"
-  );
-  const auto dumper = read_source_file(
-    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
-  );
-  ASSERT_FALSE(display.empty());
-  ASSERT_FALSE(dumper.empty());
-  EXPECT_NE(
-    display.find("snapshot_debug_inputs && est.overlay_plan"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display.find("!est.overlay_plan && v2_renderer_selected"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display.find("sbs_dumper.reject_pending_request()"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    dumper.find("if (completed.overlay_conditioning_active)"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    dumper.find("reject_pending_request();", dumper.find(
-      "if (completed.overlay_conditioning_active)")),
-    std::string::npos
-  );
 }
 
 TEST(ParallaxV2ContractTest, DebugDumpPublishesCpuSnapshotOffTheRenderThread) {
@@ -2054,47 +2005,10 @@ TEST(DirectxShaderSourceTest, DumpGeometryBindsMatchedAuthenticatedState) {
   );
 }
 
-TEST(DirectxShaderSourceTest, OverlaySceneCutStencilUsesEndpointUnionAtEverySample) {
-  const auto source = read_source_file(
-    SUNSHINE_SHADERS_DIR "/depth_scene_cut_evidence_cs.hlsl"
-  );
-  ASSERT_FALSE(source.empty());
-
-  const auto center_union = source.find("bool center_admitted =");
-  const auto center_current = source.find(
-    "g_current_exclusion[tile_center] == 0u", center_union);
-  const auto center_previous = source.find(
-    "g_previous_exclusion[tile_center] == 0u", center_current);
-  ASSERT_NE(center_union, std::string::npos);
-  ASSERT_NE(center_current, std::string::npos);
-  ASSERT_NE(center_previous, std::string::npos);
-
-  const auto sample_union = source.find("bool sample_admitted =");
-  const auto sample_current = source.find(
-    "g_current_exclusion[tile_index] == 0u", sample_union);
-  const auto sample_previous = source.find(
-    "g_previous_exclusion[tile_index] == 0u", sample_current);
-  const auto current_assignment = source.find(
-    "current_sample_admitted[sample_index] = sample_admitted", sample_previous);
-  const auto previous_assignment = source.find(
-    "previous_sample_admitted[sample_index] = sample_admitted", current_assignment);
-  ASSERT_NE(sample_union, std::string::npos);
-  ASSERT_NE(sample_current, std::string::npos);
-  ASSERT_NE(sample_previous, std::string::npos);
-  ASSERT_NE(current_assignment, std::string::npos);
-  ASSERT_NE(previous_assignment, std::string::npos);
-  EXPECT_LT(sample_union, sample_current);
-  EXPECT_LT(sample_current, sample_previous);
-  EXPECT_LT(sample_previous, current_assignment);
-  EXPECT_LT(current_assignment, previous_assignment);
-}
-
 TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
   using Microsoft::WRL::ComPtr;
 
   constexpr std::array shaders {
-    std::tuple {"depth_overlay_analysis_cs.hlsl", "sanitize_main", "cs_5_0"},
-    std::tuple {"depth_overlay_analysis_cs.hlsl", "exclusion_main", "cs_5_0"},
     std::tuple {"depth_ema_motion_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_minmax_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_minmax_ema_cs.hlsl", "main", "cs_5_0"},
@@ -2105,8 +2019,6 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
     std::tuple {"depth_coordinate_v2_moments_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_coordinate_v2_ownership_cs.hlsl", "main", "cs_5_0"},
-    std::tuple {
-      "depth_coordinate_v2_overlay_zero_plane_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"},
     std::tuple {"sbs_reprojection_v2_live_ps.hlsl", "main_ps", "ps_5_0"},
     std::tuple {"sbs_reprojection_v2_diagnostics_ps.hlsl", "mapping_ps", "ps_5_0"},
@@ -2134,896 +2046,6 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
             static_cast<const char *>(shader_errors->GetBufferPointer()) :
             "no compiler diagnostics");
   }
-}
-
-TEST(DirectxShaderTest, OverlaySanitizerPreservesUnmaskedRgbAndMaxPoolsExclusion) {
-  using Microsoft::WRL::ComPtr;
-
-  ComPtr<ID3D11Device> device;
-  ComPtr<ID3D11DeviceContext> context;
-  D3D_FEATURE_LEVEL feature_level {};
-  constexpr D3D_FEATURE_LEVEL requested_levels[] = {D3D_FEATURE_LEVEL_11_0};
-  ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(
-    nullptr,
-    D3D_DRIVER_TYPE_WARP,
-    nullptr,
-    0,
-    requested_levels,
-    static_cast<UINT>(std::size(requested_levels)),
-    D3D11_SDK_VERSION,
-    &device,
-    &feature_level,
-    &context
-  )));
-
-  const auto compile_shader = [&](const char *entrypoint) {
-    ComPtr<ID3DBlob> blob;
-    ComPtr<ID3DBlob> errors;
-    const std::filesystem::path path =
-      SUNSHINE_SHADERS_DIR "/depth_overlay_analysis_cs.hlsl";
-    const auto status = D3DCompileFromFile(
-      path.c_str(),
-      nullptr,
-      D3D_COMPILE_STANDARD_FILE_INCLUDE,
-      entrypoint,
-      "cs_5_0",
-      D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
-      0,
-      &blob,
-      &errors
-    );
-    EXPECT_TRUE(SUCCEEDED(status))
-      << (errors ? static_cast<const char *>(errors->GetBufferPointer()) :
-                   "no compiler diagnostics");
-    ComPtr<ID3D11ComputeShader> shader;
-    if (SUCCEEDED(status)) {
-      EXPECT_TRUE(SUCCEEDED(device->CreateComputeShader(
-        blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &shader)));
-    }
-    return shader;
-  };
-  const auto sanitize_shader = compile_shader("sanitize_main");
-  const auto exclusion_shader = compile_shader("exclusion_main");
-  ASSERT_TRUE(sanitize_shader && exclusion_shader);
-
-  constexpr UINT source_width = 8u;
-  constexpr UINT source_height = 4u;
-  constexpr UINT target_width = 4u;
-  constexpr UINT target_height = 2u;
-  using rgba8_t = std::array<std::uint8_t, 4>;
-  std::array<rgba8_t, source_width * source_height> source {};
-  for (UINT y = 0u; y < source_height; ++y) {
-    for (UINT x = 0u; x < source_width; ++x) {
-      source[y * source_width + x] = rgba8_t {
-        static_cast<std::uint8_t>(10u + x),
-        static_cast<std::uint8_t>(20u + y),
-        static_cast<std::uint8_t>(30u + x + y),
-        255u,
-      };
-    }
-  }
-  std::array<std::uint8_t, source_width * source_height> mask {};
-  for (const auto index : {10u, 11u}) {
-    source[index] = rgba8_t {250u, 250u, 250u, 255u};
-    mask[index] = 255u;
-  }
-
-  D3D11_TEXTURE2D_DESC source_desc {};
-  source_desc.Width = source_width;
-  source_desc.Height = source_height;
-  source_desc.MipLevels = 1u;
-  source_desc.ArraySize = 1u;
-  source_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-  source_desc.SampleDesc.Count = 1u;
-  source_desc.Usage = D3D11_USAGE_DEFAULT;
-  source_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-  D3D11_SUBRESOURCE_DATA source_data {
-    source.data(), source_width * sizeof(rgba8_t), 0u};
-  ComPtr<ID3D11Texture2D> source_texture;
-  ComPtr<ID3D11ShaderResourceView> source_srv;
-  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(
-    &source_desc, &source_data, &source_texture)));
-  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
-    source_texture.Get(), nullptr, &source_srv)));
-
-  auto mask_desc = source_desc;
-  mask_desc.Format = DXGI_FORMAT_R8_UNORM;
-  D3D11_SUBRESOURCE_DATA mask_data {mask.data(), source_width, 0u};
-  ComPtr<ID3D11Texture2D> mask_texture;
-  ComPtr<ID3D11ShaderResourceView> mask_srv;
-  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(
-    &mask_desc, &mask_data, &mask_texture)));
-  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
-    mask_texture.Get(), nullptr, &mask_srv)));
-
-  auto sanitized_desc = source_desc;
-  sanitized_desc.BindFlags =
-    D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-  ComPtr<ID3D11Texture2D> sanitized_texture;
-  ComPtr<ID3D11UnorderedAccessView> sanitized_uav;
-  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(
-    &sanitized_desc, nullptr, &sanitized_texture)));
-  ASSERT_TRUE(SUCCEEDED(device->CreateUnorderedAccessView(
-    sanitized_texture.Get(), nullptr, &sanitized_uav)));
-
-  D3D11_TEXTURE2D_DESC exclusion_desc {};
-  exclusion_desc.Width = target_width;
-  exclusion_desc.Height = target_height;
-  exclusion_desc.MipLevels = 1u;
-  exclusion_desc.ArraySize = 1u;
-  exclusion_desc.Format = DXGI_FORMAT_R32_UINT;
-  exclusion_desc.SampleDesc.Count = 1u;
-  exclusion_desc.Usage = D3D11_USAGE_DEFAULT;
-  exclusion_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-  ComPtr<ID3D11Texture2D> exclusion_texture;
-  ComPtr<ID3D11UnorderedAccessView> exclusion_uav;
-  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(
-    &exclusion_desc, nullptr, &exclusion_texture)));
-  ASSERT_TRUE(SUCCEEDED(device->CreateUnorderedAccessView(
-    exclusion_texture.Get(), nullptr, &exclusion_uav)));
-
-  std::array<std::uint32_t, 12> constants {};
-  constants[0] = target_width;
-  constants[1] = target_height;
-  constants[2] = 0u;
-  D3D11_BUFFER_DESC constant_desc {};
-  constant_desc.ByteWidth = sizeof(constants);
-  constant_desc.Usage = D3D11_USAGE_IMMUTABLE;
-  constant_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-  D3D11_SUBRESOURCE_DATA constant_data {constants.data(), 0u, 0u};
-  ComPtr<ID3D11Buffer> constant_buffer;
-  ASSERT_TRUE(SUCCEEDED(device->CreateBuffer(
-    &constant_desc, &constant_data, &constant_buffer)));
-
-  ID3D11ShaderResourceView *source_srvs[2] = {
-    source_srv.Get(), mask_srv.Get()};
-  ID3D11UnorderedAccessView *sanitize_uavs[2] = {
-    sanitized_uav.Get(), nullptr};
-  context->CSSetShader(sanitize_shader.Get(), nullptr, 0u);
-  context->CSSetConstantBuffers(0u, 1u, constant_buffer.GetAddressOf());
-  context->CSSetShaderResources(0u, 2u, source_srvs);
-  context->CSSetUnorderedAccessViews(0u, 2u, sanitize_uavs, nullptr);
-  context->Dispatch(1u, 1u, 1u);
-
-  ID3D11ShaderResourceView *null_srvs[2] = {nullptr, nullptr};
-  ID3D11UnorderedAccessView *null_uavs[2] = {nullptr, nullptr};
-  context->CSSetShaderResources(0u, 2u, null_srvs);
-  context->CSSetUnorderedAccessViews(0u, 2u, null_uavs, nullptr);
-
-  ID3D11ShaderResourceView *mask_srvs[2] = {nullptr, mask_srv.Get()};
-  ID3D11UnorderedAccessView *exclusion_uavs[2] = {
-    nullptr, exclusion_uav.Get()};
-  context->CSSetShader(exclusion_shader.Get(), nullptr, 0u);
-  context->CSSetShaderResources(0u, 2u, mask_srvs);
-  context->CSSetUnorderedAccessViews(0u, 2u, exclusion_uavs, nullptr);
-  context->Dispatch(1u, 1u, 1u);
-  context->CSSetShaderResources(0u, 2u, null_srvs);
-  context->CSSetUnorderedAccessViews(0u, 2u, null_uavs, nullptr);
-
-  const auto read_texture = [&](ID3D11Texture2D *texture,
-                                const DXGI_FORMAT format,
-                                const UINT width,
-                                const UINT height,
-                                const UINT bytes_per_pixel) {
-    D3D11_TEXTURE2D_DESC staging_desc {};
-    texture->GetDesc(&staging_desc);
-    staging_desc.Format = format;
-    staging_desc.Usage = D3D11_USAGE_STAGING;
-    staging_desc.BindFlags = 0u;
-    staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    ComPtr<ID3D11Texture2D> staging;
-    EXPECT_TRUE(SUCCEEDED(device->CreateTexture2D(
-      &staging_desc, nullptr, &staging)));
-    std::vector<std::uint8_t> bytes(width * height * bytes_per_pixel);
-    if (!staging) {
-      return bytes;
-    }
-    context->CopyResource(staging.Get(), texture);
-    D3D11_MAPPED_SUBRESOURCE mapped {};
-    EXPECT_TRUE(SUCCEEDED(context->Map(
-      staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped)));
-    if (mapped.pData) {
-      for (UINT y = 0u; y < height; ++y) {
-        std::memcpy(
-          bytes.data() + y * width * bytes_per_pixel,
-          static_cast<const std::uint8_t *>(mapped.pData) + y * mapped.RowPitch,
-          width * bytes_per_pixel
-        );
-      }
-      context->Unmap(staging.Get(), 0u);
-    }
-    return bytes;
-  };
-
-  const auto sanitized = read_texture(
-    sanitized_texture.Get(), DXGI_FORMAT_R8G8B8A8_UNORM,
-    source_width, source_height, sizeof(rgba8_t));
-  ASSERT_EQ(sanitized.size(), sizeof(source));
-  for (std::size_t index = 0u; index < source.size(); ++index) {
-    rgba8_t output {};
-    std::memcpy(&output, sanitized.data() + index * sizeof(output), sizeof(output));
-    if (mask[index] == 0u) {
-      EXPECT_EQ(output, source[index]) << "unmasked source index " << index;
-    } else {
-      EXPECT_NE(output, source[index]) << "masked source index " << index;
-    }
-  }
-
-  const auto exclusion_bytes = read_texture(
-    exclusion_texture.Get(), DXGI_FORMAT_R32_UINT,
-    target_width, target_height, sizeof(std::uint32_t));
-  ASSERT_EQ(exclusion_bytes.size(), target_width * target_height * sizeof(std::uint32_t));
-  std::array<std::uint32_t, target_width * target_height> exclusion {};
-  std::memcpy(exclusion.data(), exclusion_bytes.data(), exclusion_bytes.size());
-  const std::array<std::uint32_t, target_width * target_height> expected {
-    0u, 1u, 0u, 0u,
-    0u, 0u, 0u, 0u,
-  };
-  EXPECT_EQ(exclusion, expected);
-
-  // An oversized/malformed mask still cannot leak the original marked pixels into inference.
-  mask.fill(255u);
-  context->UpdateSubresource(
-    mask_texture.Get(), 0u, nullptr, mask.data(), source_width, 0u);
-  context->CSSetShader(sanitize_shader.Get(), nullptr, 0u);
-  context->CSSetShaderResources(0u, 2u, source_srvs);
-  context->CSSetUnorderedAccessViews(0u, 2u, sanitize_uavs, nullptr);
-  context->Dispatch(1u, 1u, 1u);
-  context->CSSetShaderResources(0u, 2u, null_srvs);
-  context->CSSetUnorderedAccessViews(0u, 2u, null_uavs, nullptr);
-  const auto neutral = read_texture(
-    sanitized_texture.Get(), DXGI_FORMAT_R8G8B8A8_UNORM,
-    source_width, source_height, sizeof(rgba8_t));
-  for (std::size_t index = 0u; index < source.size(); ++index) {
-    EXPECT_EQ(neutral[index * 4u], 128u);
-    EXPECT_EQ(neutral[index * 4u + 1u], 128u);
-    EXPECT_EQ(neutral[index * 4u + 2u], 128u);
-    EXPECT_EQ(neutral[index * 4u + 3u], 255u);
-  }
-}
-
-TEST(DirectxShaderTest, OverlayExclusionRemovesMaskedOutlierFromDepthReductions) {
-  using Microsoft::WRL::ComPtr;
-
-  ComPtr<ID3D11Device> device;
-  ComPtr<ID3D11DeviceContext> context;
-  D3D_FEATURE_LEVEL feature_level {};
-  constexpr D3D_FEATURE_LEVEL requested_levels[] = {D3D_FEATURE_LEVEL_11_0};
-  ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(
-    nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
-    requested_levels, static_cast<UINT>(std::size(requested_levels)),
-    D3D11_SDK_VERSION, &device, &feature_level, &context)));
-
-  const auto compile_shader = [&](const char *filename) {
-    const std::filesystem::path path =
-      std::filesystem::path(SUNSHINE_SHADERS_DIR) / filename;
-    ComPtr<ID3DBlob> blob;
-    ComPtr<ID3DBlob> errors;
-    const auto status = D3DCompileFromFile(
-      path.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
-      "main", "cs_5_0",
-      D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
-      0, &blob, &errors);
-    EXPECT_TRUE(SUCCEEDED(status))
-      << filename << ": "
-      << (errors ? static_cast<const char *>(errors->GetBufferPointer()) :
-                   "no compiler diagnostics");
-    ComPtr<ID3D11ComputeShader> shader;
-    if (SUCCEEDED(status)) {
-      EXPECT_TRUE(SUCCEEDED(device->CreateComputeShader(
-        blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &shader)));
-    }
-    return shader;
-  };
-  const auto minmax_shader = compile_shader("depth_minmax_cs.hlsl");
-  const auto minmax_ema_shader = compile_shader("depth_minmax_ema_cs.hlsl");
-  const auto moments_shader = compile_shader("depth_coordinate_v2_moments_cs.hlsl");
-  const auto frame_resolve_shader =
-    compile_shader("depth_coordinate_v2_frame_resolve_cs.hlsl");
-  ASSERT_TRUE(
-    minmax_shader && minmax_ema_shader && moments_shader && frame_resolve_shader);
-
-  const std::array<float, 4> raw_depth {1.0f, 100.0f, 3.0f, 4.0f};
-  D3D11_BUFFER_DESC input_desc {};
-  input_desc.ByteWidth = sizeof(raw_depth);
-  input_desc.Usage = D3D11_USAGE_DEFAULT;
-  input_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-  input_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-  input_desc.StructureByteStride = sizeof(float);
-  D3D11_SUBRESOURCE_DATA input_data {raw_depth.data(), 0u, 0u};
-  ComPtr<ID3D11Buffer> input_buffer;
-  ComPtr<ID3D11ShaderResourceView> input_srv;
-  ASSERT_TRUE(SUCCEEDED(device->CreateBuffer(
-    &input_desc, &input_data, &input_buffer)));
-  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
-    input_buffer.Get(), nullptr, &input_srv)));
-
-  const std::array<std::uint32_t, 4> exclusion {0u, 1u, 0u, 0u};
-  D3D11_TEXTURE2D_DESC mask_desc {};
-  mask_desc.Width = 4u;
-  mask_desc.Height = 1u;
-  mask_desc.MipLevels = 1u;
-  mask_desc.ArraySize = 1u;
-  mask_desc.Format = DXGI_FORMAT_R32_UINT;
-  mask_desc.SampleDesc.Count = 1u;
-  mask_desc.Usage = D3D11_USAGE_IMMUTABLE;
-  mask_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-  D3D11_SUBRESOURCE_DATA mask_data {exclusion.data(), sizeof(exclusion), 0u};
-  ComPtr<ID3D11Texture2D> mask_texture;
-  ComPtr<ID3D11ShaderResourceView> mask_srv;
-  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(
-    &mask_desc, &mask_data, &mask_texture)));
-  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
-    mask_texture.Get(), nullptr, &mask_srv)));
-
-  std::array<std::uint32_t, 12> constants {};
-  constants[0] = 4u;
-  constants[1] = 1u;
-  constants[5] = 256u;
-  D3D11_BUFFER_DESC constant_desc {};
-  constant_desc.ByteWidth = sizeof(constants);
-  constant_desc.Usage = D3D11_USAGE_IMMUTABLE;
-  constant_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-  D3D11_SUBRESOURCE_DATA constant_data {constants.data(), 0u, 0u};
-  ComPtr<ID3D11Buffer> constant_buffer;
-  ASSERT_TRUE(SUCCEEDED(device->CreateBuffer(
-    &constant_desc, &constant_data, &constant_buffer)));
-
-  const std::array<std::uint32_t, 4> minmax_identity {
-    0xFFFFFFFFu, 0u, 0u, 0u};
-  D3D11_BUFFER_DESC minmax_desc {};
-  minmax_desc.ByteWidth = sizeof(minmax_identity);
-  minmax_desc.Usage = D3D11_USAGE_DEFAULT;
-  minmax_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-  minmax_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
-  D3D11_SUBRESOURCE_DATA minmax_data {minmax_identity.data(), 0u, 0u};
-  ComPtr<ID3D11Buffer> minmax_buffer;
-  ComPtr<ID3D11UnorderedAccessView> minmax_uav;
-  ASSERT_TRUE(SUCCEEDED(device->CreateBuffer(
-    &minmax_desc, &minmax_data, &minmax_buffer)));
-  D3D11_UNORDERED_ACCESS_VIEW_DESC minmax_uav_desc {};
-  minmax_uav_desc.Format = DXGI_FORMAT_R32_TYPELESS;
-  minmax_uav_desc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-  minmax_uav_desc.Buffer.NumElements = 4u;
-  minmax_uav_desc.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
-  ASSERT_TRUE(SUCCEEDED(device->CreateUnorderedAccessView(
-    minmax_buffer.Get(), &minmax_uav_desc, &minmax_uav)));
-
-  const auto create_float4_buffer = [&](const UINT vector_count,
-                                        const UINT bind_flags,
-                                        ComPtr<ID3D11Buffer> &buffer,
-                                        ComPtr<ID3D11ShaderResourceView> *srv,
-                                        ComPtr<ID3D11UnorderedAccessView> *uav) {
-    D3D11_BUFFER_DESC desc {};
-    desc.ByteWidth = vector_count * 4u * sizeof(float);
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = bind_flags;
-    desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-    desc.StructureByteStride = 4u * sizeof(float);
-    if (FAILED(device->CreateBuffer(&desc, nullptr, &buffer))) {
-      return false;
-    }
-    if (srv && FAILED(device->CreateShaderResourceView(
-                 buffer.Get(), nullptr, srv->ReleaseAndGetAddressOf()))) {
-      return false;
-    }
-    return !uav || SUCCEEDED(device->CreateUnorderedAccessView(
-                     buffer.Get(), nullptr, uav->ReleaseAndGetAddressOf()));
-  };
-  ComPtr<ID3D11Buffer> partials_buffer;
-  ComPtr<ID3D11ShaderResourceView> partials_srv;
-  ComPtr<ID3D11UnorderedAccessView> partials_uav;
-  ComPtr<ID3D11Buffer> frame_stats_buffer;
-  ComPtr<ID3D11UnorderedAccessView> frame_stats_uav;
-  ASSERT_TRUE(create_float4_buffer(
-    2u, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
-    partials_buffer, &partials_srv, &partials_uav));
-  ASSERT_TRUE(create_float4_buffer(
-    2u, D3D11_BIND_UNORDERED_ACCESS,
-    frame_stats_buffer, nullptr, &frame_stats_uav));
-
-  const auto read_buffer = [&](ID3D11Buffer *source) {
-    D3D11_BUFFER_DESC staging_desc {};
-    source->GetDesc(&staging_desc);
-    staging_desc.Usage = D3D11_USAGE_STAGING;
-    staging_desc.BindFlags = 0u;
-    staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    staging_desc.MiscFlags = 0u;
-    staging_desc.StructureByteStride = 0u;
-    ComPtr<ID3D11Buffer> staging;
-    EXPECT_TRUE(SUCCEEDED(device->CreateBuffer(
-      &staging_desc, nullptr, &staging)));
-    std::vector<std::uint8_t> bytes(staging_desc.ByteWidth);
-    if (!staging) {
-      return bytes;
-    }
-    context->CopyResource(staging.Get(), source);
-    D3D11_MAPPED_SUBRESOURCE mapped {};
-    EXPECT_TRUE(SUCCEEDED(context->Map(
-      staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped)));
-    if (mapped.pData) {
-      std::memcpy(bytes.data(), mapped.pData, bytes.size());
-      context->Unmap(staging.Get(), 0u);
-    }
-    return bytes;
-  };
-
-  ID3D11Buffer *constant_buffers[] = {constant_buffer.Get()};
-  ID3D11ShaderResourceView *reduction_srvs[] = {input_srv.Get(), mask_srv.Get()};
-  context->CSSetShader(minmax_shader.Get(), nullptr, 0u);
-  context->CSSetConstantBuffers(0u, 1u, constant_buffers);
-  context->CSSetShaderResources(0u, 2u, reduction_srvs);
-  context->CSSetUnorderedAccessViews(0u, 1u, minmax_uav.GetAddressOf(), nullptr);
-  context->Dispatch(1u, 1u, 1u);
-  ID3D11ShaderResourceView *null_srvs[2] = {nullptr, nullptr};
-  ID3D11UnorderedAccessView *null_uav = nullptr;
-  context->CSSetShaderResources(0u, 2u, null_srvs);
-  context->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
-
-  auto minmax_bytes = read_buffer(minmax_buffer.Get());
-  ASSERT_EQ(minmax_bytes.size(), sizeof(minmax_identity));
-  std::array<std::uint32_t, 4> minmax {};
-  std::memcpy(minmax.data(), minmax_bytes.data(), minmax_bytes.size());
-  EXPECT_FLOAT_EQ(std::bit_cast<float>(minmax[0]), 1.0f);
-  EXPECT_FLOAT_EQ(std::bit_cast<float>(minmax[1]), 4.0f);
-  EXPECT_EQ(minmax[2], 3u);
-  EXPECT_EQ(minmax[3], 3u);
-
-  context->CSSetShader(moments_shader.Get(), nullptr, 0u);
-  context->CSSetShaderResources(0u, 2u, reduction_srvs);
-  context->CSSetUnorderedAccessViews(0u, 1u, partials_uav.GetAddressOf(), nullptr);
-  context->Dispatch(1u, 1u, 1u);
-  context->CSSetShaderResources(0u, 2u, null_srvs);
-  context->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
-
-  context->CSSetShader(frame_resolve_shader.Get(), nullptr, 0u);
-  context->CSSetShaderResources(0u, 1u, partials_srv.GetAddressOf());
-  context->CSSetUnorderedAccessViews(
-    0u, 1u, frame_stats_uav.GetAddressOf(), nullptr);
-  context->Dispatch(1u, 1u, 1u);
-  context->CSSetShaderResources(0u, 1u, null_srvs);
-  context->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
-
-  const auto frame_bytes = read_buffer(frame_stats_buffer.Get());
-  ASSERT_EQ(frame_bytes.size(), 8u * sizeof(float));
-  std::array<float, 8> frame_stats {};
-  std::memcpy(frame_stats.data(), frame_bytes.data(), frame_bytes.size());
-  EXPECT_NEAR(frame_stats[0], 8.0f / 3.0f, 1e-6f);
-  EXPECT_NEAR(frame_stats[1], std::sqrt(14.0f / 9.0f), 1e-6f);
-  EXPECT_FLOAT_EQ(frame_stats[2], 1.0f);
-  EXPECT_FLOAT_EQ(frame_stats[3], 4.0f);
-  EXPECT_FLOAT_EQ(frame_stats[4], 3.0f);
-  EXPECT_FLOAT_EQ(frame_stats[5], 3.0f);
-  EXPECT_FLOAT_EQ(frame_stats[6], 1.0f);
-
-  // Null/unbound exclusion is the exact ordinary route and admits all physical tensor cells.
-  context->UpdateSubresource(
-    minmax_buffer.Get(), 0u, nullptr, minmax_identity.data(), 0u, 0u);
-  ID3D11ShaderResourceView *ordinary_srvs[] = {input_srv.Get(), nullptr};
-  context->CSSetShader(minmax_shader.Get(), nullptr, 0u);
-  context->CSSetShaderResources(0u, 2u, ordinary_srvs);
-  context->CSSetUnorderedAccessViews(0u, 1u, minmax_uav.GetAddressOf(), nullptr);
-  context->Dispatch(1u, 1u, 1u);
-  context->CSSetShaderResources(0u, 2u, null_srvs);
-  context->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
-  minmax_bytes = read_buffer(minmax_buffer.Get());
-  std::memcpy(minmax.data(), minmax_bytes.data(), minmax_bytes.size());
-  EXPECT_FLOAT_EQ(std::bit_cast<float>(minmax[0]), 1.0f);
-  EXPECT_FLOAT_EQ(std::bit_cast<float>(minmax[1]), 100.0f);
-  EXPECT_EQ(minmax[2], 4u);
-  EXPECT_EQ(minmax[3], 4u);
-
-  context->CSSetShader(moments_shader.Get(), nullptr, 0u);
-  context->CSSetShaderResources(0u, 2u, ordinary_srvs);
-  context->CSSetUnorderedAccessViews(0u, 1u, partials_uav.GetAddressOf(), nullptr);
-  context->Dispatch(1u, 1u, 1u);
-  context->CSSetShaderResources(0u, 2u, null_srvs);
-  context->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
-  context->CSSetShader(frame_resolve_shader.Get(), nullptr, 0u);
-  context->CSSetShaderResources(0u, 1u, partials_srv.GetAddressOf());
-  context->CSSetUnorderedAccessViews(
-    0u, 1u, frame_stats_uav.GetAddressOf(), nullptr);
-  context->Dispatch(1u, 1u, 1u);
-  context->CSSetShaderResources(0u, 1u, null_srvs);
-  context->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
-
-  const auto ordinary_frame_bytes = read_buffer(frame_stats_buffer.Get());
-  ASSERT_EQ(ordinary_frame_bytes.size(), 8u * sizeof(float));
-  std::array<float, 8> ordinary_frame_stats {};
-  std::memcpy(
-    ordinary_frame_stats.data(),
-    ordinary_frame_bytes.data(),
-    ordinary_frame_bytes.size()
-  );
-  EXPECT_FLOAT_EQ(ordinary_frame_stats[0], 27.0f);
-  EXPECT_NEAR(ordinary_frame_stats[1], std::sqrt(1777.5f), 1e-5f);
-  EXPECT_FLOAT_EQ(ordinary_frame_stats[2], 1.0f);
-  EXPECT_FLOAT_EQ(ordinary_frame_stats[3], 100.0f);
-  EXPECT_FLOAT_EQ(ordinary_frame_stats[4], 4.0f);
-  EXPECT_FLOAT_EQ(ordinary_frame_stats[5], 4.0f);
-  EXPECT_FLOAT_EQ(ordinary_frame_stats[6], 1.0f);
-
-  // Exclusion is evaluated before finiteness, so a masked non-finite prediction contributes to
-  // neither valid nor eligible counts and cannot invalidate the admitted range.
-  const std::array<float, 4> masked_nonfinite_depth {
-    1.0f, std::numeric_limits<float>::quiet_NaN(), 3.0f, 4.0f};
-  context->UpdateSubresource(
-    input_buffer.Get(), 0u, nullptr, masked_nonfinite_depth.data(), 0u, 0u);
-  context->UpdateSubresource(
-    minmax_buffer.Get(), 0u, nullptr, minmax_identity.data(), 0u, 0u);
-  context->CSSetShader(minmax_shader.Get(), nullptr, 0u);
-  context->CSSetShaderResources(0u, 2u, reduction_srvs);
-  context->CSSetUnorderedAccessViews(0u, 1u, minmax_uav.GetAddressOf(), nullptr);
-  context->Dispatch(1u, 1u, 1u);
-  context->CSSetShaderResources(0u, 2u, null_srvs);
-  context->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
-  minmax_bytes = read_buffer(minmax_buffer.Get());
-  std::memcpy(minmax.data(), minmax_bytes.data(), minmax_bytes.size());
-  EXPECT_FLOAT_EQ(std::bit_cast<float>(minmax[0]), 1.0f);
-  EXPECT_FLOAT_EQ(std::bit_cast<float>(minmax[1]), 4.0f);
-  EXPECT_EQ(minmax[2], 3u);
-  EXPECT_EQ(minmax[3], 3u);
-
-  // A non-finite admitted texel must not let the finite subset update percentile/range history.
-  // Model that exact reduction result directly: finite min/max exist, but valid < eligible.
-  const std::array<std::uint32_t, 4> partial_nonfinite_raw {
-    std::bit_cast<std::uint32_t>(1.0f),
-    std::bit_cast<std::uint32_t>(4.0f),
-    3u,
-    4u,
-  };
-  context->UpdateSubresource(
-    minmax_buffer.Get(), 0u, nullptr, partial_nonfinite_raw.data(), 0u, 0u);
-
-  ComPtr<ID3D11Buffer> range_ema_buffer;
-  ComPtr<ID3D11UnorderedAccessView> range_ema_uav;
-  ASSERT_TRUE(create_float4_buffer(
-    1u, D3D11_BIND_UNORDERED_ACCESS,
-    range_ema_buffer, nullptr, &range_ema_uav));
-  const std::array<float, 4> prior_range {10.0f, 20.0f, 1.0f, 1.0f};
-  context->UpdateSubresource(
-    range_ema_buffer.Get(), 0u, nullptr, prior_range.data(), 0u, 0u);
-
-  ComPtr<ID3D11Buffer> diagnostic_buffer;
-  ComPtr<ID3D11UnorderedAccessView> diagnostic_uav;
-  ASSERT_TRUE(create_float4_buffer(
-    32u, D3D11_BIND_UNORDERED_ACCESS,
-    diagnostic_buffer, nullptr, &diagnostic_uav));
-  const std::array<std::array<float, 4>, 32> zero_diagnostics {};
-  context->UpdateSubresource(
-    diagnostic_buffer.Get(), 0u, nullptr, zero_diagnostics.data(), 0u, 0u);
-
-  const std::array<std::uint32_t, 256> zero_histogram {};
-  D3D11_BUFFER_DESC histogram_desc {};
-  histogram_desc.ByteWidth = sizeof(zero_histogram);
-  histogram_desc.Usage = D3D11_USAGE_DEFAULT;
-  histogram_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-  histogram_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-  histogram_desc.StructureByteStride = sizeof(std::uint32_t);
-  D3D11_SUBRESOURCE_DATA histogram_data {zero_histogram.data(), 0u, 0u};
-  ComPtr<ID3D11Buffer> histogram_buffer;
-  ComPtr<ID3D11UnorderedAccessView> histogram_uav;
-  ASSERT_TRUE(SUCCEEDED(device->CreateBuffer(
-    &histogram_desc, &histogram_data, &histogram_buffer)));
-  ASSERT_TRUE(SUCCEEDED(device->CreateUnorderedAccessView(
-    histogram_buffer.Get(), nullptr, &histogram_uav)));
-
-  ID3D11UnorderedAccessView *ema_uavs[4] = {
-    range_ema_uav.Get(), minmax_uav.Get(), histogram_uav.Get(),
-    diagnostic_uav.Get()};
-  context->CSSetShader(minmax_ema_shader.Get(), nullptr, 0u);
-  context->CSSetConstantBuffers(0u, 1u, constant_buffers);
-  context->CSSetUnorderedAccessViews(0u, 4u, ema_uavs, nullptr);
-  context->Dispatch(1u, 1u, 1u);
-  ID3D11UnorderedAccessView *null_ema_uavs[4] = {
-    nullptr, nullptr, nullptr, nullptr};
-  context->CSSetUnorderedAccessViews(0u, 4u, null_ema_uavs, nullptr);
-
-  const auto range_bytes = read_buffer(range_ema_buffer.Get());
-  ASSERT_EQ(range_bytes.size(), sizeof(prior_range));
-  std::array<float, 4> held_range {};
-  std::memcpy(held_range.data(), range_bytes.data(), range_bytes.size());
-  EXPECT_FLOAT_EQ(held_range[0], prior_range[0]);
-  EXPECT_FLOAT_EQ(held_range[1], prior_range[1]);
-  EXPECT_FLOAT_EQ(held_range[2], prior_range[2]);
-  EXPECT_FLOAT_EQ(held_range[3], 0.0f);
-
-  minmax_bytes = read_buffer(minmax_buffer.Get());
-  std::memcpy(minmax.data(), minmax_bytes.data(), minmax_bytes.size());
-  EXPECT_EQ(minmax, minmax_identity);
-}
-
-TEST(DirectxShaderTest, OverlayExclusionMakesMotionStencilAbstain) {
-  using Microsoft::WRL::ComPtr;
-
-  ComPtr<ID3D11Device> device;
-  ComPtr<ID3D11DeviceContext> context;
-  D3D_FEATURE_LEVEL feature_level {};
-  constexpr D3D_FEATURE_LEVEL requested_levels[] = {D3D_FEATURE_LEVEL_11_0};
-  ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(
-    nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
-    requested_levels, static_cast<UINT>(std::size(requested_levels)),
-    D3D11_SDK_VERSION, &device, &feature_level, &context)));
-
-  ComPtr<ID3DBlob> blob;
-  ComPtr<ID3DBlob> errors;
-  const std::filesystem::path shader_path =
-    SUNSHINE_SHADERS_DIR "/depth_ema_motion_cs.hlsl";
-  const auto compile_status = D3DCompileFromFile(
-    shader_path.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
-    "main", "cs_5_0",
-    D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
-    0, &blob, &errors);
-  ASSERT_TRUE(SUCCEEDED(compile_status))
-    << (errors ? static_cast<const char *>(errors->GetBufferPointer()) :
-                 "no compiler diagnostics");
-  ComPtr<ID3D11ComputeShader> shader;
-  ASSERT_TRUE(SUCCEEDED(device->CreateComputeShader(
-    blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &shader)));
-
-  const auto create_structured_srv = [&]<typename T>(
-                                       const std::span<const T> values,
-                                       ComPtr<ID3D11Buffer> &buffer,
-                                       ComPtr<ID3D11ShaderResourceView> &srv) {
-    D3D11_BUFFER_DESC desc {};
-    desc.ByteWidth = static_cast<UINT>(values.size_bytes());
-    desc.Usage = D3D11_USAGE_IMMUTABLE;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-    desc.StructureByteStride = sizeof(T);
-    D3D11_SUBRESOURCE_DATA data {values.data(), 0u, 0u};
-    return SUCCEEDED(device->CreateBuffer(&desc, &data, &buffer)) &&
-           SUCCEEDED(device->CreateShaderResourceView(
-             buffer.Get(), nullptr, &srv));
-  };
-
-  const std::array<float, 3> raw_depth {1.0f, 0.0f, 0.0f};
-  ComPtr<ID3D11Buffer> raw_buffer;
-  ComPtr<ID3D11ShaderResourceView> raw_srv;
-  ASSERT_TRUE(create_structured_srv(
-    std::span<const float> {raw_depth}, raw_buffer, raw_srv));
-
-  const std::array<std::array<float, 4>, 1> minmax_ema {{
-    {0.0f, 1.0f, 1.0f, 1.0f},
-  }};
-  ComPtr<ID3D11Buffer> minmax_buffer;
-  ComPtr<ID3D11ShaderResourceView> minmax_srv;
-  ASSERT_TRUE(create_structured_srv(
-    std::span<const std::array<float, 4>> {minmax_ema},
-    minmax_buffer,
-    minmax_srv
-  ));
-
-  const std::array<float, 3> previous_depth {0.0f, 0.0f, 0.0f};
-  D3D11_TEXTURE2D_DESC previous_desc {};
-  previous_desc.Width = 3u;
-  previous_desc.Height = 1u;
-  previous_desc.MipLevels = 1u;
-  previous_desc.ArraySize = 1u;
-  previous_desc.Format = DXGI_FORMAT_R32_FLOAT;
-  previous_desc.SampleDesc.Count = 1u;
-  previous_desc.Usage = D3D11_USAGE_IMMUTABLE;
-  previous_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-  D3D11_SUBRESOURCE_DATA previous_data {
-    previous_depth.data(), 3u * sizeof(float), 0u};
-  ComPtr<ID3D11Texture2D> previous_texture;
-  ComPtr<ID3D11ShaderResourceView> previous_srv;
-  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(
-    &previous_desc, &previous_data, &previous_texture)));
-  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
-    previous_texture.Get(), nullptr, &previous_srv)));
-
-  const std::array<std::uint32_t, 3> exclusion {0u, 1u, 0u};
-  auto exclusion_desc = previous_desc;
-  exclusion_desc.Format = DXGI_FORMAT_R32_UINT;
-  D3D11_SUBRESOURCE_DATA exclusion_data {
-    exclusion.data(), 3u * sizeof(std::uint32_t), 0u};
-  ComPtr<ID3D11Texture2D> exclusion_texture;
-  ComPtr<ID3D11ShaderResourceView> exclusion_srv;
-  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(
-    &exclusion_desc, &exclusion_data, &exclusion_texture)));
-  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
-    exclusion_texture.Get(), nullptr, &exclusion_srv)));
-
-  auto output_desc = exclusion_desc;
-  output_desc.Usage = D3D11_USAGE_DEFAULT;
-  output_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-  ComPtr<ID3D11Texture2D> output_texture;
-  ComPtr<ID3D11UnorderedAccessView> output_uav;
-  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(
-    &output_desc, nullptr, &output_texture)));
-  ASSERT_TRUE(SUCCEEDED(device->CreateUnorderedAccessView(
-    output_texture.Get(), nullptr, &output_uav)));
-
-  std::array<std::uint32_t, 12> constants {};
-  constants[0] = 3u;
-  constants[1] = 1u;
-  constants[6] = std::bit_cast<std::uint32_t>(0.5f);
-  constants[7] = std::bit_cast<std::uint32_t>(0.001f);
-  D3D11_BUFFER_DESC constant_desc {};
-  constant_desc.ByteWidth = sizeof(constants);
-  constant_desc.Usage = D3D11_USAGE_IMMUTABLE;
-  constant_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-  D3D11_SUBRESOURCE_DATA constant_data {constants.data(), 0u, 0u};
-  ComPtr<ID3D11Buffer> constant_buffer;
-  ASSERT_TRUE(SUCCEEDED(device->CreateBuffer(
-    &constant_desc, &constant_data, &constant_buffer)));
-
-  const auto run_case = [&](ID3D11ShaderResourceView *mask) {
-    const UINT clear[4] = {0u, 0u, 0u, 0u};
-    context->ClearUnorderedAccessViewUint(output_uav.Get(), clear);
-    ID3D11ShaderResourceView *inputs[4] = {
-      raw_srv.Get(), minmax_srv.Get(), previous_srv.Get(), mask};
-    context->CSSetShader(shader.Get(), nullptr, 0u);
-    context->CSSetConstantBuffers(0u, 1u, constant_buffer.GetAddressOf());
-    context->CSSetShaderResources(0u, 4u, inputs);
-    context->CSSetUnorderedAccessViews(
-      0u, 1u, output_uav.GetAddressOf(), nullptr);
-    context->Dispatch(1u, 1u, 1u);
-    ID3D11ShaderResourceView *null_srvs[4] = {
-      nullptr, nullptr, nullptr, nullptr};
-    ID3D11UnorderedAccessView *null_uav = nullptr;
-    context->CSSetShaderResources(0u, 4u, null_srvs);
-    context->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
-
-    D3D11_TEXTURE2D_DESC staging_desc = output_desc;
-    staging_desc.Usage = D3D11_USAGE_STAGING;
-    staging_desc.BindFlags = 0u;
-    staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    ComPtr<ID3D11Texture2D> staging;
-    EXPECT_TRUE(SUCCEEDED(device->CreateTexture2D(
-      &staging_desc, nullptr, &staging)));
-    std::array<std::uint32_t, 3> result {};
-    if (!staging) {
-      return result;
-    }
-    context->CopyResource(staging.Get(), output_texture.Get());
-    D3D11_MAPPED_SUBRESOURCE mapped {};
-    EXPECT_TRUE(SUCCEEDED(context->Map(
-      staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped)));
-    if (mapped.pData) {
-      std::memcpy(result.data(), mapped.pData, sizeof(result));
-      context->Unmap(staging.Get(), 0u);
-    }
-    return result;
-  };
-
-  const std::array<std::uint32_t, 3> ordinary_expected {1u, 0u, 0u};
-  EXPECT_EQ(run_case(nullptr), ordinary_expected);
-  const std::array<std::uint32_t, 3> excluded_expected {0u, 0u, 0u};
-  EXPECT_EQ(run_case(exclusion_srv.Get()), excluded_expected);
-}
-
-TEST(DirectxShaderTest, OverlayExcludedOwnershipCenterPreservesCandidateExactly) {
-  using Microsoft::WRL::ComPtr;
-
-  ComPtr<ID3D11Device> device;
-  ComPtr<ID3D11DeviceContext> context;
-  D3D_FEATURE_LEVEL feature_level {};
-  constexpr D3D_FEATURE_LEVEL requested_levels[] = {D3D_FEATURE_LEVEL_11_0};
-  ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(
-    nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
-    requested_levels, static_cast<UINT>(std::size(requested_levels)),
-    D3D11_SDK_VERSION, &device, &feature_level, &context)));
-
-  ComPtr<ID3DBlob> blob;
-  ComPtr<ID3DBlob> errors;
-  const std::filesystem::path shader_path =
-    SUNSHINE_SHADERS_DIR "/depth_coordinate_v2_ownership_cs.hlsl";
-  const auto compile_status = D3DCompileFromFile(
-    shader_path.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
-    "main", "cs_5_0",
-    D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
-    0, &blob, &errors);
-  ASSERT_TRUE(SUCCEEDED(compile_status))
-    << (errors ? static_cast<const char *>(errors->GetBufferPointer()) :
-                 "no compiler diagnostics");
-  ComPtr<ID3D11ComputeShader> shader;
-  ASSERT_TRUE(SUCCEEDED(device->CreateComputeShader(
-    blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &shader)));
-
-  constexpr UINT width = 3u;
-  const std::array<float, width> candidate {0.125f, 0.375f, 0.875f};
-  D3D11_TEXTURE2D_DESC candidate_desc {};
-  candidate_desc.Width = width;
-  candidate_desc.Height = 1u;
-  candidate_desc.MipLevels = 1u;
-  candidate_desc.ArraySize = 1u;
-  candidate_desc.Format = DXGI_FORMAT_R32_FLOAT;
-  candidate_desc.SampleDesc.Count = 1u;
-  candidate_desc.Usage = D3D11_USAGE_IMMUTABLE;
-  candidate_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-  D3D11_SUBRESOURCE_DATA candidate_data {
-    candidate.data(), width * sizeof(float), 0u};
-  ComPtr<ID3D11Texture2D> candidate_texture;
-  ComPtr<ID3D11ShaderResourceView> candidate_srv;
-  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(
-    &candidate_desc, &candidate_data, &candidate_texture)));
-  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
-    candidate_texture.Get(), nullptr, &candidate_srv)));
-
-  const std::array<std::array<std::uint8_t, 4>, width> source {{
-    {0u, 0u, 0u, 255u},
-    {127u, 127u, 127u, 255u},
-    {255u, 255u, 255u, 255u},
-  }};
-  auto source_desc = candidate_desc;
-  source_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-  D3D11_SUBRESOURCE_DATA source_data {
-    source.data(), width * 4u, 0u};
-  ComPtr<ID3D11Texture2D> source_texture;
-  ComPtr<ID3D11ShaderResourceView> source_srv;
-  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(
-    &source_desc, &source_data, &source_texture)));
-  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
-    source_texture.Get(), nullptr, &source_srv)));
-
-  const std::array<std::uint32_t, width> exclusion {0u, 1u, 0u};
-  auto exclusion_desc = candidate_desc;
-  exclusion_desc.Format = DXGI_FORMAT_R32_UINT;
-  D3D11_SUBRESOURCE_DATA exclusion_data {
-    exclusion.data(), width * sizeof(std::uint32_t), 0u};
-  ComPtr<ID3D11Texture2D> exclusion_texture;
-  ComPtr<ID3D11ShaderResourceView> exclusion_srv;
-  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(
-    &exclusion_desc, &exclusion_data, &exclusion_texture)));
-  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
-    exclusion_texture.Get(), nullptr, &exclusion_srv)));
-
-  auto output_desc = candidate_desc;
-  output_desc.Usage = D3D11_USAGE_DEFAULT;
-  output_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-  ComPtr<ID3D11Texture2D> output_texture;
-  ComPtr<ID3D11UnorderedAccessView> output_uav;
-  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(
-    &output_desc, nullptr, &output_texture)));
-  ASSERT_TRUE(SUCCEEDED(device->CreateUnorderedAccessView(
-    output_texture.Get(), nullptr, &output_uav)));
-
-  std::array<std::uint32_t, 12> constants {};
-  constants[0] = width;
-  constants[1] = 1u;
-  D3D11_BUFFER_DESC constant_desc {};
-  constant_desc.ByteWidth = sizeof(constants);
-  constant_desc.Usage = D3D11_USAGE_IMMUTABLE;
-  constant_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-  D3D11_SUBRESOURCE_DATA constant_data {constants.data(), 0u, 0u};
-  ComPtr<ID3D11Buffer> constant_buffer;
-  ASSERT_TRUE(SUCCEEDED(device->CreateBuffer(
-    &constant_desc, &constant_data, &constant_buffer)));
-
-  ID3D11ShaderResourceView *inputs[3] = {
-    candidate_srv.Get(), source_srv.Get(), exclusion_srv.Get()};
-  context->CSSetShader(shader.Get(), nullptr, 0u);
-  context->CSSetConstantBuffers(0u, 1u, constant_buffer.GetAddressOf());
-  context->CSSetShaderResources(0u, 3u, inputs);
-  context->CSSetUnorderedAccessViews(
-    0u, 1u, output_uav.GetAddressOf(), nullptr);
-  context->Dispatch(1u, 1u, 1u);
-  ID3D11ShaderResourceView *null_srvs[3] = {nullptr, nullptr, nullptr};
-  ID3D11UnorderedAccessView *null_uav = nullptr;
-  context->CSSetShaderResources(0u, 3u, null_srvs);
-  context->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
-
-  auto staging_desc = output_desc;
-  staging_desc.Usage = D3D11_USAGE_STAGING;
-  staging_desc.BindFlags = 0u;
-  staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-  ComPtr<ID3D11Texture2D> staging;
-  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(
-    &staging_desc, nullptr, &staging)));
-  context->CopyResource(staging.Get(), output_texture.Get());
-  D3D11_MAPPED_SUBRESOURCE mapped {};
-  ASSERT_TRUE(SUCCEEDED(context->Map(
-    staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped)));
-  std::array<float, width> output {};
-  std::memcpy(output.data(), mapped.pData, sizeof(output));
-  context->Unmap(staging.Get(), 0u);
-
-  EXPECT_EQ(
-    std::bit_cast<std::uint32_t>(output[1]),
-    std::bit_cast<std::uint32_t>(candidate[1])
-  );
 }
 
 TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {

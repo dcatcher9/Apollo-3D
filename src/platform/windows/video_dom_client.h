@@ -25,6 +25,7 @@ namespace platf::video_dom {
   enum class status_e : std::uint8_t {
     starting,
     ok,
+    ok_fullscreen,
     no_foreground,
     unsupported,
     unavailable,
@@ -42,8 +43,48 @@ namespace platf::video_dom {
     stopped,
   };
 
+  /** Both positive protocol statuses carry an authenticated semantic video identity/rectangle. */
+  [[nodiscard]] inline constexpr bool carries_video_geometry(
+    const status_e status
+  ) noexcept {
+    return status == status_e::ok || status == status_e::ok_fullscreen;
+  }
+
   /**
-   * One immutable helper observation. Only status==ok carries non-zero identity/geometry.
+   * Preserve the helper's fullscreen-only provenance after screen-to-capture mapping.
+   * Ordinary `ok` comes from the strict windowed selector and may authorize either a windowed ROI
+   * or an exact full-capture rectangle. `ok_fullscreen` may authorize only the latter.
+   */
+  [[nodiscard]] inline constexpr bool allows_mapped_video_rect(
+    const status_e status,
+    const bool exactly_full_capture
+  ) noexcept {
+    return status == status_e::ok ||
+           (status == status_e::ok_fullscreen && exactly_full_capture);
+  }
+
+  enum class geometry_authority_class_e : std::uint8_t {
+    none,
+    strict_windowed,
+    fullscreen_only,
+  };
+
+  /** Stable route provenance for detector lineage; heartbeat/snapshot generations are excluded. */
+  [[nodiscard]] inline constexpr geometry_authority_class_e geometry_authority_class(
+    const status_e status
+  ) noexcept {
+    if (status == status_e::ok) {
+      return geometry_authority_class_e::strict_windowed;
+    }
+    if (status == status_e::ok_fullscreen) {
+      return geometry_authority_class_e::fullscreen_only;
+    }
+    return geometry_authority_class_e::none;
+  }
+
+  /**
+   * One immutable helper observation. Only `ok` and `ok_fullscreen` carry non-zero
+   * identity/geometry.
    * Both timestamps are host-local and therefore do not trust a child-process clock.
    * received_at tracks the newest helper heartbeat. geometry_valid_since tracks when this exact
    * OK identity and rectangle began one uninterrupted run; identical heartbeats preserve it.
@@ -178,8 +219,8 @@ namespace platf::video_dom {
     };
 
     /**
-     * Preserve the beginning of an uninterrupted geometry run only across an identical OK
-     * heartbeat. Every status, identity, or rectangle transition starts a new run.
+     * Preserve the beginning of an uninterrupted geometry run only across an identical positive
+     * status and heartbeat. Every status, identity, or rectangle transition starts a new run.
      */
     [[nodiscard]] std::chrono::steady_clock::time_point continued_geometry_valid_since(
       const snapshot_t *previous,

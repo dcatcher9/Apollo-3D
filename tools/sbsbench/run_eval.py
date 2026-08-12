@@ -71,7 +71,7 @@ from generate_depth_coordinate_v2_contract import (  # noqa: E402
     shader_source_closure_sha256,
 )
 
-EVAL_SCHEMA = whole_clip_raw_contract.EVALUATOR_SCHEMA  # schema 36; harness 20 or direct 25
+EVAL_SCHEMA = whole_clip_raw_contract.EVALUATOR_SCHEMA  # schema 37; harness 22 or direct 25
 PARALLAX_V2_LIVE_RENDERER = "depth-coordinate-v2-live-signed-parallax"
 BASELINE_SNAPSHOT_SCHEMA = 1
 BASELINE_SNAPSHOT_FILE = "baseline_snapshot.json"
@@ -89,7 +89,6 @@ CONTENT_TYPES = {
     "animation",
     "simulation",
 }
-
 
 def production_subprocess_env():
     """Environment for Sunshine/build children without evaluator-only numeric thread limits."""
@@ -490,7 +489,7 @@ def label_context_sha(meta):
 
 
 def validate_preprocess_identity_meta(meta):
-    """Fail closed on schema-36 preprocessing identity, including valid abstention.
+    """Fail closed on schema-37 preprocessing identity, including valid abstention.
 
     Every run records the source closure actually consumed by the runtime shader compiler.  A
     profile/calibration pair is present only when that closure and the complete model identity
@@ -503,7 +502,7 @@ def validate_preprocess_identity_meta(meta):
         "depth_coordinate_v2_calibration_id",
     }
     if not required_keys.issubset(meta):
-        raise ValueError("schema-36 results omit preprocessing identity fields")
+        raise ValueError("schema-37 results omit preprocessing identity fields")
     source_digest = meta["preprocess_source_closure_sha256"]
     if (not isinstance(source_digest, str) or
             re.fullmatch(r"[0-9a-f]{64}", source_digest) is None):
@@ -745,6 +744,46 @@ def validate_subtitle_transition_contract(path, contract):
     return contract
 
 
+def validate_subtitle_tight_mask(path, meta):
+    """Validate exact authored glyph-plus-outline support without requiring an RGB oracle."""
+    if meta.get("required_gt_subtitle_region") is not True:
+        raise ValueError(
+            "required_gt_subtitle_tight_mask requires required_gt_subtitle_region=true")
+
+    source_by_id = sbsbench.indexed_files(os.path.join(path, "frame_*.*"), "frame_")
+    source_by_id = {
+        frame_id: frame_path for frame_id, frame_path in source_by_id.items()
+        if frame_path.lower().endswith((".png", ".jpg", ".jpeg"))
+    }
+    loose_by_id = sbsbench.indexed_files(
+        os.path.join(path, "gt_subtitle_region", "frame_*.png"), "frame_")
+    tight_by_id = sbsbench.indexed_files(
+        os.path.join(path, "gt_subtitle_overlay_mask", "frame_*.png"), "frame_")
+    expected_ids = set(source_by_id)
+    for label, indexed in (
+            ("loose subtitle region", loose_by_id),
+            ("tight subtitle overlay mask", tight_by_id)):
+        if set(indexed) != expected_ids:
+            missing = sorted(expected_ids - set(indexed))
+            extra = sorted(set(indexed) - expected_ids)
+            raise ValueError(
+                f"subtitle tight-mask {label}/source frame-id mismatch: "
+                f"missing={missing}, extra={extra}")
+
+    for frame_id in sorted(source_by_id):
+        with Image.open(source_by_id[frame_id]) as source_image:
+            source_shape = (source_image.height, source_image.width)
+        loose = sbsbench.load_binary_source_mask(loose_by_id[frame_id], source_shape)
+        tight = sbsbench.load_binary_source_mask(tight_by_id[frame_id], source_shape)
+        if np.any(tight & ~loose):
+            raise ValueError(
+                f"tight subtitle overlay mask escapes loose subtitle region at frame {frame_id}")
+        if bool(np.any(tight)) != bool(np.any(loose)):
+            raise ValueError(
+                "tight subtitle overlay mask and loose subtitle region must have matching "
+                f"empty/non-empty state at frame {frame_id}")
+
+
 def validate_subtitle_sanitizer_oracle(path, meta):
     """Validate exact tight-overlay support and the authored subtitle-free RGB plate."""
     if meta.get("required_gt_subtitle_region") is not True:
@@ -891,7 +930,8 @@ def load_clip_metadata(path, suite=None, required=True):
         # memory, but never publish or interpret it as consumed ground-truth evidence.
         meta["reference_stereo_available"] = meta.pop("required_gt_stereo")
     requirement_keys = (
-        "required_gt_depth", "required_gt_flow", "required_gt_subtitle_region")
+        "required_gt_depth", "required_gt_flow", "required_gt_subtitle_region",
+        "required_gt_subtitle_tight_mask")
     for key in requirement_keys:
         if key in meta and not isinstance(meta[key], bool):
             raise ValueError(f"invalid clip metadata {meta_path}: {key} must be boolean")
@@ -900,18 +940,11 @@ def load_clip_metadata(path, suite=None, required=True):
         raise ValueError(
             f"invalid clip metadata {meta_path}: "
             "required_gt_subtitle_sanitizer_oracle must be boolean")
-    if "subtitle_target_disparity_pct" in meta:
-        try:
-            meta["subtitle_target_disparity_pct"] = (
-                sbsbench.sbs_subtitle_metrics.validate_subtitle_target_disparity_pct(
-                    meta["subtitle_target_disparity_pct"]))
-        except ValueError as exc:
-            raise ValueError(f"invalid clip metadata {meta_path}: {exc}") from exc
-    if (meta.get("required_gt_subtitle_region") is True and
-            "subtitle_target_disparity_pct" not in meta):
+    if (meta.get("required_gt_subtitle_tight_mask") is True and
+            meta.get("required_gt_subtitle_region") is not True):
         raise ValueError(
-            f"invalid clip metadata {meta_path}: required_gt_subtitle_region needs explicit "
-            "subtitle_target_disparity_pct")
+            f"invalid clip metadata {meta_path}: required_gt_subtitle_tight_mask "
+            "requires required_gt_subtitle_region=true")
     if "subtitle_transition_contract" in meta:
         if meta.get("required_gt_subtitle_region") is not True:
             raise ValueError(
@@ -1119,6 +1152,8 @@ def load_clip_metadata(path, suite=None, required=True):
         "required_gt_flow": os.path.join(path, "gt_flow", "frame_*.npz"),
         "required_gt_subtitle_region": os.path.join(
             path, "gt_subtitle_region", "frame_*.png"),
+        "required_gt_subtitle_tight_mask": os.path.join(
+            path, "gt_subtitle_overlay_mask", "frame_*.png"),
         "reference_stereo_available": os.path.join(path, "gt_right", "frame_*.*"),
     }
     for key, pattern in reference_patterns.items():
@@ -1159,6 +1194,13 @@ def load_clip_metadata(path, suite=None, required=True):
                 raise ValueError(
                     f"invalid clip metadata {meta_path}: malformed GT subtitle region for "
                     f"frame {frame_id}: {exc}") from exc
+    if meta.get("required_gt_subtitle_tight_mask"):
+        try:
+            validate_subtitle_tight_mask(path, meta)
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                f"invalid clip metadata {meta_path}: malformed GT subtitle tight mask: "
+                f"{exc}") from exc
     if meta.get("required_gt_subtitle_sanitizer_oracle"):
         try:
             validate_subtitle_sanitizer_oracle(path, meta)
@@ -1174,7 +1216,7 @@ def published_clip_metadata(source_meta):
     keys = (
         "name", "description", "expected_flat", "gt_depth_kind", "required_gt_depth",
         "required_gt_flow", "required_gt_subtitle_region", "reference_stereo_available",
-        "required_gt_subtitle_sanitizer_oracle", "subtitle_target_disparity_pct",
+        "required_gt_subtitle_tight_mask", "required_gt_subtitle_sanitizer_oracle",
         "subtitle_transition_contract",
         "dataset", "homepage", "citation",
         "license_note", "content_type", "evaluation_role", "source_url", "source_window",
@@ -1213,8 +1255,8 @@ def source_evidence_digests(path):
     semantic = {k: meta[k] for k in ("expected_flat", "gt_depth_kind", "dataset",
                                      "required_gt_depth", "required_gt_flow",
                                      "required_gt_subtitle_region",
+                                     "required_gt_subtitle_tight_mask",
                                      "required_gt_subtitle_sanitizer_oracle",
-                                     "subtitle_target_disparity_pct",
                                      "subtitle_transition_contract",
                                      "reference_stereo_available", "evaluation_role",
                                      "content_type", "shot_state_contract") if k in meta}
@@ -1985,7 +2027,7 @@ def authoritative_remeasurement_clip_meta(
     ``results.json`` is only a cache.  In particular, an edited ``expected_flat`` flag or a
     forged ``source_frame_count`` can change metric applicability and label completeness.  This
     function deliberately does not read the cached per-clip metadata while constructing the
-    replacement.  The source ``meta.json``, the harness contract (schema 20 for production depth,
+    replacement.  The source ``meta.json``, the harness contract (schema 22 for production depth,
     schema 25 for authenticated displacement plus diagnostic-order replay), and the complete set of metric
     artifact identities are the authorities.
     """
@@ -2079,7 +2121,7 @@ def authoritative_remeasurement_clip_meta(
         except ValueError as exc:
             raise ValueError(f"clips.{clip}: {exc}") from exc
     else:
-        # Ordinary schema-20 evaluation runs execute the production Depth Coordinate V2
+        # Ordinary schema-22 evaluation runs execute the production Depth Coordinate V2
         # renderer; a legacy-pipeline result must never be remeasured as current evidence.
         live_contract = contract.get("parallax_v2_live")
         if (not isinstance(live_contract, dict) or

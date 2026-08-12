@@ -1,6 +1,6 @@
 /**
  * @file src/host_sbs_shader_cache.cpp
- * @brief Process-wide bytecode cache for the fixed-shape Host SBS depth shaders.
+ * @brief Closure-keyed memory and persistent bytecode cache for fixed-shape Host SBS shaders.
  */
 
 #include "host_sbs_shader_cache.h"
@@ -9,8 +9,11 @@
 #include "logging.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
+#include <d3d11shader.h>
 #include <d3dcompiler.h>
+#include <exception>
 #include <fstream>
 #include <future>
 #include <iterator>
@@ -23,6 +26,7 @@
 #include <string>
 #include <tuple>
 #include <utility>
+#include <windows.h>
 #include <wrl/client.h>
 
 #ifdef _MSC_VER
@@ -47,6 +51,9 @@ namespace models::host_sbs_shader_cache {
   namespace {
     constexpr std::string_view source_closure_domain =
       "apollo-host-sbs-source-closure-v2\n";
+    constexpr std::string_view bytecode_cache_key_domain =
+      "apollo-host-sbs-bytecode-cache-v1\n";
+    constexpr std::uint64_t maximum_cached_bytecode_bytes = 64u * 1024u * 1024u;
 
     void append_u64_le(std::string &output, const std::uint64_t value) {
       for (unsigned int shift = 0; shift < 64; shift += 8) {
@@ -69,6 +76,59 @@ namespace models::host_sbs_shader_cache {
         result.push_back(digits[byte & 0x0fu]);
       }
       return result;
+    }
+
+    std::string bytecode_cache_key(
+      const source_snapshot &snapshot,
+      const owned_shader_spec &spec
+    ) {
+      std::string canonical {bytecode_cache_key_domain};
+      append_u64_le(canonical, shader_compile_flags);
+      append_field(canonical, snapshot.closure_sha256);
+      append_field(canonical, spec.filename);
+      append_field(canonical, spec.entrypoint);
+      append_field(canonical, spec.target);
+      return standard_sha256_hex(canonical);
+    }
+
+    bool bytecode_matches_target(
+      const std::vector<unsigned char> &bytecode,
+      const std::string_view target
+    ) {
+      if (bytecode.empty() || bytecode.size() > maximum_cached_bytecode_bytes) {
+        return false;
+      }
+      // D3D11 and D3D12 reflection use the same tokenized shader-version layout. MinGW's
+      // Windows SDK exposes only the D3D12-named helper macros, so decode the stable DXBC token
+      // directly instead of depending on SDK-specific aliases.
+      std::uint32_t expected_type = 0u;
+      if (target == "cs_5_0") {
+        expected_type = 5u;
+      } else if (target == "vs_5_0") {
+        expected_type = 1u;
+      } else if (target == "ps_5_0") {
+        expected_type = 0u;
+      } else {
+        return false;
+      }
+      // MinGW declares this compiler-version-specific IID as an external symbol, unlike the
+      // MSVC SDK's selectany definition. Keep the D3DCompiler 47 value local so the cache does
+      // not need dxguid.lib merely to validate a blob.
+      constexpr IID shader_reflection_iid {
+        0x8d536ca1u, 0x0ccau, 0x4956u,
+        {0xa8u, 0x37u, 0x78u, 0x69u, 0x63u, 0x75u, 0x55u, 0x84u}};
+      Microsoft::WRL::ComPtr<ID3D11ShaderReflection> reflection;
+      if (FAILED(D3DReflect(
+            bytecode.data(), bytecode.size(), shader_reflection_iid,
+            reinterpret_cast<void **>(reflection.GetAddressOf()))) ||
+          !reflection) {
+        return false;
+      }
+      D3D11_SHADER_DESC description {};
+      return SUCCEEDED(reflection->GetDesc(&description)) &&
+             ((description.Version >> 16u) & 0xffffu) == expected_type &&
+             ((description.Version >> 4u) & 0x0fu) == 5u &&
+             (description.Version & 0x0fu) == 0u;
     }
 
     std::string normalize_source_for_digest(const std::string_view source) {
@@ -185,6 +245,160 @@ namespace models::host_sbs_shader_cache {
 
     std::mutex cache_mutex;
     std::map<cache_key, cache_future> cache;
+    std::filesystem::path persistent_cache_directory;
+    std::atomic<std::uint64_t> memory_hit_count {0u};
+    std::atomic<std::uint64_t> persistent_hit_count {0u};
+    std::atomic<std::uint64_t> compile_count {0u};
+    std::atomic<std::uint64_t> persistent_write_count {0u};
+    std::atomic<std::uint64_t> rejected_artifact_count {0u};
+    std::atomic<std::uint64_t> temporary_artifact_sequence {0u};
+    constexpr std::size_t maximum_persistent_artifact_count = 128u;
+
+    std::filesystem::path persistent_artifact_path(
+      const std::filesystem::path &directory,
+      const source_snapshot &snapshot,
+      const owned_shader_spec &spec
+    ) {
+      if (directory.empty()) {
+        return {};
+      }
+      return directory / (bytecode_cache_key(snapshot, spec) + ".dxbc");
+    }
+
+    bytecode_t load_persistent_artifact(
+      const std::filesystem::path &path,
+      const owned_shader_spec &spec
+    ) {
+      if (path.empty()) {
+        return {};
+      }
+      std::error_code exists_error;
+      if (!std::filesystem::is_regular_file(path, exists_error)) {
+        return {};
+      }
+      const auto byte_count = std::filesystem::file_size(path, exists_error);
+      bool valid = !exists_error && byte_count > 0u &&
+                   byte_count <= maximum_cached_bytecode_bytes;
+      std::ifstream input(path, std::ios::binary);
+      valid = valid && input.is_open();
+      auto bytes = std::make_shared<std::vector<unsigned char>>();
+      if (valid) {
+        bytes->resize(static_cast<std::size_t>(byte_count));
+        input.read(
+          reinterpret_cast<char *>(bytes->data()),
+          static_cast<std::streamsize>(bytes->size()));
+        valid = input.gcount() == static_cast<std::streamsize>(bytes->size()) &&
+                input.peek() == std::char_traits<char>::eof() &&
+                bytecode_matches_target(*bytes, spec.target);
+      }
+      if (valid) {
+        persistent_hit_count.fetch_add(1u, std::memory_order_relaxed);
+        std::error_code touch_error;
+        std::filesystem::last_write_time(
+          path, std::filesystem::file_time_type::clock::now(), touch_error);
+        return bytes;
+      }
+
+      rejected_artifact_count.fetch_add(1u, std::memory_order_relaxed);
+      BOOST_LOG(warning)
+        << "Discarding an invalid Host SBS persistent shader artifact: " << path;
+      input.close();
+      std::error_code remove_error;
+      std::filesystem::remove(path, remove_error);
+      return {};
+    }
+
+    void store_persistent_artifact(
+      const std::filesystem::path &path,
+      const bytecode_t &bytecode
+    ) {
+      if (path.empty() || !bytecode || bytecode->empty() ||
+          bytecode->size() > maximum_cached_bytecode_bytes) {
+        return;
+      }
+      std::error_code error;
+      if (!std::filesystem::create_directories(path.parent_path(), error) && error) {
+        BOOST_LOG(warning)
+          << "Could not create the Host SBS persistent shader-cache directory "
+          << path.parent_path() << ": " << error.message();
+        return;
+      }
+      if (std::filesystem::is_regular_file(path, error) && !error) {
+        return;
+      }
+      error.clear();
+      auto temporary = path;
+      temporary += ".tmp-" + std::to_string(GetCurrentProcessId()) + "-" +
+                   std::to_string(temporary_artifact_sequence.fetch_add(
+                     1u, std::memory_order_relaxed));
+      std::filesystem::remove(temporary, error);
+      error.clear();
+      std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+      if (output.is_open()) {
+        output.write(
+          reinterpret_cast<const char *>(bytecode->data()),
+          static_cast<std::streamsize>(bytecode->size()));
+        output.flush();
+      }
+      output.close();
+      const bool written = output.good();
+      if (!written) {
+        std::filesystem::remove(temporary, error);
+        BOOST_LOG(warning)
+          << "Could not write Host SBS persistent shader artifact " << path;
+        return;
+      }
+      std::filesystem::rename(temporary, path, error);
+      if (error) {
+        // A second process may have published the same immutable artifact first.
+        std::error_code exists_error;
+        const bool destination_exists =
+          std::filesystem::is_regular_file(path, exists_error) && !exists_error;
+        std::filesystem::remove(temporary, exists_error);
+        if (!destination_exists) {
+          BOOST_LOG(warning)
+            << "Could not publish Host SBS persistent shader artifact " << path
+            << ": " << error.message();
+        }
+        return;
+      }
+      persistent_write_count.fetch_add(1u, std::memory_order_relaxed);
+    }
+
+    void prune_persistent_artifacts() {
+      std::filesystem::path directory;
+      {
+        std::lock_guard lock(cache_mutex);
+        directory = persistent_cache_directory;
+      }
+      if (directory.empty()) {
+        return;
+      }
+      std::error_code error;
+      std::vector<std::pair<std::filesystem::file_time_type, std::filesystem::path>>
+        artifacts;
+      for (std::filesystem::directory_iterator it(directory, error), end;
+           !error && it != end; it.increment(error)) {
+        if (it->is_regular_file(error) && !error &&
+            it->path().extension() == ".dxbc") {
+          const auto modified = it->last_write_time(error);
+          if (!error) {
+            artifacts.emplace_back(modified, it->path());
+          }
+        }
+      }
+      if (error || artifacts.size() <= maximum_persistent_artifact_count) {
+        return;
+      }
+      std::ranges::sort(artifacts, [](const auto &left, const auto &right) {
+        return left.first > right.first;
+      });
+      for (std::size_t index = maximum_persistent_artifact_count;
+           index < artifacts.size(); ++index) {
+        std::filesystem::remove(artifacts[index].second, error);
+        error.clear();
+      }
+    }
 
     bool collect_source_closure_sha256(
       const std::filesystem::path &root,
@@ -347,6 +561,38 @@ namespace models::host_sbs_shader_cache {
     }
   }  // namespace
 
+  void configure_persistent_cache(const std::filesystem::path &directory) {
+    std::filesystem::path normalized;
+    if (!directory.empty()) {
+      std::error_code error;
+      normalized = std::filesystem::absolute(directory, error).lexically_normal();
+      if (error) {
+        BOOST_LOG(warning)
+          << "Could not resolve the Host SBS persistent shader-cache directory "
+          << directory << ": " << error.message();
+        normalized.clear();
+      }
+    }
+    {
+      std::lock_guard lock(cache_mutex);
+      persistent_cache_directory = normalized;
+    }
+    if (!normalized.empty()) {
+      BOOST_LOG(info)
+        << "Host SBS persistent shader bytecode cache: " << normalized;
+    }
+  }
+
+  cache_statistics_t cache_statistics() noexcept {
+    return {
+      memory_hit_count.load(std::memory_order_relaxed),
+      persistent_hit_count.load(std::memory_order_relaxed),
+      compile_count.load(std::memory_order_relaxed),
+      persistent_write_count.load(std::memory_order_relaxed),
+      rejected_artifact_count.load(std::memory_order_relaxed),
+    };
+  }
+
   source_snapshot_t snapshot_sources(
     const std::filesystem::path &shader_root,
     const std::span<const shader_spec> specs
@@ -423,20 +669,36 @@ namespace models::host_sbs_shader_cache {
 
     cache_future future;
     std::shared_ptr<std::promise<bytecode_t>> producer;
+    std::filesystem::path artifact_path;
     {
       std::lock_guard lock(cache_mutex);
       if (const auto found = cache.find(key); found != cache.end()) {
         future = found->second;
+        memory_hit_count.fetch_add(1u, std::memory_order_relaxed);
       } else {
         producer = std::make_shared<std::promise<bytecode_t>>();
         future = producer->get_future().share();
         cache.emplace(key, future);
+        artifact_path = persistent_artifact_path(
+          persistent_cache_directory, *sources, *selected);
       }
     }
 
     if (producer) {
-      auto bytecode = compile(*sources, *selected);
+      auto bytecode = load_persistent_artifact(artifact_path, *selected);
+      if (!bytecode) {
+        compile_count.fetch_add(1u, std::memory_order_relaxed);
+        bytecode = compile(*sources, *selected);
+      }
       producer->set_value(bytecode);
+      if (bytecode) {
+        try {
+          store_persistent_artifact(artifact_path, bytecode);
+        } catch (const std::exception &error) {
+          BOOST_LOG(warning)
+            << "Could not persist Host SBS shader bytecode: " << error.what();
+        }
+      }
       if (!bytecode) {
         // A transient source/install problem may be repaired without restarting the process.
         std::lock_guard lock(cache_mutex);
@@ -448,6 +710,7 @@ namespace models::host_sbs_shader_cache {
   }
 
   bool prewarm(const std::filesystem::path &assets_dir) {
+    const auto statistics_before = cache_statistics();
     const auto shader_root = assets_dir / "shaders" / "directx";
     const auto parallax_v2_sources = snapshot_sources(
       shader_root,
@@ -484,7 +747,15 @@ namespace models::host_sbs_shader_cache {
       << "Prewarmed the complete Host SBS V2 shader set ("
       << parallax_v2_producer_specs.size() + parallax_v2_live_renderer_specs.size() +
            sbs_flat_fallback_specs.size()
-      << " production shaders; dump-only shaders remain lazy).";
+      << " production shaders"
+      << "; persistent_hits="
+      << cache_statistics().persistent_hits - statistics_before.persistent_hits
+      << ", compiled="
+      << cache_statistics().compiled - statistics_before.compiled
+      << "; experimental/test and dump-only shaders remain lazy).";
+    if (all_compiled) {
+      prune_persistent_artifacts();
+    }
     return all_compiled;
   }
 }  // namespace models::host_sbs_shader_cache

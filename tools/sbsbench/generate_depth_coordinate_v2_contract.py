@@ -28,11 +28,14 @@ HLSL_TARGET = (
 EXPECTED_TOP_LEVEL_KEYS = {
     "schema", "vector_width", "calibrated_defaults", "constant_buffer", "frame_stats",
     "shadow_state", "model_calibrations", "capture_provenance", "shader_implementation",
+    "subtitle_ocr",
 }
 
 
 def _float32(value: float) -> float:
     return struct.unpack("<f", struct.pack("<f", float(value)))[0]
+
+
 EXPECTED_FIELD_KEYS = {"index", "name", "type", "gpu_encoding", "initial"}
 EXPECTED_LAYOUT_FIELD_KEYS = {"index", "name", "type"}
 EXPECTED_DEFAULT_NAMES = (
@@ -64,6 +67,57 @@ EXPECTED_SHADER_IMPLEMENTATION_KEYS = {
 }
 EXPECTED_SHADER_SPEC_KEYS = {
     "source_file", "source_entrypoint", "source_target",
+}
+CANONICAL_SUBTITLE_OCR = {
+    "schema": 1,
+    "logical_model": "ppocrv6_tiny_det",
+    "model_url": (
+        "https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det_onnx/resolve/"
+        "2ba1506c0380b8f0b03dd142459aac66d4421f6c/inference.onnx?download=true"),
+    "onnx_sha256": "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8",
+    "engine_recipe": "trt-strong-fp32-tf32-fixed960x160-level5-v1",
+    "preprocess_profile": "apollo-ppocrv6-bottom-6x1-bgr-imagenet-v1",
+    "source_crop": "bottom-6:1",
+    "input_tensor": {
+        "name": "x",
+        "dtype": "float32",
+        "layout": "NCHW",
+        "shape": [1, 3, 160, 960],
+        "channels": ["B", "G", "R"],
+        "imagenet_mean": [0.485, 0.456, 0.406],
+        "imagenet_std": [0.229, 0.224, 0.225],
+    },
+    "output_tensor": {
+        "name": "fetch_name_0",
+        "dtype": "float32",
+        "layout": "NCHW",
+        "shape": [1, 1, 160, 960],
+    },
+    "ocr_record": {
+        "schema": 1,
+        "tag": 0x3652434F,
+        "word_count": 208,
+        "header_word_count": 16,
+        "box_word_count": 8,
+        "raw_box_offset": 16,
+        "raw_box_capacity": 16,
+        "final_box_offset": 144,
+        "final_box_capacity": 8,
+        "field_width": 770,
+        "field_height": 434,
+        "roi_top": 325,
+        "roi_bottom": 430,
+    },
+    "locator_state": {
+        "schema": 6,
+        "tag": 0x36524C53,
+        "word_count": 80,
+        "header_word_count": 32,
+        "rectangle_capacity": 4,
+        "owner_offset": 32,
+        "pending_offset": 48,
+        "current_offset": 64,
+    },
 }
 EXPECTED_CONSTANT_FIELD_NAMES = (
     "raw_coordinate_scale",
@@ -105,8 +159,6 @@ PREPROCESS_SHADER_ROOT = (
 PREPROCESS_SHADER_SPECS = (("rgb_to_nchw_cs.hlsl", "main", "cs_5_0"),)
 PARALLAX_V2_SHADER_SPECS = (
     ("rgb_to_nchw_cs.hlsl", "main", "cs_5_0"),
-    ("depth_overlay_analysis_cs.hlsl", "sanitize_main", "cs_5_0"),
-    ("depth_overlay_analysis_cs.hlsl", "exclusion_main", "cs_5_0"),
     ("buffer_to_tex_cs.hlsl", "main", "cs_5_0"),
     ("depth_ema_motion_cs.hlsl", "main", "cs_5_0"),
     ("depth_minmax_cs.hlsl", "main", "cs_5_0"),
@@ -122,7 +174,11 @@ PARALLAX_V2_SHADER_SPECS = (
     ("depth_coordinate_v2_ownership_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_vertical_limit_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_limit_cs.hlsl", "main", "cs_5_0"),
-    ("depth_coordinate_v2_overlay_zero_plane_cs.hlsl", "main", "cs_5_0"),
+    ("host_sbs_ocr_preprocess_cs.hlsl", "main", "cs_5_0"),
+    ("host_sbs_ocr_boxes_cs.hlsl", "cells_main", "cs_5_0"),
+    ("host_sbs_ocr_boxes_cs.hlsl", "resolve_main", "cs_5_0"),
+    ("host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"),
+    ("host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"),
 )
 SOURCE_CLOSURE_DOMAIN = b"apollo-host-sbs-source-closure-v2\n"
 SHADER_COMPILE_FLAGS = 0x00008800
@@ -296,6 +352,10 @@ def validate_contract(
                 for name in ("manifest_key", "binding"))):
         raise ValueError(
             "capture_provenance must contain a positive schema, manifest_key, and binding")
+
+    if contract.get("subtitle_ocr") != CANONICAL_SUBTITLE_OCR:
+        raise ValueError(
+            "subtitle_ocr must exactly match the authenticated PP-OCRv6/OCR6/SLR6 contract")
 
     shader_implementation = contract.get("shader_implementation")
     if (not isinstance(shader_implementation, dict) or
@@ -594,6 +654,11 @@ def render_cpp(contract: dict[str, Any]) -> str:
     tag_semantic_digest = contract_tag_semantic_digest(contract)
     calibrations = contract["model_calibrations"]
     shader_implementation = contract["shader_implementation"]
+    subtitle_ocr = contract["subtitle_ocr"]
+    ocr_input = subtitle_ocr["input_tensor"]
+    ocr_output = subtitle_ocr["output_tensor"]
+    ocr_record = subtitle_ocr["ocr_record"]
+    locator_state = subtitle_ocr["locator_state"]
     calibrated_shapes = [
         (calibration["calibration_id"], shape["width"], shape["height"])
         for calibration in calibrations
@@ -627,6 +692,82 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"{json.dumps(contract['capture_provenance']['manifest_key'])};",
         f"  inline constexpr std::string_view capture_provenance_binding = "
         f"{json.dumps(contract['capture_provenance']['binding'])};",
+        f"  inline constexpr std::uint32_t subtitle_ocr_contract_schema = "
+        f"{subtitle_ocr['schema']}u;",
+        f"  inline constexpr std::string_view subtitle_ocr_model_name = "
+        f"{json.dumps(subtitle_ocr['logical_model'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_model_url = "
+        f"{json.dumps(subtitle_ocr['model_url'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_onnx_sha256 = "
+        f"{json.dumps(subtitle_ocr['onnx_sha256'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_engine_recipe = "
+        f"{json.dumps(subtitle_ocr['engine_recipe'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_preprocess_profile = "
+        f"{json.dumps(subtitle_ocr['preprocess_profile'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_source_crop = "
+        f"{json.dumps(subtitle_ocr['source_crop'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_input_name = "
+        f"{json.dumps(ocr_input['name'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_input_dtype = "
+        f"{json.dumps(ocr_input['dtype'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_input_layout = "
+        f"{json.dumps(ocr_input['layout'])};",
+        f"  inline constexpr std::uint32_t subtitle_ocr_input_n = {ocr_input['shape'][0]}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_input_c = {ocr_input['shape'][1]}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_input_height = {ocr_input['shape'][2]}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_input_width = {ocr_input['shape'][3]}u;",
+        "  inline constexpr std::array<std::string_view, 3> subtitle_ocr_input_channels {{" +
+        ", ".join(json.dumps(value) for value in ocr_input["channels"]) + "}};",
+        # Keep the manifest's decimal values as binary64 for canonical JSON provenance. HLSL
+        # receives explicit float literals below; using float here would promote rounded binary32
+        # values back to double when nlohmann serializes the dump descriptor.
+        "  inline constexpr std::array<double, 3> subtitle_ocr_imagenet_mean {{" +
+        ", ".join(json.dumps(value) for value in ocr_input["imagenet_mean"]) + "}};",
+        "  inline constexpr std::array<double, 3> subtitle_ocr_imagenet_std {{" +
+        ", ".join(json.dumps(value) for value in ocr_input["imagenet_std"]) + "}};",
+        f"  inline constexpr std::string_view subtitle_ocr_output_name = "
+        f"{json.dumps(ocr_output['name'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_output_dtype = "
+        f"{json.dumps(ocr_output['dtype'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_output_layout = "
+        f"{json.dumps(ocr_output['layout'])};",
+        f"  inline constexpr std::uint32_t subtitle_ocr_output_n = {ocr_output['shape'][0]}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_output_c = {ocr_output['shape'][1]}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_output_height = {ocr_output['shape'][2]}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_output_width = {ocr_output['shape'][3]}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_record_schema = {ocr_record['schema']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_record_tag = 0x{ocr_record['tag']:08X}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_record_word_count = {ocr_record['word_count']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_record_header_word_count = {ocr_record['header_word_count']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_box_word_count = {ocr_record['box_word_count']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_raw_box_offset = {ocr_record['raw_box_offset']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_raw_box_capacity = {ocr_record['raw_box_capacity']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_final_box_offset = {ocr_record['final_box_offset']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_final_box_capacity = {ocr_record['final_box_capacity']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_field_width = {ocr_record['field_width']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_field_height = {ocr_record['field_height']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_roi_top = {ocr_record['roi_top']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_roi_bottom = {ocr_record['roi_bottom']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_state_schema = {locator_state['schema']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_state_tag = 0x{locator_state['tag']:08X}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_state_word_count = {locator_state['word_count']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_header_word_count = {locator_state['header_word_count']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_rectangle_capacity = {locator_state['rectangle_capacity']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_owner_offset = {locator_state['owner_offset']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_pending_offset = {locator_state['pending_offset']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_current_offset = {locator_state['current_offset']}u;",
+        "  static_assert(subtitle_ocr_input_n == 1u && subtitle_ocr_input_c == 3u);",
+        "  static_assert(subtitle_ocr_output_n == 1u && subtitle_ocr_output_c == 1u);",
+        "  static_assert(subtitle_ocr_final_box_offset == subtitle_ocr_raw_box_offset +",
+        "                subtitle_ocr_raw_box_capacity * subtitle_ocr_box_word_count);",
+        "  static_assert(subtitle_ocr_record_word_count == subtitle_ocr_final_box_offset +",
+        "                subtitle_ocr_final_box_capacity * subtitle_ocr_box_word_count);",
+        "  static_assert(subtitle_locator_pending_offset == subtitle_locator_owner_offset +",
+        "                subtitle_locator_rectangle_capacity * 4u);",
+        "  static_assert(subtitle_locator_current_offset == subtitle_locator_pending_offset +",
+        "                subtitle_locator_rectangle_capacity * 4u);",
+        "  static_assert(subtitle_locator_state_word_count == subtitle_locator_current_offset +",
+        "                subtitle_locator_rectangle_capacity * 4u);",
         f"  inline constexpr std::uint32_t shader_source_closure_schema = "
         f"{shader_implementation['source_closure_schema']}u;",
         f"  inline constexpr std::uint32_t shader_source_compile_flags = "
@@ -953,6 +1094,11 @@ def render_hlsl(contract: dict[str, Any]) -> str:
     constants = constant_buffer["fields"]
     frame_stats = contract["frame_stats"]["fields"]
     defaults = contract["calibrated_defaults"]
+    subtitle_ocr = contract["subtitle_ocr"]
+    ocr_input = subtitle_ocr["input_tensor"]
+    ocr_output = subtitle_ocr["output_tensor"]
+    ocr_record = subtitle_ocr["ocr_record"]
+    locator_state = subtitle_ocr["locator_state"]
     tag = contract_tag(contract)
     components = ("x", "y", "z", "w")
     lines = [
@@ -965,6 +1111,42 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"#define V2_CONTRACT_TAG 0x{tag:08X}u",
         f"#define V2_SHADOW_STATE_WORD_COUNT {len(fields)}u",
         f"#define V2_SHADOW_STATE_VECTOR_COUNT {len(fields) // contract['vector_width']}u",
+        f"#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA {subtitle_ocr['schema']}u",
+        f"#define V2_OCR_INPUT_N {ocr_input['shape'][0]}u",
+        f"#define V2_OCR_INPUT_C {ocr_input['shape'][1]}u",
+        f"#define V2_OCR_INPUT_HEIGHT {ocr_input['shape'][2]}u",
+        f"#define V2_OCR_INPUT_WIDTH {ocr_input['shape'][3]}u",
+        f"#define V2_OCR_OUTPUT_N {ocr_output['shape'][0]}u",
+        f"#define V2_OCR_OUTPUT_C {ocr_output['shape'][1]}u",
+        f"#define V2_OCR_OUTPUT_HEIGHT {ocr_output['shape'][2]}u",
+        f"#define V2_OCR_OUTPUT_WIDTH {ocr_output['shape'][3]}u",
+        f"#define V2_OCR_IMAGENET_MEAN_B {_float_literal(ocr_input['imagenet_mean'][0])}",
+        f"#define V2_OCR_IMAGENET_MEAN_G {_float_literal(ocr_input['imagenet_mean'][1])}",
+        f"#define V2_OCR_IMAGENET_MEAN_R {_float_literal(ocr_input['imagenet_mean'][2])}",
+        f"#define V2_OCR_IMAGENET_STD_B {_float_literal(ocr_input['imagenet_std'][0])}",
+        f"#define V2_OCR_IMAGENET_STD_G {_float_literal(ocr_input['imagenet_std'][1])}",
+        f"#define V2_OCR_IMAGENET_STD_R {_float_literal(ocr_input['imagenet_std'][2])}",
+        f"#define V2_OCR_RECORD_SCHEMA {ocr_record['schema']}u",
+        f"#define V2_OCR_RECORD_TAG 0x{ocr_record['tag']:08X}u",
+        f"#define V2_OCR_RECORD_WORD_COUNT {ocr_record['word_count']}u",
+        f"#define V2_OCR_RECORD_HEADER_WORD_COUNT {ocr_record['header_word_count']}u",
+        f"#define V2_OCR_BOX_WORD_COUNT {ocr_record['box_word_count']}u",
+        f"#define V2_OCR_RAW_BOX_OFFSET {ocr_record['raw_box_offset']}u",
+        f"#define V2_OCR_RAW_BOX_CAPACITY {ocr_record['raw_box_capacity']}u",
+        f"#define V2_OCR_FINAL_BOX_OFFSET {ocr_record['final_box_offset']}u",
+        f"#define V2_OCR_FINAL_BOX_CAPACITY {ocr_record['final_box_capacity']}u",
+        f"#define V2_OCR_FIELD_WIDTH {ocr_record['field_width']}u",
+        f"#define V2_OCR_FIELD_HEIGHT {ocr_record['field_height']}u",
+        f"#define V2_OCR_ROI_TOP {ocr_record['roi_top']}u",
+        f"#define V2_OCR_ROI_BOTTOM {ocr_record['roi_bottom']}u",
+        f"#define V2_SUBTITLE_LOCATOR_STATE_SCHEMA {locator_state['schema']}u",
+        f"#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x{locator_state['tag']:08X}u",
+        f"#define V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT {locator_state['word_count']}u",
+        f"#define V2_SUBTITLE_LOCATOR_HEADER_WORD_COUNT {locator_state['header_word_count']}u",
+        f"#define V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY {locator_state['rectangle_capacity']}u",
+        f"#define V2_SUBTITLE_LOCATOR_OWNER_OFFSET {locator_state['owner_offset']}u",
+        f"#define V2_SUBTITLE_LOCATOR_PENDING_OFFSET {locator_state['pending_offset']}u",
+        f"#define V2_SUBTITLE_LOCATOR_CURRENT_OFFSET {locator_state['current_offset']}u",
         f"#define V2_DIRECT_CONTAINER_LIMIT "
         f"{_float_literal(defaults['direct_container_limit'])}",
         f"#define V2_MAX_VERTICAL_SHEAR "

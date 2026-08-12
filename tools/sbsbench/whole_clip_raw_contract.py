@@ -1,8 +1,8 @@
 """Authenticated raw-depth artifacts produced by a current whole-clip evaluator run.
 
 The temporal replay must not infer provenance from whatever ``raw_*.f32`` files happen to be
-present beside a results file.  Schema-36 ``run_eval.py`` records this manifest after the
-schema-20 production harness finishes, rechecks it after scoring, and stores it in
+present beside a results file.  Schema-37 ``run_eval.py`` records this manifest after the
+schema-22 production harness finishes, rechecks it after scoring, and stores it in
 ``results.json``.  Consumers validate the same shared contract before reading a tensor.
 """
 
@@ -20,11 +20,11 @@ except ImportError:  # Direct execution from tools/sbsbench.
     from depth_coordinate_v2_contract import MODEL_CALIBRATIONS  # type: ignore
 
 
-EVALUATOR_SCHEMA = 36
-HARNESS_CONTRACT_SCHEMA = 20
+EVALUATOR_SCHEMA = 37
+HARNESS_CONTRACT_SCHEMA = 22
 MANIFEST_SCHEMA = 1
 RESULTS_META_KEY = "whole_clip_raw_artifacts"
-BINDING = "schema-36-results-to-schema-20-harness-raw-f32-v1"
+BINDING = "schema-37-results-to-schema-22-harness-raw-f32-v1"
 RAW_SHAPE_SCHEMA = 1
 RAW_STAGE = "raw model output before transform/normalization/EMA/curvature"
 

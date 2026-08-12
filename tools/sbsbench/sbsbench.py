@@ -21,8 +21,8 @@ Metric families:
   GT depth accuracy     Scale/shift-invariant RMSE and boundary F1 on clips with gt_depth sidecars.
   GT depth lag          Whether predicted boundaries match the previous GT frame better than the
                         current frame, directly detecting held-depth temporal registration.
-  GT subtitle region    Exact target-plane error, disparity variance, and registered horizontal-
-                        gradient preservation inside explicit full-resolution source masks.
+  GT subtitle glyphs    Tight canonical visibility, per-band soft-plane conformance, and
+                        registered glyph sharpness.
   flow temporal         Output residual after authenticated optical-flow compensation.
 
 Usage:
@@ -91,6 +91,9 @@ EVIDENCE_SUPPORT_REQUIREMENTS = {
     # non-empty mask with zero valid warp support publish a measured 0% support gate, while a
     # genuinely empty no-subtitle frame remains an authenticated abstention.
     "subtitle_region_authored_count": 1.0,
+    "subtitle_glyph_support_count": float(
+        sbs_subtitle_metrics.MIN_SUBTITLE_REGION_SAMPLES),
+    "subtitle_glyph_authored_count": 1.0,
 }
 CUT_STATE_SCHEMA = cut_state_contract.SCHEMA
 CUT_STATE_FIELDS = cut_state_contract.FIELDS
@@ -1407,7 +1410,8 @@ HARD_MAX_AGG = {
     "source_coverage_worst_patch_bad_pct", "image_integrity_worst_patch_bad_pct",
     "shot_state_pulse_mismatch", "shot_state_trace_inconsistent",
     "subtitle_disparity_variance_pct2",
-    "subtitle_target_disparity_rms_error_pct",
+    "subtitle_constant_plane_rms_error_pct",
+    "subtitle_plane_abs_disparity_pct",
 }
 HARD_MIN_AGG = {
     "exact_binocular_support_pct", "source_coverage_pct", "image_integrity_pct",
@@ -1415,6 +1419,8 @@ HARD_MIN_AGG = {
     "shot_state_initialized_ok", "shot_state_relative_escape_ok",
     "subtitle_sharpness_preservation_pct",
     "subtitle_region_binocular_support_pct",
+    "subtitle_glyph_sample_visibility_pct",
+    "subtitle_glyph_soft_plane_inlier_pct",
 }
 SUM_AGG = {
     # Binary per-frame events whose clip contract is explicitly a count.
@@ -1422,6 +1428,8 @@ SUM_AGG = {
     # Region support is clip evidence: empty no-subtitle frames legitimately contribute zero.
     "subtitle_region_support_count",
     "subtitle_region_authored_count",
+    "subtitle_glyph_support_count",
+    "subtitle_glyph_authored_count",
 }
 
 
@@ -2206,7 +2214,7 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
                       warp_mask=None, warp_mapping=None, warp_mapping_shape=None,
                       src_rgb=None, hdr_scale=None, compact=False, depth_semantics=None,
                       structure_field=None, subtitle_region=None,
-                      subtitle_target_disparity_pct=None):
+                      subtitle_overlay_mask=None):
     """Spatial metrics for one harness SBS frame and its authenticated sidecars."""
     sbs_rgb = load_rgb(path)
     sbs = rgb_luma(sbs_rgb)
@@ -2297,8 +2305,7 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
                         np.float16).astype(np.float32)))
             out.update(sbs_subtitle_metrics.measure_subtitle_region(
                 left, right, subtitle_source, subtitle_region, warp_mapping_shape,
-                binocular_geometry,
-                target_disparity_pct=subtitle_target_disparity_pct))
+                binocular_geometry, overlay_mask=subtitle_overlay_mask))
         if structure_field is not None:
             # V2-live evaluation: score structural diagnostics against the production
             # candidate-parallax field instead of raw-model ordering. The GT metrics above
@@ -2461,6 +2468,12 @@ def _measure_sequence_spatial_job(job):
                 raise ValueError("subtitle region exists without a source frame")
             subtitle_region = load_binary_source_mask(
                 job["subtitle_region_path"], src.shape)
+        subtitle_overlay_mask = None
+        if job.get("subtitle_overlay_mask_path"):
+            if src is None:
+                raise ValueError("subtitle overlay mask exists without a source frame")
+            subtitle_overlay_mask = load_binary_source_mask(
+                job["subtitle_overlay_mask_path"], src.shape)
         warp_mask = None
         if job["warp_mask_path"]:
             with Image.open(job["warp_mask_path"]) as mask_image:
@@ -2481,7 +2494,7 @@ def _measure_sequence_spatial_job(job):
             src_rgb=src_rgb, hdr_scale=job["hdr_scale"], compact=job["compact"],
             depth_semantics=job.get("depth_semantics"),
             structure_field=structure_field, subtitle_region=subtitle_region,
-            subtitle_target_disparity_pct=job.get("subtitle_target_disparity_pct"))
+            subtitle_overlay_mask=subtitle_overlay_mask)
         row["_frame_id"] = frame_id
         return row
     except Exception as exc:
@@ -2673,6 +2686,15 @@ def measure_sequence(seq_dir, frames_dir=None, compact=False):
         raise ValueError(
             "GT-subtitle-region/SBS frame-id mismatch: "
             f"missing region={missing_region}, extra region={extra_region}")
+    subtitle_overlay_by_id = indexed_files(
+        os.path.join(frames_dir, "gt_subtitle_overlay_mask", "frame_*.png"),
+        "frame_") if frames_dir else {}
+    if subtitle_overlay_by_id and set(subtitle_overlay_by_id) != set(frame_ids):
+        missing_overlay = sorted(set(frame_ids) - set(subtitle_overlay_by_id))
+        extra_overlay = sorted(set(subtitle_overlay_by_id) - set(frame_ids))
+        raise ValueError(
+            "GT-subtitle-overlay-mask/SBS frame-id mismatch: "
+            f"missing overlay={missing_overlay}, extra overlay={extra_overlay}")
     gt_right_by_id = indexed_files(
         os.path.join(frames_dir, "gt_right", "frame_*.*"), "frame_") if frames_dir else {}
     if gt_right_by_id and set(gt_right_by_id) != set(frame_ids):
@@ -2690,7 +2712,7 @@ def measure_sequence(seq_dir, frames_dir=None, compact=False):
     gt_kind = "disparity"
     clip_meta = {}
     require_gt_depth = require_gt_flow = require_subtitle_region = False
-    subtitle_target_disparity_pct = None
+    require_subtitle_tight_mask = require_subtitle_oracle = False
     reference_stereo_available = False
     if frames_dir:
         meta_path = os.path.join(frames_dir, "meta.json")
@@ -2719,14 +2741,22 @@ def measure_sequence(seq_dir, frames_dir=None, compact=False):
                 raise ValueError("required_gt_subtitle_region must be boolean")
             require_subtitle_region = clip_meta.get(
                 "required_gt_subtitle_region", False)
-            if "subtitle_target_disparity_pct" in clip_meta:
-                subtitle_target_disparity_pct = (
-                    sbs_subtitle_metrics.validate_subtitle_target_disparity_pct(
-                        clip_meta["subtitle_target_disparity_pct"]))
-            if require_subtitle_region and subtitle_target_disparity_pct is None:
+            if ("required_gt_subtitle_tight_mask" in clip_meta and
+                    not isinstance(clip_meta["required_gt_subtitle_tight_mask"], bool)):
+                raise ValueError("required_gt_subtitle_tight_mask must be boolean")
+            require_subtitle_tight_mask = clip_meta.get(
+                "required_gt_subtitle_tight_mask", False)
+            if require_subtitle_tight_mask and not require_subtitle_region:
                 raise ValueError(
-                    "required_gt_subtitle_region needs explicit "
-                    "subtitle_target_disparity_pct")
+                    "required_gt_subtitle_tight_mask requires "
+                    "required_gt_subtitle_region=true")
+            if ("required_gt_subtitle_sanitizer_oracle" in clip_meta and
+                    not isinstance(
+                        clip_meta["required_gt_subtitle_sanitizer_oracle"], bool)):
+                raise ValueError(
+                    "required_gt_subtitle_sanitizer_oracle must be boolean")
+            require_subtitle_oracle = clip_meta.get(
+                "required_gt_subtitle_sanitizer_oracle", False)
             reference_stereo_available = bool(
                 clip_meta.get("reference_stereo_available", False))
         except OSError as exc:
@@ -2745,6 +2775,10 @@ def measure_sequence(seq_dir, frames_dir=None, compact=False):
             "clip requires GT subtitle regions, but no gt_subtitle_region sidecars were found")
     if require_subtitle_region and not mapping_by_id:
         raise ValueError("clip requires GT subtitle metrics, but exact warp maps are unavailable")
+    if (require_subtitle_tight_mask or require_subtitle_oracle) and not subtitle_overlay_by_id:
+        raise ValueError(
+            "clip requires an authenticated subtitle tight mask, but no "
+            "gt_subtitle_overlay_mask sidecars were found")
     if reference_stereo_available and not gt_right_by_id:
         raise ValueError(
             "clip declares diagnostic stereo reference availability, but no gt_right sidecars "
@@ -2764,7 +2798,9 @@ def measure_sequence(seq_dir, frames_dir=None, compact=False):
         "gt_depth_path": gt_by_id.get(frame_id),
         "gt_valid_path": gt_valid_by_id.get(frame_id),
         "subtitle_region_path": subtitle_region_by_id.get(frame_id),
-        "subtitle_target_disparity_pct": subtitle_target_disparity_pct,
+        "subtitle_overlay_mask_path": (
+            subtitle_overlay_by_id.get(frame_id)
+            if require_subtitle_tight_mask or require_subtitle_oracle else None),
         "warp_mask_path": mask_by_id.get(frame_id),
         "warp_mapping_path": mapping_by_id.get(frame_id),
         "mapping_shape": mapping_shape,
@@ -2902,12 +2938,20 @@ def measure_sequence(seq_dir, frames_dir=None, compact=False):
     if require_subtitle_region:
         missing = [key for key in (
             "subtitle_region_binocular_support_pct",
-            "subtitle_target_disparity_rms_error_pct",
+            "subtitle_constant_plane_rms_error_pct",
+            "subtitle_plane_abs_disparity_pct",
             "subtitle_disparity_variance_pct2",
             "subtitle_sharpness_preservation_pct",
         ) if key not in agg]
         if missing:
             raise ValueError(f"required GT-subtitle-region metrics unavailable: {missing}")
+    if require_subtitle_tight_mask or require_subtitle_oracle:
+        missing = [key for key in (
+            "subtitle_glyph_sample_visibility_pct",
+            "subtitle_glyph_soft_plane_inlier_pct",
+        ) if key not in agg]
+        if missing:
+            raise ValueError(f"required GT-subtitle-glyph metrics unavailable: {missing}")
     return rows, agg
 
 
@@ -2984,6 +3028,13 @@ def metric_evidence_state(metric, spec, observed, clip_meta=None):
         # may opt a clip into subtitle-region scoring; otherwise even a numeric support value is
         # diagnostic residue and the policy must report N/A.
         return "unsupported"
+    if requirement in {
+            "subtitle_glyph_support_count", "subtitle_glyph_authored_count"}:
+        tight_authenticated = (
+            clip_meta.get("required_gt_subtitle_tight_mask") is True or
+            clip_meta.get("required_gt_subtitle_sanitizer_oracle") is True)
+        if not tight_authenticated:
+            return "unsupported"
     if requirement in EVIDENCE_SUPPORT_REQUIREMENTS:
         support = observed.get(requirement)
         # Missing/invalid support is not proof of exemption.  Only a measured value below the
@@ -3323,8 +3374,9 @@ SEQ_FMT = [
     "exact_symmetry_residual_p95_pct", "exact_polarity_ok",
     "source_coverage_pct", "source_coverage_worst_patch_bad_pct",
     "image_integrity_pct", "image_integrity_worst_patch_bad_pct",
-    "subtitle_region_binocular_support_pct",
-    "subtitle_target_disparity_rms_error_pct",
+    "subtitle_glyph_sample_visibility_pct",
+    "subtitle_glyph_soft_plane_inlier_pct",
+    "subtitle_plane_abs_disparity_pct",
     "vmisalign_p99_pct",
     "exact_mapping_stretch_pct", "exact_mapping_fold_pct",
     "warp_cross_row_shear_severity_pct",

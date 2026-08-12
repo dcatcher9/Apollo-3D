@@ -46,7 +46,8 @@ important corrections:
 - **Offline subtitle analysis must remain scene-bounded.** The offline converter is designed around
   scene-level buffered look-ahead. A new whole-clip pre-pass would duplicate work and cross the
   current ownership boundary. Per-frame tight masks must sanitize input before that frame reaches
-  DAV2; the scene buffer may then revise candidates and finalize the stable loose geometry mask.
+  DAV2; the scene buffer may then revise candidates and finalize stable plan metadata without
+  replacing the tight glyph mask with a flattened rectangle.
 - W8, W10, W11, and W9 are not host-only changes. They require protocol and Moonlight 3D work, so
   they cannot be treated as local edits to one Windows source file.
 
@@ -55,9 +56,13 @@ video-boundary authority. W6 now uses a supervised Chromium IAccessible2 helper 
 causally-prior `<video>` element rectangle observation to a matched Host-SBS frame. The production
 Desktop-Duplication route now uses that result for a strict foreground-browser ROI when its aspect
 can reach the current authenticated tensor with at most 2% inward area trimming. It never pads, expands,
-or stretches the detected video. Observer, rectangle, fit, and crop-resource eligibility failures
-leave the route on ordinary full-frame V2; internal base-V2 authentication failures still render
-flat. The optional `window_video_border.json` artifact is diagnostic only.
+or stretches the detected video. True fullscreen is a separate semantic route: an available video
+may cover the complete foreground browser client despite element overscan, document-rectangle
+clipping, or multiple full-cover clones, but the host must still map that client exactly to the
+capture. A maximized/full-source browser alone is not authority. Observer, rectangle, fit, and
+crop-resource eligibility failures leave the route on ordinary full-frame V2; internal base-V2
+authentication failures still render flat. The optional `window_video_border.json` artifact is
+diagnostic only.
 
 ## Context an implementer needs
 
@@ -69,8 +74,10 @@ renders **flat** SBS; there is no alternate renderer and no fallback geometry.
 
 The live path is, in order: desktop capture (DXGI Desktop Duplication, with a Windows.Graphics.Capture
 path alongside it) → cursor blend → exact foreground-video attribution or full-frame selection →
-`convert()` → DAV2 depth inference → V2 coordinate mapping → signed final parallax → an
-11-iteration contractive inverse warp → SBS packing → NVENC.
+`convert()` → DAV2 depth inference → V2 coordinate mapping → signed post-limit field → bounded
+bottom-band OCR6 detection and compact SLR6 final-field conditioning → an 11-iteration contractive
+inverse warp → SBS packing → NVENC. The retired generic overlay sanitizer/exclusion graph is not in
+this path.
 
 Only three configuration keys survive on this surface: `sbs_3d_pop_strength`,
 `sbs_3d_max_encode_width`, `sbs_3d_cuda_graph`. Do not reintroduce removed keys; the deletion was
@@ -99,8 +106,11 @@ area while retaining the largest centered portion. It never expands into a playe
 stretches pixels. A larger mismatch or invalid rectangle selects ordinary full-frame V2; it does not
 turn an otherwise supported Host SBS stream flat.
 
-An exact semantic rectangle equal to the full capture is canonical full-frame V2. It bypasses crop,
-trim, ROI-domain reset, and ROI embedding.
+Separately authenticated true fullscreen is canonical full-frame V2: an available semantic video
+must cover the complete foreground browser client and the host must map that client exactly to the
+capture. It bypasses crop, trim, ROI-domain reset, and ROI embedding. Element overscan,
+document-rectangle clipping, and multiple full-cover clones are allowed at helper selection; a
+maximized/full-source browser without the semantic/client proof is not authority.
 
 ### Non-negotiable repo process
 
@@ -144,16 +154,18 @@ inference, three things go wrong at once:
    resampling warp — this is precisely the artifact class the `rim_over` metric was built to detect
    (a thin bright ridge hugging a silhouette). White text with a black outline *is* a thin bright
    ridge by construction.
-3. **It lands at the wrong depth.** An overlay that should be at a fixed, comfortable, authored
-   depth instead floats at an inferred depth that disagrees with what it annotates or points at.
-   In stereo this is actively uncomfortable, and for the cursor it destroys pointing accuracy.
+3. **It lands at inconsistent depth.** An overlay that should remain rigid on one comfortable plane
+   instead inherits varying scene depth across its strokes. For burned-in text the implementation
+   samples a nearby post-limiter value to reduce the surrounding cliff; a separate cursor can use an
+   authored plane. Inconsistent stereo depth is uncomfortable and destroys cursor pointing accuracy.
 
 The conservative treatment has two forms. A separately available overlay such as the DDup cursor
 stays out of inference and is composited after the warp at an authored disparity. A burned-in
 overlay cannot be separated from the delivered color: keep that original color untouched for final
 rendering, make a sanitized **inference-only** copy, exclude its overlay cells from scene evidence,
-and force a loose rectangle around it to the authored plane in the final parallax field. The inverse
-warp then samples the original pixels without moving them. [W1](#w1-composite-the-cursor-after-the-warp-candidate-defect)
+and hold each pooled glyph component to its own stable plane in the final parallax field. Each plane
+is sampled from ordinary post-limiter geometry rather than authored as zero, and a slope-safe collar
+preserves a contractive inverse. [W1](#w1-composite-the-cursor-after-the-warp-candidate-defect)
 uses the first form and [W2](#w2-subtitles-burned-into-the-picture) uses the second; W2 does not
 depend on W1's sprite compositor.
 
@@ -224,204 +236,37 @@ Note that the render pass already excludes subtitles with `-sn`
 ([offline_sbs_worker.cpp:3991](../src/offline_sbs_worker.cpp:3991), alongside `-an` and `-dn`). That
 is correct and should stay — it just has no effect on subtitles that are already pixels.
 
-#### W2a. Burned-in subtitles — zero-parallax mask
+#### W2a. Burned-in subtitles — adaptive constant-plane mask
 
-**Problem.** Hardsubbed sources and live browser capture both deliver subtitles already burned into
-the pixels. `-sn` cannot help. Every failure mode in
-[the unifying principle](#the-unifying-principle-overlays-are-not-scene-content) applies at full
-strength. Additionally, subtitles sit near the bottom edge of the frame, so if they acquire negative
-parallax while being cut by that edge, the result is a frame violation — occlusion and disparity
-cues contradict each other, which is uncomfortable.
+**Current implementation direction.** Burned-in subtitles remain part of the captured picture.
+The current production path consumes bounded OCR6 subtitle boxes and conditions only the final V2
+field through compact SLR6 rectangle state. It does not sanitize DAV2 input, classify arbitrary
+overlays, retain pixel histories, or run the retired GST/OGR/ORS detector graph. At most four
+same-frame authority rectangles receive the exact anisotropic slope-safe distance treatment; absent,
+stale, mismatched, or unsupported evidence copies ordinary V2 bit-for-bit.
 
-This is the primary subtitle case for this project, not an edge case. Hardsubbed releases dominate
-Chinese-language content, and CJK glyphs carry far denser strokes than Latin ones, so both the
-resampling damage and the rim artifact are more visible than they would be on Latin text. Tune and
-test against CJK, not against English.
-
-**Approach.** Do not try to infer or warp text well. Give analysis and final rendering different
-views of the same captured frame:
-
-1. Preserve the exact source color unchanged. This remains the only color sampled by the final
-   inverse warp.
-2. Detect overlay evidence on that source at full resolution. Build a stroke-tight mask, dilate it
-   enough to cover glyph outlines, and locally fill only those pixels in a separate inference copy.
-   The fill need only avoid presenting text edges to DAV2; it is never displayed and is not claimed
-   to reconstruct the hidden picture.
-3. Conservatively max-pool the dilated mask into tensor cells: if any contributing source pixel is
-   masked, that tensor cell is excluded. DAV2 consumes the sanitized copy. Scene-cut comparisons use
-   the union of the current and previous exclusion masks. Every color, ordinal, or depth reduction
-   used for cut evidence or V2 frame statistics, including the moments that latch scene center,
-   ignores excluded cells. Subtitle, logo, watermark, or HUD appearance and disappearance therefore
-   cannot manufacture a cut or move the scene's authored center.
-4. Separately derive one or more **loose rectangles** for geometry. Apply exactly **zero** to the
-   final authoritative parallax field throughout each rectangle, after the authenticated V2 limiter,
-   and satisfy the production slope bounds with an outside-only collar. The fixed-point inverse is
-   the identity in that zero core and therefore samples the untouched source color at the same
-   coordinate, so the original burned-in text remains visible, sharp, and identical between eyes.
-
-These are deliberately two masks. The tight/dilated mask protects inference and statistics while
-discarding as little scene evidence as possible. The loose rectangle avoids a parallax cliff at
-every glyph stroke. No alpha extraction or subtitle re-rendering is required. The picture that was
-behind burned-in glyphs is not present in the source and cannot be recovered exactly; only the
-inference-only copy receives an approximate local fill.
-
-**Implementation status.** The schema-27 known-mask consumer and its component-level authenticated
-tests are implemented: exact-frame R8 mask validation, inference-only sanitization, conservative
-tensor exclusion, current/previous cut and history exclusion, sanitized ownership, and the
-post-limit zero-plane core/collar all fail together to ordinary V2 when any product is unavailable.
-The high-resolution fixture now publishes a tight overlay mask plus an exact subtitle-free authored
-plate and authenticates transition/cut integrity. An end-to-end DAV2 trace against that clean plate
-is still required to quantify residual learned-receptive-field influence. The automatic
-full-resolution detector that produces plans for arbitrary live/offline content is also pending; no
-production path guesses a mask from DAV2-resolution pixels.
-
-Every geometry pass that re-reads color after DAV2 must share this separation. In particular, the
-current depth-edge ownership pass must read the sanitized inference copy or abstain on excluded
-tensor cells; reading the untouched source there would let the same text edges influence geometry
-again. The original-color SRV is reserved for detection and final display.
-
-The first authored plane is zero (screen plane). A later experiment may expose one global constant
-for all overlapping overlay rectangles, but independently authored overlapping planes are unsafe.
-
-**Gotchas — these determine whether the result is good or bad.**
-
-- **Put the transition outside the loose rectangle.** The complete rectangle is the exact-zero
-  core; do not spend part of it ramping back toward scene depth. A hard discontinuity would violate
-  the contractive inverse-warp assumptions, so clamp the original final field by its allowed
-  horizontal/vertical distance from the rectangle. This produces an outside-only, slope-safe collar
-  rather than multiplying parallax by a visually chosen feather.
-- **Leave a sampling safety margin.** The exact-zero core must extend by at least one final-field
-  sample/texel footprint beyond the detected overlay coverage. Bilinear sampling at the last glyph
-  edge must not mix in the outside collar.
-- **Use a loose rectangle, not a glyph-tight geometry mask.** A tight mask is the intuitive choice
-  and it is wrong: it places a parallax cliff at every single stroke edge. The loose rectangle costs
-  only a small patch of background near the subtitles being flattened toward the screen plane, which
-  is acceptable cardboarding. This is the single most important design decision in this item.
-- Do not inpaint the final color or pretend to recover the occluded background. Local fill exists
-  only in the sanitized inference copy. In the final color path, zero parallax makes the inverse
-  mapping the identity throughout the loose core and preserves the source pixels as delivered.
-
-**Detection.** Subtitles have a strong joint signature: high contrast (white or yellow, usually with
-a dark outline), **piecewise static in time** (a line persists for one to five seconds then changes
-abruptly), and dense in stroke gradients. The discriminating combination is *temporally
-piecewise-static* **and** *high gradient*. Station logos, watermarks, and screen-locked HUD elements
-share the same screen-space overlay treatment and do not need a separate semantic classifier; a
-small false-positive rectangle around one of them is usually useful rather than harmful.
-
-**Resolution contract:** measure luma gradients and temporal stability from the exact
-full-resolution video/source pixels **before** `rgb_to_nchw_cs.hlsl` area-resizes them to the DAV2
-tensor (commonly 770x434). Never detect text from the DAV2 input, raw depth, depth EMA mask, or any
-other model-resolution field: dense CJK strokes and dark outlines can already have been averaged
-away there. A GPU pass may pool the resulting full-resolution votes into tiles immediately, and a
-later pass may turn those tile statistics into loose rectangles, but edge extraction and temporal
-comparison must happen first at source-pixel resolution. Published rectangles remain half-open
-full-resolution source/ROI coordinates.
-
-The exact source-color SRV and its SDR/linear/HDR conversion policy are reusable from the current
-pipeline. The existing motion-edge mask is a model-resolution *depth* signal, while scene-cut RGB
-and ordinal evidence is model-resolution and reduced to global counters; neither is spatial
-subtitle evidence. Add one bounded full-resolution color-analysis pass, pool only compact tile
-statistics or rectangles, and never read a full-resolution mask back to the CPU.
-
-A minimal detector computes display-referred luma, local gradient/outline strength, and same-screen-
-coordinate temporal stability in that full-resolution pass, then pools compact tile counts and
-bounds. Connected components over eligible neighboring tiles produce stroke candidates; a small
-close/dilation joins glyphs and stacked lines. A subtitle candidate is piecewise stable and then
-replaced in roughly the same region. A logo, watermark, or HUD is persistently screen-locked. Camera
-cuts reset output authority, although the old rectangle may remain an unverified prior for rapid
-reacquisition. Position may rank candidates but must never be the deciding gate.
-
-A locked-off shot containing a real sign can be visually indistinguishable from a screen overlay for
-several frames. Fail closed in that case. Authorize only after the candidate either changes as a
-piecewise subtitle block or remains fixed while independently supported background motion or a real
-scene transition occurs around it. The detector may therefore take a short bounded interval to
-acquire; it must not flatten uncertain scene text merely to react on the first frame.
-
-All per-frame detector products carry the same source sequence, dimensions, transfer domain, and
-full-frame/ROI analysis-domain identity as the inference submission. Current and previous exclusion
-masks advance together with the corresponding model-input/depth history. A missing or mismatched
-product disables W2a treatment for that frame rather than borrowing a stale mask.
-
-Three properties of real hardsubbed content that a naive detector gets wrong:
-
-- **Frame position is a weak prior, not a gate.** Do not restrict the search to a lower band. Fansub
-  releases routinely place translated signs and notes at the *top* of the frame while dialogue runs
-  along the bottom, and both need the same treatment.
-- **Support several disjoint regions at once.** Top notes plus bottom dialogue is a common
-  simultaneous case, so the mask must be a set of rectangles rather than a single one.
-- **Bilingual stacking makes the region taller than one line.** Chinese-plus-English subtitle pairs
-  are the norm in this content, so a height prior calibrated on single-line English will clip the
-  second line and leave half the text being warped.
-
-**The offline path can use stronger look-ahead without adding a whole-clip pre-pass.** Each frame's
-tight/dilated mask, sanitized inference copy, and pooled exclusion cells must be bound to that exact
-source frame *before* its DAV2 submission. Keep a bounded number of source frames if temporal
-confirmation requires look-ahead; an unsanitized inference result cannot be repaired retroactively.
-Within the existing scene buffer, revise candidates with look-ahead and finalize a stable loose-
-rectangle set for the physical scene before rendering it. Carry a conservative prior across
-adjacent scenes only as a hint, never as an unverified mask. The live path remains causal and needs
-hysteresis. Both paths may share the detector and final-field consumer; neither needs W1's cursor
-sprite compositor.
-
-**Acceptance and measurement.** The repository already contains evidence of this failure mode:
-`flat_page` is a synthetic static document page whose stated purpose is
-"False stereo and depth hallucination on flat content"
-([DATASETS.md:18](../tools/sbsbench/DATASETS.md:18),
-[make_synth_clips.py:8](../tools/sbsbench/make_synth_clips.py:8)). That clip is full-page text, not
-overlaid subtitles, so it is evidence but not a gate.
-
-Phase 0.3 adds four deterministic, movie-like fixtures through
-`tools/sbsbench/make_synth_clips.py`: dense dark-outlined CJK subtitles, a tall bilingual stack,
-simultaneous disjoint top-and-bottom regions, and a 2560x1440 fine-stroke CJK sequence with
-empty/appear/replace/disappear states plus a real broad cut. The high-resolution probe retains only
-about 53% of its authored edge energy after a 770x434 round trip, directly covering the
-pre-downscale-detection requirement. Together the fixtures gate stroke density, height,
-multi-region layout, temporal transitions, and cut visibility without an external movie clip.
-
-Four new metrics belong in the metric contract
-([METRICS.md](../tools/sbsbench/METRICS.md)):
-
-- **Authored-region binocular support**, a hard minimum over both valid canonical samples and
-  mutually rendered output area. This prevents a mostly missing or horizontally collapsed subtitle
-  from passing on a handful of surviving identity samples.
-- **Disparity variance within the text region**, which should be approximately zero.
-- **Absolute target-disparity error within the text region.** Variance alone accepts a perfectly
-  rigid but wrong nonzero plane, so `subtitle_target_disparity_rms_error_pct` must be a hard gate
-  against the authored zero target.
-- **Text sharpness preservation**: the ratio of horizontal gradient energy in the text region after
-  the warp to before it. Resampled glyphs lose high-frequency energy.
-
-These loose-region metrics gate final presentation, not the sanitizer by themselves. The
-high-resolution transition fixture therefore also publishes an authenticated exact tight overlay
-mask and subtitle-free authored background. Component tests already prove exact mask pooling,
-sanitizer isolation, current/previous exclusion, and preservation of a broad unmasked cut. Before
-automatic detection ships, an end-to-end DAV2 trace must compare sanitized analysis against that
-clean oracle and bound subtitle-only changes in cut and scene-center evidence. Good final
-zero-plane metrics alone remain insufficient evidence for a sanitizer pass.
-
-The existing `swim` metric already covers subtitle depth instability (its definition — frame-to-frame
-depth change where the source is static — is exactly this case), and `rim_over` already covers the
-bright fringe.
+Acceptance still emphasizes CJK and bilingual material, authored tight-mask scoring, sharpness,
+plane residual, transitions, cuts, and false-positive real-video evidence. Synthetic clips remain
+deterministic contract tests rather than a substitute for a real-video distribution.
 
 ---
 
-### W3. Further overlay-mask reuse in scene evidence (deferred)
+### W3. Overlay-mask reuse in scene evidence (deferred)
 
-W2a's own exclusion is not deferred. Its conservative tensor-cell mask is part of the burned-in
-subtitle treatment and must gate both current/previous scene-cut evidence and the V2 moments that
-latch scene center. Otherwise the detector can remove text from DAV2 while subtitle appearance,
-replacement, or its approximate fill still perturbs the scene state.
+The current OCR6/SLR6 route does not sanitize DAV2 input and does not feed subtitle rectangles into
+scene-cut evidence, V2 moments, or scene-center latching. It changes only the authenticated final
+field. A confirmed cut is handled by the SLR6 transaction itself; no generic exclusion mask is
+published.
 
-What remains deferred here is reuse for unrelated overlays or generic scene regions. Do not feed a
-cursor mask, HWND rectangle, browser chrome, or broad UI classifier into cut/geometry reductions
-without authenticated traces proving that specific defect. Current V2 does not use a moving
-min/max or histogram to normalize geometry, and broad masks can hide a genuine localized player
-cut. The W2a mask is narrow because it is backed by full-resolution, screen-locked edge evidence.
+Do not feed a subtitle box, cursor mask, HWND rectangle, browser chrome, or broad UI classifier into
+cut/geometry reductions without authenticated traces proving that specific defect. Broad masks can
+hide a genuine localized player cut, and text-box evidence alone does not establish that the
+underlying scene evidence is invalid.
 
-**Acceptance.** A subtitled conformance clip must show that the W2a mask prevents subtitle-only
-transitions from proposing a cut or changing the latched scene center without hiding a real
-localized player cut. Common unmasked cells, not the full tensor area, own cut denominators. The
-rendered `swim` metric should remain at the noise floor across subtitle-only transitions.
+**Acceptance for any future reuse.** Show on real and deterministic conformance traces that the
+proposed evidence source prevents the targeted false transition without hiding a localized player
+cut or changing ordinary V2 outside its authenticated scope. Until then this item has no production
+authority.
 
 ---
 
@@ -489,11 +334,13 @@ off until those precision tests pass.
 
 ### W6. Video ROI detection
 
-**Goal and current boundary.** The implemented route finds the unique largest visible Chromium
-`<video>` in the foreground browser, performs one crop-local V2 analysis, and leaves the surrounding
-desktop at zero parallax beyond the required edge collar. Generic player windows, background
-browsers, windowed games, occlusion reasoning, and multiple simultaneous 3D regions remain later
-work.
+**Goal and current boundary.** The implemented windowed route finds the unique largest fully
+contained Chromium `<video>` in the foreground browser, performs one crop-local V2 analysis, and
+leaves the surrounding desktop at zero parallax beyond the required edge collar. A separate
+true-fullscreen selection recognizes an available semantic video covering the whole foreground
+browser client, which the host must then map exactly to the capture. Generic player windows,
+background browsers, windowed games, occlusion reasoning, and multiple simultaneous 3D regions
+remain later work.
 
 **Rejected damage-metadata route.** Target-machine traces initially looked promising: a windowed
 video repeatedly produced `820:510-2471:1439`, and maximise produced approximately the full capture.
@@ -512,10 +359,13 @@ UI Automation is not sufficient because Chromium exposes `<video>` as a generic 
 tag survives in the extended IA2 attributes.
 
 The helper scans only the foreground Chrome or Edge root. Background windows and background tabs
-are deliberately ignored even if media continues playing there. Among credible visible videos in
-the foreground document it selects the unique largest area; an exact tie is ambiguous. This is a
-visible-content rule rather than a playback-state rule, which is why pause does not discard the
-selected border.
+are deliberately ignored even if media continues playing there. For a windowed ROI it selects the
+unique largest credible available video fully contained by its document and browser client; an exact
+largest-area tie is ambiguous. Fullscreen is evaluated independently: any available semantic video
+covering the complete client is eligible even if its element overscans, its available document
+rectangle is clipped, or Chromium exposes multiple full-cover clones. The helper retains a stable
+clone identity and publishes the client rectangle as authority. Both are semantic-content rules
+rather than playback-state rules, which is why pause does not discard the selected border.
 
 Build and run the opt-in probe from the configured RelWithDebInfo tree:
 
@@ -526,39 +376,46 @@ cmake-build-relwithdebinfo/tools/video-dom-info.exe --all-scans --interval-ms 10
 
 Keep Chrome or Edge in the foreground during the measurement. The human diagnostic mode lists every
 exact video node and applies a two-census display filter. Production machine mode instead stages a
-unique candidate after one complete census, retains its document/video COM nodes without publishing
-authority, and promotes it only when the next 100 ms tick independently confirms the same identities,
-states, and rectangle. This avoids requiring a second expensive whole-tree walk while preserving a
-separate observation boundary. From the available, fully-contained videos whose area is at least 5%
-of the foreground browser client, it selects the unique largest visible rectangle; equal-area leaders
-remain ambiguous. Paused video needs no stale-identity exception: its same DOM node and rectangle
-remain available to the cached-object check.
+candidate after one complete census, retains its document/video COM nodes without publishing
+authority, and promotes it only when the next 100 ms tick independently confirms it. This avoids
+requiring a second expensive whole-tree walk while preserving a separate observation boundary. For
+windowed ROI, the available, fully contained videos must cover at least 5% of the foreground browser
+client; the unique largest visible rectangle wins and equal-area leaders remain ambiguous. For
+fullscreen, the retained video identity and available state must persist while its element continues
+to cover the unchanged client. Document-rectangle clipping and harmless element overscan changes do
+not revoke that fullscreen cache. Paused video needs no stale-identity exception.
 
-Partial clipping, an incomplete or changing tree walk, a foreground change, and unexpected COM
-failures expose no initial candidate. An unselected incomplete census retries within one second;
-confirmed accessibility unavailability retains the 15-second backoff so Chromium is not continuously
-walked. After promotion, a transient incomplete full census cannot erase an independently revalidated
-cache. A foreground change or failed cache check invalidates immediately; unrelated object events
-request a coalesced audit without erasing a still-valid cached video, so dynamic controls and ads do
-not create a permanent rescan loop. A complete fallback audit runs every 15 seconds. Because audits
-are coalesced to at most one per three seconds, a newly appearing larger video can replace a
-still-valid old selection only after that bounded audit and semantic confirmation. Until replacement
-is confirmed, only the independently revalidated current identity is eligible; a foreground change
-or stale/failed validation immediately returns production to full-frame V2. Sunshine supervises the
-helper out of process, accepts only a strict versioned record with a fresh heartbeat, and
-kills/restarts a silent helper. The streaming path performs one atomic snapshot read and no COM, IPC
-wait, or GPU-to-CPU image readback.
+Windowed partial clipping, an incomplete or changing tree walk, a foreground change, and unexpected
+COM failures expose no initial ROI candidate. Fullscreen element overscan and document-rectangle
+clipping are the explicit exception when the available video still covers the whole client. An
+unselected incomplete census retries within one second; confirmed accessibility unavailability
+retains the 15-second backoff so Chromium is not continuously walked. After promotion, a transient
+incomplete full census cannot erase an independently revalidated cache. A foreground change or
+failed cache check invalidates immediately; unrelated object events request a coalesced audit without
+erasing a still-valid cached video, so dynamic controls and ads do not create a permanent rescan
+loop. A complete fallback audit runs every 15 seconds. Because audits are coalesced to at most one
+per three seconds, a newly appearing larger windowed video can replace a still-valid old selection
+only after that bounded audit and semantic confirmation. Until replacement is confirmed, only the
+independently revalidated current identity is eligible; a foreground change or stale/failed
+validation immediately returns production to full-frame V2. Sunshine supervises the helper out of
+process, accepts only a strict versioned record with a fresh heartbeat, and kills/restarts a silent
+helper. The streaming path performs one atomic snapshot read and no COM, IPC wait, or GPU-to-CPU
+image readback.
 
 While Host SBS is active, it clips at most one physical pixel of Chromium/DPI endpoint overflow,
-converts the physical screen rectangle to an identity-oriented single-output capture, and binds a
+converts the helper's authority rectangle to an identity-oriented single-output capture, and binds a
 causally-prior geometry run to one private matched color slot. The latest helper heartbeat may be
-newer than paused source content, but the exact HWND/process/document/video/rect tuple must have
-remained continuously valid since no later than that content timestamp. Any status, identity, or
-one-pixel rectangle change starts a new run. DDup uses `LastPresentTime`, never a later cursor-only
-timestamp. The host also rechecks foreground HWND and PID immediately before binding.
+newer than paused source content, but the exact HWND/process/document/video/authority-rect tuple must
+have remained continuously valid since no later than that content timestamp. For windowed ROI that
+authority is the selected visible video rectangle. For fullscreen it is the browser client, so a
+harmless change to element overscan or document geometry does not create a false domain change. DDup
+uses `LastPresentTime`, never a later cursor-only timestamp. The host also rechecks foreground HWND
+and PID immediately before binding.
 
-An exact semantic rectangle equal to the full capture is first canonicalized to ordinary full-frame
-V2, with no crop, trim, ROI-domain reset, or active-ROI dump rejection. Otherwise the production slot
+The helper's fullscreen client authority is first mapped by the host and is admitted only when it
+equals the full capture. It then canonicalizes to ordinary full-frame V2, with no crop, trim,
+ROI-domain reset, or active-ROI dump rejection. A maximized browser or estimator full-source domain
+without this semantic/client proof is not fullscreen authority. Otherwise the strict windowed slot
 may trim the video rectangle inward by at most 2% of its area so its aspect maps to the current
 full-frame authenticated tensor. It never trims more, grows into browser chrome, pads, or stretches.
 A same-format D3D11 crop becomes the only DAV2 and ownership source for that frame; scene cuts,
@@ -567,12 +424,19 @@ After V2, local parallax is multiplied by `ROI_width / source_width` to preserve
 outside-only signed collar decays at the production slope limits to exact zero beyond the collar
 without changing any ROI-interior value.
 
+The versioned machine record distinguishes strict `ok` geometry from relaxed `ok-fullscreen`
+client authority. The host accepts the latter only when its mapped rectangle equals the complete
+capture; it cannot silently become a windowed ROI. That authority class is part of the live-overlay
+domain key, so `ok`/`ok-fullscreen` transitions break detector history without treating repeated
+heartbeats as domain changes.
+
 This live route currently authorizes only Desktop Duplication. WGC has no `LastPresentTime`
 equivalent for separating content from cursor-only compositor frames and therefore uses full-frame
 V2. Diagnostics may record the frame-bound semantic border and the observer/mapping failure reason,
-but that observation is not the live renderer authority by itself. Dump 3D schema 13 records the
-crop-local analysis field, authoritative full-source placement/collar contract, and exact
-full-source inverse map as distinct evidence.
+but that observation is not the live renderer authority by itself. Current Dump 3D schema 15 records
+the crop-local analysis field, authoritative full-source placement/collar contract, and exact
+full-source inverse map as distinct evidence; strict readers preserve schema 14 and schema 13 under
+their historical identities.
 
 A paused page captured before the first valid geometry run still has no matched-frame border. The
 host waits for a real `LastPresentTime`; once the geometry predates a presented content frame,
@@ -583,8 +447,9 @@ Chromium's IA2 rectangle is still a semantic element box, not proof that every p
 CSS clipping/occlusion, canvas or WebGL players, protected content, and disabled accessibility can
 all defeat it. Reading extended IA2 attributes enables Chromium's richer accessibility
 serialization process-wide, so browser CPU and memory overhead remain part of live qualification.
-If an overlay is actually captured inside an otherwise authorized semantic rectangle, it is ordinary
-crop content for DAV2; this route does not recover the unoccluded video or construct a visible mask.
+If an overlay is captured inside an otherwise authorized semantic rectangle, it remains ordinary
+crop content unless a separately admitted burned-in-overlay treatment supplies the tight mask. The
+ROI route itself does not recover unoccluded video or construct a compositor-visible mask.
 
 NVIDIA RTX Video does not provide an alternate public discovery API. Chromium already owns the
 decoded texture and content rectangle and explicitly enables NVIDIA processing on that D3D11 video
@@ -610,20 +475,22 @@ external DOM rectangle that Sunshine can query.
   private color/depth slot. Analysis-domain changes reset temporal/camera state, while a pure
   position change of the same-sized ROI retains it. Stale or partially off-monitor geometry uses
   full-frame V2 rather than warping the old rectangle.
-- **Fullscreen canonicalization is not an ROI transition.** When the semantic rectangle equals the
-  full capture, the ordinary full-frame domain continues without crop, temporal reset, or dump
-  rejection.
+- **Fullscreen authority is separate from windowed ROI.** When an available semantic video covers
+  the complete foreground client and the host maps that client exactly to the capture, the ordinary
+  full-frame domain continues without crop, temporal reset, or dump rejection. A maximized or
+  otherwise full-source frame alone cannot take this route.
 
 **A reality that will dominate user reports.** Hardware-DRM content — Netflix, Disney+, Prime — is
 black in Desktop Duplication. The pixels are not obtainable, so no amount of detection makes ROI
 conversion work there. YouTube, local files, and most non-DRM streams are fine. Say so in the UI
 before a user discovers it.
 
-**Status.** The dirty-region detector is retired. IA2 helper supervision, largest-video selection,
-one-pixel endpoint tolerance, screen-to-capture validation, matched-frame attribution, transition
-logging, bounded inward aspect trim, same-format DAV2/ownership crop, crop-local state, full-source
-rendering, and the outside-only zero-plane collar are implemented. Active ROI frames are represented
-by Dump 3D schema 13; ordinary replay remains fail-closed until it consumes both coordinate domains.
+**Status.** The dirty-region detector is retired. IA2 helper supervision, strict unique-largest
+windowed selection, separate full-client semantic fullscreen selection, one-pixel endpoint tolerance,
+screen-to-capture validation, matched-frame attribution, transition logging, bounded inward aspect
+trim, same-format DAV2/ownership crop, crop-local state, full-source rendering, and the outside-only
+zero-plane collar are implemented. Active ROI frames are represented by current Dump 3D schema 15;
+ordinary replay remains fail-closed until it consumes both coordinate domains.
 
 ---
 
@@ -763,8 +630,8 @@ infrastructure before its consumers, and put cheap de-risking probes before expe
 | # | Item | Why first |
 |---|---|---|
 | 0.1 | **Completed and retired:** dirty-rectangle investigation (part of [W6](#w6-video-roi-detection)) | It proved that DDup damage can resemble a video rectangle, then disproved it as semantic authority on pause, partial updates, and dynamic pages. The probe/tracker code was removed. |
-| 0.2 | **Implemented:** Chromium IA2 video-border attribution | The isolated helper selects the largest visible `<video>`, survives pause, fails closed on ambiguity, and publishes no COM work onto streaming threads. Host SBS validates causal ordering and binds the observation to one matched frame; the production ROI may consume it, while the optional dump artifact remains diagnostic only. |
-| 0.3 | Subtitled synthetic clips and four new metrics ([W2a](#w2a-burned-in-subtitles--zero-parallax-mask)) | Repo process requires measuring before changing. Variance alone cannot prove the authored zero plane, and surviving sample count alone cannot prove local binocular coverage, so target-error and authored-region support are hard gates. Dense-CJK, tall-bilingual, disjoint top-plus-bottom, and high-resolution transition/cut fixtures cover both real content shapes and pre-downscale temporal evidence. |
+| 0.2 | **Implemented:** Chromium IA2 video-border attribution | The isolated helper keeps strict unique-largest selection for windowed ROI and separately accepts an available video covering the whole foreground client for fullscreen, including overscan/document clipping/duplicate-clone cases. It survives pause and publishes no COM work onto streaming threads. Host SBS validates causal ordering and requires the fullscreen client to map exactly to the capture; the optional dump artifact remains diagnostic only. |
+| 0.3 | **Implemented:** subtitled synthetic clips and tight-mask metrics ([W2a](#w2a-burned-in-subtitles--adaptive-constant-plane-mask)) | Dense-CJK, tall-bilingual, disjoint top-plus-bottom, and high-resolution transition/cut fixtures cover consumer geometry and temporal evidence. Authored-region support and fitted constant-plane RMS remain evaluation evidence; absolute fitted plane has only the target-free 8.0% binocular representation/comfort bound. |
 
 #### Evaluate W6 border attribution
 
@@ -772,22 +639,27 @@ Use the Desktop Duplication capture backend and start Host SBS with Edge or Chro
 foreground. Test one main video plus smaller previews, pause/resume, local-only pixel updates,
 dynamic sidebars, maximise/restore, browser zoom, and a negative-coordinate monitor. The host log
 should publish only transitions for a validated half-open capture rectangle. Fullscreen endpoint
-rounding of at most one physical pixel is clipped; larger overflow, partial clipping, stale helper
-heartbeat, unsupported aspect, or equal-largest videos must select ordinary full-frame V2. An
-incomplete walk cannot create or replace a border; it may only preserve a previously selected object
-that still passes the independent exact cached-object check.
+rounding of at most one physical pixel is clipped. For windowed ROI, larger overflow, partial
+clipping, stale helper heartbeat, unsupported aspect, or equal-largest videos must select ordinary
+full-frame V2. Separately test fullscreen element overscan, a clipped-but-available document
+rectangle, and multiple full-cover clones: these remain eligible only while one retained available
+semantic video covers the unchanged foreground client. An incomplete walk cannot create or replace a
+border; it may only preserve a previously selected object that still passes the independent cached-object
+check for its route.
 
-An exact full-capture rectangle must canonicalize to ordinary full-frame V2 with no crop, trim,
-analysis-domain reset, or ROI embedding. This route-level fallback is distinct from the
-base fail-closed contract: a model, provenance, state, field, or renderer authentication failure must
-render flat rather than retrying through full-frame geometry.
+An authenticated fullscreen client rectangle must map exactly to the capture and then canonicalize
+to ordinary full-frame V2 with no crop, trim, analysis-domain reset, or ROI embedding. A maximized
+browser or full-source analysis domain without that semantic/client authority must not claim an ROI.
+This route-level fallback is distinct from the base fail-closed contract: a model, provenance, state,
+field, or renderer authentication failure must render flat rather than retrying through full-frame
+geometry.
 
 For accepted ROIs, verify that aspect fitting removes at most 2% of the detected area from inside the
 video, uses the current authenticated tensor, and never pads or stretches. Inspect both disparity
 signs at all four edges: the ROI interior must remain unchanged, the outside-only collar must respect
 the production slope limits, and the farther surround must be exactly zero. A pure window
 translation must retain scene state; ROI/full, identity, size, and transfer-domain changes must
-reset it. Capture a schema-13 ROI Dump 3D and require its full-source inverse map to be identity
+  reset it. Capture a schema-21 ROI Dump 3D and require its full-source inverse map to be identity
 beyond the conservative collar; the crop-local final field alone is not sufficient evidence.
 
 ### Phase 1 — Overlay treatment
@@ -795,8 +667,8 @@ beyond the conservative collar; the crop-local final field alone is not sufficie
 | # | Item | Why here |
 |---|---|---|
 | 1.1 | [W1 — cursor after the warp](#w1-composite-the-cursor-after-the-warp-candidate-defect) | Medium cross-backend change: first create an independent WGC cursor layer, then build the post-warp compositor. |
-| 1.2 | [W2a — subtitle zero-parallax mask](#w2a-burned-in-subtitles--zero-parallax-mask) | Known-mask schema-27 sanitizer/exclusion/final-field consumer and oracle evidence are implemented independently of W1. Automatic full-resolution detection remains: ship the offline scene-buffered producer first; the live causal producer can follow. |
-| 1.3 | [W3 — further overlay-mask reuse (deferred)](#w3-further-overlay-mask-reuse-in-scene-evidence-deferred) | W2a exclusion from cut evidence and scene-center moments is part of 1.2. Only unrelated overlay-mask reuse remains deferred and evidence-gated. |
+| 1.2 | [W2a — burned-in subtitles](#w2a-burned-in-subtitles--adaptive-constant-plane-mask) | Current work is the bounded OCR-box/final-field route described above. The retired general overlay detector, inference sanitizer, and component-local mask graph are no longer production or replay dependencies. Semantic, cross-GPU, real-video, and headset qualification remain required. |
+| 1.3 | [W3 — overlay-mask reuse (deferred)](#w3-overlay-mask-reuse-in-scene-evidence-deferred) | No OCR6/SLR6 mask currently enters cut evidence or scene-center moments; any future reuse remains evidence-gated. |
 | 1.4 | [W12 — foreground/media classifier](#w12-foreground-process-and-media-state-classifier) | Evidence source only; it may choose a validated route but may not silently change V2 strength. |
 | 1.5 | [W13 — damage-guided depth reuse](#w13-damage-guided-depth-reuse-new-review-addition) | Start only with cursor-only reuse after W1. Broader reuse remains gated on move metadata and independent damage classification. |
 

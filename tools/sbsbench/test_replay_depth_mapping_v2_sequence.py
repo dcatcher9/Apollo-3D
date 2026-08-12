@@ -263,11 +263,14 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                 clip, [1], shape, run_model)
             self.assertEqual(evidence["selected_frame_ids"], ["00001"])
             self.assertEqual(
-                evidence["model_hash_authority"], "schema-36-run-level-results-json")
+                evidence["model_hash_authority"], "schema-37-run-level-results-json")
             self.assertEqual(
-                evidence["input_shape_authority"], "schema-36-per-clip-raw-manifest")
-            self.assertEqual(evidence["eval_schema"], 36)
-            self.assertEqual(evidence["contract_schema"], 20)
+                evidence["input_shape_authority"], "schema-37-per-clip-raw-manifest")
+            self.assertEqual(
+                evidence["eval_schema"], whole_clip_raw_contract.EVALUATOR_SCHEMA)
+            self.assertEqual(
+                evidence["contract_schema"],
+                whole_clip_raw_contract.HARNESS_CONTRACT_SCHEMA)
             self.assertEqual(evidence["raw_hash_authority"]["binding"],
                              whole_clip_raw_contract.BINDING)
             self.assertEqual(evidence["depth_model_url"], MODEL_CALIBRATIONS[0].depth_model_url)

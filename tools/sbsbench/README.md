@@ -55,6 +55,11 @@ Host SBS V2 has no model/profile selector. Production and the maintained benchma
 authenticated DAV2 Small calibration. The supported treatments are intentionally narrow and are
 listed by `run_eval.py --help`; unrecognized historical options fail argument parsing.
 
+### Current subtitle authority
+
+The current dump reader accepts the authenticated OCR6 record and compact SLR6 locator state as
+the only live subtitle authority. Retired SLR3--SLR5, GST/OGR/ORS, and offline overlay-detector
+paths are not accepted as live or replay authority.
 ## Reports and comparisons
 
 When a treatment was not run with `--report-control`, generate a report separately:
@@ -95,8 +100,10 @@ python tools/sbsbench/sbsbench.py `
   --baseline base.json
 ```
 
-See [Dump and replay format](DUMP_FORMAT.md) before interpreting preview PNGs or replaying an older
-capture.
+See [Dump and replay format](DUMP_FORMAT.md) before interpreting preview PNGs. The reader accepts
+only the current SLR6/OCR6 dump schema; older experimental captures are intentionally unsupported.
+An active package authenticates the exact OCR6 record, compact SLR6 state, ordinary Base field,
+and selected conditioned field. An inactive package uses the one canonical `none` descriptor.
 
 ## Whole-clip conversion boundary
 

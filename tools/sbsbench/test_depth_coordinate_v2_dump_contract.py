@@ -2,7 +2,9 @@
 """Strict JSON-dump tests for the generated algorithm and independent dump schemas."""
 
 import copy
+import hashlib
 import json
+import struct
 import sys
 import tempfile
 import unittest
@@ -146,8 +148,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "renderer_authorization_bits": values["renderer_authorization_bits"],
             },
             "adaptation_semantics": {
-                "coordinate":
-                    "immediate-first-usable-center-latched-until-cut-fixed-authenticated-scale-retained-across-unusable",
+                "coordinate": (
+                    "immediate-first-usable-center-latched-until-cut-fixed-"
+                    "authenticated-scale-retained-across-unusable"
+                ),
                 "convergence_curve":
                     "arithmetic-mean-center-is-zero-plane",
                 "requested_gain": "immutable-cfg-pop-strength",
@@ -208,9 +212,18 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "shadow_final_parallax.f32":
                 ("parallax-v2 final conditioned displacement field", True),
         }
+        subtitle_none = {
+            "mode": "none",
+            "request": None,
+            "producer": None,
+            "resolver": None,
+            "artifacts": {},
+        }
         self.manifest = {
             "schema": dump_contract.DUMP_MANIFEST_SCHEMA,
+            "capture_status": "complete",
             "matched_frame_id": 41,
+            "subtitle_conditioning": subtitle_none,
             "renderer": {
                 "authority":
                     "authenticated-parallax-v2-orientation-selective-conditioned-field",
@@ -335,6 +348,14 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             },
         }
         self.manifest["artifacts"].update({
+            "subtitle_conditioning.json": {
+                "available": True,
+                "required": True,
+                "stage": "subtitle conditioning authority",
+                "description": "canonical current-schema ordinary subtitle state",
+                "sha256": hashlib.sha256(
+                    json.dumps(subtitle_none).encode("utf-8")).hexdigest(),
+            },
             "depth_input_region.json": {
                 "available": True,
                 "required": True,
@@ -428,6 +449,505 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertIn("completed.shadow_vertical_majorant", native)
         self.assertIn('"shadow_vertical_conditioned"', native)
         self.assertIn("completed.shadow_vertical_conditioned", native)
+
+    def test_current_subtitle_record_and_state_abi_partition_exact_word_counts(self):
+        self.assertEqual(
+            dump_contract.SUBTITLE_OCR_RAW_BOX_WORD_OFFSET,
+            dump_contract.SUBTITLE_OCR_HEADER_WORD_COUNT)
+        self.assertEqual(
+            dump_contract.SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET,
+            dump_contract.SUBTITLE_OCR_RAW_BOX_WORD_OFFSET +
+            dump_contract.SUBTITLE_OCR_RAW_BOX_CAPACITY *
+            dump_contract.SUBTITLE_OCR_BOX_WORD_COUNT)
+        self.assertEqual(
+            dump_contract.SUBTITLE_OCR_RECORD_WORD_COUNT,
+            dump_contract.SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET +
+            dump_contract.SUBTITLE_OCR_FINAL_BOX_CAPACITY *
+            dump_contract.SUBTITLE_OCR_BOX_WORD_COUNT)
+        self.assertEqual(
+            struct.pack("<I", dump_contract.SUBTITLE_OCR_RECORD_TAG), b"OCR6")
+
+        rectangle_words = 4 * dump_contract.SUBTITLE_LOCATOR_RECT_CAPACITY
+        self.assertEqual(
+            dump_contract.SUBTITLE_LOCATOR_OWNER_WORD_OFFSET,
+            dump_contract.SUBTITLE_LOCATOR_HEADER_WORD_COUNT)
+        self.assertEqual(
+            dump_contract.SUBTITLE_LOCATOR_PENDING_WORD_OFFSET,
+            dump_contract.SUBTITLE_LOCATOR_OWNER_WORD_OFFSET + rectangle_words)
+        self.assertEqual(
+            dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET,
+            dump_contract.SUBTITLE_LOCATOR_PENDING_WORD_OFFSET + rectangle_words)
+        self.assertEqual(
+            dump_contract.SUBTITLE_LOCATOR_STATE_WORD_COUNT,
+            dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET + rectangle_words)
+        self.assertEqual(
+            struct.pack("<I", dump_contract.SUBTITLE_LOCATOR_STATE_TAG), b"SLR6")
+
+    @staticmethod
+    def _valid_ocr_record_words():
+        words = [0] * dump_contract.SUBTITLE_OCR_RECORD_WORD_COUNT
+        words[:16] = [
+            dump_contract.SUBTITLE_OCR_RECORD_SCHEMA,
+            dump_contract.SUBTITLE_OCR_RECORD_TAG,
+            1, 1, 1,
+            41, 0,
+            17, 0,
+            1920, 1080,
+            770, 434,
+            325, 430,
+            0,
+        ]
+        score_bits = struct.unpack("<I", struct.pack("<f", 0.875))[0]
+        box = [120, 350, 650, 401, score_bits, 0, 0, 0]
+        raw = dump_contract.SUBTITLE_OCR_RAW_BOX_WORD_OFFSET
+        final = dump_contract.SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET
+        words[raw:raw + len(box)] = box
+        words[final:final + len(box)] = box
+        return words
+
+    @staticmethod
+    def _pack_uint32_words(words):
+        return struct.pack(f"<{len(words)}I", *words)
+
+    def _active_slr6_manifest(self, base_manifest=None):
+        manifest = copy.deepcopy(
+            self.manifest if base_manifest is None else base_manifest)
+        subtitle = {
+            "mode": "subtitle-slr6",
+            "request": True,
+            "producer": dump_contract._subtitle_ocr_producer_contract(),
+            "resolver": dump_contract._subtitle_locator_resolver_contract(),
+            "artifacts": {
+                "ocr_record": "subtitle_ocr_record.u32",
+                "locator_state": "subtitle_locator_state.u32",
+                "base_field": "shadow_base_final_parallax.f32",
+                "conditioned_field": "shadow_final_parallax.f32",
+            },
+        }
+        manifest["subtitle_conditioning"] = subtitle
+        manifest["dimensions"]["shadow_base_final_parallax"] = copy.deepcopy(
+            manifest["dimensions"]["shadow_final_parallax"])
+        manifest["artifacts"].update({
+            "subtitle_ocr_record.u32": {
+                "available": True,
+                "required": True,
+                "stage": "same-frame OCR6 subtitle boxes",
+                "description": "authenticated test OCR6 record",
+                "sha256": "0" * 64,
+            },
+            "subtitle_locator_state.u32": {
+                "available": True,
+                "required": True,
+                "stage": "compact SLR6 subtitle authority state",
+                "description": "authenticated test SLR6 state",
+                "sha256": "0" * 64,
+            },
+            "shadow_base_final_parallax.f32": {
+                "available": True,
+                "required": True,
+                "stage": "ordinary post-limiter V2 field before SLR6 conditioning",
+                "description": "authenticated test unconditioned base field",
+                "sha256": "0" * 64,
+            },
+        })
+        manifest["renderer"]["parallax_v2_conditioner_role"] = (
+            "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= "
+            "max_horizontal_slope and vertical shear <= max_vertical_shear produces "
+            "shadow_base_final_parallax; SLR6 applies the analytic anisotropic rectangle "
+            "budget/fade from same-frame current authority and publishes "
+            "shadow_final_parallax as live position authority")
+        payload = json.dumps(subtitle).encode("utf-8")
+        manifest["artifacts"]["subtitle_conditioning.json"]["sha256"] = (
+            hashlib.sha256(payload).hexdigest())
+        return manifest
+
+    def test_current_slr6_manifest_binds_exact_model_shader_and_artifact_roles(self):
+        decoded = dump_contract.validate_v2_dump_manifest_document(
+            self._active_slr6_manifest())
+        subtitle = decoded["subtitle_conditioning"]
+        self.assertEqual(subtitle["mode"], "subtitle-slr6")
+        self.assertTrue(subtitle["live"])
+        self.assertTrue(subtitle["subtitle_evidence_complete"])
+        self.assertEqual(
+            subtitle["artifact_files"]["conditioned_field"],
+            "shadow_final_parallax.f32")
+        native = (REPO / "src" / "platform" / "windows" /
+                  "sbs_debug_dump.cpp").read_text(encoding="utf-8")
+        for token in (
+                '"subtitle-slr6"', '"subtitle_ocr_record.u32"',
+                '"subtitle_locator_state.u32"',
+                '"shadow_base_final_parallax.f32"',
+                "subtitle_ocr_onnx_sha256",
+                "subtitle_ocr_record_word_count",
+                "subtitle_locator_state_word_count"):
+            self.assertIn(token, native)
+
+    def test_current_slr6_manifest_rejects_provenance_roles_and_base_field_drift(self):
+        mutations = {
+            "request": (
+                lambda manifest: manifest["subtitle_conditioning"].update({"request": False}),
+                "enabled request"),
+            "model": (
+                lambda manifest: manifest["subtitle_conditioning"]["producer"]["model"].update(
+                    {"onnx_sha256": "0" * 64}),
+                "OCR6 provenance"),
+            "resolver": (
+                lambda manifest: manifest["subtitle_conditioning"]["resolver"].update(
+                    {"state_tag": 0}),
+                "resolver provenance"),
+            "artifact-role": (
+                lambda manifest: manifest["subtitle_conditioning"]["artifacts"].update(
+                    {"locator_state": "wrong.u32"}),
+                "artifact roles"),
+            "artifact-stage": (
+                lambda manifest: manifest["artifacts"]["subtitle_ocr_record.u32"].update(
+                    {"stage": "diagnostic only"}),
+                "misattributes"),
+            "base-dimension": (
+                lambda manifest: manifest["dimensions"]
+                ["shadow_base_final_parallax"].update({"width": 769}),
+                "dimensions disagree"),
+        }
+        for name, (mutate, error) in mutations.items():
+            with self.subTest(name=name):
+                manifest = self._active_slr6_manifest()
+                mutate(manifest)
+                with self.assertRaisesRegex(ValueError, error):
+                    dump_contract.validate_v2_dump_manifest_document(manifest)
+
+    def test_current_ocr6_record_validates_exact_identity_boxes_and_empty_authority(self):
+        decoded = dump_contract.validate_subtitle_ocr_record(
+            self._pack_uint32_words(self._valid_ocr_record_words()),
+            matched_frame_id=41,
+            analysis_generation=17,
+            source_width=1920,
+            source_height=1080,
+            field_width=770,
+            field_height=434,
+            roi_top=325,
+            roi_bottom=430)
+        self.assertTrue(decoded["authoritative"])
+        self.assertEqual(decoded["raw_count"], 1)
+        self.assertEqual(decoded["final_count"], 1)
+        self.assertEqual(
+            decoded["final_boxes"][0], {
+                "left": 120,
+                "top": 350,
+                "right": 650,
+                "bottom": 401,
+                "score": 0.875,
+                "score_bits": struct.unpack("<I", struct.pack("<f", 0.875))[0],
+            })
+
+        empty = self._valid_ocr_record_words()
+        empty[3] = 0
+        empty[4] = 0
+        empty[dump_contract.SUBTITLE_OCR_RAW_BOX_WORD_OFFSET:] = [
+            0
+        ] * (dump_contract.SUBTITLE_OCR_RECORD_WORD_COUNT -
+             dump_contract.SUBTITLE_OCR_RAW_BOX_WORD_OFFSET)
+        decoded = dump_contract.validate_subtitle_ocr_record(
+            self._pack_uint32_words(empty),
+            matched_frame_id=41,
+            analysis_generation=17,
+            source_width=1920,
+            source_height=1080,
+            field_width=770,
+            field_height=434,
+            roi_top=325,
+            roi_bottom=430)
+        self.assertTrue(decoded["authoritative"])
+        self.assertEqual(decoded["final_boxes"], [])
+
+    def test_current_ocr6_record_rejects_identity_capacity_slots_and_box_corruption(self):
+        mutations = {
+            "tag": (lambda words: words.__setitem__(1, 0), "schema or tag"),
+            "frame": (lambda words: words.__setitem__(5, 42), "identity"),
+            "capacity": (
+                lambda words: words.__setitem__(3, 17), "fixed box capacity"),
+            "final-count": (
+                lambda words: words.__setitem__(4, 2), "cannot exceed"),
+            "unused-slot": (
+                lambda words: words.__setitem__(
+                    dump_contract.SUBTITLE_OCR_RAW_BOX_WORD_OFFSET +
+                    dump_contract.SUBTITLE_OCR_BOX_WORD_COUNT, 1),
+                "canonical zero"),
+            "outside-roi": (
+                lambda words: words.__setitem__(
+                    dump_contract.SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET + 1, 100),
+                "inside the OCR ROI"),
+            "nan-score": (
+                lambda words: words.__setitem__(
+                    dump_contract.SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET + 4,
+                    0x7FC00000),
+                "finite float32"),
+            "low-score": (
+                lambda words: words.__setitem__(
+                    dump_contract.SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET + 4,
+                    struct.unpack("<I", struct.pack("<f", 0.2))[0]),
+                r"\[0.4,1.0\]"),
+            "box-flags": (
+                lambda words: words.__setitem__(
+                    dump_contract.SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET + 5, 1),
+                "flags and reserved"),
+        }
+        for name, (mutate, error) in mutations.items():
+            with self.subTest(name=name):
+                words = self._valid_ocr_record_words()
+                mutate(words)
+                with self.assertRaisesRegex(ValueError, error):
+                    dump_contract.validate_subtitle_ocr_record(
+                        self._pack_uint32_words(words),
+                        matched_frame_id=41,
+                        analysis_generation=17,
+                        source_width=1920,
+                        source_height=1080,
+                        field_width=770,
+                        field_height=434,
+                        roi_top=325,
+                        roi_bottom=430)
+
+    @staticmethod
+    def _valid_slr6_state_words():
+        words = [0] * dump_contract.SUBTITLE_LOCATOR_STATE_WORD_COUNT
+        target_bits = struct.unpack("<I", struct.pack("<f", 0.0075))[0]
+        words[:32] = [
+            dump_contract.SUBTITLE_LOCATOR_STATE_SCHEMA,
+            dump_contract.SUBTITLE_LOCATOR_STATE_TAG,
+            (dump_contract.SUBTITLE_LOCATOR_FLAG_OWNER |
+             dump_contract.SUBTITLE_LOCATOR_FLAG_TARGET_VALID),
+            9,
+            1,
+            120, 350, 650, 401,
+            530 * 51,
+            17, 0,
+            0,
+            0, 0, 0, 0,
+            0,
+            target_bits,
+            9,
+            1,
+            dump_contract.SUBTITLE_LOCATOR_EVENT_BIRTH,
+            41, 0,
+            1,
+            0,
+            3,
+            770,
+            434,
+            0,
+            0,
+            0,
+        ]
+        rectangle = [120, 350, 650, 401]
+        owner = dump_contract.SUBTITLE_LOCATOR_OWNER_WORD_OFFSET
+        current = dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET
+        words[owner:owner + 4] = rectangle
+        words[current:current + 4] = rectangle
+        return words
+
+    def test_current_slr6_state_validates_identity_rectangles_and_target(self):
+        decoded = dump_contract.validate_subtitle_locator_state(
+            self._pack_uint32_words(self._valid_slr6_state_words()),
+            matched_frame_id=41,
+            analysis_generation=17,
+            field_width=770,
+            field_height=434)
+        self.assertEqual(decoded["owner_count"], 1)
+        self.assertEqual(decoded["current_count"], 1)
+        self.assertEqual(decoded["target"], struct.unpack("<f", struct.pack("<f", 0.0075))[0])
+        self.assertEqual(decoded["last_event"], dump_contract.SUBTITLE_LOCATOR_EVENT_BIRTH)
+        self.assertEqual(decoded["current_rectangles"], [{
+            "left": 120, "top": 350, "right": 650, "bottom": 401,
+        }])
+
+        empty = [0] * dump_contract.SUBTITLE_LOCATOR_STATE_WORD_COUNT
+        empty[:32] = [
+            dump_contract.SUBTITLE_LOCATOR_STATE_SCHEMA,
+            dump_contract.SUBTITLE_LOCATOR_STATE_TAG,
+            0, 0, 0,
+            0, 0, 0, 0, 0,
+            17, 0,
+            0,
+            0, 0, 0, 0, 0,
+            0, 0,
+            0,
+            dump_contract.SUBTITLE_LOCATOR_EVENT_NONE,
+            41, 0,
+            0, 0, 3,
+            770, 434,
+            0, 0, 0,
+        ]
+        decoded = dump_contract.validate_subtitle_locator_state(
+            self._pack_uint32_words(empty),
+            matched_frame_id=41,
+            analysis_generation=17,
+            field_width=770,
+            field_height=434)
+        self.assertEqual(decoded["current_rectangles"], [])
+        self.assertIsNone(decoded["target"])
+
+        grace = empty.copy()
+        cached_bits = struct.unpack("<I", struct.pack("<f", 0.006))[0]
+        grace[18] = cached_bits
+        grace[25] = 2
+        grace[29] = 120 | (650 << 16)
+        grace[30] = 350 | (401 << 16)
+        decoded = dump_contract.validate_subtitle_locator_state(
+            self._pack_uint32_words(grace),
+            matched_frame_id=41,
+            analysis_generation=17,
+            field_width=770,
+            field_height=434)
+        self.assertEqual(decoded["target_grace"], 2)
+        self.assertEqual(decoded["grace_bounds"], {
+            "left": 120, "top": 350, "right": 650, "bottom": 401,
+        })
+
+    def test_current_slr6_state_rejects_identity_flags_slots_and_aggregates(self):
+        def add_second_current(words):
+            words[20] = 2
+            offset = dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET + 4
+            words[offset:offset + 4] = [130, 352, 220, 380]
+
+        def add_pending(words, *, valid_aggregate):
+            words[2] |= dump_contract.SUBTITLE_LOCATOR_FLAG_PENDING
+            words[12] = 1
+            words[13:17] = [140, 360, 610, 398]
+            words[17] = 470 * 38 if valid_aggregate else 1
+            offset = dump_contract.SUBTITLE_LOCATOR_PENDING_WORD_OFFSET
+            words[offset:offset + 4] = [140, 360, 610, 398]
+
+        def make_target_reset_with_stale_target(words):
+            words[2] = (dump_contract.SUBTITLE_LOCATOR_FLAG_OWNER |
+                        dump_contract.SUBTITLE_LOCATOR_FLAG_TARGET_RESET)
+            words[20] = 0
+            words[24] = 0
+            offset = dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET
+            words[offset:offset + 4] = [0, 0, 0, 0]
+
+        def make_invalid_grace(words):
+            words[2] = 0
+            words[3] = 0
+            words[4] = 0
+            words[5:10] = [0, 0, 0, 0, 0]
+            owner = dump_contract.SUBTITLE_LOCATOR_OWNER_WORD_OFFSET
+            words[owner:owner + 4] = [0, 0, 0, 0]
+            words[19] = 0
+            words[20] = 0
+            current = dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET
+            words[current:current + 4] = [0, 0, 0, 0]
+            words[24] = 0
+            words[25] = 2
+            words[29] = 650 | (120 << 16)
+            words[30] = 350 | (401 << 16)
+
+        def make_owner_without_target_with_stale_words(words):
+            words[2] = dump_contract.SUBTITLE_LOCATOR_FLAG_OWNER
+            words[20] = 0
+            words[24] = 0
+            current = dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET
+            words[current:current + 4] = [0, 0, 0, 0]
+
+        mutations = {
+            "tag": (lambda words: words.__setitem__(1, 0), "schema or tag"),
+            "generation": (lambda words: words.__setitem__(10, 18), "identity"),
+            "unknown-flags": (lambda words: words.__setitem__(2, 0x10), "unknown flags"),
+            "flag-count": (
+                lambda words: words.__setitem__(2, dump_contract.SUBTITLE_LOCATOR_FLAG_TARGET_VALID),
+                "flags disagree"),
+            "owner-bbox": (lambda words: words.__setitem__(8, 651), "bbox or area"),
+            "owner-area": (lambda words: words.__setitem__(9, 1), "bbox or area"),
+            "owner-generation": (
+                lambda words: words.__setitem__(3, 0),
+                "owner generation"),
+            "target-generation": (
+                lambda words: words.__setitem__(19, 8),
+                "valid target identity"),
+            "current-exceeds-owner": (
+                add_second_current,
+                "cannot exceed its owner count"),
+            "pending-area": (
+                lambda words: add_pending(words, valid_aggregate=False),
+                "pending bbox or area"),
+            "unused-owner": (
+                lambda words: words.__setitem__(
+                    dump_contract.SUBTITLE_LOCATOR_OWNER_WORD_OFFSET + 4, 1),
+                "canonical zero"),
+            "outside-field": (
+                lambda words: words.__setitem__(
+                    dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET + 2, 771),
+                "inside the OCR ROI"),
+            "nan-target": (
+                lambda words: words.__setitem__(18, 0x7FC00000),
+                "valid target"),
+            "zero-fade-with-current": (
+                lambda words: words.__setitem__(24, 0),
+                "current rectangles require"),
+            "unknown-fade": (
+                lambda words: words.__setitem__(24, 3),
+                "fade step"),
+            "event": (lambda words: words.__setitem__(21, 4), "unknown last event"),
+            "target-reset-stale-target": (
+                make_target_reset_with_stale_target,
+                "target reset must clear"),
+            "owner-grace": (
+                lambda words: words.__setitem__(25, 1),
+                "live owner cannot retain"),
+            "invalid-grace-bounds": (
+                make_invalid_grace,
+                "death-grace target or packed bounds"),
+            "owner-without-target-stale-words": (
+                make_owner_without_target_with_stale_words,
+                "owner without target authority"),
+            "reserved-header": (
+                lambda words: words.__setitem__(31, 1),
+                "reserved header word"),
+        }
+        for name, (mutate, error) in mutations.items():
+            with self.subTest(name=name):
+                words = self._valid_slr6_state_words()
+                mutate(words)
+                with self.assertRaisesRegex(ValueError, error):
+                    dump_contract.validate_subtitle_locator_state(
+                        self._pack_uint32_words(words),
+                        matched_frame_id=41,
+                        analysis_generation=17,
+                        field_width=770,
+                        field_height=434)
+
+    def test_native_slr6_prevalidation_mirrors_python_mutation_invariants(self):
+        native = (REPO / "src" / "platform" / "windows" /
+                  "sbs_debug_dump.cpp").read_text(encoding="utf-8")
+        start = native.index("bool subtitle_locator_state_is_canonical(")
+        end = native.index("bool subtitle_records_match_frame(", start)
+        validator = native[start:end]
+        for token in (
+                "subtitle_rectangle_summary_matches(locator, 5u, 9u, owner_summary)",
+                "subtitle_rectangle_summary_matches(locator, 13u, 17u, pending_summary)",
+                "owner != (owner_count != 0u)",
+                "pending != (pending_count != 0u)",
+                "owner != (owner_generation != 0u)",
+                "current_count > owner_count",
+                "fade > subtitle_locator_max_fade",
+                "last_event > subtitle_locator_max_event",
+                "target_generation != owner_generation",
+                "grace != 0u || !packed_grace_zero",
+                "ocr_flags == 0u && current_count != 0u",
+                "subtitle_current_rectangles_match_ocr_final"):
+            with self.subTest(token=token):
+                self.assertIn(token, validator)
+
+        membership_start = native.index(
+            "bool subtitle_current_rectangles_match_ocr_final(")
+        membership = native[membership_start:start]
+        self.assertIn("subtitle_ocr_final_box_offset", membership)
+        self.assertIn("subtitle_locator_current_offset", membership)
+        for component in range(4):
+            suffix = "" if component == 0 else f" + {component}u"
+            self.assertIn(
+                f"subtitle_word(locator, current{suffix}) == "
+                f"subtitle_word(ocr, final{suffix})",
+                membership)
 
     def test_depth_input_region_accepts_real_integer_floor_roi_and_float32_fitter(self):
         region = copy.deepcopy(self.depth_input_region)
@@ -548,12 +1068,21 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "geometry artifact"):
             dump_contract.validate_v2_dump_manifest_document(changed)
 
-    def _write_synthetic_geometry_dump(self, root):
-        import hashlib
+    @staticmethod
+    def _write_subtitle_conditioning_document(root, manifest):
+        payload = json.dumps(manifest["subtitle_conditioning"]).encode("utf-8")
+        (root / "subtitle_conditioning.json").write_bytes(payload)
+        manifest["artifacts"]["subtitle_conditioning.json"]["sha256"] = (
+            hashlib.sha256(payload).hexdigest())
 
+    @staticmethod
+    def _write_hashed_payload(root, manifest, name, payload):
+        (root / name).write_bytes(payload)
+        manifest["artifacts"][name]["sha256"] = hashlib.sha256(payload).hexdigest()
+
+    def _write_synthetic_geometry_dump(self, root, width=16, height=12):
         import numpy as np
 
-        width, height = 16, 12
         rng = np.random.default_rng(20260804)
         candidate = (rng.uniform(-0.002, 0.03, (height, width))).astype(np.float32)
         ownership = candidate.copy()
@@ -618,9 +1147,98 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         (root / "depth_input_region.json").write_bytes(region_payload)
         manifest["artifacts"]["depth_input_region.json"]["sha256"] = hashlib.sha256(
             region_payload).hexdigest()
+        self._write_subtitle_conditioning_document(root, manifest)
         (root / "dump_manifest.json").write_text(
             json.dumps(manifest), encoding="utf-8")
         return manifest, fields
+
+    def _activate_synthetic_slr6_dump(self, root, manifest, fields):
+        manifest = self._active_slr6_manifest(manifest)
+        base_payload = fields["shadow_final_parallax"].astype("<f4").tobytes()
+        self._write_hashed_payload(
+            root, manifest, "shadow_base_final_parallax.f32", base_payload)
+
+        ocr = [0] * dump_contract.SUBTITLE_OCR_RECORD_WORD_COUNT
+        ocr[:16] = [
+            dump_contract.SUBTITLE_OCR_RECORD_SCHEMA,
+            dump_contract.SUBTITLE_OCR_RECORD_TAG,
+            1, 0, 0,
+            41, 0,
+            0, 0,
+            1920, 1080,
+            dump_contract.SUBTITLE_OCR_FIELD_WIDTH,
+            dump_contract.SUBTITLE_OCR_FIELD_HEIGHT,
+            dump_contract.SUBTITLE_OCR_ROI_TOP,
+            dump_contract.SUBTITLE_OCR_ROI_BOTTOM,
+            0,
+        ]
+        self._write_hashed_payload(
+            root, manifest, "subtitle_ocr_record.u32",
+            self._pack_uint32_words(ocr))
+
+        locator = [0] * dump_contract.SUBTITLE_LOCATOR_STATE_WORD_COUNT
+        locator[:32] = [
+            dump_contract.SUBTITLE_LOCATOR_STATE_SCHEMA,
+            dump_contract.SUBTITLE_LOCATOR_STATE_TAG,
+            0, 0, 0,
+            0, 0, 0, 0, 0,
+            0, 0,
+            0,
+            0, 0, 0, 0, 0,
+            0, 0,
+            0,
+            dump_contract.SUBTITLE_LOCATOR_EVENT_NONE,
+            41, 0,
+            0, 0, 3,
+            dump_contract.SUBTITLE_OCR_FIELD_WIDTH,
+            dump_contract.SUBTITLE_OCR_FIELD_HEIGHT,
+            0, 0, 0,
+        ]
+        self._write_hashed_payload(
+            root, manifest, "subtitle_locator_state.u32",
+            self._pack_uint32_words(locator))
+        self._write_subtitle_conditioning_document(root, manifest)
+        (root / "dump_manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8")
+        return manifest
+
+    def _activate_synthetic_slr6_current_dump(
+            self, root, manifest, fields, *, fade=1):
+        manifest = self._activate_synthetic_slr6_dump(root, manifest, fields)
+        ocr = self._valid_ocr_record_words()
+        ocr[7] = 0
+        ocr[8] = 0
+        self._write_hashed_payload(
+            root, manifest, "subtitle_ocr_record.u32",
+            self._pack_uint32_words(ocr))
+
+        locator = self._valid_slr6_state_words()
+        locator[10] = 0
+        locator[11] = 0
+        locator[24] = fade
+        self._write_hashed_payload(
+            root, manifest, "subtitle_locator_state.u32",
+            self._pack_uint32_words(locator))
+        rectangle = {
+            "left": 120, "top": 350, "right": 650, "bottom": 401,
+        }
+        target = struct.unpack("<f", struct.pack("<I", locator[18]))[0]
+        subtitle = {
+            "current_rectangles": [rectangle],
+            "source_width": 1920,
+            "target": target,
+            "fade": fade,
+        }
+        conditioned = dump_contract._replay_slr6_conditioner(
+            fields["shadow_final_parallax"], subtitle)
+        payload = conditioned.astype("<f4").tobytes()
+        self._write_hashed_payload(
+            root, manifest, "shadow_final_parallax.f32", payload)
+        self._write_hashed_payload(root, manifest, "warp_depth.f32", payload)
+        self._write_subtitle_conditioning_document(root, manifest)
+        (root / "dump_manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8")
+        return manifest, conditioned, locator, ocr
 
     def _write_synthetic_roi_geometry_dump(self, root, *, near_full=False):
         import hashlib
@@ -888,6 +1506,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         }
         (root / "warp_map_shape.json").write_text(
             json.dumps(shape), encoding="utf-8")
+        self._write_subtitle_conditioning_document(root, manifest)
         (root / "dump_manifest.json").write_text(
             json.dumps(manifest), encoding="utf-8")
         return manifest, region, warp_map
@@ -961,6 +1580,138 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             self.assertEqual(summary["width"], 16)
             self.assertEqual(summary["height"], 12)
             self.assertFalse(summary["window_video_border_verified"])
+
+    def test_geometry_verifier_accepts_current_slr6_empty_authority_as_exact_base(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, fields = self._write_synthetic_geometry_dump(
+                root,
+                width=dump_contract.SUBTITLE_OCR_FIELD_WIDTH,
+                height=dump_contract.SUBTITLE_OCR_FIELD_HEIGHT)
+            self._activate_synthetic_slr6_dump(root, manifest, fields)
+
+            summary = dump_contract.verify_v2_dump_geometry(root)
+
+            subtitle = summary["subtitle_conditioning"]
+            self.assertEqual(subtitle["mode"], "subtitle-slr6")
+            self.assertTrue(subtitle["subtitle_evidence_verified"])
+            self.assertTrue(subtitle["ocr_authoritative"])
+            self.assertEqual(subtitle["current_count"], 0)
+            self.assertIn(
+                "shadow_base_final_parallax",
+                summary["chain_fields_verified"])
+
+    def test_geometry_verifier_rejects_slr6_record_identity_and_nonbase_empty_output(self):
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, fields = self._write_synthetic_geometry_dump(
+                root,
+                width=dump_contract.SUBTITLE_OCR_FIELD_WIDTH,
+                height=dump_contract.SUBTITLE_OCR_FIELD_HEIGHT)
+            manifest = self._activate_synthetic_slr6_dump(root, manifest, fields)
+
+            record = list(struct.unpack(
+                f"<{dump_contract.SUBTITLE_OCR_RECORD_WORD_COUNT}I",
+                (root / "subtitle_ocr_record.u32").read_bytes()))
+            record[5] = 42
+            self._write_hashed_payload(
+                root, manifest, "subtitle_ocr_record.u32",
+                self._pack_uint32_words(record))
+            (root / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "identity disagrees"):
+                dump_contract.verify_v2_dump_geometry(root)
+
+            record[5] = 41
+            self._write_hashed_payload(
+                root, manifest, "subtitle_ocr_record.u32",
+                self._pack_uint32_words(record))
+            changed = fields["shadow_final_parallax"].copy()
+            changed[0, 0] = np.nextafter(
+                changed[0, 0], np.float32(np.inf), dtype=np.float32)
+            self._write_hashed_payload(
+                root, manifest, "shadow_final_parallax.f32",
+                changed.astype("<f4").tobytes())
+            self._write_hashed_payload(
+                root, manifest, "warp_depth.f32",
+                changed.astype("<f4").tobytes())
+            (root / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "not exact Base"):
+                dump_contract.verify_v2_dump_geometry(root)
+
+    def test_geometry_verifier_replays_nonempty_slr6_rectangle_fade_and_ocr_binding(self):
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, fields = self._write_synthetic_geometry_dump(
+                root,
+                width=dump_contract.SUBTITLE_OCR_FIELD_WIDTH,
+                height=dump_contract.SUBTITLE_OCR_FIELD_HEIGHT)
+            manifest, fade_one, locator, ocr = (
+                self._activate_synthetic_slr6_current_dump(
+                    root, manifest, fields, fade=1))
+
+            summary = dump_contract.verify_v2_dump_geometry(root)
+            self.assertEqual(summary["subtitle_conditioning"]["current_count"], 1)
+            base = fields["shadow_final_parallax"]
+            self.assertTrue(np.array_equal(fade_one[0, 0], base[0, 0]))
+            self.assertTrue(np.any(
+                fade_one[350:401, 120:650] != base[350:401, 120:650]))
+
+            locator[24] = 2
+            self._write_hashed_payload(
+                root, manifest, "subtitle_locator_state.u32",
+                self._pack_uint32_words(locator))
+            target = struct.unpack("<f", struct.pack("<I", locator[18]))[0]
+            fade_two = dump_contract._replay_slr6_conditioner(base, {
+                "current_rectangles": [{
+                    "left": 120, "top": 350, "right": 650, "bottom": 401,
+                }],
+                "source_width": 1920,
+                "target": target,
+                "fade": 2,
+            })
+            fade_two_payload = fade_two.astype("<f4").tobytes()
+            self._write_hashed_payload(
+                root, manifest, "shadow_final_parallax.f32", fade_two_payload)
+            self._write_hashed_payload(
+                root, manifest, "warp_depth.f32", fade_two_payload)
+            (root / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            summary = dump_contract.verify_v2_dump_geometry(root)
+            self.assertEqual(summary["subtitle_conditioning"]["fade"], 2)
+            self.assertTrue(np.any(fade_two != fade_one))
+
+            tampered = fade_two.copy()
+            tampered[360, 200] = np.nextafter(
+                tampered[360, 200], np.float32(np.inf), dtype=np.float32)
+            tampered_payload = tampered.astype("<f4").tobytes()
+            self._write_hashed_payload(
+                root, manifest, "shadow_final_parallax.f32", tampered_payload)
+            self._write_hashed_payload(
+                root, manifest, "warp_depth.f32", tampered_payload)
+            (root / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "exact SLR6 rectangle-conditioning"):
+                dump_contract.verify_v2_dump_geometry(root)
+
+            self._write_hashed_payload(
+                root, manifest, "shadow_final_parallax.f32", fade_two_payload)
+            self._write_hashed_payload(
+                root, manifest, "warp_depth.f32", fade_two_payload)
+            final = dump_contract.SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET
+            ocr[final] += 1
+            self._write_hashed_payload(
+                root, manifest, "subtitle_ocr_record.u32",
+                self._pack_uint32_words(ocr))
+            (root / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "not exact boxes"):
+                dump_contract.verify_v2_dump_geometry(root)
 
     def test_roi_geometry_verifier_authenticates_region_border_map_and_zero_plane(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1321,6 +2072,28 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "authenticated live Host-SBS renderer input; not a client wire contract")
         decoded = dump_contract.validate_shadow_state_document(live)
         self.assertEqual(decoded["contract_tag_bits"], self.state["decoded"]["contract_tag"])
+
+    def test_shadow_state_accepts_exact_writer_unit_variants(self):
+        variants = (
+            {
+                "coordinate": "dimensionless canonical coordinate derived from raw depth",
+                "gain": "one-eye full-source-U per curve unit",
+                "parallax": "signed one-eye full-source-U",
+            },
+            {
+                "coordinate": "dimensionless canonical coordinate derived from raw depth",
+                "gain": "one-eye ROI-local source-U per curve unit",
+                "parallax": (
+                    "signed one-eye ROI-local source-U; full-source renderer authority "
+                    "additionally requires depth_input_region embedding"),
+            },
+        )
+        for units in variants:
+            with self.subTest(gain=units["gain"]):
+                writer_state = copy.deepcopy(self.state)
+                writer_state["units"] = units
+                decoded = dump_contract.validate_shadow_state_document(writer_state)
+                self.assertEqual(decoded["confirmed_cut_count"], 3)
 
     def test_single_dump_replay_reads_frame_and_derived_camera_validity(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -1087,6 +1087,23 @@ namespace sbs_bench {
       return succeeded;
     }
 
+    bool dump_float_texture_srv(
+      ID3D11Device *dev,
+      ID3D11DeviceContext *ctx,
+      ID3D11ShaderResourceView *srv,
+      const fs::path &path,
+      ComPtr<ID3D11Texture2D> &stage_cache
+    ) {
+      if (!srv) {
+        return false;
+      }
+      ComPtr<ID3D11Resource> resource;
+      srv->GetResource(&resource);
+      ComPtr<ID3D11Texture2D> texture;
+      return resource && SUCCEEDED(resource.As(&texture)) && texture &&
+             dump_float_texture(dev, ctx, texture.Get(), path, stage_cache);
+    }
+
     // Preserve the exact raw model output for stage-by-stage parity checks. Unlike the display
     // PNG, this is not clamped or normalized: it is row-major float32, width*height values.
     void dump_raw_model_depth(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv, int width, int height, const fs::path &path, ComPtr<ID3D11Buffer> &stage_cache) {
@@ -4247,6 +4264,7 @@ namespace sbs_bench {
               BOOST_LOG(error) << "sbs-bench: failed writing " << sname;
               return 6;
             }
+
           }
           // The fixed live calibration keeps the edge-selective EMA enabled, so the moving-edge
           // snap mask remains a per-frame evaluation artifact.
@@ -4413,13 +4431,13 @@ namespace sbs_bench {
         return 8;
       }
       // Machine-readable execution contract. Evaluation must not scrape human log prose. The
-      // Schema 20 attests the V2-only configuration surface (the direct-replay schema stays
+      // Schema 22 attests the V2-only configuration surface (the direct-replay schema stays
       // pinned by its validator).
       std::ofstream contract(fs::path(o.out) / "contract.json");
       if (contract) {
         contract << "{\n"
                  << "  \"schema\": "
-                 << (direct_parallax_mode ? direct_geometry_contract_schema : 20u)
+                 << (direct_parallax_mode ? direct_geometry_contract_schema : 22u)
                  << ",\n"
                  << "  \"model\": " << json_string(model.name) << ",\n"
                  << "  \"depth_step\": \"current-once\",\n"

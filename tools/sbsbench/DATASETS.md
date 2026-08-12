@@ -24,7 +24,7 @@ iteration and contains real/curated content plus deterministic failure-mode prob
 | `structureless_white_history_bridge` | Saturated-white version of the structureless bridge |
 | `subtitle_cjk_dense` | Dense, outlined CJK burned-in subtitles over moving imagery |
 | `subtitle_bilingual_tall_stack` | Unusually tall four-line CJK/English subtitle stacks |
-| `subtitle_top_bottom_disjoint` | Simultaneous disjoint top-note and bottom-dialogue regions |
+| `subtitle_top_bottom_disjoint` | Simultaneous disjoint top-note and bottom-dialogue regions for authority-separation tests |
 | `subtitle_cjk_highres_transitions` | 1440p thin CJK strokes plus subtitle transitions and a true scene cut |
 
 The normative pulse schedule and detector expectations are maintained in
@@ -43,6 +43,19 @@ python tools/sbsbench/make_synth_clips.py subtitle_cjk_dense `
   subtitle_bilingual_tall_stack subtitle_top_bottom_disjoint `
   subtitle_cjk_highres_transitions
 ```
+
+These four subtitle clips are deterministic synthetic contract counterexamples. They pin geometry,
+transition, replay, and no-op invariants; they are not a sample of real-video subtitle or negative
+distributions. The 95% glyph-visibility floor is a frozen hard quality contract. The unchanged 98%
+soft-plane value is a synthetic qualification reference: falling below it emits a warning but does
+not become a universal release failure or a fitted classifier threshold. A production semantic
+release additionally requires bottom-ROI-scoped continuous real-video positive subtitles, a
+separate real-video negative holdout, and a live signed-authority/effect trace gate.
+
+The top note in `subtitle_top_bottom_disjoint` is deliberately outside the selected subtitle
+authority used by the existing qualification fixture and must remain an exact no-op. The current all-authored-band
+soft-plane diagnostic remains useful as a stress warning, but real positive qualification is
+pending until an ROI-scoped real-video corpus and policy are authenticated.
 
 `subtitle_cjk_highres_transitions` is a lossless `2560x1440` probe with authored three-pixel CJK
 strokes and a two-pixel dark outline. Scaling it to the `770x434` detector canvas is approximately
@@ -155,19 +168,31 @@ disparity truth; the five legacy `c*` clips remain no-reference.
 source frame: background is `0` and an authored subtitle region is `255`. Every source frame in a
 clip that declares `required_gt_subtitle_region: true` must have one same-sized mask with the same
 frame ID; missing, extra, differently sized, or non-`L`/non-binary sidecars are a dataset error.
-The same metadata must explicitly declare `subtitle_target_disparity_pct`. It is signed
-`x_right - x_left` disparity in the evaluator's reference-aspect image percentage and must be finite
-within `[-3.5, 3.0]`; all current subtitle fixtures author the screen plane as `0.0`.
 
 The mask is the union of one or more **loose rectangles around complete visual subtitle blocks**.
-It is deliberately not a glyph segmentation: nearby background padding belongs to the region so a
-future zero-parallax consumer does not put a disparity boundary around every stroke. Simultaneous
+It is deliberately not a glyph segmentation: nearby background padding belongs to the legacy
+region contract and to binocular-support scoring. Simultaneous
 top and bottom subtitles remain separate rectangles in the same binary mask. This sidecar records
 the unfeathered authored support; any feathering policy belongs to the consuming renderer rather
 than dataset truth. An empty mask represents a frame without visible subtitles. Masks retain full
 source-frame resolution, matching the runtime plan to detect burned-in pixels before inference
-downscaling. Their pixels, requirement flag, authored target disparity, and any strict
+downscaling. Their pixels, requirement flag, and any strict
 `subtitle_transition_contract` schedule are part of clip identity.
+
+### Subtitle tight glyph mask
+
+`required_gt_subtitle_tight_mask: true` requires
+`gt_subtitle_overlay_mask/frame_*.png` for every source frame without requiring a subtitle-free
+movie plate. Each sidecar is a source-sized 8-bit `L` PNG containing only `0` and `255`; its frame
+IDs must exactly equal the source IDs. `255` covers the authored glyph and outline pixels, must be
+wholly contained by the same-frame loose subtitle region, and must have the same empty/non-empty
+state as that loose region. The flag itself requires `required_gt_subtitle_region: true`.
+
+All three standard subtitle fixtures declare this contract. Their masks are produced directly from
+the deterministic authored glyph and outline layers, so whitespace and gaps between characters are
+not mislabeled as subtitle pixels. The mask bytes and requirement flag are part of clip identity.
+When the tight-mask requirement applies, constant-plane, variance, and sharpness metrics must use
+this sidecar and may not fall back to the loose rectangle.
 
 ### Subtitle sanitizer oracle
 
@@ -184,6 +209,16 @@ per-pixel RGB difference support between the rendered source and subtitle-free o
 subtitle states therefore have an all-zero tight mask and a source frame identical to the oracle;
 non-empty states have non-empty tight support. The requirement currently applies only to
 `subtitle_cjk_highres_transitions` and requires its strict transition contract.
+
+When either the tight-mask requirement or sanitizer oracle authenticates this mask, constant-plane,
+variance, and sharpness metrics score only its glyph-plus-outline pixels. Whitespace and gaps between
+characters therefore remain ordinary scene geometry and do not vote for plane constancy. Legacy
+fixtures declaring neither authority retain loose-region scoring but are not tight glyph-plane
+evidence. No fixture authors a target disparity:
+the runtime selects a frame-local plane from the post-limiter field at the deterministic primary
+loose-rectangle center. Evaluation reports fitted-plane residual and target-free absolute magnitude
+as diagnostics. The per-band five-eye-pixel score uses the frozen 98% synthetic qualification
+reference described above; it is not a release hard gate.
 
 Every declared appearance, subtitle-only replacement, and disappearance is rechecked on the
 subtitle-free oracle after excluding the union of the previous and current tight masks. At most 5%

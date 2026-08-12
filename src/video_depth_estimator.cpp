@@ -81,6 +81,7 @@ static void set_model_prepare_status(const std::string &engine_name, models::eng
 // out of memory and the device was removed. Pooling caps live contexts at peak concurrency.
 static std::mutex g_trt_mutex;
 static std::condition_variable g_trt_context_available;
+static std::mutex g_tensorrt_compile_mutex;
 // One active stream normally needs one context; four permits bounded encoder-transition and
 // failed-warmup recovery without letting repeated rebuilds consume VRAM without bound.
 static constexpr std::size_t kMaxContextsPerEngine = 4;
@@ -409,6 +410,56 @@ static bool validate_engine_io_locked(nvinfer1::ICudaEngine *engine, engine_slot
   return slot.io_compatible;
 }
 
+// Validate the fixed PP-OCRv6 tiny boundary without calling any TensorRT method that returns
+// Dims by value (unsafe across the MinGW/MSVC ABI boundary on Windows).
+static bool validate_ocr_engine_io_locked(nvinfer1::ICudaEngine *engine, engine_slot &slot) {
+  if (!engine) {
+    return false;
+  }
+  if (slot.io_validated) {
+    return slot.io_compatible;
+  }
+
+  slot.io_validated = true;
+  bool have_in = false;
+  bool have_out = false;
+  bool input_fp32 = false;
+  bool output_fp32 = false;
+  bool input_mode_ok = false;
+  bool output_mode_ok = false;
+  for (int i = 0; i < engine->getNbIOTensors(); ++i) {
+    const char *name = engine->getIOTensorName(i);
+    if (!name) {
+      BOOST_LOG(error) << "OCR TensorRT engine returned a null I/O tensor name.";
+      continue;
+    }
+    const auto type = engine->getTensorDataType(name);
+    const bool is_input =
+      engine->getTensorIOMode(name) == nvinfer1::TensorIOMode::kINPUT;
+    BOOST_LOG(info) << "OCR engine tensor '" << name << "' "
+                    << (is_input ? "(input)" : "(output)")
+                    << " dtype=" << tensor_dtype_name(type);
+    if (std::string_view(name) == "x") {
+      have_in = true;
+      input_fp32 = type == nvinfer1::DataType::kFLOAT;
+      input_mode_ok = is_input;
+    } else if (std::string_view(name) == "fetch_name_0") {
+      have_out = true;
+      output_fp32 = type == nvinfer1::DataType::kFLOAT;
+      output_mode_ok = !is_input;
+    }
+  }
+  slot.io_compatible = engine->getNbIOTensors() == 2 && have_in && have_out &&
+                       input_fp32 && output_fp32 &&
+                       input_mode_ok && output_mode_ok;
+  if (!slot.io_compatible) {
+    BOOST_LOG(error)
+      << "OCR engine must expose FP32 input 'x' and FP32 output 'fetch_name_0'; "
+         "detector conditioning will remain flat.";
+  }
+  return slot.io_compatible;
+}
+
 // Detach a resident engine that deserialized successfully but violates the fixed model I/O
 // contract, so rebuilding its on-disk plan can actually replace it. TensorRT objects cannot be
 // destroyed safely across the MinGW/MSVC ABI boundary; pooled contexts and the engine are
@@ -504,6 +555,62 @@ static bool warmup_execution_context(
   return synchronized;
 }
 
+static bool warmup_ocr_execution_context(
+  cuda_driver_api &cuda,
+  CUcontext cuda_ctx,
+  nvinfer1::IExecutionContext *exec_context
+) {
+  if (!exec_context || !cuda.is_valid()) {
+    return false;
+  }
+  if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
+    return false;
+  }
+
+  CUstream stream = nullptr;
+  if (cuda.cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING) != CUDA_SUCCESS || !stream) {
+    return false;
+  }
+  auto destroy_stream = util::fail_guard([&]() {
+    cuda.cuStreamDestroy(stream);
+  });
+
+  constexpr int h = models::ocr_engine_height;
+  constexpr int w = models::ocr_engine_width;
+  constexpr std::size_t pixels = static_cast<std::size_t>(h) * w;
+  CUdeviceptr d_in = 0;
+  CUdeviceptr d_out = 0;
+  if (cuda.cuMemAlloc(&d_in, 3u * pixels * sizeof(float)) != CUDA_SUCCESS) {
+    return false;
+  }
+  auto free_input = util::fail_guard([&]() {
+    cuda.cuMemFree(d_in);
+  });
+  if (cuda.cuMemAlloc(&d_out, pixels * sizeof(float)) != CUDA_SUCCESS) {
+    return false;
+  }
+  auto free_output = util::fail_guard([&]() {
+    cuda.cuMemFree(d_out);
+  });
+
+  const auto input_dims = make_input_dims(h, w);
+  const bool bound = exec_context->setInputShape("x", input_dims) &&
+                     exec_context->setTensorAddress("x", reinterpret_cast<void *>(d_in)) &&
+                     exec_context->setTensorAddress(
+                       "fetch_name_0", reinterpret_cast<void *>(d_out));
+  bool enqueued = false;
+  if (bound) {
+    std::lock_guard<std::mutex> lock(g_trt_mutex);
+    enqueued = exec_context->enqueueV3(stream);
+  }
+  const bool synchronized = enqueued && cuda.cuStreamSynchronize &&
+                            cuda.cuStreamSynchronize(stream) == CUDA_SUCCESS;
+  BOOST_LOG(info) << "PP-OCRv6 tiny startup warmup "
+                  << (synchronized ? "complete" : "failed") << " (" << w << 'x' << h
+                  << ").";
+  return synchronized;
+}
+
 namespace models {
 
   bool parallax_v2_result_is_authenticated(const estimate_result &result) {
@@ -511,22 +618,10 @@ namespace models {
         !result.parallax_v2_producer_active || !result.shadow_candidate_parallax ||
         !result.shadow_ownership_refined_parallax ||
         !result.shadow_vertical_majorant || !result.shadow_vertical_conditioned ||
-        !result.shadow_final_parallax ||
+        !result.shadow_base_final_parallax || !result.shadow_final_parallax ||
         !result.shadow_state || !result.shadow_frame_stats ||
         !result.raw_model_provenance || !result.parallax_v2_shader_provenance ||
         result.raw_width <= 0 || result.raw_height <= 0) {
-      return false;
-    }
-
-    const bool has_overlay_plan = static_cast<bool>(result.overlay_plan);
-    if (has_overlay_plan != result.overlay_zero_plane_applied) {
-      return false;
-    }
-    if (has_overlay_plan &&
-        (!result.overlay_plan->has_zero_plane_geometry() ||
-         result.overlay_plan->source_frame_id != result.completed_frame_id ||
-         result.overlay_plan->input_region != result.input_region ||
-         result.overlay_plan->color_space != result.color_space)) {
       return false;
     }
 
@@ -550,6 +645,11 @@ namespace models {
           input_region.height()
         ) ||
         full_source_shape != result_shape || analysis_shape != result_shape) {
+      return false;
+    }
+    const bool subtitle_shape = result.raw_width == 770 && result.raw_height == 434;
+    if ((subtitle_shape && (!result.ocr_box_record || !result.subtitle_locator_state)) ||
+        (!subtitle_shape && (result.ocr_box_record || result.subtitle_locator_state))) {
       return false;
     }
 
@@ -600,19 +700,19 @@ namespace models {
 
   static bool publish_active_engine_manifest(
     const std::filesystem::path &assets_dir,
-    const config::depth_model_info &model,
+    const std::string_view model_name,
     const engine_artifact &artifact
   ) {
     if (artifact.name.empty() || artifact.source_sha256.empty()) {
       return false;
     }
 
-    const auto path = assets_dir / (model.name + ".active-engine.json");
+    const auto path = assets_dir / (std::string(model_name) + ".active-engine.json");
     auto temporary_path = path;
     temporary_path += ".tmp";
     const nlohmann::json manifest {
       {"schema", 1},
-      {"model", model.name},
+      {"model", std::string(model_name)},
       {"engine", artifact.name},
       {"onnx_sha256", artifact.source_sha256},
     };
@@ -655,8 +755,7 @@ namespace models {
     CUdevice cuda_device,
     engine_artifact &artifact
   ) {
-    static std::mutex compile_mutex;
-    std::lock_guard<std::mutex> lock(compile_mutex);
+    std::lock_guard<std::mutex> lock(g_tensorrt_compile_mutex);
 
     artifact.source_path = ensure_onnx_available(assets_dir, model.name, model.url);
     if (artifact.source_path.empty()) {
@@ -800,6 +899,185 @@ namespace models {
       BOOST_LOG(error) << "Engine build failed.";
     }
     return false;
+  }
+
+  static bool ensure_ocr_tensorrt_engine_for_device(
+    const std::filesystem::path &assets_dir,
+    cuda_driver_api &cuda,
+    CUdevice cuda_device,
+    engine_artifact &artifact
+  ) {
+    std::lock_guard<std::mutex> lock(g_tensorrt_compile_mutex);
+
+    // The shared downloader proves HTTP/file promotion, not this detector's pinned identity.
+    // A readable but wrong response must not become a permanent final-path cache hit: remove only
+    // that exact fixed model path, redownload once, and authenticate again before engine lookup.
+    for (unsigned int source_attempt = 0u; source_attempt < 2u; ++source_attempt) {
+      artifact.source_path = ensure_onnx_available(
+        assets_dir,
+        ocr_model_name,
+        ocr_model_url
+      );
+      if (artifact.source_path.empty()) {
+        BOOST_LOG(warning)
+          << "PP-OCRv6 tiny ONNX source is unavailable; subtitle conditioning stays flat.";
+        return false;
+      }
+      artifact.source_sha256 = file_sha256_hex(artifact.source_path);
+      if (artifact.source_sha256 == ocr_model_onnx_sha256) {
+        break;
+      }
+      if (artifact.source_sha256.empty()) {
+        BOOST_LOG(error)
+          << "PP-OCRv6 tiny ONNX source is unreadable; refusing to remove an unverified path.";
+        return false;
+      }
+
+      BOOST_LOG(error)
+        << "PP-OCRv6 tiny ONNX SHA-256 mismatch (expected " << ocr_model_onnx_sha256
+        << ", got " << artifact.source_sha256 << "); removing untrusted detector bytes"
+        << (source_attempt == 0u ? " and retrying once." : ".");
+      std::error_code remove_error;
+      const bool removed = std::filesystem::remove(artifact.source_path, remove_error);
+      if (!removed || remove_error) {
+        BOOST_LOG(error)
+          << "Could not remove mismatched PP-OCRv6 tiny ONNX source: "
+          << (remove_error ? remove_error.message() : "path was not a removable file");
+        return false;
+      }
+      artifact.source_path.clear();
+      artifact.source_sha256.clear();
+    }
+    if (artifact.source_sha256 != ocr_model_onnx_sha256) {
+      // The second mismatched download was removed above. Remain flat until a later startup can
+      // obtain the authenticated bytes; never build an engine from the rejected response.
+      return false;
+    }
+    artifact.name = ocr_engine_filename(
+      engine_compatibility_tag(cuda, cuda_device) + "-onnx" + artifact.source_sha256
+    );
+    artifact.engine_path = assets_dir / artifact.name;
+
+    std::error_code existing_ec;
+    if (std::filesystem::is_regular_file(artifact.engine_path, existing_ec)) {
+      BOOST_LOG(info) << "PP-OCRv6 tiny TensorRT engine cache hit: "
+                      << artifact.engine_path.filename();
+      return true;
+    }
+
+    if (CUcontext ctx = primary_context(cuda, cuda_device)) {
+      if (cuda.cuCtxSetCurrent(ctx) != CUDA_SUCCESS) {
+        BOOST_LOG(error) << "Could not select the configured CUDA device for OCR compilation.";
+        return false;
+      }
+    } else {
+      BOOST_LOG(error) << "Could not retain the configured CUDA device for OCR compilation.";
+      return false;
+    }
+
+    initLibNvInferPlugins(&gLogger, "");
+    auto builder = TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(gLogger));
+    if (!builder) {
+      return false;
+    }
+#if NV_TENSORRT_MAJOR < 11
+    // TensorRT 10 still permits weakly typed networks, so make the production type policy
+    // explicit. TensorRT 11 makes every network strongly typed and deprecates/ignores this flag.
+    constexpr std::uint32_t ocr_network_creation_flags =
+      1u << static_cast<std::uint32_t>(
+        nvinfer1::NetworkDefinitionCreationFlag::kSTRONGLY_TYPED);
+    static_assert(ocr_network_creation_flags != 0u);
+#else
+    constexpr std::uint32_t ocr_network_creation_flags = 0u;
+    static_assert(ocr_network_creation_flags == 0u);
+#endif
+    auto network = TrtUniquePtr<nvinfer1::INetworkDefinition>(
+      builder->createNetworkV2(ocr_network_creation_flags));
+    auto config = TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
+    if (!network || !config) {
+      return false;
+    }
+    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1ULL << 30);
+    config->setBuilderOptimizationLevel(ocr_engine_builder_level);
+    // TF32 is the explicit acceleration policy for this authenticated FP32 graph. It is enabled
+    // by default in TensorRT, but pinning the flag makes the recipe auditable across TRT10/11.
+    config->setFlag(nvinfer1::BuilderFlag::kTF32);
+
+    auto parser = TrtUniquePtr<nvonnxparser::IParser>(
+      nvonnxparser::createParser(*network, gLogger));
+    if (!parser || !parser->parseFromFile(
+          artifact.source_path.string().c_str(),
+          static_cast<int>(nvinfer1::ILogger::Severity::kWARNING))) {
+      BOOST_LOG(error) << "Failed to parse authenticated PP-OCRv6 tiny ONNX.";
+      return false;
+    }
+
+    auto *input = network->getNbInputs() == 1 ? network->getInput(0) : nullptr;
+    if (!input || !input->getName() || std::string_view(input->getName()) != "x" ||
+        input->getType() != nvinfer1::DataType::kFLOAT) {
+      BOOST_LOG(error)
+        << "PP-OCRv6 tiny input contract must be exactly one FP32 tensor named 'x'.";
+      return false;
+    }
+    auto profile = builder->createOptimizationProfile();
+    const auto fixed_dims = make_input_dims(ocr_engine_height, ocr_engine_width);
+    const bool profile_ok = profile &&
+      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMIN, fixed_dims) &&
+      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kOPT, fixed_dims) &&
+      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX, fixed_dims);
+    if (!profile_ok || config->addOptimizationProfile(profile) < 0) {
+      BOOST_LOG(error) << "TensorRT rejected the fixed 960x160 OCR profile.";
+      return false;
+    }
+
+    nvinfer1::ITensor *output = nullptr;
+    for (int i = 0; i < network->getNbOutputs(); ++i) {
+      auto *candidate = network->getOutput(i);
+      if (candidate && candidate->getName() &&
+          std::string_view(candidate->getName()) == "fetch_name_0") {
+        output = candidate;
+      }
+    }
+    if (!output || network->getNbOutputs() != 1 ||
+        output->getType() != nvinfer1::DataType::kFLOAT) {
+      BOOST_LOG(error)
+        << "PP-OCRv6 tiny output contract must be exactly one FP32 tensor named "
+           "'fetch_name_0'.";
+      return false;
+    }
+
+    BOOST_LOG(info)
+      << "Building authenticated PP-OCRv6 tiny TensorRT engine (strongly typed FP32 + TF32, "
+         "fixed 960x160).";
+    auto serialized = TrtUniquePtr<nvinfer1::IHostMemory>(
+      builder->buildSerializedNetwork(*network, *config));
+    if (!serialized) {
+      BOOST_LOG(error) << "PP-OCRv6 tiny TensorRT engine build failed.";
+      return false;
+    }
+
+    auto part_path = artifact.engine_path;
+    part_path += ".part";
+    std::error_code ec;
+    std::filesystem::remove(part_path, ec);
+    std::ofstream stream(part_path, std::ios::binary | std::ios::trunc);
+    if (!stream) {
+      return false;
+    }
+    stream.write(static_cast<const char *>(serialized->data()), serialized->size());
+    stream.close();
+    if (!stream) {
+      std::filesystem::remove(part_path, ec);
+      return false;
+    }
+    std::filesystem::rename(part_path, artifact.engine_path, ec);
+    if (ec) {
+      BOOST_LOG(error) << "Failed to publish OCR TensorRT engine: " << ec.message();
+      std::filesystem::remove(part_path, ec);
+      return false;
+    }
+    BOOST_LOG(info) << "Saved PP-OCRv6 tiny engine atomically to " << artifact.engine_path;
+    return true;
   }
 
   engine_build_status tensorrt_model_prepare_status(const config::depth_model_info &model) {
@@ -969,7 +1247,7 @@ namespace models {
       BOOST_LOG(error) << "Startup depth-model preparation produced no reusable warmed context.";
       return false;
     }
-    if (!publish_active_engine_manifest(assets_dir, model, artifact)) {
+    if (!publish_active_engine_manifest(assets_dir, model.name, artifact)) {
       // Manifest publication is an evaluator/preflight contract, not a reason to discard a model
       // that is already resident and proven usable for production streaming.
       BOOST_LOG(error) << "Could not publish the active TensorRT engine manifest for model '"
@@ -981,7 +1259,178 @@ namespace models {
     return true;
   }
 
+  bool prepare_ocr_tensorrt_model(
+    const std::filesystem::path &assets_dir,
+    const std::string &adapter_name
+  ) {
+    auto &cuda = cuda_driver_api::get();
+    if (!cuda.is_valid() || !ensure_cuda_initialized(cuda)) {
+      BOOST_LOG(warning) << "CUDA is unavailable; PP-OCRv6 tiny remains fail-flat.";
+      return false;
+    }
+    CUdevice cuda_device = 0;
+    if (!cuda_device_for_configured_adapter(cuda, adapter_name, cuda_device)) {
+      BOOST_LOG(warning) << "Could not resolve the configured adapter for PP-OCRv6 tiny.";
+      return false;
+    }
+    CUcontext cuda_ctx = primary_context(cuda, cuda_device);
+    if (!cuda_ctx || cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
+      return false;
+    }
+
+    engine_artifact artifact;
+    if (!ensure_ocr_tensorrt_engine_for_device(
+          assets_dir, cuda, cuda_device, artifact)) {
+      return false;
+    }
+    auto engine_path = artifact.engine_path;
+    auto engine_key = std::to_string(cuda_device) + ":" + artifact.name;
+    nvinfer1::ICudaEngine *engine = nullptr;
+    nvinfer1::IExecutionContext *exec_context = nullptr;
+    bool pooled = false;
+    bool create_context = false;
+    bool resident_warmed_context = false;
+    bool engine_repair_allowed = true;
+    {
+      std::lock_guard<std::mutex> lock(g_trt_mutex);
+      engine = acquire_engine_locked(
+        engine_key, engine_path, exec_context, pooled);
+      auto &slot = g_engines[engine_key];
+      if (!validate_ocr_engine_io_locked(engine, slot)) {
+        if (exec_context) {
+          slot.context_pool.push_back(exec_context);
+          exec_context = nullptr;
+          pooled = false;
+          g_trt_context_available.notify_all();
+        }
+        engine_repair_allowed = detach_incompatible_engine_locked(engine_key);
+        engine = nullptr;
+      }
+    }
+
+    // A regular cache file may still be truncated, stale across a runtime upgrade, or expose a
+    // foreign tensor contract. Replace it only when no live context owns its resident engine,
+    // rebuild atomically from the authenticated ONNX, and retry exactly once.
+    if (!engine) {
+      if (!engine_repair_allowed) {
+        BOOST_LOG(error)
+          << "Cached PP-OCRv6 tiny plan is incompatible but still owned by an active session; "
+             "refusing unsafe replacement.";
+        return false;
+      }
+      {
+        std::lock_guard<std::mutex> lock(g_trt_mutex);
+        auto found = g_engines.find(engine_key);
+        if (found != g_engines.end() && !found->second.engine &&
+            allocated_context_count(found->second) == 0u &&
+            found->second.context_pool.empty()) {
+          g_engines.erase(found);
+        }
+      }
+      std::error_code remove_error;
+      std::filesystem::remove(engine_path, remove_error);
+      BOOST_LOG(warning)
+        << "Cached PP-OCRv6 tiny plan is unreadable or incompatible; rebuilding "
+        << engine_path.filename() << '.';
+      if (!ensure_ocr_tensorrt_engine_for_device(
+            assets_dir, cuda, cuda_device, artifact)) {
+        return false;
+      }
+      engine_path = artifact.engine_path;
+      engine_key = std::to_string(cuda_device) + ":" + artifact.name;
+      {
+        std::lock_guard<std::mutex> lock(g_trt_mutex);
+        engine = acquire_engine_locked(
+          engine_key, engine_path, exec_context, pooled);
+        auto &slot = g_engines[engine_key];
+        if (!validate_ocr_engine_io_locked(engine, slot)) {
+          if (exec_context) {
+            slot.context_pool.push_back(exec_context);
+            exec_context = nullptr;
+            pooled = false;
+            g_trt_context_available.notify_all();
+          }
+          detach_incompatible_engine_locked(engine_key);
+          BOOST_LOG(error)
+            << "Rebuilt PP-OCRv6 tiny engine still violates the fixed FP32 I/O contract.";
+          return false;
+        }
+      }
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(g_trt_mutex);
+      auto &slot = g_engines[engine_key];
+      if (!exec_context) {
+        if (allocated_context_count(slot) >= kMaxContextsPerEngine) {
+          resident_warmed_context = slot.warmed_context_count != 0u;
+        } else {
+          ++slot.context_count;
+          create_context = true;
+        }
+      }
+    }
+
+    if (create_context) {
+      exec_context = engine->createExecutionContext();
+      if (!exec_context) {
+        std::lock_guard<std::mutex> lock(g_trt_mutex);
+        --g_engines[engine_key].context_count;
+        g_trt_context_available.notify_all();
+        return false;
+      }
+      if (!warmup_ocr_execution_context(cuda, cuda_ctx, exec_context)) {
+        std::lock_guard<std::mutex> lock(g_trt_mutex);
+        quarantine_execution_context_locked(engine_key, exec_context, false);
+        return false;
+      }
+      std::lock_guard<std::mutex> lock(g_trt_mutex);
+      mark_execution_context_warmed_locked(engine_key);
+    }
+    if (exec_context) {
+      std::lock_guard<std::mutex> lock(g_trt_mutex);
+      g_engines[engine_key].context_pool.push_back(exec_context);
+      g_trt_context_available.notify_all();
+    }
+    if (!exec_context && !resident_warmed_context) {
+      return false;
+    }
+    BOOST_LOG(info)
+      << "Authenticated PP-OCRv6 tiny is resident and ready for isolated live contexts.";
+    if (!publish_active_engine_manifest(assets_dir, ocr_model_name, artifact)) {
+      BOOST_LOG(warning) << "Could not publish the active PP-OCRv6 tiny engine manifest.";
+    }
+    return true;
+  }
+
   struct video_depth_estimator::impl {
+    static constexpr std::uint32_t ocr_grid_width = ocr_engine_width / 8;
+    static constexpr std::uint32_t ocr_grid_height = ocr_engine_height;
+    static constexpr std::uint32_t ocr_cell_words = 8;
+    static constexpr std::uint32_t ocr_cell_stats_word_count =
+      ocr_grid_width * ocr_grid_height * ocr_cell_words;
+    static constexpr std::uint32_t ocr_box_record_word_count =
+      depth_coordinate_v2::subtitle_ocr_record_word_count;
+    static constexpr std::uint32_t ocr_box_record_schema =
+      depth_coordinate_v2::subtitle_ocr_record_schema;
+    static constexpr std::uint32_t ocr_box_record_tag =
+      depth_coordinate_v2::subtitle_ocr_record_tag;
+    static constexpr std::uint32_t subtitle_locator_state_word_count =
+      depth_coordinate_v2::subtitle_locator_state_word_count;
+    static constexpr std::uint32_t subtitle_field_width =
+      depth_coordinate_v2::subtitle_ocr_field_width;
+    static constexpr std::uint32_t subtitle_field_height =
+      depth_coordinate_v2::subtitle_ocr_field_height;
+    static constexpr std::uint32_t subtitle_roi_top =
+      depth_coordinate_v2::subtitle_ocr_roi_top;
+    static constexpr std::uint32_t subtitle_roi_bottom =
+      depth_coordinate_v2::subtitle_ocr_roi_bottom;
+
+    static_assert(ocr_grid_width * 8u ==
+                  depth_coordinate_v2::subtitle_ocr_output_width);
+    static_assert(ocr_grid_height ==
+                  depth_coordinate_v2::subtitle_ocr_output_height);
+
     Microsoft::WRL::ComPtr<ID3D11Device> device;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
     const std::filesystem::path shader_root;
@@ -993,6 +1442,15 @@ namespace models {
     CUstream cu_stream = nullptr;
     CUdevice cuda_device = -1;
     std::string engine_key;
+    // PP-OCR owns a distinct mutable TensorRT context. It shares only the estimator's bounded
+    // CUDA stream, so depth and OCR complete as one exact-frame unit without concurrent bindings.
+    nvinfer1::ICudaEngine *ocr_engine = nullptr;
+    nvinfer1::IExecutionContext *ocr_exec_context = nullptr;
+    std::string ocr_engine_key;
+    bool ocr_context_pooled = false;
+    bool ocr_context_warmed = false;
+    bool ocr_context_poisoned = false;
+    bool ocr_available = false;
 
     float ema_alpha;
     float ema_edge_change;
@@ -1677,10 +2135,10 @@ namespace models {
     int trt_bound_height = 0;
     CUdeviceptr trt_bound_input = 0;
     CUdeviceptr trt_bound_output = 0;
+    CUdeviceptr ocr_bound_input = 0;
+    CUdeviceptr ocr_bound_output = 0;
 
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> rgb_to_nchw_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_overlay_sanitize_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_overlay_exclusion_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_ema_motion_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_minmax_cs;
@@ -1697,10 +2155,16 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_coordinate_diagnostic_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_vertical_limit_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_limit_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader>
-      depth_coordinate_v2_overlay_zero_plane_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> ocr_preprocess_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> ocr_box_cells_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> ocr_box_resolve_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_locator_resolve_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_condition_cs;
     Microsoft::WRL::ComPtr<ID3D11Buffer> cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_cbuffer;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_preprocess_cbuffer;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_resolve_cbuffer;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> subtitle_locator_cbuffer;
 
     Microsoft::WRL::ComPtr<ID3D11Buffer> tensor_in_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_in_uav;
@@ -1714,15 +2178,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> previous_appearance_ordinal_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> previous_appearance_ordinal_srv;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> previous_appearance_ordinal_uav;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> tensor_analysis_exclusion_tex;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_analysis_exclusion_srv;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_analysis_exclusion_uav;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> previous_tensor_analysis_exclusion_tex;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>
-      previous_tensor_analysis_exclusion_srv;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>
-      previous_tensor_analysis_exclusion_uav;
-
     Microsoft::WRL::ComPtr<ID3D11Buffer> tensor_out_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_out_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> raw_snapshot_buf;
@@ -1796,35 +2251,36 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_coordinate_v2_final_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_final_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_final_srv;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D>
-      depth_coordinate_v2_overlay_conditioned_tex;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>
-      depth_coordinate_v2_overlay_conditioned_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>
-      depth_coordinate_v2_overlay_conditioned_srv;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_overlay_rects_buf;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>
-      depth_coordinate_v2_overlay_rects_srv;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_overlay_cbuffer;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> subtitle_conditioned_tex;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subtitle_conditioned_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_conditioned_srv;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> subtitle_locator_state_buf;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subtitle_locator_state_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_locator_state_srv;
     bool depth_coordinate_v2_coordinate_diagnostic_error_logged = false;
 
     CUgraphicsResource cuda_in_res = nullptr;
     CUgraphicsResource cuda_out_res = nullptr;
+    CUgraphicsResource cuda_ocr_in_res = nullptr;
+    CUgraphicsResource cuda_ocr_out_res = nullptr;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_input_buf;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> ocr_input_uav;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_output_buf;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_output_srv;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_cell_stats_buf;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> ocr_cell_stats_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_cell_stats_srv;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_box_record_buf;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> ocr_box_record_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_box_record_srv;
+    bool pending_ocr_submitted = false;
+    bool subtitle_conditioned_current = false;
+    bool ocr_shape_bound = false;
+    bool ocr_error_logged = false;
     // The accepted input is a private matched-frame texture. Retain its SRV until the exact
     // asynchronous raw-depth completion has run the full-resolution ownership pass; this adds no
     // color copy and keeps every RGB/depth lookup on the same D3D11 command stream.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> pending_source_srv;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> pending_overlay_mask_srv;
-    std::optional<host_sbs_overlay_plan_t> pending_overlay_plan;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> sanitized_source_tex;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sanitized_source_srv;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> sanitized_source_uav;
-    UINT sanitized_source_width = 0u;
-    UINT sanitized_source_height = 0u;
-    DXGI_FORMAT sanitized_source_format = DXGI_FORMAT_UNKNOWN;
-    bool overlay_resource_error_logged = false;
-    bool tensor_analysis_exclusion_may_be_nonzero = false;
-    bool tensor_analysis_exclusion_history_may_be_nonzero = false;
     input_color_space pending_color_space = input_color_space::srgb;
     depth_input_region_t pending_input_region {};
     depth_input_domain_tracker_t processed_input_domain;
@@ -1864,209 +2320,6 @@ namespace models {
       return requested;
     }
 
-    static DXGI_FORMAT overlay_sanitized_format(
-      ID3D11ShaderResourceView *input_srv
-    ) noexcept {
-      if (!input_srv) {
-        return DXGI_FORMAT_UNKNOWN;
-      }
-      D3D11_SHADER_RESOURCE_VIEW_DESC view_desc {};
-      input_srv->GetDesc(&view_desc);
-      switch (view_desc.Format) {
-        case DXGI_FORMAT_B8G8R8A8_UNORM:
-        case DXGI_FORMAT_R8G8B8A8_UNORM:
-          // A shader load exposes logical RGBA values for either source layout. Storing those
-          // values into RGBA8 preserves every unmasked 8-bit channel exactly while providing the
-          // typed-UAV support that BGRA8 itself lacks on D3D11.
-          return DXGI_FORMAT_R8G8B8A8_UNORM;
-        case DXGI_FORMAT_R16G16B16A16_FLOAT:
-          return DXGI_FORMAT_R16G16B16A16_FLOAT;
-        default:
-          return DXGI_FORMAT_UNKNOWN;
-      }
-    }
-
-    bool overlay_mask_matches_frame(
-      const host_sbs_overlay_plan_t *overlay_plan,
-      ID3D11ShaderResourceView *overlay_mask,
-      const std::uint64_t mask_generation,
-      const std::uint64_t frame_id,
-      const depth_input_region_t &input_region,
-      const input_color_space color_space,
-      const D3D11_TEXTURE2D_DESC &input_desc
-    ) const noexcept {
-      if (!overlay_plan || !overlay_mask ||
-          !overlay_plan->has_zero_plane_geometry() ||
-          !overlay_plan->valid_for(frame_id, input_region, color_space) ||
-          mask_generation != overlay_plan->analysis_exclusion_generation ||
-          overlay_plan->analysis_width != input_desc.Width ||
-          overlay_plan->analysis_height != input_desc.Height) {
-        return false;
-      }
-
-      D3D11_SHADER_RESOURCE_VIEW_DESC mask_view_desc {};
-      overlay_mask->GetDesc(&mask_view_desc);
-      if (mask_view_desc.Format != DXGI_FORMAT_R8_UNORM ||
-          mask_view_desc.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D ||
-          mask_view_desc.Texture2D.MostDetailedMip != 0u ||
-          mask_view_desc.Texture2D.MipLevels != 1u) {
-        return false;
-      }
-
-      Microsoft::WRL::ComPtr<ID3D11Resource> mask_resource;
-      overlay_mask->GetResource(&mask_resource);
-      Microsoft::WRL::ComPtr<ID3D11Texture2D> mask_texture;
-      if (FAILED(mask_resource.As(&mask_texture)) || !mask_texture) {
-        return false;
-      }
-      D3D11_TEXTURE2D_DESC mask_desc {};
-      mask_texture->GetDesc(&mask_desc);
-      if (mask_desc.Width != input_desc.Width ||
-          mask_desc.Height != input_desc.Height ||
-          mask_desc.MipLevels != 1u || mask_desc.ArraySize != 1u ||
-          mask_desc.SampleDesc.Count != 1u ||
-          (mask_desc.Format != DXGI_FORMAT_R8_UNORM &&
-           mask_desc.Format != DXGI_FORMAT_R8_TYPELESS)) {
-        return false;
-      }
-
-      Microsoft::WRL::ComPtr<ID3D11Device> mask_device;
-      overlay_mask->GetDevice(&mask_device);
-      return mask_device.Get() == device.Get();
-    }
-
-    bool ensure_overlay_sanitized_source(
-      ID3D11ShaderResourceView *input_srv,
-      const D3D11_TEXTURE2D_DESC &input_desc
-    ) {
-      const auto format = overlay_sanitized_format(input_srv);
-      if (format == DXGI_FORMAT_UNKNOWN) {
-        return false;
-      }
-      if (sanitized_source_tex && sanitized_source_srv && sanitized_source_uav &&
-          sanitized_source_width == input_desc.Width &&
-          sanitized_source_height == input_desc.Height &&
-          sanitized_source_format == format) {
-        return true;
-      }
-
-      sanitized_source_tex.Reset();
-      sanitized_source_srv.Reset();
-      sanitized_source_uav.Reset();
-      sanitized_source_width = 0u;
-      sanitized_source_height = 0u;
-      sanitized_source_format = DXGI_FORMAT_UNKNOWN;
-
-      UINT format_support = 0u;
-      if (FAILED(device->CheckFormatSupport(format, &format_support)) ||
-          (format_support & D3D11_FORMAT_SUPPORT_SHADER_SAMPLE) == 0u ||
-          (format_support & D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW) == 0u) {
-        return false;
-      }
-
-      D3D11_TEXTURE2D_DESC desc {};
-      desc.Width = input_desc.Width;
-      desc.Height = input_desc.Height;
-      desc.MipLevels = 1u;
-      desc.ArraySize = 1u;
-      desc.Format = format;
-      desc.SampleDesc.Count = 1u;
-      desc.Usage = D3D11_USAGE_DEFAULT;
-      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-      const bool created =
-        SUCCEEDED(device->CreateTexture2D(
-          &desc, nullptr, sanitized_source_tex.ReleaseAndGetAddressOf())) &&
-        SUCCEEDED(device->CreateShaderResourceView(
-          sanitized_source_tex.Get(), nullptr,
-          sanitized_source_srv.ReleaseAndGetAddressOf())) &&
-        SUCCEEDED(device->CreateUnorderedAccessView(
-          sanitized_source_tex.Get(), nullptr,
-          sanitized_source_uav.ReleaseAndGetAddressOf()));
-      if (!created) {
-        sanitized_source_tex.Reset();
-        sanitized_source_srv.Reset();
-        sanitized_source_uav.Reset();
-        return false;
-      }
-      sanitized_source_width = input_desc.Width;
-      sanitized_source_height = input_desc.Height;
-      sanitized_source_format = format;
-      return true;
-    }
-
-    bool dispatch_overlay_analysis(
-      ID3D11ShaderResourceView *input_srv,
-      ID3D11ShaderResourceView *overlay_mask,
-      const D3D11_TEXTURE2D_DESC &input_desc
-    ) {
-      if (!depth_overlay_sanitize_cs || !depth_overlay_exclusion_cs ||
-          !overlay_zero_plane_resources_ready() ||
-          !tensor_analysis_exclusion_tex || !tensor_analysis_exclusion_srv ||
-          !tensor_analysis_exclusion_uav ||
-          !previous_tensor_analysis_exclusion_tex ||
-          !previous_tensor_analysis_exclusion_srv ||
-          !previous_tensor_analysis_exclusion_uav ||
-          !ensure_overlay_sanitized_source(input_srv, input_desc)) {
-        if (!overlay_resource_error_logged) {
-          BOOST_LOG(warning)
-            << "Host SBS overlay analysis resources are unavailable; using ordinary unmasked "
-               "V2 for affected frames.";
-          overlay_resource_error_logged = true;
-        }
-        return false;
-      }
-
-      ID3D11ShaderResourceView *source_srvs[2] = {
-        input_srv,
-        overlay_mask,
-      };
-      ID3D11UnorderedAccessView *sanitize_uavs[2] = {
-        sanitized_source_uav.Get(),
-        nullptr,
-      };
-      context->CSSetShader(depth_overlay_sanitize_cs.Get(), nullptr, 0);
-      context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-      context->CSSetShaderResources(0, 2, source_srvs);
-      context->CSSetUnorderedAccessViews(0, 2, sanitize_uavs, nullptr);
-      context->Dispatch(
-        (input_desc.Width + 15u) / 16u,
-        (input_desc.Height + 15u) / 16u,
-        1u
-      );
-
-      ID3D11ShaderResourceView *null_srvs[2] = {nullptr, nullptr};
-      ID3D11UnorderedAccessView *null_uavs[2] = {nullptr, nullptr};
-      context->CSSetShaderResources(0, 2, null_srvs);
-      context->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
-
-      ID3D11ShaderResourceView *mask_srvs[2] = {
-        nullptr,
-        overlay_mask,
-      };
-      ID3D11UnorderedAccessView *exclusion_uavs[2] = {
-        nullptr,
-        tensor_analysis_exclusion_uav.Get(),
-      };
-      context->CSSetShader(depth_overlay_exclusion_cs.Get(), nullptr, 0);
-      context->CSSetShaderResources(0, 2, mask_srvs);
-      context->CSSetUnorderedAccessViews(0, 2, exclusion_uavs, nullptr);
-      context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
-      context->CSSetShaderResources(0, 2, null_srvs);
-      context->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
-      tensor_analysis_exclusion_may_be_nonzero = true;
-      return true;
-    }
-
-    void clear_current_overlay_analysis() {
-      if (tensor_analysis_exclusion_may_be_nonzero &&
-          tensor_analysis_exclusion_uav) {
-        const UINT zero[4] = {0u, 0u, 0u, 0u};
-        context->ClearUnorderedAccessViewUint(
-          tensor_analysis_exclusion_uav.Get(), zero);
-      }
-      tensor_analysis_exclusion_may_be_nonzero = false;
-    }
-
     // Host V2 fails flat on any producer error. Only async execution/query failures quarantine the
     // TRT context; a rejected shape or interop mapping may still be safely reused by a later stream.
     void mark_terminal_failure(const bool poison_execution_context = false) {
@@ -2085,6 +2338,158 @@ namespace models {
         return false;
       }
       return SUCCEEDED(device->CreateComputeShader(bytecode->data(), bytecode->size(), nullptr, &out_cs));
+    }
+
+    bool initialize_ocr_context(
+      const std::filesystem::path &assets_dir,
+      cuda_driver_api &cuda
+    ) {
+      engine_artifact artifact;
+      if (!ensure_ocr_tensorrt_engine_for_device(
+            assets_dir, cuda, cuda_device, artifact)) {
+        return false;
+      }
+      auto engine_path = artifact.engine_path;
+      ocr_engine_key = std::to_string(cuda_device) + ":" + artifact.name;
+      bool engine_repair_allowed = true;
+      {
+        std::lock_guard<std::mutex> lock(g_trt_mutex);
+        ocr_engine = acquire_engine_locked(
+          ocr_engine_key,
+          engine_path,
+          ocr_exec_context,
+          ocr_context_pooled
+        );
+        auto &slot = g_engines[ocr_engine_key];
+        if (!validate_ocr_engine_io_locked(ocr_engine, slot)) {
+          if (ocr_exec_context) {
+            slot.context_pool.push_back(ocr_exec_context);
+            ocr_exec_context = nullptr;
+            ocr_context_pooled = false;
+            ocr_context_warmed = false;
+            g_trt_context_available.notify_all();
+          }
+          engine_repair_allowed =
+            detach_incompatible_engine_locked(ocr_engine_key);
+          ocr_engine = nullptr;
+        }
+        ocr_context_warmed = ocr_context_pooled;
+      }
+
+      if (!ocr_engine) {
+        // Startup normally repairs this cache first, but standalone evaluators can construct the
+        // estimator directly. Keep the same one-shot, no-live-owner repair at this second seam.
+        if (!engine_repair_allowed) {
+          BOOST_LOG(error)
+            << "PP-OCRv6 tiny cannot replace an incompatible TensorRT plan while another "
+               "session owns a context.";
+          return false;
+        }
+        {
+          std::lock_guard<std::mutex> lock(g_trt_mutex);
+          auto found = g_engines.find(ocr_engine_key);
+          if (found != g_engines.end() && !found->second.engine &&
+              allocated_context_count(found->second) == 0u &&
+              found->second.context_pool.empty()) {
+            g_engines.erase(found);
+          }
+        }
+        std::error_code remove_error;
+        std::filesystem::remove(engine_path, remove_error);
+        BOOST_LOG(warning)
+          << "Depth estimator found an unreadable or incompatible PP-OCRv6 tiny plan; "
+             "rebuilding "
+          << engine_path.filename() << '.';
+        if (!ensure_ocr_tensorrt_engine_for_device(
+              assets_dir, cuda, cuda_device, artifact)) {
+          return false;
+        }
+        engine_path = artifact.engine_path;
+        ocr_engine_key = std::to_string(cuda_device) + ":" + artifact.name;
+        {
+          std::lock_guard<std::mutex> lock(g_trt_mutex);
+          ocr_engine = acquire_engine_locked(
+            ocr_engine_key,
+            engine_path,
+            ocr_exec_context,
+            ocr_context_pooled
+          );
+          auto &slot = g_engines[ocr_engine_key];
+          if (!validate_ocr_engine_io_locked(ocr_engine, slot)) {
+            if (ocr_exec_context) {
+              slot.context_pool.push_back(ocr_exec_context);
+              ocr_exec_context = nullptr;
+              ocr_context_pooled = false;
+              ocr_context_warmed = false;
+              g_trt_context_available.notify_all();
+            }
+            detach_incompatible_engine_locked(ocr_engine_key);
+            ocr_engine = nullptr;
+          } else {
+            ocr_context_warmed = ocr_context_pooled;
+          }
+        }
+        if (!ocr_engine) {
+          BOOST_LOG(error)
+            << "Rebuilt PP-OCRv6 tiny plan is unreadable or violates the FP32 I/O contract.";
+          return false;
+        }
+      }
+
+      bool create_context = false;
+      if (!ocr_exec_context) {
+        std::unique_lock<std::mutex> lock(g_trt_mutex);
+        auto &slot = g_engines[ocr_engine_key];
+        if (slot.context_pool.empty() &&
+            allocated_context_count(slot) >= kMaxContextsPerEngine) {
+          g_trt_context_available.wait_for(
+            lock,
+            std::chrono::seconds(2),
+            [&slot]() {
+              return !slot.context_pool.empty() ||
+                     allocated_context_count(slot) < kMaxContextsPerEngine;
+            }
+          );
+        }
+        if (!slot.context_pool.empty()) {
+          ocr_exec_context = slot.context_pool.back();
+          slot.context_pool.pop_back();
+          ocr_context_pooled = true;
+          ocr_context_warmed = true;
+        } else if (allocated_context_count(slot) < kMaxContextsPerEngine) {
+          ++slot.context_count;
+          create_context = true;
+        }
+      }
+      if (create_context) {
+        ocr_exec_context = ocr_engine->createExecutionContext();
+        if (!ocr_exec_context) {
+          std::lock_guard<std::mutex> lock(g_trt_mutex);
+          --g_engines[ocr_engine_key].context_count;
+          g_trt_context_available.notify_all();
+          return false;
+        }
+        if (!warmup_ocr_execution_context(cuda, cuda_ctx, ocr_exec_context)) {
+          std::lock_guard<std::mutex> lock(g_trt_mutex);
+          quarantine_execution_context_locked(
+            ocr_engine_key, ocr_exec_context, false);
+          ocr_context_poisoned = true;
+          return false;
+        }
+        std::lock_guard<std::mutex> lock(g_trt_mutex);
+        mark_execution_context_warmed_locked(ocr_engine_key);
+        ocr_context_warmed = true;
+      }
+      if (!ocr_exec_context || !ocr_context_warmed) {
+        BOOST_LOG(warning)
+          << "No isolated warmed PP-OCRv6 tiny context is available; conditioning stays flat.";
+        return false;
+      }
+      if (!publish_active_engine_manifest(assets_dir, ocr_model_name, artifact)) {
+        BOOST_LOG(warning) << "Could not publish the active PP-OCRv6 tiny engine manifest.";
+      }
+      BOOST_LOG(info) << "PP-OCRv6 tiny live context acquired (fixed 960x160).";
+      return true;
     }
 
     impl(
@@ -2482,45 +2887,42 @@ namespace models {
           host_sbs_shader_cache::depth_coordinate_v2_vertical_limit,
           depth_coordinate_v2_vertical_limit_cs
         ) &&
-        create_shader(
-          producer_sources,
-          host_sbs_shader_cache::depth_coordinate_v2_limit,
-          depth_coordinate_v2_limit_cs
-        );
+         create_shader(
+           producer_sources,
+           host_sbs_shader_cache::depth_coordinate_v2_limit,
+           depth_coordinate_v2_limit_cs
+         ) &&
+         create_shader(
+           producer_sources,
+           host_sbs_shader_cache::host_sbs_ocr_preprocess,
+           ocr_preprocess_cs
+         ) &&
+         create_shader(
+           producer_sources,
+           host_sbs_shader_cache::host_sbs_ocr_cells,
+           ocr_box_cells_cs
+         ) &&
+         create_shader(
+           producer_sources,
+           host_sbs_shader_cache::host_sbs_ocr_resolve,
+           ocr_box_resolve_cs
+         ) &&
+         create_shader(
+           producer_sources,
+           host_sbs_shader_cache::host_sbs_subtitle_locator_resolve,
+           subtitle_locator_resolve_cs
+         ) &&
+         create_shader(
+           producer_sources,
+           host_sbs_shader_cache::host_sbs_subtitle_condition,
+           subtitle_condition_cs
+         );
       if (!producer_shaders_ok) {
         parallax_v2_producer_failed = true;
         BOOST_LOG(error)
           << "Host SBS V2 shader initialization or source-identity verification failed; "
              "Host SBS will fail flat.";
         return;
-      }
-
-      // Burned-in-overlay treatment is authenticated by the same complete source closure but is
-      // optional at runtime. Shader-object creation failure disables W2 only; ordinary unmasked
-      // V2 continues through the mandatory producer objects above.
-      const bool overlay_shaders_ok =
-        create_shader(
-          producer_sources,
-          host_sbs_shader_cache::depth_overlay_sanitize,
-          depth_overlay_sanitize_cs
-        ) &&
-        create_shader(
-          producer_sources,
-          host_sbs_shader_cache::depth_overlay_exclusion,
-          depth_overlay_exclusion_cs
-        ) &&
-        create_shader(
-          producer_sources,
-          host_sbs_shader_cache::depth_coordinate_v2_overlay_zero_plane,
-          depth_coordinate_v2_overlay_zero_plane_cs
-        );
-      if (!overlay_shaders_ok) {
-        depth_overlay_sanitize_cs.Reset();
-        depth_overlay_exclusion_cs.Reset();
-        depth_coordinate_v2_overlay_zero_plane_cs.Reset();
-        BOOST_LOG(warning)
-          << "Host SBS overlay-analysis shaders are unavailable; ordinary unmasked V2 remains "
-             "active.";
       }
 
       parallax_v2_producer_shaders_ready = true;
@@ -2542,10 +2944,16 @@ namespace models {
         << ", requested pop " << parallax_v2_requested_pop_strength
         << ", requested gain " << parallax_v2_requested_gain
         << "); completed fields remain separately authenticated before rendering.";
-      BOOST_LOG(info)
-        << "Host SBS V2 cut-only GPU analysis enabled; subject, adaptive-pop, and stretch "
-           "paths remain absent; authenticated burned-in-overlay treatment is available only "
-           "for exact-frame mask plans.";
+      BOOST_LOG(info) << "Host SBS V2 cut-only GPU analysis enabled.";
+
+      // OCR is optional. Its authenticated source, engine and mutable execution context are
+      // isolated from depth; an unavailable detector leaves the compact OCR6 record invalid and
+      // the SLR6 conditioner copies BaseField exactly.
+      ocr_available = initialize_ocr_context(assets_dir, cuda);
+      if (!ocr_available) {
+        BOOST_LOG(warning)
+          << "PP-OCRv6 tiny is unavailable for this estimator; subtitle conditioning is flat.";
+      }
       // Min/max reduction accumulator, pre-seeded to the reduction identity
       // {min = 0xFFFFFFFF, max = 0, valid = 0, eligible = 0}.
       // depth_minmax_ema_cs resets it after each frame.
@@ -2658,7 +3066,7 @@ namespace models {
         BOOST_LOG(error) << "Depth estimator failed: TensorRT execution-context warmup failed.";
         return;
       }
-      if (!publish_active_engine_manifest(assets_dir, model, artifact)) {
+      if (!publish_active_engine_manifest(assets_dir, model.name, artifact)) {
         BOOST_LOG(error) << "Could not publish the active TensorRT engine manifest for model '"
                          << model.name << "'.";
       }
@@ -2740,6 +3148,18 @@ namespace models {
             cleanup_execution_ok = false;
           }
         }
+        if (cuda_ocr_in_res) {
+          if (!cuda.cuGraphicsUnregisterResource ||
+              cuda.cuGraphicsUnregisterResource(cuda_ocr_in_res) != CUDA_SUCCESS) {
+            cleanup_execution_ok = false;
+          }
+        }
+        if (cuda_ocr_out_res) {
+          if (!cuda.cuGraphicsUnregisterResource ||
+              cuda.cuGraphicsUnregisterResource(cuda_ocr_out_res) != CUDA_SUCCESS) {
+            cleanup_execution_ok = false;
+          }
+        }
         perf_destroy_events();  // free the timing events while cuda_ctx is still current
       }
       if (!cleanup_execution_ok) {
@@ -2747,6 +3167,7 @@ namespace models {
         // Never give that execution context to a later stream, even if the live polling path did
         // not have another opportunity to mark it before this instance was destroyed.
         execution_context_poisoned = true;
+        ocr_context_poisoned = true;
       }
 
       // Return only a successfully warmed context to the reusable pool. Construction can fail
@@ -2770,6 +3191,21 @@ namespace models {
           );
         }
       }
+      if (ocr_exec_context) {
+        if (ocr_context_warmed && !ocr_context_poisoned) {
+          g_engines[ocr_engine_key].context_pool.push_back(ocr_exec_context);
+          ocr_exec_context = nullptr;
+          g_trt_context_available.notify_all();
+        } else {
+          if (ocr_context_poisoned) {
+            BOOST_LOG(warning)
+              << "Quarantining the PP-OCRv6 tiny execution context after a GPU failure.";
+          }
+          quarantine_execution_context_locked(
+            ocr_engine_key, ocr_exec_context, ocr_context_warmed
+          );
+        }
+      }
       // TRT runtime/engines are cached globally, do not destroy them here.
     }
 
@@ -2788,6 +3224,7 @@ namespace models {
 
     void release_parallax_v2_resources() {
       parallax_v2_producer_active = false;
+      subtitle_conditioned_current = false;
       depth_coordinate_v2_cbuffer.Reset();
       depth_coordinate_v2_partials_buf.Reset();
       depth_coordinate_v2_partials_uav.Reset();
@@ -2816,25 +3253,15 @@ namespace models {
       depth_coordinate_v2_final_tex.Reset();
       depth_coordinate_v2_final_uav.Reset();
       depth_coordinate_v2_final_srv.Reset();
-      depth_coordinate_v2_overlay_conditioned_tex.Reset();
-      depth_coordinate_v2_overlay_conditioned_uav.Reset();
-      depth_coordinate_v2_overlay_conditioned_srv.Reset();
-      depth_coordinate_v2_overlay_rects_buf.Reset();
-      depth_coordinate_v2_overlay_rects_srv.Reset();
-      depth_coordinate_v2_overlay_cbuffer.Reset();
+      subtitle_conditioned_tex.Reset();
+      subtitle_conditioned_uav.Reset();
+      subtitle_conditioned_srv.Reset();
+      subtitle_locator_state_buf.Reset();
+      subtitle_locator_state_uav.Reset();
+      subtitle_locator_state_srv.Reset();
+      subtitle_locator_cbuffer.Reset();
       pending_source_srv.Reset();
-      pending_overlay_mask_srv.Reset();
-      pending_overlay_plan.reset();
-      tensor_analysis_exclusion_may_be_nonzero = false;
-      tensor_analysis_exclusion_history_may_be_nonzero = false;
-      sanitized_source_tex.Reset();
-      sanitized_source_srv.Reset();
-      sanitized_source_uav.Reset();
-      sanitized_source_width = 0u;
-      sanitized_source_height = 0u;
-      sanitized_source_format = DXGI_FORMAT_UNKNOWN;
     }
-
     void fail_parallax_v2_producer(std::string_view reason) {
       if (!parallax_v2_producer_failed) {
         BOOST_LOG(error) << "Host SBS V2 producer failed: " << reason
@@ -2842,6 +3269,178 @@ namespace models {
       }
       parallax_v2_producer_failed = true;
       release_parallax_v2_resources();
+    }
+
+    bool ensure_subtitle_resources() {
+      auto create_uint_buffer = [&] (
+                                  const std::uint32_t word_count,
+                                  Microsoft::WRL::ComPtr<ID3D11Buffer> &buffer,
+                                  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> &srv,
+                                  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> &uav) {
+        D3D11_BUFFER_DESC desc {};
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.ByteWidth = word_count * sizeof(std::uint32_t);
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+        desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        desc.StructureByteStride = sizeof(std::uint32_t);
+        return SUCCEEDED(device->CreateBuffer(&desc, nullptr, &buffer)) &&
+               SUCCEEDED(device->CreateShaderResourceView(buffer.Get(), nullptr, &srv)) &&
+               SUCCEEDED(device->CreateUnorderedAccessView(buffer.Get(), nullptr, &uav));
+      };
+      auto create_constant_buffer = [&] (
+                                      const UINT byte_width,
+                                      Microsoft::WRL::ComPtr<ID3D11Buffer> &buffer) {
+        if (buffer) {
+          return true;
+        }
+        D3D11_BUFFER_DESC desc {};
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.ByteWidth = byte_width;
+        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        return SUCCEEDED(device->CreateBuffer(&desc, nullptr, &buffer));
+      };
+
+      bool resources_ok = true;
+      if (!ocr_box_record_buf || !ocr_box_record_srv || !ocr_box_record_uav) {
+        ocr_box_record_buf.Reset();
+        ocr_box_record_srv.Reset();
+        ocr_box_record_uav.Reset();
+        resources_ok = create_uint_buffer(
+          ocr_box_record_word_count,
+          ocr_box_record_buf,
+          ocr_box_record_srv,
+          ocr_box_record_uav
+        );
+      }
+      if (!subtitle_locator_state_buf || !subtitle_locator_state_srv ||
+          !subtitle_locator_state_uav) {
+        subtitle_locator_state_buf.Reset();
+        subtitle_locator_state_srv.Reset();
+        subtitle_locator_state_uav.Reset();
+        resources_ok = resources_ok && create_uint_buffer(
+          subtitle_locator_state_word_count,
+          subtitle_locator_state_buf,
+          subtitle_locator_state_srv,
+          subtitle_locator_state_uav
+        );
+      }
+
+      if (!subtitle_conditioned_tex || !subtitle_conditioned_srv ||
+          !subtitle_conditioned_uav) {
+        D3D11_TEXTURE2D_DESC desc {};
+        desc.Width = static_cast<UINT>(target_w);
+        desc.Height = static_cast<UINT>(target_h);
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_R32_FLOAT;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+        resources_ok = resources_ok &&
+          SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &subtitle_conditioned_tex)) &&
+          SUCCEEDED(device->CreateShaderResourceView(
+            subtitle_conditioned_tex.Get(), nullptr, &subtitle_conditioned_srv)) &&
+          SUCCEEDED(device->CreateUnorderedAccessView(
+            subtitle_conditioned_tex.Get(), nullptr, &subtitle_conditioned_uav));
+      }
+      resources_ok = resources_ok &&
+        create_constant_buffer(48u, subtitle_locator_cbuffer);
+      if (!resources_ok) {
+        return false;
+      }
+
+      const UINT zero[4] = {};
+      context->ClearUnorderedAccessViewUint(ocr_box_record_uav.Get(), zero);
+      context->ClearUnorderedAccessViewUint(subtitle_locator_state_uav.Get(), zero);
+      const float zero_float[4] = {};
+      context->ClearUnorderedAccessViewFloat(subtitle_conditioned_uav.Get(), zero_float);
+
+      if (!ocr_available) {
+        return true;
+      }
+      if (cuda_ocr_in_res && cuda_ocr_out_res && ocr_input_uav && ocr_output_srv &&
+          ocr_cell_stats_srv && ocr_cell_stats_uav && ocr_preprocess_cbuffer &&
+          ocr_resolve_cbuffer) {
+        return true;
+      }
+
+      auto create_float_buffer = [&] (
+                                    const std::uint32_t float_count,
+                                    const UINT bind_flags,
+                                    Microsoft::WRL::ComPtr<ID3D11Buffer> &buffer,
+                                    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> *srv,
+                                    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> *uav) {
+        D3D11_BUFFER_DESC desc {};
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.ByteWidth = float_count * sizeof(float);
+        desc.BindFlags = bind_flags;
+        desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        desc.StructureByteStride = sizeof(float);
+        return SUCCEEDED(device->CreateBuffer(&desc, nullptr, &buffer)) &&
+               (!srv || SUCCEEDED(device->CreateShaderResourceView(
+                          buffer.Get(), nullptr, srv->ReleaseAndGetAddressOf()))) &&
+               (!uav || SUCCEEDED(device->CreateUnorderedAccessView(
+                          buffer.Get(), nullptr, uav->ReleaseAndGetAddressOf())));
+      };
+
+      const std::uint32_t ocr_pixels = ocr_engine_width * ocr_engine_height;
+      bool ocr_resources_ok = create_float_buffer(
+                                3u * ocr_pixels,
+                                D3D11_BIND_UNORDERED_ACCESS,
+                                ocr_input_buf,
+                                nullptr,
+                                &ocr_input_uav
+                              ) &&
+                              create_float_buffer(
+                                ocr_pixels,
+                                D3D11_BIND_SHADER_RESOURCE,
+                                ocr_output_buf,
+                                &ocr_output_srv,
+                                nullptr
+                              ) &&
+                              create_uint_buffer(
+                                ocr_cell_stats_word_count,
+                                ocr_cell_stats_buf,
+                                ocr_cell_stats_srv,
+                                ocr_cell_stats_uav
+                              ) &&
+                              create_constant_buffer(32u, ocr_preprocess_cbuffer) &&
+                              create_constant_buffer(48u, ocr_resolve_cbuffer);
+      auto &cuda = cuda_driver_api::get();
+      if (ocr_resources_ok && cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) == CUDA_SUCCESS) {
+        const auto input_status = cuda.cuGraphicsD3D11RegisterResource(
+          &cuda_ocr_in_res, ocr_input_buf.Get(), 0);
+        const auto output_status = cuda.cuGraphicsD3D11RegisterResource(
+          &cuda_ocr_out_res, ocr_output_buf.Get(), 0);
+        ocr_resources_ok = input_status == CUDA_SUCCESS && output_status == CUDA_SUCCESS &&
+                           cuda_ocr_in_res && cuda_ocr_out_res;
+        if (!ocr_resources_ok) {
+          BOOST_LOG(warning)
+            << "PP-OCRv6 tiny D3D11/CUDA registration failed (" << input_status << ", "
+            << output_status << "); subtitle conditioning remains flat.";
+        }
+      } else {
+        ocr_resources_ok = false;
+      }
+      if (!ocr_resources_ok) {
+        if (cuda_ocr_in_res && cuda.cuGraphicsUnregisterResource) {
+          cuda.cuGraphicsUnregisterResource(cuda_ocr_in_res);
+        }
+        if (cuda_ocr_out_res && cuda.cuGraphicsUnregisterResource) {
+          cuda.cuGraphicsUnregisterResource(cuda_ocr_out_res);
+        }
+        cuda_ocr_in_res = nullptr;
+        cuda_ocr_out_res = nullptr;
+        ocr_input_buf.Reset();
+        ocr_input_uav.Reset();
+        ocr_output_buf.Reset();
+        ocr_output_srv.Reset();
+        ocr_cell_stats_buf.Reset();
+        ocr_cell_stats_uav.Reset();
+        ocr_cell_stats_srv.Reset();
+        ocr_available = false;
+      }
+      return true;
     }
 
     bool ensure_parallax_v2_resources() {
@@ -2989,73 +3588,11 @@ namespace models {
         &constants_data,
         &depth_coordinate_v2_cbuffer
       ));
+      resources_ok = resources_ok && ensure_subtitle_resources();
 
       if (!resources_ok) {
         fail_parallax_v2_producer("GPU resource allocation failed"sv);
         return false;
-      }
-
-      // W2 is optional at runtime. Pre-create every zero-plane resource as one unit so a later
-      // accepted mask can never sanitize DAV2 input unless its completed field is also guaranteed
-      // to reach the post-limit conditioner. Allocation failure leaves ordinary unmasked V2
-      // fully active and is not part of the one-way fail-flat latch.
-      bool overlay_zero_plane_resources_ok =
-        depth_coordinate_v2_overlay_zero_plane_cs &&
-        create_float_texture(
-          depth_coordinate_v2_overlay_conditioned_tex,
-          &depth_coordinate_v2_overlay_conditioned_srv,
-          depth_coordinate_v2_overlay_conditioned_uav
-        );
-      if (overlay_zero_plane_resources_ok) {
-        D3D11_BUFFER_DESC rect_desc {};
-        rect_desc.Usage = D3D11_USAGE_DEFAULT;
-        rect_desc.ByteWidth = static_cast<UINT>(
-          sizeof(host_sbs_overlay_geometry_t::loose_rects));
-        rect_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        rect_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-        rect_desc.StructureByteStride = sizeof(depth_source_rect_t);
-        const std::array<depth_source_rect_t, host_sbs_overlay_max_loose_rects>
-          empty_rects {};
-        D3D11_SUBRESOURCE_DATA rect_data {empty_rects.data(), 0u, 0u};
-        overlay_zero_plane_resources_ok =
-          SUCCEEDED(device->CreateBuffer(
-            &rect_desc,
-            &rect_data,
-            &depth_coordinate_v2_overlay_rects_buf
-          )) &&
-          SUCCEEDED(device->CreateShaderResourceView(
-            depth_coordinate_v2_overlay_rects_buf.Get(),
-            nullptr,
-            &depth_coordinate_v2_overlay_rects_srv
-          ));
-      }
-      if (overlay_zero_plane_resources_ok) {
-        const host_sbs_overlay_zero_plane_constants_t empty_constants {};
-        D3D11_BUFFER_DESC overlay_constants_desc {};
-        overlay_constants_desc.Usage = D3D11_USAGE_DEFAULT;
-        overlay_constants_desc.ByteWidth = sizeof(empty_constants);
-        overlay_constants_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        D3D11_SUBRESOURCE_DATA overlay_constants_data {
-          &empty_constants, 0u, 0u};
-        overlay_zero_plane_resources_ok = SUCCEEDED(device->CreateBuffer(
-          &overlay_constants_desc,
-          &overlay_constants_data,
-          &depth_coordinate_v2_overlay_cbuffer
-        ));
-      }
-      if (!overlay_zero_plane_resources_ok) {
-        depth_coordinate_v2_overlay_conditioned_tex.Reset();
-        depth_coordinate_v2_overlay_conditioned_uav.Reset();
-        depth_coordinate_v2_overlay_conditioned_srv.Reset();
-        depth_coordinate_v2_overlay_rects_buf.Reset();
-        depth_coordinate_v2_overlay_rects_srv.Reset();
-        depth_coordinate_v2_overlay_cbuffer.Reset();
-        if (!overlay_resource_error_logged) {
-          BOOST_LOG(warning)
-            << "Host SBS overlay zero-plane resources are unavailable; ordinary unmasked V2 "
-               "remains active.";
-          overlay_resource_error_logged = true;
-        }
       }
 
       const float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -3070,98 +3607,14 @@ namespace models {
         clear
       );
       context->ClearUnorderedAccessViewFloat(depth_coordinate_v2_final_uav.Get(), clear);
-      if (depth_coordinate_v2_overlay_conditioned_uav) {
-        context->ClearUnorderedAccessViewFloat(
-          depth_coordinate_v2_overlay_conditioned_uav.Get(), clear);
-      }
       parallax_v2_producer_active = true;
       BOOST_LOG(info)
         << "Host SBS V2 GPU producer active at " << target_w << 'x' << target_h
         << "; full-resolution conservative foreground ownership precedes the 75% vertical "
            "upper and 25% vertical lower envelope "
-           "followed by one horizontal majorant; "
-           "the renderer will authenticate its first completed field before the one-time "
+           "followed by one horizontal majorant; the renderer will authenticate its first "
+           "completed field before the one-time "
            "V2-or-flat latch.";
-      return true;
-    }
-
-    bool overlay_zero_plane_resources_ready() const noexcept {
-      return depth_coordinate_v2_overlay_zero_plane_cs &&
-             depth_coordinate_v2_overlay_conditioned_tex &&
-             depth_coordinate_v2_overlay_conditioned_uav &&
-             depth_coordinate_v2_overlay_conditioned_srv &&
-             depth_coordinate_v2_overlay_rects_buf &&
-             depth_coordinate_v2_overlay_rects_srv &&
-             depth_coordinate_v2_overlay_cbuffer;
-    }
-
-    bool dispatch_overlay_zero_plane(
-      const host_sbs_overlay_plan_t &plan
-    ) {
-      if (!overlay_zero_plane_resources_ready() ||
-          !plan.has_zero_plane_geometry() ||
-          !plan.valid_for(
-            pending_frame_id,
-            pending_input_region,
-            pending_color_space
-          )) {
-        return false;
-      }
-
-      context->UpdateSubresource(
-        depth_coordinate_v2_overlay_rects_buf.Get(),
-        0u,
-        nullptr,
-        plan.geometry.loose_rects.data(),
-        0u,
-        0u
-      );
-      const host_sbs_overlay_zero_plane_constants_t overlay_constants {
-        .analysis_width = plan.analysis_width,
-        .analysis_height = plan.analysis_height,
-        .loose_rect_count = plan.geometry.loose_rect_count,
-        .reserved = 0u,
-      };
-      context->UpdateSubresource(
-        depth_coordinate_v2_overlay_cbuffer.Get(),
-        0u,
-        nullptr,
-        &overlay_constants,
-        0u,
-        0u
-      );
-
-      ID3D11Buffer *constant_buffers[3] = {
-        cbuffer.Get(),
-        depth_coordinate_v2_cbuffer.Get(),
-        depth_coordinate_v2_overlay_cbuffer.Get(),
-      };
-      ID3D11ShaderResourceView *inputs[2] = {
-        depth_coordinate_v2_final_srv.Get(),
-        depth_coordinate_v2_overlay_rects_srv.Get(),
-      };
-      context->CSSetShader(
-        depth_coordinate_v2_overlay_zero_plane_cs.Get(), nullptr, 0u);
-      context->CSSetConstantBuffers(0u, 3u, constant_buffers);
-      context->CSSetShaderResources(0u, 2u, inputs);
-      context->CSSetUnorderedAccessViews(
-        0u,
-        1u,
-        depth_coordinate_v2_overlay_conditioned_uav.GetAddressOf(),
-        nullptr
-      );
-      context->Dispatch(
-        (static_cast<UINT>(target_w) + 15u) / 16u,
-        (static_cast<UINT>(target_h) + 15u) / 16u,
-        1u
-      );
-
-      ID3D11ShaderResourceView *null_srvs[2] = {nullptr, nullptr};
-      ID3D11UnorderedAccessView *null_uav = nullptr;
-      ID3D11Buffer *null_constant = nullptr;
-      context->CSSetShaderResources(0u, 2u, null_srvs);
-      context->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
-      context->CSSetConstantBuffers(2u, 1u, &null_constant);
       return true;
     }
 
@@ -3180,8 +3633,7 @@ namespace models {
       context->CSSetShader(depth_coordinate_v2_moments_cs.Get(), nullptr, 0);
       ID3D11ShaderResourceView *moments_srvs[2] = {
         tensor_out_srv.Get(),
-        tensor_analysis_exclusion_may_be_nonzero ?
-          tensor_analysis_exclusion_srv.Get() : nullptr,
+        nullptr,
       };
       context->CSSetShaderResources(0, 2, moments_srvs);
       context->CSSetUnorderedAccessViews(
@@ -3249,8 +3701,7 @@ namespace models {
         ID3D11ShaderResourceView *ownership_srvs[3] = {
           depth_coordinate_v2_candidate_srv.Get(),
           pending_source_srv.Get(),
-          tensor_analysis_exclusion_may_be_nonzero ?
-            tensor_analysis_exclusion_srv.Get() : nullptr,
+          nullptr,
         };
         context->CSSetShaderResources(0, 3, ownership_srvs);
         context->CSSetUnorderedAccessViews(
@@ -3307,12 +3758,174 @@ namespace models {
       context->CSSetShaderResources(0, 1, null_srvs3);
       context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
 
-      const bool overlay_zero_plane_applied =
-        pending_overlay_plan && dispatch_overlay_zero_plane(*pending_overlay_plan);
+      ID3D11Buffer *null_constants[2] = {nullptr, nullptr};
+      context->CSSetConstantBuffers(1, 2, null_constants);
+      return true;
+    }
 
-      ID3D11Buffer *null_constant = nullptr;
-      context->CSSetConstantBuffers(1, 1, &null_constant);
-      return overlay_zero_plane_applied;
+    bool dispatch_ocr_postprocess() {
+      const bool submitted = std::exchange(pending_ocr_submitted, false);
+      if (!ocr_box_record_buf || !ocr_box_record_uav) {
+        return false;
+      }
+      const std::uint32_t source_width = pending_input_region.width();
+      const std::uint32_t source_height = pending_input_region.height();
+      const auto publish_abstention = [&]() {
+        std::array<std::uint32_t, ocr_box_record_word_count> words {};
+        words[0] = ocr_box_record_schema;
+        words[1] = ocr_box_record_tag;
+        words[5] = static_cast<std::uint32_t>(pending_frame_id);
+        words[6] = static_cast<std::uint32_t>(pending_frame_id >> 32u);
+        words[7] = static_cast<std::uint32_t>(
+          pending_input_region.analysis_generation);
+        words[8] = static_cast<std::uint32_t>(
+          pending_input_region.analysis_generation >> 32u);
+        words[9] = source_width;
+        words[10] = source_height;
+        words[11] = static_cast<std::uint32_t>(target_w);
+        words[12] = static_cast<std::uint32_t>(target_h);
+        words[13] = subtitle_roi_top;
+        words[14] = subtitle_roi_bottom;
+        context->UpdateSubresource(
+          ocr_box_record_buf.Get(), 0, nullptr, words.data(), 0, 0);
+      };
+      if (!submitted || !ocr_box_cells_cs || !ocr_box_resolve_cs ||
+          !ocr_output_srv || !ocr_cell_stats_srv || !ocr_cell_stats_uav ||
+          !ocr_resolve_cbuffer) {
+        publish_abstention();
+        return false;
+      }
+
+      const std::uint32_t crop_height = std::min(
+        source_height,
+        (source_width + 5u) / 6u
+      );
+      const std::uint32_t crop_top = source_height - crop_height;
+      const std::array<std::uint32_t, 12> constants {
+        static_cast<std::uint32_t>(pending_frame_id),
+        static_cast<std::uint32_t>(pending_frame_id >> 32u),
+        static_cast<std::uint32_t>(pending_input_region.analysis_generation),
+        static_cast<std::uint32_t>(pending_input_region.analysis_generation >> 32u),
+        source_width,
+        source_height,
+        static_cast<std::uint32_t>(target_w),
+        static_cast<std::uint32_t>(target_h),
+        crop_top,
+        crop_height,
+        0u,
+        0u,
+      };
+      context->UpdateSubresource(
+        ocr_resolve_cbuffer.Get(), 0, nullptr, constants.data(), 0, 0);
+
+      context->CSSetShader(ocr_box_cells_cs.Get(), nullptr, 0);
+      context->CSSetShaderResources(0, 1, ocr_output_srv.GetAddressOf());
+      context->CSSetUnorderedAccessViews(
+        0, 1, ocr_cell_stats_uav.GetAddressOf(), nullptr);
+      context->Dispatch(ocr_grid_width, ocr_grid_height, 1);
+      ID3D11ShaderResourceView *null_srv = nullptr;
+      ID3D11UnorderedAccessView *null_uav = nullptr;
+      context->CSSetShaderResources(0, 1, &null_srv);
+      context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
+
+      context->CSSetShader(ocr_box_resolve_cs.Get(), nullptr, 0);
+      context->CSSetConstantBuffers(0, 1, ocr_resolve_cbuffer.GetAddressOf());
+      context->CSSetShaderResources(1, 1, ocr_cell_stats_srv.GetAddressOf());
+      context->CSSetUnorderedAccessViews(
+        1, 1, ocr_box_record_uav.GetAddressOf(), nullptr);
+      context->Dispatch(1, 1, 1);
+      context->CSSetShaderResources(1, 1, &null_srv);
+      context->CSSetUnorderedAccessViews(1, 1, &null_uav, nullptr);
+      ID3D11Buffer *null_buffer = nullptr;
+      context->CSSetConstantBuffers(0, 1, &null_buffer);
+      return true;
+    }
+
+    bool dispatch_subtitle_conditioner(
+      const bool ocr_record_submitted,
+      const bool input_domain_reset
+    ) {
+      subtitle_conditioned_current = false;
+      if (!subtitle_locator_resolve_cs || !subtitle_condition_cs ||
+          !subtitle_locator_cbuffer || !subtitle_locator_state_srv ||
+          !subtitle_locator_state_uav || !subtitle_conditioned_srv ||
+          !subtitle_conditioned_uav || !depth_coordinate_v2_final_srv ||
+          !ocr_box_record_srv || !cut_state_srv) {
+        return false;
+      }
+
+      // SLR6 is qualified only for the canonical landscape 770x434 field and [325,430) ROI.
+      // Every other calibrated DAV2 shape bypasses the locator and preserves ordinary BaseField
+      // bit-for-bit, while retaining zeroed current-only diagnostics.
+      if (target_w != static_cast<int>(subtitle_field_width) ||
+          target_h != static_cast<int>(subtitle_field_height)) {
+        const UINT zero[4] = {};
+        context->ClearUnorderedAccessViewUint(subtitle_locator_state_uav.Get(), zero);
+        // make_result() publishes BaseField itself for unsupported shapes; no copy or locator
+        // dispatch is needed.
+        return true;
+      }
+
+      const std::array<std::uint32_t, 12> constants {
+        static_cast<std::uint32_t>(target_w),
+        static_cast<std::uint32_t>(target_h),
+        subtitle_roi_top,
+        subtitle_roi_bottom,
+        pending_input_region.width(),
+        pending_input_region.height(),
+        ocr_record_submitted ? 1u : 0u,
+        input_domain_reset ? 1u : 0u,
+        static_cast<std::uint32_t>(pending_frame_id),
+        static_cast<std::uint32_t>(pending_frame_id >> 32u),
+        static_cast<std::uint32_t>(pending_input_region.analysis_generation),
+        static_cast<std::uint32_t>(pending_input_region.analysis_generation >> 32u),
+      };
+      context->UpdateSubresource(
+        subtitle_locator_cbuffer.Get(), 0, nullptr, constants.data(), 0, 0);
+
+      ID3D11Buffer *constant_buffers[3] = {
+        cbuffer.Get(),
+        depth_coordinate_v2_cbuffer.Get(),
+        subtitle_locator_cbuffer.Get(),
+      };
+      context->CSSetShader(subtitle_locator_resolve_cs.Get(), nullptr, 0);
+      context->CSSetConstantBuffers(0, 3, constant_buffers);
+      ID3D11ShaderResourceView *resolve_srvs[8] = {
+        nullptr,
+        cut_state_srv.Get(),
+        depth_coordinate_v2_final_srv.Get(),
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        ocr_box_record_srv.Get(),
+      };
+      context->CSSetShaderResources(0, 8, resolve_srvs);
+      context->CSSetUnorderedAccessViews(
+        2, 1, subtitle_locator_state_uav.GetAddressOf(), nullptr);
+      context->Dispatch(1, 1, 1);
+      ID3D11ShaderResourceView *null_srvs[8] = {};
+      ID3D11UnorderedAccessView *null_uav = nullptr;
+      context->CSSetShaderResources(0, 8, null_srvs);
+      context->CSSetUnorderedAccessViews(2, 1, &null_uav, nullptr);
+
+      context->CSSetShader(subtitle_condition_cs.Get(), nullptr, 0);
+      ID3D11ShaderResourceView *condition_srvs[4] = {
+        nullptr,
+        nullptr,
+        depth_coordinate_v2_final_srv.Get(),
+        subtitle_locator_state_srv.Get(),
+      };
+      context->CSSetShaderResources(0, 4, condition_srvs);
+      context->CSSetUnorderedAccessViews(
+        3, 1, subtitle_conditioned_uav.GetAddressOf(), nullptr);
+      context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
+      context->CSSetShaderResources(0, 4, null_srvs);
+      context->CSSetUnorderedAccessViews(3, 1, &null_uav, nullptr);
+      ID3D11Buffer *null_constants[3] = {};
+      context->CSSetConstantBuffers(0, 3, null_constants);
+      subtitle_conditioned_current = true;
+      return true;
     }
 
     bool ensure_parallax_v2_coordinate_diagnostic_resource() {
@@ -3433,9 +4046,7 @@ namespace models {
       bool coordinate_snapshot_valid = false,
       depth_input_region_t completed_input_region = {},
       input_color_space completed_color_space = input_color_space::srgb,
-      bool input_domain_reset = false,
-      bool completed_overlay_zero_plane_applied = false,
-      std::optional<host_sbs_overlay_plan_t> completed_overlay_plan = std::nullopt
+      bool input_domain_reset = false
     ) {
       estimate_result r;
       r.depth = output_srv();
@@ -3458,12 +4069,17 @@ namespace models {
         r.shadow_ownership_refined_parallax = depth_coordinate_v2_ownership_srv;
         r.shadow_vertical_majorant = depth_coordinate_v2_vertical_majorant_srv;
         r.shadow_vertical_conditioned = depth_coordinate_v2_vertical_conditioned_srv;
-        r.shadow_final_parallax =
-          completed_overlay_zero_plane_applied && completed_overlay_plan ?
-            depth_coordinate_v2_overlay_conditioned_srv :
-            depth_coordinate_v2_final_srv;
+        r.shadow_base_final_parallax = depth_coordinate_v2_final_srv;
+        r.shadow_final_parallax = subtitle_conditioned_current ?
+                                    subtitle_conditioned_srv :
+                                    depth_coordinate_v2_final_srv;
         r.shadow_state = depth_coordinate_v2_state_srv;
         r.shadow_frame_stats = depth_coordinate_v2_frame_stats_srv;
+        if (target_w == static_cast<int>(subtitle_field_width) &&
+            target_h == static_cast<int>(subtitle_field_height)) {
+          r.ocr_box_record = ocr_box_record_srv;
+          r.subtitle_locator_state = subtitle_locator_state_srv;
+        }
         r.parallax_v2_shader_provenance = parallax_v2_shader_provenance;
         r.parallax_v2_producer_active = true;
         r.parallax_v2_raw_coordinate_scale = parallax_v2_raw_coordinate_scale;
@@ -3480,8 +4096,6 @@ namespace models {
         r.input_region = completed_input_region;
         r.color_space = completed_color_space;
         r.input_domain_reset = input_domain_reset;
-        r.overlay_zero_plane_applied = completed_overlay_zero_plane_applied;
-        r.overlay_plan = std::move(completed_overlay_plan);
       }
       return r;
     }
@@ -3570,8 +4184,7 @@ namespace models {
       }
       auto *d3d_timer = diagnostics_enabled ? begin_d3d_perf(true, false) : nullptr;
       const bool input_domain_reset = prepare_pending_input_domain();
-      const bool completed_overlay_zero_plane_applied =
-        normalize_depth_output(d3d_timer);
+      normalize_depth_output(d3d_timer, input_domain_reset);
       mark_d3d_post_end(d3d_timer);
       bool raw_snapshot_valid = false;
       bool model_input_snapshot_valid = false;
@@ -3602,12 +4215,10 @@ namespace models {
       const auto completed_frame_id = pending_frame_id;
       const auto completed_input_region = pending_input_region;
       const auto completed_color_space = pending_color_space;
-      auto completed_overlay_plan = std::move(pending_overlay_plan);
       has_previous_frame = false;  // the output buffer has been consumed; never fold it twice
       // normalize_depth_output() has submitted and unbound every D3D11 read of this exact source.
       // Drop our retained reference only after the ownership pass has consumed it.
       pending_source_srv.Reset();
-      pending_overlay_mask_srv.Reset();
       if (diagnostics_enabled) {
         throughput_stats_completions++;
       }
@@ -3620,9 +4231,7 @@ namespace models {
         coordinate_snapshot_valid,
         completed_input_region,
         completed_color_space,
-        input_domain_reset,
-        completed_overlay_zero_plane_applied,
-        std::move(completed_overlay_plan)
+        input_domain_reset
       );
     }
 
@@ -3700,11 +4309,6 @@ namespace models {
       if (previous_appearance_ordinal_uav) {
         context->ClearUnorderedAccessViewFloat(previous_appearance_ordinal_uav.Get(), zero4);
       }
-      if (previous_tensor_analysis_exclusion_uav) {
-        context->ClearUnorderedAccessViewUint(
-          previous_tensor_analysis_exclusion_uav.Get(), zero_uint4);
-      }
-      tensor_analysis_exclusion_history_may_be_nonzero = false;
       if (depth_uav) {
         context->ClearUnorderedAccessViewFloat(depth_uav.Get(), zero4);
       }
@@ -3716,6 +4320,10 @@ namespace models {
       }
       if (ema_motion_mask_uav) {
         context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), zero_uint4);
+      }
+      if (subtitle_locator_state_uav) {
+        context->ClearUnorderedAccessViewUint(
+          subtitle_locator_state_uav.Get(), zero_uint4);
       }
       if (depth_coordinate_v2_state_buf) {
         context->UpdateSubresource(
@@ -3736,6 +4344,7 @@ namespace models {
              depth_coordinate_v2_vertical_majorant_uav.Get(),
              depth_coordinate_v2_vertical_conditioned_uav.Get(),
              depth_coordinate_v2_final_uav.Get(),
+             subtitle_conditioned_uav.Get(),
            }) {
         if (uav) {
           context->ClearUnorderedAccessViewFloat(uav, zero4);
@@ -3758,7 +4367,14 @@ namespace models {
     // Normalize the finished raw disparity in tensor_out_buf into depth_tex: the scale
     // passes (min/max reduction, permanent percentile histogram, EMA fold) followed by the
     // mapping/temporal-EMA pass. GPU-resident throughout, no CPU readback.
-    bool normalize_depth_output(d3d_perf_slot *perf_slot) {
+    void normalize_depth_output(
+      d3d_perf_slot *perf_slot,
+      const bool input_domain_reset
+    ) {
+      // OCR and depth were submitted back-to-back on the same bounded CUDA stream. Its completion
+      // gate therefore makes the probability map for this exact pending frame safe to consume
+      // before any next-frame interop mapping can reuse the fixed buffers.
+      const bool ocr_record_submitted = dispatch_ocr_postprocess();
       // 3a. Per-frame scale (GPU-resident; no CPU readback). Depth Anything V2's
       // relative output is affine-invariant, so this is required for a stable parallax scale.
       if (depth_minmax_cs && depth_minmax_ema_cs && minmax_raw_uav && minmax_ema_uav) {
@@ -3767,8 +4383,7 @@ namespace models {
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
         ID3D11ShaderResourceView *reduction_srvs[2] = {
           tensor_out_srv.Get(),
-          tensor_analysis_exclusion_may_be_nonzero ?
-            tensor_analysis_exclusion_srv.Get() : nullptr,
+          nullptr,
         };
         context->CSSetShaderResources(0, 2, reduction_srvs);
         context->CSSetUnorderedAccessViews(0, 1, minmax_raw_uav.GetAddressOf(), nullptr);
@@ -3821,8 +4436,7 @@ namespace models {
           tensor_out_srv.Get(),
           minmax_ema_srv.Get(),
           depth_previous_srv.Get(),
-          tensor_analysis_exclusion_may_be_nonzero ?
-            tensor_analysis_exclusion_srv.Get() : nullptr,
+          nullptr,
         };
         context->CSSetShaderResources(0, 4, mask_srvs);
         context->CSSetUnorderedAccessViews(0, 1, ema_motion_mask_uav.GetAddressOf(), nullptr);
@@ -3892,10 +4506,8 @@ namespace models {
           minmax_ema_srv.Get(),
           appearance_ordinal_srv.Get(),
           previous_appearance_ordinal_srv.Get(),
-          tensor_analysis_exclusion_may_be_nonzero ?
-            tensor_analysis_exclusion_srv.Get() : nullptr,
-          tensor_analysis_exclusion_history_may_be_nonzero ?
-            previous_tensor_analysis_exclusion_srv.Get() : nullptr,
+          nullptr,
+          nullptr,
         };
         context->CSSetShaderResources(0, 9, analysis_srvs);
         context->CSSetShader(depth_scene_cut_evidence_cs.Get(), nullptr, 0);
@@ -3944,23 +4556,17 @@ namespace models {
           appearance_ordinal_srv.Get(),
           cut_state_srv.Get(),
           depth_srv.Get(),
-          tensor_analysis_exclusion_may_be_nonzero ?
-            tensor_analysis_exclusion_srv.Get() : nullptr,
+          nullptr,
         };
         ID3D11UnorderedAccessView *history_uavs[4] = {
           tensor_previous_input_uav.Get(),
           previous_appearance_ordinal_uav.Get(),
           depth_cut_history_uav.Get(),
-          (tensor_analysis_exclusion_may_be_nonzero ||
-           tensor_analysis_exclusion_history_may_be_nonzero) ?
-            previous_tensor_analysis_exclusion_uav.Get() : nullptr,
+          nullptr,
         };
         context->CSSetShaderResources(0, 6, history_srvs);
         context->CSSetUnorderedAccessViews(0, 4, history_uavs, nullptr);
         context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
-        tensor_analysis_exclusion_history_may_be_nonzero =
-          tensor_analysis_exclusion_history_may_be_nonzero ||
-          tensor_analysis_exclusion_may_be_nonzero;
         ID3D11ShaderResourceView *null_history_srvs[6] = {
           nullptr,
           nullptr,
@@ -3978,17 +4584,19 @@ namespace models {
       // Production V2 runs after the shared scene-cut bridge and consumes its confirmed-cut
       // generation, with the same-frame pulse retained for attribution.
       if (parallax_v2_producer_active) {
-        // This nested interval covers the seven base V2 coordinate passes and the optional
-        // post-limit overlay conditioner. It remains inside the inclusive depth_postprocess_gpu
-        // interval so existing benchmark semantics do not move.
+        // This nested interval covers the base V2 coordinate passes. It remains inside the
+        // inclusive depth_postprocess_gpu interval so existing benchmark semantics do not move.
         mark_d3d_parallax_start(perf_slot);
       }
-      const bool overlay_zero_plane_applied =
-        dispatch_parallax_v2_producer(perf_slot);
+      const bool base_ready = dispatch_parallax_v2_producer(perf_slot);
+      if (base_ready) {
+        dispatch_subtitle_conditioner(ocr_record_submitted, input_domain_reset);
+      } else {
+        subtitle_conditioned_current = false;
+      }
       if (parallax_v2_producer_active) {
         mark_d3d_parallax_end(perf_slot);
       }
-      return overlay_zero_plane_applied;
     }
 
     // Diagnostics-only accounting for achieved inference throughput and busy drops. Callers
@@ -4076,8 +4684,7 @@ namespace models {
       input_color_space color_space,
       std::uint64_t frame_id,
       bool snapshot_raw_model_depth,
-      depth_input_region_t input_region,
-      depth_overlay_mask_input_t overlay_mask
+      depth_input_region_t input_region
     ) {
       if (!valid || terminal_failure || live_v2_producer_unavailable() || !input_srv) {
         return {};
@@ -4090,8 +4697,6 @@ namespace models {
       depth_input_region_t completed_input_region {};
       input_color_space completed_color_space = input_color_space::srgb;
       bool completed_input_domain_reset = false;
-      bool completed_overlay_zero_plane_applied = false;
-      std::optional<host_sbs_overlay_plan_t> completed_overlay_plan;
 
       auto &cuda = cuda_driver_api::get();
       if (!cuda.is_valid()) {
@@ -4156,23 +4761,6 @@ namespace models {
       if (!input_region.valid()) {
         return make_result();
       }
-      std::optional<host_sbs_overlay_plan_t> overlay_plan_snapshot;
-      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> overlay_mask_snapshot;
-      std::uint64_t overlay_mask_generation = 0u;
-      if (overlay_mask.plan) {
-        overlay_plan_snapshot.emplace(*overlay_mask.plan);
-        overlay_mask_snapshot = overlay_mask.tight_dilated_mask;
-        overlay_mask_generation = overlay_mask.mask_generation;
-      }
-      const bool overlay_identity_matches = overlay_mask_matches_frame(
-        overlay_plan_snapshot ? &*overlay_plan_snapshot : nullptr,
-        overlay_mask_snapshot.Get(),
-        overlay_mask_generation,
-        frame_id,
-        input_region,
-        color_space,
-        input_desc
-      );
       const auto requested_shape = models::fit_depth_tensor_shape(
         input_desc.Width,
         input_desc.Height,
@@ -4344,42 +4932,6 @@ namespace models {
                        SUCCEEDED(device->CreateUnorderedAccessView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_uav)) &&
                        SUCCEEDED(device->CreateShaderResourceView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_srv));
 
-        // Optional W2 current/history masks. Every modified core shader treats an unbound mask
-        // SRV as zero, so allocation failure preserves byte-for-byte ordinary V2 inputs and does
-        // not enter the one-way fail-flat latch.
-        const bool overlay_mask_resources_ok =
-          SUCCEEDED(device->CreateTexture2D(
-            &mask_desc, nullptr, &tensor_analysis_exclusion_tex)) &&
-          SUCCEEDED(device->CreateUnorderedAccessView(
-            tensor_analysis_exclusion_tex.Get(), nullptr,
-            &tensor_analysis_exclusion_uav)) &&
-          SUCCEEDED(device->CreateShaderResourceView(
-            tensor_analysis_exclusion_tex.Get(), nullptr,
-            &tensor_analysis_exclusion_srv)) &&
-          SUCCEEDED(device->CreateTexture2D(
-            &mask_desc, nullptr,
-            &previous_tensor_analysis_exclusion_tex)) &&
-          SUCCEEDED(device->CreateUnorderedAccessView(
-            previous_tensor_analysis_exclusion_tex.Get(), nullptr,
-            &previous_tensor_analysis_exclusion_uav)) &&
-          SUCCEEDED(device->CreateShaderResourceView(
-            previous_tensor_analysis_exclusion_tex.Get(), nullptr,
-            &previous_tensor_analysis_exclusion_srv));
-        if (!overlay_mask_resources_ok) {
-          tensor_analysis_exclusion_tex.Reset();
-          tensor_analysis_exclusion_uav.Reset();
-          tensor_analysis_exclusion_srv.Reset();
-          previous_tensor_analysis_exclusion_tex.Reset();
-          previous_tensor_analysis_exclusion_uav.Reset();
-          previous_tensor_analysis_exclusion_srv.Reset();
-          if (!overlay_resource_error_logged) {
-            BOOST_LOG(warning)
-              << "Host SBS overlay exclusion resources are unavailable; ordinary unmasked V2 "
-                 "remains active.";
-            overlay_resource_error_logged = true;
-          }
-        }
-
         if (!resources_ok) {
           BOOST_LOG(error)
             << "Depth estimator D3D11 resource creation failed; Host SBS V2 will fail flat.";
@@ -4399,16 +4951,6 @@ namespace models {
         context->ClearUnorderedAccessViewFloat(depth_cut_history_uav.Get(), clear_color);
         const UINT clear_uint[4] = {0u, 0u, 0u, 0u};
         context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), clear_uint);
-        if (tensor_analysis_exclusion_uav) {
-          context->ClearUnorderedAccessViewUint(
-            tensor_analysis_exclusion_uav.Get(), clear_uint);
-        }
-        if (previous_tensor_analysis_exclusion_uav) {
-          context->ClearUnorderedAccessViewUint(
-            previous_tensor_analysis_exclusion_uav.Get(), clear_uint);
-        }
-        tensor_analysis_exclusion_may_be_nonzero = false;
-        tensor_analysis_exclusion_history_may_be_nonzero = false;
 
         auto res1 = cuda.cuGraphicsD3D11RegisterResource(&cuda_in_res, tensor_in_buf.Get(), 0);
         auto res2 = cuda.cuGraphicsD3D11RegisterResource(&cuda_out_res, tensor_out_buf.Get(), 0);
@@ -4453,13 +4995,11 @@ namespace models {
           return {};
         }
         completed_input_domain_reset = prepare_pending_input_domain();
-        completed_overlay_zero_plane_applied = normalize_depth_output(d3d_timer);
-        completed_overlay_plan = std::move(pending_overlay_plan);
+        normalize_depth_output(d3d_timer, completed_input_domain_reset);
         completed_color_space = pending_color_space;
         // The ownership dispatch has now consumed and unbound the completed frame's source SRV.
         // It is safe to release before preprocessing the newly accepted source frame.
         pending_source_srv.Reset();
-        pending_overlay_mask_srv.Reset();
         // Restore the newly supplied frame's transfer mode before its full-resolution preprocess.
         ensure_cbuffers(color_space);
         if (!cbuffer) {
@@ -4471,8 +5011,6 @@ namespace models {
         // must not contaminate live
         // depth_postprocess_gpu samples.
         mark_d3d_post_end(d3d_timer);
-        // The snapshots retain the completed analysis domain. An ROI completion is crop-local and
-        // is authenticated together with its exact full-source embedding by Dump 3D.
         if (snapshot_raw_model_depth) {
           coordinate_snapshot_valid =
             dispatch_parallax_v2_coordinate_diagnostic();
@@ -4495,6 +5033,8 @@ namespace models {
             "model-input"
           );
         }
+        // Every debug copy is now ordered after this completion's consumers and before estimator
+        // working resources can be reused.
         completed_frame_id = pending_frame_id;
         completed_input_region = pending_input_region;
         completed_frame_valid = true;
@@ -4521,26 +5061,12 @@ namespace models {
           coordinate_snapshot_valid,
           completed_input_region,
           completed_color_space,
-          completed_input_domain_reset,
-          completed_overlay_zero_plane_applied,
-          std::move(completed_overlay_plan)
+          completed_input_domain_reset
         );
       }
 
-      // Overlay sanitation and conservative max-pooling are part of model preprocessing and are
-      // included in the existing depth_preprocess_gpu interval when diagnostics are enabled.
       mark_d3d_pre_start(d3d_timer);
       ID3D11ShaderResourceView *analysis_input_srv = input_srv;
-      std::optional<host_sbs_overlay_plan_t> accepted_overlay_plan;
-      if (overlay_identity_matches &&
-          dispatch_overlay_analysis(input_srv, overlay_mask_snapshot.Get(), input_desc)) {
-        analysis_input_srv = sanitized_source_srv.Get();
-        accepted_overlay_plan = overlay_plan_snapshot;
-      } else {
-        // Validation/resource failure is atomic: neither exclusion nor the later zero-field
-        // consumer receives authority, and the calibrated ordinary source path remains intact.
-        clear_current_overlay_analysis();
-      }
 
       // 1. D3D11 Compute Shader: Resize & Normalize to NCHW FP32 Buffer (for CURRENT frame)
       context->CSSetShader(rgb_to_nchw_cs.Get(), nullptr, 0);
@@ -4558,15 +5084,58 @@ namespace models {
       ID3D11ShaderResourceView *null_srv = nullptr;
       context->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
       context->CSSetShaderResources(0, 1, &null_srv);
+
+      // The detector sees only the bottom 6:1 source crop. Resize and ImageNet/BGR normalization
+      // happen directly into the registered FP32 TensorRT input; no CPU pixels or readback exist.
+      bool ocr_frame_eligible =
+        ocr_available && ocr_preprocess_cs && ocr_preprocess_cbuffer &&
+        ocr_input_uav && cuda_ocr_in_res && cuda_ocr_out_res &&
+        target_w == static_cast<int>(subtitle_field_width) &&
+        target_h == static_cast<int>(subtitle_field_height);
+      const std::uint32_t ocr_crop_height = std::min(
+        input_desc.Height,
+        (input_desc.Width + 5u) / 6u
+      );
+      if (ocr_frame_eligible && ocr_crop_height != 0u) {
+        const std::array<std::uint32_t, 8> ocr_constants {
+          input_desc.Width,
+          input_desc.Height,
+          input_desc.Height - ocr_crop_height,
+          ocr_crop_height,
+          static_cast<std::uint32_t>(color_space),
+          0u,
+          0u,
+          0u,
+        };
+        context->UpdateSubresource(
+          ocr_preprocess_cbuffer.Get(), 0, nullptr, ocr_constants.data(), 0, 0);
+        context->CSSetShader(ocr_preprocess_cs.Get(), nullptr, 0);
+        context->CSSetConstantBuffers(0, 1, ocr_preprocess_cbuffer.GetAddressOf());
+        context->CSSetShaderResources(0, 1, &analysis_input_srv);
+        context->CSSetUnorderedAccessViews(
+          0, 1, ocr_input_uav.GetAddressOf(), nullptr);
+        context->Dispatch(
+          (ocr_engine_width + 15) / 16,
+          (ocr_engine_height + 15) / 16,
+          1
+        );
+        context->CSSetUnorderedAccessViews(0, 1, null_uavs, nullptr);
+        context->CSSetShaderResources(0, 1, &null_srv);
+        ID3D11Buffer *null_cbuffer = nullptr;
+        context->CSSetConstantBuffers(0, 1, &null_cbuffer);
+      } else {
+        ocr_frame_eligible = false;
+      }
       end_d3d_perf(d3d_timer);
       // No explicit Flush: cuGraphicsMapResources() below already guarantees the
       // preceding D3D11 compute work completes before the CUDA stream reads the buffer.
       // Force-flushing every frame only prevents the driver from interleaving other GPU
       // consumers (DWM / Edge / the Widgets panel), which starves them and can trigger a TDR.
 
-      // 2. CUDA Execution (for CURRENT frame)
-      CUgraphicsResource resources[2] = {cuda_in_res, cuda_out_res};
-      auto map_res = cuda.cuGraphicsMapResources(2, resources, cu_stream);
+      // 2. CUDA Execution (for CURRENT frame). Depth remains mandatory; optional OCR maps
+      // separately so an interop failure in the detector cannot suppress the depth completion.
+      CUgraphicsResource depth_resources[2] = {cuda_in_res, cuda_out_res};
+      auto map_res = cuda.cuGraphicsMapResources(2, depth_resources, cu_stream);
       if (map_res != 0) {
         BOOST_LOG(error) << "cuGraphicsMapResources failed: " << map_res;
         mark_terminal_failure();
@@ -4579,10 +5148,26 @@ namespace models {
           coordinate_snapshot_valid,
           completed_input_region,
           completed_color_space,
-          completed_input_domain_reset,
-          completed_overlay_zero_plane_applied,
-          std::move(completed_overlay_plan)
+          completed_input_domain_reset
         );
+      }
+
+      CUgraphicsResource ocr_resources[2] = {cuda_ocr_in_res, cuda_ocr_out_res};
+      bool ocr_mapped = false;
+      if (ocr_frame_eligible) {
+        const auto ocr_map = cuda.cuGraphicsMapResources(2, ocr_resources, cu_stream);
+        if (ocr_map == CUDA_SUCCESS) {
+          ocr_mapped = true;
+        } else {
+          ocr_available = false;
+          ocr_frame_eligible = false;
+          if (!ocr_error_logged) {
+            BOOST_LOG(warning)
+              << "PP-OCRv6 tiny interop map failed (" << ocr_map
+              << "); depth remains active and subtitle conditioning stays flat.";
+            ocr_error_logged = true;
+          }
+        }
       }
 
       CUdeviceptr d_in = 0;
@@ -4598,7 +5183,19 @@ namespace models {
         cuda_out_res
       );
 
+      CUdeviceptr d_ocr_in = 0;
+      CUdeviceptr d_ocr_out = 0;
+      CUresult ocr_in_ptr_res = CUDA_ERROR_NOT_READY;
+      CUresult ocr_out_ptr_res = CUDA_ERROR_NOT_READY;
+      if (ocr_mapped) {
+        ocr_in_ptr_res = cuda.cuGraphicsResourceGetMappedPointer(
+          &d_ocr_in, nullptr, cuda_ocr_in_res);
+        ocr_out_ptr_res = cuda.cuGraphicsResourceGetMappedPointer(
+          &d_ocr_out, nullptr, cuda_ocr_out_res);
+      }
+
       bool enqueued = false;
+      bool ocr_enqueued = false;
       if (in_ptr_res != CUDA_SUCCESS || out_ptr_res != CUDA_SUCCESS || !d_in || !d_out) {
         BOOST_LOG(error) << "Failed to get mapped pointer for TensorRT: "
                          << in_ptr_res << ", " << out_ptr_res;
@@ -4642,10 +5239,44 @@ namespace models {
             stream_error_logged = true;
           }
         }
+        bool ocr_bindings_ok = ocr_mapped && ocr_exec_context &&
+                               ocr_in_ptr_res == CUDA_SUCCESS &&
+                               ocr_out_ptr_res == CUDA_SUCCESS &&
+                               d_ocr_in && d_ocr_out;
+        if (ocr_bindings_ok && !ocr_shape_bound) {
+          ocr_bindings_ok = ocr_exec_context->setInputShape(
+            "x", make_input_dims(ocr_engine_height, ocr_engine_width));
+          ocr_shape_bound = ocr_bindings_ok;
+        }
+        if (ocr_bindings_ok && ocr_bound_input != d_ocr_in) {
+          ocr_bindings_ok = ocr_exec_context->setTensorAddress(
+            "x", reinterpret_cast<void *>(d_ocr_in));
+          if (ocr_bindings_ok) {
+            ocr_bound_input = d_ocr_in;
+          }
+        }
+        if (ocr_bindings_ok && ocr_bound_output != d_ocr_out) {
+          ocr_bindings_ok = ocr_exec_context->setTensorAddress(
+            "fetch_name_0", reinterpret_cast<void *>(d_ocr_out));
+          if (ocr_bindings_ok) {
+            ocr_bound_output = d_ocr_out;
+          }
+        }
+        if (ocr_mapped && !ocr_bindings_ok) {
+          ocr_available = false;
+          ocr_context_poisoned = true;
+          if (!ocr_error_logged) {
+            BOOST_LOG(warning)
+              << "PP-OCRv6 tiny fixed-shape tensor binding failed; depth remains active and "
+                 "subtitle conditioning stays flat.";
+            ocr_error_logged = true;
+          }
+        }
+
         if (bindings_ok) {
           // Serialize TensorRT async enqueue to avoid driver-level concurrent execution faults
           std::lock_guard<std::mutex> lock(*trt_mutex);
-          int perf_slot = perf_begin(perf_depth, cu_stream);
+          int depth_perf_slot = perf_begin(perf_depth, cu_stream);
           enqueued = enqueue_inference(
             d_in,
             d_out,
@@ -4659,29 +5290,50 @@ namespace models {
               stream_error_logged = true;
             }
           }
-          perf_end(perf_depth, perf_slot, cu_stream);
+          perf_end(perf_depth, depth_perf_slot, cu_stream);
+          if (enqueued && ocr_bindings_ok) {
+            ocr_enqueued = ocr_exec_context->enqueueV3(cu_stream);
+            if (!ocr_enqueued) {
+              ocr_available = false;
+              ocr_context_poisoned = true;
+              if (!ocr_error_logged) {
+                BOOST_LOG(warning)
+                  << "PP-OCRv6 tiny enqueue failed; depth remains active and subtitle "
+                     "conditioning stays flat.";
+                ocr_error_logged = true;
+              }
+            }
+          }
         }
       }
 
-      auto unmap_res = cuda.cuGraphicsUnmapResources(2, resources, cu_stream);
+      CUresult ocr_unmap_res = CUDA_SUCCESS;
+      if (ocr_mapped) {
+        ocr_unmap_res = cuda.cuGraphicsUnmapResources(2, ocr_resources, cu_stream);
+      }
+      auto unmap_res = cuda.cuGraphicsUnmapResources(2, depth_resources, cu_stream);
       if (unmap_res != CUDA_SUCCESS) {
         BOOST_LOG(error) << "cuGraphicsUnmapResources failed: " << unmap_res;
         mark_terminal_failure(true);
         enqueued = false;
       }
+      if (ocr_unmap_res != CUDA_SUCCESS) {
+        BOOST_LOG(error)
+          << "PP-OCRv6 tiny interop unmap failed on the shared CUDA stream: "
+          << ocr_unmap_res;
+        ocr_context_poisoned = true;
+        mark_terminal_failure(true);
+        enqueued = false;
+        ocr_enqueued = false;
+      }
 
       has_previous_frame = enqueued;
+      pending_ocr_submitted = enqueued && ocr_enqueued;
       if (enqueued) {
         // Retain the exact private matched-frame color SRV across asynchronous TensorRT execution.
-        // The next normalize_depth_output() uses it only for local, full-resolution ownership
-        // evidence and releases it immediately after submitting that D3D11 pass.
+        // The next normalize_depth_output() uses it for local, full-resolution ownership evidence
+        // and releases it immediately after submitting that D3D11 pass.
         pending_source_srv = analysis_input_srv;
-        pending_overlay_plan = std::move(accepted_overlay_plan);
-        if (pending_overlay_plan) {
-          pending_overlay_mask_srv = overlay_mask_snapshot;
-        } else {
-          pending_overlay_mask_srv.Reset();
-        }
         pending_color_space = color_space;
         pending_frame_id = frame_id;
         pending_input_region = input_region;
@@ -4690,8 +5342,6 @@ namespace models {
         }
       } else {
         pending_source_srv.Reset();
-        pending_overlay_mask_srv.Reset();
-        pending_overlay_plan.reset();
       }
 
       return make_result(
@@ -4703,9 +5353,7 @@ namespace models {
         coordinate_snapshot_valid,
         completed_input_region,
         completed_color_space,
-        completed_input_domain_reset,
-        completed_overlay_zero_plane_applied,
-        std::move(completed_overlay_plan)
+        completed_input_domain_reset
       );
     }
   };
@@ -4739,16 +5387,14 @@ namespace models {
     input_color_space color_space,
     std::uint64_t frame_id,
     bool snapshot_debug_inputs,
-    depth_input_region_t input_region,
-    depth_overlay_mask_input_t overlay_mask
+    depth_input_region_t input_region
   ) {
     return pimpl->estimate(
       input_srv,
       color_space,
       frame_id,
       snapshot_debug_inputs,
-      input_region,
-      std::move(overlay_mask)
+      input_region
     );
   }
 

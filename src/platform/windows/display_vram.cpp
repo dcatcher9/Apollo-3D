@@ -918,8 +918,9 @@ namespace platf::dxgi {
             )
           ) {
             BOOST_LOG(error)
-              << "Host SBS rejected a depth completion whose input region does not match "sv
-                 "its exact buffered color frame; rendering current-frame identity."sv;
+              << "Host SBS rejected a depth completion whose input region does not match its "sv
+                 "exact buffered color frame; "sv
+                 "rendering current-frame identity."sv;
             matched_render_slot = nullptr;
             est = {};
             render_input_srv = img_ctx.encoder_input_res.get();
@@ -1242,18 +1243,11 @@ namespace platf::dxgi {
                  "package exists."sv;
             sbs_dumper.reject_pending_request();
           }
-          if (snapshot_debug_inputs && est.overlay_plan) {
-            BOOST_LOG(warning)
-              << "Dump 3D request rejected: schema 13 cannot authenticate the active "sv
-                 "burned-in-overlay mask, sanitized DAV2 input, loose zero-plane rectangles, "sv
-                 "or conditioned final field."sv;
-            sbs_dumper.reject_pending_request();
-          }
           if (!repeat_matched_output) {
             const bool complete_dump_snapshot =
               matched_render_slot && dump_warp_depth && est.model_input_snapshot &&
               est.raw_model_depth_snapshot && est.raw_model_provenance &&
-              !est.overlay_plan && v2_renderer_selected &&
+              v2_renderer_selected &&
               models::parallax_v2_result_is_authenticated(est);
             const bool dump_frame_valid =
               complete_dump_snapshot &&
@@ -1322,7 +1316,12 @@ namespace platf::dxgi {
                   est.shadow_vertical_majorant.Get();
                 dump_frame.shadow_vertical_conditioned =
                   est.shadow_vertical_conditioned.Get();
+                dump_frame.shadow_base_final_parallax =
+                  est.shadow_base_final_parallax.Get();
                 dump_frame.shadow_final_parallax = est.shadow_final_parallax.Get();
+                dump_frame.ocr_box_record = est.ocr_box_record.Get();
+                dump_frame.subtitle_locator_state =
+                  est.subtitle_locator_state.Get();
                 dump_frame.shadow_state = est.shadow_state.Get();
                 dump_frame.shadow_frame_stats = est.shadow_frame_stats.Get();
                 dump_frame.raw_model_provenance = est.raw_model_provenance;
@@ -1336,8 +1335,6 @@ namespace platf::dxgi {
                 dump_frame.depth_input_region = est.input_region;
                 dump_frame.depth_video_plan = matched_render_slot->depth_video_plan;
                 dump_frame.input_domain_reset = est.input_domain_reset;
-                dump_frame.overlay_conditioning_active =
-                  static_cast<bool>(est.overlay_plan);
                 dump_frame.window_video_border =
                   matched_render_slot->window_video_border;
                 dump_frame.window_video_observer_status =
@@ -2106,6 +2103,18 @@ namespace platf::dxgi {
       };
     }
 
+    static bool window_video_border_has_route_authority(
+      const video_dom::status_e status,
+      const sbs_debug::window_video_border_snapshot &border,
+      const D3D11_TEXTURE2D_DESC &source_desc
+    ) noexcept {
+      const bool exactly_full_capture =
+        border.left == 0 && border.top == 0 &&
+        static_cast<std::uint32_t>(border.right) == source_desc.Width &&
+        static_cast<std::uint32_t>(border.bottom) == source_desc.Height;
+      return video_dom::allows_mapped_video_rect(status, exactly_full_capture);
+    }
+
     std::uint64_t video_depth_analysis_generation(
       const models::video_depth_domain_key_t &key
     ) noexcept {
@@ -2220,7 +2229,14 @@ namespace platf::dxgi {
       slot.depth_video_plan.reset();
       slot.depth_input_region = full_depth_input_region(source_desc);
 
-      if (slot.window_video_border) {
+      if (
+        slot.window_video_border &&
+        window_video_border_has_route_authority(
+          slot.window_video_status,
+          *slot.window_video_border,
+          source_desc
+        )
+      ) {
         const auto &border = *slot.window_video_border;
         const models::depth_source_rect_t semantic_rect {
           static_cast<std::uint32_t>(border.left),
@@ -2228,6 +2244,21 @@ namespace platf::dxgi {
           static_cast<std::uint32_t>(border.right),
           static_cast<std::uint32_t>(border.bottom),
         };
+        const auto make_video_domain_key =
+          [&](const models::depth_source_rect_t analysis_rect) {
+            return models::video_depth_domain_key_t {
+              .source_width = source_desc.Width,
+              .source_height = source_desc.Height,
+              .semantic_width = semantic_rect.width(),
+              .semantic_height = semantic_rect.height(),
+              .crop_width = analysis_rect.width(),
+              .crop_height = analysis_rect.height(),
+              .hwnd = border.hwnd,
+              .process_id = border.process_id,
+              .document_id = border.document_id,
+              .video_id = border.video_id,
+            };
+          };
         const auto active_shape = models::fit_host_sbs_v2_depth_tensor_shape(
           source_desc.Width,
           source_desc.Height
@@ -2239,18 +2270,7 @@ namespace platf::dxgi {
           active_shape
         );
         if (plan && copy_video_depth_crop(slot, source_desc, plan->source_rect)) {
-          const models::video_depth_domain_key_t key {
-            .source_width = source_desc.Width,
-            .source_height = source_desc.Height,
-            .semantic_width = semantic_rect.width(),
-            .semantic_height = semantic_rect.height(),
-            .crop_width = plan->source_rect.width(),
-            .crop_height = plan->source_rect.height(),
-            .hwnd = border.hwnd,
-            .process_id = border.process_id,
-            .document_id = border.document_id,
-            .video_id = border.video_id,
-          };
+          const auto key = make_video_domain_key(plan->source_rect);
           slot.depth_input_region = models::depth_input_region_t {
             .source_width = source_desc.Width,
             .source_height = source_desc.Height,
@@ -2263,6 +2283,7 @@ namespace platf::dxgi {
           };
           slot.depth_video_plan = std::move(plan);
         }
+
       }
 
       if (!slot.depth_input_region.video_region) {
@@ -2283,6 +2304,7 @@ namespace platf::dxgi {
         matched_output_timeout_active = false;
       }
     }
+
 
     std::optional<sbs_debug::window_video_border_snapshot>
     capture_window_video_border(
@@ -2316,7 +2338,7 @@ namespace platf::dxgi {
           maximum_age
         )
       ) {
-        if (video_status == video_dom::status_e::ok) {
+        if (video_dom::carries_video_geometry(video_status)) {
           video_status = video_dom::status_e::stale;
         }
         return std::nullopt;
@@ -2427,7 +2449,8 @@ namespace platf::dxgi {
       if (slot.window_video_border) {
         if (
           !last_window_video_border ||
-          !same_window_video_border(*last_window_video_border, *slot.window_video_border)
+          !same_window_video_border(*last_window_video_border, *slot.window_video_border) ||
+          observer_state_changed
         ) {
           const auto &border = *slot.window_video_border;
           BOOST_LOG(info)
@@ -2454,6 +2477,18 @@ namespace platf::dxgi {
               << plan.tensor_shape.height << " inward_trim_pct="sv
               << plan.trimmed_area_fraction * 100.0f
               << "; scene cuts and scene center are video-local."sv;
+          } else if (
+            border.left == 0 && border.top == 0 &&
+            border.right == border.source_width &&
+            border.bottom == border.source_height
+          ) {
+            BOOST_LOG(info)
+              << "Host SBS semantic video covers the exact capture extent; using canonical "sv
+                 "ordinary full-frame V2."sv;
+          } else if (slot.window_video_status == video_dom::status_e::ok_fullscreen) {
+            BOOST_LOG(info)
+              << "Host SBS fullscreen-only browser-client authority does not map to the exact "sv
+                 "capture extent; the windowed ROI remains disabled."sv;
           } else {
             BOOST_LOG(info)
               << "Host SBS video border is not eligible for the active authenticated tensor; "sv

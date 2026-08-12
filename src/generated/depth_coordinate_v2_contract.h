@@ -10,10 +10,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 27u;
-  inline constexpr std::uint32_t contract_tag = 0x1A28FDA1u;
-  inline constexpr std::string_view contract_canonical_sha256 = "6ecebd79f92c7bce3fbaf80c5c9e52fe2193e65baf1574f5b99fbf3a6f0a681e";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "1a28fda150d9ab42c7b6bc866168c6604a168b48044a563c657f95f44dbd3cdb";
+  inline constexpr std::uint32_t contract_schema = 40u;
+  inline constexpr std::uint32_t contract_tag = 0xF7C853C2u;
+  inline constexpr std::string_view contract_canonical_sha256 = "5c7116be0004e33e24f150430d85e06b9eb66782b4fc3b059501e04093835d9e";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "f7c853c22015d4bc3e34980da4d7e52e20f8379dcb7cc463a207e18989dfff17";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -22,10 +22,67 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t capture_provenance_schema = 3u;
   inline constexpr std::string_view capture_provenance_manifest_key = "raw_model_provenance";
   inline constexpr std::string_view capture_provenance_binding = "raw-depth-model-input-and-preprocess-source-produced-by-calibrated-identity-v3";
+  inline constexpr std::uint32_t subtitle_ocr_contract_schema = 1u;
+  inline constexpr std::string_view subtitle_ocr_model_name = "ppocrv6_tiny_det";
+  inline constexpr std::string_view subtitle_ocr_model_url = "https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det_onnx/resolve/2ba1506c0380b8f0b03dd142459aac66d4421f6c/inference.onnx?download=true";
+  inline constexpr std::string_view subtitle_ocr_onnx_sha256 = "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8";
+  inline constexpr std::string_view subtitle_ocr_engine_recipe = "trt-strong-fp32-tf32-fixed960x160-level5-v1";
+  inline constexpr std::string_view subtitle_ocr_preprocess_profile = "apollo-ppocrv6-bottom-6x1-bgr-imagenet-v1";
+  inline constexpr std::string_view subtitle_ocr_source_crop = "bottom-6:1";
+  inline constexpr std::string_view subtitle_ocr_input_name = "x";
+  inline constexpr std::string_view subtitle_ocr_input_dtype = "float32";
+  inline constexpr std::string_view subtitle_ocr_input_layout = "NCHW";
+  inline constexpr std::uint32_t subtitle_ocr_input_n = 1u;
+  inline constexpr std::uint32_t subtitle_ocr_input_c = 3u;
+  inline constexpr std::uint32_t subtitle_ocr_input_height = 160u;
+  inline constexpr std::uint32_t subtitle_ocr_input_width = 960u;
+  inline constexpr std::array<std::string_view, 3> subtitle_ocr_input_channels {{"B", "G", "R"}};
+  inline constexpr std::array<double, 3> subtitle_ocr_imagenet_mean {{0.485, 0.456, 0.406}};
+  inline constexpr std::array<double, 3> subtitle_ocr_imagenet_std {{0.229, 0.224, 0.225}};
+  inline constexpr std::string_view subtitle_ocr_output_name = "fetch_name_0";
+  inline constexpr std::string_view subtitle_ocr_output_dtype = "float32";
+  inline constexpr std::string_view subtitle_ocr_output_layout = "NCHW";
+  inline constexpr std::uint32_t subtitle_ocr_output_n = 1u;
+  inline constexpr std::uint32_t subtitle_ocr_output_c = 1u;
+  inline constexpr std::uint32_t subtitle_ocr_output_height = 160u;
+  inline constexpr std::uint32_t subtitle_ocr_output_width = 960u;
+  inline constexpr std::uint32_t subtitle_ocr_record_schema = 1u;
+  inline constexpr std::uint32_t subtitle_ocr_record_tag = 0x3652434Fu;
+  inline constexpr std::uint32_t subtitle_ocr_record_word_count = 208u;
+  inline constexpr std::uint32_t subtitle_ocr_record_header_word_count = 16u;
+  inline constexpr std::uint32_t subtitle_ocr_box_word_count = 8u;
+  inline constexpr std::uint32_t subtitle_ocr_raw_box_offset = 16u;
+  inline constexpr std::uint32_t subtitle_ocr_raw_box_capacity = 16u;
+  inline constexpr std::uint32_t subtitle_ocr_final_box_offset = 144u;
+  inline constexpr std::uint32_t subtitle_ocr_final_box_capacity = 8u;
+  inline constexpr std::uint32_t subtitle_ocr_field_width = 770u;
+  inline constexpr std::uint32_t subtitle_ocr_field_height = 434u;
+  inline constexpr std::uint32_t subtitle_ocr_roi_top = 325u;
+  inline constexpr std::uint32_t subtitle_ocr_roi_bottom = 430u;
+  inline constexpr std::uint32_t subtitle_locator_state_schema = 6u;
+  inline constexpr std::uint32_t subtitle_locator_state_tag = 0x36524C53u;
+  inline constexpr std::uint32_t subtitle_locator_state_word_count = 80u;
+  inline constexpr std::uint32_t subtitle_locator_header_word_count = 32u;
+  inline constexpr std::uint32_t subtitle_locator_rectangle_capacity = 4u;
+  inline constexpr std::uint32_t subtitle_locator_owner_offset = 32u;
+  inline constexpr std::uint32_t subtitle_locator_pending_offset = 48u;
+  inline constexpr std::uint32_t subtitle_locator_current_offset = 64u;
+  static_assert(subtitle_ocr_input_n == 1u && subtitle_ocr_input_c == 3u);
+  static_assert(subtitle_ocr_output_n == 1u && subtitle_ocr_output_c == 1u);
+  static_assert(subtitle_ocr_final_box_offset == subtitle_ocr_raw_box_offset +
+                subtitle_ocr_raw_box_capacity * subtitle_ocr_box_word_count);
+  static_assert(subtitle_ocr_record_word_count == subtitle_ocr_final_box_offset +
+                subtitle_ocr_final_box_capacity * subtitle_ocr_box_word_count);
+  static_assert(subtitle_locator_pending_offset == subtitle_locator_owner_offset +
+                subtitle_locator_rectangle_capacity * 4u);
+  static_assert(subtitle_locator_current_offset == subtitle_locator_pending_offset +
+                subtitle_locator_rectangle_capacity * 4u);
+  static_assert(subtitle_locator_state_word_count == subtitle_locator_current_offset +
+                subtitle_locator_rectangle_capacity * 4u);
   inline constexpr std::uint32_t shader_source_closure_schema = 2u;
   inline constexpr std::uint32_t shader_source_compile_flags = 34816u;
   inline constexpr std::uint32_t shader_source_macro_count = 0u;
-  inline constexpr std::string_view shader_source_closure_sha256 = "352f9b8de5e063427d48780130680756cba8b84cb2885ee9cd63a7a2e46b1f0f";
+  inline constexpr std::string_view shader_source_closure_sha256 = "861f800db1cc06a6d25b80d18bb1b7bf4bc469ed1ccfacfd96a0b384bfb2a7a1";
 
   struct shader_source_spec_t {
     std::string_view source_file;
@@ -33,10 +90,8 @@ namespace models::depth_coordinate_v2 {
     std::string_view source_target;
   };
 
-  inline constexpr std::array<shader_source_spec_t, 19> shader_source_specs {{
+  inline constexpr std::array<shader_source_spec_t, 21> shader_source_specs {{
     {"rgb_to_nchw_cs.hlsl", "main", "cs_5_0"},
-    {"depth_overlay_analysis_cs.hlsl", "sanitize_main", "cs_5_0"},
-    {"depth_overlay_analysis_cs.hlsl", "exclusion_main", "cs_5_0"},
     {"buffer_to_tex_cs.hlsl", "main", "cs_5_0"},
     {"depth_ema_motion_cs.hlsl", "main", "cs_5_0"},
     {"depth_minmax_cs.hlsl", "main", "cs_5_0"},
@@ -52,7 +107,11 @@ namespace models::depth_coordinate_v2 {
     {"depth_coordinate_v2_ownership_cs.hlsl", "main", "cs_5_0"},
     {"depth_coordinate_v2_vertical_limit_cs.hlsl", "main", "cs_5_0"},
     {"depth_coordinate_v2_limit_cs.hlsl", "main", "cs_5_0"},
-    {"depth_coordinate_v2_overlay_zero_plane_cs.hlsl", "main", "cs_5_0"},
+    {"host_sbs_ocr_preprocess_cs.hlsl", "main", "cs_5_0"},
+    {"host_sbs_ocr_boxes_cs.hlsl", "cells_main", "cs_5_0"},
+    {"host_sbs_ocr_boxes_cs.hlsl", "resolve_main", "cs_5_0"},
+    {"host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"},
+    {"host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"},
   }};
 
   inline constexpr float collapse_abs_epsilon = 1e-06f;

@@ -17,12 +17,16 @@ pop, a frame-local parallax container, conservative foreground ownership, bounde
 horizontal cliff conditioning, and a unique contractive inverse. Invalid or unauthenticated
 geometry renders flat; there is no older fallback.
 
-On Desktop Duplication, a fresh exact matched-frame rectangle for the unique largest `<video>` in
-the foreground Chrome or Edge document may replace full-frame analysis with one same-format crop.
-The detected rectangle can be trimmed inward by at most 2% of its area to the current authenticated
-tensor aspect; it is never padded or stretched. A rectangle equal to the capture extent canonicalizes
-to ordinary full-frame V2 with no crop or domain reset. Other ROI-eligibility failures also retain
-full-frame analysis; an internal base-V2 authentication failure still renders flat.
+On Desktop Duplication, a fresh exact matched-frame rectangle for the unique largest fully contained
+`<video>` in the foreground Chrome or Edge document may replace full-frame analysis with one
+same-format crop. The detected rectangle can be trimmed inward by at most 2% of its area to the
+current authenticated tensor aspect; it is never padded or stretched. True fullscreen has separate
+semantic authority: an available video may cover the complete foreground browser client despite
+element overscan, document-rectangle clipping, or multiple full-cover clones, but the host still
+requires that client rectangle to map exactly to the capture. That admitted case canonicalizes to
+ordinary full-frame V2 with no crop or domain reset. A maximized/full-source browser without this
+proof and every other ROI-eligibility failure retain unauthoritative full-frame analysis; an internal
+base-V2 authentication failure still renders flat.
 
 The complete implementation contract is in [Host SBS pipeline](host-sbs.md). Scene-cut behavior is
 owned by [Host SBS scene cuts](host-sbs-scene-cuts.md).
@@ -53,32 +57,24 @@ reached with at most 2% area trimming.
 
 ### Foreground browser ROI boundary
 
-The ROI is intentionally narrow in scope: foreground Chrome/Edge, Desktop Duplication, one uniquely
-largest accessible `<video>`, fully on one monitor, and an exact causally matched frame. Paused video
-is supported because selection follows DOM identity rather than playback activity. Background
-windows/tabs, equal-largest videos, stale or ambiguous accessibility data, WGC, unsupported aspect
-fits, and partially off-monitor rectangles use full-frame V2.
+The windowed ROI is intentionally narrow in scope: foreground Chrome/Edge, Desktop Duplication, one
+uniquely largest accessible `<video>` fully contained by its document and browser client, fully on
+one monitor, and an exact causally matched frame. Paused video is supported because selection
+follows DOM identity rather than playback activity. Background windows/tabs, equal-largest windowed
+videos, stale or ambiguous accessibility data, WGC, unsupported aspect fits, and partially
+off-monitor rectangles use full-frame V2. Independently, a semantic video covering the complete
+foreground client can authorize true fullscreen even with overscan, document clipping, or duplicate
+full-cover clones; the host accepts it only when that client maps exactly to the capture.
 
-The route has no compositor-visible-region oracle. A CSS/player overlay captured inside an otherwise
-authorized rectangle is analyzed as part of that crop unless an exact-frame burned-in-overlay plan
-supplies the authenticated analysis mask and zero-plane geometry. The known-mask consumer is now
-part of Depth Coordinate schema 27; automatic full-resolution subtitle/logo detection is still
-pending, and the host does not reconstruct hidden video.
+The helper reports strict windowed evidence as `ok` and relaxed full-client evidence as
+`ok-fullscreen`. The latter can never authorize a mapped subrectangle as an ROI. Switching between
+the two authority classes clears live-detector lineage even when the semantic IDs and extents match.
 
-The crop owns DAV2, ownership, scene center, cuts, and temporal histories, while the renderer keeps
-the full color frame. ROI parallax is converted back to full-source pixel scale; its interior is
-unchanged, and an outside-only slope-limited collar reaches exact screen-plane disparity in the
-surround. The collar is the minimum continuity cost at a nonzero ROI edge, not inferred video depth.
-Dump 3D schema 13 serializes the crop-local model/depth fields and their authenticated full-source
-placement separately. ROI packages require the exact full-source inverse map so the screen-plane
-surround beyond the collar can be verified rather than inferred. A full-capture semantic video
-rectangle remains canonical full-frame V2.
-
-For an accepted known mask, the original source color stays untouched. An inference-only local fill
-feeds DAV2, affected tensor cells abstain from cuts/center/ownership, and the final post-limit field
-is exactly zero inside loose rectangles with the required slope-safe transition outside. Missing or
-mismatched analysis and geometry products disable the whole treatment for that frame and preserve
-ordinary V2. Dump 3D schema 13 rejects such active frames until it can serialize that authority.
+The route has no compositor-visible-region oracle. The current subtitle treatment therefore uses
+OCR6 bounded boxes and compact SLR6 owner/pending/current-authority rectangles at the authenticated
+DAV2 field shape. It does not retain the retired row-history or general overlay-detector pipelines.
+Unsupported identities and shapes preserve ordinary V2 exactly. Dump and replay accept only the
+current SLR6/OCR6 schema. The host does not reconstruct hidden video.
 
 ### Foreground crowns and disocclusion
 

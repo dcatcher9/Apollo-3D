@@ -1073,9 +1073,9 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
             input_contract.get("contract_schema") !=
             whole_clip_raw_contract.HARNESS_CONTRACT_SCHEMA or
             input_contract.get("model_hash_authority") !=
-            "schema-36-run-level-results-json" or
+            "schema-37-run-level-results-json" or
             input_contract.get("input_shape_authority") !=
-            "schema-36-per-clip-raw-manifest" or
+            "schema-37-per-clip-raw-manifest" or
             not isinstance(input_contract.get("depth_model_url"), str) or
             not input_contract["depth_model_url"].startswith("https://") or
             not isinstance(input_contract.get("preprocess_profile"), str) or
@@ -1091,7 +1091,7 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
         raise ValueError("sequence input evidence has unknown authority or invalid hashes")
     raw_hash_authority = input_contract.get("raw_hash_authority")
     if raw_hash_authority != {
-            "source": "schema-36-run-level-results-json",
+            "source": "schema-37-run-level-results-json",
             "manifest_schema": whole_clip_raw_contract.MANIFEST_SCHEMA,
             "binding": whole_clip_raw_contract.BINDING,
     }:

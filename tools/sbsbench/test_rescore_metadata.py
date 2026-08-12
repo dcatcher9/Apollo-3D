@@ -70,6 +70,7 @@ class RescoreMetadataTests(unittest.TestCase):
                 "contract_schema": run_eval.PARALLAX_V2_CONTRACT_SCHEMA,
                 "legacy_levers_applied": False,
             },
+            "raw_model_provenance": {"raw_width": 12, "raw_height": 8},
             "cut_state": {
                 "file": "cut_state.json", "schema": sbsbench.CUT_STATE_SCHEMA,
                 "capture": sbsbench.cut_state_contract.CAPTURE,

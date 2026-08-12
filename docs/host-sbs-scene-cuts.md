@@ -50,23 +50,30 @@ history, baselines, pending confirmation, and the scene camera before analysis r
 of the same crop without a size change retains the analysis domain and its histories; the exact
 matched-frame rectangle still determines where that frame is rendered. A missing, stale,
 unsupported, or partially off-monitor ROI selects full-frame V2. That resets state when leaving an
-active ROI, but repeated ineligible observations while already full-frame are not domain changes. A
-semantic rectangle exactly equal to the capture extent is already that canonical full-frame domain:
-it creates no crop, ROI transition, history reset, or camera reacquisition.
+active ROI, but repeated ineligible observations while already full-frame are not domain changes.
+Separately authenticated true fullscreen—an available semantic video covering the complete
+foreground browser client, with that client mapped exactly to the capture—is already the canonical
+full-frame domain: it creates no crop, ROI transition, history reset, or camera reacquisition. A
+maximized or otherwise full-source frame without that authority simply remains in the ordinary
+full-frame analysis domain; the bottom subtitle locator observes whichever domain V2 actually used.
 
-Within either domain, an exact-frame burned-in-overlay plan may exclude tensor cells without
-creating a new scene domain. The tight/dilated full-resolution mask is max-pooled with exact
-positive-overlap resize support. Every excluded cell abstains from normalized-depth change, raw
-appearance, ordinal evidence, EMA-motion snapping, V2 moments, and scene-center acquisition. Cut
-comparisons use the union of current and previous exclusion masks for the center and all four
-ordinal neighbors, so appearance, replacement, or disappearance of a subtitle/logo cannot leak
-through an endpoint. All evidence fractions use the remaining eligible support as their
-denominator. A partially non-finite eligible set invalidates the update rather than quietly
-shrinking that denominator; a wholly excluded frame preserves the prior scene state.
+The helper labels relaxed full-client evidence `ok-fullscreen`, distinct from strict `ok` ROI
+evidence. The host rejects an `ok-fullscreen` subrectangle. Any real input-domain transition resets
+the subtitle locator together with the ordinary cut and camera histories.
 
-The exclusion plan is frame-local authority, not a history reset. A missing, mismatched, stale, or
-resource-incomplete plan uses the ordinary unmasked path atomically; it never sanitizes pixels
-without also guaranteeing the post-limit zero-plane treatment for those same source pixels.
+The production subtitle path applies no overlay exclusion to cut evidence or DAV2. Subtitle
+appearance and disappearance remain ordinary scene evidence; the locator consumes the
+already-resolved cut result and can neither suppress nor retroactively change it.
+
+The production detector-only PP-OCRv6/OCR6/SLR6 subtitle path has no private cut classifier. It
+consumes the finalized same-frame CutBridge result. A confirmed cut clears pending and death-grace
+state, preserves only current OCR rectangles that still match an old owner, and forces a fresh
+plane-target sample; additions or disjoint boxes start a new two-observation transaction. An
+input-domain reset clears the owner too and records current boxes only as the first pending
+observation. Missing, stale, abstaining, or mismatched OCR6 evidence clears current subtitle
+authority and copies the ordinary post-limit field exactly. There is no preprocessing exclusion,
+recognizer, subtitle-driven cut veto, or pause branch.
+
 
 ## Appearance proposals
 
@@ -219,9 +226,16 @@ The committed conformance clips must prove at least these contracts:
 - full-frame-to-ROI, ROI-to-full-frame, identity, crop-size, and transfer-domain changes clear old
   evidence instead of emitting a synthetic cut;
 - a pure on-screen translation of the same-sized ROI retains the camera and cut histories while
-  binding geometry to the new exact matched-frame rectangle; and
-- an exact full-capture semantic rectangle remains in the ordinary full-frame domain without a
-  reset or camera reacquisition.
+  binding geometry to the new exact matched-frame rectangle;
+- an authenticated true-fullscreen client mapping remains in the ordinary full-frame domain without
+  a reset or camera reacquisition, while a merely maximized/full-source browser has no detector
+  authority;
+- a stable lower OCR line stack acquires only after two compatible observations with distinct exact
+  frame/domain identities; redispatching one record cannot self-confirm;
+- a hard cut clears pending/grace, preserves only same-frame rectangles that still overlap an old
+  owner, and forces a new target sample; disjoint or appended lines remain pending; and
+- a no-owner cut or input reset landing on an already-visible static subtitle records the first box
+  stack as pending and can acquire it on the next compatible distinct observation.
 
 Run the production evaluator and the scene-cut unit tests after changing the evidence shader,
 thresholds, state resolver, preprocessing order, or history layout:
@@ -252,8 +266,18 @@ Exercise each sequence for at least 20 seconds and finish with five seconds of a
 14. Enter and leave the foreground-Chromium ROI route, including an unsupported-aspect fallback.
 15. Move a same-sized video window without changing its content, then resize it across an analysis
     domain boundary.
-16. Maximize the semantic video rectangle to the exact capture extent and verify ordinary full-frame
-    continuity rather than an ROI transition.
+16. Enter semantic true fullscreen and verify that the foreground client maps exactly to the capture
+    and preserves ordinary full-frame continuity rather than creating an ROI transition; repeat with
+    only a maximized/full-source browser and verify no detector authority.
+17. With no subtitle owner, land a cut and then an input-domain reset on an already-visible static
+    subtitle; verify first-observation pending, second-distinct-observation acquisition, and exact
+    Base on the pending frame.
+18. Introduce subtitle-like lower-frame scene text during a textured pan. Verify that moving boxes
+    fail the two-observation overlap transaction, then explicitly check the known false-positive
+    boundary where a detector publishes a stable horizontal box for two observations.
+19. Acquire one line, append a delayed translated line, and remove it again. Verify that the first
+    line retains same-frame authority, the appended stack needs two observations, each line remains
+    a separate dense rectangle, and empty/missed current OCR returns exact Base immediately.
 
 Repeat representative cases in SDR and HDR and across authenticated landscape, ultrawide, and
 portrait tensor shapes. Record frame identity, all evidence fractions, reason flags, arm/latch
@@ -264,3 +288,7 @@ The live contract passes when exposure-only changes never reacquire the camera, 
 never pumps it, each qualified editorial cut creates exactly one camera acquisition, a cut during
 persistent motion remains observable, ROI-domain transitions cannot compare incompatible history,
 pure ROI translation does not reacquire the camera, and diagnostics add no GPU queue stall.
+The subtitle portion additionally requires two distinct exact-frame observations for birth and
+material handoff, static cut/reset recovery on the second observation, cut survival only for
+same-frame rectangles still matching the old owner, exact Base whenever current OCR authority is
+absent, and no geometry synthesized from owner, pending, target, or grace state.

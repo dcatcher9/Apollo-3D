@@ -530,8 +530,20 @@ def _prepare_highres_subtitle_oracle_output(out):
     return tuple(outputs)
 
 
+def _prepare_standard_subtitle_tight_mask_output(out):
+    """Create and clear the authored glyph-plus-outline mask for standard clips."""
+    directory = os.path.join(out, "gt_subtitle_overlay_mask")
+    os.makedirs(directory, exist_ok=True)
+    for filename in os.listdir(directory):
+        if filename.startswith("frame_") and filename.lower().endswith(
+                (".png", ".jpg", ".jpeg")):
+            os.remove(os.path.join(directory, filename))
+    return directory
+
+
 def _subtitle_clip(clip, variant):
     out, region_out = _prepare_subtitle_output(clip)
+    overlay_out = _prepare_standard_subtitle_tight_mask_output(out)
     for frame_id in range(1, N + 1):
         frame = _movie_background(frame_id, variant)
         glyph_rgb, glyph_mask, outline_mask, region_mask = _subtitle_layers(clip, frame_id)
@@ -541,6 +553,10 @@ def _subtitle_clip(clip, variant):
             os.path.join(out, f"frame_{frame_id:05d}.png"), compress_level=9)
         Image.fromarray(region_mask, mode="L").save(
             os.path.join(region_out, f"frame_{frame_id:05d}.png"), compress_level=9)
+        overlay_mask = np.zeros((H, W), dtype=np.uint8)
+        overlay_mask[glyph_mask | outline_mask] = 255
+        Image.fromarray(overlay_mask, mode="L").save(
+            os.path.join(overlay_out, f"frame_{frame_id:05d}.png"), compress_level=9)
 
 
 def subtitle_cjk_dense():
@@ -910,18 +926,17 @@ def clip_metadata(clip):
     if clip in SUBTITLE_STANDARD_CLIPS:
         return {
             "required_gt_subtitle_region": True,
-            "subtitle_target_disparity_pct": 0.0,
+            "required_gt_subtitle_tight_mask": True,
             "subtitle_cue_start_frames": list(SUBTITLE_CUE_START_FRAMES),
             "source_artifacts": [
-                "Authored burned-in subtitle pixels; region truth is intentionally loose rather "
-                "than glyph-tight."
+                "Authored burned-in subtitle pixels with both loose-region and exact "
+                "glyph-plus-outline mask truth."
             ],
         }
     if clip == SUBTITLE_HIGHRES_CLIP:
         return {
             "required_gt_subtitle_region": True,
             "required_gt_subtitle_sanitizer_oracle": True,
-            "subtitle_target_disparity_pct": 0.0,
             "subtitle_transition_contract": {
                 "kind": "highres-empty-appear-replace-disappear-hard-cut",
                 "source_size_px": [SUBTITLE_HIGHRES_W, SUBTITLE_HIGHRES_H],

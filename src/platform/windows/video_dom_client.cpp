@@ -84,6 +84,9 @@ namespace platf::video_dom {
       if (token == "ok") {
         return status_e::ok;
       }
+      if (token == "ok-fullscreen") {
+        return status_e::ok_fullscreen;
+      }
       if (token == "no-foreground") {
         return status_e::no_foreground;
       }
@@ -608,6 +611,8 @@ namespace platf::video_dom {
         return "starting";
       case status_e::ok:
         return "ok";
+      case status_e::ok_fullscreen:
+        return "ok-fullscreen";
       case status_e::no_foreground:
         return "no-foreground";
       case status_e::unsupported:
@@ -647,7 +652,7 @@ namespace platf::video_dom {
     const std::chrono::steady_clock::time_point now,
     const std::chrono::milliseconds maximum_age
   ) noexcept {
-    return snapshot.status == status_e::ok &&
+    return carries_video_geometry(snapshot.status) &&
            rect_valid(snapshot.screen_rect) &&
            snapshot.window != 0 && snapshot.process_id != 0 &&
            snapshot.document_id != 0 && snapshot.video_id != 0 &&
@@ -807,11 +812,12 @@ namespace platf::video_dom {
       const protocol_record_t &record,
       const std::chrono::steady_clock::time_point received_at
     ) noexcept {
-      if (record.status != status_e::ok) {
+      if (!carries_video_geometry(record.status)) {
         return {};
       }
       if (
-        previous && previous->status == status_e::ok &&
+        previous && previous->status == record.status &&
+        carries_video_geometry(previous->status) &&
         previous->geometry_valid_since.time_since_epoch().count() != 0 &&
         previous->window == record.window && previous->process_id == record.process_id &&
         previous->document_id == record.document_id && previous->video_id == record.video_id &&
@@ -873,7 +879,7 @@ namespace platf::video_dom {
       }
       record.status = *parsed_status;
 
-      if (record.status == status_e::ok) {
+      if (carries_video_geometry(record.status)) {
         if (
           record.window == 0 || record.process_id == 0 ||
           record.document_id == 0 || record.video_id == 0 ||

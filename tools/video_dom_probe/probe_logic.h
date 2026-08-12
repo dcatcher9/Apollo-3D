@@ -314,15 +314,29 @@ namespace video_dom_probe {
     long unique_id {};
     rect_t element_rect {};
     rect_t visible_rect {};
+    // Windowed ROI authority requires the element and its owning document to be
+    // available and fully contained. Fullscreen authority deliberately has a
+    // separate availability bit: a Chromium document can be clipped while its
+    // available <video> still covers the complete foreground client.
     bool available {};
     bool fully_contained {};
     bool credible_size {};
+    bool fullscreen_available {};
   };
+
+  [[nodiscard]] inline constexpr bool fullscreen_semantic_available(
+    bool video_state_available,
+    bool has_owning_document,
+    bool document_state_available
+  ) noexcept {
+    return video_state_available && has_owning_document && document_state_available;
+  }
 
   enum class selection_reason_e {
     none,
     single,
     largest,
+    fullscreen,
     ambiguous,
   };
 
@@ -336,7 +350,8 @@ namespace video_dom_probe {
   ) noexcept {
     return selection.index.has_value() &&
            (selection.reason == selection_reason_e::single ||
-            selection.reason == selection_reason_e::largest);
+            selection.reason == selection_reason_e::largest ||
+            selection.reason == selection_reason_e::fullscreen);
   }
 
   struct complete_census_policy_t {
@@ -420,6 +435,91 @@ namespace video_dom_probe {
     return {.index = largest_index, .reason = selection_reason_e::largest};
   }
 
+  // A true-fullscreen semantic authority is independent of windowed ROI selection. An available
+  // video may overscan the browser client and may belong to a document whose rectangle is clipped;
+  // neither condition makes the captured client any less fully covered. Equal fullscreen clones
+  // are therefore not ambiguous. Pick a stable IA2 identity so enumeration-order churn does not
+  // change the retained cache object or its semantic fingerprint.
+  [[nodiscard]] inline selection_t select_authority_candidate(
+    std::span<const video_candidate_t> candidates,
+    const rect_t &client_rect,
+    long coordinate_tolerance = 1
+  ) {
+    std::optional<std::size_t> fullscreen_index;
+    if (rect_valid(client_rect) && coordinate_tolerance >= 0) {
+      for (std::size_t index = 0; index < candidates.size(); ++index) {
+        const auto &candidate = candidates[index];
+        if (!candidate.fullscreen_available ||
+            !rect_contains_with_tolerance(
+              candidate.element_rect,
+              client_rect,
+              coordinate_tolerance
+            )) {
+          continue;
+        }
+        if (!fullscreen_index ||
+            candidate.unique_id < candidates[*fullscreen_index].unique_id) {
+          fullscreen_index = index;
+        }
+      }
+    }
+    if (fullscreen_index) {
+      return {
+        .index = *fullscreen_index,
+        .reason = selection_reason_e::fullscreen,
+      };
+    }
+    return select_candidate(candidates);
+  }
+
+  [[nodiscard]] inline std::optional<rect_t> selection_authority_rect(
+    std::span<const video_candidate_t> candidates,
+    const selection_t &selection,
+    const rect_t &client_rect,
+    long coordinate_tolerance = 1
+  ) noexcept {
+    if (!selection.index || *selection.index >= candidates.size()) {
+      return std::nullopt;
+    }
+    const auto &candidate = candidates[*selection.index];
+    if (selection.reason == selection_reason_e::fullscreen) {
+      if (!candidate.fullscreen_available ||
+          !rect_contains_with_tolerance(
+            candidate.element_rect,
+            client_rect,
+            coordinate_tolerance
+          )) {
+        return std::nullopt;
+      }
+      return client_rect;
+    }
+    if (!rect_valid(candidate.visible_rect)) {
+      return std::nullopt;
+    }
+    return candidate.visible_rect;
+  }
+
+  // Fullscreen cache refresh deliberately has no document-rectangle input. The authority is the
+  // unchanged foreground client plus the retained semantic video identity; Chromium may clip or
+  // relocate its document rectangle and may change harmless video overscan between full censuses.
+  [[nodiscard]] inline bool fullscreen_cache_refresh_matches(
+    long expected_video_unique_id,
+    long observed_video_unique_id,
+    const rect_t &cached_authority_rect,
+    const rect_t &current_client_rect,
+    const rect_t &current_video_rect,
+    long coordinate_tolerance = 1
+  ) noexcept {
+    return expected_video_unique_id != 0 &&
+           observed_video_unique_id == expected_video_unique_id &&
+           cached_authority_rect == current_client_rect &&
+           rect_contains_with_tolerance(
+             current_video_rect,
+             current_client_rect,
+             coordinate_tolerance
+           );
+  }
+
   [[nodiscard]] inline const char *selection_reason_name(selection_reason_e reason) noexcept {
     switch (reason) {
       case selection_reason_e::none:
@@ -428,6 +528,8 @@ namespace video_dom_probe {
         return "single";
       case selection_reason_e::largest:
         return "largest";
+      case selection_reason_e::fullscreen:
+        return "fullscreen";
       case selection_reason_e::ambiguous:
         return "ambiguous";
     }

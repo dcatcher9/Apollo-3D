@@ -1292,8 +1292,7 @@ HARD_DISPLAY = (
     ("source_coverage_worst_patch_bad_pct", "Worst localized missing patch", "%"),
     ("image_integrity_worst_patch_bad_pct", "Worst localized texture damage", "%"),
     ("depth_gt_polarity_ok", "Authenticated GT depth polarity", "%"),
-    ("subtitle_region_binocular_support_pct", "Subtitle binocular support", "%"),
-    ("subtitle_target_disparity_rms_error_pct", "Subtitle target-plane error", "%"),
+    ("subtitle_glyph_sample_visibility_pct", "Subtitle glyph visibility", "%"),
     ("shot_state_pulse_mismatch", "Shot pulse contract mismatch", ""),
     ("shot_state_trace_inconsistent", "Shot trace consistency", ""),
     ("shot_state_initialized_ok", "Shot state initialized", "%"),
@@ -1311,8 +1310,7 @@ HARD_SUPPORT_KEYS = {
     "image_integrity_pct": "image_integrity_support",
     "source_coverage_worst_patch_bad_pct": "source_fidelity_support_pct",
     "image_integrity_worst_patch_bad_pct": "image_integrity_support",
-    "subtitle_region_binocular_support_pct": "subtitle_region_authored_count",
-    "subtitle_target_disparity_rms_error_pct": "subtitle_region_support_count",
+    "subtitle_glyph_sample_visibility_pct": "subtitle_glyph_authored_count",
     "shot_state_pulse_mismatch": "shot_state_contract_support",
     "shot_state_trace_inconsistent": "shot_state_contract_support",
     "shot_state_initialized_ok": "shot_state_contract_support",
@@ -1330,6 +1328,12 @@ SUPPORTING_HEATMAP_AXES = (
     ("interocular_exposure_rivalry_burden_pct", "exposure"),
     ("interocular_color_gain_rivalry_burden_pct", "colour"),
     ("flow_temporal_p95", "flow temporal"),
+    ("subtitle_region_binocular_support_pct", "legacy subtitle region support"),
+    ("subtitle_region_output_area_coverage_pct", "subtitle region output area"),
+    ("subtitle_glyph_output_area_coverage_pct", "subtitle glyph output area"),
+    ("subtitle_glyph_soft_plane_inlier_pct", "synthetic soft-plane qualification"),
+    ("subtitle_constant_plane_rms_error_pct", "legacy subtitle plane residual"),
+    ("subtitle_plane_abs_disparity_pct", "subtitle plane magnitude"),
     ("subtitle_disparity_variance_pct2", "subtitle disparity variance"),
     ("subtitle_sharpness_preservation_pct", "subtitle sharpness"),
     # Cardboarding evidence. The fraction says how much of the frame renders at one disparity;
@@ -1788,21 +1792,41 @@ METRIC_DEFS = [
          "gt_depth_lag",
          "P95 amount by which predicted depth boundaries match the previous GT frame better than the current frame. Positive values directly indicate held/stale depth on moving geometry.",
          "lower = less one-frame depth lag"),
+    ("subtitle_glyph_sample_visibility_pct",
+         "subtitle_glyph_visibility",
+         "Mutually valid canonical-sample survival on the authenticated same-frame tight glyph-plus-outline mask; rendered output-area compression is reported separately.",
+         "must retain at least 95% of authored glyph samples"),
+    ("subtitle_glyph_soft_plane_inlier_pct",
+         "subtitle_soft_plane_inliers",
+         "Worst independently authored vertical band's output-area-weighted glyph fraction within five binocular eye pixels of its weighted-median disparity.",
+         "synthetic qualification warning below the frozen 98% reference; real positive qualification pending"),
     ("subtitle_region_binocular_support_pct",
-         "subtitle_binocular_support",
-         "Conservative minimum of mutually valid canonical-sample coverage and mutually rendered output-area coverage across the authenticated authored subtitle region.",
-         "must retain at least 95% binocular support"),
-    ("subtitle_target_disparity_rms_error_pct",
-         "subtitle_target_error",
-         "Output-area-weighted RMS difference between exact subtitle-region disparity and the authenticated authored target, in resolution-normalized reference-aspect disparity percent.",
-         "must remain at the authored subtitle plane"),
+         "subtitle_legacy_region_support",
+         "Legacy conservative minimum of canonical visibility and output-area coverage over the loose authored subtitle rectangle.",
+         "diagnostic; glyph visibility is the current hard authority"),
+    ("subtitle_region_output_area_coverage_pct",
+         "subtitle_region_output_area",
+         "Mutually rendered output-area coverage over the legacy loose subtitle rectangle.",
+         "diagnostic for local compression"),
+    ("subtitle_glyph_output_area_coverage_pct",
+         "subtitle_glyph_output_area",
+         "Mutually rendered output-area coverage over authenticated tight glyph support.",
+         "diagnostic for local compression"),
+    ("subtitle_constant_plane_rms_error_pct",
+         "subtitle_legacy_constant_plane_error",
+         "Legacy output-area-weighted RMS residual about each frame's globally fitted subtitle-plane disparity, in resolution-normalized reference-aspect disparity percent.",
+         "diagnostic; bounded local scene relief may remain"),
+    ("subtitle_plane_abs_disparity_pct",
+         "subtitle_plane_magnitude",
+         "Absolute output-area-weighted fitted subtitle-plane disparity in reference-aspect image-disparity percent; no zero target is authored.",
+         "diagnostic; exact closure and global slope invariants own safety"),
     ("subtitle_disparity_variance_pct2",
          "subtitle_disparity_variance",
-         "Output-area-weighted exact disparity variance inside an authenticated loose subtitle region, after resolution normalization into squared reference-aspect image-disparity percent.",
+         "Output-area-weighted exact disparity variance inside the authenticated tight glyph/outline mask when required, or the legacy loose region otherwise, after resolution normalization into squared reference-aspect image-disparity percent.",
          "lower = a more constant subtitle plane"),
     ("subtitle_sharpness_preservation_pct",
          "subtitle_sharpness",
-         "Worse-eye horizontal-gradient energy after exact registration back to the authored subtitle region, divided by the unwarped full-resolution source energy.",
+         "Worse-eye horizontal-gradient energy after exact registration back to the authenticated tight glyph/outline mask when required, or the legacy loose region otherwise, divided by the unwarped full-resolution source energy.",
          "higher = more source text sharpness retained"),
     ("vmisalign_p99_pct",
          "vmis",
@@ -1900,6 +1924,39 @@ def metrics_section():
             f'</div></div></details>')
 
 
+def subtitle_qualification_strip():
+    """Keep synthetic soft-plane warnings visible without promoting them to release gates."""
+    metric = "subtitle_glyph_soft_plane_inlier_pct"
+    spec = THR.get(metric, {})
+    reference = spec.get("trigger_min")
+    if spec.get("role") != "diagnostic" or reference is None:
+        return ""
+    reference = float(reference)
+    observed = []
+    for clip in CLIPS:
+        value = _metric_value(TREAT, clip, metric)
+        if value is not None:
+            observed.append((clip, float(value)))
+    below = [(clip, value) for clip, value in observed if value < reference]
+    if below:
+        items = "".join(
+            f'<li><code>{html.escape(name(clip))}</code> = {value:.3f}% '
+            f'(&lt; {reference:.2f}% reference)</li>'
+            for clip, value in sorted(below, key=lambda item: item[1]))
+        status = (f'<b>Subtitle: SYNTHETIC QUALIFICATION WARNING</b> — the frozen '
+                  f'{reference:.2f}% soft-plane reference was missed.<ul>{items}</ul>')
+    elif observed:
+        status = (f'<b>Subtitle: synthetic qualification reference met</b> — all applicable '
+                  f'committed synthetic bands remain at or above {reference:.2f}%.')
+    else:
+        status = ('<b>Subtitle: synthetic qualification evidence unavailable</b> — this report '
+                  'does not contain an applicable tight-mask soft-plane score.')
+    pending = (' <b>Real positive qualification pending.</b> The current diagnostic includes all '
+               'authored bands and scores final rendered glyphs only. Authority/effect '
+               'qualification awaits the replacement OCR-box trace.')
+    return f'<div class="gate gate-info">{status}{pending}</div>'
+
+
 def conclusion_section():
     """Auto-derived verdict using per-clip metric gates; means summarize but never decide."""
     wins, costs = [], []
@@ -1983,7 +2040,8 @@ def conclusion_section():
             f'<p class="sub" style="margin-bottom:12px">{head} — decision over '
             f'{len(DECISION_CLIPS)} non-flat clip(s); expected-flat diagnostics remain below. '
             f'<b>{scope_note}</b> Qualified training labels: <b>{qualified_labels}</b>.</p>'
-            f'<ul class="concl">{li}<li>{verdict}</li></ul>{gate_strip()}</section>')
+            f'<ul class="concl">{li}<li>{verdict}</li></ul>{gate_strip()}'
+            f'{subtitle_qualification_strip()}</section>')
 
 
 def gate_strip():

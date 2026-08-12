@@ -917,6 +917,40 @@ class FrameLabelContractTests(unittest.TestCase):
             {"exact_polarity_support_pct": 0.0}, thresholds, {})
         self.assertEqual(unsupported, [])
 
+    def test_soft_plane_reference_emits_qualification_issue_not_hard_failure(self):
+        with open(os.path.join(SCRIPT_DIR, "thresholds.json"),
+                  encoding="utf-8") as stream:
+            spec = json.load(stream)["metrics"][
+                "subtitle_glyph_soft_plane_inlier_pct"]
+        metric = "subtitle_glyph_soft_plane_inlier_pct"
+        row = {
+            "_frame_id": 17,
+            "subtitle_glyph_support_count": 128.0,
+            metric: 97.0,
+        }
+        thresholds = {"metrics": {metric: spec}}
+        metadata = {
+            "required_gt_subtitle_region": True,
+            "required_gt_subtitle_tight_mask": True,
+        }
+
+        worst, issues, hard_failures = run_eval.score_clip_gates(
+            [row], dict(row), thresholds, metadata)
+
+        self.assertEqual(spec["role"], "diagnostic")
+        self.assertEqual(spec["trigger_min"], 98.0)
+        self.assertNotIn("hard_min", spec)
+        self.assertEqual(worst[metric]["worst_value"], 97.0)
+        self.assertEqual([item["metric"] for item in issues], [metric])
+        self.assertEqual(hard_failures, [])
+
+        at_reference = dict(row)
+        at_reference[metric] = spec["trigger_min"]
+        _, reference_issues, reference_hard = run_eval.score_clip_gates(
+            [at_reference], at_reference, thresholds, metadata)
+        self.assertEqual(reference_issues, [])
+        self.assertEqual(reference_hard, [])
+
     def test_temporal_primary_evidence_checks_transitions_not_aggregate_keys(self):
         thresholds = {"metrics": {
             "static_jitter_p95": {
@@ -1231,6 +1265,10 @@ class ReportEvidenceContractTests(unittest.TestCase):
                             "contract_schema":
                                 run_eval.PARALLAX_V2_CONTRACT_SCHEMA,
                             "legacy_levers_applied": False,
+                        },
+                        "raw_model_provenance": {
+                            "raw_width": eye_width,
+                            "raw_height": height,
                         },
                         "cut_state": {
                             "file": "cut_state.json",
@@ -1555,6 +1593,9 @@ class ReportEvidenceContractTests(unittest.TestCase):
             self.assertIn("mapping_stretch", report)
             self.assertIn("delta: red worse / blue better", report)
             self.assertIn("not applicable", report)
+            self.assertIn("Real positive qualification pending", report)
+            self.assertIn("scores final rendered glyphs only", report)
+            self.assertIn("replacement OCR-box trace", report)
             self.assertNotIn("9876.54", report)
             self.assertIn("render_integrity", report)
             self.assertNotIn("__CONCLUSION__", report)

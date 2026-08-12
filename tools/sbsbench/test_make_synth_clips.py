@@ -116,7 +116,6 @@ class SubtitleSyntheticClipTests(unittest.TestCase):
         self.assertEqual(
             contract["scene_state_by_frame"],
             list(make_synth_clips.SUBTITLE_HIGHRES_SCENE_BY_FRAME))
-        self.assertEqual(metadata["subtitle_target_disparity_pct"], 0.0)
         self.assertEqual(metadata["shot_state_contract"], {
             "kind": "hard-cut",
             "monitor_from_frame": 2,
@@ -236,13 +235,15 @@ class SubtitleSyntheticClipTests(unittest.TestCase):
                         if filename.startswith("frame_") and filename.endswith(".png"))
                     region_dir = os.path.join(generated, "gt_subtitle_region")
                     region_ids = sorted(os.listdir(region_dir))
+                    overlay_dir = os.path.join(generated, "gt_subtitle_overlay_mask")
+                    overlay_ids = sorted(os.listdir(overlay_dir))
                     self.assertEqual(source_ids, expected_ids)
                     self.assertEqual(region_ids, expected_ids)
+                    self.assertEqual(overlay_ids, expected_ids)
 
                     with open(os.path.join(generated, "meta.json"), encoding="utf-8") as stream:
                         metadata = json.load(stream)
                     self.assertIs(metadata["required_gt_subtitle_region"], True)
-                    self.assertEqual(metadata["subtitle_target_disparity_pct"], 0.0)
                     if clip == make_synth_clips.SUBTITLE_HIGHRES_CLIP:
                         expected_size = (
                             make_synth_clips.SUBTITLE_HIGHRES_W,
@@ -254,6 +255,8 @@ class SubtitleSyntheticClipTests(unittest.TestCase):
                             metadata["required_gt_subtitle_sanitizer_oracle"], True)
                     else:
                         expected_size = (make_synth_clips.W, make_synth_clips.H)
+                        self.assertIs(
+                            metadata["required_gt_subtitle_tight_mask"], True)
                         self.assertEqual(
                             metadata["subtitle_cue_start_frames"],
                             list(make_synth_clips.SUBTITLE_CUE_START_FRAMES))
@@ -274,9 +277,27 @@ class SubtitleSyntheticClipTests(unittest.TestCase):
                                 self.assertEqual(values, {0})
                             else:
                                 self.assertEqual(values, {0, 255})
+                            region = np.asarray(region_image) != 0
+                        with Image.open(os.path.join(overlay_dir, filename)) as mask_image:
+                            self.assertEqual(mask_image.mode, "L")
+                            self.assertEqual(mask_image.size, expected_size)
+                            self.assertEqual(mask_image.format, "PNG")
+                            overlay_values = set(np.unique(np.asarray(mask_image)).tolist())
+                            if (clip == make_synth_clips.SUBTITLE_HIGHRES_CLIP and
+                                    make_synth_clips.SUBTITLE_HIGHRES_STATE_BY_FRAME[
+                                        frame_id - 1] == "empty"):
+                                self.assertEqual(overlay_values, {0})
+                            else:
+                                self.assertEqual(overlay_values, {0, 255})
+                            overlay = np.asarray(mask_image) != 0
+                        self.assertFalse(np.any(overlay & ~region))
+                        if clip in make_synth_clips.SUBTITLE_STANDARD_CLIPS:
+                            _, glyph, outline, authored_region = (
+                                make_synth_clips._subtitle_layers(clip, frame_id))
+                            self.assertTrue(np.array_equal(overlay, glyph | outline))
+                            self.assertTrue(np.array_equal(region, authored_region != 0))
 
                     if clip == make_synth_clips.SUBTITLE_HIGHRES_CLIP:
-                        overlay_dir = os.path.join(generated, "gt_subtitle_overlay_mask")
                         oracle_dir = os.path.join(generated, "gt_subtitle_free")
                         self.assertEqual(sorted(os.listdir(overlay_dir)), expected_ids)
                         self.assertEqual(sorted(os.listdir(oracle_dir)), expected_ids)

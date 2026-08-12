@@ -3,7 +3,6 @@
   "description": "Lossless 2560x1440 synthetic movie imagery with fine three-pixel CJK strokes and a two-pixel dark outline; authenticates empty, appear, subtitle-only replacement, disappear, and broad scene-cut transitions before 770x434 inference downscaling.",
   "required_gt_subtitle_region": true,
   "required_gt_subtitle_sanitizer_oracle": true,
-  "subtitle_target_disparity_pct": 0.0,
   "subtitle_transition_contract": {
     "kind": "highres-empty-appear-replace-disappear-hard-cut",
     "source_size_px": [

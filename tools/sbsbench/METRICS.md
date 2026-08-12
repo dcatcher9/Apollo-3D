@@ -23,7 +23,7 @@ Every entry in [thresholds.json](thresholds.json) has one scope and one role:
 | `role: primary` | Independent quality axis used in a decision |
 | `role: diagnostic` | Supports interpretation but cannot decide alone |
 
-The current compact policy exposes 41 metrics: 17 hard constraints, four primary axes, and 20
+The current compact policy exposes 55 metrics: 22 hard constraints, four primary axes, and 29
 diagnostics. There are no qualified training labels. A metric must explicitly declare both a
 training label and `label_status: qualified`; all current perceptual candidates remain
 experimental, so label export abstains.
@@ -129,48 +129,70 @@ The affine fit rejects negative scale and requires at least 5% valid support. Ed
 when `depth_gt_edge_support_pct >= 1.0`; below that it remains diagnostic because tiny weak-gradient
 changes can flip binary membership without meaningful geometry movement.
 
-## Ground-truth subtitle-region metrics
+## Ground-truth subtitle metrics
 
 Subtitle metrics consume explicit source-coordinate masks from
-`gt_subtitle_region/frame_<id>.png` only when `meta.json` declares
-`required_gt_subtitle_region: true` plus an explicit finite `subtitle_target_disparity_pct` inside
-`[-3.5, 3.0]`. The masks are loose binary regions, not detected glyph masks;
-one mask may contain several disjoint rectangles for simultaneous top notes, dialogue, or bilingual
-stacks. A mask exists for every source frame so frame identity stays exact; frames without visible
-subtitles use an empty mask. The evaluator never detects text automatically. It loads both the
-source and same-size GT mask at their full source resolution before canonical exact-map sampling;
-this matches the W2 runtime contract that subtitle detection happens before inference downscaling.
+`gt_subtitle_region/frame_<id>.png` when `meta.json` declares
+`required_gt_subtitle_region: true`. Those masks are loose regions and may contain any number of
+disjoint rectangles for simultaneous notes, dialogue, or multilingual stacks. A same-size mask
+exists for every source frame; no visible subtitle is represented by an empty mask. The scorer never
+detects text to create metric truth.
+
+Current subtitle clips additionally declare `required_gt_subtitle_tight_mask: true` or
+`required_gt_subtitle_sanitizer_oracle: true` and authenticate a same-frame
+`gt_subtitle_overlay_mask`. This binary mask contains only the visible glyph plus outline; character
+gaps and surrounding rectangle space remain ordinary scene geometry. Older fixtures that declare
+neither authority retain loose-region measurements for report compatibility, but cannot provide the
+current glyph-local evidence. Tight glyph visibility is hard; the soft-plane score is a synthetic
+qualification diagnostic pending real-video positive evidence.
 
 | Metric | Meaning | Preferred direction |
 |---|---|---|
-| `subtitle_region_binocular_support_pct` | Conservative minimum of valid canonical-sample coverage and mutually rendered output-area coverage over the authored region | Must remain at or above 95% |
-| `subtitle_target_disparity_rms_error_pct` | Output-area-weighted RMS error from the authenticated signed target, in reference-aspect disparity percent | Must remain at or below 0.02% |
-| `subtitle_disparity_variance_pct2` | Output-area-weighted disparity variance within the explicit region, in squared reference-aspect image-disparity percent | Lower; zero is a constant plane |
+| `subtitle_glyph_sample_visibility_pct` | Mutually valid canonical-sample survival over the tight glyph mask | Hard minimum 95% |
+| `subtitle_glyph_soft_plane_inlier_pct` | Worst vertical glyph band's output-area-weighted fraction within five binocular eye pixels of its weighted-median disparity | Synthetic qualification warning below the frozen 98% reference; not a release hard gate |
+| `subtitle_plane_abs_disparity_pct` | Absolute fitted subtitle disparity in reference-aspect disparity percent | Diagnostic |
+| `subtitle_region_output_area_coverage_pct` | Rendered output-area coverage over the loose region | Diagnostic |
+| `subtitle_glyph_output_area_coverage_pct` | Rendered output-area coverage over tight glyph support | Diagnostic |
+| `subtitle_region_binocular_support_pct` | Legacy minimum of loose-region sample visibility and output-area coverage | Diagnostic |
+| `subtitle_constant_plane_rms_error_pct` | Legacy globally fitted-plane RMS residual | Diagnostic |
+| `subtitle_disparity_variance_pct2` | Legacy global disparity variance over tight support, or loose fallback | Diagnostic |
 | `subtitle_sharpness_preservation_pct` | Worse-eye registered post-warp/pre-warp horizontal-gradient energy ratio | Higher; 100% preserves source energy |
-| `subtitle_region_support_count` | Unique mutually visible source samples inside the explicit region | Evidence context |
-| `subtitle_region_authored_count` | Canonical samples selected by the authored region before warp validity | Applicability context |
 
-Disparity comes from the exact mutually visible inverse-warp correspondences, not image matching,
-and is resolution-normalized before its target error and variance are taken. Variance alone cannot
-distinguish the intended plane from a wrong constant plane, so target RMS error is the hard
-zero-plane gate; all current subtitle fixtures authenticate a `0.0` target. The independent support
-gate prevents a fold or hole from hiding bad geometry by leaving only 16 easy samples, and its
-output-area term prevents a map from compressing every canonical source sample into a narrow strip
-while claiming 100% count support. Every non-empty authored frame must retain at least 95% of both
-canonical samples and nominal mutually rendered area. Invalid samples do not become zero-disparity
-votes. A genuinely empty authored mask has zero authored support and legitimately abstains.
+Canonical visibility and rendered output area are deliberately separate. A local soft transition can
+compress a glyph edge while retaining every valid source correspondence, so output-area compression
+must remain visible without turning that expected behavior into a false hard failure. Invalid exact
+map samples do not vote, and the clip aggregate keeps the minimum visibility over non-empty frames.
 
-Sharpness registers each rendered eye back to the same canonical source grid, then divides its
-horizontal first-difference energy by the unwarped source energy on identical supported mask pairs.
-The clip aggregate keeps the worst frame: minimum binocular support, maximum target error and
-disparity variance, and minimum sharpness preservation. Sharpness is not capped at 100%; an
-overshoot remains visible for interpretation alongside the existing integrity/ringing evidence.
+The soft-plane diagnostic makes no assumption about subtitle line count. It projects tight-mask row
+occupancy into the 434-row locator domain, joins nearby occupied rows into bands, and scores every
+remaining connected vertical band independently. Each band fits an output-area-weighted median
+disparity. Falling below the frozen 98% reference within five binocular eye pixels produces a
+**synthetic qualification warning**, not a universal hard failure. Using binocular eye-pixel units
+and then converting through the reference-aspect disparity function keeps the reference resolution
+independent; taking the worst band prevents a large dialogue row from hiding a damaged shorter row.
 
-At least 16 mutually visible region samples are required. Sharpness additionally needs at least 16
-supported horizontal pairs and mean source-gradient energy of one 8-bit code step squared. Missing,
-unauthenticated, empty, or textureless evidence is `n/a`, never zero. The source identity hash covers
-the mask pixels, `required_gt_subtitle_region`, `subtitle_target_disparity_pct`, and any strict
-`subtitle_transition_contract` semantics.
+The current diagnostic deliberately reports every authored band, including the top note in
+`subtitle_top_bottom_disjoint`. It therefore cannot define production release policy. Any future
+hard promotion must first define bottom-ROI-scoped positive evidence, then qualify the unchanged
+reference on continuous real-video subtitles. Until that evidence exists, **real positive
+qualification is pending**.
+
+The cleanup build does not authenticate subtitle authority or pre/post conditioning artifacts.
+Glyph visibility and soft-plane metrics score the final renderer output only. Authority/effect
+qualification resumes when the replacement OCR-box contract and its dump ABI are frozen.
+
+Disparity is derived from exact mutually visible inverse-warp correspondences, not image matching,
+and is resolution-normalized. The global constant-plane residual and variance remain diagnostics for
+legacy comparison. `subtitle_plane_abs_disparity_pct` remains a diagnostic of fitted plane placement.
+Sharpness registers each rendered eye back to the canonical source grid and uses only authenticated
+tight glyph pairs when tight authority is required.
+
+At least 16 mutually visible loose-region samples and 16 mutually visible tight glyph samples are
+required. Every independently scored glyph band also requires 16 samples. Sharpness additionally
+needs 16 supported horizontal pairs and mean source-gradient energy of one 8-bit code step squared.
+Missing, unauthenticated, empty, or textureless evidence is `n/a`, never zero. The source identity
+hash covers both masks, their metadata requirements, and strict `subtitle_transition_contract`
+semantics.
 
 ## Evidence floors
 
@@ -181,10 +203,14 @@ Evidence minima are part of the contract:
 - cross-row shear requires 512 qualified pixels;
 - texture integrity requires at least 0.1% independently textured support; and
 - vertical alignment requires at least 2% overlapping texture-tile support.
-- each non-empty subtitle region must retain at least 95% mutually visible canonical samples and
-  nominal mutually rendered output area;
-- subtitle-region geometry and sharpness require at least 16 mutually visible samples (and 16
-  horizontal pairs for sharpness); empty authored masks abstain.
+- each non-empty tight subtitle mask must retain at least 95% mutually visible canonical glyph
+  samples; loose- and tight-region output-area coverage remains diagnostic;
+- each tight vertical glyph band requires 16 supported samples; values below the frozen 98%
+  soft-plane reference are synthetic qualification warnings, not release hard failures;
+- soft-plane warnings cannot replace bottom-ROI-scoped continuous real-video positive subtitles,
+  a real-video negative holdout, and a live authority/effect trace release gate; and
+- subtitle geometry and sharpness require at least 16 mutually visible samples (and 16 horizontal
+  pairs for sharpness); empty authored masks abstain from glyph geometry.
 
 These are conservative screening floors, not statistical-independence proofs. Lower support
 abstains.

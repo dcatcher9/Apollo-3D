@@ -1,4 +1,5 @@
 #include "model_manager.h"
+#include "generated/depth_coordinate_v2_contract.h"
 #include "logging.h"
 #include <curl/curl.h>
 #include <openssl/evp.h>
@@ -16,12 +17,38 @@ using namespace std::literals;
 
 namespace models {
 
+    static_assert(ocr_engine_width ==
+                  static_cast<int>(depth_coordinate_v2::subtitle_ocr_input_width));
+    static_assert(ocr_engine_height ==
+                  static_cast<int>(depth_coordinate_v2::subtitle_ocr_input_height));
+    static_assert(depth_coordinate_v2::subtitle_ocr_output_width ==
+                  depth_coordinate_v2::subtitle_ocr_input_width);
+    static_assert(depth_coordinate_v2::subtitle_ocr_output_height ==
+                  depth_coordinate_v2::subtitle_ocr_input_height);
+    static_assert(std::string_view {ocr_model_name} ==
+                  depth_coordinate_v2::subtitle_ocr_model_name);
+    static_assert(std::string_view {ocr_model_url} ==
+                  depth_coordinate_v2::subtitle_ocr_model_url);
+    static_assert(std::string_view {ocr_model_onnx_sha256} ==
+                  depth_coordinate_v2::subtitle_ocr_onnx_sha256);
+    static_assert(std::string_view {ocr_engine_recipe} ==
+                  depth_coordinate_v2::subtitle_ocr_engine_recipe);
+
     static size_t write_data(void* ptr, size_t size, size_t nmemb, FILE* stream) {
         return fwrite(ptr, size, nmemb, stream);
     }
 
     std::string engine_filename(const config::depth_model_info& model, std::string_view compatibility_tag) {
         std::string filename = model.name + "." + depth_engine_recipe;
+        if (!compatibility_tag.empty()) {
+            filename += ".";
+            filename += compatibility_tag;
+        }
+        return filename + ".engine";
+    }
+
+    std::string ocr_engine_filename(std::string_view compatibility_tag) {
+        std::string filename = std::string(ocr_model_name) + "." + ocr_engine_recipe;
         if (!compatibility_tag.empty()) {
             filename += ".";
             filename += compatibility_tag;

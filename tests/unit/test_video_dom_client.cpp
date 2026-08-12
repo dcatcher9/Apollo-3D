@@ -17,6 +17,8 @@ namespace {
 
   constexpr std::string_view ok_record =
     "SUNSHINE_VIDEO_DOM_V1\t1\tok\t4660\t991\t-200\t-19121\t29\t203\t1802\t1201";
+  constexpr std::string_view ok_fullscreen_record =
+    "SUNSHINE_VIDEO_DOM_V1\t2\tok-fullscreen\t4660\t991\t-200\t-19121\t0\t0\t1920\t1080";
 
   TEST(VideoDomClientProtocol, ParsesExactOkRecord) {
     const auto parsed = video_dom::detail::parse_protocol_record(ok_record);
@@ -28,6 +30,22 @@ namespace {
     EXPECT_EQ(parsed->document_id, -200);
     EXPECT_EQ(parsed->video_id, -19121);
     EXPECT_EQ(parsed->screen_rect, (video_dom::rect_t {29, 203, 1802, 1201}));
+  }
+
+  TEST(VideoDomClientProtocol, ParsesFullscreenProvenanceWithoutChangingFieldCount) {
+    const auto parsed = video_dom::detail::parse_protocol_record(ok_fullscreen_record);
+    ASSERT_TRUE(parsed);
+    EXPECT_EQ(parsed->status, video_dom::status_e::ok_fullscreen);
+    EXPECT_EQ(parsed->sequence, 2u);
+    EXPECT_EQ(parsed->window, 4660u);
+    EXPECT_EQ(parsed->process_id, 991u);
+    EXPECT_EQ(parsed->document_id, -200);
+    EXPECT_EQ(parsed->video_id, -19121);
+    EXPECT_EQ(parsed->screen_rect, (video_dom::rect_t {0, 0, 1920, 1080}));
+    EXPECT_STREQ(
+      video_dom::status_name(video_dom::status_e::ok_fullscreen),
+      "ok-fullscreen"
+    );
   }
 
   TEST(VideoDomClientProtocol, AcceptsEveryDeclaredUnavailableStatusOnlyWithZeroPayload) {
@@ -49,7 +67,7 @@ namespace {
         std::string(status) + "\t0\t0\t0\t0\t0\t0\t0\t0";
       const auto parsed = video_dom::detail::parse_protocol_record(line);
       ASSERT_TRUE(parsed) << status;
-      EXPECT_NE(parsed->status, video_dom::status_e::ok);
+      EXPECT_FALSE(video_dom::carries_video_geometry(parsed->status));
     }
   }
 
@@ -57,6 +75,7 @@ namespace {
     EXPECT_FALSE(video_dom::detail::parse_protocol_record("SUNSHINE_VIDEO_DOM_V1\t1\tfuture\t0\t0\t0\t0\t0\t0\t0\t0"));
     EXPECT_FALSE(video_dom::detail::parse_protocol_record("SUNSHINE_VIDEO_DOM_V1\t1\tno-video\t1\t0\t0\t0\t0\t0\t0\t0"));
     EXPECT_FALSE(video_dom::detail::parse_protocol_record("SUNSHINE_VIDEO_DOM_V1\t1\tok\t4660\t991\t-200\t-19121\t29\t203\t29\t1201"));
+    EXPECT_FALSE(video_dom::detail::parse_protocol_record("SUNSHINE_VIDEO_DOM_V1\t1\tok-fullscreen\t0\t0\t0\t0\t0\t0\t0\t0"));
     EXPECT_FALSE(video_dom::detail::parse_protocol_record(std::string(ok_record) + "\textra"));
     EXPECT_FALSE(video_dom::detail::parse_protocol_record(std::string(ok_record) + "\r"));
     EXPECT_FALSE(video_dom::detail::parse_protocol_record("SUNSHINE_VIDEO_DOM_V1\t+1\tok\t4660\t991\t-200\t-19121\t29\t203\t1802\t1201"));
@@ -156,6 +175,8 @@ namespace {
       .received_at = now - 2s,
       .geometry_valid_since = now - 4s,
     };
+    EXPECT_TRUE(video_dom::usable(snapshot, now));
+    snapshot.status = video_dom::status_e::ok_fullscreen;
     EXPECT_TRUE(video_dom::usable(snapshot, now));
     EXPECT_FALSE(video_dom::usable(snapshot, now - 2001ms));
     EXPECT_FALSE(video_dom::usable(snapshot, now + 501ms));
@@ -272,6 +293,18 @@ namespace {
       video_dom::detail::continued_geometry_valid_since(&previous, changed, heartbeat),
       heartbeat
     );
+    changed = record;
+    changed.status = video_dom::status_e::ok_fullscreen;
+    EXPECT_EQ(
+      video_dom::detail::continued_geometry_valid_since(&previous, changed, heartbeat),
+      heartbeat
+    );
+    previous.status = video_dom::status_e::ok_fullscreen;
+    EXPECT_EQ(
+      video_dom::detail::continued_geometry_valid_since(&previous, changed, heartbeat),
+      first_seen
+    );
+    previous.status = video_dom::status_e::ok;
     changed = record;
     changed.status = video_dom::status_e::changed;
     EXPECT_EQ(

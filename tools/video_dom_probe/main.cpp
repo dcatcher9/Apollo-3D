@@ -394,6 +394,7 @@ namespace {
   struct document_context_t {
     LONG unique_id {};
     probe::rect_t rect {};
+    bool state_available {};
     bool available {};
     IAccessible *accessible {};
   };
@@ -534,11 +535,13 @@ namespace {
             } else {
               constexpr DWORD unavailable_states =
                 STATE_SYSTEM_UNAVAILABLE | STATE_SYSTEM_INVISIBLE | STATE_SYSTEM_OFFSCREEN;
+              const bool state_available = (*state & unavailable_states) == 0;
               retained_documents.push_back(retain_com(node.accessible.get()));
               current_document = document_context_t {
                 .unique_id = unique_id_before,
                 .rect = *document_rect,
-                .available = (*state & unavailable_states) == 0 &&
+                .state_available = state_available,
+                .available = state_available &&
                              probe::clip_if_within_tolerance(
                                result.client_rect,
                                *document_rect,
@@ -591,12 +594,14 @@ namespace {
                     }
                     const auto client_area = probe::rect_area(result.client_rect);
                     const auto element_area = probe::rect_area(*element_rect);
+                    const bool state_available =
+                      (*state & unavailable_states) == 0;
                     observed_candidate_t candidate;
                     candidate.geometry.unique_id = unique_id_before;
                     candidate.geometry.element_rect = *element_rect;
                     candidate.geometry.visible_rect = visible_rect.value_or(probe::rect_t {});
                     candidate.geometry.available =
-                      (*state & unavailable_states) == 0 && visible_rect.has_value() &&
+                      state_available && visible_rect.has_value() &&
                       current_document && current_document->available;
                     candidate.geometry.fully_contained =
                       current_document &&
@@ -612,6 +617,12 @@ namespace {
                       ).has_value();
                     candidate.geometry.credible_size =
                       client_area > 0 && element_area >= client_area / 20;
+                    candidate.geometry.fullscreen_available =
+                      probe::fullscreen_semantic_available(
+                        state_available,
+                        current_document.has_value(),
+                        current_document && current_document->state_available
+                      );
                     candidate.state = *state;
                     candidate.document_unique_id =
                       current_document ? current_document->unique_id : 0;
@@ -771,6 +782,7 @@ namespace {
     probe::rect_t document_rect {};
     probe::rect_t element_rect {};
     probe::rect_t visible_rect {};
+    bool fullscreen {};
     std::string semantic_fingerprint;
     com_ptr_t<IAccessible> accessible;
     com_ptr_t<IAccessible> document_accessible;
@@ -852,8 +864,18 @@ namespace {
       return std::nullopt;
     }
     const auto &candidate = result.candidates[*selection.index];
-    if (!candidate.accessible || !candidate.document_accessible ||
-        !probe::rect_valid(candidate.geometry.visible_rect)) {
+    const std::array geometry {candidate.geometry};
+    const probe::selection_t local_selection {
+      .index = 0,
+      .reason = selection.reason,
+    };
+    const auto authority_rect = probe::selection_authority_rect(
+      geometry,
+      local_selection,
+      result.client_rect,
+      coordinate_rounding_tolerance
+    );
+    if (!candidate.accessible || !candidate.document_accessible || !authority_rect) {
       return std::nullopt;
     }
     return cached_selection_t {
@@ -865,7 +887,8 @@ namespace {
       .video_unique_id = candidate.geometry.unique_id,
       .document_rect = candidate.document_rect,
       .element_rect = candidate.geometry.element_rect,
-      .visible_rect = candidate.geometry.visible_rect,
+      .visible_rect = *authority_rect,
+      .fullscreen = selection.reason == probe::selection_reason_e::fullscreen,
       .semantic_fingerprint = std::move(semantics),
       .accessible = retain_com(candidate.accessible.get()),
       .document_accessible = retain_com(candidate.document_accessible.get()),
@@ -898,8 +921,22 @@ namespace {
       false,
       true
     );
-    if (!document || !video || document->rect != cached.document_rect ||
-        video->rect != cached.element_rect) {
+    if (!document || !video) {
+      return false;
+    }
+
+    if (cached.fullscreen) {
+      return probe::fullscreen_cache_refresh_matches(
+        cached.video_unique_id,
+        video->unique_id,
+        cached.visible_rect,
+        *client_rect,
+        video->rect,
+        coordinate_rounding_tolerance
+      );
+    }
+
+    if (document->rect != cached.document_rect || video->rect != cached.element_rect) {
       return false;
     }
 
@@ -938,7 +975,11 @@ namespace {
     for (const auto &candidate : result.candidates) {
       geometry.push_back(candidate.geometry);
     }
-    return probe::select_candidate(geometry);
+    return probe::select_authority_candidate(
+      geometry,
+      result.client_rect,
+      coordinate_rounding_tolerance
+    );
   }
 
   [[nodiscard]] std::string semantic_fingerprint(
@@ -952,9 +993,15 @@ namespace {
     if (selection.index) {
       const auto &candidate = result.candidates[*selection.index];
       output << candidate.document_unique_id << '@'
-             << candidate.geometry.unique_id << '@'
-             << rect_string(candidate.geometry.element_rect) << '@'
-             << rect_string(candidate.geometry.visible_rect);
+             << candidate.geometry.unique_id << '@';
+      if (selection.reason == probe::selection_reason_e::fullscreen) {
+        // Fullscreen authority is the client. Document clipping and harmless element overscan
+        // changes do not alter the semantic identity of the retained video object.
+        output << "fullscreen";
+      } else {
+        output << rect_string(candidate.geometry.element_rect) << '@'
+               << rect_string(candidate.geometry.visible_rect);
+      }
     }
     return output.str();
   }
@@ -999,6 +1046,8 @@ namespace {
                 << " element=" << rect_string(candidate.geometry.element_rect)
                 << " visible=" << rect_string(candidate.geometry.visible_rect)
                 << " available=" << candidate.geometry.available
+                << " fullscreen_available="
+                << candidate.geometry.fullscreen_available
                 << " contained=" << candidate.geometry.fully_contained
                 << " credible=" << candidate.geometry.credible_size
                 << " document=" << candidate.document_unique_id
@@ -1008,8 +1057,21 @@ namespace {
     std::cout << "  selection=" << probe::selection_reason_name(result.selection.reason);
     if (result.selection.index) {
       const auto &selected = result.candidates[*result.selection.index];
+      const std::array geometry {selected.geometry};
+      const probe::selection_t local_selection {
+        .index = 0,
+        .reason = result.selection.reason,
+      };
+      const auto authority_rect = probe::selection_authority_rect(
+        geometry,
+        local_selection,
+        result.client_rect,
+        coordinate_rounding_tolerance
+      );
       std::cout << " id=" << selected.geometry.unique_id
-                << " rect=" << rect_string(selected.geometry.visible_rect);
+                << " rect=" << rect_string(
+                     authority_rect.value_or(selected.geometry.visible_rect)
+                   );
     }
     std::cout << '\n'
               << std::flush;
@@ -1166,18 +1228,31 @@ namespace {
       return invalid_machine_record("no-video");
     }
     const auto &candidate = result.candidates[*result.selection.index];
-    if (!probe::rect_valid(candidate.geometry.visible_rect) ||
+    const std::array geometry {candidate.geometry};
+    const probe::selection_t local_selection {
+      .index = 0,
+      .reason = result.selection.reason,
+    };
+    const auto authority_rect = probe::selection_authority_rect(
+      geometry,
+      local_selection,
+      result.client_rect,
+      coordinate_rounding_tolerance
+    );
+    if (!authority_rect ||
         result.window == nullptr || result.process_id == 0 ||
         candidate.document_unique_id == 0 || candidate.geometry.unique_id == 0) {
       return invalid_machine_record("incomplete");
     }
     return {
-      .status = "ok",
+      .status = result.selection.reason == probe::selection_reason_e::fullscreen ?
+                  "ok-fullscreen" :
+                  "ok",
       .window = reinterpret_cast<std::uintptr_t>(result.window),
       .process_id = result.process_id,
       .document_unique_id = candidate.document_unique_id,
       .video_unique_id = candidate.geometry.unique_id,
-      .rect = candidate.geometry.visible_rect,
+      .rect = *authority_rect,
     };
   }
 
@@ -1185,7 +1260,7 @@ namespace {
     const cached_selection_t &cached
   ) {
     return {
-      .status = "ok",
+      .status = cached.fullscreen ? "ok-fullscreen" : "ok",
       .window = reinterpret_cast<std::uintptr_t>(cached.window),
       .process_id = cached.process_id,
       .document_unique_id = cached.document_unique_id,

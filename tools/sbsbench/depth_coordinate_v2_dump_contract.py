@@ -20,15 +20,54 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     import generate_depth_coordinate_v2_contract as generator  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 13
+DUMP_MANIFEST_SCHEMA = 21
+SUPPORTED_DUMP_MANIFEST_SCHEMAS = frozenset({DUMP_MANIFEST_SCHEMA})
+SUBTITLE_OCR_RECORD_SCHEMA = coordinate_contract.SUBTITLE_OCR.record_schema
+SUBTITLE_OCR_RECORD_TAG = coordinate_contract.SUBTITLE_OCR.record_tag
+SUBTITLE_OCR_RECORD_WORD_COUNT = coordinate_contract.SUBTITLE_OCR.record_word_count
+SUBTITLE_OCR_HEADER_WORD_COUNT = coordinate_contract.SUBTITLE_OCR.record_header_word_count
+SUBTITLE_OCR_RAW_BOX_CAPACITY = coordinate_contract.SUBTITLE_OCR.raw_box_capacity
+SUBTITLE_OCR_FINAL_BOX_CAPACITY = coordinate_contract.SUBTITLE_OCR.final_box_capacity
+SUBTITLE_OCR_BOX_WORD_COUNT = coordinate_contract.SUBTITLE_OCR.box_word_count
+SUBTITLE_OCR_RAW_BOX_WORD_OFFSET = coordinate_contract.SUBTITLE_OCR.raw_box_offset
+SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET = coordinate_contract.SUBTITLE_OCR.final_box_offset
+SUBTITLE_OCR_FIELD_WIDTH = coordinate_contract.SUBTITLE_OCR.field_width
+SUBTITLE_OCR_FIELD_HEIGHT = coordinate_contract.SUBTITLE_OCR.field_height
+SUBTITLE_OCR_ROI_TOP = coordinate_contract.SUBTITLE_OCR.roi_top
+SUBTITLE_OCR_ROI_BOTTOM = coordinate_contract.SUBTITLE_OCR.roi_bottom
+SUBTITLE_LOCATOR_STATE_SCHEMA = coordinate_contract.SUBTITLE_OCR.locator_schema
+SUBTITLE_LOCATOR_STATE_TAG = coordinate_contract.SUBTITLE_OCR.locator_tag
+SUBTITLE_LOCATOR_STATE_WORD_COUNT = coordinate_contract.SUBTITLE_OCR.locator_word_count
+SUBTITLE_LOCATOR_HEADER_WORD_COUNT = (
+    coordinate_contract.SUBTITLE_OCR.locator_header_word_count)
+SUBTITLE_LOCATOR_RECT_CAPACITY = (
+    coordinate_contract.SUBTITLE_OCR.locator_rectangle_capacity)
+SUBTITLE_LOCATOR_OWNER_WORD_OFFSET = coordinate_contract.SUBTITLE_OCR.locator_owner_offset
+SUBTITLE_LOCATOR_PENDING_WORD_OFFSET = coordinate_contract.SUBTITLE_OCR.locator_pending_offset
+SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET = coordinate_contract.SUBTITLE_OCR.locator_current_offset
+SUBTITLE_LOCATOR_FLAG_OWNER = 1 << 0
+SUBTITLE_LOCATOR_FLAG_PENDING = 1 << 1
+SUBTITLE_LOCATOR_FLAG_TARGET_VALID = 1 << 2
+SUBTITLE_LOCATOR_FLAG_TARGET_RESET = 1 << 3
+SUBTITLE_LOCATOR_KNOWN_FLAGS = (
+    SUBTITLE_LOCATOR_FLAG_OWNER |
+    SUBTITLE_LOCATOR_FLAG_PENDING |
+    SUBTITLE_LOCATOR_FLAG_TARGET_VALID |
+    SUBTITLE_LOCATOR_FLAG_TARGET_RESET
+)
+SUBTITLE_LOCATOR_EVENT_NONE = 0
+SUBTITLE_LOCATOR_EVENT_BIRTH = 1
+SUBTITLE_LOCATOR_EVENT_DEATH = 2
+SUBTITLE_LOCATOR_EVENT_HANDOFF = 3
 DEPTH_INPUT_REGION_SCHEMA = 1
 WINDOW_VIDEO_BORDER_SCHEMA = 2
 WINDOW_VIDEO_OBSERVER_STATUSES = frozenset({
-    "starting", "ok", "no-foreground", "unsupported", "unavailable",
+    "starting", "ok", "ok-fullscreen", "no-foreground", "unsupported", "unavailable",
     "accessibility", "warming", "incomplete", "changed", "no-video",
     "ambiguous", "helper-missing", "launch-failed", "helper-exited",
     "protocol-error", "stale", "stopped",
 })
+_WINDOW_VIDEO_POSITIVE_OBSERVER_STATUSES = frozenset({"ok", "ok-fullscreen"})
 WINDOW_VIDEO_MAPPING_STATUSES = frozenset({
     "ok", "invalid-video-rect", "invalid-capture-rect", "unsupported-rotation",
     "extent-mismatch", "foreground-mismatch", "outside-capture",
@@ -36,12 +75,11 @@ WINDOW_VIDEO_MAPPING_STATUSES = frozenset({
 SHADOW_STATE_DUMP_SCHEMA = 16
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 2
 LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
-    "115ddcf1cf8058064516421d9ea2c0d34631af999184ef62effe5ad9cd28e79e"
+    "914fc624955c5e3b41f867429acb17a03c34ba71e41f7cbfab00fd939aafff9b"
 )
 DIAGNOSTIC_SOURCE_CLOSURE_SHA256 = (
-    "7977b2e9adaf33e24b091af7acf2377f1c52300246f27c76a2d39f4189046fe8"
+    "d2dada0490e727d88fdda802a9eb6759b34e9501c91835363ebdb0196e3d5c4b"
 )
-
 _CONTRACT = coordinate_contract.load_contract()
 _CONTRACT_TAG = generator.contract_tag(_CONTRACT)
 _STATE_FIELDS = tuple(_CONTRACT["shadow_state"]["fields"])
@@ -58,9 +96,26 @@ _AUTHENTICATED_TENSOR_SHAPES = frozenset(
 _MAXIMUM_SOURCE_LONG_SIDE = 5120
 _MAXIMUM_SOURCE_PIXELS = 5120 * 2160
 
+_SUBTITLE_MODE_NONE = "none"
+_SUBTITLE_MODE_SLR6 = "subtitle-slr6"
+_SUBTITLE_OCR_MODEL_NAME = coordinate_contract.SUBTITLE_OCR.logical_model
+_SUBTITLE_OCR_MODEL_URL = coordinate_contract.SUBTITLE_OCR.model_url
+_SUBTITLE_OCR_MODEL_ONNX_SHA256 = coordinate_contract.SUBTITLE_OCR.onnx_sha256
+_SUBTITLE_OCR_ENGINE_RECIPE = coordinate_contract.SUBTITLE_OCR.engine_recipe
+_SUBTITLE_OCR_SHADER_SPECS = (
+    ("host_sbs_ocr_preprocess_cs.hlsl", "main", "cs_5_0"),
+    ("host_sbs_ocr_boxes_cs.hlsl", "cells_main", "cs_5_0"),
+    ("host_sbs_ocr_boxes_cs.hlsl", "resolve_main", "cs_5_0"),
+)
+_SUBTITLE_LOCATOR_SHADER_SPECS = (
+    ("host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"),
+    ("host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"),
+)
+
 
 def _float32(value: float) -> float:
     return struct.unpack("<f", struct.pack("<f", value))[0]
+
 
 _STATE_ROOT_KEYS = {
     "schema", "coordinate_contract", "source", "capture", "rendered_output_selected",
@@ -102,6 +157,339 @@ def _uint64(value: Any, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 0xFFFFFFFFFFFFFFFF:
         raise ValueError(f"{label} must be a uint64")
     return value
+
+
+def _uint32_words(payload: Any, word_count: int, label: str) -> tuple[int, ...]:
+    if not isinstance(payload, (bytes, bytearray, memoryview)):
+        raise ValueError(f"{label} must be a little-endian uint32 byte record")
+    raw = bytes(payload)
+    expected_size = word_count * 4
+    if len(raw) != expected_size:
+        raise ValueError(f"{label} must contain exactly {word_count} uint32 words")
+    return struct.unpack(f"<{word_count}I", raw)
+
+
+def _uint64_words(low: int, high: int) -> int:
+    return low | (high << 32)
+
+
+def _float32_bits(word: int) -> float:
+    return struct.unpack("<f", struct.pack("<I", word))[0]
+
+
+def _decode_subtitle_ocr_boxes(
+        words: tuple[int, ...], *, offset: int, count: int, capacity: int,
+        field_width: int, field_height: int, label: str) -> list[Dict[str, Any]]:
+    decoded: list[Dict[str, Any]] = []
+    for slot in range(capacity):
+        start = offset + slot * SUBTITLE_OCR_BOX_WORD_COUNT
+        values = words[start:start + SUBTITLE_OCR_BOX_WORD_COUNT]
+        if slot >= count:
+            if any(values):
+                raise ValueError(f"{label} unused box slots must be canonical zero")
+            continue
+        left, top, right, bottom, score_bits, box_flags, reserved0, reserved1 = values
+        score = _float32_bits(score_bits)
+        if (left >= right or top >= bottom or right > field_width or
+                bottom > field_height or top < SUBTITLE_OCR_ROI_TOP or
+                bottom > SUBTITLE_OCR_ROI_BOTTOM):
+            raise ValueError(
+                f"{label} boxes must be nonempty half-open rectangles inside the OCR ROI")
+        if not math.isfinite(score) or not 0.4 <= score <= 1.0:
+            raise ValueError(f"{label} box scores must be finite float32 values in [0.4,1.0]")
+        if box_flags != 0 or reserved0 != 0 or reserved1 != 0:
+            raise ValueError(f"{label} box flags and reserved words must be zero")
+        decoded.append({
+            "left": left,
+            "top": top,
+            "right": right,
+            "bottom": bottom,
+            "score": score,
+            "score_bits": score_bits,
+        })
+    return decoded
+
+
+def validate_subtitle_ocr_record(
+        payload: Any, *, matched_frame_id: int, analysis_generation: int,
+        source_width: int, source_height: int, field_width: int, field_height: int,
+        roi_top: int, roi_bottom: int) -> Dict[str, Any]:
+    """Validate and decode the sole current OCR6 208-word subtitle record."""
+
+    expected_frame = _uint64(matched_frame_id, "OCR6 matched frame id")
+    expected_generation = _uint64(analysis_generation, "OCR6 analysis generation")
+    expected_source_width = _uint32(source_width, "OCR6 source width")
+    expected_source_height = _uint32(source_height, "OCR6 source height")
+    expected_field_width = _uint32(field_width, "OCR6 field width")
+    expected_field_height = _uint32(field_height, "OCR6 field height")
+    expected_roi_top = _uint32(roi_top, "OCR6 ROI top")
+    expected_roi_bottom = _uint32(roi_bottom, "OCR6 ROI bottom")
+    if (expected_source_width == 0 or expected_source_height == 0 or
+            expected_field_width == 0 or expected_field_height == 0 or
+            expected_roi_top >= expected_roi_bottom or
+            expected_roi_bottom > expected_field_height):
+        raise ValueError("OCR6 expected source, field, or ROI geometry is invalid")
+    if (expected_field_width != SUBTITLE_OCR_FIELD_WIDTH or
+            expected_field_height != SUBTITLE_OCR_FIELD_HEIGHT or
+            expected_roi_top != SUBTITLE_OCR_ROI_TOP or
+            expected_roi_bottom != SUBTITLE_OCR_ROI_BOTTOM):
+        raise ValueError("OCR6 expected geometry does not match the frozen current ABI")
+
+    words = _uint32_words(payload, SUBTITLE_OCR_RECORD_WORD_COUNT, "OCR6 record")
+    if words[0] != SUBTITLE_OCR_RECORD_SCHEMA or words[1] != SUBTITLE_OCR_RECORD_TAG:
+        raise ValueError("OCR6 record has an unknown schema or tag")
+    flags = words[2]
+    raw_count = words[3]
+    final_count = words[4]
+    if flags not in (0, 1):
+        raise ValueError("OCR6 flags must be exactly zero (abstain) or one (authoritative)")
+    if (raw_count > SUBTITLE_OCR_RAW_BOX_CAPACITY or
+            final_count > SUBTITLE_OCR_FINAL_BOX_CAPACITY):
+        raise ValueError("OCR6 record exceeds its fixed box capacity")
+    if final_count > raw_count:
+        raise ValueError("OCR6 final box count cannot exceed its raw box count")
+    if flags == 0 and (raw_count != 0 or final_count != 0):
+        raise ValueError("an abstaining OCR6 record cannot publish boxes")
+    if words[15] != 0:
+        raise ValueError("OCR6 reserved header word must be zero")
+
+    frame_id = _uint64_words(words[5], words[6])
+    generation = _uint64_words(words[7], words[8])
+    identity = {
+        "matched_frame_id": frame_id,
+        "analysis_generation": generation,
+        "source_width": words[9],
+        "source_height": words[10],
+        "field_width": words[11],
+        "field_height": words[12],
+        "roi_top": words[13],
+        "roi_bottom": words[14],
+    }
+    expected_identity = {
+        "matched_frame_id": expected_frame,
+        "analysis_generation": expected_generation,
+        "source_width": expected_source_width,
+        "source_height": expected_source_height,
+        "field_width": expected_field_width,
+        "field_height": expected_field_height,
+        "roi_top": expected_roi_top,
+        "roi_bottom": expected_roi_bottom,
+    }
+    if identity != expected_identity:
+        raise ValueError("OCR6 record identity disagrees with the matched dump frame")
+
+    raw_boxes = _decode_subtitle_ocr_boxes(
+        words, offset=SUBTITLE_OCR_RAW_BOX_WORD_OFFSET, count=raw_count,
+        capacity=SUBTITLE_OCR_RAW_BOX_CAPACITY, field_width=expected_field_width,
+        field_height=expected_field_height, label="OCR6 raw")
+    final_boxes = _decode_subtitle_ocr_boxes(
+        words, offset=SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET, count=final_count,
+        capacity=SUBTITLE_OCR_FINAL_BOX_CAPACITY, field_width=expected_field_width,
+        field_height=expected_field_height, label="OCR6 final")
+    return {
+        "schema": words[0],
+        "tag": words[1],
+        "authoritative": flags == 1,
+        "flags": flags,
+        "raw_count": raw_count,
+        "final_count": final_count,
+        **identity,
+        "raw_boxes": raw_boxes,
+        "final_boxes": final_boxes,
+    }
+
+
+def _decode_subtitle_locator_rectangles(
+        words: tuple[int, ...], *, offset: int, count: int,
+        field_width: int, field_height: int, label: str) -> list[Dict[str, int]]:
+    decoded: list[Dict[str, int]] = []
+    for slot in range(SUBTITLE_LOCATOR_RECT_CAPACITY):
+        start = offset + slot * 4
+        left, top, right, bottom = words[start:start + 4]
+        if slot >= count:
+            if left != 0 or top != 0 or right != 0 or bottom != 0:
+                raise ValueError(f"{label} unused rectangle slots must be canonical zero")
+            continue
+        if (left >= right or top >= bottom or right > field_width or
+                bottom > field_height or top < SUBTITLE_OCR_ROI_TOP or
+                bottom > SUBTITLE_OCR_ROI_BOTTOM):
+            raise ValueError(
+                f"{label} rectangles must be nonempty half-open coordinates inside the OCR ROI")
+        decoded.append({
+            "left": left,
+            "top": top,
+            "right": right,
+            "bottom": bottom,
+        })
+    return decoded
+
+
+def _subtitle_rectangle_aggregate(
+        rectangles: list[Dict[str, int]]) -> tuple[tuple[int, int, int, int], int]:
+    if not rectangles:
+        return (0, 0, 0, 0), 0
+    bbox = (
+        min(rectangle["left"] for rectangle in rectangles),
+        min(rectangle["top"] for rectangle in rectangles),
+        max(rectangle["right"] for rectangle in rectangles),
+        max(rectangle["bottom"] for rectangle in rectangles),
+    )
+    area = sum(
+        (rectangle["right"] - rectangle["left"]) *
+        (rectangle["bottom"] - rectangle["top"])
+        for rectangle in rectangles)
+    return bbox, area
+
+
+def validate_subtitle_locator_state(
+        payload: Any, *, matched_frame_id: int, analysis_generation: int,
+        field_width: int, field_height: int) -> Dict[str, Any]:
+    """Validate and decode the sole current compact SLR6 80-word state."""
+
+    expected_frame = _uint64(matched_frame_id, "SLR6 matched frame id")
+    expected_generation = _uint64(analysis_generation, "SLR6 analysis generation")
+    expected_field_width = _uint32(field_width, "SLR6 field width")
+    expected_field_height = _uint32(field_height, "SLR6 field height")
+    if expected_field_width == 0 or expected_field_height == 0:
+        raise ValueError("SLR6 expected field geometry is invalid")
+    if (expected_field_width != SUBTITLE_OCR_FIELD_WIDTH or
+            expected_field_height != SUBTITLE_OCR_FIELD_HEIGHT):
+        raise ValueError("SLR6 expected geometry does not match the frozen current ABI")
+
+    words = _uint32_words(payload, SUBTITLE_LOCATOR_STATE_WORD_COUNT, "SLR6 state")
+    if words[0] != SUBTITLE_LOCATOR_STATE_SCHEMA or words[1] != SUBTITLE_LOCATOR_STATE_TAG:
+        raise ValueError("SLR6 state has an unknown schema or tag")
+    flags = words[2]
+    if flags & ~SUBTITLE_LOCATOR_KNOWN_FLAGS:
+        raise ValueError("SLR6 state has unknown flags")
+    owner_count = words[4]
+    pending_count = words[12]
+    current_count = words[20]
+    if any(count > SUBTITLE_LOCATOR_RECT_CAPACITY for count in (
+            owner_count, pending_count, current_count)):
+        raise ValueError("SLR6 state exceeds its fixed rectangle capacity")
+    fade = words[24]
+    if fade > 2:
+        raise ValueError("SLR6 fade step must be zero, one, or two")
+    if words[21] not in {
+            SUBTITLE_LOCATOR_EVENT_NONE,
+            SUBTITLE_LOCATOR_EVENT_BIRTH,
+            SUBTITLE_LOCATOR_EVENT_DEATH,
+            SUBTITLE_LOCATOR_EVENT_HANDOFF}:
+        raise ValueError("SLR6 state has an unknown last event")
+    if words[31] != 0:
+        raise ValueError("SLR6 reserved header word must be zero")
+
+    generation = _uint64_words(words[10], words[11])
+    frame_id = _uint64_words(words[22], words[23])
+    if (generation != expected_generation or frame_id != expected_frame or
+            words[27] != expected_field_width or words[28] != expected_field_height):
+        raise ValueError("SLR6 state identity disagrees with the matched dump frame")
+
+    owner = _decode_subtitle_locator_rectangles(
+        words, offset=SUBTITLE_LOCATOR_OWNER_WORD_OFFSET, count=owner_count,
+        field_width=expected_field_width, field_height=expected_field_height,
+        label="SLR6 owner")
+    pending = _decode_subtitle_locator_rectangles(
+        words, offset=SUBTITLE_LOCATOR_PENDING_WORD_OFFSET, count=pending_count,
+        field_width=expected_field_width, field_height=expected_field_height,
+        label="SLR6 pending")
+    current = _decode_subtitle_locator_rectangles(
+        words, offset=SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET, count=current_count,
+        field_width=expected_field_width, field_height=expected_field_height,
+        label="SLR6 current-authority")
+    owner_bbox, owner_area = _subtitle_rectangle_aggregate(owner)
+    pending_bbox, pending_area = _subtitle_rectangle_aggregate(pending)
+    if tuple(words[5:9]) != owner_bbox or words[9] != owner_area:
+        raise ValueError("SLR6 owner bbox or area disagrees with its rectangles")
+    if tuple(words[13:17]) != pending_bbox or words[17] != pending_area:
+        raise ValueError("SLR6 pending bbox or area disagrees with its rectangles")
+
+    target = _float32_bits(words[18])
+    target_valid = bool(flags & SUBTITLE_LOCATOR_FLAG_TARGET_VALID)
+    owner_flag = bool(flags & SUBTITLE_LOCATOR_FLAG_OWNER)
+    pending_flag = bool(flags & SUBTITLE_LOCATOR_FLAG_PENDING)
+    target_reset = bool(flags & SUBTITLE_LOCATOR_FLAG_TARGET_RESET)
+    if owner_flag != (owner_count != 0) or pending_flag != (pending_count != 0):
+        raise ValueError("SLR6 owner/pending flags disagree with their rectangle counts")
+    if owner_flag != (words[3] != 0):
+        raise ValueError("SLR6 owner generation disagrees with owner authority")
+    if current_count > owner_count:
+        raise ValueError("SLR6 current rectangle count cannot exceed its owner count")
+    if current_count != 0 and not (owner_flag and target_valid and fade in (1, 2)):
+        raise ValueError("SLR6 current rectangles require owner and valid target authority")
+    if target_valid:
+        if (not owner_flag or target_reset or words[19] != words[3] or
+                not math.isfinite(target) or
+                abs(target) > _DEFAULTS.direct_container_limit or fade not in (1, 2)):
+            raise ValueError("SLR6 valid target identity or value is inconsistent")
+    elif target_reset:
+        if (not owner_flag or words[18] != 0 or words[19] != 0 or
+                current_count != 0 or fade != 0):
+            raise ValueError("SLR6 target reset must clear target and current authority")
+
+    grace = words[25]
+    grace_bounds = {
+        "left": words[29] & 0xFFFF,
+        "right": words[29] >> 16,
+        "top": words[30] & 0xFFFF,
+        "bottom": words[30] >> 16,
+    }
+    packed_grace_zero = words[29] == 0 and words[30] == 0
+    if owner_flag:
+        if grace != 0 or not packed_grace_zero:
+            raise ValueError("SLR6 live owner cannot retain death-grace bounds")
+        if not target_valid and not target_reset and (
+                words[18] != 0 or words[19] != 0 or current_count != 0 or fade != 0):
+            raise ValueError("SLR6 owner without target authority must clear target words")
+    elif grace == 0:
+        if (words[18] != 0 or words[19] != 0 or not packed_grace_zero or
+                current_count != 0 or target_valid or target_reset or fade != 0):
+            raise ValueError("SLR6 absent owner/grace state must be canonical zero")
+    else:
+        if (target_valid or target_reset or words[19] != 0 or
+                not math.isfinite(target) or
+                abs(target) > _DEFAULTS.direct_container_limit or
+                current_count != 0 or fade != 0 or
+                grace_bounds["left"] >= grace_bounds["right"] or
+                grace_bounds["top"] >= grace_bounds["bottom"] or
+                grace_bounds["right"] > expected_field_width or
+                grace_bounds["top"] < SUBTITLE_OCR_ROI_TOP or
+                grace_bounds["bottom"] > SUBTITLE_OCR_ROI_BOTTOM):
+            raise ValueError("SLR6 death-grace target or packed bounds are inconsistent")
+
+    return {
+        "schema": words[0],
+        "tag": words[1],
+        "flags": flags,
+        "owner_generation": words[3],
+        "owner_count": owner_count,
+        "owner_bbox": owner_bbox,
+        "owner_area": owner_area,
+        "analysis_generation": generation,
+        "pending_count": pending_count,
+        "pending_bbox": pending_bbox,
+        "pending_area": pending_area,
+        "target": target if target_valid else None,
+        "cached_target": target if grace != 0 else None,
+        "target_bits": words[18],
+        "target_generation": words[19],
+        "target_reset": target_reset,
+        "current_count": current_count,
+        "last_event": words[21],
+        "matched_frame_id": frame_id,
+        "fade": fade,
+        "target_grace": grace,
+        "scene_epoch": words[26],
+        "field_width": words[27],
+        "field_height": words[28],
+        "packed_grace_x": words[29],
+        "packed_grace_y": words[30],
+        "grace_bounds": grace_bounds if grace != 0 else None,
+        "owner_rectangles": owner,
+        "pending_rectangles": pending,
+        "current_rectangles": current,
+    }
 
 
 def _int32(value: Any, label: str) -> int:
@@ -200,7 +588,7 @@ def _plan_host_sbs_v2_video_region(
         return (max(candidate_width, candidate_height) <= _MAXIMUM_SOURCE_LONG_SIDE and
                 candidate_width * candidate_height <= _MAXIMUM_SOURCE_PIXELS and
                 _fit_host_sbs_v2_depth_tensor_shape(candidate_width, candidate_height) in
-                    _AUTHENTICATED_TENSOR_SHAPES)
+                _AUTHENTICATED_TENSOR_SHAPES)
 
     exact_shape = _fit_host_sbs_v2_depth_tensor_shape(width, height)
     if (exact_shape == (tensor_width, tensor_height) and
@@ -356,7 +744,7 @@ def validate_depth_input_region_document(
         renderer.get("full_source_parallax_scale"), "full-source parallax scale")
     if (renderer.get("inside_inference_rect") != "no taper" or
             renderer.get("source_sampling") !=
-                "full matched source; never clamp to inference rectangle" or
+            "full matched source; never clamp to inference rectangle" or
             renderer.get("inverse_iterations") != 11):
         raise ValueError("depth_input_region.json has unknown renderer semantics")
 
@@ -562,9 +950,9 @@ def _same_number(left: Any, right: Any) -> bool:
     return math.isclose(float(left), float(right), rel_tol=1.0e-6, abs_tol=1.0e-8)
 
 
-def _require_coordinate_binding(value: Any, count_key: str, count: int) -> None:
+def _require_coordinate_binding(value: Any, count_key: str, count: int) -> int:
     shader = coordinate_contract.SHADER_IMPLEMENTATION
-    expected = {
+    current = {
         "schema": coordinate_contract.CONTRACT_SCHEMA,
         "tag": _CONTRACT_TAG,
         "source_closure_schema": shader.source_closure_schema,
@@ -573,8 +961,9 @@ def _require_coordinate_binding(value: Any, count_key: str, count: int) -> None:
         "source_closure_sha256": shader.source_closure_sha256,
         count_key: count,
     }
-    if value != expected:
+    if value != current:
         raise ValueError("dump has an unknown depth-coordinate-v2 contract binding")
+    return _CONTRACT_TAG
 
 
 def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
@@ -584,7 +973,7 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
         raise ValueError("shadow_state.json has missing or unknown root fields")
     if document.get("schema") != SHADOW_STATE_DUMP_SCHEMA:
         raise ValueError("shadow_state.json has an unknown serialization schema")
-    _require_coordinate_binding(
+    coordinate_tag = _require_coordinate_binding(
         document.get("coordinate_contract"), "state_word_count", len(_STATE_FIELDS))
     rendered = document.get("rendered_output_selected")
     expected_wire = (
@@ -597,23 +986,43 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
             not isinstance(rendered, bool) or
             document.get("wire_contract") != expected_wire):
         raise ValueError("shadow_state.json has unknown capture semantics")
-    if document.get("units") != {
+    accepted_units = (
+        {
             "coordinate": "dimensionless canonical coordinate derived from raw depth",
             "gain": "one-eye source-U per curve unit",
-            "parallax": "signed one-eye source-U"}:
+            "parallax": "signed one-eye source-U",
+        },
+        {
+            "coordinate": "dimensionless canonical coordinate derived from raw depth",
+            "gain": "one-eye full-source-U per curve unit",
+            "parallax": "signed one-eye full-source-U",
+        },
+        {
+            "coordinate": "dimensionless canonical coordinate derived from raw depth",
+            "gain": "one-eye ROI-local source-U per curve unit",
+            "parallax": (
+                "signed one-eye ROI-local source-U; full-source renderer authority "
+                "additionally requires depth_input_region embedding"),
+        },
+    )
+    if document.get("units") not in accepted_units:
         raise ValueError("shadow_state.json has unknown units")
     if document.get("adaptation_semantics") != {
-            "coordinate":
-                "immediate-first-usable-center-latched-until-cut-fixed-authenticated-scale-retained-across-unusable",
-            "convergence_curve":
-                "arithmetic-mean-center-is-zero-plane",
+            "coordinate": (
+                "immediate-first-usable-center-latched-until-cut-fixed-"
+                "authenticated-scale-retained-across-unusable"
+            ),
+            "convergence_curve": "arithmetic-mean-center-is-zero-plane",
             "requested_gain": "immutable-cfg-pop-strength",
-            "container_scale":
-                "abi-retained-identity-pointwise-soft-container-is-map-local",
-            "near_curve":
-                "fixed-contract-logarithmic-tau-independent-of-content-occupancy",
-            "spatial_conditioner":
-                "fixed-75pct-vertical-majorant-share-then-horizontal-majorant"}:
+            "container_scale": (
+                "abi-retained-identity-pointwise-soft-container-is-map-local"
+            ),
+            "near_curve": (
+                "fixed-contract-logarithmic-tau-independent-of-content-occupancy"
+            ),
+            "spatial_conditioner": (
+                "fixed-75pct-vertical-majorant-share-then-horizontal-majorant"
+            )}:
         raise ValueError("shadow_state.json has unknown adaptation semantics")
 
     constants = document.get("constants")
@@ -683,7 +1092,7 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
         typed["calibration_revision"],
         "shadow_state.json state calibration_revision",
     )
-    if typed["contract_tag_bits"] != _CONTRACT_TAG:
+    if typed["contract_tag_bits"] != coordinate_tag:
         raise ValueError("shadow_state.json state words have the wrong contract tag")
     expected_camera_integrity = camera_center_integrity_bits(
         float(typed["center"]),
@@ -693,7 +1102,7 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
     )
     if typed["camera_center_integrity_bits"] != expected_camera_integrity:
         raise ValueError("shadow_state.json camera center integrity checksum disagrees")
-    expected_authorization = _CONTRACT_TAG if typed["frame_valid"] > 0.5 else 0
+    expected_authorization = coordinate_tag if typed["frame_valid"] > 0.5 else 0
     if typed["renderer_authorization_bits"] != expected_authorization:
         raise ValueError("shadow_state.json renderer authorization disagrees with frame validity")
     if any(typed[name] != 0 for name in (
@@ -722,7 +1131,7 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
     expected_decoded = {
         "calibration_revision": typed["calibration_revision"],
         "confirmed_cut_count": typed["confirmed_cut_count"],
-        "contract_tag": _CONTRACT_TAG,
+        "contract_tag": coordinate_tag,
         "requested_gain": constants["requested_gain"],
         "requested_pop_strength": constants["requested_pop_strength"],
         "camera_valid": (
@@ -752,10 +1161,11 @@ def validate_shadow_state_document(document: Any) -> Dict[str, Any]:
             (decoded["camera_valid"] and not _same_number(
                 decoded["latched_scale"], constants["raw_coordinate_scale"])) or
             (decoded["frame_valid"] and not decoded["camera_valid"]) or
-            (not decoded["camera_valid"] and
-              (typed["center"] != 0.0 or typed["inverse_scale"] != 0.0 or
-              not _same_number(
-                  typed["convergence_curve"], _DEFAULTS.convergence_curve_default)))):
+            (not decoded["camera_valid"] and (
+                typed["center"] != 0.0 or typed["inverse_scale"] != 0.0 or
+                not _same_number(
+                    typed["convergence_curve"],
+                    _DEFAULTS.convergence_curve_default)))):
         raise ValueError("shadow_state.json decoded safety state is out of range")
     return typed
 
@@ -799,17 +1209,164 @@ def validate_shadow_frame_stats_document(document: Any) -> Dict[str, float]:
     return values
 
 
-def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
-    """Validate the schema-13 V2 geometry fragment of ``dump_manifest.json``.
+def _required_hashed_artifact(
+        artifacts: Dict[str, Any], name: str, label: str) -> Dict[str, Any]:
+    descriptor = artifacts.get(name)
+    if (not isinstance(descriptor, dict) or set(descriptor) != {
+            "available", "required", "stage", "description", "sha256"} or
+            descriptor.get("available") is not True or
+            descriptor.get("required") is not True or
+            not isinstance(descriptor.get("stage"), str) or not descriptor["stage"] or
+            not isinstance(descriptor.get("description"), str) or
+            not descriptor["description"] or
+            not _is_sha256_hex(descriptor.get("sha256"))):
+        raise ValueError(f"dump_manifest.json has an invalid {label} artifact descriptor")
+    return descriptor
 
-    The full package contains legacy/color/model metadata owned by other contracts. This reader
+
+def _subtitle_shader_contract(
+        specs: tuple[tuple[str, str, str], ...]) -> Dict[str, Any]:
+    shader = coordinate_contract.SHADER_IMPLEMENTATION
+    return {
+        "depth_coordinate_v2_schema": coordinate_contract.CONTRACT_SCHEMA,
+        "depth_coordinate_v2_tag": _CONTRACT_TAG,
+        "source_closure_schema": shader.source_closure_schema,
+        "source_compile_flags": shader.source_compile_flags,
+        "source_macro_count": shader.source_macro_count,
+        "source_closure_sha256": shader.source_closure_sha256,
+        "source_specs": [
+            {
+                "source_file": source_file,
+                "entrypoint": entrypoint,
+                "target": target,
+            }
+            for source_file, entrypoint, target in specs
+        ],
+    }
+
+
+def _subtitle_ocr_producer_contract() -> Dict[str, Any]:
+    return {
+        "record_schema": SUBTITLE_OCR_RECORD_SCHEMA,
+        "record_tag": SUBTITLE_OCR_RECORD_TAG,
+        "record_word_count": SUBTITLE_OCR_RECORD_WORD_COUNT,
+        "raw_box_capacity": SUBTITLE_OCR_RAW_BOX_CAPACITY,
+        "final_box_capacity": SUBTITLE_OCR_FINAL_BOX_CAPACITY,
+        "model": {
+            "name": _SUBTITLE_OCR_MODEL_NAME,
+            "source_url": _SUBTITLE_OCR_MODEL_URL,
+            "onnx_sha256": _SUBTITLE_OCR_MODEL_ONNX_SHA256,
+            "engine_recipe": _SUBTITLE_OCR_ENGINE_RECIPE,
+            "preprocess_profile": coordinate_contract.SUBTITLE_OCR.preprocess_profile,
+            "source_crop": coordinate_contract.SUBTITLE_OCR.source_crop,
+            "input": {
+                "name": coordinate_contract.SUBTITLE_OCR.input_name,
+                "dtype": coordinate_contract.SUBTITLE_OCR.input_dtype,
+                "layout": coordinate_contract.SUBTITLE_OCR.input_layout,
+                "shape": list(coordinate_contract.SUBTITLE_OCR.input_shape),
+                "channels": list(coordinate_contract.SUBTITLE_OCR.input_channels),
+                "imagenet_mean": list(coordinate_contract.SUBTITLE_OCR.imagenet_mean),
+                "imagenet_std": list(coordinate_contract.SUBTITLE_OCR.imagenet_std),
+            },
+            "output": {
+                "name": coordinate_contract.SUBTITLE_OCR.output_name,
+                "dtype": coordinate_contract.SUBTITLE_OCR.output_dtype,
+                "layout": coordinate_contract.SUBTITLE_OCR.output_layout,
+                "shape": list(coordinate_contract.SUBTITLE_OCR.output_shape),
+            },
+        },
+        "shader_contract": _subtitle_shader_contract(_SUBTITLE_OCR_SHADER_SPECS),
+    }
+
+
+def _subtitle_locator_resolver_contract() -> Dict[str, Any]:
+    return {
+        "state_schema": SUBTITLE_LOCATOR_STATE_SCHEMA,
+        "state_tag": SUBTITLE_LOCATOR_STATE_TAG,
+        "state_word_count": SUBTITLE_LOCATOR_STATE_WORD_COUNT,
+        "rectangle_capacity": SUBTITLE_LOCATOR_RECT_CAPACITY,
+        "shader_contract": _subtitle_shader_contract(_SUBTITLE_LOCATOR_SHADER_SPECS),
+    }
+
+
+def _validate_subtitle_conditioning_manifest(
+        document: Dict[str, Any], artifacts: Dict[str, Any]) -> Dict[str, Any]:
+    if "overlay_conditioning" in document:
+        raise ValueError("retired overlay-conditioning authority is not supported")
+    _required_hashed_artifact(
+        artifacts, "subtitle_conditioning.json", "subtitle conditioning metadata")
+    subtitle = document.get("subtitle_conditioning")
+    expected_keys = {"mode", "request", "producer", "resolver", "artifacts"}
+    if not isinstance(subtitle, dict) or set(subtitle) != expected_keys:
+        raise ValueError("dump_manifest.json has an invalid subtitle-conditioning contract")
+
+    mode = subtitle.get("mode")
+    if mode == _SUBTITLE_MODE_NONE:
+        if subtitle != {
+                "mode": _SUBTITLE_MODE_NONE,
+                "request": None,
+                "producer": None,
+                "resolver": None,
+                "artifacts": {}}:
+            raise ValueError("inactive subtitle conditioning is not canonical")
+        return {
+            "mode": _SUBTITLE_MODE_NONE,
+            "live": False,
+            "request": None,
+            "artifact_files": {},
+            "subtitle_evidence_complete": False,
+        }
+    if mode == _SUBTITLE_MODE_SLR6:
+        expected_files = {
+            "ocr_record": "subtitle_ocr_record.u32",
+            "locator_state": "subtitle_locator_state.u32",
+            "base_field": "shadow_base_final_parallax.f32",
+            "conditioned_field": "shadow_final_parallax.f32",
+        }
+        if subtitle.get("request") is not True:
+            raise ValueError("active SLR6 subtitle conditioning must bind an enabled request")
+        if subtitle.get("producer") != _subtitle_ocr_producer_contract():
+            raise ValueError("active SLR6 subtitle conditioning has unknown OCR6 provenance")
+        if subtitle.get("resolver") != _subtitle_locator_resolver_contract():
+            raise ValueError("active SLR6 subtitle conditioning has unknown resolver provenance")
+        if subtitle.get("artifacts") != expected_files:
+            raise ValueError("active SLR6 subtitle conditioning has unknown artifact roles")
+        required = {
+            "subtitle_ocr_record.u32": "same-frame OCR6 subtitle boxes",
+            "subtitle_locator_state.u32": "compact SLR6 subtitle authority state",
+            "shadow_base_final_parallax.f32": (
+                "ordinary post-limiter V2 field before SLR6 conditioning"),
+        }
+        for name, stage in required.items():
+            descriptor = _required_hashed_artifact(
+                artifacts, name, f"active subtitle {name}")
+            if descriptor.get("stage") != stage:
+                raise ValueError(
+                    f"dump_manifest.json misattributes active subtitle artifact {name}")
+        return {
+            "mode": _SUBTITLE_MODE_SLR6,
+            "live": True,
+            "request": True,
+            "artifact_files": expected_files,
+            "subtitle_evidence_complete": True,
+        }
+    raise ValueError("unsupported subtitle-conditioning authority")
+
+
+
+def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
+    """Validate a supported V2 geometry fragment of ``dump_manifest.json``.
+
+    The full package contains color/model metadata owned by other contracts. This reader
     deliberately validates only the candidate -> full-resolution ownership refinement -> vertical
     envelopes/share -> row-majorant chain, its analysis domain, and every authenticated
     intermediate.
     """
 
-    if not isinstance(document, dict) or document.get("schema") != DUMP_MANIFEST_SCHEMA:
+    if (not isinstance(document, dict) or
+            document.get("schema") not in SUPPORTED_DUMP_MANIFEST_SCHEMAS):
         raise ValueError("dump_manifest.json has an unknown serialization schema")
+    schema = document["schema"]
     renderer = document.get("renderer")
     shadow = document.get("parallax_v2_shadow")
     artifacts = document.get("artifacts")
@@ -821,6 +1378,10 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     input_summary = document.get("depth_input_region")
     input_descriptor = artifacts.get("depth_input_region.json")
     input_preview_descriptor = artifacts.get("depth_input_source.png")
+    expected_input_preview_description = (
+        "Spatially exact full-source or cropped color input submitted to the calibrated "
+        "preprocess; transfer-aware PNG is diagnostic only and never numeric model authority."
+    )
     if (not isinstance(input_summary, dict) or set(input_summary) != {
             "available", "artifact", "mode", "geometry_authority", "renderer_authority"} or
             input_summary.get("available") is not True or
@@ -842,9 +1403,12 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
             input_preview_descriptor.get("required") is not False or
             input_preview_descriptor.get("stage") != "model-depth input source preview" or
             input_preview_descriptor.get("description") !=
-                "Spatially exact full-source or cropped color input submitted to the calibrated preprocess; transfer-aware PNG is diagnostic only and never numeric model authority."):
+            expected_input_preview_description):
         raise ValueError("dump_manifest.json has an invalid depth-input-region contract")
     input_mode = input_summary["mode"]
+    subtitle_conditioning = _validate_subtitle_conditioning_manifest(
+        document, artifacts)
+    subtitle_live = subtitle_conditioning["live"]
 
     active = shadow.get("active")
     selected = renderer.get("parallax_v2_render_selected")
@@ -855,6 +1419,8 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         raise ValueError("dump_manifest.json V2 selection flags disagree")
     if selected and not active:
         raise ValueError("dump_manifest.json selects V2 without an active producer")
+    if subtitle_live and (not active or not selected):
+        raise ValueError("active SLR6 subtitle conditioning requires selected V2 geometry")
     requested = renderer.get("parallax_v2_render_requested")
     mapping_matches = renderer.get("mapping_artifacts_match_selected_renderer")
     if (not isinstance(requested, bool) or
@@ -882,15 +1448,17 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         "shadow_coordinate is diagnostic only; it has no renderer authority"
         if selected else None
     )
+    expected_live_renderer_source_closure = LIVE_RENDERER_SOURCE_CLOSURE_SHA256
+    expected_diagnostic_source_closure = DIAGNOSTIC_SOURCE_CLOSURE_SHA256
     expected_live_shader_source = ({
         "source_closure_schema": generator.SOURCE_CLOSURE_SCHEMA,
         "source_compile_flags": generator.SHADER_COMPILE_FLAGS,
         "source_macro_count": 0,
-        "source_closure_sha256": LIVE_RENDERER_SOURCE_CLOSURE_SHA256,
+        "source_closure_sha256": expected_live_renderer_source_closure,
         "source_file": "sbs_reprojection_v2_live_ps.hlsl",
         "entrypoint": "main_ps",
         "target": "ps_5_0",
-        "diagnostic_source_closure_sha256": DIAGNOSTIC_SOURCE_CLOSURE_SHA256,
+        "diagnostic_source_closure_sha256": expected_diagnostic_source_closure,
         "mapping_source_file": "sbs_reprojection_v2_diagnostics_ps.hlsl",
         "mapping_entrypoint": "mapping_ps",
         "mask_source_file": "sbs_reprojection_v2_diagnostics_ps.hlsl",
@@ -916,6 +1484,18 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     )
     expected_final_role = (
         (("least row-wise crop-local q >= shadow_vertical_conditioned with horizontal slope <= "
+          "max_horizontal_slope and vertical shear <= max_vertical_shear produces "
+          "shadow_base_final_parallax; SLR6 applies the analytic anisotropic rectangle "
+          "budget/fade from same-frame current authority and publishes shadow_final_parallax, "
+          "which plus depth_input_region embedding is live position authority")
+         if subtitle_live and input_mode == "video-region" else
+         ("least row-wise q >= shadow_vertical_conditioned with horizontal slope <= "
+          "max_horizontal_slope and vertical shear <= max_vertical_shear produces "
+          "shadow_base_final_parallax; SLR6 applies the analytic anisotropic rectangle "
+          "budget/fade from same-frame current authority and publishes "
+          "shadow_final_parallax as live position authority")
+         if subtitle_live else
+         ("least row-wise crop-local q >= shadow_vertical_conditioned with horizontal slope <= "
           "max_horizontal_slope and vertical shear <= max_vertical_shear; q plus "
           "depth_input_region embedding is live position authority")
          if input_mode == "video-region" else
@@ -939,7 +1519,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
             renderer.get("parallax_v2_ownership_refined_role") != expected_ownership_role or
             renderer.get("parallax_v2_vertical_majorant_role") != expected_vertical_role or
             renderer.get("parallax_v2_vertical_conditioned_role") !=
-                expected_conditioned_role or
+            expected_conditioned_role or
             renderer.get("parallax_v2_conditioner_role") != expected_final_role or
             renderer.get("collar_defocus") != expected_collar_defocus):
         raise ValueError("dump_manifest.json has unknown V2 conditioner attribution")
@@ -974,6 +1554,9 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         "shadow_final_parallax.f32": (
             "parallax-v2 final conditioned displacement field", True),
     }
+    if subtitle_live:
+        expected_artifacts["shadow_base_final_parallax.f32"] = (
+            "ordinary post-limiter V2 field before SLR6 conditioning", True)
     for name, (stage, required) in expected_artifacts.items():
         descriptor = artifacts.get(name)
         # Exact geometry fields carry a mandatory SHA-256 of the written bytes; a manifest
@@ -997,7 +1580,9 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     dimension_names = (
         "shadow_candidate_parallax", "shadow_ownership_refined_parallax",
         "shadow_vertical_majorant",
-        "shadow_vertical_conditioned", "shadow_final_parallax")
+        "shadow_vertical_conditioned",
+        *(('shadow_base_final_parallax',) if subtitle_live else ()),
+        "shadow_final_parallax")
     geometry_dimensions = [dimensions.get(name) for name in dimension_names]
     if active:
         if any(not isinstance(value, dict) for value in geometry_dimensions):
@@ -1014,6 +1599,11 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
 
         geometry_width = expected_dimensions["width"]
         geometry_height = expected_dimensions["height"]
+        if subtitle_live and (
+                geometry_width != SUBTITLE_OCR_FIELD_WIDTH or
+                geometry_height != SUBTITLE_OCR_FIELD_HEIGHT):
+            raise ValueError(
+                "active SLR6 subtitle conditioning requires the frozen 770x434 field")
         model_dimensions = dimensions.get("model_input")
         raw_dimensions = dimensions.get("raw_depth")
         warp_dimensions = dimensions.get("warp_depth")
@@ -1055,10 +1645,14 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
                     ("DXGI_FORMAT_R16G16B16A16_FLOAT", 10)} or
                 analysis_source_dimensions["format"] != source_dimensions["format"] or
                 analysis_source_dimensions["format_value"] !=
-                    source_dimensions["format_value"]):
+                source_dimensions["format_value"]):
             raise ValueError("dump_manifest.json has invalid analysis-source dimensions")
     elif any(value is not None for value in geometry_dimensions):
         raise ValueError("dump_manifest.json exposes inactive V2 geometry dimensions")
+    if not subtitle_live and (
+            "shadow_base_final_parallax.f32" in artifacts or
+            "shadow_base_final_parallax" in dimensions):
+        raise ValueError("inactive subtitle conditioning exposes an SLR6 base field")
 
     if input_mode == "video-region":
         warp_map_descriptor = artifacts.get("warp_map.f32")
@@ -1092,6 +1686,8 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
             not isinstance(border_descriptor, dict)):
         raise ValueError("dump_manifest.json has an invalid window-video border contract")
     border_available = border_summary.get("available")
+    border_observer_status = border_summary.get("observer_status")
+    border_mapping_status = border_summary.get("mapping_status")
     border_required = input_mode == "video-region"
     expected_border_descriptor_keys = {"available", "required", "stage", "description"}
     if border_required:
@@ -1105,18 +1701,25 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
             not border_descriptor["description"] or
             border_summary.get("artifact") != (
                 "window_video_border.json" if border_available else None) or
-            border_summary.get("observer_status") not in WINDOW_VIDEO_OBSERVER_STATUSES or
-            border_summary.get("mapping_status") not in WINDOW_VIDEO_MAPPING_STATUSES or
+            border_observer_status not in WINDOW_VIDEO_OBSERVER_STATUSES or
+            border_mapping_status not in WINDOW_VIDEO_MAPPING_STATUSES or
             (border_available and (
-                border_summary.get("observer_status") != "ok" or
-                border_summary.get("mapping_status") != "ok")) or
+                border_observer_status not in _WINDOW_VIDEO_POSITIVE_OBSERVER_STATUSES or
+                border_mapping_status != "ok")) or
             (border_required and (
                 not border_available or
                 not _is_sha256_hex(border_descriptor.get("sha256")))) or
             border_summary.get("geometry_authority") is not False or
             border_summary.get("renderer_authority") is not False):
         raise ValueError("dump_manifest.json has an inconsistent window-video border contract")
+    if border_observer_status == "ok-fullscreen":
+        if (not border_available or border_mapping_status != "ok" or
+                input_mode != "full-source"):
+            raise ValueError(
+                "ok-fullscreen window-video evidence requires an available mapped border, "
+                "and full-source depth input")
     return {
+        "manifest_schema": schema,
         "active": active,
         "rendered_output_selected": selected,
         "mapping_artifacts_match_selected_renderer": mapping_matches,
@@ -1130,6 +1733,9 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
             ["shadow_final_parallax", "depth_input_region"]
             if input_mode == "video-region" else ["shadow_final_parallax"]),
         "window_video_border_available": border_available,
+        "window_video_border_observer_status": border_observer_status,
+        "window_video_border_mapping_status": border_mapping_status,
+        "subtitle_conditioning": subtitle_conditioning,
     }
 
 
@@ -1145,6 +1751,158 @@ _GEOMETRY_CHAIN_FIELDS = (
     "shadow_vertical_conditioned",
     "shadow_final_parallax",
 )
+
+
+def _read_hashed_artifact(
+        dump_dir: Any, artifacts: Dict[str, Any], name: str) -> bytes:
+    import hashlib
+    import os
+
+    path = os.path.join(os.fspath(dump_dir), name)
+    try:
+        with open(path, "rb") as handle:
+            payload = handle.read()
+    except OSError as error:
+        raise ValueError(f"{name} is missing") from error
+    descriptor = artifacts.get(name)
+    if (not isinstance(descriptor, dict) or
+            hashlib.sha256(payload).hexdigest() != descriptor.get("sha256")):
+        raise ValueError(f"{name} content hash mismatch")
+    return payload
+
+
+def _verify_subtitle_conditioning_artifacts(
+        dump_dir: Any, manifest: Dict[str, Any], *, matched_frame_id: int,
+        analysis_generation: int, source_width: int, source_height: int,
+        field_width: int, field_height: int) -> Dict[str, Any]:
+    import json
+
+    metadata_payload = _read_hashed_artifact(
+        dump_dir, manifest["artifacts"], "subtitle_conditioning.json")
+    try:
+        metadata = json.loads(metadata_payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("subtitle_conditioning.json is malformed") from error
+    if metadata != manifest.get("subtitle_conditioning"):
+        raise ValueError("subtitle_conditioning.json disagrees with the manifest")
+    mode = metadata.get("mode")
+    if mode == _SUBTITLE_MODE_SLR6:
+        ocr_payload = _read_hashed_artifact(
+            dump_dir, manifest["artifacts"], "subtitle_ocr_record.u32")
+        locator_payload = _read_hashed_artifact(
+            dump_dir, manifest["artifacts"], "subtitle_locator_state.u32")
+        ocr = validate_subtitle_ocr_record(
+            ocr_payload,
+            matched_frame_id=matched_frame_id,
+            analysis_generation=analysis_generation,
+            source_width=source_width,
+            source_height=source_height,
+            field_width=field_width,
+            field_height=field_height,
+            roi_top=SUBTITLE_OCR_ROI_TOP,
+            roi_bottom=SUBTITLE_OCR_ROI_BOTTOM,
+        )
+        locator = validate_subtitle_locator_state(
+            locator_payload,
+            matched_frame_id=matched_frame_id,
+            analysis_generation=analysis_generation,
+            field_width=field_width,
+            field_height=field_height,
+        )
+        if not ocr["authoritative"] and locator["current_count"] != 0:
+            raise ValueError("an abstaining OCR6 record cannot authorize SLR6 current rectangles")
+        final_rectangles = {
+            (rectangle["left"], rectangle["top"], rectangle["right"], rectangle["bottom"])
+            for rectangle in ocr["final_boxes"]
+        }
+        if any(
+                (rectangle["left"], rectangle["top"],
+                 rectangle["right"], rectangle["bottom"]) not in final_rectangles
+                for rectangle in locator["current_rectangles"]):
+            raise ValueError(
+                "SLR6 current rectangles are not exact boxes from the same-frame OCR6 record")
+        return {
+            "mode": _SUBTITLE_MODE_SLR6,
+            "subtitle_evidence_verified": True,
+            "ocr_authoritative": ocr["authoritative"],
+            "ocr_raw_count": ocr["raw_count"],
+            "ocr_final_count": ocr["final_count"],
+            "source_width": ocr["source_width"],
+            "owner_count": locator["owner_count"],
+            "pending_count": locator["pending_count"],
+            "current_count": locator["current_count"],
+            "last_event": locator["last_event"],
+            "current_rectangles": locator["current_rectangles"],
+            "target": locator["target"],
+            "fade": locator["fade"],
+        }
+    return {
+        "mode": _SUBTITLE_MODE_NONE,
+        "subtitle_evidence_verified": False,
+    }
+
+
+def _replay_slr6_conditioner(base_field: Any, subtitle: Dict[str, Any]) -> Any:
+    """Replay the frozen SLR6 analytic rectangle conditioner in float32 order."""
+
+    import numpy as np
+
+    base = np.asarray(base_field, dtype=np.float32)
+    if base.ndim != 2:
+        raise ValueError("SLR6 Base field must be a two-dimensional float32 array")
+    rectangles = subtitle["current_rectangles"]
+    if not rectangles:
+        return base.copy()
+    source_width = _uint32(subtitle.get("source_width"), "SLR6 analysis source width")
+    if source_width == 0:
+        raise ValueError("SLR6 analysis source width must be positive")
+    target = subtitle.get("target")
+    fade = subtitle.get("fade")
+    if target is None or fade not in (1, 2):
+        raise ValueError("SLR6 current geometry lacks valid target/fade authority")
+
+    height, width = base.shape
+    if width != SUBTITLE_OCR_FIELD_WIDTH or height != SUBTITLE_OCR_FIELD_HEIGHT:
+        raise ValueError("SLR6 conditioner field does not match the frozen 770x434 ABI")
+    x = np.arange(width, dtype=np.int64)[None, :]
+    y = np.arange(height, dtype=np.int64)[:, None]
+    horizontal_step = np.float32(
+        np.float32(_DEFAULTS.max_horizontal_slope) / np.float32(width))
+    vertical_step = np.float32(
+        np.float32(_DEFAULTS.max_vertical_shear) / np.float32(width))
+    best_distance = np.full(base.shape, np.float32(np.inf), dtype=np.float32)
+    for rectangle in rectangles:
+        left = rectangle["left"]
+        top = rectangle["top"]
+        right = rectangle["right"]
+        bottom = rectangle["bottom"]
+        dx = np.where(x < left, left - x,
+                      np.where(x >= right, x - (right - 1), 0)).astype(np.float32)
+        dy = np.where(y < top, top - y,
+                      np.where(y >= bottom, y - (bottom - 1), 0)).astype(np.float32)
+        horizontal_distance = np.multiply(dx, horizontal_step, dtype=np.float32)
+        vertical_distance = np.multiply(dy, vertical_step, dtype=np.float32)
+        distance = np.add(horizontal_distance, vertical_distance, dtype=np.float32)
+        best_distance = np.minimum(best_distance, distance)
+
+    core_range = np.float32(np.float32(0.5) / np.float32(source_width))
+    budget = np.add(core_range, best_distance, dtype=np.float32)
+    target32 = np.float32(target)
+    delta = np.subtract(base, target32, dtype=np.float32)
+    safe = np.less_equal(np.abs(delta), budget)
+    base_in_range = np.less_equal(
+        np.abs(base), np.float32(_DEFAULTS.direct_container_limit))
+    signed_budget = np.where(delta < np.float32(0.0), -budget, budget).astype(np.float32)
+    full = np.add(target32, signed_budget, dtype=np.float32)
+    if fade == 1:
+        half_delta = np.multiply(
+            np.float32(0.5), np.subtract(full, base, dtype=np.float32),
+            dtype=np.float32)
+        conditioned = np.add(base, half_delta, dtype=np.float32)
+    else:
+        conditioned = full
+    return np.where(base_in_range & ~safe, conditioned, base).astype(np.float32)
+
 
 
 def _verify_roi_exterior_zero_warp_map(
@@ -1221,17 +1979,18 @@ def _verify_roi_exterior_zero_warp_map(
             shape.get("channels") != ["raw_reproject_source_u_normalized"] or
             shape.get("validity") != expected_validity or
             shape.get("live_sample_source_u_normalized") !=
-                "clamp(raw_reproject_source_u_normalized, 0, 1)" or
+            "clamp(raw_reproject_source_u_normalized, 0, 1)" or
             shape.get("derived_inverse_displacement_output_eye_px") !=
-                "(raw_reproject_source_u_normalized - aspect_fitted_unwarped_source_u) * content_scale_x * eye_width" or
+            "(raw_reproject_source_u_normalized - aspect_fitted_unwarped_source_u) * "
+            "content_scale_x * eye_width" or
             shape.get("derived_signed_binocular_disparity_px") !=
-                "invert both eye maps at common source-U samples; x_right - x_left" or
+            "invert both eye maps at common source-U samples; x_right - x_left" or
             not isinstance(preview, dict) or set(preview) != {
                 "file", "range_px", "normalization", "negative", "zero", "positive",
                 "bars", "nonfinite"} or
             preview.get("file") != "warp_displacement_heat.png" or
             preview.get("normalization") !=
-                "symmetric finite-content p98 absolute displacement" or
+            "symmetric finite-content p98 absolute displacement" or
             preview.get("negative") != "blue" or preview.get("zero") != "green" or
             preview.get("positive") != "red" or preview.get("bars") != "black" or
             preview.get("nonfinite") != "magenta" or
@@ -1258,9 +2017,9 @@ def _verify_roi_exterior_zero_warp_map(
             content_scale_x != expected_scale_x or content_scale_y != expected_scale_y or
             not isinstance(content_fit, dict) or
             _finite_number(content_fit.get("scale_x"), "manifest content scale x") !=
-                expected_scale_x or
+            expected_scale_x or
             _finite_number(content_fit.get("scale_y"), "manifest content scale y") !=
-                expected_scale_y):
+            expected_scale_y):
         raise ValueError("ROI warp-map content-fit contract disagrees")
 
     values = np.frombuffer(payload, dtype="<f4")
@@ -1383,9 +2142,10 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
       1. every chain field's ``.f32`` bytes hash to the manifest descriptor's ``sha256``;
       2. every field matches the manifest geometry dimensions and is entirely finite;
       3. the conditioning chain is internally consistent in exact float32:
-         ``vertical_majorant``/``vertical_conditioned``/``final`` are bitwise equal to the
-         recurrences recomputed from ``ownership_refined``; and the ownership refinement never
-         lowers the candidate.
+         ``vertical_majorant``/``vertical_conditioned``/ordinary Base are bitwise equal to the
+         recurrences recomputed from ``ownership_refined``; SLR6's analytic rectangle budget and
+         fade exactly reproduce the selected final field; and ownership refinement never lowers
+         the candidate.
 
     Returns a summary dict on success; raises ``ValueError`` on the first violation.
     """
@@ -1478,8 +2238,38 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
                 "video_id": border["video_id"]}:
             raise ValueError("depth input authorization disagrees with window-video border")
 
+    if fragment["window_video_border_observer_status"] == "ok-fullscreen":
+        if border is None:
+            raise ValueError("ok-fullscreen dump has no matched window-video border")
+        if (border["left"], border["top"], border["right"], border["bottom"]) != (
+                0, 0, source_width, source_height):
+            raise ValueError(
+                "ok-fullscreen window-video border is not the exact full source")
+        if input_region["mode"] != "full-source":
+            raise ValueError(
+                "ok-fullscreen dump is not bound to the full-source analysis domain")
+
+    subtitle_summary = _verify_subtitle_conditioning_artifacts(
+        dump_dir,
+        manifest,
+        matched_frame_id=frame_id,
+        analysis_generation=input_region["analysis_generation"],
+        source_width=input_region["inference_width"],
+        source_height=input_region["inference_height"],
+        field_width=width,
+        field_height=height,
+    )
+    subtitle_live = subtitle_summary["mode"] == _SUBTITLE_MODE_SLR6
+    geometry_chain_fields = (
+        "shadow_candidate_parallax",
+        "shadow_ownership_refined_parallax",
+        "shadow_vertical_majorant",
+        "shadow_vertical_conditioned",
+        *(('shadow_base_final_parallax',) if subtitle_live else ()),
+        "shadow_final_parallax",
+    )
     fields: Dict[str, Any] = {}
-    for name in _GEOMETRY_CHAIN_FIELDS:
+    for name in geometry_chain_fields:
         path = os.path.join(os.fspath(dump_dir), name + ".f32")
         with open(path, "rb") as handle:
             payload = handle.read()
@@ -1493,7 +2283,6 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
         if not np.isfinite(values).all():
             raise ValueError(f"{name}.f32 contains non-finite values")
         fields[name] = values.reshape(height, width)
-
     candidate = fields["shadow_candidate_parallax"]
     ownership = fields["shadow_ownership_refined_parallax"]
     if np.any(ownership < candidate):
@@ -1523,16 +2312,33 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
     for col in range(width - 2, -1, -1):
         final[:, col] = np.maximum(final[:, col], final[:, col + 1] - horizontal_step)
 
-    for name, recomputed in (
+    recurrence_fields = [
         ("shadow_vertical_majorant", majorant),
         ("shadow_vertical_conditioned", conditioned),
-        ("shadow_final_parallax", final),
-    ):
+    ]
+    recurrence_fields.append((
+        "shadow_base_final_parallax" if subtitle_live else "shadow_final_parallax",
+        final,
+    ))
+    for name, recomputed in recurrence_fields:
         if not np.array_equal(fields[name], recomputed):
             mismatch = float(np.max(np.abs(fields[name] - recomputed)))
             raise ValueError(
                 f"{name}.f32 is not the exact recurrence of the dumped ownership field "
                 f"(max abs diff {mismatch})")
+
+    if subtitle_live:
+        replayed_subtitle = _replay_slr6_conditioner(
+            fields["shadow_base_final_parallax"], subtitle_summary)
+        if not np.array_equal(fields["shadow_final_parallax"], replayed_subtitle):
+            mismatch = float(np.max(np.abs(
+                fields["shadow_final_parallax"] - replayed_subtitle)))
+            if subtitle_summary["current_count"] == 0:
+                raise ValueError(
+                    "SLR6 has no current geometry but the final field is not exact Base")
+            raise ValueError(
+                "shadow_final_parallax.f32 is not the exact SLR6 rectangle-conditioning "
+                f"recurrence (max abs diff {mismatch})")
 
     warp_depth_path = os.path.join(os.fspath(dump_dir), "warp_depth.f32")
     try:
@@ -1563,12 +2369,14 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
         "width": width,
         "height": height,
         "texels": width * height,
-        "chain_fields_verified": list(_GEOMETRY_CHAIN_FIELDS),
+        "chain_fields_verified": list(geometry_chain_fields),
         "depth_input_region_verified": True,
         "depth_input_region": input_region,
         "roi_exterior_zero_evidence": exterior_zero,
         "window_video_border_verified": border is not None,
         "window_video_border": border,
+        "subtitle_conditioning": subtitle_summary,
+        "final_recurrence_verified": True,
     }
 
 
@@ -1579,9 +2387,41 @@ __all__ = [
     "LIVE_RENDERER_SOURCE_CLOSURE_SHA256",
     "SHADOW_FRAME_STATS_DUMP_SCHEMA",
     "SHADOW_STATE_DUMP_SCHEMA",
+    "SUPPORTED_DUMP_MANIFEST_SCHEMAS",
+    "SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET",
+    "SUBTITLE_LOCATOR_EVENT_BIRTH",
+    "SUBTITLE_LOCATOR_EVENT_DEATH",
+    "SUBTITLE_LOCATOR_EVENT_HANDOFF",
+    "SUBTITLE_LOCATOR_EVENT_NONE",
+    "SUBTITLE_LOCATOR_FLAG_OWNER",
+    "SUBTITLE_LOCATOR_FLAG_PENDING",
+    "SUBTITLE_LOCATOR_FLAG_TARGET_RESET",
+    "SUBTITLE_LOCATOR_FLAG_TARGET_VALID",
+    "SUBTITLE_LOCATOR_HEADER_WORD_COUNT",
+    "SUBTITLE_LOCATOR_OWNER_WORD_OFFSET",
+    "SUBTITLE_LOCATOR_PENDING_WORD_OFFSET",
+    "SUBTITLE_LOCATOR_RECT_CAPACITY",
+    "SUBTITLE_LOCATOR_STATE_SCHEMA",
+    "SUBTITLE_LOCATOR_STATE_TAG",
+    "SUBTITLE_LOCATOR_STATE_WORD_COUNT",
+    "SUBTITLE_OCR_BOX_WORD_COUNT",
+    "SUBTITLE_OCR_FINAL_BOX_CAPACITY",
+    "SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET",
+    "SUBTITLE_OCR_FIELD_HEIGHT",
+    "SUBTITLE_OCR_FIELD_WIDTH",
+    "SUBTITLE_OCR_HEADER_WORD_COUNT",
+    "SUBTITLE_OCR_ROI_BOTTOM",
+    "SUBTITLE_OCR_ROI_TOP",
+    "SUBTITLE_OCR_RAW_BOX_CAPACITY",
+    "SUBTITLE_OCR_RAW_BOX_WORD_OFFSET",
+    "SUBTITLE_OCR_RECORD_SCHEMA",
+    "SUBTITLE_OCR_RECORD_TAG",
+    "SUBTITLE_OCR_RECORD_WORD_COUNT",
     "WINDOW_VIDEO_BORDER_SCHEMA",
     "camera_center_integrity_bits",
     "validate_depth_input_region_document",
+    "validate_subtitle_locator_state",
+    "validate_subtitle_ocr_record",
     "validate_window_video_border_document",
     "validate_v2_dump_manifest_document",
     "validate_shadow_frame_stats_document",

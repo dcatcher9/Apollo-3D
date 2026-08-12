@@ -1861,10 +1861,10 @@ def _clip_sequence_input_contract(
         "raw_coordinate_scale": run_model["raw_coordinate_scale"],
         "run_pop_strength": run_model["pop_strength"],
         "results_json_sha256": run_model["results_sha256"],
-        "model_hash_authority": "schema-36-run-level-results-json",
-        "input_shape_authority": "schema-36-per-clip-raw-manifest",
+        "model_hash_authority": "schema-37-run-level-results-json",
+        "input_shape_authority": "schema-37-per-clip-raw-manifest",
         "raw_hash_authority": {
-            "source": "schema-36-run-level-results-json",
+            "source": "schema-37-run-level-results-json",
             "manifest_schema": whole_clip_raw_contract.MANIFEST_SCHEMA,
             "binding": whole_clip_raw_contract.BINDING,
         },

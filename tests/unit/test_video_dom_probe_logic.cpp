@@ -26,6 +26,7 @@ namespace {
       .available = available,
       .fully_contained = contained,
       .credible_size = true,
+      .fullscreen_available = available,
     };
   }
 }  // namespace
@@ -323,4 +324,179 @@ TEST(VideoDomProbeLogic, UnavailablePartiallyClippedMainStillPoisonsSmallerAd) {
   const auto selection = probe::select_candidate(candidates);
   EXPECT_FALSE(selection.index);
   EXPECT_EQ(selection.reason, probe::selection_reason_e::ambiguous);
+}
+
+TEST(VideoDomProbeLogic, DuplicateFullClientVideosAuthorizeFullscreen) {
+  const std::array candidates {
+    candidate(20, {0, 0, 1920, 1080}),
+    candidate(10, {0, 0, 1920, 1080}),
+  };
+
+  const auto selection = probe::select_authority_candidate(candidates, browser);
+  ASSERT_TRUE(selection.index);
+  EXPECT_EQ(*selection.index, 1U);
+  EXPECT_EQ(selection.reason, probe::selection_reason_e::fullscreen);
+  EXPECT_EQ(
+    probe::selection_authority_rect(candidates, selection, browser),
+    std::optional<probe::rect_t> {browser}
+  );
+}
+
+TEST(VideoDomProbeLogic, FullClientSelectionIsIndependentOfTraversalOrder) {
+  const std::array forward {
+    candidate(30, {0, 0, 1920, 1080}),
+    candidate(10, {-20, -10, 1940, 1090}, true, false),
+  };
+  const std::array reverse {forward[1], forward[0]};
+
+  const auto forward_selection = probe::select_authority_candidate(forward, browser);
+  const auto reverse_selection = probe::select_authority_candidate(reverse, browser);
+  ASSERT_TRUE(forward_selection.index);
+  ASSERT_TRUE(reverse_selection.index);
+  EXPECT_EQ(forward[*forward_selection.index].unique_id, 10);
+  EXPECT_EQ(reverse[*reverse_selection.index].unique_id, 10);
+  EXPECT_EQ(forward_selection.reason, probe::selection_reason_e::fullscreen);
+  EXPECT_EQ(reverse_selection.reason, probe::selection_reason_e::fullscreen);
+  EXPECT_EQ(
+    probe::selection_authority_rect(forward, forward_selection, browser),
+    probe::selection_authority_rect(reverse, reverse_selection, browser)
+  );
+}
+
+TEST(VideoDomProbeLogic, FullClientVideoBeatsUnrelatedPartialCandidate) {
+  auto partial = candidate(1, {-100, 100, 1400, 950}, true, false);
+  partial.visible_rect = {0, 100, 1400, 950};
+  const std::array candidates {
+    partial,
+    candidate(2, {0, 0, 1920, 1080}),
+  };
+
+  const auto selection = probe::select_authority_candidate(candidates, browser);
+  ASSERT_TRUE(selection.index);
+  EXPECT_EQ(*selection.index, 1U);
+  EXPECT_EQ(selection.reason, probe::selection_reason_e::fullscreen);
+}
+
+TEST(VideoDomProbeLogic, DocumentClippingDoesNotDisableFullClientVideo) {
+  auto document_clipped = candidate(7, {-30, -20, 1950, 1100}, false, false);
+  document_clipped.visible_rect = {100, 80, 1820, 1000};
+  document_clipped.fullscreen_available =
+    probe::fullscreen_semantic_available(true, true, true);
+  const std::array candidates {document_clipped};
+
+  const auto selection = probe::select_authority_candidate(candidates, browser);
+  ASSERT_TRUE(selection.index);
+  EXPECT_EQ(selection.reason, probe::selection_reason_e::fullscreen);
+  EXPECT_EQ(
+    probe::selection_authority_rect(candidates, selection, browser),
+    std::optional<probe::rect_t> {browser}
+  );
+}
+
+TEST(VideoDomProbeLogic, UnavailableDocumentCannotAuthorizeFullClientVideo) {
+  auto unavailable_document = candidate(7, {0, 0, 1920, 1080}, false, true);
+  // The element itself may be geometrically full-client, but census collection leaves this false
+  // when its owning document has an unavailable IA2 state.
+  unavailable_document.fullscreen_available =
+    probe::fullscreen_semantic_available(true, true, false);
+  const std::array candidates {unavailable_document};
+
+  const auto selection = probe::select_authority_candidate(candidates, browser);
+  EXPECT_FALSE(selection.index);
+  EXPECT_EQ(selection.reason, probe::selection_reason_e::none);
+}
+
+TEST(VideoDomProbeLogic, UnavailableVideoCannotAuthorizeFullClientVideo) {
+  auto unavailable_video = candidate(8, {0, 0, 1920, 1080}, false, true);
+  unavailable_video.fullscreen_available =
+    probe::fullscreen_semantic_available(false, true, true);
+  const std::array candidates {unavailable_video};
+
+  const auto selection = probe::select_authority_candidate(candidates, browser);
+  EXPECT_FALSE(selection.index);
+  EXPECT_EQ(selection.reason, probe::selection_reason_e::none);
+}
+
+TEST(VideoDomProbeLogic, MaximizedBrowserDoesNotPromoteNonCoveringPageVideo) {
+  const std::array candidates {
+    candidate(9, {0, 120, 1920, 1080}),
+  };
+
+  const auto selection = probe::select_authority_candidate(candidates, browser);
+  ASSERT_TRUE(selection.index);
+  EXPECT_EQ(selection.reason, probe::selection_reason_e::single);
+  const std::optional<probe::rect_t> expected {
+    probe::rect_t {0, 120, 1920, 1080}
+  };
+  EXPECT_EQ(
+    probe::selection_authority_rect(candidates, selection, browser),
+    expected
+  );
+}
+
+TEST(VideoDomProbeLogic, EqualWindowedRoiCandidatesRemainAmbiguous) {
+  const std::array candidates {
+    candidate(10, {100, 100, 900, 700}),
+    candidate(20, {1000, 100, 1800, 700}),
+  };
+
+  const auto selection = probe::select_authority_candidate(candidates, browser);
+  EXPECT_FALSE(selection.index);
+  EXPECT_EQ(selection.reason, probe::selection_reason_e::ambiguous);
+}
+
+TEST(VideoDomProbeLogic, CompleteFullscreenCensusCanStageAuthority) {
+  const probe::selection_t selection {
+    .index = 0,
+    .reason = probe::selection_reason_e::fullscreen,
+  };
+
+  const auto policy = probe::complete_census_policy(selection, false);
+  EXPECT_TRUE(policy.stage_selection);
+  EXPECT_FALSE(policy.revoke_cached_selection);
+  EXPECT_EQ(policy.phase, probe::cached_selection_phase_e::provisional);
+  EXPECT_FALSE(policy.publish_ok);
+}
+
+TEST(VideoDomProbeLogic, FullscreenCacheRefreshAllowsDocumentAndOverscanChanges) {
+  // Document geometry is intentionally absent from this policy. Only the retained video
+  // identity, stable client authority, and continued full-client coverage are relevant.
+  EXPECT_TRUE(probe::fullscreen_cache_refresh_matches(
+    42,
+    42,
+    browser,
+    browser,
+    {-40, -25, 1960, 1110}
+  ));
+  EXPECT_TRUE(probe::fullscreen_cache_refresh_matches(
+    42,
+    42,
+    browser,
+    browser,
+    {0, 0, 1920, 1080}
+  ));
+}
+
+TEST(VideoDomProbeLogic, FullscreenCacheRefreshRejectsIdentityOrAuthorityChange) {
+  EXPECT_FALSE(probe::fullscreen_cache_refresh_matches(
+    42,
+    43,
+    browser,
+    browser,
+    {0, 0, 1920, 1080}
+  ));
+  EXPECT_FALSE(probe::fullscreen_cache_refresh_matches(
+    42,
+    42,
+    browser,
+    {10, 10, 1930, 1090},
+    {0, 0, 1930, 1090}
+  ));
+  EXPECT_FALSE(probe::fullscreen_cache_refresh_matches(
+    42,
+    42,
+    browser,
+    browser,
+    {2, 0, 1920, 1080}
+  ));
 }

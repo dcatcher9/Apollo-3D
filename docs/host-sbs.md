@@ -16,40 +16,49 @@ flowchart LR
     IA2["Foreground Chromium IA2 observation"]
     MATCH["Exact matched-frame ROI selection"]
     DOMAIN["Full frame or authenticated inward-trimmed ROI"]
-    OVERLAY["Exact-frame burned-in overlay plan (optional)"]
-    SANITIZE["Inference-only local fill and tensor exclusion"]
     PREPROCESS["HDR/SDR model preprocessing"]
     DAV2["Authenticated DAV2 Small inference"]
     CUT["Cut-only evidence and scene epoch"]
+    OCR["PP-OCRv6 tiny detector (bottom 960x160)"]
+    LOCATOR["OCR6 boxes and compact SLR6 tracker"]
     CAMERA["Scene-latched raw center"]
     CURVE["Fixed raw coordinate and curve"]
     CONTAINER["Pointwise soft source-U container"]
     OWNER["Conservative ownership correction"]
     VERTICAL["75/25 vertical envelope share"]
     ROW["Horizontal majorant"]
-    ZERO["Post-limit zero-plane core and outside collar"]
+    PLANE["Post-limit subtitle plane and analytic collar"]
     INVERSE["11-step contractive inverse"]
     COLOR["One native linear-color sample"]
     ENCODE["Packed SBS and NVENC"]
 
-    CAPTURE --> MATCH --> DOMAIN --> SANITIZE --> PREPROCESS --> DAV2
-    OVERLAY -. exact-frame optional authority .-> SANITIZE
+    CAPTURE --> MATCH --> DOMAIN --> PREPROCESS --> DAV2
     IA2 -. optional authority .-> MATCH
     DAV2 --> CUT --> CAMERA
-    DAV2 --> CAMERA --> CURVE --> CONTAINER --> OWNER --> VERTICAL --> ROW --> ZERO --> INVERSE
-    OVERLAY -. exact-frame optional authority .-> ZERO
+    DAV2 --> CAMERA --> CURVE --> CONTAINER --> OWNER --> VERTICAL --> ROW --> PLANE --> INVERSE
+    CAPTURE -. completed 770x434 observation .-> OCR --> LOCATOR
+    CUT --> LOCATOR --> PLANE
     CAPTURE --> COLOR
     INVERSE --> COLOR --> ENCODE
 ```
 
-Only the final row-conditioned parallax field has rendering authority. Raw depth, canonical
-coordinate, candidate parallax, ownership-refined parallax, and vertical-envelope outputs are
+Only the final authenticated parallax field, including optional adaptive overlay-plane
+conditioning, has rendering authority. Raw depth, canonical coordinate, candidate parallax,
+ownership-refined parallax, vertical-envelope output, and the unconditioned row majorant are
 diagnostics that explain how the final field was produced.
 
 ## Authenticated production contract
 
-The generated Depth Coordinate contract is the machine-readable authority. At schema 27, live
-Host SBS admits the following production calibration:
+The generated Depth Coordinate contract is the machine-readable authority. The current identity is
+schema 40/tag `0xF7C853C2`, canonical SHA-256
+`5c7116be0004e33e24f150430d85e06b9eb66782b4fc3b059501e04093835d9e`, with authenticated
+producer source-closure SHA-256
+`861f800db1cc06a6d25b80d18bb1b7bf4bc469ed1ccfacfd96a0b384bfb2a7a1`, live-renderer
+source-closure SHA-256
+`914fc624955c5e3b41f867429acb17a03c34ba71e41f7cbfab00fd939aafff9b`, and dump-only diagnostic
+renderer source-closure SHA-256
+`d2dada0490e727d88fdda802a9eb6759b34e9501c91835363ebdb0196e3d5c4b`. It admits the following
+production calibration:
 
 | Property | Production value |
 |---|---|
@@ -71,6 +80,15 @@ producer closure, state checksum, and renderer closure must also authenticate. L
 production Web UI conversion, and the maintained benchmark harness all use this one pinned model.
 There is no supported Host SBS model selector. Unsupported model identities and tensor shapes fail
 closed.
+
+Fixed-shape shader bytecode is cached across restarts under the executable's trusted configuration
+directory at `shader-cache/host-sbs-v1`. Each artifact filename is keyed by the authenticated source
+closure, ordered entrypoint/target, and compile flags. Runtime reflection validates the cached stage
+and Shader Model 5.0 bytecode before use; missing, stale, truncated, or invalid artifacts are
+compiled from the immutable source snapshot and replaced atomically. This is only a startup
+optimization and cannot weaken source-closure or shader-creation fail-flat behavior. Successful
+prewarm retains the 128 most recently used artifacts so superseded closures cannot grow without
+bound.
 
 ### Authenticated resolution fitting
 
@@ -94,9 +112,15 @@ inward by at most 2% of its area to match that shape's aspect ratio. It never ex
 into browser chrome, pads the model input, or stretches video pixels. If that small inward fit cannot
 be proven, the frame uses ordinary full-frame V2.
 
-A semantic video rectangle exactly equal to the full capture extent is canonical ordinary
-full-frame V2. It is not cropped or trimmed, does not enter a new ROI analysis domain, and does not
-require the ROI embedding branch. Dump 3D records it as the canonical full-source analysis domain.
+Authenticated true fullscreen is selected separately from the strict windowed-ROI candidate. The
+helper may recognize an available semantic `<video>` that covers the complete foreground browser
+client even when the element overscans that client, its owning document rectangle is clipped, or
+Chromium exposes multiple full-cover clones. The helper publishes the client rectangle as the
+fullscreen authority, and the host accepts that authority only when the client maps exactly to the
+capture extent. A maximized browser, an estimator full-source domain, or a failed windowed ROI does
+not prove fullscreen by itself. Once admitted, true fullscreen is canonical ordinary full-frame V2:
+it is not cropped or trimmed, does not enter a new ROI analysis domain, and does not require the ROI
+embedding branch. Dump 3D records it as the canonical full-source analysis domain.
 
 ## Color and HDR
 
@@ -132,44 +156,62 @@ identity or dimensions, or changing its input transfer domain resets the tempora
 state before the new domain is used. Translating the same ROI without changing its dimensions is
 not a new analysis domain, so an ordinary window move does not by itself reacquire the camera.
 
-An authenticated burned-in-overlay plan adds a second, frame-local exclusion inside either
-analysis domain. The original color remains untouched. A separate inference-only texture locally
-fills the tight/dilated R8 mask before DAV2, and exact positive-overlap pooling marks every affected
-tensor cell ineligible for extrema, histogram/normalization, EMA motion, current/previous cut
-evidence, ownership, V2 moments, and scene-center acquisition. In schema 27 the internal
-`frame_stats.texel_count` word therefore means the number of eligible, unmasked tensor cells; with
-no overlay plan it remains the physical tensor texel count. Any non-finite admitted cell makes that
-frame ineligible instead of silently changing its denominator.
+### OCR-box subtitle conditioner
 
-After the ordinary vertical and horizontal limiters, a separate authenticated compute pass clamps
-the final field to exact zero throughout each loose overlay rectangle. It spends the required
-horizontal/vertical transition entirely outside that core using the existing slope bounds. The
-inverse is identity in the core and samples the untouched source subtitle/logo pixels without an
-extra resample. The analysis sanitizer and final-field conditioner are one atomic optional bundle:
-missing, stale, mismatched, or unavailable mask/geometry resources disable both for that frame and
-leave ordinary V2 unchanged.
+The production subtitle path is the single current detector-only PP-OCRv6 tiny/OCR6/SLR6 route.
+It does not run text recognition, language classification, or logo recognition. For a completed
+canonical `770x434` DAV2 observation, the GPU takes the exact bottom `6:1` source crop, resizes it to
+`960x160`, converts BGR through the pinned ImageNet normalization, and runs the authenticated
+`ppocrv6_tiny_det` TensorRT 11 strong-typed FP32 engine
+(`trt-strong-fp32-tf32-fixed960x160-level5-v1`). The detector's `1x1x160x960` probability map is reduced
+on the GPU to bounded line boxes; no probability texture or model input becomes rendering
+authority.
+
+OCR6 is a fixed 208-word current record: a 16-word header, at most 16 raw boxes, and at most eight
+final boxes. Every half-open box lies in the `770x434` field's `[325,430)` bottom ROI. Schema/tag,
+authoritative flag, exact matched-frame and analysis-generation identity, source dimensions, field,
+ROI, finite score, counts, and all reserved/unused words must validate together. `flags == 1` with
+zero boxes is an authoritative empty observation. Abstaining, incomplete, overflowing, stale, or
+malformed output has no geometry authority.
+
+SLR6 is a fixed 80-word compact state containing at most four owner rectangles, four pending
+rectangles, and four same-frame current-authority rectangles. Generic line geometry rejects boxes
+that are too small, too wide, too short, or not sufficiently horizontal; there is no hard-coded
+logo position. Vertically adjacent boxes form one coherent centered, left-aligned, or right-aligned
+stack, chosen deterministically by area. Individual line rectangles and their gaps are preserved.
+The first exact observation is pending; only a compatible observation with a distinct exact
+frame/domain identity confirms an owner. A compatible subset can remove a line immediately, while
+an appended or materially changed stack remains pending and conditions only lines still matched to
+the old owner until its second observation confirms the handoff.
+
+Only rectangles copied from the current OCR6 record can condition the current frame. Cached owner,
+pending, target, and six-observation death grace cannot manufacture geometry. Authoritative empty
+OCR removes all current rectangles immediately. A hard cut clears pending/grace, retains only
+current rectangles that still overlap an old owner, and resamples the plane target; disjoint boxes
+begin a new two-observation transaction. An input-domain reset clears the owner as well and treats
+any current boxes as the first pending observation. This lets a seek/reset landing on an
+already-visible static subtitle acquire on the following distinct observation without an onset
+edge.
+
+The plane target is sampled from the same post-limit BaseField as the subtitle, above the owner
+stack: the median of 32 samples is filtered with a `0.15` EMA and a maximum per-observation step of
+`0.25 / source_width`. New owners fade from half to full strength over two observations; a
+cut-surviving owner resamples at full strength. The conditioner then evaluates distance directly to
+each current half-open rectangle. For integer cell `(x,y)`, `dx`/`dy` are zero inside a rectangle
+and count cells to its nearest included edge outside it:
 
 ```text
-u = (raw_depth - scene_center) / 2.25
+d      = min(dx * 0.5 / field_width + dy * 2.0 / field_width)
+budget = 0.5 / source_width + d
 ```
 
-The selected center is the exact zero-disparity plane. There is no additional convergence offset.
-It remains fixed through later valid, invalid, and fast-motion frames until the next confirmed
-cut. There is no age-based camera replacement, per-frame recentering, subject tracking, endpoint
-normalization, or adaptive pop multiplier.
-
-The fixed monotone curve is:
-
-```text
-             0.75 * (exp(u / 0.75) - 1)          u < 0
-F(u) =       u                                    0 <= u <= 1
-             1 + 0.5 * log(1 + (u - 1) / 0.5)    u > 1
-```
-
-It is continuous, monotone, and unbounded on the near branch. The wider linear coordinate region
-preserves middle-layer ordering; the far shelf is deliberately lower-value than the middle and
-near zones, and the near logarithm compresses extreme foreground without clamping it into a flat
-slab.
+Base values already within `budget` of the target are copied bit-for-bit. Values outside it move
+only to `target +/- budget`, with the half-strength birth/handoff fade when applicable. Thus each
+line has a dense core and a V2-slope-safe analytic collar, nearby line collars may meet naturally,
+and the gap is never converted into one merged rectangle. Missing current authority, invalid target
+state, unsupported tensor shape, or any identity failure copies ordinary post-limit V2 exactly.
+There is no pixel history, row lease, onset accumulator, signature, horizontal-distance texture,
+full-resolution overlay detector, or GST/OGR/ORS dependency.
 
 ## Pop and the pointwise soft container
 
@@ -261,7 +303,11 @@ color. A confirmed cut invalidates the old camera; the next usable field acquire
 
 Model preparation, shader compilation, and the live renderer are fail-closed. Live shaders are
 compiled and cached at process startup. Dump-only resources are created lazily and cannot prevent a
-stream from starting. A failure in optional diagnostics has no rendering authority.
+stream from starting. A failure in optional diagnostics has no rendering authority. An armed
+schema-21 dump preserves the selected path's same-frame authority resources with ordered D3D11
+`CopyResource` operations;
+it adds no production GPU-to-CPU readback, flush, query wait, or synchronous Map. The explicit dump
+then uses the existing diagnostic readback path to publish files.
 
 ROI observer, rectangle, aspect-fit, or crop-resource eligibility failure selects ordinary
 full-frame V2. That route selection does not weaken the base contract: an internal V2 model,
@@ -275,29 +321,41 @@ may intentionally block to obtain a complete trace.
 
 ## Foreground Chromium window-video ROI
 
-Windows Host SBS can bind a Chromium `<video>` element's physical screen rectangle observation to
-one matched color/depth frame. A supervised helper process obtains the semantic rectangle through
-Chromium's IAccessible2 tree; Sunshine never performs accessibility traversal or waits for the
-helper on the capture, inference, encode, or render thread. The host accepts only a fresh,
-identity-bearing result from the foreground Chrome or Edge document, maps the half-open rectangle
-to an identity-oriented single-output capture, and tolerates at most one physical pixel of browser
-endpoint rounding before clipping. Missing, stale, ambiguous, rotated, spanning, partially
-off-monitor, or mismatched geometry uses ordinary full-frame V2.
+Windows Host SBS can bind a Chromium `<video>` observation to one matched color/depth frame. A
+supervised helper obtains semantic element and foreground-client rectangles through Chromium's
+IAccessible2 tree; Sunshine never performs accessibility traversal or waits for the helper on the
+capture, inference, encode, or render thread. The host accepts only a fresh, identity-bearing result
+from the foreground Chrome or Edge root, maps its half-open authority rectangle to an
+identity-oriented single-output capture, and tolerates at most one physical pixel of browser
+endpoint rounding before clipping.
 
-Selection targets the IA2-available, fully contained semantic video box, not every media session on
-the machine. Only the foreground browser root is scanned; background browser windows and background
-tabs cannot authorize a rectangle. Within its document, the unique largest credible `<video>` is
-selected. Equal-largest candidates are ambiguous. Playback state is not required, so the same DOM
-identity and rectangle remain valid while the selected video is paused.
+Windowed ROI and true fullscreen use deliberately separate selection rules. A windowed ROI still
+requires the unique largest credible IA2-available `<video>` to be fully contained by both its
+owning document and the foreground browser client; equal-largest candidates remain ambiguous. For
+true fullscreen, an available semantic `<video>` need only cover the complete foreground client.
+The element may overscan that client, the available owning document's rectangle may be clipped, and
+multiple full-cover Chromium clones do not make fullscreen ambiguous; the helper retains a stable
+semantic identity and publishes the client rectangle. Only the foreground browser root is scanned,
+so background browser windows and tabs cannot authorize either route. Playback state is not
+required, and a paused retained identity remains eligible.
+
+The machine protocol preserves that provenance: strict windowed selection publishes `ok`, while
+the relaxed full-client selection publishes `ok-fullscreen`. The host never accepts an
+`ok-fullscreen` subrectangle as a windowed ROI; it is eligible only after mapping exactly to the
+capture. A transition between the two positive status classes starts a new live-detector source
+generation even when the semantic IDs and rectangle are otherwise identical.
 
 One complete census can only stage a new machine-mode selection as provisional; it remains
-unpublished and Host SBS continues on full-frame V2. On the next 100 ms helper tick, the retained
-document and video objects must independently pass the same identity, state, tag, containment, size,
-and exact-rectangle checks before the helper emits `ok`. A failed refresh emits `changed` and
-requests an immediate new census. A complete no-video or ambiguous census revokes an existing
-selection immediately. Foreground changes are hard vetoes, while unrelated descendant-object churn
-only requests a coalesced three-second audit. An uncached incomplete traversal retries within one
-second; confirmed accessibility unavailability retains the 15-second backoff.
+unpublished and Host SBS continues on full-frame V2. On the next 100 ms helper tick, a windowed
+selection's retained document and video objects must independently pass the same identity, state,
+tag, containment, size, and exact-rectangle checks before the helper emits `ok`. A fullscreen
+refresh instead requires the same available retained video identity to keep covering the unchanged
+foreground client; document-rectangle clipping and harmless element overscan changes are not
+fullscreen revocations. A failed refresh emits `changed` and requests an immediate new census. A
+complete no-video or windowed ambiguity revokes an existing selection immediately. Foreground
+changes are hard vetoes, while unrelated descendant-object churn only requests a coalesced
+three-second audit. An uncached incomplete traversal retries within one second; confirmed
+accessibility unavailability retains the 15-second backoff.
 
 This causal attribution is currently Desktop-Duplication-only. WGC does not expose an equivalent
 of `LastPresentTime` that separates desktop content from cursor-only compositor frames, so WGC uses
@@ -312,9 +370,12 @@ area to the current authenticated tensor aspect. A same-format D3D11 crop suppli
 preprocessing and the full-resolution ownership pass; all cut, center, and history state is
 crop-local. The original full color texture remains the renderer source. The final ROI field is
 mapped back at its physical pixel scale, with the outside-only slope collar described above, and the
-desktop beyond that collar is exactly at zero parallax. A semantic rectangle equal to the full
-capture is canonical full-frame V2. Unsupported aspect fitting, crop allocation failure, or
-lost/stale observer identity also selects full-frame V2 rather than a guessed ROI; an internal V2
+desktop beyond that collar is exactly at zero parallax. Separately, the host grants the helper's
+true-fullscreen authority only when its foreground-client rectangle maps exactly to the capture;
+that case is canonical full-frame V2. A maximized window or full-source fallback without this
+semantic/client proof is not fullscreen authority. Missing, stale, ambiguous windowed selection,
+rotated, spanning, partially off-monitor, mismatched geometry, unsupported aspect fitting, or crop
+allocation failure selects ordinary full-frame V2 rather than a guessed ROI; an internal V2
 authentication failure remains fail-closed flat.
 
 The host separately tracks the newest helper heartbeat and the beginning of the current exact
@@ -331,43 +392,15 @@ continues unchanged.
 
 ## Dump 3D and evaluation
 
-A current Dump 3D package records:
-
-- the matched source, model input, and direct raw DAV2 output;
-- the exact full-source or inward-cropped color input submitted to preprocessing, plus an
-  authenticated half-open analysis-region document;
-- candidate, ownership-refined, vertical-envelope, and final parallax fields;
-- scene camera and cut attribution;
-- the exact inverse-warp map and finite-source mask; and
-- for an ROI dump, the required matched-frame semantic video border and browser/document identity;
-  this observation is not renderer authority by itself; and
-- the rendered packed SBS image plus model, shader, state, color, and source provenance.
-
-Dump manifest schema 13 represents both coordinate domains explicitly. In an ROI package,
-`model_input`, raw depth, and all producer fields are crop-local; the source image, packed SBS, and
-inverse map remain full-source/full-output. `depth_input_region.json` binds the two domains, the
-inward trim, analysis generation, `ROI_width / source_width` unit conversion, and outside-only
-collar. Renderer authority is the tuple of the crop-local final field, this region document, and the
-authenticated live shader closure. The required full-source inverse map lets the verifier measure
-that samples beyond the conservative collar return to identity. `window_video_border.json` remains
-the semantic observation from which the ROI was planned, not independent geometry authority.
-
-Schema 13 does not yet carry a burned-in-overlay mask, sanitizer input, plan generation, loose
-rectangles, or conditioned-field provenance. A pending Dump 3D request is therefore explicitly
-rejected on an overlay-conditioned frame rather than publishing unauthenticated evidence or
-silently retrying on a later unrelated frame.
-
-The ordinary replay command rejects ROI packages until its harness accepts the full source, crop,
-region constants, and ROI renderer together; it must never reinterpret crop-local depth as a
-full-frame field.
+Dump 3D records one matched current-contract frame: source/model/raw DAV2 evidence, authenticated
+analysis-region placement, the V2 geometry chain and inverse map, scene/cut attribution, packed SBS,
+and—when selected—the exact OCR6 record and compact SLR6 state used by conditioning. The reader
+accepts only the current schema and identities. Retired SLR3--SLR5 and GST/OGR/ORS packages are not
+replayed or reinterpreted.
 
 Use `.f32` artifacts for quantitative comparisons. Independently stretched PNG previews can hide
-scale differences and must not be compared as absolute depth values. Older dumps remain useful as
-input witnesses only; they cannot authenticate a newer producer or renderer schema.
-
-The supported commands, dump contract, metrics, and baseline policy live in
-[the sbsbench guide](../tools/sbsbench/README.md). Scene-cut behavior and its headset acceptance
-plan live in [Host SBS scene cuts](host-sbs-scene-cuts.md).
+scale differences and are diagnostic only. The supported commands, metrics, and baseline policy live
+in [the sbsbench guide](../tools/sbsbench/README.md).
 
 ## Known limitations
 
@@ -382,11 +415,25 @@ plan live in [Host SBS scene cuts](host-sbs-scene-cuts.md).
 - The ROI route is foreground-Chromium-only. Chromium accessibility exposes a semantic element box,
   not exact composited visibility. Canvas or WebGL players, protected video, disabled accessibility,
   background tabs/windows, non-Chromium applications, and partially off-monitor video use
-  full-frame V2 when they provide no valid rectangle. CSS or browser overlays captured inside an
-  otherwise authorized rectangle remain analysis content unless a separately authenticated
-  burned-in-overlay plan masks them. The known-mask consumer exists, but the automatic
-  subtitle/logo detector is not yet production authority; Host SBS does not reconstruct an
-  unoccluded video.
+  full-frame V2 when they provide no valid rectangle.
+- The automatic subtitle path is qualified only for an exact `770x434` landscape model tensor and
+  one coherent bottom stack of at most four line boxes. Other tensor shapes copy ordinary V2. The
+  detector does not know whether a box contains a subtitle, UI text, a lower third, or a logo;
+  bottom crop, generic horizontal-line geometry, coherent stacking, exact identity, and
+  two-observation overlap are the only false-positive controls. A horizontal persistent scene-text
+  box can therefore acquire, while a square badge is normally rejected by geometry. More than one
+  simultaneous subtitle stack is unsupported and only the deterministic winning stack is tracked.
+- Detection, not recognition, is pinned. Very small, very low-contrast, stylized, vertical, curved,
+  or partially clipped text can be missed or boxed inaccurately. The two-observation transaction
+  adds one completed-observation latency to births and material handoffs. Typewriter and karaoke
+  additions condition only already-matched lines until the updated stack confirms. An authoritative
+  one-observation detector miss removes current geometry immediately; grace retains only a target
+  seed, never a mask.
+- Current subtitle qualification comes from deterministic synthetic clip fixtures and WARP
+  sequences; it does not measure the real-video distribution or a production false-positive rate.
+  HDR, fades, stylized subtitles, false positives, cross-GPU timing, and Galaxy XR visual acceptance
+  still require real-video qualification. Host SBS does not reconstruct unoccluded video behind the
+  subtitle.
 - Unsupported model or fitted-tensor setup is rejected before Host SBS starts. A bad per-frame
   shader/state/field identity renders that current frame flat rather than attempting a best-effort
   geometry fallback.

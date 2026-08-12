@@ -2,6 +2,7 @@ import io
 import ast
 import glob
 import hashlib
+import html
 import json
 import os
 import shutil
@@ -91,6 +92,8 @@ class EvalContractTests(unittest.TestCase):
                 stream.write(b"canonical-sbs")
             with open(os.path.join(run, "warp_map_00001.f32"), "wb") as stream:
                 stream.write(b"canonical-map")
+            with open(os.path.join(run, "structure_00001.png"), "wb") as stream:
+                stream.write(b"canonical-structure")
             oracle_dir = os.path.join(run, "offline_oracles")
             os.makedirs(oracle_dir)
             report_path = os.path.join(run, "report.html")
@@ -113,6 +116,12 @@ class EvalContractTests(unittest.TestCase):
 
             with open(os.path.join(run, "sbs_00001.png"), "wb") as stream:
                 stream.write(b"changed-sbs")
+            self.assertNotEqual(numeric_original, run_eval.scored_artifact_digests(run)[1])
+
+            with open(os.path.join(run, "sbs_00001.png"), "wb") as stream:
+                stream.write(b"canonical-sbs")
+            with open(os.path.join(run, "structure_00001.png"), "wb") as stream:
+                stream.write(b"changed-structure")
             self.assertNotEqual(numeric_original, run_eval.scored_artifact_digests(run)[1])
 
     def test_direct_parallax_manifest_is_authenticated_and_geometry_bound(self):
@@ -1644,7 +1653,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("quarantined_context_count", estimator)
         self.assertIn("warmed_context_count", estimator)
         self.assertIn("if (context_warmed && !execution_context_poisoned)", estimator)
-        self.assertIn('model.name + ".active-engine.json"', estimator)
+        self.assertIn('std::string(model_name) + ".active-engine.json"', estimator)
         self.assertIn('{"onnx_sha256", artifact.source_sha256}', estimator)
 
     def test_harness_contract_is_v2_only_and_machine_verified(self):
@@ -1660,7 +1669,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn('a == "--literal-bestv2"', harness)
         self.assertIn('fs::path(o.out) / "contract.json"', harness)
         self.assertIn(
-            '(direct_parallax_mode ? direct_geometry_contract_schema : 20u)',
+            '(direct_parallax_mode ? direct_geometry_contract_schema : 22u)',
             harness)
         self.assertIn('direct_geometry_contract_schema = 25u', harness)
         self.assertIn('direct_geometry_manifest_schema = 6u', harness)
@@ -1673,6 +1682,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('"mapping_ps"', harness)
         self.assertIn('"warp_map_%s.f32"', harness)
         self.assertIn('fs::path(o.out) / "warp_map_shape.json"', harness)
+        self.assertIn('shadow_final_parallax', harness)
         self.assertIn('raw_reproject_source_u_normalized', harness)
         self.assertIn('live_sample_transform', harness)
         self.assertIn('\\"warp_mapping\\"', harness)
@@ -1760,7 +1770,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn('SBS_DIRECT_CANDIDATE_PARALLAX', harness)
         self.assertNotIn('SBS_CANDIDATE_GAP_FILL', harness)
         self.assertIn(
-            '(direct_parallax_mode ? direct_geometry_contract_schema : 20u)',
+            '(direct_parallax_mode ? direct_geometry_contract_schema : 22u)',
             harness)
         self.assertIn('{"renderer_uses_order", false}', harness)
         self.assertIn(
@@ -1871,7 +1881,10 @@ class EvalContractTests(unittest.TestCase):
             estimator.index("estimate_result estimate("):
             estimator.index("video_depth_estimator::video_depth_estimator")
         ]
-        normalized = live_estimate.index("normalize_depth_output(d3d_timer);")
+        self.assertIn(
+            "normalize_depth_output(d3d_timer, input_domain_reset);", estimator)
+        normalized = live_estimate.index(
+            "normalize_depth_output(d3d_timer, completed_input_domain_reset);")
         production_post_timing_ended = live_estimate.index(
             "mark_d3d_post_end(d3d_timer);", normalized)
         raw_snapshotted = live_estimate.index(
@@ -1881,7 +1894,8 @@ class EvalContractTests(unittest.TestCase):
         current_preprocess = live_estimate.index(
             "context->CSSetShader(rgb_to_nchw_cs.Get()", input_snapshotted)
         reused_by_cuda = live_estimate.index(
-            "cuda.cuGraphicsMapResources(2, resources, cu_stream)", current_preprocess)
+            "cuda.cuGraphicsMapResources(2, depth_resources, cu_stream)",
+            current_preprocess)
         self.assertLess(normalized, raw_snapshotted)
         self.assertLess(production_post_timing_ended, raw_snapshotted)
         self.assertLess(raw_snapshotted, input_snapshotted)
@@ -2205,11 +2219,53 @@ class EvalContractTests(unittest.TestCase):
         self.assertEqual(set(primary_style),
                          configured_primary | {"exact_visible_pop_spread_pct"})
         self.assertEqual(set(hard), configured_hard)
-        self.assertEqual(len(hard), 17)
+        self.assertEqual(len(hard), len(set(hard)))
         self.assertEqual(set(supporting),
                          configured_diagnostic - {"exact_visible_pop_spread_pct"})
         self.assertIn("exact_local_polarity_component_pct", supporting)
         self.assertIn("flow_temporal_p95", supporting)
+
+    def test_soft_plane_policy_is_a_visible_bottom_roi_qualification_warning(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "tools", "sbsbench", "thresholds.json"),
+                  encoding="utf-8") as stream:
+            spec = json.load(stream)["metrics"][
+                "subtitle_glyph_soft_plane_inlier_pct"]
+        self.assertEqual(spec["role"], "diagnostic")
+        self.assertEqual(spec["trigger_min"], 98.0)
+        self.assertNotIn("hard_min", spec)
+
+        report_path = os.path.join(repo, "tools", "sbsbench", "build_report.py")
+        with open(report_path, encoding="utf-8") as stream:
+            tree = ast.parse(stream.read(), filename=report_path)
+        function = next(node for node in tree.body
+                        if isinstance(node, ast.FunctionDef)
+                        and node.name == "subtitle_qualification_strip")
+        metric = "subtitle_glyph_soft_plane_inlier_pct"
+        namespace = {
+            "THR": {metric: spec},
+            "CLIPS": ["synthetic"],
+            "TREAT": {"clips": {"synthetic": {"aggregate": {metric: 97.0}}}},
+            "_metric_value": lambda run, clip, key: run["clips"][clip]["aggregate"].get(key),
+            "html": html,
+            "name": lambda clip: clip,
+        }
+        exec(compile(ast.Module(body=[function], type_ignores=[]), report_path, "exec"),
+             namespace)
+
+        warning = namespace["subtitle_qualification_strip"]()
+        self.assertIn("SYNTHETIC QUALIFICATION WARNING", warning)
+        self.assertIn("98.00%", warning)
+        self.assertIn("Real positive qualification pending", warning)
+        self.assertIn("scores final rendered glyphs only", warning)
+        self.assertIn("replacement OCR-box trace", warning)
+
+        for document in ("METRICS.md", "DATASETS.md"):
+            with open(os.path.join(repo, "tools", "sbsbench", document),
+                      encoding="utf-8") as stream:
+                policy = " ".join(stream.read().split())
+            self.assertIn("bottom-roi-scoped", policy.lower())
+            self.assertIn("real positive qualification is pending", policy.lower())
 
     def test_live_trt_contexts_are_bounded_and_engine_io_fails_closed(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

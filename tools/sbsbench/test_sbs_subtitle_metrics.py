@@ -66,16 +66,17 @@ def horizontal_blur(image):
 
 
 class SubtitleMetricTests(unittest.TestCase):
-    def test_constant_nonzero_disparity_has_zero_variance_but_nonzero_target_error(self):
+    def test_constant_nonzero_disparity_fits_exact_plane_and_reports_position(self):
         width, height = 32, 16
         source = stripe_frame(width, height)
         geometry = binocular_geometry(
             width, height, np.full((height, width), 3.5, dtype=np.float32))
         measured = subtitle_metrics.measure_subtitle_region(
             source, source, source, np.ones(source.shape, bool),
-            mapping_shape(width, height), geometry, target_disparity_pct=0.0)
+            mapping_shape(width, height), geometry)
         self.assertEqual(measured["subtitle_disparity_variance_pct2"], 0.0)
-        self.assertGreater(measured["subtitle_target_disparity_rms_error_pct"], 0.0)
+        self.assertEqual(measured["subtitle_constant_plane_rms_error_pct"], 0.0)
+        self.assertGreater(measured["subtitle_plane_abs_disparity_pct"], 0.0)
 
     def test_disparity_variance_is_resolution_normalized_and_region_limited(self):
         def measured(width, height, scale):
@@ -90,10 +91,9 @@ class SubtitleMetricTests(unittest.TestCase):
             region[:, width // 4:3 * width // 4] = True
             metrics = subtitle_metrics.measure_subtitle_region(
                 source, source, source, region, mapping_shape(width, height),
-                binocular_geometry(width, height, disparity),
-                target_disparity_pct=0.0)
+                binocular_geometry(width, height, disparity))
             return (metrics["subtitle_disparity_variance_pct2"],
-                    metrics["subtitle_target_disparity_rms_error_pct"])
+                    metrics["subtitle_constant_plane_rms_error_pct"])
 
         low = measured(32, 16, 1.0)
         high = measured(64, 32, 2.0)
@@ -102,18 +102,42 @@ class SubtitleMetricTests(unittest.TestCase):
         self.assertAlmostEqual(low[0], high[0], places=5)
         self.assertAlmostEqual(low[1], high[1], places=5)
 
+    def test_authenticated_tight_mask_excludes_character_gaps_from_plane_fit(self):
+        width, height = 32, 16
+        source = stripe_frame(width, height)
+        loose = np.ones(source.shape, dtype=bool)
+        tight = np.zeros(source.shape, dtype=bool)
+        tight[:, 2:8] = True
+        tight[:, 24:30] = True
+        disparity = np.full(source.shape, 2.0, dtype=np.float32)
+        disparity[:, 8:24] = np.where(
+            np.arange(16)[None, :] % 2, 18.0, -18.0)
+        geometry = binocular_geometry(width, height, disparity)
+
+        tight_metrics = subtitle_metrics.measure_subtitle_region(
+            source, source, source, loose, mapping_shape(width, height), geometry,
+            overlay_mask=tight)
+        legacy_metrics = subtitle_metrics.measure_subtitle_region(
+            source, source, source, loose, mapping_shape(width, height), geometry)
+
+        self.assertEqual(tight_metrics["subtitle_constant_plane_rms_error_pct"], 0.0)
+        self.assertGreater(
+            legacy_metrics["subtitle_constant_plane_rms_error_pct"], 0.1)
+        self.assertEqual(
+            tight_metrics["subtitle_region_authored_count"], width * height)
+
     def test_identical_eyes_preserve_horizontal_gradient_energy(self):
         width, height = 32, 16
         source = stripe_frame(width, height)
         measured = subtitle_metrics.measure_subtitle_region(
             source, source, source, np.ones(source.shape, bool),
-            mapping_shape(width, height), binocular_geometry(width, height),
-            target_disparity_pct=0.0)
-        self.assertEqual(measured["subtitle_target_disparity_rms_error_pct"], 0.0)
+            mapping_shape(width, height), binocular_geometry(width, height))
+        self.assertEqual(measured["subtitle_constant_plane_rms_error_pct"], 0.0)
+        self.assertEqual(measured["subtitle_plane_abs_disparity_pct"], 0.0)
         self.assertAlmostEqual(
             measured["subtitle_sharpness_preservation_pct"], 100.0, places=5)
 
-    def test_matching_nonzero_authored_target_has_zero_error(self):
+    def test_nonzero_constant_plane_has_zero_fitted_residual(self):
         width, height = 32, 16
         source = stripe_frame(width, height)
         one_pixel_pct = subtitle_metrics.sbs_interocular_metrics.perceived_disparity_pct(
@@ -122,10 +146,11 @@ class SubtitleMetricTests(unittest.TestCase):
         disparity = np.full(source.shape, target / one_pixel_pct, dtype=np.float32)
         measured = subtitle_metrics.measure_subtitle_region(
             source, source, source, np.ones(source.shape, bool),
-            mapping_shape(width, height), binocular_geometry(width, height, disparity),
-            target_disparity_pct=target)
+            mapping_shape(width, height), binocular_geometry(width, height, disparity))
         self.assertAlmostEqual(
-            measured["subtitle_target_disparity_rms_error_pct"], 0.0, places=6)
+            measured["subtitle_constant_plane_rms_error_pct"], 0.0, places=6)
+        self.assertAlmostEqual(
+            measured["subtitle_plane_abs_disparity_pct"], target, places=6)
 
     def test_worse_eye_horizontal_blur_reduces_sharpness(self):
         width, height = 32, 16
@@ -140,8 +165,7 @@ class SubtitleMetricTests(unittest.TestCase):
         source = stripe_frame(width, height)
         measured = subtitle_metrics.measure_subtitle_region(
             source, source, source, np.zeros(source.shape, bool),
-            mapping_shape(width, height), binocular_geometry(width, height),
-            target_disparity_pct=0.0)
+            mapping_shape(width, height), binocular_geometry(width, height))
         self.assertEqual(measured, {
             "subtitle_region_authored_count": 0,
             "subtitle_region_support_count": 0,
@@ -152,9 +176,9 @@ class SubtitleMetricTests(unittest.TestCase):
         source = np.full((height, width), 0.5, dtype=np.float32)
         measured = subtitle_metrics.measure_subtitle_region(
             source, source, source, np.ones(source.shape, bool),
-            mapping_shape(width, height), binocular_geometry(width, height),
-            target_disparity_pct=0.0)
-        self.assertIn("subtitle_target_disparity_rms_error_pct", measured)
+            mapping_shape(width, height), binocular_geometry(width, height))
+        self.assertIn("subtitle_constant_plane_rms_error_pct", measured)
+        self.assertIn("subtitle_plane_abs_disparity_pct", measured)
         self.assertIn("subtitle_disparity_variance_pct2", measured)
         self.assertNotIn("subtitle_sharpness_preservation_pct", measured)
 
@@ -168,7 +192,7 @@ class SubtitleMetricTests(unittest.TestCase):
         geometry["symmetry"][~valid] = np.nan
         measured = subtitle_metrics.measure_subtitle_region(
             source, source, source, np.ones(source.shape, bool),
-            mapping_shape(width, height), geometry, target_disparity_pct=0.0)
+            mapping_shape(width, height), geometry)
         self.assertEqual(
             measured["subtitle_region_support_count"], int(np.count_nonzero(valid)))
         self.assertAlmostEqual(
@@ -200,7 +224,7 @@ class SubtitleMetricTests(unittest.TestCase):
         measured = subtitle_metrics.measure_subtitle_region(
             source, source, source, np.ones(source.shape, bool),
             mapping_shape(width, height), binocular_geometry(width, height, valid=valid),
-            target_disparity_pct=0.0)
+            overlay_mask=np.ones(source.shape, bool))
         self.assertEqual(measured["subtitle_region_authored_count"], width * height)
         self.assertEqual(
             measured["subtitle_region_support_count"],
@@ -211,14 +235,15 @@ class SubtitleMetricTests(unittest.TestCase):
 
         with open(os.path.join(SCRIPT_DIR, "thresholds.json"), encoding="utf-8") as stream:
             spec = json.load(stream)["metrics"][
-                "subtitle_region_binocular_support_pct"]
+                "subtitle_glyph_sample_visibility_pct"]
         _, _, failures = run_eval.score_clip_gates(
             [measured], measured,
-            {"metrics": {"subtitle_region_binocular_support_pct": spec}},
-            {"required_gt_subtitle_region": True})
+            {"metrics": {"subtitle_glyph_sample_visibility_pct": spec}},
+            {"required_gt_subtitle_region": True,
+             "required_gt_subtitle_tight_mask": True})
         self.assertEqual(
             [failure["metric"] for failure in failures],
-            ["subtitle_region_binocular_support_pct"])
+            ["subtitle_glyph_sample_visibility_pct"])
 
     def test_binocular_support_gate_detects_output_area_collapse(self):
         width, height = 32, 16
@@ -228,41 +253,127 @@ class SubtitleMetricTests(unittest.TestCase):
             source, source, source, np.ones(source.shape, bool),
             mapping_shape(width, height), binocular_geometry(
                 width, height, support_weight=collapsed_weight),
-            target_disparity_pct=0.0)
+            overlay_mask=np.ones(source.shape, bool))
         self.assertEqual(measured["subtitle_region_support_count"], width * height)
         self.assertAlmostEqual(
             measured["subtitle_region_binocular_support_pct"], 1.0, places=6)
+        self.assertAlmostEqual(
+            measured["subtitle_glyph_sample_visibility_pct"], 100.0, places=6)
+        self.assertAlmostEqual(
+            measured["subtitle_glyph_output_area_coverage_pct"], 1.0, places=6)
 
-    def test_target_disparity_validation_is_finite_numeric_and_bounded(self):
-        for value in (True, "0", float("nan"), -3.5001, 3.0001):
-            with self.subTest(value=value), self.assertRaises(ValueError):
-                subtitle_metrics.validate_subtitle_target_disparity_pct(value)
-        for value in (-3.5, 0, 3.0):
-            with self.subTest(value=value):
-                self.assertEqual(
-                    subtitle_metrics.validate_subtitle_target_disparity_pct(value),
-                    float(value))
-
-    def test_nonzero_target_error_fails_the_hard_gate(self):
+    def test_legacy_constant_plane_residual_is_diagnostic(self):
         with open(os.path.join(SCRIPT_DIR, "thresholds.json"), encoding="utf-8") as stream:
             spec = json.load(stream)["metrics"][
-                "subtitle_target_disparity_rms_error_pct"]
-        thresholds = {"metrics": {"subtitle_target_disparity_rms_error_pct": spec}}
+                "subtitle_constant_plane_rms_error_pct"]
+        self.assertEqual(spec["role"], "diagnostic")
+        self.assertNotIn("hard_max", spec)
+        thresholds = {"metrics": {"subtitle_constant_plane_rms_error_pct": spec}}
         row = {
             "subtitle_region_support_count": 64,
-            "subtitle_target_disparity_rms_error_pct": spec["hard_max"] + 0.001,
+            "subtitle_constant_plane_rms_error_pct": 100.0,
         }
         _, _, failures = run_eval.score_clip_gates(
             [row], row, thresholds, {"required_gt_subtitle_region": True})
+        self.assertEqual(failures, [])
+
+    def test_soft_plane_scores_each_vertical_band_without_line_count_assumption(self):
+        width, height = 64, 64
+        source = stripe_frame(width, height)
+        tight = np.zeros(source.shape, dtype=bool)
+        tight[4:12, :] = True
+        tight[40:48, :] = True
+        disparity = np.zeros(source.shape, dtype=np.float32)
+        disparity[40:48, :] = 20.0
+        measured = subtitle_metrics.measure_subtitle_region(
+            source, source, source, tight, mapping_shape(width, height),
+            binocular_geometry(width, height, disparity), overlay_mask=tight)
+
+        self.assertEqual(measured["subtitle_glyph_band_count"], 2)
+        self.assertEqual(measured["subtitle_glyph_soft_plane_inlier_pct"], 100.0)
+        self.assertGreater(measured["subtitle_constant_plane_rms_error_pct"], 0.0)
+
+    def test_soft_plane_five_pixel_reference_warns_on_more_than_two_percent_tail(self):
+        width, height = 64, 64
+        source = stripe_frame(width, height)
+        tight = np.zeros(source.shape, dtype=bool)
+        tight[8:16, :] = True
+        disparity = np.zeros(source.shape, dtype=np.float32)
+        # Sixteen of 512 glyph samples are six eye pixels from the robust band plane.
+        disparity[8, :16] = 6.0
+        measured = subtitle_metrics.measure_subtitle_region(
+            source, source, source, tight, mapping_shape(width, height),
+            binocular_geometry(width, height, disparity), overlay_mask=tight)
+        self.assertAlmostEqual(
+            measured["subtitle_glyph_soft_plane_inlier_pct"], 96.875, places=6)
+
+        with open(os.path.join(SCRIPT_DIR, "thresholds.json"), encoding="utf-8") as stream:
+            spec = json.load(stream)["metrics"]["subtitle_glyph_soft_plane_inlier_pct"]
+        worst, issues, failures = run_eval.score_clip_gates(
+            [measured], measured,
+            {"metrics": {"subtitle_glyph_soft_plane_inlier_pct": spec}},
+            {"required_gt_subtitle_region": True,
+             "required_gt_subtitle_tight_mask": True})
+        self.assertEqual(spec["role"], "diagnostic")
+        self.assertEqual(spec["trigger_min"], 98.0)
+        self.assertNotIn("hard_min", spec)
+        self.assertEqual(
+            [issue["metric"] for issue in issues],
+            ["subtitle_glyph_soft_plane_inlier_pct"])
+        self.assertEqual(
+            worst["subtitle_glyph_soft_plane_inlier_pct"]["worst_value"], 96.875)
         self.assertEqual(
             [failure["metric"] for failure in failures],
-            ["subtitle_target_disparity_rms_error_pct"])
+            [])
+
+
+    def test_plane_magnitude_is_diagnostic_after_exact_closure_migration(self):
+        with open(os.path.join(SCRIPT_DIR, "thresholds.json"), encoding="utf-8") as stream:
+            spec = json.load(stream)["metrics"]["subtitle_plane_abs_disparity_pct"]
+        self.assertEqual(spec["role"], "diagnostic")
+        self.assertNotIn("hard_max", spec)
+        self.assertNotIn("trigger", spec)
+        thresholds = {"metrics": {"subtitle_plane_abs_disparity_pct": spec}}
+        observed = {
+            "subtitle_region_support_count": 64,
+            "subtitle_plane_abs_disparity_pct": 8.001,
+        }
+        self.assertEqual(
+            run_eval.score_clip_gates(
+                [observed], observed, thresholds,
+                {"required_gt_subtitle_region": True})[2],
+            [])
 
 
 class SubtitleSidecarContractTests(unittest.TestCase):
     @staticmethod
     def _write_source(path, value=0):
         Image.fromarray(np.full((16, 32, 3), value, dtype=np.uint8)).save(path)
+
+    def _write_tight_mask_clip(self, clip, frame_ids=(1, 2)):
+        region_dir = os.path.join(clip, "gt_subtitle_region")
+        overlay_dir = os.path.join(clip, "gt_subtitle_overlay_mask")
+        os.makedirs(region_dir, exist_ok=True)
+        os.makedirs(overlay_dir, exist_ok=True)
+        for frame_id in frame_ids:
+            self._write_source(os.path.join(clip, f"frame_{frame_id:05d}.png"))
+            loose = np.zeros((16, 32), dtype=np.uint8)
+            tight = np.zeros((16, 32), dtype=np.uint8)
+            loose[4:14, 4:28] = 255
+            tight[6:12, 8:24] = 255
+            Image.fromarray(loose).save(
+                os.path.join(region_dir, f"frame_{frame_id:05d}.png"))
+            Image.fromarray(tight).save(
+                os.path.join(overlay_dir, f"frame_{frame_id:05d}.png"))
+        metadata = {
+            "name": "subtitle-tight-probe",
+            "content_type": "synthetic",
+            "required_gt_subtitle_region": True,
+            "required_gt_subtitle_tight_mask": True,
+        }
+        with open(os.path.join(clip, "meta.json"), "w", encoding="utf-8") as stream:
+            json.dump(metadata, stream)
+        return metadata
 
     @staticmethod
     def _transition_contract():
@@ -318,7 +429,6 @@ class SubtitleSidecarContractTests(unittest.TestCase):
             "content_type": "synthetic",
             "required_gt_subtitle_region": True,
             "required_gt_subtitle_sanitizer_oracle": True,
-            "subtitle_target_disparity_pct": 0.0,
             "subtitle_transition_contract": contract,
         }
         with open(os.path.join(clip, "meta.json"), "w", encoding="utf-8") as stream:
@@ -335,28 +445,14 @@ class SubtitleSidecarContractTests(unittest.TestCase):
             with open(os.path.join(clip, "meta.json"), "w", encoding="utf-8") as stream:
                 json.dump({
                     "required_gt_subtitle_region": True,
-                    "subtitle_target_disparity_pct": 0.0,
                 }, stream)
             original = run_eval.source_evidence_digests(clip)
-            with open(os.path.join(clip, "meta.json"), "w", encoding="utf-8") as stream:
-                json.dump({
-                    "required_gt_subtitle_region": True,
-                    "subtitle_target_disparity_pct": 0.5,
-                }, stream)
-            changed_target = run_eval.source_evidence_digests(clip)
-            self.assertNotEqual(original, changed_target)
-            with open(os.path.join(clip, "meta.json"), "w", encoding="utf-8") as stream:
-                json.dump({
-                    "required_gt_subtitle_region": True,
-                    "subtitle_target_disparity_pct": 0.0,
-                }, stream)
             Image.fromarray(np.full((16, 32), 255, dtype=np.uint8)).save(region_path)
             changed_pixels = run_eval.source_evidence_digests(clip)
             self.assertNotEqual(original, changed_pixels)
             with open(os.path.join(clip, "meta.json"), "w", encoding="utf-8") as stream:
                 json.dump({
                     "required_gt_subtitle_region": False,
-                    "subtitle_target_disparity_pct": 0.0,
                 }, stream)
             self.assertNotEqual(changed_pixels, run_eval.source_evidence_digests(clip))
 
@@ -364,10 +460,99 @@ class SubtitleSidecarContractTests(unittest.TestCase):
         published = run_eval.published_clip_metadata({
             "name": "subtitle",
             "required_gt_subtitle_region": True,
-            "subtitle_target_disparity_pct": 0.0,
+            "required_gt_subtitle_tight_mask": True,
         })
         self.assertIs(published["required_gt_subtitle_region"], True)
-        self.assertEqual(published["subtitle_target_disparity_pct"], 0.0)
+        self.assertIs(published["required_gt_subtitle_tight_mask"], True)
+
+    def test_tight_mask_contract_is_validated_published_and_hashed(self):
+        with tempfile.TemporaryDirectory() as clip:
+            metadata = self._write_tight_mask_clip(clip)
+            loaded = run_eval.load_clip_metadata(clip)
+            self.assertIs(loaded["required_gt_subtitle_tight_mask"], True)
+            self.assertIs(
+                run_eval.published_clip_metadata(loaded)[
+                    "required_gt_subtitle_tight_mask"],
+                True)
+            original = run_eval.source_evidence_digests(clip)
+            metadata["required_gt_subtitle_tight_mask"] = False
+            with open(os.path.join(clip, "meta.json"), "w", encoding="utf-8") as stream:
+                json.dump(metadata, stream)
+            self.assertNotEqual(original, run_eval.source_evidence_digests(clip))
+            metadata["required_gt_subtitle_tight_mask"] = True
+            with open(os.path.join(clip, "meta.json"), "w", encoding="utf-8") as stream:
+                json.dump(metadata, stream)
+            mask_path = os.path.join(
+                clip, "gt_subtitle_overlay_mask", "frame_00001.png")
+            mask = np.asarray(Image.open(mask_path)).copy()
+            mask[5, 7] = 255
+            Image.fromarray(mask).save(mask_path)
+            self.assertNotEqual(original, run_eval.source_evidence_digests(clip))
+
+    def test_tight_mask_contract_rejects_missing_malformed_or_escaping_masks(self):
+        with tempfile.TemporaryDirectory() as clip:
+            self._write_tight_mask_clip(clip)
+            os.remove(os.path.join(
+                clip, "gt_subtitle_overlay_mask", "frame_00002.png"))
+            with self.assertRaisesRegex(ValueError, "frame-id mismatch"):
+                run_eval.load_clip_metadata(clip)
+
+            self._write_tight_mask_clip(clip)
+            mask_path = os.path.join(
+                clip, "gt_subtitle_overlay_mask", "frame_00001.png")
+            Image.fromarray(np.zeros((16, 32, 3), dtype=np.uint8)).save(mask_path)
+            with self.assertRaisesRegex(ValueError, "8-bit single-channel"):
+                run_eval.load_clip_metadata(clip)
+
+            self._write_tight_mask_clip(clip)
+            Image.fromarray(np.zeros((8, 32), dtype=np.uint8)).save(mask_path)
+            with self.assertRaisesRegex(ValueError, "does not match source"):
+                run_eval.load_clip_metadata(clip)
+
+            self._write_tight_mask_clip(clip)
+            Image.fromarray(np.full((16, 32), 128, dtype=np.uint8)).save(mask_path)
+            with self.assertRaisesRegex(ValueError, "other than 0/255"):
+                run_eval.load_clip_metadata(clip)
+
+            self._write_tight_mask_clip(clip)
+            mask = np.asarray(Image.open(mask_path)).copy()
+            mask[0, 0] = 255
+            Image.fromarray(mask).save(mask_path)
+            with self.assertRaisesRegex(ValueError, "escapes loose subtitle region"):
+                run_eval.load_clip_metadata(clip)
+
+            self._write_tight_mask_clip(clip)
+            Image.fromarray(np.zeros((16, 32), dtype=np.uint8)).save(mask_path)
+            with self.assertRaisesRegex(ValueError, "matching empty/non-empty"):
+                run_eval.load_clip_metadata(clip)
+
+    def test_tight_mask_requirement_is_boolean_and_requires_loose_region(self):
+        with tempfile.TemporaryDirectory() as clip:
+            self._write_source(os.path.join(clip, "frame_00001.png"))
+            meta_path = os.path.join(clip, "meta.json")
+            with open(meta_path, "w", encoding="utf-8") as stream:
+                json.dump({"required_gt_subtitle_tight_mask": "yes"}, stream)
+            with self.assertRaisesRegex(ValueError, "must be boolean"):
+                run_eval.load_clip_metadata(clip)
+            with open(meta_path, "w", encoding="utf-8") as stream:
+                json.dump({"required_gt_subtitle_tight_mask": True}, stream)
+            with self.assertRaisesRegex(
+                    ValueError, "requires required_gt_subtitle_region=true"):
+                run_eval.load_clip_metadata(clip)
+
+    def test_authenticated_discovery_validates_tight_mask_contract(self):
+        with tempfile.TemporaryDirectory() as root:
+            clip = os.path.join(root, "subtitle-tight-probe")
+            os.makedirs(clip)
+            self._write_tight_mask_clip(clip)
+            self.assertEqual(
+                [item["id"] for item in
+                 authenticated_metric_sources.discover_clips([root])],
+                ["subtitle-tight-probe"])
+            Image.fromarray(np.zeros((16, 32), dtype=np.uint8)).save(os.path.join(
+                clip, "gt_subtitle_overlay_mask", "frame_00003.png"))
+            with self.assertRaisesRegex(ValueError, r"extra=\[3\]"):
+                authenticated_metric_sources.discover_clips([root])
 
     def test_transition_contract_is_validated_published_and_hashed(self):
         with tempfile.TemporaryDirectory() as clip:
@@ -550,7 +735,6 @@ class SubtitleSidecarContractTests(unittest.TestCase):
                 json.dump({
                     "content_type": "synthetic",
                     "required_gt_subtitle_region": True,
-                    "subtitle_target_disparity_pct": 0.0,
                 }, stream)
             with self.assertRaisesRegex(ValueError, "frame-id mismatch"):
                 run_eval.load_clip_metadata(clip)
@@ -577,7 +761,7 @@ class SubtitleSidecarContractTests(unittest.TestCase):
                         ValueError, "8-bit single-channel"):
                     sbsbench.load_binary_source_mask(path, (16, 32))
 
-    def test_required_metadata_rejects_missing_or_invalid_target(self):
+    def test_required_metadata_needs_no_authored_plane_target(self):
         with tempfile.TemporaryDirectory() as clip:
             self._write_source(os.path.join(clip, "frame_00000.png"))
             region_dir = os.path.join(clip, "gt_subtitle_region")
@@ -590,19 +774,8 @@ class SubtitleSidecarContractTests(unittest.TestCase):
                     "content_type": "synthetic",
                     "required_gt_subtitle_region": True,
                 }, stream)
-            with self.assertRaisesRegex(ValueError, "needs explicit"):
-                run_eval.load_clip_metadata(clip)
-            for target in (True, "0", -3.5001, 3.0001):
-                with self.subTest(target=target):
-                    with open(meta_path, "w", encoding="utf-8") as stream:
-                        json.dump({
-                            "content_type": "synthetic",
-                            "required_gt_subtitle_region": True,
-                            "subtitle_target_disparity_pct": target,
-                        }, stream)
-                    with self.assertRaisesRegex(
-                            ValueError, "subtitle_target_disparity_pct"):
-                        run_eval.load_clip_metadata(clip)
+            loaded = run_eval.load_clip_metadata(clip)
+            self.assertIs(loaded["required_gt_subtitle_region"], True)
 
     def test_metadata_preflight_rejects_nonbinary_region(self):
         with tempfile.TemporaryDirectory() as clip:
@@ -615,7 +788,6 @@ class SubtitleSidecarContractTests(unittest.TestCase):
                 json.dump({
                     "content_type": "synthetic",
                     "required_gt_subtitle_region": True,
-                    "subtitle_target_disparity_pct": 0.0,
                 }, stream)
             with self.assertRaisesRegex(ValueError, "other than 0/255"):
                 run_eval.load_clip_metadata(clip)
@@ -630,7 +802,8 @@ class SubtitleSidecarContractTests(unittest.TestCase):
                 "subtitle_region_authored_count": 64,
                 "subtitle_region_support_count": 64,
                 "subtitle_region_binocular_support_pct": 100.0,
-                "subtitle_target_disparity_rms_error_pct": 0.0,
+                "subtitle_constant_plane_rms_error_pct": 0.0,
+                "subtitle_plane_abs_disparity_pct": 0.5,
                 "subtitle_disparity_variance_pct2": 0.0,
                 "subtitle_sharpness_preservation_pct": 100.0,
             },
@@ -639,7 +812,9 @@ class SubtitleSidecarContractTests(unittest.TestCase):
         specs = {
             "subtitle_region_binocular_support_pct": {
                 "requires": "subtitle_region_authored_count"},
-            "subtitle_target_disparity_rms_error_pct": {
+            "subtitle_constant_plane_rms_error_pct": {
+                "requires": "subtitle_region_support_count"},
+            "subtitle_plane_abs_disparity_pct": {
                 "requires": "subtitle_region_support_count"},
             "subtitle_disparity_variance_pct2": {
                 "requires": "subtitle_region_support_count"},
@@ -651,16 +826,20 @@ class SubtitleSidecarContractTests(unittest.TestCase):
         self.assertEqual(filtered["subtitle_region_authored_count"], 64.0)
         self.assertEqual(filtered["subtitle_region_support_count"], 64.0)
         self.assertEqual(filtered["subtitle_region_binocular_support_pct"], 100.0)
-        self.assertEqual(filtered["subtitle_target_disparity_rms_error_pct"], 0.0)
+        self.assertEqual(filtered["subtitle_constant_plane_rms_error_pct"], 0.0)
+        self.assertEqual(filtered["subtitle_plane_abs_disparity_pct"], 0.5)
         self.assertEqual(filtered["subtitle_disparity_variance_pct2"], 0.0)
         self.assertEqual(filtered["subtitle_sharpness_preservation_pct"], 100.0)
 
-    def test_measure_sequence_consumes_explicit_region_sidecar(self):
+
+    def test_measure_sequence_consumes_required_region_and_tight_mask_sidecars(self):
         with tempfile.TemporaryDirectory() as root:
             frames = os.path.join(root, "frames")
             sequence = os.path.join(root, "sequence")
             region_dir = os.path.join(frames, "gt_subtitle_region")
+            overlay_dir = os.path.join(frames, "gt_subtitle_overlay_mask")
             os.makedirs(region_dir)
+            os.makedirs(overlay_dir)
             os.makedirs(sequence)
             width, height = 32, 16
             source_luma = (stripe_frame(width, height) * 255.0).astype(np.uint8)
@@ -670,10 +849,15 @@ class SubtitleSidecarContractTests(unittest.TestCase):
                 os.path.join(sequence, "sbs_00000.png"))
             Image.fromarray(np.full((height, width), 255, dtype=np.uint8)).save(
                 os.path.join(region_dir, "frame_00000.png"))
+            tight = np.zeros((height, width), dtype=np.uint8)
+            tight[:, 2:10] = 255
+            tight[:, 22:30] = 255
+            overlay_path = os.path.join(overlay_dir, "frame_00000.png")
+            Image.fromarray(tight).save(overlay_path)
             with open(os.path.join(frames, "meta.json"), "w", encoding="utf-8") as stream:
                 json.dump({
                     "required_gt_subtitle_region": True,
-                    "subtitle_target_disparity_pct": 0.0,
+                    "required_gt_subtitle_tight_mask": True,
                 }, stream)
             source_u = (np.arange(width, dtype=np.float32) + 0.5) / width
             eye_map = np.broadcast_to(source_u, (height, width))
@@ -682,18 +866,23 @@ class SubtitleSidecarContractTests(unittest.TestCase):
             with open(os.path.join(sequence, "warp_map_shape.json"), "w",
                       encoding="utf-8") as stream:
                 json.dump(mapping_shape(width, height), stream)
-
             rows, aggregate = sbsbench.measure_sequence(sequence, frames)
             self.assertEqual(rows[0]["subtitle_region_authored_count"], width * height)
             self.assertEqual(rows[0]["subtitle_region_support_count"], width * height)
             self.assertGreaterEqual(
                 aggregate["subtitle_region_binocular_support_pct"], 95.0)
             self.assertEqual(
-                aggregate["subtitle_target_disparity_rms_error_pct"], 0.0)
+                aggregate["subtitle_constant_plane_rms_error_pct"], 0.0)
+            self.assertEqual(aggregate["subtitle_plane_abs_disparity_pct"], 0.0)
             self.assertAlmostEqual(
                 aggregate["subtitle_disparity_variance_pct2"], 0.0, places=7)
             self.assertAlmostEqual(
                 aggregate["subtitle_sharpness_preservation_pct"], 100.0, places=4)
+            self.assertEqual(aggregate["subtitle_glyph_sample_visibility_pct"], 100.0)
+            self.assertEqual(aggregate["subtitle_glyph_soft_plane_inlier_pct"], 100.0)
+            os.remove(overlay_path)
+            with self.assertRaisesRegex(ValueError, "authenticated subtitle tight mask"):
+                sbsbench.measure_sequence(sequence, frames)
 
 
 if __name__ == "__main__":

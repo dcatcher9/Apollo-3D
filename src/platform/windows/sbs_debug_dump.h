@@ -45,7 +45,9 @@ namespace platf::sbs_debug {
    * candidate first produces shadow_ownership_refined_parallax from the full-resolution source
    * contour, then shadow_vertical_majorant (the exact upper-envelope diagnostic) and
    * shadow_vertical_conditioned (the fixed 75/25 vertical share), then the row majorant produces
-   * shadow_final_parallax. In ROI mode that final field remains crop-local and is not by itself a
+   * shadow_base_final_parallax. When OCR6 and SLR6 are active, the compact exact-frame record and
+   * locator state condition that Base into shadow_final_parallax; an empty current-authority block
+   * copies Base bit for bit. In ROI mode that final field remains crop-local and is not by itself a
    * full-source position field. shadow_coordinate is allocated and written only for this explicit
    * dump; it is never a live resource. V2 supplies an exact fixed-point inverse warp_map when its
    * matching dump-only
@@ -70,7 +72,10 @@ namespace platf::sbs_debug {
     ID3D11ShaderResourceView *shadow_ownership_refined_parallax = nullptr;
     ID3D11ShaderResourceView *shadow_vertical_majorant = nullptr;
     ID3D11ShaderResourceView *shadow_vertical_conditioned = nullptr;
+    ID3D11ShaderResourceView *shadow_base_final_parallax = nullptr;
     ID3D11ShaderResourceView *shadow_final_parallax = nullptr;
+    ID3D11ShaderResourceView *ocr_box_record = nullptr;
+    ID3D11ShaderResourceView *subtitle_locator_state = nullptr;
     ID3D11ShaderResourceView *shadow_state = nullptr;
     ID3D11ShaderResourceView *shadow_frame_stats = nullptr;
     std::shared_ptr<const models::raw_model_provenance_t> raw_model_provenance;
@@ -87,8 +92,6 @@ namespace platf::sbs_debug {
     std::optional<models::depth_video_region_plan_t> depth_video_plan;
     /** True when this completion was the first frame after its analysis domain was rearmed. */
     bool input_domain_reset = false;
-    /** Schema 13 cannot authenticate an overlay mask/plan or conditioned final field. */
-    bool overlay_conditioning_active = false;
     /** Optional, diagnostic-only browser-video border stamped onto matched_frame_id. */
     std::optional<window_video_border_snapshot> window_video_border;
     std::string window_video_observer_status = "not-observed";
