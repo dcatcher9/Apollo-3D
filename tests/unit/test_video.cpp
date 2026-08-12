@@ -14,11 +14,11 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <src/depth_coordinate_v2.h>
+#include <src/generated/sbs_adaptive_state_contract.h>
+#include <src/host_sbs_shader_cache.h>
 #include <src/nvenc/nvenc_base.h>
 #include <src/nvenc/nvenc_config.h>
-#include <src/generated/sbs_adaptive_state_contract.h>
-#include <src/depth_coordinate_v2.h>
-#include <src/host_sbs_shader_cache.h>
 #include <src/platform/windows/video_dom_client.h>
 #include <src/video.h>
 #include <src/video_colorspace.h>
@@ -27,9 +27,9 @@
 #include <vector>
 
 #ifdef _WIN32
-#include <d3d11.h>
-#include <d3dcompiler.h>
-#include <wrl/client.h>
+  #include <d3d11.h>
+  #include <d3dcompiler.h>
+  #include <wrl/client.h>
 
 namespace platf::dxgi {
   int init();
@@ -75,9 +75,7 @@ namespace {
     int width,
     int height
   ) {
-    constexpr std::array<std::array<int, 2>, 5> offsets {{
-      {{0, 0}}, {{-1, 0}}, {{1, 0}}, {{0, -1}}, {{0, 1}}
-    }};
+    constexpr std::array<std::array<int, 2>, 5> offsets {{{{0, 0}}, {{-1, 0}}, {{1, 0}}, {{0, -1}}, {{0, 1}}}};
     const auto sample = [&](const std::vector<float> &values, int sx, int sy) {
       sx = std::clamp(sx, 0, width - 1);
       sy = std::clamp(sy, 0, height - 1);
@@ -110,16 +108,16 @@ namespace {
             const float current_threshold = std::max(
               0.0001f,
               0.04f * std::max(
-                std::abs(current_samples[first]),
-                std::abs(current_samples[second])
-              )
+                        std::abs(current_samples[first]),
+                        std::abs(current_samples[second])
+                      )
             );
             const float previous_threshold = std::max(
               0.0001f,
               0.04f * std::max(
-                std::abs(previous_samples[first]),
-                std::abs(previous_samples[second])
-              )
+                        std::abs(previous_samples[first]),
+                        std::abs(previous_samples[second])
+                      )
             );
             const bool current_reliable =
               std::abs(current_delta) >= current_threshold;
@@ -138,8 +136,7 @@ namespace {
         current_supported += current_comparisons >= 4 ? 1u : 0u;
         previous_supported += previous_comparisons >= 4 ? 1u : 0u;
         common_supported += common_comparisons >= 4 ? 1u : 0u;
-        if (common_comparisons >= 4 && ordering_flips >= 2 &&
-            ordering_flips * 2 >= common_comparisons) {
+        if (common_comparisons >= 4 && ordering_flips >= 2 && ordering_flips * 2 >= common_comparisons) {
           ++changed;
         }
       }
@@ -196,8 +193,10 @@ namespace {
     state.scene_age = state.initialized ?
                         std::min(
                           state.scene_age + static_cast<float>(std::clamp(
-                            stream_frame_delta, 1u, 65535u
-                          )),
+                                              stream_frame_delta,
+                                              1u,
+                                              65535u
+                                            )),
                           65535.0f
                         ) :
                         0.0f;
@@ -219,9 +218,9 @@ namespace {
       common_structure_reliable &&
       common_structural_support_fraction >=
         0.50f * std::min(
-          current_structural_support_fraction,
-          previous_structural_support_fraction
-        );
+                  current_structural_support_fraction,
+                  previous_structural_support_fraction
+                );
     state.appearance_change_baseline =
       std::clamp(state.appearance_change_baseline, 0.0f, 1.0f);
     const bool broad_appearance_proposal =
@@ -236,9 +235,9 @@ namespace {
       structural_change_fraction >= 0.03f &&
       raw_rgb_change_fraction >= state.appearance_change_baseline + 0.12f &&
       raw_rgb_change_fraction >= std::max(
-        0.18f,
-        state.appearance_change_baseline * 3.0f
-      );
+                                   0.18f,
+                                   state.appearance_change_baseline * 3.0f
+                                 );
     const bool appearance_proposal =
       broad_appearance_proposal || localized_appearance_proposal;
     const bool broad_rgb_transition =
@@ -246,7 +245,7 @@ namespace {
       raw_rgb_change_fraction >= 0.70f;
     const bool brightness_direction_consistent =
       std::max(brightness_rise_fraction, brightness_fall_fraction) >=
-        0.80f * raw_rgb_change_fraction;
+      0.80f * raw_rgb_change_fraction;
     const bool exposure_structure_preserved =
       structural_change_fraction < 0.01f ||
       (structural_change_fraction <=
@@ -406,10 +405,11 @@ namespace {
     }
     state.model_input_history_state =
       start_geometry_confirmation ? 4.0f :
-      (structureless_transition ? 2.0f :
-       (persistent_structureless_transition ||
-        (low_structure_scene && !current_structure_reliable)) ? 3.0f :
-       1.0f);
+                                    (structureless_transition ? 2.0f :
+                                     (persistent_structureless_transition ||
+                                      (low_structure_scene && !current_structure_reliable)) ?
+                                                                3.0f :
+                                                                1.0f);
     state.initialized = true;
     return shot_cut;
   }
@@ -571,13 +571,16 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
 TEST(DirectxShaderTest, PersistentHostSbsCacheSurvivesProcessEquivalentRoots) {
   namespace cache = models::host_sbs_shader_cache;
   const auto unique = std::to_string(
-    std::chrono::steady_clock::now().time_since_epoch().count());
+    std::chrono::steady_clock::now().time_since_epoch().count()
+  );
   const auto temporary_root =
     std::filesystem::temp_directory_path() /
     ("apollo-host-sbs-shader-cache-test-" + unique);
   const auto cache_directory = temporary_root / "cache";
+
   struct cleanup_t {
     std::filesystem::path root;
+
     ~cleanup_t() {
       cache::configure_persistent_cache({});
       std::error_code ignored;
@@ -586,7 +589,10 @@ TEST(DirectxShaderTest, PersistentHostSbsCacheSurvivesProcessEquivalentRoots) {
   } cleanup {temporary_root};
 
   constexpr cache::shader_spec spec {
-    "persistent_cache_test_cs.hlsl", "main", "cs_5_0"};
+    "persistent_cache_test_cs.hlsl",
+    "main",
+    "cs_5_0"
+  };
   constexpr std::array specs {spec};
   constexpr std::string_view source =
     "RWStructuredBuffer<uint> Output : register(u0);\n"
@@ -644,10 +650,14 @@ TEST(DirectxShaderTest, PersistentHostSbsCacheSurvivesProcessEquivalentRoots) {
   EXPECT_EQ(*first, *third);
   const auto after_third = cache::cache_statistics();
   EXPECT_EQ(
-    after_third.rejected_artifacts - after_second.rejected_artifacts, 1u);
+    after_third.rejected_artifacts - after_second.rejected_artifacts,
+    1u
+  );
   EXPECT_EQ(after_third.compiled - after_second.compiled, 1u);
   EXPECT_EQ(
-    after_third.persistent_writes - after_second.persistent_writes, 1u);
+    after_third.persistent_writes - after_second.persistent_writes,
+    1u
+  );
 
   const auto fourth_sources = make_snapshot("root-d");
   ASSERT_TRUE(fourth_sources);
@@ -680,8 +690,16 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_NEAR(v2::pointwise_container(1.0e-5f), 1.0e-5f, 1.0e-10f);
   float previous_contained = -v2::direct_container_limit;
   for (const float requested : std::array {
-         -1.0e30f, -1.0f, -0.04f, -0.01f, 0.0f,
-          0.01f, 0.04f, 1.0f, 1.0e30f}) {
+         -1.0e30f,
+         -1.0f,
+         -0.04f,
+         -0.01f,
+         0.0f,
+         0.01f,
+         0.04f,
+         1.0f,
+         1.0e30f
+       }) {
     const float contained = v2::pointwise_container(requested);
     EXPECT_TRUE(std::isfinite(contained));
     EXPECT_GE(contained, previous_contained);
@@ -697,7 +715,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 40u);
+  EXPECT_EQ(v2::contract_schema, 45u);
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
   EXPECT_EQ(v2::shadow_state_dump_schema, 16u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
@@ -865,18 +883,8 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
     std::pair {434u, 1036u},
   };
   for (const auto &[width, height] : supported_shapes) {
-    EXPECT_TRUE(v2::model_calibration_supports_shape(
-      small_calibration, width, height
-    )) << width << 'x' << height;
-    EXPECT_TRUE(v2::capture_identity_is_calibrated(
-      small_calibration.depth_model,
-      small_calibration.depth_model_url,
-      small_calibration.onnx_sha256,
-      small_calibration.preprocess.profile,
-      small_calibration.preprocess.source_closure_sha256,
-      width,
-      height
-    )) << width << 'x' << height;
+    EXPECT_TRUE(v2::model_calibration_supports_shape(small_calibration, width, height)) << width << 'x' << height;
+    EXPECT_TRUE(v2::capture_identity_is_calibrated(small_calibration.depth_model, small_calibration.depth_model_url, small_calibration.onnx_sha256, small_calibration.preprocess.profile, small_calibration.preprocess.source_closure_sha256, width, height)) << width << 'x' << height;
   }
   EXPECT_EQ(v2::constant_float_count, 8u);
   EXPECT_EQ(v2::constant_vector_count, 2u);
@@ -897,87 +905,36 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_STREQ(v2::state_field_names[v2::calibration_revision], "calibration_revision");
   EXPECT_STREQ(v2::state_field_names[v2::convergence_curve], "convergence_curve");
   EXPECT_STREQ(v2::state_field_names[v2::container_scale], "container_scale");
-  EXPECT_STREQ(v2::state_field_names[v2::camera_center_integrity_bits],
-               "camera_center_integrity_bits");
+  EXPECT_STREQ(v2::state_field_names[v2::camera_center_integrity_bits], "camera_center_integrity_bits");
   EXPECT_TRUE(v2::state_word_is_uint_bits(v2::state_word_e::calibration_revision));
   EXPECT_TRUE(v2::state_word_is_uint_bits(v2::state_word_e::confirmed_cut_count));
   EXPECT_TRUE(v2::state_word_is_uint_bits(v2::state_word_e::contract_tag_bits));
-  EXPECT_TRUE(v2::state_word_is_uint_bits(
-    v2::state_word_e::camera_center_integrity_bits));
+  EXPECT_TRUE(v2::state_word_is_uint_bits(v2::state_word_e::camera_center_integrity_bits));
   EXPECT_TRUE(v2::state_word_is_uint_bits(v2::state_word_e::renderer_authorization_bits));
   EXPECT_FALSE(v2::state_word_is_uint_bits(v2::state_word_e::center));
   EXPECT_EQ(v2::state_initial_words[v2::calibration_revision], 0u);
   EXPECT_EQ(v2::state_initial_words[v2::confirmed_cut_count], 0u);
-  EXPECT_EQ(v2::state_initial_words[v2::frame_valid],
-            std::bit_cast<std::uint32_t>(0.0f));
-  EXPECT_EQ(v2::state_initial_words[v2::convergence_curve],
-            std::bit_cast<std::uint32_t>(0.0f));
-  EXPECT_EQ(v2::state_initial_words[v2::container_scale],
-            std::bit_cast<std::uint32_t>(1.0f));
+  EXPECT_EQ(v2::state_initial_words[v2::frame_valid], std::bit_cast<std::uint32_t>(0.0f));
+  EXPECT_EQ(v2::state_initial_words[v2::convergence_curve], std::bit_cast<std::uint32_t>(0.0f));
+  EXPECT_EQ(v2::state_initial_words[v2::container_scale], std::bit_cast<std::uint32_t>(1.0f));
   EXPECT_EQ(v2::state_initial_words[v2::contract_tag_bits], v2::contract_tag);
   EXPECT_EQ(v2::state_initial_words[v2::camera_center_integrity_bits], 0u);
   EXPECT_EQ(v2::state_initial_words[v2::renderer_authorization_bits], 0u);
   EXPECT_EQ(v2::state_initial_words[v2::mapping_state_reserved_1], 0u);
   EXPECT_EQ(v2::state_initial_words[v2::mapping_state_reserved_2], 0u);
   EXPECT_TRUE(v2::camera_center_integrity_is_valid(0u, 0u, 0u, 0u, 0u));
-  EXPECT_FALSE(v2::camera_center_integrity_is_valid(
-    0u, 0u, std::bit_cast<std::uint32_t>(-0.1f), 0u, 0u));
-  EXPECT_FALSE(v2::camera_center_integrity_is_valid(
-    std::bit_cast<std::uint32_t>(1.0f), 0u, 0u, 0u, 0u));
+  EXPECT_FALSE(v2::camera_center_integrity_is_valid(0u, 0u, std::bit_cast<std::uint32_t>(-0.1f), 0u, 0u));
+  EXPECT_FALSE(v2::camera_center_integrity_is_valid(std::bit_cast<std::uint32_t>(1.0f), 0u, 0u, 0u, 0u));
   EXPECT_FALSE(v2::cut_generation_changed(7u, 7u, false));
   EXPECT_TRUE(v2::cut_generation_changed(7u, 8u, false));
   EXPECT_TRUE(v2::cut_generation_changed(7u, 7u, true));
 
-  EXPECT_TRUE(v2::model_calibration_supports_shape(
-    small_calibration,
-    1036u,
-    434u
-  ));
-  EXPECT_TRUE(v2::capture_identity_is_calibrated(
-    small_calibration.depth_model,
-    small_calibration.depth_model_url,
-    small_calibration.onnx_sha256,
-    small_calibration.preprocess.profile,
-    small_calibration.preprocess.source_closure_sha256,
-    770u,
-    434u
-  ));
-  EXPECT_TRUE(v2::capture_identity_is_calibrated(
-    small_calibration.depth_model,
-    small_calibration.depth_model_url,
-    small_calibration.onnx_sha256,
-    small_calibration.preprocess.profile,
-    small_calibration.preprocess.source_closure_sha256,
-    1036u,
-    434u
-  ));
-  EXPECT_FALSE(v2::capture_identity_is_calibrated(
-    small_calibration.depth_model,
-    small_calibration.depth_model_url,
-    small_calibration.onnx_sha256,
-    "different-preprocess",
-    small_calibration.preprocess.source_closure_sha256,
-    770u,
-    434u
-  ));
-  EXPECT_FALSE(v2::capture_identity_is_calibrated(
-    small_calibration.depth_model,
-    small_calibration.depth_model_url,
-    std::string(64u, '0'),
-    small_calibration.preprocess.profile,
-    small_calibration.preprocess.source_closure_sha256,
-    770u,
-    434u
-  ));
-  EXPECT_FALSE(v2::capture_identity_is_calibrated(
-    small_calibration.depth_model,
-    small_calibration.depth_model_url,
-    small_calibration.onnx_sha256,
-    small_calibration.preprocess.profile,
-    std::string(64u, '0'),
-    770u,
-    434u
-  ));
+  EXPECT_TRUE(v2::model_calibration_supports_shape(small_calibration, 1036u, 434u));
+  EXPECT_TRUE(v2::capture_identity_is_calibrated(small_calibration.depth_model, small_calibration.depth_model_url, small_calibration.onnx_sha256, small_calibration.preprocess.profile, small_calibration.preprocess.source_closure_sha256, 770u, 434u));
+  EXPECT_TRUE(v2::capture_identity_is_calibrated(small_calibration.depth_model, small_calibration.depth_model_url, small_calibration.onnx_sha256, small_calibration.preprocess.profile, small_calibration.preprocess.source_closure_sha256, 1036u, 434u));
+  EXPECT_FALSE(v2::capture_identity_is_calibrated(small_calibration.depth_model, small_calibration.depth_model_url, small_calibration.onnx_sha256, "different-preprocess", small_calibration.preprocess.source_closure_sha256, 770u, 434u));
+  EXPECT_FALSE(v2::capture_identity_is_calibrated(small_calibration.depth_model, small_calibration.depth_model_url, std::string(64u, '0'), small_calibration.preprocess.profile, small_calibration.preprocess.source_closure_sha256, 770u, 434u));
+  EXPECT_FALSE(v2::capture_identity_is_calibrated(small_calibration.depth_model, small_calibration.depth_model_url, small_calibration.onnx_sha256, small_calibration.preprocess.profile, std::string(64u, '0'), 770u, 434u));
 }
 
 TEST(ParallaxV2ContractTest, LiveModelResolverPinsAuthenticatedProductionIdentity) {
@@ -1049,51 +1006,17 @@ TEST(ParallaxV2RendererTest, AuthenticationLatchesV2OrLiveFlat) {
     host_sbs_renderer_e::failed_flat
   );
 
-  EXPECT_TRUE(models::host_sbs_renderer_uses_depth_pipeline(
-    host_sbs_renderer_e::awaiting_v2
-  ));
-  EXPECT_TRUE(models::host_sbs_renderer_uses_depth_pipeline(
-    host_sbs_renderer_e::parallax_v2
-  ));
-  EXPECT_FALSE(models::host_sbs_renderer_uses_depth_pipeline(
-    host_sbs_renderer_e::failed_flat
-  ));
-  EXPECT_TRUE(models::host_sbs_should_repeat_matched_output(
-    host_sbs_renderer_e::parallax_v2, false, true
-  ));
-  EXPECT_FALSE(models::host_sbs_should_repeat_matched_output(
-    host_sbs_renderer_e::failed_flat, false, true
-  ));
-  EXPECT_FALSE(models::host_sbs_should_repeat_matched_output(
-    host_sbs_renderer_e::parallax_v2, true, true
-  ));
-  EXPECT_TRUE(models::host_sbs_should_repeat_matched_output(
-    host_sbs_renderer_e::parallax_v2,
-    false,
-    true,
-    models::host_sbs_v2_max_matched_repeat_age
-  ));
-  EXPECT_FALSE(models::host_sbs_should_repeat_matched_output(
-    host_sbs_renderer_e::parallax_v2,
-    false,
-    true,
-    models::host_sbs_v2_max_matched_repeat_age + std::chrono::milliseconds(1)
-  ));
-  EXPECT_TRUE(models::host_sbs_matched_completion_is_current(
-    true,
-    models::host_sbs_v2_max_matched_repeat_age + std::chrono::hours(1)
-  ));
-  EXPECT_FALSE(models::host_sbs_matched_completion_is_current(
-    false,
-    models::host_sbs_v2_max_matched_repeat_age + std::chrono::milliseconds(1)
-  ));
-  EXPECT_TRUE(models::host_sbs_should_repeat_matched_output(
-    host_sbs_renderer_e::parallax_v2,
-    false,
-    true,
-    models::host_sbs_v2_max_matched_repeat_age + std::chrono::hours(1),
-    true
-  ));
+  EXPECT_TRUE(models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer_e::awaiting_v2));
+  EXPECT_TRUE(models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer_e::parallax_v2));
+  EXPECT_FALSE(models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer_e::failed_flat));
+  EXPECT_TRUE(models::host_sbs_should_repeat_matched_output(host_sbs_renderer_e::parallax_v2, false, true));
+  EXPECT_FALSE(models::host_sbs_should_repeat_matched_output(host_sbs_renderer_e::failed_flat, false, true));
+  EXPECT_FALSE(models::host_sbs_should_repeat_matched_output(host_sbs_renderer_e::parallax_v2, true, true));
+  EXPECT_TRUE(models::host_sbs_should_repeat_matched_output(host_sbs_renderer_e::parallax_v2, false, true, models::host_sbs_v2_max_matched_repeat_age));
+  EXPECT_FALSE(models::host_sbs_should_repeat_matched_output(host_sbs_renderer_e::parallax_v2, false, true, models::host_sbs_v2_max_matched_repeat_age + std::chrono::milliseconds(1)));
+  EXPECT_TRUE(models::host_sbs_matched_completion_is_current(true, models::host_sbs_v2_max_matched_repeat_age + std::chrono::hours(1)));
+  EXPECT_FALSE(models::host_sbs_matched_completion_is_current(false, models::host_sbs_v2_max_matched_repeat_age + std::chrono::milliseconds(1)));
+  EXPECT_TRUE(models::host_sbs_should_repeat_matched_output(host_sbs_renderer_e::parallax_v2, false, true, models::host_sbs_v2_max_matched_repeat_age + std::chrono::hours(1), true));
   EXPECT_EQ(
     models::fail_host_sbs_renderer_flat(host_sbs_renderer_e::parallax_v2),
     host_sbs_renderer_e::failed_flat
@@ -1321,7 +1244,7 @@ TEST(DepthInputRegionTest, DumpSnapshotsPreserveFullOrRoiAnalysisDomain) {
   );
 }
 
-#ifdef _WIN32
+  #ifdef _WIN32
 TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   using Microsoft::WRL::ComPtr;
   namespace v2 = models::depth_coordinate_v2;
@@ -1363,9 +1286,12 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   result.shadow_ownership_refined_parallax = view;
   result.shadow_vertical_majorant = view;
   result.shadow_vertical_conditioned = view;
+  result.shadow_base_final_parallax = view;
   result.shadow_final_parallax = view;
   result.shadow_state = view;
   result.shadow_frame_stats = view;
+  result.ocr_box_record = view;
+  result.subtitle_locator_state = view;
   result.raw_model_provenance =
     std::make_shared<const models::raw_model_provenance_t>(
       models::raw_model_provenance_t {
@@ -1429,12 +1355,21 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   missing_vertical_conditioned.shadow_vertical_conditioned.Reset();
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_vertical_conditioned));
 
+  auto missing_ocr_record = result;
+  missing_ocr_record.ocr_box_record.Reset();
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_ocr_record));
+
+  auto missing_subtitle_state = result;
+  missing_subtitle_state.subtitle_locator_state.Reset();
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_subtitle_state));
+
   struct supported_shape_t {
     std::uint32_t source_width;
     std::uint32_t source_height;
     int depth_width;
     int depth_height;
   };
+
   const std::array supported_shapes {
     supported_shape_t {1920u, 1080u, 770, 434},
     supported_shape_t {2560u, 1080u, 1022, 434},
@@ -1499,7 +1434,7 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   wrong_gain.parallax_v2_requested_gain *= 2.0f;
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_gain));
 }
-#endif
+  #endif
 
 TEST(ParallaxV2ContractTest, DumpDecodesExactCountersInsteadOfSubnormalFloats) {
   const auto source = read_source_file(
@@ -1531,7 +1466,7 @@ TEST(ParallaxV2ContractTest, DumpDecodesExactCountersInsteadOfSubnormalFloats) {
   EXPECT_NE(source.find("source_closure_sha256"), std::string::npos);
   const auto manifest = source.find("nlohmann::json manifest {");
   ASSERT_NE(manifest, std::string::npos);
-  EXPECT_NE(source.find("{\"schema\", 21}", manifest), std::string::npos);
+  EXPECT_NE(source.find("{\"schema\", 26}", manifest), std::string::npos);
   EXPECT_NE(source.find("depth_input_region.json"), std::string::npos);
   EXPECT_NE(source.find("depth_input_source.png"), std::string::npos);
   EXPECT_NE(source.find("\"shadow_final_parallax + depth_input_region embedding\""), std::string::npos);
@@ -1710,8 +1645,10 @@ TEST(DirectxShaderTest, FixedShapeHostSbsCacheOwnsAuthenticatedSourceSnapshots) 
   const auto shader_root =
     std::filesystem::temp_directory_path() / ("apollo-sbs-shader-cache-" + unique);
   ASSERT_TRUE(std::filesystem::create_directories(shader_root));
+
   struct cleanup_t {
     std::filesystem::path path;
+
     ~cleanup_t() {
       std::error_code error;
       std::filesystem::remove_all(path, error);
@@ -1725,8 +1662,7 @@ TEST(DirectxShaderTest, FixedShapeHostSbsCacheOwnsAuthenticatedSourceSnapshots) 
     "RWStructuredBuffer<float> Out : register(u0);\n"
     "[numthreads(1, 1, 1)]\n"
     "void main(uint3 id : SV_DispatchThreadID) { Out[0] = SHARED_VALUE; }\n";
-  const auto write_source = [](const std::filesystem::path &path,
-                               const std::string_view source) {
+  const auto write_source = [](const std::filesystem::path &path, const std::string_view source) {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     output.write(source.data(), static_cast<std::streamsize>(source.size()));
     return output.good();
@@ -1784,20 +1720,20 @@ TEST(DirectxShaderTest, FixedShapeHostSbsCacheOwnsAuthenticatedSourceSnapshots) 
     cache::source_closure_sha256(current)
   );
   ASSERT_TRUE(write_source(root_path,
-    "#include \"shared.hlsl\"\r\n"
-    "RWStructuredBuffer<float> Out : register(u0);\r\n"
-    "[numthreads(1, 1, 1)]\r\n"
-    "void main(uint3 id : SV_DispatchThreadID) { Out[0] = SHARED_VALUE; }\r\n"));
+                           "#include \"shared.hlsl\"\r\n"
+                           "RWStructuredBuffer<float> Out : register(u0);\r\n"
+                           "[numthreads(1, 1, 1)]\r\n"
+                           "void main(uint3 id : SV_DispatchThreadID) { Out[0] = SHARED_VALUE; }\r\n"));
   ASSERT_TRUE(write_source(include_path, "#define SHARED_VALUE 1.0f\r\n"));
   EXPECT_EQ(
     cache::source_closure_sha256(cache::snapshot_sources(shader_root, specs)),
     initial_digest
   );
   ASSERT_TRUE(write_source(root_path,
-    "#include \"shared.hlsl\"\r"
-    "RWStructuredBuffer<float> Out : register(u0);\r"
-    "[numthreads(1, 1, 1)]\r"
-    "void main(uint3 id : SV_DispatchThreadID) { Out[0] = SHARED_VALUE; }\r"));
+                           "#include \"shared.hlsl\"\r"
+                           "RWStructuredBuffer<float> Out : register(u0);\r"
+                           "[numthreads(1, 1, 1)]\r"
+                           "void main(uint3 id : SV_DispatchThreadID) { Out[0] = SHARED_VALUE; }\r"));
   ASSERT_TRUE(write_source(include_path, "#define SHARED_VALUE 1.0f\r"));
   EXPECT_EQ(
     cache::source_closure_sha256(cache::snapshot_sources(shader_root, specs)),
@@ -1811,30 +1747,30 @@ TEST(DirectxShaderTest, FixedShapeHostSbsCacheCompilesAuthenticatedNestedInclude
     std::chrono::steady_clock::now().time_since_epoch().count()
   );
   const auto root = std::filesystem::temp_directory_path() /
-    ("apollo-sbs-shader-nested-" + unique);
+                    ("apollo-sbs-shader-nested-" + unique);
   ASSERT_TRUE(std::filesystem::create_directories(root / "nested"));
+
   struct cleanup_t {
     std::filesystem::path path;
+
     ~cleanup_t() {
       std::error_code error;
       std::filesystem::remove_all(path, error);
     }
   } cleanup {root};
-  const auto write_source = [](const std::filesystem::path &path,
-                               const std::string_view source) {
+
+  const auto write_source = [](const std::filesystem::path &path, const std::string_view source) {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     output.write(source.data(), static_cast<std::streamsize>(source.size()));
     return output.good();
   };
   ASSERT_TRUE(write_source(root / "root.hlsl",
-    "#include \"nested/parent.hlsl\"\n"
-    "RWStructuredBuffer<float> Out : register(u0);\n"
-    "[numthreads(1, 1, 1)]\n"
-    "void main(uint3 id : SV_DispatchThreadID) { Out[0] = NESTED_VALUE; }\n"));
-  ASSERT_TRUE(write_source(root / "nested" / "parent.hlsl",
-                           "#include \"shared.hlsl\"\n"));
-  ASSERT_TRUE(write_source(root / "nested" / "shared.hlsl",
-                           "#define NESTED_VALUE 2.0f\n"));
+                           "#include \"nested/parent.hlsl\"\n"
+                           "RWStructuredBuffer<float> Out : register(u0);\n"
+                           "[numthreads(1, 1, 1)]\n"
+                           "void main(uint3 id : SV_DispatchThreadID) { Out[0] = NESTED_VALUE; }\n"));
+  ASSERT_TRUE(write_source(root / "nested" / "parent.hlsl", "#include \"shared.hlsl\"\n"));
+  ASSERT_TRUE(write_source(root / "nested" / "shared.hlsl", "#define NESTED_VALUE 2.0f\n"));
   ASSERT_TRUE(write_source(root / "shared.hlsl", "#define NESTED_VALUE 1.0f\n"));
   constexpr std::array specs {cache::shader_spec {"root.hlsl"}};
   const auto initial = cache::snapshot_sources(root, specs);
@@ -1848,8 +1784,7 @@ TEST(DirectxShaderTest, FixedShapeHostSbsCacheCompilesAuthenticatedNestedInclude
   const auto unrelated = cache::snapshot_sources(root, specs);
   ASSERT_TRUE(unrelated);
   EXPECT_EQ(cache::source_closure_sha256(unrelated), initial_digest);
-  ASSERT_TRUE(write_source(root / "nested" / "shared.hlsl",
-                           "#define NESTED_VALUE 3.0f\n"));
+  ASSERT_TRUE(write_source(root / "nested" / "shared.hlsl", "#define NESTED_VALUE 3.0f\n"));
   const auto changed = cache::snapshot_sources(root, specs);
   ASSERT_TRUE(changed);
   EXPECT_NE(cache::source_closure_sha256(changed), initial_digest);
@@ -1862,18 +1797,20 @@ TEST(DirectxShaderTest, FixedShapeHostSbsCacheRejectsUnauthenticatedIncludes) {
     std::chrono::steady_clock::now().time_since_epoch().count()
   );
   const auto parent = std::filesystem::temp_directory_path() /
-    ("apollo-sbs-shader-include-" + unique);
+                      ("apollo-sbs-shader-include-" + unique);
   const auto root = parent / "root";
   ASSERT_TRUE(std::filesystem::create_directories(root));
+
   struct cleanup_t {
     std::filesystem::path path;
+
     ~cleanup_t() {
       std::error_code error;
       std::filesystem::remove_all(path, error);
     }
   } cleanup {parent};
-  const auto write_source = [](const std::filesystem::path &path,
-                               const std::string_view source) {
+
+  const auto write_source = [](const std::filesystem::path &path, const std::string_view source) {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     output.write(source.data(), static_cast<std::streamsize>(source.size()));
     return output.good();
@@ -1887,8 +1824,7 @@ TEST(DirectxShaderTest, FixedShapeHostSbsCacheRejectsUnauthenticatedIncludes) {
   EXPECT_FALSE(cache::snapshot_sources(root, specs));
   ASSERT_TRUE(write_source(root / "root.hlsl", "#include <outside.hlsl>\n"));
   EXPECT_FALSE(cache::snapshot_sources(root, specs));
-  ASSERT_TRUE(write_source(root / "root.hlsl",
-    "#define WHICH \"outside.hlsl\"\n#include WHICH\n"));
+  ASSERT_TRUE(write_source(root / "root.hlsl", "#define WHICH \"outside.hlsl\"\n#include WHICH\n"));
   EXPECT_FALSE(cache::snapshot_sources(root, specs));
 
   std::error_code symlink_error;
@@ -2104,14 +2040,13 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
                           UINT source_width,
                           UINT source_height,
                           UINT target_width,
-                           UINT target_height,
-                           const std::vector<rgba_pixel_t> &source_pixels,
-                           std::vector<float> &model_output,
-                           std::vector<float> &appearance_ordinal,
-                           std::uint32_t color_mode = 0u
-                         ) {
-    if (source_pixels.size() !=
-        static_cast<std::size_t>(source_width) * source_height) {
+                          UINT target_height,
+                          const std::vector<rgba_pixel_t> &source_pixels,
+                          std::vector<float> &model_output,
+                          std::vector<float> &appearance_ordinal,
+                          std::uint32_t color_mode = 0u
+                        ) {
+    if (source_pixels.size() != static_cast<std::size_t>(source_width) * source_height) {
       return false;
     }
 
@@ -2130,16 +2065,7 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
 
     ComPtr<ID3D11Texture2D> input_texture;
     ComPtr<ID3D11ShaderResourceView> input_srv;
-    if (FAILED(device->CreateTexture2D(
-          &texture_desc,
-          &texture_data,
-          &input_texture
-        )) ||
-        FAILED(device->CreateShaderResourceView(
-          input_texture.Get(),
-          nullptr,
-          &input_srv
-        ))) {
+    if (FAILED(device->CreateTexture2D(&texture_desc, &texture_data, &input_texture)) || FAILED(device->CreateShaderResourceView(input_texture.Get(), nullptr, &input_srv))) {
       return false;
     }
 
@@ -2167,8 +2093,7 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
     ComPtr<ID3D11UnorderedAccessView> model_uav;
     ComPtr<ID3D11Buffer> appearance_buffer;
     ComPtr<ID3D11UnorderedAccessView> appearance_uav;
-    if (!create_output(target_texels * 3u, model_buffer, model_uav) ||
-        !create_output(target_texels, appearance_buffer, appearance_uav)) {
+    if (!create_output(target_texels * 3u, model_buffer, model_uav) || !create_output(target_texels, appearance_buffer, appearance_uav)) {
       return false;
     }
 
@@ -2183,11 +2108,7 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
     D3D11_SUBRESOURCE_DATA constant_data {};
     constant_data.pSysMem = constants.data();
     ComPtr<ID3D11Buffer> constant_buffer;
-    if (FAILED(device->CreateBuffer(
-          &constant_desc,
-          &constant_data,
-          &constant_buffer
-        ))) {
+    if (FAILED(device->CreateBuffer(&constant_desc, &constant_data, &constant_buffer))) {
       return false;
     }
 
@@ -2231,13 +2152,7 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
       }
       context->CopyResource(staging.Get(), source);
       D3D11_MAPPED_SUBRESOURCE mapped {};
-      if (FAILED(context->Map(
-            staging.Get(),
-            0,
-            D3D11_MAP_READ,
-            0,
-            &mapped
-          ))) {
+      if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
         return false;
       }
       const auto *begin = static_cast<const float *>(mapped.pData);
@@ -2404,14 +2319,22 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
   // evidence. This specifically protects the per-source conversion-before-area-resize order.
   {
     const std::vector<rgba_pixel_t> encoded {
-      {0.10f, 0.25f, 0.50f, 1.0f}, {0.20f, 0.30f, 0.60f, 1.0f},
-      {0.30f, 0.40f, 0.70f, 1.0f}, {0.40f, 0.50f, 0.80f, 1.0f},
-      {0.15f, 0.35f, 0.55f, 1.0f}, {0.25f, 0.45f, 0.65f, 1.0f},
-      {0.35f, 0.55f, 0.75f, 1.0f}, {0.45f, 0.65f, 0.85f, 1.0f},
-      {0.12f, 0.22f, 0.42f, 1.0f}, {0.22f, 0.32f, 0.52f, 1.0f},
-      {0.32f, 0.42f, 0.62f, 1.0f}, {0.42f, 0.52f, 0.72f, 1.0f},
-      {0.18f, 0.28f, 0.48f, 1.0f}, {0.28f, 0.38f, 0.58f, 1.0f},
-      {0.38f, 0.48f, 0.68f, 1.0f}, {0.48f, 0.58f, 0.78f, 1.0f},
+      {0.10f, 0.25f, 0.50f, 1.0f},
+      {0.20f, 0.30f, 0.60f, 1.0f},
+      {0.30f, 0.40f, 0.70f, 1.0f},
+      {0.40f, 0.50f, 0.80f, 1.0f},
+      {0.15f, 0.35f, 0.55f, 1.0f},
+      {0.25f, 0.45f, 0.65f, 1.0f},
+      {0.35f, 0.55f, 0.75f, 1.0f},
+      {0.45f, 0.65f, 0.85f, 1.0f},
+      {0.12f, 0.22f, 0.42f, 1.0f},
+      {0.22f, 0.32f, 0.52f, 1.0f},
+      {0.32f, 0.42f, 0.62f, 1.0f},
+      {0.42f, 0.52f, 0.72f, 1.0f},
+      {0.18f, 0.28f, 0.48f, 1.0f},
+      {0.28f, 0.38f, 0.58f, 1.0f},
+      {0.38f, 0.48f, 0.68f, 1.0f},
+      {0.48f, 0.58f, 0.78f, 1.0f},
     };
     auto linear = encoded;
     for (auto &pixel : linear) {

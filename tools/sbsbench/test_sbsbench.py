@@ -1984,6 +1984,12 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("if (!graph_signature_warmed)", estimator)
         self.assertIn("destroy_inference_graph(cuda);", estimator)
         self.assertIn("return exec_context->enqueueV3(cu_stream);", estimator)
+        self.assertIn("input != ocr_graph_input || output != ocr_graph_output", estimator)
+        self.assertIn("if (!ocr_graph_signature_warmed)", estimator)
+        self.assertIn("enqueue_ocr_inference(", estimator)
+        self.assertIn("destroy_ocr_inference_graph(cuda);", estimator)
+        self.assertIn('perf_ocr.stage = "ocr_infer";', estimator)
+        self.assertIn('"ocr_submit_cpu"', estimator)
         with open(os.path.join(repo, "src", "cuda_driver_api.h"), encoding="utf-8") as fh:
             driver = fh.read()
         for symbol in ("cuStreamBeginCapture", "cuStreamEndCapture",
@@ -2400,6 +2406,62 @@ class EvalContractTests(unittest.TestCase):
         # shape and builder level, so a kMAX change would otherwise reuse a stale engine.
         self.assertIn("depth_engine_max_dim = 1036", manager)
         self.assertIn("setBuilderOptimizationLevel(depth_engine_builder_level)", estimator)
+
+    def test_tensorrt_engine_cache_binds_the_full_runtime_build(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
+                  encoding="utf-8") as fh:
+            estimator = fh.read()
+        tag_start = estimator.index("static std::string engine_compatibility_tag")
+        tag_end = estimator.index("struct engine_slot", tag_start)
+        tag = estimator[tag_start:tag_end]
+        for component in (
+                "NV_TENSORRT_MAJOR", "NV_TENSORRT_MINOR",
+                "NV_TENSORRT_PATCH", "NV_TENSORRT_BUILD"):
+            self.assertIn(component, tag)
+
+    def test_mixed_fp16_ocr_is_a_bundled_authenticated_fail_flat_asset(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "src", "model_manager.h"), encoding="utf-8") as fh:
+            manager = fh.read()
+        with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
+                  encoding="utf-8") as fh:
+            estimator = fh.read()
+        ensure_start = estimator.index("static bool ensure_ocr_tensorrt_engine_for_device")
+        ensure_end = estimator.index("engine_build_status tensorrt_model_prepare_status", ensure_start)
+        ensure = estimator[ensure_start:ensure_end]
+        self.assertIn("models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx", manager)
+        self.assertIn("ocr_model_artifact_onnx_sha256", ensure)
+        self.assertIn("assets_dir / ocr_model_asset_path", ensure)
+        self.assertNotIn("ensure_onnx_available", ensure)
+        self.assertNotIn("std::filesystem::remove(artifact.source_path", ensure)
+
+    def test_ocr_engine_cache_filename_is_bounded_and_hashes_the_full_identity(self):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(repo, "src", "model_manager.cpp"), encoding="utf-8") as fh:
+            manager = fh.read()
+        start = manager.index("std::string ocr_engine_filename")
+        end = manager.index("std::filesystem::path ensure_onnx_available", start)
+        helper = manager[start:end]
+        self.assertIn("cache_identity_domain", helper)
+        self.assertIn("update_field(ocr_model_name)", helper)
+        self.assertIn("update_field(ocr_engine_recipe)", helper)
+        self.assertIn("update_field(compatibility_tag)", helper)
+        self.assertIn("std::uint64_t", helper)
+        self.assertIn("EVP_sha256()", helper)
+        self.assertIn("digest_size != 32u", helper)
+        self.assertIn('".cache-"', helper)
+        self.assertNotIn("filename += compatibility_tag", helper)
+
+        with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
+                  encoding="utf-8") as fh:
+            estimator = fh.read()
+        ensure_start = estimator.index("static bool ensure_ocr_tensorrt_engine_for_device")
+        ensure_end = estimator.index("engine_build_status tensorrt_model_prepare_status", ensure_start)
+        ensure = estimator[ensure_start:ensure_end]
+        name = ensure.index("artifact.name = ocr_engine_filename")
+        path = ensure.index("artifact.engine_path = assets_dir / artifact.name")
+        self.assertIn("if (artifact.name.empty())", ensure[name:path])
 
     def test_live_and_eval_shaders_use_level3_optimization(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

@@ -20,7 +20,7 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     import generate_depth_coordinate_v2_contract as generator  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 21
+DUMP_MANIFEST_SCHEMA = 26
 SUPPORTED_DUMP_MANIFEST_SCHEMAS = frozenset({DUMP_MANIFEST_SCHEMA})
 SUBTITLE_OCR_RECORD_SCHEMA = coordinate_contract.SUBTITLE_OCR.record_schema
 SUBTITLE_OCR_RECORD_TAG = coordinate_contract.SUBTITLE_OCR.record_tag
@@ -29,12 +29,11 @@ SUBTITLE_OCR_HEADER_WORD_COUNT = coordinate_contract.SUBTITLE_OCR.record_header_
 SUBTITLE_OCR_RAW_BOX_CAPACITY = coordinate_contract.SUBTITLE_OCR.raw_box_capacity
 SUBTITLE_OCR_FINAL_BOX_CAPACITY = coordinate_contract.SUBTITLE_OCR.final_box_capacity
 SUBTITLE_OCR_BOX_WORD_COUNT = coordinate_contract.SUBTITLE_OCR.box_word_count
+SUBTITLE_OCR_BOX_FLAG_RIBBON = coordinate_contract.SUBTITLE_OCR.box_flag_ribbon
+SUBTITLE_OCR_BOX_KNOWN_FLAGS = coordinate_contract.SUBTITLE_OCR.box_known_flags
 SUBTITLE_OCR_RAW_BOX_WORD_OFFSET = coordinate_contract.SUBTITLE_OCR.raw_box_offset
 SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET = coordinate_contract.SUBTITLE_OCR.final_box_offset
-SUBTITLE_OCR_FIELD_WIDTH = coordinate_contract.SUBTITLE_OCR.field_width
-SUBTITLE_OCR_FIELD_HEIGHT = coordinate_contract.SUBTITLE_OCR.field_height
-SUBTITLE_OCR_ROI_TOP = coordinate_contract.SUBTITLE_OCR.roi_top
-SUBTITLE_OCR_ROI_BOTTOM = coordinate_contract.SUBTITLE_OCR.roi_bottom
+SUBTITLE_OCR_OUTPUT_WIDTH = coordinate_contract.SUBTITLE_OCR.output_shape[3]
 SUBTITLE_LOCATOR_STATE_SCHEMA = coordinate_contract.SUBTITLE_OCR.locator_schema
 SUBTITLE_LOCATOR_STATE_TAG = coordinate_contract.SUBTITLE_OCR.locator_tag
 SUBTITLE_LOCATOR_STATE_WORD_COUNT = coordinate_contract.SUBTITLE_OCR.locator_word_count
@@ -45,6 +44,14 @@ SUBTITLE_LOCATOR_RECT_CAPACITY = (
 SUBTITLE_LOCATOR_OWNER_WORD_OFFSET = coordinate_contract.SUBTITLE_OCR.locator_owner_offset
 SUBTITLE_LOCATOR_PENDING_WORD_OFFSET = coordinate_contract.SUBTITLE_OCR.locator_pending_offset
 SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET = coordinate_contract.SUBTITLE_OCR.locator_current_offset
+SUBTITLE_LOCATOR_KIND_WORD = coordinate_contract.SUBTITLE_OCR.locator_kind_word
+SUBTITLE_LOCATOR_OWNER_KIND_SHIFT = (
+    coordinate_contract.SUBTITLE_OCR.locator_owner_kind_shift)
+SUBTITLE_LOCATOR_PENDING_KIND_SHIFT = (
+    coordinate_contract.SUBTITLE_OCR.locator_pending_kind_shift)
+SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT = (
+    coordinate_contract.SUBTITLE_OCR.locator_current_kind_shift)
+SUBTITLE_LOCATOR_KIND_MASK = coordinate_contract.SUBTITLE_OCR.locator_kind_mask
 SUBTITLE_LOCATOR_FLAG_OWNER = 1 << 0
 SUBTITLE_LOCATOR_FLAG_PENDING = 1 << 1
 SUBTITLE_LOCATOR_FLAG_TARGET_VALID = 1 << 2
@@ -75,10 +82,10 @@ WINDOW_VIDEO_MAPPING_STATUSES = frozenset({
 SHADOW_STATE_DUMP_SCHEMA = 16
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 2
 LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
-    "914fc624955c5e3b41f867429acb17a03c34ba71e41f7cbfab00fd939aafff9b"
+    "cefced5c4ebcb98d8b410b4d13d05a03941f63207edb6ade93afb69fa9bf1529"
 )
 DIAGNOSTIC_SOURCE_CLOSURE_SHA256 = (
-    "d2dada0490e727d88fdda802a9eb6759b34e9501c91835363ebdb0196e3d5c4b"
+    "53c3b025ca2f7c1dbd7abed09ca156d5646ccb45a17c294f9f169d62962a7194"
 )
 _CONTRACT = coordinate_contract.load_contract()
 _CONTRACT_TAG = generator.contract_tag(_CONTRACT)
@@ -97,10 +104,19 @@ _MAXIMUM_SOURCE_LONG_SIDE = 5120
 _MAXIMUM_SOURCE_PIXELS = 5120 * 2160
 
 _SUBTITLE_MODE_NONE = "none"
-_SUBTITLE_MODE_SLR6 = "subtitle-slr6"
+_SUBTITLE_MODE_SLR8 = "subtitle-slr8"
+_SUBTITLE_OCR_CONTRACT_SCHEMA = coordinate_contract.SUBTITLE_OCR.schema
 _SUBTITLE_OCR_MODEL_NAME = coordinate_contract.SUBTITLE_OCR.logical_model
-_SUBTITLE_OCR_MODEL_URL = coordinate_contract.SUBTITLE_OCR.model_url
-_SUBTITLE_OCR_MODEL_ONNX_SHA256 = coordinate_contract.SUBTITLE_OCR.onnx_sha256
+_SUBTITLE_OCR_ASSET_PATH = coordinate_contract.SUBTITLE_OCR.asset_path
+_SUBTITLE_OCR_ARTIFACT_ONNX_SHA256 = (
+    coordinate_contract.SUBTITLE_OCR.artifact_onnx_sha256)
+_SUBTITLE_OCR_SOURCE_URL = coordinate_contract.SUBTITLE_OCR.source_url
+_SUBTITLE_OCR_SOURCE_ONNX_SHA256 = coordinate_contract.SUBTITLE_OCR.source_onnx_sha256
+_SUBTITLE_OCR_CONVERSION_TOOL = coordinate_contract.SUBTITLE_OCR.conversion_tool
+_SUBTITLE_OCR_CONVERSION_VERSION = coordinate_contract.SUBTITLE_OCR.conversion_version
+_SUBTITLE_OCR_CONVERSION_RECIPE = coordinate_contract.SUBTITLE_OCR.conversion_recipe
+_SUBTITLE_OCR_CONVERSION_CALIBRATION_PROFILE = (
+    coordinate_contract.SUBTITLE_OCR.conversion_calibration_profile)
 _SUBTITLE_OCR_ENGINE_RECIPE = coordinate_contract.SUBTITLE_OCR.engine_recipe
 _SUBTITLE_OCR_SHADER_SPECS = (
     ("host_sbs_ocr_preprocess_cs.hlsl", "main", "cs_5_0"),
@@ -179,7 +195,8 @@ def _float32_bits(word: int) -> float:
 
 def _decode_subtitle_ocr_boxes(
         words: tuple[int, ...], *, offset: int, count: int, capacity: int,
-        field_width: int, field_height: int, label: str) -> list[Dict[str, Any]]:
+        field_width: int, field_height: int, roi_top: int, roi_bottom: int,
+        ribbon_min_bottom: int, final_boxes: bool, label: str) -> list[Dict[str, Any]]:
     decoded: list[Dict[str, Any]] = []
     for slot in range(capacity):
         start = offset + slot * SUBTITLE_OCR_BOX_WORD_COUNT
@@ -188,17 +205,35 @@ def _decode_subtitle_ocr_boxes(
             if any(values):
                 raise ValueError(f"{label} unused box slots must be canonical zero")
             continue
-        left, top, right, bottom, score_bits, box_flags, reserved0, reserved1 = values
+        left, top, right, bottom, score_bits, box_flags, island_count, gap_count = values
         score = _float32_bits(score_bits)
         if (left >= right or top >= bottom or right > field_width or
-                bottom > field_height or top < SUBTITLE_OCR_ROI_TOP or
-                bottom > SUBTITLE_OCR_ROI_BOTTOM):
+                bottom > field_height or top < roi_top):
             raise ValueError(
-                f"{label} boxes must be nonempty half-open rectangles inside the OCR ROI")
+                f"{label} boxes must be nonempty half-open rectangles inside the field")
         if not math.isfinite(score) or not 0.4 <= score <= 1.0:
             raise ValueError(f"{label} box scores must be finite float32 values in [0.4,1.0]")
-        if box_flags != 0 or reserved0 != 0 or reserved1 != 0:
-            raise ValueError(f"{label} box flags and reserved words must be zero")
+        if box_flags & ~SUBTITLE_OCR_BOX_KNOWN_FLAGS:
+            raise ValueError(f"{label} boxes have unknown kind flags")
+        if (island_count == 0 or island_count > SUBTITLE_OCR_OUTPUT_WIDTH or
+                gap_count >= island_count):
+            raise ValueError(f"{label} boxes have invalid topology counts")
+        ribbon = bool(box_flags & SUBTITLE_OCR_BOX_FLAG_RIBBON)
+        if ribbon:
+            if (island_count < coordinate_contract.SUBTITLE_OCR.ribbon_min_structural_gaps + 1 or
+                    gap_count < coordinate_contract.SUBTITLE_OCR.ribbon_min_structural_gaps):
+                raise ValueError(f"{label} ribbon topology is inconsistent")
+            if final_boxes:
+                if (left != 0 or right != field_width or bottom != field_height or
+                        top < roi_top):
+                    raise ValueError(f"{label} ribbon cover is not the canonical bottom strip")
+            elif (bottom < ribbon_min_bottom or bottom > roi_bottom or
+                  (right - left) * coordinate_contract.SUBTITLE_OCR.ribbon_min_width_denominator <
+                  field_width * coordinate_contract.SUBTITLE_OCR.ribbon_min_width_numerator):
+                raise ValueError(
+                    f"{label} ribbon core is outside its projected bottom tolerance or not wide")
+        elif bottom > roi_bottom:
+            raise ValueError(f"{label} ordinary boxes must remain inside the OCR ROI")
         decoded.append({
             "left": left,
             "top": top,
@@ -206,6 +241,10 @@ def _decode_subtitle_ocr_boxes(
             "bottom": bottom,
             "score": score,
             "score_bits": score_bits,
+            "box_flags": box_flags,
+            "kind": "ribbon" if ribbon else "text",
+            "island_count": island_count,
+            "structural_gap_count": gap_count,
         })
     return decoded
 
@@ -214,44 +253,50 @@ def validate_subtitle_ocr_record(
         payload: Any, *, matched_frame_id: int, analysis_generation: int,
         source_width: int, source_height: int, field_width: int, field_height: int,
         roi_top: int, roi_bottom: int) -> Dict[str, Any]:
-    """Validate and decode the sole current OCR6 208-word subtitle record."""
+    """Validate and decode the sole current OCR8 208-word lower-text record."""
 
-    expected_frame = _uint64(matched_frame_id, "OCR6 matched frame id")
-    expected_generation = _uint64(analysis_generation, "OCR6 analysis generation")
-    expected_source_width = _uint32(source_width, "OCR6 source width")
-    expected_source_height = _uint32(source_height, "OCR6 source height")
-    expected_field_width = _uint32(field_width, "OCR6 field width")
-    expected_field_height = _uint32(field_height, "OCR6 field height")
-    expected_roi_top = _uint32(roi_top, "OCR6 ROI top")
-    expected_roi_bottom = _uint32(roi_bottom, "OCR6 ROI bottom")
+    expected_frame = _uint64(matched_frame_id, "OCR8 matched frame id")
+    expected_generation = _uint64(analysis_generation, "OCR8 analysis generation")
+    expected_source_width = _uint32(source_width, "OCR8 source width")
+    expected_source_height = _uint32(source_height, "OCR8 source height")
+    expected_field_width = _uint32(field_width, "OCR8 field width")
+    expected_field_height = _uint32(field_height, "OCR8 field height")
+    expected_roi_top = _uint32(roi_top, "OCR8 ROI top")
+    expected_roi_bottom = _uint32(roi_bottom, "OCR8 ROI bottom")
     if (expected_source_width == 0 or expected_source_height == 0 or
             expected_field_width == 0 or expected_field_height == 0 or
             expected_roi_top >= expected_roi_bottom or
             expected_roi_bottom > expected_field_height):
-        raise ValueError("OCR6 expected source, field, or ROI geometry is invalid")
-    if (expected_field_width != SUBTITLE_OCR_FIELD_WIDTH or
-            expected_field_height != SUBTITLE_OCR_FIELD_HEIGHT or
-            expected_roi_top != SUBTITLE_OCR_ROI_TOP or
-            expected_roi_bottom != SUBTITLE_OCR_ROI_BOTTOM):
-        raise ValueError("OCR6 expected geometry does not match the frozen current ABI")
+        raise ValueError("OCR8 expected source, field, or ROI geometry is invalid")
+    dynamic_roi = coordinate_contract.subtitle_ocr_dynamic_roi(
+        expected_source_width, expected_source_height,
+        expected_field_width, expected_field_height)
+    if dynamic_roi != (expected_roi_top, expected_roi_bottom):
+        raise ValueError(
+            "OCR8 expected field/ROI geometry does not match the calibrated dynamic policy")
+    ribbon_min_bottom = coordinate_contract.subtitle_ocr_ribbon_min_bottom(
+        expected_source_width, expected_source_height,
+        expected_field_width, expected_field_height)
+    if ribbon_min_bottom is None or not expected_roi_top < ribbon_min_bottom <= expected_roi_bottom:
+        raise ValueError("OCR8 projected ribbon bottom tolerance is invalid")
 
-    words = _uint32_words(payload, SUBTITLE_OCR_RECORD_WORD_COUNT, "OCR6 record")
+    words = _uint32_words(payload, SUBTITLE_OCR_RECORD_WORD_COUNT, "OCR8 record")
     if words[0] != SUBTITLE_OCR_RECORD_SCHEMA or words[1] != SUBTITLE_OCR_RECORD_TAG:
-        raise ValueError("OCR6 record has an unknown schema or tag")
+        raise ValueError("OCR8 record has an unknown schema or tag")
     flags = words[2]
     raw_count = words[3]
     final_count = words[4]
     if flags not in (0, 1):
-        raise ValueError("OCR6 flags must be exactly zero (abstain) or one (authoritative)")
+        raise ValueError("OCR8 flags must be exactly zero (abstain) or one (authoritative)")
     if (raw_count > SUBTITLE_OCR_RAW_BOX_CAPACITY or
             final_count > SUBTITLE_OCR_FINAL_BOX_CAPACITY):
-        raise ValueError("OCR6 record exceeds its fixed box capacity")
-    if final_count > raw_count:
-        raise ValueError("OCR6 final box count cannot exceed its raw box count")
+        raise ValueError("OCR8 record exceeds its fixed box capacity")
+    if final_count != raw_count:
+        raise ValueError("OCR8 raw and final box counts must match exactly")
     if flags == 0 and (raw_count != 0 or final_count != 0):
-        raise ValueError("an abstaining OCR6 record cannot publish boxes")
+        raise ValueError("an abstaining OCR8 record cannot publish boxes")
     if words[15] != 0:
-        raise ValueError("OCR6 reserved header word must be zero")
+        raise ValueError("OCR8 reserved header word must be zero")
 
     frame_id = _uint64_words(words[5], words[6])
     generation = _uint64_words(words[7], words[8])
@@ -276,16 +321,28 @@ def validate_subtitle_ocr_record(
         "roi_bottom": expected_roi_bottom,
     }
     if identity != expected_identity:
-        raise ValueError("OCR6 record identity disagrees with the matched dump frame")
+        raise ValueError("OCR8 record identity disagrees with the matched dump frame")
 
     raw_boxes = _decode_subtitle_ocr_boxes(
         words, offset=SUBTITLE_OCR_RAW_BOX_WORD_OFFSET, count=raw_count,
         capacity=SUBTITLE_OCR_RAW_BOX_CAPACITY, field_width=expected_field_width,
-        field_height=expected_field_height, label="OCR6 raw")
+        field_height=expected_field_height, roi_top=expected_roi_top,
+        roi_bottom=expected_roi_bottom, ribbon_min_bottom=ribbon_min_bottom,
+        final_boxes=False, label="OCR8 raw")
     final_boxes = _decode_subtitle_ocr_boxes(
         words, offset=SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET, count=final_count,
         capacity=SUBTITLE_OCR_FINAL_BOX_CAPACITY, field_width=expected_field_width,
-        field_height=expected_field_height, label="OCR6 final")
+        field_height=expected_field_height, roi_top=expected_roi_top,
+        roi_bottom=expected_roi_bottom, ribbon_min_bottom=ribbon_min_bottom,
+        final_boxes=True, label="OCR8 final")
+    for index, (core, cover) in enumerate(zip(raw_boxes, final_boxes)):
+        metadata_keys = (
+            "score_bits", "box_flags", "island_count", "structural_gap_count")
+        if any(core[key] != cover[key] for key in metadata_keys):
+            raise ValueError(f"OCR8 pair {index} metadata does not match")
+        if (cover["left"] > core["left"] or cover["top"] > core["top"] or
+                cover["right"] < core["right"] or cover["bottom"] < core["bottom"]):
+            raise ValueError(f"OCR8 pair {index} cover does not contain its core")
     return {
         "schema": words[0],
         "tag": words[1],
@@ -301,8 +358,10 @@ def validate_subtitle_ocr_record(
 
 def _decode_subtitle_locator_rectangles(
         words: tuple[int, ...], *, offset: int, count: int,
-        field_width: int, field_height: int, label: str) -> list[Dict[str, int]]:
-    decoded: list[Dict[str, int]] = []
+        field_width: int, field_height: int, roi_top: int, roi_bottom: int,
+        ribbon_min_bottom: int, ribbon_mask: int, current_cover: bool,
+        label: str) -> list[Dict[str, Any]]:
+    decoded: list[Dict[str, Any]] = []
     for slot in range(SUBTITLE_LOCATOR_RECT_CAPACITY):
         start = offset + slot * 4
         left, top, right, bottom = words[start:start + 4]
@@ -310,16 +369,25 @@ def _decode_subtitle_locator_rectangles(
             if left != 0 or top != 0 or right != 0 or bottom != 0:
                 raise ValueError(f"{label} unused rectangle slots must be canonical zero")
             continue
+        ribbon = bool(ribbon_mask & (1 << slot))
         if (left >= right or top >= bottom or right > field_width or
-                bottom > field_height or top < SUBTITLE_OCR_ROI_TOP or
-                bottom > SUBTITLE_OCR_ROI_BOTTOM):
+                bottom > field_height or top < roi_top):
             raise ValueError(
-                f"{label} rectangles must be nonempty half-open coordinates inside the OCR ROI")
+                f"{label} rectangles must be nonempty half-open field coordinates")
+        if current_cover and ribbon:
+            if left != 0 or right != field_width or bottom != field_height:
+                raise ValueError(f"{label} ribbon cover is not the canonical bottom strip")
+        elif ribbon and bottom < ribbon_min_bottom:
+            raise ValueError(f"{label} ribbon core is outside its projected bottom tolerance")
+        elif bottom > roi_bottom:
+            raise ValueError(f"{label} rectangles must remain inside the OCR ROI")
         decoded.append({
             "left": left,
             "top": top,
             "right": right,
             "bottom": bottom,
+            "kind": "ribbon" if ribbon else "text",
+            "ribbon": ribbon,
         })
     return decoded
 
@@ -341,69 +409,248 @@ def _subtitle_rectangle_aggregate(
     return bbox, area
 
 
+def _subtitle_coherent_lines(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+    """Mirror the frozen SLR8 vertically-adjacent ordinary-line predicate."""
+
+    width_a = a["right"] - a["left"]
+    width_b = b["right"] - b["left"]
+    height_a = a["bottom"] - a["top"]
+    height_b = b["bottom"] - b["top"]
+    overlap = max(0, min(a["right"], b["right"]) - max(a["left"], b["left"]))
+    center_x_delta_twice = abs(
+        (a["left"] + a["right"]) - (b["left"] + b["right"]))
+    left_delta = abs(a["left"] - b["left"])
+    right_delta = abs(a["right"] - b["right"])
+    center_y_delta_twice = abs(
+        (a["top"] + a["bottom"]) - (b["top"] + b["bottom"]))
+    gap = 0
+    if a["bottom"] <= b["top"]:
+        gap = b["top"] - a["bottom"]
+    elif b["bottom"] <= a["top"]:
+        gap = a["top"] - b["bottom"]
+    shorter_height = min(height_a, height_b)
+    taller_height = max(height_a, height_b)
+    return (
+        overlap * 2 >= min(width_a, width_b) and
+        (center_x_delta_twice <= taller_height or
+         left_delta <= taller_height or right_delta <= taller_height) and
+        taller_height <= 2 * shorter_height and
+        center_y_delta_twice >= shorter_height and
+        gap * 2 <= taller_height
+    )
+
+
+def _subtitle_same_baseline_segments(
+        a: Dict[str, Any], b: Dict[str, Any], field_width: int) -> bool:
+    """Mirror the frozen SLR8 horizontally-disjoint same-baseline predicate."""
+
+    if not (a["right"] <= b["left"] or b["right"] <= a["left"]):
+        return False
+    height_a = a["bottom"] - a["top"]
+    height_b = b["bottom"] - b["top"]
+    shorter_height = min(height_a, height_b)
+    taller_height = max(height_a, height_b)
+    vertical_overlap = max(
+        0, min(a["bottom"], b["bottom"]) - max(a["top"], b["top"]))
+    center_y_delta_twice = abs(
+        (a["top"] + a["bottom"]) - (b["top"] + b["bottom"]))
+    horizontal_gap = (
+        b["left"] - a["right"] if a["right"] <= b["left"]
+        else a["left"] - b["right"])
+    combined_span = max(a["right"], b["right"]) - min(a["left"], b["left"])
+    policy = coordinate_contract.SUBTITLE_OCR
+    return (
+        vertical_overlap * 4 >= 3 * shorter_height and
+        taller_height <= 2 * shorter_height and
+        center_y_delta_twice <= shorter_height and
+        horizontal_gap <= 8 * taller_height and
+        combined_span * policy.locator_max_width_denominator <=
+        field_width * policy.locator_max_width_numerator
+    )
+
+
+def _subtitle_qualified_ocr_core(
+        rectangle: Dict[str, Any], field_width: int) -> bool:
+    """Mirror SLR8's generic core geometry gate after OCR8 validation."""
+
+    width = rectangle["right"] - rectangle["left"]
+    height = rectangle["bottom"] - rectangle["top"]
+    if width < 48 or height < 6 or width < 2 * height:
+        return False
+    if rectangle["kind"] == "ribbon":
+        return True
+    policy = coordinate_contract.SUBTITLE_OCR
+    return (width * policy.locator_max_width_denominator <=
+            field_width * policy.locator_max_width_numerator)
+
+
+def _subtitle_selected_ocr_indices(
+        raw_boxes: list[Dict[str, Any]], field_width: int) -> list[int]:
+    """Replay frozen SLR8 component closure/selection on same-frame OCR8 cores."""
+
+    qualified = [
+        index for index, rectangle in enumerate(raw_boxes)
+        if _subtitle_qualified_ocr_core(rectangle, field_width)
+    ]
+    ordinary = [index for index in qualified if raw_boxes[index]["kind"] == "text"]
+    ribbon = [index for index in qualified if raw_boxes[index]["kind"] == "ribbon"]
+
+    unseen = set(ordinary)
+    components: list[list[int]] = []
+    while unseen:
+        root = min(unseen)
+        reached = {root}
+        frontier = [root]
+        unseen.remove(root)
+        while frontier:
+            left = frontier.pop()
+            for right in tuple(unseen):
+                if (_subtitle_coherent_lines(raw_boxes[left], raw_boxes[right]) or
+                        _subtitle_same_baseline_segments(
+                            raw_boxes[left], raw_boxes[right], field_width)):
+                    reached.add(right)
+                    frontier.append(right)
+                    unseen.remove(right)
+        components.append(sorted(reached))
+
+    best: list[int] = []
+    best_key: tuple[int, int, int, int] | None = None
+    for component in components:
+        if len(component) > SUBTITLE_LOCATOR_RECT_CAPACITY:
+            continue
+        rectangles = [raw_boxes[index] for index in component]
+        bbox, area = _subtitle_rectangle_aggregate(rectangles)
+        policy = coordinate_contract.SUBTITLE_OCR
+        if ((bbox[2] - bbox[0]) * policy.locator_max_width_denominator >
+                field_width * policy.locator_max_width_numerator):
+            continue
+        # Selection maximizes summed core area. Ties prefer lower bottom, then lower top, then
+        # smaller left exactly as BuildCurrentStack's deterministic comparison does.
+        key = (area, bbox[3], bbox[1], -bbox[0])
+        if best_key is None or key > best_key:
+            best = component
+            best_key = key
+
+    selected = sorted(
+        best + ribbon,
+        key=lambda index: (
+            raw_boxes[index]["top"], raw_boxes[index]["left"], index))
+    if len(selected) > SUBTITLE_LOCATOR_RECT_CAPACITY:
+        return []
+    return selected
+
+
+def _subtitle_rectangles_are_top_left_ordered(
+        rectangles: list[Dict[str, Any]]) -> bool:
+    keys = [
+        (rectangle["top"], rectangle["left"])
+        for rectangle in rectangles
+    ]
+    return keys == sorted(keys)
+
+
 def validate_subtitle_locator_state(
         payload: Any, *, matched_frame_id: int, analysis_generation: int,
+        source_width: int, source_height: int,
         field_width: int, field_height: int) -> Dict[str, Any]:
-    """Validate and decode the sole current compact SLR6 80-word state."""
+    """Validate and decode the sole current compact SLR8 80-word state."""
 
-    expected_frame = _uint64(matched_frame_id, "SLR6 matched frame id")
-    expected_generation = _uint64(analysis_generation, "SLR6 analysis generation")
-    expected_field_width = _uint32(field_width, "SLR6 field width")
-    expected_field_height = _uint32(field_height, "SLR6 field height")
-    if expected_field_width == 0 or expected_field_height == 0:
-        raise ValueError("SLR6 expected field geometry is invalid")
-    if (expected_field_width != SUBTITLE_OCR_FIELD_WIDTH or
-            expected_field_height != SUBTITLE_OCR_FIELD_HEIGHT):
-        raise ValueError("SLR6 expected geometry does not match the frozen current ABI")
+    expected_frame = _uint64(matched_frame_id, "SLR8 matched frame id")
+    expected_generation = _uint64(analysis_generation, "SLR8 analysis generation")
+    expected_source_width = _uint32(source_width, "SLR8 source width")
+    expected_source_height = _uint32(source_height, "SLR8 source height")
+    expected_field_width = _uint32(field_width, "SLR8 field width")
+    expected_field_height = _uint32(field_height, "SLR8 field height")
+    dynamic_roi = coordinate_contract.subtitle_ocr_dynamic_roi(
+        expected_source_width, expected_source_height,
+        expected_field_width, expected_field_height)
+    if dynamic_roi is None:
+        raise ValueError("SLR8 expected field geometry is invalid")
+    expected_roi_top, expected_roi_bottom = dynamic_roi
+    ribbon_min_bottom = coordinate_contract.subtitle_ocr_ribbon_min_bottom(
+        expected_source_width, expected_source_height,
+        expected_field_width, expected_field_height)
+    if ribbon_min_bottom is None or not expected_roi_top < ribbon_min_bottom <= expected_roi_bottom:
+        raise ValueError("SLR8 projected ribbon bottom tolerance is invalid")
 
-    words = _uint32_words(payload, SUBTITLE_LOCATOR_STATE_WORD_COUNT, "SLR6 state")
+    words = _uint32_words(payload, SUBTITLE_LOCATOR_STATE_WORD_COUNT, "SLR8 state")
     if words[0] != SUBTITLE_LOCATOR_STATE_SCHEMA or words[1] != SUBTITLE_LOCATOR_STATE_TAG:
-        raise ValueError("SLR6 state has an unknown schema or tag")
+        raise ValueError("SLR8 state has an unknown schema or tag")
     flags = words[2]
     if flags & ~SUBTITLE_LOCATOR_KNOWN_FLAGS:
-        raise ValueError("SLR6 state has unknown flags")
+        raise ValueError("SLR8 state has unknown flags")
     owner_count = words[4]
     pending_count = words[12]
     current_count = words[20]
     if any(count > SUBTITLE_LOCATOR_RECT_CAPACITY for count in (
             owner_count, pending_count, current_count)):
-        raise ValueError("SLR6 state exceeds its fixed rectangle capacity")
+        raise ValueError("SLR8 state exceeds its fixed rectangle capacity")
     fade = words[24]
     if fade > 2:
-        raise ValueError("SLR6 fade step must be zero, one, or two")
+        raise ValueError("SLR8 fade step must be zero, one, or two")
     if words[21] not in {
             SUBTITLE_LOCATOR_EVENT_NONE,
             SUBTITLE_LOCATOR_EVENT_BIRTH,
             SUBTITLE_LOCATOR_EVENT_DEATH,
             SUBTITLE_LOCATOR_EVENT_HANDOFF}:
-        raise ValueError("SLR6 state has an unknown last event")
-    if words[31] != 0:
-        raise ValueError("SLR6 reserved header word must be zero")
+        raise ValueError("SLR8 state has an unknown last event")
+    packed_kinds = words[SUBTITLE_LOCATOR_KIND_WORD]
+    known_kind_bits = (
+        (SUBTITLE_LOCATOR_KIND_MASK << SUBTITLE_LOCATOR_OWNER_KIND_SHIFT) |
+        (SUBTITLE_LOCATOR_KIND_MASK << SUBTITLE_LOCATOR_PENDING_KIND_SHIFT) |
+        (SUBTITLE_LOCATOR_KIND_MASK << SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT)
+    )
+    if packed_kinds & ~known_kind_bits:
+        raise ValueError("SLR8 state has unknown packed-kind bits")
+
+    def kind_mask(shift: int, count: int, label: str) -> int:
+        value = (packed_kinds >> shift) & SUBTITLE_LOCATOR_KIND_MASK
+        used = (1 << count) - 1 if count else 0
+        if value & ~used:
+            raise ValueError(f"SLR8 {label} kind mask exceeds its rectangle count")
+        return value
+
+    owner_kinds = kind_mask(SUBTITLE_LOCATOR_OWNER_KIND_SHIFT, owner_count, "owner")
+    pending_kinds = kind_mask(SUBTITLE_LOCATOR_PENDING_KIND_SHIFT, pending_count, "pending")
+    current_kinds = kind_mask(SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT, current_count, "current")
 
     generation = _uint64_words(words[10], words[11])
     frame_id = _uint64_words(words[22], words[23])
     if (generation != expected_generation or frame_id != expected_frame or
             words[27] != expected_field_width or words[28] != expected_field_height):
-        raise ValueError("SLR6 state identity disagrees with the matched dump frame")
+        raise ValueError("SLR8 state identity disagrees with the matched dump frame")
 
     owner = _decode_subtitle_locator_rectangles(
         words, offset=SUBTITLE_LOCATOR_OWNER_WORD_OFFSET, count=owner_count,
         field_width=expected_field_width, field_height=expected_field_height,
-        label="SLR6 owner")
+        roi_top=expected_roi_top, roi_bottom=expected_roi_bottom,
+        ribbon_min_bottom=ribbon_min_bottom,
+        ribbon_mask=owner_kinds, current_cover=False, label="SLR8 owner")
     pending = _decode_subtitle_locator_rectangles(
         words, offset=SUBTITLE_LOCATOR_PENDING_WORD_OFFSET, count=pending_count,
         field_width=expected_field_width, field_height=expected_field_height,
-        label="SLR6 pending")
+        roi_top=expected_roi_top, roi_bottom=expected_roi_bottom,
+        ribbon_min_bottom=ribbon_min_bottom,
+        ribbon_mask=pending_kinds, current_cover=False, label="SLR8 pending")
     current = _decode_subtitle_locator_rectangles(
         words, offset=SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET, count=current_count,
         field_width=expected_field_width, field_height=expected_field_height,
-        label="SLR6 current-authority")
+        roi_top=expected_roi_top, roi_bottom=expected_roi_bottom,
+        ribbon_min_bottom=ribbon_min_bottom,
+        ribbon_mask=current_kinds, current_cover=True,
+        label="SLR8 current-authority")
+    # Owner and pending store cores and therefore expose the producer's canonical core order.
+    # Current stores paired covers; their expansion can change cover-top order, so its canonical
+    # order is checked later against the selected OCR core order rather than cover coordinates.
+    for label, rectangles in (("owner", owner), ("pending", pending)):
+        if not _subtitle_rectangles_are_top_left_ordered(rectangles):
+            raise ValueError(f"SLR8 {label} rectangles are not in canonical top/left order")
     owner_bbox, owner_area = _subtitle_rectangle_aggregate(owner)
     pending_bbox, pending_area = _subtitle_rectangle_aggregate(pending)
     if tuple(words[5:9]) != owner_bbox or words[9] != owner_area:
-        raise ValueError("SLR6 owner bbox or area disagrees with its rectangles")
+        raise ValueError("SLR8 owner bbox or area disagrees with its rectangles")
     if tuple(words[13:17]) != pending_bbox or words[17] != pending_area:
-        raise ValueError("SLR6 pending bbox or area disagrees with its rectangles")
+        raise ValueError("SLR8 pending bbox or area disagrees with its rectangles")
 
     target = _float32_bits(words[18])
     target_valid = bool(flags & SUBTITLE_LOCATOR_FLAG_TARGET_VALID)
@@ -411,22 +658,22 @@ def validate_subtitle_locator_state(
     pending_flag = bool(flags & SUBTITLE_LOCATOR_FLAG_PENDING)
     target_reset = bool(flags & SUBTITLE_LOCATOR_FLAG_TARGET_RESET)
     if owner_flag != (owner_count != 0) or pending_flag != (pending_count != 0):
-        raise ValueError("SLR6 owner/pending flags disagree with their rectangle counts")
+        raise ValueError("SLR8 owner/pending flags disagree with their rectangle counts")
     if owner_flag != (words[3] != 0):
-        raise ValueError("SLR6 owner generation disagrees with owner authority")
+        raise ValueError("SLR8 owner generation disagrees with owner authority")
     if current_count > owner_count:
-        raise ValueError("SLR6 current rectangle count cannot exceed its owner count")
+        raise ValueError("SLR8 current rectangle count cannot exceed its owner count")
     if current_count != 0 and not (owner_flag and target_valid and fade in (1, 2)):
-        raise ValueError("SLR6 current rectangles require owner and valid target authority")
+        raise ValueError("SLR8 current rectangles require owner and valid target authority")
     if target_valid:
         if (not owner_flag or target_reset or words[19] != words[3] or
                 not math.isfinite(target) or
                 abs(target) > _DEFAULTS.direct_container_limit or fade not in (1, 2)):
-            raise ValueError("SLR6 valid target identity or value is inconsistent")
+            raise ValueError("SLR8 valid target identity or value is inconsistent")
     elif target_reset:
         if (not owner_flag or words[18] != 0 or words[19] != 0 or
                 current_count != 0 or fade != 0):
-            raise ValueError("SLR6 target reset must clear target and current authority")
+            raise ValueError("SLR8 target reset must clear target and current authority")
 
     grace = words[25]
     grace_bounds = {
@@ -438,14 +685,14 @@ def validate_subtitle_locator_state(
     packed_grace_zero = words[29] == 0 and words[30] == 0
     if owner_flag:
         if grace != 0 or not packed_grace_zero:
-            raise ValueError("SLR6 live owner cannot retain death-grace bounds")
+            raise ValueError("SLR8 live owner cannot retain death-grace bounds")
         if not target_valid and not target_reset and (
                 words[18] != 0 or words[19] != 0 or current_count != 0 or fade != 0):
-            raise ValueError("SLR6 owner without target authority must clear target words")
+            raise ValueError("SLR8 owner without target authority must clear target words")
     elif grace == 0:
         if (words[18] != 0 or words[19] != 0 or not packed_grace_zero or
                 current_count != 0 or target_valid or target_reset or fade != 0):
-            raise ValueError("SLR6 absent owner/grace state must be canonical zero")
+            raise ValueError("SLR8 absent owner/grace state must be canonical zero")
     else:
         if (target_valid or target_reset or words[19] != 0 or
                 not math.isfinite(target) or
@@ -454,9 +701,9 @@ def validate_subtitle_locator_state(
                 grace_bounds["left"] >= grace_bounds["right"] or
                 grace_bounds["top"] >= grace_bounds["bottom"] or
                 grace_bounds["right"] > expected_field_width or
-                grace_bounds["top"] < SUBTITLE_OCR_ROI_TOP or
-                grace_bounds["bottom"] > SUBTITLE_OCR_ROI_BOTTOM):
-            raise ValueError("SLR6 death-grace target or packed bounds are inconsistent")
+                grace_bounds["top"] < expected_roi_top or
+                grace_bounds["bottom"] > expected_roi_bottom):
+            raise ValueError("SLR8 death-grace target or packed bounds are inconsistent")
 
     return {
         "schema": words[0],
@@ -485,6 +732,10 @@ def validate_subtitle_locator_state(
         "field_height": words[28],
         "packed_grace_x": words[29],
         "packed_grace_y": words[30],
+        "packed_kinds": packed_kinds,
+        "owner_ribbon_mask": owner_kinds,
+        "pending_ribbon_mask": pending_kinds,
+        "current_ribbon_mask": current_kinds,
         "grace_bounds": grace_bounds if grace != 0 else None,
         "owner_rectangles": owner,
         "pending_rectangles": pending,
@@ -1247,6 +1498,7 @@ def _subtitle_shader_contract(
 
 def _subtitle_ocr_producer_contract() -> Dict[str, Any]:
     return {
+        "contract_schema": _SUBTITLE_OCR_CONTRACT_SCHEMA,
         "record_schema": SUBTITLE_OCR_RECORD_SCHEMA,
         "record_tag": SUBTITLE_OCR_RECORD_TAG,
         "record_word_count": SUBTITLE_OCR_RECORD_WORD_COUNT,
@@ -1254,8 +1506,15 @@ def _subtitle_ocr_producer_contract() -> Dict[str, Any]:
         "final_box_capacity": SUBTITLE_OCR_FINAL_BOX_CAPACITY,
         "model": {
             "name": _SUBTITLE_OCR_MODEL_NAME,
-            "source_url": _SUBTITLE_OCR_MODEL_URL,
-            "onnx_sha256": _SUBTITLE_OCR_MODEL_ONNX_SHA256,
+            "asset_path": _SUBTITLE_OCR_ASSET_PATH,
+            "artifact_onnx_sha256": _SUBTITLE_OCR_ARTIFACT_ONNX_SHA256,
+            "source_url": _SUBTITLE_OCR_SOURCE_URL,
+            "source_onnx_sha256": _SUBTITLE_OCR_SOURCE_ONNX_SHA256,
+            "conversion_tool": _SUBTITLE_OCR_CONVERSION_TOOL,
+            "conversion_version": _SUBTITLE_OCR_CONVERSION_VERSION,
+            "conversion_recipe": _SUBTITLE_OCR_CONVERSION_RECIPE,
+            "conversion_calibration_profile": (
+                _SUBTITLE_OCR_CONVERSION_CALIBRATION_PROFILE),
             "engine_recipe": _SUBTITLE_OCR_ENGINE_RECIPE,
             "preprocess_profile": coordinate_contract.SUBTITLE_OCR.preprocess_profile,
             "source_crop": coordinate_contract.SUBTITLE_OCR.source_crop,
@@ -1316,7 +1575,7 @@ def _validate_subtitle_conditioning_manifest(
             "artifact_files": {},
             "subtitle_evidence_complete": False,
         }
-    if mode == _SUBTITLE_MODE_SLR6:
+    if mode == _SUBTITLE_MODE_SLR8:
         expected_files = {
             "ocr_record": "subtitle_ocr_record.u32",
             "locator_state": "subtitle_locator_state.u32",
@@ -1324,18 +1583,18 @@ def _validate_subtitle_conditioning_manifest(
             "conditioned_field": "shadow_final_parallax.f32",
         }
         if subtitle.get("request") is not True:
-            raise ValueError("active SLR6 subtitle conditioning must bind an enabled request")
+            raise ValueError("active SLR8 subtitle conditioning must bind an enabled request")
         if subtitle.get("producer") != _subtitle_ocr_producer_contract():
-            raise ValueError("active SLR6 subtitle conditioning has unknown OCR6 provenance")
+            raise ValueError("active SLR8 subtitle conditioning has unknown OCR8 provenance")
         if subtitle.get("resolver") != _subtitle_locator_resolver_contract():
-            raise ValueError("active SLR6 subtitle conditioning has unknown resolver provenance")
+            raise ValueError("active SLR8 subtitle conditioning has unknown resolver provenance")
         if subtitle.get("artifacts") != expected_files:
-            raise ValueError("active SLR6 subtitle conditioning has unknown artifact roles")
+            raise ValueError("active SLR8 subtitle conditioning has unknown artifact roles")
         required = {
-            "subtitle_ocr_record.u32": "same-frame OCR6 subtitle boxes",
-            "subtitle_locator_state.u32": "compact SLR6 subtitle authority state",
+            "subtitle_ocr_record.u32": "same-frame OCR8 subtitle boxes",
+            "subtitle_locator_state.u32": "compact SLR8 subtitle authority state",
             "shadow_base_final_parallax.f32": (
-                "ordinary post-limiter V2 field before SLR6 conditioning"),
+                "ordinary post-limiter V2 field before SLR8 conditioning"),
         }
         for name, stage in required.items():
             descriptor = _required_hashed_artifact(
@@ -1344,7 +1603,7 @@ def _validate_subtitle_conditioning_manifest(
                 raise ValueError(
                     f"dump_manifest.json misattributes active subtitle artifact {name}")
         return {
-            "mode": _SUBTITLE_MODE_SLR6,
+            "mode": _SUBTITLE_MODE_SLR8,
             "live": True,
             "request": True,
             "artifact_files": expected_files,
@@ -1420,7 +1679,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     if selected and not active:
         raise ValueError("dump_manifest.json selects V2 without an active producer")
     if subtitle_live and (not active or not selected):
-        raise ValueError("active SLR6 subtitle conditioning requires selected V2 geometry")
+        raise ValueError("active SLR8 subtitle conditioning requires selected V2 geometry")
     requested = renderer.get("parallax_v2_render_requested")
     mapping_matches = renderer.get("mapping_artifacts_match_selected_renderer")
     if (not isinstance(requested, bool) or
@@ -1485,13 +1744,13 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     expected_final_role = (
         (("least row-wise crop-local q >= shadow_vertical_conditioned with horizontal slope <= "
           "max_horizontal_slope and vertical shear <= max_vertical_shear produces "
-          "shadow_base_final_parallax; SLR6 applies the analytic anisotropic rectangle "
+          "shadow_base_final_parallax; SLR8 applies the analytic anisotropic rectangle "
           "budget/fade from same-frame current authority and publishes shadow_final_parallax, "
           "which plus depth_input_region embedding is live position authority")
          if subtitle_live and input_mode == "video-region" else
          ("least row-wise q >= shadow_vertical_conditioned with horizontal slope <= "
           "max_horizontal_slope and vertical shear <= max_vertical_shear produces "
-          "shadow_base_final_parallax; SLR6 applies the analytic anisotropic rectangle "
+          "shadow_base_final_parallax; SLR8 applies the analytic anisotropic rectangle "
           "budget/fade from same-frame current authority and publishes "
           "shadow_final_parallax as live position authority")
          if subtitle_live else
@@ -1556,7 +1815,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     }
     if subtitle_live:
         expected_artifacts["shadow_base_final_parallax.f32"] = (
-            "ordinary post-limiter V2 field before SLR6 conditioning", True)
+            "ordinary post-limiter V2 field before SLR8 conditioning", True)
     for name, (stage, required) in expected_artifacts.items():
         descriptor = artifacts.get(name)
         # Exact geometry fields carry a mandatory SHA-256 of the written bytes; a manifest
@@ -1600,10 +1859,9 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         geometry_width = expected_dimensions["width"]
         geometry_height = expected_dimensions["height"]
         if subtitle_live and (
-                geometry_width != SUBTITLE_OCR_FIELD_WIDTH or
-                geometry_height != SUBTITLE_OCR_FIELD_HEIGHT):
+                geometry_width, geometry_height) not in _AUTHENTICATED_TENSOR_SHAPES:
             raise ValueError(
-                "active SLR6 subtitle conditioning requires the frozen 770x434 field")
+                "active SLR8 subtitle conditioning requires a calibrated DAV2 field")
         model_dimensions = dimensions.get("model_input")
         raw_dimensions = dimensions.get("raw_depth")
         warp_dimensions = dimensions.get("warp_depth")
@@ -1652,7 +1910,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     if not subtitle_live and (
             "shadow_base_final_parallax.f32" in artifacts or
             "shadow_base_final_parallax" in dimensions):
-        raise ValueError("inactive subtitle conditioning exposes an SLR6 base field")
+        raise ValueError("inactive subtitle conditioning exposes an SLR8 base field")
 
     if input_mode == "video-region":
         warp_map_descriptor = artifacts.get("warp_map.f32")
@@ -1786,7 +2044,13 @@ def _verify_subtitle_conditioning_artifacts(
     if metadata != manifest.get("subtitle_conditioning"):
         raise ValueError("subtitle_conditioning.json disagrees with the manifest")
     mode = metadata.get("mode")
-    if mode == _SUBTITLE_MODE_SLR6:
+    if mode == _SUBTITLE_MODE_SLR8:
+        dynamic_roi = coordinate_contract.subtitle_ocr_dynamic_roi(
+            source_width, source_height, field_width, field_height)
+        if dynamic_roi is None:
+            raise ValueError(
+                "active SLR8 subtitle conditioning has unsupported source/field geometry")
+        roi_top, roi_bottom = dynamic_roi
         ocr_payload = _read_hashed_artifact(
             dump_dir, manifest["artifacts"], "subtitle_ocr_record.u32")
         locator_payload = _read_hashed_artifact(
@@ -1799,35 +2063,73 @@ def _verify_subtitle_conditioning_artifacts(
             source_height=source_height,
             field_width=field_width,
             field_height=field_height,
-            roi_top=SUBTITLE_OCR_ROI_TOP,
-            roi_bottom=SUBTITLE_OCR_ROI_BOTTOM,
+            roi_top=roi_top,
+            roi_bottom=roi_bottom,
         )
         locator = validate_subtitle_locator_state(
             locator_payload,
             matched_frame_id=matched_frame_id,
             analysis_generation=analysis_generation,
+            source_width=source_width,
+            source_height=source_height,
             field_width=field_width,
             field_height=field_height,
         )
         if not ocr["authoritative"] and locator["current_count"] != 0:
-            raise ValueError("an abstaining OCR6 record cannot authorize SLR6 current rectangles")
+            raise ValueError("an abstaining OCR8 record cannot authorize SLR8 current rectangles")
+        selected_indices = _subtitle_selected_ocr_indices(
+            ocr["raw_boxes"], field_width)
+        selected_final_rectangles = [
+            (ocr["final_boxes"][index]["left"],
+             ocr["final_boxes"][index]["top"],
+             ocr["final_boxes"][index]["right"],
+             ocr["final_boxes"][index]["bottom"],
+             ocr["final_boxes"][index]["kind"])
+            for index in selected_indices
+        ]
         final_rectangles = {
-            (rectangle["left"], rectangle["top"], rectangle["right"], rectangle["bottom"])
+            (rectangle["left"], rectangle["top"], rectangle["right"], rectangle["bottom"],
+             rectangle["kind"])
             for rectangle in ocr["final_boxes"]
         }
         if any(
                 (rectangle["left"], rectangle["top"],
-                 rectangle["right"], rectangle["bottom"]) not in final_rectangles
+                 rectangle["right"], rectangle["bottom"],
+                 rectangle["kind"]) not in final_rectangles
                 for rectangle in locator["current_rectangles"]):
             raise ValueError(
-                "SLR6 current rectangles are not exact boxes from the same-frame OCR6 record")
+                "SLR8 current rectangles/kinds are not exact covers from same-frame OCR8")
+        current_tuples = [
+            (rectangle["left"], rectangle["top"],
+             rectangle["right"], rectangle["bottom"], rectangle["kind"])
+            for rectangle in locator["current_rectangles"]
+        ]
+        selected_position = 0
+        selection_order_valid = True
+        for rectangle in current_tuples:
+            while (selected_position < len(selected_final_rectangles) and
+                   selected_final_rectangles[selected_position] != rectangle):
+                selected_position += 1
+            if selected_position < len(selected_final_rectangles):
+                selected_position += 1
+            else:
+                selection_order_valid = False
+                break
+        if not selection_order_valid:
+            raise ValueError(
+                "SLR8 current rectangles are outside the frozen same-frame OCR8 selection")
         return {
-            "mode": _SUBTITLE_MODE_SLR6,
+            "mode": _SUBTITLE_MODE_SLR8,
             "subtitle_evidence_verified": True,
             "ocr_authoritative": ocr["authoritative"],
             "ocr_raw_count": ocr["raw_count"],
             "ocr_final_count": ocr["final_count"],
             "source_width": ocr["source_width"],
+            "source_height": ocr["source_height"],
+            "field_width": ocr["field_width"],
+            "field_height": ocr["field_height"],
+            "roi_top": ocr["roi_top"],
+            "roi_bottom": ocr["roi_bottom"],
             "owner_count": locator["owner_count"],
             "pending_count": locator["pending_count"],
             "current_count": locator["current_count"],
@@ -1842,28 +2144,30 @@ def _verify_subtitle_conditioning_artifacts(
     }
 
 
-def _replay_slr6_conditioner(base_field: Any, subtitle: Dict[str, Any]) -> Any:
-    """Replay the frozen SLR6 analytic rectangle conditioner in float32 order."""
+def _replay_slr8_conditioner(base_field: Any, subtitle: Dict[str, Any]) -> Any:
+    """Replay the frozen SLR8 analytic rectangle conditioner in float32 order."""
 
     import numpy as np
 
     base = np.asarray(base_field, dtype=np.float32)
     if base.ndim != 2:
-        raise ValueError("SLR6 Base field must be a two-dimensional float32 array")
+        raise ValueError("SLR8 Base field must be a two-dimensional float32 array")
     rectangles = subtitle["current_rectangles"]
     if not rectangles:
         return base.copy()
-    source_width = _uint32(subtitle.get("source_width"), "SLR6 analysis source width")
+    source_width = _uint32(subtitle.get("source_width"), "SLR8 analysis source width")
     if source_width == 0:
-        raise ValueError("SLR6 analysis source width must be positive")
+        raise ValueError("SLR8 analysis source width must be positive")
     target = subtitle.get("target")
     fade = subtitle.get("fade")
     if target is None or fade not in (1, 2):
-        raise ValueError("SLR6 current geometry lacks valid target/fade authority")
+        raise ValueError("SLR8 current geometry lacks valid target/fade authority")
 
     height, width = base.shape
-    if width != SUBTITLE_OCR_FIELD_WIDTH or height != SUBTITLE_OCR_FIELD_HEIGHT:
-        raise ValueError("SLR6 conditioner field does not match the frozen 770x434 ABI")
+    if ((width, height) not in _AUTHENTICATED_TENSOR_SHAPES or
+            width != subtitle.get("field_width") or
+            height != subtitle.get("field_height")):
+        raise ValueError("SLR8 conditioner field does not match its calibrated authority")
     x = np.arange(width, dtype=np.int64)[None, :]
     y = np.arange(height, dtype=np.int64)[:, None]
     horizontal_step = np.float32(
@@ -1876,10 +2180,18 @@ def _replay_slr6_conditioner(base_field: Any, subtitle: Dict[str, Any]) -> Any:
         top = rectangle["top"]
         right = rectangle["right"]
         bottom = rectangle["bottom"]
-        dx = np.where(x < left, left - x,
-                      np.where(x >= right, x - (right - 1), 0)).astype(np.float32)
-        dy = np.where(y < top, top - y,
-                      np.where(y >= bottom, y - (bottom - 1), 0)).astype(np.float32)
+        if rectangle.get("ribbon") is True:
+            # A bottom ribbon is a constant plane whose only exterior boundary is its
+            # corrected top edge.  Its authenticated cover is full-width/to-bottom, but
+            # keeping the analytic replay explicitly top-only prevents future geometry
+            # refactors from silently reintroducing side or bottom collars.
+            dx = np.zeros_like(x, dtype=np.float32)
+            dy = np.maximum(top - y, 0).astype(np.float32)
+        else:
+            dx = np.where(x < left, left - x,
+                          np.where(x >= right, x - (right - 1), 0)).astype(np.float32)
+            dy = np.where(y < top, top - y,
+                          np.where(y >= bottom, y - (bottom - 1), 0)).astype(np.float32)
         horizontal_distance = np.multiply(dx, horizontal_step, dtype=np.float32)
         vertical_distance = np.multiply(dy, vertical_step, dtype=np.float32)
         distance = np.add(horizontal_distance, vertical_distance, dtype=np.float32)
@@ -2143,7 +2455,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
       2. every field matches the manifest geometry dimensions and is entirely finite;
       3. the conditioning chain is internally consistent in exact float32:
          ``vertical_majorant``/``vertical_conditioned``/ordinary Base are bitwise equal to the
-         recurrences recomputed from ``ownership_refined``; SLR6's analytic rectangle budget and
+         recurrences recomputed from ``ownership_refined``; SLR8's analytic rectangle budget and
          fade exactly reproduce the selected final field; and ownership refinement never lowers
          the candidate.
 
@@ -2259,7 +2571,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
         field_width=width,
         field_height=height,
     )
-    subtitle_live = subtitle_summary["mode"] == _SUBTITLE_MODE_SLR6
+    subtitle_live = subtitle_summary["mode"] == _SUBTITLE_MODE_SLR8
     geometry_chain_fields = (
         "shadow_candidate_parallax",
         "shadow_ownership_refined_parallax",
@@ -2328,16 +2640,16 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
                 f"(max abs diff {mismatch})")
 
     if subtitle_live:
-        replayed_subtitle = _replay_slr6_conditioner(
+        replayed_subtitle = _replay_slr8_conditioner(
             fields["shadow_base_final_parallax"], subtitle_summary)
         if not np.array_equal(fields["shadow_final_parallax"], replayed_subtitle):
             mismatch = float(np.max(np.abs(
                 fields["shadow_final_parallax"] - replayed_subtitle)))
             if subtitle_summary["current_count"] == 0:
                 raise ValueError(
-                    "SLR6 has no current geometry but the final field is not exact Base")
+                    "SLR8 has no current geometry but the final field is not exact Base")
             raise ValueError(
-                "shadow_final_parallax.f32 is not the exact SLR6 rectangle-conditioning "
+                "shadow_final_parallax.f32 is not the exact SLR8 rectangle-conditioning "
                 f"recurrence (max abs diff {mismatch})")
 
     warp_depth_path = os.path.join(os.fspath(dump_dir), "warp_depth.f32")
@@ -2407,11 +2719,7 @@ __all__ = [
     "SUBTITLE_OCR_BOX_WORD_COUNT",
     "SUBTITLE_OCR_FINAL_BOX_CAPACITY",
     "SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET",
-    "SUBTITLE_OCR_FIELD_HEIGHT",
-    "SUBTITLE_OCR_FIELD_WIDTH",
     "SUBTITLE_OCR_HEADER_WORD_COUNT",
-    "SUBTITLE_OCR_ROI_BOTTOM",
-    "SUBTITLE_OCR_ROI_TOP",
     "SUBTITLE_OCR_RAW_BOX_CAPACITY",
     "SUBTITLE_OCR_RAW_BOX_WORD_OFFSET",
     "SUBTITLE_OCR_RECORD_SCHEMA",

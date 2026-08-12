@@ -69,13 +69,22 @@ EXPECTED_SHADER_SPEC_KEYS = {
     "source_file", "source_entrypoint", "source_target",
 }
 CANONICAL_SUBTITLE_OCR = {
-    "schema": 1,
-    "logical_model": "ppocrv6_tiny_det",
-    "model_url": (
+    "schema": 5,
+    "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
+    "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
+    "artifact_onnx_sha256": (
+        "169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44"),
+    "source_url": (
         "https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det_onnx/resolve/"
         "2ba1506c0380b8f0b03dd142459aac66d4421f6c/inference.onnx?download=true"),
-    "onnx_sha256": "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8",
-    "engine_recipe": "trt-strong-fp32-tf32-fixed960x160-level5-v1",
+    "source_onnx_sha256": (
+        "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8"),
+    "conversion_tool": "nvidia-modelopt",
+    "conversion_version": "0.45.0",
+    "conversion_recipe": "nvidia-modelopt-autocast-fp16-keep-io-fp32-v1",
+    "conversion_calibration_profile": "apollo-live8-bottom960x160-v1",
+    "engine_recipe": (
+        "trt-strong-modelopt045-fp16-iofp32-tf32-fixed960x160-level5-v2"),
     "preprocess_profile": "apollo-ppocrv6-bottom-6x1-bgr-imagenet-v1",
     "source_crop": "bottom-6:1",
     "input_tensor": {
@@ -93,30 +102,51 @@ CANONICAL_SUBTITLE_OCR = {
         "layout": "NCHW",
         "shape": [1, 1, 160, 960],
     },
+    "field_policy": {
+        "locator_max_width_numerator": 9,
+        "locator_max_width_denominator": 10,
+        "ocr_safe_row_top": 24,
+        "ocr_safe_row_bottom": 155,
+        "source_crop_aspect_width": 6,
+        "source_crop_aspect_height": 1,
+        "text_join_gap_cells": 4,
+        "ribbon_join_gap_cells": 12,
+        "ribbon_structural_gap_min_cells": 3,
+        "ribbon_min_structural_gaps": 3,
+        "ribbon_min_width_numerator": 1,
+        "ribbon_min_width_denominator": 2,
+        "ribbon_bottom_tolerance_pixels": 2,
+        "ribbon_bottom_tolerance_projection":
+            "exact-ceil-detector-edge-through-bottom-crop-v1",
+        "ribbon_cover_pad_limit": 8,
+    },
     "ocr_record": {
-        "schema": 1,
-        "tag": 0x3652434F,
+        "schema": 3,
+        "tag": 0x3852434F,
         "word_count": 208,
         "header_word_count": 16,
         "box_word_count": 8,
+        "box_flag_ribbon": 1,
+        "box_known_flags": 1,
         "raw_box_offset": 16,
         "raw_box_capacity": 16,
         "final_box_offset": 144,
         "final_box_capacity": 8,
-        "field_width": 770,
-        "field_height": 434,
-        "roi_top": 325,
-        "roi_bottom": 430,
     },
     "locator_state": {
-        "schema": 6,
-        "tag": 0x36524C53,
+        "schema": 8,
+        "tag": 0x38524C53,
         "word_count": 80,
         "header_word_count": 32,
         "rectangle_capacity": 4,
         "owner_offset": 32,
         "pending_offset": 48,
         "current_offset": 64,
+        "kind_word": 31,
+        "owner_kind_shift": 0,
+        "pending_kind_shift": 4,
+        "current_kind_shift": 8,
+        "kind_mask": 15,
     },
 }
 EXPECTED_CONSTANT_FIELD_NAMES = (
@@ -355,7 +385,7 @@ def validate_contract(
 
     if contract.get("subtitle_ocr") != CANONICAL_SUBTITLE_OCR:
         raise ValueError(
-            "subtitle_ocr must exactly match the authenticated PP-OCRv6/OCR6/SLR6 contract")
+            "subtitle_ocr must exactly match the authenticated PP-OCRv6/OCR8/SLR8 contract")
 
     shader_implementation = contract.get("shader_implementation")
     if (not isinstance(shader_implementation, dict) or
@@ -657,6 +687,7 @@ def render_cpp(contract: dict[str, Any]) -> str:
     subtitle_ocr = contract["subtitle_ocr"]
     ocr_input = subtitle_ocr["input_tensor"]
     ocr_output = subtitle_ocr["output_tensor"]
+    field_policy = subtitle_ocr["field_policy"]
     ocr_record = subtitle_ocr["ocr_record"]
     locator_state = subtitle_ocr["locator_state"]
     calibrated_shapes = [
@@ -696,10 +727,22 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"{subtitle_ocr['schema']}u;",
         f"  inline constexpr std::string_view subtitle_ocr_model_name = "
         f"{json.dumps(subtitle_ocr['logical_model'])};",
-        f"  inline constexpr std::string_view subtitle_ocr_model_url = "
-        f"{json.dumps(subtitle_ocr['model_url'])};",
-        f"  inline constexpr std::string_view subtitle_ocr_onnx_sha256 = "
-        f"{json.dumps(subtitle_ocr['onnx_sha256'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_asset_path = "
+        f"{json.dumps(subtitle_ocr['asset_path'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_artifact_onnx_sha256 = "
+        f"{json.dumps(subtitle_ocr['artifact_onnx_sha256'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_source_url = "
+        f"{json.dumps(subtitle_ocr['source_url'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_source_onnx_sha256 = "
+        f"{json.dumps(subtitle_ocr['source_onnx_sha256'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_conversion_tool = "
+        f"{json.dumps(subtitle_ocr['conversion_tool'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_conversion_version = "
+        f"{json.dumps(subtitle_ocr['conversion_version'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_conversion_recipe = "
+        f"{json.dumps(subtitle_ocr['conversion_recipe'])};",
+        f"  inline constexpr std::string_view subtitle_ocr_conversion_calibration_profile = "
+        f"{json.dumps(subtitle_ocr['conversion_calibration_profile'])};",
         f"  inline constexpr std::string_view subtitle_ocr_engine_recipe = "
         f"{json.dumps(subtitle_ocr['engine_recipe'])};",
         f"  inline constexpr std::string_view subtitle_ocr_preprocess_profile = "
@@ -740,14 +783,42 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"  inline constexpr std::uint32_t subtitle_ocr_record_word_count = {ocr_record['word_count']}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_record_header_word_count = {ocr_record['header_word_count']}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_box_word_count = {ocr_record['box_word_count']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_box_flag_ribbon = {ocr_record['box_flag_ribbon']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_box_known_flags = {ocr_record['box_known_flags']}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_raw_box_offset = {ocr_record['raw_box_offset']}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_raw_box_capacity = {ocr_record['raw_box_capacity']}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_final_box_offset = {ocr_record['final_box_offset']}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_final_box_capacity = {ocr_record['final_box_capacity']}u;",
-        f"  inline constexpr std::uint32_t subtitle_ocr_field_width = {ocr_record['field_width']}u;",
-        f"  inline constexpr std::uint32_t subtitle_ocr_field_height = {ocr_record['field_height']}u;",
-        f"  inline constexpr std::uint32_t subtitle_ocr_roi_top = {ocr_record['roi_top']}u;",
-        f"  inline constexpr std::uint32_t subtitle_ocr_roi_bottom = {ocr_record['roi_bottom']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_safe_row_top = "
+        f"{field_policy['ocr_safe_row_top']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_safe_row_bottom = "
+        f"{field_policy['ocr_safe_row_bottom']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_max_width_numerator = "
+        f"{field_policy['locator_max_width_numerator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_max_width_denominator = "
+        f"{field_policy['locator_max_width_denominator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_crop_aspect_width = "
+        f"{field_policy['source_crop_aspect_width']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_crop_aspect_height = "
+        f"{field_policy['source_crop_aspect_height']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_text_join_gap_cells = "
+        f"{field_policy['text_join_gap_cells']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_ribbon_join_gap_cells = "
+        f"{field_policy['ribbon_join_gap_cells']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_ribbon_structural_gap_min_cells = "
+        f"{field_policy['ribbon_structural_gap_min_cells']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_ribbon_min_structural_gaps = "
+        f"{field_policy['ribbon_min_structural_gaps']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_ribbon_min_width_numerator = "
+        f"{field_policy['ribbon_min_width_numerator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_ribbon_min_width_denominator = "
+        f"{field_policy['ribbon_min_width_denominator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_ocr_ribbon_bottom_tolerance_pixels = "
+        f"{field_policy['ribbon_bottom_tolerance_pixels']}u;",
+        f"  inline constexpr std::string_view subtitle_ocr_ribbon_bottom_tolerance_projection = "
+        f"{json.dumps(field_policy['ribbon_bottom_tolerance_projection'])};",
+        f"  inline constexpr std::uint32_t subtitle_ocr_ribbon_cover_pad_limit = "
+        f"{field_policy['ribbon_cover_pad_limit']}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_state_schema = {locator_state['schema']}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_state_tag = 0x{locator_state['tag']:08X}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_state_word_count = {locator_state['word_count']}u;",
@@ -756,8 +827,20 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"  inline constexpr std::uint32_t subtitle_locator_owner_offset = {locator_state['owner_offset']}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_pending_offset = {locator_state['pending_offset']}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_current_offset = {locator_state['current_offset']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_kind_word = {locator_state['kind_word']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_owner_kind_shift = {locator_state['owner_kind_shift']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_pending_kind_shift = {locator_state['pending_kind_shift']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_current_kind_shift = {locator_state['current_kind_shift']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_kind_mask = {locator_state['kind_mask']}u;",
         "  static_assert(subtitle_ocr_input_n == 1u && subtitle_ocr_input_c == 3u);",
         "  static_assert(subtitle_ocr_output_n == 1u && subtitle_ocr_output_c == 1u);",
+        "  static_assert(subtitle_ocr_text_join_gap_cells > 0u);",
+        "  static_assert(subtitle_ocr_text_join_gap_cells <",
+        "                subtitle_ocr_ribbon_join_gap_cells);",
+        "  static_assert(subtitle_ocr_ribbon_join_gap_cells >=",
+        "                subtitle_ocr_ribbon_structural_gap_min_cells);",
+        "  static_assert(subtitle_ocr_ribbon_bottom_tolerance_pixels <=",
+        "                subtitle_ocr_safe_row_bottom);",
         "  static_assert(subtitle_ocr_final_box_offset == subtitle_ocr_raw_box_offset +",
         "                subtitle_ocr_raw_box_capacity * subtitle_ocr_box_word_count);",
         "  static_assert(subtitle_ocr_record_word_count == subtitle_ocr_final_box_offset +",
@@ -895,6 +978,97 @@ def render_cpp(contract: dict[str, Any]) -> str:
     )
     lines.extend([
         "  }};",
+        "",
+        "  constexpr bool subtitle_ocr_field_is_calibrated(",
+        "    const std::uint32_t width,",
+        "    const std::uint32_t height",
+        "  ) {",
+        "    for (const auto &shape : model_calibrated_shapes) {",
+        "      if (shape.width == width && shape.height == height) {",
+        "        return true;",
+        "      }",
+        "    }",
+        "    return false;",
+        "  }",
+        "",
+        "  struct subtitle_ocr_roi_t {",
+        "    std::uint32_t top;",
+        "    std::uint32_t bottom;",
+        "",
+        "    constexpr explicit operator bool() const { return bottom > top; }",
+        "  };",
+        "",
+        "  struct subtitle_ocr_projected_row_t {",
+        "    std::uint32_t value;",
+        "    bool valid;",
+        "",
+        "    constexpr explicit operator bool() const { return valid; }",
+        "  };",
+        "",
+        "  constexpr std::uint64_t subtitle_ocr_ceil_div(",
+        "    const std::uint64_t numerator,",
+        "    const std::uint64_t denominator",
+        "  ) {",
+        "    return denominator == 0u ? 0u :",
+        "      numerator / denominator + (numerator % denominator != 0u);",
+        "  }",
+        "",
+        "  constexpr subtitle_ocr_projected_row_t subtitle_ocr_project_row_ceil(",
+        "    const std::uint32_t source_width,",
+        "    const std::uint32_t source_height,",
+        "    const std::uint32_t field_width,",
+        "    const std::uint32_t field_height,",
+        "    const std::uint32_t detector_y",
+        "  ) {",
+        "    if (source_width == 0u || source_height == 0u ||",
+        "        detector_y > subtitle_ocr_output_height ||",
+        "        !subtitle_ocr_field_is_calibrated(field_width, field_height)) {",
+        "      return {0u, false};",
+        "    }",
+        "    const auto requested_crop_height = subtitle_ocr_ceil_div(",
+        "      static_cast<std::uint64_t>(source_width) * subtitle_ocr_crop_aspect_height,",
+        "      subtitle_ocr_crop_aspect_width);",
+        "    const auto crop_height = requested_crop_height < source_height ?",
+        "      requested_crop_height : static_cast<std::uint64_t>(source_height);",
+        "    const auto crop_top = static_cast<std::uint64_t>(source_height) - crop_height;",
+        "    const auto denominator = static_cast<std::uint64_t>(source_height) *",
+        "      subtitle_ocr_output_height;",
+        "    const auto source_y_numerator = crop_top * subtitle_ocr_output_height +",
+        "      static_cast<std::uint64_t>(detector_y) * crop_height;",
+        "    const auto projected = subtitle_ocr_ceil_div(",
+        "      source_y_numerator * field_height, denominator);",
+        "    return {",
+        "      static_cast<std::uint32_t>(projected < field_height ? projected : field_height),",
+        "      true",
+        "    };",
+        "  }",
+        "",
+        "  constexpr subtitle_ocr_projected_row_t subtitle_ocr_ribbon_min_bottom(",
+        "    const std::uint32_t source_width,",
+        "    const std::uint32_t source_height,",
+        "    const std::uint32_t field_width,",
+        "    const std::uint32_t field_height",
+        "  ) {",
+        "    return subtitle_ocr_project_row_ceil(",
+        "      source_width, source_height, field_width, field_height,",
+        "      subtitle_ocr_safe_row_bottom - subtitle_ocr_ribbon_bottom_tolerance_pixels",
+        "    );",
+        "  }",
+        "",
+        "  constexpr subtitle_ocr_roi_t subtitle_ocr_dynamic_roi(",
+        "    const std::uint32_t source_width,",
+        "    const std::uint32_t source_height,",
+        "    const std::uint32_t field_width,",
+        "    const std::uint32_t field_height",
+        "  ) {",
+        "    const auto top = subtitle_ocr_project_row_ceil(",
+        "      source_width, source_height, field_width, field_height, subtitle_ocr_safe_row_top);",
+        "    const auto bottom = subtitle_ocr_project_row_ceil(",
+        "      source_width, source_height, field_width, field_height,",
+        "      subtitle_ocr_safe_row_bottom);",
+        "    return top && bottom && top.value < bottom.value ?",
+        "      subtitle_ocr_roi_t {top.value, bottom.value} : subtitle_ocr_roi_t {0u, 0u};",
+        "  }",
         "",
         "  constexpr bool model_calibration_supports_shape(",
         "    const model_calibration_t &calibration,",
@@ -1097,8 +1271,27 @@ def render_hlsl(contract: dict[str, Any]) -> str:
     subtitle_ocr = contract["subtitle_ocr"]
     ocr_input = subtitle_ocr["input_tensor"]
     ocr_output = subtitle_ocr["output_tensor"]
+    field_policy = subtitle_ocr["field_policy"]
     ocr_record = subtitle_ocr["ocr_record"]
     locator_state = subtitle_ocr["locator_state"]
+    calibrated_shapes = [
+        (shape["width"], shape["height"])
+        for calibration in contract["model_calibrations"]
+        for shape in calibration["calibrated_input_shapes"]
+    ]
+    shape_macros = [
+        macro
+        for index, (width, height) in enumerate(calibrated_shapes)
+        for macro in (
+            f"#define V2_MODEL_CALIBRATED_SHAPE_WIDTH_{index} {width}u",
+            f"#define V2_MODEL_CALIBRATED_SHAPE_HEIGHT_{index} {height}u",
+        )
+    ]
+    shape_predicate = " ||\n           ".join(
+        f"(field_width == V2_MODEL_CALIBRATED_SHAPE_WIDTH_{index} && "
+        f"field_height == V2_MODEL_CALIBRATED_SHAPE_HEIGHT_{index})"
+        for index in range(len(calibrated_shapes))
+    )
     tag = contract_tag(contract)
     components = ("x", "y", "z", "w")
     lines = [
@@ -1131,14 +1324,40 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"#define V2_OCR_RECORD_WORD_COUNT {ocr_record['word_count']}u",
         f"#define V2_OCR_RECORD_HEADER_WORD_COUNT {ocr_record['header_word_count']}u",
         f"#define V2_OCR_BOX_WORD_COUNT {ocr_record['box_word_count']}u",
+        f"#define V2_OCR_BOX_FLAG_RIBBON {ocr_record['box_flag_ribbon']}u",
+        f"#define V2_OCR_BOX_KNOWN_FLAGS {ocr_record['box_known_flags']}u",
         f"#define V2_OCR_RAW_BOX_OFFSET {ocr_record['raw_box_offset']}u",
         f"#define V2_OCR_RAW_BOX_CAPACITY {ocr_record['raw_box_capacity']}u",
         f"#define V2_OCR_FINAL_BOX_OFFSET {ocr_record['final_box_offset']}u",
         f"#define V2_OCR_FINAL_BOX_CAPACITY {ocr_record['final_box_capacity']}u",
-        f"#define V2_OCR_FIELD_WIDTH {ocr_record['field_width']}u",
-        f"#define V2_OCR_FIELD_HEIGHT {ocr_record['field_height']}u",
-        f"#define V2_OCR_ROI_TOP {ocr_record['roi_top']}u",
-        f"#define V2_OCR_ROI_BOTTOM {ocr_record['roi_bottom']}u",
+        f"#define V2_MODEL_CALIBRATED_SHAPE_COUNT {len(calibrated_shapes)}u",
+        *shape_macros,
+        f"#define V2_OCR_SAFE_ROW_TOP {field_policy['ocr_safe_row_top']}u",
+        f"#define V2_OCR_SAFE_ROW_BOTTOM {field_policy['ocr_safe_row_bottom']}u",
+        f"#define V2_OCR_CROP_ASPECT_WIDTH "
+        f"{field_policy['source_crop_aspect_width']}u",
+        f"#define V2_OCR_CROP_ASPECT_HEIGHT "
+        f"{field_policy['source_crop_aspect_height']}u",
+        f"#define V2_OCR_TEXT_JOIN_GAP_CELLS "
+        f"{field_policy['text_join_gap_cells']}u",
+        f"#define V2_OCR_RIBBON_JOIN_GAP_CELLS "
+        f"{field_policy['ribbon_join_gap_cells']}u",
+        f"#define V2_OCR_RIBBON_STRUCTURAL_GAP_MIN_CELLS "
+        f"{field_policy['ribbon_structural_gap_min_cells']}u",
+        f"#define V2_OCR_RIBBON_MIN_STRUCTURAL_GAPS "
+        f"{field_policy['ribbon_min_structural_gaps']}u",
+        f"#define V2_OCR_RIBBON_MIN_WIDTH_NUMERATOR "
+        f"{field_policy['ribbon_min_width_numerator']}u",
+        f"#define V2_OCR_RIBBON_MIN_WIDTH_DENOMINATOR "
+        f"{field_policy['ribbon_min_width_denominator']}u",
+        f"#define V2_OCR_RIBBON_BOTTOM_TOLERANCE_PIXELS "
+        f"{field_policy['ribbon_bottom_tolerance_pixels']}u",
+        f"#define V2_OCR_RIBBON_COVER_PAD_LIMIT "
+        f"{field_policy['ribbon_cover_pad_limit']}u",
+        f"#define V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR "
+        f"{field_policy['locator_max_width_numerator']}u",
+        f"#define V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR "
+        f"{field_policy['locator_max_width_denominator']}u",
         f"#define V2_SUBTITLE_LOCATOR_STATE_SCHEMA {locator_state['schema']}u",
         f"#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x{locator_state['tag']:08X}u",
         f"#define V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT {locator_state['word_count']}u",
@@ -1147,6 +1366,11 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"#define V2_SUBTITLE_LOCATOR_OWNER_OFFSET {locator_state['owner_offset']}u",
         f"#define V2_SUBTITLE_LOCATOR_PENDING_OFFSET {locator_state['pending_offset']}u",
         f"#define V2_SUBTITLE_LOCATOR_CURRENT_OFFSET {locator_state['current_offset']}u",
+        f"#define V2_SUBTITLE_LOCATOR_KIND_WORD {locator_state['kind_word']}u",
+        f"#define V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT {locator_state['owner_kind_shift']}u",
+        f"#define V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT {locator_state['pending_kind_shift']}u",
+        f"#define V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT {locator_state['current_kind_shift']}u",
+        f"#define V2_SUBTITLE_LOCATOR_KIND_MASK {locator_state['kind_mask']}u",
         f"#define V2_DIRECT_CONTAINER_LIMIT "
         f"{_float_literal(defaults['direct_container_limit'])}",
         f"#define V2_MAX_VERTICAL_SHEAR "
@@ -1160,6 +1384,50 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"{_float_literal(defaults['convergence_curve_default'])}",
         "static const float v2_max_vertical_shear = V2_MAX_VERTICAL_SHEAR;",
         "static const float v2_vertical_majorant_share = V2_VERTICAL_MAJORANT_SHARE;",
+        "",
+        "bool V2SubtitleOcrFieldIsCalibrated(uint field_width, uint field_height) {",
+        f"    return {shape_predicate};",
+        "}",
+        "",
+        "// Exact ceil projection of a detector row edge through the authenticated bottom crop.",
+        "// The overflow guards mirror the SM5 consumers, which have no uint64 arithmetic.",
+        "bool V2SubtitleOcrProjectRowCeil(",
+        "    uint source_width, uint source_height, uint field_width, uint field_height,",
+        "    uint detector_y, out uint projected_y) {",
+        "    projected_y = 0u;",
+        "    if (source_width == 0u || source_height == 0u || field_height == 0u ||",
+        "        detector_y > V2_OCR_OUTPUT_HEIGHT ||",
+        "        !V2SubtitleOcrFieldIsCalibrated(field_width, field_height)) return false;",
+        "    uint crop_quotient = source_width / V2_OCR_CROP_ASPECT_WIDTH;",
+        "    uint crop_remainder = source_width % V2_OCR_CROP_ASPECT_WIDTH;",
+        "    if (crop_quotient > 0xffffffffu / V2_OCR_CROP_ASPECT_HEIGHT ||",
+        "        crop_remainder > 0xffffffffu / V2_OCR_CROP_ASPECT_HEIGHT) return false;",
+        "    uint crop_height = min(",
+        "        source_height,",
+        "        crop_quotient * V2_OCR_CROP_ASPECT_HEIGHT +",
+        "        (crop_remainder * V2_OCR_CROP_ASPECT_HEIGHT +",
+        "         V2_OCR_CROP_ASPECT_WIDTH - 1u) / V2_OCR_CROP_ASPECT_WIDTH);",
+        "    uint crop_top = source_height - crop_height;",
+        "    if (source_height > 0xffffffffu / V2_OCR_OUTPUT_HEIGHT) return false;",
+        "    uint denominator = V2_OCR_OUTPUT_HEIGHT * source_height;",
+        "    if (denominator == 0u || denominator > 0xffffffffu / field_height) return false;",
+        "    uint source_y_numerator =",
+        "        crop_top * V2_OCR_OUTPUT_HEIGHT + detector_y * crop_height;",
+        "    uint scaled = source_y_numerator * field_height;",
+        "    projected_y = min(",
+        "        scaled / denominator + (scaled % denominator != 0u ? 1u : 0u),",
+        "        field_height);",
+        "    return true;",
+        "}",
+        "",
+        "bool V2SubtitleOcrRibbonMinBottom(",
+        "    uint source_width, uint source_height, uint field_width, uint field_height,",
+        "    out uint minimum_bottom) {",
+        "    return V2SubtitleOcrProjectRowCeil(",
+        "        source_width, source_height, field_width, field_height,",
+        "        V2_OCR_SAFE_ROW_BOTTOM - V2_OCR_RIBBON_BOTTOM_TOLERANCE_PIXELS,",
+        "        minimum_bottom);",
+        "}",
         "",
         f"cbuffer {constant_buffer['name']} : register({constant_buffer['register']}) {{",
     ]

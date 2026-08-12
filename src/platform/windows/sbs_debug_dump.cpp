@@ -98,6 +98,18 @@ namespace platf::sbs_debug {
       models::depth_coordinate_v2::subtitle_ocr_record_word_count;
     constexpr auto subtitle_ocr_box_word_count =
       models::depth_coordinate_v2::subtitle_ocr_box_word_count;
+    constexpr auto subtitle_ocr_box_flag_ribbon =
+      models::depth_coordinate_v2::subtitle_ocr_box_flag_ribbon;
+    constexpr auto subtitle_ocr_box_known_flags =
+      models::depth_coordinate_v2::subtitle_ocr_box_known_flags;
+    constexpr auto subtitle_ocr_output_width =
+      models::depth_coordinate_v2::subtitle_ocr_output_width;
+    constexpr auto subtitle_ocr_ribbon_min_structural_gaps =
+      models::depth_coordinate_v2::subtitle_ocr_ribbon_min_structural_gaps;
+    constexpr auto subtitle_ocr_ribbon_min_width_numerator =
+      models::depth_coordinate_v2::subtitle_ocr_ribbon_min_width_numerator;
+    constexpr auto subtitle_ocr_ribbon_min_width_denominator =
+      models::depth_coordinate_v2::subtitle_ocr_ribbon_min_width_denominator;
     constexpr auto subtitle_ocr_raw_box_offset =
       models::depth_coordinate_v2::subtitle_ocr_raw_box_offset;
     constexpr auto subtitle_ocr_raw_box_capacity =
@@ -106,14 +118,6 @@ namespace platf::sbs_debug {
       models::depth_coordinate_v2::subtitle_ocr_final_box_offset;
     constexpr auto subtitle_ocr_final_box_capacity =
       models::depth_coordinate_v2::subtitle_ocr_final_box_capacity;
-    constexpr auto subtitle_ocr_field_width =
-      models::depth_coordinate_v2::subtitle_ocr_field_width;
-    constexpr auto subtitle_ocr_field_height =
-      models::depth_coordinate_v2::subtitle_ocr_field_height;
-    constexpr auto subtitle_ocr_roi_top =
-      models::depth_coordinate_v2::subtitle_ocr_roi_top;
-    constexpr auto subtitle_ocr_roi_bottom =
-      models::depth_coordinate_v2::subtitle_ocr_roi_bottom;
     constexpr auto subtitle_locator_state_schema =
       models::depth_coordinate_v2::subtitle_locator_state_schema;
     constexpr auto subtitle_locator_state_tag =
@@ -128,6 +132,16 @@ namespace platf::sbs_debug {
       models::depth_coordinate_v2::subtitle_locator_pending_offset;
     constexpr auto subtitle_locator_current_offset =
       models::depth_coordinate_v2::subtitle_locator_current_offset;
+    constexpr auto subtitle_locator_kind_word =
+      models::depth_coordinate_v2::subtitle_locator_kind_word;
+    constexpr auto subtitle_locator_owner_kind_shift =
+      models::depth_coordinate_v2::subtitle_locator_owner_kind_shift;
+    constexpr auto subtitle_locator_pending_kind_shift =
+      models::depth_coordinate_v2::subtitle_locator_pending_kind_shift;
+    constexpr auto subtitle_locator_current_kind_shift =
+      models::depth_coordinate_v2::subtitle_locator_current_kind_shift;
+    constexpr auto subtitle_locator_kind_mask =
+      models::depth_coordinate_v2::subtitle_locator_kind_mask;
     constexpr auto subtitle_target_limit =
       models::depth_coordinate_v2::direct_container_limit;
 
@@ -164,6 +178,7 @@ namespace platf::sbs_debug {
     ) {
       using namespace models::depth_coordinate_v2;
       return {
+        {"contract_schema", subtitle_ocr_contract_schema},
         {"record_schema", subtitle_ocr_record_schema},
         {"record_tag", subtitle_ocr_record_tag},
         {"record_word_count", subtitle_ocr_record_word_count},
@@ -171,8 +186,16 @@ namespace platf::sbs_debug {
         {"final_box_capacity", subtitle_ocr_final_box_capacity},
         {"model", {
           {"name", std::string {subtitle_ocr_model_name}},
-          {"source_url", std::string {subtitle_ocr_model_url}},
-          {"onnx_sha256", std::string {subtitle_ocr_onnx_sha256}},
+          {"asset_path", std::string {subtitle_ocr_asset_path}},
+          {"artifact_onnx_sha256", std::string {subtitle_ocr_artifact_onnx_sha256}},
+          {"source_url", std::string {subtitle_ocr_source_url}},
+          {"source_onnx_sha256", std::string {subtitle_ocr_source_onnx_sha256}},
+          {"conversion_tool", std::string {subtitle_ocr_conversion_tool}},
+          {"conversion_version", std::string {subtitle_ocr_conversion_version}},
+          {"conversion_recipe", std::string {subtitle_ocr_conversion_recipe}},
+          {"conversion_calibration_profile", std::string {
+            subtitle_ocr_conversion_calibration_profile
+          }},
           {"engine_recipe", std::string {subtitle_ocr_engine_recipe}},
           {"preprocess_profile", std::string {subtitle_ocr_preprocess_profile}},
           {"source_crop", std::string {subtitle_ocr_source_crop}},
@@ -278,7 +301,13 @@ namespace platf::sbs_debug {
       const std::vector<std::uint8_t> &bytes,
       const std::size_t offset,
       const std::uint32_t count,
-      const std::uint32_t capacity
+      const std::uint32_t capacity,
+      const std::uint32_t field_width,
+      const std::uint32_t field_height,
+      const std::uint32_t roi_top,
+      const std::uint32_t roi_bottom,
+      const std::uint32_t ribbon_min_bottom,
+      const bool final_boxes
     ) {
       for (std::uint32_t slot = 0u; slot < capacity; ++slot) {
         const std::size_t first =
@@ -296,13 +325,62 @@ namespace platf::sbs_debug {
         const auto right = subtitle_word(bytes, first + 2u);
         const auto bottom = subtitle_word(bytes, first + 3u);
         const float score = std::bit_cast<float>(subtitle_word(bytes, first + 4u));
-        if (left >= right || top >= bottom || right > subtitle_ocr_field_width ||
-            top < subtitle_ocr_roi_top || bottom > subtitle_ocr_roi_bottom ||
+        const auto box_flags = subtitle_word(bytes, first + 5u);
+        const auto island_count = subtitle_word(bytes, first + 6u);
+        const auto structural_gap_count = subtitle_word(bytes, first + 7u);
+        const bool ribbon = (box_flags & subtitle_ocr_box_flag_ribbon) != 0u;
+        if (left >= right || top >= bottom || right > field_width ||
+            bottom > field_height || top < roi_top ||
             !std::isfinite(score) || score < 0.4f || score > 1.0f ||
-            subtitle_word(bytes, first + 5u) != 0u ||
-            subtitle_word(bytes, first + 6u) != 0u ||
-            subtitle_word(bytes, first + 7u) != 0u) {
+            (box_flags & ~subtitle_ocr_box_known_flags) != 0u ||
+            island_count == 0u || island_count > subtitle_ocr_output_width ||
+            structural_gap_count >= island_count) {
           return false;
+        }
+        if (ribbon) {
+          if (island_count < subtitle_ocr_ribbon_min_structural_gaps + 1u ||
+              structural_gap_count < subtitle_ocr_ribbon_min_structural_gaps) {
+            return false;
+          }
+          if (final_boxes) {
+            if (left != 0u || right != field_width || bottom != field_height) {
+              return false;
+            }
+          } else if (
+            bottom < ribbon_min_bottom || bottom > roi_bottom ||
+            static_cast<std::uint64_t>(right - left) *
+                subtitle_ocr_ribbon_min_width_denominator <
+              static_cast<std::uint64_t>(field_width) *
+                subtitle_ocr_ribbon_min_width_numerator
+          ) {
+            return false;
+          }
+        } else if (bottom > roi_bottom) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    bool subtitle_ocr_pairs_are_canonical(
+      const std::vector<std::uint8_t> &ocr,
+      const std::uint32_t count
+    ) {
+      for (std::uint32_t slot = 0u; slot < count; ++slot) {
+        const std::size_t raw = subtitle_ocr_raw_box_offset +
+          static_cast<std::size_t>(slot) * subtitle_ocr_box_word_count;
+        const std::size_t final = subtitle_ocr_final_box_offset +
+          static_cast<std::size_t>(slot) * subtitle_ocr_box_word_count;
+        if (subtitle_word(ocr, final) > subtitle_word(ocr, raw) ||
+            subtitle_word(ocr, final + 1u) > subtitle_word(ocr, raw + 1u) ||
+            subtitle_word(ocr, final + 2u) < subtitle_word(ocr, raw + 2u) ||
+            subtitle_word(ocr, final + 3u) < subtitle_word(ocr, raw + 3u)) {
+          return false;
+        }
+        for (std::size_t word = 4u; word < subtitle_ocr_box_word_count; ++word) {
+          if (subtitle_word(ocr, raw + word) != subtitle_word(ocr, final + word)) {
+            return false;
+          }
         }
       }
       return true;
@@ -317,6 +395,13 @@ namespace platf::sbs_debug {
       const std::vector<std::uint8_t> &bytes,
       const std::size_t offset,
       const std::uint32_t count,
+      const std::uint32_t field_width,
+      const std::uint32_t field_height,
+      const std::uint32_t roi_top,
+      const std::uint32_t roi_bottom,
+      const std::uint32_t ribbon_min_bottom,
+      const std::uint32_t ribbon_mask,
+      const bool current_cover,
       subtitle_rectangle_summary_t &summary
     ) {
       summary = {};
@@ -326,13 +411,16 @@ namespace platf::sbs_debug {
         const auto top = subtitle_word(bytes, first + 1u);
         const auto right = subtitle_word(bytes, first + 2u);
         const auto bottom = subtitle_word(bytes, first + 3u);
+        const bool ribbon = (ribbon_mask & (1u << slot)) != 0u;
         if (slot >= count) {
           if (left != 0u || top != 0u || right != 0u || bottom != 0u) {
             return false;
           }
         } else if (left >= right || top >= bottom ||
-                   right > subtitle_ocr_field_width ||
-                   top < subtitle_ocr_roi_top || bottom > subtitle_ocr_roi_bottom) {
+                   right > field_width || bottom > field_height || top < roi_top ||
+                   (current_cover && ribbon ?
+                      (left != 0u || right != field_width || bottom != field_height) :
+                      (bottom > roi_bottom || (ribbon && bottom < ribbon_min_bottom)))) {
           return false;
         } else {
           if (slot == 0u) {
@@ -366,20 +454,26 @@ namespace platf::sbs_debug {
       const std::vector<std::uint8_t> &ocr,
       const std::uint32_t final_count,
       const std::vector<std::uint8_t> &locator,
-      const std::uint32_t current_count
+      const std::uint32_t current_count,
+      const std::uint32_t current_ribbon_mask
     ) {
       for (std::uint32_t current_slot = 0u; current_slot < current_count; ++current_slot) {
         const std::size_t current =
           subtitle_locator_current_offset + static_cast<std::size_t>(current_slot) * 4u;
+        const bool current_ribbon =
+          (current_ribbon_mask & (1u << current_slot)) != 0u;
         bool found = false;
         for (std::uint32_t final_slot = 0u; final_slot < final_count; ++final_slot) {
           const std::size_t final =
             subtitle_ocr_final_box_offset +
             static_cast<std::size_t>(final_slot) * subtitle_ocr_box_word_count;
+          const bool final_ribbon =
+            (subtitle_word(ocr, final + 5u) & subtitle_ocr_box_flag_ribbon) != 0u;
           if (subtitle_word(locator, current) == subtitle_word(ocr, final) &&
               subtitle_word(locator, current + 1u) == subtitle_word(ocr, final + 1u) &&
               subtitle_word(locator, current + 2u) == subtitle_word(ocr, final + 2u) &&
-              subtitle_word(locator, current + 3u) == subtitle_word(ocr, final + 3u)) {
+              subtitle_word(locator, current + 3u) == subtitle_word(ocr, final + 3u) &&
+              current_ribbon == final_ribbon) {
             found = true;
             break;
           }
@@ -395,7 +489,12 @@ namespace platf::sbs_debug {
       const std::vector<std::uint8_t> &ocr,
       const std::uint32_t ocr_flags,
       const std::uint32_t final_count,
-      const std::vector<std::uint8_t> &locator
+      const std::vector<std::uint8_t> &locator,
+      const std::uint32_t field_width,
+      const std::uint32_t field_height,
+      const std::uint32_t roi_top,
+      const std::uint32_t roi_bottom,
+      const std::uint32_t ribbon_min_bottom
     ) {
       const auto flags = subtitle_word(locator, 2u);
       const auto owner_generation = subtitle_word(locator, 3u);
@@ -410,6 +509,20 @@ namespace platf::sbs_debug {
       const auto grace = subtitle_word(locator, 25u);
       const auto packed_grace_x = subtitle_word(locator, 29u);
       const auto packed_grace_y = subtitle_word(locator, 30u);
+      const auto packed_kinds = subtitle_word(locator, subtitle_locator_kind_word);
+      const auto owner_ribbon_mask =
+        (packed_kinds >> subtitle_locator_owner_kind_shift) & subtitle_locator_kind_mask;
+      const auto pending_ribbon_mask =
+        (packed_kinds >> subtitle_locator_pending_kind_shift) & subtitle_locator_kind_mask;
+      const auto current_ribbon_mask =
+        (packed_kinds >> subtitle_locator_current_kind_shift) & subtitle_locator_kind_mask;
+      const auto known_kind_bits =
+        (subtitle_locator_kind_mask << subtitle_locator_owner_kind_shift) |
+        (subtitle_locator_kind_mask << subtitle_locator_pending_kind_shift) |
+        (subtitle_locator_kind_mask << subtitle_locator_current_kind_shift);
+      const auto count_mask = [](const std::uint32_t count) {
+        return count == 0u ? 0u : (1u << count) - 1u;
+      };
       const bool owner = (flags & subtitle_locator_flag_owner) != 0u;
       const bool pending = (flags & subtitle_locator_flag_pending) != 0u;
       const bool target_valid = (flags & subtitle_locator_flag_target_valid) != 0u;
@@ -424,15 +537,28 @@ namespace platf::sbs_debug {
           owner_count > subtitle_locator_rectangle_capacity ||
           pending_count > subtitle_locator_rectangle_capacity ||
           current_count > subtitle_locator_rectangle_capacity ||
+          (packed_kinds & ~known_kind_bits) != 0u ||
+          (owner_ribbon_mask & ~count_mask(owner_count)) != 0u ||
+          (pending_ribbon_mask & ~count_mask(pending_count)) != 0u ||
+          (current_ribbon_mask & ~count_mask(current_count)) != 0u ||
           fade > subtitle_locator_max_fade || last_event > subtitle_locator_max_event ||
           !subtitle_locator_rectangles_are_canonical(
-            locator, subtitle_locator_owner_offset, owner_count, owner_summary
+            locator, subtitle_locator_owner_offset, owner_count,
+            field_width, field_height, roi_top, roi_bottom,
+            ribbon_min_bottom,
+            owner_ribbon_mask, false, owner_summary
           ) ||
           !subtitle_locator_rectangles_are_canonical(
-            locator, subtitle_locator_pending_offset, pending_count, pending_summary
+            locator, subtitle_locator_pending_offset, pending_count,
+            field_width, field_height, roi_top, roi_bottom,
+            ribbon_min_bottom,
+            pending_ribbon_mask, false, pending_summary
           ) ||
           !subtitle_locator_rectangles_are_canonical(
-            locator, subtitle_locator_current_offset, current_count, current_summary
+            locator, subtitle_locator_current_offset, current_count,
+            field_width, field_height, roi_top, roi_bottom,
+            ribbon_min_bottom,
+            current_ribbon_mask, true, current_summary
           ) ||
           !subtitle_rectangle_summary_matches(locator, 5u, 9u, owner_summary) ||
           !subtitle_rectangle_summary_matches(locator, 13u, 17u, pending_summary) ||
@@ -441,7 +567,7 @@ namespace platf::sbs_debug {
           (current_count != 0u && (!owner || !target_valid || fade == 0u)) ||
           (ocr_flags == 0u && current_count != 0u) ||
           !subtitle_current_rectangles_match_ocr_final(
-            ocr, final_count, locator, current_count
+            ocr, final_count, locator, current_count, current_ribbon_mask
           )) {
         return false;
       }
@@ -481,8 +607,8 @@ namespace platf::sbs_debug {
         if (target_valid || target_reset || target_generation != 0u || !target_in_range ||
             current_count != 0u || fade != 0u ||
             grace_left >= grace_right || grace_top >= grace_bottom ||
-            grace_right > subtitle_ocr_field_width ||
-            grace_top < subtitle_ocr_roi_top || grace_bottom > subtitle_ocr_roi_bottom) {
+            grace_right > field_width || grace_bottom > field_height ||
+            grace_top < roi_top || grace_bottom > roi_bottom) {
           return false;
         }
       }
@@ -498,6 +624,28 @@ namespace platf::sbs_debug {
           locator.size() != subtitle_locator_state_word_count * sizeof(std::uint32_t)) {
         return false;
       }
+      const auto field_width = static_cast<std::uint32_t>(completed.model_width);
+      const auto field_height = static_cast<std::uint32_t>(completed.model_height);
+      const auto roi = models::depth_coordinate_v2::subtitle_ocr_dynamic_roi(
+        completed.depth_input_region.width(),
+        completed.depth_input_region.height(),
+        field_width,
+        field_height
+      );
+      if (!roi) {
+        return false;
+      }
+      const auto ribbon_min_bottom =
+        models::depth_coordinate_v2::subtitle_ocr_ribbon_min_bottom(
+          completed.depth_input_region.width(),
+          completed.depth_input_region.height(),
+          field_width,
+          field_height
+        );
+      if (!ribbon_min_bottom || ribbon_min_bottom.value <= roi.top ||
+          ribbon_min_bottom.value > roi.bottom) {
+        return false;
+      }
       const auto ocr_flags = subtitle_word(ocr, 2u);
       const auto raw_count = subtitle_word(ocr, 3u);
       const auto final_count = subtitle_word(ocr, 4u);
@@ -505,23 +653,27 @@ namespace platf::sbs_debug {
           subtitle_word(ocr, 1u) != subtitle_ocr_record_tag ||
           ocr_flags > 1u || raw_count > subtitle_ocr_raw_box_capacity ||
           final_count > subtitle_ocr_final_box_capacity ||
-          final_count > raw_count ||
+          final_count != raw_count ||
           (ocr_flags == 0u && (raw_count != 0u || final_count != 0u)) ||
           subtitle_u64(ocr, 5u) != completed.matched_frame_id ||
           subtitle_u64(ocr, 7u) != completed.depth_input_region.analysis_generation ||
           subtitle_word(ocr, 9u) != completed.depth_input_region.width() ||
           subtitle_word(ocr, 10u) != completed.depth_input_region.height() ||
-          subtitle_word(ocr, 11u) != subtitle_ocr_field_width ||
-          subtitle_word(ocr, 12u) != subtitle_ocr_field_height ||
-          subtitle_word(ocr, 13u) != subtitle_ocr_roi_top ||
-          subtitle_word(ocr, 14u) != subtitle_ocr_roi_bottom ||
+          subtitle_word(ocr, 11u) != field_width ||
+          subtitle_word(ocr, 12u) != field_height ||
+          subtitle_word(ocr, 13u) != roi.top ||
+          subtitle_word(ocr, 14u) != roi.bottom ||
           subtitle_word(ocr, 15u) != 0u ||
           !subtitle_ocr_boxes_are_canonical(
-            ocr, subtitle_ocr_raw_box_offset, raw_count, subtitle_ocr_raw_box_capacity
+            ocr, subtitle_ocr_raw_box_offset, raw_count, subtitle_ocr_raw_box_capacity,
+            field_width, field_height, roi.top, roi.bottom,
+            ribbon_min_bottom.value, false
           ) ||
           !subtitle_ocr_boxes_are_canonical(
-            ocr, subtitle_ocr_final_box_offset, final_count, subtitle_ocr_final_box_capacity
-          )) {
+            ocr, subtitle_ocr_final_box_offset, final_count, subtitle_ocr_final_box_capacity,
+            field_width, field_height, roi.top, roi.bottom,
+            ribbon_min_bottom.value, true
+          ) || !subtitle_ocr_pairs_are_canonical(ocr, final_count)) {
         return false;
       }
 
@@ -529,11 +681,11 @@ namespace platf::sbs_debug {
           subtitle_word(locator, 1u) != subtitle_locator_state_tag ||
           subtitle_u64(locator, 10u) != completed.depth_input_region.analysis_generation ||
           subtitle_u64(locator, 22u) != completed.matched_frame_id ||
-          subtitle_word(locator, 27u) != subtitle_ocr_field_width ||
-          subtitle_word(locator, 28u) != subtitle_ocr_field_height ||
-          subtitle_word(locator, 31u) != 0u ||
+          subtitle_word(locator, 27u) != field_width ||
+          subtitle_word(locator, 28u) != field_height ||
           !subtitle_locator_state_is_canonical(
-            ocr, ocr_flags, final_count, locator
+            ocr, ocr_flags, final_count, locator,
+            field_width, field_height, roi.top, roi.bottom, ribbon_min_bottom.value
           )) {
         return false;
       }
@@ -2616,12 +2768,12 @@ namespace platf::sbs_debug {
                                            job.source;
         const auto &warp_depth = job.warp_depth;
         const auto &sbs = job.sbs;
-        const bool subtitle_slr6_active =
+        const bool subtitle_slr8_active =
           !job.subtitle_ocr_record.empty() &&
           !job.subtitle_locator_state.empty();
-        const nlohmann::json subtitle_conditioning = subtitle_slr6_active ?
+        const nlohmann::json subtitle_conditioning = subtitle_slr8_active ?
           nlohmann::json {
-            {"mode", "subtitle-slr6"},
+            {"mode", "subtitle-slr8"},
             {"request", true},
             {"producer", subtitle_ocr_producer_contract_json(
               *completed.parallax_v2_shader_provenance
@@ -2690,7 +2842,7 @@ namespace platf::sbs_debug {
             tensor_width,
             tensor_height
           ) ||
-          (subtitle_slr6_active && !scalar_tensor_snapshot_matches(
+          (subtitle_slr8_active && !scalar_tensor_snapshot_matches(
             job.shadow_base_final,
             tensor_width,
             tensor_height
@@ -2726,7 +2878,7 @@ namespace platf::sbs_debug {
             paths.temporary / "subtitle_conditioning.json",
             subtitle_conditioning
           ) ||
-          (subtitle_slr6_active && (
+          (subtitle_slr8_active && (
             !write_bytes(
               paths.temporary / "subtitle_ocr_record.u32",
               job.subtitle_ocr_record.data(),
@@ -2814,16 +2966,16 @@ namespace platf::sbs_debug {
         const std::string subtitle_conditioning_sha256 = models::file_sha256_hex(
           paths.temporary / "subtitle_conditioning.json"
         );
-        const std::string subtitle_ocr_record_sha256 = subtitle_slr6_active ?
+        const std::string subtitle_ocr_record_sha256 = subtitle_slr8_active ?
           models::file_sha256_hex(paths.temporary / "subtitle_ocr_record.u32") :
           std::string {};
-        const std::string subtitle_locator_state_sha256 = subtitle_slr6_active ?
+        const std::string subtitle_locator_state_sha256 = subtitle_slr8_active ?
           models::file_sha256_hex(paths.temporary / "subtitle_locator_state.u32") :
           std::string {};
         if (raw_depth_sha256.empty() || model_input_sha256.empty() ||
             model_input_shape_sha256.empty() || depth_input_region_sha256.empty() ||
             subtitle_conditioning_sha256.empty() ||
-            (subtitle_slr6_active && (
+            (subtitle_slr8_active && (
               subtitle_ocr_record_sha256.empty() ||
               subtitle_locator_state_sha256.empty()
             ))) {
@@ -2880,22 +3032,22 @@ namespace platf::sbs_debug {
                "parallax-v2 ROI-local source-U fixed 75/25 share of the column upper/lower envelopes; neutral intermediate consumed by the row majorant" :
                "parallax-v2 full-source-U fixed 75/25 share of the column upper/lower envelopes; neutral intermediate consumed by the row majorant"
            ) ||
-           (subtitle_slr6_active && !dump_shadow_float_texture(
+           (subtitle_slr8_active && !dump_shadow_float_texture(
              shadow_base_final,
              paths.temporary,
              "shadow_base_final_parallax",
              video_region ?
-               "ordinary parallax-v2 crop-local source-U field after the horizontal majorant and before SLR6; renderer authority requires current SLR6 conditioning plus depth_input_region embedding" :
-               "ordinary parallax-v2 full-source-U field after the horizontal majorant and before SLR6 conditioning"
+               "ordinary parallax-v2 crop-local source-U field after the horizontal majorant and before SLR8; renderer authority requires current SLR8 conditioning plus depth_input_region embedding" :
+               "ordinary parallax-v2 full-source-U field after the horizontal majorant and before SLR8 conditioning"
            )) ||
            !dump_shadow_float_texture(
              shadow_final,
              paths.temporary,
              "shadow_final_parallax",
-             subtitle_slr6_active ?
+             subtitle_slr8_active ?
                (video_region ?
-                 "parallax-v2 crop-local source-U field after current SLR6 rectangle conditioning; renderer authority only together with depth_input_region embedding" :
-                 "parallax-v2 full-source-U field after current SLR6 rectangle conditioning; live render position authority") :
+                 "parallax-v2 crop-local source-U field after current SLR8 rectangle conditioning; renderer authority only together with depth_input_region embedding" :
+                 "parallax-v2 full-source-U field after current SLR8 rectangle conditioning; live render position authority") :
                (video_region ?
                  "parallax-v2 crop-local source-U field after one horizontal Lipschitz majorant; renderer authority only together with depth_input_region embedding" :
                  "parallax-v2 full-source-U field after one horizontal Lipschitz majorant; live render position authority")
@@ -3057,7 +3209,7 @@ namespace platf::sbs_debug {
           models::file_sha256_hex(paths.temporary / "shadow_vertical_majorant.f32");
         const std::string shadow_vertical_conditioned_sha256 =
           models::file_sha256_hex(paths.temporary / "shadow_vertical_conditioned.f32");
-        const std::string shadow_base_final_sha256 = subtitle_slr6_active ?
+        const std::string shadow_base_final_sha256 = subtitle_slr8_active ?
           models::file_sha256_hex(
             paths.temporary / "shadow_base_final_parallax.f32"
           ) :
@@ -3068,7 +3220,7 @@ namespace platf::sbs_debug {
             shadow_candidate_sha256.empty() || shadow_ownership_sha256.empty() ||
             shadow_vertical_majorant_sha256.empty() ||
             shadow_vertical_conditioned_sha256.empty() || shadow_final_sha256.empty() ||
-            (subtitle_slr6_active && shadow_base_final_sha256.empty())) {
+            (subtitle_slr8_active && shadow_base_final_sha256.empty())) {
           BOOST_LOG(warning)
             << "SBS debug dump: failed to hash a written V2 geometry field; dump rejected."sv;
           break;
@@ -3097,22 +3249,22 @@ namespace platf::sbs_debug {
           true,
           true,
           "subtitle conditioning authority",
-          "Canonical current-schema subtitle authority descriptor: none or exact OCR6/SLR6.",
+          "Canonical current-schema subtitle authority descriptor: none or exact OCR8/SLR8.",
           subtitle_conditioning_sha256
         );
-        if (subtitle_slr6_active) {
+        if (subtitle_slr8_active) {
           artifacts["subtitle_ocr_record.u32"] = hashed_artifact_description(
             true,
             true,
-            "same-frame OCR6 subtitle boxes",
-            "Exact 208-word little-endian OCR6 record bound to this frame, analysis generation, source, field, and ROI.",
+            "same-frame OCR8 subtitle boxes",
+            "Exact 208-word little-endian OCR8 record bound to this frame, analysis generation, source, field, and ROI.",
             subtitle_ocr_record_sha256
           );
           artifacts["subtitle_locator_state.u32"] = hashed_artifact_description(
             true,
             true,
-            "compact SLR6 subtitle authority state",
-            "Exact 80-word little-endian SLR6 owner, pending, target, and same-frame current-authority state.",
+            "compact SLR8 subtitle authority state",
+            "Exact 80-word little-endian SLR8 owner, pending, target, and same-frame current-authority state.",
             subtitle_locator_state_sha256
           );
         }
@@ -3344,14 +3496,14 @@ namespace platf::sbs_debug {
           "parallax-v2 orientation-selective vertical conditioner preview",
           "Finite p2-p98 jet preview of the exact vertical share."
         );
-        if (subtitle_slr6_active) {
+        if (subtitle_slr8_active) {
           artifacts["shadow_base_final_parallax.f32"] = hashed_artifact_description(
             true,
             true,
-            "ordinary post-limiter V2 field before SLR6 conditioning",
+            "ordinary post-limiter V2 field before SLR8 conditioning",
             video_region ?
-              "Exact ordinary crop-local row-majorant field before SLR6; not renderer authority without current SLR6 conditioning and depth_input_region embedding." :
-              "Exact ordinary full-source-U row-majorant field before SLR6; not selected renderer authority.",
+              "Exact ordinary crop-local row-majorant field before SLR8; not renderer authority without current SLR8 conditioning and depth_input_region embedding." :
+              "Exact ordinary full-source-U row-majorant field before SLR8; not selected renderer authority.",
             shadow_base_final_sha256
           );
         }
@@ -3359,10 +3511,10 @@ namespace platf::sbs_debug {
           true,
           true,
           "parallax-v2 final conditioned displacement field",
-          subtitle_slr6_active ?
+          subtitle_slr8_active ?
             (video_region ?
-              "Exact signed one-eye ROI-local source-U after current SLR6 rectangle conditioning. Live authority is this field plus depth_input_region embedding." :
-              "Exact signed one-eye full-source-U after current SLR6 rectangle conditioning; live V2 render position authority.") :
+              "Exact signed one-eye ROI-local source-U after current SLR8 rectangle conditioning. Live authority is this field plus depth_input_region embedding." :
+              "Exact signed one-eye full-source-U after current SLR8 rectangle conditioning; live V2 render position authority.") :
             (video_region ?
               "Exact signed one-eye ROI-local source-U after the row majorant. Live renderer authority is the pair of this crop-local q field and the authenticated depth_input_region embedding." :
               "Exact signed one-eye full-source-U after the row majorant of shadow_vertical_conditioned; q >= conditioned, |dq/dx| <= max_horizontal_slope/target_width, and |dq/dy| <= max_vertical_shear/target_width. q may raise or lower candidate. Live V2 render position authority."),
@@ -3509,7 +3661,7 @@ namespace platf::sbs_debug {
           texture_description(shadow_vertical);
         dimensions["shadow_vertical_conditioned"] =
           texture_description(shadow_vertical_conditioned);
-        if (subtitle_slr6_active) {
+        if (subtitle_slr8_active) {
           dimensions["shadow_base_final_parallax"] =
             texture_description(shadow_base_final);
         }
@@ -3533,7 +3685,7 @@ namespace platf::sbs_debug {
             *completed.parallax_v2_shader_provenance
           );
         nlohmann::json manifest {
-          {"schema", 21},
+          {"schema", 26},
           {"capture", "one matched, completed Host-SBS frame"},
           {"capture_status", "complete"},
           {"published_atomically", true},
@@ -3562,10 +3714,10 @@ namespace platf::sbs_debug {
                            "conservative full-resolution source-contour foreground ownership applied to candidate before the vertical conditioner; may only raise uniquely owned far-side boundary texels"},
                          {"parallax_v2_vertical_majorant_role", "least column-wise upper envelope v+ >= ownership-refined candidate with adjacent-row source-U change <= max_vertical_shear/target_width; diagnostic evidence only"},
                          {"parallax_v2_vertical_conditioned_role", "fixed 75/25 share of column upper/lower envelopes; may raise or lower candidate and feeds the row majorant"},
-                         {"parallax_v2_conditioner_role", subtitle_slr6_active ?
+                         {"parallax_v2_conditioner_role", subtitle_slr8_active ?
                            (video_region ?
-                             "least row-wise crop-local q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear produces shadow_base_final_parallax; SLR6 applies the analytic anisotropic rectangle budget/fade from same-frame current authority and publishes shadow_final_parallax, which plus depth_input_region embedding is live position authority" :
-                             "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear produces shadow_base_final_parallax; SLR6 applies the analytic anisotropic rectangle budget/fade from same-frame current authority and publishes shadow_final_parallax as live position authority") :
+                             "least row-wise crop-local q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear produces shadow_base_final_parallax; SLR8 applies the analytic anisotropic rectangle budget/fade from same-frame current authority and publishes shadow_final_parallax, which plus depth_input_region embedding is live position authority" :
+                             "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear produces shadow_base_final_parallax; SLR8 applies the analytic anisotropic rectangle budget/fade from same-frame current authority and publishes shadow_final_parallax as live position authority") :
                            (video_region ?
                              "least row-wise crop-local q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear; q plus depth_input_region embedding is live position authority" :
                              "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear; q may raise or lower candidate and is the live position authority")},
@@ -3897,15 +4049,17 @@ namespace platf::sbs_debug {
       }
       const bool subtitle_ocr_present = completed.ocr_box_record != nullptr;
       const bool subtitle_locator_present = completed.subtitle_locator_state != nullptr;
-      const bool subtitle_slr6_active = subtitle_ocr_present && subtitle_locator_present;
+      const bool subtitle_slr8_active = subtitle_ocr_present && subtitle_locator_present;
       if (subtitle_ocr_present != subtitle_locator_present ||
-          (subtitle_slr6_active && (
+          (subtitle_slr8_active && (
             !completed.shadow_base_final_parallax ||
-            completed.model_width != static_cast<int>(subtitle_ocr_field_width) ||
-            completed.model_height != static_cast<int>(subtitle_ocr_field_height)
+            !models::depth_coordinate_v2::subtitle_ocr_field_is_calibrated(
+              static_cast<std::uint32_t>(completed.model_width),
+              static_cast<std::uint32_t>(completed.model_height)
+            )
           ))) {
         BOOST_LOG(warning)
-          << "SBS debug dump: OCR6/SLR6 resources are partial; dump rejected."sv;
+          << "SBS debug dump: OCR8/SLR8 resources are partial; dump rejected."sv;
         retry_backoff_frames_ = retry_backoff_frames;
         return false;
       }
@@ -4049,7 +4203,7 @@ namespace platf::sbs_debug {
           models::depth_coordinate_v2::frame_stats_float_count,
           job.shadow_frame_stats
         );
-      if (captured && subtitle_slr6_active) {
+      if (captured && subtitle_slr8_active) {
         captured =
           read_texture(
             device,
@@ -4117,14 +4271,14 @@ namespace platf::sbs_debug {
           << "SBS debug dump: stable GPU snapshot readback failed; request retained for retry."sv;
         return false;
       }
-      if (subtitle_slr6_active && !subtitle_records_match_frame(
+      if (subtitle_slr8_active && !subtitle_records_match_frame(
             job.subtitle_ocr_record,
             job.subtitle_locator_state,
             completed
           )) {
         retry_backoff_frames_ = retry_backoff_frames;
         BOOST_LOG(warning)
-          << "SBS debug dump: OCR6/SLR6 record identity or layout is invalid; request retained."sv;
+          << "SBS debug dump: OCR8/SLR8 record identity or layout is invalid; request retained."sv;
         return false;
       }
 

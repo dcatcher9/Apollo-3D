@@ -5,6 +5,7 @@
 #include <openssl/evp.h>
 #include <array>
 #include <cstdio>
+#include <cstdint>
 #include <fstream>
 #include <iomanip>
 #include <memory>
@@ -27,10 +28,22 @@ namespace models {
                   depth_coordinate_v2::subtitle_ocr_input_height);
     static_assert(std::string_view {ocr_model_name} ==
                   depth_coordinate_v2::subtitle_ocr_model_name);
-    static_assert(std::string_view {ocr_model_url} ==
-                  depth_coordinate_v2::subtitle_ocr_model_url);
-    static_assert(std::string_view {ocr_model_onnx_sha256} ==
-                  depth_coordinate_v2::subtitle_ocr_onnx_sha256);
+    static_assert(std::string_view {ocr_model_asset_path} ==
+                  depth_coordinate_v2::subtitle_ocr_asset_path);
+    static_assert(std::string_view {ocr_model_artifact_onnx_sha256} ==
+                  depth_coordinate_v2::subtitle_ocr_artifact_onnx_sha256);
+    static_assert(std::string_view {ocr_model_source_url} ==
+                  depth_coordinate_v2::subtitle_ocr_source_url);
+    static_assert(std::string_view {ocr_model_source_onnx_sha256} ==
+                  depth_coordinate_v2::subtitle_ocr_source_onnx_sha256);
+    static_assert(std::string_view {ocr_model_conversion_tool} ==
+                  depth_coordinate_v2::subtitle_ocr_conversion_tool);
+    static_assert(std::string_view {ocr_model_conversion_version} ==
+                  depth_coordinate_v2::subtitle_ocr_conversion_version);
+    static_assert(std::string_view {ocr_model_conversion_recipe} ==
+                  depth_coordinate_v2::subtitle_ocr_conversion_recipe);
+    static_assert(std::string_view {ocr_model_conversion_calibration_profile} ==
+                  depth_coordinate_v2::subtitle_ocr_conversion_calibration_profile);
     static_assert(std::string_view {ocr_engine_recipe} ==
                   depth_coordinate_v2::subtitle_ocr_engine_recipe);
 
@@ -48,12 +61,48 @@ namespace models {
     }
 
     std::string ocr_engine_filename(std::string_view compatibility_tag) {
-        std::string filename = std::string(ocr_model_name) + "." + ocr_engine_recipe;
-        if (!compatibility_tag.empty()) {
-            filename += ".";
-            filename += compatibility_tag;
+        // Encoding the complete identity verbatim in a Windows path can exceed MAX_PATH once
+        // `.part` is appended during atomic publication. The contract retains the readable
+        // recipe, while the active-engine manifest publishes this digest-bearing filename and
+        // the authenticated ONNX hash. Length-framed fields make the cache identity unambiguous;
+        // the domain prevents this digest from being confused with an unrelated SHA-256 use.
+        using context_ptr = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
+        context_ptr context(EVP_MD_CTX_new(), &EVP_MD_CTX_free);
+        std::array<unsigned char, EVP_MAX_MD_SIZE> digest {};
+        unsigned int digest_size = 0;
+        if (!context || EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1) {
+            return {};
         }
-        return filename + ".engine";
+
+        const auto update_field = [&](std::string_view field) {
+            std::array<unsigned char, sizeof(std::uint64_t)> encoded_size {};
+            std::uint64_t remaining = static_cast<std::uint64_t>(field.size());
+            for (auto byte = encoded_size.rbegin(); byte != encoded_size.rend(); ++byte) {
+                *byte = static_cast<unsigned char>(remaining & 0xffu);
+                remaining >>= 8u;
+            }
+            return EVP_DigestUpdate(
+                     context.get(), encoded_size.data(), encoded_size.size()) == 1 &&
+                   (field.empty() ||
+                    EVP_DigestUpdate(context.get(), field.data(), field.size()) == 1);
+        };
+        constexpr std::string_view cache_identity_domain =
+          "sunshine3d/ocr-tensorrt-engine-cache/v1";
+        if (!update_field(cache_identity_domain) ||
+            !update_field(ocr_model_name) ||
+            !update_field(ocr_engine_recipe) ||
+            !update_field(compatibility_tag) ||
+            EVP_DigestFinal_ex(context.get(), digest.data(), &digest_size) != 1 ||
+            digest_size != 32u) {
+            return {};
+        }
+
+        std::ostringstream token;
+        token << std::hex << std::setfill('0');
+        for (unsigned int i = 0; i < digest_size; ++i) {
+            token << std::setw(2) << static_cast<unsigned int>(digest[i]);
+        }
+        return std::string(ocr_model_name) + ".cache-" + token.str() + ".engine";
     }
 
     std::filesystem::path ensure_onnx_available(const std::filesystem::path& assets_dir, const std::string& model_name, const std::string& model_url) {

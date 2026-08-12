@@ -6,3 +6,6 @@ Dockerfile text eol=lf
 
 # Unified-diff context lines intentionally contain a single prefix space.
 cmake/patches/*.patch -whitespace
+
+# Neural-network weights are binary assets; never apply line-ending or text filters.
+*.onnx -text

@@ -20,7 +20,7 @@ flowchart LR
     DAV2["Authenticated DAV2 Small inference"]
     CUT["Cut-only evidence and scene epoch"]
     OCR["PP-OCRv6 tiny detector (bottom 960x160)"]
-    LOCATOR["OCR6 boxes and compact SLR6 tracker"]
+    LOCATOR["OCR8 boxes and compact SLR8 tracker"]
     CAMERA["Scene-latched raw center"]
     CURVE["Fixed raw coordinate and curve"]
     CONTAINER["Pointwise soft source-U container"]
@@ -36,7 +36,7 @@ flowchart LR
     IA2 -. optional authority .-> MATCH
     DAV2 --> CUT --> CAMERA
     DAV2 --> CAMERA --> CURVE --> CONTAINER --> OWNER --> VERTICAL --> ROW --> PLANE --> INVERSE
-    CAPTURE -. completed 770x434 observation .-> OCR --> LOCATOR
+    CAPTURE -. completed calibrated DAV2 observation .-> OCR --> LOCATOR
     CUT --> LOCATOR --> PLANE
     CAPTURE --> COLOR
     INVERSE --> COLOR --> ENCODE
@@ -50,14 +50,14 @@ diagnostics that explain how the final field was produced.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 40/tag `0xF7C853C2`, canonical SHA-256
-`5c7116be0004e33e24f150430d85e06b9eb66782b4fc3b059501e04093835d9e`, with authenticated
-producer source-closure SHA-256
-`861f800db1cc06a6d25b80d18bb1b7bf4bc469ed1ccfacfd96a0b384bfb2a7a1`, live-renderer
-source-closure SHA-256
-`914fc624955c5e3b41f867429acb17a03c34ba71e41f7cbfab00fd939aafff9b`, and dump-only diagnostic
+schema 45/tag `0xFBD3CDB1`, canonical SHA-256
+`8515cf7bc352c2e9e56e6a5fd9dad9802e1e7cd02f705fd8a957617c7ba94e9a`. It binds the
+complete policy below, including all subtitle field/ROI semantics, and producer source-closure
+SHA-256 `11bd8c0ab14d22caab83044e5f0d38cca10f5eef5df5d5e671cbedf64e256a1f`.
+The live-renderer source-closure SHA-256 is
+`cefced5c4ebcb98d8b410b4d13d05a03941f63207edb6ade93afb69fa9bf1529`, and dump-only diagnostic
 renderer source-closure SHA-256
-`d2dada0490e727d88fdda802a9eb6759b34e9501c91835363ebdb0196e3d5c4b`. It admits the following
+`53c3b025ca2f7c1dbd7abed09ca156d5646ccb45a17c294f9f169d62962a7194`. It admits the following
 production calibration:
 
 | Property | Production value |
@@ -158,33 +158,83 @@ not a new analysis domain, so an ordinary window move does not by itself reacqui
 
 ### OCR-box subtitle conditioner
 
-The production subtitle path is the single current detector-only PP-OCRv6 tiny/OCR6/SLR6 route.
+The production subtitle path is the single current detector-only PP-OCRv6 tiny/OCR8/SLR8 route.
 It does not run text recognition, language classification, or logo recognition. For a completed
-canonical `770x434` DAV2 observation, the GPU takes the exact bottom `6:1` source crop, resizes it to
+DAV2 observation in any of the six calibrated landscape/portrait fields, the GPU takes the exact
+bottom `6:1` analysis-source crop, resizes it to
 `960x160`, converts BGR through the pinned ImageNet normalization, and runs the authenticated
-`ppocrv6_tiny_det` TensorRT 11 strong-typed FP32 engine
-(`trt-strong-fp32-tf32-fixed960x160-level5-v1`). The detector's `1x1x160x960` probability map is reduced
-on the GPU to bounded line boxes; no probability texture or model input becomes rendering
-authority.
+`ppocrv6_tiny_det_modelopt_fp16` TensorRT 11 strong-typed mixed-FP16 engine with FP32 I/O
+(`trt-strong-modelopt045-fp16-iofp32-tf32-fixed960x160-level5-v2`). The bundled artifact is
+`models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx`, SHA-256
+`169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44`. It is derived by
+NVIDIA ModelOpt `0.45.0` using
+`nvidia-modelopt-autocast-fp16-keep-io-fp32-v1` and calibration profile
+`apollo-live8-bottom960x160-v1` from the pinned upstream FP32 ONNX, SHA-256
+`193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8`. The contract
+authenticates the bundled artifact and upstream source independently. The detector's
+`1x1x160x960` FP32 probability map is reduced on the GPU to bounded line boxes; no probability
+texture or model input becomes rendering authority.
 
-OCR6 is a fixed 208-word current record: a 16-word header, at most 16 raw boxes, and at most eight
-final boxes. Every half-open box lies in the `770x434` field's `[325,430)` bottom ROI. Schema/tag,
+OCR8 is a fixed 208-word current record: a 16-word header followed by paired tight/core and cover
+slots, with at most eight authoritative pairs. Each eight-word slot stores half-open coordinates,
+score bits, a ribbon-kind bit, island count, and structural-gap count. Tight cores lie in the active
+calibrated DAV2 field's dynamic bottom
+ROI obtained by projecting detector rows `[24,155)` through the exact bottom-6:1 source crop. For a
+16:9 source and `770x434` field this remains `[325,430)`; ultrawide and portrait fields have different
+row intervals. Schema/tag,
 authoritative flag, exact matched-frame and analysis-generation identity, source dimensions, field,
-ROI, finite score, counts, and all reserved/unused words must validate together. `flags == 1` with
+ROI, finite score, paired containment and metadata, topology, counts, and all unused words must
+validate together. `flags == 1` with
 zero boxes is an authoritative empty observation. Abstaining, incomplete, overflowing, stale, or
 malformed output has no geometry authority.
 
-SLR6 is a fixed 80-word compact state containing at most four owner rectangles, four pending
-rectangles, and four same-frame current-authority rectangles. Generic line geometry rejects boxes
-that are too small, too wide, too short, or not sufficiently horizontal; there is no hard-coded
-logo position. Vertically adjacent boxes form one coherent centered, left-aligned, or right-aligned
-stack, chosen deterministically by area. Individual line rectangles and their gaps are preserved.
+OCR8 first discovers broad horizontal runs with a 12-cell inactive-gap allowance solely to decide
+whether their unfiltered topology is a bottom ribbon. It does not prefilter small or weak islands
+from this broad pass: a ribbon is labelled only when the broad run is bottom-attached within two
+detector pixels, spans at least half the detector width, and contains at least three inactive gaps
+of three or more eight-pixel cells. A broad run that is not a ribbon is always rescanned with the
+ordinary four-cell join allowance, even when its broad aggregate would fail the ordinary evidence
+gate. In that rescan each island must independently have width and height of at least three detector
+pixels and mean score at least `0.4` before it can contribute. Each resulting ordinary subrun
+recomputes its tight bounds, score, island count, and structural-gap count from only those retained
+islands. Thus a weak speck cannot borrow a subtitle's confidence or bridge its cover across a
+foreground object, while a segmented bottom index remains one ribbon.
+
+A ribbon's expansion pad is capped at eight detector pixels; ordinary subtitle expansion is
+unchanged. A ribbon's final cover is the canonical bottom strip
+`[0, corrected_top, field_width, field_height)`, while its paired raw box remains tight evidence.
+The detector tolerance is preserved after coordinate conversion: the inclusive minimum raw-core
+bottom is the exact rational ceil projection of detector row `155 - 2 = 153` through the same
+bottom-6:1 source crop into the active DAV2 field. A core at that projected row is valid; one field
+row below it is malformed. The upper bound remains the projected safe ROI bottom.
+
+SLR8 is a fixed 80-word compact state containing at most four owner/core rectangles, four
+pending/core rectangles, and four same-frame current cover rectangles. Header word 31 carries
+owner, pending, and current ribbon masks in bits `0..3`, `4..7`, and `8..11`; higher bits are zero.
+Generic ordinary-line geometry requires
+width at least 48 cells, height at least 6 cells, width at least twice height, and width at most
+`floor(9 * field_width / 10)`; there is no hard-coded logo position. DAV2 field cells remain square
+and every calibrated shape has short side 434, so the lower cell thresholds and sampling offsets
+stay fixed while only the maximum line width follows the long side. Vertically adjacent boxes form
+one coherent centered, left-aligned, or right-aligned
+stack, chosen deterministically by area. A detected ribbon joins that stack as another tracked
+member, and an observation exceeding four total members abstains rather than dropping one.
+Individual line rectangles and their gaps are preserved.
+Ordinary, horizontally disjoint cores may nevertheless join the same transitive component when
+they share a strong baseline: vertical overlap is at least three quarters of the shorter height,
+the taller height is at most twice the shorter, doubled vertical-center separation is at most the
+shorter height, horizontal separation is at most eight times the taller height, and the pair's
+combined span is at most `floor(9 * field_width / 10)`. Transitive closure is accepted only when
+the complete component also stays within that same maximum span. This relation affects only component
+selection and the shared plane target; it never unions geometry. Every core and paired cover
+remains independent, canonical core order is top then left, and paired current covers retain that
+core-defined order. A selected set needing more than four rectangles fails flat.
 The first exact observation is pending; only a compatible observation with a distinct exact
 frame/domain identity confirms an owner. A compatible subset can remove a line immediately, while
 an appended or materially changed stack remains pending and conditions only lines still matched to
 the old owner until its second observation confirms the handoff.
 
-Only rectangles copied from the current OCR6 record can condition the current frame. Cached owner,
+Only rectangles copied from the current OCR8 record can condition the current frame. Cached owner,
 pending, target, and six-observation death grace cannot manufacture geometry. Authoritative empty
 OCR removes all current rectangles immediately. A hard cut clears pending/grace, retains only
 current rectangles that still overlap an old owner, and resamples the plane target; disjoint boxes
@@ -193,11 +243,15 @@ any current boxes as the first pending observation. This lets a seek/reset landi
 already-visible static subtitle acquire on the following distinct observation without an onset
 edge.
 
-The plane target is sampled from the same post-limit BaseField as the subtitle, above the owner
-stack: the median of 32 samples is filtered with a `0.15` EMA and a maximum per-observation step of
-`0.25 / source_width`. New owners fade from half to full strength over two observations; a
-cut-surviving owner resamples at full strength. The conditioner then evaluates distance directly to
-each current half-open rectangle. For integer cell `(x,y)`, `dx`/`dy` are zero inside a rectangle
+The plane target is the median of 32 samples from the same post-limit BaseField above the combined
+lower-text owner stack. It is sampled once for a fresh confirmed birth and then latched bit-exact
+for the continuing owner; ordinary Base changes, core jitter, and subset removal do not update it.
+Any confirmed handoff or rebirth during the six-observation death grace inherits the cached target
+bits, independent of overlap. A hard-cut
+survivor advances owner generation, resamples immediately at full strength, and a domain reset
+clears the owner and latch so present geometry starts a new pending transaction. New owners fade
+from half to full strength over two observations. The conditioner then evaluates distance directly to
+each current half-open cover. For integer cell `(x,y)`, `dx`/`dy` are zero inside a rectangle
 and count cells to its nearest included edge outside it:
 
 ```text
@@ -207,8 +261,10 @@ budget = 0.5 / source_width + d
 
 Base values already within `budget` of the target are copied bit-for-bit. Values outside it move
 only to `target +/- budget`, with the half-strength birth/handoff fade when applicable. Thus each
-line has a dense core and a V2-slope-safe analytic collar, nearby line collars may meet naturally,
-and the gap is never converted into one merged rectangle. Missing current authority, invalid target
+ordinary line has a dense cover and a V2-slope-safe analytic collar, nearby line collars may meet
+naturally, and the gap is never converted into one merged rectangle. Because a ribbon cover spans
+the complete field width and reaches the field bottom, its only exterior boundary—and therefore its
+only collar—is the corrected top edge. Missing current authority, invalid target
 state, unsupported tensor shape, or any identity failure copies ordinary post-limit V2 exactly.
 There is no pixel history, row lease, onset accumulator, signature, horizontal-distance texture,
 full-resolution overlay detector, or GST/OGR/ORS dependency.
@@ -304,7 +360,7 @@ color. A confirmed cut invalidates the old camera; the next usable field acquire
 Model preparation, shader compilation, and the live renderer are fail-closed. Live shaders are
 compiled and cached at process startup. Dump-only resources are created lazily and cannot prevent a
 stream from starting. A failure in optional diagnostics has no rendering authority. An armed
-schema-21 dump preserves the selected path's same-frame authority resources with ordered D3D11
+schema-26 dump preserves the selected path's same-frame authority resources with ordered D3D11
 `CopyResource` operations;
 it adds no production GPU-to-CPU readback, flush, query wait, or synchronous Map. The explicit dump
 then uses the existing diagnostic readback path to publish files.
@@ -394,7 +450,7 @@ continues unchanged.
 
 Dump 3D records one matched current-contract frame: source/model/raw DAV2 evidence, authenticated
 analysis-region placement, the V2 geometry chain and inverse map, scene/cut attribution, packed SBS,
-and—when selected—the exact OCR6 record and compact SLR6 state used by conditioning. The reader
+and—when selected—the exact OCR8 record and compact SLR8 state used by conditioning. The reader
 accepts only the current schema and identities. Retired SLR3--SLR5 and GST/OGR/ORS packages are not
 replayed or reinterpreted.
 
@@ -416,8 +472,9 @@ in [the sbsbench guide](../tools/sbsbench/README.md).
   not exact composited visibility. Canvas or WebGL players, protected video, disabled accessibility,
   background tabs/windows, non-Chromium applications, and partially off-monitor video use
   full-frame V2 when they provide no valid rectangle.
-- The automatic subtitle path is qualified only for an exact `770x434` landscape model tensor and
-  one coherent bottom stack of at most four line boxes. Other tensor shapes copy ordinary V2. The
+- The automatic subtitle path accepts all six authenticated DAV2 fields (`770x434`, `1022x434`,
+  `1036x434`, and their portrait transposes) and one coherent bottom stack of at most four line
+  boxes. Any other fitted tensor copies ordinary V2. The
   detector does not know whether a box contains a subtitle, UI text, a lower third, or a logo;
   bottom crop, generic horizontal-line geometry, coherent stacking, exact identity, and
   two-observation overlap are the only false-positive controls. A horizontal persistent scene-text

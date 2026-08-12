@@ -3,11 +3,11 @@
 #ifndef DEPTH_COORDINATE_V2_CONTRACT_GENERATED_HLSL
 #define DEPTH_COORDINATE_V2_CONTRACT_GENERATED_HLSL
 
-#define V2_CONTRACT_SCHEMA 40u
-#define V2_CONTRACT_TAG 0xF7C853C2u
+#define V2_CONTRACT_SCHEMA 45u
+#define V2_CONTRACT_TAG 0xFBD3CDB1u
 #define V2_SHADOW_STATE_WORD_COUNT 12u
 #define V2_SHADOW_STATE_VECTOR_COUNT 3u
-#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 1u
+#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 5u
 #define V2_OCR_INPUT_N 1u
 #define V2_OCR_INPUT_C 3u
 #define V2_OCR_INPUT_HEIGHT 160u
@@ -22,33 +22,112 @@
 #define V2_OCR_IMAGENET_STD_B 0.229f
 #define V2_OCR_IMAGENET_STD_G 0.224f
 #define V2_OCR_IMAGENET_STD_R 0.225f
-#define V2_OCR_RECORD_SCHEMA 1u
-#define V2_OCR_RECORD_TAG 0x3652434Fu
+#define V2_OCR_RECORD_SCHEMA 3u
+#define V2_OCR_RECORD_TAG 0x3852434Fu
 #define V2_OCR_RECORD_WORD_COUNT 208u
 #define V2_OCR_RECORD_HEADER_WORD_COUNT 16u
 #define V2_OCR_BOX_WORD_COUNT 8u
+#define V2_OCR_BOX_FLAG_RIBBON 1u
+#define V2_OCR_BOX_KNOWN_FLAGS 1u
 #define V2_OCR_RAW_BOX_OFFSET 16u
 #define V2_OCR_RAW_BOX_CAPACITY 16u
 #define V2_OCR_FINAL_BOX_OFFSET 144u
 #define V2_OCR_FINAL_BOX_CAPACITY 8u
-#define V2_OCR_FIELD_WIDTH 770u
-#define V2_OCR_FIELD_HEIGHT 434u
-#define V2_OCR_ROI_TOP 325u
-#define V2_OCR_ROI_BOTTOM 430u
-#define V2_SUBTITLE_LOCATOR_STATE_SCHEMA 6u
-#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x36524C53u
+#define V2_MODEL_CALIBRATED_SHAPE_COUNT 6u
+#define V2_MODEL_CALIBRATED_SHAPE_WIDTH_0 770u
+#define V2_MODEL_CALIBRATED_SHAPE_HEIGHT_0 434u
+#define V2_MODEL_CALIBRATED_SHAPE_WIDTH_1 1022u
+#define V2_MODEL_CALIBRATED_SHAPE_HEIGHT_1 434u
+#define V2_MODEL_CALIBRATED_SHAPE_WIDTH_2 1036u
+#define V2_MODEL_CALIBRATED_SHAPE_HEIGHT_2 434u
+#define V2_MODEL_CALIBRATED_SHAPE_WIDTH_3 434u
+#define V2_MODEL_CALIBRATED_SHAPE_HEIGHT_3 770u
+#define V2_MODEL_CALIBRATED_SHAPE_WIDTH_4 434u
+#define V2_MODEL_CALIBRATED_SHAPE_HEIGHT_4 1022u
+#define V2_MODEL_CALIBRATED_SHAPE_WIDTH_5 434u
+#define V2_MODEL_CALIBRATED_SHAPE_HEIGHT_5 1036u
+#define V2_OCR_SAFE_ROW_TOP 24u
+#define V2_OCR_SAFE_ROW_BOTTOM 155u
+#define V2_OCR_CROP_ASPECT_WIDTH 6u
+#define V2_OCR_CROP_ASPECT_HEIGHT 1u
+#define V2_OCR_TEXT_JOIN_GAP_CELLS 4u
+#define V2_OCR_RIBBON_JOIN_GAP_CELLS 12u
+#define V2_OCR_RIBBON_STRUCTURAL_GAP_MIN_CELLS 3u
+#define V2_OCR_RIBBON_MIN_STRUCTURAL_GAPS 3u
+#define V2_OCR_RIBBON_MIN_WIDTH_NUMERATOR 1u
+#define V2_OCR_RIBBON_MIN_WIDTH_DENOMINATOR 2u
+#define V2_OCR_RIBBON_BOTTOM_TOLERANCE_PIXELS 2u
+#define V2_OCR_RIBBON_COVER_PAD_LIMIT 8u
+#define V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR 9u
+#define V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR 10u
+#define V2_SUBTITLE_LOCATOR_STATE_SCHEMA 8u
+#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x38524C53u
 #define V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT 80u
 #define V2_SUBTITLE_LOCATOR_HEADER_WORD_COUNT 32u
 #define V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY 4u
 #define V2_SUBTITLE_LOCATOR_OWNER_OFFSET 32u
 #define V2_SUBTITLE_LOCATOR_PENDING_OFFSET 48u
 #define V2_SUBTITLE_LOCATOR_CURRENT_OFFSET 64u
+#define V2_SUBTITLE_LOCATOR_KIND_WORD 31u
+#define V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT 0u
+#define V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT 4u
+#define V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT 8u
+#define V2_SUBTITLE_LOCATOR_KIND_MASK 15u
 #define V2_DIRECT_CONTAINER_LIMIT 0.04f
 #define V2_MAX_VERTICAL_SHEAR 2.0f
 #define V2_VERTICAL_MAJORANT_SHARE 0.75f
 #define V2_CONVERGENCE_CURVE_DEFAULT 0.0f
 static const float v2_max_vertical_shear = V2_MAX_VERTICAL_SHEAR;
 static const float v2_vertical_majorant_share = V2_VERTICAL_MAJORANT_SHARE;
+
+bool V2SubtitleOcrFieldIsCalibrated(uint field_width, uint field_height) {
+    return (field_width == V2_MODEL_CALIBRATED_SHAPE_WIDTH_0 && field_height == V2_MODEL_CALIBRATED_SHAPE_HEIGHT_0) ||
+           (field_width == V2_MODEL_CALIBRATED_SHAPE_WIDTH_1 && field_height == V2_MODEL_CALIBRATED_SHAPE_HEIGHT_1) ||
+           (field_width == V2_MODEL_CALIBRATED_SHAPE_WIDTH_2 && field_height == V2_MODEL_CALIBRATED_SHAPE_HEIGHT_2) ||
+           (field_width == V2_MODEL_CALIBRATED_SHAPE_WIDTH_3 && field_height == V2_MODEL_CALIBRATED_SHAPE_HEIGHT_3) ||
+           (field_width == V2_MODEL_CALIBRATED_SHAPE_WIDTH_4 && field_height == V2_MODEL_CALIBRATED_SHAPE_HEIGHT_4) ||
+           (field_width == V2_MODEL_CALIBRATED_SHAPE_WIDTH_5 && field_height == V2_MODEL_CALIBRATED_SHAPE_HEIGHT_5);
+}
+
+// Exact ceil projection of a detector row edge through the authenticated bottom crop.
+// The overflow guards mirror the SM5 consumers, which have no uint64 arithmetic.
+bool V2SubtitleOcrProjectRowCeil(
+    uint source_width, uint source_height, uint field_width, uint field_height,
+    uint detector_y, out uint projected_y) {
+    projected_y = 0u;
+    if (source_width == 0u || source_height == 0u || field_height == 0u ||
+        detector_y > V2_OCR_OUTPUT_HEIGHT ||
+        !V2SubtitleOcrFieldIsCalibrated(field_width, field_height)) return false;
+    uint crop_quotient = source_width / V2_OCR_CROP_ASPECT_WIDTH;
+    uint crop_remainder = source_width % V2_OCR_CROP_ASPECT_WIDTH;
+    if (crop_quotient > 0xffffffffu / V2_OCR_CROP_ASPECT_HEIGHT ||
+        crop_remainder > 0xffffffffu / V2_OCR_CROP_ASPECT_HEIGHT) return false;
+    uint crop_height = min(
+        source_height,
+        crop_quotient * V2_OCR_CROP_ASPECT_HEIGHT +
+        (crop_remainder * V2_OCR_CROP_ASPECT_HEIGHT +
+         V2_OCR_CROP_ASPECT_WIDTH - 1u) / V2_OCR_CROP_ASPECT_WIDTH);
+    uint crop_top = source_height - crop_height;
+    if (source_height > 0xffffffffu / V2_OCR_OUTPUT_HEIGHT) return false;
+    uint denominator = V2_OCR_OUTPUT_HEIGHT * source_height;
+    if (denominator == 0u || denominator > 0xffffffffu / field_height) return false;
+    uint source_y_numerator =
+        crop_top * V2_OCR_OUTPUT_HEIGHT + detector_y * crop_height;
+    uint scaled = source_y_numerator * field_height;
+    projected_y = min(
+        scaled / denominator + (scaled % denominator != 0u ? 1u : 0u),
+        field_height);
+    return true;
+}
+
+bool V2SubtitleOcrRibbonMinBottom(
+    uint source_width, uint source_height, uint field_width, uint field_height,
+    out uint minimum_bottom) {
+    return V2SubtitleOcrProjectRowCeil(
+        source_width, source_height, field_width, field_height,
+        V2_OCR_SAFE_ROW_BOTTOM - V2_OCR_RIBBON_BOTTOM_TOLERANCE_PIXELS,
+        minimum_bottom);
+}
 
 cbuffer DepthCoordinateV2Constants : register(b1) {
     float v2_raw_coordinate_scale;

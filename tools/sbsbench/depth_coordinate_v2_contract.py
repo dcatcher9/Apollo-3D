@@ -71,13 +71,22 @@ SHADER_SOURCE_SPECS = (
     ("host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"),
 )
 EXPECTED_SUBTITLE_OCR = {
-    "schema": 1,
-    "logical_model": "ppocrv6_tiny_det",
-    "model_url": (
+    "schema": 5,
+    "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
+    "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
+    "artifact_onnx_sha256": (
+        "169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44"),
+    "source_url": (
         "https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det_onnx/resolve/"
         "2ba1506c0380b8f0b03dd142459aac66d4421f6c/inference.onnx?download=true"),
-    "onnx_sha256": "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8",
-    "engine_recipe": "trt-strong-fp32-tf32-fixed960x160-level5-v1",
+    "source_onnx_sha256": (
+        "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8"),
+    "conversion_tool": "nvidia-modelopt",
+    "conversion_version": "0.45.0",
+    "conversion_recipe": "nvidia-modelopt-autocast-fp16-keep-io-fp32-v1",
+    "conversion_calibration_profile": "apollo-live8-bottom960x160-v1",
+    "engine_recipe": (
+        "trt-strong-modelopt045-fp16-iofp32-tf32-fixed960x160-level5-v2"),
     "preprocess_profile": "apollo-ppocrv6-bottom-6x1-bgr-imagenet-v1",
     "source_crop": "bottom-6:1",
     "input_tensor": {
@@ -90,18 +99,38 @@ EXPECTED_SUBTITLE_OCR = {
         "name": "fetch_name_0", "dtype": "float32", "layout": "NCHW",
         "shape": [1, 1, 160, 960],
     },
+    "field_policy": {
+        "locator_max_width_numerator": 9,
+        "locator_max_width_denominator": 10,
+        "ocr_safe_row_top": 24,
+        "ocr_safe_row_bottom": 155,
+        "source_crop_aspect_width": 6,
+        "source_crop_aspect_height": 1,
+        "text_join_gap_cells": 4,
+        "ribbon_join_gap_cells": 12,
+        "ribbon_structural_gap_min_cells": 3,
+        "ribbon_min_structural_gaps": 3,
+        "ribbon_min_width_numerator": 1,
+        "ribbon_min_width_denominator": 2,
+        "ribbon_bottom_tolerance_pixels": 2,
+        "ribbon_bottom_tolerance_projection":
+            "exact-ceil-detector-edge-through-bottom-crop-v1",
+        "ribbon_cover_pad_limit": 8,
+    },
     "ocr_record": {
-        "schema": 1, "tag": 0x3652434F, "word_count": 208,
+        "schema": 3, "tag": 0x3852434F, "word_count": 208,
         "header_word_count": 16, "box_word_count": 8,
+        "box_flag_ribbon": 1, "box_known_flags": 1,
         "raw_box_offset": 16, "raw_box_capacity": 16,
         "final_box_offset": 144, "final_box_capacity": 8,
-        "field_width": 770, "field_height": 434,
-        "roi_top": 325, "roi_bottom": 430,
     },
     "locator_state": {
-        "schema": 6, "tag": 0x36524C53, "word_count": 80,
+        "schema": 8, "tag": 0x38524C53, "word_count": 80,
         "header_word_count": 32, "rectangle_capacity": 4,
         "owner_offset": 32, "pending_offset": 48, "current_offset": 64,
+        "kind_word": 31,
+        "owner_kind_shift": 0, "pending_kind_shift": 4,
+        "current_kind_shift": 8, "kind_mask": 15,
     },
 }
 
@@ -165,8 +194,14 @@ class ShaderImplementation:
 class SubtitleOcrContract:
     schema: int
     logical_model: str
-    model_url: str
-    onnx_sha256: str
+    asset_path: str
+    artifact_onnx_sha256: str
+    source_url: str
+    source_onnx_sha256: str
+    conversion_tool: str
+    conversion_version: str
+    conversion_recipe: str
+    conversion_calibration_profile: str
     engine_recipe: str
     preprocess_profile: str
     source_crop: str
@@ -181,19 +216,32 @@ class SubtitleOcrContract:
     output_dtype: str
     output_layout: str
     output_shape: tuple[int, int, int, int]
+    locator_max_width_numerator: int
+    locator_max_width_denominator: int
+    ocr_safe_row_top: int
+    ocr_safe_row_bottom: int
+    source_crop_aspect_width: int
+    source_crop_aspect_height: int
+    text_join_gap_cells: int
+    ribbon_join_gap_cells: int
+    ribbon_structural_gap_min_cells: int
+    ribbon_min_structural_gaps: int
+    ribbon_min_width_numerator: int
+    ribbon_min_width_denominator: int
+    ribbon_bottom_tolerance_pixels: int
+    ribbon_bottom_tolerance_projection: str
+    ribbon_cover_pad_limit: int
     record_schema: int
     record_tag: int
     record_word_count: int
     record_header_word_count: int
     box_word_count: int
+    box_flag_ribbon: int
+    box_known_flags: int
     raw_box_offset: int
     raw_box_capacity: int
     final_box_offset: int
     final_box_capacity: int
-    field_width: int
-    field_height: int
-    roi_top: int
-    roi_bottom: int
     locator_schema: int
     locator_tag: int
     locator_word_count: int
@@ -202,6 +250,11 @@ class SubtitleOcrContract:
     locator_owner_offset: int
     locator_pending_offset: int
     locator_current_offset: int
+    locator_kind_word: int
+    locator_owner_kind_shift: int
+    locator_pending_kind_shift: int
+    locator_current_kind_shift: int
+    locator_kind_mask: int
 
 
 def _subtitle_ocr_contract(contract: dict[str, Any]) -> SubtitleOcrContract:
@@ -209,16 +262,23 @@ def _subtitle_ocr_contract(contract: dict[str, Any]) -> SubtitleOcrContract:
     if value != EXPECTED_SUBTITLE_OCR:
         raise ValueError(
             "depth-coordinate-v2 subtitle_ocr identity or ABI does not match the current "
-            "authenticated PP-OCRv6/OCR6/SLR6 contract")
+            "authenticated PP-OCRv6/OCR8/SLR8 contract")
     input_tensor = value["input_tensor"]
     output_tensor = value["output_tensor"]
+    field_policy = value["field_policy"]
     record = value["ocr_record"]
     locator = value["locator_state"]
     return SubtitleOcrContract(
         schema=value["schema"],
         logical_model=value["logical_model"],
-        model_url=value["model_url"],
-        onnx_sha256=value["onnx_sha256"],
+        asset_path=value["asset_path"],
+        artifact_onnx_sha256=value["artifact_onnx_sha256"],
+        source_url=value["source_url"],
+        source_onnx_sha256=value["source_onnx_sha256"],
+        conversion_tool=value["conversion_tool"],
+        conversion_version=value["conversion_version"],
+        conversion_recipe=value["conversion_recipe"],
+        conversion_calibration_profile=value["conversion_calibration_profile"],
         engine_recipe=value["engine_recipe"],
         preprocess_profile=value["preprocess_profile"],
         source_crop=value["source_crop"],
@@ -233,19 +293,33 @@ def _subtitle_ocr_contract(contract: dict[str, Any]) -> SubtitleOcrContract:
         output_dtype=output_tensor["dtype"],
         output_layout=output_tensor["layout"],
         output_shape=tuple(output_tensor["shape"]),
+        locator_max_width_numerator=field_policy["locator_max_width_numerator"],
+        locator_max_width_denominator=field_policy["locator_max_width_denominator"],
+        ocr_safe_row_top=field_policy["ocr_safe_row_top"],
+        ocr_safe_row_bottom=field_policy["ocr_safe_row_bottom"],
+        source_crop_aspect_width=field_policy["source_crop_aspect_width"],
+        source_crop_aspect_height=field_policy["source_crop_aspect_height"],
+        text_join_gap_cells=field_policy["text_join_gap_cells"],
+        ribbon_join_gap_cells=field_policy["ribbon_join_gap_cells"],
+        ribbon_structural_gap_min_cells=field_policy["ribbon_structural_gap_min_cells"],
+        ribbon_min_structural_gaps=field_policy["ribbon_min_structural_gaps"],
+        ribbon_min_width_numerator=field_policy["ribbon_min_width_numerator"],
+        ribbon_min_width_denominator=field_policy["ribbon_min_width_denominator"],
+        ribbon_bottom_tolerance_pixels=field_policy["ribbon_bottom_tolerance_pixels"],
+        ribbon_bottom_tolerance_projection=
+            field_policy["ribbon_bottom_tolerance_projection"],
+        ribbon_cover_pad_limit=field_policy["ribbon_cover_pad_limit"],
         record_schema=record["schema"],
         record_tag=record["tag"],
         record_word_count=record["word_count"],
         record_header_word_count=record["header_word_count"],
         box_word_count=record["box_word_count"],
+        box_flag_ribbon=record["box_flag_ribbon"],
+        box_known_flags=record["box_known_flags"],
         raw_box_offset=record["raw_box_offset"],
         raw_box_capacity=record["raw_box_capacity"],
         final_box_offset=record["final_box_offset"],
         final_box_capacity=record["final_box_capacity"],
-        field_width=record["field_width"],
-        field_height=record["field_height"],
-        roi_top=record["roi_top"],
-        roi_bottom=record["roi_bottom"],
         locator_schema=locator["schema"],
         locator_tag=locator["tag"],
         locator_word_count=locator["word_count"],
@@ -254,6 +328,11 @@ def _subtitle_ocr_contract(contract: dict[str, Any]) -> SubtitleOcrContract:
         locator_owner_offset=locator["owner_offset"],
         locator_pending_offset=locator["pending_offset"],
         locator_current_offset=locator["current_offset"],
+        locator_kind_word=locator["kind_word"],
+        locator_owner_kind_shift=locator["owner_kind_shift"],
+        locator_pending_kind_shift=locator["pending_kind_shift"],
+        locator_current_kind_shift=locator["current_kind_shift"],
+        locator_kind_mask=locator["kind_mask"],
     )
 
 
@@ -469,6 +548,73 @@ SUBTITLE_OCR = _subtitle_ocr_contract(_CONTRACT)
 MODEL_CALIBRATIONS = _model_calibrations(_CONTRACT)
 
 
+def subtitle_ocr_field_is_calibrated(field_width: int, field_height: int) -> bool:
+    """Return whether a subtitle field is one of the DAV2 model's calibrated shapes."""
+
+    return any(
+        (field_width, field_height) in calibration.calibrated_input_shapes
+        for calibration in MODEL_CALIBRATIONS
+    )
+
+
+def subtitle_ocr_project_row_ceil(
+        source_width: int, source_height: int,
+        field_width: int, field_height: int,
+        detector_y: int) -> Optional[int]:
+    """Project one detector row edge by the authenticated exact rational ceil rule."""
+
+    if (source_width <= 0 or source_height <= 0 or
+            detector_y < 0 or detector_y > SUBTITLE_OCR.output_shape[2] or
+            not subtitle_ocr_field_is_calibrated(field_width, field_height)):
+        return None
+    crop_height = min(
+        source_height,
+        (source_width * SUBTITLE_OCR.source_crop_aspect_height +
+         SUBTITLE_OCR.source_crop_aspect_width - 1) //
+        SUBTITLE_OCR.source_crop_aspect_width,
+    )
+    crop_top = source_height - crop_height
+    denominator = SUBTITLE_OCR.output_shape[2] * source_height
+    numerator = (
+        (crop_top * SUBTITLE_OCR.output_shape[2] + detector_y * crop_height) *
+        field_height
+    )
+    return min(
+        numerator // denominator + int(numerator % denominator != 0),
+        field_height,
+    )
+
+
+def subtitle_ocr_ribbon_min_bottom(
+        source_width: int, source_height: int,
+        field_width: int, field_height: int) -> Optional[int]:
+    """Return the inclusive field-row lower bound for a ribbon core's bottom edge."""
+
+    return subtitle_ocr_project_row_ceil(
+        source_width, source_height, field_width, field_height,
+        SUBTITLE_OCR.ocr_safe_row_bottom -
+        SUBTITLE_OCR.ribbon_bottom_tolerance_pixels,
+    )
+
+
+def subtitle_ocr_dynamic_roi(
+        source_width: int,
+        source_height: int,
+        field_width: int,
+        field_height: int) -> Optional[tuple[int, int]]:
+    """Project the authenticated safe OCR-row interval into one calibrated DAV2 field."""
+
+    top = subtitle_ocr_project_row_ceil(
+        source_width, source_height, field_width, field_height,
+        SUBTITLE_OCR.ocr_safe_row_top)
+    bottom = subtitle_ocr_project_row_ceil(
+        source_width, source_height, field_width, field_height,
+        SUBTITLE_OCR.ocr_safe_row_bottom)
+    if top is None or bottom is None or top >= bottom:
+        return None
+    return top, bottom
+
+
 def find_model_calibration(
         depth_model: str, depth_model_url: str, onnx_sha256: str) -> Optional[ModelCalibration]:
     """Return the one calibration bound to an exact model name, URL, and ONNX digest."""
@@ -508,4 +654,8 @@ __all__ = [
     "SubtitleOcrContract",
     "find_model_calibration",
     "load_contract",
+    "subtitle_ocr_dynamic_roi",
+    "subtitle_ocr_field_is_calibrated",
+    "subtitle_ocr_project_row_ceil",
+    "subtitle_ocr_ribbon_min_bottom",
 ]

@@ -45,7 +45,7 @@ namespace platf::sbs_debug {
    * candidate first produces shadow_ownership_refined_parallax from the full-resolution source
    * contour, then shadow_vertical_majorant (the exact upper-envelope diagnostic) and
    * shadow_vertical_conditioned (the fixed 75/25 vertical share), then the row majorant produces
-   * shadow_base_final_parallax. When OCR6 and SLR6 are active, the compact exact-frame record and
+   * shadow_base_final_parallax. When OCR8 and SLR8 are active, the compact exact-frame record and
    * locator state condition that Base into shadow_final_parallax; an empty current-authority block
    * copies Base bit for bit. In ROI mode that final field remains crop-local and is not by itself a
    * full-source position field. shadow_coordinate is allocated and written only for this explicit

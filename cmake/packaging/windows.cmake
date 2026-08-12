@@ -2,6 +2,13 @@
 install(TARGETS sunshine RUNTIME DESTINATION "." COMPONENT application)
 install(FILES "${PROJECT_SOURCE_DIR}/NOTICE" DESTINATION "." COMPONENT application)
 
+# The Windows TensorRT ZIP keeps runtime and builder-resource DLLs beside the
+# application at run time. The development target copies the same authenticated
+# package set post-build; include it in installed/packaged builds as well.
+if(PROJECT_TENSORRT_DLLS)
+    install(FILES ${PROJECT_TENSORRT_DLLS} DESTINATION "." COMPONENT application)
+endif()
+
 # Hardening: include zlib1.dll (loaded via LoadLibrary() in openssl's libcrypto.a)
 install(FILES "${ZLIB}" DESTINATION "." COMPONENT application)
 

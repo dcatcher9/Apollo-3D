@@ -53,6 +53,52 @@ TEST(HostSbsResolutionTest, EveryStandardMoonlight3dChoiceMapsToAuthenticatedSha
   }
 }
 
+TEST(HostSbsResolutionTest, ProjectsSubtitleSafeRowsIntoEveryAuthenticatedField) {
+  struct geometry_case_t {
+    std::uint32_t source_width;
+    std::uint32_t source_height;
+    int field_width;
+    int field_height;
+    std::uint32_t roi_top;
+    std::uint32_t roi_bottom;
+  };
+  constexpr std::array cases {
+    geometry_case_t {1920u, 1080u, 770, 434, 325u, 430u},
+    geometry_case_t {2560u, 1440u, 770, 434, 325u, 430u},
+    geometry_case_t {3840u, 2160u, 770, 434, 325u, 430u},
+    geometry_case_t {2560u, 1080u, 1022, 434, 289u, 429u},
+    geometry_case_t {3440u, 1440u, 1036, 434, 287u, 429u},
+    geometry_case_t {5120u, 2160u, 1022, 434, 289u, 429u},
+    geometry_case_t {1080u, 1920u, 434, 770, 709u, 768u},
+    geometry_case_t {1440u, 2560u, 434, 770, 709u, 768u},
+    geometry_case_t {2160u, 3840u, 434, 770, 709u, 768u},
+    geometry_case_t {1080u, 2560u, 434, 1022, 961u, 1020u},
+    geometry_case_t {1440u, 3440u, 434, 1036, 975u, 1034u},
+    geometry_case_t {2160u, 5120u, 434, 1022, 961u, 1020u},
+  };
+
+  for (const auto &test_case : cases) {
+    SCOPED_TRACE(
+      std::to_string(test_case.source_width) + "x" +
+      std::to_string(test_case.source_height)
+    );
+    const auto geometry = models::fit_subtitle_analysis_geometry(
+      test_case.source_width,
+      test_case.source_height,
+      {test_case.field_width, test_case.field_height}
+    );
+    ASSERT_TRUE(geometry.valid());
+    EXPECT_EQ(geometry.field_width, static_cast<std::uint32_t>(test_case.field_width));
+    EXPECT_EQ(geometry.field_height, static_cast<std::uint32_t>(test_case.field_height));
+    EXPECT_EQ(geometry.roi_top, test_case.roi_top);
+    EXPECT_EQ(geometry.roi_bottom, test_case.roi_bottom);
+  }
+
+  EXPECT_FALSE(models::fit_subtitle_analysis_geometry(1920u, 1080u, {1008, 434}).valid());
+  EXPECT_FALSE(models::fit_subtitle_analysis_geometry(0u, 1080u, {770, 434}).valid());
+  EXPECT_FALSE(models::fit_subtitle_analysis_geometry(1920u, 0u, {770, 434}).valid());
+}
+
 TEST(HostSbsResolutionTest, UsesTensorAuthenticationInsteadOfAStreamSizeAllowlist) {
   // A smaller 16:9 custom stream is safe because it produces the same authenticated 770x434
   // tensor as the standard 1080p/1440p/4K choices.

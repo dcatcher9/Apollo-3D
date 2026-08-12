@@ -1,32 +1,68 @@
-// Compact SLR6 subtitle authority.
+// Compact SLR8 lower-text authority.
 //
-// OCR6 is the sole geometry source.  A coherent line stack needs two distinct, exact-frame
-// observations before it becomes an owner.  Only rectangles copied from the current OCR6 record
-// may condition the current BaseField; cached owner, pending, target, and death-grace state never
-// manufacture current geometry.  The conditioner preserves each line rectangle and its gaps and
-// evaluates the V2-safe collar analytically, so no row/history/distance resources exist.
+// OCR8 is the sole geometry source.  A coherent subtitle stack plus any bottom ribbon candidates
+// need two distinct, exact-frame observations before becoming one shared-plane owner. Only tight
+// cores copied from the current OCR8 record may select or track geometry; only their paired
+// same-frame covers may condition the BaseField. Cached owner, pending, target, and death-grace
+// state never manufacture current geometry. Ordinary covers retain the established four-sided
+// analytic collar; a canonical full-width/bottom ribbon cover exposes only its top collar.
 
 #include "include/depth_constants.hlsl"
 #include "include/depth_coordinate_v2_contract.generated.hlsl"
 #include "include/sbs_adaptive_state_contract.generated.hlsl"
 
-// OCR6/SLR6 is an authenticated generated ABI.  Never reconstruct it locally when a stale
+// OCR8/SLR8 is an authenticated generated ABI.  Never reconstruct it locally when a stale
 // generated header is present: missing identity/layout macros are a compile-time failure.
 #if !defined(V2_OCR_RECORD_SCHEMA) || !defined(V2_OCR_RECORD_TAG) || \
     !defined(V2_OCR_RECORD_WORD_COUNT) || !defined(V2_OCR_RECORD_HEADER_WORD_COUNT) || \
     !defined(V2_OCR_BOX_WORD_COUNT) || !defined(V2_OCR_RAW_BOX_OFFSET) || \
     !defined(V2_OCR_RAW_BOX_CAPACITY) || !defined(V2_OCR_FINAL_BOX_OFFSET) || \
-    !defined(V2_OCR_FINAL_BOX_CAPACITY) || !defined(V2_OCR_FIELD_WIDTH) || \
-    !defined(V2_OCR_FIELD_HEIGHT) || !defined(V2_OCR_ROI_TOP) || \
-    !defined(V2_OCR_ROI_BOTTOM) || !defined(V2_SUBTITLE_LOCATOR_STATE_SCHEMA) || \
+    !defined(V2_OCR_FINAL_BOX_CAPACITY) || !defined(V2_OCR_OUTPUT_HEIGHT) || \
+    !defined(V2_OCR_BOX_FLAG_RIBBON) || !defined(V2_OCR_BOX_KNOWN_FLAGS) || \
+    !defined(V2_OCR_RIBBON_MIN_STRUCTURAL_GAPS) || \
+    !defined(V2_OCR_RIBBON_MIN_WIDTH_NUMERATOR) || \
+    !defined(V2_OCR_RIBBON_MIN_WIDTH_DENOMINATOR) || \
+    !defined(V2_OCR_RIBBON_BOTTOM_TOLERANCE_PIXELS) || \
+    !defined(V2_OCR_SAFE_ROW_TOP) || \
+    !defined(V2_OCR_SAFE_ROW_BOTTOM) || !defined(V2_OCR_CROP_ASPECT_WIDTH) || \
+    !defined(V2_OCR_CROP_ASPECT_HEIGHT) || \
+    !defined(V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR) || \
+    !defined(V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR) || \
+    !defined(V2_MODEL_CALIBRATED_SHAPE_COUNT) || \
+    !defined(V2_SUBTITLE_LOCATOR_STATE_SCHEMA) || \
     !defined(V2_SUBTITLE_LOCATOR_STATE_TAG) || \
     !defined(V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT) || \
     !defined(V2_SUBTITLE_LOCATOR_HEADER_WORD_COUNT) || \
     !defined(V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY) || \
     !defined(V2_SUBTITLE_LOCATOR_OWNER_OFFSET) || \
     !defined(V2_SUBTITLE_LOCATOR_PENDING_OFFSET) || \
-    !defined(V2_SUBTITLE_LOCATOR_CURRENT_OFFSET)
-#error "Generated V2 OCR6/SLR6 contract macros are required"
+    !defined(V2_SUBTITLE_LOCATOR_CURRENT_OFFSET) || \
+    !defined(V2_SUBTITLE_LOCATOR_KIND_WORD) || \
+    !defined(V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT) || \
+    !defined(V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT) || \
+    !defined(V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT) || \
+    !defined(V2_SUBTITLE_LOCATOR_KIND_MASK)
+#error "Generated V2 OCR8/SLR8 contract macros are required"
+#endif
+
+#if V2_MODEL_CALIBRATED_SHAPE_COUNT != 6 || V2_OCR_SAFE_ROW_TOP >= V2_OCR_SAFE_ROW_BOTTOM || \
+    V2_OCR_SAFE_ROW_BOTTOM > V2_OCR_OUTPUT_HEIGHT || \
+    V2_OCR_CROP_ASPECT_WIDTH == 0 || V2_OCR_CROP_ASPECT_HEIGHT == 0 || \
+    V2_OCR_CROP_ASPECT_HEIGHT > V2_OCR_CROP_ASPECT_WIDTH || \
+    V2_OCR_BOX_FLAG_RIBBON != 1u || V2_OCR_BOX_KNOWN_FLAGS != 1u || \
+    V2_OCR_RIBBON_MIN_STRUCTURAL_GAPS == 0u || \
+    V2_OCR_RIBBON_MIN_WIDTH_DENOMINATOR == 0u || \
+    V2_OCR_RIBBON_MIN_WIDTH_NUMERATOR > V2_OCR_RIBBON_MIN_WIDTH_DENOMINATOR || \
+    V2_OCR_RIBBON_BOTTOM_TOLERANCE_PIXELS >= V2_OCR_SAFE_ROW_BOTTOM || \
+    V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR == 0 || \
+    V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR >= V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR || \
+    V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY != 4u || \
+    V2_SUBTITLE_LOCATOR_KIND_WORD != 31u || \
+    V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT != 0u || \
+    V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT != 4u || \
+    V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT != 8u || \
+    V2_SUBTITLE_LOCATOR_KIND_MASK != 15u
+#error "Generated V2 OCR field-shape, safe-row, or locator-scale policy is inconsistent"
 #endif
 
 StructuredBuffer<float4> CutBridge : register(t1);
@@ -65,9 +101,14 @@ static const uint MATCHED_BASE = 24u;
 static const uint DEATH_GRACE_OBSERVATIONS = 6u;
 
 groupshared uint PreviousState[V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT];
-groupshared uint4 QualifiedBoxes[V2_OCR_FINAL_BOX_CAPACITY];
+groupshared uint4 QualifiedCores[V2_OCR_FINAL_BOX_CAPACITY];
+groupshared uint4 QualifiedCovers[V2_OCR_FINAL_BOX_CAPACITY];
+groupshared uint QualifiedKinds[V2_OCR_FINAL_BOX_CAPACITY];
 groupshared uint QualifiedMasks[V2_OCR_FINAL_BOX_CAPACITY];
 groupshared uint4 WorkRects[28];
+groupshared uint WorkKinds[28];
+groupshared uint4 StackCovers[MAX_LINES];
+groupshared uint4 MatchedCovers[MAX_LINES];
 groupshared float TargetSamples[32];
 groupshared float LineCenters[MAX_LINES];
 
@@ -79,10 +120,57 @@ bool ZeroRect(uint4 rectangle) {
     return all(rectangle == uint4(0u, 0u, 0u, 0u));
 }
 
+// The active field/ROI is carried by the existing runtime cbuffer and repeated in OCR8.  The host
+// enables this path only after authenticating the DAV2 tensor shape; SLR8 independently checks
+// finite ABI-sized geometry, the actual BaseField dispatch dimensions, and that the ROI is a
+// non-empty subset of the exact bottom-6:1 detector crop.  Any disagreement publishes no current
+// authority and condition_main copies BaseField exactly.
+bool LocatorGeometryValid() {
+    if (locator_source.x == 0u || locator_source.y == 0u || locator_source.z != 1u ||
+        locator_field.x == 0u || locator_field.y == 0u ||
+        locator_field.x > 0xffffu || locator_field.y > 0xffffu ||
+        locator_field.z >= locator_field.w || locator_field.w > locator_field.y ||
+        target_w != locator_field.x || target_h != locator_field.y) {
+        return false;
+    }
+
+    if (!V2SubtitleOcrFieldIsCalibrated(locator_field.x, locator_field.y)) return false;
+
+    uint crop_quotient = locator_source.x / V2_OCR_CROP_ASPECT_WIDTH;
+    uint crop_remainder = locator_source.x % V2_OCR_CROP_ASPECT_WIDTH;
+    uint crop_height = min(
+        locator_source.y,
+        crop_quotient * V2_OCR_CROP_ASPECT_HEIGHT +
+        (crop_remainder * V2_OCR_CROP_ASPECT_HEIGHT +
+         V2_OCR_CROP_ASPECT_WIDTH - 1u) / V2_OCR_CROP_ASPECT_WIDTH);
+    uint crop_top = locator_source.y - crop_height;
+    if (locator_source.y > 0xffffffffu / V2_OCR_OUTPUT_HEIGHT) return false;
+    uint denominator = V2_OCR_OUTPUT_HEIGHT * locator_source.y;
+    if (denominator > 0xffffffffu / locator_field.y) return false;
+    uint top_numerator =
+        crop_top * V2_OCR_OUTPUT_HEIGHT + V2_OCR_SAFE_ROW_TOP * crop_height;
+    uint bottom_numerator =
+        crop_top * V2_OCR_OUTPUT_HEIGHT + V2_OCR_SAFE_ROW_BOTTOM * crop_height;
+    uint top_scaled = top_numerator * locator_field.y;
+    uint bottom_scaled = bottom_numerator * locator_field.y;
+    uint expected_roi_top = min(
+        top_scaled / denominator + (top_scaled % denominator != 0u ? 1u : 0u),
+        locator_field.y);
+    uint expected_roi_bottom = min(
+        bottom_scaled / denominator + (bottom_scaled % denominator != 0u ? 1u : 0u),
+        locator_field.y);
+    return locator_field.z == expected_roi_top && locator_field.w == expected_roi_bottom;
+}
+
 bool ValidRoiRect(uint4 rectangle) {
     return rectangle.x < rectangle.z && rectangle.y < rectangle.w &&
         rectangle.z <= locator_field.x && rectangle.w <= locator_field.y &&
         rectangle.y >= locator_field.z && rectangle.w <= locator_field.w;
+}
+
+bool ValidFieldRect(uint4 rectangle) {
+    return rectangle.x < rectangle.z && rectangle.y < rectangle.w &&
+        rectangle.z <= locator_field.x && rectangle.w <= locator_field.y;
 }
 
 uint RectArea(uint4 rectangle) {
@@ -97,10 +185,6 @@ float RectIou(uint4 a, uint4 b) {
     uint intersection = right > left && bottom > top ? (right - left) * (bottom - top) : 0u;
     uint union_area = RectArea(a) + RectArea(b) - intersection;
     return union_area == 0u ? 0.0f : (float)intersection / (float)union_area;
-}
-
-bool RectanglesOverlap(uint4 a, uint4 b) {
-    return min(a.z, b.z) > max(a.x, b.x) && min(a.w, b.w) > max(a.y, b.y);
 }
 
 uint4 RectSummary(uint base, uint count) {
@@ -133,6 +217,7 @@ void CopyRects(uint destination, uint source, uint count) {
     for (uint index = 0u; index < MAX_LINES; ++index) {
         WorkRects[destination + index] = index < count ? WorkRects[source + index] :
             uint4(0u, 0u, 0u, 0u);
+        WorkKinds[destination + index] = index < count ? WorkKinds[source + index] : 0u;
     }
 }
 
@@ -160,14 +245,80 @@ bool CoherentLines(uint4 a, uint4 b) {
         gap * 2u <= max(height_a, height_b);
 }
 
-bool ValidOcrBox(uint offset) {
+bool SameBaselineSegments(uint4 a, uint4 b) {
+    // OCR deliberately keeps ordinary covers independent when a horizontal gap exceeds the text
+    // join limit. Re-associate only strongly aligned, nearby core segments for owner selection; do
+    // not union their geometry. The strict vertical relation prevents a nearby upper/lower scene
+    // text line from bridging otherwise separate components.
+    bool a_before_b = a.z <= b.x;
+    bool b_before_a = b.z <= a.x;
+    if (!a_before_b && !b_before_a) return false;
+    uint height_a = a.w - a.y;
+    uint height_b = b.w - b.y;
+    uint shorter_height = min(height_a, height_b);
+    uint taller_height = max(height_a, height_b);
+    uint vertical_overlap = min(a.w, b.w) > max(a.y, b.y) ?
+        min(a.w, b.w) - max(a.y, b.y) : 0u;
+    uint center_y_delta_twice = (a.y + a.w) > (b.y + b.w) ?
+        (a.y + a.w) - (b.y + b.w) : (b.y + b.w) - (a.y + a.w);
+    uint horizontal_gap = a_before_b ? b.x - a.z : a.x - b.z;
+    uint combined_span = max(a.z, b.z) - min(a.x, b.x);
+    uint maximum_width = locator_field.x * V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR /
+        V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR;
+    return vertical_overlap * 4u >= shorter_height * 3u &&
+        taller_height <= 2u * shorter_height &&
+        center_y_delta_twice <= shorter_height &&
+        horizontal_gap <= 8u * taller_height &&
+        combined_span <= maximum_width;
+}
+
+bool ValidOcrBoxPayload(uint offset) {
     uint4 rectangle = uint4(
         OcrRecord[offset + 0u], OcrRecord[offset + 1u],
         OcrRecord[offset + 2u], OcrRecord[offset + 3u]);
     float score = asfloat(OcrRecord[offset + 4u]);
-    return ValidRoiRect(rectangle) && FiniteFloat(score) && score >= 0.4f && score <= 1.0f &&
-        OcrRecord[offset + 5u] == 0u && OcrRecord[offset + 6u] == 0u &&
-        OcrRecord[offset + 7u] == 0u;
+    return ValidFieldRect(rectangle) && FiniteFloat(score) && score >= 0.4f && score <= 1.0f &&
+        (OcrRecord[offset + 5u] & ~V2_OCR_BOX_KNOWN_FLAGS) == 0u &&
+        OcrRecord[offset + 6u] != 0u && OcrRecord[offset + 6u] <= V2_OCR_OUTPUT_WIDTH &&
+        OcrRecord[offset + 7u] < OcrRecord[offset + 6u];
+}
+
+bool ValidOcrPair(uint slot) {
+    uint raw_offset = V2_OCR_RAW_BOX_OFFSET + slot * V2_OCR_BOX_WORD_COUNT;
+    uint final_offset = V2_OCR_FINAL_BOX_OFFSET + slot * V2_OCR_BOX_WORD_COUNT;
+    if (!ValidOcrBoxPayload(raw_offset) || !ValidOcrBoxPayload(final_offset)) return false;
+    uint4 core = uint4(
+        OcrRecord[raw_offset + 0u], OcrRecord[raw_offset + 1u],
+        OcrRecord[raw_offset + 2u], OcrRecord[raw_offset + 3u]);
+    uint4 cover = uint4(
+        OcrRecord[final_offset + 0u], OcrRecord[final_offset + 1u],
+        OcrRecord[final_offset + 2u], OcrRecord[final_offset + 3u]);
+    if (!ValidRoiRect(core) || cover.x > core.x || cover.y > core.y ||
+        cover.z < core.z || cover.w < core.w ||
+        OcrRecord[raw_offset + 4u] != OcrRecord[final_offset + 4u] ||
+        OcrRecord[raw_offset + 5u] != OcrRecord[final_offset + 5u] ||
+        OcrRecord[raw_offset + 6u] != OcrRecord[final_offset + 6u] ||
+        OcrRecord[raw_offset + 7u] != OcrRecord[final_offset + 7u]) {
+        return false;
+    }
+    bool ribbon = (OcrRecord[raw_offset + 5u] & V2_OCR_BOX_FLAG_RIBBON) != 0u;
+    if (ribbon) {
+        uint width = core.z - core.x;
+        uint minimum_bottom = 0u;
+        bool projected = V2SubtitleOcrRibbonMinBottom(
+            locator_source.x, locator_source.y, locator_field.x, locator_field.y,
+            minimum_bottom);
+        if (width * V2_OCR_RIBBON_MIN_WIDTH_DENOMINATOR <
+                locator_field.x * V2_OCR_RIBBON_MIN_WIDTH_NUMERATOR ||
+            !projected || core.w < minimum_bottom || core.w > locator_field.w ||
+            OcrRecord[raw_offset + 6u] <= OcrRecord[raw_offset + 7u] ||
+            OcrRecord[raw_offset + 7u] < V2_OCR_RIBBON_MIN_STRUCTURAL_GAPS ||
+            cover.x != 0u || cover.z != locator_field.x || cover.w != locator_field.y ||
+            cover.y < locator_field.z) {
+            return false;
+        }
+    } else if (!ValidRoiRect(cover)) return false;
+    return true;
 }
 
 bool ZeroOcrBox(uint offset) {
@@ -180,17 +331,14 @@ bool ZeroOcrBox(uint offset) {
 
 bool ValidateOcrRecord(out uint final_count) {
     final_count = 0u;
-    if (locator_field.x != V2_OCR_FIELD_WIDTH || locator_field.y != V2_OCR_FIELD_HEIGHT ||
-        locator_field.z != V2_OCR_ROI_TOP || locator_field.w != V2_OCR_ROI_BOTTOM ||
-        target_w != locator_field.x || target_h != locator_field.y ||
-        locator_source.x == 0u || locator_source.y == 0u || locator_source.z != 1u) {
+    if (!LocatorGeometryValid()) {
         return false;
     }
     uint raw_count = OcrRecord[3u];
     final_count = OcrRecord[4u];
     if (OcrRecord[0u] != V2_OCR_RECORD_SCHEMA || OcrRecord[1u] != V2_OCR_RECORD_TAG ||
         OcrRecord[2u] != 1u || raw_count > V2_OCR_RAW_BOX_CAPACITY ||
-        final_count > V2_OCR_FINAL_BOX_CAPACITY || final_count > raw_count ||
+        final_count > V2_OCR_FINAL_BOX_CAPACITY || raw_count != final_count ||
         OcrRecord[5u] != locator_frame.x || OcrRecord[6u] != locator_frame.y ||
         OcrRecord[7u] != locator_frame.z || OcrRecord[8u] != locator_frame.w ||
         OcrRecord[9u] != locator_source.x || OcrRecord[10u] != locator_source.y ||
@@ -202,31 +350,48 @@ bool ValidateOcrRecord(out uint final_count) {
     [loop]
     for (uint slot = 0u; slot < V2_OCR_RAW_BOX_CAPACITY; ++slot) {
         uint offset = V2_OCR_RAW_BOX_OFFSET + slot * V2_OCR_BOX_WORD_COUNT;
-        if (slot < raw_count ? !ValidOcrBox(offset) : !ZeroOcrBox(offset)) return false;
+        if (slot < raw_count ? !ValidOcrPair(slot) : !ZeroOcrBox(offset)) return false;
     }
     [loop]
     for (uint final_slot = 0u; final_slot < V2_OCR_FINAL_BOX_CAPACITY; ++final_slot) {
         uint offset = V2_OCR_FINAL_BOX_OFFSET + final_slot * V2_OCR_BOX_WORD_COUNT;
-        if (final_slot < final_count ? !ValidOcrBox(offset) : !ZeroOcrBox(offset)) return false;
+        if (final_slot >= final_count && !ZeroOcrBox(offset)) return false;
     }
     return true;
 }
 
 uint BuildCurrentStack(uint final_count) {
     uint qualified_count = 0u;
+    uint ribbon_mask = 0u;
     [loop]
     for (uint slot = 0u; slot < V2_OCR_FINAL_BOX_CAPACITY; ++slot) {
         if (slot < final_count) {
-            uint offset = V2_OCR_FINAL_BOX_OFFSET + slot * V2_OCR_BOX_WORD_COUNT;
-            uint4 rectangle = uint4(
-                OcrRecord[offset + 0u], OcrRecord[offset + 1u],
-                OcrRecord[offset + 2u], OcrRecord[offset + 3u]);
-            uint width = rectangle.z - rectangle.x;
-            uint height = rectangle.w - rectangle.y;
+            uint raw_offset = V2_OCR_RAW_BOX_OFFSET + slot * V2_OCR_BOX_WORD_COUNT;
+            uint final_offset = V2_OCR_FINAL_BOX_OFFSET + slot * V2_OCR_BOX_WORD_COUNT;
+            uint4 core = uint4(
+                OcrRecord[raw_offset + 0u], OcrRecord[raw_offset + 1u],
+                OcrRecord[raw_offset + 2u], OcrRecord[raw_offset + 3u]);
+            uint4 cover = uint4(
+                OcrRecord[final_offset + 0u], OcrRecord[final_offset + 1u],
+                OcrRecord[final_offset + 2u], OcrRecord[final_offset + 3u]);
+            uint kind = (OcrRecord[raw_offset + 5u] & V2_OCR_BOX_FLAG_RIBBON) != 0u ? 1u : 0u;
+            uint width = core.z - core.x;
+            uint height = core.w - core.y;
             // Generic subtitle-line geometry.  In particular, square badges/logos fail the
             // aspect gate without a position- or brand-specific exclusion.
-            if (width >= 48u && width <= 693u && height >= 6u && width >= 2u * height) {
-                QualifiedBoxes[qualified_count++] = rectangle;
+            // Every calibrated DAV2 tensor has square analysis cells and the same 434-cell short
+            // side, so font/target-sampling distances remain physical cell counts.  Only the
+            // maximum ordinary subtitle span is a fraction of the active field width.  A ribbon
+            // has independent detector topology evidence and may legitimately span the field.
+            uint maximum_width = locator_field.x * V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR /
+                V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR;
+            if (width >= 48u && (kind != 0u || width <= maximum_width) &&
+                height >= 6u && width >= 2u * height) {
+                QualifiedCores[qualified_count] = core;
+                QualifiedCovers[qualified_count] = cover;
+                QualifiedKinds[qualified_count] = kind;
+                if (kind != 0u) ribbon_mask |= 1u << qualified_count;
+                ++qualified_count;
             }
         }
     }
@@ -234,7 +399,8 @@ uint BuildCurrentStack(uint final_count) {
 
     [loop]
     for (uint index = 0u; index < V2_OCR_FINAL_BOX_CAPACITY; ++index) {
-        QualifiedMasks[index] = index < qualified_count ? (1u << index) : 0u;
+        QualifiedMasks[index] = index < qualified_count && QualifiedKinds[index] == 0u ?
+            (1u << index) : 0u;
     }
     [loop]
     for (uint closure_pass = 0u; closure_pass < V2_OCR_FINAL_BOX_CAPACITY; ++closure_pass) {
@@ -244,10 +410,13 @@ uint BuildCurrentStack(uint final_count) {
                 uint expanded = QualifiedMasks[a];
                 [loop]
                 for (uint b = 0u; b < V2_OCR_FINAL_BOX_CAPACITY; ++b) {
-                    if (b < qualified_count && (expanded & (1u << b)) != 0u) {
+                    if (b < qualified_count && QualifiedKinds[b] == 0u &&
+                        (expanded & (1u << b)) != 0u) {
                         [loop]
                         for (uint c = 0u; c < V2_OCR_FINAL_BOX_CAPACITY; ++c) {
-                            if (c < qualified_count && CoherentLines(QualifiedBoxes[b], QualifiedBoxes[c])) {
+                            if (c < qualified_count && QualifiedKinds[c] == 0u &&
+                                (CoherentLines(QualifiedCores[b], QualifiedCores[c]) ||
+                                 SameBaselineSegments(QualifiedCores[b], QualifiedCores[c]))) {
                                 expanded |= 1u << c;
                             }
                         }
@@ -263,7 +432,7 @@ uint BuildCurrentStack(uint final_count) {
     uint4 best_bbox = uint4(0u, 0u, 0u, 0u);
     [loop]
     for (uint root = 0u; root < V2_OCR_FINAL_BOX_CAPACITY; ++root) {
-        if (root < qualified_count) {
+        if (root < qualified_count && QualifiedKinds[root] == 0u) {
             uint mask = QualifiedMasks[root];
             // Evaluate each connected component once and reject unsupported >4-line blocks.
             if ((mask & ((1u << root) - 1u)) == 0u) {
@@ -273,7 +442,7 @@ uint BuildCurrentStack(uint final_count) {
                 [loop]
                 for (uint index = 0u; index < V2_OCR_FINAL_BOX_CAPACITY; ++index) {
                     if (index < qualified_count && (mask & (1u << index)) != 0u) {
-                        uint4 rectangle = QualifiedBoxes[index];
+                        uint4 rectangle = QualifiedCores[index];
                         ++count;
                         area += RectArea(rectangle);
                         bbox.x = min(bbox.x, rectangle.x);
@@ -282,7 +451,11 @@ uint BuildCurrentStack(uint final_count) {
                         bbox.w = max(bbox.w, rectangle.w);
                     }
                 }
-                bool better = count <= MAX_LINES && (best_mask == 0u || area > best_area ||
+                uint maximum_width = locator_field.x *
+                    V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR /
+                    V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR;
+                bool better = count <= MAX_LINES && bbox.z - bbox.x <= maximum_width &&
+                    (best_mask == 0u || area > best_area ||
                     (area == best_area && (bbox.w > best_bbox.w ||
                     (bbox.w == best_bbox.w && (bbox.y > best_bbox.y ||
                     (bbox.y == best_bbox.y && bbox.x < best_bbox.x))))));
@@ -294,13 +467,28 @@ uint BuildCurrentStack(uint final_count) {
             }
         }
     }
-    if (best_mask == 0u) return 0u;
+    uint selected_mask = best_mask | ribbon_mask;
+    if (selected_mask == 0u) return 0u;
+
+    uint selected_count = 0u;
+    [loop]
+    for (uint selected_index = 0u; selected_index < V2_OCR_FINAL_BOX_CAPACITY; ++selected_index) {
+        if (selected_index < qualified_count && (selected_mask & (1u << selected_index)) != 0u) {
+            ++selected_count;
+        }
+    }
+    // The compact authenticated state has four rectangles.  Never silently discard a detected
+    // ribbon or an ordinary line to make a mixed owner fit: an over-capacity observation abstains.
+    if (selected_count > MAX_LINES) return 0u;
 
     uint stack_count = 0u;
     [loop]
     for (uint collect_index = 0u; collect_index < V2_OCR_FINAL_BOX_CAPACITY; ++collect_index) {
-        if (collect_index < qualified_count && (best_mask & (1u << collect_index)) != 0u) {
-            WorkRects[STACK_BASE + stack_count++] = QualifiedBoxes[collect_index];
+        if (collect_index < qualified_count && (selected_mask & (1u << collect_index)) != 0u) {
+            WorkRects[STACK_BASE + stack_count] = QualifiedCores[collect_index];
+            WorkKinds[STACK_BASE + stack_count] = QualifiedKinds[collect_index];
+            StackCovers[stack_count] = QualifiedCovers[collect_index];
+            ++stack_count;
         }
     }
     // Canonical top/left order makes temporal comparison and dumps deterministic.
@@ -314,6 +502,12 @@ uint BuildCurrentStack(uint final_count) {
                 if (right.y < left.y || (right.y == left.y && right.x < left.x)) {
                     WorkRects[STACK_BASE + sort_a] = right;
                     WorkRects[STACK_BASE + sort_b] = left;
+                    uint4 cover_swap = StackCovers[sort_a];
+                    StackCovers[sort_a] = StackCovers[sort_b];
+                    StackCovers[sort_b] = cover_swap;
+                    uint kind_swap = WorkKinds[STACK_BASE + sort_a];
+                    WorkKinds[STACK_BASE + sort_a] = WorkKinds[STACK_BASE + sort_b];
+                    WorkKinds[STACK_BASE + sort_b] = kind_swap;
                 }
             }
         }
@@ -348,15 +542,33 @@ bool ValidatePreviousRectBlock(uint offset, uint count, uint4 expected_bbox, uin
 }
 
 bool ValidatePreviousCurrent(uint count) {
+    uint kinds = (PreviousState[V2_SUBTITLE_LOCATOR_KIND_WORD] >>
+                  V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT) & V2_SUBTITLE_LOCATOR_KIND_MASK;
     [unroll]
     for (uint slot = 0u; slot < MAX_LINES; ++slot) {
         uint base = V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + slot * 4u;
         uint4 rectangle = uint4(
             PreviousState[base + 0u], PreviousState[base + 1u],
             PreviousState[base + 2u], PreviousState[base + 3u]);
-        if (slot < count ? !ValidRoiRect(rectangle) : !ZeroRect(rectangle)) return false;
+        if (slot < count) {
+            bool ribbon = ((kinds >> slot) & 1u) != 0u;
+            bool valid = ribbon ?
+                (ValidFieldRect(rectangle) && rectangle.x == 0u &&
+                 rectangle.z == locator_field.x && rectangle.w == locator_field.y &&
+                 rectangle.y >= locator_field.z) : ValidRoiRect(rectangle);
+            if (!valid) return false;
+        } else if (!ZeroRect(rectangle)) return false;
     }
     return true;
+}
+
+uint KindMaskForCount(uint count) {
+    return count == 0u ? 0u : (1u << count) - 1u;
+}
+
+bool PackedKindsValid(uint packed, uint shift, uint count) {
+    uint kinds = (packed >> shift) & V2_SUBTITLE_LOCATOR_KIND_MASK;
+    return (kinds & ~KindMaskForCount(count)) == 0u;
 }
 
 bool ValidatePreviousState() {
@@ -368,12 +580,21 @@ bool ValidatePreviousState() {
     bool pending = (flags & FLAG_PENDING) != 0u;
     bool target_valid = (flags & FLAG_TARGET_VALID) != 0u;
     bool target_reset = (flags & FLAG_TARGET_RESET) != 0u;
+    uint packed_kinds = PreviousState[V2_SUBTITLE_LOCATOR_KIND_WORD];
+    uint known_kind_bits =
+        (V2_SUBTITLE_LOCATOR_KIND_MASK << V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT) |
+        (V2_SUBTITLE_LOCATOR_KIND_MASK << V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT) |
+        (V2_SUBTITLE_LOCATOR_KIND_MASK << V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT);
     if (PreviousState[0u] != V2_SUBTITLE_LOCATOR_STATE_SCHEMA ||
         PreviousState[1u] != V2_SUBTITLE_LOCATOR_STATE_TAG || (flags & ~KNOWN_FLAGS) != 0u ||
         owner_count > MAX_LINES || pending_count > MAX_LINES || current_count > MAX_LINES ||
         PreviousState[21u] > EVENT_HANDOFF || PreviousState[24u] > 2u ||
         PreviousState[27u] != locator_field.x || PreviousState[28u] != locator_field.y ||
-        PreviousState[31u] != 0u || owner != (owner_count != 0u) ||
+        (packed_kinds & ~known_kind_bits) != 0u ||
+        !PackedKindsValid(packed_kinds, V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT, owner_count) ||
+        !PackedKindsValid(packed_kinds, V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT, pending_count) ||
+        !PackedKindsValid(packed_kinds, V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT, current_count) ||
+        owner != (owner_count != 0u) ||
         pending != (pending_count != 0u) || owner != (PreviousState[3u] != 0u) ||
         (current_count != 0u && (!owner || !target_valid || current_count > owner_count))) {
         return false;
@@ -418,7 +639,9 @@ bool ValidatePreviousState() {
     return true;
 }
 
-void LoadPreviousRects(uint state_offset, uint work_base, uint count) {
+void LoadPreviousRects(uint state_offset, uint kind_shift, uint work_base, uint count) {
+    uint kinds = (PreviousState[V2_SUBTITLE_LOCATOR_KIND_WORD] >> kind_shift) &
+        V2_SUBTITLE_LOCATOR_KIND_MASK;
     [unroll]
     for (uint slot = 0u; slot < MAX_LINES; ++slot) {
         uint offset = state_offset + slot * 4u;
@@ -426,6 +649,7 @@ void LoadPreviousRects(uint state_offset, uint work_base, uint count) {
             PreviousState[offset + 0u], PreviousState[offset + 1u],
             PreviousState[offset + 2u], PreviousState[offset + 3u]) :
             uint4(0u, 0u, 0u, 0u);
+        WorkKinds[work_base + slot] = slot < count ? ((kinds >> slot) & 1u) : 0u;
     }
 }
 
@@ -434,7 +658,10 @@ bool StackCompatible(uint first_base, uint first_count, uint second_base, uint s
     float sum = 0.0f;
     [unroll]
     for (uint index = 0u; index < MAX_LINES; ++index) {
-        if (index < first_count) sum += RectIou(WorkRects[first_base + index], WorkRects[second_base + index]);
+        if (index < first_count) {
+            if (WorkKinds[first_base + index] != WorkKinds[second_base + index]) return false;
+            sum += RectIou(WorkRects[first_base + index], WorkRects[second_base + index]);
+        }
     }
     return sum >= 0.6f * (float)first_count;
 }
@@ -450,6 +677,8 @@ uint MatchCurrentToOwner(uint current_count, uint owner_count) {
             [unroll]
             for (uint owner_index = 0u; owner_index < MAX_LINES; ++owner_index) {
                 if (owner_index < owner_count && (used & (1u << owner_index)) == 0u) {
+                    if (WorkKinds[STACK_BASE + current_index] !=
+                        WorkKinds[OLD_OWNER_BASE + owner_index]) continue;
                     float iou = RectIou(
                         WorkRects[STACK_BASE + current_index], WorkRects[OLD_OWNER_BASE + owner_index]);
                     if (iou >= best_iou) {
@@ -460,15 +689,42 @@ uint MatchCurrentToOwner(uint current_count, uint owner_count) {
             }
             if (best_owner < MAX_LINES) {
                 used |= 1u << best_owner;
-                WorkRects[MATCHED_BASE + matched++] = WorkRects[STACK_BASE + current_index];
+                WorkRects[MATCHED_BASE + matched] = WorkRects[STACK_BASE + current_index];
+                WorkKinds[MATCHED_BASE + matched] = WorkKinds[STACK_BASE + current_index];
+                MatchedCovers[matched] = StackCovers[current_index];
+                ++matched;
             }
         }
     }
     [unroll]
     for (uint index = 0u; index < MAX_LINES; ++index) {
-        if (index >= matched) WorkRects[MATCHED_BASE + index] = uint4(0u, 0u, 0u, 0u);
+        if (index >= matched) {
+            WorkRects[MATCHED_BASE + index] = uint4(0u, 0u, 0u, 0u);
+            WorkKinds[MATCHED_BASE + index] = 0u;
+            MatchedCovers[index] = uint4(0u, 0u, 0u, 0u);
+        }
     }
     return matched;
+}
+
+void CopyStackCoversToCurrent(uint count) {
+    [unroll]
+    for (uint index = 0u; index < MAX_LINES; ++index) {
+        WorkRects[NEW_CURRENT_BASE + index] = index < count ? StackCovers[index] :
+            uint4(0u, 0u, 0u, 0u);
+        WorkKinds[NEW_CURRENT_BASE + index] = index < count ?
+            WorkKinds[STACK_BASE + index] : 0u;
+    }
+}
+
+void CopyMatchedCoversToCurrent(uint count) {
+    [unroll]
+    for (uint index = 0u; index < MAX_LINES; ++index) {
+        WorkRects[NEW_CURRENT_BASE + index] = index < count ? MatchedCovers[index] :
+            uint4(0u, 0u, 0u, 0u);
+        WorkKinds[NEW_CURRENT_BASE + index] = index < count ?
+            WorkKinds[MATCHED_BASE + index] : 0u;
+    }
 }
 
 uint NextGeneration(uint value) {
@@ -499,8 +755,10 @@ bool SampleOwnerTarget(uint owner_count, out float target) {
     float center = (owner_count & 1u) != 0u ? LineCenters[owner_count / 2u] :
         0.5f * (LineCenters[owner_count / 2u - 1u] + LineCenters[owner_count / 2u]);
     uint owner_top = RectSummary(NEW_OWNER_BASE, owner_count).y;
-    uint sample_y0 = owner_top >= 10u ? owner_top - 10u : 0u;
-    uint sample_y1 = owner_top >= 4u ? owner_top - 4u : 0u;
+    uint outer_y_offset = 10u;
+    uint inner_y_offset = 4u;
+    uint sample_y0 = owner_top >= outer_y_offset ? owner_top - outer_y_offset : 0u;
+    uint sample_y1 = owner_top >= inner_y_offset ? owner_top - inner_y_offset : 0u;
     [loop]
     for (uint sample_index = 0u; sample_index < 16u; ++sample_index) {
         float sample_x_float = center - 30.0f + 4.0f * (float)sample_index;
@@ -532,12 +790,6 @@ bool SampleOwnerTarget(uint owner_count, out float target) {
     return FiniteFloat(target) && abs(target) <= v2_direct_container_limit;
 }
 
-float UpdateTarget(float previous, float observation) {
-    float requested = 0.15f * (observation - previous);
-    float max_step = 0.25f / (float)locator_source.x;
-    return previous + clamp(requested, -max_step, max_step);
-}
-
 void StoreRectBlock(uint offset, uint base, uint count) {
     [unroll]
     for (uint slot = 0u; slot < MAX_LINES; ++slot) {
@@ -547,6 +799,15 @@ void StoreRectBlock(uint offset, uint base, uint count) {
         LocatorState[offset + slot * 4u + 2u] = rectangle.z;
         LocatorState[offset + slot * 4u + 3u] = rectangle.w;
     }
+}
+
+uint PackKinds(uint base, uint count, uint shift) {
+    uint kinds = 0u;
+    [unroll]
+    for (uint slot = 0u; slot < MAX_LINES; ++slot) {
+        if (slot < count) kinds |= (WorkKinds[base + slot] & 1u) << slot;
+    }
+    return kinds << shift;
 }
 
 void PublishState(
@@ -592,7 +853,11 @@ void PublishState(
         (grace_bounds.z << 16u) | grace_bounds.x : 0u;
     LocatorState[30u] = owner_count == 0u && grace != 0u ?
         (grace_bounds.w << 16u) | grace_bounds.y : 0u;
-    LocatorState[31u] = 0u;
+    LocatorState[V2_SUBTITLE_LOCATOR_KIND_WORD] =
+        PackKinds(NEW_OWNER_BASE, owner_count, V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT) |
+        PackKinds(NEW_PENDING_BASE, pending_count, V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT) |
+        PackKinds(NEW_CURRENT_BASE, target_valid ? current_count : 0u,
+                  V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT);
     StoreRectBlock(V2_SUBTITLE_LOCATOR_OWNER_OFFSET, NEW_OWNER_BASE, owner_count);
     StoreRectBlock(V2_SUBTITLE_LOCATOR_PENDING_OFFSET, NEW_PENDING_BASE, pending_count);
     StoreRectBlock(
@@ -610,6 +875,12 @@ void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
     [loop]
     for (uint work_index = 0u; work_index < 28u; ++work_index) {
         WorkRects[work_index] = uint4(0u, 0u, 0u, 0u);
+        WorkKinds[work_index] = 0u;
+    }
+    [unroll]
+    for (uint cover_index = 0u; cover_index < MAX_LINES; ++cover_index) {
+        StackCovers[cover_index] = uint4(0u, 0u, 0u, 0u);
+        MatchedCovers[cover_index] = uint4(0u, 0u, 0u, 0u);
     }
 
     bool cut_valid = asuint(SBS_STATE_CUT_CONTRACT_TAG_BITS(
@@ -628,8 +899,12 @@ void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint old_owner_count = old_valid ? PreviousState[4u] : 0u;
     uint old_pending_count = old_valid ? PreviousState[12u] : 0u;
     if (old_valid) {
-        LoadPreviousRects(V2_SUBTITLE_LOCATOR_OWNER_OFFSET, OLD_OWNER_BASE, old_owner_count);
-        LoadPreviousRects(V2_SUBTITLE_LOCATOR_PENDING_OFFSET, OLD_PENDING_BASE, old_pending_count);
+        LoadPreviousRects(
+            V2_SUBTITLE_LOCATOR_OWNER_OFFSET, V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT,
+            OLD_OWNER_BASE, old_owner_count);
+        LoadPreviousRects(
+            V2_SUBTITLE_LOCATOR_PENDING_OFFSET, V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT,
+            OLD_PENDING_BASE, old_pending_count);
     }
     bool distinct_observation = !old_valid || PreviousState[22u] != locator_frame.x ||
         PreviousState[23u] != locator_frame.y || PreviousState[10u] != locator_frame.z ||
@@ -670,10 +945,12 @@ void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
             uint matched = MatchCurrentToOwner(stack_count, old_owner_count);
             if (matched != 0u) {
                 CopyRects(NEW_OWNER_BASE, MATCHED_BASE, matched);
-                CopyRects(NEW_CURRENT_BASE, MATCHED_BASE, matched);
+                CopyMatchedCoversToCurrent(matched);
                 new_owner_count = matched;
                 authority_count = matched;
-                owner_generation = PreviousState[3u];
+                // A cut is a target-resampling boundary even when geometry survives. Advance the
+                // generation so the newly sampled plane cannot masquerade as the old latch.
+                owner_generation = NextGeneration(PreviousState[3u]);
                 cut_survivor = true;
                 if (matched < stack_count) {
                     CopyRects(NEW_PENDING_BASE, STACK_BASE, stack_count);
@@ -710,15 +987,13 @@ void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
         if (old_pending_count != 0u && distinct_observation &&
             StackCompatible(OLD_PENDING_BASE, old_pending_count, STACK_BASE, stack_count)) {
             CopyRects(NEW_OWNER_BASE, STACK_BASE, stack_count);
-            CopyRects(NEW_CURRENT_BASE, STACK_BASE, stack_count);
+            CopyStackCoversToCurrent(stack_count);
             new_owner_count = stack_count;
             authority_count = stack_count;
             owner_generation = NextGeneration(PreviousState[3u]);
             new_owner = true;
             event = EVENT_HANDOFF;
-            if (old_target_valid && RectanglesOverlap(
-                    RectSummary(OLD_OWNER_BASE, old_owner_count),
-                    RectSummary(STACK_BASE, stack_count))) {
+            if (old_target_valid) {
                 inherit_target = true;
                 inherited_target = old_target;
             }
@@ -726,7 +1001,7 @@ void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
             uint matched = MatchCurrentToOwner(stack_count, old_owner_count);
             if (matched == stack_count && stack_count <= old_owner_count) {
                 CopyRects(NEW_OWNER_BASE, STACK_BASE, stack_count);
-                CopyRects(NEW_CURRENT_BASE, STACK_BASE, stack_count);
+                CopyStackCoversToCurrent(stack_count);
                 new_owner_count = stack_count;
                 authority_count = stack_count;
                 owner_generation = PreviousState[3u];
@@ -734,7 +1009,7 @@ void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
             } else {
                 CopyRects(NEW_OWNER_BASE, OLD_OWNER_BASE, old_owner_count);
                 CopyRects(NEW_PENDING_BASE, STACK_BASE, stack_count);
-                CopyRects(NEW_CURRENT_BASE, MATCHED_BASE, matched);
+                CopyMatchedCoversToCurrent(matched);
                 new_owner_count = old_owner_count;
                 new_pending_count = stack_count;
                 authority_count = matched;
@@ -747,14 +1022,13 @@ void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
             StackCompatible(OLD_PENDING_BASE, old_pending_count, STACK_BASE, stack_count);
         if (confirmed) {
             CopyRects(NEW_OWNER_BASE, STACK_BASE, stack_count);
-            CopyRects(NEW_CURRENT_BASE, STACK_BASE, stack_count);
+            CopyStackCoversToCurrent(stack_count);
             new_owner_count = stack_count;
             authority_count = stack_count;
             owner_generation = NextGeneration(0u);
             new_owner = true;
             event = EVENT_BIRTH;
-            if (old_grace != 0u && RectanglesOverlap(
-                    old_grace_bounds, RectSummary(STACK_BASE, stack_count))) {
+            if (old_grace != 0u) {
                 inherit_target = true;
                 inherited_target = old_cached_target;
             }
@@ -775,28 +1049,24 @@ void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
     float target = 0.0f;
     uint fade_step = 0u;
     if (new_owner_count != 0u) {
-        float observation = 0.0f;
-        bool retain_duplicate = continuing_owner && !distinct_observation && old_target_valid;
-        bool sampled = retain_duplicate || SampleOwnerTarget(new_owner_count, observation);
-        if (sampled) {
-            if (retain_duplicate) {
-                target = old_target;
-                fade_step = PreviousState[24u];
-            } else if (cut_survivor) {
-                target = observation;
-                fade_step = 2u;
-            } else if (continuing_owner && old_target_valid) {
-                target = UpdateTarget(old_target, observation);
-                fade_step = distinct_observation ? min(PreviousState[24u] + 1u, 2u) :
-                    PreviousState[24u];
-            } else if (new_owner && inherit_target) {
-                target = UpdateTarget(inherited_target, observation);
-                fade_step = 1u;
-            } else {
-                target = observation;
-                fade_step = 1u;
-            }
+        // One plane target belongs to one owner lifetime. Ordinary observations, geometry jitter,
+        // subset removal, handoff, and death grace copy its exact float bits; only birth without a
+        // cached lifetime or an authenticated hard-cut survivor samples the current BaseField.
+        if (cut_survivor) {
+            target_valid = SampleOwnerTarget(new_owner_count, target);
+            fade_step = 2u;
+        } else if (continuing_owner && old_target_valid) {
+            target = old_target;
+            target_valid = true;
+            fade_step = distinct_observation ? min(PreviousState[24u] + 1u, 2u) :
+                PreviousState[24u];
+        } else if (new_owner && inherit_target) {
+            target = inherited_target;
             target_valid = FiniteFloat(target) && abs(target) <= v2_direct_container_limit;
+            fade_step = 1u;
+        } else {
+            target_valid = SampleOwnerTarget(new_owner_count, target);
+            fade_step = 1u;
         }
         if (!target_valid) {
             target = 0.0f;
@@ -837,6 +1107,37 @@ bool ValidateConditionRectBlock(uint offset, uint count, out uint4 bbox, out uin
     return true;
 }
 
+bool ValidateConditionCurrentBlock(uint count, out uint4 bbox, out uint area) {
+    bbox = uint4(0u, 0u, 0u, 0u);
+    area = 0u;
+    uint kinds = (LocatorStateRead[V2_SUBTITLE_LOCATOR_KIND_WORD] >>
+                  V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT) & V2_SUBTITLE_LOCATOR_KIND_MASK;
+    [unroll]
+    for (uint slot = 0u; slot < MAX_LINES; ++slot) {
+        uint base = V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + slot * 4u;
+        uint4 rectangle = uint4(
+            LocatorStateRead[base + 0u], LocatorStateRead[base + 1u],
+            LocatorStateRead[base + 2u], LocatorStateRead[base + 3u]);
+        if (slot < count) {
+            bool ribbon = ((kinds >> slot) & 1u) != 0u;
+            bool valid = ribbon ?
+                (ValidFieldRect(rectangle) && rectangle.x == 0u &&
+                 rectangle.z == locator_field.x && rectangle.w == locator_field.y &&
+                 rectangle.y >= locator_field.z) : ValidRoiRect(rectangle);
+            if (!valid) return false;
+            if (slot == 0u) bbox = rectangle;
+            else {
+                bbox.x = min(bbox.x, rectangle.x);
+                bbox.y = min(bbox.y, rectangle.y);
+                bbox.z = max(bbox.z, rectangle.z);
+                bbox.w = max(bbox.w, rectangle.w);
+            }
+            area += RectArea(rectangle);
+        } else if (!ZeroRect(rectangle)) return false;
+    }
+    return true;
+}
+
 bool ConditionStateValid(out uint current_count, out float target, out uint fade_step) {
     current_count = LocatorStateRead[20u];
     target = asfloat(LocatorStateRead[18u]);
@@ -844,10 +1145,12 @@ bool ConditionStateValid(out uint current_count, out float target, out uint fade
     uint flags = LocatorStateRead[2u];
     uint owner_count = LocatorStateRead[4u];
     uint pending_count = LocatorStateRead[12u];
-    if (locator_source.z != 1u || locator_source.x == 0u ||
-        locator_field.x != V2_OCR_FIELD_WIDTH || locator_field.y != V2_OCR_FIELD_HEIGHT ||
-        locator_field.z != V2_OCR_ROI_TOP || locator_field.w != V2_OCR_ROI_BOTTOM ||
-        target_w != locator_field.x || target_h != locator_field.y ||
+    uint packed_kinds = LocatorStateRead[V2_SUBTITLE_LOCATOR_KIND_WORD];
+    uint known_kind_bits =
+        (V2_SUBTITLE_LOCATOR_KIND_MASK << V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT) |
+        (V2_SUBTITLE_LOCATOR_KIND_MASK << V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT) |
+        (V2_SUBTITLE_LOCATOR_KIND_MASK << V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT);
+    if (!LocatorGeometryValid() ||
         LocatorStateRead[0u] != V2_SUBTITLE_LOCATOR_STATE_SCHEMA ||
         LocatorStateRead[1u] != V2_SUBTITLE_LOCATOR_STATE_TAG ||
         (flags & ~KNOWN_FLAGS) != 0u || (flags & FLAG_OWNER) == 0u ||
@@ -861,7 +1164,11 @@ bool ConditionStateValid(out uint current_count, out float target, out uint fade
         (fade_step != 1u && fade_step != 2u) || LocatorStateRead[25u] != 0u ||
         LocatorStateRead[27u] != locator_field.x || LocatorStateRead[28u] != locator_field.y ||
         LocatorStateRead[29u] != 0u || LocatorStateRead[30u] != 0u ||
-        LocatorStateRead[31u] != 0u || !FiniteFloat(target) ||
+        (packed_kinds & ~known_kind_bits) != 0u ||
+        !PackedKindsValid(packed_kinds, V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT, owner_count) ||
+        !PackedKindsValid(packed_kinds, V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT, pending_count) ||
+        !PackedKindsValid(packed_kinds, V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT, current_count) ||
+        !FiniteFloat(target) ||
         abs(target) > v2_direct_container_limit ||
         !FiniteFloat(v2_max_horizontal_slope) || v2_max_horizontal_slope < 0.0f ||
         !FiniteFloat(v2_max_vertical_shear) || v2_max_vertical_shear < 0.0f) {
@@ -877,8 +1184,7 @@ bool ConditionStateValid(out uint current_count, out float target, out uint fade
             V2_SUBTITLE_LOCATOR_OWNER_OFFSET, owner_count, owner_bbox, owner_area) ||
         !ValidateConditionRectBlock(
             V2_SUBTITLE_LOCATOR_PENDING_OFFSET, pending_count, pending_bbox, pending_area) ||
-        !ValidateConditionRectBlock(
-            V2_SUBTITLE_LOCATOR_CURRENT_OFFSET, current_count, current_bbox, current_area) ||
+        !ValidateConditionCurrentBlock(current_count, current_bbox, current_area) ||
         any(owner_bbox != uint4(
             LocatorStateRead[5u], LocatorStateRead[6u],
             LocatorStateRead[7u], LocatorStateRead[8u])) || owner_area != LocatorStateRead[9u] ||
@@ -906,6 +1212,9 @@ void condition_main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint best_dx = 0xffffffffu;
     uint best_dy = 0xffffffffu;
     float best_distance = 3.402823466e+38f;
+    uint current_kinds = (LocatorStateRead[V2_SUBTITLE_LOCATOR_KIND_WORD] >>
+                          V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT) &
+        V2_SUBTITLE_LOCATOR_KIND_MASK;
     precise float horizontal_step = v2_max_horizontal_slope / (float)target_w;
     precise float vertical_step = v2_max_vertical_shear / (float)target_w;
     [unroll]
@@ -915,10 +1224,16 @@ void condition_main(uint3 dispatch_id : SV_DispatchThreadID) {
             uint4 rectangle = uint4(
                 LocatorStateRead[offset + 0u], LocatorStateRead[offset + 1u],
                 LocatorStateRead[offset + 2u], LocatorStateRead[offset + 3u]);
-            uint dx = dispatch_id.x < rectangle.x ? rectangle.x - dispatch_id.x :
-                (dispatch_id.x >= rectangle.z ? dispatch_id.x - (rectangle.z - 1u) : 0u);
-            uint dy = dispatch_id.y < rectangle.y ? rectangle.y - dispatch_id.y :
-                (dispatch_id.y >= rectangle.w ? dispatch_id.y - (rectangle.w - 1u) : 0u);
+            bool ribbon = ((current_kinds >> slot) & 1u) != 0u;
+            // A canonical ribbon cover spans the full field from its corrected top to the bottom.
+            // Make the one-edge policy explicit: the strip and everything below its top use core
+            // budget, while only rows above it receive the vertical analytic collar. Ordinary
+            // subtitle covers retain the established four-sided Manhattan collar.
+            uint dx = ribbon ? 0u : (dispatch_id.x < rectangle.x ? rectangle.x - dispatch_id.x :
+                (dispatch_id.x >= rectangle.z ? dispatch_id.x - (rectangle.z - 1u) : 0u));
+            uint dy = ribbon ? (dispatch_id.y < rectangle.y ? rectangle.y - dispatch_id.y : 0u) :
+                (dispatch_id.y < rectangle.y ? rectangle.y - dispatch_id.y :
+                 (dispatch_id.y >= rectangle.w ? dispatch_id.y - (rectangle.w - 1u) : 0u));
             precise float horizontal_distance = (float)dx * horizontal_step;
             precise float vertical_distance = (float)dy * vertical_step;
             precise float distance = horizontal_distance + vertical_distance;

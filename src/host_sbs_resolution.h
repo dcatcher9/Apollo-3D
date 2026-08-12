@@ -141,7 +141,7 @@ namespace models {
   }
 
   /** True only for a tensor shape carried by the shipped V2 calibration. */
-  inline bool host_sbs_v2_depth_shape_is_authenticated(
+  inline constexpr bool host_sbs_v2_depth_shape_is_authenticated(
     const depth_tensor_shape_t shape
   ) noexcept {
     static_assert(!depth_coordinate_v2::model_calibrations.empty());
@@ -150,6 +150,66 @@ namespace models {
                               static_cast<std::uint32_t>(shape.width),
                               static_cast<std::uint32_t>(shape.height)
                             );
+  }
+
+  /**
+   * Runtime subtitle geometry for one authenticated DAV2 field.
+   *
+   * PP-OCR keeps a fixed tensor, while its boxes are projected into the current analysis field.
+   * The safe detector rows are part of the generated OCR contract. Integer ceil projection keeps
+   * host, shader, and dump bounds identical for landscape, ultrawide, and portrait fields.
+   */
+  struct subtitle_analysis_geometry_t {
+    std::uint32_t field_width = 0u;
+    std::uint32_t field_height = 0u;
+    std::uint32_t roi_top = 0u;
+    std::uint32_t roi_bottom = 0u;
+
+    constexpr bool valid() const noexcept {
+      return field_width > 0u && field_height > 0u &&
+             roi_top < roi_bottom && roi_bottom <= field_height;
+    }
+  };
+
+  inline constexpr subtitle_analysis_geometry_t fit_subtitle_analysis_geometry(
+    const std::uint32_t source_width,
+    const std::uint32_t source_height,
+    const depth_tensor_shape_t field
+  ) noexcept {
+    if (!host_sbs_v2_depth_shape_is_authenticated(field)) {
+      return {};
+    }
+    const auto roi = depth_coordinate_v2::subtitle_ocr_dynamic_roi(
+      source_width,
+      source_height,
+      static_cast<std::uint32_t>(field.width),
+      static_cast<std::uint32_t>(field.height)
+    );
+    if (!roi) {
+      return {};
+    }
+    return {
+      static_cast<std::uint32_t>(field.width),
+      static_cast<std::uint32_t>(field.height),
+      roi.top,
+      roi.bottom,
+    };
+  }
+
+  /** Height, in source pixels, of the exact bottom crop consumed by fixed-shape subtitle OCR. */
+  inline constexpr std::uint32_t subtitle_ocr_source_crop_height(
+    const std::uint32_t source_width,
+    const std::uint32_t source_height
+  ) noexcept {
+    if (source_width == 0u || source_height == 0u) {
+      return 0u;
+    }
+    const auto requested = depth_coordinate_v2::subtitle_ocr_ceil_div(
+      static_cast<std::uint64_t>(source_width) *
+        depth_coordinate_v2::subtitle_ocr_crop_aspect_height,
+      depth_coordinate_v2::subtitle_ocr_crop_aspect_width
+    );
+    return static_cast<std::uint32_t>(std::min<std::uint64_t>(requested, source_height));
   }
 
   /** Fit the exact source tensor requested by the fixed live Host SBS V2 calibration. */

@@ -61,6 +61,11 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             38: "ba4940356916270d435961d28ff0b4a52442cd45f718a0dc48491927d3f8a58e",
             39: "b6c7b68e27009b35317f14d3aca1aba7f461d68e00dc2d5352195a815d75b81a",
             40: "5c7116be0004e33e24f150430d85e06b9eb66782b4fc3b059501e04093835d9e",
+            41: "2f8a3bba1477cdcba58b1b28de8c0353b8f0aca13528b7eefb8f2e101078c51a",
+            42: "b2932026a49f6dbd6ca2036f87aa095a2286850d283b52bd98328973f923e2a6",
+            43: "026eea4c5e3280af0f7945d6f84fce7d54e74d009c6d89dafb6d725bf003aba1",
+            44: "7ab9db96b7af454e10cfd004f878c0847d66913059005578e212474ef2a0a5fb",
+            45: "8515cf7bc352c2e9e56e6a5fd9dad9802e1e7cd02f705fd8a957617c7ba94e9a",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -68,14 +73,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0xF7C853C2)
+        self.assertEqual(generator.contract_tag(contract), 0xFBD3CDB1)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "f7c853c22015d4bc3e34980da4d7e52e20f8379dcb7cc463a207e18989dfff17",
+            "fbd3cdb175e260327046e63a18a8278428a65a9b2103a23b5a6ceae7c5abcbcd",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "861f800db1cc06a6d25b80d18bb1b7bf4bc469ed1ccfacfd96a0b384bfb2a7a1",
+            "11bd8c0ab14d22caab83044e5f0d38cca10f5eef5df5d5e671cbedf64e256a1f",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -202,14 +207,29 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
 
     def test_subtitle_ocr_contract_binds_model_profile_tensor_and_record_abis(self):
         ocr = python_contract.SUBTITLE_OCR
-        self.assertEqual(ocr.schema, 1)
-        self.assertEqual(ocr.logical_model, "ppocrv6_tiny_det")
+        self.assertEqual(ocr.schema, 5)
+        self.assertEqual(ocr.logical_model, "ppocrv6_tiny_det_modelopt_fp16")
         self.assertEqual(
-            ocr.onnx_sha256,
+            ocr.asset_path,
+            "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx")
+        self.assertEqual(
+            ocr.artifact_onnx_sha256,
+            "169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44")
+        self.assertEqual(
+            ocr.source_onnx_sha256,
             "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8")
+        self.assertIn("2ba1506c0380b8f0b03dd142459aac66d4421f6c", ocr.source_url)
+        self.assertEqual((ocr.conversion_tool, ocr.conversion_version),
+                         ("nvidia-modelopt", "0.45.0"))
+        self.assertEqual(
+            ocr.conversion_recipe,
+            "nvidia-modelopt-autocast-fp16-keep-io-fp32-v1")
+        self.assertEqual(
+            ocr.conversion_calibration_profile,
+            "apollo-live8-bottom960x160-v1")
         self.assertEqual(
             ocr.engine_recipe,
-            "trt-strong-fp32-tf32-fixed960x160-level5-v1")
+            "trt-strong-modelopt045-fp16-iofp32-tf32-fixed960x160-level5-v2")
         self.assertEqual(
             ocr.preprocess_profile,
             "apollo-ppocrv6-bottom-6x1-bgr-imagenet-v1")
@@ -223,13 +243,23 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(ocr.output_name, "fetch_name_0")
         self.assertEqual((ocr.output_dtype, ocr.output_layout), ("float32", "NCHW"))
         self.assertEqual(ocr.output_shape, (1, 1, 160, 960))
-        self.assertEqual((ocr.record_schema, ocr.record_tag), (1, 0x3652434F))
+        self.assertEqual(
+            (ocr.locator_max_width_numerator, ocr.locator_max_width_denominator,
+             ocr.ocr_safe_row_top, ocr.ocr_safe_row_bottom,
+             ocr.source_crop_aspect_width, ocr.source_crop_aspect_height),
+            (9, 10, 24, 155, 6, 1))
+        self.assertEqual(
+            (ocr.text_join_gap_cells, ocr.ribbon_join_gap_cells),
+            (4, 12))
+        self.assertGreater(ocr.text_join_gap_cells, 0)
+        self.assertLess(ocr.text_join_gap_cells, ocr.ribbon_join_gap_cells)
+        self.assertGreaterEqual(
+            ocr.ribbon_join_gap_cells,
+            ocr.ribbon_structural_gap_min_cells)
+        self.assertEqual((ocr.record_schema, ocr.record_tag), (3, 0x3852434F))
         self.assertEqual((ocr.record_word_count, ocr.raw_box_offset), (208, 16))
         self.assertEqual((ocr.final_box_offset, ocr.final_box_capacity), (144, 8))
-        self.assertEqual(
-            (ocr.field_width, ocr.field_height, ocr.roi_top, ocr.roi_bottom),
-            (770, 434, 325, 430))
-        self.assertEqual((ocr.locator_schema, ocr.locator_tag), (6, 0x36524C53))
+        self.assertEqual((ocr.locator_schema, ocr.locator_tag), (8, 0x38524C53))
         self.assertEqual(
             (ocr.locator_word_count, ocr.locator_owner_offset,
              ocr.locator_pending_offset, ocr.locator_current_offset),
@@ -239,26 +269,88 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'subtitle_ocr_model_name = "ppocrv6_tiny_det"',
-                'subtitle_ocr_onnx_sha256 = '
+                'subtitle_ocr_model_name = "ppocrv6_tiny_det_modelopt_fp16"',
+                'subtitle_ocr_asset_path = '
+                '"models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx"',
+                'subtitle_ocr_artifact_onnx_sha256 = '
+                '"169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44"',
+                'subtitle_ocr_source_onnx_sha256 = '
                 '"193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8"',
+                'subtitle_ocr_conversion_tool = "nvidia-modelopt"',
+                'subtitle_ocr_conversion_version = "0.45.0"',
+                'subtitle_ocr_conversion_recipe = '
+                '"nvidia-modelopt-autocast-fp16-keep-io-fp32-v1"',
                 'subtitle_ocr_preprocess_profile = '
                 '"apollo-ppocrv6-bottom-6x1-bgr-imagenet-v1"',
                 'subtitle_ocr_input_name = "x"',
                 'subtitle_ocr_output_name = "fetch_name_0"',
                 'std::array<double, 3> subtitle_ocr_imagenet_mean {{0.485, 0.456, 0.406}}',
                 'subtitle_ocr_output_width = 960u',
-                'subtitle_ocr_record_tag = 0x3652434Fu',
-                'subtitle_locator_state_tag = 0x36524C53u'):
+                'subtitle_ocr_record_tag = 0x3852434Fu',
+                'subtitle_locator_state_tag = 0x38524C53u',
+                'subtitle_ocr_safe_row_top = 24u',
+                'subtitle_ocr_safe_row_bottom = 155u',
+                'subtitle_ocr_crop_aspect_width = 6u',
+                'subtitle_ocr_crop_aspect_height = 1u',
+                'subtitle_ocr_text_join_gap_cells = 4u',
+                'subtitle_ocr_ribbon_join_gap_cells = 12u',
+                'subtitle_locator_max_width_numerator = 9u',
+                'subtitle_locator_max_width_denominator = 10u',
+                'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
                 '#define V2_OCR_INPUT_WIDTH 960u',
                 '#define V2_OCR_OUTPUT_WIDTH 960u',
                 '#define V2_OCR_IMAGENET_MEAN_B 0.485f',
                 '#define V2_OCR_IMAGENET_STD_R 0.225f',
-                '#define V2_OCR_RECORD_TAG 0x3652434Fu',
-                '#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x36524C53u'):
+                '#define V2_OCR_RECORD_TAG 0x3852434Fu',
+                '#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x38524C53u',
+                '#define V2_MODEL_CALIBRATED_SHAPE_COUNT 6u',
+                '#define V2_MODEL_CALIBRATED_SHAPE_WIDTH_5 434u',
+                '#define V2_MODEL_CALIBRATED_SHAPE_HEIGHT_5 1036u',
+                '#define V2_OCR_SAFE_ROW_TOP 24u',
+                '#define V2_OCR_SAFE_ROW_BOTTOM 155u',
+                '#define V2_OCR_CROP_ASPECT_WIDTH 6u',
+                '#define V2_OCR_CROP_ASPECT_HEIGHT 1u',
+                '#define V2_OCR_TEXT_JOIN_GAP_CELLS 4u',
+                '#define V2_OCR_RIBBON_JOIN_GAP_CELLS 12u',
+                '#define V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR 9u',
+                '#define V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR 10u',
+                'bool V2SubtitleOcrFieldIsCalibrated('):
             self.assertIn(token, hlsl)
+        self.assertNotIn("subtitle_ocr_join_gap_cells", cpp)
+        self.assertNotIn("V2_OCR_JOIN_GAP_CELLS", hlsl)
+
+    def test_subtitle_ocr_dynamic_roi_covers_all_calibrated_fields(self):
+        cases = (
+            ((1920, 1080, 770, 434), (325, 430), 429),
+            ((2560, 1080, 1022, 434), (289, 429), 427),
+            ((3440, 1440, 1036, 434), (287, 429), 427),
+            ((1080, 1920, 434, 770), (709, 768), 767),
+            ((1080, 2560, 434, 1022), (961, 1020), 1019),
+            ((1440, 3440, 434, 1036), (975, 1034), 1033),
+        )
+        for arguments, expected_roi, expected_ribbon_bottom in cases:
+            with self.subTest(arguments=arguments):
+                self.assertTrue(
+                    python_contract.subtitle_ocr_field_is_calibrated(
+                        arguments[2], arguments[3]))
+                self.assertEqual(
+                    python_contract.subtitle_ocr_dynamic_roi(*arguments), expected_roi)
+                self.assertEqual(
+                    python_contract.subtitle_ocr_ribbon_min_bottom(*arguments),
+                    expected_ribbon_bottom)
+                self.assertEqual(
+                    python_contract.subtitle_ocr_project_row_ceil(
+                        *arguments,
+                        python_contract.SUBTITLE_OCR.ocr_safe_row_bottom -
+                        python_contract.SUBTITLE_OCR.ribbon_bottom_tolerance_pixels),
+                    expected_ribbon_bottom)
+        self.assertFalse(python_contract.subtitle_ocr_field_is_calibrated(768, 432))
+        self.assertIsNone(
+            python_contract.subtitle_ocr_dynamic_roi(1920, 1080, 768, 432))
+        self.assertIsNone(
+            python_contract.subtitle_ocr_ribbon_min_bottom(1920, 1080, 768, 432))
 
         shader_root = (REPO / "src_assets" / "windows" / "assets" /
                        "shaders" / "directx")
@@ -277,8 +369,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             self.assertIn(token, preprocess_source)
         for token in (
                 "#define OCR_WIDTH V2_OCR_OUTPUT_WIDTH",
-                "#define OCR6_WORDS V2_OCR_RECORD_WORD_COUNT",
-                "#define OCR6_TAG V2_OCR_RECORD_TAG"):
+                "#define OCR8_WORDS V2_OCR_RECORD_WORD_COUNT",
+                "#define OCR8_TAG V2_OCR_RECORD_TAG"):
             self.assertIn(token, boxes_source)
         for token in (
                 "MAX_LINES = V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY",
@@ -289,14 +381,28 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
     def test_subtitle_ocr_contract_rejects_model_tensor_profile_and_abi_drift(self):
         original = generator.load_contract(verify_shader_source_closure=False)
         mutations = {
-            "model-hash": lambda value: value["subtitle_ocr"].update(
-                {"onnx_sha256": "0" * 64}),
+            "artifact-hash": lambda value: value["subtitle_ocr"].update(
+                {"artifact_onnx_sha256": "0" * 64}),
+            "source-hash": lambda value: value["subtitle_ocr"].update(
+                {"source_onnx_sha256": "0" * 64}),
+            "conversion-recipe": lambda value: value["subtitle_ocr"].update(
+                {"conversion_recipe": "unreviewed-fp16"}),
             "profile": lambda value: value["subtitle_ocr"].update(
                 {"preprocess_profile": "generic-rgb"}),
             "channels": lambda value: value["subtitle_ocr"]["input_tensor"].update(
                 {"channels": ["R", "G", "B"]}),
             "output-width": lambda value: value["subtitle_ocr"]["output_tensor"].update(
                 {"shape": [1, 1, 160, 120]}),
+            "safe-row": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"ocr_safe_row_top": 23}),
+            "crop-aspect": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"source_crop_aspect_width": 7}),
+            "locator-max-width": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"locator_max_width_numerator": 8}),
+            "text-join-gap": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"text_join_gap_cells": 5}),
+            "ribbon-join-gap": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"ribbon_join_gap_cells": 11}),
             "ocr-tag": lambda value: value["subtitle_ocr"]["ocr_record"].update(
                 {"tag": 0}),
             "locator-words": lambda value: value["subtitle_ocr"]["locator_state"].update(

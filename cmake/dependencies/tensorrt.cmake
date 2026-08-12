@@ -37,8 +37,12 @@ if(TENSORRT_INCLUDE_DIR AND TENSORRT_LIBRARY)
         )
     endif()
     
-    # We will copy all DLLs from the TensorRT lib directory to the output directory
-    file(GLOB TENSORRT_DLLS "${TENSORRT_DIR}/lib/*.dll")
+    # NVIDIA's Windows ZIP stores runtime DLLs in bin and import libraries in lib.
+    # Retain the lib fallback for older/custom package layouts.
+    file(GLOB TENSORRT_DLLS
+        "${TENSORRT_DIR}/bin/*.dll"
+        "${TENSORRT_DIR}/lib/*.dll"
+    )
     
     # Register the DLLs to be copied post-build
     set(PROJECT_TENSORRT_DLLS ${TENSORRT_DLLS} CACHE INTERNAL "TensorRT DLLs to package")

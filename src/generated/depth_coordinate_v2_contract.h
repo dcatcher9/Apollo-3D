@@ -10,10 +10,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 40u;
-  inline constexpr std::uint32_t contract_tag = 0xF7C853C2u;
-  inline constexpr std::string_view contract_canonical_sha256 = "5c7116be0004e33e24f150430d85e06b9eb66782b4fc3b059501e04093835d9e";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "f7c853c22015d4bc3e34980da4d7e52e20f8379dcb7cc463a207e18989dfff17";
+  inline constexpr std::uint32_t contract_schema = 45u;
+  inline constexpr std::uint32_t contract_tag = 0xFBD3CDB1u;
+  inline constexpr std::string_view contract_canonical_sha256 = "8515cf7bc352c2e9e56e6a5fd9dad9802e1e7cd02f705fd8a957617c7ba94e9a";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "fbd3cdb175e260327046e63a18a8278428a65a9b2103a23b5a6ceae7c5abcbcd";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -22,11 +22,17 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t capture_provenance_schema = 3u;
   inline constexpr std::string_view capture_provenance_manifest_key = "raw_model_provenance";
   inline constexpr std::string_view capture_provenance_binding = "raw-depth-model-input-and-preprocess-source-produced-by-calibrated-identity-v3";
-  inline constexpr std::uint32_t subtitle_ocr_contract_schema = 1u;
-  inline constexpr std::string_view subtitle_ocr_model_name = "ppocrv6_tiny_det";
-  inline constexpr std::string_view subtitle_ocr_model_url = "https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det_onnx/resolve/2ba1506c0380b8f0b03dd142459aac66d4421f6c/inference.onnx?download=true";
-  inline constexpr std::string_view subtitle_ocr_onnx_sha256 = "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8";
-  inline constexpr std::string_view subtitle_ocr_engine_recipe = "trt-strong-fp32-tf32-fixed960x160-level5-v1";
+  inline constexpr std::uint32_t subtitle_ocr_contract_schema = 5u;
+  inline constexpr std::string_view subtitle_ocr_model_name = "ppocrv6_tiny_det_modelopt_fp16";
+  inline constexpr std::string_view subtitle_ocr_asset_path = "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx";
+  inline constexpr std::string_view subtitle_ocr_artifact_onnx_sha256 = "169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44";
+  inline constexpr std::string_view subtitle_ocr_source_url = "https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det_onnx/resolve/2ba1506c0380b8f0b03dd142459aac66d4421f6c/inference.onnx?download=true";
+  inline constexpr std::string_view subtitle_ocr_source_onnx_sha256 = "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8";
+  inline constexpr std::string_view subtitle_ocr_conversion_tool = "nvidia-modelopt";
+  inline constexpr std::string_view subtitle_ocr_conversion_version = "0.45.0";
+  inline constexpr std::string_view subtitle_ocr_conversion_recipe = "nvidia-modelopt-autocast-fp16-keep-io-fp32-v1";
+  inline constexpr std::string_view subtitle_ocr_conversion_calibration_profile = "apollo-live8-bottom960x160-v1";
+  inline constexpr std::string_view subtitle_ocr_engine_recipe = "trt-strong-modelopt045-fp16-iofp32-tf32-fixed960x160-level5-v2";
   inline constexpr std::string_view subtitle_ocr_preprocess_profile = "apollo-ppocrv6-bottom-6x1-bgr-imagenet-v1";
   inline constexpr std::string_view subtitle_ocr_source_crop = "bottom-6:1";
   inline constexpr std::string_view subtitle_ocr_input_name = "x";
@@ -46,29 +52,54 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t subtitle_ocr_output_c = 1u;
   inline constexpr std::uint32_t subtitle_ocr_output_height = 160u;
   inline constexpr std::uint32_t subtitle_ocr_output_width = 960u;
-  inline constexpr std::uint32_t subtitle_ocr_record_schema = 1u;
-  inline constexpr std::uint32_t subtitle_ocr_record_tag = 0x3652434Fu;
+  inline constexpr std::uint32_t subtitle_ocr_record_schema = 3u;
+  inline constexpr std::uint32_t subtitle_ocr_record_tag = 0x3852434Fu;
   inline constexpr std::uint32_t subtitle_ocr_record_word_count = 208u;
   inline constexpr std::uint32_t subtitle_ocr_record_header_word_count = 16u;
   inline constexpr std::uint32_t subtitle_ocr_box_word_count = 8u;
+  inline constexpr std::uint32_t subtitle_ocr_box_flag_ribbon = 1u;
+  inline constexpr std::uint32_t subtitle_ocr_box_known_flags = 1u;
   inline constexpr std::uint32_t subtitle_ocr_raw_box_offset = 16u;
   inline constexpr std::uint32_t subtitle_ocr_raw_box_capacity = 16u;
   inline constexpr std::uint32_t subtitle_ocr_final_box_offset = 144u;
   inline constexpr std::uint32_t subtitle_ocr_final_box_capacity = 8u;
-  inline constexpr std::uint32_t subtitle_ocr_field_width = 770u;
-  inline constexpr std::uint32_t subtitle_ocr_field_height = 434u;
-  inline constexpr std::uint32_t subtitle_ocr_roi_top = 325u;
-  inline constexpr std::uint32_t subtitle_ocr_roi_bottom = 430u;
-  inline constexpr std::uint32_t subtitle_locator_state_schema = 6u;
-  inline constexpr std::uint32_t subtitle_locator_state_tag = 0x36524C53u;
+  inline constexpr std::uint32_t subtitle_ocr_safe_row_top = 24u;
+  inline constexpr std::uint32_t subtitle_ocr_safe_row_bottom = 155u;
+  inline constexpr std::uint32_t subtitle_locator_max_width_numerator = 9u;
+  inline constexpr std::uint32_t subtitle_locator_max_width_denominator = 10u;
+  inline constexpr std::uint32_t subtitle_ocr_crop_aspect_width = 6u;
+  inline constexpr std::uint32_t subtitle_ocr_crop_aspect_height = 1u;
+  inline constexpr std::uint32_t subtitle_ocr_text_join_gap_cells = 4u;
+  inline constexpr std::uint32_t subtitle_ocr_ribbon_join_gap_cells = 12u;
+  inline constexpr std::uint32_t subtitle_ocr_ribbon_structural_gap_min_cells = 3u;
+  inline constexpr std::uint32_t subtitle_ocr_ribbon_min_structural_gaps = 3u;
+  inline constexpr std::uint32_t subtitle_ocr_ribbon_min_width_numerator = 1u;
+  inline constexpr std::uint32_t subtitle_ocr_ribbon_min_width_denominator = 2u;
+  inline constexpr std::uint32_t subtitle_ocr_ribbon_bottom_tolerance_pixels = 2u;
+  inline constexpr std::string_view subtitle_ocr_ribbon_bottom_tolerance_projection = "exact-ceil-detector-edge-through-bottom-crop-v1";
+  inline constexpr std::uint32_t subtitle_ocr_ribbon_cover_pad_limit = 8u;
+  inline constexpr std::uint32_t subtitle_locator_state_schema = 8u;
+  inline constexpr std::uint32_t subtitle_locator_state_tag = 0x38524C53u;
   inline constexpr std::uint32_t subtitle_locator_state_word_count = 80u;
   inline constexpr std::uint32_t subtitle_locator_header_word_count = 32u;
   inline constexpr std::uint32_t subtitle_locator_rectangle_capacity = 4u;
   inline constexpr std::uint32_t subtitle_locator_owner_offset = 32u;
   inline constexpr std::uint32_t subtitle_locator_pending_offset = 48u;
   inline constexpr std::uint32_t subtitle_locator_current_offset = 64u;
+  inline constexpr std::uint32_t subtitle_locator_kind_word = 31u;
+  inline constexpr std::uint32_t subtitle_locator_owner_kind_shift = 0u;
+  inline constexpr std::uint32_t subtitle_locator_pending_kind_shift = 4u;
+  inline constexpr std::uint32_t subtitle_locator_current_kind_shift = 8u;
+  inline constexpr std::uint32_t subtitle_locator_kind_mask = 15u;
   static_assert(subtitle_ocr_input_n == 1u && subtitle_ocr_input_c == 3u);
   static_assert(subtitle_ocr_output_n == 1u && subtitle_ocr_output_c == 1u);
+  static_assert(subtitle_ocr_text_join_gap_cells > 0u);
+  static_assert(subtitle_ocr_text_join_gap_cells <
+                subtitle_ocr_ribbon_join_gap_cells);
+  static_assert(subtitle_ocr_ribbon_join_gap_cells >=
+                subtitle_ocr_ribbon_structural_gap_min_cells);
+  static_assert(subtitle_ocr_ribbon_bottom_tolerance_pixels <=
+                subtitle_ocr_safe_row_bottom);
   static_assert(subtitle_ocr_final_box_offset == subtitle_ocr_raw_box_offset +
                 subtitle_ocr_raw_box_capacity * subtitle_ocr_box_word_count);
   static_assert(subtitle_ocr_record_word_count == subtitle_ocr_final_box_offset +
@@ -82,7 +113,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t shader_source_closure_schema = 2u;
   inline constexpr std::uint32_t shader_source_compile_flags = 34816u;
   inline constexpr std::uint32_t shader_source_macro_count = 0u;
-  inline constexpr std::string_view shader_source_closure_sha256 = "861f800db1cc06a6d25b80d18bb1b7bf4bc469ed1ccfacfd96a0b384bfb2a7a1";
+  inline constexpr std::string_view shader_source_closure_sha256 = "11bd8c0ab14d22caab83044e5f0d38cca10f5eef5df5d5e671cbedf64e256a1f";
 
   struct shader_source_spec_t {
     std::string_view source_file;
@@ -202,6 +233,97 @@ namespace models::depth_coordinate_v2 {
     {"dav2-small-fp16-standardized-ui-shapes-v3", 434u, 1022u},
     {"dav2-small-fp16-standardized-ui-shapes-v3", 434u, 1036u},
   }};
+
+  constexpr bool subtitle_ocr_field_is_calibrated(
+    const std::uint32_t width,
+    const std::uint32_t height
+  ) {
+    for (const auto &shape : model_calibrated_shapes) {
+      if (shape.width == width && shape.height == height) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  struct subtitle_ocr_roi_t {
+    std::uint32_t top;
+    std::uint32_t bottom;
+
+    constexpr explicit operator bool() const { return bottom > top; }
+  };
+
+  struct subtitle_ocr_projected_row_t {
+    std::uint32_t value;
+    bool valid;
+
+    constexpr explicit operator bool() const { return valid; }
+  };
+
+  constexpr std::uint64_t subtitle_ocr_ceil_div(
+    const std::uint64_t numerator,
+    const std::uint64_t denominator
+  ) {
+    return denominator == 0u ? 0u :
+      numerator / denominator + (numerator % denominator != 0u);
+  }
+
+  constexpr subtitle_ocr_projected_row_t subtitle_ocr_project_row_ceil(
+    const std::uint32_t source_width,
+    const std::uint32_t source_height,
+    const std::uint32_t field_width,
+    const std::uint32_t field_height,
+    const std::uint32_t detector_y
+  ) {
+    if (source_width == 0u || source_height == 0u ||
+        detector_y > subtitle_ocr_output_height ||
+        !subtitle_ocr_field_is_calibrated(field_width, field_height)) {
+      return {0u, false};
+    }
+    const auto requested_crop_height = subtitle_ocr_ceil_div(
+      static_cast<std::uint64_t>(source_width) * subtitle_ocr_crop_aspect_height,
+      subtitle_ocr_crop_aspect_width);
+    const auto crop_height = requested_crop_height < source_height ?
+      requested_crop_height : static_cast<std::uint64_t>(source_height);
+    const auto crop_top = static_cast<std::uint64_t>(source_height) - crop_height;
+    const auto denominator = static_cast<std::uint64_t>(source_height) *
+      subtitle_ocr_output_height;
+    const auto source_y_numerator = crop_top * subtitle_ocr_output_height +
+      static_cast<std::uint64_t>(detector_y) * crop_height;
+    const auto projected = subtitle_ocr_ceil_div(
+      source_y_numerator * field_height, denominator);
+    return {
+      static_cast<std::uint32_t>(projected < field_height ? projected : field_height),
+      true
+    };
+  }
+
+  constexpr subtitle_ocr_projected_row_t subtitle_ocr_ribbon_min_bottom(
+    const std::uint32_t source_width,
+    const std::uint32_t source_height,
+    const std::uint32_t field_width,
+    const std::uint32_t field_height
+  ) {
+    return subtitle_ocr_project_row_ceil(
+      source_width, source_height, field_width, field_height,
+      subtitle_ocr_safe_row_bottom - subtitle_ocr_ribbon_bottom_tolerance_pixels
+    );
+  }
+
+  constexpr subtitle_ocr_roi_t subtitle_ocr_dynamic_roi(
+    const std::uint32_t source_width,
+    const std::uint32_t source_height,
+    const std::uint32_t field_width,
+    const std::uint32_t field_height
+  ) {
+    const auto top = subtitle_ocr_project_row_ceil(
+      source_width, source_height, field_width, field_height, subtitle_ocr_safe_row_top);
+    const auto bottom = subtitle_ocr_project_row_ceil(
+      source_width, source_height, field_width, field_height,
+      subtitle_ocr_safe_row_bottom);
+    return top && bottom && top.value < bottom.value ?
+      subtitle_ocr_roi_t {top.value, bottom.value} : subtitle_ocr_roi_t {0u, 0u};
+  }
 
   constexpr bool model_calibration_supports_shape(
     const model_calibration_t &calibration,

@@ -16,6 +16,16 @@ Set `TENSORRT_DIR` to the extracted directory containing `include/NvInfer.h` and
 libraries. A CUDA Toolkit is **not** required: the runtime uses the NVIDIA driver API, while CMake
 links the packaged TensorRT libraries and copies their DLLs beside the build output.
 
+The NVIDIA Windows headers use the MSVC interface-vtable layout. After extracting a fresh package,
+apply the repository's idempotent MinGW compatibility patch once before configuring:
+
+```powershell
+python .\patch_trt.py C:\path\to\TensorRT
+```
+
+Re-running the command is safe and should report zero changed files. Apply it again whenever the
+TensorRT package is replaced; do not reuse headers patched for a different TensorRT release.
+
 Install the MSYS2 packages from an **MSYS2 UCRT64** shell:
 
 ```bash
@@ -36,7 +46,7 @@ on `PATH` when CMake configures the Web UI.
 From an MSYS2 UCRT64 shell:
 
 ```bash
-export PATH="/c/Program Files/nodejs:$PATH"
+export PATH="/ucrt64/bin:/c/Program Files/nodejs:$PATH"
 export TENSORRT_DIR="/c/path/to/TensorRT"
 cmake -B cmake-build-relwithdebinfo -G Ninja -S . \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo
@@ -49,8 +59,13 @@ From PowerShell, invoke the same shell explicitly:
 $env:MSYSTEM = "UCRT64"
 $env:MSYS2_PATH_TYPE = "inherit"
 C:\msys64\usr\bin\bash.exe -lc `
-  'export PATH="/c/Program Files/nodejs:$PATH"; export TENSORRT_DIR="/c/path/to/TensorRT"; cd /e/Git/Repo/Apollo-3D; cmake -B cmake-build-relwithdebinfo -G Ninja -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo; /ucrt64/bin/ninja -C cmake-build-relwithdebinfo'
+  'export PATH="/ucrt64/bin:/c/Program Files/nodejs:$PATH"; export TENSORRT_DIR="/c/path/to/TensorRT"; cd /e/Git/Repo/Apollo-3D; cmake -B cmake-build-relwithdebinfo -G Ninja -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo; /ucrt64/bin/ninja -C cmake-build-relwithdebinfo'
 ```
+
+The `/ucrt64/bin` entry must be present in the environment inherited by Ninja, compiler, and test
+child processes. A login shell may rebuild `PATH`, so setting it only in the parent PowerShell is
+not sufficient. A missing entry commonly appears as a compiler failure with no diagnostic or a
+`cc1plus.exe` exit code of `0xC0000135`.
 
 Use `RelWithDebInfo` for live XR testing. It preserves symbols without the capture, AI, and encode
 stalls of an unoptimized Debug build. Build directories must use the `cmake-build-` prefix because
@@ -59,6 +74,7 @@ repository tooling uses it to distinguish generated artifacts.
 ## Test
 
 ```powershell
+$env:PATH = "C:\msys64\ucrt64\bin;C:\path\to\TensorRT\bin;C:\Program Files\nodejs;$env:PATH"
 C:\msys64\ucrt64\bin\ninja.exe -C cmake-build-relwithdebinfo test_sunshine
 cmake-build-relwithdebinfo\tests\test_sunshine.exe
 python -m unittest discover -s tools/sbsbench -p "test_*.py"
