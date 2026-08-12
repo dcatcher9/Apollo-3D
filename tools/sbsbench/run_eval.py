@@ -2028,7 +2028,7 @@ def authoritative_remeasurement_clip_meta(
     forged ``source_frame_count`` can change metric applicability and label completeness.  This
     function deliberately does not read the cached per-clip metadata while constructing the
     replacement.  The source ``meta.json``, the independent evaluation-harness contract (schema
-    22 for production depth; unrelated to Dump 3D schema 26 and DVC2 schema 45),
+    22 for production depth; unrelated to Dump 3D schema 27 and DVC2 schema 46),
     schema 25 for authenticated displacement plus diagnostic-order replay), and the complete set of metric
     artifact identities are the authorities.
     """
@@ -2123,7 +2123,7 @@ def authoritative_remeasurement_clip_meta(
             raise ValueError(f"clips.{clip}: {exc}") from exc
     else:
         # Ordinary evaluation-harness schema-22 runs execute the production Depth Coordinate V2;
-        # this is intentionally independent of Dump 3D schema 26 and DVC2 schema 45.
+        # this is intentionally independent of Dump 3D schema 27 and DVC2 schema 46.
         # renderer; a legacy-pipeline result must never be remeasured as current evidence.
         live_contract = contract.get("parallax_v2_live")
         if (not isinstance(live_contract, dict) or

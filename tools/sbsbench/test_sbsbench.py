@@ -2430,38 +2430,60 @@ class EvalContractTests(unittest.TestCase):
         ensure_start = estimator.index("static bool ensure_ocr_tensorrt_engine_for_device")
         ensure_end = estimator.index("engine_build_status tensorrt_model_prepare_status", ensure_start)
         ensure = estimator[ensure_start:ensure_end]
-        self.assertIn("models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx", manager)
+        self.assertIn(
+            "ocr_model_asset_path =\n        depth_coordinate_v2::subtitle_ocr_asset_path",
+            manager,
+        )
         self.assertIn("ocr_model_artifact_onnx_sha256", ensure)
-        self.assertIn("assets_dir / ocr_model_asset_path", ensure)
+        self.assertIn(
+            "assets_dir / std::filesystem::path {ocr_model_asset_path}", ensure
+        )
         self.assertNotIn("ensure_onnx_available", ensure)
         self.assertNotIn("std::filesystem::remove(artifact.source_path", ensure)
 
-    def test_ocr_engine_cache_filename_is_bounded_and_hashes_the_full_identity(self):
+    def test_ocr_validates_resolved_output_and_interop_extents_before_enqueue(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        with open(os.path.join(repo, "src", "model_manager.cpp"), encoding="utf-8") as fh:
-            manager = fh.read()
-        start = manager.index("std::string ocr_engine_filename")
-        end = manager.index("std::filesystem::path ensure_onnx_available", start)
-        helper = manager[start:end]
-        self.assertIn("cache_identity_domain", helper)
-        self.assertIn("update_field(ocr_model_name)", helper)
-        self.assertIn("update_field(ocr_engine_recipe)", helper)
-        self.assertIn("update_field(compatibility_tag)", helper)
-        self.assertIn("std::uint64_t", helper)
-        self.assertIn("EVP_sha256()", helper)
-        self.assertIn("digest_size != 32u", helper)
-        self.assertIn('".cache-"', helper)
-        self.assertNotIn("filename += compatibility_tag", helper)
-
         with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
                   encoding="utf-8") as fh:
             estimator = fh.read()
-        ensure_start = estimator.index("static bool ensure_ocr_tensorrt_engine_for_device")
-        ensure_end = estimator.index("engine_build_status tensorrt_model_prepare_status", ensure_start)
-        ensure = estimator[ensure_start:ensure_end]
-        name = ensure.index("artifact.name = ocr_engine_filename")
-        path = ensure.index("artifact.engine_path = assets_dir / artifact.name")
-        self.assertIn("if (artifact.name.empty())", ensure[name:path])
+
+        warmup_start = estimator.index("static bool warmup_ocr_execution_context")
+        warmup_end = estimator.index("namespace models {", warmup_start)
+        warmup = estimator[warmup_start:warmup_end]
+        self.assertLess(
+            warmup.index('getMaxOutputSize("fetch_name_0")'),
+            warmup.index('setTensorAddress("x"'),
+        )
+        self.assertLess(
+            warmup.index('getMaxOutputSize("fetch_name_0")'),
+            warmup.index("enqueueV3(stream)"),
+        )
+
+        context_start = estimator.index("bool initialize_ocr_context(")
+        context_end = estimator.index("\n    impl(", context_start)
+        context_init = estimator[context_start:context_end]
+        self.assertLess(
+            context_init.index('getMaxOutputSize("fetch_name_0")'),
+            context_init.index("publish_active_engine_manifest("),
+        )
+        self.assertIn("ocr_output_size_validated = true", context_init)
+
+        live_start = estimator.index("expected_ocr_input_bytes")
+        live_end = estimator.index("CUresult ocr_unmap_res", live_start)
+        live = estimator[live_start:live_end]
+        for evidence in (
+                "ocr_input_mapped_bytes < expected_ocr_input_bytes",
+                "ocr_output_mapped_bytes < expected_ocr_output_bytes",
+                'getMaxOutputSize("fetch_name_0")'):
+            self.assertIn(evidence, live)
+        self.assertLess(
+            live.index('getMaxOutputSize("fetch_name_0")'),
+            live.index("ocr_exec_context->setTensorAddress("),
+        )
+        self.assertLess(
+            live.index('getMaxOutputSize("fetch_name_0")'),
+            live.index("enqueue_ocr_inference("),
+        )
 
     def test_live_and_eval_shaders_use_level3_optimization(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

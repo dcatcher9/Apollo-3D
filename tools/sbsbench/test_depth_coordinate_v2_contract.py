@@ -66,6 +66,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             43: "026eea4c5e3280af0f7945d6f84fce7d54e74d009c6d89dafb6d725bf003aba1",
             44: "7ab9db96b7af454e10cfd004f878c0847d66913059005578e212474ef2a0a5fb",
             45: "8515cf7bc352c2e9e56e6a5fd9dad9802e1e7cd02f705fd8a957617c7ba94e9a",
+            46: "8ab387f9bcda29e90455ce9e5b8677cef3cd7744fe03ee03202a4699fa7e4ead",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -73,14 +74,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0xFBD3CDB1)
+        self.assertEqual(generator.contract_tag(contract), 0xD18FF0F3)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "fbd3cdb175e260327046e63a18a8278428a65a9b2103a23b5a6ceae7c5abcbcd",
+            "d18ff0f3c8e823725663bf578e243abb61bf406d4334807edd658b9c86d9e94d",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "11bd8c0ab14d22caab83044e5f0d38cca10f5eef5df5d5e671cbedf64e256a1f",
+            "f299ce49f332458a1d97634d4ced6d7fc802d2be8d583ee04f0e32d851ed1a22",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -207,7 +208,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
 
     def test_subtitle_ocr_contract_binds_model_profile_tensor_and_record_abis(self):
         ocr = python_contract.SUBTITLE_OCR
-        self.assertEqual(ocr.schema, 5)
+        self.assertEqual(ocr.schema, 6)
         self.assertEqual(ocr.logical_model, "ppocrv6_tiny_det_modelopt_fp16")
         self.assertEqual(
             ocr.asset_path,
@@ -259,7 +260,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual((ocr.record_schema, ocr.record_tag), (3, 0x3852434F))
         self.assertEqual((ocr.record_word_count, ocr.raw_box_offset), (208, 16))
         self.assertEqual((ocr.final_box_offset, ocr.final_box_capacity), (144, 8))
-        self.assertEqual((ocr.locator_schema, ocr.locator_tag), (8, 0x38524C53))
+        self.assertEqual((ocr.locator_schema, ocr.locator_tag), (9, 0x39524C53))
         self.assertEqual(
             (ocr.locator_word_count, ocr.locator_owner_offset,
              ocr.locator_pending_offset, ocr.locator_current_offset),
@@ -269,6 +270,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
+                'contract_schema = 46u',
+                'subtitle_ocr_contract_schema = 6u',
                 'subtitle_ocr_model_name = "ppocrv6_tiny_det_modelopt_fp16"',
                 'subtitle_ocr_asset_path = '
                 '"models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx"',
@@ -287,7 +290,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'std::array<double, 3> subtitle_ocr_imagenet_mean {{0.485, 0.456, 0.406}}',
                 'subtitle_ocr_output_width = 960u',
                 'subtitle_ocr_record_tag = 0x3852434Fu',
-                'subtitle_locator_state_tag = 0x38524C53u',
+                'subtitle_locator_state_schema = 9u',
+                'subtitle_locator_state_tag = 0x39524C53u',
                 'subtitle_ocr_safe_row_top = 24u',
                 'subtitle_ocr_safe_row_bottom = 155u',
                 'subtitle_ocr_crop_aspect_width = 6u',
@@ -299,12 +303,15 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
+                '#define V2_CONTRACT_SCHEMA 46u',
+                '#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 6u',
                 '#define V2_OCR_INPUT_WIDTH 960u',
                 '#define V2_OCR_OUTPUT_WIDTH 960u',
                 '#define V2_OCR_IMAGENET_MEAN_B 0.485f',
                 '#define V2_OCR_IMAGENET_STD_R 0.225f',
                 '#define V2_OCR_RECORD_TAG 0x3852434Fu',
-                '#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x38524C53u',
+                '#define V2_SUBTITLE_LOCATOR_STATE_SCHEMA 9u',
+                '#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x39524C53u',
                 '#define V2_MODEL_CALIBRATED_SHAPE_COUNT 6u',
                 '#define V2_MODEL_CALIBRATED_SHAPE_WIDTH_5 434u',
                 '#define V2_MODEL_CALIBRATED_SHAPE_HEIGHT_5 1036u',

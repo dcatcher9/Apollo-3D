@@ -171,75 +171,32 @@ def inspect_dump(dump: Path) -> RawModelProvenance:
         raise ValueError("dump_manifest.json lacks its authoritative config object")
 
     live_config = config.get("live_effective")
-    offline_config = config.get("offline_analysis_configured")
     shared_config = config.get("shared_configured")
-    config_schema = config.get("schema")
-    if config_schema is None:
-        if live_config is not None or offline_config is not None or shared_config is not None:
-            raise ValueError("structured dump config is missing its schema")
-    elif config_schema in (2, 3):
-        if not isinstance(live_config, dict):
-            raise ValueError("config.live_effective must be an object")
-        if config_schema == 2 and not isinstance(offline_config, dict):
-            raise ValueError("config.offline_analysis_configured must be an object")
-        if config_schema == 3 and offline_config is not None:
-            raise ValueError("config schema 3 must not contain retired offline model selection")
-        if not isinstance(shared_config, dict):
-            raise ValueError("config.shared_configured must be an object")
-    else:
-        raise ValueError("structured dump config has unknown semantics")
-    # Schema 2 separated effective live authority from the now-removed offline model selector.
-    # Schema 3 has one authenticated model authority. Keep both schema 2 and the flat-key fallback
-    # so historical captures remain auditable.
-    effective_config = live_config if isinstance(live_config, dict) else config
-    configured_analysis = offline_config if isinstance(offline_config, dict) else config
-    effective_prefix = "config.live_effective" if live_config is not None else "config"
-    configured_prefix = (
-        "config.offline_analysis_configured" if offline_config is not None else "config")
+    if config.get("schema") != 3:
+        raise ValueError("dump config is not the current schema 3")
+    if not isinstance(live_config, dict):
+        raise ValueError("config.live_effective must be an object")
+    if not isinstance(shared_config, dict):
+        raise ValueError("config.shared_configured must be an object")
+    if config.get("offline_analysis_configured") is not None:
+        raise ValueError("config schema 3 must not contain retired offline model selection")
 
     manifest_model = _optional_string(manifest.get("depth_model"), "depth_model")
     config_model = _optional_string(
-        effective_config.get("depth_model"), f"{effective_prefix}.depth_model")
+        live_config.get("depth_model"), "config.live_effective.depth_model")
     if manifest_model and config_model and manifest_model != config_model:
         raise ValueError("dump manifest disagrees about the effective depth model")
     declared_model = manifest_model or config_model
     if declared_model is None:
         raise ValueError("dump manifest lacks an effective depth model name")
-    configured_model = _optional_string(
-        configured_analysis.get("depth_model") if offline_config is not None else
-        config.get("configured_depth_model"),
-        f"{configured_prefix}.depth_model",
-        empty_is_none=True)
     declared_url = _optional_string(
-        effective_config.get("depth_model_url"),
-        f"{effective_prefix}.depth_model_url", empty_is_none=True)
+        live_config.get("depth_model_url"),
+        "config.live_effective.depth_model_url", empty_is_none=True)
     raw_digest = file_sha256(raw_path)
 
     proof = manifest.get(PROVENANCE_KEY)
     if proof is None:
-        return RawModelProvenance(
-            status="unverified",
-            source="dump_manifest.json",
-            attestation_schema=None,
-            binding=None,
-            declared_model=declared_model,
-            configured_model=configured_model,
-            declared_url=declared_url,
-            onnx_sha256=None,
-            raw_depth_sha256=raw_digest,
-            model_input_sha256=None,
-            model_input_shape_sha256=None,
-            preprocess_profile=None,
-            preprocess_source_closure_sha256=None,
-            calibration_id=None,
-            calibrated_raw_coordinate_scale=None,
-            model_input_width=None,
-            model_input_height=None,
-            reason=(
-                "capture manifest has no ONNX SHA-256 bound to raw_depth.f32; model name and "
-                "URL are descriptive only"
-            ),
-        )
+        raise ValueError(f"dump manifest lacks required {PROVENANCE_KEY}")
     if not isinstance(proof, dict) or set(proof) != PROVENANCE_KEYS:
         raise ValueError(f"dump manifest {PROVENANCE_KEY} has missing or unknown fields")
     if proof.get("schema") != PROVENANCE_SCHEMA or proof.get("binding") != BINDING:
@@ -288,7 +245,7 @@ def inspect_dump(dump: Path) -> RawModelProvenance:
         attestation_schema=PROVENANCE_SCHEMA,
         binding=BINDING,
         declared_model=declared_model,
-        configured_model=configured_model,
+        configured_model=None,
         declared_url=declared_url,
         onnx_sha256=onnx_digest,
         raw_depth_sha256=raw_digest,
@@ -302,19 +259,6 @@ def inspect_dump(dump: Path) -> RawModelProvenance:
         model_input_height=height,
         reason=None,
     )
-
-
-def require_authoritative(
-        provenance: RawModelProvenance, allow_unverified: bool) -> None:
-    if provenance.authoritative or allow_unverified:
-        return
-    raise ValueError(
-        "raw model provenance is unverified: " + str(provenance.reason) + "; "
-        "capture a dump with ONNX-hash provenance or pass "
-        "--allow-unverified-model-provenance for geometry-only experimentation"
-    )
-
-
 __all__ = [
     "BINDING",
     "PROVENANCE_KEY",
@@ -323,5 +267,4 @@ __all__ = [
     "RawModelProvenance",
     "file_sha256",
     "inspect_dump",
-    "require_authoritative",
 ]

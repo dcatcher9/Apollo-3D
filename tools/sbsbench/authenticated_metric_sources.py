@@ -273,10 +273,6 @@ def sample_sha256(path):
     return digest.hexdigest()
 
 
-# Private alias retained for existing validator result-schema compatibility.
-_sample_sha256 = sample_sha256
-
-
 __all__ = [
     "DEFAULT_CLIPS_ROOT", "deterministic_frame_sample", "discover_clips", "load_frame",
     "sample_sha256", "suite_roots",

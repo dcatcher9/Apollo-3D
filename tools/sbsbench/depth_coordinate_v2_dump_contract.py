@@ -20,8 +20,7 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     import generate_depth_coordinate_v2_contract as generator  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 26
-SUPPORTED_DUMP_MANIFEST_SCHEMAS = frozenset({DUMP_MANIFEST_SCHEMA})
+DUMP_MANIFEST_SCHEMA = 27
 SUBTITLE_OCR_RECORD_SCHEMA = coordinate_contract.SUBTITLE_OCR.record_schema
 SUBTITLE_OCR_RECORD_TAG = coordinate_contract.SUBTITLE_OCR.record_tag
 SUBTITLE_OCR_RECORD_WORD_COUNT = coordinate_contract.SUBTITLE_OCR.record_word_count
@@ -82,10 +81,10 @@ WINDOW_VIDEO_MAPPING_STATUSES = frozenset({
 SHADOW_STATE_DUMP_SCHEMA = 16
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 2
 LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
-    "cefced5c4ebcb98d8b410b4d13d05a03941f63207edb6ade93afb69fa9bf1529"
+    "5a1ab7175b97b8ca89397da8b3f86812a3faedf5e15938abf42f64e9716f2c5b"
 )
 DIAGNOSTIC_SOURCE_CLOSURE_SHA256 = (
-    "53c3b025ca2f7c1dbd7abed09ca156d5646ccb45a17c294f9f169d62962a7194"
+    "12dbf80c10110b21d59d01b9120c4efa0b9147bed420f134053cfef1276d00d3"
 )
 _CONTRACT = coordinate_contract.load_contract()
 _CONTRACT_TAG = generator.contract_tag(_CONTRACT)
@@ -104,7 +103,7 @@ _MAXIMUM_SOURCE_LONG_SIDE = 5120
 _MAXIMUM_SOURCE_PIXELS = 5120 * 2160
 
 _SUBTITLE_MODE_NONE = "none"
-_SUBTITLE_MODE_SLR8 = "subtitle-slr8"
+_SUBTITLE_MODE_SLR9 = "subtitle-slr9"
 _SUBTITLE_OCR_CONTRACT_SCHEMA = coordinate_contract.SUBTITLE_OCR.schema
 _SUBTITLE_OCR_MODEL_NAME = coordinate_contract.SUBTITLE_OCR.logical_model
 _SUBTITLE_OCR_ASSET_PATH = coordinate_contract.SUBTITLE_OCR.asset_path
@@ -410,7 +409,7 @@ def _subtitle_rectangle_aggregate(
 
 
 def _subtitle_coherent_lines(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
-    """Mirror the frozen SLR8 vertically-adjacent ordinary-line predicate."""
+    """Mirror the frozen SLR9 vertically-adjacent ordinary-line predicate."""
 
     width_a = a["right"] - a["left"]
     width_b = b["right"] - b["left"]
@@ -442,7 +441,7 @@ def _subtitle_coherent_lines(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
 
 def _subtitle_same_baseline_segments(
         a: Dict[str, Any], b: Dict[str, Any], field_width: int) -> bool:
-    """Mirror the frozen SLR8 horizontally-disjoint same-baseline predicate."""
+    """Mirror the frozen SLR9 horizontally-disjoint same-baseline predicate."""
 
     if not (a["right"] <= b["left"] or b["right"] <= a["left"]):
         return False
@@ -471,7 +470,7 @@ def _subtitle_same_baseline_segments(
 
 def _subtitle_qualified_ocr_core(
         rectangle: Dict[str, Any], field_width: int) -> bool:
-    """Mirror SLR8's generic core geometry gate after OCR8 validation."""
+    """Mirror SLR9's generic core geometry gate after OCR8 validation."""
 
     width = rectangle["right"] - rectangle["left"]
     height = rectangle["bottom"] - rectangle["top"]
@@ -486,7 +485,7 @@ def _subtitle_qualified_ocr_core(
 
 def _subtitle_selected_ocr_indices(
         raw_boxes: list[Dict[str, Any]], field_width: int) -> list[int]:
-    """Replay frozen SLR8 component closure/selection on same-frame OCR8 cores."""
+    """Replay frozen SLR9 component closure/selection on same-frame OCR8 cores."""
 
     qualified = [
         index for index, rectangle in enumerate(raw_boxes)
@@ -553,47 +552,47 @@ def validate_subtitle_locator_state(
         payload: Any, *, matched_frame_id: int, analysis_generation: int,
         source_width: int, source_height: int,
         field_width: int, field_height: int) -> Dict[str, Any]:
-    """Validate and decode the sole current compact SLR8 80-word state."""
+    """Validate and decode the sole current compact SLR9 80-word state."""
 
-    expected_frame = _uint64(matched_frame_id, "SLR8 matched frame id")
-    expected_generation = _uint64(analysis_generation, "SLR8 analysis generation")
-    expected_source_width = _uint32(source_width, "SLR8 source width")
-    expected_source_height = _uint32(source_height, "SLR8 source height")
-    expected_field_width = _uint32(field_width, "SLR8 field width")
-    expected_field_height = _uint32(field_height, "SLR8 field height")
+    expected_frame = _uint64(matched_frame_id, "SLR9 matched frame id")
+    expected_generation = _uint64(analysis_generation, "SLR9 analysis generation")
+    expected_source_width = _uint32(source_width, "SLR9 source width")
+    expected_source_height = _uint32(source_height, "SLR9 source height")
+    expected_field_width = _uint32(field_width, "SLR9 field width")
+    expected_field_height = _uint32(field_height, "SLR9 field height")
     dynamic_roi = coordinate_contract.subtitle_ocr_dynamic_roi(
         expected_source_width, expected_source_height,
         expected_field_width, expected_field_height)
     if dynamic_roi is None:
-        raise ValueError("SLR8 expected field geometry is invalid")
+        raise ValueError("SLR9 expected field geometry is invalid")
     expected_roi_top, expected_roi_bottom = dynamic_roi
     ribbon_min_bottom = coordinate_contract.subtitle_ocr_ribbon_min_bottom(
         expected_source_width, expected_source_height,
         expected_field_width, expected_field_height)
     if ribbon_min_bottom is None or not expected_roi_top < ribbon_min_bottom <= expected_roi_bottom:
-        raise ValueError("SLR8 projected ribbon bottom tolerance is invalid")
+        raise ValueError("SLR9 projected ribbon bottom tolerance is invalid")
 
-    words = _uint32_words(payload, SUBTITLE_LOCATOR_STATE_WORD_COUNT, "SLR8 state")
+    words = _uint32_words(payload, SUBTITLE_LOCATOR_STATE_WORD_COUNT, "SLR9 state")
     if words[0] != SUBTITLE_LOCATOR_STATE_SCHEMA or words[1] != SUBTITLE_LOCATOR_STATE_TAG:
-        raise ValueError("SLR8 state has an unknown schema or tag")
+        raise ValueError("SLR9 state has an unknown schema or tag")
     flags = words[2]
     if flags & ~SUBTITLE_LOCATOR_KNOWN_FLAGS:
-        raise ValueError("SLR8 state has unknown flags")
+        raise ValueError("SLR9 state has unknown flags")
     owner_count = words[4]
     pending_count = words[12]
     current_count = words[20]
     if any(count > SUBTITLE_LOCATOR_RECT_CAPACITY for count in (
             owner_count, pending_count, current_count)):
-        raise ValueError("SLR8 state exceeds its fixed rectangle capacity")
+        raise ValueError("SLR9 state exceeds its fixed rectangle capacity")
     fade = words[24]
     if fade > 2:
-        raise ValueError("SLR8 fade step must be zero, one, or two")
+        raise ValueError("SLR9 fade step must be zero, one, or two")
     if words[21] not in {
             SUBTITLE_LOCATOR_EVENT_NONE,
             SUBTITLE_LOCATOR_EVENT_BIRTH,
             SUBTITLE_LOCATOR_EVENT_DEATH,
             SUBTITLE_LOCATOR_EVENT_HANDOFF}:
-        raise ValueError("SLR8 state has an unknown last event")
+        raise ValueError("SLR9 state has an unknown last event")
     packed_kinds = words[SUBTITLE_LOCATOR_KIND_WORD]
     known_kind_bits = (
         (SUBTITLE_LOCATOR_KIND_MASK << SUBTITLE_LOCATOR_OWNER_KIND_SHIFT) |
@@ -601,13 +600,13 @@ def validate_subtitle_locator_state(
         (SUBTITLE_LOCATOR_KIND_MASK << SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT)
     )
     if packed_kinds & ~known_kind_bits:
-        raise ValueError("SLR8 state has unknown packed-kind bits")
+        raise ValueError("SLR9 state has unknown packed-kind bits")
 
     def kind_mask(shift: int, count: int, label: str) -> int:
         value = (packed_kinds >> shift) & SUBTITLE_LOCATOR_KIND_MASK
         used = (1 << count) - 1 if count else 0
         if value & ~used:
-            raise ValueError(f"SLR8 {label} kind mask exceeds its rectangle count")
+            raise ValueError(f"SLR9 {label} kind mask exceeds its rectangle count")
         return value
 
     owner_kinds = kind_mask(SUBTITLE_LOCATOR_OWNER_KIND_SHIFT, owner_count, "owner")
@@ -618,39 +617,39 @@ def validate_subtitle_locator_state(
     frame_id = _uint64_words(words[22], words[23])
     if (generation != expected_generation or frame_id != expected_frame or
             words[27] != expected_field_width or words[28] != expected_field_height):
-        raise ValueError("SLR8 state identity disagrees with the matched dump frame")
+        raise ValueError("SLR9 state identity disagrees with the matched dump frame")
 
     owner = _decode_subtitle_locator_rectangles(
         words, offset=SUBTITLE_LOCATOR_OWNER_WORD_OFFSET, count=owner_count,
         field_width=expected_field_width, field_height=expected_field_height,
         roi_top=expected_roi_top, roi_bottom=expected_roi_bottom,
         ribbon_min_bottom=ribbon_min_bottom,
-        ribbon_mask=owner_kinds, current_cover=False, label="SLR8 owner")
+        ribbon_mask=owner_kinds, current_cover=False, label="SLR9 owner")
     pending = _decode_subtitle_locator_rectangles(
         words, offset=SUBTITLE_LOCATOR_PENDING_WORD_OFFSET, count=pending_count,
         field_width=expected_field_width, field_height=expected_field_height,
         roi_top=expected_roi_top, roi_bottom=expected_roi_bottom,
         ribbon_min_bottom=ribbon_min_bottom,
-        ribbon_mask=pending_kinds, current_cover=False, label="SLR8 pending")
+        ribbon_mask=pending_kinds, current_cover=False, label="SLR9 pending")
     current = _decode_subtitle_locator_rectangles(
         words, offset=SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET, count=current_count,
         field_width=expected_field_width, field_height=expected_field_height,
         roi_top=expected_roi_top, roi_bottom=expected_roi_bottom,
         ribbon_min_bottom=ribbon_min_bottom,
         ribbon_mask=current_kinds, current_cover=True,
-        label="SLR8 current-authority")
+        label="SLR9 current-authority")
     # Owner and pending store cores and therefore expose the producer's canonical core order.
     # Current stores paired covers; their expansion can change cover-top order, so its canonical
     # order is checked later against the selected OCR core order rather than cover coordinates.
     for label, rectangles in (("owner", owner), ("pending", pending)):
         if not _subtitle_rectangles_are_top_left_ordered(rectangles):
-            raise ValueError(f"SLR8 {label} rectangles are not in canonical top/left order")
+            raise ValueError(f"SLR9 {label} rectangles are not in canonical top/left order")
     owner_bbox, owner_area = _subtitle_rectangle_aggregate(owner)
     pending_bbox, pending_area = _subtitle_rectangle_aggregate(pending)
     if tuple(words[5:9]) != owner_bbox or words[9] != owner_area:
-        raise ValueError("SLR8 owner bbox or area disagrees with its rectangles")
+        raise ValueError("SLR9 owner bbox or area disagrees with its rectangles")
     if tuple(words[13:17]) != pending_bbox or words[17] != pending_area:
-        raise ValueError("SLR8 pending bbox or area disagrees with its rectangles")
+        raise ValueError("SLR9 pending bbox or area disagrees with its rectangles")
 
     target = _float32_bits(words[18])
     target_valid = bool(flags & SUBTITLE_LOCATOR_FLAG_TARGET_VALID)
@@ -658,22 +657,22 @@ def validate_subtitle_locator_state(
     pending_flag = bool(flags & SUBTITLE_LOCATOR_FLAG_PENDING)
     target_reset = bool(flags & SUBTITLE_LOCATOR_FLAG_TARGET_RESET)
     if owner_flag != (owner_count != 0) or pending_flag != (pending_count != 0):
-        raise ValueError("SLR8 owner/pending flags disagree with their rectangle counts")
+        raise ValueError("SLR9 owner/pending flags disagree with their rectangle counts")
     if owner_flag != (words[3] != 0):
-        raise ValueError("SLR8 owner generation disagrees with owner authority")
+        raise ValueError("SLR9 owner generation disagrees with owner authority")
     if current_count > owner_count:
-        raise ValueError("SLR8 current rectangle count cannot exceed its owner count")
+        raise ValueError("SLR9 current rectangle count cannot exceed its owner count")
     if current_count != 0 and not (owner_flag and target_valid and fade in (1, 2)):
-        raise ValueError("SLR8 current rectangles require owner and valid target authority")
+        raise ValueError("SLR9 current rectangles require owner and valid target authority")
     if target_valid:
         if (not owner_flag or target_reset or words[19] != words[3] or
                 not math.isfinite(target) or
                 abs(target) > _DEFAULTS.direct_container_limit or fade not in (1, 2)):
-            raise ValueError("SLR8 valid target identity or value is inconsistent")
+            raise ValueError("SLR9 valid target identity or value is inconsistent")
     elif target_reset:
         if (not owner_flag or words[18] != 0 or words[19] != 0 or
                 current_count != 0 or fade != 0):
-            raise ValueError("SLR8 target reset must clear target and current authority")
+            raise ValueError("SLR9 target reset must clear target and current authority")
 
     grace = words[25]
     grace_bounds = {
@@ -685,14 +684,14 @@ def validate_subtitle_locator_state(
     packed_grace_zero = words[29] == 0 and words[30] == 0
     if owner_flag:
         if grace != 0 or not packed_grace_zero:
-            raise ValueError("SLR8 live owner cannot retain death-grace bounds")
+            raise ValueError("SLR9 live owner cannot retain death-grace bounds")
         if not target_valid and not target_reset and (
                 words[18] != 0 or words[19] != 0 or current_count != 0 or fade != 0):
-            raise ValueError("SLR8 owner without target authority must clear target words")
+            raise ValueError("SLR9 owner without target authority must clear target words")
     elif grace == 0:
         if (words[18] != 0 or words[19] != 0 or not packed_grace_zero or
                 current_count != 0 or target_valid or target_reset or fade != 0):
-            raise ValueError("SLR8 absent owner/grace state must be canonical zero")
+            raise ValueError("SLR9 absent owner/grace state must be canonical zero")
     else:
         if (target_valid or target_reset or words[19] != 0 or
                 not math.isfinite(target) or
@@ -703,7 +702,7 @@ def validate_subtitle_locator_state(
                 grace_bounds["right"] > expected_field_width or
                 grace_bounds["top"] < expected_roi_top or
                 grace_bounds["bottom"] > expected_roi_bottom):
-            raise ValueError("SLR8 death-grace target or packed bounds are inconsistent")
+            raise ValueError("SLR9 death-grace target or packed bounds are inconsistent")
 
     return {
         "schema": words[0],
@@ -1575,7 +1574,7 @@ def _validate_subtitle_conditioning_manifest(
             "artifact_files": {},
             "subtitle_evidence_complete": False,
         }
-    if mode == _SUBTITLE_MODE_SLR8:
+    if mode == _SUBTITLE_MODE_SLR9:
         expected_files = {
             "ocr_record": "subtitle_ocr_record.u32",
             "locator_state": "subtitle_locator_state.u32",
@@ -1583,18 +1582,18 @@ def _validate_subtitle_conditioning_manifest(
             "conditioned_field": "shadow_final_parallax.f32",
         }
         if subtitle.get("request") is not True:
-            raise ValueError("active SLR8 subtitle conditioning must bind an enabled request")
+            raise ValueError("active SLR9 subtitle conditioning must bind an enabled request")
         if subtitle.get("producer") != _subtitle_ocr_producer_contract():
-            raise ValueError("active SLR8 subtitle conditioning has unknown OCR8 provenance")
+            raise ValueError("active SLR9 subtitle conditioning has unknown OCR8 provenance")
         if subtitle.get("resolver") != _subtitle_locator_resolver_contract():
-            raise ValueError("active SLR8 subtitle conditioning has unknown resolver provenance")
+            raise ValueError("active SLR9 subtitle conditioning has unknown resolver provenance")
         if subtitle.get("artifacts") != expected_files:
-            raise ValueError("active SLR8 subtitle conditioning has unknown artifact roles")
+            raise ValueError("active SLR9 subtitle conditioning has unknown artifact roles")
         required = {
             "subtitle_ocr_record.u32": "same-frame OCR8 subtitle boxes",
-            "subtitle_locator_state.u32": "compact SLR8 subtitle authority state",
+            "subtitle_locator_state.u32": "compact SLR9 subtitle authority state",
             "shadow_base_final_parallax.f32": (
-                "ordinary post-limiter V2 field before SLR8 conditioning"),
+                "ordinary post-limiter V2 field before SLR9 conditioning"),
         }
         for name, stage in required.items():
             descriptor = _required_hashed_artifact(
@@ -1603,7 +1602,7 @@ def _validate_subtitle_conditioning_manifest(
                 raise ValueError(
                     f"dump_manifest.json misattributes active subtitle artifact {name}")
         return {
-            "mode": _SUBTITLE_MODE_SLR8,
+            "mode": _SUBTITLE_MODE_SLR9,
             "live": True,
             "request": True,
             "artifact_files": expected_files,
@@ -1623,7 +1622,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     """
 
     if (not isinstance(document, dict) or
-            document.get("schema") not in SUPPORTED_DUMP_MANIFEST_SCHEMAS):
+            document.get("schema") != DUMP_MANIFEST_SCHEMA):
         raise ValueError("dump_manifest.json has an unknown serialization schema")
     schema = document["schema"]
     renderer = document.get("renderer")
@@ -1679,7 +1678,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     if selected and not active:
         raise ValueError("dump_manifest.json selects V2 without an active producer")
     if subtitle_live and (not active or not selected):
-        raise ValueError("active SLR8 subtitle conditioning requires selected V2 geometry")
+        raise ValueError("active SLR9 subtitle conditioning requires selected V2 geometry")
     requested = renderer.get("parallax_v2_render_requested")
     mapping_matches = renderer.get("mapping_artifacts_match_selected_renderer")
     if (not isinstance(requested, bool) or
@@ -1744,13 +1743,13 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     expected_final_role = (
         (("least row-wise crop-local q >= shadow_vertical_conditioned with horizontal slope <= "
           "max_horizontal_slope and vertical shear <= max_vertical_shear produces "
-          "shadow_base_final_parallax; SLR8 applies the analytic anisotropic rectangle "
+          "shadow_base_final_parallax; SLR9 applies the analytic anisotropic rectangle "
           "budget/fade from same-frame current authority and publishes shadow_final_parallax, "
           "which plus depth_input_region embedding is live position authority")
          if subtitle_live and input_mode == "video-region" else
          ("least row-wise q >= shadow_vertical_conditioned with horizontal slope <= "
           "max_horizontal_slope and vertical shear <= max_vertical_shear produces "
-          "shadow_base_final_parallax; SLR8 applies the analytic anisotropic rectangle "
+          "shadow_base_final_parallax; SLR9 applies the analytic anisotropic rectangle "
           "budget/fade from same-frame current authority and publishes "
           "shadow_final_parallax as live position authority")
          if subtitle_live else
@@ -1815,7 +1814,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     }
     if subtitle_live:
         expected_artifacts["shadow_base_final_parallax.f32"] = (
-            "ordinary post-limiter V2 field before SLR8 conditioning", True)
+            "ordinary post-limiter V2 field before SLR9 conditioning", True)
     for name, (stage, required) in expected_artifacts.items():
         descriptor = artifacts.get(name)
         # Exact geometry fields carry a mandatory SHA-256 of the written bytes; a manifest
@@ -1861,7 +1860,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         if subtitle_live and (
                 geometry_width, geometry_height) not in _AUTHENTICATED_TENSOR_SHAPES:
             raise ValueError(
-                "active SLR8 subtitle conditioning requires a calibrated DAV2 field")
+                "active SLR9 subtitle conditioning requires a calibrated DAV2 field")
         model_dimensions = dimensions.get("model_input")
         raw_dimensions = dimensions.get("raw_depth")
         warp_dimensions = dimensions.get("warp_depth")
@@ -1910,7 +1909,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     if not subtitle_live and (
             "shadow_base_final_parallax.f32" in artifacts or
             "shadow_base_final_parallax" in dimensions):
-        raise ValueError("inactive subtitle conditioning exposes an SLR8 base field")
+        raise ValueError("inactive subtitle conditioning exposes an SLR9 base field")
 
     if input_mode == "video-region":
         warp_map_descriptor = artifacts.get("warp_map.f32")
@@ -2044,12 +2043,12 @@ def _verify_subtitle_conditioning_artifacts(
     if metadata != manifest.get("subtitle_conditioning"):
         raise ValueError("subtitle_conditioning.json disagrees with the manifest")
     mode = metadata.get("mode")
-    if mode == _SUBTITLE_MODE_SLR8:
+    if mode == _SUBTITLE_MODE_SLR9:
         dynamic_roi = coordinate_contract.subtitle_ocr_dynamic_roi(
             source_width, source_height, field_width, field_height)
         if dynamic_roi is None:
             raise ValueError(
-                "active SLR8 subtitle conditioning has unsupported source/field geometry")
+                "active SLR9 subtitle conditioning has unsupported source/field geometry")
         roi_top, roi_bottom = dynamic_roi
         ocr_payload = _read_hashed_artifact(
             dump_dir, manifest["artifacts"], "subtitle_ocr_record.u32")
@@ -2076,7 +2075,7 @@ def _verify_subtitle_conditioning_artifacts(
             field_height=field_height,
         )
         if not ocr["authoritative"] and locator["current_count"] != 0:
-            raise ValueError("an abstaining OCR8 record cannot authorize SLR8 current rectangles")
+            raise ValueError("an abstaining OCR8 record cannot authorize SLR9 current rectangles")
         selected_indices = _subtitle_selected_ocr_indices(
             ocr["raw_boxes"], field_width)
         selected_final_rectangles = [
@@ -2098,7 +2097,7 @@ def _verify_subtitle_conditioning_artifacts(
                  rectangle["kind"]) not in final_rectangles
                 for rectangle in locator["current_rectangles"]):
             raise ValueError(
-                "SLR8 current rectangles/kinds are not exact covers from same-frame OCR8")
+                "SLR9 current rectangles/kinds are not exact covers from same-frame OCR8")
         current_tuples = [
             (rectangle["left"], rectangle["top"],
              rectangle["right"], rectangle["bottom"], rectangle["kind"])
@@ -2117,9 +2116,9 @@ def _verify_subtitle_conditioning_artifacts(
                 break
         if not selection_order_valid:
             raise ValueError(
-                "SLR8 current rectangles are outside the frozen same-frame OCR8 selection")
+                "SLR9 current rectangles are outside the frozen same-frame OCR8 selection")
         return {
-            "mode": _SUBTITLE_MODE_SLR8,
+            "mode": _SUBTITLE_MODE_SLR9,
             "subtitle_evidence_verified": True,
             "ocr_authoritative": ocr["authoritative"],
             "ocr_raw_count": ocr["raw_count"],
@@ -2134,6 +2133,9 @@ def _verify_subtitle_conditioning_artifacts(
             "pending_count": locator["pending_count"],
             "current_count": locator["current_count"],
             "last_event": locator["last_event"],
+            "cached_target": locator["cached_target"],
+            "target_grace": locator["target_grace"],
+            "grace_bounds": locator["grace_bounds"],
             "current_rectangles": locator["current_rectangles"],
             "target": locator["target"],
             "fade": locator["fade"],
@@ -2144,30 +2146,30 @@ def _verify_subtitle_conditioning_artifacts(
     }
 
 
-def _replay_slr8_conditioner(base_field: Any, subtitle: Dict[str, Any]) -> Any:
-    """Replay the frozen SLR8 analytic rectangle conditioner in float32 order."""
+def _replay_slr9_conditioner(base_field: Any, subtitle: Dict[str, Any]) -> Any:
+    """Replay the frozen SLR9 analytic rectangle conditioner in float32 order."""
 
     import numpy as np
 
     base = np.asarray(base_field, dtype=np.float32)
     if base.ndim != 2:
-        raise ValueError("SLR8 Base field must be a two-dimensional float32 array")
+        raise ValueError("SLR9 Base field must be a two-dimensional float32 array")
     rectangles = subtitle["current_rectangles"]
     if not rectangles:
         return base.copy()
-    source_width = _uint32(subtitle.get("source_width"), "SLR8 analysis source width")
+    source_width = _uint32(subtitle.get("source_width"), "SLR9 analysis source width")
     if source_width == 0:
-        raise ValueError("SLR8 analysis source width must be positive")
+        raise ValueError("SLR9 analysis source width must be positive")
     target = subtitle.get("target")
     fade = subtitle.get("fade")
     if target is None or fade not in (1, 2):
-        raise ValueError("SLR8 current geometry lacks valid target/fade authority")
+        raise ValueError("SLR9 current geometry lacks valid target/fade authority")
 
     height, width = base.shape
     if ((width, height) not in _AUTHENTICATED_TENSOR_SHAPES or
             width != subtitle.get("field_width") or
             height != subtitle.get("field_height")):
-        raise ValueError("SLR8 conditioner field does not match its calibrated authority")
+        raise ValueError("SLR9 conditioner field does not match its calibrated authority")
     x = np.arange(width, dtype=np.int64)[None, :]
     y = np.arange(height, dtype=np.int64)[:, None]
     horizontal_step = np.float32(
@@ -2455,7 +2457,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
       2. every field matches the manifest geometry dimensions and is entirely finite;
       3. the conditioning chain is internally consistent in exact float32:
          ``vertical_majorant``/``vertical_conditioned``/ordinary Base are bitwise equal to the
-         recurrences recomputed from ``ownership_refined``; SLR8's analytic rectangle budget and
+         recurrences recomputed from ``ownership_refined``; SLR9's analytic rectangle budget and
          fade exactly reproduce the selected final field; and ownership refinement never lowers
          the candidate.
 
@@ -2571,7 +2573,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
         field_width=width,
         field_height=height,
     )
-    subtitle_live = subtitle_summary["mode"] == _SUBTITLE_MODE_SLR8
+    subtitle_live = subtitle_summary["mode"] == _SUBTITLE_MODE_SLR9
     geometry_chain_fields = (
         "shadow_candidate_parallax",
         "shadow_ownership_refined_parallax",
@@ -2640,16 +2642,16 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
                 f"(max abs diff {mismatch})")
 
     if subtitle_live:
-        replayed_subtitle = _replay_slr8_conditioner(
+        replayed_subtitle = _replay_slr9_conditioner(
             fields["shadow_base_final_parallax"], subtitle_summary)
         if not np.array_equal(fields["shadow_final_parallax"], replayed_subtitle):
             mismatch = float(np.max(np.abs(
                 fields["shadow_final_parallax"] - replayed_subtitle)))
             if subtitle_summary["current_count"] == 0:
                 raise ValueError(
-                    "SLR8 has no current geometry but the final field is not exact Base")
+                    "SLR9 has no current geometry but the final field is not exact Base")
             raise ValueError(
-                "shadow_final_parallax.f32 is not the exact SLR8 rectangle-conditioning "
+                "shadow_final_parallax.f32 is not the exact SLR9 rectangle-conditioning "
                 f"recurrence (max abs diff {mismatch})")
 
     warp_depth_path = os.path.join(os.fspath(dump_dir), "warp_depth.f32")
@@ -2699,7 +2701,6 @@ __all__ = [
     "LIVE_RENDERER_SOURCE_CLOSURE_SHA256",
     "SHADOW_FRAME_STATS_DUMP_SCHEMA",
     "SHADOW_STATE_DUMP_SCHEMA",
-    "SUPPORTED_DUMP_MANIFEST_SCHEMAS",
     "SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET",
     "SUBTITLE_LOCATOR_EVENT_BIRTH",
     "SUBTITLE_LOCATOR_EVENT_DEATH",

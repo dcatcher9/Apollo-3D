@@ -595,7 +595,18 @@ static bool warmup_ocr_execution_context(
   });
 
   const auto input_dims = make_input_dims(h, w);
-  const bool bound = exec_context->setInputShape("x", input_dims) &&
+  constexpr std::int64_t output_bytes =
+    static_cast<std::int64_t>(pixels * sizeof(float));
+  const bool shape_bound = exec_context->setInputShape("x", input_dims);
+  const std::int64_t required_output_bytes =
+    shape_bound ? exec_context->getMaxOutputSize("fetch_name_0") : -1;
+  if (required_output_bytes <= 0 || required_output_bytes > output_bytes) {
+    BOOST_LOG(error)
+      << "PP-OCRv6 tiny resolved output requires " << required_output_bytes
+      << " bytes; the authenticated fixed buffer provides " << output_bytes << '.';
+    return false;
+  }
+  const bool bound = shape_bound &&
                      exec_context->setTensorAddress("x", reinterpret_cast<void *>(d_in)) &&
                      exec_context->setTensorAddress(
                        "fetch_name_0",
@@ -926,7 +937,7 @@ namespace models {
     // The ModelOpt-derived graph is a required packaged asset, not a network-repairable cache.
     // The pinned upstream URL names different FP32 bytes, so a missing or mismatched bundle must
     // fail flat without deleting it or silently downloading the source model in its place.
-    artifact.source_path = assets_dir / ocr_model_asset_path;
+    artifact.source_path = assets_dir / std::filesystem::path {ocr_model_asset_path};
     std::error_code source_error;
     if (!std::filesystem::is_regular_file(artifact.source_path, source_error) || source_error) {
       BOOST_LOG(warning)
@@ -2393,6 +2404,7 @@ namespace models {
     bool pending_ocr_submitted = false;
     bool subtitle_conditioned_current = false;
     bool ocr_shape_bound = false;
+    bool ocr_output_size_validated = false;
     bool ocr_error_logged = false;
     // The accepted input is a private matched-frame texture. Retain its SRV until the exact
     // asynchronous raw-depth completion has run the full-resolution ownership pass; this adds no
@@ -2610,6 +2622,28 @@ namespace models {
           << "No isolated warmed PP-OCRv6 tiny context is available; conditioning stays flat.";
         return false;
       }
+      // A pooled context was warmed before it entered the global cache. Revalidate its fixed
+      // context-dependent output bound in this owning instance before any D3D interop binding.
+      const auto fixed_dims = make_input_dims(ocr_engine_height, ocr_engine_width);
+      constexpr std::int64_t fixed_output_bytes =
+        static_cast<std::int64_t>(ocr_engine_width) * ocr_engine_height * sizeof(float);
+      if (!ocr_exec_context->setInputShape("x", fixed_dims)) {
+        BOOST_LOG(error)
+          << "PP-OCRv6 tiny could not restore its authenticated fixed input shape.";
+        ocr_context_poisoned = true;
+        return false;
+      }
+      ocr_shape_bound = true;
+      const std::int64_t required_output_bytes =
+        ocr_exec_context->getMaxOutputSize("fetch_name_0");
+      if (required_output_bytes <= 0 || required_output_bytes > fixed_output_bytes) {
+        BOOST_LOG(error)
+          << "PP-OCRv6 tiny resolved output requires " << required_output_bytes
+          << " bytes; the authenticated fixed buffer provides " << fixed_output_bytes << '.';
+        ocr_context_poisoned = true;
+        return false;
+      }
+      ocr_output_size_validated = true;
       if (!publish_active_engine_manifest(assets_dir, ocr_model_name, artifact)) {
         BOOST_LOG(warning) << "Could not publish the active PP-OCRv6 tiny engine manifest.";
       }
@@ -3072,7 +3106,7 @@ namespace models {
 
       // OCR is optional. Its authenticated source, engine and mutable execution context are
       // isolated from depth; an unavailable detector leaves the compact OCR8 record invalid and
-      // the SLR8 conditioner copies BaseField exactly.
+      // the SLR9 conditioner copies BaseField exactly.
       ocr_available = initialize_ocr_context(assets_dir, cuda);
       if (!ocr_available) {
         BOOST_LOG(warning)
@@ -4026,7 +4060,7 @@ namespace models {
         source_height,
         {target_w, target_h}
       );
-      // OCR8/SLR8 follows the current authenticated analysis field. An unsupported tensor or an
+      // OCR8/SLR9 follows the current authenticated analysis field. An unsupported tensor or an
       // unprojectable bottom crop has no subtitle authority and preserves ordinary BaseField.
       if (!roi.valid()) {
         const UINT zero[4] = {};
@@ -4260,8 +4294,6 @@ namespace models {
       r.completed_frame_id = completed_frame_id;
       r.inference_enqueued = inference_enqueued;
       r.cuda_graph_active = inference_graph_exec != nullptr && !graph_capture_failed;
-      r.ocr_cuda_graph_active =
-        ocr_inference_graph_exec != nullptr && !ocr_graph_capture_failed;
       if (completed_frame_valid) {
         r.input_region = completed_input_region;
         r.color_space = completed_color_space;
@@ -5373,15 +5405,17 @@ namespace models {
 
       CUdeviceptr d_ocr_in = 0;
       CUdeviceptr d_ocr_out = 0;
+      std::size_t ocr_input_mapped_bytes = 0u;
+      std::size_t ocr_output_mapped_bytes = 0u;
       CUresult ocr_in_ptr_res = CUDA_ERROR_NOT_READY;
       CUresult ocr_out_ptr_res = CUDA_ERROR_NOT_READY;
       if (ocr_mapped) {
         ocr_in_ptr_res = cuda.cuGraphicsResourceGetMappedPointer(
-          &d_ocr_in, nullptr,
+          &d_ocr_in, &ocr_input_mapped_bytes,
           cuda_ocr_in_res
         );
         ocr_out_ptr_res = cuda.cuGraphicsResourceGetMappedPointer(
-          &d_ocr_out, nullptr,
+          &d_ocr_out, &ocr_output_mapped_bytes,
           cuda_ocr_out_res
         );
       }
@@ -5435,6 +5469,22 @@ namespace models {
                                ocr_in_ptr_res == CUDA_SUCCESS &&
                                ocr_out_ptr_res == CUDA_SUCCESS &&
                                d_ocr_in && d_ocr_out;
+        constexpr std::size_t expected_ocr_input_bytes =
+          static_cast<std::size_t>(3u) * ocr_engine_width * ocr_engine_height *
+          sizeof(float);
+        constexpr std::size_t expected_ocr_output_bytes =
+          static_cast<std::size_t>(ocr_engine_width) * ocr_engine_height *
+          sizeof(float);
+        if (ocr_bindings_ok &&
+            (ocr_input_mapped_bytes < expected_ocr_input_bytes ||
+             ocr_output_mapped_bytes < expected_ocr_output_bytes)) {
+          BOOST_LOG(error)
+            << "PP-OCRv6 tiny interop buffer is smaller than its authenticated FP32 boundary: "
+            << "input " << ocr_input_mapped_bytes << '/' << expected_ocr_input_bytes
+            << ", output " << ocr_output_mapped_bytes << '/' << expected_ocr_output_bytes
+            << " bytes.";
+          ocr_bindings_ok = false;
+        }
         if (ocr_bindings_ok && (d_ocr_in != ocr_graph_input || d_ocr_out != ocr_graph_output)) {
           // TensorRT graph nodes retain the execution context's bound addresses. Tear down a
           // graph for the previous D3D mapping before mutating those bindings.
@@ -5447,6 +5497,20 @@ namespace models {
             "x", make_input_dims(ocr_engine_height, ocr_engine_width)
           );
           ocr_shape_bound = ocr_bindings_ok;
+        }
+        if (ocr_bindings_ok && !ocr_output_size_validated) {
+          const std::int64_t required_output_bytes =
+            ocr_exec_context->getMaxOutputSize("fetch_name_0");
+          ocr_bindings_ok = required_output_bytes > 0 &&
+                            static_cast<std::uint64_t>(required_output_bytes) <=
+                              expected_ocr_output_bytes;
+          ocr_output_size_validated = ocr_bindings_ok;
+          if (!ocr_bindings_ok) {
+            BOOST_LOG(error)
+              << "PP-OCRv6 tiny resolved output requires " << required_output_bytes
+              << " bytes; the authenticated interop buffer provides "
+              << expected_ocr_output_bytes << '.';
+          }
         }
         if (ocr_bindings_ok && ocr_bound_input != d_ocr_in) {
           ocr_bindings_ok = ocr_exec_context->setTensorAddress(

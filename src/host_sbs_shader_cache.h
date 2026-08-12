@@ -78,9 +78,9 @@ namespace models::host_sbs_shader_cache {
     "sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"
   };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
-    "cefced5c4ebcb98d8b410b4d13d05a03941f63207edb6ade93afb69fa9bf1529";
+    "5a1ab7175b97b8ca89397da8b3f86812a3faedf5e15938abf42f64e9716f2c5b";
   inline constexpr std::string_view parallax_v2_diagnostic_source_closure_sha256 =
-    "53c3b025ca2f7c1dbd7abed09ca156d5646ccb45a17c294f9f169d62962a7194";
+    "12dbf80c10110b21d59d01b9120c4efa0b9147bed420f134053cfef1276d00d3";
   inline constexpr std::string_view sbs_flat_fallback_source_closure_sha256 =
     "7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4";
 
@@ -93,7 +93,7 @@ namespace models::host_sbs_shader_cache {
 
   // Complete production V2 producer set. The normalized depth is private scene-cut evidence; the
   // retired subject shaping, hard-mask sanitizer/exclusion, and adaptive-pop paths remain absent.
-  // The OCR8 producer and compact SLR8 post-limit conditioner share this authenticated snapshot,
+  // The OCR8 producer and compact SLR9 post-limit conditioner share this authenticated snapshot,
   // so no analysis or geometry pass can be sampled from a weaker closure.
   inline constexpr std::array parallax_v2_producer_specs {
     // Authenticate the complete path from captured RGB preprocessing through cut/history state

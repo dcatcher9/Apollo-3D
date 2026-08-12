@@ -428,7 +428,7 @@ def evaluate_sample(clip, frame_path, max_width):
     return {
         "clip": clip["id"],
         "frame": os.path.basename(frame_path),
-        "source_sha256": authenticated_sources._sample_sha256(frame_path),
+        "source_sha256": authenticated_sources.sample_sha256(frame_path),
         "analysis_source_geometry": [source_width, source_height],
         "checks": checks,
     }

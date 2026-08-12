@@ -58,50 +58,23 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO = SCRIPT_DIR.parent.parent
 
 
-def _positive_float(value: str) -> float:
-    try:
-        number = float(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("must be a finite positive number") from exc
-    if not np.isfinite(number) or number <= 0.0:
-        raise argparse.ArgumentTypeError("must be a finite positive number")
-    return number
-
-
 def _resolve_mapping_calibration(
-        provenance: raw_model_provenance.RawModelProvenance,
-        experimental_raw_coordinate_scale: float | None) -> tuple[float, Dict[str, Any]]:
-    if provenance.authoritative:
-        if experimental_raw_coordinate_scale is not None:
-            raise ValueError(
-                "--experimental-raw-coordinate-scale is only valid for unverified legacy dumps")
-        if (provenance.calibrated_raw_coordinate_scale is None or
-                provenance.calibration_id is None):
-            raise ValueError("authoritative provenance lacks its fixed raw-coordinate scale")
-        scale = provenance.calibrated_raw_coordinate_scale
-        return scale, {
-            "status": "authoritative",
-            "authoritative": True,
-            "calibration_id": provenance.calibration_id,
-            "onnx_sha256": provenance.onnx_sha256,
-            "preprocess_profile": provenance.preprocess_profile,
-            "preprocess_source_closure_sha256":
-                provenance.preprocess_source_closure_sha256,
-            "raw_coordinate_scale": scale,
-            "source": "depth-coordinate-v2 canonical model calibration manifest",
-        }
-    if experimental_raw_coordinate_scale is None:
-        raise ValueError(
-            "unverified legacy replay requires --experimental-raw-coordinate-scale")
-    return experimental_raw_coordinate_scale, {
-        "status": "experiment-unverified",
-        "authoritative": False,
-        "calibration_id": None,
-        "onnx_sha256": None,
-        "preprocess_profile": None,
-        "preprocess_source_closure_sha256": None,
-        "raw_coordinate_scale": experimental_raw_coordinate_scale,
-        "source": "explicit experiment-only CLI override; not a model calibration claim",
+        provenance: raw_model_provenance.RawModelProvenance) -> tuple[float, Dict[str, Any]]:
+    if (not provenance.authoritative or
+            provenance.calibrated_raw_coordinate_scale is None or
+            provenance.calibration_id is None):
+        raise ValueError("authoritative provenance lacks its fixed raw-coordinate scale")
+    scale = provenance.calibrated_raw_coordinate_scale
+    return scale, {
+        "status": "authoritative",
+        "authoritative": True,
+        "calibration_id": provenance.calibration_id,
+        "onnx_sha256": provenance.onnx_sha256,
+        "preprocess_profile": provenance.preprocess_profile,
+        "preprocess_source_closure_sha256":
+            provenance.preprocess_source_closure_sha256,
+        "raw_coordinate_scale": scale,
+        "source": "depth-coordinate-v2 canonical model calibration manifest",
     }
 
 
@@ -337,14 +310,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--build-dir", type=Path,
                         default=REPO / "cmake-build-relwithdebinfo")
     parser.add_argument("--conf", type=Path, default=SCRIPT_DIR / "bench.conf")
-    parser.add_argument(
-        "--allow-unverified-model-provenance", action="store_true",
-        help=("permit exact replay of raw_depth.f32 when the capture did not record a bound "
-              "ONNX SHA-256; the report remains explicitly unverified"))
-    parser.add_argument(
-        "--experimental-raw-coordinate-scale", type=_positive_float,
-        help=("experiment-only fixed raw-coordinate scale for an unverified legacy dump; "
-              "legacy dumps never inherit the calibrated DAV2 Small value"))
     parser.add_argument("--pop-strength", type=float, default=defaults.pop_strength,
                         help=("requested artistic maximum; mapped once through the calibrated "
                               f"{defaults.gain_per_pop:g} source-U gain per pop unit"))
@@ -374,14 +339,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         model_provenance = raw_model_provenance.inspect_dump(dump)
         shadow_state_capture = _inspect_optional_shadow_state(dump)
-        raw_model_provenance.require_authoritative(
-            model_provenance, args.allow_unverified_model_provenance)
-        dump_manifest_capture = (
-            _inspect_optional_v2_dump_manifest(dump)
-            if model_provenance.authoritative or
-               shadow_state_capture.get("status") == "validated"
-            else {"status": "not-applicable-unverified-legacy"}
-        )
+        dump_manifest_capture = _inspect_optional_v2_dump_manifest(dump)
+        if dump_manifest_capture.get("status") != "validated":
+            raise ValueError("replay requires the current Dump 3D manifest")
         manifest_active = bool(
             dump_manifest_capture.get("status") == "validated" and
             dump_manifest_capture.get("active"))
@@ -391,7 +351,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(
                 "dump V2 manifest availability disagrees with its shadow-state artifacts")
         raw_coordinate_scale, mapping_calibration = _resolve_mapping_calibration(
-            model_provenance, args.experimental_raw_coordinate_scale)
+            model_provenance)
         _new_output_directory(output)
         raw, raw_shape = _load_raw_depth(dump)
         if raw_model_provenance.file_sha256(dump / "raw_depth.f32") != \

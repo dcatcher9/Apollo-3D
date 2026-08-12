@@ -69,7 +69,7 @@ EXPECTED_SHADER_SPEC_KEYS = {
     "source_file", "source_entrypoint", "source_target",
 }
 CANONICAL_SUBTITLE_OCR = {
-    "schema": 5,
+    "schema": 6,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
     "artifact_onnx_sha256": (
@@ -134,8 +134,8 @@ CANONICAL_SUBTITLE_OCR = {
         "final_box_capacity": 8,
     },
     "locator_state": {
-        "schema": 8,
-        "tag": 0x38524C53,
+        "schema": 9,
+        "tag": 0x39524C53,
         "word_count": 80,
         "header_word_count": 32,
         "rectangle_capacity": 4,
@@ -385,7 +385,7 @@ def validate_contract(
 
     if contract.get("subtitle_ocr") != CANONICAL_SUBTITLE_OCR:
         raise ValueError(
-            "subtitle_ocr must exactly match the authenticated PP-OCRv6/OCR8/SLR8 contract")
+            "subtitle_ocr must exactly match the authenticated PP-OCRv6/OCR8/SLR9 contract")
 
     shader_implementation = contract.get("shader_implementation")
     if (not isinstance(shader_implementation, dict) or

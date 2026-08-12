@@ -71,7 +71,7 @@ SHADER_SOURCE_SPECS = (
     ("host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"),
 )
 EXPECTED_SUBTITLE_OCR = {
-    "schema": 5,
+    "schema": 6,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
     "artifact_onnx_sha256": (
@@ -125,7 +125,7 @@ EXPECTED_SUBTITLE_OCR = {
         "final_box_offset": 144, "final_box_capacity": 8,
     },
     "locator_state": {
-        "schema": 8, "tag": 0x38524C53, "word_count": 80,
+        "schema": 9, "tag": 0x39524C53, "word_count": 80,
         "header_word_count": 32, "rectangle_capacity": 4,
         "owner_offset": 32, "pending_offset": 48, "current_offset": 64,
         "kind_word": 31,
@@ -262,7 +262,7 @@ def _subtitle_ocr_contract(contract: dict[str, Any]) -> SubtitleOcrContract:
     if value != EXPECTED_SUBTITLE_OCR:
         raise ValueError(
             "depth-coordinate-v2 subtitle_ocr identity or ABI does not match the current "
-            "authenticated PP-OCRv6/OCR8/SLR8 contract")
+            "authenticated PP-OCRv6/OCR8/SLR9 contract")
     input_tensor = value["input_tensor"]
     output_tensor = value["output_tensor"]
     field_policy = value["field_policy"]

@@ -1,7 +1,7 @@
 # Dump 3D format
 
 Dump 3D is one atomic, matched-frame diagnostic package for the authenticated Host SBS V2 path.
-The writer and strict reader accept one current manifest schema only. Retired SLR3--SLR5,
+The writer and strict reader accept one current manifest schema only. Retired SLR3--SLR8,
 GST/OGR/ORS, and offline overlay-detector packages are intentionally unsupported.
 
 ## Current package
@@ -24,23 +24,23 @@ The core package contains:
 | `shadow_ownership_refined_parallax.f32` | Full-resolution contour ownership result |
 | `shadow_vertical_majorant.f32` | Vertical upper-envelope diagnostic |
 | `shadow_vertical_conditioned.f32` | Fixed vertical-share result |
-| `shadow_base_final_parallax.f32` | Required in active SLR8 packages; ordinary post-limiter field before subtitle conditioning |
-| `shadow_final_parallax.f32` | Selected final model-domain field, after SLR8 when active |
+| `shadow_base_final_parallax.f32` | Required in active SLR9 packages; ordinary post-limiter field before subtitle conditioning |
+| `shadow_final_parallax.f32` | Selected final model-domain field, after SLR9 when active |
 | `warp_depth.f32` | Exact field consumed by reprojection |
 | `shadow_state.json`, `shadow_frame_stats.json` | Typed V2 state and current-frame statistics |
 | `warp_map.f32`, `warp_map_shape.json` | Exact inverse map; required for ROI packages |
 | `warp_mask.png` | Boundary-extrapolation diagnostic |
 | `window_video_border.json` | Required semantic observation for ROI packages |
 | `sbs.png` | Packed stereo preview |
-| `subtitle_conditioning.json` | Required current subtitle-authority descriptor; canonical `none` or `subtitle-slr8` |
+| `subtitle_conditioning.json` | Required current subtitle-authority descriptor; canonical `none` or `subtitle-slr9` |
 | `subtitle_ocr_record.u32` | Active-only exact-frame OCR8 record: 208 little-endian uint32 words |
-| `subtitle_locator_state.u32` | Active-only compact SLR8 state: 80 little-endian uint32 words |
+| `subtitle_locator_state.u32` | Active-only compact SLR9 state: 80 little-endian uint32 words |
 
-All `.f32` files are little-endian float32. Schema 26 accepts the canonical inactive descriptor or
-the one current `subtitle-slr8` package. It binds Depth Coordinate V2 schema `45`, tag
-`0xfbd3cdb1`, canonical SHA-256
-`8515cf7bc352c2e9e56e6a5fd9dad9802e1e7cd02f705fd8a957617c7ba94e9a`, and producer
-source closure `11bd8c0ab14d22caab83044e5f0d38cca10f5eef5df5d5e671cbedf64e256a1f`.
+All `.f32` files are little-endian float32. Schema 27 accepts the canonical inactive descriptor or
+the one current `subtitle-slr9` package. It binds Depth Coordinate V2 schema `46`, tag
+`0xd18ff0f3`, canonical SHA-256
+`8ab387f9bcda29e90455ce9e5b8677cef3cd7744fe03ee03202a4699fa7e4ead`, and producer
+source closure `f299ce49f332458a1d97634d4ced6d7fc802d2be8d583ee04f0e32d851ed1a22`.
 The active descriptor
 also binds the authenticated PP-OCRv6 tiny detector
 `ppocrv6_tiny_det_modelopt_fp16`: bundled artifact
@@ -58,7 +58,7 @@ binds the current Depth Coordinate V2 shader closure, exact OCR producer and loc
 and four artifact roles (OCR record, locator state, Base field, selected field). No retired layout
 is preserved or reinterpreted.
 
-## OCR8 and SLR8 records
+## OCR8 and SLR9 records
 
 OCR8 has schema `3`, tag `OCR8` (`0x3852434f`), and exactly 208 words. Its 16-word header contains
 authority flags, raw/final counts, frame and analysis-generation identities, exact analysis-input
@@ -84,7 +84,7 @@ both at least three detector pixels and its own mean score is at least `0.4`; bo
 count, and structural-gap count are then recomputed per retained subrun. The broad pass deliberately
 does not apply this island filter, so segmented bottom indexes keep their complete topology.
 
-SLR8 has schema `8`, tag `SLR8` (`0x38524c53`), and exactly 80 words: a 32-word header, four owner
+SLR9 has schema `9`, tag `SLR9` (`0x39524c53`), and exactly 80 words: a 32-word header, four owner
 rectangles, four pending rectangles, and four same-frame current-authority rectangles. The header
 binds owner/pending aggregates, target and generation state, exact frame/analysis identities,
 event/fade/grace state, scene epoch, and field extent. Rectangles are half-open field coordinates;
@@ -105,6 +105,11 @@ owner. Any confirmed handoff or rebirth during death grace inherits the cached t
 of overlap. A hard-cut survivor increments owner generation
 and resamples at full strength, while an input-domain reset clears owner and target before starting
 present geometry as pending. There is no target EMA or per-observation rate limiter.
+Two observations confirm a pending stack only when the exact member count and kinds match and every
+corresponding canonical member has IoU at least `0.6`; aggregate overlap cannot hide a disjoint
+member. Invalid or abstaining OCR in a valid unchanged domain publishes no current geometry,
+clears pending, and starts or ages the same six-distinct-observation cached-target grace. The cache
+never conditions pixels by itself, and hard-cut/reset invalidity clears it.
 Nonempty current authority requires a live owner, matching target generation, and fade step `1` or
 `2`; each current rectangle must be an exact final box from the same-frame OCR8 record.
 An empty current block requires `shadow_final_parallax.f32` to equal
@@ -139,9 +144,9 @@ The maintained reader:
 5. requires `warp_depth.f32` to equal the selected final field;
 6. validates ROI placement, semantic-border identity, inverse-map geometry, and the exterior
    zero-plane evidence; and
-7. validates canonical inactive metadata, or the exact current OCR8/SLR8 model, shader, record,
+7. validates canonical inactive metadata, or the exact current OCR8/SLR9 model, shader, record,
    state, and artifact identities;
-8. replays the ordinary V2 chain into `shadow_base_final_parallax.f32` when SLR8 is active, then
+8. replays the ordinary V2 chain into `shadow_base_final_parallax.f32` when SLR9 is active, then
    replays the exact analytic rectangle budget and fade into `shadow_final_parallax.f32` (including
    bit-exact Base passthrough when current authority is empty).
 

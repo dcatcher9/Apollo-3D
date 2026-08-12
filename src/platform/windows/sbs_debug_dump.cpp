@@ -2768,12 +2768,12 @@ namespace platf::sbs_debug {
                                            job.source;
         const auto &warp_depth = job.warp_depth;
         const auto &sbs = job.sbs;
-        const bool subtitle_slr8_active =
+        const bool subtitle_slr9_active =
           !job.subtitle_ocr_record.empty() &&
           !job.subtitle_locator_state.empty();
-        const nlohmann::json subtitle_conditioning = subtitle_slr8_active ?
+        const nlohmann::json subtitle_conditioning = subtitle_slr9_active ?
           nlohmann::json {
-            {"mode", "subtitle-slr8"},
+            {"mode", "subtitle-slr9"},
             {"request", true},
             {"producer", subtitle_ocr_producer_contract_json(
               *completed.parallax_v2_shader_provenance
@@ -2842,7 +2842,7 @@ namespace platf::sbs_debug {
             tensor_width,
             tensor_height
           ) ||
-          (subtitle_slr8_active && !scalar_tensor_snapshot_matches(
+          (subtitle_slr9_active && !scalar_tensor_snapshot_matches(
             job.shadow_base_final,
             tensor_width,
             tensor_height
@@ -2878,7 +2878,7 @@ namespace platf::sbs_debug {
             paths.temporary / "subtitle_conditioning.json",
             subtitle_conditioning
           ) ||
-          (subtitle_slr8_active && (
+          (subtitle_slr9_active && (
             !write_bytes(
               paths.temporary / "subtitle_ocr_record.u32",
               job.subtitle_ocr_record.data(),
@@ -2966,16 +2966,16 @@ namespace platf::sbs_debug {
         const std::string subtitle_conditioning_sha256 = models::file_sha256_hex(
           paths.temporary / "subtitle_conditioning.json"
         );
-        const std::string subtitle_ocr_record_sha256 = subtitle_slr8_active ?
+        const std::string subtitle_ocr_record_sha256 = subtitle_slr9_active ?
           models::file_sha256_hex(paths.temporary / "subtitle_ocr_record.u32") :
           std::string {};
-        const std::string subtitle_locator_state_sha256 = subtitle_slr8_active ?
+        const std::string subtitle_locator_state_sha256 = subtitle_slr9_active ?
           models::file_sha256_hex(paths.temporary / "subtitle_locator_state.u32") :
           std::string {};
         if (raw_depth_sha256.empty() || model_input_sha256.empty() ||
             model_input_shape_sha256.empty() || depth_input_region_sha256.empty() ||
             subtitle_conditioning_sha256.empty() ||
-            (subtitle_slr8_active && (
+            (subtitle_slr9_active && (
               subtitle_ocr_record_sha256.empty() ||
               subtitle_locator_state_sha256.empty()
             ))) {
@@ -3032,22 +3032,22 @@ namespace platf::sbs_debug {
                "parallax-v2 ROI-local source-U fixed 75/25 share of the column upper/lower envelopes; neutral intermediate consumed by the row majorant" :
                "parallax-v2 full-source-U fixed 75/25 share of the column upper/lower envelopes; neutral intermediate consumed by the row majorant"
            ) ||
-           (subtitle_slr8_active && !dump_shadow_float_texture(
+           (subtitle_slr9_active && !dump_shadow_float_texture(
              shadow_base_final,
              paths.temporary,
              "shadow_base_final_parallax",
              video_region ?
-               "ordinary parallax-v2 crop-local source-U field after the horizontal majorant and before SLR8; renderer authority requires current SLR8 conditioning plus depth_input_region embedding" :
-               "ordinary parallax-v2 full-source-U field after the horizontal majorant and before SLR8 conditioning"
+               "ordinary parallax-v2 crop-local source-U field after the horizontal majorant and before SLR9; renderer authority requires current SLR9 conditioning plus depth_input_region embedding" :
+               "ordinary parallax-v2 full-source-U field after the horizontal majorant and before SLR9 conditioning"
            )) ||
            !dump_shadow_float_texture(
              shadow_final,
              paths.temporary,
              "shadow_final_parallax",
-             subtitle_slr8_active ?
+             subtitle_slr9_active ?
                (video_region ?
-                 "parallax-v2 crop-local source-U field after current SLR8 rectangle conditioning; renderer authority only together with depth_input_region embedding" :
-                 "parallax-v2 full-source-U field after current SLR8 rectangle conditioning; live render position authority") :
+                 "parallax-v2 crop-local source-U field after current SLR9 rectangle conditioning; renderer authority only together with depth_input_region embedding" :
+                 "parallax-v2 full-source-U field after current SLR9 rectangle conditioning; live render position authority") :
                (video_region ?
                  "parallax-v2 crop-local source-U field after one horizontal Lipschitz majorant; renderer authority only together with depth_input_region embedding" :
                  "parallax-v2 full-source-U field after one horizontal Lipschitz majorant; live render position authority")
@@ -3209,7 +3209,7 @@ namespace platf::sbs_debug {
           models::file_sha256_hex(paths.temporary / "shadow_vertical_majorant.f32");
         const std::string shadow_vertical_conditioned_sha256 =
           models::file_sha256_hex(paths.temporary / "shadow_vertical_conditioned.f32");
-        const std::string shadow_base_final_sha256 = subtitle_slr8_active ?
+        const std::string shadow_base_final_sha256 = subtitle_slr9_active ?
           models::file_sha256_hex(
             paths.temporary / "shadow_base_final_parallax.f32"
           ) :
@@ -3220,7 +3220,7 @@ namespace platf::sbs_debug {
             shadow_candidate_sha256.empty() || shadow_ownership_sha256.empty() ||
             shadow_vertical_majorant_sha256.empty() ||
             shadow_vertical_conditioned_sha256.empty() || shadow_final_sha256.empty() ||
-            (subtitle_slr8_active && shadow_base_final_sha256.empty())) {
+            (subtitle_slr9_active && shadow_base_final_sha256.empty())) {
           BOOST_LOG(warning)
             << "SBS debug dump: failed to hash a written V2 geometry field; dump rejected."sv;
           break;
@@ -3249,10 +3249,10 @@ namespace platf::sbs_debug {
           true,
           true,
           "subtitle conditioning authority",
-          "Canonical current-schema subtitle authority descriptor: none or exact OCR8/SLR8.",
+          "Canonical current-schema subtitle authority descriptor: none or exact OCR8/SLR9.",
           subtitle_conditioning_sha256
         );
-        if (subtitle_slr8_active) {
+        if (subtitle_slr9_active) {
           artifacts["subtitle_ocr_record.u32"] = hashed_artifact_description(
             true,
             true,
@@ -3263,8 +3263,8 @@ namespace platf::sbs_debug {
           artifacts["subtitle_locator_state.u32"] = hashed_artifact_description(
             true,
             true,
-            "compact SLR8 subtitle authority state",
-            "Exact 80-word little-endian SLR8 owner, pending, target, and same-frame current-authority state.",
+            "compact SLR9 subtitle authority state",
+            "Exact 80-word little-endian SLR9 owner, pending, target, and same-frame current-authority state.",
             subtitle_locator_state_sha256
           );
         }
@@ -3496,14 +3496,14 @@ namespace platf::sbs_debug {
           "parallax-v2 orientation-selective vertical conditioner preview",
           "Finite p2-p98 jet preview of the exact vertical share."
         );
-        if (subtitle_slr8_active) {
+        if (subtitle_slr9_active) {
           artifacts["shadow_base_final_parallax.f32"] = hashed_artifact_description(
             true,
             true,
-            "ordinary post-limiter V2 field before SLR8 conditioning",
+            "ordinary post-limiter V2 field before SLR9 conditioning",
             video_region ?
-              "Exact ordinary crop-local row-majorant field before SLR8; not renderer authority without current SLR8 conditioning and depth_input_region embedding." :
-              "Exact ordinary full-source-U row-majorant field before SLR8; not selected renderer authority.",
+              "Exact ordinary crop-local row-majorant field before SLR9; not renderer authority without current SLR9 conditioning and depth_input_region embedding." :
+              "Exact ordinary full-source-U row-majorant field before SLR9; not selected renderer authority.",
             shadow_base_final_sha256
           );
         }
@@ -3511,10 +3511,10 @@ namespace platf::sbs_debug {
           true,
           true,
           "parallax-v2 final conditioned displacement field",
-          subtitle_slr8_active ?
+          subtitle_slr9_active ?
             (video_region ?
-              "Exact signed one-eye ROI-local source-U after current SLR8 rectangle conditioning. Live authority is this field plus depth_input_region embedding." :
-              "Exact signed one-eye full-source-U after current SLR8 rectangle conditioning; live V2 render position authority.") :
+              "Exact signed one-eye ROI-local source-U after current SLR9 rectangle conditioning. Live authority is this field plus depth_input_region embedding." :
+              "Exact signed one-eye full-source-U after current SLR9 rectangle conditioning; live V2 render position authority.") :
             (video_region ?
               "Exact signed one-eye ROI-local source-U after the row majorant. Live renderer authority is the pair of this crop-local q field and the authenticated depth_input_region embedding." :
               "Exact signed one-eye full-source-U after the row majorant of shadow_vertical_conditioned; q >= conditioned, |dq/dx| <= max_horizontal_slope/target_width, and |dq/dy| <= max_vertical_shear/target_width. q may raise or lower candidate. Live V2 render position authority."),
@@ -3661,7 +3661,7 @@ namespace platf::sbs_debug {
           texture_description(shadow_vertical);
         dimensions["shadow_vertical_conditioned"] =
           texture_description(shadow_vertical_conditioned);
-        if (subtitle_slr8_active) {
+        if (subtitle_slr9_active) {
           dimensions["shadow_base_final_parallax"] =
             texture_description(shadow_base_final);
         }
@@ -3685,7 +3685,7 @@ namespace platf::sbs_debug {
             *completed.parallax_v2_shader_provenance
           );
         nlohmann::json manifest {
-          {"schema", 26},
+          {"schema", 27},
           {"capture", "one matched, completed Host-SBS frame"},
           {"capture_status", "complete"},
           {"published_atomically", true},
@@ -3714,10 +3714,10 @@ namespace platf::sbs_debug {
                            "conservative full-resolution source-contour foreground ownership applied to candidate before the vertical conditioner; may only raise uniquely owned far-side boundary texels"},
                          {"parallax_v2_vertical_majorant_role", "least column-wise upper envelope v+ >= ownership-refined candidate with adjacent-row source-U change <= max_vertical_shear/target_width; diagnostic evidence only"},
                          {"parallax_v2_vertical_conditioned_role", "fixed 75/25 share of column upper/lower envelopes; may raise or lower candidate and feeds the row majorant"},
-                         {"parallax_v2_conditioner_role", subtitle_slr8_active ?
+                         {"parallax_v2_conditioner_role", subtitle_slr9_active ?
                            (video_region ?
-                             "least row-wise crop-local q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear produces shadow_base_final_parallax; SLR8 applies the analytic anisotropic rectangle budget/fade from same-frame current authority and publishes shadow_final_parallax, which plus depth_input_region embedding is live position authority" :
-                             "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear produces shadow_base_final_parallax; SLR8 applies the analytic anisotropic rectangle budget/fade from same-frame current authority and publishes shadow_final_parallax as live position authority") :
+                             "least row-wise crop-local q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear produces shadow_base_final_parallax; SLR9 applies the analytic anisotropic rectangle budget/fade from same-frame current authority and publishes shadow_final_parallax, which plus depth_input_region embedding is live position authority" :
+                             "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear produces shadow_base_final_parallax; SLR9 applies the analytic anisotropic rectangle budget/fade from same-frame current authority and publishes shadow_final_parallax as live position authority") :
                            (video_region ?
                              "least row-wise crop-local q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear; q plus depth_input_region embedding is live position authority" :
                              "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= max_horizontal_slope and vertical shear <= max_vertical_shear; q may raise or lower candidate and is the live position authority")},
@@ -4049,9 +4049,9 @@ namespace platf::sbs_debug {
       }
       const bool subtitle_ocr_present = completed.ocr_box_record != nullptr;
       const bool subtitle_locator_present = completed.subtitle_locator_state != nullptr;
-      const bool subtitle_slr8_active = subtitle_ocr_present && subtitle_locator_present;
+      const bool subtitle_slr9_active = subtitle_ocr_present && subtitle_locator_present;
       if (subtitle_ocr_present != subtitle_locator_present ||
-          (subtitle_slr8_active && (
+          (subtitle_slr9_active && (
             !completed.shadow_base_final_parallax ||
             !models::depth_coordinate_v2::subtitle_ocr_field_is_calibrated(
               static_cast<std::uint32_t>(completed.model_width),
@@ -4059,7 +4059,7 @@ namespace platf::sbs_debug {
             )
           ))) {
         BOOST_LOG(warning)
-          << "SBS debug dump: OCR8/SLR8 resources are partial; dump rejected."sv;
+          << "SBS debug dump: OCR8/SLR9 resources are partial; dump rejected."sv;
         retry_backoff_frames_ = retry_backoff_frames;
         return false;
       }
@@ -4203,7 +4203,7 @@ namespace platf::sbs_debug {
           models::depth_coordinate_v2::frame_stats_float_count,
           job.shadow_frame_stats
         );
-      if (captured && subtitle_slr8_active) {
+      if (captured && subtitle_slr9_active) {
         captured =
           read_texture(
             device,
@@ -4271,14 +4271,14 @@ namespace platf::sbs_debug {
           << "SBS debug dump: stable GPU snapshot readback failed; request retained for retry."sv;
         return false;
       }
-      if (subtitle_slr8_active && !subtitle_records_match_frame(
+      if (subtitle_slr9_active && !subtitle_records_match_frame(
             job.subtitle_ocr_record,
             job.subtitle_locator_state,
             completed
           )) {
         retry_backoff_frames_ = retry_backoff_frames;
         BOOST_LOG(warning)
-          << "SBS debug dump: OCR8/SLR8 record identity or layout is invalid; request retained."sv;
+          << "SBS debug dump: OCR8/SLR9 record identity or layout is invalid; request retained."sv;
         return false;
       }
 

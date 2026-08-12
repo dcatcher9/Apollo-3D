@@ -1,5 +1,4 @@
 #include "model_manager.h"
-#include "generated/depth_coordinate_v2_contract.h"
 #include "logging.h"
 #include <curl/curl.h>
 #include <openssl/evp.h>
@@ -17,35 +16,6 @@
 using namespace std::literals;
 
 namespace models {
-
-    static_assert(ocr_engine_width ==
-                  static_cast<int>(depth_coordinate_v2::subtitle_ocr_input_width));
-    static_assert(ocr_engine_height ==
-                  static_cast<int>(depth_coordinate_v2::subtitle_ocr_input_height));
-    static_assert(depth_coordinate_v2::subtitle_ocr_output_width ==
-                  depth_coordinate_v2::subtitle_ocr_input_width);
-    static_assert(depth_coordinate_v2::subtitle_ocr_output_height ==
-                  depth_coordinate_v2::subtitle_ocr_input_height);
-    static_assert(std::string_view {ocr_model_name} ==
-                  depth_coordinate_v2::subtitle_ocr_model_name);
-    static_assert(std::string_view {ocr_model_asset_path} ==
-                  depth_coordinate_v2::subtitle_ocr_asset_path);
-    static_assert(std::string_view {ocr_model_artifact_onnx_sha256} ==
-                  depth_coordinate_v2::subtitle_ocr_artifact_onnx_sha256);
-    static_assert(std::string_view {ocr_model_source_url} ==
-                  depth_coordinate_v2::subtitle_ocr_source_url);
-    static_assert(std::string_view {ocr_model_source_onnx_sha256} ==
-                  depth_coordinate_v2::subtitle_ocr_source_onnx_sha256);
-    static_assert(std::string_view {ocr_model_conversion_tool} ==
-                  depth_coordinate_v2::subtitle_ocr_conversion_tool);
-    static_assert(std::string_view {ocr_model_conversion_version} ==
-                  depth_coordinate_v2::subtitle_ocr_conversion_version);
-    static_assert(std::string_view {ocr_model_conversion_recipe} ==
-                  depth_coordinate_v2::subtitle_ocr_conversion_recipe);
-    static_assert(std::string_view {ocr_model_conversion_calibration_profile} ==
-                  depth_coordinate_v2::subtitle_ocr_conversion_calibration_profile);
-    static_assert(std::string_view {ocr_engine_recipe} ==
-                  depth_coordinate_v2::subtitle_ocr_engine_recipe);
 
     static size_t write_data(void* ptr, size_t size, size_t nmemb, FILE* stream) {
         return fwrite(ptr, size, nmemb, stream);

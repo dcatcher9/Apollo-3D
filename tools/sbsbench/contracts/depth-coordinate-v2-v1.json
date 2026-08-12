@@ -1,5 +1,5 @@
 {
-  "schema": 45,
+  "schema": 46,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -7,7 +7,7 @@
     "binding": "raw-depth-model-input-and-preprocess-source-produced-by-calibrated-identity-v3"
   },
   "subtitle_ocr": {
-    "schema": 5,
+    "schema": 6,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
     "artifact_onnx_sha256": "169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44",
@@ -88,8 +88,8 @@
       "final_box_capacity": 8
     },
     "locator_state": {
-      "schema": 8,
-      "tag": 944917587,
+      "schema": 9,
+      "tag": 961694803,
       "word_count": 80,
       "header_word_count": 32,
       "rectangle_capacity": 4,
@@ -214,7 +214,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "11bd8c0ab14d22caab83044e5f0d38cca10f5eef5df5d5e671cbedf64e256a1f"
+    "source_closure_sha256": "f299ce49f332458a1d97634d4ced6d7fc802d2be8d583ee04f0e32d851ed1a22"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,

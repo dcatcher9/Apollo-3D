@@ -715,7 +715,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 45u);
+  EXPECT_EQ(v2::contract_schema, 46u);
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
   EXPECT_EQ(v2::shadow_state_dump_schema, 16u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
@@ -1466,7 +1466,7 @@ TEST(ParallaxV2ContractTest, DumpDecodesExactCountersInsteadOfSubnormalFloats) {
   EXPECT_NE(source.find("source_closure_sha256"), std::string::npos);
   const auto manifest = source.find("nlohmann::json manifest {");
   ASSERT_NE(manifest, std::string::npos);
-  EXPECT_NE(source.find("{\"schema\", 26}", manifest), std::string::npos);
+  EXPECT_NE(source.find("{\"schema\", 27}", manifest), std::string::npos);
   EXPECT_NE(source.find("depth_input_region.json"), std::string::npos);
   EXPECT_NE(source.find("depth_input_source.png"), std::string::npos);
   EXPECT_NE(source.find("\"shadow_final_parallax + depth_input_region embedding\""), std::string::npos);

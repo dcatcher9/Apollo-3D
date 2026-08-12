@@ -450,13 +450,16 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertIn('"shadow_vertical_conditioned"', native)
         self.assertIn("completed.shadow_vertical_conditioned", native)
 
-    def test_reader_rejects_retired_schema_21_without_a_compatibility_path(self):
+    def test_reader_rejects_previous_schema_without_a_compatibility_path(self):
         retired = copy.deepcopy(self.manifest)
-        retired["schema"] = 21
+        retired["schema"] = dump_contract.DUMP_MANIFEST_SCHEMA - 1
         with self.assertRaisesRegex(ValueError, "unknown serialization schema"):
             dump_contract.validate_v2_dump_manifest_document(retired)
 
     def test_current_subtitle_record_and_state_abi_partition_exact_word_counts(self):
+        self.assertEqual(dump_contract.DUMP_MANIFEST_SCHEMA, 27)
+        self.assertEqual(dump_contract.SUBTITLE_OCR_RECORD_SCHEMA, 3)
+        self.assertEqual(dump_contract.SUBTITLE_LOCATOR_STATE_SCHEMA, 9)
         self.assertEqual(
             dump_contract.SUBTITLE_OCR_RAW_BOX_WORD_OFFSET,
             dump_contract.SUBTITLE_OCR_HEADER_WORD_COUNT)
@@ -487,7 +490,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             dump_contract.SUBTITLE_LOCATOR_STATE_WORD_COUNT,
             dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET + rectangle_words)
         self.assertEqual(
-            struct.pack("<I", dump_contract.SUBTITLE_LOCATOR_STATE_TAG), b"SLR8")
+            struct.pack("<I", dump_contract.SUBTITLE_LOCATOR_STATE_TAG), b"SLR9")
 
     @staticmethod
     def _valid_ocr_record_words():
@@ -515,11 +518,11 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
     def _pack_uint32_words(words):
         return struct.pack(f"<{len(words)}I", *words)
 
-    def _active_slr8_manifest(self, base_manifest=None):
+    def _active_slr9_manifest(self, base_manifest=None):
         manifest = copy.deepcopy(
             self.manifest if base_manifest is None else base_manifest)
         subtitle = {
-            "mode": "subtitle-slr8",
+            "mode": "subtitle-slr9",
             "request": True,
             "producer": dump_contract._subtitle_ocr_producer_contract(),
             "resolver": dump_contract._subtitle_locator_resolver_contract(),
@@ -544,14 +547,14 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "subtitle_locator_state.u32": {
                 "available": True,
                 "required": True,
-                "stage": "compact SLR8 subtitle authority state",
-                "description": "authenticated test SLR8 state",
+                "stage": "compact SLR9 subtitle authority state",
+                "description": "authenticated test SLR9 state",
                 "sha256": "0" * 64,
             },
             "shadow_base_final_parallax.f32": {
                 "available": True,
                 "required": True,
-                "stage": "ordinary post-limiter V2 field before SLR8 conditioning",
+                "stage": "ordinary post-limiter V2 field before SLR9 conditioning",
                 "description": "authenticated test unconditioned base field",
                 "sha256": "0" * 64,
             },
@@ -559,7 +562,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         manifest["renderer"]["parallax_v2_conditioner_role"] = (
             "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= "
             "max_horizontal_slope and vertical shear <= max_vertical_shear produces "
-            "shadow_base_final_parallax; SLR8 applies the analytic anisotropic rectangle "
+            "shadow_base_final_parallax; SLR9 applies the analytic anisotropic rectangle "
             "budget/fade from same-frame current authority and publishes "
             "shadow_final_parallax as live position authority")
         payload = json.dumps(subtitle).encode("utf-8")
@@ -567,18 +570,18 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             hashlib.sha256(payload).hexdigest())
         return manifest
 
-    def test_current_slr8_manifest_binds_exact_model_shader_and_artifact_roles(self):
-        manifest = self._active_slr8_manifest()
+    def test_current_slr9_manifest_binds_exact_model_shader_and_artifact_roles(self):
+        manifest = self._active_slr9_manifest()
         decoded = dump_contract.validate_v2_dump_manifest_document(manifest)
         subtitle = decoded["subtitle_conditioning"]
-        self.assertEqual(subtitle["mode"], "subtitle-slr8")
+        self.assertEqual(subtitle["mode"], "subtitle-slr9")
         self.assertTrue(subtitle["live"])
         self.assertTrue(subtitle["subtitle_evidence_complete"])
         self.assertEqual(
             subtitle["artifact_files"]["conditioned_field"],
             "shadow_final_parallax.f32")
         producer = manifest["subtitle_conditioning"]["producer"]
-        self.assertEqual(producer["contract_schema"], 5)
+        self.assertEqual(producer["contract_schema"], 6)
         self.assertEqual(set(producer["model"]), {
             "name", "asset_path", "artifact_onnx_sha256", "source_url",
             "source_onnx_sha256", "conversion_tool", "conversion_version",
@@ -588,7 +591,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         native = (REPO / "src" / "platform" / "windows" /
                   "sbs_debug_dump.cpp").read_text(encoding="utf-8")
         for token in (
-                '"subtitle-slr8"', '"subtitle_ocr_record.u32"',
+                '"subtitle-slr9"', '"subtitle_ocr_record.u32"',
                 '"subtitle_locator_state.u32"',
                 '"shadow_base_final_parallax.f32"',
                 "subtitle_ocr_artifact_onnx_sha256",
@@ -598,8 +601,12 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "subtitle_locator_state_word_count"):
             self.assertIn(token, native)
 
-    def test_current_slr8_manifest_rejects_provenance_roles_and_base_field_drift(self):
+    def test_current_slr9_manifest_rejects_provenance_roles_and_base_field_drift(self):
         mutations = {
+            "retired-mode": (
+                lambda manifest: manifest["subtitle_conditioning"].update(
+                    {"mode": "subtitle-slr8"}),
+                "unsupported subtitle-conditioning authority"),
             "request": (
                 lambda manifest: manifest["subtitle_conditioning"].update({"request": False}),
                 "enabled request"),
@@ -626,7 +633,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         }
         for name, (mutate, error) in mutations.items():
             with self.subTest(name=name):
-                manifest = self._active_slr8_manifest()
+                manifest = self._active_slr9_manifest()
                 mutate(manifest)
                 with self.assertRaisesRegex(ValueError, error):
                     dump_contract.validate_v2_dump_manifest_document(manifest)
@@ -679,7 +686,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertTrue(decoded["authoritative"])
         self.assertEqual(decoded["final_boxes"], [])
 
-    def test_current_ocr8_slr8_empty_records_accept_all_calibrated_fields(self):
+    def test_current_ocr8_slr9_empty_records_accept_all_calibrated_fields(self):
         cases = (
             (1920, 1080, 770, 434),
             (2560, 1080, 1022, 434),
@@ -899,7 +906,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                         roi_bottom=430)
 
     @staticmethod
-    def _valid_slr8_state_words():
+    def _valid_slr9_state_words():
         words = [0] * dump_contract.SUBTITLE_LOCATOR_STATE_WORD_COUNT
         target_bits = struct.unpack("<I", struct.pack("<f", 0.0075))[0]
         words[:32] = [
@@ -936,9 +943,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         words[current:current + 4] = rectangle
         return words
 
-    def test_current_slr8_state_validates_identity_rectangles_and_target(self):
+    def test_current_slr9_state_validates_identity_rectangles_and_target(self):
         decoded = dump_contract.validate_subtitle_locator_state(
-            self._pack_uint32_words(self._valid_slr8_state_words()),
+            self._pack_uint32_words(self._valid_slr9_state_words()),
             matched_frame_id=41,
             analysis_generation=17,
             source_width=1920,
@@ -1001,7 +1008,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "left": 120, "top": 350, "right": 650, "bottom": 401,
         })
 
-    def test_current_slr8_state_rejects_identity_flags_slots_and_aggregates(self):
+    def test_current_slr9_state_rejects_identity_flags_slots_and_aggregates(self):
         def add_second_current(words):
             words[20] = 2
             offset = dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET + 4
@@ -1048,6 +1055,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
 
         mutations = {
             "tag": (lambda words: words.__setitem__(1, 0), "schema or tag"),
+            "retired-slr8-identity": (
+                lambda words: words.__setitem__(slice(0, 2), [8, 0x38524C53]),
+                "schema or tag"),
             "generation": (lambda words: words.__setitem__(10, 18), "identity"),
             "unknown-flags": (lambda words: words.__setitem__(2, 0x10), "unknown flags"),
             "flag-count": (
@@ -1103,7 +1113,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         }
         for name, (mutate, error) in mutations.items():
             with self.subTest(name=name):
-                words = self._valid_slr8_state_words()
+                words = self._valid_slr9_state_words()
                 mutate(words)
                 with self.assertRaisesRegex(ValueError, error):
                     dump_contract.validate_subtitle_locator_state(
@@ -1115,7 +1125,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                         field_width=770,
                         field_height=434)
 
-    def test_native_slr8_prevalidation_mirrors_python_mutation_invariants(self):
+    def test_native_slr9_prevalidation_mirrors_python_mutation_invariants(self):
         native = (REPO / "src" / "platform" / "windows" /
                   "sbs_debug_dump.cpp").read_text(encoding="utf-8")
         start = native.index("bool subtitle_locator_state_is_canonical(")
@@ -1352,8 +1362,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             json.dumps(manifest), encoding="utf-8")
         return manifest, fields
 
-    def _activate_synthetic_slr8_dump(self, root, manifest, fields):
-        manifest = self._active_slr8_manifest(manifest)
+    def _activate_synthetic_slr9_dump(self, root, manifest, fields):
+        manifest = self._active_slr9_manifest(manifest)
         base_payload = fields["shadow_final_parallax"].astype("<f4").tobytes()
         self._write_hashed_payload(
             root, manifest, "shadow_base_final_parallax.f32", base_payload)
@@ -1399,9 +1409,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             json.dumps(manifest), encoding="utf-8")
         return manifest
 
-    def _activate_synthetic_slr8_current_dump(
+    def _activate_synthetic_slr9_current_dump(
             self, root, manifest, fields, *, fade=1):
-        manifest = self._activate_synthetic_slr8_dump(root, manifest, fields)
+        manifest = self._activate_synthetic_slr9_dump(root, manifest, fields)
         ocr = self._valid_ocr_record_words()
         ocr[7] = 0
         ocr[8] = 0
@@ -1409,7 +1419,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             root, manifest, "subtitle_ocr_record.u32",
             self._pack_uint32_words(ocr))
 
-        locator = self._valid_slr8_state_words()
+        locator = self._valid_slr9_state_words()
         locator[10] = 0
         locator[11] = 0
         locator[24] = fade
@@ -1428,7 +1438,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "target": target,
             "fade": fade,
         }
-        conditioned = dump_contract._replay_slr8_conditioner(
+        conditioned = dump_contract._replay_slr9_conditioner(
             fields["shadow_final_parallax"], subtitle)
         payload = conditioned.astype("<f4").tobytes()
         self._write_hashed_payload(
@@ -1780,19 +1790,19 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             self.assertEqual(summary["height"], 12)
             self.assertFalse(summary["window_video_border_verified"])
 
-    def test_geometry_verifier_accepts_current_slr8_empty_authority_as_exact_base(self):
+    def test_geometry_verifier_accepts_current_slr9_empty_authority_as_exact_base(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             manifest, fields = self._write_synthetic_geometry_dump(
                 root,
                 width=770,
                 height=434)
-            self._activate_synthetic_slr8_dump(root, manifest, fields)
+            self._activate_synthetic_slr9_dump(root, manifest, fields)
 
             summary = dump_contract.verify_v2_dump_geometry(root)
 
             subtitle = summary["subtitle_conditioning"]
-            self.assertEqual(subtitle["mode"], "subtitle-slr8")
+            self.assertEqual(subtitle["mode"], "subtitle-slr9")
             self.assertTrue(subtitle["subtitle_evidence_verified"])
             self.assertTrue(subtitle["ocr_authoritative"])
             self.assertEqual(subtitle["current_count"], 0)
@@ -1800,7 +1810,48 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "shadow_base_final_parallax",
                 summary["chain_fields_verified"])
 
-    def test_geometry_verifier_rejects_slr8_record_identity_and_nonbase_empty_output(self):
+    def test_geometry_verifier_accepts_abstaining_ocr_with_slr9_target_grace_as_exact_base(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, fields = self._write_synthetic_geometry_dump(
+                root,
+                width=770,
+                height=434)
+            manifest = self._activate_synthetic_slr9_dump(root, manifest, fields)
+
+            ocr = list(struct.unpack(
+                f"<{dump_contract.SUBTITLE_OCR_RECORD_WORD_COUNT}I",
+                (root / "subtitle_ocr_record.u32").read_bytes()))
+            ocr[2] = 0
+            self._write_hashed_payload(
+                root, manifest, "subtitle_ocr_record.u32",
+                self._pack_uint32_words(ocr))
+
+            locator = list(struct.unpack(
+                f"<{dump_contract.SUBTITLE_LOCATOR_STATE_WORD_COUNT}I",
+                (root / "subtitle_locator_state.u32").read_bytes()))
+            locator[18] = struct.unpack("<I", struct.pack("<f", 0.006))[0]
+            locator[21] = dump_contract.SUBTITLE_LOCATOR_EVENT_DEATH
+            locator[25] = 6
+            locator[29] = 120 | (650 << 16)
+            locator[30] = 350 | (401 << 16)
+            self._write_hashed_payload(
+                root, manifest, "subtitle_locator_state.u32",
+                self._pack_uint32_words(locator))
+            (root / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+
+            summary = dump_contract.verify_v2_dump_geometry(root)
+            subtitle = summary["subtitle_conditioning"]
+            self.assertFalse(subtitle["ocr_authoritative"])
+            self.assertEqual(subtitle["current_count"], 0)
+            self.assertEqual(subtitle["target_grace"], 6)
+            self.assertAlmostEqual(subtitle["cached_target"], 0.006)
+            self.assertEqual(subtitle["grace_bounds"], {
+                "left": 120, "top": 350, "right": 650, "bottom": 401,
+            })
+
+    def test_geometry_verifier_rejects_slr9_record_identity_and_nonbase_empty_output(self):
         import numpy as np
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -1809,7 +1860,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 root,
                 width=770,
                 height=434)
-            manifest = self._activate_synthetic_slr8_dump(root, manifest, fields)
+            manifest = self._activate_synthetic_slr9_dump(root, manifest, fields)
 
             record = list(struct.unpack(
                 f"<{dump_contract.SUBTITLE_OCR_RECORD_WORD_COUNT}I",
@@ -1841,7 +1892,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "not exact Base"):
                 dump_contract.verify_v2_dump_geometry(root)
 
-    def test_geometry_verifier_replays_nonempty_slr8_rectangle_fade_and_ocr_binding(self):
+    def test_geometry_verifier_replays_nonempty_slr9_rectangle_fade_and_ocr_binding(self):
         import numpy as np
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -1851,7 +1902,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 width=770,
                 height=434)
             manifest, fade_one, locator, ocr = (
-                self._activate_synthetic_slr8_current_dump(
+                self._activate_synthetic_slr9_current_dump(
                     root, manifest, fields, fade=1))
 
             summary = dump_contract.verify_v2_dump_geometry(root)
@@ -1866,7 +1917,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 root, manifest, "subtitle_locator_state.u32",
                 self._pack_uint32_words(locator))
             target = struct.unpack("<f", struct.pack("<I", locator[18]))[0]
-            fade_two = dump_contract._replay_slr8_conditioner(base, {
+            fade_two = dump_contract._replay_slr9_conditioner(base, {
                 "current_rectangles": [{
                     "left": 120, "top": 350, "right": 650, "bottom": 401,
                 }],
@@ -1897,7 +1948,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 root, manifest, "warp_depth.f32", tampered_payload)
             (root / "dump_manifest.json").write_text(
                 json.dumps(manifest), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "exact SLR8 rectangle-conditioning"):
+            with self.assertRaisesRegex(ValueError, "exact SLR9 rectangle-conditioning"):
                 dump_contract.verify_v2_dump_geometry(root)
 
             self._write_hashed_payload(
@@ -1914,7 +1965,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "does not contain|not exact"):
                 dump_contract.verify_v2_dump_geometry(root)
 
-    def test_slr8_ribbon_replay_has_only_a_top_edge_collar(self):
+    def test_slr9_ribbon_replay_has_only_a_top_edge_collar(self):
         import numpy as np
 
         base = np.full((434, 770), np.float32(0.02), dtype=np.float32)
@@ -1928,11 +1979,11 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         geometry = {
             "left": 120, "top": 350, "right": 650, "bottom": 401,
         }
-        ribbon = dump_contract._replay_slr8_conditioner(base, {
+        ribbon = dump_contract._replay_slr9_conditioner(base, {
             **common,
             "current_rectangles": [{**geometry, "kind": "ribbon", "ribbon": True}],
         })
-        ordinary = dump_contract._replay_slr8_conditioner(base, {
+        ordinary = dump_contract._replay_slr9_conditioner(base, {
             **common,
             "current_rectangles": [{**geometry, "kind": "text", "ribbon": False}],
         })

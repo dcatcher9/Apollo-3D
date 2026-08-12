@@ -75,7 +75,7 @@ renders **flat** SBS; there is no alternate renderer and no fallback geometry.
 The live path is, in order: desktop capture (DXGI Desktop Duplication, with a Windows.Graphics.Capture
 path alongside it) → cursor blend → exact foreground-video attribution or full-frame selection →
 `convert()` → DAV2 depth inference → V2 coordinate mapping → signed post-limit field → bounded
-bottom-band OCR8 detection and compact SLR8 final-field conditioning → an 11-iteration contractive
+bottom-band OCR8 detection and compact SLR9 final-field conditioning → an 11-iteration contractive
 inverse warp → SBS packing → NVENC. The retired generic overlay sanitizer/exclusion graph is not in
 this path.
 
@@ -240,7 +240,7 @@ is correct and should stay — it just has no effect on subtitles that are alrea
 
 **Current implementation direction.** Burned-in subtitles remain part of the captured picture.
 The current production path consumes bounded OCR8 subtitle boxes and conditions only the final V2
-field through compact SLR8 rectangle state. It does not sanitize DAV2 input, classify arbitrary
+field through compact SLR9 rectangle state. It does not sanitize DAV2 input, classify arbitrary
 overlays, retain pixel histories, or run the retired GST/OGR/ORS detector graph. At most four
 same-frame authority rectangles receive the exact anisotropic slope-safe distance treatment; absent,
 stale, mismatched, or unsupported evidence copies ordinary V2 bit-for-bit.
@@ -253,9 +253,9 @@ deterministic contract tests rather than a substitute for a real-video distribut
 
 ### W3. Overlay-mask reuse in scene evidence (deferred)
 
-The current OCR8/SLR8 route does not sanitize DAV2 input and does not feed subtitle rectangles into
+The current OCR8/SLR9 route does not sanitize DAV2 input and does not feed subtitle rectangles into
 scene-cut evidence, V2 moments, or scene-center latching. It changes only the authenticated final
-field. A confirmed cut is handled by the SLR8 transaction itself; no generic exclusion mask is
+field. A confirmed cut is handled by the SLR9 transaction itself; no generic exclusion mask is
 published.
 
 Do not feed a subtitle box, cursor mask, HWND rectangle, browser chrome, or broad UI classifier into
@@ -433,7 +433,7 @@ heartbeats as domain changes.
 This live route currently authorizes only Desktop Duplication. WGC has no `LastPresentTime`
 equivalent for separating content from cursor-only compositor frames and therefore uses full-frame
 V2. Diagnostics may record the frame-bound semantic border and the observer/mapping failure reason,
-but that observation is not the live renderer authority by itself. Current Dump 3D schema 26 records
+but that observation is not the live renderer authority by itself. Current Dump 3D schema 27 records
 the crop-local analysis field, authoritative full-source placement/collar contract, and exact
 full-source inverse map as distinct evidence. The strict reader accepts only the current schema and
 identity; historical dump schemas are intentionally unsupported.
@@ -489,7 +489,7 @@ before a user discovers it.
 windowed selection, separate full-client semantic fullscreen selection, one-pixel endpoint tolerance,
 screen-to-capture validation, matched-frame attribution, transition logging, bounded inward aspect
 trim, same-format DAV2/ownership crop, crop-local state, full-source rendering, and the outside-only
-zero-plane collar are implemented. Active ROI frames are represented by current Dump 3D schema 26;
+zero-plane collar are implemented. Active ROI frames are represented by current Dump 3D schema 27;
 ordinary replay remains fail-closed until it consumes both coordinate domains.
 
 ---
@@ -659,7 +659,7 @@ video, uses the current authenticated tensor, and never pads or stretches. Inspe
 signs at all four edges: the ROI interior must remain unchanged, the outside-only collar must respect
 the production slope limits, and the farther surround must be exactly zero. A pure window
 translation must retain scene state; ROI/full, identity, size, and transfer-domain changes must
-  reset it. Capture a schema-26 ROI Dump 3D and require its full-source inverse map to be identity
+  reset it. Capture a schema-27 ROI Dump 3D and require its full-source inverse map to be identity
 beyond the conservative collar; the crop-local final field alone is not sufficient evidence.
 
 ### Phase 1 — Overlay treatment
@@ -668,7 +668,7 @@ beyond the conservative collar; the crop-local final field alone is not sufficie
 |---|---|---|
 | 1.1 | [W1 — cursor after the warp](#w1-composite-the-cursor-after-the-warp-candidate-defect) | Medium cross-backend change: first create an independent WGC cursor layer, then build the post-warp compositor. |
 | 1.2 | [W2a — burned-in subtitles](#w2a-burned-in-subtitles--adaptive-constant-plane-mask) | Current work is the bounded OCR-box/final-field route described above. The retired general overlay detector, inference sanitizer, and component-local mask graph are no longer production or replay dependencies. Semantic, cross-GPU, real-video, and headset qualification remain required. |
-| 1.3 | [W3 — overlay-mask reuse (deferred)](#w3-overlay-mask-reuse-in-scene-evidence-deferred) | No OCR8/SLR8 mask currently enters cut evidence or scene-center moments; any future reuse remains evidence-gated. |
+| 1.3 | [W3 — overlay-mask reuse (deferred)](#w3-overlay-mask-reuse-in-scene-evidence-deferred) | No OCR8/SLR9 mask currently enters cut evidence or scene-center moments; any future reuse remains evidence-gated. |
 | 1.4 | [W12 — foreground/media classifier](#w12-foreground-process-and-media-state-classifier) | Evidence source only; it may choose a validated route but may not silently change V2 strength. |
 | 1.5 | [W13 — damage-guided depth reuse](#w13-damage-guided-depth-reuse-new-review-addition) | Start only with cursor-only reuse after W1. Broader reuse remains gated on move metadata and independent damage classification. |
 

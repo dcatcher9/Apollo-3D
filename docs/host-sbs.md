@@ -20,7 +20,7 @@ flowchart LR
     DAV2["Authenticated DAV2 Small inference"]
     CUT["Cut-only evidence and scene epoch"]
     OCR["PP-OCRv6 tiny detector (bottom 960x160)"]
-    LOCATOR["OCR8 boxes and compact SLR8 tracker"]
+    LOCATOR["OCR8 boxes and compact SLR9 tracker"]
     CAMERA["Scene-latched raw center"]
     CURVE["Fixed raw coordinate and curve"]
     CONTAINER["Pointwise soft source-U container"]
@@ -50,14 +50,14 @@ diagnostics that explain how the final field was produced.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 45/tag `0xFBD3CDB1`, canonical SHA-256
-`8515cf7bc352c2e9e56e6a5fd9dad9802e1e7cd02f705fd8a957617c7ba94e9a`. It binds the
+schema 46/tag `0xD18FF0F3`, canonical SHA-256
+`8ab387f9bcda29e90455ce9e5b8677cef3cd7744fe03ee03202a4699fa7e4ead`. It binds the
 complete policy below, including all subtitle field/ROI semantics, and producer source-closure
-SHA-256 `11bd8c0ab14d22caab83044e5f0d38cca10f5eef5df5d5e671cbedf64e256a1f`.
+SHA-256 `f299ce49f332458a1d97634d4ced6d7fc802d2be8d583ee04f0e32d851ed1a22`.
 The live-renderer source-closure SHA-256 is
-`cefced5c4ebcb98d8b410b4d13d05a03941f63207edb6ade93afb69fa9bf1529`, and dump-only diagnostic
+`5a1ab7175b97b8ca89397da8b3f86812a3faedf5e15938abf42f64e9716f2c5b`, and dump-only diagnostic
 renderer source-closure SHA-256
-`53c3b025ca2f7c1dbd7abed09ca156d5646ccb45a17c294f9f169d62962a7194`. It admits the following
+`12dbf80c10110b21d59d01b9120c4efa0b9147bed420f134053cfef1276d00d3`. It admits the following
 production calibration:
 
 | Property | Production value |
@@ -158,7 +158,7 @@ not a new analysis domain, so an ordinary window move does not by itself reacqui
 
 ### OCR-box subtitle conditioner
 
-The production subtitle path is the single current detector-only PP-OCRv6 tiny/OCR8/SLR8 route.
+The production subtitle path is the single current detector-only PP-OCRv6 tiny/OCR8/SLR9 route.
 It does not run text recognition, language classification, or logo recognition. For a completed
 DAV2 observation in any of the six calibrated landscape/portrait fields, the GPU takes the exact
 bottom `6:1` analysis-source crop, resizes it to
@@ -174,6 +174,12 @@ NVIDIA ModelOpt `0.45.0` using
 authenticates the bundled artifact and upstream source independently. The detector's
 `1x1x160x960` FP32 probability map is reduced on the GPU to bounded line boxes; no probability
 texture or model input becomes rendering authority.
+
+When the authenticated detector is available, OCR runs once for every depth observation accepted
+by the existing nonblocking DAV2 stream gate. It does not run for source frames dropped while the
+previous inference is busy, and it does not reuse stale boxes or add a separate host cadence. This
+keeps OCR8 and SLR9 on the same exact-frame authority path without extra readback, drain, probe, or
+subtitle-onset delay.
 
 OCR8 is a fixed 208-word current record: a 16-word header followed by paired tight/core and cover
 slots, with at most eight authoritative pairs. Each eight-word slot stores half-open coordinates,
@@ -208,7 +214,7 @@ bottom is the exact rational ceil projection of detector row `155 - 2 = 153` thr
 bottom-6:1 source crop into the active DAV2 field. A core at that projected row is valid; one field
 row below it is malformed. The upper bound remains the projected safe ROI bottom.
 
-SLR8 is a fixed 80-word compact state containing at most four owner/core rectangles, four
+SLR9 is a fixed 80-word compact state containing at most four owner/core rectangles, four
 pending/core rectangles, and four same-frame current cover rectangles. Header word 31 carries
 owner, pending, and current ribbon masks in bits `0..3`, `4..7`, and `8..11`; higher bits are zero.
 Generic ordinary-line geometry requires
@@ -230,13 +236,18 @@ selection and the shared plane target; it never unions geometry. Every core and 
 remains independent, canonical core order is top then left, and paired current covers retain that
 core-defined order. A selected set needing more than four rectangles fails flat.
 The first exact observation is pending; only a compatible observation with a distinct exact
-frame/domain identity confirms an owner. A compatible subset can remove a line immediately, while
+frame/domain identity confirms an owner. Compatibility requires the same member count and kind in
+canonical order and IoU at least `0.6` for every corresponding member; high aggregate overlap from
+other unchanged lines cannot confirm a disjoint replacement. A compatible subset can remove a line immediately, while
 an appended or materially changed stack remains pending and conditions only lines still matched to
 the old owner until its second observation confirms the handoff.
 
 Only rectangles copied from the current OCR8 record can condition the current frame. Cached owner,
 pending, target, and six-observation death grace cannot manufacture geometry. Authoritative empty
-OCR removes all current rectangles immediately. A hard cut clears pending/grace, retains only
+OCR removes all current rectangles immediately. Missing, stale, abstaining, or malformed OCR in an
+otherwise valid unchanged domain also clears current and pending immediately, starts or advances
+the same six-distinct-observation cached-target grace, and conditions exact Base. Redispatching the
+same observation does not consume another grace step. A hard cut clears pending/grace, retains only
 current rectangles that still overlap an old owner, and resamples the plane target; disjoint boxes
 begin a new two-observation transaction. An input-domain reset clears the owner as well and treats
 any current boxes as the first pending observation. This lets a seek/reset landing on an
@@ -266,6 +277,8 @@ naturally, and the gap is never converted into one merged rectangle. Because a r
 the complete field width and reaches the field bottom, its only exterior boundary—and therefore its
 only collar—is the corrected top edge. Missing current authority, invalid target
 state, unsupported tensor shape, or any identity failure copies ordinary post-limit V2 exactly.
+The conditioner validates the complete 80-word state once per `16x16` dispatch group and shares
+that verdict within the group; no thread can partially accept a malformed state.
 There is no pixel history, row lease, onset accumulator, signature, horizontal-distance texture,
 full-resolution overlay detector, or GST/OGR/ORS dependency.
 
@@ -360,7 +373,7 @@ color. A confirmed cut invalidates the old camera; the next usable field acquire
 Model preparation, shader compilation, and the live renderer are fail-closed. Live shaders are
 compiled and cached at process startup. Dump-only resources are created lazily and cannot prevent a
 stream from starting. A failure in optional diagnostics has no rendering authority. An armed
-schema-26 dump preserves the selected path's same-frame authority resources with ordered D3D11
+schema-27 dump preserves the selected path's same-frame authority resources with ordered D3D11
 `CopyResource` operations;
 it adds no production GPU-to-CPU readback, flush, query wait, or synchronous Map. The explicit dump
 then uses the existing diagnostic readback path to publish files.
@@ -450,8 +463,8 @@ continues unchanged.
 
 Dump 3D records one matched current-contract frame: source/model/raw DAV2 evidence, authenticated
 analysis-region placement, the V2 geometry chain and inverse map, scene/cut attribution, packed SBS,
-and—when selected—the exact OCR8 record and compact SLR8 state used by conditioning. The reader
-accepts only the current schema and identities. Retired SLR3--SLR5 and GST/OGR/ORS packages are not
+and—when selected—the exact OCR8 record and compact SLR9 state used by conditioning. The reader
+accepts only the current schema and identities. Retired SLR3--SLR8 and GST/OGR/ORS packages are not
 replayed or reinterpreted.
 
 Use `.f32` artifacts for quantitative comparisons. Independently stretched PNG previews can hide

@@ -57,8 +57,8 @@ listed by `run_eval.py --help`; unrecognized historical options fail argument pa
 
 ### Current subtitle authority
 
-The current dump reader accepts the authenticated OCR8 record and compact SLR8 locator state as
-the only live subtitle authority. Retired SLR3--SLR5, GST/OGR/ORS, and offline overlay-detector
+The current dump reader accepts the authenticated OCR8 record and compact SLR9 locator state as
+the only live subtitle authority. Retired SLR3--SLR8, GST/OGR/ORS, and offline overlay-detector
 paths are not accepted as live or replay authority.
 ## Reports and comparisons
 
@@ -101,8 +101,8 @@ python tools/sbsbench/sbsbench.py `
 ```
 
 See [Dump and replay format](DUMP_FORMAT.md) before interpreting preview PNGs. The reader accepts
-only the current SLR8/OCR8 dump schema; older experimental captures are intentionally unsupported.
-An active package authenticates the exact OCR8 record, compact SLR8 state, ordinary Base field,
+only the current SLR9/OCR8 dump schema; older experimental captures are intentionally unsupported.
+An active package authenticates the exact OCR8 record, compact SLR9 state, ordinary Base field,
 and selected conditioned field. An inactive package uses the one canonical `none` descriptor.
 
 ## Whole-clip conversion boundary

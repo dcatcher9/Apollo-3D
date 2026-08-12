@@ -65,15 +65,17 @@ The production subtitle path applies no overlay exclusion to cut evidence or DAV
 appearance and disappearance remain ordinary scene evidence; the locator consumes the
 already-resolved cut result and can neither suppress nor retroactively change it.
 
-The production detector-only PP-OCRv6/OCR8/SLR8 subtitle path has no private cut classifier. It
+The production detector-only PP-OCRv6/OCR8/SLR9 subtitle path has no private cut classifier. It
 consumes the finalized same-frame CutBridge result. A confirmed cut clears pending and death-grace
 state, preserves only current OCR rectangles that still match an old owner, and forces a fresh
 plane-target sample; additions or disjoint boxes start a new two-observation transaction. An
 input-domain reset clears the owner too and records current boxes only as the first pending
-observation. Missing, stale, abstaining, or mismatched OCR8 evidence clears current subtitle
-authority and copies the ordinary post-limit field exactly. There is no preprocessing exclusion,
+observation. Missing, stale, abstaining, malformed, or mismatched OCR8 evidence in an otherwise
+valid unchanged domain clears current and pending subtitle authority, starts or advances the
+existing six-distinct-observation cached-target grace, and copies the ordinary post-limit field
+exactly; redispatching the same identity does not age grace twice. Invalid OCR on a hard-cut/reset
+boundary cannot carry that cache into the new scene. There is no preprocessing exclusion,
 recognizer, subtitle-driven cut veto, or pause branch.
-
 
 ## Appearance proposals
 
