@@ -5,8 +5,15 @@
 #include "../tests_common.h"
 
 #include <openssl/x509.h>
-
 #include <src/crypto.h>
+
+namespace {
+  crypto::aes_t fixed_aes_value(std::uint8_t first) {
+    crypto::aes_t value(16, 0);
+    value.front() = first;
+    return value;
+  }
+}  // namespace
 
 TEST(CryptoTest, GeneratedCredentialsExposeSubjectAndVerifySignatures) {
   constexpr std::string_view common_name = "Apollo Test Host";
@@ -48,9 +55,50 @@ TEST(CryptoTest, GeneratedCredentialsExposeSubjectAndVerifySignatures) {
 
   const auto signed_payload = crypto::sign256(pkey, payload);
   ASSERT_FALSE(signed_payload.empty());
-  ASSERT_TRUE(crypto::verify256(
-    cert,
-    payload,
-    {reinterpret_cast<const char *>(signed_payload.data()), signed_payload.size()}
-  ));
+  ASSERT_TRUE(crypto::verify256(cert, payload, {reinterpret_cast<const char *>(signed_payload.data()), signed_payload.size()}));
+}
+
+TEST(CryptoTest, GcmDecryptReinitializationFailureReturnsError) {
+  const auto key = fixed_aes_value(0x11);
+  auto iv = fixed_aes_value(0x22);
+  constexpr std::string_view plaintext = "authenticated input";
+
+  crypto::cipher::gcm_t cipher {key, false};
+  std::vector<std::uint8_t> tagged_cipher(
+    crypto::cipher::tag_size + plaintext.size()
+  );
+  ASSERT_EQ(
+    cipher.encrypt(plaintext, tagged_cipher.data(), &iv),
+    static_cast<int>(plaintext.size())
+  );
+
+  std::vector<std::uint8_t> decrypted;
+  const std::string_view tagged_view {
+    reinterpret_cast<const char *>(tagged_cipher.data()),
+    tagged_cipher.size()
+  };
+  ASSERT_EQ(cipher.decrypt(tagged_view, decrypted, &iv), 0);
+  ASSERT_EQ(std::string_view(reinterpret_cast<const char *>(decrypted.data()), decrypted.size()), plaintext);
+
+  // Keep a non-null context while removing its cipher. This deterministically forces the exact
+  // EVP_DecryptInit_ex(nullptr cipher) reinitialization branch to fail.
+  ASSERT_EQ(EVP_CIPHER_CTX_reset(cipher.decrypt_ctx.get()), 1);
+  EXPECT_EQ(cipher.decrypt(tagged_view, decrypted, &iv), -1);
+}
+
+TEST(CryptoTest, CbcEncryptReinitializationFailureReturnsError) {
+  const auto key = fixed_aes_value(0x33);
+  auto iv = fixed_aes_value(0x44);
+  constexpr std::string_view plaintext = "sixteen-byte-msg";
+
+  crypto::cipher::cbc_t cipher {key, false};
+  std::vector<std::uint8_t> encrypted(plaintext.size() + EVP_MAX_BLOCK_LENGTH);
+  ASSERT_EQ(
+    cipher.encrypt(plaintext, encrypted.data(), &iv),
+    static_cast<int>(plaintext.size())
+  );
+
+  // As above, preserve the allocated context but clear its configured cipher.
+  ASSERT_EQ(EVP_CIPHER_CTX_reset(cipher.encrypt_ctx.get()), 1);
+  EXPECT_EQ(cipher.encrypt(plaintext, encrypted.data(), &iv), -1);
 }

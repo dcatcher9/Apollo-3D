@@ -386,6 +386,16 @@ namespace platf {
 
     virtual int convert(platf::img_t &img) = 0;
 
+    /** Timestamp of the desktop/content pixels in the most recently converted encoder input.
+     *
+     * This is deliberately independent from the presentation/cadence timestamp carried by the
+     * encode loop. A converter may render an older matched Host SBS source, repeat its previous
+     * output, or composite a cursor update over retained desktop pixels.
+     */
+    virtual std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp() const {
+      return std::nullopt;
+    }
+
     /** True when the retained source must be converted once more to consume asynchronous work.
      * The encode loop uses this only after capture has gone idle; ordinary devices remain false.
      */

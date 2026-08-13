@@ -263,6 +263,10 @@ namespace video {
       return device && device->needs_conversion_poll();
     }
 
+    std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp() const override {
+      return device ? device->rendered_content_timestamp() : std::nullopt;
+    }
+
     void request_idr_frame() override {
       force_idr = true;
     }
@@ -745,7 +749,8 @@ namespace video {
     nvenc_encode_session_t &session,
     safe::mail_raw_t::queue_t<packet_t> &packets,
     const std::shared_ptr<void> &channel_data,
-    std::optional<std::chrono::steady_clock::time_point> frame_timestamp
+    std::optional<std::chrono::steady_clock::time_point> frame_timestamp,
+    std::optional<std::chrono::steady_clock::time_point> content_timestamp
   ) {
     auto encoded_frame = session.encode_frame(frame_nr);
     if (encoded_frame.data.empty()) {
@@ -761,6 +766,7 @@ namespace video {
     packet->channel_data = channel_data;
     packet->after_ref_frame_invalidation = encoded_frame.after_ref_frame_invalidation;
     packet->frame_timestamp = frame_timestamp;
+    packet->content_timestamp = content_timestamp;
     const bool packet_is_idr = packet->is_idr();
     // A queued IDR can replace stale packets and immediately repair the reference chain. A delta
     // frame cannot: if the queue is full, discard both the stale queue and this delta frame, then
@@ -1020,7 +1026,8 @@ namespace video {
         *session,
         packets,
         channel_data,
-        frame_timestamp
+        frame_timestamp,
+        session->rendered_content_timestamp()
       );
       if (publish_result.failed) {
         BOOST_LOG(error) << "Could not encode video packet"sv;
@@ -1553,7 +1560,7 @@ namespace video {
       ENCODED_PACKET_QUEUE_LIMIT
     );
     while (!packets->peek()) {
-      if (encode(1, *session, packets, nullptr, {}).failed) {
+      if (encode(1, *session, packets, nullptr, {}, {}).failed) {
         return -1;
       }
     }

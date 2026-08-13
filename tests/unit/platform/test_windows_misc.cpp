@@ -6,22 +6,144 @@
 
 #ifdef _WIN32
   #include <algorithm>
-  #include <cstdio>
-  #include <filesystem>
-  #include <optional>
-  #include <string>
-  #include <vector>
-
   #include <boost/filesystem/path.hpp>
   #include <boost/process/v1/child.hpp>
   #include <boost/process/v1/environment.hpp>
   #include <boost/process/v1/group.hpp>
-
+  #include <cstdint>
+  #include <cstdio>
+  #include <filesystem>
+  #include <optional>
+  // display.h declares the small D3DKMT function table without depending on the WDK headers.
+  // Match display_base.cpp's prerequisite after boost/process has selected its Windows headers.
+  typedef long NTSTATUS;
+  #include <src/platform/windows/display.h>
   #include <src/platform/windows/misc.h>
-  #include <ShlObj.h>
   #include <sddl.h>
+  #include <ShlObj.h>
+  #include <string>
+  #include <vector>
 
 namespace {
+  struct fake_keyed_mutex_t {
+    HRESULT acquire_result = S_OK;
+    unsigned acquire_calls = 0;
+    unsigned release_calls = 0;
+    UINT64 acquired_key = 0;
+    UINT64 released_key = 0;
+
+    HRESULT AcquireSync(const UINT64 key, DWORD) noexcept {
+      ++acquire_calls;
+      acquired_key = key;
+      return acquire_result;
+    }
+
+    HRESULT ReleaseSync(const UINT64 key) noexcept {
+      ++release_calls;
+      released_key = key;
+      return S_OK;
+    }
+  };
+
+  TEST(WindowsKeyedMutexLockTest, ReleasesSuccessfulAcquisitionOnEarlyReturn) {
+    fake_keyed_mutex_t mutex;
+    const auto conversion_with_early_return = [&]() {
+      platf::dxgi::detail::keyed_mutex_lock_t lock {&mutex};
+      if (lock.lock(3, INFINITE, 7) != S_OK) {
+        return true;
+      }
+      return false;
+    };
+
+    EXPECT_FALSE(conversion_with_early_return());
+    EXPECT_EQ(mutex.acquire_calls, 1u);
+    EXPECT_EQ(mutex.release_calls, 1u);
+    EXPECT_EQ(mutex.acquired_key, 3u);
+    EXPECT_EQ(mutex.released_key, 7u);
+  }
+
+  TEST(WindowsKeyedMutexLockTest, DoesNotReleaseFailedAcquisition) {
+    fake_keyed_mutex_t mutex;
+    mutex.acquire_result = WAIT_TIMEOUT;
+    {
+      platf::dxgi::detail::keyed_mutex_lock_t lock {&mutex};
+      EXPECT_EQ(lock.lock(), WAIT_TIMEOUT);
+      EXPECT_FALSE(lock.owns_lock());
+    }
+
+    EXPECT_EQ(mutex.acquire_calls, 1u);
+    EXPECT_EQ(mutex.release_calls, 0u);
+  }
+
+  TEST(WindowsDdupTimestampTest, CursorOnlyUpdateRetainsDesktopContentTimestamp) {
+    using timestamp_t = std::int64_t;
+    const auto initial_present = platf::dxgi::detail::select_ddup_timestamps(
+      std::optional<timestamp_t> {100},
+      std::optional<timestamp_t> {},
+      std::optional<timestamp_t> {}
+    );
+    ASSERT_EQ(initial_present.presentation_timestamp, 100);
+    ASSERT_EQ(initial_present.content_timestamp, 100);
+
+    const auto cursor_only = platf::dxgi::detail::select_ddup_timestamps(
+      std::optional<timestamp_t> {},
+      std::optional<timestamp_t> {200},
+      initial_present.content_timestamp
+    );
+    EXPECT_EQ(cursor_only.presentation_timestamp, 200);
+    EXPECT_EQ(cursor_only.content_timestamp, 100);
+  }
+
+  TEST(WindowsDdupTimestampTest, NewerCursorCadenceDoesNotReplacePresentContentTime) {
+    using timestamp_t = std::int64_t;
+    const auto timestamps = platf::dxgi::detail::select_ddup_timestamps(
+      std::optional<timestamp_t> {300},
+      std::optional<timestamp_t> {350},
+      std::optional<timestamp_t> {100}
+    );
+
+    EXPECT_EQ(timestamps.presentation_timestamp, 350);
+    EXPECT_EQ(timestamps.content_timestamp, 300);
+  }
+
+  struct fake_desktop_retry_operations_t {
+    std::vector<bool> attempt_results;
+    bool synchronization_result = true;
+    std::size_t attempt_count = 0;
+    std::size_t synchronization_count = 0;
+
+    bool attempt() {
+      const auto result = attempt_results.at(attempt_count);
+      ++attempt_count;
+      return result;
+    }
+
+    bool synchronize() {
+      ++synchronization_count;
+      return synchronization_result;
+    }
+  };
+
+  struct fake_desktop_handle_operations_t {
+    std::uintptr_t candidate = 2;
+    bool set_succeeds = true;
+    std::vector<std::string> calls;
+
+    std::uintptr_t open_input_desktop() {
+      calls.emplace_back("open:" + std::to_string(candidate));
+      return candidate;
+    }
+
+    bool set_thread_desktop(std::uintptr_t desktop) {
+      calls.emplace_back("set:" + std::to_string(desktop));
+      return set_succeeds;
+    }
+
+    void close_desktop(std::uintptr_t desktop) {
+      calls.emplace_back("close:" + std::to_string(desktop));
+    }
+  };
+
   TEST(WindowsQpcTimeTest, ConvertsPerformanceCounterTicksToNanoseconds) {
     LARGE_INTEGER frequency {};
     ASSERT_TRUE(QueryPerformanceFrequency(&frequency));
@@ -161,6 +283,71 @@ namespace {
     return platf::to_utf8(sid_text);
   }
 }  // namespace
+
+TEST(WindowsInputDesktopRetryTest, DoesNotSynchronizeAfterImmediateSuccess) {
+  fake_desktop_retry_operations_t operations {{true}};
+
+  EXPECT_TRUE(platf::detail::run_with_desktop_retry([&]() {
+    return operations.attempt();
+  },
+                                                    [&]() {
+                                                      return operations.synchronize();
+                                                    }));
+  EXPECT_EQ(operations.attempt_count, 1u);
+  EXPECT_EQ(operations.synchronization_count, 0u);
+}
+
+TEST(WindowsInputDesktopRetryTest, RetriesExactlyOnceAfterSuccessfulSynchronization) {
+  fake_desktop_retry_operations_t operations {{false, false}};
+
+  EXPECT_FALSE(platf::detail::run_with_desktop_retry([&]() {
+    return operations.attempt();
+  },
+                                                     [&]() {
+                                                       return operations.synchronize();
+                                                     }));
+  EXPECT_EQ(operations.attempt_count, 2u);
+  EXPECT_EQ(operations.synchronization_count, 1u);
+}
+
+TEST(WindowsInputDesktopRetryTest, DoesNotRetryWhenSynchronizationFails) {
+  fake_desktop_retry_operations_t operations {{false}};
+  operations.synchronization_result = false;
+
+  EXPECT_FALSE(platf::detail::run_with_desktop_retry([&]() {
+    return operations.attempt();
+  },
+                                                     [&]() {
+                                                       return operations.synchronize();
+                                                     }));
+  EXPECT_EQ(operations.attempt_count, 1u);
+  EXPECT_EQ(operations.synchronization_count, 1u);
+}
+
+TEST(WindowsInputDesktopRetryTest, RetainsSuccessfulDesktopAndClosesSupersededHandle) {
+  std::uintptr_t active = 1;
+  fake_desktop_handle_operations_t operations;
+
+  EXPECT_TRUE(platf::detail::replace_thread_desktop_handle(active, operations));
+  EXPECT_EQ(active, 2u);
+  EXPECT_EQ(
+    operations.calls,
+    (std::vector<std::string> {"open:2", "set:2", "close:1"})
+  );
+}
+
+TEST(WindowsInputDesktopRetryTest, ClosesFailedCandidateAndPreservesActiveHandle) {
+  std::uintptr_t active = 1;
+  fake_desktop_handle_operations_t operations;
+  operations.set_succeeds = false;
+
+  EXPECT_FALSE(platf::detail::replace_thread_desktop_handle(active, operations));
+  EXPECT_EQ(active, 1u);
+  EXPECT_EQ(
+    operations.calls,
+    (std::vector<std::string> {"open:2", "set:2", "close:2"})
+  );
+}
 
 TEST(ExplorerRestartControllerTest, AcceptsWindowsAutomaticRestartWithoutLaunchingAgain) {
   fake_explorer_restart_operations_t operations;
@@ -760,7 +947,8 @@ TEST(RunCommandUnelevatedTest, ElevatedTrayLaunchesProductionShapeStandardUserCh
     child_process,
     child_group.native_handle(),
     &child_is_in_job
-  )) << "Win32 error " << GetLastError();
+  )) << "Win32 error "
+     << GetLastError();
   EXPECT_TRUE(child_is_in_job);
 
   std::error_code wait_error;

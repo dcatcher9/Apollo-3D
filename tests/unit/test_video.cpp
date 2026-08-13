@@ -37,6 +37,71 @@ namespace platf::dxgi {
 #endif
 
 namespace {
+  TEST(RenderedContentTimestampTest, MatchedT0IsPreservedWhileCurrentCadenceIsT1) {
+    const auto t0 = std::chrono::steady_clock::time_point {10ms};
+    const auto t1 = std::chrono::steady_clock::time_point {20ms};
+
+    const auto rendered = video::detail::select_rendered_content_timestamp(
+      false,
+      std::nullopt,
+      true,
+      t0,
+      t0,
+      t1,
+      t1
+    );
+
+    EXPECT_EQ(rendered, t0);
+    EXPECT_EQ(t1, std::chrono::steady_clock::time_point {20ms});
+  }
+
+  TEST(RenderedContentTimestampTest, RepeatedOutputKeepsPriorRenderedContentTime) {
+    const auto t0 = std::chrono::steady_clock::time_point {10ms};
+    const auto t1 = std::chrono::steady_clock::time_point {20ms};
+
+    EXPECT_EQ(
+      video::detail::select_rendered_content_timestamp(
+        true,
+        t0,
+        false,
+        std::nullopt,
+        std::nullopt,
+        t1,
+        t1
+      ),
+      t0
+    );
+  }
+
+  TEST(RenderedContentTimestampTest, CursorOnlyPresentationKeepsRetainedContentTime) {
+    const auto t0 = std::chrono::steady_clock::time_point {10ms};
+    const auto t1 = std::chrono::steady_clock::time_point {20ms};
+
+    EXPECT_EQ(
+      video::detail::select_rendered_content_timestamp(
+        false,
+        std::nullopt,
+        false,
+        std::nullopt,
+        std::nullopt,
+        t0,
+        t1
+      ),
+      t0
+    );
+  }
+
+  TEST(RenderedContentTimestampTest, ProcessingTelemetryPrefersContentButCadenceStaysSeparate) {
+    const auto content_t0 = std::chrono::steady_clock::time_point {10ms};
+    const auto presentation_t1 = std::chrono::steady_clock::time_point {20ms};
+
+    EXPECT_EQ(
+      video::detail::select_processing_timestamp(content_t0, presentation_t1),
+      content_t0
+    );
+    EXPECT_EQ(presentation_t1, std::chrono::steady_clock::time_point {20ms});
+  }
+
   std::string read_source_file(const std::string &path) {
     std::ifstream input(path, std::ios::binary);
     if (!input.is_open()) {

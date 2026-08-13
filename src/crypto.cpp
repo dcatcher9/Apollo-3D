@@ -153,7 +153,7 @@ namespace crypto {
       // Calling with cipher == nullptr results in a parameter change
       // without requiring a reallocation of the internal cipher ctx.
       if (EVP_DecryptInit_ex(decrypt_ctx.get(), nullptr, nullptr, nullptr, iv->data()) != 1) {
-        return false;
+        return -1;
       }
 
       auto cipher = tagged_cipher.substr(tag_size);
@@ -287,7 +287,7 @@ namespace crypto {
       // Calling with cipher == nullptr results in a parameter change
       // without requiring a reallocation of the internal cipher ctx.
       if (EVP_EncryptInit_ex(encrypt_ctx.get(), nullptr, nullptr, nullptr, iv->data()) != 1) {
-        return false;
+        return -1;
       }
 
       int update_outlen, final_outlen;

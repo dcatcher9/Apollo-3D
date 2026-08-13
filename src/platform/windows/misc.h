@@ -29,6 +29,45 @@ namespace platf {
   };
 
   namespace detail {
+    /**
+     * Run an input injection attempt with at most one retry after synchronizing the thread's
+     * input desktop. This keeps a persistent injection failure from monopolizing the input worker.
+     */
+    template<class Attempt, class SynchronizeDesktop>
+    bool run_with_desktop_retry(Attempt &&attempt, SynchronizeDesktop &&synchronize_desktop) {
+      if (std::invoke(attempt)) {
+        return true;
+      }
+      if (!std::invoke(synchronize_desktop)) {
+        return false;
+      }
+      return std::invoke(attempt);
+    }
+
+    /**
+     * Replace the handle that backs this thread's desktop association.
+     *
+     * A failed SetThreadDesktop leaves the previous association intact and closes only the
+     * candidate. A successful switch retains the candidate (CloseDesktop must not be called on a
+     * handle in use by a thread) and closes the superseded handle.
+     */
+    template<class Handle, class Operations>
+    bool replace_thread_desktop_handle(Handle &active, Operations &operations) {
+      const auto candidate = operations.open_input_desktop();
+      if (!candidate) {
+        return false;
+      }
+      if (!operations.set_thread_desktop(candidate)) {
+        operations.close_desktop(candidate);
+        return false;
+      }
+      if (active) {
+        operations.close_desktop(active);
+      }
+      active = candidate;
+      return true;
+    }
+
     struct create_process_with_token_plan_t {
       DWORD creation_flags;
       DWORD startup_info_size;
@@ -185,7 +224,7 @@ namespace platf {
   explorer_restart_result_e restart_active_user_explorer();
 
   void print_status(const std::string_view &prefix, HRESULT status);
-  HDESK syncThreadDesktop();
+  bool syncThreadDesktop();
 
   int64_t qpc_counter();
 

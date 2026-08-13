@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <vector>
 
 // local includes
@@ -27,6 +28,53 @@ namespace video {
   // already encoded video. Three frames absorb ordinary encoder/network scheduling jitter while
   // keeping recovery bounded when the sender cannot keep up.
   constexpr std::uint32_t ENCODED_PACKET_QUEUE_LIMIT = 3;
+
+  namespace detail {
+    using frame_time_point_t = std::chrono::steady_clock::time_point;
+    using optional_frame_time_point_t = std::optional<frame_time_point_t>;
+
+    /** Select the timestamp of the pixels a conversion actually rendered.
+     *
+     * `presentation_timestamp` remains a separate encode/RTP cadence identity. Host SBS may
+     * instead render a matched buffered source or repeat an already packed output; capture
+     * backends may also report a cursor-only presentation over retained desktop content.
+     */
+    constexpr optional_frame_time_point_t select_rendered_content_timestamp(
+      bool repeats_prior_output,
+      optional_frame_time_point_t prior_output_content_timestamp,
+      bool renders_matched_source,
+      optional_frame_time_point_t matched_content_timestamp,
+      optional_frame_time_point_t matched_presentation_timestamp,
+      optional_frame_time_point_t current_content_timestamp,
+      optional_frame_time_point_t current_presentation_timestamp
+    ) noexcept {
+      if (repeats_prior_output) {
+        return prior_output_content_timestamp;
+      }
+
+      if (renders_matched_source) {
+        return matched_content_timestamp ?
+                 matched_content_timestamp :
+                 matched_presentation_timestamp;
+      }
+
+      return current_content_timestamp ?
+               current_content_timestamp :
+               current_presentation_timestamp;
+    }
+
+    /** Timestamp used for host frame-processing latency telemetry. RTP uses the distinct
+     * presentation timestamp directly and must not call this helper.
+     */
+    constexpr optional_frame_time_point_t select_processing_timestamp(
+      optional_frame_time_point_t rendered_content_timestamp,
+      optional_frame_time_point_t presentation_timestamp
+    ) noexcept {
+      return rendered_content_timestamp ?
+               rendered_content_timestamp :
+               presentation_timestamp;
+    }
+  }  // namespace detail
 
   /* Host-side SBS 3D mode requested by the client via the 0x3003 control message.
      Must match the SBS_MODE_* wire values in the client's moonlight-common-c Limelight.h. */
@@ -423,6 +471,10 @@ namespace video {
 
     virtual int convert(platf::img_t &img) = 0;
 
+    virtual std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp() const {
+      return std::nullopt;
+    }
+
     virtual bool needs_conversion_poll() const {
       return false;
     }
@@ -450,7 +502,11 @@ namespace video {
     // pointers and a session -> broadcast -> queued packet -> session ownership cycle.
     std::shared_ptr<void> channel_data;
     bool after_ref_frame_invalidation = false;
+    // Presentation/cadence time. This is the only timestamp used to derive the monotonic RTP PTS.
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
+    // Actual desktop/content pixels rendered into this packet. This may predate frame_timestamp
+    // for cursor-only capture updates, matched Host SBS output, and repeated encoder input.
+    std::optional<std::chrono::steady_clock::time_point> content_timestamp;
     // Timestamp after encoding, used independently from the capture timestamp to bound only
     // host-side encoded-packet backlog.
     std::chrono::steady_clock::time_point encoded_timestamp = std::chrono::steady_clock::now();

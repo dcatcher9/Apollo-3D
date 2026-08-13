@@ -532,8 +532,22 @@ namespace platf::dxgi {
              sbs_dumper.needs_conversion_poll();
     }
 
+    std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp() const {
+      return rendered_content_timestamp_;
+    }
+
     int convert(platf::img_t &img_base) {
       auto &img = (img_d3d_t &) img_base;
+      auto converted_content_timestamp =
+        ::video::detail::select_rendered_content_timestamp(
+          false,
+          std::nullopt,
+          false,
+          std::nullopt,
+          std::nullopt,
+          img_base.content_timestamp,
+          img_base.frame_timestamp
+        );
       if (!img.blank) {
         // Look up (or create) this image's encoder context. Only when a new id first appears do
         // we garbage-collect contexts whose capture img_t has since expired -- the set of live
@@ -557,7 +571,8 @@ namespace platf::dxgi {
         }
 
         // Acquire encoder mutex to synchronize with capture code
-        auto status = img_ctx.encoder_mutex->AcquireSync(0, INFINITE);
+        detail::keyed_mutex_lock_t encoder_mutex_lock {img_ctx.encoder_mutex.get()};
+        auto status = encoder_mutex_lock.lock(0, INFINITE);
         if (status != S_OK) {
           BOOST_LOG(error) << "Failed to acquire encoder mutex [0x"sv << util::hex(status).to_string_view() << ']';
           return -1;
@@ -960,6 +975,7 @@ namespace platf::dxgi {
             matched_output_valid = false;
             matched_output_source_at = {};
             matched_output_source_timestamp.reset();
+            matched_output_content_timestamp.reset();
             matched_output_input_region = {};
             matched_output_color_space = models::input_color_space::srgb;
           } else if (
@@ -1107,6 +1123,16 @@ namespace platf::dxgi {
               repeat_source_age,
               output_source_unchanged
             );
+          converted_content_timestamp =
+            ::video::detail::select_rendered_content_timestamp(
+              repeat_matched_output,
+              matched_output_content_timestamp,
+              matched_render_slot != nullptr,
+              matched_render_slot ? matched_render_slot->content_timestamp : std::nullopt,
+              matched_render_slot ? matched_render_slot->source_timestamp : std::nullopt,
+              current_content_timestamp,
+              current_source_timestamp
+            );
           const bool v2_repeat_timed_out =
             stale_v2_completion ||
             (host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2 &&
@@ -1238,6 +1264,16 @@ namespace platf::dxgi {
               matched_output_source_at = matched_render_slot->captured_at;
               matched_output_source_timestamp =
                 matched_render_slot->source_timestamp;
+              matched_output_content_timestamp =
+                ::video::detail::select_rendered_content_timestamp(
+                  false,
+                  std::nullopt,
+                  true,
+                  matched_render_slot->content_timestamp,
+                  matched_render_slot->source_timestamp,
+                  std::nullopt,
+                  std::nullopt
+                );
               matched_output_input_region = est.input_region;
               matched_output_color_space = matched_render_slot->color_space;
             } else {
@@ -1247,6 +1283,7 @@ namespace platf::dxgi {
               matched_output_valid = false;
               matched_output_source_at = {};
               matched_output_source_timestamp.reset();
+              matched_output_content_timestamp.reset();
               matched_output_input_region = {};
               matched_output_color_space = models::input_color_space::srgb;
             }
@@ -1465,11 +1502,11 @@ namespace platf::dxgi {
           }
         }
 
-        // Release encoder mutex to allow capture code to reuse this image
-        img_ctx.encoder_mutex->ReleaseSync(0);
-
         ID3D11ShaderResourceView *emptyShaderResourceView = nullptr;
         device_ctx->PSSetShaderResources(0, 1, &emptyShaderResourceView);
+        rendered_content_timestamp_ = converted_content_timestamp;
+      } else {
+        rendered_content_timestamp_.reset();
       }
 
       return 0;
@@ -1541,6 +1578,7 @@ namespace platf::dxgi {
       matched_output_valid = false;
       matched_output_source_at = {};
       matched_output_source_timestamp.reset();
+      matched_output_content_timestamp.reset();
       matched_output_input_region = {};
       matched_output_color_space = models::input_color_space::srgb;
       matched_output_timeout_active = false;
@@ -2036,6 +2074,7 @@ namespace platf::dxgi {
       std::uint64_t frame_id = 0;
       models::input_color_space color_space = models::input_color_space::srgb;
       std::optional<std::chrono::steady_clock::time_point> source_timestamp;
+      std::optional<std::chrono::steady_clock::time_point> content_timestamp;
       std::chrono::steady_clock::time_point captured_at {};
       std::optional<sbs_debug::window_region_snapshot> window_region;
       std::optional<models::depth_video_region_plan_t> depth_video_plan;
@@ -2119,6 +2158,7 @@ namespace platf::dxgi {
       matched_output_valid = false;
       matched_output_source_at = {};
       matched_output_source_timestamp.reset();
+      matched_output_content_timestamp.reset();
       matched_output_input_region = {};
       matched_output_color_space = models::input_color_space::srgb;
       matched_output_timeout_active = false;
@@ -2277,6 +2317,7 @@ namespace platf::dxgi {
       matched_output_valid = false;
       matched_output_source_at = {};
       matched_output_source_timestamp.reset();
+      matched_output_content_timestamp.reset();
       matched_output_input_region = {};
       matched_output_color_space = models::input_color_space::srgb;
       matched_output_timeout_active = false;
@@ -2637,6 +2678,7 @@ namespace platf::dxgi {
         matched_output_valid = false;
         matched_output_source_at = {};
         matched_output_source_timestamp.reset();
+        matched_output_content_timestamp.reset();
         matched_output_input_region = {};
         matched_output_color_space = models::input_color_space::srgb;
         matched_output_timeout_active = false;
@@ -3046,6 +3088,7 @@ namespace platf::dxgi {
       slot.frame_id = frame_id;
       slot.color_space = color_space;
       slot.source_timestamp = source_timestamp;
+      slot.content_timestamp = content_timestamp;
       // Production uses source age to bound V2 output repetition; this is no longer diagnostics-
       // only metadata. The aggregate age counters below remain gated by diagnostics_enabled.
       slot.captured_at = captured_at;
@@ -3499,6 +3542,7 @@ namespace platf::dxgi {
       matched_output_valid = false;
       matched_output_source_at = {};
       matched_output_source_timestamp.reset();
+      matched_output_content_timestamp.reset();
       matched_output_input_region = {};
       matched_output_color_space = models::input_color_space::srgb;
       matched_output_timeout_active = false;
@@ -4211,6 +4255,7 @@ namespace platf::dxgi {
     bool matched_output_valid = false;
     std::chrono::steady_clock::time_point matched_output_source_at {};
     std::optional<std::chrono::steady_clock::time_point> matched_output_source_timestamp;
+    std::optional<std::chrono::steady_clock::time_point> matched_output_content_timestamp;
     models::depth_input_region_t matched_output_input_region {};
     models::input_color_space matched_output_color_space =
       models::input_color_space::srgb;
@@ -4232,6 +4277,7 @@ namespace platf::dxgi {
     bool sbs_gpu_timing_ready = false;
 
     platf::sbs_debug::dumper sbs_dumper;  ///< Debug: dumps SBS frames on the client button (see sbs_debug_dump.h).
+    std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp_;
   };
 
   namespace {
@@ -5561,6 +5607,10 @@ namespace platf::dxgi {
       return base.needs_conversion_poll();
     }
 
+    std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp() const override {
+      return base.rendered_content_timestamp();
+    }
+
   private:
     d3d_base_encode_device base;
     std::unique_ptr<nvenc::nvenc_d3d11> nvenc_d3d;
@@ -5631,20 +5681,24 @@ namespace platf::dxgi {
       return capture_e::timeout;
     }
 
-    std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
-    if (auto qpc_displayed = std::max(frame_info.LastPresentTime.QuadPart, frame_info.LastMouseUpdateTime.QuadPart)) {
-      // Translate QueryPerformanceCounter() value to steady_clock time point
-      frame_timestamp = std::chrono::steady_clock::now() - qpc_time_difference(qpc_counter(), qpc_displayed);
-    }
-    if (frame_info.LastPresentTime.QuadPart != 0) {
-      // The content timestamp deliberately excludes cursor-only acquisitions. Window-region
-      // geometry describes desktop pixels and must not be paired to an older surface merely
-      // because the hardware cursor moved later.
-      last_content_timestamp = std::chrono::steady_clock::now() - qpc_time_difference(
-        qpc_counter(),
-        frame_info.LastPresentTime.QuadPart
-      );
-    }
+    const auto timestamp_now = std::chrono::steady_clock::now();
+    const auto timestamp_qpc = qpc_counter();
+    const auto from_qpc = [&](const std::int64_t value) {
+      return timestamp_now - qpc_time_difference(timestamp_qpc, value);
+    };
+    const auto timestamp_selection = detail::select_ddup_timestamps(
+      frame_info.LastPresentTime.QuadPart != 0 ?
+        std::optional {from_qpc(frame_info.LastPresentTime.QuadPart)} :
+        std::nullopt,
+      frame_info.LastMouseUpdateTime.QuadPart != 0 ?
+        std::optional {from_qpc(frame_info.LastMouseUpdateTime.QuadPart)} :
+        std::nullopt,
+      last_content_timestamp
+    );
+    auto frame_timestamp = timestamp_selection.presentation_timestamp;
+    // Desktop content deliberately does not advance for cursor-only acquisitions. Window-region
+    // geometry must not be paired to an older surface merely because the hardware cursor moved.
+    last_content_timestamp = timestamp_selection.content_timestamp;
 
     if (frame_info.PointerShapeBufferSize > 0) {
       DXGI_OUTDUPL_POINTER_SHAPE_INFO shape_info {};

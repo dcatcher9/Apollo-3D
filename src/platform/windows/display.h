@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -73,6 +74,89 @@ namespace platf::dxgi {
   using depth_stencil_state_t = util::safe_ptr<ID3D11DepthStencilState, Release<ID3D11DepthStencilState>>;
   using depth_stencil_view_t = util::safe_ptr<ID3D11DepthStencilView, Release<ID3D11DepthStencilView>>;
   using keyed_mutex_t = util::safe_ptr<IDXGIKeyedMutex, Release<IDXGIKeyedMutex>>;
+
+  namespace detail {
+    /** Non-owning scope guard for one successful IDXGIKeyedMutex acquisition.
+     *
+     * Keeping this generic makes the ownership contract testable without a D3D device. The
+     * referenced mutex must outlive the guard, as it does for an image encoder context.
+     */
+    template<typename KeyedMutex>
+    class keyed_mutex_lock_t {
+    public:
+      explicit keyed_mutex_lock_t(KeyedMutex *mutex) noexcept:
+          mutex_ {mutex} {
+      }
+
+      keyed_mutex_lock_t(const keyed_mutex_lock_t &) = delete;
+      keyed_mutex_lock_t &operator=(const keyed_mutex_lock_t &) = delete;
+
+      ~keyed_mutex_lock_t() noexcept {
+        if (locked_) {
+          mutex_->ReleaseSync(release_key_);
+        }
+      }
+
+      [[nodiscard]] HRESULT lock(
+        UINT64 acquire_key = 0,
+        DWORD timeout_ms = INFINITE,
+        UINT64 release_key = 0
+      ) noexcept {
+        if (locked_) {
+          return S_OK;
+        }
+        if (!mutex_) {
+          return E_POINTER;
+        }
+
+        const auto status = mutex_->AcquireSync(acquire_key, timeout_ms);
+        if (status == S_OK) {
+          locked_ = true;
+          release_key_ = release_key;
+        }
+        return status;
+      }
+
+      [[nodiscard]] bool owns_lock() const noexcept {
+        return locked_;
+      }
+
+    private:
+      KeyedMutex *mutex_;
+      UINT64 release_key_ = 0;
+      bool locked_ = false;
+    };
+
+    template<typename Timestamp>
+    struct ddup_timestamp_selection_t {
+      std::optional<Timestamp> presentation_timestamp;
+      std::optional<Timestamp> content_timestamp;
+    };
+
+    /** Advance Desktop Duplication timestamp state for one acquired frame.
+     *
+     * Cursor movement advances presentation cadence but retains the last desktop-content time;
+     * a present advances both, even when a newer cursor update shares the acquisition.
+     */
+    template<typename Timestamp>
+    constexpr ddup_timestamp_selection_t<Timestamp> select_ddup_timestamps(
+      std::optional<Timestamp> present_timestamp,
+      std::optional<Timestamp> mouse_timestamp,
+      std::optional<Timestamp> retained_content_timestamp
+    ) {
+      auto presentation_timestamp = present_timestamp;
+      if (
+        mouse_timestamp &&
+        (!presentation_timestamp || *presentation_timestamp < *mouse_timestamp)
+      ) {
+        presentation_timestamp = mouse_timestamp;
+      }
+      if (present_timestamp) {
+        retained_content_timestamp = present_timestamp;
+      }
+      return {presentation_timestamp, retained_content_timestamp};
+    }
+  }  // namespace detail
 
   namespace video {
     using device_t = util::safe_ptr<ID3D11VideoDevice, Release<ID3D11VideoDevice>>;

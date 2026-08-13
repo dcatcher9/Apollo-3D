@@ -184,9 +184,9 @@ namespace input {
     return std::clamp(from_netfloat(f), min, max);
   }
 
-  static task_pool_util::TaskPool::task_id_t key_press_repeat_id {};
   static std::unordered_map<key_press_id_t, bool> key_press {};
-  static std::array<std::uint8_t, 5> mouse_press {};
+  // Protocol mouse buttons are numbered 1 through 5; index 0 is intentionally unused.
+  static std::array<std::uint8_t, 6> mouse_press {};
 
   static platf::input_t platf_input;
   static std::bitset<platf::MAX_GAMEPADS> gamepadMask {};
@@ -202,6 +202,9 @@ namespace input {
     gamepad_t():
         gamepad_state {},
         back_timeout_id {},
+        home_release_id {},
+        back_action_generation {},
+        home_action_generation {},
         id {-1},
         back_button_state {button_state_e::NONE} {
     }
@@ -217,6 +220,9 @@ namespace input {
     platf::gamepad_state_t gamepad_state;
 
     thread_pool_util::ThreadPool::task_id_t back_timeout_id;
+    thread_pool_util::ThreadPool::task_id_t home_release_id;
+    std::uint64_t back_action_generation;
+    std::uint64_t home_action_generation;
 
     int id;
 
@@ -244,7 +250,10 @@ namespace input {
         client_context {platf::allocate_client_input_context(platf_input)},
         touch_port_event {std::move(touch_port_event)},
         feedback_queue {std::move(feedback_queue)},
+        key_repeat_id {},
+        key_repeat_generation {},
         mouse_left_button_timeout {},
+        mouse_left_button_generation {},
         touch_port {{0, 0, 0, 0}, 0, 0, 1.0f},
         accumulated_vscroll_delta {},
         accumulated_hscroll_delta {} {
@@ -263,8 +272,17 @@ namespace input {
 
     std::list<std::vector<uint8_t>> input_queue;
     std::mutex input_queue_lock;
+    std::mutex input_dispatch_lock;
+    detail::drain_gate_t input_drain_gate;
+    std::uint64_t input_generation = 0;
+    bool input_reset = false;
+    std::shared_ptr<std::promise<void>> reset_completion;
 
-    thread_pool_util::ThreadPool::task_id_t mouse_left_button_timeout;
+    thread_pool_util::ThreadPool::task_id_t key_repeat_id;
+    std::uint64_t key_repeat_generation;
+
+    std::atomic<thread_pool_util::ThreadPool::task_id_t> mouse_left_button_timeout;
+    std::atomic<std::uint64_t> mouse_left_button_generation;
 
     input::touch_port_t touch_port;
 
@@ -273,7 +291,20 @@ namespace input {
   };
 
   void passthrough(std::shared_ptr<input_t> &input, PNV_REL_MOUSE_MOVE_PACKET packet) {
-    input->mouse_left_button_timeout = DISABLE_LEFT_BUTTON_DELAY;
+    ++input->mouse_left_button_generation;
+    const auto old_timer = input->mouse_left_button_timeout.exchange(DISABLE_LEFT_BUTTON_DELAY);
+    if (old_timer && old_timer != DISABLE_LEFT_BUTTON_DELAY) {
+      task_pool.cancel(old_timer);
+      // Absolute LEFT-up has already changed logical state but was waiting for injection. Flush it
+      // before entering relative mode so cancelling the delayed task cannot strand OS LEFT down.
+      if (detail::should_flush_pending_left_release(
+            old_timer,
+            DISABLE_LEFT_BUTTON_DELAY,
+            mouse_press[BUTTON_LEFT]
+          )) {
+        platf::button_mouse(platf_input, BUTTON_LEFT, true);
+      }
+    }
     platf::move_mouse(platf_input, util::endian::big(packet->deltaX), util::endian::big(packet->deltaY));
   }
 
@@ -343,7 +374,7 @@ namespace input {
   }
 
   void passthrough(std::shared_ptr<input_t> &input, PNV_ABS_MOUSE_MOVE_PACKET packet) {
-    if (input->mouse_left_button_timeout == DISABLE_LEFT_BUTTON_DELAY) {
+    if (input->mouse_left_button_timeout.load() == DISABLE_LEFT_BUTTON_DELAY) {
       input->mouse_left_button_timeout = ENABLE_LEFT_BUTTON_DELAY;
     }
 
@@ -380,14 +411,15 @@ namespace input {
   void passthrough(std::shared_ptr<input_t> &input, PNV_MOUSE_BUTTON_PACKET packet) {
     auto release = util::endian::little(packet->header.magic) == MOUSE_BUTTON_UP_EVENT_MAGIC_GEN5;
     auto button = util::endian::big(packet->button);
-    if (button > 0 && button < mouse_press.size()) {
-      if (mouse_press[button] != release) {
-        // button state is already what we want
-        return;
-      }
-
-      mouse_press[button] = !release;
+    if (!detail::valid_mouse_button(button)) {
+      return;
     }
+    if (mouse_press[button] != release) {
+      // button state is already what we want
+      return;
+    }
+
+    mouse_press[button] = !release;
     /**
      * When Artemis sends mouse input through absolute coordinates,
      * it's possible that BUTTON_RIGHT is pressed down immediately after releasing BUTTON_LEFT.
@@ -403,25 +435,37 @@ namespace input {
      * when the last mouse coordinates were absolute
      */
     if (button == BUTTON_LEFT && release && !input->mouse_left_button_timeout) {
+      const auto generation = input->mouse_left_button_generation.fetch_add(1) + 1;
       auto f = [=]() {
+        std::lock_guard dispatch_guard {input->input_dispatch_lock};
+        // Clear the completed task ID on every callback path, including a left re-press that makes
+        // this delayed release obsolete. Keeping it would leave a dangling task pointer.
+        auto expected_generation = generation;
+        if (!input->mouse_left_button_generation.compare_exchange_strong(
+              expected_generation,
+              generation + 1
+            )) {
+          return;
+        }
         auto left_released = mouse_press[BUTTON_LEFT];
-        if (left_released) {
+        input->mouse_left_button_timeout = nullptr;
+        if (!detail::delayed_action_needed(left_released)) {
           // Already released left button
           return;
         }
         platf::button_mouse(platf_input, BUTTON_LEFT, release);
 
         mouse_press[BUTTON_LEFT] = false;
-        input->mouse_left_button_timeout = nullptr;
       };
 
-      input->mouse_left_button_timeout = task_pool.pushDelayed(std::move(f), 10ms).task_id;
+    input->mouse_left_button_timeout = task_pool.pushDelayed(std::move(f), 10ms).task_id;
 
       return;
     }
+    const auto left_release_timer = input->mouse_left_button_timeout.load();
     if (
       button == BUTTON_RIGHT && !release &&
-      input->mouse_left_button_timeout > DISABLE_LEFT_BUTTON_DELAY
+      left_release_timer && left_release_timer != DISABLE_LEFT_BUTTON_DELAY
     ) {
       platf::button_mouse(platf_input, BUTTON_RIGHT, false);
       platf::button_mouse(platf_input, BUTTON_RIGHT, true);
@@ -525,16 +569,38 @@ namespace input {
     }
   }
 
-  void repeat_key(uint16_t key_code, uint8_t flags, uint8_t synthetic_modifiers) {
+  void repeat_key(
+    std::shared_ptr<input_t> input,
+    uint16_t key_code,
+    uint8_t flags,
+    uint8_t synthetic_modifiers,
+    std::uint64_t generation
+  ) {
+    std::lock_guard dispatch_guard {input->input_dispatch_lock};
     // If key no longer pressed, stop repeating
-    if (!key_press[make_kpid(key_code, flags)]) {
-      key_press_repeat_id = nullptr;
+    if (!detail::key_repeat_is_current(
+          input->input_reset,
+          generation,
+          input->key_repeat_generation,
+          key_press[make_kpid(key_code, flags)]
+        )) {
+      if (generation == input->key_repeat_generation) {
+        input->key_repeat_id = nullptr;
+      }
       return;
     }
 
     send_key_and_modifiers(key_code, false, flags, synthetic_modifiers);
 
-    key_press_repeat_id = task_pool.pushDelayed(repeat_key, config::input.key_repeat_period, key_code, flags, synthetic_modifiers).task_id;
+    input->key_repeat_id = task_pool.pushDelayed(
+      repeat_key,
+      config::input.key_repeat_period,
+      input,
+      key_code,
+      flags,
+      synthetic_modifiers,
+      generation
+    ).task_id;
   }
 
   void passthrough(std::shared_ptr<input_t> &input, PNV_KEYBOARD_PACKET packet) {
@@ -572,12 +638,22 @@ namespace input {
     auto &pressed = key_press[make_kpid(keyCode, packet->flags)];
     if (!pressed) {
       if (!release) {
-        if (key_press_repeat_id) {
-          task_pool.cancel(key_press_repeat_id);
+        if (input->key_repeat_id) {
+          task_pool.cancel(input->key_repeat_id);
+          input->key_repeat_id = nullptr;
         }
+        const auto repeat_generation = ++input->key_repeat_generation;
 
         if (config::input.key_repeat_delay.count() > 0) {
-          key_press_repeat_id = task_pool.pushDelayed(repeat_key, config::input.key_repeat_delay, keyCode, packet->flags, synthetic_modifiers).task_id;
+          input->key_repeat_id = task_pool.pushDelayed(
+            repeat_key,
+            config::input.key_repeat_delay,
+            input,
+            keyCode,
+            packet->flags,
+            synthetic_modifiers,
+            repeat_generation
+          ).task_id;
         }
       } else {
         // Already released
@@ -876,8 +952,18 @@ namespace input {
     // authoritative for removal, but it must not silently synthesize an unannounced device.
     if (!(packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id >= 0) {
       // If this is the final event for a gamepad being removed, free the gamepad and return.
+      const auto back_timer = gamepad.back_timeout_id;
+      const auto home_timer = gamepad.home_release_id;
+      gamepad.back_timeout_id = nullptr;
+      gamepad.home_release_id = nullptr;
+      ++gamepad.back_action_generation;
+      ++gamepad.home_action_generation;
+      gamepad.gamepad_state.buttonFlags &= ~(platf::BACK | platf::HOME);
+      gamepad.back_button_state = button_state_e::NONE;
       free_gamepad(platf_input, gamepad.id);
       gamepad.id = -1;
+      task_pool.cancel(back_timer);
+      task_pool.cancel(home_timer);
       return;
     }
 
@@ -925,8 +1011,20 @@ namespace input {
       if (platf::BACK & bf_new) {
         // Don't emulate home button if timeout < 0
         if (config::input.back_button_timeout >= 0ms) {
-          auto f = [input, controller = packet->controllerNumber]() {
+          const auto controller = packet->controllerNumber;
+          const auto back_generation = ++gamepad.back_action_generation;
+          auto f = [input, controller, back_generation]() {
+            std::lock_guard dispatch_guard {input->input_dispatch_lock};
             auto &gamepad = input->gamepads[controller];
+            if (!detail::controller_action_is_current(
+                  input->input_reset,
+                  gamepad.id,
+                  back_generation,
+                  gamepad.back_action_generation
+                )) {
+              return;
+            }
+            gamepad.back_timeout_id = nullptr;
 
             auto &state = gamepad.gamepad_state;
 
@@ -939,34 +1037,50 @@ namespace input {
             state.buttonFlags |= platf::HOME;
             platf::gamepad_update(platf_input, gamepad.id, state);
 
-            // Sleep for a short time to allow the input to be detected
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-            // Release Home button
-            state.buttonFlags &= ~platf::HOME;
-            platf::gamepad_update(platf_input, gamepad.id, state);
-
-            gamepad.back_timeout_id = nullptr;
+            const auto home_generation = ++gamepad.home_action_generation;
+            auto release_home = [input, controller, home_generation]() {
+              std::lock_guard dispatch_guard {input->input_dispatch_lock};
+              auto &gamepad = input->gamepads[controller];
+              if (!detail::controller_action_is_current(
+                    input->input_reset,
+                    gamepad.id,
+                    home_generation,
+                    gamepad.home_action_generation
+                  )) {
+                return;
+              }
+              gamepad.home_release_id = nullptr;
+              gamepad.gamepad_state.buttonFlags &= ~platf::HOME;
+              platf::gamepad_update(platf_input, gamepad.id, gamepad.gamepad_state);
+            };
+            gamepad.home_release_id = task_pool.pushDelayed(std::move(release_home), 100ms).task_id;
           };
 
           gamepad.back_timeout_id = task_pool.pushDelayed(std::move(f), config::input.back_button_timeout).task_id;
         }
-      } else if (gamepad.back_timeout_id) {
+      } else if (gamepad.back_timeout_id || gamepad.home_release_id) {
         task_pool.cancel(gamepad.back_timeout_id);
+        task_pool.cancel(gamepad.home_release_id);
         gamepad.back_timeout_id = nullptr;
+        gamepad.home_release_id = nullptr;
+        ++gamepad.back_action_generation;
+        ++gamepad.home_action_generation;
+        gamepad.gamepad_state.buttonFlags &= ~platf::HOME;
       }
     }
+
+    gamepad_state.buttonFlags = detail::latch_button_while_active(
+      gamepad_state.buttonFlags,
+      static_cast<decltype(gamepad_state.buttonFlags)>(platf::HOME),
+      gamepad.home_release_id != nullptr
+    );
 
     platf::gamepad_update(platf_input, gamepad.id, gamepad_state);
 
     gamepad.gamepad_state = gamepad_state;
   }
 
-  enum class batch_result_e {
-    batched,  ///< This entry was batched with the source entry
-    not_batchable,  ///< Not eligible to batch but continue attempts to batch
-    terminate_batch,  ///< Stop trying to batch with this entry
-  };
+  using detail::batch_result_e;
 
   /**
    * @brief Batch two relative mouse messages.
@@ -974,7 +1088,7 @@ namespace input {
    * @param src A later packet to attempt to batch.
    * @return The status of the batching operation.
    */
-  batch_result_e batch(PNV_REL_MOUSE_MOVE_PACKET dest, PNV_REL_MOUSE_MOVE_PACKET src) {
+  batch_result_e batch(NV_REL_MOUSE_MOVE_PACKET *dest, const NV_REL_MOUSE_MOVE_PACKET *src) {
     // Batching is safe as long as the result doesn't overflow a 16-bit integer
     const auto deltaX = detail::checked_add_i16(
       util::endian::big(dest->deltaX),
@@ -1000,7 +1114,7 @@ namespace input {
    * @param src A later packet to attempt to batch.
    * @return The status of the batching operation.
    */
-  batch_result_e batch(PNV_ABS_MOUSE_MOVE_PACKET dest, PNV_ABS_MOUSE_MOVE_PACKET src) {
+  batch_result_e batch(NV_ABS_MOUSE_MOVE_PACKET *dest, const NV_ABS_MOUSE_MOVE_PACKET *src) {
     // Batching must only happen if the reference width and height don't change
     if (dest->width != src->width || dest->height != src->height) {
       return batch_result_e::terminate_batch;
@@ -1017,7 +1131,7 @@ namespace input {
    * @param src A later packet to attempt to batch.
    * @return The status of the batching operation.
    */
-  batch_result_e batch(PNV_SCROLL_PACKET dest, PNV_SCROLL_PACKET src) {
+  batch_result_e batch(NV_SCROLL_PACKET *dest, const NV_SCROLL_PACKET *src) {
     // Batching is safe as long as the result doesn't overflow a 16-bit integer
     const auto scrollAmt = detail::checked_add_i16(
       util::endian::big(dest->scrollAmt1),
@@ -1039,7 +1153,7 @@ namespace input {
    * @param src A later packet to attempt to batch.
    * @return The status of the batching operation.
    */
-  batch_result_e batch(PSS_HSCROLL_PACKET dest, PSS_HSCROLL_PACKET src) {
+  batch_result_e batch(SS_HSCROLL_PACKET *dest, const SS_HSCROLL_PACKET *src) {
     // Batching is safe as long as the result doesn't overflow a 16-bit integer
     const auto scrollAmt = detail::checked_add_i16(
       util::endian::big(dest->scrollAmount),
@@ -1060,7 +1174,7 @@ namespace input {
    * @param src A later packet to attempt to batch.
    * @return The status of the batching operation.
    */
-  batch_result_e batch(PNV_MULTI_CONTROLLER_PACKET dest, PNV_MULTI_CONTROLLER_PACKET src) {
+  batch_result_e batch(NV_MULTI_CONTROLLER_PACKET *dest, const NV_MULTI_CONTROLLER_PACKET *src) {
     // Do not allow batching if the active controllers change
     if (dest->activeGamepadMask != src->activeGamepadMask) {
       return batch_result_e::terminate_batch;
@@ -1088,7 +1202,7 @@ namespace input {
    * @param src A later packet to attempt to batch.
    * @return The status of the batching operation.
    */
-  batch_result_e batch(PSS_TOUCH_PACKET dest, PSS_TOUCH_PACKET src) {
+  batch_result_e batch(SS_TOUCH_PACKET *dest, const SS_TOUCH_PACKET *src) {
     // Only batch hover or move events
     if (dest->eventType != LI_TOUCH_EVENT_MOVE && dest->eventType != LI_TOUCH_EVENT_HOVER) {
       return batch_result_e::terminate_batch;
@@ -1120,7 +1234,7 @@ namespace input {
    * @param src A later packet to attempt to batch.
    * @return The status of the batching operation.
    */
-  batch_result_e batch(PSS_PEN_PACKET dest, PSS_PEN_PACKET src) {
+  batch_result_e batch(SS_PEN_PACKET *dest, const SS_PEN_PACKET *src) {
     // Only batch hover or move events
     if (dest->eventType != LI_TOUCH_EVENT_MOVE && dest->eventType != LI_TOUCH_EVENT_HOVER) {
       return batch_result_e::terminate_batch;
@@ -1152,7 +1266,7 @@ namespace input {
    * @param src A later packet to attempt to batch.
    * @return The status of the batching operation.
    */
-  batch_result_e batch(PSS_CONTROLLER_TOUCH_PACKET dest, PSS_CONTROLLER_TOUCH_PACKET src) {
+  batch_result_e batch(SS_CONTROLLER_TOUCH_PACKET *dest, const SS_CONTROLLER_TOUCH_PACKET *src) {
     // Only batch hover or move events
     if (dest->eventType != LI_TOUCH_EVENT_MOVE && dest->eventType != LI_TOUCH_EVENT_HOVER) {
       return batch_result_e::terminate_batch;
@@ -1190,7 +1304,7 @@ namespace input {
    * @param src A later packet to attempt to batch.
    * @return The status of the batching operation.
    */
-  batch_result_e batch(PSS_CONTROLLER_MOTION_PACKET dest, PSS_CONTROLLER_MOTION_PACKET src) {
+  batch_result_e batch(SS_CONTROLLER_MOTION_PACKET *dest, const SS_CONTROLLER_MOTION_PACKET *src) {
     // We can only batch entries for the same controller, but allow batching attempts to continue
     // in case we have more packets for this controller later in the queue.
     if (dest->controllerNumber != src->controllerNumber) {
@@ -1213,7 +1327,7 @@ namespace input {
    * @param src A later packet to attempt to batch.
    * @return The status of the batching operation.
    */
-  batch_result_e batch(PNV_INPUT_HEADER dest, PNV_INPUT_HEADER src) {
+  batch_result_e batch(NV_INPUT_HEADER *dest, const NV_INPUT_HEADER *src) {
     // We can only batch if the packet types are the same
     if (dest->magic != src->magic) {
       return batch_result_e::terminate_batch;
@@ -1222,75 +1336,80 @@ namespace input {
     // We can only batch certain message types
     switch (util::endian::little(dest->magic)) {
       case MOUSE_MOVE_REL_MAGIC_GEN5:
-        return batch((PNV_REL_MOUSE_MOVE_PACKET) dest, (PNV_REL_MOUSE_MOVE_PACKET) src);
+        return batch((PNV_REL_MOUSE_MOVE_PACKET) dest, (const NV_REL_MOUSE_MOVE_PACKET *) src);
       case MOUSE_MOVE_ABS_MAGIC:
-        return batch((PNV_ABS_MOUSE_MOVE_PACKET) dest, (PNV_ABS_MOUSE_MOVE_PACKET) src);
+        return batch((PNV_ABS_MOUSE_MOVE_PACKET) dest, (const NV_ABS_MOUSE_MOVE_PACKET *) src);
       case SCROLL_MAGIC_GEN5:
-        return batch((PNV_SCROLL_PACKET) dest, (PNV_SCROLL_PACKET) src);
+        return batch((PNV_SCROLL_PACKET) dest, (const NV_SCROLL_PACKET *) src);
       case SS_HSCROLL_MAGIC:
-        return batch((PSS_HSCROLL_PACKET) dest, (PSS_HSCROLL_PACKET) src);
+        return batch((PSS_HSCROLL_PACKET) dest, (const SS_HSCROLL_PACKET *) src);
       case MULTI_CONTROLLER_MAGIC_GEN5:
-        return batch((PNV_MULTI_CONTROLLER_PACKET) dest, (PNV_MULTI_CONTROLLER_PACKET) src);
+        return batch((PNV_MULTI_CONTROLLER_PACKET) dest, (const NV_MULTI_CONTROLLER_PACKET *) src);
       case SS_TOUCH_MAGIC:
-        return batch((PSS_TOUCH_PACKET) dest, (PSS_TOUCH_PACKET) src);
+        return batch((PSS_TOUCH_PACKET) dest, (const SS_TOUCH_PACKET *) src);
       case SS_PEN_MAGIC:
-        return batch((PSS_PEN_PACKET) dest, (PSS_PEN_PACKET) src);
+        return batch((PSS_PEN_PACKET) dest, (const SS_PEN_PACKET *) src);
       case SS_CONTROLLER_TOUCH_MAGIC:
-        return batch((PSS_CONTROLLER_TOUCH_PACKET) dest, (PSS_CONTROLLER_TOUCH_PACKET) src);
+        return batch((PSS_CONTROLLER_TOUCH_PACKET) dest, (const SS_CONTROLLER_TOUCH_PACKET *) src);
       case SS_CONTROLLER_MOTION_MAGIC:
-        return batch((PSS_CONTROLLER_MOTION_PACKET) dest, (PSS_CONTROLLER_MOTION_PACKET) src);
+        return batch((PSS_CONTROLLER_MOTION_PACKET) dest, (const SS_CONTROLLER_MOTION_PACKET *) src);
       default:
         // Not a batchable message type
         return batch_result_e::terminate_batch;
     }
   }
 
+  batch_result_e detail::batch_packets(
+    std::span<std::uint8_t> destination,
+    std::span<const std::uint8_t> source
+  ) noexcept {
+    if (!validated_packet_magic(destination) || !validated_packet_magic(source)) {
+      return batch_result_e::terminate_batch;
+    }
+
+    return batch(
+      reinterpret_cast<NV_INPUT_HEADER *>(destination.data()),
+      reinterpret_cast<const NV_INPUT_HEADER *>(source.data())
+    );
+  }
+
+  std::optional<std::vector<std::uint8_t>> detail::pop_next_batched_packet(
+    std::list<std::vector<std::uint8_t>> &packets
+  ) {
+    if (packets.empty()) {
+      return std::nullopt;
+    }
+
+    auto entry = std::move(packets.front());
+    packets.pop_front();
+
+    // Empty entries are reset barriers. They deliberately stop packet coalescing and preserve
+    // reset ordering relative to input arriving before and after the barrier.
+    if (entry.empty()) {
+      return entry;
+    }
+
+    auto candidate = packets.begin();
+    while (candidate != packets.end() && !candidate->empty()) {
+      const auto result = batch_packets(entry, *candidate);
+      if (result == batch_result_e::terminate_batch) {
+        break;
+      }
+      if (result == batch_result_e::batched) {
+        candidate = packets.erase(candidate);
+      } else {
+        ++candidate;
+      }
+    }
+    return entry;
+  }
+
   /**
    * @brief Called on a thread pool thread to process an input message.
    * @param input The input context pointer.
    */
-  void passthrough_next_message(std::shared_ptr<input_t> input) {
-    // 'entry' backs the 'payload' pointer, so they must remain in scope together
-    std::vector<uint8_t> entry;
-    PNV_INPUT_HEADER payload;
-
-    // Lock the input queue while batching, but release it before sending
-    // the input to the OS. This avoids potentially lengthy lock contention
-    // in the control stream thread while input is being processed by the OS.
-    {
-      std::lock_guard<std::mutex> lg(input->input_queue_lock);
-
-      // If all entries have already been processed, nothing to do
-      if (input->input_queue.empty()) {
-        return;
-      }
-
-      // Pop off the first entry, which we will send
-      entry = input->input_queue.front();
-      payload = (PNV_INPUT_HEADER) entry.data();
-      input->input_queue.pop_front();
-
-      // Try to batch with remaining items on the queue
-      auto i = input->input_queue.begin();
-      while (i != input->input_queue.end()) {
-        auto batchable_entry = *i;
-        auto batchable_payload = (PNV_INPUT_HEADER) batchable_entry.data();
-
-        auto batch_result = batch(payload, batchable_payload);
-        if (batch_result == batch_result_e::terminate_batch) {
-          // Stop batching
-          break;
-        } else if (batch_result == batch_result_e::batched) {
-          // Erase this entry since it was batched
-          i = input->input_queue.erase(i);
-        } else {
-          // We couldn't batch this entry, but try to batch later entries.
-          i++;
-        }
-      }
-    }
-
-    // Send the batched input to the OS
+  void dispatch_input_packet(std::shared_ptr<input_t> &input, std::vector<uint8_t> &entry) {
+    auto payload = (PNV_INPUT_HEADER) entry.data();
     switch (util::endian::little(payload->magic)) {
       case MOUSE_MOVE_REL_MAGIC_GEN5:
         passthrough(input, (PNV_REL_MOUSE_MOVE_PACKET) payload);
@@ -1336,6 +1455,90 @@ namespace input {
       case SS_CONTROLLER_BATTERY_MAGIC:
         passthrough(input, (PSS_CONTROLLER_BATTERY_PACKET) payload);
         break;
+    }
+  }
+
+  void release_all_input_state() {
+    for (int x = 0; x < mouse_press.size(); ++x) {
+      if (mouse_press[x]) {
+        platf::button_mouse(platf_input, x, true);
+        mouse_press[x] = false;
+      }
+    }
+
+    for (auto &kp : key_press) {
+      if (!kp.second) {
+        continue;
+      }
+      platf::keyboard_update(platf_input, map_keycode(vk_from_kpid(kp.first) & 0x00FF), true, flags_from_kpid(kp.first));
+      key_press[kp.first] = false;
+    }
+  }
+
+  /**
+   * @brief Own and drain one input context's queue on the global worker.
+   * @details The gate transition to idle happens while holding the queue lock, so an arrival
+   * racing the end of a drain either remains owned by this drain or schedules the next one.
+   */
+  void drain_input_queue(std::shared_ptr<input_t> input) {
+    std::size_t dispatched = 0;
+    while (!detail::drain_turn_exhausted(dispatched)) {
+      std::optional<std::vector<uint8_t>> entry;
+      std::uint64_t generation;
+      {
+        std::lock_guard<std::mutex> lg(input->input_queue_lock);
+        entry = detail::pop_next_batched_packet(input->input_queue);
+        if (!entry) {
+          detail::release_if_empty(input->input_drain_gate, true);
+          return;
+        }
+        generation = input->input_generation;
+      }
+
+      if (entry->empty()) {
+        std::lock_guard dispatch_guard {input->input_dispatch_lock};
+        release_all_input_state();
+        // Complete virtual-controller teardown before allowing the sole active-session slot to be
+        // released. gamepad_t destructors then see id == -1 and do not enqueue stale frees.
+        detail::free_gamepads_before_completion(
+          input->gamepads,
+          [&](int id) {
+            free_gamepad(platf_input, id);
+          },
+          [&]() {
+            if (input->reset_completion) {
+              input->reset_completion->set_value();
+              input->reset_completion.reset();
+            }
+          }
+        );
+      } else {
+        detail::dispatch_if_current(
+          input->input_dispatch_lock,
+          generation,
+          input->input_generation,
+          [&]() {
+          dispatch_input_packet(input, *entry);
+          }
+        );
+      }
+      ++dispatched;
+    }
+
+    // Retain gate ownership across exactly one continuation. Arrivals during the handoff see an
+    // active owner and need no task of their own; the continuation either consumes them or makes
+    // the empty-to-idle transition under the queue lock.
+    task_pool.pushDelayed(drain_input_queue, 0ms, input);
+  }
+
+  void schedule_input_drain_if_needed(std::shared_ptr<input_t> &input) {
+    bool schedule_drain;
+    {
+      std::lock_guard<std::mutex> lg(input->input_queue_lock);
+      schedule_drain = input->input_drain_gate.request();
+    }
+    if (schedule_drain) {
+      task_pool.push(drain_input_queue, input);
     }
   }
 
@@ -1414,35 +1617,70 @@ namespace input {
       }
     }
 
+    bool schedule_drain;
     {
-      std::lock_guard<std::mutex> lg(input->input_queue_lock);
-      input->input_queue.push_back(std::move(input_data));
+      std::lock_guard dispatch_guard {input->input_dispatch_lock};
+      const auto admitted = detail::admit_if_live(input->input_reset, [&]() {
+        std::lock_guard<std::mutex> lg(input->input_queue_lock);
+        input->input_queue.push_back(std::move(input_data));
+        schedule_drain = input->input_drain_gate.request();
+      });
+      if (!admitted) {
+        return;
+      }
     }
-    task_pool.push(passthrough_next_message, input);
+    if (schedule_drain) {
+      task_pool.push(drain_input_queue, input);
+    }
   }
 
-  void reset(std::shared_ptr<input_t> &input) {
-    task_pool.cancel(key_press_repeat_id);
-    task_pool.cancel(input->mouse_left_button_timeout);
-
-    // Ensure input is synchronous, by using the task_pool
-    task_pool.push([]() {
-      for (int x = 0; x < mouse_press.size(); ++x) {
-        if (mouse_press[x]) {
-          platf::button_mouse(platf_input, x, true);
-          mouse_press[x] = false;
-        }
+  std::future<void> reset(std::shared_ptr<input_t> &input) {
+    auto completion = std::make_shared<std::promise<void>>();
+    auto future = completion->get_future();
+    {
+      std::lock_guard dispatch_guard {input->input_dispatch_lock};
+      input->input_reset = true;
+      input->reset_completion = completion;
+      task_pool.cancel(input->key_repeat_id);
+      input->key_repeat_id = nullptr;
+      ++input->key_repeat_generation;
+      ++input->mouse_left_button_generation;
+      const auto pending_left_release = input->mouse_left_button_timeout.exchange(nullptr);
+      // The mouse callback uses input_dispatch_lock before clearing its raw ID, so cancelling here
+      // cannot hit a destroyed/reused task address and cannot race a post-reset publication.
+      task_pool.cancel(pending_left_release);
+      for (auto &gamepad : input->gamepads) {
+        // The callbacks take input_dispatch_lock before clearing their raw task IDs. Cancel while
+        // holding that lock so an executed task cannot be destroyed/reused between snapshot and
+        // cancellation (the task pool never holds its mutex while running a callback).
+        task_pool.cancel(gamepad.back_timeout_id);
+        task_pool.cancel(gamepad.home_release_id);
+        gamepad.back_timeout_id = nullptr;
+        gamepad.home_release_id = nullptr;
+        ++gamepad.back_action_generation;
+        ++gamepad.home_action_generation;
+        gamepad.gamepad_state.buttonFlags &= ~platf::HOME;
       }
-
-      for (auto &kp : key_press) {
-        if (!kp.second) {
-          // already released
-          continue;
-        }
-        platf::keyboard_update(platf_input, map_keycode(vk_from_kpid(kp.first) & 0x00FF), true, flags_from_kpid(kp.first));
-        key_press[kp.first] = false;
+      // An empty queue entry is an ordered reset barrier. Invalidate the current drain generation,
+      // clear queued input from the ended session, then enqueue exactly one release operation. A
+      // stale drain that is already in flight observes the generation change before dispatching any
+      // packet it removed before reset. Input arriving after reset remains behind the barrier.
+      std::lock_guard queue_guard {input->input_queue_lock};
+      ++input->input_generation;
+      input->input_queue.clear();
+      input->input_queue.emplace_back();
+      if (detail::should_flush_pending_left_release(
+            pending_left_release,
+            DISABLE_LEFT_BUTTON_DELAY,
+            mouse_press[BUTTON_LEFT]
+          )) {
+        // The logical LEFT state is already up, so release_all_input_state() cannot discover this
+        // outstanding delayed OS release. Flush it into the ordered reset critical section.
+        platf::button_mouse(platf_input, BUTTON_LEFT, true);
       }
-    });
+    }
+    schedule_input_drain_if_needed(input);
+    return future;
   }
 
   class deinit_t: public platf::deinit_t {

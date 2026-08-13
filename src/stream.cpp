@@ -2516,13 +2516,17 @@ namespace stream {
         frame_header.lastPayloadLen = channel->packet_size - sizeof(NV_VIDEO_PACKET);
       }
 
-      if (packet->frame_timestamp) {
+      const auto processing_timestamp = video::detail::select_processing_timestamp(
+        packet->content_timestamp,
+        packet->frame_timestamp
+      );
+      if (processing_timestamp) {
         auto duration_to_latency = [](const std::chrono::steady_clock::duration &duration) {
           const auto duration_us = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
           return (uint16_t) std::clamp<decltype(duration_us)>((duration_us + 50) / 100, 0, std::numeric_limits<uint16_t>::max());
         };
 
-        uint16_t latency = duration_to_latency(std::chrono::steady_clock::now() - *packet->frame_timestamp);
+        uint16_t latency = duration_to_latency(std::chrono::steady_clock::now() - *processing_timestamp);
         frame_header.frame_processing_latency = latency;
         frame_processing_latency_logger.collect_and_log(latency / 10.);
       } else {
@@ -3641,7 +3645,7 @@ namespace stream {
       session.controlEnd.view();
       // Reset input on session stop to avoid stuck repeated keys
       BOOST_LOG(debug) << "Resetting Input..."sv;
-      input::reset(session.input);
+      input::reset(session.input).wait();
 
       // Release the authoritative active slot only after every media/control worker has joined.
       // Validated launch work takes the same lock, so a successor cannot overlap teardown.

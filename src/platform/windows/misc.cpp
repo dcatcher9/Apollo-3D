@@ -263,23 +263,39 @@ namespace platf {
     return local_ip;
   }
 
-  HDESK syncThreadDesktop() {
-    auto hDesk = OpenInputDesktop(DF_ALLOWOTHERACCOUNTHOOK, FALSE, GENERIC_ALL);
-    if (!hDesk) {
-      auto err = GetLastError();
-      BOOST_LOG(error) << "Failed to Open Input Desktop [0x"sv << util::hex(err).to_string_view() << ']';
+  bool syncThreadDesktop() {
+    // SetThreadDesktop keeps the supplied desktop handle in use for the lifetime of the thread's
+    // association. Retain the successful handle instead of immediately calling CloseDesktop(),
+    // which is documented to fail for a handle used by a thread in this process.
+    static thread_local HDESK active_input_desktop = nullptr;
 
-      return nullptr;
-    }
+    struct desktop_operations_t {
+      HDESK open_input_desktop() {
+        const auto desktop = OpenInputDesktop(DF_ALLOWOTHERACCOUNTHOOK, FALSE, GENERIC_ALL);
+        if (!desktop) {
+          const auto err = GetLastError();
+          BOOST_LOG(error) << "Failed to Open Input Desktop [0x"sv << util::hex(err).to_string_view() << ']';
+        }
+        return desktop;
+      }
 
-    if (!SetThreadDesktop(hDesk)) {
-      auto err = GetLastError();
-      BOOST_LOG(error) << "Failed to sync desktop to thread [0x"sv << util::hex(err).to_string_view() << ']';
-    }
+      bool set_thread_desktop(HDESK desktop) {
+        if (SetThreadDesktop(desktop)) {
+          return true;
+        }
+        const auto err = GetLastError();
+        BOOST_LOG(error) << "Failed to sync desktop to thread [0x"sv << util::hex(err).to_string_view() << ']';
+        return false;
+      }
 
-    CloseDesktop(hDesk);
+      void close_desktop(HDESK desktop) {
+        CloseDesktop(desktop);
+      }
+    } operations;
 
-    return hDesk;
+    // Once the thread is associated through the new handle, the previous handle is no longer the
+    // one in use and can be closed. The final retained handle is released by the process at exit.
+    return detail::replace_thread_desktop_handle(active_input_desktop, operations);
   }
 
   void print_status(const std::string_view &prefix, HRESULT status) {
