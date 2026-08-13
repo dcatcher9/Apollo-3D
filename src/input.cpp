@@ -975,19 +975,22 @@ namespace input {
    * @return The status of the batching operation.
    */
   batch_result_e batch(PNV_REL_MOUSE_MOVE_PACKET dest, PNV_REL_MOUSE_MOVE_PACKET src) {
-    short deltaX, deltaY;
-
     // Batching is safe as long as the result doesn't overflow a 16-bit integer
-    if (!__builtin_add_overflow(util::endian::big(dest->deltaX), util::endian::big(src->deltaX), &deltaX)) {
-      return batch_result_e::terminate_batch;
-    }
-    if (!__builtin_add_overflow(util::endian::big(dest->deltaY), util::endian::big(src->deltaY), &deltaY)) {
+    const auto deltaX = detail::checked_add_i16(
+      util::endian::big(dest->deltaX),
+      util::endian::big(src->deltaX)
+    );
+    const auto deltaY = detail::checked_add_i16(
+      util::endian::big(dest->deltaY),
+      util::endian::big(src->deltaY)
+    );
+    if (!deltaX || !deltaY) {
       return batch_result_e::terminate_batch;
     }
 
     // Take the sum of deltas
-    dest->deltaX = util::endian::big(deltaX);
-    dest->deltaY = util::endian::big(deltaY);
+    dest->deltaX = util::endian::big(*deltaX);
+    dest->deltaY = util::endian::big(*deltaY);
     return batch_result_e::batched;
   }
 
@@ -1015,16 +1018,18 @@ namespace input {
    * @return The status of the batching operation.
    */
   batch_result_e batch(PNV_SCROLL_PACKET dest, PNV_SCROLL_PACKET src) {
-    short scrollAmt;
-
     // Batching is safe as long as the result doesn't overflow a 16-bit integer
-    if (!__builtin_add_overflow(util::endian::big(dest->scrollAmt1), util::endian::big(src->scrollAmt1), &scrollAmt)) {
+    const auto scrollAmt = detail::checked_add_i16(
+      util::endian::big(dest->scrollAmt1),
+      util::endian::big(src->scrollAmt1)
+    );
+    if (!scrollAmt) {
       return batch_result_e::terminate_batch;
     }
 
     // Take the sum of delta
-    dest->scrollAmt1 = util::endian::big(scrollAmt);
-    dest->scrollAmt2 = util::endian::big(scrollAmt);
+    dest->scrollAmt1 = util::endian::big(*scrollAmt);
+    dest->scrollAmt2 = util::endian::big(*scrollAmt);
     return batch_result_e::batched;
   }
 
@@ -1035,15 +1040,17 @@ namespace input {
    * @return The status of the batching operation.
    */
   batch_result_e batch(PSS_HSCROLL_PACKET dest, PSS_HSCROLL_PACKET src) {
-    short scrollAmt;
-
     // Batching is safe as long as the result doesn't overflow a 16-bit integer
-    if (!__builtin_add_overflow(util::endian::big(dest->scrollAmount), util::endian::big(src->scrollAmount), &scrollAmt)) {
+    const auto scrollAmt = detail::checked_add_i16(
+      util::endian::big(dest->scrollAmount),
+      util::endian::big(src->scrollAmount)
+    );
+    if (!scrollAmt) {
       return batch_result_e::terminate_batch;
     }
 
     // Take the sum of delta
-    dest->scrollAmount = util::endian::big(scrollAmt);
+    dest->scrollAmount = util::endian::big(*scrollAmt);
     return batch_result_e::batched;
   }
 

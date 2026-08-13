@@ -15,7 +15,7 @@ flowchart LR
     CAPTURE["Matched source frame"]
     REGION["Chromium video or foreground-client observation"]
     MATCH["Priority and exact matched-frame region selection"]
-    DOMAIN["Full frame or authenticated inward-trimmed ROI"]
+    DOMAIN["Full frame or exact whole-client/video ROI"]
     PREPROCESS["HDR/SDR model preprocessing"]
     DAV2["Authenticated DAV2 Small inference"]
     CUT["Cut-only evidence and scene epoch"]
@@ -50,14 +50,14 @@ diagnostics that explain how the final field was produced.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 46/tag `0xD18FF0F3`, canonical SHA-256
-`8ab387f9bcda29e90455ce9e5b8677cef3cd7744fe03ee03202a4699fa7e4ead`. It binds the
+schema 48/tag `0x4F3FF872`, canonical SHA-256
+`07da2a0f7ad23e8e6a4d70e00b3aa9cb159f9eb76991215b5c85634e96f29441`. It binds the
 complete policy below, including all subtitle field/ROI semantics, and producer source-closure
-SHA-256 `f299ce49f332458a1d97634d4ced6d7fc802d2be8d583ee04f0e32d851ed1a22`.
+SHA-256 `254d73afac205fb282e471dfe75e5e38a6e0156c0c4ec4296d71ffa828fc512c`.
 The live-renderer source-closure SHA-256 is
-`5a1ab7175b97b8ca89397da8b3f86812a3faedf5e15938abf42f64e9716f2c5b`, and dump-only diagnostic
+`084e36b4379482203f356d830c1bcc4c09c6fe9b1c7d12b6bb17ecd1cd75990c`, and dump-only diagnostic
 renderer source-closure SHA-256
-`12dbf80c10110b21d59d01b9120c4efa0b9147bed420f134053cfef1276d00d3`. It admits the following
+`60eb3f87dc22cd297a97ae8b9df25b0afd1ba4287034180c4068a9fd36e16c93`. It admits the following
 production calibration:
 
 | Property | Production value |
@@ -107,10 +107,13 @@ Portrait is an explicit `width < height` display mode. Host SBS does not rotate 
 non-identity Windows display rotation is rejected before pipeline setup.
 
 The window-region route does not introduce another model shape. It keeps the current full-frame
-authenticated tensor shape and, only when necessary, trims the selected Chromium-video or
-foreground-client rectangle inward by at most 2% of its area to match that shape's aspect ratio. It
-never expands the authority rectangle, pads the model input, or stretches source pixels. If that
-small inward fit cannot be proven, the frame uses ordinary full-frame V2.
+authenticated tensor shape and copies the selected Chromium-video or foreground-client rectangle
+exactly, regardless of its aspect ratio. The preprocessor fits that whole source rectangle into a
+deterministic centered integer content rectangle. It never crops or stretches source pixels.
+Synthetic tensor pixels outside the content rectangle replicate the nearest content edge and are
+excluded from depth statistics, scene-cut evidence, ownership, history, and OCR authority. The
+published parallax field extends its content boundary through this padding so renderer filtering
+cannot turn padding into a false depth shelf.
 
 Chromium true fullscreen is selected separately from the strict semantic-video ROI candidate. The
 helper may recognize an available semantic `<video>` that covers the complete foreground browser
@@ -358,7 +361,8 @@ There is no forward owner, multi-root visibility choice, inpaint pass, or synthe
 Only samples outside the finite source rectangle clamp to its nearest edge; the diagnostic mask
 reports that source-boundary condition rather than internal disocclusion.
 
-An ROI final-parallax texture remains local to the selected window-region analysis rectangle. Before
+An ROI final-parallax texture remains local to the selected window-region analysis rectangle. Its
+integer tensor-content rectangle maps back to the complete uncropped source ROI. Before
 the full-source inverse, the renderer converts that field to source-U units by multiplying it by
 `ROI_width / source_width`; this preserves the intended pixel displacement rather than shrinking or
 amplifying it with the crop. The ROI interior is unchanged. Outside the rectangle, the renderer
@@ -377,12 +381,12 @@ color. A confirmed cut invalidates the old camera; the next usable field acquire
 Model preparation, shader compilation, and the live renderer are fail-closed. Live shaders are
 compiled and cached at process startup. Dump-only resources are created lazily and cannot prevent a
 stream from starting. A failure in optional diagnostics has no rendering authority. An armed
-schema-28 dump preserves the selected path's same-frame authority resources with ordered D3D11
-`CopyResource` operations;
-it adds no production GPU-to-CPU readback, flush, query wait, or synchronous Map. The explicit dump
-then uses the existing diagnostic readback path to publish files.
+schema-29 dump preserves the selected path's same-frame authority resources with ordered D3D11
+`CopyResource` operations and one terminal event. Submission performs no GPU-to-CPU wait or
+synchronous Map. Later render-thread calls poll with `DONOTFLUSH`, collect staging resources with
+`DO_NOT_WAIT`, then hand the CPU snapshot to the existing publication worker.
 
-ROI observer, rectangle, aspect-fit, or crop-resource eligibility failure selects ordinary
+ROI observer, rectangle, planner, or crop-resource eligibility failure selects ordinary
 full-frame V2. That route selection does not weaken the base contract: an internal V2 model,
 provenance, state, field, or renderer authentication failure renders the affected frame flat.
 
@@ -396,7 +400,7 @@ may intentionally block to obtain a complete trace.
 
 Windows Host SBS selects at most one optional analysis region for a matched Desktop Duplication
 frame. A causally authenticated Chromium `<video>` has first priority. When no Chromium video route
-is eligible, the root client rectangle of `GetForegroundWindow()` may authorize the same crop-local
+is eligible, the root client rectangle of `GetForegroundWindow()` may authorize the same ROI-local
 V2 path. This is geometric routing only: the generic route has no executable allowlist, media/game
 classifier, playback test, or occlusion reconstruction.
 
@@ -404,9 +408,13 @@ The foreground observer resolves the top-level root, uses the client area rather
 or DWM frame as the analysis rectangle, and validates its physical screen geometry under per-monitor
 DPI awareness. Screen rectangles are compared against raw
 `DXGI_OUTPUT_DESC::DesktopCoordinates`, including negative virtual-desktop origins, rather than a
-pointer-normalized offset. No rectangle is published for a null foreground, the shell or desktop,
-Sunshine's own window, an invalid/hidden/minimized/cloaked root, an excluded
-tool/no-activate/layered style, or invalid geometry. These cases select ordinary full-frame V2. A
+pointer-normalized offset. Distinct `HMONITOR` values from a duplicated output are equivalent only
+when `GetMonitorInfo` reports an `rcMonitor` exactly equal to those selected-output coordinates.
+No rectangle is published for a null foreground, the shell or desktop, Sunshine's own window, an
+invalid/hidden/minimized/cloaked root, an excluded tool/no-activate style, or invalid geometry. A
+layered root is admitted only when `GetLayeredWindowAttributes` positively proves uniform alpha
+255 with no color key; unknown, partially transparent, color-keyed, and per-pixel-alpha layered
+windows select ordinary full-frame V2. A
 client must be wholly contained by the current identity-oriented capture output. A disjoint client
 on another monitor and a client that partially intersects or spans outputs both select full-frame
 V2; Host SBS never switches the capture monitor or crops the intersection. A client that exactly
@@ -458,17 +466,18 @@ Immediately before attribution, the host also rechecks that the helper HWND stil
 the foreground root window, and still belongs to the reported process. This cheap Win32 guard
 closes the helper-heartbeat gap on Alt-Tab, close, and HWND reuse without putting COM on the stream.
 
-After exact frame attribution, the host optionally trims the selected rectangle inward by at most
-2% of its area to the current authenticated tensor aspect. A same-format D3D11 crop supplies both DAV2
-preprocessing and the full-resolution ownership pass; all cut, center, and history state is
-crop-local. The original full color texture remains the renderer source. The final ROI field is
+After exact frame attribution, a same-format D3D11 copy preserves the selected rectangle exactly for
+both DAV2 preprocessing and the full-resolution ownership pass; all cut, center, and history state
+is ROI-local. Arbitrary source aspect ratios use the centered integer contain-fit described above,
+with edge-replicated padding excluded from analysis. The original full color texture remains the
+renderer source. The final ROI field is
 mapped back at its physical pixel scale, with the outside-only slope collar described above, and the
 desktop beyond that collar is exactly at zero parallax. Separately, the host grants the helper's
 true-fullscreen authority only when its foreground-client rectangle maps exactly to the capture;
 that case is canonical full-frame V2. The generic foreground-client route follows the same
 canonicalization whenever its client rectangle equals the capture, without claiming Chromium
 semantic authority. Missing, stale or ambiguous selection, non-identity rotation, spanning,
-partially off-monitor, mismatched geometry, unsupported aspect fitting, or crop allocation failure
+partially off-monitor, mismatched geometry, unauthenticated tensor geometry, or crop allocation failure
 selects ordinary full-frame V2 rather than a guessed ROI; an internal V2 authentication failure
 remains fail-closed flat.
 
@@ -477,7 +486,9 @@ The host separately tracks the newest helper heartbeat and the beginning of the 
 matched color slot is created, while the uninterrupted geometry run must have begun no later than
 the source frame's content timestamp. Identical later heartbeats therefore preserve a video border
 through pause, but a changed identity or rectangle cannot be attached retroactively to older
-pixels. Desktop Duplication derives the content time from `LastPresentTime` only; a later
+pixels. The run-begin timestamp is part of both the live authority epoch and the matched slot, so
+an A-to-B-to-A helper sequence cannot revive authority captured under the first A. Desktop
+Duplication derives the content time from `LastPresentTime` only; a later
 cursor-only update cannot make old desktop pixels appear new. This proves causal ordering and
 bounded liveness, not simultaneous compositor geometry: WinEvent delivery can still lag the pixels
 by a short interval. Rendering must never combine the latest browser rectangle with an older
@@ -495,6 +506,18 @@ observation generation: focus, move, resize, desktop focus, and monitor changes 
 completions and cached ROI output before warp or dump. A pure translation may reuse the DAV2 analysis
 history after a newly copied frame is authorized, but never the pre-move color/depth pair.
 
+During the native USER32 interactive move/size loop, Host SBS withdraws window-region authority and
+continues ordinary full-source 3D for the current captured display. DAV2/OCR, matched completion,
+telemetry, and Dump 3D therefore retain their normal full-frame behavior instead of chasing a moving
+client rectangle. When the loop ends, ordinary foreground causality must authorize a newly copied
+frame before the matched-domain transition can submit a new ROI; output may briefly be identity
+while that exact ROI completion is pending. This covers standard caption dragging, border resizing,
+and borderless applications that delegate native hit-testing to USER32. For fully custom
+applications that animate themselves with `SetWindowPos`, a copied desktop image that still
+predates a newly observed same-size position is submitted through full-source V2 rather than
+waiting indefinitely for another desktop content presentation. A later causally matched image may
+re-enter the ROI while preserving position-independent analysis history.
+
 ## Dump 3D and evaluation
 
 Dump 3D records one matched current-contract frame: source/model/raw DAV2 evidence, authenticated
@@ -502,6 +525,22 @@ analysis-region placement, the V2 geometry chain and inverse map, scene/cut attr
 and—when selected—the exact OCR8 record and compact SLR9 state used by conditioning. The reader
 accepts only the current schema and identities. Retired SLR3--SLR8 and GST/OGR/ORS packages are not
 replayed or reinterpreted.
+
+An explicit dump submits every GPU artifact to a single ordered D3D11 staging batch and terminates
+that batch with one event query. The render thread never flushes or waits for it: later conversions
+poll with `DONOTFLUSH`, map only after completion with `DO_NOT_WAIT`, and then hand CPU-owned bytes
+to the process publication worker. Because every copy precedes the event and all later live writes
+follow it on the same immediate context, the package remains one exact matched frame without a
+capture-cadence stall. Only one GPU batch or CPU publication may be pending per session. Once the
+event is ready, CPU collection is resumable: each conversion copies at most 4 MiB, uses at most
+eight maps, and observes a 2 ms turn budget (with a one-row progress exception for a texture row
+wider than the byte budget). Every map is released in the same callback and publication begins only
+after all slices are complete. A 4K HDR diagnostic batch can contain about 353 MiB of logical data,
+so collection may span many frames while avoiding the former 100+ ms single-callback copy. Logs
+report GPU-ready age, cumulative CPU collection time, poll count, and wall time. While Host SBS
+remains active, the pending batch owns the retained-source conversion poll so even a completely
+static desktop receives every later callback. If the session ends or changes mode first, its
+unpublished diagnostic batch is cancelled at teardown instead of making teardown wait for the GPU.
 
 Use `.f32` artifacts for quantitative comparisons. Independently stretched PNG previews can hide
 scale differences and are diagnostic only. The supported commands, metrics, and baseline policy live

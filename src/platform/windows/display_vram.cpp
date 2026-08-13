@@ -13,6 +13,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <string_view>
 #include <thread>
 
 // platform includes
@@ -70,8 +71,12 @@ namespace platf::dxgi {
     float video_roi_top = 0.0f;
     float video_roi_right = 1.0f;
     float video_roi_bottom = 1.0f;
+    std::uint32_t tensor_content_left = 0u;
+    std::uint32_t tensor_content_top = 0u;
+    std::uint32_t tensor_content_right = 0u;
+    std::uint32_t tensor_content_bottom = 0u;
   };
-  static_assert(sizeof(host_sbs_v2_geometry_t) == 32u);
+  static_assert(sizeof(host_sbs_v2_geometry_t) == 48u);
 
   template<class T>
   buf_t make_buffer(device_t::pointer device, const T &t) {
@@ -523,7 +528,8 @@ namespace platf::dxgi {
     }
 
     bool needs_conversion_poll() const {
-      return depth_completion_poll_pending;
+      return depth_completion_poll_pending || depth_authority_reprocess_pending ||
+             sbs_dumper.needs_conversion_poll();
     }
 
     int convert(platf::img_t &img_base) {
@@ -661,6 +667,10 @@ namespace platf::dxgi {
           const bool input_is_linear =
             img.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
 
+          // Retire an earlier Dump 3D staging batch only when its terminal GPU event is ready.
+          // This poll never flushes or waits and is kept outside production timing telemetry.
+          sbs_dumper.poll_pending_readback(device_ctx.get());
+
           // Perf benchmark: CPU wall time of the whole SBS block (estimator dispatch + composite
           // draw submission). GPU-side inference times are measured separately via CUDA events in
           // the estimator. No-op unless runtime diagnostics are on.
@@ -691,10 +701,11 @@ namespace platf::dxgi {
           // Observe foreground continuity on every SBS conversion, not merely when TensorRT can
           // accept a new matched frame. A focus-away/focus-back transition between accepted
           // inferences must revoke stale ROI completions and cached output immediately.
+          live_window_authority_observation_t pre_copy_authority;
           if (models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)) {
             D3D11_TEXTURE2D_DESC live_source_desc {};
             img_ctx.encoder_texture->GetDesc(&live_source_desc);
-            (void) observe_live_window_authority(
+            pre_copy_authority = observe_live_window_authority(
               live_source_desc,
               current_content_timestamp
             );
@@ -769,6 +780,9 @@ namespace platf::dxgi {
                   find_pending_matched_slot(recovered.completed_frame_id);
                 if (recovered_slot) {
                   recovered_slot->pending = false;
+                  if (!recovered_slot->depth_input_region.video_region) {
+                    depth_authority_reprocess_pending = false;
+                  }
                   matched_render_slot = recovered_slot;
                   render_input_srv = recovered_slot->srv.get();
                   sbs_telemetry_last_sampled_frame_id = recovered.completed_frame_id;
@@ -807,7 +821,8 @@ namespace platf::dxgi {
                   frame_id,
                   input_color_space,
                   current_source_timestamp,
-                  current_content_timestamp
+                  current_content_timestamp,
+                  pre_copy_authority
                 );
               mark_sbs_matched_copy_end(gpu_timer, matched_copy_submitted);
               if (matched_copy_submitted) {
@@ -844,6 +859,9 @@ namespace platf::dxgi {
                 if (est.inference_enqueued) {
                   matched_candidate_slot->pending = true;
                   depth_completion_poll_pending = true;
+                  // The forced full-source submission has retired the old ROI authority. Return
+                  // subsequent observations to ordinary causality and route selection.
+                  depth_authority_reprocess_pending = false;
                 }
 
                 // On the first real frame after a long idle gap, consume the just-submitted current
@@ -885,6 +903,9 @@ namespace platf::dxgi {
                       find_pending_matched_slot(recovered.completed_frame_id);
                     if (recovered_slot) {
                       recovered_slot->pending = false;
+                      if (!recovered_slot->depth_input_region.video_region) {
+                        depth_authority_reprocess_pending = false;
+                      }
                       matched_render_slot = recovered_slot;
                       render_input_srv = recovered_slot->srv.get();
                       sbs_telemetry_last_sampled_frame_id =
@@ -1251,9 +1272,10 @@ namespace platf::dxgi {
           // on the D3D11 queue and subscription-off schedules no diagnostic copy.
           poll_sbs_telemetry_after_output();
 
-          // Close the live CPU sample before any requested dump work. A dump performs lazy
-          // shader compilation, blocking GPU readback, PNG/JSON serialization, and filesystem
-          // publication; none of that represents production Host-SBS frame cost.
+          // Close the live CPU sample before any requested dump work. A dump may perform lazy
+          // shader compilation and submit a large diagnostic staging batch; none of that
+          // represents production Host-SBS frame cost. Readback polling is nonblocking above,
+          // while PNG/JSON serialization and filesystem publication run on the worker.
           if (perf && !snapshot_debug_inputs) {
             const auto dt = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - perf_t0
@@ -1281,12 +1303,7 @@ namespace platf::dxgi {
               models::parallax_v2_result_is_authenticated(est);
             const bool dump_frame_valid =
               complete_dump_snapshot &&
-              sbs_dumper.preflight_requested_v2_frame(
-                device.get(),
-                device_ctx.get(),
-                est.shadow_state.Get(),
-                est.completed_frame_id
-              );
+              sbs_dumper.prepare_requested_v2_frame(est.completed_frame_id);
             if (dump_frame_valid) {
               ID3D11Buffer *completed_constants = sbs_reprojection_cbuffer.get();
               bool geometry_available = false;
@@ -1528,6 +1545,7 @@ namespace platf::dxgi {
       matched_output_color_space = models::input_color_space::srgb;
       matched_output_timeout_active = false;
       depth_completion_poll_pending = false;
+      depth_authority_reprocess_pending = false;
       sbs_dumper.cancel_pending_request();
       publish_depth_status(0);
     }
@@ -1657,6 +1675,10 @@ namespace platf::dxgi {
         geometry.video_roi_top = static_cast<float>(input_region->top) / source_height;
         geometry.video_roi_right = static_cast<float>(input_region->right) / source_width;
         geometry.video_roi_bottom = static_cast<float>(input_region->bottom) / source_height;
+        geometry.tensor_content_left = input_region->tensor_content.left;
+        geometry.tensor_content_top = input_region->tensor_content.top;
+        geometry.tensor_content_right = input_region->tensor_content.right;
+        geometry.tensor_content_bottom = input_region->tensor_content.bottom;
       }
 
       if (!sbs_reprojection_cbuffer) {
@@ -2018,14 +2040,15 @@ namespace platf::dxgi {
       std::optional<sbs_debug::window_region_snapshot> window_region;
       std::optional<models::depth_video_region_plan_t> depth_video_plan;
       models::depth_input_region_t depth_input_region {};
-      std::string window_region_observer_status = "not-observed";
-      std::string window_region_mapping_status = "not-mapped";
+      std::string_view window_region_observer_status = "not-observed";
+      std::string_view window_region_mapping_status = "not-mapped";
       std::uint64_t live_window_authority_generation = 0u;
       std::uint64_t live_browser_authority_generation = 0u;
       std::int32_t live_browser_screen_left = 0;
       std::int32_t live_browser_screen_top = 0;
       std::int32_t live_browser_screen_right = 0;
       std::int32_t live_browser_screen_bottom = 0;
+      std::chrono::steady_clock::time_point live_browser_geometry_valid_since {};
       video_dom::geometry_authority_class_e live_browser_authority_class =
         video_dom::geometry_authority_class_e::none;
       bool pending = false;
@@ -2125,6 +2148,10 @@ namespace platf::dxgi {
     static models::depth_input_region_t full_depth_input_region(
       const D3D11_TEXTURE2D_DESC &source_desc
     ) noexcept {
+      const auto tensor_shape = models::fit_host_sbs_v2_depth_tensor_shape(
+        source_desc.Width,
+        source_desc.Height
+      );
       return models::depth_input_region_t {
         .source_width = source_desc.Width,
         .source_height = source_desc.Height,
@@ -2132,6 +2159,12 @@ namespace platf::dxgi {
         .top = 0u,
         .right = source_desc.Width,
         .bottom = source_desc.Height,
+        .tensor_content = {
+          0u,
+          0u,
+          static_cast<std::uint32_t>(std::max(tensor_shape.width, 0)),
+          static_cast<std::uint32_t>(std::max(tensor_shape.height, 0)),
+        },
         .analysis_generation = 0u,
         .video_region = false,
         .authority = models::depth_analysis_authority_e::full_source,
@@ -2151,17 +2184,27 @@ namespace platf::dxgi {
       std::int32_t document_id = 0;
       std::int32_t video_id = 0;
       video_dom::rect_t screen_rect {};
+      std::chrono::steady_clock::time_point geometry_valid_since {};
 
       bool operator==(const browser_live_authority_key_t &) const = default;
     };
 
-    void observe_live_browser_authority() {
+    struct live_window_authority_observation_t {
+      foreground_window::snapshot_t foreground;
+      video_dom::snapshot_ptr browser_snapshot;
+      std::optional<browser_live_authority_key_t> browser_authority;
+      std::uint64_t browser_authority_epoch = 0u;
+    };
+
+    void observe_live_browser_authority(
+      const video_dom::snapshot_ptr &browser
+    ) {
       std::optional<browser_live_authority_key_t> next;
-      if (video_dom_lease) {
-        const auto browser = video_dom_lease->latest();
+      if (browser) {
         constexpr auto maximum_age = std::chrono::milliseconds {2500};
         if (
-          browser && video_dom::carries_video_geometry(browser->status) &&
+          video_dom::carries_video_geometry(browser->status) &&
+          browser->received_at >= browser_roi_not_before &&
           video_dom::usable(*browser, std::chrono::steady_clock::now(), maximum_age)
         ) {
           next = browser_live_authority_key_t {
@@ -2171,6 +2214,7 @@ namespace platf::dxgi {
             .document_id = browser->document_id,
             .video_id = browser->video_id,
             .screen_rect = browser->screen_rect,
+            .geometry_valid_since = browser->geometry_valid_since,
           };
         }
       }
@@ -2238,7 +2282,7 @@ namespace platf::dxgi {
       matched_output_timeout_active = false;
     }
 
-    foreground_window::snapshot_t observe_live_window_authority(
+    live_window_authority_observation_t observe_live_window_authority(
       const D3D11_TEXTURE2D_DESC &source_desc,
       const std::optional<std::chrono::steady_clock::time_point> &content_timestamp
     ) {
@@ -2250,6 +2294,32 @@ namespace platf::dxgi {
           .status = foreground_window::status_e::no_foreground,
           .observed_at = std::chrono::steady_clock::now(),
         });
+      }
+
+      const bool interactive_move_size =
+        observed.status == foreground_window::status_e::interactive_move_size;
+      if (interactive_move_size) {
+        if (!interactive_move_size_observed) {
+          BOOST_LOG(info)
+            << "Host SBS selected full-source 3D for an interactive foreground-window "sv
+               "move/resize."sv;
+          for (const auto &slot : matched_frame_slots) {
+            if (slot.pending && slot.depth_input_region.video_region) {
+              // Consuming this exact-source ROI completion does not enqueue a replacement. Ask
+              // the retained-source owner for one more conversion so full-source depth starts
+              // even if USER32 stops producing desktop damage during the modal move loop.
+              depth_authority_reprocess_pending = true;
+              break;
+            }
+          }
+        }
+        interactive_move_size_observed = true;
+        browser_roi_not_before = observed.observed_at;
+      } else if (interactive_move_size_observed) {
+        BOOST_LOG(info)
+          << "Host SBS foreground-window move/resize ended; waiting for fresh ROI authority."sv;
+        interactive_move_size_observed = false;
+        browser_roi_not_before = observed.observed_at;
       }
 
       std::optional<foreground_window::snapshot_t> next_root;
@@ -2291,6 +2361,20 @@ namespace platf::dxgi {
         return before.has_value() != after.has_value() ||
                (before && after && before->generation != after->generation);
       };
+      const bool programmatic_causal_gap =
+        live_foreground_region && next_region &&
+        live_foreground_region->generation != next_region->generation &&
+        foreground_window::requires_full_source_causal_fallback(
+          *live_foreground_region,
+          *next_region,
+          content_timestamp
+        );
+      if (programmatic_causal_gap) {
+        // This observation runs even while TensorRT owns the prior ROI slot. Keep requesting
+        // retained-source conversions after that old completion is retired, so one exact
+        // full-source submission occurs even if Desktop Duplication never presents again.
+        depth_authority_reprocess_pending = true;
+      }
       const bool root_changed = changed(live_window_authority, next_root);
       const bool region_changed = changed(live_foreground_region, next_region);
       const bool analysis_authority_changed =
@@ -2309,8 +2393,16 @@ namespace platf::dxgi {
       }
       live_window_authority = next_root;
       live_foreground_region = next_region;
-      observe_live_browser_authority();
-      return observed;
+      // Read the helper exactly once for this Win32 observation. The immutable shared snapshot,
+      // the live epoch derived from it, and any later ROI mapping remain one attribution unit.
+      const auto browser_snapshot = video_dom_lease ? video_dom_lease->latest() : nullptr;
+      observe_live_browser_authority(browser_snapshot);
+      return {
+        .foreground = observed,
+        .browser_snapshot = browser_snapshot,
+        .browser_authority = live_browser_authority,
+        .browser_authority_epoch = live_browser_authority_epoch,
+      };
     }
 
     bool window_region_matches_live_authority(
@@ -2347,6 +2439,8 @@ namespace platf::dxgi {
                browser->screen_rect.top == slot.live_browser_screen_top &&
                browser->screen_rect.right == slot.live_browser_screen_right &&
                browser->screen_rect.bottom == slot.live_browser_screen_bottom &&
+               browser->geometry_valid_since ==
+                 slot.live_browser_geometry_valid_since &&
                video_dom::geometry_authority_class(browser->status) ==
                  slot.live_browser_authority_class;
       }
@@ -2509,6 +2603,7 @@ namespace platf::dxgi {
             .top = plan->source_rect.top,
             .right = plan->source_rect.right,
             .bottom = plan->source_rect.bottom,
+            .tensor_content = plan->tensor_content,
             .analysis_generation = depth_analysis_generation(key),
             .video_region = true,
             .authority = authority,
@@ -2552,6 +2647,7 @@ namespace platf::dxgi {
     std::optional<sbs_debug::window_region_snapshot>
     capture_browser_window_region(
       const D3D11_TEXTURE2D_DESC &source_desc,
+      const video_dom::snapshot_ptr &observed,
       const std::uint64_t frame_id,
       const std::optional<std::chrono::steady_clock::time_point> &content_timestamp,
       const std::chrono::steady_clock::time_point captured_at,
@@ -2560,18 +2656,19 @@ namespace platf::dxgi {
     ) const {
       video_status = video_dom::status_e::stopped;
       mapping_status = video_dom::mapping_status_e::invalid_video_rect;
-      if (!video_dom_lease || !display) {
-        return std::nullopt;
-      }
-
-      const auto observed = video_dom_lease->latest();
-      if (!observed) {
+      if (!observed || !display) {
         return std::nullopt;
       }
       video_status = observed->status;
+      if (observed->received_at < browser_roi_not_before) {
+        if (video_dom::carries_video_geometry(video_status)) {
+          video_status = video_dom::status_e::stale;
+        }
+        return std::nullopt;
+      }
       constexpr auto maximum_age = std::chrono::milliseconds {2500};
       // The newest heartbeat proves liveness; the uninterrupted exact-geometry run proves
-      // causality. A later identical heartbeat may accompany paused pixels, but a newly changed
+      // causality. An identical heartbeat may accompany unchanged pixels, but a newly changed
       // identity or rectangle must never be attached retroactively to an older matched frame.
       if (
         !video_dom::detail::usable_for_content(
@@ -2684,8 +2781,8 @@ namespace platf::dxgi {
       const std::optional<std::chrono::steady_clock::time_point> &content_timestamp,
       const std::chrono::steady_clock::time_point captured_at,
       const foreground_window::snapshot_t &snapshot,
-      std::string &observer_status,
-      std::string &mapping_status
+      std::string_view &observer_status,
+      std::string_view &mapping_status
     ) {
       constexpr auto maximum_age = std::chrono::milliseconds {250};
       observer_status = foreground_window::status_name(snapshot.status);
@@ -2816,8 +2913,8 @@ namespace platf::dxgi {
               << plan.source_rect.left << ':' << plan.source_rect.top << '-'
               << plan.source_rect.right << ':' << plan.source_rect.bottom
               << " tensor="sv << plan.tensor_shape.width << 'x'
-              << plan.tensor_shape.height << " inward_trim_pct="sv
-              << plan.trimmed_area_fraction * 100.0f
+              << plan.tensor_shape.height << " letterbox_padding_pct="sv
+              << plan.padded_area_fraction * 100.0f
               << "; scene cuts and scene center are region-local."sv;
           } else if (
             region.left == 0 && region.top == 0 &&
@@ -2873,7 +2970,8 @@ namespace platf::dxgi {
       std::uint64_t frame_id,
       models::input_color_space color_space,
       std::optional<std::chrono::steady_clock::time_point> source_timestamp,
-      std::optional<std::chrono::steady_clock::time_point> content_timestamp
+      std::optional<std::chrono::steady_clock::time_point> content_timestamp,
+      const live_window_authority_observation_t &pre_copy_authority
     ) {
       if (!source) {
         return false;
@@ -2924,13 +3022,26 @@ namespace platf::dxgi {
       device_ctx->CopyResource(slot.texture.get(), source);
       // Recheck after the copy as the causal authority for this exact matched image. The earlier
       // per-convert observation breaks continuity across busy periods; this second observation
-      // closes a focus/move/resize race between admission and CopyResource.
-      const auto copied_foreground_snapshot = observe_live_window_authority(
-        source_desc,
-        content_timestamp
-      );
-      const auto copied_browser_authority_epoch = live_browser_authority_epoch;
-      const auto copied_browser_authority = live_browser_authority;
+      // closes a focus/move/resize race between admission and CopyResource. During an already
+      // authenticated native move/resize, ROI authority has been withdrawn and this frame is
+      // forced to full-source analysis, so repeating the synchronous USER32/DWM sample cannot
+      // improve attribution. If the move starts after the first observation, this recheck still
+      // runs and detects it.
+      const bool pre_copy_interactive_move_size =
+        pre_copy_authority.foreground.status ==
+        foreground_window::status_e::interactive_move_size;
+      const auto copied_authority = pre_copy_interactive_move_size ?
+                                      pre_copy_authority :
+                                      observe_live_window_authority(
+                                        source_desc,
+                                        content_timestamp
+                                      );
+      const auto &copied_foreground_snapshot = copied_authority.foreground;
+      // A pre-drag ROI completion may still own the estimator after USER32 stops producing desktop
+      // damage. Full-source analysis is independent of window geometry, so submit these exact
+      // retained pixels once without letting post-drag ROI causality block completion retirement.
+      const bool preexisting_force_full_source =
+        depth_authority_reprocess_pending || pre_copy_interactive_move_size;
       const auto attributed_at = std::chrono::steady_clock::now();
       slot.frame_id = frame_id;
       slot.color_space = color_space;
@@ -2941,36 +3052,42 @@ namespace platf::dxgi {
       slot.window_region.reset();
       slot.window_region_observer_status = "not-observed";
       slot.window_region_mapping_status = "not-mapped";
+      slot.live_browser_geometry_valid_since = {};
+      if (pre_copy_interactive_move_size) {
+        slot.window_region_observer_status = foreground_window::status_name(
+          foreground_window::status_e::interactive_move_size
+        );
+      }
       video_dom::status_e browser_status = video_dom::status_e::stopped;
       video_dom::mapping_status_e browser_mapping_status =
         video_dom::mapping_status_e::invalid_video_rect;
       const bool foreground_causal_wait =
-        copied_foreground_snapshot.status == foreground_window::status_e::ok &&
         live_foreground_region &&
-        copied_foreground_snapshot.window == live_foreground_region->window &&
-        copied_foreground_snapshot.process_id == live_foreground_region->process_id &&
-        copied_foreground_snapshot.monitor == live_foreground_region->monitor &&
-        same_window_analysis_identity_shape(
+        foreground_window::requires_full_source_causal_fallback(
           copied_foreground_snapshot,
-          *live_foreground_region
-        ) &&
-        content_timestamp &&
-        *content_timestamp < copied_foreground_snapshot.geometry_valid_since;
+          *live_foreground_region,
+          content_timestamp
+        );
+      const bool force_full_source =
+        preexisting_force_full_source || foreground_causal_wait;
       if (foreground_causal_wait) {
-        // The copied desktop content predates this same-size window move. Do not let either a
-        // stale Chromium rectangle or the generic foreground route rebind those pixels, and do
-        // not publish a false full-source domain transition. The next causally eligible copy can
-        // reuse the position-independent DAV2 analysis history.
-        return false;
+        // The copied desktop content predates this same-size programmatic move. Desktop
+        // Duplication may never publish another content timestamp after the move, so submit this
+        // exact frame through full-source V2 instead of starving depth indefinitely.
+        slot.window_region_observer_status = "causal-wait-full-source";
+        slot.window_region_mapping_status = "not-mapped";
       }
-      auto browser_region = capture_browser_window_region(
-        source_desc,
-        frame_id,
-        content_timestamp,
-        captured_at,
-        browser_status,
-        browser_mapping_status
-      );
+      auto browser_region = force_full_source ?
+                              std::optional<sbs_debug::window_region_snapshot> {} :
+                              capture_browser_window_region(
+                                source_desc,
+                                copied_authority.browser_snapshot,
+                                frame_id,
+                                content_timestamp,
+                                captured_at,
+                                browser_status,
+                                browser_mapping_status
+                              );
       const bool browser_fullscreen_only_mismatch =
         browser_region && browser_status == video_dom::status_e::ok_fullscreen &&
         !(
@@ -2992,9 +3109,9 @@ namespace platf::dxgi {
         slot.window_region_observer_status = video_dom::status_name(browser_status);
         slot.window_region_mapping_status =
           video_dom::mapping_status_name(browser_mapping_status);
-      } else {
-        std::string foreground_observer_status;
-        std::string foreground_mapping_status;
+      } else if (!force_full_source) {
+        std::string_view foreground_observer_status;
+        std::string_view foreground_mapping_status;
         slot.window_region = capture_foreground_window_region(
           source_desc,
           frame_id,
@@ -3004,8 +3121,8 @@ namespace platf::dxgi {
           foreground_observer_status,
           foreground_mapping_status
         );
-        slot.window_region_observer_status = std::move(foreground_observer_status);
-        slot.window_region_mapping_status = std::move(foreground_mapping_status);
+        slot.window_region_observer_status = foreground_observer_status;
+        slot.window_region_mapping_status = foreground_mapping_status;
       }
       const bool retry_foreground_after_browser =
         slot.window_region &&
@@ -3022,8 +3139,8 @@ namespace platf::dxgi {
         !retry_foreground_after_browser
       );
       if (!slot.depth_input_region.video_region && retry_foreground_after_browser) {
-        std::string foreground_observer_status;
-        std::string foreground_mapping_status;
+        std::string_view foreground_observer_status;
+        std::string_view foreground_mapping_status;
         slot.window_region = capture_foreground_window_region(
           source_desc,
           frame_id,
@@ -3033,8 +3150,8 @@ namespace platf::dxgi {
           foreground_observer_status,
           foreground_mapping_status
         );
-        slot.window_region_observer_status = std::move(foreground_observer_status);
-        slot.window_region_mapping_status = std::move(foreground_mapping_status);
+        slot.window_region_observer_status = foreground_observer_status;
+        slot.window_region_mapping_status = foreground_mapping_status;
         select_depth_input_region(slot, source_desc);
       }
       slot.live_window_authority_generation =
@@ -3050,16 +3167,24 @@ namespace platf::dxgi {
         slot.window_region &&
             slot.window_region->authority_kind ==
               sbs_debug::window_region_authority_kind_e::chromium_video ?
-          copied_browser_authority_epoch :
+          copied_authority.browser_authority_epoch :
           0u;
       if (slot.live_browser_authority_generation != 0u && video_dom_lease) {
-        if (copied_browser_authority) {
-          slot.live_browser_screen_left = copied_browser_authority->screen_rect.left;
-          slot.live_browser_screen_top = copied_browser_authority->screen_rect.top;
-          slot.live_browser_screen_right = copied_browser_authority->screen_rect.right;
-          slot.live_browser_screen_bottom = copied_browser_authority->screen_rect.bottom;
+        if (copied_authority.browser_authority) {
+          slot.live_browser_screen_left =
+            copied_authority.browser_authority->screen_rect.left;
+          slot.live_browser_screen_top =
+            copied_authority.browser_authority->screen_rect.top;
+          slot.live_browser_screen_right =
+            copied_authority.browser_authority->screen_rect.right;
+          slot.live_browser_screen_bottom =
+            copied_authority.browser_authority->screen_rect.bottom;
+          slot.live_browser_geometry_valid_since =
+            copied_authority.browser_authority->geometry_valid_since;
           slot.live_browser_authority_class =
-            video_dom::geometry_authority_class(copied_browser_authority->status);
+            video_dom::geometry_authority_class(
+              copied_authority.browser_authority->status
+            );
         }
       }
       if (slot.depth_input_region.video_region &&
@@ -3363,6 +3488,8 @@ namespace platf::dxgi {
       live_foreground_region.reset();
       live_browser_authority.reset();
       live_browser_authority_epoch = 0u;
+      interactive_move_size_observed = false;
+      browser_roi_not_before = {};
       video_depth_crop_failure_key.reset();
       video_depth_crop_retry_frames = 0u;
       last_window_region.reset();
@@ -3376,6 +3503,7 @@ namespace platf::dxgi {
       matched_output_color_space = models::input_color_space::srgb;
       matched_output_timeout_active = false;
       depth_completion_poll_pending = false;
+      depth_authority_reprocess_pending = false;
       sbs_intermediate_is_linear = false;
       matched_unknown_frame_error_last = {};
       matched_unknown_frame_errors_suppressed = 0;
@@ -4072,11 +4200,13 @@ namespace platf::dxgi {
     std::optional<foreground_window::snapshot_t> live_foreground_region;
     std::optional<browser_live_authority_key_t> live_browser_authority;
     std::uint64_t live_browser_authority_epoch = 0u;
+    bool interactive_move_size_observed = false;
+    std::chrono::steady_clock::time_point browser_roi_not_before {};
     std::optional<video_depth_crop_failure_key_t> video_depth_crop_failure_key;
     unsigned video_depth_crop_retry_frames = 0u;
     std::optional<sbs_debug::window_region_snapshot> last_window_region;
-    std::optional<std::string> last_window_region_observer_status;
-    std::optional<std::string> last_window_region_mapping_status;
+    std::optional<std::string_view> last_window_region_observer_status;
+    std::optional<std::string_view> last_window_region_mapping_status;
     std::uint64_t sbs_frame_sequence = 0;
     bool matched_output_valid = false;
     std::chrono::steady_clock::time_point matched_output_source_at {};
@@ -4086,6 +4216,7 @@ namespace platf::dxgi {
       models::input_color_space::srgb;
     bool matched_output_timeout_active = false;
     bool depth_completion_poll_pending = false;
+    bool depth_authority_reprocess_pending = false;
     std::chrono::steady_clock::time_point matched_stats_started {};
     unsigned matched_stats_calls = 0;
     unsigned matched_stats_completions = 0;

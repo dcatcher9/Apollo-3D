@@ -75,7 +75,8 @@ plane-target sample; additions or disjoint boxes start a new two-observation tra
 input-domain reset clears the owner too and records current boxes only as the first pending
 observation. Missing, stale, abstaining, malformed, or mismatched OCR8 evidence in an otherwise
 valid unchanged domain clears current and pending subtitle authority, starts or advances the
-existing six-distinct-observation cached-target grace, and copies the ordinary post-limit field
+generated bounded cached-target grace defined by the Host SBS subtitle contract, and copies the
+ordinary post-limit field
 exactly; redispatching the same identity does not age grace twice. Invalid OCR on a hard-cut/reset
 boundary cannot carry that cache into the new scene. There is no preprocessing exclusion,
 recognizer, subtitle-driven cut veto, or pause branch.

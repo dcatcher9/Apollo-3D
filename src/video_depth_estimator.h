@@ -10,7 +10,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <type_traits>
 #include <wrl/client.h>
 
 namespace models {
@@ -44,6 +43,47 @@ namespace models {
     ready,
     failed,
   };
+
+  namespace detail {
+
+    /** Failure phase for a context that has already completed its startup warmup.
+     *
+     * Pre-enqueue interop and binding failures do not mutate asynchronous TensorRT execution
+     * state, so the context remains reusable by a later estimator. Once execution may have
+     * started, or teardown cannot prove the stream clean, the MinGW/MSVC ABI prevents destroying
+     * the context and it must instead be quarantined.
+     */
+    enum class warmed_execution_context_failure_e : std::uint8_t {
+      pre_enqueue_interop_or_binding,
+      asynchronous_execution_or_query,
+      unsafe_teardown,
+    };
+
+    constexpr bool warmed_execution_context_requires_quarantine(
+      const warmed_execution_context_failure_e failure
+    ) noexcept {
+      return failure !=
+             warmed_execution_context_failure_e::pre_enqueue_interop_or_binding;
+    }
+
+    class warmed_execution_context_health_t {
+    public:
+      constexpr void observe(
+        const warmed_execution_context_failure_e failure
+      ) noexcept {
+        poisoned_ = poisoned_ ||
+                    warmed_execution_context_requires_quarantine(failure);
+      }
+
+      constexpr bool poisoned() const noexcept {
+        return poisoned_;
+      }
+
+    private:
+      bool poisoned_ = false;
+    };
+
+  }  // namespace detail
 
   enum class input_color_space : uint32_t {
     srgb = 0,  ///< gamma-encoded SDR UNORM capture
@@ -79,6 +119,7 @@ namespace models {
     std::uint32_t top = 0u;
     std::uint32_t right = 0u;
     std::uint32_t bottom = 0u;
+    depth_tensor_content_rect_t tensor_content {};
     std::uint64_t analysis_generation = 0u;
     bool video_region = false;
     depth_analysis_authority_e authority = depth_analysis_authority_e::full_source;
@@ -93,7 +134,7 @@ namespace models {
 
     constexpr bool valid() const noexcept {
       if (source_width == 0u || source_height == 0u || left >= right || top >= bottom ||
-          right > source_width || bottom > source_height) {
+          right > source_width || bottom > source_height || !tensor_content.valid()) {
         return false;
       }
       if (video_region) {
@@ -103,7 +144,9 @@ namespace models {
       }
       return authority == depth_analysis_authority_e::full_source &&
              left == 0u && top == 0u && right == source_width &&
-             bottom == source_height && analysis_generation == 0u;
+             bottom == source_height && tensor_content.left == 0u &&
+             tensor_content.top == 0u &&
+             analysis_generation == 0u;
     }
 
     constexpr bool same_analysis_domain(const depth_input_region_t &other) const noexcept {
@@ -111,6 +154,7 @@ namespace models {
              authority == other.authority &&
              source_width == other.source_width && source_height == other.source_height &&
              width() == other.width() && height() == other.height() &&
+             tensor_content == other.tensor_content &&
              analysis_generation == other.analysis_generation;
     }
 

@@ -825,6 +825,10 @@ void main(uint3 id : SV_DispatchThreadID) {
       common_words[0] = width;
       common_words[1] = height;
       common_words[5] = reduce_groups * 256u;
+      common_words[9] = 0u;
+      common_words[10] = 0u;
+      common_words[11] = width;
+      common_words[12] = height;
       const std::array<float, 4> encode_words {{
         v2::direct_container_limit, 0.0f, 0.0f, 0.0f,
       }};

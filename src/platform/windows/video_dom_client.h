@@ -50,19 +50,6 @@ namespace platf::video_dom {
     return status == status_e::ok || status == status_e::ok_fullscreen;
   }
 
-  /**
-   * Preserve the helper's fullscreen-only provenance after screen-to-capture mapping.
-   * Ordinary `ok` comes from the strict windowed selector and may authorize either a windowed ROI
-   * or an exact full-capture rectangle. `ok_fullscreen` may authorize only the latter.
-   */
-  [[nodiscard]] inline constexpr bool allows_mapped_video_rect(
-    const status_e status,
-    const bool exactly_full_capture
-  ) noexcept {
-    return status == status_e::ok ||
-           (status == status_e::ok_fullscreen && exactly_full_capture);
-  }
-
   enum class geometry_authority_class_e : std::uint8_t {
     none,
     strict_windowed,

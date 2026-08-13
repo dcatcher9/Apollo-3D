@@ -163,6 +163,15 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     "fixed-75pct-vertical-majorant-share-then-horizontal-majorant",
             },
         }
+        self.live_state = copy.deepcopy(self.state)
+        self.live_state["rendered_output_selected"] = True
+        self.live_state["wire_contract"] = (
+            "authenticated live Host-SBS renderer input; not a client wire contract")
+        self.live_state["units"] = {
+            "coordinate": "dimensionless canonical coordinate derived from raw depth",
+            "gain": "one-eye full-source-U per curve unit",
+            "parallax": "signed one-eye full-source-U",
+        }
         stats = {
             "mean": 2.0,
             "population_std": 0.5,
@@ -222,6 +231,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.manifest = {
             "schema": dump_contract.DUMP_MANIFEST_SCHEMA,
             "capture_status": "complete",
+            "published_atomically": True,
             "matched_frame_id": 41,
             "subtitle_conditioning": subtitle_none,
             "renderer": {
@@ -276,8 +286,20 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 },
             },
             "parallax_v2_shadow": {
+                "requested": False,
                 "active": True,
                 "rendered_output_selected": True,
+                "shader_source": {
+                    "source_closure_schema": shader.source_closure_schema,
+                    "source_compile_flags": shader.source_compile_flags,
+                    "source_macro_count": shader.source_macro_count,
+                    "source_closure_sha256": shader.source_closure_sha256,
+                },
+                "state": {
+                    **copy.deepcopy(self.live_state["decoded"]),
+                    "raw_coordinate_scale": raw_scale,
+                    "rendered_output_selected": True,
+                },
             },
             "dimensions": {
                 "source": {
@@ -372,6 +394,20 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     "calibrated preprocess; transfer-aware PNG is diagnostic only and never "
                     "numeric model authority."),
             },
+            "shadow_state.json": {
+                "available": True,
+                "required": True,
+                "stage": "parallax-v2 shot calibration and attenuation state",
+                "description": "authenticated test V2 state",
+                "sha256": "0" * 64,
+            },
+            "shadow_frame_stats.json": {
+                "available": True,
+                "required": True,
+                "stage": "parallax-v2 current-frame moments",
+                "description": "authenticated test V2 frame statistics",
+                "sha256": "0" * 64,
+            },
             "window_region.json": {
                 "available": False,
                 "required": False,
@@ -401,7 +437,11 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "analysis_generation": 0,
                 "input_domain_reset": False,
                 "tensor_extent_px": {"width": 770, "height": 434},
-                "trimmed_area_fraction": 0.0,
+                "tensor_content_rect_px": {
+                    "left": 0, "top": 0, "right": 770, "bottom": 434,
+                },
+                "padded_area_fraction": 0.0,
+                "fit_method": "full-tensor",
                 "crop_method": "full-source",
                 "scene_analysis_domain": "full-source",
             },
@@ -449,6 +489,36 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertIn("completed.shadow_vertical_majorant", native)
         self.assertIn('"shadow_vertical_conditioned"', native)
         self.assertIn("completed.shadow_vertical_conditioned", native)
+        self.assertIn(
+            'artifacts["shadow_state.json"] = hashed_artifact_description(', native)
+        self.assertIn(
+            'artifacts["shadow_frame_stats.json"] = hashed_artifact_description(', native)
+        self.assertIn(
+            'models::file_sha256_hex(paths.temporary / "shadow_state.json")', native)
+        self.assertIn(
+            'models::file_sha256_hex(paths.temporary / "shadow_frame_stats.json")', native)
+        self.assertIn('{"requested", false}', native)
+        self.assertIn('{"rendered_output_selected", true}', native)
+
+    def test_manifest_accepts_exact_native_capture_color_format_allowlist(self):
+        for name, value in (
+                ("DXGI_FORMAT_B8G8R8A8_UNORM", 87),
+                ("DXGI_FORMAT_B8G8R8X8_UNORM", 88),
+                ("DXGI_FORMAT_R8G8B8A8_UNORM", 28),
+                ("DXGI_FORMAT_R16G16B16A16_FLOAT", 10)):
+            changed = copy.deepcopy(self.manifest)
+            for key in ("source", "analysis_source"):
+                changed["dimensions"][key]["format"] = name
+                changed["dimensions"][key]["format_value"] = value
+            with self.subTest(name=name):
+                dump_contract.validate_v2_dump_manifest_document(changed)
+
+        unsupported = copy.deepcopy(self.manifest)
+        for key in ("source", "analysis_source"):
+            unsupported["dimensions"][key]["format"] = "DXGI_FORMAT_UNKNOWN_24"
+            unsupported["dimensions"][key]["format_value"] = 24
+        with self.assertRaisesRegex(ValueError, "analysis-source dimensions"):
+            dump_contract.validate_v2_dump_manifest_document(unsupported)
 
     def test_reader_rejects_previous_schema_without_a_compatibility_path(self):
         retired = copy.deepcopy(self.manifest)
@@ -456,8 +526,69 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown serialization schema"):
             dump_contract.validate_v2_dump_manifest_document(retired)
 
+    def test_reader_requires_complete_atomic_publication(self):
+        for key, forged in (
+                ("capture_status", "partial"),
+                ("published_atomically", False)):
+            manifest = copy.deepcopy(self.manifest)
+            manifest[key] = forged
+            with self.subTest(key=key), self.assertRaisesRegex(
+                    ValueError, "complete atomic publication"):
+                dump_contract.validate_v2_dump_manifest_document(manifest)
+        missing = copy.deepcopy(self.manifest)
+        missing.pop("published_atomically")
+        with self.assertRaisesRegex(ValueError, "complete atomic publication"):
+            dump_contract.validate_v2_dump_manifest_document(missing)
+
+    def test_manifest_requires_exact_selected_v2_shadow_attribution(self):
+        mutations = {
+            "unknown-key": lambda value: value.update({"future": 1}),
+            "requested-shadow": lambda value: value.update({"requested": True}),
+            "inactive-shadow": lambda value: value.update({"active": False}),
+            "unselected-shadow": lambda value: value.update(
+                {"rendered_output_selected": False}),
+            "shader-drift": lambda value: value["shader_source"].update(
+                {"source_closure_sha256": "0" * 64}),
+        }
+        for name, mutate in mutations.items():
+            changed = copy.deepcopy(self.manifest)
+            mutate(changed["parallax_v2_shadow"])
+            with self.subTest(name=name), self.assertRaisesRegex(
+                    ValueError, "shadow attribution"):
+                dump_contract.validate_v2_dump_manifest_document(changed)
+
+        for name, mutate in {
+                "unknown-key": lambda value: value.update({"future": 1}),
+                "invalid-frame": lambda value: value.update({"frame_valid": False}),
+                "wrong-contract": lambda value: value.update({"contract_tag": 0}),
+                "unselected-state": lambda value: value.update(
+                    {"rendered_output_selected": False}),
+        }.items():
+            changed = copy.deepcopy(self.manifest)
+            mutate(changed["parallax_v2_shadow"]["state"])
+            with self.subTest(name=name), self.assertRaisesRegex(
+                    ValueError, "state summary"):
+                dump_contract.validate_v2_dump_manifest_document(changed)
+
+    def test_manifest_requires_hashed_v2_state_artifacts_with_exact_roles(self):
+        for artifact in ("shadow_state.json", "shadow_frame_stats.json"):
+            for field, replacement in (
+                    ("sha256", "not-a-hash"),
+                    ("required", False)):
+                changed = copy.deepcopy(self.manifest)
+                changed["artifacts"][artifact][field] = replacement
+                with self.subTest(artifact=artifact, field=field), self.assertRaisesRegex(
+                        ValueError, "artifact descriptor"):
+                    dump_contract.validate_v2_dump_manifest_document(changed)
+
+            changed = copy.deepcopy(self.manifest)
+            changed["artifacts"][artifact]["stage"] = "wrong-stage"
+            with self.subTest(artifact=artifact, field="stage"), self.assertRaisesRegex(
+                    ValueError, "state artifact attribution"):
+                dump_contract.validate_v2_dump_manifest_document(changed)
+
     def test_current_subtitle_record_and_state_abi_partition_exact_word_counts(self):
-        self.assertEqual(dump_contract.DUMP_MANIFEST_SCHEMA, 28)
+        self.assertEqual(dump_contract.DUMP_MANIFEST_SCHEMA, 29)
         self.assertEqual(dump_contract.SUBTITLE_OCR_RECORD_SCHEMA, 3)
         self.assertEqual(dump_contract.SUBTITLE_LOCATOR_STATE_SCHEMA, 9)
         self.assertEqual(
@@ -581,7 +712,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             subtitle["artifact_files"]["conditioned_field"],
             "shadow_final_parallax.f32")
         producer = manifest["subtitle_conditioning"]["producer"]
-        self.assertEqual(producer["contract_schema"], 6)
+        self.assertEqual(producer["contract_schema"], coordinate.SUBTITLE_OCR.schema)
         self.assertEqual(set(producer["model"]), {
             "name", "asset_path", "artifact_onnx_sha256", "source_url",
             "source_onnx_sha256", "conversion_tool", "conversion_version",
@@ -753,6 +884,102 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     field_width=field_width,
                     field_height=field_height)
                 self.assertEqual(decoded_locator["current_rectangles"], [])
+
+    def test_ocr8_and_slr9_project_and_confine_geometry_to_tensor_content(self):
+        source_width, source_height = 400, 1200
+        field_width, field_height = 770, 434
+        content = (313, 0, 457, 434)
+        roi = dump_contract._subtitle_dynamic_roi(
+            source_width, source_height, content)
+        minimum_bottom = dump_contract._subtitle_ribbon_min_bottom(
+            source_width, source_height, content)
+        self.assertEqual(roi, (414, 434))
+        self.assertEqual(minimum_bottom, 433)
+
+        score_bits = struct.unpack("<I", struct.pack("<f", 0.875))[0]
+        core = [323, 420, 447, 433, score_bits,
+                dump_contract.SUBTITLE_OCR_BOX_FLAG_RIBBON, 7, 4]
+        cover = [313, 418, 457, 434, score_bits,
+                 dump_contract.SUBTITLE_OCR_BOX_FLAG_RIBBON, 7, 4]
+        ocr = [0] * dump_contract.SUBTITLE_OCR_RECORD_WORD_COUNT
+        ocr[:16] = [
+            dump_contract.SUBTITLE_OCR_RECORD_SCHEMA,
+            dump_contract.SUBTITLE_OCR_RECORD_TAG,
+            1, 1, 1,
+            41, 0,
+            17, 0,
+            source_width, source_height,
+            field_width, field_height,
+            roi[0], roi[1],
+            0,
+        ]
+        raw_offset = dump_contract.SUBTITLE_OCR_RAW_BOX_WORD_OFFSET
+        final_offset = dump_contract.SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET
+        ocr[raw_offset:raw_offset + 8] = core
+        ocr[final_offset:final_offset + 8] = cover
+        decoded_ocr = dump_contract.validate_subtitle_ocr_record(
+            self._pack_uint32_words(ocr),
+            matched_frame_id=41,
+            analysis_generation=17,
+            source_width=source_width,
+            source_height=source_height,
+            field_width=field_width,
+            field_height=field_height,
+            roi_top=roi[0],
+            roi_bottom=roi[1],
+            tensor_content=content)
+        self.assertEqual(decoded_ocr["tensor_content_rect"], content)
+        self.assertEqual(
+            tuple(decoded_ocr["final_boxes"][0][key]
+                  for key in ("left", "top", "right", "bottom")),
+            (313, 418, 457, 434))
+
+        target_bits = struct.unpack("<I", struct.pack("<f", 0.0075))[0]
+        locator = [0] * dump_contract.SUBTITLE_LOCATOR_STATE_WORD_COUNT
+        locator[:32] = [
+            dump_contract.SUBTITLE_LOCATOR_STATE_SCHEMA,
+            dump_contract.SUBTITLE_LOCATOR_STATE_TAG,
+            (dump_contract.SUBTITLE_LOCATOR_FLAG_OWNER |
+             dump_contract.SUBTITLE_LOCATOR_FLAG_TARGET_VALID),
+            9, 1,
+            323, 420, 447, 433, 124 * 13,
+            17, 0,
+            0,
+            0, 0, 0, 0, 0,
+            target_bits, 9,
+            1,
+            dump_contract.SUBTITLE_LOCATOR_EVENT_BIRTH,
+            41, 0,
+            1, 0, 3,
+            field_width, field_height,
+            0, 0,
+            ((1 << dump_contract.SUBTITLE_LOCATOR_OWNER_KIND_SHIFT) |
+             (1 << dump_contract.SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT)),
+        ]
+        owner_offset = dump_contract.SUBTITLE_LOCATOR_OWNER_WORD_OFFSET
+        current_offset = dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET
+        locator[owner_offset:owner_offset + 4] = core[:4]
+        locator[current_offset:current_offset + 4] = cover[:4]
+        decoded_locator = dump_contract.validate_subtitle_locator_state(
+            self._pack_uint32_words(locator),
+            matched_frame_id=41,
+            analysis_generation=17,
+            source_width=source_width,
+            source_height=source_height,
+            field_width=field_width,
+            field_height=field_height,
+            tensor_content=content)
+        self.assertEqual(decoded_locator["tensor_content_rect"], content)
+
+        escaped = ocr.copy()
+        escaped[final_offset] = 0
+        with self.assertRaisesRegex(ValueError, "inside the field|canonical bottom strip"):
+            dump_contract.validate_subtitle_ocr_record(
+                self._pack_uint32_words(escaped),
+                matched_frame_id=41, analysis_generation=17,
+                source_width=source_width, source_height=source_height,
+                field_width=field_width, field_height=field_height,
+                roi_top=roi[0], roi_bottom=roi[1], tensor_content=content)
 
     def test_ribbon_bottom_tolerance_boundary_is_shared_by_strict_ocr_and_slr_readers(self):
         source_width, source_height = 2560, 1080
@@ -992,7 +1219,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         grace = empty.copy()
         cached_bits = struct.unpack("<I", struct.pack("<f", 0.006))[0]
         grace[18] = cached_bits
-        grace[25] = 2
+        grace[25] = (
+            coordinate.SUBTITLE_OCR.locator_death_grace_observations)
         grace[29] = 120 | (650 << 16)
         grace[30] = 350 | (401 << 16)
         decoded = dump_contract.validate_subtitle_locator_state(
@@ -1003,7 +1231,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             source_height=1080,
             field_width=770,
             field_height=434)
-        self.assertEqual(decoded["target_grace"], 2)
+        self.assertEqual(
+            decoded["target_grace"],
+            coordinate.SUBTITLE_OCR.locator_death_grace_observations)
         self.assertEqual(decoded["grace_bounds"], {
             "left": 120, "top": 350, "right": 650, "bottom": 401,
         })
@@ -1044,6 +1274,23 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             words[24] = 0
             words[25] = 2
             words[29] = 650 | (120 << 16)
+            words[30] = 350 | (401 << 16)
+
+        def make_grace_above_limit(words):
+            words[2] = 0
+            words[3] = 0
+            words[4] = 0
+            words[5:10] = [0, 0, 0, 0, 0]
+            owner = dump_contract.SUBTITLE_LOCATOR_OWNER_WORD_OFFSET
+            words[owner:owner + 4] = [0, 0, 0, 0]
+            words[19] = 0
+            words[20] = 0
+            current = dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET
+            words[current:current + 4] = [0, 0, 0, 0]
+            words[24] = 0
+            words[25] = (
+                coordinate.SUBTITLE_OCR.locator_death_grace_observations + 1)
+            words[29] = 120 | (650 << 16)
             words[30] = 350 | (401 << 16)
 
         def make_owner_without_target_with_stale_words(words):
@@ -1104,6 +1351,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "invalid-grace-bounds": (
                 make_invalid_grace,
                 "death-grace target or packed bounds"),
+            "grace-above-contract-limit": (
+                make_grace_above_limit,
+                "death-grace exceeds the authenticated observation limit"),
             "owner-without-target-stale-words": (
                 make_owner_without_target_with_stale_words,
                 "owner without target authority"),
@@ -1140,6 +1390,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "current_count > owner_count",
                 "fade > subtitle_locator_max_fade",
                 "last_event > subtitle_locator_max_event",
+                "grace > subtitle_locator_death_grace_observations",
                 "target_generation != owner_generation",
                 "grace != 0u || !packed_grace_zero",
                 "ocr_flags == 0u && current_count != 0u",
@@ -1176,18 +1427,25 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "left": 277, "top": 415, "right": 2813, "bottom": 1842,
         }
         coordinate_space["inference_rect_px"] = {
-            "left": 279, "top": 415, "right": 2810, "bottom": 1842,
+            "left": 277, "top": 415, "right": 2813, "bottom": 1842,
         }
-        trim = 1.0 - (2531 * 1427) / (2536 * 1427)
+        plan = dump_contract._plan_host_sbs_v2_window_region(
+            (277, 415, 2813, 1842), 3840, 2160, 770, 434)
+        self.assertIsNotNone(plan)
+        _, content, padding = plan
         region["analysis"].update({
             "analysis_generation": 17,
             "input_domain_reset": True,
-            "trimmed_area_fraction": trim,
+            "tensor_content_rect_px": dict(zip(
+                ("left", "top", "right", "bottom"), content)),
+            "padded_area_fraction": padding,
+            "fit_method":
+                "centered-integer-contain-with-edge-replicated-excluded-padding",
             "crop_method": "same-format D3D11 CopySubresourceRegion",
             "scene_analysis_domain": "inference-rectangle-only",
         })
         runtime_scale, vertical_slope = dump_contract._roi_renderer_constants(
-            (279, 415, 2810, 1842), 3840, 2160, 770, 434)
+            (277, 415, 2813, 1842), 3840, 2160, content)
         region["renderer"].update({
             "final_parallax_units": "roi-local-source-u",
             "full_source_parallax_scale": runtime_scale,
@@ -1202,7 +1460,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         decoded = dump_contract.validate_depth_input_region_document(
             region, matched_frame_id=41, source_width=3840, source_height=2160,
             tensor_width=770, tensor_height=434)
-        self.assertEqual(decoded["inference_width"], 2531)
+        self.assertEqual(decoded["inference_width"], 2536)
+        self.assertEqual(decoded["tensor_content_rect"], content)
+        self.assertEqual(decoded["padded_area_fraction"], padding)
         self.assertEqual(decoded["analysis_generation"], 17)
         self.assertEqual(decoded["authorization"]["observer_generation"], 901)
         self.assertNotEqual(
@@ -1236,10 +1496,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         moved = copy.deepcopy(region)
         moved["coordinate_space"]["inference_rect_px"]["left"] += 1
         moved["coordinate_space"]["inference_rect_px"]["right"] += 1
-        with self.assertRaisesRegex(ValueError, "deterministic authenticated inward fit"):
+        with self.assertRaisesRegex(ValueError, "deterministic authenticated integer contain fit"):
             dump_contract.validate_depth_input_region_document(moved)
 
-    def test_depth_input_region_rejects_forged_tensor_trim_scale_slope_and_identity(self):
+    def test_depth_input_region_rejects_forged_tensor_content_scale_slope_and_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             self._write_synthetic_roi_geometry_dump(root)
@@ -1251,9 +1511,13 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     "canonical uppercase hexadecimal"),
                 "wrong-tensor": (
                     lambda value: value["analysis"]["tensor_extent_px"].update({"width": 756}),
-                    "deterministic authenticated inward fit"),
-                "wrong-trim": (
-                    lambda value: value["analysis"].update({"trimmed_area_fraction": 0.01}),
+                    "deterministic authenticated integer contain fit"),
+                "wrong-content": (
+                    lambda value: value["analysis"]["tensor_content_rect_px"].update(
+                        {"top": value["analysis"]["tensor_content_rect_px"]["top"] + 1}),
+                    "deterministic authenticated integer contain fit"),
+                "wrong-padding": (
+                    lambda value: value["analysis"].update({"padded_area_fraction": 0.01}),
                     "inconsistent window-region analysis"),
                 "wrong-scale": (
                     lambda value: value["renderer"].update({
@@ -1351,6 +1615,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         input_region["analysis"]["tensor_extent_px"] = {
             "width": width, "height": height,
         }
+        input_region["analysis"]["tensor_content_rect_px"] = {
+            "left": 0, "top": 0, "right": width, "bottom": height,
+        }
         fields = {
             "shadow_candidate_parallax": candidate,
             "shadow_ownership_refined_parallax": ownership,
@@ -1377,6 +1644,17 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         manifest["artifacts"]["depth_input_region.json"]["sha256"] = hashlib.sha256(
             region_payload).hexdigest()
         self._write_subtitle_conditioning_document(root, manifest)
+        state_payload = json.dumps(self.live_state).encode("utf-8")
+        (root / "shadow_state.json").write_bytes(state_payload)
+        manifest["artifacts"]["shadow_state.json"]["sha256"] = hashlib.sha256(
+            state_payload).hexdigest()
+        frame_stats = copy.deepcopy(self.frame_stats)
+        frame_stats["named_values"]["valid_count"] = float(width * height)
+        frame_stats["named_values"]["texel_count"] = float(width * height)
+        stats_payload = json.dumps(frame_stats).encode("utf-8")
+        (root / "shadow_frame_stats.json").write_bytes(stats_payload)
+        manifest["artifacts"]["shadow_frame_stats.json"]["sha256"] = hashlib.sha256(
+            stats_payload).hexdigest()
         (root / "dump_manifest.json").write_text(
             json.dumps(manifest), encoding="utf-8")
         return manifest, fields
@@ -1477,11 +1755,16 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         tensor_width, tensor_height = 770, 434
         if near_full:
             semantic = {"left": 1, "top": 1, "right": 773, "bottom": 435}
-            inference = {"left": 2, "top": 1, "right": 772, "bottom": 435}
         else:
-            semantic = {"left": 94, "top": 53, "right": 866, "bottom": 487}
-            inference = {"left": 95, "top": 53, "right": 865, "bottom": 487}
-        trim = np.float32(1.0 - (770 * 434) / (772 * 434)).item()
+            # A deliberately tall arbitrary-aspect client: production keeps all 300x434 source
+            # pixels and centers them in a 300-cell-wide content strip inside the 770x434 tensor.
+            semantic = {"left": 330, "top": 53, "right": 630, "bottom": 487}
+        inference = dict(semantic)
+        plan = dump_contract._plan_host_sbs_v2_window_region(
+            tuple(semantic[key] for key in ("left", "top", "right", "bottom")),
+            source_width, source_height, tensor_width, tensor_height)
+        self.assertIsNotNone(plan)
+        _, tensor_content, padded_fraction = plan
 
         manifest = copy.deepcopy(self.manifest)
         manifest["depth_input_region"]["mode"] = "window-region"
@@ -1506,7 +1789,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "format": "DXGI_FORMAT_R16G16B16A16_FLOAT", "format_value": 10,
             },
             "analysis_source": {
-                "width": 770, "height": 434,
+                "width": inference["right"] - inference["left"],
+                "height": inference["bottom"] - inference["top"],
                 "format": "DXGI_FORMAT_R16G16B16A16_FLOAT", "format_value": 10,
             },
             "packed_sbs": {
@@ -1558,8 +1842,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         runtime_scale, vertical_slope = dump_contract._roi_renderer_constants(
             (inference["left"], inference["top"],
              inference["right"], inference["bottom"]),
-            source_width, source_height,
-            tensor_width, tensor_height)
+            source_width, source_height, tensor_content)
         region = copy.deepcopy(self.depth_input_region)
         region.update({
             "mode": "window-region",
@@ -1581,7 +1864,11 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "analysis_generation": 17,
             "input_domain_reset": True,
             "tensor_extent_px": {"width": tensor_width, "height": tensor_height},
-            "trimmed_area_fraction": trim,
+            "tensor_content_rect_px": dict(zip(
+                ("left", "top", "right", "bottom"), tensor_content)),
+            "padded_area_fraction": padded_fraction,
+            "fit_method":
+                "centered-integer-contain-with-edge-replicated-excluded-padding",
             "crop_method": "same-format D3D11 CopySubresourceRegion",
             "scene_analysis_domain": "inference-rectangle-only",
         })
@@ -1737,6 +2024,28 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         (root / "warp_map_shape.json").write_text(
             json.dumps(shape), encoding="utf-8")
         self._write_subtitle_conditioning_document(root, manifest)
+        roi_state = copy.deepcopy(self.live_state)
+        roi_state["units"] = {
+            "coordinate": "dimensionless canonical coordinate derived from raw depth",
+            "gain": "one-eye ROI-local source-U per curve unit",
+            "parallax": (
+                "signed one-eye ROI-local source-U; full-source renderer authority "
+                "additionally requires depth_input_region embedding"),
+        }
+        state_payload = json.dumps(roi_state).encode("utf-8")
+        (root / "shadow_state.json").write_bytes(state_payload)
+        manifest["artifacts"]["shadow_state.json"]["sha256"] = hashlib.sha256(
+            state_payload).hexdigest()
+        frame_stats = copy.deepcopy(self.frame_stats)
+        content_texel_count = (
+            (tensor_content[2] - tensor_content[0]) *
+            (tensor_content[3] - tensor_content[1]))
+        frame_stats["named_values"]["valid_count"] = float(content_texel_count)
+        frame_stats["named_values"]["texel_count"] = float(content_texel_count)
+        stats_payload = json.dumps(frame_stats).encode("utf-8")
+        (root / "shadow_frame_stats.json").write_bytes(stats_payload)
+        manifest["artifacts"]["shadow_frame_stats.json"]["sha256"] = hashlib.sha256(
+            stats_payload).hexdigest()
         (root / "dump_manifest.json").write_text(
             json.dumps(manifest), encoding="utf-8")
         return manifest, region, warp_map
@@ -1811,6 +2120,66 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             self.assertEqual(summary["width"], 16)
             self.assertEqual(summary["height"], 12)
             self.assertFalse(summary["window_region_verified"])
+
+    def test_geometry_verifier_authenticates_v2_state_artifact_bytes(self):
+        for artifact in ("shadow_state.json", "shadow_frame_stats.json"):
+            with self.subTest(artifact=artifact), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self._write_synthetic_geometry_dump(root)
+                path = root / artifact
+                path.write_bytes(path.read_bytes() + b" ")
+                with self.assertRaisesRegex(ValueError, f"{artifact} content hash mismatch"):
+                    dump_contract.verify_v2_dump_geometry(root)
+
+    def test_geometry_verifier_validates_v2_state_artifact_payloads(self):
+        mutations = {
+            "shadow_state.json": (
+                lambda value: value.update({"future": 1}),
+                "missing or unknown root fields"),
+            "shadow_frame_stats.json": (
+                lambda value: value["named_values"].pop("reserved"),
+                "exact stats layout"),
+        }
+        for artifact, (mutate, expected) in mutations.items():
+            with self.subTest(artifact=artifact), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                manifest, _ = self._write_synthetic_geometry_dump(root)
+                path = root / artifact
+                document = json.loads(path.read_text(encoding="utf-8"))
+                mutate(document)
+                payload = json.dumps(document).encode("utf-8")
+                path.write_bytes(payload)
+                manifest["artifacts"][artifact]["sha256"] = hashlib.sha256(
+                    payload).hexdigest()
+                (root / "dump_manifest.json").write_text(
+                    json.dumps(manifest), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, expected):
+                    dump_contract.verify_v2_dump_geometry(root)
+
+    def test_geometry_verifier_cross_checks_state_summary_and_exact_frame_stats(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, _ = self._write_synthetic_geometry_dump(root)
+            manifest["parallax_v2_shadow"]["state"]["confirmed_cut_count"] += 1
+            (root / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "summary disagrees"):
+                dump_contract.verify_v2_dump_geometry(root)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, _ = self._write_synthetic_geometry_dump(root)
+            path = root / "shadow_frame_stats.json"
+            stats = json.loads(path.read_text(encoding="utf-8"))
+            stats["named_values"]["population_std"] = 0.0
+            payload = json.dumps(stats).encode("utf-8")
+            path.write_bytes(payload)
+            manifest["artifacts"]["shadow_frame_stats.json"]["sha256"] = hashlib.sha256(
+                payload).hexdigest()
+            (root / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "exact-frame statistics"):
+                dump_contract.verify_v2_dump_geometry(root)
 
     def test_geometry_verifier_accepts_current_slr9_empty_authority_as_exact_base(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1911,7 +2280,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 changed.astype("<f4").tobytes())
             (root / "dump_manifest.json").write_text(
                 json.dumps(manifest), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "not exact Base"):
+            with self.assertRaisesRegex(ValueError, "not the exact content-clamped Base"):
                 dump_contract.verify_v2_dump_geometry(root)
 
     def test_geometry_verifier_replays_nonempty_slr9_rectangle_fade_and_ocr_binding(self):
@@ -1987,6 +2356,103 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "does not contain|not exact"):
                 dump_contract.verify_v2_dump_geometry(root)
 
+    def test_slr9_sm5_replay_accepts_the_roi_width_1101_division_bit(self):
+        import numpy as np
+
+        exact_candidates = dump_contract._sm5_power_of_two_division_candidates(
+            0.5, 1024)
+        exact_bits = {
+            int(np.asarray(value, dtype=np.float32).view(np.uint32))
+            for value in exact_candidates
+        }
+        self.assertEqual(exact_bits, {0x39FFFFFF, 0x3A000000, 0x3A000001})
+
+        exact_base = np.full((434, 770), np.float32(0.02), dtype=np.float32)
+        exact_subtitle = {
+            "current_rectangles": [{
+                "left": 210, "top": 393, "right": 561, "bottom": 430,
+            }],
+            "source_width": 1024,
+            "field_width": 770,
+            "field_height": 434,
+            "target": 0.0,
+            "fade": 2,
+        }
+        exact_replay_bits = {
+            int(replay[393, 210].view(np.uint32))
+            for replay in dump_contract._replay_slr9_conditioner_sm5_candidates(
+                exact_base, exact_subtitle)
+        }
+        self.assertEqual(exact_replay_bits, exact_bits)
+
+        candidates = dump_contract._sm5_power_of_two_division_candidates(0.5, 1101)
+        candidate_bits = {
+            int(np.asarray(value, dtype=np.float32).view(np.uint32))
+            for value in candidates
+        }
+        self.assertEqual(candidate_bits, {0x39EE18A5, 0x39EE18A6})
+
+        target = np.asarray([0x39FA3F70], dtype=np.uint32).view(np.float32)[0]
+        base = np.full((434, 770), np.float32(0.02), dtype=np.float32)
+        subtitle = {
+            "current_rectangles": [{
+                "left": 210, "top": 393, "right": 561, "bottom": 430,
+            }],
+            "source_width": 1101,
+            "field_width": 770,
+            "field_height": 434,
+            "target": target,
+            "fade": 2,
+        }
+        replay_bits = {
+            int(replay[393, 210].view(np.uint32))
+            for replay in dump_contract._replay_slr9_conditioner_sm5_candidates(
+                base, subtitle)
+        }
+        # 0x3A742C0A is the production NVIDIA field bit from the supplied ROI dump;
+        # 0x3A742C0B is the correctly rounded WARP/NumPy alternative.
+        self.assertEqual(replay_bits, {0x3A742C0A, 0x3A742C0B})
+
+    def test_slr9_replay_uses_content_width_and_boundary_extends_padding(self):
+        import numpy as np
+
+        content = (100, 10, 670, 424)
+        base = np.full((434, 770), np.float32(-0.02), dtype=np.float32)
+        base[content[1]:content[3], content[0]:content[2]] = np.float32(0.03)
+        subtitle = {
+            "current_rectangles": [{
+                "left": 300, "top": 200, "right": 400, "bottom": 250,
+            }],
+            "source_width": 1000,
+            "field_width": 770,
+            "field_height": 434,
+            "tensor_content_rect": content,
+            "target": 0.0,
+            "fade": 2,
+        }
+        replay = dump_contract._replay_slr9_conditioner(base, subtitle)
+        horizontal_step = np.float32(
+            np.float32(coordinate.CALIBRATED_DEFAULTS.max_horizontal_slope) /
+            np.float32(content[2] - content[0]))
+        core_range = np.float32(np.float32(0.5) / np.float32(1000))
+        expected_one_cell = np.add(core_range, horizontal_step, dtype=np.float32)
+        self.assertEqual(replay[220, 299], expected_one_cell)
+
+        # Synthetic tensor padding is never conditioned from its own model value. It repeats the
+        # nearest content result exactly on all four sides.
+        np.testing.assert_array_equal(
+            replay[:, :content[0]],
+            np.repeat(replay[:, content[0]:content[0] + 1], content[0], axis=1))
+        np.testing.assert_array_equal(
+            replay[:, content[2]:],
+            np.repeat(replay[:, content[2] - 1:content[2]], 770 - content[2], axis=1))
+        np.testing.assert_array_equal(
+            replay[:content[1], :],
+            np.repeat(replay[content[1]:content[1] + 1, :], content[1], axis=0))
+        np.testing.assert_array_equal(
+            replay[content[3]:, :],
+            np.repeat(replay[content[3] - 1:content[3], :], 434 - content[3], axis=0))
+
     def test_slr9_ribbon_replay_has_only_a_top_edge_collar(self):
         import numpy as np
 
@@ -2044,9 +2510,121 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             self.assertTrue(evidence["has_exterior_zero_plane"])
             self.assertGreater(evidence["beyond_collar_sample_count"], 0)
             self.assertEqual(evidence["max_abs_identity_error_output_eye_px"], 0.0)
+        self.assertEqual(
+            summary["depth_input_region"]["inference_rect"],
+            (330, 53, 630, 487))
+        self.assertEqual(
+            summary["depth_input_region"]["tensor_content_rect"],
+            (235, 0, 535, 434))
+
+    def test_roi_geometry_verifier_binds_frame_stats_to_nonpadding_content(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, region, _ = self._write_synthetic_roi_geometry_dump(root)
+            content = region["analysis"]["tensor_content_rect_px"]
+            expected_count = float(
+                (content["right"] - content["left"]) *
+                (content["bottom"] - content["top"]))
+            stats_path = root / "shadow_frame_stats.json"
+            stats = json.loads(stats_path.read_text(encoding="utf-8"))
+            self.assertEqual(stats["named_values"]["texel_count"], expected_count)
+
+            # A full-tensor count incorrectly includes synthetic letterbox padding. Even with a
+            # matching descriptor hash, it is not the exact analysis population for this frame.
+            full_tensor_count = float(770 * 434)
+            stats["named_values"]["valid_count"] = full_tensor_count
+            stats["named_values"]["texel_count"] = full_tensor_count
+            payload = json.dumps(stats).encode("utf-8")
+            stats_path.write_bytes(payload)
+            manifest["artifacts"]["shadow_frame_stats.json"]["sha256"] = hashlib.sha256(
+                payload).hexdigest()
+            (root / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "exact analysis content"):
+                dump_contract.verify_v2_dump_geometry(root)
+
+    def test_roi_geometry_verifier_uses_content_width_for_full_tensor_recurrences(self):
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, region, _ = self._write_synthetic_roi_geometry_dump(root)
+            content = region["analysis"]["tensor_content_rect_px"]
+            left, right = content["left"], content["right"]
+            width, height = 770, 434
+
+            candidate = np.zeros((height, width), dtype=np.float32)
+            split = left + (right - left) // 2
+            candidate[:, split:] = np.float32(0.001)
+            ownership = candidate.copy()
+            vertical_step = np.float32(
+                coordinate.CALIBRATED_DEFAULTS.max_vertical_shear / (right - left))
+            horizontal_step = np.float32(
+                coordinate.CALIBRATED_DEFAULTS.max_horizontal_slope / (right - left))
+            share = np.float32(coordinate.CALIBRATED_DEFAULTS.vertical_majorant_share)
+
+            majorant = ownership.copy()
+            for row in range(1, height):
+                majorant[row] = np.maximum(
+                    majorant[row], majorant[row - 1] - vertical_step)
+            for row in range(height - 2, -1, -1):
+                majorant[row] = np.maximum(
+                    majorant[row], majorant[row + 1] - vertical_step)
+            minorant = ownership.copy()
+            for row in range(1, height):
+                minorant[row] = np.minimum(
+                    ownership[row], minorant[row - 1] + vertical_step)
+            for row in range(height - 2, -1, -1):
+                minorant[row] = np.minimum(
+                    minorant[row], minorant[row + 1] + vertical_step)
+            conditioned = (
+                share * majorant + np.float32(1.0 - float(share)) * minorant
+            ).astype(np.float32)
+            final = conditioned.copy()
+            for column in range(1, width):
+                final[:, column] = np.maximum(
+                    final[:, column], final[:, column - 1] - horizontal_step)
+            for column in range(width - 2, -1, -1):
+                final[:, column] = np.maximum(
+                    final[:, column], final[:, column + 1] - horizontal_step)
+
+            fields = {
+                "shadow_candidate_parallax.f32": candidate,
+                "shadow_ownership_refined_parallax.f32": ownership,
+                "shadow_vertical_majorant.f32": majorant,
+                "shadow_vertical_conditioned.f32": conditioned,
+                "shadow_final_parallax.f32": final,
+                "warp_depth.f32": final,
+            }
+            for name, values in fields.items():
+                self._write_hashed_payload(
+                    root, manifest, name, values.astype("<f4").tobytes())
+            (root / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            summary = dump_contract.verify_v2_dump_geometry(root)
             self.assertEqual(
-                summary["depth_input_region"]["inference_rect"],
-                (95, 53, 865, 487))
+                summary["depth_input_region"]["tensor_content_rect"],
+                (235, 0, 535, 434))
+
+            # The old whole-tensor denominator would propagate the 0.001 cliff leftward. It is
+            # a different exact recurrence and must now fail closed.
+            legacy_step = np.float32(
+                coordinate.CALIBRATED_DEFAULTS.max_horizontal_slope / width)
+            legacy = conditioned.copy()
+            for column in range(1, width):
+                legacy[:, column] = np.maximum(
+                    legacy[:, column], legacy[:, column - 1] - legacy_step)
+            for column in range(width - 2, -1, -1):
+                legacy[:, column] = np.maximum(
+                    legacy[:, column], legacy[:, column + 1] - legacy_step)
+            self.assertFalse(np.array_equal(final, legacy))
+            for name in ("shadow_final_parallax.f32", "warp_depth.f32"):
+                self._write_hashed_payload(
+                    root, manifest, name, legacy.astype("<f4").tobytes())
+            (root / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "exact recurrence"):
+                dump_contract.verify_v2_dump_geometry(root)
 
     def test_roi_geometry_verifier_accepts_foreground_window_provenance(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -2383,41 +2961,16 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "geometry dimension"):
             dump_contract.validate_v2_dump_manifest_document(changed)
 
-    def test_inactive_manifest_requires_unavailable_vertical_artifacts(self):
+    def test_current_manifest_rejects_inactive_shadow_compatibility(self):
         inactive = copy.deepcopy(self.manifest)
-        inactive["renderer"].update({
-            "authority": None,
-            "parallax_v2_render_requested": False,
-            "parallax_v2_render_selected": False,
-            "mapping_artifacts_match_selected_renderer": False,
-            "parallax_v2_position_field": None,
-            "parallax_v2_coordinate_role": None,
-            "parallax_v2_ownership_refined_role": None,
-            "parallax_v2_vertical_majorant_role": None,
-            "parallax_v2_vertical_conditioned_role": None,
-            "parallax_v2_conditioner_role": None,
-            "parallax_v2_inverse": None,
-            "collar_defocus": None,
-            "live_shader_source": None,
-        })
         inactive["parallax_v2_shadow"]["active"] = False
-        inactive["parallax_v2_shadow"]["rendered_output_selected"] = False
-        for name in (
-                "shadow_candidate_parallax", "shadow_ownership_refined_parallax",
-                "shadow_vertical_majorant",
-                "shadow_vertical_conditioned",
-                "shadow_final_parallax"):
-            inactive["dimensions"][name] = None
-        for name, descriptor in inactive["artifacts"].items():
-            if name.startswith("shadow_"):
-                descriptor["available"] = False
-        decoded = dump_contract.validate_v2_dump_manifest_document(inactive)
-        self.assertFalse(decoded["vertical_majorant_available"])
+        with self.assertRaisesRegex(ValueError, "shadow attribution"):
+            dump_contract.validate_v2_dump_manifest_document(inactive)
 
     def test_manifest_rejects_selection_or_geometry_dimension_disagreement(self):
         changed = copy.deepcopy(self.manifest)
         changed["parallax_v2_shadow"]["rendered_output_selected"] = False
-        with self.assertRaisesRegex(ValueError, "selection flags disagree"):
+        with self.assertRaisesRegex(ValueError, "shadow attribution"):
             dump_contract.validate_v2_dump_manifest_document(changed)
 
         changed = copy.deepcopy(self.manifest)

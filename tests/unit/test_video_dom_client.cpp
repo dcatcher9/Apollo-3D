@@ -318,6 +318,82 @@ namespace {
     );
   }
 
+  TEST(VideoDomClientSnapshot, GeometryRunTokenRejectsAbaAndSurvivesHeartbeat) {
+    const auto first_seen = std::chrono::steady_clock::time_point {10s};
+    const video_dom::detail::protocol_record_t a {
+      .status = video_dom::status_e::ok,
+      .sequence = 1u,
+      .window = 7u,
+      .process_id = 8u,
+      .document_id = -9,
+      .video_id = -10,
+      .screen_rect = {0, 0, 1920, 1080},
+    };
+    video_dom::snapshot_t previous_a {
+      .status = a.status,
+      .window = a.window,
+      .process_id = a.process_id,
+      .document_id = a.document_id,
+      .video_id = a.video_id,
+      .screen_rect = a.screen_rect,
+      .received_at = first_seen,
+      .geometry_valid_since = first_seen,
+    };
+
+    auto b = a;
+    b.sequence = 2u;
+    b.screen_rect.left += 100;
+    b.screen_rect.right += 100;
+    const auto b_seen = first_seen + 100ms;
+    const auto b_run = video_dom::detail::continued_geometry_valid_since(
+      &previous_a,
+      b,
+      b_seen
+    );
+    ASSERT_EQ(b_run, b_seen);
+    const video_dom::snapshot_t previous_b {
+      .status = b.status,
+      .window = b.window,
+      .process_id = b.process_id,
+      .document_id = b.document_id,
+      .video_id = b.video_id,
+      .screen_rect = b.screen_rect,
+      .received_at = b_seen,
+      .geometry_valid_since = b_run,
+    };
+
+    auto returned_a = a;
+    returned_a.sequence = 3u;
+    const auto second_a_seen = b_seen + 100ms;
+    const auto second_a_run = video_dom::detail::continued_geometry_valid_since(
+      &previous_b,
+      returned_a,
+      second_a_seen
+    );
+    EXPECT_EQ(second_a_run, second_a_seen);
+    EXPECT_NE(second_a_run, previous_a.geometry_valid_since);
+
+    const video_dom::snapshot_t current_a {
+      .status = returned_a.status,
+      .window = returned_a.window,
+      .process_id = returned_a.process_id,
+      .document_id = returned_a.document_id,
+      .video_id = returned_a.video_id,
+      .screen_rect = returned_a.screen_rect,
+      .received_at = second_a_seen,
+      .geometry_valid_since = second_a_run,
+    };
+    returned_a.sequence = 4u;
+    EXPECT_EQ(
+      video_dom::detail::continued_geometry_valid_since(
+        &current_a,
+        returned_a,
+        second_a_seen + 1s
+      ),
+      second_a_run
+    );
+  }
+
   TEST(VideoDomClientLifecycle, ReacquireDuringJoinRestartsOnlyAfterOldWorkerStops) {
     video_dom::detail::lifecycle_t lifecycle;
 

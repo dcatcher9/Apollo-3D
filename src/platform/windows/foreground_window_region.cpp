@@ -9,6 +9,7 @@
 #include <array>
 #include <limits>
 #include <string_view>
+#include <utility>
 
 #include <dwmapi.h>
 #include <windows.h>
@@ -130,6 +131,8 @@ namespace platf::foreground_window {
         return "geometry-unavailable";
       case status_e::foreground_changed:
         return "foreground-changed";
+      case status_e::interactive_move_size:
+        return "interactive-move-size";
     }
     return "unknown";
   }
@@ -145,6 +148,7 @@ namespace platf::foreground_window {
           .window = raw.window,
           .process_id = raw.process_id,
           .monitor = raw.monitor,
+          .monitor_screen_rect = raw.monitor_screen_rect,
           .client_screen_rect = raw.client_screen_rect,
           .frame_screen_rect = raw.frame_screen_rect,
           .observed_at = observed_at,
@@ -164,8 +168,7 @@ namespace platf::foreground_window {
         return make_result(status_e::shell_surface);
       }
       if (
-        !raw.is_window || !raw.process_query_succeeded || raw.process_id == 0 ||
-        !raw.class_query_succeeded || !raw.style_query_succeeded
+        !raw.is_window || !raw.process_query_succeeded || raw.process_id == 0
       ) {
         return make_result(status_e::invalid_window);
       }
@@ -178,16 +181,40 @@ namespace platf::foreground_window {
       if (raw.minimized) {
         return make_result(status_e::minimized);
       }
+      if (
+        raw.gui_thread_query_succeeded && raw.gui_in_move_size &&
+        (raw.move_size_root == 0 || raw.move_size_root == raw.window) &&
+        raw.window_after == raw.window && raw.is_window_after &&
+        raw.process_query_after_succeeded && raw.process_id_after == raw.process_id
+      ) {
+        return make_result(status_e::interactive_move_size);
+      }
+      if (!raw.class_query_succeeded || !raw.style_query_succeeded) {
+        return make_result(status_e::invalid_window);
+      }
       if (!raw.cloak_query_succeeded) {
         return make_result(status_e::geometry_unavailable);
       }
       if (raw.cloaked) {
         return make_result(status_e::cloaked);
       }
-      constexpr std::uint64_t excluded_styles =
-        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED;
-      if ((raw.extended_style & excluded_styles) != 0) {
+      constexpr std::uint64_t always_excluded_styles =
+        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+      if ((raw.extended_style & always_excluded_styles) != 0) {
         return make_result(status_e::excluded_style);
+      }
+      if ((raw.extended_style & WS_EX_LAYERED) != 0) {
+        constexpr std::uint32_t known_layered_flags = LWA_ALPHA | LWA_COLORKEY;
+        const bool proven_uniformly_opaque =
+          raw.layered_attributes_succeeded &&
+          raw.layered_flags == LWA_ALPHA &&
+          raw.layered_alpha == 255u &&
+          (raw.layered_flags & ~known_layered_flags) == 0u;
+        if (!proven_uniformly_opaque) {
+          // GetLayeredWindowAttributes fails for UpdateLayeredWindow/per-pixel-alpha surfaces.
+          // Admit only the strictly stronger proof of uniform alpha 255 with no color key.
+          return make_result(status_e::excluded_style);
+        }
       }
       if (
         !raw.client_rect_succeeded || !raw.frame_rect_succeeded || raw.monitor == 0 ||
@@ -234,10 +261,43 @@ namespace platf::foreground_window {
     raw.minimized = IsIconic(window) != FALSE;
 
     DWORD process_id = 0;
-    raw.process_query_succeeded =
-      GetWindowThreadProcessId(window, &process_id) != 0 && process_id != 0;
+    const DWORD gui_thread_id = GetWindowThreadProcessId(window, &process_id);
+    raw.process_query_succeeded = gui_thread_id != 0 && process_id != 0;
     raw.process_id = process_id;
     raw.own_process_id = GetCurrentProcessId();
+
+    GUITHREADINFO gui_info {};
+    gui_info.cbSize = sizeof(gui_info);
+    raw.gui_thread_query_succeeded =
+      gui_thread_id != 0 && GetGUIThreadInfo(gui_thread_id, &gui_info) != FALSE;
+    raw.gui_in_move_size =
+      raw.gui_thread_query_succeeded && (gui_info.flags & GUI_INMOVESIZE) != 0;
+    if (raw.gui_in_move_size && gui_info.hwndMoveSize) {
+      const HWND move_size_root = GetAncestor(gui_info.hwndMoveSize, GA_ROOT);
+      raw.move_size_root = reinterpret_cast<std::uintptr_t>(move_size_root);
+    }
+    const auto recheck_foreground = [&]() {
+      const HWND foreground_after = GetForegroundWindow();
+      const HWND window_after =
+        foreground_after ? GetAncestor(foreground_after, GA_ROOT) : nullptr;
+      raw.window_after = reinterpret_cast<std::uintptr_t>(window_after);
+      raw.is_window_after = window_after && IsWindow(window_after) != FALSE;
+      DWORD process_id_after = 0;
+      raw.process_query_after_succeeded =
+        window_after && GetWindowThreadProcessId(window_after, &process_id_after) != 0 &&
+        process_id_after != 0;
+      raw.process_id_after = process_id_after;
+    };
+    if (
+      raw.gui_in_move_size &&
+      (raw.move_size_root == 0 || raw.move_size_root == raw.window)
+    ) {
+      // The advisory is enough to withdraw ROI authority and use full-source depth. Avoid DWM
+      // bounds and client mapping while USER32's modal loop is active; these synchronous calls
+      // otherwise contend with the compositor path that is trying to move the window.
+      recheck_foreground();
+      return detail::classify(raw, std::chrono::steady_clock::now());
+    }
 
     std::array<wchar_t, 256> class_name {};
     const int class_length = GetClassNameW(
@@ -258,6 +318,15 @@ namespace platf::foreground_window {
     raw.style_query_succeeded =
       extended_style != 0 || GetLastError() == ERROR_SUCCESS;
     raw.extended_style = static_cast<std::uint64_t>(extended_style);
+    if (raw.style_query_succeeded && (extended_style & WS_EX_LAYERED) != 0) {
+      COLORREF color_key = 0;
+      BYTE alpha = 0;
+      DWORD flags = 0;
+      raw.layered_attributes_succeeded =
+        GetLayeredWindowAttributes(window, &color_key, &alpha, &flags) != FALSE;
+      raw.layered_alpha = alpha;
+      raw.layered_flags = flags;
+    }
 
     DWORD cloaked = 0;
     raw.cloak_query_succeeded = SUCCEEDED(DwmGetWindowAttribute(
@@ -297,21 +366,24 @@ namespace platf::foreground_window {
     }
 
     if (raw.client_screen_rect.valid()) {
-      raw.monitor = reinterpret_cast<std::uintptr_t>(MonitorFromRect(
+      const HMONITOR monitor = MonitorFromRect(
         &client,
         MONITOR_DEFAULTTONULL
-      ));
+      );
+      raw.monitor = reinterpret_cast<std::uintptr_t>(monitor);
+      MONITORINFO monitor_info {};
+      monitor_info.cbSize = sizeof(monitor_info);
+      if (monitor && GetMonitorInfoW(monitor, &monitor_info) != FALSE) {
+        raw.monitor_screen_rect = {
+          monitor_info.rcMonitor.left,
+          monitor_info.rcMonitor.top,
+          monitor_info.rcMonitor.right,
+          monitor_info.rcMonitor.bottom,
+        };
+      }
     }
 
-    const HWND foreground_after = GetForegroundWindow();
-    const HWND window_after = foreground_after ? GetAncestor(foreground_after, GA_ROOT) : nullptr;
-    raw.window_after = reinterpret_cast<std::uintptr_t>(window_after);
-    raw.is_window_after = window_after && IsWindow(window_after) != FALSE;
-    DWORD process_id_after = 0;
-    raw.process_query_after_succeeded =
-      window_after && GetWindowThreadProcessId(window_after, &process_id_after) != 0 &&
-      process_id_after != 0;
-    raw.process_id_after = process_id_after;
+    recheck_foreground();
 
     return detail::classify(raw, std::chrono::steady_clock::now());
   }
@@ -331,6 +403,7 @@ namespace platf::foreground_window {
       .window = observation.window,
       .process_id = observation.process_id,
       .monitor = observation.monitor,
+      .monitor_screen_rect = observation.monitor_screen_rect,
       .client_screen_rect = observation.client_screen_rect,
       .frame_screen_rect = observation.frame_screen_rect,
     };
@@ -351,6 +424,7 @@ namespace platf::foreground_window {
       .window = observation.window,
       .process_id = observation.process_id,
       .monitor = observation.monitor,
+      .monitor_screen_rect = observation.monitor_screen_rect,
       .client_screen_rect = observation.client_screen_rect,
       .frame_screen_rect = observation.frame_screen_rect,
       .observed_at = observation.observed_at,
@@ -374,6 +448,28 @@ namespace platf::foreground_window {
            capture_now - snapshot.observed_at <= maximum_age &&
            *content_timestamp >= snapshot.geometry_valid_since &&
            *content_timestamp <= capture_now;
+  }
+
+  bool requires_full_source_causal_fallback(
+    const snapshot_t &previous_snapshot,
+    const snapshot_t &current_snapshot,
+    const std::optional<std::chrono::steady_clock::time_point> &content_timestamp
+  ) noexcept {
+    const auto extent = [](const rect_t rect) {
+      return std::pair {
+        static_cast<std::int64_t>(rect.right) - rect.left,
+        static_cast<std::int64_t>(rect.bottom) - rect.top,
+      };
+    };
+    return snapshot_has_complete_geometry(previous_snapshot) &&
+           snapshot_has_complete_geometry(current_snapshot) &&
+           previous_snapshot.window == current_snapshot.window &&
+           previous_snapshot.process_id == current_snapshot.process_id &&
+           previous_snapshot.monitor == current_snapshot.monitor &&
+           extent(previous_snapshot.client_screen_rect) ==
+             extent(current_snapshot.client_screen_rect) &&
+           content_timestamp &&
+           *content_timestamp < current_snapshot.geometry_valid_since;
   }
 
   const char *mapping_status_name(const mapping_status_e status) noexcept {
@@ -418,7 +514,13 @@ namespace platf::foreground_window {
     if (!target.identity_orientation) {
       return {.status = mapping_status_e::unsupported_orientation};
     }
-    if (snapshot.monitor != target.monitor) {
+    // HMONITOR values may differ for duplicated outputs. Exact monitor bounds equal to the
+    // selected output's raw DesktopCoordinates prove that both handles use the same physical
+    // coordinate domain; all partial/spanning checks below still apply unchanged.
+    const bool equivalent_cloned_monitor =
+      snapshot.monitor_screen_rect.valid() &&
+      snapshot.monitor_screen_rect == target.screen_rect;
+    if (snapshot.monitor != target.monitor && !equivalent_cloned_monitor) {
       return {.status = mapping_status_e::monitor_mismatch};
     }
     if (!contains(target.screen_rect, snapshot.client_screen_rect)) {

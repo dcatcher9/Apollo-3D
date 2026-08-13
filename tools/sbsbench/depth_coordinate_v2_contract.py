@@ -71,7 +71,7 @@ SHADER_SOURCE_SPECS = (
     ("host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"),
 )
 EXPECTED_SUBTITLE_OCR = {
-    "schema": 6,
+    "schema": 8,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
     "artifact_onnx_sha256": (
@@ -100,8 +100,16 @@ EXPECTED_SUBTITLE_OCR = {
         "shape": [1, 1, 160, 960],
     },
     "field_policy": {
+        "detector_active_probability_threshold": 0.2,
+        "detector_min_mean_score": 0.4,
         "locator_max_width_numerator": 9,
         "locator_max_width_denominator": 10,
+        "locator_min_width_cells": 48,
+        "locator_min_height_cells": 6,
+        "locator_min_aspect_numerator": 2,
+        "locator_min_aspect_denominator": 1,
+        "locator_match_iou_threshold": 0.6,
+        "locator_death_grace_observations": 6,
         "ocr_safe_row_top": 24,
         "ocr_safe_row_bottom": 155,
         "source_crop_aspect_width": 6,
@@ -216,8 +224,16 @@ class SubtitleOcrContract:
     output_dtype: str
     output_layout: str
     output_shape: tuple[int, int, int, int]
+    detector_active_probability_threshold: float
+    detector_min_mean_score: float
     locator_max_width_numerator: int
     locator_max_width_denominator: int
+    locator_min_width_cells: int
+    locator_min_height_cells: int
+    locator_min_aspect_numerator: int
+    locator_min_aspect_denominator: int
+    locator_match_iou_threshold: float
+    locator_death_grace_observations: int
     ocr_safe_row_top: int
     ocr_safe_row_bottom: int
     source_crop_aspect_width: int
@@ -293,8 +309,18 @@ def _subtitle_ocr_contract(contract: dict[str, Any]) -> SubtitleOcrContract:
         output_dtype=output_tensor["dtype"],
         output_layout=output_tensor["layout"],
         output_shape=tuple(output_tensor["shape"]),
+        detector_active_probability_threshold=float(
+            field_policy["detector_active_probability_threshold"]),
+        detector_min_mean_score=float(field_policy["detector_min_mean_score"]),
         locator_max_width_numerator=field_policy["locator_max_width_numerator"],
         locator_max_width_denominator=field_policy["locator_max_width_denominator"],
+        locator_min_width_cells=field_policy["locator_min_width_cells"],
+        locator_min_height_cells=field_policy["locator_min_height_cells"],
+        locator_min_aspect_numerator=field_policy["locator_min_aspect_numerator"],
+        locator_min_aspect_denominator=field_policy["locator_min_aspect_denominator"],
+        locator_match_iou_threshold=float(field_policy["locator_match_iou_threshold"]),
+        locator_death_grace_observations=field_policy[
+            "locator_death_grace_observations"],
         ocr_safe_row_top=field_policy["ocr_safe_row_top"],
         ocr_safe_row_bottom=field_policy["ocr_safe_row_bottom"],
         source_crop_aspect_width=field_policy["source_crop_aspect_width"],
@@ -306,8 +332,8 @@ def _subtitle_ocr_contract(contract: dict[str, Any]) -> SubtitleOcrContract:
         ribbon_min_width_numerator=field_policy["ribbon_min_width_numerator"],
         ribbon_min_width_denominator=field_policy["ribbon_min_width_denominator"],
         ribbon_bottom_tolerance_pixels=field_policy["ribbon_bottom_tolerance_pixels"],
-        ribbon_bottom_tolerance_projection=
-            field_policy["ribbon_bottom_tolerance_projection"],
+        ribbon_bottom_tolerance_projection=(
+            field_policy["ribbon_bottom_tolerance_projection"]),
         ribbon_cover_pad_limit=field_policy["ribbon_cover_pad_limit"],
         record_schema=record["schema"],
         record_tag=record["tag"],

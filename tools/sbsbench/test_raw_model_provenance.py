@@ -322,8 +322,8 @@ class RawModelProvenanceTests(unittest.TestCase):
             onnx_sha256=self.CALIBRATION.onnx_sha256, raw_depth_sha256="a" * 64,
             model_input_sha256="b" * 64, model_input_shape_sha256="c" * 64,
             preprocess_profile=self.CALIBRATION.preprocess.profile,
-            preprocess_source_closure_sha256=
-                self.CALIBRATION.preprocess.source_closure_sha256,
+            preprocess_source_closure_sha256=(
+                self.CALIBRATION.preprocess.source_closure_sha256),
             calibration_id=self.CALIBRATION.calibration_id,
             calibrated_raw_coordinate_scale=self.CALIBRATION.raw_coordinate_scale,
             model_input_width=self.WIDTH, model_input_height=self.HEIGHT, reason=None)

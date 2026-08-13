@@ -55,13 +55,15 @@ The Desktop Duplication dirty-rectangle investigation in Phase 0.1 is complete a
 video-boundary authority. W6 now has a two-source window-region policy. A supervised Chromium
 IAccessible2 helper can bind a fresh, causally-prior `<video>` rectangle to a matched Host-SBS frame;
 that semantic source has priority. Otherwise a lightweight Win32/DWM observer may bind the current
-foreground root client. Either ROI keeps the authenticated tensor aspect with at most 2% inward area
-trimming and is never expanded, padded, or stretched. A selected client that maps exactly to the
-capture canonicalizes to ordinary full-frame V2. Null/shell/desktop/self, hidden/minimized/cloaked or
-excluded windows, invalid/stale geometry, WGC, non-identity rotation, and off-output or spanning
-rectangles all retain ordinary full-frame V2; the route never switches capture monitors. Internal
-base-V2 authentication failures still render flat. The optional `window_region.json` artifact is
-diagnostic only.
+foreground root client. Either ROI copies that authority rectangle whole and fits it into the
+session's fixed authenticated tensor with a deterministic centered integer contain-fit. It never
+crops or stretches source pixels; tensor padding replicates the nearest content edge and is excluded
+from depth statistics, scene cuts, ownership, history, and OCR. A selected client that maps exactly
+to the capture canonicalizes to ordinary full-frame V2. Null/shell/desktop/self,
+hidden/minimized/cloaked or excluded windows, invalid/stale geometry, WGC, non-identity rotation, and
+off-output or spanning rectangles all retain ordinary full-frame V2; the route never switches
+capture monitors. Internal base-V2 authentication failures still render flat. The optional
+`window_region.json` artifact is diagnostic only.
 
 ## Context an implementer needs
 
@@ -100,18 +102,21 @@ The practical consequences:
   the shipped calibration and cannot be submitted directly.
 
 The implemented window-region ROI keeps the full-frame session's already authenticated tensor shape.
-If the exact Chromium-video or foreground-client rectangle misses that aspect slightly, it may trim
-inward by at most 2% of its area while retaining the largest centered portion. It never expands the
-authority rectangle, pads the tensor, or stretches pixels. A larger mismatch or invalid rectangle
-selects ordinary full-frame V2; it does not turn an otherwise supported Host SBS stream flat.
+The exact Chromium-video or foreground-client rectangle is copied whole, including every source
+pixel, and an arbitrary aspect ratio is admitted. A deterministic centered integer contain-fit maps
+that copy into a half-open content rectangle inside the fixed tensor without cropping or stretching.
+Any tensor cells outside the content rectangle replicate the nearest content edge, but remain
+synthetic support: they are excluded from depth statistics, scene-cut evidence, ownership, temporal
+history, and OCR authority. Invalid source geometry still selects ordinary full-frame V2; it does
+not turn an otherwise supported Host SBS stream flat.
 
 Separately authenticated Chromium true fullscreen is canonical full-frame V2: an available semantic
 video must cover the complete foreground browser client and the host must map that client exactly to
-the capture. It bypasses crop, trim, ROI-domain reset, and ROI embedding. Element overscan,
-document-rectangle clipping, and multiple full-cover clones are allowed at helper selection. The
-lower-priority foreground-client route independently applies the same canonicalization whenever its
-client rectangle exactly equals the capture; that geometric result does not claim Chromium semantic
-authority.
+the capture. It bypasses ROI copying, contain-fit padding, ROI-domain reset, and ROI embedding.
+Element overscan, document-rectangle clipping, and multiple full-cover clones are allowed at helper
+selection. The lower-priority foreground-client route independently applies the same
+canonicalization whenever its client rectangle exactly equals the capture; that geometric result
+does not claim Chromium semantic authority.
 
 ### Non-negotiable repo process
 
@@ -337,7 +342,7 @@ off until those precision tests pass.
 
 ### W6. Video ROI detection
 
-**Goal and current boundary.** The implemented route performs one crop-local V2 analysis and leaves
+**Goal and current boundary.** The implemented route performs one ROI-local V2 analysis and leaves
 the surrounding desktop at zero parallax beyond the required edge collar. The unique largest fully
 contained Chromium `<video>` in the foreground browser has priority. Otherwise the current
 foreground root client can supply the rectangle, which covers ordinary windowed players and games
@@ -433,15 +438,17 @@ uses `LastPresentTime`, never a later cursor-only timestamp. The host also reche
 and PID immediately before binding.
 
 The helper's fullscreen client authority is first mapped by the host and is admitted only when it
-equals the full capture. It then canonicalizes to ordinary full-frame V2, with no crop, trim,
-ROI-domain reset, or active-ROI dump rejection. Without this proof the browser helper has no semantic
-fullscreen authority, although the lower-priority foreground-client route can independently
-canonicalize the same exact-full-capture client by geometry. Otherwise the strict windowed slot may
-trim the video rectangle inward by at most 2% of its area so its aspect maps to the current full-frame
-authenticated tensor. The generic foreground-client slot uses the same inward-only fit. Neither
-route trims more, expands its authority rectangle, pads, or stretches. A same-format D3D11 crop
-becomes the only DAV2 and ownership source for that frame; scene cuts, center, and temporal histories
-are crop-local. The full captured texture remains the color source.
+equals the full capture. It then canonicalizes to ordinary full-frame V2, with no ROI copy,
+contain-fit padding, ROI-domain reset, or active-ROI dump rejection. Without this proof the browser
+helper has no semantic fullscreen authority, although the lower-priority foreground-client route can
+independently canonicalize the same exact-full-capture client by geometry. Otherwise the strict
+windowed slot copies the complete video rectangle, and the generic foreground-client slot likewise
+copies the complete root client. Either arbitrary-aspect copy uses the current full-frame
+authenticated tensor and a deterministic centered integer contain-fit. The source is never cropped
+or stretched. Tensor cells outside the integer content rectangle replicate the nearest content edge
+and are excluded from depth statistics, scene cuts, ownership, history, and OCR. The exact
+same-format D3D11 copy is the only DAV2 and ownership source for that frame; scene analysis remains
+ROI-local. The full captured texture remains the color source.
 After V2, local parallax is multiplied by `ROI_width / source_width` to preserve pixel shift, and an
 outside-only signed collar decays at the production slope limits to exact zero beyond the collar
 without changing any ROI-interior value.
@@ -456,10 +463,11 @@ translation within one unchanged authority do not.
 This live route currently authorizes only Desktop Duplication. WGC has no `LastPresentTime`
 equivalent for separating content from cursor-only compositor frames and therefore uses full-frame
 V2. Diagnostics may record the selected frame-bound window region and observer/mapping provenance,
-but that observation is not the live renderer authority by itself. Current Dump 3D schema 28 records
-the crop-local analysis field, authority kind, authoritative full-source placement/collar contract,
-and exact full-source inverse map as distinct evidence. The strict reader accepts only the current
-schema and identity; historical dump schemas are intentionally unsupported.
+but that observation is not the live renderer authority by itself. Current Dump 3D schema 29 records
+the ROI-local analysis field, integer tensor-content rectangle, padded-area fraction, fit method,
+authority kind, authoritative full-source placement/collar contract, and exact full-source inverse
+map as distinct evidence. The strict reader accepts only the current schema and identity; historical
+dump schemas are intentionally unsupported.
 
 A paused page captured before the first valid geometry run still has no matched-frame border. The
 host waits for a real `LastPresentTime`; once the geometry predates a presented content frame,
@@ -471,7 +479,7 @@ CSS clipping/occlusion, canvas or WebGL players, protected content, and disabled
 all defeat it. Reading extended IA2 attributes enables Chromium's richer accessibility
 serialization process-wide, so browser CPU and memory overhead remain part of live qualification.
 If an overlay is captured inside an otherwise authorized semantic rectangle, it remains ordinary
-crop content unless a separately admitted burned-in-overlay treatment supplies the tight mask. The
+ROI content unless a separately admitted burned-in-overlay treatment supplies the tight mask. The
 ROI route itself does not recover unoccluded video or construct a compositor-visible mask.
 
 NVIDIA RTX Video does not provide an alternate public discovery API. Chromium already owns the
@@ -483,17 +491,19 @@ external DOM rectangle that Sunshine can query.
 
 - **Stereo window and frame violation remains a content limitation.** The renderer does not pull the
   ROI boundary to zero from inside, because that would compress legitimate video depth. It preserves
-  every interior value and spends only the minimum slope-limited collar outside the fitted analysis
+  every interior value and spends only the minimum slope-limited collar outside the exact authority
   rectangle before reaching the desktop's exact zero plane. A foreground object visibly cut by the
-  fitted or DOM edge can still produce contradictory occlusion cues; monocular input cannot recover
-  the hidden part of that object.
+  authority or DOM edge can still produce contradictory occlusion cues; monocular input cannot
+  recover the hidden part of that object.
 - **Full-source color remains available at the edge.** The renderer does not clamp sampling to the
-  crop or stretch the cropped image. The outside collar can sample the captured browser/desktop
-  pixels that are actually present, then ordinary zero-parallax surroundings remain unchanged.
-- **Aspect adaptation is inward-only and bounded.** See
-  [the resolution constraint](#a-resolution-constraint-that-will-bite-roi-work). At most 2% of the
-  detected area may be removed to reach the current authenticated aspect. A larger mismatch uses
-  full-frame V2.
+  ROI or stretch its exact copied content. The outside collar can sample the captured
+  browser/desktop pixels that are actually present, then ordinary zero-parallax surroundings remain
+  unchanged.
+- **Aspect adaptation preserves the complete source.** See
+  [the resolution constraint](#a-resolution-constraint-that-will-bite-roi-work). Any admitted ROI
+  aspect uses a deterministic centered integer contain-fit inside the fixed authenticated tensor.
+  Nearest-edge replicated padding is synthetic and cannot contribute depth, cut, ownership, history,
+  or OCR evidence.
 - **Motion is exact-frame attributed.** Rendering consumes only the rectangle attached to the same
   private color/depth slot. Analysis-domain changes reset temporal/camera state, while a pure
   position change of the same-sized ROI retains it. Stale or partially off-monitor geometry uses
@@ -501,7 +511,7 @@ external DOM rectangle that Sunshine can query.
 - **Exact full-capture clients are canonical full source.** Chromium can prove this through a
   semantic video covering the complete foreground client; the generic route can prove it from the
   causally continuous client rectangle itself. In both cases the ordinary full-frame domain
-  continues without crop, temporal reset, or dump rejection.
+  continues without ROI copying, temporal reset, or dump rejection.
 
 **A reality that will dominate user reports.** Hardware-DRM content — Netflix, Disney+, Prime — is
 black in Desktop Duplication. The pixels are not obtainable, so no amount of detection makes ROI
@@ -511,10 +521,11 @@ before a user discovers it.
 **Status.** The dirty-region detector is retired. IA2 helper supervision, strict unique-largest
 video selection, separate full-client semantic fullscreen selection, the lightweight foreground-root
 client observer, Chromium-first priority, causal continuity, raw virtual-desktop coordinate mapping,
-same-output containment, exact-full-source canonicalization, bounded inward aspect trim, same-format
-DAV2/ownership crop, authority-specific state, full-source rendering, and the outside-only zero-plane
-collar are implemented. Active ROI frames are represented by current Dump 3D schema 28; ordinary
-replay remains fail-closed until it consumes both coordinate domains.
+same-output containment, exact-full-source canonicalization, arbitrary-aspect integer contain-fit,
+edge-replicated excluded padding, exact same-format DAV2/ownership copying, authority-specific state,
+full-source rendering, and the outside-only zero-plane collar are implemented. Active ROI frames are
+represented by current Dump 3D schema 29. Strict replay reproduces the integer content plan and
+validates both the ROI-local and full-source coordinate domains; mismatched evidence fails closed.
 
 ---
 
@@ -665,7 +676,7 @@ foreground. Test one main video plus smaller previews, pause/resume, local-only 
 dynamic sidebars, maximise/restore, browser zoom, and a negative-coordinate monitor. The host log
 should publish only transitions for a validated half-open capture rectangle. Fullscreen endpoint
 rounding of at most one physical pixel is clipped. For windowed ROI, larger overflow, partial
-clipping, stale helper heartbeat, unsupported aspect, or equal-largest videos must select ordinary
+clipping, stale helper heartbeat, invalid geometry, or equal-largest videos must select ordinary
 full-frame V2. Separately test fullscreen element overscan, a clipped-but-available document
 rectangle, and multiple full-cover clones: these remain eligible only while one retained available
 semantic video covers the unchanged foreground client. An incomplete walk cannot create or replace a
@@ -681,21 +692,23 @@ capture output and must not crop the intersection. Switch from a valid Chromium 
 browser's foreground client and verify the distinct authority resets analysis state.
 
 Any selected client rectangle that maps exactly to the capture must canonicalize to ordinary
-full-frame V2 with no crop, trim, analysis-domain reset, or ROI embedding. Chromium's semantic
-fullscreen status and the generic foreground-client geometry can independently reach this canonical
-result; neither creates an active ROI.
+full-frame V2 with no ROI copy, contain-fit padding, analysis-domain reset, or ROI embedding.
+Chromium's semantic fullscreen status and the generic foreground-client geometry can independently
+reach this canonical result; neither creates an active ROI.
 This route-level fallback is distinct from the base fail-closed contract: a model, provenance, state,
 field, or renderer authentication failure must render flat rather than retrying through full-frame
 geometry.
 
-For accepted ROIs, verify that aspect fitting removes at most 2% of the selected area from inside the
-authority rectangle, uses the current authenticated tensor, and never pads or stretches. Inspect
-both disparity signs at all four edges: the ROI interior must remain unchanged, the outside-only
-collar must respect the production slope limits, and the farther surround must be exactly zero. A
-pure window
+For accepted ROIs, verify that the exact authority rectangle is copied whole and an arbitrary aspect
+uses the current authenticated tensor with a deterministic centered integer contain-fit. Source
+pixels must never be cropped or stretched. Nearest-edge replicated padding must be excluded from
+depth statistics, cut evidence, ownership, history, and OCR. Inspect both disparity signs at all four
+edges: the ROI interior must remain unchanged, the outside-only collar must respect the production
+slope limits, and the farther surround must be exactly zero. A pure window
 translation must retain scene state; ROI/full, authority, identity, size, and transfer-domain changes
-must reset it. Capture a schema-28 ROI Dump 3D and require its full-source inverse map to be identity
-beyond the conservative collar; the crop-local final field alone is not sufficient evidence.
+must reset it. Capture a schema-29 ROI Dump 3D and require its tensor-content rectangle, padding
+fraction, and fit method to reproduce the integer plan; require its full-source inverse map to be
+identity beyond the conservative collar. The ROI-local final field alone is not sufficient evidence.
 
 ### Phase 1 — Overlay treatment
 

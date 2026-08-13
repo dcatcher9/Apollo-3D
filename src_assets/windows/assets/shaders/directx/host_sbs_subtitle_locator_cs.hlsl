@@ -28,6 +28,13 @@
     !defined(V2_OCR_CROP_ASPECT_HEIGHT) || \
     !defined(V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR) || \
     !defined(V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR) || \
+    !defined(V2_SUBTITLE_LOCATOR_MIN_WIDTH_CELLS) || \
+    !defined(V2_SUBTITLE_LOCATOR_MIN_HEIGHT_CELLS) || \
+    !defined(V2_SUBTITLE_LOCATOR_MIN_ASPECT_NUMERATOR) || \
+    !defined(V2_SUBTITLE_LOCATOR_MIN_ASPECT_DENOMINATOR) || \
+    !defined(V2_SUBTITLE_LOCATOR_MATCH_IOU_THRESHOLD) || \
+    !defined(V2_SUBTITLE_LOCATOR_DEATH_GRACE_OBSERVATIONS) || \
+    !defined(V2_OCR_MIN_MEAN_SCORE) || \
     !defined(V2_MODEL_CALIBRATED_SHAPE_COUNT) || \
     !defined(V2_SUBTITLE_LOCATOR_STATE_SCHEMA) || \
     !defined(V2_SUBTITLE_LOCATOR_STATE_TAG) || \
@@ -56,6 +63,11 @@
     V2_OCR_RIBBON_BOTTOM_TOLERANCE_PIXELS >= V2_OCR_SAFE_ROW_BOTTOM || \
     V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR == 0 || \
     V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR >= V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR || \
+    V2_SUBTITLE_LOCATOR_MIN_WIDTH_CELLS == 0u || \
+    V2_SUBTITLE_LOCATOR_MIN_HEIGHT_CELLS == 0u || \
+    V2_SUBTITLE_LOCATOR_MIN_ASPECT_NUMERATOR == 0u || \
+    V2_SUBTITLE_LOCATOR_MIN_ASPECT_DENOMINATOR == 0u || \
+    V2_SUBTITLE_LOCATOR_DEATH_GRACE_OBSERVATIONS == 0u || \
     V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY != 4u || \
     V2_SUBTITLE_LOCATOR_KIND_WORD != 31u || \
     V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT != 0u || \
@@ -77,6 +89,7 @@ cbuffer SubtitleLocatorConstants : register(b2) {
     uint4 locator_field;   // width, height, ROI top, ROI bottom
     uint4 locator_source;  // analysis source width, height, enabled, input-domain reset
     uint4 locator_frame;   // matched frame lo/hi, analysis generation lo/hi
+    uint4 locator_content; // integer half-open real-source rectangle in locator_field
 };
 
 static const uint FLAG_OWNER = 1u;
@@ -98,7 +111,8 @@ static const uint NEW_OWNER_BASE = 12u;
 static const uint NEW_PENDING_BASE = 16u;
 static const uint NEW_CURRENT_BASE = 20u;
 static const uint MATCHED_BASE = 24u;
-static const uint DEATH_GRACE_OBSERVATIONS = 6u;
+static const uint DEATH_GRACE_OBSERVATIONS =
+    V2_SUBTITLE_LOCATOR_DEATH_GRACE_OBSERVATIONS;
 
 groupshared uint PreviousState[V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT];
 groupshared uint4 QualifiedCores[V2_OCR_FINAL_BOX_CAPACITY];
@@ -125,22 +139,18 @@ bool ZeroRect(uint4 rectangle) {
     return all(rectangle == uint4(0u, 0u, 0u, 0u));
 }
 
-// The active field/ROI is carried by the existing runtime cbuffer and repeated in OCR8.  The host
-// enables this path only after authenticating the DAV2 tensor shape; SLR9 independently checks
-// finite ABI-sized geometry, the actual BaseField dispatch dimensions, and that the ROI is a
-// non-empty subset of the exact bottom-6:1 detector crop.  Any disagreement publishes no current
-// authority and condition_main copies BaseField exactly.
-bool LocatorDomainGeometryValid() {
-    if (locator_source.x == 0u || locator_source.y == 0u || locator_source.z > 1u ||
-        locator_field.x == 0u || locator_field.y == 0u ||
-        locator_field.x > 0xffffu || locator_field.y > 0xffffu ||
-        locator_field.z >= locator_field.w || locator_field.w > locator_field.y ||
-        target_w != locator_field.x || target_h != locator_field.y) {
-        return false;
-    }
+uint LocatorContentWidth() {
+    return locator_content.z - locator_content.x;
+}
 
-    if (!V2SubtitleOcrFieldIsCalibrated(locator_field.x, locator_field.y)) return false;
+uint LocatorContentHeight() {
+    return locator_content.w - locator_content.y;
+}
 
+bool ProjectDetectorRowCeil(uint detector_y, out uint projected_y) {
+    projected_y = 0u;
+    if (detector_y > V2_OCR_OUTPUT_HEIGHT || locator_source.x == 0u ||
+        locator_source.y == 0u || LocatorContentHeight() == 0u) return false;
     uint crop_quotient = locator_source.x / V2_OCR_CROP_ASPECT_WIDTH;
     uint crop_remainder = locator_source.x % V2_OCR_CROP_ASPECT_WIDTH;
     uint crop_height = min(
@@ -151,19 +161,39 @@ bool LocatorDomainGeometryValid() {
     uint crop_top = locator_source.y - crop_height;
     if (locator_source.y > 0xffffffffu / V2_OCR_OUTPUT_HEIGHT) return false;
     uint denominator = V2_OCR_OUTPUT_HEIGHT * locator_source.y;
-    if (denominator > 0xffffffffu / locator_field.y) return false;
-    uint top_numerator =
-        crop_top * V2_OCR_OUTPUT_HEIGHT + V2_OCR_SAFE_ROW_TOP * crop_height;
-    uint bottom_numerator =
-        crop_top * V2_OCR_OUTPUT_HEIGHT + V2_OCR_SAFE_ROW_BOTTOM * crop_height;
-    uint top_scaled = top_numerator * locator_field.y;
-    uint bottom_scaled = bottom_numerator * locator_field.y;
-    uint expected_roi_top = min(
-        top_scaled / denominator + (top_scaled % denominator != 0u ? 1u : 0u),
-        locator_field.y);
-    uint expected_roi_bottom = min(
-        bottom_scaled / denominator + (bottom_scaled % denominator != 0u ? 1u : 0u),
-        locator_field.y);
+    if (denominator == 0u || denominator > 0xffffffffu / LocatorContentHeight()) return false;
+    uint numerator = crop_top * V2_OCR_OUTPUT_HEIGHT + detector_y * crop_height;
+    uint scaled = numerator * LocatorContentHeight();
+    projected_y = locator_content.y + min(
+        scaled / denominator + (scaled % denominator != 0u ? 1u : 0u),
+        LocatorContentHeight());
+    return true;
+}
+
+// The active field/ROI is carried by the existing runtime cbuffer and repeated in OCR8.  The host
+// enables this path only after authenticating the DAV2 tensor shape; SLR9 independently checks
+// finite ABI-sized geometry, the actual BaseField dispatch dimensions, and that the ROI is a
+// non-empty subset of the exact bottom-6:1 detector crop.  Any disagreement publishes no current
+// authority and condition_main copies BaseField exactly.
+bool LocatorDomainGeometryValid() {
+    if (locator_source.x == 0u || locator_source.y == 0u || locator_source.z > 1u ||
+        locator_field.x == 0u || locator_field.y == 0u ||
+        locator_field.x > 0xffffu || locator_field.y > 0xffffu ||
+        locator_field.z >= locator_field.w || locator_field.w > locator_field.y ||
+        target_w != locator_field.x || target_h != locator_field.y ||
+        locator_content.x >= locator_content.z || locator_content.y >= locator_content.w ||
+        locator_content.z > locator_field.x || locator_content.w > locator_field.y ||
+        locator_field.z < locator_content.y || locator_field.w > locator_content.w ||
+        any(locator_content != DepthAnalysisContentCells())) {
+        return false;
+    }
+
+    if (!V2SubtitleOcrFieldIsCalibrated(locator_field.x, locator_field.y)) return false;
+
+    uint expected_roi_top;
+    uint expected_roi_bottom;
+    if (!ProjectDetectorRowCeil(V2_OCR_SAFE_ROW_TOP, expected_roi_top) ||
+        !ProjectDetectorRowCeil(V2_OCR_SAFE_ROW_BOTTOM, expected_roi_bottom)) return false;
     return locator_field.z == expected_roi_top && locator_field.w == expected_roi_bottom;
 }
 
@@ -173,13 +203,14 @@ bool LocatorGeometryValid() {
 
 bool ValidRoiRect(uint4 rectangle) {
     return rectangle.x < rectangle.z && rectangle.y < rectangle.w &&
-        rectangle.z <= locator_field.x && rectangle.w <= locator_field.y &&
+        rectangle.x >= locator_content.x && rectangle.z <= locator_content.z &&
         rectangle.y >= locator_field.z && rectangle.w <= locator_field.w;
 }
 
 bool ValidFieldRect(uint4 rectangle) {
     return rectangle.x < rectangle.z && rectangle.y < rectangle.w &&
-        rectangle.z <= locator_field.x && rectangle.w <= locator_field.y;
+        rectangle.x >= locator_content.x && rectangle.y >= locator_content.y &&
+        rectangle.z <= locator_content.z && rectangle.w <= locator_content.w;
 }
 
 uint RectArea(uint4 rectangle) {
@@ -272,7 +303,7 @@ bool SameBaselineSegments(uint4 a, uint4 b) {
         (a.y + a.w) - (b.y + b.w) : (b.y + b.w) - (a.y + a.w);
     uint horizontal_gap = a_before_b ? b.x - a.z : a.x - b.z;
     uint combined_span = max(a.z, b.z) - min(a.x, b.x);
-    uint maximum_width = locator_field.x * V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR /
+    uint maximum_width = LocatorContentWidth() * V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR /
         V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR;
     return vertical_overlap * 4u >= shorter_height * 3u &&
         taller_height <= 2u * shorter_height &&
@@ -286,7 +317,8 @@ bool ValidOcrBoxPayload(uint offset) {
         OcrRecord[offset + 0u], OcrRecord[offset + 1u],
         OcrRecord[offset + 2u], OcrRecord[offset + 3u]);
     float score = asfloat(OcrRecord[offset + 4u]);
-    return ValidFieldRect(rectangle) && FiniteFloat(score) && score >= 0.4f && score <= 1.0f &&
+    return ValidFieldRect(rectangle) && FiniteFloat(score) &&
+        score >= V2_OCR_MIN_MEAN_SCORE && score <= 1.0f &&
         (OcrRecord[offset + 5u] & ~V2_OCR_BOX_KNOWN_FLAGS) == 0u &&
         OcrRecord[offset + 6u] != 0u && OcrRecord[offset + 6u] <= V2_OCR_OUTPUT_WIDTH &&
         OcrRecord[offset + 7u] < OcrRecord[offset + 6u];
@@ -314,15 +346,16 @@ bool ValidOcrPair(uint slot) {
     if (ribbon) {
         uint width = core.z - core.x;
         uint minimum_bottom = 0u;
-        bool projected = V2SubtitleOcrRibbonMinBottom(
-            locator_source.x, locator_source.y, locator_field.x, locator_field.y,
+        bool projected = ProjectDetectorRowCeil(
+            V2_OCR_SAFE_ROW_BOTTOM - V2_OCR_RIBBON_BOTTOM_TOLERANCE_PIXELS,
             minimum_bottom);
         if (width * V2_OCR_RIBBON_MIN_WIDTH_DENOMINATOR <
-                locator_field.x * V2_OCR_RIBBON_MIN_WIDTH_NUMERATOR ||
+                LocatorContentWidth() * V2_OCR_RIBBON_MIN_WIDTH_NUMERATOR ||
             !projected || core.w < minimum_bottom || core.w > locator_field.w ||
             OcrRecord[raw_offset + 6u] <= OcrRecord[raw_offset + 7u] ||
             OcrRecord[raw_offset + 7u] < V2_OCR_RIBBON_MIN_STRUCTURAL_GAPS ||
-            cover.x != 0u || cover.z != locator_field.x || cover.w != locator_field.y ||
+            cover.x != locator_content.x || cover.z != locator_content.z ||
+            cover.w != locator_content.w ||
             cover.y < locator_field.z) {
             return false;
         }
@@ -392,10 +425,13 @@ uint BuildCurrentStack(uint final_count) {
             // side, so font/target-sampling distances remain physical cell counts.  Only the
             // maximum ordinary subtitle span is a fraction of the active field width.  A ribbon
             // has independent detector topology evidence and may legitimately span the field.
-            uint maximum_width = locator_field.x * V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR /
+            uint maximum_width = LocatorContentWidth() * V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR /
                 V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR;
-            if (width >= 48u && (kind != 0u || width <= maximum_width) &&
-                height >= 6u && width >= 2u * height) {
+            if (width >= V2_SUBTITLE_LOCATOR_MIN_WIDTH_CELLS &&
+                (kind != 0u || width <= maximum_width) &&
+                height >= V2_SUBTITLE_LOCATOR_MIN_HEIGHT_CELLS &&
+                width * V2_SUBTITLE_LOCATOR_MIN_ASPECT_DENOMINATOR >=
+                    V2_SUBTITLE_LOCATOR_MIN_ASPECT_NUMERATOR * height) {
                 QualifiedCores[qualified_count] = core;
                 QualifiedCovers[qualified_count] = cover;
                 QualifiedKinds[qualified_count] = kind;
@@ -460,7 +496,7 @@ uint BuildCurrentStack(uint final_count) {
                         bbox.w = max(bbox.w, rectangle.w);
                     }
                 }
-                uint maximum_width = locator_field.x *
+                uint maximum_width = LocatorContentWidth() *
                     V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR /
                     V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR;
                 bool better = count <= MAX_LINES && bbox.z - bbox.x <= maximum_width &&
@@ -562,8 +598,8 @@ bool ValidatePreviousCurrent(uint count) {
         if (slot < count) {
             bool ribbon = ((kinds >> slot) & 1u) != 0u;
             bool valid = ribbon ?
-                (ValidFieldRect(rectangle) && rectangle.x == 0u &&
-                 rectangle.z == locator_field.x && rectangle.w == locator_field.y &&
+                (ValidFieldRect(rectangle) && rectangle.x == locator_content.x &&
+                 rectangle.z == locator_content.z && rectangle.w == locator_content.w &&
                  rectangle.y >= locator_field.z) : ValidRoiRect(rectangle);
             if (!valid) return false;
         } else if (!ZeroRect(rectangle)) return false;
@@ -672,7 +708,8 @@ bool StackCompatible(uint first_base, uint first_count, uint second_base, uint s
             // A stack transaction confirms every member, not merely enough aggregate overlap.
             // Otherwise two unchanged lines can lend their IoU to a newly disjoint third line and
             // give that one-observation geometry immediate owner authority.
-            if (RectIou(WorkRects[first_base + index], WorkRects[second_base + index]) < 0.6f) {
+            if (RectIou(WorkRects[first_base + index], WorkRects[second_base + index]) <
+                V2_SUBTITLE_LOCATOR_MATCH_IOU_THRESHOLD) {
                 return false;
             }
         }
@@ -686,7 +723,7 @@ uint MatchCurrentToOwner(uint current_count, uint owner_count) {
     [unroll]
     for (uint current_index = 0u; current_index < MAX_LINES; ++current_index) {
         if (current_index < current_count) {
-            float best_iou = 0.6f;
+            float best_iou = V2_SUBTITLE_LOCATOR_MATCH_IOU_THRESHOLD;
             uint best_owner = MAX_LINES;
             [unroll]
             for (uint owner_index = 0u; owner_index < MAX_LINES; ++owner_index) {
@@ -771,12 +808,21 @@ bool SampleOwnerTarget(uint owner_count, out float target) {
     uint owner_top = RectSummary(NEW_OWNER_BASE, owner_count).y;
     uint outer_y_offset = 10u;
     uint inner_y_offset = 4u;
-    uint sample_y0 = owner_top >= outer_y_offset ? owner_top - outer_y_offset : 0u;
-    uint sample_y1 = owner_top >= inner_y_offset ? owner_top - inner_y_offset : 0u;
+    uint sample_y0 = clamp(
+        owner_top >= outer_y_offset ? owner_top - outer_y_offset : 0u,
+        locator_content.y,
+        locator_content.w - 1u);
+    uint sample_y1 = clamp(
+        owner_top >= inner_y_offset ? owner_top - inner_y_offset : 0u,
+        locator_content.y,
+        locator_content.w - 1u);
     [loop]
     for (uint sample_index = 0u; sample_index < 16u; ++sample_index) {
         float sample_x_float = center - 30.0f + 4.0f * (float)sample_index;
-        uint sample_x = (uint)clamp(floor(sample_x_float + 0.5f), 0.0f, (float)(locator_field.x - 1u));
+        uint sample_x = (uint)clamp(
+            floor(sample_x_float + 0.5f),
+            (float)locator_content.x,
+            (float)(locator_content.z - 1u));
         float first = BaseField.Load(int3(sample_x, sample_y0, 0));
         float second = BaseField.Load(int3(sample_x, sample_y1, 0));
         if (!FiniteFloat(first) || !FiniteFloat(second) ||
@@ -1164,8 +1210,8 @@ bool ValidateConditionCurrentBlock(uint count) {
         if (slot < count) {
             bool ribbon = ((kinds >> slot) & 1u) != 0u;
             bool valid = ribbon ?
-                (ValidFieldRect(rectangle) && rectangle.x == 0u &&
-                 rectangle.z == locator_field.x && rectangle.w == locator_field.y &&
+                (ValidFieldRect(rectangle) && rectangle.x == locator_content.x &&
+                 rectangle.z == locator_content.z && rectangle.w == locator_content.w &&
                  rectangle.y >= locator_field.z) : ValidRoiRect(rectangle);
             if (!valid) return false;
         } else if (!ZeroRect(rectangle)) return false;
@@ -1249,7 +1295,11 @@ void condition_main(
     }
     GroupMemoryBarrierWithGroupSync();
     if (dispatch_id.x >= target_w || dispatch_id.y >= target_h) return;
-    float base = BaseField.Load(int3(dispatch_id.xy, 0));
+    // Padding is synthetic only. Re-evaluate the same analytic conditioner at the nearest content
+    // cell so the published final field is an exact boundary extension and renderer filtering at
+    // the half-open content edge cannot blend in unrelated geometry.
+    uint2 condition_position = DepthAnalysisClampCell(dispatch_id.xy);
+    float base = BaseField.Load(int3(condition_position, 0));
     if (ConditionStateIsValid == 0u || !FiniteFloat(base) ||
         abs(base) > v2_direct_container_limit) {
         ConditionedField[dispatch_id.xy] = base;
@@ -1257,8 +1307,10 @@ void condition_main(
     }
 
     float best_distance = 3.402823466e+38f;
-    precise float horizontal_step = v2_max_horizontal_slope / (float)target_w;
-    precise float vertical_step = v2_max_vertical_shear / (float)target_w;
+    precise float horizontal_step = v2_max_horizontal_slope /
+        (float)LocatorContentWidth();
+    precise float vertical_step = v2_max_vertical_shear /
+        (float)LocatorContentWidth();
     [unroll]
     for (uint slot = 0u; slot < MAX_LINES; ++slot) {
         if (slot < ConditionCurrentCount) {
@@ -1271,11 +1323,15 @@ void condition_main(
             // Make the one-edge policy explicit: the strip and everything below its top use core
             // budget, while only rows above it receive the vertical analytic collar. Ordinary
             // subtitle covers retain the established four-sided Manhattan collar.
-            uint dx = ribbon ? 0u : (dispatch_id.x < rectangle.x ? rectangle.x - dispatch_id.x :
-                (dispatch_id.x >= rectangle.z ? dispatch_id.x - (rectangle.z - 1u) : 0u));
-            uint dy = ribbon ? (dispatch_id.y < rectangle.y ? rectangle.y - dispatch_id.y : 0u) :
-                (dispatch_id.y < rectangle.y ? rectangle.y - dispatch_id.y :
-                 (dispatch_id.y >= rectangle.w ? dispatch_id.y - (rectangle.w - 1u) : 0u));
+            uint dx = ribbon ? 0u :
+                (condition_position.x < rectangle.x ? rectangle.x - condition_position.x :
+                 (condition_position.x >= rectangle.z ?
+                    condition_position.x - (rectangle.z - 1u) : 0u));
+            uint dy = ribbon ?
+                (condition_position.y < rectangle.y ? rectangle.y - condition_position.y : 0u) :
+                (condition_position.y < rectangle.y ? rectangle.y - condition_position.y :
+                 (condition_position.y >= rectangle.w ?
+                    condition_position.y - (rectangle.w - 1u) : 0u));
             precise float horizontal_distance = (float)dx * horizontal_step;
             precise float vertical_distance = (float)dy * vertical_step;
             precise float distance = horizontal_distance + vertical_distance;

@@ -2,8 +2,8 @@
 
 The temporal replay must not infer provenance from whatever ``raw_*.f32`` files happen to be
 present beside a results file.  Schema-37 ``run_eval.py`` records this manifest after the
-independent schema-22 production evaluation harness finishes (not Dump 3D schema 28 or DVC2
-schema 46), rechecks it after scoring, and stores it in
+independent schema-22 production evaluation harness finishes (not Dump 3D schema 29 or DVC2
+schema 48), rechecks it after scoring, and stores it in
 ``results.json``.  Consumers validate the same shared contract before reading a tensor.
 """
 

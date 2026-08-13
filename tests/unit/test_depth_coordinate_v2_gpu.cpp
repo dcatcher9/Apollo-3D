@@ -475,6 +475,8 @@ namespace {
     std::array<std::uint32_t, 16> constants {};
     constants[0] = width;
     constants[1] = height;
+    constants[11] = width;
+    constants[12] = height;
     D3D11_BUFFER_DESC constant_desc {};
     constant_desc.ByteWidth = sizeof(constants);
     constant_desc.Usage = D3D11_USAGE_IMMUTABLE;
@@ -2207,13 +2209,15 @@ TEST(DepthCoordinateV2GpuTest, SevenCoordinatePassReplayLatchesRecoversAndRelatc
   const std::size_t foreground_count = element_count / 4u;
   raw_fields.emplace_back(element_count, 0.0f);  // confirmed cut, broad foreground
   std::fill_n(raw_fields.back().begin(), foreground_count, 20.0f);
-  raw_fields.emplace_back(element_count, std::numeric_limits<float>::quiet_NaN());
+  raw_fields.push_back(base);  // one non-finite texel invalidates the authenticated field
+  raw_fields.back()[element_count / 2u] = std::numeric_limits<float>::quiet_NaN();
   raw_fields.emplace_back(element_count, 2.0f);  // finite but collapsed
   raw_fields.push_back(base);  // retained camera resumes without a gauge jump
   for (float &value : raw_fields.back()) {
     value += 0.5f;
   }
-  raw_fields.emplace_back(element_count, std::numeric_limits<float>::quiet_NaN());
+  raw_fields.push_back(base);  // the same one-NaN field on a cut cannot seed the new camera
+  raw_fields.back()[element_count / 3u] = std::numeric_limits<float>::quiet_NaN();
   const std::size_t ramp_foreground_count = element_count * 18u / 100u;
   raw_fields.emplace_back(element_count, 0.0f);  // invalid+cut cleared; ramp reacquires
   std::fill_n(raw_fields.back().begin(), ramp_foreground_count, 20.0f);
@@ -2380,6 +2384,8 @@ TEST(DepthCoordinateV2GpuTest, SevenCoordinatePassReplayLatchesRecoversAndRelatc
   EXPECT_EQ(rows[4]["collapsed"], false);
   EXPECT_EQ(rows[4]["frame_valid"], false);
   EXPECT_EQ(rows[4]["camera_valid"], true);
+  EXPECT_FLOAT_EQ(outputs[4].encoded_minimum, 0.5f);
+  EXPECT_FLOAT_EQ(outputs[4].encoded_maximum, 0.5f);
   EXPECT_NEAR(rows[4]["center"].get<float>(), rows[3]["center"].get<float>(), 2.0e-6f);
   EXPECT_FLOAT_EQ(rows[4]["effective_gain"].get<float>(), 0.0f);
   EXPECT_EQ(rows[5]["input_valid"], true);
@@ -2393,6 +2399,8 @@ TEST(DepthCoordinateV2GpuTest, SevenCoordinatePassReplayLatchesRecoversAndRelatc
   EXPECT_EQ(rows[7]["frame_valid"], false);
   EXPECT_EQ(rows[7]["camera_valid"], false);
   EXPECT_FLOAT_EQ(rows[7]["center"].get<float>(), 0.0f);
+  EXPECT_FLOAT_EQ(outputs[7].encoded_minimum, 0.5f);
+  EXPECT_FLOAT_EQ(outputs[7].encoded_maximum, 0.5f);
   EXPECT_EQ(rows[8]["frame_valid"], true);
   EXPECT_EQ(rows[8]["camera_valid"], true);
   EXPECT_NEAR(rows[8]["center"].get<float>(),

@@ -53,7 +53,7 @@ namespace platf::sbs_debug {
       "Dump contracts explicitly use little-endian float and integer words."
     );
 
-    constexpr unsigned retry_backoff_frames = 60;
+    constexpr auto retry_backoff = std::chrono::seconds(1);
 
     bool parallax_v2_shader_identity_matches_contract(
       const std::shared_ptr<const models::parallax_v2_shader_provenance_t> &identity
@@ -104,6 +104,8 @@ namespace platf::sbs_debug {
       models::depth_coordinate_v2::subtitle_ocr_box_known_flags;
     constexpr auto subtitle_ocr_output_width =
       models::depth_coordinate_v2::subtitle_ocr_output_width;
+    constexpr auto subtitle_ocr_min_mean_score =
+      models::depth_coordinate_v2::subtitle_ocr_min_mean_score;
     constexpr auto subtitle_ocr_ribbon_min_structural_gaps =
       models::depth_coordinate_v2::subtitle_ocr_ribbon_min_structural_gaps;
     constexpr auto subtitle_ocr_ribbon_min_width_numerator =
@@ -142,6 +144,8 @@ namespace platf::sbs_debug {
       models::depth_coordinate_v2::subtitle_locator_current_kind_shift;
     constexpr auto subtitle_locator_kind_mask =
       models::depth_coordinate_v2::subtitle_locator_kind_mask;
+    constexpr auto subtitle_locator_death_grace_observations =
+      models::depth_coordinate_v2::subtitle_locator_death_grace_observations;
     constexpr auto subtitle_target_limit =
       models::depth_coordinate_v2::direct_container_limit;
 
@@ -304,6 +308,7 @@ namespace platf::sbs_debug {
       const std::uint32_t capacity,
       const std::uint32_t field_width,
       const std::uint32_t field_height,
+      const models::depth_tensor_content_rect_t tensor_content,
       const std::uint32_t roi_top,
       const std::uint32_t roi_bottom,
       const std::uint32_t ribbon_min_bottom,
@@ -329,9 +334,12 @@ namespace platf::sbs_debug {
         const auto island_count = subtitle_word(bytes, first + 6u);
         const auto structural_gap_count = subtitle_word(bytes, first + 7u);
         const bool ribbon = (box_flags & subtitle_ocr_box_flag_ribbon) != 0u;
-        if (left >= right || top >= bottom || right > field_width ||
+        if (left >= right || top >= bottom || left < tensor_content.left ||
+            top < tensor_content.top || right > tensor_content.right ||
+            bottom > tensor_content.bottom || right > field_width ||
             bottom > field_height || top < roi_top ||
-            !std::isfinite(score) || score < 0.4f || score > 1.0f ||
+            !std::isfinite(score) || score < subtitle_ocr_min_mean_score ||
+            score > 1.0f ||
             (box_flags & ~subtitle_ocr_box_known_flags) != 0u ||
             island_count == 0u || island_count > subtitle_ocr_output_width ||
             structural_gap_count >= island_count) {
@@ -343,14 +351,15 @@ namespace platf::sbs_debug {
             return false;
           }
           if (final_boxes) {
-            if (left != 0u || right != field_width || bottom != field_height) {
+            if (left != tensor_content.left || right != tensor_content.right ||
+                bottom != tensor_content.bottom) {
               return false;
             }
           } else if (
             bottom < ribbon_min_bottom || bottom > roi_bottom ||
             static_cast<std::uint64_t>(right - left) *
                 subtitle_ocr_ribbon_min_width_denominator <
-              static_cast<std::uint64_t>(field_width) *
+              static_cast<std::uint64_t>(tensor_content.width()) *
                 subtitle_ocr_ribbon_min_width_numerator
           ) {
             return false;
@@ -397,6 +406,7 @@ namespace platf::sbs_debug {
       const std::uint32_t count,
       const std::uint32_t field_width,
       const std::uint32_t field_height,
+      const models::depth_tensor_content_rect_t tensor_content,
       const std::uint32_t roi_top,
       const std::uint32_t roi_bottom,
       const std::uint32_t ribbon_min_bottom,
@@ -417,9 +427,12 @@ namespace platf::sbs_debug {
             return false;
           }
         } else if (left >= right || top >= bottom ||
+                   left < tensor_content.left || top < tensor_content.top ||
+                   right > tensor_content.right || bottom > tensor_content.bottom ||
                    right > field_width || bottom > field_height || top < roi_top ||
                    (current_cover && ribbon ?
-                      (left != 0u || right != field_width || bottom != field_height) :
+                      (left != tensor_content.left || right != tensor_content.right ||
+                       bottom != tensor_content.bottom) :
                       (bottom > roi_bottom || (ribbon && bottom < ribbon_min_bottom)))) {
           return false;
         } else {
@@ -492,6 +505,7 @@ namespace platf::sbs_debug {
       const std::vector<std::uint8_t> &locator,
       const std::uint32_t field_width,
       const std::uint32_t field_height,
+      const models::depth_tensor_content_rect_t tensor_content,
       const std::uint32_t roi_top,
       const std::uint32_t roi_bottom,
       const std::uint32_t ribbon_min_bottom
@@ -542,21 +556,22 @@ namespace platf::sbs_debug {
           (pending_ribbon_mask & ~count_mask(pending_count)) != 0u ||
           (current_ribbon_mask & ~count_mask(current_count)) != 0u ||
           fade > subtitle_locator_max_fade || last_event > subtitle_locator_max_event ||
+          grace > subtitle_locator_death_grace_observations ||
           !subtitle_locator_rectangles_are_canonical(
             locator, subtitle_locator_owner_offset, owner_count,
-            field_width, field_height, roi_top, roi_bottom,
+            field_width, field_height, tensor_content, roi_top, roi_bottom,
             ribbon_min_bottom,
             owner_ribbon_mask, false, owner_summary
           ) ||
           !subtitle_locator_rectangles_are_canonical(
             locator, subtitle_locator_pending_offset, pending_count,
-            field_width, field_height, roi_top, roi_bottom,
+            field_width, field_height, tensor_content, roi_top, roi_bottom,
             ribbon_min_bottom,
             pending_ribbon_mask, false, pending_summary
           ) ||
           !subtitle_locator_rectangles_are_canonical(
             locator, subtitle_locator_current_offset, current_count,
-            field_width, field_height, roi_top, roi_bottom,
+            field_width, field_height, tensor_content, roi_top, roi_bottom,
             ribbon_min_bottom,
             current_ribbon_mask, true, current_summary
           ) ||
@@ -607,45 +622,41 @@ namespace platf::sbs_debug {
         if (target_valid || target_reset || target_generation != 0u || !target_in_range ||
             current_count != 0u || fade != 0u ||
             grace_left >= grace_right || grace_top >= grace_bottom ||
-            grace_right > field_width || grace_bottom > field_height ||
-            grace_top < roi_top || grace_bottom > roi_bottom) {
+            grace_left < tensor_content.left || grace_right > tensor_content.right ||
+            grace_bottom > tensor_content.bottom || grace_top < roi_top ||
+            grace_bottom > roi_bottom) {
           return false;
         }
       }
       return true;
     }
 
-    bool subtitle_records_match_frame(
+  }  // namespace
+
+  namespace detail {
+
+    bool subtitle_ocr_record_is_canonical_for_frame(
       const std::vector<std::uint8_t> &ocr,
-      const std::vector<std::uint8_t> &locator,
       const frame &completed
     ) {
-      if (ocr.size() != subtitle_ocr_record_word_count * sizeof(std::uint32_t) ||
-          locator.size() != subtitle_locator_state_word_count * sizeof(std::uint32_t)) {
+      if (ocr.size() != subtitle_ocr_record_word_count * sizeof(std::uint32_t)) {
         return false;
       }
       const auto field_width = static_cast<std::uint32_t>(completed.model_width);
       const auto field_height = static_cast<std::uint32_t>(completed.model_height);
-      const auto roi = models::depth_coordinate_v2::subtitle_ocr_dynamic_roi(
+      const auto geometry = models::fit_subtitle_analysis_geometry(
         completed.depth_input_region.width(),
         completed.depth_input_region.height(),
-        field_width,
-        field_height
+        {completed.model_width, completed.model_height},
+        completed.depth_input_region.tensor_content
       );
-      if (!roi) {
+      if (!geometry.valid()) {
         return false;
       }
-      const auto ribbon_min_bottom =
-        models::depth_coordinate_v2::subtitle_ocr_ribbon_min_bottom(
-          completed.depth_input_region.width(),
-          completed.depth_input_region.height(),
-          field_width,
-          field_height
-        );
-      if (!ribbon_min_bottom || ribbon_min_bottom.value <= roi.top ||
-          ribbon_min_bottom.value > roi.bottom) {
-        return false;
-      }
+      const auto tensor_content = geometry.tensor_content;
+      const auto roi_top = geometry.roi_top;
+      const auto roi_bottom = geometry.roi_bottom;
+      const auto ribbon_min_bottom = geometry.ribbon_min_bottom;
       const auto ocr_flags = subtitle_word(ocr, 2u);
       const auto raw_count = subtitle_word(ocr, 3u);
       const auto final_count = subtitle_word(ocr, 4u);
@@ -661,22 +672,47 @@ namespace platf::sbs_debug {
           subtitle_word(ocr, 10u) != completed.depth_input_region.height() ||
           subtitle_word(ocr, 11u) != field_width ||
           subtitle_word(ocr, 12u) != field_height ||
-          subtitle_word(ocr, 13u) != roi.top ||
-          subtitle_word(ocr, 14u) != roi.bottom ||
+          subtitle_word(ocr, 13u) != roi_top ||
+          subtitle_word(ocr, 14u) != roi_bottom ||
           subtitle_word(ocr, 15u) != 0u ||
           !subtitle_ocr_boxes_are_canonical(
             ocr, subtitle_ocr_raw_box_offset, raw_count, subtitle_ocr_raw_box_capacity,
-            field_width, field_height, roi.top, roi.bottom,
-            ribbon_min_bottom.value, false
+            field_width, field_height, tensor_content, roi_top, roi_bottom,
+            ribbon_min_bottom, false
           ) ||
           !subtitle_ocr_boxes_are_canonical(
             ocr, subtitle_ocr_final_box_offset, final_count, subtitle_ocr_final_box_capacity,
-            field_width, field_height, roi.top, roi.bottom,
-            ribbon_min_bottom.value, true
+            field_width, field_height, tensor_content, roi_top, roi_bottom,
+            ribbon_min_bottom, true
           ) || !subtitle_ocr_pairs_are_canonical(ocr, final_count)) {
         return false;
       }
 
+      return true;
+    }
+
+    bool subtitle_records_match_frame(
+      const std::vector<std::uint8_t> &ocr,
+      const std::vector<std::uint8_t> &locator,
+      const frame &completed
+    ) {
+      if (!subtitle_ocr_record_is_canonical_for_frame(ocr, completed) ||
+          locator.size() != subtitle_locator_state_word_count * sizeof(std::uint32_t)) {
+        return false;
+      }
+      const auto field_width = static_cast<std::uint32_t>(completed.model_width);
+      const auto field_height = static_cast<std::uint32_t>(completed.model_height);
+      const auto geometry = models::fit_subtitle_analysis_geometry(
+        completed.depth_input_region.width(),
+        completed.depth_input_region.height(),
+        {completed.model_width, completed.model_height},
+        completed.depth_input_region.tensor_content
+      );
+      if (!geometry.valid()) {
+        return false;
+      }
+      const auto ocr_flags = subtitle_word(ocr, 2u);
+      const auto final_count = subtitle_word(ocr, 4u);
       if (subtitle_word(locator, 0u) != subtitle_locator_state_schema ||
           subtitle_word(locator, 1u) != subtitle_locator_state_tag ||
           subtitle_u64(locator, 10u) != completed.depth_input_region.analysis_generation ||
@@ -685,12 +721,17 @@ namespace platf::sbs_debug {
           subtitle_word(locator, 28u) != field_height ||
           !subtitle_locator_state_is_canonical(
             ocr, ocr_flags, final_count, locator,
-            field_width, field_height, roi.top, roi.bottom, ribbon_min_bottom.value
+            field_width, field_height, geometry.tensor_content,
+            geometry.roi_top, geometry.roi_bottom, geometry.ribbon_min_bottom
           )) {
         return false;
       }
       return true;
     }
+
+  }  // namespace detail
+
+  namespace {
 
     struct normalization_state {
       float lower = 0.0f;
@@ -763,6 +804,116 @@ namespace platf::sbs_debug {
       texture_snapshot warp_mask;
     };
 
+    struct staged_buffer {
+      Microsoft::WRL::ComPtr<ID3D11Buffer> resource;
+      std::size_t byte_count = 0;
+    };
+
+    struct staged_texture {
+      Microsoft::WRL::ComPtr<ID3D11Texture2D> resource;
+      D3D11_TEXTURE2D_DESC desc {};
+      std::size_t row_bytes = 0;
+    };
+
+  }  // namespace
+
+  namespace detail {
+
+    std::size_t bounded_collection_chunk_bytes(
+      const std::size_t remaining_bytes,
+      const std::size_t alignment,
+      const std::size_t available_budget,
+      const bool poll_is_empty
+    ) noexcept {
+      if (remaining_bytes == 0 || alignment == 0 ||
+          remaining_bytes % alignment != 0) {
+        return 0;
+      }
+      if (available_budget >= alignment) {
+        return std::min(
+          remaining_bytes,
+          available_budget - available_budget % alignment
+        );
+      }
+      return poll_is_empty ? std::min(remaining_bytes, alignment) : 0;
+    }
+
+    enum class collection_stage_e : std::uint8_t {
+      shadow_state,
+      shadow_frame_stats,
+      subtitle_ocr_record,
+      subtitle_locator_state,
+      validate_evidence,
+      scene_normalization,
+      scene_adaptive,
+      scene_decode,
+      model_input,
+      raw_depth,
+      warp_depth,
+      shadow_coordinate,
+      shadow_candidate,
+      shadow_ownership_refined,
+      shadow_vertical,
+      shadow_vertical_conditioned,
+      shadow_base_final,
+      shadow_final,
+      source,
+      depth_input_source,
+      sbs,
+      warp_map,
+      warp_mask,
+      complete,
+    };
+
+    /**
+     * One exact-frame D3D11 staging batch. Every copy and the terminal event query are submitted
+     * together on the owning immediate context before any live texture can be reused.
+     */
+    struct pending_gpu_capture {
+      captured_dump_job job;
+      Microsoft::WRL::ComPtr<ID3D11Query> completion;
+
+      staged_texture source;
+      staged_texture depth_input_source;
+      staged_buffer model_input;
+      staged_buffer raw_depth;
+      staged_texture warp_depth;
+      staged_texture sbs;
+      staged_texture shadow_coordinate;
+      staged_texture shadow_candidate;
+      staged_texture shadow_ownership_refined;
+      staged_texture shadow_vertical;
+      staged_texture shadow_vertical_conditioned;
+      staged_texture shadow_base_final;
+      staged_texture shadow_final;
+      staged_buffer subtitle_ocr_record;
+      staged_buffer subtitle_locator_state;
+      staged_buffer shadow_state;
+      staged_buffer shadow_frame_stats;
+      staged_texture warp_map;
+      staged_texture warp_mask;
+      staged_buffer depth_frame_state;
+      staged_buffer adaptive_state;
+
+      std::vector<std::uint8_t> normalization_state_bytes;
+      collection_stage_e collection_stage = collection_stage_e::shadow_state;
+
+      bool subtitle_slr9_active = false;
+      bool depth_input_source_available = false;
+      bool scene_cut_bridge_requested = false;
+      bool gpu_ready = false;
+      std::uint64_t retry_token = 0;
+      std::chrono::steady_clock::time_point submitted_at {};
+      std::chrono::steady_clock::time_point collection_started_at {};
+      double gpu_ready_age_ms = 0.0;
+      double cpu_collection_ms = 0.0;
+      std::uint32_t collection_poll_count = 0;
+    };
+
+  }  // namespace detail
+
+  namespace {
+
     struct dump_publish_result {
       bool success = false;
       bool trigger_remove_failed = false;
@@ -800,6 +951,7 @@ namespace platf::sbs_debug {
         case DXGI_FORMAT_R32_FLOAT:
         case DXGI_FORMAT_R32_UINT:
         case DXGI_FORMAT_B8G8R8A8_UNORM:
+        case DXGI_FORMAT_B8G8R8X8_UNORM:
         case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
         case DXGI_FORMAT_R8G8B8A8_UNORM:
         case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
@@ -819,6 +971,8 @@ namespace platf::sbs_debug {
           return "DXGI_FORMAT_R32_UINT";
         case DXGI_FORMAT_B8G8R8A8_UNORM:
           return "DXGI_FORMAT_B8G8R8A8_UNORM";
+        case DXGI_FORMAT_B8G8R8X8_UNORM:
+          return "DXGI_FORMAT_B8G8R8X8_UNORM";
         case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
           return "DXGI_FORMAT_B8G8R8A8_UNORM_SRGB";
         case DXGI_FORMAT_R8G8B8A8_UNORM:
@@ -1048,12 +1202,61 @@ namespace platf::sbs_debug {
       return ok && out.good();
     }
 
-    bool read_buffer(
+    enum class collect_status_e {
+      ready,
+      partial,
+      not_ready,
+      failed,
+    };
+
+    class collection_budget {
+    public:
+      explicit collection_budget(const std::chrono::steady_clock::time_point started) noexcept:
+          deadline_(started + std::chrono::milliseconds(2)) {
+      }
+
+      std::size_t next_chunk(
+        const std::size_t remaining_bytes,
+        const std::size_t alignment
+      ) const noexcept {
+        if (remaining_maps_ == 0 ||
+            std::chrono::steady_clock::now() >= deadline_) {
+          return 0;
+        }
+        return detail::bounded_collection_chunk_bytes(
+          remaining_bytes,
+          alignment,
+          remaining_bytes_,
+          copied_bytes_ == 0
+        );
+      }
+
+      void record_copy(const std::size_t bytes) noexcept {
+        copied_bytes_ += bytes;
+        remaining_bytes_ = bytes >= remaining_bytes_ ? 0 : remaining_bytes_ - bytes;
+        if (remaining_maps_ != 0) {
+          --remaining_maps_;
+        }
+      }
+
+      bool exhausted() const noexcept {
+        return remaining_bytes_ == 0 || remaining_maps_ == 0 ||
+               std::chrono::steady_clock::now() >= deadline_;
+      }
+
+    private:
+      std::chrono::steady_clock::time_point deadline_ {};
+      std::size_t remaining_bytes_ = detail::cpu_collection_byte_budget;
+      std::size_t copied_bytes_ = 0;
+      unsigned remaining_maps_ = 8;
+    };
+
+    bool stage_buffer(
       ID3D11Device *device,
       ID3D11DeviceContext *ctx,
       ID3D11ShaderResourceView *srv,
       const std::size_t required_bytes,
-      std::vector<std::uint8_t> &bytes
+      staged_buffer &staging
     ) {
       if (!device || !ctx || !srv || required_bytes == 0) {
         return false;
@@ -1076,46 +1279,19 @@ namespace platf::sbs_debug {
       staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
       staging_desc.MiscFlags = 0;
       staging_desc.StructureByteStride = 0;
-      Microsoft::WRL::ComPtr<ID3D11Buffer> staging;
-      if (FAILED(device->CreateBuffer(&staging_desc, nullptr, &staging))) {
+      if (FAILED(device->CreateBuffer(&staging_desc, nullptr, &staging.resource))) {
         return false;
       }
-
-      ctx->CopyResource(staging.Get(), buffer.Get());
-      D3D11_MAPPED_SUBRESOURCE mapped {};
-      if (FAILED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
-        return false;
-      }
-      bytes.resize(required_bytes);
-      std::memcpy(bytes.data(), mapped.pData, required_bytes);
-      ctx->Unmap(staging.Get(), 0);
+      staging.byte_count = required_bytes;
+      ctx->CopyResource(staging.resource.Get(), buffer.Get());
       return true;
     }
 
-    bool read_float_buffer(
+    bool stage_texture(
       ID3D11Device *device,
       ID3D11DeviceContext *ctx,
       ID3D11ShaderResourceView *srv,
-      const std::size_t value_count,
-      std::vector<float> &values
-    ) {
-      if (value_count > SIZE_MAX / sizeof(float)) {
-        return false;
-      }
-      std::vector<std::uint8_t> bytes;
-      if (!read_buffer(device, ctx, srv, value_count * sizeof(float), bytes)) {
-        return false;
-      }
-      values.resize(value_count);
-      std::memcpy(values.data(), bytes.data(), bytes.size());
-      return true;
-    }
-
-    bool read_texture(
-      ID3D11Device *device,
-      ID3D11DeviceContext *ctx,
-      ID3D11ShaderResourceView *srv,
-      texture_snapshot &snapshot
+      staged_texture &staging
     ) {
       if (!device || !ctx || !srv) {
         return false;
@@ -1126,55 +1302,216 @@ namespace platf::sbs_debug {
       if (!resource || FAILED(resource.As(&texture))) {
         return false;
       }
-      texture->GetDesc(&snapshot.desc);
-      const std::uint32_t bytes_per_pixel = format_bytes_per_pixel(snapshot.desc.Format);
+      texture->GetDesc(&staging.desc);
+      const std::uint32_t bytes_per_pixel = format_bytes_per_pixel(staging.desc.Format);
       if (
-        bytes_per_pixel == 0 || snapshot.desc.Width == 0 || snapshot.desc.Height == 0 ||
-        snapshot.desc.ArraySize != 1 || snapshot.desc.MipLevels != 1 ||
-        snapshot.desc.SampleDesc.Count != 1
+        bytes_per_pixel == 0 || staging.desc.Width == 0 || staging.desc.Height == 0 ||
+        staging.desc.ArraySize != 1 || staging.desc.MipLevels != 1 ||
+        staging.desc.SampleDesc.Count != 1
       ) {
         return false;
       }
-      snapshot.row_bytes =
-        static_cast<std::size_t>(snapshot.desc.Width) * bytes_per_pixel;
+      staging.row_bytes =
+        static_cast<std::size_t>(staging.desc.Width) * bytes_per_pixel;
       if (
-        static_cast<std::size_t>(snapshot.desc.Height) >
-        SIZE_MAX / snapshot.row_bytes
+        static_cast<std::size_t>(staging.desc.Height) >
+        SIZE_MAX / staging.row_bytes
       ) {
         return false;
       }
 
-      D3D11_TEXTURE2D_DESC staging_desc = snapshot.desc;
+      D3D11_TEXTURE2D_DESC staging_desc = staging.desc;
       staging_desc.Usage = D3D11_USAGE_STAGING;
       staging_desc.BindFlags = 0;
       staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
       staging_desc.MiscFlags = 0;
-      Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
-      if (FAILED(device->CreateTexture2D(&staging_desc, nullptr, &staging))) {
+      if (FAILED(device->CreateTexture2D(&staging_desc, nullptr, &staging.resource))) {
         return false;
       }
-      ctx->CopyResource(staging.Get(), texture.Get());
-      D3D11_MAPPED_SUBRESOURCE mapped {};
-      if (FAILED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
-        return false;
-      }
-      if (mapped.RowPitch < snapshot.row_bytes) {
-        ctx->Unmap(staging.Get(), 0);
-        return false;
-      }
-      snapshot.bytes.resize(
-        static_cast<std::size_t>(snapshot.desc.Height) * snapshot.row_bytes
-      );
-      for (std::uint32_t y = 0; y < snapshot.desc.Height; ++y) {
-        std::memcpy(
-          snapshot.bytes.data() + static_cast<std::size_t>(y) * snapshot.row_bytes,
-          static_cast<const std::uint8_t *>(mapped.pData) +
-            static_cast<std::size_t>(y) * mapped.RowPitch,
-          snapshot.row_bytes
-        );
-      }
-      ctx->Unmap(staging.Get(), 0);
+      ctx->CopyResource(staging.resource.Get(), texture.Get());
       return true;
+    }
+
+    collect_status_e collect_buffer(
+      ID3D11DeviceContext *ctx,
+      staged_buffer &staging,
+      std::vector<std::uint8_t> &bytes,
+      collection_budget &budget
+    ) {
+      if (!ctx || !staging.resource || staging.byte_count == 0) {
+        return collect_status_e::failed;
+      }
+      if (bytes.size() > staging.byte_count) {
+        return collect_status_e::failed;
+      }
+      if (bytes.size() == staging.byte_count) {
+        staging.resource.Reset();
+        return collect_status_e::ready;
+      }
+      bytes.reserve(staging.byte_count);
+      const std::size_t copy_bytes = budget.next_chunk(
+        staging.byte_count - bytes.size(), 1u
+      );
+      if (copy_bytes == 0) {
+        return collect_status_e::partial;
+      }
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      const HRESULT status = ctx->Map(
+        staging.resource.Get(),
+        0,
+        D3D11_MAP_READ,
+        D3D11_MAP_FLAG_DO_NOT_WAIT,
+        &mapped
+      );
+      if (status == DXGI_ERROR_WAS_STILL_DRAWING) {
+        return collect_status_e::not_ready;
+      }
+      if (FAILED(status) || !mapped.pData) {
+        return collect_status_e::failed;
+      }
+      try {
+        const auto *source = static_cast<const std::uint8_t *>(mapped.pData) + bytes.size();
+        bytes.insert(bytes.end(), source, source + copy_bytes);
+      } catch (...) {
+        ctx->Unmap(staging.resource.Get(), 0);
+        throw;
+      }
+      ctx->Unmap(staging.resource.Get(), 0);
+      budget.record_copy(copy_bytes);
+      if (bytes.size() == staging.byte_count) {
+        staging.resource.Reset();
+        return collect_status_e::ready;
+      }
+      return collect_status_e::partial;
+    }
+
+    collect_status_e collect_float_buffer(
+      ID3D11DeviceContext *ctx,
+      staged_buffer &staging,
+      const std::size_t value_count,
+      std::vector<float> &values,
+      collection_budget &budget
+    ) {
+      if (value_count > SIZE_MAX / sizeof(float) ||
+          staging.byte_count != value_count * sizeof(float)) {
+        return collect_status_e::failed;
+      }
+      if (!ctx || !staging.resource || values.size() > value_count) {
+        return collect_status_e::failed;
+      }
+      if (values.size() == value_count) {
+        staging.resource.Reset();
+        return collect_status_e::ready;
+      }
+      values.reserve(value_count);
+      const std::size_t copy_bytes = budget.next_chunk(
+        (value_count - values.size()) * sizeof(float), sizeof(float)
+      );
+      if (copy_bytes == 0) {
+        return collect_status_e::partial;
+      }
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      const HRESULT status = ctx->Map(
+        staging.resource.Get(),
+        0,
+        D3D11_MAP_READ,
+        D3D11_MAP_FLAG_DO_NOT_WAIT,
+        &mapped
+      );
+      if (status == DXGI_ERROR_WAS_STILL_DRAWING) {
+        return collect_status_e::not_ready;
+      }
+      if (FAILED(status) || !mapped.pData) {
+        return collect_status_e::failed;
+      }
+      try {
+        const auto *source = static_cast<const float *>(mapped.pData) + values.size();
+        values.insert(values.end(), source, source + copy_bytes / sizeof(float));
+      } catch (...) {
+        ctx->Unmap(staging.resource.Get(), 0);
+        throw;
+      }
+      ctx->Unmap(staging.resource.Get(), 0);
+      budget.record_copy(copy_bytes);
+      if (values.size() == value_count) {
+        staging.resource.Reset();
+        return collect_status_e::ready;
+      }
+      return collect_status_e::partial;
+    }
+
+    collect_status_e collect_texture(
+      ID3D11DeviceContext *ctx,
+      staged_texture &staging,
+      texture_snapshot &snapshot,
+      collection_budget &budget
+    ) {
+      if (!ctx || !staging.resource || staging.row_bytes == 0) {
+        return collect_status_e::failed;
+      }
+      const std::size_t total_bytes =
+        static_cast<std::size_t>(staging.desc.Height) * staging.row_bytes;
+      if (snapshot.bytes.size() > total_bytes ||
+          snapshot.bytes.size() % staging.row_bytes != 0) {
+        return collect_status_e::failed;
+      }
+      snapshot.desc = staging.desc;
+      snapshot.row_bytes = staging.row_bytes;
+      if (snapshot.bytes.size() == total_bytes) {
+        staging.resource.Reset();
+        return collect_status_e::ready;
+      }
+      snapshot.bytes.reserve(total_bytes);
+      const std::size_t copy_bytes = budget.next_chunk(
+        total_bytes - snapshot.bytes.size(), staging.row_bytes
+      );
+      if (copy_bytes == 0) {
+        return collect_status_e::partial;
+      }
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      const HRESULT status = ctx->Map(
+        staging.resource.Get(),
+        0,
+        D3D11_MAP_READ,
+        D3D11_MAP_FLAG_DO_NOT_WAIT,
+        &mapped
+      );
+      if (status == DXGI_ERROR_WAS_STILL_DRAWING) {
+        return collect_status_e::not_ready;
+      }
+      if (FAILED(status) || !mapped.pData || mapped.RowPitch < staging.row_bytes) {
+        if (SUCCEEDED(status)) {
+          ctx->Unmap(staging.resource.Get(), 0);
+        }
+        return collect_status_e::failed;
+      }
+
+      const std::size_t first_row = snapshot.bytes.size() / snapshot.row_bytes;
+      const std::size_t row_count = copy_bytes / snapshot.row_bytes;
+      try {
+        const auto *source = static_cast<const std::uint8_t *>(mapped.pData) +
+                             first_row * mapped.RowPitch;
+        if (mapped.RowPitch == snapshot.row_bytes) {
+          snapshot.bytes.insert(snapshot.bytes.end(), source, source + copy_bytes);
+        } else {
+          for (std::size_t y = 0; y < row_count; ++y) {
+            const auto *row = source + y * mapped.RowPitch;
+            snapshot.bytes.insert(
+              snapshot.bytes.end(), row, row + snapshot.row_bytes
+            );
+          }
+        }
+      } catch (...) {
+        ctx->Unmap(staging.resource.Get(), 0);
+        throw;
+      }
+      ctx->Unmap(staging.resource.Get(), 0);
+      budget.record_copy(copy_bytes);
+      if (snapshot.bytes.size() == total_bytes) {
+        staging.resource.Reset();
+        return collect_status_e::ready;
+      }
+      return collect_status_e::partial;
     }
 
     bool texture_to_rgb(
@@ -1232,6 +1569,7 @@ namespace platf::sbs_debug {
                 break;
               }
             case DXGI_FORMAT_B8G8R8A8_UNORM:
+            case DXGI_FORMAT_B8G8R8X8_UNORM:
             case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
               {
                 const std::uint8_t *pixel = input + static_cast<std::size_t>(x) * 4u;
@@ -1848,16 +2186,15 @@ namespace platf::sbs_debug {
              write_json(dir / "shadow_frame_stats.json", frame_json);
     }
 
-    depth_dumpability read_normalization_state(
-      ID3D11Device *device,
-      ID3D11DeviceContext *ctx,
-      ID3D11ShaderResourceView *srv,
+    depth_dumpability decode_normalization_state(
+      const std::vector<std::uint8_t> &bytes,
       normalization_state &state
     ) {
-      std::vector<float> values;
-      if (!read_float_buffer(device, ctx, srv, 4u, values)) {
+      if (bytes.size() != 4u * sizeof(float)) {
         return depth_dumpability::unreadable;
       }
+      std::array<float, 4> values {};
+      std::memcpy(values.data(), bytes.data(), bytes.size());
       for (const float value : values) {
         if (!std::isfinite(value)) {
           return depth_dumpability::unreadable;
@@ -1867,6 +2204,18 @@ namespace platf::sbs_debug {
       return state.frame_state >= 0.5f ?
                depth_dumpability::valid :
                depth_dumpability::invalid;
+    }
+
+    bool shadow_state_is_dumpable(const std::vector<float> &state) {
+      using namespace models::depth_coordinate_v2;
+      return state.size() == state_float_count &&
+             std::bit_cast<std::uint32_t>(state[contract_tag_bits]) == contract_tag &&
+             state[frame_valid] > 0.5f &&
+             std::isfinite(state[center]) &&
+             std::isfinite(state[inverse_scale]) &&
+             std::isfinite(state[convergence_curve]) &&
+             state[inverse_scale] > 0.0f &&
+             std::bit_cast<std::uint32_t>(state[calibration_revision]) > 0u;
     }
 
     const char *encoding_name(const sbs_adaptive_state::gpu_encoding_e encoding) {
@@ -2373,7 +2722,7 @@ namespace platf::sbs_debug {
         tensor_shape
       );
       if (!expected_plan || *expected_plan != *completed.depth_video_plan) {
-        return "ROI planner result is not the deterministic authenticated inward fit";
+        return "ROI planner result is not the deterministic authenticated integer contain fit";
       }
       const auto &input_rect = completed.depth_video_plan->source_rect;
       if (region.left != input_rect.left || region.top != input_rect.top ||
@@ -2383,13 +2732,15 @@ namespace platf::sbs_debug {
       if (completed.depth_video_plan->tensor_shape != tensor_shape) {
         return "ROI planner tensor does not match the completed model/depth tensor";
       }
+      if (!region.tensor_content.valid(tensor_shape) ||
+          region.tensor_content != completed.depth_video_plan->tensor_content) {
+        return "ROI tensor-content rectangle does not match its authenticated planner";
+      }
       return {};
     }
 
     float video_region_vertical_slope_source_u_per_source_v(
-      const models::depth_input_region_t &region,
-      const int depth_width,
-      const int depth_height
+      const models::depth_input_region_t &region
     ) {
       const float source_width = static_cast<float>(region.source_width);
       const float source_height = static_cast<float>(region.source_height);
@@ -2406,8 +2757,8 @@ namespace platf::sbs_debug {
         std::max(roi_height * source_height, 1.0e-6f);
       const float vertical_slope =
         models::depth_coordinate_v2::max_vertical_shear * roi_pixel_aspect *
-        (static_cast<float>(depth_height) /
-         std::max(static_cast<float>(depth_width), 1.0f));
+        (static_cast<float>(region.tensor_content.height()) /
+         std::max(static_cast<float>(region.tensor_content.width()), 1.0f));
       return vertical_slope * source_height_in_source_u;
     }
 
@@ -2442,11 +2793,7 @@ namespace platf::sbs_debug {
           {"horizontal_slope_source_u_per_source_u",
            models::depth_coordinate_v2::max_horizontal_slope},
           {"vertical_slope_source_u_per_source_v",
-           video_region_vertical_slope_source_u_per_source_v(
-             region,
-             completed.model_width,
-             completed.model_height
-           )},
+           video_region_vertical_slope_source_u_per_source_v(region)},
           {"beyond_collar", "exact zero parallax"},
         } :
         nlohmann::json(nullptr);
@@ -2458,7 +2805,7 @@ namespace platf::sbs_debug {
           static_cast<float>(region.left) / static_cast<float>(region.source_width) :
         1.0f;
       return {
-        {"schema", 2},
+        {"schema", 3},
         {"capture", "same matched source/color/model/depth/render frame as the parent Dump 3D package"},
         {"role", "authoritative analysis-domain placement and live-render embedding contract"},
         {"matched_frame_id", completed.matched_frame_id},
@@ -2486,8 +2833,17 @@ namespace platf::sbs_debug {
             {"width", completed.model_width},
             {"height", completed.model_height},
           }},
-          {"trimmed_area_fraction",
-           roi ? completed.depth_video_plan->trimmed_area_fraction : 0.0f},
+          {"tensor_content_rect_px", source_rect_document(
+            region.tensor_content.left,
+            region.tensor_content.top,
+            region.tensor_content.right,
+            region.tensor_content.bottom
+          )},
+          {"padded_area_fraction",
+           roi ? completed.depth_video_plan->padded_area_fraction : 0.0f},
+          {"fit_method", roi ?
+            "centered-integer-contain-with-edge-replicated-excluded-padding" :
+            "full-tensor"},
           {"crop_method", roi ?
             "same-format D3D11 CopySubresourceRegion" : "full-source"},
           {"scene_analysis_domain", roi ?
@@ -2589,7 +2945,8 @@ namespace platf::sbs_debug {
       file_trigger_enabled_ || file_trigger_pending_;
     snapshot_armed_for_dump_ = false;
     prepared_frame_id_ = 0;
-    retry_backoff_frames_ = 0;
+    pending_gpu_capture_.reset();
+    retry_not_before_ = {};
     if (auto *button = button_request_.get()) {
       button->store(false, std::memory_order_relaxed);
     }
@@ -2610,7 +2967,8 @@ namespace platf::sbs_debug {
   void dumper::reject_pending_request() noexcept {
     snapshot_armed_for_dump_ = false;
     prepared_frame_id_ = 0;
-    retry_backoff_frames_ = 0;
+    pending_gpu_capture_.reset();
+    retry_not_before_ = {};
     if (auto *button = button_request_.get()) {
       button->store(false, std::memory_order_relaxed);
     }
@@ -2634,15 +2992,14 @@ namespace platf::sbs_debug {
       file_trigger_enabled_ = false;
     }
     if (async_ && async_->take_publication_failed()) {
-      retry_backoff_frames_ = retry_backoff_frames;
+        retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
     }
     // The button latch remains armed while publication is active, so a later click is retained
     // for the next frame instead of replacing or aliasing the in-flight package.
-    if (async_ && async_->busy()) {
+    if (pending_gpu_capture_ || (async_ && async_->busy())) {
       return false;
     }
-    if (retry_backoff_frames_ != 0u) {
-      --retry_backoff_frames_;
+    if (std::chrono::steady_clock::now() < retry_not_before_) {
       return false;
     }
     const auto *button = button_request_.get();
@@ -2663,12 +3020,7 @@ namespace platf::sbs_debug {
       snapshot_armed_for_dump_ = true;
       return true;
     }
-    if ((poll_counter_++ & 63u) != 0u) {
-      return false;
-    }
-    std::error_code error;
-    file_trigger_pending_ =
-      std::filesystem::exists(dir_ / "dump.trigger", error) && !error;
+    (void) needs_conversion_poll();
     snapshot_armed_for_dump_ = file_trigger_pending_;
     if (file_trigger_pending_ && async_) {
       async_->allow_retries_and_token();
@@ -2676,59 +3028,58 @@ namespace platf::sbs_debug {
     return file_trigger_pending_;
   }
 
-  bool dumper::preflight_requested_v2_frame(
-    ID3D11Device *device,
-    ID3D11DeviceContext *ctx,
-    ID3D11ShaderResourceView *shadow_state,
+  bool dumper::needs_conversion_poll() const noexcept {
+    if (pending_gpu_capture_) {
+      return true;
+    }
+    if (async_ && async_->busy()) {
+      return false;
+    }
+    if (std::chrono::steady_clock::now() < retry_not_before_) {
+      return false;
+    }
+    const auto *button = button_request_.get();
+    if (button && button->load(std::memory_order_acquire)) {
+      return true;
+    }
+    if (!file_trigger_enabled_) {
+      return false;
+    }
+    if (file_trigger_pending_) {
+      return true;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_file_trigger_poll_) {
+      return false;
+    }
+    next_file_trigger_poll_ = now + std::chrono::seconds(1);
+    try {
+      std::error_code error;
+      file_trigger_pending_ =
+        std::filesystem::exists(dir_ / "dump.trigger", error) && !error;
+    } catch (...) {
+      file_trigger_pending_ = false;
+    }
+    return file_trigger_pending_;
+  }
+
+  bool dumper::prepare_requested_v2_frame(
     const std::uint64_t matched_frame_id
   ) noexcept {
     auto *button = button_request_.get();
     const bool requested =
       (button && button->load(std::memory_order_relaxed)) ||
       file_trigger_pending_;
-    if (!requested || !snapshot_armed_for_dump_) {
+    if (!requested || !snapshot_armed_for_dump_ || pending_gpu_capture_ ||
+        matched_frame_id == 0) {
       return false;
     }
-
-    try {
-      std::vector<float> state;
-      if (read_float_buffer(
-            device,
-            ctx,
-            shadow_state,
-            models::depth_coordinate_v2::state_float_count,
-            state
-          ) &&
-          std::bit_cast<std::uint32_t>(
-            state[models::depth_coordinate_v2::contract_tag_bits]
-          ) == models::depth_coordinate_v2::contract_tag &&
-          state[models::depth_coordinate_v2::frame_valid] > 0.5f &&
-          std::isfinite(state[models::depth_coordinate_v2::center]) &&
-          std::isfinite(state[models::depth_coordinate_v2::inverse_scale]) &&
-          std::isfinite(state[models::depth_coordinate_v2::convergence_curve]) &&
-          state[models::depth_coordinate_v2::inverse_scale] > 0.0f &&
-          std::bit_cast<std::uint32_t>(
-            state[models::depth_coordinate_v2::calibration_revision]
-          ) > 0u) {
-        prepared_frame_id_ = matched_frame_id;
-        return true;
-      }
-    } catch (...) {
-    }
-
-    // This completion did not render an attributable current V2 geometry pair (it may have held
-    // the prior target, drawn identity without a camera, or exposed unreadable state). Retain the
-    // trigger and try another completed frame after a bounded delay; do not mix current source/raw
-    // tensors with an unrelated packed SBS target.
-    snapshot_armed_for_dump_ = false;
-    retry_backoff_frames_ = retry_backoff_frames;
-    try {
-      BOOST_LOG(warning)
-        << "SBS debug dump deferred: selected parallax-v2 completion is not a current valid "sv
-           "camera/output pair."sv;
-    } catch (...) {
-    }
-    return false;
+    // Do not read shadow_state here. The subsequent staging batch captures that buffer and the
+    // packed SBS in one command-stream transaction, then validates the camera from those exact
+    // bytes once the terminal event query reports completion.
+    prepared_frame_id_ = matched_frame_id;
+    return true;
   }
 
   namespace {
@@ -3225,10 +3576,15 @@ namespace platf::sbs_debug {
           std::string {};
         const std::string shadow_final_sha256 =
           models::file_sha256_hex(paths.temporary / "shadow_final_parallax.f32");
+        const std::string shadow_state_sha256 =
+          models::file_sha256_hex(paths.temporary / "shadow_state.json");
+        const std::string shadow_frame_stats_sha256 =
+          models::file_sha256_hex(paths.temporary / "shadow_frame_stats.json");
         if (warp_depth_sha256.empty() || shadow_coordinate_sha256.empty() ||
             shadow_candidate_sha256.empty() || shadow_ownership_sha256.empty() ||
             shadow_vertical_majorant_sha256.empty() ||
             shadow_vertical_conditioned_sha256.empty() || shadow_final_sha256.empty() ||
+            shadow_state_sha256.empty() || shadow_frame_stats_sha256.empty() ||
             (subtitle_slr9_active && shadow_base_final_sha256.empty())) {
           BOOST_LOG(warning)
             << "SBS debug dump: failed to hash a written V2 geometry field; dump rejected."sv;
@@ -3553,17 +3909,19 @@ namespace platf::sbs_debug {
             "Finite p2-p98 jet preview of crop-local q; full-source renderer authority additionally requires depth_input_region.json." :
             "Finite p2-p98 jet preview of the live V2 position field."
         );
-        artifacts["shadow_state.json"] = artifact_description(
+        artifacts["shadow_state.json"] = hashed_artifact_description(
           true,
-          false,
+          true,
           "parallax-v2 shot calibration and attenuation state",
-          "Independent typed state bound to the exact coordinate contract tag."
+          "Independent typed state bound to the exact coordinate contract tag.",
+          shadow_state_sha256
         );
-        artifacts["shadow_frame_stats.json"] = artifact_description(
+        artifacts["shadow_frame_stats.json"] = hashed_artifact_description(
           true,
-          false,
+          true,
           "parallax-v2 current-frame moments",
-          "Independent mean/std/min/max state bound to the exact coordinate contract tag."
+          "Independent mean/std/min/max state bound to the exact coordinate contract tag.",
+          shadow_frame_stats_sha256
         );
         artifacts["warp_map.f32"] = video_region ?
           hashed_artifact_description(
@@ -3694,7 +4052,7 @@ namespace platf::sbs_debug {
             *completed.parallax_v2_shader_provenance
           );
         nlohmann::json manifest {
-          {"schema", 28},
+          {"schema", 29},
           {"capture", "one matched, completed Host-SBS frame"},
           {"capture_status", "complete"},
           {"published_atomically", true},
@@ -3997,6 +4355,507 @@ namespace platf::sbs_debug {
 
   }  // namespace
 
+  void dumper::poll_pending_readback(ID3D11DeviceContext *ctx) noexcept {
+    if (!pending_gpu_capture_ || !ctx || !async_) {
+      return;
+    }
+
+    const auto fail_capture = [this](const char *reason, const bool retryable = true) noexcept {
+      if (!pending_gpu_capture_) {
+        return;
+      }
+      const auto retry_token = pending_gpu_capture_->retry_token;
+      const bool by_button = pending_gpu_capture_->job.by_button;
+      const bool by_file = pending_gpu_capture_->job.by_file;
+      const auto button = pending_gpu_capture_->job.button_request;
+      pending_gpu_capture_.reset();
+      prepared_frame_id_ = 0;
+      retry_not_before_ = retryable ?
+        std::chrono::steady_clock::now() + retry_backoff :
+        std::chrono::steady_clock::time_point {};
+      const bool rearmed = retryable && async_ && async_->record_publication_failure(
+        retry_token, by_button, by_file, button
+      );
+      if (!retryable && async_) {
+        // Invalidate only this capture's retry epoch. A later click may already have re-armed the
+        // shared button latch after the original request was consumed and must remain pending.
+        async_->cancel_retries(nullptr);
+      }
+      if (!retryable) {
+        snapshot_armed_for_dump_ = false;
+        if (by_file) {
+          try {
+            std::error_code error;
+            std::filesystem::remove(dir_ / "dump.trigger", error);
+            if (error) {
+              file_trigger_enabled_ = false;
+            }
+          } catch (...) {
+            file_trigger_enabled_ = false;
+          }
+        }
+        file_trigger_pending_ = false;
+      }
+      try {
+        BOOST_LOG(warning) << "SBS debug dump staged GPU readback failed; request "sv
+                           << (rearmed ? "re-armed" :
+                               (retryable ? "discarded after cancellation" :
+                                            "discarded as deterministic invalid evidence"))
+                           << ": " << reason;
+      } catch (...) {
+      }
+    };
+
+    try {
+      auto &pending = *pending_gpu_capture_;
+      if (!pending.gpu_ready) {
+        if (!pending.completion) {
+          fail_capture("completion query is unavailable");
+          return;
+        }
+        const HRESULT query_status = ctx->GetData(
+          pending.completion.Get(),
+          nullptr,
+          0,
+          D3D11_ASYNC_GETDATA_DONOTFLUSH
+        );
+        if (query_status == S_FALSE) {
+          return;
+        }
+        if (FAILED(query_status)) {
+          fail_capture("completion query failed");
+          return;
+        }
+        const auto ready_observed = std::chrono::steady_clock::now();
+        pending.gpu_ready = true;
+        pending.gpu_ready_age_ms = std::chrono::duration<double, std::milli>(
+          ready_observed - pending.submitted_at
+        ).count();
+        pending.collection_started_at = ready_observed;
+        pending.completion.Reset();
+      }
+
+      const auto poll_started = std::chrono::steady_clock::now();
+      ++pending.collection_poll_count;
+      collection_budget budget(poll_started);
+      auto &job = pending.job;
+      const auto finish_poll = [&]() noexcept {
+        pending.cpu_collection_ms += std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - poll_started
+        ).count();
+      };
+
+      const auto collect_required = [&]
+      (
+        const collect_status_e status,
+        const detail::collection_stage_e next
+      ) noexcept {
+        if (status == collect_status_e::ready) {
+          pending.collection_stage = next;
+          return true;
+        }
+        finish_poll();
+        if (status == collect_status_e::failed) {
+          fail_capture("required staging resource could not be mapped");
+        }
+        // A terminal EVENT should normally make every preceding staging resource mappable.
+        // WAS_STILL_DRAWING and a deliberately partial chunk both retain the immutable batch.
+        return false;
+      };
+
+      while (pending_gpu_capture_) {
+        if (budget.exhausted()) {
+          finish_poll();
+          return;
+        }
+
+        using stage_e = detail::collection_stage_e;
+        switch (pending.collection_stage) {
+          case stage_e::shadow_state:
+            if (!collect_required(
+                  collect_float_buffer(
+                    ctx,
+                    pending.shadow_state,
+                    models::depth_coordinate_v2::state_float_count,
+                    job.shadow_state,
+                    budget
+                  ),
+                  stage_e::shadow_frame_stats
+                )) return;
+            break;
+
+          case stage_e::shadow_frame_stats:
+            if (!collect_required(
+                  collect_float_buffer(
+                    ctx,
+                    pending.shadow_frame_stats,
+                    models::depth_coordinate_v2::frame_stats_float_count,
+                    job.shadow_frame_stats,
+                    budget
+                  ),
+                  stage_e::subtitle_ocr_record
+                )) return;
+            break;
+
+          case stage_e::subtitle_ocr_record:
+            if (!pending.subtitle_slr9_active) {
+              pending.collection_stage = stage_e::validate_evidence;
+              break;
+            }
+            if (!collect_required(
+                  collect_buffer(
+                    ctx,
+                    pending.subtitle_ocr_record,
+                    job.subtitle_ocr_record,
+                    budget
+                  ),
+                  stage_e::subtitle_locator_state
+                )) return;
+            break;
+
+          case stage_e::subtitle_locator_state:
+            if (!collect_required(
+                  collect_buffer(
+                    ctx,
+                    pending.subtitle_locator_state,
+                    job.subtitle_locator_state,
+                    budget
+                  ),
+                  stage_e::validate_evidence
+                )) return;
+            break;
+
+          case stage_e::validate_evidence:
+            if (!shadow_state_is_dumpable(job.shadow_state)) {
+              finish_poll();
+              fail_capture(
+                "selected completion is not a current valid V2 camera/output pair"
+              );
+              return;
+            }
+            if (pending.subtitle_slr9_active && !detail::subtitle_records_match_frame(
+                  job.subtitle_ocr_record,
+                  job.subtitle_locator_state,
+                  job.completed
+                )) {
+              finish_poll();
+              fail_capture("OCR8/SLR9 record identity or layout is invalid", false);
+              return;
+            }
+            pending.collection_stage = stage_e::scene_normalization;
+            break;
+
+          case stage_e::scene_normalization:
+            if (!pending.scene_cut_bridge_requested) {
+              pending.collection_stage = stage_e::model_input;
+              break;
+            }
+            {
+              const auto status = collect_buffer(
+                ctx,
+                pending.depth_frame_state,
+                pending.normalization_state_bytes,
+                budget
+              );
+              if (status == collect_status_e::ready) {
+                pending.collection_stage = stage_e::scene_adaptive;
+              } else if (status == collect_status_e::failed) {
+                pending.scene_cut_bridge_requested = false;
+                pending.depth_frame_state.resource.Reset();
+                pending.adaptive_state.resource.Reset();
+                pending.normalization_state_bytes.clear();
+                job.adaptive_state.clear();
+                pending.collection_stage = stage_e::model_input;
+              } else {
+                finish_poll();
+                return;
+              }
+            }
+            break;
+
+          case stage_e::scene_adaptive:
+            {
+              const auto status = collect_buffer(
+                ctx,
+                pending.adaptive_state,
+                job.adaptive_state,
+                budget
+              );
+              if (status == collect_status_e::ready) {
+                pending.collection_stage = stage_e::scene_decode;
+              } else if (status == collect_status_e::failed) {
+                pending.scene_cut_bridge_requested = false;
+                pending.adaptive_state.resource.Reset();
+                pending.normalization_state_bytes.clear();
+                job.adaptive_state.clear();
+                pending.collection_stage = stage_e::model_input;
+              } else {
+                finish_poll();
+                return;
+              }
+            }
+            break;
+
+          case stage_e::scene_decode:
+            // The retained scene-cut bridge is optional comparison evidence. Malformed bytes do
+            // not reject the exact-frame core package.
+            job.scene_cut_bridge_state_available =
+              decode_normalization_state(
+                pending.normalization_state_bytes, job.normalization
+              ) == depth_dumpability::valid;
+            pending.normalization_state_bytes.clear();
+            if (!job.scene_cut_bridge_state_available) {
+              job.adaptive_state.clear();
+            }
+            pending.collection_stage = stage_e::model_input;
+            break;
+
+          case stage_e::model_input:
+            if (!collect_required(
+                  collect_float_buffer(
+                    ctx,
+                    pending.model_input,
+                    static_cast<std::size_t>(job.completed.model_width) *
+                      static_cast<std::size_t>(job.completed.model_height) * 3u,
+                    job.model_input,
+                    budget
+                  ),
+                  stage_e::raw_depth
+                )) return;
+            break;
+
+          case stage_e::raw_depth:
+            if (!collect_required(
+                  collect_float_buffer(
+                    ctx,
+                    pending.raw_depth,
+                    static_cast<std::size_t>(job.completed.raw_width) *
+                      static_cast<std::size_t>(job.completed.raw_height),
+                    job.raw_depth,
+                    budget
+                  ),
+                  stage_e::warp_depth
+                )) return;
+            break;
+
+          case stage_e::warp_depth:
+            if (!collect_required(
+                  collect_texture(ctx, pending.warp_depth, job.warp_depth, budget),
+                  stage_e::shadow_coordinate
+                )) return;
+            break;
+
+          case stage_e::shadow_coordinate:
+            if (!collect_required(
+                  collect_texture(
+                    ctx, pending.shadow_coordinate, job.shadow_coordinate, budget
+                  ),
+                  stage_e::shadow_candidate
+                )) return;
+            break;
+
+          case stage_e::shadow_candidate:
+            if (!collect_required(
+                  collect_texture(
+                    ctx, pending.shadow_candidate, job.shadow_candidate, budget
+                  ),
+                  stage_e::shadow_ownership_refined
+                )) return;
+            break;
+
+          case stage_e::shadow_ownership_refined:
+            if (!collect_required(
+                  collect_texture(
+                    ctx,
+                    pending.shadow_ownership_refined,
+                    job.shadow_ownership_refined,
+                    budget
+                  ),
+                  stage_e::shadow_vertical
+                )) return;
+            break;
+
+          case stage_e::shadow_vertical:
+            if (!collect_required(
+                  collect_texture(
+                    ctx, pending.shadow_vertical, job.shadow_vertical, budget
+                  ),
+                  stage_e::shadow_vertical_conditioned
+                )) return;
+            break;
+
+          case stage_e::shadow_vertical_conditioned:
+            if (!collect_required(
+                  collect_texture(
+                    ctx,
+                    pending.shadow_vertical_conditioned,
+                    job.shadow_vertical_conditioned,
+                    budget
+                  ),
+                  stage_e::shadow_base_final
+                )) return;
+            break;
+
+          case stage_e::shadow_base_final:
+            if (!pending.subtitle_slr9_active) {
+              pending.collection_stage = stage_e::shadow_final;
+              break;
+            }
+            if (!collect_required(
+                  collect_texture(
+                    ctx, pending.shadow_base_final, job.shadow_base_final, budget
+                  ),
+                  stage_e::shadow_final
+                )) return;
+            break;
+
+          case stage_e::shadow_final:
+            if (!collect_required(
+                  collect_texture(ctx, pending.shadow_final, job.shadow_final, budget),
+                  stage_e::source
+                )) return;
+            break;
+
+          case stage_e::source:
+            if (!collect_required(
+                  collect_texture(ctx, pending.source, job.source, budget),
+                  stage_e::depth_input_source
+                )) return;
+            break;
+
+          case stage_e::depth_input_source:
+            if (!pending.depth_input_source_available) {
+              pending.collection_stage = stage_e::sbs;
+              break;
+            }
+            if (!collect_required(
+                  collect_texture(
+                    ctx, pending.depth_input_source, job.depth_input_source, budget
+                  ),
+                  stage_e::sbs
+                )) return;
+            break;
+
+          case stage_e::sbs:
+            if (!collect_required(
+                  collect_texture(ctx, pending.sbs, job.sbs, budget),
+                  stage_e::warp_map
+                )) return;
+            break;
+
+          case stage_e::warp_map:
+            if (!job.warp_map_available) {
+              pending.collection_stage = stage_e::warp_mask;
+              break;
+            }
+            if (!collect_required(
+                  collect_texture(ctx, pending.warp_map, job.warp_map, budget),
+                  stage_e::warp_mask
+                )) return;
+            break;
+
+          case stage_e::warp_mask:
+            if (!job.warp_mask_available) {
+              pending.collection_stage = stage_e::complete;
+              break;
+            }
+            if (!collect_required(
+                  collect_texture(ctx, pending.warp_mask, job.warp_mask, budget),
+                  stage_e::complete
+                )) return;
+            break;
+
+          case stage_e::complete:
+            finish_poll();
+            {
+              const auto queued_frame_id = job.completed.matched_frame_id;
+              const auto retry_token = pending.retry_token;
+              const bool by_button = job.by_button;
+              const bool by_file = job.by_file;
+              const auto button = job.button_request;
+              const double gpu_ready_age_ms = pending.gpu_ready_age_ms;
+              const double collection_ms = pending.cpu_collection_ms;
+              const auto collection_poll_count = pending.collection_poll_count;
+              const double collection_wall_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - pending.collection_started_at
+              ).count();
+              auto cpu_job = std::move(job);
+              pending_gpu_capture_.reset();
+
+              const auto worker_state = async_;
+              bool queued = false;
+              try {
+                std::function<void()> publish_task =
+                  [job = std::move(cpu_job), worker_state, retry_token]() mutable {
+                  dump_publish_result result;
+                  try {
+                    result = publish_captured_dump(job);
+                  } catch (const std::exception &exception) {
+                    result.error = exception.what();
+                  } catch (...) {
+                    result.error = "unknown background publication exception";
+                  }
+                  if (!result.success) {
+                    const bool rearmed = worker_state->record_publication_failure(
+                      retry_token,
+                      job.by_button,
+                      job.by_file,
+                      job.button_request
+                    );
+                    try {
+                      BOOST_LOG(warning)
+                        << "SBS debug dump background publication failed; request "
+                        << (rearmed ? "re-armed" : "discarded after cancellation")
+                        << (result.error.empty() ? "." : ": " + result.error);
+                    } catch (...) {
+                    }
+                  }
+                  if (result.trigger_remove_failed) {
+                    worker_state->record_trigger_remove_failure();
+                  }
+                };
+                queued = worker_state->enqueue(std::move(publish_task));
+              } catch (...) {
+                // The exact-frame CPU snapshot is already complete, but allocating the queued
+                // task itself can still fail. Preserve the request through the common retry path.
+                queued = false;
+              }
+              if (!queued) {
+                retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
+                worker_state->record_publication_failure(
+                  retry_token,
+                  by_button,
+                  by_file,
+                  button
+                );
+                return;
+              }
+
+              try {
+                BOOST_LOG(info)
+                  << "SBS debug dump stable GPU snapshot queued for background publication (frame "sv
+                  << queued_frame_id << ", GPU-ready age " << gpu_ready_age_ms
+                  << " ms, CPU collection " << collection_ms << " ms across "
+                  << collection_poll_count << " polls, ready-to-CPU age "
+                  << collection_wall_ms << " ms)."sv;
+              } catch (...) {
+              }
+            }
+            return;
+        }
+      }
+    } catch (const std::exception &exception) {
+      try {
+        BOOST_LOG(warning) << "SBS debug dump staging collection threw: "
+                           << exception.what();
+      } catch (...) {
+      }
+      fail_capture("CPU snapshot allocation or collection failed");
+    } catch (...) {
+      fail_capture("CPU snapshot collection failed with an unknown exception");
+    }
+  }
+
   bool dumper::maybe_dump(
     ID3D11Device *device,
     ID3D11DeviceContext *ctx,
@@ -4004,7 +4863,8 @@ namespace platf::sbs_debug {
     const config::video_t::sbs_t &cfg
   ) {
     const bool by_file = file_trigger_pending_;
-    if (!snapshot_armed_for_dump_ || !async_ || async_->busy()) {
+    if (!snapshot_armed_for_dump_ || !async_ || async_->busy() ||
+        pending_gpu_capture_) {
       return false;
     }
     snapshot_armed_for_dump_ = false;
@@ -4013,6 +4873,7 @@ namespace platf::sbs_debug {
       return false;
     }
     try {
+      const auto submission_started = std::chrono::steady_clock::now();
       const std::uint64_t retry_token = async_->allow_retries_and_token();
       if (
         !device || !ctx || !completed.source || !completed.depth_input_source ||
@@ -4029,10 +4890,7 @@ namespace platf::sbs_debug {
         completed.raw_height != completed.model_height ||
         prepared_frame_id_ != completed.matched_frame_id
       ) {
-        // Every rejection below keeps the trigger latched, so without a backoff the next frame
-        // repeats the full-GPU-sync preflight at frame rate for as long as the condition
-        // persists. Bound the retry cadence exactly like the downstream failure paths.
-        retry_backoff_frames_ = retry_backoff_frames;
+        retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
         return false;
       }
       const auto input_region_error = depth_input_region_error(completed);
@@ -4040,7 +4898,7 @@ namespace platf::sbs_debug {
         BOOST_LOG(warning) << "SBS debug dump: authenticated input-region metadata is "sv
                               "incomplete or inconsistent; dump rejected: "sv
                            << input_region_error << '.';
-        retry_backoff_frames_ = retry_backoff_frames;
+        retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
         return false;
       }
       if (!completed.parallax_v2_render_selected ||
@@ -4053,8 +4911,8 @@ namespace platf::sbs_debug {
         BOOST_LOG(warning)
           << "SBS debug dump: production V2 renderer is not selected or has an incomplete "sv
              "authenticated resource set; dump rejected (legacy live rendering is unsupported)."sv;
-        retry_backoff_frames_ = retry_backoff_frames;
-          return false;
+        retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
+        return false;
       }
       const bool subtitle_ocr_present = completed.ocr_box_record != nullptr;
       const bool subtitle_locator_present = completed.subtitle_locator_state != nullptr;
@@ -4069,14 +4927,14 @@ namespace platf::sbs_debug {
           ))) {
         BOOST_LOG(warning)
           << "SBS debug dump: OCR8/SLR9 resources are partial; dump rejected."sv;
-        retry_backoff_frames_ = retry_backoff_frames;
+        retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
         return false;
       }
       if (!completed.shadow_coordinate) {
         BOOST_LOG(warning)
           << "SBS debug dump: the explicit Dump 3D canonical-coordinate snapshot is "sv
              "unavailable; live V2 rendering remains authenticated and unaffected."sv;
-        retry_backoff_frames_ = retry_backoff_frames;
+        retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
         return false;
       }
       if (completed.parallax_v2_live_renderer_source_closure_sha256 !=
@@ -4085,7 +4943,7 @@ namespace platf::sbs_debug {
         BOOST_LOG(warning)
           << "SBS debug dump: production V2 renderer source closure is missing or "sv
              "mismatched; dump rejected."sv;
-        retry_backoff_frames_ = retry_backoff_frames;
+        retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
         return false;
       }
 
@@ -4123,11 +4981,12 @@ namespace platf::sbs_debug {
         static_cast<std::uint64_t>(completed.raw_height);
       if (model_pixels > SIZE_MAX / (3u * sizeof(float)) ||
           raw_values > SIZE_MAX / sizeof(float)) {
-        retry_backoff_frames_ = retry_backoff_frames;
+        retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
         return false;
       }
 
-      captured_dump_job job;
+      auto pending = std::make_unique<detail::pending_gpu_capture>();
+      auto &job = pending->job;
       job.root = dir_;
       job.trigger = dir_ / "dump.trigger";
       job.button_request = button_request_;
@@ -4138,161 +4997,160 @@ namespace platf::sbs_debug {
       job.preprocess = &capture_calibration->preprocess;
       job.warp_map_available = completed.warp_map != nullptr;
       job.warp_mask_available = completed.warp_mask != nullptr;
+      pending->subtitle_slr9_active = subtitle_slr9_active;
+      pending->depth_input_source_available =
+        completed.depth_input_region.video_region;
+      pending->retry_token = retry_token;
       if (completed.depth_input_region.video_region &&
           (!job.warp_map_available || !job.warp_mask_available)) {
         BOOST_LOG(warning)
           << "SBS debug dump: ROI completion lacks the required full-source inverse map "sv
              "or mask; dump rejected."sv;
-        retry_backoff_frames_ = retry_backoff_frames;
+        retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
         return false;
       }
 
-      // Snapshot every GPU-owned byte before returning to the render loop. All expensive CPU
-      // transformation and publication happens later from these immutable vectors.
-      bool captured =
-        read_texture(device, ctx, completed.source, job.source) &&
-        read_float_buffer(
+      D3D11_QUERY_DESC query_desc {D3D11_QUERY_EVENT, 0};
+      if (FAILED(device->CreateQuery(&query_desc, &pending->completion))) {
+        retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
+        return false;
+      }
+
+      bool staged =
+        stage_texture(device, ctx, completed.source, pending->source) &&
+        stage_buffer(
           device,
           ctx,
           completed.model_input,
-          static_cast<std::size_t>(model_pixels) * 3u,
-          job.model_input
+          static_cast<std::size_t>(model_pixels) * 3u * sizeof(float),
+          pending->model_input
         ) &&
-        read_float_buffer(
+        stage_buffer(
           device,
           ctx,
           completed.raw_depth,
-          static_cast<std::size_t>(raw_values),
-          job.raw_depth
+          static_cast<std::size_t>(raw_values) * sizeof(float),
+          pending->raw_depth
         ) &&
-        read_texture(device, ctx, completed.warp_depth, job.warp_depth) &&
-        read_texture(device, ctx, completed.sbs, job.sbs) &&
-        read_texture(device, ctx, completed.shadow_coordinate, job.shadow_coordinate) &&
-        read_texture(
+        stage_texture(device, ctx, completed.warp_depth, pending->warp_depth) &&
+        stage_texture(device, ctx, completed.sbs, pending->sbs) &&
+        stage_texture(
+          device, ctx, completed.shadow_coordinate, pending->shadow_coordinate
+        ) &&
+        stage_texture(
           device,
           ctx,
           completed.shadow_candidate_parallax,
-          job.shadow_candidate
+          pending->shadow_candidate
         ) &&
-        read_texture(
+        stage_texture(
           device,
           ctx,
           completed.shadow_ownership_refined_parallax,
-          job.shadow_ownership_refined
+          pending->shadow_ownership_refined
         ) &&
-        read_texture(
+        stage_texture(
           device,
           ctx,
           completed.shadow_vertical_majorant,
-          job.shadow_vertical
+          pending->shadow_vertical
         ) &&
-        read_texture(
+        stage_texture(
           device,
           ctx,
           completed.shadow_vertical_conditioned,
-          job.shadow_vertical_conditioned
+          pending->shadow_vertical_conditioned
         ) &&
-        read_texture(
-          device,
-          ctx,
-          completed.shadow_final_parallax,
-          job.shadow_final
+        stage_texture(
+          device, ctx, completed.shadow_final_parallax, pending->shadow_final
         ) &&
-        read_float_buffer(
+        stage_buffer(
           device,
           ctx,
           completed.shadow_state,
-          models::depth_coordinate_v2::state_float_count,
-          job.shadow_state
+          models::depth_coordinate_v2::state_float_count * sizeof(float),
+          pending->shadow_state
         ) &&
-        read_float_buffer(
+        stage_buffer(
           device,
           ctx,
           completed.shadow_frame_stats,
-          models::depth_coordinate_v2::frame_stats_float_count,
-          job.shadow_frame_stats
+          models::depth_coordinate_v2::frame_stats_float_count * sizeof(float),
+          pending->shadow_frame_stats
         );
-      if (captured && subtitle_slr9_active) {
-        captured =
-          read_texture(
+      if (staged && subtitle_slr9_active) {
+        staged =
+          stage_texture(
             device,
             ctx,
             completed.shadow_base_final_parallax,
-            job.shadow_base_final
+            pending->shadow_base_final
           ) &&
-          read_buffer(
+          stage_buffer(
             device,
             ctx,
             completed.ocr_box_record,
             subtitle_ocr_record_word_count * sizeof(std::uint32_t),
-            job.subtitle_ocr_record
+            pending->subtitle_ocr_record
           ) &&
-          read_buffer(
+          stage_buffer(
             device,
             ctx,
             completed.subtitle_locator_state,
             subtitle_locator_state_word_count * sizeof(std::uint32_t),
-            job.subtitle_locator_state
+            pending->subtitle_locator_state
           );
       }
-      if (captured && completed.depth_input_region.video_region) {
-        captured = read_texture(
+      if (staged && pending->depth_input_source_available) {
+        staged = stage_texture(
           device,
           ctx,
           completed.depth_input_source,
-          job.depth_input_source
+          pending->depth_input_source
         );
       }
-      if (captured && job.warp_map_available) {
-        captured = read_texture(device, ctx, completed.warp_map, job.warp_map);
+      if (staged && job.warp_map_available) {
+        staged = stage_texture(device, ctx, completed.warp_map, pending->warp_map);
       }
-      if (captured && job.warp_mask_available) {
-        captured = read_texture(device, ctx, completed.warp_mask, job.warp_mask);
+      if (staged && job.warp_mask_available) {
+        staged = stage_texture(device, ctx, completed.warp_mask, pending->warp_mask);
+      }
+      if (!staged) {
+        retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
+        BOOST_LOG(warning)
+          << "SBS debug dump: GPU staging submission failed; request retained for retry."sv;
+        return false;
       }
 
-      // The retained scene-cut bridge is comparison-only. An unavailable optional readback must
-      // not reject an otherwise authenticated V2 package.
-      if (captured && completed.adaptive_state && completed.depth_frame_state) {
-        try {
-          job.scene_cut_bridge_state_available =
-            read_normalization_state(
-              device,
-              ctx,
-              completed.depth_frame_state,
-              job.normalization
-            ) == depth_dumpability::valid &&
-            read_buffer(
-              device,
-              ctx,
-              completed.adaptive_state,
-              sbs_adaptive_state::word_count * sizeof(std::uint32_t),
-              job.adaptive_state
-            );
-        } catch (...) {
-          job.scene_cut_bridge_state_available = false;
-          job.adaptive_state.clear();
+      if (completed.adaptive_state && completed.depth_frame_state) {
+        pending->scene_cut_bridge_requested =
+          stage_buffer(
+            device,
+            ctx,
+            completed.depth_frame_state,
+            4u * sizeof(float),
+            pending->depth_frame_state
+          ) &&
+          stage_buffer(
+            device,
+            ctx,
+            completed.adaptive_state,
+            sbs_adaptive_state::word_count * sizeof(std::uint32_t),
+            pending->adaptive_state
+          );
+        if (!pending->scene_cut_bridge_requested) {
+          pending->depth_frame_state = {};
+          pending->adaptive_state = {};
         }
       }
 
-      if (!captured) {
-        retry_backoff_frames_ = retry_backoff_frames;
-        BOOST_LOG(warning)
-          << "SBS debug dump: stable GPU snapshot readback failed; request retained for retry."sv;
-        return false;
-      }
-      if (subtitle_slr9_active && !subtitle_records_match_frame(
-            job.subtitle_ocr_record,
-            job.subtitle_locator_state,
-            completed
-          )) {
-        retry_backoff_frames_ = retry_backoff_frames;
-        BOOST_LOG(warning)
-          << "SBS debug dump: OCR8/SLR9 record identity or layout is invalid; request retained."sv;
-        return false;
-      }
+      // No later frame can race these bytes: every CopyResource precedes this event, and all
+      // future live writes are submitted after it on the same immediate-context command stream.
+      ctx->End(pending->completion.Get());
+      pending->submitted_at = std::chrono::steady_clock::now();
 
-      // No background code may observe a live COM pointer. The worker receives only CPU-owned
-      // snapshots plus copied scalar/provenance metadata.
+      // No background code may observe a live COM pointer. The pending GPU object owns only
+      // staging resources; the eventual publication job owns only copied scalar metadata.
       job.completed.source = nullptr;
       job.completed.depth_input_source = nullptr;
       job.completed.model_input = nullptr;
@@ -4315,72 +5173,39 @@ namespace platf::sbs_debug {
       job.completed.shadow_state = nullptr;
       job.completed.shadow_frame_stats = nullptr;
 
-      const auto queued_frame_id = job.completed.matched_frame_id;
-      const auto worker_state = async_;
-      const bool queued = worker_state->enqueue(
-        [job = std::move(job), worker_state, retry_token]() mutable {
-          dump_publish_result result;
-          try {
-            result = publish_captured_dump(job);
-          } catch (const std::exception &exception) {
-            result.error = exception.what();
-          } catch (...) {
-            result.error = "unknown background publication exception";
-          }
-          if (!result.success) {
-            const bool rearmed = worker_state->record_publication_failure(
-              retry_token,
-              job.by_button,
-              job.by_file,
-              job.button_request
-            );
-            try {
-              BOOST_LOG(warning)
-                << "SBS debug dump background publication failed; request "
-                << (rearmed ? "re-armed" : "discarded after cancellation")
-                << (result.error.empty() ? "." : ": " + result.error);
-            } catch (...) {
-            }
-          }
-          if (result.trigger_remove_failed) {
-            worker_state->record_trigger_remove_failure();
-          }
-        }
-      );
-      if (!queued) {
-        retry_backoff_frames_ = retry_backoff_frames;
-        return false;
-      }
-
-      // Publication now owns this request. Do not write the button latch again: a click that
-      // arrived after the initial exchange belongs to the next package.
+      const auto submitted_frame_id = job.completed.matched_frame_id;
+      pending_gpu_capture_ = std::move(pending);
       button_request.commit();
       if (by_file) {
         file_trigger_pending_ = false;
       }
       prepared_frame_id_ = 0;
       try {
+        const double submission_ms = std::chrono::duration<double, std::milli>(
+          pending_gpu_capture_->submitted_at - submission_started
+        ).count();
         BOOST_LOG(info)
-          << "SBS debug dump stable GPU snapshot queued for background publication (frame "sv
-          << queued_frame_id << ")."sv;
+          << "SBS debug dump exact-frame GPU staging submitted without waiting (frame "sv
+          << submitted_frame_id << ", CPU allocation/submission " << submission_ms
+          << " ms)."sv;
       } catch (...) {
       }
       return true;
     } catch (const std::exception &exception) {
-      retry_backoff_frames_ = retry_backoff_frames;
+      retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
       try {
         BOOST_LOG(warning)
-          << "SBS debug dump render-thread snapshot failed; request retained: "
+          << "SBS debug dump render-thread staging submission failed; request retained: "
           << exception.what();
       } catch (...) {
       }
       return false;
     } catch (...) {
-      retry_backoff_frames_ = retry_backoff_frames;
+      retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
       try {
         BOOST_LOG(warning)
-          << "SBS debug dump render-thread snapshot failed with an unknown exception; "sv
-             "request retained."sv;
+          << "SBS debug dump render-thread staging submission failed with an unknown "sv
+             "exception; request retained."sv;
       } catch (...) {
       }
       return false;

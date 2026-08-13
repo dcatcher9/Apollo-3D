@@ -89,3 +89,20 @@ TEST(InputPacketValidationTests, RejectsRuntOversizedUnknownAndMismatchedPackets
   std::memcpy(mismatched.data(), &wrong_size, sizeof(wrong_size));
   EXPECT_FALSE(input::validated_packet_magic(mismatched));
 }
+
+TEST(InputBatchingTests, AddsOrdinarySignedDeltasExactly) {
+  EXPECT_EQ(input::detail::checked_add_i16(12, 7), 19);
+  EXPECT_EQ(input::detail::checked_add_i16(-12, -7), -19);
+  EXPECT_EQ(input::detail::checked_add_i16(12, -7), 5);
+  EXPECT_EQ(input::detail::checked_add_i16(-12, 7), -5);
+}
+
+TEST(InputBatchingTests, AcceptsRepresentableBoundarySums) {
+  EXPECT_EQ(input::detail::checked_add_i16(32760, 7), 32767);
+  EXPECT_EQ(input::detail::checked_add_i16(-32760, -8), -32768);
+}
+
+TEST(InputBatchingTests, RejectsPositiveAndNegativeOverflow) {
+  EXPECT_FALSE(input::detail::checked_add_i16(32760, 8));
+  EXPECT_FALSE(input::detail::checked_add_i16(-32760, -9));
+}

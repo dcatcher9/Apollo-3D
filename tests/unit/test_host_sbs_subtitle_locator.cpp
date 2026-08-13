@@ -28,6 +28,37 @@ namespace {
   using Microsoft::WRL::ComPtr;
   namespace v2 = models::depth_coordinate_v2;
 
+  using tensor_content_t = std::array<std::uint32_t, 4u>;
+
+  constexpr std::uint32_t ceil_ocr_crop_height(
+    const std::uint32_t width,
+    const std::uint32_t height
+  ) {
+    const auto crop = (
+      static_cast<std::uint64_t>(width) * v2::subtitle_ocr_crop_aspect_height +
+      v2::subtitle_ocr_crop_aspect_width - 1u
+    ) / v2::subtitle_ocr_crop_aspect_width;
+    return std::min(height, static_cast<std::uint32_t>(crop));
+  }
+
+  constexpr std::uint32_t subtitle_roi_edge(
+    const std::uint32_t source_width,
+    const std::uint32_t source_height,
+    const tensor_content_t &content,
+    const std::uint32_t detector_row
+  ) {
+    const auto crop_height = ceil_ocr_crop_height(source_width, source_height);
+    const auto crop_top = source_height - crop_height;
+    const auto content_height = content[3u] - content[1u];
+    const std::uint64_t numerator =
+      (static_cast<std::uint64_t>(crop_top) * v2::subtitle_ocr_output_height +
+       static_cast<std::uint64_t>(detector_row) * crop_height) * content_height;
+    const std::uint64_t denominator =
+      static_cast<std::uint64_t>(v2::subtitle_ocr_output_height) * source_height;
+    return content[1u] +
+           static_cast<std::uint32_t>((numerator + denominator - 1u) / denominator);
+  }
+
   constexpr std::uint32_t field_width = v2::model_calibrated_shapes[0u].width;
   constexpr std::uint32_t field_height = v2::model_calibrated_shapes[0u].height;
   constexpr auto default_roi =
@@ -61,7 +92,8 @@ namespace {
     float ema_edge_change;
     float ema_edge_gradient;
     float ema_edge_strength;
-    std::array<float, 3u> reserved;
+    tensor_content_t tensor_content;
+    std::array<std::uint32_t, 3u> reserved;
   };
 
   struct v2_constants_t {
@@ -79,6 +111,7 @@ namespace {
     std::array<std::uint32_t, 4u> field;
     std::array<std::uint32_t, 4u> source;
     std::array<std::uint32_t, 4u> frame;
+    tensor_content_t tensor_content;
   };
 
   struct line_box_t {
@@ -112,9 +145,9 @@ namespace {
         structural_gap_count(structural_gaps) {}
   };
 
-  static_assert(sizeof(depth_constants_t) == 48u);
+  static_assert(sizeof(depth_constants_t) == 64u);
   static_assert(sizeof(v2_constants_t) == 32u);
-  static_assert(sizeof(subtitle_constants_t) == 48u);
+  static_assert(sizeof(subtitle_constants_t) == 64u);
 
   bool compile_compute_shader(
     ID3D11Device *device,
@@ -261,14 +294,23 @@ namespace {
       const std::uint32_t source_w = 1920u,
       const std::uint32_t source_h = 1080u,
       const std::uint32_t roi_top_override = std::numeric_limits<std::uint32_t>::max(),
-      const std::uint32_t roi_bottom_override = std::numeric_limits<std::uint32_t>::max()
+      const std::uint32_t roi_bottom_override = std::numeric_limits<std::uint32_t>::max(),
+      tensor_content_t tensor_content = {}
     ) :
         field_width_(field_w),
         field_height_(field_h),
         source_width_(source_w),
-        source_height_(source_h) {
-      const auto dynamic_roi =
-        v2::subtitle_ocr_dynamic_roi(source_w, source_h, field_w, field_h);
+        source_height_(source_h),
+        tensor_content_(tensor_content) {
+      if (tensor_content_ == tensor_content_t {}) {
+        tensor_content_ = {0u, 0u, field_w, field_h};
+      }
+      const v2::subtitle_ocr_roi_t dynamic_roi {
+        subtitle_roi_edge(
+          source_w, source_h, tensor_content_, v2::subtitle_ocr_safe_row_top),
+        subtitle_roi_edge(
+          source_w, source_h, tensor_content_, v2::subtitle_ocr_safe_row_bottom),
+      };
       roi_top_ = roi_top_override == std::numeric_limits<std::uint32_t>::max() ?
                    dynamic_roi.top :
                    roi_top_override;
@@ -367,7 +409,8 @@ namespace {
       }
 
       const depth_constants_t depth_constants {
-        field_width_, field_height_, 0u, 0.0f, 0.0f, 0u, 0.0f, 0.0f, 0.0f, {}
+        field_width_, field_height_, 0u, 0.0f, 0.0f, 0u, 0.0f, 0.0f, 0.0f,
+        tensor_content_, {}
       };
       const v2_constants_t v2_constants {
         0.04f, 0.0001f, 0.0f, 0.0f, 1.0f, 0.5f, 0.04f, 0.0f
@@ -376,6 +419,7 @@ namespace {
         {field_width_, field_height_, roi_top_, roi_bottom_},
         {source_width_, source_height_, 1u, 0u},
         {0u, 0u, 0u, 0u},
+        tensor_content_,
       };
       return create_constant_buffer(
                device_.Get(), &depth_constants, sizeof(depth_constants), depth_cb_) &&
@@ -451,6 +495,7 @@ namespace {
           static_cast<std::uint32_t>(identity),
           static_cast<std::uint32_t>(identity >> 32u),
         },
+        tensor_content_,
       };
       context_->UpdateSubresource(
         subtitle_cb_.Get(), 0u, nullptr, &subtitle_constants, 0u, 0u
@@ -516,6 +561,18 @@ namespace {
       );
     }
 
+    void set_base_at(
+      const std::uint32_t x,
+      const std::uint32_t y,
+      const float value
+    ) {
+      base_.at(static_cast<std::size_t>(y) * field_width_ + x) = value;
+      context_->UpdateSubresource(
+        base_texture_.Get(), 0u, nullptr, base_.data(),
+        static_cast<UINT>(field_width_ * sizeof(float)), 0u
+      );
+    }
+
     bool output_is_exact_base() const {
       if (output_.size() != base_.size()) return false;
       for (std::size_t index = 0u; index < base_.size(); ++index) {
@@ -574,6 +631,7 @@ namespace {
     std::uint32_t field_height_;
     std::uint32_t source_width_;
     std::uint32_t source_height_;
+    tensor_content_t tensor_content_ {};
     std::uint32_t roi_top_;
     std::uint32_t roi_bottom_;
     std::uint32_t scene_epoch_ = 0u;
@@ -968,13 +1026,18 @@ namespace {
     const std::uint32_t expired_target = fixture.state()[18u];
 
     ASSERT_TRUE(fixture.observe(322u, {}, false));
-    ASSERT_EQ(fixture.state()[25u], 6u);
+    ASSERT_EQ(
+      fixture.state()[25u], v2::subtitle_locator_death_grace_observations
+    );
     ASSERT_EQ(fixture.state()[18u], expired_target);
 
     // Word 25 is authenticated previous-state lifetime, not an open-ended counter. Corrupting it
-    // above the six-observation policy must invalidate the whole previous state: the next box is a
-    // fresh first observation with no cached target, and only its successor may sample a new one.
-    ASSERT_TRUE(fixture.overwrite_state_word(25u, 7u));
+    // above the generated observation limit must invalidate the whole previous state: the next
+    // box is a fresh first observation with no cached target, and only its successor may sample a
+    // new one.
+    ASSERT_TRUE(fixture.overwrite_state_word(
+      25u, v2::subtitle_locator_death_grace_observations + 1u
+    ));
     fixture.set_base(0.029f);
     ASSERT_TRUE(fixture.observe(323u, {line}, false));
     EXPECT_EQ(fixture.state()[2u], flag_pending);
@@ -1194,6 +1257,49 @@ namespace {
     EXPECT_EQ(fixture.state()[26u], 2u);
   }
 
+  TEST(HostSbsSubtitleSlr9GpuTest, PartialHardCutSurvivorHandsOffExpandedStackOnSecondObservation) {
+    slr9_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error)) << error;
+
+    const line_box_t first {180u, 350u, 590u, 358u};
+    const line_box_t second {180u, 362u, 590u, 370u};
+    const line_box_t added {180u, 374u, 590u, 382u};
+    ASSERT_TRUE(fixture.observe(50u, {first, second}, false));
+    ASSERT_TRUE(fixture.observe(51u, {first, second}, false));
+    ASSERT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
+    ASSERT_EQ(fixture.state()[3u], 1u);
+
+    // The cut observation retains only the two old-owner matches as current authority. The full
+    // three-line stack is deliberately pending, while the survivor resamples at full strength.
+    fixture.set_cut(1u, true);
+    ASSERT_TRUE(fixture.observe(52u, {first, second, added}, false));
+    EXPECT_EQ(fixture.state()[2u], flag_owner | flag_pending | flag_target_valid);
+    EXPECT_EQ(fixture.state()[3u], 2u);
+    EXPECT_EQ(fixture.state()[4u], 2u);
+    EXPECT_EQ(fixture.state()[12u], 3u);
+    EXPECT_EQ(fixture.state()[20u], 2u);
+    EXPECT_EQ(fixture.state()[21u], 0u);
+    EXPECT_EQ(fixture.state()[24u], 2u);
+
+    // The next distinct matching observation confirms the material three-line handoff. Its
+    // generation bump and half-strength first fade are the specified second transaction, not a
+    // same-frame promotion of the newly added line.
+    ASSERT_TRUE(fixture.observe(53u, {first, second, added}, false));
+    EXPECT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
+    EXPECT_EQ(fixture.state()[3u], 3u);
+    EXPECT_EQ(fixture.state()[4u], 3u);
+    EXPECT_EQ(fixture.state()[12u], 0u);
+    EXPECT_EQ(fixture.state()[20u], 3u);
+    EXPECT_EQ(fixture.state()[21u], 3u);
+    EXPECT_EQ(fixture.state()[24u], 1u);
+
+    ASSERT_TRUE(fixture.observe(54u, {first, second, added}, false));
+    EXPECT_EQ(fixture.state()[3u], 3u);
+    EXPECT_EQ(fixture.state()[20u], 3u);
+    EXPECT_EQ(fixture.state()[24u], 2u);
+  }
+
   TEST(HostSbsSubtitleSlr9GpuTest, DomainResetRequiresPendingThenNextDistinctFrameBirth) {
     slr9_warp_fixture_t fixture;
     std::string error;
@@ -1286,6 +1392,65 @@ namespace {
         0.025f
       );
     }
+  }
+
+  TEST(HostSbsSubtitleSlr9GpuTest, AuthenticatesPaddedContentAndExtendsItsBoundary) {
+    constexpr std::uint32_t source_width = 1500u;
+    constexpr std::uint32_t source_height = 500u;
+    constexpr tensor_content_t content {0u, 89u, field_width, 345u};
+    constexpr auto padded_roi_top = subtitle_roi_edge(
+      source_width, source_height, content, v2::subtitle_ocr_safe_row_top
+    );
+    constexpr auto padded_roi_bottom = subtitle_roi_edge(
+      source_width, source_height, content, v2::subtitle_ocr_safe_row_bottom
+    );
+    static_assert(padded_roi_top == 237u);
+    static_assert(padded_roi_bottom == 341u);
+
+    slr9_warp_fixture_t fixture(
+      field_width,
+      field_height,
+      source_width,
+      source_height,
+      std::numeric_limits<std::uint32_t>::max(),
+      std::numeric_limits<std::uint32_t>::max(),
+      content
+    );
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error)) << error;
+
+    // Even before an owner is confirmed, condition_main must publish synthetic tensor padding
+    // as an exact extension of the nearest real-content cell rather than unrelated BaseField.
+    constexpr std::uint32_t sample_x = 300u;
+    constexpr float boundary_value = 0.012f;
+    fixture.set_base_at(sample_x, content[1u], boundary_value);
+    const line_box_t line {
+      180u, padded_roi_top + 5u, 590u, padded_roi_top + 15u
+    };
+    ASSERT_TRUE(fixture.observe(500u, {line}, false));
+    EXPECT_EQ(fixture.state()[2u], flag_pending);
+    EXPECT_EQ(
+      std::bit_cast<std::uint32_t>(fixture.output_at(sample_x, 0u)),
+      std::bit_cast<std::uint32_t>(boundary_value)
+    );
+    EXPECT_EQ(
+      std::bit_cast<std::uint32_t>(fixture.output_at(sample_x, content[1u])),
+      std::bit_cast<std::uint32_t>(boundary_value)
+    );
+
+    ASSERT_TRUE(fixture.observe(501u, {line}, false));
+    EXPECT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
+    EXPECT_EQ(fixture.state()[4u], 1u);
+    EXPECT_EQ(fixture.state()[20u], 1u);
+    constexpr auto current = v2::subtitle_locator_current_offset;
+    EXPECT_EQ(fixture.state()[current + 0u], line.left);
+    EXPECT_EQ(fixture.state()[current + 1u], line.top);
+    EXPECT_EQ(fixture.state()[current + 2u], line.right);
+    EXPECT_EQ(fixture.state()[current + 3u], line.bottom);
+    EXPECT_GE(fixture.state()[current + 0u], content[0u]);
+    EXPECT_GE(fixture.state()[current + 1u], content[1u]);
+    EXPECT_LE(fixture.state()[current + 2u], content[2u]);
+    EXPECT_LE(fixture.state()[current + 3u], content[3u]);
   }
 
   TEST(HostSbsSubtitleSlr9GpuTest, RibbonBottomToleranceProjectsExactlyAcrossFields) {

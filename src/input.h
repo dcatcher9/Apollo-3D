@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <span>
 #include <vector>
@@ -23,6 +24,19 @@ namespace input {
   struct input_t;
 
   namespace detail {
+    /**
+     * @brief Add two signed 16-bit input deltas without allowing protocol-field wraparound.
+     * @return The exact sum, or std::nullopt when it is not representable as int16_t.
+     */
+    constexpr std::optional<std::int16_t> checked_add_i16(std::int16_t left, std::int16_t right) noexcept {
+      const auto sum = static_cast<std::int32_t>(left) + static_cast<std::int32_t>(right);
+      if (sum < std::numeric_limits<std::int16_t>::min() ||
+          sum > std::numeric_limits<std::int16_t>::max()) {
+        return std::nullopt;
+      }
+      return static_cast<std::int16_t>(sum);
+    }
+
     /**
      * @brief Determine whether a held, remapped right Alt should be removed from packet modifiers.
      * @param mapped_right_alt Effective virtual-key mapping for right Alt.

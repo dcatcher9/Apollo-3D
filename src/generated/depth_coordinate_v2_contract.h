@@ -10,10 +10,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 46u;
-  inline constexpr std::uint32_t contract_tag = 0xD18FF0F3u;
-  inline constexpr std::string_view contract_canonical_sha256 = "8ab387f9bcda29e90455ce9e5b8677cef3cd7744fe03ee03202a4699fa7e4ead";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "d18ff0f3c8e823725663bf578e243abb61bf406d4334807edd658b9c86d9e94d";
+  inline constexpr std::uint32_t contract_schema = 48u;
+  inline constexpr std::uint32_t contract_tag = 0x4F3FF872u;
+  inline constexpr std::string_view contract_canonical_sha256 = "07da2a0f7ad23e8e6a4d70e00b3aa9cb159f9eb76991215b5c85634e96f29441";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "4f3ff872d2a1f0b3f6503207cd870f606a538aef168535a4253590fa8cd7d920";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -22,7 +22,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t capture_provenance_schema = 3u;
   inline constexpr std::string_view capture_provenance_manifest_key = "raw_model_provenance";
   inline constexpr std::string_view capture_provenance_binding = "raw-depth-model-input-and-preprocess-source-produced-by-calibrated-identity-v3";
-  inline constexpr std::uint32_t subtitle_ocr_contract_schema = 6u;
+  inline constexpr std::uint32_t subtitle_ocr_contract_schema = 8u;
   inline constexpr std::string_view subtitle_ocr_model_name = "ppocrv6_tiny_det_modelopt_fp16";
   inline constexpr std::string_view subtitle_ocr_asset_path = "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx";
   inline constexpr std::string_view subtitle_ocr_artifact_onnx_sha256 = "169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44";
@@ -65,8 +65,16 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t subtitle_ocr_final_box_capacity = 8u;
   inline constexpr std::uint32_t subtitle_ocr_safe_row_top = 24u;
   inline constexpr std::uint32_t subtitle_ocr_safe_row_bottom = 155u;
+  inline constexpr float subtitle_ocr_active_probability_threshold = 0.2f;
+  inline constexpr float subtitle_ocr_min_mean_score = 0.4f;
   inline constexpr std::uint32_t subtitle_locator_max_width_numerator = 9u;
   inline constexpr std::uint32_t subtitle_locator_max_width_denominator = 10u;
+  inline constexpr std::uint32_t subtitle_locator_min_width_cells = 48u;
+  inline constexpr std::uint32_t subtitle_locator_min_height_cells = 6u;
+  inline constexpr std::uint32_t subtitle_locator_min_aspect_numerator = 2u;
+  inline constexpr std::uint32_t subtitle_locator_min_aspect_denominator = 1u;
+  inline constexpr float subtitle_locator_match_iou_threshold = 0.6f;
+  inline constexpr std::uint32_t subtitle_locator_death_grace_observations = 6u;
   inline constexpr std::uint32_t subtitle_ocr_crop_aspect_width = 6u;
   inline constexpr std::uint32_t subtitle_ocr_crop_aspect_height = 1u;
   inline constexpr std::uint32_t subtitle_ocr_text_join_gap_cells = 4u;
@@ -93,6 +101,18 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t subtitle_locator_kind_mask = 15u;
   static_assert(subtitle_ocr_input_n == 1u && subtitle_ocr_input_c == 3u);
   static_assert(subtitle_ocr_output_n == 1u && subtitle_ocr_output_c == 1u);
+  static_assert(subtitle_ocr_active_probability_threshold > 0.0f &&
+                subtitle_ocr_active_probability_threshold < 1.0f);
+  static_assert(subtitle_ocr_min_mean_score >
+                subtitle_ocr_active_probability_threshold);
+  static_assert(subtitle_ocr_min_mean_score <= 1.0f);
+  static_assert(subtitle_locator_min_width_cells > 0u);
+  static_assert(subtitle_locator_min_height_cells > 0u);
+  static_assert(subtitle_locator_min_aspect_numerator > 0u);
+  static_assert(subtitle_locator_min_aspect_denominator > 0u);
+  static_assert(subtitle_locator_match_iou_threshold > 0.0f &&
+                subtitle_locator_match_iou_threshold <= 1.0f);
+  static_assert(subtitle_locator_death_grace_observations > 0u);
   static_assert(subtitle_ocr_text_join_gap_cells > 0u);
   static_assert(subtitle_ocr_text_join_gap_cells <
                 subtitle_ocr_ribbon_join_gap_cells);
@@ -113,7 +133,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t shader_source_closure_schema = 2u;
   inline constexpr std::uint32_t shader_source_compile_flags = 34816u;
   inline constexpr std::uint32_t shader_source_macro_count = 0u;
-  inline constexpr std::string_view shader_source_closure_sha256 = "f299ce49f332458a1d97634d4ced6d7fc802d2be8d583ee04f0e32d851ed1a22";
+  inline constexpr std::string_view shader_source_closure_sha256 = "254d73afac205fb282e471dfe75e5e38a6e0156c0c4ec4296d71ffa828fc512c";
 
   struct shader_source_spec_t {
     std::string_view source_file;
@@ -204,14 +224,14 @@ namespace models::depth_coordinate_v2 {
       "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
       2.25f,
       {
-        "apollo-dav2-area-hdr-srgb-imagenet-v1",
+        "apollo-dav2-centered-integer-contain-edge-pad-area-hdr-srgb-imagenet-v2",
         2u,
         "rgb_to_nchw_cs.hlsl",
         "main",
         "cs_5_0",
         34816u,
         0u,
-        "d765bf19eb493f302752b1881f62e5d07fa82a073cfba3811fed50f5a5264124",
+        "6ee5ca19e447a210f5f7eceb29561321b8f9db3ec3bafd32006f79b43398d730",
         1u,
         "float32-le",
         "NCHW",
@@ -220,7 +240,7 @@ namespace models::depth_coordinate_v2 {
         1036u,
         {{0.485f, 0.456f, 0.406f}},
         {{0.229f, 0.224f, 0.225f}},
-        "exact model input after area resize, HDR tone mapping, sRGB conversion, and ImageNet normalization",
+        "exact model input after centered integer contain-fit area resize, HDR tone mapping, sRGB conversion, ImageNet normalization, and edge-replicated tensor padding excluded from the analysis domain",
       },
     },
   }};

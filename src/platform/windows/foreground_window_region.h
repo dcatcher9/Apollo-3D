@@ -36,6 +36,7 @@ namespace platf::foreground_window {
     dpi_unavailable,
     geometry_unavailable,
     foreground_changed,
+    interactive_move_size,
   };
 
   [[nodiscard]] const char *status_name(status_e status) noexcept;
@@ -50,6 +51,10 @@ namespace platf::foreground_window {
     std::uintptr_t window {};
     std::uint32_t process_id {};
     std::uintptr_t monitor {};
+    // Optional physical monitor bounds. Production fills this from GetMonitorInfoW; keeping it
+    // alongside the HMONITOR lets cloned outputs prove coordinate equivalence without accepting
+    // an unrelated monitor merely because its window rectangle happens to fit.
+    rect_t monitor_screen_rect {};
     rect_t client_screen_rect {};
     rect_t frame_screen_rect {};
     std::chrono::steady_clock::time_point observed_at {};
@@ -68,6 +73,7 @@ namespace platf::foreground_window {
     std::uintptr_t window {};
     std::uint32_t process_id {};
     std::uintptr_t monitor {};
+    rect_t monitor_screen_rect {};
     rect_t client_screen_rect {};
     rect_t frame_screen_rect {};
     std::chrono::steady_clock::time_point observed_at {};
@@ -89,6 +95,7 @@ namespace platf::foreground_window {
       std::uintptr_t window {};
       std::uint32_t process_id {};
       std::uintptr_t monitor {};
+      rect_t monitor_screen_rect {};
       rect_t client_screen_rect {};
       rect_t frame_screen_rect {};
 
@@ -109,6 +116,20 @@ namespace platf::foreground_window {
     const std::optional<std::chrono::steady_clock::time_point> &content_timestamp,
     std::chrono::steady_clock::time_point capture_now,
     std::chrono::milliseconds maximum_age = std::chrono::milliseconds {250}
+  ) noexcept;
+
+  /**
+   * Detect the narrow same-analysis-shape causality gap used by the capture owner.
+   *
+   * A programmatic same-size move can be observed before Desktop Duplication publishes pixels at
+   * the new location. That copied frame must use full-source analysis rather than stall waiting
+   * forever for another desktop present. Identity or size changes are deliberately excluded; they
+   * already take the ordinary unavailable/full-source route.
+   */
+  [[nodiscard]] bool requires_full_source_causal_fallback(
+    const snapshot_t &previous_snapshot,
+    const snapshot_t &current_snapshot,
+    const std::optional<std::chrono::steady_clock::time_point> &content_timestamp
   ) noexcept;
 
   /** Raw selected-output identity supplied from DXGI_OUTPUT_DESC by the capture owner. */
@@ -171,9 +192,13 @@ namespace platf::foreground_window {
       std::uint32_t process_id_after {};
       std::uint32_t own_process_id {};
       std::uintptr_t monitor {};
+      rect_t monitor_screen_rect {};
       rect_t client_screen_rect {};
       rect_t frame_screen_rect {};
       std::uint64_t extended_style {};
+      std::uint32_t layered_flags {};
+      std::uint8_t layered_alpha {};
+      bool layered_attributes_succeeded {};
       bool dpi_aware {};
       bool is_window {};
       bool is_window_after {};
@@ -188,6 +213,9 @@ namespace platf::foreground_window {
       bool style_query_succeeded {};
       bool class_query_succeeded {};
       bool shell_class {};
+      bool gui_thread_query_succeeded {};
+      bool gui_in_move_size {};
+      std::uintptr_t move_size_root {};
     };
 
     /** Apply the foreground-window admission policy to injected native-query results. */

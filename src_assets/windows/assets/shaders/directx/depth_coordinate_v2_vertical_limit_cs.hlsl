@@ -34,7 +34,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         return;
     }
 
-    float max_step = v2_max_vertical_shear / (float)target_w;
+    float max_step = v2_max_vertical_shear / DepthAnalysisContentWidthCells();
     float candidate = Candidate[uint2(x, 0u)];
     float upper = candidate;
     float lower = candidate;

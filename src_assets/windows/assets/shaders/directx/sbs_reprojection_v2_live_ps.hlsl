@@ -16,6 +16,7 @@ cbuffer HostSbsV2Geometry : register(b2) {
     float video_roi_active;
     float geometry_reserved;
     float4 video_roi_source_uv;
+    uint4 video_roi_tensor_content_rect;
 };
 
 #include "include/depth_coordinate_v2_contract.generated.hlsl"
@@ -32,6 +33,9 @@ struct PS_INPUT {
 
 bool WarpAvailable() {
     float4 mapping_state = ParallaxState[V2_STATE_VECTOR_CAMERA_CENTER_INTEGRITY_BITS];
+    uint depth_width;
+    uint depth_height;
+    FinalParallax.GetDimensions(depth_width, depth_height);
     bool roi_mode_valid = video_roi_active == 0.0f || video_roi_active == 1.0f;
     bool roi_reserved_valid = geometry_reserved == 0.0f;
     bool roi_rect_valid = video_roi_active == 0.0f ||
@@ -40,8 +44,13 @@ bool WarpAvailable() {
          video_roi_source_uv.z <= 1.0f && video_roi_source_uv.w <= 1.0f &&
          video_roi_source_uv.z > video_roi_source_uv.x &&
          video_roi_source_uv.w > video_roi_source_uv.y);
+    bool roi_content_valid = video_roi_active == 0.0f ||
+        (video_roi_tensor_content_rect.x < video_roi_tensor_content_rect.z &&
+         video_roi_tensor_content_rect.y < video_roi_tensor_content_rect.w &&
+         video_roi_tensor_content_rect.z <= depth_width &&
+         video_roi_tensor_content_rect.w <= depth_height);
     return asuint(V2_STATE_RENDERER_AUTHORIZATION_BITS(mapping_state)) == V2_CONTRACT_TAG &&
-        roi_mode_valid && roi_reserved_valid && roi_rect_valid;
+        roi_mode_valid && roi_reserved_valid && roi_rect_valid && roi_content_valid;
 }
 
 bool ContentToSourceUV(float2 output_uv, out float2 source_uv) {
@@ -63,20 +72,27 @@ float SampleVideoRoiParallax(
     float vertical_budget_per_source_v
 ) {
     float effective_parallax = 0.0f;
-    // The ROI-local field uses the entire DAV2 grid and retains the ordinary V2 limiter slopes.
-    // Convert its local-U displacement to full-source U before constructing the smallest signed
-    // exterior collar allowed by those same horizontal/vertical slope contracts. The projection
-    // leaves every point inside the ROI untouched. Outside, soft-thresholding reaches exact zero
-    // as quickly as the authenticated slopes permit; the summed anisotropic distance gives the
+    // The ROI-local field occupies its authenticated integer content rectangle within the fixed
+    // DAV2 grid. Convert its local-U displacement to full-source U before constructing the
+    // smallest signed exterior collar allowed by the same content-local slope contracts. The
+    // projection leaves every point inside the ROI untouched. Outside, soft-thresholding reaches
+    // exact zero as quickly as those slopes permit; the summed anisotropic distance gives the
     // corresponding minimum diamond at a corner.
     float2 roi_min = video_roi_source_uv.xy;
     float2 roi_max = video_roi_source_uv.zw;
     float2 source_uv = float2(source_x, source_y);
     float2 projected_uv = clamp(source_uv, roi_min, roi_max);
     float2 local_uv = (projected_uv - roi_min) / (roi_max - roi_min);
+    uint depth_width;
+    uint depth_height;
+    FinalParallax.GetDimensions(depth_width, depth_height);
+    float2 depth_size = max(float2(depth_width, depth_height), float2(1.0f, 1.0f));
+    float2 content_min = float2(video_roi_tensor_content_rect.xy) / depth_size;
+    float2 content_max = float2(video_roi_tensor_content_rect.zw) / depth_size;
+    float2 tensor_uv = lerp(content_min, content_max, local_uv);
     float roi_local_parallax = FinalParallax.SampleLevel(
         LinearSampler,
-        local_uv,
+        tensor_uv,
         0
     );
     float full_source_parallax = roi_width * roi_local_parallax;
@@ -116,16 +132,20 @@ float2 Reproject(float2 destination_uv, float eye_sign) {
         uint depth_width;
         uint depth_height;
         FinalParallax.GetDimensions(depth_width, depth_height);
+        uint content_width =
+            video_roi_tensor_content_rect.z - video_roi_tensor_content_rect.x;
+        uint content_height =
+            video_roi_tensor_content_rect.w - video_roi_tensor_content_rect.y;
         float source_height_in_source_u =
             (float)source_height / max((float)source_width, 1.0f);
-        // The producer's vertical step remains V2_MAX_VERTICAL_SHEAR / depth_width per depth
-        // row. Convert that local-grid derivative exactly into full-source coordinates. Keeping
-        // the actual ROI and tensor aspects retains their patch-rounding difference.
+        // The producer's vertical step is V2_MAX_VERTICAL_SHEAR / content_width per real-source
+        // row. Convert that local-content derivative exactly into full-source coordinates. The
+        // surrounding tensor letterbox is synthetic support and contributes no spatial extent.
         float roi_pixel_aspect =
             (roi_width * (float)source_width) /
             max(roi_height * (float)source_height, 1.0e-6f);
         float vertical_slope = V2_MAX_VERTICAL_SHEAR * roi_pixel_aspect *
-            ((float)depth_height / max((float)depth_width, 1.0f));
+            ((float)content_height / max((float)content_width, 1.0f));
         float vertical_budget_per_source_v =
             vertical_slope * source_height_in_source_u;
         [unroll]

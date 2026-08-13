@@ -22,7 +22,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         return;
     }
 
-    float max_step = v2_max_horizontal_slope / (float)target_w;
+    float max_step = v2_max_horizontal_slope / DepthAnalysisContentWidthCells();
     float value = VerticalConditioned[uint2(0u, y)];
     FinalOut[uint2(0u, y)] = value;
     [loop]

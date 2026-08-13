@@ -20,11 +20,12 @@ geometry renders flat; there is no older fallback.
 On Desktop Duplication, a fresh exact matched-frame rectangle may replace full-frame analysis with
 one same-format crop. The unique largest fully contained `<video>` in the foreground Chrome or Edge
 document has priority; otherwise the foreground top-level root client may authorize the crop. The
-rectangle can be trimmed inward by at most 2% of its area to the current authenticated tensor aspect;
-it is never expanded, padded, or stretched. A selected client that exactly covers the capture
+rectangle is copied exactly and fitted without cropping or stretching into a centered integer
+content rectangle in the current authenticated tensor. Edge-replicated synthetic padding is
+excluded from analysis. A selected client that exactly covers the capture
 canonicalizes to ordinary full-frame V2 with no crop or domain reset. Null/shell/desktop/self,
 hidden/minimized/cloaked/excluded-style windows, missing content timestamps, invalid or stale
-geometry, non-identity rotation, unsupported aspect fits, and other-monitor/partial/spanning
+geometry, non-identity rotation, unauthenticated tensor geometry, and other-monitor/partial/spanning
 rectangles all retain ordinary full-frame analysis. The host never changes the capture monitor for
 this route; an internal base-V2 authentication failure still renders flat.
 
@@ -52,10 +53,9 @@ These are architectural boundaries, not dormant feature flags.
 
 DAV2 is a relative monocular model. Fullscreen, windowed, or differently surrounded versions of
 the same image can produce materially different raw depth. More tensor pixels on the main subject
-do not guarantee a better boundary. Neutral padding and synthetic browser surrounds have not shown
-enough cross-scene reliability to ship. The window-region ROI route avoids synthetic context: it
-uses an inward-only crop and falls back to the full frame when the current authenticated aspect
-cannot be reached with at most 2% area trimming.
+do not guarantee a better boundary. Synthetic context must not influence monocular analysis. The
+window-region route therefore uses only the exact client/video pixels: its edge-replicated tensor
+padding is excluded from depth statistics, scene cuts, ownership, history, and OCR authority.
 
 ### Foreground window-region ROI boundary
 
@@ -64,7 +64,7 @@ root, full containment on the currently captured identity-oriented output, and a
 matched frame. A valid Chromium semantic `<video>` wins; otherwise the whole foreground client is
 eligible without application classification. Paused Chromium video is supported because selection
 follows DOM identity rather than playback activity. Desktop or shell focus, hidden/minimized/cloaked
-or excluded windows, stale geometry, WGC, unsupported aspect fits, and partially off-monitor,
+or excluded windows, stale geometry, WGC, unauthenticated tensor geometry, and partially off-monitor,
 spanning, or other-monitor rectangles use full-frame V2. The route does not crop an intersection or
 switch outputs.
 
@@ -129,7 +129,7 @@ Before changing V2 geometry:
    depth, and all authenticated aspect families. For the window-region route, also check Chromium
    priority, pause, foreground translation and resize, authority changes, desktop/minimized focus,
    other-monitor and spanning fallbacks, exact full-capture canonicalization, multiple videos,
-   inward aspect trim, and both signs at every ROI edge.
+   portrait/square/ultrawide contain-fit padding, and both signs at every ROI edge.
 5. Confirm the result in Galaxy XR at the intended pop strength before changing the production
    contract or baselines.
 

@@ -136,7 +136,7 @@ TEST(HostSbsResolutionTest, UsesTensorAuthenticationInsteadOfAStreamSizeAllowlis
   );
 }
 
-TEST(HostSbsResolutionTest, TrimsMeasuredBrowserVideoToTheActiveTensorAspect) {
+TEST(HostSbsResolutionTest, LetterboxesMeasuredWindowWithoutCroppingIt) {
   const models::depth_source_rect_t video {820u, 510u, 2471u, 1439u};
   const auto plan = models::plan_host_sbs_v2_video_region(
     video,
@@ -146,18 +146,13 @@ TEST(HostSbsResolutionTest, TrimsMeasuredBrowserVideoToTheActiveTensorAspect) {
   );
   ASSERT_TRUE(plan);
   EXPECT_EQ(plan->tensor_shape, (models::depth_tensor_shape_t {770, 434}));
-  EXPECT_GT(plan->trimmed_area_fraction, 0.0f);
-  EXPECT_LE(
-    plan->trimmed_area_fraction,
-    models::host_sbs_v2_max_video_region_trim_fraction
-  );
-  EXPECT_GE(plan->source_rect.left, video.left);
-  EXPECT_GE(plan->source_rect.top, video.top);
-  EXPECT_LE(plan->source_rect.right, video.right);
-  EXPECT_LE(plan->source_rect.bottom, video.bottom);
+  EXPECT_EQ(plan->source_rect, video);
+  EXPECT_GT(plan->padded_area_fraction, 0.0f);
+  EXPECT_TRUE(plan->tensor_content.valid(plan->tensor_shape));
   EXPECT_TRUE(
-    plan->source_rect.left > video.left || plan->source_rect.top > video.top ||
-    plan->source_rect.right < video.right || plan->source_rect.bottom < video.bottom
+    plan->tensor_content.left > 0u || plan->tensor_content.top > 0u ||
+    plan->tensor_content.right < plan->tensor_shape.width ||
+    plan->tensor_content.bottom < plan->tensor_shape.height
   );
 }
 
@@ -171,7 +166,8 @@ TEST(HostSbsResolutionTest, KeepsAnExactTensorAspectRectangle) {
   );
   ASSERT_TRUE(plan);
   EXPECT_EQ(plan->source_rect, video);
-  EXPECT_FLOAT_EQ(plan->trimmed_area_fraction, 0.0f);
+  EXPECT_TRUE(plan->tensor_content.full(plan->tensor_shape));
+  EXPECT_FLOAT_EQ(plan->padded_area_fraction, 0.0f);
 }
 
 TEST(HostSbsResolutionTest, KeepsAFullCaptureVideoOnTheOrdinaryFullFrameRoute) {
@@ -183,45 +179,91 @@ TEST(HostSbsResolutionTest, KeepsAFullCaptureVideoOnTheOrdinaryFullFrameRoute) {
   ));
 }
 
-TEST(HostSbsResolutionTest, TrimsOnlyAProvablySmallNearAspectMiss) {
-  // This slightly-wide rectangle rounds to an uncalibrated patch shape as-is. A narrow inward
-  // trim removes the player edge while mapping through the ordinary fitter to 16:9.
-  const models::depth_source_rect_t near_miss {100u, 100u, 1730u, 1010u};
-  ASSERT_NE(
-    models::fit_host_sbs_v2_depth_tensor_shape(
-      near_miss.width(), near_miss.height()),
-    (models::depth_tensor_shape_t {770, 434})
-  );
-  const auto plan = models::plan_host_sbs_v2_video_region(
-    near_miss,
-    3840u,
-    2160u,
-    {770, 434}
-  );
-  ASSERT_TRUE(plan);
-  EXPECT_EQ(plan->tensor_shape, (models::depth_tensor_shape_t {770, 434}));
-  EXPECT_GT(plan->trimmed_area_fraction, 0.0f);
-  EXPECT_LE(
-    plan->trimmed_area_fraction,
-    models::host_sbs_v2_max_video_region_trim_fraction
-  );
-  EXPECT_GE(plan->source_rect.left, near_miss.left);
-  EXPECT_GE(plan->source_rect.top, near_miss.top);
-  EXPECT_LE(plan->source_rect.right, near_miss.right);
-  EXPECT_LE(plan->source_rect.bottom, near_miss.bottom);
+TEST(HostSbsResolutionTest, SupportsArbitraryWindowAspectsAndSmallWindows) {
+  struct case_t {
+    models::depth_source_rect_t rect;
+    bool pillarbox;
+  };
+  constexpr std::array cases {
+    case_t {{100u, 100u, 1700u, 1300u}, true},   // 4:3
+    case_t {{100u, 100u, 1000u, 1000u}, true},   // square
+    case_t {{100u, 100u, 700u, 1100u}, true},    // portrait
+    case_t {{100u, 100u, 2500u, 1000u}, false},  // ultrawide
+    case_t {{0u, 0u, 640u, 360u}, false},        // exact-aspect upscale
+  };
+  for (const auto &test_case : cases) {
+    const auto plan = models::plan_host_sbs_v2_video_region(
+      test_case.rect, 3840u, 2160u, {770, 434}
+    );
+    ASSERT_TRUE(plan);
+    EXPECT_EQ(plan->source_rect, test_case.rect);
+    EXPECT_TRUE(plan->tensor_content.valid(plan->tensor_shape));
+    if (test_case.pillarbox) {
+      EXPECT_GT(plan->tensor_content.left, 0u);
+      EXPECT_EQ(plan->tensor_content.top, 0u);
+      EXPECT_EQ(plan->tensor_content.bottom, 434u);
+    } else if (!plan->tensor_content.full(plan->tensor_shape)) {
+      EXPECT_EQ(plan->tensor_content.left, 0u);
+      EXPECT_EQ(plan->tensor_content.right, 770u);
+      EXPECT_LT(plan->tensor_content.bottom - plan->tensor_content.top, 434u);
+    }
+  }
 }
 
-TEST(HostSbsResolutionTest, RejectsMaterialMismatchSmallVideoAndWrongDomainShape) {
-  EXPECT_FALSE(models::plan_host_sbs_v2_video_region(
-    {100u, 100u, 1700u, 1300u}, 3840u, 2160u, {770, 434}
-  ));
-  EXPECT_FALSE(models::plan_host_sbs_v2_video_region(
+TEST(HostSbsResolutionTest, ContentRectUsesDeterministicContainFitAndTrailingOddPad) {
+  const auto square = models::plan_host_sbs_v2_video_region(
+    {100u, 100u, 1000u, 1000u}, 3840u, 2160u, {770, 434}
+  );
+  ASSERT_TRUE(square);
+  EXPECT_EQ(
+    square->tensor_content,
+    (models::depth_tensor_content_rect_t {168u, 0u, 602u, 434u})
+  );
+
+  // 640x360 differs from the authenticated 770x434 aspect by less than one tensor row. The
+  // integer contain fit keeps every source pixel and assigns the odd one-row pad to the trailing
+  // edge, so all components reproduce the same half-open rectangle without float rounding.
+  const auto almost_exact = models::plan_host_sbs_v2_video_region(
     {0u, 0u, 640u, 360u}, 3840u, 2160u, {770, 434}
-  ));
-  EXPECT_FALSE(models::plan_host_sbs_v2_video_region(
-    {0u, 0u, 1920u, 1080u}, 3840u, 2160u, {1022, 434}
-  ));
+  );
+  ASSERT_TRUE(almost_exact);
+  EXPECT_EQ(
+    almost_exact->tensor_content,
+    (models::depth_tensor_content_rect_t {0u, 0u, 770u, 433u})
+  );
+}
+
+TEST(HostSbsResolutionTest, SubtitleProjectionIsOffsetInsideTensorContent) {
+  constexpr models::depth_tensor_content_rect_t content {168u, 0u, 602u, 434u};
+  constexpr auto geometry = models::fit_subtitle_analysis_geometry(
+    900u, 900u, {770, 434}, content
+  );
+  static_assert(geometry.valid());
+  EXPECT_EQ(geometry.tensor_content, content);
+  EXPECT_GE(geometry.roi_top, content.top);
+  EXPECT_LE(geometry.roi_bottom, content.bottom);
+  EXPECT_GT(geometry.ribbon_min_bottom, geometry.roi_top);
+  EXPECT_LE(geometry.ribbon_min_bottom, geometry.roi_bottom);
+  EXPECT_EQ(geometry.field_width, 770u);
+  EXPECT_EQ(geometry.field_height, 434u);
+}
+
+TEST(HostSbsResolutionTest, SubtitleProjectionUsesExactVerticallyPaddedContent) {
+  constexpr models::depth_tensor_content_rect_t content {0u, 0u, 770u, 433u};
+  constexpr auto geometry = models::fit_subtitle_analysis_geometry(
+    2536u, 1427u, {770, 434}, content
+  );
+  static_assert(geometry.valid());
+  EXPECT_EQ(geometry.roi_top, 324u);
+  EXPECT_EQ(geometry.ribbon_min_bottom, 428u);
+  EXPECT_EQ(geometry.roi_bottom, 429u);
+}
+
+TEST(HostSbsResolutionTest, RejectsInvalidGeometryAndUnauthenticatedTensorOnly) {
   EXPECT_FALSE(models::plan_host_sbs_v2_video_region(
     {0u, 0u, 4000u, 2160u}, 3840u, 2160u, {770, 434}
+  ));
+  EXPECT_FALSE(models::plan_host_sbs_v2_video_region(
+    {0u, 0u, 1920u, 1080u}, 3840u, 2160u, {1008, 434}
   ));
 }

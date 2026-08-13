@@ -53,17 +53,53 @@ namespace models {
     constexpr bool operator==(const depth_source_rect_t &) const = default;
   };
 
+  /**
+   * Centered integer half-open texel rectangle occupied by real source pixels in one fixed DAV2
+   * tensor.
+   * Pixels outside this rectangle are synthetic edge-replicated letterbox support and never
+   * belong to the analysis domain.
+   */
+  struct depth_tensor_content_rect_t {
+    std::uint32_t left = 0u;
+    std::uint32_t top = 0u;
+    std::uint32_t right = 0u;
+    std::uint32_t bottom = 0u;
+
+    constexpr std::uint32_t width() const noexcept {
+      return right > left ? right - left : 0u;
+    }
+
+    constexpr std::uint32_t height() const noexcept {
+      return bottom > top ? bottom - top : 0u;
+    }
+
+    constexpr bool valid() const noexcept {
+      return width() > 0u && height() > 0u;
+    }
+
+    constexpr bool valid(const depth_tensor_shape_t shape) const noexcept {
+      return shape.valid() && valid() &&
+             right <= static_cast<std::uint32_t>(shape.width) &&
+             bottom <= static_cast<std::uint32_t>(shape.height);
+    }
+
+    constexpr bool full(const depth_tensor_shape_t shape) const noexcept {
+      return shape.valid() && left == 0u && top == 0u &&
+             right == static_cast<std::uint32_t>(shape.width) &&
+             bottom == static_cast<std::uint32_t>(shape.height);
+    }
+
+    constexpr bool operator==(const depth_tensor_content_rect_t &) const = default;
+  };
+
   struct depth_video_region_plan_t {
     depth_source_rect_t source_rect {};
     depth_tensor_shape_t tensor_shape {};
-    float trimmed_area_fraction = 0.0f;
+    depth_tensor_content_rect_t tensor_content {};
+    float padded_area_fraction = 0.0f;
 
     constexpr bool operator==(const depth_video_region_plan_t &) const = default;
   };
-
-  // A small inward trim may exclude a Chromium/player frame without materially cropping the
-  // picture. Larger adaptation is rejected so the ordinary full-frame route remains the fallback.
-  inline constexpr float host_sbs_v2_max_video_region_trim_fraction = 0.02f;
 
 
   namespace host_sbs_resolution_detail {
@@ -164,36 +200,90 @@ namespace models {
     std::uint32_t field_height = 0u;
     std::uint32_t roi_top = 0u;
     std::uint32_t roi_bottom = 0u;
+    std::uint32_t ribbon_min_bottom = 0u;
+    depth_tensor_content_rect_t tensor_content {};
 
     constexpr bool valid() const noexcept {
       return field_width > 0u && field_height > 0u &&
-             roi_top < roi_bottom && roi_bottom <= field_height;
+             roi_top < roi_bottom && roi_bottom <= field_height &&
+             roi_top < ribbon_min_bottom && ribbon_min_bottom <= roi_bottom &&
+             tensor_content.valid({
+               static_cast<int>(field_width),
+               static_cast<int>(field_height),
+             }) &&
+             roi_top >= tensor_content.top && roi_bottom <= tensor_content.bottom;
     }
   };
 
   inline constexpr subtitle_analysis_geometry_t fit_subtitle_analysis_geometry(
     const std::uint32_t source_width,
     const std::uint32_t source_height,
-    const depth_tensor_shape_t field
+    const depth_tensor_shape_t field,
+    const depth_tensor_content_rect_t tensor_content
   ) noexcept {
-    if (!host_sbs_v2_depth_shape_is_authenticated(field)) {
+    if (!host_sbs_v2_depth_shape_is_authenticated(field) ||
+        !tensor_content.valid(field) || source_width == 0u || source_height == 0u) {
       return {};
     }
-    const auto roi = depth_coordinate_v2::subtitle_ocr_dynamic_roi(
-      source_width,
+    const auto crop_height = std::min<std::uint64_t>(
       source_height,
-      static_cast<std::uint32_t>(field.width),
-      static_cast<std::uint32_t>(field.height)
+      depth_coordinate_v2::subtitle_ocr_ceil_div(
+        static_cast<std::uint64_t>(source_width) *
+          depth_coordinate_v2::subtitle_ocr_crop_aspect_height,
+        depth_coordinate_v2::subtitle_ocr_crop_aspect_width
+      )
     );
-    if (!roi) {
+    const auto crop_top = static_cast<std::uint64_t>(source_height) - crop_height;
+    const auto denominator = static_cast<std::uint64_t>(source_height) *
+      depth_coordinate_v2::subtitle_ocr_output_height;
+    const auto project_row = [&](const std::uint32_t detector_y) constexpr {
+      const auto source_numerator = crop_top *
+        depth_coordinate_v2::subtitle_ocr_output_height +
+        static_cast<std::uint64_t>(detector_y) * crop_height;
+      return static_cast<std::uint32_t>(tensor_content.top +
+        std::min<std::uint64_t>(
+          depth_coordinate_v2::subtitle_ocr_ceil_div(
+            source_numerator * tensor_content.height(), denominator
+          ),
+          tensor_content.height()
+        ));
+    };
+    const auto roi_top = project_row(depth_coordinate_v2::subtitle_ocr_safe_row_top);
+    const auto roi_bottom = project_row(depth_coordinate_v2::subtitle_ocr_safe_row_bottom);
+    const auto ribbon_min_bottom = project_row(
+      depth_coordinate_v2::subtitle_ocr_safe_row_bottom -
+        depth_coordinate_v2::subtitle_ocr_ribbon_bottom_tolerance_pixels
+    );
+    if (roi_top >= roi_bottom || ribbon_min_bottom <= roi_top ||
+        ribbon_min_bottom > roi_bottom) {
       return {};
     }
     return {
       static_cast<std::uint32_t>(field.width),
       static_cast<std::uint32_t>(field.height),
-      roi.top,
-      roi.bottom,
+      roi_top,
+      roi_bottom,
+      ribbon_min_bottom,
+      tensor_content,
     };
+  }
+
+  inline constexpr subtitle_analysis_geometry_t fit_subtitle_analysis_geometry(
+    const std::uint32_t source_width,
+    const std::uint32_t source_height,
+    const depth_tensor_shape_t field
+  ) noexcept {
+    return fit_subtitle_analysis_geometry(
+      source_width,
+      source_height,
+      field,
+      {
+        0u,
+        0u,
+        static_cast<std::uint32_t>(std::max(field.width, 0)),
+        static_cast<std::uint32_t>(std::max(field.height, 0)),
+      }
+    );
   }
 
   /** Height, in source pixels, of the exact bottom crop consumed by fixed-shape subtitle OCR. */
@@ -263,28 +353,22 @@ namespace models {
   }
 
   /**
-   * Select a video-only input for one already-active authenticated tensor shape.
+   * Select an exact window-region source for one already-active authenticated tensor shape.
    *
-   * A non-fullscreen rectangle is kept only when it already has the exact tensor aspect. A near
-   * miss may trim inward by at most 2% of its area and must then pass the ordinary fitter again.
-   * This deliberately removes a thin player/frame border instead of admitting it to DAV2. It is
-   * not a generic aspect converter: there is no stretching or padding, and a material mismatch
-   * returns no plan (full-frame fallback). A full-capture rectangle is always ordinary full-frame
-   * V2 and therefore returns no ROI plan.
+   * The source rectangle is never cropped or stretched. A centered integer half-open content
+   * rectangle letterboxes it into the fixed tensor, and the preprocess edge-replicates pixels
+   * outside that rectangle. A full-capture rectangle remains ordinary full-frame V2 and returns
+   * no ROI plan.
    */
   inline std::optional<depth_video_region_plan_t> plan_host_sbs_v2_video_region(
     const depth_source_rect_t video_rect,
     const std::uint32_t source_width,
     const std::uint32_t source_height,
-    const depth_tensor_shape_t required_shape,
-    const float maximum_trim_fraction =
-      host_sbs_v2_max_video_region_trim_fraction
+    const depth_tensor_shape_t required_shape
   ) noexcept {
     if (!video_rect.valid() || video_rect.right > source_width ||
         video_rect.bottom > source_height ||
-        !host_sbs_v2_depth_shape_is_authenticated(required_shape) ||
-        !std::isfinite(maximum_trim_fraction) ||
-        maximum_trim_fraction < 0.0f) {
+        !host_sbs_v2_depth_shape_is_authenticated(required_shape)) {
       return std::nullopt;
     }
     // A semantic video that already covers the complete captured source is the ordinary
@@ -294,73 +378,43 @@ namespace models {
         video_rect.right == source_width && video_rect.bottom == source_height) {
       return std::nullopt;
     }
-    const auto exact_shape = fit_host_sbs_v2_depth_tensor_shape(
-      video_rect.width(),
-      video_rect.height()
-    );
+
     const std::uint64_t width = video_rect.width();
     const std::uint64_t height = video_rect.height();
     const std::uint64_t target_width = static_cast<std::uint32_t>(required_shape.width);
     const std::uint64_t target_height = static_cast<std::uint32_t>(required_shape.height);
-    if (exact_shape == required_shape &&
-        width * target_height == height * target_width &&
-        host_sbs_v2_source_resolution_is_supported(
-          video_rect.width(),
-          video_rect.height()
-        )) {
-      return depth_video_region_plan_t {video_rect, exact_shape, 0.0f};
-    }
-
-    std::uint64_t fitted_width = width;
-    std::uint64_t fitted_height = height;
-    if (width * target_height > height * target_width) {
-      fitted_width = height * target_width / target_height;
-    } else if (width * target_height < height * target_width) {
-      fitted_height = width * target_height / target_width;
-    }
-    if (fitted_width > width || fitted_height > height ||
-        fitted_width < target_width || fitted_height < target_height) {
-      return std::nullopt;
-    }
-
-    const std::uint64_t original_area = width * height;
-    const std::uint64_t fitted_area = fitted_width * fitted_height;
-    const float trimmed_fraction = static_cast<float>(
-      1.0 - static_cast<double>(fitted_area) / static_cast<double>(original_area)
-    );
-    if (trimmed_fraction > maximum_trim_fraction) {
-      return std::nullopt;
-    }
-
-    const auto remove_x = static_cast<std::uint32_t>(width - fitted_width);
-    const auto remove_y = static_cast<std::uint32_t>(height - fitted_height);
-    const auto left = video_rect.left + remove_x / 2u;
-    const auto top = video_rect.top + remove_y / 2u;
-    const depth_source_rect_t fitted_rect {
-      left,
-      top,
-      left + static_cast<std::uint32_t>(fitted_width),
-      top + static_cast<std::uint32_t>(fitted_height),
+    depth_tensor_content_rect_t content {
+      0u,
+      0u,
+      static_cast<std::uint32_t>(required_shape.width),
+      static_cast<std::uint32_t>(required_shape.height),
     };
-    if (fitted_rect.left < video_rect.left || fitted_rect.top < video_rect.top ||
-        fitted_rect.right > video_rect.right || fitted_rect.bottom > video_rect.bottom) {
+    if (width * target_height > height * target_width) {
+      const auto content_height = static_cast<std::uint32_t>(std::max<std::uint64_t>(
+        1u,
+        target_width * height / width
+      ));
+      content.top = (static_cast<std::uint32_t>(required_shape.height) - content_height) / 2u;
+      content.bottom = content.top + content_height;
+    } else if (width * target_height < height * target_width) {
+      const auto content_width = static_cast<std::uint32_t>(std::max<std::uint64_t>(
+        1u,
+        target_height * width / height
+      ));
+      content.left = (static_cast<std::uint32_t>(required_shape.width) - content_width) / 2u;
+      content.right = content.left + content_width;
+    }
+    if (!content.valid(required_shape)) {
       return std::nullopt;
     }
-    const auto verified_shape = fit_host_sbs_v2_depth_tensor_shape(
-      fitted_rect.width(),
-      fitted_rect.height()
-    );
-    if (verified_shape != required_shape ||
-        !host_sbs_v2_source_resolution_is_supported(
-          fitted_rect.width(),
-          fitted_rect.height()
-        )) {
-      return std::nullopt;
-    }
+    const double content_area = static_cast<double>(content.width()) * content.height();
+    const double tensor_area = static_cast<double>(target_width) * target_height;
+    const float padded_fraction = static_cast<float>(1.0 - content_area / tensor_area);
     return depth_video_region_plan_t {
-      fitted_rect,
-      verified_shape,
-      trimmed_fraction,
+      video_rect,
+      required_shape,
+      content,
+      padded_fraction,
     };
   }
 

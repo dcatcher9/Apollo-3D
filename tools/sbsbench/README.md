@@ -105,6 +105,12 @@ only the current SLR9/OCR8 dump schema; older experimental captures are intentio
 An active package authenticates the exact OCR8 record, compact SLR9 state, ordinary Base field,
 and selected conditioned field. An inactive package uses the one canonical `none` descriptor.
 
+Current schema-29 window-region packages preserve the complete authorized source rectangle at any
+aspect ratio. `depth_input_region.json` schema 3 records the centered integer content rectangle in
+the fixed DAV2 tensor and its edge-replicated excluded padding. Quantitative consumers must use
+that content width for limiter and SLR9 steps and must project OCR/SLR geometry only into that
+content rectangle; treating the whole tensor as real source pixels is rejected.
+
 ## Whole-clip conversion boundary
 
 Sunshine 3D's Web UI conversion is a native job manager and isolated native worker. `sbsbench`

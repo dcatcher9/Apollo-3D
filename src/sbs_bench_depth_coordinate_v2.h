@@ -5,9 +5,9 @@
  * This is deliberately not a second mapping implementation. The helper loads authenticated raw
  * DAV2 fields and hard-cut generations, keeps one GPU state buffer alive for the sequence, and
  * dispatches the same seven base V2 coordinate entrypoints used by video_depth_estimator. Its
- * replay contract has no overlay-mask input and therefore does not dispatch the optional
- * post-limit burned-in-overlay conditioner. Its candidate texture is retained as immutable
- * pre-conditioner evidence. The column pass publishes
+ * replay contract supplies canonical full-content analysis geometry and omits the live-only
+ * OCR/SLR9 subtitle ownership stage. Its candidate texture is retained as immutable
+ * pre-limiter evidence. The column pass publishes
  * both an upper-envelope diagnostic and the authenticated 75/25 vertical share consumed by the
  * pure row majorant. The encoded final texture is the live render input for the eleven-step
  * contractive inverse. A separate

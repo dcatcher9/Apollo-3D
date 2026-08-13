@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import struct
+from itertools import product
 from typing import Any, Dict
 
 try:
@@ -20,7 +21,7 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     import generate_depth_coordinate_v2_contract as generator  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 28
+DUMP_MANIFEST_SCHEMA = 29
 SUBTITLE_OCR_RECORD_SCHEMA = coordinate_contract.SUBTITLE_OCR.record_schema
 SUBTITLE_OCR_RECORD_TAG = coordinate_contract.SUBTITLE_OCR.record_tag
 SUBTITLE_OCR_RECORD_WORD_COUNT = coordinate_contract.SUBTITLE_OCR.record_word_count
@@ -65,16 +66,16 @@ SUBTITLE_LOCATOR_EVENT_NONE = 0
 SUBTITLE_LOCATOR_EVENT_BIRTH = 1
 SUBTITLE_LOCATOR_EVENT_DEATH = 2
 SUBTITLE_LOCATOR_EVENT_HANDOFF = 3
-DEPTH_INPUT_REGION_SCHEMA = 2
+DEPTH_INPUT_REGION_SCHEMA = 3
 WINDOW_REGION_SCHEMA = 1
 WINDOW_REGION_AUTHORITY_KINDS = frozenset({"chromium-video", "foreground-client"})
 SHADOW_STATE_DUMP_SCHEMA = 16
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 2
 LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
-    "5a1ab7175b97b8ca89397da8b3f86812a3faedf5e15938abf42f64e9716f2c5b"
+    "084e36b4379482203f356d830c1bcc4c09c6fe9b1c7d12b6bb17ecd1cd75990c"
 )
 DIAGNOSTIC_SOURCE_CLOSURE_SHA256 = (
-    "12dbf80c10110b21d59d01b9120c4efa0b9147bed420f134053cfef1276d00d3"
+    "60eb3f87dc22cd297a97ae8b9df25b0afd1ba4287034180c4068a9fd36e16c93"
 )
 _CONTRACT = coordinate_contract.load_contract()
 _CONTRACT_TAG = generator.contract_tag(_CONTRACT)
@@ -82,7 +83,6 @@ _STATE_FIELDS = tuple(_CONTRACT["shadow_state"]["fields"])
 _FRAME_STATS_FIELDS = tuple(_CONTRACT["frame_stats"]["fields"])
 _DEFAULTS = coordinate_contract.CALIBRATED_DEFAULTS
 _RESERVED_CALIBRATION_REVISION = 0xFFFFFFFF
-_MAXIMUM_WINDOW_REGION_TRIM_FRACTION = 0.02
 _ROI_EXTERIOR_ZERO_TOLERANCE_OUTPUT_EYE_PX = 0.005
 _PRODUCTION_DEPTH_SHORT_SIDE = 432
 _PRODUCTION_DEPTH_MAX_ASPECT = 4.0
@@ -182,10 +182,75 @@ def _float32_bits(word: int) -> float:
     return struct.unpack("<f", struct.pack("<I", word))[0]
 
 
+def _subtitle_tensor_content(
+        field_width: int, field_height: int,
+        tensor_content: tuple[int, int, int, int] | None
+        ) -> tuple[int, int, int, int]:
+    """Validate the real-source half-open rectangle inside one DAV2 tensor."""
+
+    content = ((0, 0, field_width, field_height)
+               if tensor_content is None else tensor_content)
+    if (not isinstance(content, tuple) or len(content) != 4 or
+            any(isinstance(value, bool) or not isinstance(value, int) for value in content)):
+        raise ValueError("subtitle tensor content must be an integer half-open rectangle")
+    left, top, right, bottom = content
+    if (left < 0 or top < 0 or left >= right or top >= bottom or
+            right > field_width or bottom > field_height):
+        raise ValueError("subtitle tensor content is outside the DAV2 field")
+    return content
+
+
+def _subtitle_project_row_ceil(
+        source_width: int, source_height: int,
+        tensor_content: tuple[int, int, int, int], detector_y: int) -> int | None:
+    """Project a detector edge into the real tensor content using production integers."""
+
+    if (source_width <= 0 or source_height <= 0 or detector_y < 0 or
+            detector_y > coordinate_contract.SUBTITLE_OCR.output_shape[2]):
+        return None
+    content_height = tensor_content[3] - tensor_content[1]
+    crop_height = min(
+        source_height,
+        (source_width * coordinate_contract.SUBTITLE_OCR.source_crop_aspect_height +
+         coordinate_contract.SUBTITLE_OCR.source_crop_aspect_width - 1) //
+        coordinate_contract.SUBTITLE_OCR.source_crop_aspect_width,
+    )
+    crop_top = source_height - crop_height
+    denominator = coordinate_contract.SUBTITLE_OCR.output_shape[2] * source_height
+    numerator = (
+        (crop_top * coordinate_contract.SUBTITLE_OCR.output_shape[2] +
+         detector_y * crop_height) * content_height
+    )
+    projected = numerator // denominator + int(numerator % denominator != 0)
+    return tensor_content[1] + min(projected, content_height)
+
+
+def _subtitle_dynamic_roi(
+        source_width: int, source_height: int,
+        tensor_content: tuple[int, int, int, int]) -> tuple[int, int] | None:
+    top = _subtitle_project_row_ceil(
+        source_width, source_height, tensor_content,
+        coordinate_contract.SUBTITLE_OCR.ocr_safe_row_top)
+    bottom = _subtitle_project_row_ceil(
+        source_width, source_height, tensor_content,
+        coordinate_contract.SUBTITLE_OCR.ocr_safe_row_bottom)
+    return None if top is None or bottom is None or top >= bottom else (top, bottom)
+
+
+def _subtitle_ribbon_min_bottom(
+        source_width: int, source_height: int,
+        tensor_content: tuple[int, int, int, int]) -> int | None:
+    return _subtitle_project_row_ceil(
+        source_width, source_height, tensor_content,
+        coordinate_contract.SUBTITLE_OCR.ocr_safe_row_bottom -
+        coordinate_contract.SUBTITLE_OCR.ribbon_bottom_tolerance_pixels)
+
+
 def _decode_subtitle_ocr_boxes(
         words: tuple[int, ...], *, offset: int, count: int, capacity: int,
         field_width: int, field_height: int, roi_top: int, roi_bottom: int,
-        ribbon_min_bottom: int, final_boxes: bool, label: str) -> list[Dict[str, Any]]:
+        tensor_content: tuple[int, int, int, int], ribbon_min_bottom: int,
+        final_boxes: bool, label: str) -> list[Dict[str, Any]]:
     decoded: list[Dict[str, Any]] = []
     for slot in range(capacity):
         start = offset + slot * SUBTITLE_OCR_BOX_WORD_COUNT
@@ -196,12 +261,17 @@ def _decode_subtitle_ocr_boxes(
             continue
         left, top, right, bottom, score_bits, box_flags, island_count, gap_count = values
         score = _float32_bits(score_bits)
-        if (left >= right or top >= bottom or right > field_width or
-                bottom > field_height or top < roi_top):
+        content_left, content_top, content_right, content_bottom = tensor_content
+        if (left >= right or top >= bottom or left < content_left or
+                top < content_top or right > content_right or
+                bottom > content_bottom or top < roi_top):
             raise ValueError(
                 f"{label} boxes must be nonempty half-open rectangles inside the field")
-        if not math.isfinite(score) or not 0.4 <= score <= 1.0:
-            raise ValueError(f"{label} box scores must be finite float32 values in [0.4,1.0]")
+        minimum_score = coordinate_contract.SUBTITLE_OCR.detector_min_mean_score
+        if not math.isfinite(score) or not minimum_score <= score <= 1.0:
+            raise ValueError(
+                f"{label} box scores must be finite float32 values in "
+                f"[{minimum_score},1.0]")
         if box_flags & ~SUBTITLE_OCR_BOX_KNOWN_FLAGS:
             raise ValueError(f"{label} boxes have unknown kind flags")
         if (island_count == 0 or island_count > SUBTITLE_OCR_OUTPUT_WIDTH or
@@ -213,12 +283,14 @@ def _decode_subtitle_ocr_boxes(
                     gap_count < coordinate_contract.SUBTITLE_OCR.ribbon_min_structural_gaps):
                 raise ValueError(f"{label} ribbon topology is inconsistent")
             if final_boxes:
-                if (left != 0 or right != field_width or bottom != field_height or
+                if (left != content_left or right != content_right or
+                        bottom != content_bottom or
                         top < roi_top):
                     raise ValueError(f"{label} ribbon cover is not the canonical bottom strip")
             elif (bottom < ribbon_min_bottom or bottom > roi_bottom or
                   (right - left) * coordinate_contract.SUBTITLE_OCR.ribbon_min_width_denominator <
-                  field_width * coordinate_contract.SUBTITLE_OCR.ribbon_min_width_numerator):
+                  (content_right - content_left) *
+                  coordinate_contract.SUBTITLE_OCR.ribbon_min_width_numerator):
                 raise ValueError(
                     f"{label} ribbon core is outside its projected bottom tolerance or not wide")
         elif bottom > roi_bottom:
@@ -241,7 +313,8 @@ def _decode_subtitle_ocr_boxes(
 def validate_subtitle_ocr_record(
         payload: Any, *, matched_frame_id: int, analysis_generation: int,
         source_width: int, source_height: int, field_width: int, field_height: int,
-        roi_top: int, roi_bottom: int) -> Dict[str, Any]:
+        roi_top: int, roi_bottom: int,
+        tensor_content: tuple[int, int, int, int] | None = None) -> Dict[str, Any]:
     """Validate and decode the sole current OCR8 208-word lower-text record."""
 
     expected_frame = _uint64(matched_frame_id, "OCR8 matched frame id")
@@ -252,20 +325,22 @@ def validate_subtitle_ocr_record(
     expected_field_height = _uint32(field_height, "OCR8 field height")
     expected_roi_top = _uint32(roi_top, "OCR8 ROI top")
     expected_roi_bottom = _uint32(roi_bottom, "OCR8 ROI bottom")
+    expected_content = _subtitle_tensor_content(
+        expected_field_width, expected_field_height, tensor_content)
     if (expected_source_width == 0 or expected_source_height == 0 or
             expected_field_width == 0 or expected_field_height == 0 or
+            not coordinate_contract.subtitle_ocr_field_is_calibrated(
+                expected_field_width, expected_field_height) or
             expected_roi_top >= expected_roi_bottom or
             expected_roi_bottom > expected_field_height):
         raise ValueError("OCR8 expected source, field, or ROI geometry is invalid")
-    dynamic_roi = coordinate_contract.subtitle_ocr_dynamic_roi(
-        expected_source_width, expected_source_height,
-        expected_field_width, expected_field_height)
+    dynamic_roi = _subtitle_dynamic_roi(
+        expected_source_width, expected_source_height, expected_content)
     if dynamic_roi != (expected_roi_top, expected_roi_bottom):
         raise ValueError(
             "OCR8 expected field/ROI geometry does not match the calibrated dynamic policy")
-    ribbon_min_bottom = coordinate_contract.subtitle_ocr_ribbon_min_bottom(
-        expected_source_width, expected_source_height,
-        expected_field_width, expected_field_height)
+    ribbon_min_bottom = _subtitle_ribbon_min_bottom(
+        expected_source_width, expected_source_height, expected_content)
     if ribbon_min_bottom is None or not expected_roi_top < ribbon_min_bottom <= expected_roi_bottom:
         raise ValueError("OCR8 projected ribbon bottom tolerance is invalid")
 
@@ -316,13 +391,15 @@ def validate_subtitle_ocr_record(
         words, offset=SUBTITLE_OCR_RAW_BOX_WORD_OFFSET, count=raw_count,
         capacity=SUBTITLE_OCR_RAW_BOX_CAPACITY, field_width=expected_field_width,
         field_height=expected_field_height, roi_top=expected_roi_top,
-        roi_bottom=expected_roi_bottom, ribbon_min_bottom=ribbon_min_bottom,
+        roi_bottom=expected_roi_bottom, tensor_content=expected_content,
+        ribbon_min_bottom=ribbon_min_bottom,
         final_boxes=False, label="OCR8 raw")
     final_boxes = _decode_subtitle_ocr_boxes(
         words, offset=SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET, count=final_count,
         capacity=SUBTITLE_OCR_FINAL_BOX_CAPACITY, field_width=expected_field_width,
         field_height=expected_field_height, roi_top=expected_roi_top,
-        roi_bottom=expected_roi_bottom, ribbon_min_bottom=ribbon_min_bottom,
+        roi_bottom=expected_roi_bottom, tensor_content=expected_content,
+        ribbon_min_bottom=ribbon_min_bottom,
         final_boxes=True, label="OCR8 final")
     for index, (core, cover) in enumerate(zip(raw_boxes, final_boxes)):
         metadata_keys = (
@@ -342,13 +419,15 @@ def validate_subtitle_ocr_record(
         **identity,
         "raw_boxes": raw_boxes,
         "final_boxes": final_boxes,
+        "tensor_content_rect": expected_content,
     }
 
 
 def _decode_subtitle_locator_rectangles(
         words: tuple[int, ...], *, offset: int, count: int,
         field_width: int, field_height: int, roi_top: int, roi_bottom: int,
-        ribbon_min_bottom: int, ribbon_mask: int, current_cover: bool,
+        tensor_content: tuple[int, int, int, int], ribbon_min_bottom: int,
+        ribbon_mask: int, current_cover: bool,
         label: str) -> list[Dict[str, Any]]:
     decoded: list[Dict[str, Any]] = []
     for slot in range(SUBTITLE_LOCATOR_RECT_CAPACITY):
@@ -359,12 +438,15 @@ def _decode_subtitle_locator_rectangles(
                 raise ValueError(f"{label} unused rectangle slots must be canonical zero")
             continue
         ribbon = bool(ribbon_mask & (1 << slot))
-        if (left >= right or top >= bottom or right > field_width or
-                bottom > field_height or top < roi_top):
+        content_left, content_top, content_right, content_bottom = tensor_content
+        if (left >= right or top >= bottom or left < content_left or
+                top < content_top or right > content_right or
+                bottom > content_bottom or top < roi_top):
             raise ValueError(
                 f"{label} rectangles must be nonempty half-open field coordinates")
         if current_cover and ribbon:
-            if left != 0 or right != field_width or bottom != field_height:
+            if (left != content_left or right != content_right or
+                    bottom != content_bottom):
                 raise ValueError(f"{label} ribbon cover is not the canonical bottom strip")
         elif ribbon and bottom < ribbon_min_bottom:
             raise ValueError(f"{label} ribbon core is outside its projected bottom tolerance")
@@ -464,11 +546,14 @@ def _subtitle_qualified_ocr_core(
 
     width = rectangle["right"] - rectangle["left"]
     height = rectangle["bottom"] - rectangle["top"]
-    if width < 48 or height < 6 or width < 2 * height:
+    policy = coordinate_contract.SUBTITLE_OCR
+    if (width < policy.locator_min_width_cells or
+            height < policy.locator_min_height_cells or
+            width * policy.locator_min_aspect_denominator <
+            policy.locator_min_aspect_numerator * height):
         return False
     if rectangle["kind"] == "ribbon":
         return True
-    policy = coordinate_contract.SUBTITLE_OCR
     return (width * policy.locator_max_width_denominator <=
             field_width * policy.locator_max_width_numerator)
 
@@ -541,7 +626,8 @@ def _subtitle_rectangles_are_top_left_ordered(
 def validate_subtitle_locator_state(
         payload: Any, *, matched_frame_id: int, analysis_generation: int,
         source_width: int, source_height: int,
-        field_width: int, field_height: int) -> Dict[str, Any]:
+        field_width: int, field_height: int,
+        tensor_content: tuple[int, int, int, int] | None = None) -> Dict[str, Any]:
     """Validate and decode the sole current compact SLR9 80-word state."""
 
     expected_frame = _uint64(matched_frame_id, "SLR9 matched frame id")
@@ -550,15 +636,18 @@ def validate_subtitle_locator_state(
     expected_source_height = _uint32(source_height, "SLR9 source height")
     expected_field_width = _uint32(field_width, "SLR9 field width")
     expected_field_height = _uint32(field_height, "SLR9 field height")
-    dynamic_roi = coordinate_contract.subtitle_ocr_dynamic_roi(
-        expected_source_width, expected_source_height,
-        expected_field_width, expected_field_height)
+    expected_content = _subtitle_tensor_content(
+        expected_field_width, expected_field_height, tensor_content)
+    if not coordinate_contract.subtitle_ocr_field_is_calibrated(
+            expected_field_width, expected_field_height):
+        raise ValueError("SLR9 expected field geometry is invalid")
+    dynamic_roi = _subtitle_dynamic_roi(
+        expected_source_width, expected_source_height, expected_content)
     if dynamic_roi is None:
         raise ValueError("SLR9 expected field geometry is invalid")
     expected_roi_top, expected_roi_bottom = dynamic_roi
-    ribbon_min_bottom = coordinate_contract.subtitle_ocr_ribbon_min_bottom(
-        expected_source_width, expected_source_height,
-        expected_field_width, expected_field_height)
+    ribbon_min_bottom = _subtitle_ribbon_min_bottom(
+        expected_source_width, expected_source_height, expected_content)
     if ribbon_min_bottom is None or not expected_roi_top < ribbon_min_bottom <= expected_roi_bottom:
         raise ValueError("SLR9 projected ribbon bottom tolerance is invalid")
 
@@ -613,19 +702,19 @@ def validate_subtitle_locator_state(
         words, offset=SUBTITLE_LOCATOR_OWNER_WORD_OFFSET, count=owner_count,
         field_width=expected_field_width, field_height=expected_field_height,
         roi_top=expected_roi_top, roi_bottom=expected_roi_bottom,
-        ribbon_min_bottom=ribbon_min_bottom,
+        tensor_content=expected_content, ribbon_min_bottom=ribbon_min_bottom,
         ribbon_mask=owner_kinds, current_cover=False, label="SLR9 owner")
     pending = _decode_subtitle_locator_rectangles(
         words, offset=SUBTITLE_LOCATOR_PENDING_WORD_OFFSET, count=pending_count,
         field_width=expected_field_width, field_height=expected_field_height,
         roi_top=expected_roi_top, roi_bottom=expected_roi_bottom,
-        ribbon_min_bottom=ribbon_min_bottom,
+        tensor_content=expected_content, ribbon_min_bottom=ribbon_min_bottom,
         ribbon_mask=pending_kinds, current_cover=False, label="SLR9 pending")
     current = _decode_subtitle_locator_rectangles(
         words, offset=SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET, count=current_count,
         field_width=expected_field_width, field_height=expected_field_height,
         roi_top=expected_roi_top, roi_bottom=expected_roi_bottom,
-        ribbon_min_bottom=ribbon_min_bottom,
+        tensor_content=expected_content, ribbon_min_bottom=ribbon_min_bottom,
         ribbon_mask=current_kinds, current_cover=True,
         label="SLR9 current-authority")
     # Owner and pending store cores and therefore expose the producer's canonical core order.
@@ -665,6 +754,8 @@ def validate_subtitle_locator_state(
             raise ValueError("SLR9 target reset must clear target and current authority")
 
     grace = words[25]
+    if grace > coordinate_contract.SUBTITLE_OCR.locator_death_grace_observations:
+        raise ValueError("SLR9 death-grace exceeds the authenticated observation limit")
     grace_bounds = {
         "left": words[29] & 0xFFFF,
         "right": words[29] >> 16,
@@ -689,7 +780,8 @@ def validate_subtitle_locator_state(
                 current_count != 0 or fade != 0 or
                 grace_bounds["left"] >= grace_bounds["right"] or
                 grace_bounds["top"] >= grace_bounds["bottom"] or
-                grace_bounds["right"] > expected_field_width or
+                grace_bounds["left"] < expected_content[0] or
+                grace_bounds["right"] > expected_content[2] or
                 grace_bounds["top"] < expected_roi_top or
                 grace_bounds["bottom"] > expected_roi_bottom):
             raise ValueError("SLR9 death-grace target or packed bounds are inconsistent")
@@ -719,6 +811,7 @@ def validate_subtitle_locator_state(
         "scene_epoch": words[26],
         "field_width": words[27],
         "field_height": words[28],
+        "tensor_content_rect": expected_content,
         "packed_grace_x": words[29],
         "packed_grace_y": words[30],
         "packed_kinds": packed_kinds,
@@ -813,8 +906,8 @@ def _fit_host_sbs_v2_depth_tensor_shape(width: int, height: int) -> tuple[int, i
 def _plan_host_sbs_v2_window_region(
         semantic: tuple[int, int, int, int], source_width: int, source_height: int,
         tensor_width: int, tensor_height: int
-        ) -> tuple[tuple[int, int, int, int], float] | None:
-    """Exact integer/float32 mirror of the production inward-only ROI planner."""
+        ) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int], float] | None:
+    """Mirror the exact-source, centered integer contain-fit used by production."""
 
     left, top, right, bottom = semantic
     width = right - left
@@ -824,49 +917,28 @@ def _plan_host_sbs_v2_window_region(
             semantic == (0, 0, source_width, source_height)):
         return None
 
-    def source_supported(candidate_width: int, candidate_height: int) -> bool:
-        return (max(candidate_width, candidate_height) <= _MAXIMUM_SOURCE_LONG_SIDE and
-                candidate_width * candidate_height <= _MAXIMUM_SOURCE_PIXELS and
-                _fit_host_sbs_v2_depth_tensor_shape(candidate_width, candidate_height) in
-                _AUTHENTICATED_TENSOR_SHAPES)
-
-    exact_shape = _fit_host_sbs_v2_depth_tensor_shape(width, height)
-    if (exact_shape == (tensor_width, tensor_height) and
-            width * tensor_height == height * tensor_width and
-            source_supported(width, height)):
-        return semantic, 0.0
-
-    fitted_width = width
-    fitted_height = height
+    content_left = 0
+    content_top = 0
+    content_right = tensor_width
+    content_bottom = tensor_height
     if width * tensor_height > height * tensor_width:
-        fitted_width = height * tensor_width // tensor_height
+        content_height = max(1, tensor_width * height // width)
+        content_top = (tensor_height - content_height) // 2
+        content_bottom = content_top + content_height
     elif width * tensor_height < height * tensor_width:
-        fitted_height = width * tensor_height // tensor_width
-    if (fitted_width > width or fitted_height > height or
-            fitted_width < tensor_width or fitted_height < tensor_height):
-        return None
-    trimmed_fraction = _float32(
-        1.0 - (fitted_width * fitted_height) / (width * height))
-    if trimmed_fraction > _float32(_MAXIMUM_WINDOW_REGION_TRIM_FRACTION):
-        return None
-    remove_x = width - fitted_width
-    remove_y = height - fitted_height
-    inference = (
-        left + remove_x // 2,
-        top + remove_y // 2,
-        left + remove_x // 2 + fitted_width,
-        top + remove_y // 2 + fitted_height,
-    )
-    if (_fit_host_sbs_v2_depth_tensor_shape(fitted_width, fitted_height) !=
-            (tensor_width, tensor_height) or
-            not source_supported(fitted_width, fitted_height)):
-        return None
-    return inference, trimmed_fraction
+        content_width = max(1, tensor_height * width // height)
+        content_left = (tensor_width - content_width) // 2
+        content_right = content_left + content_width
+    content = (content_left, content_top, content_right, content_bottom)
+    content_area = (content_right - content_left) * (content_bottom - content_top)
+    padded_fraction = _float32(
+        1.0 - content_area / (tensor_width * tensor_height))
+    return semantic, content, padded_fraction
 
 
 def _roi_renderer_constants(
         inference: tuple[int, int, int, int], source_width: int, source_height: int,
-        tensor_width: int, tensor_height: int) -> tuple[float, float]:
+        tensor_content: tuple[int, int, int, int]) -> tuple[float, float]:
     """Mirror the production constant-buffer/shader float32 instruction order."""
 
     left, top, right, bottom = inference
@@ -884,8 +956,9 @@ def _roi_renderer_constants(
         max(_float32(roi_height * height), _float32(1.0e-6)))
     vertical_slope = _float32(
         _float32(_float32(_DEFAULTS.max_vertical_shear) * roi_pixel_aspect) *
-        _float32(_float32(float(tensor_height)) /
-                 max(_float32(float(tensor_width)), _float32(1.0))))
+        _float32(_float32(float(tensor_content[3] - tensor_content[1])) /
+                 max(_float32(float(tensor_content[2] - tensor_content[0])),
+                     _float32(1.0))))
     vertical_budget = _float32(vertical_slope * source_height_in_source_u)
     return roi_width, vertical_budget
 
@@ -973,8 +1046,9 @@ def validate_depth_input_region_document(
 
     analysis = document.get("analysis")
     if not isinstance(analysis, dict) or set(analysis) != {
-            "analysis_generation", "tensor_extent_px", "trimmed_area_fraction",
-            "crop_method", "scene_analysis_domain", "input_domain_reset"}:
+            "analysis_generation", "tensor_extent_px", "tensor_content_rect_px",
+            "padded_area_fraction", "fit_method", "crop_method",
+            "scene_analysis_domain", "input_domain_reset"}:
         raise ValueError("depth_input_region.json has an unknown analysis layout")
     generation = _uint64(analysis.get("analysis_generation"), "analysis generation")
     tensor_w, tensor_h = _pixel_extent(
@@ -982,8 +1056,12 @@ def validate_depth_input_region_document(
     if ((tensor_width is not None and tensor_w != tensor_width) or
             (tensor_height is not None and tensor_h != tensor_height)):
         raise ValueError("depth_input_region.json tensor extent does not match dumped geometry")
-    trimmed_fraction = _finite_number(
-        analysis.get("trimmed_area_fraction"), "trimmed area fraction")
+    tensor_content = _pixel_rect(
+        analysis.get("tensor_content_rect_px"), "depth input tensor content rectangle")
+    if tensor_content[2] > tensor_w or tensor_content[3] > tensor_h:
+        raise ValueError("depth input tensor content rectangle is outside its tensor")
+    padded_fraction = _finite_number(
+        analysis.get("padded_area_fraction"), "padded area fraction")
     if not isinstance(analysis.get("input_domain_reset"), bool):
         raise ValueError("depth_input_region.json input_domain_reset must be boolean")
 
@@ -1005,7 +1083,9 @@ def validate_depth_input_region_document(
     if mode == "full-source":
         if (semantic is not None or authorization is not None or
                 inference != (0, 0, width, height) or generation != 0 or
-                trimmed_fraction != 0.0 or analysis.get("crop_method") != "full-source" or
+                tensor_content != (0, 0, tensor_w, tensor_h) or
+                padded_fraction != 0.0 or analysis.get("fit_method") != "full-tensor" or
+                analysis.get("crop_method") != "full-source" or
                 analysis.get("scene_analysis_domain") != "full-source" or
                 renderer.get("final_parallax_units") != "full-source-u" or
                 scale != 1.0 or renderer.get("outside") is not None):
@@ -1016,14 +1096,17 @@ def validate_depth_input_region_document(
             raise ValueError("depth_input_region.json has incomplete window-region authority")
         expected_plan = _plan_host_sbs_v2_window_region(
             semantic, width, height, tensor_w, tensor_h)
-        if expected_plan is None or expected_plan[0] != inference:
+        if (expected_plan is None or expected_plan[0] != inference or
+                expected_plan[1] != tensor_content):
             raise ValueError(
-                "depth_input_region.json is not the deterministic authenticated inward fit")
-        expected_trim = expected_plan[1]
+                "depth_input_region.json is not the deterministic authenticated integer contain fit")
+        expected_padding = expected_plan[2]
         expected_scale, expected_vertical_slope = _roi_renderer_constants(
-            inference, width, height, tensor_w, tensor_h)
-        if (trimmed_fraction < 0.0 or
-                not math.isclose(trimmed_fraction, expected_trim, rel_tol=0.0, abs_tol=1.0e-7) or
+            inference, width, height, tensor_content)
+        if (padded_fraction < 0.0 or padded_fraction >= 1.0 or
+                padded_fraction != expected_padding or
+                analysis.get("fit_method") !=
+                "centered-integer-contain-with-edge-replicated-excluded-padding" or
                 analysis.get("crop_method") != "same-format D3D11 CopySubresourceRegion" or
                 analysis.get("scene_analysis_domain") != "inference-rectangle-only" or
                 renderer.get("final_parallax_units") != "roi-local-source-u" or
@@ -1059,7 +1142,8 @@ def validate_depth_input_region_document(
         "tensor_height": tensor_h,
         "analysis_generation": generation,
         "authorization": authorization,
-        "trimmed_area_fraction": trimmed_fraction,
+        "tensor_content_rect": tensor_content,
+        "padded_area_fraction": padded_fraction,
         "input_domain_reset": analysis["input_domain_reset"],
         "full_source_parallax_scale": scale,
         "horizontal_slope_source_u_per_source_u": (
@@ -1469,6 +1553,44 @@ def validate_shadow_frame_stats_document(document: Any) -> Dict[str, float]:
     return values
 
 
+def _validate_shadow_manifest_summary(value: Any) -> Dict[str, Any]:
+    expected_keys = _DECODED_KEYS | {
+        "raw_coordinate_scale", "rendered_output_selected",
+    }
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise ValueError("dump_manifest.json has an invalid V2 state summary")
+    if (value.get("frame_valid") is not True or
+            value.get("camera_valid") is not True or
+            value.get("rendered_output_selected") is not True):
+        raise ValueError("dump_manifest.json has an invalid V2 state summary")
+    _calibration_revision(
+        value.get("calibration_revision"),
+        "dump_manifest.json V2 state calibration_revision")
+    for key in ("confirmed_cut_count", "contract_tag", "camera_center_integrity_bits",
+                "renderer_authorization_bits"):
+        _uint32(value.get(key), f"dump_manifest.json V2 state {key}")
+    for key in ("requested_gain", "requested_pop_strength", "latched_scale",
+                "convergence_curve", "container_scale", "effective_gain",
+                "raw_coordinate_scale"):
+        _finite_number(value.get(key), f"dump_manifest.json V2 state {key}")
+    if (value["contract_tag"] != _CONTRACT_TAG or
+            value["renderer_authorization_bits"] != _CONTRACT_TAG or
+            value["calibration_revision"] == 0 or
+            value["requested_gain"] < 0.0 or
+            value["requested_pop_strength"] < 0.0 or
+            value["raw_coordinate_scale"] <= 0.0 or
+            not _same_number(
+                value["requested_gain"],
+                float(value["requested_pop_strength"]) * _DEFAULTS.gain_per_pop) or
+            not _same_number(value["effective_gain"], value["requested_gain"]) or
+            not _same_number(value["latched_scale"], value["raw_coordinate_scale"]) or
+            not _same_number(value["convergence_curve"],
+                             _DEFAULTS.convergence_curve_default) or
+            not _same_number(value["container_scale"], 1.0)):
+        raise ValueError("dump_manifest.json has an invalid V2 state summary")
+    return value
+
+
 def _required_hashed_artifact(
         artifacts: Dict[str, Any], name: str, label: str) -> Dict[str, Any]:
     descriptor = artifacts.get(name)
@@ -1621,7 +1743,6 @@ def _validate_subtitle_conditioning_manifest(
     raise ValueError("unsupported subtitle-conditioning authority")
 
 
-
 def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     """Validate a supported V2 geometry fragment of ``dump_manifest.json``.
 
@@ -1634,6 +1755,9 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     if (not isinstance(document, dict) or
             document.get("schema") != DUMP_MANIFEST_SCHEMA):
         raise ValueError("dump_manifest.json has an unknown serialization schema")
+    if (document.get("capture_status") != "complete" or
+            document.get("published_atomically") is not True):
+        raise ValueError("dump_manifest.json is not a complete atomic publication")
     schema = document["schema"]
     renderer = document.get("renderer")
     shadow = document.get("parallax_v2_shadow")
@@ -1642,6 +1766,31 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     if not all(isinstance(value, dict) for value in
                (renderer, shadow, artifacts, dimensions)):
         raise ValueError("dump_manifest.json is missing its V2 geometry objects")
+
+    shader = coordinate_contract.SHADER_IMPLEMENTATION
+    expected_shadow_shader = {
+        "source_closure_schema": shader.source_closure_schema,
+        "source_compile_flags": shader.source_compile_flags,
+        "source_macro_count": shader.source_macro_count,
+        "source_closure_sha256": shader.source_closure_sha256,
+    }
+    if (set(shadow) != {
+            "requested", "active", "rendered_output_selected", "shader_source", "state"} or
+            shadow.get("requested") is not False or
+            shadow.get("active") is not True or
+            shadow.get("rendered_output_selected") is not True or
+            shadow.get("shader_source") != expected_shadow_shader):
+        raise ValueError("dump_manifest.json has an invalid V2 shadow attribution")
+    shadow_state_summary = _validate_shadow_manifest_summary(shadow.get("state"))
+
+    state_descriptor = _required_hashed_artifact(
+        artifacts, "shadow_state.json", "V2 shadow-state")
+    stats_descriptor = _required_hashed_artifact(
+        artifacts, "shadow_frame_stats.json", "V2 frame-statistics")
+    if (state_descriptor.get("stage") !=
+            "parallax-v2 shot calibration and attenuation state" or
+            stats_descriptor.get("stage") != "parallax-v2 current-frame moments"):
+        raise ValueError("dump_manifest.json has invalid V2 state artifact attribution")
 
     input_summary = document.get("depth_input_region")
     input_descriptor = artifacts.get("depth_input_region.json")
@@ -1909,6 +2058,8 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
                 analysis_source_dimensions["height"] <= 0 or
                 (source_dimensions["format"], source_dimensions["format_value"]) not in {
                     ("DXGI_FORMAT_B8G8R8A8_UNORM", 87),
+                    ("DXGI_FORMAT_B8G8R8X8_UNORM", 88),
+                    ("DXGI_FORMAT_R8G8B8A8_UNORM", 28),
                     ("DXGI_FORMAT_R16G16B16A16_FLOAT", 10)} or
                 analysis_source_dimensions["format"] != source_dimensions["format"] or
                 analysis_source_dimensions["format_value"] !=
@@ -2001,6 +2152,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         "window_region_observer_status": region_observer_status,
         "window_region_mapping_status": region_mapping_status,
         "subtitle_conditioning": subtitle_conditioning,
+        "shadow_state_summary": shadow_state_summary,
     }
 
 
@@ -2039,7 +2191,8 @@ def _read_hashed_artifact(
 def _verify_subtitle_conditioning_artifacts(
         dump_dir: Any, manifest: Dict[str, Any], *, matched_frame_id: int,
         analysis_generation: int, source_width: int, source_height: int,
-        field_width: int, field_height: int) -> Dict[str, Any]:
+        field_width: int, field_height: int,
+        tensor_content: tuple[int, int, int, int]) -> Dict[str, Any]:
     import json
 
     metadata_payload = _read_hashed_artifact(
@@ -2052,8 +2205,8 @@ def _verify_subtitle_conditioning_artifacts(
         raise ValueError("subtitle_conditioning.json disagrees with the manifest")
     mode = metadata.get("mode")
     if mode == _SUBTITLE_MODE_SLR9:
-        dynamic_roi = coordinate_contract.subtitle_ocr_dynamic_roi(
-            source_width, source_height, field_width, field_height)
+        content = _subtitle_tensor_content(field_width, field_height, tensor_content)
+        dynamic_roi = _subtitle_dynamic_roi(source_width, source_height, content)
         if dynamic_roi is None:
             raise ValueError(
                 "active SLR9 subtitle conditioning has unsupported source/field geometry")
@@ -2072,6 +2225,7 @@ def _verify_subtitle_conditioning_artifacts(
             field_height=field_height,
             roi_top=roi_top,
             roi_bottom=roi_bottom,
+            tensor_content=content,
         )
         locator = validate_subtitle_locator_state(
             locator_payload,
@@ -2081,11 +2235,12 @@ def _verify_subtitle_conditioning_artifacts(
             source_height=source_height,
             field_width=field_width,
             field_height=field_height,
+            tensor_content=content,
         )
         if not ocr["authoritative"] and locator["current_count"] != 0:
             raise ValueError("an abstaining OCR8 record cannot authorize SLR9 current rectangles")
         selected_indices = _subtitle_selected_ocr_indices(
-            ocr["raw_boxes"], field_width)
+            ocr["raw_boxes"], content[2] - content[0])
         selected_final_rectangles = [
             (ocr["final_boxes"][index]["left"],
              ocr["final_boxes"][index]["top"],
@@ -2135,6 +2290,7 @@ def _verify_subtitle_conditioning_artifacts(
             "source_height": ocr["source_height"],
             "field_width": ocr["field_width"],
             "field_height": ocr["field_height"],
+            "tensor_content_rect": content,
             "roi_top": ocr["roi_top"],
             "roi_bottom": ocr["roi_bottom"],
             "owner_count": locator["owner_count"],
@@ -2154,7 +2310,63 @@ def _verify_subtitle_conditioning_artifacts(
     }
 
 
-def _replay_slr9_conditioner(base_field: Any, subtitle: Dict[str, Any]) -> Any:
+def _sm5_power_of_two_division_candidates(
+        numerator: float, denominator: int) -> tuple[Any, ...]:
+    """Return every bit-exact SM5 result for this bounded positive division.
+
+    SLR9's three divisions all have an exactly representable power-of-two numerator and an
+    exactly representable positive integer denominator.  The D3D11.3 functional specification,
+    section 3.1.3.1, permits ``x / y`` to execute as ``x * (1 / y)`` with a reciprocal accurate
+    to one ULP.  Scaling that reciprocal by these power-of-two numerators is exact in SLR9's
+    bounded normal range.  A nonrepresentable quotient therefore admits exactly its two
+    bracketing float32 values; an exactly representable quotient admits itself and its two
+    immediate neighbors.  The choice is device-dependent: NVIDIA hardware uses the lower
+    bracketing value for 0.5 / 1101 while WARP and NumPy use the upper one.
+
+    Keeping this as a finite set of exact bit patterns is important.  It is not an epsilon: a
+    captured field must still equal one globally consistent SM5 recurrence bit for bit.
+    """
+
+    import numpy as np
+
+    denominator32 = np.float32(denominator)
+    numerator32 = np.float32(numerator)
+    if (denominator <= 0 or denominator > _MAXIMUM_SOURCE_LONG_SIDE or
+            int(denominator32) != denominator or
+            not np.isfinite(numerator32) or numerator32 <= np.float32(0.0)):
+        raise ValueError(
+            "SM5 replay division requires bounded exact positive float32 operands")
+    numerator_integer, numerator_denominator = float(numerator32).as_integer_ratio()
+    if ((numerator_integer & (numerator_integer - 1)) != 0 or
+            (numerator_denominator & (numerator_denominator - 1)) != 0):
+        raise ValueError("SM5 replay division numerator must be an exact power of two")
+
+    nearest = np.divide(numerator32, denominator32, dtype=np.float32)
+    nearest_integer, nearest_denominator = float(nearest).as_integer_ratio()
+    # Compare the rounded float with numerator / denominator using integers only.  Within the
+    # production bound (<= 5120), a non-power-of-two denominator is far from a float32 binade
+    # boundary, so the one-ULP reciprocal allowance contains exactly the two floats bracketing
+    # the rational.  A power-of-two denominator makes the rational exact, hence the explicit
+    # exact-plus-neighbors case above.  Multiplication by SLR9's power-of-two numerator only
+    # changes the exponent, so it neither introduces rounding nor changes this candidate count.
+    comparison = (
+        nearest_integer * numerator_denominator * denominator -
+        numerator_integer * nearest_denominator
+    )
+    if comparison == 0:
+        return (
+            nearest,
+            np.nextafter(nearest, np.float32(-np.inf), dtype=np.float32),
+            np.nextafter(nearest, np.float32(np.inf), dtype=np.float32),
+        )
+    direction = np.float32(-np.inf if comparison > 0 else np.inf)
+    adjacent = np.nextafter(nearest, direction, dtype=np.float32)
+    return (nearest, adjacent)
+
+
+def _replay_slr9_conditioner(
+        base_field: Any, subtitle: Dict[str, Any], *,
+        division_values: tuple[Any, Any, Any] | None = None) -> Any:
     """Replay the frozen SLR9 analytic rectangle conditioner in float32 order."""
 
     import numpy as np
@@ -2162,9 +2374,18 @@ def _replay_slr9_conditioner(base_field: Any, subtitle: Dict[str, Any]) -> Any:
     base = np.asarray(base_field, dtype=np.float32)
     if base.ndim != 2:
         raise ValueError("SLR9 Base field must be a two-dimensional float32 array")
+    height, width = base.shape
+    content = _subtitle_tensor_content(
+        width, height, subtitle.get("tensor_content_rect"))
+    content_width = content[2] - content[0]
+    # The shader evaluates all synthetic padding at its nearest real content cell and loads Base
+    # there, including the inactive/empty-current path.
+    x_cells = np.clip(np.arange(width, dtype=np.int64), content[0], content[2] - 1)
+    y_cells = np.clip(np.arange(height, dtype=np.int64), content[1], content[3] - 1)
+    base_for_conditioning = base[np.ix_(y_cells, x_cells)]
     rectangles = subtitle["current_rectangles"]
     if not rectangles:
-        return base.copy()
+        return base_for_conditioning.copy()
     source_width = _uint32(subtitle.get("source_width"), "SLR9 analysis source width")
     if source_width == 0:
         raise ValueError("SLR9 analysis source width must be positive")
@@ -2173,17 +2394,21 @@ def _replay_slr9_conditioner(base_field: Any, subtitle: Dict[str, Any]) -> Any:
     if target is None or fade not in (1, 2):
         raise ValueError("SLR9 current geometry lacks valid target/fade authority")
 
-    height, width = base.shape
     if ((width, height) not in _AUTHENTICATED_TENSOR_SHAPES or
             width != subtitle.get("field_width") or
             height != subtitle.get("field_height")):
         raise ValueError("SLR9 conditioner field does not match its calibrated authority")
-    x = np.arange(width, dtype=np.int64)[None, :]
-    y = np.arange(height, dtype=np.int64)[:, None]
-    horizontal_step = np.float32(
-        np.float32(_DEFAULTS.max_horizontal_slope) / np.float32(width))
-    vertical_step = np.float32(
-        np.float32(_DEFAULTS.max_vertical_shear) / np.float32(width))
+    x = x_cells[None, :]
+    y = y_cells[:, None]
+    if division_values is None:
+        horizontal_step = np.float32(
+            np.float32(_DEFAULTS.max_horizontal_slope) / np.float32(content_width))
+        vertical_step = np.float32(
+            np.float32(_DEFAULTS.max_vertical_shear) / np.float32(content_width))
+        core_range = np.float32(np.float32(0.5) / np.float32(source_width))
+    else:
+        horizontal_step, vertical_step, core_range = (
+            np.float32(value) for value in division_values)
     best_distance = np.full(base.shape, np.float32(np.inf), dtype=np.float32)
     for rectangle in rectangles:
         left = rectangle["left"]
@@ -2207,24 +2432,57 @@ def _replay_slr9_conditioner(base_field: Any, subtitle: Dict[str, Any]) -> Any:
         distance = np.add(horizontal_distance, vertical_distance, dtype=np.float32)
         best_distance = np.minimum(best_distance, distance)
 
-    core_range = np.float32(np.float32(0.5) / np.float32(source_width))
     budget = np.add(core_range, best_distance, dtype=np.float32)
     target32 = np.float32(target)
-    delta = np.subtract(base, target32, dtype=np.float32)
+    delta = np.subtract(base_for_conditioning, target32, dtype=np.float32)
     safe = np.less_equal(np.abs(delta), budget)
     base_in_range = np.less_equal(
-        np.abs(base), np.float32(_DEFAULTS.direct_container_limit))
+        np.abs(base_for_conditioning), np.float32(_DEFAULTS.direct_container_limit))
     signed_budget = np.where(delta < np.float32(0.0), -budget, budget).astype(np.float32)
     full = np.add(target32, signed_budget, dtype=np.float32)
     if fade == 1:
         half_delta = np.multiply(
-            np.float32(0.5), np.subtract(full, base, dtype=np.float32),
+            np.float32(0.5), np.subtract(full, base_for_conditioning, dtype=np.float32),
             dtype=np.float32)
-        conditioned = np.add(base, half_delta, dtype=np.float32)
+        conditioned = np.add(base_for_conditioning, half_delta, dtype=np.float32)
     else:
         conditioned = full
-    return np.where(base_in_range & ~safe, conditioned, base).astype(np.float32)
+    return np.where(
+        base_in_range & ~safe, conditioned, base_for_conditioning).astype(np.float32)
 
+
+def _replay_slr9_conditioner_sm5_candidates(
+        base_field: Any, subtitle: Dict[str, Any]):
+    """Yield the finite, globally consistent bit-exact SM5 SLR9 recurrences."""
+
+    import numpy as np
+
+    base = np.asarray(base_field, dtype=np.float32)
+    if base.ndim != 2:
+        raise ValueError("SLR9 Base field must be a two-dimensional float32 array")
+    source_width = _uint32(subtitle.get("source_width"), "SLR9 analysis source width")
+    width = base.shape[1]
+    height = base.shape[0]
+    content = _subtitle_tensor_content(
+        width, height, subtitle.get("tensor_content_rect"))
+    content_width = content[2] - content[0]
+    choices = (
+        _sm5_power_of_two_division_candidates(
+            _DEFAULTS.max_horizontal_slope, content_width),
+        _sm5_power_of_two_division_candidates(
+            _DEFAULTS.max_vertical_shear, content_width),
+        _sm5_power_of_two_division_candidates(0.5, source_width),
+    )
+    seen = set()
+    for division_values in product(*choices):
+        bit_key = tuple(
+            int(np.asarray(value, dtype=np.float32).view(np.uint32))
+            for value in division_values)
+        if bit_key in seen:
+            continue
+        seen.add(bit_key)
+        yield _replay_slr9_conditioner(
+            base, subtitle, division_values=division_values)
 
 
 def _verify_roi_exterior_zero_warp_map(
@@ -2499,6 +2757,40 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
     if source_width == 0 or source_height == 0 or frame_id == 0:
         raise ValueError("dump_manifest.json has invalid matched source geometry")
 
+    def read_hashed_json_artifact(name: str) -> tuple[bytes, Dict[str, Any]]:
+        path = os.path.join(os.fspath(dump_dir), name)
+        try:
+            with open(path, "rb") as handle:
+                payload = handle.read()
+            document = json.loads(payload.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError(f"{name} is missing or malformed") from error
+        if not isinstance(document, dict):
+            raise ValueError(f"{name} must contain a JSON object")
+        descriptor = artifacts[name]
+        if hashlib.sha256(payload).hexdigest() != descriptor["sha256"]:
+            raise ValueError(f"{name} content hash mismatch")
+        return payload, document
+
+    _, shadow_state_document = read_hashed_json_artifact("shadow_state.json")
+    shadow_state = validate_shadow_state_document(shadow_state_document)
+    _, shadow_stats_document = read_hashed_json_artifact("shadow_frame_stats.json")
+    shadow_stats = validate_shadow_frame_stats_document(shadow_stats_document)
+    if shadow_state_document.get("rendered_output_selected") is not True:
+        raise ValueError("shadow_state.json is not selected renderer state")
+    collapse_epsilon = float(shadow_state_document["constants"]["collapse_abs_epsilon"])
+    expected_frame_valid = bool(
+        shadow_stats["valid"] > 0.5 and
+        shadow_stats["population_std"] > collapse_epsilon)
+    if (shadow_state["frame_valid"] > 0.5) != expected_frame_valid:
+        raise ValueError("V2 shadow state disagrees with its exact-frame statistics")
+    expected_shadow_summary = dict(shadow_state_document["decoded"])
+    expected_shadow_summary["raw_coordinate_scale"] = (
+        shadow_state_document["constants"]["raw_coordinate_scale"])
+    expected_shadow_summary["rendered_output_selected"] = True
+    if expected_shadow_summary != fragment["shadow_state_summary"]:
+        raise ValueError("dump manifest V2 state summary disagrees with shadow_state.json")
+
     input_region_path = os.path.join(os.fspath(dump_dir), "depth_input_region.json")
     try:
         with open(input_region_path, "rb") as handle:
@@ -2522,6 +2814,12 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
     if (analysis_source_dimensions.get("width") != input_region["inference_width"] or
             analysis_source_dimensions.get("height") != input_region["inference_height"]):
         raise ValueError("analysis-source dimensions disagree with depth_input_region.json")
+    content_left, content_top, content_right, content_bottom = (
+        input_region["tensor_content_rect"])
+    expected_stats_texel_count = float(
+        (content_right - content_left) * (content_bottom - content_top))
+    if shadow_stats["texel_count"] != expected_stats_texel_count:
+        raise ValueError("V2 shadow statistics disagree with the exact analysis content")
 
     window_region = None
     if fragment["window_region_available"]:
@@ -2583,6 +2881,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
         source_height=input_region["inference_height"],
         field_width=width,
         field_height=height,
+        tensor_content=input_region["tensor_content_rect"],
     )
     subtitle_live = subtitle_summary["mode"] == _SUBTITLE_MODE_SLR9
     geometry_chain_fields = (
@@ -2615,8 +2914,11 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
 
     # Exact float32 replicas of the production recurrences (validated bitwise against the
     # GPU intermediates; see docs/host-sbs.md#cliff-conditioning).
-    vertical_step = np.float32(_DEFAULTS.max_vertical_shear / width)
-    horizontal_step = np.float32(_DEFAULTS.max_horizontal_slope / width)
+    content_left, content_top, content_right, content_bottom = (
+        input_region["tensor_content_rect"])
+    content_width = content_right - content_left
+    vertical_step = np.float32(_DEFAULTS.max_vertical_shear / content_width)
+    horizontal_step = np.float32(_DEFAULTS.max_horizontal_slope / content_width)
     share = np.float32(_DEFAULTS.vertical_majorant_share)
     share_complement = np.float32(1.0 - float(share))
 
@@ -2653,17 +2955,25 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
                 f"(max abs diff {mismatch})")
 
     if subtitle_live:
-        replayed_subtitle = _replay_slr9_conditioner(
-            fields["shadow_base_final_parallax"], subtitle_summary)
-        if not np.array_equal(fields["shadow_final_parallax"], replayed_subtitle):
-            mismatch = float(np.max(np.abs(
-                fields["shadow_final_parallax"] - replayed_subtitle)))
+        replay_matched = False
+        minimum_mismatch = math.inf
+        for replayed_subtitle in _replay_slr9_conditioner_sm5_candidates(
+                fields["shadow_base_final_parallax"], subtitle_summary):
+            if np.array_equal(fields["shadow_final_parallax"], replayed_subtitle):
+                replay_matched = True
+                break
+            minimum_mismatch = min(
+                minimum_mismatch,
+                float(np.max(np.abs(
+                    fields["shadow_final_parallax"] - replayed_subtitle))))
+        if not replay_matched:
             if subtitle_summary["current_count"] == 0:
                 raise ValueError(
-                    "SLR9 has no current geometry but the final field is not exact Base")
+                    "SLR9 has no current geometry but the final field is not the exact "
+                    "content-clamped Base extension")
             raise ValueError(
                 "shadow_final_parallax.f32 is not the exact SLR9 rectangle-conditioning "
-                f"recurrence (max abs diff {mismatch})")
+                f"recurrence (minimum max abs diff {minimum_mismatch})")
 
     warp_depth_path = os.path.join(os.fspath(dump_dir), "warp_depth.f32")
     try:

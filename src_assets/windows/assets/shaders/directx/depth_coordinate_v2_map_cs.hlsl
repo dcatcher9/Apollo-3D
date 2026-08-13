@@ -4,6 +4,7 @@
 
 StructuredBuffer<float> InputBuffer : register(t0);
 StructuredBuffer<float4> ShadowState : register(t1);
+Texture2D<uint> TensorExclusion : register(t2);
 RWTexture2D<float> Output : register(u0);
 
 #include "include/depth_constants.hlsl"
@@ -37,7 +38,12 @@ void main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= target_w || id.y >= target_h) {
         return;
     }
-    uint index = id.y * target_w + id.x;
+    // Synthetic letterbox cells are a nearest-boundary extension of the real analysis domain.
+    // Sanitizing before ownership and both limiters prevents arbitrary model padding output from
+    // entering a valid row/column envelope.
+    uint2 sample_position = TensorExclusion[id.xy] != 0u ?
+        DepthAnalysisClampCell(id.xy) : id.xy;
+    uint index = sample_position.y * target_w + sample_position.x;
     float coordinate;
     if (!CanonicalCoordinate(index, coordinate)) {
         Output[id.xy] = 0.0f;
@@ -60,6 +66,8 @@ void coordinate_main(uint3 id : SV_DispatchThreadID) {
         return;
     }
     float coordinate;
-    CanonicalCoordinate(id.y * target_w + id.x, coordinate);
+    uint2 sample_position = TensorExclusion[id.xy] != 0u ?
+        DepthAnalysisClampCell(id.xy) : id.xy;
+    CanonicalCoordinate(sample_position.y * target_w + sample_position.x, coordinate);
     Output[id.xy] = coordinate;
 }

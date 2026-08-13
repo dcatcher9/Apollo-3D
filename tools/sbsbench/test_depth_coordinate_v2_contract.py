@@ -67,6 +67,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             44: "7ab9db96b7af454e10cfd004f878c0847d66913059005578e212474ef2a0a5fb",
             45: "8515cf7bc352c2e9e56e6a5fd9dad9802e1e7cd02f705fd8a957617c7ba94e9a",
             46: "8ab387f9bcda29e90455ce9e5b8677cef3cd7744fe03ee03202a4699fa7e4ead",
+            47: "d1e6046cd87e992ebf12ff6fc0f3ddd435bd6603fd6967465c6e51a8d0c4cc8b",
+            48: "07da2a0f7ad23e8e6a4d70e00b3aa9cb159f9eb76991215b5c85634e96f29441",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -74,14 +76,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0xD18FF0F3)
+        self.assertEqual(generator.contract_tag(contract), 0x4F3FF872)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "d18ff0f3c8e823725663bf578e243abb61bf406d4334807edd658b9c86d9e94d",
+            "4f3ff872d2a1f0b3f6503207cd870f606a538aef168535a4253590fa8cd7d920",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "f299ce49f332458a1d97634d4ced6d7fc802d2be8d583ee04f0e32d851ed1a22",
+            "254d73afac205fb282e471dfe75e5e38a6e0156c0c4ec4296d71ffa828fc512c",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -170,7 +172,13 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04")
         self.assertEqual(calibration.raw_coordinate_scale, 2.25)
         self.assertEqual(
-            calibration.preprocess.profile, "apollo-dav2-area-hdr-srgb-imagenet-v1")
+            calibration.preprocess.profile,
+            "apollo-dav2-centered-integer-contain-edge-pad-area-hdr-srgb-imagenet-v2")
+        self.assertEqual(
+            calibration.preprocess.stage,
+            "exact model input after centered integer contain-fit area resize, HDR tone "
+            "mapping, sRGB conversion, ImageNet normalization, and edge-replicated tensor "
+            "padding excluded from the analysis domain")
         self.assertEqual(calibration.preprocess.source_closure_schema, 2)
         self.assertEqual(calibration.preprocess.source_file, "rgb_to_nchw_cs.hlsl")
         self.assertEqual(calibration.preprocess.source_entrypoint, "main")
@@ -179,7 +187,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(calibration.preprocess.source_macro_count, 0)
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
-            "d765bf19eb493f302752b1881f62e5d07fa82a073cfba3811fed50f5a5264124")
+            "6ee5ca19e447a210f5f7eceb29561321b8f9db3ec3bafd32006f79b43398d730")
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
             generator.shader_source_closure_sha256())
@@ -208,7 +216,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
 
     def test_subtitle_ocr_contract_binds_model_profile_tensor_and_record_abis(self):
         ocr = python_contract.SUBTITLE_OCR
-        self.assertEqual(ocr.schema, 6)
+        self.assertEqual(ocr.schema, 8)
         self.assertEqual(ocr.logical_model, "ppocrv6_tiny_det_modelopt_fp16")
         self.assertEqual(
             ocr.asset_path,
@@ -244,6 +252,15 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(ocr.output_name, "fetch_name_0")
         self.assertEqual((ocr.output_dtype, ocr.output_layout), ("float32", "NCHW"))
         self.assertEqual(ocr.output_shape, (1, 1, 160, 960))
+        self.assertEqual(ocr.detector_active_probability_threshold, 0.2)
+        self.assertEqual(ocr.detector_min_mean_score, 0.4)
+        self.assertEqual(
+            (ocr.locator_min_width_cells, ocr.locator_min_height_cells,
+             ocr.locator_min_aspect_numerator,
+             ocr.locator_min_aspect_denominator),
+            (48, 6, 2, 1))
+        self.assertEqual(ocr.locator_match_iou_threshold, 0.6)
+        self.assertEqual(ocr.locator_death_grace_observations, 6)
         self.assertEqual(
             (ocr.locator_max_width_numerator, ocr.locator_max_width_denominator,
              ocr.ocr_safe_row_top, ocr.ocr_safe_row_bottom,
@@ -270,8 +287,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 46u',
-                'subtitle_ocr_contract_schema = 6u',
+                'contract_schema = 48u',
+                'subtitle_ocr_contract_schema = 8u',
                 'subtitle_ocr_model_name = "ppocrv6_tiny_det_modelopt_fp16"',
                 'subtitle_ocr_asset_path = '
                 '"models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx"',
@@ -300,11 +317,19 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'subtitle_ocr_ribbon_join_gap_cells = 12u',
                 'subtitle_locator_max_width_numerator = 9u',
                 'subtitle_locator_max_width_denominator = 10u',
+                'subtitle_ocr_active_probability_threshold = 0.2f',
+                'subtitle_ocr_min_mean_score = 0.4f',
+                'subtitle_locator_min_width_cells = 48u',
+                'subtitle_locator_min_height_cells = 6u',
+                'subtitle_locator_min_aspect_numerator = 2u',
+                'subtitle_locator_min_aspect_denominator = 1u',
+                'subtitle_locator_match_iou_threshold = 0.6f',
+                'subtitle_locator_death_grace_observations = 6u',
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 46u',
-                '#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 6u',
+                '#define V2_CONTRACT_SCHEMA 48u',
+                '#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 8u',
                 '#define V2_OCR_INPUT_WIDTH 960u',
                 '#define V2_OCR_OUTPUT_WIDTH 960u',
                 '#define V2_OCR_IMAGENET_MEAN_B 0.485f',
@@ -323,6 +348,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 '#define V2_OCR_RIBBON_JOIN_GAP_CELLS 12u',
                 '#define V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR 9u',
                 '#define V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR 10u',
+                '#define V2_OCR_ACTIVE_PROBABILITY_THRESHOLD 0.2f',
+                '#define V2_OCR_MIN_MEAN_SCORE 0.4f',
+                '#define V2_SUBTITLE_LOCATOR_MIN_WIDTH_CELLS 48u',
+                '#define V2_SUBTITLE_LOCATOR_MIN_HEIGHT_CELLS 6u',
+                '#define V2_SUBTITLE_LOCATOR_MIN_ASPECT_NUMERATOR 2u',
+                '#define V2_SUBTITLE_LOCATOR_MIN_ASPECT_DENOMINATOR 1u',
+                '#define V2_SUBTITLE_LOCATOR_MATCH_IOU_THRESHOLD 0.6f',
+                '#define V2_SUBTITLE_LOCATOR_DEATH_GRACE_OBSERVATIONS 6u',
                 'bool V2SubtitleOcrFieldIsCalibrated('):
             self.assertIn(token, hlsl)
         self.assertNotIn("subtitle_ocr_join_gap_cells", cpp)

@@ -69,7 +69,7 @@ EXPECTED_SHADER_SPEC_KEYS = {
     "source_file", "source_entrypoint", "source_target",
 }
 CANONICAL_SUBTITLE_OCR = {
-    "schema": 6,
+    "schema": 8,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
     "artifact_onnx_sha256": (
@@ -103,8 +103,16 @@ CANONICAL_SUBTITLE_OCR = {
         "shape": [1, 1, 160, 960],
     },
     "field_policy": {
+        "detector_active_probability_threshold": 0.2,
+        "detector_min_mean_score": 0.4,
         "locator_max_width_numerator": 9,
         "locator_max_width_denominator": 10,
+        "locator_min_width_cells": 48,
+        "locator_min_height_cells": 6,
+        "locator_min_aspect_numerator": 2,
+        "locator_min_aspect_denominator": 1,
+        "locator_match_iou_threshold": 0.6,
+        "locator_death_grace_observations": 6,
         "ocr_safe_row_top": 24,
         "ocr_safe_row_bottom": 155,
         "source_crop_aspect_width": 6,
@@ -793,10 +801,26 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"{field_policy['ocr_safe_row_top']}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_safe_row_bottom = "
         f"{field_policy['ocr_safe_row_bottom']}u;",
+        f"  inline constexpr float subtitle_ocr_active_probability_threshold = "
+        f"{_float_literal(field_policy['detector_active_probability_threshold'])};",
+        f"  inline constexpr float subtitle_ocr_min_mean_score = "
+        f"{_float_literal(field_policy['detector_min_mean_score'])};",
         f"  inline constexpr std::uint32_t subtitle_locator_max_width_numerator = "
         f"{field_policy['locator_max_width_numerator']}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_max_width_denominator = "
         f"{field_policy['locator_max_width_denominator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_min_width_cells = "
+        f"{field_policy['locator_min_width_cells']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_min_height_cells = "
+        f"{field_policy['locator_min_height_cells']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_min_aspect_numerator = "
+        f"{field_policy['locator_min_aspect_numerator']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_min_aspect_denominator = "
+        f"{field_policy['locator_min_aspect_denominator']}u;",
+        f"  inline constexpr float subtitle_locator_match_iou_threshold = "
+        f"{_float_literal(field_policy['locator_match_iou_threshold'])};",
+        f"  inline constexpr std::uint32_t subtitle_locator_death_grace_observations = "
+        f"{field_policy['locator_death_grace_observations']}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_crop_aspect_width = "
         f"{field_policy['source_crop_aspect_width']}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_crop_aspect_height = "
@@ -823,17 +847,32 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"  inline constexpr std::uint32_t subtitle_locator_state_tag = 0x{locator_state['tag']:08X}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_state_word_count = {locator_state['word_count']}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_header_word_count = {locator_state['header_word_count']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_rectangle_capacity = {locator_state['rectangle_capacity']}u;",
+        "  inline constexpr std::uint32_t subtitle_locator_rectangle_capacity = "
+        f"{locator_state['rectangle_capacity']}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_owner_offset = {locator_state['owner_offset']}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_pending_offset = {locator_state['pending_offset']}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_current_offset = {locator_state['current_offset']}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_kind_word = {locator_state['kind_word']}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_owner_kind_shift = {locator_state['owner_kind_shift']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_pending_kind_shift = {locator_state['pending_kind_shift']}u;",
-        f"  inline constexpr std::uint32_t subtitle_locator_current_kind_shift = {locator_state['current_kind_shift']}u;",
+        "  inline constexpr std::uint32_t subtitle_locator_pending_kind_shift = "
+        f"{locator_state['pending_kind_shift']}u;",
+        "  inline constexpr std::uint32_t subtitle_locator_current_kind_shift = "
+        f"{locator_state['current_kind_shift']}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_kind_mask = {locator_state['kind_mask']}u;",
         "  static_assert(subtitle_ocr_input_n == 1u && subtitle_ocr_input_c == 3u);",
         "  static_assert(subtitle_ocr_output_n == 1u && subtitle_ocr_output_c == 1u);",
+        "  static_assert(subtitle_ocr_active_probability_threshold > 0.0f &&",
+        "                subtitle_ocr_active_probability_threshold < 1.0f);",
+        "  static_assert(subtitle_ocr_min_mean_score >",
+        "                subtitle_ocr_active_probability_threshold);",
+        "  static_assert(subtitle_ocr_min_mean_score <= 1.0f);",
+        "  static_assert(subtitle_locator_min_width_cells > 0u);",
+        "  static_assert(subtitle_locator_min_height_cells > 0u);",
+        "  static_assert(subtitle_locator_min_aspect_numerator > 0u);",
+        "  static_assert(subtitle_locator_min_aspect_denominator > 0u);",
+        "  static_assert(subtitle_locator_match_iou_threshold > 0.0f &&",
+        "                subtitle_locator_match_iou_threshold <= 1.0f);",
+        "  static_assert(subtitle_locator_death_grace_observations > 0u);",
         "  static_assert(subtitle_ocr_text_join_gap_cells > 0u);",
         "  static_assert(subtitle_ocr_text_join_gap_cells <",
         "                subtitle_ocr_ribbon_join_gap_cells);",
@@ -1334,6 +1373,10 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         *shape_macros,
         f"#define V2_OCR_SAFE_ROW_TOP {field_policy['ocr_safe_row_top']}u",
         f"#define V2_OCR_SAFE_ROW_BOTTOM {field_policy['ocr_safe_row_bottom']}u",
+        f"#define V2_OCR_ACTIVE_PROBABILITY_THRESHOLD "
+        f"{_float_literal(field_policy['detector_active_probability_threshold'])}",
+        f"#define V2_OCR_MIN_MEAN_SCORE "
+        f"{_float_literal(field_policy['detector_min_mean_score'])}",
         f"#define V2_OCR_CROP_ASPECT_WIDTH "
         f"{field_policy['source_crop_aspect_width']}u",
         f"#define V2_OCR_CROP_ASPECT_HEIGHT "
@@ -1358,6 +1401,18 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"{field_policy['locator_max_width_numerator']}u",
         f"#define V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR "
         f"{field_policy['locator_max_width_denominator']}u",
+        f"#define V2_SUBTITLE_LOCATOR_MIN_WIDTH_CELLS "
+        f"{field_policy['locator_min_width_cells']}u",
+        f"#define V2_SUBTITLE_LOCATOR_MIN_HEIGHT_CELLS "
+        f"{field_policy['locator_min_height_cells']}u",
+        f"#define V2_SUBTITLE_LOCATOR_MIN_ASPECT_NUMERATOR "
+        f"{field_policy['locator_min_aspect_numerator']}u",
+        f"#define V2_SUBTITLE_LOCATOR_MIN_ASPECT_DENOMINATOR "
+        f"{field_policy['locator_min_aspect_denominator']}u",
+        f"#define V2_SUBTITLE_LOCATOR_MATCH_IOU_THRESHOLD "
+        f"{_float_literal(field_policy['locator_match_iou_threshold'])}",
+        f"#define V2_SUBTITLE_LOCATOR_DEATH_GRACE_OBSERVATIONS "
+        f"{field_policy['locator_death_grace_observations']}u",
         f"#define V2_SUBTITLE_LOCATOR_STATE_SCHEMA {locator_state['schema']}u",
         f"#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x{locator_state['tag']:08X}u",
         f"#define V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT {locator_state['word_count']}u",

@@ -50,16 +50,33 @@ namespace {
   constexpr std::uint32_t subtitle_roi_edge(
     const std::uint32_t source_w,
     const std::uint32_t source_h,
-    const std::uint32_t field_h,
+    const std::uint32_t content_top,
+    const std::uint32_t content_height,
     const std::uint32_t safe_row
   ) {
     const auto crop_height = ceil_crop_height(source_w, source_h);
     const auto crop_top = source_h - crop_height;
     const std::uint64_t numerator =
       (static_cast<std::uint64_t>(crop_top) * ocr_height +
-       static_cast<std::uint64_t>(safe_row) * crop_height) * field_h;
+       static_cast<std::uint64_t>(safe_row) * crop_height) * content_height;
     const std::uint64_t denominator = static_cast<std::uint64_t>(ocr_height) * source_h;
-    return static_cast<std::uint32_t>((numerator + denominator - 1u) / denominator);
+    return content_top +
+           static_cast<std::uint32_t>((numerator + denominator - 1u) / denominator);
+  }
+
+  constexpr std::uint32_t subtitle_roi_edge(
+    const std::uint32_t source_w,
+    const std::uint32_t source_h,
+    const std::uint32_t field_h,
+    const std::uint32_t safe_row
+  ) {
+    return subtitle_roi_edge(
+      source_w,
+      source_h,
+      0u,
+      field_h,
+      safe_row
+    );
   }
 
   constexpr std::uint32_t map_ocr_y_floor(
@@ -132,6 +149,7 @@ namespace {
     std::uint32_t crop_height;
     std::uint32_t roi_top;
     std::uint32_t roi_bottom;
+    std::array<std::uint32_t, 4u> tensor_content;
   };
 
   struct depth_constants_t {
@@ -144,6 +162,7 @@ namespace {
     float ema_edge_change;
     float ema_edge_gradient;
     float ema_edge_strength;
+    std::array<std::uint32_t, 4u> tensor_content;
     std::array<float, 3u> reserved;
   };
 
@@ -162,14 +181,15 @@ namespace {
     std::array<std::uint32_t, 4u> field;
     std::array<std::uint32_t, 4u> source;
     std::array<std::uint32_t, 4u> frame;
+    std::array<std::uint32_t, 4u> tensor_content;
   };
 
   static_assert(sizeof(rgba_t) == 4u * sizeof(float));
   static_assert(sizeof(preprocess_constants_t) == 32u);
-  static_assert(sizeof(ocr_resolve_constants_t) == 48u);
-  static_assert(sizeof(depth_constants_t) == 48u);
+  static_assert(sizeof(ocr_resolve_constants_t) == 64u);
+  static_assert(sizeof(depth_constants_t) == 64u);
   static_assert(sizeof(v2_constants_t) == 32u);
-  static_assert(sizeof(subtitle_constants_t) == 48u);
+  static_assert(sizeof(subtitle_constants_t) == 64u);
   static_assert(ocr_width == v2::subtitle_ocr_input_width);
   static_assert(ocr_height == v2::subtitle_ocr_input_height);
 
@@ -450,7 +470,8 @@ namespace {
       const std::uint32_t crop_top = source_crop_top,
       const std::uint32_t crop_height = source_crop_height,
       const std::uint32_t field_roi_top = roi_top,
-      const std::uint32_t field_roi_bottom = roi_bottom
+      const std::uint32_t field_roi_bottom = roi_bottom,
+      std::array<std::uint32_t, 4u> tensor_content = {}
     ) {
       if (!cells_ || !boxes_ || probability.size() != ocr_pixels) {
         return false;
@@ -463,6 +484,9 @@ namespace {
         0u,
         0u
       );
+      if (tensor_content == std::array<std::uint32_t, 4u> {}) {
+        tensor_content = {0u, 0u, field_w, field_h};
+      }
       const ocr_resolve_constants_t constants {
         static_cast<std::uint32_t>(frame),
         static_cast<std::uint32_t>(frame >> 32u),
@@ -476,6 +500,7 @@ namespace {
         crop_height,
         field_roi_top,
         field_roi_bottom,
+        tensor_content,
       };
       context_->UpdateSubresource(
         boxes_cb_.Get(),
@@ -519,6 +544,7 @@ namespace {
           static_cast<std::uint32_t>(generation),
           static_cast<std::uint32_t>(generation >> 32u),
         },
+        {0u, 0u, field_width, field_height},
       };
       context_->UpdateSubresource(
         subtitle_cb_.Get(),
@@ -736,6 +762,7 @@ namespace {
         0.0f,
         0.0f,
         0.0f,
+        {0u, 0u, field_width, field_height},
         {}
       };
       const v2_constants_t coordinate_constants {
@@ -752,6 +779,7 @@ namespace {
         {field_width, field_height, roi_top, roi_bottom},
         {source_width, source_height, 1u, 0u},
         {},
+        {0u, 0u, field_width, field_height},
       };
       return create_constant_buffer(
                device_.Get(),
@@ -1343,6 +1371,61 @@ namespace {
       )
     );
     EXPECT_EQ(custom_portrait_box[1u], 737u);
+
+    // An arbitrary-aspect active window keeps the calibrated DAV2 tensor shape and fits the
+    // source into an exact integer content rectangle. OCR geometry must map into that rectangle,
+    // never into the edge-replicated tensor padding above or below it.
+    constexpr std::uint32_t padded_source_w = 1500u;
+    constexpr std::uint32_t padded_source_h = 500u;
+    constexpr std::array<std::uint32_t, 4u> padded_content {
+      0u, 89u, field_width, 345u
+    };
+    constexpr auto padded_crop_h =
+      ceil_crop_height(padded_source_w, padded_source_h);
+    constexpr auto padded_crop_top = padded_source_h - padded_crop_h;
+    constexpr auto padded_roi_top = subtitle_roi_edge(
+      padded_source_w,
+      padded_source_h,
+      padded_content[1u],
+      padded_content[3u] - padded_content[1u],
+      v2::subtitle_ocr_safe_row_top
+    );
+    constexpr auto padded_roi_bottom = subtitle_roi_edge(
+      padded_source_w,
+      padded_source_h,
+      padded_content[1u],
+      padded_content[3u] - padded_content[1u],
+      v2::subtitle_ocr_safe_row_bottom
+    );
+    std::fill(probability.begin(), probability.end(), 0.0f);
+    paint_rectangle(probability, 240u, 100u, 720u, 108u);
+    ASSERT_TRUE(fixture.run_boxes(
+      probability,
+      frame++,
+      91u,
+      padded_source_w,
+      padded_source_h,
+      field_width,
+      field_height,
+      padded_crop_top,
+      padded_crop_h,
+      padded_roi_top,
+      padded_roi_bottom,
+      padded_content
+    ));
+    ASSERT_EQ(fixture.record()[2u], 1u);
+    EXPECT_EQ(fixture.record()[13u], padded_roi_top);
+    EXPECT_EQ(fixture.record()[14u], padded_roi_bottom);
+    EXPECT_EQ(
+      read_box(fixture.record(), v2::subtitle_ocr_raw_box_offset),
+      (std::array<std::uint32_t, 4u> {192u, 297u, 578u, 304u})
+    );
+    const auto padded_cover =
+      read_box(fixture.record(), v2::subtitle_ocr_final_box_offset);
+    EXPECT_GE(padded_cover[0u], padded_content[0u]);
+    EXPECT_GE(padded_cover[1u], padded_content[1u]);
+    EXPECT_LE(padded_cover[2u], padded_content[2u]);
+    EXPECT_LE(padded_cover[3u], padded_content[3u]);
 
     const auto wrong_roi_top = roi_top + 1u;
     ASSERT_TRUE(fixture.run_boxes(

@@ -51,6 +51,8 @@ class RawModelProvenance:
     attestation_schema: Optional[int]
     binding: Optional[str]
     declared_model: str
+    # Stable report-schema slot retained for external consumers. Current authenticated dumps bind
+    # the declared capture-time model directly and therefore report no separate configured model.
     configured_model: Optional[str]
     declared_url: Optional[str]
     onnx_sha256: Optional[str]
@@ -259,6 +261,8 @@ def inspect_dump(dump: Path) -> RawModelProvenance:
         model_input_height=height,
         reason=None,
     )
+
+
 __all__ = [
     "BINDING",
     "PROVENANCE_KEY",

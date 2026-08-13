@@ -218,10 +218,11 @@ static std::string engine_compatibility_tag(cuda_driver_api &cuda, CUdevice devi
 // One resident engine per CUDA-device/model pair, so multi-adapter sessions never reuse a
 // TensorRT engine or execution context deserialized under another CUDA primary context. Distinct
 // startup model configurations remain isolated instead of being pinned to the first model.
-// Engines are never evicted: an
-// IExecutionContext holds ~1.3 GB scratch and cannot be safely destroyed across the MinGW/MSVC
-// ABI boundary, so contexts are pooled per engine and reused (see the ctor/dtor). With
-// sequential evaluator model testing this can leave 2-3 engines resident, which is acceptable.
+// TensorRT interfaces are never destroyed: an incompatible engine may be detached from its slot,
+// but its allocation remains deliberately leaked across the MinGW/MSVC ABI boundary. A usable
+// IExecutionContext holds ~1.3 GB scratch, so contexts are pooled per engine and reused (see the
+// ctor/dtor). Sequential evaluator model testing can leave 2-3 engines resident, which is
+// acceptable.
 struct engine_slot {
   nvinfer1::ICudaEngine *engine = nullptr;
   std::vector<nvinfer1::IExecutionContext *> context_pool;
@@ -243,8 +244,9 @@ static std::size_t allocated_context_count(const engine_slot &slot) {
 
 // The object is deliberately leaked because destroying TensorRT interfaces across this compiler
 // boundary corrupts the heap. Removing it from usable accounting prevents a later session from
-// treating a failed lazy-load/binding operation as a warmed context; quarantined accounting keeps
-// repeated failures bounded by kMaxContextsPerEngine.
+// treating a context that never completed warmup, or later suffered an asynchronous execution
+// failure, as reusable; quarantined accounting keeps repeated failures bounded by
+// kMaxContextsPerEngine.
 static void quarantine_execution_context_locked(
   const std::string &engine_key,
   nvinfer1::IExecutionContext *&context,
@@ -668,13 +670,27 @@ namespace models {
       input_region.source_width,
       input_region.source_height
     );
-    const auto analysis_shape = fit_host_sbs_v2_depth_tensor_shape(
-      input_region.width(),
-      input_region.height()
-    );
     const depth_tensor_shape_t result_shape {result.raw_width, result.raw_height};
-    if (!input_region.valid() || !host_sbs_v2_source_resolution_is_supported(input_region.source_width, input_region.source_height) || !host_sbs_v2_source_resolution_is_supported(input_region.width(), input_region.height()) ||
-        full_source_shape != result_shape || analysis_shape != result_shape) {
+    if (!input_region.valid() ||
+        !host_sbs_v2_source_resolution_is_supported(
+          input_region.source_width, input_region.source_height) ||
+        full_source_shape != result_shape ||
+        !input_region.tensor_content.valid(result_shape)) {
+      return false;
+    }
+    if (input_region.video_region) {
+      const auto expected = plan_host_sbs_v2_video_region(
+        {input_region.left, input_region.top, input_region.right, input_region.bottom},
+        input_region.source_width,
+        input_region.source_height,
+        result_shape
+      );
+      if (!expected || expected->source_rect != depth_source_rect_t {
+            input_region.left, input_region.top, input_region.right, input_region.bottom
+          } || expected->tensor_content != input_region.tensor_content) {
+        return false;
+      }
+    } else if (!input_region.tensor_content.full(result_shape)) {
       return false;
     }
     if (!result.ocr_box_record || !result.subtitle_locator_state) {
@@ -1462,7 +1478,7 @@ namespace models {
     std::string ocr_engine_key;
     bool ocr_context_pooled = false;
     bool ocr_context_warmed = false;
-    bool ocr_context_poisoned = false;
+    detail::warmed_execution_context_health_t ocr_context_health;
     bool ocr_available = false;
 
     float ema_alpha;
@@ -1474,22 +1490,30 @@ namespace models {
     float minmax_alpha;  // temporal EMA blend for the normalized min/max
     bool cuda_graph_enabled;
     const bool diagnostics_enabled;
-    CUgraph inference_graph = nullptr;
-    CUgraphExec inference_graph_exec = nullptr;
-    CUdeviceptr graph_input = 0;
-    CUdeviceptr graph_output = 0;
-    int graph_width = 0;
-    int graph_height = 0;
-    bool graph_signature_warmed = false;
-    bool graph_capture_failed = false;
+    struct cuda_graph_signature_t {
+      CUdeviceptr input = 0;
+      CUdeviceptr output = 0;
+      int width = 0;
+      int height = 0;
+
+      bool matches(const cuda_graph_signature_t &other) const noexcept {
+        return input == other.input && output == other.output &&
+               width == other.width && height == other.height;
+      }
+    };
+
+    struct tensorrt_cuda_graph_t {
+      CUgraph graph = nullptr;
+      CUgraphExec executable = nullptr;
+      cuda_graph_signature_t signature;
+      bool signature_warmed = false;
+      bool capture_failed = false;
+    };
+
+    tensorrt_cuda_graph_t depth_inference_graph;
     // OCR owns a distinct TensorRT context and graph. The graph captures only enqueueV3; D3D/CUDA
     // interop map/unmap and mutable tensor bindings always remain outside the capture boundary.
-    CUgraph ocr_inference_graph = nullptr;
-    CUgraphExec ocr_inference_graph_exec = nullptr;
-    CUdeviceptr ocr_graph_input = 0;
-    CUdeviceptr ocr_graph_output = 0;
-    bool ocr_graph_signature_warmed = false;
-    bool ocr_graph_capture_failed = false;
+    tensorrt_cuda_graph_t ocr_inference_graph;
     bool valid = false;  // all mandatory engine, shader, and session resources are ready
     float parallax_v2_raw_coordinate_scale = 0.0f;
     const float parallax_v2_requested_pop_strength;
@@ -2083,134 +2107,76 @@ namespace models {
       }
     }
 
-    void destroy_inference_graph(cuda_driver_api &cuda) {
-      if (inference_graph_exec && cuda.cuGraphExecDestroy) {
-        cuda.cuGraphExecDestroy(inference_graph_exec);
+    void destroy_inference_graph(
+      cuda_driver_api &cuda,
+      tensorrt_cuda_graph_t &state
+    ) {
+      if (state.executable && cuda.cuGraphExecDestroy) {
+        cuda.cuGraphExecDestroy(state.executable);
       }
-      if (inference_graph && cuda.cuGraphDestroy) {
-        cuda.cuGraphDestroy(inference_graph);
+      if (state.graph && cuda.cuGraphDestroy) {
+        cuda.cuGraphDestroy(state.graph);
       }
-      inference_graph_exec = nullptr;
-      inference_graph = nullptr;
-      graph_signature_warmed = false;
+      state.executable = nullptr;
+      state.graph = nullptr;
+      state.signature_warmed = false;
     }
 
-    void destroy_ocr_inference_graph(cuda_driver_api &cuda) {
-      if (ocr_inference_graph_exec && cuda.cuGraphExecDestroy) {
-        cuda.cuGraphExecDestroy(ocr_inference_graph_exec);
+    // D3D interop is allowed to return different device pointers after any map. TensorRT graph
+    // nodes retain the context's addresses (and depth's dynamic shape), so a graph is reusable
+    // only for one exact signature. OCR calls this before rebinding; the common enqueue path also
+    // calls it defensively so the depth and OCR lifecycle cannot drift apart.
+    void select_inference_graph_signature(
+      cuda_driver_api &cuda,
+      tensorrt_cuda_graph_t &state,
+      const cuda_graph_signature_t &signature
+    ) {
+      if (state.signature.matches(signature)) {
+        return;
       }
-      if (ocr_inference_graph && cuda.cuGraphDestroy) {
-        cuda.cuGraphDestroy(ocr_inference_graph);
-      }
-      ocr_inference_graph_exec = nullptr;
-      ocr_inference_graph = nullptr;
-      ocr_graph_signature_warmed = false;
+      destroy_inference_graph(cuda, state);
+      state.signature = signature;
     }
 
-    bool enqueue_inference(CUdeviceptr input, CUdeviceptr output, cuda_driver_api &cuda) {
-      const bool graph_api = cuda_graph_enabled && cuda.cuStreamBeginCapture &&
-                             cuda.cuStreamEndCapture && cuda.cuGraphInstantiateWithFlags &&
-                             cuda.cuGraphLaunch && cuda.cuGraphDestroy &&
-                             cuda.cuGraphExecDestroy;
-      if (!graph_api || graph_capture_failed) {
-        return exec_context->enqueueV3(cu_stream);
-      }
-      auto launch_or_fallback = [&]() {
-        const CUresult launch = cuda.cuGraphLaunch(inference_graph_exec, cu_stream);
-        if (launch == CUDA_SUCCESS) {
-          return true;
-        }
-        BOOST_LOG(warning) << "TensorRT CUDA graph launch failed (" << launch
-                           << "); using ordinary enqueue.";
-        destroy_inference_graph(cuda);
-        graph_capture_failed = true;
-        return exec_context->enqueueV3(cu_stream);
-      };
-
-      // CUDA explicitly permits an interop mapping to return a different address on each map.
-      // A graph embeds TensorRT's tensor pointers, so never replay it across a changed mapping or
-      // shape. The first enqueue after each signature change is deliberately ordinary: TensorRT
-      // may perform deferred shape-dependent setup that cannot be captured.
-      if (input != graph_input || output != graph_output || target_w != graph_width || target_h != graph_height) {
-        destroy_inference_graph(cuda);
-        graph_input = input;
-        graph_output = output;
-        graph_width = target_w;
-        graph_height = target_h;
-      }
-      if (inference_graph_exec) {
-        return launch_or_fallback();
-      }
-      if (!graph_signature_warmed) {
-        graph_signature_warmed = true;
-        return exec_context->enqueueV3(cu_stream);
-      }
-
-      CUgraph captured = nullptr;
-      const CUresult begin = cuda.cuStreamBeginCapture(
-        cu_stream,
-        CU_STREAM_CAPTURE_MODE_RELAXED
-      );
-      const bool captured_enqueue = begin == CUDA_SUCCESS && exec_context->enqueueV3(cu_stream);
-      const CUresult end = begin == CUDA_SUCCESS ?
-                             cuda.cuStreamEndCapture(cu_stream, &captured) :
-                             begin;
-      if (captured_enqueue && end == CUDA_SUCCESS && captured && cuda.cuGraphInstantiateWithFlags(&inference_graph_exec, captured, 0) == CUDA_SUCCESS && inference_graph_exec) {
-        inference_graph = captured;
-        BOOST_LOG(info) << "TensorRT CUDA graph captured for " << target_w << 'x' << target_h << '.';
-        return launch_or_fallback();
-      }
-
-      if (captured) {
-        cuda.cuGraphDestroy(captured);
-      }
-      inference_graph_exec = nullptr;
-      inference_graph = nullptr;
-      graph_capture_failed = true;
-      BOOST_LOG(warning) << "TensorRT CUDA graph capture failed (begin=" << begin
-                         << ", enqueue=" << captured_enqueue << ", end=" << end
-                         << "); using ordinary enqueue.";
-      return exec_context->enqueueV3(cu_stream);
-    }
-
-    bool enqueue_ocr_inference(
-      CUdeviceptr input,
-      CUdeviceptr output,
-      cuda_driver_api &cuda
+    // Graph acceleration is optional for each context. A capture or launch failure disables graph
+    // use for that state and immediately retries with ordinary enqueueV3; only failure of that
+    // ordinary enqueue is surfaced to the caller as an execution-context failure.
+    bool enqueue_with_inference_graph(
+      nvinfer1::IExecutionContext *context,
+      tensorrt_cuda_graph_t &state,
+      const cuda_graph_signature_t &signature,
+      cuda_driver_api &cuda,
+      const char *log_name,
+      const bool fixed_shape
     ) {
       const bool graph_api = cuda_graph_enabled && cuda.cuStreamBeginCapture &&
                              cuda.cuStreamEndCapture && cuda.cuGraphInstantiateWithFlags &&
                              cuda.cuGraphLaunch && cuda.cuGraphDestroy &&
                              cuda.cuGraphExecDestroy;
-      if (!graph_api || ocr_graph_capture_failed) {
-        return ocr_exec_context->enqueueV3(cu_stream);
+      if (!graph_api || state.capture_failed) {
+        return context->enqueueV3(cu_stream);
       }
-
-      const auto launch_or_fallback = [&]() {
-        const CUresult launch = cuda.cuGraphLaunch(ocr_inference_graph_exec, cu_stream);
+      auto launch_or_fallback = [&]() {
+        const CUresult launch = cuda.cuGraphLaunch(state.executable, cu_stream);
         if (launch == CUDA_SUCCESS) {
           return true;
         }
-        BOOST_LOG(warning) << "PP-OCRv6 tiny CUDA graph launch failed (" << launch
+        BOOST_LOG(warning) << log_name << " CUDA graph launch failed (" << launch
                            << "); using ordinary enqueue.";
-        destroy_ocr_inference_graph(cuda);
-        ocr_graph_capture_failed = true;
-        return ocr_exec_context->enqueueV3(cu_stream);
+        destroy_inference_graph(cuda, state);
+        state.capture_failed = true;
+        return context->enqueueV3(cu_stream);
       };
 
-      // D3D interop may return a different pointer after any map. A graph embeds TensorRT's
-      // tensor addresses, so replay only while both exact mapped pointers remain unchanged.
-      if (input != ocr_graph_input || output != ocr_graph_output) {
-        destroy_ocr_inference_graph(cuda);
-        ocr_graph_input = input;
-        ocr_graph_output = output;
-      }
-      if (ocr_inference_graph_exec) {
+      select_inference_graph_signature(cuda, state, signature);
+      if (state.executable) {
         return launch_or_fallback();
       }
-      if (!ocr_graph_signature_warmed) {
-        ocr_graph_signature_warmed = true;
-        return ocr_exec_context->enqueueV3(cu_stream);
+      // The first enqueue after each signature change is deliberately ordinary: TensorRT may do
+      // deferred shape-dependent setup that cannot be captured.
+      if (!state.signature_warmed) {
+        state.signature_warmed = true;
+        return context->enqueueV3(cu_stream);
       }
 
       CUgraph captured = nullptr;
@@ -2218,8 +2184,7 @@ namespace models {
         cu_stream,
         CU_STREAM_CAPTURE_MODE_RELAXED
       );
-      const bool captured_enqueue =
-        begin == CUDA_SUCCESS && ocr_exec_context->enqueueV3(cu_stream);
+      const bool captured_enqueue = begin == CUDA_SUCCESS && context->enqueueV3(cu_stream);
       const CUresult end = begin == CUDA_SUCCESS ?
                              cuda.cuStreamEndCapture(cu_stream, &captured) :
                              begin;
@@ -2228,10 +2193,14 @@ namespace models {
         captured_enqueue && end == CUDA_SUCCESS && captured ?
           cuda.cuGraphInstantiateWithFlags(&candidate_exec, captured, 0) :
           end;
-      if (captured_enqueue && end == CUDA_SUCCESS && captured && instantiate == CUDA_SUCCESS && candidate_exec) {
-        ocr_inference_graph_exec = candidate_exec;
-        ocr_inference_graph = captured;
-        BOOST_LOG(info) << "PP-OCRv6 tiny CUDA graph captured for fixed 960x160 inference.";
+      if (captured_enqueue && end == CUDA_SUCCESS && captured &&
+          instantiate == CUDA_SUCCESS && candidate_exec) {
+        state.executable = candidate_exec;
+        state.graph = captured;
+        BOOST_LOG(info) << log_name << " CUDA graph captured for "
+                        << (fixed_shape ? "fixed " : "")
+                        << signature.width << 'x' << signature.height
+                        << (fixed_shape ? " inference." : ".");
         return launch_or_fallback();
       }
 
@@ -2241,14 +2210,40 @@ namespace models {
       if (captured) {
         cuda.cuGraphDestroy(captured);
       }
-      ocr_inference_graph_exec = nullptr;
-      ocr_inference_graph = nullptr;
-      ocr_graph_capture_failed = true;
-      BOOST_LOG(warning) << "PP-OCRv6 tiny CUDA graph capture failed (begin=" << begin
+      state.executable = nullptr;
+      state.graph = nullptr;
+      state.capture_failed = true;
+      BOOST_LOG(warning) << log_name << " CUDA graph capture failed (begin=" << begin
                          << ", enqueue=" << captured_enqueue << ", end=" << end
                          << ", instantiate=" << instantiate
                          << "); using ordinary enqueue.";
-      return ocr_exec_context->enqueueV3(cu_stream);
+      return context->enqueueV3(cu_stream);
+    }
+
+    bool enqueue_inference(CUdeviceptr input, CUdeviceptr output, cuda_driver_api &cuda) {
+      return enqueue_with_inference_graph(
+        exec_context,
+        depth_inference_graph,
+        {input, output, target_w, target_h},
+        cuda,
+        "TensorRT",
+        false
+      );
+    }
+
+    bool enqueue_ocr_inference(
+      CUdeviceptr input,
+      CUdeviceptr output,
+      cuda_driver_api &cuda
+    ) {
+      return enqueue_with_inference_graph(
+        ocr_exec_context,
+        ocr_inference_graph,
+        {input, output, ocr_engine_width, ocr_engine_height},
+        cuda,
+        "PP-OCRv6 tiny",
+        true
+      );
     }
 
     // Caching
@@ -2256,6 +2251,7 @@ namespace models {
     int target_h = 0;
     UINT reduce_groups = 0;  // threadgroups for the min/max reduction (groups * 256 = total threads)
     int cb_color_mode = -1;  // input_color_space baked into constant buffers
+    depth_tensor_content_rect_t cb_tensor_content {};
     // TensorRT retains dynamic shape and tensor-address bindings on an execution context. The
     // interop pointer is allowed to change after any map, so cache each piece independently and
     // rebind only the values that actually changed.
@@ -2346,6 +2342,14 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> ema_motion_mask_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> ema_motion_mask_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask_srv;
+    // Synthetic letterbox support is visible to DAV2 but excluded from every analysis statistic,
+    // history comparison, ownership decision, and positioned renderer sample.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> tensor_exclusion_tex;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_exclusion_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_exclusion_srv;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> tensor_previous_exclusion_tex;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_previous_exclusion_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_previous_exclusion_srv;
 
     // GPU-only raw-coordinate V2 producer. The canonical-coordinate texture is exceptional: its
     // shader, texture, and views are created only for an explicit Dump 3D snapshot. The
@@ -2433,12 +2437,22 @@ namespace models {
       const D3D11_TEXTURE2D_DESC &input_desc
     ) noexcept {
       if (!requested.video_region) {
+        const auto tensor_shape = fit_host_sbs_v2_depth_tensor_shape(
+          input_desc.Width,
+          input_desc.Height
+        );
         requested.source_width = input_desc.Width;
         requested.source_height = input_desc.Height;
         requested.left = 0u;
         requested.top = 0u;
         requested.right = input_desc.Width;
         requested.bottom = input_desc.Height;
+        requested.tensor_content = {
+          0u,
+          0u,
+          static_cast<std::uint32_t>(std::max(tensor_shape.width, 0)),
+          static_cast<std::uint32_t>(std::max(tensor_shape.height, 0)),
+        };
         requested.analysis_generation = 0u;
         return requested;
       }
@@ -2455,6 +2469,24 @@ namespace models {
       execution_context_poisoned =
         execution_context_poisoned || poison_execution_context;
       terminal_failure = true;
+    }
+
+    void mark_ocr_context_failure(
+      const detail::warmed_execution_context_failure_e failure
+    ) noexcept {
+      ocr_context_health.observe(failure);
+    }
+
+    // Depth and optional OCR share one bounded CUDA stream. A query/synchronization/unmap error
+    // can make every context that submitted work to that stream unsafe to reuse, while an OCR
+    // context that did not enqueue remains healthy.
+    void mark_shared_execution_failure(const bool ocr_was_submitted) noexcept {
+      mark_terminal_failure(true);
+      if (ocr_was_submitted) {
+        mark_ocr_context_failure(
+          detail::warmed_execution_context_failure_e::asynchronous_execution_or_query
+        );
+      }
     }
 
     bool create_shader(
@@ -2610,7 +2642,6 @@ namespace models {
             ocr_engine_key, ocr_exec_context,
             false
           );
-          ocr_context_poisoned = true;
           return false;
         }
         std::lock_guard<std::mutex> lock(g_trt_mutex);
@@ -2630,7 +2661,9 @@ namespace models {
       if (!ocr_exec_context->setInputShape("x", fixed_dims)) {
         BOOST_LOG(error)
           << "PP-OCRv6 tiny could not restore its authenticated fixed input shape.";
-        ocr_context_poisoned = true;
+        mark_ocr_context_failure(
+          detail::warmed_execution_context_failure_e::pre_enqueue_interop_or_binding
+        );
         return false;
       }
       ocr_shape_bound = true;
@@ -2640,7 +2673,9 @@ namespace models {
         BOOST_LOG(error)
           << "PP-OCRv6 tiny resolved output requires " << required_output_bytes
           << " bytes; the authenticated fixed buffer provides " << fixed_output_bytes << '.';
-        ocr_context_poisoned = true;
+        mark_ocr_context_failure(
+          detail::warmed_execution_context_failure_e::pre_enqueue_interop_or_binding
+        );
         return false;
       }
       ocr_output_size_validated = true;
@@ -3288,8 +3323,8 @@ namespace models {
           } else {
             cleanup_execution_ok = false;
           }
-          destroy_inference_graph(cuda);
-          destroy_ocr_inference_graph(cuda);
+          destroy_inference_graph(cuda, depth_inference_graph);
+          destroy_inference_graph(cuda, ocr_inference_graph);
           if (!cuda.cuStreamDestroy ||
               cuda.cuStreamDestroy(cu_stream) != CUDA_SUCCESS) {
             cleanup_execution_ok = false;
@@ -3326,7 +3361,9 @@ namespace models {
         // Never give that execution context to a later stream, even if the live polling path did
         // not have another opportunity to mark it before this instance was destroyed.
         execution_context_poisoned = true;
-        ocr_context_poisoned = true;
+        mark_ocr_context_failure(
+          detail::warmed_execution_context_failure_e::unsafe_teardown
+        );
       }
 
       // Return only a successfully warmed context to the reusable pool. Construction can fail
@@ -3351,14 +3388,15 @@ namespace models {
         }
       }
       if (ocr_exec_context) {
-        if (ocr_context_warmed && !ocr_context_poisoned) {
+        if (ocr_context_warmed && !ocr_context_health.poisoned()) {
           g_engines[ocr_engine_key].context_pool.push_back(ocr_exec_context);
           ocr_exec_context = nullptr;
           g_trt_context_available.notify_all();
         } else {
-          if (ocr_context_poisoned) {
+          if (ocr_context_health.poisoned()) {
             BOOST_LOG(warning)
-              << "Quarantining the PP-OCRv6 tiny execution context after a GPU failure.";
+              << "Quarantining the PP-OCRv6 tiny execution context after asynchronous GPU "
+                 "execution or unsafe teardown.";
           }
           quarantine_execution_context_locked(
             ocr_engine_key, ocr_exec_context, ocr_context_warmed
@@ -3509,7 +3547,7 @@ namespace models {
                        ));
       }
       resources_ok = resources_ok &&
-        create_constant_buffer(48u, subtitle_locator_cbuffer);
+        create_constant_buffer(64u, subtitle_locator_cbuffer);
       if (!resources_ok) {
         return false;
       }
@@ -3575,7 +3613,7 @@ namespace models {
                                 ocr_cell_stats_uav
                               ) &&
                               create_constant_buffer(32u, ocr_preprocess_cbuffer) &&
-                              create_constant_buffer(48u, ocr_resolve_cbuffer);
+                              create_constant_buffer(64u, ocr_resolve_cbuffer);
       auto &cuda = cuda_driver_api::get();
       if (ocr_resources_ok && cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) == CUDA_SUCCESS) {
         const auto input_status = cuda.cuGraphicsD3D11RegisterResource(
@@ -3804,7 +3842,7 @@ namespace models {
       context->CSSetShader(depth_coordinate_v2_moments_cs.Get(), nullptr, 0);
       ID3D11ShaderResourceView *moments_srvs[2] = {
         tensor_out_srv.Get(),
-        nullptr,
+        tensor_exclusion_srv.Get(),
       };
       context->CSSetShaderResources(0, 2, moments_srvs);
       context->CSSetUnorderedAccessViews(
@@ -3851,11 +3889,12 @@ namespace models {
       // Raw depth -> immutable pre-limiter candidate. The full-size canonical-coordinate field
       // is deliberately absent from production; an explicit Dump 3D dispatches it separately.
       context->CSSetShader(depth_coordinate_v2_map_cs.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *map_srvs[2] = {
+      ID3D11ShaderResourceView *map_srvs[3] = {
         tensor_out_srv.Get(),
         depth_coordinate_v2_state_srv.Get(),
+        tensor_exclusion_srv.Get(),
       };
-      context->CSSetShaderResources(0, 2, map_srvs);
+      context->CSSetShaderResources(0, 3, map_srvs);
       context->CSSetUnorderedAccessViews(
         0,
         1,
@@ -3863,7 +3902,7 @@ namespace models {
         nullptr
       );
       context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
-      context->CSSetShaderResources(0, 2, null_srvs3);
+      context->CSSetShaderResources(0, 3, null_srvs3);
       context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
 
       // Candidate -> conservative full-resolution RGB ownership refinement. The retained source
@@ -3874,7 +3913,7 @@ namespace models {
         ID3D11ShaderResourceView *ownership_srvs[3] = {
           depth_coordinate_v2_candidate_srv.Get(),
           pending_source_srv.Get(),
-          nullptr,
+          tensor_exclusion_srv.Get(),
         };
         context->CSSetShaderResources(0, 3, ownership_srvs);
         context->CSSetUnorderedAccessViews(
@@ -3952,7 +3991,8 @@ namespace models {
       const auto roi = fit_subtitle_analysis_geometry(
         source_width,
         source_height,
-        {target_w, target_h}
+        {target_w, target_h},
+        pending_input_region.tensor_content
       );
       const auto publish_abstention = [&]() {
         std::array<std::uint32_t, ocr_box_record_word_count> words {};
@@ -3988,7 +4028,7 @@ namespace models {
         source_height
       );
       const std::uint32_t crop_top = source_height - crop_height;
-      const std::array<std::uint32_t, 12> constants {
+      const std::array<std::uint32_t, 16> constants {
         static_cast<std::uint32_t>(pending_frame_id),
         static_cast<std::uint32_t>(pending_frame_id >> 32u),
         static_cast<std::uint32_t>(pending_input_region.analysis_generation),
@@ -4001,6 +4041,10 @@ namespace models {
         crop_height,
         roi.roi_top,
         roi.roi_bottom,
+        roi.tensor_content.left,
+        roi.tensor_content.top,
+        roi.tensor_content.right,
+        roi.tensor_content.bottom,
       };
       context->UpdateSubresource(
         ocr_resolve_cbuffer.Get(), 0, nullptr, constants.data(), 0,
@@ -4058,17 +4102,17 @@ namespace models {
       const auto roi = fit_subtitle_analysis_geometry(
         source_width,
         source_height,
-        {target_w, target_h}
+        {target_w, target_h},
+        pending_input_region.tensor_content
       );
       // OCR8/SLR9 follows the current authenticated analysis field. An unsupported tensor or an
-      // unprojectable bottom crop has no subtitle authority and preserves ordinary BaseField.
-      if (!roi.valid()) {
-        const UINT zero[4] = {};
-        context->ClearUnorderedAccessViewUint(subtitle_locator_state_uav.Get(), zero);
-        return true;
-      }
+      // unprojectable bottom crop has no subtitle authority, but condition_main must still run:
+      // its abstention path copies BaseField through the exact content clamp so synthetic padding
+      // remains a boundary extension after the vertical/horizontal limiters.
+      const bool locator_geometry_valid = roi.valid();
+      const auto tensor_content = pending_input_region.tensor_content;
 
-      const std::array<std::uint32_t, 12> constants {
+      const std::array<std::uint32_t, 16> constants {
         field_width,
         field_height,
         roi.roi_top,
@@ -4081,6 +4125,10 @@ namespace models {
         static_cast<std::uint32_t>(pending_frame_id >> 32u),
         static_cast<std::uint32_t>(pending_input_region.analysis_generation),
         static_cast<std::uint32_t>(pending_input_region.analysis_generation >> 32u),
+        tensor_content.left,
+        tensor_content.top,
+        tensor_content.right,
+        tensor_content.bottom,
       };
       context->UpdateSubresource(
         subtitle_locator_cbuffer.Get(), 0, nullptr, constants.data(), 0,
@@ -4092,28 +4140,33 @@ namespace models {
         depth_coordinate_v2_cbuffer.Get(),
         subtitle_locator_cbuffer.Get(),
       };
-      context->CSSetShader(subtitle_locator_resolve_cs.Get(), nullptr, 0);
-      context->CSSetConstantBuffers(0, 3, constant_buffers);
-      ID3D11ShaderResourceView *resolve_srvs[8] = {
-        nullptr,
-        cut_state_srv.Get(),
-        depth_coordinate_v2_final_srv.Get(),
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        ocr_box_record_srv.Get(),
-      };
-      context->CSSetShaderResources(0, 8, resolve_srvs);
-      context->CSSetUnorderedAccessViews(
-        2, 1, subtitle_locator_state_uav.GetAddressOf(),
-        nullptr
-      );
-      context->Dispatch(1, 1, 1);
       ID3D11ShaderResourceView *null_srvs[8] = {};
       ID3D11UnorderedAccessView *null_uav = nullptr;
-      context->CSSetShaderResources(0, 8, null_srvs);
-      context->CSSetUnorderedAccessViews(2, 1, &null_uav, nullptr);
+      context->CSSetConstantBuffers(0, 3, constant_buffers);
+      if (locator_geometry_valid) {
+        context->CSSetShader(subtitle_locator_resolve_cs.Get(), nullptr, 0);
+        ID3D11ShaderResourceView *resolve_srvs[8] = {
+          nullptr,
+          cut_state_srv.Get(),
+          depth_coordinate_v2_final_srv.Get(),
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
+          ocr_box_record_srv.Get(),
+        };
+        context->CSSetShaderResources(0, 8, resolve_srvs);
+        context->CSSetUnorderedAccessViews(
+          2, 1, subtitle_locator_state_uav.GetAddressOf(),
+          nullptr
+        );
+        context->Dispatch(1, 1, 1);
+        context->CSSetShaderResources(0, 8, null_srvs);
+        context->CSSetUnorderedAccessViews(2, 1, &null_uav, nullptr);
+      } else {
+        const UINT zero[4] = {};
+        context->ClearUnorderedAccessViewUint(subtitle_locator_state_uav.Get(), zero);
+      }
 
       context->CSSetShader(subtitle_condition_cs.Get(), nullptr, 0);
       ID3D11ShaderResourceView *condition_srvs[4] = {
@@ -4208,9 +4261,10 @@ namespace models {
         cbuffer.Get(),
         depth_coordinate_v2_cbuffer.Get(),
       };
-      ID3D11ShaderResourceView *inputs[2] = {
+      ID3D11ShaderResourceView *inputs[3] = {
         tensor_out_srv.Get(),
         depth_coordinate_v2_state_srv.Get(),
+        tensor_exclusion_srv.Get(),
       };
       context->CSSetShader(
         depth_coordinate_v2_coordinate_diagnostic_cs.Get(),
@@ -4218,7 +4272,7 @@ namespace models {
         0
       );
       context->CSSetConstantBuffers(0, 2, constant_buffers);
-      context->CSSetShaderResources(0, 2, inputs);
+      context->CSSetShaderResources(0, 3, inputs);
       context->CSSetUnorderedAccessViews(
         0,
         1,
@@ -4227,10 +4281,10 @@ namespace models {
       );
       context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
 
-      ID3D11ShaderResourceView *null_srvs[2] = {nullptr, nullptr};
+      ID3D11ShaderResourceView *null_srvs[3] = {nullptr, nullptr, nullptr};
       ID3D11UnorderedAccessView *null_uav = nullptr;
       ID3D11Buffer *null_constant = nullptr;
-      context->CSSetShaderResources(0, 2, null_srvs);
+      context->CSSetShaderResources(0, 3, null_srvs);
       context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
       context->CSSetConstantBuffers(1, 1, &null_constant);
       return true;
@@ -4293,7 +4347,8 @@ namespace models {
       r.completed_frame_valid = completed_frame_valid;
       r.completed_frame_id = completed_frame_id;
       r.inference_enqueued = inference_enqueued;
-      r.cuda_graph_active = inference_graph_exec != nullptr && !graph_capture_failed;
+      r.cuda_graph_active = depth_inference_graph.executable != nullptr &&
+                            !depth_inference_graph.capture_failed;
       if (completed_frame_valid) {
         r.input_region = completed_input_region;
         r.color_space = completed_color_space;
@@ -4362,13 +4417,13 @@ namespace models {
       }
       if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
         BOOST_LOG(error) << "cuCtxSetCurrent failed while finishing pending depth.";
-        mark_terminal_failure(true);
+        mark_shared_execution_failure(pending_ocr_submitted);
         return make_result();
       }
       CUresult sync = cuda.cuStreamSynchronize(cu_stream);
       if (sync != CUDA_SUCCESS) {
         BOOST_LOG(error) << "Depth synchronization failed: " << sync;
-        mark_terminal_failure(true);
+        mark_shared_execution_failure(pending_ocr_submitted);
         return make_result();
       }
       if (diagnostics_enabled) {
@@ -4376,13 +4431,13 @@ namespace models {
         perf_drain(perf_ocr);
       }
       (void) color_space;  // the pending frame owns its transfer mode
-      ensure_cbuffers(pending_color_space);
+      ensure_cbuffers(pending_color_space, pending_input_region);
       if (!cbuffer) {
         // A persistent constant-buffer allocation failure must latch terminal like every other
         // resource failure; returning empty without latching leaves the caller retrying at the
         // minimum-FPS cadence forever.
         BOOST_LOG(error) << "Depth constant-buffer creation failed while finishing a pending frame";
-        mark_terminal_failure(true);
+        mark_terminal_failure();
         return make_result();
       }
       auto *d3d_timer = diagnostics_enabled ? begin_d3d_perf(true, false) : nullptr;
@@ -4393,7 +4448,8 @@ namespace models {
       bool model_input_snapshot_valid = false;
       bool coordinate_snapshot_valid = false;
       // Dump 3D binds these immutable tensors to pending_input_region. For a video ROI they are
-      // intentionally crop-local; the package separately records the exact full-source embedding.
+      // bound to the crop-local source and its exact tensor content rectangle; the package
+      // separately records the full-source embedding.
       if (snapshot_debug_inputs) {
         coordinate_snapshot_valid = dispatch_parallax_v2_coordinate_diagnostic();
         raw_snapshot_valid = snapshot_buffer(
@@ -4438,27 +4494,38 @@ namespace models {
       );
     }
 
-    // (Re)build the depth constant buffer. Its contents are session-constant once the model
-    // resolution is fixed, so it is immutable and rebuilt only if capture color encoding changes
-    // during a display/mode transition.
-    void ensure_cbuffers(input_color_space color_space) {
+    // (Re)build the depth constant buffer. The fixed tensor dimensions stay session-constant,
+    // while transfer mode and an ROI's centered tensor-content rectangle follow the exact pending
+    // frame. Domain changes are rare, so an immutable replacement keeps all dispatches simple.
+    void ensure_cbuffers(
+      input_color_space color_space,
+      const depth_input_region_t &input_region
+    ) {
       const int color_mode = (int) color_space;
-      if (cb_color_mode == color_mode && cbuffer) {
+      const auto tensor_content = input_region.tensor_content.valid() ?
+                                    input_region.tensor_content :
+                                    depth_tensor_content_rect_t {
+                                      0u, 0u,
+                                      static_cast<std::uint32_t>(std::max(target_w, 0)),
+                                      static_cast<std::uint32_t>(std::max(target_h, 0)),
+                                    };
+      if (cb_color_mode == color_mode && cb_tensor_content == tensor_content && cbuffer) {
         return;
       }
       cb_color_mode = color_mode;
+      cb_tensor_content = tensor_content;
 
       D3D11_BUFFER_DESC cb_desc = {};
       cb_desc.Usage = D3D11_USAGE_IMMUTABLE;
-      cb_desc.ByteWidth = 48;  // shared depth-pass cbuffer (12 floats/uints; see below)
+      cb_desc.ByteWidth = 64;  // shared depth-pass cbuffer (16 floats/uints; see below)
       cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 
-      // Shared depth-pass constants, 12 scalars = 3 float4 registers. THIS fill is the
+      // Shared depth-pass constants, 16 scalars = 4 float4 registers. THIS fill is the
       // single source of truth for the canonical layout in
       // shaders/directx/include/depth_constants.hlsl -- every cbf[N] below must stay
       // slot-for-slot with the include (which every depth shader #includes). To add a
       // field: append it here AND to the include.
-      uint32_t cb[12] = {};
+      uint32_t cb[16] = {};
       float *cbf = (float *) cb;
       cb[0] = (uint32_t) target_w;
       cb[1] = (uint32_t) target_h;
@@ -4469,6 +4536,10 @@ namespace models {
       cbf[6] = ema_edge_change;
       cbf[7] = ema_edge_gradient;
       cbf[8] = ema_edge_strength;
+      cb[9] = tensor_content.left;
+      cb[10] = tensor_content.top;
+      cb[11] = tensor_content.right;
+      cb[12] = tensor_content.bottom;
       D3D11_SUBRESOURCE_DATA sd = {cb, 0, 0};
       cbuffer.Reset();
       device->CreateBuffer(&cb_desc, &sd, &cbuffer);
@@ -4525,6 +4596,10 @@ namespace models {
       }
       if (ema_motion_mask_uav) {
         context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), zero_uint4);
+      }
+      if (tensor_previous_exclusion_uav) {
+        context->ClearUnorderedAccessViewUint(
+          tensor_previous_exclusion_uav.Get(), zero_uint4);
       }
       if (subtitle_locator_state_uav) {
         context->ClearUnorderedAccessViewUint(
@@ -4590,7 +4665,7 @@ namespace models {
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
         ID3D11ShaderResourceView *reduction_srvs[2] = {
           tensor_out_srv.Get(),
-          nullptr,
+          tensor_exclusion_srv.Get(),
         };
         context->CSSetShaderResources(0, 2, reduction_srvs);
         context->CSSetUnorderedAccessViews(0, 1, minmax_raw_uav.GetAddressOf(), nullptr);
@@ -4643,7 +4718,7 @@ namespace models {
           tensor_out_srv.Get(),
           minmax_ema_srv.Get(),
           depth_previous_srv.Get(),
-          nullptr,
+          tensor_exclusion_srv.Get(),
         };
         context->CSSetShaderResources(0, 4, mask_srvs);
         context->CSSetUnorderedAccessViews(0, 1, ema_motion_mask_uav.GetAddressOf(), nullptr);
@@ -4664,21 +4739,24 @@ namespace models {
       // first valid frame snap and makes an all-invalid frame hold entirely on the GPU.
       context->CSSetShader(buffer_to_tex_cs.Get(), nullptr, 0);
       context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-      ID3D11ShaderResourceView *bt_srvs[4] = {
+      ID3D11ShaderResourceView *bt_srvs[5] = {
         tensor_out_srv.Get(),
         minmax_ema_srv.Get(),
         depth_previous_srv.Get(),
-        ema_motion_mask_srv.Get()
+        ema_motion_mask_srv.Get(),
+        tensor_exclusion_srv.Get(),
       };
-      context->CSSetShaderResources(0, 4, bt_srvs);
+      context->CSSetShaderResources(0, 5, bt_srvs);
       context->CSSetUnorderedAccessViews(0, 1, depth_uav.GetAddressOf(), nullptr);
 
       context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
 
       ID3D11UnorderedAccessView *null_uav2[2] = {nullptr, nullptr};
-      ID3D11ShaderResourceView *null_srvs[4] = {nullptr, nullptr, nullptr, nullptr};
+      ID3D11ShaderResourceView *null_srvs[5] = {
+        nullptr, nullptr, nullptr, nullptr, nullptr
+      };
       context->CSSetUnorderedAccessViews(0, 1, null_uav2, nullptr);
-      context->CSSetShaderResources(0, 4, null_srvs);
+      context->CSSetShaderResources(0, 5, null_srvs);
 
       // 3s. Analyze the freshly normalized private cut field: compact evidence + cut resolve.
       {
@@ -4715,8 +4793,8 @@ namespace models {
           minmax_ema_srv.Get(),
           appearance_ordinal_srv.Get(),
           previous_appearance_ordinal_srv.Get(),
-          nullptr,
-          nullptr,
+          tensor_exclusion_srv.Get(),
+          tensor_previous_exclusion_srv.Get(),
         };
         context->CSSetShaderResources(0, 9, analysis_srvs);
         context->CSSetShader(depth_scene_cut_evidence_cs.Get(), nullptr, 0);
@@ -4765,13 +4843,13 @@ namespace models {
           appearance_ordinal_srv.Get(),
           cut_state_srv.Get(),
           depth_srv.Get(),
-          nullptr,
+          tensor_exclusion_srv.Get(),
         };
         ID3D11UnorderedAccessView *history_uavs[4] = {
           tensor_previous_input_uav.Get(),
           previous_appearance_ordinal_uav.Get(),
           depth_cut_history_uav.Get(),
-          nullptr,
+          tensor_previous_exclusion_uav.Get(),
         };
         context->CSSetShaderResources(0, 6, history_srvs);
         context->CSSetUnorderedAccessViews(0, 4, history_uavs, nullptr);
@@ -4854,7 +4932,7 @@ namespace models {
       }
       auto &cuda = cuda_driver_api::get();
       if (!cuda.is_valid() || !cu_stream || !cuda.cuStreamQuery) {
-        mark_terminal_failure(true);
+        mark_shared_execution_failure(pending_ocr_submitted);
         return false;
       }
       if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
@@ -4862,7 +4940,7 @@ namespace models {
           BOOST_LOG(error) << "cuCtxSetCurrent failed during depth readiness preflight.";
           stream_error_logged = true;
         }
-        mark_terminal_failure(true);
+        mark_shared_execution_failure(pending_ocr_submitted);
         return false;
       }
 
@@ -4882,7 +4960,7 @@ namespace models {
           BOOST_LOG(error) << "cuStreamQuery failed during depth readiness preflight: " << query;
           stream_error_logged = true;
         }
-        mark_terminal_failure(true);
+        mark_shared_execution_failure(pending_ocr_submitted);
         readiness_preflighted = false;
         return false;
       }
@@ -4912,7 +4990,7 @@ namespace models {
       auto &cuda = cuda_driver_api::get();
       if (!cuda.is_valid()) {
         BOOST_LOG(error) << "CUDA Driver API is not available.";
-        mark_terminal_failure(true);
+        mark_shared_execution_failure(pending_ocr_submitted);
         return {};
       }
 
@@ -4921,7 +4999,7 @@ namespace models {
           BOOST_LOG(error) << "cuCtxSetCurrent failed during depth estimation.";
           stream_error_logged = true;
         }
-        mark_terminal_failure(true);
+        mark_shared_execution_failure(pending_ocr_submitted);
         return {};
       }
 
@@ -4954,7 +5032,7 @@ namespace models {
           stream_error_logged = true;
         }
         if (q != CUDA_SUCCESS) {
-          mark_terminal_failure(true);
+          mark_shared_execution_failure(pending_ocr_submitted);
           return make_result();
         }
       }
@@ -4974,8 +5052,8 @@ namespace models {
         return make_result();
       }
       const auto requested_shape = models::fit_depth_tensor_shape(
-        input_desc.Width,
-        input_desc.Height,
+        input_region.source_width,
+        input_region.source_height,
         depth_short_side,
         max_aspect
       );
@@ -5142,7 +5220,13 @@ namespace models {
         resources_ok = resources_ok &&
                        SUCCEEDED(device->CreateTexture2D(&mask_desc, nullptr, &ema_motion_mask_tex)) &&
                        SUCCEEDED(device->CreateUnorderedAccessView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_uav)) &&
-                       SUCCEEDED(device->CreateShaderResourceView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_srv));
+                       SUCCEEDED(device->CreateShaderResourceView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_srv)) &&
+                       SUCCEEDED(device->CreateTexture2D(&mask_desc, nullptr, &tensor_exclusion_tex)) &&
+                       SUCCEEDED(device->CreateUnorderedAccessView(tensor_exclusion_tex.Get(), nullptr, &tensor_exclusion_uav)) &&
+                       SUCCEEDED(device->CreateShaderResourceView(tensor_exclusion_tex.Get(), nullptr, &tensor_exclusion_srv)) &&
+                       SUCCEEDED(device->CreateTexture2D(&mask_desc, nullptr, &tensor_previous_exclusion_tex)) &&
+                       SUCCEEDED(device->CreateUnorderedAccessView(tensor_previous_exclusion_tex.Get(), nullptr, &tensor_previous_exclusion_uav)) &&
+                       SUCCEEDED(device->CreateShaderResourceView(tensor_previous_exclusion_tex.Get(), nullptr, &tensor_previous_exclusion_srv));
 
         if (!resources_ok) {
           BOOST_LOG(error)
@@ -5163,6 +5247,8 @@ namespace models {
         context->ClearUnorderedAccessViewFloat(depth_cut_history_uav.Get(), clear_color);
         const UINT clear_uint[4] = {0u, 0u, 0u, 0u};
         context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), clear_uint);
+        context->ClearUnorderedAccessViewUint(tensor_exclusion_uav.Get(), clear_uint);
+        context->ClearUnorderedAccessViewUint(tensor_previous_exclusion_uav.Get(), clear_uint);
 
         auto res1 = cuda.cuGraphicsD3D11RegisterResource(&cuda_in_res, tensor_in_buf.Get(), 0);
         auto res2 = cuda.cuGraphicsD3D11RegisterResource(&cuda_out_res, tensor_out_buf.Get(), 0);
@@ -5187,7 +5273,10 @@ namespace models {
       // The caller's color_space can already describe a new mode while the pending raw field and
       // retained source still belong to the previous one. Always interpret that completed pair
       // with the mode accepted alongside it.
-      ensure_cbuffers(has_previous_frame ? pending_color_space : color_space);
+      ensure_cbuffers(
+        has_previous_frame ? pending_color_space : color_space,
+        has_previous_frame ? pending_input_region : input_region
+      );
       if (!cbuffer) {
         mark_terminal_failure();
         return {};
@@ -5201,19 +5290,18 @@ namespace models {
       // (fully unmapped from CUDA), so consuming it here never blocks the encode thread. The
       // caller uses completed_frame_id to select the color slot that produced this exact result.
       if (has_previous_frame) {
-        ensure_cbuffers(pending_color_space);
+        ensure_cbuffers(pending_color_space, pending_input_region);
         if (!cbuffer) {
           mark_terminal_failure();
           return {};
         }
         completed_input_domain_reset = prepare_pending_input_domain();
         normalize_depth_output(d3d_timer, completed_input_domain_reset);
-        completed_color_space = pending_color_space;
         // The ownership dispatch has now consumed and unbound the completed frame's source SRV.
         // It is safe to release before preprocessing the newly accepted source frame.
         pending_source_srv.Reset();
         // Restore the newly supplied frame's transfer mode before its full-resolution preprocess.
-        ensure_cbuffers(color_space);
+        ensure_cbuffers(color_space, input_region);
         if (!cbuffer) {
           mark_terminal_failure();
           return {};
@@ -5224,6 +5312,10 @@ namespace models {
         // depth_postprocess_gpu samples.
         mark_d3d_post_end(d3d_timer);
         if (snapshot_raw_model_depth) {
+          // The diagnostic map belongs to the completed raw tensor, including its exact content
+          // rectangle. The current-frame preprocess has not run yet, so the exclusion texture is
+          // still the same completed authority as well.
+          ensure_cbuffers(pending_color_space, pending_input_region);
           coordinate_snapshot_valid =
             dispatch_parallax_v2_coordinate_diagnostic();
           // tensor_in_buf and tensor_out_buf still own the exact completed frame here. Preserve
@@ -5244,11 +5336,17 @@ namespace models {
             model_input_snapshot_retry_frames,
             "model-input"
           );
+          ensure_cbuffers(color_space, input_region);
+          if (!cbuffer) {
+            mark_terminal_failure();
+            return {};
+          }
         }
         // Every debug copy is now ordered after this completion's consumers and before estimator
         // working resources can be reused.
         completed_frame_id = pending_frame_id;
         completed_input_region = pending_input_region;
+        completed_color_space = pending_color_space;
         completed_frame_valid = true;
         has_previous_frame = false;
         if (diagnostics_enabled) {
@@ -5284,17 +5382,18 @@ namespace models {
       context->CSSetShader(rgb_to_nchw_cs.Get(), nullptr, 0);
       context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
       context->CSSetShaderResources(0, 1, &analysis_input_srv);
-      ID3D11UnorderedAccessView *preprocess_uavs[2] = {
+      ID3D11UnorderedAccessView *preprocess_uavs[3] = {
         tensor_in_uav.Get(),
-        appearance_ordinal_uav.Get()
+        appearance_ordinal_uav.Get(),
+        tensor_exclusion_uav.Get(),
       };
-      context->CSSetUnorderedAccessViews(0, 2, preprocess_uavs, nullptr);
+      context->CSSetUnorderedAccessViews(0, 3, preprocess_uavs, nullptr);
 
       context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
 
-      ID3D11UnorderedAccessView *null_uavs[2] = {nullptr, nullptr};
+      ID3D11UnorderedAccessView *null_uavs[3] = {nullptr, nullptr, nullptr};
       ID3D11ShaderResourceView *null_srv = nullptr;
-      context->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
+      context->CSSetUnorderedAccessViews(0, 3, null_uavs, nullptr);
       context->CSSetShaderResources(0, 1, &null_srv);
 
       // The detector sees only the bottom 6:1 source crop. Resize and ImageNet/BGR normalization
@@ -5302,7 +5401,8 @@ namespace models {
       const auto current_ocr_roi = fit_subtitle_analysis_geometry(
         input_desc.Width,
         input_desc.Height,
-        {target_w, target_h}
+        {target_w, target_h},
+        input_region.tensor_content
       );
       bool ocr_frame_eligible =
         ocr_available && ocr_preprocess_cs && ocr_preprocess_cbuffer &&
@@ -5353,7 +5453,8 @@ namespace models {
       // consumers (DWM / Edge / the Widgets panel), which starves them and can trigger a TDR.
 
       // 2. CUDA Execution (for CURRENT frame). Depth remains mandatory; optional OCR maps
-      // separately so an interop failure in the detector cannot suppress the depth completion.
+      // separately so a pre-enqueue detector map/binding failure cannot suppress depth. A failed
+      // shared-stream unmap after submission remains terminal because completion is then unknown.
       CUgraphicsResource depth_resources[2] = {cuda_in_res, cuda_out_res};
       auto map_res = cuda.cuGraphicsMapResources(2, depth_resources, cu_stream);
       if (map_res != 0) {
@@ -5381,6 +5482,9 @@ namespace models {
         } else {
           ocr_available = false;
           ocr_frame_eligible = false;
+          mark_ocr_context_failure(
+            detail::warmed_execution_context_failure_e::pre_enqueue_interop_or_binding
+          );
           if (!ocr_error_logged) {
             BOOST_LOG(warning)
               << "PP-OCRv6 tiny interop map failed (" << ocr_map
@@ -5485,12 +5589,14 @@ namespace models {
             << " bytes.";
           ocr_bindings_ok = false;
         }
-        if (ocr_bindings_ok && (d_ocr_in != ocr_graph_input || d_ocr_out != ocr_graph_output)) {
+        if (ocr_bindings_ok) {
           // TensorRT graph nodes retain the execution context's bound addresses. Tear down a
           // graph for the previous D3D mapping before mutating those bindings.
-          destroy_ocr_inference_graph(cuda);
-          ocr_graph_input = d_ocr_in;
-          ocr_graph_output = d_ocr_out;
+          select_inference_graph_signature(
+            cuda,
+            ocr_inference_graph,
+            {d_ocr_in, d_ocr_out, ocr_engine_width, ocr_engine_height}
+          );
         }
         if (ocr_bindings_ok && !ocr_shape_bound) {
           ocr_bindings_ok = ocr_exec_context->setInputShape(
@@ -5530,7 +5636,9 @@ namespace models {
         }
         if (ocr_mapped && !ocr_bindings_ok) {
           ocr_available = false;
-          ocr_context_poisoned = true;
+          mark_ocr_context_failure(
+            detail::warmed_execution_context_failure_e::pre_enqueue_interop_or_binding
+          );
           if (!ocr_error_logged) {
             BOOST_LOG(warning)
               << "PP-OCRv6 tiny fixed-shape tensor binding failed; depth remains active and "
@@ -5579,7 +5687,9 @@ namespace models {
             perf_end(perf_ocr, ocr_perf_slot, cu_stream);
             if (!ocr_enqueued) {
               ocr_available = false;
-              ocr_context_poisoned = true;
+              mark_ocr_context_failure(
+                detail::warmed_execution_context_failure_e::asynchronous_execution_or_query
+              );
               if (!ocr_error_logged) {
                 BOOST_LOG(warning)
                   << "PP-OCRv6 tiny enqueue failed; depth remains active and subtitle "
@@ -5598,15 +5708,14 @@ namespace models {
       auto unmap_res = cuda.cuGraphicsUnmapResources(2, depth_resources, cu_stream);
       if (unmap_res != CUDA_SUCCESS) {
         BOOST_LOG(error) << "cuGraphicsUnmapResources failed: " << unmap_res;
-        mark_terminal_failure(true);
+        mark_shared_execution_failure(ocr_enqueued);
         enqueued = false;
       }
       if (ocr_unmap_res != CUDA_SUCCESS) {
         BOOST_LOG(error)
           << "PP-OCRv6 tiny interop unmap failed on the shared CUDA stream: "
           << ocr_unmap_res;
-        ocr_context_poisoned = true;
-        mark_terminal_failure(true);
+        mark_shared_execution_failure(ocr_enqueued);
         enqueued = false;
         ocr_enqueued = false;
       }

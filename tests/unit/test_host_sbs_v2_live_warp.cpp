@@ -61,9 +61,13 @@ namespace {
     float video_roi_top = 0.0f;
     float video_roi_right = 1.0f;
     float video_roi_bottom = 1.0f;
+    std::uint32_t tensor_content_left = 0u;
+    std::uint32_t tensor_content_top = 0u;
+    std::uint32_t tensor_content_right = 0u;
+    std::uint32_t tensor_content_bottom = 0u;
   };
 
-  static_assert(sizeof(host_sbs_v2_geometry_t) == 32u);
+  static_assert(sizeof(host_sbs_v2_geometry_t) == 48u);
 
   class live_v2_warp_fixture_t {
   public:
@@ -289,7 +293,7 @@ namespace {
         return false;
       }
 
-      // Exact 32-byte mirror of HostSbsV2Geometry at b2. Creating one immutable buffer for each
+      // Exact 48-byte mirror of HostSbsV2Geometry at b2. Creating one immutable buffer for each
       // draw also proves that ROI geometry belongs to that exact matched render rather than to
       // mutable fixture state retained from an earlier frame.
       ComPtr<ID3D11Buffer> geometry_buffer;
@@ -718,12 +722,22 @@ namespace {
       (projected_u - geometry.video_roi_left) / roi_width;
     const float local_v =
       (projected_v - geometry.video_roi_top) / roi_height;
+    const float tensor_u =
+      (static_cast<float>(geometry.tensor_content_left) +
+       local_u * static_cast<float>(
+         geometry.tensor_content_right - geometry.tensor_content_left)) /
+      static_cast<float>(depth_width);
+    const float tensor_v =
+      (static_cast<float>(geometry.tensor_content_top) +
+       local_v * static_cast<float>(
+         geometry.tensor_content_bottom - geometry.tensor_content_top)) /
+      static_cast<float>(depth_height);
     const float local_parallax = sample_linear_clamp(
       roi_local_parallax,
       depth_width,
       depth_height,
-      local_u,
-      local_v
+      tensor_u,
+      tensor_v
     );
     const float full_source_parallax = roi_width * local_parallax;
     const float source_height_in_source_u =
@@ -733,7 +747,10 @@ namespace {
       (roi_height * static_cast<float>(source_height));
     const float vertical_slope =
       models::depth_coordinate_v2::max_vertical_shear * roi_pixel_aspect *
-      (static_cast<float>(depth_height) / static_cast<float>(depth_width));
+      (static_cast<float>(
+         geometry.tensor_content_bottom - geometry.tensor_content_top) /
+       static_cast<float>(
+         geometry.tensor_content_right - geometry.tensor_content_left));
     const float collar_budget =
       models::depth_coordinate_v2::max_horizontal_slope *
         std::abs(source_u - projected_u) +
@@ -1024,6 +1041,8 @@ TEST(HostSbsV2LiveWarpGpuTest, RoiLocalFieldUsesMinimumSlopeConstrainedOutsideCo
     .video_roi_top = 0.25f,
     .video_roi_right = 0.75f,
     .video_roi_bottom = 0.75f,
+    .tensor_content_right = depth_width,
+    .tensor_content_bottom = depth_height,
   };
   const std::vector<float> positive_field(
     static_cast<std::size_t>(depth_width) * depth_height,
@@ -1224,6 +1243,107 @@ TEST(HostSbsV2LiveWarpGpuTest, RoiLocalFieldUsesMinimumSlopeConstrainedOutsideCo
     3.0e-6f,
     "right eye beyond collar"
   );
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, RoiMapsOnlyTheIntegerTensorContentRectangle) {
+  constexpr UINT source_width = 128u;
+  constexpr UINT source_height = 64u;
+  constexpr UINT depth_width = 64u;
+  constexpr UINT depth_height = 32u;
+  constexpr host_sbs_v2_geometry_t geometry {
+    .video_roi_active = 1.0f,
+    .video_roi_left = 0.25f,
+    .video_roi_top = 0.0f,
+    .video_roi_right = 0.75f,
+    .video_roi_bottom = 1.0f,
+    .tensor_content_left = 16u,
+    .tensor_content_top = 0u,
+    .tensor_content_right = 48u,
+    .tensor_content_bottom = 32u,
+  };
+
+  // The synthetic pillarbox is the exact nearest-boundary extension produced by the real map
+  // pipeline. A varying interior makes sampling the whole tensor observably wrong even though no
+  // invalid padding value is present.
+  std::vector<float> field(static_cast<std::size_t>(depth_width) * depth_height);
+  for (UINT y = 0u; y < depth_height; ++y) {
+    for (UINT x = 0u; x < depth_width; ++x) {
+      const UINT content_x = std::clamp(x, 16u, 47u);
+      field[static_cast<std::size_t>(y) * depth_width + x] =
+        0.004f + 0.006f * static_cast<float>(content_x - 16u) / 31.0f;
+    }
+  }
+  std::vector<rgba32f_t> source(
+    static_cast<std::size_t>(source_width) * source_height
+  );
+  for (UINT y = 0u; y < source_height; ++y) {
+    for (UINT x = 0u; x < source_width; ++x) {
+      const float u = (static_cast<float>(x) + 0.5f) / source_width;
+      const float v = (static_cast<float>(y) + 0.5f) / source_height;
+      source[static_cast<std::size_t>(y) * source_width + x] =
+        {u, v, 0.25f + 0.5f * u, 1.0f};
+    }
+  }
+
+  std::string error;
+  live_v2_warp_fixture_t warp;
+  ASSERT_TRUE(warp.initialize(error)) << error;
+  std::vector<std::byte> packed_bytes;
+  ASSERT_TRUE(warp.render(
+    DXGI_FORMAT_R32G32B32A32_FLOAT,
+    sizeof(rgba32f_t),
+    source_width,
+    source_height,
+    source.data(),
+    field,
+    std::vector<float>(field.size(), 0.0f),
+    make_live_state(true, true),
+    {0.91f, 0.13f, 0.77f, 0.42f},
+    packed_bytes,
+    error,
+    depth_width,
+    depth_height,
+    geometry
+  )) << error;
+  const auto packed = unpack_rgba32f(packed_bytes);
+  ASSERT_EQ(packed.size(), source.size() * 2u);
+  constexpr UINT y = source_height / 2u;
+  const float destination_v = (static_cast<float>(y) + 0.5f) / source_height;
+  for (UINT eye = 0u; eye < 2u; ++eye) {
+    const float eye_sign = eye == 0u ? -1.0f : 1.0f;
+    for (UINT x = 8u; x + 8u < source_width; x += 7u) {
+      const float destination_u = (static_cast<float>(x) + 0.5f) / source_width;
+      float source_u = destination_u;
+      for (int iteration = 0; iteration < 11; ++iteration) {
+        source_u = destination_u + eye_sign * sample_effective_parallax(
+          field,
+          depth_width,
+          depth_height,
+          source_width,
+          source_height,
+          source_u,
+          destination_v,
+          geometry
+        );
+      }
+      const auto expected = sample_linear_clamp(
+        source,
+        source_width,
+        source_height,
+        std::clamp(source_u, 0.0f, 1.0f),
+        destination_v
+      );
+      const auto packed_index = static_cast<std::size_t>(y) * source_width * 2u +
+                                eye * source_width + x;
+      expect_rgba_near(
+        packed[packed_index],
+        expected,
+        4.0e-5f,
+        "letterbox content mapping eye=" + std::to_string(eye) +
+          ", x=" + std::to_string(x)
+      );
+    }
+  }
 }
 
 TEST(HostSbsV2LiveWarpGpuTest, CandidateFieldCannotBlurOrAlterLiveColor) {

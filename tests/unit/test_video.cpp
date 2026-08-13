@@ -715,7 +715,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 46u);
+  EXPECT_EQ(v2::contract_schema, 48u);
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
   EXPECT_EQ(v2::shadow_state_dump_schema, 16u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
@@ -852,7 +852,16 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   );
   EXPECT_EQ(small_calibration.depth_model, "depth_anything_v2_fp16");
   EXPECT_FLOAT_EQ(small_calibration.raw_coordinate_scale, 2.25f);
-  EXPECT_EQ(small_calibration.preprocess.profile, "apollo-dav2-area-hdr-srgb-imagenet-v1");
+  EXPECT_EQ(
+    small_calibration.preprocess.profile,
+    "apollo-dav2-centered-integer-contain-edge-pad-area-hdr-srgb-imagenet-v2"
+  );
+  EXPECT_EQ(
+    small_calibration.preprocess.stage,
+    "exact model input after centered integer contain-fit area resize, HDR tone mapping, sRGB "
+    "conversion, ImageNet normalization, and edge-replicated tensor padding excluded from the "
+    "analysis domain"
+  );
   EXPECT_EQ(
     small_calibration.preprocess.source_closure_schema,
     models::host_sbs_shader_cache::source_closure_schema
@@ -1031,6 +1040,27 @@ TEST(ParallaxV2RendererTest, AuthenticationLatchesV2OrLiveFlat) {
   );
 }
 
+TEST(TensorRtContextLifecycleTest, WarmedContextQuarantineStartsOnlyAfterAsyncExecution) {
+  using failure_e = models::detail::warmed_execution_context_failure_e;
+  using health_t = models::detail::warmed_execution_context_health_t;
+
+  std::size_t quarantined_contexts = 0u;
+  for (std::size_t session = 0u; session < 4u; ++session) {
+    health_t session_health;
+    session_health.observe(failure_e::pre_enqueue_interop_or_binding);
+    quarantined_contexts += session_health.poisoned() ? 1u : 0u;
+  }
+  EXPECT_EQ(quarantined_contexts, 0u);
+
+  health_t execution_health;
+  execution_health.observe(failure_e::asynchronous_execution_or_query);
+  EXPECT_TRUE(execution_health.poisoned());
+
+  health_t teardown_health;
+  teardown_health.observe(failure_e::unsafe_teardown);
+  EXPECT_TRUE(teardown_health.poisoned());
+}
+
 TEST(DepthInputRegionTest, RequiresCanonicalFullSourceOrAuthenticatedRoiAuthority) {
   const models::depth_input_region_t full_source {
     .source_width = 1920u,
@@ -1039,6 +1069,7 @@ TEST(DepthInputRegionTest, RequiresCanonicalFullSourceOrAuthenticatedRoiAuthorit
     .top = 0u,
     .right = 1920u,
     .bottom = 1080u,
+    .tensor_content = {0u, 0u, 770u, 434u},
   };
   EXPECT_TRUE(full_source.valid());
 
@@ -1057,6 +1088,7 @@ TEST(DepthInputRegionTest, RequiresCanonicalFullSourceOrAuthenticatedRoiAuthorit
     .top = 510u,
     .right = 2471u,
     .bottom = 1439u,
+    .tensor_content = {0u, 0u, 770u, 433u},
     .analysis_generation = 7u,
     .video_region = true,
     .authority = models::depth_analysis_authority_e::chromium_video,
@@ -1097,6 +1129,7 @@ TEST(DepthInputRegionTest, AnalysisDomainIgnoresOnlyPurePositionMoves) {
     .top = 510u,
     .right = 2471u,
     .bottom = 1439u,
+    .tensor_content = {0u, 0u, 770u, 433u},
     .analysis_generation = 7u,
     .video_region = true,
     .authority = models::depth_analysis_authority_e::chromium_video,
@@ -1110,6 +1143,10 @@ TEST(DepthInputRegionTest, AnalysisDomainIgnoresOnlyPurePositionMoves) {
   auto resized = original;
   resized.right += 1u;
   EXPECT_FALSE(original.same_analysis_domain(resized));
+
+  auto new_content_mapping = original;
+  --new_content_mapping.tensor_content.bottom;
+  EXPECT_FALSE(original.same_analysis_domain(new_content_mapping));
 
   auto new_video = original;
   new_video.analysis_generation += 1u;
@@ -1170,6 +1207,7 @@ TEST(DepthInputRegionTest, DomainTransitionDecisionResetsExactlyOncePerStableCha
     .top = 0u,
     .right = 3840u,
     .bottom = 2160u,
+    .tensor_content = {0u, 0u, 770u, 434u},
   };
   EXPECT_TRUE(domain_tracker.update(full_source, models::input_color_space::srgb));
   EXPECT_FALSE(domain_tracker.update(full_source, models::input_color_space::srgb));
@@ -1196,6 +1234,7 @@ TEST(DepthInputRegionTest, DomainTransitionDecisionResetsExactlyOncePerStableCha
     .top = 326u,
     .right = 3254u,
     .bottom = 1830u,
+    .tensor_content = {0u, 0u, 770u, 433u},
     .analysis_generation = first_generation,
     .video_region = true,
     .authority = models::depth_analysis_authority_e::chromium_video,
@@ -1318,6 +1357,78 @@ TEST(DepthInputRegionTest, DumpSnapshotsPreserveFullOrRoiAnalysisDomain) {
     std::string::npos
   );
   EXPECT_NE(
+    display_source.find("status_e::interactive_move_size"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display_source.find("selected full-source 3D for an interactive foreground-window"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display_source.find("browser->received_at >= browser_roi_not_before"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display_source.find("depth_completion_poll_pending || depth_authority_reprocess_pending"),
+    std::string::npos
+  );
+  const auto busy_authority_observation = display_source.find(
+    "pre_copy_authority = observe_live_window_authority("
+  );
+  const auto retained_source_completion = display_source.find(
+    "if (retained_source_pending_slot)"
+  );
+  ASSERT_NE(busy_authority_observation, std::string::npos);
+  ASSERT_NE(retained_source_completion, std::string::npos);
+  EXPECT_LT(busy_authority_observation, retained_source_completion);
+  const auto programmatic_gap = display_source.find(
+    "const bool programmatic_causal_gap"
+  );
+  const auto programmatic_reprocess_arm = display_source.find(
+    "depth_authority_reprocess_pending = true;",
+    programmatic_gap
+  );
+  const auto programmatic_live_publish = display_source.find(
+    "live_foreground_region = next_region;",
+    programmatic_gap
+  );
+  ASSERT_NE(programmatic_gap, std::string::npos);
+  ASSERT_NE(programmatic_reprocess_arm, std::string::npos);
+  ASSERT_NE(programmatic_live_publish, std::string::npos);
+  EXPECT_LT(programmatic_reprocess_arm, programmatic_live_publish);
+  EXPECT_NE(display_source.find("const bool force_full_source"), std::string::npos);
+  EXPECT_NE(display_source.find("} else if (!force_full_source) {"), std::string::npos);
+  EXPECT_NE(
+    display_source.find(
+      "preexisting_force_full_source || foreground_causal_wait"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display_source.find(
+      "pre_copy_interactive_move_size ?\n"
+      "                                      pre_copy_authority"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display_source.find("requires_full_source_causal_fallback("),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display_source.find("causal-wait-full-source"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display_source.find(
+      "If the move starts after the first observation, this recheck still"
+    ),
+    std::string::npos
+  );
+  EXPECT_EQ(display_source.find("clear_cached_matched_output()"), std::string::npos);
+  EXPECT_EQ(display_source.find("interactive_move_size_active"), std::string::npos);
+  EXPECT_EQ(display_source.find("interactive_move_size_epoch"), std::string::npos);
+  EXPECT_NE(
     display_source.find("output_desc.DesktopCoordinates.left"),
     std::string::npos
   );
@@ -1336,6 +1447,47 @@ TEST(DepthInputRegionTest, DumpSnapshotsPreserveFullOrRoiAnalysisDomain) {
   ASSERT_NE(browser_capture, std::string::npos);
   ASSERT_NE(foreground_capture, std::string::npos);
   EXPECT_LT(browser_capture, foreground_capture);
+  const auto browser_capture_definition = display_source.find(
+    "capture_browser_window_region(\n"
+  );
+  const auto foreground_capture_definition = display_source.find(
+    "capture_foreground_window_region(\n",
+    browser_capture_definition
+  );
+  ASSERT_NE(browser_capture_definition, std::string::npos);
+  ASSERT_NE(foreground_capture_definition, std::string::npos);
+  const auto browser_capture_body = display_source.substr(
+    browser_capture_definition,
+    foreground_capture_definition - browser_capture_definition
+  );
+  EXPECT_NE(
+    browser_capture_body.find("const video_dom::snapshot_ptr &observed"),
+    std::string::npos
+  );
+  EXPECT_EQ(browser_capture_body.find("->latest()"), std::string::npos);
+  EXPECT_NE(
+    display_source.find("copied_authority.browser_authority_epoch"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display_source.find(
+      ".geometry_valid_since = browser->geometry_valid_since"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display_source.find(
+      "browser->geometry_valid_since ==\n"
+      "                 slot.live_browser_geometry_valid_since"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display_source.find(
+      "copied_authority.browser_authority->geometry_valid_since"
+    ),
+    std::string::npos
+  );
   EXPECT_NE(
     display_source.find("dump_frame.depth_input_region = est.input_region"),
     std::string::npos
@@ -1437,6 +1589,7 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
     .top = 0u,
     .right = 1920u,
     .bottom = 1080u,
+    .tensor_content = {0u, 0u, 770u, 434u},
   };
   EXPECT_FALSE(result.shadow_coordinate);
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(result));
@@ -1499,6 +1652,11 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
       .top = 0u,
       .right = source_width,
       .bottom = source_height,
+      .tensor_content = {
+        0u, 0u,
+        static_cast<std::uint32_t>(width),
+        static_cast<std::uint32_t>(height),
+      },
     };
     EXPECT_TRUE(models::parallax_v2_result_is_authenticated(supported_shape))
       << width << 'x' << height;
@@ -1512,6 +1670,7 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
     .top = 510u,
     .right = 2471u,
     .bottom = 1439u,
+    .tensor_content = {0u, 0u, 770u, 433u},
     .analysis_generation = 7u,
     .video_region = true,
     .authority = models::depth_analysis_authority_e::chromium_video,
@@ -1577,7 +1736,7 @@ TEST(ParallaxV2ContractTest, DumpDecodesExactCountersInsteadOfSubnormalFloats) {
   EXPECT_NE(source.find("source_closure_sha256"), std::string::npos);
   const auto manifest = source.find("nlohmann::json manifest {");
   ASSERT_NE(manifest, std::string::npos);
-  EXPECT_NE(source.find("{\"schema\", 27}", manifest), std::string::npos);
+  EXPECT_NE(source.find("{\"schema\", 29}", manifest), std::string::npos);
   EXPECT_NE(source.find("depth_input_region.json"), std::string::npos);
   EXPECT_NE(source.find("depth_input_source.png"), std::string::npos);
   EXPECT_NE(source.find("\"shadow_final_parallax + depth_input_region embedding\""), std::string::npos);
@@ -1602,7 +1761,7 @@ TEST(ParallaxV2ContractTest, DumpDecodesExactCountersInsteadOfSubnormalFloats) {
   EXPECT_EQ(source.find("{\"offline_analysis_configured\", {"), std::string::npos);
 }
 
-TEST(ParallaxV2ContractTest, DebugDumpPublishesCpuSnapshotOffTheRenderThread) {
+TEST(ParallaxV2ContractTest, DebugDumpUsesNonblockingGpuStagingBeforeCpuPublication) {
   const auto source = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
   );
@@ -1615,12 +1774,16 @@ TEST(ParallaxV2ContractTest, DebugDumpPublishesCpuSnapshotOffTheRenderThread) {
   const auto publisher = source.rfind(
     "dump_publish_result publish_captured_dump(const captured_dump_job &job)"
   );
+  const auto poll = source.find("void dumper::poll_pending_readback(");
   const auto capture = source.find("bool dumper::maybe_dump(");
   ASSERT_NE(publisher, std::string::npos);
+  ASSERT_NE(poll, std::string::npos);
   ASSERT_NE(capture, std::string::npos);
-  ASSERT_LT(publisher, capture);
+  ASSERT_LT(publisher, poll);
+  ASSERT_LT(poll, capture);
 
-  const auto publisher_body = source.substr(publisher, capture - publisher);
+  const auto publisher_body = source.substr(publisher, poll - publisher);
+  const auto poll_body = source.substr(poll, capture - poll);
   const auto capture_body = source.substr(capture);
   EXPECT_NE(publisher_body.find("write_color_preview("), std::string::npos);
   EXPECT_NE(publisher_body.find("models::file_sha256_hex("), std::string::npos);
@@ -1631,17 +1794,23 @@ TEST(ParallaxV2ContractTest, DebugDumpPublishesCpuSnapshotOffTheRenderThread) {
   EXPECT_EQ(publisher_body.find("read_texture(device"), std::string::npos);
   EXPECT_EQ(publisher_body.find("ID3D11DeviceContext"), std::string::npos);
 
-  const auto enqueue = capture_body.find("worker_state->enqueue(");
+  const auto enqueue = poll_body.find("worker_state->enqueue(");
   ASSERT_NE(enqueue, std::string::npos);
-  const auto render_thread_prefix = capture_body.substr(0, enqueue);
-  EXPECT_NE(render_thread_prefix.find("read_texture(device"), std::string::npos);
-  EXPECT_EQ(render_thread_prefix.find("write_png("), std::string::npos);
+  EXPECT_NE(source.find("D3D11_ASYNC_GETDATA_DONOTFLUSH"), std::string::npos);
+  EXPECT_NE(source.find("D3D11_MAP_FLAG_DO_NOT_WAIT"), std::string::npos);
+  EXPECT_NE(capture_body.find("stage_texture("), std::string::npos);
+  EXPECT_NE(capture_body.find("stage_buffer("), std::string::npos);
+  EXPECT_NE(capture_body.find("ctx->End(pending->completion.Get())"), std::string::npos);
+  EXPECT_EQ(capture_body.find("ctx->Map("), std::string::npos);
+  EXPECT_EQ(capture_body.find("GetData("), std::string::npos);
+  EXPECT_EQ(poll_body.find("ctx->CopyResource("), std::string::npos);
+  EXPECT_EQ(poll_body.find("write_png("), std::string::npos);
   EXPECT_EQ(
-    render_thread_prefix.find("models::file_sha256_hex("),
+    poll_body.find("models::file_sha256_hex("),
     std::string::npos
   );
   EXPECT_EQ(
-    render_thread_prefix.find("std::filesystem::create_directories("),
+    poll_body.find("std::filesystem::create_directories("),
     std::string::npos
   );
 
@@ -1661,10 +1830,134 @@ TEST(ParallaxV2ContractTest, DebugDumpPublishesCpuSnapshotOffTheRenderThread) {
     std::string::npos
   );
   EXPECT_NE(
-    capture_body.find("worker_state->record_publication_failure("),
+    poll_body.find("worker_state->record_publication_failure("),
     std::string::npos
   );
   EXPECT_NE(source.find("async_->cancel_retries(button_request_);"), std::string::npos);
+
+  const auto header = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.h"
+  );
+  ASSERT_FALSE(header.empty());
+  EXPECT_NE(
+    header.find("std::unique_ptr<detail::pending_gpu_capture> pending_gpu_capture_"),
+    std::string::npos
+  );
+  EXPECT_NE(capture_body.find("pending_gpu_capture_ = std::move(pending)"), std::string::npos);
+  EXPECT_NE(
+    source.find("if (pending_gpu_capture_ || (async_ && async_->busy()))"),
+    std::string::npos
+  );
+}
+
+TEST(ParallaxV2ContractTest, DebugDumpStagingPreservesEventAndRequestOrdering) {
+  const auto source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
+  );
+  const auto display = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp"
+  );
+  ASSERT_FALSE(source.empty());
+  ASSERT_FALSE(display.empty());
+
+  const auto prepare = source.find("bool dumper::prepare_requested_v2_frame(");
+  const auto poll = source.find("void dumper::poll_pending_readback(");
+  const auto submit = source.find("bool dumper::maybe_dump(");
+  ASSERT_NE(prepare, std::string::npos);
+  ASSERT_NE(poll, std::string::npos);
+  ASSERT_NE(submit, std::string::npos);
+  ASSERT_LT(prepare, poll);
+  ASSERT_LT(poll, submit);
+
+  const auto prepare_body = source.substr(prepare, poll - prepare);
+  const auto poll_body = source.substr(poll, submit - poll);
+  const auto submit_body = source.substr(submit);
+  EXPECT_EQ(prepare_body.find("Map("), std::string::npos);
+  EXPECT_EQ(prepare_body.find("GetData("), std::string::npos);
+  EXPECT_EQ(submit_body.find("Map("), std::string::npos);
+  EXPECT_EQ(submit_body.find("GetData("), std::string::npos);
+
+  const auto get_data = poll_body.find("ctx->GetData(");
+  const auto gpu_ready = poll_body.find("pending.gpu_ready = true");
+  const auto collect = poll_body.find("collection_budget budget(poll_started)");
+  ASSERT_NE(get_data, std::string::npos);
+  ASSERT_NE(gpu_ready, std::string::npos);
+  ASSERT_NE(collect, std::string::npos);
+  EXPECT_LT(get_data, gpu_ready);
+  EXPECT_LT(gpu_ready, collect);
+  EXPECT_LT(get_data, collect);
+  EXPECT_NE(
+    poll_body.find("D3D11_ASYNC_GETDATA_DONOTFLUSH", get_data),
+    std::string::npos
+  );
+  EXPECT_NE(
+    poll_body.find("while (pending_gpu_capture_)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    poll_body.find("if (budget.exhausted())"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    poll_body.find("WAS_STILL_DRAWING and a deliberately partial chunk"),
+    std::string::npos
+  );
+
+  const auto first_stage = submit_body.find("stage_texture(");
+  const auto event_end = submit_body.find("ctx->End(pending->completion.Get())");
+  const auto publish_pending = submit_body.find(
+    "pending_gpu_capture_ = std::move(pending)"
+  );
+  ASSERT_NE(first_stage, std::string::npos);
+  ASSERT_NE(event_end, std::string::npos);
+  ASSERT_NE(publish_pending, std::string::npos);
+  EXPECT_LT(first_stage, event_end);
+  EXPECT_LT(event_end, publish_pending);
+
+  const auto readback_poll = display.find("sbs_dumper.poll_pending_readback(");
+  const auto request_poll = display.find("sbs_dumper.snapshot_requested()");
+  ASSERT_NE(readback_poll, std::string::npos);
+  ASSERT_NE(request_poll, std::string::npos);
+  EXPECT_LT(readback_poll, request_poll);
+  EXPECT_NE(display.find("sbs_dumper.needs_conversion_poll()"), std::string::npos);
+  EXPECT_NE(source.find("next_file_trigger_poll_"), std::string::npos);
+  EXPECT_NE(source.find("std::filesystem::exists(dir_ / \"dump.trigger\""), std::string::npos);
+  EXPECT_EQ(display.find("preflight_requested_v2_frame("), std::string::npos);
+}
+
+TEST(ParallaxV2ContractTest, DebugDumpAcceptsAdvertisedWindowsCaptureColorFormats) {
+  const auto dump = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
+  );
+  const auto display = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp"
+  );
+  ASSERT_FALSE(dump.empty());
+  ASSERT_FALSE(display.empty());
+
+  for (const auto *format : {
+         "DXGI_FORMAT_B8G8R8A8_UNORM",
+         "DXGI_FORMAT_B8G8R8X8_UNORM",
+         "DXGI_FORMAT_R8G8B8A8_UNORM",
+         "DXGI_FORMAT_R16G16B16A16_FLOAT",
+       }) {
+    EXPECT_NE(display.find(format), std::string::npos) << format;
+    EXPECT_NE(dump.find(format), std::string::npos) << format;
+  }
+  EXPECT_NE(
+    dump.find("case DXGI_FORMAT_B8G8R8X8_UNORM:\n        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    dump.find(
+      "case DXGI_FORMAT_B8G8R8X8_UNORM:\n          return \"DXGI_FORMAT_B8G8R8X8_UNORM\";"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    dump.find("case DXGI_FORMAT_B8G8R8X8_UNORM:\n            case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:"),
+    std::string::npos
+  );
 }
 
 TEST(ParallaxV2ContractTest, CalibrationRevisionRejectsReservedSentinel) {
@@ -2155,7 +2448,9 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
                           const std::vector<rgba_pixel_t> &source_pixels,
                           std::vector<float> &model_output,
                           std::vector<float> &appearance_ordinal,
-                          std::uint32_t color_mode = 0u
+                          std::uint32_t color_mode = 0u,
+                          models::depth_tensor_content_rect_t tensor_content = {},
+                          std::vector<std::uint32_t> *tensor_exclusion = nullptr
                         ) {
     if (source_pixels.size() != static_cast<std::size_t>(source_width) * source_height) {
       return false;
@@ -2208,10 +2503,35 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
       return false;
     }
 
-    std::array<std::uint32_t, 12> constants {};
+    D3D11_TEXTURE2D_DESC exclusion_desc {};
+    exclusion_desc.Width = target_width;
+    exclusion_desc.Height = target_height;
+    exclusion_desc.MipLevels = 1u;
+    exclusion_desc.ArraySize = 1u;
+    exclusion_desc.Format = DXGI_FORMAT_R32_UINT;
+    exclusion_desc.SampleDesc.Count = 1u;
+    exclusion_desc.Usage = D3D11_USAGE_DEFAULT;
+    exclusion_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    ComPtr<ID3D11Texture2D> exclusion_texture;
+    ComPtr<ID3D11UnorderedAccessView> exclusion_uav;
+    if (FAILED(device->CreateTexture2D(
+          &exclusion_desc, nullptr, &exclusion_texture)) ||
+        FAILED(device->CreateUnorderedAccessView(
+          exclusion_texture.Get(), nullptr, &exclusion_uav))) {
+      return false;
+    }
+
+    if (!tensor_content.valid()) {
+      tensor_content = {0u, 0u, target_width, target_height};
+    }
+    std::array<std::uint32_t, 16> constants {};
     constants[0] = target_width;
     constants[1] = target_height;
     constants[2] = color_mode;
+    constants[9] = tensor_content.left;
+    constants[10] = tensor_content.top;
+    constants[11] = tensor_content.right;
+    constants[12] = tensor_content.bottom;
     D3D11_BUFFER_DESC constant_desc {};
     constant_desc.ByteWidth = sizeof(constants);
     constant_desc.Usage = D3D11_USAGE_IMMUTABLE;
@@ -2226,12 +2546,13 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
     ID3D11ShaderResourceView *input_srvs[] = {input_srv.Get()};
     ID3D11UnorderedAccessView *output_uavs[] = {
       model_uav.Get(),
-      appearance_uav.Get()
+      appearance_uav.Get(),
+      exclusion_uav.Get(),
     };
     ID3D11Buffer *constant_buffers[] = {constant_buffer.Get()};
     context->CSSetShader(shader.Get(), nullptr, 0);
     context->CSSetShaderResources(0, 1, input_srvs);
-    context->CSSetUnorderedAccessViews(0, 2, output_uavs, nullptr);
+    context->CSSetUnorderedAccessViews(0, 3, output_uavs, nullptr);
     context->CSSetConstantBuffers(0, 1, constant_buffers);
     context->Dispatch(
       (target_width + 15u) / 16u,
@@ -2240,9 +2561,9 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
     );
 
     ID3D11ShaderResourceView *null_srvs[] = {nullptr};
-    ID3D11UnorderedAccessView *null_uavs[] = {nullptr, nullptr};
+    ID3D11UnorderedAccessView *null_uavs[] = {nullptr, nullptr, nullptr};
     context->CSSetShaderResources(0, 1, null_srvs);
-    context->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
+    context->CSSetUnorderedAccessViews(0, 3, null_uavs, nullptr);
 
     const auto read_buffer = [&](
                                ID3D11Buffer *source,
@@ -2272,6 +2593,36 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
       return true;
     };
 
+    const auto read_exclusion = [&]() {
+      if (!tensor_exclusion) {
+        return true;
+      }
+      auto staging_desc = exclusion_desc;
+      staging_desc.Usage = D3D11_USAGE_STAGING;
+      staging_desc.BindFlags = 0u;
+      staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      ComPtr<ID3D11Texture2D> staging;
+      if (FAILED(device->CreateTexture2D(&staging_desc, nullptr, &staging))) {
+        return false;
+      }
+      context->CopyResource(staging.Get(), exclusion_texture.Get());
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) {
+        return false;
+      }
+      tensor_exclusion->resize(target_texels);
+      for (UINT y = 0u; y < target_height; ++y) {
+        std::memcpy(
+          tensor_exclusion->data() + static_cast<std::size_t>(y) * target_width,
+          static_cast<const std::byte *>(mapped.pData) +
+            static_cast<std::size_t>(y) * mapped.RowPitch,
+          static_cast<std::size_t>(target_width) * sizeof(std::uint32_t)
+        );
+      }
+      context->Unmap(staging.Get(), 0u);
+      return true;
+    };
+
     return read_buffer(
              model_buffer.Get(),
              target_texels * 3u,
@@ -2281,7 +2632,7 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
              appearance_buffer.Get(),
              target_texels,
              appearance_ordinal
-           );
+           ) && read_exclusion();
   };
 
   constexpr std::array imagenet_mean {0.485f, 0.456f, 0.406f};
@@ -2519,6 +2870,61 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
     ASSERT_EQ(appearance_ordinal.size(), 2u);
     EXPECT_FLOAT_EQ(appearance_ordinal[0], 0.6f);
     EXPECT_FLOAT_EQ(appearance_ordinal[1], 4.0f);
+  }
+
+  // Downsampling must replicate the resized boundary cell, not sample the outermost source pixel.
+  // The first source column deliberately differs from the point/area sample of the first content
+  // cell, so this catches source-edge padding that the upsampling case above cannot distinguish.
+  {
+    std::vector<rgba_pixel_t> source_pixels;
+    source_pixels.reserve(32u);
+    for (UINT y = 0u; y < 4u; ++y) {
+      for (UINT x = 0u; x < 8u; ++x) {
+        const float value = static_cast<float>(y * 8u + x) / 32.0f;
+        source_pixels.push_back({value, 1.0f - value, value * 0.5f, 1.0f});
+      }
+    }
+    std::vector<float> model_output;
+    std::vector<float> appearance_ordinal;
+    std::vector<std::uint32_t> exclusion;
+    ASSERT_TRUE(run_case(
+      8u, 4u, 6u, 2u, source_pixels,
+      model_output, appearance_ordinal, 0u,
+      {1u, 0u, 5u, 2u}, &exclusion
+    ));
+    ASSERT_EQ(model_output.size(), 36u);
+    ASSERT_EQ(appearance_ordinal.size(), 12u);
+    ASSERT_EQ(exclusion.size(), 12u);
+    for (UINT y = 0u; y < 2u; ++y) {
+      const UINT left_pad = y * 6u;
+      const UINT left_content = left_pad + 1u;
+      const UINT right_content = left_pad + 4u;
+      const UINT right_pad = left_pad + 5u;
+      EXPECT_EQ(exclusion[left_pad], 1u);
+      EXPECT_EQ(exclusion[right_pad], 1u);
+      for (UINT x = 1u; x < 5u; ++x) {
+        EXPECT_EQ(exclusion[y * 6u + x], 0u);
+      }
+      for (UINT channel = 0u; channel < 3u; ++channel) {
+        const UINT channel_offset = channel * 12u;
+        EXPECT_EQ(
+          std::bit_cast<std::uint32_t>(model_output[channel_offset + left_pad]),
+          std::bit_cast<std::uint32_t>(model_output[channel_offset + left_content])
+        );
+        EXPECT_EQ(
+          std::bit_cast<std::uint32_t>(model_output[channel_offset + right_pad]),
+          std::bit_cast<std::uint32_t>(model_output[channel_offset + right_content])
+        );
+      }
+      EXPECT_EQ(
+        std::bit_cast<std::uint32_t>(appearance_ordinal[left_pad]),
+        std::bit_cast<std::uint32_t>(appearance_ordinal[left_content])
+      );
+      EXPECT_EQ(
+        std::bit_cast<std::uint32_t>(appearance_ordinal[right_pad]),
+        std::bit_cast<std::uint32_t>(appearance_ordinal[right_content])
+      );
+    }
   }
 }
 #endif
@@ -3670,7 +4076,9 @@ TEST(DirectxShaderSourceTest, EmaMotionMaskUsesResolvedReferenceGridGradients) {
     std::string::npos
   );
   EXPECT_NE(
-    constants.find("return (float)min(target_w, target_h) /"),
+    constants.find(
+      "return (float)min(content.z - content.x, content.w - content.y) /"
+    ),
     std::string::npos
   );
   EXPECT_NE(

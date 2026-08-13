@@ -9,11 +9,14 @@
 
 // standard includes
 #include <atomic>
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 // local includes
 #include "src/config.h"
@@ -28,8 +31,37 @@ namespace models {
 
 namespace platf::sbs_debug {
 
+  struct frame;
+
   namespace detail {
     class publication_state;
+    struct pending_gpu_capture;
+
+    /** Maximum staging payload copied by one render-thread polling turn. */
+    inline constexpr std::size_t cpu_collection_byte_budget = 4u * 1024u * 1024u;
+
+    /**
+     * Return one aligned copy chunk. An otherwise empty turn may overshoot by one alignment unit
+     * so a texture row wider than the nominal budget cannot stall forever.
+     */
+    std::size_t bounded_collection_chunk_bytes(
+      std::size_t remaining_bytes,
+      std::size_t alignment,
+      std::size_t available_budget,
+      bool poll_is_empty
+    ) noexcept;
+
+    /** Pure exact-frame OCR8/SLR9 validation used before diagnostic publication. */
+    bool subtitle_records_match_frame(
+      const std::vector<std::uint8_t> &ocr,
+      const std::vector<std::uint8_t> &locator,
+      const frame &completed
+    );
+
+    bool subtitle_ocr_record_is_canonical_for_frame(
+      const std::vector<std::uint8_t> &ocr,
+      const frame &completed
+    );
   }
 
   /**
@@ -39,7 +71,7 @@ namespace platf::sbs_debug {
    * model_input and raw_depth are immutable estimator snapshots. warp_depth is the exact signed,
    * anisotropically slope-limited final parallax consumed by production V2: full-source-U in the
    * ordinary mode and ROI-local-U in window-region mode. ROI renderer authority is the pair of
-   * that crop-local field and depth_input_region's scale/outside-collar embedding. The
+   * that ROI-local field and depth_input_region's scale/outside-collar embedding. The
    * adaptive_state/depth_frame_state pair is optional comparison-only evidence from the retained
    * scene-cut bridge; it never authorizes a dump or controls live geometry. The immutable V2
    * candidate first produces shadow_ownership_refined_parallax from the full-resolution source
@@ -57,7 +89,7 @@ namespace platf::sbs_debug {
    */
   struct frame {
     ID3D11ShaderResourceView *source = nullptr;
-    /** Exact full-frame or inward-cropped color texture submitted to DAV2 and ownership. */
+    /** Exact full-frame or whole-ROI color texture submitted to DAV2 and ownership. */
     ID3D11ShaderResourceView *depth_input_source = nullptr;
     ID3D11ShaderResourceView *model_input = nullptr;
     ID3D11ShaderResourceView *raw_depth = nullptr;
@@ -138,16 +170,30 @@ namespace platf::sbs_debug {
      */
     bool snapshot_requested();
 
-    /** Require a current valid authenticated V2 camera before publishing a live-render dump.
-     * Invalid V2 completions hold the prior packed SBS via pixel-shader discard, so pairing their
-     * current source/raw field with that prior output would create a false package.
+    /**
+     * @brief Keep retained-source conversion alive for a newly latched button request or until a
+     *        submitted event-query batch is collected.
+     *
+     * Publication remains single-flight: a later click waits without reconverting while the CPU
+     * worker owns the preceding package, then wakes the retained source when that worker is idle.
      */
-    bool preflight_requested_v2_frame(
-      ID3D11Device *device,
-      ID3D11DeviceContext *ctx,
-      ID3D11ShaderResourceView *shadow_state,
-      std::uint64_t matched_frame_id
-    ) noexcept;
+    bool needs_conversion_poll() const noexcept;
+
+    /**
+     * @brief Poll a previously submitted staging batch without flushing the D3D11 queue.
+     *
+     * The owning render thread calls this once per Host-SBS conversion. A ready batch is mapped
+     * into bounded CPU-owned chunks over later conversions before the publication worker is
+     * queued. Every successful map is unmapped before this call returns.
+     */
+    void poll_pending_readback(ID3D11DeviceContext *ctx) noexcept;
+
+    /** Arm dump-only geometry for the requested matched frame.
+     *
+     * Camera validity is checked from the same staged shadow-state bytes as the rest of the
+     * package. This preparation step deliberately performs no GPU readback or synchronization.
+     */
+    bool prepare_requested_v2_frame(std::uint64_t matched_frame_id) noexcept;
 
     /** Cancel a request that can never complete, such as after permanent estimator failure. */
     void cancel_pending_request() noexcept;
@@ -156,13 +202,13 @@ namespace platf::sbs_debug {
     void reject_pending_request() noexcept;
 
     /**
-     * @brief Snapshot a completed frame and queue its package for background publication.
+     * @brief Submit an immutable same-frame staging batch for background publication.
      *
      * An incomplete matched set or invalid completion defers the trigger. Writer failures retain
-     * it with bounded retry cadence; no partial folder is exposed as a completed dump. GPU
-     * readback remains on the owning render thread so the resources form one stable frame, while
-     * PNG generation, hashing, JSON serialization, and filesystem I/O run on the process-lifetime
-     * publication worker. Cheap no-op otherwise. Call once per Host-SBS convert().
+     * it with bounded retry cadence; no partial folder is exposed as a completed dump. GPU copies
+     * and nonblocking query polling remain on the owning render thread so the resources form one
+     * stable frame. PNG generation, hashing, JSON serialization, and filesystem I/O run on the
+     * process-lifetime publication worker. Cheap no-op otherwise. Call once per Host-SBS convert().
      */
     bool maybe_dump(
       ID3D11Device *device,
@@ -174,11 +220,12 @@ namespace platf::sbs_debug {
   private:
     std::filesystem::path dir_;
     std::shared_ptr<detail::publication_state> async_;
+    std::unique_ptr<detail::pending_gpu_capture> pending_gpu_capture_;
     std::shared_ptr<std::atomic<bool>> button_request_;
     bool file_trigger_enabled_ = false;
-    bool file_trigger_pending_ = false;
-    unsigned poll_counter_ = 0;  ///< Rate-limits the dump.trigger file stat to ~1/s.
-    unsigned retry_backoff_frames_ = 0;
+    mutable bool file_trigger_pending_ = false;
+    mutable std::chrono::steady_clock::time_point next_file_trigger_poll_ {};
+    std::chrono::steady_clock::time_point retry_not_before_ {};
     bool snapshot_armed_for_dump_ = false;
     std::uint64_t prepared_frame_id_ = 0;
   };

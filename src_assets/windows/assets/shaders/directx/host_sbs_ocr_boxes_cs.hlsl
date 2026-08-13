@@ -11,6 +11,8 @@
     !defined(V2_OCR_RAW_BOX_CAPACITY) || !defined(V2_OCR_FINAL_BOX_OFFSET) || \
     !defined(V2_OCR_FINAL_BOX_CAPACITY) || !defined(V2_OCR_SAFE_ROW_TOP) || \
     !defined(V2_OCR_SAFE_ROW_BOTTOM) || !defined(V2_OCR_CROP_ASPECT_WIDTH) || \
+    !defined(V2_OCR_ACTIVE_PROBABILITY_THRESHOLD) || \
+    !defined(V2_OCR_MIN_MEAN_SCORE) || \
     !defined(V2_OCR_CROP_ASPECT_HEIGHT) || !defined(V2_OCR_TEXT_JOIN_GAP_CELLS) || \
     !defined(V2_OCR_RIBBON_JOIN_GAP_CELLS) || \
     !defined(V2_OCR_RIBBON_STRUCTURAL_GAP_MIN_CELLS) || \
@@ -94,7 +96,7 @@ void cells_main(
         float probability = ProbabilityMap[pixel.y * OCR_WIDTH + pixel.x];
         if (!FiniteFloat(probability)) {
             InterlockedAdd(nonfinite_count, 1u);
-        } else if (probability > 0.2f) {
+        } else if (probability > V2_OCR_ACTIVE_PROBABILITY_THRESHOLD) {
             InterlockedAdd(active_count, 1u);
             InterlockedAdd(
                 probability_sum_q12,
@@ -138,6 +140,7 @@ cbuffer OcrResolveConstants : register(b0) {
     uint crop_height_pixels;
     uint roi_top;
     uint roi_bottom;
+    uint4 tensor_content;
 };
 
 uint CellBase(uint x, uint y) {
@@ -161,11 +164,17 @@ bool ColumnActive(uint x, uint y0, uint y1) {
 }
 
 uint MapXFloor(uint x) {
-    return min((uint)floor((float)x * (float)field_width / (float)OCR_WIDTH), field_width);
+    uint content_width = tensor_content.z - tensor_content.x;
+    return tensor_content.x + min(
+        (uint)floor((float)x * (float)content_width / (float)OCR_WIDTH),
+        content_width);
 }
 
 uint MapXCeil(uint x) {
-    return min((uint)ceil((float)x * (float)field_width / (float)OCR_WIDTH), field_width);
+    uint content_width = tensor_content.z - tensor_content.x;
+    return tensor_content.x + min(
+        (uint)ceil((float)x * (float)content_width / (float)OCR_WIDTH),
+        content_width);
 }
 
 uint MapYRational(uint y, bool round_up) {
@@ -175,8 +184,10 @@ uint MapYRational(uint y, bool round_up) {
     uint source_numerator = crop_top_pixels * OCR_HEIGHT + y * crop_height_pixels;
     uint whole = source_numerator / denominator;
     uint remainder = source_numerator % denominator;
-    uint scaled_remainder = remainder * field_height;
-    uint mapped = whole * field_height + scaled_remainder / denominator;
+    uint content_height = tensor_content.w - tensor_content.y;
+    uint scaled_remainder = remainder * content_height;
+    uint mapped = tensor_content.y + whole * content_height +
+        scaled_remainder / denominator;
     if (round_up && scaled_remainder % denominator != 0u) ++mapped;
     return clamp(min(mapped, field_height), roi_top, roi_bottom);
 }
@@ -192,14 +203,17 @@ uint MapYCeil(uint y) {
 // The host authenticates the DAV2 field shape before enabling OCR.  This shader still validates
 // every runtime dimension and proves that its ROI is a non-empty subset of the exact bottom-6:1
 // crop. OCR8 then carries those dimensions and bounds to SLR8, which cross-checks them against the
-// actual BaseField dispatch.  Keeping this geometry in the existing 48-byte cbuffer avoids a
-// shape-specific OCR record or a second ABI.
+// actual BaseField dispatch. The 64-byte cbuffer also binds the integer tensor-content rectangle,
+// avoiding a shape-specific OCR record or a second ABI.
 bool ResolveGeometryValid() {
     if (source_width == 0u || source_height == 0u || field_width == 0u || field_height == 0u ||
         field_width > 0xffffu || field_height > 0xffffu ||
         roi_top >= roi_bottom || roi_bottom > field_height || crop_height_pixels == 0u ||
         crop_top_pixels > source_height ||
-        crop_height_pixels > source_height - crop_top_pixels) {
+        crop_height_pixels > source_height - crop_top_pixels ||
+        tensor_content.x >= tensor_content.z || tensor_content.y >= tensor_content.w ||
+        tensor_content.z > field_width || tensor_content.w > field_height ||
+        roi_top < tensor_content.y || roi_bottom > tensor_content.w) {
         return false;
     }
 
@@ -219,19 +233,20 @@ bool ResolveGeometryValid() {
 
     if (source_height > 0xffffffffu / OCR_HEIGHT) return false;
     uint denominator = OCR_HEIGHT * source_height;
-    if (denominator > 0xffffffffu / field_height) return false;
+    uint content_height = tensor_content.w - tensor_content.y;
+    if (denominator > 0xffffffffu / content_height) return false;
     uint top_numerator =
         crop_top_pixels * OCR_HEIGHT + V2_OCR_SAFE_ROW_TOP * crop_height_pixels;
     uint bottom_numerator =
         crop_top_pixels * OCR_HEIGHT + V2_OCR_SAFE_ROW_BOTTOM * crop_height_pixels;
-    uint top_scaled = top_numerator * field_height;
-    uint bottom_scaled = bottom_numerator * field_height;
-    uint expected_roi_top = min(
+    uint top_scaled = top_numerator * content_height;
+    uint bottom_scaled = bottom_numerator * content_height;
+    uint expected_roi_top = tensor_content.y + min(
         top_scaled / denominator + (top_scaled % denominator != 0u ? 1u : 0u),
-        field_height);
-    uint expected_roi_bottom = min(
+        content_height);
+    uint expected_roi_bottom = tensor_content.y + min(
         bottom_scaled / denominator + (bottom_scaled % denominator != 0u ? 1u : 0u),
-        field_height);
+        content_height);
     return roi_top == expected_roi_top && roi_bottom == expected_roi_bottom;
 }
 
@@ -331,7 +346,7 @@ bool CandidateEvidenceValid(CandidateStats stats, out float score) {
         return false;
     }
     score = (float)stats.sum_q12 / ((float)stats.active_pixels * 4095.0f);
-    return FiniteFloat(score) && score >= 0.4f;
+    return FiniteFloat(score) && score >= V2_OCR_MIN_MEAN_SCORE;
 }
 
 void MergeRetainedIsland(
@@ -393,7 +408,8 @@ void PublishCandidate(
     // A ribbon conditions the complete bottom strip. Ordinary candidates preserve their own
     // expanded cover, including gaps only among independently valid retained islands.
     uint4 expanded_box = kind_flags == V2_OCR_BOX_FLAG_RIBBON ?
-        uint4(0u, MapYFloor(expanded_top), field_width, field_height) :
+        uint4(tensor_content.x, MapYFloor(expanded_top),
+              tensor_content.z, tensor_content.w) :
         MapBox(expanded_left, expanded_top, expanded_right, expanded_bottom);
     if (expanded_box.x >= expanded_box.z || expanded_box.y >= expanded_box.w) return;
 

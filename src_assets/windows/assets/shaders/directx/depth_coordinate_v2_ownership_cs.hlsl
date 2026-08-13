@@ -115,14 +115,19 @@ bool FullResolutionForegroundCoverage(
     uint source_w = 0u;
     uint source_h = 0u;
     SourceColor.GetDimensions(source_w, source_h);
-    if (source_w < target_w || source_h < target_h ||
-        target_w == 0u || target_h == 0u) {
+    uint4 content = DepthAnalysisContentCells();
+    uint2 content_size = content.zw - content.xy;
+    if (source_w < content_size.x || source_h < content_size.y ||
+        any(content_size == 0u) || target_position.x < content.x ||
+        target_position.y < content.y || target_position.x >= content.z ||
+        target_position.y >= content.w) {
         return false;
     }
 
     uint2 source_size = uint2(source_w, source_h);
-    float2 source_scale = float2(source_size) / float2(target_w, target_h);
-    float2 source_center = (float2(target_position) + 0.5f) * source_scale;
+    float2 source_scale = float2(source_size) / float2(content_size);
+    float2 source_center =
+        (float2(target_position - content.xy) + 0.5f) * source_scale;
     bool horizontal_normal = near_direction.x != 0;
     int normal_sign = horizontal_normal ? near_direction.x : near_direction.y;
     float normal_step = horizontal_normal ? source_scale.x : source_scale.y;
@@ -350,21 +355,16 @@ void main(uint3 id : SV_DispatchThreadID) {
         return;
     }
 
-    int2 position = int2(id.xy);
+    // Re-run the exact content-boundary ownership decision for synthetic padding cells. This is
+    // intentionally redundant: reading a concurrently-written boundary output would race, while
+    // preserving the pre-ownership candidate would let a lower padding value enter the later
+    // row/column envelopes when ownership raises that boundary.
+    int2 position = int2(DepthAnalysisClampCell(id.xy));
     float center = Candidate.Load(int3(position, 0));
     if (!V2Finite(center)) {
         OwnershipRefined[id.xy] = 0.0f;
         return;
     }
-    // Exclusion is an exact no-op for the center cell. The tensor cell is outside every
-    // ownership decision, but its candidate value still has to pass unchanged through this
-    // intermediate field so the later subtitle conditioner remains the sole text-depth
-    // authority. LoadCandidate intentionally remains exclusion-aware for every neighbor/stencil.
-    if (TensorExclusion[position] != 0u) {
-        OwnershipRefined[id.xy] = center;
-        return;
-    }
-
     static const int2 directions[4] = {
         int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1)
     };
@@ -389,7 +389,8 @@ void main(uint3 id : SV_DispatchThreadID) {
         }
     }
 
-    float cliff_floor = 8.0f * v2_max_horizontal_slope / max((float)target_w, 1.0f);
+    float cliff_floor = 8.0f * v2_max_horizontal_slope /
+        DepthAnalysisContentWidthCells();
     if (best_direction < 0 || best_jump < cliff_floor ||
         second_jump * 2.0f >= best_jump) {
         OwnershipRefined[id.xy] = center;
@@ -408,7 +409,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     }
 
     float foreground_coverage;
-    if (!FullResolutionForegroundCoverage(id.xy, normal, foreground_coverage)) {
+    if (!FullResolutionForegroundCoverage(uint2(position), normal, foreground_coverage)) {
         OwnershipRefined[id.xy] = center;
         return;
     }

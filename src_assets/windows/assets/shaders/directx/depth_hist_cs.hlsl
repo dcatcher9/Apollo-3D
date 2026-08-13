@@ -10,7 +10,7 @@ Texture2D<uint>          TensorExclusion : register(t1);
 RWStructuredBuffer<uint> Histogram   : register(u0);  // 256 bins, reset by depth_minmax_ema_cs
 RWByteAddressBuffer      MinMaxRaw   : register(u1);  // read-only: min/max bits, valid + eligible counts
 
-// Shared depth-pass cbuffer (slots 11-12 = the percentile bounds consumed by depth_minmax_ema_cs).
+// Shared depth-pass cbuffer (slots 11-12 are the real tensor-content right/bottom bounds).
 #include "include/depth_constants.hlsl"
 
 #define GROUP_SIZE 256

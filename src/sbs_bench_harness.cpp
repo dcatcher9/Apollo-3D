@@ -1087,23 +1087,6 @@ namespace sbs_bench {
       return succeeded;
     }
 
-    bool dump_float_texture_srv(
-      ID3D11Device *dev,
-      ID3D11DeviceContext *ctx,
-      ID3D11ShaderResourceView *srv,
-      const fs::path &path,
-      ComPtr<ID3D11Texture2D> &stage_cache
-    ) {
-      if (!srv) {
-        return false;
-      }
-      ComPtr<ID3D11Resource> resource;
-      srv->GetResource(&resource);
-      ComPtr<ID3D11Texture2D> texture;
-      return resource && SUCCEEDED(resource.As(&texture)) && texture &&
-             dump_float_texture(dev, ctx, texture.Get(), path, stage_cache);
-    }
-
     // Preserve the exact raw model output for stage-by-stage parity checks. Unlike the display
     // PNG, this is not clamped or normalized: it is row-major float32, width*height values.
     void dump_raw_model_depth(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv, int width, int height, const fs::path &path, ComPtr<ID3D11Buffer> &stage_cache) {
@@ -4432,7 +4415,7 @@ namespace sbs_bench {
       }
       // Machine-readable execution contract. Evaluation must not scrape human log prose. The
       // Independent evaluation-harness schema 22 attests the V2-only configuration surface;
-      // it is unrelated to Dump 3D schema 28 and DVC2 schema 46 (the direct-replay schema stays
+      // it is unrelated to Dump 3D schema 29 and DVC2 schema 48 (the direct-replay schema stays
       // pinned by its own validator).
       std::ofstream contract(fs::path(o.out) / "contract.json");
       if (contract) {

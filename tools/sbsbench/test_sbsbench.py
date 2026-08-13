@@ -1627,7 +1627,8 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(shader_dir, "buffer_to_tex_cs.hlsl"),
                   encoding="utf-8") as fh:
             mapper = fh.read()
-        self.assertIn("OutputTexture[DTid.xy] = PreviousDepth[DTid.xy]", mapper)
+        self.assertIn("OutputTexture[DTid.xy] = PreviousDepth[sample_position]", mapper)
+        self.assertIn("DepthAnalysisClampCell(DTid.xy)", mapper)
         self.assertIn("scale.w < 0.5f", mapper)
         self.assertIn("scale.w > 1.5f ? 1.0f : ema_alpha", mapper)
         with open(os.path.join(shader_dir, "depth_ema_motion_cs.hlsl"),
@@ -1919,7 +1920,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("est.model_input_snapshot.Get()", production[estimate_call:])
         # The authenticated final-parallax field is retained for live rendering and dump replay.
         self.assertIn("dump_warp_depth = warp_depth;", production)
-        preflight = production.index("sbs_dumper.preflight_requested_v2_frame(")
+        preflight = production.index("sbs_dumper.prepare_requested_v2_frame(")
         self.assertIn("render_sbs_debug_geometry(", production)
         self.assertLess(
             preflight,
@@ -1941,6 +1942,16 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(repo, "src", "platform", "windows",
                                "sbs_debug_dump.cpp"), encoding="utf-8") as fh:
             dumper = fh.read()
+        submit = dumper[dumper.index("bool dumper::maybe_dump("):]
+        poll = dumper[
+            dumper.index("void dumper::poll_pending_readback("):
+            dumper.index("bool dumper::maybe_dump(")
+        ]
+        self.assertNotIn("Map(", submit)
+        self.assertNotIn("GetData(", submit)
+        self.assertIn("D3D11_ASYNC_GETDATA_DONOTFLUSH", poll)
+        self.assertIn("D3D11_MAP_FLAG_DO_NOT_WAIT", dumper)
+        self.assertIn("ctx->End(pending->completion.Get())", submit)
         for artifact in (
                 "model_input.f32", "model_input.png", "model_input_shape.json",
                 "raw_depth.f32", "raw_depth.png", "raw_depth_heat.png",

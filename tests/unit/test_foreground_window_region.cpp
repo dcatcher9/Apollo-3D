@@ -23,6 +23,7 @@ namespace {
       .process_id_after = 42u,
       .own_process_id = 7u,
       .monitor = 0x200u,
+      .monitor_screen_rect = {-1920, 0, 0, 1080},
       .client_screen_rect = {-1800, 100, -200, 1000},
       .frame_screen_rect = {-1810, 70, -190, 1010},
       .dpi_aware = true,
@@ -47,6 +48,7 @@ namespace {
       .window = 0x100u,
       .process_id = 42u,
       .monitor = 0x200u,
+      .monitor_screen_rect = {-1920, 0, 0, 1080},
       .client_screen_rect = {-1800, 100, -200, 1000},
       .frame_screen_rect = {-1810, 70, -190, 1010},
       .observed_at = now,
@@ -64,6 +66,7 @@ namespace {
     EXPECT_EQ(result.window, 0x100u);
     EXPECT_EQ(result.process_id, 42u);
     EXPECT_EQ(result.monitor, 0x200u);
+    EXPECT_EQ(result.monitor_screen_rect, (foreground::rect_t {-1920, 0, 0, 1080}));
     EXPECT_EQ(result.client_screen_rect, (foreground::rect_t {-1800, 100, -200, 1000}));
     EXPECT_EQ(result.frame_screen_rect, (foreground::rect_t {-1810, 70, -190, 1010}));
     EXPECT_EQ(result.observed_at, observed_at);
@@ -150,7 +153,7 @@ namespace {
     );
   }
 
-  TEST(ForegroundWindowPolicy, RejectsToolNoActivateAndLayeredStyles) {
+  TEST(ForegroundWindowPolicy, RejectsToolNoActivateAndUnprovenLayeredStyles) {
     const auto now = std::chrono::steady_clock::time_point {10s};
     constexpr std::uint64_t excluded_styles[] {
       WS_EX_TOOLWINDOW,
@@ -166,6 +169,41 @@ namespace {
         foreground::status_e::excluded_style
       ) << style;
     }
+
+    auto raw = available_window();
+    raw.extended_style = WS_EX_LAYERED;
+    raw.layered_attributes_succeeded = true;
+    raw.layered_flags = LWA_ALPHA;
+    raw.layered_alpha = 254u;
+    EXPECT_EQ(
+      foreground::detail::classify(raw, now).status,
+      foreground::status_e::excluded_style
+    );
+    raw.layered_alpha = 255u;
+    raw.layered_flags = LWA_ALPHA | LWA_COLORKEY;
+    EXPECT_EQ(
+      foreground::detail::classify(raw, now).status,
+      foreground::status_e::excluded_style
+    );
+  }
+
+  TEST(ForegroundWindowPolicy, AcceptsOnlyProvenUniformlyOpaqueLayeredWindows) {
+    const auto now = std::chrono::steady_clock::time_point {10s};
+    auto raw = available_window();
+    raw.extended_style = WS_EX_LAYERED;
+    raw.layered_attributes_succeeded = true;
+    raw.layered_flags = LWA_ALPHA;
+    raw.layered_alpha = 255u;
+    EXPECT_EQ(
+      foreground::detail::classify(raw, now).status,
+      foreground::status_e::ok
+    );
+
+    raw.extended_style |= WS_EX_TOOLWINDOW;
+    EXPECT_EQ(
+      foreground::detail::classify(raw, now).status,
+      foreground::status_e::excluded_style
+    );
   }
 
   TEST(ForegroundWindowPolicy, RequiresDwmFrameClientAndMonitorGeometry) {
@@ -224,6 +262,45 @@ namespace {
     );
   }
 
+  TEST(ForegroundWindowMoveSize, WithdrawsOnlyTheForegroundRootsGeometry) {
+    const auto now = std::chrono::steady_clock::time_point {10s};
+    auto raw = available_window();
+    raw.gui_thread_query_succeeded = true;
+    raw.gui_in_move_size = true;
+    raw.move_size_root = raw.window;
+    // The production fast path deliberately returns before class/style/DWM/client queries.
+    raw.class_query_succeeded = false;
+    raw.style_query_succeeded = false;
+    raw.cloak_query_succeeded = false;
+    raw.client_rect_succeeded = false;
+    raw.frame_rect_succeeded = false;
+    EXPECT_EQ(
+      foreground::detail::classify(raw, now).status,
+      foreground::status_e::interactive_move_size
+    );
+    EXPECT_FALSE(foreground::carries_geometry(
+      foreground::detail::classify(raw, now).status
+    ));
+
+    raw.gui_in_move_size = false;
+    raw.class_query_succeeded = true;
+    raw.style_query_succeeded = true;
+    raw.cloak_query_succeeded = true;
+    raw.client_rect_succeeded = true;
+    raw.frame_rect_succeeded = true;
+    EXPECT_EQ(foreground::detail::classify(raw, now).status, foreground::status_e::ok);
+    raw.gui_in_move_size = true;
+    raw.move_size_root += 1u;
+    EXPECT_EQ(foreground::detail::classify(raw, now).status, foreground::status_e::ok);
+    raw.move_size_root = 0u;
+    EXPECT_EQ(
+      foreground::detail::classify(raw, now).status,
+      foreground::status_e::interactive_move_size
+    );
+    raw.gui_thread_query_succeeded = false;
+    EXPECT_EQ(foreground::detail::classify(raw, now).status, foreground::status_e::ok);
+  }
+
   TEST(ForegroundWindowContinuity, PreservesExactRunAndRearmsEveryDiscontinuity) {
     foreground::continuity_tracker_t tracker;
     const auto first_at = std::chrono::steady_clock::time_point {10s};
@@ -268,6 +345,33 @@ namespace {
     EXPECT_EQ(after_reset.geometry_valid_since, first_at + 250ms);
   }
 
+  TEST(ForegroundWindowMoveSize, BreaksGeometryContinuityUntilTheLoopEnds) {
+    foreground::continuity_tracker_t tracker;
+    const auto start = std::chrono::steady_clock::time_point {10s};
+    auto raw = available_window();
+    const auto first = tracker.update(foreground::detail::classify(raw, start));
+    ASSERT_EQ(first.status, foreground::status_e::ok);
+    ASSERT_NE(first.generation, 0u);
+
+    raw.gui_thread_query_succeeded = true;
+    raw.gui_in_move_size = true;
+    raw.move_size_root = raw.window;
+    const auto moving = tracker.update(foreground::detail::classify(raw, start + 10ms));
+    EXPECT_EQ(moving.status, foreground::status_e::interactive_move_size);
+    EXPECT_EQ(moving.generation, 0u);
+    EXPECT_EQ(moving.window, 0u);
+    EXPECT_EQ(moving.process_id, 0u);
+    EXPECT_EQ(moving.monitor, 0u);
+    EXPECT_FALSE(moving.client_screen_rect.valid());
+    EXPECT_FALSE(foreground::carries_geometry(moving.status));
+
+    raw.gui_in_move_size = false;
+    const auto resumed = tracker.update(foreground::detail::classify(raw, start + 20ms));
+    EXPECT_EQ(resumed.status, foreground::status_e::ok);
+    EXPECT_GT(resumed.generation, first.generation);
+    EXPECT_EQ(resumed.geometry_valid_since, start + 20ms);
+  }
+
   TEST(ForegroundWindowContinuity, ChangedIdentityMonitorOrFrameStartsNewGeneration) {
     const auto start = std::chrono::steady_clock::time_point {10s};
     constexpr auto step = 10ms;
@@ -289,6 +393,9 @@ namespace {
     });
     expect_change([](auto &value) {
       ++value.monitor;
+    });
+    expect_change([](auto &value) {
+      --value.monitor_screen_rect.left;
     });
     expect_change([](auto &value) {
       --value.frame_screen_rect.left;
@@ -323,6 +430,54 @@ namespace {
     ));
   }
 
+  TEST(ForegroundWindowCausality, SameSizeProgrammaticMoveFallsBackInsteadOfStalling) {
+    const auto move_at = std::chrono::steady_clock::time_point {10s};
+    auto previous = available_snapshot();
+    previous.observed_at = move_at - 1ms;
+    auto current = previous;
+    ++current.generation;
+    current.observed_at = move_at;
+    current.geometry_valid_since = move_at;
+    current.client_screen_rect.left += 100;
+    current.client_screen_rect.right += 100;
+    current.frame_screen_rect.left += 100;
+    current.frame_screen_rect.right += 100;
+
+    // The first sample after the move arms retained-source reprocessing even while an old ROI
+    // inference is still pending.
+    EXPECT_TRUE(foreground::requires_full_source_causal_fallback(
+      previous,
+      current,
+      move_at - 1ms
+    ));
+    // The post-copy check uses the same current snapshot on both sides and reaches the same safe
+    // full-source decision when no pending inference intercepted the call.
+    EXPECT_TRUE(foreground::requires_full_source_causal_fallback(
+      current,
+      current,
+      move_at - 1ms
+    ));
+    EXPECT_FALSE(foreground::requires_full_source_causal_fallback(
+      previous,
+      current,
+      move_at
+    ));
+    EXPECT_FALSE(foreground::requires_full_source_causal_fallback(
+      previous,
+      current,
+      std::nullopt
+    ));
+
+    auto resized = current;
+    ++resized.client_screen_rect.right;
+    ++resized.frame_screen_rect.right;
+    EXPECT_FALSE(foreground::requires_full_source_causal_fallback(
+      previous,
+      resized,
+      move_at - 1ms
+    ));
+  }
+
   TEST(ForegroundWindowMapping, MapsNegativeRawDesktopCoordinatesWithoutClipping) {
     const auto mapped = foreground::map_to_capture(
       available_snapshot(),
@@ -354,6 +509,27 @@ namespace {
     ASSERT_TRUE(mapped);
     EXPECT_EQ(mapped.route, foreground::route_e::full_capture);
     EXPECT_EQ(mapped.capture_pixels, (foreground::rect_t {0, 0, 1920, 1080}));
+  }
+
+  TEST(ForegroundWindowMapping, AcceptsDistinctCloneHandleOnlyForExactMonitorBounds) {
+    const auto snapshot = available_snapshot();
+    const foreground::capture_target_t clone_target {
+      .screen_rect = {-1920, 0, 0, 1080},
+      .width = 1920,
+      .height = 1080,
+      .monitor = 0x201u,
+    };
+    const auto mapped = foreground::map_to_capture(snapshot, clone_target);
+    ASSERT_TRUE(mapped);
+    EXPECT_EQ(mapped.route, foreground::route_e::roi);
+    EXPECT_EQ(mapped.capture_pixels, (foreground::rect_t {120, 100, 1720, 1000}));
+
+    auto unrelated = snapshot;
+    unrelated.monitor_screen_rect = {-2560, 0, 0, 1440};
+    EXPECT_EQ(
+      foreground::map_to_capture(unrelated, clone_target).status,
+      foreground::mapping_status_e::monitor_mismatch
+    );
   }
 
   TEST(ForegroundWindowMapping, RejectsOtherMonitorAndSpanningOrOffscreenRects) {
