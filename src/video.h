@@ -28,6 +28,9 @@ namespace video {
   // already encoded video. Three frames absorb ordinary encoder/network scheduling jitter while
   // keeping recovery bounded when the sender cannot keep up.
   constexpr std::uint32_t ENCODED_PACKET_QUEUE_LIMIT = 3;
+  constexpr std::size_t ENCODED_FRAME_BUFFER_POOL_LIMIT =
+    ENCODED_PACKET_QUEUE_LIMIT + 1;
+  constexpr std::size_t ENCODED_FRAME_BUFFER_RETAIN_LIMIT = 16 * 1024 * 1024;
 
   namespace detail {
     using frame_time_point_t = std::chrono::steady_clock::time_point;
@@ -73,6 +76,17 @@ namespace video {
       return rendered_content_timestamp ?
                rendered_content_timestamp :
                presentation_timestamp;
+    }
+
+    /** A ready depth pipeline can bypass the image wait only when there is retained source
+     * content to reconvert. Before the first real capture, a zero-duration wait would repeatedly
+     * encode the dummy surface while the ready event remains pending.
+     */
+    constexpr bool should_poll_ready_depth_without_wait(
+      bool depth_pipeline_ready,
+      bool has_retained_source
+    ) noexcept {
+      return depth_pipeline_ready && has_retained_source;
     }
   }  // namespace detail
 
@@ -512,11 +526,53 @@ namespace video {
     std::chrono::steady_clock::time_point encoded_timestamp = std::chrono::steady_clock::now();
   };
 
+  class encoded_frame_buffer_pool_t {
+  public:
+    std::vector<std::uint8_t> acquire() {
+      std::lock_guard lock(mutex_);
+      if (buffers_.empty()) {
+        return {};
+      }
+
+      auto buffer = std::move(buffers_.back());
+      buffers_.pop_back();
+      return buffer;
+    }
+
+    void recycle(std::vector<std::uint8_t> &&buffer) {
+      if (buffer.capacity() > ENCODED_FRAME_BUFFER_RETAIN_LIMIT) {
+        return;
+      }
+
+      buffer.clear();
+      std::lock_guard lock(mutex_);
+      if (buffers_.size() < ENCODED_FRAME_BUFFER_POOL_LIMIT) {
+        buffers_.push_back(std::move(buffer));
+      }
+    }
+
+  private:
+    std::mutex mutex_;
+    std::vector<std::vector<std::uint8_t>> buffers_;
+  };
+
   struct packet_raw_generic: packet_raw_t {
-    packet_raw_generic(std::vector<uint8_t> &&frame_data, int64_t frame_index, bool idr):
+    packet_raw_generic(
+      std::vector<uint8_t> &&frame_data,
+      int64_t frame_index,
+      bool idr,
+      std::shared_ptr<encoded_frame_buffer_pool_t> frame_buffer_pool = {}
+    ):
         frame_data {std::move(frame_data)},
         index {frame_index},
-        idr {idr} {
+        idr {idr},
+        frame_buffer_pool {std::move(frame_buffer_pool)} {
+    }
+
+    ~packet_raw_generic() override {
+      if (frame_buffer_pool) {
+        frame_buffer_pool->recycle(std::move(frame_data));
+      }
     }
 
     bool is_idr() override {
@@ -538,6 +594,7 @@ namespace video {
     std::vector<uint8_t> frame_data;
     int64_t index;
     bool idr;
+    std::shared_ptr<encoded_frame_buffer_pool_t> frame_buffer_pool;
   };
 
   using packet_t = std::unique_ptr<packet_raw_t>;

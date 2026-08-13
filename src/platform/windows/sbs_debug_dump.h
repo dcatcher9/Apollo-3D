@@ -38,7 +38,7 @@ namespace platf::sbs_debug {
     struct pending_gpu_capture;
 
     /** Maximum staging payload copied by one render-thread polling turn. */
-    inline constexpr std::size_t cpu_collection_byte_budget = 4u * 1024u * 1024u;
+    inline constexpr std::size_t cpu_collection_byte_budget = 64u * 1024u * 1024u;
 
     /**
      * Return one aligned copy chunk. An otherwise empty turn may overshoot by one alignment unit

@@ -86,6 +86,83 @@ TEST(CryptoTest, GcmDecryptReinitializationFailureReturnsError) {
   EXPECT_EQ(cipher.decrypt(tagged_view, decrypted, &iv), -1);
 }
 
+TEST(CryptoTest, GcmDecryptCanSplitAuthenticatedPrefixWithoutPayloadMemmove) {
+  const auto key = fixed_aes_value(0x51);
+  auto iv = fixed_aes_value(0x62);
+  constexpr std::array<std::uint8_t, 9> plaintext {
+    0x07, 0x03, 0x05, 0x00, 9, 8, 7, 6, 5
+  };
+
+  crypto::cipher::gcm_t cipher {key, false};
+  std::vector<std::uint8_t> tagged_cipher(
+    crypto::cipher::tag_size + plaintext.size()
+  );
+  ASSERT_EQ(
+    cipher.encrypt(
+      {reinterpret_cast<const char *>(plaintext.data()), plaintext.size()},
+      tagged_cipher.data(),
+      &iv
+    ),
+    static_cast<int>(plaintext.size())
+  );
+
+  std::array<std::uint8_t, 4> header {};
+  std::vector<std::uint8_t> payload;
+  ASSERT_EQ(
+    cipher.decrypt(
+      {reinterpret_cast<const char *>(tagged_cipher.data()), tagged_cipher.size()},
+      header,
+      payload,
+      &iv
+    ),
+    0
+  );
+  EXPECT_TRUE(std::equal(header.begin(), header.end(), plaintext.begin()));
+  EXPECT_TRUE(std::equal(payload.begin(), payload.end(), plaintext.begin() + header.size()));
+
+  // The split overload must be byte-equivalent to the existing contiguous output.
+  std::vector<std::uint8_t> contiguous;
+  ASSERT_EQ(
+    cipher.decrypt(
+      {reinterpret_cast<const char *>(tagged_cipher.data()), tagged_cipher.size()},
+      contiguous,
+      &iv
+    ),
+    0
+  );
+  EXPECT_TRUE(std::equal(contiguous.begin(), contiguous.end(), plaintext.begin()));
+}
+
+TEST(CryptoTest, SplitGcmDecryptClearsUnauthenticatedOutputOnTagFailure) {
+  const auto key = fixed_aes_value(0x71);
+  auto iv = fixed_aes_value(0x82);
+  constexpr std::string_view plaintext = "headpayload";
+
+  crypto::cipher::gcm_t cipher {key, false};
+  std::vector<std::uint8_t> tagged_cipher(
+    crypto::cipher::tag_size + plaintext.size()
+  );
+  ASSERT_EQ(
+    cipher.encrypt(plaintext, tagged_cipher.data(), &iv),
+    static_cast<int>(plaintext.size())
+  );
+  tagged_cipher.front() ^= 0x80;
+
+  std::array<std::uint8_t, 4> header {1, 1, 1, 1};
+  std::vector<std::uint8_t> payload {2, 2, 2};
+  EXPECT_EQ(
+    cipher.decrypt(
+      {reinterpret_cast<const char *>(tagged_cipher.data()), tagged_cipher.size()},
+      header,
+      payload,
+      &iv
+    ),
+    -1
+  );
+  EXPECT_TRUE(std::ranges::all_of(header, [](std::uint8_t byte) { return byte == 0; }));
+  EXPECT_TRUE(payload.empty());
+}
+
 TEST(CryptoTest, CbcEncryptReinitializationFailureReturnsError) {
   const auto key = fixed_aes_value(0x33);
   auto iv = fixed_aes_value(0x44);

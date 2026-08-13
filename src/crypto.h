@@ -6,6 +6,7 @@
 
 // standard includes
 #include <array>
+#include <span>
 
 // lib includes
 #include <openssl/evp.h>
@@ -183,6 +184,18 @@ namespace crypto {
       int encrypt(const std::string_view &plaintext, std::uint8_t *tagged_cipher, aes_t *iv);
 
       int decrypt(const std::string_view &cipher, std::vector<std::uint8_t> &plaintext, aes_t *iv);
+
+      /**
+       * Decrypt an authenticated prefix into caller storage and the remaining plaintext into a
+       * vector. The tag is verified before either output may be consumed. This lets framed
+       * protocols remove a fixed header without a post-decrypt vector erase/memmove.
+       */
+      int decrypt(
+        const std::string_view &cipher,
+        std::span<std::uint8_t> plaintext_prefix,
+        std::vector<std::uint8_t> &plaintext_remainder,
+        aes_t *iv
+      );
     };
 
     class cbc_t: public cipher_t {

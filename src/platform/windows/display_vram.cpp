@@ -75,6 +75,8 @@ namespace platf::dxgi {
     std::uint32_t tensor_content_top = 0u;
     std::uint32_t tensor_content_right = 0u;
     std::uint32_t tensor_content_bottom = 0u;
+
+    [[nodiscard]] constexpr bool operator==(const host_sbs_v2_geometry_t &) const = default;
   };
   static_assert(sizeof(host_sbs_v2_geometry_t) == 48u);
 
@@ -683,7 +685,8 @@ namespace platf::dxgi {
             img.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
 
           // Retire an earlier Dump 3D staging batch only when its terminal GPU event is ready.
-          // This poll never flushes or waits and is kept outside production timing telemetry.
+          // GPU readiness never flushes or waits. Once ready, this explicit debug action copies
+          // the complete snapshot here and remains outside production timing telemetry.
           sbs_dumper.poll_pending_readback(device_ctx.get());
 
           // Perf benchmark: CPU wall time of the whole SBS block (estimator dispatch + composite
@@ -708,16 +711,20 @@ namespace platf::dxgi {
           // Production always uses bounded matched pairing: infer asynchronously from a private
           // color slot, then warp only the slot whose frame identity completed.
           const auto input_color_space = input_is_linear ?
-                                           (display->is_hdr() ? models::input_color_space::scrgb_hdr :
+                                           (display_is_hdr ? models::input_color_space::scrgb_hdr :
                                                                 models::input_color_space::linear_sdr) :
                                            models::input_color_space::srgb;
           const auto current_source_timestamp = img_base.frame_timestamp;
           const auto current_content_timestamp = img_base.content_timestamp;
-          // Observe foreground continuity on every SBS conversion, not merely when TensorRT can
-          // accept a new matched frame. A focus-away/focus-back transition between accepted
-          // inferences must revoke stale ROI completions and cached output immediately.
+          // Once the per-stream estimator exists, observe foreground continuity on every SBS
+          // conversion, not merely when TensorRT can accept a new matched frame. Before then
+          // there is no ROI completion/cache to revoke, so synchronous USER32/DWM work has no
+          // consumer. A focus transition between accepted inferences still revokes authority.
           live_window_authority_observation_t pre_copy_authority;
-          if (models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)) {
+          if (detail::host_sbs_window_authority_observation_needed(
+                depth_estimator != nullptr,
+                models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)
+              )) {
             D3D11_TEXTURE2D_DESC live_source_desc {};
             img_ctx.encoder_texture->GetDesc(&live_source_desc);
             pre_copy_authority = observe_live_window_authority(
@@ -901,9 +908,17 @@ namespace platf::dxgi {
                   ) &&
                   recovery_now - matched_output_source_at >
                     models::host_sbs_v2_max_matched_repeat_age;
-                const bool bootstrap_current_output =
-                  !matched_render_slot && !matched_output_valid;
-                if (est.inference_enqueued && matched_candidate_slot && (stale_prior_completion || stale_prior_output || bootstrap_current_output)) {
+                // New/reset analysis domains stay asynchronous. They render current-frame flat
+                // identity until the ordinary completion (or retained-source timeout owner)
+                // consumes this work. Synchronous recovery is reserved for a genuinely stale
+                // prior source after an idle gap, not normal ROI acquire/release.
+                if (
+                  est.inference_enqueued && matched_candidate_slot &&
+                  detail::host_sbs_accepted_frame_needs_synchronous_recovery(
+                    stale_prior_completion,
+                    stale_prior_output
+                  )
+                ) {
                   auto recovered =
                     depth_estimator->finish_pending_depth_for_idle_recovery(
                       input_color_space,
@@ -1291,6 +1306,11 @@ namespace platf::dxgi {
 
           mark_sbs_warp_end(gpu_timer);
 
+          const bool output_conversion_required =
+            host_sbs_encoder_input_state.conversion_required(
+              repeat_matched_output,
+              rgb_present_target != nullptr
+            );
           if (rgb_present_target) {
             // The local AR presenter consumes the production RGB warp directly, avoiding an
             // encode/decode round trip. Exact layouts take the copy fast path; retain the shader
@@ -1298,10 +1318,14 @@ namespace platf::dxgi {
             if (!copy_rgb(final_sbs_texture, final_sbs_is_linear)) {
               draw_rgb(final_sbs_srv, final_sbs_is_linear);
             }
-          } else {
+          } else if (output_conversion_required) {
             // Host SBS accepts identity-oriented sources only. Portrait is represented by actual
             // W < H display dimensions, so this final conversion never rotates a packed 2W frame.
             draw(final_sbs_srv, out_Y_or_YUV_viewport, out_UV_viewport, final_sbs_is_linear);
+            // Native NVENC owns one registered input texture for this whole encode session. The
+            // completed draw remains there until a later conversion overwrites it, so a repeated
+            // packed SBS frame can be encoded again without identical Y and UV draws.
+            host_sbs_encoder_input_state.mark_converted();
           }
           end_sbs_gpu_timer(gpu_timer);
           // Telemetry is deliberately submitted after the production warp/output work. The
@@ -1311,8 +1335,9 @@ namespace platf::dxgi {
 
           // Close the live CPU sample before any requested dump work. A dump may perform lazy
           // shader compilation and submit a large diagnostic staging batch; none of that
-          // represents production Host-SBS frame cost. Readback polling is nonblocking above,
-          // while PNG/JSON serialization and filesystem publication run on the worker.
+          // represents production Host-SBS frame cost. GPU readiness polling is nonblocking
+          // above; explicit dump CPU copies are excluded, while PNG/JSON serialization and
+          // filesystem publication run on the worker.
           if (perf && !snapshot_debug_inputs) {
             const auto dt = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - perf_t0
@@ -1531,7 +1556,7 @@ namespace platf::dxgi {
       // an HDR desktop and also avoids relying on DDup's initially-unknown capture format.
       const bool source_is_hdr = ::video::hdr_to_sdr_tonemap_required(
         ::video::colorspace_is_hdr(colorspace),
-        display->is_hdr(),
+        display_is_hdr,
         true
       );
       constexpr float fallback_sdr_white_nits = 203.0f;
@@ -1734,7 +1759,8 @@ namespace platf::dxgi {
           return false;
         }
         sbs_reprojection_cbuffer = buf_t {buffer};
-      } else {
+        sbs_reprojection_constants.commit(geometry);
+      } else if (!sbs_reprojection_constants.is_current(geometry)) {
         device_ctx->UpdateSubresource(
           sbs_reprojection_cbuffer.get(),
           0,
@@ -1743,6 +1769,7 @@ namespace platf::dxgi {
           0,
           0
         );
+        sbs_reprojection_constants.commit(geometry);
       }
       return true;
     }
@@ -1951,7 +1978,7 @@ namespace platf::dxgi {
         if (ready == S_FALSE) {
           continue;
         }
-        if (FAILED(ready)) {
+        if (ready != S_OK) {
           slot.pending = false;
           continue;
         }
@@ -1961,12 +1988,19 @@ namespace platf::dxgi {
         UINT64 warp_start = 0;
         UINT64 warp_end = 0;
         UINT64 convert_end = 0;
-        const auto start_status = device_ctx->GetData(slot.start.get(), &start, sizeof(start), 0);
-        const auto matched_copy_status = device_ctx->GetData(slot.matched_copy_end.get(), &matched_copy_end, sizeof(matched_copy_end), 0);
-        const auto warp_start_status = device_ctx->GetData(slot.warp_start.get(), &warp_start, sizeof(warp_start), 0);
-        const auto warp_status = device_ctx->GetData(slot.warp_end.get(), &warp_end, sizeof(warp_end), 0);
-        const auto convert_status = device_ctx->GetData(slot.convert_end.get(), &convert_end, sizeof(convert_end), 0);
-        if (SUCCEEDED(start_status) && SUCCEEDED(matched_copy_status) && SUCCEEDED(warp_start_status) && SUCCEEDED(warp_status) && SUCCEEDED(convert_status) && !timing.Disjoint && timing.Frequency > 0 && matched_copy_end >= start && warp_start >= matched_copy_end && warp_end >= warp_start && convert_end >= warp_end) {
+        const auto start_status = device_ctx->GetData(slot.start.get(), &start, sizeof(start), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        const auto matched_copy_status = device_ctx->GetData(slot.matched_copy_end.get(), &matched_copy_end, sizeof(matched_copy_end), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        const auto warp_start_status = device_ctx->GetData(slot.warp_start.get(), &warp_start, sizeof(warp_start), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        const auto warp_status = device_ctx->GetData(slot.warp_end.get(), &warp_end, sizeof(warp_end), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        const auto convert_status = device_ctx->GetData(slot.convert_end.get(), &convert_end, sizeof(convert_end), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        if (start_status == S_FALSE || matched_copy_status == S_FALSE || warp_start_status == S_FALSE || warp_status == S_FALSE || convert_status == S_FALSE) {
+          continue;
+        }
+        if (start_status != S_OK || matched_copy_status != S_OK || warp_start_status != S_OK || warp_status != S_OK || convert_status != S_OK) {
+          slot.pending = false;
+          continue;
+        }
+        if (!timing.Disjoint && timing.Frequency > 0 && matched_copy_end >= start && warp_start >= matched_copy_end && warp_end >= warp_start && convert_end >= warp_end) {
           const double to_ms = 1000.0 / static_cast<double>(timing.Frequency);
           if (slot.has_matched_copy) {
             sbs_perf::add_sample_ms_if_current(
@@ -3549,6 +3583,7 @@ namespace platf::dxgi {
       depth_completion_poll_pending = false;
       depth_authority_reprocess_pending = false;
       sbs_intermediate_is_linear = false;
+      host_sbs_encoder_input_state.reset();
       matched_unknown_frame_error_last = {};
       matched_unknown_frame_errors_suppressed = 0;
       if (diagnostics_enabled) {
@@ -3638,7 +3673,7 @@ namespace platf::dxgi {
         // captured SDR white follows the user's display setting (203 nits is Windows' fallback).
         constexpr float fallback_sdr_white_nits = 203.0f;
         float sdr_white_nits = fallback_sdr_white_nits;
-        if (display->is_hdr()) {
+        if (display_is_hdr) {
           const auto queried_sdr_white_nits = display->get_sdr_white_nits();
           if (queried_sdr_white_nits && *queried_sdr_white_nits > 0.0f) {
             sdr_white_nits = *queried_sdr_white_nits;
@@ -3742,7 +3777,7 @@ namespace platf::dxgi {
             // Semi-planar 16-bit YUV 4:2:0, 10 most significant bits store the value
             create_vertex_shader_helper(convert_yuv420_planar_y_vs_hlsl, convert_Y_or_YUV_vs);
             create_pixel_shader_helper(convert_yuv420_planar_y_ps_hlsl, convert_Y_or_YUV_ps);
-            if (display->is_hdr()) {
+            if (display_is_hdr) {
               create_pixel_shader_helper(convert_yuv420_planar_y_ps_perceptual_quantizer_hlsl, convert_Y_or_YUV_fp16_ps);
             } else {
               create_pixel_shader_helper(convert_yuv420_planar_y_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
@@ -3750,7 +3785,7 @@ namespace platf::dxgi {
             if (downscaling) {
               create_vertex_shader_helper(convert_yuv420_packed_uv_type0s_vs_hlsl, convert_UV_vs);
               create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_hlsl, convert_UV_ps);
-              if (display->is_hdr()) {
+              if (display_is_hdr) {
                 create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_perceptual_quantizer_hlsl, convert_UV_fp16_ps);
               } else {
                 create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_linear_hlsl, convert_UV_fp16_ps);
@@ -3758,7 +3793,7 @@ namespace platf::dxgi {
             } else {
               create_vertex_shader_helper(convert_yuv420_packed_uv_type0_vs_hlsl, convert_UV_vs);
               create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_hlsl, convert_UV_ps);
-              if (display->is_hdr()) {
+              if (display_is_hdr) {
                 create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_perceptual_quantizer_hlsl, convert_UV_fp16_ps);
               } else {
                 create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_linear_hlsl, convert_UV_fp16_ps);
@@ -4030,6 +4065,9 @@ namespace platf::dxgi {
         return -1;
       }
       display = nullptr;
+      // Windows HDR/color-mode changes rebuild this display/capture object. Cache its immutable
+      // session value instead of issuing QueryInterface + GetDesc1 for every FP16 SBS frame.
+      display_is_hdr = this->display->is_hdr();
 
       blend_disable = make_blend(device.get(), false, false);
       if (!blend_disable) {
@@ -4155,6 +4193,7 @@ namespace platf::dxgi {
     std::map<uint32_t, encoder_img_ctx_t> img_ctx_map;
 
     std::shared_ptr<display_base_t> display;
+    bool display_is_hdr = false;
 
     vs_t convert_Y_or_YUV_vs;
     ps_t convert_Y_or_YUV_ps;
@@ -4223,6 +4262,9 @@ namespace platf::dxgi {
     render_target_t sbs_intermediate_rtv;
     shader_res_t sbs_intermediate_srv;
     bool sbs_intermediate_is_linear = false;
+    detail::host_sbs_encoder_input_state_t host_sbs_encoder_input_state;
+    detail::uploaded_value_state_t<host_sbs_v2_geometry_t>
+      sbs_reprojection_constants;
     // Lazily created only for an explicit Dump 3D. These repeat the exact production inverse map
     // after its timing window without allocating the removed V1 forward-coverage resources.
     Microsoft::WRL::ComPtr<ID3D11PixelShader> sbs_debug_v2_mapping_ps;

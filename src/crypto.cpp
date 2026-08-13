@@ -2,6 +2,9 @@
  * @file src/crypto.cpp
  * @brief Definitions for cryptography functions.
  */
+// standard includes
+#include <algorithm>
+
 // lib includes
 #include <openssl/pem.h>
 #include <openssl/rsa.h>
@@ -146,36 +149,88 @@ namespace crypto {
     }
 
     int gcm_t::decrypt(const std::string_view &tagged_cipher, std::vector<std::uint8_t> &plaintext, aes_t *iv) {
-      if (!decrypt_ctx && init_decrypt_gcm(decrypt_ctx, &key, iv, padding)) {
+      return decrypt(tagged_cipher, {}, plaintext, iv);
+    }
+
+    int gcm_t::decrypt(
+      const std::string_view &tagged_cipher,
+      std::span<std::uint8_t> plaintext_prefix,
+      std::vector<std::uint8_t> &plaintext_remainder,
+      aes_t *iv
+    ) {
+      const auto fail = [&]() {
+        std::fill(plaintext_prefix.begin(), plaintext_prefix.end(), std::uint8_t {0});
+        plaintext_remainder.clear();
         return -1;
+      };
+      plaintext_remainder.clear();
+      if (tagged_cipher.size() < tag_size) {
+        return fail();
+      }
+
+      if (!decrypt_ctx && init_decrypt_gcm(decrypt_ctx, &key, iv, padding)) {
+        return fail();
       }
 
       // Calling with cipher == nullptr results in a parameter change
       // without requiring a reallocation of the internal cipher ctx.
       if (EVP_DecryptInit_ex(decrypt_ctx.get(), nullptr, nullptr, nullptr, iv->data()) != 1) {
-        return -1;
+        return fail();
       }
 
       auto cipher = tagged_cipher.substr(tag_size);
       auto tag = tagged_cipher.substr(0, tag_size);
+      if (plaintext_prefix.size() > cipher.size()) {
+        return fail();
+      }
 
-      plaintext.resize(round_to_pkcs7_padded(cipher.size()));
+      auto remaining_cipher = cipher.substr(plaintext_prefix.size());
+      const auto remainder_capacity = std::max<std::size_t>(
+        round_to_pkcs7_padded(remaining_cipher.size()),
+        EVP_MAX_BLOCK_LENGTH
+      );
+      plaintext_remainder.resize(remainder_capacity);
 
-      int update_outlen, final_outlen;
+      int prefix_outlen = 0;
+      int update_outlen = 0;
+      int final_outlen = 0;
 
-      if (EVP_DecryptUpdate(decrypt_ctx.get(), plaintext.data(), &update_outlen, (const std::uint8_t *) cipher.data(), cipher.size()) != 1) {
-        return -1;
+      if (!plaintext_prefix.empty() &&
+          (EVP_DecryptUpdate(
+             decrypt_ctx.get(),
+             plaintext_prefix.data(),
+             &prefix_outlen,
+             reinterpret_cast<const std::uint8_t *>(cipher.data()),
+             plaintext_prefix.size()
+           ) != 1 ||
+           prefix_outlen != static_cast<int>(plaintext_prefix.size()))) {
+        return fail();
+      }
+
+      if (!remaining_cipher.empty() &&
+          EVP_DecryptUpdate(
+            decrypt_ctx.get(),
+            plaintext_remainder.data(),
+            &update_outlen,
+            reinterpret_cast<const std::uint8_t *>(remaining_cipher.data()),
+            remaining_cipher.size()
+          ) != 1) {
+        return fail();
       }
 
       if (EVP_CIPHER_CTX_ctrl(decrypt_ctx.get(), EVP_CTRL_GCM_SET_TAG, tag.size(), const_cast<char *>(tag.data())) != 1) {
-        return -1;
+        return fail();
       }
 
-      if (EVP_DecryptFinal_ex(decrypt_ctx.get(), plaintext.data() + update_outlen, &final_outlen) != 1) {
-        return -1;
+      if (EVP_DecryptFinal_ex(
+            decrypt_ctx.get(),
+            plaintext_remainder.data() + update_outlen,
+            &final_outlen
+          ) != 1) {
+        return fail();
       }
 
-      plaintext.resize(update_outlen + final_outlen);
+      plaintext_remainder.resize(update_outlen + final_outlen);
       return 0;
     }
 

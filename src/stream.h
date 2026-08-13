@@ -14,6 +14,7 @@
 #include <optional>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 // lib includes
 #include <boost/asio.hpp>
@@ -55,6 +56,12 @@ namespace stream {
   constexpr std::int64_t VIDEO_PACING_QUANTUM_NS = 1'000'000;
   constexpr std::int64_t VIDEO_PACING_MAX_CATCHUP_NS = VIDEO_PACING_QUANTUM_NS;
   constexpr std::int64_t VIDEO_BACKLOG_MIN_MAX_AGE_NS = 50'000'000;
+  // ENet has no cross-thread wake primitive. Keep its blocking service interval short so
+  // host-originated rumble, HDR, depth, telemetry, and acknowledgement queues are observed
+  // promptly without moving ENet or cipher ownership off the control thread.
+  constexpr std::chrono::milliseconds CONTROL_OUTGOING_MAX_WAIT {10};
+  constexpr std::size_t VIDEO_RS_CONTEXT_CACHE_LIMIT = 8;
+  constexpr std::size_t VIDEO_SEND_WORKSPACE_RETAIN_LIMIT = 16 * 1024 * 1024;
 
   constexpr std::size_t CONTROL_HEADER_V2_SIZE = 2 * sizeof(std::uint16_t);
   constexpr std::size_t CONTROL_GCM_TAG_SIZE = 16;
@@ -130,8 +137,9 @@ namespace stream {
    * Build a bounded pacing plan from the encoded-data rate and this frame's expected wire size.
    *
    * The nominal rate accounts for the actual data/parity shard ratio and per-packet transport
-   * overhead. A frame-size-derived lower bound keeps every frame within 75% of one frame
-   * interval, leaving capture/encode scheduling slack. The ceiling is a safety limit for
+   * overhead. A frame-size-derived lower bound keeps every frame within half of one frame
+   * interval, reducing decode readiness latency while retaining bitrate-aware anti-burst pacing.
+   * The ceiling is a safety limit for
    * pathological frames, not the ordinary pacing rate.
    */
   [[nodiscard]] constexpr video_pacing_plan_t make_video_pacing_plan(
@@ -168,7 +176,7 @@ namespace stream {
     if (frame_interval_ns <= 0) {
       frame_interval_ns = video_frame_interval_ns(60'000);
     }
-    const auto max_frame_span_ns = std::max<std::int64_t>(1, frame_interval_ns * 3 / 4);
+    const auto max_frame_span_ns = std::max<std::int64_t>(1, frame_interval_ns / 2);
     const auto estimated_wire_bits =
       static_cast<std::uint64_t>(safe_wire_packets) *
       safe_wire_bytes * 8;
@@ -256,6 +264,19 @@ namespace stream {
     return plaintext_size >= CONTROL_HEADER_V2_SIZE &&
            declared_payload_size == plaintext_size - CONTROL_HEADER_V2_SIZE;
   }
+
+  /**
+   * Combine two logical input buffers while reserving and clearing a prefix at every slice.
+   * `storage` is a retained high-watermark workspace; only the returned prefix is valid. This
+   * avoids a full-size allocation and value-initialization on every encoded frame.
+   */
+  [[nodiscard]] std::optional<std::size_t> concat_and_insert_into(
+    std::vector<std::uint8_t> &storage,
+    std::uint64_t insert_size,
+    std::uint64_t slice_size,
+    std::string_view data1,
+    std::string_view data2
+  );
 
   // Sunshine's encrypted Gen-7 protocol uses 0x5502 in both directions for unrelated messages:
   // controller RGB feedback is host->client, while this fixed-size per-frame FEC report is

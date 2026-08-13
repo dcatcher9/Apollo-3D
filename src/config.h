@@ -49,7 +49,7 @@ namespace config {
     std::string output_name;
 
     int max_bitrate;  // Maximum bitrate, sets ceiling in kbps for bitrate requested from client
-    double minimum_fps_target;  ///< Lowest framerate that will be used when streaming. Range 0-1000, 0 = half of client's requested framerate.
+    double minimum_fps_target;  ///< Lowest framerate used when streaming. Range 0-1000; 0 = max(one fifth of the requested rate, 10 FPS).
 
     // Host/offline 2D->3D side-by-side (SBS) settings. Every geometry-producing path runs the
     // Depth Coordinate V2 pipeline with its fixed calibration; only the explicit shared controls

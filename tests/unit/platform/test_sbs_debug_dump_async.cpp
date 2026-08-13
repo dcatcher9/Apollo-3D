@@ -306,7 +306,9 @@ namespace {
 
   TEST(SbsDebugDumpAsyncTest, CollectionChunksAreBoundedAlignedAndComplete) {
     constexpr std::size_t alignment = sizeof(float);
-    std::size_t remaining = dump_detail::cpu_collection_byte_budget * 2u + 20u;
+    static_assert(dump_detail::cpu_collection_byte_budget == 64u * 1024u * 1024u);
+    constexpr std::size_t representative_4k_dump_bytes = 393u * 1024u * 1024u;
+    std::size_t remaining = representative_4k_dump_bytes;
     std::size_t copied = 0;
     unsigned polls = 0;
     while (remaining != 0) {
@@ -323,8 +325,9 @@ namespace {
       remaining -= chunk;
       ++polls;
     }
-    EXPECT_EQ(copied, dump_detail::cpu_collection_byte_budget * 2u + 20u);
-    EXPECT_EQ(polls, 3u);
+    EXPECT_EQ(copied, representative_4k_dump_bytes);
+    EXPECT_EQ(polls, 7u);
+    EXPECT_LT(polls, 99u);  // The former 4 MiB budget needed about 99 polls.
   }
 
   TEST(SbsDebugDumpAsyncTest, WideTextureRowGetsOneEmptyPollOvershoot) {

@@ -581,7 +581,11 @@ namespace nvenc {
     hdr_metadata = {};
   }
 
-  nvenc_encoded_frame nvenc_base::encode_frame(uint64_t frame_index, bool force_idr) {
+  nvenc_encoded_frame nvenc_base::encode_frame(
+    uint64_t frame_index,
+    bool force_idr,
+    std::vector<std::uint8_t> frame_buffer
+  ) {
     if (!encoder) {
       return {};
     }
@@ -650,8 +654,15 @@ namespace nvenc {
     }
 
     auto data_pointer = (uint8_t *) lock_bitstream.bitstreamBufferPtr;
+    // The ENCODED_PACKET_QUEUE_LIMIT bounds how many of these buffers can be in flight. Reusing
+    // their capacity removes a large allocation from the encode path while still copying before
+    // NvEncUnlockBitstream(), as required by the NVENC ownership contract.
+    frame_buffer.assign(
+      data_pointer,
+      data_pointer + lock_bitstream.bitstreamSizeInBytes
+    );
     nvenc_encoded_frame encoded_frame {
-      {data_pointer, data_pointer + lock_bitstream.bitstreamSizeInBytes},
+      std::move(frame_buffer),
       lock_bitstream.outputTimeStamp,
       lock_bitstream.pictureType == NV_ENC_PIC_TYPE_IDR,
       encoder_state.rfi_needs_confirmation,

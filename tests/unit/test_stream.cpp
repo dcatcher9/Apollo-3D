@@ -24,6 +24,8 @@ namespace stream {
 
 using namespace std::chrono_literals;
 
+static_assert(stream::CONTROL_OUTGOING_MAX_WAIT <= 10ms);
+
 TEST(SbsDebugDumpRequestTest, RequiresDiagnosticsAndRuntimeHostSbsOwnership) {
   EXPECT_TRUE(stream::sbs_debug_dump_request_allowed(true, video::SBS_AI, true));
   EXPECT_FALSE(stream::sbs_debug_dump_request_allowed(false, video::SBS_AI, true));
@@ -148,6 +150,11 @@ TEST(VideoTransportConfigTests, EnforcesPacketAndFecWireBounds) {
   EXPECT_FALSE(stream::is_valid_video_transport_config(1392, stream::MIN_REQUIRED_FEC_PACKETS_MAX + 1));
 }
 
+TEST(ControlFeedbackPolicyTests, OutgoingQueuesArePolledWithinTenMilliseconds) {
+  EXPECT_GT(stream::CONTROL_OUTGOING_MAX_WAIT, 0ms);
+  EXPECT_LE(stream::CONTROL_OUTGOING_MAX_WAIT, 10ms);
+}
+
 TEST(VideoTransportConfigTests, EnforcesTenBitFecPacketIndex) {
   constexpr std::size_t block_size = 1408;
   constexpr std::size_t largest_valid_payload = stream::FEC_PACKET_INDEX_MAX * block_size;
@@ -190,6 +197,44 @@ TEST(VideoPacingTests, UsesBitrateFecCadenceAndBoundedBatches) {
     stream::video_pacing_offset(estimated_wire_packets, plan.packets_per_second).count(),
     plan.max_frame_span_ns
   );
+  EXPECT_EQ(plan.max_frame_span_ns, plan.frame_interval_ns / 2);
+  EXPECT_LE(plan.max_frame_span_ns, 5'555'556);
+}
+
+TEST(VideoPacingTests, NinetyFpsFrameSpanIsAtMostHalfAnInterval) {
+  const auto plan = stream::make_video_pacing_plan(
+    200'000,
+    90'000,
+    200,
+    240,
+    1376,
+    1440
+  );
+
+  EXPECT_EQ(plan.frame_interval_ns, 11'111'111);
+  EXPECT_EQ(plan.max_frame_span_ns, 5'555'555);
+  EXPECT_LE(plan.max_frame_span_ns, 5'555'556);
+}
+
+TEST(VideoPacketizationWorkspaceTests, ReusesCapacityAndClearsOnlyInsertedPrefixes) {
+  std::vector<std::uint8_t> workspace(128, 0xA5);
+  const auto original_capacity = workspace.capacity();
+  const std::array<std::uint8_t, 3> first {1, 2, 3};
+  const std::array<std::uint8_t, 2> second {4, 5};
+
+  const auto size = stream::concat_and_insert_into(
+    workspace,
+    2,
+    3,
+    {reinterpret_cast<const char *>(first.data()), first.size()},
+    {reinterpret_cast<const char *>(second.data()), second.size()}
+  );
+
+  ASSERT_EQ(size, 9u);
+  EXPECT_EQ(workspace.capacity(), original_capacity);
+  const std::array<std::uint8_t, 9> expected {0, 0, 1, 2, 3, 0, 0, 4, 5};
+  EXPECT_TRUE(std::equal(expected.begin(), expected.end(), workspace.begin()));
+  EXPECT_EQ(workspace[9], 0xA5);
 }
 
 TEST(VideoPacingTests, LowBitrateThirtyFpsStreamRemainsNegotiatedRateAware) {
@@ -202,8 +247,8 @@ TEST(VideoPacingTests, LowBitrateThirtyFpsStreamRemainsNegotiatedRateAware) {
     1440
   );
   EXPECT_GT(low_rate.target_wire_bps, 10'000'000);
-  EXPECT_LT(low_rate.target_wire_bps, 20'000'000);
-  EXPECT_EQ(low_rate.target_wire_bps, 16'588'801);
+  EXPECT_LT(low_rate.target_wire_bps, 30'000'000);
+  EXPECT_EQ(low_rate.target_wire_bps, 24'883'201);
   EXPECT_LE(
     stream::video_pacing_offset(36, low_rate.packets_per_second).count(),
     low_rate.max_frame_span_ns
@@ -278,6 +323,18 @@ TEST(ControlPayloadValidationTests, EnforcesEncryptedEnvelopeLength) {
   EXPECT_FALSE(stream::is_valid_encrypted_control_payload(stream::CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE + minimum_length - 1, minimum_length));
   EXPECT_FALSE(stream::is_valid_encrypted_control_payload(stream::CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE + minimum_length + 1, minimum_length));
   EXPECT_TRUE(stream::is_valid_encrypted_control_payload(stream::CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE + std::numeric_limits<std::uint16_t>::max(), std::numeric_limits<std::uint16_t>::max()));
+}
+
+TEST(ControlPayloadValidationTests, MinimumEnvelopeAlwaysContainsTheSplitHeader) {
+  EXPECT_EQ(
+    stream::CONTROL_ENCRYPTED_MIN_LENGTH - stream::CONTROL_ENCRYPTED_SEQUENCE_SIZE,
+    stream::CONTROL_GCM_TAG_SIZE + stream::CONTROL_HEADER_V2_SIZE
+  );
+  EXPECT_FALSE(stream::is_valid_encrypted_control_payload(
+    stream::CONTROL_ENCRYPTED_LENGTH_FIELD_SIZE +
+      stream::CONTROL_ENCRYPTED_MIN_LENGTH - 1,
+    stream::CONTROL_ENCRYPTED_MIN_LENGTH - 1
+  ));
 }
 
 TEST(ControlPayloadValidationTests, EnforcesDecryptedInnerLength) {

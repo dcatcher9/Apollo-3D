@@ -76,6 +76,76 @@ namespace platf::dxgi {
   using keyed_mutex_t = util::safe_ptr<IDXGIKeyedMutex, Release<IDXGIKeyedMutex>>;
 
   namespace detail {
+    /** Tracks whether a persistent encoder input already contains a converted Host-SBS output.
+     *
+     * Native NVENC registers one D3D11 input texture for the lifetime of an encode session. A
+     * repeated packed SBS image therefore does not need another RGB-to-YUV draw once that exact
+     * texture has been initialized. Local RGB presentation is deliberately excluded: its
+     * swapchain backbuffer can rotate on every Present().
+     */
+    class host_sbs_encoder_input_state_t {
+    public:
+      [[nodiscard]] constexpr bool conversion_required(
+        const bool repeats_prior_output,
+        const bool local_rgb_presentation
+      ) const noexcept {
+        return local_rgb_presentation || !repeats_prior_output || !initialized_;
+      }
+
+      constexpr void mark_converted() noexcept {
+        initialized_ = true;
+      }
+
+      constexpr void reset() noexcept {
+        initialized_ = false;
+      }
+
+      [[nodiscard]] constexpr bool initialized() const noexcept {
+        return initialized_;
+      }
+
+    private:
+      bool initialized_ = false;
+    };
+
+    /** Accepted-frame synchronization is reserved for an old source that already exceeded the
+     * bounded repeat window. Startup and ordinary analysis-domain resets have no stale source and
+     * must remain on the normal asynchronous completion path. */
+    [[nodiscard]] constexpr bool host_sbs_accepted_frame_needs_synchronous_recovery(
+      const bool stale_prior_completion,
+      const bool stale_prior_output
+    ) noexcept {
+      return stale_prior_completion || stale_prior_output;
+    }
+
+    [[nodiscard]] constexpr bool host_sbs_window_authority_observation_needed(
+      const bool has_depth_estimator,
+      const bool renderer_uses_depth_pipeline
+    ) noexcept {
+      return has_depth_estimator && renderer_uses_depth_pipeline;
+    }
+
+    /** CPU shadow for an immutable-by-value GPU upload. The caller commits only after the D3D
+     * create/update operation has been submitted successfully. */
+    template<typename T>
+    class uploaded_value_state_t {
+    public:
+      [[nodiscard]] constexpr bool is_current(const T &value) const {
+        return value_ && *value_ == value;
+      }
+
+      constexpr void commit(const T &value) {
+        value_ = value;
+      }
+
+      constexpr void reset() noexcept {
+        value_.reset();
+      }
+
+    private:
+      std::optional<T> value_;
+    };
+
     /** Non-owning scope guard for one successful IDXGIKeyedMutex acquisition.
      *
      * Keeping this generic makes the ownership contract testable without a D3D device. The

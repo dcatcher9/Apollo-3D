@@ -1345,6 +1345,103 @@ namespace stream {
       reed_solomon_release(rs);
     }>;
 
+    class rs_cache_t {
+    public:
+      reed_solomon *acquire(std::size_t data_shards, std::size_t parity_shards) {
+        ++use_generation_;
+        for (auto &entry : entries_) {
+          if (entry.context && entry.data_shards == data_shards &&
+              entry.parity_shards == parity_shards) {
+            entry.last_use = use_generation_;
+            return entry.context.get();
+          }
+        }
+
+        auto *replacement = &entries_.front();
+        for (auto &entry : entries_) {
+          if (!entry.context) {
+            replacement = &entry;
+            break;
+          }
+          if (entry.last_use < replacement->last_use) {
+            replacement = &entry;
+          }
+        }
+
+        rs_t context {reed_solomon_new(data_shards, parity_shards)};
+        if (!context) {
+          return nullptr;
+        }
+
+        replacement->data_shards = data_shards;
+        replacement->parity_shards = parity_shards;
+        replacement->last_use = use_generation_;
+        replacement->context = std::move(context);
+        return replacement->context.get();
+      }
+
+      void discard(std::size_t data_shards, std::size_t parity_shards) {
+        for (auto &entry : entries_) {
+          if (entry.context && entry.data_shards == data_shards &&
+              entry.parity_shards == parity_shards) {
+            entry.context.reset();
+            return;
+          }
+        }
+      }
+
+    private:
+      struct entry_t {
+        std::size_t data_shards = 0;
+        std::size_t parity_shards = 0;
+        std::uint64_t last_use = 0;
+        rs_t context;
+      };
+
+      std::array<entry_t, VIDEO_RS_CONTEXT_CACHE_LIMIT> entries_;
+      std::uint64_t use_generation_ = 0;
+    };
+
+    struct workspace_t {
+      std::vector<char> shards;
+      std::vector<char> headers;
+      std::vector<std::uint8_t *> shard_pointers;
+      std::vector<platf::buffer_descriptor_t> payload_buffers;
+
+      void ensure_capacity(
+        std::size_t shard_bytes,
+        std::size_t header_bytes,
+        std::size_t shard_count
+      ) {
+        if (shards.size() < shard_bytes) {
+          shards.resize(shard_bytes);
+        }
+        if (headers.size() < header_bytes) {
+          headers.resize(header_bytes);
+        }
+        if (shard_pointers.size() < shard_count) {
+          shard_pointers.resize(shard_count);
+        }
+        payload_buffers.clear();
+        if (payload_buffers.capacity() < 2) {
+          payload_buffers.reserve(2);
+        }
+      }
+
+      void release_oversized() {
+        if (shards.capacity() > VIDEO_SEND_WORKSPACE_RETAIN_LIMIT) {
+          std::vector<char>().swap(shards);
+        }
+        if (headers.capacity() > VIDEO_SEND_WORKSPACE_RETAIN_LIMIT) {
+          std::vector<char>().swap(headers);
+        }
+        if (shard_pointers.capacity() * sizeof(std::uint8_t *) >
+            VIDEO_SEND_WORKSPACE_RETAIN_LIMIT) {
+          std::vector<std::uint8_t *>().swap(shard_pointers);
+        }
+      }
+    };
+
     struct fec_t {
       size_t data_shards;
       size_t nr_shards;
@@ -1352,26 +1449,38 @@ namespace stream {
 
       size_t blocksize;
       size_t prefixsize;
-      util::buffer_t<char> shards;
-      util::buffer_t<char> headers;
-      util::buffer_t<uint8_t *> shards_p;
-
-      std::vector<platf::buffer_descriptor_t> payload_buffers;
+      workspace_t *workspace;
 
       char *data(size_t el) {
-        return (char *) shards_p[el];
+        return reinterpret_cast<char *>(workspace->shard_pointers[el]);
       }
 
       char *prefix(size_t el) {
-        return prefixsize ? &headers[el * prefixsize] : nullptr;
+        return prefixsize ? workspace->headers.data() + el * prefixsize : nullptr;
+      }
+
+      const char *headers_begin() const {
+        return prefixsize ? workspace->headers.data() : nullptr;
       }
 
       size_t size() const {
         return nr_shards;
       }
+
+      std::vector<platf::buffer_descriptor_t> &payload_buffers() {
+        return workspace->payload_buffers;
+      }
     };
 
-    static fec_t encode(const std::string_view &payload, size_t blocksize, size_t fecpercentage, size_t minparityshards, size_t prefixsize) {
+    static fec_t encode(
+      const std::string_view &payload,
+      size_t blocksize,
+      size_t fecpercentage,
+      size_t minparityshards,
+      size_t prefixsize,
+      rs_cache_t &rs_cache,
+      workspace_t &workspace
+    ) {
       if (payload.empty() || blocksize == 0 || fecpercentage > 255 || minparityshards > MIN_REQUIRED_FEC_PACKETS_MAX) {
         throw std::invalid_argument("Invalid Reed-Solomon FEC parameters");
       }
@@ -1399,10 +1508,15 @@ namespace stream {
       // If we need to store a zero-padded data shard, allocate that first to
       // to keep the shards in order and reduce buffer fragmentation
       auto parity_shard_offset = pad ? 1 : 0;
-      util::buffer_t<char> shards {(parity_shard_offset + parity_shards) * blocksize};
-      util::buffer_t<uint8_t *> shards_p {nr_shards};
-      std::vector<platf::buffer_descriptor_t> payload_buffers;
-      payload_buffers.reserve(2);
+      const auto shard_storage_size = (parity_shard_offset + parity_shards) * blocksize;
+      workspace.ensure_capacity(
+        shard_storage_size,
+        nr_shards * prefixsize,
+        nr_shards
+      );
+      auto &shards = workspace.shards;
+      auto &shards_p = workspace.shard_pointers;
+      auto &payload_buffers = workspace.payload_buffers;
 
       // Point into the payload buffer for all except the final padded data shard
       auto next = std::begin(payload);
@@ -1414,7 +1528,7 @@ namespace stream {
 
       // If the last data shard needs to be zero-padded, we must use the shards buffer
       if (pad) {
-        shards_p[aligned_data_shards] = (uint8_t *) &shards[0];
+        shards_p[aligned_data_shards] = reinterpret_cast<std::uint8_t *>(shards.data());
 
         // GCC doesn't figure out that std::copy_n() can be replaced with memcpy() here
         // and ends up compiling a horribly slow element-by-element copy loop, so we
@@ -1428,21 +1542,25 @@ namespace stream {
       }
 
       // Add a payload buffer describing the shard buffer
-      payload_buffers.emplace_back(std::begin(shards), shards.size());
+      payload_buffers.emplace_back(shards.data(), shard_storage_size);
 
       if (fecpercentage != 0) {
         // Point into our allocated buffer for the parity shards
         for (auto x = 0; x < parity_shards; ++x) {
-          shards_p[data_shards + x] = (uint8_t *) &shards[(parity_shard_offset + x) * blocksize];
+          shards_p[data_shards + x] = reinterpret_cast<std::uint8_t *>(
+            shards.data() + (parity_shard_offset + x) * blocksize
+          );
         }
 
-        // packets = parity_shards + data_shards
-        rs_t rs {reed_solomon_new(data_shards, parity_shards)};
+        // Matrix construction is substantially more expensive than encoding and shard counts are
+        // highly repetitive. Retain a fixed number of contexts on this serial sender thread.
+        auto *rs = rs_cache.acquire(data_shards, parity_shards);
         if (!rs) {
           BOOST_LOG(error) << "Failed to allocate video Reed-Solomon context; sending this FEC block without parity"sv;
           nr_shards = data_shards;
           fecpercentage = 0;
-        } else if (reed_solomon_encode(rs.get(), shards_p.begin(), nr_shards, blocksize) != 0) {
+        } else if (reed_solomon_encode(rs, shards_p.data(), nr_shards, blocksize) != 0) {
+          rs_cache.discard(data_shards, parity_shards);
           BOOST_LOG(error) << "Failed to encode video Reed-Solomon shards; sending this FEC block without parity"sv;
           nr_shards = data_shards;
           fecpercentage = 0;
@@ -1455,10 +1573,7 @@ namespace stream {
         fecpercentage,
         blocksize,
         prefixsize,
-        std::move(shards),
-        util::buffer_t<char> {nr_shards * prefixsize},
-        std::move(shards_p),
-        std::move(payload_buffers),
+        &workspace,
       };
     }
   }  // namespace fec
@@ -1470,27 +1585,38 @@ namespace stream {
    * @param data1 The first data buffer.
    * @param data2 The second data buffer.
    */
-  std::vector<uint8_t> concat_and_insert(uint64_t insert_size, uint64_t slice_size, const std::string_view &data1, const std::string_view &data2) {
+  std::optional<std::size_t> concat_and_insert_into(
+    std::vector<std::uint8_t> &storage,
+    std::uint64_t insert_size,
+    std::uint64_t slice_size,
+    const std::string_view data1,
+    const std::string_view data2
+  ) {
     constexpr auto size_max = std::numeric_limits<std::size_t>::max();
     if (slice_size == 0 || slice_size > size_max || insert_size > size_max || data1.size() > size_max - data2.size()) {
-      return {};
+      return std::nullopt;
     }
 
     const auto slice_bytes = static_cast<std::size_t>(slice_size);
     const auto insert_bytes = static_cast<std::size_t>(insert_size);
     const auto data_size = data1.size() + data2.size();
+    if (data_size == 0) {
+      return std::nullopt;
+    }
     const auto elements = data_size / slice_bytes + (data_size % slice_bytes != 0);
     if (elements != 0 && insert_bytes > (size_max - data_size) / elements) {
-      return {};
+      return std::nullopt;
     }
 
-    std::vector<uint8_t> result;
-    result.resize(data_size + elements * insert_bytes);
+    const auto result_size = data_size + elements * insert_bytes;
+    if (storage.size() < result_size) {
+      storage.resize(result_size);
+    }
 
     std::size_t source_offset = 0;
     std::size_t output_offset = 0;
     while (source_offset < data_size) {
-      // resize() zero-initializes the inserted prefix.
+      std::memset(storage.data() + output_offset, 0, insert_bytes);
       output_offset += insert_bytes;
       const auto chunk_size = std::min(slice_bytes, data_size - source_offset);
 
@@ -1498,7 +1624,7 @@ namespace stream {
       if (source_offset < data1.size()) {
         first_size = std::min(chunk_size, data1.size() - source_offset);
         std::memcpy(
-          result.data() + output_offset,
+          storage.data() + output_offset,
           data1.data() + source_offset,
           first_size
         );
@@ -1508,7 +1634,7 @@ namespace stream {
       if (second_size != 0) {
         const auto second_offset = source_offset + first_size - data1.size();
         std::memcpy(
-          result.data() + output_offset + first_size,
+          storage.data() + output_offset + first_size,
           data2.data() + second_offset,
           second_size
         );
@@ -1518,6 +1644,22 @@ namespace stream {
       output_offset += chunk_size;
     }
 
+    return result_size;
+  }
+
+  std::vector<uint8_t> concat_and_insert(uint64_t insert_size, uint64_t slice_size, const std::string_view &data1, const std::string_view &data2) {
+    std::vector<std::uint8_t> result;
+    const auto result_size = concat_and_insert_into(
+      result,
+      insert_size,
+      slice_size,
+      data1,
+      data2
+    );
+    if (!result_size) {
+      return {};
+    }
+    result.resize(*result_size);
     return result;
   }
 
@@ -2154,8 +2296,9 @@ namespace stream {
       iv[10] = 'C';  // Client originated
       iv[11] = 'C';  // Control stream
 
-      std::vector<uint8_t> plaintext;
-      if (cipher.decrypt(tagged_cipher, plaintext, &iv)) {
+      std::array<std::uint8_t, CONTROL_HEADER_V2_SIZE> plaintext_header;
+      std::vector<uint8_t> plaintext_payload;
+      if (cipher.decrypt(tagged_cipher, plaintext_header, plaintext_payload, &iv)) {
         // something went wrong :(
 
         BOOST_LOG(error) << "Failed to verify tag"sv;
@@ -2164,26 +2307,27 @@ namespace stream {
         return;
       }
 
-      if (plaintext.size() < CONTROL_HEADER_V2_SIZE) {
-        BOOST_LOG(warning) << "Dropping encrypted control message with a runt plaintext header"sv;
-        return;
-      }
-
       std::uint16_t type;
       std::uint16_t declared_payload_size;
-      std::memcpy(&type, plaintext.data(), sizeof(type));
-      std::memcpy(&declared_payload_size, plaintext.data() + sizeof(type), sizeof(declared_payload_size));
+      std::memcpy(&type, plaintext_header.data(), sizeof(type));
+      std::memcpy(
+        &declared_payload_size,
+        plaintext_header.data() + sizeof(type),
+        sizeof(declared_payload_size)
+      );
       type = util::endian::little(type);
       declared_payload_size = util::endian::little(declared_payload_size);
-      if (!is_valid_decrypted_control_payload(plaintext.size(), declared_payload_size)) {
+      if (declared_payload_size != plaintext_payload.size()) {
         BOOST_LOG(warning) << "Dropping encrypted control message with mismatched inner length: declared "sv
-                           << declared_payload_size << " bytes in a "sv << plaintext.size() << "-byte plaintext"sv;
+                           << declared_payload_size << " bytes in a "sv
+                           << (CONTROL_HEADER_V2_SIZE + plaintext_payload.size())
+                           << "-byte plaintext"sv;
         return;
       }
 
       std::string_view next_payload {
-        (char *) plaintext.data() + CONTROL_HEADER_V2_SIZE,
-        declared_payload_size
+        reinterpret_cast<char *>(plaintext_payload.data()),
+        plaintext_payload.size()
       };
 
       if (type == control_packet::encrypted) {
@@ -2194,8 +2338,11 @@ namespace stream {
 
       // Input data is already authenticated by the outer control-v2 envelope.
       if (type == control_packet::input) {
-        plaintext.erase(std::begin(plaintext), std::begin(plaintext) + CONTROL_HEADER_V2_SIZE);
-        input::passthrough(session->input, std::move(plaintext), session::permissions(*session));
+        input::passthrough(
+          session->input,
+          std::move(plaintext_payload),
+          session::permissions(*session)
+        );
       } else {
         server->call(type, session, next_payload, true);
       }
@@ -2210,14 +2357,16 @@ namespace stream {
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
     while (!shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
-      auto iteration_timeout = 150ms;
+      auto iteration_timeout = CONTROL_OUTGOING_MAX_WAIT;
       {
         auto slot_lock = server->_session.lock();
         auto *session = server->_session->session;
         if (session && !shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
           if (session->control.sbs_telemetry_subscription->enabled()) {
-            iteration_timeout =
-              session->control.sbs_telemetry_subscription->focused() ? 50ms : 100ms;
+            iteration_timeout = std::min(
+              iteration_timeout,
+              session->control.sbs_telemetry_subscription->focused() ? 50ms : 100ms
+            );
           }
           if (std::chrono::steady_clock::now() > session->pingTimeout) {
             const auto identity = server->_session->peer ?
@@ -2455,6 +2604,9 @@ namespace stream {
     logging::time_delta_periodic_logger frame_network_latency_logger(info, "Network: frame's overall network latency");
 
     crypto::aes_t iv(12);
+    std::vector<std::uint8_t> packetization_storage;
+    fec::rs_cache_t video_rs_cache;
+    fec::workspace_t video_fec_workspace;
 
     auto timer = platf::create_high_precision_timer();
     if (!timer || !*timer) {
@@ -2465,6 +2617,12 @@ namespace stream {
     auto ratecontrol_next_frame_start = std::chrono::steady_clock::now();
 
     while (auto packet = packets->pop()) {
+      auto release_oversized_workspaces = util::fail_guard([&]() {
+        if (packetization_storage.capacity() > VIDEO_SEND_WORKSPACE_RETAIN_LIMIT) {
+          std::vector<std::uint8_t>().swap(packetization_storage);
+        }
+        video_fec_workspace.release_oversized();
+      });
       if (shutdown_event->peek()) {
         break;
       }
@@ -2538,13 +2696,22 @@ namespace stream {
       // Insert space for packet headers
       auto blocksize = channel->packet_size + MAX_RTP_HEADER_SIZE;
       auto payload_blocksize = blocksize - sizeof(video_packet_raw_t);
-      auto payload_new = concat_and_insert(sizeof(video_packet_raw_t), payload_blocksize, std::string_view {(char *) &frame_header, sizeof(frame_header)}, payload);
-      if (payload_new.empty()) {
+      const auto packetized_size = concat_and_insert_into(
+        packetization_storage,
+        sizeof(video_packet_raw_t),
+        payload_blocksize,
+        std::string_view {(char *) &frame_header, sizeof(frame_header)},
+        payload
+      );
+      if (!packetized_size) {
         request_recovery_idr("video payload packetization failed"sv);
         continue;
       }
 
-      payload = std::string_view {(char *) payload_new.data(), payload_new.size()};
+      payload = std::string_view {
+        reinterpret_cast<char *>(packetization_storage.data()),
+        *packetized_size
+      };
 
       // There are 2 bits for FEC block count for a maximum of 4 FEC blocks
       constexpr auto MAX_FEC_BLOCKS = 4;
@@ -2691,7 +2858,15 @@ namespace stream {
           }
 
           frame_fec_latency_logger.first_point_now();
-          auto shards = fec::encode(current_payload, blocksize, fecPercentage, channel->min_required_fec_packets, sizeof(video_packet_enc_prefix_t));
+          auto shards = fec::encode(
+            current_payload,
+            blocksize,
+            fecPercentage,
+            channel->min_required_fec_packets,
+            sizeof(video_packet_enc_prefix_t),
+            video_rs_cache,
+            video_fec_workspace
+          );
           frame_fec_latency_logger.second_point_now_and_log();
 
           // Reserve this whole block's sequence range before the first send. If a send throws
@@ -2702,9 +2877,9 @@ namespace stream {
 
           auto peer_address = channel->peer.address();
           auto batch_info = platf::batched_send_info_t {
-            shards.headers.begin(),
+            shards.headers_begin(),
             shards.prefixsize,
-            shards.payload_buffers,
+            shards.payload_buffers(),
             shards.blocksize,
             0,
             0,

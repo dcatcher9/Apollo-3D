@@ -530,17 +530,17 @@ An explicit dump submits every GPU artifact to a single ordered D3D11 staging ba
 that batch with one event query. The render thread never flushes or waits for it: later conversions
 poll with `DONOTFLUSH`, map only after completion with `DO_NOT_WAIT`, and then hand CPU-owned bytes
 to the process publication worker. Because every copy precedes the event and all later live writes
-follow it on the same immediate context, the package remains one exact matched frame without a
-capture-cadence stall. Only one GPU batch or CPU publication may be pending per session. Once the
-event is ready, CPU collection is resumable: each conversion copies at most 4 MiB, uses at most
-eight maps, and observes a 2 ms turn budget (with a one-row progress exception for a texture row
-wider than the byte budget). Every map is released in the same callback and publication begins only
-after all slices are complete. A 4K HDR diagnostic batch can contain about 353 MiB of logical data,
-so collection may span many frames while avoiding the former 100+ ms single-callback copy. Logs
-report GPU-ready age, cumulative CPU collection time, poll count, and wall time. While Host SBS
-remains active, the pending batch owns the retained-source conversion poll so even a completely
-static desktop receives every later callback. If the session ends or changes mode first, its
-unpublished diagnostic batch is cancelled at teardown instead of making teardown wait for the GPU.
+follow it on the same immediate context, the package remains one exact matched frame. Only one GPU
+batch or CPU publication may be pending per session. Once the event is ready, CPU collection is
+resumable: each conversion copies at most 64 MiB, uses at most eight maps, and observes a 2 ms turn
+budget (with a one-row progress exception for a texture row wider than the byte budget). Every map
+is released in the same callback and publication begins only after all slices are complete. Dump 3D
+is an explicit diagnostic action, so the larger chunks intentionally trade capture cadence for much
+fewer collection polls and simpler observation. Logs report GPU-ready age, cumulative CPU collection
+time, poll count, and wall time. While Host SBS remains active, the pending batch owns the retained-
+source conversion poll so even a completely static desktop receives every later callback. If the
+session ends or changes mode first, its unpublished diagnostic batch is cancelled at teardown
+instead of making teardown wait for the GPU.
 
 Use `.f32` artifacts for quantitative comparisons. Independently stretched PNG previews can hide
 scale differences and are diagnostic only. The supported commands, metrics, and baseline policy live

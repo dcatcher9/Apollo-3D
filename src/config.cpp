@@ -75,7 +75,7 @@ namespace config {
     {},  // output_name
 
     0,  // max_bitrate
-    0,  // minimum_fps_target (0 = framerate)
+    0,  // minimum_fps_target (0 = max(requested framerate / 5, 10 FPS))
 
     {},  // sbs (tuned defaults are the sbs_t member initializers in config.h)
   };

@@ -106,6 +106,91 @@ namespace {
     EXPECT_EQ(timestamps.content_timestamp, 300);
   }
 
+  TEST(WindowsHostSbsEncoderInputStateTest, FirstRepeatStillInitializesPersistentInput) {
+    platf::dxgi::detail::host_sbs_encoder_input_state_t state;
+
+    EXPECT_TRUE(state.conversion_required(true, false));
+    state.mark_converted();
+    EXPECT_FALSE(state.conversion_required(true, false));
+    EXPECT_TRUE(state.conversion_required(false, false));
+  }
+
+  TEST(WindowsHostSbsEncoderInputStateTest, ResetInvalidatesPersistentInput) {
+    platf::dxgi::detail::host_sbs_encoder_input_state_t state;
+    state.mark_converted();
+    ASSERT_TRUE(state.initialized());
+
+    state.reset();
+
+    EXPECT_FALSE(state.initialized());
+    EXPECT_TRUE(state.conversion_required(true, false));
+  }
+
+  TEST(WindowsHostSbsEncoderInputStateTest, LocalRgbBackbufferIsNeverReused) {
+    platf::dxgi::detail::host_sbs_encoder_input_state_t state;
+    state.mark_converted();
+
+    EXPECT_TRUE(state.conversion_required(true, true));
+  }
+
+  TEST(WindowsHostSbsRecoveryTest, StartupAndDomainResetStayAsynchronous) {
+    EXPECT_FALSE(
+      platf::dxgi::detail::host_sbs_accepted_frame_needs_synchronous_recovery(
+        false,
+        false
+      )
+    );
+  }
+
+  TEST(WindowsHostSbsRecoveryTest, TrulyStalePriorSourceUsesBoundedRecovery) {
+    EXPECT_TRUE(
+      platf::dxgi::detail::host_sbs_accepted_frame_needs_synchronous_recovery(
+        true,
+        false
+      )
+    );
+    EXPECT_TRUE(
+      platf::dxgi::detail::host_sbs_accepted_frame_needs_synchronous_recovery(
+        false,
+        true
+      )
+    );
+  }
+
+  TEST(WindowsHostSbsAuthorityTest, SamplingRequiresAnEstimatorConsumer) {
+    EXPECT_FALSE(
+      platf::dxgi::detail::host_sbs_window_authority_observation_needed(
+        false,
+        true
+      )
+    );
+    EXPECT_FALSE(
+      platf::dxgi::detail::host_sbs_window_authority_observation_needed(
+        true,
+        false
+      )
+    );
+    EXPECT_TRUE(
+      platf::dxgi::detail::host_sbs_window_authority_observation_needed(
+        true,
+        true
+      )
+    );
+  }
+
+  TEST(WindowsUploadedValueStateTest, CommitsOnlyExplicitlyAcceptedValue) {
+    platf::dxgi::detail::uploaded_value_state_t<std::array<int, 3>> state;
+    constexpr std::array first {1, 2, 3};
+    constexpr std::array second {1, 2, 4};
+
+    EXPECT_FALSE(state.is_current(first));
+    state.commit(first);
+    EXPECT_TRUE(state.is_current(first));
+    EXPECT_FALSE(state.is_current(second));
+    state.reset();
+    EXPECT_FALSE(state.is_current(first));
+  }
+
   struct fake_desktop_retry_operations_t {
     std::vector<bool> attempt_results;
     bool synchronization_result = true;

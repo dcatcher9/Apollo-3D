@@ -285,19 +285,40 @@ namespace video {
       }
     }
 
-    nvenc::nvenc_encoded_frame encode_frame(uint64_t frame_index) {
+    nvenc::nvenc_encoded_frame encode_frame(
+      uint64_t frame_index,
+      std::vector<std::uint8_t> &&frame_buffer
+    ) {
       if (!device || !device->nvenc) {
         return {};
       }
 
-      auto result = device->nvenc->encode_frame(frame_index, force_idr);
+      auto result = device->nvenc->encode_frame(
+        frame_index,
+        force_idr,
+        std::move(frame_buffer)
+      );
       force_idr = false;
       return result;
+    }
+
+    std::vector<std::uint8_t> acquire_frame_buffer() {
+      return frame_buffer_pool->acquire();
+    }
+
+    void recycle_frame_buffer(std::vector<std::uint8_t> &&frame_buffer) {
+      frame_buffer_pool->recycle(std::move(frame_buffer));
+    }
+
+    const std::shared_ptr<encoded_frame_buffer_pool_t> &frame_pool() const {
+      return frame_buffer_pool;
     }
 
   private:
     std::unique_ptr<platf::nvenc_encode_device_t> device;
     bool force_idr = false;
+    std::shared_ptr<encoded_frame_buffer_pool_t> frame_buffer_pool =
+      std::make_shared<encoded_frame_buffer_pool_t>();
   };
 
   struct capture_ctx_t {
@@ -573,9 +594,8 @@ namespace video {
           if (*it && it->use_count() == 1) {
             img_out = *it;
             if (it != imgs.begin()) {
-              // move image to the front of the list to prioritize its reusal
-              imgs.erase(it);
-              imgs.push_front(img_out);
+              // Relink the existing node so the per-frame LRU update does not allocate.
+              imgs.splice(imgs.begin(), imgs, it);
             }
             break;
           }
@@ -588,9 +608,7 @@ namespace video {
               *it = disp->alloc_img();
               img_out = *it;
               if (it != imgs.begin()) {
-                // move image to the front of the list to prioritize its reusal
-                imgs.erase(it);
-                imgs.push_front(img_out);
+                imgs.splice(imgs.begin(), imgs, it);
               }
               break;
             }
@@ -752,9 +770,13 @@ namespace video {
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp,
     std::optional<std::chrono::steady_clock::time_point> content_timestamp
   ) {
-    auto encoded_frame = session.encode_frame(frame_nr);
+    auto encoded_frame = session.encode_frame(
+      frame_nr,
+      session.acquire_frame_buffer()
+    );
     if (encoded_frame.data.empty()) {
       BOOST_LOG(error) << "NvENC returned empty packet";
+      session.recycle_frame_buffer(std::move(encoded_frame.data));
       return {true, 0, false};
     }
 
@@ -762,7 +784,12 @@ namespace video {
       BOOST_LOG(error) << "NvENC frame index mismatch " << frame_nr << " " << encoded_frame.frame_index;
     }
 
-    auto packet = std::make_unique<packet_raw_generic>(std::move(encoded_frame.data), encoded_frame.frame_index, encoded_frame.idr);
+    auto packet = std::make_unique<packet_raw_generic>(
+      std::move(encoded_frame.data),
+      encoded_frame.frame_index,
+      encoded_frame.idr,
+      session.frame_pool()
+    );
     packet->channel_data = channel_data;
     packet->after_ref_frame_invalidation = encoded_frame.after_ref_frame_invalidation;
     packet->frame_timestamp = frame_timestamp;
@@ -926,7 +953,10 @@ namespace video {
 
       // Encode at a minimum FPS to avoid image quality issues with static content
       if (!requested_idr_frame || images->peek()) {
-        const auto image_wait = depth_pipeline_ready_event && depth_pipeline_ready_event->peek() ?
+        const auto image_wait = detail::should_poll_ready_depth_without_wait(
+                                  depth_pipeline_ready_event && depth_pipeline_ready_event->peek(),
+                                  static_cast<bool>(last_img)
+                                ) ?
                                   0ns :
                                   max_frametime;
         if (auto img = images->pop(image_wait)) {

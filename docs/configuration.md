@@ -831,7 +831,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td rowspan="3">Choices</td>
         <td>0</td>
-        <td>Use half the stream's FPS as the minimum target.</td>
+        <td>Use one fifth of the stream's FPS, with a 10 FPS floor, as the minimum target.</td>
     </tr>
     <tr>
         <td>1-1000</td>

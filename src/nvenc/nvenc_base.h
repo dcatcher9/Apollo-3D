@@ -85,9 +85,14 @@ namespace nvenc {
      *        Afterwards serves as parameter for `invalidate_ref_frames()`.
      *        No restrictions on the first frame index, but later frame indexes must be subsequent.
      * @param force_idr Whether to encode frame as forced IDR.
+     * @param frame_buffer Recyclable storage for the copied bitstream.
      * @return Encoded frame.
      */
-    nvenc_encoded_frame encode_frame(uint64_t frame_index, bool force_idr);
+    nvenc_encoded_frame encode_frame(
+      uint64_t frame_index,
+      bool force_idr,
+      std::vector<std::uint8_t> frame_buffer = {}
+    );
 
     /**
      * @brief Perform reference frame invalidation (RFI) procedure.

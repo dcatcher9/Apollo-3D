@@ -1990,6 +1990,44 @@ TEST(ParallaxV2ContractTest, DebugDumpStagingPreservesEventAndRequestOrdering) {
   EXPECT_EQ(display.find("preflight_requested_v2_frame("), std::string::npos);
 }
 
+TEST(ParallaxV2ContractTest, GpuTimerKeepsEveryNotReadyTimestampPending) {
+  const auto display = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp"
+  );
+  ASSERT_FALSE(display.empty());
+
+  const auto resolve = display.find("void resolve_sbs_gpu_timers()");
+  const auto begin = display.find("sbs_gpu_timer_slot_t *begin_sbs_gpu_timer()", resolve);
+  ASSERT_NE(resolve, std::string::npos);
+  ASSERT_NE(begin, std::string::npos);
+  const auto body = display.substr(resolve, begin - resolve);
+
+  EXPECT_NE(body.find("if (ready == S_FALSE)"), std::string::npos);
+  EXPECT_NE(body.find("if (ready != S_OK)"), std::string::npos);
+  EXPECT_NE(body.find("start_status == S_FALSE"), std::string::npos);
+  EXPECT_NE(body.find("convert_status == S_FALSE"), std::string::npos);
+  EXPECT_NE(body.find("start_status != S_OK"), std::string::npos);
+  EXPECT_NE(body.find("convert_status != S_OK"), std::string::npos);
+  EXPECT_EQ(body.find("SUCCEEDED(start_status)"), std::string::npos);
+  const auto not_ready = body.find("start_status == S_FALSE");
+  const auto retire_failure = body.find("start_status != S_OK");
+  const auto retire_slot = body.find("slot.pending = false", retire_failure);
+  ASSERT_NE(not_ready, std::string::npos);
+  ASSERT_NE(retire_failure, std::string::npos);
+  ASSERT_NE(retire_slot, std::string::npos);
+  EXPECT_LT(not_ready, retire_failure);
+  EXPECT_LT(retire_failure, retire_slot);
+
+  std::size_t nonflushing_queries = 0;
+  for (std::size_t offset = 0;
+       (offset = body.find("D3D11_ASYNC_GETDATA_DONOTFLUSH", offset)) !=
+       std::string::npos;
+       offset += 1) {
+    ++nonflushing_queries;
+  }
+  EXPECT_EQ(nonflushing_queries, 6u);
+}
+
 TEST(ParallaxV2ContractTest, DebugDumpAcceptsAdvertisedWindowsCaptureColorFormats) {
   const auto dump = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
@@ -3282,6 +3320,59 @@ TEST(DirectxShaderTest, CompilesContractiveDirectParallaxRendererAndDiagnostics)
             static_cast<const char *>(shader_errors->GetBufferPointer()) :
             "no compiler diagnostics");
   }
+}
+
+TEST(EncodeWaitPolicyTests, ReadyDepthCannotSpinBeforeFirstRealFrame) {
+  EXPECT_FALSE(video::detail::should_poll_ready_depth_without_wait(false, false));
+  EXPECT_FALSE(video::detail::should_poll_ready_depth_without_wait(false, true));
+  EXPECT_FALSE(video::detail::should_poll_ready_depth_without_wait(true, false));
+  EXPECT_TRUE(video::detail::should_poll_ready_depth_without_wait(true, true));
+}
+
+TEST(EncodedFrameBufferPoolTests, RecyclesBoundedReasonableBuffers) {
+  video::encoded_frame_buffer_pool_t pool;
+  std::vector<std::uint8_t> buffer(1024, 0x5A);
+  const auto capacity = buffer.capacity();
+  pool.recycle(std::move(buffer));
+
+  auto reused = pool.acquire();
+  EXPECT_TRUE(reused.empty());
+  EXPECT_GE(reused.capacity(), capacity);
+  EXPECT_TRUE(pool.acquire().empty());
+}
+
+TEST(EncodedFrameBufferPoolTests, PacketDestructionReturnsStorageToPool) {
+  auto pool = std::make_shared<video::encoded_frame_buffer_pool_t>();
+  std::vector<std::uint8_t> storage(4096, 0x3C);
+  const auto capacity = storage.capacity();
+  {
+    video::packet_raw_generic packet {std::move(storage), 7, false, pool};
+    EXPECT_EQ(packet.data_size(), 4096u);
+  }
+
+  auto reused = pool->acquire();
+  EXPECT_TRUE(reused.empty());
+  EXPECT_GE(reused.capacity(), capacity);
+}
+
+TEST(EncodedFrameBufferPoolTests, PoolIsBoundedAndRejectsOversizedCapacity) {
+  video::encoded_frame_buffer_pool_t pool;
+  for (std::size_t i = 0; i < video::ENCODED_FRAME_BUFFER_POOL_LIMIT + 2; ++i) {
+    std::vector<std::uint8_t> storage(256 + i);
+    pool.recycle(std::move(storage));
+  }
+
+  std::size_t retained = 0;
+  for (std::size_t i = 0; i < video::ENCODED_FRAME_BUFFER_POOL_LIMIT + 2; ++i) {
+    retained += pool.acquire().capacity() != 0 ? 1u : 0u;
+  }
+  EXPECT_EQ(retained, video::ENCODED_FRAME_BUFFER_POOL_LIMIT);
+
+  std::vector<std::uint8_t> oversized(
+    video::ENCODED_FRAME_BUFFER_RETAIN_LIMIT + 1
+  );
+  pool.recycle(std::move(oversized));
+  EXPECT_EQ(pool.acquire().capacity(), 0u);
 }
 
 TEST(EffectiveVideoModePublisherTests, PublishesOnlyCoherentProvenPacingPairs) {

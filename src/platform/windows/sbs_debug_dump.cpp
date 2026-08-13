@@ -4422,7 +4422,7 @@ namespace platf::sbs_debug {
         if (query_status == S_FALSE) {
           return;
         }
-        if (FAILED(query_status)) {
+        if (query_status != S_OK) {
           fail_capture("completion query failed");
           return;
         }
