@@ -51,9 +51,9 @@ diagnostics that explain how the final field was produced.
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
 schema 50/tag `0x84C0CB62`, canonical SHA-256
-`c452c4211f3b7bdfe566bdb2117adf15e3f663aeb1361a91514d5ed1130009a0`. It binds the
+`b7d05b870bf37aecf811c7735dddefc11a80bb742b339c6b36a2a5018fc6b7e2`. It binds the
 complete policy below, including all subtitle field/ROI semantics, and producer source-closure
-SHA-256 `42d2ee8d50520f370d2052c2e21ade7b9b0eb9ba985e936f907d966fe3bc786f`.
+SHA-256 `a5fc976f84e686aa50826faa5f32f8fd0d43967723111dfd6d49cd177507dd89`.
 The live-renderer source-closure SHA-256 is
 `5850bb757becd0c4d359812298974de72b073a4be0279d3ba41c6c1a5c270af1`, and dump-only diagnostic
 renderer source-closure SHA-256

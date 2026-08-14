@@ -4,7 +4,13 @@
 #define OCR_HEIGHT V2_OCR_OUTPUT_HEIGHT
 #define OCR_CELL_WIDTH 8u
 #define OCR_GRID_WIDTH (OCR_WIDTH / OCR_CELL_WIDTH)
-#define OCR_CELL_WORDS 8u
+#define OCR_CELLS_PER_GROUP 32u
+#define OCR_CELL_ROWS_PER_GROUP 4u
+#define OCR_CELL_WORDS 1u
+#define OCR_CELL_ACTIVE_MASK 0xffu
+#define OCR_CELL_NONFINITE_BIT 0x100u
+#define OCR_CELL_SUM_SHIFT 9u
+#define OCR_CELL_SUM_MASK 0x7fffu
 #define OCR8_WORDS V2_OCR_RECORD_WORD_COUNT
 #define OCR8_RAW_OFFSET V2_OCR_RAW_BOX_OFFSET
 #define OCR8_RAW_CAPACITY V2_OCR_RAW_BOX_CAPACITY
@@ -19,71 +25,60 @@
 StructuredBuffer<float> ProbabilityMap : register(t0);
 RWStructuredBuffer<uint> CellStatsWrite : register(u0);
 
-groupshared uint active_count;
-groupshared uint probability_sum_q12;
-groupshared uint min_x;
-groupshared uint max_x;
-groupshared uint min_y;
-groupshared uint max_y;
-groupshared uint nonfinite_count;
-
 bool FiniteFloat(float value) {
     return (asuint(value) & 0x7f800000u) != 0x7f800000u;
 }
 
-// One 8x1 group emits a compact exact-pixel bound and confidence summary. Keeping model rows
-// separate prevents two close bilingual lines from being fused by a coarse vertical cell.
-[numthreads(OCR_CELL_WIDTH, 1, 1)]
+// One lane summarizes one 8x1 cell entirely in registers. Each of the four group rows is a full
+// warp of 32 adjacent cells instead of one quarter-full warp per cell, removing the old shared
+// atomics and two barriers. The packed word retains the exact active-pixel mask, any-nonfinite
+// state, and Q12 probability sum; bounds and count are reconstructed losslessly.
+[numthreads(OCR_CELLS_PER_GROUP, OCR_CELL_ROWS_PER_GROUP, 1)]
 void cells_main(
     uint3 group_id : SV_GroupID,
     uint3 group_thread_id : SV_GroupThreadID)
 {
-    if (group_thread_id.x == 0u) {
-        active_count = 0u;
-        probability_sum_q12 = 0u;
-        min_x = 0xffffffffu;
-        max_x = 0u;
-        min_y = 0xffffffffu;
-        max_y = 0u;
-        nonfinite_count = 0u;
-    }
-    GroupMemoryBarrierWithGroupSync();
+    uint cell_x = group_id.x * OCR_CELLS_PER_GROUP + group_thread_id.x;
+    uint cell_y = group_id.y * OCR_CELL_ROWS_PER_GROUP + group_thread_id.y;
+    if (cell_x >= OCR_GRID_WIDTH || cell_y >= OCR_HEIGHT) return;
 
-    uint2 pixel = uint2(group_id.x * OCR_CELL_WIDTH + group_thread_id.x, group_id.y);
-    if (pixel.x < OCR_WIDTH && pixel.y < OCR_HEIGHT) {
-        float probability = ProbabilityMap[pixel.y * OCR_WIDTH + pixel.x];
+    uint active_mask = 0u;
+    uint probability_sum_q12 = 0u;
+    uint nonfinite = 0u;
+    uint pixel_base = cell_y * OCR_WIDTH + cell_x * OCR_CELL_WIDTH;
+    [unroll]
+    for (uint pixel_in_cell = 0u; pixel_in_cell < OCR_CELL_WIDTH; ++pixel_in_cell) {
+        float probability = ProbabilityMap[pixel_base + pixel_in_cell];
         if (!FiniteFloat(probability)) {
-            InterlockedAdd(nonfinite_count, 1u);
+            nonfinite = OCR_CELL_NONFINITE_BIT;
         } else if (probability > V2_OCR_ACTIVE_PROBABILITY_THRESHOLD) {
-            InterlockedAdd(active_count, 1u);
-            InterlockedAdd(
-                probability_sum_q12,
-                (uint)round(saturate(probability) * 4095.0f));
-            InterlockedMin(min_x, pixel.x);
-            InterlockedMax(max_x, pixel.x + 1u);
-            InterlockedMin(min_y, pixel.y);
-            InterlockedMax(max_y, pixel.y + 1u);
+            active_mask |= 1u << pixel_in_cell;
+            probability_sum_q12 += (uint)round(saturate(probability) * 4095.0f);
         }
     }
-    GroupMemoryBarrierWithGroupSync();
 
-    if (group_thread_id.x == 0u) {
-        uint base = (group_id.y * OCR_GRID_WIDTH + group_id.x) * OCR_CELL_WORDS;
-        CellStatsWrite[base + 0u] = active_count;
-        CellStatsWrite[base + 1u] = probability_sum_q12;
-        CellStatsWrite[base + 2u] = min_x;
-        CellStatsWrite[base + 3u] = max_x;
-        CellStatsWrite[base + 4u] = min_y;
-        CellStatsWrite[base + 5u] = max_y;
-        CellStatsWrite[base + 6u] = nonfinite_count;
-        CellStatsWrite[base + 7u] = 0u;
-    }
+    CellStatsWrite[cell_y * OCR_GRID_WIDTH + cell_x] =
+        active_mask | nonfinite |
+        ((probability_sum_q12 & OCR_CELL_SUM_MASK) << OCR_CELL_SUM_SHIFT);
 }
 
 // Keep resolve bindings distinct from cells_main. D3DCompiler validates the complete source file
 // before entrypoint dead-code elimination and rejects two differently typed globals on one slot.
 StructuredBuffer<uint> CellStats : register(t1);
 RWStructuredBuffer<uint> OcrBoxRecord : register(u1);
+
+#define OCR_RESOLVE_THREADS 256u
+#define OCR_ACTIVE_MASK_BITS 32u
+#define OCR_ACTIVE_MASK_WORDS_PER_ROW \
+    ((OCR_GRID_WIDTH + OCR_ACTIVE_MASK_BITS - 1u) / OCR_ACTIVE_MASK_BITS)
+#define OCR_ACTIVE_MASK_WORD_COUNT (OCR_HEIGHT * OCR_ACTIVE_MASK_WORDS_PER_ROW)
+
+// resolve_main builds this compact occupancy index cooperatively before its deterministic
+// topology walk. The old single-lane RowActive/ColumnActive helpers repeatedly fetched the same
+// 19,200-cell UAV output through a strided SRV. Four row-local words preserve every cell decision
+// exactly while moving those repeated queries to groupshared memory.
+groupshared uint ResolveActiveMask[OCR_ACTIVE_MASK_WORD_COUNT];
+groupshared uint ResolveNonfiniteByThread[OCR_RESOLVE_THREADS];
 
 cbuffer OcrResolveConstants : register(b0) {
     uint frame_lo;
@@ -105,20 +100,40 @@ uint CellBase(uint x, uint y) {
     return (y * OCR_GRID_WIDTH + x) * OCR_CELL_WORDS;
 }
 
+uint CellActiveMask(uint packed) {
+    return packed & OCR_CELL_ACTIVE_MASK;
+}
+
+uint CellProbabilitySumQ12(uint packed) {
+    return (packed >> OCR_CELL_SUM_SHIFT) & OCR_CELL_SUM_MASK;
+}
+
 bool RowActive(uint y) {
-    [loop]
-    for (uint x = 0u; x < OCR_GRID_WIDTH; ++x) {
-        if (CellStats[CellBase(x, y)] != 0u) return true;
+    uint row_base = y * OCR_ACTIVE_MASK_WORDS_PER_ROW;
+    [unroll]
+    for (uint word = 0u; word < OCR_ACTIVE_MASK_WORDS_PER_ROW; ++word) {
+        if (ResolveActiveMask[row_base + word] != 0u) return true;
     }
     return false;
 }
 
-bool ColumnActive(uint x, uint y0, uint y1) {
+uint4 BuildBandActiveMask(uint y0, uint y1) {
+    uint4 active = uint4(0u, 0u, 0u, 0u);
     [loop]
     for (uint y = y0; y < y1; ++y) {
-        if (CellStats[CellBase(x, y)] != 0u) return true;
+        uint row_base = y * OCR_ACTIVE_MASK_WORDS_PER_ROW;
+        [unroll]
+        for (uint word = 0u; word < OCR_ACTIVE_MASK_WORDS_PER_ROW; ++word) {
+            active[word] |= ResolveActiveMask[row_base + word];
+        }
     }
-    return false;
+    return active;
+}
+
+bool BandColumnActive(uint x, uint4 active) {
+    uint word = x / OCR_ACTIVE_MASK_BITS;
+    uint bit = 1u << (x % OCR_ACTIVE_MASK_BITS);
+    return (active[word] & bit) != 0u;
 }
 
 uint MapXFloor(uint x) {
@@ -219,6 +234,12 @@ void PublishHeader(bool authoritative, uint raw_total, uint final_total) {
     OcrBoxRecord[15] = 0u;
 }
 
+void ClearAndPublishInvalidRecord() {
+    [loop]
+    for (uint word = 0u; word < OCR8_WORDS; ++word) OcrBoxRecord[word] = 0u;
+    PublishHeader(false, 0u, 0u);
+}
+
 void StoreBox(
     uint base,
     uint index,
@@ -274,16 +295,36 @@ void GatherCandidateStats(
     [loop]
     for (uint row = band_top; row < band_bottom; ++row) {
         [loop]
-        for (uint column = column_start; column < column_end; ++column) {
-            uint base = CellBase(column, row);
-            uint count = CellStats[base + 0u];
-            if (count == 0u) continue;
-            stats.active_pixels += count;
-            stats.sum_q12 += CellStats[base + 1u];
-            stats.tight_left = min(stats.tight_left, CellStats[base + 2u]);
-            stats.tight_right = max(stats.tight_right, CellStats[base + 3u]);
-            stats.tight_top = min(stats.tight_top, CellStats[base + 4u]);
-            stats.tight_bottom = max(stats.tight_bottom, CellStats[base + 5u]);
+        for (uint word = column_start / OCR_ACTIVE_MASK_BITS;
+             word <= (column_end - 1u) / OCR_ACTIVE_MASK_BITS;
+             ++word) {
+            uint word_column = word * OCR_ACTIVE_MASK_BITS;
+            uint first_column = max(column_start, word_column);
+            uint end_column = min(column_end, word_column + OCR_ACTIVE_MASK_BITS);
+            uint active = ResolveActiveMask[row * OCR_ACTIVE_MASK_WORDS_PER_ROW + word];
+            uint first_bit = first_column - word_column;
+            uint end_bit = end_column - word_column;
+            if (first_bit != 0u) active &= 0xffffffffu << first_bit;
+            if (end_bit != OCR_ACTIVE_MASK_BITS) active &= (1u << end_bit) - 1u;
+
+            [loop]
+            while (active != 0u) {
+                uint active_bit = (uint)firstbitlow(active);
+                uint column = word_column + active_bit;
+                uint packed = CellStats[CellBase(column, row)];
+                uint mask = CellActiveMask(packed);
+                uint count = countbits(mask);
+                uint first = (uint)firstbitlow(mask);
+                uint last = (uint)firstbithigh(mask);
+                uint cell_left = column * OCR_CELL_WIDTH;
+                stats.active_pixels += count;
+                stats.sum_q12 += CellProbabilitySumQ12(packed);
+                stats.tight_left = min(stats.tight_left, cell_left + first);
+                stats.tight_right = max(stats.tight_right, cell_left + last + 1u);
+                stats.tight_top = min(stats.tight_top, row);
+                stats.tight_bottom = max(stats.tight_bottom, row + 1u);
+                active &= active - 1u;
+            }
         }
     }
 }
@@ -378,27 +419,65 @@ void PublishCandidate(
     }
 }
 
-// Deterministic lower-text DB postprocess. It preserves the tight model-pixel core and its
-// horizontal topology before producing a separately paired cover rectangle. A broad run retains
-// the larger index gap only long enough to classify a bottom ribbon. Non-ribbon text is rescanned
-// with its smaller join gap, and every retained island must carry valid text evidence on its own so
-// a distant weak pixel cannot borrow a subtitle's confidence or enlarge its conditioning cover.
-[numthreads(1, 1, 1)]
-void resolve_main(uint3 id : SV_DispatchThreadID) {
+// Deterministic lower-text DB postprocess. All lanes first build a compact, exact cell-occupancy
+// index and clear the fixed OCR8 record. Lane zero then preserves the existing serial topology and
+// publication order, but its repeated row/column tests no longer rescan global cell records.
+// A broad run retains the larger index gap only long enough to classify a bottom ribbon.
+// Non-ribbon text is rescanned with its smaller join gap, and every retained island must carry
+// valid text evidence on its own so a distant weak pixel cannot borrow a subtitle's confidence or
+// enlarge its conditioning cover.
+[numthreads(OCR_RESOLVE_THREADS, 1, 1)]
+void resolve_main(uint3 group_thread_id : SV_GroupThreadID) {
+    uint thread_index = group_thread_id.x;
+    if (thread_index < OCR8_WORDS) {
+        OcrBoxRecord[thread_index] = 0u;
+    }
+
+    uint local_nonfinite = 0u;
     [loop]
-    for (uint word = 0u; word < OCR8_WORDS; ++word) OcrBoxRecord[word] = 0u;
+    for (uint mask_word = thread_index;
+         mask_word < OCR_ACTIVE_MASK_WORD_COUNT;
+         mask_word += OCR_RESOLVE_THREADS) {
+        uint row = mask_word / OCR_ACTIVE_MASK_WORDS_PER_ROW;
+        uint word_in_row = mask_word % OCR_ACTIVE_MASK_WORDS_PER_ROW;
+        uint first_x = word_in_row * OCR_ACTIVE_MASK_BITS;
+        uint active_mask = 0u;
+        [unroll]
+        for (uint bit_index = 0u; bit_index < OCR_ACTIVE_MASK_BITS; ++bit_index) {
+            uint x = first_x + bit_index;
+            if (x < OCR_GRID_WIDTH) {
+                uint packed = CellStats[CellBase(x, row)];
+                if (CellActiveMask(packed) != 0u) {
+                    active_mask |= 1u << bit_index;
+                }
+                local_nonfinite |= (packed & OCR_CELL_NONFINITE_BIT) != 0u ? 1u : 0u;
+            }
+        }
+        ResolveActiveMask[mask_word] = active_mask;
+    }
+    ResolveNonfiniteByThread[thread_index] = local_nonfinite;
+
+    // This orders both the groupshared index and the cooperative OCR8 UAV clear before lane zero
+    // begins overwriting authoritative header/box words. Every lane reaches this sole barrier.
+    AllMemoryBarrierWithGroupSync();
+    if (thread_index != 0u) {
+        return;
+    }
 
     if (!ResolveGeometryValid()) {
         PublishHeader(false, 0u, 0u);
         return;
     }
 
-    uint status = OCR8_VALID;
     [loop]
-    for (uint cell = 0u; cell < OCR_GRID_WIDTH * OCR_HEIGHT; ++cell) {
-        if (CellStats[cell * OCR_CELL_WORDS + 6u] != 0u) status |= OCR8_NONFINITE;
+    for (uint thread = 0u; thread < OCR_RESOLVE_THREADS; ++thread) {
+        if (ResolveNonfiniteByThread[thread] != 0u) {
+            ClearAndPublishInvalidRecord();
+            return;
+        }
     }
 
+    uint status = OCR8_VALID;
     uint raw_total = 0u;
     uint final_total = 0u;
     uint y = 0u;
@@ -409,11 +488,12 @@ void resolve_main(uint3 id : SV_DispatchThreadID) {
         uint band_top = y;
         while (y < OCR_HEIGHT && RowActive(y)) ++y;
         uint band_bottom = y;
+        uint4 band_active = BuildBandActiveMask(band_top, band_bottom);
 
         uint x = 0u;
         [loop]
         while (x < OCR_GRID_WIDTH) {
-            while (x < OCR_GRID_WIDTH && !ColumnActive(x, band_top, band_bottom)) ++x;
+            while (x < OCR_GRID_WIDTH && !BandColumnActive(x, band_active)) ++x;
             if (x >= OCR_GRID_WIDTH) break;
             uint broad_start = x;
             uint broad_last_active = x;
@@ -423,7 +503,7 @@ void resolve_main(uint3 id : SV_DispatchThreadID) {
             ++x;
             [loop]
             while (x < OCR_GRID_WIDTH) {
-                if (ColumnActive(x, band_top, band_bottom)) {
+                if (BandColumnActive(x, band_active)) {
                     if (broad_gap != 0u) {
                         ++broad_island_count;
                         if (broad_gap >= V2_OCR_RIBBON_STRUCTURAL_GAP_MIN_CELLS) {
@@ -463,6 +543,10 @@ void resolve_main(uint3 id : SV_DispatchThreadID) {
                 PublishCandidate(
                     broad, broad_score, V2_OCR_BOX_FLAG_RIBBON,
                     status, raw_total, final_total);
+                if ((status & OCR8_OVERFLOW) != 0u) {
+                    ClearAndPublishInvalidRecord();
+                    return;
+                }
                 continue;
             }
 
@@ -473,7 +557,7 @@ void resolve_main(uint3 id : SV_DispatchThreadID) {
             [loop]
             while (text_x < broad_end) {
                 while (text_x < broad_end &&
-                       !ColumnActive(text_x, band_top, band_bottom)) ++text_x;
+                       !BandColumnActive(text_x, band_active)) ++text_x;
                 if (text_x >= broad_end) break;
                 uint text_start = text_x;
                 uint text_last_active = text_x;
@@ -481,7 +565,7 @@ void resolve_main(uint3 id : SV_DispatchThreadID) {
                 ++text_x;
                 [loop]
                 while (text_x < broad_end) {
-                    if (ColumnActive(text_x, band_top, band_bottom)) {
+                    if (BandColumnActive(text_x, band_active)) {
                         text_last_active = text_x;
                         text_gap = 0u;
                     } else {
@@ -500,11 +584,11 @@ void resolve_main(uint3 id : SV_DispatchThreadID) {
                 [loop]
                 while (island_x < text_end) {
                     while (island_x < text_end &&
-                           !ColumnActive(island_x, band_top, band_bottom)) ++island_x;
+                           !BandColumnActive(island_x, band_active)) ++island_x;
                     if (island_x >= text_end) break;
                     uint island_start = island_x;
                     while (island_x < text_end &&
-                           ColumnActive(island_x, band_top, band_bottom)) ++island_x;
+                           BandColumnActive(island_x, band_active)) ++island_x;
                     uint island_end = island_x;
 
                     CandidateStats island;
@@ -523,6 +607,10 @@ void resolve_main(uint3 id : SV_DispatchThreadID) {
                                 PublishCandidate(
                                     retained, retained_score, 0u,
                                     status, raw_total, final_total);
+                                if ((status & OCR8_OVERFLOW) != 0u) {
+                                    ClearAndPublishInvalidRecord();
+                                    return;
+                                }
                             }
                             ResetCandidateStats(retained);
                             retained_count = 0u;
@@ -538,6 +626,10 @@ void resolve_main(uint3 id : SV_DispatchThreadID) {
                 if (CandidateEvidenceValid(retained, text_score)) {
                     PublishCandidate(
                         retained, text_score, 0u, status, raw_total, final_total);
+                    if ((status & OCR8_OVERFLOW) != 0u) {
+                        ClearAndPublishInvalidRecord();
+                        return;
+                    }
                 }
             }
         }

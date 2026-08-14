@@ -32,7 +32,13 @@ namespace {
   constexpr std::uint32_t ocr_pixels = ocr_width * ocr_height;
   constexpr std::uint32_t ocr_cell_width = 8u;
   constexpr std::uint32_t ocr_grid_width = ocr_width / ocr_cell_width;
-  constexpr std::uint32_t ocr_cell_words = 8u;
+  constexpr std::uint32_t ocr_cells_per_group = 32u;
+  constexpr std::uint32_t ocr_cell_rows_per_group = 4u;
+  constexpr std::uint32_t ocr_cell_group_count =
+    (ocr_grid_width + ocr_cells_per_group - 1u) / ocr_cells_per_group;
+  constexpr std::uint32_t ocr_cell_group_row_count =
+    (ocr_height + ocr_cell_rows_per_group - 1u) / ocr_cell_rows_per_group;
+  constexpr std::uint32_t ocr_cell_words = 1u;
   constexpr std::uint32_t ocr_cell_stat_words =
     ocr_grid_width * ocr_height * ocr_cell_words;
 
@@ -514,7 +520,7 @@ namespace {
       context_->CSSetShader(cells_.Get(), nullptr, 0u);
       context_->CSSetShaderResources(0u, 1u, probability_srv_.GetAddressOf());
       context_->CSSetUnorderedAccessViews(0u, 1u, cell_stats_uav_.GetAddressOf(), nullptr);
-      context_->Dispatch(ocr_grid_width, ocr_height, 1u);
+      context_->Dispatch(ocr_cell_group_count, ocr_cell_group_row_count, 1u);
       unbind();
 
       context_->CSSetShader(boxes_.Get(), nullptr, 0u);

@@ -84,7 +84,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             47: "d1e6046cd87e992ebf12ff6fc0f3ddd435bd6603fd6967465c6e51a8d0c4cc8b",
             48: "c5fde9d4bac887bc5b13850ce137110466af1dfe732db02510f29ef34780da06",
             49: "d0aa744d7be1f2700c9b693b73feaebf53a20eda3e64c70ae9ccb10b550f9ec7",
-            50: "c452c4211f3b7bdfe566bdb2117adf15e3f663aeb1361a91514d5ed1130009a0",
+            50: "b7d05b870bf37aecf811c7735dddefc11a80bb742b339c6b36a2a5018fc6b7e2",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -99,7 +99,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "42d2ee8d50520f370d2052c2e21ade7b9b0eb9ba985e936f907d966fe3bc786f",
+            "a5fc976f84e686aa50826faa5f32f8fd0d43967723111dfd6d49cd177507dd89",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(

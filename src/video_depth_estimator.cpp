@@ -1474,7 +1474,13 @@ namespace models {
   struct video_depth_estimator::impl {
     static constexpr std::uint32_t ocr_grid_width = ocr_engine_width / 8;
     static constexpr std::uint32_t ocr_grid_height = ocr_engine_height;
-    static constexpr std::uint32_t ocr_cell_words = 8;
+    static constexpr std::uint32_t ocr_cells_per_group = 32;
+    static constexpr std::uint32_t ocr_cell_rows_per_group = 4;
+    static constexpr std::uint32_t ocr_cell_group_count =
+      (ocr_grid_width + ocr_cells_per_group - 1u) / ocr_cells_per_group;
+    static constexpr std::uint32_t ocr_cell_group_row_count =
+      (ocr_grid_height + ocr_cell_rows_per_group - 1u) / ocr_cell_rows_per_group;
+    static constexpr std::uint32_t ocr_cell_words = 1;
     static constexpr std::uint32_t ocr_cell_stats_word_count =
       ocr_grid_width * ocr_grid_height * ocr_cell_words;
     static constexpr std::uint32_t ocr_box_record_word_count =
@@ -3984,7 +3990,7 @@ namespace models {
         0, 1, ocr_cell_stats_uav.GetAddressOf(),
         nullptr
       );
-      context->Dispatch(ocr_grid_width, ocr_grid_height, 1);
+      context->Dispatch(ocr_cell_group_count, ocr_cell_group_row_count, 1);
       ID3D11ShaderResourceView *null_srv = nullptr;
       ID3D11UnorderedAccessView *null_uav = nullptr;
       context->CSSetShaderResources(0, 1, &null_srv);
