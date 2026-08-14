@@ -1600,6 +1600,8 @@ namespace models {
       Microsoft::WRL::ComPtr<ID3D11Query> post_end;
       Microsoft::WRL::ComPtr<ID3D11Query> parallax_start;
       Microsoft::WRL::ComPtr<ID3D11Query> parallax_end;
+      Microsoft::WRL::ComPtr<ID3D11Query> parallax_map_start;
+      Microsoft::WRL::ComPtr<ID3D11Query> parallax_subtitle_start;
       Microsoft::WRL::ComPtr<ID3D11Query> ownership_start;
       Microsoft::WRL::ComPtr<ID3D11Query> ownership_end;
       Microsoft::WRL::ComPtr<ID3D11Query> pre_start;
@@ -1607,6 +1609,8 @@ namespace models {
       bool pending = false;
       bool has_post = false;
       bool has_parallax = false;
+      bool has_parallax_map_start = false;
+      bool has_parallax_subtitle_start = false;
       bool has_ownership = false;
       bool has_pre = false;
       std::uint64_t perf_generation = 0;
@@ -1632,6 +1636,8 @@ namespace models {
             FAILED(device->CreateQuery(&desc, &slot.post_end)) ||
             FAILED(device->CreateQuery(&desc, &slot.parallax_start)) ||
             FAILED(device->CreateQuery(&desc, &slot.parallax_end)) ||
+            FAILED(device->CreateQuery(&desc, &slot.parallax_map_start)) ||
+            FAILED(device->CreateQuery(&desc, &slot.parallax_subtitle_start)) ||
             FAILED(device->CreateQuery(&desc, &slot.ownership_start)) ||
             FAILED(device->CreateQuery(&desc, &slot.ownership_end)) ||
             FAILED(device->CreateQuery(&desc, &slot.pre_start)) ||
@@ -1670,6 +1676,8 @@ namespace models {
         UINT64 post_end = 0;
         UINT64 parallax_start = 0;
         UINT64 parallax_end = 0;
+        UINT64 parallax_map_start = 0;
+        UINT64 parallax_subtitle_start = 0;
         UINT64 ownership_start = 0;
         UINT64 ownership_end = 0;
         UINT64 pre_start = 0;
@@ -1693,6 +1701,8 @@ namespace models {
         );
         HRESULT parallax_start_status = S_OK;
         HRESULT parallax_end_status = S_OK;
+        HRESULT parallax_map_start_status = S_OK;
+        HRESULT parallax_subtitle_start_status = S_OK;
         HRESULT ownership_start_status = S_OK;
         HRESULT ownership_end_status = S_OK;
         if (slot.has_parallax) {
@@ -1702,6 +1712,22 @@ namespace models {
           );
           parallax_end_status = context->GetData(
             slot.parallax_end.Get(), &parallax_end, sizeof(parallax_end),
+            nonblocking
+          );
+        }
+        if (slot.has_parallax_map_start) {
+          parallax_map_start_status = context->GetData(
+            slot.parallax_map_start.Get(),
+            &parallax_map_start,
+            sizeof(parallax_map_start),
+            nonblocking
+          );
+        }
+        if (slot.has_parallax_subtitle_start) {
+          parallax_subtitle_start_status = context->GetData(
+            slot.parallax_subtitle_start.Get(),
+            &parallax_subtitle_start,
+            sizeof(parallax_subtitle_start),
             nonblocking
           );
         }
@@ -1719,6 +1745,8 @@ namespace models {
           post_start_status == S_FALSE || post_end_status == S_FALSE ||
           pre_start_status == S_FALSE || pre_end_status == S_FALSE ||
           parallax_start_status == S_FALSE || parallax_end_status == S_FALSE ||
+          parallax_map_start_status == S_FALSE ||
+          parallax_subtitle_start_status == S_FALSE ||
           ownership_start_status == S_FALSE || ownership_end_status == S_FALSE;
         if (any_pending) {
           continue;
@@ -1726,15 +1754,28 @@ namespace models {
         if (post_start_status == S_OK && post_end_status == S_OK &&
             pre_start_status == S_OK && pre_end_status == S_OK &&
             parallax_start_status == S_OK && parallax_end_status == S_OK &&
+            parallax_map_start_status == S_OK &&
+            parallax_subtitle_start_status == S_OK &&
             ownership_start_status == S_OK && ownership_end_status == S_OK &&
             !timing.Disjoint && timing.Frequency > 0 && post_end >= post_start &&
             pre_start >= post_end && pre_end >= pre_start &&
             (!slot.has_parallax ||
               (parallax_start >= post_start && parallax_end >= parallax_start &&
                post_end >= parallax_end)) &&
+            (!slot.has_parallax_map_start ||
+             (slot.has_parallax && parallax_map_start >= parallax_start &&
+              parallax_end >= parallax_map_start)) &&
+            (!slot.has_parallax_subtitle_start ||
+             (slot.has_parallax &&
+              parallax_subtitle_start >= parallax_start &&
+              parallax_end >= parallax_subtitle_start)) &&
             (!slot.has_ownership ||
              (slot.has_parallax && ownership_start >= parallax_start &&
-              ownership_end >= ownership_start && parallax_end >= ownership_end))) {
+              ownership_end >= ownership_start && parallax_end >= ownership_end)) &&
+            (!slot.has_parallax_map_start || !slot.has_ownership ||
+             ownership_start >= parallax_map_start) &&
+            (!slot.has_parallax_subtitle_start || !slot.has_ownership ||
+             parallax_subtitle_start >= ownership_end)) {
           const double to_ms = 1000.0 / static_cast<double>(timing.Frequency);
           if (slot.has_post) {
             sbs_perf::add_sample_ms_if_current(
@@ -1747,6 +1788,34 @@ namespace models {
             sbs_perf::add_sample_ms_if_current(
               "depth_parallax_gpu",
               static_cast<double>(parallax_end - parallax_start) * to_ms,
+              slot.perf_generation
+            );
+          }
+          if (slot.has_parallax_map_start) {
+            sbs_perf::add_sample_ms_if_current(
+              "depth_parallax_stats_gpu",
+              static_cast<double>(parallax_map_start - parallax_start) * to_ms,
+              slot.perf_generation
+            );
+          }
+          if (slot.has_parallax_map_start && slot.has_ownership) {
+            sbs_perf::add_sample_ms_if_current(
+              "depth_parallax_map_gpu",
+              static_cast<double>(ownership_start - parallax_map_start) * to_ms,
+              slot.perf_generation
+            );
+          }
+          if (slot.has_parallax_subtitle_start && slot.has_ownership) {
+            sbs_perf::add_sample_ms_if_current(
+              "depth_parallax_limits_gpu",
+              static_cast<double>(parallax_subtitle_start - ownership_end) * to_ms,
+              slot.perf_generation
+            );
+          }
+          if (slot.has_parallax_subtitle_start) {
+            sbs_perf::add_sample_ms_if_current(
+              "depth_parallax_subtitle_gpu",
+              static_cast<double>(parallax_end - parallax_subtitle_start) * to_ms,
               slot.perf_generation
             );
           }
@@ -1783,6 +1852,8 @@ namespace models {
         d3d_perf_next = (index + 1) % d3d_perf_slots.size();
         slot.has_post = has_post;
         slot.has_parallax = false;
+        slot.has_parallax_map_start = false;
+        slot.has_parallax_subtitle_start = false;
         slot.has_ownership = false;
         slot.has_pre = has_pre;
         slot.perf_generation = sbs_perf::generation();
@@ -2358,6 +2429,7 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_srv;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_previous_tex;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_previous_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_previous_srv;
     // Cut detection keeps a separate reliable depth endpoint. The ordinary previous texture must
     // still advance every frame for temporal EMA, including through clipped/structureless frames.
@@ -3352,6 +3424,20 @@ namespace models {
       }
     }
 
+    void mark_d3d_parallax_map_start(d3d_perf_slot *slot) {
+      if (slot && slot->has_parallax) {
+        slot->has_parallax_map_start = true;
+        context->End(slot->parallax_map_start.Get());
+      }
+    }
+
+    void mark_d3d_parallax_subtitle_start(d3d_perf_slot *slot) {
+      if (slot && slot->has_parallax) {
+        slot->has_parallax_subtitle_start = true;
+        context->End(slot->parallax_subtitle_start.Get());
+      }
+    }
+
     void release_parallax_v2_resources() {
       parallax_v2_producer_active = false;
       subtitle_conditioned_current = false;
@@ -3819,6 +3905,8 @@ namespace models {
       context->CSSetShaderResources(0, 2, null_srvs3);
       context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
 
+      mark_d3d_parallax_map_start(perf_slot);
+
       // Raw depth -> immutable pre-limiter candidate. The full-size canonical-coordinate field
       // is deliberately absent from production; an explicit Dump 3D dispatches it separately.
       context->CSSetShader(depth_coordinate_v2_map_cs.Get(), nullptr, 0);
@@ -3881,7 +3969,7 @@ namespace models {
         depth_coordinate_v2_vertical_conditioned_uav.Get(),
       };
       context->CSSetUnorderedAccessViews(0, 2, vertical_envelope_uavs, nullptr);
-      context->Dispatch((target_w + 63) / 64, 1, 1);
+      context->Dispatch(target_w, 1, 1);
       context->CSSetShaderResources(0, 1, null_srvs3);
       context->CSSetUnorderedAccessViews(0, 2, null_uavs2, nullptr);
 
@@ -3899,9 +3987,11 @@ namespace models {
         depth_coordinate_v2_final_uav.GetAddressOf(),
         nullptr
       );
-      context->Dispatch((target_h + 63) / 64, 1, 1);
+      context->Dispatch(target_h, 1, 1);
       context->CSSetShaderResources(0, 1, null_srvs3);
       context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
+
+      mark_d3d_parallax_subtitle_start(perf_slot);
 
       ID3D11Buffer *null_constants[2] = {nullptr, nullptr};
       context->CSSetConstantBuffers(1, 2, null_constants);
@@ -4521,8 +4611,8 @@ namespace models {
       if (depth_uav) {
         context->ClearUnorderedAccessViewFloat(depth_uav.Get(), zero4);
       }
-      if (depth_tex && depth_previous_tex) {
-        context->CopyResource(depth_previous_tex.Get(), depth_tex.Get());
+      if (depth_previous_uav) {
+        context->ClearUnorderedAccessViewFloat(depth_previous_uav.Get(), zero4);
       }
       if (depth_cut_history_uav) {
         context->ClearUnorderedAccessViewFloat(depth_cut_history_uav.Get(), zero4);
@@ -4640,8 +4730,12 @@ namespace models {
         context->CSSetUnorderedAccessViews(0, 4, null_uav2, nullptr);
       }
 
-      // Snapshot the complete previous depth before any thread writes the new result.
-      context->CopyResource(depth_previous_tex.Get(), depth_tex.Get());
+      // Rotate the two identically provisioned depth textures. The old current side becomes the
+      // immutable previous-frame SRV, while the older side becomes this completion's UAV target.
+      // This preserves the exact EMA history without a full-field CopyResource every frame.
+      std::swap(depth_tex, depth_previous_tex);
+      std::swap(depth_uav, depth_previous_uav);
+      std::swap(depth_srv, depth_previous_srv);
 
       const UINT clear_mask[4] = {0u, 0u, 0u, 0u};
       if (ema_edge_change > 0.0f && ema_edge_gradient > 0.0f) {
@@ -5121,12 +5215,15 @@ namespace models {
                        SUCCEEDED(device->CreateUnorderedAccessView(depth_tex.Get(), nullptr, &depth_uav)) &&
                        SUCCEEDED(device->CreateShaderResourceView(depth_tex.Get(), nullptr, &depth_srv));
 
-        // Immutable previous-depth snapshot for motion-edge classification and EMA input. Keep
-        // the history SRV separate from the depth UAV that receives the current frame.
-        auto previous_desc = tex_desc;
-        previous_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        // The two ordinary depth fields rotate roles after every completed inference. Give both
+        // identical views so rotation replaces a full-field copy without changing shader bindings.
         resources_ok = resources_ok &&
-                       SUCCEEDED(device->CreateTexture2D(&previous_desc, nullptr, &depth_previous_tex)) &&
+                       SUCCEEDED(device->CreateTexture2D(&tex_desc, nullptr, &depth_previous_tex)) &&
+                       SUCCEEDED(device->CreateUnorderedAccessView(
+                         depth_previous_tex.Get(),
+                         nullptr,
+                         &depth_previous_uav
+                       )) &&
                        SUCCEEDED(device->CreateShaderResourceView(depth_previous_tex.Get(), nullptr, &depth_previous_srv));
 
         auto cut_history_desc = tex_desc;
@@ -5177,6 +5274,7 @@ namespace models {
         // Clear depth so the range->pixel EMA initializes from a known value.
         const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
         context->ClearUnorderedAccessViewFloat(depth_uav.Get(), clear_color);
+        context->ClearUnorderedAccessViewFloat(depth_previous_uav.Get(), clear_color);
         context->ClearUnorderedAccessViewFloat(depth_cut_history_uav.Get(), clear_color);
         const UINT clear_uint[4] = {0u, 0u, 0u, 0u};
         context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), clear_uint);

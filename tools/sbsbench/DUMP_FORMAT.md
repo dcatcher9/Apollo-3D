@@ -116,8 +116,9 @@ The maintained reader:
 1. rejects every manifest schema except the current one;
 2. checks exact DVC2 contract/tag/source-closure bindings;
 3. verifies every required content hash and numeric extent;
-4. replays the ownership, vertical-share, and horizontal-majorant recurrences over the full tensor
-   in float32 order, using content width for both limiter steps;
+4. replays ownership and the schema-selected limiter over the full tensor: serial float32 for
+   lines up to 32 elements, otherwise conservative Q30 upper/lower envelopes and horizontal
+   majorant with the authenticated 75/25 float32 share, using content width for both steps;
 5. requires `warp_depth.f32` to equal the selected final field;
 6. validates ROI placement, authority-specific window identity, inverse-map geometry, and the exterior
    zero-plane evidence; and

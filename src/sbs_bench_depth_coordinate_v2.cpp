@@ -1070,7 +1070,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       };
       context->CSSetShaderResources(0, 1, vertical_limit_srvs);
       context->CSSetUnorderedAccessViews(0, 2, vertical_limit_uavs, nullptr);
-      context->Dispatch((width + 63u) / 64u, 1u, 1u);
+      context->Dispatch(width, 1u, 1u);
       unbind(1u, 2u);
 
       context->CSSetShader(limit_shader.Get(), nullptr, 0);
@@ -1078,7 +1078,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       ID3D11UnorderedAccessView *limit_uavs[] = {final_uav.Get()};
       context->CSSetShaderResources(0, 1, limit_srvs);
       context->CSSetUnorderedAccessViews(0, 1, limit_uavs, nullptr);
-      context->Dispatch((height + 63u) / 64u, 1u, 1u);
+      context->Dispatch(height, 1u, 1u);
       unbind(1u, 1u);
 
       context->CSSetShader(encode_shader.Get(), nullptr, 0);

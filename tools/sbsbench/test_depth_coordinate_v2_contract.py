@@ -85,6 +85,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             48: "c5fde9d4bac887bc5b13850ce137110466af1dfe732db02510f29ef34780da06",
             49: "d0aa744d7be1f2700c9b693b73feaebf53a20eda3e64c70ae9ccb10b550f9ec7",
             50: "b7d05b870bf37aecf811c7735dddefc11a80bb742b339c6b36a2a5018fc6b7e2",
+            51: "50ab2ec86d2833d8dc935ccc8becbbd15e99e23eadde00e99b5a575ba6606f8a",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -92,14 +93,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x84C0CB62)
+        self.assertEqual(generator.contract_tag(contract), 0xE37DBC1F)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "84c0cb62752dc446000ec8267d7c4d396df3c3dcd38eee029ddca7221873a011",
+            "e37dbc1f38ca5a533a39e812a50afae2f9a3f1da2fd978338167ef184d7264f3",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "a5fc976f84e686aa50826faa5f32f8fd0d43967723111dfd6d49cd177507dd89",
+            "bcf57b361288e9e0a16e1946292f7e80def7cbb6de26f5b587599ccb0fc63682",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -377,7 +378,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 50u',
+                'contract_schema = 51u',
                 'subtitle_ocr_contract_schema = 10u',
                 'subtitle_ocr_model_name = "ppocrv6_tiny_det_modelopt_fp16"',
                 'subtitle_ocr_asset_path = '
@@ -399,6 +400,12 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'subtitle_ocr_record_tag = 0x3852434Fu',
                 'subtitle_locator_state_schema = 12u',
                 'subtitle_locator_state_tag = 0x32314C53u',
+                'limiter_group_threads = 32u',
+                'limiter_q_fraction_bits = 30u',
+                'limiter_q_scale = 1073741824u',
+                'limiter_container_q_limit = 42949672',
+                'limiter_horizontal_step_q_numerator = 536870912u',
+                'limiter_vertical_step_q_numerator = 2147483648u',
                 'subtitle_ocr_safe_row_top = 24u',
                 'subtitle_ocr_safe_row_bottom = 155u',
                 'subtitle_ocr_crop_aspect_width = 6u',
@@ -425,7 +432,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 50u',
+                '#define V2_CONTRACT_SCHEMA 51u',
                 '#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 10u',
                 '#define V2_OCR_INPUT_WIDTH 960u',
                 '#define V2_OCR_OUTPUT_WIDTH 960u',
@@ -435,6 +442,12 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 '#define V2_SUBTITLE_LOCATOR_STATE_SCHEMA 12u',
                 '#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x32314C53u',
                 '#define V2_MODEL_CALIBRATED_SHAPE_COUNT 6u',
+                '#define V2_LIMITER_GROUP_THREADS 32u',
+                '#define V2_LIMITER_Q_FRACTION_BITS 30u',
+                '#define V2_LIMITER_Q_SCALE 1073741824.0f',
+                '#define V2_LIMITER_CONTAINER_Q_LIMIT 42949672',
+                '#define V2_LIMITER_HORIZONTAL_STEP_Q_NUMERATOR 536870912u',
+                '#define V2_LIMITER_VERTICAL_STEP_Q_NUMERATOR 2147483648u',
                 '#define V2_MODEL_CALIBRATED_SHAPE_WIDTH_5 434u',
                 '#define V2_MODEL_CALIBRATED_SHAPE_HEIGHT_5 1036u',
                 '#define V2_OCR_SAFE_ROW_TOP 24u',
@@ -586,9 +599,9 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.validate_renderer_source_closure_pins(),
             {
                 "parallax_v2_live_renderer_source_closure_sha256":
-                    "5850bb757becd0c4d359812298974de72b073a4be0279d3ba41c6c1a5c270af1",
+                    "d2672fa57bb2542bb3714c243ea393e78e29fd40603379ea435f4740c6762b7d",
                 "parallax_v2_diagnostic_source_closure_sha256":
-                    "077eefb9830c6a9322210fe1059cc765aa52a7b369f8414249795b0f43e96aaa",
+                    "32b257d5c84f839b5797fbf720aaddb1d5e5b5056cbb57d45b64d7c2d32aaec3",
             },
         )
 

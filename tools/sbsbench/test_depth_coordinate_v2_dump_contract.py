@@ -27,6 +27,17 @@ from replay_depth_mapping_v2 import (  # noqa: E402
 
 
 class DepthCoordinateV2DumpContractTests(unittest.TestCase):
+    def test_renderer_closure_constants_match_native_authenticated_pins(self):
+        pins = generator.validate_renderer_source_closure_pins()
+        self.assertEqual(
+            dump_contract.LIVE_RENDERER_SOURCE_CLOSURE_SHA256,
+            pins["parallax_v2_live_renderer_source_closure_sha256"],
+        )
+        self.assertEqual(
+            dump_contract.DIAGNOSTIC_SOURCE_CLOSURE_SHA256,
+            pins["parallax_v2_diagnostic_source_closure_sha256"],
+        )
+
     @staticmethod
     def _set_state_word(document, name, value):
         document["named_values"][name] = value
@@ -1717,27 +1728,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         ownership = candidate.copy()
         ownership[4, 7] = np.float32(ownership[4, 7] + 0.005)  # raise-only refinement
 
-        defaults = coordinate.CALIBRATED_DEFAULTS
-        vertical_step = np.float32(defaults.max_vertical_shear / width)
-        horizontal_step = np.float32(defaults.max_horizontal_slope / width)
-        share = np.float32(defaults.vertical_majorant_share)
-        majorant = ownership.copy()
-        for row in range(1, height):
-            majorant[row] = np.maximum(majorant[row], majorant[row - 1] - vertical_step)
-        for row in range(height - 2, -1, -1):
-            majorant[row] = np.maximum(majorant[row], majorant[row + 1] - vertical_step)
-        minorant = ownership.copy()
-        for row in range(1, height):
-            minorant[row] = np.minimum(ownership[row], minorant[row - 1] + vertical_step)
-        for row in range(height - 2, -1, -1):
-            minorant[row] = np.minimum(minorant[row], minorant[row + 1] + vertical_step)
-        conditioned = (share * majorant + np.float32(1.0 - float(share)) * minorant
-                       ).astype(np.float32)
-        final = conditioned.copy()
-        for col in range(1, width):
-            final[:, col] = np.maximum(final[:, col], final[:, col - 1] - horizontal_step)
-        for col in range(width - 2, -1, -1):
-            final[:, col] = np.maximum(final[:, col], final[:, col + 1] - horizontal_step)
+        majorant, conditioned, final = dump_contract._replay_v2_limiter_fields(
+            ownership, width)
 
         manifest = copy.deepcopy(self.manifest)
         for name in (
@@ -1952,19 +1944,21 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         constant = np.full(
             (tensor_height, tensor_width), 0.01 if near_full else 0.001,
             dtype=np.float32)
+        majorant, conditioned, final = dump_contract._replay_v2_limiter_fields(
+            constant, tensor_content[2] - tensor_content[0])
         fields = {
             "shadow_candidate_parallax": constant,
             "shadow_ownership_refined_parallax": constant,
-            "shadow_vertical_majorant": constant,
-            "shadow_vertical_conditioned": constant,
-            "shadow_final_parallax": constant,
+            "shadow_vertical_majorant": majorant,
+            "shadow_vertical_conditioned": conditioned,
+            "shadow_final_parallax": final,
         }
         for name, values in fields.items():
             payload = values.astype("<f4").tobytes()
             (root / f"{name}.f32").write_bytes(payload)
             manifest["artifacts"][f"{name}.f32"]["sha256"] = hashlib.sha256(
                 payload).hexdigest()
-        warp_depth_payload = constant.astype("<f4").tobytes()
+        warp_depth_payload = final.astype("<f4").tobytes()
         (root / "warp_depth.f32").write_bytes(warp_depth_payload)
         manifest["artifacts"]["warp_depth.f32"] = {
             "available": True,
@@ -2714,36 +2708,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             split = left + (right - left) // 2
             candidate[:, split:] = np.float32(0.001)
             ownership = candidate.copy()
-            vertical_step = np.float32(
-                coordinate.CALIBRATED_DEFAULTS.max_vertical_shear / (right - left))
-            horizontal_step = np.float32(
-                coordinate.CALIBRATED_DEFAULTS.max_horizontal_slope / (right - left))
-            share = np.float32(coordinate.CALIBRATED_DEFAULTS.vertical_majorant_share)
-
-            majorant = ownership.copy()
-            for row in range(1, height):
-                majorant[row] = np.maximum(
-                    majorant[row], majorant[row - 1] - vertical_step)
-            for row in range(height - 2, -1, -1):
-                majorant[row] = np.maximum(
-                    majorant[row], majorant[row + 1] - vertical_step)
-            minorant = ownership.copy()
-            for row in range(1, height):
-                minorant[row] = np.minimum(
-                    ownership[row], minorant[row - 1] + vertical_step)
-            for row in range(height - 2, -1, -1):
-                minorant[row] = np.minimum(
-                    minorant[row], minorant[row + 1] + vertical_step)
-            conditioned = (
-                share * majorant + np.float32(1.0 - float(share)) * minorant
-            ).astype(np.float32)
-            final = conditioned.copy()
-            for column in range(1, width):
-                final[:, column] = np.maximum(
-                    final[:, column], final[:, column - 1] - horizontal_step)
-            for column in range(width - 2, -1, -1):
-                final[:, column] = np.maximum(
-                    final[:, column], final[:, column + 1] - horizontal_step)
+            majorant, conditioned, final = dump_contract._replay_v2_limiter_fields(
+                ownership, right - left)
 
             fields = {
                 "shadow_candidate_parallax.f32": candidate,
@@ -2765,15 +2731,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
 
             # The old whole-tensor denominator would propagate the 0.001 cliff leftward. It is
             # a different exact recurrence and must now fail closed.
-            legacy_step = np.float32(
-                coordinate.CALIBRATED_DEFAULTS.max_horizontal_slope / width)
-            legacy = conditioned.copy()
-            for column in range(1, width):
-                legacy[:, column] = np.maximum(
-                    legacy[:, column], legacy[:, column - 1] - legacy_step)
-            for column in range(width - 2, -1, -1):
-                legacy[:, column] = np.maximum(
-                    legacy[:, column], legacy[:, column + 1] - legacy_step)
+            _, _, legacy = dump_contract._replay_v2_limiter_fields(ownership, width)
             self.assertFalse(np.array_equal(final, legacy))
             for name in ("shadow_final_parallax.f32", "warp_depth.f32"):
                 self._write_hashed_payload(

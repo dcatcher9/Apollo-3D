@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -396,6 +397,176 @@ namespace {
     return result;
   }
 
+  struct q30_vertical_oracle_t {
+    std::vector<float> majorant;
+    std::vector<float> conditioned;
+  };
+
+  std::int32_t limiter_upper_q30(float value) {
+    namespace v2 = models::depth_coordinate_v2;
+    value = std::isfinite(value) ?
+      std::clamp(value, -v2::direct_container_limit, v2::direct_container_limit) :
+      0.0f;
+    return static_cast<std::int32_t>(
+      std::ceil(value * static_cast<float>(v2::limiter_q_scale))
+    );
+  }
+
+  std::int32_t limiter_lower_q30(float value) {
+    namespace v2 = models::depth_coordinate_v2;
+    value = std::isfinite(value) ?
+      std::clamp(value, -v2::direct_container_limit, v2::direct_container_limit) :
+      0.0f;
+    return static_cast<std::int32_t>(
+      std::floor(value * static_cast<float>(v2::limiter_q_scale))
+    );
+  }
+
+  float limiter_from_q30(const std::int32_t value) {
+    return static_cast<float>(value) /
+           static_cast<float>(models::depth_coordinate_v2::limiter_q_scale);
+  }
+
+  std::int32_t limiter_step_q30(
+    const std::uint32_t numerator,
+    const std::uint32_t content_width
+  ) {
+    namespace v2 = models::depth_coordinate_v2;
+    if (content_width == 0u) {
+      return 0;
+    }
+    const std::uint32_t max_decay =
+      2u * static_cast<std::uint32_t>(v2::limiter_container_q_limit);
+    return static_cast<std::int32_t>(std::max(
+      1u,
+      std::min(numerator / content_width, max_decay)
+    ));
+  }
+
+  q30_vertical_oracle_t exact_q30_vertical_oracle(
+    const std::vector<float> &candidate,
+    const std::uint32_t width,
+    const std::uint32_t height,
+    const std::uint32_t content_width
+  ) {
+    namespace v2 = models::depth_coordinate_v2;
+    if (width == 0u || height <= v2::limiter_group_threads || content_width == 0u ||
+        candidate.size() != static_cast<std::size_t>(width) * height) {
+      return {};
+    }
+
+    std::vector<std::int32_t> upper(candidate.size());
+    std::vector<std::int32_t> lower(candidate.size());
+    for (std::size_t index = 0; index < candidate.size(); ++index) {
+      upper[index] = limiter_upper_q30(candidate[index]);
+      lower[index] = limiter_lower_q30(candidate[index]);
+    }
+    const std::int32_t step = limiter_step_q30(
+      v2::limiter_vertical_step_q_numerator,
+      content_width
+    );
+    for (std::uint32_t x = 0u; x < width; ++x) {
+      for (std::uint32_t y = 1u; y < height; ++y) {
+        const std::size_t index = static_cast<std::size_t>(y) * width + x;
+        upper[index] = std::max(upper[index], upper[index - width] - step);
+        lower[index] = std::min(lower[index], lower[index - width] + step);
+      }
+      for (std::uint32_t y = height - 1u; y > 0u; --y) {
+        const std::size_t index = static_cast<std::size_t>(y - 1u) * width + x;
+        upper[index] = std::max(upper[index], upper[index + width] - step);
+        lower[index] = std::min(lower[index], lower[index + width] + step);
+      }
+    }
+
+    q30_vertical_oracle_t result;
+    result.majorant.resize(candidate.size());
+    result.conditioned.resize(candidate.size());
+    for (std::size_t index = 0; index < candidate.size(); ++index) {
+      const float majorant = limiter_from_q30(upper[index]);
+      const float minorant = limiter_from_q30(lower[index]);
+      result.majorant[index] = majorant;
+      result.conditioned[index] = std::clamp(
+        vertical_envelope_share(majorant, minorant),
+        minorant,
+        majorant
+      );
+    }
+    return result;
+  }
+
+  std::vector<float> exact_q30_horizontal_oracle(
+    const std::vector<float> &candidate,
+    const std::uint32_t width,
+    const std::uint32_t height,
+    const std::uint32_t content_width
+  ) {
+    namespace v2 = models::depth_coordinate_v2;
+    if (width <= v2::limiter_group_threads || height == 0u || content_width == 0u ||
+        candidate.size() != static_cast<std::size_t>(width) * height) {
+      return {};
+    }
+
+    std::vector<std::int32_t> result_q30(candidate.size());
+    std::transform(
+      candidate.begin(),
+      candidate.end(),
+      result_q30.begin(),
+      limiter_upper_q30
+    );
+    const std::int32_t step = limiter_step_q30(
+      v2::limiter_horizontal_step_q_numerator,
+      content_width
+    );
+    for (std::uint32_t y = 0u; y < height; ++y) {
+      const std::size_t row = static_cast<std::size_t>(y) * width;
+      for (std::uint32_t x = 1u; x < width; ++x) {
+        const std::size_t index = row + x;
+        result_q30[index] = std::max(
+          result_q30[index],
+          result_q30[index - 1u] - step
+        );
+      }
+      for (std::uint32_t x = width - 1u; x > 0u; --x) {
+        const std::size_t index = row + x - 1u;
+        result_q30[index] = std::max(
+          result_q30[index],
+          result_q30[index + 1u] - step
+        );
+      }
+    }
+
+    std::vector<float> result(candidate.size());
+    std::transform(
+      result_q30.begin(),
+      result_q30.end(),
+      result.begin(),
+      limiter_from_q30
+    );
+    return result;
+  }
+
+  void expect_float_fields_bitwise_equal(
+    const std::vector<float> &expected,
+    const std::vector<float> &actual,
+    const std::uint32_t width,
+    const std::uint32_t content_width,
+    const std::string_view field
+  ) {
+    ASSERT_EQ(actual.size(), expected.size()) << field;
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+      const auto expected_bits = std::bit_cast<std::uint32_t>(expected[index]);
+      const auto actual_bits = std::bit_cast<std::uint32_t>(actual[index]);
+      if (actual_bits != expected_bits) {
+        FAIL() << field << " differs at x=" << index % width
+               << ", y=" << index / width
+               << ", content_width=" << content_width
+               << ": expected=" << expected[index]
+               << " (0x" << std::hex << expected_bits << "), actual="
+               << actual[index] << " (0x" << actual_bits << ')';
+      }
+    }
+  }
+
   bool dispatch_depth_coordinate_v2_limit(
     warp_device_t &warp,
     ID3D11ComputeShader *shader,
@@ -404,9 +575,12 @@ namespace {
     const std::uint32_t dispatch_groups,
     const std::vector<float> &candidate,
     std::vector<float> &result,
-    std::vector<float> *secondary_result = nullptr
+    std::vector<float> *secondary_result = nullptr,
+    const std::uint32_t analysis_content_width = 0u
   ) {
-    if (!shader || width == 0u || height == 0u ||
+    const std::uint32_t content_width = analysis_content_width == 0u ?
+      width : analysis_content_width;
+    if (!shader || width == 0u || height == 0u || content_width > width ||
         candidate.size() != static_cast<std::size_t>(width) * height) {
       return false;
     }
@@ -475,7 +649,7 @@ namespace {
     std::array<std::uint32_t, 16> constants {};
     constants[0] = width;
     constants[1] = height;
-    constants[11] = width;
+    constants[11] = content_width;
     constants[12] = height;
     D3D11_BUFFER_DESC constant_desc {};
     constant_desc.ByteWidth = sizeof(constants);
@@ -525,6 +699,16 @@ namespace {
       constant_buffer.Get(),
       v2_constant_buffer.Get()
     };
+    const float unwritten[4] = {
+      std::numeric_limits<float>::quiet_NaN(),
+      std::numeric_limits<float>::quiet_NaN(),
+      std::numeric_limits<float>::quiet_NaN(),
+      std::numeric_limits<float>::quiet_NaN(),
+    };
+    warp.context->ClearUnorderedAccessViewFloat(final_uav.Get(), unwritten);
+    if (secondary_uav) {
+      warp.context->ClearUnorderedAccessViewFloat(secondary_uav.Get(), unwritten);
+    }
     warp.context->CSSetShader(shader, nullptr, 0u);
     warp.context->CSSetShaderResources(0u, 1u, srvs);
     warp.context->CSSetUnorderedAccessViews(0u, uav_count, uavs, nullptr);
@@ -652,7 +836,7 @@ TEST(DepthCoordinateV2GpuTest, LimiterIsExactLeastRowwiseLipschitzMajorant) {
       shader.Get(),
       width,
       height,
-      (height + 63u) / 64u,
+      height,
       candidate,
       gpu
     ));
@@ -664,10 +848,21 @@ TEST(DepthCoordinateV2GpuTest, LimiterIsExactLeastRowwiseLipschitzMajorant) {
       const std::size_t row = static_cast<std::size_t>(y) * width;
       for (std::uint32_t x = 0; x < width; ++x) {
         const std::size_t index = row + x;
-        EXPECT_FLOAT_EQ(gpu[index], oracle[index])
-          << "x=" << x << ", y=" << y << ", width=" << width;
+        if (width <= 32u) {
+          EXPECT_FLOAT_EQ(gpu[index], oracle[index])
+            << "x=" << x << ", y=" << y << ", width=" << width;
+        } else {
+          EXPECT_NEAR(gpu[index], oracle[index], 2.0e-7f)
+            << "x=" << x << ", y=" << y << ", width=" << width;
+        }
+        EXPECT_TRUE(std::isfinite(gpu[index]))
+          << "unwritten/nonfinite x=" << x << ", y=" << y << ", width=" << width;
         EXPECT_GE(gpu[index], candidate[index])
           << "x=" << x << ", y=" << y << ", width=" << width;
+        if (x > 0u) {
+          EXPECT_LE(std::abs(gpu[index] - gpu[index - 1u]), max_step + 2.0e-7f)
+            << "slope x=" << x << ", y=" << y << ", width=" << width;
+        }
 
         // The pointwise supremum is the definition of the least Lipschitz majorant.
         // Checking it independently prevents a shared one-direction scan bug in the GPU and
@@ -704,6 +899,19 @@ TEST(DepthCoordinateV2GpuTest, LimiterIsExactLeastRowwiseLipschitzMajorant) {
     adversarial[4u * width + x] = -0.017f;
   }
   verify_case(width, height, adversarial);
+
+  // Exercise every balanced-chunk boundary around powers of two and at all authenticated axis
+  // lengths. Impulses immediately before/after boundaries force carries to cross chunks.
+  for (const std::uint32_t parallel_width :
+       std::array<std::uint32_t, 8> {33u, 63u, 64u, 65u, 434u, 770u, 1022u, 1036u}) {
+    std::vector<float> boundary_impulses(parallel_width, -0.039f);
+    for (std::uint32_t chunk = 1u; chunk < 32u; ++chunk) {
+      const std::uint32_t boundary = chunk * parallel_width / 32u;
+      boundary_impulses[boundary - 1u] = chunk % 2u == 0u ? 0.037f : -0.038f;
+      boundary_impulses[boundary] = chunk % 2u == 0u ? -0.038f : 0.039f;
+    }
+    verify_case(parallel_width, 1u, boundary_impulses);
+  }
 
   // The shader's target_w==1 path has no scan iterations and must preserve each row exactly.
   verify_case(1u, 3u, {-0.031f, 0.0f, 0.039f});
@@ -745,7 +953,8 @@ TEST(DepthCoordinateV2GpuTest, VerticalPassPublishesExactMajorantAndConditionedS
 
   const auto verify_case = [&](const std::uint32_t width,
                                const std::uint32_t height,
-                               const std::vector<float> &candidate) {
+                               const std::vector<float> &candidate,
+                               const bool check_pointwise = true) {
     ASSERT_EQ(candidate.size(), static_cast<std::size_t>(width) * height);
     const auto oracle = least_columnwise_lipschitz_majorant(
       candidate,
@@ -773,7 +982,7 @@ TEST(DepthCoordinateV2GpuTest, VerticalPassPublishesExactMajorantAndConditionedS
       shader.Get(),
       width,
       height,
-      (width + 63u) / 64u,
+      width,
       candidate,
       gpu,
       &conditioned_gpu
@@ -786,28 +995,47 @@ TEST(DepthCoordinateV2GpuTest, VerticalPassPublishesExactMajorantAndConditionedS
     for (std::uint32_t y = 0; y < height; ++y) {
       for (std::uint32_t x = 0; x < width; ++x) {
         const std::size_t index = static_cast<std::size_t>(y) * width + x;
-        EXPECT_FLOAT_EQ(gpu[index], oracle[index])
-          << "x=" << x << ", y=" << y << ", height=" << height;
+        if (height <= 32u) {
+          EXPECT_FLOAT_EQ(gpu[index], oracle[index])
+            << "x=" << x << ", y=" << y << ", height=" << height;
+          EXPECT_FLOAT_EQ(conditioned_gpu[index], conditioned_oracle[index])
+            << "conditioned x=" << x << ", y=" << y << ", height=" << height;
+        } else {
+          EXPECT_NEAR(gpu[index], oracle[index], 2.0e-7f)
+            << "x=" << x << ", y=" << y << ", height=" << height;
+          EXPECT_NEAR(conditioned_gpu[index], conditioned_oracle[index], 2.0e-7f)
+            << "conditioned x=" << x << ", y=" << y << ", height=" << height;
+        }
+        EXPECT_TRUE(std::isfinite(gpu[index]));
+        EXPECT_TRUE(std::isfinite(conditioned_gpu[index]));
         EXPECT_GE(gpu[index], candidate[index])
           << "x=" << x << ", y=" << y << ", height=" << height;
-        EXPECT_FLOAT_EQ(conditioned_gpu[index], conditioned_oracle[index])
-          << "conditioned x=" << x << ", y=" << y << ", height=" << height;
-        EXPECT_GE(conditioned_gpu[index], minorant_oracle[index]);
-        EXPECT_LE(conditioned_gpu[index], oracle[index]);
-
-        // Check the defining pointwise supremum independently of the two directional scans.
-        float least = -std::numeric_limits<float>::infinity();
-        for (std::uint32_t source_y = 0; source_y < height; ++source_y) {
-          least = std::max(
-            least,
-            candidate[static_cast<std::size_t>(source_y) * width + x] -
-              max_step * static_cast<float>(
-                y > source_y ? y - source_y : source_y - y
-              )
+        EXPECT_GE(conditioned_gpu[index] + 2.0e-7f, minorant_oracle[index]);
+        EXPECT_LE(conditioned_gpu[index], oracle[index] + 2.0e-7f);
+        if (y > 0u) {
+          const std::size_t prior = index - width;
+          EXPECT_LE(std::abs(gpu[index] - gpu[prior]), max_step + 2.0e-7f);
+          EXPECT_LE(
+            std::abs(conditioned_gpu[index] - conditioned_gpu[prior]),
+            max_step + 2.0e-7f
           );
         }
-        EXPECT_NEAR(gpu[index], least, 2.0e-7f)
-          << "x=" << x << ", y=" << y << ", height=" << height;
+
+        // Check the defining pointwise supremum independently of the two directional scans.
+        if (check_pointwise) {
+          float least = -std::numeric_limits<float>::infinity();
+          for (std::uint32_t source_y = 0; source_y < height; ++source_y) {
+            least = std::max(
+              least,
+              candidate[static_cast<std::size_t>(source_y) * width + x] -
+                max_step * static_cast<float>(
+                  y > source_y ? y - source_y : source_y - y
+                )
+            );
+          }
+          EXPECT_NEAR(gpu[index], least, 2.0e-7f)
+            << "x=" << x << ", y=" << y << ", height=" << height;
+        }
       }
     }
   };
@@ -828,6 +1056,31 @@ TEST(DepthCoordinateV2GpuTest, VerticalPassPublishesExactMajorantAndConditionedS
     adversarial[static_cast<std::size_t>(y) * width + 4u] = -0.017f;
   }
   verify_case(width, height, adversarial);
+
+  constexpr std::uint32_t production_width = 434u;
+  constexpr std::uint32_t production_height = 1036u;
+  std::vector<float> production_boundaries(
+    static_cast<std::size_t>(production_width) * production_height,
+    -0.039f
+  );
+  for (std::uint32_t chunk = 1u; chunk < 32u; ++chunk) {
+    const std::uint32_t boundary = chunk * production_height / 32u;
+    const float before = chunk % 2u == 0u ? 0.037f : -0.038f;
+    const float after = chunk % 2u == 0u ? -0.038f : 0.039f;
+    std::fill_n(
+      production_boundaries.begin() +
+        static_cast<std::size_t>(boundary - 1u) * production_width,
+      production_width,
+      before
+    );
+    std::fill_n(
+      production_boundaries.begin() +
+        static_cast<std::size_t>(boundary) * production_width,
+      production_width,
+      after
+    );
+  }
+  verify_case(production_width, production_height, production_boundaries, false);
 
   // The target_h==1 path has no scan iterations and must preserve every column exactly.
   verify_case(3u, 1u, {-0.031f, 0.0f, 0.039f});
@@ -896,7 +1149,7 @@ TEST(DepthCoordinateV2GpuTest, VerticalShareThenHorizontalMajorantMatchesC75AndB
     vertical_shader.Get(),
     width,
     height,
-    (width + 63u) / 64u,
+    width,
     candidate,
     vertical_gpu,
     &vertical_conditioned_gpu
@@ -907,7 +1160,7 @@ TEST(DepthCoordinateV2GpuTest, VerticalShareThenHorizontalMajorantMatchesC75AndB
     horizontal_shader.Get(),
     width,
     height,
-    (height + 63u) / 64u,
+    height,
     vertical_conditioned_gpu,
     final_gpu
   ));
@@ -959,6 +1212,157 @@ TEST(DepthCoordinateV2GpuTest, VerticalShareThenHorizontalMajorantMatchesC75AndB
         ) << "vertical bound at x=" << x << ", y=" << y;
       }
     }
+  }
+}
+
+TEST(DepthCoordinateV2GpuTest, ParallelQ30LimitersMatchSerialOracleAtAuthenticatedShape) {
+  namespace v2 = models::depth_coordinate_v2;
+
+  warp_device_t warp;
+  ASSERT_TRUE(warp.initialize());
+
+  const auto compile = [&](const char *filename,
+                           ComPtr<ID3D11ComputeShader> &shader) {
+    const std::filesystem::path path =
+      std::filesystem::path(SUNSHINE_SHADERS_DIR) / filename;
+    ComPtr<ID3DBlob> blob;
+    ComPtr<ID3DBlob> errors;
+    const HRESULT status = D3DCompileFromFile(
+      path.c_str(),
+      nullptr,
+      D3D_COMPILE_STANDARD_FILE_INCLUDE,
+      "main",
+      "cs_5_0",
+      D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
+      0u,
+      &blob,
+      &errors
+    );
+    ASSERT_TRUE(SUCCEEDED(status))
+      << filename << ": "
+      << (errors ? static_cast<const char *>(errors->GetBufferPointer()) :
+                   "no compiler diagnostics");
+    ASSERT_TRUE(SUCCEEDED(warp.device->CreateComputeShader(
+      blob->GetBufferPointer(),
+      blob->GetBufferSize(),
+      nullptr,
+      &shader
+    )));
+  };
+
+  ComPtr<ID3D11ComputeShader> vertical_shader;
+  ComPtr<ID3D11ComputeShader> horizontal_shader;
+  compile("depth_coordinate_v2_vertical_limit_cs.hlsl", vertical_shader);
+  compile("depth_coordinate_v2_limit_cs.hlsl", horizontal_shader);
+
+  constexpr std::uint32_t width = 770u;
+  constexpr std::uint32_t height = 434u;
+  ASSERT_GT(width, v2::limiter_group_threads);
+  ASSERT_GT(height, v2::limiter_group_threads);
+  ASSERT_TRUE(std::any_of(
+    v2::model_calibrated_shapes.begin(),
+    v2::model_calibrated_shapes.end(),
+    [](const auto &shape) {
+      return shape.width == width && shape.height == height;
+    }
+  ));
+
+  std::vector<float> candidate(static_cast<std::size_t>(width) * height);
+  for (std::uint32_t y = 0u; y < height; ++y) {
+    for (std::uint32_t x = 0u; x < width; ++x) {
+      std::uint32_t hash = x * 1664525u + y * 1013904223u;
+      hash ^= hash >> 16u;
+      const float unit = static_cast<float>(hash % 79001u) / 79000.0f;
+      candidate[static_cast<std::size_t>(y) * width + x] =
+        -0.039f + 0.078f * unit;
+    }
+  }
+
+  // Put alternating cliffs on both sides of every balanced-chunk boundary so a serial oracle
+  // catches a wrong carry distance/direction in either parallel pass.
+  constexpr std::uint32_t boundary_row = 17u;
+  constexpr std::uint32_t boundary_column = 29u;
+  for (std::uint32_t chunk = 1u; chunk < v2::limiter_group_threads; ++chunk) {
+    const std::uint32_t boundary_x = chunk * width / v2::limiter_group_threads;
+    candidate[static_cast<std::size_t>(boundary_row) * width + boundary_x - 1u] =
+      chunk % 2u == 0u ? 0.039f : -0.039f;
+    candidate[static_cast<std::size_t>(boundary_row) * width + boundary_x] =
+      chunk % 2u == 0u ? -0.039f : 0.039f;
+
+    const std::uint32_t boundary_y = chunk * height / v2::limiter_group_threads;
+    candidate[static_cast<std::size_t>(boundary_y - 1u) * width + boundary_column] =
+      chunk % 2u == 0u ? -0.039f : 0.039f;
+    candidate[static_cast<std::size_t>(boundary_y) * width + boundary_column] =
+      chunk % 2u == 0u ? 0.039f : -0.039f;
+  }
+
+  for (const std::uint32_t content_width :
+       std::array<std::uint32_t, 2> {1u, 300u}) {
+    SCOPED_TRACE("content_width=" + std::to_string(content_width));
+    ASSERT_LT(content_width, width);
+
+    const auto vertical_oracle = exact_q30_vertical_oracle(
+      candidate,
+      width,
+      height,
+      content_width
+    );
+    ASSERT_EQ(vertical_oracle.majorant.size(), candidate.size());
+    ASSERT_EQ(vertical_oracle.conditioned.size(), candidate.size());
+    std::vector<float> vertical_gpu;
+    std::vector<float> conditioned_gpu;
+    ASSERT_TRUE(dispatch_depth_coordinate_v2_limit(
+      warp,
+      vertical_shader.Get(),
+      width,
+      height,
+      width,
+      candidate,
+      vertical_gpu,
+      &conditioned_gpu,
+      content_width
+    ));
+    expect_float_fields_bitwise_equal(
+      vertical_oracle.majorant,
+      vertical_gpu,
+      width,
+      content_width,
+      "vertical_majorant"
+    );
+    expect_float_fields_bitwise_equal(
+      vertical_oracle.conditioned,
+      conditioned_gpu,
+      width,
+      content_width,
+      "vertical_conditioned"
+    );
+
+    const auto final_oracle = exact_q30_horizontal_oracle(
+      vertical_oracle.conditioned,
+      width,
+      height,
+      content_width
+    );
+    ASSERT_EQ(final_oracle.size(), candidate.size());
+    std::vector<float> final_gpu;
+    ASSERT_TRUE(dispatch_depth_coordinate_v2_limit(
+      warp,
+      horizontal_shader.Get(),
+      width,
+      height,
+      height,
+      conditioned_gpu,
+      final_gpu,
+      nullptr,
+      content_width
+    ));
+    expect_float_fields_bitwise_equal(
+      final_oracle,
+      final_gpu,
+      width,
+      content_width,
+      "final"
+    );
   }
 }
 

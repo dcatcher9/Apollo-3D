@@ -1827,7 +1827,9 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
                   encoding="utf-8") as fh:
             estimator = fh.read()
-        self.assertIn("CopyResource(depth_previous_tex.Get(), depth_tex.Get())", estimator)
+        self.assertIn("std::swap(depth_tex, depth_previous_tex)", estimator)
+        self.assertIn("std::swap(depth_uav, depth_previous_uav)", estimator)
+        self.assertIn("std::swap(depth_srv, depth_previous_srv)", estimator)
         self.assertIn("ema_motion_mask_srv", estimator)
         with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
                   encoding="utf-8") as fh:

@@ -50,14 +50,14 @@ diagnostics that explain how the final field was produced.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 50/tag `0x84C0CB62`, canonical SHA-256
-`b7d05b870bf37aecf811c7735dddefc11a80bb742b339c6b36a2a5018fc6b7e2`. It binds the
+schema 51/tag `0xE37DBC1F`, canonical SHA-256
+`50ab2ec86d2833d8dc935ccc8becbbd15e99e23eadde00e99b5a575ba6606f8a`. It binds the
 complete policy below, including all subtitle field/ROI semantics, and producer source-closure
-SHA-256 `a5fc976f84e686aa50826faa5f32f8fd0d43967723111dfd6d49cd177507dd89`.
+SHA-256 `bcf57b361288e9e0a16e1946292f7e80def7cbb6de26f5b587599ccb0fc63682`.
 The live-renderer source-closure SHA-256 is
-`5850bb757becd0c4d359812298974de72b073a4be0279d3ba41c6c1a5c270af1`, and dump-only diagnostic
+`d2672fa57bb2542bb3714c243ea393e78e29fd40603379ea435f4740c6762b7d`, and dump-only diagnostic
 renderer source-closure SHA-256
-`077eefb9830c6a9322210fe1059cc765aa52a7b369f8414249795b0f43e96aaa`. It admits the following
+`32b257d5c84f839b5797fbf720aaddb1d5e5b5056cbb57d45b64d7c2d32aaec3`. It admits the following
 production calibration:
 
 | Property | Production value |
@@ -364,7 +364,7 @@ A large depth cliff cannot be inverted safely as a single-valued backward warp w
 compressing foreground disparity, deforming visible background, or synthesizing missing pixels.
 Sunshine 3D does not synthesize hidden background. It uses a bounded compromise:
 
-1. Compute exact vertical upper and lower Lipschitz envelopes with a maximum shear of
+1. Compute conservative vertical upper and lower Lipschitz envelopes with a maximum shear of
    `2 / depth content width` per adjacent row.
 2. Combine them as `0.75 * upper + 0.25 * lower`.
 3. Compute the least horizontal majorant with a maximum slope of
@@ -374,6 +374,13 @@ The horizontal majorant guarantees a unique contractive inverse and preserves la
 continuity. The vertical share limits crown bending without fully flattening the foreground. The
 trade-off remains visible on severe hair, glass-rim, and small near-object crowns: a large raw cliff
 becomes a wider safe ramp, which can bend real source samples differently in the two eyes.
+
+The production limiters use signed Q30 arithmetic inside one 32-thread group per row or column.
+Upper inputs round outward, lower inputs round downward, and the slope step uses integer division,
+so chunk composition is associative and cannot create a float-only discontinuity at a chunk
+boundary. Lines of 32 cells or fewer retain the serial float recurrence. Schema 51 permits the
+limiter field to differ by up to `2e-7` from the former bitwise serial recurrence while the
+container, majorant/minorant ordering, and spatial bounds remain fail-closed requirements.
 
 A previously tested post-warp collar blur was removed because it introduced a translucent halo at
 a hand boundary. More inverse iterations do not solve the crown trade-off; they only solve the

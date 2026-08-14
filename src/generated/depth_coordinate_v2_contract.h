@@ -10,10 +10,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 50u;
-  inline constexpr std::uint32_t contract_tag = 0x84C0CB62u;
-  inline constexpr std::string_view contract_canonical_sha256 = "b7d05b870bf37aecf811c7735dddefc11a80bb742b339c6b36a2a5018fc6b7e2";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "84c0cb62752dc446000ec8267d7c4d396df3c3dcd38eee029ddca7221873a011";
+  inline constexpr std::uint32_t contract_schema = 51u;
+  inline constexpr std::uint32_t contract_tag = 0xE37DBC1Fu;
+  inline constexpr std::string_view contract_canonical_sha256 = "50ab2ec86d2833d8dc935ccc8becbbd15e99e23eadde00e99b5a575ba6606f8a";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "e37dbc1f38ca5a533a39e812a50afae2f9a3f1da2fd978338167ef184d7264f3";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -150,7 +150,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t shader_source_closure_schema = 2u;
   inline constexpr std::uint32_t shader_source_compile_flags = 34816u;
   inline constexpr std::uint32_t shader_source_macro_count = 0u;
-  inline constexpr std::string_view shader_source_closure_sha256 = "a5fc976f84e686aa50826faa5f32f8fd0d43967723111dfd6d49cd177507dd89";
+  inline constexpr std::string_view shader_source_closure_sha256 = "bcf57b361288e9e0a16e1946292f7e80def7cbb6de26f5b587599ccb0fc63682";
 
   struct shader_source_spec_t {
     std::string_view source_file;
@@ -192,6 +192,12 @@ namespace models::depth_coordinate_v2 {
   inline constexpr float max_vertical_shear = 2.0f;
   inline constexpr float vertical_majorant_share = 0.75f;
   inline constexpr float convergence_curve_default = 0.0f;
+  inline constexpr std::uint32_t limiter_group_threads = 32u;
+  inline constexpr std::uint32_t limiter_q_fraction_bits = 30u;
+  inline constexpr std::uint32_t limiter_q_scale = 1073741824u;
+  inline constexpr std::int32_t limiter_container_q_limit = 42949672;
+  inline constexpr std::uint32_t limiter_horizontal_step_q_numerator = 536870912u;
+  inline constexpr std::uint32_t limiter_vertical_step_q_numerator = 2147483648u;
   inline constexpr std::string_view direct_parallax_decode_expression = "(encoded * 2 - 1) * 0.04";
   static_assert(convergence_curve_default == 0.0f);
   static_assert(max_horizontal_slope > 0.0f && max_horizontal_slope < 1.0f);

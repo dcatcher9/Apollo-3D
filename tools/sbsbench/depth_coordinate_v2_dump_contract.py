@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 import struct
 from itertools import product
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 try:
     from . import depth_coordinate_v2_contract as coordinate_contract
@@ -72,10 +72,10 @@ WINDOW_REGION_AUTHORITY_KINDS = frozenset({"chromium-video", "foreground-client"
 SHADOW_STATE_DUMP_SCHEMA = 16
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 2
 LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
-    "5850bb757becd0c4d359812298974de72b073a4be0279d3ba41c6c1a5c270af1"
+    "d2672fa57bb2542bb3714c243ea393e78e29fd40603379ea435f4740c6762b7d"
 )
 DIAGNOSTIC_SOURCE_CLOSURE_SHA256 = (
-    "077eefb9830c6a9322210fe1059cc765aa52a7b369f8414249795b0f43e96aaa"
+    "32b257d5c84f839b5797fbf720aaddb1d5e5b5056cbb57d45b64d7c2d32aaec3"
 )
 _CONTRACT = coordinate_contract.load_contract()
 _CONTRACT_TAG = generator.contract_tag(_CONTRACT)
@@ -2884,13 +2884,108 @@ def _verify_roi_exterior_zero_warp_map(
     }
 
 
+def _replay_v2_limiter_fields(ownership: Any, content_width: int) -> Tuple[Any, Any, Any]:
+    """Replay the schema-51 serial/Q30 limiter branches exactly in NumPy."""
+
+    import numpy as np
+
+    values = np.asarray(ownership, dtype=np.float32)
+    if values.ndim != 2 or values.size == 0 or content_width <= 0:
+        raise ValueError("limiter replay requires a non-empty 2-D field and positive content width")
+    height, width = values.shape
+    vertical_step = np.float32(_DEFAULTS.max_vertical_shear / content_width)
+    horizontal_step = np.float32(_DEFAULTS.max_horizontal_slope / content_width)
+    share = np.float32(_DEFAULTS.vertical_majorant_share)
+    share_complement = np.float32(1.0 - float(share))
+
+    if height <= 32:
+        majorant = values.copy()
+        for row in range(1, height):
+            majorant[row] = np.maximum(majorant[row], majorant[row - 1] - vertical_step)
+        for row in range(height - 2, -1, -1):
+            majorant[row] = np.maximum(majorant[row], majorant[row + 1] - vertical_step)
+        minorant = values.copy()
+        for row in range(1, height):
+            minorant[row] = np.minimum(values[row], minorant[row - 1] + vertical_step)
+        for row in range(height - 2, -1, -1):
+            minorant[row] = np.minimum(minorant[row], minorant[row + 1] + vertical_step)
+    else:
+        q30_scale = np.float32(1073741824.0)
+        limit = np.float32(_DEFAULTS.direct_container_limit)
+        finite = np.where(np.isfinite(values), values, np.float32(0.0)).astype(np.float32)
+        bounded = np.clip(finite, -limit, limit).astype(np.float32)
+        upper_q30 = np.ceil(
+            np.multiply(bounded, q30_scale, dtype=np.float32)
+        ).astype(np.int64)
+        lower_q30 = np.floor(
+            np.multiply(bounded, q30_scale, dtype=np.float32)
+        ).astype(np.int64)
+        limit_q30 = int(np.ceil(np.float32(limit * q30_scale)))
+        step_q30 = max(1, min(0x80000000 // content_width, 2 * limit_q30))
+
+        majorant_q30 = upper_q30.copy()
+        for row in range(1, height):
+            majorant_q30[row] = np.maximum(
+                upper_q30[row], majorant_q30[row - 1] - step_q30)
+        for row in range(height - 2, -1, -1):
+            majorant_q30[row] = np.maximum(
+                majorant_q30[row], majorant_q30[row + 1] - step_q30)
+        minorant_q30 = lower_q30.copy()
+        for row in range(1, height):
+            minorant_q30[row] = np.minimum(
+                lower_q30[row], minorant_q30[row - 1] + step_q30)
+        for row in range(height - 2, -1, -1):
+            minorant_q30[row] = np.minimum(
+                minorant_q30[row], minorant_q30[row + 1] + step_q30)
+        majorant = np.divide(
+            majorant_q30.astype(np.float32), q30_scale, dtype=np.float32)
+        minorant = np.divide(
+            minorant_q30.astype(np.float32), q30_scale, dtype=np.float32)
+
+    conditioned = np.add(
+        np.multiply(share, majorant, dtype=np.float32),
+        np.multiply(share_complement, minorant, dtype=np.float32),
+        dtype=np.float32,
+    )
+    conditioned = np.minimum(np.maximum(conditioned, minorant), majorant).astype(np.float32)
+
+    if width <= 32:
+        final = conditioned.copy()
+        for column in range(1, width):
+            final[:, column] = np.maximum(
+                final[:, column], final[:, column - 1] - horizontal_step)
+        for column in range(width - 2, -1, -1):
+            final[:, column] = np.maximum(
+                final[:, column], final[:, column + 1] - horizontal_step)
+    else:
+        q30_scale = np.float32(1073741824.0)
+        limit = np.float32(_DEFAULTS.direct_container_limit)
+        bounded = np.clip(conditioned, -limit, limit).astype(np.float32)
+        candidate_q30 = np.ceil(
+            np.multiply(bounded, q30_scale, dtype=np.float32)
+        ).astype(np.int64)
+        limit_q30 = int(np.ceil(np.float32(limit * q30_scale)))
+        step_q30 = max(1, min(0x20000000 // content_width, 2 * limit_q30))
+        final_q30 = candidate_q30.copy()
+        for column in range(1, width):
+            final_q30[:, column] = np.maximum(
+                candidate_q30[:, column], final_q30[:, column - 1] - step_q30)
+        for column in range(width - 2, -1, -1):
+            final_q30[:, column] = np.maximum(
+                final_q30[:, column], final_q30[:, column + 1] - step_q30)
+        final = np.divide(
+            final_q30.astype(np.float32), q30_scale, dtype=np.float32)
+
+    return majorant, conditioned, final
+
+
 def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
     """Verify a dump directory's geometry evidence against its own manifest.
 
     Checks, fail-closed:
       1. every chain field's ``.f32`` bytes hash to the manifest descriptor's ``sha256``;
       2. every field matches the manifest geometry dimensions and is entirely finite;
-      3. the conditioning chain is internally consistent in exact float32:
+      3. the conditioning chain is internally consistent with the schema-51 serial/Q30 branches:
          ``vertical_majorant``/``vertical_conditioned``/ordinary Base are bitwise equal to the
          recurrences recomputed from ``ownership_refined``; SLR12's analytic rectangle budget and
          fade exactly reproduce the selected final field; and ownership refinement never lowers
@@ -3086,32 +3181,12 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
     if np.any(ownership < candidate):
         raise ValueError("ownership refinement lowered the candidate field")
 
-    # Exact float32 replicas of the production recurrences (validated bitwise against the
-    # GPU intermediates; see docs/host-sbs.md#cliff-conditioning).
+    # Exact replicas of the production serial/Q30 branches (validated bitwise against the GPU
+    # intermediates; see docs/host-sbs.md#cliff-conditioning).
     content_left, content_top, content_right, content_bottom = (
         input_region["tensor_content_rect"])
     content_width = content_right - content_left
-    vertical_step = np.float32(_DEFAULTS.max_vertical_shear / content_width)
-    horizontal_step = np.float32(_DEFAULTS.max_horizontal_slope / content_width)
-    share = np.float32(_DEFAULTS.vertical_majorant_share)
-    share_complement = np.float32(1.0 - float(share))
-
-    majorant = ownership.astype(np.float32).copy()
-    for row in range(1, height):
-        majorant[row] = np.maximum(majorant[row], majorant[row - 1] - vertical_step)
-    for row in range(height - 2, -1, -1):
-        majorant[row] = np.maximum(majorant[row], majorant[row + 1] - vertical_step)
-    minorant = ownership.astype(np.float32).copy()
-    for row in range(1, height):
-        minorant[row] = np.minimum(ownership[row], minorant[row - 1] + vertical_step)
-    for row in range(height - 2, -1, -1):
-        minorant[row] = np.minimum(minorant[row], minorant[row + 1] + vertical_step)
-    conditioned = (share * majorant + share_complement * minorant).astype(np.float32)
-    final = conditioned.copy()
-    for col in range(1, width):
-        final[:, col] = np.maximum(final[:, col], final[:, col - 1] - horizontal_step)
-    for col in range(width - 2, -1, -1):
-        final[:, col] = np.maximum(final[:, col], final[:, col + 1] - horizontal_step)
+    majorant, conditioned, final = _replay_v2_limiter_fields(ownership, content_width)
 
     recurrence_fields = [
         ("shadow_vertical_majorant", majorant),
@@ -3125,7 +3200,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
         if not np.array_equal(fields[name], recomputed):
             mismatch = float(np.max(np.abs(fields[name] - recomputed)))
             raise ValueError(
-                f"{name}.f32 is not the exact recurrence of the dumped ownership field "
+                f"{name}.f32 is not the exact recurrence/schema-51 limiter replay of the dumped ownership field "
                 f"(max abs diff {mismatch})")
 
     if subtitle_live:

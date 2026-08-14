@@ -29,6 +29,9 @@ HLSL_OCR_ASSERT_TARGET = (
     "include" / "depth_coordinate_v2_ocr_assert.generated.hlsl"
 )
 HOST_SBS_SHADER_CACHE_HEADER = ROOT / "src" / "host_sbs_shader_cache.h"
+LIMITER_GROUP_THREADS = 32
+LIMITER_Q_FRACTION_BITS = 30
+LIMITER_Q_SCALE = 1 << LIMITER_Q_FRACTION_BITS
 
 EXPECTED_TOP_LEVEL_KEYS = {
     "schema", "vector_width", "calibrated_defaults", "constant_buffer", "frame_stats",
@@ -505,6 +508,14 @@ def validate_contract(
             raise ValueError(f"calibrated default {name} must be positive")
     if calibrated_defaults["max_horizontal_slope"] >= 1.0:
         raise ValueError("max_horizontal_slope must be below one")
+    for name in ("max_horizontal_slope", "max_vertical_shear"):
+        scaled = float(calibrated_defaults[name]) * LIMITER_Q_SCALE
+        if not scaled.is_integer() or scaled <= 0.0 or scaled > 0xFFFFFFFF:
+            raise ValueError(f"{name} must have an exact unsigned Q30 numerator")
+    limiter_q_limit = math.ceil(
+        _float32(calibrated_defaults["direct_container_limit"]) * LIMITER_Q_SCALE)
+    if limiter_q_limit <= 0 or 4 * limiter_q_limit > 0x7FFFFFFF:
+        raise ValueError("direct_container_limit is unsafe for signed Q30 limiter arithmetic")
     majorant_share = _float32(calibrated_defaults["vertical_majorant_share"])
     minorant_share = _float32(_float32(1.0) - majorant_share)
     if majorant_share <= 0.0 or minorant_share <= 0.0:
@@ -1012,6 +1023,16 @@ def render_cpp(contract: dict[str, Any]) -> str:
         for name in EXPECTED_DEFAULT_NAMES
     )
     lines.extend([
+        f"  inline constexpr std::uint32_t limiter_group_threads = {LIMITER_GROUP_THREADS}u;",
+        f"  inline constexpr std::uint32_t limiter_q_fraction_bits = "
+        f"{LIMITER_Q_FRACTION_BITS}u;",
+        f"  inline constexpr std::uint32_t limiter_q_scale = {LIMITER_Q_SCALE}u;",
+        f"  inline constexpr std::int32_t limiter_container_q_limit = "
+        f"{math.ceil(_float32(defaults['direct_container_limit']) * LIMITER_Q_SCALE)};",
+        f"  inline constexpr std::uint32_t limiter_horizontal_step_q_numerator = "
+        f"{int(float(defaults['max_horizontal_slope']) * LIMITER_Q_SCALE)}u;",
+        f"  inline constexpr std::uint32_t limiter_vertical_step_q_numerator = "
+        f"{int(float(defaults['max_vertical_shear']) * LIMITER_Q_SCALE)}u;",
         "  inline constexpr std::string_view direct_parallax_decode_expression = "
         f'"(encoded * 2 - 1) * {json.dumps(float(defaults["direct_container_limit"]))}";',
         "  static_assert(convergence_curve_default == 0.0f);",
@@ -1403,6 +1424,15 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         for calibration in contract["model_calibrations"]
         for shape in calibration["calibrated_input_shapes"]
     ]
+    calibrated_max_dimension = max(
+        max(width, height) for width, height in calibrated_shapes
+    )
+    limiter_container_q_limit = math.ceil(
+        _float32(defaults["direct_container_limit"]) * LIMITER_Q_SCALE)
+    limiter_horizontal_step_q_numerator = int(
+        float(defaults["max_horizontal_slope"]) * LIMITER_Q_SCALE)
+    limiter_vertical_step_q_numerator = int(
+        float(defaults["max_vertical_shear"]) * LIMITER_Q_SCALE)
     shape_macros = [
         macro
         for index, (width, height) in enumerate(calibrated_shapes)
@@ -1455,6 +1485,15 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"#define V2_OCR_FINAL_BOX_OFFSET {ocr_record['final_box_offset']}u",
         f"#define V2_OCR_FINAL_BOX_CAPACITY {ocr_record['final_box_capacity']}u",
         f"#define V2_MODEL_CALIBRATED_SHAPE_COUNT {len(calibrated_shapes)}u",
+        f"#define V2_MODEL_CALIBRATED_MAX_DIMENSION {calibrated_max_dimension}u",
+        f"#define V2_LIMITER_GROUP_THREADS {LIMITER_GROUP_THREADS}u",
+        f"#define V2_LIMITER_Q_FRACTION_BITS {LIMITER_Q_FRACTION_BITS}u",
+        f"#define V2_LIMITER_Q_SCALE {LIMITER_Q_SCALE}.0f",
+        f"#define V2_LIMITER_CONTAINER_Q_LIMIT {limiter_container_q_limit}",
+        f"#define V2_LIMITER_HORIZONTAL_STEP_Q_NUMERATOR "
+        f"{limiter_horizontal_step_q_numerator}u",
+        f"#define V2_LIMITER_VERTICAL_STEP_Q_NUMERATOR "
+        f"{limiter_vertical_step_q_numerator}u",
         *shape_macros,
         f"#define V2_OCR_SAFE_ROW_TOP {field_policy['ocr_safe_row_top']}u",
         f"#define V2_OCR_SAFE_ROW_BOTTOM {field_policy['ocr_safe_row_bottom']}u",
