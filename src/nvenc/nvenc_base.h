@@ -120,15 +120,6 @@ namespace nvenc {
     virtual bool create_and_register_input_buffer() = 0;
 
     /**
-     * @brief Optional. Override if you must perform additional operations on the registered input surface in the beginning of `encode_frame()`.
-     *        Typically used for interop copy.
-     * @return `true` on success, `false` on error
-     */
-    virtual bool synchronize_input_buffer() {
-      return true;
-    }
-
-    /**
      * @brief Optional. Override if you want to create encoder in async mode.
      *        In this case must also set `async_event_handle` variable.
      * @param timeout_ms Wait timeout in milliseconds

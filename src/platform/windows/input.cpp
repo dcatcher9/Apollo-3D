@@ -9,7 +9,7 @@
 
 // standard includes
 #include <cmath>
-#include <thread>
+#include <memory>
 
 // lib includes
 #include <ViGEm/Client.h>
@@ -439,11 +439,7 @@ namespace platf {
   }
 
   struct input_raw_t {
-    ~input_raw_t() {
-      delete vigem;
-    }
-
-    vigem_t *vigem;
+    std::unique_ptr<vigem_t> vigem;
 
     decltype(CreateSyntheticPointerDevice) *fnCreateSyntheticPointerDevice;
     decltype(InjectSyntheticPointerInput) *fnInjectSyntheticPointerInput;
@@ -454,10 +450,9 @@ namespace platf {
     input_t result {new input_raw_t {}};
     auto &raw = *(input_raw_t *) result.get();
 
-    raw.vigem = new vigem_t {};
+    raw.vigem = std::make_unique<vigem_t>();
     if (raw.vigem->init()) {
-      delete raw.vigem;
-      raw.vigem = nullptr;
+      raw.vigem.reset();
     }
 
     // Get pointers to virtual touch/pen input functions (Win10 1809+)
@@ -541,10 +536,8 @@ namespace platf {
     send_input(i);
   }
 
-  util::point_t get_mouse_loc(input_t &input) {
-    throw std::runtime_error("not implemented yet, has to pass tests");
-    // TODO: Tests are failing, something wrong here?
-    POINT p;
+  util::point_t get_mouse_loc(input_t &) {
+    POINT p {};
     if (!GetCursorPos(&p)) {
       return util::point_t {0.0, 0.0};
     }
@@ -1484,7 +1477,7 @@ namespace platf {
    * @param gamepad_state The gamepad button/axis state sent from the client.
    */
   void gamepad_update(input_t &input, int nr, const gamepad_state_t &gamepad_state) {
-    auto vigem = ((input_raw_t *) input.get())->vigem;
+    auto *vigem = ((input_raw_t *) input.get())->vigem.get();
 
     // If there is no gamepad support
     if (!vigem) {
@@ -1516,7 +1509,7 @@ namespace platf {
    * @param touch The touch event.
    */
   void gamepad_touch(input_t &input, const gamepad_touch_t &touch) {
-    auto vigem = ((input_raw_t *) input.get())->vigem;
+    auto *vigem = ((input_raw_t *) input.get())->vigem.get();
 
     // If there is no gamepad support
     if (!vigem) {
@@ -1622,7 +1615,7 @@ namespace platf {
    * @param motion The motion event.
    */
   void gamepad_motion(input_t &input, const gamepad_motion_t &motion) {
-    auto vigem = ((input_raw_t *) input.get())->vigem;
+    auto *vigem = ((input_raw_t *) input.get())->vigem.get();
 
     // If there is no gamepad support
     if (!vigem) {
@@ -1649,7 +1642,7 @@ namespace platf {
    * @param battery The battery event.
    */
   void gamepad_battery(input_t &input, const gamepad_battery_t &battery) {
-    auto vigem = ((input_raw_t *) input.get())->vigem;
+    auto *vigem = ((input_raw_t *) input.get())->vigem.get();
 
     // If there is no gamepad support
     if (!vigem) {
@@ -1722,35 +1715,48 @@ namespace platf {
     delete input;
   }
 
-  std::vector<supported_gamepad_t> &supported_gamepads(input_t *input) {
-    if (!input) {
-      static std::vector gps {
+  namespace {
+    std::vector<supported_gamepad_t> make_supported_gamepads(
+      const bool input_initialized,
+      const bool vigem_available
+    ) {
+      if (!input_initialized) {
+        return {
         supported_gamepad_t {"auto", true, ""},
         supported_gamepad_t {"x360", false, ""},
         supported_gamepad_t {"ds4", false, ""},
+        };
+      }
+      const auto reason =
+        vigem_available ? "" : "gamepads.vigem-not-available";
+      return {
+        supported_gamepad_t {"auto", true, reason},
+        supported_gamepad_t {"x360", vigem_available, reason},
+        supported_gamepad_t {"ds4", vigem_available, reason},
       };
+    }
+  }  // namespace
 
-      return gps;
+  std::vector<supported_gamepad_t> &supported_gamepads(input_t *input) {
+    if (!input) {
+      static std::vector<supported_gamepad_t> gamepads =
+        make_supported_gamepads(false, false);
+      return gamepads;
     }
 
-    auto vigem = ((input_raw_t *) input)->vigem;
-    auto enabled = vigem != nullptr;
-    auto reason = enabled ? "" : "gamepads.vigem-not-available";
+    thread_local std::vector<supported_gamepad_t> gamepads;
+    gamepads = make_supported_gamepads(
+      true,
+      ((input_raw_t *) input)->vigem != nullptr
+    );
 
-    // ds4 == ps4
-    static std::vector gps {
-      supported_gamepad_t {"auto", true, reason},
-      supported_gamepad_t {"x360", enabled, reason},
-      supported_gamepad_t {"ds4", enabled, reason}
-    };
-
-    for (auto &[name, is_enabled, reason_disabled] : gps) {
+    for (const auto &[name, is_enabled, reason_disabled] : gamepads) {
       if (!is_enabled) {
         BOOST_LOG(warning) << "Gamepad " << name << " is disabled due to " << reason_disabled;
       }
     }
 
-    return gps;
+    return gamepads;
   }
 
   /**

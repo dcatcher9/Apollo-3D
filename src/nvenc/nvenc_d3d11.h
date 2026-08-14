@@ -16,8 +16,6 @@ namespace nvenc {
 
   _COM_SMARTPTR_TYPEDEF(ID3D11Device, IID_ID3D11Device);
   _COM_SMARTPTR_TYPEDEF(ID3D11Texture2D, IID_ID3D11Texture2D);
-  _COM_SMARTPTR_TYPEDEF(IDXGIDevice, IID_IDXGIDevice);
-  _COM_SMARTPTR_TYPEDEF(IDXGIAdapter, IID_IDXGIAdapter);
 
   /**
    * @brief Abstract Direct3D11 NVENC encoder.

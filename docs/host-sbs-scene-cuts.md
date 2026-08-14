@@ -68,10 +68,19 @@ The production subtitle path applies no overlay exclusion to cut evidence or DAV
 appearance and disappearance remain ordinary scene evidence; the locator consumes the
 already-resolved cut result and can neither suppress nor retroactively change it.
 
-The production detector-only PP-OCRv6/OCR8/SLR9 subtitle path has no private cut classifier. It
-consumes the finalized same-frame CutBridge result. A confirmed cut clears pending and death-grace
-state, preserves only current OCR rectangles that still match an old owner, and forces a fresh
-plane-target sample; additions or disjoint boxes start a new two-observation transaction. An
+The production detector-only PP-OCRv6/OCR8/SLR12 subtitle path has no private cut classifier. It
+consumes the finalized same-frame CutBridge result only for a distinct observation; redispatching
+the same frame/domain identity cannot apply the cut pulse twice. The conditioner also binds that
+CutBridge resource and copies Base unless the locator scene epoch equals its authenticated hard-cut
+count. A confirmed cut clears pending and death-grace
+state, preserves only current OCR rectangles that still match an old owner, and samples the new
+local supporting plane. Each sampling row is independently reliable only when its generated
+interquartile-range gate passes; one good row is sufficient. With both rows valid and at least one
+coherent, close medians are averaged and separated medians choose the larger-U, nearer support.
+A reliable survivor restarts on the selected plane at half fade strength;
+an unreliable one conditions exact Base. The old full-strength target never crosses the cut.
+Additions or disjoint boxes
+start a new two-observation transaction. An
 input-domain reset clears the owner too and records current boxes only as the first pending
 observation. Missing, stale, abstaining, malformed, or mismatched OCR8 evidence in an otherwise
 valid unchanged domain clears current and pending subtitle authority, starts or advances the
@@ -240,7 +249,9 @@ The committed conformance clips must prove at least these contracts:
 - a stable lower OCR line stack acquires only after two compatible observations with distinct exact
   frame/domain identities; redispatching one record cannot self-confirm;
 - a hard cut clears pending/grace, preserves only same-frame rectangles that still overlap an old
-  owner, and forces a new target sample; disjoint or appended lines remain pending; and
+  owner, then either restarts from a reliable new local-plane sample at half strength or publishes
+  exact Base when sampling is unreliable; disjoint or
+  appended lines remain pending; and
 - a no-owner cut or input reset landing on an already-visible static subtitle records the first box
   stack as pending and can acquire it on the next compatible distinct observation.
 

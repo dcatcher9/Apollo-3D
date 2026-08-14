@@ -57,9 +57,10 @@ listed by `run_eval.py --help`; unrecognized historical options fail argument pa
 
 ### Current subtitle authority
 
-The current dump reader accepts the authenticated OCR8 record and compact SLR9 locator state as
-the only live subtitle authority. Retired SLR3--SLR8, GST/OGR/ORS, and offline overlay-detector
+The current dump reader accepts the authenticated OCR8 record and compact SLR12 locator state as
+the only live subtitle authority. Retired SLR3--SLR9, GST/OGR/ORS, and offline overlay-detector
 paths are not accepted as live or replay authority.
+
 ## Reports and comparisons
 
 When a treatment was not run with `--report-control`, generate a report separately:
@@ -101,14 +102,14 @@ python tools/sbsbench/sbsbench.py `
 ```
 
 See [Dump and replay format](DUMP_FORMAT.md) before interpreting preview PNGs. The reader accepts
-only the current SLR9/OCR8 dump schema; older experimental captures are intentionally unsupported.
-An active package authenticates the exact OCR8 record, compact SLR9 state, ordinary Base field,
+only the current SLR12/OCR8 dump schema; older experimental captures are intentionally unsupported.
+An active package authenticates the exact OCR8 record, compact SLR12 state, ordinary Base field,
 and selected conditioned field. An inactive package uses the one canonical `none` descriptor.
 
-Current schema-29 window-region packages preserve the complete authorized source rectangle at any
+Current schema-31 window-region packages preserve the complete authorized source rectangle at any
 aspect ratio. `depth_input_region.json` schema 3 records the centered integer content rectangle in
 the fixed DAV2 tensor and its edge-replicated excluded padding. Quantitative consumers must use
-that content width for limiter and SLR9 steps and must project OCR/SLR geometry only into that
+that content width for limiter and SLR12 steps and must project OCR/SLR geometry only into that
 content rectangle; treating the whole tensor as real source pixels is rejected.
 
 ## Whole-clip conversion boundary

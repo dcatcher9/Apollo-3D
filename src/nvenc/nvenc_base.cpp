@@ -6,12 +6,13 @@
 #include "nvenc_base.h"
 
 // standard includes
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <format>
+#include <string_view>
 
 // local includes
-#include "src/config.h"
 #include "src/logging.h"
 #include "src/utility.h"
 
@@ -31,61 +32,35 @@ namespace {
   std::array<std::atomic<int>, 3> observed_codec_max_widths {};
   std::array<std::atomic<int>, 3> observed_codec_max_heights {};
 
-  GUID quality_preset_guid_from_number(unsigned number) {
-    if (number > 7) {
-      number = 7;
-    }
-
-    switch (number) {
-      case 1:
-      default:
-        return NV_ENC_PRESET_P1_GUID;
-
-      case 2:
-        return NV_ENC_PRESET_P2_GUID;
-
-      case 3:
-        return NV_ENC_PRESET_P3_GUID;
-
-      case 4:
-        return NV_ENC_PRESET_P4_GUID;
-
-      case 5:
-        return NV_ENC_PRESET_P5_GUID;
-
-      case 6:
-        return NV_ENC_PRESET_P6_GUID;
-
-      case 7:
-        return NV_ENC_PRESET_P7_GUID;
-    }
+  struct quality_preset_t {
+    const GUID *guid;
+    std::string_view name;
   };
+
+  const std::array quality_presets {
+    quality_preset_t {&NV_ENC_PRESET_P1_GUID, "P1"},
+    quality_preset_t {&NV_ENC_PRESET_P2_GUID, "P2"},
+    quality_preset_t {&NV_ENC_PRESET_P3_GUID, "P3"},
+    quality_preset_t {&NV_ENC_PRESET_P4_GUID, "P4"},
+    quality_preset_t {&NV_ENC_PRESET_P5_GUID, "P5"},
+    quality_preset_t {&NV_ENC_PRESET_P6_GUID, "P6"},
+    quality_preset_t {&NV_ENC_PRESET_P7_GUID, "P7"},
+  };
+
+  GUID quality_preset_guid_from_number(unsigned number) {
+    number = std::clamp(number, 1u, static_cast<unsigned>(quality_presets.size()));
+    return *quality_presets[number - 1].guid;
+  }
 
   bool equal_guids(const GUID &guid1, const GUID &guid2) {
     return std::memcmp(&guid1, &guid2, sizeof(GUID)) == 0;
   }
 
-  auto quality_preset_string_from_guid(const GUID &guid) {
-    if (equal_guids(guid, NV_ENC_PRESET_P1_GUID)) {
-      return "P1";
-    }
-    if (equal_guids(guid, NV_ENC_PRESET_P2_GUID)) {
-      return "P2";
-    }
-    if (equal_guids(guid, NV_ENC_PRESET_P3_GUID)) {
-      return "P3";
-    }
-    if (equal_guids(guid, NV_ENC_PRESET_P4_GUID)) {
-      return "P4";
-    }
-    if (equal_guids(guid, NV_ENC_PRESET_P5_GUID)) {
-      return "P5";
-    }
-    if (equal_guids(guid, NV_ENC_PRESET_P6_GUID)) {
-      return "P6";
-    }
-    if (equal_guids(guid, NV_ENC_PRESET_P7_GUID)) {
-      return "P7";
+  std::string_view quality_preset_string_from_guid(const GUID &guid) {
+    for (const auto &preset : quality_presets) {
+      if (equal_guids(guid, *preset.guid)) {
+        return preset.name;
+      }
     }
     return "Unknown";
   }
@@ -404,7 +379,7 @@ namespace nvenc {
       vui_config.videoFullRangeFlag = colorspace.full_range;
       vui_config.colourDescriptionPresentFlag = 1;
       vui_config.colourPrimaries = colorspace.primaries;
-      vui_config.transferCharacteristics = colorspace.tranfer_function;
+      vui_config.transferCharacteristics = colorspace.transfer_function;
       vui_config.colourMatrix = colorspace.matrix;
       vui_config.chromaSampleLocationFlag = 1;
       vui_config.chromaSampleLocationTop = 0;
@@ -461,7 +436,7 @@ namespace nvenc {
             format_config.outputBitDepth = NV_ENC_BIT_DEPTH_10;
           }
           format_config.colorPrimaries = colorspace.primaries;
-          format_config.transferCharacteristics = colorspace.tranfer_function;
+          format_config.transferCharacteristics = colorspace.transfer_function;
           format_config.matrixCoefficients = colorspace.matrix;
           format_config.colorRange = colorspace.full_range;
           format_config.chromaSamplePosition = 1;
@@ -592,11 +567,6 @@ namespace nvenc {
 
     assert(registered_input_buffer);
     assert(output_bitstream);
-
-    if (!synchronize_input_buffer()) {
-      BOOST_LOG(error) << "NvEnc: failed to synchronize input buffer";
-      return {};
-    }
 
     NV_ENC_MAP_INPUT_RESOURCE mapped_input_buffer = {NV_ENC_MAP_INPUT_RESOURCE_VER};
     mapped_input_buffer.registeredResource = registered_input_buffer;
@@ -767,12 +737,6 @@ namespace nvenc {
 
     last_nvenc_error_string.clear();
     if (status != NV_ENC_SUCCESS) {
-      /* This API function gives broken strings more often than not
-      if (nvenc && encoder) {
-        last_nvenc_error_string = nvenc->nvEncGetLastErrorString(encoder);
-        if (!last_nvenc_error_string.empty()) last_nvenc_error_string += " ";
-      }
-      */
       last_nvenc_error_string += status_string(status);
       return true;
     }

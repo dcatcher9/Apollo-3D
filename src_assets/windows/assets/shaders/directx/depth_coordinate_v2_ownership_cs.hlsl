@@ -36,17 +36,10 @@ bool LoadCandidate(int2 position, out float value) {
 #define OWNERSHIP_COVERAGE_MAX 0.99f
 #define OWNERSHIP_COVERAGE_ERROR 0.0002f
 
-float3 OwnershipSrgbToLinear(float3 color) {
-    color = saturate(color);
-    float3 low = color / 12.92f;
-    float3 high = pow((color + 0.055f) / 1.055f, 2.4f);
-    return color <= 0.04045f ? low : high;
-}
-
 float3 SourceLinearColor(int2 position) {
     // Decode all capture modes through the same display-referred signal used by preprocessing,
     // then compare in the linear-RGB units on which the ownership oracle was calibrated.
-    return OwnershipSrgbToLinear(DepthColorToSrgb(
+    return DepthSrgbToLinear(DepthColorToSrgb(
         SourceColor.Load(int3(position, 0)).rgb,
         color_mode
     ));

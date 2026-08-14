@@ -45,14 +45,14 @@ namespace nvenc {
       case video::colorspace_e::rec601:
         // Rec. 601
         colorspace.primaries = NV_ENC_VUI_COLOR_PRIMARIES_SMPTE170M;
-        colorspace.tranfer_function = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SMPTE170M;
+        colorspace.transfer_function = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SMPTE170M;
         colorspace.matrix = NV_ENC_VUI_MATRIX_COEFFS_SMPTE170M;
         break;
 
       case video::colorspace_e::rec709:
         // Rec. 709
         colorspace.primaries = NV_ENC_VUI_COLOR_PRIMARIES_BT709;
-        colorspace.tranfer_function = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709;
+        colorspace.transfer_function = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709;
         colorspace.matrix = NV_ENC_VUI_MATRIX_COEFFS_BT709;
         break;
 
@@ -60,7 +60,7 @@ namespace nvenc {
         // Rec. 2020
         colorspace.primaries = NV_ENC_VUI_COLOR_PRIMARIES_BT2020;
         assert(sunshine_colorspace.bit_depth == 10);
-        colorspace.tranfer_function = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT2020_10;
+        colorspace.transfer_function = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT2020_10;
         colorspace.matrix = NV_ENC_VUI_MATRIX_COEFFS_BT2020_NCL;
         break;
 
@@ -68,7 +68,7 @@ namespace nvenc {
         // Rec. 2020 with ST 2084 perceptual quantizer
         colorspace.primaries = NV_ENC_VUI_COLOR_PRIMARIES_BT2020;
         assert(sunshine_colorspace.bit_depth == 10);
-        colorspace.tranfer_function = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SMPTE2084;
+        colorspace.transfer_function = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SMPTE2084;
         colorspace.matrix = NV_ENC_VUI_MATRIX_COEFFS_BT2020_NCL;
         break;
     }

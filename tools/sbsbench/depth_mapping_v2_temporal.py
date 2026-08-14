@@ -706,7 +706,7 @@ def _ownership_source_rgb(source_rgb: np.ndarray) -> np.ndarray:
 
 
 def _ownership_linear_rgb(source: np.ndarray, y: int, x: int) -> np.ndarray:
-    """Mirror OwnershipSrgbToLinear for one source texel in float32."""
+    """Mirror DepthSrgbToLinear for one source texel in float32."""
 
     color = np.asarray(source[y, x], dtype=np.float32)
     if source.dtype.kind != "f":

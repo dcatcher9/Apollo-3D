@@ -9,9 +9,8 @@
 struct MouseHIDTest: PlatformTestSuite, testing::WithParamInterface<util::point_t> {
   void SetUp() override {
 #ifdef _WIN32
-    // TODO: Windows tests are failing, `get_mouse_loc` seems broken and `platf::abs_mouse` too
-    //       the alternative `platf::abs_mouse` method seem to work better during tests,
-    //       but I'm not sure about real work
+    // SendInput movement assertions depend on the user's mouse acceleration and
+    // virtual-desktop topology.
     GTEST_SKIP() << "TODO Windows";
 #elif __linux__
     // TODO: Inputtino waiting https://github.com/games-on-whales/inputtino/issues/6 is resolved.

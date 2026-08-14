@@ -10,18 +10,15 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
-#include <fstream>
 #include <future>
 #include <limits>
 #include <mutex>
 #include <optional>
-#include <queue>
 #include <stdexcept>
 #include <thread>
 
 // lib includes
 #include <boost/endian/arithmetic.hpp>
-#include <openssl/err.h>
 #include <rs.h>
 
 extern "C" {
@@ -295,10 +292,6 @@ namespace stream {
 
 #pragma pack(pop)
 
-  constexpr std::size_t round_to_pkcs7_padded(std::size_t size) {
-    return ((size + 15) / 16) * 16;
-  }
-
   live_video_mode_ack_e live_video_mode_ack_status(proc::live_video_mode_result_e result) {
     switch (result) {
       case proc::live_video_mode_result_e::applied:
@@ -484,7 +477,10 @@ namespace stream {
 
   constexpr std::size_t MAX_AUDIO_PACKET_SIZE = 1400;
 
-  using audio_aes_t = std::array<char, round_to_pkcs7_padded(MAX_AUDIO_PACKET_SIZE)>;
+  using audio_aes_t = std::array<
+    char,
+    crypto::cipher::round_to_pkcs7_padded(MAX_AUDIO_PACKET_SIZE)
+  >;
 
   using message_queue_t = std::shared_ptr<safe::queue_t<std::pair<udp::endpoint, std::string>>>;
 
@@ -501,12 +497,6 @@ namespace stream {
   };
 
   using av_ping_route_queue_t = std::shared_ptr<safe::queue_t<av_ping_route_update_t>>;
-
-  // return bytes written on success
-  // return -1 on error
-  static inline int encode_audio(const audio::buffer_t &plaintext, uint8_t *destination, crypto::aes_t &iv, crypto::cipher::cbc_t &cbc) {
-    return cbc.encrypt(std::string_view {(char *) std::begin(plaintext), plaintext.size()}, destination, &iv);
-  }
 
   class control_server_t {
   public:
@@ -1221,6 +1211,37 @@ namespace stream {
     return std::string_view {(char *) tagged_cipher.data(), packet_length + sizeof(control_encrypted_t) - sizeof(control_encrypted_t::seq)};
   }
 
+  enum class control_delivery_e {
+    reliable,
+    unreliable_sequenced,
+  };
+
+  template<typename Plaintext>
+  int send_control_packet(
+    session_t *session,
+    control_server_t &server,
+    const Plaintext &plaintext,
+    const control_delivery_e delivery = control_delivery_e::reliable
+  ) {
+    if (!session->control.peer) {
+      return -1;
+    }
+    std::array<
+      std::uint8_t,
+      sizeof(control_encrypted_t) +
+        crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) +
+        crypto::cipher::tag_size>
+      encrypted_payload;
+    const auto payload =
+      encode_control(session, util::view(plaintext), encrypted_payload);
+    if (payload.empty()) {
+      return -1;
+    }
+    return delivery == control_delivery_e::reliable ?
+             server.send(payload, session->control.peer) :
+             server.send_unreliable_sequenced(payload, session->control.peer);
+  }
+
   int start_broadcast(broadcast_ctx_t &ctx);
   void end_broadcast(broadcast_ctx_t &ctx);
 
@@ -1676,7 +1697,8 @@ namespace stream {
       return -1;
     }
 
-    std::string payload;
+    auto &server = session->broadcast_ref->control_server;
+    int send_result = -1;
     if (msg.type == platf::gamepad_feedback_e::rumble) {
       control_rumble_t plaintext;
       plaintext.header.type = control_packet::rumble;
@@ -1689,10 +1711,7 @@ namespace stream {
       plaintext.lowfreq = util::endian::little(data.lowfreq);
       plaintext.highfreq = util::endian::little(data.highfreq);
 
-      std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
-        encrypted_payload;
-
-      payload = encode_control(session, util::view(plaintext), encrypted_payload);
+      send_result = send_control_packet(session, server, plaintext);
     } else if (msg.type == platf::gamepad_feedback_e::rumble_triggers) {
       control_rumble_triggers_t plaintext;
       plaintext.header.type = control_packet::rumble_triggers;
@@ -1704,10 +1723,7 @@ namespace stream {
       plaintext.left = util::endian::little(data.left_trigger);
       plaintext.right = util::endian::little(data.right_trigger);
 
-      std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
-        encrypted_payload;
-
-      payload = encode_control(session, util::view(plaintext), encrypted_payload);
+      send_result = send_control_packet(session, server, plaintext);
     } else if (msg.type == platf::gamepad_feedback_e::set_motion_event_state) {
       control_set_motion_event_t plaintext;
       plaintext.header.type = control_packet::set_motion_event;
@@ -1719,10 +1735,7 @@ namespace stream {
       plaintext.reportrate = util::endian::little(data.report_rate);
       plaintext.type = data.motion_type;
 
-      std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
-        encrypted_payload;
-
-      payload = encode_control(session, util::view(plaintext), encrypted_payload);
+      send_result = send_control_packet(session, server, plaintext);
     } else if (msg.type == platf::gamepad_feedback_e::set_rgb_led) {
       control_set_rgb_led_t plaintext;
       plaintext.header.type = control_packet::set_rgb_led_feedback;
@@ -1735,10 +1748,7 @@ namespace stream {
       plaintext.g = data.g;
       plaintext.b = data.b;
 
-      std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
-        encrypted_payload;
-
-      payload = encode_control(session, util::view(plaintext), encrypted_payload);
+      send_result = send_control_packet(session, server, plaintext);
     } else if (msg.type == platf::gamepad_feedback_e::set_adaptive_triggers) {
       control_adaptive_triggers_t plaintext;
       plaintext.header.type = control_packet::set_adaptive_triggers;
@@ -1751,16 +1761,13 @@ namespace stream {
       plaintext.type_right = msg.data.adaptive_triggers.type_right;
       std::ranges::copy(msg.data.adaptive_triggers.right, plaintext.right);
 
-      std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
-        encrypted_payload;
-
-      payload = encode_control(session, util::view(plaintext), encrypted_payload);
+      send_result = send_control_packet(session, server, plaintext);
     } else {
       BOOST_LOG(error) << "Unknown gamepad feedback message type"sv;
       return -1;
     }
 
-    if (session->broadcast_ref->control_server.send(payload, session->control.peer)) {
+    if (send_result != 0) {
       TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
       BOOST_LOG(warning) << "Couldn't send gamepad feedback to ["sv << addr << ':' << port << ']';
 
@@ -1784,11 +1791,11 @@ namespace stream {
     plaintext.enabled = hdr_info->enabled;
     plaintext.metadata = hdr_info->metadata;
 
-    std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
-      encrypted_payload;
-
-    auto payload = encode_control(session, util::view(plaintext), encrypted_payload);
-    if (session->broadcast_ref->control_server.send(payload, session->control.peer)) {
+    if (send_control_packet(
+          session,
+          session->broadcast_ref->control_server,
+          plaintext
+        ) != 0) {
       TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
       BOOST_LOG(warning) << "Couldn't send HDR mode to ["sv << addr << ':' << port << ']';
 
@@ -1810,11 +1817,11 @@ namespace stream {
     plaintext.header.payloadLength = sizeof(control_depth_status_t) - sizeof(control_header_v2);
     plaintext.phase = (std::uint8_t) phase;
 
-    std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
-      encrypted_payload;
-
-    auto payload = encode_control(session, util::view(plaintext), encrypted_payload);
-    if (session->broadcast_ref->control_server.send(payload, session->control.peer)) {
+    if (send_control_packet(
+          session,
+          session->broadcast_ref->control_server,
+          plaintext
+        ) != 0) {
       TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
       BOOST_LOG(warning) << "Couldn't send depth status to ["sv << addr << ':' << port << ']';
       return -1;
@@ -1847,11 +1854,11 @@ namespace stream {
       return -1;
     }
 
-    std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
-      encrypted_payload;
-
-    auto payload = encode_control(session, util::view(plaintext), encrypted_payload);
-    if (payload.empty() || session->broadcast_ref->control_server.send(payload, session->control.peer)) {
+    if (send_control_packet(
+          session,
+          session->broadcast_ref->control_server,
+          plaintext
+        ) != 0) {
       TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
       BOOST_LOG(warning) << "Couldn't send live video-mode acknowledgement to ["sv << addr << ':' << port << ']';
       return -1;
@@ -1903,26 +1910,13 @@ namespace stream {
       return -1;
     }
 
-    std::array<
-      std::uint8_t,
-      sizeof(control_encrypted_t) +
-        crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) +
-        crypto::cipher::tag_size>
-      encrypted_payload;
-    auto payload = encode_control(session, util::view(plaintext), encrypted_payload);
-    if (payload.empty()) {
-      return -1;
-    }
-
-    const int result = reliable ?
-                         session->broadcast_ref->control_server.send(
-                           payload,
-                           session->control.peer
-                         ) :
-                         session->broadcast_ref->control_server.send_unreliable_sequenced(
-                           payload,
-                           session->control.peer
-                         );
+    const int result = send_control_packet(
+      session,
+      session->broadcast_ref->control_server,
+      plaintext,
+      reliable ? control_delivery_e::reliable :
+                 control_delivery_e::unreliable_sequenced
+    );
     if (result != 0) {
       return -1;
     }
@@ -1966,10 +1960,7 @@ namespace stream {
     plaintext.header.payloadLength = sizeof(plaintext.ec);
     plaintext.ec = util::endian::big<std::uint32_t>(0x80030023);
 
-    std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
-      encrypted_payload;
-    auto payload = encode_control(&session, util::view(plaintext), encrypted_payload);
-    if (payload.empty() || server.send(payload, session.control.peer)) {
+    if (send_control_packet(&session, server, plaintext) != 0) {
       TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session.control.peer->address.address));
       BOOST_LOG(warning) << "Couldn't send termination code to ["sv << addr << ':' << port << ']';
     }
@@ -3052,7 +3043,14 @@ namespace stream {
 
       auto &shards_p = channel->shard_ptrs;
 
-      auto bytes = encode_audio(packet_data, shards_p[sequenceNumber % RTPA_DATA_SHARDS], iv, channel->cipher);
+      const auto bytes = channel->cipher.encrypt(
+        std::string_view {
+          reinterpret_cast<const char *>(std::begin(packet_data)),
+          packet_data.size()
+        },
+        shards_p[sequenceNumber % RTPA_DATA_SHARDS],
+        &iv
+      );
       if (bytes < 0) {
         BOOST_LOG(error) << "Couldn't encode audio packet"sv;
         break;

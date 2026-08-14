@@ -1,7 +1,7 @@
 # Dump 3D format
 
 Dump 3D is one atomic, matched-frame diagnostic package for the authenticated Host SBS V2 path.
-The writer and strict reader accept one current manifest schema only. Retired SLR3--SLR8,
+The writer and strict reader accept one current manifest schema only. Retired SLR3--SLR9,
 GST/OGR/ORS, and offline overlay-detector packages are intentionally unsupported.
 
 ## Current package
@@ -27,20 +27,20 @@ The core package contains:
 | `shadow_ownership_refined_parallax.f32` | Full-resolution contour ownership result |
 | `shadow_vertical_majorant.f32` | Vertical upper-envelope diagnostic |
 | `shadow_vertical_conditioned.f32` | Fixed vertical-share result |
-| `shadow_base_final_parallax.f32` | Required in active SLR9 packages; ordinary post-limiter field before subtitle conditioning |
-| `shadow_final_parallax.f32` | Selected final model-domain field, after SLR9 when active |
+| `shadow_base_final_parallax.f32` | Required in active SLR12 packages; ordinary post-limiter field before subtitle conditioning |
+| `shadow_final_parallax.f32` | Selected final model-domain field, after SLR12 when active |
 | `warp_depth.f32` | Exact field consumed by reprojection |
 | `shadow_state.json`, `shadow_frame_stats.json` | Typed V2 state and current-frame statistics |
 | `warp_map.f32`, `warp_map_shape.json` | Exact inverse map; required for ROI packages |
 | `warp_mask.png` | Boundary-extrapolation diagnostic |
 | `window_region.json` | Required semantic observation for ROI packages |
 | `sbs.png` | Packed stereo preview |
-| `subtitle_conditioning.json` | Required current subtitle-authority descriptor; canonical `none` or `subtitle-slr9` |
+| `subtitle_conditioning.json` | Required current subtitle-authority descriptor; canonical `none` or `subtitle-slr12` |
 | `subtitle_ocr_record.u32` | Active-only exact-frame OCR8 record in generated-contract word order |
-| `subtitle_locator_state.u32` | Active-only compact SLR9 state in generated-contract word order |
+| `subtitle_locator_state.u32` | Active-only compact SLR12 state in generated-contract word order |
 
-All `.f32` files are little-endian float32. Schema 29 accepts the canonical inactive descriptor or
-the one current `subtitle-slr9` package. It binds the exact current generated Depth Coordinate V2
+All `.f32` files are little-endian float32. Schema 31 accepts the canonical inactive descriptor or
+the one current `subtitle-slr12` package. It binds the exact current generated Depth Coordinate V2
 identity, producer and renderer closures, OCR model provenance, entrypoints, and four artifact
 roles (OCR record, locator state, Base field, selected field). The generated contract is the sole
 owner of those live identities and numeric policy values. The
@@ -48,7 +48,7 @@ owner of those live identities and numeric policy values. The
 sole owner of their runtime and state-machine semantics; this dump-format document copies neither.
 No retired layout is preserved or reinterpreted.
 
-## OCR8 and SLR9 records
+## OCR8 and SLR12 records
 
 The generated `subtitle_ocr.ocr_record` contract owns OCR8's schema, tag, word counts, offsets,
 capacities, flags, and numeric detector/box policy values. The dump serializes exactly that fixed
@@ -57,12 +57,23 @@ tensor-content geometry, projected ROI, paired core/cover records, topology meta
 zero tail must all agree with the manifest's selected exact frame. See the
 [live OCR8 contract](../../docs/host-sbs.md#ocr-box-subtitle-conditioner) for producer semantics.
 
-The generated `subtitle_ocr.locator_state` contract owns SLR9's schema, tag, word layout,
-rectangle capacity, kind packing, and numeric qualification and death-grace limits. The dump
+The generated `subtitle_ocr.locator_state` contract owns SLR12's schema, the unambiguous
+little-endian `SL12` tag bytes, word layout,
+rectangle capacity, kind packing, numeric qualification/death-grace limits, and the complete
+local-supporting-plane target policy. The resolver descriptor serializes that policy exactly as
+`binocular-source-pixels`: two independent 16-sample rows; median indices `7/8`; Tukey-IQR lower
+indices `3/4` and upper indices `11/12`; at least one coherent row with IQR at most `8`; and a
+row-median difference of `4` as the both-valid mean-versus-maximum-median selection boundary. It
+also binds deadband `1`, EMA alpha `0.125`, maximum slew `0.25`, maximum continuing residual `8`,
+and at most two distinct continuing same-scene unreliable-measurement holds in owner state word
+25. Only current authority increments that counter; duplicates do not age it, absent current
+authority may preserve it without conditioning, and hard cuts cannot hold it. The signed
+direct-parallax container is the target's only representation limit. The dump
 serializes exactly that fixed word array as little-endian uint32 values. The reader authenticates
-every identity, flag, aggregate, rectangle, target, event, fade, grace, kind mask, and canonical
+every identity, flag, aggregate, rectangle, target, event, fade, contextual hold/grace counter,
+kind mask, and canonical
 zero slot, and requires current covers to come from the same-frame OCR8 record. See the
-[live SLR9 contract](../../docs/host-sbs.md#ocr-box-subtitle-conditioner) for overlap, cut-survival,
+[live SLR12 contract](../../docs/host-sbs.md#ocr-box-subtitle-conditioner) for overlap, cut-survival,
 target, fade, death-grace, and conditioning semantics.
 
 The Python conditioner replay below is deliberately an independent dump-integrity verifier. It
@@ -110,9 +121,9 @@ The maintained reader:
 5. requires `warp_depth.f32` to equal the selected final field;
 6. validates ROI placement, authority-specific window identity, inverse-map geometry, and the exterior
    zero-plane evidence; and
-7. validates canonical inactive metadata, or the exact current OCR8/SLR9 model, shader, record,
+7. validates canonical inactive metadata, or the exact current OCR8/SLR12 model, shader, record,
    state, and artifact identities;
-8. replays the ordinary V2 chain into `shadow_base_final_parallax.f32` when SLR9 is active, then
+8. replays the ordinary V2 chain into `shadow_base_final_parallax.f32` when SLR12 is active, then
    replays the exact content-clamped analytic rectangle budget and fade into
    `shadow_final_parallax.f32` (including exact nearest-content Base extension when current
    authority is empty). SM5 division is checked against the finite globally consistent one-ULP

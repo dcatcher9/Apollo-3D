@@ -15,7 +15,7 @@ diagnostic evidence only. HDR color fidelity is not claimed.
 The calibrated spatial projection is composed in a fixed order: compute the column-wise upper and
 lower envelopes, form their authenticated 75/25 orientation-selective share, then apply one
 row-wise horizontal majorant. Vertical shear is expressed as horizontal disparity pixels per
-source-image vertical pixel. This experiment remains full-source-only: schema-29 window-region
+source-image vertical pixel. This experiment remains full-source-only: schema-31 window-region
 captures carry an integer tensor-content rectangle and excluded padding, and fail closed below
 rather than being reinterpreted as full-tensor source geometry.
 """
@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -58,6 +59,7 @@ except ImportError:  # Direct execution from tools/sbsbench.
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO = SCRIPT_DIR.parent.parent
+_RESULT_RAW_COORDINATE_SCALE_AUTHENTICATION_TOLERANCE = 1.0e-6
 
 
 def _resolve_mapping_calibration(
@@ -100,9 +102,8 @@ def _inspect_optional_shadow_state(dump: Path) -> Dict[str, Any]:
     state_document = _read_json(state_path)
     state = v2_dump_contract.validate_shadow_state_document(state_document)
     stats = v2_dump_contract.validate_shadow_frame_stats_document(_read_json(stats_path))
-    collapse_epsilon = float(state_document["constants"]["collapse_abs_epsilon"])
-    expected_frame_valid = bool(
-        stats["valid"] > 0.5 and stats["population_std"] > collapse_epsilon)
+    expected_frame_valid = v2_dump_contract.shadow_frame_valid_from_statistics(
+        state_document, stats)
     if bool(state["frame_valid"] > 0.5) != expected_frame_valid:
         raise ValueError("dump shadow state disagrees with its current-frame statistics")
     return {
@@ -115,6 +116,8 @@ def _inspect_optional_shadow_state(dump: Path) -> Dict[str, Any]:
         "calibration_revision": state["calibration_revision"],
         "confirmed_cut_count": state["confirmed_cut_count"],
         "frame_stats_valid": bool(stats["valid"] > 0.5),
+        "raw_coordinate_scale": v2_dump_contract.shadow_state_constant_float32(
+            state_document, "raw_coordinate_scale"),
     }
 
 
@@ -140,6 +143,24 @@ def _require_supported_replay_domain(capture: Dict[str, Any]) -> None:
             "ROI-active Dump 3D replay is not implemented: crop-local raw/parallax must "
             "be embedded with depth_input_region.json and its full-source zero-plane "
             "collar; refusing to reinterpret it as full-frame geometry")
+
+
+def _authenticate_replay_coordinate_scale(
+        provenance_scale: float,
+        state_capture: Dict[str, Any],
+        manifest_capture: Dict[str, Any]) -> None:
+    """Join independently authenticated model, state, and manifest scale claims."""
+
+    state_scale = state_capture.get("raw_coordinate_scale")
+    summary = manifest_capture.get("shadow_state_summary")
+    manifest_scale = summary.get("raw_coordinate_scale") if isinstance(summary, dict) else None
+    for label, value in (("shadow state", state_scale), ("dump manifest", manifest_scale)):
+        if (not isinstance(value, (int, float)) or isinstance(value, bool) or
+                not math.isfinite(float(value)) or
+                abs(float(value) - provenance_scale) >
+                _RESULT_RAW_COORDINATE_SCALE_AUTHENTICATION_TOLERANCE):
+            raise ValueError(
+                f"{label} raw-coordinate scale disagrees with model provenance")
 
 
 def _validate_direct_replay_contract(
@@ -338,6 +359,11 @@ def main(argv: list[str] | None = None) -> int:
     source = dump / "source.png"
     if not source.is_file():
         parser.error(f"dump is missing source.png: {dump}")
+    build_dir = args.build_dir.resolve()
+    executable = build_dir / "sunshine.exe"
+    conf = args.conf.resolve()
+    if not executable.is_file() or not conf.is_file():
+        parser.error("build-dir must contain sunshine.exe and --conf must be readable")
     try:
         model_provenance = raw_model_provenance.inspect_dump(dump)
         shadow_state_capture = _inspect_optional_shadow_state(dump)
@@ -347,6 +373,16 @@ def main(argv: list[str] | None = None) -> int:
         manifest_active = bool(
             dump_manifest_capture.get("status") == "validated" and
             dump_manifest_capture.get("active"))
+        if manifest_active:
+            # Join the manifest to the hashed state, region, geometry-chain, and
+            # selected final field before making any replay-domain decision.
+            verified_geometry = v2_dump_contract.verify_v2_dump_geometry(dump)
+            verified_region = verified_geometry.get("depth_input_region")
+            if (not isinstance(verified_region, dict) or
+                    verified_region.get("mode") !=
+                    dump_manifest_capture.get("depth_input_mode")):
+                raise ValueError(
+                    "verified depth-input region disagrees with the dump manifest")
         _require_supported_replay_domain(dump_manifest_capture)
         state_captured = shadow_state_capture.get("status") == "validated"
         if manifest_active != state_captured:
@@ -354,6 +390,9 @@ def main(argv: list[str] | None = None) -> int:
                 "dump V2 manifest availability disagrees with its shadow-state artifacts")
         raw_coordinate_scale, mapping_calibration = _resolve_mapping_calibration(
             model_provenance)
+        if manifest_active:
+            _authenticate_replay_coordinate_scale(
+                raw_coordinate_scale, shadow_state_capture, dump_manifest_capture)
         _new_output_directory(output)
         raw, raw_shape = _load_raw_depth(dump)
         if raw_model_provenance.file_sha256(dump / "raw_depth.f32") != \
@@ -441,15 +480,12 @@ def main(argv: list[str] | None = None) -> int:
         (output / "mapping_v2_report.json").write_text(
             json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-        executable = args.build_dir.resolve() / "sunshine.exe"
-        if not executable.is_file() or not args.conf.resolve().is_file():
-            raise ValueError("build-dir must contain sunshine.exe and --conf must be readable")
         harness_command = [
-            str(executable), str(args.conf.resolve()), "--sbs-bench",
+            str(executable), str(conf), "--sbs-bench",
             "--frames", str(frames), "--out", str(harness),
             "--direct-parallax-root", str(direct_root),
         ]
-        _run_checked(harness_command, args.build_dir.resolve(), output / "harness.log")
+        _run_checked(harness_command, build_dir, output / "harness.log")
 
         contract = _read_json(harness / "contract.json")
         _validate_direct_replay_contract(

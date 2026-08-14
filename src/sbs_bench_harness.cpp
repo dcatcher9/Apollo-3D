@@ -4415,7 +4415,7 @@ namespace sbs_bench {
       }
       // Machine-readable execution contract. Evaluation must not scrape human log prose. The
       // Independent evaluation-harness schema 22 attests the V2-only configuration surface;
-      // it is unrelated to Dump 3D schema 29 and DVC2 schema 48 (the direct-replay schema stays
+      // it is unrelated to Dump 3D schema 31 and DVC2 schema 50 (the direct-replay schema stays
       // pinned by its own validator).
       std::ofstream contract(fs::path(o.out) / "contract.json");
       if (contract) {

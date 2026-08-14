@@ -21,8 +21,7 @@ bool CanonicalCoordinate(uint index, out float coordinate) {
     // validity atomic with it. The versioned authorization token above is the only state guard
     // needed in this per-texel pass.
     float raw = InputBuffer[index];
-    bool valid = !isnan(raw) && !isinf(raw);
-    if (!valid) {
+    if (!V2Finite(raw)) {
         return false;
     }
     coordinate = (raw - V2_STATE_CENTER(active)) * V2_STATE_INVERSE_SCALE(active);
@@ -54,7 +53,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         (V2Curve(coordinate) -
          V2_STATE_CONVERGENCE_CURVE(active));
     float candidate = V2PointwiseContainer(requested);
-    if (!V2Finite(coordinate) || !V2Finite(candidate)) {
+    if (!V2Finite(candidate)) {
         candidate = 0.0f;
     }
     Output[id.xy] = candidate;

@@ -71,6 +71,33 @@ namespace video {
         std::max(2, static_cast<int>(std::lround(height * scale)) & ~1),
       };
     }
+
+    struct encode_limits_t {
+      int width;
+      int height;
+    };
+
+    encode_limits_t effective_encode_limits(
+      const int video_format,
+      const std::optional<int> configured_max_width,
+      const int runtime_max_width,
+      const int runtime_max_height
+    ) {
+      // Conservative per-axis defaults observed on the production RTX 5080. Runtime capability
+      // queries remain authoritative when they report a lower value.
+      const int codec_limit = video_format == 1 || video_format == 2 ? 8192 : 4096;
+      int width = configured_max_width ?
+                    std::min(*configured_max_width, codec_limit) :
+                    codec_limit;
+      int height = codec_limit;
+      if (runtime_max_width > 0) {
+        width = std::min(width, runtime_max_width);
+      }
+      if (runtime_max_height > 0) {
+        height = std::min(height, runtime_max_height);
+      }
+      return {width, height};
+    }
   }  // namespace
 
   void apply_sbs_telemetry_config(
@@ -111,24 +138,18 @@ namespace video {
     int runtime_max_width,
     int runtime_max_height
   ) {
-    // These are the per-axis capabilities reported by the production RTX 5080. The runtime
-    // values remain authoritative and may reduce either conservative default.
-    const int codec_max_width = video_format == 1 || video_format == 2 ? 8192 : 4096;
-    const int codec_max_height = video_format == 1 || video_format == 2 ? 8192 : 4096;
-    int effective_max_width = std::min(configured_max_width, codec_max_width);
-    int effective_max_height = codec_max_height;
-    if (runtime_max_width > 0) {
-      effective_max_width = std::min(effective_max_width, runtime_max_width);
-    }
-    if (runtime_max_height > 0) {
-      effective_max_height = std::min(effective_max_height, runtime_max_height);
-    }
+    const auto limits = effective_encode_limits(
+      video_format,
+      configured_max_width,
+      runtime_max_width,
+      runtime_max_height
+    );
     const std::int64_t packed_width = static_cast<std::int64_t>(base_width) * 2;
     return fit_even_encode_dimensions(
       packed_width,
       base_height,
-      effective_max_width,
-      effective_max_height
+      limits.width,
+      limits.height
     );
   }
 
@@ -139,23 +160,17 @@ namespace video {
     int runtime_max_width,
     int runtime_max_height
   ) {
-    // Same conservative per-axis ceilings as host_sbs_output_dimensions; runtime NVENC
-    // capabilities remain authoritative when known.
-    const int codec_max_width = video_format == 1 || video_format == 2 ? 8192 : 4096;
-    const int codec_max_height = video_format == 1 || video_format == 2 ? 8192 : 4096;
-    int effective_max_width = codec_max_width;
-    int effective_max_height = codec_max_height;
-    if (runtime_max_width > 0) {
-      effective_max_width = std::min(effective_max_width, runtime_max_width);
-    }
-    if (runtime_max_height > 0) {
-      effective_max_height = std::min(effective_max_height, runtime_max_height);
-    }
+    const auto limits = effective_encode_limits(
+      video_format,
+      std::nullopt,
+      runtime_max_width,
+      runtime_max_height
+    );
     return fit_even_encode_dimensions(
       width,
       height,
-      effective_max_width,
-      effective_max_height
+      limits.width,
+      limits.height
     );
   }
 
@@ -213,12 +228,6 @@ namespace video {
    */
   bool allow_encoder_probing() {
     const auto devices {display_device::enumerate_devices()};
-
-    // // If there are no devices, then either the API is not working correctly or OS does not support the lib.
-    // // Either way we should not block the probing in this case as we can't tell what's wrong.
-    // if (devices.empty()) {
-    //   return true;
-    // }
 
     if (devices.empty()) {
 #ifdef _WIN32

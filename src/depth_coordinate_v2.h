@@ -8,6 +8,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <string_view>
 
 #include "generated/depth_coordinate_v2_contract.h"
 
@@ -25,13 +26,23 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t shadow_frame_stats_dump_schema = 2u;
   inline constexpr std::uint32_t reserved_calibration_revision = 0xffffffffu;
 
-  constexpr bool calibration_revision_is_valid(const std::uint32_t revision) {
+  constexpr bool calibration_revision_word_is_valid(const std::uint32_t revision) {
     return revision != reserved_calibration_revision;
   }
 
-  static_assert(calibration_revision_is_valid(0u));
-  static_assert(calibration_revision_is_valid(1u));
-  static_assert(!calibration_revision_is_valid(reserved_calibration_revision));
+  constexpr bool acquired_calibration_revision_is_valid(const std::uint32_t revision) {
+    return revision > 0u && calibration_revision_word_is_valid(revision);
+  }
+
+  static_assert(calibration_revision_word_is_valid(0u));
+  static_assert(calibration_revision_word_is_valid(1u));
+  static_assert(!calibration_revision_word_is_valid(reserved_calibration_revision));
+  static_assert(!acquired_calibration_revision_is_valid(0u));
+  static_assert(acquired_calibration_revision_is_valid(1u));
+  static_assert(!acquired_calibration_revision_is_valid(reserved_calibration_revision));
+
+  inline constexpr float raw_coordinate_scale_authentication_tolerance = 2.0e-6f;
+  inline constexpr float requested_gain_authentication_tolerance = 1.0e-7f;
 
   constexpr std::uint32_t camera_center_integrity_for_words(
     const std::uint32_t center_bits,
@@ -100,12 +111,12 @@ namespace models::depth_coordinate_v2 {
     }
 
     const bool camera_initialized =
-      inverse_scale_value > 0.0f && revision > 0u &&
-      calibration_revision_is_valid(revision) &&
-      std::abs(1.0f / inverse_scale_value - raw_coordinate_scale) <= 2.0e-6f;
+      inverse_scale_value > 0.0f && acquired_calibration_revision_is_valid(revision) &&
+      std::abs(1.0f / inverse_scale_value - raw_coordinate_scale) <=
+        raw_coordinate_scale_authentication_tolerance;
     const bool camera_empty =
       center_value == 0.0f && inverse_scale_value == 0.0f &&
-      (revision == 0u || calibration_revision_is_valid(revision));
+      calibration_revision_word_is_valid(revision);
     return frame_is_valid ? camera_initialized : (camera_initialized || camera_empty);
   }
 
@@ -119,6 +130,25 @@ namespace models::depth_coordinate_v2 {
 
   constexpr float requested_gain_for_config(const float configured_pop) {
     return gain_per_pop * requested_pop_strength(configured_pop);
+  }
+
+  /** Validate the runtime constants carried beside an authenticated producer result.
+   *
+   * Configuration-range admission is deliberately separate: replay accepts an untrusted
+   * manifest and applies the configured range in addition to this shared live/dump relation.
+   */
+  inline bool parallax_runtime_constants_are_valid(
+    const float raw_coordinate_scale,
+    const float requested_pop_strength_value,
+    const float requested_gain
+  ) {
+    return std::isfinite(raw_coordinate_scale) && raw_coordinate_scale > 0.0f &&
+           std::isfinite(requested_pop_strength_value) &&
+           requested_pop_strength_value > 0.0f &&
+           std::isfinite(requested_gain) && requested_gain > 0.0f &&
+           std::abs(
+             requested_gain - requested_gain_for_config(requested_pop_strength_value)
+           ) <= requested_gain_authentication_tolerance;
   }
 
   inline float pointwise_container(

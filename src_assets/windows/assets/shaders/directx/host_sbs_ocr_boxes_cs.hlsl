@@ -1,46 +1,4 @@
-#include "include/depth_coordinate_v2_contract.generated.hlsl"
-
-// OCR8 is an authenticated generated ABI.  A stale header must fail compilation rather than
-// publishing a locally reconstructed same-sized record.
-#if !defined(V2_OCR_OUTPUT_N) || !defined(V2_OCR_OUTPUT_C) || \
-    !defined(V2_OCR_OUTPUT_WIDTH) || !defined(V2_OCR_OUTPUT_HEIGHT) || \
-    !defined(V2_OCR_RECORD_SCHEMA) || !defined(V2_OCR_RECORD_TAG) || \
-    !defined(V2_OCR_RECORD_WORD_COUNT) || !defined(V2_OCR_RECORD_HEADER_WORD_COUNT) || \
-    !defined(V2_OCR_BOX_WORD_COUNT) || !defined(V2_OCR_BOX_FLAG_RIBBON) || \
-    !defined(V2_OCR_BOX_KNOWN_FLAGS) || !defined(V2_OCR_RAW_BOX_OFFSET) || \
-    !defined(V2_OCR_RAW_BOX_CAPACITY) || !defined(V2_OCR_FINAL_BOX_OFFSET) || \
-    !defined(V2_OCR_FINAL_BOX_CAPACITY) || !defined(V2_OCR_SAFE_ROW_TOP) || \
-    !defined(V2_OCR_SAFE_ROW_BOTTOM) || !defined(V2_OCR_CROP_ASPECT_WIDTH) || \
-    !defined(V2_OCR_ACTIVE_PROBABILITY_THRESHOLD) || \
-    !defined(V2_OCR_MIN_MEAN_SCORE) || \
-    !defined(V2_OCR_CROP_ASPECT_HEIGHT) || !defined(V2_OCR_TEXT_JOIN_GAP_CELLS) || \
-    !defined(V2_OCR_RIBBON_JOIN_GAP_CELLS) || \
-    !defined(V2_OCR_RIBBON_STRUCTURAL_GAP_MIN_CELLS) || \
-    !defined(V2_OCR_RIBBON_MIN_STRUCTURAL_GAPS) || \
-    !defined(V2_OCR_RIBBON_MIN_WIDTH_NUMERATOR) || \
-    !defined(V2_OCR_RIBBON_MIN_WIDTH_DENOMINATOR) || \
-    !defined(V2_OCR_RIBBON_BOTTOM_TOLERANCE_PIXELS) || \
-    !defined(V2_OCR_RIBBON_COVER_PAD_LIMIT) || \
-    !defined(V2_MODEL_CALIBRATED_SHAPE_COUNT)
-#error "Generated V2 OCR8 record contract macros are required"
-#endif
-
-#if V2_MODEL_CALIBRATED_SHAPE_COUNT != 6 || V2_OCR_SAFE_ROW_TOP >= V2_OCR_SAFE_ROW_BOTTOM || \
-    V2_OCR_SAFE_ROW_BOTTOM > V2_OCR_OUTPUT_HEIGHT || V2_OCR_CROP_ASPECT_WIDTH == 0 || \
-    V2_OCR_CROP_ASPECT_HEIGHT == 0 || \
-    V2_OCR_CROP_ASPECT_HEIGHT > V2_OCR_CROP_ASPECT_WIDTH || \
-    V2_OCR_BOX_FLAG_RIBBON == 0 || \
-    (V2_OCR_BOX_FLAG_RIBBON & V2_OCR_BOX_KNOWN_FLAGS) != V2_OCR_BOX_FLAG_RIBBON || \
-    V2_OCR_RIBBON_STRUCTURAL_GAP_MIN_CELLS == 0 || \
-    V2_OCR_TEXT_JOIN_GAP_CELLS == 0 || \
-    V2_OCR_TEXT_JOIN_GAP_CELLS >= V2_OCR_RIBBON_JOIN_GAP_CELLS || \
-    V2_OCR_RIBBON_JOIN_GAP_CELLS < V2_OCR_RIBBON_STRUCTURAL_GAP_MIN_CELLS || \
-    V2_OCR_RIBBON_MIN_STRUCTURAL_GAPS == 0 || \
-    V2_OCR_RIBBON_MIN_WIDTH_DENOMINATOR == 0 || \
-    V2_OCR_RIBBON_MIN_WIDTH_NUMERATOR >= V2_OCR_RIBBON_MIN_WIDTH_DENOMINATOR || \
-    V2_OCR_RIBBON_COVER_PAD_LIMIT == 0
-#error "Generated V2 OCR field-shape and safe-row policy is inconsistent"
-#endif
+#include "include/depth_coordinate_v2_ocr_assert.generated.hlsl"
 
 #define OCR_WIDTH V2_OCR_OUTPUT_WIDTH
 #define OCR_HEIGHT V2_OCR_OUTPUT_HEIGHT
@@ -202,7 +160,7 @@ uint MapYCeil(uint y) {
 
 // The host authenticates the DAV2 field shape before enabling OCR.  This shader still validates
 // every runtime dimension and proves that its ROI is a non-empty subset of the exact bottom-6:1
-// crop. OCR8 then carries those dimensions and bounds to SLR8, which cross-checks them against the
+// crop. OCR8 then carries those dimensions and bounds to SLR12, which cross-checks them against the
 // actual BaseField dispatch. The 64-byte cbuffer also binds the integer tensor-content rectangle,
 // avoiding a shape-specific OCR record or a second ABI.
 bool ResolveGeometryValid() {
@@ -219,34 +177,26 @@ bool ResolveGeometryValid() {
 
     if (!V2SubtitleOcrFieldIsCalibrated(field_width, field_height)) return false;
 
-    uint crop_quotient = source_width / V2_OCR_CROP_ASPECT_WIDTH;
-    uint crop_remainder = source_width % V2_OCR_CROP_ASPECT_WIDTH;
-    uint expected_crop_height = min(
-        source_height,
-        crop_quotient * V2_OCR_CROP_ASPECT_HEIGHT +
-        (crop_remainder * V2_OCR_CROP_ASPECT_HEIGHT +
-         V2_OCR_CROP_ASPECT_WIDTH - 1u) / V2_OCR_CROP_ASPECT_WIDTH);
-    if (crop_height_pixels != expected_crop_height ||
-        crop_top_pixels != source_height - expected_crop_height) {
+    uint expected_crop_top;
+    uint expected_crop_height;
+    if (!V2SubtitleOcrComputeCrop(
+            source_width, source_height, expected_crop_top, expected_crop_height)) {
         return false;
     }
-
-    if (source_height > 0xffffffffu / OCR_HEIGHT) return false;
-    uint denominator = OCR_HEIGHT * source_height;
-    uint content_height = tensor_content.w - tensor_content.y;
-    if (denominator > 0xffffffffu / content_height) return false;
-    uint top_numerator =
-        crop_top_pixels * OCR_HEIGHT + V2_OCR_SAFE_ROW_TOP * crop_height_pixels;
-    uint bottom_numerator =
-        crop_top_pixels * OCR_HEIGHT + V2_OCR_SAFE_ROW_BOTTOM * crop_height_pixels;
-    uint top_scaled = top_numerator * content_height;
-    uint bottom_scaled = bottom_numerator * content_height;
-    uint expected_roi_top = tensor_content.y + min(
-        top_scaled / denominator + (top_scaled % denominator != 0u ? 1u : 0u),
-        content_height);
-    uint expected_roi_bottom = tensor_content.y + min(
-        bottom_scaled / denominator + (bottom_scaled % denominator != 0u ? 1u : 0u),
-        content_height);
+    if (crop_height_pixels != expected_crop_height ||
+        crop_top_pixels != expected_crop_top) {
+        return false;
+    }
+    uint expected_roi_top;
+    uint expected_roi_bottom;
+    if (!V2SubtitleOcrProjectContentRowCeil(
+            source_width, source_height, field_width, field_height, tensor_content,
+            V2_OCR_SAFE_ROW_TOP, expected_roi_top) ||
+        !V2SubtitleOcrProjectContentRowCeil(
+            source_width, source_height, field_width, field_height, tensor_content,
+            V2_OCR_SAFE_ROW_BOTTOM, expected_roi_bottom)) {
+        return false;
+    }
     return roi_top == expected_roi_top && roi_bottom == expected_roi_bottom;
 }
 

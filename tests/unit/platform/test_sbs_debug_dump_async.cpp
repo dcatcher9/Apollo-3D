@@ -5,6 +5,7 @@
 #include "../../tests_common.h"
 
 #ifdef _WIN32
+  #include <algorithm>
   #include <atomic>
   #include <array>
   #include <bit>
@@ -27,12 +28,23 @@ namespace {
   using namespace std::chrono_literals;
   namespace dump_detail = platf::sbs_debug::detail;
   namespace v2 = models::depth_coordinate_v2;
+  constexpr std::uint32_t subtitle_scene_epoch = 3u;
 
   template<std::size_t WordCount>
   std::vector<std::uint8_t> word_bytes(const std::array<std::uint32_t, WordCount> &words) {
     std::vector<std::uint8_t> bytes(sizeof(words));
     std::memcpy(bytes.data(), words.data(), sizeof(words));
     return bytes;
+  }
+
+  bool subtitle_records_match_frame(
+    const std::vector<std::uint8_t> &ocr,
+    const std::vector<std::uint8_t> &locator,
+    const platf::sbs_debug::frame &frame
+  ) {
+    return dump_detail::subtitle_records_match_frame(
+      ocr, locator, frame, subtitle_scene_epoch
+    );
   }
 
   platf::sbs_debug::frame subtitle_frame(
@@ -81,6 +93,73 @@ namespace {
     return words;
   }
 
+  using subtitle_rect_t = std::array<std::uint32_t, 4>;
+
+  void store_ocr_pair(
+    std::array<std::uint32_t, v2::subtitle_ocr_record_word_count> &words,
+    const std::uint32_t slot,
+    const subtitle_rect_t core,
+    const subtitle_rect_t cover
+  ) {
+    const auto raw = v2::subtitle_ocr_raw_box_offset +
+      static_cast<std::size_t>(slot) * v2::subtitle_ocr_box_word_count;
+    const auto final = v2::subtitle_ocr_final_box_offset +
+      static_cast<std::size_t>(slot) * v2::subtitle_ocr_box_word_count;
+    for (std::size_t index = 0u; index < core.size(); ++index) {
+      words[raw + index] = core[index];
+      words[final + index] = cover[index];
+    }
+    words[raw + 4u] = std::bit_cast<std::uint32_t>(0.9f);
+    words[raw + 5u] = 0u;
+    words[raw + 6u] = 1u;
+    words[raw + 7u] = 0u;
+    std::copy_n(words.begin() + raw + 4u, 4u, words.begin() + final + 4u);
+  }
+
+  std::array<std::uint32_t, v2::subtitle_locator_state_word_count>
+  two_line_subtitle_state(
+    const platf::sbs_debug::frame &frame,
+    const subtitle_rect_t first,
+    const subtitle_rect_t second
+  ) {
+    std::array<std::uint32_t, v2::subtitle_locator_state_word_count> words {};
+    constexpr std::uint32_t owner_generation = 9u;
+    words[0u] = v2::subtitle_locator_state_schema;
+    words[1u] = v2::subtitle_locator_state_tag;
+    words[2u] = 1u | 4u;
+    words[3u] = owner_generation;
+    words[4u] = 2u;
+    words[5u] = std::min(first[0], second[0]);
+    words[6u] = std::min(first[1], second[1]);
+    words[7u] = std::max(first[2], second[2]);
+    words[8u] = std::max(first[3], second[3]);
+    words[9u] = (first[2] - first[0]) * (first[3] - first[1]) +
+                (second[2] - second[0]) * (second[3] - second[1]);
+    words[10u] = static_cast<std::uint32_t>(frame.depth_input_region.analysis_generation);
+    words[11u] = static_cast<std::uint32_t>(
+      frame.depth_input_region.analysis_generation >> 32u
+    );
+    words[18u] = std::bit_cast<std::uint32_t>(
+      4.0f / (2.0f * static_cast<float>(frame.depth_input_region.width()))
+    );
+    words[19u] = owner_generation;
+    words[20u] = 2u;
+    words[21u] = 1u;
+    words[22u] = static_cast<std::uint32_t>(frame.matched_frame_id);
+    words[23u] = static_cast<std::uint32_t>(frame.matched_frame_id >> 32u);
+    words[24u] = 2u;
+    words[26u] = subtitle_scene_epoch;
+    words[27u] = static_cast<std::uint32_t>(frame.model_width);
+    words[28u] = static_cast<std::uint32_t>(frame.model_height);
+    for (std::size_t index = 0u; index < first.size(); ++index) {
+      words[v2::subtitle_locator_owner_offset + index] = first[index];
+      words[v2::subtitle_locator_owner_offset + 4u + index] = second[index];
+      words[v2::subtitle_locator_current_offset + index] = first[index];
+      words[v2::subtitle_locator_current_offset + 4u + index] = second[index];
+    }
+    return words;
+  }
+
   std::array<std::uint32_t, v2::subtitle_locator_state_word_count> cached_grace_state(
     const platf::sbs_debug::frame &frame,
     const models::subtitle_analysis_geometry_t geometry,
@@ -93,11 +172,13 @@ namespace {
     words[11] = static_cast<std::uint32_t>(
       frame.depth_input_region.analysis_generation >> 32u
     );
-    words[18] = std::bit_cast<std::uint32_t>(0.006f);
+    words[18] = std::bit_cast<std::uint32_t>(
+      4.0f / (2.0f * static_cast<float>(frame.depth_input_region.width()))
+    );
     words[22] = static_cast<std::uint32_t>(frame.matched_frame_id);
     words[23] = static_cast<std::uint32_t>(frame.matched_frame_id >> 32u);
     words[25] = grace;
-    words[26] = 3u;
+    words[26] = subtitle_scene_epoch;
     words[27] = static_cast<std::uint32_t>(frame.model_width);
     words[28] = static_cast<std::uint32_t>(frame.model_height);
     constexpr std::uint32_t left = 120u;
@@ -437,13 +518,252 @@ namespace {
     auto locator = cached_grace_state(
       frame, geometry, v2::subtitle_locator_death_grace_observations
     );
-    EXPECT_TRUE(dump_detail::subtitle_records_match_frame(
+    EXPECT_TRUE(subtitle_records_match_frame(
       word_bytes(ocr), word_bytes(locator), frame
     ));
 
-    locator[25] = v2::subtitle_locator_death_grace_observations + 1u;
-    EXPECT_FALSE(dump_detail::subtitle_records_match_frame(
+    locator[18] = std::bit_cast<std::uint32_t>(
+      std::nextafter(
+        v2::direct_container_limit,
+        std::numeric_limits<float>::infinity()
+      )
+    );
+    EXPECT_FALSE(subtitle_records_match_frame(
       word_bytes(ocr), word_bytes(locator), frame
+    ));
+
+    locator = cached_grace_state(
+      frame, geometry, v2::subtitle_locator_death_grace_observations
+    );
+
+    locator[25] = v2::subtitle_locator_death_grace_observations + 1u;
+    EXPECT_FALSE(subtitle_records_match_frame(
+      word_bytes(ocr), word_bytes(locator), frame
+    ));
+  }
+
+  TEST(SbsDebugDumpAsyncTest, NativeSubtitleValidationAcceptsSignedLocalPlaneWithinContainer) {
+    constexpr models::depth_tensor_content_rect_t content {0u, 0u, 770u, 434u};
+    const auto frame = subtitle_frame(content, 3440u, 1440u);
+    const auto geometry = models::fit_subtitle_analysis_geometry(
+      frame.depth_input_region.width(), frame.depth_input_region.height(),
+      {frame.model_width, frame.model_height}, content
+    );
+    ASSERT_TRUE(geometry.valid());
+    const auto ocr = empty_ocr(frame, geometry);
+    auto locator = cached_grace_state(frame, geometry, 1u);
+
+    const float local_plane = 4.0f / 3440.0f;
+    for (const float candidate : {
+           -v2::direct_container_limit,
+           -local_plane,
+           0.0f,
+           local_plane,
+           v2::direct_container_limit,
+         }) {
+      locator[18] = std::bit_cast<std::uint32_t>(candidate);
+      EXPECT_TRUE(subtitle_records_match_frame(
+        word_bytes(ocr), word_bytes(locator), frame
+      ));
+    }
+    for (const float candidate : {
+           std::nextafter(
+             -v2::direct_container_limit,
+             -std::numeric_limits<float>::infinity()
+           ),
+           std::nextafter(
+             v2::direct_container_limit,
+             std::numeric_limits<float>::infinity()
+           ),
+           std::numeric_limits<float>::quiet_NaN(),
+         }) {
+      locator[18] = std::bit_cast<std::uint32_t>(candidate);
+      EXPECT_FALSE(subtitle_records_match_frame(
+        word_bytes(ocr), word_bytes(locator), frame
+      ));
+    }
+  }
+
+  TEST(SbsDebugDumpAsyncTest, NativeSubtitleValidationKeepsResetStateOutOfGrace) {
+    constexpr models::depth_tensor_content_rect_t content {0u, 0u, 770u, 434u};
+    const auto frame = subtitle_frame(content, 1920u, 1080u);
+    const auto geometry = models::fit_subtitle_analysis_geometry(
+      frame.depth_input_region.width(), frame.depth_input_region.height(),
+      {frame.model_width, frame.model_height}, content
+    );
+    ASSERT_TRUE(geometry.valid());
+
+    constexpr subtitle_rect_t first {180u, 350u, 590u, 360u};
+    constexpr subtitle_rect_t second {180u, 364u, 500u, 374u};
+    auto ocr = empty_ocr(frame, geometry);
+    ocr[2u] = 1u;
+    ocr[3u] = 2u;
+    ocr[4u] = 2u;
+    store_ocr_pair(ocr, 0u, first, first);
+    store_ocr_pair(ocr, 1u, second, second);
+
+    auto reset = two_line_subtitle_state(frame, first, second);
+    reset[2u] = 1u | 8u;  // owner + target-reset
+    reset[18u] = 0u;
+    reset[19u] = 0u;
+    reset[20u] = 0u;
+    reset[24u] = 0u;
+    std::fill_n(
+      reset.begin() + v2::subtitle_locator_current_offset,
+      v2::subtitle_locator_rectangle_capacity * 4u,
+      0u
+    );
+    EXPECT_TRUE(subtitle_records_match_frame(
+      word_bytes(ocr), word_bytes(reset), frame
+    ));
+
+    // An unreliable or excessive-residual observation retains only the owner transaction. Its
+    // zero reset marker is not a cached plane and therefore cannot enter death grace.
+    reset[25u] = 1u;
+    EXPECT_FALSE(subtitle_records_match_frame(
+      word_bytes(ocr), word_bytes(reset), frame
+    ));
+    reset[25u] = 0u;
+    reset[18u] = std::bit_cast<std::uint32_t>(-0.0f);
+    EXPECT_FALSE(subtitle_records_match_frame(
+      word_bytes(ocr), word_bytes(reset), frame
+    ));
+  }
+
+  TEST(SbsDebugDumpAsyncTest, NativeSubtitleValidationBoundsUnreliableOwnerHold) {
+    constexpr models::depth_tensor_content_rect_t content {0u, 0u, 770u, 434u};
+    const auto frame = subtitle_frame(content, 1920u, 1080u);
+    const auto geometry = models::fit_subtitle_analysis_geometry(
+      frame.depth_input_region.width(), frame.depth_input_region.height(),
+      {frame.model_width, frame.model_height}, content
+    );
+    ASSERT_TRUE(geometry.valid());
+
+    constexpr subtitle_rect_t first {180u, 350u, 590u, 360u};
+    constexpr subtitle_rect_t second {180u, 364u, 500u, 374u};
+    auto ocr = empty_ocr(frame, geometry);
+    ocr[2u] = 1u;
+    ocr[3u] = 2u;
+    ocr[4u] = 2u;
+    store_ocr_pair(ocr, 0u, first, first);
+    store_ocr_pair(ocr, 1u, second, second);
+
+    auto held = two_line_subtitle_state(frame, first, second);
+    held[21u] = 0u;  // A hold is an ordinary continuing-owner observation.
+    for (std::uint32_t count = 1u;
+         count <= v2::subtitle_target_max_unreliable_holds;
+         ++count) {
+      held[25u] = count;
+      EXPECT_TRUE(subtitle_records_match_frame(
+        word_bytes(ocr), word_bytes(held), frame
+      ));
+    }
+
+    held[25u] = v2::subtitle_target_max_unreliable_holds + 1u;
+    EXPECT_FALSE(subtitle_records_match_frame(
+      word_bytes(ocr), word_bytes(held), frame
+    ));
+
+    // Word 25 is an unreliable-measurement hold only while the owner retains a valid target. It
+    // cannot be attached to a birth/handoff/death event. An observation with no matched current
+    // authority preserves the counter without aging it and conditions exact Base for that frame.
+    held[25u] = 1u;
+    held[21u] = 3u;
+    EXPECT_FALSE(subtitle_records_match_frame(
+      word_bytes(ocr), word_bytes(held), frame
+    ));
+    held[21u] = 0u;
+    held[20u] = 0u;
+    std::fill_n(
+      held.begin() + v2::subtitle_locator_current_offset,
+      v2::subtitle_locator_rectangle_capacity * 4u,
+      0u
+    );
+    EXPECT_TRUE(subtitle_records_match_frame(
+      word_bytes(ocr), word_bytes(held), frame
+    ));
+    held[2u] = 1u | 8u;
+    held[18u] = 0u;
+    held[19u] = 0u;
+    held[24u] = 0u;
+    EXPECT_FALSE(subtitle_records_match_frame(
+      word_bytes(ocr), word_bytes(held), frame
+    ));
+  }
+
+  TEST(SbsDebugDumpAsyncTest, NativeSubtitleValidationBindsCurrentToSelectedOcrOrder) {
+    constexpr models::depth_tensor_content_rect_t content {0u, 0u, 770u, 434u};
+    const auto frame = subtitle_frame(content, 1920u, 1080u);
+    const auto geometry = models::fit_subtitle_analysis_geometry(
+      frame.depth_input_region.width(), frame.depth_input_region.height(),
+      {frame.model_width, frame.model_height}, content
+    );
+    ASSERT_TRUE(geometry.valid());
+
+    constexpr subtitle_rect_t first {180u, 350u, 590u, 360u};
+    constexpr subtitle_rect_t second {180u, 364u, 500u, 374u};
+    // This is valid OCR8 evidence but deliberately fails SLR12's 48-cell/two-to-one core gate.
+    constexpr subtitle_rect_t unselected {40u, 380u, 60u, 400u};
+    auto ocr = empty_ocr(frame, geometry);
+    ocr[2u] = 1u;
+    ocr[3u] = 3u;
+    ocr[4u] = 3u;
+    store_ocr_pair(ocr, 0u, first, first);
+    store_ocr_pair(ocr, 1u, second, second);
+    store_ocr_pair(ocr, 2u, unselected, unselected);
+    ASSERT_TRUE(dump_detail::subtitle_ocr_record_is_canonical_for_frame(
+      word_bytes(ocr), frame
+    ));
+
+    const auto valid = two_line_subtitle_state(frame, first, second);
+    ASSERT_TRUE(subtitle_records_match_frame(
+      word_bytes(ocr), word_bytes(valid), frame
+    ));
+
+    auto foreign_scene_epoch = valid;
+    foreign_scene_epoch[26u] = subtitle_scene_epoch + 1u;
+    EXPECT_FALSE(subtitle_records_match_frame(
+      word_bytes(ocr), word_bytes(foreign_scene_epoch), frame
+    ));
+
+    const auto store_current = [](
+      auto &words,
+      const std::size_t slot,
+      const subtitle_rect_t rectangle
+    ) {
+      std::copy(
+        rectangle.begin(), rectangle.end(),
+        words.begin() + v2::subtitle_locator_current_offset + slot * 4u
+      );
+    };
+
+    auto selected_subsequence = valid;
+    selected_subsequence[20u] = 1u;
+    store_current(selected_subsequence, 0u, second);
+    store_current(selected_subsequence, 1u, {});
+    EXPECT_TRUE(subtitle_records_match_frame(
+      word_bytes(ocr), word_bytes(selected_subsequence), frame
+    ));
+
+    auto reversed = valid;
+    store_current(reversed, 0u, second);
+    store_current(reversed, 1u, first);
+    EXPECT_FALSE(subtitle_records_match_frame(
+      word_bytes(ocr), word_bytes(reversed), frame
+    ));
+
+    auto duplicate = valid;
+    store_current(duplicate, 1u, first);
+    EXPECT_FALSE(subtitle_records_match_frame(
+      word_bytes(ocr), word_bytes(duplicate), frame
+    ));
+
+    auto outside_selection = valid;
+    outside_selection[20u] = 1u;
+    store_current(outside_selection, 0u, unselected);
+    store_current(outside_selection, 1u, {});
+    EXPECT_FALSE(subtitle_records_match_frame(
+      word_bytes(ocr), word_bytes(outside_selection), frame
     ));
   }
 }  // namespace

@@ -1506,7 +1506,7 @@ namespace {
       (std::array<std::uint32_t, 4u> {694u, 374u, 750u, 430u})
     );
 
-    // OCR deliberately preserves the separated square candidate. SLR9 owns the generic shape
+    // OCR deliberately preserves the separated square candidate. SLR12 owns the generic shape
     // rejection and admits only the wide subtitle line into pending/current authority.
     fixture.reset_locator();
     ASSERT_TRUE(fixture.dispatch_locator(10u, generation, true));
@@ -1545,7 +1545,7 @@ namespace {
     EXPECT_TRUE(fixture.output_is_exact_base());
 
     // Re-establish a line owner, then inject a non-finite probability. OCR8 abstains (flags=0),
-    // SLR9 discards all authority, and no stale target can alter Base.
+    // SLR12 discards all authority, and no stale target can alter Base.
     std::vector<float> line_only(ocr_pixels, 0.0f);
     paint_rectangle(line_only, 240u, 100u, 720u, 108u);
     ASSERT_TRUE(fixture.run_boxes(line_only, 13u, generation));

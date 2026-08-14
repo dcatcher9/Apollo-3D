@@ -709,39 +709,30 @@ namespace models::host_sbs_shader_cache {
     return future.get();
   }
 
+  template<std::size_t Size>
+  static bool prewarm_shader_set(
+    const std::filesystem::path &shader_root,
+    const std::array<shader_spec, Size> &specs,
+    bool &all_compiled
+  ) {
+    const auto sources = snapshot_sources(shader_root, specs);
+    if (!sources) {
+      return false;
+    }
+    for (const auto &spec : specs) {
+      all_compiled = static_cast<bool>(get(sources, spec)) && all_compiled;
+    }
+    return true;
+  }
+
   bool prewarm(const std::filesystem::path &assets_dir) {
     const auto statistics_before = cache_statistics();
     const auto shader_root = assets_dir / "shaders" / "directx";
-    const auto parallax_v2_sources = snapshot_sources(
-      shader_root,
-      parallax_v2_producer_specs
-    );
-    if (!parallax_v2_sources) {
-      return false;
-    }
     bool all_compiled = true;
-    for (const auto &spec : parallax_v2_producer_specs) {
-      all_compiled = static_cast<bool>(get(parallax_v2_sources, spec)) && all_compiled;
-    }
-    const auto parallax_v2_live_sources = snapshot_sources(
-      shader_root,
-      parallax_v2_live_renderer_specs
-    );
-    if (!parallax_v2_live_sources) {
+    if (!prewarm_shader_set(shader_root, parallax_v2_producer_specs, all_compiled) ||
+        !prewarm_shader_set(shader_root, parallax_v2_live_renderer_specs, all_compiled) ||
+        !prewarm_shader_set(shader_root, sbs_flat_fallback_specs, all_compiled)) {
       return false;
-    }
-    for (const auto &spec : parallax_v2_live_renderer_specs) {
-      all_compiled = static_cast<bool>(get(parallax_v2_live_sources, spec)) && all_compiled;
-    }
-    const auto flat_fallback_sources = snapshot_sources(
-      shader_root,
-      sbs_flat_fallback_specs
-    );
-    if (!flat_fallback_sources) {
-      return false;
-    }
-    for (const auto &spec : sbs_flat_fallback_specs) {
-      all_compiled = static_cast<bool>(get(flat_fallback_sources, spec)) && all_compiled;
     }
     BOOST_LOG(info)
       << "Prewarmed the complete Host SBS V2 shader set ("

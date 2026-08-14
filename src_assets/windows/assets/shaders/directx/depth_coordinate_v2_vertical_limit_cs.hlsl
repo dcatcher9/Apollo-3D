@@ -1,16 +1,16 @@
 // Produce the exact column-wise upper envelope and the fixed orientation-selective vertical
 // share used by Host SBS V2:
 //
-//   Upper(y) = max_s Candidate(s) - step * abs(y - s)
-//   Lower(y) = min_s Candidate(s) + step * abs(y - s)
+//   Upper(y) = max_s OwnershipRefined(s) - step * abs(y - s)
+//   Lower(y) = min_s OwnershipRefined(s) + step * abs(y - s)
 //   Conditioned(y) = a * Upper(y) + (1 - a) * Lower(y)
 //
-// where step = max_vertical_shear / target_w and a is the authenticated contract constant.
+// where step = max_vertical_shear / content_width and a is the authenticated contract constant.
 // VerticalConditioned temporarily stores the forward lower scan, then is overwritten with the
 // completed share during the backward scan. VerticalMajorant remains a diagnostic upper field;
 // the row pass consumes only VerticalConditioned.
 
-Texture2D<float> Candidate : register(t0);
+Texture2D<float> OwnershipRefined : register(t0);
 RWTexture2D<float> VerticalMajorant : register(u0);
 RWTexture2D<float> VerticalConditioned : register(u1);
 
@@ -35,7 +35,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     }
 
     float max_step = v2_max_vertical_shear / DepthAnalysisContentWidthCells();
-    float candidate = Candidate[uint2(x, 0u)];
+    float candidate = OwnershipRefined[uint2(x, 0u)];
     float upper = candidate;
     float lower = candidate;
     VerticalMajorant[uint2(x, 0u)] = upper;
@@ -43,7 +43,7 @@ void main(uint3 id : SV_DispatchThreadID) {
 
     [loop]
     for (uint y = 1u; y < target_h; ++y) {
-        candidate = Candidate[uint2(x, y)];
+        candidate = OwnershipRefined[uint2(x, y)];
         upper = max(candidate, upper - max_step);
         lower = min(candidate, lower + max_step);
         VerticalMajorant[uint2(x, y)] = upper;

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -78,9 +79,9 @@ namespace models::host_sbs_shader_cache {
     "sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"
   };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
-    "084e36b4379482203f356d830c1bcc4c09c6fe9b1c7d12b6bb17ecd1cd75990c";
+    "5850bb757becd0c4d359812298974de72b073a4be0279d3ba41c6c1a5c270af1";
   inline constexpr std::string_view parallax_v2_diagnostic_source_closure_sha256 =
-    "60eb3f87dc22cd297a97ae8b9df25b0afd1ba4287034180c4068a9fd36e16c93";
+    "077eefb9830c6a9322210fe1059cc765aa52a7b369f8414249795b0f43e96aaa";
   inline constexpr std::string_view sbs_flat_fallback_source_closure_sha256 =
     "7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4";
 
@@ -93,12 +94,9 @@ namespace models::host_sbs_shader_cache {
 
   // Complete production V2 producer set. The normalized depth is private scene-cut evidence; the
   // retired subject shaping, hard-mask sanitizer/exclusion, and adaptive-pop paths remain absent.
-  // The OCR8 producer and compact SLR9 post-limit conditioner share this authenticated snapshot,
+  // The OCR8 producer and compact SLR12 post-limit conditioner share this authenticated snapshot,
   // so no analysis or geometry pass can be sampled from a weaker closure.
-  inline constexpr std::array parallax_v2_producer_specs {
-    // Authenticate the complete path from captured RGB preprocessing through cut/history state
-    // and final coordinate limiting. Compile every shared pass from this single immutable
-    // snapshot so no separately sampled source body can feed authenticated V2 geometry.
+  enum class producer_shader_e : std::uint8_t {
     rgb_to_nchw,
     buffer_to_tex,
     depth_ema_motion,
@@ -121,6 +119,81 @@ namespace models::host_sbs_shader_cache {
     host_sbs_subtitle_locator_resolve,
     host_sbs_subtitle_condition,
   };
+
+  struct producer_shader_binding {
+    producer_shader_e id;
+    shader_spec spec;
+  };
+
+  inline constexpr std::array parallax_v2_producer_bindings {
+    // Authenticate the complete path from captured RGB preprocessing through cut/history state
+    // and final coordinate limiting. Compile every shared pass from this single immutable
+    // snapshot so no separately sampled source body can feed authenticated V2 geometry.
+    producer_shader_binding {producer_shader_e::rgb_to_nchw, rgb_to_nchw},
+    producer_shader_binding {producer_shader_e::buffer_to_tex, buffer_to_tex},
+    producer_shader_binding {producer_shader_e::depth_ema_motion, depth_ema_motion},
+    producer_shader_binding {producer_shader_e::depth_minmax, depth_minmax},
+    producer_shader_binding {producer_shader_e::depth_minmax_ema, depth_minmax_ema},
+    producer_shader_binding {producer_shader_e::depth_hist, depth_hist},
+    producer_shader_binding {
+      producer_shader_e::depth_scene_cut_evidence, depth_scene_cut_evidence
+    },
+    producer_shader_binding {
+      producer_shader_e::depth_scene_cut_resolve, depth_scene_cut_resolve
+    },
+    producer_shader_binding {producer_shader_e::depth_valid_history, depth_valid_history},
+    producer_shader_binding {
+      producer_shader_e::depth_coordinate_v2_moments, depth_coordinate_v2_moments
+    },
+    producer_shader_binding {
+      producer_shader_e::depth_coordinate_v2_frame_resolve, depth_coordinate_v2_frame_resolve
+    },
+    producer_shader_binding {
+      producer_shader_e::depth_coordinate_v2_state_resolve, depth_coordinate_v2_state_resolve
+    },
+    producer_shader_binding {
+      producer_shader_e::depth_coordinate_v2_map, depth_coordinate_v2_map
+    },
+    producer_shader_binding {
+      producer_shader_e::depth_coordinate_v2_ownership, depth_coordinate_v2_ownership
+    },
+    producer_shader_binding {
+      producer_shader_e::depth_coordinate_v2_vertical_limit,
+      depth_coordinate_v2_vertical_limit
+    },
+    producer_shader_binding {
+      producer_shader_e::depth_coordinate_v2_limit, depth_coordinate_v2_limit
+    },
+    producer_shader_binding {
+      producer_shader_e::host_sbs_ocr_preprocess, host_sbs_ocr_preprocess
+    },
+    producer_shader_binding {producer_shader_e::host_sbs_ocr_cells, host_sbs_ocr_cells},
+    producer_shader_binding {producer_shader_e::host_sbs_ocr_resolve, host_sbs_ocr_resolve},
+    producer_shader_binding {
+      producer_shader_e::host_sbs_subtitle_locator_resolve,
+      host_sbs_subtitle_locator_resolve
+    },
+    producer_shader_binding {
+      producer_shader_e::host_sbs_subtitle_condition, host_sbs_subtitle_condition
+    },
+  };
+
+  static_assert([] {
+    for (std::size_t index = 0; index < parallax_v2_producer_bindings.size(); ++index) {
+      if (static_cast<std::size_t>(parallax_v2_producer_bindings[index].id) != index) {
+        return false;
+      }
+    }
+    return true;
+  }(), "producer shader IDs must remain complete and in canonical order");
+
+  inline constexpr auto parallax_v2_producer_specs = [] {
+    std::array<shader_spec, parallax_v2_producer_bindings.size()> specs {};
+    for (std::size_t index = 0; index < specs.size(); ++index) {
+      specs[index] = parallax_v2_producer_bindings[index].spec;
+    }
+    return specs;
+  }();
 
   // The canonical-coordinate field is not a production input or output. Keep its alternate
   // entrypoint outside the authenticated live producer set so a normal frame never depends on

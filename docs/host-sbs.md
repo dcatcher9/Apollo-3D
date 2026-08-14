@@ -20,7 +20,7 @@ flowchart LR
     DAV2["Authenticated DAV2 Small inference"]
     CUT["Cut-only evidence and scene epoch"]
     OCR["PP-OCRv6 tiny detector (bottom 960x160)"]
-    LOCATOR["OCR8 boxes and compact SLR9 tracker"]
+    LOCATOR["OCR8 boxes and compact SLR12 tracker"]
     CAMERA["Scene-latched raw center"]
     CURVE["Fixed raw coordinate and curve"]
     CONTAINER["Pointwise soft source-U container"]
@@ -50,14 +50,14 @@ diagnostics that explain how the final field was produced.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 48/tag `0x4F3FF872`, canonical SHA-256
-`07da2a0f7ad23e8e6a4d70e00b3aa9cb159f9eb76991215b5c85634e96f29441`. It binds the
+schema 50/tag `0x84C0CB62`, canonical SHA-256
+`c452c4211f3b7bdfe566bdb2117adf15e3f663aeb1361a91514d5ed1130009a0`. It binds the
 complete policy below, including all subtitle field/ROI semantics, and producer source-closure
-SHA-256 `254d73afac205fb282e471dfe75e5e38a6e0156c0c4ec4296d71ffa828fc512c`.
+SHA-256 `42d2ee8d50520f370d2052c2e21ade7b9b0eb9ba985e936f907d966fe3bc786f`.
 The live-renderer source-closure SHA-256 is
-`084e36b4379482203f356d830c1bcc4c09c6fe9b1c7d12b6bb17ecd1cd75990c`, and dump-only diagnostic
+`5850bb757becd0c4d359812298974de72b073a4be0279d3ba41c6c1a5c270af1`, and dump-only diagnostic
 renderer source-closure SHA-256
-`60eb3f87dc22cd297a97ae8b9df25b0afd1ba4287034180c4068a9fd36e16c93`. It admits the following
+`077eefb9830c6a9322210fe1059cc765aa52a7b369f8414249795b0f43e96aaa`. It admits the following
 production calibration:
 
 | Property | Production value |
@@ -165,7 +165,7 @@ reacquire the camera.
 
 ### OCR-box subtitle conditioner
 
-The production subtitle path is the single current detector-only PP-OCRv6 tiny/OCR8/SLR9 route.
+The production subtitle path is the single current detector-only PP-OCRv6 tiny/OCR8/SLR12 route.
 It does not run text recognition, language classification, or logo recognition. For a completed
 DAV2 observation in any of the six calibrated landscape/portrait fields, the GPU takes the exact
 bottom `6:1` analysis-source crop, resizes it to
@@ -185,7 +185,7 @@ texture or model input becomes rendering authority.
 When the authenticated detector is available, OCR runs once for every depth observation accepted
 by the existing nonblocking DAV2 stream gate. It does not run for source frames dropped while the
 previous inference is busy, and it does not reuse stale boxes or add a separate host cadence. This
-keeps OCR8 and SLR9 on the same exact-frame authority path without extra readback, drain, probe, or
+keeps OCR8 and SLR12 on the same exact-frame authority path without extra readback, drain, probe, or
 subtitle-onset delay.
 
 OCR8 is a fixed 208-word current record: a 16-word header followed by paired tight/core and cover
@@ -221,7 +221,8 @@ bottom is the exact rational ceil projection of detector row `155 - 2 = 153` thr
 bottom-6:1 source crop into the active DAV2 field. A core at that projected row is valid; one field
 row below it is malformed. The upper bound remains the projected safe ROI bottom.
 
-SLR9 is a fixed 80-word compact state containing at most four owner/core rectangles, four
+SLR12 is a fixed 80-word compact state with schema `12` and little-endian tag bytes `SL12`,
+containing at most four owner/core rectangles, four
 pending/core rectangles, and four same-frame current cover rectangles. Header word 31 carries
 owner, pending, and current ribbon masks in bits `0..3`, `4..7`, and `8..11`; higher bits are zero.
 Generic ordinary-line geometry requires
@@ -254,21 +255,48 @@ pending, target, and six-observation death grace cannot manufacture geometry. Au
 OCR removes all current rectangles immediately. Missing, stale, abstaining, or malformed OCR in an
 otherwise valid unchanged domain also clears current and pending immediately, starts or advances
 the same six-distinct-observation cached-target grace, and conditions exact Base. Redispatching the
-same observation does not consume another grace step. A hard cut clears pending/grace, retains only
-current rectangles that still overlap an old owner, and resamples the plane target; disjoint boxes
+same observation does not consume another grace step or reapply a same-frame cut pulse. A hard cut clears pending/grace, retains only
+current rectangles that still overlap an old owner, and samples a new plane; disjoint boxes
 begin a new two-observation transaction. An input-domain reset clears the owner as well and treats
 any current boxes as the first pending observation. This lets a seek/reset landing on an
 already-visible static subtitle acquire on the following distinct observation without an onset
 edge.
 
-The plane target is the median of 32 samples from the same post-limit BaseField above the combined
-lower-text owner stack. It is sampled once for a fresh confirmed birth and then latched bit-exact
-for the continuing owner; ordinary Base changes, core jitter, and subset removal do not update it.
-Any confirmed handoff or rebirth during the six-observation death grace inherits the cached target
-bits, independent of overlap. A hard-cut
-survivor advances owner generation, resamples immediately at full strength, and a domain reset
-clears the owner and latch so present geometry starts a new pending transaction. New owners fade
-from half to full strength over two observations. The conditioner then evaluates distance directly to
+The observed plane comes from two independent 16-sample rows above the combined lower-text owner
+stack. Each row is sorted and is coherent only when its Tukey interquartile range—the average of
+elements 11/12 minus the average of elements 3/4—is at most `8` binocular source pixels. A row with
+invalid or out-of-container samples is independently unusable and does not invalidate the other
+row. No coherent row makes the observation unreliable. If only one row is valid and coherent, its
+median is the desired plane. If both rows are valid and at least one is coherent, median separation
+of at most `4` pixels selects their mean; larger separation selects the larger-U median, even when
+that nearer row crossed the IQR gate. This avoids placing text behind the nearer supporting surface
+while still requiring one stable row as evidence. A target of `k` pixels is
+stored as `k / (2 * analysis_source_width)` signed one-eye source U; positive and negative targets
+are both permitted up to the signed direct-parallax container. There is no absolute screen-plane
+or near-screen clamp. These units are exact binocular output pixels for a native 1:1 SBS encode;
+packed-output downscaling reduces visible disparity by the eye-content-width to full-source-width
+ratio.
+
+Every distinct authoritative continuing, handoff, or grace-rebirth observation resamples that
+local plane. A fresh birth has no inherited target and starts directly on the reliable observation.
+A confirmed same-scene handoff inherits the previous owner target, and a grace rebirth inherits its
+valid cached target; a difference of at most `1` binocular source pixel then preserves those bits
+exactly. A reliable residual above `8` pixels reacquires the new supporting plane at half strength
+instead of slowly dragging the old plane through the scene. Otherwise the inherited or continuing
+target takes an exact `1/8` EMA step limited to `0.25` pixel per distinct observation. Hard cuts
+never inherit either seed. Duplicate identities do no target arithmetic. A continuing same-scene owner with current geometry may hold its previous
+target, covers, and fade through at most two distinct unreliable measurements; header word 25 stores
+this count while an owner exists and still stores death grace when no owner exists. Duplicates and
+observations without current OCR authority do not age the hold; the latter preserve an existing
+counter and valid target but clear current covers and condition exact Base. The third distinct unreliable
+measurement resets target authority and publishes exact Base; the next reliable observation
+reacquires at half strength. Fresh owners and handoffs without a valid target never use this hold.
+Grace caches only a valid filtered target. A hard-cut survivor likewise restarts from the reliable
+new local plane at half strength, or publishes Base when neither row is reliable; it never
+conditions the new scene with the old full-strength target.
+A domain reset clears the owner and target so present geometry starts a new pending transaction.
+New owners fade from half to full strength over two observations. The conditioner then evaluates
+distance directly to
 each current half-open cover. For integer cell `(x,y)`, `dx`/`dy` are zero inside a rectangle
 and count cells to its nearest included edge outside it:
 
@@ -284,8 +312,9 @@ naturally, and the gap is never converted into one merged rectangle. Because a r
 the complete field width and reaches the field bottom, its only exterior boundary—and therefore its
 only collar—is the corrected top edge. Missing current authority, invalid target
 state, unsupported tensor shape, or any identity failure copies ordinary post-limit V2 exactly.
-The conditioner validates the complete 80-word state once per `16x16` dispatch group and shares
-that verdict within the group; no thread can partially accept a malformed state.
+The conditioner validates the complete 80-word state once per `16x16` dispatch group, requires its
+scene epoch to equal the authenticated CutBridge hard-cut count bound at `t1`, and shares that
+verdict within the group; no thread can partially accept malformed or cross-scene state.
 There is no pixel history, row lease, onset accumulator, signature, horizontal-distance texture,
 full-resolution overlay detector, or GST/OGR/ORS dependency.
 
@@ -336,10 +365,10 @@ compressing foreground disparity, deforming visible background, or synthesizing 
 Sunshine 3D does not synthesize hidden background. It uses a bounded compromise:
 
 1. Compute exact vertical upper and lower Lipschitz envelopes with a maximum shear of
-   `2 / depth_width` per adjacent row.
+   `2 / depth content width` per adjacent row.
 2. Combine them as `0.75 * upper + 0.25 * lower`.
 3. Compute the least horizontal majorant with a maximum slope of
-   `0.5 / depth_width` per adjacent column.
+   `0.5 / depth content width` per adjacent column.
 
 The horizontal majorant guarantees a unique contractive inverse and preserves lateral foreground
 continuity. The vertical share limits crown bending without fully flattening the foreground. The
@@ -381,7 +410,7 @@ color. A confirmed cut invalidates the old camera; the next usable field acquire
 Model preparation, shader compilation, and the live renderer are fail-closed. Live shaders are
 compiled and cached at process startup. Dump-only resources are created lazily and cannot prevent a
 stream from starting. A failure in optional diagnostics has no rendering authority. An armed
-schema-29 dump preserves the selected path's same-frame authority resources with ordered D3D11
+schema-31 dump preserves the selected path's same-frame authority resources with ordered D3D11
 `CopyResource` operations and one terminal event. Submission performs no GPU-to-CPU wait or
 synchronous Map. Later render-thread calls poll with `DONOTFLUSH`, collect staging resources with
 `DO_NOT_WAIT`, then hand the CPU snapshot to the existing publication worker.
@@ -522,8 +551,8 @@ re-enter the ROI while preserving position-independent analysis history.
 
 Dump 3D records one matched current-contract frame: source/model/raw DAV2 evidence, authenticated
 analysis-region placement, the V2 geometry chain and inverse map, scene/cut attribution, packed SBS,
-and—when selected—the exact OCR8 record and compact SLR9 state used by conditioning. The reader
-accepts only the current schema and identities. Retired SLR3--SLR8 and GST/OGR/ORS packages are not
+and—when selected—the exact OCR8 record and compact SLR12 state used by conditioning. The reader
+accepts only the current schema and identities. Retired SLR3--SLR9 and GST/OGR/ORS packages are not
 replayed or reinterpreted.
 
 An explicit dump submits every GPU artifact to a single ordered D3D11 staging batch and terminates

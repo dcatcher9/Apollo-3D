@@ -24,6 +24,11 @@ HLSL_TARGET = (
     ROOT / "src_assets" / "windows" / "assets" / "shaders" / "directx" /
     "include" / "depth_coordinate_v2_contract.generated.hlsl"
 )
+HLSL_OCR_ASSERT_TARGET = (
+    ROOT / "src_assets" / "windows" / "assets" / "shaders" / "directx" /
+    "include" / "depth_coordinate_v2_ocr_assert.generated.hlsl"
+)
+HOST_SBS_SHADER_CACHE_HEADER = ROOT / "src" / "host_sbs_shader_cache.h"
 
 EXPECTED_TOP_LEVEL_KEYS = {
     "schema", "vector_width", "calibrated_defaults", "constant_buffer", "frame_stats",
@@ -69,7 +74,7 @@ EXPECTED_SHADER_SPEC_KEYS = {
     "source_file", "source_entrypoint", "source_target",
 }
 CANONICAL_SUBTITLE_OCR = {
-    "schema": 8,
+    "schema": 10,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
     "artifact_onnx_sha256": (
@@ -113,6 +118,13 @@ CANONICAL_SUBTITLE_OCR = {
         "locator_min_aspect_denominator": 1,
         "locator_match_iou_threshold": 0.6,
         "locator_death_grace_observations": 6,
+        "locator_target_max_row_iqr_binocular_source_pixels": 8.0,
+        "locator_target_max_row_median_delta_binocular_source_pixels": 4.0,
+        "locator_target_max_residual_binocular_source_pixels": 8.0,
+        "locator_target_max_unreliable_holds": 2,
+        "locator_target_deadband_binocular_source_pixels": 1.0,
+        "locator_target_ema_alpha": 0.125,
+        "locator_target_max_slew_binocular_source_pixels": 0.25,
         "ocr_safe_row_top": 24,
         "ocr_safe_row_bottom": 155,
         "source_crop_aspect_width": 6,
@@ -142,8 +154,8 @@ CANONICAL_SUBTITLE_OCR = {
         "final_box_capacity": 8,
     },
     "locator_state": {
-        "schema": 9,
-        "tag": 0x39524C53,
+        "schema": 12,
+        "tag": 0x32314C53,
         "word_count": 80,
         "header_word_count": 32,
         "rectangle_capacity": 4,
@@ -217,6 +229,20 @@ PARALLAX_V2_SHADER_SPECS = (
     ("host_sbs_ocr_boxes_cs.hlsl", "resolve_main", "cs_5_0"),
     ("host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"),
     ("host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"),
+)
+PARALLAX_V2_LIVE_RENDERER_SHADER_SPECS = (
+    ("sbs_reprojection_v2_live_ps.hlsl", "main_ps", "ps_5_0"),
+    ("sbs_reprojection_vs.hlsl", "main_vs", "vs_5_0"),
+)
+PARALLAX_V2_DIAGNOSTIC_SHADER_SPECS = (
+    ("sbs_reprojection_v2_diagnostics_ps.hlsl", "mapping_ps", "ps_5_0"),
+    ("sbs_reprojection_v2_diagnostics_ps.hlsl", "mask_ps", "ps_5_0"),
+)
+RENDERER_SOURCE_CLOSURE_PINS = (
+    ("parallax_v2_live_renderer_source_closure_sha256",
+     PARALLAX_V2_LIVE_RENDERER_SHADER_SPECS, "live renderer"),
+    ("parallax_v2_diagnostic_source_closure_sha256",
+     PARALLAX_V2_DIAGNOSTIC_SHADER_SPECS, "diagnostic renderer"),
 )
 SOURCE_CLOSURE_DOMAIN = b"apollo-host-sbs-source-closure-v2\n"
 SHADER_COMPILE_FLAGS = 0x00008800
@@ -313,6 +339,37 @@ def shader_source_closure_sha256(
     return hashlib.sha256(canonical).hexdigest()
 
 
+def validate_renderer_source_closure_pins(
+        shader_root: Path = PREPROCESS_SHADER_ROOT,
+        pin_header: Path = HOST_SBS_SHADER_CACHE_HEADER) -> dict[str, str]:
+    """Require native renderer pins to match their exact reachable shader closures.
+
+    Both renderer closures reach the generated Depth Coordinate V2 HLSL include. Running the
+    contract generator therefore also proves that regenerating that include did not leave either
+    independently authenticated renderer pin stale.
+    """
+
+    try:
+        header = pin_header.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"cannot read renderer closure pin header: {pin_header}") from exc
+    validated: dict[str, str] = {}
+    for name, specs, label in RENDERER_SOURCE_CLOSURE_PINS:
+        matches = re.findall(
+            rf"\b{re.escape(name)}\s*=\s*\"([0-9a-f]{{64}})\";",
+            header,
+        )
+        if len(matches) != 1:
+            raise ValueError(f"{label} source closure pin must appear exactly once")
+        expected = shader_source_closure_sha256(shader_root, specs)
+        if matches[0] != expected:
+            raise ValueError(
+                f"{label} source closure pin is stale: expected {expected}, "
+                f"found {matches[0]}")
+        validated[name] = expected
+    return validated
+
+
 def canonical_bytes(contract: dict[str, Any]) -> bytes:
     """Return the complete normalized manifest used for its full provenance digest."""
 
@@ -369,7 +426,8 @@ def contract_tag(contract: dict[str, Any]) -> int:
 
 
 def validate_contract(
-        contract: Any, *, verify_shader_source_closure: bool = True) -> dict[str, Any]:
+        contract: Any, *, verify_shader_source_closure: bool = True,
+        verify_preprocess_source_closure: bool = True) -> dict[str, Any]:
     if not isinstance(contract, dict):
         raise ValueError("manifest root must be an object")
     if set(contract) != EXPECTED_TOP_LEVEL_KEYS:
@@ -393,7 +451,7 @@ def validate_contract(
 
     if contract.get("subtitle_ocr") != CANONICAL_SUBTITLE_OCR:
         raise ValueError(
-            "subtitle_ocr must exactly match the authenticated PP-OCRv6/OCR8/SLR9 contract")
+            "subtitle_ocr must exactly match the authenticated PP-OCRv6/OCR8/SLR12 contract")
 
     shader_implementation = contract.get("shader_implementation")
     if (not isinstance(shader_implementation, dict) or
@@ -512,7 +570,8 @@ def validate_contract(
                for name, value in expected_source_identity.items()):
             raise ValueError(
                 f"{prefix}.preprocess shader source identity is unsupported")
-        if source_closure_sha256 != shader_source_closure_sha256():
+        if (verify_preprocess_source_closure and
+                source_closure_sha256 != shader_source_closure_sha256()):
             raise ValueError(
                 f"{prefix}.preprocess.source_closure_sha256 is stale for the runtime shader")
         if (preprocess.get("model_input_schema") != 1 or
@@ -658,11 +717,13 @@ def validate_contract(
 
 
 def load_contract(
-        path: Path = MANIFEST, *, verify_shader_source_closure: bool = True) -> dict[str, Any]:
+        path: Path = MANIFEST, *, verify_shader_source_closure: bool = True,
+        verify_preprocess_source_closure: bool = True) -> dict[str, Any]:
     with path.open(encoding="utf-8") as stream:
         return validate_contract(
             json.load(stream),
             verify_shader_source_closure=verify_shader_source_closure,
+            verify_preprocess_source_closure=verify_preprocess_source_closure,
         )
 
 
@@ -821,6 +882,20 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"{_float_literal(field_policy['locator_match_iou_threshold'])};",
         f"  inline constexpr std::uint32_t subtitle_locator_death_grace_observations = "
         f"{field_policy['locator_death_grace_observations']}u;",
+        f"  inline constexpr float subtitle_target_max_row_iqr_binocular_source_pixels = "
+        f"{_float_literal(field_policy['locator_target_max_row_iqr_binocular_source_pixels'])};",
+        f"  inline constexpr float subtitle_target_max_row_median_delta_binocular_source_pixels = "
+        f"{_float_literal(field_policy['locator_target_max_row_median_delta_binocular_source_pixels'])};",
+        f"  inline constexpr float subtitle_target_max_residual_binocular_source_pixels = "
+        f"{_float_literal(field_policy['locator_target_max_residual_binocular_source_pixels'])};",
+        f"  inline constexpr std::uint32_t subtitle_target_max_unreliable_holds = "
+        f"{field_policy['locator_target_max_unreliable_holds']}u;",
+        f"  inline constexpr float subtitle_target_deadband_binocular_source_pixels = "
+        f"{_float_literal(field_policy['locator_target_deadband_binocular_source_pixels'])};",
+        f"  inline constexpr float subtitle_target_ema_alpha = "
+        f"{_float_literal(field_policy['locator_target_ema_alpha'])};",
+        f"  inline constexpr float subtitle_target_max_slew_binocular_source_pixels = "
+        f"{_float_literal(field_policy['locator_target_max_slew_binocular_source_pixels'])};",
         f"  inline constexpr std::uint32_t subtitle_ocr_crop_aspect_width = "
         f"{field_policy['source_crop_aspect_width']}u;",
         f"  inline constexpr std::uint32_t subtitle_ocr_crop_aspect_height = "
@@ -873,6 +948,16 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "  static_assert(subtitle_locator_match_iou_threshold > 0.0f &&",
         "                subtitle_locator_match_iou_threshold <= 1.0f);",
         "  static_assert(subtitle_locator_death_grace_observations > 0u);",
+        "  static_assert(subtitle_target_max_row_iqr_binocular_source_pixels > 0.0f);",
+        "  static_assert(subtitle_target_max_row_median_delta_binocular_source_pixels > 0.0f);",
+        "  static_assert(subtitle_target_max_residual_binocular_source_pixels > 0.0f);",
+        "  static_assert(subtitle_target_max_unreliable_holds > 0u);",
+        "  static_assert(subtitle_target_deadband_binocular_source_pixels > 0.0f);",
+        "  static_assert(subtitle_target_ema_alpha > 0.0f &&",
+        "                subtitle_target_ema_alpha < 1.0f);",
+        "  static_assert(subtitle_target_max_slew_binocular_source_pixels > 0.0f &&",
+        "                subtitle_target_max_slew_binocular_source_pixels <=",
+        "                  subtitle_target_deadband_binocular_source_pixels);",
         "  static_assert(subtitle_ocr_text_join_gap_cells > 0u);",
         "  static_assert(subtitle_ocr_text_join_gap_cells <",
         "                subtitle_ocr_ribbon_join_gap_cells);",
@@ -1413,6 +1498,20 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"{_float_literal(field_policy['locator_match_iou_threshold'])}",
         f"#define V2_SUBTITLE_LOCATOR_DEATH_GRACE_OBSERVATIONS "
         f"{field_policy['locator_death_grace_observations']}u",
+        f"#define V2_SUBTITLE_TARGET_MAX_ROW_IQR_BINOCULAR_SOURCE_PIXELS "
+        f"{_float_literal(field_policy['locator_target_max_row_iqr_binocular_source_pixels'])}",
+        f"#define V2_SUBTITLE_TARGET_MAX_ROW_MEDIAN_DELTA_BINOCULAR_SOURCE_PIXELS "
+        f"{_float_literal(field_policy['locator_target_max_row_median_delta_binocular_source_pixels'])}",
+        f"#define V2_SUBTITLE_TARGET_MAX_RESIDUAL_BINOCULAR_SOURCE_PIXELS "
+        f"{_float_literal(field_policy['locator_target_max_residual_binocular_source_pixels'])}",
+        f"#define V2_SUBTITLE_TARGET_MAX_UNRELIABLE_HOLDS "
+        f"{field_policy['locator_target_max_unreliable_holds']}u",
+        f"#define V2_SUBTITLE_TARGET_DEADBAND_BINOCULAR_SOURCE_PIXELS "
+        f"{_float_literal(field_policy['locator_target_deadband_binocular_source_pixels'])}",
+        f"#define V2_SUBTITLE_TARGET_EMA_ALPHA "
+        f"{_float_literal(field_policy['locator_target_ema_alpha'])}",
+        f"#define V2_SUBTITLE_TARGET_MAX_SLEW_BINOCULAR_SOURCE_PIXELS "
+        f"{_float_literal(field_policy['locator_target_max_slew_binocular_source_pixels'])}",
         f"#define V2_SUBTITLE_LOCATOR_STATE_SCHEMA {locator_state['schema']}u",
         f"#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x{locator_state['tag']:08X}u",
         f"#define V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT {locator_state['word_count']}u",
@@ -1426,6 +1525,7 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"#define V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT {locator_state['pending_kind_shift']}u",
         f"#define V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT {locator_state['current_kind_shift']}u",
         f"#define V2_SUBTITLE_LOCATOR_KIND_MASK {locator_state['kind_mask']}u",
+        "#define V2_OCR_SHADER_CONTRACT_GENERATED 1u",
         f"#define V2_DIRECT_CONTAINER_LIMIT "
         f"{_float_literal(defaults['direct_container_limit'])}",
         f"#define V2_MAX_VERTICAL_SHEAR "
@@ -1444,44 +1544,51 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"    return {shape_predicate};",
         "}",
         "",
-        "// Exact ceil projection of a detector row edge through the authenticated bottom crop.",
-        "// The overflow guards mirror the SM5 consumers, which have no uint64 arithmetic.",
-        "bool V2SubtitleOcrProjectRowCeil(",
-        "    uint source_width, uint source_height, uint field_width, uint field_height,",
-        "    uint detector_y, out uint projected_y) {",
-        "    projected_y = 0u;",
-        "    if (source_width == 0u || source_height == 0u || field_height == 0u ||",
-        "        detector_y > V2_OCR_OUTPUT_HEIGHT ||",
-        "        !V2SubtitleOcrFieldIsCalibrated(field_width, field_height)) return false;",
+        "// Resolve the authenticated bottom crop without uint64 arithmetic.",
+        "bool V2SubtitleOcrComputeCrop(",
+        "    uint source_width, uint source_height, out uint crop_top, out uint crop_height) {",
+        "    crop_top = 0u;",
+        "    crop_height = 0u;",
+        "    if (source_width == 0u || source_height == 0u) return false;",
         "    uint crop_quotient = source_width / V2_OCR_CROP_ASPECT_WIDTH;",
         "    uint crop_remainder = source_width % V2_OCR_CROP_ASPECT_WIDTH;",
         "    if (crop_quotient > 0xffffffffu / V2_OCR_CROP_ASPECT_HEIGHT ||",
         "        crop_remainder > 0xffffffffu / V2_OCR_CROP_ASPECT_HEIGHT) return false;",
-        "    uint crop_height = min(",
+        "    crop_height = min(",
         "        source_height,",
         "        crop_quotient * V2_OCR_CROP_ASPECT_HEIGHT +",
         "        (crop_remainder * V2_OCR_CROP_ASPECT_HEIGHT +",
         "         V2_OCR_CROP_ASPECT_WIDTH - 1u) / V2_OCR_CROP_ASPECT_WIDTH);",
-        "    uint crop_top = source_height - crop_height;",
-        "    if (source_height > 0xffffffffu / V2_OCR_OUTPUT_HEIGHT) return false;",
-        "    uint denominator = V2_OCR_OUTPUT_HEIGHT * source_height;",
-        "    if (denominator == 0u || denominator > 0xffffffffu / field_height) return false;",
-        "    uint source_y_numerator =",
-        "        crop_top * V2_OCR_OUTPUT_HEIGHT + detector_y * crop_height;",
-        "    uint scaled = source_y_numerator * field_height;",
-        "    projected_y = min(",
-        "        scaled / denominator + (scaled % denominator != 0u ? 1u : 0u),",
-        "        field_height);",
-        "    return true;",
+        "    crop_top = source_height - crop_height;",
+        "    return crop_height != 0u;",
         "}",
         "",
-        "bool V2SubtitleOcrRibbonMinBottom(",
+        "// Exact ceil projection of a detector row edge through that crop into the real",
+        "// tensor-content rectangle.",
+        "bool V2SubtitleOcrProjectContentRowCeil(",
         "    uint source_width, uint source_height, uint field_width, uint field_height,",
-        "    out uint minimum_bottom) {",
-        "    return V2SubtitleOcrProjectRowCeil(",
-        "        source_width, source_height, field_width, field_height,",
-        "        V2_OCR_SAFE_ROW_BOTTOM - V2_OCR_RIBBON_BOTTOM_TOLERANCE_PIXELS,",
-        "        minimum_bottom);",
+        "    uint4 tensor_content, uint detector_y, out uint projected_y) {",
+        "    projected_y = 0u;",
+        "    if (source_width == 0u || source_height == 0u || field_height == 0u ||",
+        "        detector_y > V2_OCR_OUTPUT_HEIGHT ||",
+        "        !V2SubtitleOcrFieldIsCalibrated(field_width, field_height) ||",
+        "        tensor_content.x >= tensor_content.z || tensor_content.y >= tensor_content.w ||",
+        "        tensor_content.z > field_width || tensor_content.w > field_height) return false;",
+        "    uint crop_top;",
+        "    uint crop_height;",
+        "    if (!V2SubtitleOcrComputeCrop(",
+        "            source_width, source_height, crop_top, crop_height)) return false;",
+        "    if (source_height > 0xffffffffu / V2_OCR_OUTPUT_HEIGHT) return false;",
+        "    uint denominator = V2_OCR_OUTPUT_HEIGHT * source_height;",
+        "    uint content_height = tensor_content.w - tensor_content.y;",
+        "    if (denominator == 0u || denominator > 0xffffffffu / content_height) return false;",
+        "    uint source_y_numerator =",
+        "        crop_top * V2_OCR_OUTPUT_HEIGHT + detector_y * crop_height;",
+        "    uint scaled = source_y_numerator * content_height;",
+        "    projected_y = tensor_content.y + min(",
+        "        scaled / denominator + (scaled % denominator != 0u ? 1u : 0u),",
+        "        content_height);",
+        "    return true;",
         "}",
         "",
         f"cbuffer {constant_buffer['name']} : register({constant_buffer['register']}) {{",
@@ -1522,6 +1629,81 @@ def render_hlsl(contract: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_hlsl_ocr_assertions() -> str:
+    """Render the shared compile-time OCR8/SLR12 consumer invariants."""
+
+    return "\n".join([
+        "// Generated by tools/sbsbench/generate_depth_coordinate_v2_contract.py.",
+        "// Edit tools/sbsbench/contracts/depth-coordinate-v2-v1.json instead.",
+        "#ifndef DEPTH_COORDINATE_V2_OCR_ASSERT_GENERATED_HLSL",
+        "#define DEPTH_COORDINATE_V2_OCR_ASSERT_GENERATED_HLSL",
+        "",
+        '#include "include/depth_coordinate_v2_contract.generated.hlsl"',
+        "",
+        "#if !defined(V2_OCR_SHADER_CONTRACT_GENERATED)",
+        '#error "Complete generated V2 OCR8/SLR12 contract is required"',
+        "#endif",
+        "",
+        "#if !defined(V2_SUBTITLE_TARGET_MAX_ROW_IQR_BINOCULAR_SOURCE_PIXELS) || \\",
+        "    !defined(V2_SUBTITLE_TARGET_MAX_ROW_MEDIAN_DELTA_BINOCULAR_SOURCE_PIXELS) || \\",
+        "    !defined(V2_SUBTITLE_TARGET_MAX_RESIDUAL_BINOCULAR_SOURCE_PIXELS) || \\",
+        "    !defined(V2_SUBTITLE_TARGET_MAX_UNRELIABLE_HOLDS) || \\",
+        "    !defined(V2_SUBTITLE_TARGET_DEADBAND_BINOCULAR_SOURCE_PIXELS) || \\",
+        "    !defined(V2_SUBTITLE_TARGET_EMA_ALPHA) || \\",
+        "    !defined(V2_SUBTITLE_TARGET_MAX_SLEW_BINOCULAR_SOURCE_PIXELS)",
+        '#error "Complete generated V2 subtitle target policy is required"',
+        "#endif",
+        "",
+        "#if V2_MODEL_CALIBRATED_SHAPE_COUNT != 6 || \\",
+        "    V2_OCR_SAFE_ROW_TOP >= V2_OCR_SAFE_ROW_BOTTOM || \\",
+        "    V2_OCR_SAFE_ROW_BOTTOM > V2_OCR_OUTPUT_HEIGHT || \\",
+        "    V2_OCR_CROP_ASPECT_WIDTH == 0u || V2_OCR_CROP_ASPECT_HEIGHT == 0u || \\",
+        "    V2_OCR_CROP_ASPECT_HEIGHT > V2_OCR_CROP_ASPECT_WIDTH || \\",
+        "    V2_OCR_BOX_FLAG_RIBBON != 1u || V2_OCR_BOX_KNOWN_FLAGS != 1u || \\",
+        "    V2_OCR_TEXT_JOIN_GAP_CELLS == 0u || \\",
+        "    V2_OCR_TEXT_JOIN_GAP_CELLS >= V2_OCR_RIBBON_JOIN_GAP_CELLS || \\",
+        "    V2_OCR_RIBBON_STRUCTURAL_GAP_MIN_CELLS == 0u || \\",
+        "    V2_OCR_RIBBON_JOIN_GAP_CELLS < V2_OCR_RIBBON_STRUCTURAL_GAP_MIN_CELLS || \\",
+        "    V2_OCR_RIBBON_MIN_STRUCTURAL_GAPS == 0u || \\",
+        "    V2_OCR_RIBBON_MIN_WIDTH_DENOMINATOR == 0u || \\",
+        "    V2_OCR_RIBBON_MIN_WIDTH_NUMERATOR >= V2_OCR_RIBBON_MIN_WIDTH_DENOMINATOR || \\",
+        "    V2_OCR_RIBBON_BOTTOM_TOLERANCE_PIXELS >= V2_OCR_SAFE_ROW_BOTTOM || \\",
+        "    V2_OCR_RIBBON_COVER_PAD_LIMIT == 0u || \\",
+        "    V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR == 0u || \\",
+        "    V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR >= \\",
+        "        V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR || \\",
+        "    V2_SUBTITLE_LOCATOR_MIN_WIDTH_CELLS == 0u || \\",
+        "    V2_SUBTITLE_LOCATOR_MIN_HEIGHT_CELLS == 0u || \\",
+        "    V2_SUBTITLE_LOCATOR_MIN_ASPECT_NUMERATOR == 0u || \\",
+        "    V2_SUBTITLE_LOCATOR_MIN_ASPECT_DENOMINATOR == 0u || \\",
+        "    V2_SUBTITLE_LOCATOR_DEATH_GRACE_OBSERVATIONS == 0u || \\",
+        "    V2_SUBTITLE_TARGET_MAX_UNRELIABLE_HOLDS == 0u || \\",
+        "    V2_OCR_RECORD_HEADER_WORD_COUNT != V2_OCR_RAW_BOX_OFFSET || \\",
+        "    V2_OCR_FINAL_BOX_OFFSET != V2_OCR_RAW_BOX_OFFSET + \\",
+        "        V2_OCR_RAW_BOX_CAPACITY * V2_OCR_BOX_WORD_COUNT || \\",
+        "    V2_OCR_RECORD_WORD_COUNT != V2_OCR_FINAL_BOX_OFFSET + \\",
+        "        V2_OCR_FINAL_BOX_CAPACITY * V2_OCR_BOX_WORD_COUNT || \\",
+        "    V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY != 4u || \\",
+        "    V2_SUBTITLE_LOCATOR_HEADER_WORD_COUNT != V2_SUBTITLE_LOCATOR_OWNER_OFFSET || \\",
+        "    V2_SUBTITLE_LOCATOR_PENDING_OFFSET != V2_SUBTITLE_LOCATOR_OWNER_OFFSET + \\",
+        "        V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY * 4u || \\",
+        "    V2_SUBTITLE_LOCATOR_CURRENT_OFFSET != V2_SUBTITLE_LOCATOR_PENDING_OFFSET + \\",
+        "        V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY * 4u || \\",
+        "    V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT != V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + \\",
+        "        V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY * 4u || \\",
+        "    V2_SUBTITLE_LOCATOR_KIND_WORD != 31u || \\",
+        "    V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT != 0u || \\",
+        "    V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT != 4u || \\",
+        "    V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT != 8u || \\",
+        "    V2_SUBTITLE_LOCATOR_KIND_MASK != 15u",
+        '#error "Generated V2 OCR8/SLR12 contract invariants are inconsistent"',
+        "#endif",
+        "",
+        "#endif",
+        "",
+    ])
+
+
 def _write_or_check(path: Path, expected: str, check: bool) -> bool:
     if check:
         try:
@@ -1559,18 +1741,26 @@ def main(argv: list[str] | None = None) -> int:
         contract = load_contract(
             args.manifest,
             verify_shader_source_closure=False,
+            verify_preprocess_source_closure=False,
         )
+        preprocess_digest = shader_source_closure_sha256()
+        for calibration in contract["model_calibrations"]:
+            calibration["preprocess"]["source_closure_sha256"] = preprocess_digest
         # The GPU tag deliberately excludes only the shader-body digest, so this first HLSL
         # generation is final. Hash the complete preprocessing, overlay, cut/history, and
         # coordinate-producer closure, record that independent
         # identity, and render again; the second HLSL must be byte-identical by construction.
         first_hlsl = render_hlsl(contract)
+        first_ocr_assertions = render_hlsl_ocr_assertions()
         _write_or_check(HLSL_TARGET, first_hlsl, False)
+        _write_or_check(HLSL_OCR_ASSERT_TARGET, first_ocr_assertions, False)
         contract["shader_implementation"]["source_closure_sha256"] = (
             shader_source_closure_sha256(specs=PARALLAX_V2_SHADER_SPECS))
         contract = validate_contract(contract)
         second_hlsl = render_hlsl(contract)
-        if second_hlsl != first_hlsl:
+        second_ocr_assertions = render_hlsl_ocr_assertions()
+        if (second_hlsl != first_hlsl or
+                second_ocr_assertions != first_ocr_assertions):
             raise RuntimeError("shader identity refresh is not idempotent")
         args.manifest.write_text(
             json.dumps(contract, indent=2, ensure_ascii=True) + "\n",
@@ -1581,6 +1771,13 @@ def main(argv: list[str] | None = None) -> int:
         contract = load_contract(args.manifest)
     valid = _write_or_check(CPP_TARGET, render_cpp(contract), args.check)
     valid &= _write_or_check(HLSL_TARGET, render_hlsl(contract), args.check)
+    valid &= _write_or_check(
+        HLSL_OCR_ASSERT_TARGET, render_hlsl_ocr_assertions(), args.check)
+    try:
+        validate_renderer_source_closure_pins()
+    except ValueError as exc:
+        print(f"stale: {exc}", file=sys.stderr)
+        valid = False
     return 0 if valid else 1
 
 

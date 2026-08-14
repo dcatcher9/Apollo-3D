@@ -1,15 +1,15 @@
-// Exact least row-wise Lipschitz majorant of the orientation-selective vertical field. For each
+// Exact least row-wise Lipschitz majorant of the orientation-selective vertical share. For each
 // row this computes
 //
-//   q(x) = max_s VerticalConditioned(s) - step * abs(x - s),
-//   step = max_horizontal_slope / target_w.
+//   q(x) = max_s VerticalShare(s) - step * abs(x - s),
+//   step = max_horizontal_slope / content_width.
 //
 // The vertical share may raise or lower the immutable candidate, but it already satisfies the
 // vertical shear bound. This pure horizontal majorant preserves that bound, enforces the
 // contractive inverse-warp slope, and avoids the lateral lowering introduced by a horizontal
 // minorant component. One GPU thread owns a complete row.
 
-Texture2D<float> VerticalConditioned : register(t0);
+Texture2D<float> VerticalShare : register(t0);
 RWTexture2D<float> FinalOut : register(u0);
 
 #include "include/depth_constants.hlsl"
@@ -23,11 +23,11 @@ void main(uint3 id : SV_DispatchThreadID) {
     }
 
     float max_step = v2_max_horizontal_slope / DepthAnalysisContentWidthCells();
-    float value = VerticalConditioned[uint2(0u, y)];
+    float value = VerticalShare[uint2(0u, y)];
     FinalOut[uint2(0u, y)] = value;
     [loop]
     for (uint x = 1u; x < target_w; ++x) {
-        value = max(VerticalConditioned[uint2(x, y)], value - max_step);
+        value = max(VerticalShare[uint2(x, y)], value - max_step);
         FinalOut[uint2(x, y)] = value;
     }
     DeviceMemoryBarrier();

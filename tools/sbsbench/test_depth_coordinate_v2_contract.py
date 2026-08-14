@@ -2,6 +2,8 @@
 import copy
 import hashlib
 import json
+import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -16,6 +18,18 @@ sys.path.insert(0, str(SCRIPT_DIR))
 import depth_coordinate_v2_contract as python_contract  # noqa: E402
 import generate_depth_coordinate_v2_contract as generator  # noqa: E402
 from depth_mapping_v2 import DIRECT_PARALLAX_SOURCE_U_LIMIT, MappingV2Config  # noqa: E402
+
+
+def _float32(value: float) -> float:
+    return struct.unpack("<f", struct.pack("<f", float(value)))[0]
+
+
+def _next_float32_up(value: float) -> float:
+    rounded = _float32(value)
+    bits = struct.unpack("<I", struct.pack("<f", rounded))[0]
+    if bits >= 0x7F800000:
+        raise ValueError("test value has no finite float32 successor")
+    return struct.unpack("<f", struct.pack("<I", bits + 1))[0]
 
 
 class DepthCoordinateV2ContractTests(unittest.TestCase):
@@ -68,7 +82,9 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             45: "8515cf7bc352c2e9e56e6a5fd9dad9802e1e7cd02f705fd8a957617c7ba94e9a",
             46: "8ab387f9bcda29e90455ce9e5b8677cef3cd7744fe03ee03202a4699fa7e4ead",
             47: "d1e6046cd87e992ebf12ff6fc0f3ddd435bd6603fd6967465c6e51a8d0c4cc8b",
-            48: "07da2a0f7ad23e8e6a4d70e00b3aa9cb159f9eb76991215b5c85634e96f29441",
+            48: "c5fde9d4bac887bc5b13850ce137110466af1dfe732db02510f29ef34780da06",
+            49: "d0aa744d7be1f2700c9b693b73feaebf53a20eda3e64c70ae9ccb10b550f9ec7",
+            50: "c452c4211f3b7bdfe566bdb2117adf15e3f663aeb1361a91514d5ed1130009a0",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -76,14 +92,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x4F3FF872)
+        self.assertEqual(generator.contract_tag(contract), 0x84C0CB62)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "4f3ff872d2a1f0b3f6503207cd870f606a538aef168535a4253590fa8cd7d920",
+            "84c0cb62752dc446000ec8267d7c4d396df3c3dcd38eee029ddca7221873a011",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "254d73afac205fb282e471dfe75e5e38a6e0156c0c4ec4296d71ffa828fc512c",
+            "42d2ee8d50520f370d2052c2e21ade7b9b0eb9ba985e936f907d966fe3bc786f",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -164,6 +180,71 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(defaults.reference_pop_strength, 1.0)
         self.assertEqual(DIRECT_PARALLAX_SOURCE_U_LIMIT, defaults.direct_container_limit)
 
+    def test_subtitle_local_plane_rows_are_independent_and_select_nearer_support(self):
+        source_width = 1024
+        scale = 2.0 * source_width
+
+        # One invalid row cannot poison an independently coherent row.
+        invalid = [float("nan")] + [0.0] * 15
+        coherent = [_float32(24.0 / scale)] * 16
+        selected = python_contract.select_subtitle_local_plane_source_u(
+            invalid, coherent, source_width)
+        self.assertEqual(struct.pack("<f", selected), struct.pack("<f", coherent[0]))
+
+        # With two valid rows and at least one coherent row, a separated observation selects the
+        # larger source-U median even when that nearer row itself crosses the IQR limit.
+        far_coherent = [_float32(20.0 / scale)] * 16
+        near_incoherent = (
+            [_float32(30.0 / scale)] * 8 + [_float32(50.0 / scale)] * 8)
+        selected = python_contract.select_subtitle_local_plane_source_u(
+            far_coherent, near_incoherent, source_width)
+        self.assertEqual(
+            struct.pack("<f", selected), struct.pack("<f", 40.0 / scale))
+
+        # The general close-row branch averages both valid medians, including one coherent and one
+        # incoherent row; the 4px delta bounds the contribution to at most 2px.
+        close_incoherent = (
+            [_float32(-3.0 / scale)] * 8 + [_float32(9.0 / scale)] * 8)
+        zero_coherent = [0.0] * 16
+        selected = python_contract.select_subtitle_local_plane_source_u(
+            zero_coherent, close_incoherent, source_width)
+        self.assertAlmostEqual(selected * scale, 1.5, places=5)
+
+        both_incoherent = (
+            [_float32(-8.0 / scale)] * 8 + [_float32(8.0 / scale)] * 8)
+        self.assertIsNone(python_contract.select_subtitle_local_plane_source_u(
+            both_incoherent, both_incoherent, source_width))
+
+    def test_subtitle_local_plane_thresholds_use_exact_float32_boundaries(self):
+        source_width = 1024
+        scale = 2.0 * source_width
+        invalid = [float("nan")] + [0.0] * 15
+
+        # Eight low and eight high values make the row IQR exactly their separation.
+        iqr_boundary = _float32(8.0 / scale)
+        row_at_iqr_limit = [0.0] * 8 + [iqr_boundary] * 8
+        selected = python_contract.select_subtitle_local_plane_source_u(
+            row_at_iqr_limit, invalid, source_width)
+        self.assertIsNotNone(selected)
+        row_beyond_iqr_limit = [0.0] * 8 + [_next_float32_up(iqr_boundary)] * 8
+        self.assertIsNone(python_contract.select_subtitle_local_plane_source_u(
+            row_beyond_iqr_limit, invalid, source_width))
+
+        # The exact 4px row-median delta takes the mean branch. Its next float32 ULP takes the
+        # separated-row maximum branch; binary64 comparison would get this trust boundary wrong.
+        median_boundary = _float32(4.0 / scale)
+        zero = [0.0] * 16
+        at_delta_limit = [median_boundary] * 16
+        selected = python_contract.select_subtitle_local_plane_source_u(
+            zero, at_delta_limit, source_width)
+        self.assertEqual(
+            struct.pack("<f", selected), struct.pack("<f", 0.5 * median_boundary))
+        above_delta_limit = _next_float32_up(median_boundary)
+        selected = python_contract.select_subtitle_local_plane_source_u(
+            zero, [above_delta_limit] * 16, source_width)
+        self.assertEqual(
+            struct.pack("<f", selected), struct.pack("<f", above_delta_limit))
+
     def test_model_calibration_binds_identity_preprocess_and_exact_shape(self):
         calibration = python_contract.MODEL_CALIBRATIONS[0]
         self.assertEqual(calibration.depth_model, "depth_anything_v2_fp16")
@@ -187,7 +268,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(calibration.preprocess.source_macro_count, 0)
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
-            "6ee5ca19e447a210f5f7eceb29561321b8f9db3ec3bafd32006f79b43398d730")
+            "e6f66453473af25007d7d4784656dc97d97bae7c730fdfd684d9ab8181ffed47")
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
             generator.shader_source_closure_sha256())
@@ -216,7 +297,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
 
     def test_subtitle_ocr_contract_binds_model_profile_tensor_and_record_abis(self):
         ocr = python_contract.SUBTITLE_OCR
-        self.assertEqual(ocr.schema, 8)
+        self.assertEqual(ocr.schema, 10)
         self.assertEqual(ocr.logical_model, "ppocrv6_tiny_det_modelopt_fp16")
         self.assertEqual(
             ocr.asset_path,
@@ -262,6 +343,15 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(ocr.locator_match_iou_threshold, 0.6)
         self.assertEqual(ocr.locator_death_grace_observations, 6)
         self.assertEqual(
+            (ocr.locator_target_max_row_iqr_binocular_source_pixels,
+             ocr.locator_target_max_row_median_delta_binocular_source_pixels,
+             ocr.locator_target_max_residual_binocular_source_pixels,
+             ocr.locator_target_max_unreliable_holds,
+             ocr.locator_target_deadband_binocular_source_pixels,
+             ocr.locator_target_ema_alpha,
+             ocr.locator_target_max_slew_binocular_source_pixels),
+            (8.0, 4.0, 8.0, 2, 1.0, 0.125, 0.25))
+        self.assertEqual(
             (ocr.locator_max_width_numerator, ocr.locator_max_width_denominator,
              ocr.ocr_safe_row_top, ocr.ocr_safe_row_bottom,
              ocr.source_crop_aspect_width, ocr.source_crop_aspect_height),
@@ -277,7 +367,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual((ocr.record_schema, ocr.record_tag), (3, 0x3852434F))
         self.assertEqual((ocr.record_word_count, ocr.raw_box_offset), (208, 16))
         self.assertEqual((ocr.final_box_offset, ocr.final_box_capacity), (144, 8))
-        self.assertEqual((ocr.locator_schema, ocr.locator_tag), (9, 0x39524C53))
+        self.assertEqual((ocr.locator_schema, ocr.locator_tag), (12, 0x32314C53))
         self.assertEqual(
             (ocr.locator_word_count, ocr.locator_owner_offset,
              ocr.locator_pending_offset, ocr.locator_current_offset),
@@ -287,8 +377,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 48u',
-                'subtitle_ocr_contract_schema = 8u',
+                'contract_schema = 50u',
+                'subtitle_ocr_contract_schema = 10u',
                 'subtitle_ocr_model_name = "ppocrv6_tiny_det_modelopt_fp16"',
                 'subtitle_ocr_asset_path = '
                 '"models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx"',
@@ -307,8 +397,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'std::array<double, 3> subtitle_ocr_imagenet_mean {{0.485, 0.456, 0.406}}',
                 'subtitle_ocr_output_width = 960u',
                 'subtitle_ocr_record_tag = 0x3852434Fu',
-                'subtitle_locator_state_schema = 9u',
-                'subtitle_locator_state_tag = 0x39524C53u',
+                'subtitle_locator_state_schema = 12u',
+                'subtitle_locator_state_tag = 0x32314C53u',
                 'subtitle_ocr_safe_row_top = 24u',
                 'subtitle_ocr_safe_row_bottom = 155u',
                 'subtitle_ocr_crop_aspect_width = 6u',
@@ -325,18 +415,25 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'subtitle_locator_min_aspect_denominator = 1u',
                 'subtitle_locator_match_iou_threshold = 0.6f',
                 'subtitle_locator_death_grace_observations = 6u',
+                'subtitle_target_max_row_iqr_binocular_source_pixels = 8.0f',
+                'subtitle_target_max_row_median_delta_binocular_source_pixels = 4.0f',
+                'subtitle_target_max_residual_binocular_source_pixels = 8.0f',
+                'subtitle_target_max_unreliable_holds = 2u',
+                'subtitle_target_deadband_binocular_source_pixels = 1.0f',
+                'subtitle_target_ema_alpha = 0.125f',
+                'subtitle_target_max_slew_binocular_source_pixels = 0.25f',
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 48u',
-                '#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 8u',
+                '#define V2_CONTRACT_SCHEMA 50u',
+                '#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 10u',
                 '#define V2_OCR_INPUT_WIDTH 960u',
                 '#define V2_OCR_OUTPUT_WIDTH 960u',
                 '#define V2_OCR_IMAGENET_MEAN_B 0.485f',
                 '#define V2_OCR_IMAGENET_STD_R 0.225f',
                 '#define V2_OCR_RECORD_TAG 0x3852434Fu',
-                '#define V2_SUBTITLE_LOCATOR_STATE_SCHEMA 9u',
-                '#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x39524C53u',
+                '#define V2_SUBTITLE_LOCATOR_STATE_SCHEMA 12u',
+                '#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x32314C53u',
                 '#define V2_MODEL_CALIBRATED_SHAPE_COUNT 6u',
                 '#define V2_MODEL_CALIBRATED_SHAPE_WIDTH_5 434u',
                 '#define V2_MODEL_CALIBRATED_SHAPE_HEIGHT_5 1036u',
@@ -356,6 +453,13 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 '#define V2_SUBTITLE_LOCATOR_MIN_ASPECT_DENOMINATOR 1u',
                 '#define V2_SUBTITLE_LOCATOR_MATCH_IOU_THRESHOLD 0.6f',
                 '#define V2_SUBTITLE_LOCATOR_DEATH_GRACE_OBSERVATIONS 6u',
+                '#define V2_SUBTITLE_TARGET_MAX_ROW_IQR_BINOCULAR_SOURCE_PIXELS 8.0f',
+                '#define V2_SUBTITLE_TARGET_MAX_ROW_MEDIAN_DELTA_BINOCULAR_SOURCE_PIXELS 4.0f',
+                '#define V2_SUBTITLE_TARGET_MAX_RESIDUAL_BINOCULAR_SOURCE_PIXELS 8.0f',
+                '#define V2_SUBTITLE_TARGET_MAX_UNRELIABLE_HOLDS 2u',
+                '#define V2_SUBTITLE_TARGET_DEADBAND_BINOCULAR_SOURCE_PIXELS 1.0f',
+                '#define V2_SUBTITLE_TARGET_EMA_ALPHA 0.125f',
+                '#define V2_SUBTITLE_TARGET_MAX_SLEW_BINOCULAR_SOURCE_PIXELS 0.25f',
                 'bool V2SubtitleOcrFieldIsCalibrated('):
             self.assertIn(token, hlsl)
         self.assertNotIn("subtitle_ocr_join_gap_cells", cpp)
@@ -392,31 +496,29 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertIsNone(
             python_contract.subtitle_ocr_ribbon_min_bottom(1920, 1080, 768, 432))
 
-        shader_root = (REPO / "src_assets" / "windows" / "assets" /
-                       "shaders" / "directx")
-        preprocess_source = (shader_root / "host_sbs_ocr_preprocess_cs.hlsl").read_text(
-            encoding="utf-8")
-        boxes_source = (shader_root / "host_sbs_ocr_boxes_cs.hlsl").read_text(
-            encoding="utf-8")
-        locator_source = (shader_root / "host_sbs_subtitle_locator_cs.hlsl").read_text(
-            encoding="utf-8")
-        for source in (preprocess_source, boxes_source, locator_source):
-            self.assertIn(
-                '#include "include/depth_coordinate_v2_contract.generated.hlsl"', source)
-        for token in (
-                "#define OCR_WIDTH V2_OCR_INPUT_WIDTH",
-                "V2_OCR_IMAGENET_MEAN_B", "V2_OCR_IMAGENET_STD_R"):
-            self.assertIn(token, preprocess_source)
-        for token in (
-                "#define OCR_WIDTH V2_OCR_OUTPUT_WIDTH",
-                "#define OCR8_WORDS V2_OCR_RECORD_WORD_COUNT",
-                "#define OCR8_TAG V2_OCR_RECORD_TAG"):
-            self.assertIn(token, boxes_source)
-        for token in (
-                "MAX_LINES = V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY",
-                "V2_SUBTITLE_LOCATOR_STATE_SCHEMA",
-                "V2_SUBTITLE_LOCATOR_CURRENT_OFFSET"):
-            self.assertIn(token, locator_source)
+    def test_generated_ocr_assertions_do_not_compare_float_macros_in_preprocessor(self):
+        assertions = generator.render_hlsl_ocr_assertions()
+        policy_macros = (
+            "V2_SUBTITLE_TARGET_MAX_ROW_IQR_BINOCULAR_SOURCE_PIXELS",
+            "V2_SUBTITLE_TARGET_MAX_ROW_MEDIAN_DELTA_BINOCULAR_SOURCE_PIXELS",
+            "V2_SUBTITLE_TARGET_MAX_RESIDUAL_BINOCULAR_SOURCE_PIXELS",
+            "V2_SUBTITLE_TARGET_DEADBAND_BINOCULAR_SOURCE_PIXELS",
+            "V2_SUBTITLE_TARGET_EMA_ALPHA",
+            "V2_SUBTITLE_TARGET_MAX_SLEW_BINOCULAR_SOURCE_PIXELS",
+        )
+        for macro in policy_macros:
+            self.assertIn(f"!defined({macro})", assertions)
+        self.assertIn(
+            "!defined(V2_SUBTITLE_TARGET_MAX_UNRELIABLE_HOLDS)", assertions)
+
+        integer_assertion_start = assertions.index("#if V2_MODEL_CALIBRATED_SHAPE_COUNT")
+        integer_assertion_end = assertions.index(
+            '#error "Generated V2 OCR8/SLR12 contract invariants are inconsistent"',
+            integer_assertion_start,
+        )
+        integer_assertions = assertions[integer_assertion_start:integer_assertion_end]
+        for macro in policy_macros:
+            self.assertNotIn(macro, integer_assertions)
 
     def test_subtitle_ocr_contract_rejects_model_tensor_profile_and_abi_drift(self):
         original = generator.load_contract(verify_shader_source_closure=False)
@@ -443,6 +545,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 {"text_join_gap_cells": 5}),
             "ribbon-join-gap": lambda value: value["subtitle_ocr"]["field_policy"].update(
                 {"ribbon_join_gap_cells": 11}),
+            "target-iqr": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"locator_target_max_row_iqr_binocular_source_pixels": 9.0}),
+            "target-row-median": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"locator_target_max_row_median_delta_binocular_source_pixels": 5.0}),
+            "target-residual": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"locator_target_max_residual_binocular_source_pixels": 9.0}),
+            "target-holds": lambda value: value["subtitle_ocr"]["field_policy"].update(
+                {"locator_target_max_unreliable_holds": 3}),
             "ocr-tag": lambda value: value["subtitle_ocr"]["ocr_record"].update(
                 {"tag": 0}),
             "locator-words": lambda value: value["subtitle_ocr"]["locator_state"].update(
@@ -470,6 +580,31 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_renderer_closure_pins_cover_generated_contract_include(self):
+        self.assertEqual(
+            generator.validate_renderer_source_closure_pins(),
+            {
+                "parallax_v2_live_renderer_source_closure_sha256":
+                    "5850bb757becd0c4d359812298974de72b073a4be0279d3ba41c6c1a5c270af1",
+                "parallax_v2_diagnostic_source_closure_sha256":
+                    "077eefb9830c6a9322210fe1059cc765aa52a7b369f8414249795b0f43e96aaa",
+            },
+        )
+
+        # Both renderer roots reach this generated include. Prove a DVC regeneration cannot pass
+        # the generator check while the independent native renderer pins still name old bytes.
+        with tempfile.TemporaryDirectory() as temporary:
+            shader_root = Path(temporary) / "directx"
+            shutil.copytree(generator.PREPROCESS_SHADER_ROOT, shader_root)
+            generated = (
+                shader_root / "include" / "depth_coordinate_v2_contract.generated.hlsl")
+            generated.write_bytes(generated.read_bytes() + b"\n// simulated DVC drift\n")
+            with self.assertRaisesRegex(ValueError, "live renderer source closure pin is stale"):
+                generator.validate_renderer_source_closure_pins(
+                    shader_root=shader_root,
+                    pin_header=generator.HOST_SBS_SHADER_CACHE_HEADER,
+                )
 
     def test_same_count_semantic_reorders_are_rejected_before_generation(self):
         original = generator.load_contract()

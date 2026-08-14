@@ -1,5 +1,7 @@
 #include "virtual_display.h"
 
+#include "display_config.h"
+
 #include <algorithm>
 #include <chrono>
 #include <combaseapi.h>
@@ -8,12 +10,10 @@
 #include <cwctype>
 #include <dxgi.h>
 #include <dxgi1_6.h>
-#include <highlevelmonitorconfigurationapi.h>
 #include <initguid.h>
 #include <limits>
 #include <mutex>
 #include <optional>
-#include <physicalmonitorenumerationapi.h>
 #include <setupapi.h>
 #include <thread>
 #include <tuple>
@@ -23,9 +23,6 @@
 using namespace SUDOVDA;
 
 namespace VDISPLAY {
-  // {dff7fd29-5b75-41d1-9731-b32a17a17104}
-  // static const GUID DEFAULT_DISPLAY_GUID = { 0xdff7fd29, 0x5b75, 0x41d1, { 0x97, 0x31, 0xb3, 0x2a, 0x17, 0xa1, 0x71, 0x04 } };
-
   namespace {
     HANDLE sudovdaDriverHandle = INVALID_HANDLE_VALUE;
     std::mutex virtualDisplayMutationMutex;
@@ -512,6 +509,33 @@ baseline_refresh_rates_t baselineRefreshRates(int refresh_rate) {
   return {preferred, alternate};
 }
 
+LONG changeBaselineDisplaySettings(
+  const wchar_t *deviceName,
+  const int width,
+  const int height,
+  const baseline_refresh_rates_t refreshRates,
+  const DWORD flags
+) {
+  DEVMODEW devMode {};
+  devMode.dmSize = sizeof(devMode);
+  if (!EnumDisplaySettingsW(deviceName, ENUM_CURRENT_SETTINGS, &devMode)) {
+    return DISP_CHANGE_FAILED;
+  }
+
+  devMode.dmPelsWidth = width;
+  devMode.dmPelsHeight = height;
+  devMode.dmDisplayFrequency = refreshRates.preferred;
+  devMode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+  auto result = ChangeDisplaySettingsExW(deviceName, &devMode, nullptr, flags, nullptr);
+  if (result == DISP_CHANGE_SUCCESSFUL ||
+      refreshRates.alternate == refreshRates.preferred) {
+    return result;
+  }
+
+  devMode.dmDisplayFrequency = refreshRates.alternate;
+  return ChangeDisplaySettingsExW(deviceName, &devMode, nullptr, flags, nullptr);
+}
+
 LONG applyDisplaySettings(const wchar_t *deviceName, int width, int height, int refresh_rate) {
   std::vector<DISPLAYCONFIG_PATH_INFO> pathArray;
   std::vector<DISPLAYCONFIG_MODE_INFO> modeArray;
@@ -583,56 +607,29 @@ LONG applyDisplaySettings(const wchar_t *deviceName, int width, int height, int 
 }  // namespace
 
 LONG testDisplaySettings(const wchar_t *deviceName, int width, int height, int refresh_rate) {
-  DEVMODEW devMode = {};
-  devMode.dmSize = sizeof(devMode);
-  if (!EnumDisplaySettingsW(deviceName, ENUM_CURRENT_SETTINGS, &devMode)) {
-    return DISP_CHANGE_FAILED;
-  }
-
-  const auto refreshRates = baselineRefreshRates(refresh_rate);
-  devMode.dmPelsWidth = width;
-  devMode.dmPelsHeight = height;
-  devMode.dmDisplayFrequency = refreshRates.preferred;
-  devMode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
-
-  auto result = ChangeDisplaySettingsExW(deviceName, &devMode, nullptr, CDS_TEST, nullptr);
-  if (result == DISP_CHANGE_SUCCESSFUL || refreshRates.alternate == refreshRates.preferred) {
-    return result;
-  }
-
-  devMode.dmDisplayFrequency = refreshRates.alternate;
-  return ChangeDisplaySettingsExW(deviceName, &devMode, nullptr, CDS_TEST, nullptr);
+  return changeBaselineDisplaySettings(
+    deviceName,
+    width,
+    height,
+    baselineRefreshRates(refresh_rate),
+    CDS_TEST
+  );
 }
 
 LONG changeDisplaySettings(const wchar_t *deviceName, int width, int height, int refresh_rate) {
-  DEVMODEW devMode = {};
-  devMode.dmSize = sizeof(devMode);
-
-  // Old method to set at least baseline refresh rate
-  if (EnumDisplaySettingsW(deviceName, ENUM_CURRENT_SETTINGS, &devMode)) {
-    const auto refreshRates = baselineRefreshRates(refresh_rate);
-
-    wprintf(L"[SUDOVDA] Applying baseline display mode [%dx%dx%d] for %ls.\n", width, height, refreshRates.preferred, deviceName);
-
-    devMode.dmPelsWidth = width;
-    devMode.dmPelsHeight = height;
-    devMode.dmDisplayFrequency = refreshRates.preferred;
-    devMode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
-
-    auto res = ChangeDisplaySettingsExW(deviceName, &devMode, NULL, CDS_UPDATEREGISTRY, NULL);
-
-    if (res != ERROR_SUCCESS && refreshRates.alternate != refreshRates.preferred) {
-      wprintf(L"[SUDOVDA] Failed to apply baseline display mode, trying alt mode: [%dx%dx%d].\n", width, height, refreshRates.alternate);
-      devMode.dmDisplayFrequency = refreshRates.alternate;
-      res = ChangeDisplaySettingsExW(deviceName, &devMode, NULL, CDS_UPDATEREGISTRY, NULL);
-      if (res != ERROR_SUCCESS) {
-        wprintf(L"[SUDOVDA] Failed to apply alt baseline display mode.\n");
-      }
-    }
-
-    if (res == ERROR_SUCCESS) {
-      wprintf(L"[SUDOVDA] Baseline display mode applied successfully.");
-    }
+  const auto refreshRates = baselineRefreshRates(refresh_rate);
+  wprintf(L"[SUDOVDA] Applying baseline display mode [%dx%dx%d] for %ls.\n", width, height, refreshRates.preferred, deviceName);
+  const auto baselineStatus = changeBaselineDisplaySettings(
+    deviceName,
+    width,
+    height,
+    refreshRates,
+    CDS_UPDATEREGISTRY
+  );
+  if (baselineStatus == DISP_CHANGE_SUCCESSFUL) {
+    wprintf(L"[SUDOVDA] Baseline display mode applied successfully.\n");
+  } else {
+    wprintf(L"[SUDOVDA] Failed to apply baseline display mode.\n");
   }
 
   // Apply the exact fractional refresh rate through DisplayConfig.
@@ -676,47 +673,25 @@ std::optional<bool> queryDisplayHDR(const LUID &adapterLuid, uint32_t targetId) 
   // Query the display configuration state directly. A virtual HDR desktop is represented as
   // linear scRGB to desktop applications, so its DXGI output color space is not required to be
   // the physical-output PQ/Rec.2020 space and is not a reliable HDR-enabled test.
-  DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 info2 {};
-  info2.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2;
-  info2.header.size = sizeof(info2);
-  info2.header.adapterId = adapterLuid;
-  info2.header.id = targetId;
-  if (DisplayConfigGetDeviceInfo(&info2.header) == ERROR_SUCCESS) {
-    return info2.activeColorMode == DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  const auto state = platf::display_config::query_advanced_color(
+    adapterLuid,
+    targetId,
+    platf::display_config::legacy_fallback_e::any_modern_failure
+  );
+  if (!state) {
+    return std::nullopt;
   }
-
-  DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO info {};
-  info.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
-  info.header.size = sizeof(info);
-  info.header.adapterId = adapterLuid;
-  info.header.id = targetId;
-  if (DisplayConfigGetDeviceInfo(&info.header) == ERROR_SUCCESS) {
-    return info.advancedColorEnabled != 0;
-  }
-  return std::nullopt;
+  return state->api == platf::display_config::advanced_color_api_e::modern ?
+           state->active_mode == DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR :
+           state->advanced_color_enabled;
 }
 
 bool setDisplayHDR(const LUID& adapterId, const uint32_t& targetId, bool enableAdvancedColor) {
-  DISPLAYCONFIG_SET_HDR_STATE setHdrState = {};
-  setHdrState.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE;
-  setHdrState.header.size = sizeof(setHdrState);
-  setHdrState.header.adapterId = adapterId;
-  setHdrState.header.id = targetId;
-  setHdrState.enableHdr = enableAdvancedColor;
-
-  if (DisplayConfigSetDeviceInfo(&setHdrState.header) == ERROR_SUCCESS) {
-    return true;
-  }
-
-  // Windows 10 exposes only the combined Advanced Color setter.
-  DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE setHdrInfo = {};
-  setHdrInfo.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE;
-  setHdrInfo.header.size = sizeof(setHdrInfo);
-  setHdrInfo.header.adapterId = adapterId;
-  setHdrInfo.header.id = targetId;
-  setHdrInfo.enableAdvancedColor = enableAdvancedColor;
-
-  return DisplayConfigSetDeviceInfo(&setHdrInfo.header) == ERROR_SUCCESS;
+  return platf::display_config::set_hdr_state_with_legacy_fallback(
+    adapterId,
+    targetId,
+    enableAdvancedColor
+  );
 }
 
 std::optional<bool> queryDisplayHDRByName(const wchar_t* displayName) {
@@ -865,57 +840,20 @@ bool queryDisplayConfig(
   std::vector<DISPLAYCONFIG_MODE_INFO> &modes,
   LONG *failureStatus = nullptr
 ) {
-  // The active-path count can change between the size and data calls while Windows is applying a
-  // hotplug, HDR, or IddCx topology transition. Retry that documented race instead of presenting a
-  // transient empty desktop to callers.
-  for (int attempt = 0; attempt < 8; ++attempt) {
-    UINT32 pathCount = 0;
-    UINT32 modeCount = 0;
-    const auto sizeStatus = GetDisplayConfigBufferSizes(flags, &pathCount, &modeCount);
-    if (sizeStatus != ERROR_SUCCESS) {
-      if (sizeStatus != ERROR_INSUFFICIENT_BUFFER) {
-        if (failureStatus) {
-          *failureStatus = sizeStatus;
-        }
-        return false;
-      }
-      Sleep(1u << std::min(attempt, 5));
-      continue;
-    }
-
-    paths.resize(pathCount);
-    modes.resize(modeCount);
-    const auto queryStatus = QueryDisplayConfig(
+  const auto result =
+    platf::display_config::query_display_config(
       flags,
-      &pathCount,
-      paths.data(),
-      &modeCount,
-      modes.data(),
-      nullptr
+      paths,
+      modes,
+      {
+        8,
+        platf::display_config::retry_delay_e::exponential_milliseconds,
+      }
     );
-    if (queryStatus == ERROR_SUCCESS) {
-      paths.resize(pathCount);
-      modes.resize(modeCount);
-      if (failureStatus) {
-        *failureStatus = ERROR_SUCCESS;
-      }
-      return true;
-    }
-    if (queryStatus != ERROR_INSUFFICIENT_BUFFER) {
-      if (failureStatus) {
-        *failureStatus = queryStatus;
-      }
-      return false;
-    }
-    Sleep(1u << std::min(attempt, 5));
-  }
-
-  paths.clear();
-  modes.clear();
   if (failureStatus) {
-    *failureStatus = ERROR_INSUFFICIENT_BUFFER;
+    *failureStatus = result.status;
   }
-  return false;
+  return static_cast<bool>(result);
 }
 }  // namespace
 
@@ -1161,59 +1099,28 @@ namespace {
     const LUID &adapter_id,
     UINT32 target_id
   ) {
-    DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 info2 {};
-    info2.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2;
-    info2.header.size = sizeof(info2);
-    info2.header.adapterId = adapter_id;
-    info2.header.id = target_id;
-    const auto modern_status = DisplayConfigGetDeviceInfo(&info2.header);
-    if (modern_status == ERROR_SUCCESS) {
+    const auto state = platf::display_config::query_advanced_color(
+      adapter_id,
+      target_id,
+      platf::display_config::legacy_fallback_e::unsupported_modern_api
+    );
+    if (!state) {
+      return std::nullopt;
+    }
+    if (state->api == platf::display_config::advanced_color_api_e::modern) {
       return display_color_contract_t {
         color_contract_api_e::modern,
         false,
-        info2.highDynamicRangeUserEnabled != 0,
-        info2.wideColorUserEnabled != 0,
-        info2.advancedColorActive != 0,
-        info2.activeColorMode,
+        state->hdr_user_enabled,
+        state->wcg_user_enabled,
+        state->advanced_color_active,
+        state->active_mode,
       };
     }
-    if (modern_status != ERROR_INVALID_PARAMETER &&
-        modern_status != ERROR_NOT_SUPPORTED) {
-      return std::nullopt;
-    }
-
-    DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO info {};
-    info.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
-    info.header.size = sizeof(info);
-    info.header.adapterId = adapter_id;
-    info.header.id = target_id;
-    if (DisplayConfigGetDeviceInfo(&info.header) == ERROR_SUCCESS) {
-      return display_color_contract_t {
-        color_contract_api_e::legacy,
-        info.advancedColorEnabled != 0,
-      };
-    }
-    return std::nullopt;
-  }
-
-  bool setDisplayWcg(const LUID &adapter_id, UINT32 target_id, bool enabled) {
-    DISPLAYCONFIG_SET_WCG_STATE state {};
-    state.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_WCG_STATE;
-    state.header.size = sizeof(state);
-    state.header.adapterId = adapter_id;
-    state.header.id = target_id;
-    state.enableWcg = enabled;
-    return DisplayConfigSetDeviceInfo(&state.header) == ERROR_SUCCESS;
-  }
-
-  bool setDisplayHdrModern(const LUID &adapter_id, UINT32 target_id, bool enabled) {
-    DISPLAYCONFIG_SET_HDR_STATE state {};
-    state.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE;
-    state.header.size = sizeof(state);
-    state.header.adapterId = adapter_id;
-    state.header.id = target_id;
-    state.enableHdr = enabled;
-    return DisplayConfigSetDeviceInfo(&state.header) == ERROR_SUCCESS;
+    return display_color_contract_t {
+      color_contract_api_e::legacy,
+      state->advanced_color_enabled,
+    };
   }
 
   bool reconcileDisplayColorContract(
@@ -1251,7 +1158,11 @@ namespace {
       case color_reconcile_action_internal_e::set_hdr_user_state:
         active_mode_settle = {};
         if (colorSetterRetryAvailable(action, attempts, now)) {
-          if (setDisplayHdrModern(adapter_id, target_id, expected.hdr_user_enabled)) {
+          if (platf::display_config::set_hdr_state(
+                adapter_id,
+                target_id,
+                expected.hdr_user_enabled
+              )) {
             consumeColorSetterAttempt(action, attempts);
           } else {
             deferRejectedColorSetter(action, attempts, now);
@@ -1261,7 +1172,11 @@ namespace {
       case color_reconcile_action_internal_e::set_wcg_user_state:
         active_mode_settle = {};
         if (colorSetterRetryAvailable(action, attempts, now)) {
-          if (setDisplayWcg(adapter_id, target_id, expected.wcg_user_enabled)) {
+          if (platf::display_config::set_wcg_state(
+                adapter_id,
+                target_id,
+                expected.wcg_user_enabled
+              )) {
             consumeColorSetterAttempt(action, attempts);
           } else {
             deferRejectedColorSetter(action, attempts, now);

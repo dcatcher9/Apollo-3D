@@ -41,11 +41,6 @@ float2 DepthAnalysisContentMinUv() {
         max(float2(target_w, target_h), float2(1.0f, 1.0f));
 }
 
-float2 DepthAnalysisContentMaxUv() {
-    return float2(analysis_content_right, analysis_content_bottom) /
-        max(float2(target_w, target_h), float2(1.0f, 1.0f));
-}
-
 uint4 DepthAnalysisContentCells() {
     if (!DepthAnalysisContentValid() || target_w == 0u || target_h == 0u) {
         return uint4(0u, 0u, 0u, 0u);

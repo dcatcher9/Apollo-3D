@@ -1,5 +1,5 @@
 {
-  "schema": 48,
+  "schema": 50,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -7,7 +7,7 @@
     "binding": "raw-depth-model-input-and-preprocess-source-produced-by-calibrated-identity-v3"
   },
   "subtitle_ocr": {
-    "schema": 8,
+    "schema": 10,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
     "artifact_onnx_sha256": "169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44",
@@ -68,6 +68,13 @@
       "locator_min_aspect_denominator": 1,
       "locator_match_iou_threshold": 0.6,
       "locator_death_grace_observations": 6,
+      "locator_target_max_row_iqr_binocular_source_pixels": 8.0,
+      "locator_target_max_row_median_delta_binocular_source_pixels": 4.0,
+      "locator_target_max_residual_binocular_source_pixels": 8.0,
+      "locator_target_max_unreliable_holds": 2,
+      "locator_target_deadband_binocular_source_pixels": 1.0,
+      "locator_target_ema_alpha": 0.125,
+      "locator_target_max_slew_binocular_source_pixels": 0.25,
       "ocr_safe_row_top": 24,
       "ocr_safe_row_bottom": 155,
       "source_crop_aspect_width": 6,
@@ -96,8 +103,8 @@
       "final_box_capacity": 8
     },
     "locator_state": {
-      "schema": 9,
-      "tag": 961694803,
+      "schema": 12,
+      "tag": 842091603,
       "word_count": 80,
       "header_word_count": 32,
       "rectangle_capacity": 4,
@@ -222,7 +229,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "254d73afac205fb282e471dfe75e5e38a6e0156c0c4ec4296d71ffa828fc512c"
+    "source_closure_sha256": "42d2ee8d50520f370d2052c2e21ade7b9b0eb9ba985e936f907d966fe3bc786f"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,
@@ -277,7 +284,7 @@
         "source_target": "cs_5_0",
         "source_compile_flags": 34816,
         "source_macro_count": 0,
-        "source_closure_sha256": "6ee5ca19e447a210f5f7eceb29561321b8f9db3ec3bafd32006f79b43398d730",
+        "source_closure_sha256": "e6f66453473af25007d7d4784656dc97d97bae7c730fdfd684d9ab8181ffed47",
         "model_input_schema": 1,
         "dtype": "float32-le",
         "layout": "NCHW",

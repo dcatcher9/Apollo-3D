@@ -28,7 +28,6 @@
 #include <NvInfer.h>
 #include <NvInferPlugin.h>
 #include <NvOnnxParser.h>
-#include <regex>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -111,6 +110,19 @@ static CUcontext primary_context(cuda_driver_api &cuda, CUdevice device) {
     g_cuda_primary_contexts.emplace(device, context);
   }
   return context;
+}
+
+static bool unregister_cuda_graphics_resource(
+  cuda_driver_api &cuda,
+  CUgraphicsResource &resource
+) {
+  if (!resource) {
+    return true;
+  }
+  const bool unregistered = cuda.cuGraphicsUnregisterResource &&
+                            cuda.cuGraphicsUnregisterResource(resource) == CUDA_SUCCESS;
+  resource = nullptr;
+  return unregistered;
 }
 
 static bool cuda_device_for_d3d(cuda_driver_api &cuda, ID3D11Device *d3d, CUdevice &out) {
@@ -229,9 +241,7 @@ struct engine_slot {
   // Usable contexts include both checked-out and pooled instances. Failed warmup contexts cannot
   // be destroyed across the MinGW/MSVC ABI boundary, so account for them separately: they must
   // never re-enter the pool, while the combined count still enforces the physical VRAM cap.
-  std::size_t context_count = 0;
-  std::size_t warmed_context_count = 0;
-  std::size_t quarantined_context_count = 0;
+  models::detail::execution_context_accounting_t context_accounting;
   bool io_validated = false;
   bool io_compatible = false;
 };
@@ -239,7 +249,7 @@ struct engine_slot {
 static std::map<std::string, engine_slot> g_engines;  // guarded by g_trt_mutex
 
 static std::size_t allocated_context_count(const engine_slot &slot) {
-  return slot.context_count + slot.quarantined_context_count;
+  return slot.context_accounting.allocated();
 }
 
 // The object is deliberately leaked because destroying TensorRT interfaces across this compiler
@@ -256,20 +266,71 @@ static void quarantine_execution_context_locked(
     return;
   }
   auto &slot = g_engines[engine_key];
-  if (slot.context_count > 0) {
-    --slot.context_count;
-  }
-  if (was_warmed && slot.warmed_context_count > 0) {
-    --slot.warmed_context_count;
-  }
-  ++slot.quarantined_context_count;
+  slot.context_accounting.quarantine(was_warmed);
   context = nullptr;
   g_trt_context_available.notify_all();
 }
 
 static void mark_execution_context_warmed_locked(const std::string &engine_key) {
+  g_engines[engine_key].context_accounting.mark_warmed();
+}
+
+static void return_execution_context_locked(
+  const std::string &engine_key,
+  nvinfer1::IExecutionContext *&context
+) {
+  if (!context) {
+    return;
+  }
+  g_engines[engine_key].context_pool.push_back(context);
+  context = nullptr;
+  g_trt_context_available.notify_all();
+}
+
+static void release_context_reservation_locked(const std::string &engine_key) {
+  g_engines[engine_key].context_accounting.release_reservation();
+  g_trt_context_available.notify_all();
+}
+
+enum class startup_context_reservation_e {
+  create,
+  resident_warmed,
+  unavailable,
+};
+
+static startup_context_reservation_e reserve_startup_context_locked(
+  const std::string &engine_key
+) {
   auto &slot = g_engines[engine_key];
-  ++slot.warmed_context_count;
+  if (allocated_context_count(slot) >= kMaxContextsPerEngine) {
+    return slot.context_accounting.warmed() != 0u ?
+             startup_context_reservation_e::resident_warmed :
+             startup_context_reservation_e::unavailable;
+  }
+  slot.context_accounting.reserve(kMaxContextsPerEngine);
+  return startup_context_reservation_e::create;
+}
+
+static void erase_empty_engine_slot_locked(const std::string &engine_key) {
+  const auto found = g_engines.find(engine_key);
+  if (found != g_engines.end() && !found->second.engine &&
+      allocated_context_count(found->second) == 0u &&
+      found->second.context_pool.empty()) {
+    g_engines.erase(found);
+  }
+}
+
+static void recycle_or_quarantine_execution_context_locked(
+  const std::string &engine_key,
+  nvinfer1::IExecutionContext *&context,
+  const bool warmed,
+  const bool poisoned
+) {
+  if (warmed && !poisoned) {
+    return_execution_context_locked(engine_key, context);
+  } else {
+    quarantine_execution_context_locked(engine_key, context, warmed);
+  }
 }
 
 template<typename T>
@@ -309,10 +370,12 @@ static nvinfer1::ICudaEngine *acquire_engine_locked(
   const std::string &engine_key,
   const std::filesystem::path &engine_path,
   nvinfer1::IExecutionContext *&out_context,
-  bool &out_pooled
+  bool *out_pooled = nullptr
 ) {
   out_context = nullptr;
-  out_pooled = false;
+  if (out_pooled) {
+    *out_pooled = false;
+  }
   auto &slot = g_engines[engine_key];
   if (!g_runtime) {
     g_runtime = nvinfer1::createInferRuntime(gLogger);
@@ -333,7 +396,9 @@ static nvinfer1::ICudaEngine *acquire_engine_locked(
   if (slot.engine && !slot.context_pool.empty()) {
     out_context = slot.context_pool.back();
     slot.context_pool.pop_back();
-    out_pooled = true;
+    if (out_pooled) {
+      *out_pooled = true;
+    }
   }
   return slot.engine;
 }
@@ -481,21 +546,20 @@ static bool detach_incompatible_engine_locked(const std::string &engine_key) {
     return allocated_context_count(slot) == 0 && slot.context_pool.empty();
   }
 
-  if (slot.context_pool.size() > slot.context_count) {
+  if (slot.context_pool.size() > slot.context_accounting.usable()) {
     BOOST_LOG(error) << "TensorRT engine slot accounting is corrupt; refusing unsafe replacement.";
     return false;
   }
-  const std::size_t checked_out = slot.context_count - slot.context_pool.size();
+  const std::size_t checked_out =
+    slot.context_accounting.usable() - slot.context_pool.size();
   if (checked_out != 0) {
     BOOST_LOG(error) << "Cannot replace incompatible TensorRT engine while " << checked_out
                      << " execution context(s) are still owned by active sessions.";
     return false;
   }
 
-  slot.quarantined_context_count += slot.context_pool.size();
+  slot.context_accounting.detach_pooled(slot.context_pool.size());
   slot.context_pool.clear();
-  slot.context_count = 0;
-  slot.warmed_context_count = 0;
   slot.engine = nullptr;  // intentionally leaked; see the ABI note above
   slot.io_validated = false;
   slot.io_compatible = false;
@@ -697,14 +761,9 @@ namespace models {
       return false;
     }
 
-    const auto &shader = *result.parallax_v2_shader_provenance;
-    if (shader.source_closure_schema !=
-          depth_coordinate_v2::shader_source_closure_schema ||
-        shader.source_compile_flags !=
-          depth_coordinate_v2::shader_source_compile_flags ||
-        shader.source_macro_count != depth_coordinate_v2::shader_source_macro_count ||
-        shader.source_closure_sha256 !=
-          depth_coordinate_v2::shader_source_closure_sha256) {
+    if (!parallax_v2_shader_provenance_matches_current_contract(
+          *result.parallax_v2_shader_provenance
+        )) {
       return false;
     }
 
@@ -718,13 +777,14 @@ namespace models {
       static_cast<std::uint32_t>(result.raw_width),
       static_cast<std::uint32_t>(result.raw_height)
     );
-    if (!calibration || !std::isfinite(result.parallax_v2_raw_coordinate_scale) ||
+    if (!calibration ||
         std::abs(result.parallax_v2_raw_coordinate_scale -
                  calibration->raw_coordinate_scale) > 1.0e-6f ||
-        !std::isfinite(result.parallax_v2_requested_pop_strength) ||
-        result.parallax_v2_requested_pop_strength <= 0.0f ||
-        !std::isfinite(result.parallax_v2_requested_gain) ||
-        std::abs(result.parallax_v2_requested_gain - depth_coordinate_v2::requested_gain_for_config(result.parallax_v2_requested_pop_strength)) > 1.0e-7f) {
+        !depth_coordinate_v2::parallax_runtime_constants_are_valid(
+          result.parallax_v2_raw_coordinate_scale,
+          result.parallax_v2_requested_pop_strength,
+          result.parallax_v2_requested_gain
+        )) {
       return false;
     }
     return true;
@@ -736,6 +796,41 @@ namespace models {
     std::filesystem::path source_path;
     std::filesystem::path engine_path;
   };
+
+  static bool publish_serialized_engine(
+    const std::filesystem::path &engine_path,
+    const nvinfer1::IHostMemory &serialized,
+    const std::string_view description
+  ) {
+    auto part_path = engine_path;
+    part_path += ".part";
+    std::error_code filesystem_error;
+    std::filesystem::remove(part_path, filesystem_error);
+    {
+      std::ofstream output(part_path, std::ios::binary | std::ios::trunc);
+      if (output) {
+        output.write(
+          static_cast<const char *>(serialized.data()),
+          serialized.size()
+        );
+        output.close();
+      }
+      if (!output) {
+        std::filesystem::remove(part_path, filesystem_error);
+        BOOST_LOG(error) << "Failed to save built " << description << " to " << engine_path;
+        return false;
+      }
+    }
+    std::filesystem::rename(part_path, engine_path, filesystem_error);
+    if (filesystem_error) {
+      BOOST_LOG(error) << "Failed to publish built " << description << ' ' << engine_path
+                       << ": " << filesystem_error.message();
+      std::filesystem::remove(part_path, filesystem_error);
+      return false;
+    }
+    BOOST_LOG(info) << "Saved built " << description << " atomically to " << engine_path;
+    return true;
+  }
 
   static std::mutex g_active_engine_manifest_mutex;
 
@@ -914,32 +1009,13 @@ namespace models {
     }
 
     auto serializedModel = TrtUniquePtr<nvinfer1::IHostMemory>(builder->buildSerializedNetwork(*network, *config));
-    if (serializedModel) {
-      // Save under the recipe-specific engine name so a later recipe change rebuilds
-      // rather than silently reusing this engine's (now-wrong) I/O layout.
-      auto part_path = artifact.engine_path;
-      part_path += ".part";
-      std::error_code ec;
-      std::filesystem::remove(part_path, ec);
-      std::ofstream p(part_path, std::ios::binary | std::ios::trunc);
-      if (p) {
-        p.write(static_cast<const char *>(serializedModel->data()), serializedModel->size());
-        p.close();
-        if (p) {
-          std::filesystem::rename(part_path, artifact.engine_path, ec);
-          if (!ec) {
-            BOOST_LOG(info) << "Saved built engine atomically to " << artifact.engine_path;
-            return true;
-          }
-          BOOST_LOG(error) << "Failed to publish built engine " << artifact.engine_path << ": " << ec.message();
-        }
-      }
-      std::filesystem::remove(part_path, ec);
-      BOOST_LOG(error) << "Failed to save built engine to " << artifact.engine_path;
-    } else {
+    if (!serializedModel) {
       BOOST_LOG(error) << "Engine build failed.";
+      return false;
     }
-    return false;
+    // Save under the recipe-specific engine name so a later recipe change rebuilds rather than
+    // silently reusing this engine's (now-wrong) I/O layout.
+    return publish_serialized_engine(artifact.engine_path, *serializedModel, "depth engine");
   }
 
   static bool ensure_ocr_tensorrt_engine_for_device(
@@ -1086,28 +1162,11 @@ namespace models {
       return false;
     }
 
-    auto part_path = artifact.engine_path;
-    part_path += ".part";
-    std::error_code ec;
-    std::filesystem::remove(part_path, ec);
-    std::ofstream stream(part_path, std::ios::binary | std::ios::trunc);
-    if (!stream) {
-      return false;
-    }
-    stream.write(static_cast<const char *>(serialized->data()), serialized->size());
-    stream.close();
-    if (!stream) {
-      std::filesystem::remove(part_path, ec);
-      return false;
-    }
-    std::filesystem::rename(part_path, artifact.engine_path, ec);
-    if (ec) {
-      BOOST_LOG(error) << "Failed to publish OCR TensorRT engine: " << ec.message();
-      std::filesystem::remove(part_path, ec);
-      return false;
-    }
-    BOOST_LOG(info) << "Saved PP-OCRv6 tiny engine atomically to " << artifact.engine_path;
-    return true;
+    return publish_serialized_engine(
+      artifact.engine_path,
+      *serialized,
+      "PP-OCRv6 tiny engine"
+    );
   }
 
   engine_build_status tensorrt_model_prepare_status(const config::depth_model_info &model) {
@@ -1167,21 +1226,15 @@ namespace models {
 
     nvinfer1::ICudaEngine *engine = nullptr;
     nvinfer1::IExecutionContext *exec_context = nullptr;
-    bool pooled = false;
     bool create_context = false;
     bool resident_warmed_context = false;
     bool engine_repair_allowed = true;
     {
       std::lock_guard<std::mutex> lock(g_trt_mutex);
-      engine = acquire_engine_locked(engine_key, engine_path, exec_context, pooled);
+      engine = acquire_engine_locked(engine_key, engine_path, exec_context);
       auto &slot = g_engines[engine_key];
       if (engine && !validate_engine_io_locked(engine, slot)) {
-        if (exec_context) {
-          slot.context_pool.push_back(exec_context);
-          exec_context = nullptr;
-          pooled = false;
-          g_trt_context_available.notify_all();
-        }
+        return_execution_context_locked(engine_key, exec_context);
         engine_repair_allowed = detach_incompatible_engine_locked(engine_key);
         engine = nullptr;
       }
@@ -1199,10 +1252,7 @@ namespace models {
       }
       {
         std::lock_guard<std::mutex> lock(g_trt_mutex);
-        auto found = g_engines.find(engine_key);
-        if (found != g_engines.end() && !found->second.engine && allocated_context_count(found->second) == 0 && found->second.context_pool.empty()) {
-          g_engines.erase(found);
-        }
+        erase_empty_engine_slot_locked(engine_key);
       }
       std::error_code ec;
       std::filesystem::remove(engine_path, ec);
@@ -1213,34 +1263,31 @@ namespace models {
       engine_path = artifact.engine_path;
       engine_key = std::to_string(cuda_device) + ":" + artifact.name;
       std::lock_guard<std::mutex> lock(g_trt_mutex);
-      engine = acquire_engine_locked(engine_key, engine_path, exec_context, pooled);
+      engine = acquire_engine_locked(engine_key, engine_path, exec_context);
     }
 
     {
       std::lock_guard<std::mutex> lock(g_trt_mutex);
       auto &slot = g_engines[engine_key];
       if (!validate_engine_io_locked(engine, slot)) {
-        if (exec_context) {
-          slot.context_pool.push_back(exec_context);
-          exec_context = nullptr;
-          g_trt_context_available.notify_all();
-        }
+        return_execution_context_locked(engine_key, exec_context);
         detach_incompatible_engine_locked(engine_key);
         return false;
       }
       if (!exec_context) {
-        if (allocated_context_count(slot) >= kMaxContextsPerEngine) {
-          // A live session may already have populated the engine before startup preparation
-          // finished. Only a context that actually completed warmup can establish readiness;
-          // quarantined or still-constructing contexts are not evidence that the plan is usable.
-          if (slot.warmed_context_count == 0) {
+        switch (reserve_startup_context_locked(engine_key)) {
+          case startup_context_reservation_e::create:
+            create_context = true;
+            break;
+          case startup_context_reservation_e::resident_warmed:
+            resident_warmed_context = true;
+            break;
+          case startup_context_reservation_e::unavailable:
+            // A live session may already have populated the engine before startup preparation
+            // finished. Only a context that actually completed warmup can establish readiness;
+            // quarantined or still-constructing contexts are not evidence that the plan is usable.
             BOOST_LOG(error) << "TensorRT context capacity contains no successfully warmed context.";
             return false;
-          }
-          resident_warmed_context = true;
-        } else {
-          ++slot.context_count;
-          create_context = true;
         }
       }
     }
@@ -1250,8 +1297,7 @@ namespace models {
       exec_context = engine->createExecutionContext();
       if (!exec_context) {
         std::lock_guard<std::mutex> lock(g_trt_mutex);
-        --g_engines[engine_key].context_count;
-        g_trt_context_available.notify_all();
+        release_context_reservation_locked(engine_key);
         return false;
       }
       if (!warmup_execution_context(cuda, cuda_ctx, exec_context)) {
@@ -1268,12 +1314,12 @@ namespace models {
       }
     }
 
+    const bool reusable_warmed_context = exec_context || resident_warmed_context;
     if (exec_context) {
       std::lock_guard<std::mutex> lock(g_trt_mutex);
-      g_engines[engine_key].context_pool.push_back(exec_context);
-      g_trt_context_available.notify_all();
+      return_execution_context_locked(engine_key, exec_context);
     }
-    if (!exec_context && !resident_warmed_context) {
+    if (!reusable_warmed_context) {
       BOOST_LOG(error) << "Startup depth-model preparation produced no reusable warmed context.";
       return false;
     }
@@ -1319,24 +1365,17 @@ namespace models {
     auto engine_key = std::to_string(cuda_device) + ":" + artifact.name;
     nvinfer1::ICudaEngine *engine = nullptr;
     nvinfer1::IExecutionContext *exec_context = nullptr;
-    bool pooled = false;
     bool create_context = false;
     bool resident_warmed_context = false;
     bool engine_repair_allowed = true;
     {
       std::lock_guard<std::mutex> lock(g_trt_mutex);
       engine = acquire_engine_locked(
-        engine_key, engine_path, exec_context,
-        pooled
+        engine_key, engine_path, exec_context
       );
       auto &slot = g_engines[engine_key];
       if (!validate_ocr_engine_io_locked(engine, slot)) {
-        if (exec_context) {
-          slot.context_pool.push_back(exec_context);
-          exec_context = nullptr;
-          pooled = false;
-          g_trt_context_available.notify_all();
-        }
+        return_execution_context_locked(engine_key, exec_context);
         engine_repair_allowed = detach_incompatible_engine_locked(engine_key);
         engine = nullptr;
       }
@@ -1354,12 +1393,7 @@ namespace models {
       }
       {
         std::lock_guard<std::mutex> lock(g_trt_mutex);
-        auto found = g_engines.find(engine_key);
-        if (found != g_engines.end() && !found->second.engine &&
-            allocated_context_count(found->second) == 0u &&
-            found->second.context_pool.empty()) {
-          g_engines.erase(found);
-        }
+        erase_empty_engine_slot_locked(engine_key);
       }
       std::error_code remove_error;
       std::filesystem::remove(engine_path, remove_error);
@@ -1377,17 +1411,11 @@ namespace models {
       {
         std::lock_guard<std::mutex> lock(g_trt_mutex);
         engine = acquire_engine_locked(
-          engine_key, engine_path, exec_context,
-          pooled
+          engine_key, engine_path, exec_context
         );
         auto &slot = g_engines[engine_key];
         if (!validate_ocr_engine_io_locked(engine, slot)) {
-          if (exec_context) {
-            slot.context_pool.push_back(exec_context);
-            exec_context = nullptr;
-            pooled = false;
-            g_trt_context_available.notify_all();
-          }
+          return_execution_context_locked(engine_key, exec_context);
           detach_incompatible_engine_locked(engine_key);
           BOOST_LOG(error)
             << "Rebuilt PP-OCRv6 tiny engine still violates the fixed FP32 I/O contract.";
@@ -1398,13 +1426,16 @@ namespace models {
 
     {
       std::lock_guard<std::mutex> lock(g_trt_mutex);
-      auto &slot = g_engines[engine_key];
       if (!exec_context) {
-        if (allocated_context_count(slot) >= kMaxContextsPerEngine) {
-          resident_warmed_context = slot.warmed_context_count != 0u;
-        } else {
-          ++slot.context_count;
-          create_context = true;
+        switch (reserve_startup_context_locked(engine_key)) {
+          case startup_context_reservation_e::create:
+            create_context = true;
+            break;
+          case startup_context_reservation_e::resident_warmed:
+            resident_warmed_context = true;
+            break;
+          case startup_context_reservation_e::unavailable:
+            return false;
         }
       }
     }
@@ -1413,8 +1444,7 @@ namespace models {
       exec_context = engine->createExecutionContext();
       if (!exec_context) {
         std::lock_guard<std::mutex> lock(g_trt_mutex);
-        --g_engines[engine_key].context_count;
-        g_trt_context_available.notify_all();
+        release_context_reservation_locked(engine_key);
         return false;
       }
       if (!warmup_ocr_execution_context(cuda, cuda_ctx, exec_context)) {
@@ -1425,12 +1455,12 @@ namespace models {
       std::lock_guard<std::mutex> lock(g_trt_mutex);
       mark_execution_context_warmed_locked(engine_key);
     }
+    const bool reusable_warmed_context = exec_context || resident_warmed_context;
     if (exec_context) {
       std::lock_guard<std::mutex> lock(g_trt_mutex);
-      g_engines[engine_key].context_pool.push_back(exec_context);
-      g_trt_context_available.notify_all();
+      return_execution_context_locked(engine_key, exec_context);
     }
-    if (!exec_context && !resident_warmed_context) {
+    if (!reusable_warmed_context) {
       return false;
     }
     BOOST_LOG(info)
@@ -1466,7 +1496,6 @@ namespace models {
 
     nvinfer1::ICudaEngine *engine = nullptr;
     nvinfer1::IExecutionContext *exec_context = nullptr;
-    std::mutex *trt_mutex = nullptr;
     CUcontext cuda_ctx = nullptr;
     CUstream cu_stream = nullptr;
     CUdevice cuda_device = -1;
@@ -1490,24 +1519,10 @@ namespace models {
     float minmax_alpha;  // temporal EMA blend for the normalized min/max
     bool cuda_graph_enabled;
     const bool diagnostics_enabled;
-    struct cuda_graph_signature_t {
-      CUdeviceptr input = 0;
-      CUdeviceptr output = 0;
-      int width = 0;
-      int height = 0;
-
-      bool matches(const cuda_graph_signature_t &other) const noexcept {
-        return input == other.input && output == other.output &&
-               width == other.width && height == other.height;
-      }
-    };
-
     struct tensorrt_cuda_graph_t {
       CUgraph graph = nullptr;
       CUgraphExec executable = nullptr;
-      cuda_graph_signature_t signature;
-      bool signature_warmed = false;
-      bool capture_failed = false;
+      detail::cuda_graph_replay_policy_t policy;
     };
 
     tensorrt_cuda_graph_t depth_inference_graph;
@@ -2119,7 +2134,7 @@ namespace models {
       }
       state.executable = nullptr;
       state.graph = nullptr;
-      state.signature_warmed = false;
+      state.policy.signature_warmed = false;
     }
 
     // D3D interop is allowed to return different device pointers after any map. TensorRT graph
@@ -2129,13 +2144,12 @@ namespace models {
     void select_inference_graph_signature(
       cuda_driver_api &cuda,
       tensorrt_cuda_graph_t &state,
-      const cuda_graph_signature_t &signature
+      const detail::cuda_graph_signature_t &signature
     ) {
-      if (state.signature.matches(signature)) {
+      if (!detail::select_cuda_graph_signature(state.policy, signature)) {
         return;
       }
       destroy_inference_graph(cuda, state);
-      state.signature = signature;
     }
 
     // Graph acceleration is optional for each context. A capture or launch failure disables graph
@@ -2144,7 +2158,7 @@ namespace models {
     bool enqueue_with_inference_graph(
       nvinfer1::IExecutionContext *context,
       tensorrt_cuda_graph_t &state,
-      const cuda_graph_signature_t &signature,
+      const detail::cuda_graph_signature_t &signature,
       cuda_driver_api &cuda,
       const char *log_name,
       const bool fixed_shape
@@ -2153,9 +2167,6 @@ namespace models {
                              cuda.cuStreamEndCapture && cuda.cuGraphInstantiateWithFlags &&
                              cuda.cuGraphLaunch && cuda.cuGraphDestroy &&
                              cuda.cuGraphExecDestroy;
-      if (!graph_api || state.capture_failed) {
-        return context->enqueueV3(cu_stream);
-      }
       auto launch_or_fallback = [&]() {
         const CUresult launch = cuda.cuGraphLaunch(state.executable, cu_stream);
         if (launch == CUDA_SUCCESS) {
@@ -2164,19 +2175,27 @@ namespace models {
         BOOST_LOG(warning) << log_name << " CUDA graph launch failed (" << launch
                            << "); using ordinary enqueue.";
         destroy_inference_graph(cuda, state);
-        state.capture_failed = true;
+        state.policy.capture_failed = true;
         return context->enqueueV3(cu_stream);
       };
 
-      select_inference_graph_signature(cuda, state, signature);
-      if (state.executable) {
-        return launch_or_fallback();
-      }
-      // The first enqueue after each signature change is deliberately ordinary: TensorRT may do
-      // deferred shape-dependent setup that cannot be captured.
-      if (!state.signature_warmed) {
-        state.signature_warmed = true;
+      if (!graph_api || state.policy.capture_failed) {
         return context->enqueueV3(cu_stream);
+      }
+      select_inference_graph_signature(cuda, state, signature);
+      switch (detail::next_cuda_graph_enqueue_action(
+                state.policy,
+                true,
+                state.executable != nullptr
+              )) {
+        case detail::cuda_graph_enqueue_action_e::ordinary:
+          // The first enqueue after each signature change is deliberately ordinary: TensorRT may
+          // do deferred shape-dependent setup that cannot be captured.
+          return context->enqueueV3(cu_stream);
+        case detail::cuda_graph_enqueue_action_e::replay:
+          return launch_or_fallback();
+        case detail::cuda_graph_enqueue_action_e::capture:
+          break;
       }
 
       CUgraph captured = nullptr;
@@ -2212,7 +2231,7 @@ namespace models {
       }
       state.executable = nullptr;
       state.graph = nullptr;
-      state.capture_failed = true;
+      state.policy.capture_failed = true;
       BOOST_LOG(warning) << log_name << " CUDA graph capture failed (begin=" << begin
                          << ", enqueue=" << captured_enqueue << ", end=" << end
                          << ", instantiate=" << instantiate
@@ -2523,17 +2542,13 @@ namespace models {
           ocr_engine_key,
           engine_path,
           ocr_exec_context,
-          ocr_context_pooled
+          &ocr_context_pooled
         );
         auto &slot = g_engines[ocr_engine_key];
         if (!validate_ocr_engine_io_locked(ocr_engine, slot)) {
-          if (ocr_exec_context) {
-            slot.context_pool.push_back(ocr_exec_context);
-            ocr_exec_context = nullptr;
-            ocr_context_pooled = false;
-            ocr_context_warmed = false;
-            g_trt_context_available.notify_all();
-          }
+          return_execution_context_locked(ocr_engine_key, ocr_exec_context);
+          ocr_context_pooled = false;
+          ocr_context_warmed = false;
           engine_repair_allowed =
             detach_incompatible_engine_locked(ocr_engine_key);
           ocr_engine = nullptr;
@@ -2552,12 +2567,7 @@ namespace models {
         }
         {
           std::lock_guard<std::mutex> lock(g_trt_mutex);
-          auto found = g_engines.find(ocr_engine_key);
-          if (found != g_engines.end() && !found->second.engine &&
-              allocated_context_count(found->second) == 0u &&
-              found->second.context_pool.empty()) {
-            g_engines.erase(found);
-          }
+          erase_empty_engine_slot_locked(ocr_engine_key);
         }
         std::error_code remove_error;
         std::filesystem::remove(engine_path, remove_error);
@@ -2579,17 +2589,13 @@ namespace models {
             ocr_engine_key,
             engine_path,
             ocr_exec_context,
-            ocr_context_pooled
+            &ocr_context_pooled
           );
           auto &slot = g_engines[ocr_engine_key];
           if (!validate_ocr_engine_io_locked(ocr_engine, slot)) {
-            if (ocr_exec_context) {
-              slot.context_pool.push_back(ocr_exec_context);
-              ocr_exec_context = nullptr;
-              ocr_context_pooled = false;
-              ocr_context_warmed = false;
-              g_trt_context_available.notify_all();
-            }
+            return_execution_context_locked(ocr_engine_key, ocr_exec_context);
+            ocr_context_pooled = false;
+            ocr_context_warmed = false;
             detach_incompatible_engine_locked(ocr_engine_key);
             ocr_engine = nullptr;
           } else {
@@ -2624,16 +2630,14 @@ namespace models {
           ocr_context_pooled = true;
           ocr_context_warmed = true;
         } else if (allocated_context_count(slot) < kMaxContextsPerEngine) {
-          ++slot.context_count;
-          create_context = true;
+          create_context = slot.context_accounting.reserve(kMaxContextsPerEngine);
         }
       }
       if (create_context) {
         ocr_exec_context = ocr_engine->createExecutionContext();
         if (!ocr_exec_context) {
           std::lock_guard<std::mutex> lock(g_trt_mutex);
-          --g_engines[ocr_engine_key].context_count;
-          g_trt_context_available.notify_all();
+          release_context_reservation_locked(ocr_engine_key);
           return false;
         }
         if (!warmup_ocr_execution_context(cuda, cuda_ctx, ocr_exec_context)) {
@@ -2769,7 +2773,12 @@ namespace models {
         std::lock_guard<std::mutex> lock(g_trt_mutex);
         // Load (once) the engine for this configured model into its own slot and take a pooled
         // execution context if one is free. Different startup configurations remain isolated.
-        engine = acquire_engine_locked(engine_key, model_path, exec_context, depth_context_pooled);
+        engine = acquire_engine_locked(
+          engine_key,
+          model_path,
+          exec_context,
+          &depth_context_pooled
+        );
         context_warmed = depth_context_pooled;
         if (depth_context_pooled) {
           BOOST_LOG(info) << "Reusing pooled TensorRT execution context.";
@@ -2778,18 +2787,13 @@ namespace models {
 
         if (!validate_engine_io_locked(engine, slot)) {
           BOOST_LOG(error) << "Depth engine I/O contract is incompatible with Sunshine 3D; streaming flat SBS.";
-          if (exec_context) {
-            slot.context_pool.push_back(exec_context);
-            exec_context = nullptr;
-            depth_context_pooled = false;
-            context_warmed = false;
-            g_trt_context_available.notify_all();
-          }
+          return_execution_context_locked(engine_key, exec_context);
+          depth_context_pooled = false;
+          context_warmed = false;
           engine_repair_allowed = detach_incompatible_engine_locked(engine_key);
           engine = nullptr;
         }
 
-        trt_mutex = &g_trt_mutex;
       }  // release g_trt_mutex before the shader/buffer setup and warmup below
 
       if (!engine) {
@@ -2802,10 +2806,7 @@ namespace models {
         }
         {
           std::lock_guard<std::mutex> lock(g_trt_mutex);
-          auto found = g_engines.find(engine_key);
-          if (found != g_engines.end() && !found->second.engine && allocated_context_count(found->second) == 0 && found->second.context_pool.empty()) {
-            g_engines.erase(found);
-          }
+          erase_empty_engine_slot_locked(engine_key);
         }
         std::error_code ec;
         std::filesystem::remove(model_path, ec);
@@ -2818,17 +2819,18 @@ namespace models {
         engine_key = std::to_string(cuda_device) + ":" + artifact.name;
         {
           std::lock_guard<std::mutex> lock(g_trt_mutex);
-          engine = acquire_engine_locked(engine_key, model_path, exec_context, depth_context_pooled);
+          engine = acquire_engine_locked(
+            engine_key,
+            model_path,
+            exec_context,
+            &depth_context_pooled
+          );
           context_warmed = depth_context_pooled;
           auto &slot = g_engines[engine_key];
           if (!validate_engine_io_locked(engine, slot)) {
-            if (exec_context) {
-              slot.context_pool.push_back(exec_context);
-              exec_context = nullptr;
-              depth_context_pooled = false;
-              context_warmed = false;
-              g_trt_context_available.notify_all();
-            }
+            return_execution_context_locked(engine_key, exec_context);
+            depth_context_pooled = false;
+            context_warmed = false;
             detach_incompatible_engine_locked(engine_key);
             engine = nullptr;
           }
@@ -2889,8 +2891,8 @@ namespace models {
             context_warmed = true;
             BOOST_LOG(info) << "Reusing pooled TensorRT execution context after bounded wait.";
           } else if (engine) {
-            ++slot.context_count;  // reserve atomically so concurrent constructors cannot exceed the cap
-            create_context = true;
+            // Reserve atomically so concurrent constructors cannot exceed the cap.
+            create_context = slot.context_accounting.reserve(kMaxContextsPerEngine);
           }
         }
         if (create_context) {
@@ -2902,9 +2904,7 @@ namespace models {
           exec_context = engine->createExecutionContext();
           if (!exec_context) {
             std::lock_guard<std::mutex> lock(g_trt_mutex);
-            auto &slot = g_engines[engine_key];
-            --slot.context_count;
-            g_trt_context_available.notify_all();
+            release_context_reservation_locked(engine_key);
           }
         }
       }
@@ -3003,113 +3003,58 @@ namespace models {
       // snapshot. Startup prewarm populates these exact cache entries, so the constructor neither
       // recompiles rgb_to_nchw from its identity-only calibration closure nor compiles the shared
       // analysis roots once as "core" and then again as V2.
-      const bool producer_shaders_ok =
-        producer_sources && shader_identity_matches &&
-        create_shader(
-          producer_sources,
-          host_sbs_shader_cache::rgb_to_nchw,
-          rgb_to_nchw_cs
-        ) &&
-        create_shader(
-          producer_sources,
-          host_sbs_shader_cache::buffer_to_tex,
-          buffer_to_tex_cs
-        ) &&
-        create_shader(
-          producer_sources,
-          host_sbs_shader_cache::depth_ema_motion,
-          depth_ema_motion_cs
-        ) &&
-        create_shader(
-          producer_sources,
-          host_sbs_shader_cache::depth_minmax,
-          depth_minmax_cs
-        ) &&
-        create_shader(
-          producer_sources,
-          host_sbs_shader_cache::depth_minmax_ema,
-          depth_minmax_ema_cs
-        ) &&
-        create_shader(
-          producer_sources,
-          host_sbs_shader_cache::depth_hist,
-          depth_hist_cs
-        ) &&
-        create_shader(
-          producer_sources,
-          host_sbs_shader_cache::depth_scene_cut_evidence,
-          depth_scene_cut_evidence_cs
-        ) &&
-        create_shader(
-          producer_sources,
-          host_sbs_shader_cache::depth_scene_cut_resolve,
-          depth_scene_cut_resolve_cs
-        ) &&
-        create_shader(
-          producer_sources,
-          host_sbs_shader_cache::depth_valid_history,
-          depth_valid_history_cs
-        ) &&
-        create_shader(
-          producer_sources,
-          host_sbs_shader_cache::depth_coordinate_v2_moments,
-          depth_coordinate_v2_moments_cs
-        ) &&
-        create_shader(
-          producer_sources,
-          host_sbs_shader_cache::depth_coordinate_v2_frame_resolve,
-          depth_coordinate_v2_frame_resolve_cs
-        ) &&
-        create_shader(
-          producer_sources,
-          host_sbs_shader_cache::depth_coordinate_v2_state_resolve,
-          depth_coordinate_v2_state_resolve_cs
-        ) &&
-        create_shader(
-          producer_sources,
-          host_sbs_shader_cache::depth_coordinate_v2_map,
-          depth_coordinate_v2_map_cs
-        ) &&
-        create_shader(
-          producer_sources,
-          host_sbs_shader_cache::depth_coordinate_v2_ownership,
-          depth_coordinate_v2_ownership_cs
-        ) &&
-        create_shader(
-          producer_sources,
-          host_sbs_shader_cache::depth_coordinate_v2_vertical_limit,
-          depth_coordinate_v2_vertical_limit_cs
-        ) &&
-         create_shader(
-           producer_sources,
-           host_sbs_shader_cache::depth_coordinate_v2_limit,
-           depth_coordinate_v2_limit_cs
-         ) &&
-         create_shader(
-           producer_sources,
-           host_sbs_shader_cache::host_sbs_ocr_preprocess,
-           ocr_preprocess_cs
-         ) &&
-         create_shader(
-           producer_sources,
-           host_sbs_shader_cache::host_sbs_ocr_cells,
-           ocr_box_cells_cs
-         ) &&
-         create_shader(
-           producer_sources,
-           host_sbs_shader_cache::host_sbs_ocr_resolve,
-           ocr_box_resolve_cs
-         ) &&
-         create_shader(
-           producer_sources,
-           host_sbs_shader_cache::host_sbs_subtitle_locator_resolve,
-           subtitle_locator_resolve_cs
-         ) &&
-         create_shader(
-           producer_sources,
-           host_sbs_shader_cache::host_sbs_subtitle_condition,
-           subtitle_condition_cs
-         );
+      using producer_shader_e = host_sbs_shader_cache::producer_shader_e;
+      const auto shader_output = [&](const producer_shader_e shader) ->
+        Microsoft::WRL::ComPtr<ID3D11ComputeShader> * {
+        switch (shader) {
+          case producer_shader_e::rgb_to_nchw: return std::addressof(rgb_to_nchw_cs);
+          case producer_shader_e::buffer_to_tex: return std::addressof(buffer_to_tex_cs);
+          case producer_shader_e::depth_ema_motion: return std::addressof(depth_ema_motion_cs);
+          case producer_shader_e::depth_minmax: return std::addressof(depth_minmax_cs);
+          case producer_shader_e::depth_minmax_ema: return std::addressof(depth_minmax_ema_cs);
+          case producer_shader_e::depth_hist: return std::addressof(depth_hist_cs);
+          case producer_shader_e::depth_scene_cut_evidence:
+            return std::addressof(depth_scene_cut_evidence_cs);
+          case producer_shader_e::depth_scene_cut_resolve:
+            return std::addressof(depth_scene_cut_resolve_cs);
+          case producer_shader_e::depth_valid_history:
+            return std::addressof(depth_valid_history_cs);
+          case producer_shader_e::depth_coordinate_v2_moments:
+            return std::addressof(depth_coordinate_v2_moments_cs);
+          case producer_shader_e::depth_coordinate_v2_frame_resolve:
+            return std::addressof(depth_coordinate_v2_frame_resolve_cs);
+          case producer_shader_e::depth_coordinate_v2_state_resolve:
+            return std::addressof(depth_coordinate_v2_state_resolve_cs);
+          case producer_shader_e::depth_coordinate_v2_map:
+            return std::addressof(depth_coordinate_v2_map_cs);
+          case producer_shader_e::depth_coordinate_v2_ownership:
+            return std::addressof(depth_coordinate_v2_ownership_cs);
+          case producer_shader_e::depth_coordinate_v2_vertical_limit:
+            return std::addressof(depth_coordinate_v2_vertical_limit_cs);
+          case producer_shader_e::depth_coordinate_v2_limit:
+            return std::addressof(depth_coordinate_v2_limit_cs);
+          case producer_shader_e::host_sbs_ocr_preprocess:
+            return std::addressof(ocr_preprocess_cs);
+          case producer_shader_e::host_sbs_ocr_cells:
+            return std::addressof(ocr_box_cells_cs);
+          case producer_shader_e::host_sbs_ocr_resolve:
+            return std::addressof(ocr_box_resolve_cs);
+          case producer_shader_e::host_sbs_subtitle_locator_resolve:
+            return std::addressof(subtitle_locator_resolve_cs);
+          case producer_shader_e::host_sbs_subtitle_condition:
+            return std::addressof(subtitle_condition_cs);
+        }
+        return nullptr;
+      };
+      bool producer_shaders_ok = producer_sources && shader_identity_matches;
+      for (const auto &binding : host_sbs_shader_cache::parallax_v2_producer_bindings) {
+        if (!producer_shaders_ok) {
+          break;
+        }
+        auto *const output = shader_output(binding.id);
+        producer_shaders_ok = output && create_shader(
+          producer_sources, binding.spec, *output);
+      }
       if (!producer_shaders_ok) {
         parallax_v2_producer_failed = true;
         BOOST_LOG(error)
@@ -3141,7 +3086,7 @@ namespace models {
 
       // OCR is optional. Its authenticated source, engine and mutable execution context are
       // isolated from depth; an unavailable detector leaves the compact OCR8 record invalid and
-      // the SLR9 conditioner copies BaseField exactly.
+      // the SLR12 conditioner copies BaseField exactly.
       ocr_available = initialize_ocr_context(assets_dir, cuda);
       if (!ocr_available) {
         BOOST_LOG(warning)
@@ -3330,30 +3275,18 @@ namespace models {
             cleanup_execution_ok = false;
           }
         }
-        if (cuda_in_res) {
-          if (!cuda.cuGraphicsUnregisterResource ||
-              cuda.cuGraphicsUnregisterResource(cuda_in_res) != CUDA_SUCCESS) {
-            cleanup_execution_ok = false;
-          }
-        }
-        if (cuda_out_res) {
-          if (!cuda.cuGraphicsUnregisterResource ||
-              cuda.cuGraphicsUnregisterResource(cuda_out_res) != CUDA_SUCCESS) {
-            cleanup_execution_ok = false;
-          }
-        }
-        if (cuda_ocr_in_res) {
-          if (!cuda.cuGraphicsUnregisterResource ||
-              cuda.cuGraphicsUnregisterResource(cuda_ocr_in_res) != CUDA_SUCCESS) {
-            cleanup_execution_ok = false;
-          }
-        }
-        if (cuda_ocr_out_res) {
-          if (!cuda.cuGraphicsUnregisterResource ||
-              cuda.cuGraphicsUnregisterResource(cuda_ocr_out_res) != CUDA_SUCCESS) {
-            cleanup_execution_ok = false;
-          }
-        }
+        cleanup_execution_ok =
+          unregister_cuda_graphics_resource(cuda, cuda_in_res) &&
+          cleanup_execution_ok;
+        cleanup_execution_ok =
+          unregister_cuda_graphics_resource(cuda, cuda_out_res) &&
+          cleanup_execution_ok;
+        cleanup_execution_ok =
+          unregister_cuda_graphics_resource(cuda, cuda_ocr_in_res) &&
+          cleanup_execution_ok;
+        cleanup_execution_ok =
+          unregister_cuda_graphics_resource(cuda, cuda_ocr_out_res) &&
+          cleanup_execution_ok;
         perf_destroy_events();  // free the timing events while cuda_ctx is still current
       }
       if (!cleanup_execution_ok) {
@@ -3372,36 +3305,30 @@ namespace models {
       // Contexts cannot be destroyed safely across the DLL boundary, so quarantine them instead.
       std::lock_guard<std::mutex> lock(g_trt_mutex);
       if (exec_context) {
-        if (context_warmed && !execution_context_poisoned) {
-          g_engines[engine_key].context_pool.push_back(exec_context);
-          exec_context = nullptr;
-          g_trt_context_available.notify_all();
-        } else {
-          if (execution_context_poisoned) {
-            BOOST_LOG(warning)
-              << "Quarantining a TensorRT execution context after CUDA/TensorRT execution or "
-                 "teardown failure.";
-          }
-          quarantine_execution_context_locked(
-            engine_key, exec_context, context_warmed
-          );
+        if (execution_context_poisoned) {
+          BOOST_LOG(warning)
+            << "Quarantining a TensorRT execution context after CUDA/TensorRT execution or "
+               "teardown failure.";
         }
+        recycle_or_quarantine_execution_context_locked(
+          engine_key,
+          exec_context,
+          context_warmed,
+          execution_context_poisoned
+        );
       }
       if (ocr_exec_context) {
-        if (ocr_context_warmed && !ocr_context_health.poisoned()) {
-          g_engines[ocr_engine_key].context_pool.push_back(ocr_exec_context);
-          ocr_exec_context = nullptr;
-          g_trt_context_available.notify_all();
-        } else {
-          if (ocr_context_health.poisoned()) {
-            BOOST_LOG(warning)
-              << "Quarantining the PP-OCRv6 tiny execution context after asynchronous GPU "
-                 "execution or unsafe teardown.";
-          }
-          quarantine_execution_context_locked(
-            ocr_engine_key, ocr_exec_context, ocr_context_warmed
-          );
+        if (ocr_context_health.poisoned()) {
+          BOOST_LOG(warning)
+            << "Quarantining the PP-OCRv6 tiny execution context after asynchronous GPU "
+               "execution or unsafe teardown.";
         }
+        recycle_or_quarantine_execution_context_locked(
+          ocr_engine_key,
+          ocr_exec_context,
+          ocr_context_warmed,
+          ocr_context_health.poisoned()
+        );
       }
       // TRT runtime/engines are cached globally, do not destroy them here.
     }
@@ -4105,7 +4032,7 @@ namespace models {
         {target_w, target_h},
         pending_input_region.tensor_content
       );
-      // OCR8/SLR9 follows the current authenticated analysis field. An unsupported tensor or an
+      // OCR8/SLR12 follows the current authenticated analysis field. An unsupported tensor or an
       // unprojectable bottom crop has no subtitle authority, but condition_main must still run:
       // its abstention path copies BaseField through the exact content clamp so synthetic padding
       // remains a boundary extension after the vertical/horizontal limiters.
@@ -4171,7 +4098,7 @@ namespace models {
       context->CSSetShader(subtitle_condition_cs.Get(), nullptr, 0);
       ID3D11ShaderResourceView *condition_srvs[4] = {
         nullptr,
-        nullptr,
+        cut_state_srv.Get(),
         depth_coordinate_v2_final_srv.Get(),
         subtitle_locator_state_srv.Get(),
       };
@@ -4348,7 +4275,7 @@ namespace models {
       r.completed_frame_id = completed_frame_id;
       r.inference_enqueued = inference_enqueued;
       r.cuda_graph_active = depth_inference_graph.executable != nullptr &&
-                            !depth_inference_graph.capture_failed;
+                            !depth_inference_graph.policy.capture_failed;
       if (completed_frame_valid) {
         r.input_region = completed_input_region;
         r.color_space = completed_color_space;
@@ -5649,7 +5576,7 @@ namespace models {
 
         if (bindings_ok) {
           // Serialize TensorRT async enqueue to avoid driver-level concurrent execution faults
-          std::lock_guard<std::mutex> lock(*trt_mutex);
+          std::lock_guard<std::mutex> lock(g_trt_mutex);
           int depth_perf_slot = perf_begin(perf_depth, cu_stream);
           enqueued = enqueue_inference(
             d_in,

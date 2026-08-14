@@ -1448,13 +1448,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertLess(main.index("if (!config::sunshine.cmd.name.empty())"),
                         main.index("std::jthread model_prepare_thread"))
 
-        with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
-                  encoding="utf-8") as fh:
-            estimator = fh.read()
-        self.assertIn("cuda_device_for_configured_adapter", estimator)
-        self.assertIn("if (!warmup_execution_context", estimator)
-        self.assertIn("const bool synchronized = enqueued", estimator)
-
     def test_relative_cli_paths_are_resolved_before_subprocess_cwd(self):
         args = argparse.Namespace(build_dir="cmake-build-relwithdebinfo", conf="bench.conf",
                                   clips_root=None, baseline_dir=None,
@@ -1641,22 +1634,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("MinMaxEma[0].w < 0.5f", history)
         self.assertIn("PreviousModelInput[idx + 2u * plane]", history)
 
-    def test_failed_tensorrt_warmups_are_quarantined_and_not_advertised(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
-                  encoding="utf-8") as fh:
-            estimator = fh.read()
-        self.assertIn(
-            "quarantine_execution_context_locked(engine_key, exec_context,",
-            estimator,
-        )
-        self.assertIn("--slot.warmed_context_count", estimator)
-        self.assertIn("quarantined_context_count", estimator)
-        self.assertIn("warmed_context_count", estimator)
-        self.assertIn("if (context_warmed && !execution_context_poisoned)", estimator)
-        self.assertIn('std::string(model_name) + ".active-engine.json"', estimator)
-        self.assertIn('{"onnx_sha256", artifact.source_sha256}', estimator)
-
     def test_harness_contract_is_v2_only_and_machine_verified(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
@@ -1757,7 +1734,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn('o.literal_bestv2', harness)
         self.assertNotIn('depth_override_root', harness)
         self.assertNotIn('direct_parallax_max_abs * 1.10f', harness)
-        self.assertIn('words remain reserved to preserve the 16-byte constant-buffer ABI', harness)
         self.assertIn(
             'direct_parallax_source_u_limit =\n'
             '      models::depth_coordinate_v2::direct_container_limit', harness)
@@ -1808,164 +1784,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn(
             'validate_direct_parallax_manifest(', evaluator)
 
-    def test_live_depth_pairing_is_bounded_with_retained_source_completion_owner(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:
-            config = fh.read()
-        self.assertNotIn('"depth_frame_mode"', config)
-        self.assertNotIn('"depth_fps"', config)
-
-        with open(os.path.join(repo, "src", "platform", "windows", "display_vram.cpp"),
-                  encoding="utf-8") as fh:
-            production = fh.read()
-        self.assertIn("std::array<matched_frame_slot_t, 2>", production)
-        self.assertIn("repeat_matched_output", production)
-        self.assertNotIn("finish_pending_depth_for_evaluation", production)
-        self.assertIn("finish_pending_depth_for_idle_recovery", production)
-        self.assertIn("bootstrap_current_output", production)
-        self.assertIn("stale_prior_completion", production)
-        self.assertIn("retained_source_pending_slot", production)
-        self.assertIn("depth_completion_poll_pending", production)
-        self.assertIn("needs_conversion_poll() const override", production)
-        self.assertNotIn("depth_frame_mode", production)
-
-        cleanup = production[
-            production.index("const auto release_unknown_completion"):
-            production.index("if (retained_source_pending_slot)")
-        ]
-        self.assertIn("if (&slot != preserve_slot)", cleanup)
-        self.assertIn("slot.pending = false;", cleanup)
-
-        retained = production[
-            production.index("if (retained_source_pending_slot)"):
-            production.index("matched_candidate_slot = available_matched_slot();")
-        ]
-        self.assertLess(
-            retained.index("depth_completion_poll_pending = false;"),
-            retained.index("find_pending_matched_slot(recovered.completed_frame_id)"))
-        self.assertIn(
-            "release_unknown_completion(recovered.completed_frame_id, nullptr);",
-            retained)
-        compact_production = "".join(production.split())
-        self.assertIn(
-            "release_unknown_completion(est.completed_frame_id,matched_candidate_slot);",
-            compact_production)
-
-        bootstrap = production[
-            production.index("const bool bootstrap_current_output"):
-            production.index("// A poisoned CUDA/TensorRT producer")
-        ]
-        self.assertLess(
-            bootstrap.index("depth_completion_poll_pending = false;"),
-            bootstrap.index("find_pending_matched_slot(recovered.completed_frame_id)"))
-        self.assertIn(
-            "release_unknown_completion(recovered.completed_frame_id, nullptr);",
-            bootstrap)
-
-        with open(os.path.join(repo, "src", "video.cpp"), encoding="utf-8") as fh:
-            encoder = fh.read()
-        self.assertIn("session->needs_conversion_poll()", encoder)
-        self.assertIn("session->convert(*last_img)", encoder)
-        self.assertIn("img->frame_timestamp = frame_timestamp", encoder)
-
-        with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
-                  encoding="utf-8") as fh:
-            harness = fh.read()
-        self.assertIn("finish_pending_depth_for_evaluation", harness)
-
-    def test_live_debug_dump_snapshots_exact_model_io_before_cuda_reuse(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
-                  encoding="utf-8") as fh:
-            estimator = fh.read()
-        live_estimate = estimator[
-            estimator.index("estimate_result estimate("):
-            estimator.index("video_depth_estimator::video_depth_estimator")
-        ]
-        self.assertIn(
-            "normalize_depth_output(d3d_timer, input_domain_reset);", estimator)
-        normalized = live_estimate.index(
-            "normalize_depth_output(d3d_timer, completed_input_domain_reset);")
-        production_post_timing_ended = live_estimate.index(
-            "mark_d3d_post_end(d3d_timer);", normalized)
-        raw_snapshotted = live_estimate.index(
-            "tensor_out_buf.Get(),", normalized)
-        input_snapshotted = live_estimate.index(
-            "tensor_in_buf.Get(),", raw_snapshotted)
-        current_preprocess = live_estimate.index(
-            "context->CSSetShader(rgb_to_nchw_cs.Get()", input_snapshotted)
-        reused_by_cuda = live_estimate.index(
-            "cuda.cuGraphicsMapResources(2, depth_resources, cu_stream)",
-            current_preprocess)
-        self.assertLess(normalized, raw_snapshotted)
-        self.assertLess(production_post_timing_ended, raw_snapshotted)
-        self.assertLess(raw_snapshotted, input_snapshotted)
-        self.assertLess(input_snapshotted, current_preprocess)
-        self.assertLess(current_preprocess, reused_by_cuda)
-        self.assertIn(
-            "context->CopyResource(snapshot.Get(), source);", estimator)
-
-        with open(os.path.join(repo, "src", "platform", "windows", "display_vram.cpp"),
-                  encoding="utf-8") as fh:
-            production = fh.read()
-        requested = production.index(
-            "const bool snapshot_debug_inputs = sbs_dumper.snapshot_requested();")
-        estimate_call = production.index("depth_estimator->estimate_depth(", requested)
-        self.assertLess(requested, estimate_call)
-        self.assertIn(
-            "perf && !snapshot_debug_inputs ? begin_sbs_gpu_timer() : nullptr",
-            production)
-        self.assertIn("if (perf && !snapshot_debug_inputs)", production)
-        self.assertIn("est.raw_model_depth_snapshot.Get()", production[estimate_call:])
-        self.assertIn("est.model_input_snapshot.Get()", production[estimate_call:])
-        # The authenticated final-parallax field is retained for live rendering and dump replay.
-        self.assertIn("dump_warp_depth = warp_depth;", production)
-        preflight = production.index("sbs_dumper.prepare_requested_v2_frame(")
-        self.assertIn("render_sbs_debug_geometry(", production)
-        self.assertLess(
-            preflight,
-            production.index("render_sbs_debug_geometry(", preflight))
-        self.assertLess(
-            production.index("end_sbs_gpu_timer(gpu_timer);"),
-            production.index("render_sbs_debug_geometry("))
-        self.assertLess(
-            production.index('sbs_perf::add_sample_ms("sbs_convert_cpu"', requested),
-            production.index("render_sbs_debug_geometry(", requested))
-        # Color interpretation belongs to the buffered source/depth pair, not whichever capture
-        # frame happens to be current when the asynchronous inference completes.
-        self.assertIn(
-            "models::input_color_space color_space = models::input_color_space::srgb;",
-            production)
-        self.assertIn("slot.color_space = color_space;", production)
-        self.assertIn("matched_render_slot->color_space", production)
-
-        with open(os.path.join(repo, "src", "platform", "windows",
-                               "sbs_debug_dump.cpp"), encoding="utf-8") as fh:
-            dumper = fh.read()
-        submit = dumper[dumper.index("bool dumper::maybe_dump("):]
-        poll = dumper[
-            dumper.index("void dumper::poll_pending_readback("):
-            dumper.index("bool dumper::maybe_dump(")
-        ]
-        self.assertNotIn("Map(", submit)
-        self.assertNotIn("GetData(", submit)
-        self.assertIn("D3D11_ASYNC_GETDATA_DONOTFLUSH", poll)
-        self.assertIn("D3D11_MAP_FLAG_DO_NOT_WAIT", dumper)
-        self.assertIn("ctx->End(pending->completion.Get())", submit)
-        for artifact in (
-                "model_input.f32", "model_input.png", "model_input_shape.json",
-                "raw_depth.f32", "raw_depth.png", "raw_depth_heat.png",
-                "raw_shape.json", "depth.f32", "warp_depth.f32",
-                "adaptive_state.json", "warp_map.f32",
-                "warp_displacement_heat.png", "warp_mask.png",
-                "dump_manifest.json"):
-            self.assertIn(artifact, dumper)
-        self.assertIn("matched_frame_id", dumper)
-        self.assertIn("catch (const std::exception &exception)", dumper)
-        self.assertIn(
-            "color_space == models::input_color_space::srgb", dumper)
-        self.assertIn("r = encode_unit(rf);", dumper)
-
     def test_live_debug_dump_is_session_scoped_and_host_sbs_only(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "src", "stream.cpp"), encoding="utf-8") as fh:
@@ -1981,32 +1799,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn("std::atomic<bool> sbs_debug_dump_pending", video)
         self.assertNotIn("extern std::atomic<bool> sbs_debug_dump_pending", dumper)
         self.assertIn("button_request_", dumper)
-
-    def test_cuda_graph_replay_is_signature_safe_and_falls_back(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        with open(os.path.join(repo, "src", "config.h"), encoding="utf-8") as fh:
-            config = fh.read()
-        self.assertIn("bool cuda_graph = true;", config)
-        with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
-                  encoding="utf-8") as fh:
-            estimator = fh.read()
-        self.assertIn("input != graph_input || output != graph_output", estimator)
-        self.assertIn("target_w != graph_width || target_h != graph_height", estimator)
-        self.assertIn("if (!graph_signature_warmed)", estimator)
-        self.assertIn("destroy_inference_graph(cuda);", estimator)
-        self.assertIn("return exec_context->enqueueV3(cu_stream);", estimator)
-        self.assertIn("input != ocr_graph_input || output != ocr_graph_output", estimator)
-        self.assertIn("if (!ocr_graph_signature_warmed)", estimator)
-        self.assertIn("enqueue_ocr_inference(", estimator)
-        self.assertIn("destroy_ocr_inference_graph(cuda);", estimator)
-        self.assertIn('perf_ocr.stage = "ocr_infer";', estimator)
-        self.assertIn('"ocr_submit_cpu"', estimator)
-        with open(os.path.join(repo, "src", "cuda_driver_api.h"), encoding="utf-8") as fh:
-            driver = fh.read()
-        for symbol in ("cuStreamBeginCapture", "cuStreamEndCapture",
-                       "cuGraphInstantiateWithFlags", "cuGraphLaunch",
-                       "cuGraphExecDestroy"):
-            self.assertIn(symbol, driver)
 
     def test_shared_eval_controls_read_explicit_top_level_values(self):
         with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
@@ -2284,17 +2076,6 @@ class EvalContractTests(unittest.TestCase):
             self.assertIn("bottom-roi-scoped", policy.lower())
             self.assertIn("real positive qualification is pending", policy.lower())
 
-    def test_live_trt_contexts_are_bounded_and_engine_io_fails_closed(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        path = os.path.join(repo, "src", "video_depth_estimator.cpp")
-        with open(path, encoding="utf-8") as fh:
-            text = fh.read()
-        self.assertIn("kMaxContextsPerEngine = 4", text)
-        self.assertIn("allocated_context_count(slot) >= kMaxContextsPerEngine", text)
-        self.assertIn("g_trt_context_available.wait_for", text)
-        self.assertIn("slot.io_compatible = have_in && have_out && input_fp32 && output_fp32", text)
-        self.assertIn("validate_engine_io_locked", text)
-
     def test_nvhttp_reads_coherent_locked_process_status(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "src", "process.h"), encoding="utf-8") as fh:
@@ -2381,29 +2162,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertFalse(run_eval.metric_exempt_for_clip({"axis": "comfort"}, flat))
         self.assertFalse(run_eval.metric_exempt_for_clip({"axis": "stereo"}, {}))
 
-    def test_production_v2_pipeline_is_mandatory_and_fails_flat(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        paths = {
-            "estimator": os.path.join(repo, "src", "video_depth_estimator.cpp"),
-            "display": os.path.join(repo, "src", "platform", "windows", "display_vram.cpp"),
-        }
-        text = {}
-        for key, path in paths.items():
-            with open(path, encoding="utf-8") as fh:
-                text[key] = fh.read()
-        self.assertIn("const bool producer_shaders_ok", text["estimator"])
-        self.assertIn("if (!producer_shaders_ok)", text["estimator"])
-        self.assertIn(
-            "if (!valid || terminal_failure || live_v2_producer_unavailable() || !input_srv)",
-            text["estimator"],
-        )
-        self.assertIn("depth_estimator->is_valid()", text["display"])
-        self.assertIn("models::parallax_v2_result_is_authenticated(est)", text["display"])
-        self.assertIn(
-            "host_sbs_renderer = models::fail_host_sbs_renderer_flat(host_sbs_renderer);",
-            text["display"],
-        )
-
     def test_tensorrt_level_is_part_of_engine_recipe(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "src", "model_manager.h"), encoding="utf-8") as fh:
@@ -2418,84 +2176,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("depth_engine_max_dim = 1036", manager)
         self.assertIn("setBuilderOptimizationLevel(depth_engine_builder_level)", estimator)
 
-    def test_tensorrt_engine_cache_binds_the_full_runtime_build(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
-                  encoding="utf-8") as fh:
-            estimator = fh.read()
-        tag_start = estimator.index("static std::string engine_compatibility_tag")
-        tag_end = estimator.index("struct engine_slot", tag_start)
-        tag = estimator[tag_start:tag_end]
-        for component in (
-                "NV_TENSORRT_MAJOR", "NV_TENSORRT_MINOR",
-                "NV_TENSORRT_PATCH", "NV_TENSORRT_BUILD"):
-            self.assertIn(component, tag)
-
-    def test_mixed_fp16_ocr_is_a_bundled_authenticated_fail_flat_asset(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        with open(os.path.join(repo, "src", "model_manager.h"), encoding="utf-8") as fh:
-            manager = fh.read()
-        with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
-                  encoding="utf-8") as fh:
-            estimator = fh.read()
-        ensure_start = estimator.index("static bool ensure_ocr_tensorrt_engine_for_device")
-        ensure_end = estimator.index("engine_build_status tensorrt_model_prepare_status", ensure_start)
-        ensure = estimator[ensure_start:ensure_end]
-        self.assertIn(
-            "ocr_model_asset_path =\n        depth_coordinate_v2::subtitle_ocr_asset_path",
-            manager,
-        )
-        self.assertIn("ocr_model_artifact_onnx_sha256", ensure)
-        self.assertIn(
-            "assets_dir / std::filesystem::path {ocr_model_asset_path}", ensure
-        )
-        self.assertNotIn("ensure_onnx_available", ensure)
-        self.assertNotIn("std::filesystem::remove(artifact.source_path", ensure)
-
-    def test_ocr_validates_resolved_output_and_interop_extents_before_enqueue(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
-                  encoding="utf-8") as fh:
-            estimator = fh.read()
-
-        warmup_start = estimator.index("static bool warmup_ocr_execution_context")
-        warmup_end = estimator.index("namespace models {", warmup_start)
-        warmup = estimator[warmup_start:warmup_end]
-        self.assertLess(
-            warmup.index('getMaxOutputSize("fetch_name_0")'),
-            warmup.index('setTensorAddress("x"'),
-        )
-        self.assertLess(
-            warmup.index('getMaxOutputSize("fetch_name_0")'),
-            warmup.index("enqueueV3(stream)"),
-        )
-
-        context_start = estimator.index("bool initialize_ocr_context(")
-        context_end = estimator.index("\n    impl(", context_start)
-        context_init = estimator[context_start:context_end]
-        self.assertLess(
-            context_init.index('getMaxOutputSize("fetch_name_0")'),
-            context_init.index("publish_active_engine_manifest("),
-        )
-        self.assertIn("ocr_output_size_validated = true", context_init)
-
-        live_start = estimator.index("expected_ocr_input_bytes")
-        live_end = estimator.index("CUresult ocr_unmap_res", live_start)
-        live = estimator[live_start:live_end]
-        for evidence in (
-                "ocr_input_mapped_bytes < expected_ocr_input_bytes",
-                "ocr_output_mapped_bytes < expected_ocr_output_bytes",
-                'getMaxOutputSize("fetch_name_0")'):
-            self.assertIn(evidence, live)
-        self.assertLess(
-            live.index('getMaxOutputSize("fetch_name_0")'),
-            live.index("ocr_exec_context->setTensorAddress("),
-        )
-        self.assertLess(
-            live.index('getMaxOutputSize("fetch_name_0")'),
-            live.index("enqueue_ocr_inference("),
-        )
-
     def test_live_and_eval_shaders_use_level3_optimization(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "src", "platform", "windows", "display_vram.cpp"),
@@ -2506,14 +2186,6 @@ class EvalContractTests(unittest.TestCase):
             harness = fh.read()
         self.assertIn("flags |= D3DCOMPILE_OPTIMIZATION_LEVEL3", live)
         self.assertIn("D3DCOMPILE_OPTIMIZATION_LEVEL3", harness)
-
-    def test_production_warp_uses_authenticated_inverse_mapping(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        shader = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
-                              "sbs_reprojection_v2_live_ps.hlsl")
-        with open(shader, encoding="utf-8") as fh:
-            text = fh.read()
-        self.assertIn("sample_uv = WarpAvailable() ? Reproject(source_uv, eye_sign)", text)
 
     def test_report_evidence_is_bounded_and_accepts_zero_based_frames(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

@@ -4,6 +4,7 @@
 #include "host_sbs_resolution.h"
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <d3d11.h>
 #include <filesystem>
@@ -36,6 +37,18 @@ namespace models {
     std::uint32_t source_macro_count = 0;
     std::string source_closure_sha256;
   };
+
+  inline bool parallax_v2_shader_provenance_matches_current_contract(
+    const parallax_v2_shader_provenance_t &identity
+  ) noexcept {
+    return identity.source_closure_schema ==
+             depth_coordinate_v2::shader_source_closure_schema &&
+           identity.source_compile_flags ==
+             depth_coordinate_v2::shader_source_compile_flags &&
+           identity.source_macro_count == depth_coordinate_v2::shader_source_macro_count &&
+           identity.source_closure_sha256 ==
+             depth_coordinate_v2::shader_source_closure_sha256;
+  }
 
   enum class engine_build_status {
     unknown,
@@ -82,6 +95,113 @@ namespace models {
     private:
       bool poisoned_ = false;
     };
+
+    class execution_context_accounting_t {
+    public:
+      constexpr std::size_t allocated() const noexcept {
+        return usable_ + quarantined_;
+      }
+
+      constexpr std::size_t usable() const noexcept {
+        return usable_;
+      }
+
+      constexpr std::size_t warmed() const noexcept {
+        return warmed_;
+      }
+
+      constexpr std::size_t quarantined() const noexcept {
+        return quarantined_;
+      }
+
+      constexpr bool reserve(const std::size_t limit) noexcept {
+        if (allocated() >= limit) {
+          return false;
+        }
+        ++usable_;
+        return true;
+      }
+
+      constexpr void release_reservation() noexcept {
+        if (usable_ > 0u) {
+          --usable_;
+        }
+      }
+
+      constexpr void mark_warmed() noexcept {
+        ++warmed_;
+      }
+
+      constexpr void quarantine(const bool was_warmed) noexcept {
+        release_reservation();
+        if (was_warmed && warmed_ > 0u) {
+          --warmed_;
+        }
+        ++quarantined_;
+      }
+
+      constexpr void detach_pooled(const std::size_t pooled_count) noexcept {
+        quarantined_ += pooled_count;
+        usable_ = 0u;
+        warmed_ = 0u;
+      }
+
+    private:
+      std::size_t usable_ = 0u;
+      std::size_t warmed_ = 0u;
+      std::size_t quarantined_ = 0u;
+    };
+
+    struct cuda_graph_signature_t {
+      std::uint64_t input = 0u;
+      std::uint64_t output = 0u;
+      int width = 0;
+      int height = 0;
+
+      constexpr bool operator==(const cuda_graph_signature_t &) const noexcept = default;
+    };
+
+    struct cuda_graph_replay_policy_t {
+      cuda_graph_signature_t signature;
+      bool signature_warmed = false;
+      bool capture_failed = false;
+    };
+
+    enum class cuda_graph_enqueue_action_e : std::uint8_t {
+      ordinary,
+      capture,
+      replay,
+    };
+
+    constexpr bool select_cuda_graph_signature(
+      cuda_graph_replay_policy_t &state,
+      const cuda_graph_signature_t &signature
+    ) noexcept {
+      if (state.signature == signature) {
+        return false;
+      }
+      state.signature = signature;
+      state.signature_warmed = false;
+      return true;
+    }
+
+    constexpr cuda_graph_enqueue_action_e next_cuda_graph_enqueue_action(
+      cuda_graph_replay_policy_t &state,
+      const bool graph_api_available,
+      const bool executable_available
+    ) noexcept {
+      if (!graph_api_available || state.capture_failed) {
+        return cuda_graph_enqueue_action_e::ordinary;
+      }
+      if (executable_available) {
+        return cuda_graph_enqueue_action_e::replay;
+      }
+      if (!state.signature_warmed) {
+        state.signature_warmed = true;
+        return cuda_graph_enqueue_action_e::ordinary;
+      }
+      return cuda_graph_enqueue_action_e::capture;
+    }
 
   }  // namespace detail
 
@@ -276,7 +396,7 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_state;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_frame_stats;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_box_record;  ///< Exact-frame OCR8 208-word record; flags==1 is authoritative, including empty observations.
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_locator_state;  ///< Current compact 80-word SLR9 state after consuming ocr_box_record.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_locator_state;  ///< Current compact 80-word SLR12 state after consuming ocr_box_record.
     std::shared_ptr<const parallax_v2_shader_provenance_t>
       parallax_v2_shader_provenance;  ///< Exact producer shader closure when V2 is active.
     int raw_width = 0;

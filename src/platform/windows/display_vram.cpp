@@ -25,6 +25,7 @@
 
 // local includes
 #include "display.h"
+#include "display_config.h"
 #include "foreground_window_region.h"
 #include "misc.h"
 #include "sbs_debug_dump.h"
@@ -171,7 +172,7 @@ namespace platf::dxgi {
     render_target_t capture_rt;
     keyed_mutex_t capture_mutex;
 
-    // This is the shared handle used by hwdevice_t to open capture_texture
+    // Shared handle used by an encode device to open capture_texture.
     HANDLE encoder_texture_handle = {};
 
     // Set to true if the image corresponds to a dummy texture used prior to
@@ -4188,8 +4189,8 @@ namespace platf::dxgi {
 
     // d3d_img_t::id -> encoder_img_ctx_t
     // These store the encoder textures for each img_t that passes through
-    // convert(). We can't store them in the img_t itself because it is shared
-    // amongst multiple hwdevice_t objects (and therefore multiple ID3D11Devices).
+    // convert(). We can't store them in the img_t itself because it can be shared
+    // among multiple encode devices (and therefore multiple ID3D11Devices).
     std::map<uint32_t, encoder_img_ctx_t> img_ctx_map;
 
     std::shared_ptr<display_base_t> display;
@@ -4504,59 +4505,44 @@ namespace platf::dxgi {
       if (display_name.empty()) {
         return std::nullopt;
       }
-      constexpr UINT32 flags = QDC_ONLY_ACTIVE_PATHS;
-      for (int attempt = 0; attempt < 4; ++attempt) {
-        UINT32 path_count = 0;
-        UINT32 mode_count = 0;
-        if (GetDisplayConfigBufferSizes(flags, &path_count, &mode_count) != ERROR_SUCCESS) {
-          return std::nullopt;
-        }
-        std::vector<DISPLAYCONFIG_PATH_INFO> paths(path_count);
-        std::vector<DISPLAYCONFIG_MODE_INFO> modes(mode_count);
-        auto query_path_count = path_count;
-        auto query_mode_count = mode_count;
-        const auto query_status = QueryDisplayConfig(
-          flags,
-          &query_path_count,
-          paths.data(),
-          &query_mode_count,
-          modes.data(),
-          nullptr
-        );
-        if (query_status == ERROR_INSUFFICIENT_BUFFER) {
+      std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+      std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+      if (!platf::display_config::query_display_config(
+            QDC_ONLY_ACTIVE_PATHS,
+            paths,
+            modes,
+            {
+              4,
+              platf::display_config::retry_delay_e::none,
+            }
+          )) {
+        return std::nullopt;
+      }
+      for (const auto &path : paths) {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME source_name {};
+        source_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        source_name.header.size = sizeof(source_name);
+        source_name.header.adapterId = path.sourceInfo.adapterId;
+        source_name.header.id = path.sourceInfo.id;
+        if (DisplayConfigGetDeviceInfo(&source_name.header) != ERROR_SUCCESS || display_name != source_name.viewGdiDeviceName) {
           continue;
         }
-        if (query_status != ERROR_SUCCESS) {
+
+        DISPLAYCONFIG_TARGET_DEVICE_NAME target_name {};
+        target_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+        target_name.header.size = sizeof(target_name);
+        target_name.header.adapterId = path.targetInfo.adapterId;
+        target_name.header.id = path.targetInfo.id;
+        if (DisplayConfigGetDeviceInfo(&target_name.header) != ERROR_SUCCESS || !target_name.monitorDevicePath[0]) {
           return std::nullopt;
         }
-        paths.resize(query_path_count);
-        for (const auto &path : paths) {
-          DISPLAYCONFIG_SOURCE_DEVICE_NAME source_name {};
-          source_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-          source_name.header.size = sizeof(source_name);
-          source_name.header.adapterId = path.sourceInfo.adapterId;
-          source_name.header.id = path.sourceInfo.id;
-          if (DisplayConfigGetDeviceInfo(&source_name.header) != ERROR_SUCCESS || display_name != source_name.viewGdiDeviceName) {
-            continue;
-          }
-
-          DISPLAYCONFIG_TARGET_DEVICE_NAME target_name {};
-          target_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-          target_name.header.size = sizeof(target_name);
-          target_name.header.adapterId = path.targetInfo.adapterId;
-          target_name.header.id = path.targetInfo.id;
-          if (DisplayConfigGetDeviceInfo(&target_name.header) != ERROR_SUCCESS || !target_name.monitorDevicePath[0]) {
-            return std::nullopt;
-          }
-          return local_presenter_display_identity_t {
-            path.targetInfo.adapterId,
-            path.targetInfo.id,
-            source_name.viewGdiDeviceName,
-            target_name.monitorDevicePath,
-            target_name.monitorFriendlyDeviceName,
-          };
-        }
-        return std::nullopt;
+        return local_presenter_display_identity_t {
+          path.targetInfo.adapterId,
+          path.targetInfo.id,
+          source_name.viewGdiDeviceName,
+          target_name.monitorDevicePath,
+          target_name.monitorFriendlyDeviceName,
+        };
       }
       return std::nullopt;
     }
@@ -5655,7 +5641,7 @@ namespace platf::dxgi {
 
   private:
     d3d_base_encode_device base;
-    std::unique_ptr<nvenc::nvenc_d3d11> nvenc_d3d;
+    std::unique_ptr<nvenc::nvenc_d3d11_native> nvenc_d3d;
     NV_ENC_BUFFER_FORMAT buffer_format = NV_ENC_BUFFER_FORMAT_UNDEFINED;
   };
 

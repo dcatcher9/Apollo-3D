@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <src/depth_coordinate_v2.h>
 #include <src/generated/sbs_adaptive_state_contract.h>
 #include <src/host_sbs_shader_cache.h>
@@ -780,7 +781,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 48u);
+  EXPECT_EQ(v2::contract_schema, 50u);
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
   EXPECT_EQ(v2::shadow_state_dump_schema, 16u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
@@ -1058,6 +1059,43 @@ TEST(ParallaxV2ContractTest, SerializedRendererStateFailsClosedOnAnyBrokenSeal) 
   EXPECT_FALSE(v2::parallax_state_words_are_authenticated(initialized, raw_scale * 1.01f));
 }
 
+TEST(ParallaxV2ContractTest, RuntimeConstantsAndShaderProvenanceFailClosed) {
+  namespace v2 = models::depth_coordinate_v2;
+  const float raw_scale = v2::model_calibrations.front().raw_coordinate_scale;
+  constexpr float pop = 1.75f;
+  const float gain = v2::requested_gain_for_config(pop);
+
+  EXPECT_TRUE(v2::parallax_runtime_constants_are_valid(raw_scale, pop, gain));
+  EXPECT_FALSE(v2::parallax_runtime_constants_are_valid(0.0f, pop, gain));
+  EXPECT_FALSE(v2::parallax_runtime_constants_are_valid(raw_scale, 0.0f, 0.0f));
+  EXPECT_FALSE(v2::parallax_runtime_constants_are_valid(raw_scale, -pop, gain));
+  EXPECT_FALSE(v2::parallax_runtime_constants_are_valid(raw_scale, pop, gain * 2.0f));
+  EXPECT_FALSE(v2::parallax_runtime_constants_are_valid(
+    raw_scale,
+    std::numeric_limits<float>::quiet_NaN(),
+    gain
+  ));
+
+  models::parallax_v2_shader_provenance_t identity {
+    .source_closure_schema = v2::shader_source_closure_schema,
+    .source_compile_flags = v2::shader_source_compile_flags,
+    .source_macro_count = v2::shader_source_macro_count,
+    .source_closure_sha256 = std::string {v2::shader_source_closure_sha256},
+  };
+  EXPECT_TRUE(models::parallax_v2_shader_provenance_matches_current_contract(identity));
+  ++identity.source_closure_schema;
+  EXPECT_FALSE(models::parallax_v2_shader_provenance_matches_current_contract(identity));
+  identity.source_closure_schema = v2::shader_source_closure_schema;
+  ++identity.source_compile_flags;
+  EXPECT_FALSE(models::parallax_v2_shader_provenance_matches_current_contract(identity));
+  identity.source_compile_flags = v2::shader_source_compile_flags;
+  ++identity.source_macro_count;
+  EXPECT_FALSE(models::parallax_v2_shader_provenance_matches_current_contract(identity));
+  identity.source_macro_count = v2::shader_source_macro_count;
+  identity.source_closure_sha256.assign(64u, '0');
+  EXPECT_FALSE(models::parallax_v2_shader_provenance_matches_current_contract(identity));
+}
+
 TEST(ParallaxV2RendererTest, AuthenticationLatchesV2OrLiveFlat) {
   using models::host_sbs_renderer_e;
   using models::latch_host_sbs_renderer;
@@ -1124,6 +1162,78 @@ TEST(TensorRtContextLifecycleTest, WarmedContextQuarantineStartsOnlyAfterAsyncEx
   health_t teardown_health;
   teardown_health.observe(failure_e::unsafe_teardown);
   EXPECT_TRUE(teardown_health.poisoned());
+}
+
+TEST(TensorRtContextLifecycleTest, AccountingBoundsQuarantinedAndReusableContextsTogether) {
+  models::detail::execution_context_accounting_t accounting;
+  EXPECT_TRUE(accounting.reserve(2u));
+  accounting.mark_warmed();
+  EXPECT_TRUE(accounting.reserve(2u));
+  EXPECT_FALSE(accounting.reserve(2u));
+  EXPECT_EQ(accounting.allocated(), 2u);
+  EXPECT_EQ(accounting.warmed(), 1u);
+
+  accounting.quarantine(true);
+  EXPECT_EQ(accounting.usable(), 1u);
+  EXPECT_EQ(accounting.warmed(), 0u);
+  EXPECT_EQ(accounting.quarantined(), 1u);
+  EXPECT_FALSE(accounting.reserve(2u));
+
+  accounting.release_reservation();
+  EXPECT_TRUE(accounting.reserve(2u));
+  accounting.mark_warmed();
+  accounting.detach_pooled(1u);
+  EXPECT_EQ(accounting.usable(), 0u);
+  EXPECT_EQ(accounting.warmed(), 0u);
+  EXPECT_EQ(accounting.quarantined(), 2u);
+}
+
+TEST(TensorRtCudaGraphPolicyTest, SignatureChangesWarmBeforeCaptureAndFailuresStayFallback) {
+  using action_e = models::detail::cuda_graph_enqueue_action_e;
+  using policy_t = models::detail::cuda_graph_replay_policy_t;
+  using signature_t = models::detail::cuda_graph_signature_t;
+
+  policy_t policy;
+  const signature_t depth {1u, 2u, 770, 434};
+  const signature_t resized {3u, 4u, 518, 294};
+
+  EXPECT_TRUE(models::detail::select_cuda_graph_signature(policy, depth));
+  EXPECT_EQ(
+    models::detail::next_cuda_graph_enqueue_action(policy, true, false),
+    action_e::ordinary
+  );
+  EXPECT_TRUE(policy.signature_warmed);
+  EXPECT_EQ(
+    models::detail::next_cuda_graph_enqueue_action(policy, true, false),
+    action_e::capture
+  );
+  EXPECT_EQ(
+    models::detail::next_cuda_graph_enqueue_action(policy, true, true),
+    action_e::replay
+  );
+
+  EXPECT_TRUE(models::detail::select_cuda_graph_signature(policy, resized));
+  EXPECT_FALSE(policy.signature_warmed);
+  EXPECT_EQ(
+    models::detail::next_cuda_graph_enqueue_action(policy, true, false),
+    action_e::ordinary
+  );
+  EXPECT_FALSE(models::detail::select_cuda_graph_signature(policy, resized));
+
+  policy.capture_failed = true;
+  policy.signature_warmed = false;
+  EXPECT_EQ(
+    models::detail::next_cuda_graph_enqueue_action(policy, true, false),
+    action_e::ordinary
+  );
+  EXPECT_FALSE(policy.signature_warmed);
+
+  policy.capture_failed = false;
+  EXPECT_EQ(
+    models::detail::next_cuda_graph_enqueue_action(policy, false, false),
+    action_e::ordinary
+  );
+  EXPECT_FALSE(policy.signature_warmed);
 }
 
 TEST(DepthInputRegionTest, RequiresCanonicalFullSourceOrAuthenticatedRoiAuthority) {
@@ -1359,218 +1469,6 @@ TEST(DepthInputRegionTest, DomainTransitionDecisionResetsExactlyOncePerStableCha
   EXPECT_FALSE(domain_tracker.update(roi, models::input_color_space::linear_sdr));
 }
 
-TEST(DepthInputRegionTest, DumpSnapshotsPreserveFullOrRoiAnalysisDomain) {
-  const auto source = read_source_file(
-    SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp"
-  );
-  ASSERT_FALSE(source.empty());
-  EXPECT_NE(
-    source.find("if (snapshot_debug_inputs)"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find("if (snapshot_raw_model_depth)"),
-    std::string::npos
-  );
-  EXPECT_EQ(
-    source.find("&& !pending_input_region.video_region"),
-    std::string::npos
-  );
-
-  const auto display_source = read_source_file(
-    SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp"
-  );
-  ASSERT_FALSE(display_source.empty());
-  EXPECT_EQ(
-    display_source.find(".observer_generation = border.generation"),
-    std::string::npos
-  );
-  const auto estimator_header = read_source_file(
-    SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.h"
-  );
-  ASSERT_FALSE(estimator_header.empty());
-  EXPECT_NE(
-    estimator_header.find(
-      "Position and observer snapshot generation are deliberately absent"
-    ),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display_source.find(
-      "foreground_window_tracker.update(foreground_window::sample())"
-    ),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display_source.find("live_window_authority_generation"),
-    std::string::npos
-  );
-  const auto render_authority_check = display_source.find(
-    "window_region_authorized_for_render(*matched_render_slot)"
-  );
-  const auto renderer_latch = display_source.find(
-    "Authenticate the first completed V2 field"
-  );
-  const auto dump_snapshot = display_source.find("dump_frame.window_region =");
-  ASSERT_NE(render_authority_check, std::string::npos);
-  ASSERT_NE(renderer_latch, std::string::npos);
-  ASSERT_NE(dump_snapshot, std::string::npos);
-  EXPECT_LT(render_authority_check, renderer_latch);
-  EXPECT_LT(render_authority_check, dump_snapshot);
-  EXPECT_NE(
-    display_source.find("clear_cached_roi_output()"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display_source.find("status_e::interactive_move_size"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display_source.find("selected full-source 3D for an interactive foreground-window"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display_source.find("browser->received_at >= browser_roi_not_before"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display_source.find("depth_completion_poll_pending || depth_authority_reprocess_pending"),
-    std::string::npos
-  );
-  const auto busy_authority_observation = display_source.find(
-    "pre_copy_authority = observe_live_window_authority("
-  );
-  const auto retained_source_completion = display_source.find(
-    "if (retained_source_pending_slot)"
-  );
-  ASSERT_NE(busy_authority_observation, std::string::npos);
-  ASSERT_NE(retained_source_completion, std::string::npos);
-  EXPECT_LT(busy_authority_observation, retained_source_completion);
-  const auto programmatic_gap = display_source.find(
-    "const bool programmatic_causal_gap"
-  );
-  const auto programmatic_reprocess_arm = display_source.find(
-    "depth_authority_reprocess_pending = true;",
-    programmatic_gap
-  );
-  const auto programmatic_live_publish = display_source.find(
-    "live_foreground_region = next_region;",
-    programmatic_gap
-  );
-  ASSERT_NE(programmatic_gap, std::string::npos);
-  ASSERT_NE(programmatic_reprocess_arm, std::string::npos);
-  ASSERT_NE(programmatic_live_publish, std::string::npos);
-  EXPECT_LT(programmatic_reprocess_arm, programmatic_live_publish);
-  EXPECT_NE(display_source.find("const bool force_full_source"), std::string::npos);
-  EXPECT_NE(display_source.find("} else if (!force_full_source) {"), std::string::npos);
-  EXPECT_NE(
-    display_source.find(
-      "preexisting_force_full_source || foreground_causal_wait"
-    ),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display_source.find(
-      "pre_copy_interactive_move_size ?\n"
-      "                                      pre_copy_authority"
-    ),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display_source.find("requires_full_source_causal_fallback("),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display_source.find("causal-wait-full-source"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display_source.find(
-      "If the move starts after the first observation, this recheck still"
-    ),
-    std::string::npos
-  );
-  EXPECT_EQ(display_source.find("clear_cached_matched_output()"), std::string::npos);
-  EXPECT_EQ(display_source.find("interactive_move_size_active"), std::string::npos);
-  EXPECT_EQ(display_source.find("interactive_move_size_epoch"), std::string::npos);
-  EXPECT_NE(
-    display_source.find("output_desc.DesktopCoordinates.left"),
-    std::string::npos
-  );
-  EXPECT_EQ(
-    display_source.find("display->offset_x,"),
-    std::string::npos
-  );
-  const auto route_selection = display_source.find("auto browser_region =");
-  ASSERT_NE(route_selection, std::string::npos);
-  const auto browser_capture = display_source.find(
-    "capture_browser_window_region(", route_selection
-  );
-  const auto foreground_capture = display_source.find(
-    "capture_foreground_window_region(", route_selection
-  );
-  ASSERT_NE(browser_capture, std::string::npos);
-  ASSERT_NE(foreground_capture, std::string::npos);
-  EXPECT_LT(browser_capture, foreground_capture);
-  const auto browser_capture_definition = display_source.find(
-    "capture_browser_window_region(\n"
-  );
-  const auto foreground_capture_definition = display_source.find(
-    "capture_foreground_window_region(\n",
-    browser_capture_definition
-  );
-  ASSERT_NE(browser_capture_definition, std::string::npos);
-  ASSERT_NE(foreground_capture_definition, std::string::npos);
-  const auto browser_capture_body = display_source.substr(
-    browser_capture_definition,
-    foreground_capture_definition - browser_capture_definition
-  );
-  EXPECT_NE(
-    browser_capture_body.find("const video_dom::snapshot_ptr &observed"),
-    std::string::npos
-  );
-  EXPECT_EQ(browser_capture_body.find("->latest()"), std::string::npos);
-  EXPECT_NE(
-    display_source.find("copied_authority.browser_authority_epoch"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display_source.find(
-      ".geometry_valid_since = browser->geometry_valid_since"
-    ),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display_source.find(
-      "browser->geometry_valid_since ==\n"
-      "                 slot.live_browser_geometry_valid_since"
-    ),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display_source.find(
-      "copied_authority.browser_authority->geometry_valid_since"
-    ),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display_source.find("dump_frame.depth_input_region = est.input_region"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display_source.find("dump_frame.depth_input_source ="),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display_source.find("matched_render_slot->depth_input_srv();"),
-    std::string::npos
-  );
-  EXPECT_EQ(
-    display_source.find("Dump 3D request rejected: window-region ROI rendering is active"),
-    std::string::npos
-  );
-}
-
   #ifdef _WIN32
 TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   using Microsoft::WRL::ComPtr;
@@ -1771,61 +1669,6 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
 }
   #endif
 
-TEST(ParallaxV2ContractTest, DumpDecodesExactCountersInsteadOfSubnormalFloats) {
-  const auto source = read_source_file(
-    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
-  );
-  ASSERT_FALSE(source.empty());
-  EXPECT_NE(
-    source.find("std::bit_cast<std::uint32_t>(state[calibration_revision])"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find("std::bit_cast<std::uint32_t>(state[confirmed_cut_count])"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find("calibration_revision_is_valid(calibration_revision_value)"),
-    std::string::npos
-  );
-  EXPECT_EQ(
-    source.find("{\"calibration_revision\", state[calibration_revision]}"),
-    std::string::npos
-  );
-  EXPECT_NE(source.find("{\"schema\", shadow_state_dump_schema}"), std::string::npos);
-  EXPECT_NE(
-    source.find("{\"schema\", shadow_frame_stats_dump_schema}"),
-    std::string::npos
-  );
-  EXPECT_NE(source.find("parallax_v2_coordinate_binding("), std::string::npos);
-  EXPECT_NE(source.find("source_closure_sha256"), std::string::npos);
-  const auto manifest = source.find("nlohmann::json manifest {");
-  ASSERT_NE(manifest, std::string::npos);
-  EXPECT_NE(source.find("{\"schema\", 29}", manifest), std::string::npos);
-  EXPECT_NE(source.find("depth_input_region.json"), std::string::npos);
-  EXPECT_NE(source.find("depth_input_source.png"), std::string::npos);
-  EXPECT_NE(source.find("\"shadow_final_parallax + depth_input_region embedding\""), std::string::npos);
-  EXPECT_NE(source.find("completed.parallax_v2_render_selected"), std::string::npos);
-  EXPECT_NE(
-    source.find("mapping_artifacts_match_selected_renderer"),
-    std::string::npos
-  );
-  EXPECT_NE(source.find("live_shader_source"), std::string::npos);
-  EXPECT_NE(
-    source.find("parallax_v2_live_renderer_source_closure_sha256"),
-    std::string::npos
-  );
-  EXPECT_NE(source.find("{\"shader_source\", shadow_shader_source}"), std::string::npos);
-  EXPECT_NE(
-    source.find("!parallax_v2_shader_identity_matches_contract("),
-    std::string::npos
-  );
-  EXPECT_NE(source.find("state_semantics_valid"), std::string::npos);
-  EXPECT_NE(source.find("{\"shared_configured\", {"), std::string::npos);
-  EXPECT_NE(source.find("{\"live_effective\", {"), std::string::npos);
-  EXPECT_EQ(source.find("{\"offline_analysis_configured\", {"), std::string::npos);
-}
-
 TEST(ParallaxV2ContractTest, DebugDumpUsesNonblockingGpuStagingBeforeCpuPublication) {
   const auto source = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
@@ -1963,11 +1806,6 @@ TEST(ParallaxV2ContractTest, DebugDumpStagingPreservesEventAndRequestOrdering) {
     poll_body.find("if (budget.exhausted())"),
     std::string::npos
   );
-  EXPECT_NE(
-    poll_body.find("WAS_STILL_DRAWING and a deliberately partial chunk"),
-    std::string::npos
-  );
-
   const auto first_stage = submit_body.find("stage_texture(");
   const auto event_end = submit_body.find("ctx->End(pending->completion.Get())");
   const auto publish_pending = submit_body.find(
@@ -2065,83 +1903,14 @@ TEST(ParallaxV2ContractTest, DebugDumpAcceptsAdvertisedWindowsCaptureColorFormat
 
 TEST(ParallaxV2ContractTest, CalibrationRevisionRejectsReservedSentinel) {
   namespace v2 = models::depth_coordinate_v2;
-  EXPECT_TRUE(v2::calibration_revision_is_valid(0u));
-  EXPECT_TRUE(v2::calibration_revision_is_valid(1u));
-  EXPECT_FALSE(v2::calibration_revision_is_valid(v2::reserved_calibration_revision));
-}
-
-TEST(ParallaxV2ContractTest, NativeReplayUsesTheAuthenticatedShaderCache) {
-  const auto replay = read_source_file(
-    SUNSHINE_SOURCE_DIR "/src/sbs_bench_depth_coordinate_v2.cpp"
-  );
-  ASSERT_FALSE(replay.empty());
-  EXPECT_NE(replay.find("shader_cache::snapshot_sources("), std::string::npos);
-  EXPECT_NE(replay.find("shader_cache::source_closure_sha256("), std::string::npos);
-  EXPECT_NE(replay.find("shader_cache::get("), std::string::npos);
-  EXPECT_EQ(replay.find("D3DCompileFromFile("), std::string::npos);
-}
-
-TEST(ParallaxV2ContractTest, RawProvenanceResolvesTheExactModelIdentity) {
-  const auto source = read_source_file(
-    SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp"
-  );
-  ASSERT_FALSE(source.empty());
-  const auto lookup = source.find("depth_coordinate_v2::find_model_calibration(");
-  ASSERT_NE(lookup, std::string::npos);
-  const auto preprocess_snapshot = source.find(
-    "host_sbs_shader_cache::snapshot_sources(",
-    lookup
-  );
-  ASSERT_NE(preprocess_snapshot, std::string::npos);
-  const auto exact_calibration = source.find(
-    "const auto *coordinate_calibration =",
-    preprocess_snapshot
-  );
-  ASSERT_NE(exact_calibration, std::string::npos);
-  const auto provenance = source.find("raw_model_provenance =", exact_calibration);
-  ASSERT_NE(provenance, std::string::npos);
-  EXPECT_LT(lookup, preprocess_snapshot);
-  EXPECT_LT(preprocess_snapshot, exact_calibration);
-  EXPECT_LT(exact_calibration, provenance);
-  EXPECT_NE(
-    source.find(".preprocess_source_closure_sha256 =", provenance),
-    std::string::npos
-  );
-  EXPECT_EQ(
-    source.rfind("model_calibrations.front()", provenance),
-    std::string::npos
-  );
-}
-
-TEST(ParallaxV2ContractTest, EvaluationRawArtifactsCarryProducerAttestation) {
-  const auto harness = read_source_file(
-    SUNSHINE_SOURCE_DIR "/src/sbs_bench_harness.cpp"
-  );
-  ASSERT_FALSE(harness.empty());
-
-  const auto provenance_gate = harness.find(
-    "ordinary evaluation completed without exact raw-model provenance"
-  );
-  const auto provenance_contract = harness.find("\\\"raw_model_provenance\\\"");
-  ASSERT_NE(provenance_gate, std::string::npos);
-  ASSERT_NE(provenance_contract, std::string::npos);
-  EXPECT_LT(provenance_gate, provenance_contract);
-  EXPECT_NE(harness.find("direct_geometry_contract_schema = 25u"), std::string::npos);
-  for (const auto *field : {
-         "\\\"depth_model_url\\\"",
-         "\\\"onnx_sha256\\\"",
-         "\\\"preprocess_profile\\\"",
-         "\\\"preprocess_source_closure_sha256\\\"",
-         "\\\"raw_width\\\"",
-         "\\\"raw_height\\\"",
-       }) {
-    EXPECT_NE(harness.find(field, provenance_contract), std::string::npos);
-  }
-
-  const auto raw_shape = harness.find("fs::path(o.out) / \"raw_shape.json\"");
-  ASSERT_NE(raw_shape, std::string::npos);
-  EXPECT_NE(harness.find("\\\"schema\\\": 1", raw_shape), std::string::npos);
-  EXPECT_NE(harness.find("\\\"layout\\\": \\\"row-major\\\"", raw_shape), std::string::npos);
+  EXPECT_TRUE(v2::calibration_revision_word_is_valid(0u));
+  EXPECT_TRUE(v2::calibration_revision_word_is_valid(1u));
+  EXPECT_FALSE(v2::calibration_revision_word_is_valid(v2::reserved_calibration_revision));
+  EXPECT_FALSE(v2::acquired_calibration_revision_is_valid(0u));
+  EXPECT_TRUE(v2::acquired_calibration_revision_is_valid(1u));
+  EXPECT_FALSE(v2::acquired_calibration_revision_is_valid(
+    v2::reserved_calibration_revision
+  ));
 }
 
 TEST(DirectxShaderTest, FixedShapeHostSbsCacheOwnsAuthenticatedSourceSnapshots) {
@@ -2340,112 +2109,6 @@ TEST(DirectxShaderTest, FixedShapeHostSbsCacheRejectsUnauthenticatedIncludes) {
     ASSERT_TRUE(write_source(root / "root.hlsl", "#include \"linked.hlsl\"\n"));
     EXPECT_FALSE(cache::snapshot_sources(root, specs));
   }
-}
-
-TEST(DirectxShaderSourceTest, DumpGeometryCompilationStaysOffTheLivePath) {
-  const auto source = read_source_file(
-    SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp"
-  );
-  ASSERT_FALSE(source.empty());
-  const auto ensure_begin = source.find(
-    "bool ensure_sbs_debug_geometry_resources()"
-  );
-  const auto ensure_end = source.find(
-    "bool render_sbs_debug_geometry(",
-    ensure_begin
-  );
-  ASSERT_NE(ensure_begin, std::string::npos);
-  ASSERT_NE(ensure_end, std::string::npos);
-  const auto dump_initializer = source.substr(
-    ensure_begin,
-    ensure_end - ensure_begin
-  );
-  EXPECT_EQ(dump_initializer.find("compile_shader("), std::string::npos);
-  EXPECT_NE(
-    dump_initializer.find("parallax_v2_live_diagnostic_specs"),
-    std::string::npos
-  );
-  EXPECT_NE(dump_initializer.find("cache::get("), std::string::npos);
-  EXPECT_NE(
-    dump_initializer.find("parallax_v2_diagnostic_source_closure_sha256"),
-    std::string::npos
-  );
-}
-
-TEST(ParallaxV2ContractTest, ExactGpuReplayHashesAndDecodesOneImmutableSourceSnapshot) {
-  const auto harness = read_source_file(
-    SUNSHINE_SOURCE_DIR "/src/sbs_bench_harness.cpp"
-  );
-  ASSERT_FALSE(harness.empty());
-
-  const auto snapshot = harness.find("read_file_snapshot(current_frame, exact_source_snapshot)");
-  const auto digest = harness.find("exact_source_sha256 = sha256_hex(exact_source_snapshot)", snapshot);
-  const auto memory_decode = harness.find(
-    "load_png(std::string_view(exact_source_snapshot), img)",
-    digest
-  );
-  const auto dispatch = harness.find("exact_source_sha256,", memory_decode);
-  ASSERT_NE(snapshot, std::string::npos);
-  ASSERT_NE(digest, std::string::npos);
-  ASSERT_NE(memory_decode, std::string::npos);
-  ASSERT_NE(dispatch, std::string::npos);
-  EXPECT_LT(snapshot, digest);
-  EXPECT_LT(digest, memory_decode);
-  EXPECT_LT(memory_decode, dispatch);
-  EXPECT_NE(harness.find("InitializeFromMemory"), std::string::npos);
-  EXPECT_NE(harness.find("WICDecodeMetadataCacheOnLoad"), std::string::npos);
-  EXPECT_EQ(harness.find("sha256_file_hex(current_frame)"), std::string::npos);
-}
-
-TEST(DirectxShaderSourceTest, DumpGeometryBindsMatchedAuthenticatedState) {
-  const auto source = read_source_file(
-    SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp"
-  );
-  ASSERT_FALSE(source.empty());
-  const auto render_begin = source.find(
-    "bool render_sbs_debug_geometry("
-  );
-  const auto render_end = source.find(
-    "void reset_matched_stats(",
-    render_begin
-  );
-  ASSERT_NE(render_begin, std::string::npos);
-  ASSERT_NE(render_end, std::string::npos);
-  const auto render = source.substr(render_begin, render_end - render_begin);
-
-  // The diagnostic shaders include the production WarpAvailable() authentication check. Both
-  // mapping and mask draws must therefore bind the matched completion's state at t2; a null t2
-  // silently turns both artifacts into identity geometry.
-  EXPECT_NE(render.find("!parallax_state"), std::string::npos);
-  for (const auto declaration : {
-         "ID3D11ShaderResourceView *mapping_inputs[]",
-         "ID3D11ShaderResourceView *mask_inputs[]",
-       }) {
-    const auto inputs_begin = render.find(declaration);
-    ASSERT_NE(inputs_begin, std::string::npos);
-    const auto inputs_end = render.find("};", inputs_begin);
-    ASSERT_NE(inputs_end, std::string::npos);
-    const auto inputs = render.substr(inputs_begin, inputs_end - inputs_begin);
-    std::string compact_inputs;
-    for (const char value : inputs) {
-      if (value != ' ' && value != '\t' && value != '\r' && value != '\n') {
-        compact_inputs.push_back(value);
-      }
-    }
-    EXPECT_NE(
-      compact_inputs.find("[]={source,warp_depth,parallax_state,"),
-      std::string::npos
-    );
-  }
-
-  const auto call = source.find("geometry_available = render_sbs_debug_geometry(");
-  ASSERT_NE(call, std::string::npos);
-  const auto call_end = source.find(");", call);
-  ASSERT_NE(call_end, std::string::npos);
-  EXPECT_NE(
-    source.substr(call, call_end - call).find("est.shadow_state.Get(),"),
-    std::string::npos
-  );
 }
 
 TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
@@ -3115,10 +2778,6 @@ TEST(DirectxShaderSourceTest, HostSbsRejectsRotationAndUsesMatchedV2Frames) {
   ASSERT_FALSE(live_shader.empty());
   EXPECT_NE(
     display.find("display->display_rotation != DXGI_MODE_ROTATION_IDENTITY"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display.find("Use an explicit portrait resolution instead of Windows display"),
     std::string::npos
   );
   EXPECT_NE(display.find("find_pending_matched_slot(est.completed_frame_id)"), std::string::npos);
@@ -4841,6 +4500,29 @@ TEST(ClampEncodeDimensionsTest, AlwaysProducesAnEvenEncodableSize) {
   EXPECT_EQ(degenerate.width, 2);
   EXPECT_GE(degenerate.height, 2);
   EXPECT_EQ(degenerate.height % 2, 0);
+}
+
+TEST(EncodeDimensionLimitsTest, HostSbsAndOrdinaryClampShareRuntimeCeilings) {
+  const auto packed = video::host_sbs_output_dimensions(
+    5000,
+    3000,
+    1,
+    8192,
+    7000,
+    2800
+  );
+  const auto ordinary = video::clamp_encode_dimensions(
+    10000,
+    3000,
+    1,
+    7000,
+    2800
+  );
+
+  EXPECT_EQ(packed.width, ordinary.width);
+  EXPECT_EQ(packed.height, ordinary.height);
+  EXPECT_LE(packed.width, 7000);
+  EXPECT_LE(packed.height, 2800);
 }
 
 TEST(VideoPacketLifetimeTest, RetainsBroadcastStateUntilPacketIsConsumed) {

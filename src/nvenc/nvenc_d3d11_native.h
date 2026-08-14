@@ -4,10 +4,6 @@
  */
 #pragma once
 #ifdef _WIN32
-  // standard includes
-  #include <comdef.h>
-  #include <d3d11.h>
-
   // local includes
   #include "nvenc_d3d11.h"
 

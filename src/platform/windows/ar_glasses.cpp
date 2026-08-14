@@ -1,5 +1,6 @@
 #include "ar_glasses.h"
 
+#include "display_config.h"
 #include "display.h"
 #include "misc.h"
 #include "src/config.h"
@@ -324,60 +325,32 @@ namespace ar_glasses {
     };
 
     hdr_state_t query_hdr_state(const LUID &adapter_id, UINT32 target_id) {
-      DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 info2 {};
-      info2.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2;
-      info2.header.size = sizeof(info2);
-      info2.header.adapterId = adapter_id;
-      info2.header.id = target_id;
-      if (DisplayConfigGetDeviceInfo(&info2.header) == ERROR_SUCCESS) {
-        return {
-          true,
-          info2.highDynamicRangeSupported != 0,
-          info2.highDynamicRangeUserEnabled != 0,
-          info2.activeColorMode == DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR,
-          info2.advancedColorLimitedByPolicy != 0,
-          info2.bitsPerColorChannel,
-        };
+      const auto state = platf::display_config::query_advanced_color(
+        adapter_id,
+        target_id,
+        platf::display_config::legacy_fallback_e::any_modern_failure
+      );
+      if (!state) {
+        return {};
       }
-
-      // Windows 10 exposes only the combined Advanced Color query. On an HDR display its
-      // enabled state is also the active HDR state, so it remains a valid compatibility fallback.
-      DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO info {};
-      info.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
-      info.header.size = sizeof(info);
-      info.header.adapterId = adapter_id;
-      info.header.id = target_id;
-      if (DisplayConfigGetDeviceInfo(&info.header) == ERROR_SUCCESS) {
-        return {
-          true,
-          info.advancedColorSupported != 0,
-          info.advancedColorEnabled != 0,
-          info.advancedColorEnabled != 0,
-          info.advancedColorForceDisabled != 0,
-          info.bitsPerColorChannel,
-        };
-      }
-      return {};
+      return {
+        true,
+        state->hdr_supported,
+        state->hdr_user_enabled,
+        state->api == platf::display_config::advanced_color_api_e::modern ?
+          state->active_mode == DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR :
+          state->advanced_color_enabled,
+        state->limited_by_policy,
+        state->bits_per_color_channel,
+      };
     }
 
     bool set_hdr_state(const LUID &adapter_id, UINT32 target_id, bool enabled) {
-      DISPLAYCONFIG_SET_HDR_STATE hdr {};
-      hdr.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE;
-      hdr.header.size = sizeof(hdr);
-      hdr.header.adapterId = adapter_id;
-      hdr.header.id = target_id;
-      hdr.enableHdr = enabled;
-      if (DisplayConfigSetDeviceInfo(&hdr.header) == ERROR_SUCCESS) {
-        return true;
-      }
-
-      DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE advanced_color {};
-      advanced_color.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE;
-      advanced_color.header.size = sizeof(advanced_color);
-      advanced_color.header.adapterId = adapter_id;
-      advanced_color.header.id = target_id;
-      advanced_color.enableAdvancedColor = enabled;
-      return DisplayConfigSetDeviceInfo(&advanced_color.header) == ERROR_SUCCESS;
+      return platf::display_config::set_hdr_state_with_legacy_fallback(
+        adapter_id,
+        target_id,
+        enabled
+      );
     }
 
     std::optional<float> query_sdr_white_nits(const LUID &adapter_id, UINT32 target_id) {

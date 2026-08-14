@@ -3,11 +3,11 @@
 #ifndef DEPTH_COORDINATE_V2_CONTRACT_GENERATED_HLSL
 #define DEPTH_COORDINATE_V2_CONTRACT_GENERATED_HLSL
 
-#define V2_CONTRACT_SCHEMA 48u
-#define V2_CONTRACT_TAG 0x4F3FF872u
+#define V2_CONTRACT_SCHEMA 50u
+#define V2_CONTRACT_TAG 0x84C0CB62u
 #define V2_SHADOW_STATE_WORD_COUNT 12u
 #define V2_SHADOW_STATE_VECTOR_COUNT 3u
-#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 8u
+#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 10u
 #define V2_OCR_INPUT_N 1u
 #define V2_OCR_INPUT_C 3u
 #define V2_OCR_INPUT_HEIGHT 160u
@@ -68,8 +68,15 @@
 #define V2_SUBTITLE_LOCATOR_MIN_ASPECT_DENOMINATOR 1u
 #define V2_SUBTITLE_LOCATOR_MATCH_IOU_THRESHOLD 0.6f
 #define V2_SUBTITLE_LOCATOR_DEATH_GRACE_OBSERVATIONS 6u
-#define V2_SUBTITLE_LOCATOR_STATE_SCHEMA 9u
-#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x39524C53u
+#define V2_SUBTITLE_TARGET_MAX_ROW_IQR_BINOCULAR_SOURCE_PIXELS 8.0f
+#define V2_SUBTITLE_TARGET_MAX_ROW_MEDIAN_DELTA_BINOCULAR_SOURCE_PIXELS 4.0f
+#define V2_SUBTITLE_TARGET_MAX_RESIDUAL_BINOCULAR_SOURCE_PIXELS 8.0f
+#define V2_SUBTITLE_TARGET_MAX_UNRELIABLE_HOLDS 2u
+#define V2_SUBTITLE_TARGET_DEADBAND_BINOCULAR_SOURCE_PIXELS 1.0f
+#define V2_SUBTITLE_TARGET_EMA_ALPHA 0.125f
+#define V2_SUBTITLE_TARGET_MAX_SLEW_BINOCULAR_SOURCE_PIXELS 0.25f
+#define V2_SUBTITLE_LOCATOR_STATE_SCHEMA 12u
+#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x32314C53u
 #define V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT 80u
 #define V2_SUBTITLE_LOCATOR_HEADER_WORD_COUNT 32u
 #define V2_SUBTITLE_LOCATOR_RECTANGLE_CAPACITY 4u
@@ -81,6 +88,7 @@
 #define V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT 4u
 #define V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT 8u
 #define V2_SUBTITLE_LOCATOR_KIND_MASK 15u
+#define V2_OCR_SHADER_CONTRACT_GENERATED 1u
 #define V2_DIRECT_CONTAINER_LIMIT 0.04f
 #define V2_MAX_VERTICAL_SHEAR 2.0f
 #define V2_VERTICAL_MAJORANT_SHARE 0.75f
@@ -97,44 +105,51 @@ bool V2SubtitleOcrFieldIsCalibrated(uint field_width, uint field_height) {
            (field_width == V2_MODEL_CALIBRATED_SHAPE_WIDTH_5 && field_height == V2_MODEL_CALIBRATED_SHAPE_HEIGHT_5);
 }
 
-// Exact ceil projection of a detector row edge through the authenticated bottom crop.
-// The overflow guards mirror the SM5 consumers, which have no uint64 arithmetic.
-bool V2SubtitleOcrProjectRowCeil(
-    uint source_width, uint source_height, uint field_width, uint field_height,
-    uint detector_y, out uint projected_y) {
-    projected_y = 0u;
-    if (source_width == 0u || source_height == 0u || field_height == 0u ||
-        detector_y > V2_OCR_OUTPUT_HEIGHT ||
-        !V2SubtitleOcrFieldIsCalibrated(field_width, field_height)) return false;
+// Resolve the authenticated bottom crop without uint64 arithmetic.
+bool V2SubtitleOcrComputeCrop(
+    uint source_width, uint source_height, out uint crop_top, out uint crop_height) {
+    crop_top = 0u;
+    crop_height = 0u;
+    if (source_width == 0u || source_height == 0u) return false;
     uint crop_quotient = source_width / V2_OCR_CROP_ASPECT_WIDTH;
     uint crop_remainder = source_width % V2_OCR_CROP_ASPECT_WIDTH;
     if (crop_quotient > 0xffffffffu / V2_OCR_CROP_ASPECT_HEIGHT ||
         crop_remainder > 0xffffffffu / V2_OCR_CROP_ASPECT_HEIGHT) return false;
-    uint crop_height = min(
+    crop_height = min(
         source_height,
         crop_quotient * V2_OCR_CROP_ASPECT_HEIGHT +
         (crop_remainder * V2_OCR_CROP_ASPECT_HEIGHT +
          V2_OCR_CROP_ASPECT_WIDTH - 1u) / V2_OCR_CROP_ASPECT_WIDTH);
-    uint crop_top = source_height - crop_height;
-    if (source_height > 0xffffffffu / V2_OCR_OUTPUT_HEIGHT) return false;
-    uint denominator = V2_OCR_OUTPUT_HEIGHT * source_height;
-    if (denominator == 0u || denominator > 0xffffffffu / field_height) return false;
-    uint source_y_numerator =
-        crop_top * V2_OCR_OUTPUT_HEIGHT + detector_y * crop_height;
-    uint scaled = source_y_numerator * field_height;
-    projected_y = min(
-        scaled / denominator + (scaled % denominator != 0u ? 1u : 0u),
-        field_height);
-    return true;
+    crop_top = source_height - crop_height;
+    return crop_height != 0u;
 }
 
-bool V2SubtitleOcrRibbonMinBottom(
+// Exact ceil projection of a detector row edge through that crop into the real
+// tensor-content rectangle.
+bool V2SubtitleOcrProjectContentRowCeil(
     uint source_width, uint source_height, uint field_width, uint field_height,
-    out uint minimum_bottom) {
-    return V2SubtitleOcrProjectRowCeil(
-        source_width, source_height, field_width, field_height,
-        V2_OCR_SAFE_ROW_BOTTOM - V2_OCR_RIBBON_BOTTOM_TOLERANCE_PIXELS,
-        minimum_bottom);
+    uint4 tensor_content, uint detector_y, out uint projected_y) {
+    projected_y = 0u;
+    if (source_width == 0u || source_height == 0u || field_height == 0u ||
+        detector_y > V2_OCR_OUTPUT_HEIGHT ||
+        !V2SubtitleOcrFieldIsCalibrated(field_width, field_height) ||
+        tensor_content.x >= tensor_content.z || tensor_content.y >= tensor_content.w ||
+        tensor_content.z > field_width || tensor_content.w > field_height) return false;
+    uint crop_top;
+    uint crop_height;
+    if (!V2SubtitleOcrComputeCrop(
+            source_width, source_height, crop_top, crop_height)) return false;
+    if (source_height > 0xffffffffu / V2_OCR_OUTPUT_HEIGHT) return false;
+    uint denominator = V2_OCR_OUTPUT_HEIGHT * source_height;
+    uint content_height = tensor_content.w - tensor_content.y;
+    if (denominator == 0u || denominator > 0xffffffffu / content_height) return false;
+    uint source_y_numerator =
+        crop_top * V2_OCR_OUTPUT_HEIGHT + detector_y * crop_height;
+    uint scaled = source_y_numerator * content_height;
+    projected_y = tensor_content.y + min(
+        scaled / denominator + (scaled % denominator != 0u ? 1u : 0u),
+        content_height);
+    return true;
 }
 
 cbuffer DepthCoordinateV2Constants : register(b1) {

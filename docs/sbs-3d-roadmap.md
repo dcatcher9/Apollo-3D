@@ -80,10 +80,10 @@ The helper reports strict windowed evidence as `ok` and relaxed full-client evid
 the full-source domain only after exact capture mapping.
 
 The route has no compositor-visible-region oracle. The current subtitle treatment therefore uses
-OCR8 bounded boxes and compact SLR9 owner/pending/current-authority rectangles at the authenticated
+OCR8 bounded boxes and compact SLR12 owner/pending/current-authority rectangles at the authenticated
 DAV2 field shape. It does not retain the retired row-history or general overlay-detector pipelines.
 Unsupported identities and shapes preserve ordinary V2 exactly. Dump and replay accept only the
-current SLR9/OCR8 schema. The host does not reconstruct hidden video.
+current SLR12/OCR8 schema. The host does not reconstruct hidden video.
 
 ### Foreground crowns and disocclusion
 

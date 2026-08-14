@@ -55,24 +55,16 @@ namespace platf::dxgi {
   using output6_t = util::safe_ptr<IDXGIOutput6, Release<IDXGIOutput6>>;
   using dup_t = util::safe_ptr<IDXGIOutputDuplication, Release<IDXGIOutputDuplication>>;
   using texture2d_t = util::safe_ptr<ID3D11Texture2D, Release<ID3D11Texture2D>>;
-  using texture1d_t = util::safe_ptr<ID3D11Texture1D, Release<ID3D11Texture1D>>;
   using resource_t = util::safe_ptr<IDXGIResource, Release<IDXGIResource>>;
   using resource1_t = util::safe_ptr<IDXGIResource1, Release<IDXGIResource1>>;
-  using multithread_t = util::safe_ptr<ID3D11Multithread, Release<ID3D11Multithread>>;
   using vs_t = util::safe_ptr<ID3D11VertexShader, Release<ID3D11VertexShader>>;
   using ps_t = util::safe_ptr<ID3D11PixelShader, Release<ID3D11PixelShader>>;
-  using cs_t = util::safe_ptr<ID3D11ComputeShader, Release<ID3D11ComputeShader>>;
   using blend_t = util::safe_ptr<ID3D11BlendState, Release<ID3D11BlendState>>;
-  using input_layout_t = util::safe_ptr<ID3D11InputLayout, Release<ID3D11InputLayout>>;
   using render_target_t = util::safe_ptr<ID3D11RenderTargetView, Release<ID3D11RenderTargetView>>;
   using shader_res_t = util::safe_ptr<ID3D11ShaderResourceView, Release<ID3D11ShaderResourceView>>;
-  using unordered_access_t = util::safe_ptr<ID3D11UnorderedAccessView, Release<ID3D11UnorderedAccessView>>;
   using buf_t = util::safe_ptr<ID3D11Buffer, Release<ID3D11Buffer>>;
-  using raster_state_t = util::safe_ptr<ID3D11RasterizerState, Release<ID3D11RasterizerState>>;
   using sampler_state_t = util::safe_ptr<ID3D11SamplerState, Release<ID3D11SamplerState>>;
   using blob_t = util::safe_ptr<ID3DBlob, Release<ID3DBlob>>;
-  using depth_stencil_state_t = util::safe_ptr<ID3D11DepthStencilState, Release<ID3D11DepthStencilState>>;
-  using depth_stencil_view_t = util::safe_ptr<ID3D11DepthStencilView, Release<ID3D11DepthStencilView>>;
   using keyed_mutex_t = util::safe_ptr<IDXGIKeyedMutex, Release<IDXGIKeyedMutex>>;
 
   namespace detail {
@@ -228,16 +220,6 @@ namespace platf::dxgi {
     }
   }  // namespace detail
 
-  namespace video {
-    using device_t = util::safe_ptr<ID3D11VideoDevice, Release<ID3D11VideoDevice>>;
-    using ctx_t = util::safe_ptr<ID3D11VideoContext, Release<ID3D11VideoContext>>;
-    using processor_t = util::safe_ptr<ID3D11VideoProcessor, Release<ID3D11VideoProcessor>>;
-    using processor_out_t = util::safe_ptr<ID3D11VideoProcessorOutputView, Release<ID3D11VideoProcessorOutputView>>;
-    using processor_in_t = util::safe_ptr<ID3D11VideoProcessorInputView, Release<ID3D11VideoProcessorInputView>>;
-    using processor_enum_t = util::safe_ptr<ID3D11VideoProcessorEnumerator, Release<ID3D11VideoProcessorEnumerator>>;
-  }  // namespace video
-
-  class hwdevice_t;
   class gpu_cursor_t {
   public:
     gpu_cursor_t():

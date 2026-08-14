@@ -71,7 +71,7 @@ SHADER_SOURCE_SPECS = (
     ("host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"),
 )
 EXPECTED_SUBTITLE_OCR = {
-    "schema": 8,
+    "schema": 10,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
     "artifact_onnx_sha256": (
@@ -110,6 +110,13 @@ EXPECTED_SUBTITLE_OCR = {
         "locator_min_aspect_denominator": 1,
         "locator_match_iou_threshold": 0.6,
         "locator_death_grace_observations": 6,
+        "locator_target_max_row_iqr_binocular_source_pixels": 8.0,
+        "locator_target_max_row_median_delta_binocular_source_pixels": 4.0,
+        "locator_target_max_residual_binocular_source_pixels": 8.0,
+        "locator_target_max_unreliable_holds": 2,
+        "locator_target_deadband_binocular_source_pixels": 1.0,
+        "locator_target_ema_alpha": 0.125,
+        "locator_target_max_slew_binocular_source_pixels": 0.25,
         "ocr_safe_row_top": 24,
         "ocr_safe_row_bottom": 155,
         "source_crop_aspect_width": 6,
@@ -133,7 +140,7 @@ EXPECTED_SUBTITLE_OCR = {
         "final_box_offset": 144, "final_box_capacity": 8,
     },
     "locator_state": {
-        "schema": 9, "tag": 0x39524C53, "word_count": 80,
+        "schema": 12, "tag": 0x32314C53, "word_count": 80,
         "header_word_count": 32, "rectangle_capacity": 4,
         "owner_offset": 32, "pending_offset": 48, "current_offset": 64,
         "kind_word": 31,
@@ -234,6 +241,13 @@ class SubtitleOcrContract:
     locator_min_aspect_denominator: int
     locator_match_iou_threshold: float
     locator_death_grace_observations: int
+    locator_target_max_row_iqr_binocular_source_pixels: float
+    locator_target_max_row_median_delta_binocular_source_pixels: float
+    locator_target_max_residual_binocular_source_pixels: float
+    locator_target_max_unreliable_holds: int
+    locator_target_deadband_binocular_source_pixels: float
+    locator_target_ema_alpha: float
+    locator_target_max_slew_binocular_source_pixels: float
     ocr_safe_row_top: int
     ocr_safe_row_bottom: int
     source_crop_aspect_width: int
@@ -278,7 +292,7 @@ def _subtitle_ocr_contract(contract: dict[str, Any]) -> SubtitleOcrContract:
     if value != EXPECTED_SUBTITLE_OCR:
         raise ValueError(
             "depth-coordinate-v2 subtitle_ocr identity or ABI does not match the current "
-            "authenticated PP-OCRv6/OCR8/SLR9 contract")
+            "authenticated PP-OCRv6/OCR8/SLR12 contract")
     input_tensor = value["input_tensor"]
     output_tensor = value["output_tensor"]
     field_policy = value["field_policy"]
@@ -321,6 +335,19 @@ def _subtitle_ocr_contract(contract: dict[str, Any]) -> SubtitleOcrContract:
         locator_match_iou_threshold=float(field_policy["locator_match_iou_threshold"]),
         locator_death_grace_observations=field_policy[
             "locator_death_grace_observations"],
+        locator_target_max_row_iqr_binocular_source_pixels=float(
+            field_policy["locator_target_max_row_iqr_binocular_source_pixels"]),
+        locator_target_max_row_median_delta_binocular_source_pixels=float(
+            field_policy["locator_target_max_row_median_delta_binocular_source_pixels"]),
+        locator_target_max_residual_binocular_source_pixels=float(
+            field_policy["locator_target_max_residual_binocular_source_pixels"]),
+        locator_target_max_unreliable_holds=field_policy[
+            "locator_target_max_unreliable_holds"],
+        locator_target_deadband_binocular_source_pixels=float(
+            field_policy["locator_target_deadband_binocular_source_pixels"]),
+        locator_target_ema_alpha=float(field_policy["locator_target_ema_alpha"]),
+        locator_target_max_slew_binocular_source_pixels=float(
+            field_policy["locator_target_max_slew_binocular_source_pixels"]),
         ocr_safe_row_top=field_policy["ocr_safe_row_top"],
         ocr_safe_row_bottom=field_policy["ocr_safe_row_bottom"],
         source_crop_aspect_width=field_policy["source_crop_aspect_width"],
@@ -583,6 +610,90 @@ def subtitle_ocr_field_is_calibrated(field_width: int, field_height: int) -> boo
     )
 
 
+def subtitle_target_is_representable_source_u(target: float) -> bool:
+    """Return whether an SLR12 target fits the authenticated signed parallax container."""
+
+    value = _float32(target)
+    return math.isfinite(value) and abs(value) <= _float32(
+        CALIBRATED_DEFAULTS.direct_container_limit)
+
+
+def _subtitle_row_observation(
+        samples: tuple[float, ...], binocular_scale: float) -> tuple[bool, bool, float]:
+    """Return ``(valid, coherent, median)`` in SLR12's SM5 float32 order."""
+
+    converted: list[float] = []
+    for sample in samples:
+        try:
+            value = _float32(sample)
+        except (OverflowError, TypeError, ValueError, struct.error):
+            return False, False, 0.0
+        if not subtitle_target_is_representable_source_u(value):
+            return False, False, 0.0
+        converted.append(value)
+    converted.sort()
+
+    median = _float32(_float32(converted[7] + converted[8]) * _float32(0.5))
+    # Match the explicit precise HLSL quantiles: q1=.5*(v3+v4), q3=.5*(v11+v12).
+    q1 = _float32(_float32(0.5) * _float32(converted[3] + converted[4]))
+    q3 = _float32(_float32(0.5) * _float32(converted[11] + converted[12]))
+    iqr = _float32(q3 - q1)
+    iqr_pixels = _float32(iqr * binocular_scale)
+    coherent = (
+        math.isfinite(iqr_pixels) and
+        iqr_pixels <= _float32(
+            SUBTITLE_OCR.locator_target_max_row_iqr_binocular_source_pixels)
+    )
+    return True, coherent, median
+
+
+def select_subtitle_local_plane_source_u(
+        first_row: tuple[float, ...] | list[float],
+        second_row: tuple[float, ...] | list[float],
+        source_width: int) -> Optional[float]:
+    """Select SLR12's reliable local supporting plane from two independent rows.
+
+    Each row contains exactly 16 R32_FLOAT Base samples. A row is valid only when all of its
+    samples are finite and fit the signed direct-parallax container, and is coherent when its
+    Tukey IQR is at most the generated binocular-pixel threshold. With no coherent row the
+    observation is unreliable. One valid coherent row is used alone. When both rows are valid and
+    at least one is coherent, close medians are averaged and separated medians select the larger
+    source-U value (the nearer supporting plane).
+
+    All state-affecting arithmetic and comparisons are rounded to float32 in the same explicit
+    order as the shader. The thresholds use only addition, subtraction, multiplication, and the
+    exact power-of-two factor 0.5, so unlike reciprocal-based coordinate bounds there is no
+    alternate SM5 division candidate to admit at a boundary.
+    """
+
+    if (isinstance(source_width, bool) or not isinstance(source_width, int) or
+            source_width <= 0):
+        raise ValueError("subtitle target source width must be a positive integer")
+    if len(first_row) != 16 or len(second_row) != 16:
+        raise ValueError("subtitle target evidence must contain exactly 16 samples per row")
+    binocular_scale = _float32(_float32(2.0) * _float32(source_width))
+    if not math.isfinite(binocular_scale) or binocular_scale <= 0.0:
+        raise ValueError("subtitle target binocular scale must be finite and positive")
+
+    first_valid, first_coherent, first_median = _subtitle_row_observation(
+        tuple(first_row), binocular_scale)
+    second_valid, second_coherent, second_median = _subtitle_row_observation(
+        tuple(second_row), binocular_scale)
+    if not first_coherent and not second_coherent:
+        return None
+    if first_valid and second_valid:
+        median_delta = _float32(second_median - first_median)
+        median_delta_pixels = _float32(abs(median_delta) * binocular_scale)
+        if median_delta_pixels <= _float32(
+                SUBTITLE_OCR.locator_target_max_row_median_delta_binocular_source_pixels):
+            return _float32(
+                _float32(first_median + second_median) * _float32(0.5))
+        return max(first_median, second_median)
+    if first_coherent:
+        return first_median
+    return second_median
+
+
 def subtitle_ocr_project_row_ceil(
         source_width: int, source_height: int,
         field_width: int, field_height: int,
@@ -684,4 +795,6 @@ __all__ = [
     "subtitle_ocr_field_is_calibrated",
     "subtitle_ocr_project_row_ceil",
     "subtitle_ocr_ribbon_min_bottom",
+    "select_subtitle_local_plane_source_u",
+    "subtitle_target_is_representable_source_u",
 ]

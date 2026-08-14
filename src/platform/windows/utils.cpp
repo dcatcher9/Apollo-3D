@@ -1,28 +1,20 @@
 #include "utils.h"
 
-#include <unordered_map>
+#include "display_config.h"
 
-#include <SetupApi.h>
+#include <sstream>
+#include <system_error>
+#include <vector>
 
-#include "src/utility.h"
 #include "src/logging.h"
+#include "src/utility.h"
 
-std::wstring acpToUtf16(const std::string& origStr) {
-	auto acp = GetACP();
+#include <windows.h>
+#include <wtsapi32.h>
 
-	int utf16Len = MultiByteToWideChar(acp, 0, origStr.c_str(), origStr.size(), NULL, 0);
-	if (utf16Len == 0) {
-		return L"";
-	}
-
-	std::wstring utf16Str(utf16Len, L'\0');
-	MultiByteToWideChar(acp, 0, origStr.c_str(), origStr.size(), &utf16Str[0], utf16Len);
-
-	return utf16Str;
-}
-
-std::string utf16ToAcp(const std::wstring& utf16Str) {
-	auto acp = GetACP();
+namespace {
+  std::string utf16ToAcp(const std::wstring &utf16Str) {
+	const auto acp = GetACP();
 
 	int codepageLen = WideCharToMultiByte(acp, 0, utf16Str.c_str(), utf16Str.size(), NULL, 0, NULL, NULL);
 	if (codepageLen == 0) {
@@ -33,7 +25,8 @@ std::string utf16ToAcp(const std::wstring& utf16Str) {
 	WideCharToMultiByte(acp, 0, utf16Str.c_str(), utf16Str.size(), &codepageStr[0], codepageLen, NULL, NULL);
 
 	return codepageStr;
-}
+  }
+}  // namespace
 
 std::string utf8ToAcp(const std::string& utf8Str) {
 	if (GetACP() == CP_UTF8) {
@@ -51,68 +44,48 @@ std::string utf8ToAcp(const std::string& utf8Str) {
 	return utf16ToAcp(utf16Str);
 }
 
-std::string acpToUtf8(const std::string& origStr) {
-	if (GetACP() == CP_UTF8) {
-		return std::string(origStr);
-	}
-
-	auto utf16Str = acpToUtf16(origStr);
-
-	int utf8Len = WideCharToMultiByte(CP_UTF8, 0, utf16Str.c_str(), utf16Str.size(), NULL, 0, NULL, NULL);
-	if (utf8Len == 0) {
-		return std::string(origStr);
-	}
-
-	std::string utf8Str(utf8Len, '\0');
-	WideCharToMultiByte(CP_UTF8, 0, utf16Str.c_str(), utf16Str.size(), &utf8Str[0], utf8Len, NULL, NULL);
-
-	return utf8Str;
-}
-
 std::string currentCodePageToCharset() {
-    // Map of Windows code pages to their corresponding charset strings
-    static const std::unordered_map<int, std::string> codePageCharsetMap = {
-        {65001, "UTF-8"},
-        {1200, "UTF-16LE"},
-        {1201, "UTF-16BE"},
-        {1250, "windows-1250"},
-        {1251, "windows-1251"},
-        {1252, "windows-1252"},
-        {1253, "windows-1253"},
-        {1254, "windows-1254"},
-        {1255, "windows-1255"},
-        {1256, "windows-1256"},
-        {1257, "windows-1257"},
-        {1258, "windows-1258"},
-        {936,  "GBK"},       // Simplified Chinese
-        {949,  "EUC-KR"},    // Korean
-        {950,  "Big5"},      // Traditional Chinese
-        {932,  "Shift_JIS"}  // Japanese
-    };
-
-    static std::string charsetStr;
-
-    if (charsetStr.empty()) {
-        // Get the active Windows code page
-        int codePage = GetACP();
-        // Find the charset in the map
-        auto it = codePageCharsetMap.find(codePage);
-        if (it != codePageCharsetMap.end()) {
-            charsetStr = it->second;
-        } else {
-            // Fallback charset if code page is not found in the map
-            charsetStr = "ISO-8859-1";
-        }
-    }
-
-    return charsetStr;
+  switch (GetACP()) {
+    case 65001:
+      return "UTF-8";
+    case 1200:
+      return "UTF-16LE";
+    case 1201:
+      return "UTF-16BE";
+    case 1250:
+      return "windows-1250";
+    case 1251:
+      return "windows-1251";
+    case 1252:
+      return "windows-1252";
+    case 1253:
+      return "windows-1253";
+    case 1254:
+      return "windows-1254";
+    case 1255:
+      return "windows-1255";
+    case 1256:
+      return "windows-1256";
+    case 1257:
+      return "windows-1257";
+    case 1258:
+      return "windows-1258";
+    case 936:
+      return "GBK";
+    case 949:
+      return "EUC-KR";
+    case 950:
+      return "Big5";
+    case 932:
+      return "Shift_JIS";
+    default:
+      return "ISO-8859-1";
+  }
 }
 
-
-// Modified from https://github.com/FrogTheFrog/Sunshine/blob/b6f8573d35eff7c55da6965dfa317dc9722bd4ef/src/platform/windows/display_device/windows_utils.cpp
-
-std::string
-get_error_string(LONG error_code) {
+namespace {
+  // Modified from https://github.com/FrogTheFrog/Sunshine/blob/b6f8573d35eff7c55da6965dfa317dc9722bd4ef/src/platform/windows/display_device/windows_utils.cpp
+  std::string get_error_string(const LONG error_code) {
 	std::stringstream error;
 	error << "[code: ";
 	switch (error_code) {
@@ -140,49 +113,36 @@ get_error_string(LONG error_code) {
 	}
 	error << ", message: " << std::system_category().message(static_cast<int>(error_code)) << "]";
 	return error.str();
-}
+  }
 
-bool
-query_display_config(std::vector<DISPLAYCONFIG_PATH_INFO>& paths, std::vector<DISPLAYCONFIG_MODE_INFO>& modes, bool active_only) {
-	LONG result = ERROR_SUCCESS;
+  bool query_display_config(
+    std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
+    std::vector<DISPLAYCONFIG_MODE_INFO> &modes,
+    const bool active_only
+  ) {
+    const UINT32 flags =
+      (active_only ? QDC_ONLY_ACTIVE_PATHS : QDC_ALL_PATHS) |
+      QDC_VIRTUAL_MODE_AWARE;
+    const auto result =
+      platf::display_config::query_display_config(
+        flags,
+        paths,
+        modes,
+        {
+          // The former loop retried this race without sleeping or an upper bound. Eight immediate
+          // attempts retain its transient-topology tolerance without permitting an infinite stall.
+          8,
+          platf::display_config::retry_delay_e::none,
+        }
+      );
+    if (!result) {
+      BOOST_LOG(error) << get_error_string(result.status)
+                       << " failed to query display paths and modes!";
+    }
+    return static_cast<bool>(result);
+  }
 
-	// When we want to enable/disable displays, we need to get all paths as they will not be active.
-	// This will require some additional filtering of duplicate and otherwise useless paths.
-	UINT32 flags = active_only ? QDC_ONLY_ACTIVE_PATHS : QDC_ALL_PATHS;
-	flags |= QDC_VIRTUAL_MODE_AWARE;  // supported from W10 onwards
-
-	do {
-		UINT32 path_count { 0 };
-		UINT32 mode_count { 0 };
-
-		result = GetDisplayConfigBufferSizes(flags, &path_count, &mode_count);
-		if (result != ERROR_SUCCESS) {
-			BOOST_LOG(error) << get_error_string(result) << " failed to get display paths and modes!";
-			return false;
-		}
-
-		paths.resize(path_count);
-		modes.resize(mode_count);
-		result = QueryDisplayConfig(flags, &path_count, paths.data(), &mode_count, modes.data(), nullptr);
-
-		// The function may have returned fewer paths/modes than estimated
-		paths.resize(path_count);
-		modes.resize(mode_count);
-
-		// It's possible that between the call to GetDisplayConfigBufferSizes and QueryDisplayConfig
-		// that the display state changed, so loop on the case of ERROR_INSUFFICIENT_BUFFER.
-	} while (result == ERROR_INSUFFICIENT_BUFFER);
-
-	if (result != ERROR_SUCCESS) {
-		BOOST_LOG(error) << get_error_string(result) << " failed to query display paths and modes!";
-		return false;
-	}
-
-	return true;
-}
-
-bool
-is_user_session_locked() {
+  bool is_user_session_locked() {
 	LPWSTR buffer { nullptr };
 	const auto cleanup_guard {
 		util::fail_guard([&buffer]() {
@@ -210,10 +170,9 @@ is_user_session_locked() {
 	}
 
 	return false;
-}
+  }
 
-bool
-test_no_access_to_ccd_api() {
+  bool test_no_access_to_ccd_api() {
 	std::vector<DISPLAYCONFIG_PATH_INFO> paths;
 	std::vector<DISPLAYCONFIG_MODE_INFO> modes;
 	if (!query_display_config(paths, modes, true)) {
@@ -229,9 +188,9 @@ test_no_access_to_ccd_api() {
 
 	BOOST_LOG(debug) << "test_no_access_to_ccd_api result: " << get_error_string(result);
 	return result == ERROR_ACCESS_DENIED;
-}
+  }
+}  // namespace
 
-bool
-is_changing_settings_going_to_fail() {
+bool is_changing_settings_going_to_fail() {
 	return is_user_session_locked() || test_no_access_to_ccd_api();
 }

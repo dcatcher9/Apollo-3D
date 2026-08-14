@@ -656,7 +656,11 @@ void main(uint3 id : SV_DispatchThreadID) {
           constants.direct_container_limit != v2::direct_container_limit ||
           constants.convergence_curve_default != v2::convergence_curve_default ||
           pop_strength < 0.25f || pop_strength > 2.0f ||
-          !std::isfinite(constants.requested_gain) || constants.requested_gain <= 0.0f) {
+          !v2::parallax_runtime_constants_are_valid(
+            constants.raw_coordinate_scale,
+            pop_strength,
+            constants.requested_gain
+          )) {
         error = "v2 GPU replay mapping differs from the generated production V2 contract";
         return false;
       }
@@ -1184,8 +1188,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         mapping_state_reserved_valid &&
         v2::convergence_curve_is_valid(convergence_curve) &&
         inverse_scale > 0.0f &&
-        calibration_revision > 0u &&
-        v2::calibration_revision_is_valid(calibration_revision);
+        v2::acquired_calibration_revision_is_valid(calibration_revision);
       const float effective_gain = frame_valid ? constants.requested_gain : 0.0f;
       const float observed_mean = input_valid ? float_stat(v2::frame_stat_mean) : 0.0f;
       const float observed_std = input_valid ?
@@ -1199,11 +1202,15 @@ void main(uint3 id : SV_DispatchThreadID) {
         std::isfinite(center) && std::isfinite(inverse_scale) &&
         std::isfinite(latched_scale) && std::isfinite(convergence_curve) &&
         std::isfinite(container_scale);
-      if (!state_values_finite ||
+      v2::state_words_t authenticated_state_words {};
+      std::copy(state_words.begin(), state_words.end(), authenticated_state_words.begin());
+      const bool state_authenticated = v2::parallax_state_words_are_authenticated(
+        authenticated_state_words,
+        constants.raw_coordinate_scale
+      );
+      if (!state_values_finite || !state_authenticated ||
           frame_valid != (input_valid && !collapsed) ||
           (frame_valid && !camera_valid) ||
-          (camera_valid && std::abs(latched_scale - constants.raw_coordinate_scale) >
-                             2.0e-6f) ||
           container_scale != 1.0f ||
           (confirmed_cut && !frame_valid && camera_valid)) {
         error = "v2 GPU replay state violates frame/camera validity semantics";

@@ -51,11 +51,12 @@ namespace platf::sbs_debug {
       bool poll_is_empty
     ) noexcept;
 
-    /** Pure exact-frame OCR8/SLR9 validation used before diagnostic publication. */
+    /** Pure exact-frame OCR8/SLR12 validation used before diagnostic publication. */
     bool subtitle_records_match_frame(
       const std::vector<std::uint8_t> &ocr,
       const std::vector<std::uint8_t> &locator,
-      const frame &completed
+      const frame &completed,
+      std::uint32_t confirmed_cut_count
     );
 
     bool subtitle_ocr_record_is_canonical_for_frame(
@@ -77,7 +78,7 @@ namespace platf::sbs_debug {
    * candidate first produces shadow_ownership_refined_parallax from the full-resolution source
    * contour, then shadow_vertical_majorant (the exact upper-envelope diagnostic) and
    * shadow_vertical_conditioned (the fixed 75/25 vertical share), then the row majorant produces
-   * shadow_base_final_parallax. When OCR8 and SLR9 are active, the compact exact-frame record and
+   * shadow_base_final_parallax. When OCR8 and SLR12 are active, the compact exact-frame record and
    * locator state condition that Base into shadow_final_parallax; an empty current-authority block
    * copies Base bit for bit. In ROI mode that final field remains crop-local and is not by itself a
    * full-source position field. shadow_coordinate is allocated and written only for this explicit

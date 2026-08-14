@@ -1,8 +1,9 @@
 // Merge per-group Welford records into two frame-stat float4 vectors:
 //   [0] = {mean, population_std, minimum, maximum}
 //   [1] = {valid_count, eligible_count, valid, reserved}
-// `eligible_count` is the physical tensor count when no overlay mask is active and the unmasked
-// tensor count otherwise. Every admitted texel must be finite before the frame can publish.
+// `eligible_count` is the real tensor-content population: the full tensor for ordinary full-frame
+// analysis, or the unpadded content population for a contain-fit ROI. Every admitted texel must be
+// finite before the frame can publish.
 
 StructuredBuffer<float4> Partials : register(t0);
 RWStructuredBuffer<float4> FrameStats : register(u0);
