@@ -29,9 +29,21 @@ namespace offline_sbs {
     convert,
   };
 
+  enum class output_location_e {
+    // Compatibility scope for jobs persisted before outputs followed the source.
+    legacy_managed_exports,
+    input_directory,
+  };
+
   enum class cache_budget_policy_e {
     fail,
     split,
+  };
+
+  enum class browse_type_e {
+    file,
+    directory,
+    any,
   };
 
   enum class job_state_e {
@@ -60,8 +72,8 @@ namespace offline_sbs {
     std::filesystem::path input_path;
     operation_e operation = operation_e::evaluate;
 
-    // Conversion outputs are confined to service_config_t::exports_root. This is a
-    // basename, not an arbitrary host path supplied by an HTTP client.
+    // The manager places this basename beside the canonical input file. HTTP clients
+    // never select or supply an arbitrary output directory.
     std::string output_name;
     std::string codec = "hevc_nvenc";
 
@@ -69,9 +81,17 @@ namespace offline_sbs {
     cache_budget_policy_e cache_budget_policy = cache_budget_policy_e::fail;
   };
 
+  struct browse_request_t {
+    // An absent or empty path requests the bounded local-drive view on Windows.
+    std::optional<std::filesystem::path> path;
+    browse_type_e type = browse_type_e::any;
+  };
+
   struct service_config_t {
     std::filesystem::path state_root;
     std::filesystem::path worker_root;
+    // Retained for schema-1 publication recovery and quota accounting. New jobs
+    // publish beside their canonical input and never use this as a destination.
     std::filesystem::path exports_root;
     std::filesystem::path sunshine_executable;
     std::filesystem::path sunshine_config;
@@ -119,6 +139,7 @@ namespace offline_sbs {
     operation_e operation = operation_e::evaluate;
     std::filesystem::path input_path;
     std::optional<std::filesystem::path> output_path;
+    std::optional<output_location_e> output_location;
     std::string codec;
     std::uint64_t scene_cache_max_bytes = 0;
     cache_budget_policy_e cache_budget_policy = cache_budget_policy_e::fail;
@@ -146,6 +167,18 @@ namespace offline_sbs {
     error_code_e code = error_code_e::none;
     std::string error;
     nlohmann::json audit;
+
+    [[nodiscard]] nlohmann::json json() const;
+  };
+
+  struct browse_reply_t {
+    bool ok = false;
+    error_code_e code = error_code_e::none;
+    std::string error;
+    std::optional<std::filesystem::path> path;
+    std::optional<std::filesystem::path> parent;
+    nlohmann::json entries = nlohmann::json::array();
+    bool truncated = false;
 
     [[nodiscard]] nlohmann::json json() const;
   };
@@ -216,6 +249,7 @@ namespace offline_sbs {
     [[nodiscard]] service_reply_t cancel(std::string_view id);
     [[nodiscard]] service_reply_t get(std::string_view id) const;
     [[nodiscard]] scene_audit_reply_t scene_audit(std::string_view id) const;
+    [[nodiscard]] browse_reply_t browse(const browse_request_t &request) const;
     [[nodiscard]] std::vector<job_snapshot_t> list() const;
     [[nodiscard]] bool has_active_job() const;
     [[nodiscard]] std::optional<std::string> active_job_id() const;
@@ -243,6 +277,7 @@ namespace offline_sbs {
   service_reply_t cancel(std::string_view id);
   service_reply_t get(std::string_view id);
   scene_audit_reply_t scene_audit(std::string_view id);
+  browse_reply_t browse(const browse_request_t &request);
   std::vector<job_snapshot_t> list();
   bool has_active_job();
   nlohmann::json capabilities();

@@ -2654,6 +2654,12 @@ namespace sbs_bench {
         {"native_whole_clip", {
           {"artifact_modes", {"adaptive", "conversion"}},
           {"source_formats", {"png", "bmp", "pfm"}},
+          {"source_scope", {
+            {"frame_source", std::string {offline_sbs::whole_clip_frame_source}},
+            {"analysis_region", std::string {offline_sbs::whole_clip_analysis_region}},
+            {"active_window_dependency", false},
+            {"window_region_roi", false},
+          }},
           {"follow_protocol_schema", 1},
           {"follow_global_first_sequence", true},
           {"adaptive_state_schema", sbs_adaptive_state::schema_version},
@@ -3659,10 +3665,16 @@ namespace sbs_bench {
         // the 1-based global sequence.
         const auto estimator_frame_id =
           static_cast<std::uint64_t>(global_sequence);
+        // An empty, non-ROI request is resolved by the estimator to the complete supplied
+        // raster. State it explicitly here so this headless selected-file path can never inherit
+        // a live window-region request from another caller.
+        const models::depth_input_region_t offline_full_frame_request {};
         estimator->estimate_depth(
           in_srv.Get(),
           input_color,
-          estimator_frame_id
+          estimator_frame_id,
+          false,
+          offline_full_frame_request
         );
         est = estimator->finish_pending_depth_for_evaluation(input_color);
         if (whole_clip_mode &&
@@ -3684,6 +3696,24 @@ namespace sbs_bench {
             << " did not publish authenticated V2 geometry (terminal="
             << (estimator->has_terminal_failure() ? "true" : "false")
             << "); aborting the run";
+          return 6;
+        }
+        if (
+          whole_clip_mode &&
+          (
+            !est.input_region.valid() || est.input_region.video_region ||
+            est.input_region.authority !=
+              models::depth_analysis_authority_e::full_source ||
+            est.input_region.source_width != frame_width ||
+            est.input_region.source_height != frame_height ||
+            est.input_region.left != 0u || est.input_region.top != 0u ||
+            est.input_region.right != frame_width ||
+            est.input_region.bottom != frame_height
+          )
+        ) {
+          BOOST_LOG(error)
+            << "sbs-bench: offline analysis produced a non-full-frame input region for frame "
+            << output_id;
           return 6;
         }
         cuda_graph_captured = cuda_graph_captured || est.cuda_graph_active;
@@ -4663,6 +4693,12 @@ namespace sbs_bench {
       contract
         << "{\n"
         << "  \"schema\": 1,\n"
+        << "  \"source_scope\": {\"frame_source\": "
+        << json_string(offline_sbs::whole_clip_frame_source)
+        << ", \"analysis_region\": "
+        << json_string(offline_sbs::whole_clip_analysis_region)
+        << ", \"active_window_dependency\": false, "
+           "\"window_region_roi\": false},\n"
         << "  \"artifact_mode\": " << json_string(artifact_mode_name(o.artifacts)) << ",\n"
         << "  \"inference_mode\": "
         << json_string(replay_mode ? "scene-cache-replay" :

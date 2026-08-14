@@ -2,7 +2,12 @@
  * @file src/audio.cpp
  * @brief Definitions for audio capture and encoding.
  */
-// standard includes
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <format>
+#include <limits>
 #include <thread>
 
 // lib includes
@@ -25,13 +30,10 @@ namespace audio {
   static int start_audio_control(audio_ctx_t &ctx);
   static void stop_audio_control(audio_ctx_t &);
 
-  int map_stream(int channels, bool quality);
-
   constexpr auto SAMPLE_RATE = 48000;
+  constexpr auto LEVEL_TELEMETRY_INTERVAL = 5s;
 
-  // NOTE: If you adjust the bitrates listed here, make sure to update the
-  // corresponding bitrate adjustment logic in rtsp_stream::cmd_announce()
-  opus_stream_config_t stream_configs[MAX_STREAM_CONFIG] {
+  const opus_stream_config_t stream_configs[MAX_STREAM_CONFIG] {
     {
       SAMPLE_RATE,
       2,
@@ -82,9 +84,78 @@ namespace audio {
     },
   };
 
+  namespace {
+    class rolling_level_meter_t {
+    public:
+      void observe(const std::vector<float> &samples) {
+        for (const auto sample : samples) {
+          if (!std::isfinite(sample)) {
+            continue;
+          }
+
+          const auto magnitude = std::abs(sample);
+          peak_ = std::max(peak_, magnitude);
+          sum_squares_ += static_cast<double>(sample) * sample;
+          ++sample_count_;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now - interval_start_ < LEVEL_TELEMETRY_INTERVAL) {
+          return;
+        }
+
+        const auto rms = sample_count_ ?
+                           std::sqrt(sum_squares_ / static_cast<double>(sample_count_)) :
+                           0.0;
+        const auto to_dbfs = [](double amplitude) {
+          return amplitude > 0.0 ? 20.0 * std::log10(amplitude) :
+                                   -std::numeric_limits<double>::infinity();
+        };
+
+        BOOST_LOG(info) << std::format(
+          "Pre-Opus audio level (rolling 5 s): peak {:.1f} dBFS, RMS {:.1f} dBFS",
+          to_dbfs(peak_),
+          to_dbfs(rms)
+        );
+
+        interval_start_ = now;
+        sample_count_ = 0;
+        sum_squares_ = 0.0;
+        peak_ = 0.0;
+      }
+
+    private:
+      std::chrono::steady_clock::time_point interval_start_ {std::chrono::steady_clock::now()};
+      std::uint64_t sample_count_ {};
+      double sum_squares_ {};
+      float peak_ {};
+    };
+
+    int map_stream(int channels, bool quality) {
+      const int shift = quality ? 1 : 0;
+      switch (channels) {
+        case 2:
+          return STEREO + shift;
+        case 6:
+          return SURROUND51 + shift;
+        case 8:
+          return SURROUND71 + shift;
+      }
+      return STEREO;
+    }
+  }  // namespace
+
+  const opus_stream_config_t &select_stream_config(int channels, bool high_quality) {
+    return stream_configs[map_stream(channels, high_quality)];
+  }
+
+  int selected_bitrate_kbps(int channels, bool high_quality) {
+    return select_stream_config(channels, high_quality).bitrate / 1000;
+  }
+
   void encodeThread(sample_queue_t samples, config_t config, std::shared_ptr<void> channel_data) {
     auto packets = mail::man->queue<packet_t>(mail::audio_packets);
-    auto stream = stream_configs[map_stream(config.channels, config.flags[config_t::HIGH_QUALITY])];
+    const auto &stream = select_stream_config(config.channels, config.flags[config_t::HIGH_QUALITY]);
 
     // Encoding takes place on this thread
     platf::adjust_thread_priority(platf::thread_priority_e::high);
@@ -107,7 +178,9 @@ namespace audio {
                     << stream.bitrate / 1000 << " kbps (total), LOWDELAY"sv;
 
     auto frame_size = config.packetDuration * stream.sampleRate / 1000;
+    rolling_level_meter_t level_meter;
     while (auto sample = samples->pop()) {
+      level_meter.observe(*sample);
       buffer_t packet {1400};
 
       int bytes = opus_multistream_encode_float(opus.get(), sample->data(), frame_size, std::begin(packet), packet.size());
@@ -125,7 +198,7 @@ namespace audio {
 
   void capture(safe::mail_t mail, config_t config, std::shared_ptr<void> channel_data) {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
-    auto stream = stream_configs[map_stream(config.channels, config.flags[config_t::HIGH_QUALITY])];
+    const auto &stream = select_stream_config(config.channels, config.flags[config_t::HIGH_QUALITY]);
 
     auto ref = get_audio_ctx_ref();
     if (!ref) {
@@ -239,19 +312,6 @@ namespace audio {
   audio_ctx_ref_t get_audio_ctx_ref() {
     static auto control_shared {safe::make_shared<audio_ctx_t>(start_audio_control, stop_audio_control)};
     return control_shared.ref();
-  }
-
-  int map_stream(int channels, bool quality) {
-    int shift = quality ? 1 : 0;
-    switch (channels) {
-      case 2:
-        return STEREO + shift;
-      case 6:
-        return SURROUND51 + shift;
-      case 8:
-        return SURROUND71 + shift;
-    }
-    return STEREO;
   }
 
   int start_audio_control(audio_ctx_t &ctx) {

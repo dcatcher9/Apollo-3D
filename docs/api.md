@@ -61,6 +61,7 @@ The field-level contract is documented in [Configuration](configuration.md).
 
 | Method | Route | Purpose |
 |---|---|---|
+| `POST` | `/api/offline-sbs/browse` | Browse the host PC's local fixed/removable files under the bound interactive user |
 | `GET` | `/api/offline-sbs/capabilities` | Report whether the native worker and codecs are available |
 | `GET`, `POST` | `/api/offline-sbs/jobs` | List jobs or create a conversion |
 | `GET` | `/api/offline-sbs/jobs/{id}` | Read one job |
@@ -69,6 +70,23 @@ The field-level contract is documented in [Configuration](configuration.md).
 
 The job schema, path restrictions, media behavior, and GPU lease are owned by
 [Offline Host 3D conversion](whole-clip-sbs-pipeline.md). Do not infer them from this route index.
+Conversion creation accepts an absolute local `input_path` and a safe `.mkv` or `.mp4`
+`output_name` basename. The manager derives the destination from the canonical input directory;
+clients cannot select an unrelated output directory, and existing files are never overwritten.
+The browse route is loopback-only and uses an origin-checked JSON `POST`. Its optional `path` field
+opens a directory (or the parent of an existing file); an empty path lists local drives.
+`type=file|directory|any` filters selectable entries, while directories remain present for
+navigation. One browse runs at a time and stops adding entries when its two-second enumeration
+deadline is observed; an individual operating-system filesystem call can return later. Each
+request allows at most 256 path components, 4,096 inspected entries, and a 512 KiB serialized
+response. A bounded result reports `truncated` when more entries exist. A success response contains
+`status`, `path`, `parent`, `entries`, and `truncated`; each entry contains its UTF-8 `name`,
+absolute `path`, `type`, and whether it is `selectable` for the requested filter.
+
+This restriction follows the existing appliance trust model: Sunshine 3D trusts machine-local
+processes and accounts as host-control callers. Loopback is not per-Windows-user authentication.
+Do not expose the no-credential local Web UI on a Windows host where local accounts are mutually
+untrusted.
 
 ## Generated examples
 

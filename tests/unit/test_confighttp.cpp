@@ -76,6 +76,13 @@ TEST(ConfigHttpRequestBoundary, AppliesOfflineLimitBeforeRouteDispatch) {
   EXPECT_EQ(
     confighttp::request_content_length_limit(
       "POST",
+      "/api/offline-sbs/browse"
+    ),
+    confighttp::OFFLINE_SBS_REQUEST_MAX_BYTES
+  );
+  EXPECT_EQ(
+    confighttp::request_content_length_limit(
+      "POST",
       "/api/offline-sbs/jobs"
     ),
     confighttp::OFFLINE_SBS_REQUEST_MAX_BYTES

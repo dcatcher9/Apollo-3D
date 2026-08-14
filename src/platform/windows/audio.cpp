@@ -6,10 +6,12 @@
 
 // standard includes
 #include <format>
+#include <new>
 
 // platform includes
 #include <Audioclient.h>
 #include <avrt.h>
+#include <endpointvolume.h>
 #include <mmdeviceapi.h>
 #include <newdev.h>
 #include <roapi.h>
@@ -20,6 +22,7 @@
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/platform/windows/audio_helpers.h"
 
 // Must be the last included file
 // clang-format off
@@ -217,7 +220,9 @@ namespace platf::audio {
   using device_t = util::safe_ptr<IMMDevice, Release<IMMDevice>>;
   using collection_t = util::safe_ptr<IMMDeviceCollection, Release<IMMDeviceCollection>>;
   using audio_client_t = util::safe_ptr<IAudioClient, Release<IAudioClient>>;
+  using audio_client2_t = util::safe_ptr<IAudioClient2, Release<IAudioClient2>>;
   using audio_capture_t = util::safe_ptr<IAudioCaptureClient, Release<IAudioCaptureClient>>;
+  using endpoint_volume_t = util::safe_ptr<IAudioEndpointVolume, Release<IAudioEndpointVolume>>;
   using wave_format_t = util::safe_ptr<WAVEFORMATEX, co_task_free<WAVEFORMATEX>>;
   using wstring_t = util::safe_ptr<WCHAR, co_task_free<WCHAR>>;
   using handle_t = util::safe_ptr_v2<void, BOOL, CloseHandle>;
@@ -276,7 +281,7 @@ namespace platf::audio {
     },
   };
 
-  audio_client_t make_audio_client(device_t &device, const format_t &format) {
+  audio_client_t activate_audio_client(device_t &device) {
     audio_client_t audio_client;
     auto status = device->Activate(
       IID_IAudioClient,
@@ -291,8 +296,46 @@ namespace platf::audio {
       return nullptr;
     }
 
+    return audio_client;
+  }
+
+  bool request_post_volume_loopback(IAudioClient *audio_client) {
+    audio_client2_t audio_client2;
+    auto status = audio_client->QueryInterface(IID_IAudioClient2, (void **) &audio_client2);
+    if (FAILED(status)) {
+      BOOST_LOG(debug) << "Post-volume loopback is unavailable: IAudioClient2 query failed [0x"sv
+                       << util::hex(status).to_string_view() << ']';
+      return false;
+    }
+
+    AudioClientProperties properties {};
+    properties.cbSize = sizeof(properties);
+    properties.bIsOffload = FALSE;
+    properties.eCategory = AudioCategory_Media;
+    // MinGW's audioclient.h currently stops at AMBISONICS (0x4). Windows 11 24H2 defines
+    // POST_VOLUME_LOOPBACK as the next bit (0x8), so keep the compatibility value local until
+    // the toolchain header catches up.
+    properties.Options = static_cast<AUDCLNT_STREAMOPTIONS>(0x8);
+    status = audio_client2->SetClientProperties(&properties);
+    if (FAILED(status)) {
+      BOOST_LOG(debug) << "Post-volume loopback is unsupported; using endpoint-volume mirroring [0x"sv
+                       << util::hex(status).to_string_view() << ']';
+      return false;
+    }
+
+    return true;
+  }
+
+  audio_client_t make_audio_client(device_t &device, const format_t &format, bool &post_volume_loopback) {
+    post_volume_loopback = false;
+    auto audio_client = activate_audio_client(device);
+    if (!audio_client) {
+      return nullptr;
+    }
+
     WAVEFORMATEXTENSIBLE capture_waveformat =
       create_waveformat(sample_format_e::f32, format.channel_count, format.capture_waveformat_channel_mask);
+    HRESULT status;
 
     {
       wave_format_t mixer_waveformat;
@@ -313,20 +356,39 @@ namespace platf::audio {
                       << ((mixer_waveformat->nSamplesPerSec != 48000) ? "will be resampled to 48000 by Windows"sv : "no resampling needed"sv);
     }
 
-    status = audio_client->Initialize(
-      AUDCLNT_SHAREMODE_SHARED,
-      AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
-        AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,  // Enable automatic resampling to 48 KHz
-      0,
-      0,
-      (LPWAVEFORMATEX) &capture_waveformat,
-      nullptr
-    );
+    post_volume_loopback = request_post_volume_loopback(audio_client.get());
+    const auto initialize = [&capture_waveformat](IAudioClient *client) {
+      return client->Initialize(
+        AUDCLNT_SHAREMODE_SHARED,
+        AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
+          AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+        0,
+        0,
+        (LPWAVEFORMATEX) &capture_waveformat,
+        nullptr
+      );
+    };
 
-    if (status) {
+    status = initialize(audio_client.get());
+    if (FAILED(status) && post_volume_loopback) {
+      BOOST_LOG(debug) << "Post-volume loopback initialization failed; retrying pre-volume [0x"sv
+                       << util::hex(status).to_string_view() << ']';
+      audio_client = activate_audio_client(device);
+      post_volume_loopback = false;
+      if (!audio_client) {
+        return nullptr;
+      }
+      status = initialize(audio_client.get());
+    }
+
+    if (FAILED(status)) {
       BOOST_LOG(error) << "Couldn't initialize audio client for ["sv << format.name << "]: [0x"sv << util::hex(status).to_string_view() << ']';
       return nullptr;
     }
+
+    BOOST_LOG(info) << "Audio loopback tap is "sv
+                    << (post_volume_loopback ? "post-volume/mute (native)"sv :
+                                               "pre-volume/mute (software endpoint mirror)"sv);
 
     BOOST_LOG(info) << "Audio capture format is "sv << logging::bracket(waveformat_to_pretty_string(capture_waveformat));
 
@@ -422,6 +484,65 @@ namespace platf::audio {
     std::atomic_bool default_render_device_changed_flag;
   };
 
+  class endpoint_volume_notification_t final: public ::IAudioEndpointVolumeCallback {
+  public:
+    ULONG STDMETHODCALLTYPE AddRef() override {
+      return ref_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
+
+    ULONG STDMETHODCALLTYPE Release() override {
+      const auto remaining = ref_count_.fetch_sub(1, std::memory_order_acq_rel) - 1;
+      if (remaining == 0) {
+        delete this;
+      }
+      return remaining;
+    }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **object) override {
+      if (!object) {
+        return E_POINTER;
+      }
+      if (riid == IID_IUnknown || riid == __uuidof(IAudioEndpointVolumeCallback)) {
+        *object = static_cast<IAudioEndpointVolumeCallback *>(this);
+        AddRef();
+        return S_OK;
+      }
+      *object = nullptr;
+      return E_NOINTERFACE;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnNotify(PAUDIO_VOLUME_NOTIFICATION_DATA notification) override {
+      if (!notification) {
+        return E_POINTER;
+      }
+      refresh_state_.notify();
+      return S_OK;
+    }
+
+    bool begin_refresh_if_due(detail::endpoint_volume_refresh_state_t::clock_t::time_point now) {
+      return refresh_state_.begin_if_due(now);
+    }
+
+    void refresh_failed(detail::endpoint_volume_refresh_state_t::clock_t::time_point now) {
+      refresh_state_.failed(now);
+    }
+
+    void refresh_succeeded() {
+      refresh_state_.succeeded();
+    }
+
+    bool should_log_refresh_failure(detail::endpoint_volume_refresh_state_t::clock_t::time_point now) {
+      return refresh_state_.should_log_failure(now);
+    }
+
+  private:
+    std::atomic<ULONG> ref_count_ {1};
+    detail::endpoint_volume_refresh_state_t refresh_state_;
+  };
+
+  using endpoint_volume_notification_ptr_t =
+    util::safe_ptr<endpoint_volume_notification_t, Release<endpoint_volume_notification_t>>;
+
   class mic_wasapi_t: public mic_t {
   public:
     capture_e sample(std::vector<float> &sample_out) override {
@@ -476,7 +597,7 @@ namespace platf::audio {
         return -1;
       }
 
-      auto device = default_device(device_enum);
+      device = default_device(device_enum);
       if (!device) {
         return -1;
       }
@@ -489,7 +610,7 @@ namespace platf::audio {
         }
 
         BOOST_LOG(debug) << "Trying audio format ["sv << format.name << ']';
-        audio_client = make_audio_client(device, format);
+        audio_client = make_audio_client(device, format, post_volume_loopback);
 
         if (audio_client) {
           BOOST_LOG(debug) << "Found audio format ["sv << format.name << ']';
@@ -503,9 +624,22 @@ namespace platf::audio {
         return -1;
       }
 
-      REFERENCE_TIME default_latency;
-      audio_client->GetDevicePeriod(&default_latency, nullptr);
-      default_latency_ms = default_latency / 1000;
+      if (!post_volume_loopback) {
+        init_endpoint_volume_mirror();
+      }
+
+      REFERENCE_TIME default_latency {};
+      status = audio_client->GetDevicePeriod(&default_latency, nullptr);
+      if (SUCCEEDED(status)) {
+        event_wait_timeout_ms = detail::reference_time_to_wait_ms(default_latency);
+      } else {
+        const auto frame_duration_100ns =
+          static_cast<std::int64_t>(frame_size) * 10'000'000 / sample_rate;
+        event_wait_timeout_ms = detail::reference_time_to_wait_ms(frame_duration_100ns);
+        BOOST_LOG(warning) << "Couldn't get audio device period; using "sv
+                           << event_wait_timeout_ms << " ms wait [0x"sv
+                           << util::hex(status).to_string_view() << ']';
+      }
 
       std::uint32_t frames;
       status = audio_client->GetBufferSize(&frames);
@@ -556,6 +690,14 @@ namespace platf::audio {
         device_enum->UnregisterEndpointNotificationCallback(&endpt_notification);
       }
 
+      if (endpoint_volume && endpoint_volume_notification) {
+        const auto status = endpoint_volume->UnregisterControlChangeNotify(endpoint_volume_notification.get());
+        if (FAILED(status)) {
+          BOOST_LOG(warning) << "Couldn't unregister endpoint volume callback [0x"sv
+                             << util::hex(status).to_string_view() << ']';
+        }
+      }
+
       if (audio_client) {
         audio_client->Stop();
       }
@@ -566,6 +708,77 @@ namespace platf::audio {
     }
 
   private:
+    void init_endpoint_volume_mirror() {
+      auto status = device->Activate(
+        IID_IAudioEndpointVolume,
+        CLSCTX_ALL,
+        nullptr,
+        (void **) &endpoint_volume
+      );
+      if (FAILED(status)) {
+        BOOST_LOG(warning) << "Couldn't activate endpoint volume; Windows master volume will not affect the stream [0x"sv
+                           << util::hex(status).to_string_view() << ']';
+        return;
+      }
+
+      endpoint_volume_notification.reset(new (std::nothrow) endpoint_volume_notification_t);
+      if (!endpoint_volume_notification) {
+        BOOST_LOG(warning) << "Couldn't allocate endpoint volume callback; Windows master volume will not affect the stream"sv;
+        endpoint_volume.reset();
+        return;
+      }
+
+      status = endpoint_volume->RegisterControlChangeNotify(endpoint_volume_notification.get());
+      if (FAILED(status)) {
+        BOOST_LOG(warning) << "Couldn't register endpoint volume callback; Windows master volume will not affect the stream [0x"sv
+                           << util::hex(status).to_string_view() << ']';
+        endpoint_volume_notification.reset();
+        endpoint_volume.reset();
+        return;
+      }
+
+      // Registration happens before the snapshot, so a concurrent change either lands in this
+      // read or leaves the dirty flag set for the capture thread's next bounded refresh.
+      refresh_endpoint_volume();
+      BOOST_LOG(info) << "Mirroring Windows endpoint master volume/mute into pre-volume loopback audio"sv;
+    }
+
+    void refresh_endpoint_volume() {
+      if (!endpoint_volume || !endpoint_volume_notification) {
+        return;
+      }
+
+      const auto now = detail::endpoint_volume_refresh_state_t::clock_t::now();
+      if (!endpoint_volume_notification->begin_refresh_if_due(now)) {
+        return;
+      }
+
+      BOOL muted = FALSE;
+      float decibels = 0.0f;
+      const auto mute_status = endpoint_volume->GetMute(&muted);
+      const auto volume_status = endpoint_volume->GetMasterVolumeLevel(&decibels);
+      if (FAILED(mute_status) || FAILED(volume_status)) {
+        endpoint_volume_notification->refresh_failed(now);
+        if (endpoint_volume_notification->should_log_refresh_failure(now)) {
+          BOOST_LOG(warning) << "Couldn't snapshot endpoint volume; retaining the previous stream gain and retrying"sv;
+        }
+        return;
+      }
+
+      endpoint_volume_notification->refresh_succeeded();
+      endpoint_gain = detail::loopback_software_gain(
+        post_volume_loopback,
+        decibels,
+        muted != FALSE
+      );
+      if (muted) {
+        BOOST_LOG(debug) << "Endpoint volume mirror updated: muted"sv;
+      } else {
+        BOOST_LOG(debug) << "Endpoint volume mirror updated: "sv
+                         << std::format("{:.2f} dB", decibels);
+      }
+    }
+
     capture_e _fill_buffer() {
       HRESULT status;
 
@@ -591,7 +804,9 @@ namespace platf::audio {
         return capture_e::reinit;
       }
 
-      status = WaitForSingleObjectEx(audio_event.get(), default_latency_ms, FALSE);
+      refresh_endpoint_volume();
+
+      status = WaitForSingleObjectEx(audio_event.get(), event_wait_timeout_ms, FALSE);
       switch (status) {
         case WAIT_OBJECT_0:
           break;
@@ -601,6 +816,10 @@ namespace platf::audio {
           BOOST_LOG(error) << "Couldn't wait for audio event: [0x"sv << util::hex(status).to_string_view() << ']';
           return capture_e::error;
       }
+
+      // A volume callback can arrive while the capture thread is waiting. Refresh once after the
+      // event so the newly available packet uses the current endpoint setting.
+      refresh_endpoint_volume();
 
       std::uint32_t packet_size {};
       for (
@@ -641,6 +860,7 @@ namespace platf::audio {
           std::fill_n(sample_buf_pos, n, 0);
         } else {
           std::copy_n(sample_aligned.samples, n, sample_buf_pos);
+          detail::apply_endpoint_volume(std::span<float> {sample_buf_pos, n}, endpoint_gain);
         }
 
         sample_buf_pos += n;
@@ -668,9 +888,15 @@ namespace platf::audio {
     audio_capture_t audio_capture;
 
     audio_notification_t endpt_notification;
+    endpoint_volume_notification_ptr_t endpoint_volume_notification;
+    // Declared after the callback owner so its release happens first if explicit unregistration
+    // fails. The endpoint's COM reference then keeps the heap callback alive through teardown.
+    endpoint_volume_t endpoint_volume;
     std::optional<std::function<void()>> default_endpt_changed_cb;
 
-    REFERENCE_TIME default_latency_ms;
+    DWORD event_wait_timeout_ms {1};
+    float endpoint_gain {1.0f};
+    bool post_volume_loopback {};
 
     util::buffer_t<float> sample_buf;
     float *sample_buf_pos;

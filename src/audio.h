@@ -31,7 +31,19 @@ namespace audio {
     int bitrate;
   };
 
-  extern opus_stream_config_t stream_configs[MAX_STREAM_CONFIG];
+  extern const opus_stream_config_t stream_configs[MAX_STREAM_CONFIG];
+
+  /**
+   * @brief Select the exact Opus configuration used by the encoder.
+   * @param channels Requested channel count (2, 6, or 8).
+   * @param high_quality Whether the high-quality profile was negotiated.
+   * @return The immutable encoder configuration. Invalid channel counts fall back to stereo,
+   *         matching the historical encoder behavior.
+   */
+  const opus_stream_config_t &select_stream_config(int channels, bool high_quality);
+
+  /** @return The selected Opus total bitrate in kilobits per second. */
+  int selected_bitrate_kbps(int channels, bool high_quality);
 
   struct config_t {
     enum flags_e : int {

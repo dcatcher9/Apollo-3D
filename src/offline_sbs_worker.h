@@ -97,6 +97,17 @@ namespace offline_sbs {
   );
 
   /**
+   * Validate the native harness's selected-file/full-frame source-scope attestation.
+   *
+   * Offline analysis and replay must not observe the active window or use either live
+   * window-region ROI authority. The worker rejects missing, extended, or contradictory
+   * attestations before it can publish a conversion.
+   */
+  bool offline_full_frame_source_scope_is_valid(
+    const nlohmann::json &value
+  ) noexcept;
+
+  /**
    * Parse an already-materialized FFprobe stream/frame document.
    *
    * This is intentionally strict.  Rotation, transformed dimensions, dynamic HDR,
@@ -173,6 +184,9 @@ namespace offline_sbs {
   );
 
 #ifdef SUNSHINE_TESTS
+  bool native_stdout_pipe_error_is_eof_for_test(
+    std::uint32_t error
+  ) noexcept;
   bool adaptive_trace_flags_valid_for_test(
     float cut_flags,
     std::uint32_t analysis_flags

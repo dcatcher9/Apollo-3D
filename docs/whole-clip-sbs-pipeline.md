@@ -15,6 +15,13 @@ The production implementation is a native C++ job manager inside Sunshine 3D plu
 `sunshine.exe` child worker. It does **not** invoke Python, require Python to be installed, or
 install a separate Windows Service.
 
+Its pixel source is always the selected video's decoded full frame. Offline conversion does not
+capture the desktop, inspect the active or foreground window, consult Chromium video geometry, or
+activate either live window-region ROI authority. Analysis and replay contracts both attest
+`selected-input-only` plus `full-frame`; the worker fails closed if the native harness does not
+provide that exact source-scope attestation. Active-window and ROI selection remain live-streaming
+behavior only.
+
 > [!IMPORTANT]
 > Offline Host 3D currently requires Windows, an NVIDIA GPU with TensorRT support, and NVIDIA
 > NVENC support for the selected H.265 or AV1 output. There is no software-encode or CPU-depth
@@ -118,10 +125,12 @@ hard-linked names may be counted more than once, while filesystem allocation ove
 alternate data streams are outside the contract.
 
 An output staging file that the child did not identity-attest is never deleted
-automatically because it may be unrelated user data placed at the selected path. Such a retained
-`.sunshine3d-*.part*` file still counts toward the quota. If it alone pushes usage over the limit,
-new offline jobs fail closed with a cleanup instruction until the signed-in Windows user inspects
-and removes the retained file.
+automatically because it may be unrelated user data placed beside the selected input. Such a
+retained `.sunshine3d-*.part*` file remains bound to its durable job record and counts toward the
+quota. If it alone pushes usage over the limit, new offline jobs fail closed with a cleanup
+instruction until the signed-in Windows user inspects and removes the retained file. The legacy
+managed export directory remains covered during migration so jobs created by an older build can
+still be recovered safely.
 
 ## Start and monitor a conversion
 
@@ -131,9 +140,13 @@ The page uses the host's existing Web UI access state. Offline conversion adds n
 account, login prompt, daemon, or installed Windows Service; a host intentionally configured
 without Web UI credentials remains that way.
 
-1. Enter an absolute path to a video readable by the Windows account running Sunshine 3D.
-2. Enter a new output filename. Sunshine 3D writes only inside its managed offline-export directory
-   and refuses path traversal or overwrite.
+1. Choose **Browse** beside **Input path** and select a video readable by the signed-in Windows
+   account. The picker returns the host path without uploading or copying the source video. An
+   absolute local path can still be entered manually when the Web UI is opened from another device.
+2. Sunshine 3D fills a safe output name such as `movie-3d.mkv` or `movie-3d.mp4`. Edit it or choose
+   another new basename if desired. The final video and its atomic staging file stay in the same
+   directory as the canonical selected input; the HTTP request cannot supply another directory,
+   traverse out of that folder, or overwrite an existing file.
 3. Select **H.265 / HEVC** or **AV1**. Both production options use NVENC. Sunshine 3D checks
    packaged codec support at startup, then runs the hardware preflight only after this job has
    acquired the exclusive offline GPU lease. For AV1, the worker writes the lowest defined level
@@ -152,11 +165,11 @@ An offline conversion cannot start during live streaming, and its runtime encode
 under the same GPU exclusion as the conversion itself. Evaluation-only jobs do not require an
 available encoder.
 
-Durable history is partitioned by the Windows account SID selected when the manager starts.
-Worker scratch space and published exports live under that same account's LocalAppData, and media
-probing plus conversion run with its standard interactive token even when Sunshine 3D itself is
-elevated. Restart Sunshine 3D after switching Windows accounts; the identity checks fail closed
-instead of launching media tools as a different interactive user.
+Durable history and worker scratch space are partitioned by the Windows account SID selected when
+the manager starts. Published videos stay beside their selected inputs. Media probing, staging,
+publication, and conversion run with that account's standard interactive token even when Sunshine
+3D itself is elevated. Restart Sunshine 3D after switching Windows accounts; the identity checks
+fail closed instead of launching media tools as a different interactive user.
 
 Every conversion also emits its scene-level evaluation evidence. The built-in job manager
 additionally supports an evaluation-only operation that performs analysis without publishing an

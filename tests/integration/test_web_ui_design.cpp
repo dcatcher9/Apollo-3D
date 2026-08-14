@@ -334,6 +334,48 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
 
   EXPECT_NE(page.find("v-model.trim=\"form.inputPath\""), std::string::npos);
   EXPECT_NE(page.find("v-model.trim=\"form.outputName\""), std::string::npos);
+  EXPECT_NE(page.find("aria-label=\"Browse for an input video\""), std::string::npos);
+  EXPECT_NE(page.find("@click=\"openInputPicker\""), std::string::npos);
+  EXPECT_NE(
+    page.find("aria-label=\"Choose the output video file name\""),
+    std::string::npos
+  );
+  EXPECT_NE(page.find("@click=\"openOutputPicker\""), std::string::npos);
+  EXPECT_NE(page.find("Output folder (same as input)"), std::string::npos);
+  EXPECT_NE(page.find("inputDirectory()"), std::string::npos);
+  EXPECT_NE(page.find("'form.inputPath'(inputPath)"), std::string::npos);
+  EXPECT_NE(page.find("suggestOutputName(inputPath)"), std::string::npos);
+  EXPECT_NE(page.find("lastAutoOutputName"), std::string::npos);
+  EXPECT_NE(page.find("outputNameUserEdited"), std::string::npos);
+  EXPECT_NE(
+    page.find("current === this.lastAutoOutputName"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    page.find("await this.navigatePicker(this.inputDirectory)"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    page.find("await this.navigatePicker(this.outputRoot)"),
+    std::string::npos
+  );
+  EXPECT_NE(page.find("class=\"offline-path-picker\""), std::string::npos);
+  EXPECT_NE(page.find("browseOfflineSbsFiles"), std::string::npos);
+  EXPECT_NE(page.find("[^\\x2F\\x5C]+"), std::string::npos);
+  EXPECT_NE(page.find("[mM][kK][vV]"), std::string::npos);
+  EXPECT_NE(page.find("pickerFocusedIndex"), std::string::npos);
+  EXPECT_NE(page.find("role=\"group\""), std::string::npos);
+  EXPECT_EQ(page.find("role=\"listbox\""), std::string::npos);
+  EXPECT_NE(
+    page.find("pickerMode === 'input' && !pickerCanConfirm"),
+    std::string::npos
+  );
+  EXPECT_NE(page.find("startDisabledReason"), std::string::npos);
+  EXPECT_NE(
+    page.find(":disabled=\"Boolean(startDisabledReason)\""),
+    std::string::npos
+  );
+  EXPECT_EQ(page.find(":disabled=\"!canStart\""), std::string::npos);
   EXPECT_NE(page.find("v-model=\"form.operation\""), std::string::npos);
   EXPECT_NE(page.find("value=\"convert\""), std::string::npos);
   EXPECT_NE(page.find("value=\"evaluate\""), std::string::npos);
@@ -346,8 +388,8 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
   EXPECT_NE(page.find("const operation = settings.operation"), std::string::npos);
   EXPECT_NE(page.find("one non-empty regular video file"), std::string::npos);
   EXPECT_EQ(page.find("numbered frame directory"), std::string::npos);
+  EXPECT_NE(page.find("min=\"1\""), std::string::npos);
   EXPECT_NE(page.find("max=\"64\""), std::string::npos);
-  EXPECT_NE(page.find("budget <= 64"), std::string::npos);
   EXPECT_NE(page.find("value=\"hevc_nvenc\""), std::string::npos);
   EXPECT_NE(page.find("value=\"av1_nvenc\""), std::string::npos);
   EXPECT_NE(page.find("<strong>H.265 / HEVC</strong>"), std::string::npos);
@@ -364,13 +406,15 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
     page.find("v-if=\"form.operation === 'convert'\" class=\"offline-form-row\""),
     std::string::npos
   );
-  EXPECT_NE(
-    page.find("this.form.operation === 'evaluate' ||"),
-    std::string::npos
-  );
+  EXPECT_NE(page.find("operation: this.form.operation"), std::string::npos);
   EXPECT_NE(page.find("value=\"fail\""), std::string::npos);
   EXPECT_NE(page.find("value=\"split\""), std::string::npos);
   EXPECT_NE(page.find("Recent scene decisions"), std::string::npos);
+  EXPECT_NE(page.find("retainedAuditAttested"), std::string::npos);
+  EXPECT_NE(
+    page.find("this.sceneTotal > 0 || retainedAuditAttested"),
+    std::string::npos
+  );
   EXPECT_NE(page.find("Download full audit"), std::string::npos);
   EXPECT_NE(page.find("sceneTotal"), std::string::npos);
   EXPECT_NE(page.find("latest {{ sceneDecisions.length }} shown"), std::string::npos);
@@ -381,7 +425,10 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
   EXPECT_NE(page.find("Static HDR is supported"), std::string::npos);
   EXPECT_NE(page.find("Dolby Vision and dynamic"), std::string::npos);
   EXPECT_NE(page.find("'publishing'"), std::string::npos);
-  EXPECT_NE(page.find("stream before starting a job"), std::string::npos);
+  EXPECT_NE(
+    page.find("live stream before starting an offline job"),
+    std::string::npos
+  );
   EXPECT_NE(page.find("built-in job manager"), std::string::npos);
   EXPECT_EQ(page.find("native service"), std::string::npos);
   EXPECT_EQ(api.find("job service"), std::string::npos);
@@ -389,7 +436,14 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
   // HTTP details belong to one browser boundary, not the page component.
   EXPECT_EQ(page.find("fetch("), std::string::npos);
   EXPECT_NE(api.find("OFFLINE_SBS_JOBS_URL = '/api/offline-sbs/jobs'"), std::string::npos);
+  EXPECT_NE(
+    api.find("OFFLINE_SBS_BROWSE_URL = '/api/offline-sbs/browse'"),
+    std::string::npos
+  );
   EXPECT_NE(api.find("credentials: 'include'"), std::string::npos);
+  EXPECT_NE(api.find("browseOfflineSbsFiles"), std::string::npos);
+  EXPECT_NE(api.find("method: 'POST'"), std::string::npos);
+  EXPECT_NE(api.find("body: { path, type }"), std::string::npos);
   EXPECT_NE(api.find("createOfflineSbsJob"), std::string::npos);
   EXPECT_NE(api.find("cancelOfflineSbsJob"), std::string::npos);
   EXPECT_NE(api.find("downloadOfflineSbsSceneAudit"), std::string::npos);
@@ -437,6 +491,41 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
     std::string::npos
   );
   EXPECT_EQ(api.find("/resume"), std::string::npos);
+  EXPECT_NE(http.find("/api/offline-sbs/browse$"), std::string::npos);
+  EXPECT_NE(
+    http.find("server.resource[\"^/api/offline-sbs/browse$\"][\"POST\"]"),
+    std::string::npos
+  );
+  const auto browse_handler = http.find("void browseOfflineSbsFilesystem");
+  const auto list_handler = http.find("void listOfflineSbsJobs", browse_handler);
+  ASSERT_NE(browse_handler, std::string::npos);
+  ASSERT_NE(list_handler, std::string::npos);
+  const auto browse_handler_source =
+    http.substr(browse_handler, list_handler - browse_handler);
+  EXPECT_NE(
+    browse_handler_source.find("authenticate(response, request)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    browse_handler_source.find("net::from_address(address) != net::PC"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    browse_handler_source.find("offline_sbs::browse(browse)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    jobs.find("max_browse_entries = 4096"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    jobs.find("max_browse_response_bytes = 512ull * 1024ull"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    jobs.find("run_bound_user_filesystem_action("),
+    std::string::npos
+  );
   EXPECT_NE(
     http.find("/scene-audit$"),
     std::string::npos

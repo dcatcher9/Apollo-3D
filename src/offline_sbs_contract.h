@@ -7,8 +7,17 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 namespace offline_sbs {
+  // Offline conversion is a selected-file frame feed. These serialized values make that
+  // boundary machine-checkable: neither the active desktop window nor either live
+  // window-region ROI authority may influence analysis or replay.
+  inline constexpr std::string_view whole_clip_frame_source =
+    "selected-input-only";
+  inline constexpr std::string_view whole_clip_analysis_region =
+    "full-frame";
+
   // Increment whenever a cached scene's serialized meaning or authenticated replay
   // dependencies change. Both the producer and consumer must use this single value.
   inline constexpr unsigned scene_cache_contract_schema = 3u;

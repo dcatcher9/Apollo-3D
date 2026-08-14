@@ -6,6 +6,7 @@
  * immutable settings after the job manager reports the interruption and retained artifacts.
  */
 export const OFFLINE_SBS_JOBS_URL = '/api/offline-sbs/jobs'
+export const OFFLINE_SBS_BROWSE_URL = '/api/offline-sbs/browse'
 
 export class OfflineSbsApiError extends Error {
   constructor(message, { status = 0, payload = null } = {}) {
@@ -92,6 +93,19 @@ export async function getOfflineSbsJob(jobId, { signal } = {}) {
     { signal },
   )
   return payload?.job && typeof payload.job === 'object' ? payload.job : null
+}
+
+export async function browseOfflineSbsFiles(
+  { path = '', type = 'file', signal } = {},
+) {
+  if (!['any', 'directory', 'file'].includes(type)) {
+    throw new OfflineSbsApiError('The file browser type is invalid.')
+  }
+  return request(OFFLINE_SBS_BROWSE_URL, {
+    method: 'POST',
+    body: { path, type },
+    signal,
+  })
 }
 
 export async function createOfflineSbsJob(settings, { signal } = {}) {

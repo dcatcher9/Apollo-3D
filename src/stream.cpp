@@ -2196,9 +2196,10 @@ namespace stream {
         reject("bitrate is outside the safe encoder range"sv);
         return;
       }
-      const std::int64_t audio_bitrate_kbps =
-        (session->config.audio.flags[audio::config_t::HIGH_QUALITY] ? 256 : 96) *
-        session->config.audio.channels;
+      const std::int64_t audio_bitrate_kbps = audio::selected_bitrate_kbps(
+        session->config.audio.channels,
+        session->config.audio.flags[audio::config_t::HIGH_QUALITY]
+      );
       bitrate_kbps = rtsp_stream::detail::calculate_video_bitrate_budget(
         bitrate_kbps,
         config::stream.fec_percentage,

@@ -1515,6 +1515,15 @@ namespace offline_sbs {
     };
 
 #ifdef _WIN32
+    [[nodiscard]] bool native_stdout_pipe_error_is_eof(
+      const DWORD error
+    ) noexcept {
+      // A child can close its inherited stdout handle just before its process handle
+      // becomes signaled.  Pipe closure is EOF regardless of that short-lived process
+      // state; the caller still waits for and validates the child's exit status.
+      return error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA;
+    }
+
     class bounded_child_log_t {
     public:
       explicit bounded_child_log_t(fs::path path):
@@ -1981,10 +1990,7 @@ namespace offline_sbs {
                 nullptr
               )) {
             const auto error = GetLastError();
-            if (
-              (error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA) &&
-              !running()
-            ) {
+            if (native_stdout_pipe_error_is_eof(error)) {
               return 0;
             }
             throw worker_error("native child stdout pipe failed");
@@ -2010,10 +2016,7 @@ namespace offline_sbs {
               )
             ) {
               const auto error = GetLastError();
-              if (
-                (error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA) &&
-                !running()
-              ) {
+              if (native_stdout_pipe_error_is_eof(error)) {
                 return 0;
               }
               throw worker_error("native child stdout pipe read failed");
@@ -5411,6 +5414,14 @@ namespace offline_sbs {
           "scene replay did not attest a zero-inference exact cache replay"
         );
       }
+      if (
+        !contract.contains("source_scope") ||
+        !offline_full_frame_source_scope_is_valid(contract["source_scope"])
+      ) {
+        throw worker_error(
+          "scene replay did not attest selected-input full-frame isolation"
+        );
+      }
       const auto &adaptive_state = contract.at("adaptive_state");
       if (
         !adaptive_state.is_object() ||
@@ -5474,6 +5485,17 @@ namespace offline_sbs {
   }
 
 #ifdef SUNSHINE_TESTS
+  bool native_stdout_pipe_error_is_eof_for_test(
+    const std::uint32_t error
+  ) noexcept {
+#ifdef _WIN32
+    return native_stdout_pipe_error_is_eof(static_cast<DWORD>(error));
+#else
+    (void) error;
+    return false;
+#endif
+  }
+
   bool adaptive_trace_flags_valid_for_test(
     const float cut_flags,
     const std::uint32_t analysis_flags
@@ -6937,6 +6959,22 @@ namespace offline_sbs {
     return builder.finish();
   }
 
+  bool offline_full_frame_source_scope_is_valid(
+    const nlohmann::json &value
+  ) noexcept {
+    try {
+      return
+        value.is_object() &&
+        value.size() == 4u &&
+        value.value("frame_source", std::string {}) == whole_clip_frame_source &&
+        value.value("analysis_region", std::string {}) == whole_clip_analysis_region &&
+        !value.value("active_window_dependency", true) &&
+        !value.value("window_region_roi", true);
+    } catch (const nlohmann::json::exception &) {
+      return false;
+    }
+  }
+
   std::uint64_t analysis_open_cache_limit(
     const std::uint64_t hard_cap_bytes,
     const std::uint64_t source_raster_bytes,
@@ -7268,6 +7306,14 @@ namespace offline_sbs {
       if (capabilities.value("schema", 0) != 1 || native.value("follow_protocol_schema", 0) != 1 || native.value("adaptive_state_schema", 0u) != sbs_adaptive_state::schema_version || native.value("adaptive_state_contract_tag", 0u) != sbs_adaptive_state::cut_contract_tag || native.value("adaptive_state_contract_canonical_sha256", "") != sbs_adaptive_state::contract_canonical_sha256 || native.value("scene_cache_contract_schema", 0u) != scene_cache_contract_schema || native.value("renderer", "") != "depth-coordinate-v2-live-signed-parallax" || !native.value("render_cache_follow", false) || !native.value("render_skips_tensorrt", false) || !native.value("atomic_sbs_publication", false)) {
         throw worker_error("native SBS harness lacks the required replay contract");
       }
+      if (
+        !native.contains("source_scope") ||
+        !offline_full_frame_source_scope_is_valid(native["source_scope"])
+      ) {
+        throw worker_error(
+          "native SBS harness is not isolated to selected-input full-frame processing"
+        );
+      }
       const auto &scene_plan_capability = native.at("scene_plan");
       if (scene_plan_capability.value("schema", 0) != 2 ||
           scene_plan_capability.value("version", "") != "scene-plan-v2" ||
@@ -7454,7 +7500,10 @@ namespace offline_sbs {
         return decisions;
       };
 
-      const auto render_scenes = [&](const std::vector<scene_plan_t> &finalized) {
+      const auto render_scenes = [&](
+        const std::vector<scene_plan_t> &finalized,
+        const std::uint64_t analyzed_through_sequence
+      ) {
         for (const auto &scene : finalized) {
           if (scene.start_sequence != covered_until || scene.end_sequence_exclusive <= scene.start_sequence || scene.frame_count != scene.end_sequence_exclusive - scene.start_sequence) {
             throw worker_error("scene planner produced a gap/overlap");
@@ -7473,7 +7522,7 @@ namespace offline_sbs {
             publish_progress(
               spec,
               "replay",
-              scene.start_sequence - 1,
+              analyzed_through_sequence,
               &media,
               scenes.size(),
               scene_progress_json(scene),
@@ -7535,7 +7584,7 @@ namespace offline_sbs {
           publish_progress(
             spec,
             spec.operation == "convert" ? "analysis" : "evaluate",
-            scene.end_sequence_exclusive - 1,
+            analyzed_through_sequence,
             &media,
             scenes.size(),
             nullptr,
@@ -7669,7 +7718,7 @@ namespace offline_sbs {
             current_pair_bytes
           ));
           account_contract_records();
-          render_scenes(finalized);
+          render_scenes(finalized, timing.sequence);
           publish_progress(
             spec,
             "analysis",
@@ -7698,7 +7747,7 @@ namespace offline_sbs {
         }
         auto finalized = planner->finish();
         account_contract_records();
-        render_scenes(finalized);
+        render_scenes(finalized, media.frames.size());
       } catch (const std::exception &exception) {
         if (!analysis_done) {
           publish_producer_failed(analysis_input, exception.what());
@@ -7722,6 +7771,16 @@ namespace offline_sbs {
       if (analysis_contract.value("schema", 0) != 1 || analysis_contract.value("artifact_mode", "") != "adaptive" || analysis_contract.value("source_frame_count", 0ull) != media.frames.size() || analysis_contract.value("source_first_sequence", 0ull) != 1 || analysis_contract.value("inference_mode", "") != "single-pass-tensorrt" || !analysis_contract.value("depth_inference_enabled", false) || analysis_contract.value("scheduled_depth_update_count", 0ull) != media.frames.size() || analysis_contract.value("tensorrt_enqueue_count", 0ull) != media.frames.size()) {
         throw worker_error(
           "analysis did not attest exactly one TensorRT enqueue per source frame"
+        );
+      }
+      if (
+        !analysis_contract.contains("source_scope") ||
+        !offline_full_frame_source_scope_is_valid(
+          analysis_contract["source_scope"]
+        )
+      ) {
+        throw worker_error(
+          "analysis did not attest selected-input full-frame isolation"
         );
       }
       // Offline conversion runs the production V2 pipeline: the harness must attest the

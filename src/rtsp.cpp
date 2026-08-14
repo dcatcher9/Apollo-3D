@@ -1456,9 +1456,10 @@ namespace rtsp_stream {
 
       // The bitrate request is a total wire budget. Audio/control are not protected by video FEC,
       // so deduct them before reserving the remaining budget for video data plus parity.
-      const auto audioBitrateKbps =
-        (config.audio.flags[audio::config_t::HIGH_QUALITY] ? 256 : 96) *
-        config.audio.channels;
+      const auto audioBitrateKbps = audio::selected_bitrate_kbps(
+        config.audio.channels,
+        config.audio.flags[audio::config_t::HIGH_QUALITY]
+      );
       configuredBitrateKbps = detail::calculate_video_bitrate_budget(
         configuredBitrateKbps,
         config::stream.fec_percentage,

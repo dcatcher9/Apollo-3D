@@ -14,6 +14,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
+#include <cwchar>
 #include <cwctype>
 #include <cstring>
 #include <exception>
@@ -71,7 +72,7 @@ namespace offline_sbs {
     constexpr std::uint64_t max_cache_bytes = 64ull * 1024ull * 1024ull * 1024ull;
     // Unattested staging files are intentionally never deleted automatically.
     // Charge at least 1 MiB apiece so repeated zero-byte failures cannot grow
-    // an unbounded exports directory while consuming no byte quota.
+    // an unbounded retained staging set while consuming no byte quota.
     constexpr std::uint64_t retained_staging_minimum_charge_bytes =
       1ull * 1024ull * 1024ull;
     constexpr std::uintmax_t max_contract_bytes = 16ull * 1024ull * 1024ull;
@@ -80,6 +81,10 @@ namespace offline_sbs {
     constexpr std::size_t max_current_scene_bytes = 16ull * 1024ull;
     constexpr std::size_t max_scene_count = max_serialized_scene_count;
     constexpr std::size_t max_progress_scene_decisions = 64;
+    constexpr std::size_t max_browse_entries = 4096;
+    constexpr std::size_t max_browse_path_components = 256;
+    constexpr std::size_t max_browse_response_bytes = 512ull * 1024ull;
+    constexpr auto max_browse_duration = std::chrono::seconds(2);
     constexpr auto media_probe_timeout = std::chrono::seconds(10);
     constexpr auto worker_termination_timeout = std::chrono::seconds(5);
     // The outer manager captures the native worker's merged stdout/stderr. Keep the
@@ -104,6 +109,16 @@ namespace offline_sbs {
           return "evaluate";
         case operation_e::convert:
           return "convert";
+      }
+      return "unknown";
+    }
+
+    const char *to_string(output_location_e value) {
+      switch (value) {
+        case output_location_e::legacy_managed_exports:
+          return "legacy-managed-exports";
+        case output_location_e::input_directory:
+          return "input-directory";
       }
       return "unknown";
     }
@@ -168,6 +183,18 @@ namespace offline_sbs {
       }
       if (value == "convert") {
         return operation_e::convert;
+      }
+      return std::nullopt;
+    }
+
+    std::optional<output_location_e> parse_output_location(
+      const std::string_view value
+    ) {
+      if (value == "legacy-managed-exports") {
+        return output_location_e::legacy_managed_exports;
+      }
+      if (value == "input-directory") {
+        return output_location_e::input_directory;
       }
       return std::nullopt;
     }
@@ -1116,14 +1143,19 @@ namespace offline_sbs {
     bool validate_local_path_syntax(
       const fs::path &path,
       const std::string_view purpose,
-      std::string &error
+      std::string &error,
+      const bool check_drive_type = true
     ) {
       if (path.empty()) {
         error = std::string {purpose} + " must be absolute";
         return false;
       }
+      const auto &native = path.native();
+      if (native.find(fs::path::value_type {}) != fs::path::string_type::npos) {
+        error = std::string {purpose} + " contains an embedded null";
+        return false;
+      }
 #ifdef _WIN32
-      const auto native = path.native();
       // MinGW's std::filesystem::path::is_absolute() does not classify every
       // Windows UNC spelling consistently. Check the required drive-root form
       // directly so UNC/device/extended paths always reach the same fail-closed
@@ -1145,7 +1177,9 @@ namespace offline_sbs {
         L'\\',
         L'\0',
       };
-      const auto drive_type = GetDriveTypeW(drive_root.data());
+      const auto drive_type = check_drive_type ?
+                                GetDriveTypeW(drive_root.data()) :
+                                DRIVE_FIXED;
       if (drive_type != DRIVE_FIXED && drive_type != DRIVE_REMOVABLE) {
         error =
           std::string {purpose} +
@@ -1157,7 +1191,6 @@ namespace offline_sbs {
         error = std::string {purpose} + " must be absolute";
         return false;
       }
-      const auto native = path.native();
       if (native.starts_with("//")) {
         error = "network " + std::string {purpose} + "s are not accepted";
         return false;
@@ -1512,7 +1545,330 @@ namespace offline_sbs {
       }
       return true;
     }
+
+    std::optional<std::vector<pinned_handle_t>> pin_browse_directory(
+      const fs::path &path,
+      std::string &error
+    ) {
+      const auto normalized = path.lexically_normal();
+      if (normalized == normalized.root_path()) {
+        auto root = pin_path_component(
+          normalized,
+          pinned_leaf_kind_e::directory,
+          false,
+          "browse path",
+          error
+        );
+        if (!root) {
+          return std::nullopt;
+        }
+        std::vector<pinned_handle_t> pins;
+        pins.emplace_back(std::move(*root));
+        return pins;
+      }
+      return pin_no_reparse_components_impl(
+        normalized,
+        pinned_leaf_kind_e::directory,
+        false,
+        "browse path",
+        error
+      );
+    }
+
+    std::optional<std::vector<pinned_handle_t>> pin_publication_directory(
+      const fs::path &path,
+      std::string &error
+    ) {
+      const auto normalized = path.lexically_normal();
+      if (normalized == normalized.root_path()) {
+        auto root = pin_path_component(
+          normalized,
+          pinned_leaf_kind_e::directory,
+          false,
+          "offline output directory",
+          error
+        );
+        if (!root) {
+          return std::nullopt;
+        }
+        std::vector<pinned_handle_t> pins;
+        pins.emplace_back(std::move(*root));
+        return pins;
+      }
+      return pin_no_reparse_components_impl(
+        normalized,
+        pinned_leaf_kind_e::directory,
+        false,
+        "offline output directory",
+        error
+      );
+    }
 #endif
+
+    std::optional<std::uint64_t> retained_staging_charge(
+      const fs::path &path,
+      std::string &error
+    ) {
+#ifdef _WIN32
+      const HANDLE handle = CreateFileW(
+        path.c_str(),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr
+      );
+      if (handle == INVALID_HANDLE_VALUE) {
+        const auto open_error = GetLastError();
+        if (
+          open_error == ERROR_FILE_NOT_FOUND ||
+          open_error == ERROR_PATH_NOT_FOUND
+        ) {
+          return 0;
+        }
+        error =
+          "cannot inspect retained input-directory staging output (Windows error " +
+          std::to_string(open_error) + ")";
+        return std::nullopt;
+      }
+      BY_HANDLE_FILE_INFORMATION information {};
+      const BOOL inspected = GetFileInformationByHandle(handle, &information);
+      const auto inspect_error = inspected ? ERROR_SUCCESS : GetLastError();
+      if (
+        !inspected ||
+        (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+        (information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+      ) {
+        CloseHandle(handle);
+        error =
+          "retained input-directory staging output is not a plain file "
+          "(Windows error " + std::to_string(inspect_error) + ")";
+        return std::nullopt;
+      }
+      auto parent_pins = pin_publication_directory(path.parent_path(), error);
+      if (!parent_pins) {
+        CloseHandle(handle);
+        return std::nullopt;
+      }
+      const HANDLE observed = CreateFileW(
+        path.c_str(),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr
+      );
+      BY_HANDLE_FILE_INFORMATION observed_information {};
+      const bool same_leaf =
+        observed != INVALID_HANDLE_VALUE &&
+        GetFileInformationByHandle(observed, &observed_information) &&
+        (observed_information.dwFileAttributes &
+           (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0 &&
+        observed_information.dwVolumeSerialNumber ==
+          information.dwVolumeSerialNumber &&
+        observed_information.nFileIndexHigh == information.nFileIndexHigh &&
+        observed_information.nFileIndexLow == information.nFileIndexLow;
+      if (observed != INVALID_HANDLE_VALUE) {
+        CloseHandle(observed);
+      }
+      if (!same_leaf) {
+        CloseHandle(handle);
+        error =
+          "retained input-directory staging output changed during accounting";
+        return std::nullopt;
+      }
+      if (!revalidate_pins(
+            *parent_pins,
+            "offline output directory during staging accounting",
+            error
+          )) {
+        CloseHandle(handle);
+        return std::nullopt;
+      }
+      CloseHandle(handle);
+      const auto size =
+        (static_cast<std::uint64_t>(information.nFileSizeHigh) << 32u) |
+        information.nFileSizeLow;
+#else
+      struct stat information {};
+      if (::lstat(path.c_str(), &information) != 0) {
+        if (errno == ENOENT) {
+          return 0;
+        }
+        error =
+          "cannot inspect retained input-directory staging output: " +
+          std::string {std::strerror(errno)};
+        return std::nullopt;
+      }
+      if (!S_ISREG(information.st_mode)) {
+        error = "retained input-directory staging output is not a plain file";
+        return std::nullopt;
+      }
+      const auto size = static_cast<std::uint64_t>(information.st_size);
+#endif
+      return std::max(size, retained_staging_minimum_charge_bytes);
+    }
+
+    struct browse_entry_record_t {
+      std::string name;
+      fs::path path;
+      bool directory = false;
+    };
+
+    nlohmann::json browse_entry_json(
+      const browse_entry_record_t &record,
+      const browse_type_e type
+    ) {
+      const bool selectable =
+        type == browse_type_e::any ||
+        (type == browse_type_e::directory ? record.directory : !record.directory);
+      return {
+        {"name", record.name},
+        {"path", path_to_utf8(record.path)},
+        {"type", record.directory ? "directory" : "file"},
+        {"selectable", selectable},
+      };
+    }
+
+    std::optional<bool> inspect_browse_entry(const fs::path &path) {
+#ifdef _WIN32
+      const HANDLE handle = CreateFileW(
+        path.c_str(),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+        nullptr
+      );
+      if (handle == INVALID_HANDLE_VALUE) {
+        return std::nullopt;
+      }
+      auto handle_guard = util::fail_guard([&]() {
+        CloseHandle(handle);
+      });
+      BY_HANDLE_FILE_INFORMATION information {};
+      if (
+        !GetFileInformationByHandle(handle, &information) ||
+        (information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+      ) {
+        return std::nullopt;
+      }
+      return
+        (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#else
+      std::error_code error;
+      const auto status = fs::symlink_status(path, error);
+      if (
+        error || fs::is_symlink(status) ||
+        (!fs::is_directory(status) && !fs::is_regular_file(status))
+      ) {
+        return std::nullopt;
+      }
+      return fs::is_directory(status);
+#endif
+    }
+
+    void sort_browse_entries(std::vector<browse_entry_record_t> &entries) {
+      std::ranges::sort(entries, [](const auto &left, const auto &right) {
+        if (left.directory != right.directory) {
+          return left.directory;
+        }
+#ifdef _WIN32
+        auto left_folded = left.path.filename().native();
+        auto right_folded = right.path.filename().native();
+        std::ranges::transform(
+          left_folded,
+          left_folded.begin(),
+          [](const wchar_t character) {
+          return static_cast<wchar_t>(std::towlower(character));
+        });
+        std::ranges::transform(
+          right_folded,
+          right_folded.begin(),
+          [](const wchar_t character) {
+          return static_cast<wchar_t>(std::towlower(character));
+        });
+        if (left_folded != right_folded) {
+          return left_folded < right_folded;
+        }
+#else
+        auto left_folded = left.name;
+        auto right_folded = right.name;
+        std::ranges::transform(
+          left_folded,
+          left_folded.begin(),
+          [](const unsigned char character) {
+          return static_cast<char>(std::tolower(character));
+        });
+        std::ranges::transform(
+          right_folded,
+          right_folded.begin(),
+          [](const unsigned char character) {
+          return static_cast<char>(std::tolower(character));
+        });
+        if (left_folded != right_folded) {
+          return left_folded < right_folded;
+        }
+#endif
+        if (left.name != right.name) {
+          return left.name < right.name;
+        }
+        return path_to_utf8(left.path) < path_to_utf8(right.path);
+      });
+    }
+
+    std::optional<std::vector<browse_entry_record_t>> local_browse_roots(
+      std::string &error
+    ) {
+      std::vector<browse_entry_record_t> roots;
+#ifdef _WIN32
+      const DWORD required = GetLogicalDriveStringsW(0, nullptr);
+      if (required == 0) {
+        error =
+          "cannot enumerate local drives (Windows error " +
+          std::to_string(GetLastError()) + ")";
+        return std::nullopt;
+      }
+      std::vector<wchar_t> buffer(static_cast<std::size_t>(required) + 1, L'\0');
+      const DWORD copied = GetLogicalDriveStringsW(
+        static_cast<DWORD>(buffer.size()),
+        buffer.data()
+      );
+      if (copied == 0 || copied >= buffer.size()) {
+        error =
+          "cannot enumerate local drives (Windows error " +
+          std::to_string(GetLastError()) + ")";
+        return std::nullopt;
+      }
+      for (
+        const wchar_t *root = buffer.data();
+        *root != L'\0';
+        root += std::wcslen(root) + 1
+      ) {
+        const auto drive_type = GetDriveTypeW(root);
+        if (drive_type != DRIVE_FIXED && drive_type != DRIVE_REMOVABLE) {
+          continue;
+        }
+        const fs::path drive = fs::path {root}.lexically_normal();
+        roots.push_back({
+          .name = path_to_utf8(drive),
+          .path = drive,
+          .directory = true,
+        });
+      }
+#else
+      roots.push_back({
+        .name = "/",
+        .path = fs::path {"/"},
+        .directory = true,
+      });
+#endif
+      sort_browse_entries(roots);
+      return roots;
+    }
 
     std::optional<fs::path> canonical_regular_file(
       const fs::path &path,
@@ -2208,18 +2564,16 @@ namespace offline_sbs {
     };
 
     fs::path staging_path_for(
-      const fs::path &exports_root,
-      const std::string &output_name,
+      const fs::path &final_output,
       const std::string &job_id
     ) {
-      const fs::path output = exports_root / path_from_utf8(output_name);
-      return output.parent_path() /
+      return final_output.parent_path() /
              (
-               output.stem().wstring() +
+               final_output.stem().wstring() +
                L".sunshine3d-" +
                fs::path(path_from_utf8(job_id)).wstring() +
                L".part" +
-               output.extension().wstring()
+               final_output.extension().wstring()
              );
     }
 
@@ -2979,6 +3333,9 @@ namespace offline_sbs {
       {"output_path", output_path ?
                         nlohmann::json(path_to_utf8(*output_path)) :
                         nlohmann::json(nullptr)},
+      {"output_location", output_location ?
+                            nlohmann::json(to_string(*output_location)) :
+                            nlohmann::json(nullptr)},
       {"codec", codec},
       {"scene_cache_max_bytes", scene_cache_max_bytes},
       {"cache_budget_policy", to_string(cache_budget_policy)},
@@ -3034,6 +3391,18 @@ namespace offline_sbs {
     };
   }
 
+  nlohmann::json browse_reply_t::json() const {
+    return {
+      {"status", ok},
+      {"error_code", to_string(code)},
+      {"error", error.empty() ? nlohmann::json(nullptr) : nlohmann::json(error)},
+      {"path", path ? nlohmann::json(path_to_utf8(*path)) : nlohmann::json(nullptr)},
+      {"parent", parent ? nlohmann::json(path_to_utf8(*parent)) : nlohmann::json(nullptr)},
+      {"entries", ok ? entries : nlohmann::json::array()},
+      {"truncated", ok && truncated},
+    };
+  }
+
   struct job_service_t::impl_t {
     struct record_t {
       job_snapshot_t snapshot;
@@ -3069,6 +3438,7 @@ namespace offline_sbs {
     std::string ffprobe_version;
     std::vector<std::string> codecs;
     mutable std::mutex mutex;
+    mutable std::mutex browse_mutex;
     std::condition_variable_any changed;
     std::map<std::string, std::shared_ptr<record_t>> jobs;
     std::uint64_t next_retention_sequence = 0;
@@ -3154,20 +3524,62 @@ namespace offline_sbs {
         snapshot.operation = *operation;
         snapshot.input_path =
           path_from_utf8(value.at("input_path").get<std::string>());
+        std::string persisted_path_error;
+        if (!validate_local_path_syntax(
+              snapshot.input_path,
+              "persisted input path",
+              persisted_path_error,
+              false
+            )) {
+          error = std::move(persisted_path_error);
+          return std::nullopt;
+        }
         if (!value.at("output_path").is_null()) {
           const auto persisted_output =
             path_from_utf8(value.at("output_path").get<std::string>());
           const auto output_name = path_to_utf8(persisted_output.filename());
+          auto output_location = output_location_e::legacy_managed_exports;
+          if (
+            value.contains("output_location") &&
+            !value.at("output_location").is_null()
+          ) {
+            if (!value.at("output_location").is_string()) {
+              error = "persisted output location is invalid";
+              return std::nullopt;
+            }
+            const auto parsed_location = parse_output_location(
+              value.at("output_location").get<std::string>()
+            );
+            if (!parsed_location) {
+              error = "persisted output location is unsupported";
+              return std::nullopt;
+            }
+            output_location = *parsed_location;
+          }
           const auto expected_output =
-            (config.exports_root / path_from_utf8(output_name)).lexically_normal();
+            (
+              output_location == output_location_e::input_directory ?
+                snapshot.input_path.parent_path() / path_from_utf8(output_name) :
+                config.exports_root / path_from_utf8(output_name)
+            ).lexically_normal();
           if (
             !valid_output_name(output_name) ||
             persisted_output.lexically_normal() != expected_output
           ) {
-            error = "persisted output escaped the managed exports root";
+            error =
+              output_location == output_location_e::input_directory ?
+                "persisted output escaped the input directory" :
+                "persisted output escaped the legacy managed exports root";
             return std::nullopt;
           }
           snapshot.output_path = expected_output;
+          snapshot.output_location = output_location;
+        } else if (
+          value.contains("output_location") &&
+          !value.at("output_location").is_null()
+        ) {
+          error = "persisted evaluation job unexpectedly names an output location";
+          return std::nullopt;
         }
         snapshot.codec = value.at("codec").get<std::string>();
         snapshot.scene_cache_max_bytes =
@@ -3388,13 +3800,47 @@ namespace offline_sbs {
             if (ec) {
               throw std::runtime_error(ec.message());
             }
+
+            for (const auto &[id, record] : jobs) {
+              if (
+                record->snapshot.output_location !=
+                  output_location_e::input_directory ||
+                !record->worker.staging_output
+              ) {
+                continue;
+              }
+              std::string staging_error;
+              const auto staging_charge = retained_staging_charge(
+                *record->worker.staging_output,
+                staging_error
+              );
+              if (!staging_charge) {
+                throw std::runtime_error(
+                  "cannot safely account retained staging output for job [" +
+                  id + "]: " + staging_error
+                );
+              }
+              if (
+                total >
+                std::numeric_limits<std::uint64_t>::max() - *staging_charge
+              ) {
+                throw std::runtime_error(
+                  "retained staging artifact quota charge overflowed"
+                );
+              }
+              total += *staging_charge;
+            }
           }, error)) {
         return std::nullopt;
       }
       return total;
     }
 
-    void prune_history_locked() {
+    void prune_history_locked(const std::size_t reserved_job_slots = 0) {
+      const auto retained_job_limit =
+        reserved_job_slots >= config.max_retained_jobs ?
+          0u :
+          config.max_retained_jobs - reserved_job_slots;
       std::string quota_error;
       auto retained_bytes = retained_artifact_bytes_locked(quota_error);
       if (!retained_bytes) {
@@ -3412,7 +3858,7 @@ namespace offline_sbs {
       );
       if (
         !has_pending_state_prune &&
-        jobs.size() <= config.max_retained_jobs &&
+        jobs.size() <= retained_job_limit &&
         (
           !retained_bytes ||
           *retained_bytes <= config.max_retained_artifact_bytes
@@ -3434,6 +3880,37 @@ namespace offline_sbs {
         return left->snapshot.id < right->snapshot.id;
       });
       for (const auto &record : terminal) {
+        if (
+          record->snapshot.output_location ==
+            output_location_e::input_directory &&
+          record->worker.staging_output
+        ) {
+          std::optional<std::uint64_t> staging_charge;
+          std::string staging_error;
+          const bool staging_inspected = run_user_filesystem_action([&]() {
+            staging_charge = retained_staging_charge(
+              *record->worker.staging_output,
+              staging_error
+            );
+            if (!staging_charge) {
+              throw std::runtime_error(staging_error);
+            }
+          }, staging_error);
+          if (!staging_inspected || !staging_charge) {
+            BOOST_LOG(warning)
+              << "Retaining offline SBS record because its input-directory "
+                 "staging path could not be inspected ["sv
+              << record->snapshot.id << "]: "sv << staging_error;
+            continue;
+          }
+          if (*staging_charge != 0) {
+            // The protected record is the only durable map to a staging name
+            // outside the legacy managed exports root. Preserve it until the
+            // exact path disappears; the manager never deletes an unattested
+            // or possibly replaced user-writable leaf by pathname.
+            continue;
+          }
+        }
 #ifdef _WIN32
         if (
           record->snapshot.worker_result.is_object() &&
@@ -3451,19 +3928,20 @@ namespace offline_sbs {
 #endif
         const auto pressure_requires_prune = [&]() {
           return
-            jobs.size() > config.max_retained_jobs ||
+            jobs.size() > retained_job_limit ||
             (
               retained_bytes &&
               *retained_bytes > config.max_retained_artifact_bytes
             );
         };
         // Preserve one newest record so the UI can always explain the last outcome.
-        // If that record (or a safely retained staging file) alone exceeds the byte
-        // quota, admission fails closed instead of erasing the only diagnosis.
+        // Admission may reserve the manager's entire one-record capacity, in which
+        // case the prior terminal record must be pruned before the replacement can
+        // be accepted. If that record cannot be pruned safely, admission fails closed.
         if (
           !record->worker_artifacts_pruned &&
           (
-            jobs.size() <= 1 ||
+            (retained_job_limit != 0 && jobs.size() <= 1) ||
             !pressure_requires_prune()
           )
         ) {
@@ -3633,8 +4111,7 @@ namespace offline_sbs {
         std::optional<fs::path> staging;
         if (snapshot->output_path) {
           staging = staging_path_for(
-            config.exports_root,
-            path_to_utf8(snapshot->output_path->filename()),
+            *snapshot->output_path,
             snapshot->id
           );
         }
@@ -3758,6 +4235,26 @@ namespace offline_sbs {
           bool staging_cleanup_pending = false;
           std::string publish_error;
           if (!run_user_filesystem_action([&]() {
+#ifdef _WIN32
+                std::optional<std::vector<pinned_handle_t>> output_directory_pins;
+                if (
+                  record->snapshot.output_location ==
+                    output_location_e::input_directory
+                ) {
+                  if (!record->worker.final_output) {
+                    publish_error =
+                      "persisted publishing contract has no final output";
+                    return;
+                  }
+                  output_directory_pins = pin_publication_directory(
+                    record->worker.final_output->parent_path(),
+                    publish_error
+                  );
+                  if (!output_directory_pins) {
+                    return;
+                  }
+                }
+#endif
                 try {
                   const auto &identity =
                     record->snapshot.worker_result.at("publish_identity");
@@ -3827,6 +4324,18 @@ namespace offline_sbs {
                     std::string {"invalid persisted publishing contract: "} +
                     exception.what();
                 }
+#ifdef _WIN32
+                if (
+                  output_directory_pins &&
+                  !revalidate_pins(
+                    *output_directory_pins,
+                    "offline output directory during recovery",
+                    publish_error
+                  )
+                ) {
+                  reconciled = false;
+                }
+#endif
               }, publish_error)) {
             reconciled = false;
           }
@@ -3905,6 +4414,19 @@ namespace offline_sbs {
           bool cleanup_pending = true;
           std::string cleanup_error;
           if (!run_user_filesystem_action([&]() {
+                std::optional<std::vector<pinned_handle_t>> output_directory_pins;
+                if (
+                  record->snapshot.output_location ==
+                    output_location_e::input_directory
+                ) {
+                  output_directory_pins = pin_publication_directory(
+                    record->worker.final_output->parent_path(),
+                    cleanup_error
+                  );
+                  if (!output_directory_pins) {
+                    return;
+                  }
+                }
                 try {
                   const auto &identity =
                     record->snapshot.worker_result.at("publish_identity");
@@ -3944,6 +4466,16 @@ namespace offline_sbs {
                     std::string {
                       "invalid completed publication contract: "
                     } + exception.what();
+                }
+                if (
+                  output_directory_pins &&
+                  !revalidate_pins(
+                    *output_directory_pins,
+                    "offline output directory during cleanup recovery",
+                    cleanup_error
+                  )
+                ) {
+                  cleanup_pending = true;
                 }
               }, cleanup_error)) {
             cleanup_pending = true;
@@ -4162,6 +4694,55 @@ namespace offline_sbs {
       };
 
       fs::file_time_type last_progress_write {};
+      const auto consume_progress_update = [&](
+        const bool force_read = false
+      ) -> std::optional<std::string> {
+        std::error_code time_error;
+        fs::file_time_type write_time {};
+        std::optional<nlohmann::json> value;
+        std::string contract_error;
+        filesystem_error.clear();
+        const bool progress_read = run_user_filesystem_action([&]() {
+          write_time = fs::last_write_time(
+            context.worker_progress,
+            time_error
+          );
+          if (
+            !time_error &&
+            (force_read || write_time != last_progress_write)
+          ) {
+            value = read_json_contract(
+              context.worker_progress,
+              contract_error,
+              max_progress_contract_bytes
+            );
+          }
+        }, filesystem_error);
+        if (!progress_read) {
+          return "cannot inspect native worker progress: " + filesystem_error;
+        }
+        if (
+          time_error ||
+          (!force_read && write_time == last_progress_write)
+        ) {
+          return std::nullopt;
+        }
+        if (!value) {
+          if (contract_error == "contract does not exist") {
+            return std::nullopt;
+          }
+          return "invalid native worker progress: " + contract_error;
+        }
+        try {
+          publish_progress(parse_worker_progress(*value, context.job_id));
+          last_progress_write = write_time;
+        } catch (const std::exception &exception) {
+          return std::string {"invalid native worker progress: "} +
+                 exception.what();
+        }
+        return std::nullopt;
+      };
+
       while (child.running()) {
         if (stop.stop_requested()) {
           std::string cleanup_error;
@@ -4186,60 +4767,27 @@ namespace offline_sbs {
           };
         }
 
-        std::error_code time_error;
-        fs::file_time_type write_time {};
-        std::optional<nlohmann::json> value;
-        std::string contract_error;
-        const bool progress_read = run_user_filesystem_action([&]() {
-          write_time = fs::last_write_time(
-            context.worker_progress,
-            time_error
-          );
-          if (!time_error && write_time != last_progress_write) {
-            value = read_json_contract(
-              context.worker_progress,
-              contract_error,
-              max_progress_contract_bytes
-            );
-          }
-        }, filesystem_error);
-        if (!progress_read) {
+        if (const auto progress_error = consume_progress_update()) {
           std::string cleanup_error;
           terminate_worker(cleanup_error);
           return {
-            .error =
-              "cannot inspect native worker progress: " + filesystem_error +
-              (cleanup_error.empty() ? "" : "; cleanup: " + cleanup_error),
+            .error = *progress_error +
+                     (cleanup_error.empty() ? "" : "; cleanup: " + cleanup_error),
           };
         }
-        if (!time_error && write_time != last_progress_write) {
-          if (!value) {
-            if (contract_error != "contract does not exist") {
-              std::string cleanup_error;
-              terminate_worker(cleanup_error);
-              return {
-                .error =
-                  "invalid native worker progress: " + contract_error +
-                  (cleanup_error.empty() ? "" : "; cleanup: " + cleanup_error),
-              };
-            }
-          } else {
-            try {
-              publish_progress(parse_worker_progress(*value, context.job_id));
-              last_progress_write = write_time;
-            } catch (const std::exception &exception) {
-              std::string cleanup_error;
-              terminate_worker(cleanup_error);
-              return {
-                .error =
-                  std::string {"invalid native worker progress: "} +
-                  exception.what() +
-                  (cleanup_error.empty() ? "" : "; cleanup: " + cleanup_error),
-              };
-            }
-          }
-        }
         std::this_thread::sleep_for(config.process_poll_interval);
+      }
+
+      // The child can atomically publish its final progress and exit between two
+      // polling ticks. Drain that last contract before terminalizing the job so
+      // finalized scene decisions are not lost on fast success or failure exits.
+      if (const auto progress_error = consume_progress_update(true)) {
+        std::string cleanup_error;
+        terminate_worker(cleanup_error);
+        return {
+          .error = *progress_error +
+                   (cleanup_error.empty() ? "" : "; cleanup: " + cleanup_error),
+        };
       }
 
       const auto exit_code = child.exit_code();
@@ -4441,6 +4989,12 @@ namespace offline_sbs {
                 record->worker_path_pins,
                 "offline worker job paths",
                 identity_error
+              ) &&
+              !record->input_pins.empty() &&
+              revalidate_pins(
+                record->input_pins,
+                "offline input/output paths",
+                identity_error
               );
             }, identity_error);
             worker_identity_valid = pins_accessible && pins_valid;
@@ -4579,6 +5133,18 @@ namespace offline_sbs {
                 bool published = false;
                 bool staging_retired = false;
                 if (!run_user_filesystem_action([&]() {
+#ifdef _WIN32
+                      if (
+                        record->input_pins.empty() ||
+                        !revalidate_pins(
+                          record->input_pins,
+                          "offline input/output paths before publication",
+                          completion_error
+                        )
+                      ) {
+                        return;
+                      }
+#endif
                       published = staged_output->publish_no_replace(
                         *record->worker.final_output,
                         completion_error,
@@ -5238,7 +5804,23 @@ namespace offline_sbs {
     // Retention is enforced before acquiring scarce GPU ownership. Terminal job records
     // are pruned first; unattested staging files are deliberately never deleted and can
     // therefore fail admission until the interactive user inspects/removes them.
-    impl_->prune_history_locked();
+    // Reserve room for this job before acquiring scarce GPU ownership. A retained
+    // input-directory staging leaf can make an old terminal record intentionally
+    // unprunable; do not let repeated failures grow the durable map beyond its
+    // configured record bound while remaining below the much larger byte quota.
+    impl_->prune_history_locked(1);
+    const auto admission_history_limit =
+      impl_->config.max_retained_jobs - 1;
+    if (impl_->jobs.size() > admission_history_limit) {
+      return {
+        .code = error_code_e::unavailable,
+        .error =
+          "offline job history cannot make room under the configured " +
+          std::to_string(impl_->config.max_retained_jobs) +
+          "-record limit; inspect retained .sunshine3d-*.part* files and "
+          "locked offline artifacts before starting another job",
+      };
+    }
     std::string quota_error;
     const auto retained_bytes =
       impl_->retained_artifact_bytes_locked(quota_error);
@@ -5305,7 +5887,8 @@ namespace offline_sbs {
     snapshot.created_at_unix_ms = unix_time_ms();
     if (request.operation == operation_e::convert) {
       snapshot.output_path =
-        impl_->config.exports_root / path_from_utf8(request.output_name);
+        input->parent_path() / path_from_utf8(request.output_name);
+      snapshot.output_location = output_location_e::input_directory;
       bool output_exists = false;
       bool same_as_input = false;
       if (!run_bound_user_filesystem_action(
@@ -5384,8 +5967,7 @@ namespace offline_sbs {
     std::optional<fs::path> staging;
     if (snapshot.output_path) {
       staging = staging_path_for(
-        impl_->config.exports_root,
-        request.output_name,
+        *snapshot.output_path,
         snapshot.id
       );
     }
@@ -5884,6 +6466,282 @@ namespace offline_sbs {
     };
   }
 
+  browse_reply_t job_service_t::browse(
+    const browse_request_t &request
+  ) const {
+    std::unique_lock browse_lock {impl_->browse_mutex, std::try_to_lock};
+    if (!browse_lock.owns_lock()) {
+      return {
+        .code = error_code_e::busy,
+        .error = "another host filesystem browse is already in progress",
+      };
+    }
+    std::optional<std::string> expected_user_id;
+    {
+      std::lock_guard lock {impl_->mutex};
+      if (!impl_->started || impl_->stopping) {
+        return {
+          .code = error_code_e::not_initialized,
+          .error = "offline SBS job manager is not running",
+        };
+      }
+      expected_user_id = impl_->config.expected_user_id;
+    }
+
+    const bool roots_view = !request.path || request.path->empty();
+    fs::path requested_path;
+    if (!roots_view) {
+      requested_path = request.path->lexically_normal();
+      const auto serialized_path = path_to_utf8(requested_path);
+      if (serialized_path.size() > 32ull * 1024ull) {
+        return {
+          .code = error_code_e::invalid_request,
+          .error = "browse path exceeds the 32 KiB UTF-8 limit",
+        };
+      }
+      std::string syntax_error;
+      if (!validate_local_path_syntax(
+            requested_path,
+            "browse path",
+            syntax_error,
+            false
+          )) {
+        return {
+          .code = error_code_e::invalid_request,
+          .error = syntax_error,
+        };
+      }
+      const auto relative_path = requested_path.relative_path();
+      const auto component_count = static_cast<std::size_t>(std::distance(
+        relative_path.begin(),
+        relative_path.end()
+      ));
+      if (component_count > max_browse_path_components) {
+        return {
+          .code = error_code_e::invalid_request,
+          .error = "browse path contains too many components",
+        };
+      }
+    }
+
+    std::vector<browse_entry_record_t> records;
+    std::optional<fs::path> resolved_path;
+    std::optional<fs::path> parent_path;
+    bool truncated = false;
+    bool action_invoked = false;
+    error_code_e action_error_code = error_code_e::invalid_request;
+    std::string action_error;
+    const auto browse_deadline =
+      std::chrono::steady_clock::now() + max_browse_duration;
+    std::size_t serialized_response_bytes = 0;
+    if (!run_bound_user_filesystem_action(
+          expected_user_id,
+          [&]() {
+          action_invoked = true;
+          if (roots_view) {
+            action_error_code = error_code_e::io_error;
+            auto roots = local_browse_roots(action_error);
+            if (!roots) {
+              throw std::runtime_error(action_error);
+            }
+            records = std::move(*roots);
+            return;
+          }
+
+#ifdef _WIN32
+          std::string bound_syntax_error;
+          if (!validate_local_path_syntax(
+                requested_path,
+                "browse path",
+                bound_syntax_error
+              )) {
+            action_error = std::move(bound_syntax_error);
+            throw std::runtime_error(action_error);
+          }
+          bool requested_file = false;
+          auto path_pins = pin_browse_directory(requested_path, action_error);
+          if (!path_pins) {
+            std::string file_error;
+            path_pins = pin_no_reparse_components_impl(
+              requested_path,
+              pinned_leaf_kind_e::regular_file,
+              false,
+              "browse path",
+              file_error
+            );
+            if (!path_pins) {
+              action_error = std::move(file_error);
+              throw std::runtime_error(action_error);
+            }
+            requested_file = true;
+          }
+#else
+          bool requested_file = false;
+          auto current = requested_path.root_path();
+          for (const auto &component : requested_path.relative_path()) {
+            if (component == fs::path {"."}) {
+              continue;
+            }
+            current /= component;
+            std::error_code status_error;
+            const auto status = fs::symlink_status(current, status_error);
+            if (status_error || fs::is_symlink(status)) {
+              action_error =
+                "browse path must exist without symbolic links";
+              throw std::runtime_error(action_error);
+            }
+            if (current == requested_path) {
+              if (fs::is_regular_file(status)) {
+                requested_file = true;
+              } else if (!fs::is_directory(status)) {
+                action_error =
+                  "browse path must be an existing file or directory";
+                throw std::runtime_error(action_error);
+              }
+            } else if (!fs::is_directory(status)) {
+              action_error =
+                "browse path contains a non-directory component";
+              throw std::runtime_error(action_error);
+            }
+          }
+#endif
+
+          std::error_code canonical_error;
+          const auto resolved_request = fs::canonical(
+            requested_path,
+            canonical_error
+          );
+          if (canonical_error || resolved_request.empty()) {
+            action_error =
+              "browse path is not an existing file or directory" +
+              (
+                canonical_error ?
+                  ": " + canonical_error.message() :
+                  std::string {}
+            );
+            throw std::runtime_error(action_error);
+          }
+          resolved_path = requested_file ?
+                            resolved_request.parent_path() :
+                            resolved_request;
+          std::string resolved_syntax_error;
+          if (
+            !validate_local_path_syntax(
+              *resolved_path,
+              "resolved browse path",
+              resolved_syntax_error
+            )
+          ) {
+            action_error = resolved_syntax_error;
+            throw std::runtime_error(action_error);
+          }
+
+          if (*resolved_path != resolved_path->root_path()) {
+            parent_path = resolved_path->parent_path();
+          }
+          serialized_response_bytes = browse_reply_t {
+            .ok = true,
+            .path = resolved_path,
+            .parent = parent_path,
+          }.json().dump().size();
+          if (serialized_response_bytes > max_browse_response_bytes) {
+            action_error = "browse path exceeds the response budget";
+            throw std::runtime_error(action_error);
+          }
+
+          action_error_code = error_code_e::io_error;
+          std::error_code iterator_error;
+          fs::directory_iterator iterator {*resolved_path, iterator_error};
+          const fs::directory_iterator end;
+          if (iterator_error) {
+            action_error =
+              "cannot enumerate browse path: " + iterator_error.message();
+            throw std::runtime_error(action_error);
+          }
+          std::size_t visited = 0;
+          while (iterator != end) {
+            if (
+              visited >= max_browse_entries ||
+              std::chrono::steady_clock::now() >= browse_deadline
+            ) {
+              truncated = true;
+              break;
+            }
+            ++visited;
+            const auto entry_path = iterator->path().lexically_normal();
+            const auto directory = inspect_browse_entry(entry_path);
+            if (
+              directory &&
+              (
+                *directory ||
+                request.type != browse_type_e::directory
+              )
+            ) {
+              browse_entry_record_t record {
+                .name = path_to_utf8(entry_path.filename()),
+                .path = entry_path,
+                .directory = *directory,
+              };
+              const auto entry = browse_entry_json(record, request.type);
+              const auto entry_bytes =
+                entry.dump().size() + (records.empty() ? 0ull : 1ull);
+              if (
+                serialized_response_bytes + entry_bytes >
+                max_browse_response_bytes
+              ) {
+                truncated = true;
+                break;
+              }
+              serialized_response_bytes += entry_bytes;
+              records.push_back(std::move(record));
+            }
+            iterator.increment(iterator_error);
+            if (iterator_error) {
+              action_error =
+                "cannot continue enumerating browse path: " +
+                iterator_error.message();
+              throw std::runtime_error(action_error);
+            }
+          }
+#ifdef _WIN32
+          if (!revalidate_pins(*path_pins, "browse path", action_error)) {
+            throw std::runtime_error(action_error);
+          }
+#endif
+        }, action_error)) {
+      return {
+        .code = action_invoked ? action_error_code : error_code_e::unavailable,
+        .error = action_error,
+      };
+    }
+
+    sort_browse_entries(records);
+    auto entries = nlohmann::json::array();
+    std::size_t final_response_bytes = browse_reply_t {
+      .ok = true,
+      .path = resolved_path,
+      .parent = parent_path,
+    }.json().dump().size();
+    for (const auto &record : records) {
+      auto entry = browse_entry_json(record, request.type);
+      const auto entry_bytes =
+        entry.dump().size() + (entries.empty() ? 0ull : 1ull);
+      if (final_response_bytes + entry_bytes > max_browse_response_bytes) {
+        truncated = true;
+        break;
+      }
+      final_response_bytes += entry_bytes;
+      entries.push_back(std::move(entry));
+    }
+    return {
+      .ok = true,
+      .path = std::move(resolved_path),
+      .parent = std::move(parent_path),
+      .entries = std::move(entries),
+      .truncated = truncated,
+    };
+  }
+
   std::vector<job_snapshot_t> job_service_t::list() const {
     std::lock_guard lock {impl_->mutex};
     std::vector<job_snapshot_t> values;
@@ -5971,7 +6829,9 @@ namespace offline_sbs {
         {"path_discovery", "installation-local-or-trusted-host-override"},
       }},
       {"output_security", {
-        {"root", path_to_utf8(impl_->config.exports_root)},
+        {"location", "input-directory"},
+        {"destination_derived_from_input", true},
+        {"legacy_root", path_to_utf8(impl_->config.exports_root)},
         {"request_accepts_basename_only", true},
         {"overwrite", false},
         {"atomic_publish", true},
@@ -6160,6 +7020,21 @@ namespace offline_sbs {
       };
     }
     return service->scene_audit(id);
+  }
+
+  browse_reply_t browse(const browse_request_t &request) {
+    std::shared_ptr<job_service_t> service;
+    {
+      std::lock_guard lock {global_mutex};
+      service = global_service;
+    }
+    if (!service) {
+      return {
+        .code = error_code_e::not_initialized,
+        .error = "offline SBS job manager is not initialized",
+      };
+    }
+    return service->browse(request);
   }
 
   std::vector<job_snapshot_t> list() {

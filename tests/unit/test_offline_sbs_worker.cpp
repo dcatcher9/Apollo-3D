@@ -12,11 +12,16 @@
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#ifdef _WIN32
+  #include <windows.h>
+#endif
 
 namespace {
   namespace fs = std::filesystem;
@@ -201,6 +206,125 @@ TEST(OfflineSbsWorker, RejectsUnknownAdaptiveTraceFlagMeanings) {
     std::numeric_limits<float>::quiet_NaN(),
     0u
   ));
+}
+
+#ifdef _WIN32
+TEST(OfflineSbsWorker, TreatsClosedNativeStdoutPipeAsEofBeforeProcessSignals) {
+  EXPECT_TRUE(offline_sbs::native_stdout_pipe_error_is_eof_for_test(
+    ERROR_BROKEN_PIPE
+  ));
+  EXPECT_TRUE(offline_sbs::native_stdout_pipe_error_is_eof_for_test(
+    ERROR_NO_DATA
+  ));
+  EXPECT_FALSE(offline_sbs::native_stdout_pipe_error_is_eof_for_test(
+    ERROR_ACCESS_DENIED
+  ));
+}
+#endif
+
+TEST(OfflineSbsWorker, ReplayProgressUsesMonotonicAnalyzedFrontier) {
+  std::ifstream stream(
+    fs::path(SUNSHINE_SOURCE_DIR) / "src/offline_sbs_worker.cpp",
+    std::ios::binary
+  );
+  ASSERT_TRUE(stream);
+  const std::string source {
+    std::istreambuf_iterator<char> {stream},
+    std::istreambuf_iterator<char> {},
+  };
+  const auto render_begin = source.find("const auto render_scenes = [&](");
+  const auto render_end = source.find("\n      try {", render_begin);
+  ASSERT_NE(render_begin, std::string::npos);
+  ASSERT_NE(render_end, std::string::npos);
+  const auto render = source.substr(render_begin, render_end - render_begin);
+
+  const auto frontier_parameter = render.find("analyzed_through_sequence");
+  const auto replay_phase = render.find("\"replay\"");
+  const auto replay_frontier = render.find(
+    "analyzed_through_sequence",
+    replay_phase
+  );
+  const auto post_replay_frontier = render.find(
+    "analyzed_through_sequence",
+    replay_frontier + 1
+  );
+  ASSERT_NE(frontier_parameter, std::string::npos);
+  ASSERT_NE(replay_phase, std::string::npos);
+  ASSERT_NE(replay_frontier, std::string::npos);
+  ASSERT_NE(post_replay_frontier, std::string::npos);
+  EXPECT_LT(frontier_parameter, replay_phase);
+  EXPECT_LT(replay_phase, replay_frontier);
+  EXPECT_LT(replay_frontier, post_replay_frontier);
+  EXPECT_EQ(render.find("scene.start_sequence - 1"), std::string::npos);
+  EXPECT_EQ(
+    render.find("scene.end_sequence_exclusive - 1"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("render_scenes(finalized, timing.sequence)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("render_scenes(finalized, media.frames.size())"),
+    std::string::npos
+  );
+}
+
+TEST(OfflineSbsWorker, RequiresSelectedInputFullFrameSourceScope) {
+  nlohmann::json scope {
+    {"frame_source", std::string {offline_sbs::whole_clip_frame_source}},
+    {"analysis_region", std::string {offline_sbs::whole_clip_analysis_region}},
+    {"active_window_dependency", false},
+    {"window_region_roi", false},
+  };
+  EXPECT_TRUE(offline_sbs::offline_full_frame_source_scope_is_valid(scope));
+
+  auto active_window = scope;
+  active_window["active_window_dependency"] = true;
+  EXPECT_FALSE(
+    offline_sbs::offline_full_frame_source_scope_is_valid(active_window)
+  );
+
+  auto roi = scope;
+  roi["window_region_roi"] = true;
+  EXPECT_FALSE(offline_sbs::offline_full_frame_source_scope_is_valid(roi));
+
+  auto cropped = scope;
+  cropped["analysis_region"] = "window-region";
+  EXPECT_FALSE(offline_sbs::offline_full_frame_source_scope_is_valid(cropped));
+
+  auto desktop = scope;
+  desktop["frame_source"] = "desktop-capture";
+  EXPECT_FALSE(offline_sbs::offline_full_frame_source_scope_is_valid(desktop));
+
+  auto extended = scope;
+  extended["fallback"] = "active-window";
+  EXPECT_FALSE(offline_sbs::offline_full_frame_source_scope_is_valid(extended));
+}
+
+TEST(OfflineSbsWorker, HeadlessHarnessHasNoForegroundWindowObserver) {
+  std::ifstream stream(
+    fs::path(SUNSHINE_SOURCE_DIR) / "src/sbs_bench_harness.cpp",
+    std::ios::binary
+  );
+  ASSERT_TRUE(stream);
+  const std::string source {
+    std::istreambuf_iterator<char>(stream),
+    std::istreambuf_iterator<char>()
+  };
+
+  EXPECT_EQ(source.find("GetForegroundWindow("), std::string::npos);
+  EXPECT_EQ(source.find("capture_foreground_window_region"), std::string::npos);
+  EXPECT_EQ(source.find("foreground_window_region.h"), std::string::npos);
+  EXPECT_NE(
+    source.find("Bench/replay stays full-frame, so ROI is disabled"),
+    std::string::npos
+  );
+  EXPECT_NE(source.find("offline_full_frame_request"), std::string::npos);
+  EXPECT_NE(
+    source.find("depth_analysis_authority_e::full_source"),
+    std::string::npos
+  );
 }
 
 TEST(OfflineSbsWorker, ParsesNativeSpecAndNeverBuildsPythonCommands) {

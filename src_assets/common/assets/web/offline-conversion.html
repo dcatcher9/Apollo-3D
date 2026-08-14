@@ -177,38 +177,68 @@
 
           <div>
             <label class="form-label" for="offlineInputPath">Input path</label>
-            <input
-              id="offlineInputPath"
-              v-model.trim="form.inputPath"
-              class="form-control monospace"
-              type="text"
-              autocomplete="off"
-              spellcheck="false"
-              placeholder="D:\Media\movie.mkv"
-              aria-describedby="offlineInputPathHelp"
-              required>
+            <div class="input-group">
+              <input
+                id="offlineInputPath"
+                v-model.trim="form.inputPath"
+                class="form-control monospace"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="D:\Media\movie.mkv"
+                aria-describedby="offlineInputPathHelp"
+                required>
+              <button
+                class="btn btn-outline-secondary offline-browse-button"
+                type="button"
+                aria-label="Browse for an input video"
+                @click="openInputPicker">
+                <i class="fa-solid fa-folder-open" aria-hidden="true"></i>
+                Browse
+              </button>
+            </div>
             <div id="offlineInputPathHelp" class="form-text">
-              An absolute host path to one non-empty regular video file.
+              Choose one non-empty regular video file on this Windows PC, or enter its absolute path.
             </div>
           </div>
 
           <div v-if="form.operation === 'convert'">
             <label class="form-label" for="offlineOutputName">Output file name</label>
-            <input
-              id="offlineOutputName"
-              v-model.trim="form.outputName"
-              class="form-control monospace"
-              type="text"
-              autocomplete="off"
-              spellcheck="false"
-              placeholder="movie-3d.mkv"
-              pattern="[^\\/]+\.(?:mkv|mp4)"
-              aria-describedby="offlineOutputNameHelp"
-              required>
+            <div
+              class="offline-output-location offline-output-location-inline"
+              aria-live="polite">
+              <span>Output folder (same as input)</span>
+              <code>{{ inputDirectory || 'Choose an input video first' }}</code>
+            </div>
+            <div class="input-group">
+              <input
+                id="offlineOutputName"
+                v-model.trim="form.outputName"
+                class="form-control monospace"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="movie-3d.mkv"
+                pattern="[^\x2F\x5C]+\.(?:[mM][kK][vV]|[mM][pP]4)"
+                aria-describedby="offlineOutputNameHelp"
+                @input="outputNameUserEdited = true"
+                required>
+              <button
+                class="btn btn-outline-secondary offline-browse-button"
+                type="button"
+                aria-label="Choose the output video file name"
+                :disabled="initialLoading || !inputDirectory"
+                @click="openOutputPicker">
+                <i class="fa-solid fa-file-circle-plus" aria-hidden="true"></i>
+                Choose
+              </button>
+            </div>
             <div id="offlineOutputNameHelp" class="form-text">
-              A basename ending in <span class="monospace">.mkv</span> or
-              <span class="monospace">.mp4</span>. The built-in job manager confines output to its
-              managed <span class="monospace">offline-sbs\exports</span> directory.
+              A safe name is filled from the selected input. The output stays beside that input;
+              existing files are never overwritten.
+              <span v-if="outputPathPreview" class="offline-output-preview">
+                The video will be saved as <code>{{ outputPathPreview }}</code>.
+              </span>
             </div>
           </div>
 
@@ -319,14 +349,22 @@
           </div>
 
           <div class="offline-form-actions">
-            <p>
-              Live streaming and offline conversion are mutually exclusive. End the current
-              stream before starting a job; Sunshine 3D also blocks new streams until it finishes.
+            <p
+              id="offlineStartHelp"
+              :class="{ 'offline-start-blocked': startDisabledReason }"
+              aria-live="polite">
+              {{
+                startDisabledReason ||
+                (form.operation === 'evaluate' ?
+                  'Choose an input file, then start analysis. Missing fields are highlighted when you submit.' :
+                  'Choose the input and output files, then start conversion. Missing fields are highlighted when you submit.')
+              }}
             </p>
             <button
               class="btn btn-apollo-primary"
               type="submit"
-              :disabled="!canStart">
+              aria-describedby="offlineStartHelp"
+              :disabled="Boolean(startDisabledReason)">
               <i
                 class="fa-solid"
                 :class="startBusy ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'"
@@ -592,6 +630,173 @@
         </div>
       </article>
     </section>
+
+    <dialog
+      ref="pathPickerDialog"
+      class="offline-path-picker"
+      :aria-labelledby="pickerMode === 'input' ? 'offlineInputPickerTitle' : 'offlineOutputPickerTitle'"
+      @cancel.prevent="closePathPicker">
+      <form class="offline-path-picker-shell" @submit.prevent="confirmPathPicker">
+        <header class="offline-path-picker-header">
+          <div>
+            <p class="apollo-kicker">This Windows PC</p>
+            <h2
+              :id="pickerMode === 'input' ? 'offlineInputPickerTitle' : 'offlineOutputPickerTitle'">
+              {{ pickerMode === 'input' ? 'Choose an input video' : 'Choose the output file name' }}
+            </h2>
+          </div>
+          <button
+            class="offline-path-picker-close"
+            type="button"
+            aria-label="Close file selection dialog"
+            @click="closePathPicker">
+            <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+          </button>
+        </header>
+
+        <div class="offline-path-picker-body">
+          <template v-if="pickerMode === 'input'">
+            <label class="form-label" for="offlinePickerPath">Folder</label>
+            <div class="input-group">
+              <input
+                id="offlinePickerPath"
+                v-model.trim="pickerTypedPath"
+                class="form-control monospace"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="Choose a drive or enter a local folder"
+                @keydown.enter.prevent="navigatePicker(pickerTypedPath)">
+              <button
+                class="btn btn-outline-secondary"
+                type="button"
+                :disabled="pickerBusy"
+                @click="navigatePicker(pickerTypedPath)">
+                Go
+              </button>
+            </div>
+
+            <div class="offline-picker-toolbar">
+              <button
+                class="btn btn-sm btn-apollo-quiet"
+                type="button"
+                :disabled="pickerBusy || pickerParentPath === pickerCurrentPath"
+                @click="navigatePicker(pickerParentPath)">
+                <i class="fa-solid fa-arrow-up" aria-hidden="true"></i>
+                Up
+              </button>
+              <span class="monospace">{{ pickerCurrentPath || 'Local drives' }}</span>
+            </div>
+
+            <div
+              ref="pickerEntries"
+              class="offline-picker-entries"
+              role="group"
+              aria-label="Files and folders"
+              :aria-busy="pickerBusy">
+              <div v-if="pickerBusy" class="offline-picker-message" role="status">
+                <i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i>
+                Loading files…
+              </div>
+              <template v-else>
+                <button
+                  v-for="(entry, index) in pickerEntries"
+                  :key="entry.path"
+                  class="offline-picker-entry"
+                  :class="{ selected: pickerSelectedPath === entry.path }"
+                  type="button"
+                  :tabindex="pickerFocusedIndex === index ? 0 : -1"
+                  :aria-pressed="entry.type === 'file' ? pickerSelectedPath === entry.path : undefined"
+                  @focus="pickerFocusedIndex = index"
+                  @keydown.down.prevent="movePickerFocus(index, 1)"
+                  @keydown.up.prevent="movePickerFocus(index, -1)"
+                  @keydown.home.prevent="movePickerFocus(index, -index)"
+                  @keydown.end.prevent="movePickerFocus(index, pickerEntries.length - index - 1)"
+                  @click="selectPickerEntry(entry, index)"
+                  @dblclick="activatePickerEntry(entry)">
+                  <i
+                    class="fa-solid"
+                    :class="entry.type === 'directory' ? 'fa-folder' : 'fa-file-video'"
+                    aria-hidden="true"></i>
+                  <span>{{ entry.name }}</span>
+                  <i
+                    v-if="entry.type === 'directory'"
+                    class="fa-solid fa-chevron-right offline-picker-entry-arrow"
+                    aria-hidden="true"></i>
+                </button>
+              </template>
+              <div
+                v-if="!pickerBusy && !pickerEntries.length"
+                class="offline-picker-message">
+                No files or folders are available here.
+              </div>
+            </div>
+            <p v-if="pickerTruncated" class="form-text">
+              This folder has more entries than the picker can show. Enter a more specific folder
+              path above.
+            </p>
+          </template>
+
+          <template v-else>
+            <div class="offline-output-location">
+              <span>Output folder (same as input)</span>
+              <code>{{ pickerCurrentPath || inputDirectory }}</code>
+            </div>
+            <div>
+              <label class="form-label" for="offlinePickerOutputName">New video file</label>
+              <input
+                id="offlinePickerOutputName"
+                ref="pickerOutputName"
+                v-model.trim="pickerOutputName"
+                class="form-control monospace"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="movie-3d.mkv"
+                pattern="[^\x2F\x5C]+\.(?:[mM][kK][vV]|[mM][pP]4)"
+                required>
+              <div class="form-text">
+                Use a new name ending in <span class="monospace">.mkv</span> or
+                <span class="monospace">.mp4</span>. Existing videos are never overwritten.
+              </div>
+            </div>
+            <div v-if="existingOutputNames.length" class="offline-existing-outputs">
+              <span>Existing outputs</span>
+              <div>
+                <code v-for="name in existingOutputNames" :key="name">{{ name }}</code>
+              </div>
+            </div>
+          </template>
+
+          <div v-if="pickerError" class="apollo-notice is-danger" role="alert">
+            <span class="apollo-notice-icon" aria-hidden="true">
+              <i class="fa-solid fa-circle-exclamation"></i>
+            </span>
+            <div>
+              <strong>The path could not be selected</strong>
+              <p>{{ pickerError }}</p>
+            </div>
+          </div>
+        </div>
+
+        <footer class="offline-path-picker-actions">
+          <span class="monospace">
+            {{ pickerMode === 'input' ? pickerSelectedPath : pickerOutputPreview }}
+          </span>
+          <div>
+            <button class="btn btn-apollo-quiet" type="button" @click="closePathPicker">
+              Cancel
+            </button>
+            <button
+              class="btn btn-apollo-primary"
+              type="submit"
+              :disabled="pickerBusy || (pickerMode === 'input' && !pickerCanConfirm)">
+              {{ pickerMode === 'input' ? 'Choose video' : 'Use this path' }}
+            </button>
+          </div>
+        </footer>
+      </form>
+    </dialog>
   </main>
 </body>
 
@@ -601,6 +806,7 @@
   import Navbar from './Navbar.vue'
   import {
     OfflineSbsApiError,
+    browseOfflineSbsFiles,
     cancelOfflineSbsJob,
     createOfflineSbsJob,
     downloadOfflineSbsSceneAudit,
@@ -619,9 +825,11 @@
     'canceling',
   ])
   const INTERRUPTED_STATUSES = new Set(['interrupted', 'abandoned', 'orphaned'])
+  const OUTPUT_NAME_PATTERN = /^[^\\/]+\.(?:mkv|mp4)$/i
   const GIB = 1024 * 1024 * 1024
   let overviewAbortController = null
   let detailAbortController = null
+  let pickerAbortController = null
 
   function normalizedStatus(job) {
     return String(job?.status || job?.state || 'unknown').trim().toLowerCase()
@@ -662,6 +870,20 @@
         refreshTimer: null,
         overviewRequestSerial: 0,
         detailRequestSerial: 0,
+        pickerMode: 'input',
+        pickerCurrentPath: '',
+        pickerParentPath: '',
+        pickerTypedPath: '',
+        pickerEntries: [],
+        pickerSelectedPath: '',
+        pickerOutputName: '',
+        pickerBusy: false,
+        pickerError: '',
+        pickerTruncated: false,
+        pickerRequestSerial: 0,
+        pickerFocusedIndex: -1,
+        lastAutoOutputName: '',
+        outputNameUserEdited: false,
       }
     },
     computed: {
@@ -700,41 +922,55 @@
       liveStreamActive() {
         return this.capabilities?.live_stream_active === true
       },
-      canStart() {
-        const budget = Number(this.form.sceneCacheGiB)
-        const outputName = this.form.outputName.trim()
-        const operationValid = (
-          this.form.operation === 'convert' ||
-          this.form.operation === 'evaluate'
+      inputDirectory() {
+        return this.parentHostPath(this.form.inputPath)
+      },
+      outputPathPreview() {
+        return this.joinHostPath(this.inputDirectory, this.form.outputName.trim())
+      },
+      pickerOutputPreview() {
+        return this.joinHostPath(
+          this.pickerCurrentPath || this.inputDirectory,
+          this.pickerOutputName.trim(),
         )
-        const outputNameValid = (
-          this.form.operation === 'evaluate' ||
-          (
-            !/[\\/]/.test(outputName) &&
-            /\.(?:mkv|mp4)$/i.test(outputName)
+      },
+      existingOutputNames() {
+        return this.pickerEntries
+          .filter(entry => entry?.type === 'file')
+          .map(entry => String(entry.name || ''))
+          .filter(Boolean)
+      },
+      pickerCanConfirm() {
+        if (this.pickerMode === 'input') {
+          const selected = this.pickerEntries.find(
+            entry => entry?.path === this.pickerSelectedPath,
           )
-        )
-        const cacheSettingsValid = (
-          this.form.operation === 'evaluate' ||
-          (
-            Number.isInteger(budget) &&
-            budget >= 1 &&
-            budget <= 64
-          )
-        )
+          return selected?.type === 'file'
+        }
+        const name = this.pickerOutputName.trim()
         return (
-          !this.startBusy &&
-          !this.activeJobExists &&
-          !this.liveStreamActive &&
-          Boolean(this.form.inputPath.trim()) &&
-          operationValid &&
-          outputNameValid &&
-          (
-            this.form.operation === 'evaluate' ||
-            this.codecAvailable(this.form.codec)
-          ) &&
-          cacheSettingsValid
+          OUTPUT_NAME_PATTERN.test(name) &&
+          !this.existingOutputNames.some(existing =>
+            existing.localeCompare(name, undefined, { sensitivity: 'accent' }) === 0
+          )
         )
+      },
+      startDisabledReason() {
+        if (this.startBusy) return 'Sunshine 3D is starting the job…'
+        if (this.initialLoading) return 'Checking offline conversion support…'
+        if (this.apiError) return 'Reconnect to the offline job manager before starting.'
+        if (this.activeJobExists) return 'Wait for the active offline job to finish or cancel it.'
+        if (this.liveStreamActive) return 'End the current live stream before starting an offline job.'
+        if (
+          this.form.operation === 'convert' &&
+          !this.codecAvailable(this.form.codec)
+        ) {
+          return 'Choose an NVENC codec included with the packaged FFmpeg.'
+        }
+        return ''
+      },
+      canStart() {
+        return !this.startDisabledReason
       },
       sceneDecisions() {
         const job = this.selectedJob
@@ -764,8 +1000,12 @@
       },
       sceneAuditAvailable() {
         const status = normalizedStatus(this.selectedJob)
+        const auditHash = String(
+          this.selectedJob?.worker_result?.scene_audit_sha256 || '',
+        )
+        const retainedAuditAttested = /^[0-9a-f]{64}$/i.test(auditHash)
         return (
-          this.sceneTotal > 0 &&
+          (this.sceneTotal > 0 || retainedAuditAttested) &&
           [
             'complete',
             'completed',
@@ -789,10 +1029,15 @@
       if (this.refreshTimer) window.clearInterval(this.refreshTimer)
       overviewAbortController?.abort()
       detailAbortController?.abort()
+      pickerAbortController?.abort()
       this.overviewRequestSerial += 1
       this.detailRequestSerial += 1
+      this.pickerRequestSerial += 1
     },
     watch: {
+      'form.inputPath'(inputPath) {
+        this.applySuggestedOutputName(inputPath)
+      },
       selectedJobId(jobId) {
         this.selectedJobDetail = null
         detailAbortController?.abort()
@@ -821,6 +1066,217 @@
       },
       codecAvailable(codec) {
         return this.supportedCodecs.includes(String(codec).toLowerCase())
+      },
+      parentHostPath(path) {
+        const source = String(path || '').trim()
+        const separatorIndex = Math.max(source.lastIndexOf('\\'), source.lastIndexOf('/'))
+        if (separatorIndex < 0) return ''
+
+        const parent = source.slice(0, separatorIndex)
+        if (/^[A-Za-z]:$/.test(parent)) {
+          return `${parent}${source[separatorIndex]}`
+        }
+        return parent || source[separatorIndex]
+      },
+      suggestOutputName(inputPath) {
+        const source = String(inputPath || '').trim()
+        const separatorIndex = Math.max(source.lastIndexOf('\\'), source.lastIndexOf('/'))
+        const leaf = source.slice(separatorIndex + 1)
+        if (!leaf) return ''
+
+        const extensionIndex = leaf.lastIndexOf('.')
+        const hasExtension = extensionIndex > 0 && extensionIndex < leaf.length - 1
+        const sourceStem = hasExtension ? leaf.slice(0, extensionIndex) : leaf
+        const sourceExtension = hasExtension ? leaf.slice(extensionIndex + 1).toLowerCase() : ''
+        const outputExtension = ['mkv', 'mp4'].includes(sourceExtension) ? sourceExtension : 'mkv'
+        const safeStem = sourceStem
+          .replace(/[\u0000-\u001f<>:"/\\|?*]/g, '-')
+          .replace(/[ .]+$/g, '')
+          .trim()
+        if (!safeStem) return ''
+
+        const suffix = `-3d.${outputExtension}`
+        const encoder = new TextEncoder()
+        const maximumStemBytes = 180 - encoder.encode(suffix).length
+        let fittedStem = ''
+        for (const character of safeStem) {
+          if (encoder.encode(`${fittedStem}${character}`).length > maximumStemBytes) break
+          fittedStem += character
+        }
+        return fittedStem ? `${fittedStem}${suffix}` : ''
+      },
+      applySuggestedOutputName(inputPath) {
+        const suggestion = this.suggestOutputName(inputPath)
+        const current = this.form.outputName.trim()
+        const followsPreviousSuggestion = (
+          !this.outputNameUserEdited && current === this.lastAutoOutputName
+        )
+        if (!current || followsPreviousSuggestion) {
+          this.form.outputName = suggestion
+          this.outputNameUserEdited = false
+        }
+        this.lastAutoOutputName = suggestion
+      },
+      joinHostPath(root, name) {
+        const directory = String(root || '').trim()
+        const leaf = String(name || '').trim()
+        if (!directory || !leaf) return ''
+        const separator = directory.includes('\\') && !directory.includes('/') ? '\\' : '/'
+        return `${directory.replace(/[\\/]+$/, '')}${separator}${leaf}`
+      },
+      showPathPicker() {
+        const dialog = this.$refs.pathPickerDialog
+        if (!dialog?.showModal) {
+          this.actionError = 'This browser does not support the file selection dialog.'
+          return false
+        }
+        if (!dialog.open) dialog.showModal()
+        return true
+      },
+      resetPathPicker(mode) {
+        pickerAbortController?.abort()
+        this.pickerRequestSerial += 1
+        this.pickerMode = mode
+        this.pickerCurrentPath = ''
+        this.pickerParentPath = ''
+        this.pickerTypedPath = ''
+        this.pickerEntries = []
+        this.pickerSelectedPath = ''
+        this.pickerOutputName = mode === 'output' ? this.form.outputName.trim() : ''
+        this.pickerBusy = false
+        this.pickerError = ''
+        this.pickerTruncated = false
+        this.pickerFocusedIndex = -1
+      },
+      async openInputPicker() {
+        this.resetPathPicker('input')
+        if (!this.showPathPicker()) return
+        await this.navigatePicker(this.form.inputPath.trim())
+      },
+      async openOutputPicker() {
+        if (!this.inputDirectory) {
+          this.actionError = 'Choose an input video before choosing the output file name.'
+          return
+        }
+        this.resetPathPicker('output')
+        if (!this.showPathPicker()) return
+        await this.navigatePicker(this.inputDirectory)
+        await this.$nextTick()
+        this.$refs.pickerOutputName?.focus()
+        this.$refs.pickerOutputName?.select()
+      },
+      closePathPicker() {
+        pickerAbortController?.abort()
+        this.pickerRequestSerial += 1
+        this.pickerBusy = false
+        const dialog = this.$refs.pathPickerDialog
+        if (dialog?.open) dialog.close()
+      },
+      async navigatePicker(path) {
+        pickerAbortController?.abort()
+        const controller = new AbortController()
+        pickerAbortController = controller
+        const requestSerial = ++this.pickerRequestSerial
+        this.pickerBusy = true
+        this.pickerError = ''
+        this.pickerSelectedPath = ''
+        try {
+          const payload = await browseOfflineSbsFiles({
+            path: String(path || '').trim(),
+            type: 'file',
+            signal: controller.signal,
+          })
+          if (requestSerial !== this.pickerRequestSerial) return
+          const listing = payload?.browse && typeof payload.browse === 'object' ?
+            payload.browse :
+            payload
+          this.pickerCurrentPath = String(listing?.path || '')
+          this.pickerParentPath = String(listing?.parent || '')
+          this.pickerTypedPath = this.pickerCurrentPath
+          this.pickerEntries = Array.isArray(listing?.entries) ? listing.entries : []
+          this.pickerTruncated = listing?.truncated === true
+          this.pickerFocusedIndex = this.pickerEntries.length ? 0 : -1
+          this.pickerBusy = false
+          if (this.pickerMode === 'input' && this.pickerFocusedIndex >= 0) {
+            await this.$nextTick()
+            if (requestSerial === this.pickerRequestSerial) {
+              this.focusPickerEntry(this.pickerFocusedIndex)
+            }
+          }
+        } catch (error) {
+          if (error?.name === 'AbortError') return
+          if (requestSerial === this.pickerRequestSerial) {
+            this.pickerEntries = []
+            this.pickerTruncated = false
+            if (error?.status === 403) {
+              this.pickerError = this.pickerMode === 'input' ?
+                'For safety, browse host files from the Web UI opened on this PC. You can still enter an absolute input path manually.' :
+                'For safety, choose host files from the Web UI opened on this PC. Enter a new output filename manually in the conversion form.'
+            } else if (error?.status === 404) {
+              this.pickerError = this.pickerMode === 'input' ?
+                'This Sunshine 3D build does not include host file browsing. Enter an absolute input path manually.' :
+                'This Sunshine 3D build does not include host file browsing. Enter a new output filename manually in the conversion form.'
+            } else {
+              this.pickerError = this.apiMessage(error)
+            }
+          }
+        } finally {
+          if (requestSerial === this.pickerRequestSerial) {
+            this.pickerBusy = false
+          }
+        }
+      },
+      focusPickerEntry(index) {
+        const elements = this.$refs.pickerEntries?.querySelectorAll('.offline-picker-entry')
+        if (!elements?.length) return
+        const nextIndex = Math.max(0, Math.min(index, elements.length - 1))
+        this.pickerFocusedIndex = nextIndex
+        elements[nextIndex]?.focus()
+      },
+      movePickerFocus(index, offset) {
+        this.focusPickerEntry(index + offset)
+      },
+      selectPickerEntry(entry, index = this.pickerFocusedIndex) {
+        this.pickerFocusedIndex = index
+        if (entry?.type === 'directory') {
+          this.navigatePicker(entry.path)
+          return
+        }
+        this.pickerSelectedPath = String(entry?.path || '')
+        this.pickerError = ''
+      },
+      activatePickerEntry(entry) {
+        if (entry?.type === 'directory') {
+          this.navigatePicker(entry.path)
+          return
+        }
+        this.pickerSelectedPath = String(entry?.path || '')
+        this.confirmPathPicker()
+      },
+      confirmPathPicker() {
+        if (this.pickerMode === 'input') {
+          if (!this.pickerCanConfirm) return
+          this.form.inputPath = this.pickerSelectedPath
+          this.closePathPicker()
+          return
+        }
+        if (!this.$refs.pickerOutputName?.reportValidity() || !this.pickerCanConfirm) {
+          if (
+            this.existingOutputNames.some(existing =>
+              existing.localeCompare(
+                this.pickerOutputName.trim(),
+                undefined,
+                { sensitivity: 'accent' },
+              ) === 0
+            )
+          ) {
+            this.pickerError = 'That output file already exists. Choose a new file name.'
+          }
+          return
+        }
+        this.form.outputName = this.pickerOutputName.trim()
+        this.outputNameUserEdited = true
+        this.closePathPicker()
       },
       jobTone(job) {
         const status = normalizedStatus(job)
@@ -1333,6 +1789,28 @@
     gap: var(--apollo-space-xl);
   }
 
+  .offline-browse-button {
+    display: inline-flex;
+    min-width: 112px;
+    align-items: center;
+    justify-content: center;
+    gap: var(--apollo-space-sm);
+  }
+
+  .offline-output-preview {
+    display: block;
+    margin-top: var(--apollo-space-xs);
+  }
+
+  .offline-output-preview code {
+    overflow-wrap: anywhere;
+    color: var(--apollo-text-primary);
+  }
+
+  .offline-output-location-inline {
+    margin: 0 0 var(--apollo-space-sm);
+  }
+
   .offline-codec-grid,
   .offline-form-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1427,6 +1905,10 @@
     max-width: 520px;
     margin-bottom: 0;
     color: var(--apollo-text-secondary);
+  }
+
+  .offline-form-actions p.offline-start-blocked {
+    color: var(--apollo-status-warn);
   }
 
   .offline-form-actions .btn {
@@ -1623,6 +2105,211 @@
     color: var(--apollo-text-disabled);
   }
 
+  .offline-path-picker:not([open]) {
+    display: none;
+  }
+
+  .offline-path-picker {
+    width: min(760px, calc(100vw - 2rem));
+    max-width: none;
+    max-height: min(760px, calc(100vh - 2rem));
+    padding: 0;
+    color: var(--apollo-text-primary);
+    border: 1px solid var(--apollo-border-panel);
+    border-radius: var(--apollo-radius-card);
+    background: var(--apollo-surface-raised);
+    box-shadow: var(--apollo-shadow-card);
+  }
+
+  .offline-path-picker::backdrop {
+    background: rgb(5 10 18 / 68%);
+    backdrop-filter: blur(3px);
+  }
+
+  .offline-path-picker-shell {
+    display: grid;
+    max-height: min(760px, calc(100vh - 2rem));
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+
+  .offline-path-picker-header,
+  .offline-path-picker-actions,
+  .offline-picker-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--apollo-space-md);
+  }
+
+  .offline-path-picker-header {
+    padding: var(--apollo-space-lg) var(--apollo-space-xl);
+    border-bottom: 1px solid var(--apollo-border);
+  }
+
+  .offline-path-picker-header h2 {
+    margin-bottom: 0;
+  }
+
+  .offline-path-picker-close {
+    display: grid;
+    width: var(--apollo-control-compact);
+    min-width: var(--apollo-control-compact);
+    height: var(--apollo-control-compact);
+    color: var(--apollo-text-secondary);
+    place-items: center;
+    border: 0;
+    border-radius: var(--apollo-radius-control);
+    background: transparent;
+  }
+
+  .offline-path-picker-close:hover {
+    color: var(--apollo-text-primary);
+    background: var(--apollo-surface-muted);
+  }
+
+  .offline-path-picker-body {
+    min-height: 0;
+    padding: var(--apollo-space-xl);
+    overflow-y: auto;
+  }
+
+  .offline-picker-toolbar {
+    margin: var(--apollo-space-md) 0;
+  }
+
+  .offline-picker-toolbar > span {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--apollo-text-secondary);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .offline-picker-entries {
+    min-height: 260px;
+    max-height: 380px;
+    overflow-y: auto;
+    border: 1px solid var(--apollo-border);
+    border-radius: var(--apollo-radius-control);
+    background: var(--apollo-surface);
+  }
+
+  .offline-picker-entry {
+    display: grid;
+    width: 100%;
+    min-height: var(--apollo-control-compact);
+    padding: var(--apollo-space-sm) var(--apollo-space-md);
+    align-items: center;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: var(--apollo-space-md);
+    color: var(--apollo-text-primary);
+    text-align: left;
+    border: 0;
+    border-bottom: 1px solid var(--apollo-border);
+    background: transparent;
+  }
+
+  .offline-picker-entry:last-child {
+    border-bottom: 0;
+  }
+
+  .offline-picker-entry:hover,
+  .offline-picker-entry.selected {
+    background: color-mix(in srgb, var(--apollo-accent) 10%, var(--apollo-surface));
+  }
+
+  .offline-picker-entry.selected {
+    outline: 1px solid var(--apollo-accent);
+    outline-offset: -1px;
+  }
+
+  .offline-picker-entry > i:first-child {
+    color: var(--apollo-accent);
+  }
+
+  .offline-picker-entry > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .offline-picker-entry-arrow {
+    color: var(--apollo-text-disabled);
+  }
+
+  .offline-picker-message {
+    display: flex;
+    min-height: 260px;
+    align-items: center;
+    justify-content: center;
+    gap: var(--apollo-space-sm);
+    color: var(--apollo-text-secondary);
+  }
+
+  .offline-output-location,
+  .offline-existing-outputs {
+    display: grid;
+    margin-bottom: var(--apollo-space-xl);
+    padding: var(--apollo-space-md);
+    gap: var(--apollo-space-xs);
+    border-radius: var(--apollo-radius-control);
+    background: var(--apollo-surface-sunken);
+  }
+
+  .offline-output-location > span,
+  .offline-existing-outputs > span {
+    color: var(--apollo-text-secondary);
+    font-weight: 600;
+  }
+
+  .offline-output-location code {
+    overflow-wrap: anywhere;
+    color: var(--apollo-text-primary);
+  }
+
+  .offline-existing-outputs {
+    margin: var(--apollo-space-xl) 0 0;
+  }
+
+  .offline-existing-outputs > div {
+    display: flex;
+    max-height: 140px;
+    overflow-y: auto;
+    gap: var(--apollo-space-xs);
+    flex-wrap: wrap;
+  }
+
+  .offline-existing-outputs code {
+    padding: 0.15rem 0.4rem;
+    color: var(--apollo-text-primary);
+    border: 1px solid var(--apollo-border);
+    border-radius: var(--apollo-radius-pill);
+    background: var(--apollo-surface);
+  }
+
+  .offline-path-picker-body > .apollo-notice {
+    margin-top: var(--apollo-space-lg);
+  }
+
+  .offline-path-picker-actions {
+    padding: var(--apollo-space-lg) var(--apollo-space-xl);
+    border-top: 1px solid var(--apollo-border);
+  }
+
+  .offline-path-picker-actions > span {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--apollo-text-secondary);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .offline-path-picker-actions > div {
+    display: flex;
+    flex: 0 0 auto;
+    gap: var(--apollo-space-sm);
+  }
+
   .offline-scene-empty > span {
     display: grid;
     width: var(--apollo-icon-tile);
@@ -1664,6 +2351,26 @@
     .offline-form-actions .btn,
     .offline-progress-actions .btn {
       width: 100%;
+      justify-content: center;
+    }
+
+    .offline-path-picker-header,
+    .offline-path-picker-body,
+    .offline-path-picker-actions {
+      padding: var(--apollo-space-lg);
+    }
+
+    .offline-path-picker-actions {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .offline-path-picker-actions > div,
+    .offline-path-picker-actions .btn {
+      width: 100%;
+    }
+
+    .offline-path-picker-actions .btn {
       justify-content: center;
     }
   }

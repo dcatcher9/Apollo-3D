@@ -99,6 +99,7 @@ namespace confighttp {
     if (
       method == "POST" &&
       (
+        path == "/api/offline-sbs/browse" ||
         path == "/api/offline-sbs/jobs" ||
         path.starts_with("/api/offline-sbs/jobs/")
       )
@@ -455,7 +456,7 @@ namespace confighttp {
       bad_request(
         response,
         request,
-        "Offline conversion request has duplicate Content-Length headers"
+        "Offline SBS request has duplicate Content-Length headers"
       );
       return false;
     }
@@ -468,7 +469,7 @@ namespace confighttp {
         bad_request(
           response,
           request,
-          "Offline conversion request has an invalid Content-Length"
+          "Offline SBS request has an invalid Content-Length"
         );
         return false;
       case bounded_content_length_e::exceeds_limit:
@@ -478,7 +479,7 @@ namespace confighttp {
           {
             {"status", false},
             {"error_code", "invalid_request"},
-            {"error", "Offline conversion request exceeds the 64 KiB limit"},
+            {"error", "Offline SBS request exceeds the 64 KiB limit"},
           }
         );
         return false;
@@ -495,7 +496,7 @@ namespace confighttp {
         {
           {"status", false},
           {"error_code", "invalid_request"},
-          {"error", "Offline conversion request exceeds the 64 KiB limit"},
+          {"error", "Offline SBS request exceeds the 64 KiB limit"},
         }
       );
       return false;
@@ -1724,8 +1725,9 @@ namespace confighttp {
     }
   }
 
+  template<class Reply>
   SimpleWeb::StatusCode offline_reply_status(
-    const offline_sbs::service_reply_t &reply,
+    const Reply &reply,
     SimpleWeb::StatusCode success
   ) {
     if (reply.ok) {
@@ -1775,6 +1777,96 @@ namespace confighttp {
                     ))},
       }
     );
+  }
+
+  void browseOfflineSbsFilesystem(
+    resp_https_t response,
+    req_https_t request
+  ) {
+    if (!authenticate(response, request) ||
+        !validateContentType(response, request, "application/json") ||
+        !validateOfflineSbsRequestSize(response, request)) {
+      return;
+    }
+    const auto address =
+      net::addr_to_normalized_string(request->remote_endpoint().address());
+    if (net::from_address(address) != net::PC) {
+      BOOST_LOG(warning)
+        << "Web UI: ["sv << address
+        << "] -- rejected non-loopback offline filesystem browse"sv;
+      send_json_response(
+        response,
+        SimpleWeb::StatusCode::client_error_forbidden,
+        offline_sbs::browse_reply_t {
+          .code = offline_sbs::error_code_e::unavailable,
+          .error =
+            "Host filesystem browsing is available only from the Sunshine 3D PC",
+        }.json()
+      );
+      return;
+    }
+
+    const auto reject_request = [&](std::string error) {
+      send_json_response(
+        response,
+        SimpleWeb::StatusCode::client_error_bad_request,
+        offline_sbs::browse_reply_t {
+          .code = offline_sbs::error_code_e::invalid_request,
+          .error = std::move(error),
+        }.json()
+      );
+    };
+    try {
+      std::stringstream content;
+      content << request->content.rdbuf();
+      const auto input = nlohmann::json::parse(content.str());
+      if (!input.is_object()) {
+        reject_request("Offline browse request must be an object");
+        return;
+      }
+      static const std::set<std::string> allowed {"path", "type"};
+      for (const auto &[name, value] : input.items()) {
+        if (!allowed.contains(name)) {
+          reject_request("Offline browse request contains an unknown field");
+          return;
+        }
+      }
+
+      const auto path = input.value("path", std::string {});
+      const auto requested_type = input.value("type", std::string {"any"});
+      offline_sbs::browse_request_t browse;
+      if (!path.empty()) {
+        if (path.size() > 32ull * 1024ull) {
+          reject_request("Offline browse path exceeds the 32 KiB UTF-8 limit");
+          return;
+        }
+        std::u8string utf8_path;
+        utf8_path.assign(
+          reinterpret_cast<const char8_t *>(path.data()),
+          reinterpret_cast<const char8_t *>(path.data() + path.size())
+        );
+        browse.path = fs::path {utf8_path};
+      }
+      if (requested_type == "file") {
+        browse.type = offline_sbs::browse_type_e::file;
+      } else if (requested_type == "directory") {
+        browse.type = offline_sbs::browse_type_e::directory;
+      } else if (requested_type == "any") {
+        browse.type = offline_sbs::browse_type_e::any;
+      } else {
+        reject_request("Offline browse type must be file, directory, or any");
+        return;
+      }
+
+      const auto reply = offline_sbs::browse(browse);
+      send_json_response(
+        response,
+        offline_reply_status(reply, SimpleWeb::StatusCode::success_ok),
+        reply.json()
+      );
+    } catch (const std::exception &) {
+      reject_request("Offline browse request must contain valid JSON strings");
+    }
   }
 
   void listOfflineSbsJobs(resp_https_t response, req_https_t request) {
@@ -2041,6 +2133,8 @@ namespace confighttp {
     server.resource["^/api/apps/delete$"]["POST"] = deleteApp;
     server.resource["^/api/apps/close$"]["POST"] = closeApp;
     server.resource["^/api/logs$"]["GET"] = getLogs;
+    server.resource["^/api/offline-sbs/browse$"]["POST"] =
+      browseOfflineSbsFilesystem;
     server.resource["^/api/offline-sbs/capabilities$"]["GET"] =
       getOfflineSbsCapabilities;
     server.resource["^/api/offline-sbs/jobs$"]["GET"] = listOfflineSbsJobs;
