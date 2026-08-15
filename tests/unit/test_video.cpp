@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -24,6 +25,7 @@
 #include <src/video.h>
 #include <src/video_colorspace.h>
 #include <src/video_depth_estimator.h>
+#include <thread>
 #include <tuple>
 #include <vector>
 
@@ -1238,6 +1240,166 @@ TEST(TensorRtContextLifecycleTest, ExactFrameJoinWaitsForBothStreamsAndFailsCons
   EXPECT_EQ(joined(stream_e::failed, true, stream_e::ready), joined_e::failed);
   EXPECT_EQ(joined(stream_e::ready, true, stream_e::failed), joined_e::failed);
 }
+
+#ifdef _WIN32
+TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndConsumesExactFrameOnce) {
+  const auto *enabled = std::getenv("APOLLO_RUN_TENSORRT_TESTS");
+  if (!enabled || std::string_view {enabled} != "1") {
+    GTEST_SKIP() << "Set APOLLO_RUN_TENSORRT_TESTS=1 for the local NVIDIA/TensorRT integration check.";
+  }
+
+  using Microsoft::WRL::ComPtr;
+  ComPtr<ID3D11Device> device;
+  ComPtr<ID3D11DeviceContext> context;
+  D3D_FEATURE_LEVEL actual {};
+  constexpr D3D_FEATURE_LEVEL requested[] = {
+    D3D_FEATURE_LEVEL_11_1,
+    D3D_FEATURE_LEVEL_11_0,
+  };
+  ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(
+    nullptr,
+    D3D_DRIVER_TYPE_HARDWARE,
+    nullptr,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    requested,
+    static_cast<UINT>(std::size(requested)),
+    D3D11_SDK_VERSION,
+    &device,
+    &actual,
+    &context
+  )));
+
+  constexpr UINT width = 1280u;
+  constexpr UINT height = 720u;
+  const std::vector<std::uint32_t> pixels(
+    static_cast<std::size_t>(width) * height,
+    0xff304050u
+  );
+  D3D11_TEXTURE2D_DESC desc {};
+  desc.Width = width;
+  desc.Height = height;
+  desc.MipLevels = 1u;
+  desc.ArraySize = 1u;
+  desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+  desc.SampleDesc.Count = 1u;
+  desc.Usage = D3D11_USAGE_IMMUTABLE;
+  desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+  const D3D11_SUBRESOURCE_DATA initial {
+    pixels.data(), width * sizeof(std::uint32_t), 0u
+  };
+  ComPtr<ID3D11Texture2D> texture;
+  ComPtr<ID3D11ShaderResourceView> source;
+  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(&desc, &initial, &texture)));
+  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
+    texture.Get(), nullptr, &source
+  )));
+
+  models::video_depth_estimator estimator {
+    device,
+    context,
+    std::filesystem::path {SUNSHINE_ASSETS_DIR},
+    config::video_t::sbs_t {},
+    video::host_sbs_v2_depth_model(),
+  };
+  ASSERT_TRUE(estimator.is_valid());
+
+  // The first exact signature runs an ordinary enqueue; the second captures, instantiates, and
+  // launches its CUDA graph. A few additional replays bring an otherwise idle adapter out of its
+  // low-power state before measuring the same two-millisecond budget used by production.
+  constexpr std::uint64_t warm_frame_base = 0xabc000u;
+  constexpr std::uint64_t warm_observations = 8u;
+  for (std::uint64_t i = 1u; i <= warm_observations; ++i) {
+    const auto warm_frame_id = warm_frame_base + i;
+    const auto warm = estimator.estimate_depth(
+      source.Get(),
+      models::input_color_space::srgb,
+      warm_frame_id
+    );
+    ASSERT_TRUE(warm.inference_enqueued);
+    const auto warmed = estimator.finish_pending_depth_for_evaluation();
+    ASSERT_TRUE(warmed.completed_frame_valid);
+    ASSERT_EQ(warmed.completed_frame_id, warm_frame_id);
+  }
+
+  constexpr std::uint64_t observed_frame_base = 0xabd000u;
+  constexpr std::uint64_t measured_observations = 12u;
+  std::uint64_t immediate_hits = 0u;
+  std::uint64_t bounded_hits = 0u;
+  std::uint64_t timeouts = 0u;
+  std::uint64_t total_bounded_queries = 0u;
+  for (std::uint64_t i = 1u; i <= measured_observations; ++i) {
+    // An event-ready finish may expose the output before the independently queued interop-unmap
+    // tail is reusable. Production naturally has a frame interval and warp work here; this tight
+    // fixture waits only for that full-stream admission proof before submitting the next unit.
+    const auto reuse_deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds {50};
+    bool reusable = false;
+    do {
+      reusable = estimator.can_accept_frame();
+      if (!reusable) {
+        std::this_thread::yield();
+      }
+    } while (!reusable && std::chrono::steady_clock::now() < reuse_deadline);
+    ASSERT_TRUE(reusable);
+
+    const auto observed_frame_id = observed_frame_base + i;
+    const auto submitted = estimator.estimate_depth(
+      source.Get(),
+      models::input_color_space::srgb,
+      observed_frame_id
+    );
+    ASSERT_TRUE(submitted.inference_enqueued);
+
+    // An expired budget still performs exactly one nonblocking joined query. If it is busy, the
+    // second call exercises the production two-millisecond cap. A timeout is valid under external
+    // GPU load and must preserve the exact pending owner for the synchronous test fallback.
+    auto completed = estimator.try_finish_pending_depth_until(
+      models::input_color_space::srgb,
+      std::chrono::steady_clock::now(),
+      1u
+    );
+    ASSERT_EQ(completed.query_count, 1u);
+    const bool immediate_ready = completed.ready;
+    if (!immediate_ready) {
+      ASSERT_TRUE(completed.timed_out);
+      completed = estimator.try_finish_pending_depth_until(
+        models::input_color_space::srgb,
+        std::chrono::steady_clock::now() + std::chrono::milliseconds {2},
+        4096u
+      );
+      total_bounded_queries += completed.query_count;
+    }
+
+    if (completed.ready) {
+      immediate_hits += immediate_ready ? 1u : 0u;
+      bounded_hits += immediate_ready ? 0u : 1u;
+      ASSERT_FALSE(completed.timed_out);
+      ASSERT_TRUE(completed.result.completed_frame_valid);
+      ASSERT_EQ(completed.result.completed_frame_id, observed_frame_id);
+    } else {
+      ++timeouts;
+      ASSERT_TRUE(completed.timed_out);
+      const auto fallback = estimator.finish_pending_depth_for_evaluation();
+      ASSERT_TRUE(fallback.completed_frame_valid);
+      ASSERT_EQ(fallback.completed_frame_id, observed_frame_id);
+    }
+
+    const auto consumed_once = estimator.try_finish_pending_depth_nonblocking(
+      models::input_color_space::srgb,
+      false
+    );
+    EXPECT_TRUE(consumed_once.ready);
+    EXPECT_FALSE(consumed_once.result.completed_frame_valid);
+    EXPECT_EQ(consumed_once.query_count, 0u);
+  }
+
+  BOOST_LOG(info) << "TensorRT same-frame poll hardware: immediate hits " << immediate_hits
+                  << ", bounded hits " << bounded_hits << ", timeouts " << timeouts
+                  << ", bounded queries " << total_bounded_queries << '.';
+  EXPECT_GT(immediate_hits + bounded_hits, 0u)
+    << "No hot observation completed inside the production two-millisecond poll budget.";
+}
+#endif
 
 TEST(TensorRtContextLifecycleTest, AccountingBoundsQuarantinedAndReusableContextsTogether) {
   models::detail::execution_context_accounting_t accounting;
@@ -3747,6 +3909,39 @@ TEST(EncodeWaitPolicyTests, ReadyDepthCannotSpinBeforeFirstRealFrame) {
   EXPECT_FALSE(video::detail::should_poll_ready_depth_without_wait(false, true));
   EXPECT_FALSE(video::detail::should_poll_ready_depth_without_wait(true, false));
   EXPECT_TRUE(video::detail::should_poll_ready_depth_without_wait(true, true));
+}
+
+TEST(EncodeWaitPolicyTests, CadenceTargetIsResolvedBeforeConversionWithoutChangingTimestamp) {
+  using namespace std::chrono_literals;
+  const auto target = std::chrono::steady_clock::time_point {100ms};
+
+  const auto paced = video::detail::select_encode_frame_schedule(
+    target + 1ms,
+    target,
+    16ms,
+    4ms
+  );
+  EXPECT_EQ(paced.presentation_timestamp, target);
+  EXPECT_EQ(paced.next_encode_target, target + 16ms);
+
+  const auto discontinuity = video::detail::select_encode_frame_schedule(
+    target + 10ms,
+    target,
+    16ms,
+    4ms
+  );
+  EXPECT_EQ(discontinuity.presentation_timestamp, target + 10ms);
+  EXPECT_EQ(discontinuity.next_encode_target, target + 26ms);
+
+  const auto first_source = std::chrono::steady_clock::time_point {3s};
+  const auto first = video::detail::select_encode_frame_schedule(
+    first_source,
+    {},
+    16ms,
+    4ms
+  );
+  EXPECT_EQ(first.presentation_timestamp, first_source);
+  EXPECT_EQ(first.next_encode_target, first_source + 16ms);
 }
 
 TEST(EncodedFrameBufferPoolTests, RecyclesBoundedReasonableBuffers) {

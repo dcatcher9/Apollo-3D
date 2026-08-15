@@ -88,6 +88,33 @@ namespace video {
     ) noexcept {
       return depth_pipeline_ready && has_retained_source;
     }
+
+    struct encode_frame_schedule_t {
+      frame_time_point_t presentation_timestamp {};
+      frame_time_point_t next_encode_target {};
+    };
+
+    /** Resolve the same cadence rebase that historically ran immediately after convert().
+     *
+     * The returned next target is scheduler state, not a source/content timestamp. Computing it
+     * before conversion lets a converter use remaining cadence slack without changing the RTP
+     * presentation timestamp or the first-frame/discontinuity behavior.
+     */
+    constexpr encode_frame_schedule_t select_encode_frame_schedule(
+      const frame_time_point_t source_presentation_timestamp,
+      const frame_time_point_t current_encode_target,
+      const std::chrono::steady_clock::duration frame_interval,
+      const std::chrono::steady_clock::duration variation_threshold
+    ) noexcept {
+      const auto presentation_timestamp =
+        source_presentation_timestamp - current_encode_target < variation_threshold ?
+          current_encode_target :
+          source_presentation_timestamp;
+      return {
+        presentation_timestamp,
+        presentation_timestamp + frame_interval,
+      };
+    }
   }  // namespace detail
 
   /* Host-side SBS 3D mode requested by the client via the 0x3003 control message.
@@ -484,6 +511,14 @@ namespace video {
     virtual ~encode_session_t() = default;
 
     virtual int convert(platf::img_t &img) = 0;
+
+    virtual int convert_with_encode_target(
+      platf::img_t &img,
+      std::chrono::steady_clock::time_point next_encode_target
+    ) {
+      (void) next_encode_target;
+      return convert(img);
+    }
 
     virtual std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp() const {
       return std::nullopt;

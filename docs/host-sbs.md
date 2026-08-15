@@ -512,7 +512,8 @@ authenticated cached field against the current captured color, but it does not c
 observation, relabel the geometry completion, or advance normalization, scene-cut, camera, OCR, or
 SLR state. Any pending completion advances those states at most once under its original exact-frame
 identity. The forced refresh and every fail-open case return through the normal matched copy and
-enqueue gate rather than synchronously waiting for the GPU.
+enqueue gate rather than using an unbounded GPU wait. A newly accepted frame may still use the
+bounded same-frame completion query below.
 
 That whole-depth exception is distinct from the OCR-only redispatch above. A forced or otherwise
 ordinary DAV2 enqueue still advances depth, cut, camera, and V2 state; if only its bottom detector
@@ -551,7 +552,35 @@ TensorRT inference and all coordinate passes remain on the GPU. The live path do
 per-frame GPU-to-CPU readback. When inference is still busy, the capture loop must not enqueue an
 unbounded backlog; it continues with flat/current output according to the matched-frame contract.
 Telemetry readback is nonblocking and may drop samples under GPU load, while offline evaluation
-may intentionally block to obtain a complete trace.
+may intentionally block to obtain a complete trace. Admission and fixed-resource reuse remain
+guarded by the joined full-stream query, including the optional OCR stream's interop-unmap tail.
+
+After one current matched frame has successfully enqueued, production gives its joined DAV2/OCR
+unit one immediate nonblocking completion query. It may repeat that query only when the encode
+loop's next cadence target leaves at least `0.25 ms` of useful slack after reserving `3 ms` for
+completed-depth postprocess, SBS warp/output, and NVENC submission. Repeated queries stop at the
+earlier of that reserved cadence deadline and `2 ms` after polling began, with an independent query-
+count fuse. After the immediate query, joined queries are spaced by at least `50 us` of yielded
+steady-clock time so the fuse cannot exhaust before the GPU has a useful opportunity to progress.
+Capture and content timestamps remain pixel identities and are never interpreted as an encode
+deadline. Every iteration uses joined non-timing CUDA events recorded after the participating
+TensorRT enqueue and before its interop unmap; between repeated queries the encode thread yields.
+An event-ready finish submits D3D11 postprocess behind the already-issued unmaps without
+synchronizing either whole stream. Each accepted observation records one DAV2 event and, when OCR
+runs, one OCR event; polling adds no inference kernels, shader passes, replacement work, GPU
+readback, busy-stream synchronization, or flush. If readiness-event setup is unavailable before
+any enqueue, same-frame completion safely downgrades to one full-stream nonblocking query and does
+not spend the bounded-wait budget.
+
+A joined hit consumes that exact current frame once, invalidates the older singleton-resource
+attribution, and may render it in the current delivery instead of waiting for the next conversion.
+A bounded timeout or a busy immediate query on a late/ineligible frame leaves the candidate slot,
+one-pending owner, and previous completion untouched, so the ordinary asynchronous path continues.
+A ready empty or failed result clears the candidate and enters the existing terminal-failure or
+ordinary-output handling; a ready mismatched identity enters the existing unknown-completion
+handling. Diagnostics report wait attempts, exact hits, timeouts, failures, query count, and
+average/maximum query-wait duration. The pre-existing retained-source idle drain and the `250 ms`
+stale-prior recovery are the only paths that can synchronize an actually busy inference.
 
 ## Foreground window-region ROI
 

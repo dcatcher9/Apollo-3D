@@ -6,6 +6,7 @@
 
 // standard includes
 #include <bitset>
+#include <chrono>
 #include <filesystem>
 #include <functional>
 #include <mutex>
@@ -385,6 +386,19 @@ namespace platf {
     virtual ~encode_device_t() = default;
 
     virtual int convert(platf::img_t &img) = 0;
+
+    /** Convert one captured frame with an encode-cadence target owned by the video loop.
+     *
+     * Ordinary devices ignore the target. Windows Host SBS uses it only to bound an optional
+     * completion query; the capture/content timestamps remain pixel identities, never deadlines.
+     */
+    virtual int convert_with_encode_target(
+      platf::img_t &img,
+      std::chrono::steady_clock::time_point next_encode_target
+    ) {
+      (void) next_encode_target;
+      return convert(img);
+    }
 
     /** Timestamp of the desktop/content pixels in the most recently converted encoder input.
      *

@@ -268,6 +268,16 @@ namespace video {
       return device->convert(img);
     }
 
+    int convert_with_encode_target(
+      platf::img_t &img,
+      const std::chrono::steady_clock::time_point next_encode_target
+    ) override {
+      if (!device) {
+        return -1;
+      }
+      return device->convert_with_encode_target(img, next_encode_target);
+    }
+
     bool needs_conversion_poll() const override {
       return device && device->needs_conversion_poll();
     }
@@ -998,19 +1008,20 @@ namespace video {
             continue;
           }
 
-          if (session->convert(*img)) {
+          const auto schedule = detail::select_encode_frame_schedule(
+            current_timestamp,
+            encode_frame_timestamp,
+            encode_frame_threshold,
+            frame_variation_threshold
+          );
+          if (session->convert_with_encode_target(*img, schedule.next_encode_target)) {
             BOOST_LOG(error) << "Could not convert image"sv;
             break;
           }
           converted_frame = true;
 
-          if (time_diff < frame_variation_threshold) {
-            *frame_timestamp = encode_frame_timestamp;
-          } else {
-            encode_frame_timestamp = current_timestamp;
-          }
-
-          encode_frame_timestamp += encode_frame_threshold;
+          *frame_timestamp = schedule.presentation_timestamp;
+          encode_frame_timestamp = schedule.next_encode_target;
         } else if (!images->running()) {
           break;
         }

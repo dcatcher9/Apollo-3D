@@ -545,7 +545,11 @@ namespace platf::dxgi {
       return rendered_content_timestamp_;
     }
 
-    int convert(platf::img_t &img_base) {
+    int convert(
+      platf::img_t &img_base,
+      const std::optional<std::chrono::steady_clock::time_point> next_encode_target =
+        std::nullopt
+    ) {
       auto &img = (img_d3d_t &) img_base;
       auto converted_content_timestamp =
         ::video::detail::select_rendered_content_timestamp(
@@ -1140,11 +1144,141 @@ namespace platf::dxgi {
                   depth_authority_reprocess_pending = false;
                 }
 
+                // Give the just-submitted exact-frame DAV2/OCR unit one immediate joined query.
+                // Repeated polling is allowed only inside encode-loop cadence slack; a timeout
+                // leaves the sole pending inference, its matched slot, and the prior completion
+                // untouched. No older busy admission can enter this path because estimate_depth()
+                // must have successfully enqueued this candidate in the current call.
+                if (
+                  est.inference_enqueued && matched_candidate_slot &&
+                  matched_candidate_slot->pending && !snapshot_debug_inputs
+                ) {
+                  const auto poll_started = std::chrono::steady_clock::now();
+                  const auto poll_plan = detail::host_sbs_same_frame_poll_plan(
+                    true,
+                    false,
+                    next_encode_target,
+                    poll_started
+                  );
+                  auto polled = poll_plan.eligible ?
+                                  depth_estimator->try_finish_pending_depth_until(
+                                    input_color_space,
+                                    poll_plan.deadline,
+                                    detail::host_sbs_same_frame_poll_max_queries,
+                                    false
+                                  ) :
+                                  depth_estimator->try_finish_pending_depth_nonblocking(
+                                    input_color_space,
+                                    false
+                                  );
+                  const double waited_ms = std::chrono::duration<double, std::milli>(
+                                             polled.wait_duration
+                  )
+                                             .count();
+                  if (diagnostics_enabled) {
+                    matched_stats_same_frame_poll_queries += polled.query_count;
+                    if (polled.wait_attempted) {
+                      ++matched_stats_same_frame_poll_attempts;
+                      matched_stats_same_frame_poll_wait_sum_ms += waited_ms;
+                      matched_stats_same_frame_poll_wait_max_ms = std::max(
+                        matched_stats_same_frame_poll_wait_max_ms,
+                        waited_ms
+                      );
+                      if (perf) {
+                        sbs_perf::add_sample_ms("same_frame_poll_wait", waited_ms);
+                      }
+                    }
+                    if (polled.timed_out) {
+                      ++matched_stats_same_frame_poll_timeouts;
+                      if (perf) {
+                        sbs_perf::add_sample_ms(
+                          "same_frame_poll_timeout_wait",
+                          waited_ms
+                        );
+                      }
+                    }
+                  }
+
+                  const auto completion = detail::host_sbs_same_frame_completion(
+                    polled.ready,
+                    polled.result.completed_frame_valid,
+                    polled.result.completed_frame_id,
+                    matched_candidate_slot->frame_id
+                  );
+                  if (
+                    completion !=
+                    detail::host_sbs_same_frame_completion_e::keep_pending
+                  ) {
+                    // finish_pending() rewrites the estimator's singleton V2 resources. The prior
+                    // completion returned by estimate_depth() can no longer render after any ready
+                    // current-frame query, including a ready failure or corrupt frame identity.
+                    reusable_v2.reset();
+                    depth_completion_poll_pending = false;
+                    matched_render_slot = nullptr;
+                    render_input_srv = img_ctx.encoder_input_res.get();
+                    est = {};
+                    if (
+                      completion ==
+                      detail::host_sbs_same_frame_completion_e::adopt_exact
+                    ) {
+                      matched_candidate_slot->pending = false;
+                      if (!matched_candidate_slot->depth_input_region.video_region) {
+                        depth_authority_reprocess_pending = false;
+                      }
+                      matched_render_slot = matched_candidate_slot;
+                      render_input_srv = matched_candidate_slot->srv.get();
+                      sbs_telemetry_last_sampled_frame_id =
+                        polled.result.completed_frame_id;
+                      est = std::move(polled.result);
+                      if (diagnostics_enabled) {
+                        if (polled.wait_attempted) {
+                          ++matched_stats_same_frame_poll_hits;
+                          if (perf) {
+                            sbs_perf::add_sample_ms(
+                              "same_frame_poll_hit_wait",
+                              waited_ms
+                            );
+                          }
+                        } else {
+                          ++matched_stats_same_frame_immediate_hits;
+                        }
+                        const double age_ms =
+                          std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() -
+                            matched_candidate_slot->captured_at
+                          )
+                            .count();
+                        matched_stats_age_sum_ms += age_ms;
+                        matched_stats_age_max_ms =
+                          std::max(matched_stats_age_max_ms, age_ms);
+                        ++matched_stats_completions;
+                        if (perf) {
+                          sbs_perf::add_sample_ms("matched_frame_age", age_ms);
+                        }
+                      }
+                    } else {
+                      // A ready empty/failure result consumed or invalidated B. Clear its exact
+                      // slot and let the existing terminal-flat/authentication path decide output.
+                      matched_candidate_slot->pending = false;
+                      if (diagnostics_enabled) {
+                        ++matched_stats_same_frame_poll_failures;
+                      }
+                      if (polled.result.completed_frame_valid) {
+                        release_unknown_completion(
+                          polled.result.completed_frame_id,
+                          nullptr
+                        );
+                      }
+                    }
+                  }
+                }
+
                 // On the first real frame after a long idle gap, consume the just-submitted current
                 // inference once so depth is available immediately. The retained-source completion
                 // owner in video.cpp covers shorter bursts that stop before the age threshold.
-                // Normal frame cadence remains asynchronous; only a candidate already accepted by
-                // the nonblocking readiness gate can enter this one-inference drain.
+                // Normal cadence may spend only the bounded query slack above and never
+                // synchronizes a busy stream. Only a candidate already accepted by the
+                // nonblocking readiness gate can enter this older >250 ms recovery exception.
                 const auto recovery_now = std::chrono::steady_clock::now();
                 const bool stale_prior_completion =
                   matched_render_slot &&
@@ -1957,6 +2091,11 @@ namespace platf::dxgi {
                                                100.0 * matched_stats_video_roi_route_outputs /
                                                  matched_stats_calls :
                                                0.0;
+              const double same_frame_poll_wait_avg_ms =
+                matched_stats_same_frame_poll_attempts ?
+                  matched_stats_same_frame_poll_wait_sum_ms /
+                    matched_stats_same_frame_poll_attempts :
+                  0.0;
               BOOST_LOG(info) << "SBS cadence: frames="sv << matched_stats_calls
                               << " completed="sv << matched_stats_completions
                               << " repeats="sv << matched_stats_repeats
@@ -1979,7 +2118,20 @@ namespace platf::dxgi {
                               << low_motion_reuse_pct << "%) video_roi_route_outputs="sv
                               << matched_stats_video_roi_route_outputs << " ("sv
                               << video_roi_pct << "%) age_ms_avg/max="sv
-                              << avg_age_ms << '/' << matched_stats_age_max_ms;
+                              << avg_age_ms << '/' << matched_stats_age_max_ms
+                              << " same_frame_repeated_wait_attempt/hit="sv
+                              << matched_stats_same_frame_poll_attempts << '/'
+                              << matched_stats_same_frame_poll_hits
+                              << " timeout/failure="sv
+                              << matched_stats_same_frame_poll_timeouts << '/'
+                              << matched_stats_same_frame_poll_failures
+                              << " immediate_hits="sv
+                              << matched_stats_same_frame_immediate_hits
+                              << " poll_queries="sv
+                              << matched_stats_same_frame_poll_queries
+                              << " repeated_wait_ms_avg/max="sv
+                              << same_frame_poll_wait_avg_ms << '/'
+                              << matched_stats_same_frame_poll_wait_max_ms;
               reset_matched_stats(now);
             }
           }
@@ -4390,6 +4542,14 @@ namespace platf::dxgi {
       matched_stats_low_motion_skips = 0;
       matched_stats_low_motion_reuses = 0;
       matched_stats_video_roi_route_outputs = 0;
+      matched_stats_same_frame_poll_attempts = 0;
+      matched_stats_same_frame_poll_hits = 0;
+      matched_stats_same_frame_poll_timeouts = 0;
+      matched_stats_same_frame_poll_failures = 0;
+      matched_stats_same_frame_immediate_hits = 0;
+      matched_stats_same_frame_poll_queries = 0;
+      matched_stats_same_frame_poll_wait_sum_ms = 0.0;
+      matched_stats_same_frame_poll_wait_max_ms = 0.0;
       matched_stats_age_sum_ms = 0.0;
       matched_stats_age_max_ms = 0.0;
     }
@@ -5223,6 +5383,14 @@ namespace platf::dxgi {
     unsigned matched_stats_low_motion_skips = 0;
     unsigned matched_stats_low_motion_reuses = 0;
     unsigned matched_stats_video_roi_route_outputs = 0;
+    unsigned matched_stats_same_frame_poll_attempts = 0;
+    unsigned matched_stats_same_frame_poll_hits = 0;
+    unsigned matched_stats_same_frame_poll_timeouts = 0;
+    unsigned matched_stats_same_frame_poll_failures = 0;
+    unsigned matched_stats_same_frame_immediate_hits = 0;
+    std::uint64_t matched_stats_same_frame_poll_queries = 0;
+    double matched_stats_same_frame_poll_wait_sum_ms = 0.0;
+    double matched_stats_same_frame_poll_wait_max_ms = 0.0;
     double matched_stats_age_sum_ms = 0.0;
     double matched_stats_age_max_ms = 0.0;
     std::chrono::steady_clock::time_point matched_unknown_frame_error_last {};
@@ -6542,6 +6710,13 @@ namespace platf::dxgi {
 
     int convert(platf::img_t &img_base) override {
       return base.convert(img_base);
+    }
+
+    int convert_with_encode_target(
+      platf::img_t &img_base,
+      const std::chrono::steady_clock::time_point next_encode_target
+    ) override {
+      return base.convert(img_base, next_encode_target);
     }
 
     bool needs_conversion_poll() const override {

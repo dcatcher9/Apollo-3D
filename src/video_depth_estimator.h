@@ -485,7 +485,11 @@ namespace models {
 
   struct pending_depth_poll_result {
     estimate_result result;
-    bool ready = false;  ///< Query completed without waiting; result may still report a failure.
+    bool ready = false;  ///< Joined query proved completion; result may still report a failure.
+    bool wait_attempted = false;  ///< At least one yielded repeat was attempted after the initial query.
+    bool timed_out = false;  ///< The exact pending unit remained busy at the deadline/query fuse.
+    std::uint32_t query_count = 0;  ///< Joined DAV2/OCR readiness queries issued by this call.
+    std::chrono::steady_clock::duration wait_duration {};  ///< Query time only; excludes completed-depth postprocess.
   };
 
   /** Fail-closed CPU authentication for a completed live V2 result.
@@ -692,9 +696,27 @@ namespace models {
       bool snapshot_debug_inputs = false
     );
 
-    /** Query and consume one pending inference without blocking or enqueueing a replacement. */
+    /** Query the pending DAV2/OCR inference fences once and consume the exact unit when ready. */
     pending_depth_poll_result try_finish_pending_depth_nonblocking(
       input_color_space color_space,
+      bool snapshot_debug_inputs = false
+    );
+
+    /** Query one pending exact-frame DAV2/OCR unit until ready or an absolute CPU deadline.
+     *
+     * When available, every query is a nonblocking CUDA event query recorded after the
+     * corresponding TensorRT enqueue and before its interop unmap. Ready postprocess remains
+     * ordered behind those already issued unmaps without synchronizing either whole stream. This
+     * never flushes or enqueues replacement work; the query-count fuse is a second bound behind
+     * the steady-clock deadline.
+     * A timeout preserves the pending inference, event state, and exact owner. If event setup was
+     * unavailable before enqueue, this degrades to one full-stream query with no repeated wait;
+     * admission and fixed-resource reuse always retain their full-stream query.
+     */
+    pending_depth_poll_result try_finish_pending_depth_until(
+      input_color_space color_space,
+      std::chrono::steady_clock::time_point deadline,
+      std::uint32_t max_queries,
       bool snapshot_debug_inputs = false
     );
 

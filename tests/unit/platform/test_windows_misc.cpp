@@ -521,6 +521,79 @@ namespace {
     );
   }
 
+  TEST(WindowsHostSbsSameFramePollTest, CadenceSlackCapsAndFailClosesWaitBudget) {
+    using namespace std::chrono_literals;
+    using platf::dxgi::detail::host_sbs_same_frame_poll_plan;
+
+    const auto now = std::chrono::steady_clock::time_point {1s};
+    const auto ample = host_sbs_same_frame_poll_plan(
+      true,
+      false,
+      now + 10ms,
+      now
+    );
+    ASSERT_TRUE(ample.eligible);
+    EXPECT_EQ(ample.budget, 2ms);
+    EXPECT_EQ(ample.deadline, now + 2ms);
+
+    const auto exact_minimum = host_sbs_same_frame_poll_plan(
+      true,
+      false,
+      now + 3250us,
+      now
+    );
+    ASSERT_TRUE(exact_minimum.eligible);
+    EXPECT_EQ(exact_minimum.budget, 250us);
+
+    EXPECT_FALSE(host_sbs_same_frame_poll_plan(
+                   true, false, now + 3249us, now
+                 )
+                   .eligible);
+    EXPECT_FALSE(host_sbs_same_frame_poll_plan(
+                   true, false, now + 2ms, now
+                 )
+                   .eligible);
+    EXPECT_FALSE(host_sbs_same_frame_poll_plan(
+                   false, false, now + 10ms, now
+                 )
+                   .eligible);
+    EXPECT_FALSE(host_sbs_same_frame_poll_plan(
+                   true, true, now + 10ms, now
+                 )
+                   .eligible);
+    EXPECT_FALSE(host_sbs_same_frame_poll_plan(
+                   true, false, std::nullopt, now
+                 )
+                   .eligible);
+  }
+
+  TEST(WindowsHostSbsSameFramePollTest, ExactOwnerIsAdoptedOnlyAfterReadyMatch) {
+    using decision_e =
+      platf::dxgi::detail::host_sbs_same_frame_completion_e;
+    using platf::dxgi::detail::host_sbs_same_frame_completion;
+
+    EXPECT_EQ(
+      host_sbs_same_frame_completion(false, false, 0u, 42u),
+      decision_e::keep_pending
+    );
+    EXPECT_EQ(
+      host_sbs_same_frame_completion(false, true, 42u, 42u),
+      decision_e::keep_pending
+    );
+    EXPECT_EQ(
+      host_sbs_same_frame_completion(true, true, 42u, 42u),
+      decision_e::adopt_exact
+    );
+    EXPECT_EQ(
+      host_sbs_same_frame_completion(true, true, 41u, 42u),
+      decision_e::discard_ready
+    );
+    EXPECT_EQ(
+      host_sbs_same_frame_completion(true, false, 42u, 42u),
+      decision_e::discard_ready
+    );
+  }
+
   TEST(WindowsHostSbsAuthorityTest, SamplingRequiresAnEstimatorConsumer) {
     EXPECT_FALSE(
       platf::dxgi::detail::host_sbs_window_authority_observation_needed(

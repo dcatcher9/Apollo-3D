@@ -125,8 +125,75 @@ namespace platf::dxgi {
     inline constexpr auto host_sbs_low_motion_reuse_max_age =
       std::chrono::milliseconds {50};
     inline constexpr unsigned host_sbs_low_motion_reuse_max_skips = 1u;
+    // Same-frame completion polling is allowed only inside encode-loop cadence slack. The
+    // downstream reserve covers completed-depth postprocess, SBS warp/output, and NVENC submit;
+    // late/high-rate frames therefore remain on the ordinary nonblocking path.
+    inline constexpr auto host_sbs_same_frame_poll_max_wait =
+      std::chrono::milliseconds {2};
+    inline constexpr auto host_sbs_same_frame_poll_downstream_reserve =
+      std::chrono::milliseconds {3};
+    inline constexpr auto host_sbs_same_frame_poll_min_budget =
+      std::chrono::microseconds {250};
+    inline constexpr std::uint32_t host_sbs_same_frame_poll_max_queries = 4096u;
     // 1 / 400 = 0.25%. Keep this integer-ratio contract exact and overflow-free.
     inline constexpr std::uint64_t host_sbs_low_motion_damage_ratio_denominator = 400u;
+
+    struct host_sbs_same_frame_poll_plan_t {
+      std::chrono::steady_clock::time_point deadline {};
+      std::chrono::steady_clock::duration budget {};
+      bool eligible = false;
+    };
+
+    enum class host_sbs_same_frame_completion_e : std::uint8_t {
+      keep_pending,
+      adopt_exact,
+      discard_ready,
+    };
+
+    /** Decide slot ownership after polling without inspecting mutable estimator resources. */
+    [[nodiscard]] constexpr host_sbs_same_frame_completion_e
+    host_sbs_same_frame_completion(
+      const bool ready,
+      const bool completed_frame_valid,
+      const std::uint64_t completed_frame_id,
+      const std::uint64_t candidate_frame_id
+    ) noexcept {
+      if (!ready) {
+        return host_sbs_same_frame_completion_e::keep_pending;
+      }
+      return completed_frame_valid && completed_frame_id == candidate_frame_id ?
+               host_sbs_same_frame_completion_e::adopt_exact :
+               host_sbs_same_frame_completion_e::discard_ready;
+    }
+
+    /** Bound a newly submitted exact-frame completion query by the encode cadence scheduler.
+     * Capture/content timestamps are deliberately absent: they identify pixels but do not own the
+     * encode deadline. An unavailable, late, or too-small budget fails open to nonblocking output.
+     */
+    [[nodiscard]] constexpr host_sbs_same_frame_poll_plan_t
+    host_sbs_same_frame_poll_plan(
+      const bool inference_enqueued,
+      const bool snapshot_debug_inputs,
+      const std::optional<std::chrono::steady_clock::time_point> next_encode_target,
+      const std::chrono::steady_clock::time_point now
+    ) noexcept {
+      if (!inference_enqueued || snapshot_debug_inputs || !next_encode_target) {
+        return {};
+      }
+      const auto cadence_deadline =
+        *next_encode_target - host_sbs_same_frame_poll_downstream_reserve;
+      if (cadence_deadline <= now ||
+          cadence_deadline - now < host_sbs_same_frame_poll_min_budget) {
+        return {};
+      }
+      const auto hard_deadline = now + host_sbs_same_frame_poll_max_wait;
+      const auto deadline = std::min(cadence_deadline, hard_deadline);
+      return {
+        deadline,
+        deadline - now,
+        true,
+      };
+    }
 
     [[nodiscard]] constexpr bool host_sbs_cached_geometry_render_allowed(
       const bool dedup_gate_open,

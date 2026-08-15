@@ -31,6 +31,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 #include <windows.h>
@@ -89,6 +90,9 @@ static std::once_flag g_cuda_init_once;
 static CUresult g_cuda_init_result = CUDA_ERROR_NOT_READY;
 static std::mutex g_cuda_context_mutex;
 static std::map<CUdevice, CUcontext> g_cuda_primary_contexts;
+// CUDA's CU_EVENT_DISABLE_TIMING flag. The local driver shim intentionally exposes only the
+// small ABI surface this translation unit needs, so keep the readiness-only flag local too.
+static constexpr unsigned int cuda_event_disable_timing = 0x2u;
 
 static bool ensure_cuda_initialized(cuda_driver_api &cuda) {
   std::call_once(g_cuda_init_once, [&cuda]() {
@@ -2568,7 +2572,20 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_box_record_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> ocr_box_record_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_box_record_srv;
+    // These readiness-only fences end immediately after the TensorRT submissions. Stream queries
+    // remain the sole admission/reuse authority because they also cover the following interop
+    // unmaps; only the explicit try-finish completion paths may use these earlier fences.
+    CUevent depth_inference_done_event = nullptr;
+    CUevent ocr_inference_done_event = nullptr;
+    bool pending_depth_inference_event_recorded = false;
+    bool pending_ocr_inference_event_recorded = false;
+    bool inference_event_poll_available = false;
+    bool inference_event_ever_recorded = false;
     bool pending_ocr_submitted = false;
+    // OCR postprocess consumes pending_ocr_submitted as a one-shot output authority. Keep stream
+    // reuse ownership separate so an event-ready finish cannot admit another interop map until a
+    // later full-stream query has also observed the optional OCR unmap tail.
+    bool ocr_stream_reuse_pending = false;
     depth_optional_work_mode_e pending_optional_work =
       depth_optional_work_mode_e::ordinary;
     struct ocr_record_lineage_t {
@@ -2664,9 +2681,16 @@ namespace models {
       return requested;
     }
 
+    void clear_pending_inference_event_state() noexcept {
+      pending_depth_inference_event_recorded = false;
+      pending_ocr_inference_event_recorded = false;
+    }
+
     // Host V2 fails flat on any producer error. Only async execution/query failures quarantine the
     // TRT context; a rejected shape or interop mapping may still be safely reused by a later stream.
     void mark_terminal_failure(const bool poison_execution_context = false) {
+      clear_pending_inference_event_state();
+      ocr_stream_reuse_pending = false;
       execution_context_poisoned =
         execution_context_poisoned || poison_execution_context;
       terminal_failure = true;
@@ -2694,9 +2718,97 @@ namespace models {
       }
     }
 
+    void initialize_inference_done_events(cuda_driver_api &cuda) {
+      clear_pending_inference_event_state();
+      inference_event_poll_available = false;
+      if (
+        !cuda.cuEventCreate || !cuda.cuEventRecord || !cuda.cuEventQuery ||
+        !cuda.cuEventDestroy
+      ) {
+        BOOST_LOG(warning)
+          << "CUDA inference-event API is incomplete; same-frame completion uses one full-stream "
+             "query without bounded waiting.";
+        return;
+      }
+
+      const CUresult depth_create = cuda.cuEventCreate(
+        &depth_inference_done_event,
+        cuda_event_disable_timing
+      );
+      if (depth_create != CUDA_SUCCESS || !depth_inference_done_event) {
+        BOOST_LOG(warning)
+          << "Depth inference-event creation failed (" << depth_create
+          << "); same-frame completion uses one full-stream query without bounded waiting.";
+        (void) destroy_inference_done_events(cuda);
+        return;
+      }
+
+      if (!ocr_available) {
+        inference_event_poll_available = true;
+        return;
+      }
+      const CUresult ocr_create = cuda.cuEventCreate(
+        &ocr_inference_done_event,
+        cuda_event_disable_timing
+      );
+      if (ocr_create != CUDA_SUCCESS || !ocr_inference_done_event) {
+        BOOST_LOG(warning)
+          << "PP-OCRv6 tiny inference-event creation failed (" << ocr_create
+          << "); same-frame completion uses one full-stream query without bounded waiting.";
+        (void) destroy_inference_done_events(cuda);
+        return;
+      }
+      inference_event_poll_available = true;
+    }
+
+    bool destroy_inference_done_events(cuda_driver_api &cuda) noexcept {
+      clear_pending_inference_event_state();
+      inference_event_poll_available = false;
+      bool destroyed = true;
+      for (auto *event : {&depth_inference_done_event, &ocr_inference_done_event}) {
+        if (!*event) {
+          continue;
+        }
+        const CUresult result = cuda.cuEventDestroy ?
+                                  cuda.cuEventDestroy(*event) :
+                                  static_cast<CUresult>(-1);
+        if (result != CUDA_SUCCESS) {
+          destroyed = false;
+          BOOST_LOG(warning) << "CUDA inference-event destruction failed: " << result;
+        } else {
+          *event = nullptr;
+        }
+      }
+      return destroyed;
+    }
+
+    bool record_inference_done_event(
+      cuda_driver_api &cuda,
+      CUevent event,
+      CUstream stream,
+      bool &recorded,
+      const char *member,
+      const bool ocr_was_submitted
+    ) {
+      recorded = false;
+      const CUresult result = event && stream && cuda.cuEventRecord ?
+                                cuda.cuEventRecord(event, stream) :
+                                static_cast<CUresult>(-1);
+      if (result != CUDA_SUCCESS) {
+        BOOST_LOG(error) << member << " inference-event record failed: " << result;
+        mark_shared_execution_failure(ocr_was_submitted);
+        return false;
+      }
+      recorded = true;
+      inference_event_ever_recorded = true;
+      return true;
+    }
+
     // Failing to select the shared CUDA context prevents proving either stream's completion.
     void mark_cuda_context_failure() noexcept {
-      mark_shared_execution_failure(pending_ocr_submitted);
+      mark_shared_execution_failure(
+        pending_ocr_submitted || ocr_stream_reuse_pending
+      );
     }
 
     void mark_ocr_enqueue_failure(
@@ -2715,7 +2827,7 @@ namespace models {
       }
     }
 
-    static detail::async_stream_readiness_e normalized_stream_readiness(
+    static detail::async_stream_readiness_e normalized_cuda_readiness(
       const CUresult result
     ) noexcept {
       if (result == CUDA_SUCCESS) {
@@ -2737,19 +2849,79 @@ namespace models {
       cuda_driver_api &cuda,
       const char *phase
     ) {
+      const bool ocr_context_participated =
+        pending_ocr_submitted || ocr_stream_reuse_pending;
       if (!cu_stream || !cuda.cuStreamQuery) {
-        mark_shared_execution_failure(pending_ocr_submitted);
+        mark_shared_execution_failure(ocr_context_participated);
         return pending_execution_readiness_e::failed;
       }
 
       const auto depth_query = cuda.cuStreamQuery(cu_stream);
-      auto depth_readiness = normalized_stream_readiness(depth_query);
+      auto depth_readiness = normalized_cuda_readiness(depth_query);
       auto ocr_readiness = detail::async_stream_readiness_e::ready;
       CUresult ocr_query = CUDA_SUCCESS;
       if (depth_readiness == detail::async_stream_readiness_e::ready &&
-          pending_ocr_submitted && ocr_cu_stream) {
+          ocr_stream_reuse_pending && ocr_cu_stream) {
           ocr_query = cuda.cuStreamQuery(ocr_cu_stream);
-          ocr_readiness = normalized_stream_readiness(ocr_query);
+          ocr_readiness = normalized_cuda_readiness(ocr_query);
+      }
+
+      switch (detail::joined_stream_readiness(
+                depth_readiness,
+                ocr_stream_reuse_pending,
+                ocr_readiness
+              )) {
+        case detail::joined_stream_readiness_e::ready:
+          ocr_stream_reuse_pending = false;
+          return pending_execution_readiness_e::ready;
+        case detail::joined_stream_readiness_e::busy:
+          return pending_execution_readiness_e::busy;
+        case detail::joined_stream_readiness_e::failed:
+          if (!stream_error_logged) {
+            BOOST_LOG(error) << "DAV2/OCR CUDA stream query failed during " << phase
+                             << ": depth=" << depth_query << ", OCR=" << ocr_query;
+            stream_error_logged = true;
+          }
+          mark_shared_execution_failure(ocr_context_participated);
+          return pending_execution_readiness_e::failed;
+      }
+      return pending_execution_readiness_e::failed;
+    }
+
+    pending_execution_readiness_e query_pending_inference_events(
+      cuda_driver_api &cuda,
+      const char *phase
+    ) {
+      const bool event_state_valid =
+        cuda.cuEventQuery && depth_inference_done_event &&
+        pending_depth_inference_event_recorded &&
+        (
+          !pending_ocr_submitted ||
+          (
+            ocr_inference_done_event &&
+            pending_ocr_inference_event_recorded
+          )
+        );
+      if (!event_state_valid) {
+        if (!stream_error_logged) {
+          BOOST_LOG(error)
+            << "DAV2/OCR inference-event state was incomplete during " << phase << '.';
+          stream_error_logged = true;
+        }
+        mark_shared_execution_failure(pending_ocr_submitted);
+        return pending_execution_readiness_e::failed;
+      }
+
+      const CUresult depth_query = cuda.cuEventQuery(depth_inference_done_event);
+      const auto depth_readiness = normalized_cuda_readiness(depth_query);
+      auto ocr_readiness = detail::async_stream_readiness_e::ready;
+      CUresult ocr_query = CUDA_SUCCESS;
+      if (
+        depth_readiness == detail::async_stream_readiness_e::ready &&
+        pending_ocr_submitted
+      ) {
+        ocr_query = cuda.cuEventQuery(ocr_inference_done_event);
+        ocr_readiness = normalized_cuda_readiness(ocr_query);
       }
 
       switch (detail::joined_stream_readiness(
@@ -2763,7 +2935,7 @@ namespace models {
           return pending_execution_readiness_e::busy;
         case detail::joined_stream_readiness_e::failed:
           if (!stream_error_logged) {
-            BOOST_LOG(error) << "DAV2/OCR CUDA stream query failed during " << phase
+            BOOST_LOG(error) << "DAV2/OCR CUDA inference-event query failed during " << phase
                              << ": depth=" << depth_query << ", OCR=" << ocr_query;
             stream_error_logged = true;
           }
@@ -2774,17 +2946,20 @@ namespace models {
     }
 
     bool synchronize_pending_execution(cuda_driver_api &cuda) {
+      const bool ocr_participated =
+        pending_ocr_submitted || ocr_stream_reuse_pending;
       if (!cu_stream || !cuda.cuStreamSynchronize) {
-        mark_shared_execution_failure(pending_ocr_submitted);
+        mark_shared_execution_failure(ocr_participated);
         return false;
       }
       const CUresult depth_sync = cuda.cuStreamSynchronize(cu_stream);
       if (depth_sync != CUDA_SUCCESS) {
         BOOST_LOG(error) << "Depth synchronization failed: " << depth_sync;
-        mark_shared_execution_failure(pending_ocr_submitted);
+        mark_shared_execution_failure(ocr_participated);
         return false;
       }
-      if (!pending_ocr_submitted || !ocr_cu_stream) {
+      if (!ocr_participated || !ocr_cu_stream) {
+        ocr_stream_reuse_pending = false;
         return true;
       }
       const CUresult ocr_sync = cuda.cuStreamSynchronize(ocr_cu_stream);
@@ -2793,6 +2968,7 @@ namespace models {
         mark_shared_execution_failure(true);
         return false;
       }
+      ocr_stream_reuse_pending = false;
       return true;
     }
 
@@ -3406,6 +3582,7 @@ namespace models {
         BOOST_LOG(warning)
           << "PP-OCRv6 tiny is unavailable for this estimator; subtitle conditioning is flat.";
       }
+      initialize_inference_done_events(cuda);
       // Raw normalization record, pre-seeded to
       // {min = 0xFFFFFFFF, max = 0, valid = 0, eligible = 0}.
       // The fused V2 frame resolve overwrites all four words before the histogram consumes them;
@@ -3599,6 +3776,11 @@ namespace models {
           } else {
             cleanup_execution_ok = false;
           }
+        }
+        const bool inference_events_destroyed =
+          destroy_inference_done_events(cuda);
+        if (!inference_events_destroyed && inference_event_ever_recorded) {
+          cleanup_execution_ok = false;
         }
         destroy_inference_graph(cuda, depth_inference_graph);
         destroy_inference_graph(cuda, ocr_inference_graph);
@@ -4865,7 +5047,8 @@ namespace models {
     // once, and deliberately do NOT enqueue a duplicate. This is the synchronous quality oracle.
     estimate_result finish_pending(
       input_color_space color_space,
-      bool snapshot_debug_inputs = false
+      bool snapshot_debug_inputs = false,
+      const bool inference_events_ready = false
     ) {
       // A caller may first prove nonblocking readiness with can_accept(). Consuming instead of
       // enqueueing must retire that admission token so a later estimate cannot skip its own query.
@@ -4879,7 +5062,12 @@ namespace models {
         mark_cuda_context_failure();
         return make_result();
       }
-      if (!synchronize_pending_execution(cuda)) {
+      // A nonblocking or bounded try-finish caller may prove the TensorRT submissions complete at
+      // the earlier readiness-only fences. estimate() already issued every CUDA interop unmap
+      // before exposing this pending slot, so D3D11 work submitted below is ordered behind the
+      // resource releases without synchronizing either whole CUDA stream. Evaluation and recovery
+      // callers retain the conservative stream synchronization path.
+      if (!inference_events_ready && !synchronize_pending_execution(cuda)) {
         return make_result();
       }
       if (diagnostics_enabled) {
@@ -4937,6 +5125,7 @@ namespace models {
       const bool completed_subtitle_work_suppressed =
         pending_optional_work == depth_optional_work_mode_e::suppress_subtitle;
       has_previous_frame = false;  // the output buffer has been consumed; never fold it twice
+      clear_pending_inference_event_state();
       pending_optional_work = depth_optional_work_mode_e::ordinary;
       // normalize_depth_output() has submitted and unbound every D3D11 read of this exact source.
       // Drop our retained reference only after the ownership pass has consumed it.
@@ -4958,31 +5147,125 @@ namespace models {
       );
     }
 
+    pending_depth_poll_result try_finish_pending(
+      input_color_space color_space,
+      bool snapshot_debug_inputs,
+      const bool allow_wait,
+      const std::chrono::steady_clock::time_point deadline,
+      const std::uint32_t max_queries
+    ) {
+      readiness_preflighted = false;
+      auto &cuda = cuda_driver_api::get();
+      const auto started = std::chrono::steady_clock::now();
+      const bool use_inference_events = inference_event_poll_available;
+      const bool repeated_wait_allowed = allow_wait && use_inference_events;
+      pending_depth_poll_result polled;
+      if (!has_previous_frame) {
+        polled.result = make_result();
+        polled.ready = true;
+        return polled;
+      }
+      if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
+        mark_cuda_context_failure();
+        polled.result = make_result();
+        polled.ready = true;
+        return polled;
+      }
+
+      const auto query_limit = std::max<std::uint32_t>(1u, max_queries);
+      constexpr auto repeated_query_interval = std::chrono::microseconds {50};
+      while (true) {
+        // The first joined query is always immediate. Before every repeated query, preserve the
+        // absolute deadline even if the thread was descheduled beyond its intended poll interval.
+        if (
+          polled.query_count > 0u &&
+          std::chrono::steady_clock::now() >= deadline
+        ) {
+          polled.timed_out = repeated_wait_allowed;
+          polled.wait_duration = std::chrono::steady_clock::now() - started;
+          return polled;
+        }
+        ++polled.query_count;
+        const auto readiness = use_inference_events ?
+                                 query_pending_inference_events(
+                                   cuda,
+                                   allow_wait ? "bounded same-frame completion" :
+                                                "nonblocking completion"
+                                 ) :
+                                 query_pending_execution(
+                                   cuda,
+                                   "same-frame completion fallback"
+                                 );
+        switch (readiness) {
+          case pending_execution_readiness_e::busy: {
+            const auto now = std::chrono::steady_clock::now();
+            if (
+              !repeated_wait_allowed || polled.query_count >= query_limit ||
+              now >= deadline
+            ) {
+              polled.timed_out = repeated_wait_allowed;
+              polled.wait_duration = now - started;
+              return polled;
+            }
+            polled.wait_attempted = true;
+            // Do not burn the query fuse faster than the GPU can make useful progress. Yield until
+            // the next 50 us query point, capped by the absolute deadline; no sleeping primitive
+            // can overshoot the budget unnoticed because steady_clock is checked every turn.
+            const auto next_query_at = std::min(
+              deadline,
+              now + repeated_query_interval
+            );
+            while (std::chrono::steady_clock::now() < next_query_at) {
+              std::this_thread::yield();
+            }
+            continue;
+          }
+          case pending_execution_readiness_e::failed:
+            polled.result = make_result();
+            polled.ready = true;
+            polled.wait_duration = std::chrono::steady_clock::now() - started;
+            return polled;
+          case pending_execution_readiness_e::ready:
+            polled.wait_duration = std::chrono::steady_clock::now() - started;
+            break;
+        }
+        break;
+      }
+      polled.result = finish_pending(
+        color_space,
+        snapshot_debug_inputs,
+        use_inference_events
+      );
+      polled.ready = true;
+      return polled;
+    }
+
     pending_depth_poll_result try_finish_pending_nonblocking(
       input_color_space color_space,
       bool snapshot_debug_inputs = false
     ) {
-      readiness_preflighted = false;
-      auto &cuda = cuda_driver_api::get();
-      if (!has_previous_frame) {
-        return {.result = make_result(), .ready = true};
-      }
-      if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
-        mark_cuda_context_failure();
-        return {.result = make_result(), .ready = true};
-      }
-      switch (query_pending_execution(cuda, "nonblocking completion")) {
-        case pending_execution_readiness_e::busy:
-          return {};
-        case pending_execution_readiness_e::failed:
-          return {.result = make_result(), .ready = true};
-        case pending_execution_readiness_e::ready:
-          break;
-      }
-      return {
-        .result = finish_pending(color_space, snapshot_debug_inputs),
-        .ready = true,
-      };
+      return try_finish_pending(
+        color_space,
+        snapshot_debug_inputs,
+        false,
+        std::chrono::steady_clock::time_point {},
+        1u
+      );
+    }
+
+    pending_depth_poll_result try_finish_pending_until(
+      input_color_space color_space,
+      const std::chrono::steady_clock::time_point deadline,
+      const std::uint32_t max_queries,
+      bool snapshot_debug_inputs = false
+    ) {
+      return try_finish_pending(
+        color_space,
+        snapshot_debug_inputs,
+        true,
+        deadline,
+        max_queries
+      );
     }
 
     // (Re)build the depth constant buffer. The fixed tensor dimensions stay session-constant,
@@ -5896,6 +6179,7 @@ namespace models {
         completed_color_space = pending_color_space;
         completed_frame_valid = true;
         has_previous_frame = false;
+        clear_pending_inference_event_state();
         pending_optional_work = depth_optional_work_mode_e::ordinary;
         if (diagnostics_enabled) {
           throughput_stats_completions++;
@@ -6126,6 +6410,9 @@ namespace models {
         );
       }
 
+      // Admission proved the preceding observation's full streams reusable. From here on these
+      // flags describe only the candidate whose interop unmaps will be issued below.
+      clear_pending_inference_event_state();
       bool enqueued = false;
       bool ocr_enqueued = false;
       if (in_ptr_res != CUDA_SUCCESS || out_ptr_res != CUDA_SUCCESS || !d_in || !d_out) {
@@ -6261,8 +6548,21 @@ namespace models {
               cuda
             );
             perf_end(perf_depth, depth_perf_slot, cu_stream);
+            if (
+              enqueued && inference_event_poll_available &&
+              !record_inference_done_event(
+                cuda,
+                depth_inference_done_event,
+                cu_stream,
+                pending_depth_inference_event_recorded,
+                "Depth",
+                false
+              )
+            ) {
+              enqueued = false;
+            }
           }
-          if (!enqueued) {
+          if (!enqueued && !terminal_failure) {
             mark_terminal_failure(true);
             if (!stream_error_logged) {
               BOOST_LOG(error) << "TensorRT enqueueV3 failed; the execution context is "
@@ -6290,6 +6590,18 @@ namespace models {
             perf_end(perf_ocr, ocr_perf_slot, ocr_stream);
             if (!ocr_enqueued) {
               mark_ocr_enqueue_failure("enqueueV3", static_cast<CUresult>(-1));
+              enqueued = false;
+            } else if (
+              inference_event_poll_available &&
+              !record_inference_done_event(
+                cuda,
+                ocr_inference_done_event,
+                ocr_stream,
+                pending_ocr_inference_event_recorded,
+                "PP-OCRv6 tiny",
+                true
+              )
+            ) {
               enqueued = false;
             }
           }
@@ -6319,6 +6631,7 @@ namespace models {
 
       has_previous_frame = enqueued;
       pending_ocr_submitted = enqueued && ocr_enqueued;
+      ocr_stream_reuse_pending = enqueued && ocr_enqueued;
       if (enqueued) {
         // Retain the exact private matched-frame color SRV across asynchronous TensorRT execution.
         // The next normalize_depth_output() uses it for local, full-resolution ownership evidence
@@ -6423,6 +6736,21 @@ namespace models {
   ) {
     return pimpl ? pimpl->try_finish_pending_nonblocking(
                      color_space,
+                     snapshot_debug_inputs
+                   ) :
+                   pending_depth_poll_result {.ready = true};
+  }
+
+  pending_depth_poll_result video_depth_estimator::try_finish_pending_depth_until(
+    input_color_space color_space,
+    const std::chrono::steady_clock::time_point deadline,
+    const std::uint32_t max_queries,
+    bool snapshot_debug_inputs
+  ) {
+    return pimpl ? pimpl->try_finish_pending_until(
+                     color_space,
+                     deadline,
+                     max_queries,
                      snapshot_debug_inputs
                    ) :
                    pending_depth_poll_result {.ready = true};
