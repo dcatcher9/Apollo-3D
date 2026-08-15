@@ -1,5 +1,5 @@
 {
-  "schema": 51,
+  "schema": 52,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -7,7 +7,7 @@
     "binding": "raw-depth-model-input-and-preprocess-source-produced-by-calibrated-identity-v3"
   },
   "subtitle_ocr": {
-    "schema": 10,
+    "schema": 11,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
     "artifact_onnx_sha256": "169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44",
@@ -116,6 +116,12 @@
       "pending_kind_shift": 4,
       "current_kind_shift": 8,
       "kind_mask": 15
+    },
+    "condition_params": {
+      "schema": 2,
+      "tag": 844120915,
+      "word_count": 8,
+      "dispatch_arg_word_count": 3
     }
   },
   "shader_implementation": {
@@ -129,8 +135,23 @@
         "source_target": "cs_5_0"
       },
       {
+        "source_file": "rgb_to_nchw_cs.hlsl",
+        "source_entrypoint": "content_main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "rgb_to_nchw_cs.hlsl",
+        "source_entrypoint": "pad_main",
+        "source_target": "cs_5_0"
+      },
+      {
         "source_file": "buffer_to_tex_cs.hlsl",
         "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "buffer_to_tex_cs.hlsl",
+        "source_entrypoint": "pad_main",
         "source_target": "cs_5_0"
       },
       {
@@ -225,11 +246,21 @@
       },
       {
         "source_file": "host_sbs_subtitle_locator_cs.hlsl",
+        "source_entrypoint": "condition_prepare_main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "host_sbs_subtitle_locator_cs.hlsl",
+        "source_entrypoint": "condition_in_place_main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "host_sbs_subtitle_locator_cs.hlsl",
         "source_entrypoint": "condition_main",
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "bcf57b361288e9e0a16e1946292f7e80def7cbb6de26f5b587599ccb0fc63682"
+    "source_closure_sha256": "68b99544bb5e8525bfa6e5417c8f6d67d7238296842cd76d0b83d8d8f6c2569a"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,
@@ -284,7 +315,7 @@
         "source_target": "cs_5_0",
         "source_compile_flags": 34816,
         "source_macro_count": 0,
-        "source_closure_sha256": "e6f66453473af25007d7d4784656dc97d97bae7c730fdfd684d9ab8181ffed47",
+        "source_closure_sha256": "0a422bb447e2c3c016f4e4f1c9d6d2e98162a3eecae9e9d09bd0bf4ab56f92dd",
         "model_input_schema": 1,
         "dtype": "float32-le",
         "layout": "NCHW",

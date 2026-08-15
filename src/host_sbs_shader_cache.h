@@ -25,7 +25,16 @@ namespace models::host_sbs_shader_cache {
   };
 
   inline constexpr shader_spec rgb_to_nchw {"rgb_to_nchw_cs.hlsl"};
+  inline constexpr shader_spec rgb_to_nchw_content {
+    "rgb_to_nchw_cs.hlsl", "content_main", "cs_5_0"
+  };
+  inline constexpr shader_spec rgb_to_nchw_pad {
+    "rgb_to_nchw_cs.hlsl", "pad_main", "cs_5_0"
+  };
   inline constexpr shader_spec buffer_to_tex {"buffer_to_tex_cs.hlsl"};
+  inline constexpr shader_spec buffer_to_tex_pad {
+    "buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"
+  };
   inline constexpr shader_spec depth_ema_motion {"depth_ema_motion_cs.hlsl"};
   inline constexpr shader_spec depth_minmax {"depth_minmax_cs.hlsl"};
   inline constexpr shader_spec depth_minmax_ema {"depth_minmax_ema_cs.hlsl"};
@@ -57,6 +66,12 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec host_sbs_subtitle_locator_resolve {
     "host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"
   };
+  inline constexpr shader_spec host_sbs_subtitle_condition_prepare {
+    "host_sbs_subtitle_locator_cs.hlsl", "condition_prepare_main", "cs_5_0"
+  };
+  inline constexpr shader_spec host_sbs_subtitle_condition_in_place {
+    "host_sbs_subtitle_locator_cs.hlsl", "condition_in_place_main", "cs_5_0"
+  };
   inline constexpr shader_spec host_sbs_subtitle_condition {
     "host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"
   };
@@ -79,17 +94,19 @@ namespace models::host_sbs_shader_cache {
     "sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"
   };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
-    "d2672fa57bb2542bb3714c243ea393e78e29fd40603379ea435f4740c6762b7d";
+    "2aac93ddeb5e89de424c52eb8f43b0509ee580c829e04e345dc95967070c7cd1";
   inline constexpr std::string_view parallax_v2_diagnostic_source_closure_sha256 =
-    "32b257d5c84f839b5797fbf720aaddb1d5e5b5056cbb57d45b64d7c2d32aaec3";
+    "150d16132c0ad98c742717c124280e1818555d22ed8ee2c14bf8f86da62db28d";
   inline constexpr std::string_view sbs_flat_fallback_source_closure_sha256 =
     "7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4";
 
   // Identity-only minimal closure used to match the model/preprocess calibration. Production
-  // bytecode is never compiled from this smaller snapshot: rgb_to_nchw is compiled with every
-  // other producer root from parallax_v2_producer_specs below.
+  // bytecode is never compiled from this smaller snapshot: all rgb_to_nchw entry points are
+  // compiled with every other producer root from parallax_v2_producer_specs below.
   inline constexpr std::array preprocess_specs {
     rgb_to_nchw,
+    rgb_to_nchw_content,
+    rgb_to_nchw_pad,
   };
 
   // Complete production V2 producer set. The normalized depth is private scene-cut evidence; the
@@ -98,7 +115,10 @@ namespace models::host_sbs_shader_cache {
   // so no analysis or geometry pass can be sampled from a weaker closure.
   enum class producer_shader_e : std::uint8_t {
     rgb_to_nchw,
+    rgb_to_nchw_content,
+    rgb_to_nchw_pad,
     buffer_to_tex,
+    buffer_to_tex_pad,
     depth_ema_motion,
     depth_minmax,
     depth_minmax_ema,
@@ -117,6 +137,8 @@ namespace models::host_sbs_shader_cache {
     host_sbs_ocr_cells,
     host_sbs_ocr_resolve,
     host_sbs_subtitle_locator_resolve,
+    host_sbs_subtitle_condition_prepare,
+    host_sbs_subtitle_condition_in_place,
     host_sbs_subtitle_condition,
   };
 
@@ -130,7 +152,10 @@ namespace models::host_sbs_shader_cache {
     // and final coordinate limiting. Compile every shared pass from this single immutable
     // snapshot so no separately sampled source body can feed authenticated V2 geometry.
     producer_shader_binding {producer_shader_e::rgb_to_nchw, rgb_to_nchw},
+    producer_shader_binding {producer_shader_e::rgb_to_nchw_content, rgb_to_nchw_content},
+    producer_shader_binding {producer_shader_e::rgb_to_nchw_pad, rgb_to_nchw_pad},
     producer_shader_binding {producer_shader_e::buffer_to_tex, buffer_to_tex},
+    producer_shader_binding {producer_shader_e::buffer_to_tex_pad, buffer_to_tex_pad},
     producer_shader_binding {producer_shader_e::depth_ema_motion, depth_ema_motion},
     producer_shader_binding {producer_shader_e::depth_minmax, depth_minmax},
     producer_shader_binding {producer_shader_e::depth_minmax_ema, depth_minmax_ema},
@@ -172,6 +197,14 @@ namespace models::host_sbs_shader_cache {
     producer_shader_binding {
       producer_shader_e::host_sbs_subtitle_locator_resolve,
       host_sbs_subtitle_locator_resolve
+    },
+    producer_shader_binding {
+      producer_shader_e::host_sbs_subtitle_condition_prepare,
+      host_sbs_subtitle_condition_prepare
+    },
+    producer_shader_binding {
+      producer_shader_e::host_sbs_subtitle_condition_in_place,
+      host_sbs_subtitle_condition_in_place
     },
     producer_shader_binding {
       producer_shader_e::host_sbs_subtitle_condition, host_sbs_subtitle_condition

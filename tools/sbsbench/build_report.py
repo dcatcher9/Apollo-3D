@@ -2251,6 +2251,12 @@ def source_artifact_section():
         note = clip_meta.get("source_artifacts")
         if not note:
             continue
+        if isinstance(note, list):
+            note = " ".join(str(item) for item in note if item)
+        elif not isinstance(note, str):
+            note = str(note)
+        if not note:
+            continue
         frame = mid_frame(ctrl_dir, clip)
         path = source_path(clip, frame)
         if not path:

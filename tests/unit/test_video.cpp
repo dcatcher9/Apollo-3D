@@ -538,9 +538,10 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
   );
   ASSERT_TRUE(producer_sources);
 
-  // The one-root preprocess closure remains available only to compute the calibrated model-input
-  // identity. Its production shader is owned exactly once by the full producer closure; this test
-  // deliberately never requests bytecode from the smaller snapshot.
+  // The preprocess-only main+content+padding closure remains available only to compute the
+  // calibrated model-input identity. Each production entry point is owned exactly once by the
+  // full producer closure; this test deliberately never requests bytecode from the smaller
+  // snapshot.
   const auto preprocess_sources = cache::snapshot_sources(
     shader_root,
     cache::preprocess_specs
@@ -583,7 +584,9 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
     return std::ranges::any_of(
       cache::parallax_v2_producer_specs,
       [&](const cache::shader_spec &candidate) {
-        return candidate.filename == wanted.filename;
+        return candidate.filename == wanted.filename &&
+               candidate.entrypoint == wanted.entrypoint &&
+               candidate.target == wanted.target;
       }
     );
   };
@@ -593,6 +596,8 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_ocr_cells));
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_ocr_resolve));
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_subtitle_locator_resolve));
+  EXPECT_TRUE(has_producer_shader(cache::host_sbs_subtitle_condition_prepare));
+  EXPECT_TRUE(has_producer_shader(cache::host_sbs_subtitle_condition_in_place));
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_subtitle_condition));
 
   const auto diagnostic_sources = cache::snapshot_sources(
@@ -781,7 +786,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 51u);
+  EXPECT_EQ(v2::contract_schema, 52u);
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
   EXPECT_EQ(v2::shadow_state_dump_schema, 16u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
@@ -1141,6 +1146,60 @@ TEST(ParallaxV2RendererTest, AuthenticationLatchesV2OrLiveFlat) {
     models::fail_host_sbs_renderer_flat(host_sbs_renderer_e::failed_flat),
     host_sbs_renderer_e::failed_flat
   );
+}
+
+TEST(ParallaxV2RendererTest, InteractiveMoveSuppressesOnlyOptionalSubtitleWork) {
+  using models::depth_optional_work_mode_e;
+  using models::select_depth_optional_work_mode;
+
+  EXPECT_EQ(
+    select_depth_optional_work_mode(false, false),
+    depth_optional_work_mode_e::ordinary
+  );
+  EXPECT_EQ(
+    select_depth_optional_work_mode(true, false),
+    depth_optional_work_mode_e::suppress_subtitle
+  );
+  // An explicit diagnostic snapshot remains a complete exact-frame observation.
+  EXPECT_EQ(
+    select_depth_optional_work_mode(true, true),
+    depth_optional_work_mode_e::ordinary
+  );
+  EXPECT_EQ(
+    select_depth_optional_work_mode(false, false, true),
+    depth_optional_work_mode_e::redispatch_subtitle
+  );
+  // Complete diagnostics and native move/size suppression outrank the optimization hint.
+  EXPECT_EQ(
+    select_depth_optional_work_mode(false, true, true),
+    depth_optional_work_mode_e::ordinary
+  );
+  EXPECT_EQ(
+    select_depth_optional_work_mode(true, false, true),
+    depth_optional_work_mode_e::suppress_subtitle
+  );
+}
+
+TEST(ParallaxV2RendererTest, SubtitleOcrDamageBandUsesExactAnalysisCropPlacement) {
+  const auto full = models::subtitle_ocr_source_crop_rect(
+    models::depth_source_rect_t {0u, 0u, 1920u, 1080u}
+  );
+  ASSERT_TRUE(full);
+  EXPECT_EQ(*full, (models::depth_source_rect_t {0u, 760u, 1920u, 1080u}));
+
+  const auto roi = models::subtitle_ocr_source_crop_rect(
+    models::depth_source_rect_t {100u, 200u, 1060u, 740u}
+  );
+  ASSERT_TRUE(roi);
+  EXPECT_EQ(*roi, (models::depth_source_rect_t {100u, 580u, 1060u, 740u}));
+
+  const auto ultrawide = models::subtitle_ocr_source_crop_rect(
+    models::depth_source_rect_t {50u, 10u, 2610u, 1090u}
+  );
+  ASSERT_TRUE(ultrawide);
+  EXPECT_EQ(*ultrawide, (models::depth_source_rect_t {50u, 663u, 2610u, 1090u}));
+
+  EXPECT_FALSE(models::subtitle_ocr_source_crop_rect({}));
 }
 
 TEST(TensorRtContextLifecycleTest, WarmedContextQuarantineStartsOnlyAfterAsyncExecution) {
@@ -1556,6 +1615,10 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   };
   EXPECT_FALSE(result.shadow_coordinate);
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(result));
+
+  auto subtitle_suppressed = result;
+  subtitle_suppressed.subtitle_work_suppressed = true;
+  EXPECT_TRUE(models::parallax_v2_result_is_authenticated(subtitle_suppressed));
 
   auto missing_input_region = result;
   missing_input_region.input_region = {};
@@ -2115,6 +2178,9 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
   using Microsoft::WRL::ComPtr;
 
   constexpr std::array shaders {
+    std::tuple {"rgb_to_nchw_cs.hlsl", "content_main", "cs_5_0"},
+    std::tuple {"rgb_to_nchw_cs.hlsl", "pad_main", "cs_5_0"},
+    std::tuple {"buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"},
     std::tuple {"depth_ema_motion_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_minmax_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_minmax_ema_cs.hlsl", "main", "cs_5_0"},
@@ -2154,6 +2220,300 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
   }
 }
 
+TEST(DirectxShaderTest, BufferToTexMainThenPadReplicatesBoundaryDepthAndClearsPaddingMotion) {
+  using Microsoft::WRL::ComPtr;
+
+  ComPtr<ID3D11Device> device;
+  ComPtr<ID3D11DeviceContext> context;
+  D3D_FEATURE_LEVEL feature_level {};
+  constexpr D3D_FEATURE_LEVEL requested_levels[] {D3D_FEATURE_LEVEL_11_0};
+  ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(
+    nullptr,
+    D3D_DRIVER_TYPE_WARP,
+    nullptr,
+    0,
+    requested_levels,
+    static_cast<UINT>(std::size(requested_levels)),
+    D3D11_SDK_VERSION,
+    &device,
+    &feature_level,
+    &context
+  )));
+  ASSERT_GE(feature_level, D3D_FEATURE_LEVEL_11_0);
+
+  const auto shader_path =
+    std::filesystem::path(SUNSHINE_SHADERS_DIR) / "buffer_to_tex_cs.hlsl";
+  const auto compile_shader = [&](const char *entrypoint) {
+    ComPtr<ID3DBlob> bytecode;
+    ComPtr<ID3DBlob> diagnostics;
+    const auto status = D3DCompileFromFile(
+      shader_path.c_str(),
+      nullptr,
+      D3D_COMPILE_STANDARD_FILE_INCLUDE,
+      entrypoint,
+      "cs_5_0",
+      D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
+      0,
+      &bytecode,
+      &diagnostics
+    );
+    EXPECT_TRUE(SUCCEEDED(status))
+      << entrypoint << ": "
+      << (diagnostics ?
+            static_cast<const char *>(diagnostics->GetBufferPointer()) :
+            "no compiler diagnostics");
+    return bytecode;
+  };
+
+  const auto main_bytecode = compile_shader("main");
+  const auto pad_bytecode = compile_shader("pad_main");
+  ASSERT_TRUE(main_bytecode);
+  ASSERT_TRUE(pad_bytecode);
+  ComPtr<ID3D11ComputeShader> main_shader;
+  ComPtr<ID3D11ComputeShader> pad_shader;
+  ASSERT_TRUE(SUCCEEDED(device->CreateComputeShader(
+    main_bytecode->GetBufferPointer(),
+    main_bytecode->GetBufferSize(),
+    nullptr,
+    &main_shader
+  )));
+  ASSERT_TRUE(SUCCEEDED(device->CreateComputeShader(
+    pad_bytecode->GetBufferPointer(),
+    pad_bytecode->GetBufferSize(),
+    nullptr,
+    &pad_shader
+  )));
+
+  constexpr UINT width = 7u;
+  constexpr UINT height = 6u;
+  constexpr UINT texel_count = width * height;
+  constexpr models::depth_tensor_content_rect_t content {2u, 1u, 6u, 5u};
+
+  std::array<float, texel_count> raw_depth {};
+  std::array<float, texel_count> previous_depth {};
+  std::array<std::uint32_t, texel_count> exclusion {};
+  std::array<float, texel_count> initial_output {};
+  std::array<std::uint32_t, texel_count> initial_motion {};
+  for (UINT y = 0u; y < height; ++y) {
+    for (UINT x = 0u; x < width; ++x) {
+      const auto index = static_cast<std::size_t>(y) * width + x;
+      raw_depth[index] = static_cast<float>(index + 1u);
+      previous_depth[index] = 0.75f;
+      exclusion[index] =
+        x >= content.left && x < content.right &&
+            y >= content.top && y < content.bottom ?
+          0u :
+          1u;
+      initial_output[index] = -123.0f;
+      initial_motion[index] = 0xdeadbeefu;
+    }
+  }
+
+  const auto create_structured_srv = [&]<typename T>(
+                                       const T *values,
+                                       UINT count,
+                                       ComPtr<ID3D11Buffer> &buffer,
+                                       ComPtr<ID3D11ShaderResourceView> &srv
+                                     ) {
+    D3D11_BUFFER_DESC desc {};
+    desc.ByteWidth = count * sizeof(T);
+    desc.Usage = D3D11_USAGE_IMMUTABLE;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    desc.StructureByteStride = sizeof(T);
+    D3D11_SUBRESOURCE_DATA data {};
+    data.pSysMem = values;
+    return SUCCEEDED(device->CreateBuffer(&desc, &data, &buffer)) &&
+           SUCCEEDED(device->CreateShaderResourceView(buffer.Get(), nullptr, &srv));
+  };
+
+  ComPtr<ID3D11Buffer> raw_buffer;
+  ComPtr<ID3D11ShaderResourceView> raw_srv;
+  ASSERT_TRUE(create_structured_srv(
+    raw_depth.data(), texel_count, raw_buffer, raw_srv
+  ));
+  const std::array<float, 4> minmax_ema {0.0f, 64.0f, 1.0f, 2.0f};
+  ComPtr<ID3D11Buffer> minmax_buffer;
+  ComPtr<ID3D11ShaderResourceView> minmax_srv;
+  ASSERT_TRUE(create_structured_srv(
+    &minmax_ema, 1u, minmax_buffer, minmax_srv
+  ));
+
+  const auto create_input_texture = [&](DXGI_FORMAT format,
+                                        const void *values,
+                                        ComPtr<ID3D11Texture2D> &texture,
+                                        ComPtr<ID3D11ShaderResourceView> &srv) {
+    D3D11_TEXTURE2D_DESC desc {};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1u;
+    desc.ArraySize = 1u;
+    desc.Format = format;
+    desc.SampleDesc.Count = 1u;
+    desc.Usage = D3D11_USAGE_IMMUTABLE;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA data {};
+    data.pSysMem = values;
+    data.SysMemPitch = width * sizeof(std::uint32_t);
+    return SUCCEEDED(device->CreateTexture2D(&desc, &data, &texture)) &&
+           SUCCEEDED(device->CreateShaderResourceView(texture.Get(), nullptr, &srv));
+  };
+
+  ComPtr<ID3D11Texture2D> previous_texture;
+  ComPtr<ID3D11ShaderResourceView> previous_srv;
+  ASSERT_TRUE(create_input_texture(
+    DXGI_FORMAT_R32_FLOAT,
+    previous_depth.data(),
+    previous_texture,
+    previous_srv
+  ));
+  ComPtr<ID3D11Texture2D> exclusion_texture;
+  ComPtr<ID3D11ShaderResourceView> exclusion_srv;
+  ASSERT_TRUE(create_input_texture(
+    DXGI_FORMAT_R32_UINT,
+    exclusion.data(),
+    exclusion_texture,
+    exclusion_srv
+  ));
+
+  const auto create_output_texture = [&](DXGI_FORMAT format,
+                                         const void *values,
+                                         ComPtr<ID3D11Texture2D> &texture,
+                                         ComPtr<ID3D11UnorderedAccessView> &uav) {
+    D3D11_TEXTURE2D_DESC desc {};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1u;
+    desc.ArraySize = 1u;
+    desc.Format = format;
+    desc.SampleDesc.Count = 1u;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    D3D11_SUBRESOURCE_DATA data {};
+    data.pSysMem = values;
+    data.SysMemPitch = width * sizeof(std::uint32_t);
+    return SUCCEEDED(device->CreateTexture2D(&desc, &data, &texture)) &&
+           SUCCEEDED(device->CreateUnorderedAccessView(texture.Get(), nullptr, &uav));
+  };
+
+  ComPtr<ID3D11Texture2D> output_texture;
+  ComPtr<ID3D11UnorderedAccessView> output_uav;
+  ASSERT_TRUE(create_output_texture(
+    DXGI_FORMAT_R32_FLOAT,
+    initial_output.data(),
+    output_texture,
+    output_uav
+  ));
+  ComPtr<ID3D11Texture2D> motion_texture;
+  ComPtr<ID3D11UnorderedAccessView> motion_uav;
+  ASSERT_TRUE(create_output_texture(
+    DXGI_FORMAT_R32_UINT,
+    initial_motion.data(),
+    motion_texture,
+    motion_uav
+  ));
+
+  std::array<std::uint32_t, 16> constants {};
+  constants[0] = width;
+  constants[1] = height;
+  constants[3] = std::bit_cast<std::uint32_t>(1.0f);
+  constants[9] = content.left;
+  constants[10] = content.top;
+  constants[11] = content.right;
+  constants[12] = content.bottom;
+  D3D11_BUFFER_DESC constant_desc {};
+  constant_desc.ByteWidth = sizeof(constants);
+  constant_desc.Usage = D3D11_USAGE_IMMUTABLE;
+  constant_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+  D3D11_SUBRESOURCE_DATA constant_data {};
+  constant_data.pSysMem = constants.data();
+  ComPtr<ID3D11Buffer> constant_buffer;
+  ASSERT_TRUE(SUCCEEDED(device->CreateBuffer(
+    &constant_desc, &constant_data, &constant_buffer
+  )));
+
+  ID3D11ShaderResourceView *srvs[] = {
+    raw_srv.Get(),
+    minmax_srv.Get(),
+    previous_srv.Get(),
+    exclusion_srv.Get(),
+  };
+  ID3D11UnorderedAccessView *uavs[] = {output_uav.Get(), motion_uav.Get()};
+  ID3D11Buffer *constant_buffers[] = {constant_buffer.Get()};
+  context->CSSetShaderResources(0u, static_cast<UINT>(std::size(srvs)), srvs);
+  context->CSSetUnorderedAccessViews(0u, static_cast<UINT>(std::size(uavs)), uavs, nullptr);
+  context->CSSetConstantBuffers(0u, 1u, constant_buffers);
+  context->CSSetShader(main_shader.Get(), nullptr, 0u);
+  context->Dispatch((width + 15u) / 16u, (height + 15u) / 16u, 1u);
+  context->CSSetShader(pad_shader.Get(), nullptr, 0u);
+  context->Dispatch((width + 15u) / 16u, (height + 15u) / 16u, 1u);
+
+  ID3D11ShaderResourceView *null_srvs[] = {nullptr, nullptr, nullptr, nullptr};
+  ID3D11UnorderedAccessView *null_uavs[] = {nullptr, nullptr};
+  ID3D11Buffer *null_constant_buffers[] = {nullptr};
+  context->CSSetShader(nullptr, nullptr, 0u);
+  context->CSSetShaderResources(
+    0u, static_cast<UINT>(std::size(null_srvs)), null_srvs
+  );
+  context->CSSetUnorderedAccessViews(
+    0u, static_cast<UINT>(std::size(null_uavs)), null_uavs, nullptr
+  );
+  context->CSSetConstantBuffers(0u, 1u, null_constant_buffers);
+
+  const auto read_texture_bits = [&](ID3D11Texture2D *source,
+                                     std::array<std::uint32_t, texel_count> &bits) {
+    D3D11_TEXTURE2D_DESC desc {};
+    source->GetDesc(&desc);
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0u;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> staging;
+    if (FAILED(device->CreateTexture2D(&desc, nullptr, &staging))) {
+      return false;
+    }
+    context->CopyResource(staging.Get(), source);
+    D3D11_MAPPED_SUBRESOURCE mapped {};
+    if (FAILED(context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) {
+      return false;
+    }
+    for (UINT y = 0u; y < height; ++y) {
+      std::memcpy(
+        bits.data() + static_cast<std::size_t>(y) * width,
+        static_cast<const std::byte *>(mapped.pData) +
+          static_cast<std::size_t>(y) * mapped.RowPitch,
+        width * sizeof(std::uint32_t)
+      );
+    }
+    context->Unmap(staging.Get(), 0u);
+    return true;
+  };
+
+  std::array<std::uint32_t, texel_count> depth_bits {};
+  std::array<std::uint32_t, texel_count> motion_bits {};
+  ASSERT_TRUE(read_texture_bits(output_texture.Get(), depth_bits));
+  ASSERT_TRUE(read_texture_bits(motion_texture.Get(), motion_bits));
+
+  const auto initial_depth_bits = std::bit_cast<std::uint32_t>(-123.0f);
+  const auto held_history_bits = std::bit_cast<std::uint32_t>(0.75f);
+  for (UINT y = 0u; y < height; ++y) {
+    for (UINT x = 0u; x < width; ++x) {
+      const auto index = static_cast<std::size_t>(y) * width + x;
+      if (exclusion[index] == 0u) {
+        EXPECT_NE(depth_bits[index], initial_depth_bits) << x << ',' << y;
+        EXPECT_NE(depth_bits[index], held_history_bits) << x << ',' << y;
+        continue;
+      }
+
+      const auto clamped_x = std::clamp(x, content.left, content.right - 1u);
+      const auto clamped_y = std::clamp(y, content.top, content.bottom - 1u);
+      const auto clamped_index =
+        static_cast<std::size_t>(clamped_y) * width + clamped_x;
+      EXPECT_EQ(depth_bits[index], depth_bits[clamped_index]) << x << ',' << y;
+      EXPECT_EQ(motion_bits[index], 0u) << x << ',' << y;
+    }
+  }
+}
+
 TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
   using Microsoft::WRL::ComPtr;
 
@@ -2179,30 +2539,54 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
 
   const std::filesystem::path shader_path =
     SUNSHINE_SHADERS_DIR "/rgb_to_nchw_cs.hlsl";
-  ComPtr<ID3DBlob> shader_blob;
-  ComPtr<ID3DBlob> shader_errors;
-  const auto compile_status = D3DCompileFromFile(
-    shader_path.c_str(),
-    nullptr,
-    D3D_COMPILE_STANDARD_FILE_INCLUDE,
-    "main",
-    "cs_5_0",
-    D3DCOMPILE_OPTIMIZATION_LEVEL3,
-    0,
-    &shader_blob,
-    &shader_errors
-  );
-  ASSERT_TRUE(SUCCEEDED(compile_status))
-    << (shader_errors ?
-          static_cast<const char *>(shader_errors->GetBufferPointer()) :
-          "no compiler diagnostics");
+  const auto compile_shader = [&](const char *entrypoint) {
+    ComPtr<ID3DBlob> bytecode;
+    ComPtr<ID3DBlob> diagnostics;
+    const auto status = D3DCompileFromFile(
+      shader_path.c_str(),
+      nullptr,
+      D3D_COMPILE_STANDARD_FILE_INCLUDE,
+      entrypoint,
+      "cs_5_0",
+      D3DCOMPILE_OPTIMIZATION_LEVEL3,
+      0,
+      &bytecode,
+      &diagnostics
+    );
+    EXPECT_TRUE(SUCCEEDED(status))
+      << entrypoint << ": "
+      << (diagnostics ?
+            static_cast<const char *>(diagnostics->GetBufferPointer()) :
+            "no compiler diagnostics");
+    return bytecode;
+  };
+  const auto main_bytecode = compile_shader("main");
+  const auto content_bytecode = compile_shader("content_main");
+  const auto pad_bytecode = compile_shader("pad_main");
+  ASSERT_TRUE(main_bytecode);
+  ASSERT_TRUE(content_bytecode);
+  ASSERT_TRUE(pad_bytecode);
 
   ComPtr<ID3D11ComputeShader> shader;
+  ComPtr<ID3D11ComputeShader> content_shader;
+  ComPtr<ID3D11ComputeShader> pad_shader;
   ASSERT_TRUE(SUCCEEDED(device->CreateComputeShader(
-    shader_blob->GetBufferPointer(),
-    shader_blob->GetBufferSize(),
+    main_bytecode->GetBufferPointer(),
+    main_bytecode->GetBufferSize(),
     nullptr,
     &shader
+  )));
+  ASSERT_TRUE(SUCCEEDED(device->CreateComputeShader(
+    content_bytecode->GetBufferPointer(),
+    content_bytecode->GetBufferSize(),
+    nullptr,
+    &content_shader
+  )));
+  ASSERT_TRUE(SUCCEEDED(device->CreateComputeShader(
+    pad_bytecode->GetBufferPointer(),
+    pad_bytecode->GetBufferSize(),
+    nullptr,
+    &pad_shader
   )));
 
   using rgba_pixel_t = std::array<float, 4>;
@@ -2287,7 +2671,11 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
       return false;
     }
 
-    if (!tensor_content.valid()) {
+    const models::depth_tensor_shape_t target_shape {
+      static_cast<int>(target_width),
+      static_cast<int>(target_height),
+    };
+    if (!tensor_content.valid(target_shape)) {
       tensor_content = {0u, 0u, target_width, target_height};
     }
     std::array<std::uint32_t, 16> constants {};
@@ -2320,11 +2708,26 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
     context->CSSetShaderResources(0, 1, input_srvs);
     context->CSSetUnorderedAccessViews(0, 3, output_uavs, nullptr);
     context->CSSetConstantBuffers(0, 1, constant_buffers);
-    context->Dispatch(
-      (target_width + 15u) / 16u,
-      (target_height + 15u) / 16u,
-      1u
-    );
+    if (!tensor_content.full(target_shape)) {
+      context->CSSetShader(content_shader.Get(), nullptr, 0);
+      context->Dispatch(
+        (tensor_content.width() + 15u) / 16u,
+        (tensor_content.height() + 15u) / 16u,
+        1u
+      );
+      context->CSSetShader(pad_shader.Get(), nullptr, 0);
+      context->Dispatch(
+        (target_width + 15u) / 16u,
+        (target_height + 15u) / 16u,
+        1u
+      );
+    } else {
+      context->Dispatch(
+        (target_width + 15u) / 16u,
+        (target_height + 15u) / 16u,
+        1u
+      );
+    }
 
     ID3D11ShaderResourceView *null_srvs[] = {nullptr};
     ID3D11UnorderedAccessView *null_uavs[] = {nullptr, nullptr, nullptr};
@@ -2653,43 +3056,42 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
     std::vector<float> model_output;
     std::vector<float> appearance_ordinal;
     std::vector<std::uint32_t> exclusion;
+    constexpr UINT target_width = 6u;
+    constexpr UINT target_height = 4u;
+    constexpr models::depth_tensor_content_rect_t content {1u, 1u, 5u, 3u};
     ASSERT_TRUE(run_case(
-      8u, 4u, 6u, 2u, source_pixels,
+      8u, 4u, target_width, target_height, source_pixels,
       model_output, appearance_ordinal, 0u,
-      {1u, 0u, 5u, 2u}, &exclusion
+      content, &exclusion
     ));
-    ASSERT_EQ(model_output.size(), 36u);
-    ASSERT_EQ(appearance_ordinal.size(), 12u);
-    ASSERT_EQ(exclusion.size(), 12u);
-    for (UINT y = 0u; y < 2u; ++y) {
-      const UINT left_pad = y * 6u;
-      const UINT left_content = left_pad + 1u;
-      const UINT right_content = left_pad + 4u;
-      const UINT right_pad = left_pad + 5u;
-      EXPECT_EQ(exclusion[left_pad], 1u);
-      EXPECT_EQ(exclusion[right_pad], 1u);
-      for (UINT x = 1u; x < 5u; ++x) {
-        EXPECT_EQ(exclusion[y * 6u + x], 0u);
-      }
-      for (UINT channel = 0u; channel < 3u; ++channel) {
-        const UINT channel_offset = channel * 12u;
+    constexpr UINT target_texels = target_width * target_height;
+    ASSERT_EQ(model_output.size(), 3u * target_texels);
+    ASSERT_EQ(appearance_ordinal.size(), target_texels);
+    ASSERT_EQ(exclusion.size(), target_texels);
+    for (UINT y = 0u; y < target_height; ++y) {
+      for (UINT x = 0u; x < target_width; ++x) {
+        const UINT index = y * target_width + x;
+        const bool admitted = x >= content.left && x < content.right &&
+                              y >= content.top && y < content.bottom;
+        EXPECT_EQ(exclusion[index], admitted ? 0u : 1u) << x << ',' << y;
+        if (admitted) {
+          continue;
+        }
+        const UINT source_x = std::clamp(x, content.left, content.right - 1u);
+        const UINT source_y = std::clamp(y, content.top, content.bottom - 1u);
+        const UINT source_index = source_y * target_width + source_x;
+        for (UINT channel = 0u; channel < 3u; ++channel) {
+          const UINT channel_offset = channel * target_texels;
+          EXPECT_EQ(
+            std::bit_cast<std::uint32_t>(model_output[channel_offset + index]),
+            std::bit_cast<std::uint32_t>(model_output[channel_offset + source_index])
+          ) << x << ',' << y << " channel " << channel;
+        }
         EXPECT_EQ(
-          std::bit_cast<std::uint32_t>(model_output[channel_offset + left_pad]),
-          std::bit_cast<std::uint32_t>(model_output[channel_offset + left_content])
-        );
-        EXPECT_EQ(
-          std::bit_cast<std::uint32_t>(model_output[channel_offset + right_pad]),
-          std::bit_cast<std::uint32_t>(model_output[channel_offset + right_content])
-        );
+          std::bit_cast<std::uint32_t>(appearance_ordinal[index]),
+          std::bit_cast<std::uint32_t>(appearance_ordinal[source_index])
+        ) << x << ',' << y;
       }
-      EXPECT_EQ(
-        std::bit_cast<std::uint32_t>(appearance_ordinal[left_pad]),
-        std::bit_cast<std::uint32_t>(appearance_ordinal[left_content])
-      );
-      EXPECT_EQ(
-        std::bit_cast<std::uint32_t>(appearance_ordinal[right_pad]),
-        std::bit_cast<std::uint32_t>(appearance_ordinal[right_content])
-      );
     }
   }
 }
@@ -3878,13 +4280,13 @@ TEST(HostSbsSceneCutTest, GeometryLowRearmIsStrictAndConsecutive) {
   EXPECT_NE(state.cut_flags & cut_flag_geometry_armed, 0u);
 }
 
-TEST(DirectxShaderSourceTest, EmaMotionMaskUsesResolvedReferenceGridGradients) {
+TEST(DirectxShaderSourceTest, FusedDepthMapperUsesResolvedReferenceGridGradients) {
   const std::string shader_dir =
     SUNSHINE_SOURCE_DIR "/src_assets/windows/assets/shaders/directx/";
-  const auto ema_motion = read_source_file(shader_dir + "depth_ema_motion_cs.hlsl");
+  const auto mapper = read_source_file(shader_dir + "buffer_to_tex_cs.hlsl");
   const auto constants = read_source_file(shader_dir + "include/depth_constants.hlsl");
 
-  ASSERT_FALSE(ema_motion.empty());
+  ASSERT_FALSE(mapper.empty());
   ASSERT_FALSE(constants.empty());
   EXPECT_NE(
     constants.find("#define DEPTH_GRADIENT_REFERENCE_SHORT_SIDE 434.0f"),
@@ -3897,13 +4299,35 @@ TEST(DirectxShaderSourceTest, EmaMotionMaskUsesResolvedReferenceGridGradients) {
     std::string::npos
   );
   EXPECT_NE(
-    ema_motion.find("reference_gradient = gradient * DepthReferenceTexelScale()"),
+    mapper.find("reference_gradient = gradient * DepthReferenceTexelScale()"),
     std::string::npos
   );
   EXPECT_NE(
-    ema_motion.find("reference_gradient >= ema_edge_gradient"),
+    mapper.find("reference_gradient >= ema_edge_gradient"),
     std::string::npos
   );
+  EXPECT_NE(
+    mapper.find("RWTexture2D<uint>         MotionMask : register(u1)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    mapper.find("OutputTexture[DTid.xy] = moving ?"),
+    std::string::npos
+  );
+}
+
+TEST(DirectxShaderSourceTest, FusedDepthMapperSpecializesSyntheticPadding) {
+  const std::string shader_dir =
+    SUNSHINE_SOURCE_DIR "/src_assets/windows/assets/shaders/directx/";
+  const auto mapper = read_source_file(shader_dir + "buffer_to_tex_cs.hlsl");
+
+  ASSERT_FALSE(mapper.empty());
+  EXPECT_NE(mapper.find("void pad_main"), std::string::npos);
+  EXPECT_NE(
+    mapper.find("OutputTexture[DepthAnalysisClampCell(DTid.xy)]"),
+    std::string::npos
+  );
+  EXPECT_NE(mapper.find("MotionMask[DTid.xy] = 0u"), std::string::npos);
 }
 
 TEST(DirectxShaderSourceTest, HostTelemetryReadbackIsNonblockingAndCutBridgeContractIsHonest) {

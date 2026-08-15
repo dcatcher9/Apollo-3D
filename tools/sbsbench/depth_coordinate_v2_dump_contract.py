@@ -72,10 +72,10 @@ WINDOW_REGION_AUTHORITY_KINDS = frozenset({"chromium-video", "foreground-client"
 SHADOW_STATE_DUMP_SCHEMA = 16
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 2
 LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
-    "d2672fa57bb2542bb3714c243ea393e78e29fd40603379ea435f4740c6762b7d"
+    "2aac93ddeb5e89de424c52eb8f43b0509ee580c829e04e345dc95967070c7cd1"
 )
 DIAGNOSTIC_SOURCE_CLOSURE_SHA256 = (
-    "32b257d5c84f839b5797fbf720aaddb1d5e5b5056cbb57d45b64d7c2d32aaec3"
+    "150d16132c0ad98c742717c124280e1818555d22ed8ee2c14bf8f86da62db28d"
 )
 _CONTRACT = coordinate_contract.load_contract()
 _CONTRACT_TAG = generator.contract_tag(_CONTRACT)
@@ -116,6 +116,7 @@ _SUBTITLE_OCR_SHADER_SPECS = (
 )
 _SUBTITLE_LOCATOR_SHADER_SPECS = (
     ("host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"),
+    ("host_sbs_subtitle_locator_cs.hlsl", "condition_prepare_main", "cs_5_0"),
     ("host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"),
 )
 
@@ -2885,7 +2886,7 @@ def _verify_roi_exterior_zero_warp_map(
 
 
 def _replay_v2_limiter_fields(ownership: Any, content_width: int) -> Tuple[Any, Any, Any]:
-    """Replay the schema-51 serial/Q30 limiter branches exactly in NumPy."""
+    """Replay the contract's serial/Q30 limiter branches exactly in NumPy."""
 
     import numpy as np
 
@@ -2985,7 +2986,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
     Checks, fail-closed:
       1. every chain field's ``.f32`` bytes hash to the manifest descriptor's ``sha256``;
       2. every field matches the manifest geometry dimensions and is entirely finite;
-      3. the conditioning chain is internally consistent with the schema-51 serial/Q30 branches:
+      3. the conditioning chain is internally consistent with the contract's serial/Q30 branches:
          ``vertical_majorant``/``vertical_conditioned``/ordinary Base are bitwise equal to the
          recurrences recomputed from ``ownership_refined``; SLR12's analytic rectangle budget and
          fade exactly reproduce the selected final field; and ownership refinement never lowers
@@ -3200,7 +3201,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
         if not np.array_equal(fields[name], recomputed):
             mismatch = float(np.max(np.abs(fields[name] - recomputed)))
             raise ValueError(
-                f"{name}.f32 is not the exact recurrence/schema-51 limiter replay of the dumped ownership field "
+                f"{name}.f32 is not the exact recurrence/serial-Q30 limiter replay of the dumped ownership field "
                 f"(max abs diff {mismatch})")
 
     if subtitle_live:

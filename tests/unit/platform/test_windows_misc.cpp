@@ -17,6 +17,7 @@
   // display.h declares the small D3DKMT function table without depending on the WDK headers.
   // Match display_base.cpp's prerequisite after boost/process has selected its Windows headers.
   typedef long NTSTATUS;
+  #include <src/host_sbs_resolution.h>
   #include <src/platform/windows/display.h>
   #include <src/platform/windows/misc.h>
   #include <sddl.h>
@@ -106,6 +107,369 @@ namespace {
     EXPECT_EQ(timestamps.content_timestamp, 300);
   }
 
+  TEST(WindowsDdupDamageTest, NormalizesDirtyAndBothSidesOfMoveRects) {
+    const RECT dirty {10, 20, 30, 40};
+    DXGI_OUTDUPL_MOVE_RECT move {};
+    move.SourcePoint = {100, 120};
+    move.DestinationRect = {200, 220, 240, 260};
+
+    const auto update = platf::dxgi::detail::make_ddup_damage_update(
+      std::span<const RECT> {&dirty, 1u},
+      std::span<const DXGI_OUTDUPL_MOVE_RECT> {&move, 1u},
+      640,
+      480
+    );
+
+    ASSERT_TRUE(update.known);
+    ASSERT_EQ(update.rects.size(), 3u);
+    EXPECT_EQ(update.rects[0].left, 10);
+    EXPECT_EQ(update.rects[1].left, 100);
+    EXPECT_EQ(update.rects[1].top, 120);
+    EXPECT_EQ(update.rects[1].right, 140);
+    EXPECT_EQ(update.rects[1].bottom, 160);
+    EXPECT_EQ(update.rects[2].left, 200);
+    EXPECT_EQ(update.rects[2].top, 220);
+  }
+
+  TEST(WindowsDdupDamageTest, ExactRangeReportsChangedUnchangedAndCursorIdentity) {
+    using enum platf::dxgi::detail::ddup_damage_intersection_e;
+    auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+    const auto base = history->commit({true, {}});
+    const auto outside = history->commit({true, {{300, 300, 340, 340}}});
+    const auto inside = history->commit({true, {{40, 40, 80, 80}}});
+    const RECT roi {0, 0, 100, 100};
+
+    EXPECT_EQ(
+      platf::dxgi::detail::query_ddup_damage_between(base, base, roi),
+      unchanged
+    );
+    EXPECT_EQ(
+      platf::dxgi::detail::query_ddup_damage_between(base, outside, roi),
+      unchanged
+    );
+    EXPECT_EQ(
+      platf::dxgi::detail::query_ddup_damage_between(outside, inside, roi),
+      changed
+    );
+    EXPECT_EQ(
+      platf::dxgi::detail::query_ddup_damage_between(base, inside, roi),
+      changed
+    );
+  }
+
+  TEST(WindowsDdupDamageTest, OcrBandUsesHalfOpenDamageEdges) {
+    using enum platf::dxgi::detail::ddup_damage_intersection_e;
+    const auto crop = models::subtitle_ocr_source_crop_rect(
+      models::depth_source_rect_t {100u, 200u, 1060u, 740u}
+    );
+    ASSERT_TRUE(crop);
+    const RECT ocr_band {
+      static_cast<LONG>(crop->left),
+      static_cast<LONG>(crop->top),
+      static_cast<LONG>(crop->right),
+      static_cast<LONG>(crop->bottom),
+    };
+    auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+    const auto baseline = history->commit({true, {}});
+    const auto touches_top = history->commit({true, {{100, 560, 1060, 580}}});
+    const auto enters_top = history->commit({true, {{100, 579, 1060, 581}}});
+
+    EXPECT_EQ(
+      platf::dxgi::detail::query_ddup_damage_between(
+        baseline, touches_top, ocr_band),
+      unchanged
+    );
+    EXPECT_EQ(
+      platf::dxgi::detail::query_ddup_damage_between(
+        touches_top, enters_top, ocr_band),
+      changed
+    );
+  }
+
+  TEST(WindowsDdupDamageTest, ClassifiesFullContentAndExactRoiProofsSeparately) {
+    using enum platf::dxgi::detail::host_sbs_ddup_reuse_proof_e;
+    using clock_t = std::chrono::steady_clock;
+    const auto first_content = clock_t::time_point {std::chrono::milliseconds {1}};
+    const auto second_content = clock_t::time_point {std::chrono::milliseconds {2}};
+    const RECT roi {0, 0, 100, 100};
+    auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+    const auto baseline = history->commit({true, {}});
+    const auto outside = history->commit({true, {{200, 200, 220, 220}}});
+    const auto inside = history->commit({true, {{50, 50, 60, 60}}});
+
+    EXPECT_EQ(
+      platf::dxgi::detail::classify_host_sbs_ddup_reuse(
+        first_content, std::nullopt, false, roi, first_content, std::nullopt
+      ),
+      content_clock
+    );
+    EXPECT_EQ(
+      platf::dxgi::detail::classify_host_sbs_ddup_reuse(
+        first_content, baseline, false, roi, second_content, outside
+      ),
+      none
+    );
+    EXPECT_EQ(
+      platf::dxgi::detail::classify_host_sbs_ddup_reuse(
+        first_content, baseline, true, roi, first_content, baseline
+      ),
+      content_clock
+    );
+    EXPECT_EQ(
+      platf::dxgi::detail::classify_host_sbs_ddup_reuse(
+        first_content, baseline, true, roi, second_content, outside
+      ),
+      roi_damage
+    );
+    EXPECT_EQ(
+      platf::dxgi::detail::classify_host_sbs_ddup_reuse(
+        first_content, baseline, true, roi, second_content, inside
+      ),
+      none
+    );
+  }
+
+  TEST(WindowsDdupDamageTest, UnknownAndUnrelatedHistoriesFailOpen) {
+    using enum platf::dxgi::detail::ddup_damage_intersection_e;
+    auto first_history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+    auto second_history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+    const auto base = first_history->commit({true, {}});
+    const auto discontinuity = first_history->commit({false, {}});
+    const auto unrelated = second_history->commit({true, {}});
+    const RECT roi {0, 0, 100, 100};
+
+    EXPECT_EQ(
+      platf::dxgi::detail::query_ddup_damage_between(base, discontinuity, roi),
+      unknown
+    );
+    EXPECT_EQ(
+      platf::dxgi::detail::query_ddup_damage_between(base, unrelated, roi),
+      unknown
+    );
+    EXPECT_EQ(
+      platf::dxgi::detail::query_ddup_damage_between(std::nullopt, base, roi),
+      unknown
+    );
+    EXPECT_EQ(
+      platf::dxgi::detail::query_ddup_damage_between(base, base, RECT {0, 0, 0, 100}),
+      unknown
+    );
+  }
+
+  TEST(WindowsDdupDamageTest, EvictedSequenceRangeFailsOpen) {
+    using enum platf::dxgi::detail::ddup_damage_intersection_e;
+    auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+    const auto base = history->commit({true, {}});
+    platf::dxgi::detail::ddup_damage_snapshot_t current;
+    for (
+      std::size_t i = 0u;
+      i <= platf::dxgi::detail::ddup_damage_history_frame_budget;
+      ++i
+    ) {
+      current = history->commit({true, {}});
+    }
+
+    const RECT roi {0, 0, 100, 100};
+    EXPECT_EQ(
+      platf::dxgi::detail::query_ddup_damage_between(base, current, roi),
+      unknown
+    );
+    const auto recent = history->commit({true, {}});
+    EXPECT_EQ(
+      platf::dxgi::detail::query_ddup_damage_between(current, recent, roi),
+      unchanged
+    );
+  }
+
+  TEST(WindowsDdupDamageTest, InvalidAndOversizeMetadataBecomeUnknown) {
+    const RECT invalid_dirty {-1, 0, 10, 10};
+    EXPECT_FALSE(
+      platf::dxgi::detail::make_ddup_damage_update(
+        std::span<const RECT> {&invalid_dirty, 1u},
+        {},
+        640,
+        480
+      ).known
+    );
+
+    DXGI_OUTDUPL_MOVE_RECT invalid_move {};
+    invalid_move.SourcePoint = {630, 470};
+    invalid_move.DestinationRect = {10, 10, 30, 30};
+    EXPECT_FALSE(
+      platf::dxgi::detail::make_ddup_damage_update(
+        {},
+        std::span<const DXGI_OUTDUPL_MOVE_RECT> {&invalid_move, 1u},
+        640,
+        480
+      ).known
+    );
+
+    std::vector<RECT> too_many(
+      platf::dxgi::detail::ddup_damage_frame_rect_budget + 1u,
+      RECT {0, 0, 1, 1}
+    );
+    EXPECT_FALSE(
+      platf::dxgi::detail::make_ddup_damage_update(
+        too_many,
+        {},
+        640,
+        480
+      ).known
+    );
+    EXPECT_FALSE(
+      platf::dxgi::detail::make_ddup_damage_update({}, {}, 640, 480, false).known
+    );
+  }
+
+  TEST(WindowsDdupDamageTest, ContentPresentWithoutUpdateMetadataFailsOpen) {
+    DXGI_OUTDUPL_FRAME_INFO frame_info {};
+    frame_info.LastPresentTime.QuadPart = 1;
+    frame_info.AccumulatedFrames = 1u;
+
+    EXPECT_FALSE(
+      platf::dxgi::detail::ddup_frame_damage_metadata_available(frame_info)
+    );
+    frame_info.TotalMetadataBufferSize = static_cast<UINT>(sizeof(RECT));
+    EXPECT_TRUE(
+      platf::dxgi::detail::ddup_frame_damage_metadata_available(frame_info)
+    );
+  }
+
+  TEST(WindowsDdupDamageTest, CoverageSumsOverlapsAndSaturatesAtRegionArea) {
+    auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+    const auto base = history->commit({true, {}});
+    const auto overlap_twice = history->commit({
+      true,
+      {
+        {10, 10, 20, 20},
+        {10, 10, 20, 20},
+        {95, 95, 110, 110},
+      },
+    });
+    const RECT roi {0, 0, 100, 100};
+
+    const auto coverage =
+      platf::dxgi::detail::query_ddup_damage_coverage_between(
+        base,
+        overlap_twice,
+        roi
+      );
+    ASSERT_TRUE(coverage.known);
+    EXPECT_EQ(coverage.region_area, 10000u);
+    // The repeated 10x10 rectangle is counted twice on purpose; the clipped corner adds 5x5.
+    EXPECT_EQ(coverage.potentially_changed_area, 225u);
+
+    const auto saturated = history->commit({
+      true,
+      {
+        {0, 0, 100, 100},
+        {0, 0, 100, 100},
+      },
+    });
+    const auto saturated_coverage =
+      platf::dxgi::detail::query_ddup_damage_coverage_between(
+        overlap_twice,
+        saturated,
+        roi
+      );
+    ASSERT_TRUE(saturated_coverage.known);
+    EXPECT_EQ(saturated_coverage.potentially_changed_area, 10000u);
+  }
+
+  TEST(WindowsDdupDamageTest, LowMotionCandidateUsesExactQuarterPercentAndOcrGate) {
+    using platf::dxgi::detail::ddup_damage_coverage_t;
+    using platf::dxgi::detail::host_sbs_low_motion_damage_candidate;
+
+    EXPECT_TRUE(host_sbs_low_motion_damage_candidate(
+      ddup_damage_coverage_t {25u, 10000u, true},
+      true
+    ));
+    EXPECT_FALSE(host_sbs_low_motion_damage_candidate(
+      ddup_damage_coverage_t {26u, 10000u, true},
+      true
+    ));
+    EXPECT_FALSE(host_sbs_low_motion_damage_candidate(
+      ddup_damage_coverage_t {25u, 10000u, true},
+      false
+    ));
+    EXPECT_FALSE(host_sbs_low_motion_damage_candidate(
+      ddup_damage_coverage_t {0u, 10000u, false},
+      true
+    ));
+  }
+
+  TEST(WindowsDdupDamageTest, LowMotionCoverageAccumulatesFromAcceptedBaseline) {
+    auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+    const auto accepted = history->commit({true, {}});
+    const auto first_delivery = history->commit({true, {{0, 0, 10, 1}}});
+    const auto second_delivery = history->commit({true, {{10, 0, 20, 1}}});
+    const auto third_delivery = history->commit({true, {{20, 0, 30, 1}}});
+    const RECT roi {0, 0, 100, 100};
+    ASSERT_NE(first_delivery.token, 0u);
+
+    const auto first_two =
+      platf::dxgi::detail::query_ddup_damage_coverage_between(
+        accepted,
+        second_delivery,
+        roi
+      );
+    EXPECT_EQ(first_two.potentially_changed_area, 20u);
+    EXPECT_TRUE(platf::dxgi::detail::host_sbs_low_motion_damage_candidate(
+      first_two,
+      true
+    ));
+
+    const auto all_three =
+      platf::dxgi::detail::query_ddup_damage_coverage_between(
+        accepted,
+        third_delivery,
+        roi
+      );
+    EXPECT_EQ(all_three.potentially_changed_area, 30u);
+    EXPECT_FALSE(platf::dxgi::detail::host_sbs_low_motion_damage_candidate(
+      all_three,
+      true
+    ));
+
+    // A rolling delivered-frame baseline would incorrectly see only the last ten pixels.
+    const auto rolled = platf::dxgi::detail::query_ddup_damage_coverage_between(
+      second_delivery,
+      third_delivery,
+      roi
+    );
+    EXPECT_EQ(rolled.potentially_changed_area, 10u);
+    EXPECT_TRUE(platf::dxgi::detail::host_sbs_low_motion_damage_candidate(
+      rolled,
+      true
+    ));
+  }
+
+  TEST(WindowsDdupDamageTest, CoverageDiscontinuityAndCrossHistoryFailOpen) {
+    auto first_history =
+      std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+    auto second_history =
+      std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+    const auto base = first_history->commit({true, {}});
+    const auto discontinuity = first_history->commit({false, {}});
+    const auto unrelated = second_history->commit({true, {}});
+    const RECT roi {0, 0, 100, 100};
+
+    EXPECT_FALSE(
+      platf::dxgi::detail::query_ddup_damage_coverage_between(
+        base,
+        discontinuity,
+        roi
+      ).known
+    );
+    EXPECT_FALSE(
+      platf::dxgi::detail::query_ddup_damage_coverage_between(
+        base,
+        unrelated,
+        roi
+      ).known
+    );
+  }
+
   TEST(WindowsHostSbsEncoderInputStateTest, FirstRepeatStillInitializesPersistentInput) {
     platf::dxgi::detail::host_sbs_encoder_input_state_t state;
 
@@ -176,6 +540,82 @@ namespace {
         true
       )
     );
+  }
+
+  TEST(WindowsHostSbsContentReuseTest, RenderRequiresEveryFailClosedGate) {
+    using platf::dxgi::detail::host_sbs_cached_geometry_render_allowed;
+
+    EXPECT_TRUE(host_sbs_cached_geometry_render_allowed(true, true, true, true));
+    EXPECT_FALSE(host_sbs_cached_geometry_render_allowed(false, true, true, true));
+    EXPECT_FALSE(host_sbs_cached_geometry_render_allowed(true, false, true, true));
+    EXPECT_FALSE(host_sbs_cached_geometry_render_allowed(true, true, false, true));
+    EXPECT_FALSE(host_sbs_cached_geometry_render_allowed(true, true, true, false));
+  }
+
+  TEST(WindowsHostSbsContentReuseTest, SuccessfulEnqueueBoundsSkipsAndAge) {
+    using namespace std::chrono_literals;
+    platf::dxgi::detail::host_sbs_content_refresh_state_t state;
+    const auto start = std::chrono::steady_clock::time_point {1s};
+
+    EXPECT_TRUE(state.refresh_due(start));
+    state.record_successful_enqueue(start);
+    EXPECT_FALSE(state.refresh_due(start));
+    for (unsigned i = 0;
+         i + 1u < platf::dxgi::detail::host_sbs_full_source_reuse_max_skips;
+         ++i) {
+      state.record_reuse();
+    }
+    EXPECT_FALSE(state.refresh_due(start + 249ms));
+    state.record_reuse();
+    EXPECT_TRUE(state.refresh_due(start + 249ms));
+
+    state.record_successful_enqueue(start);
+    EXPECT_FALSE(state.refresh_due(start + 249ms));
+    EXPECT_TRUE(state.refresh_due(start + 250ms));
+  }
+
+  TEST(WindowsHostSbsContentReuseTest, ApproximateReuseAllowsOneHoldWithinFiftyMs) {
+    using namespace std::chrono_literals;
+    platf::dxgi::detail::host_sbs_low_motion_refresh_state_t state;
+    const auto start = std::chrono::steady_clock::time_point {1s};
+
+    EXPECT_FALSE(state.reuse_allowed(start));
+    state.record_successful_enqueue(start);
+    EXPECT_TRUE(state.reuse_allowed(start + 49ms));
+    EXPECT_FALSE(state.reuse_allowed(start + 50ms));
+
+    state.record_successful_enqueue(start);
+    state.record_reuse();
+    EXPECT_EQ(state.skipped(), 1u);
+    EXPECT_FALSE(state.reuse_allowed(start + 1ms));
+    state.record_successful_enqueue(start + 2ms);
+    EXPECT_TRUE(state.reuse_allowed(start + 3ms));
+  }
+
+  TEST(WindowsHostSbsContentReuseTest, ApproximateSelectorRequiresIdleAuthenticatedCache) {
+    using platf::dxgi::detail::host_sbs_low_motion_cache_reuse_allowed;
+
+    EXPECT_TRUE(host_sbs_low_motion_cache_reuse_allowed(
+      true, true, true, false, true, true
+    ));
+    EXPECT_FALSE(host_sbs_low_motion_cache_reuse_allowed(
+      false, true, true, false, true, true
+    ));
+    EXPECT_FALSE(host_sbs_low_motion_cache_reuse_allowed(
+      true, false, true, false, true, true
+    ));
+    EXPECT_FALSE(host_sbs_low_motion_cache_reuse_allowed(
+      true, true, true, true, true, true
+    ));
+    EXPECT_FALSE(host_sbs_low_motion_cache_reuse_allowed(
+      true, true, false, false, true, true
+    ));
+    EXPECT_FALSE(host_sbs_low_motion_cache_reuse_allowed(
+      true, true, true, false, false, true
+    ));
+    EXPECT_FALSE(host_sbs_low_motion_cache_reuse_allowed(
+      true, true, true, false, true, false
+    ));
   }
 
   TEST(WindowsUploadedValueStateTest, CommitsOnlyExplicitlyAcceptedValue) {

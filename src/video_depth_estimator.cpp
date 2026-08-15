@@ -1491,6 +1491,10 @@ namespace models {
       depth_coordinate_v2::subtitle_ocr_record_tag;
     static constexpr std::uint32_t subtitle_locator_state_word_count =
       depth_coordinate_v2::subtitle_locator_state_word_count;
+    static constexpr std::uint32_t subtitle_condition_param_word_count =
+      depth_coordinate_v2::subtitle_condition_param_word_count;
+    static constexpr std::uint32_t subtitle_condition_dispatch_arg_word_count =
+      depth_coordinate_v2::subtitle_condition_dispatch_arg_word_count;
     static_assert(ocr_grid_width * 8u ==
                   depth_coordinate_v2::subtitle_ocr_output_width);
     static_assert(ocr_grid_height ==
@@ -1572,6 +1576,10 @@ namespace models {
     unsigned throughput_stats_busy_drops = 0;
     unsigned throughput_stats_enqueues = 0;
     unsigned throughput_stats_completions = 0;
+    unsigned throughput_stats_subtitle_suppressed = 0;
+    unsigned throughput_stats_ocr_enqueues = 0;
+    unsigned throughput_stats_ocr_redispatches = 0;
+    unsigned throughput_stats_ocr_redispatch_fallbacks = 0;
 
     // GPU-stream timing of the async TensorRT enqueues (diagnostics only).
     // A small ring of CUDA event pairs per engine lets several inferences be in flight; the
@@ -2359,7 +2367,10 @@ namespace models {
     CUdeviceptr ocr_bound_output = 0;
 
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> rgb_to_nchw_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> rgb_to_nchw_content_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> rgb_to_nchw_pad_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_pad_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_ema_motion_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_minmax_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_minmax_ema_cs;
@@ -2379,6 +2390,8 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> ocr_box_cells_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> ocr_box_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_locator_resolve_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_condition_prepare_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_condition_in_place_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_condition_cs;
     Microsoft::WRL::ComPtr<ID3D11Buffer> cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_cbuffer;
@@ -2486,6 +2499,11 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> subtitle_locator_state_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subtitle_locator_state_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_locator_state_srv;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> subtitle_condition_params_buf;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subtitle_condition_params_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_condition_params_srv;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> subtitle_condition_dispatch_args_buf;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subtitle_condition_dispatch_args_uav;
     bool depth_coordinate_v2_coordinate_diagnostic_error_logged = false;
 
     CUgraphicsResource cuda_in_res = nullptr;
@@ -2503,6 +2521,44 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> ocr_box_record_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_box_record_srv;
     bool pending_ocr_submitted = false;
+    depth_optional_work_mode_e pending_optional_work =
+      depth_optional_work_mode_e::ordinary;
+    struct ocr_record_lineage_t {
+      depth_input_region_t input_region {};
+      input_color_space color_space = input_color_space::srgb;
+      int field_width = 0;
+      int field_height = 0;
+      bool valid = false;
+
+      [[nodiscard]] bool matches(
+        const depth_input_region_t &candidate_region,
+        const input_color_space candidate_color_space,
+        const int candidate_field_width,
+        const int candidate_field_height
+      ) const noexcept {
+        return valid && input_region == candidate_region &&
+               color_space == candidate_color_space &&
+               field_width == candidate_field_width &&
+               field_height == candidate_field_height;
+      }
+
+      void record(
+        const depth_input_region_t &candidate_region,
+        const input_color_space candidate_color_space,
+        const int candidate_field_width,
+        const int candidate_field_height
+      ) noexcept {
+        input_region = candidate_region;
+        color_space = candidate_color_space;
+        field_width = candidate_field_width;
+        field_height = candidate_field_height;
+        valid = true;
+      }
+
+      void reset() noexcept {
+        *this = {};
+      }
+    } ocr_record_lineage;
     bool subtitle_conditioned_current = false;
     bool ocr_shape_bound = false;
     bool ocr_output_size_validated = false;
@@ -3086,7 +3142,13 @@ namespace models {
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> * {
         switch (shader) {
           case producer_shader_e::rgb_to_nchw: return std::addressof(rgb_to_nchw_cs);
+          case producer_shader_e::rgb_to_nchw_content:
+            return std::addressof(rgb_to_nchw_content_cs);
+          case producer_shader_e::rgb_to_nchw_pad:
+            return std::addressof(rgb_to_nchw_pad_cs);
           case producer_shader_e::buffer_to_tex: return std::addressof(buffer_to_tex_cs);
+          case producer_shader_e::buffer_to_tex_pad:
+            return std::addressof(buffer_to_tex_pad_cs);
           case producer_shader_e::depth_ema_motion: return std::addressof(depth_ema_motion_cs);
           case producer_shader_e::depth_minmax: return std::addressof(depth_minmax_cs);
           case producer_shader_e::depth_minmax_ema: return std::addressof(depth_minmax_ema_cs);
@@ -3119,6 +3181,10 @@ namespace models {
             return std::addressof(ocr_box_resolve_cs);
           case producer_shader_e::host_sbs_subtitle_locator_resolve:
             return std::addressof(subtitle_locator_resolve_cs);
+          case producer_shader_e::host_sbs_subtitle_condition_prepare:
+            return std::addressof(subtitle_condition_prepare_cs);
+          case producer_shader_e::host_sbs_subtitle_condition_in_place:
+            return std::addressof(subtitle_condition_in_place_cs);
           case producer_shader_e::host_sbs_subtitle_condition:
             return std::addressof(subtitle_condition_cs);
         }
@@ -3260,7 +3326,10 @@ namespace models {
 
       const bool analysis_ready =
         depth_scene_cut_evidence_cs && depth_scene_cut_resolve_cs && scene_cut_evidence_uav;
-      valid = engine && exec_context && cu_stream && rgb_to_nchw_cs && buffer_to_tex_cs &&
+      valid = engine && exec_context && cu_stream && rgb_to_nchw_cs &&
+              rgb_to_nchw_content_cs && rgb_to_nchw_pad_cs &&
+              buffer_to_tex_cs &&
+              buffer_to_tex_pad_cs &&
               depth_minmax_cs && depth_minmax_ema_cs && depth_hist_cs && depth_valid_history_cs &&
               minmax_raw_uav && minmax_ema_uav && minmax_ema_srv && hist_uav &&
               analysis_ready && cut_state_uav && cut_state_srv;
@@ -3475,8 +3544,14 @@ namespace models {
       subtitle_locator_state_buf.Reset();
       subtitle_locator_state_uav.Reset();
       subtitle_locator_state_srv.Reset();
+      subtitle_condition_params_buf.Reset();
+      subtitle_condition_params_uav.Reset();
+      subtitle_condition_params_srv.Reset();
+      subtitle_condition_dispatch_args_buf.Reset();
+      subtitle_condition_dispatch_args_uav.Reset();
       subtitle_locator_cbuffer.Reset();
       pending_source_srv.Reset();
+      ocr_record_lineage.reset();
     }
     void fail_parallax_v2_producer(std::string_view reason) {
       if (!parallax_v2_producer_failed) {
@@ -3517,6 +3592,30 @@ namespace models {
         desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         return SUCCEEDED(device->CreateBuffer(&desc, nullptr, &buffer));
       };
+      auto create_indirect_args_buffer = [&]() {
+        D3D11_BUFFER_DESC desc {};
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.ByteWidth = subtitle_condition_dispatch_arg_word_count *
+                         sizeof(std::uint32_t);
+        desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+        desc.MiscFlags = D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
+        if (FAILED(device->CreateBuffer(
+              &desc,
+              nullptr,
+              &subtitle_condition_dispatch_args_buf
+            ))) {
+          return false;
+        }
+        D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc {};
+        uav_desc.Format = DXGI_FORMAT_R32_UINT;
+        uav_desc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        uav_desc.Buffer.NumElements = subtitle_condition_dispatch_arg_word_count;
+        return SUCCEEDED(device->CreateUnorderedAccessView(
+          subtitle_condition_dispatch_args_buf.Get(),
+          &uav_desc,
+          &subtitle_condition_dispatch_args_uav
+        ));
+      };
 
       bool resources_ok = true;
       if (!ocr_box_record_buf || !ocr_box_record_srv || !ocr_box_record_uav) {
@@ -3541,6 +3640,24 @@ namespace models {
           subtitle_locator_state_srv,
           subtitle_locator_state_uav
         );
+      }
+      if (!subtitle_condition_params_buf || !subtitle_condition_params_srv ||
+          !subtitle_condition_params_uav) {
+        subtitle_condition_params_buf.Reset();
+        subtitle_condition_params_srv.Reset();
+        subtitle_condition_params_uav.Reset();
+        resources_ok = resources_ok && create_uint_buffer(
+          subtitle_condition_param_word_count,
+          subtitle_condition_params_buf,
+          subtitle_condition_params_srv,
+          subtitle_condition_params_uav
+        );
+      }
+      if (!subtitle_condition_dispatch_args_buf ||
+          !subtitle_condition_dispatch_args_uav) {
+        subtitle_condition_dispatch_args_buf.Reset();
+        subtitle_condition_dispatch_args_uav.Reset();
+        resources_ok = resources_ok && create_indirect_args_buffer();
       }
 
       if (!subtitle_conditioned_tex || !subtitle_conditioned_srv ||
@@ -3572,8 +3689,14 @@ namespace models {
       }
 
       const UINT zero[4] = {};
+      // Every clear below invalidates the prior OCR8 bytes as a redispatch source. Re-establish
+      // lineage only after an ordinary resolve or a verified header restamp is submitted.
+      ocr_record_lineage.reset();
       context->ClearUnorderedAccessViewUint(ocr_box_record_uav.Get(), zero);
       context->ClearUnorderedAccessViewUint(subtitle_locator_state_uav.Get(), zero);
+      context->ClearUnorderedAccessViewUint(subtitle_condition_params_uav.Get(), zero);
+      context->ClearUnorderedAccessViewUint(
+        subtitle_condition_dispatch_args_uav.Get(), zero);
       const float zero_float[4] = {};
       context->ClearUnorderedAccessViewFloat(subtitle_conditioned_uav.Get(), zero_float);
 
@@ -3998,6 +4121,47 @@ namespace models {
       return true;
     }
 
+    bool restamp_ocr_record_for_pending_frame() {
+      if (
+        !ocr_available || !ocr_box_record_buf ||
+        !ocr_record_lineage.matches(
+          pending_input_region,
+          pending_color_space,
+          target_w,
+          target_h
+        )
+      ) {
+        return false;
+      }
+
+      // The detector's desktop-content crop was proved unchanged before enqueue, so an ordinary
+      // deterministic resolve would reproduce words 0..4 and 7..207. DDup pointer composition is
+      // intentionally outside that proof; update only the matched-frame identity.
+      // Buffer D3D11_BOX coordinates are bytes; immediate-context ordering keeps the previous
+      // locator read ahead of this tiny write without a flush, wait, shader, or closure change.
+      const std::array<std::uint32_t, 2> frame_words {
+        static_cast<std::uint32_t>(pending_frame_id),
+        static_cast<std::uint32_t>(pending_frame_id >> 32u),
+      };
+      const D3D11_BOX frame_box {
+        static_cast<UINT>(5u * sizeof(std::uint32_t)),
+        0u,
+        0u,
+        static_cast<UINT>(7u * sizeof(std::uint32_t)),
+        1u,
+        1u,
+      };
+      context->UpdateSubresource(
+        ocr_box_record_buf.Get(),
+        0u,
+        &frame_box,
+        frame_words.data(),
+        0u,
+        0u
+      );
+      return true;
+    }
+
     bool dispatch_ocr_postprocess() {
       const bool submitted = std::exchange(pending_ocr_submitted, false);
       if (!ocr_box_record_buf || !ocr_box_record_uav) {
@@ -4103,14 +4267,21 @@ namespace models {
 
     bool dispatch_subtitle_conditioner(
       const bool ocr_record_submitted,
-      const bool input_domain_reset
+      const bool input_domain_reset,
+      const bool preserve_base_diagnostic
     ) {
       subtitle_conditioned_current = false;
-      if (!subtitle_locator_resolve_cs || !subtitle_condition_cs ||
+      if (!subtitle_locator_resolve_cs || !subtitle_condition_prepare_cs ||
+          !subtitle_condition_in_place_cs || !subtitle_condition_cs ||
           !subtitle_locator_cbuffer || !subtitle_locator_state_srv ||
           !subtitle_locator_state_uav || !subtitle_conditioned_srv ||
           !subtitle_conditioned_uav || !depth_coordinate_v2_final_srv ||
-          !ocr_box_record_srv || !cut_state_srv) {
+          !depth_coordinate_v2_final_uav ||
+          !depth_coordinate_v2_final_tex || !subtitle_conditioned_tex ||
+          !subtitle_condition_params_srv || !subtitle_condition_params_uav ||
+          !subtitle_condition_dispatch_args_buf ||
+          !subtitle_condition_dispatch_args_uav || !ocr_box_record_srv ||
+          !cut_state_srv) {
         return false;
       }
 
@@ -4129,9 +4300,9 @@ namespace models {
         pending_input_region.tensor_content
       );
       // OCR8/SLR12 follows the current authenticated analysis field. An unsupported tensor or an
-      // unprojectable bottom crop has no subtitle authority, but condition_main must still run:
-      // its abstention path copies BaseField through the exact content clamp so synthetic padding
-      // remains a boundary extension after the vertical/horizontal limiters.
+      // unprojectable bottom crop has no subtitle authority. Full-content live production can
+      // therefore leave the base UAV untouched, while the out-of-place padding path still writes
+      // an exact boundary extension after the vertical/horizontal limiters.
       const bool locator_geometry_valid = roi.valid();
       const auto tensor_content = pending_input_region.tensor_content;
 
@@ -4191,24 +4362,62 @@ namespace models {
         context->ClearUnorderedAccessViewUint(subtitle_locator_state_uav.Get(), zero);
       }
 
-      context->CSSetShader(subtitle_condition_cs.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *condition_srvs[4] = {
+      // Authenticate the complete SLR12 state once, not once per 16x16 field group. This tiny
+      // pass also writes DispatchIndirect arguments: a full-content field with no current
+      // subtitle authority launches zero groups, active authority launches only its conservative
+      // analytic region, and padded fields still repair their full synthetic boundary extension.
+      context->CSSetShader(subtitle_condition_prepare_cs.Get(), nullptr, 0);
+      ID3D11ShaderResourceView *prepare_srvs[5] = {
         nullptr,
         cut_state_srv.Get(),
-        depth_coordinate_v2_final_srv.Get(),
+        nullptr,
         subtitle_locator_state_srv.Get(),
+        nullptr,
       };
-      context->CSSetShaderResources(0, 4, condition_srvs);
-      context->CSSetUnorderedAccessViews(
-        3, 1, subtitle_conditioned_uav.GetAddressOf(),
-        nullptr
-      );
-      context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
-      context->CSSetShaderResources(0, 4, null_srvs);
+      context->CSSetShaderResources(0, 5, prepare_srvs);
+      ID3D11UnorderedAccessView *prepare_uavs[2] = {
+        subtitle_condition_params_uav.Get(),
+        subtitle_condition_dispatch_args_uav.Get(),
+      };
+      context->CSSetUnorderedAccessViews(4, 2, prepare_uavs, nullptr);
+      context->Dispatch(1, 1, 1);
+      context->CSSetShaderResources(0, 5, null_srvs);
+      ID3D11UnorderedAccessView *null_prepare_uavs[2] = {nullptr, nullptr};
+      context->CSSetUnorderedAccessViews(4, 2, null_prepare_uavs, nullptr);
+
+      const bool full_content =
+        tensor_content.left == 0u && tensor_content.top == 0u &&
+        tensor_content.right == field_width && tensor_content.bottom == field_height;
+      const bool condition_in_place = full_content && !preserve_base_diagnostic;
+      ID3D11ShaderResourceView *condition_srvs[5] = {
+        nullptr,
+        nullptr,
+        condition_in_place ? nullptr : depth_coordinate_v2_final_srv.Get(),
+        subtitle_locator_state_srv.Get(),
+        subtitle_condition_params_srv.Get(),
+      };
+      context->CSSetShaderResources(0, 5, condition_srvs);
+      ID3D11UnorderedAccessView *condition_output = condition_in_place ?
+        depth_coordinate_v2_final_uav.Get() : subtitle_conditioned_uav.Get();
+      context->CSSetUnorderedAccessViews(3, 1, &condition_output, nullptr);
+      if (condition_in_place) {
+        // t2 is deliberately null: the full-content shader reads and conditionally replaces only
+        // its own u3 cell. Invalid authority has zero indirect groups and therefore zero texture
+        // traffic; active authority avoids a full-field preparatory copy.
+        context->CSSetShader(subtitle_condition_in_place_cs.Get(), nullptr, 0);
+        context->DispatchIndirect(subtitle_condition_dispatch_args_buf.Get(), 0u);
+      } else {
+        // Dump 3D must retain the unconditioned post-limiter field, and padded tensors must write
+        // every synthetic boundary cell. This complete writer publishes Base on abstention and
+        // therefore needs neither CopyResource nor the indirect gate.
+        context->CSSetShader(subtitle_condition_cs.Get(), nullptr, 0);
+        context->Dispatch((field_width + 15u) / 16u, (field_height + 15u) / 16u, 1u);
+      }
+      context->CSSetShaderResources(0, 5, null_srvs);
       context->CSSetUnorderedAccessViews(3, 1, &null_uav, nullptr);
       ID3D11Buffer *null_constants[3] = {};
       context->CSSetConstantBuffers(0, 3, null_constants);
-      subtitle_conditioned_current = true;
+      subtitle_conditioned_current = !condition_in_place;
       return true;
     }
 
@@ -4326,7 +4535,10 @@ namespace models {
       bool coordinate_snapshot_valid = false,
       depth_input_region_t completed_input_region = {},
       input_color_space completed_color_space = input_color_space::srgb,
-      bool input_domain_reset = false
+      bool input_domain_reset = false,
+      bool subtitle_work_suppressed = false,
+      bool subtitle_ocr_inference_enqueued = false,
+      bool subtitle_ocr_redispatch_enqueued = false
     ) {
       estimate_result r;
       r.depth = output_srv();
@@ -4370,12 +4582,15 @@ namespace models {
       r.completed_frame_valid = completed_frame_valid;
       r.completed_frame_id = completed_frame_id;
       r.inference_enqueued = inference_enqueued;
+      r.subtitle_ocr_inference_enqueued = subtitle_ocr_inference_enqueued;
+      r.subtitle_ocr_redispatch_enqueued = subtitle_ocr_redispatch_enqueued;
       r.cuda_graph_active = depth_inference_graph.executable != nullptr &&
                             !depth_inference_graph.policy.capture_failed;
       if (completed_frame_valid) {
         r.input_region = completed_input_region;
         r.color_space = completed_color_space;
         r.input_domain_reset = input_domain_reset;
+        r.subtitle_work_suppressed = subtitle_work_suppressed;
       }
       return r;
     }
@@ -4434,6 +4649,9 @@ namespace models {
       input_color_space color_space,
       bool snapshot_debug_inputs = false
     ) {
+      // A caller may first prove nonblocking readiness with can_accept(). Consuming instead of
+      // enqueueing must retire that admission token so a later estimate cannot skip its own query.
+      readiness_preflighted = false;
       auto &cuda = cuda_driver_api::get();
       if (!has_previous_frame || !cu_stream || !cuda.cuStreamSynchronize) {
         return make_result();
@@ -4465,7 +4683,11 @@ namespace models {
       }
       auto *d3d_timer = diagnostics_enabled ? begin_d3d_perf(true, false) : nullptr;
       const bool input_domain_reset = prepare_pending_input_domain();
-      normalize_depth_output(d3d_timer, input_domain_reset);
+      normalize_depth_output(
+        d3d_timer,
+        input_domain_reset,
+        snapshot_debug_inputs
+      );
       mark_d3d_post_end(d3d_timer);
       bool raw_snapshot_valid = false;
       bool model_input_snapshot_valid = false;
@@ -4497,7 +4719,10 @@ namespace models {
       const auto completed_frame_id = pending_frame_id;
       const auto completed_input_region = pending_input_region;
       const auto completed_color_space = pending_color_space;
+      const bool completed_subtitle_work_suppressed =
+        pending_optional_work == depth_optional_work_mode_e::suppress_subtitle;
       has_previous_frame = false;  // the output buffer has been consumed; never fold it twice
+      pending_optional_work = depth_optional_work_mode_e::ordinary;
       // normalize_depth_output() has submitted and unbound every D3D11 read of this exact source.
       // Drop our retained reference only after the ownership pass has consumed it.
       pending_source_srv.Reset();
@@ -4513,8 +4738,36 @@ namespace models {
         coordinate_snapshot_valid,
         completed_input_region,
         completed_color_space,
-        input_domain_reset
+        input_domain_reset,
+        completed_subtitle_work_suppressed
       );
+    }
+
+    pending_depth_poll_result try_finish_pending_nonblocking(
+      input_color_space color_space,
+      bool snapshot_debug_inputs = false
+    ) {
+      readiness_preflighted = false;
+      auto &cuda = cuda_driver_api::get();
+      if (!has_previous_frame || !cu_stream || !cuda.cuStreamQuery) {
+        return {.result = make_result(), .ready = true};
+      }
+      if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
+        mark_shared_execution_failure(pending_ocr_submitted);
+        return {.result = make_result(), .ready = true};
+      }
+      const auto query = cuda.cuStreamQuery(cu_stream);
+      if (query == CUDA_ERROR_NOT_READY) {
+        return {};
+      }
+      if (query != CUDA_SUCCESS) {
+        mark_shared_execution_failure(pending_ocr_submitted);
+        return {.result = make_result(), .ready = true};
+      }
+      return {
+        .result = finish_pending(color_space, snapshot_debug_inputs),
+        .ready = true,
+      };
     }
 
     // (Re)build the depth constant buffer. The fixed tensor dimensions stay session-constant,
@@ -4674,12 +4927,53 @@ namespace models {
     // mapping/temporal-EMA pass. GPU-resident throughout, no CPU readback.
     void normalize_depth_output(
       d3d_perf_slot *perf_slot,
-      const bool input_domain_reset
+      const bool input_domain_reset,
+      const bool preserve_subtitle_base
     ) {
-      // OCR and depth were submitted back-to-back on the same bounded CUDA stream. Its completion
-      // gate therefore makes the probability map for this exact pending frame safe to consume
-      // before any next-frame interop mapping can reuse the fixed buffers.
-      const bool ocr_record_submitted = dispatch_ocr_postprocess();
+      // Ordinary OCR and depth were submitted back-to-back on the same bounded CUDA stream. Its
+      // completion gate therefore makes an ordinary probability map safe to consume before any
+      // next-frame interop mapping can reuse the fixed buffers. A damage-proven redispatch has no
+      // OCR CUDA work and updates only the retained OCR8 frame identity below.
+      const bool subtitle_work_suppressed =
+        pending_optional_work == depth_optional_work_mode_e::suppress_subtitle;
+      // Native interactive move/resize keeps the depth/cut/camera pipeline live, but OCR evidence
+      // would describe a rapidly moving, deliberately de-authorized window. Leave same-domain
+      // locator bytes untouched and publish the freshly produced Base field for this completion;
+      // an analysis-domain transition still performed its mandatory reset above.
+      bool ocr_record_submitted = false;
+      if (subtitle_work_suppressed) {
+        pending_ocr_submitted = false;
+      } else if (
+        pending_optional_work == depth_optional_work_mode_e::redispatch_subtitle
+      ) {
+        pending_ocr_submitted = false;
+        ocr_record_submitted = restamp_ocr_record_for_pending_frame();
+        if (ocr_record_submitted) {
+          ocr_record_lineage.record(
+            pending_input_region,
+            pending_color_space,
+            target_w,
+            target_h
+          );
+        } else {
+          // A lineage/resource mismatch must never expose stale boxes under a fresh identity.
+          // Publish the ordinary exact-frame abstention and let SLR age it as a missed observation.
+          (void) dispatch_ocr_postprocess();
+          ocr_record_lineage.reset();
+        }
+      } else {
+        ocr_record_submitted = dispatch_ocr_postprocess();
+        if (ocr_record_submitted) {
+          ocr_record_lineage.record(
+            pending_input_region,
+            pending_color_space,
+            target_w,
+            target_h
+          );
+        } else {
+          ocr_record_lineage.reset();
+        }
+      }
       // 3a. Per-frame scale (GPU-resident; no CPU readback). Depth Anything V2's
       // relative output is affine-invariant, so this is required for a stable parallax scale.
       if (depth_minmax_cs && depth_minmax_ema_cs && minmax_raw_uav && minmax_ema_uav) {
@@ -4737,53 +5031,48 @@ namespace models {
       std::swap(depth_uav, depth_previous_uav);
       std::swap(depth_srv, depth_previous_srv);
 
-      const UINT clear_mask[4] = {0u, 0u, 0u, 0u};
-      if (ema_edge_change > 0.0f && ema_edge_gradient > 0.0f) {
-        context->CSSetShader(depth_ema_motion_cs.Get(), nullptr, 0);
-        context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-        ID3D11ShaderResourceView *mask_srvs[4] = {
-          tensor_out_srv.Get(),
-          minmax_ema_srv.Get(),
-          depth_previous_srv.Get(),
-          tensor_exclusion_srv.Get(),
-        };
-        context->CSSetShaderResources(0, 4, mask_srvs);
-        context->CSSetUnorderedAccessViews(0, 1, ema_motion_mask_uav.GetAddressOf(), nullptr);
-        context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
-        ID3D11UnorderedAccessView *null_mask_uav = nullptr;
-        ID3D11ShaderResourceView *null_mask_srvs[4] = {
-          nullptr, nullptr, nullptr,
-          nullptr
-        };
-        context->CSSetUnorderedAccessViews(0, 1, &null_mask_uav, nullptr);
-        context->CSSetShaderResources(0, 4, null_mask_srvs);
-      } else {
-        context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), clear_mask);
-      }
-
-      // 3b. Buffer to Texture: normalize disparity and either apply temporal EMA or snap the
-      // pixels selected by the deterministic moving-edge mask. MinMaxEma.frame_state makes the
-      // first valid frame snap and makes an all-invalid frame hold entirely on the GPU.
+      // 3b. Buffer to Texture: normalize disparity, classify the deterministic moving-edge
+      // stencil, apply temporal EMA, and publish the diagnostic mask in one content dispatch.
+      // Consuming the mask decision in-register removes the R32 mask round trip while retaining
+      // the exact independently observable mask. Contain-fit padding is filled afterward by a
+      // lightweight UAV copy entry point, avoiding repeated boundary-stencil work. Full-content
+      // fields remain one dispatch. MinMaxEma.frame_state makes the first valid frame snap and
+      // makes an all-invalid frame hold entirely on the GPU.
       context->CSSetShader(buffer_to_tex_cs.Get(), nullptr, 0);
       context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-      ID3D11ShaderResourceView *bt_srvs[5] = {
+      ID3D11ShaderResourceView *bt_srvs[4] = {
         tensor_out_srv.Get(),
         minmax_ema_srv.Get(),
         depth_previous_srv.Get(),
-        ema_motion_mask_srv.Get(),
         tensor_exclusion_srv.Get(),
       };
-      context->CSSetShaderResources(0, 5, bt_srvs);
-      context->CSSetUnorderedAccessViews(0, 1, depth_uav.GetAddressOf(), nullptr);
+      ID3D11UnorderedAccessView *bt_uavs[2] = {
+        depth_uav.Get(),
+        ema_motion_mask_uav.Get(),
+      };
+      context->CSSetShaderResources(0, 4, bt_srvs);
+      context->CSSetUnorderedAccessViews(0, 2, bt_uavs, nullptr);
 
       context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
 
+      const auto &tensor_content = pending_input_region.tensor_content;
+      const bool has_synthetic_padding =
+        tensor_content.left != 0u || tensor_content.top != 0u ||
+        tensor_content.right != target_w || tensor_content.bottom != target_h;
+      if (has_synthetic_padding) {
+        // The preceding dispatch has completed its UAV accesses before this dispatch begins.
+        // pad_main reads only an already-written admitted boundary texel and writes one excluded
+        // destination, so no cross-thread or cross-group dependency exists inside this pass.
+        context->CSSetShader(buffer_to_tex_pad_cs.Get(), nullptr, 0);
+        context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
+      }
+
       ID3D11UnorderedAccessView *null_uav2[2] = {nullptr, nullptr};
-      ID3D11ShaderResourceView *null_srvs[5] = {
-        nullptr, nullptr, nullptr, nullptr, nullptr
+      ID3D11ShaderResourceView *null_srvs[4] = {
+        nullptr, nullptr, nullptr, nullptr
       };
-      context->CSSetUnorderedAccessViews(0, 1, null_uav2, nullptr);
-      context->CSSetShaderResources(0, 5, null_srvs);
+      context->CSSetUnorderedAccessViews(0, 2, null_uav2, nullptr);
+      context->CSSetShaderResources(0, 4, null_srvs);
 
       // 3s. Analyze the freshly normalized private cut field: compact evidence + cut resolve.
       {
@@ -4905,8 +5194,12 @@ namespace models {
         mark_d3d_parallax_start(perf_slot);
       }
       const bool base_ready = dispatch_parallax_v2_producer(perf_slot);
-      if (base_ready) {
-        dispatch_subtitle_conditioner(ocr_record_submitted, input_domain_reset);
+      if (base_ready && !subtitle_work_suppressed) {
+        dispatch_subtitle_conditioner(
+          ocr_record_submitted,
+          input_domain_reset,
+          preserve_subtitle_base
+        );
       } else {
         subtitle_conditioned_current = false;
       }
@@ -4939,12 +5232,22 @@ namespace models {
                           << "fps, completed ~" << (int) (throughput_stats_completions / stats_seconds + 0.5f)
                           << "fps, enqueued ~" << (int) (throughput_stats_enqueues / stats_seconds + 0.5f)
                           << "fps, busy drops " << (int) (100.0f * throughput_stats_busy_drops / calls + 0.5f)
-                          << "% (" << throughput_stats_busy_drops << '/' << throughput_stats_calls << ')';
+                          << "% (" << throughput_stats_busy_drops << '/' << throughput_stats_calls
+                          << "), subtitle pauses " << throughput_stats_subtitle_suppressed
+                          << ", OCR enqueues " << throughput_stats_ocr_enqueues
+                          << ", OCR damage redispatches "
+                          << throughput_stats_ocr_redispatches
+                          << ", OCR redispatch fail-open "
+                          << throughput_stats_ocr_redispatch_fallbacks;
           throughput_stats_start = now;
           throughput_stats_calls = 0;
           throughput_stats_busy_drops = 0;
           throughput_stats_enqueues = 0;
           throughput_stats_completions = 0;
+          throughput_stats_subtitle_suppressed = 0;
+          throughput_stats_ocr_enqueues = 0;
+          throughput_stats_ocr_redispatches = 0;
+          throughput_stats_ocr_redispatch_fallbacks = 0;
         }
       }
       throughput_stats_calls++;
@@ -5000,7 +5303,8 @@ namespace models {
       input_color_space color_space,
       std::uint64_t frame_id,
       bool snapshot_raw_model_depth,
-      depth_input_region_t input_region
+      depth_input_region_t input_region,
+      depth_optional_work_mode_e optional_work
     ) {
       if (!valid || terminal_failure || live_v2_producer_unavailable() || !input_srv) {
         return {};
@@ -5013,6 +5317,11 @@ namespace models {
       depth_input_region_t completed_input_region {};
       input_color_space completed_color_space = input_color_space::srgb;
       bool completed_input_domain_reset = false;
+      bool completed_subtitle_work_suppressed = false;
+      // An explicitly armed Dump 3D frame always runs ordinary exact-frame OCR/locator work.
+      auto accepted_optional_work = snapshot_raw_model_depth ?
+                                      depth_optional_work_mode_e::ordinary :
+                                      optional_work;
 
       auto &cuda = cuda_driver_api::get();
       if (!cuda.is_valid()) {
@@ -5321,13 +5630,19 @@ namespace models {
       // (fully unmapped from CUDA), so consuming it here never blocks the encode thread. The
       // caller uses completed_frame_id to select the color slot that produced this exact result.
       if (has_previous_frame) {
+        completed_subtitle_work_suppressed =
+          pending_optional_work == depth_optional_work_mode_e::suppress_subtitle;
         ensure_cbuffers(pending_color_space, pending_input_region);
         if (!cbuffer) {
           mark_terminal_failure();
           return {};
         }
         completed_input_domain_reset = prepare_pending_input_domain();
-        normalize_depth_output(d3d_timer, completed_input_domain_reset);
+        normalize_depth_output(
+          d3d_timer,
+          completed_input_domain_reset,
+          snapshot_raw_model_depth
+        );
         // The ownership dispatch has now consumed and unbound the completed frame's source SRV.
         // It is safe to release before preprocessing the newly accepted source frame.
         pending_source_srv.Reset();
@@ -5380,6 +5695,7 @@ namespace models {
         completed_color_space = pending_color_space;
         completed_frame_valid = true;
         has_previous_frame = false;
+        pending_optional_work = depth_optional_work_mode_e::ordinary;
         if (diagnostics_enabled) {
           throughput_stats_completions++;
         }
@@ -5402,8 +5718,25 @@ namespace models {
           coordinate_snapshot_valid,
           completed_input_region,
           completed_color_space,
-          completed_input_domain_reset
+          completed_input_domain_reset,
+          completed_subtitle_work_suppressed
         );
+      }
+
+      // The caller proves DDup crop equality, while the estimator owns the mutable OCR8 buffer.
+      // Require both halves before suppressing detector work. A lost/overwritten lineage fails
+      // open to ordinary OCR in this same accepted depth submission.
+      if (
+        accepted_optional_work == depth_optional_work_mode_e::redispatch_subtitle &&
+        (
+          !ocr_available ||
+          !ocr_record_lineage.matches(input_region, color_space, target_w, target_h)
+        )
+      ) {
+        accepted_optional_work = depth_optional_work_mode_e::ordinary;
+        if (diagnostics_enabled) {
+          throughput_stats_ocr_redispatch_fallbacks++;
+        }
       }
 
       mark_d3d_pre_start(d3d_timer);
@@ -5420,7 +5753,37 @@ namespace models {
       };
       context->CSSetUnorderedAccessViews(0, 3, preprocess_uavs, nullptr);
 
-      context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
+      const auto &preprocess_content = input_region.tensor_content;
+      const depth_tensor_shape_t preprocess_shape {target_w, target_h};
+      const auto preprocess_area =
+        static_cast<std::uint64_t>(target_w) * static_cast<std::uint64_t>(target_h);
+      const auto preprocess_content_area =
+        static_cast<std::uint64_t>(preprocess_content.width()) *
+        static_cast<std::uint64_t>(preprocess_content.height());
+      const bool specialize_preprocess_padding =
+        preprocess_content.valid(preprocess_shape) &&
+        !preprocess_content.full(preprocess_shape) &&
+        // The second dispatch has a fixed cost. Keep near-matched source/tensor shapes on the
+        // original one-dispatch path; specialize only when at least one eighth of the expensive
+        // source-footprint evaluations can be replaced with cheap boundary copies.
+        (preprocess_area - preprocess_content_area) * 8u >= preprocess_area;
+      if (specialize_preprocess_padding) {
+        // content_main interprets its dispatch ID as content-local for a padded domain. Keeping
+        // this separate preserves main's common full-content bytecode and dispatch topology.
+        context->CSSetShader(rgb_to_nchw_content_cs.Get(), nullptr, 0);
+        context->Dispatch(
+          (static_cast<UINT>(preprocess_content.width()) + 15u) / 16u,
+          (static_cast<UINT>(preprocess_content.height()) + 15u) / 16u,
+          1u
+        );
+        // The content pass has finished all admitted UAV writes. The lightweight pad entry point
+        // copies NCHW/ordinal bits from clamped boundary cells and writes exclusion=1.
+        context->CSSetShader(rgb_to_nchw_pad_cs.Get(), nullptr, 0);
+        context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
+      } else {
+        // Full-content and defensive invalid-content inputs preserve the original full-grid pass.
+        context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
+      }
 
       ID3D11UnorderedAccessView *null_uavs[3] = {nullptr, nullptr, nullptr};
       ID3D11ShaderResourceView *null_srv = nullptr;
@@ -5436,6 +5799,7 @@ namespace models {
         input_region.tensor_content
       );
       bool ocr_frame_eligible =
+        accepted_optional_work == depth_optional_work_mode_e::ordinary &&
         ocr_available && ocr_preprocess_cs && ocr_preprocess_cbuffer &&
         ocr_input_uav && cuda_ocr_in_res && cuda_ocr_out_res &&
         current_ocr_roi.valid();
@@ -5500,7 +5864,8 @@ namespace models {
           coordinate_snapshot_valid,
           completed_input_region,
           completed_color_space,
-          completed_input_domain_reset
+          completed_input_domain_reset,
+          completed_subtitle_work_suppressed
         );
       }
 
@@ -5761,8 +6126,20 @@ namespace models {
         pending_color_space = color_space;
         pending_frame_id = frame_id;
         pending_input_region = input_region;
+        pending_optional_work = accepted_optional_work;
         if (diagnostics_enabled) {
           throughput_stats_enqueues++;
+          if (accepted_optional_work == depth_optional_work_mode_e::suppress_subtitle) {
+            throughput_stats_subtitle_suppressed++;
+          }
+          if (ocr_enqueued) {
+            throughput_stats_ocr_enqueues++;
+          }
+          if (
+            accepted_optional_work == depth_optional_work_mode_e::redispatch_subtitle
+          ) {
+            throughput_stats_ocr_redispatches++;
+          }
         }
       } else {
         pending_source_srv.Reset();
@@ -5777,7 +6154,11 @@ namespace models {
         coordinate_snapshot_valid,
         completed_input_region,
         completed_color_space,
-        completed_input_domain_reset
+        completed_input_domain_reset,
+        completed_subtitle_work_suppressed,
+        enqueued && ocr_enqueued,
+        enqueued &&
+          accepted_optional_work == depth_optional_work_mode_e::redispatch_subtitle
       );
     }
   };
@@ -5811,14 +6192,16 @@ namespace models {
     input_color_space color_space,
     std::uint64_t frame_id,
     bool snapshot_debug_inputs,
-    depth_input_region_t input_region
+    depth_input_region_t input_region,
+    depth_optional_work_mode_e optional_work
   ) {
     return pimpl->estimate(
       input_srv,
       color_space,
       frame_id,
       snapshot_debug_inputs,
-      input_region
+      input_region,
+      optional_work
     );
   }
 
@@ -5831,6 +6214,17 @@ namespace models {
     bool snapshot_debug_inputs
   ) {
     return pimpl->finish_pending(color_space, snapshot_debug_inputs);
+  }
+
+  pending_depth_poll_result video_depth_estimator::try_finish_pending_depth_nonblocking(
+    input_color_space color_space,
+    bool snapshot_debug_inputs
+  ) {
+    return pimpl ? pimpl->try_finish_pending_nonblocking(
+                     color_space,
+                     snapshot_debug_inputs
+                   ) :
+                   pending_depth_poll_result {.ready = true};
   }
 
   depth_telemetry_poll_result video_depth_estimator::poll_depth_telemetry(

@@ -302,6 +302,28 @@ namespace models {
     return static_cast<std::uint32_t>(std::min<std::uint64_t>(requested, source_height));
   }
 
+  /** Exact absolute source rectangle sampled by subtitle OCR inside one analysis crop. */
+  inline constexpr std::optional<depth_source_rect_t> subtitle_ocr_source_crop_rect(
+    const depth_source_rect_t &analysis_rect
+  ) noexcept {
+    if (!analysis_rect.valid()) {
+      return std::nullopt;
+    }
+    const auto crop_height = subtitle_ocr_source_crop_height(
+      analysis_rect.width(),
+      analysis_rect.height()
+    );
+    if (crop_height == 0u || crop_height > analysis_rect.height()) {
+      return std::nullopt;
+    }
+    return depth_source_rect_t {
+      analysis_rect.left,
+      analysis_rect.bottom - crop_height,
+      analysis_rect.right,
+      analysis_rect.bottom,
+    };
+  }
+
   /** Fit the exact source tensor requested by the fixed live Host SBS V2 calibration. */
   inline depth_tensor_shape_t fit_host_sbs_v2_depth_tensor_shape(
     const std::uint32_t source_width,

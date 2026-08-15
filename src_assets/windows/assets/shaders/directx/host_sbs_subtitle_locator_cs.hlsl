@@ -14,10 +14,13 @@
 StructuredBuffer<float4> CutBridge : register(t1);
 Texture2D<float> BaseField : register(t2);
 StructuredBuffer<uint> LocatorStateRead : register(t3);
+StructuredBuffer<uint> ConditionParams : register(t4);
 StructuredBuffer<uint> OcrRecord : register(t7);
 
 RWStructuredBuffer<uint> LocatorState : register(u2);
 RWTexture2D<float> ConditionedField : register(u3);
+RWStructuredBuffer<uint> ConditionParamsOut : register(u4);
+RWBuffer<uint> ConditionDispatchArgs : register(u5);
 
 cbuffer SubtitleLocatorConstants : register(b2) {
     uint4 locator_field;   // width, height, ROI top, ROI bottom
@@ -59,11 +62,16 @@ groupshared uint4 StackCovers[MAX_LINES];
 groupshared uint4 MatchedCovers[MAX_LINES];
 groupshared float TargetSamples[32];
 groupshared float LineCenters[MAX_LINES];
-groupshared uint ConditionStateIsValid;
-groupshared uint ConditionCurrentCount;
-groupshared uint ConditionCurrentKinds;
-groupshared uint ConditionFadeStep;
-groupshared float ConditionTarget;
+
+static const uint CONDITION_PARAM_SCHEMA_WORD = 0u;
+static const uint CONDITION_PARAM_TAG_WORD = 1u;
+static const uint CONDITION_PARAM_CURRENT_COUNT_WORD = 2u;
+static const uint CONDITION_PARAM_CURRENT_KINDS_WORD = 3u;
+static const uint CONDITION_PARAM_FADE_STEP_WORD = 4u;
+static const uint CONDITION_PARAM_TARGET_WORD = 5u;
+static const uint CONDITION_PARAM_ORIGIN_X_WORD = 6u;
+static const uint CONDITION_PARAM_ORIGIN_Y_WORD = 7u;
+static const uint CONDITION_PARAM_WORD_COUNT = V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT;
 
 bool FiniteFloat(float value) {
     return (asuint(value) & 0x7f800000u) != 0x7f800000u;
@@ -85,8 +93,9 @@ bool SubtitleTargetIsValid(float target) {
 // The active field/ROI is carried by the existing runtime cbuffer and repeated in OCR8.  The host
 // enables this path only after authenticating the DAV2 tensor shape; SLR12 independently checks
 // finite ABI-sized geometry, the actual BaseField dispatch dimensions, and that the ROI is a
-// non-empty subset of the exact bottom-6:1 detector crop.  Any disagreement publishes no current
-// authority and condition_main copies BaseField exactly.
+// non-empty subset of the exact bottom-6:1 detector crop. Any disagreement publishes no current
+// authority; the complete writer publishes BaseField exactly, while full-content live production
+// emits zero indirect groups and leaves the final UAV untouched.
 bool LocatorDomainGeometryValid() {
     if (locator_source.x == 0u || locator_source.y == 0u || locator_source.z > 1u ||
         locator_field.x == 0u || locator_field.y == 0u ||
@@ -1353,37 +1362,174 @@ bool ConditionStateValid(out uint current_count, out float target, out uint fade
     return true;
 }
 
-[numthreads(16, 16, 1)]
-void condition_main(
-    uint3 dispatch_id : SV_DispatchThreadID,
-    uint3 group_thread_id : SV_GroupThreadID) {
-    if (all(group_thread_id.xy == uint2(0u, 0u))) {
-        uint current_count;
-        float target;
-        uint fade_step;
-        bool state_valid = ConditionStateValid(current_count, target, fade_step);
-        ConditionStateIsValid = state_valid ? 1u : 0u;
-        ConditionCurrentCount = current_count;
-        ConditionCurrentKinds =
-            (LocatorStateRead[V2_SUBTITLE_LOCATOR_KIND_WORD] >>
-             V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT) &
-            V2_SUBTITLE_LOCATOR_KIND_MASK;
-        ConditionFadeStep = fade_step;
-        ConditionTarget = target;
+bool ConditionContentValid() {
+    return target_w != 0u && target_h != 0u &&
+        target_w == locator_field.x && target_h == locator_field.y &&
+        locator_content.x < locator_content.z && locator_content.y < locator_content.w &&
+        locator_content.z <= target_w && locator_content.w <= target_h &&
+        all(locator_content == DepthAnalysisContentCells());
+}
+
+uint ConservativeConditionPad(
+    float max_delta,
+    float core_range,
+    float slope,
+    uint content_width,
+    uint axis_extent) {
+    if (axis_extent == 0u || max_delta <= core_range) return 0u;
+    precise float step = slope / (float)content_width;
+    if (!FiniteFloat(step) || step <= 0.0f) return axis_extent;
+    precise float raw_pad = (max_delta - core_range) / step;
+    // Precheck against the bounded field extent before converting float to uint. One additional
+    // cell plus the excluded-cell proof below makes float rounding conservative, never narrow.
+    if (!FiniteFloat(raw_pad) || raw_pad >= (float)axis_extent) return axis_extent;
+    uint pad = min(axis_extent, (uint)ceil(raw_pad) + 1u);
+    precise float first_excluded_budget =
+        core_range + (float)(pad + 1u) * step;
+    return FiniteFloat(first_excluded_budget) && first_excluded_budget >= max_delta ?
+        pad : axis_extent;
+}
+
+bool PrepareFullContentActiveRegion(
+    uint current_count,
+    uint current_kinds,
+    float condition_target,
+    out uint2 dispatch_origin,
+    out uint3 dispatch_groups) {
+    dispatch_origin = uint2(0u, 0u);
+    dispatch_groups = uint3(0u, 0u, 0u);
+    precise float max_delta = v2_direct_container_limit + abs(condition_target);
+    precise float core_range = 0.5f / (float)locator_source.x;
+    if (!FiniteFloat(max_delta) || !FiniteFloat(core_range)) {
+        dispatch_groups = uint3((target_w + 15u) / 16u, (target_h + 15u) / 16u, 1u);
+        return true;
     }
-    GroupMemoryBarrierWithGroupSync();
-    if (dispatch_id.x >= target_w || dispatch_id.y >= target_h) return;
-    // Padding is synthetic only. Re-evaluate the same analytic conditioner at the nearest content
-    // cell so the published final field is an exact boundary extension and renderer filtering at
-    // the half-open content edge cannot blend in unrelated geometry.
-    uint2 condition_position = DepthAnalysisClampCell(dispatch_id.xy);
-    float base = BaseField.Load(int3(condition_position, 0));
-    if (ConditionStateIsValid == 0u || !FiniteFloat(base) ||
-        abs(base) > v2_direct_container_limit) {
-        ConditionedField[dispatch_id.xy] = base;
-        return;
+    if (max_delta <= core_range) {
+        return false;
+    }
+    uint content_width = LocatorContentWidth();
+    uint content_height = locator_content.w - locator_content.y;
+    uint horizontal_pad = ConservativeConditionPad(
+        max_delta, core_range, v2_max_horizontal_slope,
+        content_width, content_width);
+    uint vertical_pad = ConservativeConditionPad(
+        max_delta, core_range, v2_max_vertical_shear,
+        content_width, content_height);
+    uint4 bounds = uint4(
+        locator_content.z, locator_content.w, locator_content.x, locator_content.y);
+    [unroll]
+    for (uint slot = 0u; slot < MAX_LINES; ++slot) {
+        if (slot < current_count) {
+            uint offset = V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + slot * 4u;
+            uint4 rectangle = uint4(
+                LocatorStateRead[offset + 0u], LocatorStateRead[offset + 1u],
+                LocatorStateRead[offset + 2u], LocatorStateRead[offset + 3u]);
+            bool ribbon = ((current_kinds >> slot) & 1u) != 0u;
+            uint4 expanded;
+            if (ribbon) {
+                expanded = uint4(
+                    locator_content.x,
+                    rectangle.y - min(vertical_pad, rectangle.y - locator_content.y),
+                    locator_content.z,
+                    locator_content.w);
+            } else {
+                expanded = uint4(
+                    rectangle.x - min(horizontal_pad, rectangle.x - locator_content.x),
+                    rectangle.y - min(vertical_pad, rectangle.y - locator_content.y),
+                    rectangle.z + min(horizontal_pad, locator_content.z - rectangle.z),
+                    rectangle.w + min(vertical_pad, locator_content.w - rectangle.w));
+            }
+            bounds.xy = min(bounds.xy, expanded.xy);
+            bounds.zw = max(bounds.zw, expanded.zw);
+        }
+    }
+    if (bounds.x >= bounds.z || bounds.y >= bounds.w) return false;
+    dispatch_origin = (bounds.xy / 16u) * 16u;
+    uint2 dispatch_extent = bounds.zw - dispatch_origin;
+    dispatch_groups = uint3(
+        (dispatch_extent.x + 15u) / 16u,
+        (dispatch_extent.y + 15u) / 16u,
+        1u);
+    return dispatch_groups.x != 0u && dispatch_groups.y != 0u;
+}
+
+// Authenticate the state once per field, then publish the tiny immutable parameter closure used
+// by both condition writers. Full-content indirect arguments are zero without current authority;
+// otherwise they cover only the conservatively expanded union that could change. Padded ROI fields
+// still publish full-field arguments so synthetic cells can extend the nearest real content cell.
+[numthreads(1, 1, 1)]
+void condition_prepare_main(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint current_count;
+    float target;
+    uint fade_step;
+    bool state_valid = ConditionStateValid(current_count, target, fade_step);
+    uint current_kinds = state_valid ?
+        ((LocatorStateRead[V2_SUBTITLE_LOCATOR_KIND_WORD] >>
+          V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT) & V2_SUBTITLE_LOCATOR_KIND_MASK) : 0u;
+
+    bool content_valid = ConditionContentValid();
+    bool has_padding = content_valid && any(locator_content != uint4(0u, 0u, target_w, target_h));
+    uint2 dispatch_origin = uint2(0u, 0u);
+    uint3 dispatch_groups = uint3(0u, 0u, 0u);
+    if (has_padding) {
+        dispatch_groups = uint3((target_w + 15u) / 16u, (target_h + 15u) / 16u, 1u);
+    } else if (content_valid && state_valid) {
+        PrepareFullContentActiveRegion(
+            current_count, current_kinds, target, dispatch_origin, dispatch_groups);
     }
 
+    ConditionParamsOut[CONDITION_PARAM_SCHEMA_WORD] =
+        state_valid ? V2_SUBTITLE_CONDITION_PARAM_SCHEMA : 0u;
+    ConditionParamsOut[CONDITION_PARAM_TAG_WORD] =
+        state_valid ? V2_SUBTITLE_CONDITION_PARAM_TAG : 0u;
+    ConditionParamsOut[CONDITION_PARAM_CURRENT_COUNT_WORD] =
+        state_valid ? current_count : 0u;
+    ConditionParamsOut[CONDITION_PARAM_CURRENT_KINDS_WORD] = current_kinds;
+    ConditionParamsOut[CONDITION_PARAM_FADE_STEP_WORD] = state_valid ? fade_step : 0u;
+    ConditionParamsOut[CONDITION_PARAM_TARGET_WORD] = state_valid ? asuint(target) : 0u;
+    ConditionParamsOut[CONDITION_PARAM_ORIGIN_X_WORD] = dispatch_origin.x;
+    ConditionParamsOut[CONDITION_PARAM_ORIGIN_Y_WORD] = dispatch_origin.y;
+    ConditionDispatchArgs[0u] = dispatch_groups.x;
+    ConditionDispatchArgs[1u] = dispatch_groups.y;
+    ConditionDispatchArgs[2u] = dispatch_groups.z;
+}
+
+bool ConditionParamsValid(
+    out uint current_count,
+    out uint current_kinds,
+    out uint fade_step,
+    out float target,
+    out uint2 dispatch_origin) {
+    current_count = ConditionParams[CONDITION_PARAM_CURRENT_COUNT_WORD];
+    current_kinds = ConditionParams[CONDITION_PARAM_CURRENT_KINDS_WORD];
+    fade_step = ConditionParams[CONDITION_PARAM_FADE_STEP_WORD];
+    target = asfloat(ConditionParams[CONDITION_PARAM_TARGET_WORD]);
+    dispatch_origin = uint2(
+        ConditionParams[CONDITION_PARAM_ORIGIN_X_WORD],
+        ConditionParams[CONDITION_PARAM_ORIGIN_Y_WORD]);
+    return ConditionParams[CONDITION_PARAM_SCHEMA_WORD] == V2_SUBTITLE_CONDITION_PARAM_SCHEMA &&
+        ConditionParams[CONDITION_PARAM_TAG_WORD] == V2_SUBTITLE_CONDITION_PARAM_TAG &&
+        current_count != 0u && current_count <= MAX_LINES &&
+        (current_kinds & ~V2_SUBTITLE_LOCATOR_KIND_MASK) == 0u &&
+        PackedKindsValid(current_kinds, 0u, current_count) &&
+        (fade_step == 1u || fade_step == 2u) && SubtitleTargetIsValid(target) &&
+        dispatch_origin.x < target_w && dispatch_origin.y < target_h &&
+        (dispatch_origin.x & 15u) == 0u && (dispatch_origin.y & 15u) == 0u;
+}
+
+float EvaluateConditionedBase(
+    uint2 condition_position,
+    float base,
+    bool state_valid,
+    uint current_count,
+    uint current_kinds,
+    uint fade_step,
+    float condition_target,
+    out bool changed) {
+    changed = false;
+    if (!state_valid || !FiniteFloat(base) || abs(base) > v2_direct_container_limit) {
+        return base;
+    }
     float best_distance = 3.402823466e+38f;
     precise float horizontal_step = v2_max_horizontal_slope /
         (float)LocatorContentWidth();
@@ -1391,12 +1537,12 @@ void condition_main(
         (float)LocatorContentWidth();
     [unroll]
     for (uint slot = 0u; slot < MAX_LINES; ++slot) {
-        if (slot < ConditionCurrentCount) {
+        if (slot < current_count) {
             uint offset = V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + slot * 4u;
             uint4 rectangle = uint4(
                 LocatorStateRead[offset + 0u], LocatorStateRead[offset + 1u],
                 LocatorStateRead[offset + 2u], LocatorStateRead[offset + 3u]);
-            bool ribbon = ((ConditionCurrentKinds >> slot) & 1u) != 0u;
+            bool ribbon = ((current_kinds >> slot) & 1u) != 0u;
             // A canonical ribbon cover spans the full field from its corrected top to the bottom.
             // Make the one-edge policy explicit: the strip and everything below its top use core
             // budget, while only rows above it receive the vertical analytic collar. Ordinary
@@ -1420,14 +1566,64 @@ void condition_main(
     }
     precise float core_range = 0.5f / (float)locator_source.x;
     precise float budget = core_range + best_distance;
-    precise float delta = base - ConditionTarget;
+    precise float delta = base - condition_target;
     // Exact Base is a semantic branch, not an algebraic coincidence: bypassing reconstruction
     // avoids changing an already-safe R32_FLOAT bit pattern through target + (base - target).
     if (abs(delta) <= budget) {
-        ConditionedField[dispatch_id.xy] = base;
-        return;
+        return base;
     }
-    precise float full = ConditionTarget + (delta < 0.0f ? -budget : budget);
+    precise float full = condition_target + (delta < 0.0f ? -budget : budget);
     precise float faded = base + 0.5f * (full - base);
-    ConditionedField[dispatch_id.xy] = ConditionFadeStep == 1u ? faded : full;
+    changed = true;
+    return fade_step == 1u ? faded : full;
+}
+
+// Complete out-of-place writer used when Dump 3D must preserve BaseField or tensor padding must
+// extend the nearest real content cell. Every output cell is written, so no preparatory texture
+// copy is required and an invalid condition verdict still publishes Base exactly.
+[numthreads(16, 16, 1)]
+void condition_main(uint3 dispatch_id : SV_DispatchThreadID) {
+    if (dispatch_id.x >= target_w || dispatch_id.y >= target_h) return;
+    bool content_valid = ConditionContentValid();
+    uint2 condition_position = content_valid ?
+        DepthAnalysisClampCell(dispatch_id.xy) : dispatch_id.xy;
+    uint current_count;
+    uint current_kinds;
+    uint fade_step;
+    float condition_target;
+    uint2 dispatch_origin;
+    bool state_valid = ConditionParamsValid(
+        current_count, current_kinds, fade_step, condition_target, dispatch_origin);
+    float base = BaseField.Load(int3(condition_position, 0));
+    bool changed;
+    float conditioned = EvaluateConditionedBase(
+        condition_position, base, state_valid, current_count, current_kinds,
+        fade_step, condition_target, changed);
+    ConditionedField[dispatch_id.xy] = conditioned;
+}
+
+// Ordinary full-content live production aliases Base and output intentionally. There is no t2 SRV
+// binding in this entrypoint: each bounded invocation adds the authenticated group-aligned origin,
+// then reads and conditionally replaces its u3 cell. This avoids a D3D11 SRV/UAV alias and all
+// texture work when preparation emits zero groups.
+[numthreads(16, 16, 1)]
+void condition_in_place_main(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint current_count;
+    uint current_kinds;
+    uint fade_step;
+    float condition_target;
+    uint2 dispatch_origin;
+    bool state_valid = ConditionParamsValid(
+        current_count, current_kinds, fade_step, condition_target, dispatch_origin);
+    if (!state_valid || !ConditionContentValid() ||
+        any(locator_content != uint4(0u, 0u, target_w, target_h)) ||
+        dispatch_id.x >= target_w - dispatch_origin.x ||
+        dispatch_id.y >= target_h - dispatch_origin.y) return;
+    uint2 condition_position = dispatch_id.xy + dispatch_origin;
+    float base = ConditionedField[condition_position];
+    bool changed;
+    float conditioned = EvaluateConditionedBase(
+        condition_position, base, true, current_count, current_kinds,
+        fade_step, condition_target, changed);
+    if (changed) ConditionedField[condition_position] = conditioned;
 }

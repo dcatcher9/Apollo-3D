@@ -83,6 +83,15 @@ namespace platf::foreground_window {
   /** Sample the current foreground root with no worker, blocking IPC, or retained native handle. */
   [[nodiscard]] observation_t sample() noexcept;
 
+  /**
+   * Sample only USER32's native move/size advisory.
+   *
+   * WGC has no desktop-content timestamp and therefore cannot authorize foreground geometry, but
+   * it can still suppress optional subtitle work while the foreground root is in its modal
+   * move/size loop. This path deliberately avoids DWM bounds, styles, and client mapping.
+   */
+  [[nodiscard]] bool interactive_move_size_active() noexcept;
+
   /** Assign continuity and observer generations to successive synchronous observations. */
   class continuity_tracker_t {
   public:

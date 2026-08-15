@@ -367,6 +367,27 @@ namespace models {
    * @brief Result of one estimate call: private cut-analysis depth, cut state, and the
    *        authenticated Host SBS parallax field/state.
    */
+  enum class depth_optional_work_mode_e : std::uint8_t {
+    ordinary,
+    suppress_subtitle,  ///< Publish Base and freeze OCR8/SLR12 for native move/size.
+    redispatch_subtitle,  ///< Skip detector work, restamp exact retained OCR8, and run SLR12.
+  };
+
+  [[nodiscard]] constexpr depth_optional_work_mode_e select_depth_optional_work_mode(
+    const bool observed_interactive_move_size,
+    const bool snapshot_debug_inputs,
+    const bool redispatch_subtitle = false
+  ) noexcept {
+    if (snapshot_debug_inputs) {
+      return depth_optional_work_mode_e::ordinary;
+    }
+    if (observed_interactive_move_size) {
+      return depth_optional_work_mode_e::suppress_subtitle;
+    }
+    return redispatch_subtitle ? depth_optional_work_mode_e::redispatch_subtitle :
+                                 depth_optional_work_mode_e::ordinary;
+  }
+
   struct estimate_result {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> cut_state;  ///< Cut-analysis state shared with telemetry and coordinate production.
@@ -380,8 +401,10 @@ namespace models {
     // ownership_refined_parallax is the full-resolution source-contour ownership result consumed
     // by the vertical pass, vertical_majorant is the upper-envelope diagnostic,
     // vertical_conditioned is the fixed upper/lower vertical share consumed by the pure row
-    // majorant. base_final_parallax is the ordinary post-limiter field; final_parallax is the
-    // OCR-conditioned full-source live position authority in ordinary mode. In ROI
+    // majorant. base_final_parallax is independently observable as the ordinary post-limiter field
+    // for explicit diagnostics and padded ROI; full-content live production may condition that UAV
+    // in place, so base_final_parallax and final_parallax intentionally alias there. final_parallax
+    // is the OCR-conditioned full-source live position authority in ordinary mode. In ROI
     // mode it is crop-local producer q and becomes renderer authority only with input_region's
     // authenticated scale/collar embedding. coordinate is an optional Dump-3D-only snapshot,
     // never a live resource or authentication prerequisite. The legacy `shadow_*` prefix remains
@@ -395,8 +418,8 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_final_parallax;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_state;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_frame_stats;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_box_record;  ///< Exact-frame OCR8 208-word record; flags==1 is authoritative, including empty observations.
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_locator_state;  ///< Current compact 80-word SLR12 state after consuming ocr_box_record.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_box_record;  ///< Exact-frame OCR8 record unless subtitle_work_suppressed; then this retained resource is frozen evidence from an earlier frame.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_locator_state;  ///< Current SLR12 state; frozen, not exact-frame evidence, when subtitle_work_suppressed.
     std::shared_ptr<const parallax_v2_shader_provenance_t>
       parallax_v2_shader_provenance;  ///< Exact producer shader closure when V2 is active.
     int raw_width = 0;
@@ -415,6 +438,14 @@ namespace models {
     depth_input_region_t input_region {};  ///< Exact source domain that owns this completion.
     input_color_space color_space = input_color_space::srgb;  ///< Exact transfer domain used for this completion.
     bool input_domain_reset = false;  ///< Temporal/camera state was reset before this completion.
+    bool subtitle_work_suppressed = false;  ///< This completion published Base and did not advance same-domain locator state.
+    bool subtitle_ocr_inference_enqueued = false;  ///< This call enqueued OCR for its newly supplied input frame.
+    bool subtitle_ocr_redispatch_enqueued = false;  ///< This call accepted exact OCR8 redispatch for its newly supplied input frame.
+  };
+
+  struct pending_depth_poll_result {
+    estimate_result result;
+    bool ready = false;  ///< Query completed without waiting; result may still report a failure.
   };
 
   /** Fail-closed CPU authentication for a completed live V2 result.
@@ -423,7 +454,9 @@ namespace models {
    * full-source/analysis-region shape relation, the presence of every production V2 resource, and
    * the fixed-pop gain relation. Dump-only canonical coordinate evidence is deliberately excluded.
    * It does not map GPU state; the live shader authenticates the per-frame contract tag before
-   * sampling geometry.
+   * sampling geometry. A subtitle-suppressed completion authenticates its freshly published Base
+   * field, but its retained OCR/SLR views are not exact-frame evidence and callers must gate those
+   * diagnostic uses on estimate_result::subtitle_work_suppressed.
    */
   bool parallax_v2_result_is_authenticated(const estimate_result &result);
 
@@ -594,7 +627,8 @@ namespace models {
       input_color_space color_space = input_color_space::srgb,
       std::uint64_t frame_id = 0,
       bool snapshot_debug_inputs = false,
-      depth_input_region_t input_region = {}
+      depth_input_region_t input_region = {},
+      depth_optional_work_mode_e optional_work = depth_optional_work_mode_e::ordinary
     );
 
     /**
@@ -614,6 +648,12 @@ namespace models {
      * convert() could poll its completion. The encode thread remains the D3D context owner.
      */
     estimate_result finish_pending_depth_for_idle_recovery(
+      input_color_space color_space,
+      bool snapshot_debug_inputs = false
+    );
+
+    /** Query and consume one pending inference without blocking or enqueueing a replacement. */
+    pending_depth_poll_result try_finish_pending_depth_nonblocking(
       input_color_space color_space,
       bool snapshot_debug_inputs = false
     );

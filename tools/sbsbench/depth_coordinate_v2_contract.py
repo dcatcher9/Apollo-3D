@@ -49,7 +49,10 @@ SHADER_IMPLEMENTATION_KEYS = {
 }
 SHADER_SOURCE_SPECS = (
     ("rgb_to_nchw_cs.hlsl", "main", "cs_5_0"),
+    ("rgb_to_nchw_cs.hlsl", "content_main", "cs_5_0"),
+    ("rgb_to_nchw_cs.hlsl", "pad_main", "cs_5_0"),
     ("buffer_to_tex_cs.hlsl", "main", "cs_5_0"),
+    ("buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"),
     ("depth_ema_motion_cs.hlsl", "main", "cs_5_0"),
     ("depth_minmax_cs.hlsl", "main", "cs_5_0"),
     ("depth_minmax_ema_cs.hlsl", "main", "cs_5_0"),
@@ -68,10 +71,12 @@ SHADER_SOURCE_SPECS = (
     ("host_sbs_ocr_boxes_cs.hlsl", "cells_main", "cs_5_0"),
     ("host_sbs_ocr_boxes_cs.hlsl", "resolve_main", "cs_5_0"),
     ("host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"),
+    ("host_sbs_subtitle_locator_cs.hlsl", "condition_prepare_main", "cs_5_0"),
+    ("host_sbs_subtitle_locator_cs.hlsl", "condition_in_place_main", "cs_5_0"),
     ("host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"),
 )
 EXPECTED_SUBTITLE_OCR = {
-    "schema": 10,
+    "schema": 11,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
     "artifact_onnx_sha256": (
@@ -146,6 +151,10 @@ EXPECTED_SUBTITLE_OCR = {
         "kind_word": 31,
         "owner_kind_shift": 0, "pending_kind_shift": 4,
         "current_kind_shift": 8, "kind_mask": 15,
+    },
+    "condition_params": {
+        "schema": 2, "tag": 0x32504353, "word_count": 8,
+        "dispatch_arg_word_count": 3,
     },
 }
 
@@ -285,6 +294,10 @@ class SubtitleOcrContract:
     locator_pending_kind_shift: int
     locator_current_kind_shift: int
     locator_kind_mask: int
+    condition_param_schema: int
+    condition_param_tag: int
+    condition_param_word_count: int
+    condition_dispatch_arg_word_count: int
 
 
 def _subtitle_ocr_contract(contract: dict[str, Any]) -> SubtitleOcrContract:
@@ -298,6 +311,7 @@ def _subtitle_ocr_contract(contract: dict[str, Any]) -> SubtitleOcrContract:
     field_policy = value["field_policy"]
     record = value["ocr_record"]
     locator = value["locator_state"]
+    condition = value["condition_params"]
     return SubtitleOcrContract(
         schema=value["schema"],
         logical_model=value["logical_model"],
@@ -386,6 +400,10 @@ def _subtitle_ocr_contract(contract: dict[str, Any]) -> SubtitleOcrContract:
         locator_pending_kind_shift=locator["pending_kind_shift"],
         locator_current_kind_shift=locator["current_kind_shift"],
         locator_kind_mask=locator["kind_mask"],
+        condition_param_schema=condition["schema"],
+        condition_param_tag=condition["tag"],
+        condition_param_word_count=condition["word_count"],
+        condition_dispatch_arg_word_count=condition["dispatch_arg_word_count"],
     )
 
 

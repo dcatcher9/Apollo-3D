@@ -176,3 +176,70 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     OutputBuffer[base_idx + channel_stride] = g;
     OutputBuffer[base_idx + 2 * channel_stride] = b;
 }
+
+// Padded domains dispatch the expensive source sampler only over admitted content. This separate
+// entry point keeps main's common full-content bytecode unchanged while interpreting DTid as a
+// content-local coordinate. pad_main fills the remaining synthetic texels afterward.
+[numthreads(16, 16, 1)]
+void content_main(uint3 DTid : SV_DispatchThreadID) {
+    if (!DepthAnalysisContentValid())
+        return;
+
+    uint2 content_extent = uint2(
+        analysis_content_right - analysis_content_left,
+        analysis_content_bottom - analysis_content_top);
+    if (DTid.x >= content_extent.x || DTid.y >= content_extent.y)
+        return;
+
+    uint2 output_position = uint2(analysis_content_left, analysis_content_top) + DTid.xy;
+    uint base_idx = output_position.y * target_w + output_position.x;
+
+    uint source_w, source_h;
+    InputTexture.GetDimensions(source_w, source_h);
+    uint2 source_size = uint2(source_w, source_h);
+    float3 pixel = SampleLetterboxedModelFootprint(output_position, source_size);
+    OutputTensorExclusion[output_position] = 0u;
+
+    float2 appearance_model_uv =
+        (float2(output_position) + 0.5f) / float2(target_w, target_h);
+    float2 appearance_uv = LetterboxSourceUv(appearance_model_uv);
+    uint2 source_point = min(
+        uint2(appearance_uv * float2(source_size)),
+        source_size - 1u);
+    float3 capture_rgb = InputTexture.Load(int3(source_point, 0)).rgb;
+    OutputAppearanceOrdinal[base_idx] =
+        DepthAppearanceOrdinal(capture_rgb, color_mode);
+
+    float r = (pixel.r - 0.485f) / 0.229f;
+    float g = (pixel.g - 0.456f) / 0.224f;
+    float b = (pixel.b - 0.406f) / 0.225f;
+    uint channel_stride = target_w * target_h;
+    OutputBuffer[base_idx] = r;
+    OutputBuffer[base_idx + channel_stride] = g;
+    OutputBuffer[base_idx + 2u * channel_stride] = b;
+}
+
+// Synthetic contain-fit padding is exactly the nearest admitted resized texel, not a new source
+// sample. The content_main dispatch has completed before this entry point runs, so copying
+// the three planar values and appearance ordinal preserves their bits while avoiding repeated
+// multi-tap source loads and transfer conversion. Exclusion remains padding-specific and must not
+// be copied from the admitted source cell.
+[numthreads(16, 16, 1)]
+void pad_main(uint3 DTid : SV_DispatchThreadID) {
+    if (DTid.x >= target_w || DTid.y >= target_h ||
+        !DepthAnalysisContentValid() || DepthAnalysisCellIsContent(DTid.xy))
+        return;
+
+    uint2 source_position = DepthAnalysisClampCell(DTid.xy);
+    uint destination_index = DTid.y * target_w + DTid.x;
+    uint source_index = source_position.y * target_w + source_position.x;
+    uint channel_stride = target_w * target_h;
+
+    OutputBuffer[destination_index] = OutputBuffer[source_index];
+    OutputBuffer[destination_index + channel_stride] =
+        OutputBuffer[source_index + channel_stride];
+    OutputBuffer[destination_index + 2u * channel_stride] =
+        OutputBuffer[source_index + 2u * channel_stride];
+    OutputAppearanceOrdinal[destination_index] = OutputAppearanceOrdinal[source_index];
+    OutputTensorExclusion[DTid.xy] = 1u;
+}

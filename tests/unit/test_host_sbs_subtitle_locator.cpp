@@ -20,6 +20,7 @@
   #include <d3dcompiler.h>
   #include <filesystem>
   #include <limits>
+  #include <numeric>
   #include <string>
   #include <vector>
   #include <wrl/client.h>
@@ -146,6 +147,82 @@ namespace {
         structural_gap_count(structural_gaps) {}
   };
 
+  struct condition_dispatch_expectation_t {
+    std::array<std::uint32_t, 2u> origin;
+    std::array<std::uint32_t, 3u> groups;
+  };
+
+  std::uint32_t conservative_condition_pad(
+    const float max_delta,
+    const float core_range,
+    const float slope,
+    const std::uint32_t content_width,
+    const std::uint32_t axis_extent
+  ) {
+    if (axis_extent == 0u || max_delta <= core_range) return 0u;
+    const float step = slope / static_cast<float>(content_width);
+    if (!std::isfinite(step) || step <= 0.0f) return axis_extent;
+    const float raw_pad = (max_delta - core_range) / step;
+    if (!std::isfinite(raw_pad) || raw_pad >= static_cast<float>(axis_extent)) {
+      return axis_extent;
+    }
+    const auto pad = std::min(
+      axis_extent,
+      static_cast<std::uint32_t>(std::ceil(raw_pad)) + 1u
+    );
+    const float first_excluded_budget =
+      core_range + static_cast<float>(pad + 1u) * step;
+    return std::isfinite(first_excluded_budget) && first_excluded_budget >= max_delta ?
+             pad : axis_extent;
+  }
+
+  condition_dispatch_expectation_t expected_ordinary_condition_dispatch(
+    const std::vector<line_box_t> &covers,
+    const float target,
+    const std::uint32_t source_width,
+    const std::uint32_t field_width,
+    const std::uint32_t field_height
+  ) {
+    const float max_delta = v2::direct_container_limit + std::abs(target);
+    const float core_range = 0.5f / static_cast<float>(source_width);
+    const auto horizontal_pad = conservative_condition_pad(
+      max_delta,
+      core_range,
+      v2::max_horizontal_slope,
+      field_width,
+      field_width
+    );
+    const auto vertical_pad = conservative_condition_pad(
+      max_delta,
+      core_range,
+      v2::max_vertical_shear,
+      field_width,
+      field_height
+    );
+    std::uint32_t left = field_width;
+    std::uint32_t top = field_height;
+    std::uint32_t right = 0u;
+    std::uint32_t bottom = 0u;
+    for (const auto cover : covers) {
+      left = std::min(left, cover.left - std::min(horizontal_pad, cover.left));
+      top = std::min(top, cover.top - std::min(vertical_pad, cover.top));
+      right = std::max(right, cover.right + std::min(
+        horizontal_pad, field_width - cover.right));
+      bottom = std::max(bottom, cover.bottom + std::min(
+        vertical_pad, field_height - cover.bottom));
+    }
+    const std::uint32_t origin_x = (left / 16u) * 16u;
+    const std::uint32_t origin_y = (top / 16u) * 16u;
+    return {
+      {origin_x, origin_y},
+      {
+        (right - origin_x + 15u) / 16u,
+        (bottom - origin_y + 15u) / 16u,
+        1u,
+      },
+    };
+  }
+
   static_assert(sizeof(depth_constants_t) == 64u);
   static_assert(sizeof(v2_constants_t) == 32u);
   static_assert(sizeof(subtitle_constants_t) == 64u);
@@ -212,6 +289,26 @@ namespace {
                  buffer.Get(), nullptr, srv->ReleaseAndGetAddressOf()))) return false;
     return !uav || SUCCEEDED(device->CreateUnorderedAccessView(
                      buffer.Get(), nullptr, uav->ReleaseAndGetAddressOf()));
+  }
+
+  bool create_indirect_dispatch_buffer(
+    ID3D11Device *device,
+    ComPtr<ID3D11Buffer> &buffer,
+    ComPtr<ID3D11UnorderedAccessView> &uav
+  ) {
+    D3D11_BUFFER_DESC desc {};
+    desc.ByteWidth = v2::subtitle_condition_dispatch_arg_word_count *
+                     sizeof(std::uint32_t);
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    desc.MiscFlags = D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
+    if (FAILED(device->CreateBuffer(&desc, nullptr, &buffer))) return false;
+    D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc {};
+    uav_desc.Format = DXGI_FORMAT_R32_UINT;
+    uav_desc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+    uav_desc.Buffer.NumElements = v2::subtitle_condition_dispatch_arg_word_count;
+    return SUCCEEDED(device->CreateUnorderedAccessView(
+      buffer.Get(), &uav_desc, &uav));
   }
 
   bool create_constant_buffer(
@@ -339,6 +436,10 @@ namespace {
       const auto shader_path = std::filesystem::path(SUNSHINE_SHADERS_DIR) /
                                "host_sbs_subtitle_locator_cs.hlsl";
       if (!compile_compute_shader(device_.Get(), shader_path, "resolve_main", resolve_, error) ||
+          !compile_compute_shader(
+            device_.Get(), shader_path, "condition_prepare_main", condition_prepare_, error) ||
+          !compile_compute_shader(
+            device_.Get(), shader_path, "condition_in_place_main", condition_in_place_, error) ||
           !compile_compute_shader(device_.Get(), shader_path, "condition_main", condition_, error)) {
         return false;
       }
@@ -354,6 +455,19 @@ namespace {
             &state_srv_,
             &state_uav_
           )) return false;
+
+      zeros.assign(v2::subtitle_condition_param_word_count, 0u);
+      if (!create_structured_buffer(
+            device_.Get(),
+            zeros.data(),
+            zeros.size() * sizeof(std::uint32_t),
+            sizeof(std::uint32_t),
+            D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+            condition_params_buffer_,
+            &condition_params_srv_,
+            &condition_params_uav_
+          ) || !create_indirect_dispatch_buffer(
+            device_.Get(), condition_args_buffer_, condition_args_uav_)) return false;
 
       zeros.assign(ocr_words, 0u);
       if (!create_structured_buffer(
@@ -513,31 +627,32 @@ namespace {
       context_->Dispatch(1u, 1u, 1u);
       unbind();
 
-      context_->CSSetShader(condition_.Get(), nullptr, 0u);
-      std::array<ID3D11ShaderResourceView *, 4u> condition_srvs {
-        nullptr, cut_srv_.Get(), base_srv_.Get(), state_srv_.Get()
-      };
-      context_->CSSetShaderResources(0u, condition_srvs.size(), condition_srvs.data());
-      context_->CSSetUnorderedAccessViews(3u, 1u, output_uav_.GetAddressOf(), nullptr);
-      context_->Dispatch((field_width_ + 15u) / 16u, (field_height_ + 15u) / 16u, 1u);
-      unbind();
+      if (!dispatch_conditioner()) return false;
 
       return read_buffer(device_.Get(), context_.Get(), state_buffer_.Get(), state_) &&
+             read_buffer(
+               device_.Get(), context_.Get(), condition_params_buffer_.Get(), condition_params_) &&
+             read_buffer(
+               device_.Get(), context_.Get(), condition_args_buffer_.Get(), condition_args_) &&
              read_texture(device_.Get(), context_.Get(), output_texture_.Get(), output_);
     }
 
     bool condition_only() {
-      ID3D11Buffer *constant_buffers[] = {depth_cb_.Get(), v2_cb_.Get(), subtitle_cb_.Get()};
-      context_->CSSetConstantBuffers(0u, 3u, constant_buffers);
-      context_->CSSetShader(condition_.Get(), nullptr, 0u);
-      std::array<ID3D11ShaderResourceView *, 4u> condition_srvs {
-        nullptr, cut_srv_.Get(), base_srv_.Get(), state_srv_.Get()
-      };
-      context_->CSSetShaderResources(0u, condition_srvs.size(), condition_srvs.data());
-      context_->CSSetUnorderedAccessViews(3u, 1u, output_uav_.GetAddressOf(), nullptr);
-      context_->Dispatch((field_width_ + 15u) / 16u, (field_height_ + 15u) / 16u, 1u);
-      unbind();
-      return read_texture(device_.Get(), context_.Get(), output_texture_.Get(), output_);
+      if (!dispatch_conditioner()) return false;
+      return read_buffer(
+               device_.Get(), context_.Get(), condition_params_buffer_.Get(), condition_params_) &&
+             read_buffer(
+               device_.Get(), context_.Get(), condition_args_buffer_.Get(), condition_args_) &&
+             read_texture(device_.Get(), context_.Get(), output_texture_.Get(), output_);
+    }
+
+    bool condition_only_in_place() {
+      if (!dispatch_conditioner(true)) return false;
+      return read_buffer(
+               device_.Get(), context_.Get(), condition_params_buffer_.Get(), condition_params_) &&
+             read_buffer(
+               device_.Get(), context_.Get(), condition_args_buffer_.Get(), condition_args_) &&
+             read_texture(device_.Get(), context_.Get(), output_texture_.Get(), output_);
     }
 
     void set_cut(const std::uint32_t scene_epoch, const bool pulse) {
@@ -546,6 +661,8 @@ namespace {
     }
 
     const std::vector<std::uint32_t> &state() const { return state_; }
+    const std::vector<std::uint32_t> &condition_params() const { return condition_params_; }
+    const std::vector<std::uint32_t> &condition_args() const { return condition_args_; }
     const std::vector<float> &base() const { return base_; }
     const std::vector<float> &output() const { return output_; }
 
@@ -722,7 +839,59 @@ namespace {
       return true;
     }
 
+    bool in_place_matches_current_output() {
+      const auto expected = output_;
+      if (!condition_only_in_place() || output_.size() != expected.size()) return false;
+      for (std::size_t index = 0u; index < expected.size(); ++index) {
+        if (std::bit_cast<std::uint32_t>(output_[index]) !=
+            std::bit_cast<std::uint32_t>(expected[index])) return false;
+      }
+      return true;
+    }
+
    private:
+    bool dispatch_conditioner(const bool in_place = false) {
+      ID3D11Buffer *constant_buffers[] = {depth_cb_.Get(), v2_cb_.Get(), subtitle_cb_.Get()};
+      context_->CSSetConstantBuffers(0u, 3u, constant_buffers);
+
+      context_->CSSetShader(condition_prepare_.Get(), nullptr, 0u);
+      std::array<ID3D11ShaderResourceView *, 5u> prepare_srvs {
+        nullptr, cut_srv_.Get(), nullptr, state_srv_.Get(), nullptr
+      };
+      context_->CSSetShaderResources(0u, prepare_srvs.size(), prepare_srvs.data());
+      std::array<ID3D11UnorderedAccessView *, 2u> prepare_uavs {
+        condition_params_uav_.Get(), condition_args_uav_.Get()
+      };
+      context_->CSSetUnorderedAccessViews(4u, prepare_uavs.size(), prepare_uavs.data(), nullptr);
+      context_->Dispatch(1u, 1u, 1u);
+      unbind();
+
+      if (in_place) {
+        // Production already has Base in the final UAV. Seed the standalone fixture the same way,
+        // then exercise the no-SRV in-place entrypoint and its zero-group gate.
+        context_->CopyResource(output_texture_.Get(), base_texture_.Get());
+      }
+      context_->CSSetShader(in_place ? condition_in_place_.Get() : condition_.Get(), nullptr, 0u);
+      context_->CSSetConstantBuffers(0u, 3u, constant_buffers);
+      std::array<ID3D11ShaderResourceView *, 5u> condition_srvs {
+        nullptr, nullptr, in_place ? nullptr : base_srv_.Get(),
+        state_srv_.Get(), condition_params_srv_.Get()
+      };
+      context_->CSSetShaderResources(0u, condition_srvs.size(), condition_srvs.data());
+      context_->CSSetUnorderedAccessViews(3u, 1u, output_uav_.GetAddressOf(), nullptr);
+      if (in_place) {
+        context_->DispatchIndirect(condition_args_buffer_.Get(), 0u);
+      } else {
+        context_->Dispatch(
+          (field_width_ + 15u) / 16u,
+          (field_height_ + 15u) / 16u,
+          1u
+        );
+      }
+      unbind();
+      return true;
+    }
+
     static void write_box(
       std::vector<std::uint32_t> &record,
       const std::uint32_t offset,
@@ -741,7 +910,7 @@ namespace {
 
     void unbind() {
       std::array<ID3D11ShaderResourceView *, 8u> null_srvs {};
-      std::array<ID3D11UnorderedAccessView *, 4u> null_uavs {};
+      std::array<ID3D11UnorderedAccessView *, 6u> null_uavs {};
       context_->CSSetShaderResources(0u, null_srvs.size(), null_srvs.data());
       context_->CSSetUnorderedAccessViews(0u, null_uavs.size(), null_uavs.data(), nullptr);
     }
@@ -749,10 +918,17 @@ namespace {
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;
     ComPtr<ID3D11ComputeShader> resolve_;
+    ComPtr<ID3D11ComputeShader> condition_prepare_;
+    ComPtr<ID3D11ComputeShader> condition_in_place_;
     ComPtr<ID3D11ComputeShader> condition_;
     ComPtr<ID3D11Buffer> state_buffer_;
     ComPtr<ID3D11ShaderResourceView> state_srv_;
     ComPtr<ID3D11UnorderedAccessView> state_uav_;
+    ComPtr<ID3D11Buffer> condition_params_buffer_;
+    ComPtr<ID3D11ShaderResourceView> condition_params_srv_;
+    ComPtr<ID3D11UnorderedAccessView> condition_params_uav_;
+    ComPtr<ID3D11Buffer> condition_args_buffer_;
+    ComPtr<ID3D11UnorderedAccessView> condition_args_uav_;
     ComPtr<ID3D11Buffer> ocr_buffer_;
     ComPtr<ID3D11ShaderResourceView> ocr_srv_;
     ComPtr<ID3D11Buffer> cut_buffer_;
@@ -765,6 +941,8 @@ namespace {
     ComPtr<ID3D11Buffer> v2_cb_;
     ComPtr<ID3D11Buffer> subtitle_cb_;
     std::vector<std::uint32_t> state_;
+    std::vector<std::uint32_t> condition_params_;
+    std::vector<std::uint32_t> condition_args_;
     std::vector<float> base_;
     std::vector<float> output_;
     std::uint32_t field_width_;
@@ -777,6 +955,60 @@ namespace {
     std::uint32_t scene_epoch_ = 0u;
     bool cut_pulse_ = false;
   };
+
+  TEST(HostSbsSubtitleSlr12GpuTest, PartialOcr8RestampChangesOnlyFrameIdentity) {
+    constexpr D3D_FEATURE_LEVEL requested[] = {D3D_FEATURE_LEVEL_11_0};
+    D3D_FEATURE_LEVEL actual {};
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(
+      nullptr,
+      D3D_DRIVER_TYPE_WARP,
+      nullptr,
+      0u,
+      requested,
+      static_cast<UINT>(std::size(requested)),
+      D3D11_SDK_VERSION,
+      &device,
+      &actual,
+      &context
+    )));
+
+    std::vector<std::uint32_t> original(ocr_words);
+    std::iota(original.begin(), original.end(), 0x1000u);
+    ComPtr<ID3D11Buffer> record_buffer;
+    ASSERT_TRUE(create_structured_buffer(
+      device.Get(),
+      original.data(),
+      original.size() * sizeof(std::uint32_t),
+      sizeof(std::uint32_t),
+      D3D11_BIND_SHADER_RESOURCE,
+      record_buffer,
+      nullptr,
+      nullptr
+    ));
+
+    constexpr std::array<std::uint32_t, 2> identity {0x89abcdefu, 0x01234567u};
+    const D3D11_BOX identity_box {
+      static_cast<UINT>(5u * sizeof(std::uint32_t)), 0u, 0u,
+      static_cast<UINT>(7u * sizeof(std::uint32_t)), 1u, 1u,
+    };
+    context->UpdateSubresource(
+      record_buffer.Get(), 0u, &identity_box, identity.data(), 0u, 0u
+    );
+
+    std::vector<std::uint32_t> restamped;
+    ASSERT_TRUE(read_buffer(
+      device.Get(), context.Get(), record_buffer.Get(), restamped
+    ));
+    ASSERT_EQ(restamped.size(), original.size());
+    EXPECT_EQ(restamped[5u], identity[0u]);
+    EXPECT_EQ(restamped[6u], identity[1u]);
+    for (std::size_t word = 0u; word < restamped.size(); ++word) {
+      if (word == 5u || word == 6u) continue;
+      EXPECT_EQ(restamped[word], original[word]) << "word " << word;
+    }
+  }
 
   TEST(HostSbsSubtitleSlr12GpuTest, ConfirmsExactFrameStacksAndConditionsOnlyCurrentLines) {
     slr12_warp_fixture_t fixture;
@@ -797,6 +1029,19 @@ namespace {
     EXPECT_EQ(fixture.state()[4u], 0u);
     EXPECT_EQ(fixture.state()[12u], 1u);
     EXPECT_EQ(fixture.state()[20u], 0u);
+    EXPECT_EQ(
+      fixture.condition_args(),
+      (std::vector<std::uint32_t> {0u, 0u, 0u})
+    );
+    ASSERT_EQ(
+      fixture.condition_params().size(),
+      v2::subtitle_condition_param_word_count
+    );
+    EXPECT_TRUE(std::all_of(
+      fixture.condition_params().begin(),
+      fixture.condition_params().end(),
+      [](const std::uint32_t word) { return word == 0u; }
+    ));
     EXPECT_TRUE(fixture.output_is_exact_base());
 
     // Redispatching the same exact frame/domain identity cannot self-confirm.
@@ -814,11 +1059,58 @@ namespace {
     EXPECT_EQ(fixture.state()[20u], 1u);
     EXPECT_EQ(fixture.state()[21u], 1u);
     EXPECT_EQ(fixture.state()[24u], 1u);
+    const auto expected_dispatch = expected_ordinary_condition_dispatch(
+      {first},
+      std::bit_cast<float>(fixture.state()[18u]),
+      1920u,
+      field_width,
+      field_height
+    );
+    EXPECT_EQ(
+      fixture.condition_args(),
+      (std::vector<std::uint32_t> {
+        expected_dispatch.groups[0u],
+        expected_dispatch.groups[1u],
+        expected_dispatch.groups[2u],
+      })
+    );
+    EXPECT_LT(
+      expected_dispatch.groups[0u] * expected_dispatch.groups[1u],
+      ((field_width + 15u) / 16u) * ((field_height + 15u) / 16u)
+    );
+    ASSERT_EQ(
+      fixture.condition_params().size(),
+      v2::subtitle_condition_param_word_count
+    );
+    EXPECT_EQ(fixture.condition_params()[0u], v2::subtitle_condition_param_schema);
+    EXPECT_EQ(fixture.condition_params()[1u], v2::subtitle_condition_param_tag);
+    EXPECT_EQ(fixture.condition_params()[2u], fixture.state()[20u]);
+    EXPECT_EQ(
+      fixture.condition_params()[3u],
+      (fixture.state()[v2::subtitle_locator_kind_word] >> current_kind_shift) &
+        v2::subtitle_locator_kind_mask
+    );
+    EXPECT_EQ(fixture.condition_params()[4u], fixture.state()[24u]);
+    EXPECT_EQ(fixture.condition_params()[5u], fixture.state()[18u]);
+    EXPECT_EQ(fixture.condition_params()[6u], expected_dispatch.origin[0u]);
+    EXPECT_EQ(fixture.condition_params()[7u], expected_dispatch.origin[1u]);
     EXPECT_LT(fixture.output_at(300u, 364u), 0.025f);
     EXPECT_EQ(
       std::bit_cast<std::uint32_t>(fixture.output_at(10u, 100u)),
       std::bit_cast<std::uint32_t>(0.03f)
     );
+
+    // The live entrypoint reads/writes only the final UAV. It must be bit-identical to the
+    // complete out-of-place writer for a valid full-content field.
+    const auto out_of_place = fixture.output();
+    ASSERT_TRUE(fixture.condition_only_in_place());
+    ASSERT_EQ(fixture.output().size(), out_of_place.size());
+    for (std::size_t index = 0u; index < out_of_place.size(); ++index) {
+      ASSERT_EQ(
+        std::bit_cast<std::uint32_t>(fixture.output()[index]),
+        std::bit_cast<std::uint32_t>(out_of_place[index])
+      ) << "cell " << index;
+    }
 
     // The next observation reaches full strength.
     ASSERT_TRUE(fixture.observe(3u, {first}, false));
@@ -850,6 +1142,33 @@ namespace {
     EXPECT_LT(first_core, gap);
     EXPECT_LT(second_core, gap);
     EXPECT_LT(gap, 0.03f);
+    const auto expected_multi_dispatch = expected_ordinary_condition_dispatch(
+      {first, second},
+      std::bit_cast<float>(fixture.state()[18u]),
+      1920u,
+      field_width,
+      field_height
+    );
+    EXPECT_EQ(
+      fixture.condition_args(),
+      (std::vector<std::uint32_t> {
+        expected_multi_dispatch.groups[0u],
+        expected_multi_dispatch.groups[1u],
+        expected_multi_dispatch.groups[2u],
+      })
+    );
+    EXPECT_EQ(fixture.condition_params()[6u], expected_multi_dispatch.origin[0u]);
+    EXPECT_EQ(fixture.condition_params()[7u], expected_multi_dispatch.origin[1u]);
+    EXPECT_TRUE(fixture.in_place_matches_current_output());
+
+    // Stress the strict collar boundary with the accepted Base value farthest from this target.
+    // Any underestimated origin or extent would now diverge from the complete writer bit-for-bit.
+    const float active_target = std::bit_cast<float>(fixture.state()[18u]);
+    fixture.set_base(
+      active_target >= 0.0f ? -v2::direct_container_limit : v2::direct_container_limit
+    );
+    ASSERT_TRUE(fixture.condition_only());
+    EXPECT_TRUE(fixture.in_place_matches_current_output());
 
     // Authoritative empty OCR removes geometry immediately.  The cached target/grace is not
     // geometry authority, so every texel is exact Base on the death frame and thereafter.
@@ -859,6 +1178,15 @@ namespace {
     EXPECT_EQ(fixture.state()[20u], 0u);
     EXPECT_EQ(fixture.state()[21u], 2u);
     EXPECT_EQ(fixture.state()[25u], 6u);
+    EXPECT_EQ(
+      fixture.condition_args(),
+      (std::vector<std::uint32_t> {0u, 0u, 0u})
+    );
+    EXPECT_TRUE(std::all_of(
+      fixture.condition_params().begin(),
+      fixture.condition_params().end(),
+      [](const std::uint32_t word) { return word == 0u; }
+    ));
     EXPECT_TRUE(fixture.output_is_exact_base());
     ASSERT_TRUE(fixture.observe(7u, {}, false));
     EXPECT_EQ(fixture.state()[25u], 5u);
@@ -1649,6 +1977,23 @@ namespace {
     // a row immediately above the corrected top.
     EXPECT_GT(fixture.output_at(0u, 380u), fixture.output_at(0u, 395u));
     EXPECT_LE(fixture.output_at(0u, 380u), 0.03f);
+    ASSERT_EQ(
+      fixture.condition_params().size(),
+      v2::subtitle_condition_param_word_count
+    );
+    ASSERT_EQ(
+      fixture.condition_args().size(),
+      v2::subtitle_condition_dispatch_arg_word_count
+    );
+    EXPECT_EQ(fixture.condition_params()[6u], 0u);
+    EXPECT_GT(fixture.condition_params()[7u], 0u);
+    EXPECT_EQ(fixture.condition_args()[0u], (field_width + 15u) / 16u);
+    EXPECT_LT(fixture.condition_args()[1u], (field_height + 15u) / 16u);
+    EXPECT_EQ(
+      fixture.condition_args()[1u],
+      (field_height - fixture.condition_params()[7u] + 15u) / 16u
+    );
+    EXPECT_TRUE(fixture.in_place_matches_current_output());
 
     // A material subtitle handoff leaves the constant ribbon authoritative while the new subtitle
     // waits for its second distinct observation.
@@ -1970,6 +2315,19 @@ namespace {
     ASSERT_TRUE(fixture.observe(500u, {line}, false));
     EXPECT_EQ(fixture.state()[2u], flag_pending);
     EXPECT_EQ(
+      fixture.condition_args(),
+      (std::vector<std::uint32_t> {
+        (field_width + 15u) / 16u,
+        (field_height + 15u) / 16u,
+        1u,
+      })
+    );
+    EXPECT_TRUE(std::all_of(
+      fixture.condition_params().begin(),
+      fixture.condition_params().end(),
+      [](const std::uint32_t word) { return word == 0u; }
+    ));
+    EXPECT_EQ(
       std::bit_cast<std::uint32_t>(fixture.output_at(sample_x, 0u)),
       std::bit_cast<std::uint32_t>(boundary_value)
     );
@@ -1982,6 +2340,16 @@ namespace {
     EXPECT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
     EXPECT_EQ(fixture.state()[4u], 1u);
     EXPECT_EQ(fixture.state()[20u], 1u);
+    EXPECT_EQ(
+      fixture.condition_args(),
+      (std::vector<std::uint32_t> {
+        (field_width + 15u) / 16u,
+        (field_height + 15u) / 16u,
+        1u,
+      })
+    );
+    EXPECT_EQ(fixture.condition_params()[6u], 0u);
+    EXPECT_EQ(fixture.condition_params()[7u], 0u);
     constexpr auto current = v2::subtitle_locator_current_offset;
     EXPECT_EQ(fixture.state()[current + 0u], line.left);
     EXPECT_EQ(fixture.state()[current + 1u], line.top);
@@ -2169,6 +2537,10 @@ namespace {
     EXPECT_EQ(malformed_fixture.state()[2u], 0u);
     EXPECT_EQ(malformed_fixture.state()[4u], 0u);
     EXPECT_EQ(malformed_fixture.state()[20u], 0u);
+    EXPECT_EQ(
+      malformed_fixture.condition_args(),
+      (std::vector<std::uint32_t> {0u, 0u, 0u})
+    );
     EXPECT_TRUE(malformed_fixture.output_is_exact_base());
   }
 }  // namespace

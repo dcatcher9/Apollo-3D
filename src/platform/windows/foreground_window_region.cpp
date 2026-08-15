@@ -388,6 +388,44 @@ namespace platf::foreground_window {
     return detail::classify(raw, std::chrono::steady_clock::now());
   }
 
+  bool interactive_move_size_active() noexcept {
+    const HWND foreground = GetForegroundWindow();
+    const HWND window = foreground ? GetAncestor(foreground, GA_ROOT) : nullptr;
+    if (!window || IsWindow(window) == FALSE || IsWindowVisible(window) == FALSE ||
+        IsIconic(window) != FALSE) {
+      return false;
+    }
+
+    DWORD process_id = 0;
+    const DWORD gui_thread_id = GetWindowThreadProcessId(window, &process_id);
+    if (gui_thread_id == 0 || process_id == 0 || process_id == GetCurrentProcessId()) {
+      return false;
+    }
+
+    GUITHREADINFO gui_info {};
+    gui_info.cbSize = sizeof(gui_info);
+    if (GetGUIThreadInfo(gui_thread_id, &gui_info) == FALSE ||
+        (gui_info.flags & GUI_INMOVESIZE) == 0) {
+      return false;
+    }
+    if (gui_info.hwndMoveSize) {
+      const HWND move_size_root = GetAncestor(gui_info.hwndMoveSize, GA_ROOT);
+      if (!move_size_root || move_size_root != window) {
+        return false;
+      }
+    }
+
+    // Recheck identity after querying the target GUI thread. This mirrors the full observer's
+    // narrow race closure without performing any synchronous DWM geometry calls.
+    const HWND foreground_after = GetForegroundWindow();
+    const HWND window_after = foreground_after ? GetAncestor(foreground_after, GA_ROOT) : nullptr;
+    DWORD process_id_after = 0;
+    const DWORD gui_thread_id_after =
+      window_after ? GetWindowThreadProcessId(window_after, &process_id_after) : 0;
+    return window_after == window && IsWindow(window_after) != FALSE &&
+           gui_thread_id_after == gui_thread_id && process_id_after == process_id;
+  }
+
   snapshot_t continuity_tracker_t::update(const observation_t &observation) noexcept {
     if (!observation_has_complete_geometry(observation)) {
       key_.reset();

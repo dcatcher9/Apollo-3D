@@ -1213,7 +1213,9 @@ class ReportEvidenceContractTests(unittest.TestCase):
                 json.dump({
                     "name": "current-schema report fixture",
                     "content_type": "synthetic",
-                    "source_artifacts": "A baked source edge used to verify audit ordering.",
+                    "source_artifacts": [
+                        "A baked source edge used to verify audit ordering.",
+                    ],
                 }, stream)
 
             shape = mapping_shape(eye_width, height)
@@ -1349,8 +1351,9 @@ class ReportEvidenceContractTests(unittest.TestCase):
                     "source_frame_count": 1,
                     "scored_artifact_sha256": artifact_hash,
                     "content_type": "synthetic",
-                    "source_artifacts": (
-                        "A baked source edge used to verify audit ordering."),
+                    "source_artifacts": [
+                        "A baked source edge used to verify audit ordering.",
+                    ],
                 }
                 rows, aggregate = sbsbench.measure_sequence(
                     os.path.join(run_dir, "demo"), clip_dir)

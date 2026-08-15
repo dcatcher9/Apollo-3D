@@ -52,7 +52,8 @@ confirmation, and the scene camera before analysis resumes. Translation of the s
 same-sized crop retains the analysis domain and its histories; the exact matched-frame rectangle
 still determines where that frame is rendered. Translation nevertheless revokes any older
 positioned completion or cached ROI output; only a newly copied frame may reuse the retained
-histories. A missing, stale, unsupported, spanning,
+histories. DDup damage-guided reuse is not a translation exception: it requires the exact positioned
+route and every live authority epoch to remain unchanged. A missing, stale, unsupported, spanning,
 partially off-monitor, or other-monitor ROI selects full-frame V2. That resets state when leaving an
 active ROI, but repeated ineligible observations while already full-frame are not domain changes.
 Any selected client rectangle that equals the complete capture is already the canonical full-frame
@@ -63,6 +64,35 @@ relaxed full-client evidence `ok-fullscreen`, distinct from strict `ok` video-RO
 host rejects an `ok-fullscreen` subrectangle. The bottom subtitle locator observes whichever domain
 V2 actually used. Any real input-domain transition resets the subtitle locator together with the
 ordinary cut and camera histories.
+
+A bounded DDup damage reuse creates no scene observation. Once an authenticated ROI completion owns
+the exact positioned route, a contiguous and complete sequence of dirty/move metadata may prove
+that every later desktop change was wholly outside that analysis domain. Repeated delivery of one
+immutable capture sequence is idempotent, while a missing or out-of-order sequence, metadata
+failure, protected-content masking, or any dirty rectangle, move source, or move destination that
+intersects the ROI forces the ordinary matched path. WGC supplies no such proof. On a reuse, raw
+appearance, ordinal evidence, normalized-depth comparison, cut confirmation, baselines, scene
+camera, OCR, and SLR do not advance, and an already-consumed cut pulse cannot be applied again. A
+real enqueue is forced after 16 skipped deliveries or 250 ms even when the metadata chain remains
+clean; only that successful enqueue establishes the next sequence baseline.
+
+The default-off `APOLLO_SBS_LOW_MOTION_GATE=1` process experiment may create one additional
+non-bit-exact no-observation delivery from an authenticated completed cache when no inference is
+pending. Its conservative accumulated DDup overlap bound must remain at or below 0.25% of the exact
+DAV2 region, its bottom OCR crop must have no desktop damage, and the delivery must occur less than
+50 ms after the last successful enqueue. The comparison baseline does not roll forward on the hold,
+so later damage keeps accumulating until a real observation is admitted. Like exact reuse, the hold
+does not fold temporal EMA, generate cut evidence, confirm a cut, advance camera/OCR/SLR state, or
+reconsume a pulse. Unknown metadata and the independently composited cursor prevent any bit-exact
+claim; every authority or bound failure follows the ordinary observation path.
+
+An OCR-only DDup proof is different: DAV2 and this complete scene-cut pipeline still execute for a
+new exact frame. When only the bottom detector crop is unchanged, the host may omit OCR preprocess,
+TensorRT, cells, and box resolve, restamp the retained deterministic OCR8 payload to the new frame
+identity, and dispatch SLR12 against this frame's finalized CutBridge and V2 Base field. The new
+identity makes it one distinct locator observation, so a same-frame cut is consumed once and
+current plane/fade/grace behavior matches an ordinary identical detector result. An armed dump,
+WGC, damage uncertainty, or any crop intersection uses ordinary OCR.
 
 The production subtitle path applies no overlay exclusion to cut evidence or DAV2. Subtitle
 appearance and disappearance remain ordinary scene evidence; the locator consumes the
@@ -88,7 +118,10 @@ generated bounded cached-target grace defined by the Host SBS subtitle contract,
 ordinary post-limit field
 exactly; redispatching the same identity does not age grace twice. Invalid OCR on a hard-cut/reset
 boundary cannot carry that cache into the new scene. There is no preprocessing exclusion,
-recognizer, subtitle-driven cut veto, or pause branch.
+recognizer, subtitle-driven cut veto, or detector-private pause branch. The host's native USER32
+interactive move/size policy may suppress the entire optional OCR/SLR observation while DAV2 and
+this scene-cut pipeline continue normally; because no OCR8 record or locator dispatch is produced,
+that transport-level suppression neither ages grace nor changes cut authority.
 
 ## Appearance proposals
 

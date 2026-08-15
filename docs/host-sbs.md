@@ -50,14 +50,14 @@ diagnostics that explain how the final field was produced.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 51/tag `0xE37DBC1F`, canonical SHA-256
-`50ab2ec86d2833d8dc935ccc8becbbd15e99e23eadde00e99b5a575ba6606f8a`. It binds the
+schema 52/tag `0xDD77CD32`, canonical SHA-256
+`115114c1bcbbfba925e58c0edb0b90b5989deade6f722b9e43366960b8f5cf35`. It binds the
 complete policy below, including all subtitle field/ROI semantics, and producer source-closure
-SHA-256 `bcf57b361288e9e0a16e1946292f7e80def7cbb6de26f5b587599ccb0fc63682`.
+SHA-256 `68b99544bb5e8525bfa6e5417c8f6d67d7238296842cd76d0b83d8d8f6c2569a`.
 The live-renderer source-closure SHA-256 is
-`d2672fa57bb2542bb3714c243ea393e78e29fd40603379ea435f4740c6762b7d`, and dump-only diagnostic
+`2aac93ddeb5e89de424c52eb8f43b0509ee580c829e04e345dc95967070c7cd1`, and dump-only diagnostic
 renderer source-closure SHA-256
-`32b257d5c84f839b5797fbf720aaddb1d5e5b5056cbb57d45b64d7c2d32aaec3`. It admits the following
+`150d16132c0ad98c742717c124280e1818555d22ed8ee2c14bf8f86da62db28d`. It admits the following
 production calibration:
 
 | Property | Production value |
@@ -112,6 +112,11 @@ exactly, regardless of its aspect ratio. The preprocessor fits that whole source
 deterministic centered integer content rectangle. It never crops or stretches source pixels.
 Synthetic tensor pixels outside the content rectangle replicate the nearest content edge and are
 excluded from depth statistics, scene-cut evidence, ownership, history, and OCR authority. The
+preprocessor specializes tensors with at least one-eighth synthetic padding: it area-samples only
+admitted content cells, then a second ordered GPU entry point bit-copies their three NCHW values
+and appearance ordinal into synthetic padding while writing the padding exclusion bit. Smaller
+padding fractions retain the original one-dispatch path because its avoided work does not repay a
+second dispatch. Both paths produce the same edge replication and analysis exclusion. The
 published parallax field extends its content boundary through this padding so renderer filtering
 cannot turn padding into a false depth shelf.
 
@@ -182,11 +187,40 @@ authenticates the bundled artifact and upstream source independently. The detect
 `1x1x160x960` FP32 probability map is reduced on the GPU to bounded line boxes; no probability
 texture or model input becomes rendering authority.
 
-When the authenticated detector is available, OCR runs once for every depth observation accepted
-by the existing nonblocking DAV2 stream gate. It does not run for source frames dropped while the
-previous inference is busy, and it does not reuse stale boxes or add a separate host cadence. This
-keeps OCR8 and SLR12 on the same exact-frame authority path without extra readback, drain, probe, or
-subtitle-onset delay.
+When the authenticated detector is available, OCR ordinarily runs once for every depth observation
+accepted by the existing nonblocking DAV2 stream gate. It does not run for source frames dropped
+while the previous inference is busy, and it does not reuse stale boxes or add a separate host
+cadence. During a native USER32 interactive move/size observation, the accepted full-source depth
+frame explicitly suppresses the optional subtitle branch: OCR preprocessing and inference,
+OCR8 reduction, SLR12 observation, and subtitle conditioning do not run. This is no OCR observation
+rather than an abstaining or missing record, so the retained SLR12 state does not age or clear; the
+frame publishes the ordinary post-limit Base field. Scene-cut analysis, depth normalization/EMA,
+the V2 camera and the remaining geometry producer continue normally. An explicitly armed Dump 3D
+frame remains an ordinary complete observation so frozen OCR/SLR resources are never serialized as
+current-frame evidence. The first newly accepted noninteractive frame resumes a current OCR
+observation without a separate host cadence or readback; it may use the exact DDup redispatch proof
+below when the detector crop itself remained unchanged.
+
+On an otherwise ordinary accepted DAV2 observation, DDup may independently redispatch OCR8 when
+its complete damage history proves that the detector's exact bottom `6:1` analysis-source crop is
+unchanged. The proof is crop-local even for full-source DAV2 and requires the exact positioned
+analysis route, generation, tensor content, transfer, source texture signature, and retained OCR8
+lineage. Dirty or move intersection, missing/unknown history, WGC, a route or resource mismatch,
+native move/size suppression, or an armed dump uses ordinary OCR. A successful proof skips the OCR
+preprocess, CUDA interop, TensorRT enqueue, cell reduction, and box resolve. It preserves the prior
+deterministic OCR8 boxes and flags, restamps only their matched-frame identity, then runs SLR12
+normally against the current DAV2 field and finalized same-frame CutBridge. The restamped record is
+therefore a distinct current observation: it can confirm pending geometry, resample the current
+supporting plane, advance fade or death grace, and consume a cut pulse once. It is not stale box
+authority and does not freeze locator state. A proven redispatch may roll its crop baseline forward;
+busy or rejected depth admission cannot. Dump 3D continues to force a complete ordinary OCR run.
+
+DDup pointer updates are separate from desktop dirty/move metadata even though the host composites
+the hardware cursor into captured color. OCR redispatch intentionally treats that overlay as
+non-semantic detector input, matching the bounded current-color reuse policy below; it is exact for
+desktop content but is not a bit-exact OCR-tensor claim while the cursor moves or changes inside the
+detector band. Desktop subtitle onset, removal, or motion still dirties the band and runs OCR on the
+first accepted DAV2 observation without a delayed readback decision.
 
 OCR8 is a fixed 208-word current record: a 16-word header followed by paired tight/core and cover
 slots, with at most eight authoritative pairs. Each eight-word slot stores half-open coordinates,
@@ -312,9 +346,19 @@ naturally, and the gap is never converted into one merged rectangle. Because a r
 the complete field width and reaches the field bottom, its only exterior boundary—and therefore its
 only collar—is the corrected top edge. Missing current authority, invalid target
 state, unsupported tensor shape, or any identity failure copies ordinary post-limit V2 exactly.
-The conditioner validates the complete 80-word state once per `16x16` dispatch group, requires its
-scene epoch to equal the authenticated CutBridge hard-cut count bound at `t1`, and shares that
-verdict within the group; no thread can partially accept malformed or cross-scene state.
+One `1x1` preparation dispatch validates the complete 80-word state, requires its scene epoch to
+equal the authenticated CutBridge hard-cut count bound at `t1`, and publishes a compact immutable
+condition verdict plus GPU indirect-dispatch arguments. Ordinary full-content live production
+binds the final field only as `u3`: missing authority emits zero groups and zero texture traffic,
+while active authority unions the current covers, expands them by a conservative analytic collar
+derived from the maximum possible `abs(Base - target)` and the authenticated horizontal/vertical
+slopes, aligns that region to `16x16` groups, and dispatches only the bounded superset. Ribbon bounds
+remain full-width and reach the content bottom. Cells outside the dispatched region are proven
+unchangeable and remain untouched; dispatched cells write only actual analytic changes. Dump 3D
+and padded-ROI production instead bind distinct Base `t2` and output `u3` resources and run a
+complete writer that publishes every output cell, including unchanged Base bits and the exact
+synthetic boundary extension. Neither path needs a preparatory texture copy, and neither aliases a
+D3D11 SRV and UAV. No thread can partially accept malformed or cross-scene state.
 There is no pixel history, row lease, onset accumulator, signature, horizontal-distance texture,
 full-resolution overlay detector, or GST/OGR/ORS dependency.
 
@@ -411,8 +455,69 @@ always sampled from the original full captured frame; the crop is never stretche
 
 Color, raw depth, scene state, and parallax are bound to an exact completed source-frame identity.
 An unusable current field renders the current color flat. It may retain the small scene camera so a
-later usable frame resumes the same coordinate, but it never pairs old per-pixel geometry with new
-color. A confirmed cut invalidates the old camera; the next usable field acquires the new one.
+later usable frame resumes the same coordinate, but outside the bounded DDup proof below it never
+pairs old per-pixel geometry with new color. A confirmed cut invalidates the old camera; the next
+usable field acquires the new one.
+
+Desktop Duplication has one explicit, bounded current-color reuse exception with two conservative
+proofs. For full-source V2, when its non-null desktop-content timestamp is unchanged, the source
+format/extent/transfer and complete live authority epoch still match, and an authenticated
+full-source completion for that content is cached, the host may skip a duplicate DAV2/OCR
+submission and warp the current capture color through that cached field. This keeps cursor-only
+presentations live; it must never repeat the old packed SBS texture. This full-source proof
+intentionally makes cursor-only DDup presentations content-clocked rather than bit-exact with the
+prior behavior, which included the composited cursor in model input.
+
+For an already-authorized window-region ROI, DDup damage metadata supplies the second proof. Every
+committed desktop-content surface carries a monotonically ordered capture sequence and the complete
+dirty and move metadata returned for its acquisition. Starting at the exact sequence of a successful
+ROI enqueue, every later distinct sequence must be contiguous and completely observed. Repeated
+delivery of the same immutable sequence, including a retained image or cursor-only presentation,
+is idempotent. `AccumulatedFrames > 1` is not itself a gap because DDup coalesces the corresponding
+updates into that acquisition's metadata. A half-open dirty rectangle intersecting the exact ROI,
+or either the reconstructed source or destination of a move rectangle intersecting it, makes the
+proof dirty. Changes and moves wholly outside the ROI are irrelevant because that crop is already
+the complete authenticated analysis domain; damage never creates, chooses, resizes, or translates
+an ROI.
+
+Damage-guided reuse additionally requires the exact cached route placement, analysis generation,
+source signature and transfer domain, and complete foreground/browser authority epochs to match the
+current observation. Position equality is required even when a translation would retain the same
+analysis history. A missing or out-of-order sequence, capture-epoch change, incomplete or malformed
+metadata, protected-content masking, WGC, dirty or move intersection, authority/placement/source/
+transfer mismatch, armed dump, reprocess transition, terminal producer failure, or incomplete V2
+authentication fails open to the ordinary matched submission path. Only a real successful enqueue
+establishes a new clean sequence baseline; a busy or rejected admission attempt does not clear
+dirty or unknown history.
+
+Both proofs share one refresh bound: at most 16 skipped deliveries or 250 ms since the last real
+enqueue, whichever comes first. A reuse may poll the one matching pending inference or render an
+authenticated cached field against the current captured color, but it does not create a new depth
+observation, relabel the geometry completion, or advance normalization, scene-cut, camera, OCR, or
+SLR state. Any pending completion advances those states at most once under its original exact-frame
+identity. The forced refresh and every fail-open case return through the normal matched copy and
+enqueue gate rather than synchronously waiting for the GPU.
+
+That whole-depth exception is distinct from the OCR-only redispatch above. A forced or otherwise
+ordinary DAV2 enqueue still advances depth, cut, camera, and V2 state; if only its bottom detector
+crop is damage-proven unchanged, OCR8 is restamped to that new frame and SLR12 advances normally.
+
+One process-only experiment broadens whole-depth reuse without changing the persisted three-key SBS
+configuration surface. `APOLLO_SBS_LOW_MOTION_GATE=1`, read once when an encode device initializes,
+allows one non-bit-exact hold only when an authenticated completed field is already cached, no
+inference is pending, and the current route still satisfies every ordinary reuse authority check.
+From that field's successfully enqueued DDup sequence to the current sequence, the host clips every
+dirty rectangle and both ends of every move to the exact DAV2 input region, sums overlaps without
+unioning them, and saturates at the region area. The deliberately conservative upper bound must be
+at most `1/400` (0.25%) of that region, while the exact bottom OCR crop must remain free of desktop
+damage. At most one delivery may be held and it must occur less than 50 ms after the last real
+successful enqueue. The hold warps current capture color through the cached field and advances no
+depth, normalization, scene-cut, camera, OCR, or SLR observation. Missing/zero/oversize/malformed
+metadata, an unretained sequence, WGC, pending inference, OCR-crop damage, or any normal authority
+failure runs the ordinary path. DDup metadata excludes the separately composited hardware cursor,
+so this experiment is explicitly cursor-insensitive as well as non-bit-exact. It is disabled by
+default; diagnostics report candidates, suppressed submissions, and successful current-color
+reuses for A/B measurement even when the experiment is disabled.
 
 Model preparation, shader compilation, and the live renderer are fail-closed. Live shaders are
 compiled and cached at process startup. Dump-only resources are created lazily and cannot prevent a
@@ -543,16 +648,22 @@ completions and cached ROI output before warp or dump. A pure translation may re
 history after a newly copied frame is authorized, but never the pre-move color/depth pair.
 
 During the native USER32 interactive move/size loop, Host SBS withdraws window-region authority and
-continues ordinary full-source 3D for the current captured display. DAV2/OCR, matched completion,
-telemetry, and Dump 3D therefore retain their normal full-frame behavior instead of chasing a moving
-client rectangle. When the loop ends, ordinary foreground causality must authorize a newly copied
-frame before the matched-domain transition can submit a new ROI; output may briefly be identity
-while that exact ROI completion is pending. This covers standard caption dragging, border resizing,
-and borderless applications that delegate native hit-testing to USER32. For fully custom
+continues full-source 3D for the current captured display instead of chasing a moving client
+rectangle. DAV2, depth normalization/EMA, scene-cut analysis, the V2 camera and geometry production
+retain their normal full-frame behavior. The optional subtitle branch is suppressed as described
+above, so moving desktop text cannot acquire or age subtitle authority and the current Base field is
+rendered without subtitle conditioning. An explicitly armed Dump 3D request retains complete
+ordinary observation behavior. When the loop ends, ordinary foreground causality must authorize a
+newly copied frame before the matched-domain transition can submit a new ROI; output may briefly be
+identity while that exact ROI completion is pending. This covers standard caption dragging, border
+resizing, and borderless applications that delegate native hit-testing to USER32. For fully custom
 applications that animate themselves with `SetWindowPos`, a copied desktop image that still
 predates a newly observed same-size position is submitted through full-source V2 rather than
 waiting indefinitely for another desktop content presentation. A later causally matched image may
 re-enter the ROI while preserving position-independent analysis history.
+WGC has no desktop-content timestamp and remains ineligible for ROI authority; it observes only the
+lightweight USER32 `GUI_INMOVESIZE` advisory needed for this subtitle-work suppression and performs
+no DWM/client geometry mapping on that path.
 
 ## Dump 3D and evaluation
 

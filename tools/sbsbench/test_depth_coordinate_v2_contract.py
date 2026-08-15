@@ -86,6 +86,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             49: "d0aa744d7be1f2700c9b693b73feaebf53a20eda3e64c70ae9ccb10b550f9ec7",
             50: "b7d05b870bf37aecf811c7735dddefc11a80bb742b339c6b36a2a5018fc6b7e2",
             51: "50ab2ec86d2833d8dc935ccc8becbbd15e99e23eadde00e99b5a575ba6606f8a",
+            52: "115114c1bcbbfba925e58c0edb0b90b5989deade6f722b9e43366960b8f5cf35",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -93,14 +94,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0xE37DBC1F)
+        self.assertEqual(generator.contract_tag(contract), 0xDD77CD32)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "e37dbc1f38ca5a533a39e812a50afae2f9a3f1da2fd978338167ef184d7264f3",
+            "dd77cd3279a9e7b3b232b3e445ae7b1b711eeba38e109d4bf8f56edb756dd8e5",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "bcf57b361288e9e0a16e1946292f7e80def7cbb6de26f5b587599ccb0fc63682",
+            "68b99544bb5e8525bfa6e5417c8f6d67d7238296842cd76d0b83d8d8f6c2569a",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -269,7 +270,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(calibration.preprocess.source_macro_count, 0)
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
-            "e6f66453473af25007d7d4784656dc97d97bae7c730fdfd684d9ab8181ffed47")
+            "0a422bb447e2c3c016f4e4f1c9d6d2e98162a3eecae9e9d09bd0bf4ab56f92dd")
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
             generator.shader_source_closure_sha256())
@@ -298,7 +299,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
 
     def test_subtitle_ocr_contract_binds_model_profile_tensor_and_record_abis(self):
         ocr = python_contract.SUBTITLE_OCR
-        self.assertEqual(ocr.schema, 10)
+        self.assertEqual(ocr.schema, 11)
         self.assertEqual(ocr.logical_model, "ppocrv6_tiny_det_modelopt_fp16")
         self.assertEqual(
             ocr.asset_path,
@@ -373,13 +374,17 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             (ocr.locator_word_count, ocr.locator_owner_offset,
              ocr.locator_pending_offset, ocr.locator_current_offset),
             (80, 32, 48, 64))
+        self.assertEqual(
+            (ocr.condition_param_schema, ocr.condition_param_tag,
+             ocr.condition_param_word_count, ocr.condition_dispatch_arg_word_count),
+            (2, 0x32504353, 8, 3))
 
         contract = generator.load_contract(verify_shader_source_closure=False)
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 51u',
-                'subtitle_ocr_contract_schema = 10u',
+                'contract_schema = 52u',
+                'subtitle_ocr_contract_schema = 11u',
                 'subtitle_ocr_model_name = "ppocrv6_tiny_det_modelopt_fp16"',
                 'subtitle_ocr_asset_path = '
                 '"models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx"',
@@ -400,6 +405,10 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'subtitle_ocr_record_tag = 0x3852434Fu',
                 'subtitle_locator_state_schema = 12u',
                 'subtitle_locator_state_tag = 0x32314C53u',
+                'subtitle_condition_param_schema = 2u',
+                'subtitle_condition_param_tag = 0x32504353u',
+                'subtitle_condition_param_word_count = 8u',
+                'subtitle_condition_dispatch_arg_word_count = 3u',
                 'limiter_group_threads = 32u',
                 'limiter_q_fraction_bits = 30u',
                 'limiter_q_scale = 1073741824u',
@@ -432,8 +441,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 51u',
-                '#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 10u',
+                '#define V2_CONTRACT_SCHEMA 52u',
+                '#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 11u',
                 '#define V2_OCR_INPUT_WIDTH 960u',
                 '#define V2_OCR_OUTPUT_WIDTH 960u',
                 '#define V2_OCR_IMAGENET_MEAN_B 0.485f',
@@ -441,6 +450,10 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 '#define V2_OCR_RECORD_TAG 0x3852434Fu',
                 '#define V2_SUBTITLE_LOCATOR_STATE_SCHEMA 12u',
                 '#define V2_SUBTITLE_LOCATOR_STATE_TAG 0x32314C53u',
+                '#define V2_SUBTITLE_CONDITION_PARAM_SCHEMA 2u',
+                '#define V2_SUBTITLE_CONDITION_PARAM_TAG 0x32504353u',
+                '#define V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT 8u',
+                '#define V2_SUBTITLE_CONDITION_DISPATCH_ARG_WORD_COUNT 3u',
                 '#define V2_MODEL_CALIBRATED_SHAPE_COUNT 6u',
                 '#define V2_LIMITER_GROUP_THREADS 32u',
                 '#define V2_LIMITER_Q_FRACTION_BITS 30u',
@@ -594,14 +607,39 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_host_sbs_identity_paragraph_matches_generated_contract(self):
+        contract = generator.load_contract()
+        renderer_pins = generator.validate_renderer_source_closure_pins()
+        documentation = (REPO / "docs" / "host-sbs.md").read_text(encoding="utf-8")
+        self.assertIn(
+            f"schema {contract['schema']}/tag `0x{generator.contract_tag(contract):08X}`",
+            documentation,
+        )
+        self.assertIn(
+            f"`{generator.contract_digest(contract)}`. It binds the",
+            documentation,
+        )
+        self.assertIn(
+            f"SHA-256 `{contract['shader_implementation']['source_closure_sha256']}`.",
+            documentation,
+        )
+        self.assertIn(
+            f"`{renderer_pins['parallax_v2_live_renderer_source_closure_sha256']}`",
+            documentation,
+        )
+        self.assertIn(
+            f"`{renderer_pins['parallax_v2_diagnostic_source_closure_sha256']}`",
+            documentation,
+        )
+
     def test_renderer_closure_pins_cover_generated_contract_include(self):
         self.assertEqual(
             generator.validate_renderer_source_closure_pins(),
             {
                 "parallax_v2_live_renderer_source_closure_sha256":
-                    "d2672fa57bb2542bb3714c243ea393e78e29fd40603379ea435f4740c6762b7d",
+                    "2aac93ddeb5e89de424c52eb8f43b0509ee580c829e04e345dc95967070c7cd1",
                 "parallax_v2_diagnostic_source_closure_sha256":
-                    "32b257d5c84f839b5797fbf720aaddb1d5e5b5056cbb57d45b64d7c2d32aaec3",
+                    "150d16132c0ad98c742717c124280e1818555d22ed8ee2c14bf8f86da62db28d",
             },
         )
 

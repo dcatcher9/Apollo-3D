@@ -29,6 +29,12 @@ geometry, non-identity rotation, unauthenticated tensor geometry, and other-moni
 rectangles all retain ordinary full-frame analysis. The host never changes the capture monitor for
 this route; an internal base-V2 authentication failure still renders flat.
 
+The live DDup path may also reuse authenticated geometry for an already-authorized, exactly
+positioned ROI when a complete contiguous dirty/move sequence proves that every intervening desktop
+change was outside that crop. This bounded optimization changes neither ROI selection nor analysis
+semantics: uncertainty returns to normal inference, and 16 skipped deliveries or 250 ms forces a
+refresh. WGC has no damage-reuse authority.
+
 The complete implementation contract is in [Host SBS pipeline](host-sbs.md). Scene-cut behavior is
 owned by [Host SBS scene cuts](host-sbs-scene-cuts.md).
 
@@ -36,8 +42,10 @@ owned by [Host SBS scene cuts](host-sbs-scene-cuts.md).
 
 - No endpoint normalization, min/max range EMA, subject stretch/recenter, adaptive pop, or
   configurable zero-plane translation.
-- No damage-driven, image-tracked, background-window/tab, or second-inference ROI. The foreground
-  window-region route replaces that frame's full analysis with at most one causally attributed crop.
+- No damage-driven ROI selection, image-tracked ROI, background-window/tab ROI, or second-inference
+  ROI. The foreground window-region route replaces that frame's full analysis with at most one
+  causally attributed crop. DDup damage can only retain an independently authorized exact route;
+  it cannot create or alter one.
 - No application/media classifier, allowlist, Z-order compositor, occlusion reconstruction, or
   automatic capture-monitor switch in the foreground-client route.
 - No forward-owner render, multi-root visibility selector, post-warp blur, or synthetic hidden-pixel
@@ -85,6 +93,30 @@ DAV2 field shape. It does not retain the retired row-history or general overlay-
 Unsupported identities and shapes preserve ordinary V2 exactly. Dump and replay accept only the
 current SLR12/OCR8 schema. The host does not reconstruct hidden video.
 
+Damage reuse is deliberately DDup-only and fail-open. Dirty and move metadata is semantic only as a
+proof that the exact current ROI pixels did not change: damage outside the crop may save inference,
+whereas an intersecting move source or destination, a sequence gap, metadata failure, protected
+content, route movement, authority change, or WGC forces the ordinary path. Reuse freezes the
+depth/cut/camera/OCR/SLR observation state and always warps the current capture color rather than
+repeating a packed SBS frame.
+
+The next quality-surface probe is implemented only as a default-off process A/B lever,
+`APOLLO_SBS_LOW_MOTION_GATE=1`; it is not a persisted SBS setting. Starting from an authenticated
+completed cache with no inference pending, it permits one hold within 50 ms when the conservatively
+summed DDup overlap is no more than 0.25% of the exact DAV2 region and the bottom OCR crop has no
+desktop damage. The baseline stays at the last real enqueue so drift accumulates instead of rolling
+forward. Diagnostics report candidate, skip, and successful reuse rates with the lever off or on.
+This is intentionally non-bit-exact and cursor-insensitive and must remain opt-in until clip-level
+quality evaluation and Nsight GPU-load evidence justify a production policy.
+
+OCR also has a narrower independent DDup optimization on frames where DAV2 does run. If damage is
+complete and wholly outside the exact bottom `6:1` detector crop, the host retains deterministic
+OCR8 boxes, restamps them to the new exact frame, and runs current SLR12 normally. This skips OCR
+preprocess, interop, TensorRT, cells, and resolve without freezing depth, cut, camera, V2, or locator
+state. Subtitle-band damage fails open immediately, so onset/removal has no extra readback frame of
+latency. Hardware-cursor composition is deliberately ignored by this desktop-content proof; WGC and
+Dump 3D always take ordinary OCR.
+
 ### Foreground crowns and disocclusion
 
 A single source image contains no observation of background hidden behind a shifted foreground.
@@ -129,7 +161,10 @@ Before changing V2 geometry:
    depth, and all authenticated aspect families. For the window-region route, also check Chromium
    priority, pause, foreground translation and resize, authority changes, desktop/minimized focus,
    other-monitor and spanning fallbacks, exact full-capture canonicalization, multiple videos,
-   portrait/square/ultrawide contain-fit padding, and both signs at every ROI edge.
+   portrait/square/ultrawide contain-fit padding, and both signs at every ROI edge. For DDup damage
+   reuse, separately check dirty and move rectangles inside, outside, and touching each half-open ROI
+   edge; repeated and missing sequences; metadata/protected-content failure; WGC fallback; and both
+   the 16-delivery and 250-ms forced-refresh boundaries.
 5. Confirm the result in Galaxy XR at the intended pop strength before changing the production
    contract or baselines.
 

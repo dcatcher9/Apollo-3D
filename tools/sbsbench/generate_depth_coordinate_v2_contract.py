@@ -77,7 +77,7 @@ EXPECTED_SHADER_SPEC_KEYS = {
     "source_file", "source_entrypoint", "source_target",
 }
 CANONICAL_SUBTITLE_OCR = {
-    "schema": 10,
+    "schema": 11,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
     "artifact_onnx_sha256": (
@@ -171,6 +171,12 @@ CANONICAL_SUBTITLE_OCR = {
         "current_kind_shift": 8,
         "kind_mask": 15,
     },
+    "condition_params": {
+        "schema": 2,
+        "tag": 0x32504353,
+        "word_count": 8,
+        "dispatch_arg_word_count": 3,
+    },
 }
 EXPECTED_CONSTANT_FIELD_NAMES = (
     "raw_coordinate_scale",
@@ -209,10 +215,17 @@ EXPECTED_SHADOW_STATE_FIELD_NAMES = (
 CONTRACT_TAG_SENTINEL = "contract_tag"
 PREPROCESS_SHADER_ROOT = (
     ROOT / "src_assets" / "windows" / "assets" / "shaders" / "directx")
-PREPROCESS_SHADER_SPECS = (("rgb_to_nchw_cs.hlsl", "main", "cs_5_0"),)
+PREPROCESS_SHADER_SPECS = (
+    ("rgb_to_nchw_cs.hlsl", "main", "cs_5_0"),
+    ("rgb_to_nchw_cs.hlsl", "content_main", "cs_5_0"),
+    ("rgb_to_nchw_cs.hlsl", "pad_main", "cs_5_0"),
+)
 PARALLAX_V2_SHADER_SPECS = (
     ("rgb_to_nchw_cs.hlsl", "main", "cs_5_0"),
+    ("rgb_to_nchw_cs.hlsl", "content_main", "cs_5_0"),
+    ("rgb_to_nchw_cs.hlsl", "pad_main", "cs_5_0"),
     ("buffer_to_tex_cs.hlsl", "main", "cs_5_0"),
+    ("buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"),
     ("depth_ema_motion_cs.hlsl", "main", "cs_5_0"),
     ("depth_minmax_cs.hlsl", "main", "cs_5_0"),
     ("depth_minmax_ema_cs.hlsl", "main", "cs_5_0"),
@@ -231,6 +244,8 @@ PARALLAX_V2_SHADER_SPECS = (
     ("host_sbs_ocr_boxes_cs.hlsl", "cells_main", "cs_5_0"),
     ("host_sbs_ocr_boxes_cs.hlsl", "resolve_main", "cs_5_0"),
     ("host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"),
+    ("host_sbs_subtitle_locator_cs.hlsl", "condition_prepare_main", "cs_5_0"),
+    ("host_sbs_subtitle_locator_cs.hlsl", "condition_in_place_main", "cs_5_0"),
     ("host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"),
 )
 PARALLAX_V2_LIVE_RENDERER_SHADER_SPECS = (
@@ -770,6 +785,7 @@ def render_cpp(contract: dict[str, Any]) -> str:
     field_policy = subtitle_ocr["field_policy"]
     ocr_record = subtitle_ocr["ocr_record"]
     locator_state = subtitle_ocr["locator_state"]
+    condition_params = subtitle_ocr["condition_params"]
     calibrated_shapes = [
         (calibration["calibration_id"], shape["width"], shape["height"])
         for calibration in calibrations
@@ -945,6 +961,14 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "  inline constexpr std::uint32_t subtitle_locator_current_kind_shift = "
         f"{locator_state['current_kind_shift']}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_kind_mask = {locator_state['kind_mask']}u;",
+        f"  inline constexpr std::uint32_t subtitle_condition_param_schema = "
+        f"{condition_params['schema']}u;",
+        f"  inline constexpr std::uint32_t subtitle_condition_param_tag = "
+        f"0x{condition_params['tag']:08X}u;",
+        f"  inline constexpr std::uint32_t subtitle_condition_param_word_count = "
+        f"{condition_params['word_count']}u;",
+        f"  inline constexpr std::uint32_t subtitle_condition_dispatch_arg_word_count = "
+        f"{condition_params['dispatch_arg_word_count']}u;",
         "  static_assert(subtitle_ocr_input_n == 1u && subtitle_ocr_input_c == 3u);",
         "  static_assert(subtitle_ocr_output_n == 1u && subtitle_ocr_output_c == 1u);",
         "  static_assert(subtitle_ocr_active_probability_threshold > 0.0f &&",
@@ -986,6 +1010,8 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "                subtitle_locator_rectangle_capacity * 4u);",
         "  static_assert(subtitle_locator_state_word_count == subtitle_locator_current_offset +",
         "                subtitle_locator_rectangle_capacity * 4u);",
+        "  static_assert(subtitle_condition_param_word_count == 8u);",
+        "  static_assert(subtitle_condition_dispatch_arg_word_count == 3u);",
         f"  inline constexpr std::uint32_t shader_source_closure_schema = "
         f"{shader_implementation['source_closure_schema']}u;",
         f"  inline constexpr std::uint32_t shader_source_compile_flags = "
@@ -1419,6 +1445,7 @@ def render_hlsl(contract: dict[str, Any]) -> str:
     field_policy = subtitle_ocr["field_policy"]
     ocr_record = subtitle_ocr["ocr_record"]
     locator_state = subtitle_ocr["locator_state"]
+    condition_params = subtitle_ocr["condition_params"]
     calibrated_shapes = [
         (shape["width"], shape["height"])
         for calibration in contract["model_calibrations"]
@@ -1564,6 +1591,11 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"#define V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT {locator_state['pending_kind_shift']}u",
         f"#define V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT {locator_state['current_kind_shift']}u",
         f"#define V2_SUBTITLE_LOCATOR_KIND_MASK {locator_state['kind_mask']}u",
+        f"#define V2_SUBTITLE_CONDITION_PARAM_SCHEMA {condition_params['schema']}u",
+        f"#define V2_SUBTITLE_CONDITION_PARAM_TAG 0x{condition_params['tag']:08X}u",
+        f"#define V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT {condition_params['word_count']}u",
+        f"#define V2_SUBTITLE_CONDITION_DISPATCH_ARG_WORD_COUNT "
+        f"{condition_params['dispatch_arg_word_count']}u",
         "#define V2_OCR_SHADER_CONTRACT_GENERATED 1u",
         f"#define V2_DIRECT_CONTAINER_LIMIT "
         f"{_float_literal(defaults['direct_container_limit'])}",
@@ -1734,7 +1766,9 @@ def render_hlsl_ocr_assertions() -> str:
         "    V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT != 0u || \\",
         "    V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT != 4u || \\",
         "    V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT != 8u || \\",
-        "    V2_SUBTITLE_LOCATOR_KIND_MASK != 15u",
+        "    V2_SUBTITLE_LOCATOR_KIND_MASK != 15u || \\",
+        "    V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT != 8u || \\",
+        "    V2_SUBTITLE_CONDITION_DISPATCH_ARG_WORD_COUNT != 3u",
         '#error "Generated V2 OCR8/SLR12 contract invariants are inconsistent"',
         "#endif",
         "",

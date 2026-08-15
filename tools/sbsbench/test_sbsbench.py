@@ -1817,13 +1817,14 @@ class EvalContractTests(unittest.TestCase):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders",
                                   "directx")
-        with open(os.path.join(shader_dir, "depth_ema_motion_cs.hlsl"),
+        with open(os.path.join(shader_dir, "buffer_to_tex_cs.hlsl"),
                   encoding="utf-8") as fh:
-            mask_shader = fh.read()
-        self.assertIn("PreviousDepth", mask_shader)
-        self.assertIn("ema_edge_change", mask_shader)
-        self.assertNotIn("ema_edge_dilation", mask_shader)
-        self.assertIn("MotionMask[DTid.xy] = IsMovingEdge", mask_shader)
+            fused_shader = fh.read()
+        self.assertIn("PreviousDepth", fused_shader)
+        self.assertIn("ema_edge_change", fused_shader)
+        self.assertNotIn("ema_edge_dilation", fused_shader)
+        self.assertIn("RWTexture2D<uint>         MotionMask : register(u1)", fused_shader)
+        self.assertIn("OutputTexture[DTid.xy] = moving ?", fused_shader)
         with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
                   encoding="utf-8") as fh:
             estimator = fh.read()
@@ -1831,6 +1832,8 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("std::swap(depth_uav, depth_previous_uav)", estimator)
         self.assertIn("std::swap(depth_srv, depth_previous_srv)", estimator)
         self.assertIn("ema_motion_mask_srv", estimator)
+        self.assertNotIn("context->CSSetShader(depth_ema_motion_cs.Get()", estimator)
+        self.assertIn("ID3D11UnorderedAccessView *bt_uavs[2]", estimator)
         with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
                   encoding="utf-8") as fh:
             harness = fh.read()

@@ -8,9 +8,11 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <vector>
@@ -117,6 +119,119 @@ namespace platf::dxgi {
       return has_depth_estimator && renderer_uses_depth_pipeline;
     }
 
+    inline constexpr auto host_sbs_full_source_reuse_max_age =
+      std::chrono::milliseconds {250};
+    inline constexpr unsigned host_sbs_full_source_reuse_max_skips = 16u;
+    inline constexpr auto host_sbs_low_motion_reuse_max_age =
+      std::chrono::milliseconds {50};
+    inline constexpr unsigned host_sbs_low_motion_reuse_max_skips = 1u;
+    // 1 / 400 = 0.25%. Keep this integer-ratio contract exact and overflow-free.
+    inline constexpr std::uint64_t host_sbs_low_motion_damage_ratio_denominator = 400u;
+
+    [[nodiscard]] constexpr bool host_sbs_cached_geometry_render_allowed(
+      const bool dedup_gate_open,
+      const bool renderer_authenticated,
+      const bool cached_geometry_matches,
+      const bool cached_resources_complete
+    ) noexcept {
+      return dedup_gate_open && renderer_authenticated && cached_geometry_matches &&
+             cached_resources_complete;
+    }
+
+    /** Production-independent selector for the default-off completed-cache experiment. */
+    [[nodiscard]] constexpr bool host_sbs_low_motion_cache_reuse_allowed(
+      const bool experiment_enabled,
+      const bool dedup_gate_open,
+      const bool cache_authenticated,
+      const bool inference_pending,
+      const bool damage_candidate,
+      const bool refresh_allowed
+    ) noexcept {
+      return experiment_enabled && dedup_gate_open && cache_authenticated &&
+             !inference_pending && damage_candidate && refresh_allowed;
+    }
+
+    /** Bounded unchanged-content refresh state. A busy admission attempt is intentionally a no-op;
+     * only a real enqueue resets the saturated age/skip cap. */
+    class host_sbs_content_refresh_state_t {
+    public:
+      constexpr void reset() noexcept {
+        last_enqueued_at_.reset();
+        skipped_ = 0u;
+      }
+
+      constexpr void record_successful_enqueue(
+        const std::chrono::steady_clock::time_point now
+      ) noexcept {
+        last_enqueued_at_ = now;
+        skipped_ = 0u;
+      }
+
+      constexpr void record_reuse() noexcept {
+        if (skipped_ < host_sbs_full_source_reuse_max_skips) {
+          ++skipped_;
+        }
+      }
+
+      [[nodiscard]] constexpr bool refresh_due(
+        const std::chrono::steady_clock::time_point now
+      ) const noexcept {
+        return !last_enqueued_at_ ||
+               skipped_ >= host_sbs_full_source_reuse_max_skips ||
+               now - *last_enqueued_at_ >= host_sbs_full_source_reuse_max_age;
+      }
+
+      [[nodiscard]] constexpr unsigned skipped() const noexcept {
+        return skipped_;
+      }
+
+    private:
+      std::optional<std::chrono::steady_clock::time_point> last_enqueued_at_;
+      unsigned skipped_ = 0u;
+    };
+
+    /** Separate quality-surface bound for approximate low-motion holds.
+     *
+     * Exact DDup reuse retains the wider 16/250 cap above. Approximate reuse gets one delivery
+     * and 50 ms from the last real enqueue; exact holds neither consume nor refresh this budget.
+     */
+    class host_sbs_low_motion_refresh_state_t {
+    public:
+      constexpr void reset() noexcept {
+        last_enqueued_at_.reset();
+        skipped_ = 0u;
+      }
+
+      constexpr void record_successful_enqueue(
+        const std::chrono::steady_clock::time_point now
+      ) noexcept {
+        last_enqueued_at_ = now;
+        skipped_ = 0u;
+      }
+
+      constexpr void record_reuse() noexcept {
+        if (skipped_ < host_sbs_low_motion_reuse_max_skips) {
+          ++skipped_;
+        }
+      }
+
+      [[nodiscard]] constexpr bool reuse_allowed(
+        const std::chrono::steady_clock::time_point now
+      ) const noexcept {
+        return last_enqueued_at_ &&
+               skipped_ < host_sbs_low_motion_reuse_max_skips &&
+               now - *last_enqueued_at_ < host_sbs_low_motion_reuse_max_age;
+      }
+
+      [[nodiscard]] constexpr unsigned skipped() const noexcept {
+        return skipped_;
+      }
+
+    private:
+      std::optional<std::chrono::steady_clock::time_point> last_enqueued_at_;
+      unsigned skipped_ = 0u;
+    };
+
     /** CPU shadow for an immutable-by-value GPU upload. The caller commits only after the D3D
      * create/update operation has been submitted successfully. */
     template<typename T>
@@ -218,6 +333,148 @@ namespace platf::dxgi {
       }
       return {presentation_timestamp, retained_content_timestamp};
     }
+
+    inline constexpr std::size_t ddup_damage_history_frame_budget = 128u;
+    inline constexpr std::size_t ddup_damage_history_rect_budget = 4096u;
+    inline constexpr std::size_t ddup_damage_frame_rect_budget = 512u;
+    inline constexpr UINT ddup_damage_metadata_byte_budget = 64u * 1024u;
+
+    /** DDup only promises dirty/move lists when update metadata is present.
+     *
+     * A delivered content present with a zero metadata byte count is not proof that no pixels
+     * changed. Keep that acquisition as an explicit history discontinuity instead of committing a
+     * known-empty update.
+     */
+    [[nodiscard]] constexpr bool ddup_frame_damage_metadata_available(
+      const DXGI_OUTDUPL_FRAME_INFO &frame_info
+    ) noexcept {
+      return frame_info.LastPresentTime.QuadPart != 0 &&
+             frame_info.AccumulatedFrames != 0u &&
+             frame_info.TotalMetadataBufferSize != 0u &&
+             frame_info.TotalMetadataBufferSize <= ddup_damage_metadata_byte_budget &&
+             !frame_info.ProtectedContentMaskedOut;
+    }
+
+    /** Conservative answer for damage accumulated between two committed DDup surfaces. */
+    enum class ddup_damage_intersection_e : std::uint8_t {
+      unknown,
+      unchanged,
+      changed,
+    };
+
+    /** Saturated upper bound on pixels that may have changed inside one queried region.
+     *
+     * Rectangles are deliberately not unioned: summing clipped overlaps and saturating at the
+     * region area can only overestimate damage, so an accepted small fraction stays conservative.
+     */
+    struct ddup_damage_coverage_t {
+      std::uint64_t potentially_changed_area = 0u;
+      std::uint64_t region_area = 0u;
+      bool known = false;
+    };
+
+    [[nodiscard]] constexpr bool host_sbs_low_motion_damage_candidate(
+      const ddup_damage_coverage_t &coverage,
+      const bool ocr_crop_unchanged
+    ) noexcept {
+      return coverage.known && ocr_crop_unchanged && coverage.region_area != 0u &&
+             coverage.potentially_changed_area <=
+               coverage.region_area /
+                 host_sbs_low_motion_damage_ratio_denominator;
+    }
+
+    /** One acquired DDup present's normalized dirty coverage.
+     *
+     * Move rectangles contribute both their source and destination rectangles. `known == false`
+     * is an explicit discontinuity: callers must not infer an unchanged ROI across this update.
+     */
+    struct ddup_damage_update_t {
+      bool known = false;
+      std::vector<RECT> rects;
+    };
+
+    class ddup_damage_history_t;
+
+    /** Immutable identity of one desktop surface actually committed by CopyResource. */
+    struct ddup_damage_snapshot_t {
+      std::shared_ptr<const ddup_damage_history_t> history;
+      std::uint64_t token = 0u;
+    };
+
+    /** Validate and normalize DDup dirty/move metadata into capture-texture coordinates. */
+    [[nodiscard]] ddup_damage_update_t make_ddup_damage_update(
+      std::span<const RECT> dirty_rects,
+      std::span<const DXGI_OUTDUPL_MOVE_RECT> move_rects,
+      LONG width,
+      LONG height,
+      bool metadata_valid = true
+    );
+
+    /** Bounded, thread-safe history shared by capture images and the encode thread. */
+    class ddup_damage_history_t:
+        public std::enable_shared_from_this<ddup_damage_history_t> {
+    public:
+      [[nodiscard]] ddup_damage_snapshot_t commit(ddup_damage_update_t update);
+
+      [[nodiscard]] ddup_damage_intersection_e query(
+        std::uint64_t from_exclusive,
+        std::uint64_t through_inclusive,
+        const RECT &region
+      ) const;
+
+      [[nodiscard]] ddup_damage_coverage_t query_coverage(
+        std::uint64_t from_exclusive,
+        std::uint64_t through_inclusive,
+        const RECT &region
+      ) const;
+
+    private:
+      struct entry_t {
+        std::uint64_t token = 0u;
+        bool known = false;
+        std::vector<RECT> rects;
+      };
+
+      mutable std::mutex mutex_;
+      std::deque<entry_t> entries_;
+      std::size_t retained_rects_ = 0u;
+      std::uint64_t next_token_ = 1u;
+    };
+
+    /** Query only when both snapshots belong to the same retained exact history range. */
+    [[nodiscard]] ddup_damage_intersection_e query_ddup_damage_between(
+      const std::optional<ddup_damage_snapshot_t> &from,
+      const std::optional<ddup_damage_snapshot_t> &through,
+      const RECT &region
+    );
+
+    /** Query conservative accumulated coverage only across one complete retained history range. */
+    [[nodiscard]] ddup_damage_coverage_t query_ddup_damage_coverage_between(
+      const std::optional<ddup_damage_snapshot_t> &from,
+      const std::optional<ddup_damage_snapshot_t> &through,
+      const RECT &region
+    );
+
+    enum class host_sbs_ddup_reuse_proof_e : std::uint8_t {
+      none,
+      content_clock,
+      roi_damage,
+    };
+
+    /** Classify the pixel proof for bounded current-color reuse.
+     *
+     * Full-source reuse requires the established DDup content-clock identity. ROI reuse also
+     * requires one continuous damage history and may bridge changed content timestamps only when
+     * every committed dirty/move record stays outside the exact analysis crop.
+     */
+    [[nodiscard]] host_sbs_ddup_reuse_proof_e classify_host_sbs_ddup_reuse(
+      const std::optional<std::chrono::steady_clock::time_point> &inferred_content,
+      const std::optional<ddup_damage_snapshot_t> &inferred_damage,
+      bool video_region,
+      const RECT &input_region,
+      const std::optional<std::chrono::steady_clock::time_point> &current_content,
+      const std::optional<ddup_damage_snapshot_t> &current_damage
+    );
   }  // namespace detail
 
   class gpu_cursor_t {
@@ -422,6 +679,12 @@ namespace platf::dxgi {
 
     int init(display_base_t *display, const ::video::config_t &config);
     capture_e next_frame(DXGI_OUTDUPL_FRAME_INFO &frame_info, std::chrono::milliseconds timeout, resource_t::pointer *res_p);
+    detail::ddup_damage_update_t damage_update(
+      const DXGI_OUTDUPL_FRAME_INFO &frame_info,
+      DXGI_MODE_ROTATION rotation,
+      LONG width,
+      LONG height
+    );
     capture_e reset(dup_t::pointer dup_p = dup_t::pointer());
     capture_e release_frame();
 
@@ -459,6 +722,9 @@ namespace platf::dxgi {
     std::chrono::steady_clock::time_point old_surface_timestamp;
     std::variant<std::monostate, texture2d_t, std::shared_ptr<platf::img_t>> last_frame_variant;
     std::optional<std::chrono::steady_clock::time_point> last_content_timestamp;
+    std::shared_ptr<detail::ddup_damage_history_t> damage_history;
+    std::optional<detail::ddup_damage_snapshot_t> last_ddup_damage;
+    bool damage_chain_valid = true;
   };
 
   /**

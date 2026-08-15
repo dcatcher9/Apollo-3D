@@ -5,6 +5,7 @@
 // standard includes
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <thread>
 
 // platform includes
@@ -42,6 +43,281 @@ namespace platf {
 }
 
 namespace platf::dxgi {
+
+  namespace detail {
+    namespace {
+      [[nodiscard]] bool valid_damage_rect(
+        const RECT &rect,
+        const LONG width,
+        const LONG height
+      ) noexcept {
+        return width > 0 && height > 0 && rect.left >= 0 && rect.top >= 0 &&
+               rect.right > rect.left && rect.bottom > rect.top &&
+               rect.right <= width && rect.bottom <= height;
+      }
+
+      [[nodiscard]] std::uint64_t damage_rect_intersection_area(
+        const RECT &a,
+        const RECT &b
+      ) noexcept {
+        const auto width = static_cast<std::int64_t>(
+          std::min(a.right, b.right)
+        ) - std::max(a.left, b.left);
+        const auto height = static_cast<std::int64_t>(
+          std::min(a.bottom, b.bottom)
+        ) - std::max(a.top, b.top);
+        if (width <= 0 || height <= 0) {
+          return 0u;
+        }
+        return static_cast<std::uint64_t>(width) *
+               static_cast<std::uint64_t>(height);
+      }
+    }  // namespace
+
+    ddup_damage_update_t make_ddup_damage_update(
+      const std::span<const RECT> dirty_rects,
+      const std::span<const DXGI_OUTDUPL_MOVE_RECT> move_rects,
+      const LONG width,
+      const LONG height,
+      const bool metadata_valid
+    ) {
+      ddup_damage_update_t update;
+      if (
+        !metadata_valid || width <= 0 || height <= 0 ||
+        dirty_rects.size() > ddup_damage_frame_rect_budget ||
+        move_rects.size() >
+          (ddup_damage_frame_rect_budget - dirty_rects.size()) / 2u
+      ) {
+        return update;
+      }
+
+      update.rects.reserve(dirty_rects.size() + 2u * move_rects.size());
+      for (const auto &rect : dirty_rects) {
+        if (!valid_damage_rect(rect, width, height)) {
+          update.rects.clear();
+          return update;
+        }
+        update.rects.push_back(rect);
+      }
+
+      for (const auto &move : move_rects) {
+        const auto &destination = move.DestinationRect;
+        if (!valid_damage_rect(destination, width, height)) {
+          update.rects.clear();
+          return update;
+        }
+
+        const auto move_width = static_cast<std::int64_t>(destination.right) -
+                                destination.left;
+        const auto move_height = static_cast<std::int64_t>(destination.bottom) -
+                                 destination.top;
+        const auto source_right = static_cast<std::int64_t>(move.SourcePoint.x) +
+                                  move_width;
+        const auto source_bottom = static_cast<std::int64_t>(move.SourcePoint.y) +
+                                   move_height;
+        if (
+          move.SourcePoint.x < 0 || move.SourcePoint.y < 0 ||
+          source_right > width || source_bottom > height
+        ) {
+          update.rects.clear();
+          return update;
+        }
+
+        const RECT source {
+          move.SourcePoint.x,
+          move.SourcePoint.y,
+          static_cast<LONG>(source_right),
+          static_cast<LONG>(source_bottom),
+        };
+        if (!valid_damage_rect(source, width, height)) {
+          update.rects.clear();
+          return update;
+        }
+
+        update.rects.push_back(source);
+        update.rects.push_back(destination);
+      }
+
+      update.known = true;
+      return update;
+    }
+
+    ddup_damage_snapshot_t ddup_damage_history_t::commit(ddup_damage_update_t update) {
+      std::lock_guard lock {mutex_};
+      if (next_token_ == 0u) {
+        return {};
+      }
+
+      if (update.rects.size() > ddup_damage_frame_rect_budget) {
+        update.known = false;
+        update.rects.clear();
+      }
+
+      entry_t entry;
+      entry.token = next_token_++;
+      entry.known = update.known;
+      entry.rects = std::move(update.rects);
+      retained_rects_ += entry.rects.size();
+      entries_.push_back(std::move(entry));
+
+      while (
+        entries_.size() > ddup_damage_history_frame_budget ||
+        retained_rects_ > ddup_damage_history_rect_budget
+      ) {
+        retained_rects_ -= entries_.front().rects.size();
+        entries_.pop_front();
+      }
+
+      return {
+        std::static_pointer_cast<const ddup_damage_history_t>(shared_from_this()),
+        entries_.back().token,
+      };
+    }
+
+    ddup_damage_intersection_e ddup_damage_history_t::query(
+      const std::uint64_t from_exclusive,
+      const std::uint64_t through_inclusive,
+      const RECT &region
+    ) const {
+      const auto coverage = query_coverage(
+        from_exclusive,
+        through_inclusive,
+        region
+      );
+      if (!coverage.known) {
+        return ddup_damage_intersection_e::unknown;
+      }
+      return coverage.potentially_changed_area == 0u ?
+               ddup_damage_intersection_e::unchanged :
+               ddup_damage_intersection_e::changed;
+    }
+
+    ddup_damage_coverage_t ddup_damage_history_t::query_coverage(
+      const std::uint64_t from_exclusive,
+      const std::uint64_t through_inclusive,
+      const RECT &region
+    ) const {
+      ddup_damage_coverage_t result;
+      if (
+        from_exclusive == 0u || through_inclusive == 0u ||
+        from_exclusive > through_inclusive || region.left < 0 || region.top < 0 ||
+        region.right <= region.left || region.bottom <= region.top
+      ) {
+        return result;
+      }
+      result.region_area =
+        static_cast<std::uint64_t>(
+          static_cast<std::int64_t>(region.right) - region.left
+        ) *
+        static_cast<std::uint64_t>(
+          static_cast<std::int64_t>(region.bottom) - region.top
+        );
+      if (from_exclusive == through_inclusive) {
+        result.known = true;
+        return result;
+      }
+
+      std::lock_guard lock {mutex_};
+      if (
+        entries_.empty() || from_exclusive == UINT64_MAX ||
+        from_exclusive + 1u < entries_.front().token ||
+        through_inclusive > entries_.back().token
+      ) {
+        return result;
+      }
+
+      const auto first_token = from_exclusive + 1u;
+      const auto first_index = static_cast<std::size_t>(
+        first_token - entries_.front().token
+      );
+      const auto count = static_cast<std::size_t>(
+        through_inclusive - first_token + 1u
+      );
+      if (first_index > entries_.size() || count > entries_.size() - first_index) {
+        return result;
+      }
+
+      for (std::size_t offset = 0u; offset < count; ++offset) {
+        const auto &entry = entries_[first_index + offset];
+        if (entry.token != first_token + offset) {
+          return result;
+        }
+        if (!entry.known) {
+          return result;
+        }
+        for (const auto &rect : entry.rects) {
+          const auto overlap = damage_rect_intersection_area(rect, region);
+          if (overlap >= result.region_area - result.potentially_changed_area) {
+            result.potentially_changed_area = result.region_area;
+            break;
+          }
+          result.potentially_changed_area += overlap;
+        }
+      }
+
+      result.known = true;
+      return result;
+    }
+
+    ddup_damage_intersection_e query_ddup_damage_between(
+      const std::optional<ddup_damage_snapshot_t> &from,
+      const std::optional<ddup_damage_snapshot_t> &through,
+      const RECT &region
+    ) {
+      if (
+        !from || !through || !from->history || !through->history ||
+        from->history.get() != through->history.get()
+      ) {
+        return ddup_damage_intersection_e::unknown;
+      }
+      return through->history->query(from->token, through->token, region);
+    }
+
+    ddup_damage_coverage_t query_ddup_damage_coverage_between(
+      const std::optional<ddup_damage_snapshot_t> &from,
+      const std::optional<ddup_damage_snapshot_t> &through,
+      const RECT &region
+    ) {
+      if (
+        !from || !through || !from->history || !through->history ||
+        from->history.get() != through->history.get()
+      ) {
+        return {};
+      }
+      return through->history->query_coverage(
+        from->token,
+        through->token,
+        region
+      );
+    }
+
+    host_sbs_ddup_reuse_proof_e classify_host_sbs_ddup_reuse(
+      const std::optional<std::chrono::steady_clock::time_point> &inferred_content,
+      const std::optional<ddup_damage_snapshot_t> &inferred_damage,
+      const bool video_region,
+      const RECT &input_region,
+      const std::optional<std::chrono::steady_clock::time_point> &current_content,
+      const std::optional<ddup_damage_snapshot_t> &current_damage
+    ) {
+      if (!inferred_content || !current_content) {
+        return host_sbs_ddup_reuse_proof_e::none;
+      }
+      if (!video_region) {
+        return *inferred_content == *current_content ?
+                 host_sbs_ddup_reuse_proof_e::content_clock :
+                 host_sbs_ddup_reuse_proof_e::none;
+      }
+      if (
+        query_ddup_damage_between(inferred_damage, current_damage, input_region) !=
+        ddup_damage_intersection_e::unchanged
+      ) {
+        return host_sbs_ddup_reuse_proof_e::none;
+      }
+      return *inferred_content == *current_content ?
+               host_sbs_ddup_reuse_proof_e::content_clock :
+               host_sbs_ddup_reuse_proof_e::roi_damage;
+    }
+  }  // namespace detail
 
   /**
    * DDAPI-specific initialization goes here.
@@ -164,6 +440,60 @@ namespace platf::dxgi {
         BOOST_LOG(error) << "Couldn't acquire next frame [0x"sv << util::hex(status).to_string_view();
         return capture_e::error;
     }
+  }
+
+  detail::ddup_damage_update_t duplication_t::damage_update(
+    const DXGI_OUTDUPL_FRAME_INFO &frame_info,
+    const DXGI_MODE_ROTATION rotation,
+    const LONG width,
+    const LONG height
+  ) {
+    if (
+      !dup || rotation != DXGI_MODE_ROTATION_IDENTITY ||
+      !detail::ddup_frame_damage_metadata_available(frame_info)
+    ) {
+      return {};
+    }
+
+    // TotalMetadataBufferSize is the API-provided capacity for both lists. Querying either method
+    // with a null buffer is invalid on real drivers; follow the Desktop Duplication sample's
+    // single-buffer order (moves first, then dirty rectangles in the remaining bytes).
+    std::vector<std::byte> metadata(frame_info.TotalMetadataBufferSize);
+    UINT dirty_bytes = 0u;
+    UINT move_bytes = 0u;
+    auto *move_rects = reinterpret_cast<DXGI_OUTDUPL_MOVE_RECT *>(metadata.data());
+    auto status = dup->GetFrameMoveRects(
+      frame_info.TotalMetadataBufferSize,
+      move_rects,
+      &move_bytes
+    );
+    if (
+      status != S_OK || move_bytes > frame_info.TotalMetadataBufferSize ||
+      move_bytes % sizeof(DXGI_OUTDUPL_MOVE_RECT) != 0u
+    ) {
+      return {};
+    }
+    const auto dirty_capacity = frame_info.TotalMetadataBufferSize - move_bytes;
+    auto *dirty_rects = reinterpret_cast<RECT *>(metadata.data() + move_bytes);
+    if (dirty_capacity != 0u) {
+      status = dup->GetFrameDirtyRects(dirty_capacity, dirty_rects, &dirty_bytes);
+      if (
+        status != S_OK || dirty_bytes > dirty_capacity ||
+        dirty_bytes % sizeof(RECT) != 0u
+      ) {
+        return {};
+      }
+    }
+
+    return detail::make_ddup_damage_update(
+      std::span<const RECT> {dirty_rects, dirty_bytes / sizeof(RECT)},
+      std::span<const DXGI_OUTDUPL_MOVE_RECT> {
+        move_rects,
+        move_bytes / sizeof(DXGI_OUTDUPL_MOVE_RECT),
+      },
+      width,
+      height
+    );
   }
 
   capture_e duplication_t::reset(dup_t::pointer dup_p) {
