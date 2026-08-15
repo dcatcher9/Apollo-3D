@@ -438,9 +438,14 @@ namespace models {
   }
 
   /** Optional current-frame motion evidence collected before DAV2 submission. */
-  inline constexpr std::uint32_t adaptive_motion_probe_contract_tag = 0x324D4643u;
-  inline constexpr std::size_t adaptive_motion_probe_word_count = 26u;
+  inline constexpr std::uint32_t adaptive_motion_probe_contract_tag = 0x334D4643u;
+  inline constexpr std::size_t adaptive_motion_probe_word_count = 32u;
   inline constexpr std::uint32_t adaptive_motion_probe_max_exact_numeric_counter = 16777215u;
+  inline constexpr std::uint32_t adaptive_motion_ocr_input_value_count =
+    depth_coordinate_v2::subtitle_ocr_input_n *
+    depth_coordinate_v2::subtitle_ocr_input_c *
+    depth_coordinate_v2::subtitle_ocr_input_width *
+    depth_coordinate_v2::subtitle_ocr_input_height;
 
   enum class adaptive_motion_probe_status_e : std::uint8_t {
     not_requested,
@@ -477,6 +482,9 @@ namespace models {
     // Display-side DDup/OCR/route/cadence checks may arm the estimator's independent, fail-closed
     // selector. The decoded probe remains insufficient authority on its own.
     bool authorize_near_identical_observation_hold = false;
+    // This caller-owned proof remains sufficient if optional exact OCR-input comparison is
+    // unavailable. A dirty crop must instead authenticate the estimator-owned exact input below.
+    bool ocr_damage_unchanged = false;
     std::uint64_t baseline_frame_id = 0u;
     std::chrono::steady_clock::time_point deadline {};
     std::uint32_t max_queries = 1u;
@@ -508,6 +516,20 @@ namespace models {
     std::uint32_t bottom_band_rgb_delta_1_over_1024_texels = 0u;
     float bottom_band_maximum_rgb_delta = 0.0f;
     std::uint32_t appearance_exact_changed_texels = 0u;
+    bool ocr_input_baseline_valid = false;
+    bool ocr_input_comparison_valid = false;
+    std::uint64_t ocr_input_baseline_frame_id = 0u;
+    std::uint32_t ocr_input_compared_values = 0u;
+    std::uint32_t ocr_input_exact_mismatch_values = 0u;
+    std::uint32_t ocr_input_nonfinite_values = 0u;
+
+    [[nodiscard]] constexpr bool exact_ocr_input_matches_baseline() const noexcept {
+      return ocr_input_baseline_valid && ocr_input_comparison_valid &&
+             ocr_input_baseline_frame_id == baseline_frame_id &&
+             ocr_input_compared_values == adaptive_motion_ocr_input_value_count &&
+             ocr_input_exact_mismatch_values == 0u &&
+             ocr_input_nonfinite_values == 0u;
+    }
   };
 
   struct adaptive_motion_probe_result {
@@ -565,22 +587,32 @@ namespace models {
   /** Select the bounded active no-observation path after all display-owned gates are armed.
    *
    * DAV2 NCHW and exclusion must be bit-identical. Appearance ordinal bit noise below 1/1024 is
-   * tolerated, but any thresholded appearance change vetoes. The exact-appearance CFM2 channel
-   * remains independent shadow telemetry.
+   * tolerated, but any thresholded appearance change vetoes. A retained OCR redispatch may hold
+   * only with caller-owned clean-crop proof; an ordinary frame must also have a healthy current
+   * OCR submission path, and an OCR-dirty frame additionally needs exact OCR-input equality.
    */
   [[nodiscard]] constexpr adaptive_motion_hold_decision_e
   select_adaptive_motion_hold(
     const bool authorized_by_caller,
+    const bool ocr_damage_unchanged,
+    const bool current_ocr_submission_ready,
     const bool input_domain_matches,
     const bool completed_observation_consumed,
     const bool snapshot_debug_inputs,
     const depth_optional_work_mode_e optional_work,
     const adaptive_motion_probe_result &probe
   ) noexcept {
+    const bool retained_ocr_redispatch_is_safe =
+      ocr_damage_unchanged &&
+      optional_work == depth_optional_work_mode_e::redispatch_subtitle;
+    const bool ordinary_ocr_path_is_safe =
+      optional_work == depth_optional_work_mode_e::ordinary &&
+      current_ocr_submission_ready &&
+      (ocr_damage_unchanged || probe.sample.exact_ocr_input_matches_baseline());
     if (
       !authorized_by_caller || !input_domain_matches ||
       completed_observation_consumed || snapshot_debug_inputs ||
-      optional_work == depth_optional_work_mode_e::suppress_subtitle ||
+      (!retained_ocr_redispatch_is_safe && !ordinary_ocr_path_is_safe) ||
       probe.status != adaptive_motion_probe_status_e::ready ||
       probe.sample.current_frame_id == 0u ||
       probe.sample.baseline_frame_id == 0u ||
@@ -599,14 +631,23 @@ namespace models {
     return adaptive_motion_hold_decision_e::hold;
   }
 
+  enum class adaptive_motion_ocr_hold_proof_e : std::uint8_t {
+    none,
+    ddup_crop_unchanged,
+    exact_ocr_input,
+  };
+
   struct adaptive_motion_observation_hold_result {
     bool held = false;
     std::uint64_t current_frame_id = 0u;
     std::uint64_t baseline_frame_id = 0u;
+    adaptive_motion_ocr_hold_proof_e ocr_proof =
+      adaptive_motion_ocr_hold_proof_e::none;
 
     [[nodiscard]] constexpr bool valid() const noexcept {
       return held && current_frame_id != 0u && baseline_frame_id != 0u &&
-             current_frame_id > baseline_frame_id;
+             current_frame_id > baseline_frame_id &&
+             ocr_proof != adaptive_motion_ocr_hold_proof_e::none;
     }
   };
 

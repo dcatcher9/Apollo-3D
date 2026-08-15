@@ -113,14 +113,17 @@ The adaptive cadence now has two default-off process modes. `APOLLO_SBS_ADAPTIVE
 runs the truthful full-rate predictor: it proposes one broad-DDup hold after two settled quiet
 CutBridge completions, preserves exact/tiny reuse priority, and retrospectively scores the exact
 candidate frame as quiet, vetoed, or unknown. It separately reports OCR-clean depth-plus-OCR
-opportunities and broad frames that would still require current-frame OCR. A candidate also runs one
-bounded current-input probe against its exact authenticated depth lineage. The raw exact-bit verdict
-requires NCHW, appearance ordinal, and exclusion equality and remains diagnostic only.
+opportunities and broad OCR-dirty frames, including whether their exact normalized OCR model input
+matches the authenticated baseline. A candidate also runs one bounded current-input probe against
+its exact authenticated depth lineage. The raw motion verdict requires NCHW, appearance ordinal,
+and exclusion equality and remains diagnostic only.
 
-`APOLLO_SBS_ADAPTIVE_MOTION_GATE=1` activates the conservative OCR-clean branch. In addition to the
+`APOLLO_SBS_ADAPTIVE_MOTION_GATE=1` activates the conservative typed-OCR branch. In addition to the
 same route, ID, cadence, broad-DDup, and no-pending checks, it requires exact NCHW/exclusion equality
 and zero appearance texels at or above the `1/1024` delta tier; sub-threshold ordinal bit noise is
-allowed. One current delivery may render its private color through cached authenticated V2 geometry
+allowed. OCR safety is either an unchanged DDup crop or exact equality of all normalized current and
+baseline OCR input floats with an authoritative baseline OCR8 owner and healthy current bindings.
+One current delivery may render its private color through cached authenticated V2 geometry
 without a DAV2/OCR observation, then the next changed identity must infer. The hold advances no
 depth/cut/camera/OCR/SLR or lineage state, and approximate low-motion/model-equivalent providers may
 not chain. Probe readiness is limited to one immediate query plus at most 0.5 ms of encode-cadence

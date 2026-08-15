@@ -8,6 +8,9 @@ StructuredBuffer<float> PreviousAppearanceOrdinal : register(t3);
 Texture2D<uint> CurrentTensorExclusion : register(t4);
 Texture2D<uint> PreviousTensorExclusion : register(t5);
 StructuredBuffer<float4> CutBridgeState : register(t6);
+StructuredBuffer<float> CurrentOcrInput : register(t7);
+StructuredBuffer<float> PreviousOcrInput : register(t8);
+StructuredBuffer<uint> PreviousOcrRecord : register(t9);
 RWStructuredBuffer<uint> ProbeWords : register(u0);
 
 #include "include/depth_constants.hlsl"
@@ -20,10 +23,16 @@ cbuffer ProbeConstants : register(b1) {
     uint probe_baseline_frame_high;
     uint probe_bottom_top;
     uint probe_bottom_bottom;
+    uint probe_ocr_input_flags;
+    uint probe_ocr_input_value_count;
+    uint probe_ocr_baseline_frame_low;
+    uint probe_ocr_baseline_frame_high;
     uint2 probe_reserved;
 };
 
-#define MOTION_PROBE_CONTRACT_TAG 0x324D4643u
+#define MOTION_PROBE_CONTRACT_TAG 0x334D4643u
+#define MOTION_PROBE_OCR_RECORD_SCHEMA 3u
+#define MOTION_PROBE_OCR_RECORD_TAG 0x3852434Fu
 #define MOTION_PROBE_MIN_SCENE_AGE 8u
 #define MOTION_PROBE_MAX_EXACT_NUMERIC_COUNTER 16777215.0f
 #define MOTION_PROBE_KNOWN_CUT_FLAGS \
@@ -63,6 +72,16 @@ cbuffer ProbeConstants : register(b1) {
 #define PROBE_WORD_BOTTOM_RGB_1_OVER_1024 23u
 #define PROBE_WORD_BOTTOM_MAX_RGB_DELTA_BITS 24u
 #define PROBE_WORD_APPEARANCE_EXACT_CHANGED 25u
+#define PROBE_WORD_OCR_INPUT_FLAGS 26u
+#define PROBE_WORD_OCR_BASELINE_FRAME_LOW 27u
+#define PROBE_WORD_OCR_BASELINE_FRAME_HIGH 28u
+#define PROBE_WORD_OCR_INPUT_COMPARED 29u
+#define PROBE_WORD_OCR_INPUT_EXACT_MISMATCH 30u
+#define PROBE_WORD_OCR_INPUT_NONFINITE 31u
+
+#define OCR_INPUT_BASELINE_CANDIDATE (1u << 0u)
+#define OCR_INPUT_RECORD_AUTHORITATIVE (1u << 1u)
+#define OCR_INPUT_CURRENT_PREPROCESSED (1u << 2u)
 
 #define LOCAL_ADMITTED 0u
 #define LOCAL_EXCLUSION_MISMATCH 1u
@@ -78,7 +97,10 @@ cbuffer ProbeConstants : register(b1) {
 #define LOCAL_BOTTOM_RGB_1_OVER_1024 11u
 #define LOCAL_BOTTOM_MAX_RGB_DELTA_BITS 12u
 #define LOCAL_APPEARANCE_EXACT_CHANGED 13u
-#define LOCAL_WORD_COUNT 14u
+#define LOCAL_OCR_INPUT_COMPARED 14u
+#define LOCAL_OCR_INPUT_EXACT_MISMATCH 15u
+#define LOCAL_OCR_INPUT_NONFINITE 16u
+#define LOCAL_WORD_COUNT 17u
 
 groupshared uint GroupWords[LOCAL_WORD_COUNT];
 
@@ -89,6 +111,10 @@ bool ProbeCanonicalBoolean(float value) {
 bool ProbeFiniteWholeInRange(float value, float maximum) {
     return isfinite(value) && value >= 0.0f && value <= maximum &&
            value == floor(value);
+}
+
+bool ProbeFiniteFloat(float value) {
+    return (asuint(value) & 0x7f800000u) != 0x7f800000u;
 }
 
 float3 CurrentModelColor(uint index, uint plane) {
@@ -180,6 +206,27 @@ void main(
                     asuint(maximum_rgb_delta));
             }
         }
+
+        if ((probe_ocr_input_flags &
+             (OCR_INPUT_BASELINE_CANDIDATE | OCR_INPUT_CURRENT_PREPROCESSED)) ==
+            (OCR_INPUT_BASELINE_CANDIDATE | OCR_INPUT_CURRENT_PREPROCESSED)) {
+            uint field_index = dtid.y * target_w + dtid.x;
+            uint field_area = target_w * target_h;
+            for (uint ocr_index = field_index;
+                 ocr_index < probe_ocr_input_value_count;
+                 ocr_index += field_area) {
+                float current_ocr = CurrentOcrInput[ocr_index];
+                float previous_ocr = PreviousOcrInput[ocr_index];
+                InterlockedAdd(GroupWords[LOCAL_OCR_INPUT_COMPARED], 1u);
+                if (asuint(current_ocr) != asuint(previous_ocr)) {
+                    InterlockedAdd(
+                        GroupWords[LOCAL_OCR_INPUT_EXACT_MISMATCH], 1u);
+                }
+                if (!ProbeFiniteFloat(current_ocr) || !ProbeFiniteFloat(previous_ocr)) {
+                    InterlockedAdd(GroupWords[LOCAL_OCR_INPUT_NONFINITE], 1u);
+                }
+            }
+        }
     }
 
     GroupMemoryBarrierWithGroupSync();
@@ -222,6 +269,15 @@ void main(
         InterlockedAdd(
             ProbeWords[PROBE_WORD_APPEARANCE_EXACT_CHANGED],
             GroupWords[LOCAL_APPEARANCE_EXACT_CHANGED]);
+        InterlockedAdd(
+            ProbeWords[PROBE_WORD_OCR_INPUT_COMPARED],
+            GroupWords[LOCAL_OCR_INPUT_COMPARED]);
+        InterlockedAdd(
+            ProbeWords[PROBE_WORD_OCR_INPUT_EXACT_MISMATCH],
+            GroupWords[LOCAL_OCR_INPUT_EXACT_MISMATCH]);
+        InterlockedAdd(
+            ProbeWords[PROBE_WORD_OCR_INPUT_NONFINITE],
+            GroupWords[LOCAL_OCR_INPUT_NONFINITE]);
 
         if (gid.x == 0u && gid.y == 0u) {
             float scene_age_value =
@@ -290,6 +346,29 @@ void main(
             ProbeWords[PROBE_WORD_CUT_FLAGS] = cut_flags;
             ProbeWords[PROBE_WORD_ANALYSIS_FLAGS] = analysis_flags;
             ProbeWords[PROBE_WORD_HISTORY_STATE] = history_state;
+
+            uint ocr_flags = probe_ocr_input_flags &
+                (OCR_INPUT_BASELINE_CANDIDATE | OCR_INPUT_CURRENT_PREPROCESSED);
+            bool ocr_record_authoritative = false;
+            if ((ocr_flags & OCR_INPUT_BASELINE_CANDIDATE) != 0u) {
+                // Keep optional SRVs completely dormant on the DDup-clean fail-open path.
+                ocr_record_authoritative =
+                    PreviousOcrRecord[0] == MOTION_PROBE_OCR_RECORD_SCHEMA &&
+                    PreviousOcrRecord[1] == MOTION_PROBE_OCR_RECORD_TAG &&
+                    PreviousOcrRecord[2] == 1u &&
+                    PreviousOcrRecord[5] == probe_ocr_baseline_frame_low &&
+                    PreviousOcrRecord[6] == probe_ocr_baseline_frame_high &&
+                    probe_ocr_baseline_frame_low == probe_baseline_frame_low &&
+                    probe_ocr_baseline_frame_high == probe_baseline_frame_high;
+            }
+            if (ocr_record_authoritative) {
+                ocr_flags |= OCR_INPUT_RECORD_AUTHORITATIVE;
+            }
+            ProbeWords[PROBE_WORD_OCR_INPUT_FLAGS] = ocr_flags;
+            ProbeWords[PROBE_WORD_OCR_BASELINE_FRAME_LOW] =
+                probe_ocr_baseline_frame_low;
+            ProbeWords[PROBE_WORD_OCR_BASELINE_FRAME_HIGH] =
+                probe_ocr_baseline_frame_high;
         }
     }
 }

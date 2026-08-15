@@ -824,6 +824,7 @@ namespace platf::dxgi {
           auto adaptive_shadow_decision =
             detail::host_sbs_adaptive_shadow_decision_e::infer;
           std::uint64_t adaptive_probe_baseline_frame_id = 0u;
+          bool adaptive_probe_ocr_damage_unchanged = false;
           detail::host_sbs_model_equivalent_candidate_t
             adaptive_model_equivalent_candidate;
           matched_frame_slot_t current_color_reuse_slot;
@@ -984,6 +985,7 @@ namespace platf::dxgi {
                 adaptive_shadow_decision ==
                 detail::host_sbs_adaptive_shadow_decision_e::hold_candidate
               ) {
+                adaptive_probe_ocr_damage_unchanged = damage->ocr_crop_unchanged;
                 const auto candidate_class =
                   damage->ocr_crop_unchanged ?
                     detail::host_sbs_adaptive_motion_candidate_class_e::depth_plus_ocr :
@@ -1007,10 +1009,8 @@ namespace platf::dxgi {
                     ++adaptive_shadow_ocr_clean_candidates;
                   } else {
                     ++adaptive_shadow_ocr_only_candidates;
-                    ++adaptive_shadow_ocr_band_veto;
                   }
                 } else if (
-                  damage->ocr_crop_unchanged &&
                   latest_v2_lineage.slot.inference_ddup_damage &&
                   current_ddup_damage &&
                   latest_v2_lineage.slot.inference_ddup_damage->history ==
@@ -1019,8 +1019,9 @@ namespace platf::dxgi {
                   current_ddup_damage->token >
                     latest_v2_lineage.slot.inference_ddup_damage->token
                 ) {
-                  // Active mode intentionally has no OCR-dirty branch. The exact baseline ID is
-                  // revalidated after the private copy and again after the estimator returns.
+                  // OCR-dirty candidates remain provisional until the estimator compares the
+                  // exact preprocessed OCR tensors. The baseline ID is revalidated after the
+                  // private copy and again after the estimator returns.
                   adaptive_probe_baseline_frame_id =
                     latest_v2_lineage.slot.frame_id;
                   adaptive_model_equivalent_candidate = {
@@ -1031,11 +1032,9 @@ namespace platf::dxgi {
                       latest_v2_lineage.slot.inference_ddup_damage->token,
                     .current_damage_token = current_ddup_damage->token,
                     .broad_damage = broad_single_rect,
-                    .ocr_safe = damage->ocr_crop_unchanged,
+                    .ocr_damage_unchanged = damage->ocr_crop_unchanged,
                   };
                   ++adaptive_active_candidates;
-                } else if (!damage->ocr_crop_unchanged) {
-                  ++adaptive_active_ocr_vetoes;
                 }
               }
             }
@@ -1313,6 +1312,8 @@ namespace platf::dxgi {
                     .enabled = probe_plan.enabled,
                     .authorize_near_identical_observation_hold =
                       authorize_active_model_hold,
+                    .ocr_damage_unchanged =
+                      adaptive_probe_ocr_damage_unchanged,
                     .baseline_frame_id = adaptive_probe_baseline_frame_id,
                     .deadline = probe_plan.deadline,
                     .max_queries = probe_plan.max_queries,
@@ -1324,6 +1325,7 @@ namespace platf::dxgi {
                   frame_id,
                   adaptive_probe_baseline_frame_id,
                   probe_plan.enabled,
+                  adaptive_probe_ocr_damage_unchanged,
                   est.current_frame_motion_probe
                 );
                 const auto observation_hold = est.adaptive_motion_observation_hold;
@@ -1341,8 +1343,19 @@ namespace platf::dxgi {
                     adaptive_model_equivalent_candidate.current_frame_id,
                     adaptive_model_equivalent_candidate.baseline_frame_id
                   );
+                const bool active_hold_ocr_proof_matches =
+                  observation_hold.ocr_proof ==
+                      models::adaptive_motion_ocr_hold_proof_e::ddup_crop_unchanged ?
+                    adaptive_model_equivalent_candidate.ocr_damage_unchanged :
+                  observation_hold.ocr_proof ==
+                      models::adaptive_motion_ocr_hold_proof_e::exact_ocr_input ?
+                    !adaptive_model_equivalent_candidate.ocr_damage_unchanged &&
+                      est.current_frame_motion_probe.sample
+                        .exact_ocr_input_matches_baseline() :
+                    false;
                 const bool active_hold_revalidated =
                   authorize_active_model_hold && active_hold_identity_matches &&
+                  active_hold_ocr_proof_matches &&
                   !est.completed_frame_valid && !est.inference_enqueued &&
                   !est.subtitle_ocr_inference_enqueued &&
                   !est.subtitle_ocr_redispatch_enqueued &&
@@ -1357,12 +1370,20 @@ namespace platf::dxgi {
                       detail::host_sbs_depth_reuse_kind_e::bounded_model_equivalent,
                       observation_hold.baseline_frame_id,
                       observation_hold.current_frame_id,
-                      adaptive_model_equivalent_candidate.ocr_safe
+                      active_hold_ocr_proof_matches
                     );
                   if (depth_reuse_authorization.valid()) {
                     unchanged_content_submission_suppressed = true;
                     force_fresh_current_color = true;
                     ++adaptive_active_holds;
+                    if (
+                      observation_hold.ocr_proof ==
+                      models::adaptive_motion_ocr_hold_proof_e::ddup_crop_unchanged
+                    ) {
+                      ++adaptive_active_ocr_damage_clean_holds;
+                    } else {
+                      ++adaptive_active_exact_ocr_input_holds;
+                    }
                   }
                 } else if (observation_hold.valid()) {
                   // The estimator already skipped this observation. Fail closed for this one
@@ -1371,6 +1392,14 @@ namespace platf::dxgi {
                 }
                 const bool active_hold_fell_through =
                   authorize_active_model_hold && !observation_hold.valid();
+                if (
+                  active_hold_fell_through &&
+                  !adaptive_model_equivalent_candidate.ocr_damage_unchanged &&
+                  !est.current_frame_motion_probe.sample
+                    .exact_ocr_input_matches_baseline()
+                ) {
+                  ++adaptive_active_ocr_vetoes;
+                }
                 // A hold token is one-call admission authority, never cacheable presentation
                 // metadata. The explicit typed authorization above owns any current render.
                 est.adaptive_motion_observation_hold = {};
@@ -2898,6 +2927,7 @@ namespace platf::dxgi {
       const std::uint64_t frame_id,
       const std::uint64_t expected_baseline_frame_id,
       const bool requested,
+      const bool ocr_damage_unchanged,
       const models::adaptive_motion_probe_result &result
     ) noexcept {
       if (!requested) {
@@ -2918,6 +2948,24 @@ namespace platf::dxgi {
         ++adaptive_shadow_probe_repeated_waits;
       }
 
+      const bool identity_matches =
+        result.status == models::adaptive_motion_probe_status_e::ready &&
+        detail::host_sbs_current_frame_probe_identity_matches(
+          frame_id,
+          expected_baseline_frame_id,
+          result.sample.current_frame_id,
+          result.sample.baseline_frame_id
+        );
+      if (!ocr_damage_unchanged) {
+        if (!identity_matches || !result.sample.ocr_input_comparison_valid) {
+          ++adaptive_shadow_ocr_dirty_exact_unavailable;
+        } else if (result.sample.exact_ocr_input_matches_baseline()) {
+          ++adaptive_shadow_ocr_dirty_exact_equal;
+        } else {
+          ++adaptive_shadow_ocr_dirty_exact_veto;
+        }
+      }
+
       detail::host_sbs_current_frame_probe_class_e probe_class =
         detail::host_sbs_current_frame_probe_class_e::none;
       switch (result.status) {
@@ -2932,12 +2980,7 @@ namespace platf::dxgi {
           ++adaptive_shadow_probe_invalid;
           break;
         case models::adaptive_motion_probe_status_e::ready:
-          if (!detail::host_sbs_current_frame_probe_identity_matches(
-                frame_id,
-                expected_baseline_frame_id,
-                result.sample.current_frame_id,
-                result.sample.baseline_frame_id
-              )) {
+          if (!identity_matches) {
             ++adaptive_shadow_probe_invalid;
             break;
           }
@@ -3051,10 +3094,9 @@ namespace platf::dxgi {
         << " lifetime_unknown_depth_plus_ocr/ocr_only_needed="sv
         << adaptive_shadow_lifetime_unknown.depth_plus_ocr << '/'
         << adaptive_shadow_lifetime_unknown.ocr_only_needed
-        << " spatial_veto_localized/sum_only_broad/ocr_band="sv
+        << " spatial_veto_localized/sum_only_broad="sv
         << adaptive_shadow_localized_veto << '/'
-        << adaptive_shadow_sum_only_broad_veto << '/'
-        << adaptive_shadow_ocr_band_veto
+        << adaptive_shadow_sum_only_broad_veto
         << " pending_decisions="sv << pending.total
         << " pending_depth_plus_ocr/ocr_only_needed="sv
         << pending.by_class.depth_plus_ocr << '/'
@@ -3069,6 +3111,10 @@ namespace platf::dxgi {
         << adaptive_shadow_probe_exact_quiet << '/'
         << adaptive_shadow_probe_exact_motion << '/'
         << adaptive_shadow_probe_exact_invalid
+        << " ocr_dirty_exact_equal/veto/unavailable="sv
+        << adaptive_shadow_ocr_dirty_exact_equal << '/'
+        << adaptive_shadow_ocr_dirty_exact_veto << '/'
+        << adaptive_shadow_ocr_dirty_exact_unavailable
         << " probe_queries/repeated_waits="sv
         << adaptive_shadow_probe_queries << '/'
         << adaptive_shadow_probe_repeated_waits
@@ -3118,7 +3164,6 @@ namespace platf::dxgi {
       adaptive_shadow_actual_unknown = 0u;
       adaptive_shadow_localized_veto = 0u;
       adaptive_shadow_sum_only_broad_veto = 0u;
-      adaptive_shadow_ocr_band_veto = 0u;
       adaptive_shadow_probe_requests = 0u;
       adaptive_shadow_probe_ready = 0u;
       adaptive_shadow_probe_timed_out = 0u;
@@ -3127,6 +3172,9 @@ namespace platf::dxgi {
       adaptive_shadow_probe_exact_quiet = 0u;
       adaptive_shadow_probe_exact_motion = 0u;
       adaptive_shadow_probe_exact_invalid = 0u;
+      adaptive_shadow_ocr_dirty_exact_equal = 0u;
+      adaptive_shadow_ocr_dirty_exact_veto = 0u;
+      adaptive_shadow_ocr_dirty_exact_unavailable = 0u;
       adaptive_shadow_probe_queries = 0u;
       adaptive_shadow_probe_repeated_waits = 0u;
       adaptive_shadow_probe_wait_sum_ms = 0.0;
@@ -3148,6 +3196,9 @@ namespace platf::dxgi {
         << "SBS adaptive-motion active: candidates/holds/fallthrough="sv
         << adaptive_active_candidates << '/' << adaptive_active_holds << '/'
         << adaptive_active_fallthrough_enqueues
+        << " holds_ocr_damage_clean/exact_input="sv
+        << adaptive_active_ocr_damage_clean_holds << '/'
+        << adaptive_active_exact_ocr_input_holds
         << " forced_refresh_enqueues="sv
         << adaptive_active_forced_refresh_enqueues
         << " veto_ocr/postcheck="sv << adaptive_active_ocr_vetoes << '/'
@@ -3160,6 +3211,10 @@ namespace platf::dxgi {
         << adaptive_shadow_probe_exact_quiet << '/'
         << adaptive_shadow_probe_exact_motion << '/'
         << adaptive_shadow_probe_exact_invalid
+        << " ocr_dirty_exact_equal/veto/unavailable="sv
+        << adaptive_shadow_ocr_dirty_exact_equal << '/'
+        << adaptive_shadow_ocr_dirty_exact_veto << '/'
+        << adaptive_shadow_ocr_dirty_exact_unavailable
         << " probe_queries/repeated_waits="sv
         << adaptive_shadow_probe_queries << '/'
         << adaptive_shadow_probe_repeated_waits
@@ -3172,6 +3227,8 @@ namespace platf::dxgi {
       adaptive_active_forced_refresh_enqueues = 0u;
       adaptive_active_ocr_vetoes = 0u;
       adaptive_active_postcheck_vetoes = 0u;
+      adaptive_active_ocr_damage_clean_holds = 0u;
+      adaptive_active_exact_ocr_input_holds = 0u;
       adaptive_shadow_probe_requests = 0u;
       adaptive_shadow_probe_ready = 0u;
       adaptive_shadow_probe_timed_out = 0u;
@@ -3180,6 +3237,9 @@ namespace platf::dxgi {
       adaptive_shadow_probe_exact_quiet = 0u;
       adaptive_shadow_probe_exact_motion = 0u;
       adaptive_shadow_probe_exact_invalid = 0u;
+      adaptive_shadow_ocr_dirty_exact_equal = 0u;
+      adaptive_shadow_ocr_dirty_exact_veto = 0u;
+      adaptive_shadow_ocr_dirty_exact_unavailable = 0u;
       adaptive_shadow_probe_queries = 0u;
       adaptive_shadow_probe_repeated_waits = 0u;
       adaptive_shadow_probe_wait_sum_ms = 0.0;
@@ -5500,9 +5560,9 @@ namespace platf::dxgi {
              "frame still follows ordinary inference and rendering."sv;
       } else if (adaptive_motion_mode == detail::host_sbs_adaptive_motion_mode_e::active) {
         BOOST_LOG(warning)
-          << "Experimental APOLLO_SBS_ADAPTIVE_MOTION_GATE=1 active: one OCR-clean, "sv
-             "model-equivalent observation may reuse authenticated V2 geometry before a "sv
-             "mandatory real inference; this mode is not a production default."sv;
+          << "Experimental APOLLO_SBS_ADAPTIVE_MOTION_GATE=1 active: one model-equivalent "sv
+             "observation with DDup-clean or exact-input OCR proof may reuse authenticated V2 "sv
+             "geometry before a mandatory real inference; this mode is not a production default."sv;
       }
       host_sbs_renderer = models::host_sbs_renderer_e::awaiting_v2;
       diagnostics_enabled = config::sunshine.diagnostics_enabled;
@@ -5565,7 +5625,6 @@ namespace platf::dxgi {
       adaptive_shadow_lifetime_probe_unknown = {};
       adaptive_shadow_localized_veto = 0u;
       adaptive_shadow_sum_only_broad_veto = 0u;
-      adaptive_shadow_ocr_band_veto = 0u;
       adaptive_shadow_probe_requests = 0u;
       adaptive_shadow_probe_ready = 0u;
       adaptive_shadow_probe_timed_out = 0u;
@@ -5574,6 +5633,9 @@ namespace platf::dxgi {
       adaptive_shadow_probe_exact_quiet = 0u;
       adaptive_shadow_probe_exact_motion = 0u;
       adaptive_shadow_probe_exact_invalid = 0u;
+      adaptive_shadow_ocr_dirty_exact_equal = 0u;
+      adaptive_shadow_ocr_dirty_exact_veto = 0u;
+      adaptive_shadow_ocr_dirty_exact_unavailable = 0u;
       adaptive_shadow_probe_queries = 0u;
       adaptive_shadow_probe_repeated_waits = 0u;
       adaptive_shadow_probe_wait_sum_ms = 0.0;
@@ -5584,6 +5646,8 @@ namespace platf::dxgi {
       adaptive_active_forced_refresh_enqueues = 0u;
       adaptive_active_ocr_vetoes = 0u;
       adaptive_active_postcheck_vetoes = 0u;
+      adaptive_active_ocr_damage_clean_holds = 0u;
+      adaptive_active_exact_ocr_input_holds = 0u;
       matched_frame_slots = {};
       depth_analysis_generation_tracker = {};
       foreground_window_tracker.reset();
@@ -6325,7 +6389,6 @@ namespace platf::dxgi {
       adaptive_shadow_lifetime_probe_unknown;
     unsigned adaptive_shadow_localized_veto = 0u;
     unsigned adaptive_shadow_sum_only_broad_veto = 0u;
-    unsigned adaptive_shadow_ocr_band_veto = 0u;
     std::uint64_t adaptive_shadow_probe_requests = 0u;
     std::uint64_t adaptive_shadow_probe_ready = 0u;
     std::uint64_t adaptive_shadow_probe_timed_out = 0u;
@@ -6334,6 +6397,9 @@ namespace platf::dxgi {
     std::uint64_t adaptive_shadow_probe_exact_quiet = 0u;
     std::uint64_t adaptive_shadow_probe_exact_motion = 0u;
     std::uint64_t adaptive_shadow_probe_exact_invalid = 0u;
+    std::uint64_t adaptive_shadow_ocr_dirty_exact_equal = 0u;
+    std::uint64_t adaptive_shadow_ocr_dirty_exact_veto = 0u;
+    std::uint64_t adaptive_shadow_ocr_dirty_exact_unavailable = 0u;
     std::uint64_t adaptive_shadow_probe_queries = 0u;
     std::uint64_t adaptive_shadow_probe_repeated_waits = 0u;
     double adaptive_shadow_probe_wait_sum_ms = 0.0;
@@ -6344,6 +6410,8 @@ namespace platf::dxgi {
     std::uint64_t adaptive_active_forced_refresh_enqueues = 0u;
     std::uint64_t adaptive_active_ocr_vetoes = 0u;
     std::uint64_t adaptive_active_postcheck_vetoes = 0u;
+    std::uint64_t adaptive_active_ocr_damage_clean_holds = 0u;
+    std::uint64_t adaptive_active_exact_ocr_input_holds = 0u;
     vs_t sbs_reprojection_vs;
     ps_t sbs_flat_identity_ps;
     ps_t sbs_reprojection_v2_live_ps;

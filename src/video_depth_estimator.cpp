@@ -125,7 +125,9 @@ static bool unregister_cuda_graphics_resource(
   }
   const bool unregistered = cuda.cuGraphicsUnregisterResource &&
                             cuda.cuGraphicsUnregisterResource(resource) == CUDA_SUCCESS;
-  resource = nullptr;
+  if (unregistered) {
+    resource = nullptr;
+  }
   return unregistered;
 }
 
@@ -756,6 +758,12 @@ namespace models {
       bottom_rgb_1_over_1024,
       bottom_max_rgb_delta_bits,
       appearance_exact_changed,
+      ocr_input_flags,
+      ocr_input_baseline_frame_low,
+      ocr_input_baseline_frame_high,
+      ocr_input_compared,
+      ocr_input_exact_mismatch,
+      ocr_input_nonfinite,
     };
     if (
       words.size() != adaptive_motion_probe_word_count ||
@@ -772,6 +780,10 @@ namespace models {
     };
     const auto current_id = join_id(current_frame_low, current_frame_high);
     const auto baseline_id = join_id(baseline_frame_low, baseline_frame_high);
+    const auto ocr_baseline_id = join_id(
+      ocr_input_baseline_frame_low,
+      ocr_input_baseline_frame_high
+    );
     if (
       current_id != expected_current_frame_id || baseline_id != expected_baseline_frame_id ||
       current_id <= baseline_id
@@ -804,6 +816,34 @@ namespace models {
       words[bottom_exact_changed] <= words[bottom_admitted] &&
       words[bottom_rgb_1_over_1024] <= words[rgb_1_over_1024] &&
       words[bottom_rgb_1_over_1024] <= words[bottom_admitted];
+    constexpr std::uint32_t ocr_baseline_candidate = 1u << 0u;
+    constexpr std::uint32_t ocr_record_authoritative = 1u << 1u;
+    constexpr std::uint32_t ocr_current_preprocessed = 1u << 2u;
+    constexpr std::uint32_t known_ocr_input_flags =
+      ocr_baseline_candidate | ocr_record_authoritative |
+      ocr_current_preprocessed;
+    const bool has_ocr_baseline_candidate =
+      (words[ocr_input_flags] & ocr_baseline_candidate) != 0u;
+    const bool has_authoritative_ocr_record =
+      (words[ocr_input_flags] & ocr_record_authoritative) != 0u;
+    const bool has_current_ocr_input =
+      (words[ocr_input_flags] & ocr_current_preprocessed) != 0u;
+    const bool compared_ocr_inputs =
+      has_ocr_baseline_candidate && has_current_ocr_input;
+    const bool ocr_counters_valid =
+      (words[ocr_input_flags] & ~known_ocr_input_flags) == 0u &&
+      (!has_authoritative_ocr_record || has_ocr_baseline_candidate) &&
+      (ocr_baseline_id == 0u || ocr_baseline_id <= baseline_id) &&
+      (!has_ocr_baseline_candidate || ocr_baseline_id == baseline_id) &&
+      words[ocr_input_exact_mismatch] <= words[ocr_input_compared] &&
+      words[ocr_input_nonfinite] <= words[ocr_input_compared] &&
+      (
+        compared_ocr_inputs ?
+          words[ocr_input_compared] == adaptive_motion_ocr_input_value_count :
+          words[ocr_input_compared] == 0u &&
+            words[ocr_input_exact_mismatch] == 0u &&
+            words[ocr_input_nonfinite] == 0u
+      );
     const bool state_valid =
       (words[prior_state_flags] & ~adaptive_motion_probe_settled_flags) == 0u &&
       words[hard_cut_count] <= sbs_adaptive_state::counter_max &&
@@ -818,7 +858,7 @@ namespace models {
        (maximum_appearance < adaptive_motion_probe_appearance_hold_threshold)) &&
       std::isfinite(bottom_maximum_rgb) && bottom_maximum_rgb >= 0.0f &&
       bottom_maximum_rgb <= maximum_rgb;
-    if (!counters_valid || !state_valid || !maxima_valid) {
+    if (!counters_valid || !ocr_counters_valid || !state_valid || !maxima_valid) {
       return false;
     }
 
@@ -848,6 +888,15 @@ namespace models {
       .bottom_band_rgb_delta_1_over_1024_texels = words[bottom_rgb_1_over_1024],
       .bottom_band_maximum_rgb_delta = bottom_maximum_rgb,
       .appearance_exact_changed_texels = words[appearance_exact_changed],
+      .ocr_input_baseline_valid =
+        has_ocr_baseline_candidate && has_authoritative_ocr_record,
+      .ocr_input_comparison_valid =
+        has_ocr_baseline_candidate && has_authoritative_ocr_record &&
+        has_current_ocr_input,
+      .ocr_input_baseline_frame_id = ocr_baseline_id,
+      .ocr_input_compared_values = words[ocr_input_compared],
+      .ocr_input_exact_mismatch_values = words[ocr_input_exact_mismatch],
+      .ocr_input_nonfinite_values = words[ocr_input_nonfinite],
     };
     return true;
   }
@@ -2714,6 +2763,9 @@ namespace models {
     CUgraphicsResource cuda_ocr_out_res = nullptr;
     Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_input_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> ocr_input_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_input_srv;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_previous_input_buf;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_previous_input_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_output_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_output_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_cell_stats_buf;
@@ -2732,6 +2784,8 @@ namespace models {
     bool adaptive_motion_probe_copy_scheduled = false;
     bool adaptive_motion_probe_event_recorded = false;
     bool adaptive_motion_probe_error_logged = false;
+    bool adaptive_ocr_input_compare_available = false;
+    bool adaptive_ocr_input_compare_error_logged = false;
     bool pending_depth_inference_event_recorded = false;
     bool pending_ocr_inference_event_recorded = false;
     bool inference_event_poll_available = false;
@@ -2779,6 +2833,71 @@ namespace models {
         *this = {};
       }
     } ocr_record_lineage;
+    struct ocr_input_baseline_t {
+      depth_input_region_t input_region {};
+      input_color_space color_space = input_color_space::srgb;
+      std::uint64_t frame_id = 0u;
+      int field_width = 0;
+      int field_height = 0;
+      bool valid = false;
+
+      [[nodiscard]] bool matches(
+        const std::uint64_t candidate_frame_id,
+        const depth_input_region_t &candidate_region,
+        const input_color_space candidate_color_space,
+        const int candidate_field_width,
+        const int candidate_field_height
+      ) const noexcept {
+        return valid && frame_id == candidate_frame_id &&
+               input_region == candidate_region &&
+               color_space == candidate_color_space &&
+               field_width == candidate_field_width &&
+               field_height == candidate_field_height;
+      }
+
+      void record(
+        const std::uint64_t candidate_frame_id,
+        const depth_input_region_t &candidate_region,
+        const input_color_space candidate_color_space,
+        const int candidate_field_width,
+        const int candidate_field_height
+      ) noexcept {
+        input_region = candidate_region;
+        color_space = candidate_color_space;
+        frame_id = candidate_frame_id;
+        field_width = candidate_field_width;
+        field_height = candidate_field_height;
+        valid = candidate_frame_id != 0u;
+      }
+
+      [[nodiscard]] bool roll_forward(
+        const std::uint64_t prior_frame_id,
+        const std::uint64_t current_frame_id,
+        const depth_input_region_t &candidate_region,
+        const input_color_space candidate_color_space,
+        const int candidate_field_width,
+        const int candidate_field_height
+      ) noexcept {
+        if (
+          current_frame_id <= prior_frame_id ||
+          !matches(
+            prior_frame_id,
+            candidate_region,
+            candidate_color_space,
+            candidate_field_width,
+            candidate_field_height
+          )
+        ) {
+          return false;
+        }
+        frame_id = current_frame_id;
+        return true;
+      }
+
+      void reset() noexcept {
+        *this = {};
+      }
+    } ocr_input_baseline;
     bool subtitle_conditioned_current = false;
     bool ocr_shape_bound = false;
     bool ocr_output_size_validated = false;
@@ -2846,6 +2965,7 @@ namespace models {
     void mark_terminal_failure(const bool poison_execution_context = false) {
       clear_pending_inference_event_state();
       ocr_stream_reuse_pending = false;
+      ocr_input_baseline.reset();
       execution_context_poisoned =
         execution_context_poisoned || poison_execution_context;
       terminal_failure = true;
@@ -2854,6 +2974,7 @@ namespace models {
     void mark_ocr_context_failure(
       const detail::warmed_execution_context_failure_e failure
     ) noexcept {
+      ocr_input_baseline.reset();
       ocr_context_health.observe(failure);
     }
 
@@ -3190,7 +3311,7 @@ namespace models {
 
       D3D11_BUFFER_DESC constants_desc {};
       constants_desc.Usage = D3D11_USAGE_DEFAULT;
-      constants_desc.ByteWidth = 8u * sizeof(std::uint32_t);
+      constants_desc.ByteWidth = 12u * sizeof(std::uint32_t);
       constants_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
       D3D11_BUFFER_DESC output_desc {};
       output_desc.Usage = D3D11_USAGE_DEFAULT;
@@ -3275,7 +3396,8 @@ namespace models {
       const std::uint64_t current_frame_id,
       const D3D11_TEXTURE2D_DESC &input_desc,
       const depth_input_region_t &input_region,
-      const input_color_space color_space
+      const input_color_space color_space,
+      const bool current_ocr_input_preprocessed
     ) {
       adaptive_motion_probe_copy_scheduled = false;
       adaptive_motion_probe_event_recorded = false;
@@ -3311,13 +3433,35 @@ namespace models {
           content.height()
         )
       );
-      const std::array<std::uint32_t, 8> constants {
+      constexpr std::uint32_t ocr_baseline_candidate = 1u << 0u;
+      constexpr std::uint32_t ocr_current_preprocessed = 1u << 2u;
+      const bool ocr_baseline_matches =
+        adaptive_ocr_input_compare_available && ocr_input_srv &&
+        ocr_previous_input_srv && ocr_box_record_srv &&
+        ocr_input_baseline.matches(
+          request.baseline_frame_id,
+          input_region,
+          color_space,
+          target_w,
+          target_h
+        );
+      const bool current_ocr_input_available =
+        current_ocr_input_preprocessed && adaptive_ocr_input_compare_available &&
+        ocr_input_srv;
+      const std::uint32_t ocr_flags =
+        (ocr_baseline_matches ? ocr_baseline_candidate : 0u) |
+        (current_ocr_input_available ? ocr_current_preprocessed : 0u);
+      const std::array<std::uint32_t, 12> constants {
         static_cast<std::uint32_t>(current_frame_id),
         static_cast<std::uint32_t>(current_frame_id >> 32u),
         static_cast<std::uint32_t>(request.baseline_frame_id),
         static_cast<std::uint32_t>(request.baseline_frame_id >> 32u),
         bottom_top,
         content.bottom,
+        ocr_flags,
+        adaptive_motion_ocr_input_value_count,
+        static_cast<std::uint32_t>(ocr_input_baseline.frame_id),
+        static_cast<std::uint32_t>(ocr_input_baseline.frame_id >> 32u),
         0u,
         0u,
       };
@@ -3330,7 +3474,7 @@ namespace models {
         cbuffer.Get(),
         adaptive_motion_probe_cbuffer.Get(),
       };
-      ID3D11ShaderResourceView *inputs[7] = {
+      ID3D11ShaderResourceView *inputs[10] = {
         tensor_in_srv.Get(),
         tensor_previous_input_srv.Get(),
         appearance_ordinal_srv.Get(),
@@ -3338,19 +3482,22 @@ namespace models {
         tensor_exclusion_srv.Get(),
         tensor_previous_exclusion_srv.Get(),
         cut_state_srv.Get(),
+        ocr_input_srv.Get(),
+        ocr_previous_input_srv.Get(),
+        ocr_box_record_srv.Get(),
       };
       context->CSSetShader(adaptive_motion_probe_cs.Get(), nullptr, 0u);
       context->CSSetConstantBuffers(0u, 2u, constant_buffers);
-      context->CSSetShaderResources(0u, 7u, inputs);
+      context->CSSetShaderResources(0u, 10u, inputs);
       context->CSSetUnorderedAccessViews(
         0u, 1u, adaptive_motion_probe_output_uav.GetAddressOf(), nullptr
       );
       context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1u);
       ID3D11Buffer *null_constants[2] = {};
-      ID3D11ShaderResourceView *null_inputs[7] = {};
+      ID3D11ShaderResourceView *null_inputs[10] = {};
       ID3D11UnorderedAccessView *null_output = nullptr;
       context->CSSetUnorderedAccessViews(0u, 1u, &null_output, nullptr);
-      context->CSSetShaderResources(0u, 7u, null_inputs);
+      context->CSSetShaderResources(0u, 10u, null_inputs);
       context->CSSetConstantBuffers(0u, 2u, null_constants);
       context->CopyResource(
         adaptive_motion_probe_staging_buf.Get(),
@@ -4411,6 +4558,7 @@ namespace models {
       subtitle_locator_cbuffer.Reset();
       pending_source_srv.Reset();
       ocr_record_lineage.reset();
+      ocr_input_baseline.reset();
     }
     void fail_parallax_v2_producer(std::string_view reason) {
       if (!parallax_v2_producer_failed) {
@@ -4551,6 +4699,7 @@ namespace models {
       // Every clear below invalidates the prior OCR8 bytes as a redispatch source. Re-establish
       // lineage only after an ordinary resolve or a verified header restamp is submitted.
       ocr_record_lineage.reset();
+      ocr_input_baseline.reset();
       context->ClearUnorderedAccessViewUint(ocr_box_record_uav.Get(), zero);
       context->ClearUnorderedAccessViewUint(subtitle_locator_state_uav.Get(), zero);
       context->ClearUnorderedAccessViewUint(subtitle_condition_params_uav.Get(), zero);
@@ -4593,13 +4742,33 @@ namespace models {
       };
 
       const std::uint32_t ocr_pixels = ocr_engine_width * ocr_engine_height;
-      bool ocr_resources_ok = create_float_buffer(
-                                3u * ocr_pixels,
-                                D3D11_BIND_UNORDERED_ACCESS,
-                                ocr_input_buf,
-                                nullptr,
-                                &ocr_input_uav
-                              ) &&
+      bool ocr_input_supports_adaptive_compare = false;
+      bool ocr_input_resources_ok = false;
+      if (adaptive_motion_probe_enabled) {
+        ocr_input_resources_ok = create_float_buffer(
+          3u * ocr_pixels,
+          D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE,
+          ocr_input_buf,
+          nullptr,
+          &ocr_input_uav
+        );
+        ocr_input_supports_adaptive_compare = ocr_input_resources_ok;
+      }
+      if (!ocr_input_resources_ok) {
+        // SRV capability belongs only to the default-off adaptive comparison. If that augmented
+        // allocation fails, retry the production detector's original UAV-only input before
+        // declaring OCR unavailable.
+        ocr_input_buf.Reset();
+        ocr_input_uav.Reset();
+        ocr_input_resources_ok = create_float_buffer(
+          3u * ocr_pixels,
+          D3D11_BIND_UNORDERED_ACCESS,
+          ocr_input_buf,
+          nullptr,
+          &ocr_input_uav
+        );
+      }
+      bool ocr_resources_ok = ocr_input_resources_ok &&
                               create_float_buffer(
                                 ocr_pixels,
                                 D3D11_BIND_SHADER_RESOURCE,
@@ -4616,17 +4785,56 @@ namespace models {
                               create_constant_buffer(32u, ocr_preprocess_cbuffer) &&
                               create_constant_buffer(64u, ocr_resolve_cbuffer);
       auto &cuda = cuda_driver_api::get();
+      bool ocr_interop_teardown_failed = false;
+      const auto unregister_ocr_interop = [&]() {
+        // Do not short-circuit: every successfully registered member must be released before any
+        // backing D3D resource can be replaced.
+        const bool input_unregistered =
+          unregister_cuda_graphics_resource(cuda, cuda_ocr_in_res);
+        const bool output_unregistered =
+          unregister_cuda_graphics_resource(cuda, cuda_ocr_out_res);
+        return input_unregistered && output_unregistered;
+      };
       if (ocr_resources_ok && cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) == CUDA_SUCCESS) {
-        const auto input_status = cuda.cuGraphicsD3D11RegisterResource(
-          &cuda_ocr_in_res, ocr_input_buf.Get(),
-          0
-        );
-        const auto output_status = cuda.cuGraphicsD3D11RegisterResource(
-          &cuda_ocr_out_res, ocr_output_buf.Get(),
-          0
-        );
-        ocr_resources_ok = input_status == CUDA_SUCCESS && output_status == CUDA_SUCCESS &&
-                           cuda_ocr_in_res && cuda_ocr_out_res;
+        CUresult input_status = static_cast<CUresult>(-1);
+        CUresult output_status = static_cast<CUresult>(-1);
+        const auto register_ocr_interop = [&]() {
+          input_status = cuda.cuGraphicsD3D11RegisterResource(
+            &cuda_ocr_in_res, ocr_input_buf.Get(), 0
+          );
+          output_status = cuda.cuGraphicsD3D11RegisterResource(
+            &cuda_ocr_out_res, ocr_output_buf.Get(), 0
+          );
+          return input_status == CUDA_SUCCESS && output_status == CUDA_SUCCESS &&
+                 cuda_ocr_in_res && cuda_ocr_out_res;
+        };
+        ocr_resources_ok = register_ocr_interop();
+        if (!ocr_resources_ok && ocr_input_supports_adaptive_compare) {
+          // CUDA interop is also part of the production input contract. Retry it with the exact
+          // original UAV-only input before allowing optional SRV capability to disable OCR.
+          ocr_input_supports_adaptive_compare = false;
+          if (!unregister_ocr_interop()) {
+            // A failed unregister leaves CUDA ownership unresolved. Retain the backing resources,
+            // forbid the retry, and quarantine this OCR context at teardown.
+            ocr_interop_teardown_failed = true;
+            mark_ocr_context_failure(
+              detail::warmed_execution_context_failure_e::unsafe_teardown
+            );
+          } else {
+            ocr_input_buf.Reset();
+            ocr_input_uav.Reset();
+            ocr_resources_ok = create_float_buffer(
+              3u * ocr_pixels,
+              D3D11_BIND_UNORDERED_ACCESS,
+              ocr_input_buf,
+              nullptr,
+              &ocr_input_uav
+            );
+            if (ocr_resources_ok) {
+              ocr_resources_ok = register_ocr_interop();
+            }
+          }
+        }
         if (!ocr_resources_ok) {
           BOOST_LOG(warning)
             << "PP-OCRv6 tiny D3D11/CUDA registration failed (" << input_status << ", "
@@ -4636,22 +4844,62 @@ namespace models {
         ocr_resources_ok = false;
       }
       if (!ocr_resources_ok) {
-        if (cuda_ocr_in_res && cuda.cuGraphicsUnregisterResource) {
-          cuda.cuGraphicsUnregisterResource(cuda_ocr_in_res);
+        const bool interop_released = unregister_ocr_interop();
+        if (!interop_released && !ocr_interop_teardown_failed) {
+          ocr_interop_teardown_failed = true;
+          mark_ocr_context_failure(
+            detail::warmed_execution_context_failure_e::unsafe_teardown
+          );
         }
-        if (cuda_ocr_out_res && cuda.cuGraphicsUnregisterResource) {
-          cuda.cuGraphicsUnregisterResource(cuda_ocr_out_res);
+        if (interop_released) {
+          ocr_input_buf.Reset();
+          ocr_input_uav.Reset();
+          ocr_output_buf.Reset();
+          ocr_output_srv.Reset();
+        } else {
+          BOOST_LOG(error)
+            << "PP-OCRv6 tiny interop cleanup did not release every CUDA resource; retaining "
+               "the backing D3D resources and quarantining the OCR context.";
         }
-        cuda_ocr_in_res = nullptr;
-        cuda_ocr_out_res = nullptr;
-        ocr_input_buf.Reset();
-        ocr_input_uav.Reset();
-        ocr_output_buf.Reset();
-        ocr_output_srv.Reset();
+        ocr_input_srv.Reset();
+        ocr_previous_input_buf.Reset();
+        ocr_previous_input_srv.Reset();
+        ocr_input_baseline.reset();
         ocr_cell_stats_buf.Reset();
         ocr_cell_stats_uav.Reset();
         ocr_cell_stats_srv.Reset();
         ocr_available = false;
+        adaptive_ocr_input_compare_available = false;
+      } else if (adaptive_motion_probe_enabled) {
+        // Exact OCR-input comparison is an optional extension of CFM3, not a detector resource.
+        // A view/allocation failure must leave ordinary OCR and the DDup OCR-clean hold intact.
+        const bool compare_resources_ok =
+          ocr_input_supports_adaptive_compare &&
+          SUCCEEDED(device->CreateShaderResourceView(
+            ocr_input_buf.Get(),
+            nullptr,
+            ocr_input_srv.ReleaseAndGetAddressOf()
+          )) &&
+          create_float_buffer(
+            3u * ocr_pixels,
+            D3D11_BIND_SHADER_RESOURCE,
+            ocr_previous_input_buf,
+            &ocr_previous_input_srv,
+            nullptr
+          );
+        adaptive_ocr_input_compare_available = compare_resources_ok;
+        if (!compare_resources_ok) {
+          ocr_input_srv.Reset();
+          ocr_previous_input_buf.Reset();
+          ocr_previous_input_srv.Reset();
+          ocr_input_baseline.reset();
+          if (!adaptive_ocr_input_compare_error_logged) {
+            BOOST_LOG(warning)
+              << "Host SBS exact OCR-input comparison resources are unavailable; ordinary OCR "
+                 "and DDup OCR-clean adaptive holds remain active.";
+            adaptive_ocr_input_compare_error_logged = true;
+          }
+        }
       }
       return true;
     }
@@ -5886,6 +6134,7 @@ namespace models {
         }
       }
       has_last_postprocessed_frame_id = false;
+      ocr_input_baseline.reset();
     }
 
     bool prepare_pending_input_domain() {
@@ -5907,6 +6156,8 @@ namespace models {
       const bool input_domain_reset,
       const bool preserve_subtitle_base
     ) {
+      const std::uint64_t prior_postprocessed_frame_id =
+        has_last_postprocessed_frame_id ? last_postprocessed_frame_id : 0u;
       // Ordinary OCR and depth may execute concurrently on isolated CUDA streams. Their strict
       // completion join makes both outputs safe to consume before any next-frame interop mapping
       // can reuse the fixed buffers. A damage-proven redispatch has no OCR CUDA work and updates
@@ -6175,6 +6426,44 @@ namespace models {
       }
       if (parallax_v2_producer_active) {
         mark_d3d_parallax_end(perf_slot);
+      }
+
+      // This private copy is not OCR authority by itself. The later CFM3 probe also validates the
+      // retained OCR8 header and exact frame owner, so detector overflow/nonfinite abstention
+      // cannot authenticate these bytes. Establish the CPU-side owner only after this exact OCR
+      // member and V2 postprocess both succeeded. A proven OCR8 redispatch advances identity
+      // without copying because its crop equality already proves the retained input bits.
+      if (
+        !base_ready || subtitle_work_suppressed || !ocr_record_submitted ||
+        !adaptive_motion_probe_available ||
+        !adaptive_ocr_input_compare_available || !ocr_input_buf ||
+        !ocr_previous_input_buf
+      ) {
+        ocr_input_baseline.reset();
+      } else if (pending_optional_work == depth_optional_work_mode_e::ordinary) {
+        context->CopyResource(ocr_previous_input_buf.Get(), ocr_input_buf.Get());
+        ocr_input_baseline.record(
+          pending_frame_id,
+          pending_input_region,
+          pending_color_space,
+          target_w,
+          target_h
+        );
+      } else if (
+        pending_optional_work == depth_optional_work_mode_e::redispatch_subtitle
+      ) {
+        if (!ocr_input_baseline.roll_forward(
+              prior_postprocessed_frame_id,
+              pending_frame_id,
+              pending_input_region,
+              pending_color_space,
+              target_w,
+              target_h
+            )) {
+          ocr_input_baseline.reset();
+        }
+      } else {
+        ocr_input_baseline.reset();
       }
     }
 
@@ -6754,17 +7043,6 @@ namespace models {
       context->CSSetUnorderedAccessViews(0, 3, null_uavs, nullptr);
       context->CSSetShaderResources(0, 1, &null_srv);
 
-      // Compare the exact just-preprocessed frame with the settled reliable-history endpoint.
-      // Shadow mode records diagnostics only. A separately armed active candidate may suppress
-      // this one observation after the estimator authenticates the result below.
-      (void) dispatch_adaptive_motion_probe(
-        motion_probe_request,
-        frame_id,
-        input_desc,
-        input_region,
-        color_space
-      );
-
       // The detector sees only the bottom 6:1 source crop. Resize and ImageNet/BGR normalization
       // happen directly into the registered FP32 TensorRT input; no CPU pixels or readback exist.
       const auto current_ocr_roi = fit_subtitle_analysis_geometry(
@@ -6816,6 +7094,19 @@ namespace models {
       } else {
         ocr_frame_eligible = false;
       }
+
+      // Compare both the just-preprocessed DAV2 input and, when it exists, the exact current
+      // 960x160x3 OCR input against their estimator-owned authenticated baselines. This remains
+      // before the D3D-to-CUDA ordering map/event, so one optional readback owns one exact frame.
+      // A DDup OCR-clean candidate does not need OCR preprocessing or comparison resources.
+      (void) dispatch_adaptive_motion_probe(
+        motion_probe_request,
+        frame_id,
+        input_desc,
+        input_region,
+        color_space,
+        ocr_frame_eligible
+      );
       end_d3d_perf(d3d_timer);
       // No explicit Flush: cuGraphicsMapResources() below already guarantees the
       // preceding D3D11 compute work completes before the CUDA stream reads the buffer.
@@ -7052,10 +7343,25 @@ namespace models {
           frame_id
         );
 
+        const bool adaptive_ocr_authority_still_owned =
+          motion_probe_request.ocr_damage_unchanged ||
+          (
+            ocr_available && adaptive_ocr_input_compare_available &&
+            ocr_input_baseline.matches(
+              motion_probe_request.baseline_frame_id,
+              input_region,
+              color_space,
+              target_w,
+              target_h
+            )
+          );
         const bool adaptive_motion_observation_held =
           bindings_ok && !terminal_failure &&
           select_adaptive_motion_hold(
-            motion_probe_request.authorize_near_identical_observation_hold,
+            motion_probe_request.authorize_near_identical_observation_hold &&
+              adaptive_ocr_authority_still_owned,
+            motion_probe_request.ocr_damage_unchanged,
+            ocr_bindings_ok,
             processed_input_domain.matches_analysis_domain(
               input_region,
               color_space
@@ -7070,6 +7376,9 @@ namespace models {
             .held = true,
             .current_frame_id = motion_probe_result.sample.current_frame_id,
             .baseline_frame_id = motion_probe_result.sample.baseline_frame_id,
+            .ocr_proof = motion_probe_request.ocr_damage_unchanged ?
+                           adaptive_motion_ocr_hold_proof_e::ddup_crop_unchanged :
+                           adaptive_motion_ocr_hold_proof_e::exact_ocr_input,
           };
         }
 
@@ -7170,7 +7479,11 @@ namespace models {
 
       has_previous_frame = enqueued;
       pending_ocr_submitted = enqueued && ocr_enqueued;
-      ocr_stream_reuse_pending = enqueued && ocr_enqueued;
+      // The optional OCR stream owns its fixed interop input until the queued unmap tail is
+      // observed complete. This also covers an OCR-dirty exact-input hold: it mapped and compared
+      // the current input but intentionally submitted no TensorRT work.
+      ocr_stream_reuse_pending =
+        !terminal_failure && ocr_mapped && ocr_unmap_res == CUDA_SUCCESS;
       if (enqueued) {
         // Retain the exact private matched-frame color SRV across asynchronous TensorRT execution.
         // The next normalize_depth_output() uses it for local, full-resolution ownership evidence

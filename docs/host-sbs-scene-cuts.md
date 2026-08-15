@@ -99,17 +99,19 @@ a physical cut claim for a hypothetical hold.
 
 The default-off active value `APOLLO_SBS_ADAPTIVE_MOTION_GATE=1` may instead omit one complete
 DAV2/OCR observation after two settled quiet CutBridge completions. It additionally requires broad
-single-rectangle DDup evidence, an unchanged exact OCR crop, authenticated current/baseline/domain
-ownership, no pending work, exact NCHW and exclusion equality, and no appearance texel with delta at
-or above `1/1024`. The current color is rendered with the last authenticated V2 field, but the held
+single-rectangle DDup evidence, authenticated current/baseline/domain ownership, no pending work,
+exact NCHW and exclusion equality, and no appearance texel with delta at or above `1/1024`. OCR
+safety is either an unchanged exact DDup crop or bit-identical current/baseline `960x160x3` OCR
+model input with an authoritative baseline OCR8 owner and healthy current OCR bindings. The current
+color is rendered with the last authenticated V2 field, but the held
 identity does not advance or restamp CutBridge, normalization, camera, OCR, SLR, damage, or lineage
 state. No repeated or distinct approximate hold may follow until a real inference; the next
 non-exact delivery therefore observes the source. Exact DDup duplicates may reuse under their own
 bound but do not rearm the adaptive cadence. Thus a sub-threshold non-exact change can be absent from
 CutBridge for one delivery only; the forced next observation bounds cut-detection delay and cannot
 reconsume an old pulse. Tiny-motion and model-equivalent holds cannot chain across providers. Any
-authority/probe failure before the omission follows ordinary inference; post-omission display
-rejection renders fail-closed and still preserves the forced-next barrier.
+authority/probe/OCR comparison failure before the omission follows ordinary inference;
+post-omission display rejection renders fail-closed and still preserves the forced-next barrier.
 
 An OCR-only DDup proof is different: DAV2 and this complete scene-cut pipeline still execute for a
 new exact frame. When only the bottom detector crop is unchanged, the host may omit OCR preprocess,

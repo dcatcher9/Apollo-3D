@@ -155,6 +155,7 @@ namespace {
     EXPECT_TRUE(rejects(21u, area + 1u));
     EXPECT_TRUE(rejects(24u, std::bit_cast<std::uint32_t>(1.0f)));
     EXPECT_TRUE(rejects(25u, area + 1u));
+    EXPECT_TRUE(rejects(26u, 1u << 31u));
 
     auto consistent_appearance_change = valid_words();
     consistent_appearance_change[19] = 1u;
@@ -174,6 +175,71 @@ namespace {
     EXPECT_EQ(consistent_sample.appearance_delta_1_over_1024_texels, 1u);
   }
 
+  TEST(AdaptiveMotionProbeTest, AuthenticatesExactOcrInputAgainstTheV2Baseline) {
+    constexpr std::uint64_t current_id = 0x200000003ull;
+    constexpr std::uint64_t baseline_id = 0x100000002ull;
+    constexpr std::uint32_t ocr_baseline_candidate = 1u << 0u;
+    constexpr std::uint32_t ocr_record_authoritative = 1u << 1u;
+    constexpr std::uint32_t ocr_current_preprocessed = 1u << 2u;
+    std::array<std::uint32_t, models::adaptive_motion_probe_word_count> words {};
+    words[0] = models::adaptive_motion_probe_contract_tag;
+    words[1] = models::adaptive_motion_probe_settled_flags;
+    words[2] = static_cast<std::uint32_t>(current_id);
+    words[3] = static_cast<std::uint32_t>(current_id >> 32u);
+    words[4] = static_cast<std::uint32_t>(baseline_id);
+    words[5] = static_cast<std::uint32_t>(baseline_id >> 32u);
+    words[6] = 1u;
+    words[7] = 8u;
+    words[8] = 3u;
+    words[10] = 1u;
+    words[11] = 16u * 16u;
+    words[21] = 16u * 6u;
+    words[26] = ocr_baseline_candidate | ocr_record_authoritative |
+                ocr_current_preprocessed;
+    words[27] = static_cast<std::uint32_t>(baseline_id);
+    words[28] = static_cast<std::uint32_t>(baseline_id >> 32u);
+    words[29] = models::adaptive_motion_ocr_input_value_count;
+
+    models::adaptive_motion_probe_sample sample;
+    ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
+      words, current_id, baseline_id, 16, 16, sample
+    ));
+    EXPECT_TRUE(sample.exact_ocr_input_matches_baseline());
+
+    auto mismatch = words;
+    mismatch[30] = 1u;
+    ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
+      mismatch, current_id, baseline_id, 16, 16, sample
+    ));
+    EXPECT_FALSE(sample.exact_ocr_input_matches_baseline());
+
+    auto nonfinite = words;
+    nonfinite[31] = 1u;
+    ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
+      nonfinite, current_id, baseline_id, 16, 16, sample
+    ));
+    EXPECT_FALSE(sample.exact_ocr_input_matches_baseline());
+
+    auto wrong_baseline = words;
+    wrong_baseline[27]--;
+    EXPECT_FALSE(models::decode_adaptive_motion_probe_words(
+      wrong_baseline, current_id, baseline_id, 16, 16, sample
+    ));
+
+    auto missing_record_authority = words;
+    missing_record_authority[26] &= ~ocr_record_authoritative;
+    ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
+      missing_record_authority, current_id, baseline_id, 16, 16, sample
+    ));
+    EXPECT_FALSE(sample.exact_ocr_input_matches_baseline());
+
+    auto short_comparison = words;
+    short_comparison[29]--;
+    EXPECT_FALSE(models::decode_adaptive_motion_probe_words(
+      short_comparison, current_id, baseline_id, 16, 16, sample
+    ));
+  }
+
   TEST(AdaptiveMotionProbeTest, ActiveHoldUsesExactDav2AndThresholdedAppearance) {
     models::adaptive_motion_probe_result probe;
     probe.status = models::adaptive_motion_probe_status_e::ready;
@@ -181,13 +247,15 @@ namespace {
     probe.sample.baseline_frame_id = 40u;
     probe.sample.prior_state_flags = models::adaptive_motion_probe_settled_flags;
     probe.sample.admitted_texels = 256u;
-    // CFM2 still observes exact ordinal bit noise, but the active selector tolerates it below the
+    // CFM3 still observes exact ordinal bit noise, but the active selector tolerates it below the
     // most conservative existing appearance threshold.
     probe.sample.appearance_exact_changed_texels = 1u;
 
     using decision_e = models::adaptive_motion_hold_decision_e;
     const auto decide = [&](const models::adaptive_motion_probe_result &candidate) {
       return models::select_adaptive_motion_hold(
+        true,
+        true,
         true,
         true,
         false,
@@ -204,36 +272,84 @@ namespace {
 
     EXPECT_EQ(
       models::select_adaptive_motion_hold(
-        false, true, false, false,
+        false, true, true, true, false, false,
         models::depth_optional_work_mode_e::ordinary, probe
       ),
       decision_e::infer
     );
     EXPECT_EQ(
       models::select_adaptive_motion_hold(
-        true, false, false, false,
+        true, true, false, true, false, false,
         models::depth_optional_work_mode_e::ordinary, probe
       ),
       decision_e::infer
     );
     EXPECT_EQ(
       models::select_adaptive_motion_hold(
-        true, true, true, false,
+        true, true, true, false, false, false,
         models::depth_optional_work_mode_e::ordinary, probe
       ),
       decision_e::infer
     );
     EXPECT_EQ(
       models::select_adaptive_motion_hold(
-        true, true, false, true,
+        true, true, true, true, true, false,
         models::depth_optional_work_mode_e::ordinary, probe
       ),
       decision_e::infer
     );
     EXPECT_EQ(
       models::select_adaptive_motion_hold(
-        true, true, false, false,
+        true, true, true, true, false, true,
+        models::depth_optional_work_mode_e::ordinary, probe
+      ),
+      decision_e::infer
+    );
+    EXPECT_EQ(
+      models::select_adaptive_motion_hold(
+        true, true, true, true, false, false,
         models::depth_optional_work_mode_e::suppress_subtitle, probe
+      ),
+      decision_e::infer
+    );
+
+    // A clean retained OCR8 redispatch does not need current OCR mapping/bindings.
+    EXPECT_EQ(
+      models::select_adaptive_motion_hold(
+        true, true, false, true, false, false,
+        models::depth_optional_work_mode_e::redispatch_subtitle, probe
+      ),
+      decision_e::hold
+    );
+
+    // A dirty crop may hold only when the ordinary OCR path is healthy and CFM3 proves every
+    // normalized OCR input float bit-identical to the authenticated baseline.
+    auto exact_ocr = probe;
+    exact_ocr.sample.ocr_input_baseline_valid = true;
+    exact_ocr.sample.ocr_input_comparison_valid = true;
+    exact_ocr.sample.ocr_input_baseline_frame_id =
+      exact_ocr.sample.baseline_frame_id;
+    exact_ocr.sample.ocr_input_compared_values =
+      models::adaptive_motion_ocr_input_value_count;
+    EXPECT_EQ(
+      models::select_adaptive_motion_hold(
+        true, false, true, true, false, false,
+        models::depth_optional_work_mode_e::ordinary, exact_ocr
+      ),
+      decision_e::hold
+    );
+    exact_ocr.sample.ocr_input_exact_mismatch_values = 1u;
+    EXPECT_EQ(
+      models::select_adaptive_motion_hold(
+        true, false, true, true, false, false,
+        models::depth_optional_work_mode_e::ordinary, exact_ocr
+      ),
+      decision_e::infer
+    );
+    EXPECT_EQ(
+      models::select_adaptive_motion_hold(
+        true, false, false, true, false, false,
+        models::depth_optional_work_mode_e::redispatch_subtitle, probe
       ),
       decision_e::infer
     );
@@ -242,6 +358,7 @@ namespace {
       .held = true,
       .current_frame_id = probe.sample.current_frame_id,
       .baseline_frame_id = probe.sample.baseline_frame_id,
+      .ocr_proof = models::adaptive_motion_ocr_hold_proof_e::ddup_crop_unchanged,
     };
     EXPECT_TRUE(held.valid());
     held.current_frame_id = held.baseline_frame_id;
@@ -4136,7 +4253,18 @@ TEST(DirectxShaderSourceTest, AdaptiveMotionProbeAuthenticatesCutStateEncodings)
     "/src_assets/windows/assets/shaders/directx/host_sbs_current_frame_motion_probe_cs.hlsl"
   );
   ASSERT_FALSE(shader.empty());
-  EXPECT_NE(shader.find("MOTION_PROBE_CONTRACT_TAG 0x324D4643u"), std::string::npos);
+  EXPECT_EQ(models::adaptive_motion_probe_contract_tag, 0x334D4643u);
+  EXPECT_EQ(models::adaptive_motion_probe_word_count, 32u);
+  EXPECT_EQ(models::adaptive_motion_ocr_input_value_count, 960u * 160u * 3u);
+  EXPECT_EQ(models::depth_coordinate_v2::subtitle_ocr_record_schema, 3u);
+  EXPECT_EQ(models::depth_coordinate_v2::subtitle_ocr_record_tag, 0x3852434Fu);
+  EXPECT_NE(shader.find("MOTION_PROBE_CONTRACT_TAG 0x334D4643u"), std::string::npos);
+  EXPECT_NE(shader.find("MOTION_PROBE_OCR_RECORD_SCHEMA 3u"), std::string::npos);
+  EXPECT_NE(shader.find("MOTION_PROBE_OCR_RECORD_TAG 0x3852434Fu"), std::string::npos);
+  EXPECT_NE(shader.find("PROBE_WORD_OCR_INPUT_NONFINITE 31u"), std::string::npos);
+  EXPECT_NE(shader.find("StructuredBuffer<float> CurrentOcrInput : register(t7)"), std::string::npos);
+  EXPECT_NE(shader.find("StructuredBuffer<float> PreviousOcrInput : register(t8)"), std::string::npos);
+  EXPECT_NE(shader.find("StructuredBuffer<uint> PreviousOcrRecord : register(t9)"), std::string::npos);
   EXPECT_NE(shader.find("ProbeCanonicalBoolean"), std::string::npos);
   EXPECT_NE(shader.find("ProbeFiniteWholeInRange"), std::string::npos);
   EXPECT_NE(
@@ -4153,6 +4281,14 @@ TEST(DirectxShaderSourceTest, AdaptiveMotionProbeAuthenticatesCutStateEncodings)
   );
   EXPECT_NE(
     shader.find("asuint(CurrentAppearanceOrdinal[index]) !="),
+    std::string::npos
+  );
+  EXPECT_NE(
+    shader.find("PreviousOcrRecord[0] == MOTION_PROBE_OCR_RECORD_SCHEMA"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    shader.find("ocr_index < probe_ocr_input_value_count"),
     std::string::npos
   );
 }
@@ -4265,7 +4401,9 @@ TEST(DirectxShaderSourceTest, CurrentFrameProbeHasSeparateShadowAndActiveOwners)
     std::string::npos
   );
   EXPECT_NE(
-    active_proof_block.find(".ocr_safe = damage->ocr_crop_unchanged"),
+    active_proof_block.find(
+      ".ocr_damage_unchanged = damage->ocr_crop_unchanged"
+    ),
     std::string::npos
   );
   EXPECT_NE(
@@ -4422,6 +4560,84 @@ TEST(DirectxShaderSourceTest, CurrentFrameProbeHasSeparateShadowAndActiveOwners)
   EXPECT_EQ(observer_body.find("adaptive_shadow_cadence"), std::string::npos);
   EXPECT_EQ(observer_body.find("latest_v2_lineage"), std::string::npos);
   EXPECT_EQ(observer_body.find("matched_candidate_slot"), std::string::npos);
+}
+
+TEST(DirectxShaderSourceTest, AdaptiveExactOcrInputOwnershipFailsOpen) {
+  const auto estimator =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
+  const auto display =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
+  ASSERT_FALSE(estimator.empty());
+  ASSERT_FALSE(display.empty());
+
+  const auto preprocess = estimator.find("context->CSSetShader(ocr_preprocess_cs.Get()");
+  const auto probe = estimator.find("dispatch_adaptive_motion_probe(", preprocess);
+  const auto depth_map = estimator.find("cuGraphicsMapResources(2, depth_resources", probe);
+  const auto probe_collect = estimator.find("collect_adaptive_motion_probe(", depth_map);
+  const auto hold_select = estimator.find("select_adaptive_motion_hold(", probe_collect);
+  const auto unmap = estimator.find(
+    "ocr_unmap_res = cuda.cuGraphicsUnmapResources(",
+    hold_select
+  );
+  const auto stream_owner = estimator.find(
+    "ocr_stream_reuse_pending =\n        !terminal_failure && ocr_mapped",
+    unmap
+  );
+  ASSERT_NE(preprocess, std::string::npos);
+  ASSERT_NE(probe, std::string::npos);
+  ASSERT_NE(depth_map, std::string::npos);
+  ASSERT_NE(probe_collect, std::string::npos);
+  ASSERT_NE(hold_select, std::string::npos);
+  ASSERT_NE(unmap, std::string::npos);
+  ASSERT_NE(stream_owner, std::string::npos);
+  EXPECT_LT(preprocess, probe);
+  EXPECT_LT(probe, depth_map);
+  EXPECT_LT(depth_map, probe_collect);
+  EXPECT_LT(probe_collect, hold_select);
+  EXPECT_LT(hold_select, unmap);
+  EXPECT_LT(unmap, stream_owner);
+  const auto hold_block = estimator.substr(hold_select, unmap - hold_select);
+  EXPECT_NE(hold_block.find("ocr_bindings_ok"), std::string::npos);
+  EXPECT_NE(
+    hold_block.find("adaptive_ocr_authority_still_owned"),
+    std::string::npos
+  );
+
+  const auto unregister = estimator.find("const auto unregister_ocr_interop =");
+  const auto retry = estimator.find("if (!ocr_resources_ok && ocr_input_supports_adaptive_compare)", unregister);
+  const auto both_released = estimator.find("if (!unregister_ocr_interop())", retry);
+  const auto recreate = estimator.find("ocr_input_buf.Reset();", both_released);
+  ASSERT_NE(unregister, std::string::npos);
+  ASSERT_NE(retry, std::string::npos);
+  ASSERT_NE(both_released, std::string::npos);
+  ASSERT_NE(recreate, std::string::npos);
+  EXPECT_LT(unregister, retry);
+  EXPECT_LT(retry, both_released);
+  EXPECT_LT(both_released, recreate);
+  EXPECT_NE(
+    estimator.substr(unregister, retry - unregister).find(
+      "input_unregistered && output_unregistered"
+    ),
+    std::string::npos
+  );
+
+  const auto proof_match = display.find("const bool active_hold_ocr_proof_matches");
+  const auto postcheck = display.find("const bool active_hold_revalidated", proof_match);
+  ASSERT_NE(proof_match, std::string::npos);
+  ASSERT_NE(postcheck, std::string::npos);
+  const auto proof_block = display.substr(proof_match, postcheck - proof_match);
+  EXPECT_NE(
+    proof_block.find("adaptive_motion_ocr_hold_proof_e::ddup_crop_unchanged"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    proof_block.find("adaptive_motion_ocr_hold_proof_e::exact_ocr_input"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    proof_block.find("exact_ocr_input_matches_baseline()"),
+    std::string::npos
+  );
 }
 
 TEST(DirectxShaderSourceTest, HostSbsRejectsRotationAndUsesMatchedV2Frames) {

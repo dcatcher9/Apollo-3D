@@ -594,27 +594,34 @@ pending inference, complete retained DDup history, and no native interactive mov
 damage is proved only when one normalized dirty rectangle or one move endpoint intersects at least
 half the exact DAV2 region. The saturated sum is not broad proof because overlaps and a move's two
 ends can inflate it. Localized nontrivial damage above 0.25% and below that broad proof fails open;
-tiny damage remains solely the existing low-motion experiment's domain. Active mode additionally
-requires the exact bottom OCR crop to be damage-proven unchanged and has no OCR-dirty branch.
-Shadow continues to report both OCR-clean depth-plus-OCR opportunities and broad frames that would
-still require current-frame OCR.
+tiny damage remains solely the existing low-motion experiment's domain. Shadow and active both
+retain the candidate's exact OCR-crop damage class. An unchanged crop is sufficient caller-owned
+OCR proof; a dirty crop remains provisional until the estimator authenticates exact current OCR
+model-input equality as described below.
 
 Only a cadence-selected broad candidate requests the optional current-frame probe. Its current and
 baseline IDs are copied from the private candidate and latest authenticated V2 completion; the
 baseline must also equal the estimator's last postprocessed frame. After ordinary preprocessing, a
 shader outside the authenticated producer closure compares every admitted current NCHW value,
-appearance ordinal, and exclusion bit with that exact baseline and copies one fixed 26-word record.
-The raw exact-bit telemetry verdict calls only exact NCHW-bit, appearance-ordinal-bit, and exclusion
-equality quiet; it is never standalone hold authority. RGB delta tiers, appearance thresholds, tile
-maxima, and bottom-band counters remain diagnostic for that verdict and the shadow cross-tab.
+appearance ordinal, and exclusion bit with that exact baseline and copies one fixed 32-word CFM3
+record. When an estimator-owned OCR baseline exists, the same dispatch also compares all
+`960x160x3` normalized FP32 OCR input values bit-for-bit and validates that the retained OCR8 header
+and frame owner describe the same baseline. The raw motion verdict calls only exact NCHW-bit,
+appearance-ordinal-bit, and exclusion equality quiet; it is never standalone hold authority. RGB
+delta tiers, appearance thresholds, tile maxima, bottom-band counters, and the typed OCR-input
+result remain separately attributable diagnostics.
 
 Active selection is deliberately separate and narrower in authority but tolerant of harmless
 ordinal bit noise. It requires a decoded record with settled prior-state flags, exact NCHW and
 exclusion equality, and zero appearance texels at or above the `1/1024` delta tier. Exact
 appearance-ordinal bit mismatches below that tier remain telemetry and do not veto by themselves.
 The exact current/baseline/domain tuple, retained DDup history and endpoint tokens, noninteractive
-route, OCR-clean proof, absence of pending/completed work, and ordinary
-non-dump/non-suppressed-optional-work route must still match.
+route, absence of pending/completed work, and ordinary non-dump/non-suppressed-optional-work route
+must still match. OCR safety is typed: either DDup proves the exact bottom crop unchanged, or an
+ordinary current OCR path must map and bind successfully while CFM3 proves all `460800` normalized
+input floats equal an estimator-owned baseline whose OCR8 record and frame owner are authoritative.
+Any mismatch, nonfinite value, missing/abstaining OCR8 record, unavailable comparison resource, or
+OCR setup failure follows ordinary DAV2/OCR inference.
 The existing encode target remains the only deadline: after preserving the same `3 ms` downstream
 reserve, candidate-only readiness queries may consume at most `0.5 ms` and have an independent
 query fuse. A missing or late target permits one immediate query only. The staging map uses
@@ -623,7 +630,7 @@ shader/event failure immediately continues to the ordinary DAV2/OCR enqueue.
 
 On an authorized active hold the estimator returns the explicit current/baseline IDs without
 enqueueing DAV2 or OCR and without advancing its postprocessed history. Display revalidates those
-IDs, the authenticated completion, route, input domain, color space, OCR-clean proof, and absence of
+IDs, the authenticated completion, route, input domain, color space, typed OCR proof, and absence of
 pending work after the private copy and after estimator return. It then renders the current private
 candidate color through the older authenticated V2 geometry. The held identity is never restamped
 as a completion, reusable OCR input, damage baseline, or latest lineage, and the one-call hold token
@@ -636,6 +643,15 @@ inference. A valid estimator hold records that provider barrier even if display-
 later refuses the cached render, so a route or telemetry reset cannot grant a second approximate
 hold. Exact content-clock/ROI reuse remains independent, and model-equivalent holds consume neither
 the exact `16`/`250 ms` refresh budget nor the low-motion one-hold budget.
+
+The exact OCR-input baseline is estimator-owned rather than a display cache shortcut. It is copied
+only after one ordinary joined DAV2/OCR completion has produced V2 and an authoritative OCR8 record;
+a damage-proven OCR redispatch may roll only that exact owner forward. Domain changes, subtitle
+suppression, detector abstention/failure, producer failure, optional-probe loss, and unsafe interop
+cleanup invalidate it. Optional comparison allocation or registration failure disables only the
+dirty-crop proof: ordinary OCR and the independent DDup-clean hold remain available. A mapped OCR
+input remains stream-owned through its queued CUDA unmap even when the exact hold submits neither
+TensorRT engine, preventing the next delivery from racing the fixed interop buffer.
 
 The live source signature, transfer domain, root/region generations, browser epoch, and interactive
 state are observed independently of cache authentication. Any change clears predictive evidence,

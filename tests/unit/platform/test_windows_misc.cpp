@@ -1049,7 +1049,7 @@ namespace {
       .baseline_damage_token = 10u,
       .current_damage_token = 11u,
       .broad_damage = true,
-      .ocr_safe = true,
+      .ocr_damage_unchanged = true,
     };
     EXPECT_TRUE(valid.valid());
     auto invalid = valid;
@@ -1068,8 +1068,8 @@ namespace {
     invalid.broad_damage = false;
     EXPECT_FALSE(invalid.valid());
     invalid = valid;
-    invalid.ocr_safe = false;
-    EXPECT_FALSE(invalid.valid());
+    invalid.ocr_damage_unchanged = false;
+    EXPECT_TRUE(invalid.valid());
   }
 
   TEST(WindowsHostSbsContentReuseTest, ModelEquivalentHoldRequiresExactOwners) {

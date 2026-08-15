@@ -147,7 +147,7 @@ namespace platf::dxgi {
     inline constexpr auto host_sbs_same_frame_poll_min_budget =
       std::chrono::microseconds {250};
     inline constexpr std::uint32_t host_sbs_same_frame_poll_max_queries = 4096u;
-    // The shadow current-frame probe may spend only a small slice of the same encode cadence
+    // The optional current-frame probe may spend only a small slice of the same encode cadence
     // slack. A candidate without usable slack still receives one immediate nonblocking query.
     inline constexpr auto host_sbs_current_frame_probe_max_wait =
       std::chrono::microseconds {500};
@@ -386,7 +386,7 @@ namespace platf::dxgi {
 
     class ddup_damage_history_t;
 
-    /** Display-owned broad-DDup/OCR proof retained across the private-copy route recheck. */
+    /** Display-owned broad-DDup candidate retained across the private-copy route recheck. */
     struct host_sbs_model_equivalent_candidate_t {
       std::uint64_t baseline_frame_id = 0u;
       std::uint64_t current_frame_id = 0u;
@@ -394,12 +394,12 @@ namespace platf::dxgi {
       std::uint64_t baseline_damage_token = 0u;
       std::uint64_t current_damage_token = 0u;
       bool broad_damage = false;
-      bool ocr_safe = false;
+      bool ocr_damage_unchanged = false;
 
       [[nodiscard]] constexpr bool valid() const noexcept {
         return baseline_frame_id != 0u && current_frame_id > baseline_frame_id &&
                damage_history != nullptr && baseline_damage_token != 0u &&
-               current_damage_token > baseline_damage_token && broad_damage && ocr_safe;
+               current_damage_token > baseline_damage_token && broad_damage;
       }
     };
 

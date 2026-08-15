@@ -1,6 +1,6 @@
 /**
  * @file tests/unit/test_host_sbs_current_frame_motion_probe_gpu.cpp
- * @brief Executes the shadow current-frame motion probe on a D3D11 WARP device.
+ * @brief Executes the current-frame motion probe on a D3D11 WARP device.
  */
 #include "../tests_common.h"
 
@@ -34,6 +34,8 @@ namespace {
   constexpr UINT bottom_bottom = field_height;
   constexpr std::uint64_t baseline_frame_id = 0x12345678abcdef01ull;
   constexpr std::uint64_t current_frame_id = 0x12345679abcdef02ull;
+  constexpr std::uint32_t ocr_baseline_candidate = 1u << 0u;
+  constexpr std::uint32_t ocr_current_preprocessed = 1u << 2u;
 
   using probe_words_t =
     std::array<std::uint32_t, models::adaptive_motion_probe_word_count>;
@@ -47,7 +49,30 @@ namespace {
       std::vector<std::uint32_t>(field_texels, 0u);
     std::vector<std::uint32_t> previous_exclusion =
       std::vector<std::uint32_t>(field_texels, 0u);
+    bool bind_ocr_resources = false;
+    std::vector<float> current_ocr;
+    std::vector<float> previous_ocr;
+    std::array<std::uint32_t, models::depth_coordinate_v2::subtitle_ocr_record_word_count>
+      previous_ocr_record {};
+    std::uint32_t ocr_input_flags = 0u;
+    std::uint64_t ocr_baseline_frame_id = 0u;
   };
+
+  void authorize_exact_ocr_inputs(probe_inputs_t &inputs) {
+    inputs.bind_ocr_resources = true;
+    inputs.current_ocr.assign(models::adaptive_motion_ocr_input_value_count, 0.0f);
+    inputs.previous_ocr.assign(models::adaptive_motion_ocr_input_value_count, 0.0f);
+    inputs.ocr_input_flags = ocr_baseline_candidate | ocr_current_preprocessed;
+    inputs.ocr_baseline_frame_id = baseline_frame_id;
+    inputs.previous_ocr_record[0] =
+      models::depth_coordinate_v2::subtitle_ocr_record_schema;
+    inputs.previous_ocr_record[1] =
+      models::depth_coordinate_v2::subtitle_ocr_record_tag;
+    inputs.previous_ocr_record[2] = 1u;
+    inputs.previous_ocr_record[5] = static_cast<std::uint32_t>(baseline_frame_id);
+    inputs.previous_ocr_record[6] =
+      static_cast<std::uint32_t>(baseline_frame_id >> 32u);
+  }
 
   struct probe_execution_t {
     probe_words_t words {};
@@ -136,7 +161,7 @@ namespace {
         error = "could not create the depth constant buffer";
         return initialize_result_e::failed;
       }
-      constants_desc.ByteWidth = 8u * sizeof(std::uint32_t);
+      constants_desc.ByteWidth = 12u * sizeof(std::uint32_t);
       if (FAILED(device_->CreateBuffer(&constants_desc, nullptr, &probe_constants_))) {
         error = "could not create the motion-probe constant buffer";
         return initialize_result_e::failed;
@@ -176,7 +201,10 @@ namespace {
         inputs.current_appearance.size() != field_texels ||
         inputs.previous_appearance.size() != field_texels ||
         inputs.current_exclusion.size() != field_texels ||
-        inputs.previous_exclusion.size() != field_texels
+        inputs.previous_exclusion.size() != field_texels ||
+        (inputs.bind_ocr_resources &&
+         (inputs.current_ocr.size() != models::adaptive_motion_ocr_input_value_count ||
+          inputs.previous_ocr.size() != models::adaptive_motion_ocr_input_value_count))
       ) {
         error = "motion-probe input sizes are invalid";
         return false;
@@ -192,6 +220,12 @@ namespace {
       ComPtr<ID3D11ShaderResourceView> previous_appearance_srv;
       ComPtr<ID3D11Buffer> cut_state_buffer;
       ComPtr<ID3D11ShaderResourceView> cut_state_srv;
+      ComPtr<ID3D11Buffer> current_ocr_buffer;
+      ComPtr<ID3D11ShaderResourceView> current_ocr_srv;
+      ComPtr<ID3D11Buffer> previous_ocr_buffer;
+      ComPtr<ID3D11ShaderResourceView> previous_ocr_srv;
+      ComPtr<ID3D11Buffer> previous_ocr_record_buffer;
+      ComPtr<ID3D11ShaderResourceView> previous_ocr_record_srv;
       if (
         !create_structured_srv(
           inputs.current_model,
@@ -227,6 +261,32 @@ namespace {
         error = "could not create a structured motion-probe input";
         return false;
       }
+      if (
+        inputs.bind_ocr_resources &&
+        (
+          !create_structured_srv(
+            inputs.current_ocr,
+            sizeof(float),
+            current_ocr_buffer,
+            current_ocr_srv
+          ) ||
+          !create_structured_srv(
+            inputs.previous_ocr,
+            sizeof(float),
+            previous_ocr_buffer,
+            previous_ocr_srv
+          ) ||
+          !create_structured_srv(
+            inputs.previous_ocr_record,
+            sizeof(std::uint32_t),
+            previous_ocr_record_buffer,
+            previous_ocr_record_srv
+          )
+        )
+      ) {
+        error = "could not create an OCR motion-probe input";
+        return false;
+      }
 
       ComPtr<ID3D11Texture2D> current_exclusion_texture;
       ComPtr<ID3D11ShaderResourceView> current_exclusion_srv;
@@ -255,13 +315,17 @@ namespace {
       depth_constants[10] = 0u;
       depth_constants[11] = field_width;
       depth_constants[12] = field_height;
-      const std::array<std::uint32_t, 8> probe_constants {
+      const std::array<std::uint32_t, 12> probe_constants {
         static_cast<std::uint32_t>(current_frame_id),
         static_cast<std::uint32_t>(current_frame_id >> 32u),
         static_cast<std::uint32_t>(baseline_frame_id),
         static_cast<std::uint32_t>(baseline_frame_id >> 32u),
         bottom_top,
         bottom_bottom,
+        inputs.ocr_input_flags,
+        models::adaptive_motion_ocr_input_value_count,
+        static_cast<std::uint32_t>(inputs.ocr_baseline_frame_id),
+        static_cast<std::uint32_t>(inputs.ocr_baseline_frame_id >> 32u),
         0u,
         0u,
       };
@@ -292,6 +356,9 @@ namespace {
         current_exclusion_srv.Get(),
         previous_exclusion_srv.Get(),
         cut_state_srv.Get(),
+        current_ocr_srv.Get(),
+        previous_ocr_srv.Get(),
+        previous_ocr_record_srv.Get(),
       };
       ID3D11Buffer *constant_buffers[] = {
         depth_constants_.Get(),
@@ -475,6 +542,58 @@ TEST(HostSbsCurrentFrameMotionProbeGpuTest, PreservesExactEvidenceAndStateIdenti
   models::adaptive_motion_probe_sample wrong_identity_sample;
   EXPECT_FALSE(models::decode_adaptive_motion_probe_words(quiet.words, current_frame_id + 1u, baseline_frame_id, static_cast<int>(field_width), static_cast<int>(field_height), wrong_identity_sample));
   EXPECT_FALSE(models::decode_adaptive_motion_probe_words(quiet.words, current_frame_id, baseline_frame_id - 1u, static_cast<int>(field_width), static_cast<int>(field_height), wrong_identity_sample));
+
+  probe_inputs_t exact_ocr_inputs;
+  authorize_exact_ocr_inputs(exact_ocr_inputs);
+  probe_execution_t exact_ocr;
+  ASSERT_TRUE(fixture.run(exact_ocr_inputs, state, exact_ocr, error)) << error;
+  ASSERT_TRUE(exact_ocr.decoded);
+  EXPECT_TRUE(exact_ocr.sample.ocr_input_baseline_valid);
+  EXPECT_TRUE(exact_ocr.sample.ocr_input_comparison_valid);
+  EXPECT_EQ(exact_ocr.sample.ocr_input_baseline_frame_id, baseline_frame_id);
+  EXPECT_EQ(
+    exact_ocr.sample.ocr_input_compared_values,
+    models::adaptive_motion_ocr_input_value_count
+  );
+  EXPECT_EQ(exact_ocr.sample.ocr_input_exact_mismatch_values, 0u);
+  EXPECT_EQ(exact_ocr.sample.ocr_input_nonfinite_values, 0u);
+  EXPECT_TRUE(exact_ocr.sample.exact_ocr_input_matches_baseline());
+
+  exact_ocr_inputs.current_ocr[17u] =
+    std::bit_cast<float>(std::bit_cast<std::uint32_t>(0.0f) + 1u);
+  probe_execution_t ocr_mismatch;
+  ASSERT_TRUE(fixture.run(exact_ocr_inputs, state, ocr_mismatch, error)) << error;
+  ASSERT_TRUE(ocr_mismatch.decoded);
+  EXPECT_EQ(ocr_mismatch.sample.ocr_input_exact_mismatch_values, 1u);
+  EXPECT_FALSE(ocr_mismatch.sample.exact_ocr_input_matches_baseline());
+  exact_ocr_inputs.current_ocr[17u] = 0.0f;
+
+  exact_ocr_inputs.current_ocr[23u] =
+    std::numeric_limits<float>::quiet_NaN();
+  exact_ocr_inputs.previous_ocr[23u] = exact_ocr_inputs.current_ocr[23u];
+  probe_execution_t ocr_nonfinite;
+  ASSERT_TRUE(fixture.run(exact_ocr_inputs, state, ocr_nonfinite, error)) << error;
+  ASSERT_TRUE(ocr_nonfinite.decoded);
+  EXPECT_EQ(ocr_nonfinite.sample.ocr_input_exact_mismatch_values, 0u);
+  EXPECT_EQ(ocr_nonfinite.sample.ocr_input_nonfinite_values, 1u);
+  EXPECT_FALSE(ocr_nonfinite.sample.exact_ocr_input_matches_baseline());
+  exact_ocr_inputs.current_ocr[23u] = 0.0f;
+  exact_ocr_inputs.previous_ocr[23u] = 0.0f;
+
+  exact_ocr_inputs.previous_ocr_record[5]--;
+  probe_execution_t wrong_ocr_owner;
+  ASSERT_TRUE(fixture.run(exact_ocr_inputs, state, wrong_ocr_owner, error)) << error;
+  ASSERT_TRUE(wrong_ocr_owner.decoded);
+  EXPECT_FALSE(wrong_ocr_owner.sample.ocr_input_baseline_valid);
+  EXPECT_FALSE(wrong_ocr_owner.sample.exact_ocr_input_matches_baseline());
+  exact_ocr_inputs.previous_ocr_record[5]++;
+
+  exact_ocr_inputs.previous_ocr_record[2] = 0u;
+  probe_execution_t invalid_ocr_record;
+  ASSERT_TRUE(fixture.run(exact_ocr_inputs, state, invalid_ocr_record, error)) << error;
+  ASSERT_TRUE(invalid_ocr_record.decoded);
+  EXPECT_FALSE(invalid_ocr_record.sample.ocr_input_baseline_valid);
+  EXPECT_FALSE(invalid_ocr_record.sample.exact_ocr_input_matches_baseline());
 
   probe_inputs_t one_bit_inputs;
   constexpr std::size_t one_bit_index = 2u * field_width + 3u;
