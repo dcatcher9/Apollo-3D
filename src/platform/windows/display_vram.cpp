@@ -782,7 +782,7 @@ namespace platf::dxgi {
             depth_estimator && models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer) &&
             current_content_timestamp && !snapshot_debug_inputs &&
             !depth_authority_reprocess_pending && !producer_terminal;
-          const auto reusable_route_matches = reusable_route_matches_current(
+          const auto latest_v2_route_matches = latest_v2_lineage_route_matches_current(
             live_source_desc,
             input_color_space,
             current_root_authority_generation,
@@ -797,9 +797,9 @@ namespace platf::dxgi {
               return slot.pending;
             }
           );
-          auto cached_reuse_kind = reusable_route_matches ?
+          auto cached_reuse_kind = latest_v2_route_matches ?
                                      matched_input_reuse_kind(
-                                       reusable_v2.slot,
+                                       latest_v2_lineage.slot,
                                        current_content_timestamp,
                                        current_ddup_damage
                                      ) :
@@ -808,16 +808,16 @@ namespace platf::dxgi {
           const bool inspect_low_motion_candidate =
             diagnostics_enabled || low_motion_gate_enabled;
           const bool cached_low_motion_candidate =
-            inspect_low_motion_candidate && dedup_gate_open && reusable_v2.authenticated &&
-            !matched_inference_pending_at_entry && reusable_route_matches &&
+            inspect_low_motion_candidate && dedup_gate_open && latest_v2_lineage.authenticated &&
+            !matched_inference_pending_at_entry && latest_v2_route_matches &&
             cached_reuse_kind == detail::host_sbs_ddup_reuse_proof_e::none &&
-            matched_low_motion_candidate(reusable_v2.slot, current_ddup_damage);
+            matched_low_motion_candidate(latest_v2_lineage.slot, current_ddup_damage);
           low_motion_candidate_observed = cached_low_motion_candidate;
           const bool cached_low_motion_reuse_allowed =
             detail::host_sbs_low_motion_cache_reuse_allowed(
               low_motion_gate_enabled,
               dedup_gate_open,
-              reusable_v2.authenticated,
+              latest_v2_lineage.authenticated,
               matched_inference_pending_at_entry,
               cached_low_motion_candidate,
               low_motion_reuse_refresh.reuse_allowed(reuse_now)
@@ -847,13 +847,13 @@ namespace platf::dxgi {
             revoke_adaptive_motion_before(frame_id);
           }
           const bool adaptive_route_observable =
-            adaptive_shadow && dedup_gate_open && reusable_v2.authenticated &&
-            reusable_route_matches && current_ddup_damage &&
+            adaptive_shadow && dedup_gate_open && latest_v2_lineage.authenticated &&
+            latest_v2_route_matches && current_ddup_damage &&
             !current_interactive_move_size;
           if (
             adaptive_shadow &&
             (!dedup_gate_open || !current_ddup_damage || current_interactive_move_size ||
-             (reusable_v2.authenticated && !reusable_route_matches))
+             (latest_v2_lineage.authenticated && !latest_v2_route_matches))
           ) {
             // Missing DDup proof, route/authority changes, dump/reprocess, terminal failure, and
             // native move/size all revoke predictive state even before a cache is authenticated.
@@ -864,7 +864,7 @@ namespace platf::dxgi {
             cached_reuse_kind == detail::host_sbs_ddup_reuse_proof_e::none
           ) {
             const auto damage = matched_motion_damage(
-              reusable_v2.slot,
+              latest_v2_lineage.slot,
               current_ddup_damage,
               true
             );
@@ -917,22 +917,21 @@ namespace platf::dxgi {
               }
             }
           }
-          if (
-            reusable_v2.authenticated &&
-            (!reusable_route_matches ||
-             (cached_reuse_kind == detail::host_sbs_ddup_reuse_proof_e::none &&
-              !cached_low_motion_reuse_allowed) ||
-             snapshot_debug_inputs || depth_authority_reprocess_pending || producer_terminal)
-          ) {
-            reusable_v2.reset();
-            // A newer exact input may already be pending. Its successful enqueue owns the refresh
-            // clock even if this older cache just became dirty, unqueryable, or unauthorized.
-            // Cache presence gates reuse independently, so retaining the clock cannot suppress an
-            // ordinary submission when no valid geometry remains.
+          if (detail::host_sbs_latest_v2_lineage_reset_required(
+                latest_v2_lineage.authenticated,
+                latest_v2_route_matches,
+                snapshot_debug_inputs,
+                depth_authority_reprocess_pending,
+                producer_terminal
+              )) {
+            latest_v2_lineage.reset();
+            // Current-frame proof authorizes rendering independently from retained lineage. A
+            // missing exact/low-motion proof leaves the lineage available for later motion
+            // classification but cannot suppress an ordinary submission below.
             cached_reuse_kind = detail::host_sbs_ddup_reuse_proof_e::none;
           }
           const bool cached_geometry_matches =
-            reusable_v2.authenticated &&
+            latest_v2_lineage.authenticated &&
             (cached_reuse_kind != detail::host_sbs_ddup_reuse_proof_e::none ||
              cached_low_motion_reuse_allowed);
           const bool cached_geometry_render_allowed =
@@ -940,8 +939,8 @@ namespace platf::dxgi {
               dedup_gate_open,
               host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2,
               cached_geometry_matches,
-              reusable_v2.estimate.shadow_final_parallax &&
-                reusable_v2.estimate.shadow_state
+              latest_v2_lineage.estimate.shadow_final_parallax &&
+                latest_v2_lineage.estimate.shadow_state
             );
           const bool content_refresh_due = content_reuse_refresh.refresh_due(reuse_now);
           const bool cached_refresh_allows_reuse =
@@ -1026,7 +1025,7 @@ namespace platf::dxgi {
               if (recovered.completed_frame_valid) {
                 // Normalization has just rewritten the estimator's singleton V2 resources. Any
                 // prior cache metadata is now stale until this exact completion is authenticated.
-                reusable_v2.reset();
+                latest_v2_lineage.reset();
                 // Consuming a completion retires the estimator's pending work even if corrupt
                 // metadata prevents us from resolving its color slot.
                 depth_completion_poll_pending = false;
@@ -1077,7 +1076,7 @@ namespace platf::dxgi {
               if (polled.ready) {
                 // A ready poll either normalized a completion or latched a producer failure. Do
                 // not retain resource aliases authenticated before that state transition.
-                reusable_v2.reset();
+                latest_v2_lineage.reset();
                 depth_completion_poll_pending = false;
                 if (!polled.result.completed_frame_valid) {
                   // The verified slot represented the estimator's sole pending inference. A ready
@@ -1178,7 +1177,7 @@ namespace platf::dxgi {
                   optional_work
                 );
                 if (est.completed_frame_valid) {
-                  reusable_v2.reset();
+                  latest_v2_lineage.reset();
                   matched_render_slot = find_pending_matched_slot(est.completed_frame_id);
                   if (matched_render_slot) {
                     matched_render_slot->pending = false;
@@ -1232,7 +1231,7 @@ namespace platf::dxgi {
                     content_reuse_refresh.record_successful_enqueue(reuse_now);
                     low_motion_reuse_refresh.record_successful_enqueue(reuse_now);
                   } else {
-                    reusable_v2.reset();
+                    latest_v2_lineage.reset();
                     content_reuse_refresh.reset();
                     low_motion_reuse_refresh.reset();
                   }
@@ -1320,7 +1319,7 @@ namespace platf::dxgi {
                     // finish_pending() rewrites the estimator's singleton V2 resources. The prior
                     // completion returned by estimate_depth() can no longer render after any ready
                     // current-frame query, including a ready failure or corrupt frame identity.
-                    reusable_v2.reset();
+                    latest_v2_lineage.reset();
                     depth_completion_poll_pending = false;
                     matched_render_slot = nullptr;
                     render_input_srv = img_ctx.encoder_input_res.get();
@@ -1421,7 +1420,7 @@ namespace platf::dxgi {
                       snapshot_debug_inputs
                     );
                   if (recovered.completed_frame_valid) {
-                    reusable_v2.reset();
+                    latest_v2_lineage.reset();
                     // finish_pending consumed the estimator's sole pending inference. Release the
                     // poll owner before fallible frame-ID lookup, just as the retained-source path
                     // does, so corrupt metadata cannot leave a permanently pending slot.
@@ -1487,7 +1486,8 @@ namespace platf::dxgi {
 
           // Cached fields alias the estimator's singleton V2 textures, so recompute eligibility
           // only after every path that could have consumed/normalized a completion above.
-          const bool post_completion_cache_route_matches = reusable_route_matches_current(
+          const bool post_completion_cache_route_matches =
+            latest_v2_lineage_route_matches_current(
             live_source_desc,
             input_color_space,
             current_root_authority_generation,
@@ -1498,13 +1498,13 @@ namespace platf::dxgi {
           const auto post_completion_cache_reuse_kind =
             post_completion_cache_route_matches ?
               matched_input_reuse_kind(
-                reusable_v2.slot,
+                latest_v2_lineage.slot,
                 current_content_timestamp,
                 current_ddup_damage
               ) :
               detail::host_sbs_ddup_reuse_proof_e::none;
           const bool post_completion_cache_matches =
-            reusable_v2.authenticated &&
+            latest_v2_lineage.authenticated &&
             (post_completion_cache_reuse_kind !=
                detail::host_sbs_ddup_reuse_proof_e::none ||
              (low_motion_submission_suppressed &&
@@ -1514,17 +1514,17 @@ namespace platf::dxgi {
               dedup_gate_open,
               host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2,
               post_completion_cache_matches,
-              reusable_v2.estimate.shadow_final_parallax &&
-                reusable_v2.estimate.shadow_state
+              latest_v2_lineage.estimate.shadow_final_parallax &&
+                latest_v2_lineage.estimate.shadow_state
             );
           if (
             !matched_render_slot && post_completion_cache_render_allowed &&
             (unchanged_content_submission_suppressed || est.inference_enqueued)
           ) {
-            est = reusable_v2.estimate;
+            est = latest_v2_lineage.estimate;
             copy_matched_frame_attribution(
               current_color_reuse_slot,
-              reusable_v2.slot
+              latest_v2_lineage.slot
             );
             using_cached_estimate = true;
             force_fresh_current_color = true;
@@ -1706,9 +1706,9 @@ namespace platf::dxgi {
             }
           }
 
-          // Cache only a completion that survived exact frame/region/route checks and the V2
-          // authentication latch. ROI completions additionally retain their DDup inference token;
-          // changed or unavailable damage history leaves the singleton-resource cache empty.
+          // Retain the latest completion that survived exact frame/region/route checks and the V2
+          // authentication latch. This lineage aliases the estimator's singleton V2 resources but
+          // does not itself authorize rendering; current DDup/low-motion proof remains separate.
           if (matched_render_slot && est.completed_frame_valid && !using_cached_estimate) {
             const bool current_reusable_enqueue_pending =
               matched_candidate_slot && matched_candidate_slot->pending &&
@@ -1730,34 +1730,26 @@ namespace platf::dxgi {
             if (matched_render_slot->texture) {
               matched_render_slot->texture->GetDesc(&completed_source_desc);
             }
-            if (
-              host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2 &&
-              est.input_region == matched_render_slot->depth_input_region &&
-              est.color_space == matched_render_slot->color_space &&
-              est.color_space == input_color_space &&
-              source_signatures_match(completed_source_desc, live_source_desc) &&
-              (!matched_render_slot->depth_input_region.video_region ||
-               window_region_authorized_for_render(*matched_render_slot)) &&
-              (matched_input_reuse_kind(
-                 *matched_render_slot,
-                 current_content_timestamp,
-                 current_ddup_damage
-               ) != detail::host_sbs_ddup_reuse_proof_e::none ||
-               (low_motion_submission_suppressed &&
-                matched_low_motion_candidate(
-                  *matched_render_slot,
-                  current_ddup_damage
-                )))
-            ) {
-              cache_reusable_v2(
-                est,
-                *matched_render_slot,
-                completed_source_desc
-              );
-            } else {
-              reusable_v2.reset();
-            }
-            if (!reusable_v2.authenticated && !current_reusable_enqueue_pending) {
+            const auto completed_reuse_kind = matched_input_reuse_kind(
+              *matched_render_slot,
+              current_content_timestamp,
+              current_ddup_damage
+            );
+            const bool completed_low_motion_match =
+              low_motion_submission_suppressed &&
+              matched_low_motion_candidate(*matched_render_slot, current_ddup_damage);
+            const bool latest_lineage_retained = retain_latest_v2_lineage(
+              est,
+              *matched_render_slot,
+              completed_source_desc,
+              live_source_desc,
+              input_color_space
+            );
+            const bool completion_reuse_authorized =
+              latest_lineage_retained &&
+              (completed_reuse_kind != detail::host_sbs_ddup_reuse_proof_e::none ||
+               completed_low_motion_match);
+            if (!completion_reuse_authorized && !current_reusable_enqueue_pending) {
               content_reuse_refresh.reset();
               low_motion_reuse_refresh.reset();
             }
@@ -2341,7 +2333,7 @@ namespace platf::dxgi {
       for (auto &slot : matched_frame_slots) {
         slot.pending = false;
       }
-      reusable_v2.reset();
+      latest_v2_lineage.reset();
       content_reuse_refresh.reset();
       low_motion_reuse_refresh.reset();
       if (adaptive_motion_shadow_enabled()) {
@@ -3108,7 +3100,7 @@ namespace platf::dxgi {
       }
     };
 
-    struct reusable_v2_t {
+    struct latest_v2_lineage_t {
       models::estimate_result estimate;
       matched_frame_slot_t slot;
       UINT source_width = 0u;
@@ -3427,7 +3419,7 @@ namespace platf::dxgi {
              window_region_authorized_for_render(slot);
     }
 
-    [[nodiscard]] bool reusable_route_matches_current(
+    [[nodiscard]] bool latest_v2_lineage_route_matches_current(
       const D3D11_TEXTURE2D_DESC &source_desc,
       const models::input_color_space current_color_space,
       const std::uint64_t current_root_authority_generation,
@@ -3435,7 +3427,7 @@ namespace platf::dxgi {
       const std::uint64_t current_browser_authority_epoch,
       const bool current_interactive_move_size
     ) const noexcept {
-      return reusable_v2.route_matches(
+      return latest_v2_lineage.route_matches(
                source_desc,
                current_color_space,
                current_root_authority_generation,
@@ -3443,64 +3435,69 @@ namespace platf::dxgi {
                current_browser_authority_epoch,
                current_interactive_move_size
              ) &&
-             (!reusable_v2.slot.depth_input_region.video_region ||
-              window_region_authorized_for_render(reusable_v2.slot));
+             (!latest_v2_lineage.slot.depth_input_region.video_region ||
+              window_region_authorized_for_render(latest_v2_lineage.slot));
     }
 
-    void cache_reusable_v2(
+    [[nodiscard]] bool retain_latest_v2_lineage(
       const models::estimate_result &estimate,
       const matched_frame_slot_t &slot,
-      const D3D11_TEXTURE2D_DESC &source_desc
+      const D3D11_TEXTURE2D_DESC &completed_source_desc,
+      const D3D11_TEXTURE2D_DESC &current_source_desc,
+      const models::input_color_space current_color_space
     ) {
-      if (
-        host_sbs_renderer != models::host_sbs_renderer_e::parallax_v2 ||
-        !slot.inference_content_timestamp ||
-        estimate.completed_frame_id != slot.frame_id ||
-        estimate.input_region != slot.depth_input_region ||
-        estimate.color_space != slot.color_space ||
-        estimate.input_region.source_width != source_desc.Width ||
-        estimate.input_region.source_height != source_desc.Height ||
-        slot.observed_root_authority_generation !=
-          authority_generation(live_window_authority) ||
-        slot.observed_region_authority_generation !=
-          authority_generation(live_foreground_region) ||
-        slot.observed_browser_authority_epoch != live_browser_authority_epoch ||
-        slot.observed_interactive_move_size != interactive_move_size_observed ||
-        (slot.depth_input_region.video_region &&
-         (!slot.inference_ddup_damage || !window_region_authorized_for_render(slot))) ||
-        !models::parallax_v2_result_is_authenticated(estimate)
-      ) {
-        reusable_v2.reset();
-        return;
+      const bool completion_route_matches_current =
+        slot.inference_content_timestamp && estimate.completed_frame_id == slot.frame_id &&
+        estimate.input_region == slot.depth_input_region &&
+        estimate.color_space == slot.color_space && estimate.color_space == current_color_space &&
+        estimate.input_region.source_width == completed_source_desc.Width &&
+        estimate.input_region.source_height == completed_source_desc.Height &&
+        source_signatures_match(completed_source_desc, current_source_desc) &&
+        slot.observed_root_authority_generation ==
+          authority_generation(live_window_authority) &&
+        slot.observed_region_authority_generation ==
+          authority_generation(live_foreground_region) &&
+        slot.observed_browser_authority_epoch == live_browser_authority_epoch &&
+        slot.observed_interactive_move_size == interactive_move_size_observed &&
+        (!slot.depth_input_region.video_region ||
+         (slot.inference_ddup_damage && window_region_authorized_for_render(slot)));
+      if (!detail::host_sbs_latest_v2_completion_retention_allowed(
+            host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2,
+            models::parallax_v2_result_is_authenticated(estimate),
+            completion_route_matches_current
+          )) {
+        latest_v2_lineage.reset();
+        return false;
       }
 
-      reusable_v2.estimate = estimate;
+      latest_v2_lineage.estimate = estimate;
       // A reused presentation is not a new inference/completion transition. Preserve the completed
       // geometry identity while preventing reset/cut side effects from replaying on every cursor
       // delivery that shares the same DDup desktop-content clock.
-      reusable_v2.estimate.inference_enqueued = false;
-      reusable_v2.estimate.input_domain_reset = false;
-      reusable_v2.estimate.subtitle_ocr_inference_enqueued = false;
-      reusable_v2.estimate.subtitle_ocr_redispatch_enqueued = false;
+      latest_v2_lineage.estimate.inference_enqueued = false;
+      latest_v2_lineage.estimate.input_domain_reset = false;
+      latest_v2_lineage.estimate.subtitle_ocr_inference_enqueued = false;
+      latest_v2_lineage.estimate.subtitle_ocr_redispatch_enqueued = false;
       // The cache renders current color, never the old private color copy. Retain only the scalar
       // attribution needed by the V2 renderer; matched slots own move-only D3D resources.
-      copy_matched_frame_attribution(reusable_v2.slot, slot);
-      reusable_v2.source_width = source_desc.Width;
-      reusable_v2.source_height = source_desc.Height;
-      reusable_v2.mip_levels = source_desc.MipLevels;
-      reusable_v2.array_size = source_desc.ArraySize;
-      reusable_v2.source_format = source_desc.Format;
-      reusable_v2.sample_count = source_desc.SampleDesc.Count;
-      reusable_v2.sample_quality = source_desc.SampleDesc.Quality;
-      reusable_v2.root_authority_generation =
+      copy_matched_frame_attribution(latest_v2_lineage.slot, slot);
+      latest_v2_lineage.source_width = completed_source_desc.Width;
+      latest_v2_lineage.source_height = completed_source_desc.Height;
+      latest_v2_lineage.mip_levels = completed_source_desc.MipLevels;
+      latest_v2_lineage.array_size = completed_source_desc.ArraySize;
+      latest_v2_lineage.source_format = completed_source_desc.Format;
+      latest_v2_lineage.sample_count = completed_source_desc.SampleDesc.Count;
+      latest_v2_lineage.sample_quality = completed_source_desc.SampleDesc.Quality;
+      latest_v2_lineage.root_authority_generation =
         slot.observed_root_authority_generation;
-      reusable_v2.region_authority_generation =
+      latest_v2_lineage.region_authority_generation =
         slot.observed_region_authority_generation;
-      reusable_v2.browser_authority_epoch =
+      latest_v2_lineage.browser_authority_epoch =
         slot.observed_browser_authority_epoch;
-      reusable_v2.interactive_move_size =
+      latest_v2_lineage.interactive_move_size =
         slot.observed_interactive_move_size;
-      reusable_v2.authenticated = true;
+      latest_v2_lineage.authenticated = true;
+      return true;
     }
 
     bool ensure_sbs_intermediate_storage(const bool input_is_linear) {
@@ -5026,7 +5023,7 @@ namespace platf::dxgi {
       last_window_region_observer_status.reset();
       last_window_region_mapping_status.reset();
       sbs_frame_sequence = 0;
-      reusable_v2.reset();
+      latest_v2_lineage.reset();
       content_reuse_refresh.reset();
       low_motion_reuse_refresh.reset();
       reusable_ocr_input.reset();
@@ -5785,7 +5782,7 @@ namespace platf::dxgi {
     std::optional<std::string_view> last_window_region_observer_status;
     std::optional<std::string_view> last_window_region_mapping_status;
     std::uint64_t sbs_frame_sequence = 0;
-    reusable_v2_t reusable_v2;
+    latest_v2_lineage_t latest_v2_lineage;
     detail::host_sbs_content_refresh_state_t content_reuse_refresh;
     detail::host_sbs_low_motion_refresh_state_t low_motion_reuse_refresh;
     reusable_ocr_input_t reusable_ocr_input;

@@ -217,6 +217,29 @@ namespace platf::dxgi {
              cached_resources_complete;
     }
 
+    /** Retain authenticated V2 lineage independently of current-frame reuse authorization. */
+    [[nodiscard]] constexpr bool host_sbs_latest_v2_completion_retention_allowed(
+      const bool renderer_authenticated,
+      const bool result_authenticated,
+      const bool completion_route_matches_current
+    ) noexcept {
+      return renderer_authenticated && result_authenticated &&
+             completion_route_matches_current;
+    }
+
+    /** Reset retained lineage only when its resource aliases or authority route are invalid. */
+    [[nodiscard]] constexpr bool host_sbs_latest_v2_lineage_reset_required(
+      const bool lineage_authenticated,
+      const bool route_matches_current,
+      const bool snapshot_debug_inputs,
+      const bool authority_reprocess_pending,
+      const bool producer_terminal
+    ) noexcept {
+      return lineage_authenticated &&
+             (!route_matches_current || snapshot_debug_inputs || authority_reprocess_pending ||
+              producer_terminal);
+    }
+
     /** Production-independent selector for the default-off completed-cache experiment. */
     [[nodiscard]] constexpr bool host_sbs_low_motion_cache_reuse_allowed(
       const bool experiment_enabled,

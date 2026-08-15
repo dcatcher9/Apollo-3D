@@ -733,6 +733,43 @@ namespace {
     EXPECT_FALSE(host_sbs_cached_geometry_render_allowed(true, true, true, false));
   }
 
+  TEST(WindowsHostSbsContentReuseTest, LatestLineageRetentionDoesNotAuthorizeRender) {
+    using platf::dxgi::detail::host_sbs_cached_geometry_render_allowed;
+    using platf::dxgi::detail::host_sbs_latest_v2_completion_retention_allowed;
+
+    EXPECT_TRUE(host_sbs_latest_v2_completion_retention_allowed(true, true, true));
+    EXPECT_FALSE(host_sbs_latest_v2_completion_retention_allowed(false, true, true));
+    EXPECT_FALSE(host_sbs_latest_v2_completion_retention_allowed(true, false, true));
+    EXPECT_FALSE(host_sbs_latest_v2_completion_retention_allowed(true, true, false));
+
+    // Retained authenticated resources still fail closed without a current exact/low-motion
+    // geometry match.
+    EXPECT_FALSE(host_sbs_cached_geometry_render_allowed(true, true, false, true));
+  }
+
+  TEST(WindowsHostSbsContentReuseTest, LatestLineageResetCoversAuthorityAndAliasRevocation) {
+    using platf::dxgi::detail::host_sbs_latest_v2_lineage_reset_required;
+
+    EXPECT_FALSE(host_sbs_latest_v2_lineage_reset_required(
+      false, false, true, true, true
+    ));
+    EXPECT_FALSE(host_sbs_latest_v2_lineage_reset_required(
+      true, true, false, false, false
+    ));
+    EXPECT_TRUE(host_sbs_latest_v2_lineage_reset_required(
+      true, false, false, false, false
+    ));
+    EXPECT_TRUE(host_sbs_latest_v2_lineage_reset_required(
+      true, true, true, false, false
+    ));
+    EXPECT_TRUE(host_sbs_latest_v2_lineage_reset_required(
+      true, true, false, true, false
+    ));
+    EXPECT_TRUE(host_sbs_latest_v2_lineage_reset_required(
+      true, true, false, false, true
+    ));
+  }
+
   TEST(WindowsHostSbsContentReuseTest, SuccessfulEnqueueBoundsSkipsAndAge) {
     using namespace std::chrono_literals;
     platf::dxgi::detail::host_sbs_content_refresh_state_t state;

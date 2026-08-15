@@ -3730,6 +3730,60 @@ TEST(DirectxShaderSourceTest, ConvertsEveryChromaTapBeforeAveraging) {
   EXPECT_EQ(shader.find("CONVERT_CHROMA_PER_TAP"), std::string::npos);
 }
 
+TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorization) {
+  const auto display =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
+  ASSERT_FALSE(display.empty());
+
+  const auto retain_begin = display.find("[[nodiscard]] bool retain_latest_v2_lineage(");
+  const auto retain_end = display.find("bool ensure_sbs_intermediate_storage", retain_begin);
+  ASSERT_NE(retain_begin, std::string::npos);
+  ASSERT_NE(retain_end, std::string::npos);
+  const auto retain = display.substr(retain_begin, retain_end - retain_begin);
+  EXPECT_NE(
+    retain.find("host_sbs_latest_v2_completion_retention_allowed"),
+    std::string::npos
+  );
+  EXPECT_EQ(retain.find("matched_input_reuse_kind"), std::string::npos);
+  EXPECT_EQ(retain.find("matched_low_motion_candidate"), std::string::npos);
+
+  const auto frame_begin = display.find("const auto frame_id = ++sbs_frame_sequence");
+  const auto post_completion = display.find(
+    "// Cached fields alias the estimator's singleton V2 textures",
+    frame_begin
+  );
+  ASSERT_NE(frame_begin, std::string::npos);
+  ASSERT_NE(post_completion, std::string::npos);
+  const auto selection = display.substr(frame_begin, post_completion - frame_begin);
+  EXPECT_NE(selection.find("host_sbs_latest_v2_lineage_reset_required"), std::string::npos);
+  EXPECT_NE(selection.find("const bool cached_geometry_matches"), std::string::npos);
+  EXPECT_NE(selection.find("host_sbs_cached_geometry_render_allowed"), std::string::npos);
+
+  // Route/dump/reprocess/terminal revocation plus every completion owner keeps the singleton-alias
+  // reset matrix in the pre-render selection path.
+  std::size_t resets = 0u;
+  for (std::size_t offset = 0u;
+       (offset = selection.find("latest_v2_lineage.reset();", offset)) != std::string::npos;
+       ++offset) {
+    ++resets;
+  }
+  EXPECT_EQ(resets, 7u);
+  EXPECT_EQ(display.find("reusable_v2"), std::string::npos);
+
+  const auto fail_flat = display.find("void fail_depth_pipeline_flat()");
+  const auto init_output = display.find("int init_output(");
+  ASSERT_NE(fail_flat, std::string::npos);
+  ASSERT_NE(init_output, std::string::npos);
+  EXPECT_NE(
+    display.find("latest_v2_lineage.reset();", fail_flat),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.find("latest_v2_lineage.reset();", init_output),
+    std::string::npos
+  );
+}
+
 TEST(DirectxShaderSourceTest, HostSbsRejectsRotationAndUsesMatchedV2Frames) {
   const auto display =
     read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
