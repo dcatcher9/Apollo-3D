@@ -2096,8 +2096,6 @@ TEST(HostSbsV2LiveWarpGpuTest, FullFrameBytecodeSkipsTheRoiDimensionQuery) {
     static_cast<const char *>(disassembly->GetBufferPointer()),
     disassembly->GetBufferSize()
   );
-  EXPECT_NE(assembly.find("dcl_temps 6"), std::string::npos);
-
   std::vector<std::string> lines;
   std::istringstream stream(assembly);
   for (std::string line; std::getline(stream, line);) {

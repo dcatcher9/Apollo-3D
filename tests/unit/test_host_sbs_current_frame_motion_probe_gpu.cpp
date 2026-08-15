@@ -55,6 +55,8 @@ namespace {
     std::array<std::uint32_t, models::depth_coordinate_v2::subtitle_ocr_record_word_count>
       previous_ocr_record {};
     std::uint32_t ocr_input_flags = 0u;
+    std::uint32_t ocr_input_value_count =
+      models::adaptive_motion_ocr_input_value_count;
     std::uint64_t ocr_baseline_frame_id = 0u;
   };
 
@@ -323,7 +325,7 @@ namespace {
         bottom_top,
         bottom_bottom,
         inputs.ocr_input_flags,
-        models::adaptive_motion_ocr_input_value_count,
+        inputs.ocr_input_value_count,
         static_cast<std::uint32_t>(inputs.ocr_baseline_frame_id),
         static_cast<std::uint32_t>(inputs.ocr_baseline_frame_id >> 32u),
         0u,
@@ -558,6 +560,32 @@ TEST(HostSbsCurrentFrameMotionProbeGpuTest, PreservesExactEvidenceAndStateIdenti
   EXPECT_EQ(exact_ocr.sample.ocr_input_exact_mismatch_values, 0u);
   EXPECT_EQ(exact_ocr.sample.ocr_input_nonfinite_values, 0u);
   EXPECT_TRUE(exact_ocr.sample.exact_ocr_input_matches_baseline());
+  const auto active_dirty_decision = [](const probe_execution_t &execution) {
+    return models::select_adaptive_motion_hold(
+      true,
+      false,
+      true,
+      true,
+      false,
+      false,
+      models::depth_optional_work_mode_e::ordinary,
+      models::adaptive_motion_probe_result {
+        .status = models::adaptive_motion_probe_status_e::ready,
+        .sample = execution.sample,
+      }
+    );
+  };
+  EXPECT_EQ(
+    active_dirty_decision(exact_ocr),
+    models::adaptive_motion_hold_decision_e::hold
+  );
+  EXPECT_TRUE((models::adaptive_motion_observation_hold_result {
+                 .held = true,
+                 .current_frame_id = exact_ocr.sample.current_frame_id,
+                 .baseline_frame_id = exact_ocr.sample.baseline_frame_id,
+                 .ocr_proof = models::adaptive_motion_ocr_hold_proof_e::exact_ocr_input,
+               })
+                .valid());
 
   exact_ocr_inputs.current_ocr[17u] =
     std::bit_cast<float>(std::bit_cast<std::uint32_t>(0.0f) + 1u);
@@ -566,6 +594,10 @@ TEST(HostSbsCurrentFrameMotionProbeGpuTest, PreservesExactEvidenceAndStateIdenti
   ASSERT_TRUE(ocr_mismatch.decoded);
   EXPECT_EQ(ocr_mismatch.sample.ocr_input_exact_mismatch_values, 1u);
   EXPECT_FALSE(ocr_mismatch.sample.exact_ocr_input_matches_baseline());
+  EXPECT_EQ(
+    active_dirty_decision(ocr_mismatch),
+    models::adaptive_motion_hold_decision_e::infer
+  );
   exact_ocr_inputs.current_ocr[17u] = 0.0f;
 
   exact_ocr_inputs.current_ocr[23u] =
@@ -577,6 +609,10 @@ TEST(HostSbsCurrentFrameMotionProbeGpuTest, PreservesExactEvidenceAndStateIdenti
   EXPECT_EQ(ocr_nonfinite.sample.ocr_input_exact_mismatch_values, 0u);
   EXPECT_EQ(ocr_nonfinite.sample.ocr_input_nonfinite_values, 1u);
   EXPECT_FALSE(ocr_nonfinite.sample.exact_ocr_input_matches_baseline());
+  EXPECT_EQ(
+    active_dirty_decision(ocr_nonfinite),
+    models::adaptive_motion_hold_decision_e::infer
+  );
   exact_ocr_inputs.current_ocr[23u] = 0.0f;
   exact_ocr_inputs.previous_ocr[23u] = 0.0f;
 
@@ -586,6 +622,10 @@ TEST(HostSbsCurrentFrameMotionProbeGpuTest, PreservesExactEvidenceAndStateIdenti
   ASSERT_TRUE(wrong_ocr_owner.decoded);
   EXPECT_FALSE(wrong_ocr_owner.sample.ocr_input_baseline_valid);
   EXPECT_FALSE(wrong_ocr_owner.sample.exact_ocr_input_matches_baseline());
+  EXPECT_EQ(
+    active_dirty_decision(wrong_ocr_owner),
+    models::adaptive_motion_hold_decision_e::infer
+  );
   exact_ocr_inputs.previous_ocr_record[5]++;
 
   exact_ocr_inputs.previous_ocr_record[2] = 0u;
@@ -594,6 +634,17 @@ TEST(HostSbsCurrentFrameMotionProbeGpuTest, PreservesExactEvidenceAndStateIdenti
   ASSERT_TRUE(invalid_ocr_record.decoded);
   EXPECT_FALSE(invalid_ocr_record.sample.ocr_input_baseline_valid);
   EXPECT_FALSE(invalid_ocr_record.sample.exact_ocr_input_matches_baseline());
+  EXPECT_EQ(
+    active_dirty_decision(invalid_ocr_record),
+    models::adaptive_motion_hold_decision_e::infer
+  );
+
+  authorize_exact_ocr_inputs(exact_ocr_inputs);
+  exact_ocr_inputs.ocr_input_value_count =
+    models::adaptive_motion_ocr_input_value_count + 1u;
+  probe_execution_t malformed_ocr_count;
+  ASSERT_TRUE(fixture.run(exact_ocr_inputs, state, malformed_ocr_count, error)) << error;
+  EXPECT_FALSE(malformed_ocr_count.decoded);
 
   probe_inputs_t one_bit_inputs;
   constexpr std::size_t one_bit_index = 2u * field_width + 3u;

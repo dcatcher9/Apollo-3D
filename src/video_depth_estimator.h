@@ -481,7 +481,7 @@ namespace models {
     bool enabled = false;
     // Display-side DDup/OCR/route/cadence checks may arm the estimator's independent, fail-closed
     // selector. The decoded probe remains insufficient authority on its own.
-    bool authorize_near_identical_observation_hold = false;
+    bool authorize_model_equivalent_observation_hold = false;
     // This caller-owned proof remains sufficient if optional exact OCR-input comparison is
     // unavailable. A dirty crop must instead authenticate the estimator-owned exact input below.
     bool ocr_damage_unchanged = false;

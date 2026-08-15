@@ -601,10 +601,10 @@ model-input equality as described below.
 
 Only a cadence-selected broad candidate requests the optional current-frame probe. Its current and
 baseline IDs are copied from the private candidate and latest authenticated V2 completion; the
-baseline must also equal the estimator's last postprocessed frame. After ordinary preprocessing, a
-shader outside the authenticated producer closure compares every admitted current NCHW value,
-appearance ordinal, and exclusion bit with that exact baseline and copies one fixed 32-word CFM3
-record. When an estimator-owned OCR baseline exists, the same dispatch also compares all
+baseline must also equal the estimator's last postprocessed frame. After ordinary preprocessing,
+an independently source-authenticated shader outside the producer closure compares every admitted
+current NCHW value, appearance ordinal, and exclusion bit with that exact baseline and copies one
+fixed 32-word CFM3 record. When an estimator-owned OCR baseline exists, the same dispatch compares
 `960x160x3` normalized FP32 OCR input values bit-for-bit and validates that the retained OCR8 header
 and frame owner describe the same baseline. The raw motion verdict calls only exact NCHW-bit,
 appearance-ordinal-bit, and exclusion equality quiet; it is never standalone hold authority. RGB
@@ -644,14 +644,21 @@ later refuses the cached render, so a route or telemetry reset cannot grant a se
 hold. Exact content-clock/ROI reuse remains independent, and model-equivalent holds consume neither
 the exact `16`/`250 ms` refresh budget nor the low-motion one-hold budget.
 
-The exact OCR-input baseline is estimator-owned rather than a display cache shortcut. It is copied
-only after one ordinary joined DAV2/OCR completion has produced V2 and an authoritative OCR8 record;
-a damage-proven OCR redispatch may roll only that exact owner forward. Domain changes, subtitle
-suppression, detector abstention/failure, producer failure, optional-probe loss, and unsafe interop
-cleanup invalidate it. Optional comparison allocation or registration failure disables only the
-dirty-crop proof: ordinary OCR and the independent DDup-clean hold remain available. A mapped OCR
-input remains stream-owned through its queued CUDA unmap even when the exact hold submits neither
-TensorRT engine, preventing the next delivery from racing the fixed interop buffer.
+The exact OCR-input baseline is estimator-owned rather than a display cache shortcut. A candidate
+copy is queued only after one ordinary joined DAV2/OCR completion has produced V2 and submitted
+OCR postprocessing; it becomes hold authority only when a later CFM3 probe validates the retained
+OCR8 schema, validity, and exact frame owner. A damage-proven OCR redispatch may roll only that
+exact owner forward. Domain changes, subtitle suppression, detector abstention/failure, producer
+failure, optional-probe loss, and unsafe interop cleanup invalidate it. Optional comparison
+allocation or registration failure disables only the dirty-crop proof: ordinary OCR and the
+independent DDup-clean hold remain available. A mapped OCR input remains stream-owned through its
+queued CUDA unmap even when the exact hold submits neither TensorRT engine, preventing the next
+delivery from racing the fixed interop buffer.
+
+The optional CFM3 shader closure is pinned independently at SHA-256
+`c89e52371bead4517d6299c4d08712a05508ad35cae20d7c2f7948adff63b0c2`. A source snapshot or
+closure mismatch disables the adaptive probe and all model-equivalent holds without changing the
+authenticated V2 producer, ordinary DAV2/OCR inference, or rendering.
 
 The live source signature, transfer domain, root/region generations, browser epoch, and interactive
 state are observed independently of cache authentication. Any change clears predictive evidence,

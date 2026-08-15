@@ -103,7 +103,7 @@ def depth_lag_report(
         fixture: dict[str, Any], damage_mode: str, phase_offset: int) -> list[dict[str, Any]]:
     """Score an ideal current-depth path or a counterfactual one-hold broad-depth path.
 
-    ``localized`` always infers. ``broad_single_rect`` follows the shadow cadence's alternating
+    ``localized`` always infers. ``broad_single_rect`` follows the adaptive cadence's alternating
     depth-hold opportunity; its JSON contract marks OCR as separately required on those holds.
     """
     if damage_mode not in fixture["damage_modes"]:

@@ -821,8 +821,8 @@ namespace platf::dxgi {
           bool force_fresh_current_color = false;
           bool using_cached_estimate = false;
           detail::host_sbs_depth_reuse_authorization_t depth_reuse_authorization;
-          auto adaptive_shadow_decision =
-            detail::host_sbs_adaptive_shadow_decision_e::infer;
+          auto adaptive_hold_decision =
+            detail::host_sbs_adaptive_hold_decision_e::infer;
           std::uint64_t adaptive_probe_baseline_frame_id = 0u;
           bool adaptive_probe_ocr_damage_unchanged = false;
           detail::host_sbs_model_equivalent_candidate_t
@@ -859,7 +859,7 @@ namespace platf::dxgi {
           const bool adaptive_active = adaptive_motion_active_enabled();
           const bool adaptive_enabled = adaptive_shadow || adaptive_active;
           const bool adaptive_refresh_required_at_entry =
-            adaptive_active && adaptive_shadow_cadence.refresh_required();
+            adaptive_active && adaptive_hold_cadence.refresh_required();
           const bool inspect_low_motion_candidate =
             diagnostics_enabled || low_motion_gate_enabled;
           const bool adaptive_route_observable =
@@ -976,14 +976,14 @@ namespace platf::dxgi {
                   ++adaptive_shadow_localized_veto;
                 }
               }
-              adaptive_shadow_decision = adaptive_shadow_cadence.observe_changed(
+              adaptive_hold_decision = adaptive_hold_cadence.observe_changed(
                 current_content_timestamp,
                 broad_depth_candidate,
                 reuse_now
               );
               if (
-                adaptive_shadow_decision ==
-                detail::host_sbs_adaptive_shadow_decision_e::hold_candidate
+                adaptive_hold_decision ==
+                detail::host_sbs_adaptive_hold_decision_e::hold_candidate
               ) {
                 adaptive_probe_ocr_damage_unchanged = damage->ocr_crop_unchanged;
                 const auto candidate_class =
@@ -1286,8 +1286,8 @@ namespace platf::dxgi {
                 );
                 const bool authorize_active_model_hold =
                   adaptive_active &&
-                  adaptive_shadow_decision ==
-                    detail::host_sbs_adaptive_shadow_decision_e::hold_candidate &&
+                  adaptive_hold_decision ==
+                    detail::host_sbs_adaptive_hold_decision_e::hold_candidate &&
                   !matched_inference_pending_at_entry && !any_pending_slot &&
                   active_model_hold_candidate_matches(
                     *matched_candidate_slot,
@@ -1310,7 +1310,7 @@ namespace platf::dxgi {
                   optional_work,
                   models::adaptive_motion_probe_request {
                     .enabled = probe_plan.enabled,
-                    .authorize_near_identical_observation_hold =
+                    .authorize_model_equivalent_observation_hold =
                       authorize_active_model_hold,
                     .ocr_damage_unchanged =
                       adaptive_probe_ocr_damage_unchanged,
@@ -1474,12 +1474,12 @@ namespace platf::dxgi {
                     adaptive_enabled &&
                     (
                       adaptive_active ||
-                      detail::host_sbs_adaptive_shadow_records_enqueue(
-                        adaptive_shadow_decision
+                      detail::host_sbs_adaptive_records_enqueue(
+                        adaptive_hold_decision
                       )
                     )
                   ) {
-                    adaptive_shadow_cadence.record_successful_enqueue(
+                    adaptive_hold_cadence.record_successful_enqueue(
                       current_content_timestamp,
                       reuse_now
                     );
@@ -2956,14 +2956,23 @@ namespace platf::dxgi {
           result.sample.current_frame_id,
           result.sample.baseline_frame_id
         );
-      if (!ocr_damage_unchanged) {
-        if (!identity_matches || !result.sample.ocr_input_comparison_valid) {
+      switch (detail::host_sbs_adaptive_ocr_probe_class(
+        ocr_damage_unchanged,
+        identity_matches,
+        result.sample.ocr_input_comparison_valid,
+        result.sample.exact_ocr_input_matches_baseline()
+      )) {
+        case detail::host_sbs_adaptive_ocr_probe_class_e::not_applicable:
+          break;
+        case detail::host_sbs_adaptive_ocr_probe_class_e::unavailable:
           ++adaptive_shadow_ocr_dirty_exact_unavailable;
-        } else if (result.sample.exact_ocr_input_matches_baseline()) {
+          break;
+        case detail::host_sbs_adaptive_ocr_probe_class_e::exact_equal:
           ++adaptive_shadow_ocr_dirty_exact_equal;
-        } else {
+          break;
+        case detail::host_sbs_adaptive_ocr_probe_class_e::veto:
           ++adaptive_shadow_ocr_dirty_exact_veto;
-        }
+          break;
       }
 
       detail::host_sbs_current_frame_probe_class_e probe_class =
@@ -3025,7 +3034,7 @@ namespace platf::dxgi {
         tally_adaptive_motion_probe_unknown(discarded.probes);
       }
       adaptive_motion_state.reset();
-      adaptive_shadow_cadence.reset();
+      adaptive_hold_cadence.reset();
       if (reset_schedule_watermark) {
         adaptive_motion_last_scheduled_frame_id = 0u;
       }
@@ -4086,6 +4095,7 @@ namespace platf::dxgi {
       latest_v2_lineage.estimate.subtitle_ocr_inference_enqueued = false;
       latest_v2_lineage.estimate.subtitle_ocr_redispatch_enqueued = false;
       latest_v2_lineage.estimate.adaptive_motion_observation_hold = {};
+      latest_v2_lineage.estimate.current_frame_motion_probe = {};
       // The cache renders current color, never the old private color copy. Retain only the scalar
       // attribution needed by the V2 renderer; matched slots own move-only D3D resources.
       copy_matched_frame_attribution(latest_v2_lineage.slot, slot);
@@ -5596,7 +5606,7 @@ namespace platf::dxgi {
       sbs_telemetry_last_copy = {};
       adaptive_motion_state.reset();
       adaptive_motion_route_state.reset();
-      adaptive_shadow_cadence.reset();
+      adaptive_hold_cadence.reset();
       (void) adaptive_motion_audit.discard_all();
       adaptive_motion_last_scheduled_frame_id = 0u;
       adaptive_motion_min_sampled_frame_id = 0u;
@@ -6351,7 +6361,7 @@ namespace platf::dxgi {
     std::chrono::steady_clock::time_point sbs_telemetry_last_copy {};
     detail::host_sbs_adaptive_motion_state_t adaptive_motion_state;
     detail::host_sbs_adaptive_motion_route_state_t adaptive_motion_route_state;
-    detail::host_sbs_adaptive_shadow_cadence_t adaptive_shadow_cadence;
+    detail::host_sbs_adaptive_hold_cadence_t adaptive_hold_cadence;
     detail::host_sbs_adaptive_motion_audit_t adaptive_motion_audit;
     std::uint64_t adaptive_motion_last_scheduled_frame_id = 0u;
     std::uint64_t adaptive_motion_min_sampled_frame_id = 0u;

@@ -101,6 +101,8 @@ namespace models::host_sbs_shader_cache {
     "dbd718c81a960c58eb4268d4d8a83e595ec2da9fdd39bb406d87255aefaf694d";
   inline constexpr std::string_view sbs_flat_fallback_source_closure_sha256 =
     "7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4";
+  inline constexpr std::string_view adaptive_motion_probe_source_closure_sha256 =
+    "c89e52371bead4517d6299c4d08712a05508ad35cae20d7c2f7948adff63b0c2";
 
   // Identity-only minimal closure used to match the model/preprocess calibration. Production
   // bytecode is never compiled from this smaller snapshot: all rgb_to_nchw entry points are
@@ -235,8 +237,9 @@ namespace models::host_sbs_shader_cache {
     depth_coordinate_v2_coordinate_diagnostic,
   };
 
-  // Shadow-only, optional evidence. Keep this root outside the authenticated producer closure so
-  // compile/resource/readback failure cannot change schema-54 geometry or fail live Host SBS.
+  // Active, optional reuse evidence. Keep this independently pinned root outside the
+  // authenticated producer closure so source-authentication, compile, resource, or readback
+  // failure disables only adaptive reuse and cannot change schema-54 geometry or fail live SBS.
   inline constexpr std::array adaptive_motion_probe_specs {
     host_sbs_current_frame_motion_probe,
   };

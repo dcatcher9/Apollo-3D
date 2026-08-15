@@ -964,6 +964,10 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
     cache::adaptive_motion_probe_specs
   );
   ASSERT_TRUE(motion_probe_sources);
+  ASSERT_EQ(
+    cache::source_closure_sha256(motion_probe_sources),
+    cache::adaptive_motion_probe_source_closure_sha256
+  );
   ASSERT_TRUE(cache::get(
     motion_probe_sources,
     cache::host_sbs_current_frame_motion_probe
@@ -4259,6 +4263,10 @@ TEST(DirectxShaderSourceTest, AdaptiveMotionProbeAuthenticatesCutStateEncodings)
   EXPECT_EQ(models::depth_coordinate_v2::subtitle_ocr_record_schema, 3u);
   EXPECT_EQ(models::depth_coordinate_v2::subtitle_ocr_record_tag, 0x3852434Fu);
   EXPECT_NE(shader.find("MOTION_PROBE_CONTRACT_TAG 0x334D4643u"), std::string::npos);
+  EXPECT_NE(
+    shader.find("MOTION_PROBE_OCR_INPUT_VALUE_COUNT 460800u"),
+    std::string::npos
+  );
   EXPECT_NE(shader.find("MOTION_PROBE_OCR_RECORD_SCHEMA 3u"), std::string::npos);
   EXPECT_NE(shader.find("MOTION_PROBE_OCR_RECORD_TAG 0x3852434Fu"), std::string::npos);
   EXPECT_NE(shader.find("PROBE_WORD_OCR_INPUT_NONFINITE 31u"), std::string::npos);
@@ -4289,6 +4297,57 @@ TEST(DirectxShaderSourceTest, AdaptiveMotionProbeAuthenticatesCutStateEncodings)
   );
   EXPECT_NE(
     shader.find("ocr_index < probe_ocr_input_value_count"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    shader.find(
+      "probe_ocr_input_value_count == MOTION_PROBE_OCR_INPUT_VALUE_COUNT"
+    ),
+    std::string::npos
+  );
+}
+
+TEST(DirectxShaderSourceTest, AdaptiveMotionProbeAuthenticatesSourceBeforeCompile) {
+  namespace cache = models::host_sbs_shader_cache;
+  const auto sources = cache::snapshot_sources(
+    SUNSHINE_SHADERS_DIR,
+    cache::adaptive_motion_probe_specs
+  );
+  ASSERT_TRUE(sources);
+  EXPECT_EQ(
+    cache::source_closure_sha256(sources),
+    cache::adaptive_motion_probe_source_closure_sha256
+  );
+
+  const auto estimator =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
+  ASSERT_FALSE(estimator.empty());
+  const auto initialize = estimator.find("void initialize_adaptive_motion_probe(");
+  const auto snapshot = estimator.find(
+    "host_sbs_shader_cache::snapshot_sources(",
+    initialize
+  );
+  const auto authenticate = estimator.find(
+    "host_sbs_shader_cache::adaptive_motion_probe_source_closure_sha256",
+    snapshot
+  );
+  const auto compile = estimator.find("!create_shader(", authenticate);
+  const auto next_method = estimator.find(
+    "void destroy_adaptive_motion_probe_event(",
+    compile
+  );
+  ASSERT_NE(initialize, std::string::npos);
+  ASSERT_NE(snapshot, std::string::npos);
+  ASSERT_NE(authenticate, std::string::npos);
+  ASSERT_NE(compile, std::string::npos);
+  ASSERT_NE(next_method, std::string::npos);
+  EXPECT_LT(snapshot, authenticate);
+  EXPECT_LT(authenticate, compile);
+  EXPECT_LT(compile, next_method);
+  EXPECT_NE(
+    estimator.substr(authenticate, compile - authenticate).find(
+      "shader source closure authentication failed"
+    ),
     std::string::npos
   );
 }
@@ -4372,7 +4431,7 @@ TEST(DirectxShaderSourceTest, CurrentFrameProbeHasSeparateShadowAndActiveOwners)
     active_precheck
   );
   const auto active_request = display.find(
-    ".authorize_near_identical_observation_hold =",
+    ".authorize_model_equivalent_observation_hold =",
     active_post_copy
   );
   const auto active_identity = display.find(
@@ -4449,7 +4508,7 @@ TEST(DirectxShaderSourceTest, CurrentFrameProbeHasSeparateShadowAndActiveOwners)
     real_enqueue
   );
   const auto cadence_rearm = display.find(
-    "adaptive_shadow_cadence.record_successful_enqueue(",
+    "adaptive_hold_cadence.record_successful_enqueue(",
     real_enqueue
   );
   ASSERT_NE(real_enqueue, std::string::npos);
@@ -4538,6 +4597,13 @@ TEST(DirectxShaderSourceTest, CurrentFrameProbeHasSeparateShadowAndActiveOwners)
     ),
     std::string::npos
   );
+  EXPECT_NE(
+    display.find(
+      "latest_v2_lineage.estimate.current_frame_motion_probe = {};",
+      cache_copy
+    ),
+    std::string::npos
+  );
 
   const auto observer_definition = display.find(
     "void record_current_frame_motion_probe("
@@ -4556,8 +4622,8 @@ TEST(DirectxShaderSourceTest, CurrentFrameProbeHasSeparateShadowAndActiveOwners)
     observer_body.find("host_sbs_current_frame_probe_identity_matches"),
     std::string::npos
   );
-  EXPECT_EQ(observer_body.find("adaptive_shadow_decision ="), std::string::npos);
-  EXPECT_EQ(observer_body.find("adaptive_shadow_cadence"), std::string::npos);
+  EXPECT_EQ(observer_body.find("adaptive_hold_decision ="), std::string::npos);
+  EXPECT_EQ(observer_body.find("adaptive_hold_cadence"), std::string::npos);
   EXPECT_EQ(observer_body.find("latest_v2_lineage"), std::string::npos);
   EXPECT_EQ(observer_body.find("matched_candidate_slot"), std::string::npos);
 }
@@ -4600,6 +4666,49 @@ TEST(DirectxShaderSourceTest, AdaptiveExactOcrInputOwnershipFailsOpen) {
   EXPECT_NE(hold_block.find("ocr_bindings_ok"), std::string::npos);
   EXPECT_NE(
     hold_block.find("adaptive_ocr_authority_still_owned"),
+    std::string::npos
+  );
+
+  const auto probe_dispatch = estimator.find(
+    "bool dispatch_adaptive_motion_probe("
+  );
+  const auto probe_collect_definition = estimator.find(
+    "adaptive_motion_probe_result collect_adaptive_motion_probe(",
+    probe_dispatch
+  );
+  ASSERT_NE(probe_dispatch, std::string::npos);
+  ASSERT_NE(probe_collect_definition, std::string::npos);
+  const auto dispatch_body = estimator.substr(
+    probe_dispatch,
+    probe_collect_definition - probe_dispatch
+  );
+  const auto constants_abi = dispatch_body.find(
+    "const std::array<std::uint32_t, 12> constants"
+  );
+  const auto inputs_abi = dispatch_body.find(
+    "ID3D11ShaderResourceView *inputs[10]"
+  );
+  const auto current_ocr_binding = dispatch_body.find(
+    "ocr_input_srv.Get()",
+    inputs_abi
+  );
+  const auto previous_ocr_binding = dispatch_body.find(
+    "ocr_previous_input_srv.Get()",
+    current_ocr_binding
+  );
+  const auto ocr_record_binding = dispatch_body.find(
+    "ocr_box_record_srv.Get()",
+    previous_ocr_binding
+  );
+  ASSERT_NE(constants_abi, std::string::npos);
+  ASSERT_NE(inputs_abi, std::string::npos);
+  ASSERT_NE(current_ocr_binding, std::string::npos);
+  ASSERT_NE(previous_ocr_binding, std::string::npos);
+  ASSERT_NE(ocr_record_binding, std::string::npos);
+  EXPECT_LT(current_ocr_binding, previous_ocr_binding);
+  EXPECT_LT(previous_ocr_binding, ocr_record_binding);
+  EXPECT_NE(
+    dispatch_body.find("CSSetShaderResources(0u, 10u, inputs)"),
     std::string::npos
   );
 
@@ -5907,7 +6016,7 @@ TEST(DirectxShaderSourceTest, HostTelemetryReadbackIsNonblockingAndCutBridgeCont
   EXPECT_EQ(readback.find("sleep_for"), std::string::npos);
   EXPECT_EQ(readback.find("while ("), std::string::npos);
 
-  // External copies remain subscription-gated; the separate adaptive shadow may request its own
+  // External copies remain subscription-gated; the separate adaptive probe may request its own
   // exact-frame evidence. Either demand remains ordered after production output.
   const auto external_due_declaration = display.find("const bool external_due =");
   const auto enabled_gate = display.find("enabled &&", external_due_declaration);

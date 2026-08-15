@@ -310,7 +310,7 @@ def exact_evidence(
             fixture["classification"]["unchanged"] if exact_equal
             else fixture["classification"]["changed"]
         ),
-        # Even exact equality is only a shadow observation in this fixture.
+        # This source-pixel oracle never grants runtime authority by itself.
         "active_authorized": False,
     }
 

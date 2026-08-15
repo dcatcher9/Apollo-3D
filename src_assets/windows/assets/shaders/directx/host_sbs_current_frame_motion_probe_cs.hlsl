@@ -31,6 +31,7 @@ cbuffer ProbeConstants : register(b1) {
 };
 
 #define MOTION_PROBE_CONTRACT_TAG 0x334D4643u
+#define MOTION_PROBE_OCR_INPUT_VALUE_COUNT 460800u
 #define MOTION_PROBE_OCR_RECORD_SCHEMA 3u
 #define MOTION_PROBE_OCR_RECORD_TAG 0x3852434Fu
 #define MOTION_PROBE_MIN_SCENE_AGE 8u
@@ -209,7 +210,8 @@ void main(
 
         if ((probe_ocr_input_flags &
              (OCR_INPUT_BASELINE_CANDIDATE | OCR_INPUT_CURRENT_PREPROCESSED)) ==
-            (OCR_INPUT_BASELINE_CANDIDATE | OCR_INPUT_CURRENT_PREPROCESSED)) {
+            (OCR_INPUT_BASELINE_CANDIDATE | OCR_INPUT_CURRENT_PREPROCESSED) &&
+            probe_ocr_input_value_count == MOTION_PROBE_OCR_INPUT_VALUE_COUNT) {
             uint field_index = dtid.y * target_w + dtid.x;
             uint field_area = target_w * target_h;
             for (uint ocr_index = field_index;

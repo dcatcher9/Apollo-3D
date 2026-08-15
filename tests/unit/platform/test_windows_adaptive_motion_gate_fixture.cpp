@@ -152,7 +152,7 @@ namespace {
 
   TEST(WindowsHostSbsAdaptiveMotionFixtureTest,
        BothCadencePhasesHoldEachTransitionExactlyOnce) {
-    using decision_e = adaptive::host_sbs_adaptive_shadow_decision_e;
+    using decision_e = adaptive::host_sbs_adaptive_hold_decision_e;
     const auto fixture = load_adaptive_motion_fixture();
     const auto event_count = fixture.at("objects").size() * fixture.at("events").size();
     ASSERT_EQ(event_count, 15u);
@@ -165,7 +165,7 @@ namespace {
 
     std::vector<std::vector<bool>> held_by_phase;
     for (const auto phase : phase_offsets) {
-      adaptive::host_sbs_adaptive_shadow_cadence_t cadence;
+      adaptive::host_sbs_adaptive_hold_cadence_t cadence;
       const auto base = std::chrono::steady_clock::time_point {1000ms};
       cadence.record_successful_enqueue(base, base);
       unsigned tick = 0u;

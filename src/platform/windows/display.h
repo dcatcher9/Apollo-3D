@@ -189,7 +189,6 @@ namespace platf::dxgi {
 
     struct host_sbs_current_frame_probe_plan_t {
       std::chrono::steady_clock::time_point deadline {};
-      std::chrono::steady_clock::duration budget {};
       std::uint32_t max_queries = 1u;
       bool enabled = false;
     };
@@ -245,7 +244,7 @@ namespace platf::dxgi {
       };
     }
 
-    /** Bound optional shadow evidence by the encode cadence without suppressing its immediate
+    /** Bound optional adaptive probe evidence by the encode cadence without suppressing its immediate
      * query. The caller owns candidate authentication; this helper owns only timing.
      */
     [[nodiscard]] constexpr host_sbs_current_frame_probe_plan_t
@@ -271,7 +270,6 @@ namespace platf::dxgi {
         cadence_deadline,
         now + host_sbs_current_frame_probe_max_wait
       );
-      plan.budget = plan.deadline - now;
       plan.max_queries = host_sbs_current_frame_probe_max_queries;
       return plan;
     }
@@ -516,6 +514,30 @@ namespace platf::dxgi {
       exact_motion,
     };
 
+    enum class host_sbs_adaptive_ocr_probe_class_e : std::uint8_t {
+      not_applicable,
+      exact_equal,
+      veto,
+      unavailable,
+    };
+
+    [[nodiscard]] constexpr host_sbs_adaptive_ocr_probe_class_e
+    host_sbs_adaptive_ocr_probe_class(
+      const bool ocr_damage_unchanged,
+      const bool identity_matches,
+      const bool comparison_valid,
+      const bool exact_matches
+    ) noexcept {
+      if (ocr_damage_unchanged) {
+        return host_sbs_adaptive_ocr_probe_class_e::not_applicable;
+      }
+      if (!identity_matches || !comparison_valid) {
+        return host_sbs_adaptive_ocr_probe_class_e::unavailable;
+      }
+      return exact_matches ? host_sbs_adaptive_ocr_probe_class_e::exact_equal :
+                             host_sbs_adaptive_ocr_probe_class_e::veto;
+    }
+
     /** Classify one authenticated completed CutBridge observation.
      *
      * A settled detector has exactly both armed bits, with only the latched bit optionally set:
@@ -676,26 +698,24 @@ namespace platf::dxgi {
       std::optional<host_sbs_adaptive_motion_route_epoch_t> observed_;
     };
 
-    enum class host_sbs_adaptive_shadow_decision_e : std::uint8_t {
+    enum class host_sbs_adaptive_hold_decision_e : std::uint8_t {
       infer,
       hold_candidate,
       hold_same_identity,
     };
 
-    [[nodiscard]] constexpr bool host_sbs_adaptive_shadow_records_enqueue(
-      const host_sbs_adaptive_shadow_decision_e decision
+    [[nodiscard]] constexpr bool host_sbs_adaptive_records_enqueue(
+      const host_sbs_adaptive_hold_decision_e decision
     ) noexcept {
-      return decision == host_sbs_adaptive_shadow_decision_e::infer;
+      return decision == host_sbs_adaptive_hold_decision_e::infer;
     }
 
-    /** Simulate the future one-hold cadence without changing live admission or rendering.
+    /** Own the one-hold cadence shared by shadow simulation and active model-equivalent reuse.
      *
-     * A candidate consumes the simulated arm even though shadow mode still performs the real
-     * enqueue. The next distinct identity must therefore simulate inference before another
-     * candidate can be armed, matching the eventual active policy instead of predicting every
-     * quiet frame as independently skippable.
+     * A candidate consumes the arm. Shadow mode still performs and records the real enqueue;
+     * active mode requires that enqueue before another approximate hold may be armed.
      */
-    class host_sbs_adaptive_shadow_cadence_t {
+    class host_sbs_adaptive_hold_cadence_t {
     public:
       constexpr void reset() noexcept {
         armed_ = false;
@@ -716,17 +736,17 @@ namespace platf::dxgi {
         last_enqueued_at_ = enqueued_at;
       }
 
-      [[nodiscard]] constexpr host_sbs_adaptive_shadow_decision_e observe_changed(
+      [[nodiscard]] constexpr host_sbs_adaptive_hold_decision_e observe_changed(
         const std::optional<std::chrono::steady_clock::time_point> &identity,
         const bool candidate_eligible,
         const std::chrono::steady_clock::time_point now
       ) noexcept {
         if (!identity || now.time_since_epoch().count() == 0) {
           reset();
-          return host_sbs_adaptive_shadow_decision_e::infer;
+          return host_sbs_adaptive_hold_decision_e::infer;
         }
         if (last_enqueued_identity_ && *identity == *last_enqueued_identity_) {
-          return host_sbs_adaptive_shadow_decision_e::infer;
+          return host_sbs_adaptive_hold_decision_e::infer;
         }
         if (refresh_required_) {
           const bool fresh = last_enqueued_at_.time_since_epoch().count() != 0 &&
@@ -734,9 +754,9 @@ namespace platf::dxgi {
                              now - last_enqueued_at_ <
                                host_sbs_adaptive_motion_hold_max_age;
           if (refresh_identity_ && *identity == *refresh_identity_ && fresh) {
-            return host_sbs_adaptive_shadow_decision_e::hold_same_identity;
+            return host_sbs_adaptive_hold_decision_e::hold_same_identity;
           }
-          return host_sbs_adaptive_shadow_decision_e::infer;
+          return host_sbs_adaptive_hold_decision_e::infer;
         }
         const bool fresh = last_enqueued_at_.time_since_epoch().count() != 0 &&
                            now >= last_enqueued_at_ &&
@@ -746,10 +766,10 @@ namespace platf::dxgi {
           armed_ = false;
           refresh_required_ = true;
           refresh_identity_ = identity;
-          return host_sbs_adaptive_shadow_decision_e::hold_candidate;
+          return host_sbs_adaptive_hold_decision_e::hold_candidate;
         }
         armed_ = false;
-        return host_sbs_adaptive_shadow_decision_e::infer;
+        return host_sbs_adaptive_hold_decision_e::infer;
       }
 
       [[nodiscard]] constexpr bool refresh_required() const noexcept {
@@ -1228,11 +1248,11 @@ namespace platf::dxgi {
                  host_sbs_low_motion_damage_ratio_denominator;
     }
 
-    /** Broad-only depth opportunity for the adaptive shadow experiment.
+    /** Broad-only depth opportunity for adaptive shadow measurement or active reuse.
      *
      * Localized changes are intentionally excluded for small-object/UI sensitivity. A single
      * normalized DDup rectangle must cover at least half the analysis region. OCR-band evidence is
-     * classified separately so shadow can compare a depth-plus-OCR hold with depth-hold/OCR-only.
+     * classified separately so telemetry and active admission retain the exact OCR proof class.
      */
     [[nodiscard]] constexpr bool host_sbs_adaptive_motion_broad_damage_candidate(
       const ddup_damage_coverage_t &coverage

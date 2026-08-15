@@ -728,7 +728,6 @@ namespace {
     EXPECT_TRUE(no_deadline.enabled);
     EXPECT_EQ(no_deadline.max_queries, 1u);
     EXPECT_EQ(no_deadline.deadline.time_since_epoch().count(), 0);
-    EXPECT_EQ(no_deadline.budget, std::chrono::steady_clock::duration {});
 
     const auto late = host_sbs_current_frame_probe_plan(true, now + 3ms, now);
     EXPECT_TRUE(late.enabled);
@@ -738,7 +737,6 @@ namespace {
     const auto ample = host_sbs_current_frame_probe_plan(true, now + 10ms, now);
     EXPECT_TRUE(ample.enabled);
     EXPECT_EQ(ample.max_queries, host_sbs_current_frame_probe_max_queries);
-    EXPECT_EQ(ample.budget, 500us);
     EXPECT_EQ(ample.deadline, now + 500us);
 
     const auto cadence_limited = host_sbs_current_frame_probe_plan(
@@ -747,7 +745,6 @@ namespace {
       now
     );
     EXPECT_TRUE(cadence_limited.enabled);
-    EXPECT_EQ(cadence_limited.budget, 200us);
     EXPECT_EQ(cadence_limited.deadline, now + 200us);
   }
 
@@ -1092,7 +1089,7 @@ namespace {
     ));
   }
 
-  TEST(WindowsHostSbsAdaptiveShadowTest, OnlyExplicitValuesEnableAdaptiveModes) {
+  TEST(WindowsHostSbsAdaptiveMotionTest, OnlyExplicitValuesEnableAdaptiveModes) {
     using mode_e = platf::dxgi::detail::host_sbs_adaptive_motion_mode_e;
     using platf::dxgi::detail::host_sbs_adaptive_motion_mode;
 
@@ -1102,7 +1099,7 @@ namespace {
     EXPECT_EQ(host_sbs_adaptive_motion_mode(""), mode_e::off);
   }
 
-  TEST(WindowsHostSbsAdaptiveShadowTest, QuietRequiresSettledCutMasksAndValidMetrics) {
+  TEST(WindowsHostSbsAdaptiveMotionTest, QuietRequiresSettledCutMasksAndValidMetrics) {
     using verdict_e = platf::dxgi::detail::host_sbs_adaptive_motion_verdict_e;
     using platf::dxgi::detail::host_sbs_adaptive_motion_verdict;
     const auto classify = [](const std::uint32_t cut_flags,
@@ -1194,7 +1191,7 @@ namespace {
     );
   }
 
-  TEST(WindowsHostSbsAdaptiveShadowTest, TwoScheduledQuietSamplesExpireByWallClock) {
+  TEST(WindowsHostSbsAdaptiveMotionTest, TwoScheduledQuietSamplesExpireByWallClock) {
     using namespace std::chrono_literals;
     using verdict_e = platf::dxgi::detail::host_sbs_adaptive_motion_verdict_e;
     platf::dxgi::detail::host_sbs_adaptive_motion_state_t state;
@@ -1226,7 +1223,7 @@ namespace {
     EXPECT_TRUE(state.quiet_mode(first + 400ms));
   }
 
-  TEST(WindowsHostSbsAdaptiveShadowTest, LiveRouteEpochChangesWithoutAnAuthenticatedCache) {
+  TEST(WindowsHostSbsAdaptiveMotionTest, LiveRouteEpochChangesWithoutAnAuthenticatedCache) {
     using epoch_t = platf::dxgi::detail::host_sbs_adaptive_motion_route_epoch_t;
     platf::dxgi::detail::host_sbs_adaptive_motion_route_state_t state;
     const epoch_t base {
@@ -1268,10 +1265,10 @@ namespace {
     EXPECT_FALSE(state.observe(changed));
   }
 
-  TEST(WindowsHostSbsAdaptiveShadowTest, SimulatedHoldForcesOneRefreshBeforeRearming) {
+  TEST(WindowsHostSbsAdaptiveMotionTest, SimulatedHoldForcesOneRefreshBeforeRearming) {
     using namespace std::chrono_literals;
-    using decision_e = platf::dxgi::detail::host_sbs_adaptive_shadow_decision_e;
-    platf::dxgi::detail::host_sbs_adaptive_shadow_cadence_t cadence;
+    using decision_e = platf::dxgi::detail::host_sbs_adaptive_hold_decision_e;
+    platf::dxgi::detail::host_sbs_adaptive_hold_cadence_t cadence;
     const auto start = std::chrono::steady_clock::time_point {1s};
     const auto a = start;
     const auto b = start + 1ms;
@@ -1292,13 +1289,13 @@ namespace {
     cadence.record_successful_enqueue(c, start + 49ms);
     EXPECT_EQ(cadence.observe_changed(d, true, start + 98ms), decision_e::hold_candidate);
 
-    EXPECT_TRUE(platf::dxgi::detail::host_sbs_adaptive_shadow_records_enqueue(
+    EXPECT_TRUE(platf::dxgi::detail::host_sbs_adaptive_records_enqueue(
       decision_e::infer
     ));
-    EXPECT_FALSE(platf::dxgi::detail::host_sbs_adaptive_shadow_records_enqueue(
+    EXPECT_FALSE(platf::dxgi::detail::host_sbs_adaptive_records_enqueue(
       decision_e::hold_candidate
     ));
-    EXPECT_FALSE(platf::dxgi::detail::host_sbs_adaptive_shadow_records_enqueue(
+    EXPECT_FALSE(platf::dxgi::detail::host_sbs_adaptive_records_enqueue(
       decision_e::hold_same_identity
     ));
 
@@ -1310,7 +1307,7 @@ namespace {
     EXPECT_EQ(cadence.observe_changed(b, true, start + 50ms), decision_e::infer);
   }
 
-  TEST(WindowsHostSbsAdaptiveShadowTest, RetrospectiveAuditTracksExactIdsGapsAndEviction) {
+  TEST(WindowsHostSbsAdaptiveMotionTest, RetrospectiveAuditTracksExactIdsGapsAndEviction) {
     using verdict_e = platf::dxgi::detail::host_sbs_adaptive_motion_verdict_e;
     using candidate_e =
       platf::dxgi::detail::host_sbs_adaptive_motion_candidate_class_e;
@@ -1360,7 +1357,7 @@ namespace {
     EXPECT_EQ(ocr_only.matched->verdict, verdict_e::quiet);
   }
 
-  TEST(WindowsHostSbsAdaptiveShadowTest, ProbeAnnotationKeepsExactOwnershipAndBalancedLoss) {
+  TEST(WindowsHostSbsAdaptiveMotionTest, ProbeAnnotationKeepsExactOwnershipAndBalancedLoss) {
     using candidate_e =
       platf::dxgi::detail::host_sbs_adaptive_motion_candidate_class_e;
     using probe_e = platf::dxgi::detail::host_sbs_current_frame_probe_class_e;
@@ -1394,7 +1391,18 @@ namespace {
     EXPECT_EQ(discarded.probes.invalid, 1u);
   }
 
-  TEST(WindowsHostSbsAdaptiveShadowTest, ProbeAnnotationIsChargedOnQueueEviction) {
+  TEST(WindowsHostSbsAdaptiveMotionTest, OcrProbeClassificationSeparatesUnavailableFromVeto) {
+    using class_e = platf::dxgi::detail::host_sbs_adaptive_ocr_probe_class_e;
+    const auto classify = platf::dxgi::detail::host_sbs_adaptive_ocr_probe_class;
+
+    EXPECT_EQ(classify(true, false, false, false), class_e::not_applicable);
+    EXPECT_EQ(classify(false, false, true, true), class_e::unavailable);
+    EXPECT_EQ(classify(false, true, false, true), class_e::unavailable);
+    EXPECT_EQ(classify(false, true, true, false), class_e::veto);
+    EXPECT_EQ(classify(false, true, true, true), class_e::exact_equal);
+  }
+
+  TEST(WindowsHostSbsAdaptiveMotionTest, ProbeAnnotationIsChargedOnQueueEviction) {
     using candidate_e =
       platf::dxgi::detail::host_sbs_adaptive_motion_candidate_class_e;
     using probe_e = platf::dxgi::detail::host_sbs_current_frame_probe_class_e;
@@ -1415,7 +1423,7 @@ namespace {
     EXPECT_EQ(overflow.probe_unknown.exact_quiet, 1u);
   }
 
-  TEST(WindowsHostSbsAdaptiveShadowTest, RejectedOwnershipIsClassUnknownAndLedgerBalances) {
+  TEST(WindowsHostSbsAdaptiveMotionTest, RejectedOwnershipIsClassUnknownAndLedgerBalances) {
     using candidate_e =
       platf::dxgi::detail::host_sbs_adaptive_motion_candidate_class_e;
     using counts_t =
@@ -1463,7 +1471,7 @@ namespace {
     );
   }
 
-  TEST(WindowsHostSbsAdaptiveShadowTest, VerdictCountsRemainSeparated) {
+  TEST(WindowsHostSbsAdaptiveMotionTest, VerdictCountsRemainSeparated) {
     using verdict_e = platf::dxgi::detail::host_sbs_adaptive_motion_verdict_e;
     platf::dxgi::detail::host_sbs_adaptive_motion_verdict_counts_t counts;
 

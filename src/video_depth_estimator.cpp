@@ -3297,8 +3297,21 @@ namespace models {
         shader_root,
         host_sbs_shader_cache::adaptive_motion_probe_specs
       );
+      if (!sources) {
+        log_adaptive_motion_probe_failure_once("shader source snapshot failed");
+        return;
+      }
       if (
-        !sources ||
+        host_sbs_shader_cache::source_closure_sha256(sources) !=
+          host_sbs_shader_cache::adaptive_motion_probe_source_closure_sha256
+      ) {
+        adaptive_motion_probe_available = false;
+        log_adaptive_motion_probe_failure_once(
+          "shader source closure authentication failed"
+        );
+        return;
+      }
+      if (
         !create_shader(
           sources,
           host_sbs_shader_cache::host_sbs_current_frame_motion_probe,
@@ -3370,8 +3383,8 @@ namespace models {
       }
       adaptive_motion_probe_available = true;
       BOOST_LOG(info)
-        << "Host SBS current-frame motion probe initialized outside the authenticated producer "
-           "closure.";
+        << "Host SBS current-frame motion probe initialized from its independently "
+           "authenticated optional closure.";
     }
 
     void destroy_adaptive_motion_probe_event(cuda_driver_api &cuda) noexcept {
@@ -3407,7 +3420,7 @@ namespace models {
         current_frame_id <= request.baseline_frame_id ||
         !has_last_postprocessed_frame_id ||
         request.baseline_frame_id != last_postprocessed_frame_id ||
-        (request.authorize_near_identical_observation_hold &&
+        (request.authorize_model_equivalent_observation_hold &&
          !processed_input_domain.matches_analysis_domain(input_region, color_space)) ||
         !adaptive_motion_probe_cs || !adaptive_motion_probe_cbuffer ||
         !adaptive_motion_probe_output_uav || !adaptive_motion_probe_staging_buf ||
@@ -7336,7 +7349,7 @@ namespace models {
 
         // OCR mapping and binding work above consumes natural CPU slack while the ordering event
         // catches the tiny D3D readback up. The bounded query never waits on DAV2: submission is
-        // still below this point, so an authorized near-identical hold skips both observations.
+        // still below this point, so an authorized model-equivalent hold skips both observations.
         motion_probe_result = collect_adaptive_motion_probe(
           cuda,
           motion_probe_request,
@@ -7358,7 +7371,7 @@ namespace models {
         const bool adaptive_motion_observation_held =
           bindings_ok && !terminal_failure &&
           select_adaptive_motion_hold(
-            motion_probe_request.authorize_near_identical_observation_hold &&
+            motion_probe_request.authorize_model_equivalent_observation_hold &&
               adaptive_ocr_authority_still_owned,
             motion_probe_request.ocr_damage_unchanged,
             ocr_bindings_ok,
