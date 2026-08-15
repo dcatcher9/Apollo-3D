@@ -788,7 +788,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 53u);
+  EXPECT_EQ(v2::contract_schema, 54u);
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
   EXPECT_EQ(v2::shadow_state_dump_schema, 16u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
@@ -1997,6 +1997,46 @@ TEST(ParallaxV2ContractTest, DebugDumpUsesNonblockingGpuStagingBeforeCpuPublicat
     source.find("if (pending_gpu_capture_ || (async_ && async_->busy()))"),
     std::string::npos
   );
+}
+
+TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema32Contract) {
+  const auto source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
+  );
+  ASSERT_FALSE(source.empty());
+
+  const auto resolver_begin = source.find(
+    "nlohmann::json subtitle_locator_resolver_contract_json("
+  );
+  const auto resolver_end = source.find(
+    "bool subtitle_target_is_representable(", resolver_begin
+  );
+  ASSERT_NE(resolver_begin, std::string::npos);
+  ASSERT_NE(resolver_end, std::string::npos);
+  ASSERT_LT(resolver_begin, resolver_end);
+  const auto resolver = source.substr(resolver_begin, resolver_end - resolver_begin);
+
+  const auto resolve = resolver.find("{\"entrypoint\", \"resolve_main\"}");
+  const auto prepare = resolver.find("{\"entrypoint\", \"condition_prepare_main\"}");
+  const auto condition = resolver.find("{\"entrypoint\", \"condition_main\"}");
+  ASSERT_NE(resolve, std::string::npos);
+  ASSERT_NE(prepare, std::string::npos);
+  ASSERT_NE(condition, std::string::npos);
+  EXPECT_LT(resolve, prepare);
+  EXPECT_LT(prepare, condition);
+
+  EXPECT_NE(source.find("{\"schema\", 32}"), std::string::npos);
+  for (const auto *placement_key : {
+         "{\"placement\", {",
+         "{\"fallback_step_denominator\"",
+         "{\"fallback_max_radius_steps\"",
+         "{\"fallback_requires_unclamped_sample_strip\"",
+         "{\"fallback_minimum_coherent_rows\", 2u}",
+         "{\"fallback_pair_conflict\", \"unreliable-stop-search\"}",
+         "{\"ribbon_places_fallback_with_ordinary\", false}",
+       }) {
+    EXPECT_NE(resolver.find(placement_key), std::string::npos) << placement_key;
+  }
 }
 
 TEST(ParallaxV2ContractTest, DebugDumpStagingPreservesEventAndRequestOrdering) {

@@ -709,17 +709,26 @@ namespace {
       const float outer_value,
       const float inner_value
     ) {
+      const auto center = 0.5f * static_cast<float>(line.left + line.right - 1u);
+      set_background_probe_rows(center, line.top, outer_value, inner_value);
+    }
+
+    void set_background_probe_rows(
+      const float center,
+      const std::uint32_t owner_top,
+      const float outer_value,
+      const float inner_value
+    ) {
       const auto outer_y = std::clamp(
-        line.top >= 10u ? line.top - 10u : 0u,
+        owner_top >= 10u ? owner_top - 10u : 0u,
         tensor_content_[1u],
         tensor_content_[3u] - 1u
       );
       const auto inner_y = std::clamp(
-        line.top >= 4u ? line.top - 4u : 0u,
+        owner_top >= 4u ? owner_top - 4u : 0u,
         tensor_content_[1u],
         tensor_content_[3u] - 1u
       );
-      const auto center = 0.5f * static_cast<float>(line.left + line.right - 1u);
       for (std::uint32_t sample = 0u; sample < 16u; ++sample) {
         const auto x = static_cast<std::uint32_t>(std::clamp(
           std::floor(center - 30.0f + 4.0f * static_cast<float>(sample) + 0.5f),
@@ -771,17 +780,26 @@ namespace {
       const float first_value,
       const float second_value
     ) {
+      const auto center = 0.5f * static_cast<float>(line.left + line.right - 1u);
+      set_background_probe_alternating(center, line.top, first_value, second_value);
+    }
+
+    void set_background_probe_alternating(
+      const float center,
+      const std::uint32_t owner_top,
+      const float first_value,
+      const float second_value
+    ) {
       const auto outer_y = std::clamp(
-        line.top >= 10u ? line.top - 10u : 0u,
+        owner_top >= 10u ? owner_top - 10u : 0u,
         tensor_content_[1u],
         tensor_content_[3u] - 1u
       );
       const auto inner_y = std::clamp(
-        line.top >= 4u ? line.top - 4u : 0u,
+        owner_top >= 4u ? owner_top - 4u : 0u,
         tensor_content_[1u],
         tensor_content_[3u] - 1u
       );
-      const auto center = 0.5f * static_cast<float>(line.left + line.right - 1u);
       for (std::uint32_t sample = 0u; sample < 16u; ++sample) {
         const auto x = static_cast<std::uint32_t>(std::clamp(
           std::floor(center - 30.0f + 4.0f * static_cast<float>(sample) + 0.5f),
@@ -795,6 +813,47 @@ namespace {
       context_->UpdateSubresource(
         base_texture_.Get(), 0u, nullptr, base_.data(),
         static_cast<UINT>(field_width_ * sizeof(float)), 0u
+      );
+    }
+
+    void set_target_probe_ring_alternating(
+      const float primary_center,
+      const std::uint32_t owner_top,
+      const std::uint32_t horizontal_span,
+      const float first_value,
+      const float second_value
+    ) {
+      set_background_probe_alternating(
+        primary_center, owner_top, first_value, second_value
+      );
+      const float step = static_cast<float>(horizontal_span) /
+                         static_cast<float>(
+                           v2::subtitle_target_horizontal_step_denominator
+                         );
+      for (std::uint32_t radius = 1u;
+           radius <= v2::subtitle_target_horizontal_fallback_max_radius_steps;
+           ++radius) {
+        const float offset = step * static_cast<float>(radius);
+        set_background_probe_alternating(
+          primary_center - offset, owner_top, first_value, second_value
+        );
+        set_background_probe_alternating(
+          primary_center + offset, owner_top, first_value, second_value
+        );
+      }
+    }
+
+    void set_target_probe_ring_alternating(
+      const line_box_t line,
+      const float first_value,
+      const float second_value
+    ) {
+      set_target_probe_ring_alternating(
+        0.5f * static_cast<float>(line.left + line.right - 1u),
+        line.top,
+        line.right - line.left,
+        first_value,
+        second_value
       );
     }
 
@@ -1526,7 +1585,7 @@ namespace {
 
     // Both rows are bimodal with a ten-pixel Tukey IQR. Preserve the last reliable plane for two
     // distinct observations so one noisy estimate cannot expose warped glyph edges immediately.
-    fixture.set_background_sample_alternating(
+    fixture.set_target_probe_ring_alternating(
       line, target_for_pixels(2.0f), target_for_pixels(12.0f)
     );
     ASSERT_TRUE(fixture.observe(212u, {line}, false));
@@ -1672,7 +1731,7 @@ namespace {
     // With neither row coherent a fresh owner has no plane to hold and must copy exact Base.
     slr12_warp_fixture_t neither;
     ASSERT_TRUE(neither.initialize(error)) << error;
-    neither.set_background_sample_alternating(
+    neither.set_target_probe_ring_alternating(
       line, target_for_pixels(2.0f), target_for_pixels(12.0f)
     );
     ASSERT_TRUE(neither.observe(230u, {line}, false));
@@ -1680,6 +1739,127 @@ namespace {
     EXPECT_EQ(neither.state()[2u], flag_owner | flag_target_reset);
     EXPECT_EQ(neither.state()[25u], 0u);
     EXPECT_TRUE(neither.output_is_exact_base());
+  }
+
+  TEST(HostSbsSubtitleSlr12GpuTest, PrimaryFailureUsesStrictNearestOrdinaryProbeBesideRibbon) {
+    slr12_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error)) << error;
+
+    const line_box_t subtitle_core {40u, 360u, 728u, 370u};
+    const line_box_t subtitle_cover {36u, 356u, 732u, 374u};
+    const line_box_t ribbon_core {1u, 401u, 689u, roi_bottom};
+    const line_box_t ribbon_cover {0u, 397u, field_width, field_height};
+    const ocr_box_t subtitle {subtitle_core, subtitle_cover, 0u, 1u, 0u};
+    const ocr_box_t ribbon {ribbon_core, ribbon_cover, box_flag_ribbon, 7u, 4u};
+    constexpr auto target_for_pixels = [](const float binocular_source_pixels) {
+      return binocular_source_pixels / (2.0f * static_cast<float>(1920u));
+    };
+
+    // The unchanged aggregate primary center is the mean of the ordinary and ribbon member
+    // centers: (383.5 + 344.5) / 2 = 364. Its rows and every fallback ring start unreliable.
+    // W/16 is 43 cells, so the five 4-cell sample lattices are disjoint.
+    constexpr float primary_center = 364.0f;
+    fixture.set_base(target_for_pixels(2.0f));
+    fixture.set_target_probe_ring_alternating(
+      primary_center,
+      subtitle_core.top,
+      subtitle_core.right - subtitle_core.left,
+      target_for_pixels(2.0f),
+      target_for_pixels(12.0f)
+    );
+    constexpr float first_fallback_center = primary_center - 688.0f / 16.0f;
+    fixture.set_background_probe_rows(
+      first_fallback_center,
+      subtitle_core.top,
+      target_for_pixels(24.0f),
+      target_for_pixels(24.5f)
+    );
+
+    ASSERT_TRUE(fixture.observe(2320u, {subtitle, ribbon}, false));
+    ASSERT_TRUE(fixture.observe(2321u, {subtitle, ribbon}, false));
+    ASSERT_EQ(fixture.state()[2u], flag_owner | flag_target_valid);
+    ASSERT_EQ(fixture.state()[4u], 2u);
+    EXPECT_EQ(
+      fixture.state()[31u],
+      (2u << owner_kind_shift) | (2u << current_kind_shift)
+    );
+    EXPECT_NEAR(
+      std::bit_cast<float>(fixture.state()[18u]),
+      0.5f * (target_for_pixels(24.0f) + target_for_pixels(24.5f)),
+      1.0e-8f
+    );
+    EXPECT_FALSE(fixture.output_is_exact_base());
+  }
+
+  TEST(HostSbsSubtitleSlr12GpuTest, FallbackConflictAndClampedStripsFailExactBase) {
+    constexpr auto target_for_pixels = [](const float binocular_source_pixels) {
+      return binocular_source_pixels / (2.0f * static_cast<float>(1920u));
+    };
+    std::string error;
+
+    // Two strict radius-one probes on planes more than four pixels apart are an explicit
+    // conflict. Radius two is coherent, but must not hide that nearer ambiguity.
+    slr12_warp_fixture_t conflict;
+    ASSERT_TRUE(conflict.initialize(error)) << error;
+    const line_box_t line {40u, 360u, 728u, 370u};
+    constexpr float line_center = 383.5f;
+    constexpr float line_step = 688.0f / 16.0f;
+    conflict.set_base(target_for_pixels(2.0f));
+    conflict.set_target_probe_ring_alternating(
+      line, target_for_pixels(2.0f), target_for_pixels(12.0f)
+    );
+    conflict.set_background_probe_rows(
+      line_center - line_step, line.top,
+      target_for_pixels(10.0f), target_for_pixels(10.5f)
+    );
+    conflict.set_background_probe_rows(
+      line_center + line_step, line.top,
+      target_for_pixels(20.0f), target_for_pixels(20.5f)
+    );
+    conflict.set_background_probe_rows(
+      line_center - 2.0f * line_step, line.top,
+      target_for_pixels(30.0f), target_for_pixels(30.5f)
+    );
+    conflict.set_background_probe_rows(
+      line_center + 2.0f * line_step, line.top,
+      target_for_pixels(31.0f), target_for_pixels(31.5f)
+    );
+    ASSERT_TRUE(conflict.observe(2330u, {line}, false));
+    ASSERT_TRUE(conflict.observe(2331u, {line}, false));
+    EXPECT_EQ(conflict.state()[2u], flag_owner | flag_target_reset);
+    EXPECT_TRUE(conflict.output_is_exact_base());
+
+    // Three members retain an aggregate center at x=31.5 while the earlier ribbon top keeps the
+    // legacy primary rows independent from the ordinary fallback rows. The negative shifted rows
+    // look perfectly coherent only because their raw strip falls left of content and repeats x=0.
+    // The positive probes contain an invalid x=62 sample. Rejecting both clamped negative strips
+    // is therefore required for exact-Base output.
+    slr12_warp_fixture_t edge;
+    ASSERT_TRUE(edge.initialize(error)) << error;
+    const line_box_t upper {0u, 380u, 64u, 386u};
+    const line_box_t lower {0u, 389u, 64u, 395u};
+    const line_box_t edge_ribbon_core {1u, 350u, 689u, roi_bottom};
+    const line_box_t edge_ribbon_cover {0u, 346u, field_width, field_height};
+    const ocr_box_t edge_ribbon {
+      edge_ribbon_core, edge_ribbon_cover, box_flag_ribbon, 7u, 4u
+    };
+    edge.set_base(target_for_pixels(2.0f));
+    edge.set_background_probe_alternating(
+      31.5f, edge_ribbon_core.top,
+      target_for_pixels(2.0f), target_for_pixels(12.0f)
+    );
+    edge.set_background_probe_rows(
+      27.5f, upper.top, target_for_pixels(50.0f), target_for_pixels(50.0f)
+    );
+    const auto outer_y = upper.top - 10u;
+    const auto inner_y = upper.top - 4u;
+    edge.set_base_at(62u, outer_y, v2::direct_container_limit + 0.001f);
+    edge.set_base_at(62u, inner_y, v2::direct_container_limit + 0.001f);
+    ASSERT_TRUE(edge.observe(2340u, {upper, lower, edge_ribbon}, false));
+    ASSERT_TRUE(edge.observe(2341u, {upper, lower, edge_ribbon}, false));
+    EXPECT_EQ(edge.state()[2u], flag_owner | flag_target_reset);
+    EXPECT_TRUE(edge.output_is_exact_base());
   }
 
   TEST(HostSbsSubtitleSlr12GpuTest, LargeResidualAndHardCutRestartButCutNeverHolds) {
@@ -1722,7 +1902,7 @@ namespace {
     EXPECT_EQ(cut.state()[24u], 1u);
 
     // Unreliable evidence on a hard cut cannot hold the old scene's target.
-    cut.set_background_sample_alternating(
+    cut.set_target_probe_ring_alternating(
       line, target_for_pixels(2.0f), target_for_pixels(12.0f)
     );
     cut.set_cut(2u, true);

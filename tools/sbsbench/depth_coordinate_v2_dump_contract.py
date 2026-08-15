@@ -21,7 +21,7 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     import generate_depth_coordinate_v2_contract as generator  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 31
+DUMP_MANIFEST_SCHEMA = 32
 SUBTITLE_OCR_RECORD_SCHEMA = coordinate_contract.SUBTITLE_OCR.record_schema
 SUBTITLE_OCR_RECORD_TAG = coordinate_contract.SUBTITLE_OCR.record_tag
 SUBTITLE_OCR_RECORD_WORD_COUNT = coordinate_contract.SUBTITLE_OCR.record_word_count
@@ -72,10 +72,10 @@ WINDOW_REGION_AUTHORITY_KINDS = frozenset({"chromium-video", "foreground-client"
 SHADOW_STATE_DUMP_SCHEMA = 16
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 2
 LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
-    "ba7d2f6e6d8c0266bec3e0a53e67164e6e9b482394a2770c2f0c678b6d4a6512"
+    "41cd0bf450afa1cd3585b1945e006a003d11bae02c88c04e5d5b32d1a69e0f42"
 )
 DIAGNOSTIC_SOURCE_CLOSURE_SHA256 = (
-    "430f3172a51aece82acac353c098bd0c6070a3b81034af8b77adb94ea5bf1f36"
+    "0f83d7a1a7f30c2ba9eee01f0fd6c4c7780478b46d4a4e435788e3a4d91e54c1"
 )
 _CONTRACT = coordinate_contract.load_contract()
 _CONTRACT_TAG = generator.contract_tag(_CONTRACT)
@@ -1791,7 +1791,35 @@ def _subtitle_locator_resolver_contract() -> Dict[str, Any]:
         "rectangle_capacity": SUBTITLE_LOCATOR_RECT_CAPACITY,
         "target_policy": {
             "units": "binocular-source-pixels",
+            "placement": {
+                "primary": "aggregate-owner-median-member-center",
+                "fallback_on_primary_failure": True,
+                "fallback_span": (
+                    "ordinary-core-horizontal-bounds-else-owner-core-horizontal-bounds"),
+                "fallback_top": "ordinary-core-top-else-owner-core-top",
+                "fallback_step_denominator": (
+                    coordinate_contract.SUBTITLE_OCR.
+                    locator_target_horizontal_step_denominator),
+                "fallback_max_radius_steps": (
+                    coordinate_contract.SUBTITLE_OCR.
+                    locator_target_horizontal_fallback_max_radius_steps),
+                "fallback_order_within_radius": ["negative", "positive"],
+                "fallback_radius_policy": "first-reliable-radius",
+                "fallback_requires_unclamped_sample_strip": True,
+                "fallback_minimum_coherent_rows": 2,
+                "fallback_row_median_delta_max": (
+                    coordinate_contract.SUBTITLE_OCR.
+                    locator_target_max_row_median_delta_binocular_source_pixels),
+                "fallback_probe_target": "mean-medians",
+                "fallback_pair_target_delta_max": (
+                    coordinate_contract.SUBTITLE_OCR.
+                    locator_target_max_row_median_delta_binocular_source_pixels),
+                "fallback_pair_conflict": "unreliable-stop-search",
+                "fallback_within_radius_policy": "maximum-mean-within-delta",
+                "ribbon_places_fallback_with_ordinary": False,
+            },
             "selection": {
+                "applies_to": "primary",
                 "samples_per_row": 16,
                 "median_indices": [7, 8],
                 "iqr_lower_indices": [3, 4],

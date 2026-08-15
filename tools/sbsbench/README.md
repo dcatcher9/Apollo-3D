@@ -103,10 +103,11 @@ python tools/sbsbench/sbsbench.py `
 
 See [Dump and replay format](DUMP_FORMAT.md) before interpreting preview PNGs. The reader accepts
 only the current SLR12/OCR8 dump schema; older experimental captures are intentionally unsupported.
-An active package authenticates the exact OCR8 record, compact SLR12 state, ordinary Base field,
-and selected conditioned field. An inactive package uses the one canonical `none` descriptor.
+An active schema-32 package authenticates the exact OCR8 record, compact SLR12 state, ordinary Base
+field, selected conditioned field, and the resolver's bounded strict fallback placement policy. An
+inactive package uses the one canonical `none` descriptor.
 
-Current schema-31 window-region packages preserve the complete authorized source rectangle at any
+Current schema-32 window-region packages preserve the complete authorized source rectangle at any
 aspect ratio. `depth_input_region.json` schema 3 records the centered integer content rectangle in
 the fixed DAV2 tensor and its edge-replicated excluded padding. Quantitative consumers must use
 that content width for limiter and SLR12 steps and must project OCR/SLR geometry only into that

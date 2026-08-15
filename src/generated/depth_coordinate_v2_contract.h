@@ -10,10 +10,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 53u;
-  inline constexpr std::uint32_t contract_tag = 0x3B434764u;
-  inline constexpr std::string_view contract_canonical_sha256 = "c08635c04fbecfb1dd33a644eb032b1cacb786c4e09449ea035494c816e929ca";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "3b434764dad56a5df29a17e8a6f7d15049d40d278396b53344eff11c9990ca1a";
+  inline constexpr std::uint32_t contract_schema = 54u;
+  inline constexpr std::uint32_t contract_tag = 0xE6E2DB82u;
+  inline constexpr std::string_view contract_canonical_sha256 = "41691e18247a937dfeae066f415bfea89b40c9d532009a0cfb7e1546d247317c";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "e6e2db82a4e2359ae7acbc744d2b0e5c2c5acfd277a3693dd0ad760e8fdb1cce";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -22,7 +22,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t capture_provenance_schema = 3u;
   inline constexpr std::string_view capture_provenance_manifest_key = "raw_model_provenance";
   inline constexpr std::string_view capture_provenance_binding = "raw-depth-model-input-and-preprocess-source-produced-by-calibrated-identity-v3";
-  inline constexpr std::uint32_t subtitle_ocr_contract_schema = 11u;
+  inline constexpr std::uint32_t subtitle_ocr_contract_schema = 12u;
   inline constexpr std::string_view subtitle_ocr_model_name = "ppocrv6_tiny_det_modelopt_fp16";
   inline constexpr std::string_view subtitle_ocr_asset_path = "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx";
   inline constexpr std::string_view subtitle_ocr_artifact_onnx_sha256 = "169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44";
@@ -75,6 +75,8 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t subtitle_locator_min_aspect_denominator = 1u;
   inline constexpr float subtitle_locator_match_iou_threshold = 0.6f;
   inline constexpr std::uint32_t subtitle_locator_death_grace_observations = 6u;
+  inline constexpr std::uint32_t subtitle_target_horizontal_fallback_max_radius_steps = 2u;
+  inline constexpr std::uint32_t subtitle_target_horizontal_step_denominator = 16u;
   inline constexpr float subtitle_target_max_row_iqr_binocular_source_pixels = 8.0f;
   inline constexpr float subtitle_target_max_row_median_delta_binocular_source_pixels = 4.0f;
   inline constexpr float subtitle_target_max_residual_binocular_source_pixels = 8.0f;
@@ -151,12 +153,14 @@ namespace models::depth_coordinate_v2 {
                 subtitle_locator_rectangle_capacity * 4u);
   static_assert(subtitle_locator_state_word_count == subtitle_locator_current_offset +
                 subtitle_locator_rectangle_capacity * 4u);
+  static_assert(subtitle_target_horizontal_fallback_max_radius_steps == 2u);
+  static_assert(subtitle_target_horizontal_step_denominator == 16u);
   static_assert(subtitle_condition_param_word_count == 8u);
   static_assert(subtitle_condition_dispatch_arg_word_count == 3u);
   inline constexpr std::uint32_t shader_source_closure_schema = 2u;
   inline constexpr std::uint32_t shader_source_compile_flags = 34816u;
   inline constexpr std::uint32_t shader_source_macro_count = 0u;
-  inline constexpr std::string_view shader_source_closure_sha256 = "3c9192aac92497520a6e60ae87fc28d0664bdabc8888270274826ec870643735";
+  inline constexpr std::string_view shader_source_closure_sha256 = "66bd77d5c4eab407b12dcd711bae2d6bc5b0616f3c067ae0136f6a2ba3e3e141";
 
   struct shader_source_spec_t {
     std::string_view source_file;

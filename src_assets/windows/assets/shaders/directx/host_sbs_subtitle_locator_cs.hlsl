@@ -730,31 +730,19 @@ uint NextGeneration(uint value) {
     return value == 0u || value >= 0xfffffffdu ? 1u : value + 1u;
 }
 
-bool SampleOwnerTarget(uint owner_base, uint owner_count, out float target) {
+bool SampleTargetProbe(
+    float center,
+    uint owner_top,
+    bool require_consistent_rows,
+    out float target
+) {
     target = 0.0f;
-    if ((owner_base != NEW_OWNER_BASE && owner_base != MATCHED_BASE) ||
-        owner_count == 0u || owner_count > MAX_LINES || locator_source.x == 0u ||
-        !FiniteFloat(v2_direct_container_limit) || v2_direct_container_limit <= 0.0f) return false;
-    [unroll]
-    for (uint center_index = 0u; center_index < MAX_LINES; ++center_index) {
-        LineCenters[center_index] = center_index < owner_count ?
-            0.5f * (float)(WorkRects[owner_base + center_index].x +
-                           WorkRects[owner_base + center_index].z - 1u) : 0.0f;
+    if (require_consistent_rows) {
+        float first_x_float = center - 30.0f;
+        float last_x_float = center - 30.0f + 4.0f * 15.0f;
+        if (floor(first_x_float + 0.5f) < (float)locator_content.x ||
+            floor(last_x_float + 0.5f) > (float)(locator_content.z - 1u)) return false;
     }
-    [unroll]
-    for (uint center_a = 0u; center_a < MAX_LINES; ++center_a) {
-        [unroll]
-        for (uint center_b = center_a + 1u; center_b < MAX_LINES; ++center_b) {
-            if (center_b < owner_count && LineCenters[center_b] < LineCenters[center_a]) {
-                float swap_value = LineCenters[center_a];
-                LineCenters[center_a] = LineCenters[center_b];
-                LineCenters[center_b] = swap_value;
-            }
-        }
-    }
-    float center = (owner_count & 1u) != 0u ? LineCenters[owner_count / 2u] :
-        0.5f * (LineCenters[owner_count / 2u - 1u] + LineCenters[owner_count / 2u]);
-    uint owner_top = RectSummary(owner_base, owner_count).y;
     uint outer_y_offset = 10u;
     uint inner_y_offset = 4u;
     uint sample_y0 = clamp(
@@ -828,10 +816,19 @@ bool SampleOwnerTarget(uint owner_base, uint owner_count, out float target) {
     bool second_row_coherent = second_row_valid &&
         second_row_iqr * binocular_scale <=
             V2_SUBTITLE_TARGET_MAX_ROW_IQR_BINOCULAR_SOURCE_PIXELS;
+    precise float median_delta_pixels =
+        abs(second_row_median - first_row_median) * binocular_scale;
+    if (require_consistent_rows) {
+        if (!first_row_coherent || !second_row_coherent ||
+            median_delta_pixels >
+                V2_SUBTITLE_TARGET_MAX_ROW_MEDIAN_DELTA_BINOCULAR_SOURCE_PIXELS) {
+            return false;
+        }
+        target = 0.5f * (first_row_median + second_row_median);
+        return SubtitleTargetIsValid(target);
+    }
     if (!first_row_coherent && !second_row_coherent) return false;
     if (first_row_valid && second_row_valid) {
-        precise float median_delta_pixels =
-            abs(second_row_median - first_row_median) * binocular_scale;
         target = median_delta_pixels <=
                 V2_SUBTITLE_TARGET_MAX_ROW_MEDIAN_DELTA_BINOCULAR_SOURCE_PIXELS ?
             0.5f * (first_row_median + second_row_median) :
@@ -842,6 +839,88 @@ bool SampleOwnerTarget(uint owner_base, uint owner_count, out float target) {
         target = second_row_median;
     }
     return SubtitleTargetIsValid(target);
+}
+
+bool SampleOwnerTarget(uint owner_base, uint owner_count, out float target) {
+    target = 0.0f;
+    if ((owner_base != NEW_OWNER_BASE && owner_base != MATCHED_BASE) ||
+        owner_count == 0u || owner_count > MAX_LINES || locator_source.x == 0u ||
+        !FiniteFloat(v2_direct_container_limit) || v2_direct_container_limit <= 0.0f) return false;
+    [unroll]
+    for (uint center_index = 0u; center_index < MAX_LINES; ++center_index) {
+        LineCenters[center_index] = center_index < owner_count ?
+            0.5f * (float)(WorkRects[owner_base + center_index].x +
+                           WorkRects[owner_base + center_index].z - 1u) : 0.0f;
+    }
+    [unroll]
+    for (uint center_a = 0u; center_a < MAX_LINES; ++center_a) {
+        [unroll]
+        for (uint center_b = center_a + 1u; center_b < MAX_LINES; ++center_b) {
+            if (center_b < owner_count && LineCenters[center_b] < LineCenters[center_a]) {
+                float swap_value = LineCenters[center_a];
+                LineCenters[center_a] = LineCenters[center_b];
+                LineCenters[center_b] = swap_value;
+            }
+        }
+    }
+    precise float center = (owner_count & 1u) != 0u ? LineCenters[owner_count / 2u] :
+        0.5f * (LineCenters[owner_count / 2u - 1u] + LineCenters[owner_count / 2u]);
+    uint4 owner_summary = RectSummary(owner_base, owner_count);
+    if (SampleTargetProbe(center, owner_summary.y, false, target)) return true;
+
+    // The fixed center remains the aggregate owner median above. Only a failed primary activates
+    // four bounded near-center probes. A bottom UI ribbon keeps its own owner/cover authority but
+    // cannot widen or vertically place the search while ordinary text is present.
+    bool ordinary_found = false;
+    uint4 placement_summary = owner_summary;
+    [unroll]
+    for (uint placement_index = 0u; placement_index < MAX_LINES; ++placement_index) {
+        if (placement_index < owner_count && WorkKinds[owner_base + placement_index] == 0u) {
+            uint4 rectangle = WorkRects[owner_base + placement_index];
+            if (!ordinary_found) {
+                placement_summary = rectangle;
+                ordinary_found = true;
+            } else {
+                placement_summary.x = min(placement_summary.x, rectangle.x);
+                placement_summary.y = min(placement_summary.y, rectangle.y);
+                placement_summary.z = max(placement_summary.z, rectangle.z);
+                placement_summary.w = max(placement_summary.w, rectangle.w);
+            }
+        }
+    }
+    precise float horizontal_step =
+        (float)(placement_summary.z - placement_summary.x) /
+        (float)V2_SUBTITLE_TARGET_HORIZONTAL_STEP_DENOMINATOR;
+    [loop]
+    for (uint radius = 1u;
+         radius <= V2_SUBTITLE_TARGET_HORIZONTAL_FALLBACK_MAX_RADIUS_STEPS;
+         ++radius) {
+        precise float offset = horizontal_step * (float)radius;
+        float negative_target = 0.0f;
+        float positive_target = 0.0f;
+        bool negative_valid = SampleTargetProbe(
+            center - offset, placement_summary.y, true, negative_target);
+        bool positive_valid = SampleTargetProbe(
+            center + offset, placement_summary.y, true, positive_target);
+        if (negative_valid && positive_valid) {
+            precise float binocular_scale = 2.0f * (float)locator_source.x;
+            precise float pair_delta_pixels =
+                abs(positive_target - negative_target) * binocular_scale;
+            // Conflicting same-radius support makes the whole observation unreliable. Searching
+            // farther would hide the ambiguity instead of resolving it.
+            if (pair_delta_pixels >
+                V2_SUBTITLE_TARGET_MAX_ROW_MEDIAN_DELTA_BINOCULAR_SOURCE_PIXELS) return false;
+            target = max(negative_target, positive_target);
+            return true;
+        }
+        // Prefer the closest reliable ring. A sole strictly coherent probe is sufficient, while
+        // farther probes cannot override it.
+        if (negative_valid || positive_valid) {
+            target = negative_valid ? negative_target : positive_target;
+            return true;
+        }
+    }
+    return false;
 }
 
 bool UpdateOwnerTarget(float previous, float desired, out float updated) {

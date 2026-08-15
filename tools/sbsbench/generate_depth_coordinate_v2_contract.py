@@ -77,7 +77,7 @@ EXPECTED_SHADER_SPEC_KEYS = {
     "source_file", "source_entrypoint", "source_target",
 }
 CANONICAL_SUBTITLE_OCR = {
-    "schema": 11,
+    "schema": 12,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
     "artifact_onnx_sha256": (
@@ -121,6 +121,8 @@ CANONICAL_SUBTITLE_OCR = {
         "locator_min_aspect_denominator": 1,
         "locator_match_iou_threshold": 0.6,
         "locator_death_grace_observations": 6,
+        "locator_target_horizontal_fallback_max_radius_steps": 2,
+        "locator_target_horizontal_step_denominator": 16,
         "locator_target_max_row_iqr_binocular_source_pixels": 8.0,
         "locator_target_max_row_median_delta_binocular_source_pixels": 4.0,
         "locator_target_max_residual_binocular_source_pixels": 8.0,
@@ -908,6 +910,10 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"{_float_literal(field_policy['locator_match_iou_threshold'])};",
         f"  inline constexpr std::uint32_t subtitle_locator_death_grace_observations = "
         f"{field_policy['locator_death_grace_observations']}u;",
+        f"  inline constexpr std::uint32_t subtitle_target_horizontal_fallback_max_radius_steps = "
+        f"{field_policy['locator_target_horizontal_fallback_max_radius_steps']}u;",
+        f"  inline constexpr std::uint32_t subtitle_target_horizontal_step_denominator = "
+        f"{field_policy['locator_target_horizontal_step_denominator']}u;",
         f"  inline constexpr float subtitle_target_max_row_iqr_binocular_source_pixels = "
         f"{_float_literal(field_policy['locator_target_max_row_iqr_binocular_source_pixels'])};",
         f"  inline constexpr float subtitle_target_max_row_median_delta_binocular_source_pixels = "
@@ -1009,6 +1015,8 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "                subtitle_locator_rectangle_capacity * 4u);",
         "  static_assert(subtitle_locator_state_word_count == subtitle_locator_current_offset +",
         "                subtitle_locator_rectangle_capacity * 4u);",
+        "  static_assert(subtitle_target_horizontal_fallback_max_radius_steps == 2u);",
+        "  static_assert(subtitle_target_horizontal_step_denominator == 16u);",
         "  static_assert(subtitle_condition_param_word_count == 8u);",
         "  static_assert(subtitle_condition_dispatch_arg_word_count == 3u);",
         f"  inline constexpr std::uint32_t shader_source_closure_schema = "
@@ -1563,6 +1571,10 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"{_float_literal(field_policy['locator_match_iou_threshold'])}",
         f"#define V2_SUBTITLE_LOCATOR_DEATH_GRACE_OBSERVATIONS "
         f"{field_policy['locator_death_grace_observations']}u",
+        f"#define V2_SUBTITLE_TARGET_HORIZONTAL_FALLBACK_MAX_RADIUS_STEPS "
+        f"{field_policy['locator_target_horizontal_fallback_max_radius_steps']}u",
+        f"#define V2_SUBTITLE_TARGET_HORIZONTAL_STEP_DENOMINATOR "
+        f"{field_policy['locator_target_horizontal_step_denominator']}u",
         f"#define V2_SUBTITLE_TARGET_MAX_ROW_IQR_BINOCULAR_SOURCE_PIXELS "
         f"{_float_literal(field_policy['locator_target_max_row_iqr_binocular_source_pixels'])}",
         f"#define V2_SUBTITLE_TARGET_MAX_ROW_MEDIAN_DELTA_BINOCULAR_SOURCE_PIXELS "
@@ -1766,6 +1778,8 @@ def render_hlsl_ocr_assertions() -> str:
         "    V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT != 4u || \\",
         "    V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT != 8u || \\",
         "    V2_SUBTITLE_LOCATOR_KIND_MASK != 15u || \\",
+        "    V2_SUBTITLE_TARGET_HORIZONTAL_FALLBACK_MAX_RADIUS_STEPS != 2u || \\",
+        "    V2_SUBTITLE_TARGET_HORIZONTAL_STEP_DENOMINATOR != 16u || \\",
         "    V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT != 8u || \\",
         "    V2_SUBTITLE_CONDITION_DISPATCH_ARG_WORD_COUNT != 3u",
         '#error "Generated V2 OCR8/SLR12 contract invariants are inconsistent"',

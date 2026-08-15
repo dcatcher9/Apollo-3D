@@ -39,7 +39,7 @@ The core package contains:
 | `subtitle_ocr_record.u32` | Active-only exact-frame OCR8 record in generated-contract word order |
 | `subtitle_locator_state.u32` | Active-only compact SLR12 state in generated-contract word order |
 
-All `.f32` files are little-endian float32. Schema 31 accepts the canonical inactive descriptor or
+All `.f32` files are little-endian float32. Schema 32 accepts the canonical inactive descriptor or
 the one current `subtitle-slr12` package. It binds the exact current generated Depth Coordinate V2
 identity, producer and renderer closures, OCR model provenance, entrypoints, and four artifact
 roles (OCR record, locator state, Base field, selected field). The generated contract is the sole
@@ -60,11 +60,16 @@ zero tail must all agree with the manifest's selected exact frame. See the
 The generated `subtitle_ocr.locator_state` contract owns SLR12's schema, the unambiguous
 little-endian `SL12` tag bytes, word layout,
 rectangle capacity, kind packing, numeric qualification/death-grace limits, and the complete
-local-supporting-plane target policy. The resolver descriptor serializes that policy exactly as
-`binocular-source-pixels`: two independent 16-sample rows; median indices `7/8`; Tukey-IQR lower
-indices `3/4` and upper indices `11/12`; at least one coherent row with IQR at most `8`; and a
-row-median difference of `4` as the both-valid mean-versus-maximum-median selection boundary. It
-also binds deadband `1`, EMA alpha `0.125`, maximum slew `0.25`, maximum continuing residual `8`,
+local-supporting-plane target policy. The resolver descriptor serializes the aggregate-center
+primary policy exactly as `binocular-source-pixels`: two independent 16-sample rows; median indices
+`7/8`; Tukey-IQR lower indices `3/4` and upper indices `11/12`; at least one coherent row with IQR
+at most `8`; and a row-median difference of `4` as the both-valid mean-versus-maximum-median
+selection boundary. Schema 32 also authenticates its primary-failure fallback: ordinary-core span
+step `W/16`, maximum radius two, negative then positive order, ordinary-over-ribbon placement,
+unclamped 61-cell strips, two coherent rows and at most `4` pixels of intra-probe median separation.
+At one radius, two qualifying mean targets must themselves agree within `4` pixels; conflict stops
+the search and makes the observation unreliable. It also binds deadband `1`, EMA alpha `0.125`,
+maximum slew `0.25`, maximum continuing residual `8`,
 and at most two distinct continuing same-scene unreliable-measurement holds in owner state word
 25. Only current authority increments that counter; duplicates do not age it, absent current
 authority may preserve it without conditioning, and hard cuts cannot hold it. The signed

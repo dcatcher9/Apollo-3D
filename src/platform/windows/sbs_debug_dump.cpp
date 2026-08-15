@@ -207,7 +207,30 @@ namespace platf::sbs_debug {
         {"rectangle_capacity", subtitle_locator_rectangle_capacity},
         {"target_policy", {
           {"units", "binocular-source-pixels"},
+          {"placement", {
+            {"primary", "aggregate-owner-median-member-center"},
+            {"fallback_on_primary_failure", true},
+            {"fallback_span",
+             "ordinary-core-horizontal-bounds-else-owner-core-horizontal-bounds"},
+            {"fallback_top", "ordinary-core-top-else-owner-core-top"},
+            {"fallback_step_denominator", subtitle_target_horizontal_step_denominator},
+            {"fallback_max_radius_steps",
+             subtitle_target_horizontal_fallback_max_radius_steps},
+            {"fallback_order_within_radius", {"negative", "positive"}},
+            {"fallback_radius_policy", "first-reliable-radius"},
+            {"fallback_requires_unclamped_sample_strip", true},
+            {"fallback_minimum_coherent_rows", 2u},
+            {"fallback_row_median_delta_max",
+             subtitle_target_max_row_median_delta_binocular_source_pixels},
+            {"fallback_probe_target", "mean-medians"},
+            {"fallback_pair_target_delta_max",
+             subtitle_target_max_row_median_delta_binocular_source_pixels},
+            {"fallback_pair_conflict", "unreliable-stop-search"},
+            {"fallback_within_radius_policy", "maximum-mean-within-delta"},
+            {"ribbon_places_fallback_with_ordinary", false},
+          }},
           {"selection", {
+            {"applies_to", "primary"},
             {"samples_per_row", 16u},
             {"median_indices", {7u, 8u}},
             {"iqr_lower_indices", {3u, 4u}},
@@ -243,6 +266,11 @@ namespace platf::sbs_debug {
           {
             {"source_file", "host_sbs_subtitle_locator_cs.hlsl"},
             {"entrypoint", "resolve_main"},
+            {"target", "cs_5_0"},
+          },
+          {
+            {"source_file", "host_sbs_subtitle_locator_cs.hlsl"},
+            {"entrypoint", "condition_prepare_main"},
             {"target", "cs_5_0"},
           },
           {
@@ -4229,7 +4257,7 @@ namespace platf::sbs_debug {
             *completed.parallax_v2_shader_provenance
           );
         nlohmann::json manifest {
-          {"schema", 31},
+          {"schema", 32},
           {"capture", "one matched, completed Host-SBS frame"},
           {"capture_status", "complete"},
           {"published_atomically", true},

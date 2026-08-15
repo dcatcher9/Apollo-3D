@@ -50,14 +50,14 @@ diagnostics that explain how the final field was produced.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 53/tag `0x3B434764`, canonical SHA-256
-`c08635c04fbecfb1dd33a644eb032b1cacb786c4e09449ea035494c816e929ca`. It binds the
+schema 54/tag `0xE6E2DB82`, canonical SHA-256
+`41691e18247a937dfeae066f415bfea89b40c9d532009a0cfb7e1546d247317c`. It binds the
 complete policy below, including all subtitle field/ROI semantics, and producer source-closure
-SHA-256 `3c9192aac92497520a6e60ae87fc28d0664bdabc8888270274826ec870643735`.
+SHA-256 `66bd77d5c4eab407b12dcd711bae2d6bc5b0616f3c067ae0136f6a2ba3e3e141`.
 The live-renderer source-closure SHA-256 is
-`ba7d2f6e6d8c0266bec3e0a53e67164e6e9b482394a2770c2f0c678b6d4a6512`, and dump-only diagnostic
+`41cd0bf450afa1cd3585b1945e006a003d11bae02c88c04e5d5b32d1a69e0f42`, and dump-only diagnostic
 renderer source-closure SHA-256
-`430f3172a51aece82acac353c098bd0c6070a3b81034af8b77adb94ea5bf1f36`. It admits the following
+`0f83d7a1a7f30c2ba9eee01f0fd6c4c7780478b46d4a4e435788e3a4d91e54c1`. It admits the following
 production calibration:
 
 | Property | Production value |
@@ -312,15 +312,33 @@ any current boxes as the first pending observation. This lets a seek/reset landi
 already-visible static subtitle acquire on the following distinct observation without an onset
 edge.
 
-The observed plane comes from two independent 16-sample rows above the combined lower-text owner
-stack. Each row is sorted and is coherent only when its Tukey interquartile range—the average of
-elements 11/12 minus the average of elements 3/4—is at most `8` binocular source pixels. A row with
-invalid or out-of-container samples is independently unusable and does not invalidate the other
-row. No coherent row makes the observation unreliable. If only one row is valid and coherent, its
-median is the desired plane. If both rows are valid and at least one is coherent, median separation
-of at most `4` pixels selects their mean; larger separation selects the larger-U median, even when
-that nearer row crossed the IQR gate. This avoids placing text behind the nearer supporting surface
-while still requiring one stable row as evidence. A target of `k` pixels is
+The primary observed-plane probe remains two independent 16-sample rows above the combined
+lower-text owner stack, horizontally placed at the median of all owner-member centers. Only when
+that primary is unreliable, SLR12 performs a bounded near-center search. Let `W` be the horizontal
+span of the ordinary tight cores and let `C` be the unchanged aggregate primary center. It probes
+`C-W/16` then `C+W/16`; if either is reliable, the larger-U reliable result at that radius wins and
+the search stops. Only when neither is reliable does it probe `C-2W/16` then `C+2W/16` under the
+same rule. Thus at most five positions including the primary are sampled, and a farther coherent
+patch cannot override closer local support. When ordinary text exists, bottom UI ribbons remain
+independent tracked owner members with their own current covers but do not contribute to `W` or the
+fallback row top. A ribbon-only owner instead uses its complete core span and top.
+
+At the primary, each row is sorted and is coherent only when its Tukey interquartile range—the
+average of elements 11/12 minus the average of elements 3/4—is at most `8` binocular source pixels.
+A row with invalid or out-of-container samples is independently unusable and does not invalidate
+the other row. No coherent row makes the primary unreliable. If only one row is valid and coherent,
+its median is the desired plane. If both rows are valid and at least one is coherent, median
+separation of at most `4` pixels selects their mean; larger separation selects the larger-U median,
+even when that nearer row crossed the IQR gate.
+
+Fallback evidence is deliberately stricter. Its complete rounded 61-cell strip must fit inside the
+analysis content without edge clamping; both rows must be valid and individually pass the same
+`8`-pixel IQR gate; and their medians must be within `4` pixels, producing their mean. If both
+directions at one radius qualify, their two mean targets must also be within `4` pixels. Agreement
+selects the larger-U mean; disagreement makes the whole observation unreliable and does not search
+the farther radius. A sole qualifying direction is used directly. This avoids manufacturing stable
+evidence from repeated edge texels or choosing between unrelated coherent surfaces while requiring
+mutually stable local support evidence. A target of `k` pixels is
 stored as `k / (2 * analysis_source_width)` signed one-eye source U; positive and negative targets
 are both permitted up to the signed direct-parallax container. There is no absolute screen-plane
 or near-screen clamp. These units are exact binocular output pixels for a native 1:1 SBS encode;
@@ -594,7 +612,7 @@ claim.
 Model preparation, shader compilation, and the live renderer are fail-closed. Live shaders are
 compiled and cached at process startup. Dump-only resources are created lazily and cannot prevent a
 stream from starting. A failure in optional diagnostics has no rendering authority. An armed
-schema-31 dump preserves the selected path's same-frame authority resources with ordered D3D11
+schema-32 dump preserves the selected path's same-frame authority resources with ordered D3D11
 `CopyResource` operations and one terminal event. Submission performs no GPU-to-CPU wait or
 synchronous Map. Later render-thread calls poll with `DONOTFLUSH`, collect staging resources with
 `DO_NOT_WAIT`, then hand the CPU snapshot to the existing publication worker.

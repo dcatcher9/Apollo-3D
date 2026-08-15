@@ -579,7 +579,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 dump_contract.validate_v2_dump_manifest_document(changed)
 
     def test_current_subtitle_record_and_state_abi_partition_exact_word_counts(self):
-        self.assertEqual(dump_contract.DUMP_MANIFEST_SCHEMA, 31)
+        self.assertEqual(dump_contract.DUMP_MANIFEST_SCHEMA, 32)
         self.assertEqual(dump_contract.SUBTITLE_OCR_RECORD_SCHEMA, 3)
         self.assertEqual(dump_contract.SUBTITLE_LOCATOR_STATE_SCHEMA, 12)
         self.assertEqual(
@@ -714,7 +714,27 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             manifest["subtitle_conditioning"]["resolver"]["target_policy"],
             {
                 "units": "binocular-source-pixels",
+                "placement": {
+                    "primary": "aggregate-owner-median-member-center",
+                    "fallback_on_primary_failure": True,
+                    "fallback_span": (
+                        "ordinary-core-horizontal-bounds-else-owner-core-horizontal-bounds"),
+                    "fallback_top": "ordinary-core-top-else-owner-core-top",
+                    "fallback_step_denominator": 16,
+                    "fallback_max_radius_steps": 2,
+                    "fallback_order_within_radius": ["negative", "positive"],
+                    "fallback_radius_policy": "first-reliable-radius",
+                    "fallback_requires_unclamped_sample_strip": True,
+                    "fallback_minimum_coherent_rows": 2,
+                    "fallback_row_median_delta_max": 4.0,
+                    "fallback_probe_target": "mean-medians",
+                    "fallback_pair_target_delta_max": 4.0,
+                    "fallback_pair_conflict": "unreliable-stop-search",
+                    "fallback_within_radius_policy": "maximum-mean-within-delta",
+                    "ribbon_places_fallback_with_ordinary": False,
+                },
                 "selection": {
+                    "applies_to": "primary",
                     "samples_per_row": 16,
                     "median_indices": [7, 8],
                     "iqr_lower_indices": [3, 4],
@@ -744,6 +764,14 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 },
                 "representation_limit": "direct-parallax-container",
             })
+        self.assertEqual(
+            [
+                source["entrypoint"] for source in
+                manifest["subtitle_conditioning"]["resolver"]
+                ["shader_contract"]["source_specs"]
+            ],
+            ["resolve_main", "condition_prepare_main", "condition_main"],
+        )
 
     def test_current_slr12_manifest_rejects_provenance_roles_and_base_field_drift(self):
         mutations = {
