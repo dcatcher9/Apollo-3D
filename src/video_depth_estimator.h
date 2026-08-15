@@ -434,8 +434,8 @@ namespace models {
    * This is a shadow-only diagnostic contract. A ready quiet sample is evidence for evaluating a
    * future policy; it is never, by itself, authority to suppress inference or reuse geometry.
    */
-  inline constexpr std::uint32_t adaptive_motion_probe_contract_tag = 0x314D4643u;
-  inline constexpr std::size_t adaptive_motion_probe_word_count = 25u;
+  inline constexpr std::uint32_t adaptive_motion_probe_contract_tag = 0x324D4643u;
+  inline constexpr std::size_t adaptive_motion_probe_word_count = 26u;
   inline constexpr std::uint32_t adaptive_motion_probe_max_exact_numeric_counter = 16777215u;
 
   enum class adaptive_motion_probe_status_e : std::uint8_t {
@@ -500,6 +500,7 @@ namespace models {
     std::uint32_t bottom_band_exact_changed_texels = 0u;
     std::uint32_t bottom_band_rgb_delta_1_over_1024_texels = 0u;
     float bottom_band_maximum_rgb_delta = 0.0f;
+    std::uint32_t appearance_exact_changed_texels = 0u;
   };
 
   struct adaptive_motion_probe_result {
@@ -540,7 +541,8 @@ namespace models {
       return adaptive_motion_probe_exact_verdict_e::invalid;
     }
     return sample.exclusion_mismatch_texels != 0u ||
-               sample.exact_changed_texels != 0u ?
+               sample.exact_changed_texels != 0u ||
+               sample.appearance_exact_changed_texels != 0u ?
              adaptive_motion_probe_exact_verdict_e::motion_veto :
              adaptive_motion_probe_exact_verdict_e::quiet_evidence;
   }

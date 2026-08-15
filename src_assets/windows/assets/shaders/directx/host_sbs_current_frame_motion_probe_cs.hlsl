@@ -23,7 +23,7 @@ cbuffer ProbeConstants : register(b1) {
     uint2 probe_reserved;
 };
 
-#define MOTION_PROBE_CONTRACT_TAG 0x314D4643u
+#define MOTION_PROBE_CONTRACT_TAG 0x324D4643u
 #define MOTION_PROBE_MIN_SCENE_AGE 8u
 #define MOTION_PROBE_MAX_EXACT_NUMERIC_COUNTER 16777215.0f
 #define MOTION_PROBE_KNOWN_CUT_FLAGS \
@@ -62,6 +62,7 @@ cbuffer ProbeConstants : register(b1) {
 #define PROBE_WORD_BOTTOM_EXACT_CHANGED 22u
 #define PROBE_WORD_BOTTOM_RGB_1_OVER_1024 23u
 #define PROBE_WORD_BOTTOM_MAX_RGB_DELTA_BITS 24u
+#define PROBE_WORD_APPEARANCE_EXACT_CHANGED 25u
 
 #define LOCAL_ADMITTED 0u
 #define LOCAL_EXCLUSION_MISMATCH 1u
@@ -76,7 +77,8 @@ cbuffer ProbeConstants : register(b1) {
 #define LOCAL_BOTTOM_EXACT_CHANGED 10u
 #define LOCAL_BOTTOM_RGB_1_OVER_1024 11u
 #define LOCAL_BOTTOM_MAX_RGB_DELTA_BITS 12u
-#define LOCAL_WORD_COUNT 13u
+#define LOCAL_APPEARANCE_EXACT_CHANGED 13u
+#define LOCAL_WORD_COUNT 14u
 
 groupshared uint GroupWords[LOCAL_WORD_COUNT];
 
@@ -136,6 +138,9 @@ void main(
             float maximum_rgb_delta = max(rgb_delta.r, max(rgb_delta.g, rgb_delta.b));
             float appearance_delta = abs(
                 CurrentAppearanceOrdinal[index] - PreviousAppearanceOrdinal[index]);
+            bool appearance_exact_changed =
+                asuint(CurrentAppearanceOrdinal[index]) !=
+                    asuint(PreviousAppearanceOrdinal[index]);
             bool bottom_band = dtid.y >= probe_bottom_top &&
                                dtid.y < probe_bottom_bottom;
 
@@ -155,6 +160,9 @@ void main(
             InterlockedMax(GroupWords[LOCAL_MAX_RGB_DELTA_BITS], asuint(maximum_rgb_delta));
             if (appearance_delta >= (1.0f / 1024.0f)) {
                 InterlockedAdd(GroupWords[LOCAL_APPEARANCE_1_OVER_1024], 1u);
+            }
+            if (appearance_exact_changed) {
+                InterlockedAdd(GroupWords[LOCAL_APPEARANCE_EXACT_CHANGED], 1u);
             }
             InterlockedMax(
                 GroupWords[LOCAL_MAX_APPEARANCE_DELTA_BITS], asuint(appearance_delta));
@@ -211,6 +219,9 @@ void main(
         InterlockedMax(
             ProbeWords[PROBE_WORD_BOTTOM_MAX_RGB_DELTA_BITS],
             GroupWords[LOCAL_BOTTOM_MAX_RGB_DELTA_BITS]);
+        InterlockedAdd(
+            ProbeWords[PROBE_WORD_APPEARANCE_EXACT_CHANGED],
+            GroupWords[LOCAL_APPEARANCE_EXACT_CHANGED]);
 
         if (gid.x == 0u && gid.y == 0u) {
             float scene_age_value =

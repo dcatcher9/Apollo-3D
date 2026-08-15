@@ -461,6 +461,7 @@ TEST(HostSbsCurrentFrameMotionProbeGpuTest, PreservesExactEvidenceAndStateIdenti
   EXPECT_EQ(quiet.sample.admitted_texels, field_texels);
   EXPECT_EQ(quiet.sample.exclusion_mismatch_texels, 0u);
   EXPECT_EQ(quiet.sample.exact_changed_texels, 0u);
+  EXPECT_EQ(quiet.sample.appearance_exact_changed_texels, 0u);
   EXPECT_EQ(quiet.sample.maximum_exact_changed_in_16x16_tile, 0u);
   EXPECT_EQ(
     quiet.sample.bottom_band_admitted_texels,
@@ -487,6 +488,26 @@ TEST(HostSbsCurrentFrameMotionProbeGpuTest, PreservesExactEvidenceAndStateIdenti
   EXPECT_EQ(one_bit.sample.maximum_exact_changed_in_16x16_tile, 1u);
   EXPECT_EQ(
     models::adaptive_motion_probe_exact_verdict(one_bit.sample),
+    models::adaptive_motion_probe_exact_verdict_e::motion_veto
+  );
+
+  probe_inputs_t appearance_bit_inputs;
+  constexpr std::size_t appearance_bit_index = 6u * field_width + 5u;
+  appearance_bit_inputs.previous_appearance[appearance_bit_index] = 1.0f;
+  appearance_bit_inputs.current_appearance[appearance_bit_index] =
+    std::bit_cast<float>(std::bit_cast<std::uint32_t>(1.0f) + 1u);
+  probe_execution_t appearance_bit;
+  ASSERT_TRUE(fixture.run(
+    appearance_bit_inputs,
+    state,
+    appearance_bit,
+    error
+  )) << error;
+  ASSERT_TRUE(appearance_bit.decoded);
+  EXPECT_EQ(appearance_bit.sample.exact_changed_texels, 0u);
+  EXPECT_EQ(appearance_bit.sample.appearance_exact_changed_texels, 1u);
+  EXPECT_EQ(
+    models::adaptive_motion_probe_exact_verdict(appearance_bit.sample),
     models::adaptive_motion_probe_exact_verdict_e::motion_veto
   );
 

@@ -590,9 +590,9 @@ probe. Its baseline ID is copied from the latest authenticated V2 completion and
 the estimator's last postprocessed frame; either identity mismatch abstains. After ordinary
 preprocessing, a diagnostic shader outside the authenticated producer closure compares every
 admitted current NCHW value, appearance ordinal, and exclusion bit with that exact baseline and
-copies one fixed 25-word record. The verdict is deliberately narrower than the record: quiet
-requires exact NCHW-bit and exclusion equality, while any such mismatch is a motion veto. RGB
-delta tiers, appearance deltas, tile maxima, and bottom-band counters are diagnostics only and
+copies one fixed 26-word record. Quiet requires exact NCHW-bit, appearance-ordinal-bit, and
+exclusion equality, while any such mismatch is a motion veto. RGB delta tiers, appearance-delta
+thresholds, tile maxima, and bottom-band counters are diagnostics only and
 cannot change that verdict; neither verdict authorizes a hold. The existing encode target remains the
 only deadline: after preserving the same `3 ms` downstream reserve, repeated readiness queries may
 consume at most `0.5 ms` and have an independent query fuse. A missing or late target still permits

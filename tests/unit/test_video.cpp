@@ -66,6 +66,19 @@ namespace {
       models::adaptive_motion_probe_exact_verdict_e::quiet_evidence
     );
 
+    // DAV2 input equality is not a complete no-observation proof: CutBridge also consumes the
+    // point-sampled appearance-ordinal history. Even a one-bit ordinal change must veto.
+    words[25] = 1u;
+    ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
+      words, current_id, baseline_id, 770, 434, sample
+    ));
+    EXPECT_EQ(sample.appearance_exact_changed_texels, 1u);
+    EXPECT_EQ(
+      models::adaptive_motion_probe_exact_verdict(sample),
+      models::adaptive_motion_probe_exact_verdict_e::motion_veto
+    );
+    words[25] = 0u;
+
     words[13] = 1u;
     words[18] = 1u;
     ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
@@ -135,8 +148,10 @@ namespace {
     EXPECT_TRUE(rejects(17u, std::bit_cast<std::uint32_t>(
       std::numeric_limits<float>::quiet_NaN()
     )));
+    EXPECT_TRUE(rejects(19u, 1u));  // Threshold changes require an exact ordinal mismatch.
     EXPECT_TRUE(rejects(21u, area + 1u));
     EXPECT_TRUE(rejects(24u, std::bit_cast<std::uint32_t>(1.0f)));
+    EXPECT_TRUE(rejects(25u, area + 1u));
   }
 
   TEST(RenderedContentTimestampTest, MatchedT0IsPreservedWhileCurrentCadenceIsT1) {
@@ -3900,6 +3915,7 @@ TEST(DirectxShaderSourceTest, AdaptiveMotionProbeAuthenticatesCutStateEncodings)
     "/src_assets/windows/assets/shaders/directx/host_sbs_current_frame_motion_probe_cs.hlsl"
   );
   ASSERT_FALSE(shader.empty());
+  EXPECT_NE(shader.find("MOTION_PROBE_CONTRACT_TAG 0x324D4643u"), std::string::npos);
   EXPECT_NE(shader.find("ProbeCanonicalBoolean"), std::string::npos);
   EXPECT_NE(shader.find("ProbeFiniteWholeInRange"), std::string::npos);
   EXPECT_NE(
@@ -3908,6 +3924,14 @@ TEST(DirectxShaderSourceTest, AdaptiveMotionProbeAuthenticatesCutStateEncodings)
   );
   EXPECT_NE(
     shader.find("prior_flags |= state_fields_valid ? 1u << 9u : 0u;"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    shader.find("PROBE_WORD_APPEARANCE_EXACT_CHANGED"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    shader.find("asuint(CurrentAppearanceOrdinal[index]) !="),
     std::string::npos
   );
 }

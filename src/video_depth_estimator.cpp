@@ -755,6 +755,7 @@ namespace models {
       bottom_exact_changed,
       bottom_rgb_1_over_1024,
       bottom_max_rgb_delta_bits,
+      appearance_exact_changed,
     };
     if (
       words.size() != adaptive_motion_probe_word_count ||
@@ -795,7 +796,9 @@ namespace models {
       words[max_tile_exact_changed] <= 256u &&
       words[max_tile_exact_changed] <= words[exact_changed] &&
       ((words[exact_changed] == 0u) == (words[max_tile_exact_changed] == 0u)) &&
+      words[appearance_exact_changed] <= words[admitted] &&
       words[appearance_1_over_1024] <= words[admitted] &&
+      words[appearance_1_over_1024] <= words[appearance_exact_changed] &&
       words[bottom_admitted] <= words[admitted] &&
       words[bottom_exact_changed] <= words[exact_changed] &&
       words[bottom_exact_changed] <= words[bottom_admitted] &&
@@ -842,6 +845,7 @@ namespace models {
       .bottom_band_exact_changed_texels = words[bottom_exact_changed],
       .bottom_band_rgb_delta_1_over_1024_texels = words[bottom_rgb_1_over_1024],
       .bottom_band_maximum_rgb_delta = bottom_maximum_rgb,
+      .appearance_exact_changed_texels = words[appearance_exact_changed],
     };
     return true;
   }

@@ -115,8 +115,8 @@ CutBridge completions, preserves exact/tiny reuse priority, and retrospectively 
 candidate frame as quiet, vetoed, or unknown. It separately reports OCR-clean depth-plus-OCR
 opportunities and broad frames that would still require current-frame OCR. A recorded candidate
 also runs one bounded current-input probe against its exact authenticated depth lineage: exact
-NCHW-bit plus exclusion equality is quiet evidence, while the richer RGB, appearance, tile, and
-bottom-band channels remain diagnostic. Probe readiness is limited to one immediate query plus at
+NCHW-bit, appearance-ordinal-bit, and exclusion equality are quiet evidence, while the richer RGB,
+appearance-threshold, tile, and bottom-band channels remain diagnostic. Probe readiness is limited to one immediate query plus at
 most 0.5 ms of encode-cadence slack, and its exact verdict is cross-tabulated with that frame's later
 CutBridge class. No active value is accepted yet, and probe outcomes change no inference admission,
 OCR, cached geometry, cadence decision, or rendered output. The canonical policy, thresholds,
