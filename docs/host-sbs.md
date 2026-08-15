@@ -623,8 +623,10 @@ input floats equal an estimator-owned baseline whose OCR8 record and frame owner
 Any mismatch, nonfinite value, missing/abstaining OCR8 record, unavailable comparison resource, or
 OCR setup failure follows ordinary DAV2/OCR inference.
 The existing encode target remains the only deadline: after preserving the same `3 ms` downstream
-reserve, candidate-only readiness queries may consume at most `0.5 ms` and have an independent
-query fuse. A missing or late target permits one immediate query only. The staging map uses
+reserve, candidate-only readiness queries may consume at most `0.5 ms` starting when collection
+reaches its first query, and have an independent query fuse. Preprocessing does not silently spend
+that allowance; the absolute cadence deadline still truncates it. A missing or late target permits
+one immediate query only. The staging map uses
 `DO_NOT_WAIT`; unavailable resources, timeout, a motion veto, malformed evidence, or any optional
 shader/event failure immediately continues to the ordinary DAV2/OCR enqueue.
 

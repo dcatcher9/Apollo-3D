@@ -188,7 +188,8 @@ namespace platf::dxgi {
     }
 
     struct host_sbs_current_frame_probe_plan_t {
-      std::chrono::steady_clock::time_point deadline {};
+      std::chrono::steady_clock::time_point cadence_deadline {};
+      std::chrono::steady_clock::duration max_wait {};
       std::uint32_t max_queries = 1u;
       bool enabled = false;
     };
@@ -266,10 +267,10 @@ namespace platf::dxgi {
       if (cadence_deadline <= now) {
         return plan;
       }
-      plan.deadline = std::min(
-        cadence_deadline,
-        now + host_sbs_current_frame_probe_max_wait
-      );
+      // Preserve the scheduler-owned absolute deadline, but do not start spending the probe's
+      // bounded wait before estimate_depth() has dispatched preprocessing and reached collection.
+      plan.cadence_deadline = cadence_deadline;
+      plan.max_wait = host_sbs_current_frame_probe_max_wait;
       plan.max_queries = host_sbs_current_frame_probe_max_queries;
       return plan;
     }

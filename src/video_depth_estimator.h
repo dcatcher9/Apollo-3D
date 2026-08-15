@@ -486,9 +486,27 @@ namespace models {
     // unavailable. A dirty crop must instead authenticate the estimator-owned exact input below.
     bool ocr_damage_unchanged = false;
     std::uint64_t baseline_frame_id = 0u;
-    std::chrono::steady_clock::time_point deadline {};
+    std::chrono::steady_clock::time_point cadence_deadline {};
+    std::chrono::steady_clock::duration max_wait {};
     std::uint32_t max_queries = 1u;
   };
+
+  /** Start the bounded readiness allowance at collection without crossing the encode deadline. */
+  [[nodiscard]] constexpr std::chrono::steady_clock::time_point
+  adaptive_motion_probe_wait_deadline(
+    const std::chrono::steady_clock::time_point cadence_deadline,
+    const std::chrono::steady_clock::duration max_wait,
+    const std::chrono::steady_clock::time_point collection_started
+  ) noexcept {
+    if (
+      cadence_deadline.time_since_epoch().count() == 0 ||
+      max_wait <= std::chrono::steady_clock::duration::zero() ||
+      cadence_deadline <= collection_started
+    ) {
+      return {};
+    }
+    return std::min(cadence_deadline, collection_started + max_wait);
+  }
 
   struct adaptive_motion_probe_sample {
     std::uint64_t current_frame_id = 0u;

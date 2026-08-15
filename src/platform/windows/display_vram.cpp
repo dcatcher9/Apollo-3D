@@ -1315,7 +1315,8 @@ namespace platf::dxgi {
                     .ocr_damage_unchanged =
                       adaptive_probe_ocr_damage_unchanged,
                     .baseline_frame_id = adaptive_probe_baseline_frame_id,
-                    .deadline = probe_plan.deadline,
+                    .cadence_deadline = probe_plan.cadence_deadline,
+                    .max_wait = probe_plan.max_wait,
                     .max_queries = probe_plan.max_queries,
                   }
                 );

@@ -126,8 +126,9 @@ baseline OCR input floats with an authoritative baseline OCR8 owner and healthy 
 One current delivery may render its private color through cached authenticated V2 geometry
 without a DAV2/OCR observation, then the next changed identity must infer. The hold advances no
 depth/cut/camera/OCR/SLR or lineage state, and approximate low-motion/model-equivalent providers may
-not chain. Probe readiness is limited to one immediate query plus at most 0.5 ms of encode-cadence
-slack; timeout or veto immediately takes ordinary inference. The canonical policy, exact refresh
+not chain. Probe readiness is limited to one immediate query plus at most 0.5 ms, counted from
+readiness collection and still clipped by encode-cadence slack; timeout or veto immediately takes
+ordinary inference. The canonical policy, exact refresh
 bounds, scheduling-time age, one-delivery no-observation tradeoff, probe deadline, and reset matrix
 are in [Host SBS frame attribution](host-sbs.md#frame-attribution-and-failure-behavior).
 

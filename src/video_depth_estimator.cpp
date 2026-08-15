@@ -3539,12 +3539,18 @@ namespace models {
       }
 
       const auto started = std::chrono::steady_clock::now();
+      const auto deadline = adaptive_motion_probe_wait_deadline(
+        request.cadence_deadline,
+        request.max_wait,
+        started
+      );
       const auto query_limit = std::max<std::uint32_t>(1u, request.max_queries);
       constexpr auto query_interval = std::chrono::microseconds {50};
       while (true) {
         if (
           result.query_count > 0u &&
-          std::chrono::steady_clock::now() >= request.deadline
+          deadline.time_since_epoch().count() != 0 &&
+          std::chrono::steady_clock::now() >= deadline
         ) {
           result.status = adaptive_motion_probe_status_e::timed_out;
           break;
@@ -3596,13 +3602,13 @@ namespace models {
         const auto now = std::chrono::steady_clock::now();
         if (
           result.query_count >= query_limit ||
-          request.deadline.time_since_epoch().count() == 0 ||
-          now >= request.deadline
+          deadline.time_since_epoch().count() == 0 ||
+          now >= deadline
         ) {
           result.status = adaptive_motion_probe_status_e::timed_out;
           break;
         }
-        const auto next_query_at = std::min(request.deadline, now + query_interval);
+        const auto next_query_at = std::min(deadline, now + query_interval);
         while (std::chrono::steady_clock::now() < next_query_at) {
           std::this_thread::yield();
         }

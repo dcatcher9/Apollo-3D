@@ -40,6 +40,55 @@ namespace platf::dxgi {
 #endif
 
 namespace {
+  TEST(AdaptiveMotionProbeTest, StartsWaitBudgetAtCollectionAndKeepsCadenceAuthority) {
+    using namespace std::chrono_literals;
+
+    const auto scheduled = std::chrono::steady_clock::time_point {1s};
+    const auto collection_started = scheduled + 250us;
+    EXPECT_EQ(
+      models::adaptive_motion_probe_wait_deadline(
+        scheduled + 7ms,
+        500us,
+        collection_started
+      ),
+      collection_started + 500us
+    );
+    EXPECT_EQ(
+      models::adaptive_motion_probe_wait_deadline(
+        collection_started + 200us,
+        500us,
+        collection_started
+      ),
+      collection_started + 200us
+    );
+    EXPECT_EQ(
+      models::adaptive_motion_probe_wait_deadline({}, 500us, collection_started)
+        .time_since_epoch()
+        .count(),
+      0
+    );
+    EXPECT_EQ(
+      models::adaptive_motion_probe_wait_deadline(
+        collection_started + 1ms,
+        0us,
+        collection_started
+      )
+        .time_since_epoch()
+        .count(),
+      0
+    );
+    EXPECT_EQ(
+      models::adaptive_motion_probe_wait_deadline(
+        collection_started,
+        500us,
+        collection_started
+      )
+        .time_since_epoch()
+        .count(),
+      0
+    );
+  }
+
   TEST(AdaptiveMotionProbeTest, ValidatesExactIdentityAndShadowVerdict) {
     std::array<std::uint32_t, models::adaptive_motion_probe_word_count> words {};
     constexpr std::uint64_t current_id = 0x0000000200000003ull;

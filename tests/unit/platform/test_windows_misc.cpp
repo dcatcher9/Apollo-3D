@@ -727,17 +727,20 @@ namespace {
     );
     EXPECT_TRUE(no_deadline.enabled);
     EXPECT_EQ(no_deadline.max_queries, 1u);
-    EXPECT_EQ(no_deadline.deadline.time_since_epoch().count(), 0);
+    EXPECT_EQ(no_deadline.cadence_deadline.time_since_epoch().count(), 0);
+    EXPECT_EQ(no_deadline.max_wait, 0us);
 
     const auto late = host_sbs_current_frame_probe_plan(true, now + 3ms, now);
     EXPECT_TRUE(late.enabled);
     EXPECT_EQ(late.max_queries, 1u);
-    EXPECT_EQ(late.deadline.time_since_epoch().count(), 0);
+    EXPECT_EQ(late.cadence_deadline.time_since_epoch().count(), 0);
+    EXPECT_EQ(late.max_wait, 0us);
 
     const auto ample = host_sbs_current_frame_probe_plan(true, now + 10ms, now);
     EXPECT_TRUE(ample.enabled);
     EXPECT_EQ(ample.max_queries, host_sbs_current_frame_probe_max_queries);
-    EXPECT_EQ(ample.deadline, now + 500us);
+    EXPECT_EQ(ample.cadence_deadline, now + 7ms);
+    EXPECT_EQ(ample.max_wait, 500us);
 
     const auto cadence_limited = host_sbs_current_frame_probe_plan(
       true,
@@ -745,7 +748,8 @@ namespace {
       now
     );
     EXPECT_TRUE(cadence_limited.enabled);
-    EXPECT_EQ(cadence_limited.deadline, now + 200us);
+    EXPECT_EQ(cadence_limited.cadence_deadline, now + 200us);
+    EXPECT_EQ(cadence_limited.max_wait, 500us);
   }
 
   TEST(WindowsHostSbsCurrentFrameProbeTest, AuditAttachmentRequiresBothExactIdentities) {
