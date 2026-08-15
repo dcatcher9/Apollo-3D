@@ -195,7 +195,8 @@ namespace platf::dxgi {
     ddup_damage_coverage_t ddup_damage_history_t::query_coverage(
       const std::uint64_t from_exclusive,
       const std::uint64_t through_inclusive,
-      const RECT &region
+      const RECT &region,
+      const bool collect_max_single_intersection
     ) const {
       ddup_damage_coverage_t result;
       if (
@@ -247,9 +248,22 @@ namespace platf::dxgi {
         }
         for (const auto &rect : entry.rects) {
           const auto overlap = damage_rect_intersection_area(rect, region);
+          if (collect_max_single_intersection) {
+            result.max_single_intersection_area =
+              std::max(result.max_single_intersection_area, overlap);
+          }
+          if (result.potentially_changed_area == result.region_area) {
+            if (!collect_max_single_intersection) {
+              break;
+            }
+            continue;
+          }
           if (overlap >= result.region_area - result.potentially_changed_area) {
             result.potentially_changed_area = result.region_area;
-            break;
+            if (!collect_max_single_intersection) {
+              break;
+            }
+            continue;
           }
           result.potentially_changed_area += overlap;
         }
@@ -276,7 +290,8 @@ namespace platf::dxgi {
     ddup_damage_coverage_t query_ddup_damage_coverage_between(
       const std::optional<ddup_damage_snapshot_t> &from,
       const std::optional<ddup_damage_snapshot_t> &through,
-      const RECT &region
+      const RECT &region,
+      const bool collect_max_single_intersection
     ) {
       if (
         !from || !through || !from->history || !through->history ||
@@ -287,7 +302,8 @@ namespace platf::dxgi {
       return through->history->query_coverage(
         from->token,
         through->token,
-        region
+        region,
+        collect_max_single_intersection
       );
     }
 

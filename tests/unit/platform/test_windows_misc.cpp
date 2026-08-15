@@ -352,12 +352,14 @@ namespace {
       platf::dxgi::detail::query_ddup_damage_coverage_between(
         base,
         overlap_twice,
-        roi
+        roi,
+        true
       );
     ASSERT_TRUE(coverage.known);
     EXPECT_EQ(coverage.region_area, 10000u);
     // The repeated 10x10 rectangle is counted twice on purpose; the clipped corner adds 5x5.
     EXPECT_EQ(coverage.potentially_changed_area, 225u);
+    EXPECT_EQ(coverage.max_single_intersection_area, 100u);
 
     const auto saturated = history->commit({
       true,
@@ -370,10 +372,12 @@ namespace {
       platf::dxgi::detail::query_ddup_damage_coverage_between(
         overlap_twice,
         saturated,
-        roi
+        roi,
+        true
       );
     ASSERT_TRUE(saturated_coverage.known);
     EXPECT_EQ(saturated_coverage.potentially_changed_area, 10000u);
+    EXPECT_EQ(saturated_coverage.max_single_intersection_area, 10000u);
   }
 
   TEST(WindowsDdupDamageTest, LowMotionCandidateUsesExactQuarterPercentAndOcrGate) {
@@ -414,6 +418,7 @@ namespace {
         roi
       );
     EXPECT_EQ(first_two.potentially_changed_area, 20u);
+    EXPECT_EQ(first_two.max_single_intersection_area, 0u);
     EXPECT_TRUE(platf::dxgi::detail::host_sbs_low_motion_damage_candidate(
       first_two,
       true
@@ -519,6 +524,109 @@ namespace {
         true
       )
     );
+  }
+
+  TEST(WindowsDdupDamageTest, AdaptiveBroadProofCannotBeInflatedByOverlapOrMoveEnds) {
+    using platf::dxgi::detail::host_sbs_adaptive_motion_broad_damage_candidate;
+    using platf::dxgi::detail::host_sbs_adaptive_motion_sum_only_broad;
+
+    auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+    const auto accepted = history->commit({true, {}});
+    DXGI_OUTDUPL_MOVE_RECT move {};
+    move.SourcePoint = {0, 0};
+    move.DestinationRect = {0, 0, 40, 100};
+    const auto overlapping_move = platf::dxgi::detail::make_ddup_damage_update(
+      {},
+      std::span<const DXGI_OUTDUPL_MOVE_RECT> {&move, 1u},
+      100,
+      100
+    );
+    ASSERT_TRUE(overlapping_move.known);
+    ASSERT_EQ(overlapping_move.rects.size(), 2u);
+    const auto moved = history->commit(overlapping_move);
+    const RECT roi {0, 0, 100, 100};
+    const auto overlap = platf::dxgi::detail::query_ddup_damage_coverage_between(
+      accepted,
+      moved,
+      roi,
+      true
+    );
+    ASSERT_TRUE(overlap.known);
+    EXPECT_EQ(overlap.potentially_changed_area, 8000u);
+    EXPECT_EQ(overlap.max_single_intersection_area, 4000u);
+    EXPECT_TRUE(host_sbs_adaptive_motion_sum_only_broad(overlap));
+    EXPECT_FALSE(host_sbs_adaptive_motion_broad_damage_candidate(overlap));
+
+    const auto broad = history->commit({true, {{0, 0, 50, 100}}});
+    const auto broad_coverage =
+      platf::dxgi::detail::query_ddup_damage_coverage_between(
+        moved,
+        broad,
+        roi,
+        true
+      );
+    EXPECT_EQ(broad_coverage.max_single_intersection_area, 5000u);
+    EXPECT_TRUE(host_sbs_adaptive_motion_broad_damage_candidate(broad_coverage));
+    EXPECT_TRUE(platf::dxgi::detail::host_sbs_adaptive_motion_damage_candidate(
+      broad_coverage,
+      true
+    ));
+    EXPECT_FALSE(platf::dxgi::detail::host_sbs_adaptive_motion_damage_candidate(
+      broad_coverage,
+      false
+    ));
+  }
+
+  TEST(WindowsDdupDamageTest, AdaptiveOcrCleanBroadWitnessCoversBothTopHalfPhases) {
+    auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+    const auto baseline = history->commit({true, {}});
+    const RECT top_half {0, 0, 770, 217};
+    const auto first_phase = history->commit({true, {top_half}});
+    const auto second_phase = history->commit({true, {top_half}});
+    const RECT analysis_region {0, 0, 770, 434};
+    const auto source_crop = models::subtitle_ocr_source_crop_rect(
+      models::depth_source_rect_t {0u, 0u, 770u, 434u}
+    );
+    ASSERT_TRUE(source_crop);
+    const RECT ocr_crop {
+      static_cast<LONG>(source_crop->left),
+      static_cast<LONG>(source_crop->top),
+      static_cast<LONG>(source_crop->right),
+      static_cast<LONG>(source_crop->bottom),
+    };
+    EXPECT_EQ(ocr_crop.left, 0);
+    EXPECT_EQ(ocr_crop.top, 305);
+    EXPECT_EQ(ocr_crop.right, 770);
+    EXPECT_EQ(ocr_crop.bottom, 434);
+
+    const auto expect_ocr_clean_broad = [&](const auto &from, const auto &to) {
+      const auto coverage =
+        platf::dxgi::detail::query_ddup_damage_coverage_between(
+          from,
+          to,
+          analysis_region,
+          true
+        );
+      ASSERT_TRUE(coverage.known);
+      EXPECT_EQ(coverage.region_area, 770u * 434u);
+      EXPECT_EQ(coverage.max_single_intersection_area, 770u * 217u);
+      EXPECT_TRUE(
+        platf::dxgi::detail::host_sbs_adaptive_motion_broad_damage_candidate(
+          coverage
+        )
+      );
+      EXPECT_EQ(
+        platf::dxgi::detail::query_ddup_damage_between(from, to, ocr_crop),
+        platf::dxgi::detail::ddup_damage_intersection_e::unchanged
+      );
+      EXPECT_TRUE(platf::dxgi::detail::host_sbs_adaptive_motion_damage_candidate(
+        coverage,
+        true
+      ));
+    };
+
+    expect_ocr_clean_broad(baseline, first_phase);
+    expect_ocr_clean_broad(first_phase, second_phase);
   }
 
   TEST(WindowsHostSbsSameFramePollTest, CadenceSlackCapsAndFailClosesWaitBudget) {
@@ -689,6 +797,337 @@ namespace {
     EXPECT_FALSE(host_sbs_low_motion_cache_reuse_allowed(
       true, true, true, false, true, false
     ));
+  }
+
+  TEST(WindowsHostSbsAdaptiveShadowTest, OnlyExplicitShadowValueEnablesMeasurement) {
+    using mode_e = platf::dxgi::detail::host_sbs_adaptive_motion_mode_e;
+    using platf::dxgi::detail::host_sbs_adaptive_motion_mode;
+
+    EXPECT_EQ(host_sbs_adaptive_motion_mode("shadow"), mode_e::shadow);
+    EXPECT_EQ(host_sbs_adaptive_motion_mode("1"), mode_e::off);
+    EXPECT_EQ(host_sbs_adaptive_motion_mode("off"), mode_e::off);
+    EXPECT_EQ(host_sbs_adaptive_motion_mode(""), mode_e::off);
+  }
+
+  TEST(WindowsHostSbsAdaptiveShadowTest, QuietRequiresSettledCutMasksAndValidMetrics) {
+    using verdict_e = platf::dxgi::detail::host_sbs_adaptive_motion_verdict_e;
+    using platf::dxgi::detail::host_sbs_adaptive_motion_verdict;
+    const auto classify = [](const std::uint32_t cut_flags,
+                             const std::uint32_t analysis_flags = 0u,
+                             const bool hard_cut = false,
+                             const float raw_rgb = 0.005f,
+                             const float structural = 0.002f,
+                             const float depth = 0.05f) {
+      return host_sbs_adaptive_motion_verdict(
+        true,
+        true,
+        false,
+        hard_cut,
+        1u,
+        analysis_flags,
+        cut_flags,
+        8u,
+        raw_rgb,
+        structural,
+        depth
+      );
+    };
+
+    EXPECT_EQ(classify(3u), verdict_e::quiet);
+    EXPECT_EQ(classify(19u), verdict_e::quiet);
+    EXPECT_EQ(classify(0u), verdict_e::flags);
+    EXPECT_EQ(classify(3u | sbs_adaptive_state::cut_flag_geometry_low_once), verdict_e::flags);
+    EXPECT_EQ(classify(3u | sbs_adaptive_state::cut_flag_appearance_quiet_once), verdict_e::flags);
+    EXPECT_EQ(classify(3u | sbs_adaptive_state::cut_flag_appearance_recovery), verdict_e::flags);
+    EXPECT_EQ(
+      classify(3u | sbs_adaptive_state::cut_flag_geometry_confirmation_pending),
+      verdict_e::flags
+    );
+    EXPECT_EQ(classify(3u, 1u), verdict_e::flags);
+    EXPECT_EQ(classify(3u, 0u, true), verdict_e::hard_cut);
+    EXPECT_EQ(classify(3u, 0u, false, 0.011f), verdict_e::motion);
+    EXPECT_EQ(classify(3u, 0u, false, 0.005f, 0.006f), verdict_e::motion);
+    EXPECT_EQ(classify(3u, 0u, false, 0.005f, 0.002f, 0.11f), verdict_e::motion);
+    EXPECT_EQ(classify(3u, 0u, false, -1.0f), verdict_e::invalid);
+    EXPECT_EQ(
+      classify(
+        3u,
+        0u,
+        false,
+        platf::dxgi::detail::host_sbs_adaptive_motion_raw_rgb_max,
+        platf::dxgi::detail::host_sbs_adaptive_motion_structural_max,
+        platf::dxgi::detail::host_sbs_adaptive_motion_depth_change_max
+      ),
+      verdict_e::quiet
+    );
+    EXPECT_EQ(classify(3u | (1u << 31u)), verdict_e::flags);
+
+    EXPECT_EQ(
+      host_sbs_adaptive_motion_verdict(
+        false, true, false, false, 1u, 0u, 3u, 8u, 0.0f, 0.0f, 0.0f
+      ),
+      verdict_e::invalid
+    );
+    EXPECT_EQ(
+      host_sbs_adaptive_motion_verdict(
+        true, false, false, false, 1u, 0u, 3u, 8u, 0.0f, 0.0f, 0.0f
+      ),
+      verdict_e::invalid
+    );
+    EXPECT_EQ(
+      host_sbs_adaptive_motion_verdict(
+        true, true, true, false, 1u, 0u, 3u, 8u, 0.0f, 0.0f, 0.0f
+      ),
+      verdict_e::invalid
+    );
+    EXPECT_EQ(
+      host_sbs_adaptive_motion_verdict(
+        true, true, false, false, 0u, 0u, 3u, 8u, 0.0f, 0.0f, 0.0f
+      ),
+      verdict_e::invalid
+    );
+    EXPECT_EQ(
+      host_sbs_adaptive_motion_verdict(
+        true, true, false, false, 1u, 0u, 3u, 7u, 0.0f, 0.0f, 0.0f
+      ),
+      verdict_e::invalid
+    );
+    // A real pulse resets readiness and scene age, but remains the dedicated cut-risk verdict.
+    EXPECT_EQ(
+      host_sbs_adaptive_motion_verdict(
+        false, false, true, true, 0u, 1u, 0u, 0u, -1.0f, -1.0f, -1.0f
+      ),
+      verdict_e::hard_cut
+    );
+  }
+
+  TEST(WindowsHostSbsAdaptiveShadowTest, TwoScheduledQuietSamplesExpireByWallClock) {
+    using namespace std::chrono_literals;
+    using verdict_e = platf::dxgi::detail::host_sbs_adaptive_motion_verdict_e;
+    platf::dxgi::detail::host_sbs_adaptive_motion_state_t state;
+    const auto first = std::chrono::steady_clock::time_point {1s};
+
+    EXPECT_TRUE(state.observe(10u, verdict_e::quiet, first));
+    EXPECT_FALSE(state.quiet_mode(first + 1ms));
+    EXPECT_TRUE(state.observe(11u, verdict_e::quiet, first + 10ms));
+    EXPECT_TRUE(state.quiet_mode(first + 109ms));
+    EXPECT_FALSE(state.quiet_mode(first + 110ms));
+    // A readback received late cannot restamp its scheduling time.
+    EXPECT_TRUE(state.observe(12u, verdict_e::quiet, first + 20ms));
+    EXPECT_FALSE(state.quiet_mode(first + 121ms));
+    EXPECT_FALSE(state.observe(12u, verdict_e::quiet, first + 120ms));
+    EXPECT_EQ(state.quiet_samples(), 2u);
+    EXPECT_FALSE(state.observe(11u, verdict_e::quiet, first + 30ms));
+    EXPECT_EQ(state.quiet_samples(), 0u);
+
+    // A gap below 100 ms preserves continuity, while exactly 100 ms breaks the streak. The first
+    // fresh observation after that break cannot immediately requalify old quiet evidence.
+    EXPECT_TRUE(state.observe(20u, verdict_e::quiet, first + 200ms));
+    EXPECT_TRUE(state.observe(21u, verdict_e::quiet, first + 299ms));
+    EXPECT_TRUE(state.quiet_mode(first + 299ms));
+    EXPECT_TRUE(state.observe(22u, verdict_e::quiet, first + 399ms));
+    EXPECT_EQ(state.quiet_samples(), 1u);
+    EXPECT_FALSE(state.quiet_mode(first + 399ms));
+    EXPECT_TRUE(state.observe(23u, verdict_e::quiet, first + 400ms));
+    EXPECT_EQ(state.quiet_samples(), 2u);
+    EXPECT_TRUE(state.quiet_mode(first + 400ms));
+  }
+
+  TEST(WindowsHostSbsAdaptiveShadowTest, LiveRouteEpochChangesWithoutAnAuthenticatedCache) {
+    using epoch_t = platf::dxgi::detail::host_sbs_adaptive_motion_route_epoch_t;
+    platf::dxgi::detail::host_sbs_adaptive_motion_route_state_t state;
+    const epoch_t base {
+      .source_width = 1920u,
+      .source_height = 1080u,
+      .mip_levels = 1u,
+      .array_size = 1u,
+      .source_format = 87u,
+      .sample_count = 1u,
+      .sample_quality = 0u,
+      .input_color_space = 0u,
+      .root_authority_generation = 10u,
+      .region_authority_generation = 20u,
+      .browser_authority_epoch = 30u,
+      .interactive_move_size = false,
+    };
+
+    EXPECT_FALSE(state.observe(base));
+    EXPECT_FALSE(state.observe(base));
+    // Resetting predictive evidence must not erase this independent live-route baseline.
+    platf::dxgi::detail::host_sbs_adaptive_motion_state_t predictor;
+    predictor.reset();
+    auto changed = base;
+    ++changed.root_authority_generation;
+    EXPECT_TRUE(state.observe(changed));
+    ++changed.region_authority_generation;
+    EXPECT_TRUE(state.observe(changed));
+    ++changed.browser_authority_epoch;
+    EXPECT_TRUE(state.observe(changed));
+    ++changed.input_color_space;
+    EXPECT_TRUE(state.observe(changed));
+    ++changed.source_width;
+    EXPECT_TRUE(state.observe(changed));
+    ++changed.source_format;
+    EXPECT_TRUE(state.observe(changed));
+    changed.interactive_move_size = true;
+    EXPECT_TRUE(state.observe(changed));
+    state.reset();
+    EXPECT_FALSE(state.observe(changed));
+  }
+
+  TEST(WindowsHostSbsAdaptiveShadowTest, SimulatedHoldForcesOneRefreshBeforeRearming) {
+    using namespace std::chrono_literals;
+    using decision_e = platf::dxgi::detail::host_sbs_adaptive_shadow_decision_e;
+    platf::dxgi::detail::host_sbs_adaptive_shadow_cadence_t cadence;
+    const auto start = std::chrono::steady_clock::time_point {1s};
+    const auto a = start;
+    const auto b = start + 1ms;
+    const auto c = start + 2ms;
+    const auto d = start + 3ms;
+
+    cadence.record_successful_enqueue(a, start);
+    EXPECT_EQ(cadence.observe_changed(b, true, start + 49ms), decision_e::hold_candidate);
+    EXPECT_TRUE(cadence.refresh_required());
+    // Re-delivery of the one held identity is idempotent and is not a second candidate.
+    EXPECT_EQ(
+      cadence.observe_changed(b, true, start + 49ms),
+      decision_e::hold_same_identity
+    );
+    // A distinct successor forces the simulated real inference before another hold can arm.
+    EXPECT_EQ(cadence.observe_changed(c, true, start + 49ms), decision_e::infer);
+    cadence.record_successful_enqueue(c, start + 49ms);
+    EXPECT_EQ(cadence.observe_changed(d, true, start + 98ms), decision_e::hold_candidate);
+
+    EXPECT_TRUE(platf::dxgi::detail::host_sbs_adaptive_shadow_records_enqueue(
+      decision_e::infer
+    ));
+    EXPECT_FALSE(platf::dxgi::detail::host_sbs_adaptive_shadow_records_enqueue(
+      decision_e::hold_candidate
+    ));
+    EXPECT_FALSE(platf::dxgi::detail::host_sbs_adaptive_shadow_records_enqueue(
+      decision_e::hold_same_identity
+    ));
+
+    cadence.record_successful_enqueue(a, start);
+    EXPECT_EQ(cadence.observe_changed(b, true, start + 50ms), decision_e::infer);
+
+    cadence.record_successful_enqueue(a, start);
+    ASSERT_EQ(cadence.observe_changed(b, true, start + 49ms), decision_e::hold_candidate);
+    EXPECT_EQ(cadence.observe_changed(b, true, start + 50ms), decision_e::infer);
+  }
+
+  TEST(WindowsHostSbsAdaptiveShadowTest, RetrospectiveAuditTracksExactIdsGapsAndEviction) {
+    using verdict_e = platf::dxgi::detail::host_sbs_adaptive_motion_verdict_e;
+    using candidate_e =
+      platf::dxgi::detail::host_sbs_adaptive_motion_candidate_class_e;
+    platf::dxgi::detail::host_sbs_adaptive_motion_audit_t audit;
+
+    for (std::uint64_t frame = 1u;
+         frame <= platf::dxgi::detail::host_sbs_adaptive_motion_audit_capacity;
+         ++frame) {
+      const auto recorded = audit.record(
+        frame,
+        frame % 2u == 0u ? candidate_e::depth_plus_ocr :
+                           candidate_e::ocr_only_needed
+      );
+      EXPECT_TRUE(recorded.recorded);
+      EXPECT_EQ(recorded.unknown.total(), 0u);
+    }
+    const auto evicted = audit.record(
+      platf::dxgi::detail::host_sbs_adaptive_motion_audit_capacity + 1u,
+      candidate_e::ocr_only_needed
+    );
+    EXPECT_TRUE(evicted.recorded);
+    EXPECT_EQ(evicted.unknown.depth_plus_ocr, 0u);
+    EXPECT_EQ(evicted.unknown.ocr_only_needed, 1u);
+    const auto resolved = audit.resolve(10u, verdict_e::hard_cut);
+    EXPECT_EQ(resolved.unknown.depth_plus_ocr, 4u);
+    EXPECT_EQ(resolved.unknown.ocr_only_needed, 4u);
+    ASSERT_TRUE(resolved.matched);
+    EXPECT_EQ(resolved.matched->candidate_class, candidate_e::depth_plus_ocr);
+    EXPECT_EQ(resolved.matched->verdict, verdict_e::hard_cut);
+    const auto pending = audit.pending();
+    EXPECT_EQ(pending.total, 7u);
+    EXPECT_EQ(pending.by_class.depth_plus_ocr, 3u);
+    EXPECT_EQ(pending.by_class.ocr_only_needed, 4u);
+    const auto discarded = audit.discard_all();
+    EXPECT_EQ(discarded.depth_plus_ocr, 3u);
+    EXPECT_EQ(discarded.ocr_only_needed, 4u);
+    EXPECT_EQ(audit.size(), 0u);
+
+    const auto ocr_only_recorded = audit.record(20u, candidate_e::ocr_only_needed);
+    EXPECT_TRUE(ocr_only_recorded.recorded);
+    EXPECT_EQ(ocr_only_recorded.unknown.total(), 0u);
+    const auto ocr_only = audit.resolve(20u, verdict_e::quiet);
+    EXPECT_EQ(ocr_only.unknown.total(), 0u);
+    ASSERT_TRUE(ocr_only.matched);
+    EXPECT_EQ(ocr_only.matched->candidate_class, candidate_e::ocr_only_needed);
+    EXPECT_EQ(ocr_only.matched->verdict, verdict_e::quiet);
+  }
+
+  TEST(WindowsHostSbsAdaptiveShadowTest, RejectedOwnershipIsClassUnknownAndLedgerBalances) {
+    using candidate_e =
+      platf::dxgi::detail::host_sbs_adaptive_motion_candidate_class_e;
+    using counts_t =
+      platf::dxgi::detail::host_sbs_adaptive_motion_candidate_counts_t;
+    using verdict_e = platf::dxgi::detail::host_sbs_adaptive_motion_verdict_e;
+    platf::dxgi::detail::host_sbs_adaptive_motion_audit_t audit;
+    counts_t candidates;
+    counts_t unknown;
+    counts_t actual;
+
+    const auto attempt = [&](const std::uint64_t frame_id, const candidate_e candidate) {
+      candidates.add(candidate);
+      const auto result = audit.record(frame_id, candidate);
+      unknown.add(result.unknown);
+      return result.recorded;
+    };
+
+    EXPECT_FALSE(attempt(0u, candidate_e::depth_plus_ocr));
+    EXPECT_TRUE(attempt(10u, candidate_e::depth_plus_ocr));
+    EXPECT_FALSE(attempt(10u, candidate_e::ocr_only_needed));
+    EXPECT_FALSE(attempt(9u, candidate_e::depth_plus_ocr));
+
+    const auto resolved = audit.resolve(10u, verdict_e::quiet);
+    unknown.add(resolved.unknown);
+    ASSERT_TRUE(resolved.matched);
+    actual.add(resolved.matched->candidate_class);
+    const auto pending = audit.pending();
+
+    EXPECT_EQ(candidates.depth_plus_ocr, 3u);
+    EXPECT_EQ(candidates.ocr_only_needed, 1u);
+    EXPECT_EQ(actual.depth_plus_ocr, 1u);
+    EXPECT_EQ(actual.ocr_only_needed, 0u);
+    EXPECT_EQ(unknown.depth_plus_ocr, 2u);
+    EXPECT_EQ(unknown.ocr_only_needed, 1u);
+    EXPECT_EQ(pending.total, 0u);
+    EXPECT_EQ(
+      candidates.depth_plus_ocr,
+      actual.depth_plus_ocr + unknown.depth_plus_ocr +
+        pending.by_class.depth_plus_ocr
+    );
+    EXPECT_EQ(
+      candidates.ocr_only_needed,
+      actual.ocr_only_needed + unknown.ocr_only_needed +
+        pending.by_class.ocr_only_needed
+    );
+  }
+
+  TEST(WindowsHostSbsAdaptiveShadowTest, VerdictCountsRemainSeparated) {
+    using verdict_e = platf::dxgi::detail::host_sbs_adaptive_motion_verdict_e;
+    platf::dxgi::detail::host_sbs_adaptive_motion_verdict_counts_t counts;
+
+    counts.add(verdict_e::quiet);
+    counts.add(verdict_e::invalid);
+    counts.add(verdict_e::hard_cut);
+    counts.add(verdict_e::flags);
+    counts.add(verdict_e::motion);
+
+    EXPECT_EQ(counts.quiet, 1u);
+    EXPECT_EQ(counts.invalid, 1u);
+    EXPECT_EQ(counts.hard_cut, 1u);
+    EXPECT_EQ(counts.flags, 1u);
+    EXPECT_EQ(counts.motion, 1u);
   }
 
   TEST(WindowsUploadedValueStateTest, CommitsOnlyExplicitlyAcceptedValue) {

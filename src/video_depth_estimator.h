@@ -592,6 +592,8 @@ namespace models {
     float current_zero_anchor_candidate_shift_px = -1.0f;
     float structural_change_fraction = -1.0f;
     float raw_rgb_change_fraction = -1.0f;
+    std::uint32_t analysis_flags = 0;
+    std::uint32_t model_input_history_state = 0;
     std::uint32_t scene_age = 0;
     std::uint32_t cut_flags = 0;
     std::uint32_t hard_cut_count = 0;
@@ -599,6 +601,9 @@ namespace models {
     std::uint32_t empty_raw_count = 0;
     std::uint32_t collapsed_raw_count = 0;
     std::uint64_t sampled_frame_id = 0;
+    // Exact wall-clock owner of the CopyResource that captured this CutBridge state. Readback may
+    // complete much later and must never make old motion evidence look fresh.
+    std::chrono::steady_clock::time_point sampled_at {};
     bool profile_initialized = false;
     bool anchor_valid = false;
     bool range_collapsed = false;

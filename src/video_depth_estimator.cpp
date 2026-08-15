@@ -1556,9 +1556,9 @@ namespace models {
     bool parallax_v2_producer_active = false;
     bool parallax_v2_producer_failed = false;
 
-    // Subscription-gated, nonblocking telemetry readback. Resources are created lazily only after
-    // a client enables the protocol, then a three-slot staging/query ring absorbs GPU latency
-    // without ever flushing or waiting on the encode thread.
+    // Demand-gated, nonblocking telemetry readback. Resources are created lazily only after a
+    // protocol subscriber or the process-only adaptive shadow requests evidence; a three-slot
+    // staging/query ring absorbs GPU latency without flushing or waiting on the encode thread.
     static constexpr std::size_t telemetry_state_float_count =
       sbs_adaptive_state::word_count;
 
@@ -1567,6 +1567,7 @@ namespace models {
       Microsoft::WRL::ComPtr<ID3D11Query> completion;
       bool pending = false;
       std::uint64_t sampled_frame_id = 0;
+      std::chrono::steady_clock::time_point sampled_at {};
     };
 
     std::array<telemetry_readback_slot, 3> telemetry_readback_slots;
@@ -1989,6 +1990,7 @@ namespace models {
       int depth_width,
       int depth_height,
       std::uint64_t sampled_frame_id,
+      std::chrono::steady_clock::time_point sampled_at,
       depth_telemetry_sample &sample
     ) {
       using sbs_adaptive_state::word_e;
@@ -2016,6 +2018,8 @@ namespace models {
       const float scene_age = scalar(word_e::scene_age);
       const float cut_flags = scalar(word_e::cut_flags);
       const float analysis_flags = scalar(word_e::analysis_flags);
+      const float model_input_history_state =
+        scalar(word_e::model_input_history_state);
       const float hard_cut_pulse = scalar(word_e::hard_cut_pulse);
       if (
         scene_age < 0.0f ||
@@ -2026,6 +2030,9 @@ namespace models {
         analysis_flags >
           static_cast<float>(sbs_adaptive_state::known_analysis_flag_mask) ||
         std::trunc(analysis_flags) != analysis_flags ||
+        model_input_history_state < 0.0f ||
+        model_input_history_state > 4.0f ||
+        std::trunc(model_input_history_state) != model_input_history_state ||
         (hard_cut_pulse != 0.0f && hard_cut_pulse != 1.0f) ||
         words[sbs_adaptive_state::index(word_e::hard_cut_count)] >
           sbs_adaptive_state::counter_max ||
@@ -2052,6 +2059,9 @@ namespace models {
       sample.structural_change_fraction =
         scalar(word_e::structural_change_fraction);
       sample.raw_rgb_change_fraction = scalar(word_e::raw_rgb_change_fraction);
+      sample.analysis_flags = static_cast<std::uint32_t>(analysis_flags);
+      sample.model_input_history_state =
+        static_cast<std::uint32_t>(model_input_history_state);
       sample.zero_anchor_shift_px = 0.0f;
       sample.subject_depth = 0.0f;
       sample.scene_age = static_cast<std::uint32_t>(std::min(
@@ -2074,6 +2084,7 @@ namespace models {
       sample.collapsed_raw_count =
         words[sbs_adaptive_state::index(word_e::collapsed_raw_count)];
       sample.sampled_frame_id = sampled_frame_id;
+      sample.sampled_at = sampled_at;
       sample.profile_initialized = scalar(word_e::initialized) > 0.5f;
       sample.anchor_valid = false;
       sample.range_collapsed = scalar(word_e::range_collapsed) > 0.5f;
@@ -2144,6 +2155,7 @@ namespace models {
               target_w,
               target_h,
               slot.sampled_frame_id,
+              slot.sampled_at,
               decoded
             )) {
           result.failed = true;
@@ -2166,6 +2178,7 @@ namespace models {
           // The caller invokes this only after submitting the SBS warp and encoder/local-output
           // draw. D3D11 command ordering therefore puts this low-priority diagnostic copy behind
           // every frame-critical consumer of the cut bridge.
+          slot.sampled_at = std::chrono::steady_clock::now();
           context->CopyResource(slot.staging.Get(), cut_state_buf.Get());
           context->End(slot.completion.Get());
           slot.pending = true;

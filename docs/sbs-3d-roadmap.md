@@ -109,6 +109,15 @@ forward. Diagnostics report candidate, skip, and successful reuse rates with the
 This is intentionally non-bit-exact and cursor-insensitive and must remain opt-in until clip-level
 quality evaluation and Nsight GPU-load evidence justify a production policy.
 
+The next cadence investigation is even narrower: `APOLLO_SBS_ADAPTIVE_MOTION_GATE=shadow` runs a
+truthful full-rate shadow only. It predicts one broad-DDup depth hold after two settled quiet
+CutBridge completions, preserves exact/tiny reuse priority, and retrospectively scores the exact
+candidate frame as quiet, vetoed, or unknown. It separately reports OCR-clean depth-plus-OCR
+opportunities and broad frames that would still require current-frame OCR. No active value is
+accepted yet, and shadow changes no inference admission or rendered output. The canonical policy,
+thresholds, scheduling-time age, broad single-rectangle proof, and reset matrix are in
+[Host SBS frame attribution](host-sbs.md#frame-attribution-and-failure-behavior).
+
 OCR also has a narrower independent DDup optimization on frames where DAV2 does run. If damage is
 complete and wholly outside the exact bottom `6:1` detector crop, the host retains deterministic
 OCR8 boxes, restamps them to the new exact frame, and runs current SLR12 normally. This skips OCR

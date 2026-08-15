@@ -773,6 +773,8 @@ namespace platf::dxgi {
           bool low_motion_current_color_warp = false;
           bool force_fresh_current_color = false;
           bool using_cached_estimate = false;
+          auto adaptive_shadow_decision =
+            detail::host_sbs_adaptive_shadow_decision_e::infer;
           matched_frame_slot_t current_color_reuse_slot;
           const bool producer_terminal =
             depth_estimator && depth_estimator->has_terminal_failure();
@@ -820,6 +822,101 @@ namespace platf::dxgi {
               cached_low_motion_candidate,
               low_motion_reuse_refresh.reuse_allowed(reuse_now)
             );
+          const bool adaptive_shadow = adaptive_motion_shadow_enabled();
+          if (
+            adaptive_shadow && adaptive_motion_route_state.observe(
+              detail::host_sbs_adaptive_motion_route_epoch_t {
+                .source_width = live_source_desc.Width,
+                .source_height = live_source_desc.Height,
+                .mip_levels = live_source_desc.MipLevels,
+                .array_size = live_source_desc.ArraySize,
+                .source_format = static_cast<std::uint32_t>(live_source_desc.Format),
+                .sample_count = live_source_desc.SampleDesc.Count,
+                .sample_quality = live_source_desc.SampleDesc.Quality,
+                .input_color_space = static_cast<std::uint32_t>(input_color_space),
+                .root_authority_generation = current_root_authority_generation,
+                .region_authority_generation = current_region_authority_generation,
+                .browser_authority_epoch = current_browser_authority_epoch,
+                .interactive_move_size = current_interactive_move_size,
+              }
+            )
+          ) {
+            // Track route epochs independently of cache authentication. A focus/ROI/browser,
+            // source-signature, transfer-domain, or interactive transition must not let quiet
+            // evidence from the old route combine with the first completion on the new route.
+            revoke_adaptive_motion_before(frame_id);
+          }
+          const bool adaptive_route_observable =
+            adaptive_shadow && dedup_gate_open && reusable_v2.authenticated &&
+            reusable_route_matches && current_ddup_damage &&
+            !current_interactive_move_size;
+          if (
+            adaptive_shadow &&
+            (!dedup_gate_open || !current_ddup_damage || current_interactive_move_size ||
+             (reusable_v2.authenticated && !reusable_route_matches))
+          ) {
+            // Missing DDup proof, route/authority changes, dump/reprocess, terminal failure, and
+            // native move/size all revoke predictive state even before a cache is authenticated.
+            revoke_adaptive_motion_before(frame_id);
+          }
+          if (
+            adaptive_route_observable && !matched_inference_pending_at_entry &&
+            cached_reuse_kind == detail::host_sbs_ddup_reuse_proof_e::none
+          ) {
+            const auto damage = matched_motion_damage(
+              reusable_v2.slot,
+              current_ddup_damage,
+              true
+            );
+            if (!damage || !damage->coverage.known) {
+              // A matched route without a complete retained sequence is a discontinuity, not a
+              // merely ineligible candidate. Do not let an old quiet sample bridge the ordinary
+              // inference that repairs the baseline.
+              revoke_adaptive_motion_before(frame_id);
+            } else {
+              const bool quiet_signal = adaptive_motion_state.quiet_mode(reuse_now);
+              const bool broad_single_rect =
+                detail::host_sbs_adaptive_motion_broad_damage_candidate(damage->coverage);
+              const bool broad_depth_candidate = broad_single_rect && quiet_signal;
+              if (quiet_signal) {
+                if (detail::host_sbs_adaptive_motion_sum_only_broad(damage->coverage)) {
+                  ++adaptive_shadow_sum_only_broad_veto;
+                } else if (!broad_single_rect &&
+                           damage->coverage.potentially_changed_area >
+                             damage->coverage.region_area /
+                               detail::host_sbs_low_motion_damage_ratio_denominator) {
+                  ++adaptive_shadow_localized_veto;
+                }
+              }
+              adaptive_shadow_decision = adaptive_shadow_cadence.observe_changed(
+                current_content_timestamp,
+                broad_depth_candidate,
+                reuse_now
+              );
+              if (
+                adaptive_shadow_decision ==
+                detail::host_sbs_adaptive_shadow_decision_e::hold_candidate
+              ) {
+                ++adaptive_shadow_candidates;
+                const auto candidate_class =
+                  damage->ocr_crop_unchanged ?
+                    detail::host_sbs_adaptive_motion_candidate_class_e::depth_plus_ocr :
+                    detail::host_sbs_adaptive_motion_candidate_class_e::ocr_only_needed;
+                const auto audit_record = adaptive_motion_audit.record(
+                  frame_id,
+                  candidate_class
+                );
+                tally_adaptive_motion_unknown(audit_record.unknown);
+                adaptive_shadow_lifetime_candidates.add(candidate_class);
+                if (damage->ocr_crop_unchanged) {
+                  ++adaptive_shadow_ocr_clean_candidates;
+                } else {
+                  ++adaptive_shadow_ocr_only_candidates;
+                  ++adaptive_shadow_ocr_band_veto;
+                }
+              }
+            }
+          }
           if (
             reusable_v2.authenticated &&
             (!reusable_route_matches ||
@@ -1138,6 +1235,17 @@ namespace platf::dxgi {
                     reusable_v2.reset();
                     content_reuse_refresh.reset();
                     low_motion_reuse_refresh.reset();
+                  }
+                  if (
+                    adaptive_shadow &&
+                    detail::host_sbs_adaptive_shadow_records_enqueue(
+                      adaptive_shadow_decision
+                    )
+                  ) {
+                    adaptive_shadow_cadence.record_successful_enqueue(
+                      current_content_timestamp,
+                      reuse_now
+                    );
                   }
                   // The forced full-source submission has retired the old ROI authority. Return
                   // subsequent observations to ordinary causality and route selection.
@@ -1524,6 +1632,13 @@ namespace platf::dxgi {
             // Cut counters and scene-camera history are domain-scoped. The first ROI/full/transfer
             // completion starts a fresh telemetry sample without pretending the rearm was an
             // editorial cut.
+            if (adaptive_motion_shadow_enabled()) {
+              adaptive_motion_min_sampled_frame_id = std::max(
+                adaptive_motion_min_sampled_frame_id,
+                est.completed_frame_id
+              );
+              reset_adaptive_motion_runtime(true, true);
+            }
             sbs_telemetry_has_sample = false;
             sbs_telemetry_last_hard_cut_count = 0;
             sbs_telemetry_min_frame_id = std::max(
@@ -1891,7 +2006,8 @@ namespace platf::dxgi {
           end_sbs_gpu_timer(gpu_timer);
           // Telemetry is deliberately submitted after the production warp/output work. The
           // estimator uses a nonblocking staging/query ring, so this can neither flush nor wait
-          // on the D3D11 queue and subscription-off schedules no diagnostic copy.
+          // on the D3D11 queue. With both external subscription and adaptive shadow off it
+          // schedules no diagnostic copy; shadow schedules only its internal exact-frame evidence.
           poll_sbs_telemetry_after_output();
 
           // Close the live CPU sample before any requested dump work. A dump may perform lazy
@@ -2228,6 +2344,9 @@ namespace platf::dxgi {
       reusable_v2.reset();
       content_reuse_refresh.reset();
       low_motion_reuse_refresh.reset();
+      if (adaptive_motion_shadow_enabled()) {
+        reset_adaptive_motion_runtime(true, true);
+      }
       reusable_ocr_input.reset();
       matched_output_valid = false;
       matched_output_source_at = {};
@@ -2493,15 +2612,133 @@ namespace platf::dxgi {
       sbs_telemetry_event->raise(std::move(snapshot));
     }
 
+    [[nodiscard]] bool adaptive_motion_shadow_enabled() const noexcept {
+      return adaptive_motion_mode == detail::host_sbs_adaptive_motion_mode_e::shadow;
+    }
+
+    void tally_adaptive_motion_unknown(
+      const detail::host_sbs_adaptive_motion_candidate_counts_t &unknown
+    ) noexcept {
+      adaptive_shadow_actual_unknown += unknown.total();
+      adaptive_shadow_lifetime_unknown.add(unknown);
+    }
+
+    void reset_adaptive_motion_runtime(
+      const bool tally_pending_unknown = true,
+      const bool reset_schedule_watermark = false
+    ) noexcept {
+      if (tally_pending_unknown) {
+        tally_adaptive_motion_unknown(adaptive_motion_audit.discard_all());
+      } else {
+        (void) adaptive_motion_audit.discard_all();
+      }
+      adaptive_motion_state.reset();
+      adaptive_shadow_cadence.reset();
+      if (reset_schedule_watermark) {
+        adaptive_motion_last_scheduled_frame_id = 0u;
+      }
+      adaptive_motion_last_hard_cut_count = 0u;
+      adaptive_motion_has_sample = false;
+    }
+
+    void revoke_adaptive_motion_before(const std::uint64_t first_valid_frame_id) noexcept {
+      adaptive_motion_min_sampled_frame_id = std::max(
+        adaptive_motion_min_sampled_frame_id,
+        first_valid_frame_id
+      );
+      // Keep both the telemetry scheduling watermark and the newly observed live-route
+      // fingerprint. Neither is quiet evidence, and preserving them prevents stale recopy loops
+      // and makes a later cache-independent route transition observable.
+      reset_adaptive_motion_runtime();
+    }
+
+    void log_adaptive_shadow_stats_if_due(
+      const std::chrono::steady_clock::time_point now
+    ) {
+      if (!adaptive_motion_shadow_enabled() ||
+          now - adaptive_shadow_stats_started < std::chrono::seconds(5)) {
+        return;
+      }
+      const auto pending = adaptive_motion_audit.pending();
+      BOOST_LOG(info)
+        << "SBS adaptive-motion shadow: samples="sv << adaptive_shadow_samples
+        << " quiet_samples="sv << adaptive_shadow_quiet_samples
+        << " broad_depth_hold_candidates="sv << adaptive_shadow_candidates
+        << " depth_plus_ocr_hold_candidates="sv
+        << adaptive_shadow_ocr_clean_candidates
+        << " depth_hold_ocr_only_needed="sv
+        << adaptive_shadow_ocr_only_candidates
+        << " candidate_actual_quiet/veto/unknown="sv
+        << adaptive_shadow_actual_quiet << '/'
+        << (adaptive_shadow_actual_invalid_veto +
+            adaptive_shadow_actual_hard_cut_veto +
+            adaptive_shadow_actual_flags_veto +
+            adaptive_shadow_actual_motion_veto)
+        << '/' << adaptive_shadow_actual_unknown
+        << " veto_invalid/hard_cut/flags/motion="sv
+        << adaptive_shadow_actual_invalid_veto << '/'
+        << adaptive_shadow_actual_hard_cut_veto << '/'
+        << adaptive_shadow_actual_flags_veto << '/'
+        << adaptive_shadow_actual_motion_veto
+        << " lifetime_candidates_depth_plus_ocr/ocr_only_needed="sv
+        << adaptive_shadow_lifetime_candidates.depth_plus_ocr << '/'
+        << adaptive_shadow_lifetime_candidates.ocr_only_needed
+        << " lifetime_depth_plus_ocr_actual_quiet/invalid/hard_cut/flags/motion="sv
+        << adaptive_shadow_lifetime_depth_plus_ocr_actual.quiet << '/'
+        << adaptive_shadow_lifetime_depth_plus_ocr_actual.invalid << '/'
+        << adaptive_shadow_lifetime_depth_plus_ocr_actual.hard_cut << '/'
+        << adaptive_shadow_lifetime_depth_plus_ocr_actual.flags << '/'
+        << adaptive_shadow_lifetime_depth_plus_ocr_actual.motion
+        << " lifetime_ocr_only_needed_actual_quiet/invalid/hard_cut/flags/motion="sv
+        << adaptive_shadow_lifetime_ocr_only_actual.quiet << '/'
+        << adaptive_shadow_lifetime_ocr_only_actual.invalid << '/'
+        << adaptive_shadow_lifetime_ocr_only_actual.hard_cut << '/'
+        << adaptive_shadow_lifetime_ocr_only_actual.flags << '/'
+        << adaptive_shadow_lifetime_ocr_only_actual.motion
+        << " lifetime_unknown_depth_plus_ocr/ocr_only_needed="sv
+        << adaptive_shadow_lifetime_unknown.depth_plus_ocr << '/'
+        << adaptive_shadow_lifetime_unknown.ocr_only_needed
+        << " spatial_veto_localized/sum_only_broad/ocr_band="sv
+        << adaptive_shadow_localized_veto << '/'
+        << adaptive_shadow_sum_only_broad_veto << '/'
+        << adaptive_shadow_ocr_band_veto
+        << " pending_decisions="sv << pending.total
+        << " pending_depth_plus_ocr/ocr_only_needed="sv
+        << pending.by_class.depth_plus_ocr << '/'
+        << pending.by_class.ocr_only_needed;
+      adaptive_shadow_stats_started = now;
+      adaptive_shadow_samples = 0u;
+      adaptive_shadow_quiet_samples = 0u;
+      adaptive_shadow_candidates = 0u;
+      adaptive_shadow_ocr_clean_candidates = 0u;
+      adaptive_shadow_ocr_only_candidates = 0u;
+      adaptive_shadow_actual_quiet = 0u;
+      adaptive_shadow_actual_invalid_veto = 0u;
+      adaptive_shadow_actual_hard_cut_veto = 0u;
+      adaptive_shadow_actual_flags_veto = 0u;
+      adaptive_shadow_actual_motion_veto = 0u;
+      adaptive_shadow_actual_unknown = 0u;
+      adaptive_shadow_localized_veto = 0u;
+      adaptive_shadow_sum_only_broad_veto = 0u;
+      adaptive_shadow_ocr_band_veto = 0u;
+    }
+
     void poll_sbs_telemetry_after_output() {
-      if (!sbs_telemetry_subscription || !sbs_telemetry_event) {
+      const bool adaptive_requested = adaptive_motion_shadow_enabled();
+      const bool external_available =
+        sbs_telemetry_subscription && sbs_telemetry_event;
+      if (!adaptive_requested && !external_available) {
         return;
       }
 
-      const bool enabled = sbs_telemetry_subscription->enabled();
+      const bool enabled =
+        external_available && sbs_telemetry_subscription->enabled();
       const bool producer_active =
         models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer);
       if (!depth_estimator) {
+        if (adaptive_requested) {
+          reset_adaptive_motion_runtime(true, true);
+        }
         if (enabled && (!producer_active || depth_estimator_failed) &&
             !sbs_telemetry_producer_failure_published) {
           publish_sbs_telemetry_failure();
@@ -2510,13 +2747,21 @@ namespace platf::dxgi {
         return;
       }
       const auto now = std::chrono::steady_clock::now();
-      const auto interval = std::chrono::milliseconds(
-        std::max<std::uint16_t>(sbs_telemetry_subscription->interval_ms(), 1)
-      );
-      const bool due =
+      const auto interval = enabled ?
+                              std::chrono::milliseconds(std::max<std::uint16_t>(
+                                sbs_telemetry_subscription->interval_ms(),
+                                1
+                              )) :
+                              std::chrono::milliseconds {1};
+      const bool external_due =
         enabled &&
         (sbs_telemetry_last_copy.time_since_epoch().count() == 0 ||
          now - sbs_telemetry_last_copy >= interval);
+      const bool adaptive_due =
+        adaptive_requested && sbs_telemetry_last_sampled_frame_id != 0u &&
+        sbs_telemetry_last_sampled_frame_id !=
+          adaptive_motion_last_scheduled_frame_id;
+      const bool due = external_due || adaptive_due;
       auto result = depth_estimator->poll_depth_telemetry(
         due && producer_active,
         sbs_telemetry_last_sampled_frame_id
@@ -2525,7 +2770,10 @@ namespace platf::dxgi {
       // ready depth sample is no longer live data. Publish one explicit failure and suppress that
       // retired sample so subscribers cannot mistake a frozen chart for an active producer.
       if (!producer_active) {
-        if (due) {
+        if (adaptive_requested) {
+          reset_adaptive_motion_runtime(true, true);
+        }
+        if (external_due) {
           sbs_telemetry_last_copy = now;
         }
         if (enabled && !sbs_telemetry_producer_failure_published) {
@@ -2538,22 +2786,114 @@ namespace platf::dxgi {
       // prevents a permanent device error from publishing a fresh failed sequence every render
       // frame, while still retrying (and therefore recovering) at the requested interval.
       if (result.copy_scheduled || (due && result.failed)) {
-        sbs_telemetry_last_copy = now;
-      }
-      // Unsubscribe immediately stops publication and new copies. Polling with schedule_copy=false
-      // only retires a copy that was already in flight; it never creates additional GPU work.
-      if (!enabled) {
-        return;
+        if (external_due) {
+          sbs_telemetry_last_copy = now;
+        }
+        if (adaptive_due) {
+          adaptive_motion_last_scheduled_frame_id =
+            sbs_telemetry_last_sampled_frame_id;
+        }
       }
       if (result.failed) {
-        publish_sbs_telemetry_failure();
+        if (adaptive_requested) {
+          // Preserve the just-advanced scheduling watermark so a permanent staging/query failure
+          // cannot retry the same completed frame on every output. A later completion retries.
+          adaptive_motion_min_sampled_frame_id = std::max(
+            adaptive_motion_min_sampled_frame_id,
+            sbs_frame_sequence
+          );
+          reset_adaptive_motion_runtime();
+        }
+        if (enabled) {
+          publish_sbs_telemetry_failure();
+        }
       }
       if (
         result.sample &&
         result.sample->sampled_frame_id >= sbs_telemetry_min_frame_id
       ) {
-        publish_sbs_telemetry_sample(*result.sample);
+        if (
+          adaptive_requested && !result.failed &&
+          result.sample->sampled_frame_id >= adaptive_motion_min_sampled_frame_id
+        ) {
+          const bool unseen_cut =
+            adaptive_motion_has_sample &&
+            result.sample->hard_cut_count != adaptive_motion_last_hard_cut_count;
+          const auto verdict = detail::host_sbs_adaptive_motion_verdict(
+            result.sample->profile_initialized,
+            result.sample->depth_ready,
+            result.sample->range_collapsed,
+            result.sample->hard_cut_pulse || unseen_cut,
+            result.sample->model_input_history_state,
+            result.sample->analysis_flags,
+            result.sample->cut_flags,
+            result.sample->scene_age,
+            result.sample->raw_rgb_change_fraction,
+            result.sample->structural_change_fraction,
+            result.sample->change_fraction
+          );
+          const auto audit = adaptive_motion_audit.resolve(
+            result.sample->sampled_frame_id,
+            verdict
+          );
+          tally_adaptive_motion_unknown(audit.unknown);
+          if (audit.matched) {
+            auto &lifetime_cross_tab =
+              audit.matched->candidate_class ==
+                  detail::host_sbs_adaptive_motion_candidate_class_e::depth_plus_ocr ?
+                adaptive_shadow_lifetime_depth_plus_ocr_actual :
+                adaptive_shadow_lifetime_ocr_only_actual;
+            lifetime_cross_tab.add(audit.matched->verdict);
+            switch (audit.matched->verdict) {
+              case detail::host_sbs_adaptive_motion_verdict_e::quiet:
+                ++adaptive_shadow_actual_quiet;
+                break;
+              case detail::host_sbs_adaptive_motion_verdict_e::invalid:
+                ++adaptive_shadow_actual_invalid_veto;
+                break;
+              case detail::host_sbs_adaptive_motion_verdict_e::hard_cut:
+                ++adaptive_shadow_actual_hard_cut_veto;
+                break;
+              case detail::host_sbs_adaptive_motion_verdict_e::flags:
+                ++adaptive_shadow_actual_flags_veto;
+                break;
+              case detail::host_sbs_adaptive_motion_verdict_e::motion:
+                ++adaptive_shadow_actual_motion_veto;
+                break;
+            }
+          }
+          if (
+            result.sample->sampled_frame_id ==
+            adaptive_motion_state.last_sampled_frame_id()
+          ) {
+            // An external telemetry subscriber may request another copy of the same immutable
+            // completion. It is not a second quiet observation and not a discontinuity.
+          } else if (adaptive_motion_state.observe(
+                result.sample->sampled_frame_id,
+                verdict,
+                result.sample->sampled_at
+              )) {
+            adaptive_motion_last_hard_cut_count = result.sample->hard_cut_count;
+            adaptive_motion_has_sample = true;
+            ++adaptive_shadow_samples;
+            if (verdict == detail::host_sbs_adaptive_motion_verdict_e::quiet) {
+              ++adaptive_shadow_quiet_samples;
+            }
+          } else {
+            // Out-of-order or missing-timestamp evidence cannot retain any predictive state or
+            // exact pending decision across this telemetry discontinuity.
+            adaptive_motion_min_sampled_frame_id = std::max(
+              adaptive_motion_min_sampled_frame_id,
+              sbs_frame_sequence
+            );
+            reset_adaptive_motion_runtime();
+          }
+        }
+        if (enabled) {
+          publish_sbs_telemetry_sample(*result.sample);
+        }
       }
+      log_adaptive_shadow_stats_if_due(now);
     }
 
     struct sbs_gpu_timer_slot_t {
@@ -2993,26 +3333,29 @@ namespace platf::dxgi {
       );
     }
 
-    /** Conservative DDup-only candidate for one bounded, non-bit-exact depth hold.
-     *
-     * Damage is accumulated from the pixels actually submitted to DAV2, not the last delivery.
-     * The detector's exact bottom crop must be desktop-damage-free so subtitle onset, removal, and
-     * replacement never depend on this gate. DDup excludes the separately composited hardware
-     * cursor, so this proof is intentionally cursor-insensitive rather than tensor-bit-exact.
+    struct matched_motion_damage_t {
+      detail::ddup_damage_coverage_t coverage;
+      bool ocr_crop_unchanged = false;
+    };
+
+    /** DDup evidence accumulated from the pixels actually submitted to DAV2, not the last
+     * delivery. The exact OCR crop is kept separate so broad adaptive damage cannot hide a
+     * subtitle-band update.
      */
-    [[nodiscard]] bool matched_low_motion_candidate(
+    [[nodiscard]] std::optional<matched_motion_damage_t> matched_motion_damage(
       const matched_frame_slot_t &slot,
-      const std::optional<detail::ddup_damage_snapshot_t> &current_damage
+      const std::optional<detail::ddup_damage_snapshot_t> &current_damage,
+      const bool collect_max_single_intersection = false
     ) const noexcept {
       if (
         !slot.inference_content_timestamp || !slot.inference_ddup_damage ||
         !current_damage
       ) {
-        return false;
+        return std::nullopt;
       }
       const auto region = damage_region(slot.depth_input_region);
       if (!region) {
-        return false;
+        return std::nullopt;
       }
       const auto crop = models::subtitle_ocr_source_crop_rect(
         models::depth_source_rect_t {
@@ -3023,7 +3366,7 @@ namespace platf::dxgi {
         }
       );
       if (!crop) {
-        return false;
+        return std::nullopt;
       }
       const RECT ocr_crop {
         static_cast<LONG>(crop->left),
@@ -3040,12 +3383,22 @@ namespace platf::dxgi {
       const auto coverage = detail::query_ddup_damage_coverage_between(
         slot.inference_ddup_damage,
         current_damage,
-        *region
+        *region,
+        collect_max_single_intersection
       );
-      return detail::host_sbs_low_motion_damage_candidate(
-        coverage,
-        ocr_crop_unchanged
-      );
+      return matched_motion_damage_t {coverage, ocr_crop_unchanged};
+    }
+
+    /** Conservative DDup-only candidate for the existing 0.25% experiment. */
+    [[nodiscard]] bool matched_low_motion_candidate(
+      const matched_frame_slot_t &slot,
+      const std::optional<detail::ddup_damage_snapshot_t> &current_damage
+    ) const noexcept {
+      const auto evidence = matched_motion_damage(slot, current_damage);
+      return evidence && detail::host_sbs_low_motion_damage_candidate(
+                           evidence->coverage,
+                           evidence->ocr_crop_unchanged
+                         );
     }
 
     [[nodiscard]] bool matched_route_matches_current(
@@ -4586,6 +4939,21 @@ namespace platf::dxgi {
           << "Experimental APOLLO_SBS_LOW_MOTION_GATE=1 active: DDup damage at or below 0.25% "sv
              "may hold DAV2 once for at most 50 ms; this mode is not a production default."sv;
       }
+      const char *adaptive_motion_env =
+        std::getenv("APOLLO_SBS_ADAPTIVE_MOTION_GATE");
+      adaptive_motion_mode = detail::host_sbs_adaptive_motion_mode(
+        adaptive_motion_env ? std::string_view {adaptive_motion_env} : std::string_view {}
+      );
+      if (adaptive_motion_mode == detail::host_sbs_adaptive_motion_mode_e::shadow) {
+        BOOST_LOG(warning)
+          << "Experimental APOLLO_SBS_ADAPTIVE_MOTION_GATE=shadow active: broad DDup "sv
+             "hold decisions are audited against later exact CutBridge telemetry, but every "sv
+             "frame still follows ordinary inference and rendering."sv;
+      } else if (adaptive_motion_env && std::string_view {adaptive_motion_env} == "1"sv) {
+        BOOST_LOG(warning)
+          << "APOLLO_SBS_ADAPTIVE_MOTION_GATE=1 is not enabled in the shadow-only rollout; "sv
+             "ordinary full-rate inference remains active."sv;
+      }
       host_sbs_renderer = models::host_sbs_renderer_e::awaiting_v2;
       diagnostics_enabled = config::sunshine.diagnostics_enabled;
       sbs_depth_status_event = std::move(depth_status_event);
@@ -4616,6 +4984,33 @@ namespace platf::dxgi {
       sbs_telemetry_input_domain_valid = false;
       sbs_telemetry_producer_failure_published = false;
       sbs_telemetry_last_copy = {};
+      adaptive_motion_state.reset();
+      adaptive_motion_route_state.reset();
+      adaptive_shadow_cadence.reset();
+      (void) adaptive_motion_audit.discard_all();
+      adaptive_motion_last_scheduled_frame_id = 0u;
+      adaptive_motion_min_sampled_frame_id = 0u;
+      adaptive_motion_last_hard_cut_count = 0u;
+      adaptive_motion_has_sample = false;
+      adaptive_shadow_stats_started = std::chrono::steady_clock::now();
+      adaptive_shadow_samples = 0u;
+      adaptive_shadow_quiet_samples = 0u;
+      adaptive_shadow_candidates = 0u;
+      adaptive_shadow_ocr_clean_candidates = 0u;
+      adaptive_shadow_ocr_only_candidates = 0u;
+      adaptive_shadow_actual_quiet = 0u;
+      adaptive_shadow_actual_invalid_veto = 0u;
+      adaptive_shadow_actual_hard_cut_veto = 0u;
+      adaptive_shadow_actual_flags_veto = 0u;
+      adaptive_shadow_actual_motion_veto = 0u;
+      adaptive_shadow_actual_unknown = 0u;
+      adaptive_shadow_lifetime_candidates = {};
+      adaptive_shadow_lifetime_depth_plus_ocr_actual = {};
+      adaptive_shadow_lifetime_ocr_only_actual = {};
+      adaptive_shadow_lifetime_unknown = {};
+      adaptive_shadow_localized_veto = 0u;
+      adaptive_shadow_sum_only_broad_veto = 0u;
+      adaptive_shadow_ocr_band_veto = 0u;
       matched_frame_slots = {};
       depth_analysis_generation_tracker = {};
       foreground_window_tracker.reset();
@@ -5297,6 +5692,8 @@ namespace platf::dxgi {
     config::video_t::sbs_t sbs_config {};  ///< Immutable Host SBS settings for this device.
     bool diagnostics_enabled = false;  ///< Cached once per device; the disabled hot path only branches.
     bool low_motion_gate_enabled = false;  ///< Experimental process-env A/B lever; never persisted.
+    detail::host_sbs_adaptive_motion_mode_e adaptive_motion_mode =
+      detail::host_sbs_adaptive_motion_mode_e::off;
     safe::mail_raw_t::event_t<int> sbs_depth_status_event;
     std::shared_ptr<safe::event_t<bool>> sbs_depth_pipeline_ready_event;
     safe::mail_raw_t::event_t<::video::sbs_telemetry_snapshot_t> sbs_telemetry_event;
@@ -5313,6 +5710,37 @@ namespace platf::dxgi {
     bool sbs_telemetry_input_domain_valid = false;
     bool sbs_telemetry_producer_failure_published = false;
     std::chrono::steady_clock::time_point sbs_telemetry_last_copy {};
+    detail::host_sbs_adaptive_motion_state_t adaptive_motion_state;
+    detail::host_sbs_adaptive_motion_route_state_t adaptive_motion_route_state;
+    detail::host_sbs_adaptive_shadow_cadence_t adaptive_shadow_cadence;
+    detail::host_sbs_adaptive_motion_audit_t adaptive_motion_audit;
+    std::uint64_t adaptive_motion_last_scheduled_frame_id = 0u;
+    std::uint64_t adaptive_motion_min_sampled_frame_id = 0u;
+    std::uint32_t adaptive_motion_last_hard_cut_count = 0u;
+    bool adaptive_motion_has_sample = false;
+    std::chrono::steady_clock::time_point adaptive_shadow_stats_started {};
+    unsigned adaptive_shadow_samples = 0u;
+    unsigned adaptive_shadow_quiet_samples = 0u;
+    unsigned adaptive_shadow_candidates = 0u;
+    unsigned adaptive_shadow_ocr_clean_candidates = 0u;
+    unsigned adaptive_shadow_ocr_only_candidates = 0u;
+    unsigned adaptive_shadow_actual_quiet = 0u;
+    unsigned adaptive_shadow_actual_invalid_veto = 0u;
+    unsigned adaptive_shadow_actual_hard_cut_veto = 0u;
+    unsigned adaptive_shadow_actual_flags_veto = 0u;
+    unsigned adaptive_shadow_actual_motion_veto = 0u;
+    unsigned adaptive_shadow_actual_unknown = 0u;
+    detail::host_sbs_adaptive_motion_candidate_counts_t
+      adaptive_shadow_lifetime_candidates;
+    detail::host_sbs_adaptive_motion_verdict_counts_t
+      adaptive_shadow_lifetime_depth_plus_ocr_actual;
+    detail::host_sbs_adaptive_motion_verdict_counts_t
+      adaptive_shadow_lifetime_ocr_only_actual;
+    detail::host_sbs_adaptive_motion_candidate_counts_t
+      adaptive_shadow_lifetime_unknown;
+    unsigned adaptive_shadow_localized_veto = 0u;
+    unsigned adaptive_shadow_sum_only_broad_veto = 0u;
+    unsigned adaptive_shadow_ocr_band_veto = 0u;
     vs_t sbs_reprojection_vs;
     ps_t sbs_flat_identity_ps;
     ps_t sbs_reprojection_v2_live_ps;

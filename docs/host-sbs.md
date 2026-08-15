@@ -536,6 +536,61 @@ so this experiment is explicitly cursor-insensitive as well as non-bit-exact. It
 default; diagnostics report candidates, suppressed submissions, and successful current-color
 reuses for A/B measurement even when the experiment is disabled.
 
+A separate first-stage adaptive experiment is measurement-only. Setting
+`APOLLO_SBS_ADAPTIVE_MOTION_GATE=shadow` makes the host audit hypothetical depth holds while every
+frame still follows the ordinary copy, DAV2/OCR admission, completion, warp, and output paths.
+`APOLLO_SBS_ADAPTIVE_MOTION_GATE=1` is intentionally inert until shadow evidence and deterministic
+small-object, subtitle-phase, and cut-phase coverage qualify an active policy. This lever neither
+changes the existing `APOLLO_SBS_LOW_MOTION_GATE` experiment nor combines with its 0.25% authority.
+
+The predictor requires two consecutive authenticated completed CutBridge observations. Each must
+have initialized/ready non-collapsed depth, model-input history state `1`, analysis flags `0`, scene
+age at least `8`, raw-RGB change at most `0.010`, structural change at most `0.005`, and normalized
+depth change at most `0.10`. Settled cut flags are exactly both armed bits (`3`) with only the
+latched bit optionally present (`19`); either one-shot bit, recovery, confirmation-pending, a cut
+pulse, or an unseen hard-cut-count advance vetoes quiet. Evidence age is measured from the steady-
+clock instant when its exact-frame `CopyResource` was scheduled, never when the staging map later
+completes, and expires strictly at `100 ms`. A scheduling-time gap of `100 ms` or more breaks the
+quiet streak, so two new fresh quiet observations are required. A current pulse or unseen count
+advance is classified as a hard-cut veto even when that cut has already reset scene age/history.
+
+Exact content-clock/ROI reuse remains higher priority. For a distinct changed DDup identity, shadow
+simulates at most one hold after a simulated real enqueue and only while that enqueue is less than
+`50 ms` old; the following distinct identity must simulate inference before another hold can arm.
+Eligibility requires the authenticated cache and complete current route/authority to match, no
+pending inference, complete retained DDup history, and no native interactive move/size. Broad
+damage is proved only when one normalized dirty rectangle or one move endpoint intersects at least
+half the exact DAV2 region. The saturated sum is not broad proof because overlaps and a move's two
+ends can inflate it. Localized nontrivial damage above 0.25% and below that broad proof fails open;
+tiny damage remains solely the existing low-motion experiment's domain. Shadow reports both a
+conservative depth-plus-OCR opportunity (the exact bottom OCR crop is unchanged) and a depth-hold
+opportunity that would still require current-frame OCR because that crop was damaged. Neither is
+authorized to suppress work in this stage.
+
+The live source signature, transfer domain, root/region generations, browser epoch, and interactive
+state are observed independently of cache authentication. Any change clears predictive evidence,
+including while an inference is pending or before the first completion on the new route.
+
+Every hypothetical candidate retains its exact frame ID in a bounded 16-entry decision queue.
+When that frame's later CutBridge readback arrives, diagnostics classify it as actual quiet or an
+invalid, hard-cut, flags, or motion veto. A coalesced gap, queue eviction, reset, or missing exact
+readback is counted unknown rather than inferred from a newer cache. Exact resolution retains each
+candidate's depth-plus-OCR or OCR-only-needed class. Five-second diagnostics publish monotonic
+lifetime class-by-verdict totals, class-specific unknowns and current pending ownership, so an
+interval boundary cannot misattribute a later result; the existing interval aggregate remains.
+A sample is stale at `100 ms`
+and cannot enable a candidate; a scheduling-time gap of at least `100 ms` clears the quiet streak
+while retaining the cut-count baseline and exact pending-audit ownership for later truthful
+classification. Out-of-order telemetry, readback failure, DDup discontinuity, missing damage,
+route/domain/authority transition, interactive move/size, dump/reprocess, or producer failure
+clears predictor, simulated cadence, cut-count baseline, and pending-decision state. A producer or
+input-domain rebuild also clears the telemetry scheduling watermark. Ordinary discontinuities
+preserve that watermark and the independent current-route fingerprint only to prevent recopying an
+already-attempted completion and to detect the next route transition; neither is quiet evidence or
+hold authority. A separate minimum frame ID rejects delayed readback owned by the pre-reset route.
+Consequently shadow telemetry makes no stale physical cut, scene-camera, OCR, SLR, or completion
+claim.
+
 Model preparation, shader compilation, and the live renderer are fail-closed. Live shaders are
 compiled and cached at process startup. Dump-only resources are created lazily and cannot prevent a
 stream from starting. A failure in optional diagnostics has no rendering authority. An armed

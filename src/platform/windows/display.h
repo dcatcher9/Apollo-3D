@@ -15,6 +15,7 @@
 #include <span>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // platform includes
@@ -29,6 +30,7 @@
 
 // local includes
 #include "src/platform/common.h"
+#include "src/generated/sbs_adaptive_state_contract.h"
 #include "src/utility.h"
 #include "src/video.h"
 
@@ -125,6 +127,16 @@ namespace platf::dxgi {
     inline constexpr auto host_sbs_low_motion_reuse_max_age =
       std::chrono::milliseconds {50};
     inline constexpr unsigned host_sbs_low_motion_reuse_max_skips = 1u;
+    inline constexpr auto host_sbs_adaptive_motion_signal_max_age =
+      std::chrono::milliseconds {100};
+    inline constexpr auto host_sbs_adaptive_motion_hold_max_age =
+      std::chrono::milliseconds {50};
+    inline constexpr unsigned host_sbs_adaptive_motion_quiet_samples = 2u;
+    inline constexpr std::uint32_t host_sbs_adaptive_motion_min_scene_age = 8u;
+    inline constexpr float host_sbs_adaptive_motion_raw_rgb_max = 0.010f;
+    inline constexpr float host_sbs_adaptive_motion_structural_max = 0.005f;
+    inline constexpr float host_sbs_adaptive_motion_depth_change_max = 0.10f;
+    inline constexpr std::size_t host_sbs_adaptive_motion_audit_capacity = 16u;
     // Same-frame completion polling is allowed only inside encode-loop cadence slack. The
     // downstream reserve covers completed-depth postprocess, SBS warp/output, and NVENC submit;
     // late/high-rate frames therefore remain on the ordinary nonblocking path.
@@ -217,6 +229,430 @@ namespace platf::dxgi {
       return experiment_enabled && dedup_gate_open && cache_authenticated &&
              !inference_pending && damage_candidate && refresh_allowed;
     }
+
+    enum class host_sbs_adaptive_motion_mode_e : std::uint8_t {
+      off,
+      shadow,
+    };
+
+    /** The first adaptive rollout is deliberately measurement-only. Unknown values stay off. */
+    [[nodiscard]] constexpr host_sbs_adaptive_motion_mode_e
+    host_sbs_adaptive_motion_mode(const std::string_view value) noexcept {
+      return value == "shadow" ? host_sbs_adaptive_motion_mode_e::shadow :
+                                 host_sbs_adaptive_motion_mode_e::off;
+    }
+
+    enum class host_sbs_adaptive_motion_verdict_e : std::uint8_t {
+      quiet,
+      invalid,
+      hard_cut,
+      flags,
+      motion,
+    };
+
+    enum class host_sbs_adaptive_motion_candidate_class_e : std::uint8_t {
+      depth_plus_ocr,
+      ocr_only_needed,
+    };
+
+    /** Classify one authenticated completed CutBridge observation.
+     *
+     * A settled detector has exactly both armed bits, with only the latched bit optionally set:
+     * masks 3 and 19. The one-shot/recovery/confirmation bits are predictive vetoes, not quiet.
+     */
+    [[nodiscard]] constexpr host_sbs_adaptive_motion_verdict_e
+    host_sbs_adaptive_motion_verdict(
+      const bool profile_initialized,
+      const bool depth_ready,
+      const bool range_collapsed,
+      const bool hard_cut_pulse,
+      const std::uint32_t model_input_history_state,
+      const std::uint32_t analysis_flags,
+      const std::uint32_t cut_flags,
+      const std::uint32_t scene_age,
+      const float raw_rgb_change_fraction,
+      const float structural_change_fraction,
+      const float depth_change_fraction
+    ) noexcept {
+      // A current pulse (including a hard-cut-count advance synthesized by the caller) is the
+      // most important retrospective answer. Cut frames commonly reset scene/history readiness,
+      // so checking those fields first would hide the exact predictive risk as merely invalid.
+      if (hard_cut_pulse) {
+        return host_sbs_adaptive_motion_verdict_e::hard_cut;
+      }
+      if (
+        !profile_initialized || !depth_ready || range_collapsed ||
+        model_input_history_state != 1u ||
+        scene_age < host_sbs_adaptive_motion_min_scene_age ||
+        !(raw_rgb_change_fraction >= 0.0f) ||
+        !(structural_change_fraction >= 0.0f) ||
+        !(depth_change_fraction >= 0.0f)
+      ) {
+        return host_sbs_adaptive_motion_verdict_e::invalid;
+      }
+      constexpr auto required_cut_flags =
+        sbs_adaptive_state::cut_flag_geometry_armed |
+        sbs_adaptive_state::cut_flag_appearance_armed;
+      constexpr auto allowed_cut_flags =
+        required_cut_flags | sbs_adaptive_state::cut_flag_latched;
+      if (
+        analysis_flags != 0u ||
+        (cut_flags & required_cut_flags) != required_cut_flags ||
+        (cut_flags & ~allowed_cut_flags) != 0u
+      ) {
+        return host_sbs_adaptive_motion_verdict_e::flags;
+      }
+      if (
+        raw_rgb_change_fraction > host_sbs_adaptive_motion_raw_rgb_max ||
+        structural_change_fraction > host_sbs_adaptive_motion_structural_max ||
+        depth_change_fraction > host_sbs_adaptive_motion_depth_change_max
+      ) {
+        return host_sbs_adaptive_motion_verdict_e::motion;
+      }
+      return host_sbs_adaptive_motion_verdict_e::quiet;
+    }
+
+    /** Two completed quiet observations are required; scheduling time, not readback time, owns age. */
+    class host_sbs_adaptive_motion_state_t {
+    public:
+      constexpr void reset() noexcept {
+        last_sampled_frame_id_ = 0u;
+        quiet_samples_ = 0u;
+        last_sampled_at_ = {};
+      }
+
+      [[nodiscard]] constexpr bool observe(
+        const std::uint64_t sampled_frame_id,
+        const host_sbs_adaptive_motion_verdict_e verdict,
+        const std::chrono::steady_clock::time_point sampled_at
+      ) noexcept {
+        if (sampled_frame_id != 0u && sampled_frame_id == last_sampled_frame_id_) {
+          return false;
+        }
+        if (
+          sampled_frame_id == 0u || sampled_frame_id < last_sampled_frame_id_ ||
+          sampled_at.time_since_epoch().count() == 0 ||
+          (last_sampled_at_.time_since_epoch().count() != 0 &&
+           sampled_at < last_sampled_at_)
+        ) {
+          reset();
+          return false;
+        }
+        if (
+          last_sampled_at_.time_since_epoch().count() != 0 &&
+          sampled_at - last_sampled_at_ >= host_sbs_adaptive_motion_signal_max_age
+        ) {
+          quiet_samples_ = 0u;
+        }
+        last_sampled_frame_id_ = sampled_frame_id;
+        last_sampled_at_ = sampled_at;
+        quiet_samples_ = verdict == host_sbs_adaptive_motion_verdict_e::quiet ?
+                           std::min(
+                             quiet_samples_ + 1u,
+                             host_sbs_adaptive_motion_quiet_samples
+                           ) :
+                           0u;
+        return true;
+      }
+
+      [[nodiscard]] constexpr bool quiet_mode(
+        const std::chrono::steady_clock::time_point now
+      ) const noexcept {
+        return quiet_samples_ >= host_sbs_adaptive_motion_quiet_samples &&
+               last_sampled_at_.time_since_epoch().count() != 0 &&
+               now >= last_sampled_at_ &&
+               now - last_sampled_at_ < host_sbs_adaptive_motion_signal_max_age;
+      }
+
+      [[nodiscard]] constexpr unsigned quiet_samples() const noexcept {
+        return quiet_samples_;
+      }
+
+      [[nodiscard]] constexpr std::uint64_t last_sampled_frame_id() const noexcept {
+        return last_sampled_frame_id_;
+      }
+
+    private:
+      std::uint64_t last_sampled_frame_id_ = 0u;
+      unsigned quiet_samples_ = 0u;
+      std::chrono::steady_clock::time_point last_sampled_at_ {};
+    };
+
+    /** Cache-independent live route fingerprint for invalidating predictive evidence. */
+    struct host_sbs_adaptive_motion_route_epoch_t {
+      std::uint32_t source_width = 0u;
+      std::uint32_t source_height = 0u;
+      std::uint32_t mip_levels = 0u;
+      std::uint32_t array_size = 0u;
+      std::uint32_t source_format = 0u;
+      std::uint32_t sample_count = 0u;
+      std::uint32_t sample_quality = 0u;
+      std::uint32_t input_color_space = 0u;
+      std::uint64_t root_authority_generation = 0u;
+      std::uint64_t region_authority_generation = 0u;
+      std::uint64_t browser_authority_epoch = 0u;
+      bool interactive_move_size = false;
+
+      bool operator==(const host_sbs_adaptive_motion_route_epoch_t &) const = default;
+    };
+
+    class host_sbs_adaptive_motion_route_state_t {
+    public:
+      constexpr void reset() noexcept {
+        observed_.reset();
+      }
+
+      /** Returns true only when an already-observed live route changes. */
+      [[nodiscard]] constexpr bool observe(
+        const host_sbs_adaptive_motion_route_epoch_t &current
+      ) noexcept {
+        const bool changed = observed_ && *observed_ != current;
+        observed_ = current;
+        return changed;
+      }
+
+    private:
+      std::optional<host_sbs_adaptive_motion_route_epoch_t> observed_;
+    };
+
+    enum class host_sbs_adaptive_shadow_decision_e : std::uint8_t {
+      infer,
+      hold_candidate,
+      hold_same_identity,
+    };
+
+    [[nodiscard]] constexpr bool host_sbs_adaptive_shadow_records_enqueue(
+      const host_sbs_adaptive_shadow_decision_e decision
+    ) noexcept {
+      return decision == host_sbs_adaptive_shadow_decision_e::infer;
+    }
+
+    /** Simulate the future one-hold cadence without changing live admission or rendering.
+     *
+     * A candidate consumes the simulated arm even though shadow mode still performs the real
+     * enqueue. The next distinct identity must therefore simulate inference before another
+     * candidate can be armed, matching the eventual active policy instead of predicting every
+     * quiet frame as independently skippable.
+     */
+    class host_sbs_adaptive_shadow_cadence_t {
+    public:
+      constexpr void reset() noexcept {
+        armed_ = false;
+        refresh_required_ = false;
+        last_enqueued_identity_.reset();
+        refresh_identity_.reset();
+        last_enqueued_at_ = {};
+      }
+
+      constexpr void record_successful_enqueue(
+        const std::optional<std::chrono::steady_clock::time_point> &identity,
+        const std::chrono::steady_clock::time_point enqueued_at
+      ) noexcept {
+        armed_ = identity.has_value() && enqueued_at.time_since_epoch().count() != 0;
+        refresh_required_ = false;
+        last_enqueued_identity_ = identity;
+        refresh_identity_.reset();
+        last_enqueued_at_ = enqueued_at;
+      }
+
+      [[nodiscard]] constexpr host_sbs_adaptive_shadow_decision_e observe_changed(
+        const std::optional<std::chrono::steady_clock::time_point> &identity,
+        const bool candidate_eligible,
+        const std::chrono::steady_clock::time_point now
+      ) noexcept {
+        if (!identity || now.time_since_epoch().count() == 0) {
+          reset();
+          return host_sbs_adaptive_shadow_decision_e::infer;
+        }
+        if (last_enqueued_identity_ && *identity == *last_enqueued_identity_) {
+          return host_sbs_adaptive_shadow_decision_e::infer;
+        }
+        if (refresh_required_) {
+          const bool fresh = last_enqueued_at_.time_since_epoch().count() != 0 &&
+                             now >= last_enqueued_at_ &&
+                             now - last_enqueued_at_ <
+                               host_sbs_adaptive_motion_hold_max_age;
+          if (refresh_identity_ && *identity == *refresh_identity_ && fresh) {
+            return host_sbs_adaptive_shadow_decision_e::hold_same_identity;
+          }
+          return host_sbs_adaptive_shadow_decision_e::infer;
+        }
+        const bool fresh = last_enqueued_at_.time_since_epoch().count() != 0 &&
+                           now >= last_enqueued_at_ &&
+                           now - last_enqueued_at_ <
+                             host_sbs_adaptive_motion_hold_max_age;
+        if (armed_ && candidate_eligible && fresh) {
+          armed_ = false;
+          refresh_required_ = true;
+          refresh_identity_ = identity;
+          return host_sbs_adaptive_shadow_decision_e::hold_candidate;
+        }
+        armed_ = false;
+        return host_sbs_adaptive_shadow_decision_e::infer;
+      }
+
+      [[nodiscard]] constexpr bool refresh_required() const noexcept {
+        return refresh_required_;
+      }
+
+    private:
+      bool armed_ = false;
+      bool refresh_required_ = false;
+      std::optional<std::chrono::steady_clock::time_point> last_enqueued_identity_;
+      std::optional<std::chrono::steady_clock::time_point> refresh_identity_;
+      std::chrono::steady_clock::time_point last_enqueued_at_ {};
+    };
+
+    struct host_sbs_adaptive_motion_candidate_counts_t {
+      std::uint64_t depth_plus_ocr = 0u;
+      std::uint64_t ocr_only_needed = 0u;
+
+      constexpr void add(
+        const host_sbs_adaptive_motion_candidate_class_e candidate_class
+      ) noexcept {
+        if (
+          candidate_class ==
+          host_sbs_adaptive_motion_candidate_class_e::depth_plus_ocr
+        ) {
+          ++depth_plus_ocr;
+        } else {
+          ++ocr_only_needed;
+        }
+      }
+
+      constexpr void add(
+        const host_sbs_adaptive_motion_candidate_counts_t &other
+      ) noexcept {
+        depth_plus_ocr += other.depth_plus_ocr;
+        ocr_only_needed += other.ocr_only_needed;
+      }
+
+      [[nodiscard]] constexpr std::uint64_t total() const noexcept {
+        return depth_plus_ocr + ocr_only_needed;
+      }
+    };
+
+    struct host_sbs_adaptive_motion_verdict_counts_t {
+      std::uint64_t quiet = 0u;
+      std::uint64_t invalid = 0u;
+      std::uint64_t hard_cut = 0u;
+      std::uint64_t flags = 0u;
+      std::uint64_t motion = 0u;
+
+      constexpr void add(const host_sbs_adaptive_motion_verdict_e verdict) noexcept {
+        switch (verdict) {
+          case host_sbs_adaptive_motion_verdict_e::quiet:
+            ++quiet;
+            break;
+          case host_sbs_adaptive_motion_verdict_e::invalid:
+            ++invalid;
+            break;
+          case host_sbs_adaptive_motion_verdict_e::hard_cut:
+            ++hard_cut;
+            break;
+          case host_sbs_adaptive_motion_verdict_e::flags:
+            ++flags;
+            break;
+          case host_sbs_adaptive_motion_verdict_e::motion:
+            ++motion;
+            break;
+        }
+      }
+    };
+
+    struct host_sbs_adaptive_motion_audit_match_t {
+      host_sbs_adaptive_motion_candidate_class_e candidate_class;
+      host_sbs_adaptive_motion_verdict_e verdict;
+    };
+
+    struct host_sbs_adaptive_motion_audit_record_result_t {
+      bool recorded = false;
+      host_sbs_adaptive_motion_candidate_counts_t unknown;
+    };
+
+    struct host_sbs_adaptive_motion_audit_result_t {
+      std::optional<host_sbs_adaptive_motion_audit_match_t> matched;
+      host_sbs_adaptive_motion_candidate_counts_t unknown;
+    };
+
+    struct host_sbs_adaptive_motion_audit_pending_t {
+      std::size_t total = 0u;
+      host_sbs_adaptive_motion_candidate_counts_t by_class;
+    };
+
+    /** Bounded exact-frame ownership for retrospective shadow honesty. */
+    class host_sbs_adaptive_motion_audit_t {
+    public:
+      [[nodiscard]] host_sbs_adaptive_motion_audit_record_result_t record(
+        const std::uint64_t frame_id,
+        const host_sbs_adaptive_motion_candidate_class_e candidate_class
+      ) {
+        host_sbs_adaptive_motion_audit_record_result_t result;
+        if (
+          frame_id == 0u ||
+          (!pending_.empty() && frame_id <= pending_.back().frame_id)
+        ) {
+          result.unknown.add(candidate_class);
+          return result;
+        }
+        if (pending_.size() == host_sbs_adaptive_motion_audit_capacity) {
+          result.unknown.add(pending_.front().candidate_class);
+          pending_.pop_front();
+        }
+        pending_.push_back({frame_id, candidate_class});
+        result.recorded = true;
+        return result;
+      }
+
+      [[nodiscard]] host_sbs_adaptive_motion_audit_result_t resolve(
+        const std::uint64_t sampled_frame_id,
+        const host_sbs_adaptive_motion_verdict_e verdict
+      ) {
+        host_sbs_adaptive_motion_audit_result_t result;
+        while (!pending_.empty() && pending_.front().frame_id < sampled_frame_id) {
+          result.unknown.add(pending_.front().candidate_class);
+          pending_.pop_front();
+        }
+        if (!pending_.empty() && pending_.front().frame_id == sampled_frame_id) {
+          result.matched = host_sbs_adaptive_motion_audit_match_t {
+            pending_.front().candidate_class,
+            verdict,
+          };
+          pending_.pop_front();
+        }
+        return result;
+      }
+
+      [[nodiscard]] host_sbs_adaptive_motion_candidate_counts_t discard_all() noexcept {
+        host_sbs_adaptive_motion_candidate_counts_t discarded;
+        for (const auto &pending : pending_) {
+          discarded.add(pending.candidate_class);
+        }
+        pending_.clear();
+        return discarded;
+      }
+
+      [[nodiscard]] host_sbs_adaptive_motion_audit_pending_t pending() const noexcept {
+        host_sbs_adaptive_motion_audit_pending_t result;
+        result.total = pending_.size();
+        for (const auto &pending : pending_) {
+          result.by_class.add(pending.candidate_class);
+        }
+        return result;
+      }
+
+      [[nodiscard]] std::size_t size() const noexcept {
+        return pending_.size();
+      }
+
+    private:
+      struct pending_decision_t {
+        std::uint64_t frame_id;
+        host_sbs_adaptive_motion_candidate_class_e candidate_class;
+      };
+
+      std::deque<pending_decision_t> pending_;
+    };
 
     /** Bounded unchanged-content refresh state. A busy admission attempt is intentionally a no-op;
      * only a real enqueue resets the saturated age/skip cap. */
@@ -438,6 +874,9 @@ namespace platf::dxgi {
       std::uint64_t potentially_changed_area = 0u;
       std::uint64_t region_area = 0u;
       bool known = false;
+      // A lower bound on metadata coverage: unlike the saturated sum above, overlapping dirty
+      // rectangles and a move's source/destination cannot inflate this value.
+      std::uint64_t max_single_intersection_area = 0u;
     };
 
     [[nodiscard]] constexpr bool host_sbs_low_motion_damage_candidate(
@@ -448,6 +887,39 @@ namespace platf::dxgi {
              coverage.potentially_changed_area <=
                coverage.region_area /
                  host_sbs_low_motion_damage_ratio_denominator;
+    }
+
+    /** Broad-only depth opportunity for the adaptive shadow experiment.
+     *
+     * Localized changes are intentionally excluded for small-object/UI sensitivity. A single
+     * normalized DDup rectangle must cover at least half the analysis region. OCR-band evidence is
+     * classified separately so shadow can compare a depth-plus-OCR hold with depth-hold/OCR-only.
+     */
+    [[nodiscard]] constexpr bool host_sbs_adaptive_motion_broad_damage_candidate(
+      const ddup_damage_coverage_t &coverage
+    ) noexcept {
+      return coverage.known && coverage.region_area != 0u &&
+             coverage.max_single_intersection_area >=
+               (coverage.region_area + 1u) / 2u;
+    }
+
+    [[nodiscard]] constexpr bool host_sbs_adaptive_motion_damage_candidate(
+      const ddup_damage_coverage_t &coverage,
+      const bool ocr_crop_unchanged
+    ) noexcept {
+      return ocr_crop_unchanged &&
+             host_sbs_adaptive_motion_broad_damage_candidate(coverage);
+    }
+
+    /** Diagnostic: summed overlaps looked broad but no one rectangle proved broad coverage. */
+    [[nodiscard]] constexpr bool host_sbs_adaptive_motion_sum_only_broad(
+      const ddup_damage_coverage_t &coverage
+    ) noexcept {
+      return coverage.known && coverage.region_area != 0u &&
+             coverage.potentially_changed_area >=
+               (coverage.region_area + 1u) / 2u &&
+             coverage.max_single_intersection_area <
+               (coverage.region_area + 1u) / 2u;
     }
 
     /** One acquired DDup present's normalized dirty coverage.
@@ -492,7 +964,8 @@ namespace platf::dxgi {
       [[nodiscard]] ddup_damage_coverage_t query_coverage(
         std::uint64_t from_exclusive,
         std::uint64_t through_inclusive,
-        const RECT &region
+        const RECT &region,
+        bool collect_max_single_intersection = false
       ) const;
 
     private:
@@ -519,7 +992,8 @@ namespace platf::dxgi {
     [[nodiscard]] ddup_damage_coverage_t query_ddup_damage_coverage_between(
       const std::optional<ddup_damage_snapshot_t> &from,
       const std::optional<ddup_damage_snapshot_t> &through,
-      const RECT &region
+      const RECT &region,
+      bool collect_max_single_intersection = false
     );
 
     enum class host_sbs_ddup_reuse_proof_e : std::uint8_t {

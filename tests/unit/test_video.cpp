@@ -4957,19 +4957,34 @@ TEST(DirectxShaderSourceTest, HostTelemetryReadbackIsNonblockingAndCutBridgeCont
   EXPECT_EQ(readback.find("sleep_for"), std::string::npos);
   EXPECT_EQ(readback.find("while ("), std::string::npos);
 
-  // Subscription-off may retire an already submitted slot but cannot enqueue another copy, and
-  // the diagnostic work is ordered after the production output rather than ahead of it.
-  const auto due_declaration = display.find("const bool due =");
-  const auto enabled_gate = display.find("enabled &&", due_declaration);
+  // External copies remain subscription-gated; the separate adaptive shadow may request its own
+  // exact-frame evidence. Either demand remains ordered after production output.
+  const auto external_due_declaration = display.find("const bool external_due =");
+  const auto enabled_gate = display.find("enabled &&", external_due_declaration);
+  const auto adaptive_due_declaration = display.find("const bool adaptive_due =", enabled_gate);
+  const auto adaptive_requested_gate = display.find(
+    "adaptive_requested &&",
+    adaptive_due_declaration
+  );
+  const auto due_declaration = display.find(
+    "const bool due = external_due || adaptive_due",
+    adaptive_due_declaration
+  );
   const auto poll_call =
-    display.find("depth_estimator->poll_depth_telemetry(", enabled_gate);
+    display.find("depth_estimator->poll_depth_telemetry(", due_declaration);
   const auto due_argument = display.find("due && producer_active", poll_call);
-  ASSERT_NE(due_declaration, std::string::npos);
+  ASSERT_NE(external_due_declaration, std::string::npos);
   ASSERT_NE(enabled_gate, std::string::npos);
+  ASSERT_NE(adaptive_due_declaration, std::string::npos);
+  ASSERT_NE(adaptive_requested_gate, std::string::npos);
+  ASSERT_NE(due_declaration, std::string::npos);
   ASSERT_NE(poll_call, std::string::npos);
   ASSERT_NE(due_argument, std::string::npos);
-  EXPECT_LT(due_declaration, enabled_gate);
-  EXPECT_LT(enabled_gate, poll_call);
+  EXPECT_LT(external_due_declaration, enabled_gate);
+  EXPECT_LT(enabled_gate, adaptive_due_declaration);
+  EXPECT_LT(adaptive_due_declaration, adaptive_requested_gate);
+  EXPECT_LT(adaptive_requested_gate, due_declaration);
+  EXPECT_LT(due_declaration, poll_call);
   EXPECT_LT(poll_call, due_argument);
   const auto producer_failure_gate = display.find(
     "if (!producer_active)",
