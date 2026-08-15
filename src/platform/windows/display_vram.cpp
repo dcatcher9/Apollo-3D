@@ -1509,6 +1509,22 @@ namespace platf::dxgi {
                       if (diagnostics_enabled) {
                         if (polled.wait_attempted) {
                           ++matched_stats_same_frame_poll_hits;
+                          switch (detail::host_sbs_same_frame_poll_hit_bucket(
+                            polled.wait_duration
+                          )) {
+                            case detail::host_sbs_same_frame_poll_hit_bucket_e::within_2_ms:
+                              ++matched_stats_same_frame_poll_hits_le_2_ms;
+                              break;
+                            case detail::host_sbs_same_frame_poll_hit_bucket_e::between_2_and_2_5_ms:
+                              ++matched_stats_same_frame_poll_hits_2_to_2_5_ms;
+                              break;
+                            case detail::host_sbs_same_frame_poll_hit_bucket_e::between_2_5_and_3_ms:
+                              ++matched_stats_same_frame_poll_hits_2_5_to_3_ms;
+                              break;
+                            case detail::host_sbs_same_frame_poll_hit_bucket_e::over_3_ms:
+                              ++matched_stats_same_frame_poll_hits_over_3_ms;
+                              break;
+                          }
                           if (perf) {
                             sbs_perf::add_sample_ms(
                               "same_frame_poll_hit_wait",
@@ -2450,6 +2466,11 @@ namespace platf::dxgi {
                               << matched_stats_same_frame_immediate_hits
                               << " poll_queries="sv
                               << matched_stats_same_frame_poll_queries
+                              << " same_frame_wait_hit_buckets_le2/2to2_5/2_5to3/over3="sv
+                              << matched_stats_same_frame_poll_hits_le_2_ms << '/'
+                              << matched_stats_same_frame_poll_hits_2_to_2_5_ms << '/'
+                              << matched_stats_same_frame_poll_hits_2_5_to_3_ms << '/'
+                              << matched_stats_same_frame_poll_hits_over_3_ms
                               << " repeated_wait_ms_avg/max="sv
                               << same_frame_poll_wait_avg_ms << '/'
                               << matched_stats_same_frame_poll_wait_max_ms;
@@ -5398,6 +5419,10 @@ namespace platf::dxgi {
       matched_stats_same_frame_poll_timeouts = 0;
       matched_stats_same_frame_poll_failures = 0;
       matched_stats_same_frame_immediate_hits = 0;
+      matched_stats_same_frame_poll_hits_le_2_ms = 0;
+      matched_stats_same_frame_poll_hits_2_to_2_5_ms = 0;
+      matched_stats_same_frame_poll_hits_2_5_to_3_ms = 0;
+      matched_stats_same_frame_poll_hits_over_3_ms = 0;
       matched_stats_same_frame_poll_queries = 0;
       matched_stats_same_frame_poll_wait_sum_ms = 0.0;
       matched_stats_same_frame_poll_wait_max_ms = 0.0;
@@ -6370,6 +6395,10 @@ namespace platf::dxgi {
     unsigned matched_stats_same_frame_poll_timeouts = 0;
     unsigned matched_stats_same_frame_poll_failures = 0;
     unsigned matched_stats_same_frame_immediate_hits = 0;
+    unsigned matched_stats_same_frame_poll_hits_le_2_ms = 0;
+    unsigned matched_stats_same_frame_poll_hits_2_to_2_5_ms = 0;
+    unsigned matched_stats_same_frame_poll_hits_2_5_to_3_ms = 0;
+    unsigned matched_stats_same_frame_poll_hits_over_3_ms = 0;
     std::uint64_t matched_stats_same_frame_poll_queries = 0;
     double matched_stats_same_frame_poll_wait_sum_ms = 0.0;
     double matched_stats_same_frame_poll_wait_max_ms = 0.0;

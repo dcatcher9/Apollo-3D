@@ -141,7 +141,7 @@ namespace platf::dxgi {
     // downstream reserve covers completed-depth postprocess, SBS warp/output, and NVENC submit;
     // late/high-rate frames therefore remain on the ordinary nonblocking path.
     inline constexpr auto host_sbs_same_frame_poll_max_wait =
-      std::chrono::milliseconds {2};
+      std::chrono::milliseconds {3};
     inline constexpr auto host_sbs_same_frame_poll_downstream_reserve =
       std::chrono::milliseconds {3};
     inline constexpr auto host_sbs_same_frame_poll_min_budget =
@@ -160,6 +160,32 @@ namespace platf::dxgi {
       std::chrono::steady_clock::duration budget {};
       bool eligible = false;
     };
+
+    enum class host_sbs_same_frame_poll_hit_bucket_e : std::uint8_t {
+      within_2_ms,
+      between_2_and_2_5_ms,
+      between_2_5_and_3_ms,
+      over_3_ms,
+    };
+
+    /** Classify a ready repeated-wait result without rounding its steady-clock duration. */
+    [[nodiscard]] constexpr host_sbs_same_frame_poll_hit_bucket_e
+    host_sbs_same_frame_poll_hit_bucket(
+      const std::chrono::steady_clock::duration wait_duration
+    ) noexcept {
+      if (wait_duration <= std::chrono::milliseconds {2}) {
+        return host_sbs_same_frame_poll_hit_bucket_e::within_2_ms;
+      }
+      if (wait_duration <= std::chrono::microseconds {2500}) {
+        return host_sbs_same_frame_poll_hit_bucket_e::between_2_and_2_5_ms;
+      }
+      if (wait_duration <= host_sbs_same_frame_poll_max_wait) {
+        return host_sbs_same_frame_poll_hit_bucket_e::between_2_5_and_3_ms;
+      }
+      // A ready query can finish just after its nominal deadline when the render thread or driver
+      // is descheduled. Keep that rare scheduler tail explicit instead of hiding it in <= 3 ms.
+      return host_sbs_same_frame_poll_hit_bucket_e::over_3_ms;
+    }
 
     struct host_sbs_current_frame_probe_plan_t {
       std::chrono::steady_clock::time_point deadline {};

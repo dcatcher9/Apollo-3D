@@ -682,7 +682,7 @@ After one current matched frame has successfully enqueued, production gives its 
 unit one immediate nonblocking completion query. It may repeat that query only when the encode
 loop's next cadence target leaves at least `0.25 ms` of useful slack after reserving `3 ms` for
 completed-depth postprocess, SBS warp/output, and NVENC submission. Repeated queries stop at the
-earlier of that reserved cadence deadline and `2 ms` after polling began, with an independent query-
+earlier of that reserved cadence deadline and `3 ms` after polling began, with an independent query-
 count fuse. After the immediate query, joined queries are spaced by at least `50 us` of yielded
 steady-clock time so the fuse cannot exhaust before the GPU has a useful opportunity to progress.
 Capture and content timestamps remain pixel identities and are never interpreted as an encode
@@ -694,6 +694,11 @@ runs, one OCR event; polling adds no inference kernels, shader passes, replaceme
 readback, busy-stream synchronization, or flush. If readiness-event setup is unavailable before
 any enqueue, same-frame completion safely downgrades to one full-stream nonblocking query and does
 not spend the bounded-wait budget.
+
+Diagnostics retain interval counts for repeated-wait hits at `<= 2 ms`, `(2, 2.5] ms`, and
+`(2.5, 3] ms`, plus the explicit timeout count. A separate over-`3 ms` bucket exposes rare
+render-thread or driver descheduling instead of folding deadline overshoot into the nominal cap.
+These buckets measure the previously censored readiness tail without changing frame ownership.
 
 A joined hit consumes that exact current frame once, invalidates the older singleton-resource
 attribution, and may render it in the current delivery instead of waiting for the next conversion.

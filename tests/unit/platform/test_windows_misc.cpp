@@ -641,8 +641,18 @@ namespace {
       now
     );
     ASSERT_TRUE(ample.eligible);
-    EXPECT_EQ(ample.budget, 2ms);
-    EXPECT_EQ(ample.deadline, now + 2ms);
+    EXPECT_EQ(ample.budget, 3ms);
+    EXPECT_EQ(ample.deadline, now + 3ms);
+
+    const auto cadence_limited = host_sbs_same_frame_poll_plan(
+      true,
+      false,
+      now + 5500us,
+      now
+    );
+    ASSERT_TRUE(cadence_limited.eligible);
+    EXPECT_EQ(cadence_limited.budget, 2500us);
+    EXPECT_EQ(cadence_limited.deadline, now + 2500us);
 
     const auto exact_minimum = host_sbs_same_frame_poll_plan(
       true,
@@ -673,6 +683,33 @@ namespace {
                    true, false, std::nullopt, now
                  )
                    .eligible);
+  }
+
+  TEST(WindowsHostSbsSameFramePollTest, HitWaitBucketsKeepExactIntervalBoundaries) {
+    using namespace std::chrono_literals;
+    using bucket_e =
+      platf::dxgi::detail::host_sbs_same_frame_poll_hit_bucket_e;
+    using platf::dxgi::detail::host_sbs_same_frame_poll_hit_bucket;
+
+    EXPECT_EQ(host_sbs_same_frame_poll_hit_bucket(0us), bucket_e::within_2_ms);
+    EXPECT_EQ(host_sbs_same_frame_poll_hit_bucket(2ms), bucket_e::within_2_ms);
+    EXPECT_EQ(
+      host_sbs_same_frame_poll_hit_bucket(2001us),
+      bucket_e::between_2_and_2_5_ms
+    );
+    EXPECT_EQ(
+      host_sbs_same_frame_poll_hit_bucket(2500us),
+      bucket_e::between_2_and_2_5_ms
+    );
+    EXPECT_EQ(
+      host_sbs_same_frame_poll_hit_bucket(2501us),
+      bucket_e::between_2_5_and_3_ms
+    );
+    EXPECT_EQ(
+      host_sbs_same_frame_poll_hit_bucket(3ms),
+      bucket_e::between_2_5_and_3_ms
+    );
+    EXPECT_EQ(host_sbs_same_frame_poll_hit_bucket(3001us), bucket_e::over_3_ms);
   }
 
   TEST(WindowsHostSbsCurrentFrameProbeTest, CandidateAlwaysGetsImmediateQueryAndWaitIsCapped) {

@@ -1544,7 +1544,7 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
 
   // The first exact signature runs an ordinary enqueue; the second captures, instantiates, and
   // launches its CUDA graph. A few additional replays bring an otherwise idle adapter out of its
-  // low-power state before measuring the same two-millisecond budget used by production.
+  // low-power state before measuring the same three-millisecond budget used by production.
   constexpr std::uint64_t warm_frame_base = 0xabc000u;
   constexpr std::uint64_t warm_observations = 8u;
   for (std::uint64_t i = 1u; i <= warm_observations; ++i) {
@@ -1590,7 +1590,7 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     ASSERT_TRUE(submitted.inference_enqueued);
 
     // An expired budget still performs exactly one nonblocking joined query. If it is busy, the
-    // second call exercises the production two-millisecond cap. A timeout is valid under external
+    // second call exercises the production three-millisecond cap. A timeout is valid under external
     // GPU load and must preserve the exact pending owner for the synchronous test fallback.
     auto completed = estimator.try_finish_pending_depth_until(
       models::input_color_space::srgb,
@@ -1603,7 +1603,7 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
       ASSERT_TRUE(completed.timed_out);
       completed = estimator.try_finish_pending_depth_until(
         models::input_color_space::srgb,
-        std::chrono::steady_clock::now() + std::chrono::milliseconds {2},
+        std::chrono::steady_clock::now() + std::chrono::milliseconds {3},
         4096u
       );
       total_bounded_queries += completed.query_count;
@@ -1636,7 +1636,7 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
                   << ", bounded hits " << bounded_hits << ", timeouts " << timeouts
                   << ", bounded queries " << total_bounded_queries << '.';
   EXPECT_GT(immediate_hits + bounded_hits, 0u)
-    << "No hot observation completed inside the production two-millisecond poll budget.";
+    << "No hot observation completed inside the production three-millisecond poll budget.";
 }
 #endif
 
