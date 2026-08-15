@@ -1,5 +1,5 @@
-// Optional, shadow-only current-frame motion evidence. This root is deliberately outside the
-// authenticated Host SBS producer closure and has no geometry, history, or inference authority.
+// Optional current-frame motion evidence. This root is deliberately outside the authenticated
+// Host SBS producer closure and is never standalone geometry, history, or inference authority.
 
 StructuredBuffer<float> CurrentModelInput : register(t0);
 StructuredBuffer<float> PreviousModelInput : register(t1);

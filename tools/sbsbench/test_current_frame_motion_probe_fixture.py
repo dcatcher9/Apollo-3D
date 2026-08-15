@@ -18,8 +18,8 @@ class CurrentFrameMotionProbeFixtureTests(unittest.TestCase):
         cls.report = probe_fixture.qualification_report(cls.fixture)
         cls.rows = cls.report["rows"]
 
-    def test_fixture_is_shadow_only_and_matches_all_expected_counters(self):
-        self.assertIn("never active hold authority", self.report["authority"])
+    def test_fixture_is_not_standalone_authority_and_matches_all_expected_counters(self):
+        self.assertIn("never standalone active hold authority", self.report["authority"])
         self.assertEqual(
             self.report["counters"],
             self.fixture["expected_counters"],

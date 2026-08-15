@@ -814,6 +814,8 @@ namespace models {
     const bool maxima_valid =
       std::isfinite(maximum_rgb) && maximum_rgb >= 0.0f &&
       std::isfinite(maximum_appearance) && maximum_appearance >= 0.0f &&
+      ((words[appearance_1_over_1024] == 0u) ==
+       (maximum_appearance < adaptive_motion_probe_appearance_hold_threshold)) &&
       std::isfinite(bottom_maximum_rgb) && bottom_maximum_rgb >= 0.0f &&
       bottom_maximum_rgb <= maximum_rgb;
     if (!counters_valid || !state_valid || !maxima_valid) {
@@ -1687,7 +1689,7 @@ namespace models {
     bool parallax_v2_producer_failed = false;
 
     // Demand-gated, nonblocking telemetry readback. Resources are created lazily only after a
-    // protocol subscriber or the process-only adaptive shadow requests evidence; a three-slot
+    // protocol subscriber or an explicit process-only adaptive mode requests evidence; a three-slot
     // staging/query ring absorbs GPU latency without flushing or waiting on the encode thread.
     static constexpr std::size_t telemetry_state_float_count =
       sbs_adaptive_state::word_count;
@@ -4247,8 +4249,8 @@ namespace models {
             cleanup_execution_ok = false;
           }
         }
-        // The shadow-only probe event never participates in TensorRT context health. Its stream
-        // has already been synchronized above, so teardown is best-effort and fail-open.
+        // The optional probe event never participates in TensorRT context health. Its stream has
+        // already been synchronized above, so teardown is best-effort and fail-open.
         destroy_adaptive_motion_probe_event(cuda);
         const bool inference_events_destroyed =
           destroy_inference_done_events(cuda);

@@ -109,19 +109,24 @@ forward. Diagnostics report candidate, skip, and successful reuse rates with the
 This is intentionally non-bit-exact and cursor-insensitive and must remain opt-in until clip-level
 quality evaluation and Nsight GPU-load evidence justify a production policy.
 
-The next cadence investigation is even narrower: `APOLLO_SBS_ADAPTIVE_MOTION_GATE=shadow` runs a
-truthful full-rate shadow only. It predicts one broad-DDup depth hold after two settled quiet
+The adaptive cadence now has two default-off process modes. `APOLLO_SBS_ADAPTIVE_MOTION_GATE=shadow`
+runs the truthful full-rate predictor: it proposes one broad-DDup hold after two settled quiet
 CutBridge completions, preserves exact/tiny reuse priority, and retrospectively scores the exact
 candidate frame as quiet, vetoed, or unknown. It separately reports OCR-clean depth-plus-OCR
-opportunities and broad frames that would still require current-frame OCR. A recorded candidate
-also runs one bounded current-input probe against its exact authenticated depth lineage: exact
-NCHW-bit, appearance-ordinal-bit, and exclusion equality are quiet evidence, while the richer RGB,
-appearance-threshold, tile, and bottom-band channels remain diagnostic. Probe readiness is limited to one immediate query plus at
-most 0.5 ms of encode-cadence slack, and its exact verdict is cross-tabulated with that frame's later
-CutBridge class. No active value is accepted yet, and probe outcomes change no inference admission,
-OCR, cached geometry, cadence decision, or rendered output. The canonical policy, thresholds,
-scheduling-time age, broad single-rectangle proof, probe deadline, and reset matrix are in
-[Host SBS frame attribution](host-sbs.md#frame-attribution-and-failure-behavior).
+opportunities and broad frames that would still require current-frame OCR. A candidate also runs one
+bounded current-input probe against its exact authenticated depth lineage. The raw exact-bit verdict
+requires NCHW, appearance ordinal, and exclusion equality and remains diagnostic only.
+
+`APOLLO_SBS_ADAPTIVE_MOTION_GATE=1` activates the conservative OCR-clean branch. In addition to the
+same route, ID, cadence, broad-DDup, and no-pending checks, it requires exact NCHW/exclusion equality
+and zero appearance texels at or above the `1/1024` delta tier; sub-threshold ordinal bit noise is
+allowed. One current delivery may render its private color through cached authenticated V2 geometry
+without a DAV2/OCR observation, then the next changed identity must infer. The hold advances no
+depth/cut/camera/OCR/SLR or lineage state, and approximate low-motion/model-equivalent providers may
+not chain. Probe readiness is limited to one immediate query plus at most 0.5 ms of encode-cadence
+slack; timeout or veto immediately takes ordinary inference. The canonical policy, exact refresh
+bounds, scheduling-time age, one-delivery no-observation tradeoff, probe deadline, and reset matrix
+are in [Host SBS frame attribution](host-sbs.md#frame-attribution-and-failure-behavior).
 
 OCR also has a narrower independent DDup optimization on frames where DAV2 does run. If damage is
 complete and wholly outside the exact bottom `6:1` detector crop, the host retains deterministic

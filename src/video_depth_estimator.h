@@ -534,7 +534,7 @@ namespace models {
     motion_veto,
   };
 
-  /** Exact-bit safety verdict for shadow scoring; quiet_evidence never authorizes a hold. */
+  /** Exact-bit telemetry verdict. It is never standalone active-hold authorization. */
   [[nodiscard]] constexpr adaptive_motion_probe_exact_verdict_e
   adaptive_motion_probe_exact_verdict(
     const adaptive_motion_probe_sample &sample
@@ -558,6 +558,9 @@ namespace models {
     infer,
     hold,
   };
+
+  inline constexpr float adaptive_motion_probe_appearance_hold_threshold =
+    1.0f / 1024.0f;
 
   /** Select the bounded active no-observation path after all display-owned gates are armed.
    *
@@ -586,7 +589,10 @@ namespace models {
       probe.sample.admitted_texels == 0u ||
       probe.sample.exclusion_mismatch_texels != 0u ||
       probe.sample.exact_changed_texels != 0u ||
-      probe.sample.appearance_delta_1_over_1024_texels != 0u
+      probe.sample.appearance_delta_1_over_1024_texels != 0u ||
+      !(probe.sample.maximum_appearance_delta >= 0.0f) ||
+      !(probe.sample.maximum_appearance_delta <
+        adaptive_motion_probe_appearance_hold_threshold)
     ) {
       return adaptive_motion_hold_decision_e::infer;
     }

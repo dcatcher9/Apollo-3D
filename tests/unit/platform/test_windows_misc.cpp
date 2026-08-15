@@ -774,12 +774,36 @@ namespace {
 
   TEST(WindowsHostSbsContentReuseTest, RenderRequiresEveryFailClosedGate) {
     using platf::dxgi::detail::host_sbs_cached_geometry_render_allowed;
+    const auto authorized =
+      platf::dxgi::detail::make_host_sbs_depth_reuse_authorization(
+        platf::dxgi::detail::host_sbs_depth_reuse_kind_e::exact_content,
+        10u,
+        11u,
+        true
+      );
+    const platf::dxgi::detail::host_sbs_depth_reuse_authorization_t denied;
 
-    EXPECT_TRUE(host_sbs_cached_geometry_render_allowed(true, true, true, true));
-    EXPECT_FALSE(host_sbs_cached_geometry_render_allowed(false, true, true, true));
-    EXPECT_FALSE(host_sbs_cached_geometry_render_allowed(true, false, true, true));
-    EXPECT_FALSE(host_sbs_cached_geometry_render_allowed(true, true, false, true));
-    EXPECT_FALSE(host_sbs_cached_geometry_render_allowed(true, true, true, false));
+    EXPECT_TRUE(host_sbs_cached_geometry_render_allowed(
+      true, true, authorized, 10u, 11u, true
+    ));
+    EXPECT_FALSE(host_sbs_cached_geometry_render_allowed(
+      false, true, authorized, 10u, 11u, true
+    ));
+    EXPECT_FALSE(host_sbs_cached_geometry_render_allowed(
+      true, false, authorized, 10u, 11u, true
+    ));
+    EXPECT_FALSE(host_sbs_cached_geometry_render_allowed(
+      true, true, denied, 10u, 11u, true
+    ));
+    EXPECT_FALSE(host_sbs_cached_geometry_render_allowed(
+      true, true, authorized, 9u, 11u, true
+    ));
+    EXPECT_FALSE(host_sbs_cached_geometry_render_allowed(
+      true, true, authorized, 10u, 12u, true
+    ));
+    EXPECT_FALSE(host_sbs_cached_geometry_render_allowed(
+      true, true, authorized, 10u, 11u, false
+    ));
   }
 
   TEST(WindowsHostSbsContentReuseTest, LatestLineageRetentionDoesNotAuthorizeRender) {
@@ -793,7 +817,14 @@ namespace {
 
     // Retained authenticated resources still fail closed without a current exact/low-motion
     // geometry match.
-    EXPECT_FALSE(host_sbs_cached_geometry_render_allowed(true, true, false, true));
+    EXPECT_FALSE(host_sbs_cached_geometry_render_allowed(
+      true,
+      true,
+      {},
+      10u,
+      11u,
+      true
+    ));
   }
 
   TEST(WindowsHostSbsContentReuseTest, LatestLineageResetCoversAuthorityAndAliasRevocation) {
@@ -885,12 +916,151 @@ namespace {
     ));
   }
 
-  TEST(WindowsHostSbsAdaptiveShadowTest, OnlyExplicitShadowValueEnablesMeasurement) {
+  TEST(WindowsHostSbsContentReuseTest, TypedAuthorizationUnifiesProofAndRefreshSemantics) {
+    using kind_e = platf::dxgi::detail::host_sbs_depth_reuse_kind_e;
+    using exactness_e = platf::dxgi::detail::host_sbs_depth_reuse_exactness_e;
+    using refresh_e = platf::dxgi::detail::host_sbs_depth_reuse_refresh_e;
+    using proof_e = platf::dxgi::detail::host_sbs_ddup_reuse_proof_e;
+    using platf::dxgi::detail::make_host_sbs_depth_reuse_authorization;
+    using platf::dxgi::detail::select_host_sbs_cached_depth_reuse;
+
+    const auto exact = select_host_sbs_cached_depth_reuse(
+      proof_e::content_clock, true, 40u, 42u
+    );
+    EXPECT_TRUE(exact.valid());
+    EXPECT_TRUE(exact.exact());
+    EXPECT_EQ(exact.kind, kind_e::exact_content);
+    EXPECT_EQ(exact.refresh, refresh_e::bounded_content);
+
+    const auto roi = select_host_sbs_cached_depth_reuse(
+      proof_e::roi_damage, false, 40u, 42u
+    );
+    EXPECT_TRUE(roi.valid());
+    EXPECT_EQ(roi.kind, kind_e::exact_roi_damage);
+
+    const auto tiny = select_host_sbs_cached_depth_reuse(
+      proof_e::none, true, 40u, 42u
+    );
+    EXPECT_TRUE(tiny.valid());
+    EXPECT_EQ(tiny.kind, kind_e::bounded_tiny_motion);
+    EXPECT_EQ(tiny.exactness, exactness_e::approximate);
+    EXPECT_EQ(tiny.refresh, refresh_e::bounded_approximate);
+
+    const auto model = make_host_sbs_depth_reuse_authorization(
+      kind_e::bounded_model_equivalent, 40u, 42u, true
+    );
+    EXPECT_TRUE(model.valid());
+    EXPECT_TRUE(model.forces_next_inference());
+    EXPECT_EQ(model.exactness, exactness_e::approximate);
+    EXPECT_FALSE(make_host_sbs_depth_reuse_authorization(
+                   kind_e::bounded_model_equivalent, 40u, 42u, false
+                 )
+                   .valid());
+    EXPECT_FALSE(make_host_sbs_depth_reuse_authorization(
+                   kind_e::bounded_model_equivalent, 42u, 42u, true
+                 )
+                   .valid());
+
+    auto malformed = model;
+    malformed.exactness = exactness_e::exact;
+    EXPECT_FALSE(malformed.valid());
+    malformed = exact;
+    malformed.refresh = refresh_e::force_next_inference;
+    EXPECT_FALSE(malformed.valid());
+    malformed = tiny;
+    malformed.ocr_safe = false;
+    EXPECT_FALSE(malformed.valid());
+    malformed = exact;
+    malformed.current_frame_id = malformed.baseline_frame_id;
+    EXPECT_FALSE(malformed.valid());
+  }
+
+  TEST(WindowsHostSbsContentReuseTest, ApproximateProvidersCannotChain) {
+    using kind_e = platf::dxgi::detail::host_sbs_depth_reuse_kind_e;
+    using platf::dxgi::detail::host_sbs_approximate_reuse_provider_allowed;
+
+    EXPECT_TRUE(host_sbs_approximate_reuse_provider_allowed(
+      kind_e::none, kind_e::bounded_tiny_motion, false
+    ));
+    EXPECT_TRUE(host_sbs_approximate_reuse_provider_allowed(
+      kind_e::none, kind_e::bounded_model_equivalent, false
+    ));
+    EXPECT_FALSE(host_sbs_approximate_reuse_provider_allowed(
+      kind_e::bounded_tiny_motion, kind_e::bounded_model_equivalent, false
+    ));
+    EXPECT_FALSE(host_sbs_approximate_reuse_provider_allowed(
+      kind_e::bounded_model_equivalent, kind_e::bounded_tiny_motion, false
+    ));
+    EXPECT_FALSE(host_sbs_approximate_reuse_provider_allowed(
+      kind_e::none, kind_e::bounded_model_equivalent, true
+    ));
+    EXPECT_FALSE(host_sbs_approximate_reuse_provider_allowed(
+      kind_e::none, kind_e::exact_content, false
+    ));
+  }
+
+  TEST(WindowsHostSbsContentReuseTest, ModelEquivalentCandidateRequiresFullOwnedTuple) {
+    using candidate_t =
+      platf::dxgi::detail::host_sbs_model_equivalent_candidate_t;
+    auto damage_history =
+      std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+
+    const candidate_t valid {
+      .baseline_frame_id = 40u,
+      .current_frame_id = 42u,
+      .damage_history = damage_history.get(),
+      .baseline_damage_token = 10u,
+      .current_damage_token = 11u,
+      .broad_damage = true,
+      .ocr_safe = true,
+    };
+    EXPECT_TRUE(valid.valid());
+    auto invalid = valid;
+    invalid.baseline_frame_id = 0u;
+    EXPECT_FALSE(invalid.valid());
+    invalid = valid;
+    invalid.current_frame_id = invalid.baseline_frame_id;
+    EXPECT_FALSE(invalid.valid());
+    invalid = valid;
+    invalid.damage_history = nullptr;
+    EXPECT_FALSE(invalid.valid());
+    invalid = valid;
+    invalid.current_damage_token = invalid.baseline_damage_token;
+    EXPECT_FALSE(invalid.valid());
+    invalid = valid;
+    invalid.broad_damage = false;
+    EXPECT_FALSE(invalid.valid());
+    invalid = valid;
+    invalid.ocr_safe = false;
+    EXPECT_FALSE(invalid.valid());
+  }
+
+  TEST(WindowsHostSbsContentReuseTest, ModelEquivalentHoldRequiresExactOwners) {
+    using platf::dxgi::detail::host_sbs_model_equivalent_hold_identity_matches;
+
+    EXPECT_TRUE(host_sbs_model_equivalent_hold_identity_matches(
+      true, 42u, 40u, 42u, 40u
+    ));
+    EXPECT_FALSE(host_sbs_model_equivalent_hold_identity_matches(
+      false, 42u, 40u, 42u, 40u
+    ));
+    EXPECT_FALSE(host_sbs_model_equivalent_hold_identity_matches(
+      true, 41u, 40u, 42u, 40u
+    ));
+    EXPECT_FALSE(host_sbs_model_equivalent_hold_identity_matches(
+      true, 42u, 39u, 42u, 40u
+    ));
+    EXPECT_FALSE(host_sbs_model_equivalent_hold_identity_matches(
+      true, 0u, 40u, 0u, 40u
+    ));
+  }
+
+  TEST(WindowsHostSbsAdaptiveShadowTest, OnlyExplicitValuesEnableAdaptiveModes) {
     using mode_e = platf::dxgi::detail::host_sbs_adaptive_motion_mode_e;
     using platf::dxgi::detail::host_sbs_adaptive_motion_mode;
 
     EXPECT_EQ(host_sbs_adaptive_motion_mode("shadow"), mode_e::shadow);
-    EXPECT_EQ(host_sbs_adaptive_motion_mode("1"), mode_e::off);
+    EXPECT_EQ(host_sbs_adaptive_motion_mode("1"), mode_e::active);
     EXPECT_EQ(host_sbs_adaptive_motion_mode("off"), mode_e::off);
     EXPECT_EQ(host_sbs_adaptive_motion_mode(""), mode_e::off);
   }
@@ -1074,7 +1244,8 @@ namespace {
     cadence.record_successful_enqueue(a, start);
     EXPECT_EQ(cadence.observe_changed(b, true, start + 49ms), decision_e::hold_candidate);
     EXPECT_TRUE(cadence.refresh_required());
-    // Re-delivery of the one held identity is idempotent and is not a second candidate.
+    // The cadence identifies the repeated held identity. Active admission treats this decision as
+    // mandatory inference rather than granting a second approximate hold.
     EXPECT_EQ(
       cadence.observe_changed(b, true, start + 49ms),
       decision_e::hold_same_identity

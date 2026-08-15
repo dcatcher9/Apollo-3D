@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "name": "host-sbs-current-frame-motion-probe-v1",
-  "purpose": "deterministic shadow-only qualification evidence; never active hold authority",
+  "purpose": "deterministic probe qualification evidence; never standalone active hold authority",
   "model_field": {
     "width": 770,
     "height": 434

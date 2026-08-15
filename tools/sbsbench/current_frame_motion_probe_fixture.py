@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Deterministic shadow evidence for a future current-frame motion probe.
+"""Deterministic diagnostic evidence for the current-frame motion probe.
 
 This oracle intentionally does not reproduce or authorize a production admission policy. It
 compares exact authored current/baseline RGB pixels, reports tile and bottom-OCR-band evidence,
-and calls every exact change a veto. Exact equality is only quiet evidence; it never authorizes a
-hold. The two cadence phases expose changes that a fixed every-other-frame policy could miss.
+and calls every exact change a veto. Exact equality is only diagnostic quiet evidence; it is never
+standalone hold authority. The two cadence phases expose changes that a fixed every-other-frame
+policy could miss.
 """
 
 from __future__ import annotations
@@ -107,7 +108,8 @@ def validate_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
     if fixture.get("name") != "host-sbs-current-frame-motion-probe-v1":
         raise ValueError("current-frame motion probe fixture has an unknown identity")
     if fixture.get("purpose") != (
-            "deterministic shadow-only qualification evidence; never active hold authority"):
+            "deterministic probe qualification evidence; "
+            "never standalone active hold authority"):
         raise ValueError("current-frame motion probe fixture has unknown authority semantics")
     if fixture.get("model_field") != _EXPECTED_FIELD:
         raise ValueError("current-frame motion probe fixture must use the 770x434 field")
@@ -438,7 +440,10 @@ def qualification_report(fixture: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema": 1,
         "source": fixture["name"],
-        "authority": "deterministic shadow qualification only; never active hold authority",
+        "authority": (
+            "deterministic probe qualification only; "
+            "never standalone active hold authority"
+        ),
         "counters": counters,
         "rows": rows,
     }

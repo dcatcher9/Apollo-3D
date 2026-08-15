@@ -554,12 +554,13 @@ so this experiment is explicitly cursor-insensitive as well as non-bit-exact. It
 default; diagnostics report candidates, suppressed submissions, and successful current-color
 reuses for A/B measurement even when the experiment is disabled.
 
-A separate first-stage adaptive experiment is measurement-only. Setting
-`APOLLO_SBS_ADAPTIVE_MOTION_GATE=shadow` makes the host audit hypothetical depth holds while every
-frame still follows the ordinary copy, DAV2/OCR admission, completion, warp, and output paths.
-`APOLLO_SBS_ADAPTIVE_MOTION_GATE=1` is intentionally inert until shadow evidence and deterministic
-small-object, subtitle-phase, and cut-phase coverage qualify an active policy. This lever neither
-changes the existing `APOLLO_SBS_LOW_MOTION_GATE` experiment nor combines with its 0.25% authority.
+A separate default-off adaptive experiment has shadow and active process-local modes. Setting
+`APOLLO_SBS_ADAPTIVE_MOTION_GATE=shadow` audits hypothetical holds while every frame still follows
+the ordinary copy, DAV2/OCR admission, completion, warp, and output paths. Setting it to `1` enables
+one bounded model-equivalent hold under the additional current-frame proof below. Unknown values
+remain off. The exact content-clock/ROI proofs, the 0.25% low-motion experiment, and this adaptive
+proof acquire authority independently, but all produce one typed current-color/cached-geometry
+authorization. Their refresh bounds do not merge.
 
 The predictor requires two consecutive authenticated completed CutBridge observations. Each must
 have initialized/ready non-collapsed depth, model-input history state `1`, analysis flags `0`, scene
@@ -572,33 +573,59 @@ completes, and expires strictly at `100 ms`. A scheduling-time gap of `100 ms` o
 quiet streak, so two new fresh quiet observations are required. A current pulse or unseen count
 advance is classified as a hard-cut veto even when that cut has already reset scene age/history.
 
-Exact content-clock/ROI reuse remains higher priority. For a distinct changed DDup identity, shadow
-simulates at most one hold after a simulated real enqueue and only while that enqueue is less than
-`50 ms` old; the following distinct identity must simulate inference before another hold can arm.
+Exact content-clock/ROI reuse remains higher priority. For a distinct changed DDup identity, the
+adaptive cadence permits at most one hold after a real enqueue and only while that enqueue is less
+than `50 ms` old. No later approximate candidate, including a repeat of the held identity, may be
+held before a real inference; the next non-exact delivery therefore infers. Exact DDup duplicates
+may still reuse independently under their `16`/`250 ms` bound, but they neither advance nor rearm the
+adaptive cadence. Shadow simulates the same cadence without suppressing work.
 Eligibility requires the authenticated cache and complete current route/authority to match, no
 pending inference, complete retained DDup history, and no native interactive move/size. Broad
 damage is proved only when one normalized dirty rectangle or one move endpoint intersects at least
 half the exact DAV2 region. The saturated sum is not broad proof because overlaps and a move's two
 ends can inflate it. Localized nontrivial damage above 0.25% and below that broad proof fails open;
-tiny damage remains solely the existing low-motion experiment's domain. Shadow reports both a
-conservative depth-plus-OCR opportunity (the exact bottom OCR crop is unchanged) and a depth-hold
-opportunity that would still require current-frame OCR because that crop was damaged. Neither is
-authorized to suppress work in this stage.
+tiny damage remains solely the existing low-motion experiment's domain. Active mode additionally
+requires the exact bottom OCR crop to be damage-proven unchanged and has no OCR-dirty branch.
+Shadow continues to report both OCR-clean depth-plus-OCR opportunities and broad frames that would
+still require current-frame OCR.
 
-Only a successfully recorded hypothetical hold candidate requests the optional current-frame
-probe. Its baseline ID is copied from the latest authenticated V2 completion and must also equal
-the estimator's last postprocessed frame; either identity mismatch abstains. After ordinary
-preprocessing, a diagnostic shader outside the authenticated producer closure compares every
-admitted current NCHW value, appearance ordinal, and exclusion bit with that exact baseline and
-copies one fixed 26-word record. Quiet requires exact NCHW-bit, appearance-ordinal-bit, and
-exclusion equality, while any such mismatch is a motion veto. RGB delta tiers, appearance-delta
-thresholds, tile maxima, and bottom-band counters are diagnostics only and
-cannot change that verdict; neither verdict authorizes a hold. The existing encode target remains the
-only deadline: after preserving the same `3 ms` downstream reserve, repeated readiness queries may
-consume at most `0.5 ms` and have an independent query fuse. A missing or late target still permits
-one immediate query only. The staging map uses `DO_NOT_WAIT`; unavailable resources, timeout,
-malformed evidence, or any optional shader/event failure records an abstention while the same DAV2
-and OCR work continues unchanged.
+Only a cadence-selected broad candidate requests the optional current-frame probe. Its current and
+baseline IDs are copied from the private candidate and latest authenticated V2 completion; the
+baseline must also equal the estimator's last postprocessed frame. After ordinary preprocessing, a
+shader outside the authenticated producer closure compares every admitted current NCHW value,
+appearance ordinal, and exclusion bit with that exact baseline and copies one fixed 26-word record.
+The raw exact-bit telemetry verdict calls only exact NCHW-bit, appearance-ordinal-bit, and exclusion
+equality quiet; it is never standalone hold authority. RGB delta tiers, appearance thresholds, tile
+maxima, and bottom-band counters remain diagnostic for that verdict and the shadow cross-tab.
+
+Active selection is deliberately separate and narrower in authority but tolerant of harmless
+ordinal bit noise. It requires a decoded record with settled prior-state flags, exact NCHW and
+exclusion equality, and zero appearance texels at or above the `1/1024` delta tier. Exact
+appearance-ordinal bit mismatches below that tier remain telemetry and do not veto by themselves.
+The exact current/baseline/domain tuple, retained DDup history and endpoint tokens, noninteractive
+route, OCR-clean proof, absence of pending/completed work, and ordinary
+non-dump/non-suppressed-optional-work route must still match.
+The existing encode target remains the only deadline: after preserving the same `3 ms` downstream
+reserve, candidate-only readiness queries may consume at most `0.5 ms` and have an independent
+query fuse. A missing or late target permits one immediate query only. The staging map uses
+`DO_NOT_WAIT`; unavailable resources, timeout, a motion veto, malformed evidence, or any optional
+shader/event failure immediately continues to the ordinary DAV2/OCR enqueue.
+
+On an authorized active hold the estimator returns the explicit current/baseline IDs without
+enqueueing DAV2 or OCR and without advancing its postprocessed history. Display revalidates those
+IDs, the authenticated completion, route, input domain, color space, OCR-clean proof, and absence of
+pending work after the private copy and after estimator return. It then renders the current private
+candidate color through the older authenticated V2 geometry. The held identity is never restamped
+as a completion, reusable OCR input, damage baseline, or latest lineage, and the one-call hold token
+is cleared before any cache copy. The skipped delivery creates no CutBridge, normalization,
+scene-camera, OCR, or SLR observation. This can delay observation of a sub-threshold change by one
+delivery; the mandatory next real inference bounds that deliberate no-observation tradeoff.
+
+Low-motion and model-equivalent approximate providers cannot chain without an intervening real
+inference. A valid estimator hold records that provider barrier even if display-side revalidation
+later refuses the cached render, so a route or telemetry reset cannot grant a second approximate
+hold. Exact content-clock/ROI reuse remains independent, and model-equivalent holds consume neither
+the exact `16`/`250 ms` refresh budget nor the low-motion one-hold budget.
 
 The live source signature, transfer domain, root/region generations, browser epoch, and interactive
 state are observed independently of cache authentication. Any change clears predictive evidence,
@@ -627,7 +654,9 @@ preserve that watermark and the independent current-route fingerprint only to pr
 already-attempted completion and to detect the next route transition; neither is quiet evidence or
 hold authority. A separate minimum frame ID rejects delayed readback owned by the pre-reset route.
 Consequently shadow telemetry makes no stale physical cut, scene-camera, OCR, SLR, or completion
-claim.
+claim. In active mode the same reset matrix revokes candidate authority; every failure before
+estimator authorization follows ordinary inference, while a failure after an already-skipped
+observation fails closed for that one render and preserves the mandatory-next-inference barrier.
 
 Model preparation, shader compilation, and the live renderer are fail-closed. Live shaders are
 compiled and cached at process startup. Dump-only resources are created lazily and cannot prevent a
@@ -642,8 +671,8 @@ full-frame V2. That route selection does not weaken the base contract: an intern
 provenance, state, field, or renderer authentication failure renders the affected frame flat.
 
 TensorRT inference and all coordinate passes remain on the GPU. Default production does not add a
-per-frame GPU-to-CPU readback; adaptive shadow may read only the bounded candidate record described
-above. When inference is still busy, the capture loop must not enqueue an
+per-frame GPU-to-CPU readback; an explicit adaptive mode may read only the bounded candidate record
+described above. When inference is still busy, the capture loop must not enqueue an
 unbounded backlog; it continues with flat/current output according to the matched-frame contract.
 Telemetry readback is nonblocking and may drop samples under GPU load, while offline evaluation
 may intentionally block to obtain a complete trace. Admission and fixed-resource reuse remain

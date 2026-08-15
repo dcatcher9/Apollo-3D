@@ -86,16 +86,30 @@ does not fold temporal EMA, generate cut evidence, confirm a cut, advance camera
 reconsume a pulse. Unknown metadata and the independently composited cursor prevent any bit-exact
 claim; every authority or bound failure follows the ordinary observation path.
 
-`APOLLO_SBS_ADAPTIVE_MOTION_GATE=shadow` is a separate, non-authoritative predictor whose complete
-threshold, DDup, age, and retrospective-audit contract is owned by [Host SBS frame attribution and
-failure behavior](host-sbs.md#frame-attribution-and-failure-behavior). It schedules nonblocking
-exact-frame CutBridge readback but never suppresses DAV2, OCR, cut analysis, camera updates, or
-rendering. Quiet classification accepts only settled armed cut masks `3`/`19`; all one-shot,
-recovery, confirmation, analysis, current-pulse, and unseen-count states veto. Candidate IDs remain
-bound to the CopyResource scheduling time and route/domain epoch through reset/min-frame authority;
-exact results retain their depth-plus-OCR or OCR-only-needed class, while missing or coalesced
-evidence is charged as class-specific unknown. Thus this shadow stage cannot replay a cut pulse, advance
-no-observation state, or make a physical cut claim for a hypothetical hold.
+`APOLLO_SBS_ADAPTIVE_MOTION_GATE=shadow` is a non-authoritative predictor whose complete threshold,
+DDup, age, and retrospective-audit contract is owned by [Host SBS frame attribution and failure
+behavior](host-sbs.md#frame-attribution-and-failure-behavior). It schedules nonblocking exact-frame
+probe readback but never suppresses DAV2, OCR, cut analysis, camera updates, or rendering. Quiet
+classification accepts only settled armed cut masks `3`/`19`; all one-shot, recovery, confirmation,
+analysis, current-pulse, and unseen-count states veto. Candidate IDs remain bound to the copy
+scheduling time and route/domain epoch through reset/min-frame authority; exact results retain their
+depth-plus-OCR or OCR-only-needed class, while missing or coalesced evidence is charged as
+class-specific unknown. Thus shadow cannot replay a cut pulse, advance no-observation state, or make
+a physical cut claim for a hypothetical hold.
+
+The default-off active value `APOLLO_SBS_ADAPTIVE_MOTION_GATE=1` may instead omit one complete
+DAV2/OCR observation after two settled quiet CutBridge completions. It additionally requires broad
+single-rectangle DDup evidence, an unchanged exact OCR crop, authenticated current/baseline/domain
+ownership, no pending work, exact NCHW and exclusion equality, and no appearance texel with delta at
+or above `1/1024`. The current color is rendered with the last authenticated V2 field, but the held
+identity does not advance or restamp CutBridge, normalization, camera, OCR, SLR, damage, or lineage
+state. No repeated or distinct approximate hold may follow until a real inference; the next
+non-exact delivery therefore observes the source. Exact DDup duplicates may reuse under their own
+bound but do not rearm the adaptive cadence. Thus a sub-threshold non-exact change can be absent from
+CutBridge for one delivery only; the forced next observation bounds cut-detection delay and cannot
+reconsume an old pulse. Tiny-motion and model-equivalent holds cannot chain across providers. Any
+authority/probe failure before the omission follows ordinary inference; post-omission display
+rejection renders fail-closed and still preserves the forced-next barrier.
 
 An OCR-only DDup proof is different: DAV2 and this complete scene-cut pipeline still execute for a
 new exact frame. When only the bottom detector crop is unchanged, the host may omit OCR preprocess,

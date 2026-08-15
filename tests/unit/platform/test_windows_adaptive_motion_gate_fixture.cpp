@@ -1,6 +1,6 @@
 /**
  * @file tests/unit/platform/test_windows_adaptive_motion_gate_fixture.cpp
- * @brief Deterministic small-object and phase witnesses for adaptive Host SBS shadow gating.
+ * @brief Deterministic small-object and phase witnesses for adaptive Host SBS gating.
  */
 #include "../../tests_common.h"
 
@@ -80,7 +80,7 @@ namespace {
         EXPECT_FALSE(adaptive::host_sbs_adaptive_motion_damage_candidate(localized, true))
           << "width=" << width << " event=" << event;
         // Every requested object is intentionally within the separate legacy 0.25% experiment.
-        // This fixture isolates adaptive-shadow behavior; that older gate must remain disabled.
+        // This fixture isolates the adaptive gate; that older gate must remain disabled.
         EXPECT_TRUE(adaptive::host_sbs_low_motion_damage_candidate(localized, true))
           << "width=" << width << " event=" << event;
 

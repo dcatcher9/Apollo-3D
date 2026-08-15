@@ -261,13 +261,162 @@ namespace platf::dxgi {
              sampled_baseline_frame_id == expected_baseline_frame_id;
     }
 
+    enum class host_sbs_depth_reuse_kind_e : std::uint8_t {
+      none,
+      exact_content,
+      exact_roi_damage,
+      bounded_tiny_motion,
+      bounded_model_equivalent,
+    };
+
+    enum class host_sbs_depth_reuse_exactness_e : std::uint8_t {
+      exact,
+      approximate,
+    };
+
+    enum class host_sbs_depth_reuse_refresh_e : std::uint8_t {
+      none,
+      bounded_content,
+      bounded_approximate,
+      force_next_inference,
+    };
+
+    /** One current-color/cache/render authority regardless of proof acquisition path. */
+    struct host_sbs_depth_reuse_authorization_t {
+      host_sbs_depth_reuse_kind_e kind = host_sbs_depth_reuse_kind_e::none;
+      host_sbs_depth_reuse_exactness_e exactness =
+        host_sbs_depth_reuse_exactness_e::exact;
+      host_sbs_depth_reuse_refresh_e refresh =
+        host_sbs_depth_reuse_refresh_e::none;
+      std::uint64_t baseline_frame_id = 0u;
+      std::uint64_t current_frame_id = 0u;
+      bool ocr_safe = false;
+
+      [[nodiscard]] constexpr bool valid() const noexcept {
+        if (
+          kind == host_sbs_depth_reuse_kind_e::none || !ocr_safe ||
+          baseline_frame_id == 0u || current_frame_id <= baseline_frame_id
+        ) {
+          return false;
+        }
+        switch (kind) {
+          case host_sbs_depth_reuse_kind_e::none:
+            return false;
+          case host_sbs_depth_reuse_kind_e::exact_content:
+          case host_sbs_depth_reuse_kind_e::exact_roi_damage:
+            return exactness == host_sbs_depth_reuse_exactness_e::exact &&
+                   refresh == host_sbs_depth_reuse_refresh_e::bounded_content;
+          case host_sbs_depth_reuse_kind_e::bounded_tiny_motion:
+            return exactness == host_sbs_depth_reuse_exactness_e::approximate &&
+                   refresh == host_sbs_depth_reuse_refresh_e::bounded_approximate;
+          case host_sbs_depth_reuse_kind_e::bounded_model_equivalent:
+            return exactness == host_sbs_depth_reuse_exactness_e::approximate &&
+                   refresh == host_sbs_depth_reuse_refresh_e::force_next_inference;
+        }
+        return false;
+      }
+
+      [[nodiscard]] constexpr bool exact() const noexcept {
+        return valid() && exactness == host_sbs_depth_reuse_exactness_e::exact;
+      }
+
+      [[nodiscard]] constexpr bool forces_next_inference() const noexcept {
+        return valid() &&
+               refresh == host_sbs_depth_reuse_refresh_e::force_next_inference;
+      }
+    };
+
+    [[nodiscard]] constexpr host_sbs_depth_reuse_authorization_t
+    make_host_sbs_depth_reuse_authorization(
+      const host_sbs_depth_reuse_kind_e kind,
+      const std::uint64_t baseline_frame_id,
+      const std::uint64_t current_frame_id,
+      const bool ocr_safe
+    ) noexcept {
+      host_sbs_depth_reuse_authorization_t result {
+        .kind = kind,
+        .baseline_frame_id = baseline_frame_id,
+        .current_frame_id = current_frame_id,
+        .ocr_safe = ocr_safe,
+      };
+      switch (kind) {
+        case host_sbs_depth_reuse_kind_e::none:
+          break;
+        case host_sbs_depth_reuse_kind_e::exact_content:
+        case host_sbs_depth_reuse_kind_e::exact_roi_damage:
+          result.refresh = host_sbs_depth_reuse_refresh_e::bounded_content;
+          break;
+        case host_sbs_depth_reuse_kind_e::bounded_tiny_motion:
+          result.exactness = host_sbs_depth_reuse_exactness_e::approximate;
+          result.refresh = host_sbs_depth_reuse_refresh_e::bounded_approximate;
+          break;
+        case host_sbs_depth_reuse_kind_e::bounded_model_equivalent:
+          result.exactness = host_sbs_depth_reuse_exactness_e::approximate;
+          result.refresh = host_sbs_depth_reuse_refresh_e::force_next_inference;
+          break;
+      }
+      return result.valid() ? result : host_sbs_depth_reuse_authorization_t {};
+    }
+
+    class ddup_damage_history_t;
+
+    /** Display-owned broad-DDup/OCR proof retained across the private-copy route recheck. */
+    struct host_sbs_model_equivalent_candidate_t {
+      std::uint64_t baseline_frame_id = 0u;
+      std::uint64_t current_frame_id = 0u;
+      const ddup_damage_history_t *damage_history = nullptr;
+      std::uint64_t baseline_damage_token = 0u;
+      std::uint64_t current_damage_token = 0u;
+      bool broad_damage = false;
+      bool ocr_safe = false;
+
+      [[nodiscard]] constexpr bool valid() const noexcept {
+        return baseline_frame_id != 0u && current_frame_id > baseline_frame_id &&
+               damage_history != nullptr && baseline_damage_token != 0u &&
+               current_damage_token > baseline_damage_token && broad_damage && ocr_safe;
+      }
+    };
+
+    /** Approximate providers cannot chain without an intervening real inference. */
+    [[nodiscard]] constexpr bool host_sbs_approximate_reuse_provider_allowed(
+      const host_sbs_depth_reuse_kind_e prior_since_enqueue,
+      const host_sbs_depth_reuse_kind_e candidate,
+      const bool adaptive_refresh_required
+    ) noexcept {
+      if (prior_since_enqueue != host_sbs_depth_reuse_kind_e::none) {
+        return false;
+      }
+      return !adaptive_refresh_required &&
+             (
+               candidate == host_sbs_depth_reuse_kind_e::bounded_tiny_motion ||
+               candidate == host_sbs_depth_reuse_kind_e::bounded_model_equivalent
+             );
+    }
+
+    [[nodiscard]] constexpr bool host_sbs_model_equivalent_hold_identity_matches(
+      const bool held,
+      const std::uint64_t held_current_frame_id,
+      const std::uint64_t held_baseline_frame_id,
+      const std::uint64_t expected_current_frame_id,
+      const std::uint64_t expected_baseline_frame_id
+    ) noexcept {
+      return held && expected_current_frame_id != 0u &&
+             expected_baseline_frame_id != 0u &&
+             held_current_frame_id == expected_current_frame_id &&
+             held_baseline_frame_id == expected_baseline_frame_id;
+    }
+
     [[nodiscard]] constexpr bool host_sbs_cached_geometry_render_allowed(
       const bool dedup_gate_open,
       const bool renderer_authenticated,
-      const bool cached_geometry_matches,
+      const host_sbs_depth_reuse_authorization_t &authorization,
+      const std::uint64_t cached_frame_id,
+      const std::uint64_t current_frame_id,
       const bool cached_resources_complete
     ) noexcept {
-      return dedup_gate_open && renderer_authenticated && cached_geometry_matches &&
+      return dedup_gate_open && renderer_authenticated && authorization.valid() &&
+             authorization.baseline_frame_id == cached_frame_id &&
+             authorization.current_frame_id == current_frame_id &&
              cached_resources_complete;
     }
 
@@ -310,13 +459,15 @@ namespace platf::dxgi {
     enum class host_sbs_adaptive_motion_mode_e : std::uint8_t {
       off,
       shadow,
+      active,
     };
 
-    /** The first adaptive rollout is deliberately measurement-only. Unknown values stay off. */
+    /** Both experiments are explicit process-local levers. Unknown values stay off. */
     [[nodiscard]] constexpr host_sbs_adaptive_motion_mode_e
     host_sbs_adaptive_motion_mode(const std::string_view value) noexcept {
       return value == "shadow" ? host_sbs_adaptive_motion_mode_e::shadow :
-                                 host_sbs_adaptive_motion_mode_e::off;
+             value == "1" ? host_sbs_adaptive_motion_mode_e::active :
+                            host_sbs_adaptive_motion_mode_e::off;
     }
 
     enum class host_sbs_adaptive_motion_verdict_e : std::uint8_t {
@@ -1094,8 +1245,6 @@ namespace platf::dxgi {
       std::vector<RECT> rects;
     };
 
-    class ddup_damage_history_t;
-
     /** Immutable identity of one desktop surface actually committed by CopyResource. */
     struct ddup_damage_snapshot_t {
       std::shared_ptr<const ddup_damage_history_t> history;
@@ -1163,6 +1312,42 @@ namespace platf::dxgi {
       content_clock,
       roi_damage,
     };
+
+    /** Convert cache proof acquisition into the shared render authorization. Exact proof wins. */
+    [[nodiscard]] constexpr host_sbs_depth_reuse_authorization_t
+    select_host_sbs_cached_depth_reuse(
+      const host_sbs_ddup_reuse_proof_e exact_proof,
+      const bool bounded_tiny_motion_allowed,
+      const std::uint64_t baseline_frame_id,
+      const std::uint64_t current_frame_id
+    ) noexcept {
+      switch (exact_proof) {
+        case host_sbs_ddup_reuse_proof_e::content_clock:
+          return make_host_sbs_depth_reuse_authorization(
+            host_sbs_depth_reuse_kind_e::exact_content,
+            baseline_frame_id,
+            current_frame_id,
+            true
+          );
+        case host_sbs_ddup_reuse_proof_e::roi_damage:
+          return make_host_sbs_depth_reuse_authorization(
+            host_sbs_depth_reuse_kind_e::exact_roi_damage,
+            baseline_frame_id,
+            current_frame_id,
+            true
+          );
+        case host_sbs_ddup_reuse_proof_e::none:
+          break;
+      }
+      return bounded_tiny_motion_allowed ?
+               make_host_sbs_depth_reuse_authorization(
+                 host_sbs_depth_reuse_kind_e::bounded_tiny_motion,
+                 baseline_frame_id,
+                 current_frame_id,
+                 true
+               ) :
+               host_sbs_depth_reuse_authorization_t {};
+    }
 
     /** Classify the pixel proof for bounded current-color reuse.
      *

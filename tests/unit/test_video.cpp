@@ -66,8 +66,8 @@ namespace {
       models::adaptive_motion_probe_exact_verdict_e::quiet_evidence
     );
 
-    // DAV2 input equality is not a complete no-observation proof: CutBridge also consumes the
-    // point-sampled appearance-ordinal history. Even a one-bit ordinal change must veto.
+    // Exact telemetry also observes CutBridge's point-sampled appearance-ordinal history. A one-bit
+    // ordinal change vetoes this exact verdict; active selection applies its separate threshold.
     words[25] = 1u;
     ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
       words, current_id, baseline_id, 770, 434, sample
@@ -149,9 +149,29 @@ namespace {
       std::numeric_limits<float>::quiet_NaN()
     )));
     EXPECT_TRUE(rejects(19u, 1u));  // Threshold changes require an exact ordinal mismatch.
+    EXPECT_TRUE(rejects(20u, std::bit_cast<std::uint32_t>(
+      models::adaptive_motion_probe_appearance_hold_threshold
+    )));  // A zero threshold count cannot claim a threshold-sized maximum.
     EXPECT_TRUE(rejects(21u, area + 1u));
     EXPECT_TRUE(rejects(24u, std::bit_cast<std::uint32_t>(1.0f)));
     EXPECT_TRUE(rejects(25u, area + 1u));
+
+    auto consistent_appearance_change = valid_words();
+    consistent_appearance_change[19] = 1u;
+    consistent_appearance_change[20] = std::bit_cast<std::uint32_t>(
+      models::adaptive_motion_probe_appearance_hold_threshold
+    );
+    consistent_appearance_change[25] = 1u;
+    models::adaptive_motion_probe_sample consistent_sample;
+    EXPECT_TRUE(models::decode_adaptive_motion_probe_words(
+      consistent_appearance_change,
+      current_id,
+      baseline_id,
+      16,
+      16,
+      consistent_sample
+    ));
+    EXPECT_EQ(consistent_sample.appearance_delta_1_over_1024_texels, 1u);
   }
 
   TEST(AdaptiveMotionProbeTest, ActiveHoldUsesExactDav2AndThresholdedAppearance) {
@@ -235,6 +255,10 @@ namespace {
     EXPECT_EQ(decide(veto), decision_e::infer);
     veto = probe;
     veto.sample.appearance_delta_1_over_1024_texels = 1u;
+    EXPECT_EQ(decide(veto), decision_e::infer);
+    veto = probe;
+    veto.sample.maximum_appearance_delta =
+      models::adaptive_motion_probe_appearance_hold_threshold;
     EXPECT_EQ(decide(veto), decision_e::infer);
     veto = probe;
     veto.sample.prior_state_flags &= ~models::adaptive_motion_probe_flag_scene_settled;
@@ -4046,16 +4070,16 @@ TEST(DirectxShaderSourceTest, AdaptiveMotionProbeAuthenticatesCutStateEncodings)
   );
 }
 
-TEST(DirectxShaderSourceTest, CurrentFrameProbeIsCandidateOwnedAndTelemetryOnly) {
+TEST(DirectxShaderSourceTest, CurrentFrameProbeHasSeparateShadowAndActiveOwners) {
   const auto display =
     read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
   ASSERT_FALSE(display.empty());
 
   const auto build_flag = display.find(
-    "const bool adaptive_probe_shadow = adaptive_motion_shadow_enabled();"
+    "const bool adaptive_probe_enabled = adaptive_motion_enabled();"
   );
-  const auto build_capture = display.find("adaptive_probe_shadow]() mutable", build_flag);
-  const auto build_argument = display.find("active,\n          adaptive_probe_shadow", build_capture);
+  const auto build_capture = display.find("adaptive_probe_enabled]() mutable", build_flag);
+  const auto build_argument = display.find("active,\n          adaptive_probe_enabled", build_capture);
   ASSERT_NE(build_flag, std::string::npos);
   ASSERT_NE(build_capture, std::string::npos);
   ASSERT_NE(build_argument, std::string::npos);
@@ -4112,6 +4136,180 @@ TEST(DirectxShaderSourceTest, CurrentFrameProbeIsCandidateOwnedAndTelemetryOnly)
   EXPECT_NE(
     shared_damage_block.find(
       "current_ddup_damage,\n                adaptive_route_observable"
+    ),
+    std::string::npos
+  );
+
+  const auto active_precheck = display.find(
+    "adaptive_model_equivalent_candidate = {",
+    adaptive_use
+  );
+  const auto active_post_copy = display.find(
+    "active_model_hold_candidate_matches(",
+    active_precheck
+  );
+  const auto active_request = display.find(
+    ".authorize_near_identical_observation_hold =",
+    active_post_copy
+  );
+  const auto active_identity = display.find(
+    "host_sbs_model_equivalent_hold_identity_matches(",
+    active_request
+  );
+  const auto active_token_clear = display.find(
+    "est.adaptive_motion_observation_hold = {};",
+    active_identity
+  );
+  ASSERT_NE(active_precheck, std::string::npos);
+  ASSERT_NE(active_post_copy, std::string::npos);
+  ASSERT_NE(active_request, std::string::npos);
+  ASSERT_NE(active_identity, std::string::npos);
+  ASSERT_NE(active_token_clear, std::string::npos);
+  EXPECT_LT(active_precheck, active_post_copy);
+  EXPECT_LT(active_post_copy, active_request);
+  EXPECT_LT(active_request, active_identity);
+  EXPECT_LT(active_identity, active_token_clear);
+  const auto active_proof_block = display.substr(
+    active_precheck,
+    active_post_copy - active_precheck
+  );
+  EXPECT_NE(
+    active_proof_block.find(".broad_damage = broad_single_rect"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    active_proof_block.find(".ocr_safe = damage->ocr_crop_unchanged"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    active_proof_block.find(".damage_history = current_ddup_damage->history.get()"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    active_proof_block.find(".baseline_damage_token ="),
+    std::string::npos
+  );
+  EXPECT_NE(
+    active_proof_block.find(".current_damage_token = current_ddup_damage->token"),
+    std::string::npos
+  );
+
+  const auto observation_token = display.find(
+    "const auto observation_hold = est.adaptive_motion_observation_hold;",
+    active_request
+  );
+  const auto approximate_barrier = display.find(
+    "host_sbs_depth_reuse_kind_e::bounded_model_equivalent;",
+    observation_token
+  );
+  ASSERT_NE(observation_token, std::string::npos);
+  ASSERT_NE(approximate_barrier, std::string::npos);
+  EXPECT_LT(observation_token, approximate_barrier);
+  EXPECT_LT(approximate_barrier, active_identity);
+
+  const auto real_enqueue = display.find(
+    "if (est.inference_enqueued)",
+    active_token_clear
+  );
+  const auto fallthrough_account = display.find(
+    "if (active_hold_fell_through)",
+    real_enqueue
+  );
+  const auto forced_refresh_account = display.find(
+    "if (adaptive_refresh_required_at_entry)",
+    real_enqueue
+  );
+  const auto approximate_barrier_clear = display.find(
+    "host_sbs_depth_reuse_kind_e::none;",
+    real_enqueue
+  );
+  const auto cadence_rearm = display.find(
+    "adaptive_shadow_cadence.record_successful_enqueue(",
+    real_enqueue
+  );
+  ASSERT_NE(real_enqueue, std::string::npos);
+  ASSERT_NE(fallthrough_account, std::string::npos);
+  ASSERT_NE(forced_refresh_account, std::string::npos);
+  ASSERT_NE(approximate_barrier_clear, std::string::npos);
+  ASSERT_NE(cadence_rearm, std::string::npos);
+  EXPECT_LT(real_enqueue, fallthrough_account);
+  EXPECT_LT(real_enqueue, forced_refresh_account);
+  EXPECT_LT(forced_refresh_account, approximate_barrier_clear);
+  EXPECT_LT(approximate_barrier_clear, cadence_rearm);
+  EXPECT_LT(cadence_rearm, completion_poll);
+
+  const auto post_completion_authorization = display.find(
+    "auto post_completion_reuse_authorization =",
+    active_token_clear
+  );
+  const auto cached_estimate = display.find(
+    "est = latest_v2_lineage.estimate;",
+    post_completion_authorization
+  );
+  const auto cached_baseline_check = display.find(
+    "post_completion_reuse_authorization.baseline_frame_id ==",
+    cached_estimate
+  );
+  const auto private_current_color = display.find(
+    "matched_candidate_slot->srv.get()",
+    cached_baseline_check
+  );
+  const auto cache_warp_latched = display.find(
+    "cached_current_color_warp = true;",
+    private_current_color
+  );
+  const auto no_retain_reuse = display.find(
+    "!using_cached_estimate",
+    cache_warp_latched
+  );
+  ASSERT_NE(post_completion_authorization, std::string::npos);
+  ASSERT_NE(cached_estimate, std::string::npos);
+  ASSERT_NE(cached_baseline_check, std::string::npos);
+  ASSERT_NE(private_current_color, std::string::npos);
+  ASSERT_NE(cache_warp_latched, std::string::npos);
+  ASSERT_NE(no_retain_reuse, std::string::npos);
+  EXPECT_LT(post_completion_authorization, cached_estimate);
+  EXPECT_LT(cached_estimate, cached_baseline_check);
+  EXPECT_LT(cached_baseline_check, private_current_color);
+  EXPECT_LT(private_current_color, cache_warp_latched);
+  EXPECT_LT(cache_warp_latched, no_retain_reuse);
+
+  const auto active_match_definition = display.find(
+    "bool active_model_hold_candidate_matches("
+  );
+  const auto route_match_definition = display.find(
+    "bool matched_route_matches_current(",
+    active_match_definition
+  );
+  ASSERT_NE(active_match_definition, std::string::npos);
+  ASSERT_NE(route_match_definition, std::string::npos);
+  const auto active_match_body = display.substr(
+    active_match_definition,
+    route_match_definition - active_match_definition
+  );
+  EXPECT_EQ(
+    active_match_body.find("matched_motion_damage("),
+    std::string::npos
+  );
+  EXPECT_NE(
+    active_match_body.find(
+      "candidate.inference_ddup_damage->token != proof.current_damage_token"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    active_match_body.find(
+      "proof.baseline_damage_token"
+    ),
+    std::string::npos
+  );
+
+  const auto cache_copy = display.find("latest_v2_lineage.estimate = estimate;");
+  ASSERT_NE(cache_copy, std::string::npos);
+  EXPECT_NE(
+    display.find(
+      "latest_v2_lineage.estimate.adaptive_motion_observation_hold = {};",
+      cache_copy
     ),
     std::string::npos
   );
