@@ -604,12 +604,14 @@ baseline IDs are copied from the private candidate and latest authenticated V2 c
 baseline must also equal the estimator's last postprocessed frame. After ordinary preprocessing,
 an independently source-authenticated shader outside the producer closure compares every admitted
 current NCHW value, appearance ordinal, and exclusion bit with that exact baseline and copies one
-fixed 32-word CFM3 record. When an estimator-owned OCR baseline exists, the same dispatch compares
+fixed 23-word CFM4 record. When an estimator-owned OCR baseline exists, the same dispatch compares
 `960x160x3` normalized FP32 OCR input values bit-for-bit and validates that the retained OCR8 header
 and frame owner describe the same baseline. The raw motion verdict calls only exact NCHW-bit,
-appearance-ordinal-bit, and exclusion equality quiet; it is never standalone hold authority. RGB
-delta tiers, appearance thresholds, tile maxima, bottom-band counters, and the typed OCR-input
-result remain separately attributable diagnostics.
+appearance-ordinal-bit, and exclusion equality quiet; it is never standalone hold authority.
+RGB reconstruction tiers/maxima, per-tile maxima, and bottom-band counters are deliberately absent:
+they had no production consumer and added arithmetic and atomics to the critical probe. The record
+retains the thresholded and maximum appearance delta, exact appearance-bit count, and typed
+OCR-input result used by active selection or existing exact telemetry.
 
 Active selection is deliberately separate and narrower in authority but tolerant of harmless
 ordinal bit noise. It requires a decoded record with settled prior-state flags, exact NCHW and
@@ -618,7 +620,7 @@ appearance-ordinal bit mismatches below that tier remain telemetry and do not ve
 The exact current/baseline/domain tuple, retained DDup history and endpoint tokens, noninteractive
 route, absence of pending/completed work, and ordinary non-dump/non-suppressed-optional-work route
 must still match. OCR safety is typed: either DDup proves the exact bottom crop unchanged, or an
-ordinary current OCR path must map and bind successfully while CFM3 proves all `460800` normalized
+ordinary current OCR path must map and bind successfully while CFM4 proves all `460800` normalized
 input floats equal an estimator-owned baseline whose OCR8 record and frame owner are authoritative.
 Any mismatch, nonfinite value, missing/abstaining OCR8 record, unavailable comparison resource, or
 OCR setup failure follows ordinary DAV2/OCR inference.
@@ -651,7 +653,7 @@ the exact `16`/`250 ms` refresh budget nor the low-motion one-hold budget.
 
 The exact OCR-input baseline is estimator-owned rather than a display cache shortcut. A candidate
 copy is queued only after one ordinary joined DAV2/OCR completion has produced V2 and submitted
-OCR postprocessing; it becomes hold authority only when a later CFM3 probe validates the retained
+OCR postprocessing; it becomes hold authority only when a later CFM4 probe validates the retained
 OCR8 schema, validity, and exact frame owner. A damage-proven OCR redispatch may roll only that
 exact owner forward. Domain changes, subtitle suppression, detector abstention/failure, producer
 failure, optional-probe loss, and unsafe interop cleanup invalidate it. Optional comparison
@@ -660,8 +662,8 @@ independent DDup-clean hold remain available. A mapped OCR input remains stream-
 queued CUDA unmap even when the exact hold submits neither TensorRT engine, preventing the next
 delivery from racing the fixed interop buffer.
 
-The optional CFM3 shader closure is pinned independently at SHA-256
-`c89e52371bead4517d6299c4d08712a05508ad35cae20d7c2f7948adff63b0c2`. A source snapshot or
+The optional CFM4 shader closure is pinned independently at SHA-256
+`f377f3fb199b6e55a07a4e5dafd8fe1c8f74692eadb0c54b1726f97c3bffe326`. A source snapshot or
 closure mismatch disables the adaptive probe and all model-equivalent holds without changing the
 authenticated V2 producer, ordinary DAV2/OCR inference, or rendering.
 

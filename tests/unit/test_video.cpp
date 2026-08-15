@@ -142,7 +142,6 @@ namespace {
     words[8] = 3u;
     words[10] = 1u;
     words[11] = 770u * 434u;
-    words[21] = 770u * 129u;
 
     models::adaptive_motion_probe_sample sample;
     ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
@@ -155,7 +154,7 @@ namespace {
 
     // Exact telemetry also observes CutBridge's point-sampled appearance-ordinal history. A one-bit
     // ordinal change vetoes this exact verdict; active selection applies its separate threshold.
-    words[25] = 1u;
+    words[16] = 1u;
     ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
       words, current_id, baseline_id, 770, 434, sample
     ));
@@ -164,10 +163,9 @@ namespace {
       models::adaptive_motion_probe_exact_verdict(sample),
       models::adaptive_motion_probe_exact_verdict_e::motion_veto
     );
-    words[25] = 0u;
+    words[16] = 0u;
 
     words[13] = 1u;
-    words[18] = 1u;
     ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
       words, current_id, baseline_id, 770, 434, sample
     ));
@@ -212,7 +210,6 @@ namespace {
       words[8] = 3u;
       words[10] = 1u;
       words[11] = area;
-      words[21] = 16u * 6u;
       return words;
     };
     const auto rejects = [&](const std::size_t word, const std::uint32_t value) {
@@ -231,25 +228,23 @@ namespace {
     EXPECT_TRUE(rejects(9u, sbs_adaptive_state::known_analysis_flag_mask + 1u));
     EXPECT_TRUE(rejects(10u, 5u));
     EXPECT_TRUE(rejects(11u, area + 1u));
-    EXPECT_TRUE(rejects(13u, 1u));  // exact changes cannot exceed the zero default tile maximum.
-    EXPECT_TRUE(rejects(17u, std::bit_cast<std::uint32_t>(
+    EXPECT_TRUE(rejects(13u, area + 1u));
+    EXPECT_TRUE(rejects(15u, std::bit_cast<std::uint32_t>(
       std::numeric_limits<float>::quiet_NaN()
     )));
-    EXPECT_TRUE(rejects(19u, 1u));  // Threshold changes require an exact ordinal mismatch.
-    EXPECT_TRUE(rejects(20u, std::bit_cast<std::uint32_t>(
+    EXPECT_TRUE(rejects(14u, 1u));  // Threshold changes require an exact ordinal mismatch.
+    EXPECT_TRUE(rejects(15u, std::bit_cast<std::uint32_t>(
       models::adaptive_motion_probe_appearance_hold_threshold
     )));  // A zero threshold count cannot claim a threshold-sized maximum.
-    EXPECT_TRUE(rejects(21u, area + 1u));
-    EXPECT_TRUE(rejects(24u, std::bit_cast<std::uint32_t>(1.0f)));
-    EXPECT_TRUE(rejects(25u, area + 1u));
-    EXPECT_TRUE(rejects(26u, 1u << 31u));
+    EXPECT_TRUE(rejects(16u, area + 1u));
+    EXPECT_TRUE(rejects(17u, 1u << 31u));
 
     auto consistent_appearance_change = valid_words();
-    consistent_appearance_change[19] = 1u;
-    consistent_appearance_change[20] = std::bit_cast<std::uint32_t>(
+    consistent_appearance_change[14] = 1u;
+    consistent_appearance_change[15] = std::bit_cast<std::uint32_t>(
       models::adaptive_motion_probe_appearance_hold_threshold
     );
-    consistent_appearance_change[25] = 1u;
+    consistent_appearance_change[16] = 1u;
     models::adaptive_motion_probe_sample consistent_sample;
     EXPECT_TRUE(models::decode_adaptive_motion_probe_words(
       consistent_appearance_change,
@@ -280,12 +275,11 @@ namespace {
     words[8] = 3u;
     words[10] = 1u;
     words[11] = 16u * 16u;
-    words[21] = 16u * 6u;
-    words[26] = ocr_baseline_candidate | ocr_record_authoritative |
+    words[17] = ocr_baseline_candidate | ocr_record_authoritative |
                 ocr_current_preprocessed;
-    words[27] = static_cast<std::uint32_t>(baseline_id);
-    words[28] = static_cast<std::uint32_t>(baseline_id >> 32u);
-    words[29] = models::adaptive_motion_ocr_input_value_count;
+    words[18] = static_cast<std::uint32_t>(baseline_id);
+    words[19] = static_cast<std::uint32_t>(baseline_id >> 32u);
+    words[20] = models::adaptive_motion_ocr_input_value_count;
 
     models::adaptive_motion_probe_sample sample;
     ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
@@ -294,34 +288,34 @@ namespace {
     EXPECT_TRUE(sample.exact_ocr_input_matches_baseline());
 
     auto mismatch = words;
-    mismatch[30] = 1u;
+    mismatch[21] = 1u;
     ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
       mismatch, current_id, baseline_id, 16, 16, sample
     ));
     EXPECT_FALSE(sample.exact_ocr_input_matches_baseline());
 
     auto nonfinite = words;
-    nonfinite[31] = 1u;
+    nonfinite[22] = 1u;
     ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
       nonfinite, current_id, baseline_id, 16, 16, sample
     ));
     EXPECT_FALSE(sample.exact_ocr_input_matches_baseline());
 
     auto wrong_baseline = words;
-    wrong_baseline[27]--;
+    wrong_baseline[18]--;
     EXPECT_FALSE(models::decode_adaptive_motion_probe_words(
       wrong_baseline, current_id, baseline_id, 16, 16, sample
     ));
 
     auto missing_record_authority = words;
-    missing_record_authority[26] &= ~ocr_record_authoritative;
+    missing_record_authority[17] &= ~ocr_record_authoritative;
     ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
       missing_record_authority, current_id, baseline_id, 16, 16, sample
     ));
     EXPECT_FALSE(sample.exact_ocr_input_matches_baseline());
 
     auto short_comparison = words;
-    short_comparison[29]--;
+    short_comparison[20]--;
     EXPECT_FALSE(models::decode_adaptive_motion_probe_words(
       short_comparison, current_id, baseline_id, 16, 16, sample
     ));
@@ -334,7 +328,7 @@ namespace {
     probe.sample.baseline_frame_id = 40u;
     probe.sample.prior_state_flags = models::adaptive_motion_probe_settled_flags;
     probe.sample.admitted_texels = 256u;
-    // CFM3 still observes exact ordinal bit noise, but the active selector tolerates it below the
+    // CFM4 still observes exact ordinal bit noise, but the active selector tolerates it below the
     // most conservative existing appearance threshold.
     probe.sample.appearance_exact_changed_texels = 1u;
 
@@ -409,7 +403,7 @@ namespace {
       decision_e::hold
     );
 
-    // A dirty crop may hold only when the ordinary OCR path is healthy and CFM3 proves every
+    // A dirty crop may hold only when the ordinary OCR path is healthy and CFM4 proves every
     // normalized OCR input float bit-identical to the authenticated baseline.
     auto exact_ocr = probe;
     exact_ocr.sample.ocr_input_baseline_valid = true;
@@ -4344,19 +4338,20 @@ TEST(DirectxShaderSourceTest, AdaptiveMotionProbeAuthenticatesCutStateEncodings)
     "/src_assets/windows/assets/shaders/directx/host_sbs_current_frame_motion_probe_cs.hlsl"
   );
   ASSERT_FALSE(shader.empty());
-  EXPECT_EQ(models::adaptive_motion_probe_contract_tag, 0x334D4643u);
-  EXPECT_EQ(models::adaptive_motion_probe_word_count, 32u);
+  EXPECT_EQ(models::adaptive_motion_probe_contract_tag, 0x344D4643u);
+  EXPECT_EQ(models::adaptive_motion_probe_word_count, 23u);
   EXPECT_EQ(models::adaptive_motion_ocr_input_value_count, 960u * 160u * 3u);
   EXPECT_EQ(models::depth_coordinate_v2::subtitle_ocr_record_schema, 3u);
   EXPECT_EQ(models::depth_coordinate_v2::subtitle_ocr_record_tag, 0x3852434Fu);
-  EXPECT_NE(shader.find("MOTION_PROBE_CONTRACT_TAG 0x334D4643u"), std::string::npos);
+  EXPECT_NE(shader.find("MOTION_PROBE_CONTRACT_TAG 0x344D4643u"), std::string::npos);
   EXPECT_NE(
     shader.find("MOTION_PROBE_OCR_INPUT_VALUE_COUNT 460800u"),
     std::string::npos
   );
   EXPECT_NE(shader.find("MOTION_PROBE_OCR_RECORD_SCHEMA 3u"), std::string::npos);
   EXPECT_NE(shader.find("MOTION_PROBE_OCR_RECORD_TAG 0x3852434Fu"), std::string::npos);
-  EXPECT_NE(shader.find("PROBE_WORD_OCR_INPUT_NONFINITE 31u"), std::string::npos);
+  EXPECT_NE(shader.find("PROBE_WORD_OCR_INPUT_NONFINITE 22u"), std::string::npos);
+  EXPECT_NE(shader.find("LOCAL_WORD_COUNT 9u"), std::string::npos);
   EXPECT_NE(shader.find("StructuredBuffer<float> CurrentOcrInput : register(t7)"), std::string::npos);
   EXPECT_NE(shader.find("StructuredBuffer<float> PreviousOcrInput : register(t8)"), std::string::npos);
   EXPECT_NE(shader.find("StructuredBuffer<uint> PreviousOcrRecord : register(t9)"), std::string::npos);
@@ -4392,6 +4387,14 @@ TEST(DirectxShaderSourceTest, AdaptiveMotionProbeAuthenticatesCutStateEncodings)
     ),
     std::string::npos
   );
+  EXPECT_EQ(shader.find("CurrentModelColor"), std::string::npos);
+  EXPECT_EQ(shader.find("PreviousModelColor"), std::string::npos);
+  EXPECT_EQ(shader.find("PROBE_WORD_RGB_"), std::string::npos);
+  EXPECT_EQ(shader.find("PROBE_WORD_MAX_TILE_EXACT_CHANGED"), std::string::npos);
+  EXPECT_EQ(shader.find("PROBE_WORD_BOTTOM_"), std::string::npos);
+  EXPECT_EQ(shader.find("LOCAL_RGB_"), std::string::npos);
+  EXPECT_EQ(shader.find("LOCAL_BOTTOM_"), std::string::npos);
+  EXPECT_EQ(shader.find("probe_bottom_"), std::string::npos);
 }
 
 TEST(DirectxShaderSourceTest, AdaptiveMotionProbeAuthenticatesSourceBeforeCompile) {
@@ -4770,7 +4773,7 @@ TEST(DirectxShaderSourceTest, AdaptiveExactOcrInputOwnershipFailsOpen) {
     probe_collect_definition - probe_dispatch
   );
   const auto constants_abi = dispatch_body.find(
-    "const std::array<std::uint32_t, 12> constants"
+    "const std::array<std::uint32_t, 8> constants"
   );
   const auto inputs_abi = dispatch_body.find(
     "ID3D11ShaderResourceView *inputs[10]"

@@ -438,8 +438,8 @@ namespace models {
   }
 
   /** Optional current-frame motion evidence collected before DAV2 submission. */
-  inline constexpr std::uint32_t adaptive_motion_probe_contract_tag = 0x334D4643u;
-  inline constexpr std::size_t adaptive_motion_probe_word_count = 32u;
+  inline constexpr std::uint32_t adaptive_motion_probe_contract_tag = 0x344D4643u;
+  inline constexpr std::size_t adaptive_motion_probe_word_count = 23u;
   inline constexpr std::uint32_t adaptive_motion_probe_max_exact_numeric_counter = 16777215u;
   inline constexpr std::uint32_t adaptive_motion_ocr_input_value_count =
     depth_coordinate_v2::subtitle_ocr_input_n *
@@ -559,17 +559,8 @@ namespace models {
     std::uint32_t admitted_texels = 0u;
     std::uint32_t exclusion_mismatch_texels = 0u;
     std::uint32_t exact_changed_texels = 0u;
-    std::uint32_t rgb_delta_1_over_1024_texels = 0u;
-    std::uint32_t rgb_delta_1_over_256_texels = 0u;
-    std::uint32_t rgb_delta_1_over_64_texels = 0u;
-    float maximum_rgb_delta = 0.0f;
-    std::uint32_t maximum_exact_changed_in_16x16_tile = 0u;
     std::uint32_t appearance_delta_1_over_1024_texels = 0u;
     float maximum_appearance_delta = 0.0f;
-    std::uint32_t bottom_band_admitted_texels = 0u;
-    std::uint32_t bottom_band_exact_changed_texels = 0u;
-    std::uint32_t bottom_band_rgb_delta_1_over_1024_texels = 0u;
-    float bottom_band_maximum_rgb_delta = 0.0f;
     std::uint32_t appearance_exact_changed_texels = 0u;
     bool ocr_input_baseline_valid = false;
     bool ocr_input_comparison_valid = false;

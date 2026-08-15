@@ -30,8 +30,6 @@ namespace {
   constexpr UINT field_width = 18u;
   constexpr UINT field_height = 18u;
   constexpr UINT field_texels = field_width * field_height;
-  constexpr UINT bottom_top = 14u;
-  constexpr UINT bottom_bottom = field_height;
   constexpr std::uint64_t baseline_frame_id = 0x12345678abcdef01ull;
   constexpr std::uint64_t current_frame_id = 0x12345679abcdef02ull;
   constexpr std::uint32_t ocr_baseline_candidate = 1u << 0u;
@@ -163,7 +161,7 @@ namespace {
         error = "could not create the depth constant buffer";
         return initialize_result_e::failed;
       }
-      constants_desc.ByteWidth = 12u * sizeof(std::uint32_t);
+      constants_desc.ByteWidth = 8u * sizeof(std::uint32_t);
       if (FAILED(device_->CreateBuffer(&constants_desc, nullptr, &probe_constants_))) {
         error = "could not create the motion-probe constant buffer";
         return initialize_result_e::failed;
@@ -317,19 +315,15 @@ namespace {
       depth_constants[10] = 0u;
       depth_constants[11] = field_width;
       depth_constants[12] = field_height;
-      const std::array<std::uint32_t, 12> probe_constants {
+      const std::array<std::uint32_t, 8> probe_constants {
         static_cast<std::uint32_t>(current_frame_id),
         static_cast<std::uint32_t>(current_frame_id >> 32u),
         static_cast<std::uint32_t>(baseline_frame_id),
         static_cast<std::uint32_t>(baseline_frame_id >> 32u),
-        bottom_top,
-        bottom_bottom,
         inputs.ocr_input_flags,
         inputs.ocr_input_value_count,
         static_cast<std::uint32_t>(inputs.ocr_baseline_frame_id),
         static_cast<std::uint32_t>(inputs.ocr_baseline_frame_id >> 32u),
-        0u,
-        0u,
       };
       context_->UpdateSubresource(
         depth_constants_.Get(),
@@ -531,12 +525,6 @@ TEST(HostSbsCurrentFrameMotionProbeGpuTest, PreservesExactEvidenceAndStateIdenti
   EXPECT_EQ(quiet.sample.exclusion_mismatch_texels, 0u);
   EXPECT_EQ(quiet.sample.exact_changed_texels, 0u);
   EXPECT_EQ(quiet.sample.appearance_exact_changed_texels, 0u);
-  EXPECT_EQ(quiet.sample.maximum_exact_changed_in_16x16_tile, 0u);
-  EXPECT_EQ(
-    quiet.sample.bottom_band_admitted_texels,
-    field_width * (bottom_bottom - bottom_top)
-  );
-  EXPECT_EQ(quiet.sample.bottom_band_exact_changed_texels, 0u);
   EXPECT_EQ(
     models::adaptive_motion_probe_exact_verdict(quiet.sample),
     models::adaptive_motion_probe_exact_verdict_e::quiet_evidence
@@ -655,7 +643,6 @@ TEST(HostSbsCurrentFrameMotionProbeGpuTest, PreservesExactEvidenceAndStateIdenti
   ASSERT_TRUE(fixture.run(one_bit_inputs, state, one_bit, error)) << error;
   ASSERT_TRUE(one_bit.decoded);
   EXPECT_EQ(one_bit.sample.exact_changed_texels, 1u);
-  EXPECT_EQ(one_bit.sample.maximum_exact_changed_in_16x16_tile, 1u);
   EXPECT_EQ(
     models::adaptive_motion_probe_exact_verdict(one_bit.sample),
     models::adaptive_motion_probe_exact_verdict_e::motion_veto
@@ -704,26 +691,34 @@ TEST(HostSbsCurrentFrameMotionProbeGpuTest, PreservesExactEvidenceAndStateIdenti
   ASSERT_TRUE(fixture.run(swap_inputs, state, swap, error)) << error;
   ASSERT_TRUE(swap.decoded);
   EXPECT_EQ(swap.sample.exact_changed_texels, 2u);
-  EXPECT_EQ(swap.sample.maximum_exact_changed_in_16x16_tile, 2u);
   EXPECT_EQ(
     models::adaptive_motion_probe_exact_verdict(swap.sample),
     models::adaptive_motion_probe_exact_verdict_e::motion_veto
   );
 
-  probe_inputs_t bottom_inputs;
-  constexpr std::size_t bottom_index = 17u * field_width + 17u;
-  bottom_inputs.current_model[bottom_index] = 1.0f;
-  probe_execution_t bottom;
-  ASSERT_TRUE(fixture.run(bottom_inputs, state, bottom, error)) << error;
-  ASSERT_TRUE(bottom.decoded);
-  EXPECT_EQ(bottom.sample.exact_changed_texels, 1u);
-  EXPECT_EQ(bottom.sample.rgb_delta_1_over_1024_texels, 1u);
-  EXPECT_EQ(bottom.sample.rgb_delta_1_over_256_texels, 1u);
-  EXPECT_EQ(bottom.sample.rgb_delta_1_over_64_texels, 1u);
-  EXPECT_EQ(bottom.sample.bottom_band_exact_changed_texels, 1u);
-  EXPECT_EQ(bottom.sample.bottom_band_rgb_delta_1_over_1024_texels, 1u);
-  EXPECT_NEAR(bottom.sample.maximum_rgb_delta, 0.229f, 1e-6f);
-  EXPECT_NEAR(bottom.sample.bottom_band_maximum_rgb_delta, 0.229f, 1e-6f);
+  probe_inputs_t thresholded_appearance_inputs;
+  constexpr std::size_t thresholded_appearance_index = 17u * field_width + 17u;
+  thresholded_appearance_inputs.current_appearance[thresholded_appearance_index] =
+    1.0f / 512.0f;
+  probe_execution_t thresholded_appearance;
+  ASSERT_TRUE(fixture.run(
+    thresholded_appearance_inputs,
+    state,
+    thresholded_appearance,
+    error
+  )) << error;
+  ASSERT_TRUE(thresholded_appearance.decoded);
+  EXPECT_EQ(thresholded_appearance.sample.exact_changed_texels, 0u);
+  EXPECT_EQ(thresholded_appearance.sample.appearance_exact_changed_texels, 1u);
+  EXPECT_EQ(
+    thresholded_appearance.sample.appearance_delta_1_over_1024_texels,
+    1u
+  );
+  EXPECT_NEAR(
+    thresholded_appearance.sample.maximum_appearance_delta,
+    1.0f / 512.0f,
+    1e-7f
+  );
 
   probe_inputs_t exclusion_inputs;
   exclusion_inputs.current_exclusion[16u] = 1u;
@@ -733,7 +728,6 @@ TEST(HostSbsCurrentFrameMotionProbeGpuTest, PreservesExactEvidenceAndStateIdenti
   EXPECT_EQ(exclusion.sample.admitted_texels, field_texels - 1u);
   EXPECT_EQ(exclusion.sample.exclusion_mismatch_texels, 1u);
   EXPECT_EQ(exclusion.sample.exact_changed_texels, 0u);
-  EXPECT_EQ(exclusion.sample.maximum_exact_changed_in_16x16_tile, 0u);
   EXPECT_EQ(
     models::adaptive_motion_probe_exact_verdict(exclusion.sample),
     models::adaptive_motion_probe_exact_verdict_e::motion_veto

@@ -102,7 +102,7 @@ namespace models::host_sbs_shader_cache {
   inline constexpr std::string_view sbs_flat_fallback_source_closure_sha256 =
     "7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4";
   inline constexpr std::string_view adaptive_motion_probe_source_closure_sha256 =
-    "c89e52371bead4517d6299c4d08712a05508ad35cae20d7c2f7948adff63b0c2";
+    "f377f3fb199b6e55a07a4e5dafd8fe1c8f74692eadb0c54b1726f97c3bffe326";
 
   // Identity-only minimal closure used to match the model/preprocess calibration. Production
   // bytecode is never compiled from this smaller snapshot: all rgb_to_nchw entry points are

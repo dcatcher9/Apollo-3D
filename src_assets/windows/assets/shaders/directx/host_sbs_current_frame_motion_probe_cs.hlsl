@@ -21,16 +21,13 @@ cbuffer ProbeConstants : register(b1) {
     uint probe_current_frame_high;
     uint probe_baseline_frame_low;
     uint probe_baseline_frame_high;
-    uint probe_bottom_top;
-    uint probe_bottom_bottom;
     uint probe_ocr_input_flags;
     uint probe_ocr_input_value_count;
     uint probe_ocr_baseline_frame_low;
     uint probe_ocr_baseline_frame_high;
-    uint2 probe_reserved;
 };
 
-#define MOTION_PROBE_CONTRACT_TAG 0x334D4643u
+#define MOTION_PROBE_CONTRACT_TAG 0x344D4643u
 #define MOTION_PROBE_OCR_INPUT_VALUE_COUNT 460800u
 #define MOTION_PROBE_OCR_RECORD_SCHEMA 3u
 #define MOTION_PROBE_OCR_RECORD_TAG 0x3852434Fu
@@ -61,24 +58,15 @@ cbuffer ProbeConstants : register(b1) {
 #define PROBE_WORD_ADMITTED 11u
 #define PROBE_WORD_EXCLUSION_MISMATCH 12u
 #define PROBE_WORD_EXACT_CHANGED 13u
-#define PROBE_WORD_RGB_1_OVER_1024 14u
-#define PROBE_WORD_RGB_1_OVER_256 15u
-#define PROBE_WORD_RGB_1_OVER_64 16u
-#define PROBE_WORD_MAX_RGB_DELTA_BITS 17u
-#define PROBE_WORD_MAX_TILE_EXACT_CHANGED 18u
-#define PROBE_WORD_APPEARANCE_1_OVER_1024 19u
-#define PROBE_WORD_MAX_APPEARANCE_DELTA_BITS 20u
-#define PROBE_WORD_BOTTOM_ADMITTED 21u
-#define PROBE_WORD_BOTTOM_EXACT_CHANGED 22u
-#define PROBE_WORD_BOTTOM_RGB_1_OVER_1024 23u
-#define PROBE_WORD_BOTTOM_MAX_RGB_DELTA_BITS 24u
-#define PROBE_WORD_APPEARANCE_EXACT_CHANGED 25u
-#define PROBE_WORD_OCR_INPUT_FLAGS 26u
-#define PROBE_WORD_OCR_BASELINE_FRAME_LOW 27u
-#define PROBE_WORD_OCR_BASELINE_FRAME_HIGH 28u
-#define PROBE_WORD_OCR_INPUT_COMPARED 29u
-#define PROBE_WORD_OCR_INPUT_EXACT_MISMATCH 30u
-#define PROBE_WORD_OCR_INPUT_NONFINITE 31u
+#define PROBE_WORD_APPEARANCE_1_OVER_1024 14u
+#define PROBE_WORD_MAX_APPEARANCE_DELTA_BITS 15u
+#define PROBE_WORD_APPEARANCE_EXACT_CHANGED 16u
+#define PROBE_WORD_OCR_INPUT_FLAGS 17u
+#define PROBE_WORD_OCR_BASELINE_FRAME_LOW 18u
+#define PROBE_WORD_OCR_BASELINE_FRAME_HIGH 19u
+#define PROBE_WORD_OCR_INPUT_COMPARED 20u
+#define PROBE_WORD_OCR_INPUT_EXACT_MISMATCH 21u
+#define PROBE_WORD_OCR_INPUT_NONFINITE 22u
 
 #define OCR_INPUT_BASELINE_CANDIDATE (1u << 0u)
 #define OCR_INPUT_RECORD_AUTHORITATIVE (1u << 1u)
@@ -87,21 +75,13 @@ cbuffer ProbeConstants : register(b1) {
 #define LOCAL_ADMITTED 0u
 #define LOCAL_EXCLUSION_MISMATCH 1u
 #define LOCAL_EXACT_CHANGED 2u
-#define LOCAL_RGB_1_OVER_1024 3u
-#define LOCAL_RGB_1_OVER_256 4u
-#define LOCAL_RGB_1_OVER_64 5u
-#define LOCAL_MAX_RGB_DELTA_BITS 6u
-#define LOCAL_APPEARANCE_1_OVER_1024 7u
-#define LOCAL_MAX_APPEARANCE_DELTA_BITS 8u
-#define LOCAL_BOTTOM_ADMITTED 9u
-#define LOCAL_BOTTOM_EXACT_CHANGED 10u
-#define LOCAL_BOTTOM_RGB_1_OVER_1024 11u
-#define LOCAL_BOTTOM_MAX_RGB_DELTA_BITS 12u
-#define LOCAL_APPEARANCE_EXACT_CHANGED 13u
-#define LOCAL_OCR_INPUT_COMPARED 14u
-#define LOCAL_OCR_INPUT_EXACT_MISMATCH 15u
-#define LOCAL_OCR_INPUT_NONFINITE 16u
-#define LOCAL_WORD_COUNT 17u
+#define LOCAL_APPEARANCE_1_OVER_1024 3u
+#define LOCAL_MAX_APPEARANCE_DELTA_BITS 4u
+#define LOCAL_APPEARANCE_EXACT_CHANGED 5u
+#define LOCAL_OCR_INPUT_COMPARED 6u
+#define LOCAL_OCR_INPUT_EXACT_MISMATCH 7u
+#define LOCAL_OCR_INPUT_NONFINITE 8u
+#define LOCAL_WORD_COUNT 9u
 
 groupshared uint GroupWords[LOCAL_WORD_COUNT];
 
@@ -116,20 +96,6 @@ bool ProbeFiniteWholeInRange(float value, float maximum) {
 
 bool ProbeFiniteFloat(float value) {
     return (asuint(value) & 0x7f800000u) != 0x7f800000u;
-}
-
-float3 CurrentModelColor(uint index, uint plane) {
-    return float3(
-        CurrentModelInput[index] * 0.229f + 0.485f,
-        CurrentModelInput[index + plane] * 0.224f + 0.456f,
-        CurrentModelInput[index + 2u * plane] * 0.225f + 0.406f);
-}
-
-float3 PreviousModelColor(uint index, uint plane) {
-    return float3(
-        PreviousModelInput[index] * 0.229f + 0.485f,
-        PreviousModelInput[index + plane] * 0.224f + 0.456f,
-        PreviousModelInput[index + 2u * plane] * 0.225f + 0.406f);
 }
 
 [numthreads(16, 16, 1)]
@@ -159,32 +125,16 @@ void main(
                     asuint(PreviousModelInput[index + plane]) ||
                 asuint(CurrentModelInput[index + 2u * plane]) !=
                     asuint(PreviousModelInput[index + 2u * plane]);
-            float3 current_color = CurrentModelColor(index, plane);
-            float3 previous_color = PreviousModelColor(index, plane);
-            float3 rgb_delta = abs(current_color - previous_color);
-            float maximum_rgb_delta = max(rgb_delta.r, max(rgb_delta.g, rgb_delta.b));
             float appearance_delta = abs(
                 CurrentAppearanceOrdinal[index] - PreviousAppearanceOrdinal[index]);
             bool appearance_exact_changed =
                 asuint(CurrentAppearanceOrdinal[index]) !=
                     asuint(PreviousAppearanceOrdinal[index]);
-            bool bottom_band = dtid.y >= probe_bottom_top &&
-                               dtid.y < probe_bottom_bottom;
 
             InterlockedAdd(GroupWords[LOCAL_ADMITTED], 1u);
             if (exact_changed) {
                 InterlockedAdd(GroupWords[LOCAL_EXACT_CHANGED], 1u);
             }
-            if (maximum_rgb_delta >= (1.0f / 1024.0f)) {
-                InterlockedAdd(GroupWords[LOCAL_RGB_1_OVER_1024], 1u);
-            }
-            if (maximum_rgb_delta >= (1.0f / 256.0f)) {
-                InterlockedAdd(GroupWords[LOCAL_RGB_1_OVER_256], 1u);
-            }
-            if (maximum_rgb_delta >= (1.0f / 64.0f)) {
-                InterlockedAdd(GroupWords[LOCAL_RGB_1_OVER_64], 1u);
-            }
-            InterlockedMax(GroupWords[LOCAL_MAX_RGB_DELTA_BITS], asuint(maximum_rgb_delta));
             if (appearance_delta >= (1.0f / 1024.0f)) {
                 InterlockedAdd(GroupWords[LOCAL_APPEARANCE_1_OVER_1024], 1u);
             }
@@ -193,19 +143,6 @@ void main(
             }
             InterlockedMax(
                 GroupWords[LOCAL_MAX_APPEARANCE_DELTA_BITS], asuint(appearance_delta));
-
-            if (bottom_band) {
-                InterlockedAdd(GroupWords[LOCAL_BOTTOM_ADMITTED], 1u);
-                if (exact_changed) {
-                    InterlockedAdd(GroupWords[LOCAL_BOTTOM_EXACT_CHANGED], 1u);
-                }
-                if (maximum_rgb_delta >= (1.0f / 1024.0f)) {
-                    InterlockedAdd(GroupWords[LOCAL_BOTTOM_RGB_1_OVER_1024], 1u);
-                }
-                InterlockedMax(
-                    GroupWords[LOCAL_BOTTOM_MAX_RGB_DELTA_BITS],
-                    asuint(maximum_rgb_delta));
-            }
         }
 
         if ((probe_ocr_input_flags &
@@ -240,34 +177,11 @@ void main(
         InterlockedAdd(
             ProbeWords[PROBE_WORD_EXACT_CHANGED], GroupWords[LOCAL_EXACT_CHANGED]);
         InterlockedAdd(
-            ProbeWords[PROBE_WORD_RGB_1_OVER_1024], GroupWords[LOCAL_RGB_1_OVER_1024]);
-        InterlockedAdd(
-            ProbeWords[PROBE_WORD_RGB_1_OVER_256], GroupWords[LOCAL_RGB_1_OVER_256]);
-        InterlockedAdd(
-            ProbeWords[PROBE_WORD_RGB_1_OVER_64], GroupWords[LOCAL_RGB_1_OVER_64]);
-        InterlockedMax(
-            ProbeWords[PROBE_WORD_MAX_RGB_DELTA_BITS],
-            GroupWords[LOCAL_MAX_RGB_DELTA_BITS]);
-        InterlockedMax(
-            ProbeWords[PROBE_WORD_MAX_TILE_EXACT_CHANGED],
-            GroupWords[LOCAL_EXACT_CHANGED]);
-        InterlockedAdd(
             ProbeWords[PROBE_WORD_APPEARANCE_1_OVER_1024],
             GroupWords[LOCAL_APPEARANCE_1_OVER_1024]);
         InterlockedMax(
             ProbeWords[PROBE_WORD_MAX_APPEARANCE_DELTA_BITS],
             GroupWords[LOCAL_MAX_APPEARANCE_DELTA_BITS]);
-        InterlockedAdd(
-            ProbeWords[PROBE_WORD_BOTTOM_ADMITTED], GroupWords[LOCAL_BOTTOM_ADMITTED]);
-        InterlockedAdd(
-            ProbeWords[PROBE_WORD_BOTTOM_EXACT_CHANGED],
-            GroupWords[LOCAL_BOTTOM_EXACT_CHANGED]);
-        InterlockedAdd(
-            ProbeWords[PROBE_WORD_BOTTOM_RGB_1_OVER_1024],
-            GroupWords[LOCAL_BOTTOM_RGB_1_OVER_1024]);
-        InterlockedMax(
-            ProbeWords[PROBE_WORD_BOTTOM_MAX_RGB_DELTA_BITS],
-            GroupWords[LOCAL_BOTTOM_MAX_RGB_DELTA_BITS]);
         InterlockedAdd(
             ProbeWords[PROBE_WORD_APPEARANCE_EXACT_CHANGED],
             GroupWords[LOCAL_APPEARANCE_EXACT_CHANGED]);

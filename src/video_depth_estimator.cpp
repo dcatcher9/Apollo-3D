@@ -746,17 +746,8 @@ namespace models {
       admitted,
       exclusion_mismatch,
       exact_changed,
-      rgb_1_over_1024,
-      rgb_1_over_256,
-      rgb_1_over_64,
-      max_rgb_delta_bits,
-      max_tile_exact_changed,
       appearance_1_over_1024,
       max_appearance_delta_bits,
-      bottom_admitted,
-      bottom_exact_changed,
-      bottom_rgb_1_over_1024,
-      bottom_max_rgb_delta_bits,
       appearance_exact_changed,
       ocr_input_flags,
       ocr_input_baseline_frame_low,
@@ -791,31 +782,17 @@ namespace models {
       return false;
     }
 
-    const auto maximum_rgb = std::bit_cast<float>(words[max_rgb_delta_bits]);
     const auto maximum_appearance =
       std::bit_cast<float>(words[max_appearance_delta_bits]);
-    const auto bottom_maximum_rgb =
-      std::bit_cast<float>(words[bottom_max_rgb_delta_bits]);
     const auto area = static_cast<std::uint64_t>(field_width) *
                       static_cast<std::uint64_t>(field_height);
     const bool counters_valid =
       words[admitted] <= area && words[exclusion_mismatch] <= area &&
       static_cast<std::uint64_t>(words[admitted]) + words[exclusion_mismatch] <= area &&
       words[exact_changed] <= words[admitted] &&
-      words[rgb_1_over_1024] <= words[admitted] &&
-      words[rgb_1_over_256] <= words[rgb_1_over_1024] &&
-      words[rgb_1_over_64] <= words[rgb_1_over_256] &&
-      words[max_tile_exact_changed] <= 256u &&
-      words[max_tile_exact_changed] <= words[exact_changed] &&
-      ((words[exact_changed] == 0u) == (words[max_tile_exact_changed] == 0u)) &&
       words[appearance_exact_changed] <= words[admitted] &&
       words[appearance_1_over_1024] <= words[admitted] &&
-      words[appearance_1_over_1024] <= words[appearance_exact_changed] &&
-      words[bottom_admitted] <= words[admitted] &&
-      words[bottom_exact_changed] <= words[exact_changed] &&
-      words[bottom_exact_changed] <= words[bottom_admitted] &&
-      words[bottom_rgb_1_over_1024] <= words[rgb_1_over_1024] &&
-      words[bottom_rgb_1_over_1024] <= words[bottom_admitted];
+      words[appearance_1_over_1024] <= words[appearance_exact_changed];
     constexpr std::uint32_t ocr_baseline_candidate = 1u << 0u;
     constexpr std::uint32_t ocr_record_authoritative = 1u << 1u;
     constexpr std::uint32_t ocr_current_preprocessed = 1u << 2u;
@@ -852,12 +829,9 @@ namespace models {
       words[analysis_flags] <= sbs_adaptive_state::known_analysis_flag_mask &&
       words[history_state] <= 4u;
     const bool maxima_valid =
-      std::isfinite(maximum_rgb) && maximum_rgb >= 0.0f &&
       std::isfinite(maximum_appearance) && maximum_appearance >= 0.0f &&
       ((words[appearance_1_over_1024] == 0u) ==
-       (maximum_appearance < adaptive_motion_probe_appearance_hold_threshold)) &&
-      std::isfinite(bottom_maximum_rgb) && bottom_maximum_rgb >= 0.0f &&
-      bottom_maximum_rgb <= maximum_rgb;
+       (maximum_appearance < adaptive_motion_probe_appearance_hold_threshold));
     if (!counters_valid || !ocr_counters_valid || !state_valid || !maxima_valid) {
       return false;
     }
@@ -876,17 +850,8 @@ namespace models {
       .admitted_texels = words[admitted],
       .exclusion_mismatch_texels = words[exclusion_mismatch],
       .exact_changed_texels = words[exact_changed],
-      .rgb_delta_1_over_1024_texels = words[rgb_1_over_1024],
-      .rgb_delta_1_over_256_texels = words[rgb_1_over_256],
-      .rgb_delta_1_over_64_texels = words[rgb_1_over_64],
-      .maximum_rgb_delta = maximum_rgb,
-      .maximum_exact_changed_in_16x16_tile = words[max_tile_exact_changed],
       .appearance_delta_1_over_1024_texels = words[appearance_1_over_1024],
       .maximum_appearance_delta = maximum_appearance,
-      .bottom_band_admitted_texels = words[bottom_admitted],
-      .bottom_band_exact_changed_texels = words[bottom_exact_changed],
-      .bottom_band_rgb_delta_1_over_1024_texels = words[bottom_rgb_1_over_1024],
-      .bottom_band_maximum_rgb_delta = bottom_maximum_rgb,
       .appearance_exact_changed_texels = words[appearance_exact_changed],
       .ocr_input_baseline_valid =
         has_ocr_baseline_candidate && has_authoritative_ocr_record,
@@ -3324,7 +3289,7 @@ namespace models {
 
       D3D11_BUFFER_DESC constants_desc {};
       constants_desc.Usage = D3D11_USAGE_DEFAULT;
-      constants_desc.ByteWidth = 12u * sizeof(std::uint32_t);
+      constants_desc.ByteWidth = 8u * sizeof(std::uint32_t);
       constants_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
       D3D11_BUFFER_DESC output_desc {};
       output_desc.Usage = D3D11_USAGE_DEFAULT;
@@ -3407,7 +3372,6 @@ namespace models {
     bool dispatch_adaptive_motion_probe(
       const adaptive_motion_probe_request &request,
       const std::uint64_t current_frame_id,
-      const D3D11_TEXTURE2D_DESC &input_desc,
       const depth_input_region_t &input_region,
       const input_color_space color_space,
       const bool current_ocr_input_preprocessed
@@ -3431,21 +3395,9 @@ namespace models {
         return false;
       }
 
-      const auto crop_height = subtitle_ocr_source_crop_height(
-        input_desc.Width,
-        input_desc.Height
-      );
-      const auto &content = input_region.tensor_content;
-      if (crop_height == 0u || !content.valid({target_w, target_h})) {
+      if (!input_region.tensor_content.valid({target_w, target_h})) {
         return false;
       }
-      const std::uint64_t crop_top = input_desc.Height - crop_height;
-      const auto bottom_top = static_cast<std::uint32_t>(
-        content.top + std::min<std::uint64_t>(
-          (crop_top * content.height() + input_desc.Height - 1u) / input_desc.Height,
-          content.height()
-        )
-      );
       constexpr std::uint32_t ocr_baseline_candidate = 1u << 0u;
       constexpr std::uint32_t ocr_current_preprocessed = 1u << 2u;
       const bool ocr_baseline_matches =
@@ -3464,19 +3416,15 @@ namespace models {
       const std::uint32_t ocr_flags =
         (ocr_baseline_matches ? ocr_baseline_candidate : 0u) |
         (current_ocr_input_available ? ocr_current_preprocessed : 0u);
-      const std::array<std::uint32_t, 12> constants {
+      const std::array<std::uint32_t, 8> constants {
         static_cast<std::uint32_t>(current_frame_id),
         static_cast<std::uint32_t>(current_frame_id >> 32u),
         static_cast<std::uint32_t>(request.baseline_frame_id),
         static_cast<std::uint32_t>(request.baseline_frame_id >> 32u),
-        bottom_top,
-        content.bottom,
         ocr_flags,
         adaptive_motion_ocr_input_value_count,
         static_cast<std::uint32_t>(ocr_input_baseline.frame_id),
         static_cast<std::uint32_t>(ocr_input_baseline.frame_id >> 32u),
-        0u,
-        0u,
       };
       context->UpdateSubresource(
         adaptive_motion_probe_cbuffer.Get(), 0u, nullptr, constants.data(), 0u, 0u
@@ -4908,7 +4856,7 @@ namespace models {
         ocr_available = false;
         adaptive_ocr_input_compare_available = false;
       } else if (adaptive_motion_probe_enabled) {
-        // Exact OCR-input comparison is an optional extension of CFM3, not a detector resource.
+        // Exact OCR-input comparison is an optional extension of CFM4, not a detector resource.
         // A view/allocation failure must leave ordinary OCR and the DDup OCR-clean hold intact.
         const bool compare_resources_ok =
           ocr_input_supports_adaptive_compare &&
@@ -6465,7 +6413,7 @@ namespace models {
         mark_d3d_parallax_end(perf_slot);
       }
 
-      // This private copy is not OCR authority by itself. The later CFM3 probe also validates the
+      // This private copy is not OCR authority by itself. The later CFM4 probe also validates the
       // retained OCR8 header and exact frame owner, so detector overflow/nonfinite abstention
       // cannot authenticate these bytes. Establish the CPU-side owner only after this exact OCR
       // member and V2 postprocess both succeeded. A proven OCR8 redispatch advances identity
@@ -7139,7 +7087,6 @@ namespace models {
       (void) dispatch_adaptive_motion_probe(
         motion_probe_request,
         frame_id,
-        input_desc,
         input_region,
         color_space,
         ocr_frame_eligible
