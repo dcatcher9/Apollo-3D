@@ -1508,10 +1508,12 @@ namespace models {
     nvinfer1::IExecutionContext *exec_context = nullptr;
     CUcontext cuda_ctx = nullptr;
     CUstream cu_stream = nullptr;
+    CUstream ocr_cu_stream = nullptr;
     CUdevice cuda_device = -1;
     std::string engine_key;
-    // PP-OCR owns a distinct mutable TensorRT context. It shares only the estimator's bounded
-    // CUDA stream, so depth and OCR complete as one exact-frame unit without concurrent bindings.
+    // PP-OCR owns a distinct mutable TensorRT context and optional nonblocking CUDA stream. The
+    // streams may execute concurrently, but the completion gate joins them into one exact-frame
+    // unit before any D3D11 postprocess consumes either output.
     nvinfer1::ICudaEngine *ocr_engine = nullptr;
     nvinfer1::IExecutionContext *ocr_exec_context = nullptr;
     std::string ocr_engine_key;
@@ -2289,6 +2291,7 @@ namespace models {
       tensorrt_cuda_graph_t &state,
       const detail::cuda_graph_signature_t &signature,
       cuda_driver_api &cuda,
+      CUstream stream,
       const char *log_name,
       const bool fixed_shape
     ) {
@@ -2297,7 +2300,7 @@ namespace models {
                              cuda.cuGraphLaunch && cuda.cuGraphDestroy &&
                              cuda.cuGraphExecDestroy;
       auto launch_or_fallback = [&]() {
-        const CUresult launch = cuda.cuGraphLaunch(state.executable, cu_stream);
+        const CUresult launch = cuda.cuGraphLaunch(state.executable, stream);
         if (launch == CUDA_SUCCESS) {
           return true;
         }
@@ -2305,11 +2308,11 @@ namespace models {
                            << "); using ordinary enqueue.";
         destroy_inference_graph(cuda, state);
         state.policy.capture_failed = true;
-        return context->enqueueV3(cu_stream);
+        return context->enqueueV3(stream);
       };
 
       if (!graph_api || state.policy.capture_failed) {
-        return context->enqueueV3(cu_stream);
+        return context->enqueueV3(stream);
       }
       select_inference_graph_signature(cuda, state, signature);
       switch (detail::next_cuda_graph_enqueue_action(
@@ -2320,7 +2323,7 @@ namespace models {
         case detail::cuda_graph_enqueue_action_e::ordinary:
           // The first enqueue after each signature change is deliberately ordinary: TensorRT may
           // do deferred shape-dependent setup that cannot be captured.
-          return context->enqueueV3(cu_stream);
+          return context->enqueueV3(stream);
         case detail::cuda_graph_enqueue_action_e::replay:
           return launch_or_fallback();
         case detail::cuda_graph_enqueue_action_e::capture:
@@ -2329,12 +2332,12 @@ namespace models {
 
       CUgraph captured = nullptr;
       const CUresult begin = cuda.cuStreamBeginCapture(
-        cu_stream,
+        stream,
         CU_STREAM_CAPTURE_MODE_RELAXED
       );
-      const bool captured_enqueue = begin == CUDA_SUCCESS && context->enqueueV3(cu_stream);
+      const bool captured_enqueue = begin == CUDA_SUCCESS && context->enqueueV3(stream);
       const CUresult end = begin == CUDA_SUCCESS ?
-                             cuda.cuStreamEndCapture(cu_stream, &captured) :
+                             cuda.cuStreamEndCapture(stream, &captured) :
                              begin;
       CUgraphExec candidate_exec = nullptr;
       const CUresult instantiate =
@@ -2365,7 +2368,7 @@ namespace models {
                          << ", enqueue=" << captured_enqueue << ", end=" << end
                          << ", instantiate=" << instantiate
                          << "); using ordinary enqueue.";
-      return context->enqueueV3(cu_stream);
+      return context->enqueueV3(stream);
     }
 
     bool enqueue_inference(CUdeviceptr input, CUdeviceptr output, cuda_driver_api &cuda) {
@@ -2374,6 +2377,7 @@ namespace models {
         depth_inference_graph,
         {input, output, target_w, target_h},
         cuda,
+        cu_stream,
         "TensorRT",
         false
       );
@@ -2389,6 +2393,7 @@ namespace models {
         ocr_inference_graph,
         {input, output, ocr_engine_width, ocr_engine_height},
         cuda,
+        ocr_execution_stream(),
         "PP-OCRv6 tiny",
         true
       );
@@ -2673,9 +2678,13 @@ namespace models {
       ocr_context_health.observe(failure);
     }
 
-    // Depth and optional OCR share one bounded CUDA stream. A query/synchronization/unmap error
-    // can make every context that submitted work to that stream unsafe to reuse, while an OCR
-    // context that did not enqueue remains healthy.
+    [[nodiscard]] CUstream ocr_execution_stream() const noexcept {
+      return ocr_cu_stream ? ocr_cu_stream : cu_stream;
+    }
+
+    // CUDA may report an earlier asynchronous launch error through a later query, synchronization,
+    // map or unmap call on either stream. Once work was submitted, conservatively quarantine every
+    // participating TensorRT context instead of assuming the failure is stream-local.
     void mark_shared_execution_failure(const bool ocr_was_submitted) noexcept {
       mark_terminal_failure(true);
       if (ocr_was_submitted) {
@@ -2683,6 +2692,108 @@ namespace models {
           detail::warmed_execution_context_failure_e::asynchronous_execution_or_query
         );
       }
+    }
+
+    // Failing to select the shared CUDA context prevents proving either stream's completion.
+    void mark_cuda_context_failure() noexcept {
+      mark_shared_execution_failure(pending_ocr_submitted);
+    }
+
+    void mark_ocr_enqueue_failure(
+      const char *operation,
+      const CUresult result
+    ) noexcept {
+      ocr_available = false;
+      // enqueueV3(false) is not proof that no kernels were partially dispatched, and CUDA may
+      // surface the failure through another context on the same driver context. Discard the depth
+      // member too and quarantine both TensorRT contexts.
+      mark_shared_execution_failure(true);
+      if (!ocr_error_logged) {
+        BOOST_LOG(warning) << "PP-OCRv6 tiny " << operation << " failed (" << result
+                           << "); the exact-frame DAV2/OCR unit fails closed.";
+        ocr_error_logged = true;
+      }
+    }
+
+    static detail::async_stream_readiness_e normalized_stream_readiness(
+      const CUresult result
+    ) noexcept {
+      if (result == CUDA_SUCCESS) {
+        return detail::async_stream_readiness_e::ready;
+      }
+      if (result == CUDA_ERROR_NOT_READY) {
+        return detail::async_stream_readiness_e::busy;
+      }
+      return detail::async_stream_readiness_e::failed;
+    }
+
+    enum class pending_execution_readiness_e : std::uint8_t {
+      ready,
+      busy,
+      failed,
+    };
+
+    pending_execution_readiness_e query_pending_execution(
+      cuda_driver_api &cuda,
+      const char *phase
+    ) {
+      if (!cu_stream || !cuda.cuStreamQuery) {
+        mark_shared_execution_failure(pending_ocr_submitted);
+        return pending_execution_readiness_e::failed;
+      }
+
+      const auto depth_query = cuda.cuStreamQuery(cu_stream);
+      auto depth_readiness = normalized_stream_readiness(depth_query);
+      auto ocr_readiness = detail::async_stream_readiness_e::ready;
+      CUresult ocr_query = CUDA_SUCCESS;
+      if (depth_readiness == detail::async_stream_readiness_e::ready &&
+          pending_ocr_submitted && ocr_cu_stream) {
+          ocr_query = cuda.cuStreamQuery(ocr_cu_stream);
+          ocr_readiness = normalized_stream_readiness(ocr_query);
+      }
+
+      switch (detail::joined_stream_readiness(
+                depth_readiness,
+                pending_ocr_submitted,
+                ocr_readiness
+              )) {
+        case detail::joined_stream_readiness_e::ready:
+          return pending_execution_readiness_e::ready;
+        case detail::joined_stream_readiness_e::busy:
+          return pending_execution_readiness_e::busy;
+        case detail::joined_stream_readiness_e::failed:
+          if (!stream_error_logged) {
+            BOOST_LOG(error) << "DAV2/OCR CUDA stream query failed during " << phase
+                             << ": depth=" << depth_query << ", OCR=" << ocr_query;
+            stream_error_logged = true;
+          }
+          mark_shared_execution_failure(pending_ocr_submitted);
+          return pending_execution_readiness_e::failed;
+      }
+      return pending_execution_readiness_e::failed;
+    }
+
+    bool synchronize_pending_execution(cuda_driver_api &cuda) {
+      if (!cu_stream || !cuda.cuStreamSynchronize) {
+        mark_shared_execution_failure(pending_ocr_submitted);
+        return false;
+      }
+      const CUresult depth_sync = cuda.cuStreamSynchronize(cu_stream);
+      if (depth_sync != CUDA_SUCCESS) {
+        BOOST_LOG(error) << "Depth synchronization failed: " << depth_sync;
+        mark_shared_execution_failure(pending_ocr_submitted);
+        return false;
+      }
+      if (!pending_ocr_submitted || !ocr_cu_stream) {
+        return true;
+      }
+      const CUresult ocr_sync = cuda.cuStreamSynchronize(ocr_cu_stream);
+      if (ocr_sync != CUDA_SUCCESS) {
+        BOOST_LOG(error) << "PP-OCRv6 tiny synchronization failed: " << ocr_sync;
+        mark_shared_execution_failure(true);
+        return false;
+      }
+      return true;
     }
 
     bool create_shader(
@@ -3274,6 +3385,23 @@ namespace models {
       // isolated from depth; an unavailable detector leaves the compact OCR8 record invalid and
       // the SLR12 conditioner copies BaseField exactly.
       ocr_available = initialize_ocr_context(assets_dir, cuda);
+      if (ocr_available) {
+        const CUresult ocr_stream_result =
+          cuda.cuStreamCreate(&ocr_cu_stream, CU_STREAM_NON_BLOCKING);
+        if (ocr_stream_result != CUDA_SUCCESS || !ocr_cu_stream) {
+          if (ocr_cu_stream && cuda.cuStreamDestroy) {
+            cuda.cuStreamDestroy(ocr_cu_stream);
+          }
+          ocr_cu_stream = nullptr;
+          BOOST_LOG(warning)
+            << "PP-OCRv6 tiny parallel CUDA stream creation failed (" << ocr_stream_result
+            << "); preserving the existing serial CUDA-stream path.";
+        } else {
+          BOOST_LOG(info)
+            << "PP-OCRv6 tiny uses an independent CUDA stream with strict depth/OCR completion "
+               "join.";
+        }
+      }
       if (!ocr_available) {
         BOOST_LOG(warning)
           << "PP-OCRv6 tiny is unavailable for this estimator; subtitle conditioning is flat.";
@@ -3458,12 +3586,30 @@ namespace models {
           } else {
             cleanup_execution_ok = false;
           }
-          destroy_inference_graph(cuda, depth_inference_graph);
-          destroy_inference_graph(cuda, ocr_inference_graph);
-          if (!cuda.cuStreamDestroy ||
-              cuda.cuStreamDestroy(cu_stream) != CUDA_SUCCESS) {
+        }
+        if (ocr_cu_stream) {
+          if (cuda.cuStreamSynchronize) {
+            const auto synchronized = cuda.cuStreamSynchronize(ocr_cu_stream);
+            if (synchronized != CUDA_SUCCESS) {
+              cleanup_execution_ok = false;
+              BOOST_LOG(warning)
+                << "PP-OCRv6 tiny teardown observed a failed asynchronous inference: "
+                << synchronized;
+            }
+          } else {
             cleanup_execution_ok = false;
           }
+        }
+        destroy_inference_graph(cuda, depth_inference_graph);
+        destroy_inference_graph(cuda, ocr_inference_graph);
+        if (ocr_cu_stream &&
+            (!cuda.cuStreamDestroy ||
+             cuda.cuStreamDestroy(ocr_cu_stream) != CUDA_SUCCESS)) {
+          cleanup_execution_ok = false;
+        }
+        if (cu_stream &&
+            (!cuda.cuStreamDestroy || cuda.cuStreamDestroy(cu_stream) != CUDA_SUCCESS)) {
+          cleanup_execution_ok = false;
         }
         cleanup_execution_ok =
           unregister_cuda_graphics_resource(cuda, cuda_in_res) &&
@@ -3481,8 +3627,8 @@ namespace models {
       }
       if (!cleanup_execution_ok) {
         // Teardown synchronization can be the first API call to surface a deferred launch fault.
-        // Never give that execution context to a later stream, even if the live polling path did
-        // not have another opportunity to mark it before this instance was destroyed.
+        // CUDA can surface one stream's earlier launch fault through another stream's cleanup.
+        // Never give either participating context to a later estimator in that case.
         execution_context_poisoned = true;
         mark_ocr_context_failure(
           detail::warmed_execution_context_failure_e::unsafe_teardown
@@ -4725,18 +4871,15 @@ namespace models {
       // enqueueing must retire that admission token so a later estimate cannot skip its own query.
       readiness_preflighted = false;
       auto &cuda = cuda_driver_api::get();
-      if (!has_previous_frame || !cu_stream || !cuda.cuStreamSynchronize) {
+      if (!has_previous_frame) {
         return make_result();
       }
       if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
         BOOST_LOG(error) << "cuCtxSetCurrent failed while finishing pending depth.";
-        mark_shared_execution_failure(pending_ocr_submitted);
+        mark_cuda_context_failure();
         return make_result();
       }
-      CUresult sync = cuda.cuStreamSynchronize(cu_stream);
-      if (sync != CUDA_SUCCESS) {
-        BOOST_LOG(error) << "Depth synchronization failed: " << sync;
-        mark_shared_execution_failure(pending_ocr_submitted);
+      if (!synchronize_pending_execution(cuda)) {
         return make_result();
       }
       if (diagnostics_enabled) {
@@ -4821,20 +4964,20 @@ namespace models {
     ) {
       readiness_preflighted = false;
       auto &cuda = cuda_driver_api::get();
-      if (!has_previous_frame || !cu_stream || !cuda.cuStreamQuery) {
+      if (!has_previous_frame) {
         return {.result = make_result(), .ready = true};
       }
       if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
-        mark_shared_execution_failure(pending_ocr_submitted);
+        mark_cuda_context_failure();
         return {.result = make_result(), .ready = true};
       }
-      const auto query = cuda.cuStreamQuery(cu_stream);
-      if (query == CUDA_ERROR_NOT_READY) {
-        return {};
-      }
-      if (query != CUDA_SUCCESS) {
-        mark_shared_execution_failure(pending_ocr_submitted);
-        return {.result = make_result(), .ready = true};
+      switch (query_pending_execution(cuda, "nonblocking completion")) {
+        case pending_execution_readiness_e::busy:
+          return {};
+        case pending_execution_readiness_e::failed:
+          return {.result = make_result(), .ready = true};
+        case pending_execution_readiness_e::ready:
+          break;
       }
       return {
         .result = finish_pending(color_space, snapshot_debug_inputs),
@@ -5002,10 +5145,10 @@ namespace models {
       const bool input_domain_reset,
       const bool preserve_subtitle_base
     ) {
-      // Ordinary OCR and depth were submitted back-to-back on the same bounded CUDA stream. Its
-      // completion gate therefore makes an ordinary probability map safe to consume before any
-      // next-frame interop mapping can reuse the fixed buffers. A damage-proven redispatch has no
-      // OCR CUDA work and updates only the retained OCR8 frame identity below.
+      // Ordinary OCR and depth may execute concurrently on isolated CUDA streams. Their strict
+      // completion join makes both outputs safe to consume before any next-frame interop mapping
+      // can reuse the fixed buffers. A damage-proven redispatch has no OCR CUDA work and updates
+      // only the retained OCR8 frame identity below.
       const bool subtitle_work_suppressed =
         pending_optional_work == depth_optional_work_mode_e::suppress_subtitle;
       // Native interactive move/resize keeps the depth/cut/camera pipeline live, but OCR evidence
@@ -5327,7 +5470,7 @@ namespace models {
       }
       auto &cuda = cuda_driver_api::get();
       if (!cuda.is_valid() || !cu_stream || !cuda.cuStreamQuery) {
-        mark_shared_execution_failure(pending_ocr_submitted);
+        mark_cuda_context_failure();
         return false;
       }
       if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
@@ -5335,29 +5478,25 @@ namespace models {
           BOOST_LOG(error) << "cuCtxSetCurrent failed during depth readiness preflight.";
           stream_error_logged = true;
         }
-        mark_shared_execution_failure(pending_ocr_submitted);
+        mark_cuda_context_failure();
         return false;
       }
 
       if (diagnostics_enabled) {
         update_throughput_stats();
       }
-      const auto query = cuda.cuStreamQuery(cu_stream);
-      if (query == CUDA_ERROR_NOT_READY) {
-        if (diagnostics_enabled) {
-          throughput_stats_busy_drops++;
-        }
-        readiness_preflighted = false;
-        return false;
-      }
-      if (query != CUDA_SUCCESS) {
-        if (!stream_error_logged) {
-          BOOST_LOG(error) << "cuStreamQuery failed during depth readiness preflight: " << query;
-          stream_error_logged = true;
-        }
-        mark_shared_execution_failure(pending_ocr_submitted);
-        readiness_preflighted = false;
-        return false;
+      switch (query_pending_execution(cuda, "depth readiness preflight")) {
+        case pending_execution_readiness_e::busy:
+          if (diagnostics_enabled) {
+            throughput_stats_busy_drops++;
+          }
+          readiness_preflighted = false;
+          return false;
+        case pending_execution_readiness_e::failed:
+          readiness_preflighted = false;
+          return false;
+        case pending_execution_readiness_e::ready:
+          break;
       }
       readiness_preflighted = true;
       return true;
@@ -5391,7 +5530,7 @@ namespace models {
       auto &cuda = cuda_driver_api::get();
       if (!cuda.is_valid()) {
         BOOST_LOG(error) << "CUDA Driver API is not available.";
-        mark_shared_execution_failure(pending_ocr_submitted);
+        mark_cuda_context_failure();
         return {};
       }
 
@@ -5400,7 +5539,7 @@ namespace models {
           BOOST_LOG(error) << "cuCtxSetCurrent failed during depth estimation.";
           stream_error_logged = true;
         }
-        mark_shared_execution_failure(pending_ocr_submitted);
+        mark_cuda_context_failure();
         return {};
       }
 
@@ -5419,22 +5558,19 @@ namespace models {
 
       // Prevent GPU starvation: if the previous AI frame is still crunching, drop this frame.
       // This prevents an infinite queue of heavy TensorRT workloads from starving the DWM and Edge Browser.
-      if (!preflighted && cu_stream && cuda.cuStreamQuery) {
-        auto q = cuda.cuStreamQuery(cu_stream);
-        if (q == CUDA_ERROR_NOT_READY) {
-          // Reuse the last normalized depth and cut state while inference is busy.
-          if (diagnostics_enabled) {
-            throughput_stats_busy_drops++;
-          }
-          return make_result();
-        }
-        if (q != CUDA_SUCCESS && !stream_error_logged) {
-          BOOST_LOG(error) << "cuStreamQuery failed: " << q;
-          stream_error_logged = true;
-        }
-        if (q != CUDA_SUCCESS) {
-          mark_shared_execution_failure(pending_ocr_submitted);
-          return make_result();
+      if (!preflighted) {
+        switch (query_pending_execution(cuda, "depth estimate admission")) {
+          case pending_execution_readiness_e::busy:
+            // Reuse the last normalized depth and cut state while either exact-frame member is
+            // busy. This keeps the bounded one-observation contract across both CUDA streams.
+            if (diagnostics_enabled) {
+              throughput_stats_busy_drops++;
+            }
+            return make_result();
+          case pending_execution_readiness_e::failed:
+            return make_result();
+          case pending_execution_readiness_e::ready:
+            break;
         }
       }
 
@@ -5912,9 +6048,10 @@ namespace models {
       // Force-flushing every frame only prevents the driver from interleaving other GPU
       // consumers (DWM / Edge / the Widgets panel), which starves them and can trigger a TDR.
 
-      // 2. CUDA Execution (for CURRENT frame). Depth remains mandatory; optional OCR maps
-      // separately so a pre-enqueue detector map/binding failure cannot suppress depth. A failed
-      // shared-stream unmap after submission remains terminal because completion is then unknown.
+      // 2. CUDA Execution (for CURRENT frame). Depth remains mandatory; optional OCR maps and
+      // executes on its own nonblocking stream. The exact-frame completion gate joins both streams
+      // before postprocess. Only OCR setup failures proved to occur before enqueue may publish an
+      // abstention without poisoning the completed depth observation.
       CUgraphicsResource depth_resources[2] = {cuda_in_res, cuda_out_res};
       auto map_res = cuda.cuGraphicsMapResources(2, depth_resources, cu_stream);
       if (map_res != 0) {
@@ -5937,7 +6074,11 @@ namespace models {
       CUgraphicsResource ocr_resources[2] = {cuda_ocr_in_res, cuda_ocr_out_res};
       bool ocr_mapped = false;
       if (ocr_frame_eligible) {
-        const auto ocr_map = cuda.cuGraphicsMapResources(2, ocr_resources, cu_stream);
+        const auto ocr_map = cuda.cuGraphicsMapResources(
+          2,
+          ocr_resources,
+          ocr_execution_stream()
+        );
         if (ocr_map == CUDA_SUCCESS) {
           ocr_mapped = true;
         } else {
@@ -6109,14 +6250,18 @@ namespace models {
         }
 
         if (bindings_ok) {
-          // Serialize TensorRT async enqueue to avoid driver-level concurrent execution faults
-          std::lock_guard<std::mutex> lock(g_trt_mutex);
-          int depth_perf_slot = perf_begin(perf_depth, cu_stream);
-          enqueued = enqueue_inference(
-            d_in,
-            d_out,
-            cuda
-          );
+          // TensorRT host-side submission remains serialized across estimator instances. The lock
+          // is released after each enqueue; independent CUDA streams may then overlap execution.
+          {
+            std::lock_guard<std::mutex> lock(g_trt_mutex);
+            const int depth_perf_slot = perf_begin(perf_depth, cu_stream);
+            enqueued = enqueue_inference(
+              d_in,
+              d_out,
+              cuda
+            );
+            perf_end(perf_depth, depth_perf_slot, cu_stream);
+          }
           if (!enqueued) {
             mark_terminal_failure(true);
             if (!stream_error_logged) {
@@ -6125,17 +6270,14 @@ namespace models {
               stream_error_logged = true;
             }
           }
-          perf_end(perf_depth, depth_perf_slot, cu_stream);
           if (enqueued && ocr_bindings_ok) {
-            const int ocr_perf_slot = perf_begin(perf_ocr, cu_stream);
+            std::lock_guard<std::mutex> lock(g_trt_mutex);
+            const CUstream ocr_stream = ocr_execution_stream();
+            const int ocr_perf_slot = perf_begin(perf_ocr, ocr_stream);
             const auto ocr_submit_started = diagnostics_enabled ?
-                                              std::chrono::steady_clock::now() :
-                                              std::chrono::steady_clock::time_point {};
-            ocr_enqueued = enqueue_ocr_inference(
-              d_ocr_in,
-              d_ocr_out,
-              cuda
-            );
+                                                std::chrono::steady_clock::now() :
+                                                std::chrono::steady_clock::time_point {};
+            ocr_enqueued = enqueue_ocr_inference(d_ocr_in, d_ocr_out, cuda);
             if (diagnostics_enabled) {
               sbs_perf::add_sample_ms(
                 "ocr_submit_cpu",
@@ -6145,18 +6287,10 @@ namespace models {
                   .count()
               );
             }
-            perf_end(perf_ocr, ocr_perf_slot, cu_stream);
+            perf_end(perf_ocr, ocr_perf_slot, ocr_stream);
             if (!ocr_enqueued) {
-              ocr_available = false;
-              mark_ocr_context_failure(
-                detail::warmed_execution_context_failure_e::asynchronous_execution_or_query
-              );
-              if (!ocr_error_logged) {
-                BOOST_LOG(warning)
-                  << "PP-OCRv6 tiny enqueue failed; depth remains active and subtitle "
-                     "conditioning stays flat.";
-                ocr_error_logged = true;
-              }
+              mark_ocr_enqueue_failure("enqueueV3", static_cast<CUresult>(-1));
+              enqueued = false;
             }
           }
         }
@@ -6164,7 +6298,11 @@ namespace models {
 
       CUresult ocr_unmap_res = CUDA_SUCCESS;
       if (ocr_mapped) {
-        ocr_unmap_res = cuda.cuGraphicsUnmapResources(2, ocr_resources, cu_stream);
+        ocr_unmap_res = cuda.cuGraphicsUnmapResources(
+          2,
+          ocr_resources,
+          ocr_execution_stream()
+        );
       }
       auto unmap_res = cuda.cuGraphicsUnmapResources(2, depth_resources, cu_stream);
       if (unmap_res != CUDA_SUCCESS) {
@@ -6173,9 +6311,7 @@ namespace models {
         enqueued = false;
       }
       if (ocr_unmap_res != CUDA_SUCCESS) {
-        BOOST_LOG(error)
-          << "PP-OCRv6 tiny interop unmap failed on the shared CUDA stream: "
-          << ocr_unmap_res;
+        BOOST_LOG(error) << "PP-OCRv6 tiny interop unmap failed: " << ocr_unmap_res;
         mark_shared_execution_failure(ocr_enqueued);
         enqueued = false;
         ocr_enqueued = false;

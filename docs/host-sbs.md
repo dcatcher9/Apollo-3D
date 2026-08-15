@@ -197,10 +197,17 @@ authenticates the bundled artifact and upstream source independently. The detect
 texture or model input becomes rendering authority.
 
 When the authenticated detector is available, OCR ordinarily runs once for every depth observation
-accepted by the existing nonblocking DAV2 stream gate. It does not run for source frames dropped
-while the previous inference is busy, and it does not reuse stale boxes or add a separate host
-cadence. During a native USER32 interactive move/size observation, the accepted full-source depth
-frame explicitly suppresses the optional subtitle branch: OCR preprocessing and inference,
+accepted by the existing nonblocking DAV2 stream gate. DAV2 and OCR normally own isolated CUDA
+streams and may execute concurrently; if the optional OCR stream cannot be created, the same code
+falls back to their prior serialized stream. A strict completion join preserves one exact-frame
+observation: no depth normalization, OCR8 resolve, or next-frame admission occurs until every
+submitted member is ready. An OCR setup failure before enqueue publishes an abstention without
+suppressing DAV2. Once either engine has submitted work, any asynchronous CUDA error fails the whole
+estimator closed because a later API call may surface an earlier context-wide launch fault. OCR does
+not run for source frames dropped while the previous observation is busy, and it does not reuse
+stale boxes or add a separate host cadence. During a native USER32 interactive move/size
+observation, the accepted full-source depth frame explicitly suppresses the optional subtitle
+branch: OCR preprocessing and inference,
 OCR8 reduction, SLR12 observation, and subtitle conditioning do not run. This is no OCR observation
 rather than an abstaining or missing record, so the retained SLR12 state does not age or clear; the
 frame publishes the ordinary post-limit Base field. Scene-cut analysis, depth normalization/EMA,

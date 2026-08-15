@@ -1223,6 +1223,22 @@ TEST(TensorRtContextLifecycleTest, WarmedContextQuarantineStartsOnlyAfterAsyncEx
   EXPECT_TRUE(teardown_health.poisoned());
 }
 
+TEST(TensorRtContextLifecycleTest, ExactFrameJoinWaitsForBothStreamsAndFailsConservatively) {
+  using stream_e = models::detail::async_stream_readiness_e;
+  using joined_e = models::detail::joined_stream_readiness_e;
+  const auto joined = models::detail::joined_stream_readiness;
+
+  EXPECT_EQ(joined(stream_e::ready, false, stream_e::failed), joined_e::ready);
+  EXPECT_EQ(joined(stream_e::busy, false, stream_e::ready), joined_e::busy);
+  EXPECT_EQ(joined(stream_e::failed, false, stream_e::ready), joined_e::failed);
+
+  EXPECT_EQ(joined(stream_e::ready, true, stream_e::ready), joined_e::ready);
+  EXPECT_EQ(joined(stream_e::ready, true, stream_e::busy), joined_e::busy);
+  EXPECT_EQ(joined(stream_e::busy, true, stream_e::failed), joined_e::failed);
+  EXPECT_EQ(joined(stream_e::failed, true, stream_e::ready), joined_e::failed);
+  EXPECT_EQ(joined(stream_e::ready, true, stream_e::failed), joined_e::failed);
+}
+
 TEST(TensorRtContextLifecycleTest, AccountingBoundsQuarantinedAndReusableContextsTogether) {
   models::detail::execution_context_accounting_t accounting;
   EXPECT_TRUE(accounting.reserve(2u));

@@ -96,6 +96,46 @@ namespace models {
       bool poisoned_ = false;
     };
 
+    /** Normalized result of a nonblocking asynchronous-stream query.
+     *
+     * Keeping CUDA's numeric result codes out of the policy makes the exact-frame DAV2/OCR join
+     * independently testable. Once either stream has submitted work, a query failure is treated as
+     * context-wide: CUDA may surface an earlier asynchronous launch error through either stream.
+     */
+    enum class async_stream_readiness_e : std::uint8_t {
+      ready,
+      busy,
+      failed,
+    };
+
+    enum class joined_stream_readiness_e : std::uint8_t {
+      ready,
+      busy,
+      failed,
+    };
+
+    constexpr joined_stream_readiness_e joined_stream_readiness(
+      const async_stream_readiness_e mandatory,
+      const bool optional_submitted,
+      const async_stream_readiness_e optional
+    ) noexcept {
+      if (mandatory == async_stream_readiness_e::failed) {
+        return joined_stream_readiness_e::failed;
+      }
+      if (optional_submitted && optional == async_stream_readiness_e::failed) {
+        return joined_stream_readiness_e::failed;
+      }
+      if (mandatory == async_stream_readiness_e::busy) {
+        return joined_stream_readiness_e::busy;
+      }
+      if (!optional_submitted) {
+        return joined_stream_readiness_e::ready;
+      }
+      return optional == async_stream_readiness_e::busy ?
+               joined_stream_readiness_e::busy :
+               joined_stream_readiness_e::ready;
+    }
+
     class execution_context_accounting_t {
     public:
       constexpr std::size_t allocated() const noexcept {
