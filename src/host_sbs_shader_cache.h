@@ -74,6 +74,9 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec host_sbs_subtitle_condition {
     "host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"
   };
+  inline constexpr shader_spec host_sbs_current_frame_motion_probe {
+    "host_sbs_current_frame_motion_probe_cs.hlsl", "main", "cs_5_0"
+  };
   inline constexpr shader_spec parallax_v2_live_renderer {
     "sbs_reprojection_v2_live_ps.hlsl", "main_ps", "ps_5_0"
   };
@@ -230,6 +233,12 @@ namespace models::host_sbs_shader_cache {
   // diagnostic shader availability.
   inline constexpr std::array parallax_v2_diagnostic_specs {
     depth_coordinate_v2_coordinate_diagnostic,
+  };
+
+  // Shadow-only, optional evidence. Keep this root outside the authenticated producer closure so
+  // compile/resource/readback failure cannot change schema-54 geometry or fail live Host SBS.
+  inline constexpr std::array adaptive_motion_probe_specs {
+    host_sbs_current_frame_motion_probe,
   };
 
   inline constexpr std::array parallax_v2_live_renderer_specs {

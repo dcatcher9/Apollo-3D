@@ -40,6 +40,105 @@ namespace platf::dxgi {
 #endif
 
 namespace {
+  TEST(AdaptiveMotionProbeTest, ValidatesExactIdentityAndShadowVerdict) {
+    std::array<std::uint32_t, models::adaptive_motion_probe_word_count> words {};
+    constexpr std::uint64_t current_id = 0x0000000200000003ull;
+    constexpr std::uint64_t baseline_id = 0x0000000100000002ull;
+    words[0] = models::adaptive_motion_probe_contract_tag;
+    words[1] = models::adaptive_motion_probe_settled_flags;
+    words[2] = static_cast<std::uint32_t>(current_id);
+    words[3] = static_cast<std::uint32_t>(current_id >> 32u);
+    words[4] = static_cast<std::uint32_t>(baseline_id);
+    words[5] = static_cast<std::uint32_t>(baseline_id >> 32u);
+    words[6] = 7u;
+    words[7] = 9u;
+    words[8] = 3u;
+    words[10] = 1u;
+    words[11] = 770u * 434u;
+    words[21] = 770u * 129u;
+
+    models::adaptive_motion_probe_sample sample;
+    ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
+      words, current_id, baseline_id, 770, 434, sample
+    ));
+    EXPECT_EQ(
+      models::adaptive_motion_probe_exact_verdict(sample),
+      models::adaptive_motion_probe_exact_verdict_e::quiet_evidence
+    );
+
+    words[13] = 1u;
+    words[18] = 1u;
+    ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
+      words, current_id, baseline_id, 770, 434, sample
+    ));
+    EXPECT_EQ(
+      models::adaptive_motion_probe_exact_verdict(sample),
+      models::adaptive_motion_probe_exact_verdict_e::motion_veto
+    );
+    EXPECT_FALSE(models::decode_adaptive_motion_probe_words(
+      words, current_id, baseline_id + 1u, 770, 434, sample
+    ));
+    EXPECT_FALSE(models::decode_adaptive_motion_probe_words(
+      words, baseline_id - 1u, baseline_id, 770, 434, sample
+    ));
+
+    words[1] &= ~models::adaptive_motion_probe_flag_hard_cut_count_valid;
+    EXPECT_TRUE(models::decode_adaptive_motion_probe_words(
+      words, current_id, baseline_id, 770, 434, sample
+    ));
+    EXPECT_EQ(
+      models::adaptive_motion_probe_exact_verdict(sample),
+      models::adaptive_motion_probe_exact_verdict_e::invalid
+    );
+    words[1] = models::adaptive_motion_probe_settled_flags;
+    words[6] = 0xFFFFFFFFu;  // Reserved overflow sentinel from the packed uint counter contract.
+    EXPECT_FALSE(models::decode_adaptive_motion_probe_words(
+      words, current_id, baseline_id, 770, 434, sample
+    ));
+  }
+
+  TEST(AdaptiveMotionProbeTest, RejectsMalformedCountersMaximaAndState) {
+    constexpr std::uint64_t current_id = 11u;
+    constexpr std::uint64_t baseline_id = 10u;
+    constexpr std::uint32_t area = 16u * 16u;
+    const auto valid_words = [] {
+      std::array<std::uint32_t, models::adaptive_motion_probe_word_count> words {};
+      words[0] = models::adaptive_motion_probe_contract_tag;
+      words[1] = models::adaptive_motion_probe_settled_flags;
+      words[2] = static_cast<std::uint32_t>(current_id);
+      words[4] = static_cast<std::uint32_t>(baseline_id);
+      words[6] = 1u;
+      words[7] = 8u;
+      words[8] = 3u;
+      words[10] = 1u;
+      words[11] = area;
+      words[21] = 16u * 6u;
+      return words;
+    };
+    const auto rejects = [&](const std::size_t word, const std::uint32_t value) {
+      auto words = valid_words();
+      words[word] = value;
+      models::adaptive_motion_probe_sample sample;
+      return !models::decode_adaptive_motion_probe_words(
+        words, current_id, baseline_id, 16, 16, sample
+      );
+    };
+
+    EXPECT_TRUE(rejects(0u, 0u));
+    EXPECT_TRUE(rejects(1u, models::adaptive_motion_probe_settled_flags | (1u << 31u)));
+    EXPECT_TRUE(rejects(7u, models::adaptive_motion_probe_max_exact_numeric_counter + 1u));
+    EXPECT_TRUE(rejects(8u, sbs_adaptive_state::known_cut_flag_mask + 1u));
+    EXPECT_TRUE(rejects(9u, sbs_adaptive_state::known_analysis_flag_mask + 1u));
+    EXPECT_TRUE(rejects(10u, 5u));
+    EXPECT_TRUE(rejects(11u, area + 1u));
+    EXPECT_TRUE(rejects(13u, 1u));  // exact changes cannot exceed the zero default tile maximum.
+    EXPECT_TRUE(rejects(17u, std::bit_cast<std::uint32_t>(
+      std::numeric_limits<float>::quiet_NaN()
+    )));
+    EXPECT_TRUE(rejects(21u, area + 1u));
+    EXPECT_TRUE(rejects(24u, std::bit_cast<std::uint32_t>(1.0f)));
+  }
+
   TEST(RenderedContentTimestampTest, MatchedT0IsPreservedWhileCurrentCadenceIsT1) {
     const auto t0 = std::chrono::steady_clock::time_point {10ms};
     const auto t1 = std::chrono::steady_clock::time_point {20ms};
@@ -612,6 +711,17 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
     cache::depth_coordinate_v2_coordinate_diagnostic
   );
   ASSERT_TRUE(coordinate_diagnostic);
+
+  EXPECT_FALSE(has_producer_shader(cache::host_sbs_current_frame_motion_probe));
+  const auto motion_probe_sources = cache::snapshot_sources(
+    shader_root,
+    cache::adaptive_motion_probe_specs
+  );
+  ASSERT_TRUE(motion_probe_sources);
+  ASSERT_TRUE(cache::get(
+    motion_probe_sources,
+    cache::host_sbs_current_frame_motion_probe
+  ));
 
   const auto live_sources = cache::snapshot_sources(
     shader_root,
@@ -3780,6 +3890,24 @@ TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorizat
   );
   EXPECT_NE(
     display.find("latest_v2_lineage.reset();", init_output),
+    std::string::npos
+  );
+}
+
+TEST(DirectxShaderSourceTest, AdaptiveMotionProbeAuthenticatesCutStateEncodings) {
+  const auto shader = read_source_file(
+    SUNSHINE_SOURCE_DIR
+    "/src_assets/windows/assets/shaders/directx/host_sbs_current_frame_motion_probe_cs.hlsl"
+  );
+  ASSERT_FALSE(shader.empty());
+  EXPECT_NE(shader.find("ProbeCanonicalBoolean"), std::string::npos);
+  EXPECT_NE(shader.find("ProbeFiniteWholeInRange"), std::string::npos);
+  EXPECT_NE(
+    shader.find("uint hard_cut_count_value = asuint(SBS_STATE_HARD_CUT_COUNT"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    shader.find("prior_flags |= state_fields_valid ? 1u << 9u : 0u;"),
     std::string::npos
   );
 }

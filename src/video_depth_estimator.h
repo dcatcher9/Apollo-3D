@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <wrl/client.h>
 
@@ -428,6 +429,122 @@ namespace models {
                                  depth_optional_work_mode_e::ordinary;
   }
 
+  /** Optional current-frame motion evidence collected before DAV2 submission.
+   *
+   * This is a shadow-only diagnostic contract. A ready quiet sample is evidence for evaluating a
+   * future policy; it is never, by itself, authority to suppress inference or reuse geometry.
+   */
+  inline constexpr std::uint32_t adaptive_motion_probe_contract_tag = 0x314D4643u;
+  inline constexpr std::size_t adaptive_motion_probe_word_count = 25u;
+  inline constexpr std::uint32_t adaptive_motion_probe_max_exact_numeric_counter = 16777215u;
+
+  enum class adaptive_motion_probe_status_e : std::uint8_t {
+    not_requested,
+    unavailable,
+    timed_out,
+    invalid,
+    ready,
+  };
+
+  inline constexpr std::uint32_t adaptive_motion_probe_flag_cut_contract = 1u << 0u;
+  inline constexpr std::uint32_t adaptive_motion_probe_flag_initialized = 1u << 1u;
+  inline constexpr std::uint32_t adaptive_motion_probe_flag_depth_ready = 1u << 2u;
+  inline constexpr std::uint32_t adaptive_motion_probe_flag_range_valid = 1u << 3u;
+  inline constexpr std::uint32_t adaptive_motion_probe_flag_history_advanced = 1u << 4u;
+  inline constexpr std::uint32_t adaptive_motion_probe_flag_scene_settled = 1u << 5u;
+  inline constexpr std::uint32_t adaptive_motion_probe_flag_cut_flags_settled = 1u << 6u;
+  inline constexpr std::uint32_t adaptive_motion_probe_flag_no_cut_or_analysis = 1u << 7u;
+  inline constexpr std::uint32_t adaptive_motion_probe_flag_hard_cut_count_valid = 1u << 8u;
+  inline constexpr std::uint32_t adaptive_motion_probe_flag_state_fields_valid = 1u << 9u;
+  inline constexpr std::uint32_t adaptive_motion_probe_settled_flags =
+    adaptive_motion_probe_flag_cut_contract |
+    adaptive_motion_probe_flag_initialized |
+    adaptive_motion_probe_flag_depth_ready |
+    adaptive_motion_probe_flag_range_valid |
+    adaptive_motion_probe_flag_history_advanced |
+    adaptive_motion_probe_flag_scene_settled |
+    adaptive_motion_probe_flag_cut_flags_settled |
+    adaptive_motion_probe_flag_no_cut_or_analysis |
+    adaptive_motion_probe_flag_hard_cut_count_valid |
+    adaptive_motion_probe_flag_state_fields_valid;
+
+  struct adaptive_motion_probe_request {
+    bool enabled = false;
+    std::uint64_t baseline_frame_id = 0u;
+    std::chrono::steady_clock::time_point deadline {};
+    std::uint32_t max_queries = 1u;
+  };
+
+  struct adaptive_motion_probe_sample {
+    std::uint64_t current_frame_id = 0u;
+    std::uint64_t baseline_frame_id = 0u;
+    int field_width = 0;
+    int field_height = 0;
+    std::uint32_t prior_state_flags = 0u;
+    std::uint32_t hard_cut_count = 0u;
+    std::uint32_t scene_age = 0u;
+    std::uint32_t cut_flags = 0u;
+    std::uint32_t analysis_flags = 0u;
+    std::uint32_t model_input_history_state = 0u;
+    std::uint32_t admitted_texels = 0u;
+    std::uint32_t exclusion_mismatch_texels = 0u;
+    std::uint32_t exact_changed_texels = 0u;
+    std::uint32_t rgb_delta_1_over_1024_texels = 0u;
+    std::uint32_t rgb_delta_1_over_256_texels = 0u;
+    std::uint32_t rgb_delta_1_over_64_texels = 0u;
+    float maximum_rgb_delta = 0.0f;
+    std::uint32_t maximum_exact_changed_in_16x16_tile = 0u;
+    std::uint32_t appearance_delta_1_over_1024_texels = 0u;
+    float maximum_appearance_delta = 0.0f;
+    std::uint32_t bottom_band_admitted_texels = 0u;
+    std::uint32_t bottom_band_exact_changed_texels = 0u;
+    std::uint32_t bottom_band_rgb_delta_1_over_1024_texels = 0u;
+    float bottom_band_maximum_rgb_delta = 0.0f;
+  };
+
+  struct adaptive_motion_probe_result {
+    adaptive_motion_probe_status_e status =
+      adaptive_motion_probe_status_e::not_requested;
+    adaptive_motion_probe_sample sample {};
+    std::uint32_t query_count = 0u;
+    std::chrono::steady_clock::duration wait_duration {};
+  };
+
+  /** Decode and validate the fixed tiny GPU record, including both exact frame identities. */
+  bool decode_adaptive_motion_probe_words(
+    std::span<const std::uint32_t> words,
+    std::uint64_t expected_current_frame_id,
+    std::uint64_t expected_baseline_frame_id,
+    int field_width,
+    int field_height,
+    adaptive_motion_probe_sample &sample
+  ) noexcept;
+
+  enum class adaptive_motion_probe_exact_verdict_e : std::uint8_t {
+    invalid,
+    quiet_evidence,
+    motion_veto,
+  };
+
+  /** Exact-bit safety verdict for shadow scoring; quiet_evidence never authorizes a hold. */
+  [[nodiscard]] constexpr adaptive_motion_probe_exact_verdict_e
+  adaptive_motion_probe_exact_verdict(
+    const adaptive_motion_probe_sample &sample
+  ) noexcept {
+    if (
+      sample.current_frame_id == 0u || sample.baseline_frame_id == 0u ||
+      sample.current_frame_id <= sample.baseline_frame_id ||
+      sample.prior_state_flags != adaptive_motion_probe_settled_flags ||
+      sample.admitted_texels == 0u
+    ) {
+      return adaptive_motion_probe_exact_verdict_e::invalid;
+    }
+    return sample.exclusion_mismatch_texels != 0u ||
+               sample.exact_changed_texels != 0u ?
+             adaptive_motion_probe_exact_verdict_e::motion_veto :
+             adaptive_motion_probe_exact_verdict_e::quiet_evidence;
+  }
+
   struct estimate_result {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> cut_state;  ///< Cut-analysis state shared with telemetry and coordinate production.
@@ -481,6 +598,7 @@ namespace models {
     bool subtitle_work_suppressed = false;  ///< This completion published Base and did not advance same-domain locator state.
     bool subtitle_ocr_inference_enqueued = false;  ///< This call enqueued OCR for its newly supplied input frame.
     bool subtitle_ocr_redispatch_enqueued = false;  ///< This call accepted exact OCR8 redispatch for its newly supplied input frame.
+    adaptive_motion_probe_result current_frame_motion_probe;  ///< Optional shadow-only pre-DAV2 evidence for this submitted frame.
   };
 
   struct pending_depth_poll_result {
@@ -636,7 +754,8 @@ namespace models {
       Microsoft::WRL::ComPtr<ID3D11DeviceContext> context,
       const std::filesystem::path &assets_dir,
       const config::video_t::sbs_t &cfg,
-      const config::depth_model_info &model
+      const config::depth_model_info &model,
+      bool enable_adaptive_motion_probe_shadow = false
     );
 
     ~video_depth_estimator();
@@ -677,7 +796,8 @@ namespace models {
       std::uint64_t frame_id = 0,
       bool snapshot_debug_inputs = false,
       depth_input_region_t input_region = {},
-      depth_optional_work_mode_e optional_work = depth_optional_work_mode_e::ordinary
+      depth_optional_work_mode_e optional_work = depth_optional_work_mode_e::ordinary,
+      adaptive_motion_probe_request motion_probe = {}
     );
 
     /**

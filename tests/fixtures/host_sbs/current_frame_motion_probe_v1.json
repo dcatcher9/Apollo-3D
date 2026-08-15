@@ -1,0 +1,94 @@
+{
+  "schema": 1,
+  "name": "host-sbs-current-frame-motion-probe-v1",
+  "purpose": "deterministic shadow-only qualification evidence; never active hold authority",
+  "model_field": {
+    "width": 770,
+    "height": 434
+  },
+  "tile": {
+    "width": 16,
+    "height": 16
+  },
+  "bottom_ocr_band": [0, 305, 770, 434],
+  "classification": {
+    "changed": "veto_exact_change",
+    "unchanged": "quiet_evidence_only",
+    "quiet_authorizes_hold": false
+  },
+  "palette": {
+    "background": [17, 29, 43],
+    "object": [239, 199, 31],
+    "subtitle": [247, 247, 247],
+    "swap_a": [221, 37, 83],
+    "swap_b": [19, 211, 149]
+  },
+  "object_widths": [1, 2, 4, 8, 16],
+  "small_objects": [
+    {"width": 1, "start": [96, 96], "moved": [102, 96]},
+    {"width": 2, "start": [96, 96], "moved": [104, 96]},
+    {"width": 4, "start": [96, 96], "moved": [108, 96]},
+    {"width": 8, "start": [96, 96], "moved": [116, 96]},
+    {"width": 16, "start": [96, 96], "moved": [132, 96]}
+  ],
+  "small_object_events": ["appear", "move", "disappear"],
+  "cadence": {
+    "phase_offsets": [0, 1],
+    "aba_timeline": ["A", "A", "B", "A", "A"],
+    "would_hold_without_probe": "(transition_index + phase_offset) % 2 == 0"
+  },
+  "aba_scenarios": [
+    {
+      "name": "localized-object-pulse",
+      "kind": "object_pulse",
+      "rect": [103, 99, 104, 100]
+    },
+    {
+      "name": "same-tile-equal-sum-rearrangement",
+      "kind": "equal_sum_swap",
+      "first_rect": [101, 101, 103, 103],
+      "second_rect": [106, 101, 108, 103]
+    },
+    {
+      "name": "bottom-subtitle-onset-return",
+      "kind": "subtitle_pulse",
+      "rect": [200, 372, 570, 408]
+    },
+    {
+      "name": "bottom-subtitle-shift-return",
+      "kind": "subtitle_shift",
+      "before_rect": [240, 360, 500, 390],
+      "after_rect": [256, 360, 516, 390]
+    },
+    {
+      "name": "full-frame-cut-return",
+      "kind": "full_frame_cut",
+      "seed_a": 3,
+      "seed_b": 11
+    }
+  ],
+  "expected_counters": {
+    "report_rows": 70,
+    "changed_rows": 50,
+    "exact_equal_rows": 20,
+    "veto_rows": 50,
+    "quiet_evidence_rows": 20,
+    "would_hold_slots": 35,
+    "would_hold_vetoes": 25,
+    "would_hold_quiet_evidence": 10,
+    "bottom_band_vetoes": 12,
+    "small_object_vetoes": 30,
+    "localized_object_pulse_vetoes": 4,
+    "equal_sum_rearrangement_vetoes": 4,
+    "subtitle_onset_vetoes": 4,
+    "subtitle_shift_vetoes": 4,
+    "hard_cut_vetoes": 4,
+    "active_authorizations": 0,
+    "phase_0_rows": 35,
+    "phase_0_changed": 25,
+    "phase_0_would_hold": 18,
+    "phase_1_rows": 35,
+    "phase_1_changed": 25,
+    "phase_1_would_hold": 17
+  }
+}

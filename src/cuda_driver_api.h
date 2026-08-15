@@ -12,6 +12,7 @@ typedef struct CUctx_st* CUcontext;
 typedef unsigned long long CUdeviceptr;
 typedef enum cudaError_enum {
     CUDA_SUCCESS = 0,
+    CUDA_ERROR_INVALID_HANDLE = 400,
     CUDA_ERROR_NOT_READY = 600
 } CUresult;
 typedef enum CUdevice_attribute_enum {

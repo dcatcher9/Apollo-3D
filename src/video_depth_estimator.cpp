@@ -721,6 +721,131 @@ namespace models {
 
   }  // namespace
 
+  bool decode_adaptive_motion_probe_words(
+    const std::span<const std::uint32_t> words,
+    const std::uint64_t expected_current_frame_id,
+    const std::uint64_t expected_baseline_frame_id,
+    const int field_width,
+    const int field_height,
+    adaptive_motion_probe_sample &sample
+  ) noexcept {
+    enum word_e : std::size_t {
+      contract_tag,
+      prior_state_flags,
+      current_frame_low,
+      current_frame_high,
+      baseline_frame_low,
+      baseline_frame_high,
+      hard_cut_count,
+      scene_age,
+      cut_flags,
+      analysis_flags,
+      history_state,
+      admitted,
+      exclusion_mismatch,
+      exact_changed,
+      rgb_1_over_1024,
+      rgb_1_over_256,
+      rgb_1_over_64,
+      max_rgb_delta_bits,
+      max_tile_exact_changed,
+      appearance_1_over_1024,
+      max_appearance_delta_bits,
+      bottom_admitted,
+      bottom_exact_changed,
+      bottom_rgb_1_over_1024,
+      bottom_max_rgb_delta_bits,
+    };
+    if (
+      words.size() != adaptive_motion_probe_word_count ||
+      words[contract_tag] != adaptive_motion_probe_contract_tag ||
+      expected_current_frame_id == 0u || expected_baseline_frame_id == 0u ||
+      expected_current_frame_id <= expected_baseline_frame_id ||
+      field_width <= 0 || field_height <= 0
+    ) {
+      return false;
+    }
+    const auto join_id = [&](const word_e low, const word_e high) {
+      return static_cast<std::uint64_t>(words[low]) |
+             (static_cast<std::uint64_t>(words[high]) << 32u);
+    };
+    const auto current_id = join_id(current_frame_low, current_frame_high);
+    const auto baseline_id = join_id(baseline_frame_low, baseline_frame_high);
+    if (
+      current_id != expected_current_frame_id || baseline_id != expected_baseline_frame_id ||
+      current_id <= baseline_id
+    ) {
+      return false;
+    }
+
+    const auto maximum_rgb = std::bit_cast<float>(words[max_rgb_delta_bits]);
+    const auto maximum_appearance =
+      std::bit_cast<float>(words[max_appearance_delta_bits]);
+    const auto bottom_maximum_rgb =
+      std::bit_cast<float>(words[bottom_max_rgb_delta_bits]);
+    const auto area = static_cast<std::uint64_t>(field_width) *
+                      static_cast<std::uint64_t>(field_height);
+    const bool counters_valid =
+      words[admitted] <= area && words[exclusion_mismatch] <= area &&
+      static_cast<std::uint64_t>(words[admitted]) + words[exclusion_mismatch] <= area &&
+      words[exact_changed] <= words[admitted] &&
+      words[rgb_1_over_1024] <= words[admitted] &&
+      words[rgb_1_over_256] <= words[rgb_1_over_1024] &&
+      words[rgb_1_over_64] <= words[rgb_1_over_256] &&
+      words[max_tile_exact_changed] <= 256u &&
+      words[max_tile_exact_changed] <= words[exact_changed] &&
+      ((words[exact_changed] == 0u) == (words[max_tile_exact_changed] == 0u)) &&
+      words[appearance_1_over_1024] <= words[admitted] &&
+      words[bottom_admitted] <= words[admitted] &&
+      words[bottom_exact_changed] <= words[exact_changed] &&
+      words[bottom_exact_changed] <= words[bottom_admitted] &&
+      words[bottom_rgb_1_over_1024] <= words[rgb_1_over_1024] &&
+      words[bottom_rgb_1_over_1024] <= words[bottom_admitted];
+    const bool state_valid =
+      (words[prior_state_flags] & ~adaptive_motion_probe_settled_flags) == 0u &&
+      words[hard_cut_count] <= sbs_adaptive_state::counter_max &&
+      words[scene_age] <= adaptive_motion_probe_max_exact_numeric_counter &&
+      words[cut_flags] <= sbs_adaptive_state::known_cut_flag_mask &&
+      words[analysis_flags] <= sbs_adaptive_state::known_analysis_flag_mask &&
+      words[history_state] <= 4u;
+    const bool maxima_valid =
+      std::isfinite(maximum_rgb) && maximum_rgb >= 0.0f &&
+      std::isfinite(maximum_appearance) && maximum_appearance >= 0.0f &&
+      std::isfinite(bottom_maximum_rgb) && bottom_maximum_rgb >= 0.0f &&
+      bottom_maximum_rgb <= maximum_rgb;
+    if (!counters_valid || !state_valid || !maxima_valid) {
+      return false;
+    }
+
+    sample = {
+      .current_frame_id = current_id,
+      .baseline_frame_id = baseline_id,
+      .field_width = field_width,
+      .field_height = field_height,
+      .prior_state_flags = words[prior_state_flags],
+      .hard_cut_count = words[hard_cut_count],
+      .scene_age = words[scene_age],
+      .cut_flags = words[cut_flags],
+      .analysis_flags = words[analysis_flags],
+      .model_input_history_state = words[history_state],
+      .admitted_texels = words[admitted],
+      .exclusion_mismatch_texels = words[exclusion_mismatch],
+      .exact_changed_texels = words[exact_changed],
+      .rgb_delta_1_over_1024_texels = words[rgb_1_over_1024],
+      .rgb_delta_1_over_256_texels = words[rgb_1_over_256],
+      .rgb_delta_1_over_64_texels = words[rgb_1_over_64],
+      .maximum_rgb_delta = maximum_rgb,
+      .maximum_exact_changed_in_16x16_tile = words[max_tile_exact_changed],
+      .appearance_delta_1_over_1024_texels = words[appearance_1_over_1024],
+      .maximum_appearance_delta = maximum_appearance,
+      .bottom_band_admitted_texels = words[bottom_admitted],
+      .bottom_band_exact_changed_texels = words[bottom_exact_changed],
+      .bottom_band_rgb_delta_1_over_1024_texels = words[bottom_rgb_1_over_1024],
+      .bottom_band_maximum_rgb_delta = bottom_maximum_rgb,
+    };
+    return true;
+  }
+
   bool parallax_v2_result_is_authenticated(const estimate_result &result) {
     if (!result.completed_frame_valid || result.completed_frame_id == 0u ||
         !result.parallax_v2_producer_active || !result.shadow_candidate_parallax ||
@@ -1535,6 +1660,7 @@ namespace models {
     float minmax_alpha;  // temporal EMA blend for the normalized min/max
     bool cuda_graph_enabled;
     const bool diagnostics_enabled;
+    const bool adaptive_motion_probe_shadow_enabled;
     struct tensorrt_cuda_graph_t {
       CUgraph graph = nullptr;
       CUgraphExec executable = nullptr;
@@ -2458,11 +2584,16 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_condition_prepare_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_condition_in_place_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_condition_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> adaptive_motion_probe_cs;
     Microsoft::WRL::ComPtr<ID3D11Buffer> cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_preprocess_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_resolve_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subtitle_locator_cbuffer;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> adaptive_motion_probe_cbuffer;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> adaptive_motion_probe_output_buf;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> adaptive_motion_probe_output_uav;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> adaptive_motion_probe_staging_buf;
 
     Microsoft::WRL::ComPtr<ID3D11Buffer> tensor_in_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_in_uav;
@@ -2590,6 +2721,11 @@ namespace models {
     // unmaps; only the explicit try-finish completion paths may use these earlier fences.
     CUevent depth_inference_done_event = nullptr;
     CUevent ocr_inference_done_event = nullptr;
+    CUevent adaptive_motion_probe_ready_event = nullptr;
+    bool adaptive_motion_probe_available = false;
+    bool adaptive_motion_probe_copy_scheduled = false;
+    bool adaptive_motion_probe_event_recorded = false;
+    bool adaptive_motion_probe_error_logged = false;
     bool pending_depth_inference_event_recorded = false;
     bool pending_ocr_inference_event_recorded = false;
     bool inference_event_poll_available = false;
@@ -2997,6 +3133,317 @@ namespace models {
       return SUCCEEDED(device->CreateComputeShader(bytecode->data(), bytecode->size(), nullptr, &out_cs));
     }
 
+    void log_adaptive_motion_probe_failure_once(const std::string_view reason) {
+      if (!adaptive_motion_probe_error_logged) {
+        BOOST_LOG(warning) << "Host SBS current-frame motion probe is unavailable ("
+                           << reason << "); live inference and rendering are unchanged.";
+        adaptive_motion_probe_error_logged = true;
+      }
+    }
+
+    void handle_adaptive_motion_probe_cuda_failure(
+      const CUresult result,
+      const std::string_view operation
+    ) {
+      adaptive_motion_probe_available = false;
+      adaptive_motion_probe_copy_scheduled = false;
+      adaptive_motion_probe_event_recorded = false;
+      if (result == CUDA_ERROR_INVALID_HANDLE) {
+        log_adaptive_motion_probe_failure_once(operation);
+        return;  // The optional event itself is invalid; ordinary inference remains safe.
+      }
+      if (!stream_error_logged) {
+        BOOST_LOG(error) << "Host SBS current-frame motion-probe CUDA " << operation
+                         << " failed with context-wide status " << result << '.';
+        stream_error_logged = true;
+      }
+      // Driver event calls may surface an earlier asynchronous context failure. Once the error is
+      // not provably local to this optional event, retain the pipeline's conservative quarantine.
+      mark_shared_execution_failure(false);
+    }
+
+    void initialize_adaptive_motion_probe(cuda_driver_api &cuda) {
+      if (!adaptive_motion_probe_shadow_enabled) {
+        return;
+      }
+      const auto sources = host_sbs_shader_cache::snapshot_sources(
+        shader_root,
+        host_sbs_shader_cache::adaptive_motion_probe_specs
+      );
+      if (
+        !sources ||
+        !create_shader(
+          sources,
+          host_sbs_shader_cache::host_sbs_current_frame_motion_probe,
+          adaptive_motion_probe_cs
+        )
+      ) {
+        log_adaptive_motion_probe_failure_once("shader compilation failed");
+        return;
+      }
+
+      D3D11_BUFFER_DESC constants_desc {};
+      constants_desc.Usage = D3D11_USAGE_DEFAULT;
+      constants_desc.ByteWidth = 8u * sizeof(std::uint32_t);
+      constants_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+      D3D11_BUFFER_DESC output_desc {};
+      output_desc.Usage = D3D11_USAGE_DEFAULT;
+      output_desc.ByteWidth = static_cast<UINT>(
+        adaptive_motion_probe_word_count * sizeof(std::uint32_t)
+      );
+      output_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+      output_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+      output_desc.StructureByteStride = sizeof(std::uint32_t);
+      auto staging_desc = output_desc;
+      staging_desc.Usage = D3D11_USAGE_STAGING;
+      staging_desc.BindFlags = 0u;
+      staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      staging_desc.MiscFlags = 0u;
+      staging_desc.StructureByteStride = 0u;
+      const bool d3d_ready =
+        SUCCEEDED(device->CreateBuffer(
+          &constants_desc, nullptr,
+          adaptive_motion_probe_cbuffer.ReleaseAndGetAddressOf()
+        )) &&
+        SUCCEEDED(device->CreateBuffer(
+          &output_desc, nullptr,
+          adaptive_motion_probe_output_buf.ReleaseAndGetAddressOf()
+        )) &&
+        SUCCEEDED(device->CreateUnorderedAccessView(
+          adaptive_motion_probe_output_buf.Get(), nullptr,
+          adaptive_motion_probe_output_uav.ReleaseAndGetAddressOf()
+        )) &&
+        SUCCEEDED(device->CreateBuffer(
+          &staging_desc, nullptr,
+          adaptive_motion_probe_staging_buf.ReleaseAndGetAddressOf()
+        ));
+      const bool event_api = cuda.cuEventCreate && cuda.cuEventRecord &&
+                             cuda.cuEventQuery && cuda.cuEventDestroy;
+      const CUresult event_result = event_api ?
+                                      cuda.cuEventCreate(
+                                        &adaptive_motion_probe_ready_event,
+                                        cuda_event_disable_timing
+                                      ) :
+                                      static_cast<CUresult>(-1);
+      if (
+        !d3d_ready || event_result != CUDA_SUCCESS ||
+        !adaptive_motion_probe_ready_event
+      ) {
+        if (adaptive_motion_probe_ready_event && cuda.cuEventDestroy) {
+          (void) cuda.cuEventDestroy(adaptive_motion_probe_ready_event);
+          adaptive_motion_probe_ready_event = nullptr;
+        }
+        adaptive_motion_probe_cs.Reset();
+        adaptive_motion_probe_cbuffer.Reset();
+        adaptive_motion_probe_output_buf.Reset();
+        adaptive_motion_probe_output_uav.Reset();
+        adaptive_motion_probe_staging_buf.Reset();
+        log_adaptive_motion_probe_failure_once("optional resource/event setup failed");
+        return;
+      }
+      adaptive_motion_probe_available = true;
+      BOOST_LOG(info)
+        << "Host SBS current-frame motion probe shadow initialized outside the authenticated "
+           "producer closure.";
+    }
+
+    void destroy_adaptive_motion_probe_event(cuda_driver_api &cuda) noexcept {
+      adaptive_motion_probe_available = false;
+      adaptive_motion_probe_copy_scheduled = false;
+      adaptive_motion_probe_event_recorded = false;
+      if (!adaptive_motion_probe_ready_event) {
+        return;
+      }
+      const CUresult result = cuda.cuEventDestroy ?
+                                cuda.cuEventDestroy(adaptive_motion_probe_ready_event) :
+                                static_cast<CUresult>(-1);
+      if (result != CUDA_SUCCESS) {
+        BOOST_LOG(warning)
+          << "Optional current-frame motion-probe event destruction failed: " << result;
+      }
+      adaptive_motion_probe_ready_event = nullptr;
+    }
+
+    bool dispatch_adaptive_motion_probe(
+      const adaptive_motion_probe_request &request,
+      const std::uint64_t current_frame_id,
+      const D3D11_TEXTURE2D_DESC &input_desc,
+      const depth_input_region_t &input_region
+    ) {
+      adaptive_motion_probe_copy_scheduled = false;
+      adaptive_motion_probe_event_recorded = false;
+      if (
+        !request.enabled || !adaptive_motion_probe_available ||
+        current_frame_id == 0u || request.baseline_frame_id == 0u ||
+        current_frame_id <= request.baseline_frame_id ||
+        !has_last_postprocessed_frame_id ||
+        request.baseline_frame_id != last_postprocessed_frame_id ||
+        !adaptive_motion_probe_cs || !adaptive_motion_probe_cbuffer ||
+        !adaptive_motion_probe_output_uav || !adaptive_motion_probe_staging_buf ||
+        !tensor_in_srv || !tensor_previous_input_srv || !appearance_ordinal_srv ||
+        !previous_appearance_ordinal_srv || !tensor_exclusion_srv ||
+        !tensor_previous_exclusion_srv || !cut_state_srv
+      ) {
+        return false;
+      }
+
+      const auto crop_height = subtitle_ocr_source_crop_height(
+        input_desc.Width,
+        input_desc.Height
+      );
+      const auto &content = input_region.tensor_content;
+      if (crop_height == 0u || !content.valid({target_w, target_h})) {
+        return false;
+      }
+      const std::uint64_t crop_top = input_desc.Height - crop_height;
+      const auto bottom_top = static_cast<std::uint32_t>(
+        content.top + std::min<std::uint64_t>(
+          (crop_top * content.height() + input_desc.Height - 1u) / input_desc.Height,
+          content.height()
+        )
+      );
+      const std::array<std::uint32_t, 8> constants {
+        static_cast<std::uint32_t>(current_frame_id),
+        static_cast<std::uint32_t>(current_frame_id >> 32u),
+        static_cast<std::uint32_t>(request.baseline_frame_id),
+        static_cast<std::uint32_t>(request.baseline_frame_id >> 32u),
+        bottom_top,
+        content.bottom,
+        0u,
+        0u,
+      };
+      context->UpdateSubresource(
+        adaptive_motion_probe_cbuffer.Get(), 0u, nullptr, constants.data(), 0u, 0u
+      );
+      const UINT zero[4] = {};
+      context->ClearUnorderedAccessViewUint(adaptive_motion_probe_output_uav.Get(), zero);
+      ID3D11Buffer *constant_buffers[2] = {
+        cbuffer.Get(),
+        adaptive_motion_probe_cbuffer.Get(),
+      };
+      ID3D11ShaderResourceView *inputs[7] = {
+        tensor_in_srv.Get(),
+        tensor_previous_input_srv.Get(),
+        appearance_ordinal_srv.Get(),
+        previous_appearance_ordinal_srv.Get(),
+        tensor_exclusion_srv.Get(),
+        tensor_previous_exclusion_srv.Get(),
+        cut_state_srv.Get(),
+      };
+      context->CSSetShader(adaptive_motion_probe_cs.Get(), nullptr, 0u);
+      context->CSSetConstantBuffers(0u, 2u, constant_buffers);
+      context->CSSetShaderResources(0u, 7u, inputs);
+      context->CSSetUnorderedAccessViews(
+        0u, 1u, adaptive_motion_probe_output_uav.GetAddressOf(), nullptr
+      );
+      context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1u);
+      ID3D11Buffer *null_constants[2] = {};
+      ID3D11ShaderResourceView *null_inputs[7] = {};
+      ID3D11UnorderedAccessView *null_output = nullptr;
+      context->CSSetUnorderedAccessViews(0u, 1u, &null_output, nullptr);
+      context->CSSetShaderResources(0u, 7u, null_inputs);
+      context->CSSetConstantBuffers(0u, 2u, null_constants);
+      context->CopyResource(
+        adaptive_motion_probe_staging_buf.Get(),
+        adaptive_motion_probe_output_buf.Get()
+      );
+      adaptive_motion_probe_copy_scheduled = true;
+      return true;
+    }
+
+    adaptive_motion_probe_result collect_adaptive_motion_probe(
+      cuda_driver_api &cuda,
+      const adaptive_motion_probe_request &request,
+      const std::uint64_t current_frame_id
+    ) {
+      adaptive_motion_probe_result result;
+      if (!request.enabled) {
+        return result;
+      }
+      result.status = adaptive_motion_probe_status_e::unavailable;
+      if (
+        !adaptive_motion_probe_copy_scheduled ||
+        !adaptive_motion_probe_event_recorded ||
+        !adaptive_motion_probe_available
+      ) {
+        return result;
+      }
+
+      const auto started = std::chrono::steady_clock::now();
+      const auto query_limit = std::max<std::uint32_t>(1u, request.max_queries);
+      constexpr auto query_interval = std::chrono::microseconds {50};
+      while (true) {
+        if (
+          result.query_count > 0u &&
+          std::chrono::steady_clock::now() >= request.deadline
+        ) {
+          result.status = adaptive_motion_probe_status_e::timed_out;
+          break;
+        }
+        ++result.query_count;
+        const CUresult query = cuda.cuEventQuery(adaptive_motion_probe_ready_event);
+        if (query == CUDA_SUCCESS) {
+          D3D11_MAPPED_SUBRESOURCE mapped {};
+          const HRESULT mapped_result = context->Map(
+            adaptive_motion_probe_staging_buf.Get(),
+            0u,
+            D3D11_MAP_READ,
+            D3D11_MAP_FLAG_DO_NOT_WAIT,
+            &mapped
+          );
+          if (mapped_result == DXGI_ERROR_WAS_STILL_DRAWING) {
+            result.status = adaptive_motion_probe_status_e::timed_out;
+            break;
+          }
+          if (FAILED(mapped_result) || !mapped.pData) {
+            adaptive_motion_probe_available = false;
+            log_adaptive_motion_probe_failure_once("D3D11 staging readback failed");
+            result.status = adaptive_motion_probe_status_e::unavailable;
+            break;
+          }
+          std::array<std::uint32_t, adaptive_motion_probe_word_count> words {};
+          std::memcpy(words.data(), mapped.pData, sizeof(words));
+          context->Unmap(adaptive_motion_probe_staging_buf.Get(), 0u);
+          result.status = decode_adaptive_motion_probe_words(
+                            words,
+                            current_frame_id,
+                            request.baseline_frame_id,
+                            target_w,
+                            target_h,
+                            result.sample
+                          ) ?
+                            adaptive_motion_probe_status_e::ready :
+                            adaptive_motion_probe_status_e::invalid;
+          break;
+        }
+        if (query != CUDA_ERROR_NOT_READY) {
+          handle_adaptive_motion_probe_cuda_failure(
+            query,
+            "readiness query"
+          );
+          result.status = adaptive_motion_probe_status_e::unavailable;
+          break;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (
+          result.query_count >= query_limit ||
+          request.deadline.time_since_epoch().count() == 0 ||
+          now >= request.deadline
+        ) {
+          result.status = adaptive_motion_probe_status_e::timed_out;
+          break;
+        }
+        const auto next_query_at = std::min(request.deadline, now + query_interval);
+        while (std::chrono::steady_clock::now() < next_query_at) {
+          std::this_thread::yield();
+        }
+      }
+      result.wait_duration = std::chrono::steady_clock::now() - started;
+      adaptive_motion_probe_copy_scheduled = false;
+      adaptive_motion_probe_event_recorded = false;
+      return result;
+    }
+
     bool initialize_ocr_context(
       const std::filesystem::path &assets_dir,
       cuda_driver_api &cuda
@@ -3172,7 +3619,8 @@ namespace models {
       Microsoft::WRL::ComPtr<ID3D11DeviceContext> c,
       const std::filesystem::path &assets_dir,
       const config::video_t::sbs_t &cfg,
-      const config::depth_model_info &model
+      const config::depth_model_info &model,
+      const bool enable_adaptive_motion_probe_shadow
     ):
         device(d),
         context(c),
@@ -3186,6 +3634,7 @@ namespace models {
         minmax_alpha((float) config::host_sbs_v2_live_calibration::minmax_ema),
         cuda_graph_enabled(cfg.cuda_graph),
         diagnostics_enabled(config::sunshine.diagnostics_enabled),
+        adaptive_motion_probe_shadow_enabled(enable_adaptive_motion_probe_shadow),
         parallax_v2_requested_pop_strength(
           depth_coordinate_v2::requested_pop_strength(
             static_cast<float>(cfg.pop_strength)
@@ -3596,6 +4045,7 @@ namespace models {
           << "PP-OCRv6 tiny is unavailable for this estimator; subtitle conditioning is flat.";
       }
       initialize_inference_done_events(cuda);
+      initialize_adaptive_motion_probe(cuda);
       // Raw normalization record, pre-seeded to
       // {min = 0xFFFFFFFF, max = 0, valid = 0, eligible = 0}.
       // The fused V2 frame resolve overwrites all four words before the histogram consumes them;
@@ -3790,6 +4240,9 @@ namespace models {
             cleanup_execution_ok = false;
           }
         }
+        // The shadow-only probe event never participates in TensorRT context health. Its stream
+        // has already been synchronized above, so teardown is best-effort and fail-open.
+        destroy_adaptive_motion_probe_event(cuda);
         const bool inference_events_destroyed =
           destroy_inference_done_events(cuda);
         if (!inference_events_destroyed && inference_event_ever_recorded) {
@@ -4951,7 +5404,8 @@ namespace models {
       bool input_domain_reset = false,
       bool subtitle_work_suppressed = false,
       bool subtitle_ocr_inference_enqueued = false,
-      bool subtitle_ocr_redispatch_enqueued = false
+      bool subtitle_ocr_redispatch_enqueued = false,
+      adaptive_motion_probe_result motion_probe = {}
     ) {
       estimate_result r;
       r.depth = output_srv();
@@ -4997,6 +5451,7 @@ namespace models {
       r.inference_enqueued = inference_enqueued;
       r.subtitle_ocr_inference_enqueued = subtitle_ocr_inference_enqueued;
       r.subtitle_ocr_redispatch_enqueued = subtitle_ocr_redispatch_enqueued;
+      r.current_frame_motion_probe = std::move(motion_probe);
       r.cuda_graph_active = depth_inference_graph.executable != nullptr &&
                             !depth_inference_graph.policy.capture_failed;
       if (completed_frame_valid) {
@@ -5804,7 +6259,8 @@ namespace models {
       std::uint64_t frame_id,
       bool snapshot_raw_model_depth,
       depth_input_region_t input_region,
-      depth_optional_work_mode_e optional_work
+      depth_optional_work_mode_e optional_work,
+      const adaptive_motion_probe_request &motion_probe_request
     ) {
       if (!valid || terminal_failure || live_v2_producer_unavailable() || !input_srv) {
         return {};
@@ -5818,6 +6274,10 @@ namespace models {
       input_color_space completed_color_space = input_color_space::srgb;
       bool completed_input_domain_reset = false;
       bool completed_subtitle_work_suppressed = false;
+      adaptive_motion_probe_result motion_probe_result;
+      if (motion_probe_request.enabled) {
+        motion_probe_result.status = adaptive_motion_probe_status_e::unavailable;
+      }
       // An explicitly armed Dump 3D frame always runs ordinary exact-frame OCR/locator work.
       auto accepted_optional_work = snapshot_raw_model_depth ?
                                       depth_optional_work_mode_e::ordinary :
@@ -6288,6 +6748,16 @@ namespace models {
       context->CSSetUnorderedAccessViews(0, 3, null_uavs, nullptr);
       context->CSSetShaderResources(0, 1, &null_srv);
 
+      // Compare the exact just-preprocessed frame with the settled reliable-history endpoint.
+      // This dispatch/copy is optional shadow evidence only; every outcome below still submits
+      // DAV2/OCR through the unchanged production path.
+      (void) dispatch_adaptive_motion_probe(
+        motion_probe_request,
+        frame_id,
+        input_desc,
+        input_region
+      );
+
       // The detector sees only the bottom 6:1 source crop. Resize and ImageNet/BGR normalization
       // happen directly into the registered FP32 TensorRT input; no CPU pixels or readback exist.
       const auto current_ocr_roi = fit_subtitle_analysis_geometry(
@@ -6367,9 +6837,25 @@ namespace models {
           completed_subtitle_work_suppressed
         );
       }
+      if (adaptive_motion_probe_copy_scheduled) {
+        const CUresult probe_record = cuda.cuEventRecord(
+          adaptive_motion_probe_ready_event,
+          cu_stream
+        );
+        adaptive_motion_probe_event_recorded = probe_record == CUDA_SUCCESS;
+        if (!adaptive_motion_probe_event_recorded) {
+          handle_adaptive_motion_probe_cuda_failure(
+            probe_record,
+            "ordering-event record"
+          );
+        }
+      }
 
       CUgraphicsResource ocr_resources[2] = {cuda_ocr_in_res, cuda_ocr_out_res};
       bool ocr_mapped = false;
+      if (terminal_failure) {
+        ocr_frame_eligible = false;
+      }
       if (ocr_frame_eligible) {
         const auto ocr_map = cuda.cuGraphicsMapResources(
           2,
@@ -6433,7 +6919,7 @@ namespace models {
                          << in_ptr_res << ", " << out_ptr_res;
         mark_terminal_failure();
       } else {
-        bool bindings_ok = true;
+        bool bindings_ok = !terminal_failure;
         if (trt_bound_width != target_w || trt_bound_height != target_h) {
           nvinfer1::Dims in_dims = make_input_dims(target_h, target_w);
           bindings_ok = exec_context->setInputShape("pixel_values", in_dims);
@@ -6549,7 +7035,16 @@ namespace models {
           }
         }
 
-        if (bindings_ok) {
+        // OCR mapping and binding work above consumes natural CPU slack while the ordering event
+        // catches the tiny D3D readback up. The bounded query never waits on DAV2: that enqueue is
+        // deliberately still below this point and always runs regardless of the shadow verdict.
+        motion_probe_result = collect_adaptive_motion_probe(
+          cuda,
+          motion_probe_request,
+          frame_id
+        );
+
+        if (bindings_ok && !terminal_failure) {
           // TensorRT host-side submission remains serialized across estimator instances. The lock
           // is released after each enqueue; independent CUDA streams may then overlap execution.
           {
@@ -6685,7 +7180,8 @@ namespace models {
         completed_subtitle_work_suppressed,
         enqueued && ocr_enqueued,
         enqueued &&
-          accepted_optional_work == depth_optional_work_mode_e::redispatch_subtitle
+          accepted_optional_work == depth_optional_work_mode_e::redispatch_subtitle,
+        std::move(motion_probe_result)
       );
     }
   };
@@ -6695,9 +7191,17 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context,
     const std::filesystem::path &assets_dir,
     const config::video_t::sbs_t &cfg,
-    const config::depth_model_info &model
+    const config::depth_model_info &model,
+    const bool enable_adaptive_motion_probe_shadow
   ):
-      pimpl(std::make_unique<impl>(device, context, assets_dir, cfg, model)) {}
+      pimpl(std::make_unique<impl>(
+        device,
+        context,
+        assets_dir,
+        cfg,
+        model,
+        enable_adaptive_motion_probe_shadow
+      )) {}
 
   video_depth_estimator::~video_depth_estimator() = default;
 
@@ -6720,7 +7224,8 @@ namespace models {
     std::uint64_t frame_id,
     bool snapshot_debug_inputs,
     depth_input_region_t input_region,
-    depth_optional_work_mode_e optional_work
+    depth_optional_work_mode_e optional_work,
+    adaptive_motion_probe_request motion_probe
   ) {
     return pimpl->estimate(
       input_srv,
@@ -6728,7 +7233,8 @@ namespace models {
       frame_id,
       snapshot_debug_inputs,
       input_region,
-      optional_work
+      optional_work,
+      motion_probe
     );
   }
 
