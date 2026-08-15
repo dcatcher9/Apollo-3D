@@ -4043,6 +4043,93 @@ TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorizat
   );
 }
 
+TEST(DirectxShaderSourceTest, VideoRoiReuseMemoKeepsTheCompletePixelProofKey) {
+  const auto display =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
+  ASSERT_FALSE(display.empty());
+
+  const auto convert_begin = display.find("    int convert(\n");
+  const auto convert_end = display.find("    bool apply_colorspace(", convert_begin);
+  ASSERT_NE(convert_begin, std::string::npos);
+  ASSERT_NE(convert_end, std::string::npos);
+  const auto convert = display.substr(convert_begin, convert_end - convert_begin);
+  std::size_t memoized_calls = 0u;
+  for (std::size_t offset = 0u;
+       (offset = convert.find("memoized_input_reuse_kind(", offset)) !=
+       std::string::npos;
+       ++offset) {
+    ++memoized_calls;
+  }
+  EXPECT_EQ(memoized_calls, 7u);
+
+  const auto key_begin = convert.find("struct reuse_damage_key_t {");
+  const auto memo_end = convert.find(
+    "// Once the per-stream estimator exists", key_begin
+  );
+  ASSERT_NE(key_begin, std::string::npos);
+  ASSERT_NE(memo_end, std::string::npos);
+  const auto memo = convert.substr(key_begin, memo_end - key_begin);
+  EXPECT_NE(memo.find("inference_content;"), std::string::npos);
+  EXPECT_NE(memo.find("inference_damage;"), std::string::npos);
+  EXPECT_NE(memo.find("models::depth_input_region_t input_region"), std::string::npos);
+  EXPECT_NE(memo.find("current_content;"), std::string::npos);
+  EXPECT_NE(memo.find("current_damage;"), std::string::npos);
+  EXPECT_NE(memo.find("const detail::ddup_damage_history_t *history"), std::string::npos);
+  EXPECT_NE(memo.find("std::uint64_t token"), std::string::npos);
+  EXPECT_NE(memo.find("bool present"), std::string::npos);
+  EXPECT_NE(
+    memo.find("std::array<std::optional<reuse_entry_t>, 3u> reuse_cache;"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    memo.find("if (!slot.depth_input_region.video_region)"),
+    std::string::npos
+  );
+  EXPECT_NE(memo.find("entry && entry->first == key"), std::string::npos);
+  std::size_t classifications = 0u;
+  for (std::size_t offset = 0u;
+       (offset = memo.find("matched_input_reuse_kind(", offset)) !=
+       std::string::npos;
+       ++offset) {
+    ++classifications;
+  }
+  EXPECT_EQ(classifications, 2u);
+}
+
+TEST(DirectxShaderSourceTest, PendingCompletionReusesThePreparedConstantBuffer) {
+  const auto estimator =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
+  ASSERT_FALSE(estimator.empty());
+
+  const auto constants = estimator.find(
+    "// Shared constants for buffer_to_tex_cs, the min/max passes and rgb_to_nchw_cs."
+  );
+  const auto normalize = estimator.find("normalize_depth_output(", constants);
+  ASSERT_NE(constants, std::string::npos);
+  ASSERT_NE(normalize, std::string::npos);
+  const auto completion_setup = estimator.substr(constants, normalize - constants);
+  std::size_t ensures = 0u;
+  for (std::size_t offset = 0u;
+       (offset = completion_setup.find("ensure_cbuffers(", offset)) !=
+       std::string::npos;
+       ++offset) {
+    ++ensures;
+  }
+  EXPECT_EQ(ensures, 1u);
+  EXPECT_NE(
+    completion_setup.find(
+      "has_previous_frame ? pending_color_space : color_space"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    completion_setup.find(
+      "has_previous_frame ? pending_input_region : input_region"
+    ),
+    std::string::npos
+  );
+}
+
 TEST(DirectxShaderSourceTest, AdaptiveMotionProbeAuthenticatesCutStateEncodings) {
   const auto shader = read_source_file(
     SUNSHINE_SOURCE_DIR

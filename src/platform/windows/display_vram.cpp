@@ -730,6 +730,55 @@ namespace platf::dxgi {
           const auto current_source_timestamp = img_base.frame_timestamp;
           const auto current_content_timestamp = img_base.content_timestamp;
           const auto &current_ddup_damage = img.ddup_damage;
+          struct reuse_damage_key_t {
+            const detail::ddup_damage_history_t *history;
+            std::uint64_t token;
+            bool present;
+            explicit reuse_damage_key_t(
+              const std::optional<detail::ddup_damage_snapshot_t> &damage
+            ):
+                history {damage ? damage->history.get() : nullptr},
+                token {damage ? damage->token : 0u},
+                present {damage.has_value()} {}
+            bool operator==(const reuse_damage_key_t &) const = default;
+          };
+          struct reuse_key_t {
+            std::optional<std::chrono::steady_clock::time_point> inference_content;
+            reuse_damage_key_t inference_damage;
+            models::depth_input_region_t input_region;
+            std::optional<std::chrono::steady_clock::time_point> current_content;
+            reuse_damage_key_t current_damage;
+            bool operator==(const reuse_key_t &) const = default;
+          };
+          using reuse_entry_t = std::pair<
+            reuse_key_t, detail::host_sbs_ddup_reuse_proof_e>;
+          std::array<std::optional<reuse_entry_t>, 3u> reuse_cache;
+          std::size_t next_reuse_cache_entry = 0u;
+          const auto memoized_input_reuse_kind = [&](const matched_frame_slot_t &slot) {
+            if (!slot.depth_input_region.video_region) {
+              return matched_input_reuse_kind(
+                slot, current_content_timestamp, current_ddup_damage
+              );
+            }
+            const reuse_key_t key {
+              slot.inference_content_timestamp,
+              reuse_damage_key_t {slot.inference_ddup_damage},
+              slot.depth_input_region,
+              current_content_timestamp,
+              reuse_damage_key_t {current_ddup_damage},
+            };
+            for (const auto &entry : reuse_cache) {
+              if (entry && entry->first == key) {
+                return entry->second;
+              }
+            }
+            const auto kind = matched_input_reuse_kind(
+              slot, current_content_timestamp, current_ddup_damage
+            );
+            reuse_cache[next_reuse_cache_entry] = reuse_entry_t {key, kind};
+            next_reuse_cache_entry = (next_reuse_cache_entry + 1u) % reuse_cache.size();
+            return kind;
+          };
           // Once the per-stream estimator exists, observe foreground continuity on every SBS
           // conversion, not merely when TensorRT can accept a new matched frame. Before then
           // there is no ROI completion/cache to revoke, so synchronous USER32/DWM work has no
@@ -800,10 +849,8 @@ namespace platf::dxgi {
             }
           );
           const auto cached_reuse_kind = latest_v2_route_matches ?
-                                           matched_input_reuse_kind(
-                                             latest_v2_lineage.slot,
-                                             current_content_timestamp,
-                                             current_ddup_damage
+                                           memoized_input_reuse_kind(
+                                             latest_v2_lineage.slot
                                            ) :
                                            detail::host_sbs_ddup_reuse_proof_e::none;
           const auto reuse_now = std::chrono::steady_clock::now();
@@ -1068,11 +1115,7 @@ namespace platf::dxgi {
                     current_browser_authority_epoch,
                     current_interactive_move_size
                   )) {
-                const auto reuse_kind = matched_input_reuse_kind(
-                  slot,
-                  current_content_timestamp,
-                  current_ddup_damage
-                );
+                const auto reuse_kind = memoized_input_reuse_kind(slot);
                 if (reuse_kind != detail::host_sbs_ddup_reuse_proof_e::none) {
                   unchanged_input_pending_slot = &slot;
                   pending_reuse_kind = reuse_kind;
@@ -1172,11 +1215,8 @@ namespace platf::dxgi {
                     render_input_srv = completed_slot->srv.get();
                     sbs_telemetry_last_sampled_frame_id =
                       polled.result.completed_frame_id;
-                    const auto completed_reuse_kind = matched_input_reuse_kind(
-                      *completed_slot,
-                      current_content_timestamp,
-                      current_ddup_damage
-                    );
+                    const auto completed_reuse_kind =
+                      memoized_input_reuse_kind(*completed_slot);
                     force_fresh_current_color =
                       completed_reuse_kind != detail::host_sbs_ddup_reuse_proof_e::none;
                     est = std::move(polled.result);
@@ -1698,11 +1738,7 @@ namespace platf::dxgi {
             depth_reuse_authorization.valid();
           const auto post_completion_cache_reuse_kind =
             !model_equivalent_reuse_authorized && post_completion_cache_route_matches ?
-              matched_input_reuse_kind(
-                latest_v2_lineage.slot,
-                current_content_timestamp,
-                current_ddup_damage
-              ) :
+              memoized_input_reuse_kind(latest_v2_lineage.slot) :
               detail::host_sbs_ddup_reuse_proof_e::none;
           auto post_completion_reuse_authorization =
             model_equivalent_reuse_authorized ?
@@ -1741,11 +1777,7 @@ namespace platf::dxgi {
           const auto fresh_current_color_reuse_kind =
             !model_equivalent_reuse_authorized &&
                 force_fresh_current_color && matched_render_slot ?
-              matched_input_reuse_kind(
-                *matched_render_slot,
-                current_content_timestamp,
-                current_ddup_damage
-              ) :
+              memoized_input_reuse_kind(*matched_render_slot) :
               detail::host_sbs_ddup_reuse_proof_e::none;
           if (
             !model_equivalent_reuse_authorized &&
@@ -1941,20 +1973,14 @@ namespace platf::dxgi {
                 current_browser_authority_epoch,
                 current_interactive_move_size
               ) &&
-              matched_input_reuse_kind(
-                *matched_candidate_slot,
-                current_content_timestamp,
-                current_ddup_damage
-              ) != detail::host_sbs_ddup_reuse_proof_e::none;
+              memoized_input_reuse_kind(*matched_candidate_slot) !=
+                detail::host_sbs_ddup_reuse_proof_e::none;
             D3D11_TEXTURE2D_DESC completed_source_desc = live_source_desc;
             if (matched_render_slot->texture) {
               matched_render_slot->texture->GetDesc(&completed_source_desc);
             }
-            const auto completed_reuse_kind = matched_input_reuse_kind(
-              *matched_render_slot,
-              current_content_timestamp,
-              current_ddup_damage
-            );
+            const auto completed_reuse_kind =
+              memoized_input_reuse_kind(*matched_render_slot);
             const bool completed_low_motion_match =
               low_motion_submission_suppressed &&
               matched_low_motion_candidate(*matched_render_slot, current_ddup_damage);

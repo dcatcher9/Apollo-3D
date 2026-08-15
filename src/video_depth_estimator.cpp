@@ -6600,11 +6600,6 @@ namespace models {
       if (has_previous_frame) {
         completed_subtitle_work_suppressed =
           pending_optional_work == depth_optional_work_mode_e::suppress_subtitle;
-        ensure_cbuffers(pending_color_space, pending_input_region);
-        if (!cbuffer) {
-          mark_terminal_failure();
-          return {};
-        }
         completed_input_domain_reset = prepare_pending_input_domain();
         normalize_depth_output(
           d3d_timer,
