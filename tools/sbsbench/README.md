@@ -22,29 +22,44 @@ geometry contract and remain in Git history rather than serving as stale gate in
 migration with an authenticated comparison run:
 
 ```powershell
-python tools/sbsbench/run_eval.py --comparison-only --label control
+$SbsbenchPython = "C:\absolute\path\to\the\validated\python.exe"
+& $SbsbenchPython tools/sbsbench/run_eval.py --comparison-only --label control
 ```
+
+Select that interpreter once and use the exact same executable for control, treatment, scoring,
+report generation, comparisons, and related tests. Record its fingerprint before the control and
+verify the exact same output before the treatment and report:
+
+```powershell
+& $SbsbenchPython -c "import json, platform, sys, numpy, PIL; print(json.dumps({'executable': sys.executable, 'python': platform.python_version(), 'numpy': numpy.__version__, 'pillow': PIL.__version__}, sort_keys=True))"
+```
+
+Never switch between bare `python`, `py`, a bundled tool runtime, or another virtual environment
+inside one evidence chain. A numeric-runtime mismatch invalidates the pair: rerun both sides with
+one interpreter. Do not edit provenance or use an allow flag to waive the mismatch.
+`--report-allow-executable-diff` applies only to the Sunshine executable; it does not authorize a
+Python or numeric-runtime difference.
 
 Useful variants are:
 
 ```powershell
 # Fresh matched A/B without the committed-baseline verdict
-python tools/sbsbench/run_eval.py --comparison-only --label control
-python tools/sbsbench/run_eval.py --comparison-only --label treatment `
+& $SbsbenchPython tools/sbsbench/run_eval.py --comparison-only --label control
+& $SbsbenchPython tools/sbsbench/run_eval.py --comparison-only --label treatment `
   --report-control cmake-build-relwithdebinfo/sbs_eval/control `
   --report-allow-executable-diff
 
 # One supported geometry or execution treatment
-python tools/sbsbench/run_eval.py --comparison-only --label pop-1p0 `
+& $SbsbenchPython tools/sbsbench/run_eval.py --comparison-only --label pop-1p0 `
   --extra --pop-strength 1.0
-python tools/sbsbench/run_eval.py --comparison-only --label no-graph `
+& $SbsbenchPython tools/sbsbench/run_eval.py --comparison-only --label no-graph `
   --extra --cuda-graph off
 
 # Prepared public suite
-python tools/sbsbench/run_eval.py --suite extended --comparison-only --label public-control
+& $SbsbenchPython tools/sbsbench/run_eval.py --suite extended --comparison-only --label public-control
 
 # Publish an inspected V2 baseline from accepted production defaults only
-python tools/sbsbench/run_eval.py --update-baselines
+& $SbsbenchPython tools/sbsbench/run_eval.py --update-baselines
 ```
 
 `--update-baselines` rejects `--extra`; first move an accepted setting into production defaults.
@@ -66,8 +81,8 @@ paths are not accepted as live or replay authority.
 When a treatment was not run with `--report-control`, generate a report separately:
 
 ```powershell
-python tools/sbsbench/generate_report.py <control-run> <treatment-run> <report.html>
-python tools/sbsbench/compare_runs.py <control-run> <treatment-run>
+& $SbsbenchPython tools/sbsbench/generate_report.py <control-run> <treatment-run> <report.html>
+& $SbsbenchPython tools/sbsbench/compare_runs.py <control-run> <treatment-run>
 ```
 
 Do not average two `results.json` files manually. `compare_runs.py` first authenticates matching
@@ -92,11 +107,11 @@ While Host SBS is active, **Dump 3D** creates one atomic matched-frame directory
 captures directly with:
 
 ```powershell
-python tools/sbsbench/sbsbench.py `
+& $SbsbenchPython tools/sbsbench/sbsbench.py `
   --glob "E:/ApolloDev/sbs_dump/dump_2026*" `
   --json base.json
 
-python tools/sbsbench/sbsbench.py `
+& $SbsbenchPython tools/sbsbench/sbsbench.py `
   --glob "E:/ApolloDev/sbs_dump/dump_NEW*" `
   --baseline base.json
 ```
@@ -125,7 +140,7 @@ opt-in native smoke test are documented in
 Run the maintained Python suite with:
 
 ```powershell
-python -m unittest discover -s tools/sbsbench -p "test_*.py"
+& $SbsbenchPython -m unittest discover -s tools/sbsbench -p "test_*.py"
 ```
 
 Metric changes also require their applicable authenticated corruption validators and headset
