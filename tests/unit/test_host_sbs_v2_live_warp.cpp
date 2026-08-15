@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <limits>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -1917,6 +1919,247 @@ TEST(HostSbsV2LiveWarpGpuTest, ExactEarlyExitMatchesUnconditionalElevenIteration
       std::string("direct mapping ") + name
     );
   }
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, GeometryFastPathPreservesDormantAndFailFlatSemantics) {
+  constexpr UINT source_width = 32u;
+  constexpr UINT source_height = 8u;
+  constexpr UINT depth_width = 16u;
+  constexpr UINT depth_height = 8u;
+  const std::size_t depth_elements =
+    static_cast<std::size_t>(depth_width) * depth_height;
+  const std::vector<float> parallax(depth_elements, 0.011f);
+  const std::vector<float> candidate(depth_elements, 0.0f);
+  std::vector<bgra8_t> source(
+    static_cast<std::size_t>(source_width) * source_height
+  );
+  for (UINT y = 0u; y < source_height; ++y) {
+    for (UINT x = 0u; x < source_width; ++x) {
+      source[static_cast<std::size_t>(y) * source_width + x] = {
+        static_cast<std::uint8_t>((17u * x + 31u * y + 11u) & 0xffu),
+        static_cast<std::uint8_t>((47u * x + 13u * y + 23u) & 0xffu),
+        static_cast<std::uint8_t>((29u * x + 53u * y + 37u) & 0xffu),
+        0xffu,
+      };
+    }
+  }
+
+  host_sbs_v2_geometry_t valid_roi {};
+  valid_roi.video_roi_active = 1.0f;
+  valid_roi.video_roi_left = 0.1875f;
+  valid_roi.video_roi_top = 0.125f;
+  valid_roi.video_roi_right = 0.8125f;
+  valid_roi.video_roi_bottom = 0.875f;
+  valid_roi.tensor_content_left = 2u;
+  valid_roi.tensor_content_top = 1u;
+  valid_roi.tensor_content_right = 14u;
+  valid_roi.tensor_content_bottom = 7u;
+
+  struct geometry_case_t {
+    const char *name;
+    host_sbs_v2_geometry_t geometry;
+    bool full_warp;
+    bool flat_identity;
+  };
+  std::array<geometry_case_t, 12u> cases;
+  cases[0] = {"valid full", host_sbs_v2_geometry_t {}, true, false};
+  auto dormant_malformed = host_sbs_v2_geometry_t {};
+  dormant_malformed.video_roi_active = std::bit_cast<float>(0x80000000u);
+  dormant_malformed.reserved = std::bit_cast<float>(0x80000000u);
+  dormant_malformed.video_roi_left = std::numeric_limits<float>::quiet_NaN();
+  dormant_malformed.video_roi_top = std::numeric_limits<float>::infinity();
+  dormant_malformed.video_roi_right = -std::numeric_limits<float>::infinity();
+  dormant_malformed.video_roi_bottom = std::numeric_limits<float>::quiet_NaN();
+  dormant_malformed.tensor_content_left = UINT32_MAX;
+  dormant_malformed.tensor_content_top = UINT32_MAX;
+  dormant_malformed.tensor_content_right = 0u;
+  dormant_malformed.tensor_content_bottom = 0u;
+  cases[1] = {"dormant malformed signed-zero full", dormant_malformed, true, false};
+  cases[2] = {"valid ROI", valid_roi, false, false};
+  auto invalid_mode = valid_roi;
+  invalid_mode.video_roi_active = 0.5f;
+  cases[3] = {"invalid mode", invalid_mode, false, true};
+  auto invalid_mode_nan = valid_roi;
+  invalid_mode_nan.video_roi_active = std::numeric_limits<float>::quiet_NaN();
+  cases[4] = {"invalid mode NaN", invalid_mode_nan, false, true};
+  auto invalid_reserved = valid_roi;
+  invalid_reserved.reserved = std::numeric_limits<float>::quiet_NaN();
+  cases[5] = {"invalid reserved NaN", invalid_reserved, false, true};
+  auto invalid_roi_nan = valid_roi;
+  invalid_roi_nan.video_roi_left = std::numeric_limits<float>::quiet_NaN();
+  cases[6] = {"invalid ROI NaN", invalid_roi_nan, false, true};
+  auto invalid_roi_inf = valid_roi;
+  invalid_roi_inf.video_roi_bottom = std::numeric_limits<float>::infinity();
+  cases[7] = {"invalid ROI infinity", invalid_roi_inf, false, true};
+  auto invalid_roi_bounds = valid_roi;
+  invalid_roi_bounds.video_roi_left = -0.01f;
+  invalid_roi_bounds.video_roi_right = 1.01f;
+  cases[8] = {"invalid ROI bounds", invalid_roi_bounds, false, true};
+  auto invalid_roi_degenerate = valid_roi;
+  invalid_roi_degenerate.video_roi_right = invalid_roi_degenerate.video_roi_left;
+  cases[9] = {"invalid ROI degenerate", invalid_roi_degenerate, false, true};
+  auto invalid_content_degenerate = valid_roi;
+  invalid_content_degenerate.tensor_content_right =
+    invalid_content_degenerate.tensor_content_left;
+  cases[10] = {
+    "invalid content degenerate", invalid_content_degenerate, false, true
+  };
+  auto invalid_content_extent = valid_roi;
+  invalid_content_extent.tensor_content_right = depth_width + 1u;
+  invalid_content_extent.tensor_content_bottom = UINT32_MAX;
+  cases[11] = {"invalid content extent", invalid_content_extent, false, true};
+
+  std::string error;
+  live_v2_warp_fixture_t main_warp;
+  live_v2_warp_fixture_t mapping_warp;
+  ASSERT_TRUE(main_warp.initialize(error, warp_shader_e::live_main)) << error;
+  ASSERT_TRUE(mapping_warp.initialize(error, warp_shader_e::live_mapping)) << error;
+  const auto state = make_live_state(true, true);
+  const std::array<float, 4> sentinel_clear {0.91f, 0.13f, 0.77f, 0.42f};
+  const auto render_case = [&] (
+    live_v2_warp_fixture_t &warp,
+    const host_sbs_v2_geometry_t &geometry
+  ) {
+    std::vector<std::byte> bytes;
+    EXPECT_TRUE(warp.render(
+      DXGI_FORMAT_B8G8R8A8_UNORM,
+      sizeof(bgra8_t),
+      source_width,
+      source_height,
+      source.data(),
+      parallax,
+      candidate,
+      state,
+      sentinel_clear,
+      bytes,
+      error,
+      depth_width,
+      depth_height,
+      geometry
+    )) << error;
+    return bytes;
+  };
+
+  const auto full_main = render_case(main_warp, cases[0].geometry);
+  const auto full_mapping = render_case(mapping_warp, cases[0].geometry);
+  const auto roi_main = render_case(main_warp, valid_roi);
+  const auto roi_mapping = render_case(mapping_warp, valid_roi);
+  const auto identity_main = render_case(main_warp, invalid_mode);
+  const auto identity_mapping = render_case(mapping_warp, invalid_mode);
+  ASSERT_FALSE(full_main.empty());
+  ASSERT_FALSE(full_mapping.empty());
+  EXPECT_NE(full_main, identity_main);
+  EXPECT_NE(full_mapping, identity_mapping);
+  EXPECT_NE(roi_main, identity_main);
+  EXPECT_NE(roi_mapping, identity_mapping);
+
+  for (const auto &test_case : cases) {
+    SCOPED_TRACE(test_case.name);
+    const auto actual_main = render_case(main_warp, test_case.geometry);
+    const auto actual_mapping = render_case(mapping_warp, test_case.geometry);
+    if (test_case.full_warp) {
+      EXPECT_EQ(actual_main, full_main);
+      EXPECT_EQ(actual_mapping, full_mapping);
+    } else if (test_case.flat_identity) {
+      EXPECT_EQ(actual_main, identity_main);
+      EXPECT_EQ(actual_mapping, identity_mapping);
+    } else {
+      EXPECT_EQ(actual_main, roi_main);
+      EXPECT_EQ(actual_mapping, roi_mapping);
+    }
+  }
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, FullFrameBytecodeSkipsTheRoiDimensionQuery) {
+  const auto shader_path = std::filesystem::path(SUNSHINE_SHADERS_DIR) /
+    "sbs_reprojection_v2_live_ps.hlsl";
+  ComPtr<ID3DBlob> bytecode;
+  ComPtr<ID3DBlob> errors;
+  auto status = D3DCompileFromFile(
+    shader_path.c_str(),
+    nullptr,
+    D3D_COMPILE_STANDARD_FILE_INCLUDE,
+    "main_ps",
+    "ps_5_0",
+    D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
+    0,
+    &bytecode,
+    &errors
+  );
+  ASSERT_TRUE(SUCCEEDED(status) && bytecode) << (errors ?
+    static_cast<const char *>(errors->GetBufferPointer()) : "compile failed");
+  ComPtr<ID3DBlob> disassembly;
+  ASSERT_TRUE(SUCCEEDED(D3DDisassemble(
+    bytecode->GetBufferPointer(), bytecode->GetBufferSize(), 0, nullptr, &disassembly
+  )));
+  const std::string assembly(
+    static_cast<const char *>(disassembly->GetBufferPointer()),
+    disassembly->GetBufferSize()
+  );
+  EXPECT_NE(assembly.find("dcl_temps 6"), std::string::npos);
+
+  std::vector<std::string> lines;
+  std::istringstream stream(assembly);
+  for (std::string line; std::getline(stream, line);) {
+    const auto first = line.find_first_not_of(" \t\r");
+    const auto last = line.find_last_not_of(" \t\r");
+    lines.push_back(first == std::string::npos ?
+      std::string {} : line.substr(first, last - first + 1u));
+  }
+  std::size_t active_compare = std::string::npos;
+  std::string active_zero_register;
+  for (std::size_t index = 0u; index < lines.size(); ++index) {
+    const auto &line = lines[index];
+    if (line.starts_with("eq ") && line.find("cb2[0].z") != std::string::npos &&
+        line.find("l(0.000000, 1.000000") != std::string::npos) {
+      const auto destination_end = line.find(',');
+      ASSERT_NE(destination_end, std::string::npos);
+      const auto destination = line.substr(3u, destination_end - 3u);
+      const auto component = destination.find('.');
+      ASSERT_NE(component, std::string::npos);
+      ASSERT_GT(destination.size(), component + 1u);
+      active_zero_register = destination.substr(0u, component + 1u) +
+        destination[component + 1u];
+      active_compare = index;
+      break;
+    }
+  }
+  ASSERT_NE(active_compare, std::string::npos);
+
+  std::size_t full_branch = std::string::npos;
+  for (std::size_t index = active_compare + 1u; index < lines.size(); ++index) {
+    if (lines[index] == "if_nz " + active_zero_register) {
+      full_branch = index;
+      break;
+    }
+  }
+  ASSERT_NE(full_branch, std::string::npos);
+  int branch_depth = 0;
+  bool roi_else = false;
+  std::size_t full_resinfo = 0u;
+  std::size_t roi_resinfo = 0u;
+  for (std::size_t index = full_branch; index < lines.size(); ++index) {
+    const auto &line = lines[index];
+    if (line.starts_with("if_") || line.starts_with("loop")) {
+      ++branch_depth;
+    } else if (line == "else" && branch_depth == 1) {
+      roi_else = true;
+    } else if (line == "endif" || line == "endloop") {
+      --branch_depth;
+      if (branch_depth == 0) break;
+    }
+    if (line.find("resinfo") != std::string::npos &&
+        line.find("t1.") != std::string::npos) {
+      if (roi_else) {
+        ++roi_resinfo;
+      } else {
+        ++full_resinfo;
+      }
+    }
+  }
+  EXPECT_TRUE(roi_else);
+  EXPECT_EQ(full_resinfo, 0u);
+  EXPECT_EQ(roi_resinfo, 1u);
 }
 
 TEST(HostSbsV2LiveWarpGpuTest, IndependentFlatShaderIgnoresV2Geometry) {

@@ -55,9 +55,9 @@ schema 54/tag `0xE6E2DB82`, canonical SHA-256
 complete policy below, including all subtitle field/ROI semantics, and producer source-closure
 SHA-256 `66bd77d5c4eab407b12dcd711bae2d6bc5b0616f3c067ae0136f6a2ba3e3e141`.
 The live-renderer source-closure SHA-256 is
-`458ce5bdb57a1de4498ec8d7bb905f4ea1ee12c85cf53c009642f9c556e340f5`, and dump-only diagnostic
+`ce4114ea6b96752024fddf35aed7b686bed4cfde6d365653d868a58012dc4bba`, and dump-only diagnostic
 renderer source-closure SHA-256
-`4210f91933f5b3bc80e2bbcfb812bc563753a38dd98dce95ac00811b777ae64a`. It admits the following
+`dbd718c81a960c58eb4268d4d8a83e595ec2da9fdd39bb406d87255aefaf694d`. It admits the following
 production calibration:
 
 | Property | Production value |
@@ -488,6 +488,12 @@ continues the signed boundary value only through the minimum collar permitted by
 vertical slope limits, then reaches exact zero parallax. The surrounding desktop beyond that collar
 therefore stays on the screen plane, while the inverse remains continuous and contractive. Color is
 always sampled from the original full captured frame; the crop is never stretched back over it.
+
+Renderer geometry is mode-scoped after common state, mode, and reserved-word authentication. The
+full-source path ignores dormant ROI floats and tensor-content words and does not query the depth
+texture dimensions. An active ROI must first have a finite normalized source rectangle; only then
+does the renderer query the depth extent and validate the integer tensor-content rectangle. Any
+invalid active geometry renders current color through flat identity.
 
 ## Frame attribution and failure behavior
 

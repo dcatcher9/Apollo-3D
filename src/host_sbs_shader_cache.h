@@ -96,9 +96,9 @@ namespace models::host_sbs_shader_cache {
     "sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"
   };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
-    "458ce5bdb57a1de4498ec8d7bb905f4ea1ee12c85cf53c009642f9c556e340f5";
+    "ce4114ea6b96752024fddf35aed7b686bed4cfde6d365653d868a58012dc4bba";
   inline constexpr std::string_view parallax_v2_diagnostic_source_closure_sha256 =
-    "4210f91933f5b3bc80e2bbcfb812bc563753a38dd98dce95ac00811b777ae64a";
+    "dbd718c81a960c58eb4268d4d8a83e595ec2da9fdd39bb406d87255aefaf694d";
   inline constexpr std::string_view sbs_flat_fallback_source_closure_sha256 =
     "7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4";
 

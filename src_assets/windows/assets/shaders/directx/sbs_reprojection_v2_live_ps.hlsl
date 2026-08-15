@@ -32,26 +32,27 @@ struct PS_INPUT {
     float2 TexCoord : TEXCOORD0;
 };
 
-bool WarpAvailable() {
+bool WarpAuthorized() {
     float4 mapping_state = ParallaxState[V2_STATE_VECTOR_CAMERA_CENTER_INTEGRITY_BITS];
-    uint depth_width;
-    uint depth_height;
-    FinalParallax.GetDimensions(depth_width, depth_height);
     bool roi_mode_valid = video_roi_active == 0.0f || video_roi_active == 1.0f;
     bool roi_reserved_valid = geometry_reserved == 0.0f;
-    bool roi_rect_valid = video_roi_active == 0.0f ||
-        (all(!isnan(video_roi_source_uv)) && all(!isinf(video_roi_source_uv)) &&
-         video_roi_source_uv.x >= 0.0f && video_roi_source_uv.y >= 0.0f &&
-         video_roi_source_uv.z <= 1.0f && video_roi_source_uv.w <= 1.0f &&
-         video_roi_source_uv.z > video_roi_source_uv.x &&
-         video_roi_source_uv.w > video_roi_source_uv.y);
-    bool roi_content_valid = video_roi_active == 0.0f ||
-        (video_roi_tensor_content_rect.x < video_roi_tensor_content_rect.z &&
-         video_roi_tensor_content_rect.y < video_roi_tensor_content_rect.w &&
-         video_roi_tensor_content_rect.z <= depth_width &&
-         video_roi_tensor_content_rect.w <= depth_height);
     return asuint(V2_STATE_RENDERER_AUTHORIZATION_BITS(mapping_state)) == V2_CONTRACT_TAG &&
-        roi_mode_valid && roi_reserved_valid && roi_rect_valid && roi_content_valid;
+        roi_mode_valid && roi_reserved_valid;
+}
+
+bool VideoRoiRectValid() {
+    return all(!isnan(video_roi_source_uv)) && all(!isinf(video_roi_source_uv)) &&
+        video_roi_source_uv.x >= 0.0f && video_roi_source_uv.y >= 0.0f &&
+        video_roi_source_uv.z <= 1.0f && video_roi_source_uv.w <= 1.0f &&
+        video_roi_source_uv.z > video_roi_source_uv.x &&
+        video_roi_source_uv.w > video_roi_source_uv.y;
+}
+
+bool VideoRoiContentValid(uint2 depth_size) {
+    return video_roi_tensor_content_rect.x < video_roi_tensor_content_rect.z &&
+        video_roi_tensor_content_rect.y < video_roi_tensor_content_rect.w &&
+        video_roi_tensor_content_rect.z <= depth_size.x &&
+        video_roi_tensor_content_rect.w <= depth_size.y;
 }
 
 bool ContentToSourceUV(float2 output_uv, out float2 source_uv) {
@@ -70,7 +71,8 @@ float SampleVideoRoiParallax(
     float source_x,
     float source_y,
     float roi_width,
-    float vertical_budget_per_source_v
+    float vertical_budget_per_source_v,
+    uint2 depth_size_u
 ) {
     float effective_parallax = 0.0f;
     // The ROI-local field occupies its authenticated integer content rectangle within the fixed
@@ -84,10 +86,7 @@ float SampleVideoRoiParallax(
     float2 source_uv = float2(source_x, source_y);
     float2 projected_uv = clamp(source_uv, roi_min, roi_max);
     float2 local_uv = (projected_uv - roi_min) / (roi_max - roi_min);
-    uint depth_width;
-    uint depth_height;
-    FinalParallax.GetDimensions(depth_width, depth_height);
-    float2 depth_size = max(float2(depth_width, depth_height), float2(1.0f, 1.0f));
+    float2 depth_size = max(float2(depth_size_u), float2(1.0f, 1.0f));
     float2 content_min = float2(video_roi_tensor_content_rect.xy) / depth_size;
     float2 content_max = float2(video_roi_tensor_content_rect.zw) / depth_size;
     float2 tensor_uv = lerp(content_min, content_max, local_uv);
@@ -110,68 +109,67 @@ float SampleVideoRoiParallax(
     return effective_parallax;
 }
 
-float2 Reproject(float2 destination_uv, float eye_sign) {
+float2 ReprojectFull(float2 destination_uv, float eye_sign) {
     // out(x) = x - eye_sign * parallax(x). The authenticated field is contractive, so this
     // iteration converges to its unique inverse without ownership search or hole filling.
     float source_x = destination_uv.x;
-    if (video_roi_active == 0.0f) {
-        // Keep the ordinary full-frame path exactly as before and pay no ROI dimension work.
-        [unroll]
-        for (int iteration = 0; iteration < 11; ++iteration) {
-            float next_source_x = destination_uv.x + eye_sign * FinalParallax.SampleLevel(
-                LinearSampler,
-                float2(source_x, destination_uv.y),
-                0
-            );
-            bool exactly_settled = asuint(next_source_x) == asuint(source_x);
-            source_x = next_source_x;
+    [unroll]
+    for (int iteration = 0; iteration < 11; ++iteration) {
+        float next_source_x = destination_uv.x + eye_sign * FinalParallax.SampleLevel(
+            LinearSampler,
+            float2(source_x, destination_uv.y),
+            0
+        );
+        bool exactly_settled = asuint(next_source_x) == asuint(source_x);
+        source_x = next_source_x;
 #if !defined(HOST_SBS_TEST_FIXED_ELEVEN_REFERENCE)
-            if (exactly_settled) {
-                break;
-            }
-#endif
+        if (exactly_settled) {
+            break;
         }
-    } else {
-        float roi_width = video_roi_source_uv.z - video_roi_source_uv.x;
-        float roi_height = video_roi_source_uv.w - video_roi_source_uv.y;
-        uint source_width;
-        uint source_height;
-        SourceColor.GetDimensions(source_width, source_height);
-        uint depth_width;
-        uint depth_height;
-        FinalParallax.GetDimensions(depth_width, depth_height);
-        uint content_width =
-            video_roi_tensor_content_rect.z - video_roi_tensor_content_rect.x;
-        uint content_height =
-            video_roi_tensor_content_rect.w - video_roi_tensor_content_rect.y;
-        float source_height_in_source_u =
-            (float)source_height / max((float)source_width, 1.0f);
-        // The producer's vertical step is V2_MAX_VERTICAL_SHEAR / content_width per real-source
-        // row. Convert that local-content derivative exactly into full-source coordinates. The
-        // surrounding tensor letterbox is synthetic support and contributes no spatial extent.
-        float roi_pixel_aspect =
-            (roi_width * (float)source_width) /
-            max(roi_height * (float)source_height, 1.0e-6f);
-        float vertical_slope = V2_MAX_VERTICAL_SHEAR * roi_pixel_aspect *
-            ((float)content_height / max((float)content_width, 1.0f));
-        float vertical_budget_per_source_v =
-            vertical_slope * source_height_in_source_u;
-        [unroll]
-        for (int iteration = 0; iteration < 11; ++iteration) {
-            float next_source_x = destination_uv.x + eye_sign * SampleVideoRoiParallax(
-                source_x,
-                destination_uv.y,
-                roi_width,
-                vertical_budget_per_source_v
-            );
-            bool exactly_settled = asuint(next_source_x) == asuint(source_x);
-            source_x = next_source_x;
+#endif
+    }
+    return float2(source_x, destination_uv.y);
+}
+
+float2 ReprojectVideoRoi(float2 destination_uv, float eye_sign, uint2 depth_size) {
+    float source_x = destination_uv.x;
+    float roi_width = video_roi_source_uv.z - video_roi_source_uv.x;
+    float roi_height = video_roi_source_uv.w - video_roi_source_uv.y;
+    uint source_width;
+    uint source_height;
+    SourceColor.GetDimensions(source_width, source_height);
+    uint content_width =
+        video_roi_tensor_content_rect.z - video_roi_tensor_content_rect.x;
+    uint content_height =
+        video_roi_tensor_content_rect.w - video_roi_tensor_content_rect.y;
+    float source_height_in_source_u =
+        (float)source_height / max((float)source_width, 1.0f);
+    // The producer's vertical step is V2_MAX_VERTICAL_SHEAR / content_width per real-source
+    // row. Convert that local-content derivative exactly into full-source coordinates. The
+    // surrounding tensor letterbox is synthetic support and contributes no spatial extent.
+    float roi_pixel_aspect =
+        (roi_width * (float)source_width) /
+        max(roi_height * (float)source_height, 1.0e-6f);
+    float vertical_slope = V2_MAX_VERTICAL_SHEAR * roi_pixel_aspect *
+        ((float)content_height / max((float)content_width, 1.0f));
+    float vertical_budget_per_source_v =
+        vertical_slope * source_height_in_source_u;
+    [unroll]
+    for (int iteration = 0; iteration < 11; ++iteration) {
+        float next_source_x = destination_uv.x + eye_sign * SampleVideoRoiParallax(
+            source_x,
+            destination_uv.y,
+            roi_width,
+            vertical_budget_per_source_v,
+            depth_size
+        );
+        bool exactly_settled = asuint(next_source_x) == asuint(source_x);
+        source_x = next_source_x;
 #if !defined(HOST_SBS_TEST_FIXED_ELEVEN_REFERENCE)
-            if (exactly_settled) {
-                break;
-            }
-#endif
+        if (exactly_settled) {
+            break;
         }
+#endif
     }
     return float2(source_x, destination_uv.y);
 }
@@ -184,6 +182,24 @@ bool PackedToSource(float2 packed_uv, out float2 source_uv, out float eye_sign) 
     return ContentToSourceUV(eye_uv, source_uv);
 }
 
+float2 ReprojectIfAuthorized(float2 source_uv, float eye_sign) {
+    float2 sample_uv = source_uv;
+    if (WarpAuthorized()) {
+        if (video_roi_active == 0.0f) {
+            sample_uv = ReprojectFull(source_uv, eye_sign);
+        } else if (VideoRoiRectValid()) {
+            uint depth_width;
+            uint depth_height;
+            FinalParallax.GetDimensions(depth_width, depth_height);
+            uint2 depth_size = uint2(depth_width, depth_height);
+            if (VideoRoiContentValid(depth_size)) {
+                sample_uv = ReprojectVideoRoi(source_uv, eye_sign, depth_size);
+            }
+        }
+    }
+    return sample_uv;
+}
+
 float4 main_ps(PS_INPUT input) : SV_TARGET {
     float2 source_uv;
     float eye_sign;
@@ -193,7 +209,7 @@ float4 main_ps(PS_INPUT input) : SV_TARGET {
 
     // Null/uninitialized buffers read as an invalid contract. Keep the exact current color frame
     // live while the producer starts or after it fails terminally.
-    float2 sample_uv = WarpAvailable() ? Reproject(source_uv, eye_sign) : source_uv;
+    float2 sample_uv = ReprojectIfAuthorized(source_uv, eye_sign);
     sample_uv.x = saturate(sample_uv.x);
     return SourceColor.Sample(LinearSampler, sample_uv);
 }
