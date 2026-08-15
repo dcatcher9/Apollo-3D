@@ -747,7 +747,7 @@ namespace models {
       exclusion_mismatch,
       exact_changed,
       appearance_1_over_1024,
-      max_appearance_delta_bits,
+      appearance_nonfinite,
       appearance_exact_changed,
       ocr_input_flags,
       ocr_input_baseline_frame_low,
@@ -782,8 +782,6 @@ namespace models {
       return false;
     }
 
-    const auto maximum_appearance =
-      std::bit_cast<float>(words[max_appearance_delta_bits]);
     const auto area = static_cast<std::uint64_t>(field_width) *
                       static_cast<std::uint64_t>(field_height);
     const bool counters_valid =
@@ -792,6 +790,7 @@ namespace models {
       words[exact_changed] <= words[admitted] &&
       words[appearance_exact_changed] <= words[admitted] &&
       words[appearance_1_over_1024] <= words[admitted] &&
+      words[appearance_nonfinite] <= words[admitted] &&
       words[appearance_1_over_1024] <= words[appearance_exact_changed];
     constexpr std::uint32_t ocr_baseline_candidate = 1u << 0u;
     constexpr std::uint32_t ocr_record_authoritative = 1u << 1u;
@@ -828,11 +827,7 @@ namespace models {
       words[cut_flags] <= sbs_adaptive_state::known_cut_flag_mask &&
       words[analysis_flags] <= sbs_adaptive_state::known_analysis_flag_mask &&
       words[history_state] <= 4u;
-    const bool maxima_valid =
-      std::isfinite(maximum_appearance) && maximum_appearance >= 0.0f &&
-      ((words[appearance_1_over_1024] == 0u) ==
-       (maximum_appearance < adaptive_motion_probe_appearance_hold_threshold));
-    if (!counters_valid || !ocr_counters_valid || !state_valid || !maxima_valid) {
+    if (!counters_valid || !ocr_counters_valid || !state_valid) {
       return false;
     }
 
@@ -851,7 +846,7 @@ namespace models {
       .exclusion_mismatch_texels = words[exclusion_mismatch],
       .exact_changed_texels = words[exact_changed],
       .appearance_delta_1_over_1024_texels = words[appearance_1_over_1024],
-      .maximum_appearance_delta = maximum_appearance,
+      .appearance_nonfinite_texels = words[appearance_nonfinite],
       .appearance_exact_changed_texels = words[appearance_exact_changed],
       .ocr_input_baseline_valid =
         has_ocr_baseline_candidate && has_authoritative_ocr_record,
@@ -3498,28 +3493,30 @@ namespace models {
         request.max_poll_rounds
       );
       constexpr auto poll_interval = std::chrono::microseconds {50};
-      bool event_ready = false;
+      adaptive_motion_probe_poll_progress progress;
       while (true) {
         if (
-          result.poll_round_count > 0u && has_wait_deadline &&
+          progress.poll_round_count > 0u && has_wait_deadline &&
           std::chrono::steady_clock::now() >= deadline
         ) {
           result.status = adaptive_motion_probe_status_e::timed_out;
           result.timeout_reason = classify_adaptive_motion_probe_timeout(
-            event_ready,
+            progress.event_ready,
             true,
             true,
             false
           );
           break;
         }
-        ++result.poll_round_count;
-        if (!event_ready) {
-          ++result.event_query_count;
+        progress.begin_round();
+        if (progress.event_query_needed()) {
           const CUresult query = cuda.cuEventQuery(adaptive_motion_probe_ready_event);
           if (query == CUDA_SUCCESS) {
-            event_ready = true;
-          } else if (query != CUDA_ERROR_NOT_READY) {
+            progress.observe(adaptive_motion_probe_poll_observation_e::event_ready);
+          } else if (query == CUDA_ERROR_NOT_READY) {
+            progress.observe(adaptive_motion_probe_poll_observation_e::event_not_ready);
+          } else {
+            progress.observe(adaptive_motion_probe_poll_observation_e::event_failed);
             handle_adaptive_motion_probe_cuda_failure(
               query,
               "readiness query"
@@ -3528,9 +3525,8 @@ namespace models {
             break;
           }
         }
-        if (event_ready) {
+        if (progress.staging_map_needed()) {
           D3D11_MAPPED_SUBRESOURCE mapped {};
-          ++result.staging_map_attempt_count;
           const HRESULT mapped_result = context->Map(
             adaptive_motion_probe_staging_buf.Get(),
             0u,
@@ -3539,8 +3535,9 @@ namespace models {
             &mapped
           );
           if (mapped_result == DXGI_ERROR_WAS_STILL_DRAWING) {
-            ++result.staging_map_busy_count;
+            progress.observe(adaptive_motion_probe_poll_observation_e::staging_map_busy);
           } else if (FAILED(mapped_result) || !mapped.pData) {
+            progress.observe(adaptive_motion_probe_poll_observation_e::staging_map_failed);
             adaptive_motion_probe_available = false;
             log_adaptive_motion_probe_failure_once("D3D11 staging readback failed");
             result.status = adaptive_motion_probe_status_e::unavailable;
@@ -3549,6 +3546,7 @@ namespace models {
             std::array<std::uint32_t, adaptive_motion_probe_word_count> words {};
             std::memcpy(words.data(), mapped.pData, sizeof(words));
             context->Unmap(adaptive_motion_probe_staging_buf.Get(), 0u);
+            progress.observe(adaptive_motion_probe_poll_observation_e::staging_map_ready);
             result.status = decode_adaptive_motion_probe_words(
                               words,
                               current_frame_id,
@@ -3564,10 +3562,10 @@ namespace models {
         }
         const auto now = std::chrono::steady_clock::now();
         const auto timeout_reason = classify_adaptive_motion_probe_timeout(
-          event_ready,
+          progress.event_ready,
           has_wait_deadline,
           has_wait_deadline && now >= deadline,
-          result.poll_round_count >= poll_round_limit
+          progress.poll_round_count >= poll_round_limit
         );
         if (timeout_reason != adaptive_motion_probe_timeout_reason_e::none) {
           result.status = adaptive_motion_probe_status_e::timed_out;
@@ -3579,6 +3577,10 @@ namespace models {
           std::this_thread::yield();
         }
       }
+      result.poll_round_count = progress.poll_round_count;
+      result.event_query_count = progress.event_query_count;
+      result.staging_map_attempt_count = progress.staging_map_attempt_count;
+      result.staging_map_busy_count = progress.staging_map_busy_count;
       result.wait_duration = std::chrono::steady_clock::now() - started;
       adaptive_motion_probe_copy_scheduled = false;
       adaptive_motion_probe_event_recorded = false;
@@ -4856,7 +4858,7 @@ namespace models {
         ocr_available = false;
         adaptive_ocr_input_compare_available = false;
       } else if (adaptive_motion_probe_enabled) {
-        // Exact OCR-input comparison is an optional extension of CFM4, not a detector resource.
+        // Exact OCR-input comparison is an optional extension of CFM5, not a detector resource.
         // A view/allocation failure must leave ordinary OCR and the DDup OCR-clean hold intact.
         const bool compare_resources_ok =
           ocr_input_supports_adaptive_compare &&
@@ -6413,7 +6415,7 @@ namespace models {
         mark_d3d_parallax_end(perf_slot);
       }
 
-      // This private copy is not OCR authority by itself. The later CFM4 probe also validates the
+      // This private copy is not OCR authority by itself. The later CFM5 probe also validates the
       // retained OCR8 header and exact frame owner, so detector overflow/nonfinite abstention
       // cannot authenticate these bytes. Establish the CPU-side owner only after this exact OCR
       // member and V2 postprocess both succeeded. A proven OCR8 redispatch advances identity

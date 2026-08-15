@@ -1060,7 +1060,7 @@ namespace platf::dxgi {
                     adaptive_refresh_required_at_entry
                   )
                 );
-              if (quiet_signal) {
+              if (adaptive_shadow && quiet_signal) {
                 if (detail::host_sbs_adaptive_motion_sum_only_broad(damage->coverage)) {
                   ++adaptive_shadow_sum_only_broad_veto;
                 } else if (!broad_single_rect &&
@@ -1487,14 +1487,6 @@ namespace platf::dxgi {
                 }
                 const bool active_hold_fell_through =
                   authorize_active_model_hold && !observation_hold.valid();
-                if (
-                  active_hold_fell_through &&
-                  !adaptive_model_equivalent_candidate.ocr_damage_unchanged &&
-                  !est.current_frame_motion_probe.sample
-                    .exact_ocr_input_matches_baseline()
-                ) {
-                  ++adaptive_active_ocr_vetoes;
-                }
                 // A hold token is one-call admission authority, never cacheable presentation
                 // metadata. The explicit typed authorization above owns any current render.
                 est.adaptive_motion_observation_hold = {};
@@ -3028,8 +3020,8 @@ namespace platf::dxgi {
       if (!requested) {
         return;
       }
-      adaptive_shadow_probe_collection.record(result);
-      adaptive_shadow_lifetime_probe_collection.record(result);
+      adaptive_probe_collection.record(result);
+      adaptive_lifetime_probe_collection.record(result);
 
       const bool identity_matches =
         result.status == models::adaptive_motion_probe_status_e::ready &&
@@ -3048,13 +3040,13 @@ namespace platf::dxgi {
         case detail::host_sbs_adaptive_ocr_probe_class_e::not_applicable:
           break;
         case detail::host_sbs_adaptive_ocr_probe_class_e::unavailable:
-          ++adaptive_shadow_ocr_dirty_exact_unavailable;
+          ++adaptive_ocr_dirty_exact_unavailable;
           break;
         case detail::host_sbs_adaptive_ocr_probe_class_e::exact_equal:
-          ++adaptive_shadow_ocr_dirty_exact_equal;
+          ++adaptive_ocr_dirty_exact_equal;
           break;
         case detail::host_sbs_adaptive_ocr_probe_class_e::veto:
-          ++adaptive_shadow_ocr_dirty_exact_veto;
+          ++adaptive_ocr_dirty_exact_veto;
           break;
       }
 
@@ -3063,31 +3055,31 @@ namespace platf::dxgi {
       switch (result.status) {
         case models::adaptive_motion_probe_status_e::not_requested:
         case models::adaptive_motion_probe_status_e::unavailable:
-          ++adaptive_shadow_probe_unavailable;
+          ++adaptive_probe_unavailable;
           break;
         case models::adaptive_motion_probe_status_e::timed_out:
-          ++adaptive_shadow_probe_timed_out;
+          ++adaptive_probe_timed_out;
           break;
         case models::adaptive_motion_probe_status_e::invalid:
-          ++adaptive_shadow_probe_invalid;
+          ++adaptive_probe_invalid;
           break;
         case models::adaptive_motion_probe_status_e::ready:
           if (!identity_matches) {
-            ++adaptive_shadow_probe_invalid;
+            ++adaptive_probe_invalid;
             break;
           }
-          ++adaptive_shadow_probe_ready;
+          ++adaptive_probe_ready;
           switch (models::adaptive_motion_probe_exact_verdict(result.sample)) {
             case models::adaptive_motion_probe_exact_verdict_e::invalid:
-              ++adaptive_shadow_probe_exact_invalid;
+              ++adaptive_probe_exact_invalid;
               probe_class = detail::host_sbs_current_frame_probe_class_e::invalid;
               break;
             case models::adaptive_motion_probe_exact_verdict_e::quiet_evidence:
-              ++adaptive_shadow_probe_exact_quiet;
+              ++adaptive_probe_exact_quiet;
               probe_class = detail::host_sbs_current_frame_probe_class_e::exact_quiet;
               break;
             case models::adaptive_motion_probe_exact_verdict_e::motion_veto:
-              ++adaptive_shadow_probe_exact_motion;
+              ++adaptive_probe_exact_motion;
               probe_class = detail::host_sbs_current_frame_probe_class_e::exact_motion;
               break;
           }
@@ -3096,10 +3088,10 @@ namespace platf::dxgi {
       if (probe_class == detail::host_sbs_current_frame_probe_class_e::none) {
         return;
       }
-      adaptive_shadow_lifetime_probe_results.add(probe_class);
       if (!adaptive_motion_shadow_enabled()) {
         return;
       }
+      adaptive_shadow_lifetime_probe_results.add(probe_class);
       if (!adaptive_motion_audit.attach_probe(frame_id, probe_class)) {
         detail::host_sbs_current_frame_probe_counts_t unowned;
         unowned.add(probe_class);
@@ -3111,10 +3103,12 @@ namespace platf::dxgi {
       const bool tally_pending_unknown = true,
       const bool reset_schedule_watermark = false
     ) noexcept {
-      const auto discarded = adaptive_motion_audit.discard_all();
-      if (tally_pending_unknown) {
-        tally_adaptive_motion_unknown(discarded.candidates);
-        tally_adaptive_motion_probe_unknown(discarded.probes);
+      if (adaptive_motion_shadow_enabled()) {
+        const auto discarded = adaptive_motion_audit.discard_all();
+        if (tally_pending_unknown) {
+          tally_adaptive_motion_unknown(discarded.candidates);
+          tally_adaptive_motion_probe_unknown(discarded.probes);
+        }
       }
       adaptive_motion_state.reset();
       adaptive_hold_cadence.reset();
@@ -3140,7 +3134,7 @@ namespace platf::dxgi {
       const std::chrono::steady_clock::time_point now
     ) {
       if (!adaptive_motion_shadow_enabled() ||
-          now - adaptive_shadow_stats_started < std::chrono::seconds(5)) {
+          now - adaptive_stats_started < std::chrono::seconds(5)) {
         return;
       }
       const auto pending = adaptive_motion_audit.pending();
@@ -3190,24 +3184,24 @@ namespace platf::dxgi {
         << pending.by_class.depth_plus_ocr << '/'
         << pending.by_class.ocr_only_needed
         << " current_probe_requests="sv
-        << adaptive_shadow_probe_collection.requests
+        << adaptive_probe_collection.requests
         << " probe_status_ready/timeout/invalid/unavailable="sv
-        << adaptive_shadow_probe_ready << '/'
-        << adaptive_shadow_probe_timed_out << '/'
-        << adaptive_shadow_probe_invalid << '/'
-        << adaptive_shadow_probe_unavailable
+        << adaptive_probe_ready << '/'
+        << adaptive_probe_timed_out << '/'
+        << adaptive_probe_invalid << '/'
+        << adaptive_probe_unavailable
         << " probe_exact_quiet/motion/invalid="sv
-        << adaptive_shadow_probe_exact_quiet << '/'
-        << adaptive_shadow_probe_exact_motion << '/'
-        << adaptive_shadow_probe_exact_invalid
+        << adaptive_probe_exact_quiet << '/'
+        << adaptive_probe_exact_motion << '/'
+        << adaptive_probe_exact_invalid
         << " ocr_dirty_exact_equal/veto/unavailable="sv
-        << adaptive_shadow_ocr_dirty_exact_equal << '/'
-        << adaptive_shadow_ocr_dirty_exact_veto << '/'
-        << adaptive_shadow_ocr_dirty_exact_unavailable
+        << adaptive_ocr_dirty_exact_equal << '/'
+        << adaptive_ocr_dirty_exact_veto << '/'
+        << adaptive_ocr_dirty_exact_unavailable
         << " probe_collection={"sv
-        << adaptive_shadow_probe_collection.summary() << '}'
+        << adaptive_probe_collection.summary() << '}'
         << " lifetime_probe_collection={"sv
-        << adaptive_shadow_lifetime_probe_collection.summary() << '}'
+        << adaptive_lifetime_probe_collection.summary() << '}'
         << " lifetime_probe_results_invalid/quiet/motion="sv
         << adaptive_shadow_lifetime_probe_results.invalid << '/'
         << adaptive_shadow_lifetime_probe_results.exact_quiet << '/'
@@ -3238,7 +3232,7 @@ namespace platf::dxgi {
         << pending.by_probe.invalid << '/'
         << pending.by_probe.exact_quiet << '/'
         << pending.by_probe.exact_motion;
-      adaptive_shadow_stats_started = now;
+      adaptive_stats_started = now;
       adaptive_shadow_samples = 0u;
       adaptive_shadow_quiet_samples = 0u;
       adaptive_shadow_candidates = 0u;
@@ -3252,73 +3246,79 @@ namespace platf::dxgi {
       adaptive_shadow_actual_unknown = 0u;
       adaptive_shadow_localized_veto = 0u;
       adaptive_shadow_sum_only_broad_veto = 0u;
-      adaptive_shadow_probe_ready = 0u;
-      adaptive_shadow_probe_timed_out = 0u;
-      adaptive_shadow_probe_invalid = 0u;
-      adaptive_shadow_probe_unavailable = 0u;
-      adaptive_shadow_probe_exact_quiet = 0u;
-      adaptive_shadow_probe_exact_motion = 0u;
-      adaptive_shadow_probe_exact_invalid = 0u;
-      adaptive_shadow_ocr_dirty_exact_equal = 0u;
-      adaptive_shadow_ocr_dirty_exact_veto = 0u;
-      adaptive_shadow_ocr_dirty_exact_unavailable = 0u;
-      adaptive_shadow_probe_collection = {};
+      adaptive_probe_ready = 0u;
+      adaptive_probe_timed_out = 0u;
+      adaptive_probe_invalid = 0u;
+      adaptive_probe_unavailable = 0u;
+      adaptive_probe_exact_quiet = 0u;
+      adaptive_probe_exact_motion = 0u;
+      adaptive_probe_exact_invalid = 0u;
+      adaptive_ocr_dirty_exact_equal = 0u;
+      adaptive_ocr_dirty_exact_veto = 0u;
+      adaptive_ocr_dirty_exact_unavailable = 0u;
+      adaptive_probe_collection = {};
     }
 
     void log_adaptive_active_stats_if_due(
       const std::chrono::steady_clock::time_point now
     ) {
       if (!adaptive_motion_active_enabled() ||
-          now - adaptive_shadow_stats_started < std::chrono::seconds(5)) {
+          now - adaptive_stats_started < std::chrono::seconds(5)) {
         return;
       }
+      auto unresolved_candidates = adaptive_active_candidates;
+      const auto resolve_candidates = [&unresolved_candidates](const std::uint64_t resolved) noexcept {
+        unresolved_candidates -= std::min(unresolved_candidates, resolved);
+      };
+      resolve_candidates(adaptive_active_holds);
+      resolve_candidates(adaptive_active_fallthrough_enqueues);
+      resolve_candidates(adaptive_active_postcheck_vetoes);
       BOOST_LOG(info)
-        << "SBS adaptive-motion active: candidates/holds/fallthrough="sv
-        << adaptive_active_candidates << '/' << adaptive_active_holds << '/'
-        << adaptive_active_fallthrough_enqueues
+        << "SBS adaptive-motion active: candidates="sv
+        << adaptive_active_candidates
+        << " candidate_outcomes_hold/fallthrough_enqueue/postcheck_veto/unresolved="sv
+        << adaptive_active_holds << '/' << adaptive_active_fallthrough_enqueues << '/'
+        << adaptive_active_postcheck_vetoes << '/' << unresolved_candidates
         << " holds_ocr_damage_clean/exact_input="sv
         << adaptive_active_ocr_damage_clean_holds << '/'
         << adaptive_active_exact_ocr_input_holds
         << " forced_refresh_enqueues="sv
         << adaptive_active_forced_refresh_enqueues
-        << " veto_ocr/postcheck="sv << adaptive_active_ocr_vetoes << '/'
-        << adaptive_active_postcheck_vetoes
         << " probe_status_ready/timeout/invalid/unavailable="sv
-        << adaptive_shadow_probe_ready << '/' << adaptive_shadow_probe_timed_out
-        << '/' << adaptive_shadow_probe_invalid << '/'
-        << adaptive_shadow_probe_unavailable
+        << adaptive_probe_ready << '/' << adaptive_probe_timed_out
+        << '/' << adaptive_probe_invalid << '/'
+        << adaptive_probe_unavailable
         << " probe_exact_telemetry_quiet/motion/invalid="sv
-        << adaptive_shadow_probe_exact_quiet << '/'
-        << adaptive_shadow_probe_exact_motion << '/'
-        << adaptive_shadow_probe_exact_invalid
+        << adaptive_probe_exact_quiet << '/'
+        << adaptive_probe_exact_motion << '/'
+        << adaptive_probe_exact_invalid
         << " ocr_dirty_exact_equal/veto/unavailable="sv
-        << adaptive_shadow_ocr_dirty_exact_equal << '/'
-        << adaptive_shadow_ocr_dirty_exact_veto << '/'
-        << adaptive_shadow_ocr_dirty_exact_unavailable
+        << adaptive_ocr_dirty_exact_equal << '/'
+        << adaptive_ocr_dirty_exact_veto << '/'
+        << adaptive_ocr_dirty_exact_unavailable
         << " probe_collection={"sv
-        << adaptive_shadow_probe_collection.summary() << '}'
+        << adaptive_probe_collection.summary() << '}'
         << " lifetime_probe_collection={"sv
-        << adaptive_shadow_lifetime_probe_collection.summary() << '}';
-      adaptive_shadow_stats_started = now;
+        << adaptive_lifetime_probe_collection.summary() << '}';
+      adaptive_stats_started = now;
       adaptive_active_candidates = 0u;
       adaptive_active_holds = 0u;
       adaptive_active_fallthrough_enqueues = 0u;
       adaptive_active_forced_refresh_enqueues = 0u;
-      adaptive_active_ocr_vetoes = 0u;
       adaptive_active_postcheck_vetoes = 0u;
       adaptive_active_ocr_damage_clean_holds = 0u;
       adaptive_active_exact_ocr_input_holds = 0u;
-      adaptive_shadow_probe_ready = 0u;
-      adaptive_shadow_probe_timed_out = 0u;
-      adaptive_shadow_probe_invalid = 0u;
-      adaptive_shadow_probe_unavailable = 0u;
-      adaptive_shadow_probe_exact_quiet = 0u;
-      adaptive_shadow_probe_exact_motion = 0u;
-      adaptive_shadow_probe_exact_invalid = 0u;
-      adaptive_shadow_ocr_dirty_exact_equal = 0u;
-      adaptive_shadow_ocr_dirty_exact_veto = 0u;
-      adaptive_shadow_ocr_dirty_exact_unavailable = 0u;
-      adaptive_shadow_probe_collection = {};
+      adaptive_probe_ready = 0u;
+      adaptive_probe_timed_out = 0u;
+      adaptive_probe_invalid = 0u;
+      adaptive_probe_unavailable = 0u;
+      adaptive_probe_exact_quiet = 0u;
+      adaptive_probe_exact_motion = 0u;
+      adaptive_probe_exact_invalid = 0u;
+      adaptive_ocr_dirty_exact_equal = 0u;
+      adaptive_ocr_dirty_exact_veto = 0u;
+      adaptive_ocr_dirty_exact_unavailable = 0u;
+      adaptive_probe_collection = {};
     }
 
     void poll_sbs_telemetry_after_output() {
@@ -3430,52 +3430,54 @@ namespace platf::dxgi {
             result.sample->structural_change_fraction,
             result.sample->change_fraction
           );
-          const auto audit = adaptive_motion_audit.resolve(
-            result.sample->sampled_frame_id,
-            verdict
-          );
-          tally_adaptive_motion_unknown(audit.unknown);
-          tally_adaptive_motion_probe_unknown(audit.probe_unknown);
-          if (audit.matched) {
-            auto &lifetime_cross_tab =
-              audit.matched->candidate_class ==
-                  detail::host_sbs_adaptive_motion_candidate_class_e::depth_plus_ocr ?
-                adaptive_shadow_lifetime_depth_plus_ocr_actual :
-                adaptive_shadow_lifetime_ocr_only_actual;
-            lifetime_cross_tab.add(audit.matched->verdict);
-            switch (audit.matched->verdict) {
-              case detail::host_sbs_adaptive_motion_verdict_e::quiet:
-                ++adaptive_shadow_actual_quiet;
-                break;
-              case detail::host_sbs_adaptive_motion_verdict_e::invalid:
-                ++adaptive_shadow_actual_invalid_veto;
-                break;
-              case detail::host_sbs_adaptive_motion_verdict_e::hard_cut:
-                ++adaptive_shadow_actual_hard_cut_veto;
-                break;
-              case detail::host_sbs_adaptive_motion_verdict_e::flags:
-                ++adaptive_shadow_actual_flags_veto;
-                break;
-              case detail::host_sbs_adaptive_motion_verdict_e::motion:
-                ++adaptive_shadow_actual_motion_veto;
-                break;
-            }
-            auto *probe_cross_tab = [&]()
-              -> detail::host_sbs_adaptive_motion_verdict_counts_t * {
-              switch (audit.matched->probe_class) {
-                case detail::host_sbs_current_frame_probe_class_e::none:
-                  return nullptr;
-                case detail::host_sbs_current_frame_probe_class_e::invalid:
-                  return &adaptive_shadow_lifetime_probe_invalid_actual;
-                case detail::host_sbs_current_frame_probe_class_e::exact_quiet:
-                  return &adaptive_shadow_lifetime_probe_quiet_actual;
-                case detail::host_sbs_current_frame_probe_class_e::exact_motion:
-                  return &adaptive_shadow_lifetime_probe_motion_actual;
+          if (adaptive_motion_shadow_enabled()) {
+            const auto audit = adaptive_motion_audit.resolve(
+              result.sample->sampled_frame_id,
+              verdict
+            );
+            tally_adaptive_motion_unknown(audit.unknown);
+            tally_adaptive_motion_probe_unknown(audit.probe_unknown);
+            if (audit.matched) {
+              auto &lifetime_cross_tab =
+                audit.matched->candidate_class ==
+                    detail::host_sbs_adaptive_motion_candidate_class_e::depth_plus_ocr ?
+                  adaptive_shadow_lifetime_depth_plus_ocr_actual :
+                  adaptive_shadow_lifetime_ocr_only_actual;
+              lifetime_cross_tab.add(audit.matched->verdict);
+              switch (audit.matched->verdict) {
+                case detail::host_sbs_adaptive_motion_verdict_e::quiet:
+                  ++adaptive_shadow_actual_quiet;
+                  break;
+                case detail::host_sbs_adaptive_motion_verdict_e::invalid:
+                  ++adaptive_shadow_actual_invalid_veto;
+                  break;
+                case detail::host_sbs_adaptive_motion_verdict_e::hard_cut:
+                  ++adaptive_shadow_actual_hard_cut_veto;
+                  break;
+                case detail::host_sbs_adaptive_motion_verdict_e::flags:
+                  ++adaptive_shadow_actual_flags_veto;
+                  break;
+                case detail::host_sbs_adaptive_motion_verdict_e::motion:
+                  ++adaptive_shadow_actual_motion_veto;
+                  break;
               }
-              return nullptr;
-            }();
-            if (probe_cross_tab) {
-              probe_cross_tab->add(audit.matched->verdict);
+              auto *probe_cross_tab = [&]()
+                -> detail::host_sbs_adaptive_motion_verdict_counts_t * {
+                switch (audit.matched->probe_class) {
+                  case detail::host_sbs_current_frame_probe_class_e::none:
+                    return nullptr;
+                  case detail::host_sbs_current_frame_probe_class_e::invalid:
+                    return &adaptive_shadow_lifetime_probe_invalid_actual;
+                  case detail::host_sbs_current_frame_probe_class_e::exact_quiet:
+                    return &adaptive_shadow_lifetime_probe_quiet_actual;
+                  case detail::host_sbs_current_frame_probe_class_e::exact_motion:
+                    return &adaptive_shadow_lifetime_probe_motion_actual;
+                }
+                return nullptr;
+              }();
+              if (probe_cross_tab) {
+                probe_cross_tab->add(audit.matched->verdict);
+              }
             }
           }
           if (
@@ -3491,9 +3493,11 @@ namespace platf::dxgi {
               )) {
             adaptive_motion_last_hard_cut_count = result.sample->hard_cut_count;
             adaptive_motion_has_sample = true;
-            ++adaptive_shadow_samples;
-            if (verdict == detail::host_sbs_adaptive_motion_verdict_e::quiet) {
-              ++adaptive_shadow_quiet_samples;
+            if (adaptive_motion_shadow_enabled()) {
+              ++adaptive_shadow_samples;
+              if (verdict == detail::host_sbs_adaptive_motion_verdict_e::quiet) {
+                ++adaptive_shadow_quiet_samples;
+              }
             }
           } else {
             // Out-of-order or missing-timestamp evidence cannot retain any predictive state or
@@ -5673,12 +5677,14 @@ namespace platf::dxgi {
       adaptive_motion_state.reset();
       adaptive_motion_route_state.reset();
       adaptive_hold_cadence.reset();
-      (void) adaptive_motion_audit.discard_all();
+      if (adaptive_motion_shadow_enabled()) {
+        (void) adaptive_motion_audit.discard_all();
+      }
       adaptive_motion_last_scheduled_frame_id = 0u;
       adaptive_motion_min_sampled_frame_id = 0u;
       adaptive_motion_last_hard_cut_count = 0u;
       adaptive_motion_has_sample = false;
-      adaptive_shadow_stats_started = std::chrono::steady_clock::now();
+      adaptive_stats_started = std::chrono::steady_clock::now();
       adaptive_shadow_samples = 0u;
       adaptive_shadow_quiet_samples = 0u;
       adaptive_shadow_candidates = 0u;
@@ -5701,23 +5707,22 @@ namespace platf::dxgi {
       adaptive_shadow_lifetime_probe_unknown = {};
       adaptive_shadow_localized_veto = 0u;
       adaptive_shadow_sum_only_broad_veto = 0u;
-      adaptive_shadow_probe_ready = 0u;
-      adaptive_shadow_probe_timed_out = 0u;
-      adaptive_shadow_probe_invalid = 0u;
-      adaptive_shadow_probe_unavailable = 0u;
-      adaptive_shadow_probe_exact_quiet = 0u;
-      adaptive_shadow_probe_exact_motion = 0u;
-      adaptive_shadow_probe_exact_invalid = 0u;
-      adaptive_shadow_ocr_dirty_exact_equal = 0u;
-      adaptive_shadow_ocr_dirty_exact_veto = 0u;
-      adaptive_shadow_ocr_dirty_exact_unavailable = 0u;
-      adaptive_shadow_probe_collection = {};
-      adaptive_shadow_lifetime_probe_collection = {};
+      adaptive_probe_ready = 0u;
+      adaptive_probe_timed_out = 0u;
+      adaptive_probe_invalid = 0u;
+      adaptive_probe_unavailable = 0u;
+      adaptive_probe_exact_quiet = 0u;
+      adaptive_probe_exact_motion = 0u;
+      adaptive_probe_exact_invalid = 0u;
+      adaptive_ocr_dirty_exact_equal = 0u;
+      adaptive_ocr_dirty_exact_veto = 0u;
+      adaptive_ocr_dirty_exact_unavailable = 0u;
+      adaptive_probe_collection = {};
+      adaptive_lifetime_probe_collection = {};
       adaptive_active_candidates = 0u;
       adaptive_active_holds = 0u;
       adaptive_active_fallthrough_enqueues = 0u;
       adaptive_active_forced_refresh_enqueues = 0u;
-      adaptive_active_ocr_vetoes = 0u;
       adaptive_active_postcheck_vetoes = 0u;
       adaptive_active_ocr_damage_clean_holds = 0u;
       adaptive_active_exact_ocr_input_holds = 0u;
@@ -6430,7 +6435,7 @@ namespace platf::dxgi {
     std::uint64_t adaptive_motion_min_sampled_frame_id = 0u;
     std::uint32_t adaptive_motion_last_hard_cut_count = 0u;
     bool adaptive_motion_has_sample = false;
-    std::chrono::steady_clock::time_point adaptive_shadow_stats_started {};
+    std::chrono::steady_clock::time_point adaptive_stats_started {};
     unsigned adaptive_shadow_samples = 0u;
     unsigned adaptive_shadow_quiet_samples = 0u;
     unsigned adaptive_shadow_candidates = 0u;
@@ -6462,24 +6467,22 @@ namespace platf::dxgi {
       adaptive_shadow_lifetime_probe_unknown;
     unsigned adaptive_shadow_localized_veto = 0u;
     unsigned adaptive_shadow_sum_only_broad_veto = 0u;
-    std::uint64_t adaptive_shadow_probe_ready = 0u;
-    std::uint64_t adaptive_shadow_probe_timed_out = 0u;
-    std::uint64_t adaptive_shadow_probe_invalid = 0u;
-    std::uint64_t adaptive_shadow_probe_unavailable = 0u;
-    std::uint64_t adaptive_shadow_probe_exact_quiet = 0u;
-    std::uint64_t adaptive_shadow_probe_exact_motion = 0u;
-    std::uint64_t adaptive_shadow_probe_exact_invalid = 0u;
-    std::uint64_t adaptive_shadow_ocr_dirty_exact_equal = 0u;
-    std::uint64_t adaptive_shadow_ocr_dirty_exact_veto = 0u;
-    std::uint64_t adaptive_shadow_ocr_dirty_exact_unavailable = 0u;
-    adaptive_motion_probe_collection_stats_t adaptive_shadow_probe_collection;
-    adaptive_motion_probe_collection_stats_t
-      adaptive_shadow_lifetime_probe_collection;
+    std::uint64_t adaptive_probe_ready = 0u;
+    std::uint64_t adaptive_probe_timed_out = 0u;
+    std::uint64_t adaptive_probe_invalid = 0u;
+    std::uint64_t adaptive_probe_unavailable = 0u;
+    std::uint64_t adaptive_probe_exact_quiet = 0u;
+    std::uint64_t adaptive_probe_exact_motion = 0u;
+    std::uint64_t adaptive_probe_exact_invalid = 0u;
+    std::uint64_t adaptive_ocr_dirty_exact_equal = 0u;
+    std::uint64_t adaptive_ocr_dirty_exact_veto = 0u;
+    std::uint64_t adaptive_ocr_dirty_exact_unavailable = 0u;
+    adaptive_motion_probe_collection_stats_t adaptive_probe_collection;
+    adaptive_motion_probe_collection_stats_t adaptive_lifetime_probe_collection;
     std::uint64_t adaptive_active_candidates = 0u;
     std::uint64_t adaptive_active_holds = 0u;
     std::uint64_t adaptive_active_fallthrough_enqueues = 0u;
     std::uint64_t adaptive_active_forced_refresh_enqueues = 0u;
-    std::uint64_t adaptive_active_ocr_vetoes = 0u;
     std::uint64_t adaptive_active_postcheck_vetoes = 0u;
     std::uint64_t adaptive_active_ocr_damage_clean_holds = 0u;
     std::uint64_t adaptive_active_exact_ocr_input_holds = 0u;

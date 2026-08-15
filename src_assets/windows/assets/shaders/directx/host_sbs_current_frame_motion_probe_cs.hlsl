@@ -27,7 +27,7 @@ cbuffer ProbeConstants : register(b1) {
     uint probe_ocr_baseline_frame_high;
 };
 
-#define MOTION_PROBE_CONTRACT_TAG 0x344D4643u
+#define MOTION_PROBE_CONTRACT_TAG 0x354D4643u
 #define MOTION_PROBE_OCR_INPUT_VALUE_COUNT 460800u
 #define MOTION_PROBE_OCR_RECORD_SCHEMA 3u
 #define MOTION_PROBE_OCR_RECORD_TAG 0x3852434Fu
@@ -59,7 +59,7 @@ cbuffer ProbeConstants : register(b1) {
 #define PROBE_WORD_EXCLUSION_MISMATCH 12u
 #define PROBE_WORD_EXACT_CHANGED 13u
 #define PROBE_WORD_APPEARANCE_1_OVER_1024 14u
-#define PROBE_WORD_MAX_APPEARANCE_DELTA_BITS 15u
+#define PROBE_WORD_APPEARANCE_NONFINITE 15u
 #define PROBE_WORD_APPEARANCE_EXACT_CHANGED 16u
 #define PROBE_WORD_OCR_INPUT_FLAGS 17u
 #define PROBE_WORD_OCR_BASELINE_FRAME_LOW 18u
@@ -76,12 +76,11 @@ cbuffer ProbeConstants : register(b1) {
 #define LOCAL_EXCLUSION_MISMATCH 1u
 #define LOCAL_EXACT_CHANGED 2u
 #define LOCAL_APPEARANCE_1_OVER_1024 3u
-#define LOCAL_MAX_APPEARANCE_DELTA_BITS 4u
+#define LOCAL_APPEARANCE_NONFINITE 4u
 #define LOCAL_APPEARANCE_EXACT_CHANGED 5u
-#define LOCAL_OCR_INPUT_COMPARED 6u
-#define LOCAL_OCR_INPUT_EXACT_MISMATCH 7u
-#define LOCAL_OCR_INPUT_NONFINITE 8u
-#define LOCAL_WORD_COUNT 9u
+#define LOCAL_OCR_INPUT_EXACT_MISMATCH 6u
+#define LOCAL_OCR_INPUT_NONFINITE 7u
+#define LOCAL_WORD_COUNT 8u
 
 groupshared uint GroupWords[LOCAL_WORD_COUNT];
 
@@ -109,6 +108,12 @@ void main(
     }
     GroupMemoryBarrierWithGroupSync();
 
+    bool compare_ocr_inputs =
+        (probe_ocr_input_flags &
+         (OCR_INPUT_BASELINE_CANDIDATE | OCR_INPUT_CURRENT_PREPROCESSED)) ==
+            (OCR_INPUT_BASELINE_CANDIDATE | OCR_INPUT_CURRENT_PREPROCESSED) &&
+        probe_ocr_input_value_count == MOTION_PROBE_OCR_INPUT_VALUE_COUNT;
+
     if (dtid.x < target_w && dtid.y < target_h) {
         uint current_exclusion = CurrentTensorExclusion[dtid.xy];
         uint previous_exclusion = PreviousTensorExclusion[dtid.xy];
@@ -125,30 +130,31 @@ void main(
                     asuint(PreviousModelInput[index + plane]) ||
                 asuint(CurrentModelInput[index + 2u * plane]) !=
                     asuint(PreviousModelInput[index + 2u * plane]);
-            float appearance_delta = abs(
-                CurrentAppearanceOrdinal[index] - PreviousAppearanceOrdinal[index]);
+            float current_appearance = CurrentAppearanceOrdinal[index];
+            float previous_appearance = PreviousAppearanceOrdinal[index];
+            bool appearance_finite =
+                ProbeFiniteFloat(current_appearance) &&
+                ProbeFiniteFloat(previous_appearance);
+            float appearance_delta = appearance_finite ?
+                abs(current_appearance - previous_appearance) : 0.0f;
             bool appearance_exact_changed =
-                asuint(CurrentAppearanceOrdinal[index]) !=
-                    asuint(PreviousAppearanceOrdinal[index]);
+                asuint(current_appearance) != asuint(previous_appearance);
 
             InterlockedAdd(GroupWords[LOCAL_ADMITTED], 1u);
             if (exact_changed) {
                 InterlockedAdd(GroupWords[LOCAL_EXACT_CHANGED], 1u);
             }
-            if (appearance_delta >= (1.0f / 1024.0f)) {
+            if (!appearance_finite) {
+                InterlockedAdd(GroupWords[LOCAL_APPEARANCE_NONFINITE], 1u);
+            } else if (appearance_delta >= (1.0f / 1024.0f)) {
                 InterlockedAdd(GroupWords[LOCAL_APPEARANCE_1_OVER_1024], 1u);
             }
             if (appearance_exact_changed) {
                 InterlockedAdd(GroupWords[LOCAL_APPEARANCE_EXACT_CHANGED], 1u);
             }
-            InterlockedMax(
-                GroupWords[LOCAL_MAX_APPEARANCE_DELTA_BITS], asuint(appearance_delta));
         }
 
-        if ((probe_ocr_input_flags &
-             (OCR_INPUT_BASELINE_CANDIDATE | OCR_INPUT_CURRENT_PREPROCESSED)) ==
-            (OCR_INPUT_BASELINE_CANDIDATE | OCR_INPUT_CURRENT_PREPROCESSED) &&
-            probe_ocr_input_value_count == MOTION_PROBE_OCR_INPUT_VALUE_COUNT) {
+        if (compare_ocr_inputs) {
             uint field_index = dtid.y * target_w + dtid.x;
             uint field_area = target_w * target_h;
             for (uint ocr_index = field_index;
@@ -156,7 +162,6 @@ void main(
                  ocr_index += field_area) {
                 float current_ocr = CurrentOcrInput[ocr_index];
                 float previous_ocr = PreviousOcrInput[ocr_index];
-                InterlockedAdd(GroupWords[LOCAL_OCR_INPUT_COMPARED], 1u);
                 if (asuint(current_ocr) != asuint(previous_ocr)) {
                     InterlockedAdd(
                         GroupWords[LOCAL_OCR_INPUT_EXACT_MISMATCH], 1u);
@@ -179,15 +184,12 @@ void main(
         InterlockedAdd(
             ProbeWords[PROBE_WORD_APPEARANCE_1_OVER_1024],
             GroupWords[LOCAL_APPEARANCE_1_OVER_1024]);
-        InterlockedMax(
-            ProbeWords[PROBE_WORD_MAX_APPEARANCE_DELTA_BITS],
-            GroupWords[LOCAL_MAX_APPEARANCE_DELTA_BITS]);
+        InterlockedAdd(
+            ProbeWords[PROBE_WORD_APPEARANCE_NONFINITE],
+            GroupWords[LOCAL_APPEARANCE_NONFINITE]);
         InterlockedAdd(
             ProbeWords[PROBE_WORD_APPEARANCE_EXACT_CHANGED],
             GroupWords[LOCAL_APPEARANCE_EXACT_CHANGED]);
-        InterlockedAdd(
-            ProbeWords[PROBE_WORD_OCR_INPUT_COMPARED],
-            GroupWords[LOCAL_OCR_INPUT_COMPARED]);
         InterlockedAdd(
             ProbeWords[PROBE_WORD_OCR_INPUT_EXACT_MISMATCH],
             GroupWords[LOCAL_OCR_INPUT_EXACT_MISMATCH]);
@@ -285,6 +287,8 @@ void main(
                 probe_ocr_baseline_frame_low;
             ProbeWords[PROBE_WORD_OCR_BASELINE_FRAME_HIGH] =
                 probe_ocr_baseline_frame_high;
+            ProbeWords[PROBE_WORD_OCR_INPUT_COMPARED] = compare_ocr_inputs ?
+                probe_ocr_input_value_count : 0u;
         }
     }
 }

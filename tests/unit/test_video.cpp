@@ -127,6 +127,35 @@ namespace {
     );
   }
 
+  TEST(AdaptiveMotionProbeTest, StickyReadinessRetriesMapWithoutRequeryingEvent) {
+    using observation_e = models::adaptive_motion_probe_poll_observation_e;
+    models::adaptive_motion_probe_poll_progress progress;
+
+    progress.begin_round();
+    ASSERT_TRUE(progress.event_query_needed());
+    progress.observe(observation_e::event_not_ready);
+    EXPECT_TRUE(progress.event_query_needed());
+    EXPECT_FALSE(progress.staging_map_needed());
+
+    progress.begin_round();
+    progress.observe(observation_e::event_ready);
+    EXPECT_FALSE(progress.event_query_needed());
+    ASSERT_TRUE(progress.staging_map_needed());
+    progress.observe(observation_e::staging_map_busy);
+    EXPECT_FALSE(progress.event_query_needed());
+    EXPECT_TRUE(progress.staging_map_needed());
+
+    progress.begin_round();
+    EXPECT_FALSE(progress.event_query_needed());
+    progress.observe(observation_e::staging_map_ready);
+    EXPECT_FALSE(progress.staging_map_needed());
+    EXPECT_TRUE(progress.staging_map_complete);
+    EXPECT_EQ(progress.poll_round_count, 3u);
+    EXPECT_EQ(progress.event_query_count, 2u);
+    EXPECT_EQ(progress.staging_map_attempt_count, 2u);
+    EXPECT_EQ(progress.staging_map_busy_count, 1u);
+  }
+
   TEST(AdaptiveMotionProbeTest, ValidatesExactIdentityAndShadowVerdict) {
     std::array<std::uint32_t, models::adaptive_motion_probe_word_count> words {};
     constexpr std::uint64_t current_id = 0x0000000200000003ull;
@@ -195,7 +224,7 @@ namespace {
     ));
   }
 
-  TEST(AdaptiveMotionProbeTest, RejectsMalformedCountersMaximaAndState) {
+  TEST(AdaptiveMotionProbeTest, RejectsMalformedCountersAndState) {
     constexpr std::uint64_t current_id = 11u;
     constexpr std::uint64_t baseline_id = 10u;
     constexpr std::uint32_t area = 16u * 16u;
@@ -222,6 +251,7 @@ namespace {
     };
 
     EXPECT_TRUE(rejects(0u, 0u));
+    EXPECT_TRUE(rejects(0u, 0x344D4643u));
     EXPECT_TRUE(rejects(1u, models::adaptive_motion_probe_settled_flags | (1u << 31u)));
     EXPECT_TRUE(rejects(7u, models::adaptive_motion_probe_max_exact_numeric_counter + 1u));
     EXPECT_TRUE(rejects(8u, sbs_adaptive_state::known_cut_flag_mask + 1u));
@@ -229,21 +259,13 @@ namespace {
     EXPECT_TRUE(rejects(10u, 5u));
     EXPECT_TRUE(rejects(11u, area + 1u));
     EXPECT_TRUE(rejects(13u, area + 1u));
-    EXPECT_TRUE(rejects(15u, std::bit_cast<std::uint32_t>(
-      std::numeric_limits<float>::quiet_NaN()
-    )));
+    EXPECT_TRUE(rejects(15u, area + 1u));
     EXPECT_TRUE(rejects(14u, 1u));  // Threshold changes require an exact ordinal mismatch.
-    EXPECT_TRUE(rejects(15u, std::bit_cast<std::uint32_t>(
-      models::adaptive_motion_probe_appearance_hold_threshold
-    )));  // A zero threshold count cannot claim a threshold-sized maximum.
     EXPECT_TRUE(rejects(16u, area + 1u));
     EXPECT_TRUE(rejects(17u, 1u << 31u));
 
     auto consistent_appearance_change = valid_words();
     consistent_appearance_change[14] = 1u;
-    consistent_appearance_change[15] = std::bit_cast<std::uint32_t>(
-      models::adaptive_motion_probe_appearance_hold_threshold
-    );
     consistent_appearance_change[16] = 1u;
     models::adaptive_motion_probe_sample consistent_sample;
     EXPECT_TRUE(models::decode_adaptive_motion_probe_words(
@@ -255,6 +277,17 @@ namespace {
       consistent_sample
     ));
     EXPECT_EQ(consistent_sample.appearance_delta_1_over_1024_texels, 1u);
+
+    auto nonfinite_appearance = valid_words();
+    nonfinite_appearance[15] = 1u;
+    ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
+      nonfinite_appearance, current_id, baseline_id, 16, 16, consistent_sample
+    ));
+    EXPECT_EQ(consistent_sample.appearance_nonfinite_texels, 1u);
+    EXPECT_EQ(
+      models::adaptive_motion_probe_exact_verdict(consistent_sample),
+      models::adaptive_motion_probe_exact_verdict_e::invalid
+    );
   }
 
   TEST(AdaptiveMotionProbeTest, AuthenticatesExactOcrInputAgainstTheV2Baseline) {
@@ -328,7 +361,7 @@ namespace {
     probe.sample.baseline_frame_id = 40u;
     probe.sample.prior_state_flags = models::adaptive_motion_probe_settled_flags;
     probe.sample.admitted_texels = 256u;
-    // CFM4 still observes exact ordinal bit noise, but the active selector tolerates it below the
+    // CFM5 still observes exact ordinal bit noise, but the active selector tolerates it below the
     // most conservative existing appearance threshold.
     probe.sample.appearance_exact_changed_texels = 1u;
 
@@ -403,7 +436,7 @@ namespace {
       decision_e::hold
     );
 
-    // A dirty crop may hold only when the ordinary OCR path is healthy and CFM4 proves every
+    // A dirty crop may hold only when the ordinary OCR path is healthy and CFM5 proves every
     // normalized OCR input float bit-identical to the authenticated baseline.
     auto exact_ocr = probe;
     exact_ocr.sample.ocr_input_baseline_valid = true;
@@ -455,8 +488,7 @@ namespace {
     veto.sample.appearance_delta_1_over_1024_texels = 1u;
     EXPECT_EQ(decide(veto), decision_e::infer);
     veto = probe;
-    veto.sample.maximum_appearance_delta =
-      models::adaptive_motion_probe_appearance_hold_threshold;
+    veto.sample.appearance_nonfinite_texels = 1u;
     EXPECT_EQ(decide(veto), decision_e::infer);
     veto = probe;
     veto.sample.prior_state_flags &= ~models::adaptive_motion_probe_flag_scene_settled;
@@ -4338,12 +4370,12 @@ TEST(DirectxShaderSourceTest, AdaptiveMotionProbeAuthenticatesCutStateEncodings)
     "/src_assets/windows/assets/shaders/directx/host_sbs_current_frame_motion_probe_cs.hlsl"
   );
   ASSERT_FALSE(shader.empty());
-  EXPECT_EQ(models::adaptive_motion_probe_contract_tag, 0x344D4643u);
+  EXPECT_EQ(models::adaptive_motion_probe_contract_tag, 0x354D4643u);
   EXPECT_EQ(models::adaptive_motion_probe_word_count, 23u);
   EXPECT_EQ(models::adaptive_motion_ocr_input_value_count, 960u * 160u * 3u);
   EXPECT_EQ(models::depth_coordinate_v2::subtitle_ocr_record_schema, 3u);
   EXPECT_EQ(models::depth_coordinate_v2::subtitle_ocr_record_tag, 0x3852434Fu);
-  EXPECT_NE(shader.find("MOTION_PROBE_CONTRACT_TAG 0x344D4643u"), std::string::npos);
+  EXPECT_NE(shader.find("MOTION_PROBE_CONTRACT_TAG 0x354D4643u"), std::string::npos);
   EXPECT_NE(
     shader.find("MOTION_PROBE_OCR_INPUT_VALUE_COUNT 460800u"),
     std::string::npos
@@ -4351,7 +4383,8 @@ TEST(DirectxShaderSourceTest, AdaptiveMotionProbeAuthenticatesCutStateEncodings)
   EXPECT_NE(shader.find("MOTION_PROBE_OCR_RECORD_SCHEMA 3u"), std::string::npos);
   EXPECT_NE(shader.find("MOTION_PROBE_OCR_RECORD_TAG 0x3852434Fu"), std::string::npos);
   EXPECT_NE(shader.find("PROBE_WORD_OCR_INPUT_NONFINITE 22u"), std::string::npos);
-  EXPECT_NE(shader.find("LOCAL_WORD_COUNT 9u"), std::string::npos);
+  EXPECT_NE(shader.find("PROBE_WORD_APPEARANCE_NONFINITE 15u"), std::string::npos);
+  EXPECT_NE(shader.find("LOCAL_WORD_COUNT 8u"), std::string::npos);
   EXPECT_NE(shader.find("StructuredBuffer<float> CurrentOcrInput : register(t7)"), std::string::npos);
   EXPECT_NE(shader.find("StructuredBuffer<float> PreviousOcrInput : register(t8)"), std::string::npos);
   EXPECT_NE(shader.find("StructuredBuffer<uint> PreviousOcrRecord : register(t9)"), std::string::npos);
@@ -4370,9 +4403,10 @@ TEST(DirectxShaderSourceTest, AdaptiveMotionProbeAuthenticatesCutStateEncodings)
     std::string::npos
   );
   EXPECT_NE(
-    shader.find("asuint(CurrentAppearanceOrdinal[index]) !="),
+    shader.find("asuint(current_appearance) != asuint(previous_appearance)"),
     std::string::npos
   );
+  EXPECT_NE(shader.find("if (!appearance_finite)"), std::string::npos);
   EXPECT_NE(
     shader.find("PreviousOcrRecord[0] == MOTION_PROBE_OCR_RECORD_SCHEMA"),
     std::string::npos
@@ -4387,6 +4421,15 @@ TEST(DirectxShaderSourceTest, AdaptiveMotionProbeAuthenticatesCutStateEncodings)
     ),
     std::string::npos
   );
+  EXPECT_NE(
+    shader.find(
+      "ProbeWords[PROBE_WORD_OCR_INPUT_COMPARED] = compare_ocr_inputs ?"
+    ),
+    std::string::npos
+  );
+  EXPECT_EQ(shader.find("LOCAL_OCR_INPUT_COMPARED"), std::string::npos);
+  EXPECT_EQ(shader.find("InterlockedMax"), std::string::npos);
+  EXPECT_EQ(shader.find("MAX_APPEARANCE_DELTA"), std::string::npos);
   EXPECT_EQ(shader.find("CurrentModelColor"), std::string::npos);
   EXPECT_EQ(shader.find("PreviousModelColor"), std::string::npos);
   EXPECT_EQ(shader.find("PROBE_WORD_RGB_"), std::string::npos);
@@ -4511,6 +4554,16 @@ TEST(DirectxShaderSourceTest, CurrentFrameProbeHasSeparateShadowAndActiveOwners)
     ),
     std::string::npos
   );
+  const auto shadow_spatial_gate = shared_damage_block.find(
+    "if (adaptive_shadow && quiet_signal)"
+  );
+  const auto shadow_spatial_counter = shared_damage_block.find(
+    "++adaptive_shadow_sum_only_broad_veto",
+    shadow_spatial_gate
+  );
+  ASSERT_NE(shadow_spatial_gate, std::string::npos);
+  ASSERT_NE(shadow_spatial_counter, std::string::npos);
+  EXPECT_LT(shadow_spatial_gate, shadow_spatial_counter);
 
   const auto active_precheck = display.find(
     "adaptive_model_equivalent_candidate = {",
@@ -4716,6 +4769,73 @@ TEST(DirectxShaderSourceTest, CurrentFrameProbeHasSeparateShadowAndActiveOwners)
   EXPECT_EQ(observer_body.find("adaptive_hold_cadence"), std::string::npos);
   EXPECT_EQ(observer_body.find("latest_v2_lineage"), std::string::npos);
   EXPECT_EQ(observer_body.find("matched_candidate_slot"), std::string::npos);
+  const auto shadow_ledger_gate = observer_body.find(
+    "if (!adaptive_motion_shadow_enabled())"
+  );
+  const auto shadow_ledger = observer_body.find(
+    "adaptive_shadow_lifetime_probe_results.add(probe_class)",
+    shadow_ledger_gate
+  );
+  ASSERT_NE(shadow_ledger_gate, std::string::npos);
+  ASSERT_NE(shadow_ledger, std::string::npos);
+  EXPECT_LT(shadow_ledger_gate, shadow_ledger);
+
+  const auto telemetry_poll = display.find("void poll_sbs_telemetry_after_output()");
+  const auto telemetry_poll_end = display.find(
+    "struct sbs_gpu_timer_slot_t",
+    telemetry_poll
+  );
+  ASSERT_NE(telemetry_poll, std::string::npos);
+  ASSERT_NE(telemetry_poll_end, std::string::npos);
+  const auto telemetry_body = display.substr(
+    telemetry_poll,
+    telemetry_poll_end - telemetry_poll
+  );
+  const auto audit_resolve = telemetry_body.find("adaptive_motion_audit.resolve(");
+  const auto audit_shadow_gate = telemetry_body.rfind(
+    "if (adaptive_motion_shadow_enabled())",
+    audit_resolve
+  );
+  const auto state_observe = telemetry_body.find(
+    "adaptive_motion_state.observe(",
+    audit_resolve
+  );
+  ASSERT_NE(audit_resolve, std::string::npos);
+  ASSERT_NE(audit_shadow_gate, std::string::npos);
+  ASSERT_NE(state_observe, std::string::npos);
+  EXPECT_LT(audit_shadow_gate, audit_resolve);
+  EXPECT_LT(audit_resolve, state_observe);
+  const auto shadow_sample = telemetry_body.find(
+    "++adaptive_shadow_samples",
+    state_observe
+  );
+  const auto shadow_sample_gate = telemetry_body.rfind(
+    "if (adaptive_motion_shadow_enabled())",
+    shadow_sample
+  );
+  ASSERT_NE(shadow_sample, std::string::npos);
+  ASSERT_NE(shadow_sample_gate, std::string::npos);
+  EXPECT_LT(shadow_sample_gate, shadow_sample);
+
+  const auto active_log = display.find("void log_adaptive_active_stats_if_due(");
+  const auto active_log_end = display.find(
+    "void poll_sbs_telemetry_after_output()",
+    active_log
+  );
+  ASSERT_NE(active_log, std::string::npos);
+  ASSERT_NE(active_log_end, std::string::npos);
+  const auto active_log_body = display.substr(active_log, active_log_end - active_log);
+  EXPECT_NE(
+    active_log_body.find(
+      "candidate_outcomes_hold/fallthrough_enqueue/postcheck_veto/unresolved="
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    active_log_body.find("adaptive_probe_collection.summary()"),
+    std::string::npos
+  );
+  EXPECT_EQ(active_log_body.find("veto_ocr"), std::string::npos);
 }
 
 TEST(DirectxShaderSourceTest, AdaptiveExactOcrInputOwnershipFailsOpen) {
@@ -4839,7 +4959,7 @@ TEST(DirectxShaderSourceTest, AdaptiveExactOcrInputOwnershipFailsOpen) {
   );
 }
 
-TEST(DirectxShaderSourceTest, AdaptiveProbeRetriesNonblockingMapWithStickyEventReadiness) {
+TEST(DirectxShaderSourceTest, AdaptiveProbeUsesTestedProgressAndNonblockingMap) {
   const auto estimator =
     read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
   const auto display =
@@ -4855,16 +4975,19 @@ TEST(DirectxShaderSourceTest, AdaptiveProbeRetriesNonblockingMapWithStickyEventR
   ASSERT_NE(next_method, std::string::npos);
   const auto body = estimator.substr(collect, next_method - collect);
 
-  const auto sticky_declaration = body.find("bool event_ready = false;");
-  const auto query_guard = body.find("if (!event_ready)", sticky_declaration);
+  const auto progress = body.find("adaptive_motion_probe_poll_progress progress;");
+  const auto query_guard = body.find("if (progress.event_query_needed())", progress);
   const auto query = body.find("cuEventQuery(", query_guard);
-  const auto sticky_set = body.find("event_ready = true;", query);
-  const auto map_guard = body.find("if (event_ready)", sticky_set);
+  const auto sticky_set = body.find(
+    "progress.observe(adaptive_motion_probe_poll_observation_e::event_ready)",
+    query
+  );
+  const auto map_guard = body.find("if (progress.staging_map_needed())", sticky_set);
   const auto map = body.find("context->Map(", map_guard);
   const auto busy = body.find("mapped_result == DXGI_ERROR_WAS_STILL_DRAWING", map);
   const auto busy_end = body.find("} else if (FAILED(mapped_result)", busy);
   const auto timeout = body.find("classify_adaptive_motion_probe_timeout(", busy_end);
-  ASSERT_NE(sticky_declaration, std::string::npos);
+  ASSERT_NE(progress, std::string::npos);
   ASSERT_NE(query_guard, std::string::npos);
   ASSERT_NE(query, std::string::npos);
   ASSERT_NE(sticky_set, std::string::npos);
@@ -4881,10 +5004,16 @@ TEST(DirectxShaderSourceTest, AdaptiveProbeRetriesNonblockingMapWithStickyEventR
   EXPECT_LT(busy, timeout);
   EXPECT_EQ(body.substr(busy, busy_end - busy).find("break;"), std::string::npos);
   EXPECT_NE(
-    body.substr(busy, busy_end - busy).find("++result.staging_map_busy_count"),
+    body.substr(busy, busy_end - busy).find(
+      "adaptive_motion_probe_poll_observation_e::staging_map_busy"
+    ),
     std::string::npos
   );
-  EXPECT_NE(body.find("result.poll_round_count >= poll_round_limit"), std::string::npos);
+  EXPECT_NE(body.find("progress.poll_round_count >= poll_round_limit"), std::string::npos);
+  EXPECT_NE(
+    body.find("result.event_query_count = progress.event_query_count"),
+    std::string::npos
+  );
   EXPECT_EQ(body.find("Flush("), std::string::npos);
   EXPECT_EQ(body.find("Sleep("), std::string::npos);
   EXPECT_EQ(body.find("sleep_for"), std::string::npos);

@@ -57,6 +57,8 @@ namespace {
     ASSERT_EQ(area, 334180u);
     const auto events = fixture.at("events").get<std::vector<std::string>>();
     ASSERT_EQ(events, (std::vector<std::string> {"appear", "move", "disappear"}));
+    EXPECT_TRUE(fixture.at("damage_modes").at("localized")
+                  .at("ocr_crop_unchanged").get<bool>());
 
     for (const auto &object : fixture.at("objects")) {
       const auto width = object.at("width").get<std::uint64_t>();
@@ -76,8 +78,6 @@ namespace {
           object_area,
         };
         EXPECT_FALSE(adaptive::host_sbs_adaptive_motion_broad_damage_candidate(localized))
-          << "width=" << width << " event=" << event;
-        EXPECT_FALSE(adaptive::host_sbs_adaptive_motion_damage_candidate(localized, true))
           << "width=" << width << " event=" << event;
         // Every requested object is intentionally within the separate legacy 0.25% experiment.
         // This fixture isolates the adaptive gate; that older gate must remain disabled.
@@ -120,8 +120,6 @@ namespace {
       area,
     };
     EXPECT_TRUE(adaptive::host_sbs_adaptive_motion_broad_damage_candidate(full_surface));
-    EXPECT_TRUE(adaptive::host_sbs_adaptive_motion_damage_candidate(full_surface, true));
-    EXPECT_FALSE(adaptive::host_sbs_adaptive_motion_damage_candidate(full_surface, false));
     EXPECT_FALSE(adaptive::host_sbs_adaptive_motion_sum_only_broad(full_surface));
 
     const adaptive::ddup_damage_coverage_t overlapping_sum_only {

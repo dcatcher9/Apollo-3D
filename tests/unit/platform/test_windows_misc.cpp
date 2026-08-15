@@ -567,14 +567,6 @@ namespace {
       );
     EXPECT_EQ(broad_coverage.max_single_intersection_area, 5000u);
     EXPECT_TRUE(host_sbs_adaptive_motion_broad_damage_candidate(broad_coverage));
-    EXPECT_TRUE(platf::dxgi::detail::host_sbs_adaptive_motion_damage_candidate(
-      broad_coverage,
-      true
-    ));
-    EXPECT_FALSE(platf::dxgi::detail::host_sbs_adaptive_motion_damage_candidate(
-      broad_coverage,
-      false
-    ));
   }
 
   TEST(WindowsDdupDamageTest, AdaptiveOcrCleanBroadWitnessCoversBothTopHalfPhases) {
@@ -619,10 +611,6 @@ namespace {
         platf::dxgi::detail::query_ddup_damage_between(from, to, ocr_crop),
         platf::dxgi::detail::ddup_damage_intersection_e::unchanged
       );
-      EXPECT_TRUE(platf::dxgi::detail::host_sbs_adaptive_motion_damage_candidate(
-        coverage,
-        true
-      ));
     };
 
     expect_ocr_clean_broad(baseline, first_phase);

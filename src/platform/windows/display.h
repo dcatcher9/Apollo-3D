@@ -1264,14 +1264,6 @@ namespace platf::dxgi {
                (coverage.region_area + 1u) / 2u;
     }
 
-    [[nodiscard]] constexpr bool host_sbs_adaptive_motion_damage_candidate(
-      const ddup_damage_coverage_t &coverage,
-      const bool ocr_crop_unchanged
-    ) noexcept {
-      return ocr_crop_unchanged &&
-             host_sbs_adaptive_motion_broad_damage_candidate(coverage);
-    }
-
     /** Diagnostic: summed overlaps looked broad but no one rectangle proved broad coverage. */
     [[nodiscard]] constexpr bool host_sbs_adaptive_motion_sum_only_broad(
       const ddup_damage_coverage_t &coverage

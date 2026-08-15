@@ -438,7 +438,7 @@ namespace models {
   }
 
   /** Optional current-frame motion evidence collected before DAV2 submission. */
-  inline constexpr std::uint32_t adaptive_motion_probe_contract_tag = 0x344D4643u;
+  inline constexpr std::uint32_t adaptive_motion_probe_contract_tag = 0x354D4643u;
   inline constexpr std::size_t adaptive_motion_probe_word_count = 23u;
   inline constexpr std::uint32_t adaptive_motion_probe_max_exact_numeric_counter = 16777215u;
   inline constexpr std::uint32_t adaptive_motion_ocr_input_value_count =
@@ -491,6 +491,63 @@ namespace models {
     }
     return adaptive_motion_probe_timeout_reason_e::none;
   }
+
+  enum class adaptive_motion_probe_poll_observation_e : std::uint8_t {
+    event_not_ready,
+    event_ready,
+    event_failed,
+    staging_map_busy,
+    staging_map_ready,
+    staging_map_failed,
+  };
+
+  /** Minimal state machine for sticky event readiness and bounded staging-map retries. */
+  struct adaptive_motion_probe_poll_progress {
+    bool event_ready = false;
+    bool staging_map_complete = false;
+    std::uint32_t poll_round_count = 0u;
+    std::uint32_t event_query_count = 0u;
+    std::uint32_t staging_map_attempt_count = 0u;
+    std::uint32_t staging_map_busy_count = 0u;
+
+    constexpr void begin_round() noexcept {
+      ++poll_round_count;
+    }
+
+    [[nodiscard]] constexpr bool event_query_needed() const noexcept {
+      return !event_ready;
+    }
+
+    [[nodiscard]] constexpr bool staging_map_needed() const noexcept {
+      return event_ready && !staging_map_complete;
+    }
+
+    constexpr void observe(
+      const adaptive_motion_probe_poll_observation_e observation
+    ) noexcept {
+      switch (observation) {
+        case adaptive_motion_probe_poll_observation_e::event_not_ready:
+        case adaptive_motion_probe_poll_observation_e::event_failed:
+          ++event_query_count;
+          break;
+        case adaptive_motion_probe_poll_observation_e::event_ready:
+          ++event_query_count;
+          event_ready = true;
+          break;
+        case adaptive_motion_probe_poll_observation_e::staging_map_busy:
+          ++staging_map_attempt_count;
+          ++staging_map_busy_count;
+          break;
+        case adaptive_motion_probe_poll_observation_e::staging_map_ready:
+          ++staging_map_attempt_count;
+          staging_map_complete = true;
+          break;
+        case adaptive_motion_probe_poll_observation_e::staging_map_failed:
+          ++staging_map_attempt_count;
+          break;
+      }
+    }
+  };
 
   inline constexpr std::uint32_t adaptive_motion_probe_flag_cut_contract = 1u << 0u;
   inline constexpr std::uint32_t adaptive_motion_probe_flag_initialized = 1u << 1u;
@@ -560,7 +617,7 @@ namespace models {
     std::uint32_t exclusion_mismatch_texels = 0u;
     std::uint32_t exact_changed_texels = 0u;
     std::uint32_t appearance_delta_1_over_1024_texels = 0u;
-    float maximum_appearance_delta = 0.0f;
+    std::uint32_t appearance_nonfinite_texels = 0u;
     std::uint32_t appearance_exact_changed_texels = 0u;
     bool ocr_input_baseline_valid = false;
     bool ocr_input_comparison_valid = false;
@@ -616,7 +673,7 @@ namespace models {
       sample.current_frame_id == 0u || sample.baseline_frame_id == 0u ||
       sample.current_frame_id <= sample.baseline_frame_id ||
       sample.prior_state_flags != adaptive_motion_probe_settled_flags ||
-      sample.admitted_texels == 0u
+      sample.admitted_texels == 0u || sample.appearance_nonfinite_texels != 0u
     ) {
       return adaptive_motion_probe_exact_verdict_e::invalid;
     }
@@ -632,15 +689,13 @@ namespace models {
     hold,
   };
 
-  inline constexpr float adaptive_motion_probe_appearance_hold_threshold =
-    1.0f / 1024.0f;
-
   /** Select the bounded active no-observation path after all display-owned gates are armed.
    *
-   * DAV2 NCHW and exclusion must be bit-identical. Appearance ordinal bit noise below 1/1024 is
-   * tolerated, but any thresholded appearance change vetoes. A retained OCR redispatch may hold
-   * only with caller-owned clean-crop proof; an ordinary frame must also have a healthy current
-   * OCR submission path, and an OCR-dirty frame additionally needs exact OCR-input equality.
+   * DAV2 NCHW and exclusion must be bit-identical. Finite appearance ordinal bit noise below
+   * 1/1024 is tolerated, but any thresholded or nonfinite appearance value vetoes. A retained OCR
+   * redispatch may hold only with caller-owned clean-crop proof; an ordinary frame must also have
+   * a healthy current OCR submission path, and an OCR-dirty frame additionally needs exact
+   * OCR-input equality.
    */
   [[nodiscard]] constexpr adaptive_motion_hold_decision_e
   select_adaptive_motion_hold(
@@ -673,9 +728,7 @@ namespace models {
       probe.sample.exclusion_mismatch_texels != 0u ||
       probe.sample.exact_changed_texels != 0u ||
       probe.sample.appearance_delta_1_over_1024_texels != 0u ||
-      !(probe.sample.maximum_appearance_delta >= 0.0f) ||
-      !(probe.sample.maximum_appearance_delta <
-        adaptive_motion_probe_appearance_hold_threshold)
+      probe.sample.appearance_nonfinite_texels != 0u
     ) {
       return adaptive_motion_hold_decision_e::infer;
     }

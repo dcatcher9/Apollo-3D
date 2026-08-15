@@ -524,6 +524,7 @@ TEST(HostSbsCurrentFrameMotionProbeGpuTest, PreservesExactEvidenceAndStateIdenti
   EXPECT_EQ(quiet.sample.admitted_texels, field_texels);
   EXPECT_EQ(quiet.sample.exclusion_mismatch_texels, 0u);
   EXPECT_EQ(quiet.sample.exact_changed_texels, 0u);
+  EXPECT_EQ(quiet.sample.appearance_nonfinite_texels, 0u);
   EXPECT_EQ(quiet.sample.appearance_exact_changed_texels, 0u);
   EXPECT_EQ(
     models::adaptive_motion_probe_exact_verdict(quiet.sample),
@@ -714,10 +715,32 @@ TEST(HostSbsCurrentFrameMotionProbeGpuTest, PreservesExactEvidenceAndStateIdenti
     thresholded_appearance.sample.appearance_delta_1_over_1024_texels,
     1u
   );
-  EXPECT_NEAR(
-    thresholded_appearance.sample.maximum_appearance_delta,
-    1.0f / 512.0f,
-    1e-7f
+  EXPECT_EQ(thresholded_appearance.sample.appearance_nonfinite_texels, 0u);
+
+  probe_inputs_t nonfinite_appearance_inputs;
+  constexpr std::size_t nonfinite_appearance_index = 11u * field_width + 9u;
+  const auto appearance_nan = std::bit_cast<float>(0x7fc00001u);
+  nonfinite_appearance_inputs.current_appearance[nonfinite_appearance_index] =
+    appearance_nan;
+  nonfinite_appearance_inputs.previous_appearance[nonfinite_appearance_index] =
+    appearance_nan;
+  probe_execution_t nonfinite_appearance;
+  ASSERT_TRUE(fixture.run(
+    nonfinite_appearance_inputs,
+    state,
+    nonfinite_appearance,
+    error
+  )) << error;
+  ASSERT_TRUE(nonfinite_appearance.decoded);
+  EXPECT_EQ(nonfinite_appearance.sample.appearance_nonfinite_texels, 1u);
+  EXPECT_EQ(nonfinite_appearance.sample.appearance_exact_changed_texels, 0u);
+  EXPECT_EQ(
+    nonfinite_appearance.sample.appearance_delta_1_over_1024_texels,
+    0u
+  );
+  EXPECT_EQ(
+    models::adaptive_motion_probe_exact_verdict(nonfinite_appearance.sample),
+    models::adaptive_motion_probe_exact_verdict_e::invalid
   );
 
   probe_inputs_t exclusion_inputs;

@@ -604,29 +604,34 @@ baseline IDs are copied from the private candidate and latest authenticated V2 c
 baseline must also equal the estimator's last postprocessed frame. After ordinary preprocessing,
 an independently source-authenticated shader outside the producer closure compares every admitted
 current NCHW value, appearance ordinal, and exclusion bit with that exact baseline and copies one
-fixed 23-word CFM4 record. When an estimator-owned OCR baseline exists, the same dispatch compares
+fixed 23-word CFM5 record. When an estimator-owned OCR baseline exists, the same dispatch compares
 `960x160x3` normalized FP32 OCR input values bit-for-bit and validates that the retained OCR8 header
 and frame owner describe the same baseline. The raw motion verdict calls only exact NCHW-bit,
 appearance-ordinal-bit, and exclusion equality quiet; it is never standalone hold authority.
-RGB reconstruction tiers/maxima, per-tile maxima, and bottom-band counters are deliberately absent:
-they had no production consumer and added arithmetic and atomics to the critical probe. The record
-retains the thresholded and maximum appearance delta, exact appearance-bit count, and typed
-OCR-input result used by active selection or existing exact telemetry.
+RGB reconstruction tiers/maxima, per-tile maxima, bottom-band counters, and the per-texel appearance
+maximum are deliberately absent: they had no production consumer and added arithmetic and atomics
+to the critical probe. The record retains the thresholded appearance count, a nonfinite-appearance
+count, the exact appearance-bit count, and the typed OCR-input result used by active selection or
+existing exact telemetry. When exact OCR comparison is configured, its fixed value count is
+published once; only mismatches and nonfinite values use per-value atomics.
 
 Active selection is deliberately separate and narrower in authority but tolerant of harmless
 ordinal bit noise. It requires a decoded record with settled prior-state flags, exact NCHW and
 exclusion equality, and zero appearance texels at or above the `1/1024` delta tier. Exact
 appearance-ordinal bit mismatches below that tier remain telemetry and do not veto by themselves.
+Any nonfinite current or baseline appearance ordinal vetoes active selection.
 The exact current/baseline/domain tuple, retained DDup history and endpoint tokens, noninteractive
 route, absence of pending/completed work, and ordinary non-dump/non-suppressed-optional-work route
 must still match. OCR safety is typed: either DDup proves the exact bottom crop unchanged, or an
-ordinary current OCR path must map and bind successfully while CFM4 proves all `460800` normalized
+ordinary current OCR path must map and bind successfully while CFM5 proves all `460800` normalized
 input floats equal an estimator-owned baseline whose OCR8 record and frame owner are authoritative.
 Any mismatch, nonfinite value, missing/abstaining OCR8 record, unavailable comparison resource, or
 OCR setup failure follows ordinary DAV2/OCR inference.
 The existing encode target remains the only deadline: after preserving the same `3 ms` downstream
-reserve, candidate-only nonblocking collection may consume at most `0.5 ms` starting when it
-reaches its first poll round, and has an independent 16-round fuse. Preprocessing does not silently
+reserve, candidate-only nonblocking collection starts with a nominal `0.5 ms` allowance when it
+reaches its first poll round and has an independent 16-round fuse. Each round checks the absolute
+deadline before doing more work, but thread-yield scheduling can resume slightly after the nominal
+allowance; it is a poll-start bound, not a hard wall-clock bound. Preprocessing does not silently
 spend that allowance; the absolute cadence deadline still truncates it. A missing or late target
 permits one immediate round only. The staging map uses
 `DO_NOT_WAIT`; once CUDA event readiness is observed it stays sticky, and a transient
@@ -653,7 +658,7 @@ the exact `16`/`250 ms` refresh budget nor the low-motion one-hold budget.
 
 The exact OCR-input baseline is estimator-owned rather than a display cache shortcut. A candidate
 copy is queued only after one ordinary joined DAV2/OCR completion has produced V2 and submitted
-OCR postprocessing; it becomes hold authority only when a later CFM4 probe validates the retained
+OCR postprocessing; it becomes hold authority only when a later CFM5 probe validates the retained
 OCR8 schema, validity, and exact frame owner. A damage-proven OCR redispatch may roll only that
 exact owner forward. Domain changes, subtitle suppression, detector abstention/failure, producer
 failure, optional-probe loss, and unsafe interop cleanup invalidate it. Optional comparison
@@ -662,8 +667,8 @@ independent DDup-clean hold remain available. A mapped OCR input remains stream-
 queued CUDA unmap even when the exact hold submits neither TensorRT engine, preventing the next
 delivery from racing the fixed interop buffer.
 
-The optional CFM4 shader closure is pinned independently at SHA-256
-`f377f3fb199b6e55a07a4e5dafd8fe1c8f74692eadb0c54b1726f97c3bffe326`. A source snapshot or
+The optional CFM5 shader closure is pinned independently at SHA-256
+`6d2cdccee485fe423f30191a67a198c3911d70137704c068e708dd8f1b75fded`. A source snapshot or
 closure mismatch disables the adaptive probe and all model-equivalent holds without changing the
 authenticated V2 producer, ordinary DAV2/OCR inference, or rendering.
 
@@ -671,20 +676,27 @@ The live source signature, transfer domain, root/region generations, browser epo
 state are observed independently of cache authentication. Any change clears predictive evidence,
 including while an inference is pending or before the first completion on the new route.
 
-Every hypothetical candidate retains its exact frame ID in a bounded 16-entry decision queue.
+In shadow mode every hypothetical candidate retains its exact frame ID in a bounded 16-entry
+decision queue.
 When that frame's later CutBridge readback arrives, diagnostics classify it as actual quiet or an
 invalid, hard-cut, flags, or motion veto. A coalesced gap, queue eviction, reset, or missing exact
 readback is counted unknown rather than inferred from a newer cache. Exact resolution retains each
 candidate's depth-plus-OCR or OCR-only-needed class. Five-second diagnostics publish monotonic
 lifetime class-by-verdict totals, class-specific unknowns and current pending ownership, so an
 interval boundary cannot misattribute a later result; the existing interval aggregate remains.
-An exact current-frame probe annotation stays in that same queue and is resolved only by the later
-CutBridge sample with the identical candidate frame ID. Diagnostics publish probe readiness,
+An exact current-frame probe annotation stays in that same shadow queue and is resolved only by
+the later CutBridge sample with the identical candidate frame ID. Diagnostics publish probe readiness,
 query/wait cost, pending and unknown ownership, plus lifetime invalid/quiet/motion probe rows
 crossed with CutBridge quiet/invalid/hard-cut/flags/motion columns. A gap, eviction, or reset charges
 both candidate and attached probe ownership unknown rather than pairing either with a newer frame.
-A sample is stale at `100 ms`
-and cannot enable a candidate; a scheduling-time gap of at least `100 ms` clears the quiet streak
+Active mode omits this retrospective queue, lifetime result ledger, cross-tabs, spatial-veto
+counters, and shadow sample counters. It retains the shared interval probe status, OCR comparison,
+and collection-cost telemetry needed to qualify active behavior, while both modes continue to
+observe the same predictor state. Each active five-second line partitions its candidate total into
+hold, ordinary fallthrough enqueue, postcheck veto after an estimator hold, and a saturating
+unresolved residual for candidates that did not reach any of those terminal outcomes. A sample is
+stale at `100 ms` and cannot enable a candidate; a scheduling-time gap of at least `100 ms` clears
+the quiet streak
 while retaining the cut-count baseline and exact pending-audit ownership for later truthful
 classification. Out-of-order telemetry, readback failure, DDup discontinuity, missing damage,
 route/domain/authority transition, interactive move/size, dump/reprocess, or producer failure
