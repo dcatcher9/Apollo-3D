@@ -48,8 +48,15 @@ float2 Reproject(float2 destination_uv, float eye_sign) {
     float source_x = destination_uv.x;
     [unroll]
     for (int iteration = 0; iteration < 11; ++iteration) {
-        source_x = destination_uv.x + eye_sign *
+        float next_source_x = destination_uv.x + eye_sign *
             SampleParallax(source_x, destination_uv.y);
+        bool exactly_settled = asuint(next_source_x) == asuint(source_x);
+        source_x = next_source_x;
+#if !defined(HOST_SBS_TEST_FIXED_ELEVEN_REFERENCE)
+        if (exactly_settled) {
+            break;
+        }
+#endif
     }
     return float2(source_x, destination_uv.y);
 }

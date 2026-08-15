@@ -1788,8 +1788,16 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("for (int iteration = 0; iteration < 11; ++iteration)",
                       direct_inverse)
         self.assertIn(
-            "source_x = destination_uv.x + eye_sign *",
+            "float next_source_x = destination_uv.x + eye_sign *",
             direct_inverse)
+        self.assertIn(
+            "asuint(next_source_x) == asuint(source_x)", direct_inverse)
+        self.assertLess(
+            direct_inverse.index("asuint(next_source_x) == asuint(source_x)"),
+            direct_inverse.index("source_x = next_source_x;"))
+        self.assertLess(
+            direct_inverse.index("source_x = next_source_x;"),
+            direct_inverse.index("if (exactly_settled)"))
         self.assertNotIn("ForwardCoverageTexture", direct_inverse)
         self.assertNotIn("bgOrder", direct_inverse)
         self.assertNotIn("SBS_DIRECT_PARALLAX", reprojection)
@@ -1891,7 +1899,33 @@ class EvalContractTests(unittest.TestCase):
         shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx")
         for name in ("sbs_reprojection_v2_live_ps.hlsl", "sbs_direct_replay_ps.hlsl"):
             with self.subTest(shader=name), open(os.path.join(shader_dir, name), encoding="utf-8") as fh:
-                self.assertIn("ContentToSourceUV", fh.read())
+                shader = fh.read()
+                self.assertIn("ContentToSourceUV", shader)
+                expected_loops = 2 if name == "sbs_reprojection_v2_live_ps.hlsl" else 1
+                self.assertEqual(
+                    shader.count("for (int iteration = 0; iteration < 11; ++iteration)"),
+                    expected_loops,
+                )
+                self.assertEqual(
+                    shader.count("asuint(next_source_x) == asuint(source_x)"),
+                    expected_loops,
+                )
+                self.assertEqual(
+                    shader.count("source_x = next_source_x;"), expected_loops)
+                self.assertEqual(
+                    shader.count("if (exactly_settled)"), expected_loops)
+                cursor = 0
+                for _ in range(expected_loops):
+                    predicate_at = shader.index(
+                        "asuint(next_source_x) == asuint(source_x)", cursor)
+                    assignment_at = shader.index(
+                        "source_x = next_source_x;", predicate_at)
+                    break_at = shader.index("if (exactly_settled)", assignment_at)
+                    self.assertLess(predicate_at, assignment_at)
+                    self.assertLess(assignment_at, break_at)
+                    cursor = break_at + 1
+                self.assertNotIn("next_source_x == source_x", shader)
+                self.assertNotIn("abs(next_source_x", shader)
 
     def test_host_sbs_intermediate_follows_observed_capture_transfer(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

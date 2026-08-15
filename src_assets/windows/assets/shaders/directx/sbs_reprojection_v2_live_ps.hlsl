@@ -1,9 +1,10 @@
 // Production Host SBS renderer for the authenticated Depth Coordinate V2 final field.
 //
 // The producer supplies a signed, one-eye displacement in source-U units whose horizontal slope
-// is strictly below one. Each eye map therefore has one inverse; a short fixed-point solve is the
-// complete visibility rule. Invalid or unauthenticated state renders the current color frame
-// through identity so a producer fault can never expose stale pixels or legacy geometry.
+// is strictly below one. Each eye map therefore has one inverse; an at-most-11-step fixed-point
+// solve is the complete visibility rule. The solve may stop only when the next source coordinate
+// has exactly the same IEEE-754 bits. Invalid or unauthenticated state renders the current color
+// frame through identity so a producer fault can never expose stale pixels or legacy geometry.
 
 Texture2D<float4> SourceColor : register(t0);
 Texture2D<float> FinalParallax : register(t1);
@@ -117,11 +118,18 @@ float2 Reproject(float2 destination_uv, float eye_sign) {
         // Keep the ordinary full-frame path exactly as before and pay no ROI dimension work.
         [unroll]
         for (int iteration = 0; iteration < 11; ++iteration) {
-            source_x = destination_uv.x + eye_sign * FinalParallax.SampleLevel(
+            float next_source_x = destination_uv.x + eye_sign * FinalParallax.SampleLevel(
                 LinearSampler,
                 float2(source_x, destination_uv.y),
                 0
             );
+            bool exactly_settled = asuint(next_source_x) == asuint(source_x);
+            source_x = next_source_x;
+#if !defined(HOST_SBS_TEST_FIXED_ELEVEN_REFERENCE)
+            if (exactly_settled) {
+                break;
+            }
+#endif
         }
     } else {
         float roi_width = video_roi_source_uv.z - video_roi_source_uv.x;
@@ -150,12 +158,19 @@ float2 Reproject(float2 destination_uv, float eye_sign) {
             vertical_slope * source_height_in_source_u;
         [unroll]
         for (int iteration = 0; iteration < 11; ++iteration) {
-            source_x = destination_uv.x + eye_sign * SampleVideoRoiParallax(
+            float next_source_x = destination_uv.x + eye_sign * SampleVideoRoiParallax(
                 source_x,
                 destination_uv.y,
                 roi_width,
                 vertical_budget_per_source_v
             );
+            bool exactly_settled = asuint(next_source_x) == asuint(source_x);
+            source_x = next_source_x;
+#if !defined(HOST_SBS_TEST_FIXED_ELEVEN_REFERENCE)
+            if (exactly_settled) {
+                break;
+            }
+#endif
         }
     }
     return float2(source_x, destination_uv.y);

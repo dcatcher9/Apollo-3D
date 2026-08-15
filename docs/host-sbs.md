@@ -28,7 +28,7 @@ flowchart LR
     VERTICAL["75/25 vertical envelope share"]
     ROW["Horizontal majorant"]
     PLANE["Post-limit subtitle plane and analytic collar"]
-    INVERSE["11-step contractive inverse"]
+    INVERSE["At-most-11-step exact-settle inverse"]
     COLOR["One native linear-color sample"]
     ENCODE["Packed SBS and NVENC"]
 
@@ -55,9 +55,9 @@ schema 54/tag `0xE6E2DB82`, canonical SHA-256
 complete policy below, including all subtitle field/ROI semantics, and producer source-closure
 SHA-256 `66bd77d5c4eab407b12dcd711bae2d6bc5b0616f3c067ae0136f6a2ba3e3e141`.
 The live-renderer source-closure SHA-256 is
-`41cd0bf450afa1cd3585b1945e006a003d11bae02c88c04e5d5b32d1a69e0f42`, and dump-only diagnostic
+`458ce5bdb57a1de4498ec8d7bb905f4ea1ee12c85cf53c009642f9c556e340f5`, and dump-only diagnostic
 renderer source-closure SHA-256
-`0f83d7a1a7f30c2ba9eee01f0fd6c4c7780478b46d4a4e435788e3a4d91e54c1`. It admits the following
+`4210f91933f5b3bc80e2bbcfb812bc563753a38dd98dce95ac00811b777ae64a`. It admits the following
 production calibration:
 
 | Property | Production value |
@@ -467,9 +467,13 @@ transparent rims, thin structures, and ordinary non-edge content rather than one
 
 ## Inverse warp and source sampling
 
-Each eye solves the same final signed parallax field with opposite signs using 11 fixed-point
-iterations. The horizontal slope bound keeps the mapping contractive and gives one unique source
-coordinate. The renderer then takes one linear-filtered sample from the original source texture.
+Each eye solves the same final signed parallax field with opposite signs using at most 11
+fixed-point iterations. After computing an iteration, the renderer assigns that next coordinate
+and exits only when its IEEE-754 bits exactly equal the preceding coordinate; `+0.0` and `-0.0`
+therefore remain distinct. A nonsettled sample always reaches the same hard 11-iteration cap as the
+reference solve. The horizontal slope bound keeps the mapping contractive and gives one unique
+source coordinate. The renderer then takes one linear-filtered sample from the original source
+texture.
 
 There is no forward owner, multi-root visibility choice, inpaint pass, or synthetic internal fill.
 Only samples outside the finite source rectangle clamp to its nearest edge; the diagnostic mask

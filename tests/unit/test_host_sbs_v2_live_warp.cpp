@@ -15,6 +15,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <d3d11.h>
@@ -69,9 +70,36 @@ namespace {
 
   static_assert(sizeof(host_sbs_v2_geometry_t) == 48u);
 
+  struct direct_parallax_constants_t {
+    float source_u_limit = models::depth_coordinate_v2::direct_container_limit;
+    float reserved_0 = 0.0f;
+    float reserved_1 = 0.0f;
+    float reserved_2 = 0.0f;
+  };
+
+  static_assert(sizeof(direct_parallax_constants_t) == 16u);
+
+  enum class warp_shader_e {
+    live_main,
+    live_mapping,
+    direct_main,
+    direct_mapping,
+    flat_main,
+  };
+
   class live_v2_warp_fixture_t {
   public:
-    bool initialize(std::string &error, const bool flat_identity = false) {
+    bool initialize(
+      std::string &error,
+      const warp_shader_e shader = warp_shader_e::live_main,
+      const bool fixed_eleven_reference = false
+    ) {
+      mapping_output =
+        shader == warp_shader_e::live_mapping ||
+        shader == warp_shader_e::direct_mapping;
+      direct_replay =
+        shader == warp_shader_e::direct_main ||
+        shader == warp_shader_e::direct_mapping;
       constexpr D3D_FEATURE_LEVEL requested[] = {D3D_FEATURE_LEVEL_11_0};
       D3D_FEATURE_LEVEL actual {};
       auto status = D3D11CreateDevice(
@@ -92,7 +120,7 @@ namespace {
       }
 
       const std::filesystem::path shader_root = SUNSHINE_SHADERS_DIR;
-      if (flat_identity) {
+      if (shader == warp_shader_e::flat_main) {
         ComPtr<ID3DBlob> flat_bytecode;
         ComPtr<ID3DBlob> flat_errors;
         status = D3DCompileFromFile(
@@ -118,7 +146,7 @@ namespace {
                     "could not create the independent flat-SBS pixel shader";
           return false;
         }
-      } else {
+      } else if (shader == warp_shader_e::live_main && !fixed_eleven_reference) {
         const auto live_sources =
           models::host_sbs_shader_cache::snapshot_sources(
             shader_root,
@@ -148,6 +176,74 @@ namespace {
               &pixel_shader
             ))) {
           error = "could not create the authenticated live V2 pixel shader";
+          return false;
+        }
+      } else if (shader == warp_shader_e::live_mapping && !fixed_eleven_reference) {
+        const auto diagnostic_sources =
+          models::host_sbs_shader_cache::snapshot_sources(
+            shader_root,
+            models::host_sbs_shader_cache::parallax_v2_live_diagnostic_specs
+          );
+        if (!diagnostic_sources) {
+          error = "could not snapshot the live V2 diagnostic source closure";
+          return false;
+        }
+        const auto closure =
+          models::host_sbs_shader_cache::source_closure_sha256(diagnostic_sources);
+        if (closure !=
+            models::host_sbs_shader_cache::
+              parallax_v2_diagnostic_source_closure_sha256) {
+          error = "live V2 diagnostic source closure does not match its authenticated pin";
+          return false;
+        }
+        const auto pixel_bytecode = models::host_sbs_shader_cache::get(
+          diagnostic_sources,
+          models::host_sbs_shader_cache::parallax_v2_live_mapping
+        );
+        if (!pixel_bytecode ||
+            FAILED(device->CreatePixelShader(
+              pixel_bytecode->data(),
+              pixel_bytecode->size(),
+              nullptr,
+              &pixel_shader
+            ))) {
+          error = "could not create the authenticated live V2 mapping pixel shader";
+          return false;
+        }
+      } else {
+        const auto source_file = direct_replay ?
+          "sbs_direct_replay_ps.hlsl" :
+          mapping_output ?
+            "sbs_reprojection_v2_diagnostics_ps.hlsl" :
+            "sbs_reprojection_v2_live_ps.hlsl";
+        const auto entrypoint = mapping_output ? "mapping_ps" : "main_ps";
+        constexpr D3D_SHADER_MACRO fixed_eleven_macros[] = {
+          {"HOST_SBS_TEST_FIXED_ELEVEN_REFERENCE", "1"},
+          {nullptr, nullptr},
+        };
+        ComPtr<ID3DBlob> reference_bytecode;
+        ComPtr<ID3DBlob> reference_errors;
+        status = D3DCompileFromFile(
+          (shader_root / source_file).c_str(),
+          fixed_eleven_reference ? fixed_eleven_macros : nullptr,
+          D3D_COMPILE_STANDARD_FILE_INCLUDE,
+          entrypoint,
+          "ps_5_0",
+          D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
+          0,
+          &reference_bytecode,
+          &reference_errors
+        );
+        if (FAILED(status) || !reference_bytecode ||
+            FAILED(device->CreatePixelShader(
+              reference_bytecode->GetBufferPointer(),
+              reference_bytecode->GetBufferSize(),
+              nullptr,
+              &pixel_shader
+            ))) {
+          error = reference_errors ?
+                    static_cast<const char *>(reference_errors->GetBufferPointer()) :
+                    "could not create the direct or fixed-eleven reference pixel shader";
           return false;
         }
       }
@@ -312,13 +408,36 @@ namespace {
         return false;
       }
 
+      ComPtr<ID3D11Buffer> direct_constants_buffer;
+      if (direct_replay) {
+        const direct_parallax_constants_t direct_constants {};
+        D3D11_BUFFER_DESC direct_desc {};
+        direct_desc.ByteWidth = sizeof(direct_constants);
+        direct_desc.Usage = D3D11_USAGE_IMMUTABLE;
+        direct_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA direct_data {};
+        direct_data.pSysMem = &direct_constants;
+        if (FAILED(device->CreateBuffer(
+              &direct_desc,
+              &direct_data,
+              &direct_constants_buffer
+            ))) {
+          error = "could not create direct-parallax constants";
+          return false;
+        }
+      }
+
       const UINT packed_width = source_width * 2u;
+      const DXGI_FORMAT output_format =
+        mapping_output ? DXGI_FORMAT_R32_FLOAT : color_format;
+      const UINT output_bytes_per_pixel =
+        mapping_output ? sizeof(float) : color_bytes_per_pixel;
       D3D11_TEXTURE2D_DESC output_desc {};
       output_desc.Width = packed_width;
       output_desc.Height = source_height;
       output_desc.MipLevels = 1u;
       output_desc.ArraySize = 1u;
-      output_desc.Format = color_format;
+      output_desc.Format = output_format;
       output_desc.SampleDesc.Count = 1u;
       output_desc.Usage = D3D11_USAGE_DEFAULT;
       output_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
@@ -364,6 +483,10 @@ namespace {
       context->PSSetShaderResources(0, static_cast<UINT>(std::size(srvs)), srvs);
       context->PSSetSamplers(0, 1, samplers);
       context->PSSetConstantBuffers(2, 1, constants);
+      if (direct_constants_buffer) {
+        ID3D11Buffer *direct_constants[] = {direct_constants_buffer.Get()};
+        context->PSSetConstantBuffers(4, 1, direct_constants);
+      }
       context->RSSetViewports(1, &viewport);
       context->OMSetRenderTargets(1, output_rtv.GetAddressOf(), nullptr);
       context->Draw(3, 0);
@@ -393,7 +516,7 @@ namespace {
         return false;
       }
       const std::size_t row_bytes =
-        static_cast<std::size_t>(packed_width) * color_bytes_per_pixel;
+        static_cast<std::size_t>(packed_width) * output_bytes_per_pixel;
       packed_output.resize(row_bytes * source_height);
       for (UINT y = 0; y < source_height; ++y) {
         std::memcpy(
@@ -442,6 +565,8 @@ namespace {
     ComPtr<ID3D11VertexShader> vertex_shader;
     ComPtr<ID3D11PixelShader> pixel_shader;
     ComPtr<ID3D11SamplerState> sampler;
+    bool mapping_output = false;
+    bool direct_replay = false;
   };
 
   template <typename Pixel>
@@ -1598,13 +1723,209 @@ TEST(HostSbsV2LiveWarpGpuTest, CandidateFieldCannotBlurOrAlterLiveColor) {
   EXPECT_LT(production_max_defocus, 3.0e-6f);
 }
 
+TEST(HostSbsV2LiveWarpGpuTest, ExactEarlyExitMatchesUnconditionalElevenIterationsBitForBit) {
+  namespace v2 = models::depth_coordinate_v2;
+  constexpr UINT source_width = 32u;
+  constexpr UINT source_height = 12u;
+  constexpr UINT depth_width = 16u;
+  constexpr UINT depth_height = 8u;
+  const std::array<float, 4> sentinel_clear {0.91f, 0.13f, 0.77f, 0.42f};
+
+  std::vector<bgra8_t> source(
+    static_cast<std::size_t>(source_width) * source_height
+  );
+  for (UINT y = 0; y < source_height; ++y) {
+    for (UINT x = 0; x < source_width; ++x) {
+      source[static_cast<std::size_t>(y) * source_width + x] = {
+        static_cast<std::uint8_t>((17u * x + 31u * y + 11u) & 0xffu),
+        static_cast<std::uint8_t>((47u * x + 13u * y + 23u) & 0xffu),
+        static_cast<std::uint8_t>((29u * x + 53u * y + 37u) & 0xffu),
+        0xffu,
+      };
+    }
+  }
+
+  const std::size_t depth_elements =
+    static_cast<std::size_t>(depth_width) * depth_height;
+  const std::vector<float> zero_field(depth_elements, 0.0f);
+  const std::vector<float> constant_field(depth_elements, 0.011f);
+  std::vector<float> complex_field(depth_elements);
+  std::vector<float> worst_slope_field(depth_elements);
+  for (UINT y = 0; y < depth_height; ++y) {
+    for (UINT x = 0; x < depth_width; ++x) {
+      const float u = (static_cast<float>(x) + 0.5f) /
+        static_cast<float>(depth_width);
+      const float v = (static_cast<float>(y) + 0.5f) /
+        static_cast<float>(depth_height);
+      complex_field[static_cast<std::size_t>(y) * depth_width + x] =
+        0.014f * (u - 0.5f) + 0.005f * (v - 0.5f) +
+        0.002f * std::sin(6.2831853f * (u + v));
+      worst_slope_field[static_cast<std::size_t>(y) * depth_width + x] =
+        std::clamp(0.5f * (u - 0.5f), -0.04f, 0.04f);
+    }
+  }
+
+  host_sbs_v2_geometry_t roi_geometry {};
+  roi_geometry.video_roi_active = 1.0f;
+  roi_geometry.video_roi_left = 0.1875f;
+  roi_geometry.video_roi_top = 1.0f / 6.0f;
+  roi_geometry.video_roi_right = 0.8125f;
+  roi_geometry.video_roi_bottom = 5.0f / 6.0f;
+  roi_geometry.tensor_content_left = 2u;
+  roi_geometry.tensor_content_top = 1u;
+  roi_geometry.tensor_content_right = 14u;
+  roi_geometry.tensor_content_bottom = 7u;
+
+  live_v2_warp_fixture_t live_main;
+  live_v2_warp_fixture_t live_main_reference;
+  live_v2_warp_fixture_t live_mapping;
+  live_v2_warp_fixture_t live_mapping_reference;
+  live_v2_warp_fixture_t direct_main;
+  live_v2_warp_fixture_t direct_main_reference;
+  live_v2_warp_fixture_t direct_mapping;
+  live_v2_warp_fixture_t direct_mapping_reference;
+  std::string error;
+  ASSERT_TRUE(live_main.initialize(error, warp_shader_e::live_main)) << error;
+  ASSERT_TRUE(live_main_reference.initialize(
+    error, warp_shader_e::live_main, true
+  )) << error;
+  ASSERT_TRUE(live_mapping.initialize(error, warp_shader_e::live_mapping)) << error;
+  ASSERT_TRUE(live_mapping_reference.initialize(
+    error, warp_shader_e::live_mapping, true
+  )) << error;
+  ASSERT_TRUE(direct_main.initialize(error, warp_shader_e::direct_main)) << error;
+  ASSERT_TRUE(direct_main_reference.initialize(
+    error, warp_shader_e::direct_main, true
+  )) << error;
+  ASSERT_TRUE(direct_mapping.initialize(
+    error, warp_shader_e::direct_mapping
+  )) << error;
+  ASSERT_TRUE(direct_mapping_reference.initialize(
+    error, warp_shader_e::direct_mapping, true
+  )) << error;
+
+  const auto compare_exact_and_reference = [&] (
+    live_v2_warp_fixture_t &exact,
+    live_v2_warp_fixture_t &reference,
+    const std::vector<float> &field,
+    const host_sbs_v2_geometry_t &geometry,
+    const std::string &where
+  ) {
+    SCOPED_TRACE(where);
+    std::vector<std::byte> exact_bytes;
+    std::vector<std::byte> reference_bytes;
+    ASSERT_TRUE(exact.render(
+      DXGI_FORMAT_B8G8R8A8_UNORM,
+      sizeof(bgra8_t),
+      source_width,
+      source_height,
+      source.data(),
+      field,
+      zero_field,
+      make_live_state(true, true),
+      sentinel_clear,
+      exact_bytes,
+      error,
+      depth_width,
+      depth_height,
+      geometry
+    )) << error;
+    ASSERT_TRUE(reference.render(
+      DXGI_FORMAT_B8G8R8A8_UNORM,
+      sizeof(bgra8_t),
+      source_width,
+      source_height,
+      source.data(),
+      field,
+      zero_field,
+      make_live_state(true, true),
+      sentinel_clear,
+      reference_bytes,
+      error,
+      depth_width,
+      depth_height,
+      geometry
+    )) << error;
+    EXPECT_EQ(exact_bytes, reference_bytes);
+  };
+
+  // Compare both the packed color and the R32 inverse coordinate. The R32 mapping witnesses
+  // coordinate bits directly, so a texture sample cannot hide a difference at a flat color or
+  // within one bilinear footprint. Zero and constant fields settle early; the spatial field
+  // exercises ordinary varying geometry, and the clamped 0.5-slope ramp covers the authenticated
+  // worst contraction where the hard 11-step cap remains necessary.
+  const std::array<std::pair<const char *, const std::vector<float> *>, 4>
+    signed_fields {{
+      {"zero", &zero_field},
+      {"constant", &constant_field},
+      {"complex", &complex_field},
+      {"worst-slope", &worst_slope_field},
+    }};
+  for (const auto &[name, field] : signed_fields) {
+    compare_exact_and_reference(
+      live_main,
+      live_main_reference,
+      *field,
+      host_sbs_v2_geometry_t {},
+      std::string("live full packed ") + name
+    );
+    compare_exact_and_reference(
+      live_mapping,
+      live_mapping_reference,
+      *field,
+      host_sbs_v2_geometry_t {},
+      std::string("live full mapping ") + name
+    );
+    compare_exact_and_reference(
+      live_main,
+      live_main_reference,
+      *field,
+      roi_geometry,
+      std::string("live ROI packed ") + name
+    );
+    compare_exact_and_reference(
+      live_mapping,
+      live_mapping_reference,
+      *field,
+      roi_geometry,
+      std::string("live ROI mapping ") + name
+    );
+  }
+
+  const auto direct_encode = [] (const std::vector<float> &field) {
+    std::vector<float> encoded(field.size());
+    for (std::size_t index = 0; index < field.size(); ++index) {
+      encoded[index] = 0.5f + field[index] /
+        (2.0f * v2::direct_container_limit);
+    }
+    return encoded;
+  };
+  for (const auto &[name, signed_field] : signed_fields) {
+    const auto encoded_field = direct_encode(*signed_field);
+    compare_exact_and_reference(
+      direct_main,
+      direct_main_reference,
+      encoded_field,
+      host_sbs_v2_geometry_t {},
+      std::string("direct packed ") + name
+    );
+    compare_exact_and_reference(
+      direct_mapping,
+      direct_mapping_reference,
+      encoded_field,
+      host_sbs_v2_geometry_t {},
+      std::string("direct mapping ") + name
+    );
+  }
+}
+
 TEST(HostSbsV2LiveWarpGpuTest, IndependentFlatShaderIgnoresV2Geometry) {
   constexpr UINT width = 8u;
   constexpr UINT height = 1u;
   const std::array<float, 4> sentinel_clear {0.91f, 0.13f, 0.77f, 0.42f};
   std::string error;
   live_v2_warp_fixture_t flat;
-  ASSERT_TRUE(flat.initialize(error, true)) << error;
+  ASSERT_TRUE(flat.initialize(error, warp_shader_e::flat_main)) << error;
 
   std::vector<rgba32f_t> source(width);
   for (UINT x = 0; x < width; ++x) {

@@ -172,6 +172,17 @@ class DirectInverseWarpSourceTest(unittest.TestCase):
             direct,
         )
         self.assertEqual(direct.count("SampleParallax(source_x, destination_uv.y)"), 1)
+        predicate = "asuint(next_source_x) == asuint(source_x)"
+        assignment = "source_x = next_source_x;"
+        guarded_break = "if (exactly_settled)"
+        self.assertEqual(direct.count(predicate), 1)
+        self.assertEqual(direct.count(assignment), 1)
+        self.assertEqual(direct.count(guarded_break), 1)
+        self.assertLess(direct.index(predicate), direct.index(assignment))
+        self.assertLess(direct.index(assignment), direct.index(guarded_break))
+        self.assertIn("#if !defined(HOST_SBS_TEST_FIXED_ELEVEN_REFERENCE)", direct)
+        self.assertNotIn("next_source_x == source_x", direct)
+        self.assertNotIn("abs(next_source_x", direct)
         for forbidden in (
             "DirectOrderTexture",
             "ForwardCoverageTexture",
