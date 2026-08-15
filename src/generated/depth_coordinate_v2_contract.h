@@ -10,10 +10,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 52u;
-  inline constexpr std::uint32_t contract_tag = 0xDD77CD32u;
-  inline constexpr std::string_view contract_canonical_sha256 = "115114c1bcbbfba925e58c0edb0b90b5989deade6f722b9e43366960b8f5cf35";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "dd77cd3279a9e7b3b232b3e445ae7b1b711eeba38e109d4bf8f56edb756dd8e5";
+  inline constexpr std::uint32_t contract_schema = 53u;
+  inline constexpr std::uint32_t contract_tag = 0x3B434764u;
+  inline constexpr std::string_view contract_canonical_sha256 = "c08635c04fbecfb1dd33a644eb032b1cacb786c4e09449ea035494c816e929ca";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "3b434764dad56a5df29a17e8a6f7d15049d40d278396b53344eff11c9990ca1a";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -156,7 +156,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t shader_source_closure_schema = 2u;
   inline constexpr std::uint32_t shader_source_compile_flags = 34816u;
   inline constexpr std::uint32_t shader_source_macro_count = 0u;
-  inline constexpr std::string_view shader_source_closure_sha256 = "68b99544bb5e8525bfa6e5417c8f6d67d7238296842cd76d0b83d8d8f6c2569a";
+  inline constexpr std::string_view shader_source_closure_sha256 = "3c9192aac92497520a6e60ae87fc28d0664bdabc8888270274826ec870643735";
 
   struct shader_source_spec_t {
     std::string_view source_file;
@@ -164,14 +164,13 @@ namespace models::depth_coordinate_v2 {
     std::string_view source_target;
   };
 
-  inline constexpr std::array<shader_source_spec_t, 26> shader_source_specs {{
+  inline constexpr std::array<shader_source_spec_t, 25> shader_source_specs {{
     {"rgb_to_nchw_cs.hlsl", "main", "cs_5_0"},
     {"rgb_to_nchw_cs.hlsl", "content_main", "cs_5_0"},
     {"rgb_to_nchw_cs.hlsl", "pad_main", "cs_5_0"},
     {"buffer_to_tex_cs.hlsl", "main", "cs_5_0"},
     {"buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"},
     {"depth_ema_motion_cs.hlsl", "main", "cs_5_0"},
-    {"depth_minmax_cs.hlsl", "main", "cs_5_0"},
     {"depth_minmax_ema_cs.hlsl", "main", "cs_5_0"},
     {"depth_hist_cs.hlsl", "main", "cs_5_0"},
     {"depth_scene_cut_evidence_cs.hlsl", "main", "cs_5_0"},

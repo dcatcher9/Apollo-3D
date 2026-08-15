@@ -1,5 +1,5 @@
 {
-  "schema": 52,
+  "schema": 53,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -160,11 +160,6 @@
         "source_target": "cs_5_0"
       },
       {
-        "source_file": "depth_minmax_cs.hlsl",
-        "source_entrypoint": "main",
-        "source_target": "cs_5_0"
-      },
-      {
         "source_file": "depth_minmax_ema_cs.hlsl",
         "source_entrypoint": "main",
         "source_target": "cs_5_0"
@@ -260,7 +255,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "68b99544bb5e8525bfa6e5417c8f6d67d7238296842cd76d0b83d8d8f6c2569a"
+    "source_closure_sha256": "3c9192aac92497520a6e60ae87fc28d0664bdabc8888270274826ec870643735"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,

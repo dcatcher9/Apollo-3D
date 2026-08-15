@@ -87,6 +87,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             50: "b7d05b870bf37aecf811c7735dddefc11a80bb742b339c6b36a2a5018fc6b7e2",
             51: "50ab2ec86d2833d8dc935ccc8becbbd15e99e23eadde00e99b5a575ba6606f8a",
             52: "115114c1bcbbfba925e58c0edb0b90b5989deade6f722b9e43366960b8f5cf35",
+            53: "c08635c04fbecfb1dd33a644eb032b1cacb786c4e09449ea035494c816e929ca",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -94,14 +95,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0xDD77CD32)
+        self.assertEqual(generator.contract_tag(contract), 0x3B434764)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "dd77cd3279a9e7b3b232b3e445ae7b1b711eeba38e109d4bf8f56edb756dd8e5",
+            "3b434764dad56a5df29a17e8a6f7d15049d40d278396b53344eff11c9990ca1a",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "68b99544bb5e8525bfa6e5417c8f6d67d7238296842cd76d0b83d8d8f6c2569a",
+            "3c9192aac92497520a6e60ae87fc28d0664bdabc8888270274826ec870643735",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -383,7 +384,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 52u',
+                'contract_schema = 53u',
                 'subtitle_ocr_contract_schema = 11u',
                 'subtitle_ocr_model_name = "ppocrv6_tiny_det_modelopt_fp16"',
                 'subtitle_ocr_asset_path = '
@@ -441,7 +442,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 52u',
+                '#define V2_CONTRACT_SCHEMA 53u',
                 '#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 11u',
                 '#define V2_OCR_INPUT_WIDTH 960u',
                 '#define V2_OCR_OUTPUT_WIDTH 960u',
@@ -637,9 +638,9 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.validate_renderer_source_closure_pins(),
             {
                 "parallax_v2_live_renderer_source_closure_sha256":
-                    "2aac93ddeb5e89de424c52eb8f43b0509ee580c829e04e345dc95967070c7cd1",
+                    "ba7d2f6e6d8c0266bec3e0a53e67164e6e9b482394a2770c2f0c678b6d4a6512",
                 "parallax_v2_diagnostic_source_closure_sha256":
-                    "150d16132c0ad98c742717c124280e1818555d22ed8ee2c14bf8f86da62db28d",
+                    "430f3172a51aece82acac353c098bd0c6070a3b81034af8b77adb94ea5bf1f36",
             },
         )
 

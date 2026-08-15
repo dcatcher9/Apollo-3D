@@ -50,14 +50,14 @@ diagnostics that explain how the final field was produced.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 52/tag `0xDD77CD32`, canonical SHA-256
-`115114c1bcbbfba925e58c0edb0b90b5989deade6f722b9e43366960b8f5cf35`. It binds the
+schema 53/tag `0x3B434764`, canonical SHA-256
+`c08635c04fbecfb1dd33a644eb032b1cacb786c4e09449ea035494c816e929ca`. It binds the
 complete policy below, including all subtitle field/ROI semantics, and producer source-closure
-SHA-256 `68b99544bb5e8525bfa6e5417c8f6d67d7238296842cd76d0b83d8d8f6c2569a`.
+SHA-256 `3c9192aac92497520a6e60ae87fc28d0664bdabc8888270274826ec870643735`.
 The live-renderer source-closure SHA-256 is
-`2aac93ddeb5e89de424c52eb8f43b0509ee580c829e04e345dc95967070c7cd1`, and dump-only diagnostic
+`ba7d2f6e6d8c0266bec3e0a53e67164e6e9b482394a2770c2f0c678b6d4a6512`, and dump-only diagnostic
 renderer source-closure SHA-256
-`150d16132c0ad98c742717c124280e1818555d22ed8ee2c14bf8f86da62db28d`. It admits the following
+`430f3172a51aece82acac353c098bd0c6070a3b81034af8b77adb94ea5bf1f36`. It admits the following
 production calibration:
 
 | Property | Production value |
@@ -153,6 +153,15 @@ artifacts and manifest color fields when auditing the pipeline.
 For each finite raw DAV2 field, the producer calculates exact extrema, arithmetic mean, and
 population standard deviation. Standard deviation is validity evidence only. A field with
 `sigma <= 1e-6` is collapsed and cannot produce current-frame geometry.
+
+The same GPU traversal also produces the raw normalization reduction consumed by the percentile
+histogram and temporal range scaler. V2 moments continue to admit every finite value, including a
+finite negative value, while normalization separately counts only finite values greater than or
+equal to zero. Its min/max remain the exact unsigned float-bit reduction used by the prior dedicated
+pass, including its signed-zero behavior. A negative or non-finite admitted texel therefore
+invalidates normalization without changing V2's finite-value moment semantics. The one-thread frame
+resolve writes both records before normalization continues; there is no second full-tensor min/max
+traversal.
 
 At startup or after a confirmed cut, the first usable field acquires its arithmetic mean as the
 scene center. This gives occupancy-weighted behavior without a discrete scene classifier: a small

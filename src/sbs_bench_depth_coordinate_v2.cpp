@@ -423,6 +423,8 @@ void main(uint3 id : SV_DispatchThreadID) {
     ComPtr<ID3D11Buffer> frame_buffer;
     ComPtr<ID3D11ShaderResourceView> frame_srv;
     ComPtr<ID3D11UnorderedAccessView> frame_uav;
+    ComPtr<ID3D11Buffer> normalization_buffer;
+    ComPtr<ID3D11UnorderedAccessView> normalization_uav;
     ComPtr<ID3D11Buffer> state_buffer;
     ComPtr<ID3D11ShaderResourceView> state_srv;
     ComPtr<ID3D11UnorderedAccessView> state_uav;
@@ -857,7 +859,7 @@ void main(uint3 id : SV_DispatchThreadID) {
             raw_buffer, raw_srv, unused_uav
           ) ||
           !create_structured_buffer(
-            device.Get(), sizeof(float) * 4u, reduce_groups * 2u, nullptr, true,
+            device.Get(), sizeof(float) * 4u, reduce_groups * 3u, nullptr, true,
             partial_buffer, partial_srv, partial_uav
           ) ||
           !create_structured_buffer(
@@ -872,6 +874,29 @@ void main(uint3 id : SV_DispatchThreadID) {
           )) {
         error = "cannot create v2 GPU replay structured resources";
         return false;
+      }
+      {
+        const std::array<std::uint32_t, 4> normalization_identity {{
+          0xFFFFFFFFu, 0u, 0u, 0u,
+        }};
+        D3D11_BUFFER_DESC desc {};
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.ByteWidth = sizeof(normalization_identity);
+        desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+        desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+        D3D11_SUBRESOURCE_DATA initial {normalization_identity.data(), 0, 0};
+        D3D11_UNORDERED_ACCESS_VIEW_DESC view {};
+        view.Format = DXGI_FORMAT_R32_TYPELESS;
+        view.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        view.Buffer.NumElements = static_cast<UINT>(normalization_identity.size());
+        view.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+        if (FAILED(device->CreateBuffer(&desc, &initial, &normalization_buffer)) ||
+            FAILED(device->CreateUnorderedAccessView(
+              normalization_buffer.Get(), &view, &normalization_uav
+            ))) {
+          error = "cannot create v2 GPU replay normalization output";
+          return false;
+        }
       }
       auto cut_state_words = sbs_adaptive_state::initial_words;
       if (!create_structured_buffer(
@@ -1026,11 +1051,13 @@ void main(uint3 id : SV_DispatchThreadID) {
 
       context->CSSetShader(frame_shader.Get(), nullptr, 0);
       ID3D11ShaderResourceView *frame_srvs[] = {partial_srv.Get()};
-      ID3D11UnorderedAccessView *frame_uavs[] = {frame_uav.Get()};
+      ID3D11UnorderedAccessView *frame_uavs[] = {
+        frame_uav.Get(), normalization_uav.Get(),
+      };
       context->CSSetShaderResources(0, 1, frame_srvs);
-      context->CSSetUnorderedAccessViews(0, 1, frame_uavs, nullptr);
+      context->CSSetUnorderedAccessViews(0, 2, frame_uavs, nullptr);
       context->Dispatch(1u, 1u, 1u);
-      unbind(1u, 1u);
+      unbind(1u, 2u);
 
       context->CSSetShader(state_shader.Get(), nullptr, 0);
       ID3D11ShaderResourceView *state_srvs[] = {

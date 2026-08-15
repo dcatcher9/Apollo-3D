@@ -1596,19 +1596,38 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn("depth_history_valid", estimator)
         self.assertIn("depth_valid_history_cs", estimator)
         self.assertIn("tensor_previous_input_uav", estimator)
+        self.assertNotIn("context->CSSetShader(depth_minmax_cs.Get()", estimator)
+        self.assertIn("dispatch_parallax_v2_frame_stats(perf_slot)", estimator)
+        self.assertIn("static_cast<std::size_t>(reduce_groups) * 3u", estimator)
+        self.assertIn("parallax_frame_stats_end -", estimator)
 
         shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders",
                                   "directx")
-        for name in ("depth_minmax_cs.hlsl", "depth_hist_cs.hlsl",
-                     "depth_ema_motion_cs.hlsl", "buffer_to_tex_cs.hlsl"):
+        for name in ("depth_coordinate_v2_moments_cs.hlsl",
+                     "depth_coordinate_v2_frame_resolve_cs.hlsl",
+                     "depth_hist_cs.hlsl", "depth_ema_motion_cs.hlsl",
+                     "buffer_to_tex_cs.hlsl"):
             shader_path = os.path.join(shader_dir, name)
             with self.subTest(shader=name), open(shader_path, encoding="utf-8") as fh:
                 self.assertIn("isinf", fh.read())
 
-        with open(os.path.join(shader_dir, "depth_minmax_cs.hlsl"), encoding="utf-8") as fh:
+        with open(os.path.join(shader_dir, "depth_coordinate_v2_moments_cs.hlsl"),
+                  encoding="utf-8") as fh:
             reduction = fh.read()
-        self.assertIn("g_valid", reduction)
-        self.assertIn("MinMaxOut.InterlockedAdd(8, g_valid[0])", reduction)
+        self.assertIn("RWStructuredBuffer<uint4> Partials", reduction)
+        self.assertIn("value >= 0.0f", reduction)
+        self.assertIn("uint normalization_bits = asuint(value)", reduction)
+        self.assertIn("g_normalization_valid_count", reduction)
+        self.assertIn("Partials[gid.x * 3u + 2u]", reduction)
+        with open(os.path.join(shader_dir,
+                               "depth_coordinate_v2_frame_resolve_cs.hlsl"),
+                  encoding="utf-8") as fh:
+            frame_resolve = fh.read()
+        self.assertIn("RWByteAddressBuffer MinMaxRaw : register(u1)", frame_resolve)
+        self.assertIn("MinMaxRaw.Store(0, normalization_minimum_bits)", frame_resolve)
+        self.assertIn("MinMaxRaw.Store(4, normalization_maximum_bits)", frame_resolve)
+        self.assertIn("MinMaxRaw.Store(8, normalization_valid_count)", frame_resolve)
+        self.assertIn("MinMaxRaw.Store(12, eligible_count)", frame_resolve)
         with open(os.path.join(shader_dir, "depth_minmax_ema_cs.hlsl"),
                   encoding="utf-8") as fh:
             bounds = fh.read()

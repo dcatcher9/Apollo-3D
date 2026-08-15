@@ -786,7 +786,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 52u);
+  EXPECT_EQ(v2::contract_schema, 53u);
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
   EXPECT_EQ(v2::shadow_state_dump_schema, 16u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
@@ -2182,7 +2182,6 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
     std::tuple {"rgb_to_nchw_cs.hlsl", "pad_main", "cs_5_0"},
     std::tuple {"buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"},
     std::tuple {"depth_ema_motion_cs.hlsl", "main", "cs_5_0"},
-    std::tuple {"depth_minmax_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_minmax_ema_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_hist_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_scene_cut_evidence_cs.hlsl", "main", "cs_5_0"},
@@ -2218,6 +2217,350 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
             static_cast<const char *>(shader_errors->GetBufferPointer()) :
             "no compiler diagnostics");
   }
+}
+
+TEST(DirectxShaderTest, FusedV2MomentsPreserveNormalizationBitSemantics) {
+  using Microsoft::WRL::ComPtr;
+
+  ComPtr<ID3D11Device> device;
+  ComPtr<ID3D11DeviceContext> context;
+  D3D_FEATURE_LEVEL feature_level {};
+  constexpr D3D_FEATURE_LEVEL requested_levels[] {D3D_FEATURE_LEVEL_11_0};
+  ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(
+    nullptr,
+    D3D_DRIVER_TYPE_WARP,
+    nullptr,
+    0,
+    requested_levels,
+    static_cast<UINT>(std::size(requested_levels)),
+    D3D11_SDK_VERSION,
+    &device,
+    &feature_level,
+    &context
+  )));
+  ASSERT_GE(feature_level, D3D_FEATURE_LEVEL_11_0);
+
+  const auto compile_shader = [&](const char *filename) {
+    const auto path = std::filesystem::path(SUNSHINE_SHADERS_DIR) / filename;
+    ComPtr<ID3DBlob> bytecode;
+    ComPtr<ID3DBlob> diagnostics;
+    const auto status = D3DCompileFromFile(
+      path.c_str(),
+      nullptr,
+      D3D_COMPILE_STANDARD_FILE_INCLUDE,
+      "main",
+      "cs_5_0",
+      D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
+      0,
+      &bytecode,
+      &diagnostics
+    );
+    EXPECT_TRUE(SUCCEEDED(status))
+      << filename << ": "
+      << (diagnostics ?
+            static_cast<const char *>(diagnostics->GetBufferPointer()) :
+            "no compiler diagnostics");
+    return bytecode;
+  };
+  const auto moments_bytecode = compile_shader(
+    "depth_coordinate_v2_moments_cs.hlsl"
+  );
+  const auto frame_bytecode = compile_shader(
+    "depth_coordinate_v2_frame_resolve_cs.hlsl"
+  );
+  ASSERT_TRUE(moments_bytecode);
+  ASSERT_TRUE(frame_bytecode);
+  ComPtr<ID3D11ComputeShader> moments_shader;
+  ComPtr<ID3D11ComputeShader> frame_shader;
+  ASSERT_TRUE(SUCCEEDED(device->CreateComputeShader(
+    moments_bytecode->GetBufferPointer(),
+    moments_bytecode->GetBufferSize(),
+    nullptr,
+    &moments_shader
+  )));
+  ASSERT_TRUE(SUCCEEDED(device->CreateComputeShader(
+    frame_bytecode->GetBufferPointer(),
+    frame_bytecode->GetBufferSize(),
+    nullptr,
+    &frame_shader
+  )));
+
+  constexpr UINT width = 4u;
+  constexpr UINT height = 1u;
+  constexpr UINT texel_count = width * height;
+  std::array<float, texel_count> initial_raw {};
+  D3D11_BUFFER_DESC raw_desc {};
+  raw_desc.ByteWidth = sizeof(initial_raw);
+  raw_desc.Usage = D3D11_USAGE_DEFAULT;
+  raw_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+  raw_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+  raw_desc.StructureByteStride = sizeof(float);
+  D3D11_SUBRESOURCE_DATA raw_data {initial_raw.data(), 0, 0};
+  ComPtr<ID3D11Buffer> raw_buffer;
+  ComPtr<ID3D11ShaderResourceView> raw_srv;
+  ASSERT_TRUE(SUCCEEDED(device->CreateBuffer(&raw_desc, &raw_data, &raw_buffer)));
+  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
+    raw_buffer.Get(),
+    nullptr,
+    &raw_srv
+  )));
+
+  const std::array<std::uint32_t, texel_count> exclusion {};
+  D3D11_TEXTURE2D_DESC exclusion_desc {};
+  exclusion_desc.Width = width;
+  exclusion_desc.Height = height;
+  exclusion_desc.MipLevels = 1u;
+  exclusion_desc.ArraySize = 1u;
+  exclusion_desc.Format = DXGI_FORMAT_R32_UINT;
+  exclusion_desc.SampleDesc.Count = 1u;
+  exclusion_desc.Usage = D3D11_USAGE_DEFAULT;
+  exclusion_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+  D3D11_SUBRESOURCE_DATA exclusion_data {};
+  exclusion_data.pSysMem = exclusion.data();
+  exclusion_data.SysMemPitch = width * sizeof(std::uint32_t);
+  ComPtr<ID3D11Texture2D> exclusion_texture;
+  ComPtr<ID3D11ShaderResourceView> exclusion_srv;
+  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(
+    &exclusion_desc,
+    &exclusion_data,
+    &exclusion_texture
+  )));
+  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
+    exclusion_texture.Get(),
+    nullptr,
+    &exclusion_srv
+  )));
+
+  const auto create_structured_output = [&](const UINT vector_count, ComPtr<ID3D11Buffer> &buffer, ComPtr<ID3D11ShaderResourceView> *srv, ComPtr<ID3D11UnorderedAccessView> &uav) {
+    D3D11_BUFFER_DESC desc {};
+    desc.ByteWidth = vector_count * sizeof(std::uint32_t) * 4u;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS |
+                     (srv ? D3D11_BIND_SHADER_RESOURCE : 0u);
+    desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    desc.StructureByteStride = sizeof(std::uint32_t) * 4u;
+    return SUCCEEDED(device->CreateBuffer(&desc, nullptr, &buffer)) &&
+           (!srv || SUCCEEDED(device->CreateShaderResourceView(
+                      buffer.Get(),
+                      nullptr,
+                      srv->ReleaseAndGetAddressOf()
+                    ))) &&
+           SUCCEEDED(device->CreateUnorderedAccessView(
+             buffer.Get(),
+             nullptr,
+             &uav
+           ));
+  };
+  ComPtr<ID3D11Buffer> partial_buffer;
+  ComPtr<ID3D11ShaderResourceView> partial_srv;
+  ComPtr<ID3D11UnorderedAccessView> partial_uav;
+  ComPtr<ID3D11Buffer> frame_buffer;
+  ComPtr<ID3D11UnorderedAccessView> frame_uav;
+  ASSERT_TRUE(create_structured_output(
+    6u,
+    partial_buffer,
+    &partial_srv,
+    partial_uav
+  ));
+  ASSERT_TRUE(create_structured_output(
+    2u,
+    frame_buffer,
+    nullptr,
+    frame_uav
+  ));
+
+  const std::array<std::uint32_t, 4> normalization_identity {{
+    0xFFFFFFFFu,
+    0u,
+    0u,
+    0u,
+  }};
+  D3D11_BUFFER_DESC normalization_desc {};
+  normalization_desc.ByteWidth = sizeof(normalization_identity);
+  normalization_desc.Usage = D3D11_USAGE_DEFAULT;
+  normalization_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+  normalization_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+  D3D11_SUBRESOURCE_DATA normalization_data {
+    normalization_identity.data(),
+    0,
+    0
+  };
+  ComPtr<ID3D11Buffer> normalization_buffer;
+  ASSERT_TRUE(SUCCEEDED(device->CreateBuffer(
+    &normalization_desc,
+    &normalization_data,
+    &normalization_buffer
+  )));
+  D3D11_UNORDERED_ACCESS_VIEW_DESC normalization_view {};
+  normalization_view.Format = DXGI_FORMAT_R32_TYPELESS;
+  normalization_view.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+  normalization_view.Buffer.NumElements = 4u;
+  normalization_view.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+  ComPtr<ID3D11UnorderedAccessView> normalization_uav;
+  ASSERT_TRUE(SUCCEEDED(device->CreateUnorderedAccessView(
+    normalization_buffer.Get(),
+    &normalization_view,
+    &normalization_uav
+  )));
+
+  std::array<std::uint32_t, 16> constants {};
+  constants[0] = width;
+  constants[1] = height;
+  constants[5] = 512u;
+  constants[11] = width;
+  constants[12] = height;
+  D3D11_BUFFER_DESC constant_desc {};
+  constant_desc.ByteWidth = sizeof(constants);
+  constant_desc.Usage = D3D11_USAGE_IMMUTABLE;
+  constant_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+  D3D11_SUBRESOURCE_DATA constant_data {constants.data(), 0, 0};
+  ComPtr<ID3D11Buffer> constant_buffer;
+  ASSERT_TRUE(SUCCEEDED(device->CreateBuffer(
+    &constant_desc,
+    &constant_data,
+    &constant_buffer
+  )));
+
+  const auto read_words = [&](ID3D11Buffer *source, const UINT word_count) {
+    D3D11_BUFFER_DESC desc {};
+    source->GetDesc(&desc);
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0u;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    desc.MiscFlags = 0u;
+    desc.StructureByteStride = 0u;
+    ComPtr<ID3D11Buffer> staging;
+    if (FAILED(device->CreateBuffer(&desc, nullptr, &staging))) {
+      return std::vector<std::uint32_t> {};
+    }
+    context->CopyResource(staging.Get(), source);
+    D3D11_MAPPED_SUBRESOURCE mapped {};
+    if (FAILED(context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) {
+      return std::vector<std::uint32_t> {};
+    }
+    const auto *words = static_cast<const std::uint32_t *>(mapped.pData);
+    std::vector<std::uint32_t> result(words, words + word_count);
+    context->Unmap(staging.Get(), 0u);
+    return result;
+  };
+
+  const auto run = [&](const std::array<float, texel_count> &raw, const std::array<std::uint32_t, texel_count> &excluded) {
+    context->UpdateSubresource(raw_buffer.Get(), 0u, nullptr, raw.data(), 0u, 0u);
+    context->UpdateSubresource(
+      exclusion_texture.Get(),
+      0u,
+      nullptr,
+      excluded.data(),
+      width * sizeof(std::uint32_t),
+      0u
+    );
+    ID3D11Buffer *constant_buffers[] = {constant_buffer.Get()};
+    context->CSSetConstantBuffers(0u, 1u, constant_buffers);
+    ID3D11ShaderResourceView *moments_srvs[] = {raw_srv.Get(), exclusion_srv.Get()};
+    ID3D11UnorderedAccessView *moments_uavs[] = {partial_uav.Get()};
+    context->CSSetShader(moments_shader.Get(), nullptr, 0u);
+    context->CSSetShaderResources(0u, 2u, moments_srvs);
+    context->CSSetUnorderedAccessViews(0u, 1u, moments_uavs, nullptr);
+    context->Dispatch(2u, 1u, 1u);
+
+    ID3D11ShaderResourceView *null_moments_srvs[] = {nullptr, nullptr};
+    ID3D11UnorderedAccessView *null_uavs[] = {nullptr, nullptr};
+    context->CSSetShaderResources(0u, 2u, null_moments_srvs);
+    context->CSSetUnorderedAccessViews(0u, 1u, null_uavs, nullptr);
+
+    ID3D11ShaderResourceView *frame_srvs[] = {partial_srv.Get()};
+    ID3D11UnorderedAccessView *frame_uavs[] = {
+      frame_uav.Get(),
+      normalization_uav.Get(),
+    };
+    context->CSSetShader(frame_shader.Get(), nullptr, 0u);
+    context->CSSetShaderResources(0u, 1u, frame_srvs);
+    context->CSSetUnorderedAccessViews(0u, 2u, frame_uavs, nullptr);
+    context->Dispatch(1u, 1u, 1u);
+    ID3D11ShaderResourceView *null_frame_srvs[] = {nullptr};
+    context->CSSetShaderResources(0u, 1u, null_frame_srvs);
+    context->CSSetUnorderedAccessViews(0u, 2u, null_uavs, nullptr);
+    return std::pair {
+      read_words(frame_buffer.Get(), 8u),
+      read_words(normalization_buffer.Get(), 4u),
+    };
+  };
+
+  const auto [finite_frame, finite_normalization] = run(
+    {{-1.0f, 0.0f, -0.0f, 1.0f}},
+    exclusion
+  );
+  ASSERT_EQ(finite_frame.size(), 8u);
+  ASSERT_EQ(finite_normalization.size(), 4u);
+  EXPECT_FLOAT_EQ(std::bit_cast<float>(finite_frame[0]), 0.0f);
+  EXPECT_NEAR(std::bit_cast<float>(finite_frame[1]), std::sqrt(0.5f), 1.0e-6f);
+  EXPECT_FLOAT_EQ(std::bit_cast<float>(finite_frame[2]), -1.0f);
+  EXPECT_FLOAT_EQ(std::bit_cast<float>(finite_frame[3]), 1.0f);
+  EXPECT_FLOAT_EQ(std::bit_cast<float>(finite_frame[4]), 4.0f);
+  EXPECT_FLOAT_EQ(std::bit_cast<float>(finite_frame[5]), 4.0f);
+  EXPECT_FLOAT_EQ(std::bit_cast<float>(finite_frame[6]), 1.0f);
+  EXPECT_EQ(finite_normalization[0], 0x00000000u);
+  EXPECT_EQ(finite_normalization[1], 0x80000000u);
+  EXPECT_EQ(finite_normalization[2], 3u);
+  EXPECT_EQ(finite_normalization[3], 4u);
+
+  // With no negative value, signed zero alone retains the legacy unsigned ordering: -0 is the
+  // maximum bit pattern and the smallest positive value is the minimum. The resulting numeric
+  // bounds are intentionally invalid even though valid_count equals eligible_count.
+  const auto [zero_order_frame, zero_order_normalization] = run(
+    {{-0.0f, 1.0f, 2.0f, 3.0f}},
+    exclusion
+  );
+  ASSERT_EQ(zero_order_frame.size(), 8u);
+  ASSERT_EQ(zero_order_normalization.size(), 4u);
+  EXPECT_FLOAT_EQ(std::bit_cast<float>(zero_order_frame[6]), 1.0f);
+  EXPECT_EQ(zero_order_normalization[0], std::bit_cast<std::uint32_t>(1.0f));
+  EXPECT_EQ(zero_order_normalization[1], 0x80000000u);
+  EXPECT_EQ(zero_order_normalization[2], 4u);
+  EXPECT_EQ(zero_order_normalization[3], 4u);
+
+  const auto [invalid_frame, invalid_normalization] = run(
+    {{
+      std::numeric_limits<float>::quiet_NaN(),
+      std::numeric_limits<float>::infinity(),
+      -2.0f,
+      2.0f,
+    }},
+    exclusion
+  );
+  ASSERT_EQ(invalid_frame.size(), 8u);
+  ASSERT_EQ(invalid_normalization.size(), 4u);
+  for (std::size_t index = 0u; index < 4u; ++index) {
+    EXPECT_FLOAT_EQ(std::bit_cast<float>(invalid_frame[index]), 0.0f);
+  }
+  EXPECT_FLOAT_EQ(std::bit_cast<float>(invalid_frame[4]), 2.0f);
+  EXPECT_FLOAT_EQ(std::bit_cast<float>(invalid_frame[5]), 4.0f);
+  EXPECT_FLOAT_EQ(std::bit_cast<float>(invalid_frame[6]), 0.0f);
+  EXPECT_EQ(invalid_normalization[0], std::bit_cast<std::uint32_t>(2.0f));
+  EXPECT_EQ(invalid_normalization[1], std::bit_cast<std::uint32_t>(2.0f));
+  EXPECT_EQ(invalid_normalization[2], 1u);
+  EXPECT_EQ(invalid_normalization[3], 4u);
+
+  const std::array<std::uint32_t, texel_count> excluded_tail {{0u, 1u, 1u, 1u}};
+  const auto [excluded_frame, excluded_normalization] = run(
+    {{
+      1.0f,
+      -1.0f,
+      std::numeric_limits<float>::quiet_NaN(),
+      -0.0f,
+    }},
+    excluded_tail
+  );
+  ASSERT_EQ(excluded_frame.size(), 8u);
+  ASSERT_EQ(excluded_normalization.size(), 4u);
+  EXPECT_FLOAT_EQ(std::bit_cast<float>(excluded_frame[0]), 1.0f);
+  EXPECT_FLOAT_EQ(std::bit_cast<float>(excluded_frame[4]), 1.0f);
+  EXPECT_FLOAT_EQ(std::bit_cast<float>(excluded_frame[5]), 1.0f);
+  EXPECT_FLOAT_EQ(std::bit_cast<float>(excluded_frame[6]), 1.0f);
+  EXPECT_EQ(excluded_normalization[0], std::bit_cast<std::uint32_t>(1.0f));
+  EXPECT_EQ(excluded_normalization[1], std::bit_cast<std::uint32_t>(1.0f));
+  EXPECT_EQ(excluded_normalization[2], 1u);
+  EXPECT_EQ(excluded_normalization[3], 1u);
 }
 
 TEST(DirectxShaderTest, BufferToTexMainThenPadReplicatesBoundaryDepthAndClearsPaddingMotion) {

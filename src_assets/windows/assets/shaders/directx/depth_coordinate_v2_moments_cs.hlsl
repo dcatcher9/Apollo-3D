@@ -1,11 +1,15 @@
-// Numerically stable per-group Welford moments over raw DAV2 output. Two float4 records per group:
-//   [2*g+0] = {mean, M2, count, minimum}
-//   [2*g+1] = {maximum, eligible_count, 0, 0}
+// Numerically stable per-group Welford moments over raw DAV2 output. Three uint4 records per group:
+//   [3*g+0] = {asuint(mean), asuint(M2), finite_count, asuint(finite_minimum)}
+//   [3*g+1] = {asuint(finite_maximum), eligible_count,
+//              normalization_minimum_bits, normalization_maximum_bits}
+//   [3*g+2] = {normalization_valid_count, 0, 0, 0}
+// V2 frame statistics admit every finite value. The normalization reduction retains the older,
+// narrower finite && value >= 0 contract and its unsigned-bit extrema exactly, including -0.
 // Every group overwrites its records, so no accumulator clear or CPU readback is required.
 
 StructuredBuffer<float> InputBuffer : register(t0);
 Texture2D<uint> TensorExclusion : register(t1);
-RWStructuredBuffer<float4> Partials : register(u0);
+RWStructuredBuffer<uint4> Partials : register(u0);
 
 #include "include/depth_constants.hlsl"
 
@@ -16,6 +20,9 @@ groupshared float g_minimum[GROUP_SIZE];
 groupshared float g_maximum[GROUP_SIZE];
 groupshared uint g_count[GROUP_SIZE];
 groupshared uint g_eligible[GROUP_SIZE];
+groupshared uint g_normalization_minimum[GROUP_SIZE];
+groupshared uint g_normalization_maximum[GROUP_SIZE];
+groupshared uint g_normalization_valid_count[GROUP_SIZE];
 
 [numthreads(GROUP_SIZE, 1, 1)]
 void main(uint3 dtid : SV_DispatchThreadID,
@@ -28,6 +35,9 @@ void main(uint3 dtid : SV_DispatchThreadID,
     float maximum = -3.402823466e+38f;
     uint count = 0u;
     uint eligible = 0u;
+    uint normalization_minimum = 0xFFFFFFFFu;
+    uint normalization_maximum = 0u;
+    uint normalization_valid_count = 0u;
 
     [loop]
     for (uint index = dtid.x; index < element_count; index += reduce_threads) {
@@ -45,6 +55,12 @@ void main(uint3 dtid : SV_DispatchThreadID,
             m2 += delta * delta2;
             minimum = min(minimum, value);
             maximum = max(maximum, value);
+            if (value >= 0.0f) {
+                uint normalization_bits = asuint(value);
+                normalization_minimum = min(normalization_minimum, normalization_bits);
+                normalization_maximum = max(normalization_maximum, normalization_bits);
+                normalization_valid_count++;
+            }
         }
     }
 
@@ -54,6 +70,9 @@ void main(uint3 dtid : SV_DispatchThreadID,
     g_maximum[tid.x] = maximum;
     g_count[tid.x] = count;
     g_eligible[tid.x] = eligible;
+    g_normalization_minimum[tid.x] = normalization_minimum;
+    g_normalization_maximum[tid.x] = normalization_maximum;
+    g_normalization_valid_count[tid.x] = normalization_valid_count;
     GroupMemoryBarrierWithGroupSync();
 
     [unroll]
@@ -61,6 +80,14 @@ void main(uint3 dtid : SV_DispatchThreadID,
         if (tid.x < stride) {
             uint right_count = g_count[tid.x + stride];
             g_eligible[tid.x] += g_eligible[tid.x + stride];
+            g_normalization_minimum[tid.x] = min(
+                g_normalization_minimum[tid.x],
+                g_normalization_minimum[tid.x + stride]);
+            g_normalization_maximum[tid.x] = max(
+                g_normalization_maximum[tid.x],
+                g_normalization_maximum[tid.x + stride]);
+            g_normalization_valid_count[tid.x] +=
+                g_normalization_valid_count[tid.x + stride];
             if (right_count > 0u) {
                 uint left_count = g_count[tid.x];
                 if (left_count == 0u) {
@@ -85,9 +112,14 @@ void main(uint3 dtid : SV_DispatchThreadID,
     }
 
     if (tid.x == 0u) {
-        Partials[gid.x * 2u] = float4(
-            g_mean[0], g_m2[0], (float)g_count[0], g_minimum[0]);
-        Partials[gid.x * 2u + 1u] =
-            float4(g_maximum[0], (float)g_eligible[0], 0.0f, 0.0f);
+        Partials[gid.x * 3u] = uint4(
+            asuint(g_mean[0]), asuint(g_m2[0]), g_count[0], asuint(g_minimum[0]));
+        Partials[gid.x * 3u + 1u] = uint4(
+            asuint(g_maximum[0]),
+            g_eligible[0],
+            g_normalization_minimum[0],
+            g_normalization_maximum[0]);
+        Partials[gid.x * 3u + 2u] =
+            uint4(g_normalization_valid_count[0], 0u, 0u, 0u);
     }
 }

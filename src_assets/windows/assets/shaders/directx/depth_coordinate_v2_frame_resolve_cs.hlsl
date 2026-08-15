@@ -1,12 +1,16 @@
-// Merge per-group Welford records into two frame-stat float4 vectors:
+// Merge per-group Welford records into two frame-stat float4 vectors and the shared raw
+// normalization accumulator:
 //   [0] = {mean, population_std, minimum, maximum}
 //   [1] = {valid_count, eligible_count, valid, reserved}
+//   MinMaxRaw = {normalization min bits, normalization max bits,
+//                normalization valid count, eligible count}
 // `eligible_count` is the real tensor-content population: the full tensor for ordinary full-frame
 // analysis, or the unpadded content population for a contain-fit ROI. Every admitted texel must be
 // finite before the frame can publish.
 
-StructuredBuffer<float4> Partials : register(t0);
+StructuredBuffer<uint4> Partials : register(t0);
 RWStructuredBuffer<float4> FrameStats : register(u0);
+RWByteAddressBuffer MinMaxRaw : register(u1);
 
 #include "include/depth_constants.hlsl"
 #include "include/depth_coordinate_v2_contract.generated.hlsl"
@@ -20,23 +24,32 @@ void main(uint3 id : SV_DispatchThreadID) {
     float maximum = -3.402823466e+38f;
     uint count = 0u;
     uint eligible_count = 0u;
+    uint normalization_minimum_bits = 0xFFFFFFFFu;
+    uint normalization_maximum_bits = 0u;
+    uint normalization_valid_count = 0u;
 
     [loop]
     for (uint group = 0u; group < group_count; ++group) {
-        float4 record = Partials[group * 2u];
-        float4 range_record = Partials[group * 2u + 1u];
-        eligible_count += (uint)max(range_record.y, 0.0f);
-        uint right_count = (uint)max(record.z, 0.0f);
+        uint4 record_bits = Partials[group * 3u];
+        uint4 range_record_bits = Partials[group * 3u + 1u];
+        uint4 normalization_record = Partials[group * 3u + 2u];
+        eligible_count += range_record_bits.y;
+        normalization_minimum_bits = min(
+            normalization_minimum_bits, range_record_bits.z);
+        normalization_maximum_bits = max(
+            normalization_maximum_bits, range_record_bits.w);
+        normalization_valid_count += normalization_record.x;
+        uint right_count = record_bits.z;
         if (right_count == 0u) {
             continue;
         }
-        float right_mean = record.x;
-        float right_m2 = record.y;
+        float right_mean = asfloat(record_bits.x);
+        float right_m2 = asfloat(record_bits.y);
         if (count == 0u) {
             mean = right_mean;
             m2 = right_m2;
-            minimum = record.w;
-            maximum = range_record.x;
+            minimum = asfloat(record_bits.w);
+            maximum = asfloat(range_record_bits.x);
             count = right_count;
         } else {
             uint merged_count = count + right_count;
@@ -44,8 +57,8 @@ void main(uint3 id : SV_DispatchThreadID) {
             mean += delta * ((float)right_count / (float)merged_count);
             m2 += right_m2 + delta * delta *
                 ((float)count * (float)right_count / (float)merged_count);
-            minimum = min(minimum, record.w);
-            maximum = max(maximum, range_record.x);
+            minimum = min(minimum, asfloat(record_bits.w));
+            maximum = max(maximum, asfloat(range_record_bits.x));
             count = merged_count;
         }
     }
@@ -71,4 +84,8 @@ void main(uint3 id : SV_DispatchThreadID) {
     V2_FRAME_STATS_RESERVED(frame1) = 0.0f;
     FrameStats[V2_FRAME_STATS_VECTOR_MEAN] = frame0;
     FrameStats[V2_FRAME_STATS_VECTOR_VALID_COUNT] = frame1;
+    MinMaxRaw.Store(0, normalization_minimum_bits);
+    MinMaxRaw.Store(4, normalization_maximum_bits);
+    MinMaxRaw.Store(8, normalization_valid_count);
+    MinMaxRaw.Store(12, eligible_count);
 }

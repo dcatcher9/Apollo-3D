@@ -36,7 +36,6 @@ namespace models::host_sbs_shader_cache {
     "buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"
   };
   inline constexpr shader_spec depth_ema_motion {"depth_ema_motion_cs.hlsl"};
-  inline constexpr shader_spec depth_minmax {"depth_minmax_cs.hlsl"};
   inline constexpr shader_spec depth_minmax_ema {"depth_minmax_ema_cs.hlsl"};
   inline constexpr shader_spec depth_hist {"depth_hist_cs.hlsl"};
   inline constexpr shader_spec depth_valid_history {"depth_valid_history_cs.hlsl"};
@@ -94,9 +93,9 @@ namespace models::host_sbs_shader_cache {
     "sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"
   };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
-    "2aac93ddeb5e89de424c52eb8f43b0509ee580c829e04e345dc95967070c7cd1";
+    "ba7d2f6e6d8c0266bec3e0a53e67164e6e9b482394a2770c2f0c678b6d4a6512";
   inline constexpr std::string_view parallax_v2_diagnostic_source_closure_sha256 =
-    "150d16132c0ad98c742717c124280e1818555d22ed8ee2c14bf8f86da62db28d";
+    "430f3172a51aece82acac353c098bd0c6070a3b81034af8b77adb94ea5bf1f36";
   inline constexpr std::string_view sbs_flat_fallback_source_closure_sha256 =
     "7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4";
 
@@ -120,7 +119,6 @@ namespace models::host_sbs_shader_cache {
     buffer_to_tex,
     buffer_to_tex_pad,
     depth_ema_motion,
-    depth_minmax,
     depth_minmax_ema,
     depth_hist,
     depth_scene_cut_evidence,
@@ -157,7 +155,6 @@ namespace models::host_sbs_shader_cache {
     producer_shader_binding {producer_shader_e::buffer_to_tex, buffer_to_tex},
     producer_shader_binding {producer_shader_e::buffer_to_tex_pad, buffer_to_tex_pad},
     producer_shader_binding {producer_shader_e::depth_ema_motion, depth_ema_motion},
-    producer_shader_binding {producer_shader_e::depth_minmax, depth_minmax},
     producer_shader_binding {producer_shader_e::depth_minmax_ema, depth_minmax_ema},
     producer_shader_binding {producer_shader_e::depth_hist, depth_hist},
     producer_shader_binding {

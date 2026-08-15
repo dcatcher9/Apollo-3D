@@ -1606,6 +1606,8 @@ namespace models {
       Microsoft::WRL::ComPtr<ID3D11Query> disjoint;
       Microsoft::WRL::ComPtr<ID3D11Query> post_start;
       Microsoft::WRL::ComPtr<ID3D11Query> post_end;
+      Microsoft::WRL::ComPtr<ID3D11Query> parallax_frame_stats_start;
+      Microsoft::WRL::ComPtr<ID3D11Query> parallax_frame_stats_end;
       Microsoft::WRL::ComPtr<ID3D11Query> parallax_start;
       Microsoft::WRL::ComPtr<ID3D11Query> parallax_end;
       Microsoft::WRL::ComPtr<ID3D11Query> parallax_map_start;
@@ -1616,6 +1618,7 @@ namespace models {
       Microsoft::WRL::ComPtr<ID3D11Query> pre_end;
       bool pending = false;
       bool has_post = false;
+      bool has_parallax_frame_stats = false;
       bool has_parallax = false;
       bool has_parallax_map_start = false;
       bool has_parallax_subtitle_start = false;
@@ -1642,6 +1645,8 @@ namespace models {
         desc.Query = D3D11_QUERY_TIMESTAMP;
         if (FAILED(device->CreateQuery(&desc, &slot.post_start)) ||
             FAILED(device->CreateQuery(&desc, &slot.post_end)) ||
+            FAILED(device->CreateQuery(&desc, &slot.parallax_frame_stats_start)) ||
+            FAILED(device->CreateQuery(&desc, &slot.parallax_frame_stats_end)) ||
             FAILED(device->CreateQuery(&desc, &slot.parallax_start)) ||
             FAILED(device->CreateQuery(&desc, &slot.parallax_end)) ||
             FAILED(device->CreateQuery(&desc, &slot.parallax_map_start)) ||
@@ -1682,6 +1687,8 @@ namespace models {
 
         UINT64 post_start = 0;
         UINT64 post_end = 0;
+        UINT64 parallax_frame_stats_start = 0;
+        UINT64 parallax_frame_stats_end = 0;
         UINT64 parallax_start = 0;
         UINT64 parallax_end = 0;
         UINT64 parallax_map_start = 0;
@@ -1709,10 +1716,26 @@ namespace models {
         );
         HRESULT parallax_start_status = S_OK;
         HRESULT parallax_end_status = S_OK;
+        HRESULT parallax_frame_stats_start_status = S_OK;
+        HRESULT parallax_frame_stats_end_status = S_OK;
         HRESULT parallax_map_start_status = S_OK;
         HRESULT parallax_subtitle_start_status = S_OK;
         HRESULT ownership_start_status = S_OK;
         HRESULT ownership_end_status = S_OK;
+        if (slot.has_parallax_frame_stats) {
+          parallax_frame_stats_start_status = context->GetData(
+            slot.parallax_frame_stats_start.Get(),
+            &parallax_frame_stats_start,
+            sizeof(parallax_frame_stats_start),
+            nonblocking
+          );
+          parallax_frame_stats_end_status = context->GetData(
+            slot.parallax_frame_stats_end.Get(),
+            &parallax_frame_stats_end,
+            sizeof(parallax_frame_stats_end),
+            nonblocking
+          );
+        }
         if (slot.has_parallax) {
           parallax_start_status = context->GetData(
             slot.parallax_start.Get(), &parallax_start, sizeof(parallax_start),
@@ -1752,6 +1775,8 @@ namespace models {
         const bool any_pending =
           post_start_status == S_FALSE || post_end_status == S_FALSE ||
           pre_start_status == S_FALSE || pre_end_status == S_FALSE ||
+          parallax_frame_stats_start_status == S_FALSE ||
+          parallax_frame_stats_end_status == S_FALSE ||
           parallax_start_status == S_FALSE || parallax_end_status == S_FALSE ||
           parallax_map_start_status == S_FALSE ||
           parallax_subtitle_start_status == S_FALSE ||
@@ -1761,12 +1786,18 @@ namespace models {
         }
         if (post_start_status == S_OK && post_end_status == S_OK &&
             pre_start_status == S_OK && pre_end_status == S_OK &&
+            parallax_frame_stats_start_status == S_OK &&
+            parallax_frame_stats_end_status == S_OK &&
             parallax_start_status == S_OK && parallax_end_status == S_OK &&
             parallax_map_start_status == S_OK &&
             parallax_subtitle_start_status == S_OK &&
             ownership_start_status == S_OK && ownership_end_status == S_OK &&
             !timing.Disjoint && timing.Frequency > 0 && post_end >= post_start &&
             pre_start >= post_end && pre_end >= pre_start &&
+            (!slot.has_parallax_frame_stats ||
+              (slot.has_parallax && parallax_frame_stats_start >= post_start &&
+               parallax_frame_stats_end >= parallax_frame_stats_start &&
+               parallax_start >= parallax_frame_stats_end)) &&
             (!slot.has_parallax ||
               (parallax_start >= post_start && parallax_end >= parallax_start &&
                post_end >= parallax_end)) &&
@@ -1793,16 +1824,28 @@ namespace models {
             );
           }
           if (slot.has_parallax) {
+            const UINT64 frame_stats_ticks = slot.has_parallax_frame_stats ?
+                                               parallax_frame_stats_end -
+                                                 parallax_frame_stats_start :
+                                               0u;
             sbs_perf::add_sample_ms_if_current(
               "depth_parallax_gpu",
-              static_cast<double>(parallax_end - parallax_start) * to_ms,
+              static_cast<double>(
+                frame_stats_ticks + parallax_end - parallax_start
+              ) * to_ms,
               slot.perf_generation
             );
           }
           if (slot.has_parallax_map_start) {
+            const UINT64 frame_stats_ticks = slot.has_parallax_frame_stats ?
+                                               parallax_frame_stats_end -
+                                                 parallax_frame_stats_start :
+                                               0u;
             sbs_perf::add_sample_ms_if_current(
               "depth_parallax_stats_gpu",
-              static_cast<double>(parallax_map_start - parallax_start) * to_ms,
+              static_cast<double>(
+                frame_stats_ticks + parallax_map_start - parallax_start
+              ) * to_ms,
               slot.perf_generation
             );
           }
@@ -1859,6 +1902,7 @@ namespace models {
         }
         d3d_perf_next = (index + 1) % d3d_perf_slots.size();
         slot.has_post = has_post;
+        slot.has_parallax_frame_stats = false;
         slot.has_parallax = false;
         slot.has_parallax_map_start = false;
         slot.has_parallax_subtitle_start = false;
@@ -2353,7 +2397,7 @@ namespace models {
     // Caching
     int target_w = 0;
     int target_h = 0;
-    UINT reduce_groups = 0;  // threadgroups for the min/max reduction (groups * 256 = total threads)
+    UINT reduce_groups = 0;  // threadgroups for the shared moments/range reduction
     int cb_color_mode = -1;  // input_color_space baked into constant buffers
     depth_tensor_content_rect_t cb_tensor_content {};
     // TensorRT retains dynamic shape and tensor-address bindings on an execution context. The
@@ -2372,7 +2416,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_pad_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_ema_motion_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_minmax_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_minmax_ema_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_hist_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_scene_cut_evidence_cs;
@@ -3150,7 +3193,6 @@ namespace models {
           case producer_shader_e::buffer_to_tex_pad:
             return std::addressof(buffer_to_tex_pad_cs);
           case producer_shader_e::depth_ema_motion: return std::addressof(depth_ema_motion_cs);
-          case producer_shader_e::depth_minmax: return std::addressof(depth_minmax_cs);
           case producer_shader_e::depth_minmax_ema: return std::addressof(depth_minmax_ema_cs);
           case producer_shader_e::depth_hist: return std::addressof(depth_hist_cs);
           case producer_shader_e::depth_scene_cut_evidence:
@@ -3236,9 +3278,10 @@ namespace models {
         BOOST_LOG(warning)
           << "PP-OCRv6 tiny is unavailable for this estimator; subtitle conditioning is flat.";
       }
-      // Min/max reduction accumulator, pre-seeded to the reduction identity
+      // Raw normalization record, pre-seeded to
       // {min = 0xFFFFFFFF, max = 0, valid = 0, eligible = 0}.
-      // depth_minmax_ema_cs resets it after each frame.
+      // The fused V2 frame resolve overwrites all four words before the histogram consumes them;
+      // depth_minmax_ema_cs resets the identity after each frame as an additional safe default.
       {
         uint32_t init_raw[4] = {0xFFFFFFFFu, 0u, 0u, 0u};
         D3D11_BUFFER_DESC bd = {};
@@ -3330,7 +3373,7 @@ namespace models {
               rgb_to_nchw_content_cs && rgb_to_nchw_pad_cs &&
               buffer_to_tex_cs &&
               buffer_to_tex_pad_cs &&
-              depth_minmax_cs && depth_minmax_ema_cs && depth_hist_cs && depth_valid_history_cs &&
+              depth_minmax_ema_cs && depth_hist_cs && depth_valid_history_cs &&
               minmax_raw_uav && minmax_ema_uav && minmax_ema_srv && hist_uav &&
               analysis_ready && cut_state_uav && cut_state_srv;
       if (!valid) {
@@ -3484,6 +3527,19 @@ namespace models {
       if (slot) {
         slot->has_parallax = true;
         context->End(slot->parallax_start.Get());
+      }
+    }
+
+    void mark_d3d_parallax_frame_stats_start(d3d_perf_slot *slot) {
+      if (slot) {
+        slot->has_parallax_frame_stats = true;
+        context->End(slot->parallax_frame_stats_start.Get());
+      }
+    }
+
+    void mark_d3d_parallax_frame_stats_end(d3d_perf_slot *slot) {
+      if (slot && slot->has_parallax_frame_stats) {
+        context->End(slot->parallax_frame_stats_end.Get());
       }
     }
 
@@ -3847,7 +3903,7 @@ namespace models {
       };
 
       bool resources_ok = create_float4_buffer(
-                            static_cast<std::size_t>(reduce_groups) * 2u,
+                            static_cast<std::size_t>(reduce_groups) * 3u,
                             nullptr,
                             depth_coordinate_v2_partials_buf,
                             depth_coordinate_v2_partials_srv,
@@ -3969,11 +4025,12 @@ namespace models {
       return true;
     }
 
-    bool dispatch_parallax_v2_producer(d3d_perf_slot *perf_slot) {
+    bool dispatch_parallax_v2_frame_stats(d3d_perf_slot *perf_slot) {
       if (!parallax_v2_producer_active) {
         return false;
       }
 
+      mark_d3d_parallax_frame_stats_start(perf_slot);
       ID3D11Buffer *constant_buffers[2] = {
         cbuffer.Get(),
         depth_coordinate_v2_cbuffer.Get(),
@@ -4001,15 +4058,30 @@ namespace models {
 
       context->CSSetShader(depth_coordinate_v2_frame_resolve_cs.Get(), nullptr, 0);
       context->CSSetShaderResources(0, 1, depth_coordinate_v2_partials_srv.GetAddressOf());
-      context->CSSetUnorderedAccessViews(
-        0,
-        1,
-        depth_coordinate_v2_frame_stats_uav.GetAddressOf(),
-        nullptr
-      );
+      ID3D11UnorderedAccessView *frame_uavs[2] = {
+        depth_coordinate_v2_frame_stats_uav.Get(),
+        minmax_raw_uav.Get(),
+      };
+      context->CSSetUnorderedAccessViews(0, 2, frame_uavs, nullptr);
       context->Dispatch(1, 1, 1);
       context->CSSetShaderResources(0, 1, null_srvs3);
-      context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
+      context->CSSetUnorderedAccessViews(0, 2, null_uavs2, nullptr);
+      mark_d3d_parallax_frame_stats_end(perf_slot);
+      return true;
+    }
+
+    bool dispatch_parallax_v2_producer(d3d_perf_slot *perf_slot) {
+      if (!parallax_v2_producer_active) {
+        return false;
+      }
+
+      ID3D11Buffer *constant_buffers[2] = {
+        cbuffer.Get(),
+        depth_coordinate_v2_cbuffer.Get(),
+      };
+      context->CSSetConstantBuffers(0, 2, constant_buffers);
+      ID3D11ShaderResourceView *null_srvs3[3] = {nullptr, nullptr, nullptr};
+      ID3D11UnorderedAccessView *null_uavs2[2] = {nullptr, nullptr};
 
       // Acquire the first usable camera on startup/cut, then hold it until the next authenticated
       // cut. The model scale is fixed. An unusable no-cut frame publishes flat without erasing
@@ -4974,24 +5046,16 @@ namespace models {
           ocr_record_lineage.reset();
         }
       }
-      // 3a. Per-frame scale (GPU-resident; no CPU readback). Depth Anything V2's
-      // relative output is affine-invariant, so this is required for a stable parallax scale.
-      if (depth_minmax_cs && depth_minmax_ema_cs && minmax_raw_uav && minmax_ema_uav) {
-        // Pass A: parallel reduction of the raw disparity -> min/max (uint bits).
-        context->CSSetShader(depth_minmax_cs.Get(), nullptr, 0);
-        context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
+      // 3a. One shared traversal produces V2 finite-value moments and the older non-negative
+      // normalization reduction. Frame resolve publishes both FrameStats and MinMaxRaw before the
+      // histogram consumes the latter. This remains GPU-resident and introduces no readback.
+      const bool frame_stats_ready = dispatch_parallax_v2_frame_stats(perf_slot);
+      if (frame_stats_ready && depth_minmax_ema_cs && minmax_raw_uav && minmax_ema_uav) {
         ID3D11ShaderResourceView *reduction_srvs[2] = {
           tensor_out_srv.Get(),
           tensor_exclusion_srv.Get(),
         };
-        context->CSSetShaderResources(0, 2, reduction_srvs);
-        context->CSSetUnorderedAccessViews(0, 1, minmax_raw_uav.GetAddressOf(), nullptr);
-        context->Dispatch(reduce_groups, 1, 1);
-
-        ID3D11UnorderedAccessView *null_uav1 = nullptr;
         ID3D11ShaderResourceView *null_reduction_srvs[2] = {nullptr, nullptr};
-        context->CSSetUnorderedAccessViews(0, 1, &null_uav1, nullptr);
-        context->CSSetShaderResources(0, 2, null_reduction_srvs);
 
         // Pass A2 (percentile mode): 256-bin histogram over the raw range, so pass B
         // can replace the outlier-sensitive min/max with robust percentile bounds.
@@ -5189,11 +5253,12 @@ namespace models {
       // Production V2 runs after the shared scene-cut bridge and consumes its confirmed-cut
       // generation, with the same-frame pulse retained for attribution.
       if (parallax_v2_producer_active) {
-        // This nested interval covers the base V2 coordinate passes. It remains inside the
-        // inclusive depth_postprocess_gpu interval so existing benchmark semantics do not move.
+        // Together with the earlier fused frame-stats query pair, this interval covers the same
+        // V2 stats/state/geometry work as before. Both remain inside depth_postprocess_gpu, and the
+        // diagnostics resolver sums the discontiguous intervals so benchmark semantics do not move.
         mark_d3d_parallax_start(perf_slot);
       }
-      const bool base_ready = dispatch_parallax_v2_producer(perf_slot);
+      const bool base_ready = frame_stats_ready && dispatch_parallax_v2_producer(perf_slot);
       if (base_ready && !subtitle_work_suppressed) {
         dispatch_subtitle_conditioner(
           ocr_record_submitted,
@@ -5410,7 +5475,7 @@ namespace models {
         target_w = requested_shape.width;
         target_h = requested_shape.height;
 
-        // Threads for the min/max reduction; grid-stride handles any element count.
+        // Threads for the shared moments/range reduction; grid-stride handles any element count.
         int elems = target_w * target_h;
         reduce_groups = (UINT) std::min(64, std::max(1, (elems + 255) / 256));
 

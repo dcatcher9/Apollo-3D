@@ -1,6 +1,6 @@
 // 1-thread pass: fold this frame's raw min/max into an EMA'd min/max (temporal scale
 // stability, a la iw3's IncrementalEMAScaler), then reset the raw accumulator for the
-// next frame's reduction. Runs on the D3D timeline right after depth_minmax_cs.
+// next frame's fused moments/range reduction. Runs after depth_hist_cs on the D3D timeline.
 //
 // w is this-frame validity: 0 = invalid/hold, 1 = valid with history, 2 = first valid frame.
 RWStructuredBuffer<float4> MinMaxEma : register(u0);  // [0]={min,max,initialized,frame_state}
@@ -123,7 +123,7 @@ void main() {
         asfloat(health_counters);
     DiagnosticState[SBS_STATE_VECTOR_RANGE_COLLAPSED] = telemetry_flags;
 
-    // Reset accumulator so next frame's InterlockedMin/Max start from the identity.
+    // Leave a safe identity behind; the next fused frame resolve overwrites all four words.
     MinMaxRaw.Store(0, 0xFFFFFFFFu);
     MinMaxRaw.Store(4, 0u);
     MinMaxRaw.Store(8, 0u);
