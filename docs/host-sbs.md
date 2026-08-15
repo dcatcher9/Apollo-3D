@@ -623,11 +623,14 @@ input floats equal an estimator-owned baseline whose OCR8 record and frame owner
 Any mismatch, nonfinite value, missing/abstaining OCR8 record, unavailable comparison resource, or
 OCR setup failure follows ordinary DAV2/OCR inference.
 The existing encode target remains the only deadline: after preserving the same `3 ms` downstream
-reserve, candidate-only readiness queries may consume at most `0.5 ms` starting when collection
-reaches its first query, and have an independent query fuse. Preprocessing does not silently spend
-that allowance; the absolute cadence deadline still truncates it. A missing or late target permits
-one immediate query only. The staging map uses
-`DO_NOT_WAIT`; unavailable resources, timeout, a motion veto, malformed evidence, or any optional
+reserve, candidate-only nonblocking collection may consume at most `0.5 ms` starting when it
+reaches its first poll round, and has an independent 16-round fuse. Preprocessing does not silently
+spend that allowance; the absolute cadence deadline still truncates it. A missing or late target
+permits one immediate round only. The staging map uses
+`DO_NOT_WAIT`; once CUDA event readiness is observed it stays sticky, and a transient
+`DXGI_ERROR_WAS_STILL_DRAWING` is retried only inside that same allowance and 16-round fuse.
+Telemetry separates immediate-only, deadline, and fuse exhaustion in the CUDA-event and staging-map
+phases. Unavailable resources, timeout, a motion veto, malformed evidence, or any optional
 shader/event failure immediately continues to the ordinary DAV2/OCR enqueue.
 
 On an authorized active hold the estimator returns the explicit current/baseline IDs without

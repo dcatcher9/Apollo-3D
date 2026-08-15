@@ -3544,21 +3544,45 @@ namespace models {
         request.max_wait,
         started
       );
-      const auto query_limit = std::max<std::uint32_t>(1u, request.max_queries);
-      constexpr auto query_interval = std::chrono::microseconds {50};
+      const bool has_wait_deadline = deadline.time_since_epoch().count() != 0;
+      const auto poll_round_limit = std::max<std::uint32_t>(
+        1u,
+        request.max_poll_rounds
+      );
+      constexpr auto poll_interval = std::chrono::microseconds {50};
+      bool event_ready = false;
       while (true) {
         if (
-          result.query_count > 0u &&
-          deadline.time_since_epoch().count() != 0 &&
+          result.poll_round_count > 0u && has_wait_deadline &&
           std::chrono::steady_clock::now() >= deadline
         ) {
           result.status = adaptive_motion_probe_status_e::timed_out;
+          result.timeout_reason = classify_adaptive_motion_probe_timeout(
+            event_ready,
+            true,
+            true,
+            false
+          );
           break;
         }
-        ++result.query_count;
-        const CUresult query = cuda.cuEventQuery(adaptive_motion_probe_ready_event);
-        if (query == CUDA_SUCCESS) {
+        ++result.poll_round_count;
+        if (!event_ready) {
+          ++result.event_query_count;
+          const CUresult query = cuda.cuEventQuery(adaptive_motion_probe_ready_event);
+          if (query == CUDA_SUCCESS) {
+            event_ready = true;
+          } else if (query != CUDA_ERROR_NOT_READY) {
+            handle_adaptive_motion_probe_cuda_failure(
+              query,
+              "readiness query"
+            );
+            result.status = adaptive_motion_probe_status_e::unavailable;
+            break;
+          }
+        }
+        if (event_ready) {
           D3D11_MAPPED_SUBRESOURCE mapped {};
+          ++result.staging_map_attempt_count;
           const HRESULT mapped_result = context->Map(
             adaptive_motion_probe_staging_buf.Get(),
             0u,
@@ -3567,49 +3591,43 @@ namespace models {
             &mapped
           );
           if (mapped_result == DXGI_ERROR_WAS_STILL_DRAWING) {
-            result.status = adaptive_motion_probe_status_e::timed_out;
-            break;
-          }
-          if (FAILED(mapped_result) || !mapped.pData) {
+            ++result.staging_map_busy_count;
+          } else if (FAILED(mapped_result) || !mapped.pData) {
             adaptive_motion_probe_available = false;
             log_adaptive_motion_probe_failure_once("D3D11 staging readback failed");
             result.status = adaptive_motion_probe_status_e::unavailable;
             break;
+          } else {
+            std::array<std::uint32_t, adaptive_motion_probe_word_count> words {};
+            std::memcpy(words.data(), mapped.pData, sizeof(words));
+            context->Unmap(adaptive_motion_probe_staging_buf.Get(), 0u);
+            result.status = decode_adaptive_motion_probe_words(
+                              words,
+                              current_frame_id,
+                              request.baseline_frame_id,
+                              target_w,
+                              target_h,
+                              result.sample
+                            ) ?
+                              adaptive_motion_probe_status_e::ready :
+                              adaptive_motion_probe_status_e::invalid;
+            break;
           }
-          std::array<std::uint32_t, adaptive_motion_probe_word_count> words {};
-          std::memcpy(words.data(), mapped.pData, sizeof(words));
-          context->Unmap(adaptive_motion_probe_staging_buf.Get(), 0u);
-          result.status = decode_adaptive_motion_probe_words(
-                            words,
-                            current_frame_id,
-                            request.baseline_frame_id,
-                            target_w,
-                            target_h,
-                            result.sample
-                          ) ?
-                            adaptive_motion_probe_status_e::ready :
-                            adaptive_motion_probe_status_e::invalid;
-          break;
-        }
-        if (query != CUDA_ERROR_NOT_READY) {
-          handle_adaptive_motion_probe_cuda_failure(
-            query,
-            "readiness query"
-          );
-          result.status = adaptive_motion_probe_status_e::unavailable;
-          break;
         }
         const auto now = std::chrono::steady_clock::now();
-        if (
-          result.query_count >= query_limit ||
-          deadline.time_since_epoch().count() == 0 ||
-          now >= deadline
-        ) {
+        const auto timeout_reason = classify_adaptive_motion_probe_timeout(
+          event_ready,
+          has_wait_deadline,
+          has_wait_deadline && now >= deadline,
+          result.poll_round_count >= poll_round_limit
+        );
+        if (timeout_reason != adaptive_motion_probe_timeout_reason_e::none) {
           result.status = adaptive_motion_probe_status_e::timed_out;
+          result.timeout_reason = timeout_reason;
           break;
         }
-        const auto next_query_at = std::min(deadline, now + query_interval);
-        while (std::chrono::steady_clock::now() < next_query_at) {
+        const auto next_poll_at = std::min(deadline, now + poll_interval);
+        while (std::chrono::steady_clock::now() < next_poll_at) {
           std::this_thread::yield();
         }
       }

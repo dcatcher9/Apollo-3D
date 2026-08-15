@@ -14,6 +14,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string_view>
 #include <thread>
 
@@ -81,6 +82,99 @@ namespace platf::dxgi {
     [[nodiscard]] constexpr bool operator==(const host_sbs_v2_geometry_t &) const = default;
   };
   static_assert(sizeof(host_sbs_v2_geometry_t) == 48u);
+
+  struct adaptive_motion_probe_collection_stats_t {
+    std::uint64_t requests = 0u;
+    std::uint64_t poll_rounds = 0u;
+    std::uint64_t event_queries = 0u;
+    std::uint64_t staging_map_attempts = 0u;
+    std::uint64_t staging_map_busy = 0u;
+    std::uint64_t repeated_waits = 0u;
+    std::uint64_t timeout_event_immediate_only = 0u;
+    std::uint64_t timeout_event_deadline = 0u;
+    std::uint64_t timeout_event_poll_fuse = 0u;
+    std::uint64_t timeout_staging_map_immediate_only = 0u;
+    std::uint64_t timeout_staging_map_deadline = 0u;
+    std::uint64_t timeout_staging_map_poll_fuse = 0u;
+    std::uint64_t timeout_unclassified = 0u;
+    double wait_sum_ms = 0.0;
+    double wait_max_ms = 0.0;
+
+    void record(const models::adaptive_motion_probe_result &result) noexcept {
+      ++requests;
+      poll_rounds += result.poll_round_count;
+      event_queries += result.event_query_count;
+      staging_map_attempts += result.staging_map_attempt_count;
+      staging_map_busy += result.staging_map_busy_count;
+      if (result.poll_round_count > 1u) {
+        ++repeated_waits;
+      }
+      const double elapsed_ms = std::chrono::duration<double, std::milli>(
+                                  result.wait_duration
+      )
+                                  .count();
+      wait_sum_ms += elapsed_ms;
+      wait_max_ms = std::max(wait_max_ms, elapsed_ms);
+      if (result.status != models::adaptive_motion_probe_status_e::timed_out) {
+        return;
+      }
+      switch (result.timeout_reason) {
+        case models::adaptive_motion_probe_timeout_reason_e::none:
+          ++timeout_unclassified;
+          break;
+        case models::adaptive_motion_probe_timeout_reason_e::event_immediate_only:
+          ++timeout_event_immediate_only;
+          break;
+        case models::adaptive_motion_probe_timeout_reason_e::event_deadline:
+          ++timeout_event_deadline;
+          break;
+        case models::adaptive_motion_probe_timeout_reason_e::event_poll_fuse:
+          ++timeout_event_poll_fuse;
+          break;
+        case models::adaptive_motion_probe_timeout_reason_e::staging_map_immediate_only:
+          ++timeout_staging_map_immediate_only;
+          break;
+        case models::adaptive_motion_probe_timeout_reason_e::staging_map_deadline:
+          ++timeout_staging_map_deadline;
+          break;
+        case models::adaptive_motion_probe_timeout_reason_e::staging_map_poll_fuse:
+          ++timeout_staging_map_poll_fuse;
+          break;
+      }
+    }
+
+    [[nodiscard]] double wait_average_ms() const noexcept {
+      return requests ? wait_sum_ms / requests : 0.0;
+    }
+
+    [[nodiscard]] std::uint64_t timed_out_total() const noexcept {
+      return timeout_event_immediate_only + timeout_event_deadline +
+             timeout_event_poll_fuse + timeout_staging_map_immediate_only +
+             timeout_staging_map_deadline + timeout_staging_map_poll_fuse +
+             timeout_unclassified;
+    }
+
+    [[nodiscard]] std::string summary() const {
+      std::ostringstream out;
+      out
+        << "requests=" << requests
+        << " rounds/event_queries/map_attempts/map_busy/repeated_waits="
+        << poll_rounds << '/' << event_queries << '/' << staging_map_attempts
+        << '/' << staging_map_busy << '/' << repeated_waits
+        << " timeout_event_immediate/deadline/fuse="
+        << timeout_event_immediate_only << '/' << timeout_event_deadline << '/'
+        << timeout_event_poll_fuse
+        << " timeout_map_immediate/deadline/fuse="
+        << timeout_staging_map_immediate_only << '/'
+        << timeout_staging_map_deadline << '/'
+        << timeout_staging_map_poll_fuse
+        << " timeout_unclassified/total=" << timeout_unclassified << '/'
+        << timed_out_total()
+        << " collection_ms_avg/max=" << wait_average_ms() << '/'
+        << wait_max_ms;
+      return out.str();
+    }
+  };
 
   template<class T>
   buf_t make_buffer(device_t::pointer device, const T &t) {
@@ -1317,7 +1411,7 @@ namespace platf::dxgi {
                     .baseline_frame_id = adaptive_probe_baseline_frame_id,
                     .cadence_deadline = probe_plan.cadence_deadline,
                     .max_wait = probe_plan.max_wait,
-                    .max_queries = probe_plan.max_queries,
+                    .max_poll_rounds = probe_plan.max_poll_rounds,
                   }
                 );
                 // Observe the optional result before same-frame completion polling can replace
@@ -2934,20 +3028,8 @@ namespace platf::dxgi {
       if (!requested) {
         return;
       }
-      ++adaptive_shadow_probe_requests;
-      adaptive_shadow_probe_queries += result.query_count;
-      const double elapsed_ms = std::chrono::duration<double, std::milli>(
-                                  result.wait_duration
-      )
-                                  .count();
-      adaptive_shadow_probe_wait_sum_ms += elapsed_ms;
-      adaptive_shadow_probe_wait_max_ms = std::max(
-        adaptive_shadow_probe_wait_max_ms,
-        elapsed_ms
-      );
-      if (result.query_count > 1u) {
-        ++adaptive_shadow_probe_repeated_waits;
-      }
+      adaptive_shadow_probe_collection.record(result);
+      adaptive_shadow_lifetime_probe_collection.record(result);
 
       const bool identity_matches =
         result.status == models::adaptive_motion_probe_status_e::ready &&
@@ -3062,10 +3144,6 @@ namespace platf::dxgi {
         return;
       }
       const auto pending = adaptive_motion_audit.pending();
-      const double probe_wait_avg_ms = adaptive_shadow_probe_requests ?
-                                           adaptive_shadow_probe_wait_sum_ms /
-                                             adaptive_shadow_probe_requests :
-                                           0.0;
       BOOST_LOG(info)
         << "SBS adaptive-motion shadow: samples="sv << adaptive_shadow_samples
         << " quiet_samples="sv << adaptive_shadow_quiet_samples
@@ -3111,7 +3189,8 @@ namespace platf::dxgi {
         << " pending_depth_plus_ocr/ocr_only_needed="sv
         << pending.by_class.depth_plus_ocr << '/'
         << pending.by_class.ocr_only_needed
-        << " current_probe_requests="sv << adaptive_shadow_probe_requests
+        << " current_probe_requests="sv
+        << adaptive_shadow_probe_collection.requests
         << " probe_status_ready/timeout/invalid/unavailable="sv
         << adaptive_shadow_probe_ready << '/'
         << adaptive_shadow_probe_timed_out << '/'
@@ -3125,11 +3204,10 @@ namespace platf::dxgi {
         << adaptive_shadow_ocr_dirty_exact_equal << '/'
         << adaptive_shadow_ocr_dirty_exact_veto << '/'
         << adaptive_shadow_ocr_dirty_exact_unavailable
-        << " probe_queries/repeated_waits="sv
-        << adaptive_shadow_probe_queries << '/'
-        << adaptive_shadow_probe_repeated_waits
-        << " probe_query_ms_avg/max="sv
-        << probe_wait_avg_ms << '/' << adaptive_shadow_probe_wait_max_ms
+        << " probe_collection={"sv
+        << adaptive_shadow_probe_collection.summary() << '}'
+        << " lifetime_probe_collection={"sv
+        << adaptive_shadow_lifetime_probe_collection.summary() << '}'
         << " lifetime_probe_results_invalid/quiet/motion="sv
         << adaptive_shadow_lifetime_probe_results.invalid << '/'
         << adaptive_shadow_lifetime_probe_results.exact_quiet << '/'
@@ -3174,7 +3252,6 @@ namespace platf::dxgi {
       adaptive_shadow_actual_unknown = 0u;
       adaptive_shadow_localized_veto = 0u;
       adaptive_shadow_sum_only_broad_veto = 0u;
-      adaptive_shadow_probe_requests = 0u;
       adaptive_shadow_probe_ready = 0u;
       adaptive_shadow_probe_timed_out = 0u;
       adaptive_shadow_probe_invalid = 0u;
@@ -3185,10 +3262,7 @@ namespace platf::dxgi {
       adaptive_shadow_ocr_dirty_exact_equal = 0u;
       adaptive_shadow_ocr_dirty_exact_veto = 0u;
       adaptive_shadow_ocr_dirty_exact_unavailable = 0u;
-      adaptive_shadow_probe_queries = 0u;
-      adaptive_shadow_probe_repeated_waits = 0u;
-      adaptive_shadow_probe_wait_sum_ms = 0.0;
-      adaptive_shadow_probe_wait_max_ms = 0.0;
+      adaptive_shadow_probe_collection = {};
     }
 
     void log_adaptive_active_stats_if_due(
@@ -3198,10 +3272,6 @@ namespace platf::dxgi {
           now - adaptive_shadow_stats_started < std::chrono::seconds(5)) {
         return;
       }
-      const double probe_wait_avg_ms = adaptive_shadow_probe_requests ?
-                                           adaptive_shadow_probe_wait_sum_ms /
-                                             adaptive_shadow_probe_requests :
-                                           0.0;
       BOOST_LOG(info)
         << "SBS adaptive-motion active: candidates/holds/fallthrough="sv
         << adaptive_active_candidates << '/' << adaptive_active_holds << '/'
@@ -3225,11 +3295,10 @@ namespace platf::dxgi {
         << adaptive_shadow_ocr_dirty_exact_equal << '/'
         << adaptive_shadow_ocr_dirty_exact_veto << '/'
         << adaptive_shadow_ocr_dirty_exact_unavailable
-        << " probe_queries/repeated_waits="sv
-        << adaptive_shadow_probe_queries << '/'
-        << adaptive_shadow_probe_repeated_waits
-        << " probe_query_ms_avg/max="sv << probe_wait_avg_ms << '/'
-        << adaptive_shadow_probe_wait_max_ms;
+        << " probe_collection={"sv
+        << adaptive_shadow_probe_collection.summary() << '}'
+        << " lifetime_probe_collection={"sv
+        << adaptive_shadow_lifetime_probe_collection.summary() << '}';
       adaptive_shadow_stats_started = now;
       adaptive_active_candidates = 0u;
       adaptive_active_holds = 0u;
@@ -3239,7 +3308,6 @@ namespace platf::dxgi {
       adaptive_active_postcheck_vetoes = 0u;
       adaptive_active_ocr_damage_clean_holds = 0u;
       adaptive_active_exact_ocr_input_holds = 0u;
-      adaptive_shadow_probe_requests = 0u;
       adaptive_shadow_probe_ready = 0u;
       adaptive_shadow_probe_timed_out = 0u;
       adaptive_shadow_probe_invalid = 0u;
@@ -3250,10 +3318,7 @@ namespace platf::dxgi {
       adaptive_shadow_ocr_dirty_exact_equal = 0u;
       adaptive_shadow_ocr_dirty_exact_veto = 0u;
       adaptive_shadow_ocr_dirty_exact_unavailable = 0u;
-      adaptive_shadow_probe_queries = 0u;
-      adaptive_shadow_probe_repeated_waits = 0u;
-      adaptive_shadow_probe_wait_sum_ms = 0.0;
-      adaptive_shadow_probe_wait_max_ms = 0.0;
+      adaptive_shadow_probe_collection = {};
     }
 
     void poll_sbs_telemetry_after_output() {
@@ -5636,7 +5701,6 @@ namespace platf::dxgi {
       adaptive_shadow_lifetime_probe_unknown = {};
       adaptive_shadow_localized_veto = 0u;
       adaptive_shadow_sum_only_broad_veto = 0u;
-      adaptive_shadow_probe_requests = 0u;
       adaptive_shadow_probe_ready = 0u;
       adaptive_shadow_probe_timed_out = 0u;
       adaptive_shadow_probe_invalid = 0u;
@@ -5647,10 +5711,8 @@ namespace platf::dxgi {
       adaptive_shadow_ocr_dirty_exact_equal = 0u;
       adaptive_shadow_ocr_dirty_exact_veto = 0u;
       adaptive_shadow_ocr_dirty_exact_unavailable = 0u;
-      adaptive_shadow_probe_queries = 0u;
-      adaptive_shadow_probe_repeated_waits = 0u;
-      adaptive_shadow_probe_wait_sum_ms = 0.0;
-      adaptive_shadow_probe_wait_max_ms = 0.0;
+      adaptive_shadow_probe_collection = {};
+      adaptive_shadow_lifetime_probe_collection = {};
       adaptive_active_candidates = 0u;
       adaptive_active_holds = 0u;
       adaptive_active_fallthrough_enqueues = 0u;
@@ -6400,7 +6462,6 @@ namespace platf::dxgi {
       adaptive_shadow_lifetime_probe_unknown;
     unsigned adaptive_shadow_localized_veto = 0u;
     unsigned adaptive_shadow_sum_only_broad_veto = 0u;
-    std::uint64_t adaptive_shadow_probe_requests = 0u;
     std::uint64_t adaptive_shadow_probe_ready = 0u;
     std::uint64_t adaptive_shadow_probe_timed_out = 0u;
     std::uint64_t adaptive_shadow_probe_invalid = 0u;
@@ -6411,10 +6472,9 @@ namespace platf::dxgi {
     std::uint64_t adaptive_shadow_ocr_dirty_exact_equal = 0u;
     std::uint64_t adaptive_shadow_ocr_dirty_exact_veto = 0u;
     std::uint64_t adaptive_shadow_ocr_dirty_exact_unavailable = 0u;
-    std::uint64_t adaptive_shadow_probe_queries = 0u;
-    std::uint64_t adaptive_shadow_probe_repeated_waits = 0u;
-    double adaptive_shadow_probe_wait_sum_ms = 0.0;
-    double adaptive_shadow_probe_wait_max_ms = 0.0;
+    adaptive_motion_probe_collection_stats_t adaptive_shadow_probe_collection;
+    adaptive_motion_probe_collection_stats_t
+      adaptive_shadow_lifetime_probe_collection;
     std::uint64_t adaptive_active_candidates = 0u;
     std::uint64_t adaptive_active_holds = 0u;
     std::uint64_t adaptive_active_fallthrough_enqueues = 0u;

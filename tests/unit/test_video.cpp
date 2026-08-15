@@ -89,6 +89,44 @@ namespace {
     );
   }
 
+  TEST(AdaptiveMotionProbeTest, TimeoutReasonNamesPhaseAndExhaustedBound) {
+    using reason_e = models::adaptive_motion_probe_timeout_reason_e;
+    using models::classify_adaptive_motion_probe_timeout;
+
+    EXPECT_EQ(
+      classify_adaptive_motion_probe_timeout(false, false, false, false),
+      reason_e::event_immediate_only
+    );
+    EXPECT_EQ(
+      classify_adaptive_motion_probe_timeout(true, false, false, false),
+      reason_e::staging_map_immediate_only
+    );
+    EXPECT_EQ(
+      classify_adaptive_motion_probe_timeout(false, true, true, true),
+      reason_e::event_deadline
+    );
+    EXPECT_EQ(
+      classify_adaptive_motion_probe_timeout(true, true, true, true),
+      reason_e::staging_map_deadline
+    );
+    EXPECT_EQ(
+      classify_adaptive_motion_probe_timeout(false, true, false, true),
+      reason_e::event_poll_fuse
+    );
+    EXPECT_EQ(
+      classify_adaptive_motion_probe_timeout(true, true, false, true),
+      reason_e::staging_map_poll_fuse
+    );
+    EXPECT_EQ(
+      classify_adaptive_motion_probe_timeout(false, true, false, false),
+      reason_e::none
+    );
+    EXPECT_EQ(
+      classify_adaptive_motion_probe_timeout(true, true, false, false),
+      reason_e::none
+    );
+  }
+
   TEST(AdaptiveMotionProbeTest, ValidatesExactIdentityAndShadowVerdict) {
     std::array<std::uint32_t, models::adaptive_motion_probe_word_count> words {};
     constexpr std::uint64_t current_id = 0x0000000200000003ull;
@@ -4796,6 +4834,70 @@ TEST(DirectxShaderSourceTest, AdaptiveExactOcrInputOwnershipFailsOpen) {
     proof_block.find("exact_ocr_input_matches_baseline()"),
     std::string::npos
   );
+}
+
+TEST(DirectxShaderSourceTest, AdaptiveProbeRetriesNonblockingMapWithStickyEventReadiness) {
+  const auto estimator =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
+  const auto display =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
+  ASSERT_FALSE(estimator.empty());
+  ASSERT_FALSE(display.empty());
+
+  const auto collect = estimator.find(
+    "adaptive_motion_probe_result collect_adaptive_motion_probe("
+  );
+  const auto next_method = estimator.find("bool initialize_ocr_context(", collect);
+  ASSERT_NE(collect, std::string::npos);
+  ASSERT_NE(next_method, std::string::npos);
+  const auto body = estimator.substr(collect, next_method - collect);
+
+  const auto sticky_declaration = body.find("bool event_ready = false;");
+  const auto query_guard = body.find("if (!event_ready)", sticky_declaration);
+  const auto query = body.find("cuEventQuery(", query_guard);
+  const auto sticky_set = body.find("event_ready = true;", query);
+  const auto map_guard = body.find("if (event_ready)", sticky_set);
+  const auto map = body.find("context->Map(", map_guard);
+  const auto busy = body.find("mapped_result == DXGI_ERROR_WAS_STILL_DRAWING", map);
+  const auto busy_end = body.find("} else if (FAILED(mapped_result)", busy);
+  const auto timeout = body.find("classify_adaptive_motion_probe_timeout(", busy_end);
+  ASSERT_NE(sticky_declaration, std::string::npos);
+  ASSERT_NE(query_guard, std::string::npos);
+  ASSERT_NE(query, std::string::npos);
+  ASSERT_NE(sticky_set, std::string::npos);
+  ASSERT_NE(map_guard, std::string::npos);
+  ASSERT_NE(map, std::string::npos);
+  ASSERT_NE(busy, std::string::npos);
+  ASSERT_NE(busy_end, std::string::npos);
+  ASSERT_NE(timeout, std::string::npos);
+  EXPECT_LT(query_guard, query);
+  EXPECT_LT(query, sticky_set);
+  EXPECT_LT(sticky_set, map_guard);
+  EXPECT_LT(map_guard, map);
+  EXPECT_LT(map, busy);
+  EXPECT_LT(busy, timeout);
+  EXPECT_EQ(body.substr(busy, busy_end - busy).find("break;"), std::string::npos);
+  EXPECT_NE(
+    body.substr(busy, busy_end - busy).find("++result.staging_map_busy_count"),
+    std::string::npos
+  );
+  EXPECT_NE(body.find("result.poll_round_count >= poll_round_limit"), std::string::npos);
+  EXPECT_EQ(body.find("Flush("), std::string::npos);
+  EXPECT_EQ(body.find("Sleep("), std::string::npos);
+  EXPECT_EQ(body.find("sleep_for"), std::string::npos);
+  EXPECT_NE(body.find("D3D11_MAP_FLAG_DO_NOT_WAIT"), std::string::npos);
+
+  EXPECT_NE(
+    display.find("timeout_event_immediate/deadline/fuse="),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.find("timeout_map_immediate/deadline/fuse="),
+    std::string::npos
+  );
+  EXPECT_NE(display.find("timed_out_total()"), std::string::npos);
+  EXPECT_NE(display.find("probe_collection={"), std::string::npos);
+  EXPECT_NE(display.find("lifetime_probe_collection={"), std::string::npos);
 }
 
 TEST(DirectxShaderSourceTest, HostSbsRejectsRotationAndUsesMatchedV2Frames) {

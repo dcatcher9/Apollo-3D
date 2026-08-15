@@ -148,10 +148,11 @@ namespace platf::dxgi {
       std::chrono::microseconds {250};
     inline constexpr std::uint32_t host_sbs_same_frame_poll_max_queries = 4096u;
     // The optional current-frame probe may spend only a small slice of the same encode cadence
-    // slack. A candidate without usable slack still receives one immediate nonblocking query.
+    // slack. A candidate without usable slack still receives one immediate nonblocking round.
+    // After CUDA becomes ready, the same round fuse bounds nonblocking staging-map retries.
     inline constexpr auto host_sbs_current_frame_probe_max_wait =
       std::chrono::microseconds {500};
-    inline constexpr std::uint32_t host_sbs_current_frame_probe_max_queries = 16u;
+    inline constexpr std::uint32_t host_sbs_current_frame_probe_max_poll_rounds = 16u;
     // 1 / 400 = 0.25%. Keep this integer-ratio contract exact and overflow-free.
     inline constexpr std::uint64_t host_sbs_low_motion_damage_ratio_denominator = 400u;
 
@@ -190,7 +191,7 @@ namespace platf::dxgi {
     struct host_sbs_current_frame_probe_plan_t {
       std::chrono::steady_clock::time_point cadence_deadline {};
       std::chrono::steady_clock::duration max_wait {};
-      std::uint32_t max_queries = 1u;
+      std::uint32_t max_poll_rounds = 1u;
       bool enabled = false;
     };
 
@@ -271,7 +272,7 @@ namespace platf::dxgi {
       // bounded wait before estimate_depth() has dispatched preprocessing and reached collection.
       plan.cadence_deadline = cadence_deadline;
       plan.max_wait = host_sbs_current_frame_probe_max_wait;
-      plan.max_queries = host_sbs_current_frame_probe_max_queries;
+      plan.max_poll_rounds = host_sbs_current_frame_probe_max_poll_rounds;
       return plan;
     }
 

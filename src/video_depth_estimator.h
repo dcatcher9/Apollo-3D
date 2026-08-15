@@ -455,6 +455,43 @@ namespace models {
     ready,
   };
 
+  /** Exact bounded-readback exit that produced a timed-out probe. */
+  enum class adaptive_motion_probe_timeout_reason_e : std::uint8_t {
+    none,
+    event_immediate_only,
+    event_deadline,
+    event_poll_fuse,
+    staging_map_immediate_only,
+    staging_map_deadline,
+    staging_map_poll_fuse,
+  };
+
+  /** Classify which nonblocking readiness phase exhausted the candidate's allowance. */
+  [[nodiscard]] constexpr adaptive_motion_probe_timeout_reason_e
+  classify_adaptive_motion_probe_timeout(
+    const bool event_ready,
+    const bool has_wait_deadline,
+    const bool deadline_reached,
+    const bool poll_fuse_reached
+  ) noexcept {
+    if (!has_wait_deadline) {
+      return event_ready ?
+               adaptive_motion_probe_timeout_reason_e::staging_map_immediate_only :
+               adaptive_motion_probe_timeout_reason_e::event_immediate_only;
+    }
+    if (deadline_reached) {
+      return event_ready ?
+               adaptive_motion_probe_timeout_reason_e::staging_map_deadline :
+               adaptive_motion_probe_timeout_reason_e::event_deadline;
+    }
+    if (poll_fuse_reached) {
+      return event_ready ?
+               adaptive_motion_probe_timeout_reason_e::staging_map_poll_fuse :
+               adaptive_motion_probe_timeout_reason_e::event_poll_fuse;
+    }
+    return adaptive_motion_probe_timeout_reason_e::none;
+  }
+
   inline constexpr std::uint32_t adaptive_motion_probe_flag_cut_contract = 1u << 0u;
   inline constexpr std::uint32_t adaptive_motion_probe_flag_initialized = 1u << 1u;
   inline constexpr std::uint32_t adaptive_motion_probe_flag_depth_ready = 1u << 2u;
@@ -488,7 +525,7 @@ namespace models {
     std::uint64_t baseline_frame_id = 0u;
     std::chrono::steady_clock::time_point cadence_deadline {};
     std::chrono::steady_clock::duration max_wait {};
-    std::uint32_t max_queries = 1u;
+    std::uint32_t max_poll_rounds = 1u;
   };
 
   /** Start the bounded readiness allowance at collection without crossing the encode deadline. */
@@ -553,8 +590,13 @@ namespace models {
   struct adaptive_motion_probe_result {
     adaptive_motion_probe_status_e status =
       adaptive_motion_probe_status_e::not_requested;
+    adaptive_motion_probe_timeout_reason_e timeout_reason =
+      adaptive_motion_probe_timeout_reason_e::none;
     adaptive_motion_probe_sample sample {};
-    std::uint32_t query_count = 0u;
+    std::uint32_t poll_round_count = 0u;
+    std::uint32_t event_query_count = 0u;
+    std::uint32_t staging_map_attempt_count = 0u;
+    std::uint32_t staging_map_busy_count = 0u;
     std::chrono::steady_clock::duration wait_duration {};
   };
 
