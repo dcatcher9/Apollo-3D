@@ -113,9 +113,14 @@ The next cadence investigation is even narrower: `APOLLO_SBS_ADAPTIVE_MOTION_GAT
 truthful full-rate shadow only. It predicts one broad-DDup depth hold after two settled quiet
 CutBridge completions, preserves exact/tiny reuse priority, and retrospectively scores the exact
 candidate frame as quiet, vetoed, or unknown. It separately reports OCR-clean depth-plus-OCR
-opportunities and broad frames that would still require current-frame OCR. No active value is
-accepted yet, and shadow changes no inference admission or rendered output. The canonical policy,
-thresholds, scheduling-time age, broad single-rectangle proof, and reset matrix are in
+opportunities and broad frames that would still require current-frame OCR. A recorded candidate
+also runs one bounded current-input probe against its exact authenticated depth lineage: exact
+NCHW-bit plus exclusion equality is quiet evidence, while the richer RGB, appearance, tile, and
+bottom-band channels remain diagnostic. Probe readiness is limited to one immediate query plus at
+most 0.5 ms of encode-cadence slack, and its exact verdict is cross-tabulated with that frame's later
+CutBridge class. No active value is accepted yet, and probe outcomes change no inference admission,
+OCR, cached geometry, cadence decision, or rendered output. The canonical policy, thresholds,
+scheduling-time age, broad single-rectangle proof, probe deadline, and reset matrix are in
 [Host SBS frame attribution](host-sbs.md#frame-attribution-and-failure-behavior).
 
 OCR also has a narrower independent DDup optimization on frames where DAV2 does run. If damage is

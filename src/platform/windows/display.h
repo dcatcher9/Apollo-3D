@@ -147,6 +147,11 @@ namespace platf::dxgi {
     inline constexpr auto host_sbs_same_frame_poll_min_budget =
       std::chrono::microseconds {250};
     inline constexpr std::uint32_t host_sbs_same_frame_poll_max_queries = 4096u;
+    // The shadow current-frame probe may spend only a small slice of the same encode cadence
+    // slack. A candidate without usable slack still receives one immediate nonblocking query.
+    inline constexpr auto host_sbs_current_frame_probe_max_wait =
+      std::chrono::microseconds {500};
+    inline constexpr std::uint32_t host_sbs_current_frame_probe_max_queries = 16u;
     // 1 / 400 = 0.25%. Keep this integer-ratio contract exact and overflow-free.
     inline constexpr std::uint64_t host_sbs_low_motion_damage_ratio_denominator = 400u;
 
@@ -154,6 +159,13 @@ namespace platf::dxgi {
       std::chrono::steady_clock::time_point deadline {};
       std::chrono::steady_clock::duration budget {};
       bool eligible = false;
+    };
+
+    struct host_sbs_current_frame_probe_plan_t {
+      std::chrono::steady_clock::time_point deadline {};
+      std::chrono::steady_clock::duration budget {};
+      std::uint32_t max_queries = 1u;
+      bool enabled = false;
     };
 
     enum class host_sbs_same_frame_completion_e : std::uint8_t {
@@ -205,6 +217,48 @@ namespace platf::dxgi {
         deadline - now,
         true,
       };
+    }
+
+    /** Bound optional shadow evidence by the encode cadence without suppressing its immediate
+     * query. The caller owns candidate authentication; this helper owns only timing.
+     */
+    [[nodiscard]] constexpr host_sbs_current_frame_probe_plan_t
+    host_sbs_current_frame_probe_plan(
+      const bool authenticated_hold_candidate,
+      const std::optional<std::chrono::steady_clock::time_point> next_encode_target,
+      const std::chrono::steady_clock::time_point now
+    ) noexcept {
+      if (!authenticated_hold_candidate) {
+        return {};
+      }
+      host_sbs_current_frame_probe_plan_t plan;
+      plan.enabled = true;
+      if (!next_encode_target) {
+        return plan;
+      }
+      const auto cadence_deadline =
+        *next_encode_target - host_sbs_same_frame_poll_downstream_reserve;
+      if (cadence_deadline <= now) {
+        return plan;
+      }
+      plan.deadline = std::min(
+        cadence_deadline,
+        now + host_sbs_current_frame_probe_max_wait
+      );
+      plan.budget = plan.deadline - now;
+      plan.max_queries = host_sbs_current_frame_probe_max_queries;
+      return plan;
+    }
+
+    [[nodiscard]] constexpr bool host_sbs_current_frame_probe_identity_matches(
+      const std::uint64_t expected_current_frame_id,
+      const std::uint64_t expected_baseline_frame_id,
+      const std::uint64_t sampled_current_frame_id,
+      const std::uint64_t sampled_baseline_frame_id
+    ) noexcept {
+      return expected_current_frame_id != 0u && expected_baseline_frame_id != 0u &&
+             sampled_current_frame_id == expected_current_frame_id &&
+             sampled_baseline_frame_id == expected_baseline_frame_id;
     }
 
     [[nodiscard]] constexpr bool host_sbs_cached_geometry_render_allowed(
@@ -276,6 +330,13 @@ namespace platf::dxgi {
     enum class host_sbs_adaptive_motion_candidate_class_e : std::uint8_t {
       depth_plus_ocr,
       ocr_only_needed,
+    };
+
+    enum class host_sbs_current_frame_probe_class_e : std::uint8_t {
+      none,
+      invalid,
+      exact_quiet,
+      exact_motion,
     };
 
     /** Classify one authenticated completed CutBridge observation.
@@ -583,24 +644,66 @@ namespace platf::dxgi {
       }
     };
 
+    struct host_sbs_current_frame_probe_counts_t {
+      std::uint64_t invalid = 0u;
+      std::uint64_t exact_quiet = 0u;
+      std::uint64_t exact_motion = 0u;
+
+      constexpr void add(const host_sbs_current_frame_probe_class_e probe_class) noexcept {
+        switch (probe_class) {
+          case host_sbs_current_frame_probe_class_e::none:
+            break;
+          case host_sbs_current_frame_probe_class_e::invalid:
+            ++invalid;
+            break;
+          case host_sbs_current_frame_probe_class_e::exact_quiet:
+            ++exact_quiet;
+            break;
+          case host_sbs_current_frame_probe_class_e::exact_motion:
+            ++exact_motion;
+            break;
+        }
+      }
+
+      constexpr void add(const host_sbs_current_frame_probe_counts_t &other) noexcept {
+        invalid += other.invalid;
+        exact_quiet += other.exact_quiet;
+        exact_motion += other.exact_motion;
+      }
+
+      [[nodiscard]] constexpr std::uint64_t total() const noexcept {
+        return invalid + exact_quiet + exact_motion;
+      }
+    };
+
     struct host_sbs_adaptive_motion_audit_match_t {
       host_sbs_adaptive_motion_candidate_class_e candidate_class;
       host_sbs_adaptive_motion_verdict_e verdict;
+      host_sbs_current_frame_probe_class_e probe_class =
+        host_sbs_current_frame_probe_class_e::none;
     };
 
     struct host_sbs_adaptive_motion_audit_record_result_t {
       bool recorded = false;
       host_sbs_adaptive_motion_candidate_counts_t unknown;
+      host_sbs_current_frame_probe_counts_t probe_unknown;
     };
 
     struct host_sbs_adaptive_motion_audit_result_t {
       std::optional<host_sbs_adaptive_motion_audit_match_t> matched;
       host_sbs_adaptive_motion_candidate_counts_t unknown;
+      host_sbs_current_frame_probe_counts_t probe_unknown;
+    };
+
+    struct host_sbs_adaptive_motion_audit_discard_result_t {
+      host_sbs_adaptive_motion_candidate_counts_t candidates;
+      host_sbs_current_frame_probe_counts_t probes;
     };
 
     struct host_sbs_adaptive_motion_audit_pending_t {
       std::size_t total = 0u;
       host_sbs_adaptive_motion_candidate_counts_t by_class;
+      host_sbs_current_frame_probe_counts_t by_probe;
     };
 
     /** Bounded exact-frame ownership for retrospective shadow honesty. */
@@ -620,11 +723,41 @@ namespace platf::dxgi {
         }
         if (pending_.size() == host_sbs_adaptive_motion_audit_capacity) {
           result.unknown.add(pending_.front().candidate_class);
+          result.probe_unknown.add(pending_.front().probe_class);
           pending_.pop_front();
         }
-        pending_.push_back({frame_id, candidate_class});
+        pending_.push_back({
+          frame_id,
+          candidate_class,
+          host_sbs_current_frame_probe_class_e::none,
+        });
         result.recorded = true;
         return result;
+      }
+
+      /** Attach optional probe evidence only to its already-recorded exact frame. */
+      [[nodiscard]] bool attach_probe(
+        const std::uint64_t frame_id,
+        const host_sbs_current_frame_probe_class_e probe_class
+      ) noexcept {
+        if (frame_id == 0u || probe_class == host_sbs_current_frame_probe_class_e::none) {
+          return false;
+        }
+        const auto pending = std::find_if(
+          pending_.begin(),
+          pending_.end(),
+          [frame_id](const pending_decision_t &candidate) {
+            return candidate.frame_id == frame_id;
+          }
+        );
+        if (
+          pending == pending_.end() ||
+          pending->probe_class != host_sbs_current_frame_probe_class_e::none
+        ) {
+          return false;
+        }
+        pending->probe_class = probe_class;
+        return true;
       }
 
       [[nodiscard]] host_sbs_adaptive_motion_audit_result_t resolve(
@@ -634,22 +767,26 @@ namespace platf::dxgi {
         host_sbs_adaptive_motion_audit_result_t result;
         while (!pending_.empty() && pending_.front().frame_id < sampled_frame_id) {
           result.unknown.add(pending_.front().candidate_class);
+          result.probe_unknown.add(pending_.front().probe_class);
           pending_.pop_front();
         }
         if (!pending_.empty() && pending_.front().frame_id == sampled_frame_id) {
           result.matched = host_sbs_adaptive_motion_audit_match_t {
             pending_.front().candidate_class,
             verdict,
+            pending_.front().probe_class,
           };
           pending_.pop_front();
         }
         return result;
       }
 
-      [[nodiscard]] host_sbs_adaptive_motion_candidate_counts_t discard_all() noexcept {
-        host_sbs_adaptive_motion_candidate_counts_t discarded;
+      [[nodiscard]] host_sbs_adaptive_motion_audit_discard_result_t
+      discard_all() noexcept {
+        host_sbs_adaptive_motion_audit_discard_result_t discarded;
         for (const auto &pending : pending_) {
-          discarded.add(pending.candidate_class);
+          discarded.candidates.add(pending.candidate_class);
+          discarded.probes.add(pending.probe_class);
         }
         pending_.clear();
         return discarded;
@@ -660,6 +797,7 @@ namespace platf::dxgi {
         result.total = pending_.size();
         for (const auto &pending : pending_) {
           result.by_class.add(pending.candidate_class);
+          result.by_probe.add(pending.probe_class);
         }
         return result;
       }
@@ -672,6 +810,7 @@ namespace platf::dxgi {
       struct pending_decision_t {
         std::uint64_t frame_id;
         host_sbs_adaptive_motion_candidate_class_e candidate_class;
+        host_sbs_current_frame_probe_class_e probe_class;
       };
 
       std::deque<pending_decision_t> pending_;

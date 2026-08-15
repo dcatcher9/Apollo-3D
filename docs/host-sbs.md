@@ -585,6 +585,21 @@ conservative depth-plus-OCR opportunity (the exact bottom OCR crop is unchanged)
 opportunity that would still require current-frame OCR because that crop was damaged. Neither is
 authorized to suppress work in this stage.
 
+Only a successfully recorded hypothetical hold candidate requests the optional current-frame
+probe. Its baseline ID is copied from the latest authenticated V2 completion and must also equal
+the estimator's last postprocessed frame; either identity mismatch abstains. After ordinary
+preprocessing, a diagnostic shader outside the authenticated producer closure compares every
+admitted current NCHW value, appearance ordinal, and exclusion bit with that exact baseline and
+copies one fixed 25-word record. The verdict is deliberately narrower than the record: quiet
+requires exact NCHW-bit and exclusion equality, while any such mismatch is a motion veto. RGB
+delta tiers, appearance deltas, tile maxima, and bottom-band counters are diagnostics only and
+cannot change that verdict; neither verdict authorizes a hold. The existing encode target remains the
+only deadline: after preserving the same `3 ms` downstream reserve, repeated readiness queries may
+consume at most `0.5 ms` and have an independent query fuse. A missing or late target still permits
+one immediate query only. The staging map uses `DO_NOT_WAIT`; unavailable resources, timeout,
+malformed evidence, or any optional shader/event failure records an abstention while the same DAV2
+and OCR work continues unchanged.
+
 The live source signature, transfer domain, root/region generations, browser epoch, and interactive
 state are observed independently of cache authentication. Any change clears predictive evidence,
 including while an inference is pending or before the first completion on the new route.
@@ -596,6 +611,11 @@ readback is counted unknown rather than inferred from a newer cache. Exact resol
 candidate's depth-plus-OCR or OCR-only-needed class. Five-second diagnostics publish monotonic
 lifetime class-by-verdict totals, class-specific unknowns and current pending ownership, so an
 interval boundary cannot misattribute a later result; the existing interval aggregate remains.
+An exact current-frame probe annotation stays in that same queue and is resolved only by the later
+CutBridge sample with the identical candidate frame ID. Diagnostics publish probe readiness,
+query/wait cost, pending and unknown ownership, plus lifetime invalid/quiet/motion probe rows
+crossed with CutBridge quiet/invalid/hard-cut/flags/motion columns. A gap, eviction, or reset charges
+both candidate and attached probe ownership unknown rather than pairing either with a newer frame.
 A sample is stale at `100 ms`
 and cannot enable a candidate; a scheduling-time gap of at least `100 ms` clears the quiet streak
 while retaining the cut-count baseline and exact pending-audit ownership for later truthful
@@ -621,8 +641,9 @@ ROI observer, rectangle, planner, or crop-resource eligibility failure selects o
 full-frame V2. That route selection does not weaken the base contract: an internal V2 model,
 provenance, state, field, or renderer authentication failure renders the affected frame flat.
 
-TensorRT inference and all coordinate passes remain on the GPU. The live path does not add a
-per-frame GPU-to-CPU readback. When inference is still busy, the capture loop must not enqueue an
+TensorRT inference and all coordinate passes remain on the GPU. Default production does not add a
+per-frame GPU-to-CPU readback; adaptive shadow may read only the bounded candidate record described
+above. When inference is still busy, the capture loop must not enqueue an
 unbounded backlog; it continues with flat/current output according to the matched-frame contract.
 Telemetry readback is nonblocking and may drop samples under GPU load, while offline evaluation
 may intentionally block to obtain a complete trace. Admission and fixed-resource reuse remain

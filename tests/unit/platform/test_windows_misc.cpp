@@ -675,6 +675,55 @@ namespace {
                    .eligible);
   }
 
+  TEST(WindowsHostSbsCurrentFrameProbeTest, CandidateAlwaysGetsImmediateQueryAndWaitIsCapped) {
+    using namespace std::chrono_literals;
+    using platf::dxgi::detail::host_sbs_current_frame_probe_max_queries;
+    using platf::dxgi::detail::host_sbs_current_frame_probe_plan;
+
+    const auto now = std::chrono::steady_clock::time_point {1s};
+    EXPECT_FALSE(host_sbs_current_frame_probe_plan(false, now + 10ms, now).enabled);
+
+    const auto no_deadline = host_sbs_current_frame_probe_plan(
+      true,
+      std::nullopt,
+      now
+    );
+    EXPECT_TRUE(no_deadline.enabled);
+    EXPECT_EQ(no_deadline.max_queries, 1u);
+    EXPECT_EQ(no_deadline.deadline.time_since_epoch().count(), 0);
+    EXPECT_EQ(no_deadline.budget, std::chrono::steady_clock::duration {});
+
+    const auto late = host_sbs_current_frame_probe_plan(true, now + 3ms, now);
+    EXPECT_TRUE(late.enabled);
+    EXPECT_EQ(late.max_queries, 1u);
+    EXPECT_EQ(late.deadline.time_since_epoch().count(), 0);
+
+    const auto ample = host_sbs_current_frame_probe_plan(true, now + 10ms, now);
+    EXPECT_TRUE(ample.enabled);
+    EXPECT_EQ(ample.max_queries, host_sbs_current_frame_probe_max_queries);
+    EXPECT_EQ(ample.budget, 500us);
+    EXPECT_EQ(ample.deadline, now + 500us);
+
+    const auto cadence_limited = host_sbs_current_frame_probe_plan(
+      true,
+      now + 3200us,
+      now
+    );
+    EXPECT_TRUE(cadence_limited.enabled);
+    EXPECT_EQ(cadence_limited.budget, 200us);
+    EXPECT_EQ(cadence_limited.deadline, now + 200us);
+  }
+
+  TEST(WindowsHostSbsCurrentFrameProbeTest, AuditAttachmentRequiresBothExactIdentities) {
+    using platf::dxgi::detail::host_sbs_current_frame_probe_identity_matches;
+
+    EXPECT_TRUE(host_sbs_current_frame_probe_identity_matches(42u, 40u, 42u, 40u));
+    EXPECT_FALSE(host_sbs_current_frame_probe_identity_matches(0u, 40u, 0u, 40u));
+    EXPECT_FALSE(host_sbs_current_frame_probe_identity_matches(42u, 0u, 42u, 0u));
+    EXPECT_FALSE(host_sbs_current_frame_probe_identity_matches(42u, 40u, 41u, 40u));
+    EXPECT_FALSE(host_sbs_current_frame_probe_identity_matches(42u, 40u, 42u, 39u));
+  }
+
   TEST(WindowsHostSbsSameFramePollTest, ExactOwnerIsAdoptedOnlyAfterReadyMatch) {
     using decision_e =
       platf::dxgi::detail::host_sbs_same_frame_completion_e;
@@ -1088,8 +1137,9 @@ namespace {
     EXPECT_EQ(pending.by_class.depth_plus_ocr, 3u);
     EXPECT_EQ(pending.by_class.ocr_only_needed, 4u);
     const auto discarded = audit.discard_all();
-    EXPECT_EQ(discarded.depth_plus_ocr, 3u);
-    EXPECT_EQ(discarded.ocr_only_needed, 4u);
+    EXPECT_EQ(discarded.candidates.depth_plus_ocr, 3u);
+    EXPECT_EQ(discarded.candidates.ocr_only_needed, 4u);
+    EXPECT_EQ(discarded.probes.total(), 0u);
     EXPECT_EQ(audit.size(), 0u);
 
     const auto ocr_only_recorded = audit.record(20u, candidate_e::ocr_only_needed);
@@ -1100,6 +1150,61 @@ namespace {
     ASSERT_TRUE(ocr_only.matched);
     EXPECT_EQ(ocr_only.matched->candidate_class, candidate_e::ocr_only_needed);
     EXPECT_EQ(ocr_only.matched->verdict, verdict_e::quiet);
+  }
+
+  TEST(WindowsHostSbsAdaptiveShadowTest, ProbeAnnotationKeepsExactOwnershipAndBalancedLoss) {
+    using candidate_e =
+      platf::dxgi::detail::host_sbs_adaptive_motion_candidate_class_e;
+    using probe_e = platf::dxgi::detail::host_sbs_current_frame_probe_class_e;
+    using verdict_e = platf::dxgi::detail::host_sbs_adaptive_motion_verdict_e;
+    platf::dxgi::detail::host_sbs_adaptive_motion_audit_t audit;
+
+    ASSERT_TRUE(audit.record(10u, candidate_e::depth_plus_ocr).recorded);
+    ASSERT_TRUE(audit.record(11u, candidate_e::ocr_only_needed).recorded);
+    ASSERT_TRUE(audit.record(12u, candidate_e::depth_plus_ocr).recorded);
+    EXPECT_FALSE(audit.attach_probe(0u, probe_e::exact_quiet));
+    EXPECT_FALSE(audit.attach_probe(9u, probe_e::exact_quiet));
+    EXPECT_FALSE(audit.attach_probe(10u, probe_e::none));
+    EXPECT_TRUE(audit.attach_probe(10u, probe_e::exact_quiet));
+    EXPECT_FALSE(audit.attach_probe(10u, probe_e::exact_motion));
+    EXPECT_TRUE(audit.attach_probe(11u, probe_e::exact_motion));
+    EXPECT_TRUE(audit.attach_probe(12u, probe_e::invalid));
+
+    const auto resolved = audit.resolve(11u, verdict_e::hard_cut);
+    EXPECT_EQ(resolved.unknown.depth_plus_ocr, 1u);
+    EXPECT_EQ(resolved.probe_unknown.exact_quiet, 1u);
+    ASSERT_TRUE(resolved.matched);
+    EXPECT_EQ(resolved.matched->candidate_class, candidate_e::ocr_only_needed);
+    EXPECT_EQ(resolved.matched->probe_class, probe_e::exact_motion);
+    EXPECT_EQ(resolved.matched->verdict, verdict_e::hard_cut);
+
+    const auto pending = audit.pending();
+    EXPECT_EQ(pending.total, 1u);
+    EXPECT_EQ(pending.by_probe.invalid, 1u);
+    const auto discarded = audit.discard_all();
+    EXPECT_EQ(discarded.candidates.depth_plus_ocr, 1u);
+    EXPECT_EQ(discarded.probes.invalid, 1u);
+  }
+
+  TEST(WindowsHostSbsAdaptiveShadowTest, ProbeAnnotationIsChargedOnQueueEviction) {
+    using candidate_e =
+      platf::dxgi::detail::host_sbs_adaptive_motion_candidate_class_e;
+    using probe_e = platf::dxgi::detail::host_sbs_current_frame_probe_class_e;
+    platf::dxgi::detail::host_sbs_adaptive_motion_audit_t audit;
+
+    for (std::uint64_t frame = 1u;
+         frame <= platf::dxgi::detail::host_sbs_adaptive_motion_audit_capacity;
+         ++frame) {
+      ASSERT_TRUE(audit.record(frame, candidate_e::depth_plus_ocr).recorded);
+    }
+    ASSERT_TRUE(audit.attach_probe(1u, probe_e::exact_quiet));
+    const auto overflow = audit.record(
+      platf::dxgi::detail::host_sbs_adaptive_motion_audit_capacity + 1u,
+      candidate_e::ocr_only_needed
+    );
+    EXPECT_TRUE(overflow.recorded);
+    EXPECT_EQ(overflow.unknown.depth_plus_ocr, 1u);
+    EXPECT_EQ(overflow.probe_unknown.exact_quiet, 1u);
   }
 
   TEST(WindowsHostSbsAdaptiveShadowTest, RejectedOwnershipIsClassUnknownAndLedgerBalances) {

@@ -3912,6 +3912,99 @@ TEST(DirectxShaderSourceTest, AdaptiveMotionProbeAuthenticatesCutStateEncodings)
   );
 }
 
+TEST(DirectxShaderSourceTest, CurrentFrameProbeIsCandidateOwnedAndTelemetryOnly) {
+  const auto display =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
+  ASSERT_FALSE(display.empty());
+
+  const auto build_flag = display.find(
+    "const bool adaptive_probe_shadow = adaptive_motion_shadow_enabled();"
+  );
+  const auto build_capture = display.find("adaptive_probe_shadow]() mutable", build_flag);
+  const auto build_argument = display.find("active,\n          adaptive_probe_shadow", build_capture);
+  ASSERT_NE(build_flag, std::string::npos);
+  ASSERT_NE(build_capture, std::string::npos);
+  ASSERT_NE(build_argument, std::string::npos);
+
+  const auto damage = display.find("const auto cached_motion_damage =");
+  const auto adaptive_use = display.find("const auto &damage = cached_motion_damage;", damage);
+  const auto candidate_record = display.find(
+    "const auto audit_record = adaptive_motion_audit.record(",
+    adaptive_use
+  );
+  const auto recorded_gate = display.find("if (audit_record.recorded)", candidate_record);
+  const auto baseline_copy = display.find(
+    "adaptive_probe_baseline_frame_id =",
+    recorded_gate
+  );
+  const auto probe_plan = display.find(
+    "host_sbs_current_frame_probe_plan(",
+    baseline_copy
+  );
+  const auto estimate = display.find("est = depth_estimator->estimate_depth(", probe_plan);
+  const auto observer = display.find("record_current_frame_motion_probe(", estimate);
+  const auto completion_poll = display.find("host_sbs_same_frame_poll_plan(", observer);
+  ASSERT_NE(damage, std::string::npos);
+  ASSERT_NE(adaptive_use, std::string::npos);
+  ASSERT_NE(candidate_record, std::string::npos);
+  ASSERT_NE(recorded_gate, std::string::npos);
+  ASSERT_NE(baseline_copy, std::string::npos);
+  ASSERT_NE(probe_plan, std::string::npos);
+  ASSERT_NE(estimate, std::string::npos);
+  ASSERT_NE(observer, std::string::npos);
+  ASSERT_NE(completion_poll, std::string::npos);
+  EXPECT_LT(candidate_record, recorded_gate);
+  EXPECT_LT(recorded_gate, baseline_copy);
+  EXPECT_LT(probe_plan, estimate);
+  EXPECT_LT(estimate, observer);
+  EXPECT_LT(observer, completion_poll);
+
+  const auto lineage_reset = display.find(
+    "if (detail::host_sbs_latest_v2_lineage_reset_required(",
+    adaptive_use
+  );
+  ASSERT_NE(lineage_reset, std::string::npos);
+  const auto shared_damage_block = display.substr(damage, lineage_reset - damage);
+  std::size_t damage_walks = 0u;
+  std::size_t damage_walk = 0u;
+  while ((damage_walk = shared_damage_block.find(
+            "matched_motion_damage(",
+            damage_walk
+          )) != std::string::npos) {
+    ++damage_walks;
+    ++damage_walk;
+  }
+  EXPECT_EQ(damage_walks, 1u);
+  EXPECT_NE(
+    shared_damage_block.find(
+      "current_ddup_damage,\n                adaptive_route_observable"
+    ),
+    std::string::npos
+  );
+
+  const auto observer_definition = display.find(
+    "void record_current_frame_motion_probe("
+  );
+  const auto reset_definition = display.find(
+    "void reset_adaptive_motion_runtime(",
+    observer_definition
+  );
+  ASSERT_NE(observer_definition, std::string::npos);
+  ASSERT_NE(reset_definition, std::string::npos);
+  const auto observer_body = display.substr(
+    observer_definition,
+    reset_definition - observer_definition
+  );
+  EXPECT_NE(
+    observer_body.find("host_sbs_current_frame_probe_identity_matches"),
+    std::string::npos
+  );
+  EXPECT_EQ(observer_body.find("adaptive_shadow_decision ="), std::string::npos);
+  EXPECT_EQ(observer_body.find("adaptive_shadow_cadence"), std::string::npos);
+  EXPECT_EQ(observer_body.find("latest_v2_lineage"), std::string::npos);
+  EXPECT_EQ(observer_body.find("matched_candidate_slot"), std::string::npos);
+}
+
 TEST(DirectxShaderSourceTest, HostSbsRejectsRotationAndUsesMatchedV2Frames) {
   const auto display =
     read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
