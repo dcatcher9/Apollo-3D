@@ -187,22 +187,14 @@ bool FullResolutionForegroundCoverage(
     }
 
     int crossing_count = 0;
-    float edge_coordinate = 0.0f;
     int edge_interval = -1;
     [loop]
     for (int crossing_index = 0;
          crossing_index + 1 < OWNERSHIP_PROFILE_SAMPLES;
          ++crossing_index) {
-        float coordinate = OwnershipProfileCoordinate(crossing_index);
         float before = filtered[crossing_index];
         float after = filtered[crossing_index + 1];
         if (before < 0.5f && after >= 0.5f) {
-            float fraction = (0.5f - before) / max(after - before, 1e-8f);
-            edge_coordinate = lerp(
-                coordinate,
-                OwnershipProfileCoordinate(crossing_index + 1),
-                fraction
-            );
             edge_interval = crossing_index;
             ++crossing_count;
         }
@@ -324,7 +316,7 @@ bool FullResolutionForegroundCoverage(
     }
     float refined_fraction =
         (0.5f - low_projection) / max(high_projection - low_projection, 1e-8f);
-    edge_coordinate = lerp(low_coordinate, high_coordinate, refined_fraction);
+    float edge_coordinate = lerp(low_coordinate, high_coordinate, refined_fraction);
     float measured_coverage = saturate(-edge_coordinate);
     if (measured_coverage < OWNERSHIP_COVERAGE_MIN - OWNERSHIP_COVERAGE_ERROR ||
         measured_coverage > OWNERSHIP_COVERAGE_MAX + OWNERSHIP_COVERAGE_ERROR) {

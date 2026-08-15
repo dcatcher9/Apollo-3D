@@ -1261,7 +1261,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 54u);
+  EXPECT_EQ(v2::contract_schema, 55u);
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
   EXPECT_EQ(v2::shadow_state_dump_schema, 16u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
@@ -2892,7 +2892,6 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
     std::tuple {"rgb_to_nchw_cs.hlsl", "content_main", "cs_5_0"},
     std::tuple {"rgb_to_nchw_cs.hlsl", "pad_main", "cs_5_0"},
     std::tuple {"buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"},
-    std::tuple {"depth_ema_motion_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_minmax_ema_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_hist_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_scene_cut_evidence_cs.hlsl", "main", "cs_5_0"},
@@ -3566,6 +3565,161 @@ TEST(DirectxShaderTest, BufferToTexMainThenPadReplicatesBoundaryDepthAndClearsPa
       EXPECT_EQ(motion_bits[index], 0u) << x << ',' << y;
     }
   }
+
+  // A NaN frame-state is neither the all-invalid state nor an authenticated first frame. Keep
+  // the complete ordered-comparison predicate in the production shader: simplifying it after the
+  // early return changes D3DCompiler's unordered-NaN lowering and incorrectly disables edge snap.
+  // Exercise the actual optimized shader with special raw bit patterns so the sign/validity gates
+  // cannot be weakened by a future source cleanup.
+  std::array<float, texel_count> special_raw {};
+  std::array<float, texel_count> special_previous {};
+  std::array<std::uint32_t, texel_count> special_exclusion {};
+  std::array<float, texel_count> special_initial_output {};
+  std::array<std::uint32_t, texel_count> special_initial_motion {};
+  for (UINT y = 0u; y < height; ++y) {
+    for (UINT x = 0u; x < width; ++x) {
+      const auto index = static_cast<std::size_t>(y) * width + x;
+      special_raw[index] = ((x + y) & 1u) != 0u ? 1.0f : 0.0f;
+      special_previous[index] = 0.25f;
+      special_initial_output[index] = -456.0f;
+      special_initial_motion[index] = 0xfeedfaceu;
+    }
+  }
+  special_raw[0] = -0.0f;
+  special_previous[0] = -0.0f;
+  special_raw[1] = std::bit_cast<float>(0x7fc12345u);
+  special_previous[1] = std::bit_cast<float>(0x3e800001u);
+  special_raw[2] = std::numeric_limits<float>::infinity();
+  special_previous[2] = -0.0f;
+  special_raw[3] = -std::numeric_limits<float>::infinity();
+  special_previous[3] = std::bit_cast<float>(0x00000001u);
+  special_raw[4] = -1.0f;
+  special_previous[4] = std::bit_cast<float>(0x7fc54321u);
+  special_raw[5] = std::bit_cast<float>(0x80000001u);
+  special_previous[5] = std::numeric_limits<float>::infinity();
+  special_raw[6] = std::bit_cast<float>(0x00000001u);
+  special_previous[6] = 0.5f;
+
+  ComPtr<ID3D11Buffer> special_raw_buffer;
+  ComPtr<ID3D11ShaderResourceView> special_raw_srv;
+  ASSERT_TRUE(create_structured_srv(
+    special_raw.data(), texel_count, special_raw_buffer, special_raw_srv
+  ));
+  const std::array<float, 4> special_scale {
+    0.0f,
+    1.0f,
+    1.0f,
+    std::numeric_limits<float>::quiet_NaN(),
+  };
+  ComPtr<ID3D11Buffer> special_scale_buffer;
+  ComPtr<ID3D11ShaderResourceView> special_scale_srv;
+  ASSERT_TRUE(create_structured_srv(
+    &special_scale, 1u, special_scale_buffer, special_scale_srv
+  ));
+  ComPtr<ID3D11Texture2D> special_previous_texture;
+  ComPtr<ID3D11ShaderResourceView> special_previous_srv;
+  ASSERT_TRUE(create_input_texture(
+    DXGI_FORMAT_R32_FLOAT,
+    special_previous.data(),
+    special_previous_texture,
+    special_previous_srv
+  ));
+  ComPtr<ID3D11Texture2D> special_exclusion_texture;
+  ComPtr<ID3D11ShaderResourceView> special_exclusion_srv;
+  ASSERT_TRUE(create_input_texture(
+    DXGI_FORMAT_R32_UINT,
+    special_exclusion.data(),
+    special_exclusion_texture,
+    special_exclusion_srv
+  ));
+  ComPtr<ID3D11Texture2D> special_output_texture;
+  ComPtr<ID3D11UnorderedAccessView> special_output_uav;
+  ASSERT_TRUE(create_output_texture(
+    DXGI_FORMAT_R32_FLOAT,
+    special_initial_output.data(),
+    special_output_texture,
+    special_output_uav
+  ));
+  ComPtr<ID3D11Texture2D> special_motion_texture;
+  ComPtr<ID3D11UnorderedAccessView> special_motion_uav;
+  ASSERT_TRUE(create_output_texture(
+    DXGI_FORMAT_R32_UINT,
+    special_initial_motion.data(),
+    special_motion_texture,
+    special_motion_uav
+  ));
+
+  std::array<std::uint32_t, 16> special_constants {};
+  special_constants[0] = width;
+  special_constants[1] = height;
+  special_constants[3] = std::bit_cast<std::uint32_t>(0.25f);
+  special_constants[6] = std::bit_cast<std::uint32_t>(0.1f);
+  // The shader reports gradients in 434-reference-texel units. This 7x6 fixture therefore
+  // scales a unit local gradient by 6/434; keep the threshold below that value so the retained
+  // two-sided predicate enables moving-edge output and the rejected one-sided form fails.
+  special_constants[7] = std::bit_cast<std::uint32_t>(0.01f);
+  special_constants[8] = std::bit_cast<std::uint32_t>(1.0f);
+  special_constants[11] = width;
+  special_constants[12] = height;
+  D3D11_SUBRESOURCE_DATA special_constant_data {};
+  special_constant_data.pSysMem = special_constants.data();
+  ComPtr<ID3D11Buffer> special_constant_buffer;
+  ASSERT_TRUE(SUCCEEDED(device->CreateBuffer(
+    &constant_desc, &special_constant_data, &special_constant_buffer
+  )));
+
+  ID3D11ShaderResourceView *special_srvs[] = {
+    special_raw_srv.Get(),
+    special_scale_srv.Get(),
+    special_previous_srv.Get(),
+    special_exclusion_srv.Get(),
+  };
+  ID3D11UnorderedAccessView *special_uavs[] = {
+    special_output_uav.Get(), special_motion_uav.Get()
+  };
+  ID3D11Buffer *special_constant_buffers[] = {special_constant_buffer.Get()};
+  context->CSSetShaderResources(
+    0u, static_cast<UINT>(std::size(special_srvs)), special_srvs
+  );
+  context->CSSetUnorderedAccessViews(
+    0u, static_cast<UINT>(std::size(special_uavs)), special_uavs, nullptr
+  );
+  context->CSSetConstantBuffers(0u, 1u, special_constant_buffers);
+  context->CSSetShader(main_shader.Get(), nullptr, 0u);
+  context->Dispatch((width + 15u) / 16u, (height + 15u) / 16u, 1u);
+  context->CSSetShader(nullptr, nullptr, 0u);
+  context->CSSetShaderResources(
+    0u, static_cast<UINT>(std::size(null_srvs)), null_srvs
+  );
+  context->CSSetUnorderedAccessViews(
+    0u, static_cast<UINT>(std::size(null_uavs)), null_uavs, nullptr
+  );
+  context->CSSetConstantBuffers(0u, 1u, null_constant_buffers);
+
+  std::array<std::uint32_t, texel_count> special_depth_bits {};
+  std::array<std::uint32_t, texel_count> special_motion_bits {};
+  ASSERT_TRUE(read_texture_bits(special_output_texture.Get(), special_depth_bits));
+  ASSERT_TRUE(read_texture_bits(special_motion_texture.Get(), special_motion_bits));
+  // These ordinary checkerboard texels have a normalized change above 0.1 and a reference-grid
+  // gradient of 6/434 above 0.01. The original two-sided predicate therefore snaps them to the
+  // mapped endpoint. The rejected one-sided predicate produces motion=0 and a filtered interior
+  // value here, so these exact assertions mutation-test the compiler-sensitive NaN behavior.
+  EXPECT_EQ(special_motion_bits[8], 1u);
+  EXPECT_EQ(special_depth_bits[8], std::bit_cast<std::uint32_t>(0.0f));
+  EXPECT_EQ(special_motion_bits[9], 1u);
+  EXPECT_EQ(special_depth_bits[9], std::bit_cast<std::uint32_t>(1.0f));
+  EXPECT_EQ(special_depth_bits[0] & 0x7fffffffu, 0u);
+  for (const std::size_t index : {1u, 2u, 3u, 4u}) {
+    EXPECT_EQ(
+      special_depth_bits[index],
+      std::bit_cast<std::uint32_t>(special_previous[index])
+    ) << "invalid raw depth did not preserve history at texel " << index;
+  }
+  // WARP flushes the negative subnormal input to signed zero before the ordered raw-validity
+  // comparison; retain that observed shader behavior while the hardware A/B separately proves
+  // old/new byte equality for both subnormal signs.
+  EXPECT_EQ(special_depth_bits[5] & 0x7fffffffu, 0u);
+  EXPECT_TRUE(std::isfinite(std::bit_cast<float>(special_depth_bits[6])));
 }
 
 TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {

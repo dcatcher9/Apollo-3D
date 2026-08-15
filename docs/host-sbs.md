@@ -50,14 +50,14 @@ diagnostics that explain how the final field was produced.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 54/tag `0xE6E2DB82`, canonical SHA-256
-`41691e18247a937dfeae066f415bfea89b40c9d532009a0cfb7e1546d247317c`. It binds the
+schema 55/tag `0x72324F6A`, canonical SHA-256
+`8a1d7ab4961e4436b45e17a460335a9075d69cbf869d82df2903e7b3b4cd565a`. It binds the
 complete policy below, including all subtitle field/ROI semantics, and producer source-closure
-SHA-256 `66bd77d5c4eab407b12dcd711bae2d6bc5b0616f3c067ae0136f6a2ba3e3e141`.
+SHA-256 `21239c5794b70299a6d76156edd7c1aae6381625f9fab959e9e4b5152ebf6cc8`.
 The live-renderer source-closure SHA-256 is
-`ce4114ea6b96752024fddf35aed7b686bed4cfde6d365653d868a58012dc4bba`, and dump-only diagnostic
+`db700bf9767ecf18ccc3d9fb09eb5775a293e5b3383a9e96e40eaa263203f08e`, and dump-only diagnostic
 renderer source-closure SHA-256
-`dbd718c81a960c58eb4268d4d8a83e595ec2da9fdd39bb406d87255aefaf694d`. It admits the following
+`f0e89bedef48bc996c1c31697edd880ea107d2590fd0f73b511c87f5219bec5f`. It admits the following
 production calibration:
 
 | Property | Production value |

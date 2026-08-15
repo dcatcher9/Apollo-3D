@@ -21,7 +21,6 @@
 #define OCR8_TAG V2_OCR_RECORD_TAG
 #define OCR8_VALID 1u
 #define OCR8_OVERFLOW 2u
-#define OCR8_NONFINITE 4u
 StructuredBuffer<float> ProbabilityMap : register(t0);
 RWStructuredBuffer<uint> CellStatsWrite : register(u0);
 

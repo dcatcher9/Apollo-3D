@@ -1605,7 +1605,7 @@ class EvalContractTests(unittest.TestCase):
                                   "directx")
         for name in ("depth_coordinate_v2_moments_cs.hlsl",
                      "depth_coordinate_v2_frame_resolve_cs.hlsl",
-                     "depth_hist_cs.hlsl", "depth_ema_motion_cs.hlsl",
+                     "depth_hist_cs.hlsl",
                      "buffer_to_tex_cs.hlsl"):
             shader_path = os.path.join(shader_dir, name)
             with self.subTest(shader=name), open(shader_path, encoding="utf-8") as fh:
@@ -1643,10 +1643,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("DepthAnalysisClampCell(DTid.xy)", mapper)
         self.assertIn("scale.w < 0.5f", mapper)
         self.assertIn("scale.w > 1.5f ? 1.0f : ema_alpha", mapper)
-        with open(os.path.join(shader_dir, "depth_ema_motion_cs.hlsl"),
-                  encoding="utf-8") as fh:
-            motion = fh.read()
-        self.assertIn("return PreviousDepth[p]", motion)
+        self.assertFalse(os.path.exists(os.path.join(shader_dir, "depth_ema_motion_cs.hlsl")))
         with open(os.path.join(shader_dir, "depth_valid_history_cs.hlsl"),
                   encoding="utf-8") as fh:
             history = fh.read()
@@ -1859,7 +1856,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("std::swap(depth_uav, depth_previous_uav)", estimator)
         self.assertIn("std::swap(depth_srv, depth_previous_srv)", estimator)
         self.assertIn("ema_motion_mask_srv", estimator)
-        self.assertNotIn("context->CSSetShader(depth_ema_motion_cs.Get()", estimator)
+        self.assertNotIn("depth_ema_motion_cs", estimator)
         self.assertIn("ID3D11UnorderedAccessView *bt_uavs[2]", estimator)
         with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
                   encoding="utf-8") as fh:

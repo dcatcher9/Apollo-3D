@@ -125,11 +125,6 @@ void main(
     GroupMemoryBarrierWithGroupSync();
 
     if (lane == 0u) {
-        [unroll]
-        for (uint clear_chunk = 0u; clear_chunk < V2_LIMIT_THREADS; ++clear_chunk) {
-            ChunkCarriesQ30[clear_chunk] = int2(0, 0);
-        }
-
         forward_q30 = LocalEndsQ30[0u].x;
         [unroll]
         for (uint forward_chunk = 1u;

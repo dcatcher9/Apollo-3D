@@ -72,10 +72,10 @@ WINDOW_REGION_AUTHORITY_KINDS = frozenset({"chromium-video", "foreground-client"
 SHADOW_STATE_DUMP_SCHEMA = 16
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 2
 LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
-    "ce4114ea6b96752024fddf35aed7b686bed4cfde6d365653d868a58012dc4bba"
+    "db700bf9767ecf18ccc3d9fb09eb5775a293e5b3383a9e96e40eaa263203f08e"
 )
 DIAGNOSTIC_SOURCE_CLOSURE_SHA256 = (
-    "dbd718c81a960c58eb4268d4d8a83e595ec2da9fdd39bb406d87255aefaf694d"
+    "f0e89bedef48bc996c1c31697edd880ea107d2590fd0f73b511c87f5219bec5f"
 )
 _CONTRACT = coordinate_contract.load_contract()
 _CONTRACT_TAG = generator.contract_tag(_CONTRACT)

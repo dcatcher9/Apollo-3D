@@ -7,7 +7,6 @@ StructuredBuffer<float4> FrameStats : register(t0);
 StructuredBuffer<float4> CutBridgeState : register(t1);
 RWStructuredBuffer<float4> ShadowState : register(u0);
 
-#include "include/depth_constants.hlsl"
 #include "include/depth_coordinate_v2.hlsl"
 #include "include/sbs_adaptive_state_contract.generated.hlsl"
 

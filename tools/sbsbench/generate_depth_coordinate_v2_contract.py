@@ -228,7 +228,6 @@ PARALLAX_V2_SHADER_SPECS = (
     ("rgb_to_nchw_cs.hlsl", "pad_main", "cs_5_0"),
     ("buffer_to_tex_cs.hlsl", "main", "cs_5_0"),
     ("buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"),
-    ("depth_ema_motion_cs.hlsl", "main", "cs_5_0"),
     ("depth_minmax_ema_cs.hlsl", "main", "cs_5_0"),
     ("depth_hist_cs.hlsl", "main", "cs_5_0"),
     ("depth_scene_cut_evidence_cs.hlsl", "main", "cs_5_0"),

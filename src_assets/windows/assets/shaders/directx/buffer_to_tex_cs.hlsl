@@ -22,14 +22,11 @@ float CurrentDepth(int2 p, float2 mm) {
         // far-depth edge and could snap adjacent valid texels through the motion mask.
         return PreviousDepth[p];
     }
-    return saturate((max(raw, 0.0f) - mm.x) / max(mm.y - mm.x, 1e-6f));
+    return saturate((raw - mm.x) / max(mm.y - mm.x, 1e-6f));
 }
 
 bool IsMovingEdge(int2 p, float current, float2 mm) {
     p = ClampPixel(p);
-    if (TensorExclusion[p] != 0u) {
-        return false;
-    }
 
     static const int2 neighbor_offsets[4] = {
         int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1)
@@ -89,7 +86,7 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     bool raw_valid = !isnan(raw) && !isinf(raw) && raw >= 0.0f;
     float previous = PreviousDepth[sample_position];
     float mapped = raw_valid ?
-        saturate((max(raw, 0.0f) - mm.x) / max(mm.y - mm.x, 1e-6f)) : previous;
+        saturate((raw - mm.x) / max(mm.y - mm.x, 1e-6f)) : previous;
 
     // The old mask pass ran only when both thresholds were positive and only for a history frame
     // (frame_state == 1). Preserve its comparison form so a non-finite state behaves identically.

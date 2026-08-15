@@ -35,7 +35,6 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec buffer_to_tex_pad {
     "buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"
   };
-  inline constexpr shader_spec depth_ema_motion {"depth_ema_motion_cs.hlsl"};
   inline constexpr shader_spec depth_minmax_ema {"depth_minmax_ema_cs.hlsl"};
   inline constexpr shader_spec depth_hist {"depth_hist_cs.hlsl"};
   inline constexpr shader_spec depth_valid_history {"depth_valid_history_cs.hlsl"};
@@ -96,9 +95,9 @@ namespace models::host_sbs_shader_cache {
     "sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"
   };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
-    "ce4114ea6b96752024fddf35aed7b686bed4cfde6d365653d868a58012dc4bba";
+    "db700bf9767ecf18ccc3d9fb09eb5775a293e5b3383a9e96e40eaa263203f08e";
   inline constexpr std::string_view parallax_v2_diagnostic_source_closure_sha256 =
-    "dbd718c81a960c58eb4268d4d8a83e595ec2da9fdd39bb406d87255aefaf694d";
+    "f0e89bedef48bc996c1c31697edd880ea107d2590fd0f73b511c87f5219bec5f";
   inline constexpr std::string_view sbs_flat_fallback_source_closure_sha256 =
     "7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4";
   inline constexpr std::string_view adaptive_motion_probe_source_closure_sha256 =
@@ -123,7 +122,6 @@ namespace models::host_sbs_shader_cache {
     rgb_to_nchw_pad,
     buffer_to_tex,
     buffer_to_tex_pad,
-    depth_ema_motion,
     depth_minmax_ema,
     depth_hist,
     depth_scene_cut_evidence,
@@ -159,7 +157,6 @@ namespace models::host_sbs_shader_cache {
     producer_shader_binding {producer_shader_e::rgb_to_nchw_pad, rgb_to_nchw_pad},
     producer_shader_binding {producer_shader_e::buffer_to_tex, buffer_to_tex},
     producer_shader_binding {producer_shader_e::buffer_to_tex_pad, buffer_to_tex_pad},
-    producer_shader_binding {producer_shader_e::depth_ema_motion, depth_ema_motion},
     producer_shader_binding {producer_shader_e::depth_minmax_ema, depth_minmax_ema},
     producer_shader_binding {producer_shader_e::depth_hist, depth_hist},
     producer_shader_binding {
@@ -239,7 +236,7 @@ namespace models::host_sbs_shader_cache {
 
   // Active, optional reuse evidence. Keep this independently pinned root outside the
   // authenticated producer closure so source-authentication, compile, resource, or readback
-  // failure disables only adaptive reuse and cannot change schema-54 geometry or fail live SBS.
+  // failure disables only adaptive reuse and cannot change schema-55 geometry or fail live SBS.
   inline constexpr std::array adaptive_motion_probe_specs {
     host_sbs_current_frame_motion_probe,
   };

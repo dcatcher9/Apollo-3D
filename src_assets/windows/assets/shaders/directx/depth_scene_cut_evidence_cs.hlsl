@@ -103,8 +103,7 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
 
         float current_samples[5];
         float previous_samples[5];
-        bool current_sample_admitted[5];
-        bool previous_sample_admitted[5];
+        bool sample_admitted[5];
         [unroll]
         for (int sample_index = 0; sample_index < 5; ++sample_index) {
             int2 offset = STRUCTURE_ORDINAL_OFFSETS[sample_index];
@@ -115,11 +114,9 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
             // Every ordinal stencil endpoint uses the same current/previous union as its center.
             // Otherwise one frame's overlay cell could still inflate the opposite endpoint's
             // structural-support denominator even though that pair cannot produce common evidence.
-            bool sample_admitted =
+            sample_admitted[sample_index] =
                 g_current_exclusion[tile_index] == 0u &&
                 g_previous_exclusion[tile_index] == 0u;
-            current_sample_admitted[sample_index] = sample_admitted;
-            previous_sample_admitted[sample_index] = sample_admitted;
         }
         uint current_comparisons = 0u;
         uint previous_comparisons = 0u;
@@ -136,14 +133,14 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
                 float previous_scale =
                     max(abs(previous_samples[first]), abs(previous_samples[second]));
                 bool current_reliable =
-                    current_sample_admitted[first] &&
-                    current_sample_admitted[second] &&
+                    sample_admitted[first] &&
+                    sample_admitted[second] &&
                     abs(current_delta) >=
                         max(STRUCTURAL_ORDINAL_NOISE_FLOOR,
                             STRUCTURAL_ORDINAL_RELATIVE_CONTRAST_FLOOR * current_scale);
                 bool previous_reliable =
-                    previous_sample_admitted[first] &&
-                    previous_sample_admitted[second] &&
+                    sample_admitted[first] &&
+                    sample_admitted[second] &&
                     abs(previous_delta) >=
                         max(STRUCTURAL_ORDINAL_NOISE_FLOOR,
                             STRUCTURAL_ORDINAL_RELATIVE_CONTRAST_FLOOR * previous_scale);

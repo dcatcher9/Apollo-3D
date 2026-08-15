@@ -2578,7 +2578,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> rgb_to_nchw_pad_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_pad_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_ema_motion_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_minmax_ema_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_hist_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_scene_cut_evidence_cs;
@@ -4084,7 +4083,6 @@ namespace models {
           case producer_shader_e::buffer_to_tex: return std::addressof(buffer_to_tex_cs);
           case producer_shader_e::buffer_to_tex_pad:
             return std::addressof(buffer_to_tex_pad_cs);
-          case producer_shader_e::depth_ema_motion: return std::addressof(depth_ema_motion_cs);
           case producer_shader_e::depth_minmax_ema: return std::addressof(depth_minmax_ema_cs);
           case producer_shader_e::depth_hist: return std::addressof(depth_hist_cs);
           case producer_shader_e::depth_scene_cut_evidence:

@@ -18,10 +18,6 @@ void main() {
     float4 telemetry = CutBridgeState[SBS_STATE_VECTOR_CURRENT_DEPTH_CHANGE_FRACTION];
     uint4 health_counters = asuint(CutBridgeState[SBS_STATE_VECTOR_HARD_CUT_COUNT]);
     float4 telemetry_flags = CutBridgeState[SBS_STATE_VECTOR_RANGE_COLLAPSED];
-    float4 current_diagnostics =
-        CutBridgeState[SBS_STATE_VECTOR_STRUCTURAL_CHANGE_FRACTION];
-    float4 analysis_diagnostics =
-        CutBridgeState[SBS_STATE_VECTOR_CURRENT_STRUCTURAL_SUPPORT_FRACTION];
     if (asuint(SBS_STATE_CUT_CONTRACT_TAG_BITS(s)) != SBS_CUT_CONTRACT_TAG) {
         s = SbsAdaptiveStateInitialVector(0u);
         s1 = SbsAdaptiveStateInitialVector(1u);
@@ -29,14 +25,12 @@ void main() {
         telemetry = SbsAdaptiveStateInitialVector(3u);
         health_counters = asuint(SbsAdaptiveStateInitialVector(4u));
         telemetry_flags = SbsAdaptiveStateInitialVector(5u);
-        current_diagnostics = SbsAdaptiveStateInitialVector(6u);
-        analysis_diagnostics = SbsAdaptiveStateInitialVector(7u);
     }
     SBS_STATE_CUT_CONTRACT_TAG_BITS(s) = asfloat(SBS_CUT_CONTRACT_TAG);
-    current_diagnostics = 0.0f;
+    float4 current_diagnostics = 0.0f;
     SBS_STATE_STRUCTURAL_CHANGE_FRACTION(current_diagnostics) = -1.0f;
     SBS_STATE_RAW_RGB_CHANGE_FRACTION(current_diagnostics) = -1.0f;
-    analysis_diagnostics = 0.0f;
+    float4 analysis_diagnostics = 0.0f;
     SBS_STATE_CURRENT_STRUCTURAL_SUPPORT_FRACTION(analysis_diagnostics) = -1.0f;
     SBS_STATE_PREVIOUS_STRUCTURAL_SUPPORT_FRACTION(analysis_diagnostics) = -1.0f;
     SBS_STATE_COMMON_STRUCTURAL_SUPPORT_FRACTION(analysis_diagnostics) = -1.0f;

@@ -1,5 +1,5 @@
 {
-  "schema": 54,
+  "schema": 55,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -157,11 +157,6 @@
         "source_target": "cs_5_0"
       },
       {
-        "source_file": "depth_ema_motion_cs.hlsl",
-        "source_entrypoint": "main",
-        "source_target": "cs_5_0"
-      },
-      {
         "source_file": "depth_minmax_ema_cs.hlsl",
         "source_entrypoint": "main",
         "source_target": "cs_5_0"
@@ -257,7 +252,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "66bd77d5c4eab407b12dcd711bae2d6bc5b0616f3c067ae0136f6a2ba3e3e141"
+    "source_closure_sha256": "21239c5794b70299a6d76156edd7c1aae6381625f9fab959e9e4b5152ebf6cc8"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,

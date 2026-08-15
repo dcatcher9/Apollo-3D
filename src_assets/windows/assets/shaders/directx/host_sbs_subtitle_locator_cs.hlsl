@@ -1039,17 +1039,6 @@ void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
     [loop]
     for (uint index = 0u; index < V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT; ++index) {
         PreviousState[index] = LocatorState[index];
-        LocatorState[index] = 0u;
-    }
-    [loop]
-    for (uint work_index = 0u; work_index < 28u; ++work_index) {
-        WorkRects[work_index] = uint4(0u, 0u, 0u, 0u);
-        WorkKinds[work_index] = 0u;
-    }
-    [unroll]
-    for (uint cover_index = 0u; cover_index < MAX_LINES; ++cover_index) {
-        StackCovers[cover_index] = uint4(0u, 0u, 0u, 0u);
-        MatchedCovers[cover_index] = uint4(0u, 0u, 0u, 0u);
     }
 
     bool cut_valid = asuint(SBS_STATE_CUT_CONTRACT_TAG_BITS(
