@@ -371,6 +371,14 @@ namespace models {
   /** Pure transition decision used immediately before temporal/camera state is reset. */
   class depth_input_domain_tracker_t {
   public:
+    [[nodiscard]] bool matches_analysis_domain(
+      const depth_input_region_t &region,
+      const input_color_space color_space
+    ) const noexcept {
+      return initialized_ && color_space_ == color_space &&
+             region_.same_analysis_domain(region);
+    }
+
     bool update(
       const depth_input_region_t &region,
       const input_color_space color_space
@@ -429,11 +437,7 @@ namespace models {
                                  depth_optional_work_mode_e::ordinary;
   }
 
-  /** Optional current-frame motion evidence collected before DAV2 submission.
-   *
-   * This is a shadow-only diagnostic contract. A ready quiet sample is evidence for evaluating a
-   * future policy; it is never, by itself, authority to suppress inference or reuse geometry.
-   */
+  /** Optional current-frame motion evidence collected before DAV2 submission. */
   inline constexpr std::uint32_t adaptive_motion_probe_contract_tag = 0x324D4643u;
   inline constexpr std::size_t adaptive_motion_probe_word_count = 26u;
   inline constexpr std::uint32_t adaptive_motion_probe_max_exact_numeric_counter = 16777215u;
@@ -470,6 +474,9 @@ namespace models {
 
   struct adaptive_motion_probe_request {
     bool enabled = false;
+    // Display-side DDup/OCR/route/cadence checks may arm the estimator's independent, fail-closed
+    // selector. The decoded probe remains insufficient authority on its own.
+    bool authorize_near_identical_observation_hold = false;
     std::uint64_t baseline_frame_id = 0u;
     std::chrono::steady_clock::time_point deadline {};
     std::uint32_t max_queries = 1u;
@@ -547,6 +554,56 @@ namespace models {
              adaptive_motion_probe_exact_verdict_e::quiet_evidence;
   }
 
+  enum class adaptive_motion_hold_decision_e : std::uint8_t {
+    infer,
+    hold,
+  };
+
+  /** Select the bounded active no-observation path after all display-owned gates are armed.
+   *
+   * DAV2 NCHW and exclusion must be bit-identical. Appearance ordinal bit noise below 1/1024 is
+   * tolerated, but any thresholded appearance change vetoes. The exact-appearance CFM2 channel
+   * remains independent shadow telemetry.
+   */
+  [[nodiscard]] constexpr adaptive_motion_hold_decision_e
+  select_adaptive_motion_hold(
+    const bool authorized_by_caller,
+    const bool input_domain_matches,
+    const bool completed_observation_consumed,
+    const bool snapshot_debug_inputs,
+    const depth_optional_work_mode_e optional_work,
+    const adaptive_motion_probe_result &probe
+  ) noexcept {
+    if (
+      !authorized_by_caller || !input_domain_matches ||
+      completed_observation_consumed || snapshot_debug_inputs ||
+      optional_work == depth_optional_work_mode_e::suppress_subtitle ||
+      probe.status != adaptive_motion_probe_status_e::ready ||
+      probe.sample.current_frame_id == 0u ||
+      probe.sample.baseline_frame_id == 0u ||
+      probe.sample.current_frame_id <= probe.sample.baseline_frame_id ||
+      probe.sample.prior_state_flags != adaptive_motion_probe_settled_flags ||
+      probe.sample.admitted_texels == 0u ||
+      probe.sample.exclusion_mismatch_texels != 0u ||
+      probe.sample.exact_changed_texels != 0u ||
+      probe.sample.appearance_delta_1_over_1024_texels != 0u
+    ) {
+      return adaptive_motion_hold_decision_e::infer;
+    }
+    return adaptive_motion_hold_decision_e::hold;
+  }
+
+  struct adaptive_motion_observation_hold_result {
+    bool held = false;
+    std::uint64_t current_frame_id = 0u;
+    std::uint64_t baseline_frame_id = 0u;
+
+    [[nodiscard]] constexpr bool valid() const noexcept {
+      return held && current_frame_id != 0u && baseline_frame_id != 0u &&
+             current_frame_id > baseline_frame_id;
+    }
+  };
+
   struct estimate_result {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> cut_state;  ///< Cut-analysis state shared with telemetry and coordinate production.
@@ -600,7 +657,8 @@ namespace models {
     bool subtitle_work_suppressed = false;  ///< This completion published Base and did not advance same-domain locator state.
     bool subtitle_ocr_inference_enqueued = false;  ///< This call enqueued OCR for its newly supplied input frame.
     bool subtitle_ocr_redispatch_enqueued = false;  ///< This call accepted exact OCR8 redispatch for its newly supplied input frame.
-    adaptive_motion_probe_result current_frame_motion_probe;  ///< Optional shadow-only pre-DAV2 evidence for this submitted frame.
+    adaptive_motion_probe_result current_frame_motion_probe;  ///< Optional pre-DAV2 evidence for this supplied frame.
+    adaptive_motion_observation_hold_result adaptive_motion_observation_hold;  ///< Exact ownership of a supplied frame for which this call enqueued neither DAV2 nor OCR.
   };
 
   struct pending_depth_poll_result {
@@ -757,7 +815,7 @@ namespace models {
       const std::filesystem::path &assets_dir,
       const config::video_t::sbs_t &cfg,
       const config::depth_model_info &model,
-      bool enable_adaptive_motion_probe_shadow = false
+      bool enable_adaptive_motion_probe = false
     );
 
     ~video_depth_estimator();

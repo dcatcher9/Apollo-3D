@@ -1664,7 +1664,7 @@ namespace models {
     float minmax_alpha;  // temporal EMA blend for the normalized min/max
     bool cuda_graph_enabled;
     const bool diagnostics_enabled;
-    const bool adaptive_motion_probe_shadow_enabled;
+    const bool adaptive_motion_probe_enabled;
     struct tensorrt_cuda_graph_t {
       CUgraph graph = nullptr;
       CUgraphExec executable = nullptr;
@@ -3167,7 +3167,7 @@ namespace models {
     }
 
     void initialize_adaptive_motion_probe(cuda_driver_api &cuda) {
-      if (!adaptive_motion_probe_shadow_enabled) {
+      if (!adaptive_motion_probe_enabled) {
         return;
       }
       const auto sources = host_sbs_shader_cache::snapshot_sources(
@@ -3247,8 +3247,8 @@ namespace models {
       }
       adaptive_motion_probe_available = true;
       BOOST_LOG(info)
-        << "Host SBS current-frame motion probe shadow initialized outside the authenticated "
-           "producer closure.";
+        << "Host SBS current-frame motion probe initialized outside the authenticated producer "
+           "closure.";
     }
 
     void destroy_adaptive_motion_probe_event(cuda_driver_api &cuda) noexcept {
@@ -3272,7 +3272,8 @@ namespace models {
       const adaptive_motion_probe_request &request,
       const std::uint64_t current_frame_id,
       const D3D11_TEXTURE2D_DESC &input_desc,
-      const depth_input_region_t &input_region
+      const depth_input_region_t &input_region,
+      const input_color_space color_space
     ) {
       adaptive_motion_probe_copy_scheduled = false;
       adaptive_motion_probe_event_recorded = false;
@@ -3282,6 +3283,8 @@ namespace models {
         current_frame_id <= request.baseline_frame_id ||
         !has_last_postprocessed_frame_id ||
         request.baseline_frame_id != last_postprocessed_frame_id ||
+        (request.authorize_near_identical_observation_hold &&
+         !processed_input_domain.matches_analysis_domain(input_region, color_space)) ||
         !adaptive_motion_probe_cs || !adaptive_motion_probe_cbuffer ||
         !adaptive_motion_probe_output_uav || !adaptive_motion_probe_staging_buf ||
         !tensor_in_srv || !tensor_previous_input_srv || !appearance_ordinal_srv ||
@@ -3624,7 +3627,7 @@ namespace models {
       const std::filesystem::path &assets_dir,
       const config::video_t::sbs_t &cfg,
       const config::depth_model_info &model,
-      const bool enable_adaptive_motion_probe_shadow
+      const bool enable_adaptive_motion_probe
     ):
         device(d),
         context(c),
@@ -3638,7 +3641,7 @@ namespace models {
         minmax_alpha((float) config::host_sbs_v2_live_calibration::minmax_ema),
         cuda_graph_enabled(cfg.cuda_graph),
         diagnostics_enabled(config::sunshine.diagnostics_enabled),
-        adaptive_motion_probe_shadow_enabled(enable_adaptive_motion_probe_shadow),
+        adaptive_motion_probe_enabled(enable_adaptive_motion_probe),
         parallax_v2_requested_pop_strength(
           depth_coordinate_v2::requested_pop_strength(
             static_cast<float>(cfg.pop_strength)
@@ -5409,7 +5412,8 @@ namespace models {
       bool subtitle_work_suppressed = false,
       bool subtitle_ocr_inference_enqueued = false,
       bool subtitle_ocr_redispatch_enqueued = false,
-      adaptive_motion_probe_result motion_probe = {}
+      adaptive_motion_probe_result motion_probe = {},
+      adaptive_motion_observation_hold_result adaptive_motion_observation_hold = {}
     ) {
       estimate_result r;
       r.depth = output_srv();
@@ -5456,6 +5460,7 @@ namespace models {
       r.subtitle_ocr_inference_enqueued = subtitle_ocr_inference_enqueued;
       r.subtitle_ocr_redispatch_enqueued = subtitle_ocr_redispatch_enqueued;
       r.current_frame_motion_probe = std::move(motion_probe);
+      r.adaptive_motion_observation_hold = adaptive_motion_observation_hold;
       r.cuda_graph_active = depth_inference_graph.executable != nullptr &&
                             !depth_inference_graph.policy.capture_failed;
       if (completed_frame_valid) {
@@ -6753,13 +6758,14 @@ namespace models {
       context->CSSetShaderResources(0, 1, &null_srv);
 
       // Compare the exact just-preprocessed frame with the settled reliable-history endpoint.
-      // This dispatch/copy is optional shadow evidence only; every outcome below still submits
-      // DAV2/OCR through the unchanged production path.
+      // Shadow mode records diagnostics only. A separately armed active candidate may suppress
+      // this one observation after the estimator authenticates the result below.
       (void) dispatch_adaptive_motion_probe(
         motion_probe_request,
         frame_id,
         input_desc,
-        input_region
+        input_region,
+        color_space
       );
 
       // The detector sees only the bottom 6:1 source crop. Resize and ImageNet/BGR normalization
@@ -6918,6 +6924,7 @@ namespace models {
       clear_pending_inference_event_state();
       bool enqueued = false;
       bool ocr_enqueued = false;
+      adaptive_motion_observation_hold_result adaptive_motion_observation_hold;
       if (in_ptr_res != CUDA_SUCCESS || out_ptr_res != CUDA_SUCCESS || !d_in || !d_out) {
         BOOST_LOG(error) << "Failed to get mapped pointer for TensorRT: "
                          << in_ptr_res << ", " << out_ptr_res;
@@ -7040,15 +7047,36 @@ namespace models {
         }
 
         // OCR mapping and binding work above consumes natural CPU slack while the ordering event
-        // catches the tiny D3D readback up. The bounded query never waits on DAV2: that enqueue is
-        // deliberately still below this point and always runs regardless of the shadow verdict.
+        // catches the tiny D3D readback up. The bounded query never waits on DAV2: submission is
+        // still below this point, so an authorized near-identical hold skips both observations.
         motion_probe_result = collect_adaptive_motion_probe(
           cuda,
           motion_probe_request,
           frame_id
         );
 
-        if (bindings_ok && !terminal_failure) {
+        const bool adaptive_motion_observation_held =
+          bindings_ok && !terminal_failure &&
+          select_adaptive_motion_hold(
+            motion_probe_request.authorize_near_identical_observation_hold,
+            processed_input_domain.matches_analysis_domain(
+              input_region,
+              color_space
+            ),
+            completed_frame_valid,
+            snapshot_raw_model_depth,
+            accepted_optional_work,
+            motion_probe_result
+          ) == adaptive_motion_hold_decision_e::hold;
+        if (adaptive_motion_observation_held) {
+          adaptive_motion_observation_hold = {
+            .held = true,
+            .current_frame_id = motion_probe_result.sample.current_frame_id,
+            .baseline_frame_id = motion_probe_result.sample.baseline_frame_id,
+          };
+        }
+
+        if (bindings_ok && !terminal_failure && !adaptive_motion_observation_held) {
           // TensorRT host-side submission remains serialized across estimator instances. The lock
           // is released after each enqueue; independent CUDA streams may then overlap execution.
           {
@@ -7133,12 +7161,14 @@ namespace models {
         BOOST_LOG(error) << "cuGraphicsUnmapResources failed: " << unmap_res;
         mark_shared_execution_failure(ocr_enqueued);
         enqueued = false;
+        adaptive_motion_observation_hold = {};
       }
       if (ocr_unmap_res != CUDA_SUCCESS) {
         BOOST_LOG(error) << "PP-OCRv6 tiny interop unmap failed: " << ocr_unmap_res;
         mark_shared_execution_failure(ocr_enqueued);
         enqueued = false;
         ocr_enqueued = false;
+        adaptive_motion_observation_hold = {};
       }
 
       has_previous_frame = enqueued;
@@ -7185,7 +7215,8 @@ namespace models {
         enqueued && ocr_enqueued,
         enqueued &&
           accepted_optional_work == depth_optional_work_mode_e::redispatch_subtitle,
-        std::move(motion_probe_result)
+        std::move(motion_probe_result),
+        adaptive_motion_observation_hold
       );
     }
   };
@@ -7196,7 +7227,7 @@ namespace models {
     const std::filesystem::path &assets_dir,
     const config::video_t::sbs_t &cfg,
     const config::depth_model_info &model,
-    const bool enable_adaptive_motion_probe_shadow
+    const bool enable_adaptive_motion_probe
   ):
       pimpl(std::make_unique<impl>(
         device,
@@ -7204,7 +7235,7 @@ namespace models {
         assets_dir,
         cfg,
         model,
-        enable_adaptive_motion_probe_shadow
+        enable_adaptive_motion_probe
       )) {}
 
   video_depth_estimator::~video_depth_estimator() = default;

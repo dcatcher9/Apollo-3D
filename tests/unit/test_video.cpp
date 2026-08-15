@@ -154,6 +154,96 @@ namespace {
     EXPECT_TRUE(rejects(25u, area + 1u));
   }
 
+  TEST(AdaptiveMotionProbeTest, ActiveHoldUsesExactDav2AndThresholdedAppearance) {
+    models::adaptive_motion_probe_result probe;
+    probe.status = models::adaptive_motion_probe_status_e::ready;
+    probe.sample.current_frame_id = 42u;
+    probe.sample.baseline_frame_id = 40u;
+    probe.sample.prior_state_flags = models::adaptive_motion_probe_settled_flags;
+    probe.sample.admitted_texels = 256u;
+    // CFM2 still observes exact ordinal bit noise, but the active selector tolerates it below the
+    // most conservative existing appearance threshold.
+    probe.sample.appearance_exact_changed_texels = 1u;
+
+    using decision_e = models::adaptive_motion_hold_decision_e;
+    const auto decide = [&](const models::adaptive_motion_probe_result &candidate) {
+      return models::select_adaptive_motion_hold(
+        true,
+        true,
+        false,
+        false,
+        models::depth_optional_work_mode_e::ordinary,
+        candidate
+      );
+    };
+    EXPECT_EQ(decide(probe), decision_e::hold);
+    EXPECT_EQ(
+      models::adaptive_motion_probe_exact_verdict(probe.sample),
+      models::adaptive_motion_probe_exact_verdict_e::motion_veto
+    );
+
+    EXPECT_EQ(
+      models::select_adaptive_motion_hold(
+        false, true, false, false,
+        models::depth_optional_work_mode_e::ordinary, probe
+      ),
+      decision_e::infer
+    );
+    EXPECT_EQ(
+      models::select_adaptive_motion_hold(
+        true, false, false, false,
+        models::depth_optional_work_mode_e::ordinary, probe
+      ),
+      decision_e::infer
+    );
+    EXPECT_EQ(
+      models::select_adaptive_motion_hold(
+        true, true, true, false,
+        models::depth_optional_work_mode_e::ordinary, probe
+      ),
+      decision_e::infer
+    );
+    EXPECT_EQ(
+      models::select_adaptive_motion_hold(
+        true, true, false, true,
+        models::depth_optional_work_mode_e::ordinary, probe
+      ),
+      decision_e::infer
+    );
+    EXPECT_EQ(
+      models::select_adaptive_motion_hold(
+        true, true, false, false,
+        models::depth_optional_work_mode_e::suppress_subtitle, probe
+      ),
+      decision_e::infer
+    );
+
+    models::adaptive_motion_observation_hold_result held {
+      .held = true,
+      .current_frame_id = probe.sample.current_frame_id,
+      .baseline_frame_id = probe.sample.baseline_frame_id,
+    };
+    EXPECT_TRUE(held.valid());
+    held.current_frame_id = held.baseline_frame_id;
+    EXPECT_FALSE(held.valid());
+
+    auto veto = probe;
+    veto.sample.exact_changed_texels = 1u;
+    EXPECT_EQ(decide(veto), decision_e::infer);
+    veto = probe;
+    veto.sample.exclusion_mismatch_texels = 1u;
+    EXPECT_EQ(decide(veto), decision_e::infer);
+    veto = probe;
+    veto.sample.appearance_delta_1_over_1024_texels = 1u;
+    EXPECT_EQ(decide(veto), decision_e::infer);
+    veto = probe;
+    veto.sample.prior_state_flags &= ~models::adaptive_motion_probe_flag_scene_settled;
+    EXPECT_EQ(decide(veto), decision_e::infer);
+    veto = probe;
+    veto.status = models::adaptive_motion_probe_status_e::timed_out;
+    EXPECT_EQ(decide(veto), decision_e::infer);
+  }
+
   TEST(RenderedContentTimestampTest, MatchedT0IsPreservedWhileCurrentCadenceIsT1) {
     const auto t0 = std::chrono::steady_clock::time_point {10ms};
     const auto t1 = std::chrono::steady_clock::time_point {20ms};
@@ -1746,7 +1836,19 @@ TEST(DepthInputRegionTest, DomainTransitionDecisionResetsExactlyOncePerStableCha
     .bottom = 2160u,
     .tensor_content = {0u, 0u, 770u, 434u},
   };
+  EXPECT_FALSE(domain_tracker.matches_analysis_domain(
+    full_source,
+    models::input_color_space::srgb
+  ));
   EXPECT_TRUE(domain_tracker.update(full_source, models::input_color_space::srgb));
+  EXPECT_TRUE(domain_tracker.matches_analysis_domain(
+    full_source,
+    models::input_color_space::srgb
+  ));
+  EXPECT_FALSE(domain_tracker.matches_analysis_domain(
+    full_source,
+    models::input_color_space::linear_sdr
+  ));
   EXPECT_FALSE(domain_tracker.update(full_source, models::input_color_space::srgb));
 
   models::depth_analysis_domain_key_t key {
@@ -1792,12 +1894,20 @@ TEST(DepthInputRegionTest, DomainTransitionDecisionResetsExactlyOncePerStableCha
   moved.left += 40u;
   moved.right += 40u;
   ASSERT_TRUE(moved.valid());
+  EXPECT_TRUE(domain_tracker.matches_analysis_domain(
+    moved,
+    models::input_color_space::srgb
+  ));
   EXPECT_FALSE(domain_tracker.update(moved, models::input_color_space::srgb));
 
   auto semantic_resize = key;
   ++semantic_resize.semantic_width;
   roi.analysis_generation = generation_tracker.select(semantic_resize);
   EXPECT_NE(roi.analysis_generation, first_generation);
+  EXPECT_FALSE(domain_tracker.matches_analysis_domain(
+    roi,
+    models::input_color_space::srgb
+  ));
   EXPECT_TRUE(domain_tracker.update(roi, models::input_color_space::srgb));
   EXPECT_FALSE(domain_tracker.update(roi, models::input_color_space::srgb));
 
