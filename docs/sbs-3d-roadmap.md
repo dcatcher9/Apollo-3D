@@ -96,7 +96,7 @@ current SLR12/OCR8 schema. The host does not reconstruct hidden video.
 Damage reuse is deliberately DDup-only and fail-open. Dirty and move metadata is semantic only as a
 proof that the exact current ROI pixels did not change: damage outside the crop may save inference,
 whereas an intersecting move source or destination, a sequence gap, metadata failure, protected
-content, route movement, authority change, or WGC forces the ordinary path. Reuse freezes the
+content, route movement, authority change, or WGC forces the wrapper's inference path. Reuse freezes the
 depth/cut/camera/OCR/SLR observation state and always warps the current capture color rather than
 repeating a packed SBS frame.
 
@@ -109,27 +109,19 @@ forward. Diagnostics report candidate, skip, and successful reuse rates with the
 This is intentionally non-bit-exact and cursor-insensitive and must remain opt-in until clip-level
 quality evaluation and Nsight GPU-load evidence justify a production policy.
 
-The adaptive cadence now has two default-off process modes. `APOLLO_SBS_ADAPTIVE_MOTION_GATE=shadow`
-runs the truthful full-rate predictor: it proposes one broad-DDup hold after two settled quiet
-CutBridge completions, preserves exact/tiny reuse priority, and retrospectively scores the exact
-candidate frame as quiet, vetoed, or unknown. It separately reports OCR-clean depth-plus-OCR
-opportunities and broad OCR-dirty frames, including whether their exact normalized OCR model input
-matches the authenticated baseline. A candidate also runs one bounded current-input probe against
-its exact authenticated depth lineage. The raw motion verdict requires NCHW, appearance ordinal,
-and exclusion equality and remains diagnostic only.
+GPU adaptive reuse is always part of the Host SBS depth pipeline. Exact cache reuse remains higher
+priority; otherwise host-only route, cadence and broad-DDup evidence classifies a frame as either
+force-infer or GPU-undecided. A dense atomics-free model-space detector compares every admitted
+current NCHW texel with the authenticated state-1 history and applies global medium/strong limits
+plus a supported-tile strong limit. The GPU then selects the conditional DAV2 inference or
+reuse branch without staging readback, a decision poll, or CPU branch knowledge.
 
-`APOLLO_SBS_ADAPTIVE_MOTION_GATE=1` activates the conservative typed-OCR branch. In addition to the
-same route, ID, cadence, broad-DDup, and no-pending checks, it requires exact NCHW/exclusion equality
-and zero appearance texels at or above the `1/1024` delta tier; sub-threshold ordinal bit noise is
-allowed. OCR safety is either an unchanged DDup crop or exact equality of all normalized current and
-baseline OCR input floats with an authoritative baseline OCR8 owner and healthy current bindings.
-One current delivery may render its private color through cached authenticated V2 geometry
-without a DAV2/OCR observation, then the next changed identity must infer. The hold advances no
-depth/cut/camera/OCR/SLR or lineage state, and approximate low-motion/model-equivalent providers may
-not chain. Probe readiness is limited to one immediate query plus at most 0.5 ms, counted from
-readiness collection and still clipped by encode-cadence slack; timeout or veto immediately takes
-ordinary inference. The canonical policy, exact refresh
-bounds, scheduling-time age, one-delivery no-observation tradeoff, probe deadline, and reset matrix
+One GPU-undecided delivery may render its private current color through retained authenticated V2
+geometry without a DAV2/OCR observation. It advances no depth/cut/camera/OCR/SLR or reusable lineage
+state, and every approximate provider is blocked until a newer authenticated force-infer completion
+reseeds the temporal pipeline. Every post-bootstrap DAV2 submission, including force-infer,
+uses the same conditional wrapper; wrapper/capability/interop failure is terminal flat rather than a
+hidden raw-TensorRT fallback. The canonical thresholds, ownership, one-delivery risk and reset matrix
 are in [Host SBS frame attribution](host-sbs.md#frame-attribution-and-failure-behavior).
 
 OCR also has a narrower independent DDup optimization on frames where DAV2 does run. If damage is

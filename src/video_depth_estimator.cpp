@@ -1,5 +1,6 @@
 #include "video_depth_estimator.h"
 
+#include "cuda_conditional_graph.h"
 #include "cuda_driver_api.h"
 #include "depth_coordinate_v2.h"
 #include "generated/sbs_adaptive_state_contract.h"
@@ -701,6 +702,16 @@ namespace models {
 
   namespace {
 
+    static_assert(near_identical_decision_cookie == cuda_conditional_graph::decision_cookie);
+    static_assert(near_identical_token_low_cookie == cuda_conditional_graph::token_low_cookie);
+    static_assert(near_identical_token_high_cookie == cuda_conditional_graph::token_high_cookie);
+    static_assert(near_identical_proposal_magic == cuda_conditional_graph::proposal_magic);
+    static_assert(near_identical_request_magic == cuda_conditional_graph::request_magic);
+    static_assert(near_identical_receipt_magic == cuda_conditional_graph::receipt_magic);
+    static_assert(near_identical_gpu_decision_record_byte_offset == 0u);
+    static_assert(near_identical_gpu_request_record_byte_offset ==
+                  sizeof(cuda_conditional_graph::decision_record_t));
+
     static_assert(fit_subtitle_analysis_geometry(
                     1920u, 1080u, {770, 434}).roi_top == 325u);
     static_assert(fit_subtitle_analysis_geometry(
@@ -722,144 +733,6 @@ namespace models {
     static_assert(!host_sbs_v2_depth_shape_is_authenticated({1008, 434}));
 
   }  // namespace
-
-  bool decode_adaptive_motion_probe_words(
-    const std::span<const std::uint32_t> words,
-    const std::uint64_t expected_current_frame_id,
-    const std::uint64_t expected_baseline_frame_id,
-    const int field_width,
-    const int field_height,
-    adaptive_motion_probe_sample &sample
-  ) noexcept {
-    enum word_e : std::size_t {
-      contract_tag,
-      prior_state_flags,
-      current_frame_low,
-      current_frame_high,
-      baseline_frame_low,
-      baseline_frame_high,
-      hard_cut_count,
-      scene_age,
-      cut_flags,
-      analysis_flags,
-      history_state,
-      admitted,
-      exclusion_mismatch,
-      exact_changed,
-      appearance_1_over_1024,
-      appearance_nonfinite,
-      appearance_exact_changed,
-      ocr_input_flags,
-      ocr_input_baseline_frame_low,
-      ocr_input_baseline_frame_high,
-      ocr_input_compared,
-      ocr_input_exact_mismatch,
-      ocr_input_nonfinite,
-    };
-    if (
-      words.size() != adaptive_motion_probe_word_count ||
-      words[contract_tag] != adaptive_motion_probe_contract_tag ||
-      expected_current_frame_id == 0u || expected_baseline_frame_id == 0u ||
-      expected_current_frame_id <= expected_baseline_frame_id ||
-      field_width <= 0 || field_height <= 0
-    ) {
-      return false;
-    }
-    const auto join_id = [&](const word_e low, const word_e high) {
-      return static_cast<std::uint64_t>(words[low]) |
-             (static_cast<std::uint64_t>(words[high]) << 32u);
-    };
-    const auto current_id = join_id(current_frame_low, current_frame_high);
-    const auto baseline_id = join_id(baseline_frame_low, baseline_frame_high);
-    const auto ocr_baseline_id = join_id(
-      ocr_input_baseline_frame_low,
-      ocr_input_baseline_frame_high
-    );
-    if (
-      current_id != expected_current_frame_id || baseline_id != expected_baseline_frame_id ||
-      current_id <= baseline_id
-    ) {
-      return false;
-    }
-
-    const auto area = static_cast<std::uint64_t>(field_width) *
-                      static_cast<std::uint64_t>(field_height);
-    const bool counters_valid =
-      words[admitted] <= area && words[exclusion_mismatch] <= area &&
-      static_cast<std::uint64_t>(words[admitted]) + words[exclusion_mismatch] <= area &&
-      words[exact_changed] <= words[admitted] &&
-      words[appearance_exact_changed] <= words[admitted] &&
-      words[appearance_1_over_1024] <= words[admitted] &&
-      words[appearance_nonfinite] <= words[admitted] &&
-      words[appearance_1_over_1024] <= words[appearance_exact_changed];
-    constexpr std::uint32_t ocr_baseline_candidate = 1u << 0u;
-    constexpr std::uint32_t ocr_record_authoritative = 1u << 1u;
-    constexpr std::uint32_t ocr_current_preprocessed = 1u << 2u;
-    constexpr std::uint32_t known_ocr_input_flags =
-      ocr_baseline_candidate | ocr_record_authoritative |
-      ocr_current_preprocessed;
-    const bool has_ocr_baseline_candidate =
-      (words[ocr_input_flags] & ocr_baseline_candidate) != 0u;
-    const bool has_authoritative_ocr_record =
-      (words[ocr_input_flags] & ocr_record_authoritative) != 0u;
-    const bool has_current_ocr_input =
-      (words[ocr_input_flags] & ocr_current_preprocessed) != 0u;
-    const bool compared_ocr_inputs =
-      has_ocr_baseline_candidate && has_current_ocr_input;
-    const bool ocr_counters_valid =
-      (words[ocr_input_flags] & ~known_ocr_input_flags) == 0u &&
-      (!has_authoritative_ocr_record || has_ocr_baseline_candidate) &&
-      (ocr_baseline_id == 0u || ocr_baseline_id <= baseline_id) &&
-      (!has_ocr_baseline_candidate || ocr_baseline_id == baseline_id) &&
-      words[ocr_input_exact_mismatch] <= words[ocr_input_compared] &&
-      words[ocr_input_nonfinite] <= words[ocr_input_compared] &&
-      (
-        compared_ocr_inputs ?
-          words[ocr_input_compared] == adaptive_motion_ocr_input_value_count :
-          words[ocr_input_compared] == 0u &&
-            words[ocr_input_exact_mismatch] == 0u &&
-            words[ocr_input_nonfinite] == 0u
-      );
-    const bool state_valid =
-      (words[prior_state_flags] & ~adaptive_motion_probe_settled_flags) == 0u &&
-      words[hard_cut_count] <= sbs_adaptive_state::counter_max &&
-      words[scene_age] <= adaptive_motion_probe_max_exact_numeric_counter &&
-      words[cut_flags] <= sbs_adaptive_state::known_cut_flag_mask &&
-      words[analysis_flags] <= sbs_adaptive_state::known_analysis_flag_mask &&
-      words[history_state] <= 4u;
-    if (!counters_valid || !ocr_counters_valid || !state_valid) {
-      return false;
-    }
-
-    sample = {
-      .current_frame_id = current_id,
-      .baseline_frame_id = baseline_id,
-      .field_width = field_width,
-      .field_height = field_height,
-      .prior_state_flags = words[prior_state_flags],
-      .hard_cut_count = words[hard_cut_count],
-      .scene_age = words[scene_age],
-      .cut_flags = words[cut_flags],
-      .analysis_flags = words[analysis_flags],
-      .model_input_history_state = words[history_state],
-      .admitted_texels = words[admitted],
-      .exclusion_mismatch_texels = words[exclusion_mismatch],
-      .exact_changed_texels = words[exact_changed],
-      .appearance_delta_1_over_1024_texels = words[appearance_1_over_1024],
-      .appearance_nonfinite_texels = words[appearance_nonfinite],
-      .appearance_exact_changed_texels = words[appearance_exact_changed],
-      .ocr_input_baseline_valid =
-        has_ocr_baseline_candidate && has_authoritative_ocr_record,
-      .ocr_input_comparison_valid =
-        has_ocr_baseline_candidate && has_authoritative_ocr_record &&
-        has_current_ocr_input,
-      .ocr_input_baseline_frame_id = ocr_baseline_id,
-      .ocr_input_compared_values = words[ocr_input_compared],
-      .ocr_input_exact_mismatch_values = words[ocr_input_exact_mismatch],
-      .ocr_input_nonfinite_values = words[ocr_input_nonfinite],
-    };
-    return true;
-  }
 
   bool parallax_v2_result_is_authenticated(const estimate_result &result) {
     if (!result.completed_frame_valid || result.completed_frame_id == 0u ||
@@ -1675,7 +1548,6 @@ namespace models {
     float minmax_alpha;  // temporal EMA blend for the normalized min/max
     bool cuda_graph_enabled;
     const bool diagnostics_enabled;
-    const bool adaptive_motion_probe_enabled;
     struct tensorrt_cuda_graph_t {
       CUgraph graph = nullptr;
       CUgraphExec executable = nullptr;
@@ -1683,8 +1555,17 @@ namespace models {
     };
 
     tensorrt_cuda_graph_t depth_inference_graph;
+    cuda_conditional_graph::executable_t depth_conditional_graph;
+    CUdeviceptr depth_conditional_decision_ptr = 0u;
+    CUdeviceptr depth_conditional_request_ptr = 0u;
+    CUgraph depth_conditional_child_graph = nullptr;
+    bool gpu_conditional_bridge_available = true;
+    bool gpu_conditional_bridge_error_logged = false;
+    bool gpu_conditional_bridge_context_failed = false;
     // OCR owns a distinct TensorRT context and graph. The graph captures only enqueueV3; D3D/CUDA
     // interop map/unmap and mutable tensor bindings always remain outside the capture boundary.
+    // Depth retains only the captured source CUgraph. Every authoritative depth launch uses the
+    // conditional wrapper; there is deliberately no standalone raw depth CUgraphExec.
     tensorrt_cuda_graph_t ocr_inference_graph;
     bool valid = false;  // all mandatory engine, shader, and session resources are ready
     float parallax_v2_raw_coordinate_scale = 0.0f;
@@ -1697,9 +1578,9 @@ namespace models {
     bool parallax_v2_producer_active = false;
     bool parallax_v2_producer_failed = false;
 
-    // Demand-gated, nonblocking telemetry readback. Resources are created lazily only after a
-    // protocol subscriber or an explicit process-only adaptive mode requests evidence; a three-slot
-    // staging/query ring absorbs GPU latency without flushing or waiting on the encode thread.
+    // Demand-gated, nonblocking telemetry readback. Resources are created lazily only after an
+    // external protocol subscriber requests evidence; a three-slot staging/query ring absorbs GPU
+    // latency without flushing or waiting on the encode thread.
     static constexpr std::size_t telemetry_state_float_count =
       sbs_adaptive_state::word_count;
 
@@ -1743,7 +1624,7 @@ namespace models {
       const char *stage = nullptr;
     };
 
-    perf_evt_ring perf_depth;  // "depth_infer": one DA-V2 inference
+    perf_evt_ring perf_depth_conditional;  // GPU arbitration plus either infer or reuse
     perf_evt_ring perf_ocr;  // "ocr_infer": one PP-OCRv6 tiny inference
 
     // D3D11 timing for the work around TensorRT. CUDA events above deliberately measure only
@@ -2398,7 +2279,7 @@ namespace models {
       if (!cuda.cuEventDestroy) {
         return;
       }
-      for (auto *r : {&perf_depth, &perf_ocr}) {
+      for (auto *r : {&perf_depth_conditional, &perf_ocr}) {
         for (int i = 0; i < perf_evt_ring::N; i++) {
           if (r->start[i]) {
             cuda.cuEventDestroy(r->start[i]);
@@ -2411,47 +2292,88 @@ namespace models {
       }
     }
 
-    void destroy_inference_graph(
+    [[nodiscard]] bool reset_depth_conditional_graph() noexcept {
+      const bool reset_ok = depth_conditional_graph.reset();
+      const bool wrapper_released = depth_conditional_graph.empty();
+      if (!reset_ok) {
+        // A failed restore after successful destruction no longer owns dependencies, but it still
+        // proves the caller's CUDA-context state is unsafe for reuse. A failure before destruction
+        // additionally leaves wrapper_released false, which makes every caller retain backing.
+        execution_context_poisoned = true;
+        gpu_conditional_bridge_context_failed = true;
+        mark_terminal_failure(true);
+      }
+      if (!wrapper_released) {
+        // The wrapper still owns nodes embedded from the TensorRT source graph and captures the
+        // mapped decision pointer. Losing either dependency here would be a use-after-free in the
+        // CUDA driver. Quarantine the context and retain every dependency until terminal teardown.
+        execution_context_poisoned = true;
+        mark_terminal_failure(true);
+        return false;
+      }
+      depth_conditional_decision_ptr = 0u;
+      depth_conditional_request_ptr = 0u;
+      depth_conditional_child_graph = nullptr;
+      return true;
+    }
+
+    [[nodiscard]] bool destroy_inference_graph(
       cuda_driver_api &cuda,
       tensorrt_cuda_graph_t &state
     ) {
-      if (state.executable && cuda.cuGraphExecDestroy) {
-        cuda.cuGraphExecDestroy(state.executable);
+      // The wrapper owns a node-cloned child embedded from the captured depth source graph. It must
+      // die before the caller replaces or destroys that source after a signature transition.
+      if (&state == &depth_inference_graph) {
+        if (!reset_depth_conditional_graph()) {
+          return false;
+        }
       }
-      if (state.graph && cuda.cuGraphDestroy) {
-        cuda.cuGraphDestroy(state.graph);
+      if (state.executable) {
+        if (!cuda.cuGraphExecDestroy ||
+            cuda.cuGraphExecDestroy(state.executable) != CUDA_SUCCESS) {
+          execution_context_poisoned = true;
+          mark_terminal_failure(true);
+          return false;
+        }
+        state.executable = nullptr;
       }
-      state.executable = nullptr;
-      state.graph = nullptr;
+      if (state.graph) {
+        if (!cuda.cuGraphDestroy ||
+            cuda.cuGraphDestroy(state.graph) != CUDA_SUCCESS) {
+          execution_context_poisoned = true;
+          mark_terminal_failure(true);
+          return false;
+        }
+        state.graph = nullptr;
+      }
       state.policy.signature_warmed = false;
+      return true;
     }
 
     // D3D interop is allowed to return different device pointers after any map. TensorRT graph
     // nodes retain the context's addresses (and depth's dynamic shape), so a graph is reusable
     // only for one exact signature. OCR calls this before rebinding; the common enqueue path also
     // calls it defensively so the depth and OCR lifecycle cannot drift apart.
-    void select_inference_graph_signature(
+    [[nodiscard]] bool select_inference_graph_signature(
       cuda_driver_api &cuda,
       tensorrt_cuda_graph_t &state,
       const detail::cuda_graph_signature_t &signature
     ) {
       if (!detail::select_cuda_graph_signature(state.policy, signature)) {
-        return;
+        return true;
       }
-      destroy_inference_graph(cuda, state);
+      return destroy_inference_graph(cuda, state);
     }
 
-    // Graph acceleration is optional for each context. A capture or launch failure disables graph
-    // use for that state and immediately retries with ordinary enqueueV3; only failure of that
-    // ordinary enqueue is surfaced to the caller as an execution-context failure.
-    bool enqueue_with_inference_graph(
+    // OCR may fall back to ordinary enqueueV3 because it has no conditional execution contract.
+    // DAV2 never calls this replay helper: its one private per-signature warm/capture bootstrap is
+    // handled below, and every authoritative depth launch goes through the conditional wrapper.
+    bool enqueue_ocr_with_inference_graph(
       nvinfer1::IExecutionContext *context,
       tensorrt_cuda_graph_t &state,
       const detail::cuda_graph_signature_t &signature,
       cuda_driver_api &cuda,
-      CUstream stream,
-      const char *log_name,
-      const bool fixed_shape
+      CUstream stream
     ) {
       const bool graph_api = cuda_graph_enabled && cuda.cuStreamBeginCapture &&
                              cuda.cuStreamEndCapture && cuda.cuGraphInstantiateWithFlags &&
@@ -2462,9 +2384,12 @@ namespace models {
         if (launch == CUDA_SUCCESS) {
           return true;
         }
-        BOOST_LOG(warning) << log_name << " CUDA graph launch failed (" << launch
-                           << "); using ordinary enqueue.";
-        destroy_inference_graph(cuda, state);
+        BOOST_LOG(warning)
+          << "PP-OCRv6 tiny CUDA graph launch failed (" << launch
+          << "); using ordinary enqueue.";
+        if (!destroy_inference_graph(cuda, state)) {
+          return false;
+        }
         state.policy.capture_failed = true;
         return context->enqueueV3(stream);
       };
@@ -2472,7 +2397,9 @@ namespace models {
       if (!graph_api || state.policy.capture_failed) {
         return context->enqueueV3(stream);
       }
-      select_inference_graph_signature(cuda, state, signature);
+      if (!select_inference_graph_signature(cuda, state, signature)) {
+        return false;
+      }
       switch (detail::next_cuda_graph_enqueue_action(
                 state.policy,
                 true,
@@ -2506,39 +2433,95 @@ namespace models {
           instantiate == CUDA_SUCCESS && candidate_exec) {
         state.executable = candidate_exec;
         state.graph = captured;
-        BOOST_LOG(info) << log_name << " CUDA graph captured for "
-                        << (fixed_shape ? "fixed " : "")
+        BOOST_LOG(info) << "PP-OCRv6 tiny CUDA graph captured for fixed "
                         << signature.width << 'x' << signature.height
-                        << (fixed_shape ? " inference." : ".");
+                        << " inference.";
         return launch_or_fallback();
       }
 
-      if (candidate_exec) {
-        cuda.cuGraphExecDestroy(candidate_exec);
+      state.executable = candidate_exec;
+      state.graph = captured;
+      if (!destroy_inference_graph(cuda, state)) {
+        // A failed destroy can leave a captured graph holding this transaction's mapped tensor
+        // addresses. The checked destroy path retains those handles and terminally quarantines
+        // the estimator; never forget them and fall back to an ordinary enqueue.
+        return false;
       }
-      if (captured) {
-        cuda.cuGraphDestroy(captured);
-      }
-      state.executable = nullptr;
-      state.graph = nullptr;
       state.policy.capture_failed = true;
-      BOOST_LOG(warning) << log_name << " CUDA graph capture failed (begin=" << begin
-                         << ", enqueue=" << captured_enqueue << ", end=" << end
-                         << ", instantiate=" << instantiate
-                         << "); using ordinary enqueue.";
+      BOOST_LOG(warning)
+        << "PP-OCRv6 tiny CUDA graph capture failed (begin=" << begin
+        << ", enqueue=" << captured_enqueue << ", end=" << end
+        << ", instantiate=" << instantiate << ')'
+        << "; using ordinary enqueue.";
       return context->enqueueV3(stream);
     }
 
-    bool enqueue_inference(CUdeviceptr input, CUdeviceptr output, cuda_driver_api &cuda) {
-      return enqueue_with_inference_graph(
-        exec_context,
-        depth_inference_graph,
-        {input, output, target_w, target_h},
-        cuda,
+    bool prepare_depth_inference_graph(cuda_driver_api &cuda) {
+      const bool graph_api = cuda_graph_enabled && cuda.cuStreamBeginCapture &&
+                             cuda.cuStreamEndCapture && cuda.cuGraphDestroy;
+      if (!graph_api || depth_inference_graph.policy.capture_failed) {
+        fail_gpu_conditional_bridge_once(
+          !graph_api ?
+            "required DAV2 graph-capture APIs are unavailable" :
+            "DAV2 graph capture previously failed"
+        );
+        return false;
+      }
+
+      // The quiescent pre-binding path selected this exact signature before mutating TensorRT
+      // addresses. This helper owns only the private warm/capture bootstrap for that selection.
+      if (depth_inference_graph.graph) {
+        return true;
+      }
+
+      // TensorRT requires one ordinary enqueue after a dynamic-shape/address signature change
+      // before that exact signature may be captured. This is a private bootstrap only: the raw
+      // result is immediately overwritten by the wrapper's force-infer launch on the same stream
+      // and is never exposed as a pending or rendered completion.
+      if (!depth_inference_graph.policy.signature_warmed) {
+        if (!exec_context->enqueueV3(cu_stream)) {
+          depth_inference_graph.policy.capture_failed = true;
+          fail_gpu_conditional_bridge_once(
+            "private DAV2 signature bootstrap enqueue failed",
+            CUDA_SUCCESS,
+            true
+          );
+          return false;
+        }
+        depth_inference_graph.policy.signature_warmed = true;
+      }
+
+      CUgraph captured = nullptr;
+      const CUresult begin = cuda.cuStreamBeginCapture(
         cu_stream,
-        "TensorRT",
-        false
+        CU_STREAM_CAPTURE_MODE_RELAXED
       );
+      const bool captured_enqueue =
+        begin == CUDA_SUCCESS && exec_context->enqueueV3(cu_stream);
+      const CUresult end = begin == CUDA_SUCCESS ?
+                             cuda.cuStreamEndCapture(cu_stream, &captured) :
+                             begin;
+      if (captured_enqueue && end == CUDA_SUCCESS && captured) {
+        depth_inference_graph.graph = captured;
+        BOOST_LOG(info)
+          << "DAV2 private signature bootstrap captured " << target_w << 'x' << target_h
+          << "; authoritative launches now require the GPU conditional wrapper.";
+        return true;
+      }
+
+      bool graph_released = true;
+      if (captured) {
+        graph_released = cuda.cuGraphDestroy(captured) == CUDA_SUCCESS;
+      }
+      depth_inference_graph.policy.capture_failed = true;
+      fail_gpu_conditional_bridge_once(
+        "private DAV2 graph capture failed (begin=" + std::to_string(begin) +
+          ", enqueue=" + std::to_string(captured_enqueue) +
+          ", end=" + std::to_string(end) + ')',
+        end,
+        !graph_released || (begin == CUDA_SUCCESS && !captured_enqueue)
+      );
+      return false;
     }
 
     bool enqueue_ocr_inference(
@@ -2546,14 +2529,12 @@ namespace models {
       CUdeviceptr output,
       cuda_driver_api &cuda
     ) {
-      return enqueue_with_inference_graph(
+      return enqueue_ocr_with_inference_graph(
         ocr_exec_context,
         ocr_inference_graph,
         {input, output, ocr_engine_width, ocr_engine_height},
         cuda,
-        ocr_execution_stream(),
-        "PP-OCRv6 tiny",
-        true
+        ocr_execution_stream()
       );
     }
 
@@ -2598,16 +2579,26 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_condition_prepare_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_condition_in_place_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_condition_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> adaptive_motion_probe_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_compare_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_resolve_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_history_owner_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_postprocess_args_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_reuse_depth_cs;
     Microsoft::WRL::ComPtr<ID3D11Buffer> cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_preprocess_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_resolve_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subtitle_locator_cbuffer;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> adaptive_motion_probe_cbuffer;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> adaptive_motion_probe_output_buf;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> adaptive_motion_probe_output_uav;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> adaptive_motion_probe_staging_buf;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> near_identical_cbuffer;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> near_identical_tile_buf;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> near_identical_tile_srv;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> near_identical_tile_uav;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> near_identical_history_owner_buf;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> near_identical_history_owner_srv;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> near_identical_history_owner_uav;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> near_identical_gpu_decision_buf;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> near_identical_gpu_decision_uav;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> near_identical_gpu_dispatch_buf;
 
     Microsoft::WRL::ComPtr<ID3D11Buffer> tensor_in_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_in_uav;
@@ -2718,13 +2709,11 @@ namespace models {
 
     CUgraphicsResource cuda_in_res = nullptr;
     CUgraphicsResource cuda_out_res = nullptr;
+    CUgraphicsResource cuda_near_identical_decision_res = nullptr;
     CUgraphicsResource cuda_ocr_in_res = nullptr;
     CUgraphicsResource cuda_ocr_out_res = nullptr;
     Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_input_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> ocr_input_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_input_srv;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_previous_input_buf;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_previous_input_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_output_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_output_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_cell_stats_buf;
@@ -2738,13 +2727,8 @@ namespace models {
     // unmaps; only the explicit try-finish completion paths may use these earlier fences.
     CUevent depth_inference_done_event = nullptr;
     CUevent ocr_inference_done_event = nullptr;
-    CUevent adaptive_motion_probe_ready_event = nullptr;
-    bool adaptive_motion_probe_available = false;
-    bool adaptive_motion_probe_copy_scheduled = false;
-    bool adaptive_motion_probe_event_recorded = false;
-    bool adaptive_motion_probe_error_logged = false;
-    bool adaptive_ocr_input_compare_available = false;
-    bool adaptive_ocr_input_compare_error_logged = false;
+    bool near_identical_detector_available = false;
+    bool near_identical_detector_error_logged = false;
     bool pending_depth_inference_event_recorded = false;
     bool pending_ocr_inference_event_recorded = false;
     bool inference_event_poll_available = false;
@@ -2756,6 +2740,18 @@ namespace models {
     bool ocr_stream_reuse_pending = false;
     depth_optional_work_mode_e pending_optional_work =
       depth_optional_work_mode_e::ordinary;
+    enum class pending_submission_class_e : std::uint8_t {
+      force_infer,
+      gpu_undecided,
+    };
+    pending_submission_class_e pending_submission_class =
+      pending_submission_class_e::force_infer;
+    std::uint64_t pending_gpu_transaction_token = 0u;
+    std::uint64_t pending_gpu_transaction_current_frame_id = 0u;
+    std::uint64_t pending_gpu_transaction_baseline_frame_id = 0u;
+    std::uint64_t force_infer_transaction_sequence = 0u;
+    bool pending_force_temporal_reseed = false;
+    bool gpu_undecided_requires_force_infer_refresh = false;
     struct ocr_record_lineage_t {
       depth_input_region_t input_region {};
       input_color_space color_space = input_color_space::srgb;
@@ -2792,71 +2788,6 @@ namespace models {
         *this = {};
       }
     } ocr_record_lineage;
-    struct ocr_input_baseline_t {
-      depth_input_region_t input_region {};
-      input_color_space color_space = input_color_space::srgb;
-      std::uint64_t frame_id = 0u;
-      int field_width = 0;
-      int field_height = 0;
-      bool valid = false;
-
-      [[nodiscard]] bool matches(
-        const std::uint64_t candidate_frame_id,
-        const depth_input_region_t &candidate_region,
-        const input_color_space candidate_color_space,
-        const int candidate_field_width,
-        const int candidate_field_height
-      ) const noexcept {
-        return valid && frame_id == candidate_frame_id &&
-               input_region == candidate_region &&
-               color_space == candidate_color_space &&
-               field_width == candidate_field_width &&
-               field_height == candidate_field_height;
-      }
-
-      void record(
-        const std::uint64_t candidate_frame_id,
-        const depth_input_region_t &candidate_region,
-        const input_color_space candidate_color_space,
-        const int candidate_field_width,
-        const int candidate_field_height
-      ) noexcept {
-        input_region = candidate_region;
-        color_space = candidate_color_space;
-        frame_id = candidate_frame_id;
-        field_width = candidate_field_width;
-        field_height = candidate_field_height;
-        valid = candidate_frame_id != 0u;
-      }
-
-      [[nodiscard]] bool roll_forward(
-        const std::uint64_t prior_frame_id,
-        const std::uint64_t current_frame_id,
-        const depth_input_region_t &candidate_region,
-        const input_color_space candidate_color_space,
-        const int candidate_field_width,
-        const int candidate_field_height
-      ) noexcept {
-        if (
-          current_frame_id <= prior_frame_id ||
-          !matches(
-            prior_frame_id,
-            candidate_region,
-            candidate_color_space,
-            candidate_field_width,
-            candidate_field_height
-          )
-        ) {
-          return false;
-        }
-        frame_id = current_frame_id;
-        return true;
-      }
-
-      void reset() noexcept {
-        *this = {};
-      }
-    } ocr_input_baseline;
     bool subtitle_conditioned_current = false;
     bool ocr_shape_bound = false;
     bool ocr_output_size_validated = false;
@@ -2924,7 +2855,6 @@ namespace models {
     void mark_terminal_failure(const bool poison_execution_context = false) {
       clear_pending_inference_event_state();
       ocr_stream_reuse_pending = false;
-      ocr_input_baseline.reset();
       execution_context_poisoned =
         execution_context_poisoned || poison_execution_context;
       terminal_failure = true;
@@ -2933,8 +2863,133 @@ namespace models {
     void mark_ocr_context_failure(
       const detail::warmed_execution_context_failure_e failure
     ) noexcept {
-      ocr_input_baseline.reset();
       ocr_context_health.observe(failure);
+    }
+
+    void fail_gpu_conditional_bridge_once(
+      const std::string_view reason,
+      const CUresult result = CUDA_SUCCESS,
+      const bool poison_execution_context = false,
+      const bool retain_live_wrapper = false
+    ) {
+      gpu_conditional_bridge_available = false;
+      // A failed launch can leave work from this executable in flight. Never destroy its embedded
+      // child or mirror operands here; terminal teardown first quiesces the CUDA stream, then
+      // releases the wrapper and every captured dependency in order.
+      const bool wrapper_released = retain_live_wrapper ?
+                                      depth_conditional_graph.empty() :
+                                      reset_depth_conditional_graph();
+      // Active arbitration is a required execution contract, not an optional accelerator. Even a
+      // clean capability/topology rejection is terminal. Launch or unsafe teardown failures also
+      // quarantine the TensorRT context so none of its captured dependencies can be reused.
+      mark_terminal_failure(
+        poison_execution_context || (!wrapper_released && !retain_live_wrapper)
+      );
+      if (!gpu_conditional_bridge_error_logged) {
+        BOOST_LOG(error)
+          << "Host SBS GPU near-identical arbitration failed (" << reason
+          << (result == CUDA_SUCCESS ? "" : ", CUDA result " + std::to_string(result))
+          << (retain_live_wrapper && !wrapper_released ?
+                "); the live wrapper is retained until quiescent terminal teardown." :
+              wrapper_released ?
+                "); this estimator is terminal and will render flat without raw-graph fallback." :
+                "); teardown was unsafe; dependencies are retained and the estimator is quarantined.");
+        gpu_conditional_bridge_error_logged = true;
+      }
+    }
+
+    bool ensure_depth_conditional_graph(
+      cuda_driver_api &cuda,
+      const CUdeviceptr decision_record,
+      const CUdeviceptr request_record
+    ) {
+      const char *precondition_failure = nullptr;
+      if (!gpu_conditional_bridge_available) {
+        precondition_failure = "the bridge was previously disabled";
+      } else if (!cuda.has_conditional_graph_support()) {
+        precondition_failure = "required CUDA conditional/topology APIs are unavailable";
+      } else if (!cuda_ctx) {
+        precondition_failure = "the CUDA context is unavailable";
+      } else if (!depth_inference_graph.graph) {
+        precondition_failure = "the captured DAV2 graph is unavailable";
+      } else if (depth_inference_graph.policy.capture_failed) {
+        precondition_failure = "DAV2 graph capture previously failed";
+      } else if (!decision_record || !request_record ||
+                 (decision_record & 15u) != 0u || (request_record & 15u) != 0u) {
+        precondition_failure = "the device transaction records are missing or misaligned";
+      }
+      if (precondition_failure) {
+        if (!terminal_failure) {
+          fail_gpu_conditional_bridge_once(precondition_failure);
+        }
+        return false;
+      }
+      if (
+        depth_conditional_graph.ready() &&
+        depth_conditional_decision_ptr == decision_record &&
+        depth_conditional_request_ptr == request_record &&
+        depth_conditional_child_graph == depth_inference_graph.graph
+      ) {
+        return true;
+      }
+
+      if (!reset_depth_conditional_graph() || terminal_failure) {
+        return false;
+      }
+      auto candidate = cuda_conditional_graph::executable_t::build(
+        cuda,
+        {
+          .context = cuda_ctx,
+          .infer_child = depth_inference_graph.graph,
+          .reuse_child = nullptr,
+          .decision_record = decision_record,
+          .request_record = request_record,
+        }
+      );
+      if (!candidate.ready()) {
+        const auto result = candidate.cuda_result();
+        const auto build_failure = candidate.failure();
+        const auto audit = candidate.audit_result();
+        if (!candidate.empty()) {
+          // A failed build normally self-cleans. If the CUDA driver could not destroy a partial
+          // wrapper, take ownership of it so the child graph and mapped records cannot outlive
+          // their backing. This estimator is terminal; teardown will retry under its context and
+          // deliberately retain dependencies if the driver still refuses destruction.
+          depth_conditional_graph = std::move(candidate);
+          depth_conditional_decision_ptr = decision_record;
+          depth_conditional_request_ptr = request_record;
+          depth_conditional_child_graph = depth_inference_graph.graph;
+          gpu_conditional_bridge_available = false;
+          execution_context_poisoned = true;
+          mark_terminal_failure(true);
+          if (!gpu_conditional_bridge_error_logged) {
+            BOOST_LOG(warning)
+              << "Host SBS GPU near-identical conditional graph construction left live CUDA "
+                 "objects (CUDA result " << result
+              << "); retaining all dependencies and quarantining this estimator.";
+            gpu_conditional_bridge_error_logged = true;
+          }
+          return false;
+        }
+        fail_gpu_conditional_bridge_once(
+          "conditional graph construction failed at stage " +
+            std::to_string(static_cast<unsigned>(build_failure)) +
+            ", child audit " +
+            std::to_string(static_cast<unsigned>(audit.failure)) +
+            ", rejected node " +
+            std::to_string(static_cast<int>(audit.rejected_type)),
+          result
+        );
+        return false;
+      }
+      depth_conditional_graph = std::move(candidate);
+      depth_conditional_decision_ptr = decision_record;
+      depth_conditional_request_ptr = request_record;
+      depth_conditional_child_graph = depth_inference_graph.graph;
+      BOOST_LOG(info)
+        << "Host SBS GPU near-identical arbitration is active with device-owned branch "
+           "selection and no decision readback.";
+      return true;
     }
 
     [[nodiscard]] CUstream ocr_execution_stream() const noexcept {
@@ -3219,372 +3274,696 @@ namespace models {
       return SUCCEEDED(device->CreateComputeShader(bytecode->data(), bytecode->size(), nullptr, &out_cs));
     }
 
-    void log_adaptive_motion_probe_failure_once(const std::string_view reason) {
-      if (!adaptive_motion_probe_error_logged) {
-        BOOST_LOG(warning) << "Host SBS current-frame motion probe is unavailable ("
-                           << reason << "); live inference and rendering are unchanged.";
-        adaptive_motion_probe_error_logged = true;
+    void log_near_identical_detector_failure_once(const std::string_view reason) {
+      if (!near_identical_detector_error_logged) {
+        BOOST_LOG(error) << "Host SBS GPU near-identical detector is unavailable ("
+                         << reason << "); the mandatory DAV2 wrapper cannot run.";
+        near_identical_detector_error_logged = true;
       }
     }
 
-    void handle_adaptive_motion_probe_cuda_failure(
-      const CUresult result,
-      const std::string_view operation
-    ) {
-      adaptive_motion_probe_available = false;
-      adaptive_motion_probe_copy_scheduled = false;
-      adaptive_motion_probe_event_recorded = false;
-      if (result == CUDA_ERROR_INVALID_HANDLE) {
-        log_adaptive_motion_probe_failure_once(operation);
-        return;  // The optional event itself is invalid; ordinary inference remains safe.
-      }
-      if (!stream_error_logged) {
-        BOOST_LOG(error) << "Host SBS current-frame motion-probe CUDA " << operation
-                         << " failed with context-wide status " << result << '.';
-        stream_error_logged = true;
-      }
-      // Driver event calls may surface an earlier asynchronous context failure. Once the error is
-      // not provably local to this optional event, retain the pipeline's conservative quarantine.
-      mark_shared_execution_failure(false);
-    }
-
-    void initialize_adaptive_motion_probe(cuda_driver_api &cuda) {
-      if (!adaptive_motion_probe_enabled) {
-        return;
-      }
+    void initialize_near_identical_detector() {
       const auto sources = host_sbs_shader_cache::snapshot_sources(
         shader_root,
-        host_sbs_shader_cache::adaptive_motion_probe_specs
+        host_sbs_shader_cache::near_identical_detector_specs
       );
       if (!sources) {
-        log_adaptive_motion_probe_failure_once("shader source snapshot failed");
+        log_near_identical_detector_failure_once("shader source snapshot failed");
         return;
       }
       if (
         host_sbs_shader_cache::source_closure_sha256(sources) !=
-          host_sbs_shader_cache::adaptive_motion_probe_source_closure_sha256
+          host_sbs_shader_cache::near_identical_detector_source_closure_sha256
       ) {
-        adaptive_motion_probe_available = false;
-        log_adaptive_motion_probe_failure_once(
+        log_near_identical_detector_failure_once(
           "shader source closure authentication failed"
         );
         return;
       }
-      if (
-        !create_shader(
+      const bool shaders_ready =
+        create_shader(
           sources,
-          host_sbs_shader_cache::host_sbs_current_frame_motion_probe,
-          adaptive_motion_probe_cs
-        )
-      ) {
-        log_adaptive_motion_probe_failure_once("shader compilation failed");
-        return;
-      }
-
+          host_sbs_shader_cache::host_sbs_near_identical_compare,
+          near_identical_compare_cs
+        ) &&
+        create_shader(
+          sources,
+          host_sbs_shader_cache::host_sbs_near_identical_resolve,
+          near_identical_resolve_cs
+        ) &&
+        create_shader(
+          sources,
+          host_sbs_shader_cache::host_sbs_near_identical_history_owner,
+          near_identical_history_owner_cs
+        ) &&
+        create_shader(
+          sources,
+          host_sbs_shader_cache::host_sbs_near_identical_postprocess_args,
+          near_identical_postprocess_args_cs
+        ) &&
+        create_shader(
+          sources,
+          host_sbs_shader_cache::host_sbs_near_identical_reuse_depth,
+          near_identical_reuse_depth_cs
+        );
       D3D11_BUFFER_DESC constants_desc {};
       constants_desc.Usage = D3D11_USAGE_DEFAULT;
-      constants_desc.ByteWidth = 8u * sizeof(std::uint32_t);
+      constants_desc.ByteWidth = 16u * sizeof(std::uint32_t);
       constants_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-      D3D11_BUFFER_DESC output_desc {};
-      output_desc.Usage = D3D11_USAGE_DEFAULT;
-      output_desc.ByteWidth = static_cast<UINT>(
-        adaptive_motion_probe_word_count * sizeof(std::uint32_t)
-      );
-      output_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-      output_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-      output_desc.StructureByteStride = sizeof(std::uint32_t);
-      auto staging_desc = output_desc;
-      staging_desc.Usage = D3D11_USAGE_STAGING;
-      staging_desc.BindFlags = 0u;
-      staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-      staging_desc.MiscFlags = 0u;
-      staging_desc.StructureByteStride = 0u;
-      const bool d3d_ready =
-        SUCCEEDED(device->CreateBuffer(
-          &constants_desc, nullptr,
-          adaptive_motion_probe_cbuffer.ReleaseAndGetAddressOf()
-        )) &&
-        SUCCEEDED(device->CreateBuffer(
-          &output_desc, nullptr,
-          adaptive_motion_probe_output_buf.ReleaseAndGetAddressOf()
-        )) &&
-        SUCCEEDED(device->CreateUnorderedAccessView(
-          adaptive_motion_probe_output_buf.Get(), nullptr,
-          adaptive_motion_probe_output_uav.ReleaseAndGetAddressOf()
-        )) &&
-        SUCCEEDED(device->CreateBuffer(
-          &staging_desc, nullptr,
-          adaptive_motion_probe_staging_buf.ReleaseAndGetAddressOf()
-        ));
-      const bool event_api = cuda.cuEventCreate && cuda.cuEventRecord &&
-                             cuda.cuEventQuery && cuda.cuEventDestroy;
-      const CUresult event_result = event_api ?
-                                      cuda.cuEventCreate(
-                                        &adaptive_motion_probe_ready_event,
-                                        cuda_event_disable_timing
-                                      ) :
-                                      static_cast<CUresult>(-1);
-      if (
-        !d3d_ready || event_result != CUDA_SUCCESS ||
-        !adaptive_motion_probe_ready_event
-      ) {
-        if (adaptive_motion_probe_ready_event && cuda.cuEventDestroy) {
-          (void) cuda.cuEventDestroy(adaptive_motion_probe_ready_event);
-          adaptive_motion_probe_ready_event = nullptr;
-        }
-        adaptive_motion_probe_cs.Reset();
-        adaptive_motion_probe_cbuffer.Reset();
-        adaptive_motion_probe_output_buf.Reset();
-        adaptive_motion_probe_output_uav.Reset();
-        adaptive_motion_probe_staging_buf.Reset();
-        log_adaptive_motion_probe_failure_once("optional resource/event setup failed");
+      const bool constants_ready = shaders_ready && SUCCEEDED(device->CreateBuffer(
+        &constants_desc,
+        nullptr,
+        near_identical_cbuffer.ReleaseAndGetAddressOf()
+      ));
+      if (!constants_ready) {
+        near_identical_compare_cs.Reset();
+        near_identical_resolve_cs.Reset();
+        near_identical_history_owner_cs.Reset();
+        near_identical_postprocess_args_cs.Reset();
+        near_identical_reuse_depth_cs.Reset();
+        near_identical_cbuffer.Reset();
+        log_near_identical_detector_failure_once(
+          "shader or constant-buffer setup failed"
+        );
         return;
       }
-      adaptive_motion_probe_available = true;
+      near_identical_detector_available = true;
       BOOST_LOG(info)
-        << "Host SBS current-frame motion probe initialized from its independently "
-           "authenticated optional closure.";
+        << "Host SBS GPU near-identical detector initialized from its independently "
+           "authenticated mandatory closure.";
     }
 
-    void destroy_adaptive_motion_probe_event(cuda_driver_api &cuda) noexcept {
-      adaptive_motion_probe_available = false;
-      adaptive_motion_probe_copy_scheduled = false;
-      adaptive_motion_probe_event_recorded = false;
-      if (!adaptive_motion_probe_ready_event) {
+    bool unregister_near_identical_decision_interop(cuda_driver_api &cuda) {
+      if (!reset_depth_conditional_graph()) {
+        fail_gpu_conditional_bridge_once(
+          "conditional-wrapper teardown failed before decision-buffer unregister"
+        );
+        return false;
+      }
+      if (unregister_cuda_graphics_resource(
+            cuda, cuda_near_identical_decision_res
+          )) {
+        return true;
+      }
+      execution_context_poisoned = true;
+      fail_gpu_conditional_bridge_once(
+        "decision-buffer interop unregister failed"
+      );
+      return false;
+    }
+
+    bool ensure_near_identical_decision_interop(cuda_driver_api &cuda) {
+      if (cuda_near_identical_decision_res) {
+        return true;
+      }
+      if (
+        !gpu_conditional_bridge_available ||
+        !cuda.has_conditional_graph_support() ||
+        !near_identical_gpu_decision_buf ||
+        !cuda.cuGraphicsD3D11RegisterResource
+      ) {
+        return false;
+      }
+      const CUresult registered = cuda.cuGraphicsD3D11RegisterResource(
+        &cuda_near_identical_decision_res,
+        near_identical_gpu_decision_buf.Get(),
+        0u
+      );
+      if (
+        registered == CUDA_SUCCESS && cuda_near_identical_decision_res
+      ) {
+        return true;
+      }
+
+      bool cleanup_ok = true;
+      if (cuda_near_identical_decision_res) {
+        cleanup_ok = unregister_cuda_graphics_resource(
+          cuda, cuda_near_identical_decision_res
+        );
+      }
+      if (!cleanup_ok) {
+        execution_context_poisoned = true;
+        mark_terminal_failure(true);
+      }
+      fail_gpu_conditional_bridge_once(
+        cleanup_ok ?
+          "decision-buffer CUDA registration failed" :
+          "decision-buffer registration cleanup failed",
+        registered
+      );
+      return false;
+    }
+
+    bool ensure_near_identical_detector_resources() {
+      if (!near_identical_detector_available || target_w <= 0 || target_h <= 0) {
+        return false;
+      }
+      if (
+        near_identical_tile_buf && near_identical_tile_srv &&
+        near_identical_tile_uav && near_identical_gpu_decision_buf &&
+        near_identical_gpu_decision_uav && near_identical_gpu_dispatch_buf &&
+        near_identical_history_owner_buf && near_identical_history_owner_srv &&
+        near_identical_history_owner_uav
+      ) {
+        return true;
+      }
+
+      auto &cuda = cuda_driver_api::get();
+      if (
+        cuda_near_identical_decision_res &&
+        !unregister_near_identical_decision_interop(cuda)
+      ) {
+        mark_terminal_failure(true);
+        return false;
+      }
+
+      near_identical_tile_buf.Reset();
+      near_identical_tile_srv.Reset();
+      near_identical_tile_uav.Reset();
+      near_identical_gpu_decision_buf.Reset();
+      near_identical_gpu_decision_uav.Reset();
+      near_identical_gpu_dispatch_buf.Reset();
+      near_identical_history_owner_buf.Reset();
+      near_identical_history_owner_srv.Reset();
+      near_identical_history_owner_uav.Reset();
+
+      constexpr std::uint32_t tile_word_count = 4u;
+      const std::uint32_t tile_group_width =
+        (static_cast<std::uint32_t>(target_w) + 15u) / 16u;
+      const std::uint32_t tile_group_height =
+        (static_cast<std::uint32_t>(target_h) + 15u) / 16u;
+      const std::uint32_t tile_group_count = tile_group_width * tile_group_height;
+      const auto create_structured_uint_buffer = [&] (
+                                                   const std::uint32_t word_count,
+                                                   const std::uint32_t stride_words,
+                                                   Microsoft::WRL::ComPtr<ID3D11Buffer> &buffer,
+                                                   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> &srv,
+                                                   Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> &uav
+                                                 ) {
+        if (word_count == 0u || stride_words == 0u ||
+            word_count % stride_words != 0u) {
+          return false;
+        }
+        D3D11_BUFFER_DESC desc {};
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.ByteWidth = word_count * sizeof(std::uint32_t);
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+        desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        desc.StructureByteStride = stride_words * sizeof(std::uint32_t);
+        return SUCCEEDED(device->CreateBuffer(
+                 &desc, nullptr, buffer.ReleaseAndGetAddressOf()
+               )) &&
+               SUCCEEDED(device->CreateShaderResourceView(
+                 buffer.Get(), nullptr, srv.ReleaseAndGetAddressOf()
+               )) &&
+               SUCCEEDED(device->CreateUnorderedAccessView(
+                 buffer.Get(), nullptr, uav.ReleaseAndGetAddressOf()
+               ));
+      };
+      const auto create_decision_buffers = [&]() {
+        std::array<std::uint32_t, near_identical_gpu_decision_word_count> initial {};
+        initial[near_identical_gpu_decision_word_index(
+          near_identical_gpu_decision_word_e::decision
+        )] = static_cast<std::uint32_t>(near_identical_gpu_branch_e::infer);
+        D3D11_BUFFER_DESC desc {};
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.ByteWidth = static_cast<UINT>(sizeof(initial));
+        desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+        // CUDA rejects a D3D11 buffer carrying DRAWINDIRECT_ARGS. Keep the authenticated
+        // proposal/receipt in this registerable raw buffer, let postprocess write every argument,
+        // then copy the 176-byte transaction into a D3-only twin before indirect consumers.
+        desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+        D3D11_SUBRESOURCE_DATA initial_data {initial.data(), 0u, 0u};
+        if (FAILED(device->CreateBuffer(
+              &desc,
+              &initial_data,
+              near_identical_gpu_decision_buf.ReleaseAndGetAddressOf()
+            ))) {
+          return false;
+        }
+        D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc {};
+        uav_desc.Format = DXGI_FORMAT_R32_TYPELESS;
+        uav_desc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        uav_desc.Buffer.FirstElement = 0u;
+        uav_desc.Buffer.NumElements =
+          static_cast<UINT>(near_identical_gpu_decision_word_count);
+        uav_desc.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+        if (FAILED(device->CreateUnorderedAccessView(
+              near_identical_gpu_decision_buf.Get(),
+              &uav_desc,
+              near_identical_gpu_decision_uav.ReleaseAndGetAddressOf()
+            ))) {
+          return false;
+        }
+        desc.BindFlags = 0u;
+        desc.MiscFlags = D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
+        return SUCCEEDED(device->CreateBuffer(
+                 &desc,
+                 &initial_data,
+                 near_identical_gpu_dispatch_buf.ReleaseAndGetAddressOf()
+               ));
+      };
+      const bool resources_ready =
+        create_structured_uint_buffer(
+          tile_group_count * tile_word_count,
+          tile_word_count,
+          near_identical_tile_buf,
+          near_identical_tile_srv,
+          near_identical_tile_uav
+        ) &&
+        create_structured_uint_buffer(
+          static_cast<std::uint32_t>(near_identical_history_owner_word_count),
+          1u,
+          near_identical_history_owner_buf,
+          near_identical_history_owner_srv,
+          near_identical_history_owner_uav
+        ) &&
+        create_decision_buffers();
+      if (!resources_ready) {
+        near_identical_tile_buf.Reset();
+        near_identical_tile_srv.Reset();
+        near_identical_tile_uav.Reset();
+        near_identical_gpu_decision_buf.Reset();
+        near_identical_gpu_decision_uav.Reset();
+        near_identical_gpu_dispatch_buf.Reset();
+        near_identical_history_owner_buf.Reset();
+        near_identical_history_owner_srv.Reset();
+        near_identical_history_owner_uav.Reset();
+        near_identical_detector_available = false;
+        log_near_identical_detector_failure_once("GPU transaction-buffer setup failed");
+        return false;
+      }
+      const UINT zero[4] = {};
+      context->ClearUnorderedAccessViewUint(
+        near_identical_history_owner_uav.Get(), zero
+      );
+      return true;
+    }
+
+    void update_near_identical_constants(
+      const std::uint32_t request_flags,
+      const std::uint32_t tile_group_width,
+      const std::uint32_t tile_group_height,
+      const std::uint64_t current_frame_id,
+      const std::uint64_t baseline_frame_id,
+      const std::uint64_t domain_tag,
+      const std::uint64_t request_token,
+      const std::uint32_t stream_frame_delta = 0u
+    ) {
+      const std::array<std::uint32_t, 16> constants {
+        request_flags,
+        tile_group_width,
+        tile_group_height,
+        tile_group_width * tile_group_height,
+        static_cast<std::uint32_t>(current_frame_id),
+        static_cast<std::uint32_t>(current_frame_id >> 32u),
+        static_cast<std::uint32_t>(baseline_frame_id),
+        static_cast<std::uint32_t>(baseline_frame_id >> 32u),
+        static_cast<std::uint32_t>(domain_tag),
+        static_cast<std::uint32_t>(domain_tag >> 32u),
+        static_cast<std::uint32_t>(request_token),
+        static_cast<std::uint32_t>(request_token >> 32u),
+        reduce_groups,
+        stream_frame_delta,
+        0u,
+        0u,
+      };
+      context->UpdateSubresource(
+        near_identical_cbuffer.Get(), 0u, nullptr, constants.data(), 0u, 0u
+      );
+    }
+
+    [[nodiscard]] std::uint64_t next_force_infer_transaction_token() noexcept {
+      // Keep host-forced tokens in a visibly distinct nonzero namespace. The record is consumed
+      // only by the GPU and is never read back; uniqueness across this estimator lifetime is
+      // sufficient to reject stale records from an earlier mapped transaction.
+      constexpr std::uint64_t force_namespace = 0xf000000000000000ull;
+      constexpr std::uint64_t sequence_mask = 0x0fffffffffffffffull;
+      force_infer_transaction_sequence =
+        (force_infer_transaction_sequence + 1u) & sequence_mask;
+      if (force_infer_transaction_sequence == 0u) {
+        force_infer_transaction_sequence = 1u;
+      }
+      return force_namespace | force_infer_transaction_sequence;
+    }
+
+    bool publish_force_infer_transaction(const std::uint64_t token) {
+      if (token == 0u || !near_identical_gpu_decision_buf) {
+        return false;
+      }
+      std::array<std::uint32_t, near_identical_gpu_decision_word_count> transaction {};
+      const auto proposal = cuda_conditional_graph::make_proposal(
+        cuda_conditional_graph::branch_e::infer,
+        token
+      );
+      const auto request = cuda_conditional_graph::make_request(token);
+      std::memcpy(
+        reinterpret_cast<std::byte *>(transaction.data()) +
+          near_identical_gpu_decision_record_byte_offset,
+        &proposal,
+        sizeof(proposal)
+      );
+      std::memcpy(
+        reinterpret_cast<std::byte *>(transaction.data()) +
+          near_identical_gpu_request_record_byte_offset,
+        &request,
+        sizeof(request)
+      );
+      context->UpdateSubresource(
+        near_identical_gpu_decision_buf.Get(),
+        0u,
+        nullptr,
+        transaction.data(),
+        0u,
+        0u
+      );
+      return true;
+    }
+
+    void publish_near_identical_history_owner(
+      const std::uint64_t frame_id,
+      const depth_input_region_t &input_region,
+      const input_color_space color_space
+    ) {
+      if (
+        !gpu_conditional_bridge_available ||
+        depth_inference_graph.policy.capture_failed ||
+        !near_identical_detector_available ||
+        !ensure_near_identical_detector_resources() || frame_id == 0u ||
+        !input_region.tensor_content.valid({target_w, target_h}) ||
+        !near_identical_history_owner_cs || !near_identical_cbuffer ||
+        !near_identical_history_owner_uav || !cut_state_srv || !cbuffer
+      ) {
         return;
       }
-      const CUresult result = cuda.cuEventDestroy ?
-                                cuda.cuEventDestroy(adaptive_motion_probe_ready_event) :
-                                static_cast<CUresult>(-1);
-      if (result != CUDA_SUCCESS) {
-        BOOST_LOG(warning)
-          << "Optional current-frame motion-probe event destruction failed: " << result;
-      }
-      adaptive_motion_probe_ready_event = nullptr;
+      const auto domain_tag = near_identical_input_domain_tag(
+        input_region,
+        color_space,
+        static_cast<std::uint32_t>(target_w),
+        static_cast<std::uint32_t>(target_h)
+      );
+      update_near_identical_constants(0u, 0u, 0u, frame_id, 0u, domain_tag, 0u);
+      ID3D11Buffer *constant_buffers[2] = {
+        cbuffer.Get(),
+        near_identical_cbuffer.Get(),
+      };
+      ID3D11ShaderResourceView *inputs[5] = {
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        cut_state_srv.Get(),
+      };
+      ID3D11UnorderedAccessView *outputs[3] = {
+        nullptr,
+        nullptr,
+        near_identical_history_owner_uav.Get(),
+      };
+      context->CSSetShader(near_identical_history_owner_cs.Get(), nullptr, 0u);
+      context->CSSetConstantBuffers(0u, 2u, constant_buffers);
+      context->CSSetShaderResources(0u, 5u, inputs);
+      context->CSSetUnorderedAccessViews(0u, 3u, outputs, nullptr);
+      dispatch_infer_postprocess(
+        1u,
+        1u,
+        1u,
+        near_identical_gpu_infer_one_byte_offset
+      );
+      ID3D11ShaderResourceView *null_inputs[5] = {};
+      ID3D11UnorderedAccessView *null_outputs[3] = {};
+      ID3D11Buffer *null_constants[2] = {};
+      context->CSSetUnorderedAccessViews(0u, 3u, null_outputs, nullptr);
+      context->CSSetShaderResources(0u, 5u, null_inputs);
+      context->CSSetConstantBuffers(0u, 2u, null_constants);
     }
 
-    bool dispatch_adaptive_motion_probe(
-      const adaptive_motion_probe_request &request,
+    bool dispatch_near_identical_detector(
+      const gpu_adaptive_reuse_request &request,
       const std::uint64_t current_frame_id,
       const depth_input_region_t &input_region,
-      const input_color_space color_space,
-      const bool current_ocr_input_preprocessed
+      const input_color_space color_space
     ) {
-      adaptive_motion_probe_copy_scheduled = false;
-      adaptive_motion_probe_event_recorded = false;
       if (
-        !request.enabled || !adaptive_motion_probe_available ||
+        !request.authorize_gpu_undecided_reuse ||
+        request.gpu_reuse_decision_token == 0u ||
+        !near_identical_detector_available ||
+        !ensure_near_identical_detector_resources() ||
         current_frame_id == 0u || request.baseline_frame_id == 0u ||
         current_frame_id <= request.baseline_frame_id ||
         !has_last_postprocessed_frame_id ||
         request.baseline_frame_id != last_postprocessed_frame_id ||
-        (request.authorize_model_equivalent_observation_hold &&
-         !processed_input_domain.matches_analysis_domain(input_region, color_space)) ||
-        !adaptive_motion_probe_cs || !adaptive_motion_probe_cbuffer ||
-        !adaptive_motion_probe_output_uav || !adaptive_motion_probe_staging_buf ||
-        !tensor_in_srv || !tensor_previous_input_srv || !appearance_ordinal_srv ||
-        !previous_appearance_ordinal_srv || !tensor_exclusion_srv ||
-        !tensor_previous_exclusion_srv || !cut_state_srv
+        !processed_input_domain.matches_analysis_domain(input_region, color_space) ||
+        !input_region.tensor_content.valid({target_w, target_h}) ||
+        !near_identical_compare_cs || !near_identical_resolve_cs ||
+        !near_identical_cbuffer || !near_identical_tile_uav ||
+        !near_identical_tile_srv || !near_identical_history_owner_srv ||
+        !near_identical_gpu_decision_buf || !near_identical_gpu_decision_uav ||
+        !near_identical_gpu_dispatch_buf ||
+        !tensor_in_srv || !tensor_previous_input_srv || !cbuffer
       ) {
         return false;
       }
 
-      if (!input_region.tensor_content.valid({target_w, target_h})) {
-        return false;
-      }
-      constexpr std::uint32_t ocr_baseline_candidate = 1u << 0u;
-      constexpr std::uint32_t ocr_current_preprocessed = 1u << 2u;
-      const bool ocr_baseline_matches =
-        adaptive_ocr_input_compare_available && ocr_input_srv &&
-        ocr_previous_input_srv && ocr_box_record_srv &&
-        ocr_input_baseline.matches(
-          request.baseline_frame_id,
-          input_region,
-          color_space,
-          target_w,
-          target_h
-        );
-      const bool current_ocr_input_available =
-        current_ocr_input_preprocessed && adaptive_ocr_input_compare_available &&
-        ocr_input_srv;
-      const std::uint32_t ocr_flags =
-        (ocr_baseline_matches ? ocr_baseline_candidate : 0u) |
-        (current_ocr_input_available ? ocr_current_preprocessed : 0u);
-      const std::array<std::uint32_t, 8> constants {
-        static_cast<std::uint32_t>(current_frame_id),
-        static_cast<std::uint32_t>(current_frame_id >> 32u),
-        static_cast<std::uint32_t>(request.baseline_frame_id),
-        static_cast<std::uint32_t>(request.baseline_frame_id >> 32u),
-        ocr_flags,
-        adaptive_motion_ocr_input_value_count,
-        static_cast<std::uint32_t>(ocr_input_baseline.frame_id),
-        static_cast<std::uint32_t>(ocr_input_baseline.frame_id >> 32u),
-      };
-      context->UpdateSubresource(
-        adaptive_motion_probe_cbuffer.Get(), 0u, nullptr, constants.data(), 0u, 0u
+      const std::uint32_t tile_group_width =
+        (static_cast<std::uint32_t>(target_w) + 15u) / 16u;
+      const std::uint32_t tile_group_height =
+        (static_cast<std::uint32_t>(target_h) + 15u) / 16u;
+      const auto domain_tag = near_identical_input_domain_tag(
+        input_region,
+        color_space,
+        static_cast<std::uint32_t>(target_w),
+        static_cast<std::uint32_t>(target_h)
       );
-      const UINT zero[4] = {};
-      context->ClearUnorderedAccessViewUint(adaptive_motion_probe_output_uav.Get(), zero);
+      update_near_identical_constants(
+        1u,
+        tile_group_width,
+        tile_group_height,
+        current_frame_id,
+        request.baseline_frame_id,
+        domain_tag,
+        request.gpu_reuse_decision_token
+      );
+      std::array<std::uint32_t, near_identical_gpu_decision_word_count>
+        initialized_transaction {};
+      const auto set_transaction_word = [&] (
+                                           const near_identical_gpu_decision_word_e word,
+                                           const std::uint32_t value
+                                         ) {
+        initialized_transaction[near_identical_gpu_decision_word_index(word)] = value;
+      };
+      const auto token_low =
+        static_cast<std::uint32_t>(request.gpu_reuse_decision_token);
+      const auto token_high =
+        static_cast<std::uint32_t>(request.gpu_reuse_decision_token >> 32u);
+      set_transaction_word(
+        near_identical_gpu_decision_word_e::decision,
+        static_cast<std::uint32_t>(near_identical_gpu_branch_e::infer)
+      );
+      set_transaction_word(
+        near_identical_gpu_decision_word_e::request_token_low,
+        token_low
+      );
+      set_transaction_word(
+        near_identical_gpu_decision_word_e::request_token_high,
+        token_high
+      );
+      set_transaction_word(
+        near_identical_gpu_decision_word_e::request_token_low_cookie,
+        token_low ^ near_identical_token_low_cookie
+      );
+      set_transaction_word(
+        near_identical_gpu_decision_word_e::request_token_high_cookie,
+        token_high ^ near_identical_token_high_cookie
+      );
+      set_transaction_word(
+        near_identical_gpu_decision_word_e::request_magic,
+        near_identical_request_magic
+      );
+      // One full-record write invalidates every prior proposal/receipt and every indirect arg
+      // before this frame's compare. With a valid RQST, CUDA resolves a missing or malformed PROP
+      // to an authenticated infer receipt. If the conditional root/receipt itself is absent, later
+      // postprocess preserves the prior depth/history instead of consuming unauthenticated output.
+      context->UpdateSubresource(
+        near_identical_gpu_decision_buf.Get(),
+        0u,
+        nullptr,
+        initialized_transaction.data(),
+        0u,
+        0u
+      );
       ID3D11Buffer *constant_buffers[2] = {
         cbuffer.Get(),
-        adaptive_motion_probe_cbuffer.Get(),
+        near_identical_cbuffer.Get(),
       };
-      ID3D11ShaderResourceView *inputs[10] = {
+      ID3D11ShaderResourceView *compare_inputs[2] = {
         tensor_in_srv.Get(),
         tensor_previous_input_srv.Get(),
-        appearance_ordinal_srv.Get(),
-        previous_appearance_ordinal_srv.Get(),
-        tensor_exclusion_srv.Get(),
-        tensor_previous_exclusion_srv.Get(),
-        cut_state_srv.Get(),
-        ocr_input_srv.Get(),
-        ocr_previous_input_srv.Get(),
-        ocr_box_record_srv.Get(),
       };
-      context->CSSetShader(adaptive_motion_probe_cs.Get(), nullptr, 0u);
+      context->CSSetShader(near_identical_compare_cs.Get(), nullptr, 0u);
       context->CSSetConstantBuffers(0u, 2u, constant_buffers);
-      context->CSSetShaderResources(0u, 10u, inputs);
+      context->CSSetShaderResources(0u, 2u, compare_inputs);
       context->CSSetUnorderedAccessViews(
-        0u, 1u, adaptive_motion_probe_output_uav.GetAddressOf(), nullptr
+        0u, 1u, near_identical_tile_uav.GetAddressOf(), nullptr
       );
-      context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1u);
+      context->Dispatch(tile_group_width, tile_group_height, 1u);
+      ID3D11ShaderResourceView *null_compare_inputs[2] = {};
+      ID3D11UnorderedAccessView *null_compare_output = nullptr;
+      context->CSSetUnorderedAccessViews(0u, 1u, &null_compare_output, nullptr);
+      context->CSSetShaderResources(0u, 2u, null_compare_inputs);
+
+      ID3D11ShaderResourceView *resolve_inputs[4] = {
+        nullptr,
+        nullptr,
+        near_identical_tile_srv.Get(),
+        near_identical_history_owner_srv.Get(),
+      };
+      ID3D11UnorderedAccessView *resolve_outputs[4] = {
+        nullptr,
+        nullptr,
+        nullptr,
+        near_identical_gpu_decision_uav.Get(),
+      };
+      context->CSSetShader(near_identical_resolve_cs.Get(), nullptr, 0u);
+      context->CSSetShaderResources(0u, 4u, resolve_inputs);
+      context->CSSetUnorderedAccessViews(0u, 4u, resolve_outputs, nullptr);
+      context->Dispatch(1u, 1u, 1u);
+      ID3D11ShaderResourceView *null_resolve_inputs[4] = {};
+      ID3D11UnorderedAccessView *null_resolve_outputs[4] = {};
       ID3D11Buffer *null_constants[2] = {};
-      ID3D11ShaderResourceView *null_inputs[10] = {};
-      ID3D11UnorderedAccessView *null_output = nullptr;
-      context->CSSetUnorderedAccessViews(0u, 1u, &null_output, nullptr);
-      context->CSSetShaderResources(0u, 10u, null_inputs);
+      context->CSSetUnorderedAccessViews(0u, 4u, null_resolve_outputs, nullptr);
+      context->CSSetShaderResources(0u, 4u, null_resolve_inputs);
       context->CSSetConstantBuffers(0u, 2u, null_constants);
-      context->CopyResource(
-        adaptive_motion_probe_staging_buf.Get(),
-        adaptive_motion_probe_output_buf.Get()
-      );
-      adaptive_motion_probe_copy_scheduled = true;
+
       return true;
     }
 
-    adaptive_motion_probe_result collect_adaptive_motion_probe(
-      cuda_driver_api &cuda,
-      const adaptive_motion_probe_request &request,
-      const std::uint64_t current_frame_id
-    ) {
-      adaptive_motion_probe_result result;
-      if (!request.enabled) {
-        return result;
-      }
-      result.status = adaptive_motion_probe_status_e::unavailable;
-      if (
-        !adaptive_motion_probe_copy_scheduled ||
-        !adaptive_motion_probe_event_recorded ||
-        !adaptive_motion_probe_available
-      ) {
-        return result;
-      }
-
-      const auto started = std::chrono::steady_clock::now();
-      const auto deadline = adaptive_motion_probe_wait_deadline(
-        request.cadence_deadline,
-        request.max_wait,
-        started
-      );
-      const bool has_wait_deadline = deadline.time_since_epoch().count() != 0;
-      const auto poll_round_limit = std::max<std::uint32_t>(
-        1u,
-        request.max_poll_rounds
-      );
-      constexpr auto poll_interval = std::chrono::microseconds {50};
-      adaptive_motion_probe_poll_progress progress;
-      while (true) {
-        if (
-          progress.poll_round_count > 0u && has_wait_deadline &&
-          std::chrono::steady_clock::now() >= deadline
-        ) {
-          result.status = adaptive_motion_probe_status_e::timed_out;
-          result.timeout_reason = classify_adaptive_motion_probe_timeout(
-            progress.event_ready,
-            true,
-            true,
-            false
-          );
-          break;
-        }
-        progress.begin_round();
-        if (progress.event_query_needed()) {
-          const CUresult query = cuda.cuEventQuery(adaptive_motion_probe_ready_event);
-          if (query == CUDA_SUCCESS) {
-            progress.observe(adaptive_motion_probe_poll_observation_e::event_ready);
-          } else if (query == CUDA_ERROR_NOT_READY) {
-            progress.observe(adaptive_motion_probe_poll_observation_e::event_not_ready);
-          } else {
-            progress.observe(adaptive_motion_probe_poll_observation_e::event_failed);
-            handle_adaptive_motion_probe_cuda_failure(
-              query,
-              "readiness query"
-            );
-            result.status = adaptive_motion_probe_status_e::unavailable;
-            break;
-          }
-        }
-        if (progress.staging_map_needed()) {
-          D3D11_MAPPED_SUBRESOURCE mapped {};
-          const HRESULT mapped_result = context->Map(
-            adaptive_motion_probe_staging_buf.Get(),
-            0u,
-            D3D11_MAP_READ,
-            D3D11_MAP_FLAG_DO_NOT_WAIT,
-            &mapped
-          );
-          if (mapped_result == DXGI_ERROR_WAS_STILL_DRAWING) {
-            progress.observe(adaptive_motion_probe_poll_observation_e::staging_map_busy);
-          } else if (FAILED(mapped_result) || !mapped.pData) {
-            progress.observe(adaptive_motion_probe_poll_observation_e::staging_map_failed);
-            adaptive_motion_probe_available = false;
-            log_adaptive_motion_probe_failure_once("D3D11 staging readback failed");
-            result.status = adaptive_motion_probe_status_e::unavailable;
-            break;
-          } else {
-            std::array<std::uint32_t, adaptive_motion_probe_word_count> words {};
-            std::memcpy(words.data(), mapped.pData, sizeof(words));
-            context->Unmap(adaptive_motion_probe_staging_buf.Get(), 0u);
-            progress.observe(adaptive_motion_probe_poll_observation_e::staging_map_ready);
-            result.status = decode_adaptive_motion_probe_words(
-                              words,
-                              current_frame_id,
-                              request.baseline_frame_id,
-                              target_w,
-                              target_h,
-                              result.sample
-                            ) ?
-                              adaptive_motion_probe_status_e::ready :
-                              adaptive_motion_probe_status_e::invalid;
-            break;
-          }
-        }
-        const auto now = std::chrono::steady_clock::now();
-        const auto timeout_reason = classify_adaptive_motion_probe_timeout(
-          progress.event_ready,
-          has_wait_deadline,
-          has_wait_deadline && now >= deadline,
-          progress.poll_round_count >= poll_round_limit
-        );
-        if (timeout_reason != adaptive_motion_probe_timeout_reason_e::none) {
-          result.status = adaptive_motion_probe_status_e::timed_out;
-          result.timeout_reason = timeout_reason;
-          break;
-        }
-        const auto next_poll_at = std::min(deadline, now + poll_interval);
-        while (std::chrono::steady_clock::now() < next_poll_at) {
-          std::this_thread::yield();
-        }
-      }
-      result.poll_round_count = progress.poll_round_count;
-      result.event_query_count = progress.event_query_count;
-      result.staging_map_attempt_count = progress.staging_map_attempt_count;
-      result.staging_map_busy_count = progress.staging_map_busy_count;
-      result.wait_duration = std::chrono::steady_clock::now() - started;
-      adaptive_motion_probe_copy_scheduled = false;
-      adaptive_motion_probe_event_recorded = false;
-      return result;
+    [[nodiscard]] bool gpu_undecided_postprocess_pending() const noexcept {
+      return pending_submission_class == pending_submission_class_e::gpu_undecided;
     }
+
+    void dispatch_infer_postprocess(
+      const UINT direct_x,
+      const UINT direct_y,
+      const UINT direct_z,
+      const std::uint32_t indirect_byte_offset
+    ) {
+      if (!gpu_undecided_postprocess_pending()) {
+        context->Dispatch(direct_x, direct_y, direct_z);
+      } else if (near_identical_gpu_dispatch_buf) {
+        context->DispatchIndirect(
+          near_identical_gpu_dispatch_buf.Get(), indirect_byte_offset
+        );
+      }
+    }
+
+    bool dispatch_near_identical_postprocess_args() {
+      if (!gpu_undecided_postprocess_pending()) {
+        return true;
+      }
+      if (
+        !near_identical_postprocess_args_cs || !near_identical_gpu_decision_uav ||
+        !near_identical_gpu_decision_buf || !near_identical_gpu_dispatch_buf ||
+        !near_identical_cbuffer ||
+        !scene_cut_evidence_uav || !cbuffer
+      ) {
+        return false;
+      }
+      const auto domain_tag = near_identical_input_domain_tag(
+        pending_input_region,
+        pending_color_space,
+        static_cast<std::uint32_t>(target_w),
+        static_cast<std::uint32_t>(target_h)
+      );
+      const std::uint32_t groups_x =
+        (static_cast<std::uint32_t>(target_w) + 15u) / 16u;
+      const std::uint32_t groups_y =
+        (static_cast<std::uint32_t>(target_h) + 15u) / 16u;
+      std::uint64_t stream_frame_delta = 1u;
+      if (pending_gpu_transaction_baseline_frame_id != 0u &&
+          pending_gpu_transaction_current_frame_id >
+            pending_gpu_transaction_baseline_frame_id) {
+        stream_frame_delta = pending_gpu_transaction_current_frame_id -
+                             pending_gpu_transaction_baseline_frame_id;
+      }
+      update_near_identical_constants(
+        1u,
+        groups_x,
+        groups_y,
+        pending_gpu_transaction_current_frame_id,
+        pending_gpu_transaction_baseline_frame_id,
+        domain_tag,
+        pending_gpu_transaction_token,
+        static_cast<std::uint32_t>(std::min<std::uint64_t>(stream_frame_delta, 65535u))
+      );
+      ID3D11Buffer *constant_buffers[2] = {
+        cbuffer.Get(),
+        near_identical_cbuffer.Get(),
+      };
+      ID3D11UnorderedAccessView *outputs[6] = {
+        nullptr,
+        nullptr,
+        nullptr,
+        near_identical_gpu_decision_uav.Get(),
+        nullptr,
+        scene_cut_evidence_uav.Get(),
+      };
+      context->CSSetShader(near_identical_postprocess_args_cs.Get(), nullptr, 0u);
+      context->CSSetConstantBuffers(0u, 2u, constant_buffers);
+      context->CSSetUnorderedAccessViews(0u, 6u, outputs, nullptr);
+      context->Dispatch(1u, 1u, 1u);
+      ID3D11UnorderedAccessView *null_outputs[6] = {};
+      ID3D11Buffer *null_constants[2] = {};
+      context->CSSetUnorderedAccessViews(0u, 6u, null_outputs, nullptr);
+      context->CSSetConstantBuffers(0u, 2u, null_constants);
+      // CUDA cannot register a DRAWINDIRECT_ARGS buffer. Once the receipt validator has written
+      // every args record into the registerable transaction buffer and unbound its UAV, copy the
+      // complete 176-byte transaction into the D3-only indirect twin consumed below.
+      context->CopyResource(
+        near_identical_gpu_dispatch_buf.Get(),
+        near_identical_gpu_decision_buf.Get()
+      );
+      return true;
+    }
+
+    void dispatch_near_identical_reuse_depth() {
+      if (
+        !gpu_undecided_postprocess_pending() || !near_identical_reuse_depth_cs ||
+        !near_identical_gpu_dispatch_buf || !depth_previous_srv || !depth_uav ||
+        !cbuffer
+      ) {
+        return;
+      }
+      ID3D11ShaderResourceView *inputs[6] = {
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        depth_previous_srv.Get(),
+      };
+      ID3D11UnorderedAccessView *outputs[5] = {
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        depth_uav.Get(),
+      };
+      context->CSSetShader(near_identical_reuse_depth_cs.Get(), nullptr, 0u);
+      context->CSSetConstantBuffers(0u, 1u, cbuffer.GetAddressOf());
+      context->CSSetShaderResources(0u, 6u, inputs);
+      context->CSSetUnorderedAccessViews(0u, 5u, outputs, nullptr);
+      context->DispatchIndirect(
+        near_identical_gpu_dispatch_buf.Get(),
+        near_identical_gpu_reuse_grid16_byte_offset
+      );
+      ID3D11ShaderResourceView *null_inputs[6] = {};
+      ID3D11UnorderedAccessView *null_outputs[5] = {};
+      ID3D11Buffer *null_constant = nullptr;
+      context->CSSetUnorderedAccessViews(0u, 5u, null_outputs, nullptr);
+      context->CSSetShaderResources(0u, 6u, null_inputs);
+      context->CSSetConstantBuffers(0u, 1u, &null_constant);
+    }
+
 
     bool initialize_ocr_context(
       const std::filesystem::path &assets_dir,
@@ -3761,8 +4140,7 @@ namespace models {
       Microsoft::WRL::ComPtr<ID3D11DeviceContext> c,
       const std::filesystem::path &assets_dir,
       const config::video_t::sbs_t &cfg,
-      const config::depth_model_info &model,
-      const bool enable_adaptive_motion_probe
+      const config::depth_model_info &model
     ):
         device(d),
         context(c),
@@ -3776,7 +4154,6 @@ namespace models {
         minmax_alpha((float) config::host_sbs_v2_live_calibration::minmax_ema),
         cuda_graph_enabled(cfg.cuda_graph),
         diagnostics_enabled(config::sunshine.diagnostics_enabled),
-        adaptive_motion_probe_enabled(enable_adaptive_motion_probe),
         parallax_v2_requested_pop_strength(
           depth_coordinate_v2::requested_pop_strength(
             static_cast<float>(cfg.pop_strength)
@@ -3787,7 +4164,7 @@ namespace models {
       // Enable the process-wide rolling collector for diagnostic runs. Do not reset it here:
       // Galaxy XR and local-AR estimators may coexist, and one session must not invalidate the
       // other session's pending D3D query generation. The offline harness resets explicitly.
-      perf_depth.stage = "depth_infer";
+      perf_depth_conditional.stage = "depth_conditional_transaction";
       perf_ocr.stage = "ocr_infer";
       sbs_perf::set_enabled(diagnostics_enabled);
       initialize_d3d_perf();
@@ -4160,6 +4537,24 @@ namespace models {
         << "); completed fields remain separately authenticated before rendering.";
       BOOST_LOG(info) << "Host SBS V2 cut-only GPU analysis enabled.";
 
+      if (!cuda_graph_enabled) {
+        fail_gpu_conditional_bridge_once("CUDA graph replay is disabled by configuration");
+        return;
+      }
+      if (!cuda.has_conditional_graph_support()) {
+        fail_gpu_conditional_bridge_once(
+          "the installed CUDA driver lacks conditional-graph support"
+        );
+        return;
+      }
+      initialize_near_identical_detector();
+      if (!near_identical_detector_available) {
+        fail_gpu_conditional_bridge_once(
+          "mandatory GPU detector/postprocess shader initialization failed"
+        );
+        return;
+      }
+
       // OCR is optional. Its authenticated source, engine and mutable execution context are
       // isolated from depth; an unavailable detector leaves the compact OCR8 record invalid and
       // the SLR12 conditioner copies BaseField exactly.
@@ -4186,7 +4581,6 @@ namespace models {
           << "PP-OCRv6 tiny is unavailable for this estimator; subtitle conditioning is flat.";
       }
       initialize_inference_done_events(cuda);
-      initialize_adaptive_motion_probe(cuda);
       // Raw normalization record, pre-seeded to
       // {min = 0xFFFFFFFF, max = 0, valid = 0, eligible = 0}.
       // The fused V2 frame resolve overwrites all four words before the histogram consumes them;
@@ -4381,37 +4775,94 @@ namespace models {
             cleanup_execution_ok = false;
           }
         }
-        // The optional probe event never participates in TensorRT context health. Its stream has
-        // already been synchronized above, so teardown is best-effort and fail-open.
-        destroy_adaptive_motion_probe_event(cuda);
         const bool inference_events_destroyed =
           destroy_inference_done_events(cuda);
         if (!inference_events_destroyed && inference_event_ever_recorded) {
           cleanup_execution_ok = false;
         }
-        destroy_inference_graph(cuda, depth_inference_graph);
-        destroy_inference_graph(cuda, ocr_inference_graph);
-        if (ocr_cu_stream &&
+        const bool decision_interop_released =
+          unregister_near_identical_decision_interop(cuda);
+        cleanup_execution_ok = decision_interop_released && cleanup_execution_ok;
+        cleanup_execution_ok = !gpu_conditional_bridge_context_failed &&
+                               cleanup_execution_ok;
+        const bool conditional_wrapper_live = !depth_conditional_graph.empty();
+        const bool depth_graph_released =
+          !conditional_wrapper_live &&
+          destroy_inference_graph(cuda, depth_inference_graph);
+        const bool depth_graph_live = depth_inference_graph.executable != nullptr ||
+                                      depth_inference_graph.graph != nullptr;
+        const bool depth_dependency_live = conditional_wrapper_live || depth_graph_live;
+        const bool ocr_graph_released =
+          destroy_inference_graph(cuda, ocr_inference_graph);
+        const bool ocr_graph_live = ocr_inference_graph.executable != nullptr ||
+                                    ocr_inference_graph.graph != nullptr;
+        cleanup_execution_ok = depth_graph_released && ocr_graph_released &&
+                               cleanup_execution_ok;
+        if (!decision_interop_released) {
+          // A live conditional executable captures both the child graph and mapped decision
+          // address. If CUDA could not prove their release, intentionally leak the D3 interfaces
+          // with the retained CUDA registration rather than let member destruction free backing
+          // memory underneath driver-owned nodes. The poisoned context is never pooled.
+          (void) near_identical_gpu_decision_uav.Detach();
+          (void) near_identical_gpu_decision_buf.Detach();
+        }
+        if (ocr_cu_stream && !ocr_graph_live &&
             (!cuda.cuStreamDestroy ||
              cuda.cuStreamDestroy(ocr_cu_stream) != CUDA_SUCCESS)) {
           cleanup_execution_ok = false;
         }
-        if (cu_stream &&
+        if (cu_stream && !depth_dependency_live &&
             (!cuda.cuStreamDestroy || cuda.cuStreamDestroy(cu_stream) != CUDA_SUCCESS)) {
           cleanup_execution_ok = false;
         }
-        cleanup_execution_ok =
-          unregister_cuda_graphics_resource(cuda, cuda_in_res) &&
-          cleanup_execution_ok;
-        cleanup_execution_ok =
-          unregister_cuda_graphics_resource(cuda, cuda_out_res) &&
-          cleanup_execution_ok;
-        cleanup_execution_ok =
-          unregister_cuda_graphics_resource(cuda, cuda_ocr_in_res) &&
-          cleanup_execution_ok;
-        cleanup_execution_ok =
-          unregister_cuda_graphics_resource(cuda, cuda_ocr_out_res) &&
-          cleanup_execution_ok;
+        if (depth_dependency_live) {
+          // A live wrapper or captured source graph retains TensorRT's input/output addresses.
+          // Preserve their registrations, D3 backing, and launch stream together. This path is
+          // terminal and deliberately leaks only after CUDA has made safe teardown impossible;
+          // the associated execution context is quarantined below.
+          (void) tensor_in_srv.Detach();
+          (void) tensor_in_uav.Detach();
+          (void) tensor_in_buf.Detach();
+          (void) tensor_out_srv.Detach();
+          (void) tensor_out_buf.Detach();
+        } else {
+          const bool input_unregistered =
+            unregister_cuda_graphics_resource(cuda, cuda_in_res);
+          const bool output_unregistered =
+            unregister_cuda_graphics_resource(cuda, cuda_out_res);
+          if (!input_unregistered) {
+            (void) tensor_in_srv.Detach();
+            (void) tensor_in_uav.Detach();
+            (void) tensor_in_buf.Detach();
+          }
+          if (!output_unregistered) {
+            (void) tensor_out_srv.Detach();
+            (void) tensor_out_buf.Detach();
+          }
+          cleanup_execution_ok = input_unregistered && output_unregistered &&
+                                 cleanup_execution_ok;
+        }
+        if (ocr_graph_live) {
+          (void) ocr_input_uav.Detach();
+          (void) ocr_input_buf.Detach();
+          (void) ocr_output_srv.Detach();
+          (void) ocr_output_buf.Detach();
+        } else {
+          const bool ocr_input_unregistered =
+            unregister_cuda_graphics_resource(cuda, cuda_ocr_in_res);
+          const bool ocr_output_unregistered =
+            unregister_cuda_graphics_resource(cuda, cuda_ocr_out_res);
+          if (!ocr_input_unregistered) {
+            (void) ocr_input_uav.Detach();
+            (void) ocr_input_buf.Detach();
+          }
+          if (!ocr_output_unregistered) {
+            (void) ocr_output_srv.Detach();
+            (void) ocr_output_buf.Detach();
+          }
+          cleanup_execution_ok = ocr_input_unregistered &&
+                                 ocr_output_unregistered && cleanup_execution_ok;
+        }
         perf_destroy_events();  // free the timing events while cuda_ctx is still current
       }
       if (!cleanup_execution_ok) {
@@ -4543,7 +4994,6 @@ namespace models {
       subtitle_locator_cbuffer.Reset();
       pending_source_srv.Reset();
       ocr_record_lineage.reset();
-      ocr_input_baseline.reset();
     }
     void fail_parallax_v2_producer(std::string_view reason) {
       if (!parallax_v2_producer_failed) {
@@ -4684,7 +5134,6 @@ namespace models {
       // Every clear below invalidates the prior OCR8 bytes as a redispatch source. Re-establish
       // lineage only after an ordinary resolve or a verified header restamp is submitted.
       ocr_record_lineage.reset();
-      ocr_input_baseline.reset();
       context->ClearUnorderedAccessViewUint(ocr_box_record_uav.Get(), zero);
       context->ClearUnorderedAccessViewUint(subtitle_locator_state_uav.Get(), zero);
       context->ClearUnorderedAccessViewUint(subtitle_condition_params_uav.Get(), zero);
@@ -4727,32 +5176,13 @@ namespace models {
       };
 
       const std::uint32_t ocr_pixels = ocr_engine_width * ocr_engine_height;
-      bool ocr_input_supports_adaptive_compare = false;
-      bool ocr_input_resources_ok = false;
-      if (adaptive_motion_probe_enabled) {
-        ocr_input_resources_ok = create_float_buffer(
-          3u * ocr_pixels,
-          D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE,
-          ocr_input_buf,
-          nullptr,
-          &ocr_input_uav
-        );
-        ocr_input_supports_adaptive_compare = ocr_input_resources_ok;
-      }
-      if (!ocr_input_resources_ok) {
-        // SRV capability belongs only to the default-off adaptive comparison. If that augmented
-        // allocation fails, retry the production detector's original UAV-only input before
-        // declaring OCR unavailable.
-        ocr_input_buf.Reset();
-        ocr_input_uav.Reset();
-        ocr_input_resources_ok = create_float_buffer(
-          3u * ocr_pixels,
-          D3D11_BIND_UNORDERED_ACCESS,
-          ocr_input_buf,
-          nullptr,
-          &ocr_input_uav
-        );
-      }
+      const bool ocr_input_resources_ok = create_float_buffer(
+        3u * ocr_pixels,
+        D3D11_BIND_UNORDERED_ACCESS,
+        ocr_input_buf,
+        nullptr,
+        &ocr_input_uav
+      );
       bool ocr_resources_ok = ocr_input_resources_ok &&
                               create_float_buffer(
                                 ocr_pixels,
@@ -4794,32 +5224,6 @@ namespace models {
                  cuda_ocr_in_res && cuda_ocr_out_res;
         };
         ocr_resources_ok = register_ocr_interop();
-        if (!ocr_resources_ok && ocr_input_supports_adaptive_compare) {
-          // CUDA interop is also part of the production input contract. Retry it with the exact
-          // original UAV-only input before allowing optional SRV capability to disable OCR.
-          ocr_input_supports_adaptive_compare = false;
-          if (!unregister_ocr_interop()) {
-            // A failed unregister leaves CUDA ownership unresolved. Retain the backing resources,
-            // forbid the retry, and quarantine this OCR context at teardown.
-            ocr_interop_teardown_failed = true;
-            mark_ocr_context_failure(
-              detail::warmed_execution_context_failure_e::unsafe_teardown
-            );
-          } else {
-            ocr_input_buf.Reset();
-            ocr_input_uav.Reset();
-            ocr_resources_ok = create_float_buffer(
-              3u * ocr_pixels,
-              D3D11_BIND_UNORDERED_ACCESS,
-              ocr_input_buf,
-              nullptr,
-              &ocr_input_uav
-            );
-            if (ocr_resources_ok) {
-              ocr_resources_ok = register_ocr_interop();
-            }
-          }
-        }
         if (!ocr_resources_ok) {
           BOOST_LOG(warning)
             << "PP-OCRv6 tiny D3D11/CUDA registration failed (" << input_status << ", "
@@ -4846,45 +5250,10 @@ namespace models {
             << "PP-OCRv6 tiny interop cleanup did not release every CUDA resource; retaining "
                "the backing D3D resources and quarantining the OCR context.";
         }
-        ocr_input_srv.Reset();
-        ocr_previous_input_buf.Reset();
-        ocr_previous_input_srv.Reset();
-        ocr_input_baseline.reset();
         ocr_cell_stats_buf.Reset();
         ocr_cell_stats_uav.Reset();
         ocr_cell_stats_srv.Reset();
         ocr_available = false;
-        adaptive_ocr_input_compare_available = false;
-      } else if (adaptive_motion_probe_enabled) {
-        // Exact OCR-input comparison is an optional extension of CFM5, not a detector resource.
-        // A view/allocation failure must leave ordinary OCR and the DDup OCR-clean hold intact.
-        const bool compare_resources_ok =
-          ocr_input_supports_adaptive_compare &&
-          SUCCEEDED(device->CreateShaderResourceView(
-            ocr_input_buf.Get(),
-            nullptr,
-            ocr_input_srv.ReleaseAndGetAddressOf()
-          )) &&
-          create_float_buffer(
-            3u * ocr_pixels,
-            D3D11_BIND_SHADER_RESOURCE,
-            ocr_previous_input_buf,
-            &ocr_previous_input_srv,
-            nullptr
-          );
-        adaptive_ocr_input_compare_available = compare_resources_ok;
-        if (!compare_resources_ok) {
-          ocr_input_srv.Reset();
-          ocr_previous_input_buf.Reset();
-          ocr_previous_input_srv.Reset();
-          ocr_input_baseline.reset();
-          if (!adaptive_ocr_input_compare_error_logged) {
-            BOOST_LOG(warning)
-              << "Host SBS exact OCR-input comparison resources are unavailable; ordinary OCR "
-                 "and DDup OCR-clean adaptive holds remain active.";
-            adaptive_ocr_input_compare_error_logged = true;
-          }
-        }
       }
       return true;
     }
@@ -5086,7 +5455,12 @@ namespace models {
         depth_coordinate_v2_partials_uav.GetAddressOf(),
         nullptr
       );
-      context->Dispatch(reduce_groups, 1, 1);
+      dispatch_infer_postprocess(
+        reduce_groups,
+        1u,
+        1u,
+        near_identical_gpu_infer_reduce_byte_offset
+      );
       ID3D11ShaderResourceView *null_srvs3[3] = {nullptr, nullptr, nullptr};
       ID3D11UnorderedAccessView *null_uavs2[2] = {nullptr, nullptr};
       context->CSSetShaderResources(0, 2, null_srvs3);
@@ -5099,7 +5473,9 @@ namespace models {
         minmax_raw_uav.Get(),
       };
       context->CSSetUnorderedAccessViews(0, 2, frame_uavs, nullptr);
-      context->Dispatch(1, 1, 1);
+      dispatch_infer_postprocess(
+        1u, 1u, 1u, near_identical_gpu_infer_one_byte_offset
+      );
       context->CSSetShaderResources(0, 1, null_srvs3);
       context->CSSetUnorderedAccessViews(0, 2, null_uavs2, nullptr);
       mark_d3d_parallax_frame_stats_end(perf_slot);
@@ -5132,7 +5508,9 @@ namespace models {
         0, 1, depth_coordinate_v2_state_uav.GetAddressOf(),
         nullptr
       );
-      context->Dispatch(1, 1, 1);
+      dispatch_infer_postprocess(
+        1u, 1u, 1u, near_identical_gpu_infer_one_byte_offset
+      );
       context->CSSetShaderResources(0, 2, null_srvs3);
       context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
 
@@ -5153,7 +5531,12 @@ namespace models {
         depth_coordinate_v2_candidate_uav.GetAddressOf(),
         nullptr
       );
-      context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
+      dispatch_infer_postprocess(
+        (target_w + 15) / 16,
+        (target_h + 15) / 16,
+        1u,
+        near_identical_gpu_infer_grid16_byte_offset
+      );
       context->CSSetShaderResources(0, 3, null_srvs3);
       context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
 
@@ -5178,13 +5561,18 @@ namespace models {
           perf_slot->has_ownership = true;
           context->End(perf_slot->ownership_start.Get());
         }
-        context->Dispatch((target_w + 7) / 8, (target_h + 7) / 8, 1);
+        dispatch_infer_postprocess(
+          (target_w + 7) / 8,
+          (target_h + 7) / 8,
+          1u,
+          near_identical_gpu_infer_grid8_byte_offset
+        );
         if (perf_slot) {
           context->End(perf_slot->ownership_end.Get());
         }
         context->CSSetShaderResources(0, 3, null_srvs3);
         context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
-      } else {
+      } else if (!gpu_undecided_postprocess_pending()) {
         context->CopyResource(
           depth_coordinate_v2_ownership_tex.Get(),
           depth_coordinate_v2_candidate_tex.Get()
@@ -5200,7 +5588,12 @@ namespace models {
         depth_coordinate_v2_vertical_conditioned_uav.Get(),
       };
       context->CSSetUnorderedAccessViews(0, 2, vertical_envelope_uavs, nullptr);
-      context->Dispatch(target_w, 1, 1);
+      dispatch_infer_postprocess(
+        target_w,
+        1u,
+        1u,
+        near_identical_gpu_infer_columns_byte_offset
+      );
       context->CSSetShaderResources(0, 1, null_srvs3);
       context->CSSetUnorderedAccessViews(0, 2, null_uavs2, nullptr);
 
@@ -5218,7 +5611,12 @@ namespace models {
         depth_coordinate_v2_final_uav.GetAddressOf(),
         nullptr
       );
-      context->Dispatch(target_h, 1, 1);
+      dispatch_infer_postprocess(
+        target_h,
+        1u,
+        1u,
+        near_identical_gpu_infer_rows_byte_offset
+      );
       context->CSSetShaderResources(0, 1, null_srvs3);
       context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
 
@@ -5647,8 +6045,8 @@ namespace models {
       bool subtitle_work_suppressed = false,
       bool subtitle_ocr_inference_enqueued = false,
       bool subtitle_ocr_redispatch_enqueued = false,
-      adaptive_motion_probe_result motion_probe = {},
-      adaptive_motion_observation_hold_result adaptive_motion_observation_hold = {}
+      bool gpu_undecided_transaction_enqueued = false,
+      bool gpu_undecided_completion = false
     ) {
       estimate_result r;
       r.depth = output_srv();
@@ -5692,11 +6090,12 @@ namespace models {
       r.completed_frame_valid = completed_frame_valid;
       r.completed_frame_id = completed_frame_id;
       r.inference_enqueued = inference_enqueued;
+      r.gpu_undecided_transaction_enqueued =
+        gpu_undecided_transaction_enqueued;
+      r.gpu_undecided_completion = gpu_undecided_completion;
       r.subtitle_ocr_inference_enqueued = subtitle_ocr_inference_enqueued;
       r.subtitle_ocr_redispatch_enqueued = subtitle_ocr_redispatch_enqueued;
-      r.current_frame_motion_probe = std::move(motion_probe);
-      r.adaptive_motion_observation_hold = adaptive_motion_observation_hold;
-      r.cuda_graph_active = depth_inference_graph.executable != nullptr &&
+      r.cuda_graph_active = depth_conditional_graph.ready() &&
                             !depth_inference_graph.policy.capture_failed;
       if (completed_frame_valid) {
         r.input_region = completed_input_region;
@@ -5769,6 +6168,9 @@ namespace models {
       if (!has_previous_frame) {
         return make_result();
       }
+      if (gpu_undecided_postprocess_pending()) {
+        snapshot_debug_inputs = false;
+      }
       if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
         BOOST_LOG(error) << "cuCtxSetCurrent failed while finishing pending depth.";
         mark_cuda_context_failure();
@@ -5783,7 +6185,7 @@ namespace models {
         return make_result();
       }
       if (diagnostics_enabled) {
-        perf_drain(perf_depth);
+        perf_drain(perf_depth_conditional);
         perf_drain(perf_ocr);
       }
       (void) color_space;  // the pending frame owns its transfer mode
@@ -5798,11 +6200,21 @@ namespace models {
       }
       auto *d3d_timer = diagnostics_enabled ? begin_d3d_perf(true, false) : nullptr;
       const bool input_domain_reset = prepare_pending_input_domain();
-      normalize_depth_output(
-        d3d_timer,
-        input_domain_reset,
-        snapshot_debug_inputs
-      );
+      bool postprocess_temporal_reset = input_domain_reset;
+      if (pending_force_temporal_reseed && !postprocess_temporal_reset) {
+        reset_temporal_state_for_input_domain();
+        postprocess_temporal_reset = true;
+      }
+      if (!normalize_depth_output(
+            d3d_timer,
+            postprocess_temporal_reset,
+            snapshot_debug_inputs
+          )) {
+        mark_d3d_post_end(d3d_timer);
+        mark_d3d_pre_start(d3d_timer);
+        end_d3d_perf(d3d_timer);
+        return make_result();
+      }
       mark_d3d_post_end(d3d_timer);
       bool raw_snapshot_valid = false;
       bool model_input_snapshot_valid = false;
@@ -5834,11 +6246,21 @@ namespace models {
       const auto completed_frame_id = pending_frame_id;
       const auto completed_input_region = pending_input_region;
       const auto completed_color_space = pending_color_space;
+      const bool completed_gpu_undecided = gpu_undecided_postprocess_pending();
       const bool completed_subtitle_work_suppressed =
+        completed_gpu_undecided ||
         pending_optional_work == depth_optional_work_mode_e::suppress_subtitle;
+      if (!completed_gpu_undecided) {
+        gpu_undecided_requires_force_infer_refresh = false;
+      }
       has_previous_frame = false;  // the output buffer has been consumed; never fold it twice
       clear_pending_inference_event_state();
       pending_optional_work = depth_optional_work_mode_e::ordinary;
+      pending_submission_class = pending_submission_class_e::force_infer;
+      pending_gpu_transaction_token = 0u;
+      pending_gpu_transaction_current_frame_id = 0u;
+      pending_gpu_transaction_baseline_frame_id = 0u;
+      pending_force_temporal_reseed = false;
       // normalize_depth_output() has submitted and unbound every D3D11 read of this exact source.
       // Drop our retained reference only after the ownership pass has consumed it.
       pending_source_srv.Reset();
@@ -5855,7 +6277,11 @@ namespace models {
         completed_input_region,
         completed_color_space,
         input_domain_reset,
-        completed_subtitle_work_suppressed
+        completed_subtitle_work_suppressed,
+        false,
+        false,
+        false,
+        completed_gpu_undecided
       );
     }
 
@@ -6068,6 +6494,11 @@ namespace models {
       if (tensor_previous_input_uav) {
         context->ClearUnorderedAccessViewFloat(tensor_previous_input_uav.Get(), zero4);
       }
+      if (near_identical_history_owner_uav) {
+        context->ClearUnorderedAccessViewUint(
+          near_identical_history_owner_uav.Get(), zero_uint4
+        );
+      }
       if (previous_appearance_ordinal_uav) {
         context->ClearUnorderedAccessViewFloat(previous_appearance_ordinal_uav.Get(), zero4);
       }
@@ -6119,7 +6550,6 @@ namespace models {
         }
       }
       has_last_postprocessed_frame_id = false;
-      ocr_input_baseline.reset();
     }
 
     bool prepare_pending_input_domain() {
@@ -6136,18 +6566,26 @@ namespace models {
     // Normalize the finished raw disparity in tensor_out_buf into depth_tex: the scale
     // passes (min/max reduction, permanent percentile histogram, EMA fold) followed by the
     // mapping/temporal-EMA pass. GPU-resident throughout, no CPU readback.
-    void normalize_depth_output(
+    bool normalize_depth_output(
       d3d_perf_slot *perf_slot,
       const bool input_domain_reset,
       const bool preserve_subtitle_base
     ) {
-      const std::uint64_t prior_postprocessed_frame_id =
-        has_last_postprocessed_frame_id ? last_postprocessed_frame_id : 0u;
+      if (!dispatch_near_identical_postprocess_args()) {
+        // A conditional completion without a valid args writer must not consume possibly stale
+        // tensor_out or mutate history. This is a mandatory active-path resource failure: retain
+        // prior GPU state but terminally fail flat instead of publishing a fake completion.
+        fail_gpu_conditional_bridge_once(
+          "GPU-undecided postprocess argument publication failed"
+        );
+        return false;
+      }
       // Ordinary OCR and depth may execute concurrently on isolated CUDA streams. Their strict
       // completion join makes both outputs safe to consume before any next-frame interop mapping
       // can reuse the fixed buffers. A damage-proven redispatch has no OCR CUDA work and updates
       // only the retained OCR8 frame identity below.
       const bool subtitle_work_suppressed =
+        gpu_undecided_postprocess_pending() ||
         pending_optional_work == depth_optional_work_mode_e::suppress_subtitle;
       // Native interactive move/resize keeps the depth/cut/camera pipeline live, but OCR evidence
       // would describe a rapidly moving, deliberately de-authorized window. Leave same-domain
@@ -6206,7 +6644,12 @@ namespace models {
           context->CSSetShaderResources(0, 2, reduction_srvs);
           ID3D11UnorderedAccessView *hist_uavs[2] = {hist_uav.Get(), minmax_raw_uav.Get()};
           context->CSSetUnorderedAccessViews(0, 2, hist_uavs, nullptr);
-          context->Dispatch(reduce_groups, 1, 1);
+          dispatch_infer_postprocess(
+            reduce_groups,
+            1u,
+            1u,
+            near_identical_gpu_infer_reduce_byte_offset
+          );
 
           ID3D11UnorderedAccessView *null_uavs_h[2] = {nullptr, nullptr};
           context->CSSetUnorderedAccessViews(0, 2, null_uavs_h, nullptr);
@@ -6223,7 +6666,9 @@ namespace models {
           cut_state_uav.Get(),
         };
         context->CSSetUnorderedAccessViews(0, 4, ema_uavs, nullptr);
-        context->Dispatch(1, 1, 1);
+        dispatch_infer_postprocess(
+          1u, 1u, 1u, near_identical_gpu_infer_one_byte_offset
+        );
 
         ID3D11UnorderedAccessView *null_uav2[4] = {nullptr, nullptr, nullptr, nullptr};
         context->CSSetUnorderedAccessViews(0, 4, null_uav2, nullptr);
@@ -6258,7 +6703,12 @@ namespace models {
       context->CSSetShaderResources(0, 4, bt_srvs);
       context->CSSetUnorderedAccessViews(0, 2, bt_uavs, nullptr);
 
-      context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
+      dispatch_infer_postprocess(
+        (target_w + 15) / 16,
+        (target_h + 15) / 16,
+        1u,
+        near_identical_gpu_infer_grid16_byte_offset
+      );
 
       const auto &tensor_content = pending_input_region.tensor_content;
       const bool has_synthetic_padding =
@@ -6269,7 +6719,12 @@ namespace models {
         // pad_main reads only an already-written admitted boundary texel and writes one excluded
         // destination, so no cross-thread or cross-group dependency exists inside this pass.
         context->CSSetShader(buffer_to_tex_pad_cs.Get(), nullptr, 0);
-        context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
+        dispatch_infer_postprocess(
+          (target_w + 15) / 16,
+          (target_h + 15) / 16,
+          1u,
+          near_identical_gpu_infer_grid16_byte_offset
+        );
       }
 
       ID3D11UnorderedAccessView *null_uav2[2] = {nullptr, nullptr};
@@ -6278,32 +6733,37 @@ namespace models {
       };
       context->CSSetUnorderedAccessViews(0, 2, null_uav2, nullptr);
       context->CSSetShaderResources(0, 4, null_srvs);
+      dispatch_near_identical_reuse_depth();
 
       // 3s. Analyze the freshly normalized private cut field: compact evidence + cut resolve.
       {
-        // Scene refractory time is measured in source-stream frames, not completed depth
-        // observations. Seed the otherwise GPU-written evidence buffer on the same immediate
-        // context; UpdateSubresource is ordered before the following dispatch and adds no sync.
-        std::uint64_t stream_frame_delta = 1u;
-        if (has_last_postprocessed_frame_id &&
-            pending_frame_id > last_postprocessed_frame_id) {
-          stream_frame_delta = pending_frame_id - last_postprocessed_frame_id;
+        // Known force-infer completions seed this scratch record from the CPU. For a branch-unknown
+        // completion, postprocess_args_main writes the same seed only for an authenticated infer
+        // receipt, so reuse cannot mutate even temporary scene-cut state.
+        if (!gpu_undecided_postprocess_pending()) {
+          std::uint64_t stream_frame_delta = 1u;
+          if (has_last_postprocessed_frame_id &&
+              pending_frame_id > last_postprocessed_frame_id) {
+            stream_frame_delta = pending_frame_id - last_postprocessed_frame_id;
+          }
+          std::array<std::uint32_t, 10> scene_cut_evidence_seed {};
+          scene_cut_evidence_seed[9] = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+            stream_frame_delta,
+            65535u
+          ));
+          context->UpdateSubresource(
+            scene_cut_evidence_buf.Get(),
+            0,
+            nullptr,
+            scene_cut_evidence_seed.data(),
+            0,
+            0
+          );
         }
-        std::array<std::uint32_t, 10> scene_cut_evidence_seed {};
-        scene_cut_evidence_seed[9] = static_cast<std::uint32_t>(std::min<std::uint64_t>(
-          stream_frame_delta,
-          65535u
-        ));
-        context->UpdateSubresource(
-          scene_cut_evidence_buf.Get(),
-          0,
-          nullptr,
-          scene_cut_evidence_seed.data(),
-          0,
-          0
-        );
-        last_postprocessed_frame_id = pending_frame_id;
-        has_last_postprocessed_frame_id = true;
+        if (!gpu_undecided_postprocess_pending()) {
+          last_postprocessed_frame_id = pending_frame_id;
+          has_last_postprocessed_frame_id = true;
+        }
 
         context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
         ID3D11ShaderResourceView *analysis_srvs[9] = {
@@ -6325,7 +6785,12 @@ namespace models {
           scene_cut_evidence_uav.GetAddressOf(),
           nullptr
         );
-        context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
+        dispatch_infer_postprocess(
+          (target_w + 15) / 16,
+          (target_h + 15) / 16,
+          1u,
+          near_identical_gpu_infer_grid16_byte_offset
+        );
 
         ID3D11UnorderedAccessView *null_uavs_h2[2] = {nullptr, nullptr};
         context->CSSetUnorderedAccessViews(0, 2, null_uavs_h2, nullptr);
@@ -6348,7 +6813,9 @@ namespace models {
           scene_cut_evidence_uav.Get()
         };
         context->CSSetUnorderedAccessViews(0, 2, cut_uavs, nullptr);
-        context->Dispatch(1, 1, 1);
+        dispatch_infer_postprocess(
+          1u, 1u, 1u, near_identical_gpu_infer_one_byte_offset
+        );
         context->CSSetUnorderedAccessViews(0, 2, null_uavs_h2, nullptr);
 
         // tensor_in_buf, appearance_ordinal_buf and depth_tex still own the matched inputs/result
@@ -6374,7 +6841,12 @@ namespace models {
         };
         context->CSSetShaderResources(0, 6, history_srvs);
         context->CSSetUnorderedAccessViews(0, 4, history_uavs, nullptr);
-        context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
+        dispatch_infer_postprocess(
+          (target_w + 15) / 16,
+          (target_h + 15) / 16,
+          1u,
+          near_identical_gpu_infer_grid16_byte_offset
+        );
         ID3D11ShaderResourceView *null_history_srvs[6] = {
           nullptr,
           nullptr,
@@ -6389,6 +6861,11 @@ namespace models {
         };
         context->CSSetShaderResources(0, 6, null_history_srvs);
         context->CSSetUnorderedAccessViews(0, 4, null_history_uavs, nullptr);
+        publish_near_identical_history_owner(
+          pending_frame_id,
+          pending_input_region,
+          pending_color_space
+        );
       }
 
       // Production V2 runs after the shared scene-cut bridge and consumes its confirmed-cut
@@ -6413,43 +6890,7 @@ namespace models {
         mark_d3d_parallax_end(perf_slot);
       }
 
-      // This private copy is not OCR authority by itself. The later CFM5 probe also validates the
-      // retained OCR8 header and exact frame owner, so detector overflow/nonfinite abstention
-      // cannot authenticate these bytes. Establish the CPU-side owner only after this exact OCR
-      // member and V2 postprocess both succeeded. A proven OCR8 redispatch advances identity
-      // without copying because its crop equality already proves the retained input bits.
-      if (
-        !base_ready || subtitle_work_suppressed || !ocr_record_submitted ||
-        !adaptive_motion_probe_available ||
-        !adaptive_ocr_input_compare_available || !ocr_input_buf ||
-        !ocr_previous_input_buf
-      ) {
-        ocr_input_baseline.reset();
-      } else if (pending_optional_work == depth_optional_work_mode_e::ordinary) {
-        context->CopyResource(ocr_previous_input_buf.Get(), ocr_input_buf.Get());
-        ocr_input_baseline.record(
-          pending_frame_id,
-          pending_input_region,
-          pending_color_space,
-          target_w,
-          target_h
-        );
-      } else if (
-        pending_optional_work == depth_optional_work_mode_e::redispatch_subtitle
-      ) {
-        if (!ocr_input_baseline.roll_forward(
-              prior_postprocessed_frame_id,
-              pending_frame_id,
-              pending_input_region,
-              pending_color_space,
-              target_w,
-              target_h
-            )) {
-          ocr_input_baseline.reset();
-        }
-      } else {
-        ocr_input_baseline.reset();
-      }
+      return true;
     }
 
     // Diagnostics-only accounting for achieved inference throughput and busy drops. Callers
@@ -6545,7 +6986,7 @@ namespace models {
       bool snapshot_raw_model_depth,
       depth_input_region_t input_region,
       depth_optional_work_mode_e optional_work,
-      const adaptive_motion_probe_request &motion_probe_request
+      const gpu_adaptive_reuse_request &adaptive_reuse_request
     ) {
       if (!valid || terminal_failure || live_v2_producer_unavailable() || !input_srv) {
         return {};
@@ -6559,10 +7000,7 @@ namespace models {
       input_color_space completed_color_space = input_color_space::srgb;
       bool completed_input_domain_reset = false;
       bool completed_subtitle_work_suppressed = false;
-      adaptive_motion_probe_result motion_probe_result;
-      if (motion_probe_request.enabled) {
-        motion_probe_result.status = adaptive_motion_probe_status_e::unavailable;
-      }
+      bool completed_gpu_undecided = false;
       // An explicitly armed Dump 3D frame always runs ordinary exact-frame OCR/locator work.
       auto accepted_optional_work = snapshot_raw_model_depth ?
                                       depth_optional_work_mode_e::ordinary :
@@ -6593,7 +7031,7 @@ namespace models {
 
       // Resolve completed inference-timing events only for diagnostic runs.
       if (diagnostics_enabled) {
-        perf_drain(perf_depth);
+        perf_drain(perf_depth_conditional);
         perf_drain(perf_ocr);
       }
 
@@ -6660,17 +7098,33 @@ namespace models {
         // frame. Never let optional textures/state from that abandoned shape survive into the
         // retry (whose source aspect may already have changed).
         release_parallax_v2_resources();
+        if (!unregister_near_identical_decision_interop(cuda)) {
+          mark_terminal_failure(true);
+          return {};
+        }
+        near_identical_tile_buf.Reset();
+        near_identical_tile_srv.Reset();
+        near_identical_tile_uav.Reset();
+        near_identical_gpu_decision_buf.Reset();
+        near_identical_gpu_decision_uav.Reset();
+        near_identical_gpu_dispatch_buf.Reset();
+        near_identical_history_owner_buf.Reset();
+        near_identical_history_owner_srv.Reset();
+        near_identical_history_owner_uav.Reset();
 
         BOOST_LOG(info) << "Depth Estimator dynamic resolution set to " << target_w << "x" << target_h;
 
-        if (cuda_in_res) {
-          cuda.cuGraphicsUnregisterResource(cuda_in_res);
+        const bool previous_input_unregistered =
+          unregister_cuda_graphics_resource(cuda, cuda_in_res);
+        const bool previous_output_unregistered =
+          unregister_cuda_graphics_resource(cuda, cuda_out_res);
+        if (!previous_input_unregistered || !previous_output_unregistered) {
+          // A retained registration still owns the old D3 backing. Shape setup must not release
+          // or overwrite it; quarantine this context and let terminal teardown retry safely.
+          execution_context_poisoned = true;
+          mark_terminal_failure(true);
+          return {};
         }
-        if (cuda_out_res) {
-          cuda.cuGraphicsUnregisterResource(cuda_out_res);
-        }
-        cuda_in_res = nullptr;
-        cuda_out_res = nullptr;
 
         D3D11_BUFFER_DESC buf_desc = {};
         buf_desc.Usage = D3D11_USAGE_DEFAULT;
@@ -6836,16 +7290,15 @@ namespace models {
         auto res2 = cuda.cuGraphicsD3D11RegisterResource(&cuda_out_res, tensor_out_buf.Get(), 0);
         if (res1 != 0 || res2 != 0) {
           BOOST_LOG(error) << "cuGraphicsD3D11RegisterResource failed: " << res1 << ", " << res2;
-          if (cuda_in_res) {
-            cuda.cuGraphicsUnregisterResource(cuda_in_res);
+          const bool input_cleanup_ok =
+            unregister_cuda_graphics_resource(cuda, cuda_in_res);
+          const bool output_cleanup_ok =
+            unregister_cuda_graphics_resource(cuda, cuda_out_res);
+          if (!input_cleanup_ok || !output_cleanup_ok) {
+            execution_context_poisoned = true;
           }
-          if (cuda_out_res) {
-            cuda.cuGraphicsUnregisterResource(cuda_out_res);
-          }
-          cuda_in_res = nullptr;
-          cuda_out_res = nullptr;
           target_w = target_h = 0;
-          mark_terminal_failure();
+          mark_terminal_failure(!input_cleanup_ok || !output_cleanup_ok);
           return {};
         }
       }
@@ -6872,14 +7325,26 @@ namespace models {
       // (fully unmapped from CUDA), so consuming it here never blocks the encode thread. The
       // caller uses completed_frame_id to select the color slot that produced this exact result.
       if (has_previous_frame) {
+        completed_gpu_undecided = gpu_undecided_postprocess_pending();
         completed_subtitle_work_suppressed =
+          completed_gpu_undecided ||
           pending_optional_work == depth_optional_work_mode_e::suppress_subtitle;
         completed_input_domain_reset = prepare_pending_input_domain();
-        normalize_depth_output(
-          d3d_timer,
-          completed_input_domain_reset,
-          snapshot_raw_model_depth
-        );
+        bool completed_postprocess_temporal_reset = completed_input_domain_reset;
+        if (pending_force_temporal_reseed && !completed_postprocess_temporal_reset) {
+          reset_temporal_state_for_input_domain();
+          completed_postprocess_temporal_reset = true;
+        }
+        if (!normalize_depth_output(
+              d3d_timer,
+              completed_postprocess_temporal_reset,
+              snapshot_raw_model_depth
+            )) {
+          mark_d3d_post_end(d3d_timer);
+          mark_d3d_pre_start(d3d_timer);
+          end_d3d_perf(d3d_timer);
+          return {};
+        }
         // The ownership dispatch has now consumed and unbound the completed frame's source SRV.
         // It is safe to release before preprocessing the newly accepted source frame.
         pending_source_srv.Reset();
@@ -6894,7 +7359,7 @@ namespace models {
         // must not contaminate live
         // depth_postprocess_gpu samples.
         mark_d3d_post_end(d3d_timer);
-        if (snapshot_raw_model_depth) {
+        if (snapshot_raw_model_depth && !completed_gpu_undecided) {
           // The diagnostic map belongs to the completed raw tensor, including its exact content
           // rectangle. The current-frame preprocess has not run yet, so the exclusion texture is
           // still the same completed authority as well.
@@ -6934,6 +7399,14 @@ namespace models {
         has_previous_frame = false;
         clear_pending_inference_event_state();
         pending_optional_work = depth_optional_work_mode_e::ordinary;
+        pending_submission_class = pending_submission_class_e::force_infer;
+        pending_gpu_transaction_token = 0u;
+        pending_gpu_transaction_current_frame_id = 0u;
+        pending_gpu_transaction_baseline_frame_id = 0u;
+        pending_force_temporal_reseed = false;
+        if (!completed_gpu_undecided) {
+          gpu_undecided_requires_force_infer_refresh = false;
+        }
         if (diagnostics_enabled) {
           throughput_stats_completions++;
         }
@@ -6957,9 +7430,16 @@ namespace models {
           completed_input_region,
           completed_color_space,
           completed_input_domain_reset,
-          completed_subtitle_work_suppressed
+          completed_subtitle_work_suppressed,
+          false,
+          false,
+          false,
+          completed_gpu_undecided
         );
       }
+
+      const bool force_temporal_reseed_for_force_infer_submission =
+        gpu_undecided_requires_force_infer_refresh;
 
       // The caller proves DDup crop equality, while the estimator owns the mutable OCR8 buffer.
       // Require both halves before suppressing detector work. A lost/overwritten lineage fails
@@ -6975,6 +7455,50 @@ namespace models {
         if (diagnostics_enabled) {
           throughput_stats_ocr_redispatch_fallbacks++;
         }
+      }
+
+      // Every DAV2 transaction, including a CPU-known force-infer, maps the same authenticated
+      // request/receipt buffer and launches the conditional wrapper. These are mandatory pipeline
+      // resources: losing one is terminal rather than a reason to bypass the wrapper.
+      if (!ensure_near_identical_detector_resources() ||
+          !ensure_near_identical_decision_interop(cuda)) {
+        if (!terminal_failure) {
+          fail_gpu_conditional_bridge_once(
+            "mandatory GPU transaction resources or interop are unavailable"
+          );
+        }
+        return {};
+      }
+
+      // The CPU may only classify a frame as GPU-undecided from host-owned facts. The wrapper is
+      // prepared after the exact D3D interop pointers are mapped; no pre-existing source graph is
+      // an admission prerequisite and no admitted class may bypass the wrapper.
+      const bool gpu_undecided_host_candidate =
+        gpu_conditional_bridge_available && cuda_graph_enabled &&
+        cuda.has_conditional_graph_support() &&
+        !depth_inference_graph.policy.capture_failed &&
+        adaptive_reuse_request.authorize_gpu_undecided_reuse &&
+        adaptive_reuse_request.gpu_reuse_decision_token != 0u &&
+        adaptive_reuse_request.baseline_frame_id != 0u &&
+        has_last_postprocessed_frame_id &&
+        adaptive_reuse_request.baseline_frame_id == last_postprocessed_frame_id &&
+        frame_id > adaptive_reuse_request.baseline_frame_id &&
+        !gpu_undecided_requires_force_infer_refresh &&
+        accepted_optional_work == depth_optional_work_mode_e::ordinary &&
+        !snapshot_raw_model_depth && current_shape_matches &&
+        processed_input_domain.matches_analysis_domain(input_region, color_space) &&
+        input_region.tensor_content.valid({target_w, target_h});
+      auto accepted_submission_class =
+        gpu_undecided_host_candidate ?
+          pending_submission_class_e::gpu_undecided :
+          pending_submission_class_e::force_infer;
+      const std::uint64_t accepted_transaction_token =
+        gpu_undecided_host_candidate ?
+          adaptive_reuse_request.gpu_reuse_decision_token :
+          next_force_infer_transaction_token();
+      if (accepted_submission_class == pending_submission_class_e::gpu_undecided) {
+        // Active undecided transactions never map/enqueue OCR and never advance OCR/SLR.
+        accepted_optional_work = depth_optional_work_mode_e::suppress_subtitle;
       }
 
       mark_d3d_pre_start(d3d_timer);
@@ -7028,6 +7552,30 @@ namespace models {
       context->CSSetUnorderedAccessViews(0, 3, null_uavs, nullptr);
       context->CSSetShaderResources(0, 1, &null_srv);
 
+      // GPU-undecided publishes its dense proposal. CPU-known force-infer publishes a complete
+      // authenticated
+      // infer PROP/RQST instead. Both records are consumed by the same conditional wrapper and
+      // replaced by a CBRG receipt; only undecided postprocess remains receipt-gated/branch-opaque.
+      const bool transaction_published =
+        accepted_submission_class == pending_submission_class_e::gpu_undecided ?
+          dispatch_near_identical_detector(
+            adaptive_reuse_request,
+            frame_id,
+            input_region,
+            color_space
+          ) :
+          publish_force_infer_transaction(accepted_transaction_token);
+      if (!transaction_published) {
+        fail_gpu_conditional_bridge_once(
+          accepted_submission_class == pending_submission_class_e::gpu_undecided ?
+            "GPU near-identical proposal dispatch failed" :
+            "force-infer transaction publication failed"
+        );
+        mark_d3d_pre_start(d3d_timer);
+        end_d3d_perf(d3d_timer);
+        return {};
+      }
+
       // The detector sees only the bottom 6:1 source crop. Resize and ImageNet/BGR normalization
       // happen directly into the registered FP32 TensorRT input; no CPU pixels or readback exist.
       const auto current_ocr_roi = fit_subtitle_analysis_geometry(
@@ -7080,17 +7628,6 @@ namespace models {
         ocr_frame_eligible = false;
       }
 
-      // Compare both the just-preprocessed DAV2 input and, when it exists, the exact current
-      // 960x160x3 OCR input against their estimator-owned authenticated baselines. This remains
-      // before the D3D-to-CUDA ordering map/event, so one optional readback owns one exact frame.
-      // A DDup OCR-clean candidate does not need OCR preprocessing or comparison resources.
-      (void) dispatch_adaptive_motion_probe(
-        motion_probe_request,
-        frame_id,
-        input_region,
-        color_space,
-        ocr_frame_eligible
-      );
       end_d3d_perf(d3d_timer);
       // No explicit Flush: cuGraphicsMapResources() below already guarantees the
       // preceding D3D11 compute work completes before the CUDA stream reads the buffer.
@@ -7101,8 +7638,15 @@ namespace models {
       // executes on its own nonblocking stream. The exact-frame completion gate joins both streams
       // before postprocess. Only OCR setup failures proved to occur before enqueue may publish an
       // abstention without poisoning the completed depth observation.
-      CUgraphicsResource depth_resources[2] = {cuda_in_res, cuda_out_res};
-      auto map_res = cuda.cuGraphicsMapResources(2, depth_resources, cu_stream);
+      std::array<CUgraphicsResource, 3> depth_resources {
+        cuda_in_res,
+        cuda_out_res,
+        cuda_near_identical_decision_res,
+      };
+      constexpr unsigned int depth_resource_count = 3u;
+      auto map_res = cuda.cuGraphicsMapResources(
+        depth_resource_count, depth_resources.data(), cu_stream
+      );
       if (map_res != 0) {
         BOOST_LOG(error) << "cuGraphicsMapResources failed: " << map_res;
         mark_terminal_failure();
@@ -7116,23 +7660,13 @@ namespace models {
           completed_input_region,
           completed_color_space,
           completed_input_domain_reset,
-          completed_subtitle_work_suppressed
+          completed_subtitle_work_suppressed,
+          false,
+          false,
+          false,
+          completed_gpu_undecided
         );
       }
-      if (adaptive_motion_probe_copy_scheduled) {
-        const CUresult probe_record = cuda.cuEventRecord(
-          adaptive_motion_probe_ready_event,
-          cu_stream
-        );
-        adaptive_motion_probe_event_recorded = probe_record == CUDA_SUCCESS;
-        if (!adaptive_motion_probe_event_recorded) {
-          handle_adaptive_motion_probe_cuda_failure(
-            probe_record,
-            "ordering-event record"
-          );
-        }
-      }
-
       CUgraphicsResource ocr_resources[2] = {cuda_ocr_in_res, cuda_ocr_out_res};
       bool ocr_mapped = false;
       if (terminal_failure) {
@@ -7173,6 +7707,14 @@ namespace models {
         nullptr,
         cuda_out_res
       );
+      CUdeviceptr d_near_identical_decision = 0u;
+      std::size_t near_identical_decision_mapped_bytes = 0u;
+      const CUresult near_identical_decision_ptr_res =
+        cuda.cuGraphicsResourceGetMappedPointer(
+          &d_near_identical_decision,
+          &near_identical_decision_mapped_bytes,
+          cuda_near_identical_decision_res
+        );
 
       CUdeviceptr d_ocr_in = 0;
       CUdeviceptr d_ocr_out = 0;
@@ -7196,12 +7738,42 @@ namespace models {
       clear_pending_inference_event_state();
       bool enqueued = false;
       bool ocr_enqueued = false;
-      adaptive_motion_observation_hold_result adaptive_motion_observation_hold;
       if (in_ptr_res != CUDA_SUCCESS || out_ptr_res != CUDA_SUCCESS || !d_in || !d_out) {
         BOOST_LOG(error) << "Failed to get mapped pointer for TensorRT: "
                          << in_ptr_res << ", " << out_ptr_res;
         mark_terminal_failure();
       } else {
+        const bool mapped_decision_valid =
+          near_identical_decision_ptr_res == CUDA_SUCCESS &&
+          d_near_identical_decision != 0u &&
+          near_identical_decision_mapped_bytes >=
+            near_identical_gpu_decision_byte_count &&
+          d_near_identical_decision <=
+            std::numeric_limits<CUdeviceptr>::max() -
+              near_identical_gpu_request_record_byte_offset &&
+          ((d_near_identical_decision +
+            near_identical_gpu_decision_record_byte_offset) & 15u) == 0u &&
+          ((d_near_identical_decision +
+            near_identical_gpu_request_record_byte_offset) & 15u) == 0u;
+        if (!mapped_decision_valid) {
+          fail_gpu_conditional_bridge_once(
+            "mapped decision-buffer contract is invalid",
+            near_identical_decision_ptr_res
+          );
+        }
+
+        // Graph signatures include the volatile D3D interop addresses. Quiescent admission above
+        // lets a changed signature destroy the old wrapper/source graph before TensorRT bindings
+        // move. The same accepted transaction then performs its private bootstrap and wrapper
+        // launch; it is never downgraded to a raw enqueue.
+        if (!terminal_failure &&
+            !select_inference_graph_signature(
+              cuda,
+              depth_inference_graph,
+              {d_in, d_out, target_w, target_h}
+            )) {
+          mark_terminal_failure(true);
+        }
         bool bindings_ok = !terminal_failure;
         if (trt_bound_width != target_w || trt_bound_height != target_h) {
           nvinfer1::Dims in_dims = make_input_dims(target_h, target_w);
@@ -7263,7 +7835,7 @@ namespace models {
         if (ocr_bindings_ok) {
           // TensorRT graph nodes retain the execution context's bound addresses. Tear down a
           // graph for the previous D3D mapping before mutating those bindings.
-          select_inference_graph_signature(
+          ocr_bindings_ok = select_inference_graph_signature(
             cuda,
             ocr_inference_graph,
             {d_ocr_in, d_ocr_out, ocr_engine_width, ocr_engine_height}
@@ -7318,66 +7890,39 @@ namespace models {
           }
         }
 
-        // OCR mapping and binding work above consumes natural CPU slack while the ordering event
-        // catches the tiny D3D readback up. The bounded query never waits on DAV2: submission is
-        // still below this point, so an authorized model-equivalent hold skips both observations.
-        motion_probe_result = collect_adaptive_motion_probe(
-          cuda,
-          motion_probe_request,
-          frame_id
-        );
-
-        const bool adaptive_ocr_authority_still_owned =
-          motion_probe_request.ocr_damage_unchanged ||
-          (
-            ocr_available && adaptive_ocr_input_compare_available &&
-            ocr_input_baseline.matches(
-              motion_probe_request.baseline_frame_id,
-              input_region,
-              color_space,
-              target_w,
-              target_h
-            )
-          );
-        const bool adaptive_motion_observation_held =
-          bindings_ok && !terminal_failure &&
-          select_adaptive_motion_hold(
-            motion_probe_request.authorize_model_equivalent_observation_hold &&
-              adaptive_ocr_authority_still_owned,
-            motion_probe_request.ocr_damage_unchanged,
-            ocr_bindings_ok,
-            processed_input_domain.matches_analysis_domain(
-              input_region,
-              color_space
-            ),
-            completed_frame_valid,
-            snapshot_raw_model_depth,
-            accepted_optional_work,
-            motion_probe_result
-          ) == adaptive_motion_hold_decision_e::hold;
-        if (adaptive_motion_observation_held) {
-          adaptive_motion_observation_hold = {
-            .held = true,
-            .current_frame_id = motion_probe_result.sample.current_frame_id,
-            .baseline_frame_id = motion_probe_result.sample.baseline_frame_id,
-            .ocr_proof = motion_probe_request.ocr_damage_unchanged ?
-                           adaptive_motion_ocr_hold_proof_e::ddup_crop_unchanged :
-                           adaptive_motion_ocr_hold_proof_e::exact_ocr_input,
-          };
-        }
-
-        if (bindings_ok && !terminal_failure && !adaptive_motion_observation_held) {
+        if (bindings_ok && !terminal_failure) {
           // TensorRT host-side submission remains serialized across estimator instances. The lock
-          // is released after each enqueue; independent CUDA streams may then overlap execution.
+          // is released after the wrapper launch; independent CUDA streams may then overlap.
           {
             std::lock_guard<std::mutex> lock(g_trt_mutex);
-            const int depth_perf_slot = perf_begin(perf_depth, cu_stream);
-            enqueued = enqueue_inference(
-              d_in,
-              d_out,
-              cuda
-            );
-            perf_end(perf_depth, depth_perf_slot, cu_stream);
+            bool wrapper_ready = prepare_depth_inference_graph(cuda);
+            if (wrapper_ready) {
+              wrapper_ready = ensure_depth_conditional_graph(
+                cuda,
+                d_near_identical_decision +
+                  near_identical_gpu_decision_record_byte_offset,
+                d_near_identical_decision +
+                  near_identical_gpu_request_record_byte_offset
+              );
+            }
+            const int depth_perf_slot = wrapper_ready ?
+                                          perf_begin(perf_depth_conditional, cu_stream) :
+                                          -1;
+            if (wrapper_ready) {
+              const CUresult launched = cuda.cuGraphLaunch(
+                depth_conditional_graph.get(), cu_stream
+              );
+              enqueued = launched == CUDA_SUCCESS;
+              if (!enqueued) {
+                fail_gpu_conditional_bridge_once(
+                  "conditional graph launch failed",
+                  launched,
+                  true,
+                  true
+                );
+              }
+            }
+            perf_end(perf_depth_conditional, depth_perf_slot, cu_stream);
             if (
               enqueued && inference_event_poll_available &&
               !record_inference_done_event(
@@ -7395,8 +7940,8 @@ namespace models {
           if (!enqueued && !terminal_failure) {
             mark_terminal_failure(true);
             if (!stream_error_logged) {
-              BOOST_LOG(error) << "TensorRT enqueueV3 failed; the execution context is "
-                                   "quarantined and this estimator cannot continue.";
+              BOOST_LOG(error) << "DAV2 conditional-wrapper submission failed; the execution "
+                                   "context is quarantined and this estimator cannot continue.";
               stream_error_logged = true;
             }
           }
@@ -7446,26 +7991,25 @@ namespace models {
           ocr_execution_stream()
         );
       }
-      auto unmap_res = cuda.cuGraphicsUnmapResources(2, depth_resources, cu_stream);
+      auto unmap_res = cuda.cuGraphicsUnmapResources(
+        depth_resource_count, depth_resources.data(), cu_stream
+      );
       if (unmap_res != CUDA_SUCCESS) {
         BOOST_LOG(error) << "cuGraphicsUnmapResources failed: " << unmap_res;
         mark_shared_execution_failure(ocr_enqueued);
         enqueued = false;
-        adaptive_motion_observation_hold = {};
       }
       if (ocr_unmap_res != CUDA_SUCCESS) {
         BOOST_LOG(error) << "PP-OCRv6 tiny interop unmap failed: " << ocr_unmap_res;
         mark_shared_execution_failure(ocr_enqueued);
         enqueued = false;
         ocr_enqueued = false;
-        adaptive_motion_observation_hold = {};
       }
 
       has_previous_frame = enqueued;
       pending_ocr_submitted = enqueued && ocr_enqueued;
       // The optional OCR stream owns its fixed interop input until the queued unmap tail is
-      // observed complete. This also covers an OCR-dirty exact-input hold: it mapped and compared
-      // the current input but intentionally submitted no TensorRT work.
+      // observed complete.
       ocr_stream_reuse_pending =
         !terminal_failure && ocr_mapped && ocr_unmap_res == CUDA_SUCCESS;
       if (enqueued) {
@@ -7477,6 +8021,22 @@ namespace models {
         pending_frame_id = frame_id;
         pending_input_region = input_region;
         pending_optional_work = accepted_optional_work;
+        pending_submission_class = accepted_submission_class;
+        pending_gpu_transaction_token =
+          accepted_submission_class == pending_submission_class_e::gpu_undecided ?
+            accepted_transaction_token : 0u;
+        pending_gpu_transaction_current_frame_id =
+          accepted_submission_class == pending_submission_class_e::gpu_undecided ?
+            frame_id : 0u;
+        pending_gpu_transaction_baseline_frame_id =
+          accepted_submission_class == pending_submission_class_e::gpu_undecided ?
+            adaptive_reuse_request.baseline_frame_id : 0u;
+        pending_force_temporal_reseed =
+          accepted_submission_class == pending_submission_class_e::force_infer &&
+          force_temporal_reseed_for_force_infer_submission;
+        if (accepted_submission_class == pending_submission_class_e::gpu_undecided) {
+          gpu_undecided_requires_force_infer_refresh = true;
+        }
         if (diagnostics_enabled) {
           throughput_stats_enqueues++;
           if (accepted_optional_work == depth_optional_work_mode_e::suppress_subtitle) {
@@ -7498,7 +8058,7 @@ namespace models {
       return make_result(
         completed_frame_valid,
         completed_frame_id,
-        enqueued,
+        enqueued && accepted_submission_class == pending_submission_class_e::force_infer,
         raw_snapshot_valid,
         model_input_snapshot_valid,
         coordinate_snapshot_valid,
@@ -7509,8 +8069,9 @@ namespace models {
         enqueued && ocr_enqueued,
         enqueued &&
           accepted_optional_work == depth_optional_work_mode_e::redispatch_subtitle,
-        std::move(motion_probe_result),
-        adaptive_motion_observation_hold
+        enqueued &&
+          accepted_submission_class == pending_submission_class_e::gpu_undecided,
+        completed_gpu_undecided
       );
     }
   };
@@ -7520,16 +8081,14 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context,
     const std::filesystem::path &assets_dir,
     const config::video_t::sbs_t &cfg,
-    const config::depth_model_info &model,
-    const bool enable_adaptive_motion_probe
+    const config::depth_model_info &model
   ):
       pimpl(std::make_unique<impl>(
         device,
         context,
         assets_dir,
         cfg,
-        model,
-        enable_adaptive_motion_probe
+        model
       )) {}
 
   video_depth_estimator::~video_depth_estimator() = default;
@@ -7554,7 +8113,7 @@ namespace models {
     bool snapshot_debug_inputs,
     depth_input_region_t input_region,
     depth_optional_work_mode_e optional_work,
-    adaptive_motion_probe_request motion_probe
+    gpu_adaptive_reuse_request adaptive_reuse
   ) {
     return pimpl->estimate(
       input_srv,
@@ -7563,7 +8122,7 @@ namespace models {
       snapshot_debug_inputs,
       input_region,
       optional_work,
-      motion_probe
+      adaptive_reuse
     );
   }
 

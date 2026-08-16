@@ -127,16 +127,8 @@ namespace platf::dxgi {
     inline constexpr auto host_sbs_low_motion_reuse_max_age =
       std::chrono::milliseconds {50};
     inline constexpr unsigned host_sbs_low_motion_reuse_max_skips = 1u;
-    inline constexpr auto host_sbs_adaptive_motion_signal_max_age =
-      std::chrono::milliseconds {100};
     inline constexpr auto host_sbs_adaptive_motion_hold_max_age =
       std::chrono::milliseconds {50};
-    inline constexpr unsigned host_sbs_adaptive_motion_quiet_samples = 2u;
-    inline constexpr std::uint32_t host_sbs_adaptive_motion_min_scene_age = 8u;
-    inline constexpr float host_sbs_adaptive_motion_raw_rgb_max = 0.010f;
-    inline constexpr float host_sbs_adaptive_motion_structural_max = 0.005f;
-    inline constexpr float host_sbs_adaptive_motion_depth_change_max = 0.10f;
-    inline constexpr std::size_t host_sbs_adaptive_motion_audit_capacity = 16u;
     // Same-frame completion polling is allowed only inside encode-loop cadence slack. The
     // downstream reserve covers completed-depth postprocess, SBS warp/output, and NVENC submit;
     // late/high-rate frames therefore remain on the ordinary nonblocking path.
@@ -147,12 +139,6 @@ namespace platf::dxgi {
     inline constexpr auto host_sbs_same_frame_poll_min_budget =
       std::chrono::microseconds {250};
     inline constexpr std::uint32_t host_sbs_same_frame_poll_max_queries = 4096u;
-    // The optional current-frame probe may spend only a small slice of the same encode cadence
-    // slack. A candidate without usable slack still receives one immediate nonblocking round.
-    // After CUDA becomes ready, the same round fuse bounds nonblocking staging-map retries.
-    inline constexpr auto host_sbs_current_frame_probe_max_wait =
-      std::chrono::microseconds {500};
-    inline constexpr std::uint32_t host_sbs_current_frame_probe_max_poll_rounds = 16u;
     // 1 / 400 = 0.25%. Keep this integer-ratio contract exact and overflow-free.
     inline constexpr std::uint64_t host_sbs_low_motion_damage_ratio_denominator = 400u;
 
@@ -188,13 +174,6 @@ namespace platf::dxgi {
       return host_sbs_same_frame_poll_hit_bucket_e::over_3_ms;
     }
 
-    struct host_sbs_current_frame_probe_plan_t {
-      std::chrono::steady_clock::time_point cadence_deadline {};
-      std::chrono::steady_clock::duration max_wait {};
-      std::uint32_t max_poll_rounds = 1u;
-      bool enabled = false;
-    };
-
     enum class host_sbs_same_frame_completion_e : std::uint8_t {
       keep_pending,
       adopt_exact,
@@ -217,18 +196,18 @@ namespace platf::dxgi {
                host_sbs_same_frame_completion_e::discard_ready;
     }
 
-    /** Bound a newly submitted exact-frame completion query by the encode cadence scheduler.
+    /** Bound a newly submitted matched-frame transaction query by the encode cadence scheduler.
      * Capture/content timestamps are deliberately absent: they identify pixels but do not own the
      * encode deadline. An unavailable, late, or too-small budget fails open to nonblocking output.
      */
     [[nodiscard]] constexpr host_sbs_same_frame_poll_plan_t
     host_sbs_same_frame_poll_plan(
-      const bool inference_enqueued,
+      const bool transaction_enqueued,
       const bool snapshot_debug_inputs,
       const std::optional<std::chrono::steady_clock::time_point> next_encode_target,
       const std::chrono::steady_clock::time_point now
     ) noexcept {
-      if (!inference_enqueued || snapshot_debug_inputs || !next_encode_target) {
+      if (!transaction_enqueued || snapshot_debug_inputs || !next_encode_target) {
         return {};
       }
       const auto cadence_deadline =
@@ -246,53 +225,18 @@ namespace platf::dxgi {
       };
     }
 
-    /** Bound optional adaptive probe evidence by the encode cadence without suppressing its immediate
-     * query. The caller owns candidate authentication; this helper owns only timing.
-     */
-    [[nodiscard]] constexpr host_sbs_current_frame_probe_plan_t
-    host_sbs_current_frame_probe_plan(
-      const bool authenticated_hold_candidate,
-      const std::optional<std::chrono::steady_clock::time_point> next_encode_target,
-      const std::chrono::steady_clock::time_point now
-    ) noexcept {
-      if (!authenticated_hold_candidate) {
-        return {};
-      }
-      host_sbs_current_frame_probe_plan_t plan;
-      plan.enabled = true;
-      if (!next_encode_target) {
-        return plan;
-      }
-      const auto cadence_deadline =
-        *next_encode_target - host_sbs_same_frame_poll_downstream_reserve;
-      if (cadence_deadline <= now) {
-        return plan;
-      }
-      // Preserve the scheduler-owned absolute deadline, but do not start spending the probe's
-      // bounded wait before estimate_depth() has dispatched preprocessing and reached collection.
-      plan.cadence_deadline = cadence_deadline;
-      plan.max_wait = host_sbs_current_frame_probe_max_wait;
-      plan.max_poll_rounds = host_sbs_current_frame_probe_max_poll_rounds;
-      return plan;
-    }
-
-    [[nodiscard]] constexpr bool host_sbs_current_frame_probe_identity_matches(
-      const std::uint64_t expected_current_frame_id,
-      const std::uint64_t expected_baseline_frame_id,
-      const std::uint64_t sampled_current_frame_id,
-      const std::uint64_t sampled_baseline_frame_id
-    ) noexcept {
-      return expected_current_frame_id != 0u && expected_baseline_frame_id != 0u &&
-             sampled_current_frame_id == expected_current_frame_id &&
-             sampled_baseline_frame_id == expected_baseline_frame_id;
-    }
-
     enum class host_sbs_depth_reuse_kind_e : std::uint8_t {
       none,
       exact_content,
       exact_roi_damage,
       bounded_tiny_motion,
-      bounded_model_equivalent,
+    };
+
+    /** Approximate providers share one anti-chaining latch without entering cache authority. */
+    enum class host_sbs_approximate_reuse_provider_e : std::uint8_t {
+      none,
+      low_motion,
+      gpu_undecided,
     };
 
     enum class host_sbs_depth_reuse_exactness_e : std::uint8_t {
@@ -304,7 +248,81 @@ namespace platf::dxgi {
       none,
       bounded_content,
       bounded_approximate,
-      force_next_inference,
+    };
+
+    /** CPU-side disposition using host metadata only.
+     *
+     * Exact DDup proof may reuse the completed cache. An otherwise eligible changed frame is
+     * deliberately undecided so the GPU can select inference or reuse without a decision
+     * readback. Every other frame sends a force-infer request through the same wrapper.
+     */
+    enum class host_sbs_depth_admission_e : std::uint8_t {
+      reuse_cached,
+      force_infer,
+      gpu_undecided,
+    };
+
+    [[nodiscard]] constexpr host_sbs_depth_admission_e host_sbs_depth_admission(
+      const bool cached_reuse_authorized,
+      const bool gpu_undecided_eligible,
+      const bool must_observe
+    ) noexcept {
+      if (must_observe) {
+        return host_sbs_depth_admission_e::force_infer;
+      }
+      if (cached_reuse_authorized) {
+        return host_sbs_depth_admission_e::reuse_cached;
+      }
+      return gpu_undecided_eligible ? host_sbs_depth_admission_e::gpu_undecided :
+                                      host_sbs_depth_admission_e::force_infer;
+    }
+
+    /** Require a force-infer observation after every GPU-owned decision.
+     *
+     * The CPU never reads the conditional branch. A frame-id watermark therefore prevents an
+     * older force-infer completion, returned while a newer conditional transaction is submitted,
+     * from accidentally releasing the barrier. Route/reset/failure decisions remain
+     * caller-owned; only an accepted authenticated current-route force-infer completion may call
+     * `record_known_force_infer_completion(..., true)`.
+     */
+    class host_sbs_gpu_observation_barrier_t {
+    public:
+      constexpr void reset() noexcept {
+        conditional_frame_id_ = 0u;
+      }
+
+      constexpr void record_gpu_undecided_enqueue(
+        const std::uint64_t frame_id
+      ) noexcept {
+        if (frame_id != 0u) {
+          conditional_frame_id_ = std::max(conditional_frame_id_, frame_id);
+        }
+      }
+
+      [[nodiscard]] constexpr bool record_known_force_infer_completion(
+        const std::uint64_t frame_id,
+        const bool accepted
+      ) noexcept {
+        if (
+          conditional_frame_id_ == 0u || !accepted ||
+          frame_id <= conditional_frame_id_
+        ) {
+          return false;
+        }
+        reset();
+        return true;
+      }
+
+      [[nodiscard]] constexpr bool active() const noexcept {
+        return conditional_frame_id_ != 0u;
+      }
+
+      [[nodiscard]] constexpr std::uint64_t conditional_frame_id() const noexcept {
+        return conditional_frame_id_;
+      }
+
+    private:
+      std::uint64_t conditional_frame_id_ = 0u;
     };
 
     /** One current-color/cache/render authority regardless of proof acquisition path. */
@@ -335,9 +353,6 @@ namespace platf::dxgi {
           case host_sbs_depth_reuse_kind_e::bounded_tiny_motion:
             return exactness == host_sbs_depth_reuse_exactness_e::approximate &&
                    refresh == host_sbs_depth_reuse_refresh_e::bounded_approximate;
-          case host_sbs_depth_reuse_kind_e::bounded_model_equivalent:
-            return exactness == host_sbs_depth_reuse_exactness_e::approximate &&
-                   refresh == host_sbs_depth_reuse_refresh_e::force_next_inference;
         }
         return false;
       }
@@ -346,10 +361,6 @@ namespace platf::dxgi {
         return valid() && exactness == host_sbs_depth_reuse_exactness_e::exact;
       }
 
-      [[nodiscard]] constexpr bool forces_next_inference() const noexcept {
-        return valid() &&
-               refresh == host_sbs_depth_reuse_refresh_e::force_next_inference;
-      }
     };
 
     [[nodiscard]] constexpr host_sbs_depth_reuse_authorization_t
@@ -376,10 +387,6 @@ namespace platf::dxgi {
           result.exactness = host_sbs_depth_reuse_exactness_e::approximate;
           result.refresh = host_sbs_depth_reuse_refresh_e::bounded_approximate;
           break;
-        case host_sbs_depth_reuse_kind_e::bounded_model_equivalent:
-          result.exactness = host_sbs_depth_reuse_exactness_e::approximate;
-          result.refresh = host_sbs_depth_reuse_refresh_e::force_next_inference;
-          break;
       }
       return result.valid() ? result : host_sbs_depth_reuse_authorization_t {};
     }
@@ -387,14 +394,13 @@ namespace platf::dxgi {
     class ddup_damage_history_t;
 
     /** Display-owned broad-DDup candidate retained across the private-copy route recheck. */
-    struct host_sbs_model_equivalent_candidate_t {
+    struct host_sbs_gpu_undecided_candidate_t {
       std::uint64_t baseline_frame_id = 0u;
       std::uint64_t current_frame_id = 0u;
       const ddup_damage_history_t *damage_history = nullptr;
       std::uint64_t baseline_damage_token = 0u;
       std::uint64_t current_damage_token = 0u;
       bool broad_damage = false;
-      bool ocr_damage_unchanged = false;
 
       [[nodiscard]] constexpr bool valid() const noexcept {
         return baseline_frame_id != 0u && current_frame_id > baseline_frame_id &&
@@ -405,31 +411,15 @@ namespace platf::dxgi {
 
     /** Approximate providers cannot chain without an intervening real inference. */
     [[nodiscard]] constexpr bool host_sbs_approximate_reuse_provider_allowed(
-      const host_sbs_depth_reuse_kind_e prior_since_enqueue,
-      const host_sbs_depth_reuse_kind_e candidate,
+      const host_sbs_approximate_reuse_provider_e prior_since_enqueue,
+      const host_sbs_approximate_reuse_provider_e candidate,
       const bool adaptive_refresh_required
     ) noexcept {
-      if (prior_since_enqueue != host_sbs_depth_reuse_kind_e::none) {
+      if (prior_since_enqueue != host_sbs_approximate_reuse_provider_e::none) {
         return false;
       }
       return !adaptive_refresh_required &&
-             (
-               candidate == host_sbs_depth_reuse_kind_e::bounded_tiny_motion ||
-               candidate == host_sbs_depth_reuse_kind_e::bounded_model_equivalent
-             );
-    }
-
-    [[nodiscard]] constexpr bool host_sbs_model_equivalent_hold_identity_matches(
-      const bool held,
-      const std::uint64_t held_current_frame_id,
-      const std::uint64_t held_baseline_frame_id,
-      const std::uint64_t expected_current_frame_id,
-      const std::uint64_t expected_baseline_frame_id
-    ) noexcept {
-      return held && expected_current_frame_id != 0u &&
-             expected_baseline_frame_id != 0u &&
-             held_current_frame_id == expected_current_frame_id &&
-             held_baseline_frame_id == expected_baseline_frame_id;
+             candidate != host_sbs_approximate_reuse_provider_e::none;
     }
 
     [[nodiscard]] constexpr bool host_sbs_cached_geometry_render_allowed(
@@ -450,10 +440,11 @@ namespace platf::dxgi {
     [[nodiscard]] constexpr bool host_sbs_latest_v2_completion_retention_allowed(
       const bool renderer_authenticated,
       const bool result_authenticated,
-      const bool completion_route_matches_current
+      const bool completion_route_matches_current,
+      const bool known_force_infer_completion
     ) noexcept {
       return renderer_authenticated && result_authenticated &&
-             completion_route_matches_current;
+             completion_route_matches_current && known_force_infer_completion;
     }
 
     /** Reset retained lineage only when its resource aliases or authority route are invalid. */
@@ -481,187 +472,6 @@ namespace platf::dxgi {
       return experiment_enabled && dedup_gate_open && cache_authenticated &&
              !inference_pending && damage_candidate && refresh_allowed;
     }
-
-    enum class host_sbs_adaptive_motion_mode_e : std::uint8_t {
-      off,
-      shadow,
-      active,
-    };
-
-    /** Both experiments are explicit process-local levers. Unknown values stay off. */
-    [[nodiscard]] constexpr host_sbs_adaptive_motion_mode_e
-    host_sbs_adaptive_motion_mode(const std::string_view value) noexcept {
-      return value == "shadow" ? host_sbs_adaptive_motion_mode_e::shadow :
-             value == "1" ? host_sbs_adaptive_motion_mode_e::active :
-                            host_sbs_adaptive_motion_mode_e::off;
-    }
-
-    enum class host_sbs_adaptive_motion_verdict_e : std::uint8_t {
-      quiet,
-      invalid,
-      hard_cut,
-      flags,
-      motion,
-    };
-
-    enum class host_sbs_adaptive_motion_candidate_class_e : std::uint8_t {
-      depth_plus_ocr,
-      ocr_only_needed,
-    };
-
-    enum class host_sbs_current_frame_probe_class_e : std::uint8_t {
-      none,
-      invalid,
-      exact_quiet,
-      exact_motion,
-    };
-
-    enum class host_sbs_adaptive_ocr_probe_class_e : std::uint8_t {
-      not_applicable,
-      exact_equal,
-      veto,
-      unavailable,
-    };
-
-    [[nodiscard]] constexpr host_sbs_adaptive_ocr_probe_class_e
-    host_sbs_adaptive_ocr_probe_class(
-      const bool ocr_damage_unchanged,
-      const bool identity_matches,
-      const bool comparison_valid,
-      const bool exact_matches
-    ) noexcept {
-      if (ocr_damage_unchanged) {
-        return host_sbs_adaptive_ocr_probe_class_e::not_applicable;
-      }
-      if (!identity_matches || !comparison_valid) {
-        return host_sbs_adaptive_ocr_probe_class_e::unavailable;
-      }
-      return exact_matches ? host_sbs_adaptive_ocr_probe_class_e::exact_equal :
-                             host_sbs_adaptive_ocr_probe_class_e::veto;
-    }
-
-    /** Classify one authenticated completed CutBridge observation.
-     *
-     * A settled detector has exactly both armed bits, with only the latched bit optionally set:
-     * masks 3 and 19. The one-shot/recovery/confirmation bits are predictive vetoes, not quiet.
-     */
-    [[nodiscard]] constexpr host_sbs_adaptive_motion_verdict_e
-    host_sbs_adaptive_motion_verdict(
-      const bool profile_initialized,
-      const bool depth_ready,
-      const bool range_collapsed,
-      const bool hard_cut_pulse,
-      const std::uint32_t model_input_history_state,
-      const std::uint32_t analysis_flags,
-      const std::uint32_t cut_flags,
-      const std::uint32_t scene_age,
-      const float raw_rgb_change_fraction,
-      const float structural_change_fraction,
-      const float depth_change_fraction
-    ) noexcept {
-      // A current pulse (including a hard-cut-count advance synthesized by the caller) is the
-      // most important retrospective answer. Cut frames commonly reset scene/history readiness,
-      // so checking those fields first would hide the exact predictive risk as merely invalid.
-      if (hard_cut_pulse) {
-        return host_sbs_adaptive_motion_verdict_e::hard_cut;
-      }
-      if (
-        !profile_initialized || !depth_ready || range_collapsed ||
-        model_input_history_state != 1u ||
-        scene_age < host_sbs_adaptive_motion_min_scene_age ||
-        !(raw_rgb_change_fraction >= 0.0f) ||
-        !(structural_change_fraction >= 0.0f) ||
-        !(depth_change_fraction >= 0.0f)
-      ) {
-        return host_sbs_adaptive_motion_verdict_e::invalid;
-      }
-      constexpr auto required_cut_flags =
-        sbs_adaptive_state::cut_flag_geometry_armed |
-        sbs_adaptive_state::cut_flag_appearance_armed;
-      constexpr auto allowed_cut_flags =
-        required_cut_flags | sbs_adaptive_state::cut_flag_latched;
-      if (
-        analysis_flags != 0u ||
-        (cut_flags & required_cut_flags) != required_cut_flags ||
-        (cut_flags & ~allowed_cut_flags) != 0u
-      ) {
-        return host_sbs_adaptive_motion_verdict_e::flags;
-      }
-      if (
-        raw_rgb_change_fraction > host_sbs_adaptive_motion_raw_rgb_max ||
-        structural_change_fraction > host_sbs_adaptive_motion_structural_max ||
-        depth_change_fraction > host_sbs_adaptive_motion_depth_change_max
-      ) {
-        return host_sbs_adaptive_motion_verdict_e::motion;
-      }
-      return host_sbs_adaptive_motion_verdict_e::quiet;
-    }
-
-    /** Two completed quiet observations are required; scheduling time, not readback time, owns age. */
-    class host_sbs_adaptive_motion_state_t {
-    public:
-      constexpr void reset() noexcept {
-        last_sampled_frame_id_ = 0u;
-        quiet_samples_ = 0u;
-        last_sampled_at_ = {};
-      }
-
-      [[nodiscard]] constexpr bool observe(
-        const std::uint64_t sampled_frame_id,
-        const host_sbs_adaptive_motion_verdict_e verdict,
-        const std::chrono::steady_clock::time_point sampled_at
-      ) noexcept {
-        if (sampled_frame_id != 0u && sampled_frame_id == last_sampled_frame_id_) {
-          return false;
-        }
-        if (
-          sampled_frame_id == 0u || sampled_frame_id < last_sampled_frame_id_ ||
-          sampled_at.time_since_epoch().count() == 0 ||
-          (last_sampled_at_.time_since_epoch().count() != 0 &&
-           sampled_at < last_sampled_at_)
-        ) {
-          reset();
-          return false;
-        }
-        if (
-          last_sampled_at_.time_since_epoch().count() != 0 &&
-          sampled_at - last_sampled_at_ >= host_sbs_adaptive_motion_signal_max_age
-        ) {
-          quiet_samples_ = 0u;
-        }
-        last_sampled_frame_id_ = sampled_frame_id;
-        last_sampled_at_ = sampled_at;
-        quiet_samples_ = verdict == host_sbs_adaptive_motion_verdict_e::quiet ?
-                           std::min(
-                             quiet_samples_ + 1u,
-                             host_sbs_adaptive_motion_quiet_samples
-                           ) :
-                           0u;
-        return true;
-      }
-
-      [[nodiscard]] constexpr bool quiet_mode(
-        const std::chrono::steady_clock::time_point now
-      ) const noexcept {
-        return quiet_samples_ >= host_sbs_adaptive_motion_quiet_samples &&
-               last_sampled_at_.time_since_epoch().count() != 0 &&
-               now >= last_sampled_at_ &&
-               now - last_sampled_at_ < host_sbs_adaptive_motion_signal_max_age;
-      }
-
-      [[nodiscard]] constexpr unsigned quiet_samples() const noexcept {
-        return quiet_samples_;
-      }
-
-      [[nodiscard]] constexpr std::uint64_t last_sampled_frame_id() const noexcept {
-        return last_sampled_frame_id_;
-      }
-
-    private:
-      std::uint64_t last_sampled_frame_id_ = 0u;
-      unsigned quiet_samples_ = 0u;
-      std::chrono::steady_clock::time_point last_sampled_at_ {};
-    };
 
     /** Cache-independent live route fingerprint for invalidating predictive evidence. */
     struct host_sbs_adaptive_motion_route_epoch_t {
@@ -706,16 +516,10 @@ namespace platf::dxgi {
       hold_same_identity,
     };
 
-    [[nodiscard]] constexpr bool host_sbs_adaptive_records_enqueue(
-      const host_sbs_adaptive_hold_decision_e decision
-    ) noexcept {
-      return decision == host_sbs_adaptive_hold_decision_e::infer;
-    }
-
-    /** Own the one-hold cadence shared by shadow simulation and active model-equivalent reuse.
+    /** Own the one-hold cadence for GPU near-identical reuse.
      *
-     * A candidate consumes the arm. Shadow mode still performs and records the real enqueue;
-     * active mode requires that enqueue before another approximate hold may be armed.
+     * A candidate consumes the arm. A real observation must be enqueued before another
+     * approximate hold may be armed.
      */
     class host_sbs_adaptive_hold_cadence_t {
     public:
@@ -778,241 +582,29 @@ namespace platf::dxgi {
         return refresh_required_;
       }
 
+      /** Revalidate the consumed candidate immediately before GPU submission.
+       *
+       * Private frame copy and live-authority checks happen after `observe_changed()`. A delayed
+       * submit must not extend the 50 ms one-hold budget merely because the arm was consumed while
+       * it was still fresh.
+       */
+      [[nodiscard]] constexpr bool hold_candidate_still_fresh(
+        const std::optional<std::chrono::steady_clock::time_point> &identity,
+        const std::chrono::steady_clock::time_point now
+      ) const noexcept {
+        return refresh_required_ && identity && refresh_identity_ &&
+               *identity == *refresh_identity_ &&
+               last_enqueued_at_.time_since_epoch().count() != 0 &&
+               now >= last_enqueued_at_ &&
+               now - last_enqueued_at_ < host_sbs_adaptive_motion_hold_max_age;
+      }
+
     private:
       bool armed_ = false;
       bool refresh_required_ = false;
       std::optional<std::chrono::steady_clock::time_point> last_enqueued_identity_;
       std::optional<std::chrono::steady_clock::time_point> refresh_identity_;
       std::chrono::steady_clock::time_point last_enqueued_at_ {};
-    };
-
-    struct host_sbs_adaptive_motion_candidate_counts_t {
-      std::uint64_t depth_plus_ocr = 0u;
-      std::uint64_t ocr_only_needed = 0u;
-
-      constexpr void add(
-        const host_sbs_adaptive_motion_candidate_class_e candidate_class
-      ) noexcept {
-        if (
-          candidate_class ==
-          host_sbs_adaptive_motion_candidate_class_e::depth_plus_ocr
-        ) {
-          ++depth_plus_ocr;
-        } else {
-          ++ocr_only_needed;
-        }
-      }
-
-      constexpr void add(
-        const host_sbs_adaptive_motion_candidate_counts_t &other
-      ) noexcept {
-        depth_plus_ocr += other.depth_plus_ocr;
-        ocr_only_needed += other.ocr_only_needed;
-      }
-
-      [[nodiscard]] constexpr std::uint64_t total() const noexcept {
-        return depth_plus_ocr + ocr_only_needed;
-      }
-    };
-
-    struct host_sbs_adaptive_motion_verdict_counts_t {
-      std::uint64_t quiet = 0u;
-      std::uint64_t invalid = 0u;
-      std::uint64_t hard_cut = 0u;
-      std::uint64_t flags = 0u;
-      std::uint64_t motion = 0u;
-
-      constexpr void add(const host_sbs_adaptive_motion_verdict_e verdict) noexcept {
-        switch (verdict) {
-          case host_sbs_adaptive_motion_verdict_e::quiet:
-            ++quiet;
-            break;
-          case host_sbs_adaptive_motion_verdict_e::invalid:
-            ++invalid;
-            break;
-          case host_sbs_adaptive_motion_verdict_e::hard_cut:
-            ++hard_cut;
-            break;
-          case host_sbs_adaptive_motion_verdict_e::flags:
-            ++flags;
-            break;
-          case host_sbs_adaptive_motion_verdict_e::motion:
-            ++motion;
-            break;
-        }
-      }
-    };
-
-    struct host_sbs_current_frame_probe_counts_t {
-      std::uint64_t invalid = 0u;
-      std::uint64_t exact_quiet = 0u;
-      std::uint64_t exact_motion = 0u;
-
-      constexpr void add(const host_sbs_current_frame_probe_class_e probe_class) noexcept {
-        switch (probe_class) {
-          case host_sbs_current_frame_probe_class_e::none:
-            break;
-          case host_sbs_current_frame_probe_class_e::invalid:
-            ++invalid;
-            break;
-          case host_sbs_current_frame_probe_class_e::exact_quiet:
-            ++exact_quiet;
-            break;
-          case host_sbs_current_frame_probe_class_e::exact_motion:
-            ++exact_motion;
-            break;
-        }
-      }
-
-      constexpr void add(const host_sbs_current_frame_probe_counts_t &other) noexcept {
-        invalid += other.invalid;
-        exact_quiet += other.exact_quiet;
-        exact_motion += other.exact_motion;
-      }
-
-      [[nodiscard]] constexpr std::uint64_t total() const noexcept {
-        return invalid + exact_quiet + exact_motion;
-      }
-    };
-
-    struct host_sbs_adaptive_motion_audit_match_t {
-      host_sbs_adaptive_motion_candidate_class_e candidate_class;
-      host_sbs_adaptive_motion_verdict_e verdict;
-      host_sbs_current_frame_probe_class_e probe_class =
-        host_sbs_current_frame_probe_class_e::none;
-    };
-
-    struct host_sbs_adaptive_motion_audit_record_result_t {
-      bool recorded = false;
-      host_sbs_adaptive_motion_candidate_counts_t unknown;
-      host_sbs_current_frame_probe_counts_t probe_unknown;
-    };
-
-    struct host_sbs_adaptive_motion_audit_result_t {
-      std::optional<host_sbs_adaptive_motion_audit_match_t> matched;
-      host_sbs_adaptive_motion_candidate_counts_t unknown;
-      host_sbs_current_frame_probe_counts_t probe_unknown;
-    };
-
-    struct host_sbs_adaptive_motion_audit_discard_result_t {
-      host_sbs_adaptive_motion_candidate_counts_t candidates;
-      host_sbs_current_frame_probe_counts_t probes;
-    };
-
-    struct host_sbs_adaptive_motion_audit_pending_t {
-      std::size_t total = 0u;
-      host_sbs_adaptive_motion_candidate_counts_t by_class;
-      host_sbs_current_frame_probe_counts_t by_probe;
-    };
-
-    /** Bounded exact-frame ownership for retrospective shadow honesty. */
-    class host_sbs_adaptive_motion_audit_t {
-    public:
-      [[nodiscard]] host_sbs_adaptive_motion_audit_record_result_t record(
-        const std::uint64_t frame_id,
-        const host_sbs_adaptive_motion_candidate_class_e candidate_class
-      ) {
-        host_sbs_adaptive_motion_audit_record_result_t result;
-        if (
-          frame_id == 0u ||
-          (!pending_.empty() && frame_id <= pending_.back().frame_id)
-        ) {
-          result.unknown.add(candidate_class);
-          return result;
-        }
-        if (pending_.size() == host_sbs_adaptive_motion_audit_capacity) {
-          result.unknown.add(pending_.front().candidate_class);
-          result.probe_unknown.add(pending_.front().probe_class);
-          pending_.pop_front();
-        }
-        pending_.push_back({
-          frame_id,
-          candidate_class,
-          host_sbs_current_frame_probe_class_e::none,
-        });
-        result.recorded = true;
-        return result;
-      }
-
-      /** Attach optional probe evidence only to its already-recorded exact frame. */
-      [[nodiscard]] bool attach_probe(
-        const std::uint64_t frame_id,
-        const host_sbs_current_frame_probe_class_e probe_class
-      ) noexcept {
-        if (frame_id == 0u || probe_class == host_sbs_current_frame_probe_class_e::none) {
-          return false;
-        }
-        const auto pending = std::find_if(
-          pending_.begin(),
-          pending_.end(),
-          [frame_id](const pending_decision_t &candidate) {
-            return candidate.frame_id == frame_id;
-          }
-        );
-        if (
-          pending == pending_.end() ||
-          pending->probe_class != host_sbs_current_frame_probe_class_e::none
-        ) {
-          return false;
-        }
-        pending->probe_class = probe_class;
-        return true;
-      }
-
-      [[nodiscard]] host_sbs_adaptive_motion_audit_result_t resolve(
-        const std::uint64_t sampled_frame_id,
-        const host_sbs_adaptive_motion_verdict_e verdict
-      ) {
-        host_sbs_adaptive_motion_audit_result_t result;
-        while (!pending_.empty() && pending_.front().frame_id < sampled_frame_id) {
-          result.unknown.add(pending_.front().candidate_class);
-          result.probe_unknown.add(pending_.front().probe_class);
-          pending_.pop_front();
-        }
-        if (!pending_.empty() && pending_.front().frame_id == sampled_frame_id) {
-          result.matched = host_sbs_adaptive_motion_audit_match_t {
-            pending_.front().candidate_class,
-            verdict,
-            pending_.front().probe_class,
-          };
-          pending_.pop_front();
-        }
-        return result;
-      }
-
-      [[nodiscard]] host_sbs_adaptive_motion_audit_discard_result_t
-      discard_all() noexcept {
-        host_sbs_adaptive_motion_audit_discard_result_t discarded;
-        for (const auto &pending : pending_) {
-          discarded.candidates.add(pending.candidate_class);
-          discarded.probes.add(pending.probe_class);
-        }
-        pending_.clear();
-        return discarded;
-      }
-
-      [[nodiscard]] host_sbs_adaptive_motion_audit_pending_t pending() const noexcept {
-        host_sbs_adaptive_motion_audit_pending_t result;
-        result.total = pending_.size();
-        for (const auto &pending : pending_) {
-          result.by_class.add(pending.candidate_class);
-          result.by_probe.add(pending.probe_class);
-        }
-        return result;
-      }
-
-      [[nodiscard]] std::size_t size() const noexcept {
-        return pending_.size();
-      }
-
-    private:
-      struct pending_decision_t {
-        std::uint64_t frame_id;
-        host_sbs_adaptive_motion_candidate_class_e candidate_class;
-        host_sbs_current_frame_probe_class_e probe_class;
-      };
-
-      std::deque<pending_decision_t> pending_;
     };
 
     /** Bounded unchanged-content refresh state. A busy admission attempt is intentionally a no-op;
@@ -1250,28 +842,17 @@ namespace platf::dxgi {
                  host_sbs_low_motion_damage_ratio_denominator;
     }
 
-    /** Broad-only depth opportunity for adaptive shadow measurement or active reuse.
+    /** Broad-only depth opportunity for GPU adaptive reuse.
      *
      * Localized changes are intentionally excluded for small-object/UI sensitivity. A single
-     * normalized DDup rectangle must cover at least half the analysis region. OCR-band evidence is
-     * classified separately so telemetry and active admission retain the exact OCR proof class.
+     * normalized DDup rectangle must cover at least half the analysis region. GPU arbitration
+     * freezes OCR/SLR until its required force-infer observation.
      */
     [[nodiscard]] constexpr bool host_sbs_adaptive_motion_broad_damage_candidate(
       const ddup_damage_coverage_t &coverage
     ) noexcept {
       return coverage.known && coverage.region_area != 0u &&
              coverage.max_single_intersection_area >=
-               (coverage.region_area + 1u) / 2u;
-    }
-
-    /** Diagnostic: summed overlaps looked broad but no one rectangle proved broad coverage. */
-    [[nodiscard]] constexpr bool host_sbs_adaptive_motion_sum_only_broad(
-      const ddup_damage_coverage_t &coverage
-    ) noexcept {
-      return coverage.known && coverage.region_area != 0u &&
-             coverage.potentially_changed_area >=
-               (coverage.region_area + 1u) / 2u &&
-             coverage.max_single_intersection_area <
                (coverage.region_area + 1u) / 2u;
     }
 

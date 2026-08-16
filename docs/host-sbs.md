@@ -543,8 +543,8 @@ identity. The forced refresh and every fail-open case return through the normal 
 enqueue gate rather than using an unbounded GPU wait. A newly accepted frame may still use the
 bounded same-frame completion query below.
 
-That whole-depth exception is distinct from the OCR-only redispatch above. A forced or otherwise
-ordinary DAV2 enqueue still advances depth, cut, camera, and V2 state; if only its bottom detector
+That whole-depth exception is distinct from the OCR-only redispatch above. A force-infer wrapper
+launch still advances depth, cut, camera, and V2 state; if only its bottom detector
 crop is damage-proven unchanged, OCR8 is restamped to that new frame and SLR12 advances normally.
 
 One process-only experiment broadens whole-depth reuse without changing the persisted three-key SBS
@@ -559,156 +559,142 @@ damage. At most one delivery may be held and it must occur less than 50 ms after
 successful enqueue. The hold warps current capture color through the cached field and advances no
 depth, normalization, scene-cut, camera, OCR, or SLR observation. Missing/zero/oversize/malformed
 metadata, an unretained sequence, WGC, pending inference, OCR-crop damage, or any normal authority
-failure runs the ordinary path. DDup metadata excludes the separately composited hardware cursor,
+failure runs the force-infer path. DDup metadata excludes the separately composited hardware cursor,
 so this experiment is explicitly cursor-insensitive as well as non-bit-exact. It is disabled by
 default; diagnostics report candidates, suppressed submissions, and successful current-color
 reuses for A/B measurement even when the experiment is disabled.
 
-A separate default-off adaptive experiment has shadow and active process-local modes. Setting
-`APOLLO_SBS_ADAPTIVE_MOTION_GATE=shadow` audits hypothetical holds while every frame still follows
-the ordinary copy, DAV2/OCR admission, completion, warp, and output paths. Setting it to `1` enables
-one bounded model-equivalent hold under the additional current-frame proof below. Unknown values
-remain off. The exact content-clock/ROI proofs, the 0.25% low-motion experiment, and this adaptive
-proof acquire authority independently, but all produce one typed current-color/cached-geometry
-authorization. Their refresh bounds do not merge.
+A GPU-owned adaptive path runs for every Host SBS depth pipeline. Exact content-clock/ROI reuse
+stays higher priority, and the independent opt-in 0.25% low-motion experiment keeps its own budget.
+Approximate providers cannot chain without an intervening force-infer completion.
 
-The predictor requires two consecutive authenticated completed CutBridge observations. Each must
-have initialized/ready non-collapsed depth, model-input history state `1`, analysis flags `0`, scene
-age at least `8`, raw-RGB change at most `0.010`, structural change at most `0.005`, and normalized
-depth change at most `0.10`. Settled cut flags are exactly both armed bits (`3`) with only the
-latched bit optionally present (`19`); either one-shot bit, recovery, confirmation-pending, a cut
-pulse, or an unseen hard-cut-count advance vetoes quiet. Evidence age is measured from the steady-
-clock instant when its exact-frame `CopyResource` was scheduled, never when the staging map later
-completes, and expires strictly at `100 ms`. A scheduling-time gap of `100 ms` or more breaks the
-quiet streak, so two new fresh quiet observations are required. A current pulse or unseen count
-advance is classified as a hard-cut veto even when that cut has already reset scene age/history.
+### GPU-owned near-identical transaction
 
-Exact content-clock/ROI reuse remains higher priority. For a distinct changed DDup identity, the
-adaptive cadence permits at most one hold after a real enqueue and only while that enqueue is less
-than `50 ms` old. No later approximate candidate, including a repeat of the held identity, may be
-held before a real inference; the next non-exact delivery therefore infers. Exact DDup duplicates
-may still reuse independently under their `16`/`250 ms` bound, but they neither advance nor rearm the
-adaptive cadence. Shadow simulates the same cadence without suppressing work.
-Eligibility requires the authenticated cache and complete current route/authority to match, no
-pending inference, complete retained DDup history, and no native interactive move/size. Broad
-damage is proved only when one normalized dirty rectangle or one move endpoint intersects at least
-half the exact DAV2 region. The saturated sum is not broad proof because overlaps and a move's two
-ends can inflate it. Localized nontrivial damage above 0.25% and below that broad proof fails open;
-tiny damage remains solely the existing low-motion experiment's domain. Shadow and active both
-retain the candidate's exact OCR-crop damage class. An unchanged crop is sufficient caller-owned
-OCR proof; a dirty crop remains provisional until the estimator authenticates exact current OCR
-model-input equality as described below.
+The host first makes a three-way disposition using CPU-resident metadata only. An exact DDup
+content-clock or ROI-damage proof may use the authenticated completed cache. A frame that must be
+observed, or that lacks complete candidate authority, submits an authenticated force-infer
+request. Only the remaining changed frame is GPU-undecided. The CPU never uses CutBridge, model
+input, appearance, depth, OCR tensor values, or any other GPU-produced evidence to choose that
+disposition. After private per-signature warmup and graph capture, every actual DAV2 submission uses
+the same conditional wrapper; the bootstrap output is never published and there is no raw DAV2
+runtime path.
 
-Only a cadence-selected broad candidate requests the optional current-frame probe. Its current and
-baseline IDs are copied from the private candidate and latest authenticated V2 completion; the
-baseline must also equal the estimator's last postprocessed frame. After ordinary preprocessing,
-an independently source-authenticated shader outside the producer closure compares every admitted
-current NCHW value, appearance ordinal, and exclusion bit with that exact baseline and copies one
-fixed 23-word CFM5 record. When an estimator-owned OCR baseline exists, the same dispatch compares
-`960x160x3` normalized FP32 OCR input values bit-for-bit and validates that the retained OCR8 header
-and frame owner describe the same baseline. The raw motion verdict calls only exact NCHW-bit,
-appearance-ordinal-bit, and exclusion equality quiet; it is never standalone hold authority.
-RGB reconstruction tiers/maxima, per-tile maxima, bottom-band counters, and the per-texel appearance
-maximum are deliberately absent: they had no production consumer and added arithmetic and atomics
-to the critical probe. The record retains the thresholded appearance count, a nonfinite-appearance
-count, the exact appearance-bit count, and the typed OCR-input result used by active selection or
-existing exact telemetry. When exact OCR comparison is configured, its fixed value count is
-published once; only mismatches and nonfinite values use per-value atomics.
+A GPU-undecided candidate requires an authenticated completed V2 cache; matching source signature,
+transfer domain, input region, root/region generations and browser epoch; complete retained DDup
+history and strictly ordered endpoint tokens; no pending depth work; no native interactive
+move/size; and one normalized dirty rectangle or move endpoint intersecting at least half of the
+exact DAV2 input region. A saturated sum is not broad proof because overlapping rectangles and the
+two ends of one move can inflate it. The shared cadence admits at most one such transaction after a
+successful force-infer enqueue and only while that enqueue is less than `50 ms` old. A localized
+change that does not meet broad proof sends force-infer; tiny damage remains solely the low-motion
+experiment's domain. Bottom OCR-crop damage is not admission authority: both a clean and dirty crop may
+enter the GPU-undecided path.
 
-Active selection is deliberately separate and narrower in authority but tolerant of harmless
-ordinal bit noise. It requires a decoded record with settled prior-state flags, exact NCHW and
-exclusion equality, and zero appearance texels at or above the `1/1024` delta tier. Exact
-appearance-ordinal bit mismatches below that tier remain telemetry and do not veto by themselves.
-Any nonfinite current or baseline appearance ordinal vetoes active selection.
-The exact current/baseline/domain tuple, retained DDup history and endpoint tokens, noninteractive
-route, absence of pending/completed work, and ordinary non-dump/non-suppressed-optional-work route
-must still match. OCR safety is typed: either DDup proves the exact bottom crop unchanged, or an
-ordinary current OCR path must map and bind successfully while CFM5 proves all `460800` normalized
-input floats equal an estimator-owned baseline whose OCR8 record and frame owner are authoritative.
-Any mismatch, nonfinite value, missing/abstaining OCR8 record, unavailable comparison resource, or
-OCR setup failure follows ordinary DAV2/OCR inference.
-The existing encode target remains the only deadline: after preserving the same `3 ms` downstream
-reserve, candidate-only nonblocking collection starts with a nominal `0.5 ms` allowance when it
-reaches its first poll round and has an independent 16-round fuse. Each round checks the absolute
-deadline before doing more work, but thread-yield scheduling can resume slightly after the nominal
-allowance; it is a poll-start bound, not a hard wall-clock bound. Preprocessing does not silently
-spend that allowance; the absolute cadence deadline still truncates it. A missing or late target
-permits one immediate round only. The staging map uses
-`DO_NOT_WAIT`; once CUDA event readiness is observed it stays sticky, and a transient
-`DXGI_ERROR_WAS_STILL_DRAWING` is retried only inside that same allowance and 16-round fuse.
-Telemetry separates immediate-only, deadline, and fuse exhaustion in the CUDA-event and staging-map
-phases. Unavailable resources, timeout, a motion veto, malformed evidence, or any optional
-shader/event failure immediately continues to the ordinary DAV2/OCR enqueue.
+After the ordinary calibrated `rgb_to_nchw` producer, a separate required compute closure compares
+the current NCHW tensor against the GPU-owned state-1 model-input history. The history owner must
+authenticate the exact baseline frame, analysis-domain tag, and tensor dimensions. Each `16x16`
+thread group reduces its admitted, medium-change, strong-change, and nonfinite counts in group-shared
+memory and writes one compact tile record; the comparison uses no global atomics. One 64-thread
+resolve reduces the tile records and rejects any supported tile whose strong-change ratio exceeds
+the local limit. For
+each admitted texel it reconstructs the maximum model-RGB delta directly from NCHW differences as
+`abs(current - previous) * (0.229, 0.224, 0.225)`; the ImageNet means cancel.
 
-On an authorized active hold the estimator returns the explicit current/baseline IDs without
-enqueueing DAV2 or OCR and without advancing its postprocessed history. Display revalidates those
-IDs, the authenticated completion, route, input domain, color space, typed OCR proof, and absence of
-pending work after the private copy and after estimator return. It then renders the current private
-candidate color through the older authenticated V2 geometry. The held identity is never restamped
-as a completion, reusable OCR input, damage baseline, or latest lineage, and the one-call hold token
-is cleared before any cache copy. The skipped delivery creates no CutBridge, normalization,
-scene-camera, OCR, or SLR observation. This can delay observation of a sub-threshold change by one
-delivery; the mandatory next real inference bounds that deliberate no-observation tradeoff.
+The GPU proposes reuse only when the owner, request, shape and admitted count authenticate, every
+value is finite, and all of these inclusive limits hold:
 
-Low-motion and model-equivalent approximate providers cannot chain without an intervening real
-inference. A valid estimator hold records that provider barrier even if display-side revalidation
-later refuses the cached render, so a route or telemetry reset cannot grant a second approximate
-hold. Exact content-clock/ROI reuse remains independent, and model-equivalent holds consume neither
-the exact `16`/`250 ms` refresh budget nor the low-motion one-hold budget.
+- medium delta `>= 1/64` on at most `10%` of admitted texels;
+- strong delta `>= 0.20` on at most `2.5%` of admitted texels; and
+- every tile with at least `64` admitted texels has a strong-change ratio of at most `75%`.
 
-The exact OCR-input baseline is estimator-owned rather than a display cache shortcut. A candidate
-copy is queued only after one ordinary joined DAV2/OCR completion has produced V2 and submitted
-OCR postprocessing; it becomes hold authority only when a later CFM5 probe validates the retained
-OCR8 schema, validity, and exact frame owner. A damage-proven OCR redispatch may roll only that
-exact owner forward. Domain changes, subtitle suppression, detector abstention/failure, producer
-failure, optional-probe loss, and unsafe interop cleanup invalidate it. Optional comparison
-allocation or registration failure disables only the dirty-crop proof: ordinary OCR and the
-independent DDup-clean hold remain available. A mapped OCR input remains stream-owned through its
-queued CUDA unmap even when the exact hold submits neither TensorRT engine, preventing the next
-delivery from racing the fixed interop buffer.
+The proposal and branch are carried in a private 176-byte raw GPU buffer. Its first 32 bytes are
+the proposal/eventual receipt, the next 32 bytes are the request, and the remaining words are zero
+during arbitration. Before the comparison the CPU publishes an authenticated `RQST`, unique frame
+token and zero proposal/argument records in one ordered D3D11 update. The resolve writes its
+authenticated `PROP` tag last. A small CUDA setter validates the current `RQST` and `PROP`, writes
+a tag-last `CBRG` receipt describing the branch it actually selected, and sets a CUDA conditional
+handle. D3D11 buffers marked `DRAWINDIRECT_ARGS` are not CUDA-registerable on the production
+driver, so after CUDA unmap the receipt validator overwrites seven 16-byte records in the
+registerable transaction with the `reduce`, `one`, `grid16`, `grid8`, `columns`, `rows`, and
+`reuse_grid16` dispatch arguments. D3D then copies the complete tiny transaction into a separate
+same-sized indirect twin before any `DispatchIndirect` consumes it. The
+little-endian tags are `PROP = 0x504F5250`, `RQST = 0x54535152`, and `CBRG = 0x47524243`; the
+decision uses XOR cookie `0xD1EC15A5` and the token halves use `0xA3756C91` and `0x5C8A936E`.
+Tokens, cookies, reserved-zero words and tags must all match. With a valid request, a missing,
+stale or malformed proposal resolves to inference; malformed request/receipt evidence cannot grant
+current-frame postprocess authority.
 
-The optional CFM5 shader closure is pinned independently at SHA-256
-`6d2cdccee485fe423f30191a67a198c3911d70137704c068e708dd8f1b75fded`. A source snapshot or
-closure mismatch disables the adaptive probe and all model-equivalent holds without changing the
-authenticated V2 producer, ordinary DAV2/OCR inference, or rendering.
+The conditional executable contains the already-captured DAV2 TensorRT graph as its inference child
+and an empty reuse child. It maps only GPU resources and does not map OCR. A force-infer request uses
+the wrapper's default/fail-infer branch and the normal unconditional depth postprocess chain. A
+GPU-undecided request instead uses the authenticated `CBRG` receipt to generate indirect arguments.
+Its inference receipt runs the complete depth postprocess chain, including frame statistics,
+normalization reductions and histogram, depth texture publication, scene-cut/history work, and
+every V2 state, mapping, ownership and final-field pass. Its reuse receipt zeros those inference
+arguments and copies the previous depth through the swapped output target; it does not advance
+normalization, cut, camera, model-input history, or V2 state. Invalid undecided receipt/request
+evidence generates no infer-postprocess work and takes the one-shot previous-depth copy path. Thus
+TensorRT is not the only gated work and a reuse does not pay the ordinary depth postprocess chain.
 
-The live source signature, transfer domain, root/region generations, browser epoch, and interactive
-state are observed independently of cache authentication. Any change clears predictive evidence,
-including while an inference is pending or before the first completion on the new route.
+Each authenticated DAV2 shape captures two serialized 8-byte pageable-host scalar reset seeds. The
+observed values match height/14 and width/14 (`31x55` for `770x434`); their destinations are mutable
+scratch inputs to the first TensorRT/Myelin kernel. Pageable-host operands are legal in the
+captured source graph but not in a CUDA conditional body. CUDA creates a node-owned embedded copy
+when the source graph is added as the
+conditional child. The host retrieves that embedded graph, revalidates the exact topology, and
+changes only those two sources to wrapper-owned device mirrors; the TensorRT source graph remains
+immutable and no explicit application-side graph clone exists. Every launch queues the original
+live host values into the mirrors before the conditional setter. The inference child retains both
+mirror-to-scratch resets; reuse leaves TensorRT scratch untouched. Any deviation from the exact
+two-copy shape, parameters or root-chain topology rejects the required wrapper and latches the
+stream flat; it never hides a broken wrapper by replaying the source graph.
 
-In shadow mode every hypothetical candidate retains its exact frame ID in a bounded 16-entry
-decision queue.
-When that frame's later CutBridge readback arrives, diagnostics classify it as actual quiet or an
-invalid, hard-cut, flags, or motion veto. A coalesced gap, queue eviction, reset, or missing exact
-readback is counted unknown rather than inferred from a newer cache. Exact resolution retains each
-candidate's depth-plus-OCR or OCR-only-needed class. Five-second diagnostics publish monotonic
-lifetime class-by-verdict totals, class-specific unknowns and current pending ownership, so an
-interval boundary cannot misattribute a later result; the existing interval aggregate remains.
-An exact current-frame probe annotation stays in that same shadow queue and is resolved only by
-the later CutBridge sample with the identical candidate frame ID. Diagnostics publish probe readiness,
-query/wait cost, pending and unknown ownership, plus lifetime invalid/quiet/motion probe rows
-crossed with CutBridge quiet/invalid/hard-cut/flags/motion columns. A gap, eviction, or reset charges
-both candidate and attached probe ownership unknown rather than pairing either with a newer frame.
-Active mode omits this retrospective queue, lifetime result ledger, cross-tabs, spatial-veto
-counters, and shadow sample counters. It retains the shared interval probe status, OCR comparison,
-and collection-cost telemetry needed to qualify active behavior, while both modes continue to
-observe the same predictor state. Each active five-second line partitions its candidate total into
-hold, ordinary fallthrough enqueue, postcheck veto after an estimator hold, and a saturating
-unresolved residual for candidates that did not reach any of those terminal outcomes. A sample is
-stale at `100 ms` and cannot enable a candidate; a scheduling-time gap of at least `100 ms` clears
-the quiet streak
-while retaining the cut-count baseline and exact pending-audit ownership for later truthful
-classification. Out-of-order telemetry, readback failure, DDup discontinuity, missing damage,
-route/domain/authority transition, interactive move/size, dump/reprocess, or producer failure
-clears predictor, simulated cadence, cut-count baseline, and pending-decision state. A producer or
-input-domain rebuild also clears the telemetry scheduling watermark. Ordinary discontinuities
-preserve that watermark and the independent current-route fingerprint only to prevent recopying an
-already-attempted completion and to detect the next route transition; neither is quiet evidence or
-hold authority. A separate minimum frame ID rejects delayed readback owned by the pre-reset route.
-Consequently shadow telemetry makes no stale physical cut, scene-camera, OCR, SLR, or completion
-claim. In active mode the same reset matrix revokes candidate authority; every failure before
-estimator authorization follows ordinary inference, while a failure after an already-skipped
-observation fails closed for that one render and preserves the mandatory-next-inference barrier.
+OCR preprocessing, OCR TensorRT inference, OCR8 reduction and SLR12 observation are statically
+suppressed for every GPU-undecided transaction regardless of the selected depth branch. This is no
+OCR observation: retained locator state neither advances nor becomes current-frame authority. The
+next known force-infer observation restores the ordinary OCR/SLR path.
+
+There is no GPU decision readback, staging map, adaptive evidence poll, CPU wait for the
+decision, or CPU branch knowledge. The CPU submits one transaction exactly as it submits ordinary
+work and later observes only completion readiness. The completed transaction may render its exact
+current matched color once using the GPU-produced geometry; a newer force-infer completion may
+supersede it before draw. Its opaque branch cannot become latest authenticated cache lineage, an OCR
+baseline, a DDup damage baseline, or a telemetry-sampled frame.
+
+Every successful GPU-undecided enqueue arms a frame-ID observation barrier. While it is armed, the
+host blocks exact and approximate cache reuse, another conditional candidate, and new CutBridge
+telemetry copies; already-scheduled telemetry may retire but cannot classify the opaque completion.
+The retained-source conversion poll keeps the pipeline progressing toward a force-infer observation.
+When a current accepted frame is available, one estimator call consumes the unknown completion and
+immediately enqueues that frame through force-infer; an idle completion may still retire alone.
+The successor's input preparation cannot overwrite the already-published V2 field, and its temporal
+reseed remains deferred until its own completion. Immediately before that completion's postprocess
+the estimator reseeds all temporal, scene, camera, subtitle and V2 histories instead of comparing
+against branch-dependent state. Only a later
+authenticated current-route force-infer completion whose frame ID is newer than the conditional
+watermark clears the barrier and can establish reusable lineage again.
+
+Detector authentication/resource failure, missing conditional-graph capability, wrapper
+construction/topology failure, interop failure, or conditional launch failure is terminal for the
+stream and renders flat. None may silently retry through the captured source graph. A malformed GPU
+proposal with an otherwise valid request is different: the already-authenticated wrapper selects
+its inference branch. Invalid undecided request/receipt evidence receives only the one-shot
+state-preserving previous-depth copy and cannot advance authenticated GPU postprocess state. Cleanup
+failure quarantines the affected graph and interop resources. The detector closure is pinned
+independently at SHA-256
+`75d57d1cb5e02d27e8d864ff66df1c9d0bd7608d7bd161d9e3d11e223fdc6188`; a source snapshot or closure
+mismatch therefore fails the stream flat instead of disabling adaptive reuse invisibly.
+
+The detector deliberately prefers reuse within the stated bounds. A thin, small, localized, or
+sub-threshold semantic change can therefore use one delivery of stale geometry. The branch-opaque
+barrier and mandatory force-infer reseed bound that accepted heuristic risk to that delivery; no
+second approximate or exact cached reuse can extend it.
+
+The live source signature, transfer domain, root/region generations, browser epoch, interactive
+state, DDup continuity, dump/reprocess state and producer health are observed independently of cache
+authentication. A transition clears the host candidate and reuse cadence. Transitions before
+acceptance require force-infer; after acceptance they preserve the observation barrier until a newer
+authenticated current-route force-infer completion establishes known state.
 
 Model preparation, shader compilation, and the live renderer are fail-closed. Live shaders are
 compiled and cached at process startup. Dump-only resources are created lazily and cannot prevent a
@@ -722,38 +708,47 @@ ROI observer, rectangle, planner, or crop-resource eligibility failure selects o
 full-frame V2. That route selection does not weaken the base contract: an internal V2 model,
 provenance, state, field, or renderer authentication failure renders the affected frame flat.
 
-TensorRT inference and all coordinate passes remain on the GPU. Default production does not add a
-per-frame GPU-to-CPU readback; an explicit adaptive mode may read only the bounded candidate record
-described above. When inference is still busy, the capture loop must not enqueue an
-unbounded backlog; it continues with flat/current output according to the matched-frame contract.
-Telemetry readback is nonblocking and may drop samples under GPU load, while offline evaluation
-may intentionally block to obtain a complete trace. Admission and fixed-resource reuse remain
-guarded by the joined full-stream query, including the optional OCR stream's interop-unmap tail.
+TensorRT inference and all coordinate passes remain on the GPU. Neither force-infer nor
+GPU-undecided work adds per-frame payload or decision readback. Optional external CutBridge
+telemetry readback remains nonblocking and may drop samples under GPU load, while offline evaluation
+may intentionally block to obtain a complete trace. When GPU work is still busy, the capture loop
+must not enqueue an unbounded backlog; it continues with flat/current output according to the
+matched-frame contract. Before admitting work or reusing fixed interop resources, the estimator
+retains one nonblocking stream-readiness query;
+this is backpressure only, carries no frame data or branch result, and never becomes a polling loop.
+For a force-infer observation it covers the joined conditional DAV2 root and OCR stream, including
+their interop-unmap tails; for a GPU-undecided transaction it covers only the conditional depth root,
+while OCR is suppressed.
 
-After one current matched frame has successfully enqueued, production gives its joined DAV2/OCR
-unit one immediate nonblocking completion query. It may repeat that query only when the encode
-loop's next cadence target leaves at least `0.25 ms` of useful slack after reserving `3 ms` for
-completed-depth postprocess, SBS warp/output, and NVENC submission. Repeated queries stop at the
-earlier of that reserved cadence deadline and `3 ms` after polling began, with an independent query-
-count fuse. After the immediate query, joined queries are spaced by at least `50 us` of yielded
-steady-clock time so the fuse cannot exhaust before the GPU has a useful opportunity to progress.
-Capture and content timestamps remain pixel identities and are never interpreted as an encode
-deadline. Every iteration uses joined non-timing CUDA events recorded after the participating
-TensorRT enqueue and before its interop unmap; between repeated queries the encode thread yields.
+The same-frame completion-status poll is separate from adaptive detection and branch selection.
+After one current matched frame has successfully enqueued, production gives its force-infer joined
+DAV2/OCR unit or GPU-undecided conditional root one immediate nonblocking completion query. It may repeat
+that status query only when the encode loop's next cadence target leaves at least `0.25 ms` of useful
+slack after reserving `3 ms` for completed-depth postprocess, SBS warp/output, and NVENC submission.
+Repeated queries stop at the earlier of that reserved cadence deadline and `3 ms` after polling
+began, with an independent query-count fuse. After the immediate query, queries are spaced by at
+least `50 us` of yielded steady-clock time so the fuse cannot exhaust before the GPU has a useful
+opportunity to progress. Capture and content timestamps remain pixel identities and are never
+interpreted as an encode deadline. Force-infer work uses joined non-timing CUDA events recorded
+after the participating TensorRT work and before interop unmap; a GPU-undecided transaction records
+its depth event after the conditional root. Between repeated queries the encode thread yields.
 An event-ready finish submits D3D11 postprocess behind the already-issued unmaps without
-synchronizing either whole stream. Each accepted observation records one DAV2 event and, when OCR
-runs, one OCR event; polling adds no inference kernels, shader passes, replacement work, GPU
-readback, busy-stream synchronization, or flush. If readiness-event setup is unavailable before
-any enqueue, same-frame completion safely downgrades to one full-stream nonblocking query and does
-not spend the bounded-wait budget.
+synchronizing a whole stream. Each force-infer observation records one DAV2 event and, when OCR runs,
+one OCR event; each GPU-undecided transaction records only the conditional-root depth event.
+Polling adds no inference kernels, shader passes, replacement work, payload or decision readback,
+busy-stream synchronization, or flush. If readiness-event setup is unavailable before any enqueue,
+same-frame completion safely downgrades to one full-stream nonblocking status query and does not
+spend the bounded-wait budget.
 
 Diagnostics retain interval counts for repeated-wait hits at `<= 2 ms`, `(2, 2.5] ms`, and
 `(2.5, 3] ms`, plus the explicit timeout count. A separate over-`3 ms` bucket exposes rare
 render-thread or driver descheduling instead of folding deadline overshoot into the nominal cap.
 These buckets measure the previously censored readiness tail without changing frame ownership.
 
-A joined hit consumes that exact current frame once, invalidates the older singleton-resource
-attribution, and may render it in the current delivery instead of waiting for the next conversion.
+A known force-infer joined hit consumes that exact current frame once, invalidates the older singleton-
+resource attribution, and may render it in the current delivery instead of waiting for the next
+conversion. A GPU-undecided hit likewise consumes and renders its exact matched slot once,
+but remains branch-opaque and leaves the observation barrier armed.
 A bounded timeout or a busy immediate query on a late/ineligible frame leaves the candidate slot,
 one-pending owner, and previous completion untouched, so the ordinary asynchronous path continues.
 A ready empty or failed result clears the candidate and enters the existing terminal-failure or

@@ -73,8 +73,20 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec host_sbs_subtitle_condition {
     "host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"
   };
-  inline constexpr shader_spec host_sbs_current_frame_motion_probe {
-    "host_sbs_current_frame_motion_probe_cs.hlsl", "main", "cs_5_0"
+  inline constexpr shader_spec host_sbs_near_identical_compare {
+    "host_sbs_near_identical_detector_cs.hlsl", "compare_main", "cs_5_0"
+  };
+  inline constexpr shader_spec host_sbs_near_identical_resolve {
+    "host_sbs_near_identical_detector_cs.hlsl", "resolve_main", "cs_5_0"
+  };
+  inline constexpr shader_spec host_sbs_near_identical_history_owner {
+    "host_sbs_near_identical_detector_cs.hlsl", "history_owner_main", "cs_5_0"
+  };
+  inline constexpr shader_spec host_sbs_near_identical_postprocess_args {
+    "host_sbs_near_identical_detector_cs.hlsl", "postprocess_args_main", "cs_5_0"
+  };
+  inline constexpr shader_spec host_sbs_near_identical_reuse_depth {
+    "host_sbs_near_identical_detector_cs.hlsl", "reuse_depth_main", "cs_5_0"
   };
   inline constexpr shader_spec parallax_v2_live_renderer {
     "sbs_reprojection_v2_live_ps.hlsl", "main_ps", "ps_5_0"
@@ -100,8 +112,8 @@ namespace models::host_sbs_shader_cache {
     "f0e89bedef48bc996c1c31697edd880ea107d2590fd0f73b511c87f5219bec5f";
   inline constexpr std::string_view sbs_flat_fallback_source_closure_sha256 =
     "7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4";
-  inline constexpr std::string_view adaptive_motion_probe_source_closure_sha256 =
-    "6d2cdccee485fe423f30191a67a198c3911d70137704c068e708dd8f1b75fded";
+  inline constexpr std::string_view near_identical_detector_source_closure_sha256 =
+    "75d57d1cb5e02d27e8d864ff66df1c9d0bd7608d7bd161d9e3d11e223fdc6188";
 
   // Identity-only minimal closure used to match the model/preprocess calibration. Production
   // bytecode is never compiled from this smaller snapshot: all rgb_to_nchw entry points are
@@ -234,11 +246,16 @@ namespace models::host_sbs_shader_cache {
     depth_coordinate_v2_coordinate_diagnostic,
   };
 
-  // Active, optional reuse evidence. Keep this independently pinned root outside the
-  // authenticated producer closure so source-authentication, compile, resource, or readback
-  // failure disables only adaptive reuse and cannot change schema-55 geometry or fail live SBS.
-  inline constexpr std::array adaptive_motion_probe_specs {
-    host_sbs_current_frame_motion_probe,
+  // Required GPU-only reuse arbitration. This independent post-preprocess pass reads the current
+  // and authenticated-history NCHW tensors without changing calibrated preprocessing or the V2
+  // producer closure. Authentication, compilation, or resource failure is terminal fail-flat;
+  // post-bootstrap DAV2 is never submitted outside the conditional wrapper.
+  inline constexpr std::array near_identical_detector_specs {
+    host_sbs_near_identical_compare,
+    host_sbs_near_identical_resolve,
+    host_sbs_near_identical_history_owner,
+    host_sbs_near_identical_postprocess_args,
+    host_sbs_near_identical_reuse_depth,
   };
 
   inline constexpr std::array parallax_v2_live_renderer_specs {
@@ -309,6 +326,6 @@ namespace models::host_sbs_shader_cache {
     const shader_spec &spec
   );
 
-  /** Precompile the production V2/fail-flat shader sets. */
+  /** Precompile the production V2, mandatory GPU arbitration, and fail-flat shader sets. */
   bool prewarm(const std::filesystem::path &assets_dir);
 }  // namespace models::host_sbs_shader_cache

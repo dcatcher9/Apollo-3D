@@ -91,6 +91,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/audio.h"
         "${CMAKE_SOURCE_DIR}/src/model_manager.cpp"
         "${CMAKE_SOURCE_DIR}/src/model_manager.h"
+        "${CMAKE_SOURCE_DIR}/src/cuda_conditional_graph.cpp"
+        "${CMAKE_SOURCE_DIR}/src/cuda_conditional_graph.h"
         "${CMAKE_SOURCE_DIR}/src/host_sbs_shader_cache.cpp"
         "${CMAKE_SOURCE_DIR}/src/host_sbs_shader_cache.h"
         "${CMAKE_SOURCE_DIR}/src/depth_coordinate_v2.h"

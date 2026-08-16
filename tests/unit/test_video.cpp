@@ -40,463 +40,6 @@ namespace platf::dxgi {
 #endif
 
 namespace {
-  TEST(AdaptiveMotionProbeTest, StartsWaitBudgetAtCollectionAndKeepsCadenceAuthority) {
-    using namespace std::chrono_literals;
-
-    const auto scheduled = std::chrono::steady_clock::time_point {1s};
-    const auto collection_started = scheduled + 250us;
-    EXPECT_EQ(
-      models::adaptive_motion_probe_wait_deadline(
-        scheduled + 7ms,
-        500us,
-        collection_started
-      ),
-      collection_started + 500us
-    );
-    EXPECT_EQ(
-      models::adaptive_motion_probe_wait_deadline(
-        collection_started + 200us,
-        500us,
-        collection_started
-      ),
-      collection_started + 200us
-    );
-    EXPECT_EQ(
-      models::adaptive_motion_probe_wait_deadline({}, 500us, collection_started)
-        .time_since_epoch()
-        .count(),
-      0
-    );
-    EXPECT_EQ(
-      models::adaptive_motion_probe_wait_deadline(
-        collection_started + 1ms,
-        0us,
-        collection_started
-      )
-        .time_since_epoch()
-        .count(),
-      0
-    );
-    EXPECT_EQ(
-      models::adaptive_motion_probe_wait_deadline(
-        collection_started,
-        500us,
-        collection_started
-      )
-        .time_since_epoch()
-        .count(),
-      0
-    );
-  }
-
-  TEST(AdaptiveMotionProbeTest, TimeoutReasonNamesPhaseAndExhaustedBound) {
-    using reason_e = models::adaptive_motion_probe_timeout_reason_e;
-    using models::classify_adaptive_motion_probe_timeout;
-
-    EXPECT_EQ(
-      classify_adaptive_motion_probe_timeout(false, false, false, false),
-      reason_e::event_immediate_only
-    );
-    EXPECT_EQ(
-      classify_adaptive_motion_probe_timeout(true, false, false, false),
-      reason_e::staging_map_immediate_only
-    );
-    EXPECT_EQ(
-      classify_adaptive_motion_probe_timeout(false, true, true, true),
-      reason_e::event_deadline
-    );
-    EXPECT_EQ(
-      classify_adaptive_motion_probe_timeout(true, true, true, true),
-      reason_e::staging_map_deadline
-    );
-    EXPECT_EQ(
-      classify_adaptive_motion_probe_timeout(false, true, false, true),
-      reason_e::event_poll_fuse
-    );
-    EXPECT_EQ(
-      classify_adaptive_motion_probe_timeout(true, true, false, true),
-      reason_e::staging_map_poll_fuse
-    );
-    EXPECT_EQ(
-      classify_adaptive_motion_probe_timeout(false, true, false, false),
-      reason_e::none
-    );
-    EXPECT_EQ(
-      classify_adaptive_motion_probe_timeout(true, true, false, false),
-      reason_e::none
-    );
-  }
-
-  TEST(AdaptiveMotionProbeTest, StickyReadinessRetriesMapWithoutRequeryingEvent) {
-    using observation_e = models::adaptive_motion_probe_poll_observation_e;
-    models::adaptive_motion_probe_poll_progress progress;
-
-    progress.begin_round();
-    ASSERT_TRUE(progress.event_query_needed());
-    progress.observe(observation_e::event_not_ready);
-    EXPECT_TRUE(progress.event_query_needed());
-    EXPECT_FALSE(progress.staging_map_needed());
-
-    progress.begin_round();
-    progress.observe(observation_e::event_ready);
-    EXPECT_FALSE(progress.event_query_needed());
-    ASSERT_TRUE(progress.staging_map_needed());
-    progress.observe(observation_e::staging_map_busy);
-    EXPECT_FALSE(progress.event_query_needed());
-    EXPECT_TRUE(progress.staging_map_needed());
-
-    progress.begin_round();
-    EXPECT_FALSE(progress.event_query_needed());
-    progress.observe(observation_e::staging_map_ready);
-    EXPECT_FALSE(progress.staging_map_needed());
-    EXPECT_TRUE(progress.staging_map_complete);
-    EXPECT_EQ(progress.poll_round_count, 3u);
-    EXPECT_EQ(progress.event_query_count, 2u);
-    EXPECT_EQ(progress.staging_map_attempt_count, 2u);
-    EXPECT_EQ(progress.staging_map_busy_count, 1u);
-  }
-
-  TEST(AdaptiveMotionProbeTest, ValidatesExactIdentityAndShadowVerdict) {
-    std::array<std::uint32_t, models::adaptive_motion_probe_word_count> words {};
-    constexpr std::uint64_t current_id = 0x0000000200000003ull;
-    constexpr std::uint64_t baseline_id = 0x0000000100000002ull;
-    words[0] = models::adaptive_motion_probe_contract_tag;
-    words[1] = models::adaptive_motion_probe_settled_flags;
-    words[2] = static_cast<std::uint32_t>(current_id);
-    words[3] = static_cast<std::uint32_t>(current_id >> 32u);
-    words[4] = static_cast<std::uint32_t>(baseline_id);
-    words[5] = static_cast<std::uint32_t>(baseline_id >> 32u);
-    words[6] = 7u;
-    words[7] = 9u;
-    words[8] = 3u;
-    words[10] = 1u;
-    words[11] = 770u * 434u;
-
-    models::adaptive_motion_probe_sample sample;
-    ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
-      words, current_id, baseline_id, 770, 434, sample
-    ));
-    EXPECT_EQ(
-      models::adaptive_motion_probe_exact_verdict(sample),
-      models::adaptive_motion_probe_exact_verdict_e::quiet_evidence
-    );
-
-    // Exact telemetry also observes CutBridge's point-sampled appearance-ordinal history. A one-bit
-    // ordinal change vetoes this exact verdict; active selection applies its separate threshold.
-    words[16] = 1u;
-    ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
-      words, current_id, baseline_id, 770, 434, sample
-    ));
-    EXPECT_EQ(sample.appearance_exact_changed_texels, 1u);
-    EXPECT_EQ(
-      models::adaptive_motion_probe_exact_verdict(sample),
-      models::adaptive_motion_probe_exact_verdict_e::motion_veto
-    );
-    words[16] = 0u;
-
-    words[13] = 1u;
-    ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
-      words, current_id, baseline_id, 770, 434, sample
-    ));
-    EXPECT_EQ(
-      models::adaptive_motion_probe_exact_verdict(sample),
-      models::adaptive_motion_probe_exact_verdict_e::motion_veto
-    );
-    EXPECT_FALSE(models::decode_adaptive_motion_probe_words(
-      words, current_id, baseline_id + 1u, 770, 434, sample
-    ));
-    EXPECT_FALSE(models::decode_adaptive_motion_probe_words(
-      words, baseline_id - 1u, baseline_id, 770, 434, sample
-    ));
-
-    words[1] &= ~models::adaptive_motion_probe_flag_hard_cut_count_valid;
-    EXPECT_TRUE(models::decode_adaptive_motion_probe_words(
-      words, current_id, baseline_id, 770, 434, sample
-    ));
-    EXPECT_EQ(
-      models::adaptive_motion_probe_exact_verdict(sample),
-      models::adaptive_motion_probe_exact_verdict_e::invalid
-    );
-    words[1] = models::adaptive_motion_probe_settled_flags;
-    words[6] = 0xFFFFFFFFu;  // Reserved overflow sentinel from the packed uint counter contract.
-    EXPECT_FALSE(models::decode_adaptive_motion_probe_words(
-      words, current_id, baseline_id, 770, 434, sample
-    ));
-  }
-
-  TEST(AdaptiveMotionProbeTest, RejectsMalformedCountersAndState) {
-    constexpr std::uint64_t current_id = 11u;
-    constexpr std::uint64_t baseline_id = 10u;
-    constexpr std::uint32_t area = 16u * 16u;
-    const auto valid_words = [] {
-      std::array<std::uint32_t, models::adaptive_motion_probe_word_count> words {};
-      words[0] = models::adaptive_motion_probe_contract_tag;
-      words[1] = models::adaptive_motion_probe_settled_flags;
-      words[2] = static_cast<std::uint32_t>(current_id);
-      words[4] = static_cast<std::uint32_t>(baseline_id);
-      words[6] = 1u;
-      words[7] = 8u;
-      words[8] = 3u;
-      words[10] = 1u;
-      words[11] = area;
-      return words;
-    };
-    const auto rejects = [&](const std::size_t word, const std::uint32_t value) {
-      auto words = valid_words();
-      words[word] = value;
-      models::adaptive_motion_probe_sample sample;
-      return !models::decode_adaptive_motion_probe_words(
-        words, current_id, baseline_id, 16, 16, sample
-      );
-    };
-
-    EXPECT_TRUE(rejects(0u, 0u));
-    EXPECT_TRUE(rejects(0u, 0x344D4643u));
-    EXPECT_TRUE(rejects(1u, models::adaptive_motion_probe_settled_flags | (1u << 31u)));
-    EXPECT_TRUE(rejects(7u, models::adaptive_motion_probe_max_exact_numeric_counter + 1u));
-    EXPECT_TRUE(rejects(8u, sbs_adaptive_state::known_cut_flag_mask + 1u));
-    EXPECT_TRUE(rejects(9u, sbs_adaptive_state::known_analysis_flag_mask + 1u));
-    EXPECT_TRUE(rejects(10u, 5u));
-    EXPECT_TRUE(rejects(11u, area + 1u));
-    EXPECT_TRUE(rejects(13u, area + 1u));
-    EXPECT_TRUE(rejects(15u, area + 1u));
-    EXPECT_TRUE(rejects(14u, 1u));  // Threshold changes require an exact ordinal mismatch.
-    EXPECT_TRUE(rejects(16u, area + 1u));
-    EXPECT_TRUE(rejects(17u, 1u << 31u));
-
-    auto consistent_appearance_change = valid_words();
-    consistent_appearance_change[14] = 1u;
-    consistent_appearance_change[16] = 1u;
-    models::adaptive_motion_probe_sample consistent_sample;
-    EXPECT_TRUE(models::decode_adaptive_motion_probe_words(
-      consistent_appearance_change,
-      current_id,
-      baseline_id,
-      16,
-      16,
-      consistent_sample
-    ));
-    EXPECT_EQ(consistent_sample.appearance_delta_1_over_1024_texels, 1u);
-
-    auto nonfinite_appearance = valid_words();
-    nonfinite_appearance[15] = 1u;
-    ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
-      nonfinite_appearance, current_id, baseline_id, 16, 16, consistent_sample
-    ));
-    EXPECT_EQ(consistent_sample.appearance_nonfinite_texels, 1u);
-    EXPECT_EQ(
-      models::adaptive_motion_probe_exact_verdict(consistent_sample),
-      models::adaptive_motion_probe_exact_verdict_e::invalid
-    );
-  }
-
-  TEST(AdaptiveMotionProbeTest, AuthenticatesExactOcrInputAgainstTheV2Baseline) {
-    constexpr std::uint64_t current_id = 0x200000003ull;
-    constexpr std::uint64_t baseline_id = 0x100000002ull;
-    constexpr std::uint32_t ocr_baseline_candidate = 1u << 0u;
-    constexpr std::uint32_t ocr_record_authoritative = 1u << 1u;
-    constexpr std::uint32_t ocr_current_preprocessed = 1u << 2u;
-    std::array<std::uint32_t, models::adaptive_motion_probe_word_count> words {};
-    words[0] = models::adaptive_motion_probe_contract_tag;
-    words[1] = models::adaptive_motion_probe_settled_flags;
-    words[2] = static_cast<std::uint32_t>(current_id);
-    words[3] = static_cast<std::uint32_t>(current_id >> 32u);
-    words[4] = static_cast<std::uint32_t>(baseline_id);
-    words[5] = static_cast<std::uint32_t>(baseline_id >> 32u);
-    words[6] = 1u;
-    words[7] = 8u;
-    words[8] = 3u;
-    words[10] = 1u;
-    words[11] = 16u * 16u;
-    words[17] = ocr_baseline_candidate | ocr_record_authoritative |
-                ocr_current_preprocessed;
-    words[18] = static_cast<std::uint32_t>(baseline_id);
-    words[19] = static_cast<std::uint32_t>(baseline_id >> 32u);
-    words[20] = models::adaptive_motion_ocr_input_value_count;
-
-    models::adaptive_motion_probe_sample sample;
-    ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
-      words, current_id, baseline_id, 16, 16, sample
-    ));
-    EXPECT_TRUE(sample.exact_ocr_input_matches_baseline());
-
-    auto mismatch = words;
-    mismatch[21] = 1u;
-    ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
-      mismatch, current_id, baseline_id, 16, 16, sample
-    ));
-    EXPECT_FALSE(sample.exact_ocr_input_matches_baseline());
-
-    auto nonfinite = words;
-    nonfinite[22] = 1u;
-    ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
-      nonfinite, current_id, baseline_id, 16, 16, sample
-    ));
-    EXPECT_FALSE(sample.exact_ocr_input_matches_baseline());
-
-    auto wrong_baseline = words;
-    wrong_baseline[18]--;
-    EXPECT_FALSE(models::decode_adaptive_motion_probe_words(
-      wrong_baseline, current_id, baseline_id, 16, 16, sample
-    ));
-
-    auto missing_record_authority = words;
-    missing_record_authority[17] &= ~ocr_record_authoritative;
-    ASSERT_TRUE(models::decode_adaptive_motion_probe_words(
-      missing_record_authority, current_id, baseline_id, 16, 16, sample
-    ));
-    EXPECT_FALSE(sample.exact_ocr_input_matches_baseline());
-
-    auto short_comparison = words;
-    short_comparison[20]--;
-    EXPECT_FALSE(models::decode_adaptive_motion_probe_words(
-      short_comparison, current_id, baseline_id, 16, 16, sample
-    ));
-  }
-
-  TEST(AdaptiveMotionProbeTest, ActiveHoldUsesExactDav2AndThresholdedAppearance) {
-    models::adaptive_motion_probe_result probe;
-    probe.status = models::adaptive_motion_probe_status_e::ready;
-    probe.sample.current_frame_id = 42u;
-    probe.sample.baseline_frame_id = 40u;
-    probe.sample.prior_state_flags = models::adaptive_motion_probe_settled_flags;
-    probe.sample.admitted_texels = 256u;
-    // CFM5 still observes exact ordinal bit noise, but the active selector tolerates it below the
-    // most conservative existing appearance threshold.
-    probe.sample.appearance_exact_changed_texels = 1u;
-
-    using decision_e = models::adaptive_motion_hold_decision_e;
-    const auto decide = [&](const models::adaptive_motion_probe_result &candidate) {
-      return models::select_adaptive_motion_hold(
-        true,
-        true,
-        true,
-        true,
-        false,
-        false,
-        models::depth_optional_work_mode_e::ordinary,
-        candidate
-      );
-    };
-    EXPECT_EQ(decide(probe), decision_e::hold);
-    EXPECT_EQ(
-      models::adaptive_motion_probe_exact_verdict(probe.sample),
-      models::adaptive_motion_probe_exact_verdict_e::motion_veto
-    );
-
-    EXPECT_EQ(
-      models::select_adaptive_motion_hold(
-        false, true, true, true, false, false,
-        models::depth_optional_work_mode_e::ordinary, probe
-      ),
-      decision_e::infer
-    );
-    EXPECT_EQ(
-      models::select_adaptive_motion_hold(
-        true, true, false, true, false, false,
-        models::depth_optional_work_mode_e::ordinary, probe
-      ),
-      decision_e::infer
-    );
-    EXPECT_EQ(
-      models::select_adaptive_motion_hold(
-        true, true, true, false, false, false,
-        models::depth_optional_work_mode_e::ordinary, probe
-      ),
-      decision_e::infer
-    );
-    EXPECT_EQ(
-      models::select_adaptive_motion_hold(
-        true, true, true, true, true, false,
-        models::depth_optional_work_mode_e::ordinary, probe
-      ),
-      decision_e::infer
-    );
-    EXPECT_EQ(
-      models::select_adaptive_motion_hold(
-        true, true, true, true, false, true,
-        models::depth_optional_work_mode_e::ordinary, probe
-      ),
-      decision_e::infer
-    );
-    EXPECT_EQ(
-      models::select_adaptive_motion_hold(
-        true, true, true, true, false, false,
-        models::depth_optional_work_mode_e::suppress_subtitle, probe
-      ),
-      decision_e::infer
-    );
-
-    // A clean retained OCR8 redispatch does not need current OCR mapping/bindings.
-    EXPECT_EQ(
-      models::select_adaptive_motion_hold(
-        true, true, false, true, false, false,
-        models::depth_optional_work_mode_e::redispatch_subtitle, probe
-      ),
-      decision_e::hold
-    );
-
-    // A dirty crop may hold only when the ordinary OCR path is healthy and CFM5 proves every
-    // normalized OCR input float bit-identical to the authenticated baseline.
-    auto exact_ocr = probe;
-    exact_ocr.sample.ocr_input_baseline_valid = true;
-    exact_ocr.sample.ocr_input_comparison_valid = true;
-    exact_ocr.sample.ocr_input_baseline_frame_id =
-      exact_ocr.sample.baseline_frame_id;
-    exact_ocr.sample.ocr_input_compared_values =
-      models::adaptive_motion_ocr_input_value_count;
-    EXPECT_EQ(
-      models::select_adaptive_motion_hold(
-        true, false, true, true, false, false,
-        models::depth_optional_work_mode_e::ordinary, exact_ocr
-      ),
-      decision_e::hold
-    );
-    exact_ocr.sample.ocr_input_exact_mismatch_values = 1u;
-    EXPECT_EQ(
-      models::select_adaptive_motion_hold(
-        true, false, true, true, false, false,
-        models::depth_optional_work_mode_e::ordinary, exact_ocr
-      ),
-      decision_e::infer
-    );
-    EXPECT_EQ(
-      models::select_adaptive_motion_hold(
-        true, false, false, true, false, false,
-        models::depth_optional_work_mode_e::redispatch_subtitle, probe
-      ),
-      decision_e::infer
-    );
-
-    models::adaptive_motion_observation_hold_result held {
-      .held = true,
-      .current_frame_id = probe.sample.current_frame_id,
-      .baseline_frame_id = probe.sample.baseline_frame_id,
-      .ocr_proof = models::adaptive_motion_ocr_hold_proof_e::ddup_crop_unchanged,
-    };
-    EXPECT_TRUE(held.valid());
-    held.current_frame_id = held.baseline_frame_id;
-    EXPECT_FALSE(held.valid());
-
-    auto veto = probe;
-    veto.sample.exact_changed_texels = 1u;
-    EXPECT_EQ(decide(veto), decision_e::infer);
-    veto = probe;
-    veto.sample.exclusion_mismatch_texels = 1u;
-    EXPECT_EQ(decide(veto), decision_e::infer);
-    veto = probe;
-    veto.sample.appearance_delta_1_over_1024_texels = 1u;
-    EXPECT_EQ(decide(veto), decision_e::infer);
-    veto = probe;
-    veto.sample.appearance_nonfinite_texels = 1u;
-    EXPECT_EQ(decide(veto), decision_e::infer);
-    veto = probe;
-    veto.sample.prior_state_flags &= ~models::adaptive_motion_probe_flag_scene_settled;
-    EXPECT_EQ(decide(veto), decision_e::infer);
-    veto = probe;
-    veto.status = models::adaptive_motion_probe_status_e::timed_out;
-    EXPECT_EQ(decide(veto), decision_e::infer);
-  }
 
   TEST(RenderedContentTimestampTest, MatchedT0IsPreservedWhileCurrentCadenceIsT1) {
     const auto t0 = std::chrono::steady_clock::time_point {10ms};
@@ -992,6 +535,7 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
   const std::filesystem::path shader_root = SUNSHINE_SHADERS_DIR;
   const auto assets_dir = shader_root.parent_path().parent_path();
   ASSERT_TRUE(cache::prewarm(assets_dir));
+  const auto statistics_after_prewarm = cache::cache_statistics();
   const auto producer_sources = cache::snapshot_sources(
     shader_root,
     cache::parallax_v2_producer_specs
@@ -1060,6 +604,28 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_subtitle_condition_in_place));
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_subtitle_condition));
 
+  const auto near_identical_sources = cache::snapshot_sources(
+    shader_root,
+    cache::near_identical_detector_specs
+  );
+  ASSERT_TRUE(near_identical_sources);
+  for (const auto &detector : cache::near_identical_detector_specs) {
+    const auto first = cache::get(near_identical_sources, detector);
+    const auto second = cache::get(near_identical_sources, detector);
+    ASSERT_TRUE(first) << detector.filename << ':' << detector.entrypoint;
+    ASSERT_TRUE(second) << detector.filename << ':' << detector.entrypoint;
+    EXPECT_EQ(first.get(), second.get()) << detector.filename << ':' << detector.entrypoint;
+  }
+  const auto statistics_after_detector_gets = cache::cache_statistics();
+  EXPECT_EQ(
+    statistics_after_detector_gets.compiled,
+    statistics_after_prewarm.compiled
+  );
+  EXPECT_EQ(
+    statistics_after_detector_gets.persistent_writes,
+    statistics_after_prewarm.persistent_writes
+  );
+
   const auto diagnostic_sources = cache::snapshot_sources(
     shader_root,
     cache::parallax_v2_diagnostic_specs
@@ -1070,21 +636,6 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
     cache::depth_coordinate_v2_coordinate_diagnostic
   );
   ASSERT_TRUE(coordinate_diagnostic);
-
-  EXPECT_FALSE(has_producer_shader(cache::host_sbs_current_frame_motion_probe));
-  const auto motion_probe_sources = cache::snapshot_sources(
-    shader_root,
-    cache::adaptive_motion_probe_specs
-  );
-  ASSERT_TRUE(motion_probe_sources);
-  ASSERT_EQ(
-    cache::source_closure_sha256(motion_probe_sources),
-    cache::adaptive_motion_probe_source_closure_sha256
-  );
-  ASSERT_TRUE(cache::get(
-    motion_probe_sources,
-    cache::host_sbs_current_frame_motion_probe
-  ));
 
   const auto live_sources = cache::snapshot_sources(
     shader_root,
@@ -1110,6 +661,7 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
     EXPECT_EQ(first.get(), second.get()) << flat.filename << ':' << flat.entrypoint;
   }
   EXPECT_EQ(cache::parallax_v2_live_renderer_specs.size(), 2u);
+  EXPECT_EQ(cache::near_identical_detector_specs.size(), 5u);
   EXPECT_EQ(cache::sbs_flat_fallback_specs.size(), 2u);
   EXPECT_EQ(cache::parallax_v2_live_diagnostic_specs.size(), 2u);
 }
@@ -1330,6 +882,16 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_EQ(
     models::host_sbs_shader_cache::source_closure_sha256(flat_fallback_sources),
     models::host_sbs_shader_cache::sbs_flat_fallback_source_closure_sha256
+  );
+  const auto near_identical_sources =
+    models::host_sbs_shader_cache::snapshot_sources(
+      SUNSHINE_SHADERS_DIR,
+      models::host_sbs_shader_cache::near_identical_detector_specs
+    );
+  ASSERT_TRUE(near_identical_sources);
+  EXPECT_EQ(
+    models::host_sbs_shader_cache::source_closure_sha256(near_identical_sources),
+    models::host_sbs_shader_cache::near_identical_detector_source_closure_sha256
   );
   ASSERT_EQ(
     v2::shader_source_specs.size(),
@@ -1609,6 +1171,10 @@ TEST(ParallaxV2RendererTest, AuthenticationLatchesV2OrLiveFlat) {
   EXPECT_TRUE(models::host_sbs_matched_completion_is_current(true, models::host_sbs_v2_max_matched_repeat_age + std::chrono::hours(1)));
   EXPECT_FALSE(models::host_sbs_matched_completion_is_current(false, models::host_sbs_v2_max_matched_repeat_age + std::chrono::milliseconds(1)));
   EXPECT_TRUE(models::host_sbs_should_repeat_matched_output(host_sbs_renderer_e::parallax_v2, false, true, models::host_sbs_v2_max_matched_repeat_age + std::chrono::hours(1), true));
+  EXPECT_TRUE(models::host_sbs_matched_output_can_enter_repeat_cache(true, true, false));
+  EXPECT_FALSE(models::host_sbs_matched_output_can_enter_repeat_cache(true, true, true));
+  EXPECT_FALSE(models::host_sbs_matched_output_can_enter_repeat_cache(false, true, false));
+  EXPECT_FALSE(models::host_sbs_matched_output_can_enter_repeat_cache(true, false, false));
   EXPECT_EQ(
     models::fail_host_sbs_renderer_flat(host_sbs_renderer_e::parallax_v2),
     host_sbs_renderer_e::failed_flat
@@ -1770,15 +1336,16 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   models::video_depth_estimator estimator {
     device,
     context,
-    std::filesystem::path {SUNSHINE_ASSETS_DIR},
+    std::filesystem::path {SUNSHINE_TEST_BIN_DIR}.parent_path() / "assets",
     config::video_t::sbs_t {},
     video::host_sbs_v2_depth_model(),
   };
   ASSERT_TRUE(estimator.is_valid());
 
-  // The first exact signature runs an ordinary enqueue; the second captures, instantiates, and
-  // launches its CUDA graph. A few additional replays bring an otherwise idle adapter out of its
-  // low-power state before measuring the same three-millisecond budget used by production.
+  // The first exact signature performs its private non-authoritative warm/capture bootstrap and
+  // then launches the force-infer wrapper. Every result observed by this fixture therefore comes
+  // from the wrapper. Additional launches bring an otherwise idle adapter out of its low-power
+  // state before measuring the same three-millisecond budget used by production.
   constexpr std::uint64_t warm_frame_base = 0xabc000u;
   constexpr std::uint64_t warm_observations = 8u;
   for (std::uint64_t i = 1u; i <= warm_observations; ++i) {
@@ -1871,6 +1438,209 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
                   << ", bounded queries " << total_bounded_queries << '.';
   EXPECT_GT(immediate_hits + bounded_hits, 0u)
     << "No hot observation completed inside the production three-millisecond poll budget.";
+
+  // Exercise the integrated D3D proposal -> CUDA conditional child graph -> D3D receipt path.
+  // The identical source should propose reuse, but the branch deliberately remains opaque to the
+  // host; authority here is the conditional transaction class and its required force-infer successor.
+  const auto wait_until_reusable = [&]() {
+    const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds {50};
+    bool reusable = false;
+    do {
+      reusable = estimator.can_accept_frame();
+      if (!reusable) std::this_thread::yield();
+    } while (!reusable && std::chrono::steady_clock::now() < deadline);
+    return reusable;
+  };
+  ASSERT_TRUE(wait_until_reusable());
+  const std::uint64_t conditional_frame_id = observed_frame_base + 0x100u;
+  const std::uint64_t conditional_token = 0x13579bdf2468ace0ull;
+  const auto conditional = estimator.estimate_depth(
+    source.Get(),
+    models::input_color_space::srgb,
+    conditional_frame_id,
+    false,
+    {},
+    models::depth_optional_work_mode_e::ordinary,
+    models::gpu_adaptive_reuse_request {
+      .authorize_gpu_undecided_reuse = true,
+      .baseline_frame_id = observed_frame_base + measured_observations,
+      .gpu_reuse_decision_token = conditional_token,
+    }
+  );
+  ASSERT_TRUE(conditional.gpu_undecided_transaction_enqueued);
+  EXPECT_FALSE(conditional.inference_enqueued);
+  EXPECT_FALSE(conditional.subtitle_ocr_inference_enqueued);
+
+  // Once the opaque transaction is ready, consume it and enqueue the mandatory force-infer
+  // successor in the same call. This is the production path: it must not discard the current
+  // private color copy and create a one-frame submission bubble merely to publish the prior result.
+  ASSERT_TRUE(wait_until_reusable());
+  const auto forced_frame_id = conditional_frame_id + 1u;
+  const auto forced = estimator.estimate_depth(
+    source.Get(),
+    models::input_color_space::srgb,
+    forced_frame_id,
+    false,
+    {},
+    models::depth_optional_work_mode_e::ordinary,
+    models::gpu_adaptive_reuse_request {
+      .authorize_gpu_undecided_reuse = true,
+      .baseline_frame_id = conditional_frame_id,
+      .gpu_reuse_decision_token = conditional_token + 1u,
+    }
+  );
+  ASSERT_TRUE(forced.completed_frame_valid);
+  EXPECT_EQ(forced.completed_frame_id, conditional_frame_id);
+  EXPECT_TRUE(forced.gpu_undecided_completion);
+  EXPECT_TRUE(forced.inference_enqueued);
+  EXPECT_FALSE(forced.gpu_undecided_transaction_enqueued);
+  const auto forced_completed = estimator.finish_pending_depth_for_evaluation();
+  ASSERT_TRUE(forced_completed.completed_frame_valid);
+  EXPECT_EQ(forced_completed.completed_frame_id, forced_frame_id);
+  EXPECT_FALSE(forced_completed.gpu_undecided_completion);
+
+  // Deterministically drive the detector's infer branch with a full-field strong change. This is
+  // the production integration proof that the in-place-sanitized TensorRT child executes inside
+  // an undecided wrapper transaction, rather than testing only the identical-input reuse branch.
+  const std::vector<std::uint32_t> changed_pixels(
+    static_cast<std::size_t>(width) * height,
+    0xffffffffu
+  );
+  const D3D11_SUBRESOURCE_DATA changed_initial {
+    changed_pixels.data(), width * sizeof(std::uint32_t), 0u
+  };
+  ComPtr<ID3D11Texture2D> changed_texture;
+  ComPtr<ID3D11ShaderResourceView> changed_source;
+  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(
+    &desc, &changed_initial, &changed_texture
+  )));
+  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
+    changed_texture.Get(), nullptr, &changed_source
+  )));
+  ASSERT_TRUE(wait_until_reusable());
+  const auto changed_frame_id = forced_frame_id + 1u;
+  const auto changed = estimator.estimate_depth(
+    changed_source.Get(),
+    models::input_color_space::srgb,
+    changed_frame_id,
+    false,
+    {},
+    models::depth_optional_work_mode_e::ordinary,
+    models::gpu_adaptive_reuse_request {
+      .authorize_gpu_undecided_reuse = true,
+      .baseline_frame_id = forced_frame_id,
+      .gpu_reuse_decision_token = conditional_token + 2u,
+    }
+  );
+  ASSERT_TRUE(changed.gpu_undecided_transaction_enqueued);
+  EXPECT_FALSE(changed.inference_enqueued);
+  const auto changed_completed = estimator.finish_pending_depth_for_evaluation();
+  ASSERT_TRUE(changed_completed.completed_frame_valid);
+  EXPECT_EQ(changed_completed.completed_frame_id, changed_frame_id);
+  EXPECT_TRUE(changed_completed.gpu_undecided_completion);
+
+  EXPECT_FALSE(estimator.has_terminal_failure());
+}
+
+TEST(TensorRtConditionalWrapperGpuTest, AllAuthenticatedShapesBuildAndExecute) {
+  const auto *enabled = std::getenv("APOLLO_RUN_TENSORRT_TESTS");
+  if (!enabled || std::string_view {enabled} != "1") {
+    GTEST_SKIP() << "Set APOLLO_RUN_TENSORRT_TESTS=1 for the local NVIDIA/TensorRT integration check.";
+  }
+
+  using Microsoft::WRL::ComPtr;
+  ComPtr<ID3D11Device> device;
+  ComPtr<ID3D11DeviceContext> context;
+  D3D_FEATURE_LEVEL actual {};
+  constexpr D3D_FEATURE_LEVEL requested[] = {
+    D3D_FEATURE_LEVEL_11_1,
+    D3D_FEATURE_LEVEL_11_0,
+  };
+  ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(
+    nullptr,
+    D3D_DRIVER_TYPE_HARDWARE,
+    nullptr,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    requested,
+    static_cast<UINT>(std::size(requested)),
+    D3D11_SDK_VERSION,
+    &device,
+    &actual,
+    &context
+  )));
+
+  struct wrapper_shape_case_t {
+    UINT source_width;
+    UINT source_height;
+    int tensor_width;
+    int tensor_height;
+  };
+  constexpr std::array wrapper_shapes {
+    wrapper_shape_case_t {1920u, 1080u, 770, 434},
+    wrapper_shape_case_t {2560u, 1080u, 1022, 434},
+    wrapper_shape_case_t {3440u, 1440u, 1036, 434},
+    wrapper_shape_case_t {1080u, 1920u, 434, 770},
+    wrapper_shape_case_t {1080u, 2560u, 434, 1022},
+    wrapper_shape_case_t {1440u, 3440u, 434, 1036},
+  };
+  constexpr auto assets_dir = "assets";
+  for (std::size_t shape_index = 0u; shape_index < wrapper_shapes.size(); ++shape_index) {
+    const auto &shape = wrapper_shapes[shape_index];
+    SCOPED_TRACE(
+      std::to_string(shape.source_width) + 'x' + std::to_string(shape.source_height)
+    );
+    const std::vector<std::uint32_t> pixels(
+      static_cast<std::size_t>(shape.source_width) * shape.source_height,
+      0xff304050u
+    );
+    D3D11_TEXTURE2D_DESC desc {};
+    desc.Width = shape.source_width;
+    desc.Height = shape.source_height;
+    desc.MipLevels = 1u;
+    desc.ArraySize = 1u;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1u;
+    desc.Usage = D3D11_USAGE_IMMUTABLE;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    const D3D11_SUBRESOURCE_DATA initial {
+      pixels.data(),
+      shape.source_width * static_cast<UINT>(sizeof(std::uint32_t)),
+      0u
+    };
+    ComPtr<ID3D11Texture2D> texture;
+    ComPtr<ID3D11ShaderResourceView> source;
+    ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(&desc, &initial, &texture)));
+    ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
+      texture.Get(), nullptr, &source
+    )));
+
+    {
+      models::video_depth_estimator estimator {
+        device,
+        context,
+        std::filesystem::path {SUNSHINE_TEST_BIN_DIR}.parent_path() / assets_dir,
+        config::video_t::sbs_t {},
+        video::host_sbs_v2_depth_model(),
+      };
+      ASSERT_TRUE(estimator.is_valid());
+      const auto frame_id = 0xace000u + shape_index;
+      const auto submission = estimator.estimate_depth(
+        source.Get(),
+        models::input_color_space::srgb,
+        frame_id
+      );
+      ASSERT_TRUE(submission.inference_enqueued);
+      EXPECT_FALSE(submission.gpu_undecided_transaction_enqueued);
+      const auto completed = estimator.finish_pending_depth_for_evaluation();
+      ASSERT_TRUE(completed.completed_frame_valid);
+      EXPECT_EQ(completed.completed_frame_id, frame_id);
+      EXPECT_EQ(completed.raw_width, shape.tensor_width);
+      EXPECT_EQ(completed.raw_height, shape.tensor_height);
+      EXPECT_FALSE(completed.gpu_undecided_completion);
+      EXPECT_FALSE(estimator.has_terminal_failure());
+    }
+  }
 }
 #endif
 
@@ -1898,7 +1668,7 @@ TEST(TensorRtContextLifecycleTest, AccountingBoundsQuarantinedAndReusableContext
   EXPECT_EQ(accounting.quarantined(), 2u);
 }
 
-TEST(TensorRtCudaGraphPolicyTest, SignatureChangesWarmBeforeCaptureAndFailuresStayFallback) {
+TEST(TensorRtCudaGraphPolicyTest, SignatureChangesWarmBeforeCaptureAndFailedCaptureStaysOrdinary) {
   using action_e = models::detail::cuda_graph_enqueue_action_e;
   using policy_t = models::detail::cuda_graph_replay_policy_t;
   using signature_t = models::detail::cuda_graph_signature_t;
@@ -4518,673 +4288,243 @@ TEST(DirectxShaderSourceTest, PendingCompletionReusesThePreparedConstantBuffer) 
   );
 }
 
-TEST(DirectxShaderSourceTest, AdaptiveMotionProbeAuthenticatesCutStateEncodings) {
-  const auto shader = read_source_file(
-    SUNSHINE_SOURCE_DIR
-    "/src_assets/windows/assets/shaders/directx/host_sbs_current_frame_motion_probe_cs.hlsl"
-  );
-  ASSERT_FALSE(shader.empty());
-  EXPECT_EQ(models::adaptive_motion_probe_contract_tag, 0x354D4643u);
-  EXPECT_EQ(models::adaptive_motion_probe_word_count, 23u);
-  EXPECT_EQ(models::adaptive_motion_ocr_input_value_count, 960u * 160u * 3u);
-  EXPECT_EQ(models::depth_coordinate_v2::subtitle_ocr_record_schema, 3u);
-  EXPECT_EQ(models::depth_coordinate_v2::subtitle_ocr_record_tag, 0x3852434Fu);
-  EXPECT_NE(shader.find("MOTION_PROBE_CONTRACT_TAG 0x354D4643u"), std::string::npos);
-  EXPECT_NE(
-    shader.find("MOTION_PROBE_OCR_INPUT_VALUE_COUNT 460800u"),
-    std::string::npos
-  );
-  EXPECT_NE(shader.find("MOTION_PROBE_OCR_RECORD_SCHEMA 3u"), std::string::npos);
-  EXPECT_NE(shader.find("MOTION_PROBE_OCR_RECORD_TAG 0x3852434Fu"), std::string::npos);
-  EXPECT_NE(shader.find("PROBE_WORD_OCR_INPUT_NONFINITE 22u"), std::string::npos);
-  EXPECT_NE(shader.find("PROBE_WORD_APPEARANCE_NONFINITE 15u"), std::string::npos);
-  EXPECT_NE(shader.find("LOCAL_WORD_COUNT 8u"), std::string::npos);
-  EXPECT_NE(shader.find("StructuredBuffer<float> CurrentOcrInput : register(t7)"), std::string::npos);
-  EXPECT_NE(shader.find("StructuredBuffer<float> PreviousOcrInput : register(t8)"), std::string::npos);
-  EXPECT_NE(shader.find("StructuredBuffer<uint> PreviousOcrRecord : register(t9)"), std::string::npos);
-  EXPECT_NE(shader.find("ProbeCanonicalBoolean"), std::string::npos);
-  EXPECT_NE(shader.find("ProbeFiniteWholeInRange"), std::string::npos);
-  EXPECT_NE(
-    shader.find("uint hard_cut_count_value = asuint(SBS_STATE_HARD_CUT_COUNT"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    shader.find("prior_flags |= state_fields_valid ? 1u << 9u : 0u;"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    shader.find("PROBE_WORD_APPEARANCE_EXACT_CHANGED"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    shader.find("asuint(current_appearance) != asuint(previous_appearance)"),
-    std::string::npos
-  );
-  EXPECT_NE(shader.find("if (!appearance_finite)"), std::string::npos);
-  EXPECT_NE(
-    shader.find("PreviousOcrRecord[0] == MOTION_PROBE_OCR_RECORD_SCHEMA"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    shader.find("ocr_index < probe_ocr_input_value_count"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    shader.find(
-      "probe_ocr_input_value_count == MOTION_PROBE_OCR_INPUT_VALUE_COUNT"
-    ),
-    std::string::npos
-  );
-  EXPECT_NE(
-    shader.find(
-      "ProbeWords[PROBE_WORD_OCR_INPUT_COMPARED] = compare_ocr_inputs ?"
-    ),
-    std::string::npos
-  );
-  EXPECT_EQ(shader.find("LOCAL_OCR_INPUT_COMPARED"), std::string::npos);
-  EXPECT_EQ(shader.find("InterlockedMax"), std::string::npos);
-  EXPECT_EQ(shader.find("MAX_APPEARANCE_DELTA"), std::string::npos);
-  EXPECT_EQ(shader.find("CurrentModelColor"), std::string::npos);
-  EXPECT_EQ(shader.find("PreviousModelColor"), std::string::npos);
-  EXPECT_EQ(shader.find("PROBE_WORD_RGB_"), std::string::npos);
-  EXPECT_EQ(shader.find("PROBE_WORD_MAX_TILE_EXACT_CHANGED"), std::string::npos);
-  EXPECT_EQ(shader.find("PROBE_WORD_BOTTOM_"), std::string::npos);
-  EXPECT_EQ(shader.find("LOCAL_RGB_"), std::string::npos);
-  EXPECT_EQ(shader.find("LOCAL_BOTTOM_"), std::string::npos);
-  EXPECT_EQ(shader.find("probe_bottom_"), std::string::npos);
-}
 
-TEST(DirectxShaderSourceTest, AdaptiveMotionProbeAuthenticatesSourceBeforeCompile) {
-  namespace cache = models::host_sbs_shader_cache;
-  const auto sources = cache::snapshot_sources(
-    SUNSHINE_SHADERS_DIR,
-    cache::adaptive_motion_probe_specs
-  );
-  ASSERT_TRUE(sources);
-  EXPECT_EQ(
-    cache::source_closure_sha256(sources),
-    cache::adaptive_motion_probe_source_closure_sha256
-  );
-
-  const auto estimator =
-    read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
-  ASSERT_FALSE(estimator.empty());
-  const auto initialize = estimator.find("void initialize_adaptive_motion_probe(");
-  const auto snapshot = estimator.find(
-    "host_sbs_shader_cache::snapshot_sources(",
-    initialize
-  );
-  const auto authenticate = estimator.find(
-    "host_sbs_shader_cache::adaptive_motion_probe_source_closure_sha256",
-    snapshot
-  );
-  const auto compile = estimator.find("!create_shader(", authenticate);
-  const auto next_method = estimator.find(
-    "void destroy_adaptive_motion_probe_event(",
-    compile
-  );
-  ASSERT_NE(initialize, std::string::npos);
-  ASSERT_NE(snapshot, std::string::npos);
-  ASSERT_NE(authenticate, std::string::npos);
-  ASSERT_NE(compile, std::string::npos);
-  ASSERT_NE(next_method, std::string::npos);
-  EXPECT_LT(snapshot, authenticate);
-  EXPECT_LT(authenticate, compile);
-  EXPECT_LT(compile, next_method);
-  EXPECT_NE(
-    estimator.substr(authenticate, compile - authenticate).find(
-      "shader source closure authentication failed"
-    ),
-    std::string::npos
-  );
-}
-
-TEST(DirectxShaderSourceTest, CurrentFrameProbeHasSeparateShadowAndActiveOwners) {
+TEST(DirectxShaderSourceTest, AdaptiveReuseIsAlwaysOnAndGpuOwned) {
   const auto display =
     read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
   ASSERT_FALSE(display.empty());
 
-  const auto build_flag = display.find(
-    "const bool adaptive_probe_enabled = adaptive_motion_enabled();"
-  );
-  const auto build_capture = display.find("adaptive_probe_enabled]() mutable", build_flag);
-  const auto build_argument = display.find("active,\n          adaptive_probe_enabled", build_capture);
-  ASSERT_NE(build_flag, std::string::npos);
-  ASSERT_NE(build_capture, std::string::npos);
-  ASSERT_NE(build_argument, std::string::npos);
-
-  const auto damage = display.find("const auto cached_motion_damage =");
-  const auto adaptive_use = display.find("const auto &damage = cached_motion_damage;", damage);
-  const auto candidate_record = display.find(
-    "const auto audit_record = adaptive_motion_audit.record(",
-    adaptive_use
-  );
-  const auto recorded_gate = display.find("if (audit_record.recorded)", candidate_record);
-  const auto baseline_copy = display.find(
-    "adaptive_probe_baseline_frame_id =",
-    recorded_gate
-  );
-  const auto probe_plan = display.find(
-    "host_sbs_current_frame_probe_plan(",
-    baseline_copy
-  );
-  const auto estimate = display.find("est = depth_estimator->estimate_depth(", probe_plan);
-  const auto observer = display.find("record_current_frame_motion_probe(", estimate);
-  const auto completion_poll = display.find("host_sbs_same_frame_poll_plan(", observer);
-  ASSERT_NE(damage, std::string::npos);
-  ASSERT_NE(adaptive_use, std::string::npos);
-  ASSERT_NE(candidate_record, std::string::npos);
-  ASSERT_NE(recorded_gate, std::string::npos);
-  ASSERT_NE(baseline_copy, std::string::npos);
-  ASSERT_NE(probe_plan, std::string::npos);
-  ASSERT_NE(estimate, std::string::npos);
-  ASSERT_NE(observer, std::string::npos);
-  ASSERT_NE(completion_poll, std::string::npos);
-  EXPECT_LT(candidate_record, recorded_gate);
-  EXPECT_LT(recorded_gate, baseline_copy);
-  EXPECT_LT(probe_plan, estimate);
-  EXPECT_LT(estimate, observer);
-  EXPECT_LT(observer, completion_poll);
-
-  const auto lineage_reset = display.find(
+  const auto candidate_begin = display.find("auto adaptive_hold_decision =");
+  const auto candidate_end = display.find(
     "if (detail::host_sbs_latest_v2_lineage_reset_required(",
-    adaptive_use
+    candidate_begin
   );
-  ASSERT_NE(lineage_reset, std::string::npos);
-  const auto shared_damage_block = display.substr(damage, lineage_reset - damage);
-  std::size_t damage_walks = 0u;
-  std::size_t damage_walk = 0u;
-  while ((damage_walk = shared_damage_block.find(
-            "matched_motion_damage(",
-            damage_walk
-          )) != std::string::npos) {
-    ++damage_walks;
-    ++damage_walk;
-  }
-  EXPECT_EQ(damage_walks, 1u);
+  ASSERT_NE(candidate_begin, std::string::npos);
+  ASSERT_NE(candidate_end, std::string::npos);
+  const auto candidate_body = display.substr(candidate_begin, candidate_end - candidate_begin);
   EXPECT_NE(
-    shared_damage_block.find(
-      "current_ddup_damage,\n                adaptive_route_observable"
-    ),
-    std::string::npos
-  );
-  const auto shadow_spatial_gate = shared_damage_block.find(
-    "if (adaptive_shadow && quiet_signal)"
-  );
-  const auto shadow_spatial_counter = shared_damage_block.find(
-    "++adaptive_shadow_sum_only_broad_veto",
-    shadow_spatial_gate
-  );
-  ASSERT_NE(shadow_spatial_gate, std::string::npos);
-  ASSERT_NE(shadow_spatial_counter, std::string::npos);
-  EXPECT_LT(shadow_spatial_gate, shadow_spatial_counter);
-
-  const auto active_precheck = display.find(
-    "adaptive_model_equivalent_candidate = {",
-    adaptive_use
-  );
-  const auto active_post_copy = display.find(
-    "active_model_hold_candidate_matches(",
-    active_precheck
-  );
-  const auto active_request = display.find(
-    ".authorize_model_equivalent_observation_hold =",
-    active_post_copy
-  );
-  const auto active_identity = display.find(
-    "host_sbs_model_equivalent_hold_identity_matches(",
-    active_request
-  );
-  const auto active_token_clear = display.find(
-    "est.adaptive_motion_observation_hold = {};",
-    active_identity
-  );
-  ASSERT_NE(active_precheck, std::string::npos);
-  ASSERT_NE(active_post_copy, std::string::npos);
-  ASSERT_NE(active_request, std::string::npos);
-  ASSERT_NE(active_identity, std::string::npos);
-  ASSERT_NE(active_token_clear, std::string::npos);
-  EXPECT_LT(active_precheck, active_post_copy);
-  EXPECT_LT(active_post_copy, active_request);
-  EXPECT_LT(active_request, active_identity);
-  EXPECT_LT(active_identity, active_token_clear);
-  const auto active_proof_block = display.substr(
-    active_precheck,
-    active_post_copy - active_precheck
-  );
-  EXPECT_NE(
-    active_proof_block.find(".broad_damage = broad_single_rect"),
+    candidate_body.find("adaptive_route_observable"),
     std::string::npos
   );
   EXPECT_NE(
-    active_proof_block.find(
-      ".ocr_damage_unchanged = damage->ocr_crop_unchanged"
-    ),
+    candidate_body.find("adaptive_gpu_candidate = {"),
     std::string::npos
   );
   EXPECT_NE(
-    active_proof_block.find(".damage_history = current_ddup_damage->history.get()"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    active_proof_block.find(".baseline_damage_token ="),
-    std::string::npos
-  );
-  EXPECT_NE(
-    active_proof_block.find(".current_damage_token = current_ddup_damage->token"),
+    candidate_body.find("host_sbs_adaptive_hold_decision_e::hold_candidate"),
     std::string::npos
   );
 
-  const auto observation_token = display.find(
-    "const auto observation_hold = est.adaptive_motion_observation_hold;",
-    active_request
+  const auto admission = display.find("const auto host_depth_admission =");
+  const auto estimate = display.find("est = depth_estimator->estimate_depth(", admission);
+  const auto same_frame_poll = display.find("host_sbs_same_frame_poll_plan(", estimate);
+  ASSERT_NE(admission, std::string::npos);
+  ASSERT_NE(estimate, std::string::npos);
+  ASSERT_NE(same_frame_poll, std::string::npos);
+  const auto submit_body = display.substr(admission, same_frame_poll - admission);
+  EXPECT_NE(submit_body.find("gpu_observation_barrier.active()"), std::string::npos);
+  EXPECT_NE(submit_body.find("models::gpu_adaptive_reuse_request {"), std::string::npos);
+  EXPECT_NE(submit_body.find(".authorize_gpu_undecided_reuse ="), std::string::npos);
+  EXPECT_NE(
+    submit_body.find("adaptive_hold_cadence.hold_candidate_still_fresh("),
+    std::string::npos
   );
-  const auto approximate_barrier = display.find(
-    "host_sbs_depth_reuse_kind_e::bounded_model_equivalent;",
-    observation_token
+  const auto private_copy = submit_body.find("copy_matched_frame(");
+  const auto final_route_observation = submit_body.find(
+    "adaptive_motion_route_state.observe(current_adaptive_route_epoch())",
+    private_copy
   );
-  ASSERT_NE(observation_token, std::string::npos);
-  ASSERT_NE(approximate_barrier, std::string::npos);
-  EXPECT_LT(observation_token, approximate_barrier);
-  EXPECT_LT(approximate_barrier, active_identity);
+  const auto final_authorization = submit_body.find(
+    "const bool authorize_gpu_undecided =",
+    private_copy
+  );
+  ASSERT_NE(private_copy, std::string::npos);
+  ASSERT_NE(final_route_observation, std::string::npos);
+  ASSERT_NE(final_authorization, std::string::npos);
+  EXPECT_LT(final_route_observation, final_authorization);
+  EXPECT_NE(submit_body.find("est.gpu_undecided_transaction_enqueued"), std::string::npos);
+  EXPECT_NE(
+    submit_body.find("force_infer_transaction_enqueued = est.inference_enqueued"),
+    std::string::npos
+  );
+  EXPECT_NE(submit_body.find("gpu_observation_barrier.record_gpu_undecided_enqueue(frame_id)"), std::string::npos);
+  EXPECT_NE(submit_body.find("if (depth_transaction_enqueued)"), std::string::npos);
 
-  const auto real_enqueue = display.find(
-    "if (est.inference_enqueued)",
-    active_token_clear
+  const auto post_cache_route = display.find(
+    "const bool post_completion_cache_route_matches ="
   );
-  const auto fallthrough_account = display.find(
-    "if (active_hold_fell_through)",
-    real_enqueue
+  const auto post_cache = display.find("const bool post_completion_cache_gate_open =");
+  const auto completion_check = display.find("gpu_transaction_class_matches(est", post_cache);
+  const auto retention = display.find("retain_latest_v2_lineage(", completion_check);
+  const auto barrier_clear = display.find(
+    "gpu_observation_barrier.record_known_force_infer_completion(",
+    retention
   );
-  const auto forced_refresh_account = display.find(
-    "if (adaptive_refresh_required_at_entry)",
-    real_enqueue
+  ASSERT_NE(post_cache_route, std::string::npos);
+  ASSERT_NE(post_cache, std::string::npos);
+  ASSERT_NE(completion_check, std::string::npos);
+  ASSERT_NE(retention, std::string::npos);
+  ASSERT_NE(barrier_clear, std::string::npos);
+  const auto post_cache_route_body = display.substr(
+    post_cache_route,
+    post_cache - post_cache_route
   );
-  const auto approximate_barrier_clear = display.find(
-    "host_sbs_depth_reuse_kind_e::none;",
-    real_enqueue
-  );
-  const auto cadence_rearm = display.find(
-    "adaptive_hold_cadence.record_successful_enqueue(",
-    real_enqueue
-  );
-  ASSERT_NE(real_enqueue, std::string::npos);
-  ASSERT_NE(fallthrough_account, std::string::npos);
-  ASSERT_NE(forced_refresh_account, std::string::npos);
-  ASSERT_NE(approximate_barrier_clear, std::string::npos);
-  ASSERT_NE(cadence_rearm, std::string::npos);
-  EXPECT_LT(real_enqueue, fallthrough_account);
-  EXPECT_LT(real_enqueue, forced_refresh_account);
-  EXPECT_LT(forced_refresh_account, approximate_barrier_clear);
-  EXPECT_LT(approximate_barrier_clear, cadence_rearm);
-  EXPECT_LT(cadence_rearm, completion_poll);
-
-  const auto post_completion_authorization = display.find(
-    "auto post_completion_reuse_authorization =",
-    active_token_clear
-  );
-  const auto cached_estimate = display.find(
-    "est = latest_v2_lineage.estimate;",
-    post_completion_authorization
-  );
-  const auto cached_baseline_check = display.find(
-    "post_completion_reuse_authorization.baseline_frame_id ==",
-    cached_estimate
-  );
-  const auto private_current_color = display.find(
-    "matched_candidate_slot->srv.get()",
-    cached_baseline_check
-  );
-  const auto cache_warp_latched = display.find(
-    "cached_current_color_warp = true;",
-    private_current_color
-  );
-  const auto no_retain_reuse = display.find(
-    "!using_cached_estimate",
-    cache_warp_latched
-  );
-  ASSERT_NE(post_completion_authorization, std::string::npos);
-  ASSERT_NE(cached_estimate, std::string::npos);
-  ASSERT_NE(cached_baseline_check, std::string::npos);
-  ASSERT_NE(private_current_color, std::string::npos);
-  ASSERT_NE(cache_warp_latched, std::string::npos);
-  ASSERT_NE(no_retain_reuse, std::string::npos);
-  EXPECT_LT(post_completion_authorization, cached_estimate);
-  EXPECT_LT(cached_estimate, cached_baseline_check);
-  EXPECT_LT(cached_baseline_check, private_current_color);
-  EXPECT_LT(private_current_color, cache_warp_latched);
-  EXPECT_LT(cache_warp_latched, no_retain_reuse);
-
-  const auto active_match_definition = display.find(
-    "bool active_model_hold_candidate_matches("
-  );
-  const auto route_match_definition = display.find(
-    "bool matched_route_matches_current(",
-    active_match_definition
-  );
-  ASSERT_NE(active_match_definition, std::string::npos);
-  ASSERT_NE(route_match_definition, std::string::npos);
-  const auto active_match_body = display.substr(
-    active_match_definition,
-    route_match_definition - active_match_definition
+  EXPECT_NE(
+    post_cache_route_body.find("authority_generation(live_window_authority)"),
+    std::string::npos
   );
   EXPECT_EQ(
-    active_match_body.find("matched_motion_damage("),
+    post_cache_route_body.find("current_root_authority_generation"),
+    std::string::npos
+  );
+  const auto barrier_acceptance = display.rfind(
+    "const bool barrier_force_infer_completion_accepted =",
+    retention
+  );
+  ASSERT_NE(barrier_acceptance, std::string::npos);
+  const auto barrier_acceptance_body = display.substr(
+    barrier_acceptance,
+    retention - barrier_acceptance
+  );
+  EXPECT_NE(
+    barrier_acceptance_body.find("authority_generation(live_window_authority)"),
     std::string::npos
   );
   EXPECT_NE(
-    active_match_body.find(
-      "candidate.inference_ddup_damage->token != proof.current_damage_token"
-    ),
+    barrier_acceptance_body.find("authority_generation(live_foreground_region)"),
     std::string::npos
   );
   EXPECT_NE(
-    active_match_body.find(
-      "proof.baseline_damage_token"
+    barrier_acceptance_body.find("live_browser_authority_epoch"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    barrier_acceptance_body.find("interactive_move_size_observed"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    barrier_acceptance_body.find("current_root_authority_generation"),
+    std::string::npos
+  );
+  const auto pending_acceptance = display.rfind(
+    "const bool current_reusable_enqueue_pending =",
+    barrier_acceptance
+  );
+  ASSERT_NE(pending_acceptance, std::string::npos);
+  const auto pending_acceptance_body = display.substr(
+    pending_acceptance,
+    barrier_acceptance - pending_acceptance
+  );
+  EXPECT_NE(
+    pending_acceptance_body.find("authority_generation(live_window_authority)"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    pending_acceptance_body.find("current_root_authority_generation"),
+    std::string::npos
+  );
+  const auto barrier_clear_end = display.find(
+    "const bool completion_reuse_authorized =",
+    barrier_clear
+  );
+  ASSERT_NE(barrier_clear_end, std::string::npos);
+  const auto barrier_clear_body = display.substr(
+    barrier_clear,
+    barrier_clear_end - barrier_clear
+  );
+  EXPECT_NE(barrier_clear_body.find("sbs_telemetry_has_sample = false"), std::string::npos);
+  EXPECT_NE(
+    barrier_clear_body.find("sbs_telemetry_last_hard_cut_count = 0u"),
+    std::string::npos
+  );
+  EXPECT_NE(barrier_clear_body.find("sbs_telemetry_min_frame_id = std::max("), std::string::npos);
+  EXPECT_NE(
+    display.substr(post_cache, completion_check - post_cache).find(
+      "!gpu_observation_barrier.active()"
     ),
     std::string::npos
   );
 
-  const auto cache_copy = display.find("latest_v2_lineage.estimate = estimate;");
-  ASSERT_NE(cache_copy, std::string::npos);
+  const auto retain_definition = display.find("bool retain_latest_v2_lineage(");
+  const auto retain_end = display.find("bool ensure_sbs_intermediate_storage(", retain_definition);
+  ASSERT_NE(retain_definition, std::string::npos);
+  ASSERT_NE(retain_end, std::string::npos);
+  const auto retain_body = display.substr(retain_definition, retain_end - retain_definition);
   EXPECT_NE(
-    display.find(
-      "latest_v2_lineage.estimate.adaptive_motion_observation_hold = {};",
-      cache_copy
-    ),
+    retain_body.find("known_force_infer_completion(estimate, slot)"),
     std::string::npos
   );
   EXPECT_NE(
-    display.find(
-      "latest_v2_lineage.estimate.current_frame_motion_probe = {};",
-      cache_copy
+    retain_body.find("latest_v2_lineage.estimate.gpu_undecided_completion = false"),
+    std::string::npos
+  );
+
+  const auto needs_poll = display.find("bool needs_conversion_poll() const");
+  const auto needs_poll_end = display.find("rendered_content_timestamp() const", needs_poll);
+  ASSERT_NE(needs_poll, std::string::npos);
+  ASSERT_NE(needs_poll_end, std::string::npos);
+  EXPECT_NE(
+    display.substr(needs_poll, needs_poll_end - needs_poll).find(
+      "gpu_observation_barrier.active()"
     ),
     std::string::npos
   );
 
-  const auto observer_definition = display.find(
-    "void record_current_frame_motion_probe("
-  );
-  const auto reset_definition = display.find(
-    "void reset_adaptive_motion_runtime(",
-    observer_definition
-  );
-  ASSERT_NE(observer_definition, std::string::npos);
-  ASSERT_NE(reset_definition, std::string::npos);
-  const auto observer_body = display.substr(
-    observer_definition,
-    reset_definition - observer_definition
-  );
+  const auto fail_flat = display.find("void fail_depth_pipeline_flat()");
+  const auto fail_flat_end = display.find("// Create the D3D depth pipeline", fail_flat);
+  const auto adaptive_reset = display.find("void reset_adaptive_reuse_runtime(");
+  const auto adaptive_reset_end = display.find("void revoke_adaptive_reuse(", adaptive_reset);
+  const auto init_output = display.find("int init_output(");
+  ASSERT_NE(fail_flat, std::string::npos);
+  ASSERT_NE(fail_flat_end, std::string::npos);
+  ASSERT_NE(adaptive_reset, std::string::npos);
+  ASSERT_NE(adaptive_reset_end, std::string::npos);
+  ASSERT_NE(init_output, std::string::npos);
   EXPECT_NE(
-    observer_body.find("host_sbs_current_frame_probe_identity_matches"),
+    display.substr(fail_flat, fail_flat_end - fail_flat).find(
+      "gpu_observation_barrier.reset()"
+    ),
     std::string::npos
   );
-  EXPECT_EQ(observer_body.find("adaptive_hold_decision ="), std::string::npos);
-  EXPECT_EQ(observer_body.find("adaptive_hold_cadence"), std::string::npos);
-  EXPECT_EQ(observer_body.find("latest_v2_lineage"), std::string::npos);
-  EXPECT_EQ(observer_body.find("matched_candidate_slot"), std::string::npos);
-  const auto shadow_ledger_gate = observer_body.find(
-    "if (!adaptive_motion_shadow_enabled())"
+  EXPECT_EQ(
+    display.substr(adaptive_reset, adaptive_reset_end - adaptive_reset).find(
+      "gpu_observation_barrier.reset()"
+    ),
+    std::string::npos
   );
-  const auto shadow_ledger = observer_body.find(
-    "adaptive_shadow_lifetime_probe_results.add(probe_class)",
-    shadow_ledger_gate
+  EXPECT_NE(
+    display.find("gpu_observation_barrier.reset()", init_output),
+    std::string::npos
   );
-  ASSERT_NE(shadow_ledger_gate, std::string::npos);
-  ASSERT_NE(shadow_ledger, std::string::npos);
-  EXPECT_LT(shadow_ledger_gate, shadow_ledger);
+
+  const auto domain_reset = display.find(
+    "else if (matched_render_slot && est.input_domain_reset)"
+  );
+  const auto terminal_check = display.find(
+    "if (depth_estimator && depth_estimator->has_terminal_failure())",
+    domain_reset
+  );
+  ASSERT_NE(domain_reset, std::string::npos);
+  ASSERT_NE(terminal_check, std::string::npos);
+  const auto domain_reset_body = display.substr(domain_reset, terminal_check - domain_reset);
+  EXPECT_NE(domain_reset_body.find("if (force_infer_enqueued_at)"), std::string::npos);
+  EXPECT_NE(domain_reset_body.find("*force_infer_enqueued_at"), std::string::npos);
+  EXPECT_EQ(domain_reset_body.find("std::chrono::steady_clock::now()"), std::string::npos);
 
   const auto telemetry_poll = display.find("void poll_sbs_telemetry_after_output()");
-  const auto telemetry_poll_end = display.find(
-    "struct sbs_gpu_timer_slot_t",
-    telemetry_poll
-  );
+  const auto telemetry_poll_end = display.find("struct sbs_gpu_timer_slot_t", telemetry_poll);
   ASSERT_NE(telemetry_poll, std::string::npos);
   ASSERT_NE(telemetry_poll_end, std::string::npos);
-  const auto telemetry_body = display.substr(
-    telemetry_poll,
-    telemetry_poll_end - telemetry_poll
+  const auto telemetry_body = display.substr(telemetry_poll, telemetry_poll_end - telemetry_poll);
+  EXPECT_NE(telemetry_body.find("const bool external_available ="), std::string::npos);
+  EXPECT_NE(telemetry_body.find("if (!external_available)"), std::string::npos);
+  EXPECT_NE(
+    telemetry_body.find("!gpu_observation_barrier.active()"),
+    std::string::npos
   );
-  const auto audit_resolve = telemetry_body.find("adaptive_motion_audit.resolve(");
-  const auto audit_shadow_gate = telemetry_body.rfind(
-    "if (adaptive_motion_shadow_enabled())",
-    audit_resolve
-  );
-  const auto state_observe = telemetry_body.find(
-    "adaptive_motion_state.observe(",
-    audit_resolve
-  );
-  ASSERT_NE(audit_resolve, std::string::npos);
-  ASSERT_NE(audit_shadow_gate, std::string::npos);
-  ASSERT_NE(state_observe, std::string::npos);
-  EXPECT_LT(audit_shadow_gate, audit_resolve);
-  EXPECT_LT(audit_resolve, state_observe);
-  const auto shadow_sample = telemetry_body.find(
-    "++adaptive_shadow_samples",
-    state_observe
-  );
-  const auto shadow_sample_gate = telemetry_body.rfind(
-    "if (adaptive_motion_shadow_enabled())",
-    shadow_sample
-  );
-  ASSERT_NE(shadow_sample, std::string::npos);
-  ASSERT_NE(shadow_sample_gate, std::string::npos);
-  EXPECT_LT(shadow_sample_gate, shadow_sample);
 
-  const auto active_log = display.find("void log_adaptive_active_stats_if_due(");
-  const auto active_log_end = display.find(
-    "void poll_sbs_telemetry_after_output()",
-    active_log
-  );
-  ASSERT_NE(active_log, std::string::npos);
-  ASSERT_NE(active_log_end, std::string::npos);
-  const auto active_log_body = display.substr(active_log, active_log_end - active_log);
-  EXPECT_NE(
-    active_log_body.find(
-      "candidate_outcomes_hold/fallthrough_enqueue/postcheck_veto/unresolved="
-    ),
-    std::string::npos
-  );
-  EXPECT_NE(
-    active_log_body.find("adaptive_probe_collection.summary()"),
-    std::string::npos
-  );
-  EXPECT_EQ(active_log_body.find("veto_ocr"), std::string::npos);
 }
 
-TEST(DirectxShaderSourceTest, AdaptiveExactOcrInputOwnershipFailsOpen) {
-  const auto estimator =
-    read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
-  const auto display =
-    read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
-  ASSERT_FALSE(estimator.empty());
-  ASSERT_FALSE(display.empty());
-
-  const auto preprocess = estimator.find("context->CSSetShader(ocr_preprocess_cs.Get()");
-  const auto probe = estimator.find("dispatch_adaptive_motion_probe(", preprocess);
-  const auto depth_map = estimator.find("cuGraphicsMapResources(2, depth_resources", probe);
-  const auto probe_collect = estimator.find("collect_adaptive_motion_probe(", depth_map);
-  const auto hold_select = estimator.find("select_adaptive_motion_hold(", probe_collect);
-  const auto unmap = estimator.find(
-    "ocr_unmap_res = cuda.cuGraphicsUnmapResources(",
-    hold_select
-  );
-  const auto stream_owner = estimator.find(
-    "ocr_stream_reuse_pending =\n        !terminal_failure && ocr_mapped",
-    unmap
-  );
-  ASSERT_NE(preprocess, std::string::npos);
-  ASSERT_NE(probe, std::string::npos);
-  ASSERT_NE(depth_map, std::string::npos);
-  ASSERT_NE(probe_collect, std::string::npos);
-  ASSERT_NE(hold_select, std::string::npos);
-  ASSERT_NE(unmap, std::string::npos);
-  ASSERT_NE(stream_owner, std::string::npos);
-  EXPECT_LT(preprocess, probe);
-  EXPECT_LT(probe, depth_map);
-  EXPECT_LT(depth_map, probe_collect);
-  EXPECT_LT(probe_collect, hold_select);
-  EXPECT_LT(hold_select, unmap);
-  EXPECT_LT(unmap, stream_owner);
-  const auto hold_block = estimator.substr(hold_select, unmap - hold_select);
-  EXPECT_NE(hold_block.find("ocr_bindings_ok"), std::string::npos);
-  EXPECT_NE(
-    hold_block.find("adaptive_ocr_authority_still_owned"),
-    std::string::npos
-  );
-
-  const auto probe_dispatch = estimator.find(
-    "bool dispatch_adaptive_motion_probe("
-  );
-  const auto probe_collect_definition = estimator.find(
-    "adaptive_motion_probe_result collect_adaptive_motion_probe(",
-    probe_dispatch
-  );
-  ASSERT_NE(probe_dispatch, std::string::npos);
-  ASSERT_NE(probe_collect_definition, std::string::npos);
-  const auto dispatch_body = estimator.substr(
-    probe_dispatch,
-    probe_collect_definition - probe_dispatch
-  );
-  const auto constants_abi = dispatch_body.find(
-    "const std::array<std::uint32_t, 8> constants"
-  );
-  const auto inputs_abi = dispatch_body.find(
-    "ID3D11ShaderResourceView *inputs[10]"
-  );
-  const auto current_ocr_binding = dispatch_body.find(
-    "ocr_input_srv.Get()",
-    inputs_abi
-  );
-  const auto previous_ocr_binding = dispatch_body.find(
-    "ocr_previous_input_srv.Get()",
-    current_ocr_binding
-  );
-  const auto ocr_record_binding = dispatch_body.find(
-    "ocr_box_record_srv.Get()",
-    previous_ocr_binding
-  );
-  ASSERT_NE(constants_abi, std::string::npos);
-  ASSERT_NE(inputs_abi, std::string::npos);
-  ASSERT_NE(current_ocr_binding, std::string::npos);
-  ASSERT_NE(previous_ocr_binding, std::string::npos);
-  ASSERT_NE(ocr_record_binding, std::string::npos);
-  EXPECT_LT(current_ocr_binding, previous_ocr_binding);
-  EXPECT_LT(previous_ocr_binding, ocr_record_binding);
-  EXPECT_NE(
-    dispatch_body.find("CSSetShaderResources(0u, 10u, inputs)"),
-    std::string::npos
-  );
-
-  const auto unregister = estimator.find("const auto unregister_ocr_interop =");
-  const auto retry = estimator.find("if (!ocr_resources_ok && ocr_input_supports_adaptive_compare)", unregister);
-  const auto both_released = estimator.find("if (!unregister_ocr_interop())", retry);
-  const auto recreate = estimator.find("ocr_input_buf.Reset();", both_released);
-  ASSERT_NE(unregister, std::string::npos);
-  ASSERT_NE(retry, std::string::npos);
-  ASSERT_NE(both_released, std::string::npos);
-  ASSERT_NE(recreate, std::string::npos);
-  EXPECT_LT(unregister, retry);
-  EXPECT_LT(retry, both_released);
-  EXPECT_LT(both_released, recreate);
-  EXPECT_NE(
-    estimator.substr(unregister, retry - unregister).find(
-      "input_unregistered && output_unregistered"
-    ),
-    std::string::npos
-  );
-
-  const auto proof_match = display.find("const bool active_hold_ocr_proof_matches");
-  const auto postcheck = display.find("const bool active_hold_revalidated", proof_match);
-  ASSERT_NE(proof_match, std::string::npos);
-  ASSERT_NE(postcheck, std::string::npos);
-  const auto proof_block = display.substr(proof_match, postcheck - proof_match);
-  EXPECT_NE(
-    proof_block.find("adaptive_motion_ocr_hold_proof_e::ddup_crop_unchanged"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    proof_block.find("adaptive_motion_ocr_hold_proof_e::exact_ocr_input"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    proof_block.find("exact_ocr_input_matches_baseline()"),
-    std::string::npos
-  );
-}
-
-TEST(DirectxShaderSourceTest, AdaptiveProbeUsesTestedProgressAndNonblockingMap) {
-  const auto estimator =
-    read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
-  const auto display =
-    read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
-  ASSERT_FALSE(estimator.empty());
-  ASSERT_FALSE(display.empty());
-
-  const auto collect = estimator.find(
-    "adaptive_motion_probe_result collect_adaptive_motion_probe("
-  );
-  const auto next_method = estimator.find("bool initialize_ocr_context(", collect);
-  ASSERT_NE(collect, std::string::npos);
-  ASSERT_NE(next_method, std::string::npos);
-  const auto body = estimator.substr(collect, next_method - collect);
-
-  const auto progress = body.find("adaptive_motion_probe_poll_progress progress;");
-  const auto query_guard = body.find("if (progress.event_query_needed())", progress);
-  const auto query = body.find("cuEventQuery(", query_guard);
-  const auto sticky_set = body.find(
-    "progress.observe(adaptive_motion_probe_poll_observation_e::event_ready)",
-    query
-  );
-  const auto map_guard = body.find("if (progress.staging_map_needed())", sticky_set);
-  const auto map = body.find("context->Map(", map_guard);
-  const auto busy = body.find("mapped_result == DXGI_ERROR_WAS_STILL_DRAWING", map);
-  const auto busy_end = body.find("} else if (FAILED(mapped_result)", busy);
-  const auto timeout = body.find("classify_adaptive_motion_probe_timeout(", busy_end);
-  ASSERT_NE(progress, std::string::npos);
-  ASSERT_NE(query_guard, std::string::npos);
-  ASSERT_NE(query, std::string::npos);
-  ASSERT_NE(sticky_set, std::string::npos);
-  ASSERT_NE(map_guard, std::string::npos);
-  ASSERT_NE(map, std::string::npos);
-  ASSERT_NE(busy, std::string::npos);
-  ASSERT_NE(busy_end, std::string::npos);
-  ASSERT_NE(timeout, std::string::npos);
-  EXPECT_LT(query_guard, query);
-  EXPECT_LT(query, sticky_set);
-  EXPECT_LT(sticky_set, map_guard);
-  EXPECT_LT(map_guard, map);
-  EXPECT_LT(map, busy);
-  EXPECT_LT(busy, timeout);
-  EXPECT_EQ(body.substr(busy, busy_end - busy).find("break;"), std::string::npos);
-  EXPECT_NE(
-    body.substr(busy, busy_end - busy).find(
-      "adaptive_motion_probe_poll_observation_e::staging_map_busy"
-    ),
-    std::string::npos
-  );
-  EXPECT_NE(body.find("progress.poll_round_count >= poll_round_limit"), std::string::npos);
-  EXPECT_NE(
-    body.find("result.event_query_count = progress.event_query_count"),
-    std::string::npos
-  );
-  EXPECT_EQ(body.find("Flush("), std::string::npos);
-  EXPECT_EQ(body.find("Sleep("), std::string::npos);
-  EXPECT_EQ(body.find("sleep_for"), std::string::npos);
-  EXPECT_NE(body.find("D3D11_MAP_FLAG_DO_NOT_WAIT"), std::string::npos);
-
-  EXPECT_NE(
-    display.find("timeout_event_immediate/deadline/fuse="),
-    std::string::npos
-  );
-  EXPECT_NE(
-    display.find("timeout_map_immediate/deadline/fuse="),
-    std::string::npos
-  );
-  EXPECT_NE(display.find("timed_out_total()"), std::string::npos);
-  EXPECT_NE(display.find("probe_collection={"), std::string::npos);
-  EXPECT_NE(display.find("lifetime_probe_collection={"), std::string::npos);
-}
 
 TEST(DirectxShaderSourceTest, HostSbsRejectsRotationAndUsesMatchedV2Frames) {
   const auto display =
@@ -6453,35 +5793,36 @@ TEST(DirectxShaderSourceTest, HostTelemetryReadbackIsNonblockingAndCutBridgeCont
   EXPECT_EQ(readback.find("sleep_for"), std::string::npos);
   EXPECT_EQ(readback.find("while ("), std::string::npos);
 
-  // External copies remain subscription-gated; the separate adaptive probe may request its own
-  // exact-frame evidence. Either demand remains ordered after production output.
+  // Diagnostic copies remain external-subscription-only. GPU adaptive arbitration owns no
+  // telemetry readback or CPU-side cadence gate.
+  const auto external_available_declaration =
+    display.find("const bool external_available =");
   const auto external_due_declaration = display.find("const bool external_due =");
   const auto enabled_gate = display.find("enabled &&", external_due_declaration);
-  const auto adaptive_due_declaration = display.find("const bool adaptive_due =", enabled_gate);
-  const auto adaptive_requested_gate = display.find(
-    "adaptive_requested &&",
-    adaptive_due_declaration
+  const auto schedule_declaration = display.find(
+    "const bool schedule_snapshot =",
+    enabled_gate
   );
-  const auto due_declaration = display.find(
-    "const bool due = external_due || adaptive_due",
-    adaptive_due_declaration
+  const auto external_schedule_gate = display.find(
+    "external_due && producer_active && !gpu_observation_barrier.active()",
+    schedule_declaration
   );
   const auto poll_call =
-    display.find("depth_estimator->poll_depth_telemetry(", due_declaration);
-  const auto due_argument = display.find("due && producer_active", poll_call);
+    display.find("depth_estimator->poll_depth_telemetry(", schedule_declaration);
+  const auto schedule_argument = display.find("schedule_snapshot,", poll_call);
+  ASSERT_NE(external_available_declaration, std::string::npos);
   ASSERT_NE(external_due_declaration, std::string::npos);
   ASSERT_NE(enabled_gate, std::string::npos);
-  ASSERT_NE(adaptive_due_declaration, std::string::npos);
-  ASSERT_NE(adaptive_requested_gate, std::string::npos);
-  ASSERT_NE(due_declaration, std::string::npos);
+  ASSERT_NE(schedule_declaration, std::string::npos);
+  ASSERT_NE(external_schedule_gate, std::string::npos);
   ASSERT_NE(poll_call, std::string::npos);
-  ASSERT_NE(due_argument, std::string::npos);
+  ASSERT_NE(schedule_argument, std::string::npos);
+  EXPECT_LT(external_available_declaration, external_due_declaration);
   EXPECT_LT(external_due_declaration, enabled_gate);
-  EXPECT_LT(enabled_gate, adaptive_due_declaration);
-  EXPECT_LT(adaptive_due_declaration, adaptive_requested_gate);
-  EXPECT_LT(adaptive_requested_gate, due_declaration);
-  EXPECT_LT(due_declaration, poll_call);
-  EXPECT_LT(poll_call, due_argument);
+  EXPECT_LT(enabled_gate, schedule_declaration);
+  EXPECT_LT(schedule_declaration, external_schedule_gate);
+  EXPECT_LT(external_schedule_gate, poll_call);
+  EXPECT_LT(poll_call, schedule_argument);
   const auto producer_failure_gate = display.find(
     "if (!producer_active)",
     poll_call

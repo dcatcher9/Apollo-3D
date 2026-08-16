@@ -730,14 +730,15 @@ namespace models::host_sbs_shader_cache {
     const auto shader_root = assets_dir / "shaders" / "directx";
     bool all_compiled = true;
     if (!prewarm_shader_set(shader_root, parallax_v2_producer_specs, all_compiled) ||
+        !prewarm_shader_set(shader_root, near_identical_detector_specs, all_compiled) ||
         !prewarm_shader_set(shader_root, parallax_v2_live_renderer_specs, all_compiled) ||
         !prewarm_shader_set(shader_root, sbs_flat_fallback_specs, all_compiled)) {
       return false;
     }
     BOOST_LOG(info)
       << "Prewarmed the complete Host SBS V2 shader set ("
-      << parallax_v2_producer_specs.size() + parallax_v2_live_renderer_specs.size() +
-           sbs_flat_fallback_specs.size()
+      << parallax_v2_producer_specs.size() + near_identical_detector_specs.size() +
+           parallax_v2_live_renderer_specs.size() + sbs_flat_fallback_specs.size()
       << " production shaders"
       << "; persistent_hits="
       << cache_statistics().persistent_hits - statistics_before.persistent_hits

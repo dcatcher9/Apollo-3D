@@ -437,322 +437,186 @@ namespace models {
                                  depth_optional_work_mode_e::ordinary;
   }
 
-  /** Optional current-frame motion evidence collected before DAV2 submission. */
-  inline constexpr std::uint32_t adaptive_motion_probe_contract_tag = 0x354D4643u;
-  inline constexpr std::size_t adaptive_motion_probe_word_count = 23u;
-  inline constexpr std::uint32_t adaptive_motion_probe_max_exact_numeric_counter = 16777215u;
-  inline constexpr std::uint32_t adaptive_motion_ocr_input_value_count =
-    depth_coordinate_v2::subtitle_ocr_input_n *
-    depth_coordinate_v2::subtitle_ocr_input_c *
-    depth_coordinate_v2::subtitle_ocr_input_width *
-    depth_coordinate_v2::subtitle_ocr_input_height;
+  /** Fixed GPU-only near-identical decision and history-owner contracts. */
+  inline constexpr std::uint32_t near_identical_history_owner_contract_tag = 0x3142484Eu;
+  inline constexpr std::uint32_t near_identical_history_owner_contract_schema = 1u;
+  inline constexpr std::size_t near_identical_history_owner_word_count = 8u;
 
-  enum class adaptive_motion_probe_status_e : std::uint8_t {
-    not_requested,
-    unavailable,
-    timed_out,
-    invalid,
-    ready,
+  inline constexpr std::uint32_t near_identical_decision_cookie = 0xD1EC15A5u;
+  inline constexpr std::uint32_t near_identical_token_low_cookie = 0xA3756C91u;
+  inline constexpr std::uint32_t near_identical_token_high_cookie = 0x5C8A936Eu;
+  inline constexpr std::uint32_t near_identical_proposal_magic = 0x504F5250u;  // PROP
+  inline constexpr std::uint32_t near_identical_receipt_magic = 0x47524243u;  // CBRG
+  inline constexpr std::uint32_t near_identical_request_magic = 0x54535152u;  // RQST
+  inline constexpr std::size_t near_identical_gpu_decision_word_count = 44u;
+  inline constexpr std::size_t near_identical_gpu_decision_byte_count =
+    near_identical_gpu_decision_word_count * sizeof(std::uint32_t);
+
+  enum class near_identical_gpu_branch_e : std::uint32_t {
+    reuse = 0u,
+    infer = 1u,
   };
 
-  /** Exact bounded-readback exit that produced a timed-out probe. */
-  enum class adaptive_motion_probe_timeout_reason_e : std::uint8_t {
-    none,
-    event_immediate_only,
-    event_deadline,
-    event_poll_fuse,
-    staging_map_immediate_only,
-    staging_map_deadline,
-    staging_map_poll_fuse,
+  enum class near_identical_gpu_decision_word_e : std::size_t {
+    decision,
+    decision_cookie,
+    decision_token_low,
+    decision_token_high,
+    decision_token_low_cookie,
+    decision_token_high_cookie,
+    decision_magic,
+    decision_reserved,
+    request_token_low,
+    request_token_high,
+    request_token_low_cookie,
+    request_token_high_cookie,
+    request_magic,
+    request_reserved_0,
+    request_reserved_1,
+    request_reserved_2,
+    infer_reduce_x,
+    infer_reduce_y,
+    infer_reduce_z,
+    infer_reduce_padding,
+    infer_one_x,
+    infer_one_y,
+    infer_one_z,
+    infer_one_padding,
+    infer_grid16_x,
+    infer_grid16_y,
+    infer_grid16_z,
+    infer_grid16_padding,
+    infer_grid8_x,
+    infer_grid8_y,
+    infer_grid8_z,
+    infer_grid8_padding,
+    infer_columns_x,
+    infer_columns_y,
+    infer_columns_z,
+    infer_columns_padding,
+    infer_rows_x,
+    infer_rows_y,
+    infer_rows_z,
+    infer_rows_padding,
+    reuse_grid16_x,
+    reuse_grid16_y,
+    reuse_grid16_z,
+    reuse_grid16_padding,
   };
 
-  /** Classify which nonblocking readiness phase exhausted the candidate's allowance. */
-  [[nodiscard]] constexpr adaptive_motion_probe_timeout_reason_e
-  classify_adaptive_motion_probe_timeout(
-    const bool event_ready,
-    const bool has_wait_deadline,
-    const bool deadline_reached,
-    const bool poll_fuse_reached
+  [[nodiscard]] constexpr std::size_t near_identical_gpu_decision_word_index(
+    const near_identical_gpu_decision_word_e word
   ) noexcept {
-    if (!has_wait_deadline) {
-      return event_ready ?
-               adaptive_motion_probe_timeout_reason_e::staging_map_immediate_only :
-               adaptive_motion_probe_timeout_reason_e::event_immediate_only;
-    }
-    if (deadline_reached) {
-      return event_ready ?
-               adaptive_motion_probe_timeout_reason_e::staging_map_deadline :
-               adaptive_motion_probe_timeout_reason_e::event_deadline;
-    }
-    if (poll_fuse_reached) {
-      return event_ready ?
-               adaptive_motion_probe_timeout_reason_e::staging_map_poll_fuse :
-               adaptive_motion_probe_timeout_reason_e::event_poll_fuse;
-    }
-    return adaptive_motion_probe_timeout_reason_e::none;
+    return static_cast<std::size_t>(word);
   }
 
-  enum class adaptive_motion_probe_poll_observation_e : std::uint8_t {
-    event_not_ready,
-    event_ready,
-    event_failed,
-    staging_map_busy,
-    staging_map_ready,
-    staging_map_failed,
-  };
-
-  /** Minimal state machine for sticky event readiness and bounded staging-map retries. */
-  struct adaptive_motion_probe_poll_progress {
-    bool event_ready = false;
-    bool staging_map_complete = false;
-    std::uint32_t poll_round_count = 0u;
-    std::uint32_t event_query_count = 0u;
-    std::uint32_t staging_map_attempt_count = 0u;
-    std::uint32_t staging_map_busy_count = 0u;
-
-    constexpr void begin_round() noexcept {
-      ++poll_round_count;
-    }
-
-    [[nodiscard]] constexpr bool event_query_needed() const noexcept {
-      return !event_ready;
-    }
-
-    [[nodiscard]] constexpr bool staging_map_needed() const noexcept {
-      return event_ready && !staging_map_complete;
-    }
-
-    constexpr void observe(
-      const adaptive_motion_probe_poll_observation_e observation
-    ) noexcept {
-      switch (observation) {
-        case adaptive_motion_probe_poll_observation_e::event_not_ready:
-        case adaptive_motion_probe_poll_observation_e::event_failed:
-          ++event_query_count;
-          break;
-        case adaptive_motion_probe_poll_observation_e::event_ready:
-          ++event_query_count;
-          event_ready = true;
-          break;
-        case adaptive_motion_probe_poll_observation_e::staging_map_busy:
-          ++staging_map_attempt_count;
-          ++staging_map_busy_count;
-          break;
-        case adaptive_motion_probe_poll_observation_e::staging_map_ready:
-          ++staging_map_attempt_count;
-          staging_map_complete = true;
-          break;
-        case adaptive_motion_probe_poll_observation_e::staging_map_failed:
-          ++staging_map_attempt_count;
-          break;
-      }
-    }
-  };
-
-  inline constexpr std::uint32_t adaptive_motion_probe_flag_cut_contract = 1u << 0u;
-  inline constexpr std::uint32_t adaptive_motion_probe_flag_initialized = 1u << 1u;
-  inline constexpr std::uint32_t adaptive_motion_probe_flag_depth_ready = 1u << 2u;
-  inline constexpr std::uint32_t adaptive_motion_probe_flag_range_valid = 1u << 3u;
-  inline constexpr std::uint32_t adaptive_motion_probe_flag_history_advanced = 1u << 4u;
-  inline constexpr std::uint32_t adaptive_motion_probe_flag_scene_settled = 1u << 5u;
-  inline constexpr std::uint32_t adaptive_motion_probe_flag_cut_flags_settled = 1u << 6u;
-  inline constexpr std::uint32_t adaptive_motion_probe_flag_no_cut_or_analysis = 1u << 7u;
-  inline constexpr std::uint32_t adaptive_motion_probe_flag_hard_cut_count_valid = 1u << 8u;
-  inline constexpr std::uint32_t adaptive_motion_probe_flag_state_fields_valid = 1u << 9u;
-  inline constexpr std::uint32_t adaptive_motion_probe_settled_flags =
-    adaptive_motion_probe_flag_cut_contract |
-    adaptive_motion_probe_flag_initialized |
-    adaptive_motion_probe_flag_depth_ready |
-    adaptive_motion_probe_flag_range_valid |
-    adaptive_motion_probe_flag_history_advanced |
-    adaptive_motion_probe_flag_scene_settled |
-    adaptive_motion_probe_flag_cut_flags_settled |
-    adaptive_motion_probe_flag_no_cut_or_analysis |
-    adaptive_motion_probe_flag_hard_cut_count_valid |
-    adaptive_motion_probe_flag_state_fields_valid;
-
-  struct adaptive_motion_probe_request {
-    bool enabled = false;
-    // Display-side DDup/OCR/route/cadence checks may arm the estimator's independent, fail-closed
-    // selector. The decoded probe remains insufficient authority on its own.
-    bool authorize_model_equivalent_observation_hold = false;
-    // This caller-owned proof remains sufficient if optional exact OCR-input comparison is
-    // unavailable. A dirty crop must instead authenticate the estimator-owned exact input below.
-    bool ocr_damage_unchanged = false;
-    std::uint64_t baseline_frame_id = 0u;
-    std::chrono::steady_clock::time_point cadence_deadline {};
-    std::chrono::steady_clock::duration max_wait {};
-    std::uint32_t max_poll_rounds = 1u;
-  };
-
-  /** Start the bounded readiness allowance at collection without crossing the encode deadline. */
-  [[nodiscard]] constexpr std::chrono::steady_clock::time_point
-  adaptive_motion_probe_wait_deadline(
-    const std::chrono::steady_clock::time_point cadence_deadline,
-    const std::chrono::steady_clock::duration max_wait,
-    const std::chrono::steady_clock::time_point collection_started
+  [[nodiscard]] constexpr std::uint32_t near_identical_gpu_decision_byte_offset(
+    const near_identical_gpu_decision_word_e word
   ) noexcept {
-    if (
-      cadence_deadline.time_since_epoch().count() == 0 ||
-      max_wait <= std::chrono::steady_clock::duration::zero() ||
-      cadence_deadline <= collection_started
-    ) {
-      return {};
-    }
-    return std::min(cadence_deadline, collection_started + max_wait);
+    return static_cast<std::uint32_t>(
+      near_identical_gpu_decision_word_index(word) * sizeof(std::uint32_t)
+    );
   }
 
-  struct adaptive_motion_probe_sample {
-    std::uint64_t current_frame_id = 0u;
-    std::uint64_t baseline_frame_id = 0u;
-    int field_width = 0;
-    int field_height = 0;
-    std::uint32_t prior_state_flags = 0u;
-    std::uint32_t hard_cut_count = 0u;
-    std::uint32_t scene_age = 0u;
-    std::uint32_t cut_flags = 0u;
-    std::uint32_t analysis_flags = 0u;
-    std::uint32_t model_input_history_state = 0u;
-    std::uint32_t admitted_texels = 0u;
-    std::uint32_t exclusion_mismatch_texels = 0u;
-    std::uint32_t exact_changed_texels = 0u;
-    std::uint32_t appearance_delta_1_over_1024_texels = 0u;
-    std::uint32_t appearance_nonfinite_texels = 0u;
-    std::uint32_t appearance_exact_changed_texels = 0u;
-    bool ocr_input_baseline_valid = false;
-    bool ocr_input_comparison_valid = false;
-    std::uint64_t ocr_input_baseline_frame_id = 0u;
-    std::uint32_t ocr_input_compared_values = 0u;
-    std::uint32_t ocr_input_exact_mismatch_values = 0u;
-    std::uint32_t ocr_input_nonfinite_values = 0u;
+  inline constexpr std::uint32_t near_identical_gpu_decision_record_byte_offset =
+    near_identical_gpu_decision_byte_offset(
+      near_identical_gpu_decision_word_e::decision
+    );
+  inline constexpr std::uint32_t near_identical_gpu_request_record_byte_offset =
+    near_identical_gpu_decision_byte_offset(
+      near_identical_gpu_decision_word_e::request_token_low
+    );
+  inline constexpr std::uint32_t near_identical_gpu_infer_reduce_byte_offset =
+    near_identical_gpu_decision_byte_offset(
+      near_identical_gpu_decision_word_e::infer_reduce_x
+    );
+  inline constexpr std::uint32_t near_identical_gpu_infer_one_byte_offset =
+    near_identical_gpu_decision_byte_offset(
+      near_identical_gpu_decision_word_e::infer_one_x
+    );
+  inline constexpr std::uint32_t near_identical_gpu_infer_grid16_byte_offset =
+    near_identical_gpu_decision_byte_offset(
+      near_identical_gpu_decision_word_e::infer_grid16_x
+    );
+  inline constexpr std::uint32_t near_identical_gpu_infer_grid8_byte_offset =
+    near_identical_gpu_decision_byte_offset(
+      near_identical_gpu_decision_word_e::infer_grid8_x
+    );
+  inline constexpr std::uint32_t near_identical_gpu_infer_columns_byte_offset =
+    near_identical_gpu_decision_byte_offset(
+      near_identical_gpu_decision_word_e::infer_columns_x
+    );
+  inline constexpr std::uint32_t near_identical_gpu_infer_rows_byte_offset =
+    near_identical_gpu_decision_byte_offset(
+      near_identical_gpu_decision_word_e::infer_rows_x
+    );
+  inline constexpr std::uint32_t near_identical_gpu_reuse_grid16_byte_offset =
+    near_identical_gpu_decision_byte_offset(
+      near_identical_gpu_decision_word_e::reuse_grid16_x
+    );
 
-    [[nodiscard]] constexpr bool exact_ocr_input_matches_baseline() const noexcept {
-      return ocr_input_baseline_valid && ocr_input_comparison_valid &&
-             ocr_input_baseline_frame_id == baseline_frame_id &&
-             ocr_input_compared_values == adaptive_motion_ocr_input_value_count &&
-             ocr_input_exact_mismatch_values == 0u &&
-             ocr_input_nonfinite_values == 0u;
-    }
-  };
+  static_assert(near_identical_gpu_decision_record_byte_offset == 0u);
+  static_assert(near_identical_gpu_request_record_byte_offset == 32u);
+  static_assert(near_identical_gpu_decision_record_byte_offset % 16u == 0u);
+  static_assert(near_identical_gpu_request_record_byte_offset % 16u == 0u);
+  static_assert(near_identical_gpu_infer_reduce_byte_offset == 64u);
+  static_assert(near_identical_gpu_infer_one_byte_offset == 80u);
+  static_assert(near_identical_gpu_infer_grid16_byte_offset == 96u);
+  static_assert(near_identical_gpu_infer_grid8_byte_offset == 112u);
+  static_assert(near_identical_gpu_infer_columns_byte_offset == 128u);
+  static_assert(near_identical_gpu_infer_rows_byte_offset == 144u);
+  static_assert(near_identical_gpu_reuse_grid16_byte_offset == 160u);
+  static_assert(near_identical_gpu_decision_byte_count % 16u == 0u);
+  static_assert(
+    near_identical_gpu_decision_word_index(
+      near_identical_gpu_decision_word_e::reuse_grid16_padding
+    ) + 1u == near_identical_gpu_decision_word_count
+  );
 
-  struct adaptive_motion_probe_result {
-    adaptive_motion_probe_status_e status =
-      adaptive_motion_probe_status_e::not_requested;
-    adaptive_motion_probe_timeout_reason_e timeout_reason =
-      adaptive_motion_probe_timeout_reason_e::none;
-    adaptive_motion_probe_sample sample {};
-    std::uint32_t poll_round_count = 0u;
-    std::uint32_t event_query_count = 0u;
-    std::uint32_t staging_map_attempt_count = 0u;
-    std::uint32_t staging_map_busy_count = 0u;
-    std::chrono::steady_clock::duration wait_duration {};
-  };
-
-  /** Decode and validate the fixed tiny GPU record, including both exact frame identities. */
-  bool decode_adaptive_motion_probe_words(
-    std::span<const std::uint32_t> words,
-    std::uint64_t expected_current_frame_id,
-    std::uint64_t expected_baseline_frame_id,
-    int field_width,
-    int field_height,
-    adaptive_motion_probe_sample &sample
-  ) noexcept;
-
-  enum class adaptive_motion_probe_exact_verdict_e : std::uint8_t {
-    invalid,
-    quiet_evidence,
-    motion_veto,
-  };
-
-  /** Exact-bit telemetry verdict. It is never standalone active-hold authorization. */
-  [[nodiscard]] constexpr adaptive_motion_probe_exact_verdict_e
-  adaptive_motion_probe_exact_verdict(
-    const adaptive_motion_probe_sample &sample
-  ) noexcept {
-    if (
-      sample.current_frame_id == 0u || sample.baseline_frame_id == 0u ||
-      sample.current_frame_id <= sample.baseline_frame_id ||
-      sample.prior_state_flags != adaptive_motion_probe_settled_flags ||
-      sample.admitted_texels == 0u || sample.appearance_nonfinite_texels != 0u
-    ) {
-      return adaptive_motion_probe_exact_verdict_e::invalid;
-    }
-    return sample.exclusion_mismatch_texels != 0u ||
-               sample.exact_changed_texels != 0u ||
-               sample.appearance_exact_changed_texels != 0u ?
-             adaptive_motion_probe_exact_verdict_e::motion_veto :
-             adaptive_motion_probe_exact_verdict_e::quiet_evidence;
-  }
-
-  enum class adaptive_motion_hold_decision_e : std::uint8_t {
-    infer,
-    hold,
-  };
-
-  /** Select the bounded active no-observation path after all display-owned gates are armed.
+  /** Stable host-only identity for the analysis domain whose NCHW history the GPU owns.
    *
-   * DAV2 NCHW and exclusion must be bit-identical. Finite appearance ordinal bit noise below
-   * 1/1024 is tolerated, but any thresholded or nonfinite appearance value vetoes. A retained OCR
-   * redispatch may hold only with caller-owned clean-crop proof; an ordinary frame must also have
-   * a healthy current OCR submission path, and an OCR-dirty frame additionally needs exact
-   * OCR-input equality.
+   * Position is intentionally absent, matching depth_input_region_t::same_analysis_domain(). The
+   * display still owns exact positioned-route authorization independently. This tag is a compact
+   * lineage binding, not a cryptographic authentication claim.
    */
-  [[nodiscard]] constexpr adaptive_motion_hold_decision_e
-  select_adaptive_motion_hold(
-    const bool authorized_by_caller,
-    const bool ocr_damage_unchanged,
-    const bool current_ocr_submission_ready,
-    const bool input_domain_matches,
-    const bool completed_observation_consumed,
-    const bool snapshot_debug_inputs,
-    const depth_optional_work_mode_e optional_work,
-    const adaptive_motion_probe_result &probe
+  [[nodiscard]] constexpr std::uint64_t near_identical_input_domain_tag(
+    const depth_input_region_t &region,
+    const input_color_space color_space,
+    const std::uint32_t field_width,
+    const std::uint32_t field_height
   ) noexcept {
-    const bool retained_ocr_redispatch_is_safe =
-      ocr_damage_unchanged &&
-      optional_work == depth_optional_work_mode_e::redispatch_subtitle;
-    const bool ordinary_ocr_path_is_safe =
-      optional_work == depth_optional_work_mode_e::ordinary &&
-      current_ocr_submission_ready &&
-      (ocr_damage_unchanged || probe.sample.exact_ocr_input_matches_baseline());
-    if (
-      !authorized_by_caller || !input_domain_matches ||
-      completed_observation_consumed || snapshot_debug_inputs ||
-      (!retained_ocr_redispatch_is_safe && !ordinary_ocr_path_is_safe) ||
-      probe.status != adaptive_motion_probe_status_e::ready ||
-      probe.sample.current_frame_id == 0u ||
-      probe.sample.baseline_frame_id == 0u ||
-      probe.sample.current_frame_id <= probe.sample.baseline_frame_id ||
-      probe.sample.prior_state_flags != adaptive_motion_probe_settled_flags ||
-      probe.sample.admitted_texels == 0u ||
-      probe.sample.exclusion_mismatch_texels != 0u ||
-      probe.sample.exact_changed_texels != 0u ||
-      probe.sample.appearance_delta_1_over_1024_texels != 0u ||
-      probe.sample.appearance_nonfinite_texels != 0u
-    ) {
-      return adaptive_motion_hold_decision_e::infer;
-    }
-    return adaptive_motion_hold_decision_e::hold;
+    std::uint64_t hash = 1469598103934665603ull;
+    const auto append = [&hash](const std::uint64_t value) constexpr {
+      for (unsigned byte = 0u; byte < 8u; ++byte) {
+        hash ^= (value >> (byte * 8u)) & 0xffu;
+        hash *= 1099511628211ull;
+      }
+    };
+    append(region.source_width);
+    append(region.source_height);
+    append(region.width());
+    append(region.height());
+    append(region.tensor_content.left);
+    append(region.tensor_content.top);
+    append(region.tensor_content.right);
+    append(region.tensor_content.bottom);
+    append(region.analysis_generation);
+    append(region.video_region ? 1u : 0u);
+    append(static_cast<std::uint8_t>(region.authority));
+    append(static_cast<std::uint32_t>(color_space));
+    append(field_width);
+    append(field_height);
+    return hash != 0u ? hash : 1u;
   }
 
-  enum class adaptive_motion_ocr_hold_proof_e : std::uint8_t {
-    none,
-    ddup_crop_unchanged,
-    exact_ocr_input,
-  };
-
-  struct adaptive_motion_observation_hold_result {
-    bool held = false;
-    std::uint64_t current_frame_id = 0u;
+  /** Host-only prefilter command for the device-owned adaptive reuse transaction. */
+  struct gpu_adaptive_reuse_request {
+    // CPU-only prefilters may mark an ordinary, same-domain frame as undecided. The detector then
+    // publishes a GPU proposal bound to this nonzero transaction token. Conditional launch is
+    // separately runtime-gated; setting this field alone can never skip inference.
+    bool authorize_gpu_undecided_reuse = false;
     std::uint64_t baseline_frame_id = 0u;
-    adaptive_motion_ocr_hold_proof_e ocr_proof =
-      adaptive_motion_ocr_hold_proof_e::none;
-
-    [[nodiscard]] constexpr bool valid() const noexcept {
-      return held && current_frame_id != 0u && baseline_frame_id != 0u &&
-             current_frame_id > baseline_frame_id &&
-             ocr_proof != adaptive_motion_ocr_hold_proof_e::none;
-    }
+    std::uint64_t gpu_reuse_decision_token = 0u;
   };
 
   struct estimate_result {
@@ -796,8 +660,10 @@ namespace models {
     // the previous matched color/depth output.
     bool completed_frame_valid = false;
     std::uint64_t completed_frame_id = 0;  ///< Caller-provided identity of that completed result.
-    bool inference_enqueued = false;  ///< This call submitted inference for the supplied input frame.
-    bool cuda_graph_active = false;  ///< DAV2 TensorRT enqueue is currently replaying a captured graph.
+    bool inference_enqueued = false;  ///< This call submitted a force-infer wrapper transaction for the supplied input frame.
+    bool gpu_undecided_transaction_enqueued = false;  ///< This call submitted a GPU-conditional depth transaction; its branch remains device-owned.
+    bool gpu_undecided_completion = false;  ///< The completed transaction's actual branch remains GPU-owned and is deliberately not read back.
+    bool cuda_graph_active = false;  ///< The mandatory DAV2 wrapper is ready and owns its embedded inference child.
     bool parallax_v2_producer_active = false;  ///< All production V2 producer shaders/resources are active.
     float parallax_v2_raw_coordinate_scale = 0.0f;  ///< Fixed authenticated model/shape coordinate scale.
     float parallax_v2_requested_pop_strength = 0.0f;  ///< Fixed V2 request from cfg.pop_strength only; no legacy adaptive ratio or ceiling is consumed.
@@ -808,8 +674,6 @@ namespace models {
     bool subtitle_work_suppressed = false;  ///< This completion published Base and did not advance same-domain locator state.
     bool subtitle_ocr_inference_enqueued = false;  ///< This call enqueued OCR for its newly supplied input frame.
     bool subtitle_ocr_redispatch_enqueued = false;  ///< This call accepted exact OCR8 redispatch for its newly supplied input frame.
-    adaptive_motion_probe_result current_frame_motion_probe;  ///< Optional pre-DAV2 evidence for this supplied frame.
-    adaptive_motion_observation_hold_result adaptive_motion_observation_hold;  ///< Exact ownership of a supplied frame for which this call enqueued neither DAV2 nor OCR.
   };
 
   struct pending_depth_poll_result {
@@ -893,6 +757,20 @@ namespace models {
            );
   }
 
+  /** Only branch-known geometry may seed the packed-output repeat cache.
+   *
+   * A GPU-undecided completion is intentionally renderable once, but its unknown branch cannot
+   * be redelivered while the mandatory force-infer observation barrier is pending.
+   */
+  constexpr bool host_sbs_matched_output_can_enter_repeat_cache(
+    const bool has_matched_frame,
+    const bool has_authenticated_field,
+    const bool gpu_undecided_completion
+  ) {
+    return has_matched_frame && has_authenticated_field &&
+           !gpu_undecided_completion;
+  }
+
   /** A terminal producer failure moves every nonfailed Host SBS stream to live flat identity. */
   constexpr host_sbs_renderer_e fail_host_sbs_renderer_flat(
     const host_sbs_renderer_e current
@@ -965,8 +843,7 @@ namespace models {
       Microsoft::WRL::ComPtr<ID3D11DeviceContext> context,
       const std::filesystem::path &assets_dir,
       const config::video_t::sbs_t &cfg,
-      const config::depth_model_info &model,
-      bool enable_adaptive_motion_probe = false
+      const config::depth_model_info &model
     );
 
     ~video_depth_estimator();
@@ -1008,7 +885,7 @@ namespace models {
       bool snapshot_debug_inputs = false,
       depth_input_region_t input_region = {},
       depth_optional_work_mode_e optional_work = depth_optional_work_mode_e::ordinary,
-      adaptive_motion_probe_request motion_probe = {}
+      gpu_adaptive_reuse_request adaptive_reuse = {}
     );
 
     /**
