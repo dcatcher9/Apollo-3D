@@ -241,9 +241,7 @@ namespace nvenc {
     {
       auto supported_width = get_encoder_cap(NV_ENC_CAPS_WIDTH_MAX);
       auto supported_height = get_encoder_cap(NV_ENC_CAPS_HEIGHT_MAX);
-      if (supported_width > 0 && supported_height > 0 &&
-          client_config.videoFormat >= 0 &&
-          client_config.videoFormat < static_cast<int>(observed_codec_max_widths.size())) {
+      if (supported_width > 0 && supported_height > 0 && client_config.videoFormat >= 0 && client_config.videoFormat < static_cast<int>(observed_codec_max_widths.size())) {
         const int previous_width = observed_codec_max_widths[client_config.videoFormat].exchange(
           supported_width,
           std::memory_order_relaxed
@@ -342,13 +340,21 @@ namespace nvenc {
                                                                                             NV_ENC_MULTI_PASS_DISABLED;
 
     enc_config.rcParams.enableAQ = config.adaptive_quantization;
-    enc_config.rcParams.averageBitRate = client_config.bitrate * 1000;
-
-    if (get_encoder_cap(NV_ENC_CAPS_SUPPORT_CUSTOM_VBV_BUF_SIZE)) {
-      enc_config.rcParams.vbvBufferSize = client_config.bitrate * 1000 / client_config.framerate;
-      if (config.vbv_percentage_increase > 0) {
-        enc_config.rcParams.vbvBufferSize += enc_config.rcParams.vbvBufferSize * config.vbv_percentage_increase / 100;
-      }
+    const bool custom_vbv_supported =
+      get_encoder_cap(NV_ENC_CAPS_SUPPORT_CUSTOM_VBV_BUF_SIZE) != 0;
+    const auto rate_control = nvenc_rate_control_values(
+      client_config.bitrate,
+      client_config.framerate,
+      config.vbv_percentage_increase,
+      custom_vbv_supported
+    );
+    if (!rate_control) {
+      BOOST_LOG(error) << "NvEnc: invalid bitrate/cadence for rate control";
+      return false;
+    }
+    enc_config.rcParams.averageBitRate = rate_control->average_bitrate;
+    if (rate_control->vbv_buffer_size) {
+      enc_config.rcParams.vbvBufferSize = *rate_control->vbv_buffer_size;
     }
 
     auto set_h264_hevc_common_format_config = [&](auto &format_config) {
@@ -500,7 +506,7 @@ namespace nvenc {
       if (enc_config.rcParams.multiPass != NV_ENC_MULTI_PASS_DISABLED) {
         extra += " two-pass";
       }
-      if (config.vbv_percentage_increase > 0 && get_encoder_cap(NV_ENC_CAPS_SUPPORT_CUSTOM_VBV_BUF_SIZE)) {
+      if (config.vbv_percentage_increase > 0 && custom_vbv_supported) {
         extra += std::format(" vbv+{}", config.vbv_percentage_increase);
       }
       if (encoder_params.rfi) {
@@ -520,6 +526,16 @@ namespace nvenc {
     }
 
     encoder_state = {};
+    encoder_state.bitrate_reconfiguration_supported =
+      get_encoder_cap(NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE) != 0;
+    encoder_state.custom_vbv_supported = custom_vbv_supported;
+    encoder_state.framerate = client_config.framerate;
+    encoder_state.vbv_percentage_increase = config.vbv_percentage_increase;
+    encoder_state.initialize_params = init_params;
+    // Never retain a pointer to create_encoder()'s stack-local configuration. Reconfiguration
+    // installs a pointer to its own candidate copy for the duration of the driver call.
+    encoder_state.initialize_params.encodeConfig = nullptr;
+    encoder_state.encode_config = enc_config;
     fail_guard.disable();
     return true;
   }
@@ -623,6 +639,8 @@ namespace nvenc {
       return {};
     }
 
+    const auto frame_average_qp = lock_bitstream.frameAvgQP;
+    const auto frame_satd = lock_bitstream.frameSatd;
     auto data_pointer = (uint8_t *) lock_bitstream.bitstreamBufferPtr;
     // The ENCODED_PACKET_QUEUE_LIMIT bounds how many of these buffers can be in flight. Reusing
     // their capacity removes a large allocation from the encode path while still copying before
@@ -654,8 +672,62 @@ namespace nvenc {
     }
 
     encoder_state.frame_size_logger.collect_and_log(encoded_frame.data.size() / 1000.);
+    // Both values are returned by NV_ENC_LOCK_BITSTREAM without enabling the substantially richer
+    // getRCStats path. When diagnostics are disabled, each logger is only one predictable branch.
+    encoder_state.frame_qp_logger.collect_and_log(frame_average_qp);
+    encoder_state.frame_satd_logger.collect_and_log(frame_satd);
 
     return encoded_frame;
+  }
+
+  bool nvenc_base::reconfigure_bitrate(int bitrate_kbps) {
+    if (!encoder || !encoder_state.bitrate_reconfiguration_supported) {
+      return false;
+    }
+
+    const auto rate_control = nvenc_rate_control_values(
+      bitrate_kbps,
+      encoder_state.framerate,
+      encoder_state.vbv_percentage_increase,
+      encoder_state.custom_vbv_supported
+    );
+    if (!rate_control) {
+      BOOST_LOG(error) << "NvEnc: refusing invalid bitrate-only reconfiguration";
+      return false;
+    }
+
+    NV_ENC_CONFIG candidate_config = encoder_state.encode_config;
+    candidate_config.rcParams.averageBitRate = rate_control->average_bitrate;
+    if (rate_control->vbv_buffer_size) {
+      candidate_config.rcParams.vbvBufferSize = *rate_control->vbv_buffer_size;
+    }
+
+    // Treat an identical request as a successful no-op. This preserves the live session without
+    // asking the driver to reset any internal rate-control history.
+    if (candidate_config.rcParams.averageBitRate == encoder_state.encode_config.rcParams.averageBitRate && candidate_config.rcParams.vbvBufferSize == encoder_state.encode_config.rcParams.vbvBufferSize) {
+      return true;
+    }
+
+    NV_ENC_RECONFIGURE_PARAMS reconfigure_params = {NV_ENC_RECONFIGURE_PARAMS_VER};
+    reconfigure_params.reInitEncodeParams = encoder_state.initialize_params;
+    reconfigure_params.reInitEncodeParams.encodeConfig = &candidate_config;
+    reconfigure_params.resetEncoder = 0;
+    reconfigure_params.forceIDR = 0;
+
+    if (nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, &reconfigure_params))) {
+      BOOST_LOG(warning) << "NvEnc: bitrate-only NvEncReconfigureEncoder() failed: "
+                         << last_nvenc_error_string
+                         << "; rebuilding the encode session";
+      return false;
+    }
+
+    // Commit only after the driver accepted the complete candidate. A failed call leaves these
+    // snapshots untouched, allowing capture_async's existing proven-mode rebuild to remain the
+    // sole fallback authority.
+    encoder_state.encode_config = candidate_config;
+    BOOST_LOG(info) << "NvEnc: reconfigured bitrate to " << bitrate_kbps
+                    << "kbps without resetting the session or forcing an IDR";
+    return true;
   }
 
   bool nvenc_base::invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame) {

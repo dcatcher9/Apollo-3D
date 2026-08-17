@@ -7383,6 +7383,155 @@ TEST(NvencConfigTest, ForcesSplitEncodingOnlyForWideModernCodecs) {
   EXPECT_TRUE(nvenc::should_force_split_frame_encoding(true, 2, 8192, 3));
 }
 
+TEST(NvencConfigTest, DerivesIdenticalCreateAndReconfigureRateControl) {
+  const auto values = nvenc::nvenc_rate_control_values(50'000, 60, 100, true);
+  ASSERT_TRUE(values);
+  EXPECT_EQ(values->average_bitrate, 50'000'000u);
+  ASSERT_TRUE(values->vbv_buffer_size);
+  EXPECT_EQ(*values->vbv_buffer_size, 1'666'666u);
+
+  const auto without_custom_vbv =
+    nvenc::nvenc_rate_control_values(50'000, 60, 100, false);
+  ASSERT_TRUE(without_custom_vbv);
+  EXPECT_EQ(without_custom_vbv->average_bitrate, 50'000'000u);
+  EXPECT_FALSE(without_custom_vbv->vbv_buffer_size);
+}
+
+TEST(NvencConfigTest, RejectsInvalidOrOverflowingRateControl) {
+  EXPECT_FALSE(nvenc::nvenc_rate_control_values(0, 60, 100, true));
+  EXPECT_FALSE(nvenc::nvenc_rate_control_values(50'000, 0, 100, true));
+  EXPECT_FALSE(nvenc::nvenc_rate_control_values(
+    std::numeric_limits<int>::max(),
+    60,
+    100,
+    true
+  ));
+}
+
+TEST(NvencBitrateReconfigureTest, AdmitsOnlyExactGeometryAndCadence) {
+  const video::video_mode_change_t active {
+    3840,
+    2160,
+    60,
+    5994,
+    59'940,
+    50'000,
+    0,
+    0,
+  };
+  auto requested = active;
+  requested.bitrate = 75'000;
+  requested.request_id = 9;
+  requested.transaction_id = 44;
+
+  EXPECT_TRUE(video::detail::is_nvenc_bitrate_only_reconfigure_candidate(
+    active,
+    requested,
+    false
+  ));
+  EXPECT_FALSE(video::detail::is_nvenc_bitrate_only_reconfigure_candidate(
+    active,
+    requested,
+    true
+  ));
+
+  const auto expect_rebuild = [&](auto mutate) {
+    auto changed = requested;
+    mutate(changed);
+    EXPECT_FALSE(video::detail::is_nvenc_bitrate_only_reconfigure_candidate(
+      active,
+      changed,
+      false
+    ));
+  };
+  expect_rebuild([](auto &mode) { mode.width += 2; });
+  expect_rebuild([](auto &mode) { mode.height += 2; });
+  expect_rebuild([](auto &mode) { ++mode.framerate; });
+  expect_rebuild([](auto &mode) { ++mode.framerateX100; });
+  expect_rebuild([](auto &mode) { ++mode.encodingFramerate; });
+  expect_rebuild([](auto &mode) { mode.bitrate = 0; });
+}
+
+TEST(NvencBitrateReconfigureTest, FailureKeepsRequestOnExistingRebuildPath) {
+  const auto video_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/video.cpp");
+  ASSERT_FALSE(video_source.empty());
+
+  const auto guard = video_source.find("auto restore_for_rebuild = util::fail_guard");
+  const auto restore = video_source.find(
+    "video_mode_event->raise(std::move(*requested));",
+    guard
+  );
+  const auto driver_call = video_source.find(
+    "if (!session->reconfigure_bitrate(requested->bitrate))",
+    restore
+  );
+  const auto successful_ack = video_source.find(
+    "video_mode_applied_queue->raise(video_mode_applied_t",
+    driver_call
+  );
+  const auto commit = video_source.find("restore_for_rebuild.disable();", successful_ack);
+
+  ASSERT_NE(guard, std::string::npos);
+  ASSERT_NE(restore, std::string::npos);
+  ASSERT_NE(driver_call, std::string::npos);
+  ASSERT_NE(successful_ack, std::string::npos);
+  ASSERT_NE(commit, std::string::npos);
+  EXPECT_LT(guard, driver_call);
+  EXPECT_LT(driver_call, successful_ack);
+  EXPECT_LT(successful_ack, commit);
+}
+
+TEST(NvencFrameStatsTest, UsesLockBitstreamStatsWithoutEnablingDetailedRcStats) {
+  const auto source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/nvenc/nvenc_base.cpp"
+  );
+  ASSERT_FALSE(source.empty());
+
+  EXPECT_NE(
+    source.find("const auto frame_average_qp = lock_bitstream.frameAvgQP;"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("const auto frame_satd = lock_bitstream.frameSatd;"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("encoder_state.frame_qp_logger.collect_and_log(frame_average_qp);"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("encoder_state.frame_satd_logger.collect_and_log(frame_satd);"),
+    std::string::npos
+  );
+  EXPECT_EQ(source.find("lock_bitstream.getRCStats ="), std::string::npos);
+}
+
+TEST(NvencBitrateReconfigureTest, PreservesRateControlStateAndDoesNotForceIdr) {
+  const auto source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/nvenc/nvenc_base.cpp"
+  );
+  ASSERT_FALSE(source.empty());
+
+  const auto method = source.find("bool nvenc_base::reconfigure_bitrate");
+  const auto driver_call = source.find("nvEncReconfigureEncoder", method);
+  const auto cached_commit = source.find(
+    "encoder_state.encode_config = candidate_config;",
+    driver_call
+  );
+  ASSERT_NE(method, std::string::npos);
+  ASSERT_NE(driver_call, std::string::npos);
+  ASSERT_NE(cached_commit, std::string::npos);
+  EXPECT_NE(
+    source.find("reconfigure_params.resetEncoder = 0;", method),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("reconfigure_params.forceIDR = 0;", method),
+    std::string::npos
+  );
+  EXPECT_LT(driver_call, cached_commit);
+}
+
 TEST(CaptureBackendFailoverTest, RepeatedEarlyDdupFailuresLatchWgc) {
   video::capture_backend_failover_t failover;
 

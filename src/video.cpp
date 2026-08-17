@@ -4,6 +4,7 @@
  */
 // standard includes
 #include <atomic>
+#include <functional>
 #include <list>
 #include <mutex>
 #include <optional>
@@ -316,6 +317,10 @@ namespace video {
       if (!device->nvenc->invalidate_ref_frames(first_frame, last_frame)) {
         force_idr = true;
       }
+    }
+
+    bool reconfigure_bitrate(int bitrate_kbps) {
+      return device && device->nvenc && device->nvenc->reconfigure_bitrate(bitrate_kbps);
     }
 
     nvenc::nvenc_encoded_frame encode_frame(
@@ -874,7 +879,8 @@ namespace video {
     std::shared_ptr<platf::display_t> disp,
     std::unique_ptr<nvenc_encode_session_t> session,
     safe::signal_t &reinit_event,
-    std::shared_ptr<void> channel_data
+    std::shared_ptr<void> channel_data,
+    const std::function<void(const video_mode_change_t &)> &on_bitrate_reconfigured
   ) {
     // Move expensive NVENC destruction off the encode thread so a reinit can proceed. The worker
     // is process-owned rather than detached: it must drain while logging, CUDA, TensorRT, and D3D
@@ -908,6 +914,8 @@ namespace video {
     auto sbs_mode_event = mail->event<int>(mail::sbs_mode);
     // Same contract for a live client-requested resolution/frame-rate/bitrate change (0x3007).
     auto video_mode_event = mail->queue<video_mode_change_t>(mail::video_mode);
+    auto video_mode_applied_queue =
+      mail->queue<video_mode_applied_t>(mail::video_mode_applied);
     auto depth_pipeline_ready_event = config.sbs_depth_pipeline_ready_event;
 
     {
@@ -934,13 +942,95 @@ namespace video {
     // current desktop instead.
     std::shared_ptr<platf::img_t> last_img;
 
+    auto try_reconfigure_pending_bitrate = [&]() {
+      auto requested = video_mode_event->pop(0ms);
+      if (!requested) {
+        return false;
+      }
+
+      // The serial 0x3007 worker admits at most one request to this queue. Until the driver and
+      // every publication below succeed, put that exact request back so capture_async's existing
+      // proven-mode rebuild/fallback remains authoritative.
+      auto restore_for_rebuild = util::fail_guard([&] {
+        video_mode_event->raise(std::move(*requested));
+      });
+
+      const video_mode_change_t active {
+        config.sbs_mode != SBS_OFF ? config.width / 2 : config.width,
+        config.height,
+        config.framerate,
+        config.framerateX100,
+        config.encodingFramerate,
+        config.bitrate,
+        0,
+        0,
+      };
+      const bool sbs_change_pending =
+        sbs_mode_event->peek() ||
+        (config.requested_sbs_mode &&
+         config.requested_sbs_mode->load(std::memory_order_acquire) != config.sbs_mode);
+      if (!detail::is_nvenc_bitrate_only_reconfigure_candidate(
+            active,
+            *requested,
+            sbs_change_pending
+          )) {
+        return false;
+      }
+
+      if (!session->reconfigure_bitrate(requested->bitrate)) {
+        return false;
+      }
+
+      config.bitrate = requested->bitrate;
+      const effective_video_mode_t effective_mode {
+        active.width,
+        active.height,
+        active.framerateX100 > 0 ? active.framerateX100 : active.framerate * 100,
+        requested->bitrate,
+      };
+      if (config.effective_mode) {
+        // Publish pacing only after NVENC accepts the new rate-control configuration. The sender
+        // can therefore never pace at a bitrate that the live encoder rejected.
+        config.effective_mode->publish(effective_mode);
+      }
+      on_bitrate_reconfigured(*requested);
+
+      video_mode_applied_queue->raise(video_mode_applied_t {
+        {{requested->request_id, requested->transaction_id}},
+        true,
+        effective_mode,
+        {
+          requested->width,
+          requested->height,
+          requested->encodingFramerate,
+        },
+      });
+      BOOST_LOG(info) << "Applied live bitrate-only video mode at "sv
+                      << requested->bitrate
+                      << "kbps without rebuilding NVENC or forcing an IDR."sv;
+      restore_for_rebuild.disable();
+      return true;
+    };
+
     auto lifecycle_change_requested = [&]() {
       const bool shutting_down = shutdown_event->peek();
       const bool capture_stopped = !images->running();
       const bool display_reinit_pending = reinit_event.peek();
+      const bool sbs_change_pending = sbs_mode_event->peek();
+
+      // A completed encode_frame() has no NVENC work in flight, and all calls in this loop run on
+      // one thread. Use that serialized seam for a same-geometry/same-cadence bitrate update. Any
+      // mismatch, unsupported GPU, or driver failure restores the request and takes the unchanged
+      // lifecycle rebuild path below.
+      if (!shutting_down && !capture_stopped && !display_reinit_pending &&
+          !sbs_change_pending && video_mode_event->peek() &&
+          try_reconfigure_pending_bitrate()) {
+        return false;
+      }
       // Both the SBS toggle and a live video-mode change alter the encode geometry/cadence, so
       // both require the encode session to be rebuilt in place.
-      const bool encode_config_change_pending = sbs_mode_event->peek() || video_mode_event->peek();
+      const bool encode_config_change_pending =
+        sbs_change_pending || video_mode_event->peek();
 
       // If capture has to reinitialize before it has produced a frame, encode the dummy once so
       // Artemis knows the host is alive. An encode-config-only change always rebuilds immediately
@@ -1593,7 +1683,17 @@ namespace video {
         display,
         std::move(encode_session),
         capture_thread_ctx.reinit_event,
-        channel_data
+        channel_data,
+        [&](const video_mode_change_t &mode) {
+          // Keep every rebuild/fallback owner on the bitrate NVENC actually accepted. Without
+          // this callback, a later SBS toggle or display reinitialization would reconstruct the
+          // session from the pre-reconfigure bitrate even though the client was told otherwise.
+          config.bitrate = mode.bitrate;
+          capture_thread_ctx.live_video_mode =
+            std::optional<video_mode_change_t> {mode};
+          proven_video_mode = mode;
+          config_from_live_video_mode = false;
+        }
       );
     }
   }

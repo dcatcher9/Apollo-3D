@@ -4,7 +4,59 @@
  */
 #pragma once
 
+#ifndef SUNSHINE_NVENC_CONFIG_H
+  #define SUNSHINE_NVENC_CONFIG_H
+
+  #include <cstdint>
+  #include <limits>
+  #include <optional>
+
 namespace nvenc {
+
+  struct nvenc_rate_control_values_t {
+    std::uint32_t average_bitrate = 0;
+    std::optional<std::uint32_t> vbv_buffer_size;
+  };
+
+  /**
+   * Derive the rate-control fields shared by initial creation and bitrate-only reconfiguration.
+   * Keeping this calculation in one overflow-checked helper prevents a live change from using a
+   * different VBV contract than a fresh session at the same bitrate and cadence.
+   */
+  constexpr std::optional<nvenc_rate_control_values_t> nvenc_rate_control_values(
+    int bitrate_kbps,
+    int framerate,
+    int vbv_percentage_increase,
+    bool custom_vbv_supported
+  ) noexcept {
+    if (bitrate_kbps <= 0 || framerate <= 0) {
+      return std::nullopt;
+    }
+
+    constexpr auto max_u32 = std::numeric_limits<std::uint32_t>::max();
+    const auto average_bitrate = static_cast<std::uint64_t>(bitrate_kbps) * 1000u;
+    if (average_bitrate > max_u32) {
+      return std::nullopt;
+    }
+
+    nvenc_rate_control_values_t values {
+      static_cast<std::uint32_t>(average_bitrate),
+      std::nullopt,
+    };
+    if (!custom_vbv_supported) {
+      return values;
+    }
+
+    auto vbv_buffer_size = average_bitrate / static_cast<std::uint64_t>(framerate);
+    if (vbv_percentage_increase > 0) {
+      vbv_buffer_size +=
+        vbv_buffer_size * static_cast<std::uint64_t>(vbv_percentage_increase) / 100u;
+    }
+    values.vbv_buffer_size = static_cast<std::uint32_t>(
+      vbv_buffer_size > max_u32 ? max_u32 : vbv_buffer_size
+    );
+    return values;
+  }
 
   enum class nvenc_two_pass {
     disabled,  ///< Single pass, the fastest and no extra vram
@@ -57,3 +109,5 @@ namespace nvenc {
   }
 
 }  // namespace nvenc
+
+#endif  // SUNSHINE_NVENC_CONFIG_H

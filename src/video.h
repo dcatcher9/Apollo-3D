@@ -244,8 +244,9 @@ namespace video {
   std::uint32_t next_sbs_telemetry_generation() noexcept;
 
   /* Live stream geometry/rate change requested by the client via the 0x3007 control message.
-     Resolution, frame rate and bitrate change without reconnecting: the encode session is torn
-     down and rebuilt in place, exactly as the 0x3003 SBS toggle already does.
+     Resolution and frame-rate changes rebuild the encode session in place, exactly as the 0x3003
+     SBS toggle already does. A strictly bitrate-only NVENC change may reconfigure the proven live
+     session; unsupported or failed reconfiguration falls back to that same rebuild path.
 
      These are post-validation encoder values, not the client's raw request. The control handler
      applies the same clamp and FEC/audio wire-budget deduction that RTSP ANNOUNCE applies, so a
@@ -264,6 +265,27 @@ namespace video {
     // so end-to-end serialization must never use them to match an encoder completion.
     std::uint64_t transaction_id = 0;
   };
+
+  namespace detail {
+    /**
+     * Admit only a live request whose complete geometry and cadence already match the running
+     * encoder. The bitrate and opaque request identities are intentionally excluded. A pending
+     * SBS toggle owns a geometry transition and therefore fails this fast path closed.
+     */
+    constexpr bool is_nvenc_bitrate_only_reconfigure_candidate(
+      const video_mode_change_t &active,
+      const video_mode_change_t &requested,
+      bool sbs_change_pending
+    ) noexcept {
+      return !sbs_change_pending &&
+             requested.bitrate > 0 &&
+             requested.width == active.width &&
+             requested.height == active.height &&
+             requested.framerate == active.framerate &&
+             requested.framerateX100 == active.framerateX100 &&
+             requested.encodingFramerate == active.encodingFramerate;
+    }
+  }  // namespace detail
 
   /**
    * What an encode session is actually running, as opposed to what the client asked for.

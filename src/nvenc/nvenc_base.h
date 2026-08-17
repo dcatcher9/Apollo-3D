@@ -95,6 +95,15 @@ namespace nvenc {
     );
 
     /**
+     * Reconfigure only the active encoder's CBR bitrate and matching VBV size.
+     *
+     * The caller must serialize this between encode_frame() calls. A failure leaves the cached
+     * configuration unchanged so the caller can fall back to rebuilding the session. This path
+     * deliberately neither resets encoder state nor requests an IDR.
+     */
+    bool reconfigure_bitrate(int bitrate_kbps);
+
+    /**
      * @brief Perform reference frame invalidation (RFI) procedure.
      * @param first_frame First frame index of the invalidation range.
      * @param last_frame Last frame index of the invalidation range.
@@ -164,7 +173,15 @@ namespace nvenc {
       uint64_t last_encoded_frame_index = 0;
       bool rfi_needs_confirmation = false;
       std::pair<uint64_t, uint64_t> last_rfi_range;
+      bool bitrate_reconfiguration_supported = false;
+      bool custom_vbv_supported = false;
+      int framerate = 0;
+      int vbv_percentage_increase = 0;
+      NV_ENC_INITIALIZE_PARAMS initialize_params {};
+      NV_ENC_CONFIG encode_config {};
       logging::min_max_avg_periodic_logger<double> frame_size_logger = {info, "NvEnc: encoded frame sizes in kB", ""};
+      logging::min_max_avg_periodic_logger<std::uint32_t> frame_qp_logger = {info, "NvEnc: frame average QP", ""};
+      logging::min_max_avg_periodic_logger<std::uint32_t> frame_satd_logger = {info, "NvEnc: frame SATD", ""};
     } encoder_state;
   };
 
