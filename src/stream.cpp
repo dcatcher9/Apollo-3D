@@ -1520,7 +1520,7 @@ namespace stream {
         fecpercentage = (100 * parity_shards) / data_shards;
       }
 
-      if (fecpercentage != 0 && (data_shards > DATA_SHARDS_MAX || parity_shards > DATA_SHARDS_MAX || data_shards + parity_shards > DATA_SHARDS_MAX)) {
+      if (fecpercentage != 0 && (data_shards > RS8_DATA_SHARDS_MAX || parity_shards > RS8_DATA_SHARDS_MAX || data_shards + parity_shards > RS8_DATA_SHARDS_MAX)) {
         throw std::invalid_argument("Reed-Solomon shard count exceeds protocol limit");
       }
 
@@ -2715,7 +2715,7 @@ namespace stream {
       // D = 255 / (1 + F)
       // multiplied by 100 since F is the percentage as an integer:
       // D = (255 * 100) / (100 + F)
-      auto max_data_shards_per_fec_block = (DATA_SHARDS_MAX * 100) / (100 + fecPercentage);
+      auto max_data_shards_per_fec_block = (RS8_DATA_SHARDS_MAX * 100) / (100 + fecPercentage);
 
       // Compute the number of FEC blocks needed for this frame using the block size and max shards
       auto max_data_per_fec_block = max_data_shards_per_fec_block * blocksize;

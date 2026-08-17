@@ -137,7 +137,7 @@ TEST(ReedSolomonTests, RejectsInvalidShardCountsAndArguments) {
 
   auto rs = make_rs(254, 1);
   ASSERT_NE(rs, nullptr);
-  EXPECT_EQ(rs->ts, DATA_SHARDS_MAX);
+  EXPECT_EQ(rs->ts, RS8_DATA_SHARDS_MAX);
 
   std::array<std::uint8_t, 1> data {};
   std::array<std::uint8_t, 1> parity {};
