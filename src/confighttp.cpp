@@ -1631,6 +1631,10 @@ namespace confighttp {
 
     BOOST_LOG(warning) << "Requested quit from config page!"sv;
 
+    // Complete the handler-owned response before raising shutdown. Retaining this Response beyond
+    // the handler would retain a deleter that references the local HTTPS server after it stops.
+    response->write();
+
 #ifdef _WIN32
     if (GetConsoleWindow() == NULL) {
       lifetime::exit_sunshine(ERROR_SHUTDOWN_IN_PROGRESS, true);
@@ -1639,12 +1643,6 @@ namespace confighttp {
     {
       lifetime::exit_sunshine(0, true);
     }
-    // If exit fails, write a response after 5 seconds.
-    std::thread write_resp([response] {
-      std::this_thread::sleep_for(5s);
-      response->write();
-    });
-    write_resp.detach();
   }
 
   /**

@@ -404,28 +404,51 @@ namespace {
     EXPECT_TRUE(state.conversion_required(true, true));
   }
 
-  TEST(WindowsHostSbsRecoveryTest, StartupAndDomainResetStayAsynchronous) {
-    EXPECT_FALSE(
-      platf::dxgi::detail::host_sbs_accepted_frame_needs_synchronous_recovery(
-        false,
-        false
-      )
-    );
+  TEST(WindowsLocalPresenterRetryTest, BusyFinalSourceSurvivesCaptureTimeout) {
+    platf::dxgi::detail::local_presenter_retry_state_t state;
+    EXPECT_FALSE(state.should_process(false, false, false));
+    EXPECT_FALSE(state.should_convert(false, false, false));
+
+    state.observe_source();
+    EXPECT_TRUE(state.conversion_pending());
+    EXPECT_FALSE(state.presentation_pending());
+    EXPECT_TRUE(state.should_process(true, false, false));
+    EXPECT_TRUE(state.should_convert(true, false, false));
+
+    // A busy frame-latency wait leaves source conversion pending. Once conversion succeeds, a
+    // busy Present retries the backbuffer without converting/enqueuing those pixels again.
+    EXPECT_TRUE(state.should_convert(true, false, false));
+    state.record_converted();
+    EXPECT_FALSE(state.conversion_pending());
+    EXPECT_TRUE(state.presentation_pending());
+    EXPECT_TRUE(state.should_process(true, false, false));
+    EXPECT_FALSE(state.should_convert(true, false, false));
+    state.record_presented();
+    EXPECT_FALSE(state.presentation_pending());
+    EXPECT_FALSE(state.should_process(true, false, false));
+    EXPECT_FALSE(state.should_convert(true, false, false));
   }
 
-  TEST(WindowsHostSbsRecoveryTest, TrulyStalePriorSourceUsesBoundedRecovery) {
-    EXPECT_TRUE(
-      platf::dxgi::detail::host_sbs_accepted_frame_needs_synchronous_recovery(
-        true,
-        false
-      )
-    );
-    EXPECT_TRUE(
-      platf::dxgi::detail::host_sbs_accepted_frame_needs_synchronous_recovery(
-        false,
-        true
-      )
-    );
+  TEST(WindowsLocalPresenterRetryTest, AsyncDepthRearmsPresentedStaticSource) {
+    platf::dxgi::detail::local_presenter_retry_state_t state;
+    state.observe_source();
+    state.record_converted();
+    state.record_presented();
+
+    EXPECT_FALSE(state.should_convert(true, false, false));
+    EXPECT_TRUE(state.should_convert(true, true, false));
+    EXPECT_TRUE(state.should_convert(true, false, true));
+    EXPECT_FALSE(state.should_convert(false, true, true));
+
+    // The ready notification is consumed before conversion. If Present is then busy, the
+    // converted depth result itself remains pending even with no second notification or poll.
+    state.record_converted();
+    EXPECT_TRUE(state.presentation_pending());
+    EXPECT_TRUE(state.should_process(true, false, false));
+    EXPECT_FALSE(state.should_convert(true, false, false));
+    state.record_presented();
+    EXPECT_FALSE(state.should_process(true, false, false));
+    EXPECT_FALSE(state.should_convert(true, false, false));
   }
 
   TEST(WindowsDdupDamageTest, AdaptiveCandidateUsesCompleteHistoryNotDamageShape) {

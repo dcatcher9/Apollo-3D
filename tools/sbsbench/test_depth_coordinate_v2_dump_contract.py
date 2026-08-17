@@ -764,6 +764,27 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "description": "authenticated test unconditioned base field",
                 "sha256": "0" * 64,
             },
+            "shadow_base_final_parallax_shape.json": {
+                "available": True,
+                "required": False,
+                "stage": (
+                    "ordinary post-limiter V2 field contract before SLR13 conditioning"),
+                "description": "authenticated test Base shape contract",
+            },
+            "shadow_base_final_parallax.png": {
+                "available": True,
+                "required": False,
+                "stage": (
+                    "ordinary post-limiter V2 field preview before SLR13 conditioning"),
+                "description": "authenticated test Base grayscale preview",
+            },
+            "shadow_base_final_parallax_heat.png": {
+                "available": True,
+                "required": False,
+                "stage": (
+                    "ordinary post-limiter V2 field preview before SLR13 conditioning"),
+                "description": "authenticated test Base heat preview",
+            },
         })
         manifest["renderer"]["parallax_v2_conditioner_role"] = (
             "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= "
@@ -785,6 +806,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertEqual(
             subtitle["artifact_files"]["conditioned_field"],
             "shadow_final_parallax.f32")
+        self.assertEqual(
+            manifest["artifacts"]["shadow_base_final_parallax_shape.json"]["stage"],
+            "ordinary post-limiter V2 field contract before SLR13 conditioning")
         producer = manifest["subtitle_conditioning"]["producer"]
         self.assertEqual(producer["contract_schema"], coordinate.SUBTITLE_OCR.schema)
         self.assertEqual(set(producer["model"]), {
@@ -906,6 +930,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 lambda manifest: manifest["dimensions"]
                 ["shadow_base_final_parallax"].update({"width": 769}),
                 "dimensions disagree"),
+            "base-preview-stage": (
+                lambda manifest: manifest["artifacts"]
+                ["shadow_base_final_parallax.png"].update({"stage": "renderer authority"}),
+                "optional Base preview contract"),
         }
         for name, (mutate, error) in mutations.items():
             with self.subTest(name=name):

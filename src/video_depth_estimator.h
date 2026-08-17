@@ -106,6 +106,35 @@ namespace models {
       bool poisoned_ = false;
     };
 
+    /** Conservative ownership response for a CUDA API failure around the joined root stream.
+     *
+     * Required interop/binding operations always fail the estimator terminally. Optional timing
+     * instrumentation may be ignored only before the first asynchronous inference submission.
+     * After any private bootstrap or joined-root launch, CUDA is allowed to surface an earlier
+     * asynchronous failure through a later map, pointer, event, or query call, so the depth context
+     * is quarantined; OCR is quarantined once it has ever been submitted or armed in that stream
+     * lifetime.
+     */
+    struct joined_cuda_failure_policy_t {
+      bool terminal = false;
+      bool quarantine_depth = false;
+      bool quarantine_ocr = false;
+
+      bool operator==(const joined_cuda_failure_policy_t &) const = default;
+    };
+
+    [[nodiscard]] constexpr joined_cuda_failure_policy_t joined_cuda_failure_policy(
+      const bool required_operation,
+      const bool async_work_ever_submitted,
+      const bool ocr_ever_submitted_or_armed
+    ) noexcept {
+      return {
+        .terminal = required_operation || async_work_ever_submitted,
+        .quarantine_depth = async_work_ever_submitted,
+        .quarantine_ocr = async_work_ever_submitted && ocr_ever_submitted_or_armed,
+      };
+    }
+
     /** Normalized result of a nonblocking asynchronous-stream query.
      *
      * Keeping CUDA's numeric result codes out of the policy makes the exact-frame joined-root
@@ -117,6 +146,51 @@ namespace models {
       busy,
       failed,
     };
+
+    /** Bounded teardown action for one nonblocking stream-query observation. */
+    enum class teardown_quiescence_action_e : std::uint8_t {
+      release_operands,
+      retry_query,
+      retain_operands,
+    };
+
+    [[nodiscard]] constexpr teardown_quiescence_action_e teardown_quiescence_action(
+      const async_stream_readiness_e readiness,
+      const bool deadline_remaining
+    ) noexcept {
+      if (readiness == async_stream_readiness_e::ready) {
+        return teardown_quiescence_action_e::release_operands;
+      }
+      if (readiness == async_stream_readiness_e::busy && deadline_remaining) {
+        return teardown_quiescence_action_e::retry_query;
+      }
+      return teardown_quiescence_action_e::retain_operands;
+    }
+
+    /** A raw CUDA teardown handle may be forgotten only when absent or positively destroyed. */
+    [[nodiscard]] constexpr bool teardown_cuda_handle_may_be_forgotten(
+      const bool handle_present,
+      const bool destroy_api_available,
+      const bool destroy_succeeded
+    ) noexcept {
+      return !handle_present || (destroy_api_available && destroy_succeeded);
+    }
+
+    /** A poisoned conditional-bridge failure inherits every prior optional-stream participant. */
+    [[nodiscard]] constexpr bool bridge_failure_quarantines_ocr(
+      const bool poison_execution_context,
+      const bool ocr_ever_submitted_or_armed
+    ) noexcept {
+      return poison_execution_context && ocr_ever_submitted_or_armed;
+    }
+
+    /** Once a CUDA teardown chain fails, later successes cannot make further releases safe. */
+    [[nodiscard]] constexpr bool cuda_teardown_chain_may_continue(
+      const bool chain_was_clean,
+      const bool operation_succeeded
+    ) noexcept {
+      return chain_was_clean && operation_succeeded;
+    }
 
     /** Whether CUDA operands may be released after a possible asynchronous submission.
      *
@@ -985,22 +1059,10 @@ namespace models {
      * @brief Finish and consume exactly one inference previously submitted by estimate_depth().
      *
      * It synchronizes the estimator stream and applies normalization, EMA, cut analysis, and
-     * coordinate production exactly once without enqueueing another inference. The offline evaluator uses this as its
-     * exact current-frame quality path; production uses the separate idle-recovery entry point.
+     * coordinate production exactly once without enqueueing another inference. This is an
+     * offline-evaluation quality path; live capture uses only bounded/nonblocking completion polls.
      */
     estimate_result finish_pending_depth_for_evaluation(input_color_space color_space = input_color_space::srgb);
-
-    /**
-     * @brief Consume the just-submitted live inference when capture resumed after an idle gap.
-     *
-     * The normal Host SBS path stays asynchronous. This one-inference drain is used only when the
-     * current source frame would otherwise be left flat because capture went idle before a later
-     * convert() could poll its completion. The encode thread remains the D3D context owner.
-     */
-    estimate_result finish_pending_depth_for_idle_recovery(
-      input_color_space color_space,
-      bool snapshot_debug_inputs = false
-    );
 
     /** Query the pending joined DAV2/OCR completion fence once and consume the exact unit when ready. */
     pending_depth_poll_result try_finish_pending_depth_nonblocking(

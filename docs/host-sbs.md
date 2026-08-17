@@ -939,10 +939,14 @@ hit, repeated-wait hit, cadence/budget-ineligible busy, eligible timeout, ready 
 event-unavailable busy fallback. These counters expose the true success denominator and how much
 real cadence headroom the policy spent without changing frame ownership or implying a guaranteed
 hit rate.
-The same cadence line reports `warped_new/packed_repeat/flat_pending_miss` presentation counts, so
-any same-frame busy result—cadence-ineligible, eligible timeout, or event-unavailable—that used the
-presentation-only cache is distinguishable from a route/reset invalidation that had to render
-identity.
+The same cadence line labels its denominator as `conversions` (not encoded packets) and partitions
+each converted SBS output into `warped_new/packed_repeat/flat`. `flat_pending_miss` is a narrower
+subset, so any same-frame busy result—cadence-ineligible, eligible timeout, or event-unavailable—
+that used the presentation-only cache is distinguishable from a route/reset invalidation that had
+to render identity. GPU timing brackets `matched_frame_copy_gpu` immediately around the private
+`CopyResource`, outside completed-depth postprocess, and `sbs_warp_gpu` covers either the
+authenticated reprojection or the current-frame flat-identity fullscreen pass. Packed repeats
+submit neither fullscreen pass nor a matched-frame copy.
 Throughput diagnostics also split CPU-known force-infer roots from GPU-undecided roots and report
 host-side optional OCR as *armed*. When diagnostics were enabled, the authenticated GPU trace is
 the exact source for the depth infer/reuse disposition and the independent subtitle result:
@@ -962,8 +966,11 @@ producer state still rejects that presentation hold and renders identity.
 A ready empty or failed result clears the candidate and enters the existing terminal-failure or
 ordinary-output handling; a ready mismatched identity enters the existing unknown-completion
 handling. Diagnostics report wait attempts, exact hits, timeouts, failures, query count, and
-average/maximum query-wait duration. The pre-existing retained-source idle drain and the `250 ms`
-stale-prior recovery are the only paths that can synchronize an actually busy inference.
+average/maximum query-wait duration. Live capture never synchronizes an actually busy inference:
+retained-source retries and stale-prior cases preserve the exact pending slot and use only later
+bounded/nonblocking polls. The prior packed image remains presentation-only for at most `250 ms`;
+after that bound, current-frame flat identity is shown until a completion becomes ready. The
+offline evaluator alone may synchronize its private quality transaction before scoring it.
 
 ## Foreground window-region ROI
 

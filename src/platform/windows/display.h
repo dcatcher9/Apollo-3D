@@ -105,15 +105,62 @@ namespace platf::dxgi {
       bool initialized_ = false;
     };
 
-    /** Accepted-frame synchronization is reserved for an old source that already exceeded the
-     * bounded repeat window. Startup and ordinary analysis-domain resets have no stale source and
-     * must remain on the normal asynchronous completion path. */
-    [[nodiscard]] constexpr bool host_sbs_accepted_frame_needs_synchronous_recovery(
-      const bool stale_prior_completion,
-      const bool stale_prior_output
-    ) noexcept {
-      return stale_prior_completion || stale_prior_output;
-    }
+    /** Retain and retry the newest local-presenter source without imposing a minimum-FPS loop.
+     *
+     * Source conversion and swapchain presentation are separate ownership steps: a busy latency
+     * wait leaves conversion pending, while a busy Present leaves only the already-converted
+     * backbuffer pending. This prevents both losing the final output and reconverting/re-enqueuing
+     * the same pixels merely to retry Present.
+     */
+    class local_presenter_retry_state_t {
+    public:
+      constexpr void observe_source() noexcept {
+        conversion_pending_ = true;
+      }
+
+      /** A conversion triggered by an asynchronous pipeline notification can happen after the
+       * source was already presented once. Re-arm the output before Present so swapchain
+       * backpressure cannot discard that newly rendered result. */
+      constexpr void record_converted() noexcept {
+        conversion_pending_ = false;
+        presentation_pending_ = true;
+      }
+
+      [[nodiscard]] constexpr bool should_process(
+        const bool has_retained_source,
+        const bool depth_pipeline_ready,
+        const bool conversion_poll_pending
+      ) const noexcept {
+        return has_retained_source &&
+               (conversion_pending_ || presentation_pending_ || depth_pipeline_ready ||
+                conversion_poll_pending);
+      }
+
+      [[nodiscard]] constexpr bool should_convert(
+        const bool has_retained_source,
+        const bool depth_pipeline_ready,
+        const bool conversion_poll_pending
+      ) const noexcept {
+        return has_retained_source &&
+               (conversion_pending_ || depth_pipeline_ready || conversion_poll_pending);
+      }
+
+      constexpr void record_presented() noexcept {
+        presentation_pending_ = false;
+      }
+
+      [[nodiscard]] constexpr bool presentation_pending() const noexcept {
+        return presentation_pending_;
+      }
+
+      [[nodiscard]] constexpr bool conversion_pending() const noexcept {
+        return conversion_pending_;
+      }
+
+    private:
+      bool conversion_pending_ = false;
+      bool presentation_pending_ = false;
+    };
 
     [[nodiscard]] constexpr bool host_sbs_window_authority_observation_needed(
       const bool has_depth_estimator,

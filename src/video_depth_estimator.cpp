@@ -2329,13 +2329,29 @@ namespace models {
       if (!r.busy[slot] || !cuda.cuEventQuery) {
         return;
       }
-      if (cuda.cuEventQuery(r.stop[slot]) != CUDA_SUCCESS) {
-        return;  // not finished yet
+      const CUresult query = cuda.cuEventQuery(r.stop[slot]);
+      if (query == CUDA_ERROR_NOT_READY) {
+        return;
+      }
+      if (query != CUDA_SUCCESS) {
+        (void) observe_joined_cuda_failure(
+          "diagnostic timing-event query", query, false
+        );
+        return;
       }
       float ms = 0.0f;
-      if (cuda.cuEventElapsedTime && cuda.cuEventElapsedTime(&ms, r.start[slot], r.stop[slot]) == CUDA_SUCCESS) {
-        sbs_perf::add_sample_ms(r.stage, ms);
+      const CUresult elapsed = cuda.cuEventElapsedTime ?
+                                 cuda.cuEventElapsedTime(
+                                   &ms, r.start[slot], r.stop[slot]
+                                 ) :
+                                 static_cast<CUresult>(-1);
+      if (elapsed != CUDA_SUCCESS) {
+        (void) observe_joined_cuda_failure(
+          "diagnostic timing-event elapsed query", elapsed, false
+        );
+        return;
       }
+      sbs_perf::add_sample_ms(r.stage, ms);
       r.busy[slot] = false;
     }
 
@@ -2343,6 +2359,9 @@ namespace models {
       auto &cuda = cuda_driver_api::get();
       for (int i = 0; i < perf_evt_ring::N; i++) {
         perf_try_resolve(r, i, cuda);
+        if (terminal_failure) {
+          break;
+        }
       }
     }
 
@@ -2357,16 +2376,36 @@ namespace models {
       }
       int slot = r.head;
       perf_try_resolve(r, slot, cuda);  // reclaim the slot if its prior sample is ready
-      if (r.busy[slot]) {
-        return -1;  // still in flight -> drop this measurement
+      if (terminal_failure || r.busy[slot]) {
+        return -1;  // terminal, or still in flight: do not start another measurement
       }
-      if (!r.start[slot] && cuda.cuEventCreate(&r.start[slot], CU_EVENT_DEFAULT) != CUDA_SUCCESS) {
-        return -1;
+      if (!r.start[slot]) {
+        const CUresult created = cuda.cuEventCreate(
+          &r.start[slot], CU_EVENT_DEFAULT
+        );
+        if (created != CUDA_SUCCESS) {
+          (void) observe_joined_cuda_failure(
+            "diagnostic timing-event creation", created, false
+          );
+          return -1;
+        }
       }
-      if (!r.stop[slot] && cuda.cuEventCreate(&r.stop[slot], CU_EVENT_DEFAULT) != CUDA_SUCCESS) {
-        return -1;
+      if (!r.stop[slot]) {
+        const CUresult created = cuda.cuEventCreate(
+          &r.stop[slot], CU_EVENT_DEFAULT
+        );
+        if (created != CUDA_SUCCESS) {
+          (void) observe_joined_cuda_failure(
+            "diagnostic timing-event creation", created, false
+          );
+          return -1;
+        }
       }
-      if (cuda.cuEventRecord(r.start[slot], stream) != CUDA_SUCCESS) {
+      const CUresult recorded = cuda.cuEventRecord(r.start[slot], stream);
+      if (recorded != CUDA_SUCCESS) {
+        (void) observe_joined_cuda_failure(
+          "diagnostic timing-event start record", recorded, false
+        );
         return -1;
       }
       return slot;
@@ -2378,29 +2417,53 @@ namespace models {
         return;
       }
       auto &cuda = cuda_driver_api::get();
-      if (!cuda.cuEventRecord || cuda.cuEventRecord(r.stop[slot], stream) != CUDA_SUCCESS) {
+      const CUresult recorded = cuda.cuEventRecord ?
+                                  cuda.cuEventRecord(r.stop[slot], stream) :
+                                  static_cast<CUresult>(-1);
+      if (recorded != CUDA_SUCCESS) {
+        (void) observe_joined_cuda_failure(
+          "diagnostic timing-event stop record", recorded, false
+        );
         return;
       }
       r.busy[slot] = true;
       r.head = (r.head + 1) % perf_evt_ring::N;
     }
 
-    void perf_destroy_events() {
-      auto &cuda = cuda_driver_api::get();
-      if (!cuda.cuEventDestroy) {
-        return;
-      }
+    [[nodiscard]] bool perf_destroy_events(cuda_driver_api &cuda) {
       for (auto *r : {&perf_depth_conditional}) {
         for (int i = 0; i < perf_evt_ring::N; i++) {
-          if (r->start[i]) {
-            cuda.cuEventDestroy(r->start[i]);
+          for (auto event : {
+                 std::pair<CUevent *, const char *> {&r->start[i], "start"},
+                 std::pair<CUevent *, const char *> {&r->stop[i], "stop"},
+               }) {
+            if (!*event.first) {
+              continue;
+            }
+            const bool destroy_api_available = cuda.cuEventDestroy != nullptr;
+            const CUresult destroyed = destroy_api_available ?
+                                         cuda.cuEventDestroy(*event.first) :
+                                         static_cast<CUresult>(-1);
+            if (detail::teardown_cuda_handle_may_be_forgotten(
+                  true,
+                  destroy_api_available,
+                  destroyed == CUDA_SUCCESS
+                )) {
+              *event.first = nullptr;
+              continue;
+            }
+            // Keep the failed raw handle non-null. CUevent has no value destructor, so estimator
+            // destruction deliberately leaks this and every later event together with retained
+            // operands. Do not issue another CUDA teardown call after a possibly deferred fault.
+            BOOST_LOG(warning)
+              << "Depth-estimator diagnostic " << event.second << " event " << i
+              << " destroy failed: result=" << destroyed
+              << "; retaining CUDA operands and quarantining participating contexts.";
+            return false;
           }
-          if (r->stop[i]) {
-            cuda.cuEventDestroy(r->stop[i]);
-          }
-          r->start[i] = r->stop[i] = nullptr;
         }
       }
+      return true;
     }
 
     [[nodiscard]] bool reset_depth_conditional_graph() noexcept {
@@ -2436,7 +2499,9 @@ namespace models {
       depth_conditional_request_ptr = 0u;
       depth_conditional_child_graph = nullptr;
       depth_conditional_optional_child_graph = nullptr;
-      return true;
+      // Even when every wrapper handle was destroyed, a failed context restore is a CUDA teardown
+      // failure. Callers must stop before unregistering or destroying the wrapper's dependencies.
+      return reset_ok;
     }
 
     [[nodiscard]] bool destroy_inference_graph(
@@ -2525,6 +2590,7 @@ namespace models {
           );
           return false;
         }
+        joined_stream_work_ever_submitted = true;
         depth_inference_graph.policy.signature_warmed = true;
       }
 
@@ -2598,6 +2664,8 @@ namespace models {
           mark_ocr_enqueue_failure("private signature bootstrap enqueueV3", CUDA_SUCCESS);
           return false;
         }
+        joined_stream_work_ever_submitted = true;
+        joined_stream_ocr_ever_submitted_or_armed = true;
         ocr_inference_graph.policy.signature_warmed = true;
       }
 
@@ -2852,6 +2920,11 @@ namespace models {
     bool pending_depth_inference_event_recorded = false;
     bool inference_event_poll_available = false;
     bool inference_event_ever_recorded = false;
+    // CUDA may report an earlier asynchronous bootstrap/root error through a later map, pointer,
+    // or timing-event call even after nominal completion. Retain stream-lifetime participation so
+    // those late failures quarantine every TensorRT context that could have executed.
+    bool joined_stream_work_ever_submitted = false;
+    bool joined_stream_ocr_ever_submitted_or_armed = false;
     // The host knows which authenticated subtitle transaction it submitted without learning the
     // DAV2 branch. Receipt-gated postprocess uses this exact expected disposition.
     cuda_conditional_graph::work_flag_e pending_subtitle_work =
@@ -2942,8 +3015,10 @@ namespace models {
       pending_depth_inference_event_recorded = false;
     }
 
-    // Host V2 fails flat on any producer error. Only async execution/query failures quarantine the
-    // TRT context; a rejected shape or interop mapping may still be safely reused by a later stream.
+    // Host V2 fails flat on any producer error. Context quarantine is owned separately by failure
+    // provenance: pre-enqueue validation may leave a context reusable, while a CUDA error after
+    // asynchronous bootstrap/root work was submitted may be deferred and quarantines every
+    // context that participated.
     void mark_terminal_failure(const bool poison_execution_context = false) {
       clear_pending_inference_event_state();
       execution_context_poisoned =
@@ -2957,6 +3032,40 @@ namespace models {
       ocr_context_health.observe(failure);
     }
 
+    /** Apply the canonical fail-flat response to a CUDA call around the joined root stream.
+     *
+     * Required map/pointer operations are terminal even before the first launch. Optional timing
+     * calls remain optional only until asynchronous bootstrap or root work has been submitted;
+     * afterward their error result may be a deferred report from DAV2 or OCR and therefore owns
+     * the same quarantine response as a root query failure.
+     */
+    bool observe_joined_cuda_failure(
+      const std::string_view operation,
+      const CUresult result,
+      const bool required_operation
+    ) {
+      const auto policy = detail::joined_cuda_failure_policy(
+        required_operation,
+        joined_stream_work_ever_submitted,
+        joined_stream_ocr_ever_submitted_or_armed
+      );
+      if (!policy.terminal) {
+        return false;
+      }
+      if (!stream_error_logged) {
+        BOOST_LOG(error) << "DAV2/OCR joined CUDA " << operation
+                         << " failed: result=" << result;
+        stream_error_logged = true;
+      }
+      if (policy.quarantine_ocr) {
+        mark_ocr_context_failure(
+          detail::warmed_execution_context_failure_e::asynchronous_execution_or_query
+        );
+      }
+      mark_terminal_failure(policy.quarantine_depth);
+      return true;
+    }
+
     void fail_gpu_conditional_bridge_once(
       const std::string_view reason,
       const CUresult result = CUDA_SUCCESS,
@@ -2964,6 +3073,16 @@ namespace models {
       const bool retain_live_wrapper = false
     ) {
       gpu_conditional_bridge_available = false;
+      if (detail::bridge_failure_quarantines_ocr(
+            poison_execution_context,
+            joined_stream_ocr_ever_submitted_or_armed
+          )) {
+        // A later depth-only rebuild/launch API can surface an asynchronous fault from an earlier
+        // optional child on the same stream. Current suppression does not erase that ownership.
+        mark_ocr_context_failure(
+          detail::warmed_execution_context_failure_e::asynchronous_execution_or_query
+        );
+      }
       // A failed launch can leave work from this executable in flight. Never destroy its embedded
       // child or mirror operands here; terminal teardown first quiesces the CUDA stream, then
       // releases the wrapper and every captured dependency in order.
@@ -3141,9 +3260,9 @@ namespace models {
     // CUDA may report an earlier asynchronous launch error through a later root query,
     // synchronization, map, or unmap. Conservatively quarantine every TensorRT context embedded
     // in that root instead of assuming the failure belongs only to DAV2.
-    void mark_shared_execution_failure(const bool ocr_was_submitted) noexcept {
+    void mark_shared_execution_failure(const bool ocr_may_have_participated) noexcept {
       mark_terminal_failure(true);
-      if (ocr_was_submitted) {
+      if (ocr_may_have_participated || joined_stream_ocr_ever_submitted_or_armed) {
         mark_ocr_context_failure(
           detail::warmed_execution_context_failure_e::asynchronous_execution_or_query
         );
@@ -3573,7 +3692,10 @@ namespace models {
     bool unregister_near_identical_decision_interop(cuda_driver_api &cuda) {
       if (!reset_depth_conditional_graph()) {
         fail_gpu_conditional_bridge_once(
-          "conditional-wrapper teardown failed before decision-buffer unregister"
+          "conditional-wrapper teardown failed before decision-buffer unregister",
+          CUDA_SUCCESS,
+          true,
+          true
         );
         return false;
       }
@@ -3584,7 +3706,10 @@ namespace models {
       }
       execution_context_poisoned = true;
       fail_gpu_conditional_bridge_once(
-        "decision-buffer interop unregister failed"
+        "decision-buffer interop unregister failed",
+        CUDA_SUCCESS,
+        true,
+        true
       );
       return false;
     }
@@ -5053,8 +5178,7 @@ namespace models {
       auto &cuda = cuda_driver_api::get();
       bool cleanup_execution_ok = cuda.is_valid() && cuda_ctx;
       const auto retain_all_cuda_backing = [&]() noexcept {
-        // Without the estimator's CUDA context, no unregister/destroy result can prove that a
-        // graph or graphics registration released its D3 allocation. Preserve every possible
+        // When CUDA teardown cannot positively release every handle, preserve every possible D3
         // operand rather than let ComPtr destruction create a driver-side use-after-free.
         (void) near_identical_gpu_decision_uav.Detach();
         (void) near_identical_gpu_decision_buf.Detach();
@@ -5079,118 +5203,153 @@ namespace models {
         } else {
           bool stream_quiesced = !cu_stream;
           if (cu_stream) {
-            if (cuda.cuStreamSynchronize) {
-              const auto synchronized = cuda.cuStreamSynchronize(cu_stream);
-              if (synchronized != CUDA_SUCCESS) {
-                cleanup_execution_ok = false;
-                BOOST_LOG(warning)
-                  << "Depth-estimator teardown observed a failed asynchronous inference: "
-                  << synchronized;
-              } else {
-                stream_quiesced = true;
+            if (cuda.cuStreamQuery) {
+              // Teardown runs on the lifecycle worker, not the presenter. Allow a weak GPU up to a
+              // quarter second to finish one already-submitted root before choosing the deliberate
+              // retain/quarantine path; 1 ms pacing bounds driver calls and avoids a busy spin.
+              constexpr auto teardown_quiescence_budget =
+                std::chrono::milliseconds {250};
+              const auto deadline =
+                std::chrono::steady_clock::now() + teardown_quiescence_budget;
+              CUresult last_query = CUDA_ERROR_NOT_READY;
+              unsigned int query_count = 0u;
+              while (true) {
+                last_query = cuda.cuStreamQuery(cu_stream);
+                ++query_count;
+                const auto readiness = normalized_cuda_readiness(last_query);
+                const auto action = detail::teardown_quiescence_action(
+                  readiness,
+                  std::chrono::steady_clock::now() < deadline
+                );
+                if (action == detail::teardown_quiescence_action_e::release_operands) {
+                  stream_quiesced = true;
+                  break;
+                }
+                if (action == detail::teardown_quiescence_action_e::retain_operands) {
+                  cleanup_execution_ok = false;
+                  BOOST_LOG(warning)
+                    << "Depth-estimator teardown could not prove stream quiescence after "
+                    << query_count << " nonblocking query attempt(s): result=" << last_query
+                    << (readiness == detail::async_stream_readiness_e::busy ?
+                          " (250 ms deadline expired)." : " (CUDA query failed).");
+                  break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds {1});
               }
             } else {
               cleanup_execution_ok = false;
+              BOOST_LOG(warning)
+                << "Depth-estimator teardown cannot query stream quiescence; retaining all CUDA "
+                   "operands.";
             }
           }
           if (!stream_quiesced) {
-            // A failed synchronization may be either the launch fault being reported or a
-            // synchronous context/handle failure. Neither proves that graph operands are idle.
-            // Retain the wrapper, source graphs, stream, registrations and their D3 backing.
+            // A failed query may be the launch fault being reported; a timeout still leaves work
+            // potentially live. Neither proves that graph operands are idle. Retain the wrapper,
+            // source graphs, stream, registrations, and their D3 backing.
             retain_all_cuda_backing();
             depth_conditional_graph.abandon_unsafe();
           } else {
-            const bool inference_events_destroyed =
-              destroy_inference_done_events(cuda);
-            if (!inference_events_destroyed && inference_event_ever_recorded) {
+            // Every CUDA teardown call may be the first API to report a deferred root fault. The
+            // chain is monotonic: after the first failure, retain every not-yet-proven handle and
+            // D3 operand and issue no later CUDA destroy/unregister call.
+            bool cuda_teardown_may_continue = true;
+            std::string_view failed_teardown_operation;
+            const auto observe_teardown = [&](const bool succeeded, const std::string_view name) {
+              const bool next = detail::cuda_teardown_chain_may_continue(
+                cuda_teardown_may_continue,
+                succeeded
+              );
+              if (cuda_teardown_may_continue && !next) {
+                failed_teardown_operation = name;
+              }
+              cuda_teardown_may_continue = next;
+            };
+
+            // A previously failed context restore is already a failed first teardown operation.
+            // Do not use that context for even an otherwise independent event destroy.
+            observe_teardown(
+              !gpu_conditional_bridge_context_failed,
+              "conditional wrapper context state"
+            );
+            if (cuda_teardown_may_continue) {
+              observe_teardown(
+                perf_destroy_events(cuda),
+                "diagnostic event destruction"
+              );
+            }
+            if (cuda_teardown_may_continue) {
+              observe_teardown(
+                destroy_inference_done_events(cuda),
+                inference_event_ever_recorded ?
+                  "recorded inference event destruction" :
+                  "unrecorded inference event destruction"
+              );
+            }
+            if (cuda_teardown_may_continue) {
+              observe_teardown(
+                unregister_near_identical_decision_interop(cuda),
+                "conditional wrapper/decision interop release"
+              );
+            }
+            if (cuda_teardown_may_continue) {
+              observe_teardown(
+                destroy_inference_graph(cuda, depth_inference_graph),
+                "DAV2 source graph destruction"
+              );
+            }
+            if (cuda_teardown_may_continue) {
+              observe_teardown(
+                destroy_inference_graph(cuda, ocr_inference_graph),
+                "OCR source graph destruction"
+              );
+            }
+            if (cuda_teardown_may_continue && cu_stream) {
+              const CUresult stream_destroyed = cuda.cuStreamDestroy ?
+                                                  cuda.cuStreamDestroy(cu_stream) :
+                                                  static_cast<CUresult>(-1);
+              observe_teardown(
+                stream_destroyed == CUDA_SUCCESS,
+                "joined stream destruction"
+              );
+              if (cuda_teardown_may_continue) {
+                cu_stream = nullptr;
+              }
+            }
+            if (cuda_teardown_may_continue) {
+              observe_teardown(
+                unregister_cuda_graphics_resource(cuda, cuda_in_res),
+                "DAV2 input interop unregister"
+              );
+            }
+            if (cuda_teardown_may_continue) {
+              observe_teardown(
+                unregister_cuda_graphics_resource(cuda, cuda_out_res),
+                "DAV2 output interop unregister"
+              );
+            }
+            if (cuda_teardown_may_continue) {
+              observe_teardown(
+                unregister_cuda_graphics_resource(cuda, cuda_ocr_in_res),
+                "OCR input interop unregister"
+              );
+            }
+            if (cuda_teardown_may_continue) {
+              observe_teardown(
+                unregister_cuda_graphics_resource(cuda, cuda_ocr_out_res),
+                "OCR output interop unregister"
+              );
+            }
+
+            if (!cuda_teardown_may_continue) {
               cleanup_execution_ok = false;
-            }
-            const bool decision_interop_released =
-              unregister_near_identical_decision_interop(cuda);
-            cleanup_execution_ok = decision_interop_released && cleanup_execution_ok;
-            cleanup_execution_ok = !gpu_conditional_bridge_context_failed &&
-                                   cleanup_execution_ok;
-            const bool conditional_wrapper_live = !depth_conditional_graph.empty();
-            const bool depth_graph_released =
-              !conditional_wrapper_live &&
-              destroy_inference_graph(cuda, depth_inference_graph);
-            const bool depth_graph_live = depth_inference_graph.graph != nullptr;
-            const bool ocr_graph_released =
-              destroy_inference_graph(cuda, ocr_inference_graph);
-            const bool ocr_graph_live = ocr_inference_graph.graph != nullptr;
-            const bool root_dependency_live = conditional_wrapper_live || depth_graph_live ||
-                                              ocr_graph_live;
-            cleanup_execution_ok = depth_graph_released && ocr_graph_released &&
-                                   cleanup_execution_ok;
-            if (!decision_interop_released) {
-              // A live conditional executable captures both the child graph and mapped decision
-              // address. If CUDA could not prove their release, intentionally leak the D3
-              // interfaces with the retained CUDA registration rather than let member destruction
-              // free backing memory underneath driver-owned nodes. The poisoned context is never
-              // pooled.
-              (void) near_identical_gpu_decision_uav.Detach();
-              (void) near_identical_gpu_decision_buf.Detach();
-            }
-            if (cu_stream && !root_dependency_live &&
-                (!cuda.cuStreamDestroy ||
-                 cuda.cuStreamDestroy(cu_stream) != CUDA_SUCCESS)) {
-              cleanup_execution_ok = false;
-            }
-            if (root_dependency_live) {
-              // A live wrapper or captured source graph retains TensorRT's input/output addresses.
-              // Preserve their registrations, D3 backing, and launch stream together. This path is
-              // terminal and deliberately leaks only after CUDA has made safe teardown impossible;
-              // the associated execution context is quarantined below.
-              (void) tensor_in_srv.Detach();
-              (void) tensor_in_uav.Detach();
-              (void) tensor_in_buf.Detach();
-              (void) tensor_out_srv.Detach();
-              (void) tensor_out_buf.Detach();
-            } else {
-              const bool input_unregistered =
-                unregister_cuda_graphics_resource(cuda, cuda_in_res);
-              const bool output_unregistered =
-                unregister_cuda_graphics_resource(cuda, cuda_out_res);
-              if (!input_unregistered) {
-                (void) tensor_in_srv.Detach();
-                (void) tensor_in_uav.Detach();
-                (void) tensor_in_buf.Detach();
-              }
-              if (!output_unregistered) {
-                (void) tensor_out_srv.Detach();
-                (void) tensor_out_buf.Detach();
-              }
-              cleanup_execution_ok = input_unregistered && output_unregistered &&
-                                     cleanup_execution_ok;
-            }
-            if (conditional_wrapper_live || ocr_graph_live) {
-              (void) ocr_input_uav.Detach();
-              (void) ocr_input_buf.Detach();
-              (void) ocr_output_srv.Detach();
-              (void) ocr_output_buf.Detach();
-            } else {
-              const bool ocr_input_unregistered =
-                unregister_cuda_graphics_resource(cuda, cuda_ocr_in_res);
-              const bool ocr_output_unregistered =
-                unregister_cuda_graphics_resource(cuda, cuda_ocr_out_res);
-              if (!ocr_input_unregistered) {
-                (void) ocr_input_uav.Detach();
-                (void) ocr_input_buf.Detach();
-              }
-              if (!ocr_output_unregistered) {
-                (void) ocr_output_srv.Detach();
-                (void) ocr_output_buf.Detach();
-              }
-              cleanup_execution_ok = ocr_input_unregistered &&
-                                     ocr_output_unregistered && cleanup_execution_ok;
-            }
-            if (conditional_wrapper_live) {
-              // reset() already reported that one or more wrapper objects remain live. All
-              // operands were retained above; prevent the value-member destructor from retrying
-              // CUDA teardown after this quiescent cleanup scope has ended.
+              retain_all_cuda_backing();
               depth_conditional_graph.abandon_unsafe();
+              BOOST_LOG(warning)
+                << "Depth-estimator CUDA teardown stopped after "
+                << failed_teardown_operation
+                << " failed; retaining all remaining CUDA/D3 operands.";
             }
-            perf_destroy_events();  // free the timing events while cuda_ctx is still current
           }
         }
       } else {
@@ -5198,13 +5357,15 @@ namespace models {
         depth_conditional_graph.abandon_unsafe();
       }
       if (!cleanup_execution_ok) {
-        // Teardown synchronization can be the first API call to surface a deferred launch fault.
+        // Any teardown API can be the first call to surface a deferred launch fault.
         // CUDA can surface one stream's earlier launch fault through another stream's cleanup.
         // Never give either participating context to a later estimator in that case.
         execution_context_poisoned = true;
-        mark_ocr_context_failure(
-          detail::warmed_execution_context_failure_e::unsafe_teardown
-        );
+        if (joined_stream_ocr_ever_submitted_or_armed) {
+          mark_ocr_context_failure(
+            detail::warmed_execution_context_failure_e::unsafe_teardown
+          );
+        }
       }
 
       // Return only a successfully warmed context to the reusable pool. Construction can fail
@@ -6515,12 +6676,15 @@ namespace models {
       // A nonblocking or bounded try-finish caller may prove the joined root complete through its
       // post-unmap event or, when events are unavailable, a successful root-stream query. D3D11
       // postprocess is then ordered behind the same release boundary without another synchronize.
-      // Evaluation and recovery callers retain the conservative synchronization path.
+      // Offline evaluation alone retains the conservative synchronization path.
       if (!root_completion_proven && !synchronize_pending_execution(cuda)) {
         return make_result();
       }
       if (diagnostics_enabled) {
         perf_drain(perf_depth_conditional);
+        if (terminal_failure) {
+          return make_result();
+        }
       }
       (void) color_space;  // the pending frame owns its transfer mode
       ensure_cbuffers(pending_color_space, pending_input_region);
@@ -7382,6 +7546,9 @@ namespace models {
       // Resolve completed inference-timing events only for diagnostic runs.
       if (diagnostics_enabled) {
         perf_drain(perf_depth_conditional);
+        if (terminal_failure) {
+          return {};
+        }
       }
 
       // Prevent GPU starvation: if the previous AI frame is still crunching, drop this frame.
@@ -7993,9 +8160,10 @@ namespace models {
       auto map_res = cuda.cuGraphicsMapResources(
         depth_resource_count, depth_resources.data(), cu_stream
       );
-      if (map_res != 0) {
-        BOOST_LOG(error) << "cuGraphicsMapResources failed: " << map_res;
-        mark_terminal_failure();
+      if (map_res != CUDA_SUCCESS) {
+        (void) observe_joined_cuda_failure(
+          "depth interop map", map_res, true
+        );
         return make_result(
           completed_frame_valid,
           completed_frame_id,
@@ -8031,12 +8199,9 @@ namespace models {
           mark_ocr_context_failure(
             detail::warmed_execution_context_failure_e::pre_enqueue_interop_or_binding
           );
-          if (!ocr_error_logged) {
-            BOOST_LOG(warning)
-              << "PP-OCRv6 tiny interop map failed (" << ocr_map
-              << "); depth remains active and subtitle conditioning stays flat.";
-            ocr_error_logged = true;
-          }
+          (void) observe_joined_cuda_failure(
+            "optional OCR interop map", ocr_map, true
+          );
         }
       }
 
@@ -8078,6 +8243,24 @@ namespace models {
         );
       }
 
+      const bool ocr_pointer_contract_valid =
+        !ocr_mapped ||
+        (ocr_in_ptr_res == CUDA_SUCCESS && ocr_out_ptr_res == CUDA_SUCCESS &&
+         d_ocr_in != 0u && d_ocr_out != 0u);
+      if (ocr_mapped && !ocr_pointer_contract_valid) {
+        ocr_available = false;
+        mark_ocr_context_failure(
+          detail::warmed_execution_context_failure_e::pre_enqueue_interop_or_binding
+        );
+        const CUresult pointer_failure =
+          ocr_in_ptr_res != CUDA_SUCCESS ? ocr_in_ptr_res :
+          ocr_out_ptr_res != CUDA_SUCCESS ? ocr_out_ptr_res :
+          static_cast<CUresult>(-1);
+        (void) observe_joined_cuda_failure(
+          "optional OCR mapped-pointer contract", pointer_failure, true
+        );
+      }
+
       // Admission proved the preceding observation's full stream reusable. From here on these
       // flags describe only the candidate whose interop unmaps will be issued below.
       clear_pending_inference_event_state();
@@ -8086,10 +8269,17 @@ namespace models {
       // contain the OCR sibling while suppression leaves that child dormant.
       bool ocr_armed = false;
       if (in_ptr_res != CUDA_SUCCESS || out_ptr_res != CUDA_SUCCESS || !d_in || !d_out) {
-        BOOST_LOG(error) << "Failed to get mapped pointer for TensorRT: "
-                         << in_ptr_res << ", " << out_ptr_res;
-        mark_terminal_failure();
-      } else {
+        const CUresult pointer_failure =
+          in_ptr_res != CUDA_SUCCESS ? in_ptr_res :
+          out_ptr_res != CUDA_SUCCESS ? out_ptr_res :
+          static_cast<CUresult>(-1);
+        (void) observe_joined_cuda_failure(
+          "depth mapped-pointer contract", pointer_failure, true
+        );
+      } else if (!terminal_failure) {
+        constexpr std::size_t transaction_last_byte =
+          near_identical_gpu_request_record_byte_offset +
+          sizeof(cuda_conditional_graph::request_record_t) - 1u;
         const bool mapped_decision_valid =
           near_identical_decision_ptr_res == CUDA_SUCCESS &&
           d_near_identical_decision != 0u &&
@@ -8097,15 +8287,24 @@ namespace models {
             near_identical_gpu_decision_byte_count &&
           d_near_identical_decision <=
             std::numeric_limits<CUdeviceptr>::max() -
-              near_identical_gpu_request_record_byte_offset &&
+              transaction_last_byte &&
           ((d_near_identical_decision +
             near_identical_gpu_decision_record_byte_offset) & 15u) == 0u &&
           ((d_near_identical_decision +
             near_identical_gpu_request_record_byte_offset) & 15u) == 0u;
         if (!mapped_decision_valid) {
+          if (near_identical_decision_ptr_res != CUDA_SUCCESS) {
+            (void) observe_joined_cuda_failure(
+              "conditional transaction mapped-pointer query",
+              near_identical_decision_ptr_res,
+              true
+            );
+          }
           fail_gpu_conditional_bridge_once(
             "mapped decision-buffer contract is invalid",
-            near_identical_decision_ptr_res
+            near_identical_decision_ptr_res,
+            false,
+            near_identical_decision_ptr_res != CUDA_SUCCESS
           );
         }
 
@@ -8173,10 +8372,8 @@ namespace models {
             stream_error_logged = true;
           }
         }
-        bool ocr_bindings_ok = ocr_mapped && ocr_exec_context &&
-                               ocr_in_ptr_res == CUDA_SUCCESS &&
-                               ocr_out_ptr_res == CUDA_SUCCESS &&
-                               d_ocr_in && d_ocr_out;
+        bool ocr_bindings_ok = !terminal_failure && ocr_mapped &&
+                               ocr_pointer_contract_valid && ocr_exec_context;
         constexpr std::size_t expected_ocr_input_bytes =
           static_cast<std::size_t>(3u) * ocr_engine_width * ocr_engine_height *
           sizeof(float);
@@ -8255,15 +8452,17 @@ namespace models {
             ocr_bound_output = d_ocr_out;
           }
         }
-        if (ocr_mapped && !ocr_bindings_ok && !dropped_for_signature_change) {
+        if (ocr_mapped && !ocr_bindings_ok && !dropped_for_signature_change &&
+            !terminal_failure) {
           ocr_available = false;
           mark_ocr_context_failure(
             detail::warmed_execution_context_failure_e::pre_enqueue_interop_or_binding
           );
+          mark_terminal_failure();
           if (!ocr_error_logged) {
-            BOOST_LOG(warning)
-              << "PP-OCRv6 tiny fixed-shape tensor binding failed; depth remains active and "
-                 "subtitle conditioning stays flat.";
+            BOOST_LOG(error)
+              << "PP-OCRv6 tiny fixed-shape interop/tensor binding failed; the exact-frame "
+                 "DAV2/OCR unit fails flat.";
             ocr_error_logged = true;
           }
         }
@@ -8318,25 +8517,22 @@ namespace models {
             const int depth_perf_slot = wrapper_ready ?
                                           perf_begin(perf_depth_conditional, cu_stream) :
                                           -1;
-            if (wrapper_ready) {
+            if (wrapper_ready && !terminal_failure) {
+              const bool launch_ocr_may_participate =
+                optional_child_ready &&
+                (subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr ||
+                 subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr_due);
+              // cuGraphLaunch failure does not prove that neither child was partially submitted.
+              // Establish attempt lineage before the call so a suppressed transaction also retains
+              // OCR ownership from any earlier root in this shared stream lifetime.
+              joined_stream_work_ever_submitted = true;
+              joined_stream_ocr_ever_submitted_or_armed =
+                joined_stream_ocr_ever_submitted_or_armed || launch_ocr_may_participate;
               const CUresult launched = cuda.cuGraphLaunch(
                 depth_conditional_graph.get(), cu_stream
               );
               enqueued = launched == CUDA_SUCCESS;
               if (!enqueued) {
-                if (
-                  optional_child_ready &&
-                  (subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr ||
-                   subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr_due)
-                ) {
-                  // A root-launch failure can represent partial submission of either sibling.
-                  // Quarantine OCR together with DAV2 even though no CPU-visible OCR enqueue can
-                  // be claimed for the failed transaction.
-                  mark_ocr_context_failure(
-                    detail::warmed_execution_context_failure_e::
-                      asynchronous_execution_or_query
-                  );
-                }
                 fail_gpu_conditional_bridge_once(
                   "conditional graph launch failed",
                   launched,
@@ -8344,11 +8540,8 @@ namespace models {
                   true
                 );
               }
+              ocr_armed = enqueued && launch_ocr_may_participate;
             }
-            ocr_armed =
-              enqueued && optional_child_ready &&
-              (subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr ||
-               subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr_due);
             perf_end(perf_depth_conditional, depth_perf_slot, cu_stream);
           }
           if (!enqueued && !terminal_failure) {
@@ -8374,13 +8567,15 @@ namespace models {
         depth_resource_count, depth_resources.data(), cu_stream
       );
       if (unmap_res != CUDA_SUCCESS) {
-        BOOST_LOG(error) << "cuGraphicsUnmapResources failed: " << unmap_res;
-        mark_shared_execution_failure(ocr_armed);
+        (void) observe_joined_cuda_failure(
+          "depth interop unmap", unmap_res, true
+        );
         enqueued = false;
       }
       if (ocr_unmap_res != CUDA_SUCCESS) {
-        BOOST_LOG(error) << "PP-OCRv6 tiny interop unmap failed: " << ocr_unmap_res;
-        mark_shared_execution_failure(ocr_armed);
+        (void) observe_joined_cuda_failure(
+          "optional OCR interop unmap", ocr_unmap_res, true
+        );
         enqueued = false;
         ocr_armed = false;
       }
@@ -8388,7 +8583,7 @@ namespace models {
       // Record completion after every interop unmap tail. Event polling and the stream-query
       // fallback now prove the same joined depth/OCR transaction and all of its resource release.
       if (
-        enqueued && inference_event_poll_available &&
+        enqueued && !terminal_failure && inference_event_poll_available &&
         !record_inference_done_event(
           cuda,
           depth_inference_done_event,
@@ -8398,6 +8593,11 @@ namespace models {
           ocr_armed
         )
       ) {
+        enqueued = false;
+        ocr_armed = false;
+      }
+
+      if (terminal_failure) {
         enqueued = false;
         ocr_armed = false;
       }
@@ -8541,13 +8741,6 @@ namespace models {
 
   estimate_result video_depth_estimator::finish_pending_depth_for_evaluation(input_color_space color_space) {
     return pimpl->finish_pending(color_space);
-  }
-
-  estimate_result video_depth_estimator::finish_pending_depth_for_idle_recovery(
-    input_color_space color_space,
-    bool snapshot_debug_inputs
-  ) {
-    return pimpl->finish_pending(color_space, snapshot_debug_inputs);
   }
 
   pending_depth_poll_result video_depth_estimator::try_finish_pending_depth_nonblocking(

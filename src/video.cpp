@@ -20,6 +20,7 @@
 #include "platform/common.h"
 #include "process.h"
 #include "sync.h"
+#include "tracked_async_worker.h"
 #include "video.h"
 #include "depth_coordinate_v2.h"
 
@@ -33,6 +34,11 @@ namespace video {
 
   namespace {
     std::atomic_uint32_t sbs_telemetry_generation_counter {0};
+
+    detail::tracked_async_worker_pool_t &async_teardown_workers() {
+      static detail::tracked_async_worker_pool_t workers;
+      return workers;
+    }
 
     sbs_telemetry_snapshot_t make_unavailable_sbs_telemetry_snapshot(
       std::uint32_t generation,
@@ -99,6 +105,14 @@ namespace video {
       return {width, height};
     }
   }  // namespace
+
+  void launch_async_teardown_worker(std::packaged_task<void()> task) {
+    async_teardown_workers().launch(std::move(task));
+  }
+
+  void drain_async_teardown_workers() noexcept {
+    async_teardown_workers().seal_and_drain();
+  }
 
   void apply_sbs_telemetry_config(
     sbs_telemetry_snapshot_t &snapshot,
@@ -705,7 +719,10 @@ namespace video {
               while (capture_ctx->images->try_pop()) {
               }
 
-              if (!capture_ctx->images->running()) {
+              if (detail::capture_display_release_wait_cancelled(
+                    capture_ctx_queue->running(),
+                    capture_ctx->images->running()
+                  )) {
                 return;
               }
 
@@ -859,19 +876,16 @@ namespace video {
     safe::signal_t &reinit_event,
     std::shared_ptr<void> channel_data
   ) {
-    // As a workaround for NVENC hangs and to generally speed up encoder reinit,
-    // we will complete the encoder teardown in a separate thread if supported.
-    // This will move expensive processing off the encoder thread to allow us
-    // to restart encoding as soon as possible. For cases where the NVENC driver
-    // hang occurs, this thread may probably never exit, but it will allow
-    // streaming to continue without requiring a full restart of Sunshine.
+    // Move expensive NVENC destruction off the encode thread so a reinit can proceed. The worker
+    // is process-owned rather than detached: it must drain while logging, CUDA, TensorRT, and D3D
+    // globals are still alive, under the application's forced-shutdown watchdog.
     auto fail_guard = util::fail_guard([&session] {
-      std::thread encoder_teardown_thread {[session = std::move(session)]() mutable {
+      std::packaged_task<void()> teardown([session = std::move(session)]() mutable {
         BOOST_LOG(info) << "Starting async encoder teardown";
         session.reset();
         BOOST_LOG(info) << "Async encoder teardown complete";
-      }};
-      encoder_teardown_thread.detach();
+      });
+      launch_async_teardown_worker(std::move(teardown));
     });
 
     // set max frame time based on client-requested target framerate.
@@ -969,6 +983,7 @@ namespace video {
 
       std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
       bool converted_frame = false;
+      bool consume_sampled_depth_pipeline_ready = false;
 
       // Encode at a minimum FPS to avoid image quality issues with static content
       if (!requested_idr_frame || images->peek()) {
@@ -1014,6 +1029,8 @@ namespace video {
             encode_frame_threshold,
             frame_variation_threshold
           );
+          consume_sampled_depth_pipeline_ready =
+            depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
           if (session->convert_with_encode_target(*img, schedule.next_encode_target)) {
             BOOST_LOG(error) << "Could not convert image"sv;
             break;
@@ -1036,6 +1053,7 @@ namespace video {
           break;
         }
         frame_timestamp = std::chrono::steady_clock::now();
+        consume_sampled_depth_pipeline_ready = true;
         if (session->convert(*last_img)) {
           BOOST_LOG(error) << "Could not activate the initialized Host SBS GPU pipeline"sv;
           break;
@@ -1043,16 +1061,17 @@ namespace video {
         converted_frame = true;
       }
 
-      // Host SBS inference is intentionally one source behind during continuous capture. If the
-      // accepted inference belongs to the final frame of a burst, capture may go idle before a
-      // later convert() can consume it. The device owns the pending bit; reconvert the retained
-      // source once on this encode-thread timeout so completion and D3D rendering stay serialized
-      // on their normal owner. The device suppresses a duplicate inference for that same source.
+      // Host SBS inference may still be pending when capture goes idle. Reconvert the retained
+      // source once on this encode-thread timeout so the device can poll its completion without
+      // blocking and keep D3D rendering on its normal owner. A busy poll keeps the exact slot
+      // pending and suppresses duplicate inference for those same pixels.
       if (!converted_frame && last_img && session->needs_conversion_poll()) {
         if (lifecycle_change_requested()) {
           break;
         }
         frame_timestamp = std::chrono::steady_clock::now();
+        consume_sampled_depth_pipeline_ready =
+          depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
         if (session->convert(*last_img)) {
           BOOST_LOG(error) << "Could not consume pending Host SBS depth for retained source"sv;
           break;
@@ -1060,7 +1079,9 @@ namespace video {
         converted_frame = true;
       }
 
-      if (converted_frame && depth_pipeline_ready_event && depth_pipeline_ready_event->peek()) {
+      if (converted_frame && consume_sampled_depth_pipeline_ready && depth_pipeline_ready_event) {
+        // Consume only readiness observed before conversion. A build that finishes during the
+        // conversion remains armed so a static retained source adopts it on the next loop.
         depth_pipeline_ready_event->pop(0ms);
       }
 
@@ -1209,6 +1230,10 @@ namespace video {
       return;
     }
     auto capture_guard = util::fail_guard([&]() {
+      // The capture thread can be inside its display-reference reinit wait. Stop the image owner
+      // before joining so that wait has an explicit cancellation edge even if a tracked driver
+      // teardown worker still retains the old display.
+      images->stop();
       end_capture_async(capture_thread_ctx);
     });
 

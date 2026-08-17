@@ -15,6 +15,7 @@
   #include <filesystem>
   #include <fstream>
   #include <future>
+  #include <iterator>
   #include <memory>
   #include <optional>
   #include <string>
@@ -1126,6 +1127,30 @@ namespace {
 
     platf::sbs_debug::dumper dumper;
     EXPECT_TRUE(dumper.needs_conversion_poll());
+  }
+
+  TEST(SbsDebugDumpAsyncTest, ActiveBasePreviewsAreDeclaredInTheDumpManifest) {
+    std::ifstream stream(
+      std::filesystem::path(SUNSHINE_SOURCE_DIR) /
+        "src/platform/windows/sbs_debug_dump.cpp",
+      std::ios::binary
+    );
+    ASSERT_TRUE(stream);
+    const std::string source {
+      std::istreambuf_iterator<char> {stream},
+      std::istreambuf_iterator<char> {},
+    };
+    for (const std::string_view name : {
+           "shadow_base_final_parallax.f32",
+           "shadow_base_final_parallax_shape.json",
+           "shadow_base_final_parallax.png",
+           "shadow_base_final_parallax_heat.png",
+         }) {
+      EXPECT_NE(
+        source.find("artifacts[\"" + std::string(name) + "\"]"),
+        std::string::npos
+      ) << name;
+    }
   }
 
   TEST(SbsDebugDumpAsyncTest, CollectionChunksAreBoundedAlignedAndComplete) {

@@ -218,8 +218,11 @@ The maintained reader:
    closure and ABI document, chronological wrap/commit structure, raw branch/OCR proof, matched
    analysis domain, and bit-for-bit decoded JSON. An unavailable trace remains valid optional state.
 
-Use `.f32` artifacts for quantitative work. Independently stretched PNG previews are diagnostic and
-must not be compared as absolute depth values.
+Use `.f32` artifacts for quantitative work. Every generated scalar-field shape sidecar and PNG
+preview is described by `dump_manifest.json`; the pre-SLR13 Base previews remain optional,
+non-authoritative schema-36 diagnostics for compatibility with already captured packages.
+Independently stretched PNG previews are diagnostic and must not be compared as absolute depth
+values.
 
 ## Commands
 

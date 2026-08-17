@@ -22,6 +22,7 @@
 #include <src/nvenc/nvenc_base.h>
 #include <src/nvenc/nvenc_config.h>
 #include <src/platform/windows/video_dom_client.h>
+#include <src/tracked_async_worker.h>
 #include <src/video.h>
 #include <src/video_colorspace.h>
 #include <src/video_depth_estimator.h>
@@ -1425,6 +1426,392 @@ TEST(TensorRtContextLifecycleTest, WarmedContextQuarantineStartsOnlyAfterAsyncEx
   EXPECT_TRUE(teardown_health.poisoned());
 }
 
+TEST(TensorRtContextLifecycleTest, JoinedCudaFailuresFailClosedAtTheCorrectLifetime) {
+  using policy_t = models::detail::joined_cuda_failure_policy_t;
+  const auto classify = models::detail::joined_cuda_failure_policy;
+
+  EXPECT_EQ(classify(false, false, false), policy_t {})
+    << "Optional diagnostics may fail before any asynchronous inference work was submitted";
+  EXPECT_EQ(
+    classify(true, false, false),
+    (policy_t {.terminal = true})
+  ) << "A first-frame required interop failure is terminal but has no async context to poison";
+  EXPECT_EQ(
+    classify(false, true, false),
+    (policy_t {.terminal = true, .quarantine_depth = true})
+  ) << "Any later CUDA event failure may report an earlier bootstrap/root fault";
+  EXPECT_EQ(
+    classify(true, true, true),
+    (policy_t {
+      .terminal = true,
+      .quarantine_depth = true,
+      .quarantine_ocr = true,
+    })
+  ) << "Once OCR was armed, a late CUDA failure has ambiguous joined-root ownership";
+}
+
+TEST(TensorRtContextLifecycleTest, TeardownReleasesOnlyAReadyStreamBeforeTheDeadline) {
+  using action_e = models::detail::teardown_quiescence_action_e;
+  using readiness_e = models::detail::async_stream_readiness_e;
+  const auto action = models::detail::teardown_quiescence_action;
+
+  EXPECT_EQ(action(readiness_e::ready, true), action_e::release_operands);
+  EXPECT_EQ(action(readiness_e::ready, false), action_e::release_operands)
+    << "A final ready observation at the deadline is a positive quiescence proof";
+  EXPECT_EQ(action(readiness_e::busy, true), action_e::retry_query);
+  EXPECT_EQ(action(readiness_e::busy, false), action_e::retain_operands);
+  EXPECT_EQ(action(readiness_e::failed, true), action_e::retain_operands);
+  EXPECT_EQ(action(readiness_e::failed, false), action_e::retain_operands);
+}
+
+TEST(TensorRtContextLifecycleTest, TeardownForgetsOnlyAbsentOrDestroyedCudaHandles) {
+  const auto may_forget = models::detail::teardown_cuda_handle_may_be_forgotten;
+
+  EXPECT_TRUE(may_forget(false, false, false));
+  EXPECT_TRUE(may_forget(false, true, false));
+  EXPECT_FALSE(may_forget(true, false, false));
+  EXPECT_FALSE(may_forget(true, true, false));
+  EXPECT_TRUE(may_forget(true, true, true));
+}
+
+TEST(TensorRtContextLifecycleTest, CudaTeardownChainNeverRecoversAfterFirstFailure) {
+  const auto may_continue = models::detail::cuda_teardown_chain_may_continue;
+
+  EXPECT_TRUE(may_continue(true, true));
+  EXPECT_FALSE(may_continue(true, false));
+  EXPECT_FALSE(may_continue(false, true))
+    << "A later successful release cannot authorize work after an earlier CUDA failure";
+  EXPECT_FALSE(may_continue(false, false));
+}
+
+TEST(TensorRtContextLifecycleTest, PoisonedBridgeFailureInheritsHistoricalAndCurrentOcr) {
+  const auto quarantines_ocr = models::detail::bridge_failure_quarantines_ocr;
+
+  EXPECT_FALSE(quarantines_ocr(false, true));
+  EXPECT_FALSE(quarantines_ocr(true, false));
+
+  constexpr bool current_suppressed = false;
+  constexpr bool historical_ocr_participated = true;
+  EXPECT_TRUE(quarantines_ocr(
+    true, historical_ocr_participated || current_suppressed
+  )) << "Current suppression cannot erase an earlier OCR launch from the same stream";
+
+  constexpr bool current_ocr_may_be_partially_submitted = true;
+  constexpr bool no_historical_ocr = false;
+  EXPECT_TRUE(quarantines_ocr(
+    true, no_historical_ocr || current_ocr_may_be_partially_submitted
+  )) << "A failed current root launch is not proof that its OCR child never started";
+}
+
+TEST(TensorRtContextLifecycleTest, ConditionalLaunchFailurePublishesLifetimeBeforeCudaCall) {
+  const auto source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp"
+  );
+  ASSERT_FALSE(source.empty());
+
+  const auto helper_begin = source.find("void fail_gpu_conditional_bridge_once(");
+  const auto helper_end = source.find("bool ensure_depth_conditional_graph(", helper_begin);
+  ASSERT_NE(helper_begin, std::string::npos);
+  ASSERT_NE(helper_end, std::string::npos);
+  const auto helper = source.substr(helper_begin, helper_end - helper_begin);
+  EXPECT_NE(helper.find("bridge_failure_quarantines_ocr("), std::string::npos);
+  EXPECT_NE(
+    helper.find("joined_stream_ocr_ever_submitted_or_armed"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    helper.find("asynchronous_execution_or_query"),
+    std::string::npos
+  );
+
+  const auto launch_begin = source.find(
+    "const bool launch_ocr_may_participate ="
+  );
+  const auto launch_call = source.find("cuda.cuGraphLaunch(", launch_begin);
+  const auto lifetime = source.find(
+    "joined_stream_ocr_ever_submitted_or_armed =",
+    launch_begin
+  );
+  const auto failure = source.find(
+    "fail_gpu_conditional_bridge_once(",
+    launch_call
+  );
+  ASSERT_NE(launch_begin, std::string::npos);
+  ASSERT_NE(lifetime, std::string::npos);
+  ASSERT_NE(launch_call, std::string::npos);
+  ASSERT_NE(failure, std::string::npos);
+  EXPECT_LT(lifetime, launch_call);
+  EXPECT_LT(launch_call, failure);
+  const auto failure_call = source.substr(failure, 240u);
+  EXPECT_NE(failure_call.find("true,\n                  true"), std::string::npos)
+    << "Launch failure must poison execution and retain the possibly-live wrapper";
+}
+
+TEST(TensorRtContextLifecycleTest, EstimatorDestructorUsesOnlyBoundedNonblockingQuiescence) {
+  const auto source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp"
+  );
+  ASSERT_FALSE(source.empty());
+  const auto begin = source.find("~impl() {");
+  const auto end = source.find("void mark_d3d_parallax_start(", begin);
+  ASSERT_NE(begin, std::string::npos);
+  ASSERT_NE(end, std::string::npos);
+  const auto destructor = source.substr(begin, end - begin);
+
+  EXPECT_EQ(destructor.find("cuStreamSynchronize"), std::string::npos);
+  EXPECT_NE(destructor.find("cuda.cuStreamQuery(cu_stream)"), std::string::npos);
+  EXPECT_NE(
+    destructor.find("normalized_cuda_readiness(last_query)"),
+    std::string::npos
+  ) << "Only CUDA_ERROR_NOT_READY may become the retryable busy policy state.";
+  EXPECT_NE(
+    destructor.find("std::chrono::milliseconds {250}"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    destructor.find("std::this_thread::sleep_for(std::chrono::milliseconds {1})"),
+    std::string::npos
+  ) << "The bounded teardown worker must not busy-spin while a weak GPU finishes.";
+  EXPECT_NE(
+    destructor.find("teardown_quiescence_action("),
+    std::string::npos
+  );
+  EXPECT_NE(destructor.find("retain_all_cuda_backing();"), std::string::npos);
+  EXPECT_NE(destructor.find("depth_conditional_graph.abandon_unsafe();"), std::string::npos);
+  const auto chain_begin = destructor.find("bool cuda_teardown_may_continue = true;");
+  const auto known_context_failure = destructor.find(
+    "!gpu_conditional_bridge_context_failed",
+    chain_begin
+  );
+  const auto event_destroy = destructor.find("perf_destroy_events(cuda)");
+  const auto inference_event_destroy = destructor.find(
+    "destroy_inference_done_events(cuda)",
+    event_destroy
+  );
+  const auto decision_interop_destroy = destructor.find(
+    "unregister_near_identical_decision_interop(cuda)",
+    inference_event_destroy
+  );
+  const auto depth_graph_destroy = destructor.find(
+    "destroy_inference_graph(cuda, depth_inference_graph)",
+    decision_interop_destroy
+  );
+  const auto ocr_graph_destroy = destructor.find(
+    "destroy_inference_graph(cuda, ocr_inference_graph)",
+    depth_graph_destroy
+  );
+  const auto stream_destroy = destructor.find("cuda.cuStreamDestroy(cu_stream)");
+  const auto depth_input_unregister = destructor.find(
+    "unregister_cuda_graphics_resource(cuda, cuda_in_res)",
+    stream_destroy
+  );
+  const auto depth_output_unregister = destructor.find(
+    "unregister_cuda_graphics_resource(cuda, cuda_out_res)",
+    depth_input_unregister
+  );
+  const auto ocr_input_unregister = destructor.find(
+    "unregister_cuda_graphics_resource(cuda, cuda_ocr_in_res)",
+    depth_output_unregister
+  );
+  const auto ocr_output_unregister = destructor.find(
+    "unregister_cuda_graphics_resource(cuda, cuda_ocr_out_res)",
+    ocr_input_unregister
+  );
+  const auto chain_failure = destructor.find(
+    "if (!cuda_teardown_may_continue)",
+    ocr_output_unregister
+  );
+  ASSERT_NE(chain_begin, std::string::npos);
+  ASSERT_NE(known_context_failure, std::string::npos);
+  ASSERT_NE(event_destroy, std::string::npos);
+  ASSERT_NE(inference_event_destroy, std::string::npos);
+  ASSERT_NE(decision_interop_destroy, std::string::npos);
+  ASSERT_NE(depth_graph_destroy, std::string::npos);
+  ASSERT_NE(ocr_graph_destroy, std::string::npos);
+  ASSERT_NE(stream_destroy, std::string::npos);
+  ASSERT_NE(depth_input_unregister, std::string::npos);
+  ASSERT_NE(depth_output_unregister, std::string::npos);
+  ASSERT_NE(ocr_input_unregister, std::string::npos);
+  ASSERT_NE(ocr_output_unregister, std::string::npos);
+  ASSERT_NE(chain_failure, std::string::npos);
+  EXPECT_LT(chain_begin, known_context_failure);
+  EXPECT_LT(known_context_failure, event_destroy);
+  EXPECT_LT(event_destroy, inference_event_destroy);
+  EXPECT_LT(inference_event_destroy, decision_interop_destroy);
+  EXPECT_LT(decision_interop_destroy, depth_graph_destroy);
+  EXPECT_LT(depth_graph_destroy, ocr_graph_destroy);
+  EXPECT_LT(ocr_graph_destroy, stream_destroy);
+  EXPECT_LT(stream_destroy, depth_input_unregister);
+  EXPECT_LT(depth_input_unregister, depth_output_unregister);
+  EXPECT_LT(depth_output_unregister, ocr_input_unregister);
+  EXPECT_LT(ocr_input_unregister, ocr_output_unregister);
+  EXPECT_LT(ocr_output_unregister, chain_failure);
+  EXPECT_EQ(
+    destructor.find("const bool output_unregistered", chain_begin),
+    std::string::npos
+  ) << "CUDA teardown must not collect independent results after a first failure";
+  std::size_t guarded_followup_count = 0u;
+  for (
+    auto guard = destructor.find("if (cuda_teardown_may_continue)", chain_begin);
+    guard != std::string::npos && guard < chain_failure;
+    guard = destructor.find("if (cuda_teardown_may_continue)", guard + 1u)
+  ) {
+    ++guarded_followup_count;
+  }
+  EXPECT_GE(guarded_followup_count, 9u)
+    << "Every later event/graph/interop teardown operation must be gated by the monotonic chain";
+  EXPECT_NE(
+    destructor.find("if (cuda_teardown_may_continue && cu_stream)", chain_begin),
+    std::string::npos
+  ) << "Stream destruction must also be gated by the monotonic chain";
+  const auto retained_after_failure = destructor.find(
+    "retain_all_cuda_backing();",
+    chain_failure
+  );
+  const auto wrapper_abandoned_after_failure = destructor.find(
+    "depth_conditional_graph.abandon_unsafe();",
+    chain_failure
+  );
+  ASSERT_NE(retained_after_failure, std::string::npos);
+  ASSERT_NE(wrapper_abandoned_after_failure, std::string::npos);
+  EXPECT_LT(chain_failure, retained_after_failure);
+  EXPECT_LT(chain_failure, wrapper_abandoned_after_failure);
+  EXPECT_NE(
+    destructor.find(
+      "if (joined_stream_ocr_ever_submitted_or_armed)",
+      chain_failure
+    ),
+    std::string::npos
+  ) << "A late teardown fault quarantines OCR only when OCR participated in this stream.";
+
+  const auto reset_begin = source.find(
+    "[[nodiscard]] bool reset_depth_conditional_graph()"
+  );
+  const auto reset_end = source.find(
+    "[[nodiscard]] bool destroy_inference_graph(",
+    reset_begin
+  );
+  ASSERT_NE(reset_begin, std::string::npos);
+  ASSERT_NE(reset_end, std::string::npos);
+  const auto reset = source.substr(reset_begin, reset_end - reset_begin);
+  EXPECT_NE(reset.find("return reset_ok;"), std::string::npos)
+    << "A failed wrapper context restore must stop before decision interop unregister";
+
+  const auto decision_release_begin = source.find(
+    "bool unregister_near_identical_decision_interop(cuda_driver_api &cuda)"
+  );
+  const auto decision_release_end = source.find(
+    "bool ensure_near_identical_decision_interop(cuda_driver_api &cuda)",
+    decision_release_begin
+  );
+  ASSERT_NE(decision_release_begin, std::string::npos);
+  ASSERT_NE(decision_release_end, std::string::npos);
+  const auto decision_release = source.substr(
+    decision_release_begin,
+    decision_release_end - decision_release_begin
+  );
+  std::size_t reset_call_count = 0u;
+  for (
+    auto reset_call = decision_release.find("reset_depth_conditional_graph()");
+    reset_call != std::string::npos;
+    reset_call = decision_release.find("reset_depth_conditional_graph()", reset_call + 1u)
+  ) {
+    ++reset_call_count;
+  }
+  EXPECT_EQ(reset_call_count, 1u)
+    << "Failure reporting must not retry wrapper teardown after its first CUDA failure";
+  std::size_t failure_report_count = 0u;
+  for (auto report = decision_release.find("fail_gpu_conditional_bridge_once(");
+       report != std::string::npos;) {
+    ++failure_report_count;
+    const auto call_end = decision_release.find(");", report);
+    ASSERT_NE(call_end, std::string::npos);
+    const auto call = decision_release.substr(report, call_end + 2u - report);
+    const auto result_arg = call.find("CUDA_SUCCESS");
+    ASSERT_NE(result_arg, std::string::npos);
+    const auto poison_arg = call.find("true", result_arg);
+    ASSERT_NE(poison_arg, std::string::npos);
+    const auto retain_arg = call.find("true", poison_arg + 4u);
+    ASSERT_NE(retain_arg, std::string::npos);
+    EXPECT_EQ(call.find("true", retain_arg + 4u), std::string::npos);
+    EXPECT_EQ(call.find("false", result_arg), std::string::npos);
+    report = decision_release.find("fail_gpu_conditional_bridge_once(", call_end + 2u);
+  }
+  EXPECT_EQ(failure_report_count, 2u);
+
+  const auto perf_begin = source.find(
+    "[[nodiscard]] bool perf_destroy_events(cuda_driver_api &cuda)"
+  );
+  const auto perf_end = source.find(
+    "[[nodiscard]] bool reset_depth_conditional_graph()",
+    perf_begin
+  );
+  ASSERT_NE(perf_begin, std::string::npos);
+  ASSERT_NE(perf_end, std::string::npos);
+  const auto perf_destroy = source.substr(perf_begin, perf_end - perf_begin);
+  const auto destroy_policy = perf_destroy.find(
+    "teardown_cuda_handle_may_be_forgotten("
+  );
+  const auto forget_handle = perf_destroy.find("*event.first = nullptr;", destroy_policy);
+  const auto retain_handle = perf_destroy.find("return false;", forget_handle);
+  ASSERT_NE(destroy_policy, std::string::npos);
+  ASSERT_NE(forget_handle, std::string::npos);
+  ASSERT_NE(retain_handle, std::string::npos);
+  EXPECT_LT(destroy_policy, forget_handle);
+  EXPECT_LT(forget_handle, retain_handle);
+  EXPECT_NE(perf_destroy.find("destroy failed: result="), std::string::npos);
+}
+
+TEST(TensorRtContextLifecycleTest, PrivateBootstrapSubmissionOwnsLateCudaFailureLineage) {
+  const auto source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp"
+  );
+  ASSERT_FALSE(source.empty());
+
+  const auto depth_begin = source.find("bool prepare_depth_inference_graph(");
+  const auto ocr_begin = source.find("bool prepare_ocr_inference_graph(", depth_begin);
+  ASSERT_NE(depth_begin, std::string::npos);
+  ASSERT_NE(ocr_begin, std::string::npos);
+  const auto depth = source.substr(depth_begin, ocr_begin - depth_begin);
+  const auto depth_enqueue = depth.find("if (!exec_context->enqueueV3(cu_stream))");
+  const auto depth_lineage = depth.find(
+    "joined_stream_work_ever_submitted = true;",
+    depth_enqueue
+  );
+  const auto depth_warmed = depth.find(
+    "depth_inference_graph.policy.signature_warmed = true;",
+    depth_lineage
+  );
+  ASSERT_NE(depth_enqueue, std::string::npos);
+  ASSERT_NE(depth_lineage, std::string::npos);
+  ASSERT_NE(depth_warmed, std::string::npos);
+  EXPECT_LT(depth_enqueue, depth_lineage);
+  EXPECT_LT(depth_lineage, depth_warmed);
+
+  const auto ocr_end = source.find("bool prepare_", ocr_begin + 5u);
+  const auto ocr = source.substr(ocr_begin, ocr_end - ocr_begin);
+  const auto ocr_enqueue = ocr.find("if (!ocr_exec_context->enqueueV3(cu_stream))");
+  const auto ocr_work_lineage = ocr.find(
+    "joined_stream_work_ever_submitted = true;",
+    ocr_enqueue
+  );
+  const auto ocr_lineage = ocr.find(
+    "joined_stream_ocr_ever_submitted_or_armed = true;",
+    ocr_work_lineage
+  );
+  const auto ocr_warmed = ocr.find(
+    "ocr_inference_graph.policy.signature_warmed = true;",
+    ocr_lineage
+  );
+  ASSERT_NE(ocr_enqueue, std::string::npos);
+  ASSERT_NE(ocr_work_lineage, std::string::npos);
+  ASSERT_NE(ocr_lineage, std::string::npos);
+  ASSERT_NE(ocr_warmed, std::string::npos);
+  EXPECT_LT(ocr_enqueue, ocr_work_lineage);
+  EXPECT_LT(ocr_work_lineage, ocr_lineage);
+  EXPECT_LT(ocr_lineage, ocr_warmed);
+}
+
 TEST(TensorRtContextLifecycleTest, ReleasesWarmupOperandsOnlyAfterProvenQuiescence) {
   using readiness_e = models::detail::async_stream_readiness_e;
   const auto releasable = models::detail::asynchronous_operands_may_be_released;
@@ -2655,10 +3042,18 @@ TEST(ParallaxV2ContractTest, GpuTimerKeepsEveryNotReadyTimestampPending) {
   EXPECT_NE(body.find("if (ready == S_FALSE)"), std::string::npos);
   EXPECT_NE(body.find("if (ready != S_OK)"), std::string::npos);
   EXPECT_NE(body.find("start_status == S_FALSE"), std::string::npos);
+  EXPECT_NE(body.find("matched_copy_start_status == S_FALSE"), std::string::npos);
   EXPECT_NE(body.find("convert_status == S_FALSE"), std::string::npos);
   EXPECT_NE(body.find("start_status != S_OK"), std::string::npos);
+  EXPECT_NE(body.find("matched_copy_start_status != S_OK"), std::string::npos);
   EXPECT_NE(body.find("convert_status != S_OK"), std::string::npos);
   EXPECT_EQ(body.find("SUCCEEDED(start_status)"), std::string::npos);
+  EXPECT_NE(
+    body.find("matched_copy_end - matched_copy_start"),
+    std::string::npos
+  );
+  EXPECT_EQ(body.find("matched_copy_end - start"), std::string::npos)
+    << "The copy timer must not include prior completed-depth postprocess.";
   const auto not_ready = body.find("start_status == S_FALSE");
   const auto retire_failure = body.find("start_status != S_OK");
   const auto retire_slot = body.find("slot.pending = false", retire_failure);
@@ -2675,7 +3070,43 @@ TEST(ParallaxV2ContractTest, GpuTimerKeepsEveryNotReadyTimestampPending) {
        offset += 1) {
     ++nonflushing_queries;
   }
-  EXPECT_EQ(nonflushing_queries, 6u);
+  EXPECT_EQ(nonflushing_queries, 7u);
+
+  const auto copy_function = display.find("bool copy_matched_frame(");
+  const auto copy_start = display.find(
+    "mark_sbs_matched_copy_start(gpu_timer);",
+    copy_function
+  );
+  const auto private_copy = display.find(
+    "device_ctx->CopyResource(slot.texture.get(), source);",
+    copy_start
+  );
+  const auto copy_end = display.find(
+    "mark_sbs_matched_copy_end(gpu_timer, true);",
+    private_copy
+  );
+  ASSERT_NE(copy_function, std::string::npos);
+  ASSERT_NE(copy_start, std::string::npos);
+  ASSERT_NE(private_copy, std::string::npos);
+  ASSERT_NE(copy_end, std::string::npos);
+  EXPECT_LT(copy_start, private_copy);
+  EXPECT_LT(private_copy, copy_end);
+  EXPECT_NE(display.find("if (slot->matched_copy_ended)"), std::string::npos);
+  EXPECT_NE(
+    display.find("slot->has_matched_copy = slot->has_matched_copy || submitted;"),
+    std::string::npos
+  );
+
+  EXPECT_NE(
+    display.find(
+      "const bool timing_has_sbs_composite = !repeat_matched_output;"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.find("mark_sbs_warp_start(gpu_timer, timing_has_sbs_composite);"),
+    std::string::npos
+  );
 }
 
 TEST(ParallaxV2ContractTest, DebugDumpAcceptsAdvertisedWindowsCaptureColorFormats) {
@@ -4445,14 +4876,15 @@ TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorizat
   EXPECT_NE(selection.find("host_sbs_cached_geometry_render_allowed"), std::string::npos);
 
   // Route/dump/reprocess/terminal revocation, early-completion retirement/revalidation, and every
-  // completion owner keep the singleton-alias reset matrix in the pre-render selection path.
+  // asynchronous completion owner keep the singleton-alias reset matrix in the pre-render
+  // selection path. The two retired synchronous-recovery branches no longer contribute resets.
   std::size_t resets = 0u;
   for (std::size_t offset = 0u;
        (offset = selection.find("latest_v2_lineage.reset();", offset)) != std::string::npos;
        ++offset) {
     ++resets;
   }
-  EXPECT_EQ(resets, 9u);
+  EXPECT_EQ(resets, 7u);
   EXPECT_EQ(display.find("reusable_v2"), std::string::npos);
 
   const auto fail_flat = display.find("void fail_depth_pipeline_flat()");
@@ -4556,11 +4988,51 @@ TEST(DirectxShaderSourceTest, PendingCompletionReusesThePreparedConstantBuffer) 
   );
 }
 
+TEST(SbsBenchHarnessSourceTest, OfflineWarpTimingReadbackIsBoundedAndExact) {
+  const auto harness = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/sbs_bench_harness.cpp"
+  );
+  ASSERT_FALSE(harness.empty());
+
+  const auto begin = harness.find("const auto warp_timing_deadline =");
+  const auto end = harness.find("sbs_perf::tick();", begin);
+  ASSERT_NE(begin, std::string::npos);
+  ASSERT_NE(end, std::string::npos);
+  const auto timing = harness.substr(begin, end - begin);
+  EXPECT_NE(timing.find("std::chrono::seconds {30}"), std::string::npos);
+  EXPECT_NE(timing.find("D3D11_ASYNC_GETDATA_DONOTFLUSH"), std::string::npos);
+  EXPECT_NE(timing.find("warp_timing_status == S_FALSE"), std::string::npos);
+  EXPECT_NE(timing.find("warp_timing_status != S_OK"), std::string::npos);
+  EXPECT_NE(timing.find("hs != S_OK || he != S_OK"), std::string::npos);
+  EXPECT_EQ(
+    harness.find(
+      "while (ctx->GetData(warp_disjoint.Get(), &timing, sizeof(timing), 0) == "
+      "S_FALSE)"
+    ),
+    std::string::npos
+  );
+}
+
 TEST(DirectxShaderSourceTest, OpaquePackedPresentationCannotSeedSemanticLineage) {
   const auto display = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp"
   );
+  const auto estimator_header = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.h"
+  );
   ASSERT_FALSE(display.empty());
+  ASSERT_FALSE(estimator_header.empty());
+
+  EXPECT_EQ(display.find("finish_pending_depth_for_idle_recovery"), std::string::npos);
+  EXPECT_EQ(display.find("cuStreamSynchronize"), std::string::npos);
+  EXPECT_EQ(
+    estimator_header.find("finish_pending_depth_for_idle_recovery"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    estimator_header.find("finish_pending_depth_for_evaluation"),
+    std::string::npos
+  ) << "Only the offline evaluator may synchronously finish its private transaction.";
 
   const auto retention = display.find(
     "host_sbs_packed_output_can_enter_presentation_cache("
@@ -4603,11 +5075,13 @@ TEST(DirectxShaderSourceTest, OpaquePackedPresentationCannotSeedSemanticLineage)
   }
   EXPECT_NE(
     display.find(
-      "output_warped_new/packed_repeat/flat_pending_miss=",
+      "output_warped_new/packed_repeat/flat=",
       selection
     ),
     std::string::npos
   );
+  EXPECT_NE(display.find("SBS cadence: conversions=", selection), std::string::npos);
+  EXPECT_NE(display.find("flat_pending_miss=", selection), std::string::npos);
   EXPECT_NE(
     display.find(
       "planned_budget_ms_avg/max=",
@@ -6197,6 +6671,270 @@ TEST(HostSbsSceneCutTest, GeometryLowRearmIsStrictAndConsecutive) {
   EXPECT_FALSE(advance_shot_cut(state, 0.099f, 0.0f, 0.0f));
   EXPECT_FALSE(advance_shot_cut(state, 0.099f, 0.0f, 0.0f));
   EXPECT_NE(state.cut_flags & cut_flag_geometry_armed, 0u);
+}
+
+TEST(CaptureShutdownPolicyTests, EitherQueueCancelsDisplayReleaseWait) {
+  EXPECT_FALSE(video::detail::capture_display_release_wait_cancelled(true, true));
+  EXPECT_TRUE(video::detail::capture_display_release_wait_cancelled(false, true));
+  EXPECT_TRUE(video::detail::capture_display_release_wait_cancelled(true, false));
+  EXPECT_TRUE(video::detail::capture_display_release_wait_cancelled(false, false));
+}
+
+TEST(AsyncTeardownWorkerTests, ExplicitDrainTracksWorkersAndSealsLateLaunches) {
+  using namespace std::chrono_literals;
+  video::detail::tracked_async_worker_pool_t workers;
+  std::promise<void> started;
+  auto started_future = started.get_future();
+  std::promise<void> release;
+  auto release_future = release.get_future();
+  std::atomic<bool> completed {false};
+  std::atomic<bool> drained {false};
+
+  std::packaged_task<void()> task([&]() {
+    started.set_value();
+    release_future.wait();
+    completed.store(true, std::memory_order_release);
+  });
+  workers.launch(std::move(task));
+  const auto started_status = started_future.wait_for(2s);
+  if (started_status != std::future_status::ready) {
+    release.set_value();
+    FAIL() << "Tracked teardown worker did not start.";
+  }
+
+  std::thread drainer([&]() {
+    workers.seal_and_drain();
+    drained.store(true, std::memory_order_release);
+  });
+  EXPECT_FALSE(drained.load(std::memory_order_acquire));
+  release.set_value();
+  drainer.join();
+  EXPECT_TRUE(completed.load(std::memory_order_acquire));
+  EXPECT_TRUE(drained.load(std::memory_order_acquire));
+  EXPECT_TRUE(workers.sealed());
+
+  // A contract violation after the process boundary must fail closed on the caller rather than
+  // silently detach work beyond process-owned globals.
+  const auto caller = std::this_thread::get_id();
+  std::thread::id late_worker;
+  std::packaged_task<void()> late([&]() {
+    late_worker = std::this_thread::get_id();
+  });
+  workers.launch(std::move(late));
+  EXPECT_EQ(late_worker, caller);
+}
+
+TEST(LocalPresenterLifecycleSourceTests, RetainsFinalSourceAndDoesNotSwallowLateReadyEvent) {
+  const auto display = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp"
+  );
+  ASSERT_FALSE(display.empty());
+
+  const auto callback_begin = display.find("auto push_image =");
+  const auto callback_end = display.find("const auto capture_backend =", callback_begin);
+  ASSERT_NE(callback_begin, std::string::npos);
+  ASSERT_NE(callback_end, std::string::npos);
+  const auto callback = display.substr(callback_begin, callback_end - callback_begin);
+
+  const auto retain = callback.find("retained_presenter_source = std::move(image);");
+  const auto observe = callback.find("presenter_retry.observe_source();", retain);
+  const auto ready_sample = callback.find("const bool depth_pipeline_ready =", observe);
+  const auto process_decision = callback.find("presenter_retry.should_process(", ready_sample);
+  const auto latency_wait = callback.find("WaitForSingleObject(frame_latency_waitable, 0)", process_decision);
+  const auto ready_pop = callback.find("depth_pipeline_ready_event->pop(0ms);", latency_wait);
+  const auto convert = callback.find("converter.convert_rgb(", ready_pop);
+  const auto converted = callback.find("presenter_retry.record_converted();", convert);
+  const auto present = callback.find("swapchain->Present1(", converted);
+  const auto busy = callback.find("status == DXGI_ERROR_WAS_STILL_DRAWING", present);
+  const auto presented = callback.find("presenter_retry.record_presented();", busy);
+  ASSERT_NE(retain, std::string::npos);
+  ASSERT_NE(observe, std::string::npos);
+  ASSERT_NE(ready_sample, std::string::npos);
+  ASSERT_NE(process_decision, std::string::npos);
+  ASSERT_NE(latency_wait, std::string::npos);
+  ASSERT_NE(ready_pop, std::string::npos);
+  ASSERT_NE(convert, std::string::npos);
+  ASSERT_NE(converted, std::string::npos);
+  ASSERT_NE(present, std::string::npos);
+  ASSERT_NE(busy, std::string::npos);
+  ASSERT_NE(presented, std::string::npos);
+  EXPECT_LT(retain, observe);
+  EXPECT_LT(observe, ready_sample);
+  EXPECT_LT(ready_sample, process_decision);
+  EXPECT_LT(process_decision, latency_wait);
+  EXPECT_LT(latency_wait, ready_pop)
+    << "A latency-busy return must leave the sampled notification queued.";
+  EXPECT_LT(ready_pop, convert);
+  EXPECT_LT(convert, converted);
+  EXPECT_LT(converted, present);
+  EXPECT_LT(present, busy);
+  EXPECT_LT(busy, presented);
+
+  const auto after_convert = callback.substr(convert, presented - convert);
+  EXPECT_EQ(after_convert.find("depth_pipeline_ready_event->peek()"), std::string::npos);
+  EXPECT_EQ(after_convert.find("depth_pipeline_ready_event->pop(0ms);"), std::string::npos)
+    << "Only the readiness value sampled before conversion may be consumed.";
+}
+
+TEST(EncodeReadyEventLifecycleSourceTests, ConsumesOnlyReadinessSampledBeforeConversion) {
+  const auto video_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/video.cpp");
+  ASSERT_FALSE(video_source.empty());
+  const auto encode_run = video_source.find("void encode_run(");
+  const auto capture_async = video_source.find("void capture_async(", encode_run);
+  ASSERT_NE(encode_run, std::string::npos);
+  ASSERT_NE(capture_async, std::string::npos);
+  const auto encode_scope = video_source.substr(encode_run, capture_async - encode_run);
+
+  const auto flag = encode_scope.find("bool consume_sampled_depth_pipeline_ready = false;");
+  const auto sample = encode_scope.find(
+    "consume_sampled_depth_pipeline_ready =",
+    flag
+  );
+  const auto ready_peek = encode_scope.find("depth_pipeline_ready_event->peek();", sample);
+  const auto convert = encode_scope.find("session->convert_with_encode_target(", ready_peek);
+  const auto consume = encode_scope.find(
+    "converted_frame && consume_sampled_depth_pipeline_ready && depth_pipeline_ready_event",
+    convert
+  );
+  const auto pop = encode_scope.find("depth_pipeline_ready_event->pop(0ms);", consume);
+  ASSERT_NE(flag, std::string::npos);
+  ASSERT_NE(sample, std::string::npos);
+  ASSERT_NE(ready_peek, std::string::npos);
+  ASSERT_NE(convert, std::string::npos);
+  ASSERT_NE(consume, std::string::npos);
+  ASSERT_NE(pop, std::string::npos);
+  EXPECT_LT(sample, convert);
+  EXPECT_LT(ready_peek, convert);
+  EXPECT_LT(convert, consume);
+  EXPECT_LT(consume, pop);
+  EXPECT_EQ(
+    encode_scope.find(
+      "if (converted_frame && depth_pipeline_ready_event && depth_pipeline_ready_event->peek())"
+    ),
+    std::string::npos
+  );
+}
+
+TEST(AsyncTeardownLifecycleSourceTests, DrainsTrackedOwnersBeforeProcessGlobals) {
+  const auto video_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/video.cpp");
+  const auto display = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp"
+  );
+  const auto main_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/main.cpp");
+  const auto config_http = read_source_file(SUNSHINE_SOURCE_DIR "/src/confighttp.cpp");
+  ASSERT_FALSE(video_source.empty());
+  ASSERT_FALSE(display.empty());
+  ASSERT_FALSE(main_source.empty());
+  ASSERT_FALSE(config_http.empty());
+
+  const auto reinit_wait = video_source.find("while (display_wp->use_count() != 1)");
+  const auto cancellation = video_source.find(
+    "detail::capture_display_release_wait_cancelled(",
+    reinit_wait
+  );
+  const auto reinit_sleep = video_source.find("std::this_thread::sleep_for(20ms);", cancellation);
+  ASSERT_NE(reinit_wait, std::string::npos);
+  ASSERT_NE(cancellation, std::string::npos);
+  ASSERT_NE(reinit_sleep, std::string::npos);
+  EXPECT_LT(cancellation, reinit_sleep);
+
+  const auto capture_guard = video_source.find("auto capture_guard = util::fail_guard(");
+  const auto stop_images = video_source.find("images->stop();", capture_guard);
+  const auto join_capture = video_source.find("end_capture_async(capture_thread_ctx);", stop_images);
+  ASSERT_NE(capture_guard, std::string::npos);
+  ASSERT_NE(stop_images, std::string::npos);
+  ASSERT_NE(join_capture, std::string::npos);
+  EXPECT_LT(stop_images, join_capture);
+
+  const auto encode_run = video_source.find("void encode_run(");
+  const auto capture_async = video_source.find("void capture_async(", encode_run);
+  ASSERT_NE(encode_run, std::string::npos);
+  ASSERT_NE(capture_async, std::string::npos);
+  const auto encode_scope = video_source.substr(encode_run, capture_async - encode_run);
+  EXPECT_NE(encode_scope.find("launch_async_teardown_worker(std::move(teardown))"), std::string::npos);
+  EXPECT_EQ(encode_scope.find(".detach()"), std::string::npos);
+
+  const auto base_destructor = display.find("~d3d_base_encode_device()");
+  const auto retire_active = display.find(
+    "retire_depth_estimator(std::move(depth_estimator));",
+    base_destructor
+  );
+  const auto retire_build = display.find(
+    "retire_depth_estimator_build(std::move(depth_estimator_build));",
+    retire_active
+  );
+  ASSERT_NE(base_destructor, std::string::npos);
+  ASSERT_NE(retire_active, std::string::npos);
+  ASSERT_NE(retire_build, std::string::npos);
+  EXPECT_LT(retire_active, retire_build);
+  EXPECT_NE(display.find("busy_retries="), std::string::npos);
+  EXPECT_EQ(display.find("busy_drops="), std::string::npos)
+    << "A retained source/backbuffer retry is not a dropped frame.";
+
+  const auto nvenc_destructor = display.find("~d3d_nvenc_encode_device_t() override");
+  const auto release_display = display.find("base.release_capture_display();", nvenc_destructor);
+  ASSERT_NE(nvenc_destructor, std::string::npos);
+  ASSERT_NE(release_display, std::string::npos);
+
+  const auto normal_shutdown = main_source.find(
+    "UI/API shutdown does not necessarily pass through the signal handler"
+  );
+  const auto async_drain_guard = main_source.find(
+    "auto async_teardown_drain_guard = util::fail_guard("
+  );
+  const auto ar_guard = main_source.find("auto ar_glasses_deinit_guard = ar_glasses::init();");
+  const auto arm_watchdog = main_source.find("task_pool.pushDelayed(task, 10s)", normal_shutdown);
+  const auto stop_process = main_source.find("proc::proc.terminate(false, false);", arm_watchdog);
+  const auto stop_local = main_source.find("ar_glasses_deinit_guard.reset();", stop_process);
+  const auto stop_monitor = main_source.find("stop_session_monitor();", stop_local);
+  const auto drain_workers = main_source.find("video::drain_async_teardown_workers();", stop_monitor);
+  const auto disable_drain_guard = main_source.find(
+    "async_teardown_drain_guard.disable();",
+    drain_workers
+  );
+  const auto stop_pool = main_source.find("task_pool.stop();", drain_workers);
+  ASSERT_NE(async_drain_guard, std::string::npos);
+  ASSERT_NE(ar_guard, std::string::npos);
+  ASSERT_NE(normal_shutdown, std::string::npos);
+  ASSERT_NE(arm_watchdog, std::string::npos);
+  ASSERT_NE(stop_process, std::string::npos);
+  ASSERT_NE(stop_local, std::string::npos);
+  ASSERT_NE(stop_monitor, std::string::npos);
+  ASSERT_NE(drain_workers, std::string::npos);
+  ASSERT_NE(disable_drain_guard, std::string::npos);
+  ASSERT_NE(stop_pool, std::string::npos);
+  EXPECT_LT(async_drain_guard, ar_guard)
+    << "Early returns must destroy the local presenter before the fallback worker drain.";
+  EXPECT_LT(arm_watchdog, stop_process);
+  EXPECT_LT(stop_process, stop_local);
+  EXPECT_LT(stop_local, stop_monitor);
+  EXPECT_LT(stop_monitor, drain_workers);
+  EXPECT_LT(drain_workers, disable_drain_guard);
+  EXPECT_LT(drain_workers, stop_pool);
+
+  const auto monitor_begin = main_source.find(
+    "// We must create a hidden window to receive shutdown notifications"
+  );
+  const auto monitor_end = main_source.find("task_pool.start(1);", monitor_begin);
+  ASSERT_NE(monitor_begin, std::string::npos);
+  ASSERT_NE(monitor_end, std::string::npos);
+  const auto monitor_scope = main_source.substr(monitor_begin, monitor_end - monitor_begin);
+  EXPECT_NE(monitor_scope.find("session_monitor_thread.join();"), std::string::npos);
+  EXPECT_EQ(monitor_scope.find("session_monitor_thread.detach();"), std::string::npos)
+    << "The monitor owns references to main-thread state and may never outlive it.";
+
+  const auto quit_begin = config_http.find("void quit(resp_https_t response");
+  const auto quit_end = config_http.find("void disconnect(", quit_begin);
+  ASSERT_NE(quit_begin, std::string::npos);
+  ASSERT_NE(quit_end, std::string::npos);
+  const auto quit_scope = config_http.substr(quit_begin, quit_end - quit_begin);
+  const auto write_response = quit_scope.find("response->write();");
+  const auto request_shutdown = quit_scope.find("lifetime::exit_sunshine(");
+  ASSERT_NE(write_response, std::string::npos);
+  ASSERT_NE(request_shutdown, std::string::npos);
+  EXPECT_LT(write_response, request_shutdown);
+  EXPECT_EQ(quit_scope.find("pushDelayed"), std::string::npos);
+  EXPECT_EQ(quit_scope.find(".detach()"), std::string::npos);
 }
 
 TEST(DirectxShaderSourceTest, SubtitleConditionPrepareBindsExactOcrRecordAtT7) {

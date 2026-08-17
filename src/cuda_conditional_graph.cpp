@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -528,6 +529,18 @@ namespace cuda_conditional_graph {
     return result;
   }
 
+  audit_result_t audit_inference_child_graph(
+    const cuda_driver_api &cuda,
+    CUgraph graph
+  ) noexcept {
+    auto result = audit_embeddable_child_graph(cuda, graph);
+    if (result.legal() &&
+        result.node_type_counts[CU_GRAPH_NODE_TYPE_KERNEL] == 0u) {
+      result.failure = audit_failure_e::missing_inference_kernel;
+    }
+    return result;
+  }
+
   executable_t::~executable_t() {
     (void) reset();
   }
@@ -642,12 +655,19 @@ namespace cuda_conditional_graph {
     output.context_ = desc.context;
     output.failure_ = build_failure_e::invalid_descriptor;
 
+    const auto record_fits_address_space = [](const CUdeviceptr address) {
+      return address != 0u &&
+             address <= std::numeric_limits<CUdeviceptr>::max() -
+                          (sizeof(decision_record_t) - 1u);
+    };
     const auto record_distance = desc.decision_record > desc.request_record ?
                                    desc.decision_record - desc.request_record :
                                    desc.request_record - desc.decision_record;
     if (!desc.context || !desc.infer_child || !desc.decision_record ||
         !desc.request_record || (desc.decision_record & 15u) != 0u ||
         (desc.request_record & 15u) != 0u ||
+        !record_fits_address_space(desc.decision_record) ||
+        !record_fits_address_space(desc.request_record) ||
         record_distance < sizeof(decision_record_t)) {
       return output;
     }
@@ -690,18 +710,24 @@ namespace cuda_conditional_graph {
       return std::move(output);
     };
 
-    output.audit_result_ = audit_embeddable_child_graph(cuda, desc.infer_child);
+    output.audit_result_ = audit_inference_child_graph(cuda, desc.infer_child);
     if (!output.audit_result_.legal()) {
-      output.failure_ = build_failure_e::infer_child_rejected;
+      output.failure_ =
+        output.audit_result_.failure == audit_failure_e::missing_inference_kernel ?
+          build_failure_e::infer_child_missing_inference_kernel :
+          build_failure_e::infer_child_rejected;
       output.cuda_result_ = output.audit_result_.cuda_result;
       return finish(false);
     }
     if (desc.optional_infer_child) {
-      output.audit_result_ = audit_embeddable_child_graph(
+      output.audit_result_ = audit_inference_child_graph(
         cuda, desc.optional_infer_child
       );
       if (!output.audit_result_.legal()) {
-        output.failure_ = build_failure_e::optional_infer_child_rejected;
+        output.failure_ =
+          output.audit_result_.failure == audit_failure_e::missing_inference_kernel ?
+            build_failure_e::optional_infer_child_missing_inference_kernel :
+            build_failure_e::optional_infer_child_rejected;
         output.cuda_result_ = output.audit_result_.cuda_result;
         return finish(false);
       }

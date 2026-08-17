@@ -15,6 +15,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -57,6 +58,19 @@ namespace {
     mul.lo.u32 %r3, %r1, 1000;
     add.u32 %r4, %r3, %r2;
     st.global.u32 [%rd3], %r4;
+    ret;
+}
+
+.visible .entry write_inference_marker(
+    .param .u64 output_ptr,
+    .param .u32 marker_value
+)
+{
+    .reg .b32 %r1;
+    .reg .b64 %rd1;
+    ld.param.u64 %rd1, [output_ptr];
+    ld.param.u32 %r1, [marker_value];
+    st.global.u32 [%rd1], %r1;
     ret;
 }
 )ptx";
@@ -666,7 +680,9 @@ namespace {
       cuda_ = &cuda_driver_api::get();
       if (!cuda_->is_valid() || !cuda_->has_conditional_graph_support() ||
           !cuda_->cuDevicePrimaryCtxRetain || !cuda_->cuDevicePrimaryCtxRelease ||
-          !cuda_->cuGraphAddMemsetNode || !cuda_->cuMemcpyHtoD ||
+          !cuda_->cuGraphAddKernelNode || !cuda_->cuGraphAddMemsetNode ||
+          !cuda_->cuModuleLoadDataEx || !cuda_->cuModuleGetFunction ||
+          !cuda_->cuModuleUnload || !cuda_->cuMemcpyHtoD ||
           !cuda_->cuMemcpyDtoH || !cuda_->cuGraphLaunch) {
         return initialize_result_e::unavailable;
       }
@@ -684,19 +700,21 @@ namespace {
           cuda_->cuMemAlloc(&output_, sizeof(std::uint32_t)) != CUDA_SUCCESS ||
           (with_optional_child &&
            cuda_->cuMemAlloc(&optional_output_, sizeof(std::uint32_t)) != CUDA_SUCCESS) ||
-          cuda_->cuGraphCreate(&child_, 0u) != CUDA_SUCCESS) {
+          cuda_->cuGraphCreate(&child_, 0u) != CUDA_SUCCESS ||
+          cuda_->cuModuleLoadDataEx(
+            &scalar_module_, scalar_prefix_consumer_ptx, 0u, nullptr, nullptr
+          ) != CUDA_SUCCESS ||
+          cuda_->cuModuleGetFunction(
+            &marker_writer_, scalar_module_, "write_inference_marker"
+          ) != CUDA_SUCCESS || !marker_writer_) {
         return initialize_result_e::failed;
       }
 
       scalar_prefix_ = with_scalar_prefix;
       if (scalar_prefix_) {
-        if (!cuda_->cuGraphAddMemcpyNode || !cuda_->cuModuleLoadDataEx ||
-            !cuda_->cuModuleGetFunction || !cuda_->cuModuleUnload ||
+        if (!cuda_->cuGraphAddMemcpyNode ||
             cuda_->cuMemAlloc(&scalar_targets_[0], sizeof(std::uint64_t)) != CUDA_SUCCESS ||
             cuda_->cuMemAlloc(&scalar_targets_[1], sizeof(std::uint64_t)) != CUDA_SUCCESS ||
-            cuda_->cuModuleLoadDataEx(
-              &scalar_module_, scalar_prefix_consumer_ptx, 0u, nullptr, nullptr
-            ) != CUDA_SUCCESS ||
             cuda_->cuModuleGetFunction(
               &scalar_consumer_, scalar_module_, "consume_grid_scalars"
             ) != CUDA_SUCCESS || !scalar_consumer_) {
@@ -750,17 +768,22 @@ namespace {
           return initialize_result_e::failed;
         }
       } else {
-        CUDA_MEMSET_NODE_PARAMS memset_params {};
-        memset_params.dst = output_;
-        memset_params.pitch = sizeof(std::uint32_t);
-        memset_params.value = marker;
-        memset_params.elementSize = sizeof(std::uint32_t);
-        memset_params.width = 1u;
-        memset_params.height = 1u;
-        CUgraphNode memset_node = nullptr;
-        if (cuda_->cuGraphAddMemsetNode(
-              &memset_node, child_, nullptr, 0u, &memset_params, context_
-            ) != CUDA_SUCCESS) {
+        CUdeviceptr output = output_;
+        std::uint32_t value = marker;
+        void *kernel_args[] = {&output, &value};
+        CUDA_KERNEL_NODE_PARAMS kernel {};
+        kernel.func = marker_writer_;
+        kernel.gridDimX = 1u;
+        kernel.gridDimY = 1u;
+        kernel.gridDimZ = 1u;
+        kernel.blockDimX = 1u;
+        kernel.blockDimY = 1u;
+        kernel.blockDimZ = 1u;
+        kernel.kernelParams = kernel_args;
+        CUgraphNode kernel_node = nullptr;
+        if (cuda_->cuGraphAddKernelNode(
+              &kernel_node, child_, nullptr, 0u, &kernel
+            ) != CUDA_SUCCESS || !kernel_node) {
           return initialize_result_e::failed;
         }
       }
@@ -781,23 +804,23 @@ namespace {
         }
       }
       if (with_optional_child) {
-        CUDA_MEMSET_NODE_PARAMS memset_params {};
-        memset_params.dst = optional_output_;
-        memset_params.pitch = sizeof(std::uint32_t);
-        memset_params.value = optional_marker;
-        memset_params.elementSize = sizeof(std::uint32_t);
-        memset_params.width = 1u;
-        memset_params.height = 1u;
-        CUgraphNode optional_memset_node = nullptr;
+        CUdeviceptr optional_output = optional_output_;
+        std::uint32_t value = optional_marker;
+        void *kernel_args[] = {&optional_output, &value};
+        CUDA_KERNEL_NODE_PARAMS kernel {};
+        kernel.func = marker_writer_;
+        kernel.gridDimX = 1u;
+        kernel.gridDimY = 1u;
+        kernel.gridDimZ = 1u;
+        kernel.blockDimX = 1u;
+        kernel.blockDimY = 1u;
+        kernel.blockDimZ = 1u;
+        kernel.kernelParams = kernel_args;
+        CUgraphNode optional_kernel_node = nullptr;
         if (cuda_->cuGraphCreate(&optional_child_, 0u) != CUDA_SUCCESS ||
-            cuda_->cuGraphAddMemsetNode(
-              &optional_memset_node,
-              optional_child_,
-              nullptr,
-              0u,
-              &memset_params,
-              context_
-            ) != CUDA_SUCCESS) {
+            cuda_->cuGraphAddKernelNode(
+              &optional_kernel_node, optional_child_, nullptr, 0u, &kernel
+            ) != CUDA_SUCCESS || !optional_kernel_node) {
           return initialize_result_e::failed;
         }
       }
@@ -1028,6 +1051,7 @@ namespace {
       raw_executable_ = nullptr;
       scalar_module_ = nullptr;
       scalar_consumer_ = nullptr;
+      marker_writer_ = nullptr;
       output_ = 0u;
       optional_output_ = 0u;
       records_ = 0u;
@@ -1057,6 +1081,7 @@ namespace {
     CUgraphExec raw_executable_ = nullptr;
     CUmodule scalar_module_ = nullptr;
     CUfunction scalar_consumer_ = nullptr;
+    CUfunction marker_writer_ = nullptr;
     std::array<std::uint64_t, 2u> scalar_seeds_ {31u, 55u};
     std::array<CUdeviceptr, 2u> scalar_targets_ {};
     std::array<CUgraphNode, 2u> scalar_copy_nodes_ {};
@@ -1310,6 +1335,44 @@ TEST(CudaConditionalGraphContract, BuilderFailuresExposeNoExecutable) {
   EXPECT_FALSE(result.ready());
   EXPECT_EQ(result.get(), nullptr);
   EXPECT_EQ(result.failure(), build_failure_e::driver_api_unavailable);
+
+  constexpr CUdeviceptr last_aligned_address =
+    std::numeric_limits<CUdeviceptr>::max() - 15u;
+  result = executable_t::build(
+    unavailable,
+    {
+      .context = reinterpret_cast<CUcontext>(1u),
+      .infer_child = &child,
+      .decision_record = last_aligned_address,
+      .request_record = 0x1000u,
+    }
+  );
+  EXPECT_EQ(result.failure(), build_failure_e::invalid_descriptor)
+    << "The complete 32-byte decision record must not wrap the device address space";
+
+  result = executable_t::build(
+    unavailable,
+    {
+      .context = reinterpret_cast<CUcontext>(1u),
+      .infer_child = &child,
+      .decision_record = 0x1000u,
+      .request_record = last_aligned_address,
+    }
+  );
+  EXPECT_EQ(result.failure(), build_failure_e::invalid_descriptor)
+    << "The complete 32-byte request record must not wrap the device address space";
+
+  result = executable_t::build(
+    unavailable,
+    {
+      .context = reinterpret_cast<CUcontext>(1u),
+      .infer_child = &child,
+      .decision_record = std::numeric_limits<CUdeviceptr>::max() - 31u,
+      .request_record = 0x1000u,
+    }
+  );
+  EXPECT_EQ(result.failure(), build_failure_e::driver_api_unavailable)
+    << "A 32-byte record whose final byte is exactly the address maximum does not wrap";
 }
 
 TEST(CudaConditionalGraphContract, CapabilityIncludesScalarPrefixInspectionApis) {
@@ -1525,6 +1588,77 @@ TEST(CudaConditionalGraphAudit, RecursesThroughLegalChildGraphs) {
   EXPECT_EQ(result.visited_nodes, 2u);
   EXPECT_EQ(result.node_type_counts[CU_GRAPH_NODE_TYPE_GRAPH], 1u);
   EXPECT_EQ(result.node_type_counts[CU_GRAPH_NODE_TYPE_KERNEL], 1u);
+}
+
+TEST(CudaConditionalGraphAudit, InferenceChildrenRequireRecursiveKernelWork) {
+  CUgraph_st empty_graph;
+  auto result = audit_inference_child_graph(fake_audit_api(), &empty_graph);
+  EXPECT_EQ(result.failure, audit_failure_e::missing_inference_kernel);
+  EXPECT_EQ(result.visited_graphs, 1u);
+  EXPECT_EQ(result.visited_nodes, 0u);
+
+  CUgraphNode_st empty_node {.type = CU_GRAPH_NODE_TYPE_EMPTY};
+  CUgraph_st empty_node_graph {{&empty_node}};
+  result = audit_inference_child_graph(fake_audit_api(), &empty_node_graph);
+  EXPECT_EQ(result.failure, audit_failure_e::missing_inference_kernel);
+  EXPECT_EQ(result.node_type_counts[CU_GRAPH_NODE_TYPE_EMPTY], 1u);
+
+  CUgraphNode_st nested_kernel {.type = CU_GRAPH_NODE_TYPE_KERNEL};
+  CUgraph_st nested_graph {{&nested_kernel}};
+  CUgraphNode_st child_node {.type = CU_GRAPH_NODE_TYPE_GRAPH, .child = &nested_graph};
+  CUgraph_st root {{&child_node}};
+  result = audit_inference_child_graph(fake_audit_api(), &root);
+  EXPECT_TRUE(result.legal());
+  EXPECT_EQ(result.node_type_counts[CU_GRAPH_NODE_TYPE_KERNEL], 1u);
+}
+
+TEST(CudaConditionalGraphContract, RejectsKernelFreeMandatoryAndOptionalInferenceChildren) {
+  CUgraph_st empty_graph;
+  transactional_graph_fake_t mandatory_state;
+  cuda_driver_api mandatory_cuda = transactional_graph_api(mandatory_state);
+  auto result = executable_t::build(
+    mandatory_cuda,
+    {
+      .context = reinterpret_cast<CUcontext>(1u),
+      .infer_child = &empty_graph,
+      .decision_record = 0x4000u,
+      .request_record = 0x4040u,
+    }
+  );
+  EXPECT_FALSE(result.ready());
+  EXPECT_TRUE(result.empty());
+  EXPECT_EQ(
+    result.failure(), build_failure_e::infer_child_missing_inference_kernel
+  );
+  EXPECT_EQ(
+    result.audit_result().failure, audit_failure_e::missing_inference_kernel
+  );
+  transactional_graph_fake = nullptr;
+
+  scalar_prefix_graph_t infer;
+  CUgraphNode_st empty_node {.type = CU_GRAPH_NODE_TYPE_EMPTY};
+  CUgraph_st empty_optional {{&empty_node}};
+  transactional_graph_fake_t optional_state;
+  cuda_driver_api optional_cuda = transactional_graph_api(optional_state);
+  result = executable_t::build(
+    optional_cuda,
+    {
+      .context = reinterpret_cast<CUcontext>(1u),
+      .infer_child = &infer.graph,
+      .optional_infer_child = &empty_optional,
+      .decision_record = 0x4000u,
+      .request_record = 0x4040u,
+    }
+  );
+  EXPECT_FALSE(result.ready());
+  EXPECT_TRUE(result.empty());
+  EXPECT_EQ(
+    result.failure(), build_failure_e::optional_infer_child_missing_inference_kernel
+  );
+  EXPECT_EQ(
+    result.audit_result().failure, audit_failure_e::missing_inference_kernel
+  );
+  transactional_graph_fake = nullptr;
 }
 
 TEST(CudaConditionalGraphAudit, RejectsUnsupportedAndNestedConditionalNodes) {
@@ -1895,16 +2029,37 @@ TEST(CudaConditionalGraphHardware, AuditsCapturedTensorRtOcrTopology) {
   ASSERT_EQ(cuda.cuGraphCreate(&mandatory_graph, 0u), CUDA_SUCCESS);
   CUdeviceptr mandatory_marker = 0u;
   ASSERT_EQ(cuda.cuMemAlloc(&mandatory_marker, sizeof(std::uint32_t)), CUDA_SUCCESS);
-  CUDA_MEMSET_NODE_PARAMS marker_params {};
-  marker_params.dst = mandatory_marker;
-  marker_params.value = 0x51u;
-  marker_params.elementSize = sizeof(std::uint32_t);
-  marker_params.width = 1u;
-  marker_params.height = 1u;
+  CUmodule marker_module = nullptr;
+  CUfunction marker_writer = nullptr;
+  ASSERT_EQ(
+    cuda.cuModuleLoadDataEx(
+      &marker_module, scalar_prefix_consumer_ptx, 0u, nullptr, nullptr
+    ),
+    CUDA_SUCCESS
+  );
+  ASSERT_EQ(
+    cuda.cuModuleGetFunction(
+      &marker_writer, marker_module, "write_inference_marker"
+    ),
+    CUDA_SUCCESS
+  );
+  ASSERT_NE(marker_writer, nullptr);
+  CUdeviceptr mandatory_output = mandatory_marker;
+  std::uint32_t mandatory_value = 0x51u;
+  void *mandatory_args[] = {&mandatory_output, &mandatory_value};
+  CUDA_KERNEL_NODE_PARAMS marker_params {};
+  marker_params.func = marker_writer;
+  marker_params.gridDimX = 1u;
+  marker_params.gridDimY = 1u;
+  marker_params.gridDimZ = 1u;
+  marker_params.blockDimX = 1u;
+  marker_params.blockDimY = 1u;
+  marker_params.blockDimZ = 1u;
+  marker_params.kernelParams = mandatory_args;
   CUgraphNode marker_node = nullptr;
   ASSERT_EQ(
-    cuda.cuGraphAddMemsetNode(
-      &marker_node, mandatory_graph, nullptr, 0u, &marker_params, cuda_context
+    cuda.cuGraphAddKernelNode(
+      &marker_node, mandatory_graph, nullptr, 0u, &marker_params
     ),
     CUDA_SUCCESS
   );
@@ -2036,6 +2191,7 @@ TEST(CudaConditionalGraphHardware, AuditsCapturedTensorRtOcrTopology) {
     << "Authenticated reuse must keep the optional OCR child dormant";
   EXPECT_TRUE(wrapper.reset());
   EXPECT_EQ(cuda.cuGraphDestroy(mandatory_graph), CUDA_SUCCESS);
+  EXPECT_EQ(cuda.cuModuleUnload(marker_module), CUDA_SUCCESS);
   EXPECT_EQ(cuda.cuMemFree(transaction), CUDA_SUCCESS);
   EXPECT_EQ(cuda.cuMemFree(mandatory_marker), CUDA_SUCCESS);
 

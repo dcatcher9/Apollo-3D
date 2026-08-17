@@ -22,6 +22,7 @@
   #include <filesystem>
   #include <fstream>
   #include <iomanip>
+  #include <iostream>
   #include <iterator>
   #include <limits>
   #include <locale>
@@ -4513,12 +4514,44 @@ namespace sbs_bench {
         D3D11_QUERY_DATA_TIMESTAMP_DISJOINT timing = {};
         UINT64 start_tick = 0, end_tick = 0;
         ctx->Flush();
-        while (ctx->GetData(warp_disjoint.Get(), &timing, sizeof(timing), 0) == S_FALSE) {
-          std::this_thread::yield();
+        const auto warp_timing_deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds {30};
+        HRESULT warp_timing_status = S_FALSE;
+        while (
+          warp_timing_status == S_FALSE &&
+          std::chrono::steady_clock::now() < warp_timing_deadline
+        ) {
+          warp_timing_status = ctx->GetData(
+            warp_disjoint.Get(),
+            &timing,
+            sizeof(timing),
+            D3D11_ASYNC_GETDATA_DONOTFLUSH
+          );
+          if (warp_timing_status == S_FALSE) {
+            std::this_thread::sleep_for(std::chrono::microseconds {100});
+          }
         }
-        HRESULT hs = ctx->GetData(warp_start.Get(), &start_tick, sizeof(start_tick), 0);
-        HRESULT he = ctx->GetData(warp_end.Get(), &end_tick, sizeof(end_tick), 0);
-        if (SUCCEEDED(hs) && SUCCEEDED(he) && !timing.Disjoint && timing.Frequency > 0 && end_tick >= start_tick) {
+        if (warp_timing_status != S_OK) {
+          std::cerr << "Timed out or failed while reading the bounded offline warp GPU timer.\n";
+          return 7;
+        }
+        const HRESULT hs = ctx->GetData(
+          warp_start.Get(),
+          &start_tick,
+          sizeof(start_tick),
+          D3D11_ASYNC_GETDATA_DONOTFLUSH
+        );
+        const HRESULT he = ctx->GetData(
+          warp_end.Get(),
+          &end_tick,
+          sizeof(end_tick),
+          D3D11_ASYNC_GETDATA_DONOTFLUSH
+        );
+        if (hs != S_OK || he != S_OK) {
+          std::cerr << "Offline warp timestamp queries were not ready with their disjoint owner.\n";
+          return 7;
+        }
+        if (!timing.Disjoint && timing.Frequency > 0 && end_tick >= start_tick) {
           sbs_perf::add_sample_ms("warp_infer", (double) (end_tick - start_tick) * 1000.0 / (double) timing.Frequency);
         }
       }

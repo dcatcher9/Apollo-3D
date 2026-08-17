@@ -441,71 +441,57 @@ namespace platf::dxgi {
   using depth_estimator_build_task_t =
     std::packaged_task<std::unique_ptr<models::video_depth_estimator>()>;
 
-  // Keep abandoned per-device estimator builds alive without blocking a presentation-session
-  // teardown. The manager joins any remaining workers during process shutdown, before the
-  // function-static object and the TensorRT process globals are destroyed.
-  class depth_estimator_build_manager_t {
-  public:
-    ~depth_estimator_build_manager_t() {
-      for (auto &worker : workers_) {
-        if (worker.thread.joinable()) {
-          worker.thread.join();
-        }
-      }
-    }
-
-    void launch(depth_estimator_build_task_t task, std::function<void()> on_complete = {}) {
-      auto completed = std::make_shared<std::atomic<bool>>(false);
-      std::thread thread([task = std::move(task), completed, on_complete = std::move(on_complete)]() mutable {
+  // Keep abandoned per-device estimator builds/results alive without blocking a presentation
+  // session teardown. The shared process-lifetime worker service joins them together with async
+  // encoder teardown before logging/TensorRT/D3D globals are destroyed.
+  void launch_depth_estimator_build(
+    depth_estimator_build_task_t task,
+    std::function<void()> on_complete = {}
+  ) {
+    std::packaged_task<void()> worker(
+      [task = std::move(task), on_complete = std::move(on_complete)]() mutable {
         task();
-        // packaged_task makes its future ready before operator() returns. Signal the encoder only
-        // after that point so it can consume the result on its own thread without a readiness race.
+        // packaged_task makes its future ready before operator() returns. Signal the encoder
+        // only after that point so it can consume the result without a readiness race.
         if (on_complete) {
           on_complete();
         }
-        completed->store(true, std::memory_order_release);
-      });
-
-      std::lock_guard lock(mutex_);
-      for (auto worker = workers_.begin(); worker != workers_.end();) {
-        if (!worker->completed->load(std::memory_order_acquire)) {
-          ++worker;
-          continue;
-        }
-        worker->thread.join();
-        worker = workers_.erase(worker);
       }
-      workers_.push_back({std::move(thread), std::move(completed)});
-    }
+    );
+    ::video::launch_async_teardown_worker(std::move(worker));
+  }
 
-    // CUDA/TensorRT teardown can synchronize and return a large execution context to the pool.
-    // Never perform that work on the encode thread after a terminal fail-flat transition.
-    void retire(std::unique_ptr<models::video_depth_estimator> estimator) {
-      if (!estimator) {
-        return;
+  // CUDA/TensorRT teardown can wait for device quiescence and return a large execution context to
+  // the pool. Never perform that work on the encode/local-presenter thread.
+  void retire_depth_estimator(std::unique_ptr<models::video_depth_estimator> estimator) {
+    if (!estimator) {
+      return;
+    }
+    std::packaged_task<void()> worker([estimator = std::move(estimator)]() mutable {
+      estimator.reset();
+    });
+    ::video::launch_async_teardown_worker(std::move(worker));
+  }
+
+  // A ready-but-unconsumed future owns its estimator result. Move that shared state to a worker so
+  // abandoning a local/encode device never runs the estimator destructor on its owner thread.
+  void retire_depth_estimator_build(
+    std::future<std::unique_ptr<models::video_depth_estimator>> build
+  ) {
+    if (!build.valid()) {
+      return;
+    }
+    std::packaged_task<void()> worker([build = std::move(build)]() mutable {
+      try {
+        auto estimator = build.get();
+        estimator.reset();
+      } catch (const std::exception &e) {
+        BOOST_LOG(warning) << "Retired Host SBS pipeline build failed: "sv << e.what();
+      } catch (...) {
+        BOOST_LOG(warning) << "Retired Host SBS pipeline build failed with an unknown exception."sv;
       }
-      depth_estimator_build_task_t task(
-        [estimator = std::move(estimator)]() mutable {
-          estimator.reset();
-          return std::unique_ptr<models::video_depth_estimator> {};
-        }
-      );
-      launch(std::move(task));
-    }
-
-  private:
-    struct worker_t {
-      std::thread thread;
-      std::shared_ptr<std::atomic<bool>> completed;
-    };
-
-    std::mutex mutex_;
-    std::vector<worker_t> workers_;
-  };
-
-  depth_estimator_build_manager_t &depth_estimator_build_manager() {
-    static depth_estimator_build_manager_t manager;
-    return manager;
+    });
+    ::video::launch_async_teardown_worker(std::move(worker));
   }
 
   class d3d_base_encode_device final {
@@ -517,8 +503,18 @@ namespace platf::dxgi {
       drain_sbs_gpu_timers();
 
       // The background task owns D3D references and its packaged-task future does not block here.
-      // If this device is torn down while construction is in flight, the process-level build
-      // manager lets it finish independently and destroys the unused result on that worker.
+      // If this device is torn down while construction is in flight, the process-lifetime tracked
+      // worker service lets it finish independently and destroys the unused result there.
+      retire_depth_estimator(std::move(depth_estimator));
+      retire_depth_estimator_build(std::move(depth_estimator_build));
+      depth_estimator_building = false;
+    }
+
+    void release_capture_display() noexcept {
+      // Encoder teardown may remain blocked inside the NVIDIA driver. The shared capture-display
+      // owner is not a D3D/NVENC operand, so release it before derived member destruction to let
+      // Desktop Duplication reinitialize while device/context resources remain alive.
+      display.reset();
     }
 
     int convert_rgb(
@@ -1400,56 +1396,14 @@ namespace platf::dxgi {
               }
             }
 
-            // The encode loop calls convert() on a retained source only after capture has gone
-            // idle with accepted inference still pending. Consume that exact inference without
-            // enqueuing a duplicate for the same pixels. This is normally only a nonblocking
-            // completion read; the one-inference drain preserves correctness if the GPU is late.
+            // The encode loop calls convert() on a retained source when accepted inference is
+            // still pending. The early nonblocking poll above already found this exact unit busy,
+            // so keep its slot and poll owner intact and do not enqueue duplicate work. Presentation
+            // remains fail-open through the bounded packed-output hold (or current flat output once
+            // that hold expires); a later convert() adopts the exact completion when its event is
+            // ready. Live capture must never turn this retry into an unbounded CUDA stream wait.
             if (retained_source_pending_slot) {
               mark_sbs_matched_copy_end(gpu_timer, false);
-              auto recovered =
-                depth_estimator->finish_pending_depth_for_idle_recovery(
-                  input_color_space,
-                  snapshot_debug_inputs
-                );
-              if (recovered.completed_frame_valid) {
-                // Normalization has just rewritten the estimator's singleton V2 resources. Any
-                // prior cache metadata is now stale until this exact completion is authenticated.
-                latest_v2_lineage.reset();
-                // Consuming a completion retires the estimator's pending work even if corrupt
-                // metadata prevents us from resolving its color slot.
-                depth_completion_poll_pending = false;
-                auto *recovered_slot =
-                  find_pending_matched_slot(recovered.completed_frame_id);
-                if (recovered_slot) {
-                  recovered_slot->pending = false;
-                  if (!recovered_slot->depth_input_region.video_region) {
-                    depth_authority_reprocess_pending = false;
-                  }
-                  matched_render_slot = recovered_slot;
-                  render_input_srv = recovered_slot->srv.get();
-                  if (known_force_infer_completion(recovered, *recovered_slot)) {
-                    sbs_telemetry_last_sampled_frame_id = recovered.completed_frame_id;
-                  }
-                  est = std::move(recovered);
-                  if (diagnostics_enabled) {
-                    const double age_ms =
-                      std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() -
-                        recovered_slot->captured_at
-                      )
-                        .count();
-                    matched_stats_age_sum_ms += age_ms;
-                    matched_stats_age_max_ms =
-                      std::max(matched_stats_age_max_ms, age_ms);
-                    ++matched_stats_completions;
-                    if (perf) {
-                      sbs_perf::add_sample_ms("matched_frame_age", age_ms);
-                    }
-                  }
-                } else {
-                  release_unknown_completion(recovered.completed_frame_id, nullptr);
-                }
-              }
             } else if (unchanged_input_pending_slot) {
               // Never enqueue an input already represented by the sole pending inference. This is
               // either a DDup content-clock duplicate or a changed desktop whose entire damage
@@ -1557,9 +1511,14 @@ namespace platf::dxgi {
                   current_source_timestamp,
                   current_content_timestamp,
                   current_ddup_damage,
-                  pre_copy_authority
+                  pre_copy_authority,
+                  gpu_timer
                 );
-              mark_sbs_matched_copy_end(gpu_timer, matched_copy_submitted);
+              if (!matched_copy_submitted) {
+                // Every timing slot needs a complete timestamp tuple. A skipped/failed copy gets
+                // adjacent markers and publishes no matched_frame_copy_gpu sample.
+                mark_sbs_matched_copy_end(gpu_timer, false);
+              }
               if (
                 completion_finalized_before_admission && matched_render_slot &&
                 !matched_route_matches_current(
@@ -1982,86 +1941,6 @@ namespace platf::dxgi {
                   }
                 }
 
-                // On the first real frame after a long idle gap, consume the just-submitted current
-                // inference once so depth is available immediately. The retained-source completion
-                // owner in video.cpp covers shorter bursts that stop before the age threshold.
-                // Normal cadence may spend only the bounded query slack above and never
-                // synchronizes a busy stream. Only a candidate already accepted by the
-                // nonblocking readiness gate can enter this older >250 ms recovery exception.
-                const auto recovery_now = std::chrono::steady_clock::now();
-                const bool stale_prior_completion =
-                  matched_render_slot &&
-                  !same_source(
-                    matched_render_slot->source_timestamp,
-                    current_source_timestamp
-                  ) &&
-                  recovery_now - matched_render_slot->captured_at >
-                    models::host_sbs_v2_max_matched_repeat_age;
-                const bool stale_prior_output =
-                  !matched_render_slot && matched_output_valid &&
-                  !same_source(
-                    matched_output_source_timestamp,
-                    current_source_timestamp
-                  ) &&
-                  recovery_now - matched_output_source_at >
-                    models::host_sbs_v2_max_matched_repeat_age;
-                // New/reset analysis domains stay asynchronous. They render current-frame flat
-                // identity until the ordinary completion (or retained-source timeout owner)
-                // consumes this work. Synchronous recovery is reserved for a genuinely stale
-                // prior source after an idle gap, not normal ROI acquire/release.
-                if (
-                  depth_transaction_enqueued && matched_candidate_slot &&
-                  detail::host_sbs_accepted_frame_needs_synchronous_recovery(
-                    stale_prior_completion,
-                    stale_prior_output
-                  )
-                ) {
-                  auto recovered =
-                    depth_estimator->finish_pending_depth_for_idle_recovery(
-                      input_color_space,
-                      snapshot_debug_inputs
-                    );
-                  if (recovered.completed_frame_valid) {
-                    latest_v2_lineage.reset();
-                    completion_finalized_before_admission = false;
-                    // finish_pending consumed the estimator's sole pending inference. Release the
-                    // poll owner before fallible frame-ID lookup, just as the retained-source path
-                    // does, so corrupt metadata cannot leave a permanently pending slot.
-                    depth_completion_poll_pending = false;
-                    auto *recovered_slot =
-                      find_pending_matched_slot(recovered.completed_frame_id);
-                    if (recovered_slot) {
-                      recovered_slot->pending = false;
-                      if (!recovered_slot->depth_input_region.video_region) {
-                        depth_authority_reprocess_pending = false;
-                      }
-                      matched_render_slot = recovered_slot;
-                      render_input_srv = recovered_slot->srv.get();
-                      if (known_force_infer_completion(recovered, *recovered_slot)) {
-                        sbs_telemetry_last_sampled_frame_id =
-                          recovered.completed_frame_id;
-                      }
-                      est = std::move(recovered);
-                      if (diagnostics_enabled) {
-                        const double age_ms =
-                          std::chrono::duration<double, std::milli>(
-                            std::chrono::steady_clock::now() -
-                            recovered_slot->captured_at
-                          )
-                            .count();
-                        matched_stats_age_sum_ms += age_ms;
-                        matched_stats_age_max_ms =
-                          std::max(matched_stats_age_max_ms, age_ms);
-                        ++matched_stats_completions;
-                        if (perf) {
-                          sbs_perf::add_sample_ms("matched_frame_age", age_ms);
-                        }
-                      }
-                    } else {
-                      release_unknown_completion(recovered.completed_frame_id, nullptr);
-                    }
-                  }
-                }
               }
             }
           } else {
@@ -2350,9 +2229,10 @@ namespace platf::dxgi {
           }
           ID3D11ShaderResourceView *selected_parallax_field =
             v2_live_warp_selected ? est.shadow_final_parallax.Get() : nullptr;
-          const bool timing_has_depth_warp =
-            !repeat_matched_output && selected_parallax_field;
-          mark_sbs_warp_start(gpu_timer, timing_has_depth_warp);
+          // The same fullscreen pass performs either authenticated reprojection or current-frame
+          // flat identity. Time both; a packed repeat performs neither draw.
+          const bool timing_has_sbs_composite = !repeat_matched_output;
+          mark_sbs_warp_start(gpu_timer, timing_has_sbs_composite);
           ID3D11ShaderResourceView *final_sbs_srv = nullptr;
           ID3D11Texture2D *final_sbs_texture = nullptr;
           bool final_sbs_is_linear = sbs_intermediate_is_linear;
@@ -2362,14 +2242,17 @@ namespace platf::dxgi {
               ++matched_stats_output_packed_repeat;
             } else if (v2_live_warp_selected) {
               ++matched_stats_output_warped_new;
-            } else if (
-              same_frame_poll_missed_for_current_draw &&
-              depth_completion_poll_pending
-            ) {
-              // This should remain zero once a valid packed presentation exists. Keep the
-              // counter explicit so a route/reset invalidation can be distinguished from the
-              // former adaptive timeout flash in live logs.
-              ++matched_stats_output_flat_pending_miss;
+            } else {
+              ++matched_stats_output_flat;
+              if (
+                same_frame_poll_missed_for_current_draw &&
+                depth_completion_poll_pending
+              ) {
+                // This should remain zero once a valid packed presentation exists. Keep the
+                // counter explicit so a route/reset invalidation can be distinguished from the
+                // former adaptive timeout flash in live logs.
+                ++matched_stats_output_flat_pending_miss;
+              }
             }
           }
           if (repeat_matched_output) {
@@ -2726,7 +2609,7 @@ namespace platf::dxgi {
                   matched_stats_same_frame_poll_budget_sum_ms /
                     matched_stats_same_frame_poll_plans :
                   0.0;
-              BOOST_LOG(info) << "SBS cadence: frames="sv << matched_stats_calls
+              BOOST_LOG(info) << "SBS cadence: conversions="sv << matched_stats_calls
                               << " completed="sv << matched_stats_completions
                               << " repeats="sv << matched_stats_repeats
                               << " ("sv << repeat_pct << "%) content_skips="sv
@@ -2741,9 +2624,11 @@ namespace platf::dxgi {
                               << matched_stats_video_roi_route_outputs << " ("sv
                               << video_roi_pct << "%) age_ms_avg/max="sv
                               << avg_age_ms << '/' << matched_stats_age_max_ms
-                              << " output_warped_new/packed_repeat/flat_pending_miss="sv
+                              << " output_warped_new/packed_repeat/flat="sv
                               << matched_stats_output_warped_new << '/'
                               << matched_stats_output_packed_repeat << '/'
+                              << matched_stats_output_flat
+                              << " flat_pending_miss="sv
                               << matched_stats_output_flat_pending_miss
                               << " same_frame_repeated_wait_attempt/hit="sv
                               << matched_stats_same_frame_poll_attempts << '/'
@@ -2872,7 +2757,7 @@ namespace platf::dxgi {
     void fail_depth_pipeline_flat() {
       depth_estimator_failed = true;
       host_sbs_renderer = models::fail_host_sbs_renderer_flat(host_sbs_renderer);
-      depth_estimator_build_manager().retire(std::move(depth_estimator));
+      retire_depth_estimator(std::move(depth_estimator));
       for (auto &slot : matched_frame_slots) {
         slot.gpu_undecided_transaction = false;
         slot.pending = false;
@@ -2992,7 +2877,7 @@ namespace platf::dxgi {
       });
       depth_estimator_build = build_task.get_future();
       auto pipeline_ready_event = sbs_depth_pipeline_ready_event;
-      depth_estimator_build_manager().launch(
+      launch_depth_estimator_build(
         std::move(build_task),
         [pipeline_ready_event = std::move(pipeline_ready_event)]() {
           if (pipeline_ready_event) {
@@ -3238,13 +3123,16 @@ namespace platf::dxgi {
     struct sbs_gpu_timer_slot_t {
       d3d_query_t disjoint;
       d3d_query_t start;
+      d3d_query_t matched_copy_start;
       d3d_query_t matched_copy_end;
       d3d_query_t warp_start;
       d3d_query_t warp_end;
       d3d_query_t convert_end;
       bool pending = false;
+      bool matched_copy_started = false;
+      bool matched_copy_ended = false;
       bool has_matched_copy = false;
-      bool has_depth_warp = false;
+      bool has_sbs_composite = false;
       std::uint64_t perf_generation = 0;
     };
 
@@ -3265,7 +3153,7 @@ namespace platf::dxgi {
           return;
         }
         desc.Query = D3D11_QUERY_TIMESTAMP;
-        if (FAILED(device->CreateQuery(&desc, &slot.start)) || FAILED(device->CreateQuery(&desc, &slot.matched_copy_end)) || FAILED(device->CreateQuery(&desc, &slot.warp_start)) || FAILED(device->CreateQuery(&desc, &slot.warp_end)) || FAILED(device->CreateQuery(&desc, &slot.convert_end))) {
+        if (FAILED(device->CreateQuery(&desc, &slot.start)) || FAILED(device->CreateQuery(&desc, &slot.matched_copy_start)) || FAILED(device->CreateQuery(&desc, &slot.matched_copy_end)) || FAILED(device->CreateQuery(&desc, &slot.warp_start)) || FAILED(device->CreateQuery(&desc, &slot.warp_end)) || FAILED(device->CreateQuery(&desc, &slot.convert_end))) {
           BOOST_LOG(warning) << "Host SBS GPU timing unavailable: could not create timestamp queries."sv;
           return;
         }
@@ -3292,32 +3180,34 @@ namespace platf::dxgi {
         }
 
         UINT64 start = 0;
+        UINT64 matched_copy_start = 0;
         UINT64 matched_copy_end = 0;
         UINT64 warp_start = 0;
         UINT64 warp_end = 0;
         UINT64 convert_end = 0;
         const auto start_status = device_ctx->GetData(slot.start.get(), &start, sizeof(start), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        const auto matched_copy_start_status = device_ctx->GetData(slot.matched_copy_start.get(), &matched_copy_start, sizeof(matched_copy_start), D3D11_ASYNC_GETDATA_DONOTFLUSH);
         const auto matched_copy_status = device_ctx->GetData(slot.matched_copy_end.get(), &matched_copy_end, sizeof(matched_copy_end), D3D11_ASYNC_GETDATA_DONOTFLUSH);
         const auto warp_start_status = device_ctx->GetData(slot.warp_start.get(), &warp_start, sizeof(warp_start), D3D11_ASYNC_GETDATA_DONOTFLUSH);
         const auto warp_status = device_ctx->GetData(slot.warp_end.get(), &warp_end, sizeof(warp_end), D3D11_ASYNC_GETDATA_DONOTFLUSH);
         const auto convert_status = device_ctx->GetData(slot.convert_end.get(), &convert_end, sizeof(convert_end), D3D11_ASYNC_GETDATA_DONOTFLUSH);
-        if (start_status == S_FALSE || matched_copy_status == S_FALSE || warp_start_status == S_FALSE || warp_status == S_FALSE || convert_status == S_FALSE) {
+        if (start_status == S_FALSE || matched_copy_start_status == S_FALSE || matched_copy_status == S_FALSE || warp_start_status == S_FALSE || warp_status == S_FALSE || convert_status == S_FALSE) {
           continue;
         }
-        if (start_status != S_OK || matched_copy_status != S_OK || warp_start_status != S_OK || warp_status != S_OK || convert_status != S_OK) {
+        if (start_status != S_OK || matched_copy_start_status != S_OK || matched_copy_status != S_OK || warp_start_status != S_OK || warp_status != S_OK || convert_status != S_OK) {
           slot.pending = false;
           continue;
         }
-        if (!timing.Disjoint && timing.Frequency > 0 && matched_copy_end >= start && warp_start >= matched_copy_end && warp_end >= warp_start && convert_end >= warp_end) {
+        if (!timing.Disjoint && timing.Frequency > 0 && matched_copy_start >= start && matched_copy_end >= matched_copy_start && warp_start >= matched_copy_end && warp_end >= warp_start && convert_end >= warp_end) {
           const double to_ms = 1000.0 / static_cast<double>(timing.Frequency);
           if (slot.has_matched_copy) {
             sbs_perf::add_sample_ms_if_current(
               "matched_frame_copy_gpu",
-              static_cast<double>(matched_copy_end - start) * to_ms,
+              static_cast<double>(matched_copy_end - matched_copy_start) * to_ms,
               slot.perf_generation
             );
           }
-          if (slot.has_depth_warp) {
+          if (slot.has_sbs_composite) {
             sbs_perf::add_sample_ms_if_current(
               "sbs_warp_gpu",
               static_cast<double>(warp_end - warp_start) * to_ms,
@@ -3346,8 +3236,10 @@ namespace platf::dxgi {
           continue;
         }
         sbs_gpu_timer_next = (index + 1) % sbs_gpu_timers.size();
+        slot.matched_copy_started = false;
+        slot.matched_copy_ended = false;
         slot.has_matched_copy = false;
-        slot.has_depth_warp = false;
+        slot.has_sbs_composite = false;
         slot.perf_generation = sbs_perf::generation();
         device_ctx->Begin(slot.disjoint.get());
         device_ctx->End(slot.start.get());
@@ -4864,7 +4756,8 @@ namespace platf::dxgi {
       std::optional<std::chrono::steady_clock::time_point> source_timestamp,
       std::optional<std::chrono::steady_clock::time_point> content_timestamp,
       std::optional<detail::ddup_damage_snapshot_t> ddup_damage,
-      const live_window_authority_observation_t &pre_copy_authority
+      const live_window_authority_observation_t &pre_copy_authority,
+      sbs_gpu_timer_slot_t *gpu_timer
     ) {
       if (!source) {
         return false;
@@ -4912,7 +4805,9 @@ namespace platf::dxgi {
       }
 
       const auto captured_at = std::chrono::steady_clock::now();
+      mark_sbs_matched_copy_start(gpu_timer);
       device_ctx->CopyResource(slot.texture.get(), source);
+      mark_sbs_matched_copy_end(gpu_timer, true);
       // Recheck after the copy as the causal authority for this exact matched image. The earlier
       // per-convert observation breaks continuity across busy periods; this second observation
       // closes a focus/move/resize race between admission and CopyResource. During an already
@@ -5119,16 +5014,33 @@ namespace platf::dxgi {
       return true;
     }
 
+    void mark_sbs_matched_copy_start(sbs_gpu_timer_slot_t *slot) {
+      if (slot && !slot->matched_copy_started) {
+        slot->matched_copy_started = true;
+        device_ctx->End(slot->matched_copy_start.get());
+      }
+    }
+
     void mark_sbs_matched_copy_end(sbs_gpu_timer_slot_t *slot, bool submitted) {
       if (slot) {
-        slot->has_matched_copy = submitted;
+        if (slot->matched_copy_ended) {
+          // Preserve the fact that CopyResource was submitted if a later authority/result path
+          // closes the logical copy as rejected. A timestamp query must be ended exactly once.
+          slot->has_matched_copy = slot->has_matched_copy || submitted;
+          return;
+        }
+        // Skipped copies still close every query in the timing tuple, but only an actual
+        // CopyResource interval is published as matched_frame_copy_gpu.
+        mark_sbs_matched_copy_start(slot);
+        slot->matched_copy_ended = true;
+        slot->has_matched_copy = slot->has_matched_copy || submitted;
         device_ctx->End(slot->matched_copy_end.get());
       }
     }
 
-    void mark_sbs_warp_start(sbs_gpu_timer_slot_t *slot, bool has_depth_warp) {
+    void mark_sbs_warp_start(sbs_gpu_timer_slot_t *slot, bool has_sbs_composite) {
       if (slot) {
-        slot->has_depth_warp = has_depth_warp;
+        slot->has_sbs_composite = has_sbs_composite;
         device_ctx->End(slot->warp_start.get());
       }
     }
@@ -5338,6 +5250,7 @@ namespace platf::dxgi {
       matched_stats_video_roi_route_outputs = 0;
       matched_stats_output_warped_new = 0;
       matched_stats_output_packed_repeat = 0;
+      matched_stats_output_flat = 0;
       matched_stats_output_flat_pending_miss = 0;
       matched_stats_same_frame_poll_attempts = 0;
       matched_stats_same_frame_poll_hits = 0;
@@ -5835,7 +5748,8 @@ namespace platf::dxgi {
       int width,
       int height,
       int sbs_mode_param,
-      const config::video_t::sbs_t &settings
+      const config::video_t::sbs_t &settings,
+      std::shared_ptr<safe::event_t<bool>> depth_pipeline_ready_event = {}
     ) {
       return init_output(
         nullptr,
@@ -5844,7 +5758,7 @@ namespace platf::dxgi {
         sbs_mode_param,
         settings,
         {},
-        {},
+        std::move(depth_pipeline_ready_event),
         {},
         {},
         0,
@@ -6093,8 +6007,8 @@ namespace platf::dxgi {
 
     std::unique_ptr<models::video_depth_estimator> depth_estimator;
     // The per-device D3D estimator is built on a background thread and borrows the startup-warmed
-    // TensorRT context. The process-level build manager owns and joins the worker; the task itself
-    // captures owning D3D references, so abandoning this non-blocking future during teardown is safe.
+    // TensorRT context. The process-lifetime tracked worker service owns and joins the worker; the
+    // task itself captures owning D3D references, so retiring this future during teardown is safe.
     std::future<std::unique_ptr<models::video_depth_estimator>> depth_estimator_build;
     bool depth_estimator_building = false;
     bool depth_estimator_failed = false;  ///< Build threw; stream flat, don't retry on this device.
@@ -6195,6 +6109,7 @@ namespace platf::dxgi {
     unsigned matched_stats_video_roi_route_outputs = 0;
     unsigned matched_stats_output_warped_new = 0;
     unsigned matched_stats_output_packed_repeat = 0;
+    unsigned matched_stats_output_flat = 0;
     unsigned matched_stats_output_flat_pending_miss = 0;
     unsigned matched_stats_same_frame_poll_attempts = 0;
     unsigned matched_stats_same_frame_poll_hits = 0;
@@ -6998,7 +6913,14 @@ namespace platf::dxgi {
       return local_presenter_result_e::error;
     }
 
-    if (converter.init_rgb_output(output_width, output_height, config.sbs_mode, config.sbs_config)) {
+    auto depth_pipeline_ready_event = std::make_shared<safe::event_t<bool>>();
+    if (converter.init_rgb_output(
+          output_width,
+          output_height,
+          config.sbs_mode,
+          config.sbs_config,
+          depth_pipeline_ready_event
+        )) {
       BOOST_LOG(error) << "Local AR presenter could not initialize RGB presentation resources."sv;
       return local_presenter_result_e::error;
     }
@@ -7332,7 +7254,9 @@ namespace platf::dxgi {
     std::uint64_t capture_attempt_frames = 0;
     std::uint64_t captured_frames = 0;
     std::uint64_t presented_frames = 0;
-    std::uint64_t busy_present_drops = 0;
+    std::uint64_t busy_present_retries = 0;
+    std::shared_ptr<platf::img_t> retained_presenter_source;
+    detail::local_presenter_retry_state_t presenter_retry;
     auto present_stats_started = diagnostics_enabled ? std::chrono::steady_clock::now() :
                                                        std::chrono::steady_clock::time_point {};
     auto log_present_stats = [&]() {
@@ -7347,11 +7271,11 @@ namespace platf::dxgi {
       const double elapsed_seconds = std::chrono::duration<double>(elapsed).count();
       BOOST_LOG(info) << "Local AR presenter stats: captured="sv << captured_frames
                       << " presented="sv << presented_frames
-                      << " busy_drops="sv << busy_present_drops
+                      << " busy_retries="sv << busy_present_retries
                       << " output_fps="sv << (presented_frames / elapsed_seconds);
       captured_frames = 0;
       presented_frames = 0;
-      busy_present_drops = 0;
+      busy_present_retries = 0;
       present_stats_started = now;
     };
     auto push_image = [&](std::shared_ptr<platf::img_t> &&image, bool frame_captured) {
@@ -7359,12 +7283,28 @@ namespace platf::dxgi {
       if (stop_token.stop_requested() || window_closed) {
         return false;
       }
-      if (!frame_captured) {
-        return true;
+      if (frame_captured) {
+        if (!image) {
+          BOOST_LOG(error) << "Local AR capture reported a frame without an image."sv;
+          return false;
+        }
+        retained_presenter_source = std::move(image);
+        presenter_retry.observe_source();
+        ++capture_attempt_frames;
+        if (diagnostics_enabled) {
+          ++captured_frames;
+        }
       }
-      ++capture_attempt_frames;
-      if (diagnostics_enabled) {
-        ++captured_frames;
+
+      const bool depth_pipeline_ready =
+        depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
+      const bool conversion_poll_pending = converter.needs_conversion_poll();
+      if (!presenter_retry.should_process(
+            static_cast<bool>(retained_presenter_source),
+            depth_pipeline_ready,
+            conversion_poll_pending
+          )) {
+        return true;
       }
 
       const auto latest_target_rect = read_target_rect();
@@ -7393,9 +7333,9 @@ namespace platf::dxgi {
         target_rect = latest_target_rect;
       }
 
-      // Never let a slower physical output back-pressure capture, synchronous depth inference,
-      // or the desktop being interacted with. If DWM has not retired the previous flip yet, keep
-      // the newest source frame in capture and skip this presentation opportunity.
+      // Never let a slower physical output back-pressure capture, asynchronous depth processing,
+      // or the desktop being interacted with. Retain only the newest source and retry it on the
+      // next capture timeout if DWM has not retired the previous flip yet.
       const auto frame_latency_status = WaitForSingleObject(frame_latency_waitable, 0);
       if (frame_latency_status == WAIT_FAILED) {
         BOOST_LOG(error) << "Local AR presenter frame-latency wait failed: "sv << GetLastError();
@@ -7403,17 +7343,39 @@ namespace platf::dxgi {
       }
       if (frame_latency_status != WAIT_OBJECT_0) {
         if (diagnostics_enabled) {
-          ++busy_present_drops;
+          ++busy_present_retries;
           log_present_stats();
         }
         return true;
       }
 
-      // The swapchain transfer contract controls RGB presentation. In SDR, DWM may composite the
-      // G22 swapchain onto an HDR physical output, so the output's live HDR state is not relevant.
-      if (converter.convert_rgb(*image, backbuffer.Get(), backbuffer_rtv.Get(), config.hdr)) {
-        BOOST_LOG(error) << "Local AR presenter failed to convert a captured frame."sv;
-        return false;
+      const bool conversion_required = presenter_retry.should_convert(
+        static_cast<bool>(retained_presenter_source),
+        depth_pipeline_ready,
+        conversion_poll_pending
+      );
+      if (conversion_required) {
+        // The swapchain transfer contract controls RGB presentation. In SDR, DWM may composite
+        // the G22 swapchain onto an HDR physical output, so the output's live HDR state is not
+        // relevant.
+        if (depth_pipeline_ready && depth_pipeline_ready_event) {
+          // Consume only the notification sampled before should_process(). A build that becomes
+          // ready during conversion must remain armed for the next static-source timeout.
+          depth_pipeline_ready_event->pop(0ms);
+        }
+        if (converter.convert_rgb(
+              *retained_presenter_source,
+              backbuffer.Get(),
+              backbuffer_rtv.Get(),
+              config.hdr
+            )) {
+          BOOST_LOG(error) << "Local AR presenter failed to convert a captured frame."sv;
+          return false;
+        }
+        // A ready/poll-triggered conversion may update a source whose earlier flat output was
+        // already presented. Keep this newly rendered backbuffer retryable if Present is busy;
+        // only a successful Present clears the owner.
+        presenter_retry.record_converted();
       }
       DXGI_PRESENT_PARAMETERS present_parameters {};
       status = swapchain->Present1(
@@ -7423,7 +7385,7 @@ namespace platf::dxgi {
       );
       if (status == DXGI_ERROR_WAS_STILL_DRAWING) {
         if (diagnostics_enabled) {
-          ++busy_present_drops;
+          ++busy_present_retries;
           log_present_stats();
         }
         return true;
@@ -7444,6 +7406,7 @@ namespace platf::dxgi {
       if (config.presented_frames) {
         config.presented_frames->fetch_add(1, std::memory_order_relaxed);
       }
+      presenter_retry.record_presented();
       return true;
     };
 
@@ -7482,6 +7445,12 @@ namespace platf::dxgi {
 
   class d3d_nvenc_encode_device_t: public nvenc_encode_device_t {
   public:
+    ~d3d_nvenc_encode_device_t() override {
+      // The destructor body runs before nvenc_d3d is destroyed. Do not let a hung NVENC teardown
+      // retain the capture display and deadlock capture-thread reinitialization.
+      base.release_capture_display();
+    }
+
     bool init_device(std::shared_ptr<platf::display_t> display, adapter_t::pointer adapter_p, pix_fmt_e pix_fmt) {
       buffer_format = nvenc::nvenc_format_from_sunshine_format(pix_fmt);
       if (buffer_format == NV_ENC_BUFFER_FORMAT_UNDEFINED) {

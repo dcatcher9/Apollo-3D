@@ -10,6 +10,7 @@
 #include "src/host_sbs_observation_timeline.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -226,6 +227,41 @@ TEST(OfflineSbsWorker, ObservationTimelineRoundTripsAndRejectsRegression) {
 
   const std::array<std::uint64_t, 2> regressed {2u, 1u};
   EXPECT_FALSE(models::host_sbs_observation_timeline::write(path, regressed, error));
+
+  // A forged count must be rejected from the fixed header before the reader sizes its output
+  // vector. A failed read also clears caller-owned data instead of leaving stale timestamps that
+  // could be mistaken for the rejected sidecar.
+  std::array<std::uint8_t, models::host_sbs_observation_timeline::header_bytes> header {};
+  std::copy(
+    models::host_sbs_observation_timeline::magic.begin(),
+    models::host_sbs_observation_timeline::magic.end(),
+    header.begin()
+  );
+  models::host_sbs_observation_timeline::write_u32_le(
+    header.data() + 8u,
+    models::host_sbs_observation_timeline::schema
+  );
+  models::host_sbs_observation_timeline::write_u32_le(
+    header.data() + 12u,
+    models::host_sbs_observation_timeline::header_bytes
+  );
+  models::host_sbs_observation_timeline::write_u64_le(
+    header.data() + 16u,
+    models::host_sbs_observation_timeline::max_timestamp_count + 1u
+  );
+  {
+    std::ofstream forged(path, std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(forged);
+    forged.write(
+      reinterpret_cast<const char *>(header.data()),
+      static_cast<std::streamsize>(header.size())
+    );
+    ASSERT_TRUE(forged.good());
+  }
+  actual.assign({7u, 8u});
+  EXPECT_FALSE(models::host_sbs_observation_timeline::read(path, actual, error));
+  EXPECT_TRUE(actual.empty());
+  EXPECT_NE(error.find("length is invalid"), std::string::npos) << error;
   std::error_code ec;
   fs::remove_all(root, ec);
 }

@@ -271,6 +271,7 @@ namespace cuda_conditional_graph {
     unsupported_node_type,
     nested_conditional,
     recursion_limit,
+    missing_inference_kernel,
   };
 
   struct audit_result_t {
@@ -299,6 +300,18 @@ namespace cuda_conditional_graph {
     CUgraph graph
   ) noexcept;
 
+  /** Audit a TensorRT inference child and require recursively observable kernel work.
+   *
+   * A non-null capture with no kernel nodes can otherwise be embedded successfully while doing no
+   * inference. The conditional receipt would then authenticate stale output from an earlier
+   * bootstrap. Reuse children intentionally use the generic embeddable audit because a legitimate
+   * reuse body may contain only a copy or memset.
+   */
+  [[nodiscard]] audit_result_t audit_inference_child_graph(
+    const cuda_driver_api &cuda,
+    CUgraph graph
+  ) noexcept;
+
   struct build_desc_t {
     CUcontext context = nullptr;
     CUgraph infer_child = nullptr;
@@ -321,6 +334,8 @@ namespace cuda_conditional_graph {
     context_switch_failed,
     infer_child_rejected,
     optional_infer_child_rejected,
+    infer_child_missing_inference_kernel,
+    optional_infer_child_missing_inference_kernel,
     reuse_child_rejected,
     module_load_failed,
     module_function_missing,

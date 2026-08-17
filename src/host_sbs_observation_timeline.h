@@ -20,16 +20,24 @@ namespace models::host_sbs_observation_timeline {
   };
   inline constexpr std::uint32_t schema = 1u;
   inline constexpr std::uint32_t header_bytes = 24u;
+  // The native whole-clip worker already caps retained timing evidence at 128 MiB. Apply the
+  // same bound at this standalone file boundary so a malformed or sparse sidecar cannot make the
+  // harness allocate an attacker-controlled amount of memory before it validates the header.
+  inline constexpr std::uint64_t max_payload_bytes = 128ull * 1024ull * 1024ull;
+  inline constexpr std::uint64_t max_timestamp_count =
+    max_payload_bytes / sizeof(std::uint64_t);
+  inline constexpr std::size_t io_buffer_bytes = 64u * 1024u;
+  static_assert(io_buffer_bytes % sizeof(std::uint64_t) == 0u);
 
-  inline void append_u32_le(std::vector<std::uint8_t> &bytes, const std::uint32_t value) {
+  inline void write_u32_le(std::uint8_t *bytes, const std::uint32_t value) {
     for (unsigned shift = 0u; shift < 32u; shift += 8u) {
-      bytes.push_back(static_cast<std::uint8_t>(value >> shift));
+      bytes[shift / 8u] = static_cast<std::uint8_t>(value >> shift);
     }
   }
 
-  inline void append_u64_le(std::vector<std::uint8_t> &bytes, const std::uint64_t value) {
+  inline void write_u64_le(std::uint8_t *bytes, const std::uint64_t value) {
     for (unsigned shift = 0u; shift < 64u; shift += 8u) {
-      bytes.push_back(static_cast<std::uint8_t>(value >> shift));
+      bytes[shift / 8u] = static_cast<std::uint8_t>(value >> shift);
     }
   }
 
@@ -66,26 +74,44 @@ namespace models::host_sbs_observation_timeline {
     const std::span<const std::uint64_t> timestamps,
     std::string &error
   ) {
+    error.clear();
     if (!valid_timestamps(timestamps) ||
-        timestamps.size() >
-          (std::numeric_limits<std::size_t>::max() - header_bytes) / sizeof(std::uint64_t)) {
+        timestamps.size() > max_timestamp_count) {
       error = "observation timeline timestamps are empty, zero, regressed, or too large";
       return false;
     }
-    std::vector<std::uint8_t> bytes;
-    bytes.reserve(header_bytes + timestamps.size() * sizeof(std::uint64_t));
-    bytes.insert(bytes.end(), magic.begin(), magic.end());
-    append_u32_le(bytes, schema);
-    append_u32_le(bytes, header_bytes);
-    append_u64_le(bytes, static_cast<std::uint64_t>(timestamps.size()));
-    for (const auto timestamp : timestamps) {
-      append_u64_le(bytes, timestamp);
-    }
     std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+    if (!stream) {
+      error = "could not open observation timeline for writing";
+      return false;
+    }
+    std::array<std::uint8_t, header_bytes> header {};
+    std::copy(magic.begin(), magic.end(), header.begin());
+    write_u32_le(header.data() + 8u, schema);
+    write_u32_le(header.data() + 12u, header_bytes);
+    write_u64_le(header.data() + 16u, static_cast<std::uint64_t>(timestamps.size()));
     stream.write(
-      reinterpret_cast<const char *>(bytes.data()),
-      static_cast<std::streamsize>(bytes.size())
+      reinterpret_cast<const char *>(header.data()),
+      static_cast<std::streamsize>(header.size())
     );
+    std::array<std::uint8_t, io_buffer_bytes> buffer {};
+    for (std::size_t begin = 0u; begin < timestamps.size() && stream; ) {
+      const std::size_t count = std::min(
+        timestamps.size() - begin,
+        buffer.size() / sizeof(std::uint64_t)
+      );
+      for (std::size_t index = 0u; index < count; ++index) {
+        write_u64_le(
+          buffer.data() + index * sizeof(std::uint64_t),
+          timestamps[begin + index]
+        );
+      }
+      stream.write(
+        reinterpret_cast<const char *>(buffer.data()),
+        static_cast<std::streamsize>(count * sizeof(std::uint64_t))
+      );
+      begin += count;
+    }
     stream.flush();
     if (!stream.good()) {
       error = "could not write observation timeline";
@@ -104,6 +130,8 @@ namespace models::host_sbs_observation_timeline {
     std::vector<std::uint64_t> &timestamps,
     std::string &error
   ) {
+    error.clear();
+    timestamps.clear();
     std::ifstream stream(path, std::ios::binary);
     if (!stream) {
       error = "could not open observation timeline";
@@ -116,36 +144,54 @@ namespace models::host_sbs_observation_timeline {
       return false;
     }
     const auto byte_count = static_cast<std::uint64_t>(end);
-    if (byte_count > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+    const std::uint64_t maximum_file_bytes =
+      header_bytes + max_timestamp_count * sizeof(std::uint64_t);
+    if (byte_count > maximum_file_bytes) {
       error = "observation timeline is too large";
       return false;
     }
     stream.seekg(0, std::ios::beg);
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(byte_count));
+    std::array<std::uint8_t, header_bytes> header {};
     stream.read(
-      reinterpret_cast<char *>(bytes.data()),
-      static_cast<std::streamsize>(bytes.size())
+      reinterpret_cast<char *>(header.data()),
+      static_cast<std::streamsize>(header.size())
     );
-    if (!stream || !std::equal(magic.begin(), magic.end(), bytes.begin()) ||
-        read_u32_le(bytes.data() + 8u) != schema ||
-        read_u32_le(bytes.data() + 12u) != header_bytes) {
+    if (!stream || !std::equal(magic.begin(), magic.end(), header.begin()) ||
+        read_u32_le(header.data() + 8u) != schema ||
+        read_u32_le(header.data() + 12u) != header_bytes) {
       error = "observation timeline header is invalid";
       return false;
     }
-    const auto count = read_u64_le(bytes.data() + 16u);
-    if (count == 0u || count >
-          (std::numeric_limits<std::uint64_t>::max() - header_bytes) /
-            sizeof(std::uint64_t) ||
+    const auto count = read_u64_le(header.data() + 16u);
+    if (count == 0u || count > max_timestamp_count ||
         header_bytes + count * sizeof(std::uint64_t) != byte_count ||
         count > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
       error = "observation timeline length is invalid";
       return false;
     }
     timestamps.resize(static_cast<std::size_t>(count));
-    for (std::size_t index = 0u; index < timestamps.size(); ++index) {
-      timestamps[index] = read_u64_le(
-        bytes.data() + header_bytes + index * sizeof(std::uint64_t)
+    std::array<std::uint8_t, io_buffer_bytes> buffer {};
+    for (std::size_t begin = 0u; begin < timestamps.size(); ) {
+      const std::size_t chunk_count = std::min(
+        timestamps.size() - begin,
+        buffer.size() / sizeof(std::uint64_t)
       );
+      const std::size_t chunk_bytes = chunk_count * sizeof(std::uint64_t);
+      stream.read(
+        reinterpret_cast<char *>(buffer.data()),
+        static_cast<std::streamsize>(chunk_bytes)
+      );
+      if (!stream) {
+        error = "could not read observation timeline payload";
+        timestamps.clear();
+        return false;
+      }
+      for (std::size_t index = 0u; index < chunk_count; ++index) {
+        timestamps[begin + index] = read_u64_le(
+          buffer.data() + index * sizeof(std::uint64_t)
+        );
+      }
+      begin += chunk_count;
     }
     if (!valid_timestamps(timestamps)) {
       error = "observation timeline timestamps are zero or regressed";

@@ -275,12 +275,8 @@ int main(int argc, char *argv[]) {
   // We must create a hidden window to receive shutdown notifications since we load gdi32.dll
   std::promise<HWND> session_monitor_hwnd_promise;
   auto session_monitor_hwnd_future = session_monitor_hwnd_promise.get_future();
-  std::promise<void> session_monitor_join_thread_promise;
-  auto session_monitor_join_thread_future = session_monitor_join_thread_promise.get_future();
 
   std::thread session_monitor_thread([&]() {
-    session_monitor_join_thread_promise.set_value_at_thread_exit();
-
     WNDCLASSA wnd_class {};
     wnd_class.lpszClassName = "SunshineSessionMonitorClass";
     wnd_class.lpfnWndProc = SessionMonitorWindowProc;
@@ -322,24 +318,38 @@ int main(int argc, char *argv[]) {
     }
   });
 
-  auto session_monitor_join_thread_guard = util::fail_guard([&]() {
-    if (session_monitor_hwnd_future.wait_for(1s) == std::future_status::ready) {
-      if (HWND session_monitor_hwnd = session_monitor_hwnd_future.get()) {
-        PostMessage(session_monitor_hwnd, WM_CLOSE, 0, 0);
-      }
+  bool session_monitor_stopped = false;
+  const auto stop_session_monitor = [&]() {
+    if (session_monitor_stopped || !session_monitor_thread.joinable()) {
+      return;
+    }
+    session_monitor_stopped = true;
 
-      if (session_monitor_join_thread_future.wait_for(1s) == std::future_status::ready) {
-        session_monitor_thread.join();
-        return;
-      } else {
-        BOOST_LOG(warning) << "session_monitor_join_thread_future reached timeout";
-      }
-    } else {
-      BOOST_LOG(warning) << "session_monitor_hwnd_future reached timeout";
+    // Every exit after this thread is created has a running task pool. An unexpectedly blocked
+    // window creation/message loop must use the same forced-shutdown policy as GPU teardown; it
+    // may never detach while retaining references to this main-thread state.
+    if (!force_shutdown) {
+      auto task = []() {
+        BOOST_LOG(fatal)
+          << "10 seconds passed stopping the Windows session monitor: Forcing shutdown"sv;
+        logging::log_flush();
+        lifetime::debug_trap();
+      };
+      force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
     }
 
-    session_monitor_thread.detach();
-  });
+    if (session_monitor_hwnd_future.wait_for(1s) != std::future_status::ready) {
+      BOOST_LOG(warning)
+        << "Windows session-monitor window startup exceeded one second; waiting under the "
+           "forced-shutdown watchdog.";
+      session_monitor_hwnd_future.wait();
+    }
+    if (HWND session_monitor_hwnd = session_monitor_hwnd_future.get()) {
+      PostMessage(session_monitor_hwnd, WM_CLOSE, 0, 0);
+    }
+    session_monitor_thread.join();
+  };
+  auto session_monitor_join_thread_guard = util::fail_guard(stop_session_monitor);
 
 #endif
 
@@ -551,6 +561,23 @@ int main(int argc, char *argv[]) {
 #endif
   }
 
+  // Any return after local/streaming video ownership starts must retire tracked estimator and
+  // driver workers before logging, CUDA, TensorRT, or D3D process state is destroyed. Declare this
+  // before the AR guard so reverse destruction stops the presenter first and then drains what its
+  // device teardown enqueued. The explicit normal-shutdown drain below disables this fallback.
+  auto async_teardown_drain_guard = util::fail_guard([&]() {
+    if (!force_shutdown) {
+      auto task = []() {
+        BOOST_LOG(fatal)
+          << "10 seconds passed draining GPU teardown workers: Forcing shutdown"sv;
+        logging::log_flush();
+        lifetime::debug_trap();
+      };
+      force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
+    }
+    video::drain_async_teardown_workers();
+  });
+
 #ifdef _WIN32
   // An approved AR-display hotplug owns a local virtual desktop and local D3D presenter. The guard is
   // created after platform/shader and encoder initialization, and is destroyed before either.
@@ -634,9 +661,33 @@ int main(int argc, char *argv[]) {
   // always restored during an orderly host shutdown.
   stream::session::flush_platform_state();
 
+  // UI/API shutdown does not necessarily pass through the signal handler that arms this policy.
+  // Keep the established delayed debug-trap watchdog alive across local-presenter and driver
+  // teardown, then stop the task pool only after every tracked process owner has retired.
+  if (!force_shutdown) {
+    auto task = []() {
+      BOOST_LOG(fatal) << "10 seconds passed draining GPU teardown workers: Forcing shutdown"sv;
+      logging::log_flush();
+      lifetime::debug_trap();
+    };
+    force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
+  }
+
   // RTSP shutdown above has stopped and joined capture, encode, audio, control, and input. Only
   // now is it safe to undo prep commands, restore HDR, and remove the stream-owned display.
   proc::proc.terminate(false, false);
+
+#ifdef _WIN32
+  // Stop/join the local presenter before draining its estimator build/retire workers.
+  ar_glasses_deinit_guard.reset();
+
+  // The hidden monitor still owns Win32 and logging state. Join it under the live watchdog before
+  // process-wide workers and the task pool that carries the watchdog are drained.
+  stop_session_monitor();
+#endif
+
+  video::drain_async_teardown_workers();
+  async_teardown_drain_guard.disable();
 
   task_pool.stop();
   task_pool.join();

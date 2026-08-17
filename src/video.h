@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <future>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -31,6 +32,12 @@ namespace video {
   constexpr std::size_t ENCODED_FRAME_BUFFER_POOL_LIMIT =
     ENCODED_PACKET_QUEUE_LIMIT + 1;
   constexpr std::size_t ENCODED_FRAME_BUFFER_RETAIN_LIMIT = 16 * 1024 * 1024;
+
+  /** Hand driver-sensitive destruction to the process-lifetime tracked worker service. */
+  void launch_async_teardown_worker(std::packaged_task<void()> task);
+
+  /** Seal and join tracked GPU/driver workers before task-pool and process-global teardown. */
+  void drain_async_teardown_workers() noexcept;
 
   namespace detail {
     using frame_time_point_t = std::chrono::steady_clock::time_point;
@@ -87,6 +94,14 @@ namespace video {
       bool has_retained_source
     ) noexcept {
       return depth_pipeline_ready && has_retained_source;
+    }
+
+    /** A capture reinit wait must yield to either side of its shutdown handoff. */
+    constexpr bool capture_display_release_wait_cancelled(
+      bool capture_queue_running,
+      bool image_queue_running
+    ) noexcept {
+      return !capture_queue_running || !image_queue_running;
     }
 
     struct encode_frame_schedule_t {

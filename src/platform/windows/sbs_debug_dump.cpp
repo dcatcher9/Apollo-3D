@@ -5351,6 +5351,26 @@ namespace platf::sbs_debug {
               "Exact ordinary full-source-U row-majorant field before SLR13; not selected renderer authority.",
             shadow_base_final_sha256
           );
+          artifacts["shadow_base_final_parallax_shape.json"] = artifact_description(
+            true,
+            false,
+            "ordinary post-limiter V2 field contract before SLR13 conditioning",
+            video_region ?
+              "Crop-local dimensions, ROI-local source-U units, finite scalar range, and limiter bounds for the exact Base consumed by SLR13; not renderer authority without depth_input_region.json and current conditioning." :
+              "Dimensions, full-source-U units, finite scalar range, and limiter bounds for the exact Base consumed by SLR13; not selected renderer authority."
+          );
+          artifacts["shadow_base_final_parallax.png"] = artifact_description(
+            true,
+            false,
+            "ordinary post-limiter V2 field preview before SLR13 conditioning",
+            "Finite p2-p98 grayscale preview of the exact pre-SLR13 Base field."
+          );
+          artifacts["shadow_base_final_parallax_heat.png"] = artifact_description(
+            true,
+            false,
+            "ordinary post-limiter V2 field preview before SLR13 conditioning",
+            "Finite p2-p98 jet preview of the exact pre-SLR13 Base field."
+          );
         }
         artifacts["shadow_final_parallax.f32"] = hashed_artifact_description(
           true,

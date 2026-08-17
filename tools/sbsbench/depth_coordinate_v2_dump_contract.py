@@ -2444,6 +2444,32 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         if hashed and not _is_sha256_hex(descriptor.get("sha256")):
             raise ValueError(
                 "dump_manifest.json geometry artifact lacks a valid content sha256")
+    # Schema-36 packages captured before the manifest-completeness fix may already contain these
+    # non-authoritative files without descriptors. Accept their absence for compatibility, but
+    # authenticate the exact role of every descriptor a current writer publishes.
+    optional_base_artifacts = {
+        "shadow_base_final_parallax_shape.json":
+            "ordinary post-limiter V2 field contract before SLR13 conditioning",
+        "shadow_base_final_parallax.png":
+            "ordinary post-limiter V2 field preview before SLR13 conditioning",
+        "shadow_base_final_parallax_heat.png":
+            "ordinary post-limiter V2 field preview before SLR13 conditioning",
+    }
+    if subtitle_live:
+        for name, stage in optional_base_artifacts.items():
+            descriptor = artifacts.get(name)
+            if descriptor is None:
+                continue
+            if (not isinstance(descriptor, dict) or
+                    set(descriptor) != {
+                        "available", "required", "stage", "description"} or
+                    descriptor.get("available") is not active or
+                    descriptor.get("required") is not False or
+                    descriptor.get("stage") != stage or
+                    not isinstance(descriptor.get("description"), str) or
+                    not descriptor["description"]):
+                raise ValueError(
+                    "dump_manifest.json has an invalid optional Base preview contract")
     dimension_names = (
         "shadow_candidate_parallax", "shadow_ownership_refined_parallax",
         "shadow_vertical_majorant",
