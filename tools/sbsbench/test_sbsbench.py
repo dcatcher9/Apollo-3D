@@ -1429,7 +1429,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn(
             'int_between_f(vars, "sbs_3d_max_encode_width", video.sbs.max_encode_width, '
             '{256, 16384})', config)
-        self.assertIn('bool_f(vars, "sbs_3d_cuda_graph", video.sbs.cuda_graph)', config)
+        self.assertNotIn("sbs_3d_cuda_graph", config)
         self.assertNotIn("video.sbs_profiles", config)
         self.assertNotIn("apply_sbs_values", config)
 
@@ -1647,7 +1647,9 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(shader_dir, "depth_valid_history_cs.hlsl"),
                   encoding="utf-8") as fh:
             history = fh.read()
-        self.assertIn("MinMaxEma[0].w < 0.5f", history)
+        self.assertIn(
+            "DepthValidHistoryAdvances(MinMaxEma[0].w, history_state)",
+            history)
         self.assertIn("PreviousModelInput[idx + 2u * plane]", history)
 
     def test_harness_contract_is_v2_only_and_machine_verified(self):
@@ -1663,8 +1665,10 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn('a == "--literal-bestv2"', harness)
         self.assertIn('fs::path(o.out) / "contract.json"', harness)
         self.assertIn(
-            '(direct_parallax_mode ? direct_geometry_contract_schema : 22u)',
-            harness)
+            '(direct_parallax_mode ? direct_geometry_contract_schema : '
+            '(o.device_conditional_replay ? 26u : '
+            '(o.device_conditional_replay_control ? 27u : 22u)))',
+            " ".join(harness.split()))
         self.assertIn('direct_geometry_contract_schema = 25u', harness)
         self.assertIn('direct_geometry_manifest_schema = 6u', harness)
         self.assertIn(
@@ -1763,8 +1767,10 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn('SBS_DIRECT_CANDIDATE_PARALLAX', harness)
         self.assertNotIn('SBS_CANDIDATE_GAP_FILL', harness)
         self.assertIn(
-            '(direct_parallax_mode ? direct_geometry_contract_schema : 22u)',
-            harness)
+            '(direct_parallax_mode ? direct_geometry_contract_schema : '
+            '(o.device_conditional_replay ? 26u : '
+            '(o.device_conditional_replay_control ? 27u : 22u)))',
+            " ".join(harness.split()))
         self.assertIn('{"renderer_uses_order", false}', harness)
         self.assertIn(
             '{"order_role", "diagnostic-semantic-depth-only-v1"}',
@@ -1824,14 +1830,11 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn("extern std::atomic<bool> sbs_debug_dump_pending", dumper)
         self.assertIn("button_request_", dumper)
 
-    def test_shared_eval_controls_read_explicit_top_level_values(self):
+    def test_shared_eval_numeric_controls_read_explicit_top_level_values(self):
         with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
-            fh.write("sbs_3d_cuda_graph = false\n"
-                     "sbs_3d_pop_strength = 1.45\n")
+            fh.write("sbs_3d_pop_strength = 1.45\n")
             path = fh.name
         try:
-            self.assertFalse(run_eval.expected_shared_bool(
-                path, "cuda_graph", True, [], "--cuda-graph"))
             self.assertEqual(run_eval.expected_shared_number(
                 path, "pop_strength", 1.2, [], "--pop-strength"), 1.45)
         finally:

@@ -76,54 +76,87 @@ camera, OCR, and SLR do not advance, and an already-consumed cut pulse cannot be
 real enqueue is forced after 16 skipped deliveries or 250 ms even when the metadata chain remains
 clean; only that successful enqueue establishes the next sequence baseline.
 
-The default-off `APOLLO_SBS_LOW_MOTION_GATE=1` process experiment may create one additional
-non-bit-exact no-observation delivery from an authenticated completed cache when no inference is
-pending. Its conservative accumulated DDup overlap bound must remain at or below 0.25% of the exact
-DAV2 region, its bottom OCR crop must have no desktop damage, and the delivery must occur less than
-50 ms after the last successful enqueue. The comparison baseline does not roll forward on the hold,
-so later damage keeps accumulating until a real observation is admitted. Like exact reuse, the hold
-does not fold temporal EMA, generate cut evidence, confirm a cut, advance camera/OCR/SLR state, or
-reconsume a pulse. Unknown metadata and the independently composited cursor prevent any bit-exact
-claim; every authority or bound failure follows the ordinary observation path.
+The always-on GPU adaptive path may omit up to four complete DAV2 observations for an authenticated
+changed-frame candidate. The host uses only route, identity, cadence and complete retained DDup
+history to classify that frame as GPU-undecided; it does not apply a motion-area or rectangle-shape
+heuristic. A dense GPU comparison against the exact state-1 DAV2 model
+input history then applies finite, global medium/strong, and supported-tile local bounds; there is
+no CutBridge readback or CPU decision. The infer owner is eligible only through frame age `4` and a
+strictly less than `100 ms` source-observation age. The host initial-candidate and opaque-follow-up
+checks share that strict `100 ms` age ceiling.
 
-The always-on GPU adaptive path may omit one complete DAV2/OCR observation for an authenticated
-broad-DDup candidate. The host uses only route, identity, cadence and retained DDup metadata to
-classify that frame as GPU-undecided. A dense GPU comparison against the exact state-1 DAV2 model
-input history then applies finite, medium-change, strong-change and supported-tile local bounds;
-there is no CutBridge readback or CPU decision. The current color may render through the retained V2
-field, but that identity does not advance or restamp CutBridge, normalization, camera, OCR, SLR,
-damage, or reusable lineage.
+Depth and OCR remain independent request domains inside one joined completion. Ordinary current-
+ready OCR work `1`, or ordinary ineligible abstention work `2`, publishes only on infer. Cadence-due
+current-ready OCR work `8` runs on infer or reuse. Cadence-due ineligible work `16` publishes an
+exact-current abstention on either branch and can never authenticate an optional `OOCR` marker. An
+ordinary reuse freezes the complete OCR8/SLR13/conditioned-final tuple along with depth, cut,
+camera, and V2 Base. A due reuse freezes the depth tuple but advances the subtitle observation and
+conditions retained immutable Base. Native USER32 suppression publishes neither OCR nor locator
+state and publishes Base as the atomic final field. The private depth branch still cannot become CPU
+depth cache, damage lineage, or telemetry.
 
-Every GPU-undecided transaction arms an observation barrier regardless of its opaque branch. No
-repeated or distinct approximate hold may follow until a newer authenticated force-infer completion
-has reseeded temporal state. Exact DDup duplicates and the low-motion experiment cannot bypass that
-barrier. Thus a sub-threshold non-exact change can be absent from CutBridge for one delivery only;
-the forced next observation bounds the accepted detection delay and cannot reconsume an old pulse.
+The adaptive depth decision deliberately has no OCR-band, localized subtitle-transition, or
+SLR-state veto. Ordinary work consumes OCR cells only with complete proposal/request/optional-
+receipt proof and otherwise publishes a current abstention on infer; ordinary reuse holds. Due work
+is branch-independent: value `8` consumes current-ready OCR only with the optional receipt, while
+value `16` records the ineligible abstention with the optional handle off. Either due disposition
+then runs the complete conditioner from immutable V2 Base to the atomic final field. A malformed
+force proposal fails depth open to infer without authorizing stale OCR input. A CPU-known force with
+malformed receipt proof publishes an exact-current OCR abstention and complete Base-derived output;
+retained boxes are never relabeled. Invalid opaque receipt evidence instead holds the coherent prior
+tuple. Failure to publish the complete joined tuple is terminal.
+
+Every GPU-undecided transaction arms a depth observation barrier regardless of its opaque branch.
+Exact depth-cache reuse and new CutBridge telemetry cannot bypass that barrier. The barrier may
+admit a fresh same-route DDup-authenticated follow-up bound to the
+immediately preceding opaque transaction; that scalar anchor is not host cache or branch knowledge.
+The device-owned history remains the last actual infer input. It may be older than the immediate
+host anchor, but the cumulative current-to-owner comparison is allowed only through frame age `4`
+and while its source-observation timestamp is strictly less than `100 ms` old. Ordinary reuse
+freezes the subtitle tuple; due reuse publishes current OCR or abstention independently. A sequence
+that genuinely needs DAV2 may keep submitting within the existing bounded route/time authority.
+Expiry, route or
+damage discontinuity, signature drift, or any final
+attribution failure returns to a CPU-known force-infer transaction.
+
+An infer-gated owner record supplies the exact last accepted-infer frame to the next scene seed, so
+the next observation uses C-B after an opaque infer and C-A after an opaque reuse without readback.
+Thus a sub-threshold non-exact change can be absent from CutBridge for at most four deliveries and
+strictly less than `100 ms`; the next frame step or age boundary forces infer and cannot reconsume
+an old pulse. Subtitle observation has the narrower independent bound: every accepted ordinary
+opaque root is conservatively one dirty hold, and two such holds or `33 ms` since the last
+guaranteed observation makes the next accepted root due. An eventual CPU-known force completion
+restores host depth-cache lineage without resetting coherent GPU temporal state.
 Missing detector, conditional-graph, interop, or wrapper authority is terminal and renders flat; it
 never silently submits DAV2 outside the wrapper. The detailed thresholds and ownership contract are
 owned by [Host SBS frame attribution and failure behavior](host-sbs.md#frame-attribution-and-failure-behavior).
 
-An OCR-only DDup proof is different: DAV2 and this complete scene-cut pipeline still execute for a
-new exact frame. When only the bottom detector crop is unchanged, the host may omit OCR preprocess,
-TensorRT, cells, and box resolve, restamp the retained deterministic OCR8 payload to the new frame
-identity, and dispatch SLR12 against this frame's finalized CutBridge and V2 Base field. The new
-identity makes it one distinct locator observation, so a same-frame cut is consumed once and
-current plane/fade/grace behavior matches an ordinary identical detector result. An armed dump,
-WGC, damage uncertainty, or any crop intersection uses ordinary OCR.
+There is no OCR-only DDup retained-box proof. Each accepted root requests ordinary infer-coupled
+subtitle work until the conservative cadence is due. If the due root has current-ready OCR input,
+interop, and a captured child, work `8` runs OCR on either depth branch. If any of that current
+authority is ineligible, work `16` publishes the exact-current abstention on either branch with no
+optional child. Neither path relabels an older OCR8 payload. An armed Dump 3D root remains a complete
+ordinary force-infer observation.
 
 The production subtitle path applies no overlay exclusion to cut evidence or DAV2. Subtitle
 appearance and disappearance remain ordinary scene evidence; the locator consumes the
 already-resolved cut result and can neither suppress nor retroactively change it.
 
-The production detector-only PP-OCRv6/OCR8/SLR12 subtitle path has no private cut classifier. It
-consumes the finalized same-frame CutBridge result only for a distinct observation; redispatching
-the same frame/domain identity cannot apply the cut pulse twice. The conditioner also binds that
+The production detector-only PP-OCRv6/OCR8/SLR13 subtitle path has no private cut classifier. It
+consumes the authenticated durable CutBridge hard-cut epoch; processing the same frame/domain
+identity cannot advance state twice. Ordinary DAV2 reuse dispatches no locator observation. A due
+subtitle observation may publish on reuse, but it sees the retained CutBridge epoch and cannot
+invent or reconsume a raw one-frame pulse: only an authenticated epoch transition consumed by a
+distinct subtitle observation starts SLR cut handling. The saturating maximum epoch is the terminal
+unique-generation lifetime
+for one uninterrupted domain. The conditioner also binds that
 CutBridge resource and copies Base unless the locator scene epoch equals its authenticated hard-cut
 count. A confirmed cut clears pending and death-grace
 state, preserves only current OCR rectangles that still match an old owner, and samples the new
-local supporting plane. Each sampling row is independently reliable only when its generated
-interquartile-range gate passes; one good row is sufficient. With both rows valid and at least one
-coherent, close medians are averaged and separated medians choose the larger-U, nearer support.
+local supporting plane. At the aggregate primary, two complete finite in-container rows use their
+robust medians without an interquartile-range gate: close medians are averaged and separated
+medians choose the larger-U, nearer support. If only one primary row is valid, that row must pass
+the generated IQR gate. Otherwise the same strict two-row coherent fallback policy applies.
 A reliable survivor restarts on the selected plane at half fade strength;
 an unreliable one conditions exact Base. The old full-strength target never crosses the cut.
 Additions or disjoint boxes
@@ -133,12 +166,20 @@ observation. Missing, stale, abstaining, malformed, or mismatched OCR8 evidence 
 valid unchanged domain clears current and pending subtitle authority, starts or advances the
 generated bounded cached-target grace defined by the Host SBS subtitle contract, and copies the
 ordinary post-limit field
-exactly; redispatching the same identity does not age grace twice. Invalid OCR on a hard-cut/reset
+exactly; processing the same identity does not age grace twice. Invalid OCR on a hard-cut/reset
 boundary cannot carry that cache into the new scene. There is no preprocessing exclusion,
 recognizer, subtitle-driven cut veto, or detector-private pause branch. The host's native USER32
 interactive move/size policy may suppress the entire optional OCR/SLR observation while DAV2 and
 this scene-cut pipeline continue normally; because no OCR8 record or locator dispatch is produced,
 that transport-level suppression neither ages grace nor changes cut authority.
+
+The SLR13 same-scene provisional single-line bridge is never cut or reset authority. A hard-cut
+epoch change, input-domain reset, fresh onset, half-faded/transitional owner, unreliable local-plane
+sample, multiline/ribbon stack, or geometry outside its generated one-baseline bounds remains the
+ordinary first pending observation with exact Base. Only a distinct non-cut observation replacing
+a mature full-fade single ordinary owner may render its exact same-frame OCR8 cover provisionally;
+the old durable owner/generation/target/fade remain unchanged and the following distinct
+observation must still confirm the ordinary handoff.
 
 ## Appearance proposals
 
@@ -297,7 +338,7 @@ The committed conformance clips must prove at least these contracts:
 - changing an ROI between Chromium-video and foreground-client authority clears detector lineage
   even when its rectangle and dimensions match;
 - a stable lower OCR line stack acquires only after two compatible observations with distinct exact
-  frame/domain identities; redispatching one record cannot self-confirm;
+  frame/domain identities; processing one record again cannot self-confirm;
 - a hard cut clears pending/grace, preserves only same-frame rectangles that still overlap an old
   owner, then either restarts from a reliable new local-plane sample at half strength or publishes
   exact Base when sampling is unreliable; disjoint or
@@ -348,6 +389,11 @@ Exercise each sequence for at least 20 seconds and finish with five seconds of a
 19. Acquire one line, append a delayed translated line, and remove it again. Verify that the first
     line retains same-frame authority, the appended stack needs two observations, each line remains
     a separate dense rectangle, and empty/missed current OCR returns exact Base immediately.
+20. From a mature full-fade single ordinary owner, replace it with each captured single-line
+    geometry pair. Verify first-observation exact-current provisional conditioning, residual-above-8
+    half fade versus residual-at-or-below-8 full fade, unchanged durable owner/generation/target,
+    ordinary confirmation on the next distinct observation, and exact Base for cut/reset, half-fade,
+    unreliable, malformed, IoU-equality, changed-cover duplicate, and out-of-gate cases.
 
 Repeat representative cases in SDR and HDR and across authenticated landscape, ultrawide, and
 portrait tensor shapes. Record frame identity, all evidence fractions, reason flags, arm/latch
@@ -360,5 +406,6 @@ persistent motion remains observable, ROI-domain transitions cannot compare inco
 pure ROI translation does not reacquire the camera, and diagnostics add no GPU queue stall.
 The subtitle portion additionally requires two distinct exact-frame observations for birth and
 material handoff, static cut/reset recovery on the second observation, cut survival only for
-same-frame rectangles still matching the old owner, exact Base whenever current OCR authority is
-absent, and no geometry synthesized from owner, pending, target, or grace state.
+same-frame rectangles still matching the old owner, exact Base whenever neither normal nor bounded
+exact-current provisional authority exists, and no geometry synthesized from owner, pending,
+target, or grace state.

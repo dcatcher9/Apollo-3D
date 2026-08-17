@@ -36,7 +36,7 @@ LIMITER_Q_SCALE = 1 << LIMITER_Q_FRACTION_BITS
 EXPECTED_TOP_LEVEL_KEYS = {
     "schema", "vector_width", "calibrated_defaults", "constant_buffer", "frame_stats",
     "shadow_state", "model_calibrations", "capture_provenance", "shader_implementation",
-    "subtitle_ocr",
+    "subtitle_ocr", "final_parallax",
 }
 
 
@@ -76,8 +76,21 @@ EXPECTED_SHADER_IMPLEMENTATION_KEYS = {
 EXPECTED_SHADER_SPEC_KEYS = {
     "source_file", "source_entrypoint", "source_target",
 }
+CANONICAL_FINAL_PARALLAX = {
+    "schema": 2,
+    "authority": "complete-atomic-subtitle-conditioned-r32f-live-render-authority",
+    "publication_policy": (
+        "authenticated-infer-or-cpu-known-publication-or-authenticated-cadence-due-"
+        "subtitle-publication-direct-render"),
+    "reuse_policy": (
+        "ordinary-reuse-holds-complete-depth-ocr-slr-final-tuple-byte-for-byte;"
+        "authenticated-cadence-due-reuse-holds-depth-and-publishes-current-ocr-or-"
+        "abstention-slr-final-tuple-against-retained-base"),
+    "invalid_policy": "fail-closed-flat",
+    "current_rgb_policy": "always-current-never-retained",
+}
 CANONICAL_SUBTITLE_OCR = {
-    "schema": 12,
+    "schema": 13,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
     "artifact_onnx_sha256": (
@@ -119,6 +132,12 @@ CANONICAL_SUBTITLE_OCR = {
         "locator_min_height_cells": 6,
         "locator_min_aspect_numerator": 2,
         "locator_min_aspect_denominator": 1,
+        "locator_provisional_min_vertical_overlap_numerator": 3,
+        "locator_provisional_min_vertical_overlap_denominator": 4,
+        "locator_provisional_max_height_ratio": 2,
+        "locator_provisional_max_center_y_delta_shorter_height": 1,
+        "locator_corner_edge_divisor": 32,
+        "locator_corner_bottom_rows": 16,
         "locator_match_iou_threshold": 0.6,
         "locator_death_grace_observations": 6,
         "locator_target_horizontal_fallback_max_radius_steps": 2,
@@ -159,8 +178,8 @@ CANONICAL_SUBTITLE_OCR = {
         "final_box_capacity": 8,
     },
     "locator_state": {
-        "schema": 12,
-        "tag": 0x32314C53,
+        "schema": 13,
+        "tag": 0x33314C53,
         "word_count": 80,
         "header_word_count": 32,
         "rectangle_capacity": 4,
@@ -172,12 +191,14 @@ CANONICAL_SUBTITLE_OCR = {
         "pending_kind_shift": 4,
         "current_kind_shift": 8,
         "kind_mask": 15,
+        "provisional_current_flag": 1 << 4,
+        "provisional_target_word": 29,
+        "provisional_fade_word": 30,
     },
     "condition_params": {
-        "schema": 2,
-        "tag": 0x32504353,
-        "word_count": 8,
-        "dispatch_arg_word_count": 3,
+        "schema": 3,
+        "tag": 0x33504353,
+        "word_count": 6,
     },
 }
 EXPECTED_CONSTANT_FIELD_NAMES = (
@@ -245,7 +266,6 @@ PARALLAX_V2_SHADER_SPECS = (
     ("host_sbs_ocr_boxes_cs.hlsl", "resolve_main", "cs_5_0"),
     ("host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"),
     ("host_sbs_subtitle_locator_cs.hlsl", "condition_prepare_main", "cs_5_0"),
-    ("host_sbs_subtitle_locator_cs.hlsl", "condition_in_place_main", "cs_5_0"),
     ("host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"),
 )
 PARALLAX_V2_LIVE_RENDERER_SHADER_SPECS = (
@@ -469,7 +489,10 @@ def validate_contract(
 
     if contract.get("subtitle_ocr") != CANONICAL_SUBTITLE_OCR:
         raise ValueError(
-            "subtitle_ocr must exactly match the authenticated PP-OCRv6/OCR8/SLR12 contract")
+            "subtitle_ocr must exactly match the authenticated PP-OCRv6/OCR8/SLR13 contract")
+    if contract.get("final_parallax") != CANONICAL_FINAL_PARALLAX:
+        raise ValueError(
+            "final_parallax must exactly match the authenticated direct-render contract")
 
     shader_implementation = contract.get("shader_implementation")
     if (not isinstance(shader_implementation, dict) or
@@ -780,6 +803,7 @@ def render_cpp(contract: dict[str, Any]) -> str:
     calibrations = contract["model_calibrations"]
     shader_implementation = contract["shader_implementation"]
     subtitle_ocr = contract["subtitle_ocr"]
+    final_parallax = contract["final_parallax"]
     ocr_input = subtitle_ocr["input_tensor"]
     ocr_output = subtitle_ocr["output_tensor"]
     field_policy = subtitle_ocr["field_policy"]
@@ -819,6 +843,18 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"{json.dumps(contract['capture_provenance']['manifest_key'])};",
         f"  inline constexpr std::string_view capture_provenance_binding = "
         f"{json.dumps(contract['capture_provenance']['binding'])};",
+        f"  inline constexpr std::uint32_t final_parallax_contract_schema = "
+        f"{final_parallax['schema']}u;",
+        f"  inline constexpr std::string_view final_parallax_authority = "
+        f"{json.dumps(final_parallax['authority'])};",
+        f"  inline constexpr std::string_view final_parallax_publication_policy = "
+        f"{json.dumps(final_parallax['publication_policy'])};",
+        f"  inline constexpr std::string_view final_parallax_reuse_policy = "
+        f"{json.dumps(final_parallax['reuse_policy'])};",
+        f"  inline constexpr std::string_view final_parallax_invalid_policy = "
+        f"{json.dumps(final_parallax['invalid_policy'])};",
+        f"  inline constexpr std::string_view final_parallax_current_rgb_policy = "
+        f"{json.dumps(final_parallax['current_rgb_policy'])};",
         f"  inline constexpr std::uint32_t subtitle_ocr_contract_schema = "
         f"{subtitle_ocr['schema']}u;",
         f"  inline constexpr std::string_view subtitle_ocr_model_name = "
@@ -905,6 +941,21 @@ def render_cpp(contract: dict[str, Any]) -> str:
         f"{field_policy['locator_min_aspect_numerator']}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_min_aspect_denominator = "
         f"{field_policy['locator_min_aspect_denominator']}u;",
+        "  inline constexpr std::uint32_t "
+        "subtitle_locator_provisional_min_vertical_overlap_numerator = "
+        f"{field_policy['locator_provisional_min_vertical_overlap_numerator']}u;",
+        "  inline constexpr std::uint32_t "
+        "subtitle_locator_provisional_min_vertical_overlap_denominator = "
+        f"{field_policy['locator_provisional_min_vertical_overlap_denominator']}u;",
+        "  inline constexpr std::uint32_t subtitle_locator_provisional_max_height_ratio = "
+        f"{field_policy['locator_provisional_max_height_ratio']}u;",
+        "  inline constexpr std::uint32_t "
+        "subtitle_locator_provisional_max_center_y_delta_shorter_height = "
+        f"{field_policy['locator_provisional_max_center_y_delta_shorter_height']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_corner_edge_divisor = "
+        f"{field_policy['locator_corner_edge_divisor']}u;",
+        f"  inline constexpr std::uint32_t subtitle_locator_corner_bottom_rows = "
+        f"{field_policy['locator_corner_bottom_rows']}u;",
         f"  inline constexpr float subtitle_locator_match_iou_threshold = "
         f"{_float_literal(field_policy['locator_match_iou_threshold'])};",
         f"  inline constexpr std::uint32_t subtitle_locator_death_grace_observations = "
@@ -965,14 +1016,18 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "  inline constexpr std::uint32_t subtitle_locator_current_kind_shift = "
         f"{locator_state['current_kind_shift']}u;",
         f"  inline constexpr std::uint32_t subtitle_locator_kind_mask = {locator_state['kind_mask']}u;",
+        "  inline constexpr std::uint32_t subtitle_locator_provisional_current_flag = "
+        f"{locator_state['provisional_current_flag']}u;",
+        "  inline constexpr std::uint32_t subtitle_locator_provisional_target_word = "
+        f"{locator_state['provisional_target_word']}u;",
+        "  inline constexpr std::uint32_t subtitle_locator_provisional_fade_word = "
+        f"{locator_state['provisional_fade_word']}u;",
         f"  inline constexpr std::uint32_t subtitle_condition_param_schema = "
         f"{condition_params['schema']}u;",
         f"  inline constexpr std::uint32_t subtitle_condition_param_tag = "
         f"0x{condition_params['tag']:08X}u;",
         f"  inline constexpr std::uint32_t subtitle_condition_param_word_count = "
         f"{condition_params['word_count']}u;",
-        f"  inline constexpr std::uint32_t subtitle_condition_dispatch_arg_word_count = "
-        f"{condition_params['dispatch_arg_word_count']}u;",
         "  static_assert(subtitle_ocr_input_n == 1u && subtitle_ocr_input_c == 3u);",
         "  static_assert(subtitle_ocr_output_n == 1u && subtitle_ocr_output_c == 1u);",
         "  static_assert(subtitle_ocr_active_probability_threshold > 0.0f &&",
@@ -984,6 +1039,13 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "  static_assert(subtitle_locator_min_height_cells > 0u);",
         "  static_assert(subtitle_locator_min_aspect_numerator > 0u);",
         "  static_assert(subtitle_locator_min_aspect_denominator > 0u);",
+        "  static_assert(subtitle_locator_provisional_min_vertical_overlap_numerator > 0u);",
+        "  static_assert(subtitle_locator_provisional_min_vertical_overlap_denominator >= "
+        "                subtitle_locator_provisional_min_vertical_overlap_numerator);",
+        "  static_assert(subtitle_locator_provisional_max_height_ratio >= 1u);",
+        "  static_assert(subtitle_locator_provisional_max_center_y_delta_shorter_height >= 1u);",
+        "  static_assert(subtitle_locator_corner_edge_divisor > 1u);",
+        "  static_assert(subtitle_locator_corner_bottom_rows > 0u);",
         "  static_assert(subtitle_locator_match_iou_threshold > 0.0f &&",
         "                subtitle_locator_match_iou_threshold <= 1.0f);",
         "  static_assert(subtitle_locator_death_grace_observations > 0u);",
@@ -1016,8 +1078,7 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "                subtitle_locator_rectangle_capacity * 4u);",
         "  static_assert(subtitle_target_horizontal_fallback_max_radius_steps == 2u);",
         "  static_assert(subtitle_target_horizontal_step_denominator == 16u);",
-        "  static_assert(subtitle_condition_param_word_count == 8u);",
-        "  static_assert(subtitle_condition_dispatch_arg_word_count == 3u);",
+        "  static_assert(subtitle_condition_param_word_count == 6u);",
         f"  inline constexpr std::uint32_t shader_source_closure_schema = "
         f"{shader_implementation['source_closure_schema']}u;",
         f"  inline constexpr std::uint32_t shader_source_compile_flags = "
@@ -1566,6 +1627,18 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"{field_policy['locator_min_aspect_numerator']}u",
         f"#define V2_SUBTITLE_LOCATOR_MIN_ASPECT_DENOMINATOR "
         f"{field_policy['locator_min_aspect_denominator']}u",
+        "#define V2_SUBTITLE_LOCATOR_PROVISIONAL_MIN_VERTICAL_OVERLAP_NUMERATOR "
+        f"{field_policy['locator_provisional_min_vertical_overlap_numerator']}u",
+        "#define V2_SUBTITLE_LOCATOR_PROVISIONAL_MIN_VERTICAL_OVERLAP_DENOMINATOR "
+        f"{field_policy['locator_provisional_min_vertical_overlap_denominator']}u",
+        "#define V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_HEIGHT_RATIO "
+        f"{field_policy['locator_provisional_max_height_ratio']}u",
+        "#define V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_CENTER_Y_DELTA_SHORTER_HEIGHT "
+        f"{field_policy['locator_provisional_max_center_y_delta_shorter_height']}u",
+        f"#define V2_SUBTITLE_LOCATOR_CORNER_EDGE_DIVISOR "
+        f"{field_policy['locator_corner_edge_divisor']}u",
+        f"#define V2_SUBTITLE_LOCATOR_CORNER_BOTTOM_ROWS "
+        f"{field_policy['locator_corner_bottom_rows']}u",
         f"#define V2_SUBTITLE_LOCATOR_MATCH_IOU_THRESHOLD "
         f"{_float_literal(field_policy['locator_match_iou_threshold'])}",
         f"#define V2_SUBTITLE_LOCATOR_DEATH_GRACE_OBSERVATIONS "
@@ -1601,11 +1674,15 @@ def render_hlsl(contract: dict[str, Any]) -> str:
         f"#define V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT {locator_state['pending_kind_shift']}u",
         f"#define V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT {locator_state['current_kind_shift']}u",
         f"#define V2_SUBTITLE_LOCATOR_KIND_MASK {locator_state['kind_mask']}u",
+        "#define V2_SUBTITLE_LOCATOR_PROVISIONAL_CURRENT_FLAG "
+        f"{locator_state['provisional_current_flag']}u",
+        "#define V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD "
+        f"{locator_state['provisional_target_word']}u",
+        "#define V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD "
+        f"{locator_state['provisional_fade_word']}u",
         f"#define V2_SUBTITLE_CONDITION_PARAM_SCHEMA {condition_params['schema']}u",
         f"#define V2_SUBTITLE_CONDITION_PARAM_TAG 0x{condition_params['tag']:08X}u",
         f"#define V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT {condition_params['word_count']}u",
-        f"#define V2_SUBTITLE_CONDITION_DISPATCH_ARG_WORD_COUNT "
-        f"{condition_params['dispatch_arg_word_count']}u",
         "#define V2_OCR_SHADER_CONTRACT_GENERATED 1u",
         f"#define V2_DIRECT_CONTAINER_LIMIT "
         f"{_float_literal(defaults['direct_container_limit'])}",
@@ -1711,7 +1788,7 @@ def render_hlsl(contract: dict[str, Any]) -> str:
 
 
 def render_hlsl_ocr_assertions() -> str:
-    """Render the shared compile-time OCR8/SLR12 consumer invariants."""
+    """Render the shared compile-time OCR8/SLR13 consumer invariants."""
 
     return "\n".join([
         "// Generated by tools/sbsbench/generate_depth_coordinate_v2_contract.py.",
@@ -1722,13 +1799,19 @@ def render_hlsl_ocr_assertions() -> str:
         '#include "include/depth_coordinate_v2_contract.generated.hlsl"',
         "",
         "#if !defined(V2_OCR_SHADER_CONTRACT_GENERATED)",
-        '#error "Complete generated V2 OCR8/SLR12 contract is required"',
+        '#error "Complete generated V2 OCR8/SLR13 contract is required"',
         "#endif",
         "",
         "#if !defined(V2_SUBTITLE_TARGET_MAX_ROW_IQR_BINOCULAR_SOURCE_PIXELS) || \\",
         "    !defined(V2_SUBTITLE_TARGET_MAX_ROW_MEDIAN_DELTA_BINOCULAR_SOURCE_PIXELS) || \\",
         "    !defined(V2_SUBTITLE_TARGET_MAX_RESIDUAL_BINOCULAR_SOURCE_PIXELS) || \\",
         "    !defined(V2_SUBTITLE_TARGET_MAX_UNRELIABLE_HOLDS) || \\",
+        "    !defined(V2_SUBTITLE_LOCATOR_CORNER_EDGE_DIVISOR) || \\",
+        "    !defined(V2_SUBTITLE_LOCATOR_CORNER_BOTTOM_ROWS) || \\",
+        "    !defined(V2_SUBTITLE_LOCATOR_PROVISIONAL_MIN_VERTICAL_OVERLAP_NUMERATOR) || \\",
+        "    !defined(V2_SUBTITLE_LOCATOR_PROVISIONAL_MIN_VERTICAL_OVERLAP_DENOMINATOR) || \\",
+        "    !defined(V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_HEIGHT_RATIO) || \\",
+        "    !defined(V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_CENTER_Y_DELTA_SHORTER_HEIGHT) || \\",
         "    !defined(V2_SUBTITLE_TARGET_DEADBAND_BINOCULAR_SOURCE_PIXELS) || \\",
         "    !defined(V2_SUBTITLE_TARGET_EMA_ALPHA) || \\",
         "    !defined(V2_SUBTITLE_TARGET_MAX_SLEW_BINOCULAR_SOURCE_PIXELS)",
@@ -1757,6 +1840,13 @@ def render_hlsl_ocr_assertions() -> str:
         "    V2_SUBTITLE_LOCATOR_MIN_HEIGHT_CELLS == 0u || \\",
         "    V2_SUBTITLE_LOCATOR_MIN_ASPECT_NUMERATOR == 0u || \\",
         "    V2_SUBTITLE_LOCATOR_MIN_ASPECT_DENOMINATOR == 0u || \\",
+        "    V2_SUBTITLE_LOCATOR_CORNER_EDGE_DIVISOR <= 1u || \\",
+        "    V2_SUBTITLE_LOCATOR_CORNER_BOTTOM_ROWS == 0u || \\",
+        "    V2_SUBTITLE_LOCATOR_PROVISIONAL_MIN_VERTICAL_OVERLAP_NUMERATOR == 0u || \\",
+        "    V2_SUBTITLE_LOCATOR_PROVISIONAL_MIN_VERTICAL_OVERLAP_DENOMINATOR < \\",
+        "        V2_SUBTITLE_LOCATOR_PROVISIONAL_MIN_VERTICAL_OVERLAP_NUMERATOR || \\",
+        "    V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_HEIGHT_RATIO == 0u || \\",
+        "    V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_CENTER_Y_DELTA_SHORTER_HEIGHT == 0u || \\",
         "    V2_SUBTITLE_LOCATOR_DEATH_GRACE_OBSERVATIONS == 0u || \\",
         "    V2_SUBTITLE_TARGET_MAX_UNRELIABLE_HOLDS == 0u || \\",
         "    V2_OCR_RECORD_HEADER_WORD_COUNT != V2_OCR_RAW_BOX_OFFSET || \\",
@@ -1777,11 +1867,13 @@ def render_hlsl_ocr_assertions() -> str:
         "    V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT != 4u || \\",
         "    V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT != 8u || \\",
         "    V2_SUBTITLE_LOCATOR_KIND_MASK != 15u || \\",
+        "    V2_SUBTITLE_LOCATOR_PROVISIONAL_CURRENT_FLAG != 16u || \\",
+        "    V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD != 29u || \\",
+        "    V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD != 30u || \\",
         "    V2_SUBTITLE_TARGET_HORIZONTAL_FALLBACK_MAX_RADIUS_STEPS != 2u || \\",
         "    V2_SUBTITLE_TARGET_HORIZONTAL_STEP_DENOMINATOR != 16u || \\",
-        "    V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT != 8u || \\",
-        "    V2_SUBTITLE_CONDITION_DISPATCH_ARG_WORD_COUNT != 3u",
-        '#error "Generated V2 OCR8/SLR12 contract invariants are inconsistent"',
+        "    V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT != 6u",
+        '#error "Generated V2 OCR8/SLR13 contract invariants are inconsistent"',
         "#endif",
         "",
         "#endif",

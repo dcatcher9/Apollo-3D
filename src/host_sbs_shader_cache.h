@@ -67,9 +67,6 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec host_sbs_subtitle_condition_prepare {
     "host_sbs_subtitle_locator_cs.hlsl", "condition_prepare_main", "cs_5_0"
   };
-  inline constexpr shader_spec host_sbs_subtitle_condition_in_place {
-    "host_sbs_subtitle_locator_cs.hlsl", "condition_in_place_main", "cs_5_0"
-  };
   inline constexpr shader_spec host_sbs_subtitle_condition {
     "host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"
   };
@@ -82,11 +79,23 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec host_sbs_near_identical_history_owner {
     "host_sbs_near_identical_detector_cs.hlsl", "history_owner_main", "cs_5_0"
   };
+  inline constexpr shader_spec host_sbs_near_identical_scene_seed {
+    "host_sbs_near_identical_detector_cs.hlsl", "scene_seed_main", "cs_5_0"
+  };
   inline constexpr shader_spec host_sbs_near_identical_postprocess_args {
     "host_sbs_near_identical_detector_cs.hlsl", "postprocess_args_main", "cs_5_0"
   };
+  inline constexpr shader_spec host_sbs_near_identical_optional_postprocess_args {
+    "host_sbs_near_identical_detector_cs.hlsl", "optional_postprocess_args_main", "cs_5_0"
+  };
+  inline constexpr shader_spec host_sbs_near_identical_ocr_abstain {
+    "host_sbs_near_identical_detector_cs.hlsl", "ocr_abstain_main", "cs_5_0"
+  };
   inline constexpr shader_spec host_sbs_near_identical_reuse_depth {
     "host_sbs_near_identical_detector_cs.hlsl", "reuse_depth_main", "cs_5_0"
+  };
+  inline constexpr shader_spec host_sbs_gpu_trace {
+    "host_sbs_gpu_trace_cs.hlsl", "main", "cs_5_0"
   };
   inline constexpr shader_spec parallax_v2_live_renderer {
     "sbs_reprojection_v2_live_ps.hlsl", "main_ps", "ps_5_0"
@@ -107,13 +116,15 @@ namespace models::host_sbs_shader_cache {
     "sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"
   };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
-    "db700bf9767ecf18ccc3d9fb09eb5775a293e5b3383a9e96e40eaa263203f08e";
+    "fce03acecf9a3fbe7bf237321bb4539c6a18b9fc4e215cfa337ac1221106ed12";
   inline constexpr std::string_view parallax_v2_diagnostic_source_closure_sha256 =
-    "f0e89bedef48bc996c1c31697edd880ea107d2590fd0f73b511c87f5219bec5f";
+    "31a8347f2a6b7cf46d09fb27fa8f14042f805f98c3c86e3bee4281a38eb10543";
   inline constexpr std::string_view sbs_flat_fallback_source_closure_sha256 =
     "7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4";
   inline constexpr std::string_view near_identical_detector_source_closure_sha256 =
-    "75d57d1cb5e02d27e8d864ff66df1c9d0bd7608d7bd161d9e3d11e223fdc6188";
+    "8f6d770709c716abd2db48ec3193f00bd8ffbc1c94b31667227f9ae55c84c6d7";
+  inline constexpr std::string_view gpu_trace_source_closure_sha256 =
+    "cbb7618fe8332e444cc106b6d1037a00d9bca126e0885f92651cacebb7e4b33f";
 
   // Identity-only minimal closure used to match the model/preprocess calibration. Production
   // bytecode is never compiled from this smaller snapshot: all rgb_to_nchw entry points are
@@ -126,7 +137,7 @@ namespace models::host_sbs_shader_cache {
 
   // Complete production V2 producer set. The normalized depth is private scene-cut evidence; the
   // retired subject shaping, hard-mask sanitizer/exclusion, and adaptive-pop paths remain absent.
-  // The OCR8 producer and compact SLR12 post-limit conditioner share this authenticated snapshot,
+  // The OCR8 producer and compact SLR13 post-limit conditioner share this authenticated snapshot,
   // so no analysis or geometry pass can be sampled from a weaker closure.
   enum class producer_shader_e : std::uint8_t {
     rgb_to_nchw,
@@ -151,7 +162,6 @@ namespace models::host_sbs_shader_cache {
     host_sbs_ocr_resolve,
     host_sbs_subtitle_locator_resolve,
     host_sbs_subtitle_condition_prepare,
-    host_sbs_subtitle_condition_in_place,
     host_sbs_subtitle_condition,
   };
 
@@ -214,10 +224,6 @@ namespace models::host_sbs_shader_cache {
       host_sbs_subtitle_condition_prepare
     },
     producer_shader_binding {
-      producer_shader_e::host_sbs_subtitle_condition_in_place,
-      host_sbs_subtitle_condition_in_place
-    },
-    producer_shader_binding {
       producer_shader_e::host_sbs_subtitle_condition, host_sbs_subtitle_condition
     },
   };
@@ -254,8 +260,18 @@ namespace models::host_sbs_shader_cache {
     host_sbs_near_identical_compare,
     host_sbs_near_identical_resolve,
     host_sbs_near_identical_history_owner,
+    host_sbs_near_identical_scene_seed,
     host_sbs_near_identical_postprocess_args,
+    host_sbs_near_identical_optional_postprocess_args,
+    host_sbs_near_identical_ocr_abstain,
     host_sbs_near_identical_reuse_depth,
+  };
+
+  // Optional diagnostic-only completion trace. It is intentionally absent from every pinned
+  // rendering/arbitration closure and from prewarm: source/resource failure only omits Dump 3D
+  // trace evidence and can never reject the production Host SBS path.
+  inline constexpr std::array gpu_trace_specs {
+    host_sbs_gpu_trace,
   };
 
   inline constexpr std::array parallax_v2_live_renderer_specs {

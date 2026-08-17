@@ -16,6 +16,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // local includes
@@ -26,6 +27,7 @@
 namespace models {
   enum class input_color_space : std::uint32_t;
   struct parallax_v2_shader_provenance_t;
+  struct host_sbs_gpu_trace_provenance_t;
   struct raw_model_provenance_t;
 }
 
@@ -51,7 +53,7 @@ namespace platf::sbs_debug {
       bool poll_is_empty
     ) noexcept;
 
-    /** Pure exact-frame OCR8/SLR12 validation used before diagnostic publication. */
+    /** Pure exact-frame OCR8/SLR13 validation used before diagnostic publication. */
     bool subtitle_records_match_frame(
       const std::vector<std::uint8_t> &ocr,
       const std::vector<std::uint8_t> &locator,
@@ -59,8 +61,34 @@ namespace platf::sbs_debug {
       std::uint32_t confirmed_cut_count
     );
 
+    /** Accept exact-current evidence (including cadence-due reuse), or an authenticated held tuple. */
+    bool subtitle_records_match_completion(
+      const std::vector<std::uint8_t> &ocr,
+      const std::vector<std::uint8_t> &locator,
+      const std::vector<std::uint8_t> &ring,
+      const frame &completed,
+      std::uint32_t confirmed_cut_count
+    );
+
     bool subtitle_ocr_record_is_canonical_for_frame(
       const std::vector<std::uint8_t> &ocr,
+      const frame &completed
+    );
+
+    /** Validate one optional diagnostic completion ring and require the dump's matched root. */
+    bool gpu_trace_ring_is_canonical(
+      const std::vector<std::uint8_t> &ring,
+      const frame &completed
+    );
+
+    /** Serialize the exact GPU-trace wire contract used by Dump 3D diagnostics. */
+    std::string gpu_trace_contract_json(
+      const models::host_sbs_gpu_trace_provenance_t &provenance
+    );
+
+    /** Decode one already-authenticated GPU trace with the current diagnostic semantics. */
+    std::string gpu_trace_decoded_json(
+      const std::vector<std::uint8_t> &ring,
       const frame &completed
     );
   }
@@ -78,10 +106,11 @@ namespace platf::sbs_debug {
    * candidate first produces shadow_ownership_refined_parallax from the full-resolution source
    * contour, then shadow_vertical_majorant (the exact upper-envelope diagnostic) and
    * shadow_vertical_conditioned (the fixed 75/25 vertical share), then the row majorant produces
-   * shadow_base_final_parallax. When OCR8 and SLR12 are active, the compact exact-frame record and
+   * shadow_base_final_parallax. When OCR8 and SLR13 are active, the compact publication record and
    * locator state condition that Base into shadow_final_parallax; an empty current-authority block
-   * copies Base bit for bit. In ROI mode that final field remains crop-local and is not by itself a
-   * full-source position field. shadow_coordinate is allocated and written only for this explicit
+   * copies Base bit for bit. That complete atomic field is sampled directly by the renderer. In
+   * ROI mode it remains crop-local and is not by itself a full-source position field.
+   * shadow_coordinate is allocated and written only for this explicit
    * dump; it is never a live resource. V2 supplies an exact fixed-point inverse warp_map when its
    * matching dump-only
    * shader is available. V2 has no internal owner/fill mask; warp_mask attributes only inverse
@@ -109,11 +138,14 @@ namespace platf::sbs_debug {
     ID3D11ShaderResourceView *shadow_final_parallax = nullptr;
     ID3D11ShaderResourceView *ocr_box_record = nullptr;
     ID3D11ShaderResourceView *subtitle_locator_state = nullptr;
+    ID3D11ShaderResourceView *gpu_trace_ring = nullptr;
     ID3D11ShaderResourceView *shadow_state = nullptr;
     ID3D11ShaderResourceView *shadow_frame_stats = nullptr;
     std::shared_ptr<const models::raw_model_provenance_t> raw_model_provenance;
     std::shared_ptr<const models::parallax_v2_shader_provenance_t>
       parallax_v2_shader_provenance;
+    std::shared_ptr<const models::host_sbs_gpu_trace_provenance_t>
+      gpu_trace_provenance;
     int model_width = 0;
     int model_height = 0;
     int raw_width = 0;
@@ -125,6 +157,10 @@ namespace platf::sbs_debug {
     std::optional<models::depth_video_region_plan_t> depth_video_plan;
     /** True when this completion was the first frame after its analysis domain was rearmed. */
     bool input_domain_reset = false;
+    /** True when the completed depth branch remains device-owned and needs the trace for proof. */
+    bool gpu_undecided_completion = false;
+    /** True when native interaction published Base as target without advancing OCR8/SLR13. */
+    bool subtitle_work_suppressed = false;
     /** Optional matched-window provenance stamped onto matched_frame_id. */
     std::optional<window_region_snapshot> window_region;
     std::string window_region_observer_status = "not-observed";

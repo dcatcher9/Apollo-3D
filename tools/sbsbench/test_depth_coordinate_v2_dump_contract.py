@@ -231,7 +231,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "shadow_vertical_conditioned_heat.png":
                 ("parallax-v2 orientation-selective vertical conditioner preview", False),
             "shadow_final_parallax.f32":
-                ("parallax-v2 final conditioned displacement field", True),
+                ("parallax-v2 atomic final displacement field", True),
         }
         subtitle_none = {
             "mode": "none",
@@ -245,10 +245,11 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "capture_status": "complete",
             "published_atomically": True,
             "matched_frame_id": 41,
+            "color_mode": "srgb",
             "subtitle_conditioning": subtitle_none,
             "renderer": {
                 "authority":
-                    "authenticated-parallax-v2-orientation-selective-conditioned-field",
+                    "authenticated-parallax-v2-atomic-final-field",
                 "parallax_v2_render_requested": True,
                 "parallax_v2_render_selected": True,
                 "mapping_artifacts_match_selected_renderer": False,
@@ -268,8 +269,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     "candidate and feeds the row majorant",
                 "parallax_v2_conditioner_role":
                     "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= "
-                    "max_horizontal_slope and vertical shear <= max_vertical_shear; q may "
-                    "raise or lower candidate and is the live position authority",
+                    "max_horizontal_slope and vertical shear <= max_vertical_shear publishes "
+                    "shadow_final_parallax atomically as direct live authority",
                 "parallax_v2_inverse":
                     "11-step contractive fixed point; no forward-warp owner/visibility splat and no synthetic fill",
                 "collar_defocus": {
@@ -380,6 +381,25 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "geometry_authority": False,
                 "renderer_authority": False,
             },
+            "gpu_trace": {
+                "available": False,
+                "required": False,
+                "rendering_authority": False,
+                "raw_artifact": None,
+                "decoded_artifact": None,
+                "contract_artifact": None,
+            },
+            "final_parallax": {
+                "contract_schema": coordinate.FINAL_PARALLAX.schema,
+                "artifact": "shadow_final_parallax.f32",
+                "warp_artifact": "warp_depth.f32",
+                "authority": coordinate.FINAL_PARALLAX.authority,
+                "publication_policy": coordinate.FINAL_PARALLAX.publication_policy,
+                "reuse_policy": coordinate.FINAL_PARALLAX.reuse_policy,
+                "invalid_policy": coordinate.FINAL_PARALLAX.invalid_policy,
+                "current_rgb_policy": coordinate.FINAL_PARALLAX.current_rgb_policy,
+                "warp_relation": "bit-identical",
+            },
         }
         self.manifest["artifacts"].update({
             "subtitle_conditioning.json": {
@@ -425,6 +445,24 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "required": False,
                 "stage": "matched-frame window region provenance",
                 "description": "diagnostic test artifact",
+            },
+            "gpu_trace_ring.u32": {
+                "available": False,
+                "required": False,
+                "stage": "diagnostic GPU accepted-root completion history",
+                "description": "optional diagnostic test artifact",
+            },
+            "gpu_trace.json": {
+                "available": False,
+                "required": False,
+                "stage": "decoded diagnostic GPU history",
+                "description": "optional diagnostic test artifact",
+            },
+            "gpu_trace_contract.json": {
+                "available": False,
+                "required": False,
+                "stage": "diagnostic GPU trace wire contract",
+                "description": "optional diagnostic test artifact",
             },
         })
         self.depth_input_region = {
@@ -579,9 +617,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 dump_contract.validate_v2_dump_manifest_document(changed)
 
     def test_current_subtitle_record_and_state_abi_partition_exact_word_counts(self):
-        self.assertEqual(dump_contract.DUMP_MANIFEST_SCHEMA, 32)
+        self.assertEqual(dump_contract.DUMP_MANIFEST_SCHEMA, 36)
         self.assertEqual(dump_contract.SUBTITLE_OCR_RECORD_SCHEMA, 3)
-        self.assertEqual(dump_contract.SUBTITLE_LOCATOR_STATE_SCHEMA, 12)
+        self.assertEqual(dump_contract.SUBTITLE_LOCATOR_STATE_SCHEMA, 13)
         self.assertEqual(
             dump_contract.SUBTITLE_OCR_RAW_BOX_WORD_OFFSET,
             dump_contract.SUBTITLE_OCR_HEADER_WORD_COUNT)
@@ -612,7 +650,53 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             dump_contract.SUBTITLE_LOCATOR_STATE_WORD_COUNT,
             dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET + rectangle_words)
         self.assertEqual(
-            struct.pack("<I", dump_contract.SUBTITLE_LOCATOR_STATE_TAG), b"SL12")
+            struct.pack("<I", dump_contract.SUBTITLE_LOCATOR_STATE_TAG), b"SL13")
+
+    def test_subtitle_selection_mirrors_strict_symmetric_corner_filter(self):
+        policy = coordinate.SUBTITLE_OCR
+        content = (0, 0, 770, 434)
+        roi_bottom = 430
+        edge = (content[2] - content[0]) // policy.locator_corner_edge_divisor
+        bottom = roi_bottom - policy.locator_corner_bottom_rows
+        self.assertEqual(edge, 24)
+
+        def core(left, right, core_bottom=bottom, kind="text"):
+            return {
+                "left": left,
+                "top": core_bottom - 10,
+                "right": right,
+                "bottom": core_bottom,
+                "kind": kind,
+            }
+
+        self.assertFalse(dump_contract._subtitle_qualified_ocr_core(
+            core(edge - 1, edge + 115), content, roi_bottom))
+        self.assertTrue(dump_contract._subtitle_qualified_ocr_core(
+            core(edge, edge + 116), content, roi_bottom))
+        self.assertFalse(dump_contract._subtitle_qualified_ocr_core(
+            core(content[2] - edge - 115, content[2] - edge + 1),
+            content, roi_bottom))
+        self.assertTrue(dump_contract._subtitle_qualified_ocr_core(
+            core(content[2] - edge - 116, content[2] - edge),
+            content, roi_bottom))
+        self.assertTrue(dump_contract._subtitle_qualified_ocr_core(
+            core(edge - 1, edge + 115, bottom - 1), content, roi_bottom))
+        self.assertTrue(dump_contract._subtitle_qualified_ocr_core(
+            core(0, 700, roi_bottom, "ribbon"), content, roi_bottom))
+
+        # Clearance is relative to the authenticated content rectangle, not tensor x=0.
+        offset_content = (111, 0, 659, 434)
+        offset_edge = ((offset_content[2] - offset_content[0]) //
+                       policy.locator_corner_edge_divisor)
+        self.assertEqual(offset_edge, 17)
+        self.assertFalse(dump_contract._subtitle_qualified_ocr_core(
+            core(offset_content[0] + offset_edge - 1,
+                 offset_content[0] + offset_edge + 115),
+            offset_content, roi_bottom))
+        self.assertTrue(dump_contract._subtitle_qualified_ocr_core(
+            core(offset_content[2] - offset_edge - 116,
+                 offset_content[2] - offset_edge),
+            offset_content, roi_bottom))
 
     @staticmethod
     def _valid_ocr_record_words():
@@ -640,11 +724,11 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
     def _pack_uint32_words(words):
         return struct.pack(f"<{len(words)}I", *words)
 
-    def _active_slr12_manifest(self, base_manifest=None):
+    def _active_slr13_manifest(self, base_manifest=None):
         manifest = copy.deepcopy(
             self.manifest if base_manifest is None else base_manifest)
         subtitle = {
-            "mode": "subtitle-slr12",
+            "mode": "subtitle-slr13",
             "request": True,
             "producer": dump_contract._subtitle_ocr_producer_contract(),
             "resolver": dump_contract._subtitle_locator_resolver_contract(),
@@ -662,21 +746,21 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "subtitle_ocr_record.u32": {
                 "available": True,
                 "required": True,
-                "stage": "same-frame OCR8 subtitle boxes",
+                "stage": "OCR8 subtitle boxes for atomic target",
                 "description": "authenticated test OCR8 record",
                 "sha256": "0" * 64,
             },
             "subtitle_locator_state.u32": {
                 "available": True,
                 "required": True,
-                "stage": "compact SLR12 subtitle authority state",
-                "description": "authenticated test SLR12 state",
+                "stage": "compact SLR13 subtitle authority state",
+                "description": "authenticated test SLR13 state",
                 "sha256": "0" * 64,
             },
             "shadow_base_final_parallax.f32": {
                 "available": True,
                 "required": True,
-                "stage": "ordinary post-limiter V2 field before SLR12 conditioning",
+                "stage": "ordinary post-limiter V2 field before SLR13 conditioning",
                 "description": "authenticated test unconditioned base field",
                 "sha256": "0" * 64,
             },
@@ -684,19 +768,18 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         manifest["renderer"]["parallax_v2_conditioner_role"] = (
             "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= "
             "max_horizontal_slope and vertical shear <= max_vertical_shear produces "
-            "shadow_base_final_parallax; SLR12 applies the analytic anisotropic rectangle "
-            "budget/fade from same-frame current authority and publishes "
-            "shadow_final_parallax as live position authority")
+            "shadow_base_final_parallax; SLR13 publishes shadow_final_parallax atomically as "
+            "direct live authority")
         payload = json.dumps(subtitle).encode("utf-8")
         manifest["artifacts"]["subtitle_conditioning.json"]["sha256"] = (
             hashlib.sha256(payload).hexdigest())
         return manifest
 
-    def test_current_slr12_manifest_binds_exact_model_shader_and_artifact_roles(self):
-        manifest = self._active_slr12_manifest()
+    def test_current_slr13_manifest_binds_exact_model_shader_and_artifact_roles(self):
+        manifest = self._active_slr13_manifest()
         decoded = dump_contract.validate_v2_dump_manifest_document(manifest)
         subtitle = decoded["subtitle_conditioning"]
-        self.assertEqual(subtitle["mode"], "subtitle-slr12")
+        self.assertEqual(subtitle["mode"], "subtitle-slr13")
         self.assertTrue(subtitle["live"])
         self.assertTrue(subtitle["subtitle_evidence_complete"])
         self.assertEqual(
@@ -710,6 +793,18 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "conversion_recipe", "conversion_calibration_profile", "engine_recipe",
             "preprocess_profile", "source_crop", "input", "output",
         })
+        self.assertEqual(
+            manifest["subtitle_conditioning"]["resolver"]["qualification_policy"],
+            {
+                "corner_filter_applies_to": "non-ribbon-ordinary-cores",
+                "corner_edge_clearance": (
+                    "strictly-less-than-floor-content-width-over-divisor"),
+                "corner_edge_divisor": 32,
+                "corner_bottom": "at-or-below-dynamic-roi-bottom-minus-rows",
+                "corner_bottom_rows": 16,
+                "edge_threshold_equality": "accepted",
+                "ribbon_exempt": True,
+            })
         self.assertEqual(
             manifest["subtitle_conditioning"]["resolver"]["target_policy"],
             {
@@ -740,8 +835,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     "iqr_lower_indices": [3, 4],
                     "iqr_upper_indices": [11, 12],
                     "row_validity": "independent-finite-direct-container",
-                    "minimum_coherent_rows": 1,
-                    "single_valid_row": "median",
+                    "both_valid_row_iqr": "ignored",
+                    "single_valid_row": "median-if-iqr-at-most-row-iqr-max",
                     "both_valid_within_delta": "mean-medians",
                     "both_valid_beyond_delta": "maximum-median",
                 },
@@ -773,7 +868,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             ["resolve_main", "condition_prepare_main", "condition_main"],
         )
 
-    def test_current_slr12_manifest_rejects_provenance_roles_and_base_field_drift(self):
+    def test_current_slr13_manifest_rejects_provenance_roles_and_base_field_drift(self):
         mutations = {
             "retired-mode": (
                 lambda manifest: manifest["subtitle_conditioning"].update(
@@ -786,6 +881,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 lambda manifest: manifest["subtitle_conditioning"]["resolver"][
                     "target_policy"]["evidence"].update(
                         {"row_median_delta_max": 3.999}),
+                "resolver provenance"),
+            "qualification-policy": (
+                lambda manifest: manifest["subtitle_conditioning"]["resolver"][
+                    "qualification_policy"].update({"corner_edge_divisor": 31}),
                 "resolver provenance"),
             "model": (
                 lambda manifest: manifest["subtitle_conditioning"]["producer"]["model"].update(
@@ -810,7 +909,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         }
         for name, (mutate, error) in mutations.items():
             with self.subTest(name=name):
-                manifest = self._active_slr12_manifest()
+                manifest = self._active_slr13_manifest()
                 mutate(manifest)
                 with self.assertRaisesRegex(ValueError, error):
                     dump_contract.validate_v2_dump_manifest_document(manifest)
@@ -863,7 +962,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertTrue(decoded["authoritative"])
         self.assertEqual(decoded["final_boxes"], [])
 
-    def test_current_ocr8_slr12_empty_records_accept_all_calibrated_fields(self):
+    def test_current_ocr8_slr13_empty_records_accept_all_calibrated_fields(self):
         cases = (
             (1920, 1080, 770, 434),
             (2560, 1080, 1022, 434),
@@ -931,7 +1030,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     field_height=field_height)
                 self.assertEqual(decoded_locator["current_rectangles"], [])
 
-    def test_ocr8_and_slr12_project_and_confine_geometry_to_tensor_content(self):
+    def test_ocr8_and_slr13_project_and_confine_geometry_to_tensor_content(self):
         source_width, source_height = 400, 1200
         field_width, field_height = 770, 434
         content = (313, 0, 457, 434)
@@ -1130,6 +1229,78 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             dump_contract.validate_subtitle_locator_state(
                 self._pack_uint32_words(slr_state(minimum_bottom - 1)), **locator_arguments)
 
+    def test_slr13_provisional_state_authenticates_geometry_and_ephemeral_words(self):
+        owner = [203, 369, 566, 384]
+        pending = [342, 368, 415, 386]
+        cover = [337, 364, 420, 390]
+        target_bits = struct.unpack("<I", struct.pack("<f", 2.0 / (2.0 * 1920.0)))[0]
+        provisional_bits = struct.unpack("<I", struct.pack("<f", 6.0 / (2.0 * 1920.0)))[0]
+        words = [0] * dump_contract.SUBTITLE_LOCATOR_STATE_WORD_COUNT
+        words[:32] = [
+            dump_contract.SUBTITLE_LOCATOR_STATE_SCHEMA,
+            dump_contract.SUBTITLE_LOCATOR_STATE_TAG,
+            (dump_contract.SUBTITLE_LOCATOR_FLAG_OWNER |
+             dump_contract.SUBTITLE_LOCATOR_FLAG_PENDING |
+             dump_contract.SUBTITLE_LOCATOR_FLAG_TARGET_VALID |
+             dump_contract.SUBTITLE_LOCATOR_FLAG_PROVISIONAL_CURRENT),
+            9, 1, *owner, (owner[2] - owner[0]) * (owner[3] - owner[1]),
+            17, 0, 1, *pending,
+            (pending[2] - pending[0]) * (pending[3] - pending[1]),
+            target_bits, 9, 1, dump_contract.SUBTITLE_LOCATOR_EVENT_NONE,
+            41, 0, 2, 0, 3, 770, 434, provisional_bits, 2, 0,
+        ]
+        words[dump_contract.SUBTITLE_LOCATOR_OWNER_WORD_OFFSET:
+              dump_contract.SUBTITLE_LOCATOR_OWNER_WORD_OFFSET + 4] = owner
+        words[dump_contract.SUBTITLE_LOCATOR_PENDING_WORD_OFFSET:
+              dump_contract.SUBTITLE_LOCATOR_PENDING_WORD_OFFSET + 4] = pending
+        words[dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET:
+              dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET + 4] = cover
+        arguments = {
+            "matched_frame_id": 41, "analysis_generation": 17,
+            "source_width": 1920, "source_height": 1080,
+            "field_width": 770, "field_height": 434,
+            "expected_scene_epoch": 3,
+        }
+        decoded = dump_contract.validate_subtitle_locator_state(
+            self._pack_uint32_words(words), **arguments)
+        self.assertTrue(decoded["provisional_current"])
+        self.assertEqual(decoded["provisional_target_bits"], provisional_bits)
+        self.assertEqual(decoded["provisional_fade"], 2)
+
+        wrong_cover = words.copy()
+        wrong_cover[dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET] = pending[0] + 1
+        with self.assertRaisesRegex(ValueError, "does not contain"):
+            dump_contract.validate_subtitle_locator_state(
+                self._pack_uint32_words(wrong_cover), **arguments)
+
+        wrong_geometry = words.copy()
+        unrelated = [100, 330, 500, 340]
+        wrong_geometry[5:9] = unrelated
+        wrong_geometry[9] = (unrelated[2] - unrelated[0]) * (unrelated[3] - unrelated[1])
+        wrong_geometry[dump_contract.SUBTITLE_LOCATOR_OWNER_WORD_OFFSET:
+                       dump_contract.SUBTITLE_LOCATOR_OWNER_WORD_OFFSET + 4] = unrelated
+        with self.assertRaisesRegex(ValueError, "provisional current cover"):
+            dump_contract.validate_subtitle_locator_state(
+                self._pack_uint32_words(wrong_geometry), **arguments)
+
+        iou_equality = words.copy()
+        equal_owner = [100, 360, 200, 370]
+        equal_pending = [125, 360, 225, 370]
+        equal_cover = [121, 356, 229, 374]
+        iou_equality[5:9] = equal_owner
+        iou_equality[9] = 1000
+        iou_equality[13:17] = equal_pending
+        iou_equality[17] = 1000
+        iou_equality[dump_contract.SUBTITLE_LOCATOR_OWNER_WORD_OFFSET:
+                     dump_contract.SUBTITLE_LOCATOR_OWNER_WORD_OFFSET + 4] = equal_owner
+        iou_equality[dump_contract.SUBTITLE_LOCATOR_PENDING_WORD_OFFSET:
+                     dump_contract.SUBTITLE_LOCATOR_PENDING_WORD_OFFSET + 4] = equal_pending
+        iou_equality[dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET:
+                     dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET + 4] = equal_cover
+        with self.assertRaisesRegex(ValueError, "provisional current cover"):
+            dump_contract.validate_subtitle_locator_state(
+                self._pack_uint32_words(iou_equality), **arguments)
+
     def test_current_ocr8_record_rejects_identity_capacity_slots_and_box_corruption(self):
         mutations = {
             "tag": (lambda words: words.__setitem__(1, 0), "schema or tag"),
@@ -1179,7 +1350,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                         roi_bottom=430)
 
     @staticmethod
-    def _valid_slr12_state_words():
+    def _valid_slr13_state_words():
         words = [0] * dump_contract.SUBTITLE_LOCATOR_STATE_WORD_COUNT
         target_bits = struct.unpack("<I", struct.pack("<f", 0.00075))[0]
         words[:32] = [
@@ -1216,9 +1387,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         words[current:current + 4] = rectangle
         return words
 
-    def test_current_slr12_state_validates_identity_rectangles_and_target(self):
+    def test_current_slr13_state_validates_identity_rectangles_and_target(self):
         decoded = dump_contract.validate_subtitle_locator_state(
-            self._pack_uint32_words(self._valid_slr12_state_words()),
+            self._pack_uint32_words(self._valid_slr13_state_words()),
             matched_frame_id=41,
             analysis_generation=17,
             source_width=1920,
@@ -1230,7 +1401,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertEqual(decoded["current_count"], 1)
         self.assertEqual(decoded["target"], struct.unpack("<f", struct.pack("<f", 0.00075))[0])
 
-        wrong_epoch = self._valid_slr12_state_words()
+        wrong_epoch = self._valid_slr13_state_words()
         wrong_epoch[26] = 4
         with self.assertRaisesRegex(ValueError, "scene epoch"):
             dump_contract.validate_subtitle_locator_state(
@@ -1299,7 +1470,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "left": 120, "top": 350, "right": 650, "bottom": 401,
         })
 
-        held = self._valid_slr12_state_words()
+        held = self._valid_slr13_state_words()
         held[25] = coordinate.SUBTITLE_OCR.locator_target_max_unreliable_holds
         held[21] = dump_contract.SUBTITLE_LOCATOR_EVENT_NONE
         decoded = dump_contract.validate_subtitle_locator_state(
@@ -1363,7 +1534,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     field_width=770,
                     field_height=434)
 
-    def test_slr12_target_accepts_signed_local_planes_within_direct_container(self):
+    def test_slr13_target_accepts_signed_local_planes_within_direct_container(self):
         import numpy as np
 
         locator_arguments = {
@@ -1378,7 +1549,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         for target in permitted:
             target_bits = int(np.asarray(target, dtype=np.float32).view(np.uint32))
             with self.subTest(target=target, state="live"):
-                live = self._valid_slr12_state_words()
+                live = self._valid_slr13_state_words()
                 live[18] = target_bits
                 decoded = dump_contract.validate_subtitle_locator_state(
                     self._pack_uint32_words(live), **locator_arguments)
@@ -1414,7 +1585,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 self.assertEqual(decoded["target_bits"], target_bits)
 
         rejected_bits = int(np.asarray(0.0401, dtype=np.float32).view(np.uint32))
-        rejected = self._valid_slr12_state_words()
+        rejected = self._valid_slr13_state_words()
         rejected[18] = rejected_bits
         with self.assertRaisesRegex(ValueError, "representation"):
             dump_contract.validate_subtitle_locator_state(
@@ -1433,13 +1604,13 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         for target in permitted:
             with self.subTest(target=target, state="conditioner"):
                 subtitle["target"] = np.float32(target)
-                dump_contract._replay_slr12_conditioner(base, subtitle)
+                dump_contract._replay_slr13_conditioner(base, subtitle)
         subtitle["target"] = np.asarray(
             [rejected_bits], dtype=np.uint32).view(np.float32)[0]
         with self.assertRaisesRegex(ValueError, "representation limit"):
-            dump_contract._replay_slr12_conditioner(base, subtitle)
+            dump_contract._replay_slr13_conditioner(base, subtitle)
 
-    def test_current_slr12_state_rejects_identity_flags_slots_and_aggregates(self):
+    def test_current_slr13_state_rejects_identity_flags_slots_and_aggregates(self):
         def add_second_current(words):
             words[20] = 2
             offset = dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET + 4
@@ -1507,7 +1678,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 lambda words: words.__setitem__(slice(0, 2), [8, 0x38524C53]),
                 "schema or tag"),
             "generation": (lambda words: words.__setitem__(10, 18), "identity"),
-            "unknown-flags": (lambda words: words.__setitem__(2, 0x10), "unknown flags"),
+            "unknown-flags": (lambda words: words.__setitem__(2, 0x20), "unknown flags"),
             "flag-count": (
                 lambda words: words.__setitem__(2, dump_contract.SUBTITLE_LOCATOR_FLAG_TARGET_VALID),
                 "flags disagree"),
@@ -1573,7 +1744,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         }
         for name, (mutate, error) in mutations.items():
             with self.subTest(name=name):
-                words = self._valid_slr12_state_words()
+                words = self._valid_slr13_state_words()
                 mutate(words)
                 with self.assertRaisesRegex(ValueError, error):
                     dump_contract.validate_subtitle_locator_state(
@@ -1720,7 +1891,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             dump_contract.validate_v2_dump_manifest_document(changed)
 
     def test_manifest_requires_content_hashes_for_geometry_fields(self):
-        for field in ("shadow_candidate_parallax.f32", "shadow_final_parallax.f32"):
+        for field in (
+                "shadow_candidate_parallax.f32",
+                "shadow_final_parallax.f32"):
             changed = copy.deepcopy(self.manifest)
             del changed["artifacts"][field]["sha256"]
             with self.assertRaisesRegex(ValueError, "geometry artifact"):
@@ -1747,6 +1920,217 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
     def _write_hashed_payload(root, manifest, name, payload):
         (root / name).write_bytes(payload)
         manifest["artifacts"][name]["sha256"] = hashlib.sha256(payload).hexdigest()
+
+    def _gpu_trace_ring_payload(
+            self, input_region_document, field_width, field_height, *,
+            slot=0, sequence=1, dump_forced_at_enqueue=False):
+        parsed = dump_contract.validate_depth_input_region_document(
+            input_region_document,
+            matched_frame_id=self.manifest["matched_frame_id"],
+            source_width=input_region_document["coordinate_space"]["source_extent_px"]["width"],
+            source_height=input_region_document["coordinate_space"]["source_extent_px"]["height"],
+            tensor_width=field_width,
+            tensor_height=field_height,
+        )
+        domain_tag = dump_contract._gpu_trace_domain_tag(
+            parsed, "srgb", field_width, field_height)
+        token = 0x1020304050607080
+        token_low, token_high = token & 0xFFFFFFFF, token >> 32
+        work = dump_contract.GPU_TRACE_WORK_SUBTITLE_OBSERVATION
+        transaction = [0] * dump_contract.GPU_TRACE_TRANSACTION_WORD_COUNT
+        transaction[:8] = [
+            1,
+            1 ^ dump_contract.GPU_TRACE_DECISION_COOKIE,
+            token_low,
+            token_high,
+            token_low ^ dump_contract.GPU_TRACE_TOKEN_LOW_COOKIE,
+            token_high ^ dump_contract.GPU_TRACE_TOKEN_HIGH_COOKIE,
+            dump_contract.GPU_TRACE_RECEIPT_MAGIC,
+            0,
+        ]
+        transaction[8:16] = [
+            token_low,
+            token_high,
+            token_low ^ dump_contract.GPU_TRACE_TOKEN_LOW_COOKIE,
+            token_high ^ dump_contract.GPU_TRACE_TOKEN_HIGH_COOKIE,
+            dump_contract.GPU_TRACE_REQUEST_MAGIC,
+            work,
+            work ^ dump_contract.GPU_TRACE_WORK_FLAGS_COOKIE,
+            0,
+        ]
+        target_bits = struct.unpack("<I", struct.pack("<f", 0.01))[0]
+        locator = [0] * dump_contract.GPU_TRACE_LOCATOR_WORD_COUNT
+        locator[0] = dump_contract.SUBTITLE_LOCATOR_STATE_SCHEMA
+        locator[1] = dump_contract.SUBTITLE_LOCATOR_STATE_TAG
+        locator[2] = (dump_contract.SUBTITLE_LOCATOR_FLAG_OWNER |
+                      dump_contract.SUBTITLE_LOCATOR_FLAG_TARGET_VALID)
+        locator[3] = 1
+        locator[4] = 1
+        locator[10] = parsed["analysis_generation"] & 0xFFFFFFFF
+        locator[11] = parsed["analysis_generation"] >> 32
+        locator[18] = target_bits
+        locator[19] = 1
+        locator[20] = 1
+        locator[21] = dump_contract.SUBTITLE_LOCATOR_EVENT_BIRTH
+        locator[22] = self.manifest["matched_frame_id"]
+        locator[24] = 1
+        locator[26] = 3
+        locator[27] = field_width
+        locator[28] = field_height
+        condition = [
+            coordinate.SUBTITLE_OCR.condition_param_schema,
+            coordinate.SUBTITLE_OCR.condition_param_tag,
+            1,
+            0,
+            1,
+            target_bits,
+        ]
+        flags = (dump_contract.GPU_TRACE_FLAG_OCR_RECORD_SUBMITTED |
+                 dump_contract.GPU_TRACE_FLAG_CONDITION_EXECUTED)
+        if parsed["input_domain_reset"]:
+            flags |= dump_contract.GPU_TRACE_FLAG_INPUT_DOMAIN_RESET
+        if dump_forced_at_enqueue:
+            flags |= dump_contract.GPU_TRACE_FLAG_DUMP_FORCED_AT_ENQUEUE
+        record = [0] * dump_contract.GPU_TRACE_RECORD_WORD_COUNT
+        record[:24] = [
+            dump_contract.GPU_TRACE_RING_SCHEMA,
+            dump_contract.GPU_TRACE_RECORD_TAG,
+            sequence & 0xFFFFFFFF,
+            sequence >> 32,
+            self.manifest["matched_frame_id"],
+            0,
+            parsed["analysis_generation"] & 0xFFFFFFFF,
+            parsed["analysis_generation"] >> 32,
+            domain_tag & 0xFFFFFFFF,
+            domain_tag >> 32,
+            token_low,
+            token_high,
+            1,
+            2,
+            work,
+            2,
+            flags,
+            1,
+            parsed["inference_width"],
+            parsed["inference_height"],
+            field_width,
+            field_height,
+            dump_contract.GPU_TRACE_TRANSACTION_WORD_COUNT,
+            0,
+        ]
+        record[24:88] = transaction
+        record[88:168] = locator
+        record[168:174] = condition
+        observation_timestamp_us = 1_000_000 + self.manifest["matched_frame_id"]
+        record[174] = observation_timestamp_us & 0xFFFFFFFF
+        record[175] = observation_timestamp_us >> 32
+        ring = [0] * dump_contract.GPU_TRACE_RING_WORD_COUNT
+        ring[:8] = [
+            dump_contract.GPU_TRACE_RING_SCHEMA,
+            dump_contract.GPU_TRACE_RING_TAG,
+            dump_contract.GPU_TRACE_CAPACITY,
+            dump_contract.GPU_TRACE_RECORD_WORD_COUNT,
+            (sequence + 1) & 0xFFFFFFFF,
+            (sequence + 1) >> 32,
+            (slot + 1) % dump_contract.GPU_TRACE_CAPACITY,
+            1,
+        ]
+        base = (dump_contract.GPU_TRACE_HEADER_WORD_COUNT +
+                slot * dump_contract.GPU_TRACE_RECORD_WORD_COUNT)
+        ring[base:base + dump_contract.GPU_TRACE_RECORD_WORD_COUNT] = record
+        return self._pack_uint32_words(ring), parsed, domain_tag
+
+    @staticmethod
+    def _set_gpu_trace_reuse(words, *, work, host_outcome):
+        base = dump_contract.GPU_TRACE_HEADER_WORD_COUNT
+        transaction = base + dump_contract.GPU_TRACE_RECORD_OFFSETS["transaction_begin"]
+        words[base + dump_contract.GPU_TRACE_RECORD_OFFSETS["submission_class"]] = 2
+        words[base + dump_contract.GPU_TRACE_RECORD_OFFSETS["depth_disposition"]] = 1
+        words[base + dump_contract.GPU_TRACE_RECORD_OFFSETS["expected_work"]] = work
+        flags = base + dump_contract.GPU_TRACE_RECORD_OFFSETS["flags"]
+        words[flags] &= ~dump_contract.GPU_TRACE_FLAG_SUBTITLE_SUPPRESSED
+        if work == dump_contract.GPU_TRACE_WORK_NONE:
+            disposition = 0
+            words[flags] &= ~(
+                dump_contract.GPU_TRACE_FLAG_OCR_RECORD_SUBMITTED |
+                dump_contract.GPU_TRACE_FLAG_CONDITION_EXECUTED |
+                dump_contract.GPU_TRACE_FLAG_SUBTITLE_BRANCH_GATED)
+            words[flags] |= dump_contract.GPU_TRACE_FLAG_SUBTITLE_SUPPRESSED
+        else:
+            words[flags] &= ~(
+                dump_contract.GPU_TRACE_FLAG_OCR_RECORD_SUBMITTED |
+                dump_contract.GPU_TRACE_FLAG_CONDITION_EXECUTED)
+            words[flags] |= dump_contract.GPU_TRACE_FLAG_SUBTITLE_BRANCH_GATED
+            disposition = 5
+            locator = base + dump_contract.GPU_TRACE_RECORD_OFFSETS[
+                "subtitle_locator_begin"]
+            frame = words[base + dump_contract.GPU_TRACE_RECORD_OFFSETS["frame_low"]]
+            words[locator + 22] = frame - 1
+            words[locator + 23] = 0
+        words[base + dump_contract.GPU_TRACE_RECORD_OFFSETS[
+            "subtitle_disposition"]] = disposition
+        words[base + dump_contract.GPU_TRACE_RECORD_OFFSETS["host_subtitle_outcome"]] = (
+            host_outcome)
+        words[transaction + 0] = 0
+        words[transaction + 1] = dump_contract.GPU_TRACE_DECISION_COOKIE
+        words[transaction + 7] = 0
+        words[transaction + 13] = work
+        words[transaction + 14] = (
+            0 if work == dump_contract.GPU_TRACE_WORK_NONE else
+            work ^ dump_contract.GPU_TRACE_WORK_FLAGS_COOKIE)
+        return base, transaction
+
+    @staticmethod
+    def _gpu_trace_contract_document():
+        return {
+            "schema": dump_contract.GPU_TRACE_CONTRACT_SCHEMA,
+            "role": (
+                "diagnostic-only accepted-root completion history; never rendering authority"),
+            "byte_order": "little-endian",
+            **copy.deepcopy(dump_contract._gpu_trace_contract_expected_sections()),
+        }
+
+    def _attach_gpu_trace(self, root, manifest, input_region_document, width, height):
+        raw, parsed, domain_tag = self._gpu_trace_ring_payload(
+            input_region_document, width, height)
+        decoded = dump_contract.validate_gpu_trace_ring(
+            raw,
+            matched_frame_id=manifest["matched_frame_id"],
+            analysis_generation=parsed["analysis_generation"],
+            source_width=parsed["inference_width"],
+            source_height=parsed["inference_height"],
+            field_width=width,
+            field_height=height,
+            expected_domain_tag=domain_tag,
+            input_domain_reset=parsed["input_domain_reset"],
+        )
+        documents = {
+            "gpu_trace_ring.u32": raw,
+            "gpu_trace.json": (json.dumps(decoded["decoded"], indent=2) + "\n").encode(),
+            "gpu_trace_contract.json": (
+                json.dumps(self._gpu_trace_contract_document(), indent=2) + "\n").encode(),
+        }
+        for name, payload in documents.items():
+            (root / name).write_bytes(payload)
+            manifest["artifacts"][name].update({
+                "available": True,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            })
+        manifest["gpu_trace"] = {
+            "available": True,
+            "required": False,
+            "rendering_authority": False,
+            "raw_artifact": "gpu_trace_ring.u32",
+            "decoded_artifact": "gpu_trace.json",
+            "contract_artifact": "gpu_trace_contract.json",
+            "record_count": decoded["record_count"],
+            "oldest_sequence": decoded["oldest_sequence"],
+            "next_sequence": decoded["next_sequence"],
+            "matched_sequence": decoded["matched_sequence"],
+            "source_closure_sha256": dump_contract.GPU_TRACE_SOURCE_CLOSURE_SHA256,
+        }
+        (root / "dump_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        return raw, decoded
 
     def _write_synthetic_geometry_dump(self, root, width=16, height=12):
         import numpy as np
@@ -1791,7 +2175,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         manifest["artifacts"]["warp_depth.f32"] = {
             "available": True,
             "required": True,
-            "stage": "actual orientation-selective conditioned field sampled by live V2 reprojection",
+            "stage": "actual displayed parallax field sampled by live V2 reprojection",
             "description": "authenticated test warp field",
             "sha256": hashlib.sha256(warp_payload).hexdigest(),
         }
@@ -1815,8 +2199,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             json.dumps(manifest), encoding="utf-8")
         return manifest, fields
 
-    def _activate_synthetic_slr12_dump(self, root, manifest, fields):
-        manifest = self._active_slr12_manifest(manifest)
+    def _activate_synthetic_slr13_dump(self, root, manifest, fields):
+        manifest = self._active_slr13_manifest(manifest)
         base_payload = fields["shadow_final_parallax"].astype("<f4").tobytes()
         self._write_hashed_payload(
             root, manifest, "shadow_base_final_parallax.f32", base_payload)
@@ -1862,9 +2246,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             json.dumps(manifest), encoding="utf-8")
         return manifest
 
-    def _activate_synthetic_slr12_current_dump(
+    def _activate_synthetic_slr13_current_dump(
             self, root, manifest, fields, *, fade=1):
-        manifest = self._activate_synthetic_slr12_dump(root, manifest, fields)
+        manifest = self._activate_synthetic_slr13_dump(root, manifest, fields)
         ocr = self._valid_ocr_record_words()
         ocr[7] = 0
         ocr[8] = 0
@@ -1872,7 +2256,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             root, manifest, "subtitle_ocr_record.u32",
             self._pack_uint32_words(ocr))
 
-        locator = self._valid_slr12_state_words()
+        locator = self._valid_slr13_state_words()
         locator[10] = 0
         locator[11] = 0
         locator[24] = fade
@@ -1891,7 +2275,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "target": target,
             "fade": fade,
         }
-        conditioned = dump_contract._replay_slr12_conditioner(
+        conditioned = dump_contract._replay_slr13_conditioner(
             fields["shadow_final_parallax"], subtitle)
         payload = conditioned.astype("<f4").tobytes()
         self._write_hashed_payload(
@@ -1926,7 +2310,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         manifest["depth_input_region"]["mode"] = "window-region"
         manifest["renderer"].update({
             "authority":
-                "authenticated crop-local parallax-v2 conditioned field plus depth-input-region embedding",
+                "authenticated crop-local atomic final field plus depth-input-region embedding",
             "mapping_artifacts_match_selected_renderer": True,
             "parallax_v2_position_field":
                 "shadow_final_parallax + depth_input_region embedding",
@@ -1936,8 +2320,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "owned far-side boundary texels",
             "parallax_v2_conditioner_role":
                 "least row-wise crop-local q >= shadow_vertical_conditioned with horizontal "
-                "slope <= max_horizontal_slope and vertical shear <= max_vertical_shear; q "
-                "plus depth_input_region embedding is live position authority",
+                "slope <= max_horizontal_slope and vertical shear <= max_vertical_shear "
+                "publishes shadow_final_parallax atomically as direct live authority with "
+                "depth_input_region embedding",
         })
         manifest["dimensions"].update({
             "source": {
@@ -1992,7 +2377,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "available": True,
             "required": True,
             "stage":
-                "crop-local orientation-selective conditioned field embedded by live V2 reprojection",
+                "crop-local displayed parallax field embedded by live V2 reprojection",
             "description": "authenticated test crop-local warp field",
             "sha256": hashlib.sha256(warp_depth_payload).hexdigest(),
         }
@@ -2339,19 +2724,19 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "exact-frame statistics"):
                 dump_contract.verify_v2_dump_geometry(root)
 
-    def test_geometry_verifier_accepts_current_slr12_empty_authority_as_exact_base(self):
+    def test_geometry_verifier_accepts_current_slr13_empty_authority_as_exact_base(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             manifest, fields = self._write_synthetic_geometry_dump(
                 root,
                 width=770,
                 height=434)
-            self._activate_synthetic_slr12_dump(root, manifest, fields)
+            self._activate_synthetic_slr13_dump(root, manifest, fields)
 
             summary = dump_contract.verify_v2_dump_geometry(root)
 
             subtitle = summary["subtitle_conditioning"]
-            self.assertEqual(subtitle["mode"], "subtitle-slr12")
+            self.assertEqual(subtitle["mode"], "subtitle-slr13")
             self.assertTrue(subtitle["subtitle_evidence_verified"])
             self.assertTrue(subtitle["ocr_authoritative"])
             self.assertEqual(subtitle["current_count"], 0)
@@ -2359,14 +2744,14 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "shadow_base_final_parallax",
                 summary["chain_fields_verified"])
 
-    def test_geometry_verifier_rejects_slr12_scene_epoch_not_bound_to_shadow_state(self):
+    def test_geometry_verifier_rejects_slr13_scene_epoch_not_bound_to_shadow_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             manifest, fields = self._write_synthetic_geometry_dump(
                 root,
                 width=770,
                 height=434)
-            manifest = self._activate_synthetic_slr12_dump(root, manifest, fields)
+            manifest = self._activate_synthetic_slr13_dump(root, manifest, fields)
             locator = list(struct.unpack(
                 f"<{dump_contract.SUBTITLE_LOCATOR_STATE_WORD_COUNT}I",
                 (root / "subtitle_locator_state.u32").read_bytes()))
@@ -2380,14 +2765,14 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "scene epoch"):
                 dump_contract.verify_v2_dump_geometry(root)
 
-    def test_geometry_verifier_accepts_abstaining_ocr_with_slr12_target_grace_as_exact_base(self):
+    def test_geometry_verifier_accepts_abstaining_ocr_with_slr13_target_grace_as_exact_base(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             manifest, fields = self._write_synthetic_geometry_dump(
                 root,
                 width=770,
                 height=434)
-            manifest = self._activate_synthetic_slr12_dump(root, manifest, fields)
+            manifest = self._activate_synthetic_slr13_dump(root, manifest, fields)
 
             ocr = list(struct.unpack(
                 f"<{dump_contract.SUBTITLE_OCR_RECORD_WORD_COUNT}I",
@@ -2421,7 +2806,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "left": 120, "top": 350, "right": 650, "bottom": 401,
             })
 
-    def test_geometry_verifier_rejects_slr12_record_identity_and_nonbase_empty_output(self):
+    def test_geometry_verifier_rejects_slr13_record_identity_and_nonbase_empty_output(self):
         import numpy as np
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -2430,7 +2815,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 root,
                 width=770,
                 height=434)
-            manifest = self._activate_synthetic_slr12_dump(root, manifest, fields)
+            manifest = self._activate_synthetic_slr13_dump(root, manifest, fields)
 
             record = list(struct.unpack(
                 f"<{dump_contract.SUBTITLE_OCR_RECORD_WORD_COUNT}I",
@@ -2462,7 +2847,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "not the exact content-clamped Base"):
                 dump_contract.verify_v2_dump_geometry(root)
 
-    def test_geometry_verifier_replays_nonempty_slr12_rectangle_fade_and_ocr_binding(self):
+    def test_geometry_verifier_replays_nonempty_slr13_rectangle_fade_and_ocr_binding(self):
         import numpy as np
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -2472,7 +2857,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 width=770,
                 height=434)
             manifest, fade_one, locator, ocr = (
-                self._activate_synthetic_slr12_current_dump(
+                self._activate_synthetic_slr13_current_dump(
                     root, manifest, fields, fade=1))
 
             summary = dump_contract.verify_v2_dump_geometry(root)
@@ -2487,7 +2872,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 root, manifest, "subtitle_locator_state.u32",
                 self._pack_uint32_words(locator))
             target = struct.unpack("<f", struct.pack("<I", locator[18]))[0]
-            fade_two = dump_contract._replay_slr12_conditioner(base, {
+            fade_two = dump_contract._replay_slr13_conditioner(base, {
                 "current_rectangles": [{
                     "left": 120, "top": 350, "right": 650, "bottom": 401,
                 }],
@@ -2518,7 +2903,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 root, manifest, "warp_depth.f32", tampered_payload)
             (root / "dump_manifest.json").write_text(
                 json.dumps(manifest), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "exact SLR12 rectangle-conditioning"):
+            with self.assertRaisesRegex(ValueError, "exact SLR13 rectangle-conditioning"):
                 dump_contract.verify_v2_dump_geometry(root)
 
             self._write_hashed_payload(
@@ -2535,7 +2920,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "does not contain|not exact"):
                 dump_contract.verify_v2_dump_geometry(root)
 
-    def test_slr12_sm5_replay_accepts_the_roi_width_1101_division_bit(self):
+    def test_slr13_sm5_replay_accepts_the_roi_width_1101_division_bit(self):
         import numpy as np
 
         exact_candidates = dump_contract._sm5_power_of_two_division_candidates(
@@ -2559,7 +2944,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         }
         exact_replay_bits = {
             int(replay[393, 210].view(np.uint32))
-            for replay in dump_contract._replay_slr12_conditioner_sm5_candidates(
+            for replay in dump_contract._replay_slr13_conditioner_sm5_candidates(
                 exact_base, exact_subtitle)
         }
         self.assertEqual(exact_replay_bits, exact_bits)
@@ -2585,14 +2970,14 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         }
         replay_bits = {
             int(replay[393, 210].view(np.uint32))
-            for replay in dump_contract._replay_slr12_conditioner_sm5_candidates(
+            for replay in dump_contract._replay_slr13_conditioner_sm5_candidates(
                 base, subtitle)
         }
         # 0x3A742C0A is the production NVIDIA field bit from the supplied ROI dump;
         # 0x3A742C0B is the correctly rounded WARP/NumPy alternative.
         self.assertEqual(replay_bits, {0x3A742C0A, 0x3A742C0B})
 
-    def test_slr12_replay_uses_content_width_and_boundary_extends_padding(self):
+    def test_slr13_replay_uses_content_width_and_boundary_extends_padding(self):
         import numpy as np
 
         content = (100, 10, 670, 424)
@@ -2609,7 +2994,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "target": 0.0,
             "fade": 2,
         }
-        replay = dump_contract._replay_slr12_conditioner(base, subtitle)
+        replay = dump_contract._replay_slr13_conditioner(base, subtitle)
         horizontal_step = np.float32(
             np.float32(coordinate.CALIBRATED_DEFAULTS.max_horizontal_slope) /
             np.float32(content[2] - content[0]))
@@ -2632,7 +3017,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             replay[content[3]:, :],
             np.repeat(replay[content[3] - 1:content[3], :], 434 - content[3], axis=0))
 
-    def test_slr12_ribbon_replay_has_only_a_top_edge_collar(self):
+    def test_slr13_ribbon_replay_has_only_a_top_edge_collar(self):
         import numpy as np
 
         base = np.full((434, 770), np.float32(0.02), dtype=np.float32)
@@ -2646,11 +3031,11 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         geometry = {
             "left": 120, "top": 350, "right": 650, "bottom": 401,
         }
-        ribbon = dump_contract._replay_slr12_conditioner(base, {
+        ribbon = dump_contract._replay_slr13_conditioner(base, {
             **common,
             "current_rectangles": [{**geometry, "kind": "ribbon", "ribbon": True}],
         })
-        ordinary = dump_contract._replay_slr12_conditioner(base, {
+        ordinary = dump_contract._replay_slr13_conditioner(base, {
             **common,
             "current_rectangles": [{**geometry, "kind": "text", "ribbon": False}],
         })
@@ -3019,10 +3404,566 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             final_path.write_bytes(tampered_bytes)
             manifest["artifacts"]["shadow_final_parallax.f32"]["sha256"] = (
                 hashlib.sha256(tampered_bytes).hexdigest())
+            self._write_hashed_payload(
+                root, manifest, "warp_depth.f32", tampered_bytes)
             (root / "dump_manifest.json").write_text(
                 json.dumps(manifest), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "exact recurrence"):
                 dump_contract.verify_v2_dump_geometry(root)
+
+    def test_gpu_trace_contract_and_wrapped_raw_ring_are_exact(self):
+        contract = self._gpu_trace_contract_document()
+        summary = dump_contract.validate_gpu_trace_contract_document(contract)
+        self.assertEqual(summary["capacity"], 300)
+        self.assertEqual(summary["record_words"], 176)
+        self.assertEqual(
+            summary["source_closure_sha256"],
+            dump_contract.GPU_TRACE_SOURCE_CLOSURE_SHA256)
+        self.assertEqual(
+            contract["enums"]["subtitle_disposition"]["invalid"], 6)
+        input_region = copy.deepcopy(self.depth_input_region)
+        input_region["analysis"]["tensor_extent_px"] = {"width": 16, "height": 12}
+        input_region["analysis"]["tensor_content_rect_px"] = {
+            "left": 0, "top": 0, "right": 16, "bottom": 12}
+        raw, parsed, domain_tag = self._gpu_trace_ring_payload(
+            input_region, 16, 12, slot=0, sequence=501,
+            dump_forced_at_enqueue=False)
+        words = list(struct.unpack(
+            f"<{dump_contract.GPU_TRACE_RING_WORD_COUNT}I", raw))
+        newest_base = dump_contract.GPU_TRACE_HEADER_WORD_COUNT
+        oldest_base = (dump_contract.GPU_TRACE_HEADER_WORD_COUNT +
+                       299 * dump_contract.GPU_TRACE_RECORD_WORD_COUNT)
+        words[oldest_base:oldest_base + dump_contract.GPU_TRACE_RECORD_WORD_COUNT] = (
+            words[newest_base:newest_base + dump_contract.GPU_TRACE_RECORD_WORD_COUNT])
+        words[oldest_base + 2] = 500
+        words[oldest_base + 3] = 0
+        words[oldest_base + 4] = 40
+        words[oldest_base + 5] = 0
+        words[oldest_base + 14] = dump_contract.GPU_TRACE_WORK_NONE
+        words[oldest_base + 15] = 0
+        words[oldest_base + 16] = (
+            dump_contract.GPU_TRACE_FLAG_INPUT_DOMAIN_RESET |
+            dump_contract.GPU_TRACE_FLAG_SUBTITLE_SUPPRESSED)
+        words[oldest_base + 17] = 0
+        transaction = oldest_base + 24
+        words[transaction + 13] = dump_contract.GPU_TRACE_WORK_NONE
+        words[transaction + 14] = 0
+        words[oldest_base + 88:oldest_base + 174] = [0xFFFFFFFF] * 86
+        words[4:8] = [502, 0, 1, 2]
+        raw = struct.pack(f"<{len(words)}I", *words)
+        decoded = dump_contract.validate_gpu_trace_ring(
+            raw,
+            matched_frame_id=41,
+            analysis_generation=0,
+            source_width=1920,
+            source_height=1080,
+            field_width=16,
+            field_height=12,
+            expected_domain_tag=domain_tag,
+            input_domain_reset=False,
+        )
+        self.assertEqual(decoded["record_count"], 2)
+        self.assertEqual(decoded["oldest_sequence"], 500)
+        self.assertEqual(decoded["next_sequence"], 502)
+        self.assertEqual(decoded["matched_sequence"], 501)
+        records = decoded["decoded"]["records"]
+        self.assertEqual([record["ring_slot"] for record in records], [299, 0])
+        self.assertTrue(records[0]["flags"]["subtitle_suppressed"])
+        self.assertTrue(records[0]["flags"]["input_domain_reset"])
+        self.assertTrue(records[0]["subtitle_condition"]["unused"])
+        record = records[1]
+        self.assertEqual(record["ring_slot"], 0)
+        self.assertFalse(record["flags"]["dump_forced_at_enqueue"])
+        self.assertEqual(record["depth_disposition"]["name"], "infer")
+        self.assertEqual(record["subtitle_disposition"]["name"], "abstention")
+
+    def test_gpu_trace_authenticated_reuse_preserves_explicit_suppression(self):
+        input_region = copy.deepcopy(self.depth_input_region)
+        input_region["analysis"]["tensor_extent_px"] = {"width": 16, "height": 12}
+        input_region["analysis"]["tensor_content_rect_px"] = {
+            "left": 0, "top": 0, "right": 16, "bottom": 12}
+        raw, _, domain_tag = self._gpu_trace_ring_payload(input_region, 16, 12)
+        words = list(struct.unpack(
+            f"<{dump_contract.GPU_TRACE_RING_WORD_COUNT}I", raw))
+        base, _ = self._set_gpu_trace_reuse(
+            words, work=dump_contract.GPU_TRACE_WORK_NONE, host_outcome=0)
+        words[base + dump_contract.GPU_TRACE_RECORD_OFFSETS["subtitle_disposition"]] = 0
+        words[base + dump_contract.GPU_TRACE_RECORD_OFFSETS["flags"]] |= (
+            dump_contract.GPU_TRACE_FLAG_SUBTITLE_SUPPRESSED)
+
+        decoded = dump_contract.validate_gpu_trace_ring(
+            struct.pack(f"<{len(words)}I", *words),
+            matched_frame_id=41, analysis_generation=0,
+            source_width=1920, source_height=1080,
+            field_width=16, field_height=12,
+            expected_domain_tag=domain_tag, input_domain_reset=False)
+        record = decoded["decoded"]["records"][0]
+        self.assertEqual(record["subtitle_disposition"]["name"], "suppressed")
+        self.assertIn("subtitle-suppressed", record["subtitle_condition"]["reason"])
+
+    def test_gpu_trace_authenticated_ordinary_reuse_holds_coherent_subtitle_tuple(self):
+        input_region = copy.deepcopy(self.depth_input_region)
+        input_region["analysis"]["tensor_extent_px"] = {"width": 16, "height": 12}
+        input_region["analysis"]["tensor_content_rect_px"] = {
+            "left": 0, "top": 0, "right": 16, "bottom": 12}
+        raw, _, domain_tag = self._gpu_trace_ring_payload(input_region, 16, 12)
+        words = list(struct.unpack(
+            f"<{dump_contract.GPU_TRACE_RING_WORD_COUNT}I", raw))
+        base, _ = self._set_gpu_trace_reuse(
+            words,
+            work=dump_contract.GPU_TRACE_WORK_SUBTITLE_OBSERVATION,
+            host_outcome=1)
+
+        decoded = dump_contract.validate_gpu_trace_ring(
+            struct.pack(f"<{len(words)}I", *words),
+            matched_frame_id=41, analysis_generation=0,
+            source_width=1920, source_height=1080,
+            field_width=16, field_height=12,
+            expected_domain_tag=domain_tag, input_domain_reset=False)
+        record = decoded["decoded"]["records"][0]
+        self.assertEqual(
+            record["subtitle_disposition"]["name"], "held-with-depth")
+        self.assertTrue(record["flags"]["subtitle_branch_gated"])
+        self.assertFalse(record["flags"]["condition_executed"])
+        self.assertTrue(record["subtitle_condition"]["held_with_depth"])
+        self.assertEqual(record["subtitle_locator"]["frame_id"], 40)
+
+        locator = base + dump_contract.GPU_TRACE_RECORD_OFFSETS[
+            "subtitle_locator_begin"]
+        words[locator + 22] = 41
+        with self.assertRaisesRegex(ValueError, "invalid finalized SLR13 state"):
+            dump_contract.validate_gpu_trace_ring(
+                struct.pack(f"<{len(words)}I", *words),
+                matched_frame_id=41, analysis_generation=0,
+                source_width=1920, source_height=1080,
+                field_width=16, field_height=12,
+                expected_domain_tag=domain_tag, input_domain_reset=False)
+
+    def test_gpu_trace_held_tuple_must_equal_immediately_prior_record(self):
+        input_region = copy.deepcopy(self.depth_input_region)
+        input_region["analysis"]["tensor_extent_px"] = {"width": 16, "height": 12}
+        input_region["analysis"]["tensor_content_rect_px"] = {
+            "left": 0, "top": 0, "right": 16, "bottom": 12}
+        raw, _, domain_tag = self._gpu_trace_ring_payload(
+            input_region, 16, 12, slot=0, sequence=2)
+        words = list(struct.unpack(
+            f"<{dump_contract.GPU_TRACE_RING_WORD_COUNT}I", raw))
+        newest_base = dump_contract.GPU_TRACE_HEADER_WORD_COUNT
+        oldest_base = (dump_contract.GPU_TRACE_HEADER_WORD_COUNT +
+                       (dump_contract.GPU_TRACE_CAPACITY - 1) *
+                       dump_contract.GPU_TRACE_RECORD_WORD_COUNT)
+        words[oldest_base:oldest_base + dump_contract.GPU_TRACE_RECORD_WORD_COUNT] = (
+            words[newest_base:newest_base + dump_contract.GPU_TRACE_RECORD_WORD_COUNT])
+        words[oldest_base + 2] = 1
+        words[oldest_base + 3] = 0
+        words[oldest_base + 4] = 40
+        words[oldest_base + 5] = 0
+        oldest_locator = oldest_base + dump_contract.GPU_TRACE_RECORD_OFFSETS[
+            "subtitle_locator_begin"]
+        words[oldest_locator + 22] = 40
+        words[oldest_base + 174] = 1_000_040
+        words[oldest_base + 175] = 0
+        words[4:8] = [3, 0, 1, 2]
+        self._set_gpu_trace_reuse(
+            words,
+            work=dump_contract.GPU_TRACE_WORK_SUBTITLE_OBSERVATION,
+            host_outcome=1)
+
+        decoded = dump_contract.validate_gpu_trace_ring(
+            struct.pack(f"<{len(words)}I", *words),
+            matched_frame_id=41, analysis_generation=0,
+            source_width=1920, source_height=1080,
+            field_width=16, field_height=12,
+            expected_domain_tag=domain_tag, input_domain_reset=False)
+        self.assertEqual(
+            decoded["decoded"]["records"][1]["subtitle_disposition"]["name"],
+            "held-with-depth")
+
+        changed = words.copy()
+        newest_locator = newest_base + dump_contract.GPU_TRACE_RECORD_OFFSETS[
+            "subtitle_locator_begin"]
+        changed[newest_locator + 18] ^= 1
+        with self.assertRaisesRegex(ValueError, "immediately prior record"):
+            dump_contract.validate_gpu_trace_ring(
+                struct.pack(f"<{len(changed)}I", *changed),
+                matched_frame_id=41, analysis_generation=0,
+                source_width=1920, source_height=1080,
+                field_width=16, field_height=12,
+                expected_domain_tag=domain_tag, input_domain_reset=False)
+
+    def test_gpu_trace_due_observation_advances_on_reuse_without_reauthorizing_ordinary(self):
+        input_region = copy.deepcopy(self.depth_input_region)
+        input_region["analysis"]["tensor_extent_px"] = {"width": 16, "height": 12}
+        input_region["analysis"]["tensor_content_rect_px"] = {
+            "left": 0, "top": 0, "right": 16, "bottom": 12}
+        for work, marker, expected_name, expected_work_name in (
+                (dump_contract.GPU_TRACE_WORK_OPTIONAL_OCR_DUE,
+                 dump_contract.GPU_TRACE_OPTIONAL_RECEIPT_MAGIC,
+                 "optional-ocr", "optional-ocr-due"),
+                (dump_contract.GPU_TRACE_WORK_SUBTITLE_OBSERVATION_DUE,
+                 0, "abstention", "subtitle-observation-due")):
+            with self.subTest(work=work):
+                raw, _, domain_tag = self._gpu_trace_ring_payload(
+                    input_region, 16, 12)
+                words = list(struct.unpack(
+                    f"<{dump_contract.GPU_TRACE_RING_WORD_COUNT}I", raw))
+                base, transaction = self._set_gpu_trace_reuse(
+                    words, work=work, host_outcome=1)
+                words[base + dump_contract.GPU_TRACE_RECORD_OFFSETS[
+                    "subtitle_disposition"]] = 1 if marker else 2
+                locator = base + dump_contract.GPU_TRACE_RECORD_OFFSETS[
+                    "subtitle_locator_begin"]
+                words[locator + 22] = 41
+                words[transaction + 1] = (
+                    dump_contract.GPU_TRACE_DECISION_COOKIE ^ marker)
+                words[transaction + 7] = marker
+                decoded = dump_contract.validate_gpu_trace_ring(
+                    struct.pack(f"<{len(words)}I", *words),
+                    matched_frame_id=41, analysis_generation=0,
+                    source_width=1920, source_height=1080,
+                    field_width=16, field_height=12,
+                    expected_domain_tag=domain_tag, input_domain_reset=False)
+                record = decoded["decoded"]["records"][0]
+                self.assertEqual(record["expected_work"]["name"], expected_work_name)
+                self.assertEqual(record["subtitle_disposition"]["name"], expected_name)
+                self.assertTrue(record["flags"]["condition_executed"])
+                self.assertFalse(record["subtitle_condition"]["held_with_depth"])
+
+        raw, _, domain_tag = self._gpu_trace_ring_payload(input_region, 16, 12)
+        words = list(struct.unpack(
+            f"<{dump_contract.GPU_TRACE_RING_WORD_COUNT}I", raw))
+        base, transaction = self._set_gpu_trace_reuse(
+            words, work=dump_contract.GPU_TRACE_WORK_OPTIONAL_OCR, host_outcome=1)
+        marker = dump_contract.GPU_TRACE_OPTIONAL_RECEIPT_MAGIC
+        words[transaction + 1] = dump_contract.GPU_TRACE_DECISION_COOKIE ^ marker
+        words[transaction + 7] = marker
+        with self.assertRaisesRegex(ValueError, "depth disposition disagrees"):
+            dump_contract.validate_gpu_trace_ring(
+                struct.pack(f"<{len(words)}I", *words),
+                matched_frame_id=41, analysis_generation=0,
+                source_width=1920, source_height=1080,
+                field_width=16, field_height=12,
+                expected_domain_tag=domain_tag, input_domain_reset=False)
+
+        words[transaction + 7] = 0
+        words[transaction + 1] = dump_contract.GPU_TRACE_DECISION_COOKIE
+        words[base + dump_contract.GPU_TRACE_RECORD_OFFSETS["expected_work"]] = 4
+        words[transaction + 13] = 4
+        words[transaction + 14] = 4 ^ dump_contract.GPU_TRACE_WORK_FLAGS_COOKIE
+        with self.assertRaisesRegex(ValueError, "depth disposition disagrees"):
+            dump_contract.validate_gpu_trace_ring(
+                struct.pack(f"<{len(words)}I", *words),
+                matched_frame_id=41, analysis_generation=0,
+                source_width=1920, source_height=1080,
+                field_width=16, field_height=12,
+                expected_domain_tag=domain_tag, input_domain_reset=False)
+
+    def test_gpu_trace_requires_nonzero_nondecreasing_observation_timestamps(self):
+        input_region = copy.deepcopy(self.depth_input_region)
+        input_region["analysis"]["tensor_extent_px"] = {"width": 16, "height": 12}
+        input_region["analysis"]["tensor_content_rect_px"] = {
+            "left": 0, "top": 0, "right": 16, "bottom": 12}
+        raw, _, domain_tag = self._gpu_trace_ring_payload(
+            input_region, 16, 12, slot=0, sequence=2)
+        words = list(struct.unpack(
+            f"<{dump_contract.GPU_TRACE_RING_WORD_COUNT}I", raw))
+        newest_base = dump_contract.GPU_TRACE_HEADER_WORD_COUNT
+        words[newest_base + 174] = 0
+        words[newest_base + 175] = 0
+        with self.assertRaisesRegex(ValueError, "observation timestamp"):
+            dump_contract.validate_gpu_trace_ring(
+                struct.pack(f"<{len(words)}I", *words),
+                matched_frame_id=41, analysis_generation=0,
+                source_width=1920, source_height=1080,
+                field_width=16, field_height=12,
+                expected_domain_tag=domain_tag, input_domain_reset=False)
+
+        words = list(struct.unpack(
+            f"<{dump_contract.GPU_TRACE_RING_WORD_COUNT}I", raw))
+        oldest_base = (dump_contract.GPU_TRACE_HEADER_WORD_COUNT +
+                       (dump_contract.GPU_TRACE_CAPACITY - 1) *
+                       dump_contract.GPU_TRACE_RECORD_WORD_COUNT)
+        words[oldest_base:oldest_base + dump_contract.GPU_TRACE_RECORD_WORD_COUNT] = (
+            words[newest_base:newest_base + dump_contract.GPU_TRACE_RECORD_WORD_COUNT])
+        words[oldest_base + 2] = 1
+        words[oldest_base + 3] = 0
+        words[oldest_base + 4] = 40
+        words[oldest_base + 5] = 0
+        oldest_locator = oldest_base + dump_contract.GPU_TRACE_RECORD_OFFSETS[
+            "subtitle_locator_begin"]
+        words[oldest_locator + 22] = 40
+        newer_timestamp = 1_000_041
+        older_timestamp = newer_timestamp + 1
+        words[oldest_base + 174] = older_timestamp
+        words[oldest_base + 175] = 0
+        words[newest_base + 174] = newer_timestamp
+        words[newest_base + 175] = 0
+        words[4:8] = [3, 0, 1, 2]
+        with self.assertRaisesRegex(ValueError, "observation timestamp"):
+            dump_contract.validate_gpu_trace_ring(
+                struct.pack(f"<{len(words)}I", *words),
+                matched_frame_id=41, analysis_generation=0,
+                source_width=1920, source_height=1080,
+                field_width=16, field_height=12,
+                expected_domain_tag=domain_tag, input_domain_reset=False)
+
+    def test_gpu_trace_receipt_auth_rejects_force_reuse(self):
+        input_region = copy.deepcopy(self.depth_input_region)
+        input_region["analysis"]["tensor_extent_px"] = {"width": 16, "height": 12}
+        input_region["analysis"]["tensor_content_rect_px"] = {
+            "left": 0, "top": 0, "right": 16, "bottom": 12}
+        raw, _, domain_tag = self._gpu_trace_ring_payload(input_region, 16, 12)
+        words = list(struct.unpack(
+            f"<{dump_contract.GPU_TRACE_RING_WORD_COUNT}I", raw))
+        base = dump_contract.GPU_TRACE_HEADER_WORD_COUNT
+        transaction = base + dump_contract.GPU_TRACE_RECORD_OFFSETS["transaction_begin"]
+        words[transaction] = 0
+        words[transaction + 1] = dump_contract.GPU_TRACE_DECISION_COOKIE
+        words[base + dump_contract.GPU_TRACE_RECORD_OFFSETS["depth_disposition"]] = 0
+        forged = struct.pack(f"<{len(words)}I", *words)
+        decoded = dump_contract.validate_gpu_trace_ring(
+            forged,
+            matched_frame_id=41,
+            analysis_generation=0,
+            source_width=1920,
+            source_height=1080,
+            field_width=16,
+            field_height=12,
+            expected_domain_tag=domain_tag,
+            input_domain_reset=False,
+        )
+        self.assertEqual(
+            decoded["decoded"]["records"][0]["depth_disposition"]["name"],
+            "invalid")
+        record = decoded["decoded"]["records"][0]
+        self.assertEqual(record["subtitle_disposition"]["name"], "abstention")
+        self.assertFalse(record["subtitle_condition"]["unused"])
+        self.assertTrue(record["subtitle_condition"]["executed"])
+
+        words[base + dump_contract.GPU_TRACE_RECORD_OFFSETS["flags"]] &= ~(
+            dump_contract.GPU_TRACE_FLAG_CONDITION_EXECUTED)
+        with self.assertRaisesRegex(ValueError, "subtitle disposition disagrees"):
+            dump_contract.validate_gpu_trace_ring(
+                struct.pack(f"<{len(words)}I", *words),
+                matched_frame_id=41, analysis_generation=0,
+                source_width=1920, source_height=1080,
+                field_width=16, field_height=12,
+                expected_domain_tag=domain_tag, input_domain_reset=False)
+        words[base + dump_contract.GPU_TRACE_RECORD_OFFSETS["flags"]] |= (
+            dump_contract.GPU_TRACE_FLAG_CONDITION_EXECUTED)
+        words[base + dump_contract.GPU_TRACE_RECORD_OFFSETS["subtitle_disposition"]] = 6
+        with self.assertRaisesRegex(ValueError, "subtitle disposition disagrees"):
+            dump_contract.validate_gpu_trace_ring(
+                struct.pack(f"<{len(words)}I", *words),
+                matched_frame_id=41, analysis_generation=0,
+                source_width=1920, source_height=1080,
+                field_width=16, field_height=12,
+                expected_domain_tag=domain_tag, input_domain_reset=False)
+
+    def test_gpu_trace_inactive_locator_requires_canonical_zero_condition(self):
+        input_region = copy.deepcopy(self.depth_input_region)
+        input_region["analysis"]["tensor_extent_px"] = {"width": 16, "height": 12}
+        input_region["analysis"]["tensor_content_rect_px"] = {
+            "left": 0, "top": 0, "right": 16, "bottom": 12}
+        raw, _, domain_tag = self._gpu_trace_ring_payload(input_region, 16, 12)
+        words = list(struct.unpack(
+            f"<{dump_contract.GPU_TRACE_RING_WORD_COUNT}I", raw))
+        base = dump_contract.GPU_TRACE_HEADER_WORD_COUNT
+        locator = base + dump_contract.GPU_TRACE_RECORD_OFFSETS["subtitle_locator_begin"]
+        condition = base + dump_contract.GPU_TRACE_RECORD_OFFSETS["subtitle_condition_begin"]
+
+        inactive = words.copy()
+        for index in (2, 3, 4, 12, 18, 19, 20, 21, 24, 25,
+                      dump_contract.SUBTITLE_LOCATOR_KIND_WORD):
+            inactive[locator + index] = 0
+        inactive[condition:condition + dump_contract.GPU_TRACE_CONDITION_WORD_COUNT] = [0] * 6
+        inactive_payload = struct.pack(f"<{len(inactive)}I", *inactive)
+        decoded = dump_contract.validate_gpu_trace_ring(
+            inactive_payload,
+            matched_frame_id=41,
+            analysis_generation=0,
+            source_width=1920,
+            source_height=1080,
+            field_width=16,
+            field_height=12,
+            expected_domain_tag=domain_tag,
+            input_domain_reset=False,
+        )
+        summary = decoded["decoded"]["records"][0]["subtitle_condition"]
+        self.assertFalse(summary["active"])
+        self.assertFalse(summary["valid"])
+
+        stale = inactive.copy()
+        stale[condition] = coordinate.SUBTITLE_OCR.condition_param_schema
+        with self.assertRaisesRegex(ValueError, "condition params disagree"):
+            dump_contract.validate_gpu_trace_ring(
+                struct.pack(f"<{len(stale)}I", *stale),
+                matched_frame_id=41, analysis_generation=0,
+                source_width=1920, source_height=1080,
+                field_width=16, field_height=12,
+                expected_domain_tag=domain_tag, input_domain_reset=False)
+
+        missing_active = words.copy()
+        missing_active[condition:condition + dump_contract.GPU_TRACE_CONDITION_WORD_COUNT] = [0] * 6
+        with self.assertRaisesRegex(ValueError, "condition params disagree"):
+            dump_contract.validate_gpu_trace_ring(
+                struct.pack(f"<{len(missing_active)}I", *missing_active),
+                matched_frame_id=41, analysis_generation=0,
+                source_width=1920, source_height=1080,
+                field_width=16, field_height=12,
+                expected_domain_tag=domain_tag, input_domain_reset=False)
+
+    def test_gpu_trace_provisional_condition_uses_ephemeral_tuple(self):
+        input_region = copy.deepcopy(self.depth_input_region)
+        input_region["analysis"]["tensor_extent_px"] = {"width": 16, "height": 12}
+        input_region["analysis"]["tensor_content_rect_px"] = {
+            "left": 0, "top": 0, "right": 16, "bottom": 12}
+        raw, _, domain_tag = self._gpu_trace_ring_payload(input_region, 16, 12)
+        words = list(struct.unpack(
+            f"<{dump_contract.GPU_TRACE_RING_WORD_COUNT}I", raw))
+        base = dump_contract.GPU_TRACE_HEADER_WORD_COUNT
+        locator = base + dump_contract.GPU_TRACE_RECORD_OFFSETS["subtitle_locator_begin"]
+        condition = base + dump_contract.GPU_TRACE_RECORD_OFFSETS["subtitle_condition_begin"]
+        owner = [2, 2, 12, 4]
+        pending = [6, 2, 8, 4]
+        cover = [5, 1, 9, 5]
+        provisional_target = struct.unpack("<I", struct.pack("<f", 0.005))[0]
+        words[locator + 2] = (
+            dump_contract.SUBTITLE_LOCATOR_FLAG_OWNER |
+            dump_contract.SUBTITLE_LOCATOR_FLAG_PENDING |
+            dump_contract.SUBTITLE_LOCATOR_FLAG_TARGET_VALID |
+            dump_contract.SUBTITLE_LOCATOR_FLAG_PROVISIONAL_CURRENT)
+        words[locator + 12] = 1
+        words[locator + 20] = 1
+        words[locator + 21] = dump_contract.SUBTITLE_LOCATOR_EVENT_NONE
+        words[locator + 24] = 2
+        words[locator + dump_contract.SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD] = (
+            provisional_target)
+        words[locator + dump_contract.SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD] = 2
+        words[locator + dump_contract.SUBTITLE_LOCATOR_OWNER_WORD_OFFSET:
+              locator + dump_contract.SUBTITLE_LOCATOR_OWNER_WORD_OFFSET + 4] = owner
+        words[locator + dump_contract.SUBTITLE_LOCATOR_PENDING_WORD_OFFSET:
+              locator + dump_contract.SUBTITLE_LOCATOR_PENDING_WORD_OFFSET + 4] = pending
+        words[locator + dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET:
+              locator + dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET + 4] = cover
+        words[condition + 4] = 2
+        words[condition + 5] = provisional_target
+        payload = struct.pack(f"<{len(words)}I", *words)
+        decoded = dump_contract.validate_gpu_trace_ring(
+            payload, matched_frame_id=41, analysis_generation=0,
+            source_width=1920, source_height=1080,
+            field_width=16, field_height=12,
+            expected_domain_tag=domain_tag, input_domain_reset=False)
+        self.assertEqual(
+            decoded["decoded"]["schema"],
+            dump_contract.GPU_TRACE_DECODED_SCHEMA)
+        summary = decoded["decoded"]["records"][0]
+        self.assertTrue(summary["subtitle_locator"]["flags"]["provisional_current"])
+        self.assertEqual(summary["subtitle_locator"]["provisional_fade_step"], 2)
+        self.assertEqual(summary["subtitle_condition"]["target_bits"], provisional_target)
+
+        durable_condition = words.copy()
+        durable_condition[condition + 5] = durable_condition[locator + 18]
+        with self.assertRaisesRegex(ValueError, "condition params disagree"):
+            dump_contract.validate_gpu_trace_ring(
+                struct.pack(f"<{len(durable_condition)}I", *durable_condition),
+                matched_frame_id=41, analysis_generation=0,
+                source_width=1920, source_height=1080,
+                field_width=16, field_height=12,
+                expected_domain_tag=domain_tag, input_domain_reset=False)
+
+        invalid_cover = words.copy()
+        invalid_cover[locator + dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET] = 7
+        with self.assertRaisesRegex(ValueError, "provisional"):
+            dump_contract.validate_gpu_trace_ring(
+                struct.pack(f"<{len(invalid_cover)}I", *invalid_cover),
+                matched_frame_id=41, analysis_generation=0,
+                source_width=1920, source_height=1080,
+                field_width=16, field_height=12,
+                expected_domain_tag=domain_tag, input_domain_reset=False)
+
+        iou_equality = words.copy()
+        equal_owner = [1, 2, 5, 4]
+        equal_pending = [2, 2, 6, 4]
+        equal_cover = [1, 1, 7, 5]
+        iou_equality[locator + dump_contract.SUBTITLE_LOCATOR_OWNER_WORD_OFFSET:
+                     locator + dump_contract.SUBTITLE_LOCATOR_OWNER_WORD_OFFSET + 4] = equal_owner
+        iou_equality[locator + dump_contract.SUBTITLE_LOCATOR_PENDING_WORD_OFFSET:
+                     locator + dump_contract.SUBTITLE_LOCATOR_PENDING_WORD_OFFSET + 4] = equal_pending
+        iou_equality[locator + dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET:
+                     locator + dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET + 4] = equal_cover
+        with self.assertRaisesRegex(ValueError, "provisional"):
+            dump_contract.validate_gpu_trace_ring(
+                struct.pack(f"<{len(iou_equality)}I", *iou_equality),
+                matched_frame_id=41, analysis_generation=0,
+                source_width=1920, source_height=1080,
+                field_width=16, field_height=12,
+                expected_domain_tag=domain_tag, input_domain_reset=False)
+
+    def test_geometry_verifier_accepts_optional_gpu_trace_and_matches_raw_decode(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest, _ = self._write_synthetic_geometry_dump(root)
+            input_region = json.loads((root / "depth_input_region.json").read_text())
+            self._attach_gpu_trace(root, manifest, input_region, 16, 12)
+            summary = dump_contract.verify_v2_dump_geometry(root)
+            self.assertTrue(summary["gpu_trace"]["available"])
+            self.assertEqual(summary["gpu_trace"]["record_count"], 1)
+            self.assertEqual(summary["gpu_trace"]["matched_sequence"], 1)
+
+    def test_gpu_trace_verifier_rejects_hash_auth_decode_contract_and_domain_tampering(self):
+        mutations = ("raw-hash", "receipt", "decoded", "contract", "domain", "torn-tag")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                manifest, _ = self._write_synthetic_geometry_dump(root)
+                input_region = json.loads((root / "depth_input_region.json").read_text())
+                self._attach_gpu_trace(root, manifest, input_region, 16, 12)
+                if mutation in {"raw-hash", "receipt", "domain", "torn-tag"}:
+                    path = root / "gpu_trace_ring.u32"
+                    words = list(struct.unpack(
+                        f"<{dump_contract.GPU_TRACE_RING_WORD_COUNT}I", path.read_bytes()))
+                    base = dump_contract.GPU_TRACE_HEADER_WORD_COUNT
+                    if mutation == "raw-hash":
+                        words[base + 24 + 1] ^= 1
+                        expected = "content hash mismatch"
+                    elif mutation == "receipt":
+                        words[base + 24 + 1] ^= 1
+                        expected = "depth disposition disagrees"
+                    elif mutation == "domain":
+                        words[base + 8] ^= 1
+                        expected = "disagrees with the dump domain"
+                    else:
+                        words[base + 1] = 0
+                        expected = "invalid committed record"
+                    payload = struct.pack(f"<{len(words)}I", *words)
+                    path.write_bytes(payload)
+                    if mutation != "raw-hash":
+                        manifest["artifacts"]["gpu_trace_ring.u32"]["sha256"] = (
+                            hashlib.sha256(payload).hexdigest())
+                        (root / "dump_manifest.json").write_text(json.dumps(manifest))
+                elif mutation == "decoded":
+                    path = root / "gpu_trace.json"
+                    document = json.loads(path.read_text())
+                    document["records"][0]["depth_disposition"]["name"] = "reuse"
+                    payload = json.dumps(document).encode()
+                    path.write_bytes(payload)
+                    manifest["artifacts"]["gpu_trace.json"]["sha256"] = (
+                        hashlib.sha256(payload).hexdigest())
+                    (root / "dump_manifest.json").write_text(json.dumps(manifest))
+                    expected = "disagrees with the authenticated raw ring"
+                else:
+                    path = root / "gpu_trace_contract.json"
+                    document = json.loads(path.read_text())
+                    document["record_word_offsets"]["subtitle_locator_begin"] += 1
+                    payload = json.dumps(document).encode()
+                    path.write_bytes(payload)
+                    manifest["artifacts"]["gpu_trace_contract.json"]["sha256"] = (
+                        hashlib.sha256(payload).hexdigest())
+                    (root / "dump_manifest.json").write_text(json.dumps(manifest))
+                    expected = "stale record_word_offsets"
+                with self.assertRaisesRegex(ValueError, expected):
+                    dump_contract.verify_v2_dump_geometry(root)
 
     def test_geometry_verifier_rejects_ownership_lowering(self):
         import hashlib

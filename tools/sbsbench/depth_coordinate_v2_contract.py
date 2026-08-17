@@ -70,11 +70,23 @@ SHADER_SOURCE_SPECS = (
     ("host_sbs_ocr_boxes_cs.hlsl", "resolve_main", "cs_5_0"),
     ("host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"),
     ("host_sbs_subtitle_locator_cs.hlsl", "condition_prepare_main", "cs_5_0"),
-    ("host_sbs_subtitle_locator_cs.hlsl", "condition_in_place_main", "cs_5_0"),
     ("host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"),
 )
+EXPECTED_FINAL_PARALLAX = {
+    "schema": 2,
+    "authority": "complete-atomic-subtitle-conditioned-r32f-live-render-authority",
+    "publication_policy": (
+        "authenticated-infer-or-cpu-known-publication-or-authenticated-cadence-due-"
+        "subtitle-publication-direct-render"),
+    "reuse_policy": (
+        "ordinary-reuse-holds-complete-depth-ocr-slr-final-tuple-byte-for-byte;"
+        "authenticated-cadence-due-reuse-holds-depth-and-publishes-current-ocr-or-"
+        "abstention-slr-final-tuple-against-retained-base"),
+    "invalid_policy": "fail-closed-flat",
+    "current_rgb_policy": "always-current-never-retained",
+}
 EXPECTED_SUBTITLE_OCR = {
-    "schema": 12,
+    "schema": 13,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
     "artifact_onnx_sha256": (
@@ -111,6 +123,12 @@ EXPECTED_SUBTITLE_OCR = {
         "locator_min_height_cells": 6,
         "locator_min_aspect_numerator": 2,
         "locator_min_aspect_denominator": 1,
+        "locator_provisional_min_vertical_overlap_numerator": 3,
+        "locator_provisional_min_vertical_overlap_denominator": 4,
+        "locator_provisional_max_height_ratio": 2,
+        "locator_provisional_max_center_y_delta_shorter_height": 1,
+        "locator_corner_edge_divisor": 32,
+        "locator_corner_bottom_rows": 16,
         "locator_match_iou_threshold": 0.6,
         "locator_death_grace_observations": 6,
         "locator_target_horizontal_fallback_max_radius_steps": 2,
@@ -145,16 +163,17 @@ EXPECTED_SUBTITLE_OCR = {
         "final_box_offset": 144, "final_box_capacity": 8,
     },
     "locator_state": {
-        "schema": 12, "tag": 0x32314C53, "word_count": 80,
+        "schema": 13, "tag": 0x33314C53, "word_count": 80,
         "header_word_count": 32, "rectangle_capacity": 4,
         "owner_offset": 32, "pending_offset": 48, "current_offset": 64,
         "kind_word": 31,
         "owner_kind_shift": 0, "pending_kind_shift": 4,
         "current_kind_shift": 8, "kind_mask": 15,
+        "provisional_current_flag": 1 << 4,
+        "provisional_target_word": 29, "provisional_fade_word": 30,
     },
     "condition_params": {
-        "schema": 2, "tag": 0x32504353, "word_count": 8,
-        "dispatch_arg_word_count": 3,
+        "schema": 3, "tag": 0x33504353, "word_count": 6,
     },
 }
 
@@ -215,6 +234,16 @@ class ShaderImplementation:
 
 
 @dataclass(frozen=True)
+class FinalParallaxContract:
+    schema: int
+    authority: str
+    publication_policy: str
+    reuse_policy: str
+    invalid_policy: str
+    current_rgb_policy: str
+
+
+@dataclass(frozen=True)
 class SubtitleOcrContract:
     schema: int
     logical_model: str
@@ -248,6 +277,12 @@ class SubtitleOcrContract:
     locator_min_height_cells: int
     locator_min_aspect_numerator: int
     locator_min_aspect_denominator: int
+    locator_provisional_min_vertical_overlap_numerator: int
+    locator_provisional_min_vertical_overlap_denominator: int
+    locator_provisional_max_height_ratio: int
+    locator_provisional_max_center_y_delta_shorter_height: int
+    locator_corner_edge_divisor: int
+    locator_corner_bottom_rows: int
     locator_match_iou_threshold: float
     locator_death_grace_observations: int
     locator_target_horizontal_fallback_max_radius_steps: int
@@ -296,10 +331,12 @@ class SubtitleOcrContract:
     locator_pending_kind_shift: int
     locator_current_kind_shift: int
     locator_kind_mask: int
+    locator_provisional_current_flag: int
+    locator_provisional_target_word: int
+    locator_provisional_fade_word: int
     condition_param_schema: int
     condition_param_tag: int
     condition_param_word_count: int
-    condition_dispatch_arg_word_count: int
 
 
 def _subtitle_ocr_contract(contract: dict[str, Any]) -> SubtitleOcrContract:
@@ -307,7 +344,7 @@ def _subtitle_ocr_contract(contract: dict[str, Any]) -> SubtitleOcrContract:
     if value != EXPECTED_SUBTITLE_OCR:
         raise ValueError(
             "depth-coordinate-v2 subtitle_ocr identity or ABI does not match the current "
-            "authenticated PP-OCRv6/OCR8/SLR12 contract")
+            "authenticated PP-OCRv6/OCR8/SLR13 contract")
     input_tensor = value["input_tensor"]
     output_tensor = value["output_tensor"]
     field_policy = value["field_policy"]
@@ -348,6 +385,16 @@ def _subtitle_ocr_contract(contract: dict[str, Any]) -> SubtitleOcrContract:
         locator_min_height_cells=field_policy["locator_min_height_cells"],
         locator_min_aspect_numerator=field_policy["locator_min_aspect_numerator"],
         locator_min_aspect_denominator=field_policy["locator_min_aspect_denominator"],
+        locator_provisional_min_vertical_overlap_numerator=field_policy[
+            "locator_provisional_min_vertical_overlap_numerator"],
+        locator_provisional_min_vertical_overlap_denominator=field_policy[
+            "locator_provisional_min_vertical_overlap_denominator"],
+        locator_provisional_max_height_ratio=field_policy[
+            "locator_provisional_max_height_ratio"],
+        locator_provisional_max_center_y_delta_shorter_height=field_policy[
+            "locator_provisional_max_center_y_delta_shorter_height"],
+        locator_corner_edge_divisor=field_policy["locator_corner_edge_divisor"],
+        locator_corner_bottom_rows=field_policy["locator_corner_bottom_rows"],
         locator_match_iou_threshold=float(field_policy["locator_match_iou_threshold"]),
         locator_death_grace_observations=field_policy[
             "locator_death_grace_observations"],
@@ -406,10 +453,12 @@ def _subtitle_ocr_contract(contract: dict[str, Any]) -> SubtitleOcrContract:
         locator_pending_kind_shift=locator["pending_kind_shift"],
         locator_current_kind_shift=locator["current_kind_shift"],
         locator_kind_mask=locator["kind_mask"],
+        locator_provisional_current_flag=locator["provisional_current_flag"],
+        locator_provisional_target_word=locator["provisional_target_word"],
+        locator_provisional_fade_word=locator["provisional_fade_word"],
         condition_param_schema=condition["schema"],
         condition_param_tag=condition["tag"],
         condition_param_word_count=condition["word_count"],
-        condition_dispatch_arg_word_count=condition["dispatch_arg_word_count"],
     )
 
 
@@ -447,6 +496,21 @@ def _shader_implementation(contract: dict[str, Any]) -> ShaderImplementation:
         source_macro_count=implementation["source_macro_count"],
         source_specs=tuple(parsed),
         source_closure_sha256=digest,
+    )
+
+
+def _final_parallax_contract(contract: dict[str, Any]) -> FinalParallaxContract:
+    value = contract.get("final_parallax")
+    if value != EXPECTED_FINAL_PARALLAX:
+        raise ValueError(
+            "depth-coordinate-v2 final_parallax contract is unsupported")
+    return FinalParallaxContract(
+        schema=value["schema"],
+        authority=value["authority"],
+        publication_policy=value["publication_policy"],
+        reuse_policy=value["reuse_policy"],
+        invalid_policy=value["invalid_policy"],
+        current_rgb_policy=value["current_rgb_policy"],
     )
 
 
@@ -603,6 +667,7 @@ def load_contract(path: Path = CONTRACT_PATH) -> dict[str, Any]:
         raise ValueError(
             "vertical_majorant_share and its complement must remain positive in float32")
     _shader_implementation(contract)
+    _final_parallax_contract(contract)
     _subtitle_ocr_contract(contract)
     _model_calibrations(contract)
     return contract
@@ -621,6 +686,7 @@ CAPTURE_PROVENANCE_SCHEMA = int(_CONTRACT["capture_provenance"]["schema"])
 CAPTURE_PROVENANCE_KEY = str(_CONTRACT["capture_provenance"]["manifest_key"])
 CAPTURE_PROVENANCE_BINDING = str(_CONTRACT["capture_provenance"]["binding"])
 SHADER_IMPLEMENTATION = _shader_implementation(_CONTRACT)
+FINAL_PARALLAX = _final_parallax_contract(_CONTRACT)
 SUBTITLE_OCR = _subtitle_ocr_contract(_CONTRACT)
 MODEL_CALIBRATIONS = _model_calibrations(_CONTRACT)
 
@@ -635,7 +701,7 @@ def subtitle_ocr_field_is_calibrated(field_width: int, field_height: int) -> boo
 
 
 def subtitle_target_is_representable_source_u(target: float) -> bool:
-    """Return whether an SLR12 target fits the authenticated signed parallax container."""
+    """Return whether an SLR13 target fits the authenticated signed parallax container."""
 
     value = _float32(target)
     return math.isfinite(value) and abs(value) <= _float32(
@@ -644,7 +710,7 @@ def subtitle_target_is_representable_source_u(target: float) -> bool:
 
 def _subtitle_row_observation(
         samples: tuple[float, ...], binocular_scale: float) -> tuple[bool, bool, float]:
-    """Return ``(valid, coherent, median)`` in SLR12's SM5 float32 order."""
+    """Return ``(valid, coherent, median)`` in SLR13's SM5 float32 order."""
 
     converted: list[float] = []
     for sample in samples:
@@ -675,14 +741,14 @@ def select_subtitle_local_plane_source_u(
         first_row: tuple[float, ...] | list[float],
         second_row: tuple[float, ...] | list[float],
         source_width: int) -> Optional[float]:
-    """Select SLR12's reliable local supporting plane from two independent rows.
+    """Select SLR13's reliable local supporting plane from two independent rows.
 
     Each row contains exactly 16 R32_FLOAT Base samples. A row is valid only when all of its
     samples are finite and fit the signed direct-parallax container, and is coherent when its
-    Tukey IQR is at most the generated binocular-pixel threshold. With no coherent row the
-    observation is unreliable. One valid coherent row is used alone. When both rows are valid and
-    at least one is coherent, close medians are averaged and separated medians select the larger
-    source-U value (the nearer supporting plane).
+    Tukey IQR is at most the generated binocular-pixel threshold. Two valid primary rows use their
+    robust medians without an IQR gate: close medians are averaged and separated medians select the
+    larger source-U value (the nearer supporting plane). With only one valid row, that row must
+    still be coherent before its median can stand in for the missing independent observation.
 
     All state-affecting arithmetic and comparisons are rounded to float32 in the same explicit
     order as the shader. The thresholds use only addition, subtraction, multiplication, and the
@@ -703,8 +769,6 @@ def select_subtitle_local_plane_source_u(
         tuple(first_row), binocular_scale)
     second_valid, second_coherent, second_median = _subtitle_row_observation(
         tuple(second_row), binocular_scale)
-    if not first_coherent and not second_coherent:
-        return None
     if first_valid and second_valid:
         median_delta = _float32(second_median - first_median)
         median_delta_pixels = _float32(abs(median_delta) * binocular_scale)
@@ -715,7 +779,9 @@ def select_subtitle_local_plane_source_u(
         return max(first_median, second_median)
     if first_coherent:
         return first_median
-    return second_median
+    if second_coherent:
+        return second_median
+    return None
 
 
 def select_subtitle_local_plane_fallback_probe_source_u(
@@ -769,7 +835,7 @@ def subtitle_target_fallback_strip_is_unclamped(
 def subtitle_target_probe_centers(
         cores: Sequence[tuple[int, int, int, int]],
         kinds: Sequence[int]) -> tuple[float, ...]:
-    """Return SLR12's aggregate primary and bounded near-center fallback positions.
+    """Return SLR13's aggregate primary and bounded near-center fallback positions.
 
     ``kinds`` uses the compact locator convention: zero is ordinary text and one is a ribbon.
     The primary remains the median of all owner-member centers. The fallback step is one sixteenth
@@ -836,7 +902,7 @@ def select_subtitle_local_plane_with_fallback_source_u(
         fallback_centers: Sequence[float],
         content_bounds: tuple[int, int],
         source_width: int) -> Optional[float]:
-    """Select the legacy primary or the first mutually consistent strict fallback radius.
+    """Select the primary or the first mutually consistent strict fallback radius.
 
     A reliable primary short-circuits exactly. Fallback is considered only after primary failure;
     every candidate needs an interior, unclamped strip and two coherent rows whose medians differ
@@ -971,6 +1037,9 @@ __all__ = [
     "CAPTURE_PROVENANCE_KEY",
     "CAPTURE_PROVENANCE_SCHEMA",
     "CalibratedDefaults",
+    "EXPECTED_FINAL_PARALLAX",
+    "FINAL_PARALLAX",
+    "FinalParallaxContract",
     "MODEL_CALIBRATIONS",
     "MODEL_CALIBRATION_KEYS",
     "ModelCalibration",

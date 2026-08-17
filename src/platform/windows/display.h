@@ -31,6 +31,7 @@
 // local includes
 #include "src/platform/common.h"
 #include "src/generated/sbs_adaptive_state_contract.h"
+#include "src/host_sbs_adaptive_submission.h"
 #include "src/utility.h"
 #include "src/video.h"
 
@@ -124,28 +125,28 @@ namespace platf::dxgi {
     inline constexpr auto host_sbs_full_source_reuse_max_age =
       std::chrono::milliseconds {250};
     inline constexpr unsigned host_sbs_full_source_reuse_max_skips = 16u;
-    inline constexpr auto host_sbs_low_motion_reuse_max_age =
-      std::chrono::milliseconds {50};
-    inline constexpr unsigned host_sbs_low_motion_reuse_max_skips = 1u;
-    inline constexpr auto host_sbs_adaptive_motion_hold_max_age =
-      std::chrono::milliseconds {50};
+    inline constexpr auto host_sbs_gpu_observation_owner_max_age =
+      std::chrono::microseconds {
+        models::gpu_adaptive_max_infer_owner_observation_age_us
+      };
     // Same-frame completion polling is allowed only inside encode-loop cadence slack. The
     // downstream reserve covers completed-depth postprocess, SBS warp/output, and NVENC submit;
     // late/high-rate frames therefore remain on the ordinary nonblocking path.
+    // Low-rate streams have more real cadence slack, so let the scheduler-owned target expand the
+    // wait beyond the original 3 ms tail. The absolute cap bounds added presentation latency and
+    // yielded-query CPU time even when the next cadence target is far away.
     inline constexpr auto host_sbs_same_frame_poll_max_wait =
-      std::chrono::milliseconds {3};
+      std::chrono::milliseconds {8};
     inline constexpr auto host_sbs_same_frame_poll_downstream_reserve =
       std::chrono::milliseconds {3};
     inline constexpr auto host_sbs_same_frame_poll_min_budget =
       std::chrono::microseconds {250};
     inline constexpr std::uint32_t host_sbs_same_frame_poll_max_queries = 4096u;
-    // 1 / 400 = 0.25%. Keep this integer-ratio contract exact and overflow-free.
-    inline constexpr std::uint64_t host_sbs_low_motion_damage_ratio_denominator = 400u;
-
     struct host_sbs_same_frame_poll_plan_t {
       std::chrono::steady_clock::time_point deadline {};
       std::chrono::steady_clock::duration budget {};
       bool eligible = false;
+      bool limited_by_hard_cap = false;
     };
 
     enum class host_sbs_same_frame_poll_hit_bucket_e : std::uint8_t {
@@ -166,11 +167,12 @@ namespace platf::dxgi {
       if (wait_duration <= std::chrono::microseconds {2500}) {
         return host_sbs_same_frame_poll_hit_bucket_e::between_2_and_2_5_ms;
       }
-      if (wait_duration <= host_sbs_same_frame_poll_max_wait) {
+      if (wait_duration <= std::chrono::milliseconds {3}) {
         return host_sbs_same_frame_poll_hit_bucket_e::between_2_5_and_3_ms;
       }
-      // A ready query can finish just after its nominal deadline when the render thread or driver
-      // is descheduled. Keep that rare scheduler tail explicit instead of hiding it in <= 3 ms.
+      // With cadence-adaptive polling this is the intentional extended readiness tail. The
+      // separate planned-budget and timeout-limit telemetry distinguishes useful slack from a
+      // hard-cap or cadence-bound miss.
       return host_sbs_same_frame_poll_hit_bucket_e::over_3_ms;
     }
 
@@ -196,6 +198,39 @@ namespace platf::dxgi {
                host_sbs_same_frame_completion_e::discard_ready;
     }
 
+    /** Partition every newly submitted same-frame query into exactly one diagnostic outcome. */
+    enum class host_sbs_same_frame_poll_outcome_e : std::uint8_t {
+      immediate_hit,
+      wait_hit,
+      cadence_ineligible_busy,
+      eligible_timeout,
+      ready_failure,
+      wait_unavailable_busy,
+    };
+
+    [[nodiscard]] constexpr host_sbs_same_frame_poll_outcome_e
+    host_sbs_same_frame_poll_outcome(
+      const bool plan_eligible,
+      const bool wait_attempted,
+      const bool timed_out,
+      const host_sbs_same_frame_completion_e completion
+    ) noexcept {
+      if (completion == host_sbs_same_frame_completion_e::adopt_exact) {
+        return wait_attempted ?
+                 host_sbs_same_frame_poll_outcome_e::wait_hit :
+                 host_sbs_same_frame_poll_outcome_e::immediate_hit;
+      }
+      if (completion == host_sbs_same_frame_completion_e::discard_ready) {
+        return host_sbs_same_frame_poll_outcome_e::ready_failure;
+      }
+      if (!plan_eligible) {
+        return host_sbs_same_frame_poll_outcome_e::cadence_ineligible_busy;
+      }
+      return timed_out ?
+               host_sbs_same_frame_poll_outcome_e::eligible_timeout :
+               host_sbs_same_frame_poll_outcome_e::wait_unavailable_busy;
+    }
+
     /** Bound a newly submitted matched-frame transaction query by the encode cadence scheduler.
      * Capture/content timestamps are deliberately absent: they identify pixels but do not own the
      * encode deadline. An unavailable, late, or too-small budget fails open to nonblocking output.
@@ -217,11 +252,13 @@ namespace platf::dxgi {
         return {};
       }
       const auto hard_deadline = now + host_sbs_same_frame_poll_max_wait;
-      const auto deadline = std::min(cadence_deadline, hard_deadline);
+      const bool limited_by_hard_cap = hard_deadline <= cadence_deadline;
+      const auto deadline = limited_by_hard_cap ? hard_deadline : cadence_deadline;
       return {
         deadline,
         deadline - now,
         true,
+        limited_by_hard_cap,
       };
     }
 
@@ -229,25 +266,17 @@ namespace platf::dxgi {
       none,
       exact_content,
       exact_roi_damage,
-      bounded_tiny_motion,
     };
 
-    /** Approximate providers share one anti-chaining latch without entering cache authority. */
+    /** GPU-undecided admission has one anti-chaining latch outside opaque follow-ups. */
     enum class host_sbs_approximate_reuse_provider_e : std::uint8_t {
       none,
-      low_motion,
       gpu_undecided,
-    };
-
-    enum class host_sbs_depth_reuse_exactness_e : std::uint8_t {
-      exact,
-      approximate,
     };
 
     enum class host_sbs_depth_reuse_refresh_e : std::uint8_t {
       none,
       bounded_content,
-      bounded_approximate,
     };
 
     /** CPU-side disposition using host metadata only.
@@ -265,10 +294,16 @@ namespace platf::dxgi {
     [[nodiscard]] constexpr host_sbs_depth_admission_e host_sbs_depth_admission(
       const bool cached_reuse_authorized,
       const bool gpu_undecided_eligible,
-      const bool must_observe
+      const bool must_observe,
+      const bool opaque_followup_authorized = false
     ) noexcept {
       if (must_observe) {
-        return host_sbs_depth_admission_e::force_infer;
+        // The observation barrier continues to block every host-owned cache path. It may admit
+        // only the immediately-prior opaque follow-up: the authenticated device history owner
+        // compares after infer and forces inference after reuse/invalid without branch readback.
+        return opaque_followup_authorized && gpu_undecided_eligible ?
+                 host_sbs_depth_admission_e::gpu_undecided :
+                 host_sbs_depth_admission_e::force_infer;
       }
       if (cached_reuse_authorized) {
         return host_sbs_depth_admission_e::reuse_cached;
@@ -277,59 +312,25 @@ namespace platf::dxgi {
                                       host_sbs_depth_admission_e::force_infer;
     }
 
-    /** Require a force-infer observation after every GPU-owned decision.
-     *
-     * The CPU never reads the conditional branch. A frame-id watermark therefore prevents an
-     * older force-infer completion, returned while a newer conditional transaction is submitted,
-     * from accidentally releasing the barrier. Route/reset/failure decisions remain
-     * caller-owned; only an accepted authenticated current-route force-infer completion may call
-     * `record_known_force_infer_completion(..., true)`.
-     */
-    class host_sbs_gpu_observation_barrier_t {
-    public:
-      constexpr void reset() noexcept {
-        conditional_frame_id_ = 0u;
-      }
+    [[nodiscard]] constexpr bool host_sbs_gpu_followup_fresh(
+      const std::uint64_t anchor_frame_id,
+      const std::uint64_t barrier_frame_id,
+      const std::chrono::steady_clock::time_point enqueued_at,
+      const std::chrono::steady_clock::time_point now
+    ) noexcept {
+      return anchor_frame_id != 0u && anchor_frame_id == barrier_frame_id &&
+             enqueued_at.time_since_epoch().count() != 0 &&
+             now.time_since_epoch().count() != 0 && now >= enqueued_at &&
+             now - enqueued_at < host_sbs_gpu_observation_owner_max_age;
+    }
 
-      constexpr void record_gpu_undecided_enqueue(
-        const std::uint64_t frame_id
-      ) noexcept {
-        if (frame_id != 0u) {
-          conditional_frame_id_ = std::max(conditional_frame_id_, frame_id);
-        }
-      }
-
-      [[nodiscard]] constexpr bool record_known_force_infer_completion(
-        const std::uint64_t frame_id,
-        const bool accepted
-      ) noexcept {
-        if (
-          conditional_frame_id_ == 0u || !accepted ||
-          frame_id <= conditional_frame_id_
-        ) {
-          return false;
-        }
-        reset();
-        return true;
-      }
-
-      [[nodiscard]] constexpr bool active() const noexcept {
-        return conditional_frame_id_ != 0u;
-      }
-
-      [[nodiscard]] constexpr std::uint64_t conditional_frame_id() const noexcept {
-        return conditional_frame_id_;
-      }
-
-    private:
-      std::uint64_t conditional_frame_id_ = 0u;
-    };
+    /** Live alias of the shared production/offline conditional transaction policy. */
+    using host_sbs_gpu_observation_barrier_t =
+      models::gpu_adaptive_transaction_policy_t;
 
     /** One current-color/cache/render authority regardless of proof acquisition path. */
     struct host_sbs_depth_reuse_authorization_t {
       host_sbs_depth_reuse_kind_e kind = host_sbs_depth_reuse_kind_e::none;
-      host_sbs_depth_reuse_exactness_e exactness =
-        host_sbs_depth_reuse_exactness_e::exact;
       host_sbs_depth_reuse_refresh_e refresh =
         host_sbs_depth_reuse_refresh_e::none;
       std::uint64_t baseline_frame_id = 0u;
@@ -348,19 +349,10 @@ namespace platf::dxgi {
             return false;
           case host_sbs_depth_reuse_kind_e::exact_content:
           case host_sbs_depth_reuse_kind_e::exact_roi_damage:
-            return exactness == host_sbs_depth_reuse_exactness_e::exact &&
-                   refresh == host_sbs_depth_reuse_refresh_e::bounded_content;
-          case host_sbs_depth_reuse_kind_e::bounded_tiny_motion:
-            return exactness == host_sbs_depth_reuse_exactness_e::approximate &&
-                   refresh == host_sbs_depth_reuse_refresh_e::bounded_approximate;
+            return refresh == host_sbs_depth_reuse_refresh_e::bounded_content;
         }
         return false;
       }
-
-      [[nodiscard]] constexpr bool exact() const noexcept {
-        return valid() && exactness == host_sbs_depth_reuse_exactness_e::exact;
-      }
-
     };
 
     [[nodiscard]] constexpr host_sbs_depth_reuse_authorization_t
@@ -383,33 +375,33 @@ namespace platf::dxgi {
         case host_sbs_depth_reuse_kind_e::exact_roi_damage:
           result.refresh = host_sbs_depth_reuse_refresh_e::bounded_content;
           break;
-        case host_sbs_depth_reuse_kind_e::bounded_tiny_motion:
-          result.exactness = host_sbs_depth_reuse_exactness_e::approximate;
-          result.refresh = host_sbs_depth_reuse_refresh_e::bounded_approximate;
-          break;
       }
       return result.valid() ? result : host_sbs_depth_reuse_authorization_t {};
     }
 
     class ddup_damage_history_t;
 
-    /** Display-owned broad-DDup candidate retained across the private-copy route recheck. */
+    /** Display-owned complete-DDup candidate retained across the private-copy route recheck. */
     struct host_sbs_gpu_undecided_candidate_t {
       std::uint64_t baseline_frame_id = 0u;
       std::uint64_t current_frame_id = 0u;
       const ddup_damage_history_t *damage_history = nullptr;
       std::uint64_t baseline_damage_token = 0u;
       std::uint64_t current_damage_token = 0u;
-      bool broad_damage = false;
+      bool damage_history_complete = false;
+      bool opaque_followup = false;
 
       [[nodiscard]] constexpr bool valid() const noexcept {
         return baseline_frame_id != 0u && current_frame_id > baseline_frame_id &&
                damage_history != nullptr && baseline_damage_token != 0u &&
-               current_damage_token > baseline_damage_token && broad_damage;
+               current_damage_token > baseline_damage_token &&
+               damage_history_complete;
       }
     };
 
-    /** Approximate providers cannot chain without an intervening real inference. */
+    /** Host-owned approximate providers cannot chain without an intervening known inference.
+     * Device-authenticated opaque follow-ups are admitted separately under the barrier contract.
+     */
     [[nodiscard]] constexpr bool host_sbs_approximate_reuse_provider_allowed(
       const host_sbs_approximate_reuse_provider_e prior_since_enqueue,
       const host_sbs_approximate_reuse_provider_e candidate,
@@ -460,19 +452,6 @@ namespace platf::dxgi {
               producer_terminal);
     }
 
-    /** Production-independent selector for the default-off completed-cache experiment. */
-    [[nodiscard]] constexpr bool host_sbs_low_motion_cache_reuse_allowed(
-      const bool experiment_enabled,
-      const bool dedup_gate_open,
-      const bool cache_authenticated,
-      const bool inference_pending,
-      const bool damage_candidate,
-      const bool refresh_allowed
-    ) noexcept {
-      return experiment_enabled && dedup_gate_open && cache_authenticated &&
-             !inference_pending && damage_candidate && refresh_allowed;
-    }
-
     /** Cache-independent live route fingerprint for invalidating predictive evidence. */
     struct host_sbs_adaptive_motion_route_epoch_t {
       std::uint32_t source_width = 0u;
@@ -516,10 +495,11 @@ namespace platf::dxgi {
       hold_same_identity,
     };
 
-    /** Own the one-hold cadence for GPU near-identical reuse.
+    /** Own initial-candidate cadence for GPU near-identical reuse.
      *
-     * A candidate consumes the arm. A real observation must be enqueued before another
-     * approximate hold may be armed.
+     * A candidate consumes the host arm. Device-authenticated opaque follow-ups are governed by
+     * their separate route/age/owner contract; a real observation must be enqueued before another
+     * initial host candidate may be armed.
      */
     class host_sbs_adaptive_hold_cadence_t {
     public:
@@ -558,7 +538,7 @@ namespace platf::dxgi {
           const bool fresh = last_enqueued_at_.time_since_epoch().count() != 0 &&
                              now >= last_enqueued_at_ &&
                              now - last_enqueued_at_ <
-                               host_sbs_adaptive_motion_hold_max_age;
+                               host_sbs_gpu_observation_owner_max_age;
           if (refresh_identity_ && *identity == *refresh_identity_ && fresh) {
             return host_sbs_adaptive_hold_decision_e::hold_same_identity;
           }
@@ -567,7 +547,7 @@ namespace platf::dxgi {
         const bool fresh = last_enqueued_at_.time_since_epoch().count() != 0 &&
                            now >= last_enqueued_at_ &&
                            now - last_enqueued_at_ <
-                             host_sbs_adaptive_motion_hold_max_age;
+                             host_sbs_gpu_observation_owner_max_age;
         if (armed_ && candidate_eligible && fresh) {
           armed_ = false;
           refresh_required_ = true;
@@ -585,8 +565,8 @@ namespace platf::dxgi {
       /** Revalidate the consumed candidate immediately before GPU submission.
        *
        * Private frame copy and live-authority checks happen after `observe_changed()`. A delayed
-       * submit must not extend the 50 ms one-hold budget merely because the arm was consumed while
-       * it was still fresh.
+       * submit must not extend the shared observation-owner budget merely because the arm was
+       * consumed while it was still fresh.
        */
       [[nodiscard]] constexpr bool hold_candidate_still_fresh(
         const std::optional<std::chrono::steady_clock::time_point> &identity,
@@ -596,7 +576,7 @@ namespace platf::dxgi {
                *identity == *refresh_identity_ &&
                last_enqueued_at_.time_since_epoch().count() != 0 &&
                now >= last_enqueued_at_ &&
-               now - last_enqueued_at_ < host_sbs_adaptive_motion_hold_max_age;
+               now - last_enqueued_at_ < host_sbs_gpu_observation_owner_max_age;
       }
 
     private:
@@ -635,48 +615,6 @@ namespace platf::dxgi {
         return !last_enqueued_at_ ||
                skipped_ >= host_sbs_full_source_reuse_max_skips ||
                now - *last_enqueued_at_ >= host_sbs_full_source_reuse_max_age;
-      }
-
-      [[nodiscard]] constexpr unsigned skipped() const noexcept {
-        return skipped_;
-      }
-
-    private:
-      std::optional<std::chrono::steady_clock::time_point> last_enqueued_at_;
-      unsigned skipped_ = 0u;
-    };
-
-    /** Separate quality-surface bound for approximate low-motion holds.
-     *
-     * Exact DDup reuse retains the wider 16/250 cap above. Approximate reuse gets one delivery
-     * and 50 ms from the last real enqueue; exact holds neither consume nor refresh this budget.
-     */
-    class host_sbs_low_motion_refresh_state_t {
-    public:
-      constexpr void reset() noexcept {
-        last_enqueued_at_.reset();
-        skipped_ = 0u;
-      }
-
-      constexpr void record_successful_enqueue(
-        const std::chrono::steady_clock::time_point now
-      ) noexcept {
-        last_enqueued_at_ = now;
-        skipped_ = 0u;
-      }
-
-      constexpr void record_reuse() noexcept {
-        if (skipped_ < host_sbs_low_motion_reuse_max_skips) {
-          ++skipped_;
-        }
-      }
-
-      [[nodiscard]] constexpr bool reuse_allowed(
-        const std::chrono::steady_clock::time_point now
-      ) const noexcept {
-        return last_enqueued_at_ &&
-               skipped_ < host_sbs_low_motion_reuse_max_skips &&
-               now - *last_enqueued_at_ < host_sbs_low_motion_reuse_max_age;
       }
 
       [[nodiscard]] constexpr unsigned skipped() const noexcept {
@@ -832,28 +770,15 @@ namespace platf::dxgi {
       std::uint64_t max_single_intersection_area = 0u;
     };
 
-    [[nodiscard]] constexpr bool host_sbs_low_motion_damage_candidate(
-      const ddup_damage_coverage_t &coverage,
-      const bool ocr_crop_unchanged
-    ) noexcept {
-      return coverage.known && ocr_crop_unchanged && coverage.region_area != 0u &&
-             coverage.potentially_changed_area <=
-               coverage.region_area /
-                 host_sbs_low_motion_damage_ratio_denominator;
-    }
-
-    /** Broad-only depth opportunity for GPU adaptive reuse.
+    /** Complete DDup history is admission evidence, never a similarity verdict.
      *
-     * Localized changes are intentionally excluded for small-object/UI sensitivity. A single
-     * normalized DDup rectangle must cover at least half the analysis region. GPU arbitration
-     * freezes OCR/SLR until its required force-infer observation.
+     * Every authority-valid changed frame may reach the device detector. Localized/broad shape is
+     * deliberately absent: the authenticated current-vs-history tensor comparison owns reuse.
      */
-    [[nodiscard]] constexpr bool host_sbs_adaptive_motion_broad_damage_candidate(
+    [[nodiscard]] constexpr bool host_sbs_adaptive_motion_damage_candidate(
       const ddup_damage_coverage_t &coverage
     ) noexcept {
-      return coverage.known && coverage.region_area != 0u &&
-             coverage.max_single_intersection_area >=
-               (coverage.region_area + 1u) / 2u;
+      return coverage.known && coverage.region_area != 0u;
     }
 
     /** One acquired DDup present's normalized dirty coverage.
@@ -938,7 +863,6 @@ namespace platf::dxgi {
     [[nodiscard]] constexpr host_sbs_depth_reuse_authorization_t
     select_host_sbs_cached_depth_reuse(
       const host_sbs_ddup_reuse_proof_e exact_proof,
-      const bool bounded_tiny_motion_allowed,
       const std::uint64_t baseline_frame_id,
       const std::uint64_t current_frame_id
     ) noexcept {
@@ -960,14 +884,7 @@ namespace platf::dxgi {
         case host_sbs_ddup_reuse_proof_e::none:
           break;
       }
-      return bounded_tiny_motion_allowed ?
-               make_host_sbs_depth_reuse_authorization(
-                 host_sbs_depth_reuse_kind_e::bounded_tiny_motion,
-                 baseline_frame_id,
-                 current_frame_id,
-                 true
-               ) :
-               host_sbs_depth_reuse_authorization_t {};
+      return {};
     }
 
     /** Classify the pixel proof for bounded current-color reuse.

@@ -3,16 +3,17 @@
  * @brief Lightweight per-stage performance collector for the host SBS 3D pipeline.
  *
  * The perf benchmark (see tools/sbsbench/METRICS.md): each pipeline stage pushes timing
- * samples in milliseconds; a rolling p50/p95/max summary is logged every N frames. The
+ * samples in milliseconds; a rolling min/mean/p50/p95/max summary is logged every N frames. The
  * offline harness can explicitly snapshot that window to JSON. Collection follows the global
  * `diagnostics` config switch; all entry points are cheap no-ops when disabled.
  *
- * Live samples from the sole active encode pipeline form one recent process-wide system-load
- * window. A small mutex guards the maps and explicit harness snapshots.
+ * Live samples from all active encode pipelines form one recent process-wide system-load window.
+ * A small mutex guards the maps and explicit harness snapshots.
  *
  * GPU-stream stages (TensorRT depth/warp/inpaint inference) are measured with CUDA events
  * inside the estimator and the resolved elapsed-ms handed here via add_sample_ms(); this
- * module has no CUDA/D3D dependency of its own.
+ * module has no CUDA/D3D dependency of its own. Timing distributions do not identify or count a
+ * branch inside an opaque GPU conditional transaction.
  */
 #pragma once
 
@@ -36,7 +37,7 @@ namespace sbs_perf {
   void add_sample_ms_if_current(const char *stage, double ms, std::uint64_t expected_generation);
 
   /// Call once per SBS convert(): advances the frame counter and, every summary_interval
-  /// frames, logs a rolling p50/p95/max line. It never performs filesystem I/O.
+  /// frames, logs a rolling min/mean/p50/p95/max line. It never performs filesystem I/O.
   void tick();
 
   /// Drop all accumulated samples. Live diagnostics intentionally aggregate across active

@@ -57,7 +57,6 @@ namespace config {
     struct sbs_t {
       double pop_strength = 1.75;  ///< Literal live V2 stereo strength (0.25-2) and offline conversion base strength.
       int max_encode_width = 8192;  ///< Configured packed Host SBS width cap. Output also respects both runtime NVENC axes (RTX 5080: H.264 4096x4096, HEVC/AV1 8192x8192) with aspect-preserving scaling.
-      bool cuda_graph = true;  ///< Capture/replay the TensorRT enqueue when mapped D3D buffer addresses remain stable. Falls back to ordinary enqueue when unsupported.
     };
 
     sbs_t sbs;

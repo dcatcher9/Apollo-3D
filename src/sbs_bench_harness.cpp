@@ -45,7 +45,10 @@
   #include "crypto.h"
   #include "depth_coordinate_v2.h"
   #include "generated/sbs_adaptive_state_contract.h"
+  #include "host_sbs_gpu_trace.h"
+  #include "host_sbs_observation_timeline.h"
   #include "host_sbs_shader_cache.h"
+  #include "host_sbs_v2_geometry.h"
   #include "logging.h"
   #include "offline_sbs_contract.h"
   #include "sbs_perf.h"
@@ -2120,6 +2123,283 @@ namespace sbs_bench {
       return valid_adaptive_state_words(words);
     }
 
+    bool read_gpu_trace_ring(
+      ID3D11Device *dev,
+      ID3D11DeviceContext *ctx,
+      ID3D11ShaderResourceView *srv,
+      ComPtr<ID3D11Buffer> &stage_cache,
+      std::vector<std::uint32_t> &words
+    ) {
+      using namespace models::host_sbs_gpu_trace;
+      if (!srv) {
+        return false;
+      }
+      ComPtr<ID3D11Resource> resource;
+      srv->GetResource(&resource);
+      ComPtr<ID3D11Buffer> buffer;
+      if (FAILED(resource.As(&buffer))) {
+        return false;
+      }
+      D3D11_BUFFER_DESC desc {};
+      buffer->GetDesc(&desc);
+      if (
+        desc.ByteWidth != ring_byte_count ||
+        desc.StructureByteStride != sizeof(std::uint32_t)
+      ) {
+        return false;
+      }
+      bool recreate = !stage_cache;
+      if (!recreate) {
+        D3D11_BUFFER_DESC stage_desc {};
+        stage_cache->GetDesc(&stage_desc);
+        recreate = stage_desc.ByteWidth != desc.ByteWidth;
+      }
+      if (recreate) {
+        D3D11_BUFFER_DESC stage_desc = desc;
+        stage_desc.Usage = D3D11_USAGE_STAGING;
+        stage_desc.BindFlags = 0u;
+        stage_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stage_desc.MiscFlags = 0u;
+        stage_desc.StructureByteStride = 0u;
+        stage_cache.Reset();
+        if (FAILED(dev->CreateBuffer(&stage_desc, nullptr, &stage_cache))) {
+          return false;
+        }
+      }
+      ctx->CopyResource(stage_cache.Get(), buffer.Get());
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(ctx->Map(stage_cache.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) {
+        return false;
+      }
+      words.resize(ring_word_count);
+      std::memcpy(words.data(), mapped.pData, ring_byte_count);
+      ctx->Unmap(stage_cache.Get(), 0u);
+      return
+        words[word_index(header_word_e::schema)] == ring_schema &&
+        words[word_index(header_word_e::tag)] == ring_tag &&
+        words[word_index(header_word_e::capacity)] == capacity &&
+        words[word_index(header_word_e::record_words)] == record_word_count;
+    }
+
+    struct gpu_trace_replay_summary_t {
+      std::uint32_t committed_count = 0u;
+      std::uint64_t next_sequence = 0u;
+      std::size_t force_submissions = 0u;
+      std::size_t gpu_undecided_submissions = 0u;
+      std::size_t depth_infer = 0u;
+      std::size_t depth_reuse = 0u;
+      std::size_t subtitle_suppressed = 0u;
+      std::size_t optional_ocr = 0u;
+      std::size_t subtitle_abstention = 0u;
+      std::size_t subtitle_held_with_depth = 0u;
+      std::uint64_t newest_frame_id = 0u;
+      std::uint64_t newest_analysis_generation = 0u;
+      std::uint64_t newest_domain_tag = 0u;
+      std::uint32_t newest_source_width = 0u;
+      std::uint32_t newest_source_height = 0u;
+      std::uint32_t newest_field_width = 0u;
+      std::uint32_t newest_field_height = 0u;
+      bool newest_input_domain_reset = false;
+    };
+
+    bool validate_complete_gpu_trace_replay(
+      const std::vector<std::uint32_t> &words,
+      const std::vector<std::uint64_t> &expected_observation_timestamps,
+      const std::size_t expected_count,
+      const std::size_t expected_force_submissions,
+      const std::size_t expected_gpu_submissions,
+      const std::uint64_t expected_newest_frame_id,
+      const std::uint64_t expected_analysis_generation,
+      const std::uint64_t expected_domain_tag,
+      const std::uint32_t expected_source_width,
+      const std::uint32_t expected_source_height,
+      const std::uint32_t expected_field_width,
+      const std::uint32_t expected_field_height,
+      const bool expected_newest_input_domain_reset,
+      gpu_trace_replay_summary_t &summary
+    ) {
+      using namespace models::host_sbs_gpu_trace;
+      summary = {};
+      if (words.size() != ring_word_count || expected_count == 0u ||
+          expected_count > capacity || expected_newest_frame_id < expected_count ||
+          expected_observation_timestamps.size() < expected_newest_frame_id) {
+        return false;
+      }
+      const auto header = [&words](const header_word_e field) {
+        return words[word_index(field)];
+      };
+      if (header(header_word_e::schema) != ring_schema ||
+          header(header_word_e::tag) != ring_tag ||
+          header(header_word_e::capacity) != capacity ||
+          header(header_word_e::record_words) != record_word_count) {
+        return false;
+      }
+      for (std::size_t index = word_index(header_word_e::reserved_begin);
+           index < header_word_count; ++index) {
+        if (words[index] != 0u) {
+          return false;
+        }
+      }
+      summary.next_sequence = join_u64(
+        header(header_word_e::next_sequence_low),
+        header(header_word_e::next_sequence_high)
+      );
+      const auto next_slot = header(header_word_e::next_slot);
+      summary.committed_count = header(header_word_e::committed_count);
+      if (next_slot >= capacity || summary.committed_count != expected_count ||
+          summary.next_sequence <= summary.committed_count) {
+        return false;
+      }
+
+      const auto oldest_sequence = summary.next_sequence - summary.committed_count;
+      const auto oldest_slot =
+        (next_slot + capacity - summary.committed_count) % capacity;
+      const auto expected_oldest_frame =
+        expected_newest_frame_id - summary.committed_count + 1u;
+      for (std::uint32_t ordinal = 0u; ordinal < summary.committed_count; ++ordinal) {
+        const auto slot = (oldest_slot + ordinal) % capacity;
+        const auto base = record_base(slot);
+        const auto record = [base, &words](const record_word_e field) {
+          return words[base + word_index(field)];
+        };
+        const auto expected_frame_id = expected_oldest_frame + ordinal;
+        const auto expected_observation_timestamp =
+          expected_observation_timestamps[expected_frame_id - 1u];
+        if (record(record_word_e::schema) != ring_schema ||
+            record(record_word_e::commit_tag) != record_tag ||
+            join_u64(
+              record(record_word_e::sequence_low),
+              record(record_word_e::sequence_high)
+            ) != oldest_sequence + ordinal ||
+            join_u64(record(record_word_e::frame_low), record(record_word_e::frame_high)) !=
+              expected_frame_id ||
+            expected_observation_timestamp == 0u ||
+            join_u64(
+              record(record_word_e::observation_timestamp_low),
+              record(record_word_e::observation_timestamp_high)
+            ) != expected_observation_timestamp ||
+            record(record_word_e::transaction_words) != transaction_word_count ||
+            record(record_word_e::reserved0) != 0u ||
+            record(record_word_e::source_width) != expected_source_width ||
+            record(record_word_e::source_height) != expected_source_height ||
+            record(record_word_e::field_width) != expected_field_width ||
+            record(record_word_e::field_height) != expected_field_height ||
+            join_u64(
+              record(record_word_e::analysis_generation_low),
+              record(record_word_e::analysis_generation_high)
+            ) != expected_analysis_generation ||
+            join_u64(
+              record(record_word_e::domain_tag_low),
+              record(record_word_e::domain_tag_high)
+            ) != expected_domain_tag) {
+          return false;
+        }
+        for (std::size_t index = word_index(record_word_e::reserved_begin);
+             index < record_word_count; ++index) {
+          if (words[base + index] != 0u) {
+            return false;
+          }
+        }
+
+        const auto submission_class = static_cast<submission_class_e>(
+          record(record_word_e::submission_class)
+        );
+        if (submission_class == submission_class_e::force_infer) {
+          ++summary.force_submissions;
+        } else if (submission_class == submission_class_e::gpu_undecided) {
+          ++summary.gpu_undecided_submissions;
+        } else {
+          return false;
+        }
+        std::array<std::uint32_t, transaction_word_count> transaction {};
+        for (std::size_t index = 0u; index < transaction.size(); ++index) {
+          transaction[index] = words[
+            base + word_index(record_word_e::transaction_begin) + index
+          ];
+        }
+        const auto token = join_u64(
+          record(record_word_e::transaction_token_low),
+          record(record_word_e::transaction_token_high)
+        );
+        const auto receipt = authenticate_receipt(
+          transaction,
+          token,
+          record(record_word_e::expected_work),
+          submission_class
+        );
+        if (!receipt.receipt_valid ||
+            record(record_word_e::depth_disposition) !=
+              static_cast<std::uint32_t>(receipt.depth)) {
+          return false;
+        }
+        if (receipt.depth == depth_disposition_e::infer) {
+          ++summary.depth_infer;
+        } else if (receipt.depth == depth_disposition_e::reuse) {
+          ++summary.depth_reuse;
+        } else {
+          return false;
+        }
+        const auto flags = record(record_word_e::flags);
+        const auto subtitle = classify_subtitle_disposition(
+          record(record_word_e::expected_work),
+          static_cast<host_subtitle_outcome_e>(
+            record(record_word_e::host_subtitle_outcome)
+          ),
+          receipt,
+          flags
+        );
+        if (subtitle == subtitle_disposition_e::invalid ||
+            record(record_word_e::subtitle_disposition) !=
+              static_cast<std::uint32_t>(subtitle)) {
+          return false;
+        }
+        if (subtitle == subtitle_disposition_e::suppressed) {
+          ++summary.subtitle_suppressed;
+        } else if (subtitle == subtitle_disposition_e::optional_ocr) {
+          ++summary.optional_ocr;
+        } else if (subtitle == subtitle_disposition_e::abstention) {
+          ++summary.subtitle_abstention;
+        } else if (subtitle == subtitle_disposition_e::held_with_depth) {
+          ++summary.subtitle_held_with_depth;
+        }
+
+        if (ordinal + 1u == summary.committed_count) {
+          summary.newest_frame_id = join_u64(
+            record(record_word_e::frame_low), record(record_word_e::frame_high)
+          );
+          summary.newest_analysis_generation = join_u64(
+            record(record_word_e::analysis_generation_low),
+            record(record_word_e::analysis_generation_high)
+          );
+          summary.newest_domain_tag = join_u64(
+            record(record_word_e::domain_tag_low),
+            record(record_word_e::domain_tag_high)
+          );
+          summary.newest_source_width = record(record_word_e::source_width);
+          summary.newest_source_height = record(record_word_e::source_height);
+          summary.newest_field_width = record(record_word_e::field_width);
+          summary.newest_field_height = record(record_word_e::field_height);
+          summary.newest_input_domain_reset = (flags & input_domain_reset) != 0u;
+        }
+      }
+      return summary.force_submissions == expected_force_submissions &&
+             summary.gpu_undecided_submissions == expected_gpu_submissions &&
+             summary.force_submissions + summary.gpu_undecided_submissions == expected_count &&
+             summary.depth_infer + summary.depth_reuse == expected_count &&
+             summary.subtitle_held_with_depth <= summary.depth_reuse &&
+             summary.subtitle_suppressed + summary.optional_ocr +
+                 summary.subtitle_abstention + summary.subtitle_held_with_depth ==
+               expected_count &&
+             summary.newest_frame_id == expected_newest_frame_id &&
+             summary.newest_analysis_generation == expected_analysis_generation &&
+             summary.newest_domain_tag == expected_domain_tag &&
+             summary.newest_source_width == expected_source_width &&
+             summary.newest_source_height == expected_source_height &&
+             summary.newest_field_width == expected_field_width &&
+             summary.newest_field_height == expected_field_height &&
+             summary.newest_input_domain_reset == expected_newest_input_domain_reset;
+    }
+
     bool write_adaptive_state_header(
       std::ostream &out,
       const std::string_view model_name,
@@ -2378,14 +2658,14 @@ namespace sbs_bench {
       return blob;
     }
 
-    template<int N>
-    ComPtr<ID3D11Buffer> const_buffer(ID3D11Device *dev, const float (&params)[N]) {
-      static_assert(N % 4 == 0, "cbuffer must be 16-byte aligned");
+    template<class T>
+    ComPtr<ID3D11Buffer> const_buffer(ID3D11Device *dev, const T &params) {
+      static_assert(sizeof(T) % 16u == 0u, "cbuffer must be 16-byte aligned");
       D3D11_BUFFER_DESC bd = {};
-      bd.ByteWidth = N * 4;  // 16-byte aligned
+      bd.ByteWidth = static_cast<UINT>(sizeof(T));
       bd.Usage = D3D11_USAGE_IMMUTABLE;
       bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-      D3D11_SUBRESOURCE_DATA sd = {params, 0, 0};
+      D3D11_SUBRESOURCE_DATA sd = {&params, 0, 0};
       ComPtr<ID3D11Buffer> b;
       dev->CreateBuffer(&bd, &sd, &b);
       return b;
@@ -2414,13 +2694,21 @@ namespace sbs_bench {
     struct opts {
       std::string frames, out, direct_parallax_root;
       std::string depth_coordinate_v2_manifest, capabilities;
-      std::string scene_cache, render_cache, scene_plan;
+      std::string scene_cache, render_cache, scene_plan, observation_timeline;
       artifact_mode_e artifacts = artifact_mode_e::evaluation;
       bool follow = false;
       // Offline worker transport: publish one atomic header and one replace-in-place frame
       // snapshot. The consumer ACKs each frame before the producer can advance, so retaining
       // an ever-growing JSONL history is unnecessary.
       bool bounded_adaptive_state = false;
+      // Maintained replay of the live estimator's device-owned infer/reuse branch. The shared
+      // transaction policy is production code; only unavailable DDup/window/cadence admission is
+      // replaced by the ordered offline corpus. run_adaptive_replay.py owns its A/B gate.
+      bool device_conditional_replay = false;
+      // Force-infer oracle for the same private replay evidence contract. This is intentionally
+      // separate from ordinary schema-22 run_eval output so adaptive diagnostics cannot silently
+      // expand the formal evaluator contract.
+      bool device_conditional_replay_control = false;
       std::string follow_format;
       std::size_t follow_count = 0;  // optional producer frame-count upper bound
       int eye_w = 0;  // 0 -> derive from source aspect; set with eye_h to test letterboxing
@@ -2432,7 +2720,6 @@ namespace sbs_bench {
       int max_width = 0;  // 0 -> use config max_encode_width
       int limit = 0;  // 0 -> all
       int output_every = 1;  // process every input for temporal state; dump only every Nth
-      int cuda_graph = -1;  // -1 = conf, 0 = ordinary enqueue, 1 = CUDA graph replay
     };
 
     bool parse_opts(int argc, char **argv, opts &o) {
@@ -2453,6 +2740,12 @@ namespace sbs_bench {
           o.follow = true;
         } else if (a == "--bounded-adaptive-state") {
           o.bounded_adaptive_state = true;
+        } else if (a == "--observation-timeline") {
+          o.observation_timeline = next("--observation-timeline");
+        } else if (a == "--device-conditional-replay") {
+          o.device_conditional_replay = true;
+        } else if (a == "--device-conditional-replay-control") {
+          o.device_conditional_replay_control = true;
         } else if (a == "--follow-format") {
           o.follow_format = next("--follow-format");
         } else if (a == "--follow-count") {
@@ -2507,16 +2800,6 @@ namespace sbs_bench {
           o.direct_parallax_root = next("--direct-parallax-root");
         } else if (a == "--depth-coordinate-v2-manifest") {
           o.depth_coordinate_v2_manifest = next("--depth-coordinate-v2-manifest");
-        } else if (a == "--cuda-graph") {
-          std::string v = next("--cuda-graph");
-          if (v == "on" || v == "1" || v == "true") {
-            o.cuda_graph = 1;
-          } else if (v == "off" || v == "0" || v == "false") {
-            o.cuda_graph = 0;
-          } else {
-            BOOST_LOG(error) << "sbs-bench: --cuda-graph must be on or off";
-            return false;
-          }
         } else {
           BOOST_LOG(error) << "sbs-bench: unknown arg '" << a << "'";
           return false;
@@ -2555,6 +2838,32 @@ namespace sbs_bench {
                "are mutually exclusive";
           return false;
         }
+      }
+      if (o.device_conditional_replay && o.device_conditional_replay_control) {
+        BOOST_LOG(error)
+          << "sbs-bench: --device-conditional-replay and "
+             "--device-conditional-replay-control are mutually exclusive";
+        return false;
+      }
+      if ((o.device_conditional_replay || o.device_conditional_replay_control) &&
+          o.observation_timeline.empty()) {
+        BOOST_LOG(error)
+          << "sbs-bench: device-conditional replay/control requires --observation-timeline";
+        return false;
+      }
+      if (
+        (o.device_conditional_replay || o.device_conditional_replay_control) &&
+        (
+          o.artifacts != artifact_mode_e::evaluation || o.follow ||
+          !o.scene_cache.empty() || !o.render_cache.empty() ||
+          !o.scene_plan.empty() || direct_geometry_input_count != 0u ||
+          o.output_every != 1
+        )
+      ) {
+        BOOST_LOG(error)
+          << "sbs-bench: device-conditional replay evidence requires evaluation artifacts, "
+             "output cadence 1, and forbids follow, caches, scene plans, and direct replay";
+        return false;
       }
       if (!o.render_cache.empty()) {
         if (o.artifacts != artifact_mode_e::conversion ||
@@ -2662,6 +2971,8 @@ namespace sbs_bench {
           }},
           {"follow_protocol_schema", 1},
           {"follow_global_first_sequence", true},
+          {"observation_timeline_schema", models::host_sbs_observation_timeline::schema},
+          {"observation_timeline_unit", "monotonic-source-us-plus-one"},
           {"adaptive_state_schema", sbs_adaptive_state::schema_version},
           {"adaptive_state_contract_tag", sbs_adaptive_state::cut_contract_tag},
           {"adaptive_state_contract_canonical_sha256",
@@ -2775,6 +3086,16 @@ namespace sbs_bench {
         frames.resize(o.limit);
       }
     }
+    if (
+      o.device_conditional_replay &&
+      frames.size() > models::host_sbs_gpu_trace::capacity
+    ) {
+      BOOST_LOG(error)
+        << "sbs-bench: --device-conditional-replay is limited to the complete "
+        << models::host_sbs_gpu_trace::capacity
+        << "-record diagnostic ring; select a shorter clip or use --limit";
+      return 4;
+    }
     if (!o.follow && frames.empty()) {
       BOOST_LOG(error) << "sbs-bench: no supported "
                        << (o.artifacts == artifact_mode_e::evaluation ?
@@ -2782,6 +3103,32 @@ namespace sbs_bench {
                              "png/jpg/PFM")
                        << " frames in " << o.frames;
       return 4;
+    }
+    std::vector<std::uint64_t> observation_timestamps;
+    std::string observation_timeline_sha256;
+    if (!o.observation_timeline.empty()) {
+      std::string timeline_error;
+      if (!models::host_sbs_observation_timeline::read(
+            o.observation_timeline,
+            observation_timestamps,
+            timeline_error
+          )) {
+        BOOST_LOG(error) << "sbs-bench: invalid --observation-timeline: " << timeline_error;
+        return 4;
+      }
+      const auto expected_timeline_count = o.follow ? o.follow_count : frames.size();
+      if (expected_timeline_count == 0u ||
+          observation_timestamps.size() != expected_timeline_count) {
+        BOOST_LOG(error)
+          << "sbs-bench: observation timeline count " << observation_timestamps.size()
+          << " does not match the selected source frame count " << expected_timeline_count;
+        return 4;
+      }
+      observation_timeline_sha256 = sha256_file_hex(o.observation_timeline);
+      if (observation_timeline_sha256.empty()) {
+        BOOST_LOG(error) << "sbs-bench: could not hash --observation-timeline";
+        return 4;
+      }
     }
     fs::create_directories(o.out, ec);
     if (ec) {
@@ -2831,9 +3178,6 @@ namespace sbs_bench {
     if (o.pop_strength >= 0.0) {
       sbs_cfg.pop_strength = o.pop_strength;
     }
-    if (o.cuda_graph >= 0) {
-      sbs_cfg.cuda_graph = (o.cuda_graph != 0);
-    }
     config::sunshine.diagnostics_enabled = true;  // benchmark processes always measure
     sbs_perf::set_enabled(true);
     sbs_perf::reset();
@@ -2848,10 +3192,15 @@ namespace sbs_bench {
     const bool external_direct_parallax_mode = !o.direct_parallax_root.empty();
     const bool direct_parallax_mode =
       external_direct_parallax_mode || depth_coordinate_v2_gpu_mode;
+    // This is provenance, not a mode switch. Every inference-producing run requires the joined
+    // conditional wrapper. Reference/cache replays perform no TensorRT inference at all.
+    const bool inference_wrapper_required = !replay_mode && !direct_parallax_mode;
     const auto &cut_state_trace_contract = depth_coordinate_v2_gpu_mode ?
       sbs_adaptive_state::gpu_replay_cut_trace_contract :
       sbs_adaptive_state::production_cut_trace_contract;
     const bool whole_clip_mode = o.artifacts != artifact_mode_e::evaluation;
+    const bool device_conditional_replay_evidence =
+      o.device_conditional_replay || o.device_conditional_replay_control;
     const bool writes_adaptive_state = whole_clip_mode && !replay_mode;
     const bool hdr_texture_input = pfm_input || o.simulate_hdr;
     const std::string discovered_input_frame_format =
@@ -3200,6 +3549,7 @@ namespace sbs_bench {
     ComPtr<ID3D11Texture2D> ema_mask_stage;
     ComPtr<ID3D11Buffer> raw_depth_stage;
     ComPtr<ID3D11Texture2D> structure_field_stage;
+    ComPtr<ID3D11Texture2D> final_parallax_field_stage;
     ComPtr<ID3D11Buffer> cut_state_stage;
     ComPtr<ID3D11Texture2D> scene_cache_depth_stage;
     ComPtr<ID3D11Buffer> scene_cache_state_stage;
@@ -3222,6 +3572,13 @@ namespace sbs_bench {
     models::estimate_result est;
     bool cuda_graph_captured = false;
     std::size_t tensorrt_enqueue_count = 0;
+    models::gpu_adaptive_transaction_policy_t device_conditional_policy;
+    models::gpu_adaptive_ocr_cadence_t device_conditional_ocr_cadence;
+    std::uint64_t device_conditional_known_force_frame_id = 0u;
+    std::size_t device_conditional_force_submissions = 0u;
+    std::size_t device_conditional_gpu_submissions = 0u;
+    ComPtr<ID3D11Buffer> device_conditional_trace_stage;
+    std::vector<std::uint32_t> device_conditional_trace_words;
     bool scene_cache_contract_started = false;
     scene_cache_metadata scene_cache_metadata_value;
     std::size_t scene_plan_index = 0;
@@ -3437,19 +3794,13 @@ namespace sbs_bench {
         const float eye_aspect = (float) eye_w / (float) eye_h;
         const float content_scale_x = eye_aspect > aspect ? aspect / eye_aspect : 1.0f;
         const float content_scale_y = eye_aspect < aspect ? eye_aspect / aspect : 1.0f;
-        // Exact production b2 layout. Bench/replay stays full-frame, so ROI is disabled and the
-        // second register carries the canonical full-source rectangle.
-        float repro_params[8] = {
+        // Bench/replay stays full-frame, so ROI is disabled. Upload the exact shared 48-byte
+        // production b2 ABI, including its dormant tensor-content register.
+        const auto repro_geometry = models::make_host_sbs_v2_full_frame_geometry(
           content_scale_x,
-          content_scale_y,
-          0.0f,
-          0.0f,
-          0.0f,
-          0.0f,
-          1.0f,
-          1.0f,
-        };
-        repro_cb = const_buffer(dev.Get(), repro_params);
+          content_scale_y
+        );
+        repro_cb = const_buffer(dev.Get(), repro_geometry);
         if (!repro_cb) {
           BOOST_LOG(error) << "sbs-bench: reprojection constant-buffer creation failed";
           return 6;
@@ -3665,19 +4016,72 @@ namespace sbs_bench {
         // the 1-based global sequence.
         const auto estimator_frame_id =
           static_cast<std::uint64_t>(global_sequence);
+        const auto observation_timestamp_us = observation_timestamps.empty() ?
+                                                0u :
+                                                observation_timestamps.at(global_sequence - 1u);
+        const auto replay_optional_work = device_conditional_replay_evidence ?
+          device_conditional_ocr_cadence.select_mode(observation_timestamp_us) :
+          models::depth_optional_work_mode_e::ordinary;
         // An empty, non-ROI request is resolved by the estimator to the complete supplied
         // raster. State it explicitly here so this headless selected-file path can never inherit
         // a live window-region request from another caller.
         const models::depth_input_region_t offline_full_frame_request {};
-        estimator->estimate_depth(
+        models::gpu_adaptive_reuse_request replay_request {
+          .observation_timestamp_us = observation_timestamp_us,
+        };
+        if (o.device_conditional_replay) {
+          const bool opaque_followup = device_conditional_policy.active();
+          const auto baseline_frame_id = opaque_followup ?
+                                           device_conditional_policy
+                                             .conditional_frame_id() :
+                                           device_conditional_known_force_frame_id;
+          replay_request = device_conditional_policy.make_request(
+            estimator_frame_id,
+            baseline_frame_id != 0u,
+            opaque_followup,
+            baseline_frame_id,
+            observation_timestamp_us
+          );
+        }
+        const auto submitted = estimator->estimate_depth(
           in_srv.Get(),
           input_color,
           estimator_frame_id,
           false,
-          offline_full_frame_request
+          offline_full_frame_request,
+          replay_optional_work,
+          replay_request
         );
+        const bool submitted_force = submitted.inference_enqueued;
+        const bool submitted_gpu_undecided =
+          submitted.gpu_undecided_transaction_enqueued;
+        const auto replay_submission_class =
+          o.device_conditional_replay ?
+            device_conditional_policy.record_submission(
+              estimator_frame_id,
+              replay_request,
+              submitted_force,
+              submitted_gpu_undecided
+            ) :
+            (o.device_conditional_replay_control && submitted_force &&
+             !submitted_gpu_undecided ?
+               models::gpu_adaptive_submission_class_e::force_infer :
+               models::gpu_adaptive_submission_class_e::invalid);
+        device_conditional_ocr_cadence.record_accepted(
+          replay_optional_work,
+          replay_submission_class,
+          observation_timestamp_us
+        );
+        if (o.device_conditional_replay &&
+            replay_submission_class ==
+              models::gpu_adaptive_submission_class_e::invalid) {
+          BOOST_LOG(error)
+            << "sbs-bench: device-conditional replay frame " << output_id
+            << " violated the shared production adaptive transaction policy";
+          return 6;
+        }
         est = estimator->finish_pending_depth_for_evaluation(input_color);
-        if (whole_clip_mode &&
+        if ((whole_clip_mode || o.device_conditional_replay) &&
             (!est.completed_frame_valid ||
              est.completed_frame_id != estimator_frame_id)) {
           BOOST_LOG(error) << "sbs-bench: scheduled depth update for source frame "
@@ -3697,6 +4101,21 @@ namespace sbs_bench {
             << (estimator->has_terminal_failure() ? "true" : "false")
             << "); aborting the run";
           return 6;
+        }
+        if (o.device_conditional_replay) {
+          switch (replay_submission_class) {
+            case models::gpu_adaptive_submission_class_e::gpu_undecided:
+              ++device_conditional_gpu_submissions;
+              break;
+            case models::gpu_adaptive_submission_class_e::force_infer:
+              ++device_conditional_force_submissions;
+              device_conditional_known_force_frame_id = estimator_frame_id;
+              (void) device_conditional_policy
+                .record_known_force_infer_completion(estimator_frame_id, true);
+              break;
+            case models::gpu_adaptive_submission_class_e::invalid:
+              return 6;
+          }
         }
         if (
           whole_clip_mode &&
@@ -4278,6 +4697,43 @@ namespace sbs_bench {
               return 6;
             }
 
+            if (device_conditional_replay_evidence) {
+              // Private adaptive replay evidence records the complete atomic DAV2/OCR/SLR field
+              // sampled directly by the renderer.
+              const auto dump_replay_field = [&] (
+                ID3D11ShaderResourceView *field,
+                const char *role,
+                const fs::path &path,
+                ComPtr<ID3D11Texture2D> &stage
+              ) {
+                ComPtr<ID3D11Resource> resource;
+                ComPtr<ID3D11Texture2D> texture;
+                if (!field ||
+                    (field->GetResource(&resource), FAILED(resource.As(&texture)))) {
+                  BOOST_LOG(error) << "sbs-bench: adaptive replay frame " << output_id
+                                   << " published no " << role << " field";
+                  return false;
+                }
+                if (!dump_float_texture(
+                      dev.Get(), ctx.Get(), texture.Get(), path, stage
+                    )) {
+                  BOOST_LOG(error) << "sbs-bench: failed writing " << path;
+                  return false;
+                }
+                return true;
+              };
+              const auto final_parallax_path =
+                fs::path(o.out) / ("final_parallax_" + output_id + ".f32");
+              if (!dump_replay_field(
+                    est.shadow_final_parallax.Get(),
+                    "final parallax",
+                    final_parallax_path,
+                    final_parallax_field_stage
+                  )) {
+                return 6;
+              }
+            }
+
           }
           // The fixed live calibration keeps the edge-selective EMA enabled, so the moving-edge
           // snap mask remains a per-frame evaluation artifact.
@@ -4331,6 +4787,136 @@ namespace sbs_bench {
         BOOST_LOG(info) << "sbs-bench: processed " << (fi + 1)
                         << (o.follow ? " follow frames" :
                                        "/" + std::to_string(frames.size()));
+      }
+    }
+
+    if (o.device_conditional_replay) {
+      if (
+        !est.completed_frame_valid || !est.gpu_trace_ring ||
+        !est.gpu_trace_provenance ||
+        est.gpu_trace_provenance->source_closure_schema !=
+          models::host_sbs_shader_cache::source_closure_schema ||
+        est.gpu_trace_provenance->source_compile_flags !=
+          models::host_sbs_shader_cache::shader_compile_flags ||
+        est.gpu_trace_provenance->source_macro_count != 0u ||
+        est.gpu_trace_provenance->source_closure_sha256 !=
+          models::host_sbs_shader_cache::gpu_trace_source_closure_sha256 ||
+        !read_gpu_trace_ring(
+          dev.Get(),
+          ctx.Get(),
+          est.gpu_trace_ring.Get(),
+          device_conditional_trace_stage,
+          device_conditional_trace_words
+        )
+      ) {
+        BOOST_LOG(error)
+          << "sbs-bench: device-conditional replay did not publish a current, readable GPU "
+             "trace ring";
+        return 8;
+      }
+      const auto trace_domain = models::near_identical_input_domain_tag(
+        est.input_region,
+        est.color_space,
+        static_cast<std::uint32_t>(est.raw_width),
+        static_cast<std::uint32_t>(est.raw_height)
+      );
+      gpu_trace_replay_summary_t trace_summary;
+      if (!validate_complete_gpu_trace_replay(
+            device_conditional_trace_words,
+            observation_timestamps,
+            processed_frame_count,
+            device_conditional_force_submissions,
+            device_conditional_gpu_submissions,
+            est.completed_frame_id,
+            est.input_region.analysis_generation,
+            trace_domain,
+            est.input_region.source_width,
+            est.input_region.source_height,
+            static_cast<std::uint32_t>(est.raw_width),
+            static_cast<std::uint32_t>(est.raw_height),
+            est.input_domain_reset,
+            trace_summary
+          )) {
+        BOOST_LOG(error)
+          << "sbs-bench: device-conditional replay GPU trace is incomplete, torn, or "
+             "inconsistent with the submitted frame sequence";
+        return 8;
+      }
+      const fs::path raw_trace_path =
+        fs::path(o.out) / "device_conditional_gpu_trace_ring.u32";
+      std::ofstream raw_trace(raw_trace_path, std::ios::binary | std::ios::trunc);
+      raw_trace.write(
+        reinterpret_cast<const char *>(device_conditional_trace_words.data()),
+        static_cast<std::streamsize>(
+          device_conditional_trace_words.size() * sizeof(std::uint32_t)
+        )
+      );
+      raw_trace.flush();
+      if (!raw_trace.good()) {
+        BOOST_LOG(error)
+          << "sbs-bench: cannot write device-conditional GPU trace ring";
+        return 8;
+      }
+
+      using namespace models::host_sbs_gpu_trace;
+      const nlohmann::ordered_json replay_trace_contract {
+        {"schema", 3},
+        {"role", "shared production estimator transaction and OCR cadence; offline ordered full-frame admission"},
+        {"raw_trace", raw_trace_path.filename().string()},
+        {"ring", {
+          {"schema", ring_schema},
+          {"tag", ring_tag},
+          {"capacity", capacity},
+          {"record_words", record_word_count},
+          {"committed_count", trace_summary.committed_count},
+          {"next_sequence", trace_summary.next_sequence},
+        }},
+        {"capture_match", {
+          {"matched_frame_id", est.completed_frame_id},
+          {"analysis_generation", est.input_region.analysis_generation},
+          {"source_width", est.input_region.source_width},
+          {"source_height", est.input_region.source_height},
+          {"field_width", est.raw_width},
+          {"field_height", est.raw_height},
+          {"domain_tag", trace_domain},
+          {"input_domain_reset", est.input_domain_reset},
+        }},
+        {"submission_counts", {
+          {"force", device_conditional_force_submissions},
+          {"gpu_undecided", device_conditional_gpu_submissions},
+        }},
+        {"authenticated_device_dispositions", {
+          {"infer", trace_summary.depth_infer},
+          {"reuse", trace_summary.depth_reuse},
+        }},
+        {"authenticated_subtitle_dispositions", {
+          {"suppressed", trace_summary.subtitle_suppressed},
+          {"optional_ocr", trace_summary.optional_ocr},
+          {"abstention", trace_summary.subtitle_abstention},
+          {"held_with_depth", trace_summary.subtitle_held_with_depth},
+        }},
+        {"per_frame_artifact_scope", {
+          {"current_output", "sbs_*.png and authenticated final_parallax_*.f32"},
+          {"branch_dependent", "depth/raw/structure/ema artifacts are branch-dependent/frozen: current on infer and retained from the last infer on reuse"},
+          {"do_not_interpret_as", "current-frame DAV2 inference evidence without the authenticated trace disposition"},
+        }},
+        {"gpu_trace_source", {
+          {"closure_schema", est.gpu_trace_provenance->source_closure_schema},
+          {"compile_flags", est.gpu_trace_provenance->source_compile_flags},
+          {"macro_count", est.gpu_trace_provenance->source_macro_count},
+          {"closure_sha256", est.gpu_trace_provenance->source_closure_sha256},
+        }},
+      };
+      std::ofstream replay_trace_meta(
+        fs::path(o.out) / "device_conditional_replay.json",
+        std::ios::binary | std::ios::trunc
+      );
+      replay_trace_meta << replay_trace_contract.dump(2) << '\n';
+      replay_trace_meta.flush();
+      if (!replay_trace_meta.good()) {
+        BOOST_LOG(error)
+          << "sbs-bench: cannot write device-conditional replay metadata";
+        return 8;
       }
     }
 
@@ -4444,19 +5030,59 @@ namespace sbs_bench {
         return 8;
       }
       // Machine-readable execution contract. Evaluation must not scrape human log prose. The
-      // Independent evaluation-harness schema 22 attests the V2-only configuration surface;
+      // independent evaluation-harness schema 22 attests the formal V2-only configuration
+      // surface. Private adaptive replay uses schemas 26 (treatment) and 27 (force oracle) so its
+      // additional exact-field evidence cannot silently expand run_eval's schema-22 contract;
       // it is unrelated to Dump 3D and the independently versioned DVC2 contract (the direct-replay schema stays
       // pinned by its own validator).
       std::ofstream contract(fs::path(o.out) / "contract.json");
       if (contract) {
         contract << "{\n"
                  << "  \"schema\": "
-                 << (direct_parallax_mode ? direct_geometry_contract_schema : 22u)
+                 << (direct_parallax_mode ?
+                       direct_geometry_contract_schema :
+                        (o.device_conditional_replay ?
+                           26u : (o.device_conditional_replay_control ? 27u : 22u)))
                  << ",\n"
                  << "  \"model\": " << json_string(model.name) << ",\n"
-                 << "  \"depth_step\": \"current-once\",\n"
-                 << "  \"depth_reuse_interval\": 1,\n"
+                 << "  \"depth_step\": "
+                 << json_string(
+                      o.device_conditional_replay ?
+                        "gpu-device-conditional" :
+                        (o.device_conditional_replay_control ?
+                           "force-current-adaptive-replay" : "current-once")
+                    )
+                 << ",\n"
+                 << "  \"depth_reuse_interval\": "
+                 << (o.device_conditional_replay ? "null" : "1") << ",\n"
                  << "  \"pop_strength\": " << sbs_cfg.pop_strength << ",\n";
+        if (!observation_timestamps.empty()) {
+          contract
+            << "  \"observation_timeline\": {\"schema\": "
+            << models::host_sbs_observation_timeline::schema
+            << ", \"timestamp_unit\": \"monotonic-source-us-plus-one\", \"count\": "
+            << observation_timestamps.size()
+            << ", \"sha256\": " << json_string(observation_timeline_sha256) << "},\n";
+        }
+        if (o.device_conditional_replay) {
+          contract
+            << "  \"device_conditional_replay\": {"
+               "\"enabled\": true, "
+               "\"scope\": \"shared estimator transaction/OCR cadence; offline full-frame admission\", "
+               "\"bootstrap\": \"force-infer\", "
+               "\"followup\": \"gpu-owned-infer-or-reuse\", "
+               "\"raw_trace\": \"device_conditional_gpu_trace_ring.u32\", "
+               "\"metadata\": \"device_conditional_replay.json\", "
+               "\"force_submissions\": "
+            << device_conditional_force_submissions
+            << ", \"gpu_undecided_submissions\": "
+            << device_conditional_gpu_submissions << "},\n";
+        } else if (o.device_conditional_replay_control) {
+          contract
+            << "  \"device_conditional_replay_control\": {"
+               "\"enabled\": true, "
+               "\"scope\": \"force-infer oracle for private adaptive replay\"},\n";
+        }
         if (!direct_parallax_mode) {
           const auto &provenance = *est.raw_model_provenance;
           contract
@@ -4471,6 +5097,39 @@ namespace sbs_bench {
             << json_string(provenance.preprocess_source_closure_sha256)
             << ", \"raw_width\": " << est.raw_width
             << ", \"raw_height\": " << est.raw_height << "},\n";
+          if (device_conditional_replay_evidence) {
+            contract
+              << "  \"adaptive_conditional\": {"
+                 "\"request_policy_schema\": "
+              << models::gpu_adaptive_transaction_policy_schema
+              << ", \"near_identical_detector_source_closure_sha256\": "
+              << json_string(
+                   models::host_sbs_shader_cache::
+                     near_identical_detector_source_closure_sha256)
+              << "},\n";
+            contract
+              << "  \"final_parallax_field\": {"
+                 "\"file_pattern\": \"final_parallax_<frame-id>.f32\", "
+                 "\"dtype\": \"float32-le\", \"layout\": \"row-major\", "
+                 "\"authority\": "
+              << json_string(std::string(
+                   models::depth_coordinate_v2::final_parallax_authority))
+              << ", \"contract_schema\": "
+              << models::depth_coordinate_v2::final_parallax_contract_schema
+              << ", \"publication_policy\": "
+              << json_string(std::string(
+                   models::depth_coordinate_v2::final_parallax_publication_policy))
+              << ", \"reuse_policy\": "
+              << json_string(std::string(
+                   models::depth_coordinate_v2::final_parallax_reuse_policy))
+              << ", \"invalid_policy\": "
+              << json_string(std::string(
+                   models::depth_coordinate_v2::final_parallax_invalid_policy))
+              << ", \"current_rgb_policy\": "
+              << json_string(std::string(
+                   models::depth_coordinate_v2::final_parallax_current_rgb_policy))
+              << "},\n";
+          }
         }
         if (direct_parallax_mode) {
           contract << "  \"warp_input\": "
@@ -4562,7 +5221,7 @@ namespace sbs_bench {
                  << "  \"parallax_v2_render\": "
                  << (external_direct_parallax_mode ? "false" : "true")
                  << ",\n"
-                 << "  \"cuda_graph\": " << (sbs_cfg.cuda_graph ? "true" : "false") << ",\n"
+                 << "  \"cuda_graph\": " << (inference_wrapper_required ? "true" : "false") << ",\n"
                  << "  \"cuda_graph_captured\": " << (cuda_graph_captured ? "true" : "false") << ",\n"
                  << "  \"cut_state\": {\"file\": \"cut_state.json\", "
                     "\"schema\": " << cut_state_trace_contract.schema
@@ -4699,6 +5358,15 @@ namespace sbs_bench {
         << json_string(offline_sbs::whole_clip_analysis_region)
         << ", \"active_window_dependency\": false, "
            "\"window_region_roi\": false},\n"
+        << "  \"observation_timeline\": "
+        << (observation_timestamps.empty() ?
+              std::string {"null"} :
+              std::string {"{\"schema\":"} +
+                std::to_string(models::host_sbs_observation_timeline::schema) +
+                ",\"timestamp_unit\":\"monotonic-source-us-plus-one\",\"count\":" +
+                std::to_string(observation_timestamps.size()) +
+                ",\"sha256\":" + json_string(observation_timeline_sha256) + "}")
+        << ",\n"
         << "  \"artifact_mode\": " << json_string(artifact_mode_name(o.artifacts)) << ",\n"
         << "  \"inference_mode\": "
         << json_string(replay_mode ? "scene-cache-replay" :
@@ -4739,7 +5407,7 @@ namespace sbs_bench {
         << "    \"depth_height\": " << est.raw_height << ",\n"
         << "    \"depth_reuse_interval\": " << effective_depth_every << ",\n"
         << "    \"cuda_graph\": "
-        << (sbs_cfg.cuda_graph ? "true" : "false") << ",\n"
+        << (inference_wrapper_required ? "true" : "false") << ",\n"
         << "    \"parallax_v2_shadow\": false,\n"
         << "    \"parallax_v2_render\": "
         << "true,\n"

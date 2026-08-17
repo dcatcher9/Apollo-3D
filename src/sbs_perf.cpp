@@ -52,7 +52,7 @@ namespace sbs_perf {
     };
 
     struct summary {
-      double p50 = 0, p95 = 0, max = 0, mean = 0;
+      double min = 0, p50 = 0, p95 = 0, max = 0, mean = 0;
       size_t n = 0;
     };
 
@@ -69,6 +69,7 @@ namespace sbs_perf {
         sum += x;
       }
       out.mean = sum / (double) out.n;
+      out.min = v.front();
       out.max = v.back();
       auto pick = [&](double q) {
         size_t idx = (size_t) (q * (double) (out.n - 1) + 0.5);
@@ -102,6 +103,7 @@ namespace sbs_perf {
         }
         first = false;
         f << "    \"" << name << "\": {"
+          << "\"min_ms\": " << s.min << ", "
           << "\"p50_ms\": " << s.p50 << ", "
           << "\"p95_ms\": " << s.p95 << ", "
           << "\"max_ms\": " << s.max << ", "
@@ -169,9 +171,13 @@ namespace sbs_perf {
       if (s.n == 0) {
         continue;
       }
-      char buf[160];
-      snprintf(buf, sizeof(buf), " %s p50=%.2f p95=%.2f max=%.2f (n=%zu) |",
-        name.c_str(), s.p50, s.p95, s.max, s.n);
+      char buf[224];
+      snprintf(
+        buf,
+        sizeof(buf),
+        " %s min=%.2f mean=%.2f p50=%.2f p95=%.2f max=%.2f (n=%zu) |",
+        name.c_str(), s.min, s.mean, s.p50, s.p95, s.max, s.n
+      );
       line += buf;
     }
     if (!line.empty() && line.back() == '|') {

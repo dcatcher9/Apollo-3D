@@ -157,35 +157,6 @@ namespace {
     );
   }
 
-  TEST(WindowsDdupDamageTest, OcrBandUsesHalfOpenDamageEdges) {
-    using enum platf::dxgi::detail::ddup_damage_intersection_e;
-    const auto crop = models::subtitle_ocr_source_crop_rect(
-      models::depth_source_rect_t {100u, 200u, 1060u, 740u}
-    );
-    ASSERT_TRUE(crop);
-    const RECT ocr_band {
-      static_cast<LONG>(crop->left),
-      static_cast<LONG>(crop->top),
-      static_cast<LONG>(crop->right),
-      static_cast<LONG>(crop->bottom),
-    };
-    auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
-    const auto baseline = history->commit({true, {}});
-    const auto touches_top = history->commit({true, {{100, 560, 1060, 580}}});
-    const auto enters_top = history->commit({true, {{100, 579, 1060, 581}}});
-
-    EXPECT_EQ(
-      platf::dxgi::detail::query_ddup_damage_between(
-        baseline, touches_top, ocr_band),
-      unchanged
-    );
-    EXPECT_EQ(
-      platf::dxgi::detail::query_ddup_damage_between(
-        touches_top, enters_top, ocr_band),
-      changed
-    );
-  }
-
   TEST(WindowsDdupDamageTest, ClassifiesFullContentAndExactRoiProofsSeparately) {
     using enum platf::dxgi::detail::host_sbs_ddup_reuse_proof_e;
     using clock_t = std::chrono::steady_clock;
@@ -380,75 +351,6 @@ namespace {
     EXPECT_EQ(saturated_coverage.max_single_intersection_area, 10000u);
   }
 
-  TEST(WindowsDdupDamageTest, LowMotionCandidateUsesExactQuarterPercentAndOcrGate) {
-    using platf::dxgi::detail::ddup_damage_coverage_t;
-    using platf::dxgi::detail::host_sbs_low_motion_damage_candidate;
-
-    EXPECT_TRUE(host_sbs_low_motion_damage_candidate(
-      ddup_damage_coverage_t {25u, 10000u, true},
-      true
-    ));
-    EXPECT_FALSE(host_sbs_low_motion_damage_candidate(
-      ddup_damage_coverage_t {26u, 10000u, true},
-      true
-    ));
-    EXPECT_FALSE(host_sbs_low_motion_damage_candidate(
-      ddup_damage_coverage_t {25u, 10000u, true},
-      false
-    ));
-    EXPECT_FALSE(host_sbs_low_motion_damage_candidate(
-      ddup_damage_coverage_t {0u, 10000u, false},
-      true
-    ));
-  }
-
-  TEST(WindowsDdupDamageTest, LowMotionCoverageAccumulatesFromAcceptedBaseline) {
-    auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
-    const auto accepted = history->commit({true, {}});
-    const auto first_delivery = history->commit({true, {{0, 0, 10, 1}}});
-    const auto second_delivery = history->commit({true, {{10, 0, 20, 1}}});
-    const auto third_delivery = history->commit({true, {{20, 0, 30, 1}}});
-    const RECT roi {0, 0, 100, 100};
-    ASSERT_NE(first_delivery.token, 0u);
-
-    const auto first_two =
-      platf::dxgi::detail::query_ddup_damage_coverage_between(
-        accepted,
-        second_delivery,
-        roi
-      );
-    EXPECT_EQ(first_two.potentially_changed_area, 20u);
-    EXPECT_EQ(first_two.max_single_intersection_area, 0u);
-    EXPECT_TRUE(platf::dxgi::detail::host_sbs_low_motion_damage_candidate(
-      first_two,
-      true
-    ));
-
-    const auto all_three =
-      platf::dxgi::detail::query_ddup_damage_coverage_between(
-        accepted,
-        third_delivery,
-        roi
-      );
-    EXPECT_EQ(all_three.potentially_changed_area, 30u);
-    EXPECT_FALSE(platf::dxgi::detail::host_sbs_low_motion_damage_candidate(
-      all_three,
-      true
-    ));
-
-    // A rolling delivered-frame baseline would incorrectly see only the last ten pixels.
-    const auto rolled = platf::dxgi::detail::query_ddup_damage_coverage_between(
-      second_delivery,
-      third_delivery,
-      roi
-    );
-    EXPECT_EQ(rolled.potentially_changed_area, 10u);
-    EXPECT_TRUE(platf::dxgi::detail::host_sbs_low_motion_damage_candidate(
-      rolled,
-      true
-    ));
-  }
-
   TEST(WindowsDdupDamageTest, CoverageDiscontinuityAndCrossHistoryFailOpen) {
     auto first_history =
       std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
@@ -526,8 +428,9 @@ namespace {
     );
   }
 
-  TEST(WindowsDdupDamageTest, AdaptiveBroadProofCannotBeInflatedByOverlapOrMoveEnds) {
-    using platf::dxgi::detail::host_sbs_adaptive_motion_broad_damage_candidate;
+  TEST(WindowsDdupDamageTest, AdaptiveCandidateUsesCompleteHistoryNotDamageShape) {
+    using platf::dxgi::detail::ddup_damage_coverage_t;
+    using platf::dxgi::detail::host_sbs_adaptive_motion_damage_candidate;
 
     auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
     const auto accepted = history->commit({true, {}});
@@ -553,7 +456,7 @@ namespace {
     ASSERT_TRUE(overlap.known);
     EXPECT_EQ(overlap.potentially_changed_area, 8000u);
     EXPECT_EQ(overlap.max_single_intersection_area, 4000u);
-    EXPECT_FALSE(host_sbs_adaptive_motion_broad_damage_candidate(overlap));
+    EXPECT_TRUE(host_sbs_adaptive_motion_damage_candidate(overlap));
 
     const auto broad = history->commit({true, {{0, 0, 50, 100}}});
     const auto broad_coverage =
@@ -564,10 +467,16 @@ namespace {
         true
       );
     EXPECT_EQ(broad_coverage.max_single_intersection_area, 5000u);
-    EXPECT_TRUE(host_sbs_adaptive_motion_broad_damage_candidate(broad_coverage));
+    EXPECT_TRUE(host_sbs_adaptive_motion_damage_candidate(broad_coverage));
+    EXPECT_FALSE(host_sbs_adaptive_motion_damage_candidate(
+      ddup_damage_coverage_t {1u, 10000u, false}
+    ));
+    EXPECT_FALSE(host_sbs_adaptive_motion_damage_candidate(
+      ddup_damage_coverage_t {0u, 0u, true}
+    ));
   }
 
-  TEST(WindowsDdupDamageTest, AdaptiveBroadWitnessCoversBothTopHalfPhases) {
+  TEST(WindowsDdupDamageTest, AdaptiveCandidateCoversBothTopHalfPhases) {
     auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
     const auto baseline = history->commit({true, {}});
     const RECT top_half {0, 0, 770, 217};
@@ -587,7 +496,7 @@ namespace {
       EXPECT_EQ(coverage.region_area, 770u * 434u);
       EXPECT_EQ(coverage.max_single_intersection_area, 770u * 217u);
       EXPECT_TRUE(
-        platf::dxgi::detail::host_sbs_adaptive_motion_broad_damage_candidate(
+        platf::dxgi::detail::host_sbs_adaptive_motion_damage_candidate(
           coverage
         )
       );
@@ -605,12 +514,24 @@ namespace {
     const auto ample = host_sbs_same_frame_poll_plan(
       true,
       false,
-      now + 10ms,
+      now + 20ms,
       now
     );
     ASSERT_TRUE(ample.eligible);
-    EXPECT_EQ(ample.budget, 3ms);
-    EXPECT_EQ(ample.deadline, now + 3ms);
+    EXPECT_EQ(ample.budget, 8ms);
+    EXPECT_EQ(ample.deadline, now + 8ms);
+    EXPECT_TRUE(ample.limited_by_hard_cap);
+
+    const auto cadence_limited_large = host_sbs_same_frame_poll_plan(
+      true,
+      false,
+      now + 10ms,
+      now
+    );
+    ASSERT_TRUE(cadence_limited_large.eligible);
+    EXPECT_EQ(cadence_limited_large.budget, 7ms);
+    EXPECT_EQ(cadence_limited_large.deadline, now + 7ms);
+    EXPECT_FALSE(cadence_limited_large.limited_by_hard_cap);
 
     const auto cadence_limited = host_sbs_same_frame_poll_plan(
       true,
@@ -621,6 +542,7 @@ namespace {
     ASSERT_TRUE(cadence_limited.eligible);
     EXPECT_EQ(cadence_limited.budget, 2500us);
     EXPECT_EQ(cadence_limited.deadline, now + 2500us);
+    EXPECT_FALSE(cadence_limited.limited_by_hard_cap);
 
     const auto exact_minimum = host_sbs_same_frame_poll_plan(
       true,
@@ -630,6 +552,17 @@ namespace {
     );
     ASSERT_TRUE(exact_minimum.eligible);
     EXPECT_EQ(exact_minimum.budget, 250us);
+    EXPECT_FALSE(exact_minimum.limited_by_hard_cap);
+
+    const auto exact_hard_cap_boundary = host_sbs_same_frame_poll_plan(
+      true,
+      false,
+      now + 11ms,
+      now
+    );
+    ASSERT_TRUE(exact_hard_cap_boundary.eligible);
+    EXPECT_EQ(exact_hard_cap_boundary.budget, 8ms);
+    EXPECT_TRUE(exact_hard_cap_boundary.limited_by_hard_cap);
 
     EXPECT_FALSE(host_sbs_same_frame_poll_plan(
                    true, false, now + 3249us, now
@@ -684,7 +617,10 @@ namespace {
   TEST(WindowsHostSbsSameFramePollTest, ExactOwnerIsAdoptedOnlyAfterReadyMatch) {
     using decision_e =
       platf::dxgi::detail::host_sbs_same_frame_completion_e;
+    using outcome_e =
+      platf::dxgi::detail::host_sbs_same_frame_poll_outcome_e;
     using platf::dxgi::detail::host_sbs_same_frame_completion;
+    using platf::dxgi::detail::host_sbs_same_frame_poll_outcome;
 
     EXPECT_EQ(
       host_sbs_same_frame_completion(false, false, 0u, 42u),
@@ -705,6 +641,31 @@ namespace {
     EXPECT_EQ(
       host_sbs_same_frame_completion(true, false, 42u, 42u),
       decision_e::discard_ready
+    );
+
+    EXPECT_EQ(
+      host_sbs_same_frame_poll_outcome(true, false, false, decision_e::adopt_exact),
+      outcome_e::immediate_hit
+    );
+    EXPECT_EQ(
+      host_sbs_same_frame_poll_outcome(true, true, false, decision_e::adopt_exact),
+      outcome_e::wait_hit
+    );
+    EXPECT_EQ(
+      host_sbs_same_frame_poll_outcome(false, false, false, decision_e::keep_pending),
+      outcome_e::cadence_ineligible_busy
+    );
+    EXPECT_EQ(
+      host_sbs_same_frame_poll_outcome(true, true, true, decision_e::keep_pending),
+      outcome_e::eligible_timeout
+    );
+    EXPECT_EQ(
+      host_sbs_same_frame_poll_outcome(true, true, false, decision_e::discard_ready),
+      outcome_e::ready_failure
+    );
+    EXPECT_EQ(
+      host_sbs_same_frame_poll_outcome(true, false, false, decision_e::keep_pending),
+      outcome_e::wait_unavailable_busy
     );
   }
 
@@ -775,8 +736,7 @@ namespace {
       true, true, true, false
     ));
 
-    // Retained authenticated resources still fail closed without a current exact/low-motion
-    // geometry match.
+    // Retained authenticated resources still fail closed without a current exact geometry match.
     EXPECT_FALSE(host_sbs_cached_geometry_render_allowed(
       true,
       true,
@@ -787,7 +747,7 @@ namespace {
     ));
   }
 
-  TEST(WindowsHostSbsGpuAdmissionTest, BarrierOverridesCacheAndUndecidedAdmission) {
+  TEST(WindowsHostSbsGpuAdmissionTest, BarrierBlocksCacheButAdmitsExplicitOpaqueFollowup) {
     using admission_e = platf::dxgi::detail::host_sbs_depth_admission_e;
     using platf::dxgi::detail::host_sbs_depth_admission;
 
@@ -795,6 +755,27 @@ namespace {
     EXPECT_EQ(host_sbs_depth_admission(false, true, false), admission_e::gpu_undecided);
     EXPECT_EQ(host_sbs_depth_admission(false, false, false), admission_e::force_infer);
     EXPECT_EQ(host_sbs_depth_admission(true, true, true), admission_e::force_infer);
+    EXPECT_EQ(
+      host_sbs_depth_admission(true, true, true, true),
+      admission_e::gpu_undecided
+    );
+    EXPECT_EQ(
+      host_sbs_depth_admission(true, false, true, true),
+      admission_e::force_infer
+    );
+  }
+
+  TEST(WindowsHostSbsGpuAdmissionTest, OpaqueFollowupAuthorityUsesSharedStrictHundredMsBound) {
+    using namespace std::chrono_literals;
+    using platf::dxgi::detail::host_sbs_gpu_followup_fresh;
+
+    const auto enqueued_at = std::chrono::steady_clock::time_point {1s};
+    EXPECT_TRUE(host_sbs_gpu_followup_fresh(40u, 40u, enqueued_at, enqueued_at + 99ms));
+    EXPECT_FALSE(host_sbs_gpu_followup_fresh(40u, 40u, enqueued_at, enqueued_at + 100ms));
+    EXPECT_FALSE(host_sbs_gpu_followup_fresh(40u, 41u, enqueued_at, enqueued_at + 1ms));
+    EXPECT_FALSE(host_sbs_gpu_followup_fresh(0u, 0u, enqueued_at, enqueued_at + 1ms));
+    EXPECT_FALSE(host_sbs_gpu_followup_fresh(40u, 40u, {}, enqueued_at + 1ms));
+    EXPECT_FALSE(host_sbs_gpu_followup_fresh(40u, 40u, enqueued_at, enqueued_at - 1ms));
   }
 
   TEST(WindowsHostSbsGpuAdmissionTest, BarrierClearsOnlyOnNewerAcceptedForceInferCompletion) {
@@ -819,6 +800,57 @@ namespace {
     barrier.record_gpu_undecided_enqueue(50u);
     barrier.reset();
     EXPECT_FALSE(barrier.active());
+  }
+
+  TEST(WindowsHostSbsGpuAdmissionTest, SharedPolicyOwnsInitialOpaqueAndForceCompletionChaining) {
+    using models::gpu_adaptive_submission_class_e;
+    platf::dxgi::detail::host_sbs_gpu_observation_barrier_t policy;
+
+    const auto forced = policy.make_request(10u, false, false, 0u, 1000u);
+    EXPECT_FALSE(forced.authorize_gpu_undecided_reuse);
+    EXPECT_EQ(forced.observation_timestamp_us, 1000u);
+    const auto initial = policy.make_request(11u, true, false, 10u, 2000u);
+    EXPECT_TRUE(initial.authorize_gpu_undecided_reuse);
+    EXPECT_FALSE(initial.opaque_followup);
+    EXPECT_EQ(initial.baseline_frame_id, 10u);
+    EXPECT_EQ(initial.gpu_reuse_decision_token, 11u);
+    EXPECT_EQ(
+      policy.record_submission(11u, initial, false, true),
+      gpu_adaptive_submission_class_e::gpu_undecided
+    );
+    ASSERT_TRUE(policy.active());
+    EXPECT_EQ(policy.conditional_frame_id(), 11u);
+
+    // An active watermark can name only the immediately preceding opaque transaction.
+    EXPECT_FALSE(policy.make_request(12u, true, false, 10u, 3000u)
+                   .authorize_gpu_undecided_reuse);
+    EXPECT_FALSE(policy.make_request(12u, true, true, 10u, 3000u)
+                   .authorize_gpu_undecided_reuse);
+    const auto followup = policy.make_request(12u, true, true, 11u, 3000u);
+    EXPECT_TRUE(followup.authorize_gpu_undecided_reuse);
+    EXPECT_TRUE(followup.opaque_followup);
+    EXPECT_EQ(
+      policy.record_submission(12u, followup, false, true),
+      gpu_adaptive_submission_class_e::gpu_undecided
+    );
+    EXPECT_EQ(policy.conditional_frame_id(), 12u);
+
+    // A runtime fallback is CPU-known force but cannot release the watermark until its exact
+    // accepted completion arrives.
+    const auto fallback = policy.make_request(13u, true, true, 12u, 4000u);
+    EXPECT_EQ(
+      policy.record_submission(13u, fallback, true, false),
+      gpu_adaptive_submission_class_e::force_infer
+    );
+    EXPECT_TRUE(policy.active());
+    EXPECT_FALSE(policy.record_known_force_infer_completion(13u, false));
+    EXPECT_TRUE(policy.record_known_force_infer_completion(13u, true));
+    EXPECT_FALSE(policy.active());
+
+    EXPECT_EQ(
+      policy.record_submission(14u, {}, true, true),
+      gpu_adaptive_submission_class_e::invalid
+    );
   }
 
   TEST(WindowsHostSbsContentReuseTest, LatestLineageResetCoversAuthorityAndAliasRevocation) {
@@ -866,82 +898,31 @@ namespace {
     EXPECT_TRUE(state.refresh_due(start + 250ms));
   }
 
-  TEST(WindowsHostSbsContentReuseTest, ApproximateReuseAllowsOneHoldWithinFiftyMs) {
-    using namespace std::chrono_literals;
-    platf::dxgi::detail::host_sbs_low_motion_refresh_state_t state;
-    const auto start = std::chrono::steady_clock::time_point {1s};
-
-    EXPECT_FALSE(state.reuse_allowed(start));
-    state.record_successful_enqueue(start);
-    EXPECT_TRUE(state.reuse_allowed(start + 49ms));
-    EXPECT_FALSE(state.reuse_allowed(start + 50ms));
-
-    state.record_successful_enqueue(start);
-    state.record_reuse();
-    EXPECT_EQ(state.skipped(), 1u);
-    EXPECT_FALSE(state.reuse_allowed(start + 1ms));
-    state.record_successful_enqueue(start + 2ms);
-    EXPECT_TRUE(state.reuse_allowed(start + 3ms));
-  }
-
-  TEST(WindowsHostSbsContentReuseTest, ApproximateSelectorRequiresIdleAuthenticatedCache) {
-    using platf::dxgi::detail::host_sbs_low_motion_cache_reuse_allowed;
-
-    EXPECT_TRUE(host_sbs_low_motion_cache_reuse_allowed(
-      true, true, true, false, true, true
-    ));
-    EXPECT_FALSE(host_sbs_low_motion_cache_reuse_allowed(
-      false, true, true, false, true, true
-    ));
-    EXPECT_FALSE(host_sbs_low_motion_cache_reuse_allowed(
-      true, false, true, false, true, true
-    ));
-    EXPECT_FALSE(host_sbs_low_motion_cache_reuse_allowed(
-      true, true, true, true, true, true
-    ));
-    EXPECT_FALSE(host_sbs_low_motion_cache_reuse_allowed(
-      true, true, false, false, true, true
-    ));
-    EXPECT_FALSE(host_sbs_low_motion_cache_reuse_allowed(
-      true, true, true, false, false, true
-    ));
-    EXPECT_FALSE(host_sbs_low_motion_cache_reuse_allowed(
-      true, true, true, false, true, false
-    ));
-  }
-
   TEST(WindowsHostSbsContentReuseTest, TypedAuthorizationUnifiesProofAndRefreshSemantics) {
     using kind_e = platf::dxgi::detail::host_sbs_depth_reuse_kind_e;
-    using exactness_e = platf::dxgi::detail::host_sbs_depth_reuse_exactness_e;
     using refresh_e = platf::dxgi::detail::host_sbs_depth_reuse_refresh_e;
     using proof_e = platf::dxgi::detail::host_sbs_ddup_reuse_proof_e;
-    using platf::dxgi::detail::make_host_sbs_depth_reuse_authorization;
     using platf::dxgi::detail::select_host_sbs_cached_depth_reuse;
 
     const auto exact = select_host_sbs_cached_depth_reuse(
-      proof_e::content_clock, true, 40u, 42u
+      proof_e::content_clock, 40u, 42u
     );
     EXPECT_TRUE(exact.valid());
-    EXPECT_TRUE(exact.exact());
     EXPECT_EQ(exact.kind, kind_e::exact_content);
     EXPECT_EQ(exact.refresh, refresh_e::bounded_content);
 
     const auto roi = select_host_sbs_cached_depth_reuse(
-      proof_e::roi_damage, false, 40u, 42u
+      proof_e::roi_damage, 40u, 42u
     );
     EXPECT_TRUE(roi.valid());
     EXPECT_EQ(roi.kind, kind_e::exact_roi_damage);
 
-    const auto tiny = select_host_sbs_cached_depth_reuse(
-      proof_e::none, true, 40u, 42u
+    const auto denied = select_host_sbs_cached_depth_reuse(
+      proof_e::none, 40u, 42u
     );
-    EXPECT_TRUE(tiny.valid());
-    EXPECT_EQ(tiny.kind, kind_e::bounded_tiny_motion);
-    EXPECT_EQ(tiny.exactness, exactness_e::approximate);
-    EXPECT_EQ(tiny.refresh, refresh_e::bounded_approximate);
+    EXPECT_FALSE(denied.valid());
 
     auto malformed = exact;
-    malformed = tiny;
     malformed.ocr_safe = false;
     EXPECT_FALSE(malformed.valid());
     malformed = exact;
@@ -949,21 +930,15 @@ namespace {
     EXPECT_FALSE(malformed.valid());
   }
 
-  TEST(WindowsHostSbsContentReuseTest, ApproximateProvidersCannotChain) {
+  TEST(WindowsHostSbsContentReuseTest, HostOwnedApproximateProvidersCannotChain) {
     using provider_e = platf::dxgi::detail::host_sbs_approximate_reuse_provider_e;
     using platf::dxgi::detail::host_sbs_approximate_reuse_provider_allowed;
 
     EXPECT_TRUE(host_sbs_approximate_reuse_provider_allowed(
-      provider_e::none, provider_e::low_motion, false
-    ));
-    EXPECT_TRUE(host_sbs_approximate_reuse_provider_allowed(
       provider_e::none, provider_e::gpu_undecided, false
     ));
     EXPECT_FALSE(host_sbs_approximate_reuse_provider_allowed(
-      provider_e::low_motion, provider_e::gpu_undecided, false
-    ));
-    EXPECT_FALSE(host_sbs_approximate_reuse_provider_allowed(
-      provider_e::gpu_undecided, provider_e::low_motion, false
+      provider_e::gpu_undecided, provider_e::gpu_undecided, false
     ));
     EXPECT_FALSE(host_sbs_approximate_reuse_provider_allowed(
       provider_e::none, provider_e::gpu_undecided, true
@@ -985,9 +960,12 @@ namespace {
       .damage_history = damage_history.get(),
       .baseline_damage_token = 10u,
       .current_damage_token = 11u,
-      .broad_damage = true,
+      .damage_history_complete = true,
     };
     EXPECT_TRUE(valid.valid());
+    auto opaque_followup = valid;
+    opaque_followup.opaque_followup = true;
+    EXPECT_TRUE(opaque_followup.valid());
     auto invalid = valid;
     invalid.baseline_frame_id = 0u;
     EXPECT_FALSE(invalid.valid());
@@ -1001,7 +979,7 @@ namespace {
     invalid.current_damage_token = invalid.baseline_damage_token;
     EXPECT_FALSE(invalid.valid());
     invalid = valid;
-    invalid.broad_damage = false;
+    invalid.damage_history_complete = false;
     EXPECT_FALSE(invalid.valid());
   }
 
@@ -1058,28 +1036,28 @@ namespace {
     const auto d = start + 3ms;
 
     cadence.record_successful_enqueue(a, start);
-    EXPECT_EQ(cadence.observe_changed(b, true, start + 49ms), decision_e::hold_candidate);
+    EXPECT_EQ(cadence.observe_changed(b, true, start + 99ms), decision_e::hold_candidate);
     EXPECT_TRUE(cadence.refresh_required());
-    EXPECT_TRUE(cadence.hold_candidate_still_fresh(b, start + 49ms));
-    EXPECT_FALSE(cadence.hold_candidate_still_fresh(c, start + 49ms));
-    EXPECT_FALSE(cadence.hold_candidate_still_fresh(b, start + 50ms));
+    EXPECT_TRUE(cadence.hold_candidate_still_fresh(b, start + 99ms));
+    EXPECT_FALSE(cadence.hold_candidate_still_fresh(c, start + 99ms));
+    EXPECT_FALSE(cadence.hold_candidate_still_fresh(b, start + 100ms));
     // The cadence identifies the repeated held identity. GPU admission treats this decision as
     // mandatory inference rather than granting a second approximate hold.
     EXPECT_EQ(
-      cadence.observe_changed(b, true, start + 49ms),
+      cadence.observe_changed(b, true, start + 99ms),
       decision_e::hold_same_identity
     );
     // A distinct successor forces the simulated real inference before another hold can arm.
-    EXPECT_EQ(cadence.observe_changed(c, true, start + 49ms), decision_e::infer);
-    cadence.record_successful_enqueue(c, start + 49ms);
-    EXPECT_EQ(cadence.observe_changed(d, true, start + 98ms), decision_e::hold_candidate);
+    EXPECT_EQ(cadence.observe_changed(c, true, start + 99ms), decision_e::infer);
+    cadence.record_successful_enqueue(c, start + 99ms);
+    EXPECT_EQ(cadence.observe_changed(d, true, start + 198ms), decision_e::hold_candidate);
 
     cadence.record_successful_enqueue(a, start);
-    EXPECT_EQ(cadence.observe_changed(b, true, start + 50ms), decision_e::infer);
+    EXPECT_EQ(cadence.observe_changed(b, true, start + 100ms), decision_e::infer);
 
     cadence.record_successful_enqueue(a, start);
-    ASSERT_EQ(cadence.observe_changed(b, true, start + 49ms), decision_e::hold_candidate);
-    EXPECT_EQ(cadence.observe_changed(b, true, start + 50ms), decision_e::infer);
+    ASSERT_EQ(cadence.observe_changed(b, true, start + 99ms), decision_e::hold_candidate);
+    EXPECT_EQ(cadence.observe_changed(b, true, start + 100ms), decision_e::infer);
   }
 
   TEST(WindowsUploadedValueStateTest, CommitsOnlyExplicitlyAcceptedValue) {

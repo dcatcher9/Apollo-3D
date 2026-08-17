@@ -1261,13 +1261,6 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr><td>Range</td><td><code>256</code>-<code>16384</code> (rounded down to an even value)</td></tr>
 </table>
 
-### sbs_3d_cuda_graph
-
-<table>
-    <tr><td>Description</td><td>Enable TensorRT CUDA Graph replay for Host 3D, offline conversion, and evaluator inference. Leave enabled for normal use; disable only for driver diagnosis or a controlled performance comparison. Unsupported systems fall back automatically.</td></tr>
-    <tr><td>Default</td><td><code>true</code></td></tr>
-</table>
-
 ## NVIDIA NVENC Encoder
 
 ### nvenc_preset

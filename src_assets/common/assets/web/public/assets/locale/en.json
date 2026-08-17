@@ -231,8 +231,6 @@
     "port_warning": "Exposing the Web UI to the internet is a security risk! Proceed at your own risk!",
     "port_web_ui": "Web UI",
     "restart_note": "Sunshine 3D is restarting to apply changes.",
-    "sbs_3d_cuda_graph": "Host 3D CUDA Graph replay",
-    "sbs_3d_cuda_graph_desc": "Enable TensorRT CUDA Graph replay for Host 3D and offline inference. Leave enabled for normal use; unsupported systems fall back automatically.",
     "sbs_3d_max_encode_width": "Maximum packed 3D width",
     "sbs_3d_max_encode_width_desc": "Cap the packed side-by-side output width. The final size also respects the codec's NVENC width and height limits while preserving aspect ratio.",
     "sbs_3d_pop_strength": "Host 3D strength",

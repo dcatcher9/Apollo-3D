@@ -268,26 +268,6 @@ namespace {
                    ));
   }
 
-  bool create_indirect_dispatch_buffer(
-    ID3D11Device *device,
-    ComPtr<ID3D11Buffer> &buffer,
-    ComPtr<ID3D11UnorderedAccessView> &uav
-  ) {
-    D3D11_BUFFER_DESC desc {};
-    desc.ByteWidth = v2::subtitle_condition_dispatch_arg_word_count *
-                     sizeof(std::uint32_t);
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-    desc.MiscFlags = D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
-    if (FAILED(device->CreateBuffer(&desc, nullptr, &buffer))) return false;
-    D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc {};
-    uav_desc.Format = DXGI_FORMAT_R32_UINT;
-    uav_desc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-    uav_desc.Buffer.NumElements = v2::subtitle_condition_dispatch_arg_word_count;
-    return SUCCEEDED(device->CreateUnorderedAccessView(
-      buffer.Get(), &uav_desc, &uav));
-  }
-
   bool create_constant_buffer(
     ID3D11Device *device,
     const void *initial,
@@ -393,7 +373,7 @@ namespace {
       if (need_boxes && (!compile_compute_shader(device_.Get(), root / "host_sbs_ocr_boxes_cs.hlsl", "cells_main", cells_, error) || !compile_compute_shader(device_.Get(), root / "host_sbs_ocr_boxes_cs.hlsl", "resolve_main", boxes_, error))) {
         return false;
       }
-      if (need_locator && (!compile_compute_shader(device_.Get(), root / "host_sbs_subtitle_locator_cs.hlsl", "resolve_main", locator_resolve_, error) || !compile_compute_shader(device_.Get(), root / "host_sbs_subtitle_locator_cs.hlsl", "condition_prepare_main", condition_prepare_, error) || !compile_compute_shader(device_.Get(), root / "host_sbs_subtitle_locator_cs.hlsl", "condition_in_place_main", condition_in_place_, error) || !compile_compute_shader(device_.Get(), root / "host_sbs_subtitle_locator_cs.hlsl", "condition_main", condition_, error))) {
+      if (need_locator && (!compile_compute_shader(device_.Get(), root / "host_sbs_subtitle_locator_cs.hlsl", "resolve_main", locator_resolve_, error) || !compile_compute_shader(device_.Get(), root / "host_sbs_subtitle_locator_cs.hlsl", "condition_prepare_main", condition_prepare_, error) || !compile_compute_shader(device_.Get(), root / "host_sbs_subtitle_locator_cs.hlsl", "condition_main", condition_, error))) {
         return false;
       }
 
@@ -617,21 +597,19 @@ namespace {
         static_cast<UINT>(constant_buffers.size()),
         constant_buffers.data()
       );
-      std::array<ID3D11ShaderResourceView *, 5u> prepare_srvs {
-        nullptr, cut_srv_.Get(), nullptr, state_srv_.Get(), nullptr
+      std::array<ID3D11ShaderResourceView *, 8u> prepare_srvs {
+        nullptr, cut_srv_.Get(), nullptr, state_srv_.Get(), nullptr, nullptr, nullptr,
+        record_srv_.Get()
       };
       context_->CSSetShaderResources(
         0u,
         static_cast<UINT>(prepare_srvs.size()),
         prepare_srvs.data()
       );
-      std::array<ID3D11UnorderedAccessView *, 2u> prepare_uavs {
-        condition_params_uav_.Get(), condition_args_uav_.Get()
-      };
       context_->CSSetUnorderedAccessViews(
         4u,
-        static_cast<UINT>(prepare_uavs.size()),
-        prepare_uavs.data(),
+        1u,
+        condition_params_uav_.GetAddressOf(),
         nullptr
       );
       context_->Dispatch(1u, 1u, 1u);
@@ -767,8 +745,7 @@ namespace {
             condition_params_buffer_,
             &condition_params_srv_,
             &condition_params_uav_
-          ) || !create_indirect_dispatch_buffer(
-            device_.Get(), condition_args_buffer_, condition_args_uav_)) {
+          )) {
         return false;
       }
 
@@ -895,7 +872,6 @@ namespace {
     ComPtr<ID3D11ComputeShader> boxes_;
     ComPtr<ID3D11ComputeShader> locator_resolve_;
     ComPtr<ID3D11ComputeShader> condition_prepare_;
-    ComPtr<ID3D11ComputeShader> condition_in_place_;
     ComPtr<ID3D11ComputeShader> condition_;
     ComPtr<ID3D11Buffer> preprocess_cb_;
     ComPtr<ID3D11Buffer> boxes_cb_;
@@ -913,8 +889,6 @@ namespace {
     ComPtr<ID3D11Buffer> condition_params_buffer_;
     ComPtr<ID3D11ShaderResourceView> condition_params_srv_;
     ComPtr<ID3D11UnorderedAccessView> condition_params_uav_;
-    ComPtr<ID3D11Buffer> condition_args_buffer_;
-    ComPtr<ID3D11UnorderedAccessView> condition_args_uav_;
     ComPtr<ID3D11Buffer> cut_buffer_;
     ComPtr<ID3D11ShaderResourceView> cut_srv_;
     ComPtr<ID3D11Texture2D> base_texture_;
@@ -1578,7 +1552,7 @@ namespace {
       (std::array<std::uint32_t, 4u> {694u, 374u, 750u, 430u})
     );
 
-    // OCR deliberately preserves the separated square candidate. SLR12 owns the generic shape
+    // OCR deliberately preserves the separated square candidate. SLR13 owns the generic shape
     // rejection and admits only the wide subtitle line into pending/current authority.
     fixture.reset_locator();
     ASSERT_TRUE(fixture.dispatch_locator(10u, generation, true));
@@ -1617,7 +1591,7 @@ namespace {
     EXPECT_TRUE(fixture.output_is_exact_base());
 
     // Re-establish a line owner, then inject a non-finite probability. OCR8 abstains (flags=0),
-    // SLR12 discards all authority, and no stale target can alter Base.
+    // SLR13 discards all authority, and no stale target can alter Base.
     std::vector<float> line_only(ocr_pixels, 0.0f);
     paint_rectangle(line_only, 240u, 100u, 720u, 108u);
     ASSERT_TRUE(fixture.run_boxes(line_only, 13u, generation));

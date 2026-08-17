@@ -601,7 +601,6 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_ocr_resolve));
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_subtitle_locator_resolve));
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_subtitle_condition_prepare));
-  EXPECT_TRUE(has_producer_shader(cache::host_sbs_subtitle_condition_in_place));
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_subtitle_condition));
 
   const auto near_identical_sources = cache::snapshot_sources(
@@ -661,7 +660,7 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
     EXPECT_EQ(first.get(), second.get()) << flat.filename << ':' << flat.entrypoint;
   }
   EXPECT_EQ(cache::parallax_v2_live_renderer_specs.size(), 2u);
-  EXPECT_EQ(cache::near_identical_detector_specs.size(), 5u);
+  EXPECT_EQ(cache::near_identical_detector_specs.size(), 8u);
   EXPECT_EQ(cache::sbs_flat_fallback_specs.size(), 2u);
   EXPECT_EQ(cache::parallax_v2_live_diagnostic_specs.size(), 2u);
 }
@@ -813,7 +812,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 55u);
+  EXPECT_EQ(v2::contract_schema, 69u);
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
   EXPECT_EQ(v2::shadow_state_dump_schema, 16u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
@@ -1163,18 +1162,45 @@ TEST(ParallaxV2RendererTest, AuthenticationLatchesV2OrLiveFlat) {
   EXPECT_TRUE(models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer_e::awaiting_v2));
   EXPECT_TRUE(models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer_e::parallax_v2));
   EXPECT_FALSE(models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer_e::failed_flat));
-  EXPECT_TRUE(models::host_sbs_should_repeat_matched_output(host_sbs_renderer_e::parallax_v2, false, true));
-  EXPECT_FALSE(models::host_sbs_should_repeat_matched_output(host_sbs_renderer_e::failed_flat, false, true));
-  EXPECT_FALSE(models::host_sbs_should_repeat_matched_output(host_sbs_renderer_e::parallax_v2, true, true));
-  EXPECT_TRUE(models::host_sbs_should_repeat_matched_output(host_sbs_renderer_e::parallax_v2, false, true, models::host_sbs_v2_max_matched_repeat_age));
-  EXPECT_FALSE(models::host_sbs_should_repeat_matched_output(host_sbs_renderer_e::parallax_v2, false, true, models::host_sbs_v2_max_matched_repeat_age + std::chrono::milliseconds(1)));
+  EXPECT_TRUE(models::host_sbs_should_repeat_packed_presentation(
+    host_sbs_renderer_e::parallax_v2, false, true, true
+  ));
+  EXPECT_FALSE(models::host_sbs_should_repeat_packed_presentation(
+    host_sbs_renderer_e::failed_flat, false, true, true
+  ));
+  EXPECT_FALSE(models::host_sbs_should_repeat_packed_presentation(
+    host_sbs_renderer_e::parallax_v2, true, true, true
+  ));
+  EXPECT_FALSE(models::host_sbs_should_repeat_packed_presentation(
+    host_sbs_renderer_e::parallax_v2, false, true, false
+  ));
+  EXPECT_TRUE(models::host_sbs_should_repeat_packed_presentation(
+    host_sbs_renderer_e::parallax_v2,
+    false,
+    true,
+    true,
+    models::host_sbs_v2_max_matched_repeat_age
+  ));
+  EXPECT_FALSE(models::host_sbs_should_repeat_packed_presentation(
+    host_sbs_renderer_e::parallax_v2,
+    false,
+    true,
+    true,
+    models::host_sbs_v2_max_matched_repeat_age + std::chrono::milliseconds(1)
+  ));
   EXPECT_TRUE(models::host_sbs_matched_completion_is_current(true, models::host_sbs_v2_max_matched_repeat_age + std::chrono::hours(1)));
   EXPECT_FALSE(models::host_sbs_matched_completion_is_current(false, models::host_sbs_v2_max_matched_repeat_age + std::chrono::milliseconds(1)));
-  EXPECT_TRUE(models::host_sbs_should_repeat_matched_output(host_sbs_renderer_e::parallax_v2, false, true, models::host_sbs_v2_max_matched_repeat_age + std::chrono::hours(1), true));
-  EXPECT_TRUE(models::host_sbs_matched_output_can_enter_repeat_cache(true, true, false));
-  EXPECT_FALSE(models::host_sbs_matched_output_can_enter_repeat_cache(true, true, true));
-  EXPECT_FALSE(models::host_sbs_matched_output_can_enter_repeat_cache(false, true, false));
-  EXPECT_FALSE(models::host_sbs_matched_output_can_enter_repeat_cache(true, false, false));
+  EXPECT_TRUE(models::host_sbs_should_repeat_packed_presentation(
+    host_sbs_renderer_e::parallax_v2,
+    false,
+    true,
+    true,
+    models::host_sbs_v2_max_matched_repeat_age + std::chrono::hours(1),
+    true
+  ));
+  EXPECT_TRUE(models::host_sbs_packed_output_can_enter_presentation_cache(true, true));
+  EXPECT_FALSE(models::host_sbs_packed_output_can_enter_presentation_cache(false, true));
+  EXPECT_FALSE(models::host_sbs_packed_output_can_enter_presentation_cache(true, false));
   EXPECT_EQ(
     models::fail_host_sbs_renderer_flat(host_sbs_renderer_e::parallax_v2),
     host_sbs_renderer_e::failed_flat
@@ -1189,58 +1215,193 @@ TEST(ParallaxV2RendererTest, AuthenticationLatchesV2OrLiveFlat) {
   );
 }
 
+TEST(ParallaxV2RendererTest, OpaqueRenderedHitBridgesOnePendingTimeout) {
+  using models::host_sbs_packed_output_can_enter_presentation_cache;
+  using models::host_sbs_renderer_e;
+  using models::host_sbs_should_repeat_packed_presentation;
+
+  // Deterministic scheduler sequence: a completed authenticated opaque draw seeds only its
+  // self-contained packed pixels, then a later pending unit misses the bounded render poll.
+  const bool packed_after_opaque_hit =
+    host_sbs_packed_output_can_enter_presentation_cache(true, true);
+  ASSERT_TRUE(packed_after_opaque_hit);
+  EXPECT_TRUE(host_sbs_should_repeat_packed_presentation(
+    host_sbs_renderer_e::parallax_v2,
+    false,
+    packed_after_opaque_hit,
+    true,
+    std::chrono::milliseconds {1}
+  ));
+
+  // A route/domain reset revokes presentation continuity, and a changed source remains bounded by
+  // the existing 250 ms age. Static source wiring below proves no semantic lineage is admitted.
+  EXPECT_FALSE(host_sbs_should_repeat_packed_presentation(
+    host_sbs_renderer_e::parallax_v2,
+    false,
+    packed_after_opaque_hit,
+    false,
+    std::chrono::milliseconds {1}
+  ));
+  EXPECT_FALSE(host_sbs_should_repeat_packed_presentation(
+    host_sbs_renderer_e::parallax_v2,
+    false,
+    packed_after_opaque_hit,
+    true,
+    models::host_sbs_v2_max_matched_repeat_age + std::chrono::milliseconds {1}
+  ));
+}
+
 TEST(ParallaxV2RendererTest, InteractiveMoveSuppressesOnlyOptionalSubtitleWork) {
+  using models::depth_optional_work_allows_gpu_undecided;
   using models::depth_optional_work_mode_e;
-  using models::select_depth_optional_work_mode;
+  models::gpu_adaptive_ocr_cadence_t cadence;
 
   EXPECT_EQ(
-    select_depth_optional_work_mode(false, false),
+    cadence.select_mode(1000u),
+    depth_optional_work_mode_e::ordinary_due
+  );
+  cadence.record_accepted(
+    depth_optional_work_mode_e::ordinary_due,
+    models::gpu_adaptive_submission_class_e::force_infer,
+    1000u
+  );
+  EXPECT_EQ(
+    cadence.select_mode(2000u),
     depth_optional_work_mode_e::ordinary
   );
   EXPECT_EQ(
-    select_depth_optional_work_mode(true, false),
+    cadence.select_mode(2000u, true, false),
     depth_optional_work_mode_e::suppress_subtitle
   );
   // An explicit diagnostic snapshot remains a complete exact-frame observation.
   EXPECT_EQ(
-    select_depth_optional_work_mode(true, true),
+    cadence.select_mode(2000u, true, true),
     depth_optional_work_mode_e::ordinary
   );
   EXPECT_EQ(
-    select_depth_optional_work_mode(false, false, true),
-    depth_optional_work_mode_e::redispatch_subtitle
+    cadence.select_mode(34000u),
+    depth_optional_work_mode_e::ordinary_due
   );
   // Complete diagnostics and native move/size suppression outrank the optimization hint.
   EXPECT_EQ(
-    select_depth_optional_work_mode(false, true, true),
+    cadence.select_mode(34000u, false, true),
     depth_optional_work_mode_e::ordinary
   );
   EXPECT_EQ(
-    select_depth_optional_work_mode(true, false, true),
+    cadence.select_mode(34000u, true, false),
     depth_optional_work_mode_e::suppress_subtitle
   );
+  EXPECT_TRUE(depth_optional_work_allows_gpu_undecided(
+    depth_optional_work_mode_e::ordinary
+  ));
+  EXPECT_TRUE(depth_optional_work_allows_gpu_undecided(
+    depth_optional_work_mode_e::ordinary_due
+  ));
+  EXPECT_FALSE(depth_optional_work_allows_gpu_undecided(
+    depth_optional_work_mode_e::suppress_subtitle
+  ));
 }
 
-TEST(ParallaxV2RendererTest, SubtitleOcrDamageBandUsesExactAnalysisCropPlacement) {
-  const auto full = models::subtitle_ocr_source_crop_rect(
-    models::depth_source_rect_t {0u, 0u, 1920u, 1080u}
-  );
-  ASSERT_TRUE(full);
-  EXPECT_EQ(*full, (models::depth_source_rect_t {0u, 760u, 1920u, 1080u}));
+TEST(ParallaxV2RendererTest, OcrSignatureRefreshRequiresAnEligibleForceChild) {
+  using models::depth_optional_work_mode_e;
+  using models::ocr_signature_refresh_satisfied;
 
-  const auto roi = models::subtitle_ocr_source_crop_rect(
-    models::depth_source_rect_t {100u, 200u, 1060u, 740u}
-  );
-  ASSERT_TRUE(roi);
-  EXPECT_EQ(*roi, (models::depth_source_rect_t {100u, 580u, 1060u, 740u}));
+  EXPECT_FALSE(ocr_signature_refresh_satisfied(
+    true,
+    true,
+    true,
+    depth_optional_work_mode_e::suppress_subtitle,
+    false
+  ));
+  EXPECT_FALSE(ocr_signature_refresh_satisfied(
+    true,
+    true,
+    false,
+    depth_optional_work_mode_e::ordinary,
+    true
+  ));
+  EXPECT_TRUE(ocr_signature_refresh_satisfied(
+    true,
+    true,
+    true,
+    depth_optional_work_mode_e::ordinary,
+    true
+  ));
+  EXPECT_TRUE(ocr_signature_refresh_satisfied(
+    true,
+    false,
+    false,
+    depth_optional_work_mode_e::ordinary,
+    false
+  ));
+}
 
-  const auto ultrawide = models::subtitle_ocr_source_crop_rect(
-    models::depth_source_rect_t {50u, 10u, 2610u, 1090u}
-  );
-  ASSERT_TRUE(ultrawide);
-  EXPECT_EQ(*ultrawide, (models::depth_source_rect_t {50u, 663u, 2610u, 1090u}));
+TEST(ParallaxV2RendererTest, OptionalOcrWrapperTopologyDoesNotTrackPerFrameWorkMode) {
+  using models::conditional_optional_child_policy_e;
+  using models::conditional_optional_topology_selection_t;
+  using models::select_conditional_optional_topology;
 
-  EXPECT_FALSE(models::subtitle_ocr_source_crop_rect({}));
+  // Once a superset is instantiated, an optional-unarmed or suppressed transaction retains it.
+  EXPECT_EQ(
+    select_conditional_optional_topology(
+      true, true, false,
+      conditional_optional_child_policy_e::retain_if_present
+    ),
+    (conditional_optional_topology_selection_t {
+      .reuse_existing = true,
+      .build_with_optional = false,
+    })
+  );
+  // A depth-only wrapper is equally reusable while optional work remains unarmed.
+  EXPECT_EQ(
+    select_conditional_optional_topology(
+      true, false, false,
+      conditional_optional_child_policy_e::retain_if_present
+    ),
+    (conditional_optional_topology_selection_t {
+      .reuse_existing = true,
+      .build_with_optional = false,
+    })
+  );
+  // A changed base signature may not instantiate an OCR graph from unmapped stale operands.
+  EXPECT_EQ(
+    select_conditional_optional_topology(
+      false, true, false,
+      conditional_optional_child_policy_e::retain_if_present
+    ),
+    (conditional_optional_topology_selection_t {
+      .reuse_existing = false,
+      .build_with_optional = false,
+    })
+  );
+  // A mapped, validated OCR child upgrades depth-only and replaces a different OCR signature.
+  EXPECT_TRUE(select_conditional_optional_topology(
+    true, false, false,
+    conditional_optional_child_policy_e::build_ready
+  ).build_with_optional);
+  EXPECT_FALSE(select_conditional_optional_topology(
+    true, true, false,
+    conditional_optional_child_policy_e::build_ready
+  ).reuse_existing);
+  EXPECT_TRUE(select_conditional_optional_topology(
+    true, true, true,
+    conditional_optional_child_policy_e::build_ready
+  ).reuse_existing);
+  // Permanent OCR loss removes a retained sibling exactly once.
+  EXPECT_EQ(
+    select_conditional_optional_topology(
+      true, true, false,
+      conditional_optional_child_policy_e::disabled
+    ),
+    (conditional_optional_topology_selection_t {
+      .reuse_existing = false,
+      .build_with_optional = false,
+    })
+  );
+  EXPECT_TRUE(select_conditional_optional_topology(
+    true, false, false,
+    conditional_optional_child_policy_e::disabled
+  ).reuse_existing);
 }
 
 TEST(TensorRtContextLifecycleTest, WarmedContextQuarantineStartsOnlyAfterAsyncExecution) {
@@ -1264,20 +1425,15 @@ TEST(TensorRtContextLifecycleTest, WarmedContextQuarantineStartsOnlyAfterAsyncEx
   EXPECT_TRUE(teardown_health.poisoned());
 }
 
-TEST(TensorRtContextLifecycleTest, ExactFrameJoinWaitsForBothStreamsAndFailsConservatively) {
-  using stream_e = models::detail::async_stream_readiness_e;
-  using joined_e = models::detail::joined_stream_readiness_e;
-  const auto joined = models::detail::joined_stream_readiness;
+TEST(TensorRtContextLifecycleTest, ReleasesWarmupOperandsOnlyAfterProvenQuiescence) {
+  using readiness_e = models::detail::async_stream_readiness_e;
+  const auto releasable = models::detail::asynchronous_operands_may_be_released;
 
-  EXPECT_EQ(joined(stream_e::ready, false, stream_e::failed), joined_e::ready);
-  EXPECT_EQ(joined(stream_e::busy, false, stream_e::ready), joined_e::busy);
-  EXPECT_EQ(joined(stream_e::failed, false, stream_e::ready), joined_e::failed);
-
-  EXPECT_EQ(joined(stream_e::ready, true, stream_e::ready), joined_e::ready);
-  EXPECT_EQ(joined(stream_e::ready, true, stream_e::busy), joined_e::busy);
-  EXPECT_EQ(joined(stream_e::busy, true, stream_e::failed), joined_e::failed);
-  EXPECT_EQ(joined(stream_e::failed, true, stream_e::ready), joined_e::failed);
-  EXPECT_EQ(joined(stream_e::ready, true, stream_e::failed), joined_e::failed);
+  EXPECT_TRUE(releasable(false, false, readiness_e::failed));
+  EXPECT_TRUE(releasable(true, true, readiness_e::ready));
+  EXPECT_FALSE(releasable(true, false, readiness_e::ready));
+  EXPECT_FALSE(releasable(true, true, readiness_e::busy));
+  EXPECT_FALSE(releasable(true, true, readiness_e::failed));
 }
 
 #ifdef _WIN32
@@ -1345,9 +1501,10 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   // The first exact signature performs its private non-authoritative warm/capture bootstrap and
   // then launches the force-infer wrapper. Every result observed by this fixture therefore comes
   // from the wrapper. Additional launches bring an otherwise idle adapter out of its low-power
-  // state before measuring the same three-millisecond budget used by production.
+  // state before measuring the same eight-millisecond cap used by production.
   constexpr std::uint64_t warm_frame_base = 0xabc000u;
   constexpr std::uint64_t warm_observations = 8u;
+  bool observed_ocr_child_armed = false;
   for (std::uint64_t i = 1u; i <= warm_observations; ++i) {
     const auto warm_frame_id = warm_frame_base + i;
     const auto warm = estimator.estimate_depth(
@@ -1356,6 +1513,8 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
       warm_frame_id
     );
     ASSERT_TRUE(warm.inference_enqueued);
+    observed_ocr_child_armed =
+      observed_ocr_child_armed || warm.subtitle_ocr_inference_enqueued;
     const auto warmed = estimator.finish_pending_depth_for_evaluation();
     ASSERT_TRUE(warmed.completed_frame_valid);
     ASSERT_EQ(warmed.completed_frame_id, warm_frame_id);
@@ -1368,9 +1527,9 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   std::uint64_t timeouts = 0u;
   std::uint64_t total_bounded_queries = 0u;
   for (std::uint64_t i = 1u; i <= measured_observations; ++i) {
-    // An event-ready finish may expose the output before the independently queued interop-unmap
-    // tail is reusable. Production naturally has a frame interval and warp work here; this tight
-    // fixture waits only for that full-stream admission proof before submitting the next unit.
+    // The joined completion event is recorded after every interop-unmap tail. This tight fixture
+    // still waits for the estimator's conservative admission confirmation before submitting the
+    // next unit, matching the production caller contract.
     const auto reuse_deadline =
       std::chrono::steady_clock::now() + std::chrono::milliseconds {50};
     bool reusable = false;
@@ -1386,12 +1545,20 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     const auto submitted = estimator.estimate_depth(
       source.Get(),
       models::input_color_space::srgb,
-      observed_frame_id
+      observed_frame_id,
+      false,
+      {},
+      models::depth_optional_work_mode_e::ordinary,
+      models::gpu_adaptive_reuse_request {
+        .observation_timestamp_us = observed_frame_id,
+      }
     );
     ASSERT_TRUE(submitted.inference_enqueued);
+    observed_ocr_child_armed =
+      observed_ocr_child_armed || submitted.subtitle_ocr_inference_enqueued;
 
     // An expired budget still performs exactly one nonblocking joined query. If it is busy, the
-    // second call exercises the production three-millisecond cap. A timeout is valid under external
+    // second call exercises the production eight-millisecond cap. A timeout is valid under external
     // GPU load and must preserve the exact pending owner for the synchronous test fallback.
     auto completed = estimator.try_finish_pending_depth_until(
       models::input_color_space::srgb,
@@ -1404,7 +1571,7 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
       ASSERT_TRUE(completed.timed_out);
       completed = estimator.try_finish_pending_depth_until(
         models::input_color_space::srgb,
-        std::chrono::steady_clock::now() + std::chrono::milliseconds {3},
+        std::chrono::steady_clock::now() + std::chrono::milliseconds {8},
         4096u
       );
       total_bounded_queries += completed.query_count;
@@ -1437,11 +1604,11 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
                   << ", bounded hits " << bounded_hits << ", timeouts " << timeouts
                   << ", bounded queries " << total_bounded_queries << '.';
   EXPECT_GT(immediate_hits + bounded_hits, 0u)
-    << "No hot observation completed inside the production three-millisecond poll budget.";
+    << "No hot observation completed inside the production eight-millisecond poll cap.";
 
   // Exercise the integrated D3D proposal -> CUDA conditional child graph -> D3D receipt path.
   // The identical source should propose reuse, but the branch deliberately remains opaque to the
-  // host; authority here is the conditional transaction class and its required force-infer successor.
+  // host. The next root names this opaque transaction; owner mismatch then forces infer on-device.
   const auto wait_until_reusable = [&]() {
     const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::milliseconds {50};
@@ -1452,6 +1619,11 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     } while (!reusable && std::chrono::steady_clock::now() < deadline);
     return reusable;
   };
+  if (const auto *expected_ocr_graph = std::getenv("SUNSHINE_EXPECT_OCR_GRAPH_LEGAL");
+      expected_ocr_graph && std::string_view {expected_ocr_graph} == "1") {
+    ASSERT_TRUE(observed_ocr_child_armed)
+      << "The real-OCR superset-retention case requires an armed production OCR child";
+  }
   ASSERT_TRUE(wait_until_reusable());
   const std::uint64_t conditional_frame_id = observed_frame_base + 0x100u;
   const std::uint64_t conditional_token = 0x13579bdf2468ace0ull;
@@ -1461,22 +1633,78 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     conditional_frame_id,
     false,
     {},
-    models::depth_optional_work_mode_e::ordinary,
+    // The earlier ordinary observations built the real DAV2+OCR superset. A cadence-due root is
+    // independent of the DAV2 branch and requests the currently mapped OCR child.
+    models::depth_optional_work_mode_e::ordinary_due,
     models::gpu_adaptive_reuse_request {
       .authorize_gpu_undecided_reuse = true,
       .baseline_frame_id = observed_frame_base + measured_observations,
       .gpu_reuse_decision_token = conditional_token,
+      .observation_timestamp_us = conditional_frame_id,
     }
   );
   ASSERT_TRUE(conditional.gpu_undecided_transaction_enqueued);
   EXPECT_FALSE(conditional.inference_enqueued);
-  EXPECT_FALSE(conditional.subtitle_ocr_inference_enqueued);
+  EXPECT_EQ(conditional.subtitle_ocr_inference_enqueued, observed_ocr_child_armed);
 
-  // Once the opaque transaction is ready, consume it and enqueue the mandatory force-infer
-  // successor in the same call. This is the production path: it must not discard the current
-  // private color copy and create a one-frame submission bubble merely to publish the prior result.
+  // Once the opaque transaction is ready, consume it and enqueue a fresh device-authenticated
+  // follow-up in the same call. Since the identical first root reused, its infer owner did not
+  // advance; the owner mismatch makes this second opaque root infer and arm ordinary OCR without
+  // exposing either fact through host result metadata.
   ASSERT_TRUE(wait_until_reusable());
-  const auto forced_frame_id = conditional_frame_id + 1u;
+  const auto followup_frame_id = conditional_frame_id + 1u;
+  const auto followup = estimator.estimate_depth(
+    source.Get(),
+    models::input_color_space::srgb,
+    followup_frame_id,
+    false,
+    {},
+    models::depth_optional_work_mode_e::ordinary,
+    models::gpu_adaptive_reuse_request {
+      .authorize_gpu_undecided_reuse = true,
+      .opaque_followup = true,
+      .baseline_frame_id = conditional_frame_id,
+      .gpu_reuse_decision_token = conditional_token + 1u,
+      .observation_timestamp_us = followup_frame_id,
+    }
+  );
+  ASSERT_TRUE(followup.completed_frame_valid);
+  EXPECT_EQ(followup.completed_frame_id, conditional_frame_id);
+  EXPECT_TRUE(followup.gpu_undecided_completion);
+  EXPECT_FALSE(followup.inference_enqueued);
+  EXPECT_TRUE(followup.gpu_undecided_transaction_enqueued);
+  EXPECT_EQ(followup.subtitle_ocr_inference_enqueued, observed_ocr_child_armed);
+
+  // The mismatch-forced infer advanced the private owner to followup_frame_id, so another
+  // identical follow-up is legal and the detector may reuse. This remains opaque as well.
+  ASSERT_TRUE(wait_until_reusable());
+  const auto chained_frame_id = followup_frame_id + 1u;
+  const auto chained = estimator.estimate_depth(
+    source.Get(),
+    models::input_color_space::srgb,
+    chained_frame_id,
+    false,
+    {},
+    models::depth_optional_work_mode_e::ordinary,
+    models::gpu_adaptive_reuse_request {
+      .authorize_gpu_undecided_reuse = true,
+      .opaque_followup = true,
+      .baseline_frame_id = followup_frame_id,
+      .gpu_reuse_decision_token = conditional_token + 2u,
+      .observation_timestamp_us = chained_frame_id,
+    }
+  );
+  ASSERT_TRUE(chained.completed_frame_valid);
+  EXPECT_EQ(chained.completed_frame_id, followup_frame_id);
+  EXPECT_TRUE(chained.gpu_undecided_completion);
+  EXPECT_FALSE(chained.inference_enqueued);
+  EXPECT_TRUE(chained.gpu_undecided_transaction_enqueued);
+
+  // A stale CPU-known baseline must not masquerade as a new initial root while the opaque chain is
+  // unresolved. The estimator rejects that class mismatch and restores CPU-known lineage through
+  // force-infer; the prior opaque completion is still returned in this same call.
+  ASSERT_TRUE(wait_until_reusable());
+  const auto forced_frame_id = chained_frame_id + 1u;
   const auto forced = estimator.estimate_depth(
     source.Get(),
     models::input_color_space::srgb,
@@ -1486,12 +1714,13 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     models::depth_optional_work_mode_e::ordinary,
     models::gpu_adaptive_reuse_request {
       .authorize_gpu_undecided_reuse = true,
-      .baseline_frame_id = conditional_frame_id,
-      .gpu_reuse_decision_token = conditional_token + 1u,
+      .baseline_frame_id = observed_frame_base + measured_observations,
+      .gpu_reuse_decision_token = conditional_token + 3u,
+      .observation_timestamp_us = forced_frame_id,
     }
   );
   ASSERT_TRUE(forced.completed_frame_valid);
-  EXPECT_EQ(forced.completed_frame_id, conditional_frame_id);
+  EXPECT_EQ(forced.completed_frame_id, chained_frame_id);
   EXPECT_TRUE(forced.gpu_undecided_completion);
   EXPECT_TRUE(forced.inference_enqueued);
   EXPECT_FALSE(forced.gpu_undecided_transaction_enqueued);
@@ -1530,7 +1759,8 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     models::gpu_adaptive_reuse_request {
       .authorize_gpu_undecided_reuse = true,
       .baseline_frame_id = forced_frame_id,
-      .gpu_reuse_decision_token = conditional_token + 2u,
+      .gpu_reuse_decision_token = conditional_token + 4u,
+      .observation_timestamp_us = changed_frame_id,
     }
   );
   ASSERT_TRUE(changed.gpu_undecided_transaction_enqueued);
@@ -1668,8 +1898,7 @@ TEST(TensorRtContextLifecycleTest, AccountingBoundsQuarantinedAndReusableContext
   EXPECT_EQ(accounting.quarantined(), 2u);
 }
 
-TEST(TensorRtCudaGraphPolicyTest, SignatureChangesWarmBeforeCaptureAndFailedCaptureStaysOrdinary) {
-  using action_e = models::detail::cuda_graph_enqueue_action_e;
+TEST(TensorRtCudaGraphPolicyTest, SignatureChangesInvalidateThePrivateCaptureWarmup) {
   using policy_t = models::detail::cuda_graph_replay_policy_t;
   using signature_t = models::detail::cuda_graph_signature_t;
 
@@ -1678,42 +1907,20 @@ TEST(TensorRtCudaGraphPolicyTest, SignatureChangesWarmBeforeCaptureAndFailedCapt
   const signature_t resized {3u, 4u, 518, 294};
 
   EXPECT_TRUE(models::detail::select_cuda_graph_signature(policy, depth));
-  EXPECT_EQ(
-    models::detail::next_cuda_graph_enqueue_action(policy, true, false),
-    action_e::ordinary
-  );
+  EXPECT_EQ(policy.signature, depth);
+  EXPECT_FALSE(policy.signature_warmed);
+  EXPECT_FALSE(models::detail::cuda_graph_signature_matches(policy, depth));
+  policy.signature_warmed = true;
+  EXPECT_FALSE(models::detail::select_cuda_graph_signature(policy, depth));
   EXPECT_TRUE(policy.signature_warmed);
-  EXPECT_EQ(
-    models::detail::next_cuda_graph_enqueue_action(policy, true, false),
-    action_e::capture
-  );
-  EXPECT_EQ(
-    models::detail::next_cuda_graph_enqueue_action(policy, true, true),
-    action_e::replay
-  );
+  EXPECT_TRUE(models::detail::cuda_graph_signature_matches(policy, depth));
+  EXPECT_FALSE(models::detail::cuda_graph_signature_matches(policy, resized));
 
   EXPECT_TRUE(models::detail::select_cuda_graph_signature(policy, resized));
+  EXPECT_EQ(policy.signature, resized);
   EXPECT_FALSE(policy.signature_warmed);
-  EXPECT_EQ(
-    models::detail::next_cuda_graph_enqueue_action(policy, true, false),
-    action_e::ordinary
-  );
+  EXPECT_FALSE(models::detail::cuda_graph_signature_matches(policy, resized));
   EXPECT_FALSE(models::detail::select_cuda_graph_signature(policy, resized));
-
-  policy.capture_failed = true;
-  policy.signature_warmed = false;
-  EXPECT_EQ(
-    models::detail::next_cuda_graph_enqueue_action(policy, true, false),
-    action_e::ordinary
-  );
-  EXPECT_FALSE(policy.signature_warmed);
-
-  policy.capture_failed = false;
-  EXPECT_EQ(
-    models::detail::next_cuda_graph_enqueue_action(policy, false, false),
-    action_e::ordinary
-  );
-  EXPECT_FALSE(policy.signature_warmed);
 }
 
 TEST(DepthInputRegionTest, RequiresCanonicalFullSourceOrAuthenticatedRoiAuthority) {
@@ -2002,8 +2209,14 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
   ComPtr<ID3D11Texture2D> texture;
   ComPtr<ID3D11ShaderResourceView> view;
+  ComPtr<ID3D11Texture2D> conditioned_texture;
+  ComPtr<ID3D11ShaderResourceView> conditioned_view;
   ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &texture)));
   ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(texture.Get(), nullptr, &view)));
+  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &conditioned_texture)));
+  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
+    conditioned_texture.Get(), nullptr, &conditioned_view
+  )));
 
   const auto &calibration = v2::model_calibrations.front();
   models::estimate_result result;
@@ -2012,7 +2225,7 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   result.shadow_vertical_majorant = view;
   result.shadow_vertical_conditioned = view;
   result.shadow_base_final_parallax = view;
-  result.shadow_final_parallax = view;
+  result.shadow_final_parallax = conditioned_view;
   result.shadow_state = view;
   result.shadow_frame_stats = view;
   result.ocr_box_record = view;
@@ -2056,10 +2269,26 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   };
   EXPECT_FALSE(result.shadow_coordinate);
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(result));
+  EXPECT_TRUE(models::subtitle_evidence_is_exact_frame(result));
 
   auto subtitle_suppressed = result;
   subtitle_suppressed.subtitle_work_suppressed = true;
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(subtitle_suppressed));
+  EXPECT_FALSE(models::subtitle_evidence_is_exact_frame(subtitle_suppressed));
+
+  auto gpu_undecided = result;
+  gpu_undecided.gpu_undecided_completion = true;
+  EXPECT_TRUE(models::parallax_v2_result_is_authenticated(gpu_undecided));
+  EXPECT_FALSE(models::subtitle_evidence_is_exact_frame(gpu_undecided))
+    << "the CPU cannot distinguish an exact infer tuple from a held reuse tuple";
+
+  auto missing_final = result;
+  missing_final.shadow_final_parallax.Reset();
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_final));
+
+  auto final_aliases_base = result;
+  final_aliases_base.shadow_final_parallax = view;
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(final_aliases_base));
 
   auto missing_input_region = result;
   missing_input_region.input_region = {};
@@ -2173,6 +2402,28 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
 }
   #endif
 
+TEST(HostSbsGpuTraceContractTest, ProductionTraceWorkIsDiagnosticsOnly) {
+  const auto source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp"
+  );
+  ASSERT_FALSE(source.empty());
+  EXPECT_NE(
+    source.find("if (diagnostics_enabled) {\n        initialize_gpu_trace();\n      }"),
+    std::string::npos
+  ) << "normal production must not compile or allocate the diagnostic trace";
+  const auto dispatch = source.find("void dispatch_pending_gpu_completion_trace()");
+  ASSERT_NE(dispatch, std::string::npos);
+  const auto dispatch_end = source.find("void update_throughput_stats()", dispatch);
+  ASSERT_NE(dispatch_end, std::string::npos);
+  const auto body = source.substr(dispatch, dispatch_end - dispatch);
+  EXPECT_NE(body.find("if (!diagnostics_enabled)"), std::string::npos);
+  EXPECT_NE(body.find("pending_gpu_trace_append = {};"), std::string::npos);
+  EXPECT_LT(
+    body.find("if (!diagnostics_enabled)"),
+    body.find("context->CopyResource(")
+  ) << "diagnostics-off must return before trace copy or dispatch work";
+}
+
 TEST(ParallaxV2ContractTest, DebugDumpUsesNonblockingGpuStagingBeforeCpuPublication) {
   const auto source = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
@@ -2262,7 +2513,7 @@ TEST(ParallaxV2ContractTest, DebugDumpUsesNonblockingGpuStagingBeforeCpuPublicat
   );
 }
 
-TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema32Contract) {
+TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema36Contract) {
   const auto source = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
   );
@@ -2288,7 +2539,17 @@ TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema32C
   EXPECT_LT(resolve, prepare);
   EXPECT_LT(prepare, condition);
 
-  EXPECT_NE(source.find("{\"schema\", 32}"), std::string::npos);
+  EXPECT_NE(source.find("{\"schema\", 36}"), std::string::npos);
+  for (const auto *qualification_key : {
+         "{\"qualification_policy\", {",
+         "{\"corner_filter_applies_to\", \"non-ribbon-ordinary-cores\"}",
+         "{\"corner_edge_divisor\", subtitle_locator_corner_edge_divisor}",
+         "{\"corner_bottom_rows\", subtitle_locator_corner_bottom_rows}",
+         "{\"edge_threshold_equality\", \"accepted\"}",
+         "{\"ribbon_exempt\", true}",
+       }) {
+    EXPECT_NE(resolver.find(qualification_key), std::string::npos) << qualification_key;
+  }
   for (const auto *placement_key : {
          "{\"placement\", {",
          "{\"fallback_step_denominator\"",
@@ -2299,6 +2560,13 @@ TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema32C
          "{\"ribbon_places_fallback_with_ordinary\", false}",
        }) {
     EXPECT_NE(resolver.find(placement_key), std::string::npos) << placement_key;
+  }
+  for (const auto *target_policy_key : {
+         "{\"target_policy\", {",
+         "{\"both_valid_row_iqr\", \"ignored\"}",
+         "{\"single_valid_row\", \"median-if-iqr-at-most-row-iqr-max\"}",
+       }) {
+    EXPECT_NE(resolver.find(target_policy_key), std::string::npos) << target_policy_key;
   }
 }
 
@@ -4176,15 +4444,15 @@ TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorizat
   EXPECT_NE(selection.find("const bool cached_geometry_matches"), std::string::npos);
   EXPECT_NE(selection.find("host_sbs_cached_geometry_render_allowed"), std::string::npos);
 
-  // Route/dump/reprocess/terminal revocation plus every completion owner keeps the singleton-alias
-  // reset matrix in the pre-render selection path.
+  // Route/dump/reprocess/terminal revocation, early-completion retirement/revalidation, and every
+  // completion owner keep the singleton-alias reset matrix in the pre-render selection path.
   std::size_t resets = 0u;
   for (std::size_t offset = 0u;
        (offset = selection.find("latest_v2_lineage.reset();", offset)) != std::string::npos;
        ++offset) {
     ++resets;
   }
-  EXPECT_EQ(resets, 7u);
+  EXPECT_EQ(resets, 9u);
   EXPECT_EQ(display.find("reusable_v2"), std::string::npos);
 
   const auto fail_flat = display.find("void fail_depth_pipeline_flat()");
@@ -4288,6 +4556,100 @@ TEST(DirectxShaderSourceTest, PendingCompletionReusesThePreparedConstantBuffer) 
   );
 }
 
+TEST(DirectxShaderSourceTest, OpaquePackedPresentationCannotSeedSemanticLineage) {
+  const auto display = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp"
+  );
+  ASSERT_FALSE(display.empty());
+
+  const auto retention = display.find(
+    "host_sbs_packed_output_can_enter_presentation_cache("
+  );
+  const auto retention_end = display.find("mark_sbs_warp_end", retention);
+  ASSERT_NE(retention, std::string::npos);
+  ASSERT_NE(retention_end, std::string::npos);
+  const auto body = display.substr(retention, retention_end - retention);
+  EXPECT_NE(body.find("v2_live_warp_selected"), std::string::npos);
+  for (const auto *forbidden_authority : {
+         "latest_v2_lineage",
+         "reusable_ocr_input",
+         "gpu_observation_barrier",
+         "content_reuse_refresh",
+         "depth_reuse_authorization",
+       }) {
+    EXPECT_EQ(body.find(forbidden_authority), std::string::npos)
+      << forbidden_authority;
+  }
+
+  const auto selection = display.find(
+    "host_sbs_should_repeat_packed_presentation("
+  );
+  ASSERT_NE(selection, std::string::npos);
+  const auto route_gate = display.rfind(
+    "const bool packed_presentation_route_matches =",
+    selection
+  );
+  ASSERT_NE(route_gate, std::string::npos);
+  const auto route_body = display.substr(route_gate, selection - route_gate);
+  for (const auto *required_gate : {
+         "matched_output_input_region.valid()",
+         "matched_output_input_region.source_width == live_source_desc.Width",
+         "matched_output_input_region.source_height == live_source_desc.Height",
+         "matched_output_color_space == input_color_space",
+         "!depth_authority_reprocess_pending",
+         "!producer_terminal",
+       }) {
+    EXPECT_NE(route_body.find(required_gate), std::string::npos) << required_gate;
+  }
+  EXPECT_NE(
+    display.find(
+      "output_warped_new/packed_repeat/flat_pending_miss=",
+      selection
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.find(
+      "planned_budget_ms_avg/max=",
+      selection
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.find(
+      "hard_cap/cadence_timeouts=",
+      selection
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.find(
+      "submissions/immediate_hit/wait_hit/cadence_ineligible_busy/",
+      selection
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.find(
+      "eligible_timeout/ready_failure/wait_unavailable_busy=",
+      selection
+    ),
+    std::string::npos
+  );
+  const auto continuity_exhausted = display.find(
+    "Host SBS packed presentation continuity exhausted after ",
+    selection
+  );
+  ASSERT_NE(continuity_exhausted, std::string::npos);
+  const auto continuity_log = display.rfind("BOOST_LOG(", continuity_exhausted);
+  ASSERT_NE(continuity_log, std::string::npos);
+  EXPECT_EQ(
+    display.substr(continuity_log, continuity_exhausted - continuity_log).find(
+      "BOOST_LOG(error)"
+    ),
+    0u
+  );
+}
 
 TEST(DirectxShaderSourceTest, AdaptiveReuseIsAlwaysOnAndGpuOwned) {
   const auto display =
@@ -4314,17 +4676,52 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseIsAlwaysOnAndGpuOwned) {
     candidate_body.find("host_sbs_adaptive_hold_decision_e::hold_candidate"),
     std::string::npos
   );
+  EXPECT_NE(candidate_body.find("opaque_followup_route_observable"), std::string::npos);
+  EXPECT_NE(candidate_body.find("host_sbs_gpu_followup_fresh("), std::string::npos);
+  EXPECT_NE(
+    candidate_body.find("const auto followup_damage = matched_motion_damage("),
+    std::string::npos
+  );
+  EXPECT_NE(candidate_body.find("opaque_gpu_followup_anchor"), std::string::npos);
+  EXPECT_NE(candidate_body.find(".opaque_followup = true"), std::string::npos);
 
   const auto admission = display.find("const auto host_depth_admission =");
-  const auto estimate = display.find("est = depth_estimator->estimate_depth(", admission);
+  const auto estimate = display.find(
+    "auto submitted = depth_estimator->estimate_depth(",
+    admission
+  );
   const auto same_frame_poll = display.find("host_sbs_same_frame_poll_plan(", estimate);
   ASSERT_NE(admission, std::string::npos);
   ASSERT_NE(estimate, std::string::npos);
   ASSERT_NE(same_frame_poll, std::string::npos);
+  const auto early_retire = display.find(
+    "Retire a ready prior root before deriving this frame's DDup/adaptive proof."
+  );
+  const auto early_poll = display.find(
+    "try_finish_pending_depth_nonblocking(",
+    early_retire
+  );
+  const auto early_retain = display.find(
+    "retain_completed_lineage(false, true);",
+    early_poll
+  );
+  ASSERT_NE(early_retire, std::string::npos);
+  ASSERT_NE(early_poll, std::string::npos);
+  ASSERT_NE(early_retain, std::string::npos);
+  const auto early_poll_end = display.find(");", early_poll);
+  ASSERT_NE(early_poll_end, std::string::npos);
+  EXPECT_NE(
+    display.substr(early_poll, early_poll_end - early_poll).find(
+      "snapshot_debug_inputs"
+    ),
+    std::string::npos
+  ) << "A ready completion consumed before admission must preserve an armed Dump 3D snapshot.";
+  EXPECT_LT(early_poll, admission);
+  EXPECT_LT(early_retain, admission);
   const auto submit_body = display.substr(admission, same_frame_poll - admission);
   EXPECT_NE(submit_body.find("gpu_observation_barrier.active()"), std::string::npos);
-  EXPECT_NE(submit_body.find("models::gpu_adaptive_reuse_request {"), std::string::npos);
-  EXPECT_NE(submit_body.find(".authorize_gpu_undecided_reuse ="), std::string::npos);
+  EXPECT_NE(submit_body.find("gpu_observation_barrier.make_request("), std::string::npos);
+  EXPECT_NE(submit_body.find("gpu_observation_barrier.record_submission("), std::string::npos);
   EXPECT_NE(
     submit_body.find("adaptive_hold_cadence.hold_candidate_still_fresh("),
     std::string::npos
@@ -4334,36 +4731,129 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseIsAlwaysOnAndGpuOwned) {
     "adaptive_motion_route_state.observe(current_adaptive_route_epoch())",
     private_copy
   );
+  const auto early_completion_route_recheck = submit_body.find(
+    "completion_finalized_before_admission && matched_render_slot",
+    private_copy
+  );
   const auto final_authorization = submit_body.find(
     "const bool authorize_gpu_undecided =",
     private_copy
   );
+  const auto final_optional_work = submit_body.find(
+    "const auto optional_work =",
+    final_authorization
+  );
   ASSERT_NE(private_copy, std::string::npos);
   ASSERT_NE(final_route_observation, std::string::npos);
+  ASSERT_NE(early_completion_route_recheck, std::string::npos);
   ASSERT_NE(final_authorization, std::string::npos);
+  ASSERT_NE(final_optional_work, std::string::npos);
+  EXPECT_LT(early_completion_route_recheck, final_authorization);
   EXPECT_LT(final_route_observation, final_authorization);
+  EXPECT_LT(final_authorization, final_optional_work);
+  EXPECT_NE(
+    submit_body.find(
+      "models::depth_optional_work_allows_gpu_undecided("
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    submit_body.find("const auto optional_work = selected_optional_work;"),
+    std::string::npos
+  );
+  const auto early_completion_route_body = submit_body.substr(
+    early_completion_route_recheck,
+    final_route_observation - early_completion_route_recheck
+  );
+  EXPECT_NE(
+    early_completion_route_body.find("authority_generation(live_window_authority)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    early_completion_route_body.find("gpu_observation_barrier.record_gpu_undecided_enqueue("),
+    std::string::npos
+  );
   EXPECT_NE(submit_body.find("est.gpu_undecided_transaction_enqueued"), std::string::npos);
   EXPECT_NE(
     submit_body.find("force_infer_transaction_enqueued = est.inference_enqueued"),
     std::string::npos
   );
-  EXPECT_NE(submit_body.find("gpu_observation_barrier.record_gpu_undecided_enqueue(frame_id)"), std::string::npos);
+  EXPECT_NE(submit_body.find("gpu_observation_barrier.record_submission("), std::string::npos);
+  const auto followup_anchor_record = submit_body.find("opaque_gpu_followup_anchor.record(");
+  ASSERT_NE(followup_anchor_record, std::string::npos);
+  EXPECT_NE(
+    submit_body.find("final_admission_now", followup_anchor_record),
+    std::string::npos
+  ) << "Follow-up age must be measured conservatively from before wrapper submission";
+  EXPECT_NE(submit_body.find("opaque_gpu_followup_anchor.reset();"), std::string::npos);
+  EXPECT_NE(
+    display.find("opaque_followup_expired/rejected/force_fallback="),
+    std::string::npos
+  );
   EXPECT_NE(submit_body.find("if (depth_transaction_enqueued)"), std::string::npos);
+  EXPECT_NE(
+    submit_body.find("adaptive_ocr_cadence.record_accepted("),
+    std::string::npos
+  );
+  EXPECT_EQ(display.find("reusable_ocr_input"), std::string::npos)
+    << "Cursor-blended OCR input has no exact DDup-only restamp authority";
+
+  const auto gpu_proof_match = display.find(
+    "bool gpu_undecided_candidate_matches("
+  );
+  const auto gpu_proof_match_end = display.find(
+    "bool matched_route_matches_current(", gpu_proof_match
+  );
+  ASSERT_NE(gpu_proof_match, std::string::npos);
+  ASSERT_NE(gpu_proof_match_end, std::string::npos);
+  EXPECT_EQ(
+    display.substr(gpu_proof_match, gpu_proof_match_end - gpu_proof_match).find(
+      "subtitle_evidence_is_exact_frame"
+    ),
+    std::string::npos
+  ) << "Depth arbitration must not depend on CPU-visible subtitle evidence";
+  const auto stale_proof_guard = submit_body.find(
+    "else if (any_pending_slot || block_current_submission_after_early_poll)"
+  );
+  const auto current_copy = submit_body.find("copy_matched_frame(");
+  ASSERT_NE(stale_proof_guard, std::string::npos);
+  ASSERT_NE(current_copy, std::string::npos);
+  EXPECT_LT(stale_proof_guard, current_copy);
+  EXPECT_NE(
+    submit_body.find(
+      "completion_finalized_before_admission && est.completed_frame_valid"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    submit_body.find(
+      "completion_finalized_before_admission ? matched_render_slot : nullptr"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    submit_body.find(
+      "est.gpu_undecided_transaction_enqueued ="
+    ),
+    std::string::npos
+  );
 
   const auto post_cache_route = display.find(
     "const bool post_completion_cache_route_matches ="
   );
   const auto post_cache = display.find("const bool post_completion_cache_gate_open =");
-  const auto completion_check = display.find("gpu_transaction_class_matches(est", post_cache);
-  const auto retention = display.find("retain_latest_v2_lineage(", completion_check);
+  const auto completion_check = display.find("const auto validate_completed_slot =");
+  const auto retention = display.find("retain_completed_lineage(", post_cache);
+  const auto lineage_finalizer = display.find("const auto retain_completed_lineage =");
   const auto barrier_clear = display.find(
     "gpu_observation_barrier.record_known_force_infer_completion(",
-    retention
+    lineage_finalizer
   );
   ASSERT_NE(post_cache_route, std::string::npos);
   ASSERT_NE(post_cache, std::string::npos);
   ASSERT_NE(completion_check, std::string::npos);
   ASSERT_NE(retention, std::string::npos);
+  ASSERT_NE(lineage_finalizer, std::string::npos);
   ASSERT_NE(barrier_clear, std::string::npos);
   const auto post_cache_route_body = display.substr(
     post_cache_route,
@@ -4382,9 +4872,14 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseIsAlwaysOnAndGpuOwned) {
     retention
   );
   ASSERT_NE(barrier_acceptance, std::string::npos);
+  const auto barrier_acceptance_end = display.find(
+    "const bool latest_lineage_retained =",
+    barrier_acceptance
+  );
+  ASSERT_NE(barrier_acceptance_end, std::string::npos);
   const auto barrier_acceptance_body = display.substr(
     barrier_acceptance,
-    retention - barrier_acceptance
+    barrier_acceptance_end - barrier_acceptance
   );
   EXPECT_NE(
     barrier_acceptance_body.find("authority_generation(live_window_authority)"),
@@ -4406,14 +4901,19 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseIsAlwaysOnAndGpuOwned) {
     barrier_acceptance_body.find("current_root_authority_generation"),
     std::string::npos
   );
-  const auto pending_acceptance = display.rfind(
+  const auto pending_acceptance = display.find(
     "const bool current_reusable_enqueue_pending =",
-    barrier_acceptance
+    post_cache
   );
   ASSERT_NE(pending_acceptance, std::string::npos);
+  const auto pending_acceptance_end = display.find(
+    "retain_completed_lineage(",
+    pending_acceptance
+  );
+  ASSERT_NE(pending_acceptance_end, std::string::npos);
   const auto pending_acceptance_body = display.substr(
     pending_acceptance,
-    barrier_acceptance - pending_acceptance
+    pending_acceptance_end - pending_acceptance
   );
   EXPECT_NE(
     pending_acceptance_body.find("authority_generation(live_window_authority)"),
@@ -4432,14 +4932,16 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseIsAlwaysOnAndGpuOwned) {
     barrier_clear,
     barrier_clear_end - barrier_clear
   );
-  EXPECT_NE(barrier_clear_body.find("sbs_telemetry_has_sample = false"), std::string::npos);
-  EXPECT_NE(
+  // The post-opaque force completion repairs host-known lineage only. It must not fabricate a
+  // temporal-domain transition or reset the monotonic CutBridge telemetry epoch.
+  EXPECT_EQ(barrier_clear_body.find("sbs_telemetry_has_sample = false"), std::string::npos);
+  EXPECT_EQ(
     barrier_clear_body.find("sbs_telemetry_last_hard_cut_count = 0u"),
     std::string::npos
   );
-  EXPECT_NE(barrier_clear_body.find("sbs_telemetry_min_frame_id = std::max("), std::string::npos);
+  EXPECT_EQ(barrier_clear_body.find("sbs_telemetry_min_frame_id = std::max("), std::string::npos);
   EXPECT_NE(
-    display.substr(post_cache, completion_check - post_cache).find(
+    display.substr(post_cache, retention - post_cache).find(
       "!gpu_observation_barrier.active()"
     ),
     std::string::npos
@@ -4474,15 +4976,26 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseIsAlwaysOnAndGpuOwned) {
   const auto fail_flat_end = display.find("// Create the D3D depth pipeline", fail_flat);
   const auto adaptive_reset = display.find("void reset_adaptive_reuse_runtime(");
   const auto adaptive_reset_end = display.find("void revoke_adaptive_reuse(", adaptive_reset);
+  const auto adaptive_revoke_end = display.find(
+    "void poll_sbs_telemetry_after_output()",
+    adaptive_reset_end
+  );
   const auto init_output = display.find("int init_output(");
   ASSERT_NE(fail_flat, std::string::npos);
   ASSERT_NE(fail_flat_end, std::string::npos);
   ASSERT_NE(adaptive_reset, std::string::npos);
   ASSERT_NE(adaptive_reset_end, std::string::npos);
+  ASSERT_NE(adaptive_revoke_end, std::string::npos);
   ASSERT_NE(init_output, std::string::npos);
   EXPECT_NE(
     display.substr(fail_flat, fail_flat_end - fail_flat).find(
       "gpu_observation_barrier.reset()"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.substr(fail_flat, fail_flat_end - fail_flat).find(
+      "opaque_gpu_followup_anchor.reset()"
     ),
     std::string::npos
   );
@@ -4493,22 +5006,38 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseIsAlwaysOnAndGpuOwned) {
     std::string::npos
   );
   EXPECT_NE(
+    display.substr(adaptive_reset_end, adaptive_revoke_end - adaptive_reset_end).find(
+      "opaque_gpu_followup_anchor.reset()"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
     display.find("gpu_observation_barrier.reset()", init_output),
     std::string::npos
   );
-
-  const auto domain_reset = display.find(
-    "else if (matched_render_slot && est.input_domain_reset)"
+  EXPECT_NE(
+    display.find("opaque_gpu_followup_anchor.reset()", init_output),
+    std::string::npos
   );
+
+  const auto completed_domain = display.find(
+    "const auto apply_completed_domain_and_renderer ="
+  );
+  const auto domain_reset = display.find("if (est.input_domain_reset)", completed_domain);
   const auto terminal_check = display.find(
-    "if (depth_estimator && depth_estimator->has_terminal_failure())",
+    "// A poisoned CUDA/TensorRT producer cannot recover",
     domain_reset
   );
+  ASSERT_NE(completed_domain, std::string::npos);
   ASSERT_NE(domain_reset, std::string::npos);
   ASSERT_NE(terminal_check, std::string::npos);
   const auto domain_reset_body = display.substr(domain_reset, terminal_check - domain_reset);
   EXPECT_NE(domain_reset_body.find("if (force_infer_enqueued_at)"), std::string::npos);
   EXPECT_NE(domain_reset_body.find("*force_infer_enqueued_at"), std::string::npos);
+  EXPECT_NE(
+    domain_reset_body.find("opaque_gpu_followup_anchor.reset()"),
+    std::string::npos
+  );
   EXPECT_EQ(domain_reset_body.find("std::chrono::steady_clock::now()"), std::string::npos);
 
   const auto telemetry_poll = display.find("void poll_sbs_telemetry_after_output()");
@@ -5668,6 +6197,84 @@ TEST(HostSbsSceneCutTest, GeometryLowRearmIsStrictAndConsecutive) {
   EXPECT_FALSE(advance_shot_cut(state, 0.099f, 0.0f, 0.0f));
   EXPECT_FALSE(advance_shot_cut(state, 0.099f, 0.0f, 0.0f));
   EXPECT_NE(state.cut_flags & cut_flag_geometry_armed, 0u);
+}
+
+TEST(DirectxShaderSourceTest, SubtitleConditionPrepareBindsExactOcrRecordAtT7) {
+  const auto estimator =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
+  ASSERT_FALSE(estimator.empty());
+
+  const auto begin = estimator.find("bool dispatch_subtitle_conditioner(");
+  const auto end = estimator.find("void dispatch_pending_gpu_completion_trace()", begin);
+  ASSERT_NE(begin, std::string::npos);
+  ASSERT_NE(end, std::string::npos);
+  const auto dispatch = estimator.substr(begin, end - begin);
+  EXPECT_NE(
+    dispatch.find("ID3D11ShaderResourceView *prepare_srvs[8]"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    dispatch.find(
+      "subtitle_locator_state_srv.Get(),\n        nullptr,\n        nullptr,\n"
+      "        nullptr,\n        ocr_box_record_srv.Get(),"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    dispatch.find("CSSetShaderResources(0, 8, prepare_srvs)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    dispatch.find("CSSetShaderResources(0, 8, null_srvs)"),
+    std::string::npos
+  );
+}
+
+TEST(DirectxShaderSourceTest, OcrResolveConstantsRetainExactSixteenWordShaderLayout) {
+  const auto estimator =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
+  ASSERT_FALSE(estimator.empty());
+  EXPECT_NE(
+    estimator.find("using ocr_resolve_constants_t = std::array<std::uint32_t, 16u>"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    estimator.find("static_assert(sizeof(ocr_resolve_constants_t) == 64u)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    estimator.find("create_constant_buffer(64u, ocr_resolve_cbuffer)"),
+    std::string::npos
+  );
+
+  const auto function = estimator.find("bool update_pending_ocr_constants()");
+  const auto initializer = estimator.find(
+    "const ocr_resolve_constants_t constants {", function
+  );
+  const auto initializer_end = estimator.find("};", initializer);
+  ASSERT_NE(function, std::string::npos);
+  ASSERT_NE(initializer, std::string::npos);
+  ASSERT_NE(initializer_end, std::string::npos);
+  const auto layout = estimator.substr(initializer, initializer_end - initializer);
+  std::size_t cursor = 0u;
+  for (const auto *word : {
+         "static_cast<std::uint32_t>(pending_frame_id)",
+         "static_cast<std::uint32_t>(pending_frame_id >> 32u)",
+         "static_cast<std::uint32_t>(pending_input_region.analysis_generation)",
+         "static_cast<std::uint32_t>(pending_input_region.analysis_generation >> 32u)",
+         "source_width", "source_height",
+         "static_cast<std::uint32_t>(target_w)",
+         "static_cast<std::uint32_t>(target_h)",
+         "source_height - crop_height", "crop_height",
+         "roi.roi_top", "roi.roi_bottom",
+         "roi.tensor_content.left", "roi.tensor_content.top",
+         "roi.tensor_content.right", "roi.tensor_content.bottom",
+       }) {
+    cursor = layout.find(word, cursor);
+    ASSERT_NE(cursor, std::string::npos) << word;
+    cursor += std::char_traits<char>::length(word);
+  }
+  EXPECT_EQ(layout.find("pending_observation_timestamp_us"), std::string::npos);
 }
 
 TEST(DirectxShaderSourceTest, FusedDepthMapperUsesResolvedReferenceGridGradients) {

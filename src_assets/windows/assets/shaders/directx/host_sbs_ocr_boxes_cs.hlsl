@@ -174,7 +174,7 @@ uint MapYCeil(uint y) {
 
 // The host authenticates the DAV2 field shape before enabling OCR.  This shader still validates
 // every runtime dimension and proves that its ROI is a non-empty subset of the exact bottom-6:1
-// crop. OCR8 then carries those dimensions and bounds to SLR12, which cross-checks them against the
+// crop. OCR8 then carries those dimensions and bounds to SLR13, which cross-checks them against the
 // actual BaseField dispatch. The 64-byte cbuffer also binds the integer tensor-content rectangle,
 // avoiding a shape-specific OCR record or a second ABI.
 bool ResolveGeometryValid() {

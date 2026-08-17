@@ -481,19 +481,27 @@ void main(uint3 id : SV_DispatchThreadID) {
       }
       std::uint32_t calibration_schema = 0u;
       const auto &calibration_evidence = root["calibration_contract"];
-      if (!calibration_evidence.is_object() ||
-          calibration_evidence.size() != 3u ||
-          !calibration_evidence.contains("file") ||
+      if (!calibration_evidence.is_object() || calibration_evidence.size() != 3u) {
+        error = "v2 GPU replay manifest has invalid calibration-contract object";
+        return false;
+      }
+      if (!calibration_evidence.contains("file") ||
           !calibration_evidence["file"].is_string() ||
           calibration_evidence["file"].get<std::string>() !=
-            "contracts/depth-coordinate-v2-v1.json" ||
-          !calibration_evidence.contains("schema") ||
+            "contracts/depth-coordinate-v2-v1.json") {
+        error = "v2 GPU replay manifest has invalid calibration-contract file";
+        return false;
+      }
+      if (!calibration_evidence.contains("schema") ||
           !uint32_number(calibration_evidence["schema"], calibration_schema) ||
-          calibration_schema != v2::contract_schema ||
-          !calibration_evidence.contains("sha256") ||
+          calibration_schema != v2::contract_schema) {
+        error = "v2 GPU replay manifest has invalid calibration-contract schema";
+        return false;
+      }
+      if (!calibration_evidence.contains("sha256") ||
           !calibration_evidence["sha256"].is_string() ||
           !sha256_is_lower_hex(calibration_evidence["sha256"].get<std::string>())) {
-        error = "v2 GPU replay manifest has invalid calibration-contract evidence";
+        error = "v2 GPU replay manifest has invalid calibration-contract sha256";
         return false;
       }
       calibration_contract = calibration_evidence;

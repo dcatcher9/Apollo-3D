@@ -1,4 +1,4 @@
-// Compact SLR12 lower-text authority.
+// Compact SLR13 lower-text authority.
 //
 // OCR8 is the sole geometry source.  A coherent subtitle stack plus any bottom ribbon candidates
 // need two distinct, exact-frame observations before becoming one shared-plane owner. Only tight
@@ -20,7 +20,6 @@ StructuredBuffer<uint> OcrRecord : register(t7);
 RWStructuredBuffer<uint> LocatorState : register(u2);
 RWTexture2D<float> ConditionedField : register(u3);
 RWStructuredBuffer<uint> ConditionParamsOut : register(u4);
-RWBuffer<uint> ConditionDispatchArgs : register(u5);
 
 cbuffer SubtitleLocatorConstants : register(b2) {
     uint4 locator_field;   // width, height, ROI top, ROI bottom
@@ -33,7 +32,9 @@ static const uint FLAG_OWNER = 1u;
 static const uint FLAG_PENDING = 2u;
 static const uint FLAG_TARGET_VALID = 4u;
 static const uint FLAG_TARGET_RESET = 8u;
-static const uint KNOWN_FLAGS = 15u;
+static const uint FLAG_PROVISIONAL_CURRENT = V2_SUBTITLE_LOCATOR_PROVISIONAL_CURRENT_FLAG;
+static const uint KNOWN_FLAGS = FLAG_OWNER | FLAG_PENDING | FLAG_TARGET_VALID |
+    FLAG_TARGET_RESET | FLAG_PROVISIONAL_CURRENT;
 
 static const uint EVENT_NONE = 0u;
 static const uint EVENT_BIRTH = 1u;
@@ -69,9 +70,8 @@ static const uint CONDITION_PARAM_CURRENT_COUNT_WORD = 2u;
 static const uint CONDITION_PARAM_CURRENT_KINDS_WORD = 3u;
 static const uint CONDITION_PARAM_FADE_STEP_WORD = 4u;
 static const uint CONDITION_PARAM_TARGET_WORD = 5u;
-static const uint CONDITION_PARAM_ORIGIN_X_WORD = 6u;
-static const uint CONDITION_PARAM_ORIGIN_Y_WORD = 7u;
-static const uint CONDITION_PARAM_WORD_COUNT = V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT;
+
+bool ProvisionalSingleLineReplacementRects(uint4 old_core, uint4 current_core);
 
 bool FiniteFloat(float value) {
     return (asuint(value) & 0x7f800000u) != 0x7f800000u;
@@ -91,7 +91,7 @@ bool SubtitleTargetIsValid(float target) {
 }
 
 // The active field/ROI is carried by the existing runtime cbuffer and repeated in OCR8.  The host
-// enables this path only after authenticating the DAV2 tensor shape; SLR12 independently checks
+// enables this path only after authenticating the DAV2 tensor shape; SLR13 independently checks
 // finite ABI-sized geometry, the actual BaseField dispatch dimensions, and that the ROI is a
 // non-empty subset of the exact bottom-6:1 detector crop. Any disagreement publishes no current
 // authority; the complete writer publishes BaseField exactly, while full-content live production
@@ -354,7 +354,19 @@ uint BuildCurrentStack(uint final_count) {
             // has independent detector topology evidence and may legitimately span the field.
             uint maximum_width = LocatorContentWidth() * V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR /
                 V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR;
+            uint corner_edge_threshold =
+                LocatorContentWidth() / V2_SUBTITLE_LOCATOR_CORNER_EDGE_DIVISOR;
+            uint left_clearance = core.x - locator_content.x;
+            uint right_clearance = locator_content.z - core.z;
+            // Persistent player branding is commonly both bottom-attached and tucked into a
+            // horizontal corner. Reject only ordinary cores strictly inside that symmetric edge
+            // threshold and within the final ROI rows. Equality at the edge threshold remains
+            // eligible, and ribbon topology is never filtered by this ordinary-core rule.
+            bool bottom_corner_ordinary = kind == 0u &&
+                min(left_clearance, right_clearance) < corner_edge_threshold &&
+                core.w + V2_SUBTITLE_LOCATOR_CORNER_BOTTOM_ROWS >= locator_field.w;
             if (width >= V2_SUBTITLE_LOCATOR_MIN_WIDTH_CELLS &&
+                !bottom_corner_ordinary &&
                 (kind != 0u || width <= maximum_width) &&
                 height >= V2_SUBTITLE_LOCATOR_MIN_HEIGHT_CELLS &&
                 width * V2_SUBTITLE_LOCATOR_MIN_ASPECT_DENOMINATOR >=
@@ -569,6 +581,7 @@ bool ValidatePreviousState() {
     bool pending = (flags & FLAG_PENDING) != 0u;
     bool target_valid = (flags & FLAG_TARGET_VALID) != 0u;
     bool target_reset = (flags & FLAG_TARGET_RESET) != 0u;
+    bool provisional_current = (flags & FLAG_PROVISIONAL_CURRENT) != 0u;
     uint packed_kinds = PreviousState[V2_SUBTITLE_LOCATOR_KIND_WORD];
     uint known_kind_bits =
         (V2_SUBTITLE_LOCATOR_KIND_MASK << V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT) |
@@ -602,8 +615,47 @@ bool ValidatePreviousState() {
     uint lifetime_count = PreviousState[25u];
     if (owner) {
         if (lifetime_count > V2_SUBTITLE_TARGET_MAX_UNRELIABLE_HOLDS ||
-            PreviousState[29u] != 0u || PreviousState[30u] != 0u ||
             (lifetime_count != 0u && PreviousState[21u] != EVENT_NONE)) return false;
+        if (provisional_current) {
+            uint owner_kinds = (packed_kinds >> V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT) &
+                V2_SUBTITLE_LOCATOR_KIND_MASK;
+            uint pending_kinds = (packed_kinds >> V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT) &
+                V2_SUBTITLE_LOCATOR_KIND_MASK;
+            uint current_kinds = (packed_kinds >> V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT) &
+                V2_SUBTITLE_LOCATOR_KIND_MASK;
+            uint4 pending_core = uint4(
+                PreviousState[V2_SUBTITLE_LOCATOR_PENDING_OFFSET + 0u],
+                PreviousState[V2_SUBTITLE_LOCATOR_PENDING_OFFSET + 1u],
+                PreviousState[V2_SUBTITLE_LOCATOR_PENDING_OFFSET + 2u],
+                PreviousState[V2_SUBTITLE_LOCATOR_PENDING_OFFSET + 3u]);
+            uint4 current_cover = uint4(
+                PreviousState[V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + 0u],
+                PreviousState[V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + 1u],
+                PreviousState[V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + 2u],
+                PreviousState[V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + 3u]);
+            uint4 owner_core = uint4(
+                PreviousState[V2_SUBTITLE_LOCATOR_OWNER_OFFSET + 0u],
+                PreviousState[V2_SUBTITLE_LOCATOR_OWNER_OFFSET + 1u],
+                PreviousState[V2_SUBTITLE_LOCATOR_OWNER_OFFSET + 2u],
+                PreviousState[V2_SUBTITLE_LOCATOR_OWNER_OFFSET + 3u]);
+            if (!pending || !target_valid || target_reset || owner_count != 1u ||
+                pending_count != 1u || current_count != 1u || owner_kinds != 0u ||
+                pending_kinds != 0u || current_kinds != 0u ||
+                PreviousState[21u] != EVENT_NONE || PreviousState[24u] != 2u ||
+                lifetime_count != 0u || current_cover.x > pending_core.x ||
+                current_cover.y > pending_core.y || current_cover.z < pending_core.z ||
+                current_cover.w < pending_core.w ||
+                !ProvisionalSingleLineReplacementRects(owner_core, pending_core) ||
+                !SubtitleTargetIsValid(asfloat(
+                    PreviousState[V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD])) ||
+                (PreviousState[V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD] != 1u &&
+                 PreviousState[V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD] != 2u)) {
+                return false;
+            }
+        } else if (PreviousState[V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD] != 0u ||
+                   PreviousState[V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD] != 0u) {
+            return false;
+        }
         if (target_valid) {
             if (target_reset || PreviousState[19u] != PreviousState[3u] ||
                 !SubtitleTargetIsValid(target) ||
@@ -616,13 +668,13 @@ bool ValidatePreviousState() {
                    PreviousState[19u] != 0u || current_count != 0u ||
                    PreviousState[24u] != 0u) return false;
     } else if (lifetime_count == 0u) {
-        if (target_valid || target_reset || PreviousState[18u] != 0u ||
+        if (provisional_current || target_valid || target_reset || PreviousState[18u] != 0u ||
             PreviousState[19u] != 0u || PreviousState[29u] != 0u ||
             PreviousState[30u] != 0u || current_count != 0u || PreviousState[24u] != 0u) {
             return false;
         }
     } else {
-        if (lifetime_count > DEATH_GRACE_OBSERVATIONS) return false;
+        if (provisional_current || lifetime_count > DEATH_GRACE_OBSERVATIONS) return false;
         uint4 bounds = uint4(
             PreviousState[29u] & 0xffffu, PreviousState[30u] & 0xffffu,
             PreviousState[29u] >> 16u, PreviousState[30u] >> 16u);
@@ -663,6 +715,61 @@ bool StackCompatible(uint first_base, uint first_count, uint second_base, uint s
         }
     }
     return true;
+}
+
+bool StackExactlyEqual(uint first_base, uint first_count, uint second_base, uint second_count) {
+    if (first_count == 0u || first_count != second_count) return false;
+    [unroll]
+    for (uint index = 0u; index < MAX_LINES; ++index) {
+        if (index < first_count &&
+            (WorkKinds[first_base + index] != WorkKinds[second_base + index] ||
+             any(WorkRects[first_base + index] != WorkRects[second_base + index]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool StackCoverExactlyEqualsPreviousCurrent(uint stack_index, uint current_index) {
+    uint base = V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + current_index * 4u;
+    return all(StackCovers[stack_index] == uint4(
+        PreviousState[base + 0u], PreviousState[base + 1u],
+        PreviousState[base + 2u], PreviousState[base + 3u]));
+}
+
+bool ProvisionalSingleLineReplacementRects(uint4 old_core, uint4 current_core) {
+    uint old_height = old_core.w - old_core.y;
+    uint current_height = current_core.w - current_core.y;
+    uint shorter_height = min(old_height, current_height);
+    uint taller_height = max(old_height, current_height);
+    uint vertical_overlap = min(old_core.w, current_core.w) >
+            max(old_core.y, current_core.y) ?
+        min(old_core.w, current_core.w) - max(old_core.y, current_core.y) : 0u;
+    uint center_y_delta_twice = (old_core.y + old_core.w) >
+            (current_core.y + current_core.w) ?
+        (old_core.y + old_core.w) - (current_core.y + current_core.w) :
+        (current_core.y + current_core.w) - (old_core.y + old_core.w);
+    uint old_center_x_twice = old_core.x + old_core.z;
+    uint current_center_x_twice = current_core.x + current_core.z;
+    return RectIou(old_core, current_core) < V2_SUBTITLE_LOCATOR_MATCH_IOU_THRESHOLD &&
+        vertical_overlap *
+            V2_SUBTITLE_LOCATOR_PROVISIONAL_MIN_VERTICAL_OVERLAP_DENOMINATOR >=
+        shorter_height * V2_SUBTITLE_LOCATOR_PROVISIONAL_MIN_VERTICAL_OVERLAP_NUMERATOR &&
+        taller_height <=
+            V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_HEIGHT_RATIO * shorter_height &&
+        center_y_delta_twice <=
+            V2_SUBTITLE_LOCATOR_PROVISIONAL_MAX_CENTER_Y_DELTA_SHORTER_HEIGHT *
+                shorter_height &&
+        old_center_x_twice >= 2u * current_core.x &&
+        old_center_x_twice < 2u * current_core.z &&
+        current_center_x_twice >= 2u * old_core.x &&
+        current_center_x_twice < 2u * old_core.z;
+}
+
+bool ProvisionalSingleLineReplacement(uint old_base, uint current_base) {
+    return WorkKinds[old_base] == 0u && WorkKinds[current_base] == 0u &&
+        ProvisionalSingleLineReplacementRects(
+            WorkRects[old_base], WorkRects[current_base]);
 }
 
 uint MatchCurrentToOwner(uint current_count, uint owner_count) {
@@ -827,7 +934,9 @@ bool SampleTargetProbe(
         target = 0.5f * (first_row_median + second_row_median);
         return SubtitleTargetIsValid(target);
     }
-    if (!first_row_coherent && !second_row_coherent) return false;
+    // Two complete independent primary rows authorize their robust medians even when motion or
+    // scene detail broadens both within-row IQRs. A lone row still needs the IQR gate before it
+    // can stand in for the missing observation. Shifted fallback probes remain strict above.
     if (first_row_valid && second_row_valid) {
         target = median_delta_pixels <=
                 V2_SUBTITLE_TARGET_MAX_ROW_MEDIAN_DELTA_BINOCULAR_SOURCE_PIXELS ?
@@ -836,6 +945,7 @@ bool SampleTargetProbe(
     } else if (first_row_coherent) {
         target = first_row_median;
     } else {
+        if (!second_row_coherent) return false;
         target = second_row_median;
     }
     return SubtitleTargetIsValid(target);
@@ -982,11 +1092,13 @@ uint PackKinds(uint base, uint count, uint shift) {
 void PublishState(
     uint owner_generation, uint owner_count, uint pending_count, uint current_count,
     float target, bool target_valid, bool target_reset, uint fade_step, uint lifetime_count,
-    uint4 grace_bounds, uint event, uint scene_epoch
+    uint4 grace_bounds, uint event, uint scene_epoch, bool provisional_current,
+    float provisional_target, uint provisional_fade
 ) {
     uint flags = (owner_count != 0u ? FLAG_OWNER : 0u) |
         (pending_count != 0u ? FLAG_PENDING : 0u) |
-        (target_valid ? FLAG_TARGET_VALID : 0u) | (target_reset ? FLAG_TARGET_RESET : 0u);
+        (target_valid ? FLAG_TARGET_VALID : 0u) | (target_reset ? FLAG_TARGET_RESET : 0u) |
+        (provisional_current ? FLAG_PROVISIONAL_CURRENT : 0u);
     uint4 owner_bbox = RectSummary(NEW_OWNER_BASE, owner_count);
     uint4 pending_bbox = RectSummary(NEW_PENDING_BASE, pending_count);
     LocatorState[0u] = V2_SUBTITLE_LOCATOR_STATE_SCHEMA;
@@ -1018,10 +1130,14 @@ void PublishState(
     LocatorState[26u] = scene_epoch;
     LocatorState[27u] = locator_field.x;
     LocatorState[28u] = locator_field.y;
-    LocatorState[29u] = owner_count == 0u && lifetime_count != 0u ?
-        (grace_bounds.z << 16u) | grace_bounds.x : 0u;
-    LocatorState[30u] = owner_count == 0u && lifetime_count != 0u ?
-        (grace_bounds.w << 16u) | grace_bounds.y : 0u;
+    LocatorState[V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD] = provisional_current ?
+        asuint(provisional_target) :
+        (owner_count == 0u && lifetime_count != 0u ?
+            (grace_bounds.z << 16u) | grace_bounds.x : 0u);
+    LocatorState[V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD] = provisional_current ?
+        provisional_fade :
+        (owner_count == 0u && lifetime_count != 0u ?
+            (grace_bounds.w << 16u) | grace_bounds.y : 0u);
     LocatorState[V2_SUBTITLE_LOCATOR_KIND_WORD] =
         PackKinds(NEW_OWNER_BASE, owner_count, V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT) |
         PackKinds(NEW_PENDING_BASE, pending_count, V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT) |
@@ -1062,14 +1178,17 @@ void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
     bool distinct_observation = !old_valid || PreviousState[22u] != locator_frame.x ||
         PreviousState[23u] != locator_frame.y || PreviousState[10u] != locator_frame.z ||
         PreviousState[11u] != locator_frame.w;
-    bool hard_cut = cut_valid && ((distinct_observation && SBS_STATE_HARD_CUT_PULSE(
-        CutBridge[SBS_STATE_VECTOR_HARD_CUT_PULSE]) > 0.5f) ||
-        (old_valid && PreviousState[26u] != scene_epoch));
+    // The one-frame pulse is delivery-local. Infer advances CutBridge and SLR in one coherent
+    // publication while reuse freezes both; the durable hard-cut authority is therefore the
+    // authenticated epoch transition. Re-reading a retained pulse must never restart the scene.
+    bool hard_cut = cut_valid && old_valid && PreviousState[26u] != scene_epoch;
 
     bool old_target_valid = old_valid && (PreviousState[2u] & FLAG_TARGET_VALID) != 0u;
     float old_target = old_target_valid ? asfloat(PreviousState[18u]) : 0.0f;
     uint old_unreliable_holds = old_valid && old_owner_count != 0u ? PreviousState[25u] : 0u;
     uint old_grace = old_valid && old_owner_count == 0u ? PreviousState[25u] : 0u;
+    bool old_provisional_current = old_valid &&
+        (PreviousState[2u] & FLAG_PROVISIONAL_CURRENT) != 0u;
     uint4 old_grace_bounds = old_grace != 0u ? uint4(
         PreviousState[29u] & 0xffffu, PreviousState[30u] & 0xffffu,
         PreviousState[29u] >> 16u, PreviousState[30u] >> 16u) :
@@ -1081,7 +1200,8 @@ void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
     if (!cut_valid || !locator_domain_valid ||
         ((locator_source.w != 0u || hard_cut) && !ocr_valid)) {
         PublishState(0u, 0u, 0u, 0u, 0.0f, false, false, 0u, 0u,
-                     uint4(0u, 0u, 0u, 0u), EVENT_NONE, scene_epoch);
+                     uint4(0u, 0u, 0u, 0u), EVENT_NONE, scene_epoch,
+                     false, 0.0f, 0u);
         return;
     }
     if (!ocr_valid) {
@@ -1107,7 +1227,7 @@ void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
             }
         }
         PublishState(0u, 0u, 0u, 0u, cached_target, false, false, 0u, grace,
-                     grace_bounds, event, scene_epoch);
+                     grace_bounds, event, scene_epoch, false, 0.0f, 0u);
         return;
     }
     uint stack_count = BuildCurrentStack(final_count);
@@ -1121,6 +1241,8 @@ void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
     bool new_owner = false;
     bool cut_survivor = false;
     bool inherit_target = false;
+    bool provisional_candidate = false;
+    bool retain_provisional_duplicate = false;
     float inherited_target = 0.0f;
     uint grace = 0u;
     uint4 grace_bounds = uint4(0u, 0u, 0u, 0u);
@@ -1174,8 +1296,20 @@ void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
             }
         }
     } else if (old_owner_count != 0u) {
-        if (old_pending_count != 0u && distinct_observation &&
-            StackCompatible(OLD_PENDING_BASE, old_pending_count, STACK_BASE, stack_count)) {
+        uint matched = MatchCurrentToOwner(stack_count, old_owner_count);
+        // Established owner continuity has priority over a stale pending transaction. Otherwise a
+        // current box that overlaps both tracks can confirm the pending geometry and needlessly
+        // bump generation/restart fade even though every current member still belongs to owner.
+        if (matched == stack_count && stack_count <= old_owner_count) {
+            CopyRects(NEW_OWNER_BASE, STACK_BASE, stack_count);
+            CopyStackCoversToCurrent(stack_count);
+            new_owner_count = stack_count;
+            authority_count = stack_count;
+            owner_generation = PreviousState[3u];
+            continuing_owner = true;
+        } else if (old_pending_count != 0u && distinct_observation &&
+                   StackCompatible(
+                       OLD_PENDING_BASE, old_pending_count, STACK_BASE, stack_count)) {
             CopyRects(NEW_OWNER_BASE, STACK_BASE, stack_count);
             CopyStackCoversToCurrent(stack_count);
             new_owner_count = stack_count;
@@ -1187,24 +1321,44 @@ void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
                 inherit_target = true;
                 inherited_target = old_target;
             }
+        } else if (old_provisional_current && !distinct_observation &&
+                   old_pending_count == 1u && stack_count == 1u &&
+                   StackExactlyEqual(OLD_PENDING_BASE, 1u, STACK_BASE, 1u) &&
+                   StackCoverExactlyEqualsPreviousCurrent(0u, 0u)) {
+            // Re-reading the exact observation that created the provisional bridge neither
+            // confirms it nor drops its one-frame verdict. The durable owner remains unchanged.
+            CopyRects(NEW_OWNER_BASE, OLD_OWNER_BASE, old_owner_count);
+            CopyRects(NEW_PENDING_BASE, STACK_BASE, stack_count);
+            CopyStackCoversToCurrent(stack_count);
+            CopyRects(MATCHED_BASE, STACK_BASE, stack_count);
+            new_owner_count = old_owner_count;
+            new_pending_count = stack_count;
+            authority_count = stack_count;
+            owner_generation = PreviousState[3u];
+            continuing_owner = true;
+            provisional_candidate = true;
+            retain_provisional_duplicate = true;
         } else {
-            uint matched = MatchCurrentToOwner(stack_count, old_owner_count);
-            if (matched == stack_count && stack_count <= old_owner_count) {
-                CopyRects(NEW_OWNER_BASE, STACK_BASE, stack_count);
+            CopyRects(NEW_OWNER_BASE, OLD_OWNER_BASE, old_owner_count);
+            CopyRects(NEW_PENDING_BASE, STACK_BASE, stack_count);
+            CopyMatchedCoversToCurrent(matched);
+            new_owner_count = old_owner_count;
+            new_pending_count = stack_count;
+            authority_count = matched;
+            owner_generation = PreviousState[3u];
+            continuing_owner = true;
+            if (distinct_observation && matched == 0u && old_pending_count == 0u &&
+                old_target_valid && PreviousState[20u] == 1u &&
+                PreviousState[21u] == EVENT_NONE && PreviousState[24u] == 2u &&
+                old_unreliable_holds == 0u &&
+                old_owner_count == 1u && stack_count == 1u &&
+                ProvisionalSingleLineReplacement(OLD_OWNER_BASE, STACK_BASE)) {
+                // A centered same-baseline one-line replacement may condition only its exact
+                // current cover while the ordinary two-observation handoff remains pending.
                 CopyStackCoversToCurrent(stack_count);
-                new_owner_count = stack_count;
+                CopyRects(MATCHED_BASE, STACK_BASE, stack_count);
                 authority_count = stack_count;
-                owner_generation = PreviousState[3u];
-                continuing_owner = true;
-            } else {
-                CopyRects(NEW_OWNER_BASE, OLD_OWNER_BASE, old_owner_count);
-                CopyRects(NEW_PENDING_BASE, STACK_BASE, stack_count);
-                CopyMatchedCoversToCurrent(matched);
-                new_owner_count = old_owner_count;
-                new_pending_count = stack_count;
-                authority_count = matched;
-                owner_generation = PreviousState[3u];
-                continuing_owner = true;
+                provisional_candidate = true;
             }
         }
     } else {
@@ -1239,6 +1393,9 @@ void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
     float target = 0.0f;
     uint fade_step = 0u;
     uint unreliable_holds = 0u;
+    bool provisional_current = false;
+    float provisional_target = 0.0f;
+    uint provisional_fade = 0u;
     if (new_owner_count != 0u) {
         // Every distinct authoritative owner observation samples the same local supporting plane.
         // Reliable samples are not moved toward an absolute screen plane; an established target
@@ -1250,7 +1407,45 @@ void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
             continuing_owner;
         bool retain_without_current_authority = old_target_valid && continuing_owner &&
             authority_count == 0u;
-        if (retain_failed_duplicate) {
+        if (provisional_candidate) {
+            // The pending observation may affect only this exact current cover. Keep the durable
+            // owner target/fade bits untouched so a failed or reverted handoff cannot poison them.
+            target = old_target;
+            target_valid = SubtitleTargetIsValid(target);
+            fade_step = PreviousState[24u];
+            unreliable_holds = old_unreliable_holds;
+            if (retain_provisional_duplicate) {
+                provisional_target = asfloat(
+                    PreviousState[V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD]);
+                provisional_fade =
+                    PreviousState[V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD];
+                provisional_current = SubtitleTargetIsValid(provisional_target) &&
+                    (provisional_fade == 1u || provisional_fade == 2u);
+            } else {
+                float desired = 0.0f;
+                bool sampled = SampleOwnerTarget(MATCHED_BASE, authority_count, desired);
+                if (sampled) {
+                    precise float residual_pixels =
+                        abs(desired - old_target) * (2.0f * (float)locator_source.x);
+                    if (residual_pixels >
+                        V2_SUBTITLE_TARGET_MAX_RESIDUAL_BINOCULAR_SOURCE_PIXELS) {
+                        provisional_target = desired;
+                        provisional_fade = 1u;
+                        provisional_current = SubtitleTargetIsValid(provisional_target);
+                    } else {
+                        provisional_current = UpdateOwnerTarget(
+                            old_target, desired, provisional_target);
+                        provisional_fade = provisional_current ? PreviousState[24u] : 0u;
+                    }
+                }
+            }
+            if (!target_valid || !provisional_current) {
+                provisional_current = false;
+                provisional_target = 0.0f;
+                provisional_fade = 0u;
+                authority_count = 0u;
+            }
+        } else if (retain_failed_duplicate) {
             // The same observation that failed local-plane qualification cannot acquire authority
             // by being redispatched; only a distinct reliable observation may restart at fade 1.
         } else if (retain_duplicate || retain_without_current_authority) {
@@ -1273,13 +1468,23 @@ void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
             } else if (sampled && new_owner && inherit_target) {
                 precise float residual_pixels =
                     abs(desired - inherited_target) * (2.0f * (float)locator_source.x);
-                if (residual_pixels > V2_SUBTITLE_TARGET_MAX_RESIDUAL_BINOCULAR_SOURCE_PIXELS) {
+                if (residual_pixels >
+                    V2_SUBTITLE_TARGET_MAX_RESIDUAL_BINOCULAR_SOURCE_PIXELS) {
                     target = desired;
                     target_valid = true;
+                    fade_step = 1u;
                 } else {
                     target_valid = UpdateOwnerTarget(inherited_target, desired, target);
+                    // A confirmed same-scene handoff whose new supporting plane is compatible
+                    // with the inherited target does not restart a mature fade. Outside the
+                    // separately authenticated exact-current provisional bridge, the first
+                    // unmatched pending observation remains exact Base; this only removes the
+                    // otherwise unnecessary half-strength step after confirmation. Grace
+                    // rebirths retain their ordinary EVENT_BIRTH half fade, and an invalid update
+                    // still fails closed below.
+                    fade_step = event == EVENT_HANDOFF && target_valid ?
+                        PreviousState[24u] : 1u;
                 }
-                fade_step = 1u;
             } else if (sampled && new_owner) {
                 target = desired;
                 target_valid = true;
@@ -1328,7 +1533,8 @@ void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
         owner_generation, new_owner_count, new_pending_count, authority_count,
         target, target_valid, target_reset, fade_step,
         new_owner_count != 0u ? unreliable_holds : grace,
-        grace_bounds, event, scene_epoch);
+        grace_bounds, event, scene_epoch, provisional_current,
+        provisional_target, provisional_fade);
 }
 
 bool ValidateConditionRectBlock(uint offset, uint count, out uint4 bbox, out uint area) {
@@ -1369,9 +1575,15 @@ bool ValidateConditionCurrentBlock(uint count) {
 
 bool ConditionStateValid(out uint current_count, out float target, out uint fade_step) {
     current_count = LocatorStateRead[20u];
-    target = asfloat(LocatorStateRead[18u]);
-    fade_step = LocatorStateRead[24u];
     uint flags = LocatorStateRead[2u];
+    bool provisional_current = (flags & FLAG_PROVISIONAL_CURRENT) != 0u;
+    float durable_target = asfloat(LocatorStateRead[18u]);
+    uint durable_fade = LocatorStateRead[24u];
+    target = provisional_current ?
+        asfloat(LocatorStateRead[V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD]) :
+        durable_target;
+    fade_step = provisional_current ?
+        LocatorStateRead[V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD] : durable_fade;
     uint owner_count = LocatorStateRead[4u];
     uint pending_count = LocatorStateRead[12u];
     uint packed_kinds = LocatorStateRead[V2_SUBTITLE_LOCATOR_KIND_WORD];
@@ -1396,18 +1608,35 @@ bool ConditionStateValid(out uint current_count, out float target, out uint fade
         LocatorStateRead[10u] != locator_frame.z || LocatorStateRead[11u] != locator_frame.w ||
         LocatorStateRead[22u] != locator_frame.x || LocatorStateRead[23u] != locator_frame.y ||
         LocatorStateRead[21u] > EVENT_HANDOFF ||
+        (durable_fade != 1u && durable_fade != 2u) ||
         (fade_step != 1u && fade_step != 2u) ||
         LocatorStateRead[25u] > V2_SUBTITLE_TARGET_MAX_UNRELIABLE_HOLDS ||
         (LocatorStateRead[25u] != 0u && LocatorStateRead[21u] != EVENT_NONE) ||
         LocatorStateRead[27u] != locator_field.x || LocatorStateRead[28u] != locator_field.y ||
-        LocatorStateRead[29u] != 0u || LocatorStateRead[30u] != 0u ||
         (packed_kinds & ~known_kind_bits) != 0u ||
         !PackedKindsValid(packed_kinds, V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT, owner_count) ||
         !PackedKindsValid(packed_kinds, V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT, pending_count) ||
         !PackedKindsValid(packed_kinds, V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT, current_count) ||
-        !SubtitleTargetIsValid(target) ||
+        !SubtitleTargetIsValid(durable_target) || !SubtitleTargetIsValid(target) ||
         !FiniteFloat(v2_max_horizontal_slope) || v2_max_horizontal_slope < 0.0f ||
         !FiniteFloat(v2_max_vertical_shear) || v2_max_vertical_shear < 0.0f) {
+        return false;
+    }
+    uint owner_kinds = (packed_kinds >> V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT) &
+        V2_SUBTITLE_LOCATOR_KIND_MASK;
+    uint pending_kinds = (packed_kinds >> V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT) &
+        V2_SUBTITLE_LOCATOR_KIND_MASK;
+    uint current_kinds = (packed_kinds >> V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT) &
+        V2_SUBTITLE_LOCATOR_KIND_MASK;
+    if (provisional_current) {
+        if ((flags & FLAG_PENDING) == 0u || owner_count != 1u || pending_count != 1u ||
+            current_count != 1u || owner_kinds != 0u || pending_kinds != 0u ||
+            current_kinds != 0u || LocatorStateRead[21u] != EVENT_NONE ||
+            durable_fade != 2u || LocatorStateRead[25u] != 0u) {
+            return false;
+        }
+    } else if (LocatorStateRead[V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD] != 0u ||
+               LocatorStateRead[V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD] != 0u) {
         return false;
     }
     uint4 owner_bbox;
@@ -1427,6 +1656,33 @@ bool ConditionStateValid(out uint current_count, out float target, out uint fade
             LocatorStateRead[15u], LocatorStateRead[16u])) || pending_area != LocatorStateRead[17u]) {
         return false;
     }
+    if (provisional_current) {
+        // A provisional verdict is allowed to render only the exact raw-core/final-cover pair
+        // selected from this same authenticated OCR8 record. Replaying selection here prevents a
+        // corrupted or widened state cover from borrowing the pending core's temporary authority.
+        uint final_count = 0u;
+        if (!ValidateOcrRecord(final_count) || BuildCurrentStack(final_count) != 1u) return false;
+        uint4 pending_core = uint4(
+            LocatorStateRead[V2_SUBTITLE_LOCATOR_PENDING_OFFSET + 0u],
+            LocatorStateRead[V2_SUBTITLE_LOCATOR_PENDING_OFFSET + 1u],
+            LocatorStateRead[V2_SUBTITLE_LOCATOR_PENDING_OFFSET + 2u],
+            LocatorStateRead[V2_SUBTITLE_LOCATOR_PENDING_OFFSET + 3u]);
+        uint4 owner_core = uint4(
+            LocatorStateRead[V2_SUBTITLE_LOCATOR_OWNER_OFFSET + 0u],
+            LocatorStateRead[V2_SUBTITLE_LOCATOR_OWNER_OFFSET + 1u],
+            LocatorStateRead[V2_SUBTITLE_LOCATOR_OWNER_OFFSET + 2u],
+            LocatorStateRead[V2_SUBTITLE_LOCATOR_OWNER_OFFSET + 3u]);
+        uint4 current_cover = uint4(
+            LocatorStateRead[V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + 0u],
+            LocatorStateRead[V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + 1u],
+            LocatorStateRead[V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + 2u],
+            LocatorStateRead[V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + 3u]);
+        if (!ProvisionalSingleLineReplacementRects(owner_core, pending_core) ||
+            WorkKinds[STACK_BASE] != 0u || any(WorkRects[STACK_BASE] != pending_core) ||
+            any(StackCovers[0u] != current_cover)) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -1438,93 +1694,9 @@ bool ConditionContentValid() {
         all(locator_content == DepthAnalysisContentCells());
 }
 
-uint ConservativeConditionPad(
-    float max_delta,
-    float core_range,
-    float slope,
-    uint content_width,
-    uint axis_extent) {
-    if (axis_extent == 0u || max_delta <= core_range) return 0u;
-    precise float step = slope / (float)content_width;
-    if (!FiniteFloat(step) || step <= 0.0f) return axis_extent;
-    precise float raw_pad = (max_delta - core_range) / step;
-    // Precheck against the bounded field extent before converting float to uint. One additional
-    // cell plus the excluded-cell proof below makes float rounding conservative, never narrow.
-    if (!FiniteFloat(raw_pad) || raw_pad >= (float)axis_extent) return axis_extent;
-    uint pad = min(axis_extent, (uint)ceil(raw_pad) + 1u);
-    precise float first_excluded_budget =
-        core_range + (float)(pad + 1u) * step;
-    return FiniteFloat(first_excluded_budget) && first_excluded_budget >= max_delta ?
-        pad : axis_extent;
-}
-
-bool PrepareFullContentActiveRegion(
-    uint current_count,
-    uint current_kinds,
-    float condition_target,
-    out uint2 dispatch_origin,
-    out uint3 dispatch_groups) {
-    dispatch_origin = uint2(0u, 0u);
-    dispatch_groups = uint3(0u, 0u, 0u);
-    precise float max_delta = v2_direct_container_limit + abs(condition_target);
-    precise float core_range = 0.5f / (float)locator_source.x;
-    if (!FiniteFloat(max_delta) || !FiniteFloat(core_range)) {
-        dispatch_groups = uint3((target_w + 15u) / 16u, (target_h + 15u) / 16u, 1u);
-        return true;
-    }
-    if (max_delta <= core_range) {
-        return false;
-    }
-    uint content_width = LocatorContentWidth();
-    uint content_height = locator_content.w - locator_content.y;
-    uint horizontal_pad = ConservativeConditionPad(
-        max_delta, core_range, v2_max_horizontal_slope,
-        content_width, content_width);
-    uint vertical_pad = ConservativeConditionPad(
-        max_delta, core_range, v2_max_vertical_shear,
-        content_width, content_height);
-    uint4 bounds = uint4(
-        locator_content.z, locator_content.w, locator_content.x, locator_content.y);
-    [unroll]
-    for (uint slot = 0u; slot < MAX_LINES; ++slot) {
-        if (slot < current_count) {
-            uint offset = V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + slot * 4u;
-            uint4 rectangle = uint4(
-                LocatorStateRead[offset + 0u], LocatorStateRead[offset + 1u],
-                LocatorStateRead[offset + 2u], LocatorStateRead[offset + 3u]);
-            bool ribbon = ((current_kinds >> slot) & 1u) != 0u;
-            uint4 expanded;
-            if (ribbon) {
-                expanded = uint4(
-                    locator_content.x,
-                    rectangle.y - min(vertical_pad, rectangle.y - locator_content.y),
-                    locator_content.z,
-                    locator_content.w);
-            } else {
-                expanded = uint4(
-                    rectangle.x - min(horizontal_pad, rectangle.x - locator_content.x),
-                    rectangle.y - min(vertical_pad, rectangle.y - locator_content.y),
-                    rectangle.z + min(horizontal_pad, locator_content.z - rectangle.z),
-                    rectangle.w + min(vertical_pad, locator_content.w - rectangle.w));
-            }
-            bounds.xy = min(bounds.xy, expanded.xy);
-            bounds.zw = max(bounds.zw, expanded.zw);
-        }
-    }
-    if (bounds.x >= bounds.z || bounds.y >= bounds.w) return false;
-    dispatch_origin = (bounds.xy / 16u) * 16u;
-    uint2 dispatch_extent = bounds.zw - dispatch_origin;
-    dispatch_groups = uint3(
-        (dispatch_extent.x + 15u) / 16u,
-        (dispatch_extent.y + 15u) / 16u,
-        1u);
-    return dispatch_groups.x != 0u && dispatch_groups.y != 0u;
-}
-
-// Authenticate the state once per field, then publish the tiny immutable parameter closure used
-// by both condition writers. Full-content indirect arguments are zero without current authority;
-// otherwise they cover only the conservatively expanded union that could change. Padded ROI fields
-// still publish full-field arguments so synthetic cells can extend the nearest real content cell.
+// Authenticate the state once per observation, then publish only the six immutable verdict words
+// consumed by the complete out-of-place writer. Invalid authority publishes canonical zero words;
+// the writer still visits the full field and copies Base exactly.
 [numthreads(1, 1, 1)]
 void condition_prepare_main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint current_count;
@@ -1535,17 +1707,6 @@ void condition_prepare_main(uint3 dispatch_id : SV_DispatchThreadID) {
         ((LocatorStateRead[V2_SUBTITLE_LOCATOR_KIND_WORD] >>
           V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT) & V2_SUBTITLE_LOCATOR_KIND_MASK) : 0u;
 
-    bool content_valid = ConditionContentValid();
-    bool has_padding = content_valid && any(locator_content != uint4(0u, 0u, target_w, target_h));
-    uint2 dispatch_origin = uint2(0u, 0u);
-    uint3 dispatch_groups = uint3(0u, 0u, 0u);
-    if (has_padding) {
-        dispatch_groups = uint3((target_w + 15u) / 16u, (target_h + 15u) / 16u, 1u);
-    } else if (content_valid && state_valid) {
-        PrepareFullContentActiveRegion(
-            current_count, current_kinds, target, dispatch_origin, dispatch_groups);
-    }
-
     ConditionParamsOut[CONDITION_PARAM_SCHEMA_WORD] =
         state_valid ? V2_SUBTITLE_CONDITION_PARAM_SCHEMA : 0u;
     ConditionParamsOut[CONDITION_PARAM_TAG_WORD] =
@@ -1555,34 +1716,23 @@ void condition_prepare_main(uint3 dispatch_id : SV_DispatchThreadID) {
     ConditionParamsOut[CONDITION_PARAM_CURRENT_KINDS_WORD] = current_kinds;
     ConditionParamsOut[CONDITION_PARAM_FADE_STEP_WORD] = state_valid ? fade_step : 0u;
     ConditionParamsOut[CONDITION_PARAM_TARGET_WORD] = state_valid ? asuint(target) : 0u;
-    ConditionParamsOut[CONDITION_PARAM_ORIGIN_X_WORD] = dispatch_origin.x;
-    ConditionParamsOut[CONDITION_PARAM_ORIGIN_Y_WORD] = dispatch_origin.y;
-    ConditionDispatchArgs[0u] = dispatch_groups.x;
-    ConditionDispatchArgs[1u] = dispatch_groups.y;
-    ConditionDispatchArgs[2u] = dispatch_groups.z;
 }
 
 bool ConditionParamsValid(
     out uint current_count,
     out uint current_kinds,
     out uint fade_step,
-    out float target,
-    out uint2 dispatch_origin) {
+    out float target) {
     current_count = ConditionParams[CONDITION_PARAM_CURRENT_COUNT_WORD];
     current_kinds = ConditionParams[CONDITION_PARAM_CURRENT_KINDS_WORD];
     fade_step = ConditionParams[CONDITION_PARAM_FADE_STEP_WORD];
     target = asfloat(ConditionParams[CONDITION_PARAM_TARGET_WORD]);
-    dispatch_origin = uint2(
-        ConditionParams[CONDITION_PARAM_ORIGIN_X_WORD],
-        ConditionParams[CONDITION_PARAM_ORIGIN_Y_WORD]);
     return ConditionParams[CONDITION_PARAM_SCHEMA_WORD] == V2_SUBTITLE_CONDITION_PARAM_SCHEMA &&
         ConditionParams[CONDITION_PARAM_TAG_WORD] == V2_SUBTITLE_CONDITION_PARAM_TAG &&
         current_count != 0u && current_count <= MAX_LINES &&
         (current_kinds & ~V2_SUBTITLE_LOCATOR_KIND_MASK) == 0u &&
         PackedKindsValid(current_kinds, 0u, current_count) &&
-        (fade_step == 1u || fade_step == 2u) && SubtitleTargetIsValid(target) &&
-        dispatch_origin.x < target_w && dispatch_origin.y < target_h &&
-        (dispatch_origin.x & 15u) == 0u && (dispatch_origin.y & 15u) == 0u;
+        (fade_step == 1u || fade_step == 2u) && SubtitleTargetIsValid(target);
 }
 
 float EvaluateConditionedBase(
@@ -1646,9 +1796,9 @@ float EvaluateConditionedBase(
     return fade_step == 1u ? faded : full;
 }
 
-// Complete out-of-place writer used when Dump 3D must preserve BaseField or tensor padding must
-// extend the nearest real content cell. Every output cell is written, so no preparatory texture
-// copy is required and an invalid condition verdict still publishes Base exactly.
+// Sole production writer. It always reads immutable BaseField out of place and writes every output
+// cell, so padding extends the nearest real content cell, unchanged Base bits remain exact, and an
+// invalid condition verdict still publishes Base without a preparatory texture copy.
 [numthreads(16, 16, 1)]
 void condition_main(uint3 dispatch_id : SV_DispatchThreadID) {
     if (dispatch_id.x >= target_w || dispatch_id.y >= target_h) return;
@@ -1659,39 +1809,12 @@ void condition_main(uint3 dispatch_id : SV_DispatchThreadID) {
     uint current_kinds;
     uint fade_step;
     float condition_target;
-    uint2 dispatch_origin;
     bool state_valid = ConditionParamsValid(
-        current_count, current_kinds, fade_step, condition_target, dispatch_origin);
+        current_count, current_kinds, fade_step, condition_target);
     float base = BaseField.Load(int3(condition_position, 0));
     bool changed;
     float conditioned = EvaluateConditionedBase(
         condition_position, base, state_valid, current_count, current_kinds,
         fade_step, condition_target, changed);
     ConditionedField[dispatch_id.xy] = conditioned;
-}
-
-// Ordinary full-content live production aliases Base and output intentionally. There is no t2 SRV
-// binding in this entrypoint: each bounded invocation adds the authenticated group-aligned origin,
-// then reads and conditionally replaces its u3 cell. This avoids a D3D11 SRV/UAV alias and all
-// texture work when preparation emits zero groups.
-[numthreads(16, 16, 1)]
-void condition_in_place_main(uint3 dispatch_id : SV_DispatchThreadID) {
-    uint current_count;
-    uint current_kinds;
-    uint fade_step;
-    float condition_target;
-    uint2 dispatch_origin;
-    bool state_valid = ConditionParamsValid(
-        current_count, current_kinds, fade_step, condition_target, dispatch_origin);
-    if (!state_valid || !ConditionContentValid() ||
-        any(locator_content != uint4(0u, 0u, target_w, target_h)) ||
-        dispatch_id.x >= target_w - dispatch_origin.x ||
-        dispatch_id.y >= target_h - dispatch_origin.y) return;
-    uint2 condition_position = dispatch_id.xy + dispatch_origin;
-    float base = ConditionedField[condition_position];
-    bool changed;
-    float conditioned = EvaluateConditionedBase(
-        condition_position, base, true, current_count, current_kinds,
-        fade_step, condition_target, changed);
-    if (changed) ConditionedField[condition_position] = conditioned;
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "config.h"
+#include "host_sbs_adaptive_submission.h"
 #include "host_sbs_resolution.h"
 
 #include <chrono>
@@ -33,6 +34,14 @@ namespace models {
 
   /** Immutable identity of the complete producer closure behind a Host SBS parallax result. */
   struct parallax_v2_shader_provenance_t {
+    std::uint32_t source_closure_schema = 0;
+    std::uint32_t source_compile_flags = 0;
+    std::uint32_t source_macro_count = 0;
+    std::string source_closure_sha256;
+  };
+
+  /** Immutable identity of the optional diagnostic completion-ring shader. */
+  struct host_sbs_gpu_trace_provenance_t {
     std::uint32_t source_closure_schema = 0;
     std::uint32_t source_compile_flags = 0;
     std::uint32_t source_macro_count = 0;
@@ -99,9 +108,9 @@ namespace models {
 
     /** Normalized result of a nonblocking asynchronous-stream query.
      *
-     * Keeping CUDA's numeric result codes out of the policy makes the exact-frame DAV2/OCR join
-     * independently testable. Once either stream has submitted work, a query failure is treated as
-     * context-wide: CUDA may surface an earlier asynchronous launch error through either stream.
+     * Keeping CUDA's numeric result codes out of the policy makes the exact-frame joined-root
+     * query independently testable. Any query failure is context-wide because CUDA may surface an
+     * earlier asynchronous child or root launch error through this later stream operation.
      */
     enum class async_stream_readiness_e : std::uint8_t {
       ready,
@@ -109,32 +118,19 @@ namespace models {
       failed,
     };
 
-    enum class joined_stream_readiness_e : std::uint8_t {
-      ready,
-      busy,
-      failed,
-    };
-
-    constexpr joined_stream_readiness_e joined_stream_readiness(
-      const async_stream_readiness_e mandatory,
-      const bool optional_submitted,
-      const async_stream_readiness_e optional
+    /** Whether CUDA operands may be released after a possible asynchronous submission.
+     *
+     * enqueueV3(false) does not prove that no work was partially submitted. Once submission was
+     * attempted, only an available synchronize operation that returns success proves the stream
+     * quiescent enough to free captured operands or destroy its stream.
+     */
+    constexpr bool asynchronous_operands_may_be_released(
+      const bool submission_attempted,
+      const bool synchronize_available,
+      const async_stream_readiness_e synchronize_result
     ) noexcept {
-      if (mandatory == async_stream_readiness_e::failed) {
-        return joined_stream_readiness_e::failed;
-      }
-      if (optional_submitted && optional == async_stream_readiness_e::failed) {
-        return joined_stream_readiness_e::failed;
-      }
-      if (mandatory == async_stream_readiness_e::busy) {
-        return joined_stream_readiness_e::busy;
-      }
-      if (!optional_submitted) {
-        return joined_stream_readiness_e::ready;
-      }
-      return optional == async_stream_readiness_e::busy ?
-               joined_stream_readiness_e::busy :
-               joined_stream_readiness_e::ready;
+      return !submission_attempted ||
+             (synchronize_available && synchronize_result == async_stream_readiness_e::ready);
     }
 
     class execution_context_accounting_t {
@@ -208,12 +204,6 @@ namespace models {
       bool capture_failed = false;
     };
 
-    enum class cuda_graph_enqueue_action_e : std::uint8_t {
-      ordinary,
-      capture,
-      replay,
-    };
-
     constexpr bool select_cuda_graph_signature(
       cuda_graph_replay_policy_t &state,
       const cuda_graph_signature_t &signature
@@ -226,22 +216,11 @@ namespace models {
       return true;
     }
 
-    constexpr cuda_graph_enqueue_action_e next_cuda_graph_enqueue_action(
-      cuda_graph_replay_policy_t &state,
-      const bool graph_api_available,
-      const bool executable_available
+    constexpr bool cuda_graph_signature_matches(
+      const cuda_graph_replay_policy_t &state,
+      const cuda_graph_signature_t &signature
     ) noexcept {
-      if (!graph_api_available || state.capture_failed) {
-        return cuda_graph_enqueue_action_e::ordinary;
-      }
-      if (executable_available) {
-        return cuda_graph_enqueue_action_e::replay;
-      }
-      if (!state.signature_warmed) {
-        state.signature_warmed = true;
-        return cuda_graph_enqueue_action_e::ordinary;
-      }
-      return cuda_graph_enqueue_action_e::capture;
+      return state.signature_warmed && state.signature == signature;
     }
 
   }  // namespace detail
@@ -416,31 +395,72 @@ namespace models {
    * @brief Result of one estimate call: private cut-analysis depth, cut state, and the
    *        authenticated Host SBS parallax field/state.
    */
-  enum class depth_optional_work_mode_e : std::uint8_t {
-    ordinary,
-    suppress_subtitle,  ///< Publish Base and freeze OCR8/SLR12 for native move/size.
-    redispatch_subtitle,  ///< Skip detector work, restamp exact retained OCR8, and run SLR12.
+  [[nodiscard]] constexpr bool ocr_signature_refresh_satisfied(
+    const bool refresh_required,
+    const bool ocr_available,
+    const bool force_infer_enqueued,
+    const depth_optional_work_mode_e accepted_work,
+    const bool ocr_child_enqueued
+  ) noexcept {
+    return !refresh_required || !ocr_available ||
+           (force_infer_enqueued &&
+            (accepted_work == depth_optional_work_mode_e::ordinary ||
+             accepted_work == depth_optional_work_mode_e::ordinary_due) &&
+            ocr_child_enqueued);
+  }
+
+  /** Whether a joined DAV2 wrapper may embed, retain, or must drop its OCR sibling.
+   *
+   * `retain_if_present` is used while OCR is deliberately unarmed and its interop resources are
+   * unmapped. An already-instantiated superset remains valid because the authenticated setter
+   * leaves that child dormant, but a replacement wrapper must be built depth-only until a mapped
+   * ordinary transaction can validate and capture the OCR signature again.
+   */
+  enum class conditional_optional_child_policy_e : std::uint8_t {
+    disabled,
+    retain_if_present,
+    build_ready,
   };
 
-  [[nodiscard]] constexpr depth_optional_work_mode_e select_depth_optional_work_mode(
-    const bool observed_interactive_move_size,
-    const bool snapshot_debug_inputs,
-    const bool redispatch_subtitle = false
+  struct conditional_optional_topology_selection_t {
+    bool reuse_existing = false;
+    bool build_with_optional = false;
+
+    constexpr bool operator==(const conditional_optional_topology_selection_t &) const = default;
+  };
+
+  [[nodiscard]] constexpr conditional_optional_topology_selection_t
+  select_conditional_optional_topology(
+    const bool wrapper_base_matches,
+    const bool existing_optional_present,
+    const bool existing_optional_matches_requested,
+    const conditional_optional_child_policy_e policy
   ) noexcept {
-    if (snapshot_debug_inputs) {
-      return depth_optional_work_mode_e::ordinary;
+    switch (policy) {
+      case conditional_optional_child_policy_e::disabled:
+        return {
+          .reuse_existing = wrapper_base_matches && !existing_optional_present,
+          .build_with_optional = false,
+        };
+      case conditional_optional_child_policy_e::retain_if_present:
+        return {
+          .reuse_existing = wrapper_base_matches,
+          .build_with_optional = false,
+        };
+      case conditional_optional_child_policy_e::build_ready:
+        return {
+          .reuse_existing =
+            wrapper_base_matches && existing_optional_matches_requested,
+          .build_with_optional = true,
+        };
     }
-    if (observed_interactive_move_size) {
-      return depth_optional_work_mode_e::suppress_subtitle;
-    }
-    return redispatch_subtitle ? depth_optional_work_mode_e::redispatch_subtitle :
-                                 depth_optional_work_mode_e::ordinary;
+    return {};
   }
 
   /** Fixed GPU-only near-identical decision and history-owner contracts. */
   inline constexpr std::uint32_t near_identical_history_owner_contract_tag = 0x3142484Eu;
-  inline constexpr std::uint32_t near_identical_history_owner_contract_schema = 1u;
-  inline constexpr std::size_t near_identical_history_owner_word_count = 8u;
+  inline constexpr std::uint32_t near_identical_history_owner_contract_schema = 2u;
+  inline constexpr std::size_t near_identical_history_owner_word_count = 10u;
 
   inline constexpr std::uint32_t near_identical_decision_cookie = 0xD1EC15A5u;
   inline constexpr std::uint32_t near_identical_token_low_cookie = 0xA3756C91u;
@@ -448,7 +468,15 @@ namespace models {
   inline constexpr std::uint32_t near_identical_proposal_magic = 0x504F5250u;  // PROP
   inline constexpr std::uint32_t near_identical_receipt_magic = 0x47524243u;  // CBRG
   inline constexpr std::uint32_t near_identical_request_magic = 0x54535152u;  // RQST
-  inline constexpr std::size_t near_identical_gpu_decision_word_count = 44u;
+  inline constexpr std::uint32_t near_identical_optional_receipt_magic = 0x52434F4Fu;
+  inline constexpr std::uint32_t near_identical_work_flags_cookie = 0x6F435257u;
+  inline constexpr std::uint32_t near_identical_work_optional_ocr = 1u << 0u;
+  inline constexpr std::uint32_t near_identical_work_subtitle_observation = 1u << 1u;
+  inline constexpr std::uint32_t near_identical_work_optional_ocr_due = 1u << 3u;
+  inline constexpr std::uint32_t near_identical_work_subtitle_observation_due = 1u << 4u;
+  inline constexpr std::uint32_t near_identical_work_optional_infer =
+    near_identical_work_optional_ocr;
+  inline constexpr std::size_t near_identical_gpu_decision_word_count = 64u;
   inline constexpr std::size_t near_identical_gpu_decision_byte_count =
     near_identical_gpu_decision_word_count * sizeof(std::uint32_t);
 
@@ -471,9 +499,9 @@ namespace models {
     request_token_low_cookie,
     request_token_high_cookie,
     request_magic,
-    request_reserved_0,
-    request_reserved_1,
-    request_reserved_2,
+    request_work_flags,
+    request_work_flags_cookie,
+    request_reserved,
     infer_reduce_x,
     infer_reduce_y,
     infer_reduce_z,
@@ -502,6 +530,26 @@ namespace models {
     reuse_grid16_y,
     reuse_grid16_z,
     reuse_grid16_padding,
+    optional_preprocess_x,
+    optional_preprocess_y,
+    optional_preprocess_z,
+    optional_preprocess_padding,
+    optional_cells_x,
+    optional_cells_y,
+    optional_cells_z,
+    optional_cells_padding,
+    optional_one_x,
+    optional_one_y,
+    optional_one_z,
+    optional_one_padding,
+    infer_without_optional_one_x,
+    infer_without_optional_one_y,
+    infer_without_optional_one_z,
+    infer_without_optional_one_padding,
+    observation_one_x,
+    observation_one_y,
+    observation_one_z,
+    observation_one_padding,
   };
 
   [[nodiscard]] constexpr std::size_t near_identical_gpu_decision_word_index(
@@ -554,6 +602,34 @@ namespace models {
     near_identical_gpu_decision_byte_offset(
       near_identical_gpu_decision_word_e::reuse_grid16_x
     );
+  inline constexpr std::uint32_t near_identical_gpu_optional_preprocess_byte_offset =
+    near_identical_gpu_decision_byte_offset(
+      near_identical_gpu_decision_word_e::optional_preprocess_x
+    );
+  // D3D consumes this slot before CUDA mapping. The authenticated post-CUDA args writer reuses it
+  // for the complete out-of-place subtitle-conditioner grid.
+  inline constexpr std::uint32_t
+    near_identical_gpu_subtitle_condition_grid16_byte_offset =
+      near_identical_gpu_optional_preprocess_byte_offset;
+  inline constexpr std::uint32_t near_identical_gpu_optional_cells_byte_offset =
+    near_identical_gpu_decision_byte_offset(
+      near_identical_gpu_decision_word_e::optional_cells_x
+    );
+  inline constexpr std::uint32_t near_identical_gpu_optional_one_byte_offset =
+    near_identical_gpu_decision_byte_offset(
+      near_identical_gpu_decision_word_e::optional_one_x
+    );
+  inline constexpr std::uint32_t
+    near_identical_gpu_infer_without_optional_one_byte_offset =
+      near_identical_gpu_decision_byte_offset(
+        near_identical_gpu_decision_word_e::infer_without_optional_one_x
+      );
+  inline constexpr std::uint32_t near_identical_gpu_subtitle_record_one_byte_offset =
+    near_identical_gpu_infer_without_optional_one_byte_offset;
+  inline constexpr std::uint32_t near_identical_gpu_observation_one_byte_offset =
+    near_identical_gpu_decision_byte_offset(
+      near_identical_gpu_decision_word_e::observation_one_x
+    );
 
   static_assert(near_identical_gpu_decision_record_byte_offset == 0u);
   static_assert(near_identical_gpu_request_record_byte_offset == 32u);
@@ -566,10 +642,15 @@ namespace models {
   static_assert(near_identical_gpu_infer_columns_byte_offset == 128u);
   static_assert(near_identical_gpu_infer_rows_byte_offset == 144u);
   static_assert(near_identical_gpu_reuse_grid16_byte_offset == 160u);
+  static_assert(near_identical_gpu_optional_preprocess_byte_offset == 176u);
+  static_assert(near_identical_gpu_optional_cells_byte_offset == 192u);
+  static_assert(near_identical_gpu_optional_one_byte_offset == 208u);
+  static_assert(near_identical_gpu_infer_without_optional_one_byte_offset == 224u);
+  static_assert(near_identical_gpu_observation_one_byte_offset == 240u);
   static_assert(near_identical_gpu_decision_byte_count % 16u == 0u);
   static_assert(
     near_identical_gpu_decision_word_index(
-      near_identical_gpu_decision_word_e::reuse_grid16_padding
+      near_identical_gpu_decision_word_e::observation_one_padding
     ) + 1u == near_identical_gpu_decision_word_count
   );
 
@@ -609,16 +690,6 @@ namespace models {
     return hash != 0u ? hash : 1u;
   }
 
-  /** Host-only prefilter command for the device-owned adaptive reuse transaction. */
-  struct gpu_adaptive_reuse_request {
-    // CPU-only prefilters may mark an ordinary, same-domain frame as undecided. The detector then
-    // publishes a GPU proposal bound to this nonzero transaction token. Conditional launch is
-    // separately runtime-gated; setting this field alone can never skip inference.
-    bool authorize_gpu_undecided_reuse = false;
-    std::uint64_t baseline_frame_id = 0u;
-    std::uint64_t gpu_reuse_decision_token = 0u;
-  };
-
   struct estimate_result {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> cut_state;  ///< Cut-analysis state shared with telemetry and coordinate production.
@@ -633,13 +704,16 @@ namespace models {
     // by the vertical pass, vertical_majorant is the upper-envelope diagnostic,
     // vertical_conditioned is the fixed upper/lower vertical share consumed by the pure row
     // majorant. base_final_parallax is independently observable as the ordinary post-limiter field
-    // for explicit diagnostics and padded ROI; full-content live production may condition that UAV
-    // in place, so base_final_parallax and final_parallax intentionally alias there. final_parallax
-    // is the OCR-conditioned full-source live position authority in ordinary mode. In ROI
-    // mode it is crop-local producer q and becomes renderer authority only with input_region's
-    // authenticated scale/collar embedding. coordinate is an optional Dump-3D-only snapshot,
-    // never a live resource or authentication prerequisite. The legacy `shadow_*` prefix remains
-    // for dump compatibility.
+    // for explicit diagnostics and padded ROI. Subtitle conditioning always writes a separate
+    // complete texture, so base_final_parallax remains immutable. final_parallax is that atomic
+    // OCR-conditioned publication and is sampled directly by the renderer. Adaptive depth reuse
+    // always holds the DAV2 field; ordinary subtitle work holds the OCR/SLR/final tuple, while a
+    // cadence-due subtitle observation may advance that tuple independently.
+    // In ROI mode
+    // both are crop-local producer q; only final_parallax becomes renderer authority through
+    // input_region's authenticated scale/collar embedding. coordinate is an optional
+    // Dump-3D-only snapshot, never a live resource or authentication prerequisite. The legacy
+    // `shadow_*` prefix remains for dump compatibility.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_coordinate;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_candidate_parallax;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_ownership_refined_parallax;
@@ -649,13 +723,16 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_final_parallax;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_state;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_frame_stats;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_box_record;  ///< Exact-frame OCR8 record unless subtitle_work_suppressed; then this retained resource is frozen evidence from an earlier frame.
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_locator_state;  ///< Current SLR12 state; frozen, not exact-frame evidence, when subtitle_work_suppressed.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_box_record;  ///< Exact-frame OCR8 only when subtitle_evidence_is_exact_frame() succeeds.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_locator_state;  ///< Exact-frame SLR13 only when subtitle_evidence_is_exact_frame() succeeds.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> gpu_trace_ring;  ///< Optional diagnostic-only rolling completion trace; never rendering authority.
     std::shared_ptr<const parallax_v2_shader_provenance_t>
       parallax_v2_shader_provenance;  ///< Exact producer shader closure when V2 is active.
+    std::shared_ptr<const host_sbs_gpu_trace_provenance_t>
+      gpu_trace_provenance;  ///< Source identity for gpu_trace_ring when available.
     int raw_width = 0;
     int raw_height = 0;
-    // A TensorRT result completed and its GPU normalization passes were submitted. The associated
+    // A wrapper transaction completed and its GPU normalization passes were submitted. The associated
     // depth_frame_state decides on-GPU whether this completion contains valid depth or must hold
     // the previous matched color/depth output.
     bool completed_frame_valid = false;
@@ -672,9 +749,17 @@ namespace models {
     input_color_space color_space = input_color_space::srgb;  ///< Exact transfer domain used for this completion.
     bool input_domain_reset = false;  ///< Temporal/camera state was reset before this completion.
     bool subtitle_work_suppressed = false;  ///< This completion published Base and did not advance same-domain locator state.
-    bool subtitle_ocr_inference_enqueued = false;  ///< This call enqueued OCR for its newly supplied input frame.
-    bool subtitle_ocr_redispatch_enqueued = false;  ///< This call accepted exact OCR8 redispatch for its newly supplied input frame.
+    bool subtitle_ocr_inference_enqueued = false;  ///< This call requested OCR participation; ordinary work is infer-coupled and cadence-due work may execute on either authenticated depth branch.
   };
+
+  [[nodiscard]] inline bool subtitle_evidence_is_exact_frame(
+    const estimate_result &result
+  ) noexcept {
+    return result.completed_frame_valid && !result.gpu_undecided_completion &&
+           !result.subtitle_work_suppressed &&
+           result.ocr_box_record.Get() != nullptr &&
+           result.subtitle_locator_state.Get() != nullptr;
+  }
 
   struct pending_depth_poll_result {
     estimate_result result;
@@ -691,9 +776,11 @@ namespace models {
    * full-source/analysis-region shape relation, the presence of every production V2 resource, and
    * the fixed-pop gain relation. Dump-only canonical coordinate evidence is deliberately excluded.
    * It does not map GPU state; the live shader authenticates the per-frame contract tag before
-   * sampling geometry. A subtitle-suppressed completion authenticates its freshly published Base
-   * field, but its retained OCR/SLR views are not exact-frame evidence and callers must gate those
-   * diagnostic uses on estimate_result::subtitle_work_suppressed.
+   * sampling geometry. Subtitle-suppressed completions still authenticate their live geometry,
+   * but their OCR/SLR views are not exact-frame evidence. A device-conditional completion also
+   * cannot expose exact-current CPU OCR lineage because an opaque reuse may either hold ordinary
+   * subtitle state or advance a cadence-due observation. Callers gate diagnostic and baseline uses on
+   * subtitle_evidence_is_exact_frame(); the diagnostic GPU trace owns per-branch evidence.
    */
   bool parallax_v2_result_is_authenticated(const estimate_result &result);
 
@@ -741,34 +828,40 @@ namespace models {
            completion_age <= host_sbs_v2_max_matched_repeat_age;
   }
 
-  constexpr bool host_sbs_should_repeat_matched_output(
+  /** Select the already-rendered packed SBS presentation while a newer matched unit is pending.
+   *
+   * This is presentation continuity only. `presentation_route_matches` is supplied by the live
+   * route/domain owner and must never be inferred from the opaque depth decision. The retained
+   * packed image carries no reusable depth, OCR, damage, or adaptive-submission authority.
+   */
+  constexpr bool host_sbs_should_repeat_packed_presentation(
     const host_sbs_renderer_e renderer,
     const bool has_matched_frame,
-    const bool matched_output_valid,
+    const bool packed_output_valid,
+    const bool presentation_route_matches,
     const std::chrono::steady_clock::duration repeat_source_age =
       std::chrono::steady_clock::duration::zero(),
     const bool source_unchanged = false
   ) {
     return renderer == host_sbs_renderer_e::parallax_v2 &&
-           !has_matched_frame && matched_output_valid &&
+           !has_matched_frame && packed_output_valid && presentation_route_matches &&
            host_sbs_matched_completion_is_current(
              source_unchanged,
              repeat_source_age
            );
   }
 
-  /** Only branch-known geometry may seed the packed-output repeat cache.
+  /** A completed authenticated V2 draw may seed only the packed presentation cache.
    *
-   * A GPU-undecided completion is intentionally renderable once, but its unknown branch cannot
-   * be redelivered while the mandatory force-infer observation barrier is pending.
+   * The result has already been rendered into a self-contained SBS image. Its private infer/reuse
+   * branch is therefore irrelevant to redelivering those exact pixels. Geometry/OCR/adaptive
+   * lineage remains governed separately by host_sbs_latest_v2_completion_retention_allowed().
    */
-  constexpr bool host_sbs_matched_output_can_enter_repeat_cache(
+  constexpr bool host_sbs_packed_output_can_enter_presentation_cache(
     const bool has_matched_frame,
-    const bool has_authenticated_field,
-    const bool gpu_undecided_completion
+    const bool has_authenticated_field
   ) {
-    return has_matched_frame && has_authenticated_field &&
-           !gpu_undecided_completion;
+    return has_matched_frame && has_authenticated_field;
   }
 
   /** A terminal producer failure moves every nonfailed Host SBS stream to live flat identity. */
@@ -833,7 +926,7 @@ namespace models {
      * @param context D3D11 Device Context
      * @param assets_dir Path to the assets directory (for model loading)
      * @param cfg Shared SBS controls; see config::video_t::sbs_t (the estimator consumes
-     *            pop_strength and cuda_graph; the depth-side analysis parameters are the fixed
+     *            pop_strength; the depth-side analysis parameters are the fixed
      *            config::host_sbs_v2_live_calibration values).
      * @param model The selected depth model: name/url (which engine to load/build) plus the
      *            DA-V2-compatible model contract (pixel_values -> predicted_depth).
@@ -909,7 +1002,7 @@ namespace models {
       bool snapshot_debug_inputs = false
     );
 
-    /** Query the pending DAV2/OCR inference fences once and consume the exact unit when ready. */
+    /** Query the pending joined DAV2/OCR completion fence once and consume the exact unit when ready. */
     pending_depth_poll_result try_finish_pending_depth_nonblocking(
       input_color_space color_space,
       bool snapshot_debug_inputs = false
@@ -917,9 +1010,9 @@ namespace models {
 
     /** Query one pending exact-frame DAV2/OCR unit until ready or an absolute CPU deadline.
      *
-     * When available, every query is a nonblocking CUDA event query recorded after the
-     * corresponding TensorRT enqueue and before its interop unmap. Ready postprocess remains
-     * ordered behind those already issued unmaps without synchronizing either whole stream. This
+     * When available, every query is a nonblocking CUDA event query recorded after the joined
+     * conditional root and every interop-unmap tail. Ready postprocess is therefore ordered behind
+     * all fixed-buffer releases without synchronizing the root stream. This
      * never flushes or enqueues replacement work; the query-count fuse is a second bound behind
      * the steady-clock deadline.
      * A timeout preserves the pending inference, event state, and exact owner. If event setup was

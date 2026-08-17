@@ -1,5 +1,5 @@
 {
-  "schema": 55,
+  "schema": 69,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -7,7 +7,7 @@
     "binding": "raw-depth-model-input-and-preprocess-source-produced-by-calibrated-identity-v3"
   },
   "subtitle_ocr": {
-    "schema": 12,
+    "schema": 13,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
     "artifact_onnx_sha256": "169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44",
@@ -66,6 +66,12 @@
       "locator_min_height_cells": 6,
       "locator_min_aspect_numerator": 2,
       "locator_min_aspect_denominator": 1,
+      "locator_provisional_min_vertical_overlap_numerator": 3,
+      "locator_provisional_min_vertical_overlap_denominator": 4,
+      "locator_provisional_max_height_ratio": 2,
+      "locator_provisional_max_center_y_delta_shorter_height": 1,
+      "locator_corner_edge_divisor": 32,
+      "locator_corner_bottom_rows": 16,
       "locator_match_iou_threshold": 0.6,
       "locator_death_grace_observations": 6,
       "locator_target_horizontal_fallback_max_radius_steps": 2,
@@ -105,8 +111,8 @@
       "final_box_capacity": 8
     },
     "locator_state": {
-      "schema": 12,
-      "tag": 842091603,
+      "schema": 13,
+      "tag": 858868819,
       "word_count": 80,
       "header_word_count": 32,
       "rectangle_capacity": 4,
@@ -117,14 +123,24 @@
       "owner_kind_shift": 0,
       "pending_kind_shift": 4,
       "current_kind_shift": 8,
-      "kind_mask": 15
+      "kind_mask": 15,
+      "provisional_current_flag": 16,
+      "provisional_target_word": 29,
+      "provisional_fade_word": 30
     },
     "condition_params": {
-      "schema": 2,
-      "tag": 844120915,
-      "word_count": 8,
-      "dispatch_arg_word_count": 3
+      "schema": 3,
+      "tag": 860898131,
+      "word_count": 6
     }
+  },
+  "final_parallax": {
+    "schema": 2,
+    "authority": "complete-atomic-subtitle-conditioned-r32f-live-render-authority",
+    "publication_policy": "authenticated-infer-or-cpu-known-publication-or-authenticated-cadence-due-subtitle-publication-direct-render",
+    "reuse_policy": "ordinary-reuse-holds-complete-depth-ocr-slr-final-tuple-byte-for-byte;authenticated-cadence-due-reuse-holds-depth-and-publishes-current-ocr-or-abstention-slr-final-tuple-against-retained-base",
+    "invalid_policy": "fail-closed-flat",
+    "current_rgb_policy": "always-current-never-retained"
   },
   "shader_implementation": {
     "source_closure_schema": 2,
@@ -243,16 +259,11 @@
       },
       {
         "source_file": "host_sbs_subtitle_locator_cs.hlsl",
-        "source_entrypoint": "condition_in_place_main",
-        "source_target": "cs_5_0"
-      },
-      {
-        "source_file": "host_sbs_subtitle_locator_cs.hlsl",
         "source_entrypoint": "condition_main",
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "21239c5794b70299a6d76156edd7c1aae6381625f9fab959e9e4b5152ebf6cc8"
+    "source_closure_sha256": "620e1dcacc190f7d80749e68bf840eecb759210e2f866afa7d77078af78a2dfe"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,

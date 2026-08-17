@@ -24,41 +24,59 @@ namespace cuda_conditional_graph {
 .visible .entry set_condition_from_records(
     .param .u64 set_condition_param_0,
     .param .u64 set_condition_param_1,
-    .param .u64 set_condition_param_2
+    .param .u64 set_condition_param_2,
+    .param .u64 set_condition_param_3,
+    .param .u32 set_condition_param_4
 )
 {
-    .reg .pred %p<24>;
-    .reg .b32 %r<32>;
-    .reg .b64 %rd<4>;
+    .reg .pred %p<32>;
+    .reg .b32 %r<40>;
+    .reg .b64 %rd<5>;
 
     ld.param.u64 %rd1, [set_condition_param_0];
     ld.param.u64 %rd2, [set_condition_param_1];
     ld.param.u64 %rd3, [set_condition_param_2];
+    ld.param.u64 %rd4, [set_condition_param_3];
+    ld.param.u32 %r31, [set_condition_param_4];
 
-    ld.global.v4.u32 {%r1, %r2, %r3, %r4}, [%rd2];
-    ld.global.v4.u32 {%r5, %r6, %r7, %r8}, [%rd2+16];
-    ld.global.v4.u32 {%r9, %r10, %r11, %r12}, [%rd3];
-    ld.global.v4.u32 {%r13, %r14, %r15, %r16}, [%rd3+16];
+    ld.global.v4.u32 {%r1, %r2, %r3, %r4}, [%rd3];
+    ld.global.v4.u32 {%r5, %r6, %r7, %r8}, [%rd3+16];
+    ld.global.v4.u32 {%r9, %r10, %r11, %r12}, [%rd4];
+    ld.global.v4.u32 {%r13, %r14, %r15, %r16}, [%rd4+16];
 
     xor.b32 %r17, %r1, 0xd1ec15a5;
     xor.b32 %r18, %r3, 0xa3756c91;
     xor.b32 %r19, %r4, 0x5c8a936e;
     xor.b32 %r20, %r9, 0xa3756c91;
     xor.b32 %r21, %r10, 0x5c8a936e;
+    xor.b32 %r26, %r14, 0x6f435257;
+    or.b32 %r32, %r9, %r10;
 
     setp.eq.u32 %p1, %r11, %r20;
     setp.eq.u32 %p2, %r12, %r21;
     setp.eq.u32 %p3, %r13, 0x54535152;
     setp.eq.u32 %p4, %r14, 0;
-    setp.eq.u32 %p5, %r15, 0;
+    setp.eq.u32 %p24, %r14, 1;
+    setp.eq.u32 %p28, %r14, 2;
+    setp.eq.u32 %p29, %r14, 8;
+    setp.eq.u32 %p30, %r14, 16;
+    or.pred %p4, %p4, %p24;
+    or.pred %p4, %p4, %p28;
+    or.pred %p4, %p4, %p29;
+    or.pred %p4, %p4, %p30;
+    setp.eq.u32 %p18, %r14, 0;
+    selp.u32 %r27, 0, %r26, %p18;
+    setp.eq.u32 %p5, %r15, %r27;
     setp.eq.u32 %p6, %r16, 0;
+    setp.ne.u32 %p23, %r32, 0;
     and.pred %p7, %p1, %p2;
     and.pred %p7, %p7, %p3;
     and.pred %p7, %p7, %p4;
     and.pred %p7, %p7, %p5;
     and.pred %p7, %p7, %p6;
+    and.pred %p7, %p7, %p23;
 
-    setp.eq.u32 %p8, %r1, 0;
+    setp.le.u32 %p8, %r1, 1;
     setp.eq.u32 %p9, %r2, %r17;
     setp.eq.u32 %p10, %r3, %r9;
     setp.eq.u32 %p11, %r4, %r10;
@@ -75,19 +93,32 @@ namespace cuda_conditional_graph {
     and.pred %p16, %p16, %p15;
 
     and.pred %p17, %p7, %p16;
-    selp.u32 %r22, 0, 1, %p17;
+    selp.u32 %r22, %r1, 1, %p17;
     xor.b32 %r23, %r22, 0xd1ec15a5;
 
+    setp.eq.u32 %p20, %r14, 1;
+    setp.eq.u32 %p26, %r14, 8;
+    setp.eq.u32 %p22, %r31, 1;
+    setp.eq.u32 %p25, %r22, 1;
+    and.pred %p27, %p20, %p25;
+    or.pred %p27, %p27, %p26;
+    and.pred %p21, %p17, %p27;
+    and.pred %p21, %p21, %p22;
+    selp.u32 %r28, 0x52434f4f, 0, %p21;
+    selp.u32 %r29, 1, 0, %p21;
+    xor.b32 %r30, %r23, %r28;
+
     // PROP is not a consumable receipt. Invalidate its tag first, write the resolved record, and
-    // publish CBRG last. A valid request plus any malformed proposal produces an infer receipt.
-    st.global.u32 [%rd2+24], 0;
+    // publish CBRG last. A valid request plus any malformed proposal produces an infer receipt,
+    // but only a valid preprocess-ready proposal may arm ordinary infer OCR or cadence-due OCR.
+    st.global.u32 [%rd3+24], 0;
     membar.gl;
-    st.global.v4.u32 [%rd2], {%r22, %r23, %r9, %r10};
-    st.global.v2.u32 [%rd2+16], {%r20, %r21};
-    st.global.u32 [%rd2+28], 0;
+    st.global.v4.u32 [%rd3], {%r22, %r30, %r9, %r10};
+    st.global.v2.u32 [%rd3+16], {%r20, %r21};
+    st.global.u32 [%rd3+28], %r28;
     membar.gl;
     mov.u32 %r24, 0x47524243;
-    st.global.u32 [%rd2+24], %r24;
+    st.global.u32 [%rd3+24], %r24;
     membar.gl;
 
     {
@@ -95,6 +126,13 @@ namespace cuda_conditional_graph {
         .param .b32 call_param_1;
         st.param.b64 [call_param_0], %rd1;
         st.param.b32 [call_param_1], %r22;
+        call.uni cudaGraphSetConditional, (call_param_0, call_param_1);
+    }
+    {
+        .param .b64 call_param_0;
+        .param .b32 call_param_1;
+        st.param.b64 [call_param_0], %rd2;
+        st.param.b32 [call_param_1], %r29;
         call.uni cudaGraphSetConditional, (call_param_0, call_param_1);
     }
     ret;
@@ -425,16 +463,24 @@ namespace cuda_conditional_graph {
           result.failure = audit_failure_e::cuda_error;
           return false;
         }
+        const auto type_index = static_cast<std::size_t>(type);
+        if (type_index < result.node_type_counts.size()) {
+          ++result.node_type_counts[type_index];
+        }
         if (!is_conditional_body_node_type_allowed(type)) {
-          result.failure = audit_failure_e::unsupported_node_type;
-          result.rejected_type = type;
-          return false;
+          if (result.failure == audit_failure_e::none) {
+            result.failure = audit_failure_e::unsupported_node_type;
+            result.rejected_type = type;
+          }
+          continue;
         }
         // CUDA graphs containing conditional nodes cannot themselves be child-graph nodes.
         if (type == CU_GRAPH_NODE_TYPE_CONDITIONAL) {
-          result.failure = audit_failure_e::nested_conditional;
-          result.rejected_type = type;
-          return false;
+          if (result.failure == audit_failure_e::none) {
+            result.failure = audit_failure_e::nested_conditional;
+            result.rejected_type = type;
+          }
+          continue;
         }
         if (type == CU_GRAPH_NODE_TYPE_GRAPH) {
           CUgraph child = nullptr;
@@ -443,12 +489,14 @@ namespace cuda_conditional_graph {
             result.failure = audit_failure_e::cuda_error;
             return false;
           }
-          if (!audit_graph_impl(cuda, child, depth + 1u, visited, result)) {
+          if (!audit_graph_impl(cuda, child, depth + 1u, visited, result) &&
+              result.failure != audit_failure_e::unsupported_node_type &&
+              result.failure != audit_failure_e::nested_conditional) {
             return false;
           }
         }
       }
-      return true;
+      return result.failure == audit_failure_e::none;
     }
 
   }  // namespace
@@ -505,6 +553,8 @@ namespace cuda_conditional_graph {
     executable_ = std::exchange(other.executable_, nullptr);
     scalar_mirrors_[0] = std::exchange(other.scalar_mirrors_[0], 0u);
     scalar_mirrors_[1] = std::exchange(other.scalar_mirrors_[1], 0u);
+    scalar_mirrors_[2] = std::exchange(other.scalar_mirrors_[2], 0u);
+    scalar_mirrors_[3] = std::exchange(other.scalar_mirrors_[3], 0u);
     failure_ = std::exchange(other.failure_, build_failure_e::invalid_descriptor);
     cuda_result_ = std::exchange(other.cuda_result_, CUDA_SUCCESS);
     audit_result_ = other.audit_result_;
@@ -567,6 +617,20 @@ namespace cuda_conditional_graph {
       restored = cuda_->cuCtxSetCurrent(previous) == CUDA_SUCCESS;
     }
     return destroyed && restored;
+  }
+
+  void executable_t::abandon_unsafe() noexcept {
+    cuda_ = nullptr;
+    context_ = nullptr;
+    module_ = nullptr;
+    graph_ = nullptr;
+    executable_ = nullptr;
+    for (CUdeviceptr &mirror : scalar_mirrors_) {
+      mirror = 0u;
+    }
+    failure_ = build_failure_e::invalid_descriptor;
+    cuda_result_ = CUDA_SUCCESS;
+    audit_result_ = {};
   }
 
   executable_t executable_t::build(
@@ -632,6 +696,16 @@ namespace cuda_conditional_graph {
       output.cuda_result_ = output.audit_result_.cuda_result;
       return finish(false);
     }
+    if (desc.optional_infer_child) {
+      output.audit_result_ = audit_embeddable_child_graph(
+        cuda, desc.optional_infer_child
+      );
+      if (!output.audit_result_.legal()) {
+        output.failure_ = build_failure_e::optional_infer_child_rejected;
+        output.cuda_result_ = output.audit_result_.cuda_result;
+        return finish(false);
+      }
+    }
     if (desc.reuse_child) {
       output.audit_result_ = audit_embeddable_child_graph(cuda, desc.reuse_child);
       if (!output.audit_result_.legal()) {
@@ -641,23 +715,34 @@ namespace cuda_conditional_graph {
       }
     }
 
-    const scalar_prefix_t scalar_prefix = inspect_tensor_rt_scalar_prefix(
-      cuda, desc.infer_child
-    );
-    if (scalar_prefix.result == scalar_prefix_result_e::rejected ||
-        scalar_prefix.result == scalar_prefix_result_e::host_allocation_failed) {
-      output.failure_ = build_failure_e::infer_child_scalar_prefix_rejected;
-      output.cuda_result_ = scalar_prefix.cuda_result;
-      return finish(false);
+    const std::array<CUgraph, 2u> infer_children {
+      desc.infer_child,
+      desc.optional_infer_child,
+    };
+    const std::size_t infer_child_count = desc.optional_infer_child ? 2u : 1u;
+    std::array<scalar_prefix_t, 2u> scalar_prefixes {};
+    std::array<std::size_t, 2u> scalar_mirror_bases {};
+    std::size_t scalar_mirror_count = 0u;
+    for (std::size_t child_index = 0u; child_index < infer_child_count; ++child_index) {
+      scalar_prefixes[child_index] = inspect_tensor_rt_scalar_prefix(
+        cuda, infer_children[child_index]
+      );
+      const auto result = scalar_prefixes[child_index].result;
+      if (result == scalar_prefix_result_e::rejected ||
+          result == scalar_prefix_result_e::host_allocation_failed ||
+          result == scalar_prefix_result_e::cuda_error) {
+        output.failure_ = child_index == 0u ?
+                            build_failure_e::infer_child_scalar_prefix_rejected :
+                            build_failure_e::optional_infer_child_scalar_prefix_rejected;
+        output.cuda_result_ = scalar_prefixes[child_index].cuda_result;
+        return finish(false);
+      }
+      scalar_mirror_bases[child_index] = scalar_mirror_count;
+      if (result == scalar_prefix_result_e::ready) {
+        scalar_mirror_count += tensor_rt_scalar_copy_count;
+      }
     }
-    if (scalar_prefix.result == scalar_prefix_result_e::cuda_error) {
-      output.failure_ = build_failure_e::infer_child_scalar_prefix_rejected;
-      output.cuda_result_ = scalar_prefix.cuda_result;
-      return finish(false);
-    }
-    const bool mirror_scalar_prefix =
-      scalar_prefix.result == scalar_prefix_result_e::ready;
-    if (mirror_scalar_prefix &&
+    if (scalar_mirror_count != 0u &&
         (!cuda.cuGraphMemcpyNodeSetParams || !cuda.cuGraphAddMemcpyNode ||
          !cuda.cuMemAlloc || !cuda.cuMemFree)) {
       output.failure_ = build_failure_e::infer_child_scalar_prefix_rejected;
@@ -689,18 +774,24 @@ namespace cuda_conditional_graph {
     }
 
     CUgraphNode scalar_copy_tail = nullptr;
-    if (mirror_scalar_prefix) {
+    for (std::size_t child_index = 0u; child_index < infer_child_count; ++child_index) {
+      const auto &scalar_prefix = scalar_prefixes[child_index];
+      if (scalar_prefix.result != scalar_prefix_result_e::ready) {
+        continue;
+      }
       for (std::size_t i = 0u; i < tensor_rt_scalar_copy_count; ++i) {
+        const std::size_t mirror_index = scalar_mirror_bases[child_index] + i;
         output.cuda_result_ = cuda.cuMemAlloc(
-          &output.scalar_mirrors_[i], tensor_rt_scalar_copy_bytes
+          &output.scalar_mirrors_[mirror_index], tensor_rt_scalar_copy_bytes
         );
-        if (output.cuda_result_ != CUDA_SUCCESS || output.scalar_mirrors_[i] == 0u) {
+        if (output.cuda_result_ != CUDA_SUCCESS ||
+            output.scalar_mirrors_[mirror_index] == 0u) {
           output.failure_ = build_failure_e::infer_child_scalar_mirror_failed;
           return finish(false);
         }
 
         const CUDA_MEMCPY3D parent_copy = parent_scalar_copy(
-          scalar_prefix.params[i], output.scalar_mirrors_[i]
+          scalar_prefix.params[i], output.scalar_mirrors_[mirror_index]
         );
         CUgraphNode parent_copy_node = nullptr;
         const CUgraphNode *dependencies = scalar_copy_tail ? &scalar_copy_tail : nullptr;
@@ -733,9 +824,29 @@ namespace cuda_conditional_graph {
       return finish(false);
     }
 
+    CUgraphConditionalHandle optional_handle = 0u;
+    output.cuda_result_ = cuda.cuGraphConditionalHandleCreate(
+      &optional_handle,
+      output.graph_,
+      desc.context,
+      0u,
+      CU_GRAPH_COND_ASSIGN_DEFAULT
+    );
+    if (output.cuda_result_ != CUDA_SUCCESS) {
+      output.failure_ = build_failure_e::optional_handle_create_failed;
+      return finish(false);
+    }
+
     CUdeviceptr decision_record = desc.decision_record;
     CUdeviceptr request_record = desc.request_record;
-    void *setter_args[] = {&handle, &decision_record, &request_record};
+    unsigned int optional_child_present = desc.optional_infer_child ? 1u : 0u;
+    void *setter_args[] = {
+      &handle,
+      &optional_handle,
+      &decision_record,
+      &request_record,
+      &optional_child_present,
+    };
     CUDA_KERNEL_NODE_PARAMS setter_params {};
     setter_params.func = setter;
     setter_params.gridDimX = 1u;
@@ -781,53 +892,94 @@ namespace cuda_conditional_graph {
       return finish(false);
     }
 
-    CUgraphNode infer_child_node = nullptr;
-    output.cuda_result_ = cuda.cuGraphAddChildGraphNode(
-      &infer_child_node,
-      bodies[0],
-      nullptr,
-      0u,
-      desc.infer_child
+    CUgraphNodeParams optional_conditional_params {};
+    optional_conditional_params.type = CU_GRAPH_NODE_TYPE_CONDITIONAL;
+    optional_conditional_params.params.conditional.handle = optional_handle;
+    optional_conditional_params.params.conditional.type = CU_GRAPH_COND_TYPE_IF;
+    optional_conditional_params.params.conditional.size = 1u;
+    optional_conditional_params.params.conditional.ctx = desc.context;
+    CUgraphNode optional_conditional_node = nullptr;
+    output.cuda_result_ = cuda.graph_add_node(
+      &optional_conditional_node,
+      output.graph_,
+      &setter_node,
+      1u,
+      &optional_conditional_params
     );
-    if (output.cuda_result_ != CUDA_SUCCESS || !infer_child_node) {
-      output.failure_ = build_failure_e::infer_child_add_failed;
-      if (output.cuda_result_ == CUDA_SUCCESS) {
-        output.cuda_result_ = CUDA_ERROR_INVALID_HANDLE;
-      }
+    if (output.cuda_result_ != CUDA_SUCCESS) {
+      output.failure_ = build_failure_e::optional_conditional_node_add_failed;
       return finish(false);
     }
-    if (mirror_scalar_prefix) {
+    CUgraph *optional_bodies =
+      optional_conditional_params.params.conditional.phGraph_out;
+    if (!optional_bodies || !optional_bodies[0]) {
+      output.failure_ = build_failure_e::optional_conditional_body_missing;
+      output.cuda_result_ = CUDA_ERROR_INVALID_HANDLE;
+      return finish(false);
+    }
+
+    for (std::size_t child_index = 0u; child_index < infer_child_count; ++child_index) {
+      CUgraphNode infer_child_node = nullptr;
+      output.cuda_result_ = cuda.cuGraphAddChildGraphNode(
+        &infer_child_node,
+        child_index == 0u ? bodies[0] : optional_bodies[0],
+        nullptr,
+        0u,
+        infer_children[child_index]
+      );
+      if (output.cuda_result_ != CUDA_SUCCESS || !infer_child_node) {
+        output.failure_ = child_index == 0u ?
+                            build_failure_e::infer_child_add_failed :
+                            build_failure_e::optional_infer_child_add_failed;
+        if (output.cuda_result_ == CUDA_SUCCESS) {
+          output.cuda_result_ = CUDA_ERROR_INVALID_HANDLE;
+        }
+        return finish(false);
+      }
+      const auto &scalar_prefix = scalar_prefixes[child_index];
+      if (scalar_prefix.result != scalar_prefix_result_e::ready) {
+        continue;
+      }
       CUgraph embedded_infer_graph = nullptr;
       output.cuda_result_ = cuda.cuGraphChildGraphNodeGetGraph(
         infer_child_node, &embedded_infer_graph
       );
       if (output.cuda_result_ != CUDA_SUCCESS || !embedded_infer_graph) {
-        output.failure_ = build_failure_e::infer_child_embedded_scalar_prefix_rejected;
+        output.failure_ = child_index == 0u ?
+                            build_failure_e::infer_child_embedded_scalar_prefix_rejected :
+                            build_failure_e::optional_infer_child_embedded_scalar_prefix_rejected;
         return finish(false);
       }
       const scalar_prefix_t embedded_prefix = inspect_tensor_rt_scalar_prefix(
         cuda, embedded_infer_graph
       );
       if (embedded_prefix.result != scalar_prefix_result_e::ready) {
-        output.failure_ = build_failure_e::infer_child_embedded_scalar_prefix_rejected;
+        output.failure_ = child_index == 0u ?
+                            build_failure_e::infer_child_embedded_scalar_prefix_rejected :
+                            build_failure_e::optional_infer_child_embedded_scalar_prefix_rejected;
         output.cuda_result_ = embedded_prefix.cuda_result;
         return finish(false);
       }
       for (std::size_t i = 0u; i < tensor_rt_scalar_copy_count; ++i) {
         if (embedded_prefix.params[i].srcDevice != scalar_prefix.params[i].srcDevice ||
             embedded_prefix.params[i].dstDevice != scalar_prefix.params[i].dstDevice) {
-          output.failure_ = build_failure_e::infer_child_embedded_scalar_prefix_rejected;
+          output.failure_ = child_index == 0u ?
+                              build_failure_e::infer_child_embedded_scalar_prefix_rejected :
+                              build_failure_e::optional_infer_child_embedded_scalar_prefix_rejected;
           output.cuda_result_ = CUDA_SUCCESS;
           return finish(false);
         }
         const CUDA_MEMCPY3D child_copy = mirrored_child_scalar_copy(
-          embedded_prefix.params[i], output.scalar_mirrors_[i]
+          embedded_prefix.params[i],
+          output.scalar_mirrors_[scalar_mirror_bases[child_index] + i]
         );
         output.cuda_result_ = cuda.cuGraphMemcpyNodeSetParams(
           embedded_prefix.nodes[i], &child_copy
         );
         if (output.cuda_result_ != CUDA_SUCCESS) {
-          output.failure_ = build_failure_e::infer_child_scalar_rewrite_failed;
+          output.failure_ = child_index == 0u ?
+                              build_failure_e::infer_child_scalar_rewrite_failed :
+                              build_failure_e::optional_infer_child_scalar_rewrite_failed;
           return finish(false);
         }
       }

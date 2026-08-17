@@ -1,11 +1,21 @@
 #include <gtest/gtest.h>
 
 #include "src/cuda_conditional_graph.h"
+#include "src/model_manager.h"
 #include "src/video_depth_estimator.h"
+
+#include <NvInfer.h>
+#include <NvInferPlugin.h>
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <iterator>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -57,6 +67,8 @@ namespace {
   static_assert(decision_cookie == models::near_identical_decision_cookie);
   static_assert(token_low_cookie == models::near_identical_token_low_cookie);
   static_assert(token_high_cookie == models::near_identical_token_high_cookie);
+  static_assert(work_flags_value(work_flag_e::optional_ocr_due) == 8u);
+  static_assert(work_flags_value(work_flag_e::subtitle_observation_due) == 16u);
   static_assert(models::near_identical_gpu_decision_record_byte_offset == 0u);
   static_assert(models::near_identical_gpu_request_record_byte_offset == 32u);
 
@@ -648,7 +660,8 @@ namespace {
 
     initialize_result_e initialize(
       const bool with_reuse_child = false,
-      const bool with_scalar_prefix = false
+      const bool with_scalar_prefix = false,
+      const bool with_optional_child = false
     ) {
       cuda_ = &cuda_driver_api::get();
       if (!cuda_->is_valid() || !cuda_->has_conditional_graph_support() ||
@@ -669,6 +682,8 @@ namespace {
           cuda_->cuMemAlloc(&records_, sizeof(decision_record_t) +
                                         sizeof(request_record_t)) != CUDA_SUCCESS ||
           cuda_->cuMemAlloc(&output_, sizeof(std::uint32_t)) != CUDA_SUCCESS ||
+          (with_optional_child &&
+           cuda_->cuMemAlloc(&optional_output_, sizeof(std::uint32_t)) != CUDA_SUCCESS) ||
           cuda_->cuGraphCreate(&child_, 0u) != CUDA_SUCCESS) {
         return initialize_result_e::failed;
       }
@@ -765,6 +780,27 @@ namespace {
           return initialize_result_e::failed;
         }
       }
+      if (with_optional_child) {
+        CUDA_MEMSET_NODE_PARAMS memset_params {};
+        memset_params.dst = optional_output_;
+        memset_params.pitch = sizeof(std::uint32_t);
+        memset_params.value = optional_marker;
+        memset_params.elementSize = sizeof(std::uint32_t);
+        memset_params.width = 1u;
+        memset_params.height = 1u;
+        CUgraphNode optional_memset_node = nullptr;
+        if (cuda_->cuGraphCreate(&optional_child_, 0u) != CUDA_SUCCESS ||
+            cuda_->cuGraphAddMemsetNode(
+              &optional_memset_node,
+              optional_child_,
+              nullptr,
+              0u,
+              &memset_params,
+              context_
+            ) != CUDA_SUCCESS) {
+          return initialize_result_e::failed;
+        }
+      }
 
       if (cuda_->cuGraphInstantiateWithFlags(&raw_executable_, child_, 0u) != CUDA_SUCCESS ||
           !raw_executable_) {
@@ -781,6 +817,7 @@ namespace {
         {
           .context = context_,
           .infer_child = child_,
+          .optional_infer_child = optional_child_,
           .reuse_child = reuse_child_,
           .decision_record = records_,
           .request_record = records_ + sizeof(decision_record_t),
@@ -826,6 +863,50 @@ namespace {
       }
       return observed_output == expected_output &&
              authenticated_receipt(receipt, request) == expected_authenticated_receipt &&
+             (!expected_authenticated_receipt ||
+              receipt.decision == static_cast<std::uint32_t>(expected_branch));
+    }
+
+    bool run_optional(
+      const decision_record_t &proposal,
+      const request_record_t &request,
+      const std::uint32_t expected_depth_output,
+      const std::uint32_t expected_optional_output,
+      const branch_e expected_branch,
+      const bool expected_authenticated_receipt,
+      const bool expected_optional_receipt
+    ) {
+      if (!optional_child_ || !optional_output_) {
+        return false;
+      }
+      const std::uint32_t zero = 0u;
+      decision_record_t receipt {};
+      if (cuda_->cuMemcpyHtoD(output_, &zero, sizeof(zero)) != CUDA_SUCCESS ||
+          cuda_->cuMemcpyHtoD(optional_output_, &zero, sizeof(zero)) != CUDA_SUCCESS ||
+          cuda_->cuMemcpyHtoD(records_, &proposal, sizeof(proposal)) != CUDA_SUCCESS ||
+          cuda_->cuMemcpyHtoD(
+            records_ + sizeof(proposal), &request, sizeof(request)
+          ) != CUDA_SUCCESS ||
+          cuda_->cuGraphLaunch(bridge_.get(), stream_) != CUDA_SUCCESS ||
+          cuda_->cuStreamSynchronize(stream_) != CUDA_SUCCESS) {
+        return false;
+      }
+      std::uint32_t observed_depth = 0u;
+      std::uint32_t observed_optional = 0u;
+      if (cuda_->cuMemcpyDtoH(
+            &observed_depth, output_, sizeof(observed_depth)
+          ) != CUDA_SUCCESS ||
+          cuda_->cuMemcpyDtoH(
+            &observed_optional, optional_output_, sizeof(observed_optional)
+          ) != CUDA_SUCCESS ||
+          cuda_->cuMemcpyDtoH(&receipt, records_, sizeof(receipt)) != CUDA_SUCCESS) {
+        return false;
+      }
+      return observed_depth == expected_depth_output &&
+             observed_optional == expected_optional_output &&
+             authenticated_receipt(receipt, request) == expected_authenticated_receipt &&
+             authenticated_optional_infer_receipt(receipt, request) ==
+               expected_optional_receipt &&
              (!expected_authenticated_receipt ||
               receipt.decision == static_cast<std::uint32_t>(expected_branch));
     }
@@ -917,6 +998,9 @@ namespace {
       if (reuse_child_ && cuda_->cuGraphDestroy) {
         cuda_->cuGraphDestroy(reuse_child_);
       }
+      if (optional_child_ && cuda_->cuGraphDestroy) {
+        cuda_->cuGraphDestroy(optional_child_);
+      }
       if (scalar_module_ && cuda_->cuModuleUnload) {
         cuda_->cuModuleUnload(scalar_module_);
       }
@@ -929,6 +1013,9 @@ namespace {
       if (output_ && cuda_->cuMemFree) {
         cuda_->cuMemFree(output_);
       }
+      if (optional_output_ && cuda_->cuMemFree) {
+        cuda_->cuMemFree(optional_output_);
+      }
       if (records_ && cuda_->cuMemFree) {
         cuda_->cuMemFree(records_);
       }
@@ -937,10 +1024,12 @@ namespace {
       }
       child_ = nullptr;
       reuse_child_ = nullptr;
+      optional_child_ = nullptr;
       raw_executable_ = nullptr;
       scalar_module_ = nullptr;
       scalar_consumer_ = nullptr;
       output_ = 0u;
+      optional_output_ = 0u;
       records_ = 0u;
       stream_ = nullptr;
       cuda_->cuCtxSetCurrent(previous_context_);
@@ -953,6 +1042,7 @@ namespace {
 
     static constexpr std::uint32_t marker = 0xa5a5a5a5u;
     static constexpr std::uint32_t reuse_marker = 0x5a5a5a5au;
+    static constexpr std::uint32_t optional_marker = 0xc3c3c3c3u;
     cuda_driver_api *cuda_ = nullptr;
     CUdevice device_ = 0;
     CUcontext previous_context_ = nullptr;
@@ -960,8 +1050,10 @@ namespace {
     CUstream stream_ = nullptr;
     CUdeviceptr records_ = 0u;
     CUdeviceptr output_ = 0u;
+    CUdeviceptr optional_output_ = 0u;
     CUgraph child_ = nullptr;
     CUgraph reuse_child_ = nullptr;
+    CUgraph optional_child_ = nullptr;
     CUgraphExec raw_executable_ = nullptr;
     CUmodule scalar_module_ = nullptr;
     CUfunction scalar_consumer_ = nullptr;
@@ -975,6 +1067,7 @@ namespace {
   public:
     static constexpr std::uint32_t infer_marker = marker;
     static constexpr std::uint32_t reuse_branch_marker = reuse_marker;
+    static constexpr std::uint32_t optional_infer_marker = optional_marker;
   };
 
 }  // namespace
@@ -995,6 +1088,124 @@ TEST(CudaConditionalGraphContract, ResolvesOnlyExactCurrentReuseProposal) {
   EXPECT_TRUE(authenticated_receipt(infer_receipt, request));
   EXPECT_EQ(infer_receipt.decision, static_cast<std::uint32_t>(branch_e::infer));
   EXPECT_FALSE(authenticated_receipt(reuse, request)) << "PROP is never a resolved receipt";
+}
+
+TEST(CudaConditionalGraphContract, AuthenticatesOptionalOcrOnlyOnInfer) {
+  constexpr std::uint64_t token = 0x8877665544332211ull;
+  const auto request = make_request(token, work_flag_e::optional_ocr);
+  ASSERT_TRUE(authenticated_request(request));
+
+  const auto infer_receipt = resolve_proposal(
+    make_proposal(branch_e::infer, token), request
+  );
+  EXPECT_TRUE(authenticated_receipt(infer_receipt, request));
+  EXPECT_TRUE(authenticated_optional_ocr_receipt(infer_receipt, request));
+  EXPECT_EQ(infer_receipt.reserved, optional_ocr_receipt_magic);
+  EXPECT_EQ(
+    infer_receipt.decision_cookie,
+    static_cast<std::uint32_t>(branch_e::infer) ^ decision_cookie ^
+      optional_ocr_receipt_magic
+  );
+
+  const auto reuse_receipt = resolve_proposal(
+    make_proposal(branch_e::reuse, token), request
+  );
+  EXPECT_TRUE(authenticated_receipt(reuse_receipt, request));
+  EXPECT_FALSE(authenticated_optional_ocr_receipt(reuse_receipt, request));
+  EXPECT_EQ(reuse_receipt.reserved, 0u);
+
+  auto forged_reuse_ocr = reuse_receipt;
+  forged_reuse_ocr.reserved = optional_ocr_receipt_magic;
+  forged_reuse_ocr.decision_cookie ^= optional_ocr_receipt_magic;
+  EXPECT_FALSE(authenticated_receipt(forged_reuse_ocr, request))
+    << "Ordinary OCR may not authenticate on a reuse receipt";
+
+  auto malformed = make_proposal(branch_e::infer, token);
+  malformed.decision_cookie ^= 1u;
+  const auto fail_open_receipt = resolve_proposal(malformed, request);
+  EXPECT_TRUE(authenticated_receipt(fail_open_receipt, request));
+  EXPECT_EQ(
+    fail_open_receipt.decision,
+    static_cast<std::uint32_t>(branch_e::infer)
+  );
+  EXPECT_EQ(fail_open_receipt.reserved, 0u);
+  EXPECT_FALSE(authenticated_optional_ocr_receipt(fail_open_receipt, request));
+
+  auto forged_optional = fail_open_receipt;
+  forged_optional.reserved = optional_ocr_receipt_magic;
+  EXPECT_FALSE(authenticated_receipt(forged_optional, request))
+    << "The OCR-run disposition is bound into the receipt cookie";
+
+  const auto child_absent_receipt = resolve_proposal(
+    make_proposal(branch_e::infer, token), request, false
+  );
+  EXPECT_TRUE(authenticated_receipt(child_absent_receipt, request));
+  EXPECT_EQ(child_absent_receipt.reserved, 0u);
+  EXPECT_FALSE(authenticated_optional_ocr_receipt(child_absent_receipt, request))
+    << "An authenticated request cannot authorize OCR when no optional child exists";
+
+  EXPECT_TRUE(authenticated_request(make_request(
+    token, work_flag_e::subtitle_observation
+  )));
+  const auto retired_flag4 = make_request(
+    token, static_cast<work_flag_e>(4u)
+  );
+  EXPECT_FALSE(authenticated_request(retired_flag4));
+  auto combined_work = make_request(token, work_flag_e::optional_ocr);
+  combined_work.work_flags = 3u;
+  combined_work.work_flags_cookie = 3u ^ work_flags_cookie;
+  EXPECT_FALSE(authenticated_request(combined_work))
+    << "Subtitle dispositions are mutually exclusive authenticated modes";
+}
+
+TEST(CudaConditionalGraphContract, AuthenticatesCadenceDueOcrOnInferAndReuse) {
+  constexpr std::uint64_t token = 0x9a8b7c6d5e4f3021ull;
+  const auto request = make_request(token, work_flag_e::optional_ocr_due);
+  ASSERT_TRUE(authenticated_request(request));
+
+  for (const auto branch : {branch_e::infer, branch_e::reuse}) {
+    const auto receipt = resolve_proposal(make_proposal(branch, token), request);
+    EXPECT_TRUE(authenticated_receipt(receipt, request));
+    EXPECT_TRUE(authenticated_optional_ocr_receipt(receipt, request));
+    EXPECT_EQ(receipt.decision, static_cast<std::uint32_t>(branch));
+    EXPECT_EQ(receipt.reserved, optional_ocr_receipt_magic);
+  }
+
+  auto malformed = make_proposal(branch_e::reuse, token);
+  malformed.magic = 0u;
+  const auto fail_open_receipt = resolve_proposal(malformed, request);
+  EXPECT_TRUE(authenticated_receipt(fail_open_receipt, request));
+  EXPECT_EQ(
+    fail_open_receipt.decision,
+    static_cast<std::uint32_t>(branch_e::infer)
+  );
+  EXPECT_FALSE(authenticated_optional_ocr_receipt(fail_open_receipt, request));
+
+  const auto child_absent_receipt = resolve_proposal(
+    make_proposal(branch_e::reuse, token), request, false
+  );
+  EXPECT_TRUE(authenticated_receipt(child_absent_receipt, request));
+  EXPECT_FALSE(authenticated_optional_ocr_receipt(child_absent_receipt, request));
+}
+
+TEST(CudaConditionalGraphContract, CadenceDueAbstentionNeverAuthenticatesOptionalOcr) {
+  constexpr std::uint64_t token = 0x6b5a493827160f1eull;
+  const auto request = make_request(token, work_flag_e::subtitle_observation_due);
+  ASSERT_TRUE(authenticated_request(request));
+
+  for (const auto branch : {branch_e::infer, branch_e::reuse}) {
+    const auto receipt = resolve_proposal(make_proposal(branch, token), request);
+    EXPECT_TRUE(authenticated_receipt(receipt, request));
+    EXPECT_EQ(receipt.decision, static_cast<std::uint32_t>(branch));
+    EXPECT_EQ(receipt.reserved, 0u);
+    EXPECT_FALSE(authenticated_optional_ocr_receipt(receipt, request));
+
+    auto forged_ocr = receipt;
+    forged_ocr.reserved = optional_ocr_receipt_magic;
+    forged_ocr.decision_cookie ^= optional_ocr_receipt_magic;
+    EXPECT_FALSE(authenticated_receipt(forged_ocr, request))
+      << "A branch-independent abstention may not claim optional OCR execution";
+  }
 }
 
 TEST(CudaConditionalGraphContract, MalformedAndStaleInputsFailOpenToInfer) {
@@ -1026,6 +1237,13 @@ TEST(CudaConditionalGraphContract, MalformedAndStaleInputsFailOpenToInfer) {
   const auto receipt = resolve_proposal(valid_reuse, bad_request);
   EXPECT_EQ(receipt.decision, static_cast<std::uint32_t>(branch_e::infer));
   EXPECT_FALSE(authenticated_receipt(receipt, bad_request));
+
+  const auto zero_request = make_request(0u, work_flag_e::optional_infer);
+  EXPECT_FALSE(authenticated_request(zero_request));
+  EXPECT_FALSE(authenticated_optional_infer_receipt(
+    resolve_proposal(make_proposal(branch_e::infer, 0u), zero_request),
+    zero_request
+  ));
 }
 
 TEST(CudaConditionalGraphContract, EmbeddedPtxPublishesReceiptBeforeSettingCondition) {
@@ -1034,7 +1252,14 @@ TEST(CudaConditionalGraphContract, EmbeddedPtxPublishesReceiptBeforeSettingCondi
   EXPECT_NE(ptx.find("0x504f5250"), std::string_view::npos);  // PROP
   EXPECT_NE(ptx.find("0x54535152"), std::string_view::npos);  // RQST
   EXPECT_NE(ptx.find("0x47524243"), std::string_view::npos);  // CBRG
-  const auto receipt_publish = ptx.find("st.global.u32 [%rd2+24], %r24");
+  EXPECT_NE(ptx.find("0x52434f4f"), std::string_view::npos);  // OOCR
+  EXPECT_NE(ptx.find("setp.eq.u32 %p4, %r14, 0"), std::string_view::npos);
+  EXPECT_NE(ptx.find("setp.eq.u32 %p24, %r14, 1"), std::string_view::npos);
+  EXPECT_NE(ptx.find("setp.eq.u32 %p28, %r14, 2"), std::string_view::npos);
+  EXPECT_NE(ptx.find("setp.eq.u32 %p29, %r14, 8"), std::string_view::npos);
+  EXPECT_NE(ptx.find("setp.eq.u32 %p30, %r14, 16"), std::string_view::npos);
+  EXPECT_NE(ptx.find("setp.eq.u32 %p26, %r14, 8"), std::string_view::npos);
+  const auto receipt_publish = ptx.find("st.global.u32 [%rd3+24], %r24");
   const auto conditional_call = ptx.find("call.uni cudaGraphSetConditional");
   ASSERT_NE(receipt_publish, std::string_view::npos);
   ASSERT_NE(conditional_call, std::string_view::npos);
@@ -1044,6 +1269,12 @@ TEST(CudaConditionalGraphContract, EmbeddedPtxPublishesReceiptBeforeSettingCondi
   EXPECT_LT(post_publish_barrier, conditional_call);
   EXPECT_EQ(ptx.find("st.global", receipt_publish + 1u), std::string_view::npos)
     << "The receipt tag must be the final global store";
+  const auto first_conditional_call = ptx.find("call.uni cudaGraphSetConditional");
+  ASSERT_NE(first_conditional_call, std::string_view::npos);
+  EXPECT_NE(
+    ptx.find("call.uni cudaGraphSetConditional", first_conditional_call + 1u),
+    std::string_view::npos
+  ) << "Depth and optional inference own sibling conditional handles";
 }
 
 TEST(CudaConditionalGraphContract, BuilderFailuresExposeNoExecutable) {
@@ -1222,6 +1453,38 @@ TEST(CudaConditionalGraphContract, ParentDestroyFailureRetainsEmbeddedMirrorsFor
   transactional_graph_fake = nullptr;
 }
 
+TEST(CudaConditionalGraphContract, UnsafeAbandonMakesDestructorIssueNoCudaCalls) {
+  scalar_prefix_graph_t infer;
+  transactional_graph_fake_t state;
+  cuda_driver_api cuda = transactional_graph_api(state);
+  {
+    auto result = executable_t::build(
+      cuda,
+      {
+        .context = reinterpret_cast<CUcontext>(1u),
+        .infer_child = &infer.graph,
+        .decision_record = 0x4000u,
+        .request_record = 0x4040u,
+      }
+    );
+    ASSERT_TRUE(result.ready());
+    ASSERT_FALSE(result.empty());
+
+    result.abandon_unsafe();
+    EXPECT_TRUE(result.empty());
+    EXPECT_FALSE(result.ready());
+    EXPECT_FALSE(state.executable_destroyed);
+    EXPECT_FALSE(state.graph_destroyed);
+    EXPECT_FALSE(state.module_unloaded);
+    EXPECT_TRUE(state.freed_mirrors.empty());
+  }
+  EXPECT_FALSE(state.executable_destroyed);
+  EXPECT_FALSE(state.graph_destroyed);
+  EXPECT_FALSE(state.module_unloaded);
+  EXPECT_TRUE(state.freed_mirrors.empty());
+  transactional_graph_fake = nullptr;
+}
+
 TEST(CudaConditionalGraphContract, PartialEmbeddedRewriteFailureLeavesSourceUnmodified) {
   scalar_prefix_graph_t infer;
   transactional_graph_fake_t state;
@@ -1260,6 +1523,8 @@ TEST(CudaConditionalGraphAudit, RecursesThroughLegalChildGraphs) {
   EXPECT_TRUE(result.legal());
   EXPECT_EQ(result.visited_graphs, 2u);
   EXPECT_EQ(result.visited_nodes, 2u);
+  EXPECT_EQ(result.node_type_counts[CU_GRAPH_NODE_TYPE_GRAPH], 1u);
+  EXPECT_EQ(result.node_type_counts[CU_GRAPH_NODE_TYPE_KERNEL], 1u);
 }
 
 TEST(CudaConditionalGraphAudit, RejectsUnsupportedAndNestedConditionalNodes) {
@@ -1268,12 +1533,14 @@ TEST(CudaConditionalGraphAudit, RejectsUnsupportedAndNestedConditionalNodes) {
   auto result = audit_embeddable_child_graph(fake_audit_api(), &host_graph);
   EXPECT_EQ(result.failure, audit_failure_e::unsupported_node_type);
   EXPECT_EQ(result.rejected_type, CU_GRAPH_NODE_TYPE_HOST);
+  EXPECT_EQ(result.node_type_counts[CU_GRAPH_NODE_TYPE_HOST], 1u);
 
   CUgraphNode_st conditional {.type = CU_GRAPH_NODE_TYPE_CONDITIONAL};
   CUgraph_st conditional_graph {{&conditional}};
   result = audit_embeddable_child_graph(fake_audit_api(), &conditional_graph);
   EXPECT_EQ(result.failure, audit_failure_e::nested_conditional);
   EXPECT_EQ(result.rejected_type, CU_GRAPH_NODE_TYPE_CONDITIONAL);
+  EXPECT_EQ(result.node_type_counts[CU_GRAPH_NODE_TYPE_CONDITIONAL], 1u);
 }
 
 TEST(CudaConditionalGraphHardware, AlternatesBranchesAndFailsMalformedProposalToInfer) {
@@ -1336,6 +1603,117 @@ TEST(CudaConditionalGraphHardware, ExecutesOptionalReuseElseChild) {
   ));
 }
 
+TEST(CudaConditionalGraphHardware, OptionalSiblingRequiresAuthenticatedProposalAndWorkMode) {
+  constexpr std::uint64_t token = 0x3141592653589793ull;
+  conditional_hardware_fixture_t fixture;
+  const auto initialized = fixture.initialize(false, false, true);
+  if (initialized == conditional_hardware_fixture_t::initialize_result_e::unavailable) {
+    GTEST_SKIP() << "CUDA conditional graphs are unavailable on this driver/device";
+  }
+  ASSERT_EQ(initialized, conditional_hardware_fixture_t::initialize_result_e::ready)
+    << "failure=" << static_cast<int>(fixture.bridge_failure())
+    << " cuda=" << static_cast<int>(fixture.bridge_cuda_result());
+
+  const auto request = make_request(token, work_flag_e::optional_ocr);
+  EXPECT_TRUE(fixture.run_optional(
+    make_proposal(branch_e::infer, token),
+    request,
+    conditional_hardware_fixture_t::infer_marker,
+    conditional_hardware_fixture_t::optional_infer_marker,
+    branch_e::infer,
+    true,
+    true
+  ));
+  EXPECT_TRUE(fixture.run_optional(
+    make_proposal(branch_e::reuse, token),
+    request,
+    0u,
+    0u,
+    branch_e::reuse,
+    true,
+    false
+  ));
+
+  const auto due_request = make_request(token, work_flag_e::optional_ocr_due);
+  EXPECT_TRUE(fixture.run_optional(
+    make_proposal(branch_e::infer, token),
+    due_request,
+    conditional_hardware_fixture_t::infer_marker,
+    conditional_hardware_fixture_t::optional_infer_marker,
+    branch_e::infer,
+    true,
+    true
+  ));
+  EXPECT_TRUE(fixture.run_optional(
+    make_proposal(branch_e::reuse, token),
+    due_request,
+    0u,
+    conditional_hardware_fixture_t::optional_infer_marker,
+    branch_e::reuse,
+    true,
+    true
+  ));
+
+  const auto due_abstention_request = make_request(
+    token, work_flag_e::subtitle_observation_due
+  );
+  EXPECT_TRUE(fixture.run_optional(
+    make_proposal(branch_e::infer, token),
+    due_abstention_request,
+    conditional_hardware_fixture_t::infer_marker,
+    0u,
+    branch_e::infer,
+    true,
+    false
+  ));
+  EXPECT_TRUE(fixture.run_optional(
+    make_proposal(branch_e::reuse, token),
+    due_abstention_request,
+    0u,
+    0u,
+    branch_e::reuse,
+    true,
+    false
+  ));
+
+  auto malformed = make_proposal(branch_e::infer, token);
+  malformed.magic = 0u;
+  EXPECT_TRUE(fixture.run_optional(
+    malformed,
+    request,
+    conditional_hardware_fixture_t::infer_marker,
+    0u,
+    branch_e::infer,
+    true,
+    false
+  )) << "Malformed PROP must fail depth open while leaving optional OCR off";
+
+  auto invalid_request = request;
+  invalid_request.magic = 0u;
+  EXPECT_TRUE(fixture.run_optional(
+    make_proposal(branch_e::infer, token),
+    invalid_request,
+    conditional_hardware_fixture_t::infer_marker,
+    0u,
+    branch_e::infer,
+    false,
+    false
+  ));
+
+  const auto retired_flag4_request = make_request(
+    token, static_cast<work_flag_e>(4u)
+  );
+  EXPECT_TRUE(fixture.run_optional(
+    make_proposal(branch_e::reuse, token),
+    retired_flag4_request,
+    conditional_hardware_fixture_t::infer_marker,
+    0u,
+    branch_e::infer,
+    false,
+    false
+  )) << "Retired work value 4 must fail request authentication and keep OCR dormant";
+}
+
 TEST(CudaConditionalGraphHardware, MirrorsFixedDav2ScalarPrefixOnEveryLaunch) {
   conditional_hardware_fixture_t fixture;
   const auto initialized = fixture.initialize(false, true);
@@ -1388,4 +1766,286 @@ TEST(CudaConditionalGraphHardware, MirrorsFixedDav2ScalarPrefixOnEveryLaunch) {
   EXPECT_TRUE(fixture.scalar_source_unchanged());
   EXPECT_TRUE(fixture.reset_restores_null_context());
   EXPECT_TRUE(fixture.scalar_source_unchanged());
+}
+
+namespace {
+  class topology_test_logger_t: public nvinfer1::ILogger {
+  public:
+#ifdef __GNUC__
+    void msvc_dummy_destructor(char) noexcept override {}
+#endif
+    void log(Severity severity, const char *message) noexcept override {
+      if (severity <= Severity::kWARNING) {
+        std::cerr << "TensorRT topology fixture: " << message << '\n';
+      }
+    }
+  };
+
+  template<typename T>
+  void release_trt_test_interface(T *&value) {
+    if (!value) {
+      return;
+    }
+#ifdef __GNUC__
+    value->msvc_dummy_destructor(1);
+#else
+    delete value;
+#endif
+    value = nullptr;
+  }
+}
+
+// Opt-in hardware evidence for a real serialized OCR plan. The environment variable keeps this
+// machine-local engine out of portable unit-test assumptions while letting reviewers inspect the
+// exact recursively captured node topology before it is embedded in a conditional body.
+TEST(CudaConditionalGraphHardware, AuditsCapturedTensorRtOcrTopology) {
+  const char *const engine_env = std::getenv("SUNSHINE_TEST_OCR_ENGINE");
+  if (!engine_env || *engine_env == '\0') {
+    GTEST_SKIP() << "SUNSHINE_TEST_OCR_ENGINE is not set";
+  }
+  const std::filesystem::path engine_path {engine_env};
+  std::ifstream input(engine_path, std::ios::binary);
+  ASSERT_TRUE(input.is_open()) << engine_path;
+  const std::vector<char> engine_bytes {
+    std::istreambuf_iterator<char> {input}, std::istreambuf_iterator<char> {}
+  };
+  ASSERT_FALSE(engine_bytes.empty());
+
+  auto &cuda = cuda_driver_api::get();
+  ASSERT_TRUE(cuda.is_valid());
+  ASSERT_EQ(cuda.cuInit(0u), CUDA_SUCCESS);
+  CUdevice device = 0;
+  ASSERT_EQ(cuda.cuDeviceGet(&device, 0), CUDA_SUCCESS);
+  CUcontext cuda_context = nullptr;
+  ASSERT_EQ(cuda.cuDevicePrimaryCtxRetain(&cuda_context, device), CUDA_SUCCESS);
+  ASSERT_NE(cuda_context, nullptr);
+  ASSERT_EQ(cuda.cuCtxSetCurrent(cuda_context), CUDA_SUCCESS);
+
+  topology_test_logger_t logger;
+  ASSERT_TRUE(initLibNvInferPlugins(&logger, ""));
+  nvinfer1::IRuntime *runtime = nvinfer1::createInferRuntime(logger);
+  ASSERT_NE(runtime, nullptr);
+  nvinfer1::ICudaEngine *engine = runtime->deserializeCudaEngine(
+    engine_bytes.data(), engine_bytes.size()
+  );
+  ASSERT_NE(engine, nullptr);
+  nvinfer1::IExecutionContext *execution = engine->createExecutionContext();
+  ASSERT_NE(execution, nullptr);
+
+  nvinfer1::Dims input_dims {};
+  input_dims.nbDims = 4;
+  input_dims.d[0] = 1;
+  input_dims.d[1] = 3;
+  input_dims.d[2] = models::ocr_engine_height;
+  input_dims.d[3] = models::ocr_engine_width;
+  ASSERT_TRUE(execution->setInputShape("x", input_dims));
+  constexpr std::size_t input_bytes =
+    3u * static_cast<std::size_t>(models::ocr_engine_width) *
+    static_cast<std::size_t>(models::ocr_engine_height) * sizeof(float);
+  constexpr std::size_t output_bytes =
+    static_cast<std::size_t>(models::ocr_engine_width) *
+    static_cast<std::size_t>(models::ocr_engine_height) * sizeof(float);
+  CUdeviceptr device_input = 0u;
+  CUdeviceptr device_output = 0u;
+  ASSERT_EQ(cuda.cuMemAlloc(&device_input, input_bytes), CUDA_SUCCESS);
+  ASSERT_EQ(cuda.cuMemAlloc(&device_output, output_bytes), CUDA_SUCCESS);
+  ASSERT_TRUE(execution->setTensorAddress(
+    "x", reinterpret_cast<void *>(device_input)
+  ));
+  ASSERT_TRUE(execution->setTensorAddress(
+    "fetch_name_0", reinterpret_cast<void *>(device_output)
+  ));
+  CUstream stream = nullptr;
+  ASSERT_EQ(cuda.cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING), CUDA_SUCCESS);
+  ASSERT_TRUE(execution->enqueueV3(stream));
+  ASSERT_EQ(cuda.cuStreamSynchronize(stream), CUDA_SUCCESS);
+
+  CUgraph graph = nullptr;
+  ASSERT_EQ(
+    cuda.cuStreamBeginCapture(stream, CU_STREAM_CAPTURE_MODE_RELAXED),
+    CUDA_SUCCESS
+  );
+  const bool capture_enqueue = execution->enqueueV3(stream);
+  const CUresult capture_end = cuda.cuStreamEndCapture(stream, &graph);
+  ASSERT_TRUE(capture_enqueue);
+  ASSERT_EQ(capture_end, CUDA_SUCCESS);
+  ASSERT_NE(graph, nullptr);
+
+  const auto audit = audit_embeddable_child_graph(cuda, graph);
+  std::cout
+    << "OCR captured topology: aux=" << engine->getNbAuxStreams()
+    << " graphs=" << audit.visited_graphs << " nodes=" << audit.visited_nodes
+    << " kernel=" << audit.node_type_counts[CU_GRAPH_NODE_TYPE_KERNEL]
+    << " memcpy=" << audit.node_type_counts[CU_GRAPH_NODE_TYPE_MEMCPY]
+    << " memset=" << audit.node_type_counts[CU_GRAPH_NODE_TYPE_MEMSET]
+    << " child=" << audit.node_type_counts[CU_GRAPH_NODE_TYPE_GRAPH]
+    << " wait-event=" << audit.node_type_counts[CU_GRAPH_NODE_TYPE_WAIT_EVENT]
+    << " record-event=" << audit.node_type_counts[CU_GRAPH_NODE_TYPE_EVENT_RECORD]
+    << " legal=" << audit.legal() << '\n';
+  EXPECT_GT(audit.visited_nodes, 0u);
+  if (const char *const expected = std::getenv("SUNSHINE_EXPECT_OCR_GRAPH_LEGAL")) {
+    if (std::string_view {expected} == "1") {
+      EXPECT_TRUE(audit.legal());
+    } else if (std::string_view {expected} == "0") {
+      EXPECT_FALSE(audit.legal());
+    }
+  }
+
+  CUgraph mandatory_graph = nullptr;
+  ASSERT_EQ(cuda.cuGraphCreate(&mandatory_graph, 0u), CUDA_SUCCESS);
+  CUdeviceptr mandatory_marker = 0u;
+  ASSERT_EQ(cuda.cuMemAlloc(&mandatory_marker, sizeof(std::uint32_t)), CUDA_SUCCESS);
+  CUDA_MEMSET_NODE_PARAMS marker_params {};
+  marker_params.dst = mandatory_marker;
+  marker_params.value = 0x51u;
+  marker_params.elementSize = sizeof(std::uint32_t);
+  marker_params.width = 1u;
+  marker_params.height = 1u;
+  CUgraphNode marker_node = nullptr;
+  ASSERT_EQ(
+    cuda.cuGraphAddMemsetNode(
+      &marker_node, mandatory_graph, nullptr, 0u, &marker_params, cuda_context
+    ),
+    CUDA_SUCCESS
+  );
+  ASSERT_NE(marker_node, nullptr);
+
+  CUdeviceptr transaction = 0u;
+  ASSERT_EQ(cuda.cuMemAlloc(&transaction, 64u), CUDA_SUCCESS);
+  constexpr std::uint64_t token = 0x48f0ccab7a662511ull;
+  const auto proposal = make_proposal(branch_e::infer, token);
+  const auto request = make_request(token, work_flag_e::optional_ocr);
+  ASSERT_EQ(
+    cuda.cuMemcpyHtoD(transaction, &proposal, sizeof(proposal)), CUDA_SUCCESS
+  );
+  ASSERT_EQ(
+    cuda.cuMemcpyHtoD(transaction + 32u, &request, sizeof(request)), CUDA_SUCCESS
+  );
+  auto wrapper = executable_t::build(
+    cuda,
+    {
+      .context = cuda_context,
+      .infer_child = mandatory_graph,
+      .optional_infer_child = graph,
+      .decision_record = transaction,
+      .request_record = transaction + 32u,
+    }
+  );
+  ASSERT_TRUE(wrapper.ready())
+    << "failure=" << static_cast<unsigned>(wrapper.failure())
+    << " cuda=" << wrapper.cuda_result()
+    << " rejected_type=" << static_cast<int>(wrapper.audit_result().rejected_type);
+  constexpr std::uint32_t output_sentinel = 0xdeadbeefu;
+  ASSERT_EQ(
+    cuda.cuMemcpyHtoD(device_output, &output_sentinel, sizeof(output_sentinel)),
+    CUDA_SUCCESS
+  );
+  const std::uint32_t zero_marker = 0u;
+  ASSERT_EQ(
+    cuda.cuMemcpyHtoD(mandatory_marker, &zero_marker, sizeof(zero_marker)),
+    CUDA_SUCCESS
+  );
+  ASSERT_EQ(cuda.cuGraphLaunch(wrapper.get(), stream), CUDA_SUCCESS);
+  ASSERT_EQ(cuda.cuStreamSynchronize(stream), CUDA_SUCCESS);
+  decision_record_t receipt {};
+  ASSERT_EQ(
+    cuda.cuMemcpyDtoH(&receipt, transaction, sizeof(receipt)), CUDA_SUCCESS
+  );
+  EXPECT_TRUE(authenticated_optional_ocr_receipt(receipt, request));
+  std::uint32_t inferred_output_word = output_sentinel;
+  ASSERT_EQ(
+    cuda.cuMemcpyDtoH(
+      &inferred_output_word, device_output, sizeof(inferred_output_word)
+    ),
+    CUDA_SUCCESS
+  );
+  EXPECT_NE(inferred_output_word, output_sentinel)
+    << "The authenticated optional OCR child must execute the real OCR graph";
+
+  // Keep the same instantiated superset but omit the optional request flag. The mandatory DAV2
+  // marker must still execute while the embedded 132-kernel OCR graph remains completely dormant.
+  // Production uses this launch shape for native suppression while OCR interop is intentionally
+  // unmapped.
+  const auto no_optional_request = make_request(token, work_flag_e::none);
+  ASSERT_EQ(
+    cuda.cuMemcpyHtoD(transaction, &proposal, sizeof(proposal)), CUDA_SUCCESS
+  );
+  ASSERT_EQ(
+    cuda.cuMemcpyHtoD(
+      transaction + 32u, &no_optional_request, sizeof(no_optional_request)
+    ),
+    CUDA_SUCCESS
+  );
+  ASSERT_EQ(
+    cuda.cuMemcpyHtoD(device_output, &output_sentinel, sizeof(output_sentinel)),
+    CUDA_SUCCESS
+  );
+  ASSERT_EQ(cuda.cuGraphLaunch(wrapper.get(), stream), CUDA_SUCCESS);
+  ASSERT_EQ(cuda.cuStreamSynchronize(stream), CUDA_SUCCESS);
+  ASSERT_EQ(
+    cuda.cuMemcpyDtoH(&receipt, transaction, sizeof(receipt)), CUDA_SUCCESS
+  );
+  EXPECT_TRUE(authenticated_receipt(receipt, no_optional_request));
+  EXPECT_EQ(receipt.decision, static_cast<std::uint32_t>(branch_e::infer));
+  EXPECT_FALSE(authenticated_optional_infer_receipt(receipt, no_optional_request));
+  std::uint32_t mandatory_output_word = 0u;
+  ASSERT_EQ(
+    cuda.cuMemcpyDtoH(
+      &mandatory_output_word, mandatory_marker, sizeof(mandatory_output_word)
+    ),
+    CUDA_SUCCESS
+  );
+  EXPECT_EQ(mandatory_output_word, 0x51u)
+    << "The mandatory infer child must execute when only the optional handle is dormant";
+  std::uint32_t dormant_output_word = 0u;
+  ASSERT_EQ(
+    cuda.cuMemcpyDtoH(
+      &dormant_output_word, device_output, sizeof(dormant_output_word)
+    ),
+    CUDA_SUCCESS
+  );
+  EXPECT_EQ(dormant_output_word, output_sentinel)
+    << "An embedded OCR child must remain dormant when the request does not arm it";
+
+  const auto reuse_proposal = make_proposal(branch_e::reuse, token);
+  ASSERT_EQ(
+    cuda.cuMemcpyHtoD(transaction, &reuse_proposal, sizeof(reuse_proposal)),
+    CUDA_SUCCESS
+  );
+  ASSERT_EQ(
+    cuda.cuMemcpyHtoD(transaction + 32u, &request, sizeof(request)), CUDA_SUCCESS
+  );
+  ASSERT_EQ(
+    cuda.cuMemcpyHtoD(device_output, &output_sentinel, sizeof(output_sentinel)),
+    CUDA_SUCCESS
+  );
+  ASSERT_EQ(cuda.cuGraphLaunch(wrapper.get(), stream), CUDA_SUCCESS);
+  ASSERT_EQ(cuda.cuStreamSynchronize(stream), CUDA_SUCCESS);
+  ASSERT_EQ(
+    cuda.cuMemcpyDtoH(&receipt, transaction, sizeof(receipt)), CUDA_SUCCESS
+  );
+  EXPECT_TRUE(authenticated_receipt(receipt, request));
+  EXPECT_EQ(receipt.decision, static_cast<std::uint32_t>(branch_e::reuse));
+  EXPECT_FALSE(authenticated_optional_ocr_receipt(receipt, request));
+  std::uint32_t reused_output_word = 0u;
+  ASSERT_EQ(
+    cuda.cuMemcpyDtoH(&reused_output_word, device_output, sizeof(reused_output_word)),
+    CUDA_SUCCESS
+  );
+  EXPECT_EQ(reused_output_word, output_sentinel)
+    << "Authenticated reuse must keep the optional OCR child dormant";
+  EXPECT_TRUE(wrapper.reset());
+  EXPECT_EQ(cuda.cuGraphDestroy(mandatory_graph), CUDA_SUCCESS);
+  EXPECT_EQ(cuda.cuMemFree(transaction), CUDA_SUCCESS);
+  EXPECT_EQ(cuda.cuMemFree(mandatory_marker), CUDA_SUCCESS);
+
+  EXPECT_EQ(cuda.cuGraphDestroy(graph), CUDA_SUCCESS);
+  EXPECT_EQ(cuda.cuStreamDestroy(stream), CUDA_SUCCESS);
+  EXPECT_EQ(cuda.cuMemFree(device_output), CUDA_SUCCESS);
+  EXPECT_EQ(cuda.cuMemFree(device_input), CUDA_SUCCESS);
+  release_trt_test_interface(execution);
+  release_trt_test_interface(engine);
+  release_trt_test_interface(runtime);
+  EXPECT_EQ(cuda.cuCtxSetCurrent(nullptr), CUDA_SUCCESS);
+  EXPECT_EQ(cuda.cuDevicePrimaryCtxRelease(device), CUDA_SUCCESS);
 }

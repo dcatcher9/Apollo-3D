@@ -6,6 +6,8 @@
 #include "src/offline_sbs_worker.h"
 #include "src/crypto.h"
 #include "src/offline_sbs_contract.h"
+#include "src/host_sbs_v2_geometry.h"
+#include "src/host_sbs_observation_timeline.h"
 
 #include <algorithm>
 #include <chrono>
@@ -208,6 +210,26 @@ TEST(OfflineSbsWorker, RejectsUnknownAdaptiveTraceFlagMeanings) {
   ));
 }
 
+TEST(OfflineSbsWorker, ObservationTimelineRoundTripsAndRejectsRegression) {
+  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+  const auto root = fs::temp_directory_path() /
+                    ("sunshine-observation-timeline-" + std::to_string(nonce));
+  fs::create_directories(root);
+  const auto path = root / "timeline.sbsotl";
+  const std::array<std::uint64_t, 4> expected {1u, 16667u, 33334u, 50001u};
+  std::string error;
+  ASSERT_TRUE(models::host_sbs_observation_timeline::write(path, expected, error)) << error;
+  EXPECT_EQ(fs::file_size(path), 24u + expected.size() * sizeof(std::uint64_t));
+  std::vector<std::uint64_t> actual;
+  ASSERT_TRUE(models::host_sbs_observation_timeline::read(path, actual, error)) << error;
+  EXPECT_TRUE(std::equal(expected.begin(), expected.end(), actual.begin(), actual.end()));
+
+  const std::array<std::uint64_t, 2> regressed {2u, 1u};
+  EXPECT_FALSE(models::host_sbs_observation_timeline::write(path, regressed, error));
+  std::error_code ec;
+  fs::remove_all(root, ec);
+}
+
 #ifdef _WIN32
 TEST(OfflineSbsWorker, TreatsClosedNativeStdoutPipeAsEofBeforeProcessSignals) {
   EXPECT_TRUE(offline_sbs::native_stdout_pipe_error_is_eof_for_test(
@@ -320,11 +342,101 @@ TEST(OfflineSbsWorker, HeadlessHarnessHasNoForegroundWindowObserver) {
     source.find("Bench/replay stays full-frame, so ROI is disabled"),
     std::string::npos
   );
+  EXPECT_NE(
+    source.find("models::make_host_sbs_v2_full_frame_geometry("),
+    std::string::npos
+  );
+  EXPECT_EQ(source.find("float repro_params[8]"), std::string::npos);
+  EXPECT_EQ(source.find("video_roi_active = 1.0f"), std::string::npos);
   EXPECT_NE(source.find("offline_full_frame_request"), std::string::npos);
   EXPECT_NE(
     source.find("depth_analysis_authority_e::full_source"),
     std::string::npos
   );
+}
+
+TEST(OfflineSbsWorker, SharedRendererGeometryAbiIsFullFrameOnly) {
+  constexpr auto geometry =
+    models::make_host_sbs_v2_full_frame_geometry(0.75f, 0.5f);
+  static_assert(sizeof(geometry) == 48u);
+  EXPECT_FLOAT_EQ(geometry.content_scale_x, 0.75f);
+  EXPECT_FLOAT_EQ(geometry.content_scale_y, 0.5f);
+  EXPECT_FLOAT_EQ(geometry.video_roi_active, 0.0f);
+  EXPECT_FLOAT_EQ(geometry.video_roi_left, 0.0f);
+  EXPECT_FLOAT_EQ(geometry.video_roi_top, 0.0f);
+  EXPECT_FLOAT_EQ(geometry.video_roi_right, 1.0f);
+  EXPECT_FLOAT_EQ(geometry.video_roi_bottom, 1.0f);
+  EXPECT_EQ(geometry.tensor_content_left, 0u);
+  EXPECT_EQ(geometry.tensor_content_top, 0u);
+  EXPECT_EQ(geometry.tensor_content_right, 0u);
+  EXPECT_EQ(geometry.tensor_content_bottom, 0u);
+}
+
+TEST(OfflineSbsWorker, DeviceConditionalReplayUsesSharedProductionTransactionPolicy) {
+  std::ifstream stream(
+    fs::path(SUNSHINE_SOURCE_DIR) / "src/sbs_bench_harness.cpp",
+    std::ios::binary
+  );
+  ASSERT_TRUE(stream);
+  const std::string source {
+    std::istreambuf_iterator<char>(stream),
+    std::istreambuf_iterator<char>()
+  };
+
+  EXPECT_NE(source.find("--device-conditional-replay"), std::string::npos);
+  EXPECT_NE(
+    source.find("--device-conditional-replay-control"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("models::gpu_adaptive_transaction_policy_t device_conditional_policy"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("device_conditional_policy.make_request("),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("device_conditional_policy.record_submission("),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find(".record_known_force_infer_completion(estimator_frame_id, true)"),
+    std::string::npos
+  );
+  EXPECT_EQ(source.find("device_conditional_baseline_is_opaque"), std::string::npos);
+  EXPECT_NE(
+    source.find("finish_pending_depth_for_evaluation(input_color)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("only unavailable DDup/window/cadence admission is"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("validate_complete_gpu_trace_replay("),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("gpu_trace_source_closure_sha256"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("branch-dependent/frozen"),
+    std::string::npos
+  );
+  EXPECT_NE(source.find("final_parallax_"), std::string::npos);
+  EXPECT_NE(source.find("shadow_final_parallax"), std::string::npos);
+  EXPECT_NE(
+    source.find("final_parallax_publication_policy"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("final_parallax_reuse_policy"),
+    std::string::npos
+  );
+  EXPECT_EQ(source.find("display_parallax_"), std::string::npos);
+  EXPECT_EQ(source.find("shadow_target_final_parallax"), std::string::npos);
 }
 
 TEST(OfflineSbsWorker, ParsesNativeSpecAndNeverBuildsPythonCommands) {

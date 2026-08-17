@@ -8,6 +8,7 @@
 #include "crypto.h"
 #include "depth_coordinate_v2.h"
 #include "generated/sbs_adaptive_state_contract.h"
+#include "host_sbs_observation_timeline.h"
 #include "host_sbs_shader_cache.h"
 #include "offline_sbs_contract.h"
 #include "offline_scene_planner.h"
@@ -89,6 +90,49 @@ namespace offline_sbs {
     public:
       using std::runtime_error::runtime_error;
     };
+
+    std::vector<std::uint64_t> exact_observation_timestamps(
+      const media_contract_t &media
+    ) {
+      using boost::multiprecision::cpp_int;
+      if (media.frames.empty() || media.time_base.numerator <= 0 ||
+          media.time_base.denominator <= 0) {
+        throw worker_error("source observation timeline has no positive time base/frames");
+      }
+      const cpp_int first_pts = media.frames.front().pts;
+      const cpp_int numerator = media.time_base.numerator;
+      const cpp_int denominator = media.time_base.denominator;
+      const cpp_int maximum = std::numeric_limits<std::uint64_t>::max();
+      std::vector<std::uint64_t> timestamps;
+      timestamps.reserve(media.frames.size());
+      for (std::size_t index = 0u; index < media.frames.size(); ++index) {
+        const auto &frame = media.frames[index];
+        if (frame.sequence != index + 1u) {
+          throw worker_error("source observation timeline sequence is not contiguous");
+        }
+        const cpp_int delta = cpp_int(frame.pts) - first_pts;
+        const cpp_int elapsed_us = delta * numerator * 1000000 / denominator;
+        if (elapsed_us < 0 || elapsed_us >= maximum) {
+          throw worker_error("source observation timestamp is outside uint64 microseconds");
+        }
+        timestamps.push_back((elapsed_us + 1).convert_to<std::uint64_t>());
+      }
+      if (!models::host_sbs_observation_timeline::valid_timestamps(timestamps)) {
+        throw worker_error("source observation timestamps are zero or regressed");
+      }
+      return timestamps;
+    }
+
+    void write_observation_timeline(
+      const fs::path &path,
+      const media_contract_t &media
+    ) {
+      const auto timestamps = exact_observation_timestamps(media);
+      std::string error;
+      if (!models::host_sbs_observation_timeline::write(path, timestamps, error)) {
+        throw worker_error(error);
+      }
+    }
 
     constexpr bool can_retain_another_timing_frame(
       const std::uint64_t retained_frames
@@ -7262,6 +7306,8 @@ namespace offline_sbs {
         true
       );
       validate_output_time_base(spec, media);
+      const auto observation_timeline = work / "source-observation-timeline.sbsotl";
+      write_observation_timeline(observation_timeline, media);
       std::optional<stream_inventory_t> source_inventory;
       if (spec.operation == "convert") {
         source_inventory = probe_stream_inventory(
@@ -7376,6 +7422,8 @@ namespace offline_sbs {
         "--artifacts",
         "adaptive",
         "--bounded-adaptive-state",
+        "--observation-timeline",
+        path_utf8(observation_timeline),
       };
       if (spec.operation == "convert") {
         analysis_command.insert(

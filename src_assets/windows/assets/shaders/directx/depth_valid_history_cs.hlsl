@@ -17,19 +17,14 @@ RWTexture2D<uint> PreviousTensorExclusion : register(u3);
 
 #include "include/depth_constants.hlsl"
 #include "include/sbs_adaptive_state_contract.generated.hlsl"
+#include "include/depth_valid_history_contract.hlsl"
 
 [numthreads(16, 16, 1)]
 void main(uint3 dtid : SV_DispatchThreadID) {
+    float history_state = SBS_STATE_MODEL_INPUT_HISTORY_STATE(
+        CutBridgeState[SBS_STATE_VECTOR_MODEL_INPUT_HISTORY_STATE]);
     if (dtid.x >= target_w || dtid.y >= target_h ||
-        MinMaxEma[0].w < 0.5f ||
-        ((SBS_STATE_MODEL_INPUT_HISTORY_STATE(
-              CutBridgeState[SBS_STATE_VECTOR_MODEL_INPUT_HISTORY_STATE]) > 1.5f &&
-          SBS_STATE_MODEL_INPUT_HISTORY_STATE(
-              CutBridgeState[SBS_STATE_VECTOR_MODEL_INPUT_HISTORY_STATE]) < 2.5f) ||
-         (SBS_STATE_MODEL_INPUT_HISTORY_STATE(
-              CutBridgeState[SBS_STATE_VECTOR_MODEL_INPUT_HISTORY_STATE]) > 3.5f &&
-          SBS_STATE_MODEL_INPUT_HISTORY_STATE(
-              CutBridgeState[SBS_STATE_VECTOR_MODEL_INPUT_HISTORY_STATE]) < 4.5f)))
+        !DepthValidHistoryAdvances(MinMaxEma[0].w, history_state))
         return;
 
     uint plane = target_w * target_h;

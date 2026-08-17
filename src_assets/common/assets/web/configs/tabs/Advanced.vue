@@ -1,6 +1,5 @@
 <script setup>
 import { ref } from 'vue'
-import Checkbox from '../../Checkbox.vue'
 const props = defineProps([
   'config'
 ])
@@ -23,13 +22,6 @@ const config = ref(props.config)
              placeholder="8192" v-model.number="config.sbs_3d_max_encode_width" />
       <div class="form-text">{{ $t('config.sbs_3d_max_encode_width_desc') }}</div>
     </div>
-
-    <Checkbox
-      id="sbs_3d_cuda_graph"
-      locale-prefix="config"
-      v-model="config.sbs_3d_cuda_graph"
-      default="true"
-    ></Checkbox>
 
   </div>
 </template>

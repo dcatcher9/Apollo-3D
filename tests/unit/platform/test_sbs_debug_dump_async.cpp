@@ -20,7 +20,11 @@
   #include <string>
   #include <vector>
 
+  #include <nlohmann/json.hpp>
+
   #include <src/generated/depth_coordinate_v2_contract.h>
+  #include <src/host_sbs_gpu_trace.h>
+  #include <src/host_sbs_shader_cache.h>
   #include <src/platform/windows/sbs_debug_dump.h>
   #include <src/platform/windows/sbs_debug_dump_async.h>
 
@@ -29,6 +33,7 @@ namespace {
   namespace dump_detail = platf::sbs_debug::detail;
   namespace v2 = models::depth_coordinate_v2;
   constexpr std::uint32_t subtitle_scene_epoch = 3u;
+  namespace gpu_trace = models::host_sbs_gpu_trace;
 
   template<std::size_t WordCount>
   std::vector<std::uint8_t> word_bytes(const std::array<std::uint32_t, WordCount> &words) {
@@ -69,6 +74,199 @@ namespace {
       .authority = models::depth_analysis_authority_e::foreground_client,
     };
     return frame;
+  }
+
+  platf::sbs_debug::frame gpu_trace_frame() {
+    platf::sbs_debug::frame frame;
+    frame.model_width = 770;
+    frame.model_height = 434;
+    frame.matched_frame_id = 41u;
+    frame.color_space = models::input_color_space::srgb;
+    frame.depth_input_region = {
+      .source_width = 1920u,
+      .source_height = 1080u,
+      .left = 0u,
+      .top = 0u,
+      .right = 1920u,
+      .bottom = 1080u,
+      .tensor_content = {0u, 0u, 770u, 434u},
+      .analysis_generation = 0u,
+      .video_region = false,
+      .authority = models::depth_analysis_authority_e::full_source,
+    };
+    return frame;
+  }
+
+  std::vector<std::uint8_t> canonical_gpu_trace_ring(
+    const platf::sbs_debug::frame &frame,
+    const gpu_trace::submission_class_e submission_class =
+      gpu_trace::submission_class_e::force_infer,
+    const cuda_conditional_graph::branch_e branch =
+      cuda_conditional_graph::branch_e::infer,
+    const bool label_authenticated_depth = true
+  ) {
+    std::vector<std::uint32_t> words(gpu_trace::ring_word_count, 0u);
+    words[gpu_trace::word_index(gpu_trace::header_word_e::schema)] =
+      gpu_trace::ring_schema;
+    words[gpu_trace::word_index(gpu_trace::header_word_e::tag)] =
+      gpu_trace::ring_tag;
+    words[gpu_trace::word_index(gpu_trace::header_word_e::capacity)] =
+      gpu_trace::capacity;
+    words[gpu_trace::word_index(gpu_trace::header_word_e::record_words)] =
+      gpu_trace::record_word_count;
+    words[gpu_trace::word_index(gpu_trace::header_word_e::next_sequence_low)] = 2u;
+    words[gpu_trace::word_index(gpu_trace::header_word_e::next_slot)] = 1u;
+    words[gpu_trace::word_index(gpu_trace::header_word_e::committed_count)] = 1u;
+
+    const auto base = gpu_trace::record_base(0u);
+    const auto set = [&](const gpu_trace::record_word_e field, const std::uint32_t value) {
+      words[base + gpu_trace::word_index(field)] = value;
+    };
+    constexpr std::uint64_t token = 0x1020304050607080ull;
+    const auto request = cuda_conditional_graph::make_request(
+      token, cuda_conditional_graph::work_flag_e::subtitle_observation
+    );
+    const auto proposal = cuda_conditional_graph::make_proposal(branch, token);
+    const auto receipt = cuda_conditional_graph::resolve_proposal(
+      proposal, request, false
+    );
+    set(gpu_trace::record_word_e::schema, gpu_trace::ring_schema);
+    set(gpu_trace::record_word_e::commit_tag, gpu_trace::record_tag);
+    set(gpu_trace::record_word_e::sequence_low, 1u);
+    set(gpu_trace::record_word_e::frame_low,
+        static_cast<std::uint32_t>(frame.matched_frame_id));
+    set(gpu_trace::record_word_e::frame_high,
+        static_cast<std::uint32_t>(frame.matched_frame_id >> 32u));
+    set(gpu_trace::record_word_e::analysis_generation_low,
+        static_cast<std::uint32_t>(frame.depth_input_region.analysis_generation));
+    set(gpu_trace::record_word_e::analysis_generation_high,
+        static_cast<std::uint32_t>(frame.depth_input_region.analysis_generation >> 32u));
+    const auto domain = models::near_identical_input_domain_tag(
+      frame.depth_input_region,
+      frame.color_space,
+      static_cast<std::uint32_t>(frame.model_width),
+      static_cast<std::uint32_t>(frame.model_height)
+    );
+    set(gpu_trace::record_word_e::domain_tag_low, static_cast<std::uint32_t>(domain));
+    set(gpu_trace::record_word_e::domain_tag_high, static_cast<std::uint32_t>(domain >> 32u));
+    set(gpu_trace::record_word_e::transaction_token_low,
+        static_cast<std::uint32_t>(token));
+    set(gpu_trace::record_word_e::transaction_token_high,
+        static_cast<std::uint32_t>(token >> 32u));
+    set(gpu_trace::record_word_e::submission_class,
+        static_cast<std::uint32_t>(submission_class));
+    const auto expected_depth =
+      submission_class == gpu_trace::submission_class_e::force_infer &&
+        branch == cuda_conditional_graph::branch_e::reuse ?
+        gpu_trace::depth_disposition_e::invalid :
+      branch == cuda_conditional_graph::branch_e::reuse ?
+        gpu_trace::depth_disposition_e::reuse : gpu_trace::depth_disposition_e::infer;
+    set(gpu_trace::record_word_e::depth_disposition,
+        label_authenticated_depth ? static_cast<std::uint32_t>(expected_depth) :
+                                    static_cast<std::uint32_t>(gpu_trace::depth_disposition_e::reuse));
+    set(gpu_trace::record_word_e::expected_work,
+        cuda_conditional_graph::work_flags_value(
+          cuda_conditional_graph::work_flag_e::subtitle_observation));
+    const bool branch_gated =
+      submission_class == gpu_trace::submission_class_e::gpu_undecided;
+    const bool subtitle_held =
+      branch_gated && branch == cuda_conditional_graph::branch_e::reuse;
+    set(
+      gpu_trace::record_word_e::subtitle_disposition,
+      static_cast<std::uint32_t>(
+        subtitle_held ? gpu_trace::subtitle_disposition_e::held_with_depth :
+                        gpu_trace::subtitle_disposition_e::abstention
+      )
+    );
+    const auto flags =
+      (branch_gated ? gpu_trace::subtitle_branch_gated :
+                      gpu_trace::ocr_record_submitted | gpu_trace::condition_executed) |
+      (frame.input_domain_reset ? gpu_trace::input_domain_reset : 0u);
+    set(gpu_trace::record_word_e::flags, flags);
+    set(gpu_trace::record_word_e::host_subtitle_outcome,
+        static_cast<std::uint32_t>(gpu_trace::host_subtitle_outcome_e::ordinary_record));
+    set(gpu_trace::record_word_e::source_width, frame.depth_input_region.width());
+    set(gpu_trace::record_word_e::source_height, frame.depth_input_region.height());
+    set(gpu_trace::record_word_e::field_width,
+        static_cast<std::uint32_t>(frame.model_width));
+    set(gpu_trace::record_word_e::field_height,
+        static_cast<std::uint32_t>(frame.model_height));
+    set(gpu_trace::record_word_e::transaction_words,
+        gpu_trace::transaction_word_count);
+    std::memcpy(
+      words.data() + base + gpu_trace::word_index(
+        gpu_trace::record_word_e::transaction_begin
+      ),
+      &receipt,
+      sizeof(receipt)
+    );
+    std::memcpy(
+      words.data() + base + gpu_trace::word_index(
+        gpu_trace::record_word_e::transaction_begin
+      ) + sizeof(receipt) / sizeof(std::uint32_t),
+      &request,
+      sizeof(request)
+    );
+    const auto locator =
+      base + gpu_trace::word_index(gpu_trace::record_word_e::subtitle_locator_begin);
+    constexpr std::uint32_t owner_generation = 1u;
+    const auto target = std::bit_cast<std::uint32_t>(0.01f);
+    words[locator + 0u] = v2::subtitle_locator_state_schema;
+    words[locator + 1u] = v2::subtitle_locator_state_tag;
+    words[locator + 2u] = 1u | 4u;
+    words[locator + 3u] = owner_generation;
+    words[locator + 4u] = 1u;
+    words[locator + 10u] = static_cast<std::uint32_t>(
+      frame.depth_input_region.analysis_generation
+    );
+    words[locator + 11u] = static_cast<std::uint32_t>(
+      frame.depth_input_region.analysis_generation >> 32u
+    );
+    words[locator + 18u] = target;
+    words[locator + 19u] = owner_generation;
+    words[locator + 20u] = 1u;
+    words[locator + 21u] = 1u;
+    const auto locator_frame_id =
+      subtitle_held ? frame.matched_frame_id - 1u : frame.matched_frame_id;
+    words[locator + 22u] = static_cast<std::uint32_t>(locator_frame_id);
+    words[locator + 23u] = static_cast<std::uint32_t>(locator_frame_id >> 32u);
+    words[locator + 24u] = 1u;
+    words[locator + 26u] = subtitle_scene_epoch;
+    words[locator + 27u] = static_cast<std::uint32_t>(frame.model_width);
+    words[locator + 28u] = static_cast<std::uint32_t>(frame.model_height);
+    const auto condition =
+      base + gpu_trace::word_index(gpu_trace::record_word_e::subtitle_condition_begin);
+    words[condition + 0u] = v2::subtitle_condition_param_schema;
+    words[condition + 1u] = v2::subtitle_condition_param_tag;
+    words[condition + 2u] = 1u;
+    words[condition + 4u] = 1u;
+    words[condition + 5u] = target;
+    const auto observation_timestamp_us = 1'000'000u + frame.matched_frame_id;
+    set(gpu_trace::record_word_e::observation_timestamp_low,
+        static_cast<std::uint32_t>(observation_timestamp_us));
+    set(gpu_trace::record_word_e::observation_timestamp_high,
+        static_cast<std::uint32_t>(observation_timestamp_us >> 32u));
+
+    std::vector<std::uint8_t> bytes(words.size() * sizeof(std::uint32_t));
+    std::memcpy(bytes.data(), words.data(), bytes.size());
+    return bytes;
+  }
+
+  std::uint32_t trace_word(
+    const std::vector<std::uint8_t> &bytes,
+    const std::size_t index
+  ) {
+    std::uint32_t value = 0u;
+    std::memcpy(&value, bytes.data() + index * sizeof(value), sizeof(value));
+    return value;
+  }
+
+  void set_trace_word(
+    std::vector<std::uint8_t> &bytes,
+    const std::size_t index,
+    const std::uint32_t value
+  ) {
+    std::memcpy(bytes.data() + index * sizeof(value), &value, sizeof(value));
   }
 
   std::array<std::uint32_t, v2::subtitle_ocr_record_word_count> empty_ocr(
@@ -231,6 +429,551 @@ namespace {
     std::filesystem::path root_;
     bool ready_ = false;
   };
+
+  TEST(SbsDebugDumpGpuTraceTest, NativeValidatorAuthenticatesMatchedNormalPendingRoot) {
+    const auto frame = gpu_trace_frame();
+    const auto ring = canonical_gpu_trace_ring(frame);
+    ASSERT_TRUE(dump_detail::gpu_trace_ring_is_canonical(ring, frame));
+    const auto base = gpu_trace::record_base(0u);
+    const auto flags = trace_word(
+      ring, base + gpu_trace::word_index(gpu_trace::record_word_e::flags)
+    );
+    EXPECT_EQ(flags & gpu_trace::dump_forced, 0u)
+      << "a dump may harvest a root that was already pending before the request";
+  }
+
+  TEST(SbsDebugDumpGpuTraceTest, HeldOrdinaryReuseAuthenticatesTheOlderPublishedSubtitleTuple) {
+    auto completed = gpu_trace_frame();
+    completed.gpu_undecided_completion = true;
+    auto evidence = completed;
+    --evidence.matched_frame_id;
+    const auto geometry = models::fit_subtitle_analysis_geometry(
+      evidence.depth_input_region.width(),
+      evidence.depth_input_region.height(),
+      {evidence.model_width, evidence.model_height},
+      evidence.depth_input_region.tensor_content
+    );
+    ASSERT_TRUE(geometry.valid());
+    auto ocr = empty_ocr(evidence, geometry);
+    const subtitle_rect_t first {120u, 350u, 300u, 400u};
+    const subtitle_rect_t second {320u, 350u, 650u, 400u};
+    store_ocr_pair(ocr, 0u, first, first);
+    store_ocr_pair(ocr, 1u, second, second);
+    ocr[2u] = 1u;
+    ocr[3u] = 2u;
+    ocr[4u] = 2u;
+    const auto locator = two_line_subtitle_state(evidence, first, second);
+
+    auto ring = canonical_gpu_trace_ring(
+      completed,
+      gpu_trace::submission_class_e::gpu_undecided,
+      cuda_conditional_graph::branch_e::reuse
+    );
+    auto falsely_current_ocr = empty_ocr(completed, geometry);
+    store_ocr_pair(falsely_current_ocr, 0u, first, first);
+    store_ocr_pair(falsely_current_ocr, 1u, second, second);
+    falsely_current_ocr[2u] = 1u;
+    falsely_current_ocr[3u] = 2u;
+    falsely_current_ocr[4u] = 2u;
+    const auto falsely_current_locator = two_line_subtitle_state(
+      completed, first, second
+    );
+    EXPECT_FALSE(dump_detail::subtitle_records_match_completion(
+      word_bytes(falsely_current_ocr), word_bytes(falsely_current_locator), ring,
+      completed, subtitle_scene_epoch
+    )) << "an authenticated ordinary reuse may not fresh-stamp its frozen subtitle tuple";
+
+    const auto base = gpu_trace::record_base(0u);
+    const auto locator_base = base + gpu_trace::word_index(
+      gpu_trace::record_word_e::subtitle_locator_begin
+    );
+    for (std::size_t index = 0u; index < locator.size(); ++index) {
+      set_trace_word(ring, locator_base + index, locator[index]);
+    }
+    const auto condition_base = base + gpu_trace::word_index(
+      gpu_trace::record_word_e::subtitle_condition_begin
+    );
+    set_trace_word(ring, condition_base + 0u, v2::subtitle_condition_param_schema);
+    set_trace_word(ring, condition_base + 1u, v2::subtitle_condition_param_tag);
+    set_trace_word(ring, condition_base + 2u, 2u);
+    set_trace_word(ring, condition_base + 3u, 0u);
+    set_trace_word(ring, condition_base + 4u, 2u);
+    set_trace_word(ring, condition_base + 5u, locator[18u]);
+    ASSERT_TRUE(dump_detail::gpu_trace_ring_is_canonical(ring, completed));
+    EXPECT_TRUE(dump_detail::subtitle_records_match_completion(
+      word_bytes(ocr), word_bytes(locator), ring, completed, subtitle_scene_epoch
+    ));
+
+    set_trace_word(
+      ring,
+      locator_base + v2::subtitle_locator_owner_offset,
+      locator[v2::subtitle_locator_owner_offset] + 1u
+    );
+    EXPECT_FALSE(dump_detail::subtitle_records_match_completion(
+      word_bytes(ocr), word_bytes(locator), ring, completed, subtitle_scene_epoch
+    ));
+  }
+
+  TEST(SbsDebugDumpGpuTraceTest, NativeValidatorRejectsTornAuthDerivedAndDomainDrift) {
+    const auto frame = gpu_trace_frame();
+    const auto canonical = canonical_gpu_trace_ring(frame);
+    const auto base = gpu_trace::record_base(0u);
+    const auto transaction = base + gpu_trace::word_index(
+      gpu_trace::record_word_e::transaction_begin
+    );
+    const auto locator = base + gpu_trace::word_index(
+      gpu_trace::record_word_e::subtitle_locator_begin
+    );
+    const auto condition = base + gpu_trace::word_index(
+      gpu_trace::record_word_e::subtitle_condition_begin
+    );
+    const auto reject = [&](const std::size_t index, const std::uint32_t value) {
+      auto changed = canonical;
+      set_trace_word(changed, index, value);
+      EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(changed, frame));
+    };
+    reject(gpu_trace::word_index(gpu_trace::header_word_e::tag), 0u);
+    reject(base + gpu_trace::word_index(gpu_trace::record_word_e::commit_tag), 0u);
+    reject(base + gpu_trace::word_index(gpu_trace::record_word_e::sequence_low), 9u);
+    reject(transaction + 1u, trace_word(canonical, transaction + 1u) ^ 1u);
+    reject(
+      base + gpu_trace::word_index(gpu_trace::record_word_e::depth_disposition),
+      static_cast<std::uint32_t>(gpu_trace::depth_disposition_e::reuse)
+    );
+    reject(
+      base + gpu_trace::word_index(gpu_trace::record_word_e::domain_tag_low),
+      trace_word(
+        canonical,
+        base + gpu_trace::word_index(gpu_trace::record_word_e::domain_tag_low)
+      ) ^ 1u
+    );
+    reject(condition + 5u, trace_word(canonical, condition + 5u) ^ 1u);
+    reject(locator + 2u, trace_word(canonical, locator + 2u) | 0x10u);
+    reject(locator + 4u, v2::subtitle_locator_rectangle_capacity + 1u);
+  }
+
+  TEST(SbsDebugDumpGpuTraceTest, ForceReuseIsInvalidButSubtitleFallbackRemainsExact) {
+    const auto frame = gpu_trace_frame();
+    const auto invalid = canonical_gpu_trace_ring(
+      frame,
+      gpu_trace::submission_class_e::force_infer,
+      cuda_conditional_graph::branch_e::reuse,
+      true
+    );
+    EXPECT_TRUE(dump_detail::gpu_trace_ring_is_canonical(invalid, frame));
+    const auto base = gpu_trace::record_base(0u);
+    EXPECT_EQ(
+      trace_word(invalid, base + gpu_trace::word_index(
+        gpu_trace::record_word_e::depth_disposition)),
+      static_cast<std::uint32_t>(gpu_trace::depth_disposition_e::invalid)
+    );
+    EXPECT_EQ(
+      trace_word(invalid, base + gpu_trace::word_index(
+        gpu_trace::record_word_e::subtitle_disposition)),
+      static_cast<std::uint32_t>(gpu_trace::subtitle_disposition_e::abstention)
+    );
+    const auto mislabeled = canonical_gpu_trace_ring(
+      frame,
+      gpu_trace::submission_class_e::force_infer,
+      cuda_conditional_graph::branch_e::reuse,
+      false
+    );
+    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(mislabeled, frame));
+  }
+
+  TEST(SbsDebugDumpGpuTraceTest, AuthenticatedOrdinaryReuseHoldsCoherentSubtitleTuple) {
+    const auto frame = gpu_trace_frame();
+    auto reused = canonical_gpu_trace_ring(
+      frame,
+      gpu_trace::submission_class_e::gpu_undecided,
+      cuda_conditional_graph::branch_e::reuse
+    );
+    const auto base = gpu_trace::record_base(0u);
+    const auto flags = base + gpu_trace::word_index(gpu_trace::record_word_e::flags);
+    const auto disposition =
+      base + gpu_trace::word_index(gpu_trace::record_word_e::subtitle_disposition);
+    EXPECT_EQ(trace_word(reused, disposition), static_cast<std::uint32_t>(
+      gpu_trace::subtitle_disposition_e::held_with_depth
+    ));
+    EXPECT_EQ(
+      trace_word(reused, flags) &
+        (gpu_trace::ocr_record_submitted | gpu_trace::condition_executed |
+         gpu_trace::subtitle_branch_gated),
+      gpu_trace::subtitle_branch_gated
+    );
+    ASSERT_TRUE(dump_detail::gpu_trace_ring_is_canonical(reused, frame));
+
+    const auto locator =
+      base + gpu_trace::word_index(gpu_trace::record_word_e::subtitle_locator_begin);
+    EXPECT_EQ(trace_word(reused, locator + 22u), frame.matched_frame_id - 1u);
+    auto falsely_current_locator = reused;
+    set_trace_word(
+      falsely_current_locator,
+      locator + 22u,
+      static_cast<std::uint32_t>(frame.matched_frame_id)
+    );
+    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(
+      falsely_current_locator, frame
+    ));
+
+    for (const auto forbidden_host_claim : {
+           gpu_trace::ocr_record_submitted, gpu_trace::condition_executed,
+         }) {
+      auto false_execution_proof = reused;
+      set_trace_word(
+        false_execution_proof, flags,
+        trace_word(reused, flags) | forbidden_host_claim
+      );
+      EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(
+        false_execution_proof, frame
+      ));
+    }
+
+    auto relabeled = reused;
+    set_trace_word(
+      relabeled, disposition,
+      static_cast<std::uint32_t>(gpu_trace::subtitle_disposition_e::invalid)
+    );
+    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(relabeled, frame));
+  }
+
+  TEST(SbsDebugDumpGpuTraceTest, HeldSubtitleTupleEqualsImmediatelyPriorRecord) {
+    const auto frame = gpu_trace_frame();
+    auto held = canonical_gpu_trace_ring(
+      frame,
+      gpu_trace::submission_class_e::gpu_undecided,
+      cuda_conditional_graph::branch_e::reuse
+    );
+    auto prior_frame = frame;
+    --prior_frame.matched_frame_id;
+    const auto prior = canonical_gpu_trace_ring(prior_frame);
+    const auto current_base = gpu_trace::record_base(0u);
+    const auto oldest_base = gpu_trace::record_base(gpu_trace::capacity - 1u);
+    std::memcpy(
+      held.data() + oldest_base * sizeof(std::uint32_t),
+      prior.data() + current_base * sizeof(std::uint32_t),
+      gpu_trace::record_word_count * sizeof(std::uint32_t)
+    );
+    set_trace_word(
+      held,
+      oldest_base + gpu_trace::word_index(gpu_trace::record_word_e::sequence_low),
+      1u
+    );
+    set_trace_word(
+      held,
+      current_base + gpu_trace::word_index(gpu_trace::record_word_e::sequence_low),
+      2u
+    );
+    set_trace_word(
+      held, gpu_trace::word_index(gpu_trace::header_word_e::next_sequence_low), 3u
+    );
+    set_trace_word(
+      held, gpu_trace::word_index(gpu_trace::header_word_e::next_slot), 1u
+    );
+    set_trace_word(
+      held, gpu_trace::word_index(gpu_trace::header_word_e::committed_count), 2u
+    );
+    ASSERT_TRUE(dump_detail::gpu_trace_ring_is_canonical(held, frame));
+
+    auto changed = held;
+    const auto current_locator = current_base + gpu_trace::word_index(
+      gpu_trace::record_word_e::subtitle_locator_begin
+    );
+    const auto current_condition = current_base + gpu_trace::word_index(
+      gpu_trace::record_word_e::subtitle_condition_begin
+    );
+    const auto changed_target = trace_word(changed, current_locator + 18u) ^ 1u;
+    set_trace_word(changed, current_locator + 18u, changed_target);
+    set_trace_word(changed, current_condition + 5u, changed_target);
+    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(changed, frame));
+  }
+
+  TEST(SbsDebugDumpGpuTraceTest, JsonSerializerPublishesBranchGatedHoldSemantics) {
+    const models::host_sbs_gpu_trace_provenance_t provenance {
+      .source_closure_schema = models::host_sbs_shader_cache::source_closure_schema,
+      .source_compile_flags = models::host_sbs_shader_cache::shader_compile_flags,
+      .source_macro_count = 0u,
+      .source_closure_sha256 = std::string {
+        models::host_sbs_shader_cache::gpu_trace_source_closure_sha256
+      },
+    };
+    const auto contract = nlohmann::json::parse(
+      dump_detail::gpu_trace_contract_json(provenance)
+    );
+    EXPECT_EQ(
+      contract.at("enums").at("subtitle_disposition").at("held_with_depth"),
+      5u
+    );
+    EXPECT_EQ(
+      contract.at("enums").at("subtitle_disposition").at("invalid"),
+      6u
+    );
+    EXPECT_EQ(
+      contract.at("enums").at("flags").at("subtitle_branch_gated"),
+      gpu_trace::subtitle_branch_gated
+    );
+    EXPECT_NE(
+      contract.at("record_sections").at("subtitle_locator").at("validity")
+        .get<std::string>().find("held_with_depth"),
+      std::string::npos
+    );
+
+    const auto frame = gpu_trace_frame();
+    const auto reused = nlohmann::json::parse(dump_detail::gpu_trace_decoded_json(
+      canonical_gpu_trace_ring(
+        frame,
+        gpu_trace::submission_class_e::gpu_undecided,
+        cuda_conditional_graph::branch_e::reuse
+      ),
+      frame
+    ));
+    const auto &held_record = reused.at("records").at(0u);
+    EXPECT_EQ(held_record.at("subtitle_disposition").at("name"), "held-with-depth");
+    EXPECT_TRUE(held_record.at("flags").at("subtitle_branch_gated"));
+    EXPECT_FALSE(held_record.at("flags").at("condition_executed"));
+    EXPECT_FALSE(held_record.at("flags").at("condition_executed_host_proven"));
+    EXPECT_TRUE(held_record.at("subtitle_condition").at("held_with_depth"));
+    EXPECT_TRUE(held_record.at("subtitle_condition").at("active"));
+
+    const auto inferred = nlohmann::json::parse(dump_detail::gpu_trace_decoded_json(
+      canonical_gpu_trace_ring(
+        frame,
+        gpu_trace::submission_class_e::gpu_undecided,
+        cuda_conditional_graph::branch_e::infer
+      ),
+      frame
+    ));
+    const auto &infer_record = inferred.at("records").at(0u);
+    EXPECT_TRUE(infer_record.at("flags").at("subtitle_branch_gated"));
+    EXPECT_TRUE(infer_record.at("flags").at("condition_executed"));
+    EXPECT_FALSE(infer_record.at("flags").at("condition_executed_host_proven"));
+    EXPECT_FALSE(infer_record.at("subtitle_condition").at("held_with_depth"));
+    EXPECT_TRUE(infer_record.at("subtitle_condition").at("executed"));
+    EXPECT_TRUE(infer_record.at("subtitle_condition").at("active"));
+  }
+
+  TEST(SbsDebugDumpGpuTraceTest, InactiveLocatorRequiresCanonicalZeroConditionVerdict) {
+    const auto frame = gpu_trace_frame();
+    const auto canonical = canonical_gpu_trace_ring(frame);
+    const auto base = gpu_trace::record_base(0u);
+    const auto locator = base + gpu_trace::word_index(
+      gpu_trace::record_word_e::subtitle_locator_begin
+    );
+    const auto condition = base + gpu_trace::word_index(
+      gpu_trace::record_word_e::subtitle_condition_begin
+    );
+
+    auto inactive = canonical;
+    set_trace_word(inactive, locator + 2u, 0u);
+    set_trace_word(inactive, locator + 3u, 0u);
+    set_trace_word(inactive, locator + 4u, 0u);
+    set_trace_word(inactive, locator + 12u, 0u);
+    set_trace_word(inactive, locator + 18u, 0u);
+    set_trace_word(inactive, locator + 19u, 0u);
+    set_trace_word(inactive, locator + 20u, 0u);
+    set_trace_word(inactive, locator + 21u, 0u);
+    set_trace_word(inactive, locator + 24u, 0u);
+    set_trace_word(inactive, locator + 25u, 0u);
+    set_trace_word(inactive, locator + v2::subtitle_locator_kind_word, 0u);
+    for (std::size_t index = 0u; index < v2::subtitle_condition_param_word_count; ++index) {
+      set_trace_word(inactive, condition + index, 0u);
+    }
+    EXPECT_TRUE(dump_detail::gpu_trace_ring_is_canonical(inactive, frame));
+
+    auto stale_condition = inactive;
+    set_trace_word(
+      stale_condition, condition, v2::subtitle_condition_param_schema
+    );
+    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(stale_condition, frame));
+
+    auto missing_active_condition = canonical;
+    for (std::size_t index = 0u; index < v2::subtitle_condition_param_word_count; ++index) {
+      set_trace_word(missing_active_condition, condition + index, 0u);
+    }
+    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(missing_active_condition, frame));
+  }
+
+  TEST(SbsDebugDumpGpuTraceTest, ProvisionalConditionUsesEphemeralTupleAndStructuralBounds) {
+    const auto frame = gpu_trace_frame();
+    auto ring = canonical_gpu_trace_ring(frame);
+    const auto base = gpu_trace::record_base(0u);
+    const auto locator = base + gpu_trace::word_index(
+      gpu_trace::record_word_e::subtitle_locator_begin
+    );
+    const auto condition = base + gpu_trace::word_index(
+      gpu_trace::record_word_e::subtitle_condition_begin
+    );
+    constexpr subtitle_rect_t owner {203u, 369u, 566u, 384u};
+    constexpr subtitle_rect_t pending {342u, 368u, 415u, 386u};
+    constexpr subtitle_rect_t cover {337u, 364u, 420u, 390u};
+    const auto provisional_target = std::bit_cast<std::uint32_t>(
+      6.0f / (2.0f * 1920.0f)
+    );
+    set_trace_word(
+      ring, locator + 2u,
+      1u | 2u | 4u | v2::subtitle_locator_provisional_current_flag
+    );
+    set_trace_word(ring, locator + 12u, 1u);
+    set_trace_word(ring, locator + 20u, 1u);
+    set_trace_word(ring, locator + 21u, 0u);
+    set_trace_word(ring, locator + 24u, 2u);
+    set_trace_word(
+      ring, locator + v2::subtitle_locator_provisional_target_word, provisional_target
+    );
+    set_trace_word(ring, locator + v2::subtitle_locator_provisional_fade_word, 2u);
+    for (std::size_t coordinate = 0u; coordinate < 4u; ++coordinate) {
+      set_trace_word(
+        ring, locator + v2::subtitle_locator_owner_offset + coordinate, owner[coordinate]
+      );
+      set_trace_word(
+        ring, locator + v2::subtitle_locator_pending_offset + coordinate, pending[coordinate]
+      );
+      set_trace_word(
+        ring, locator + v2::subtitle_locator_current_offset + coordinate, cover[coordinate]
+      );
+    }
+    set_trace_word(ring, condition + 4u, 2u);
+    set_trace_word(ring, condition + 5u, provisional_target);
+    ASSERT_TRUE(dump_detail::gpu_trace_ring_is_canonical(ring, frame));
+
+    auto durable_tuple = ring;
+    set_trace_word(
+      durable_tuple, condition + 5u, trace_word(ring, locator + 18u)
+    );
+    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(durable_tuple, frame));
+
+    auto widened_cover = ring;
+    set_trace_word(
+      widened_cover, locator + v2::subtitle_locator_current_offset + 0u,
+      pending[0] + 1u
+    );
+    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(widened_cover, frame));
+
+    // Match equality belongs to established owner continuity, never the provisional bridge.
+    auto iou_equality = ring;
+    constexpr subtitle_rect_t equal_owner {100u, 360u, 200u, 370u};
+    constexpr subtitle_rect_t equal_pending {125u, 360u, 225u, 370u};
+    constexpr subtitle_rect_t equal_cover {120u, 356u, 230u, 374u};
+    for (std::size_t coordinate = 0u; coordinate < 4u; ++coordinate) {
+      set_trace_word(
+        iou_equality, locator + v2::subtitle_locator_owner_offset + coordinate,
+        equal_owner[coordinate]
+      );
+      set_trace_word(
+        iou_equality, locator + v2::subtitle_locator_pending_offset + coordinate,
+        equal_pending[coordinate]
+      );
+      set_trace_word(
+        iou_equality, locator + v2::subtitle_locator_current_offset + coordinate,
+        equal_cover[coordinate]
+      );
+    }
+    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(iou_equality, frame));
+  }
+
+  TEST(SbsDebugDumpGpuTraceTest, WrappedChronologyAndSuppressedFrozenSectionsValidate) {
+    const auto frame = gpu_trace_frame();
+    auto wrapped = canonical_gpu_trace_ring(frame);
+    const auto template_base = gpu_trace::record_base(0u);
+    const auto oldest_base = gpu_trace::record_base(gpu_trace::capacity - 1u);
+    std::vector<std::uint8_t> record(
+      gpu_trace::record_word_count * sizeof(std::uint32_t)
+    );
+    std::memcpy(
+      record.data(),
+      wrapped.data() + template_base * sizeof(std::uint32_t),
+      record.size()
+    );
+    std::memcpy(
+      wrapped.data() + oldest_base * sizeof(std::uint32_t),
+      record.data(),
+      record.size()
+    );
+    set_trace_word(
+      wrapped,
+      oldest_base + gpu_trace::word_index(gpu_trace::record_word_e::sequence_low),
+      500u
+    );
+    set_trace_word(
+      wrapped,
+      template_base + gpu_trace::word_index(gpu_trace::record_word_e::sequence_low),
+      501u
+    );
+    set_trace_word(
+      wrapped, gpu_trace::word_index(gpu_trace::header_word_e::next_sequence_low), 502u
+    );
+    set_trace_word(
+      wrapped, gpu_trace::word_index(gpu_trace::header_word_e::next_slot), 1u
+    );
+    set_trace_word(
+      wrapped, gpu_trace::word_index(gpu_trace::header_word_e::committed_count), 2u
+    );
+    EXPECT_TRUE(dump_detail::gpu_trace_ring_is_canonical(wrapped, frame));
+
+    auto reset_frame = frame;
+    reset_frame.input_domain_reset = true;
+    auto suppressed = canonical_gpu_trace_ring(
+      reset_frame,
+      gpu_trace::submission_class_e::gpu_undecided,
+      cuda_conditional_graph::branch_e::reuse
+    );
+    const auto base = gpu_trace::record_base(0u);
+    constexpr std::uint64_t token = 0x1020304050607080ull;
+    const auto request = cuda_conditional_graph::make_request(
+      token, cuda_conditional_graph::work_flag_e::none
+    );
+    const auto receipt = cuda_conditional_graph::resolve_proposal(
+      cuda_conditional_graph::make_proposal(
+        cuda_conditional_graph::branch_e::reuse, token
+      ),
+      request,
+      false
+    );
+    const auto transaction = base + gpu_trace::word_index(
+      gpu_trace::record_word_e::transaction_begin
+    );
+    std::memcpy(
+      suppressed.data() + transaction * sizeof(std::uint32_t),
+      &receipt,
+      sizeof(receipt)
+    );
+    std::memcpy(
+      suppressed.data() + (transaction + 8u) * sizeof(std::uint32_t),
+      &request,
+      sizeof(request)
+    );
+    set_trace_word(
+      suppressed,
+      base + gpu_trace::word_index(gpu_trace::record_word_e::expected_work),
+      0u
+    );
+    set_trace_word(
+      suppressed,
+      base + gpu_trace::word_index(gpu_trace::record_word_e::subtitle_disposition),
+      static_cast<std::uint32_t>(gpu_trace::subtitle_disposition_e::suppressed)
+    );
+    set_trace_word(
+      suppressed,
+      base + gpu_trace::word_index(gpu_trace::record_word_e::flags),
+      gpu_trace::input_domain_reset | gpu_trace::subtitle_suppressed
+    );
+    set_trace_word(
+      suppressed,
+      base + gpu_trace::word_index(gpu_trace::record_word_e::host_subtitle_outcome),
+      static_cast<std::uint32_t>(gpu_trace::host_subtitle_outcome_e::suppressed)
+    );
+    const auto locator = base + gpu_trace::word_index(
+      gpu_trace::record_word_e::subtitle_locator_begin
+    );
+    const auto condition = base + gpu_trace::word_index(
+      gpu_trace::record_word_e::subtitle_condition_begin
+    );
+    set_trace_word(suppressed, locator, 0xffffffffu);
+    set_trace_word(suppressed, locator + 2u, 0xffffffffu);
+    set_trace_word(suppressed, condition, 0xffffffffu);
+    EXPECT_TRUE(dump_detail::gpu_trace_ring_is_canonical(suppressed, reset_frame))
+      << "explicit suppression remains distinct even when depth authentically reuses";
+  }
 
   TEST(SbsDebugDumpAsyncTest, ReleasingSessionDoesNotWaitForPublication) {
     auto state = dump_detail::publication_state::create();
@@ -702,7 +1445,7 @@ namespace {
 
     constexpr subtitle_rect_t first {180u, 350u, 590u, 360u};
     constexpr subtitle_rect_t second {180u, 364u, 500u, 374u};
-    // This is valid OCR8 evidence but deliberately fails SLR12's 48-cell/two-to-one core gate.
+    // This is valid OCR8 evidence but deliberately fails SLR13's 48-cell/two-to-one core gate.
     constexpr subtitle_rect_t unselected {40u, 380u, 60u, 400u};
     auto ocr = empty_ocr(frame, geometry);
     ocr[2u] = 1u;
@@ -764,6 +1507,130 @@ namespace {
     store_current(outside_selection, 1u, {});
     EXPECT_FALSE(subtitle_records_match_frame(
       word_bytes(ocr), word_bytes(outside_selection), frame
+    ));
+  }
+
+  TEST(SbsDebugDumpAsyncTest, NativeSubtitleValidationAuthenticatesProvisionalExactPair) {
+    constexpr models::depth_tensor_content_rect_t content {0u, 0u, 770u, 434u};
+    const auto frame = subtitle_frame(content, 1920u, 1080u);
+    const auto geometry = models::fit_subtitle_analysis_geometry(
+      frame.depth_input_region.width(), frame.depth_input_region.height(),
+      {frame.model_width, frame.model_height}, content
+    );
+    ASSERT_TRUE(geometry.valid());
+    constexpr subtitle_rect_t owner {203u, 369u, 566u, 384u};
+    constexpr subtitle_rect_t pending {342u, 368u, 415u, 386u};
+    constexpr subtitle_rect_t cover {337u, 364u, 420u, 390u};
+
+    auto ocr = empty_ocr(frame, geometry);
+    ocr[2u] = 1u;
+    ocr[3u] = 1u;
+    ocr[4u] = 1u;
+    store_ocr_pair(ocr, 0u, pending, cover);
+
+    std::array<std::uint32_t, v2::subtitle_locator_state_word_count> locator {};
+    constexpr std::uint32_t generation = 9u;
+    locator[0u] = v2::subtitle_locator_state_schema;
+    locator[1u] = v2::subtitle_locator_state_tag;
+    locator[2u] = 1u | 2u | 4u | v2::subtitle_locator_provisional_current_flag;
+    locator[3u] = generation;
+    locator[4u] = 1u;
+    std::copy(owner.begin(), owner.end(), locator.begin() + 5u);
+    locator[9u] = (owner[2] - owner[0]) * (owner[3] - owner[1]);
+    locator[10u] = static_cast<std::uint32_t>(
+      frame.depth_input_region.analysis_generation
+    );
+    locator[11u] = static_cast<std::uint32_t>(
+      frame.depth_input_region.analysis_generation >> 32u
+    );
+    locator[12u] = 1u;
+    std::copy(pending.begin(), pending.end(), locator.begin() + 13u);
+    locator[17u] = (pending[2] - pending[0]) * (pending[3] - pending[1]);
+    locator[18u] = std::bit_cast<std::uint32_t>(2.0f / (2.0f * 1920.0f));
+    locator[19u] = generation;
+    locator[20u] = 1u;
+    locator[22u] = static_cast<std::uint32_t>(frame.matched_frame_id);
+    locator[23u] = static_cast<std::uint32_t>(frame.matched_frame_id >> 32u);
+    locator[24u] = 2u;
+    locator[26u] = subtitle_scene_epoch;
+    locator[27u] = static_cast<std::uint32_t>(frame.model_width);
+    locator[28u] = static_cast<std::uint32_t>(frame.model_height);
+    locator[v2::subtitle_locator_provisional_target_word] =
+      std::bit_cast<std::uint32_t>(6.0f / (2.0f * 1920.0f));
+    locator[v2::subtitle_locator_provisional_fade_word] = 2u;
+    std::copy(
+      owner.begin(), owner.end(), locator.begin() + v2::subtitle_locator_owner_offset
+    );
+    std::copy(
+      pending.begin(), pending.end(), locator.begin() + v2::subtitle_locator_pending_offset
+    );
+    std::copy(
+      cover.begin(), cover.end(), locator.begin() + v2::subtitle_locator_current_offset
+    );
+    ASSERT_TRUE(subtitle_records_match_frame(
+      word_bytes(ocr), word_bytes(locator), frame
+    ));
+
+    auto wrong_cover = locator;
+    wrong_cover[v2::subtitle_locator_current_offset] = cover[0] - 1u;
+    EXPECT_FALSE(subtitle_records_match_frame(
+      word_bytes(ocr), word_bytes(wrong_cover), frame
+    ));
+
+    auto wrong_geometry = locator;
+    constexpr subtitle_rect_t unrelated {100u, 330u, 500u, 340u};
+    std::copy(unrelated.begin(), unrelated.end(), wrong_geometry.begin() + 5u);
+    wrong_geometry[9u] =
+      (unrelated[2] - unrelated[0]) * (unrelated[3] - unrelated[1]);
+    std::copy(
+      unrelated.begin(), unrelated.end(),
+      wrong_geometry.begin() + v2::subtitle_locator_owner_offset
+    );
+    EXPECT_FALSE(subtitle_records_match_frame(
+      word_bytes(ocr), word_bytes(wrong_geometry), frame
+    ));
+  }
+
+  TEST(SbsDebugDumpAsyncTest, NativeSubtitleValidationMirrorsStrictCornerCoreFilter) {
+    constexpr models::depth_tensor_content_rect_t content {0u, 0u, 770u, 434u};
+    const auto frame = subtitle_frame(content, 1920u, 1080u);
+    const auto geometry = models::fit_subtitle_analysis_geometry(
+      frame.depth_input_region.width(), frame.depth_input_region.height(),
+      {frame.model_width, frame.model_height}, content
+    );
+    ASSERT_TRUE(geometry.valid());
+    const auto edge_threshold = content.width() / v2::subtitle_locator_corner_edge_divisor;
+    const auto bottom_threshold =
+      geometry.roi_bottom - v2::subtitle_locator_corner_bottom_rows;
+    ASSERT_EQ(edge_threshold, 24u);
+
+    const subtitle_rect_t center {
+      200u, bottom_threshold - 10u, 400u, bottom_threshold,
+    };
+    const subtitle_rect_t edge_equal {
+      edge_threshold, bottom_threshold - 10u,
+      edge_threshold + 116u, bottom_threshold,
+    };
+    auto ocr = empty_ocr(frame, geometry);
+    ocr[2u] = 1u;
+    ocr[3u] = 2u;
+    ocr[4u] = 2u;
+    store_ocr_pair(ocr, 0u, edge_equal, edge_equal);
+    store_ocr_pair(ocr, 1u, center, center);
+    const auto locator = two_line_subtitle_state(frame, edge_equal, center);
+    EXPECT_TRUE(subtitle_records_match_frame(
+      word_bytes(ocr), word_bytes(locator), frame
+    ));
+
+    // Moving the same core one cell strictly inside the corner threshold removes it from the
+    // selected ordinary component, so an SLR state claiming both lines must fail authentication.
+    const subtitle_rect_t strict_corner {
+      edge_threshold - 1u, bottom_threshold - 10u,
+      edge_threshold + 115u, bottom_threshold,
+    };
+    store_ocr_pair(ocr, 0u, strict_corner, strict_corner);
+    EXPECT_FALSE(subtitle_records_match_frame(
+      word_bytes(ocr), word_bytes(locator), frame
     ));
   }
 }  // namespace

@@ -1416,8 +1416,8 @@ def baseline_required_context(candidate_meta):
         "eval_schema": candidate_meta.get("eval_schema"),
         "depth_step": candidate_meta.get("depth_step"),
         "depth_compensation": candidate_meta.get("depth_compensation"),
-        # CUDA graphs and ordinary enqueueV3 are different execution modes. Their timing
-        # baselines are not interchangeable, even when every quality lever is identical.
+        # Inference-producing runs require the joined CUDA wrapper. Reference replays that run no
+        # TensorRT inference record false; those two provenance classes are not interchangeable.
         "cuda_graph": candidate_meta.get("cuda_graph"),
         "parallax_v2_shadow": candidate_meta.get("parallax_v2_shadow"),
         "parallax_v2_render": candidate_meta.get("parallax_v2_render"),
@@ -1442,7 +1442,7 @@ def validate_cuda_graph_execution_mode(
         raise ValueError(
             "CUDA graph execution did not match the requested mode "
             f"(requested={requested}, captured={captured}); refusing to mix "
-            "CUDA-graph and enqueueV3-fallback timing")
+            "joined-wrapper and no-inference/invalid execution provenance")
     if baseline_captured is not _NO_CUDA_GRAPH_BASELINE:
         if not isinstance(baseline_captured, bool):
             raise ValueError(
@@ -2534,18 +2534,6 @@ def expected_shared_number(conf, key, default, extra, cli_key, cast=float):
         fail(f"invalid numeric value for {key}: {value!r}")
 
 
-def expected_shared_bool(conf, key, default, extra, cli_key):
-    """Resolve one canonical top-level live/offline boolean."""
-    value = conf_value(conf, f"sbs_3d_{key}", default)
-    value = extra_value(extra, cli_key, value)
-    normalized = str(value).strip().lower()
-    if normalized in ("true", "yes", "on", "1"):
-        return True
-    if normalized in ("false", "no", "off", "0"):
-        return False
-    fail(f"invalid boolean value for {key}: {value!r}")
-
-
 def expected_depth_model():
     """Return the sole authenticated production model from the generated V2 contract."""
     if len(MODEL_CALIBRATIONS) != 1:
@@ -2813,6 +2801,9 @@ def main():
         fail("--direct-parallax-root is reference-only and requires --comparison-only")
     if direct_parallax_root and not os.path.isdir(direct_parallax_root):
         fail(f"--direct-parallax-root is not a directory: {direct_parallax_root}")
+    if "--cuda-graph" in args.extra:
+        fail("--cuda-graph was removed; inference-producing runs always require the joined "
+             "DAV2/OCR conditional wrapper")
 
     exe = os.path.join(args.build_dir, "sunshine.exe")
     default_clips, default_baselines = suite_defaults(args.suite)
@@ -2857,8 +2848,9 @@ def main():
         if missing_baselines:
             fail(f"missing committed baseline(s) in {base_dir}: {missing_baselines}. "
                  "Use --comparison-only for a matched A/B or --update-baselines after validation.")
-    expected_cuda_graph = expected_shared_bool(
-        args.conf, "cuda_graph", True, args.extra, "--cuda-graph")
+    # Immutable execution provenance: normal evaluation must instantiate the joined wrapper.
+    # External direct-parallax replay supplies geometry and executes no TensorRT inference.
+    expected_cuda_graph = not direct_parallax_root
     # These persisted fields describe this evaluator invocation, not live Host SBS configuration.
     # The default clip gate runs the production Depth Coordinate V2 renderer
     # renderer. Authenticated direct-geometry replay keeps its own schema-25

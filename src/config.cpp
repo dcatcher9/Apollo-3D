@@ -647,7 +647,6 @@ namespace config {
     video.sbs = {};
     double_between_f(vars, "sbs_3d_pop_strength", video.sbs.pop_strength, {0.25, 2.0});
     int_between_f(vars, "sbs_3d_max_encode_width", video.sbs.max_encode_width, {256, 16384});
-    bool_f(vars, "sbs_3d_cuda_graph", video.sbs.cuda_graph);
     video.sbs.max_encode_width &= ~1;
 
     path_f(vars, "pkey", nvhttp.pkey);

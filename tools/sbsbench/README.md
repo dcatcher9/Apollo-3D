@@ -52,8 +52,6 @@ Useful variants are:
 # One supported geometry or execution treatment
 & $SbsbenchPython tools/sbsbench/run_eval.py --comparison-only --label pop-1p0 `
   --extra --pop-strength 1.0
-& $SbsbenchPython tools/sbsbench/run_eval.py --comparison-only --label no-graph `
-  --extra --cuda-graph off
 
 # Prepared public suite
 & $SbsbenchPython tools/sbsbench/run_eval.py --suite extended --comparison-only --label public-control
@@ -66,13 +64,55 @@ Useful variants are:
 The process exit code is the verdict: `0` pass, `1` regression, and `2` invalid or incomplete
 evidence.
 
+### Adaptive infer/reuse A/B without a headset
+
+Use the maintained adaptive replay when a bug may depend on DAV2's private device decision. One
+command decodes every video once to lossless PNGs, feeds that exact corpus first to a force-infer
+control and then to the shared production conditional transaction policy, authenticates the full
+GPU trace, and writes JSON plus HTML comparison reports:
+
+```powershell
+& $SbsbenchPython tools/sbsbench/run_adaptive_replay.py `
+  "C:\captures\first.mp4" "C:\captures\second.mp4"
+```
+
+Prepared `frame_*.png` directories are also accepted. The numerically ordered selected subset is
+staged once under canonical one-based IDs, then hashed before and after both runs. The runner
+first requires and verifies the current `sunshine` target, then binds the executable, config,
+runtime shader tree, DAV2
+engine/ONNX, OCR engine/contract ONNX, and generated coordinate contract across both serial legs.
+The default gate requires at least one actual reuse and proves that every reuse retained the
+preceding raw DAV2 field bit-exactly. Ordinary subtitle work also holds SLR80, condition parameters,
+and `final_parallax_<frame-id>.f32`; cadence-due work may instead publish a current subtitle
+observation on the reused depth. The authenticated trace distinguishes those cases and rejects an
+ordinary OCR marker on reuse. The runner derives GPU history-owner age from both the frame ID and
+the exact source-observation timeline—not from processing speed or a host baseline delta. No run
+may exceed the production four-frame cap or strict `<100 ms` observation-age bound, and every infer
+raw field must match the same-frame force control.
+Missing, extra, wrong-sized, or misidentified artifacts fail closed. These trace and artifact
+invariants guard the adaptive subtitle-clock bug without image-tuned thresholds or headset
+judgment.
+
+The report measures final-field step and jerk for both force control and adaptive treatment. Every
+serial harness stage from `sbs_perf.json` is also aligned by name/sample count and reported with mean and
+p95 control-to-treatment deltas; nested GPU stages are kept separate and are never summed.
+Optional `--max-scene-residual-delta-p95` and `--max-subtitle-residual-delta-p95` bounds can turn
+the report's downsampled image diagnostics into clip-specific CI gates.
+
+This replay deliberately supplies no Desktop Duplication damage history, live window authority,
+or encode-deadline scheduling. Those remain live admission inputs. Request formation, opaque
+chaining, force-completion release, estimator, conditioner, renderer, and GPU trace are the same
+production code, so the offline path does not maintain a second infer/reuse state machine.
+The runner uses private replay harness schemas 27 (force oracle) and 26 (conditional treatment),
+plus metadata schema 3, leaving formal `run_eval.py` schema 22 and its baseline evidence untouched.
+
 Host SBS V2 has no model/profile selector. Production and the maintained benchmark harness use the
 authenticated DAV2 Small calibration. The supported treatments are intentionally narrow and are
 listed by `run_eval.py --help`; unrecognized historical options fail argument parsing.
 
 ### Current subtitle authority
 
-The current dump reader accepts the authenticated OCR8 record and compact SLR12 locator state as
+The current dump reader accepts the authenticated OCR8 record and compact SLR13 locator state as
 the only live subtitle authority. Retired SLR3--SLR9, GST/OGR/ORS, and offline overlay-detector
 paths are not accepted as live or replay authority.
 
@@ -117,15 +157,18 @@ captures directly with:
 ```
 
 See [Dump and replay format](DUMP_FORMAT.md) before interpreting preview PNGs. The reader accepts
-only the current SLR12/OCR8 dump schema; older experimental captures are intentionally unsupported.
-An active schema-32 package authenticates the exact OCR8 record, compact SLR12 state, ordinary Base
-field, selected conditioned field, and the resolver's bounded strict fallback placement policy. An
-inactive package uses the one canonical `none` descriptor.
+only the current SLR13/OCR8 dump schema; older experimental captures are intentionally unsupported.
+An active schema-36 package authenticates the OCR8/SLR13 tuple for the atomic final field's
+publication frame, ordinary Base, conditioned final field, and the resolver's bounded strict
+fallback placement policy. It replays SLR13 directly into that final field and requires
+`warp_depth` to equal it bit-for-bit. An
+active resolver also authenticates the strict symmetric bottom-corner ordinary-core qualification
+and its ribbon exemption. An inactive package uses the one canonical `none` descriptor.
 
-Current schema-32 window-region packages preserve the complete authorized source rectangle at any
+Current schema-36 window-region packages preserve the complete authorized source rectangle at any
 aspect ratio. `depth_input_region.json` schema 3 records the centered integer content rectangle in
 the fixed DAV2 tensor and its edge-replicated excluded padding. Quantitative consumers must use
-that content width for limiter and SLR12 steps and must project OCR/SLR geometry only into that
+that content width for limiter and SLR13 steps and must project OCR/SLR geometry only into that
 content rectangle; treating the whole tensor as real source pixels is rejected.
 
 ## Whole-clip conversion boundary

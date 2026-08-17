@@ -93,7 +93,6 @@ Useful controlled levers are passed after `--extra`, for example:
 
 ```powershell
 python tools/sbsbench/run_eval.py --comparison-only --label pop-1p0 --extra --pop-strength 1.0
-python tools/sbsbench/run_eval.py --comparison-only --label no-graph --extra --cuda-graph off
 ```
 
 The GPU harness remains serial so performance evidence is uncontended. CPU scoring can use

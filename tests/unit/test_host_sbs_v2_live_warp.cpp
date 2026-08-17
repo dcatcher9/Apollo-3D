@@ -26,6 +26,7 @@
 
 #include <src/depth_coordinate_v2.h>
 #include <src/host_sbs_shader_cache.h>
+#include <src/host_sbs_v2_geometry.h>
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -55,22 +56,7 @@ namespace {
     bool operator==(const bgra8_t &) const = default;
   };
 
-  struct host_sbs_v2_geometry_t {
-    float content_scale_x = 1.0f;
-    float content_scale_y = 1.0f;
-    float video_roi_active = 0.0f;
-    float reserved = 0.0f;
-    float video_roi_left = 0.0f;
-    float video_roi_top = 0.0f;
-    float video_roi_right = 1.0f;
-    float video_roi_bottom = 1.0f;
-    std::uint32_t tensor_content_left = 0u;
-    std::uint32_t tensor_content_top = 0u;
-    std::uint32_t tensor_content_right = 0u;
-    std::uint32_t tensor_content_bottom = 0u;
-  };
-
-  static_assert(sizeof(host_sbs_v2_geometry_t) == 48u);
+  using models::host_sbs_v2_geometry_t;
 
   struct direct_parallax_constants_t {
     float source_u_limit = models::depth_coordinate_v2::direct_container_limit;

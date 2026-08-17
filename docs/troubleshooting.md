@@ -78,7 +78,6 @@ large jitter or loss warrants lowering bitrate before changing encoder or 3D set
 
 - Keep the NVIDIA driver current.
 - Do not force an adapter that is different from the display's capture adapter.
-- Leave `sbs_3d_cuda_graph = true`; disable it only for a controlled driver diagnosis.
 - Reduce stream resolution or bitrate before selecting slower NVENC quality options.
 - Close other GPU-heavy applications while collecting Host 3D performance evidence.
 - Do not use an unoptimized Debug build for streaming tests.
