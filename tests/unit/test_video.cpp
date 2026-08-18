@@ -5135,6 +5135,73 @@ TEST(DirectxShaderSourceTest, PendingCompletionReusesThePreparedConstantBuffer) 
   );
 }
 
+TEST(DirectxShaderSourceTest, V2ProducerFailureUsesTheCanonicalTerminalLatch) {
+  const auto estimator =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
+  ASSERT_FALSE(estimator.empty());
+
+  EXPECT_EQ(
+    estimator.find("parallax_v2_producer_failed"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    estimator.find("live_v2_producer_unavailable"),
+    std::string::npos
+  );
+
+  const auto failure = estimator.find("void fail_parallax_v2_producer(");
+  const auto ensure = estimator.find("bool ensure_parallax_v2_resources()", failure);
+  ASSERT_NE(failure, std::string::npos);
+  ASSERT_NE(ensure, std::string::npos);
+  std::size_t ensure_occurrences = 0u;
+  for (std::size_t offset = 0u;
+       (offset = estimator.find("ensure_parallax_v2_resources()", offset)) !=
+       std::string::npos;
+       ++offset) {
+    ++ensure_occurrences;
+  }
+  EXPECT_EQ(ensure_occurrences, 2u)
+    << "The lazy resource initializer must retain one terminal-latching caller.";
+  const auto failure_body = estimator.substr(failure, ensure - failure);
+  EXPECT_NE(
+    failure_body.find("Host SBS V2 producer failed:"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    failure_body.find("release_parallax_v2_resources();"),
+    std::string::npos
+  );
+
+  const auto terminal = estimator.find(
+    "if (!ensure_parallax_v2_resources())",
+    ensure
+  );
+  ASSERT_NE(terminal, std::string::npos);
+  const auto terminal_end = estimator.find("}", terminal);
+  ASSERT_NE(terminal_end, std::string::npos);
+  EXPECT_NE(
+    estimator.substr(terminal, terminal_end - terminal).find(
+      "mark_terminal_failure();"
+    ),
+    std::string::npos
+  );
+
+  EXPECT_NE(
+    estimator.find("if (!valid || terminal_failure)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    estimator.find("if (!valid || terminal_failure || !input_srv)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    estimator.find(
+      "return !pimpl || !pimpl->valid || pimpl->terminal_failure;"
+    ),
+    std::string::npos
+  );
+}
+
 TEST(SbsBenchHarnessSourceTest, OfflineWarpTimingReadbackIsBoundedAndExact) {
   const auto harness = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/sbs_bench_harness.cpp"

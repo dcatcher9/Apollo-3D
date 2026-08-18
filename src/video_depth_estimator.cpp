@@ -1685,7 +1685,6 @@ namespace models {
     std::shared_ptr<const parallax_v2_shader_provenance_t>
       parallax_v2_shader_provenance;
     bool parallax_v2_producer_active = false;
-    bool parallax_v2_producer_failed = false;
 
     // Demand-gated, nonblocking telemetry readback. Resources are created lazily only after an
     // external protocol subscriber requests evidence; a three-slot staging/query ring absorbs GPU
@@ -2969,10 +2968,6 @@ namespace models {
     bool readiness_preflighted = false;  // can_accept_frame() already counted/queried this source opportunity
     bool depth_context_pooled = false;  // context reused from the pool (modules already loaded -> skip warmup)
     bool context_warmed = false;  // only warmed contexts may return to context_pool
-
-    bool live_v2_producer_unavailable() const {
-      return parallax_v2_producer_failed;
-    }
 
     static depth_input_region_t resolved_input_region(
       depth_input_region_t requested,
@@ -4740,7 +4735,6 @@ namespace models {
           preprocess_source_closure_sha256 ?
           model_coordinate_calibration : nullptr;
       if (!coordinate_calibration) {
-        parallax_v2_producer_failed = true;
         BOOST_LOG(error)
           << "Host SBS V2 cannot authenticate uncalibrated depth model '"
           << model.name << "' (ONNX SHA-256 " << artifact.source_sha256
@@ -4841,7 +4835,6 @@ namespace models {
         );
       }
       if (!producer_shaders_ok) {
-        parallax_v2_producer_failed = true;
         BOOST_LOG(error)
           << "Host SBS V2 shader initialization or source-identity verification failed; "
              "Host SBS will fail flat.";
@@ -4867,7 +4860,6 @@ namespace models {
       };
       if (!create_fused_mode_cbuffer(0u, fused_preprocess_force_cbuffer) ||
           !create_fused_mode_cbuffer(1u, fused_preprocess_compare_cbuffer)) {
-        parallax_v2_producer_failed = true;
         BOOST_LOG(error)
           << "Host SBS fused preprocess mode-buffer initialization failed; "
              "Host SBS will fail flat.";
@@ -5393,11 +5385,10 @@ namespace models {
       pending_source_srv.Reset();
     }
     void fail_parallax_v2_producer(std::string_view reason) {
-      if (!parallax_v2_producer_failed) {
-        BOOST_LOG(error) << "Host SBS V2 producer failed: " << reason
-                         << "; this stream will remain live flat identity.";
-      }
-      parallax_v2_producer_failed = true;
+      // The lazy resource initializer is the sole caller, and its sole caller immediately
+      // latches terminal_failure on false. Keep teardown here without a parallel failure flag.
+      BOOST_LOG(error) << "Host SBS V2 producer failed: " << reason
+                       << "; this stream will remain live flat identity.";
       release_parallax_v2_resources();
     }
 
@@ -5623,8 +5614,7 @@ namespace models {
       if (parallax_v2_producer_active) {
         return true;
       }
-      if (parallax_v2_producer_failed || target_w <= 0 || target_h <= 0 ||
-          reduce_groups == 0) {
+      if (target_w <= 0 || target_h <= 0 || reduce_groups == 0) {
         return false;
       }
       if (!raw_model_provenance || !depth_coordinate_v2::capture_identity_is_calibrated(raw_model_provenance->depth_model, raw_model_provenance->depth_model_url,
@@ -7349,7 +7339,7 @@ namespace models {
     // output buffer untouched; estimate() consumes that result after the caller has copied the
     // exact color frame that will own the next inference.
     bool can_accept() {
-      if (!valid || terminal_failure || live_v2_producer_unavailable()) {
+      if (!valid || terminal_failure) {
         return false;
       }
       auto &cuda = cuda_driver_api::get();
@@ -7395,7 +7385,7 @@ namespace models {
       depth_optional_work_mode_e optional_work,
       const gpu_adaptive_reuse_request &adaptive_reuse_request
     ) {
-      if (!valid || terminal_failure || live_v2_producer_unavailable() || !input_srv) {
+      if (!valid || terminal_failure || !input_srv) {
         return {};
       }
       bool completed_frame_valid = false;
@@ -8615,8 +8605,7 @@ namespace models {
   }
 
   bool video_depth_estimator::has_terminal_failure() const {
-    return !pimpl || !pimpl->valid || pimpl->terminal_failure ||
-           pimpl->live_v2_producer_unavailable();
+    return !pimpl || !pimpl->valid || pimpl->terminal_failure;
   }
 
   estimate_result video_depth_estimator::estimate_depth(
