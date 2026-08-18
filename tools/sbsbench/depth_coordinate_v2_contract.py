@@ -48,9 +48,7 @@ SHADER_IMPLEMENTATION_KEYS = {
     "source_closure_sha256",
 }
 SHADER_SOURCE_SPECS = (
-    ("rgb_to_nchw_cs.hlsl", "main", "cs_5_0"),
-    ("rgb_to_nchw_cs.hlsl", "content_main", "cs_5_0"),
-    ("rgb_to_nchw_cs.hlsl", "pad_main", "cs_5_0"),
+    ("rgb_to_nchw_near_identical_cs.hlsl", "fused_main", "cs_5_0"),
     ("buffer_to_tex_cs.hlsl", "main", "cs_5_0"),
     ("buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"),
     ("depth_minmax_ema_cs.hlsl", "main", "cs_5_0"),
@@ -551,8 +549,8 @@ def _model_calibrations(contract: dict[str, Any]) -> tuple[ModelCalibration, ...
             raise ValueError(
                 f"{prefix}.preprocess.source_closure_sha256 must be lowercase SHA-256")
         if (preprocess.get("source_closure_schema") != 2 or
-                preprocess.get("source_file") != "rgb_to_nchw_cs.hlsl" or
-                preprocess.get("source_entrypoint") != "main" or
+                preprocess.get("source_file") != "rgb_to_nchw_near_identical_cs.hlsl" or
+                preprocess.get("source_entrypoint") != "fused_main" or
                 preprocess.get("source_target") != "cs_5_0" or
                 preprocess.get("source_compile_flags") != 0x00008800 or
                 preprocess.get("source_macro_count") != 0):

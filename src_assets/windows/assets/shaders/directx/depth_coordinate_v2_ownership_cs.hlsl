@@ -17,6 +17,7 @@ RWTexture2D<float> OwnershipRefined : register(u0);
 #include "include/depth_constants.hlsl"
 #include "include/depth_color.hlsl"
 #include "include/depth_coordinate_v2.hlsl"
+#include "include/depth_source_region.hlsl"
 
 bool LoadCandidate(int2 position, out float value) {
     value = 0.0f;
@@ -36,11 +37,12 @@ bool LoadCandidate(int2 position, out float value) {
 #define OWNERSHIP_COVERAGE_MAX 0.99f
 #define OWNERSHIP_COVERAGE_ERROR 0.0002f
 
-float3 SourceLinearColor(int2 position) {
+float3 SourceLinearColor(int2 position, uint2 source_size) {
     // Decode all capture modes through the same display-referred signal used by preprocessing,
     // then compare in the linear-RGB units on which the ownership oracle was calibrated.
     return DepthSrgbToLinear(DepthColorToSrgb(
-        SourceColor.Load(int3(position, 0)).rgb,
+        SourceColor.Load(int3(
+            DepthSourceRegionLoadPosition(position, source_size), 0)).rgb,
         color_mode
     ));
 }
@@ -65,10 +67,10 @@ float3 SampleSourceLinear(float2 source_position, uint2 source_size) {
     int2 p10 = clamp(base + int2(1, 0), int2(0, 0), maximum);
     int2 p01 = clamp(base + int2(0, 1), int2(0, 0), maximum);
     int2 p11 = clamp(base + int2(1, 1), int2(0, 0), maximum);
-    float3 c00 = SourceLinearColor(p00);
-    float3 c10 = SourceLinearColor(p10);
-    float3 c01 = SourceLinearColor(p01);
-    float3 c11 = SourceLinearColor(p11);
+    float3 c00 = SourceLinearColor(p00, source_size);
+    float3 c10 = SourceLinearColor(p10, source_size);
+    float3 c01 = SourceLinearColor(p01, source_size);
+    float3 c11 = SourceLinearColor(p11, source_size);
     float3 top = c00 + fraction.x * (c10 - c00);
     float3 bottom = c01 + fraction.x * (c11 - c01);
     return top + fraction.y * (bottom - top);
@@ -105,19 +107,23 @@ bool FullResolutionForegroundCoverage(
     out float coverage
 ) {
     coverage = 0.0f;
-    uint source_w = 0u;
-    uint source_h = 0u;
-    SourceColor.GetDimensions(source_w, source_h);
+    uint texture_w = 0u;
+    uint texture_h = 0u;
+    SourceColor.GetDimensions(texture_w, texture_h);
+    uint2 texture_size = uint2(texture_w, texture_h);
+    if (!DepthSourceRegionValid(texture_size)) {
+        return false;
+    }
+    uint2 source_size = DepthSourceRegionSize();
     uint4 content = DepthAnalysisContentCells();
     uint2 content_size = content.zw - content.xy;
-    if (source_w < content_size.x || source_h < content_size.y ||
+    if (source_size.x < content_size.x || source_size.y < content_size.y ||
         any(content_size == 0u) || target_position.x < content.x ||
         target_position.y < content.y || target_position.x >= content.z ||
         target_position.y >= content.w) {
         return false;
     }
 
-    uint2 source_size = uint2(source_w, source_h);
     float2 source_scale = float2(source_size) / float2(content_size);
     float2 source_center =
         (float2(target_position - content.xy) + 0.5f) * source_scale;

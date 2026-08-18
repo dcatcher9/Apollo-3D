@@ -239,14 +239,10 @@ CONTRACT_TAG_SENTINEL = "contract_tag"
 PREPROCESS_SHADER_ROOT = (
     ROOT / "src_assets" / "windows" / "assets" / "shaders" / "directx")
 PREPROCESS_SHADER_SPECS = (
-    ("rgb_to_nchw_cs.hlsl", "main", "cs_5_0"),
-    ("rgb_to_nchw_cs.hlsl", "content_main", "cs_5_0"),
-    ("rgb_to_nchw_cs.hlsl", "pad_main", "cs_5_0"),
+    ("rgb_to_nchw_near_identical_cs.hlsl", "fused_main", "cs_5_0"),
 )
 PARALLAX_V2_SHADER_SPECS = (
-    ("rgb_to_nchw_cs.hlsl", "main", "cs_5_0"),
-    ("rgb_to_nchw_cs.hlsl", "content_main", "cs_5_0"),
-    ("rgb_to_nchw_cs.hlsl", "pad_main", "cs_5_0"),
+    ("rgb_to_nchw_near_identical_cs.hlsl", "fused_main", "cs_5_0"),
     ("buffer_to_tex_cs.hlsl", "main", "cs_5_0"),
     ("buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"),
     ("depth_minmax_ema_cs.hlsl", "main", "cs_5_0"),

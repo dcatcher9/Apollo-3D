@@ -24,13 +24,6 @@ namespace models::host_sbs_shader_cache {
     std::string_view target = "cs_5_0";
   };
 
-  inline constexpr shader_spec rgb_to_nchw {"rgb_to_nchw_cs.hlsl"};
-  inline constexpr shader_spec rgb_to_nchw_content {
-    "rgb_to_nchw_cs.hlsl", "content_main", "cs_5_0"
-  };
-  inline constexpr shader_spec rgb_to_nchw_pad {
-    "rgb_to_nchw_cs.hlsl", "pad_main", "cs_5_0"
-  };
   inline constexpr shader_spec buffer_to_tex {"buffer_to_tex_cs.hlsl"};
   inline constexpr shader_spec buffer_to_tex_pad {
     "buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"
@@ -70,8 +63,8 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec host_sbs_subtitle_condition {
     "host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"
   };
-  inline constexpr shader_spec host_sbs_near_identical_compare {
-    "host_sbs_near_identical_detector_cs.hlsl", "compare_main", "cs_5_0"
+  inline constexpr shader_spec host_sbs_near_identical_fused_preprocess {
+    "rgb_to_nchw_near_identical_cs.hlsl", "fused_main", "cs_5_0"
   };
   inline constexpr shader_spec host_sbs_near_identical_resolve {
     "host_sbs_near_identical_detector_cs.hlsl", "resolve_main", "cs_5_0"
@@ -119,25 +112,23 @@ namespace models::host_sbs_shader_cache {
     "sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"
   };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
-    "fce03acecf9a3fbe7bf237321bb4539c6a18b9fc4e215cfa337ac1221106ed12";
+    "c8a2221d4e47ac5b09881069ff18a4f2abe4ef9a6adb165426c38f27c7cfabe1";
   inline constexpr std::string_view parallax_v2_p010_y_source_closure_sha256 =
-    "f7a10d4178726bda6c469c55fdaa43422d7d5a41546052c3a6dcef71c9b02a5f";
+    "4859d6b8e1d1b52d02066562ce39c8204c1afdae99182b4c5ba5474c94b5f874";
   inline constexpr std::string_view parallax_v2_diagnostic_source_closure_sha256 =
-    "31a8347f2a6b7cf46d09fb27fa8f14042f805f98c3c86e3bee4281a38eb10543";
+    "78aa31a8b4c323e439be55f907285ffe2791cfd21c9a9cfc19574792a5f9e14c";
   inline constexpr std::string_view sbs_flat_fallback_source_closure_sha256 =
     "7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4";
   inline constexpr std::string_view near_identical_detector_source_closure_sha256 =
-    "8f6d770709c716abd2db48ec3193f00bd8ffbc1c94b31667227f9ae55c84c6d7";
+    "03cc27be7dfc31c2cba69044ad8e4bd14fe8846df0cf66392ec9215b0eddff18";
   inline constexpr std::string_view gpu_trace_source_closure_sha256 =
-    "cbb7618fe8332e444cc106b6d1037a00d9bca126e0885f92651cacebb7e4b33f";
+    "422fe351331310fd7c776a2263932da83121b21ce01f6c9a80192468a3ffad34";
 
   // Identity-only minimal closure used to match the model/preprocess calibration. Production
-  // bytecode is never compiled from this smaller snapshot: all rgb_to_nchw entry points are
-  // compiled with every other producer root from parallax_v2_producer_specs below.
+  // bytecode is never compiled from this smaller snapshot: the sole fused entry point is compiled
+  // with every other producer root from parallax_v2_producer_specs below.
   inline constexpr std::array preprocess_specs {
-    rgb_to_nchw,
-    rgb_to_nchw_content,
-    rgb_to_nchw_pad,
+    host_sbs_near_identical_fused_preprocess,
   };
 
   // Complete production V2 producer set. The normalized depth is private scene-cut evidence; the
@@ -145,9 +136,7 @@ namespace models::host_sbs_shader_cache {
   // The OCR8 producer and compact SLR13 post-limit conditioner share this authenticated snapshot,
   // so no analysis or geometry pass can be sampled from a weaker closure.
   enum class producer_shader_e : std::uint8_t {
-    rgb_to_nchw,
-    rgb_to_nchw_content,
-    rgb_to_nchw_pad,
+    host_sbs_near_identical_fused_preprocess,
     buffer_to_tex,
     buffer_to_tex_pad,
     depth_minmax_ema,
@@ -179,9 +168,10 @@ namespace models::host_sbs_shader_cache {
     // Authenticate the complete path from captured RGB preprocessing through cut/history state
     // and final coordinate limiting. Compile every shared pass from this single immutable
     // snapshot so no separately sampled source body can feed authenticated V2 geometry.
-    producer_shader_binding {producer_shader_e::rgb_to_nchw, rgb_to_nchw},
-    producer_shader_binding {producer_shader_e::rgb_to_nchw_content, rgb_to_nchw_content},
-    producer_shader_binding {producer_shader_e::rgb_to_nchw_pad, rgb_to_nchw_pad},
+    producer_shader_binding {
+      producer_shader_e::host_sbs_near_identical_fused_preprocess,
+      host_sbs_near_identical_fused_preprocess
+    },
     producer_shader_binding {producer_shader_e::buffer_to_tex, buffer_to_tex},
     producer_shader_binding {producer_shader_e::buffer_to_tex_pad, buffer_to_tex_pad},
     producer_shader_binding {producer_shader_e::depth_minmax_ema, depth_minmax_ema},
@@ -257,12 +247,12 @@ namespace models::host_sbs_shader_cache {
     depth_coordinate_v2_coordinate_diagnostic,
   };
 
-  // Required GPU-only reuse arbitration. This independent post-preprocess pass reads the current
-  // and authenticated-history NCHW tensors without changing calibrated preprocessing or the V2
-  // producer closure. Authentication, compilation, or resource failure is terminal fail-flat;
-  // post-bootstrap DAV2 is never submitted outside the conditional wrapper.
+  // Required GPU-only reuse arbitration. The mandatory producer entry points have already emitted
+  // tile evidence from the current and authenticated-history NCHW tensors. This independent
+  // closure resolves that evidence and owns receipt/postprocess gating. Authentication,
+  // compilation, or resource failure is terminal fail-flat; post-bootstrap DAV2 is never
+  // submitted outside the conditional wrapper.
   inline constexpr std::array near_identical_detector_specs {
-    host_sbs_near_identical_compare,
     host_sbs_near_identical_resolve,
     host_sbs_near_identical_history_owner,
     host_sbs_near_identical_scene_seed,

@@ -422,9 +422,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "required": False,
                 "stage": "model-depth input source preview",
                 "description": (
-                    "Spatially exact full-source or cropped color input submitted to the "
-                    "calibrated preprocess; transfer-aware PNG is diagnostic only and never "
-                    "numeric model authority."),
+                    "Spatially exact full-source preview or post-completion reconstruction of "
+                    "the logical ROI source. Live ROI preprocessing samples the retained full "
+                    "matched texture directly; this transfer-aware PNG is diagnostic only, "
+                    "while model_input.f32 is numeric authority."),
             },
             "shadow_state.json": {
                 "available": True,
@@ -617,7 +618,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 dump_contract.validate_v2_dump_manifest_document(changed)
 
     def test_current_subtitle_record_and_state_abi_partition_exact_word_counts(self):
-        self.assertEqual(dump_contract.DUMP_MANIFEST_SCHEMA, 36)
+        self.assertEqual(dump_contract.DUMP_MANIFEST_SCHEMA, 37)
+        self.assertEqual(dump_contract.DEPTH_INPUT_REGION_SCHEMA, 4)
         self.assertEqual(dump_contract.SUBTITLE_OCR_RECORD_SCHEMA, 3)
         self.assertEqual(dump_contract.SUBTITLE_LOCATOR_STATE_SCHEMA, 13)
         self.assertEqual(
@@ -1815,7 +1817,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "padded_area_fraction": padding,
             "fit_method":
                 "centered-integer-contain-with-edge-replicated-excluded-padding",
-            "crop_method": "same-format D3D11 CopySubresourceRegion",
+            "crop_method": "direct retained-source rectangle sampling",
             "scene_analysis_domain": "inference-rectangle-only",
         })
         runtime_scale, vertical_slope = dump_contract._roi_renderer_constants(
@@ -2440,7 +2442,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "padded_area_fraction": padded_fraction,
             "fit_method":
                 "centered-integer-contain-with-edge-replicated-excluded-padding",
-            "crop_method": "same-format D3D11 CopySubresourceRegion",
+            "crop_method": "direct retained-source rectangle sampling",
             "scene_analysis_domain": "inference-rectangle-only",
         })
         region["renderer"].update({

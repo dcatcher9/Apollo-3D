@@ -139,7 +139,9 @@ namespace {
     std::uint32_t crop_top;
     std::uint32_t crop_height;
     std::uint32_t color_mode;
-    std::array<std::uint32_t, 3u> reserved;
+    std::uint32_t source_left;
+    std::uint32_t source_top;
+    std::uint32_t reserved;
   };
 
   struct ocr_resolve_constants_t {
@@ -400,7 +402,11 @@ namespace {
       const std::uint32_t height,
       const std::uint32_t crop_top,
       const std::uint32_t crop_height,
-      std::vector<float> &output
+      std::vector<float> &output,
+      const std::uint32_t analysis_width = 0u,
+      const std::uint32_t analysis_height = 0u,
+      const std::uint32_t source_left = 0u,
+      const std::uint32_t source_top = 0u
     ) {
       if (!preprocess_ || source.size() != static_cast<std::size_t>(width) * height) {
         return false;
@@ -441,12 +447,14 @@ namespace {
       }
 
       const preprocess_constants_t constants {
-        width,
-        height,
+        analysis_width != 0u ? analysis_width : width,
+        analysis_height != 0u ? analysis_height : height,
         crop_top,
         crop_height,
         0u,
-        {}
+        source_left,
+        source_top,
+        0u,
       };
       context_->UpdateSubresource(
         preprocess_cb_.Get(),
@@ -977,6 +985,74 @@ namespace {
     EXPECT_NEAR(sample(0u, 20u, 159u), (0.6f - 0.485f) / 0.229f, 1.0e-5f);
     EXPECT_NEAR(sample(1u, 20u, 159u), (0.5f - 0.456f) / 0.224f, 1.0e-5f);
     EXPECT_NEAR(sample(2u, 20u, 159u), (0.4f - 0.406f) / 0.225f, 1.0e-5f);
+  }
+
+  TEST(HostSbsOcrGpuTest, DirectRoiSamplingMatchesThePriorCropTextureBitwise) {
+    ocr_warp_fixture_t fixture;
+    std::string error;
+    ASSERT_TRUE(fixture.initialize(error, true, false, false)) << error;
+
+    constexpr std::uint32_t texture_width = 160u;
+    constexpr std::uint32_t texture_height = 130u;
+    constexpr std::uint32_t source_left = 23u;
+    constexpr std::uint32_t source_top = 17u;
+    constexpr std::uint32_t analysis_width = 120u;
+    constexpr std::uint32_t analysis_height = 90u;
+    constexpr std::uint32_t crop_height = 20u;
+    constexpr std::uint32_t crop_top = analysis_height - crop_height;
+    std::vector<rgba_t> full_source(
+      static_cast<std::size_t>(texture_width) * texture_height,
+      rgba_t {31.0f, -17.0f, 43.0f, 1.0f}
+    );
+    std::vector<rgba_t> cropped_source;
+    cropped_source.reserve(
+      static_cast<std::size_t>(analysis_width) * analysis_height
+    );
+    for (std::uint32_t y = 0u; y < analysis_height; ++y) {
+      for (std::uint32_t x = 0u; x < analysis_width; ++x) {
+        const rgba_t pixel {
+          static_cast<float>(x + 3u * y) / 389.0f,
+          static_cast<float>(5u * x + y) / 691.0f,
+          static_cast<float>(2u * x + 7u * y) / 887.0f,
+          1.0f,
+        };
+        full_source[
+          static_cast<std::size_t>(source_top + y) * texture_width +
+          source_left + x
+        ] = pixel;
+        cropped_source.push_back(pixel);
+      }
+    }
+
+    std::vector<float> crop_output;
+    std::vector<float> direct_output;
+    ASSERT_TRUE(fixture.run_preprocess(
+      cropped_source,
+      analysis_width,
+      analysis_height,
+      crop_top,
+      crop_height,
+      crop_output
+    ));
+    ASSERT_TRUE(fixture.run_preprocess(
+      full_source,
+      texture_width,
+      texture_height,
+      crop_top,
+      crop_height,
+      direct_output,
+      analysis_width,
+      analysis_height,
+      source_left,
+      source_top
+    ));
+    ASSERT_EQ(direct_output.size(), crop_output.size());
+    for (std::size_t index = 0u; index < crop_output.size(); ++index) {
+      EXPECT_EQ(
+        std::bit_cast<std::uint32_t>(direct_output[index]),
+        std::bit_cast<std::uint32_t>(crop_output[index])
+      ) << "OCR input index=" << index;
+    }
   }
 
   TEST(HostSbsOcrGpuTest, ProbabilityMapProducesCenteredOneAndTwoLineOcr8Records) {

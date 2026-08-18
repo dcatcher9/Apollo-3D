@@ -10,10 +10,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 69u;
-  inline constexpr std::uint32_t contract_tag = 0x63C49931u;
-  inline constexpr std::string_view contract_canonical_sha256 = "f26cdf29cad90ac3df015bd16d71bb6e20ad557ec4708751490af05ae8a05e82";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "63c4993183c3199f4196fe10fbba092f04513dc52114545d34354b7311960aec";
+  inline constexpr std::uint32_t contract_schema = 70u;
+  inline constexpr std::uint32_t contract_tag = 0xD84FCD1Au;
+  inline constexpr std::string_view contract_canonical_sha256 = "caf07a7202266a858f5c7d68a6b550ebbb80f5640ca3ad6630a2c2ade3e7745b";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "d84fcd1adcb43ef1dea09901082d3b382e503612f8363374cdddb42c7ceeaebb";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -179,7 +179,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t shader_source_closure_schema = 2u;
   inline constexpr std::uint32_t shader_source_compile_flags = 34816u;
   inline constexpr std::uint32_t shader_source_macro_count = 0u;
-  inline constexpr std::string_view shader_source_closure_sha256 = "620e1dcacc190f7d80749e68bf840eecb759210e2f866afa7d77078af78a2dfe";
+  inline constexpr std::string_view shader_source_closure_sha256 = "53042f759cc7043f141995623c3226297566a9c4e66d2d08680319416e41109d";
 
   struct shader_source_spec_t {
     std::string_view source_file;
@@ -187,10 +187,8 @@ namespace models::depth_coordinate_v2 {
     std::string_view source_target;
   };
 
-  inline constexpr std::array<shader_source_spec_t, 23> shader_source_specs {{
-    {"rgb_to_nchw_cs.hlsl", "main", "cs_5_0"},
-    {"rgb_to_nchw_cs.hlsl", "content_main", "cs_5_0"},
-    {"rgb_to_nchw_cs.hlsl", "pad_main", "cs_5_0"},
+  inline constexpr std::array<shader_source_spec_t, 21> shader_source_specs {{
+    {"rgb_to_nchw_near_identical_cs.hlsl", "fused_main", "cs_5_0"},
     {"buffer_to_tex_cs.hlsl", "main", "cs_5_0"},
     {"buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"},
     {"depth_minmax_ema_cs.hlsl", "main", "cs_5_0"},
@@ -280,12 +278,12 @@ namespace models::depth_coordinate_v2 {
       {
         "apollo-dav2-centered-integer-contain-edge-pad-area-hdr-srgb-imagenet-v2",
         2u,
-        "rgb_to_nchw_cs.hlsl",
-        "main",
+        "rgb_to_nchw_near_identical_cs.hlsl",
+        "fused_main",
         "cs_5_0",
         34816u,
         0u,
-        "0a422bb447e2c3c016f4e4f1c9d6d2e98162a3eecae9e9d09bd0bf4ab56f92dd",
+        "1d0e89740921beb645cb8e83bfa6b3ca6f14ce58266bcf6d36dc2dfe8dc5c1bd",
         1u,
         "float32-le",
         "NCHW",

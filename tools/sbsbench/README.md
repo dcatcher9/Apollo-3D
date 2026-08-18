@@ -158,15 +158,15 @@ captures directly with:
 
 See [Dump and replay format](DUMP_FORMAT.md) before interpreting preview PNGs. The reader accepts
 only the current SLR13/OCR8 dump schema; older experimental captures are intentionally unsupported.
-An active schema-36 package authenticates the OCR8/SLR13 tuple for the atomic final field's
+An active schema-37 package authenticates the OCR8/SLR13 tuple for the atomic final field's
 publication frame, ordinary Base, conditioned final field, and the resolver's bounded strict
 fallback placement policy. It replays SLR13 directly into that final field and requires
 `warp_depth` to equal it bit-for-bit. An
 active resolver also authenticates the strict symmetric bottom-corner ordinary-core qualification
 and its ribbon exemption. An inactive package uses the one canonical `none` descriptor.
 
-Current schema-36 window-region packages preserve the complete authorized source rectangle at any
-aspect ratio. `depth_input_region.json` schema 3 records the centered integer content rectangle in
+Current schema-37 window-region packages preserve the complete authorized source rectangle at any
+aspect ratio. `depth_input_region.json` schema 4 records the centered integer content rectangle in
 the fixed DAV2 tensor and its edge-replicated excluded padding. Quantitative consumers must use
 that content width for limiter and SLR13 steps and must project OCR/SLR geometry only into that
 content rectangle; treating the whole tensor as real source pixels is rejected.

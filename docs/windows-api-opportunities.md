@@ -102,9 +102,10 @@ The practical consequences:
   the shipped calibration and cannot be submitted directly.
 
 The implemented window-region ROI keeps the full-frame session's already authenticated tensor shape.
-The exact Chromium-video or foreground-client rectangle is copied whole, including every source
-pixel, and an arbitrary aspect ratio is admitted. A deterministic centered integer contain-fit maps
-that copy into a half-open content rectangle inside the fixed tensor without cropping or stretching.
+The exact Chromium-video or foreground-client rectangle is sampled whole directly inside the
+retained full matched texture, including every source pixel, and an arbitrary aspect ratio is
+admitted. A deterministic centered integer contain-fit maps that logical source into a half-open
+content rectangle inside the fixed tensor without further cropping or stretching.
 Any tensor cells outside the content rectangle replicate the nearest content edge, but remain
 synthetic support: they are excluded from depth statistics, scene-cut evidence, ownership, temporal
 history, and OCR authority. Invalid source geometry still selects ordinary full-frame V2; it does
@@ -112,7 +113,8 @@ not turn an otherwise supported Host SBS stream flat.
 
 Separately authenticated Chromium true fullscreen is canonical full-frame V2: an available semantic
 video must cover the complete foreground browser client and the host must map that client exactly to
-the capture. It bypasses ROI copying, contain-fit padding, ROI-domain reset, and ROI embedding.
+the capture. It bypasses ROI-specific source-offset sampling, contain-fit padding, ROI-domain reset,
+and ROI embedding.
 Element overscan, document-rectangle clipping, and multiple full-cover clones are allowed at helper
 selection. The lower-priority foreground-client route independently applies the same
 canonicalization whenever its client rectangle exactly equals the capture; that geometric result
@@ -442,13 +444,15 @@ equals the full capture. It then canonicalizes to ordinary full-frame V2, with n
 contain-fit padding, ROI-domain reset, or active-ROI dump rejection. Without this proof the browser
 helper has no semantic fullscreen authority, although the lower-priority foreground-client route can
 independently canonicalize the same exact-full-capture client by geometry. Otherwise the strict
-windowed slot copies the complete video rectangle, and the generic foreground-client slot likewise
-copies the complete root client. Either arbitrary-aspect copy uses the current full-frame
-authenticated tensor and a deterministic centered integer contain-fit. The source is never cropped
-or stretched. Tensor cells outside the integer content rectangle replicate the nearest content edge
-and are excluded from depth statistics, scene cuts, ownership, history, and OCR. The exact
-same-format D3D11 copy is the only DAV2 and ownership source for that frame; scene analysis remains
-ROI-local. The full captured texture remains the color source.
+windowed slot selects the complete video rectangle, and the generic foreground-client slot likewise
+selects the complete root client. Either arbitrary-aspect logical source uses the current full-frame
+authenticated tensor and a deterministic centered integer contain-fit. The source is never stretched
+or further cropped. Tensor cells outside the integer content rectangle replicate the nearest content
+edge and are excluded from depth statistics, scene cuts, ownership, history, and OCR. DAV2, OCR, and
+ownership address the exact rectangle directly inside the retained matched full texture, adding its
+integer offset only to final color loads; scene analysis remains ROI-local. There is no ordinary live
+ROI allocation or copy. Dump 3D may reconstruct a same-format crop only after the completed frame is
+known and live timing has closed. The full captured texture remains the renderer color source.
 After V2, local parallax is multiplied by `ROI_width / source_width` to preserve pixel shift, and an
 outside-only signed collar decays at the production slope limits to exact zero beyond the collar
 without changing any ROI-interior value.
@@ -463,7 +467,7 @@ translation within one unchanged authority do not.
 This live route currently authorizes only Desktop Duplication. WGC has no `LastPresentTime`
 equivalent for separating content from cursor-only compositor frames and therefore uses full-frame
 V2. Diagnostics may record the selected frame-bound window region and observer/mapping provenance,
-but that observation is not the live renderer authority by itself. Current Dump 3D schema 35 records
+but that observation is not the live renderer authority by itself. Current Dump 3D schema 37 records
 the ROI-local analysis field, integer tensor-content rectangle, padded-area fraction, fit method,
 authority kind, authoritative full-source placement/collar contract, and exact full-source inverse
 map as distinct evidence. The strict reader accepts only the current schema and identity; historical
@@ -496,7 +500,7 @@ external DOM rectangle that Sunshine can query.
   authority or DOM edge can still produce contradictory occlusion cues; monocular input cannot
   recover the hidden part of that object.
 - **Full-source color remains available at the edge.** The renderer does not clamp sampling to the
-  ROI or stretch its exact copied content. The outside collar can sample the captured
+  ROI or stretch its exact logical content. The outside collar can sample the captured
   browser/desktop pixels that are actually present, then ordinary zero-parallax surroundings remain
   unchanged.
 - **Aspect adaptation preserves the complete source.** See
@@ -511,7 +515,7 @@ external DOM rectangle that Sunshine can query.
 - **Exact full-capture clients are canonical full source.** Chromium can prove this through a
   semantic video covering the complete foreground client; the generic route can prove it from the
   causally continuous client rectangle itself. In both cases the ordinary full-frame domain
-  continues without ROI copying, temporal reset, or dump rejection.
+  continues without an ROI-specific source offset, temporal reset, or dump rejection.
 
 **A reality that will dominate user reports.** Hardware-DRM content — Netflix, Disney+, Prime — is
 black in Desktop Duplication. The pixels are not obtainable, so no amount of detection makes ROI
@@ -522,9 +526,9 @@ before a user discovers it.
 video selection, separate full-client semantic fullscreen selection, the lightweight foreground-root
 client observer, Chromium-first priority, causal continuity, raw virtual-desktop coordinate mapping,
 same-output containment, exact-full-source canonicalization, arbitrary-aspect integer contain-fit,
-edge-replicated excluded padding, exact same-format DAV2/ownership copying, authority-specific state,
+edge-replicated excluded padding, exact direct-offset DAV2/OCR/ownership sampling, authority-specific state,
 full-source rendering, and the outside-only zero-plane collar are implemented. Active ROI frames are
-represented by current Dump 3D schema 35. Strict replay reproduces the integer content plan and
+represented by current Dump 3D schema 37. Strict replay reproduces the integer content plan and
 validates both the ROI-local and full-source coordinate domains; mismatched evidence fails closed.
 
 ---
@@ -699,14 +703,15 @@ This route-level fallback is distinct from the base fail-closed contract: a mode
 field, or renderer authentication failure must render flat rather than retrying through full-frame
 geometry.
 
-For accepted ROIs, verify that the exact authority rectangle is copied whole and an arbitrary aspect
-uses the current authenticated tensor with a deterministic centered integer contain-fit. Source
-pixels must never be cropped or stretched. Nearest-edge replicated padding must be excluded from
+For accepted ROIs, verify that the exact authority rectangle is sampled whole by direct retained-source
+offsets and an arbitrary aspect uses the current authenticated tensor with a deterministic centered
+integer contain-fit. Source pixels must never be further cropped or stretched. Nearest-edge
+replicated padding must be excluded from
 depth statistics, cut evidence, ownership, history, and OCR. Inspect both disparity signs at all four
 edges: the ROI interior must remain unchanged, the outside-only collar must respect the production
 slope limits, and the farther surround must be exactly zero. A pure window
 translation must retain scene state; ROI/full, authority, identity, size, and transfer-domain changes
-must reset it. Capture a schema-35 ROI Dump 3D and require its tensor-content rectangle, padding
+must reset it. Capture a schema-37 ROI Dump 3D and require its tensor-content rectangle, padding
 fraction, and fit method to reproduce the integer plan; require its full-source inverse map to be
 identity beyond the conservative collar. The ROI-local final field alone is not sufficient evidence.
 

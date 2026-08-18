@@ -102,6 +102,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             67: "76bafbd1061c233a4530eb0caa7dd0d9ea9127b6aa4907efa74947357993891a",
             68: "a36d647332e19aa25be72ac012b913568287847e3a96ddf2745e1a80b793ff56",
             69: "f26cdf29cad90ac3df015bd16d71bb6e20ad557ec4708751490af05ae8a05e82",
+            70: "caf07a7202266a858f5c7d68a6b550ebbb80f5640ca3ad6630a2c2ade3e7745b",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -109,14 +110,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x63C49931)
+        self.assertEqual(generator.contract_tag(contract), 0xD84FCD1A)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "63c4993183c3199f4196fe10fbba092f04513dc52114545d34354b7311960aec",
+            "d84fcd1adcb43ef1dea09901082d3b382e503612f8363374cdddb42c7ceeaebb",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "620e1dcacc190f7d80749e68bf840eecb759210e2f866afa7d77078af78a2dfe",
+            "53042f759cc7043f141995623c3226297566a9c4e66d2d08680319416e41109d",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -372,14 +373,16 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             "mapping, sRGB conversion, ImageNet normalization, and edge-replicated tensor "
             "padding excluded from the analysis domain")
         self.assertEqual(calibration.preprocess.source_closure_schema, 2)
-        self.assertEqual(calibration.preprocess.source_file, "rgb_to_nchw_cs.hlsl")
-        self.assertEqual(calibration.preprocess.source_entrypoint, "main")
+        self.assertEqual(
+            calibration.preprocess.source_file,
+            "rgb_to_nchw_near_identical_cs.hlsl")
+        self.assertEqual(calibration.preprocess.source_entrypoint, "fused_main")
         self.assertEqual(calibration.preprocess.source_target, "cs_5_0")
         self.assertEqual(calibration.preprocess.source_compile_flags, 0x00008800)
         self.assertEqual(calibration.preprocess.source_macro_count, 0)
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
-            "0a422bb447e2c3c016f4e4f1c9d6d2e98162a3eecae9e9d09bd0bf4ab56f92dd")
+            "1d0e89740921beb645cb8e83bfa6b3ca6f14ce58266bcf6d36dc2dfe8dc5c1bd")
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
             generator.shader_source_closure_sha256())
@@ -505,7 +508,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 69u',
+                'contract_schema = 70u',
                 'final_parallax_contract_schema = 2u',
                 'final_parallax_authority = '
                 '"complete-atomic-subtitle-conditioned-r32f-live-render-authority"',
@@ -583,7 +586,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 69u',
+                '#define V2_CONTRACT_SCHEMA 70u',
                 '#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 13u',
                 '#define V2_OCR_INPUT_WIDTH 960u',
                 '#define V2_OCR_OUTPUT_WIDTH 960u',
@@ -801,11 +804,11 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.validate_renderer_source_closure_pins(),
             {
                 "parallax_v2_live_renderer_source_closure_sha256":
-                    "fce03acecf9a3fbe7bf237321bb4539c6a18b9fc4e215cfa337ac1221106ed12",
+                    "c8a2221d4e47ac5b09881069ff18a4f2abe4ef9a6adb165426c38f27c7cfabe1",
                 "parallax_v2_p010_y_source_closure_sha256":
-                    "f7a10d4178726bda6c469c55fdaa43422d7d5a41546052c3a6dcef71c9b02a5f",
+                    "4859d6b8e1d1b52d02066562ce39c8204c1afdae99182b4c5ba5474c94b5f874",
                 "parallax_v2_diagnostic_source_closure_sha256":
-                    "31a8347f2a6b7cf46d09fb27fa8f14042f805f98c3c86e3bee4281a38eb10543",
+                    "78aa31a8b4c323e439be55f907285ffe2791cfd21c9a9cfc19574792a5f9e14c",
             },
         )
 

@@ -5,14 +5,15 @@ RWTexture2D<uint> OutputTensorExclusion : register(u2);
 
 #include "include/depth_constants.hlsl"
 #include "include/depth_color.hlsl"
+#include "include/depth_source_region.hlsl"
 
 // Integrate the source texel cells covered by one target texel. The capture texture exposes only
 // mip 0, so one bilinear SampleLevel tap aliases whenever the source is appreciably larger than
 // the model grid (3840x2160 -> 770x434 is almost 5x in each axis). Exact overlap weights preserve
 // thin features that sparse quadrant taps can miss at that ratio.
 float3 LoadModelColor(int2 source_pixel, uint2 source_size) {
-    source_pixel = clamp(source_pixel, int2(0, 0), int2(source_size) - 1);
-    return DepthColorToSrgb(InputTexture.Load(int3(source_pixel, 0)).rgb, color_mode);
+    int2 physical_pixel = DepthSourceRegionLoadPosition(source_pixel, source_size);
+    return DepthColorToSrgb(InputTexture.Load(int3(physical_pixel, 0)).rgb, color_mode);
 }
 
 float3 SampleModelColorBilinear(float2 center_uv, uint2 source_size) {
@@ -127,9 +128,20 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     float2 uv = float2((DTid.x + 0.5f) / (float)target_w, (DTid.y + 0.5f) / (float)target_h);
     uint base_idx = DTid.y * target_w + DTid.x;
 
-    uint source_w, source_h;
-    InputTexture.GetDimensions(source_w, source_h);
-    uint2 source_size = uint2(source_w, source_h);
+    uint texture_w, texture_h;
+    InputTexture.GetDimensions(texture_w, texture_h);
+    uint2 texture_size = uint2(texture_w, texture_h);
+    bool source_region_valid = DepthSourceRegionValid(texture_size);
+    if (!source_region_valid) {
+        uint invalid_stride = target_w * target_h;
+        OutputBuffer[base_idx] = 0.0f;
+        OutputBuffer[base_idx + invalid_stride] = 0.0f;
+        OutputBuffer[base_idx + 2u * invalid_stride] = 0.0f;
+        OutputAppearanceOrdinal[base_idx] = 0.0f;
+        OutputTensorExclusion[DTid.xy] = 1u;
+        return;
+    }
+    uint2 source_size = DepthSourceRegionSize();
     bool content_valid = DepthAnalysisContentValid();
     bool content_cell = content_valid && DepthAnalysisCellIsContent(DTid.xy);
     bool full_content = content_valid && analysis_content_left == 0u &&
@@ -159,7 +171,8 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     uint2 source_point = min(
         uint2(appearance_uv * float2(source_size)),
         source_size - 1u);
-    float3 capture_rgb = InputTexture.Load(int3(source_point, 0)).rgb;
+    float3 capture_rgb = InputTexture.Load(int3(
+        DepthSourceRegionLoadPosition(int2(source_point), source_size), 0)).rgb;
     OutputAppearanceOrdinal[base_idx] =
         DepthAppearanceOrdinal(capture_rgb, color_mode);
 
@@ -175,71 +188,4 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     OutputBuffer[base_idx] = r;
     OutputBuffer[base_idx + channel_stride] = g;
     OutputBuffer[base_idx + 2 * channel_stride] = b;
-}
-
-// Padded domains dispatch the expensive source sampler only over admitted content. This separate
-// entry point keeps main's common full-content bytecode unchanged while interpreting DTid as a
-// content-local coordinate. pad_main fills the remaining synthetic texels afterward.
-[numthreads(16, 16, 1)]
-void content_main(uint3 DTid : SV_DispatchThreadID) {
-    if (!DepthAnalysisContentValid())
-        return;
-
-    uint2 content_extent = uint2(
-        analysis_content_right - analysis_content_left,
-        analysis_content_bottom - analysis_content_top);
-    if (DTid.x >= content_extent.x || DTid.y >= content_extent.y)
-        return;
-
-    uint2 output_position = uint2(analysis_content_left, analysis_content_top) + DTid.xy;
-    uint base_idx = output_position.y * target_w + output_position.x;
-
-    uint source_w, source_h;
-    InputTexture.GetDimensions(source_w, source_h);
-    uint2 source_size = uint2(source_w, source_h);
-    float3 pixel = SampleLetterboxedModelFootprint(output_position, source_size);
-    OutputTensorExclusion[output_position] = 0u;
-
-    float2 appearance_model_uv =
-        (float2(output_position) + 0.5f) / float2(target_w, target_h);
-    float2 appearance_uv = LetterboxSourceUv(appearance_model_uv);
-    uint2 source_point = min(
-        uint2(appearance_uv * float2(source_size)),
-        source_size - 1u);
-    float3 capture_rgb = InputTexture.Load(int3(source_point, 0)).rgb;
-    OutputAppearanceOrdinal[base_idx] =
-        DepthAppearanceOrdinal(capture_rgb, color_mode);
-
-    float r = (pixel.r - 0.485f) / 0.229f;
-    float g = (pixel.g - 0.456f) / 0.224f;
-    float b = (pixel.b - 0.406f) / 0.225f;
-    uint channel_stride = target_w * target_h;
-    OutputBuffer[base_idx] = r;
-    OutputBuffer[base_idx + channel_stride] = g;
-    OutputBuffer[base_idx + 2u * channel_stride] = b;
-}
-
-// Synthetic contain-fit padding is exactly the nearest admitted resized texel, not a new source
-// sample. The content_main dispatch has completed before this entry point runs, so copying
-// the three planar values and appearance ordinal preserves their bits while avoiding repeated
-// multi-tap source loads and transfer conversion. Exclusion remains padding-specific and must not
-// be copied from the admitted source cell.
-[numthreads(16, 16, 1)]
-void pad_main(uint3 DTid : SV_DispatchThreadID) {
-    if (DTid.x >= target_w || DTid.y >= target_h ||
-        !DepthAnalysisContentValid() || DepthAnalysisCellIsContent(DTid.xy))
-        return;
-
-    uint2 source_position = DepthAnalysisClampCell(DTid.xy);
-    uint destination_index = DTid.y * target_w + DTid.x;
-    uint source_index = source_position.y * target_w + source_position.x;
-    uint channel_stride = target_w * target_h;
-
-    OutputBuffer[destination_index] = OutputBuffer[source_index];
-    OutputBuffer[destination_index + channel_stride] =
-        OutputBuffer[source_index + channel_stride];
-    OutputBuffer[destination_index + 2u * channel_stride] =
-        OutputBuffer[source_index + 2u * channel_stride];
-    OutputAppearanceOrdinal[destination_index] = OutputAppearanceOrdinal[source_index];
-    OutputTensorExclusion[DTid.xy] = 1u;
 }

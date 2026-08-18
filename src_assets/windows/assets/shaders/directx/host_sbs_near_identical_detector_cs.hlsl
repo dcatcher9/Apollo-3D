@@ -1,23 +1,14 @@
-// GPU-only near-identical proposal, authenticated branch receipt, and postprocess gating.
-// The calibrated RGB-to-NCHW producer remains untouched: this required closure reads its output
-// and an independently owned state-1 history. The CPU never maps this evidence or decision.
+// GPU-only near-identical proposal, authenticated branch receipt, and postprocess gating. The
+// mandatory GPU-undecided preprocess has already compared its committed calibrated NCHW output
+// with independently owned state-1 history. The CPU never maps this evidence or decision.
 
-StructuredBuffer<float> CurrentModelInput : register(t0);
-StructuredBuffer<float> PreviousModelInput : register(t1);
-
-struct NearIdenticalTileEvidence {
-    uint admitted;
-    uint medium_changed;
-    uint strong_changed;
-    uint nonfinite;
-};
+#include "include/host_sbs_near_identical_compare.hlsl"
 
 StructuredBuffer<NearIdenticalTileEvidence> NearIdenticalTileInput : register(t2);
 StructuredBuffer<uint> NearIdenticalHistoryOwner : register(t3);
 StructuredBuffer<float4> NearIdenticalCutBridgeState : register(t4);
 Texture2D<float> NearIdenticalPreviousDepth : register(t5);
 StructuredBuffer<float4> NearIdenticalMinMaxEma : register(t6);
-RWStructuredBuffer<NearIdenticalTileEvidence> NearIdenticalTileOutput : register(u0);
 RWStructuredBuffer<uint> NearIdenticalOcrRecord : register(u1);
 RWStructuredBuffer<uint> NearIdenticalHistoryOwnerOutput : register(u2);
 RWByteAddressBuffer NearIdenticalDecision : register(u3);
@@ -72,9 +63,6 @@ cbuffer NearIdenticalOcrConstants : register(b2) {
 
 #define NEAR_IDENTICAL_REQUEST_AUTHORIZED (1u << 0u)
 #define NEAR_IDENTICAL_REQUEST_FORCE_INFER (1u << 1u)
-#define NEAR_IDENTICAL_MEDIUM_DELTA (1.0f / 64.0f)
-#define NEAR_IDENTICAL_STRONG_DELTA 0.20f
-#define NEAR_IDENTICAL_TILE_THREADS 256u
 #define NEAR_IDENTICAL_RESOLVE_THREADS 64u
 #define NEAR_IDENTICAL_REDUCE_ELEMENTS_PER_GROUP 256u
 #define NEAR_IDENTICAL_RESOLVE_FLAG_MALFORMED (1u << 0u)
@@ -142,13 +130,8 @@ cbuffer NearIdenticalOcrConstants : register(b2) {
 #define NEAR_IDENTICAL_HISTORY_WORD_OBSERVATION_TIMESTAMP_LOW 8u
 #define NEAR_IDENTICAL_HISTORY_WORD_OBSERVATION_TIMESTAMP_HIGH 9u
 
-groupshared uint4 NearIdenticalGroupPrimary[NEAR_IDENTICAL_TILE_THREADS];
 groupshared uint4 NearIdenticalResolvePrimary[NEAR_IDENTICAL_RESOLVE_THREADS];
 groupshared uint NearIdenticalResolveFlags[NEAR_IDENTICAL_RESOLVE_THREADS];
-
-bool NearIdenticalFinite(float value) {
-    return (asuint(value) & 0x7f800000u) != 0x7f800000u;
-}
 
 bool NearIdenticalOwnerIsNewer() {
     return near_identical_current_frame_high > near_identical_baseline_frame_high ||
@@ -300,71 +283,6 @@ bool NearIdenticalSubtitleReceiptValid(
     optional_ocr = receipt_valid &&
         optional_marker == NEAR_IDENTICAL_OPTIONAL_RECEIPT_MAGIC;
     return receipt_valid;
-}
-
-[numthreads(16, 16, 1)]
-void compare_main(
-    uint3 dispatch_thread : SV_DispatchThreadID,
-    uint3 group_thread : SV_GroupThreadID,
-    uint3 group_id : SV_GroupID) {
-    uint linear_thread = group_thread.y * 16u + group_thread.x;
-    uint4 primary = 0u;
-    if (dispatch_thread.x < target_w && dispatch_thread.y < target_h &&
-        DepthAnalysisContentValid() &&
-        DepthAnalysisCellIsContent(dispatch_thread.xy)) {
-        uint plane = target_w * target_h;
-        uint index = dispatch_thread.y * target_w + dispatch_thread.x;
-        float3 current_nchw = float3(
-            CurrentModelInput[index],
-            CurrentModelInput[index + plane],
-            CurrentModelInput[index + 2u * plane]);
-        float3 previous_nchw = float3(
-            PreviousModelInput[index],
-            PreviousModelInput[index + plane],
-            PreviousModelInput[index + 2u * plane]);
-        bool finite =
-            all(bool3(
-                NearIdenticalFinite(current_nchw.r),
-                NearIdenticalFinite(current_nchw.g),
-                NearIdenticalFinite(current_nchw.b))) &&
-            all(bool3(
-                NearIdenticalFinite(previous_nchw.r),
-                NearIdenticalFinite(previous_nchw.g),
-                NearIdenticalFinite(previous_nchw.b)));
-        float max_delta = 0.0f;
-        if (finite) {
-            // ImageNet means cancel. Scale the NCHW delta directly back to model RGB.
-            float3 delta = abs(current_nchw - previous_nchw) *
-                float3(0.229f, 0.224f, 0.225f);
-            max_delta = max(delta.r, max(delta.g, delta.b));
-        }
-        primary = uint4(
-            1u,
-            finite && max_delta >= NEAR_IDENTICAL_MEDIUM_DELTA ? 1u : 0u,
-            finite && max_delta >= NEAR_IDENTICAL_STRONG_DELTA ? 1u : 0u,
-            finite ? 0u : 1u);
-    }
-    NearIdenticalGroupPrimary[linear_thread] = primary;
-    GroupMemoryBarrierWithGroupSync();
-    [unroll]
-    for (uint stride = NEAR_IDENTICAL_TILE_THREADS / 2u; stride > 0u; stride >>= 1u) {
-        if (linear_thread < stride) {
-            NearIdenticalGroupPrimary[linear_thread] +=
-                NearIdenticalGroupPrimary[linear_thread + stride];
-        }
-        GroupMemoryBarrierWithGroupSync();
-    }
-    if (linear_thread == 0u) {
-        NearIdenticalTileEvidence evidence;
-        evidence.admitted = NearIdenticalGroupPrimary[0].x;
-        evidence.medium_changed = NearIdenticalGroupPrimary[0].y;
-        evidence.strong_changed = NearIdenticalGroupPrimary[0].z;
-        evidence.nonfinite = NearIdenticalGroupPrimary[0].w;
-        uint tile_index = group_id.y * near_identical_tile_group_width + group_id.x;
-        if (tile_index < near_identical_tile_group_count) {
-            NearIdenticalTileOutput[tile_index] = evidence;
-        }
-    }
 }
 
 [numthreads(1, 1, 1)]

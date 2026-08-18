@@ -19,7 +19,7 @@ The core package contains:
 | Artifact | Authority |
 |---|---|
 | `source.png` | Matched full-source color preview |
-| `depth_input_source.png` | Exact full-source or full window-region analysis-color preview |
+| `depth_input_source.png` | Exact full-source preview, or post-completion reconstruction of the logical window-region analysis source; diagnostic only |
 | `depth_input_region.json` | Required half-open analysis-domain and ROI/full-source placement |
 | `model_input.f32`, `model_input_shape.json` | Exact calibrated DAV2 input |
 | `raw_depth.f32`, `raw_shape.json` | Exact DAV2 output |
@@ -42,7 +42,7 @@ The core package contains:
 | `gpu_trace.json` | Optional chronological decode of the authenticated raw GPU trace |
 | `gpu_trace_contract.json` | Optional exact trace offsets, enums, receipt ABI, and shader provenance |
 
-All `.f32` files are little-endian float32. Schema 36 accepts the canonical inactive descriptor or
+All `.f32` files are little-endian float32. Schema 37 accepts the canonical inactive descriptor or
 the one current `subtitle-slr13` package. It binds the exact current generated Depth Coordinate V2
 identity, producer and renderer closures, OCR model provenance, entrypoints, and four artifact
 roles (OCR record, locator state, Base field, atomic final field). The generated contract is the sole
@@ -64,7 +64,7 @@ ordinary limiter and, when active, SLR13 directly into that final field.
 
 ## Diagnostic GPU completion trace
 
-Schema 36 may carry a diagnostic-only 300-slot GPU completion ring. It records completed accepted
+Schema 37 may carry a diagnostic-only 300-slot GPU completion ring. It records completed accepted
 DAV2 roots, not source frames, presentation frames, busy drops, or every captured desktop update.
 Each 176-word (704-byte) record binds an exact trace ordinal, matched frame, analysis generation,
 analysis-domain tag, transaction token, analysis-source and DAV2-field extents, the immutable
@@ -139,7 +139,7 @@ The resolver descriptor serializes the aggregate-center
 primary policy exactly as `binocular-source-pixels`: two independent 16-sample rows; median indices
 `7/8`; both complete finite in-container rows bypass the IQR gate; a row-median difference of `4`
 is the both-valid mean-versus-maximum-median selection boundary; and a sole valid row is accepted
-only when its Tukey IQR at indices `3/4` and `11/12` is at most `8`. Schema 36 also authenticates
+only when its Tukey IQR at indices `3/4` and `11/12` is at most `8`. Schema 37 also authenticates
 the strict primary-failure fallback: ordinary-core span
 step `W/16`, maximum radius two, negative then positive order, ordinary-over-ribbon placement,
 unclamped 61-cell strips, two coherent rows and at most `4` pixels of intra-probe median separation.
@@ -172,7 +172,7 @@ native WARP/GPU tests.
 A full-source package uses analysis generation zero. A window-region package binds a nonzero
 analysis generation, the exact uncropped source rectangle, tensor extent, centered integer
 contain-fit `tensor_content_rect_px`, edge-replicated excluded padding fraction, unit conversion,
-and outside-only collar in `depth_input_region.json` schema `3`. The source rectangle is never
+and outside-only collar in `depth_input_region.json` schema `4`. The source rectangle is never
 stretched or trimmed: a wider region pads above/below and a taller region pads left/right. Padding
 does not participate in model statistics, scene-cut evidence, ownership, OCR, or subtitle state;
 published fields extend the nearest content boundary through it. Crop-local depth must never be
@@ -220,7 +220,7 @@ The maintained reader:
 
 Use `.f32` artifacts for quantitative work. Every generated scalar-field shape sidecar and PNG
 preview is described by `dump_manifest.json`; the pre-SLR13 Base previews remain optional,
-non-authoritative schema-36 diagnostics for compatibility with already captured packages.
+non-authoritative schema-37 diagnostics for compatibility with already captured packages.
 Independently stretched PNG previews are diagnostic and must not be compared as absolute depth
 values.
 

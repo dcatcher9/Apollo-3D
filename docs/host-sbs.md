@@ -53,17 +53,17 @@ diagnostics that explain how the final field was produced.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 69/tag `0x63C49931`, canonical SHA-256
-`f26cdf29cad90ac3df015bd16d71bb6e20ad557ec4708751490af05ae8a05e82`. It binds the
+schema 70/tag `0xD84FCD1A`, canonical SHA-256
+`caf07a7202266a858f5c7d68a6b550ebbb80f5640ca3ad6630a2c2ade3e7745b`. It binds the
 complete policy below, including all subtitle field/ROI semantics, and producer source-closure
-SHA-256 `620e1dcacc190f7d80749e68bf840eecb759210e2f866afa7d77078af78a2dfe`.
+SHA-256 `53042f759cc7043f141995623c3226297566a9c4e66d2d08680319416e41109d`.
 The live-renderer source-closure SHA-256 is
-`fce03acecf9a3fbe7bf237321bb4539c6a18b9fc4e215cfa337ac1221106ed12`. The optional HDR
+`c8a2221d4e47ac5b09881069ff18a4f2abe4ef9a6adb165426c38f27c7cfabe1`. The optional HDR
 warp-plus-P010-luma MRT has its own fail-open source closure
-`f7a10d4178726bda6c469c55fdaa43422d7d5a41546052c3a6dcef71c9b02a5f`; its absence or device
+`4859d6b8e1d1b52d02066562ce39c8204c1afdae99182b4c5ba5474c94b5f874`; its absence or device
 failure retains the canonical RGB-to-P010 path. The dump-only diagnostic renderer source-closure
 SHA-256 is
-`31a8347f2a6b7cf46d09fb27fa8f14042f805f98c3c86e3bee4281a38eb10543`. It admits the following
+`78aa31a8b4c323e439be55f907285ffe2791cfd21c9a9cfc19574792a5f9e14c`. It admits the following
 production calibration:
 
 | Property | Production value |
@@ -92,9 +92,12 @@ directory at `shader-cache/host-sbs-v1`. Each artifact filename is keyed by the 
 closure, ordered entrypoint/target, and compile flags. Runtime reflection validates the cached stage
 and Shader Model 5.0 bytecode before use; missing, stale, truncated, or invalid artifacts are
 compiled from the immutable source snapshot and replaced atomically. This is only a startup
-optimization and cannot weaken source-closure or shader-creation fail-flat behavior. Successful
-prewarm retains the 128 most recently used artifacts so superseded closures cannot grow without
-bound.
+optimization and cannot weaken source-closure authentication or required shader-creation fail-flat
+behavior. One fused near-identical preprocess root is the mandatory calibrated preprocess and the
+sole runtime RGB-to-NCHW producer. Its prewarm, device creation, mode buffers, previous-input view,
+and tile output are required; failure leaves Host SBS flat instead of selecting a second producer or
+comparator. Successful prewarm retains the 128 most recently used artifacts so superseded closures
+cannot grow without bound.
 
 ### Authenticated resolution fitting
 
@@ -113,18 +116,19 @@ Portrait is an explicit `width < height` display mode. Host SBS does not rotate 
 non-identity Windows display rotation is rejected before pipeline setup.
 
 The window-region route does not introduce another model shape. It keeps the current full-frame
-authenticated tensor shape and copies the selected Chromium-video or foreground-client rectangle
-exactly, regardless of its aspect ratio. The preprocessor fits that whole source rectangle into a
-deterministic centered integer content rectangle. It never crops or stretches source pixels.
+authenticated tensor shape and addresses the selected Chromium-video or foreground-client
+rectangle directly inside the retained full matched frame, regardless of its aspect ratio. The
+preprocessor treats that exact rectangle as its crop-local logical source and fits it into a
+deterministic centered integer content rectangle. It never stretches or discards pixels from that
+logical source.
 Synthetic tensor pixels outside the content rectangle replicate the nearest content edge and are
-excluded from depth statistics, scene-cut evidence, ownership, history, and OCR authority. The
-preprocessor specializes tensors with at least one-eighth synthetic padding: it area-samples only
-admitted content cells, then a second ordered GPU entry point bit-copies their three NCHW values
-and appearance ordinal into synthetic padding while writing the padding exclusion bit. Smaller
-padding fractions retain the original one-dispatch path because its avoided work does not repay a
-second dispatch. Both paths produce the same edge replication and analysis exclusion. The
-published parallax field extends its content boundary through this padding so renderer filtering
-cannot turn padding into a false depth shelf.
+excluded from depth statistics, scene-cut evidence, ownership, history, and OCR authority. Every
+domain uses the same canonical full-grid producer dispatch, including heavily padded force-infer
+frames. This deliberately repeats the clamped boundary footprint work instead of retaining a
+second content/padding entry-point topology; the removed specialization was bit-identical, and the
+single authority is simpler to authenticate and maintain. The published parallax field extends its
+content boundary through this padding so renderer filtering cannot turn padding into a false depth
+shelf.
 
 Chromium true fullscreen is selected separately from the strict semantic-video ROI candidate. The
 helper may recognize an available semantic `<video>` that covers the complete foreground browser
@@ -505,7 +509,9 @@ DAV2 runs at a lower spatial resolution than its analysis source. A depth bounda
 land in a mixed model texel whose center belongs to the far side even when most of the source
 footprint belongs to the foreground. Before slope conditioning, the ownership pass checks the
 exact matched full-resolution analysis source along the candidate cliff normal: the full captured
-frame for ordinary V2, or the same-format cropped video texture for an authorized ROI.
+frame for ordinary V2, or the exact ROI rectangle addressed directly inside that same retained
+full-frame texture. Ownership scale and interpolation remain crop-local; only final integer color
+loads receive the authenticated ROI offset.
 
 It changes a cell only when all of the following evidence agrees:
 
@@ -663,16 +669,28 @@ a follow-up must be same-route, bound to the immediately prior opaque frame, and
 `100 ms` old. Bottom OCR-crop damage is not admission authority: both a clean and dirty crop may
 enter the GPU-undecided path.
 
-After the ordinary calibrated `rgb_to_nchw` producer, a separate required compute closure compares
-the current NCHW tensor against the GPU-owned state-1 model-input history. That history and its owner
-advance only on authenticated infer. The owner may predate the host's immediately preceding opaque
-baseline, but must authenticate the same analysis-domain tag and tensor dimensions, be no newer
-than that host baseline, be at most four frame steps older than current, and have a nonregressed
-source observation timestamp strictly less than `100 ms` old. Each `16x16`
-thread group reduces its admitted, medium-change, strong-change, and nonfinite counts in group-shared
-memory and writes one compact tile record; the comparison uses no global atomics. One 64-thread
-resolve reduces the tile records and rejects any supported tile whose strong-change ratio exceeds
-the local limit. For each admitted texel it reconstructs the maximum model-RGB delta directly from NCHW differences as
+Every submitted root runs the authenticated fused producer in one full-grid dispatch, writing the
+canonical NCHW tensor, appearance ordinal, and tensor exclusion. A CPU-known force, bootstrap, or
+debug root binds an immutable disabled-evidence mode: one lane per group overwrites its tile record
+with zero and every lane exits before history reads or reduction. The force transaction ignores
+those fail-open records. A GPU-undecided root binds the immutable enabled mode and compares only the
+committed NCHW words after the thread-group device barrier. Padded domains are produced by the same
+canonical contain-fit path and their synthetic cells remain excluded from evidence. All roots bind
+valid previous-history and tile resources; allocation-time history initialization makes bootstrap
+state deterministic. Missing fused bytecode, mode buffers, or resources is terminal rather than a
+branch-dependent fallback. There is no plain runtime producer, padding specialization, standalone
+near-identical comparator, or comparison dispatch.
+
+The fused pass compares the current NCHW tensor against the GPU-owned state-1 model-input history.
+That history and its owner advance only on authenticated infer. The owner may predate the host's
+immediately preceding opaque baseline, but must authenticate the same
+analysis-domain tag and tensor dimensions, be no newer than that host baseline, be at most four
+frame steps older than current, and have a nonregressed source observation timestamp strictly less
+than `100 ms` old. Each `16x16` thread group reduces its admitted, medium-change, strong-change, and
+nonfinite counts in group-shared memory and writes one compact tile record; the comparison uses no
+global atomics. One 64-thread resolve reduces the tile records and rejects any supported tile whose
+strong-change ratio exceeds the local limit. For each admitted texel it reconstructs the maximum
+model-RGB delta directly from NCHW differences as
 `abs(current - previous) * (0.229, 0.224, 0.225)`; the ImageNet means cancel.
 
 The GPU proposes reuse only when the owner, request, shape and admitted count authenticate, every
@@ -836,7 +854,7 @@ its depth inference branch and leaves optional OCR TensorRT dormant. Invalid und
 request/receipt evidence cannot advance authenticated depth or subtitle postprocess state. Cleanup
 failure quarantines the affected graph and interop resources. The detector closure is pinned
 independently at SHA-256
-`8f6d770709c716abd2db48ec3193f00bd8ffbc1c94b31667227f9ae55c84c6d7`; a source snapshot or closure
+`03cc27be7dfc31c2cba69044ad8e4bd14fe8846df0cf66392ec9215b0eddff18`; a source snapshot or closure
 mismatch therefore fails the stream flat instead of disabling adaptive reuse invisibly.
 
 The detector deliberately prefers reuse within the stated depth bounds. A thin, small, localized,
@@ -858,7 +876,7 @@ authenticated current-route force-infer completion establishes known state.
 Model preparation, shader compilation, and the live renderer are fail-closed. Live shaders are
 compiled and cached at process startup. Dump-only resources are created lazily and cannot prevent a
 stream from starting. A failure in optional diagnostics has no rendering authority. An armed
-schema-36 dump preserves Base when SLR13 is active, the complete atomic conditioned final field,
+schema-37 dump preserves Base when SLR13 is active, the complete atomic conditioned final field,
 and the selected path's publication resources with ordered D3D11 `CopyResource` operations
 and one terminal event. Submission performs no GPU-to-CPU wait or synchronous Map. Later
 render-thread calls poll with `DONOTFLUSH`, collect staging resources with `DO_NOT_WAIT`, then hand
@@ -891,7 +909,7 @@ A zero `current_count` instead authenticates the conditioner's canonical zero6 B
 pending, target-reset, and death-grace states therefore remain valid trace history rather than being
 mistaken for corrupt active conditioning.
 
-ROI observer, rectangle, planner, or crop-resource eligibility failure selects ordinary
+ROI observer, rectangle, planner, or source-region authentication failure selects ordinary
 full-frame V2. That route selection does not weaken the base contract: an internal V2 model,
 provenance, state, field, or renderer authentication failure renders the affected frame flat.
 
@@ -957,6 +975,11 @@ submit neither fullscreen pass nor a matched-frame copy. On the optional HDR P01
 `sbs_warp_gpu` includes fused luma production and `sbs_output_gpu` contains only the unchanged
 chroma pass; the cadence line reports `p010_y_mrt` so sums can be compared without mistaking that
 timer-boundary shift for a regression.
+`depth_preprocess_gpu` includes the calibrated RGB-to-NCHW work and GPU-undecided tile comparison
+against the retained matched source. ROI samples therefore appear in that timer
+without a separate live crop allocation or copy. The cadence diagnostics report
+`roi_direct_inputs/dump_copies`; the first counts admitted direct ROI inputs, while the second can
+increase only for an explicit Dump 3D diagnostic reconstruction after live timing has closed.
 Throughput diagnostics also split CPU-known force-infer roots from GPU-undecided roots and report
 host-side optional OCR as *armed*. When diagnostics were enabled, the authenticated GPU trace is
 the exact source for the depth infer/reuse disposition and the independent subtitle result:
@@ -1052,19 +1075,22 @@ Immediately before attribution, the host also rechecks that the helper HWND stil
 the foreground root window, and still belongs to the reported process. This cheap Win32 guard
 closes the helper-heartbeat gap on Alt-Tab, close, and HWND reuse without putting COM on the stream.
 
-After exact frame attribution, a same-format D3D11 copy preserves the selected rectangle exactly for
-both DAV2 preprocessing and the full-resolution ownership pass; all cut, center, and history state
-is ROI-local. Arbitrary source aspect ratios use the centered integer contain-fit described above,
-with edge-replicated padding excluded from analysis. The original full color texture remains the
-renderer source. The final ROI field is
+After exact frame attribution, DAV2 preprocessing, OCR preprocessing, and full-resolution ownership
+sample the selected rectangle directly from the retained full matched texture with one exact integer
+source offset; all resize, contour, cut, center, and history coordinates remain ROI-local. Arbitrary
+source aspect ratios use the centered integer contain-fit described above, with edge-replicated
+padding excluded from analysis. No ordinary live ROI allocation or copy is submitted. Dump 3D alone
+may reconstruct the exact completed ROI as a same-format `CopySubresourceRegion` artifact after
+production timing has closed; failure rejects that dump without changing the live route. The
+original full color texture also remains the renderer source. The final ROI field is
 mapped back at its physical pixel scale, with the outside-only slope collar described above, and the
 desktop beyond that collar is exactly at zero parallax. Separately, the host grants the helper's
 true-fullscreen authority only when its foreground-client rectangle maps exactly to the capture;
 that case is canonical full-frame V2. The generic foreground-client route follows the same
 canonicalization whenever its client rectangle equals the capture, without claiming Chromium
 semantic authority. Missing, stale or ambiguous selection, non-identity rotation, spanning,
-partially off-monitor, mismatched geometry, unauthenticated tensor geometry, or crop allocation failure
-selects ordinary full-frame V2 rather than a guessed ROI; an internal V2 authentication failure
+partially off-monitor, mismatched geometry, or unauthenticated tensor/source-region geometry selects
+ordinary full-frame V2 rather than a guessed ROI; an internal V2 authentication failure
 remains fail-closed flat.
 
 The host separately tracks the newest helper heartbeat and the beginning of the current exact
@@ -1090,7 +1116,7 @@ attaching new geometry to old pixels while avoiding a blocking drain or second c
 root/client is also sampled while inference is busy. Every ROI matched slot carries that exact live
 observation generation: focus, move, resize, desktop focus, and monitor changes revoke older pending
 completions and cached ROI output before warp or dump. A pure translation may reuse the DAV2 analysis
-history after a newly copied frame is authorized, but never the pre-move color/depth pair.
+history after a new private matched-frame copy is authorized, but never the pre-move color/depth pair.
 
 During the native USER32 interactive move/size loop, Host SBS withdraws window-region authority and
 continues full-source 3D for the current captured display instead of chasing a moving client
@@ -1099,7 +1125,7 @@ retain their normal full-frame behavior. The optional subtitle branch is suppres
 above, so moving desktop text cannot acquire or age subtitle authority and the current Base field is
 rendered without subtitle conditioning. An explicitly armed Dump 3D request retains complete
 ordinary observation behavior. When the loop ends, ordinary foreground causality must authorize a
-newly copied frame before the matched-domain transition can submit a new ROI; output may briefly be
+new private matched-frame copy before the matched-domain transition can submit a new ROI; output may briefly be
 identity while that exact ROI completion is pending. This covers standard caption dragging, border
 resizing, and borderless applications that delegate native hit-testing to USER32. For fully custom
 applications that animate themselves with `SetWindowPos`, a copied desktop image that still

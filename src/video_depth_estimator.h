@@ -317,14 +317,15 @@ namespace models {
   };
 
   /**
-   * Exact full-source placement of the image submitted to DAV2.
+   * Exact logical analysis raster and its placement in the retained full source.
    *
    * video_region=false means the estimator input and final parallax cover the whole source,
    * authority is full_source, and analysis_generation is zero. video_region remains the legacy
    * placement name consumed by the renderer and dump path; true now means any bounded analysis ROI.
-   * Such an ROI has a non-full-source authority and a nonzero analysis generation. Position alone
-   * is not part of the analysis domain, so moving an otherwise-identical authority may retain scene
-   * state.
+   * Such an ROI has a non-full-source authority and a nonzero analysis generation. Its dimensions
+   * describe crop-local analysis coordinates, while the shaders sample that rectangle directly
+   * from the full retained source. Position alone is not part of the analysis domain, so moving an
+   * otherwise-identical authority may retain scene state.
    */
   struct depth_input_region_t {
     std::uint32_t source_width = 0u;

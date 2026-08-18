@@ -39,11 +39,12 @@ independently transformed channels.
 ### Analysis-domain ownership
 
 Ordinary V2 computes every item above from the full captured frame. When a window-region ROI is
-authorized for an exact matched frame, the same-format cropped texture is the entire analysis
-domain: DAV2 input, normalized-depth comparison, appearance and ordinal evidence, scene center,
-baselines, and history all exclude the surrounding desktop. A causally authenticated Chromium
-`<video>` has priority; otherwise a causally continuous foreground root client may provide the
-rectangle. The full captured color texture remains available only to the final renderer.
+authorized for an exact matched frame, its exact logical rectangle is the entire analysis domain
+even though shaders address it directly inside the retained full-frame texture: DAV2 input,
+normalized-depth comparison, appearance and ordinal evidence, scene center, baselines, and history
+all exclude the surrounding desktop. A causally authenticated Chromium `<video>` has priority;
+otherwise a causally continuous foreground root client may provide the rectangle. The retained full
+captured color texture supplies those offset analysis loads and remains the final renderer source.
 
 Evidence from different domains must never be compared. Entering or leaving ROI mode, changing the
 authority kind (`chromium_video` versus `foreground_client`), authorized identity or crop
@@ -51,7 +52,7 @@ dimensions, or changing the input transfer domain clears cut history, baselines,
 confirmation, and the scene camera before analysis resumes. Translation of the same authority and
 same-sized crop retains the analysis domain and its histories; the exact matched-frame rectangle
 still determines where that frame is rendered. Translation nevertheless revokes any older
-positioned completion or cached ROI output; only a newly copied frame may reuse the retained
+positioned completion or cached ROI output; only a newly retained matched frame may reuse the
 histories. DDup damage-guided reuse is not a translation exception: it requires the exact positioned
 route and every live authority epoch to remain unchanged. A missing, stale, unsupported, spanning,
 partially off-monitor, or other-monitor ROI selects full-frame V2. That resets state when leaving an

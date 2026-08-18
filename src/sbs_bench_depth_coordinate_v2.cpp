@@ -414,6 +414,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     ComPtr<ID3D11ComputeShader> encode_shader;
     std::array<ComPtr<ID3D11Buffer>, 3> common_constants_by_color;
     ComPtr<ID3D11Buffer> v2_constants;
+    ComPtr<ID3D11Buffer> source_region_constants;
     ComPtr<ID3D11Buffer> encode_constants;
     ComPtr<ID3D11Buffer> raw_buffer;
     ComPtr<ID3D11ShaderResourceView> raw_srv;
@@ -846,6 +847,9 @@ void main(uint3 id : SV_DispatchThreadID) {
       const std::array<float, 4> encode_words {{
         v2::direct_container_limit, 0.0f, 0.0f, 0.0f,
       }};
+      const std::array<std::uint32_t, 4> source_region_words {{
+        0u, 0u, source_width, source_height,
+      }};
       bool common_constants_ready = true;
       for (std::uint32_t color_mode = 0u;
            color_mode < common_constants_by_color.size();
@@ -856,6 +860,9 @@ void main(uint3 id : SV_DispatchThreadID) {
       }
       if (!common_constants_ready ||
           !create_immutable_constant_buffer(device.Get(), constants, v2_constants) ||
+          !create_immutable_constant_buffer(
+            device.Get(), source_region_words, source_region_constants
+          ) ||
           !create_immutable_constant_buffer(device.Get(), encode_words, encode_constants)) {
         error = "cannot create v2 GPU replay constant buffers";
         return false;
@@ -1092,6 +1099,9 @@ void main(uint3 id : SV_DispatchThreadID) {
       unbind(2u, 1u);
 
       context->CSSetShader(ownership_shader.Get(), nullptr, 0);
+      context->CSSetConstantBuffers(
+        2u, 1u, source_region_constants.GetAddressOf()
+      );
       ID3D11ShaderResourceView *ownership_srvs[] = {candidate_srv.Get(), source_color};
       context->CSSetShaderResources(0, 2, ownership_srvs);
       context->CSSetUnorderedAccessViews(0, 1, ownership_uav.GetAddressOf(), nullptr);

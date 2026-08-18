@@ -543,10 +543,9 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
   );
   ASSERT_TRUE(producer_sources);
 
-  // The preprocess-only main+content+padding closure remains available only to compute the
-  // calibrated model-input identity. Each production entry point is owned exactly once by the
-  // full producer closure; this test deliberately never requests bytecode from the smaller
-  // snapshot.
+  // The preprocess-only fused closure remains available only to compute the calibrated
+  // model-input identity. Its sole production entry point is owned exactly once by the full
+  // producer closure; this test deliberately never requests bytecode from the smaller snapshot.
   const auto preprocess_sources = cache::snapshot_sources(
     shader_root,
     cache::preprocess_specs
@@ -603,6 +602,7 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_subtitle_locator_resolve));
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_subtitle_condition_prepare));
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_subtitle_condition));
+  EXPECT_TRUE(has_producer_shader(cache::host_sbs_near_identical_fused_preprocess));
 
   const auto near_identical_sources = cache::snapshot_sources(
     shader_root,
@@ -676,7 +676,7 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
   ASSERT_TRUE(p010_y_shader);
   EXPECT_EQ(cache::parallax_v2_live_renderer_specs.size(), 2u);
   EXPECT_EQ(cache::parallax_v2_p010_y_specs.size(), 1u);
-  EXPECT_EQ(cache::near_identical_detector_specs.size(), 8u);
+  EXPECT_EQ(cache::near_identical_detector_specs.size(), 7u);
   EXPECT_EQ(cache::sbs_flat_fallback_specs.size(), 2u);
   EXPECT_EQ(cache::parallax_v2_live_diagnostic_specs.size(), 2u);
 }
@@ -828,7 +828,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 69u);
+  EXPECT_EQ(v2::contract_schema, 70u);
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
   EXPECT_EQ(v2::shadow_state_dump_schema, 16u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
@@ -991,15 +991,15 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   );
   EXPECT_EQ(
     small_calibration.preprocess.source_file,
-    models::host_sbs_shader_cache::rgb_to_nchw.filename
+    models::host_sbs_shader_cache::host_sbs_near_identical_fused_preprocess.filename
   );
   EXPECT_EQ(
     small_calibration.preprocess.source_entrypoint,
-    models::host_sbs_shader_cache::rgb_to_nchw.entrypoint
+    models::host_sbs_shader_cache::host_sbs_near_identical_fused_preprocess.entrypoint
   );
   EXPECT_EQ(
     small_calibration.preprocess.source_target,
-    models::host_sbs_shader_cache::rgb_to_nchw.target
+    models::host_sbs_shader_cache::host_sbs_near_identical_fused_preprocess.target
   );
   EXPECT_EQ(
     small_calibration.preprocess.source_compile_flags,
@@ -2915,7 +2915,7 @@ TEST(ParallaxV2ContractTest, DebugDumpUsesNonblockingGpuStagingBeforeCpuPublicat
   );
 }
 
-TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema36Contract) {
+TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema37Contract) {
   const auto source = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
   );
@@ -2941,7 +2941,7 @@ TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema36C
   EXPECT_LT(resolve, prepare);
   EXPECT_LT(prepare, condition);
 
-  EXPECT_NE(source.find("{\"schema\", 36}"), std::string::npos);
+  EXPECT_NE(source.find("{\"schema\", 37}"), std::string::npos);
   for (const auto *qualification_key : {
          "{\"qualification_policy\", {",
          "{\"corner_filter_applies_to\", \"non-ribbon-ordinary-cores\"}",
@@ -3373,8 +3373,7 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
   using Microsoft::WRL::ComPtr;
 
   constexpr std::array shaders {
-    std::tuple {"rgb_to_nchw_cs.hlsl", "content_main", "cs_5_0"},
-    std::tuple {"rgb_to_nchw_cs.hlsl", "pad_main", "cs_5_0"},
+    std::tuple {"rgb_to_nchw_near_identical_cs.hlsl", "fused_main", "cs_5_0"},
     std::tuple {"buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"},
     std::tuple {"depth_minmax_ema_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_hist_cs.hlsl", "main", "cs_5_0"},
@@ -4253,32 +4252,14 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
     return bytecode;
   };
   const auto main_bytecode = compile_shader("main");
-  const auto content_bytecode = compile_shader("content_main");
-  const auto pad_bytecode = compile_shader("pad_main");
   ASSERT_TRUE(main_bytecode);
-  ASSERT_TRUE(content_bytecode);
-  ASSERT_TRUE(pad_bytecode);
 
   ComPtr<ID3D11ComputeShader> shader;
-  ComPtr<ID3D11ComputeShader> content_shader;
-  ComPtr<ID3D11ComputeShader> pad_shader;
   ASSERT_TRUE(SUCCEEDED(device->CreateComputeShader(
     main_bytecode->GetBufferPointer(),
     main_bytecode->GetBufferSize(),
     nullptr,
     &shader
-  )));
-  ASSERT_TRUE(SUCCEEDED(device->CreateComputeShader(
-    content_bytecode->GetBufferPointer(),
-    content_bytecode->GetBufferSize(),
-    nullptr,
-    &content_shader
-  )));
-  ASSERT_TRUE(SUCCEEDED(device->CreateComputeShader(
-    pad_bytecode->GetBufferPointer(),
-    pad_bytecode->GetBufferSize(),
-    nullptr,
-    &pad_shader
   )));
 
   using rgba_pixel_t = std::array<float, 4>;
@@ -4292,7 +4273,8 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
                           std::vector<float> &appearance_ordinal,
                           std::uint32_t color_mode = 0u,
                           models::depth_tensor_content_rect_t tensor_content = {},
-                          std::vector<std::uint32_t> *tensor_exclusion = nullptr
+                          std::vector<std::uint32_t> *tensor_exclusion = nullptr,
+                          models::depth_source_rect_t source_region = {}
                         ) {
     if (source_pixels.size() != static_cast<std::size_t>(source_width) * source_height) {
       return false;
@@ -4370,6 +4352,12 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
     if (!tensor_content.valid(target_shape)) {
       tensor_content = {0u, 0u, target_width, target_height};
     }
+    if (!source_region.valid()) {
+      source_region = {0u, 0u, source_width, source_height};
+    }
+    if (source_region.right > source_width || source_region.bottom > source_height) {
+      return false;
+    }
     std::array<std::uint32_t, 16> constants {};
     constants[0] = target_width;
     constants[1] = target_height;
@@ -4388,6 +4376,24 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
     if (FAILED(device->CreateBuffer(&constant_desc, &constant_data, &constant_buffer))) {
       return false;
     }
+    const std::array<std::uint32_t, 4> source_region_constants {
+      source_region.left,
+      source_region.top,
+      source_region.right,
+      source_region.bottom,
+    };
+    D3D11_BUFFER_DESC source_region_desc {};
+    source_region_desc.ByteWidth = sizeof(source_region_constants);
+    source_region_desc.Usage = D3D11_USAGE_IMMUTABLE;
+    source_region_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    D3D11_SUBRESOURCE_DATA source_region_data {};
+    source_region_data.pSysMem = source_region_constants.data();
+    ComPtr<ID3D11Buffer> source_region_buffer;
+    if (FAILED(device->CreateBuffer(
+          &source_region_desc, &source_region_data, &source_region_buffer
+        ))) {
+      return false;
+    }
 
     ID3D11ShaderResourceView *input_srvs[] = {input_srv.Get()};
     ID3D11UnorderedAccessView *output_uavs[] = {
@@ -4400,26 +4406,12 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
     context->CSSetShaderResources(0, 1, input_srvs);
     context->CSSetUnorderedAccessViews(0, 3, output_uavs, nullptr);
     context->CSSetConstantBuffers(0, 1, constant_buffers);
-    if (!tensor_content.full(target_shape)) {
-      context->CSSetShader(content_shader.Get(), nullptr, 0);
-      context->Dispatch(
-        (tensor_content.width() + 15u) / 16u,
-        (tensor_content.height() + 15u) / 16u,
-        1u
-      );
-      context->CSSetShader(pad_shader.Get(), nullptr, 0);
-      context->Dispatch(
-        (target_width + 15u) / 16u,
-        (target_height + 15u) / 16u,
-        1u
-      );
-    } else {
-      context->Dispatch(
-        (target_width + 15u) / 16u,
-        (target_height + 15u) / 16u,
-        1u
-      );
-    }
+    context->CSSetConstantBuffers(2, 1, source_region_buffer.GetAddressOf());
+    context->Dispatch(
+      (target_width + 15u) / 16u,
+      (target_height + 15u) / 16u,
+      1u
+    );
 
     ID3D11ShaderResourceView *null_srvs[] = {nullptr};
     ID3D11UnorderedAccessView *null_uavs[] = {nullptr, nullptr, nullptr};
@@ -4786,6 +4778,70 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
       }
     }
   }
+
+  // Direct ROI sampling must reproduce the prior same-format crop texture bit for bit. The
+  // outside sentinel is deliberately extreme, and the padded content rectangle exercises the
+  // canonical full-grid edge-clamp path used by the sole fused runtime producer.
+  {
+    constexpr UINT full_width = 10u;
+    constexpr UINT full_height = 9u;
+    constexpr models::depth_source_rect_t roi {2u, 3u, 8u, 8u};
+    constexpr UINT roi_width = roi.right - roi.left;
+    constexpr UINT roi_height = roi.bottom - roi.top;
+    constexpr UINT target_width = 4u;
+    constexpr UINT target_height = 4u;
+    constexpr models::depth_tensor_content_rect_t content {0u, 1u, 4u, 3u};
+    std::vector<rgba_pixel_t> full_source(
+      static_cast<std::size_t>(full_width) * full_height,
+      rgba_pixel_t {37.0f, -19.0f, 83.0f, 1.0f}
+    );
+    std::vector<rgba_pixel_t> cropped_source;
+    cropped_source.reserve(static_cast<std::size_t>(roi_width) * roi_height);
+    for (UINT y = roi.top; y < roi.bottom; ++y) {
+      for (UINT x = roi.left; x < roi.right; ++x) {
+        rgba_pixel_t pixel {
+          static_cast<float>(3u * x + 5u * y) / 97.0f,
+          static_cast<float>(7u * x + 2u * y) / 101.0f,
+          static_cast<float>(x + 11u * y) / 109.0f,
+          1.0f,
+        };
+        full_source[static_cast<std::size_t>(y) * full_width + x] = pixel;
+        cropped_source.push_back(pixel);
+      }
+    }
+
+    for (const std::uint32_t color_mode : {0u, 1u, 2u}) {
+      std::vector<float> crop_model;
+      std::vector<float> crop_appearance;
+      std::vector<std::uint32_t> crop_exclusion;
+      std::vector<float> direct_model;
+      std::vector<float> direct_appearance;
+      std::vector<std::uint32_t> direct_exclusion;
+      ASSERT_TRUE(run_case(
+        roi_width, roi_height, target_width, target_height, cropped_source,
+        crop_model, crop_appearance, color_mode, content, &crop_exclusion
+      ));
+      ASSERT_TRUE(run_case(
+        full_width, full_height, target_width, target_height, full_source,
+        direct_model, direct_appearance, color_mode, content, &direct_exclusion, roi
+      ));
+      ASSERT_EQ(direct_model.size(), crop_model.size());
+      ASSERT_EQ(direct_appearance.size(), crop_appearance.size());
+      EXPECT_EQ(direct_exclusion, crop_exclusion);
+      for (std::size_t index = 0u; index < crop_model.size(); ++index) {
+        EXPECT_EQ(
+          std::bit_cast<std::uint32_t>(direct_model[index]),
+          std::bit_cast<std::uint32_t>(crop_model[index])
+        ) << "model index=" << index << " color_mode=" << color_mode;
+      }
+      for (std::size_t index = 0u; index < crop_appearance.size(); ++index) {
+        EXPECT_EQ(
+          std::bit_cast<std::uint32_t>(direct_appearance[index]),
+          std::bit_cast<std::uint32_t>(crop_appearance[index])
+        ) << "appearance index=" << index << " color_mode=" << color_mode;
+      }
+    }
+  }
 }
 #endif
 
@@ -4967,6 +5023,84 @@ TEST(DirectxShaderSourceTest, VideoRoiReuseMemoKeepsTheCompletePixelProofKey) {
     ++classifications;
   }
   EXPECT_EQ(classifications, 2u);
+}
+
+TEST(DirectxShaderSourceTest, VideoRoiSamplesRetainedSourceAndCopiesOnlyForDump) {
+  const auto display =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
+  const auto estimator =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
+  const auto preprocess = read_source_file(
+    SUNSHINE_SOURCE_DIR
+    "/src_assets/windows/assets/shaders/directx/rgb_to_nchw_cs.hlsl"
+  );
+  ASSERT_FALSE(display.empty());
+  ASSERT_FALSE(estimator.empty());
+  ASSERT_FALSE(preprocess.empty());
+
+  EXPECT_NE(
+    display.find("matched_candidate_slot->analysis_input_srv()"),
+    std::string::npos
+  );
+  const auto select_begin = display.find("    void select_depth_input_region(");
+  const auto select_end = display.find("    bool copy_matched_frame(", select_begin);
+  ASSERT_NE(select_begin, std::string::npos);
+  ASSERT_NE(select_end, std::string::npos);
+  const auto selection = display.substr(select_begin, select_end - select_begin);
+  EXPECT_EQ(selection.find("copy_video_depth_crop("), std::string::npos);
+
+  std::size_t diagnostic_crop_references = 0u;
+  for (std::size_t offset = 0u;
+       (offset = display.find("copy_video_depth_crop(", offset)) != std::string::npos;
+       ++offset) {
+    ++diagnostic_crop_references;
+  }
+  EXPECT_EQ(diagnostic_crop_references, 2u)
+    << "Only the helper definition and completed Dump 3D call may remain";
+  const auto dump_begin = display.find("const bool complete_dump_snapshot =");
+  const auto dump_copy = display.find("copy_video_depth_crop(", dump_begin);
+  const auto dump_ready = display.find("const bool dump_roi_source_ready", dump_begin);
+  ASSERT_NE(dump_begin, std::string::npos);
+  ASSERT_NE(dump_copy, std::string::npos);
+  ASSERT_NE(dump_ready, std::string::npos);
+  EXPECT_LT(dump_copy, dump_ready);
+  EXPECT_NE(
+    display.find("matched_render_slot->dump_depth_input_srv()", dump_ready),
+    std::string::npos
+  );
+
+  EXPECT_NE(
+    estimator.find("requested.source_width != input_desc.Width"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    estimator.find("requested.source_height != input_desc.Height"),
+    std::string::npos
+  );
+  const auto source_buffer = estimator.find("void ensure_source_region_cbuffer(");
+  const auto temporal_reset = estimator.find(
+    "void reset_temporal_state_for_input_domain()", source_buffer
+  );
+  ASSERT_NE(source_buffer, std::string::npos);
+  ASSERT_NE(temporal_reset, std::string::npos);
+  const auto source_buffer_body = estimator.substr(
+    source_buffer, temporal_reset - source_buffer
+  );
+  EXPECT_NE(source_buffer_body.find("D3D11_USAGE_DEFAULT"), std::string::npos);
+  EXPECT_NE(source_buffer_body.find("UpdateSubresource("), std::string::npos);
+  EXPECT_NE(
+    source_buffer_body.find("cb_source_region == source_region"),
+    std::string::npos
+  );
+
+  EXPECT_NE(
+    preprocess.find("#include \"include/depth_source_region.hlsl\""),
+    std::string::npos
+  );
+  EXPECT_NE(
+    preprocess.find("DepthSourceRegionLoadPosition("),
+    std::string::npos
+  );
 }
 
 TEST(DirectxShaderSourceTest, PendingCompletionReusesThePreparedConstantBuffer) {

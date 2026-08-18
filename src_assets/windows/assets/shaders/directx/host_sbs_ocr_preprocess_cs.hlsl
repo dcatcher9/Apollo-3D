@@ -20,7 +20,9 @@ cbuffer OcrPreprocessConstants : register(b0) {
     uint crop_top;
     uint crop_height;
     uint color_mode;
-    uint3 reserved;
+    uint source_left;
+    uint source_top;
+    uint reserved;
 };
 
 #define OCR_WIDTH V2_OCR_INPUT_WIDTH
@@ -29,6 +31,7 @@ cbuffer OcrPreprocessConstants : register(b0) {
 float3 LoadDisplayColor(int2 pixel) {
     pixel = clamp(pixel, int2(0, (int)crop_top),
                   int2((int)source_w - 1, (int)(crop_top + crop_height) - 1));
+    pixel += int2(source_left, source_top);
     return DepthColorToSrgb(InputTexture.Load(int3(pixel, 0)).rgb, color_mode);
 }
 
@@ -51,8 +54,14 @@ float3 SampleCropBilinear(uint2 output_pixel) {
 // order. The capture texture is RGB, so channel 0 intentionally receives blue.
 [numthreads(16, 16, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
+    uint texture_w = 0u;
+    uint texture_h = 0u;
+    InputTexture.GetDimensions(texture_w, texture_h);
     if (id.x >= OCR_WIDTH || id.y >= OCR_HEIGHT || source_w == 0u || source_h == 0u ||
-        crop_height == 0u || crop_top + crop_height > source_h) {
+        crop_height == 0u || crop_top > source_h ||
+        crop_height > source_h - crop_top || reserved != 0u ||
+        source_left > texture_w || source_w > texture_w - source_left ||
+        source_top > texture_h || source_h > texture_h - source_top) {
         return;
     }
     float3 rgb = SampleCropBilinear(id.xy);

@@ -783,7 +783,333 @@ namespace {
     }
     return true;
   }
+
+  bool dispatch_depth_coordinate_v2_ownership(
+    warp_device_t &warp,
+    ID3D11ComputeShader *shader,
+    const std::uint32_t target_width,
+    const std::uint32_t target_height,
+    ID3D11ShaderResourceView *source_srv,
+    const models::depth_source_rect_t source_region,
+    const std::vector<float> &candidate,
+    std::vector<float> &result
+  ) {
+    const auto element_count =
+      static_cast<std::size_t>(target_width) * target_height;
+    if (!shader || !source_srv || target_width == 0u || target_height == 0u ||
+        !source_region.valid() || candidate.size() != element_count) {
+      return false;
+    }
+
+    D3D11_TEXTURE2D_DESC input_desc {};
+    input_desc.Width = target_width;
+    input_desc.Height = target_height;
+    input_desc.MipLevels = 1u;
+    input_desc.ArraySize = 1u;
+    input_desc.Format = DXGI_FORMAT_R32_FLOAT;
+    input_desc.SampleDesc.Count = 1u;
+    input_desc.Usage = D3D11_USAGE_IMMUTABLE;
+    input_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA candidate_data {
+      candidate.data(),
+      static_cast<UINT>(static_cast<std::size_t>(target_width) * sizeof(float)),
+      0u
+    };
+    ComPtr<ID3D11Texture2D> candidate_texture;
+    ComPtr<ID3D11ShaderResourceView> candidate_srv;
+    if (FAILED(warp.device->CreateTexture2D(
+          &input_desc, &candidate_data, &candidate_texture
+        )) ||
+        FAILED(warp.device->CreateShaderResourceView(
+          candidate_texture.Get(), nullptr, &candidate_srv
+        ))) {
+      return false;
+    }
+
+    const std::vector<std::uint32_t> exclusion(element_count, 0u);
+    D3D11_TEXTURE2D_DESC exclusion_desc = input_desc;
+    exclusion_desc.Format = DXGI_FORMAT_R32_UINT;
+    D3D11_SUBRESOURCE_DATA exclusion_data {
+      exclusion.data(),
+      static_cast<UINT>(
+        static_cast<std::size_t>(target_width) * sizeof(std::uint32_t)
+      ),
+      0u
+    };
+    ComPtr<ID3D11Texture2D> exclusion_texture;
+    ComPtr<ID3D11ShaderResourceView> exclusion_srv;
+    if (FAILED(warp.device->CreateTexture2D(
+          &exclusion_desc, &exclusion_data, &exclusion_texture
+        )) ||
+        FAILED(warp.device->CreateShaderResourceView(
+          exclusion_texture.Get(), nullptr, &exclusion_srv
+        ))) {
+      return false;
+    }
+
+    D3D11_TEXTURE2D_DESC output_desc = input_desc;
+    output_desc.Usage = D3D11_USAGE_DEFAULT;
+    output_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    ComPtr<ID3D11Texture2D> output_texture;
+    ComPtr<ID3D11UnorderedAccessView> output_uav;
+    if (FAILED(warp.device->CreateTexture2D(
+          &output_desc, nullptr, &output_texture
+        )) ||
+        FAILED(warp.device->CreateUnorderedAccessView(
+          output_texture.Get(), nullptr, &output_uav
+        ))) {
+      return false;
+    }
+
+    const auto create_constant_buffer = [&]<typename T>(
+                                          const T &words,
+                                          ComPtr<ID3D11Buffer> &buffer) {
+      D3D11_BUFFER_DESC description {};
+      description.ByteWidth = sizeof(T);
+      description.Usage = D3D11_USAGE_IMMUTABLE;
+      description.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+      D3D11_SUBRESOURCE_DATA initial_data {&words, 0u, 0u};
+      return SUCCEEDED(warp.device->CreateBuffer(
+        &description, &initial_data, &buffer
+      ));
+    };
+    std::array<std::uint32_t, 16> common_constants {};
+    common_constants[0] = target_width;
+    common_constants[1] = target_height;
+    common_constants[11] = target_width;
+    common_constants[12] = target_height;
+    namespace v2 = models::depth_coordinate_v2;
+    const v2::constants_t v2_constants {
+      v2::model_calibrations.front().raw_coordinate_scale,
+      v2::collapse_abs_epsilon,
+      v2::far_tau,
+      v2::near_log_tau,
+      v2::requested_gain_for_config(v2::reference_pop_strength),
+      v2::max_horizontal_slope,
+      v2::direct_container_limit,
+      v2::convergence_curve_default,
+    };
+    const std::array<std::uint32_t, 4> source_constants {
+      source_region.left,
+      source_region.top,
+      source_region.right,
+      source_region.bottom,
+    };
+    ComPtr<ID3D11Buffer> common_buffer;
+    ComPtr<ID3D11Buffer> v2_buffer;
+    ComPtr<ID3D11Buffer> source_buffer;
+    if (!create_constant_buffer(common_constants, common_buffer) ||
+        !create_constant_buffer(v2_constants, v2_buffer) ||
+        !create_constant_buffer(source_constants, source_buffer)) {
+      return false;
+    }
+
+    ID3D11ShaderResourceView *srvs[] = {
+      candidate_srv.Get(), source_srv, exclusion_srv.Get()
+    };
+    ID3D11Buffer *constant_buffers[] = {
+      common_buffer.Get(), v2_buffer.Get(), source_buffer.Get()
+    };
+    const float unwritten[4] = {
+      std::numeric_limits<float>::quiet_NaN(),
+      std::numeric_limits<float>::quiet_NaN(),
+      std::numeric_limits<float>::quiet_NaN(),
+      std::numeric_limits<float>::quiet_NaN(),
+    };
+    warp.context->ClearUnorderedAccessViewFloat(output_uav.Get(), unwritten);
+    warp.context->CSSetShader(shader, nullptr, 0u);
+    warp.context->CSSetShaderResources(0u, 3u, srvs);
+    warp.context->CSSetUnorderedAccessViews(
+      0u, 1u, output_uav.GetAddressOf(), nullptr
+    );
+    warp.context->CSSetConstantBuffers(0u, 3u, constant_buffers);
+    warp.context->Dispatch(
+      (target_width + 7u) / 8u,
+      (target_height + 7u) / 8u,
+      1u
+    );
+
+    ID3D11ShaderResourceView *null_srvs[3] = {nullptr, nullptr, nullptr};
+    ID3D11UnorderedAccessView *null_uav = nullptr;
+    warp.context->CSSetShaderResources(0u, 3u, null_srvs);
+    warp.context->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
+    warp.context->CSSetShader(nullptr, nullptr, 0u);
+
+    D3D11_TEXTURE2D_DESC staging_desc = output_desc;
+    staging_desc.Usage = D3D11_USAGE_STAGING;
+    staging_desc.BindFlags = 0u;
+    staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> staging_texture;
+    if (FAILED(warp.device->CreateTexture2D(
+          &staging_desc, nullptr, &staging_texture
+        ))) {
+      return false;
+    }
+    warp.context->CopyResource(staging_texture.Get(), output_texture.Get());
+    D3D11_MAPPED_SUBRESOURCE mapped {};
+    if (FAILED(warp.context->Map(
+          staging_texture.Get(), 0u, D3D11_MAP_READ, 0u, &mapped
+        ))) {
+      return false;
+    }
+    result.resize(element_count);
+    for (std::uint32_t y = 0u; y < target_height; ++y) {
+      const auto *row = reinterpret_cast<const float *>(
+        static_cast<const std::byte *>(mapped.pData) +
+        static_cast<std::size_t>(y) * mapped.RowPitch
+      );
+      std::copy_n(
+        row,
+        target_width,
+        result.begin() + static_cast<std::size_t>(y) * target_width
+      );
+    }
+    warp.context->Unmap(staging_texture.Get(), 0u);
+    return true;
+  }
 }  // namespace
+
+TEST(DepthCoordinateV2GpuTest, DirectRoiOwnershipMatchesPriorCropTextureBitwise) {
+  warp_device_t warp;
+  ASSERT_TRUE(warp.initialize());
+
+  const std::filesystem::path shader_path =
+    std::filesystem::path(SUNSHINE_SHADERS_DIR) /
+    "depth_coordinate_v2_ownership_cs.hlsl";
+  ComPtr<ID3DBlob> shader_blob;
+  ComPtr<ID3DBlob> errors;
+  const HRESULT compile_status = D3DCompileFromFile(
+    shader_path.c_str(),
+    nullptr,
+    D3D_COMPILE_STANDARD_FILE_INCLUDE,
+    "main",
+    "cs_5_0",
+    D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
+    0u,
+    &shader_blob,
+    &errors
+  );
+  ASSERT_TRUE(SUCCEEDED(compile_status))
+    << (errors ? static_cast<const char *>(errors->GetBufferPointer()) :
+                 "no compiler diagnostics");
+  ComPtr<ID3D11ComputeShader> shader;
+  ASSERT_TRUE(SUCCEEDED(warp.device->CreateComputeShader(
+    shader_blob->GetBufferPointer(),
+    shader_blob->GetBufferSize(),
+    nullptr,
+    &shader
+  )));
+
+  constexpr std::uint32_t target_width = 64u;
+  constexpr std::uint32_t target_height = 36u;
+  constexpr std::uint32_t source_width = 320u;
+  constexpr std::uint32_t source_height = 180u;
+  constexpr std::uint32_t source_left = 17u;
+  constexpr std::uint32_t source_top = 13u;
+  constexpr std::uint32_t texture_width = 360u;
+  constexpr std::uint32_t texture_height = 220u;
+  constexpr std::uint32_t split = target_width / 2u;
+  constexpr std::uint32_t source_scale = source_width / target_width;
+  constexpr std::uint32_t source_edge = split * source_scale - 2u;
+  static_assert(source_width % target_width == 0u);
+
+  std::vector<float> candidate(
+    static_cast<std::size_t>(target_width) * target_height,
+    -0.039f
+  );
+  for (std::uint32_t y = 0u; y < target_height; ++y) {
+    std::fill(
+      candidate.begin() + static_cast<std::size_t>(y) * target_width + split,
+      candidate.begin() + static_cast<std::size_t>(y + 1u) * target_width,
+      0.039f
+    );
+  }
+
+  std::vector<std::uint32_t> crop_pixels(
+    static_cast<std::size_t>(source_width) * source_height,
+    0xff101010u
+  );
+  for (std::uint32_t y = 0u; y < source_height; ++y) {
+    std::fill(
+      crop_pixels.begin() + static_cast<std::size_t>(y) * source_width + source_edge,
+      crop_pixels.begin() + static_cast<std::size_t>(y + 1u) * source_width,
+      0xfff0f0f0u
+    );
+  }
+  std::vector<std::uint32_t> full_pixels(
+    static_cast<std::size_t>(texture_width) * texture_height,
+    0xffff00ffu
+  );
+  for (std::uint32_t y = 0u; y < source_height; ++y) {
+    std::copy_n(
+      crop_pixels.begin() + static_cast<std::size_t>(y) * source_width,
+      source_width,
+      full_pixels.begin() +
+        static_cast<std::size_t>(source_top + y) * texture_width + source_left
+    );
+  }
+
+  ComPtr<ID3D11Texture2D> crop_texture;
+  ComPtr<ID3D11ShaderResourceView> crop_srv;
+  ASSERT_TRUE(create_bgra_source_srv(
+    warp.device.Get(),
+    source_width,
+    source_height,
+    crop_pixels,
+    crop_texture,
+    crop_srv
+  ));
+  ComPtr<ID3D11Texture2D> full_texture;
+  ComPtr<ID3D11ShaderResourceView> full_srv;
+  ASSERT_TRUE(create_bgra_source_srv(
+    warp.device.Get(),
+    texture_width,
+    texture_height,
+    full_pixels,
+    full_texture,
+    full_srv
+  ));
+
+  std::vector<float> crop_result;
+  std::vector<float> direct_result;
+  ASSERT_TRUE(dispatch_depth_coordinate_v2_ownership(
+    warp,
+    shader.Get(),
+    target_width,
+    target_height,
+    crop_srv.Get(),
+    {0u, 0u, source_width, source_height},
+    candidate,
+    crop_result
+  ));
+  ASSERT_TRUE(dispatch_depth_coordinate_v2_ownership(
+    warp,
+    shader.Get(),
+    target_width,
+    target_height,
+    full_srv.Get(),
+    {
+      source_left,
+      source_top,
+      source_left + source_width,
+      source_top + source_height,
+    },
+    candidate,
+    direct_result
+  ));
+
+  ASSERT_EQ(direct_result.size(), crop_result.size());
+  std::size_t refined = 0u;
+  for (std::size_t index = 0u; index < crop_result.size(); ++index) {
+    EXPECT_EQ(
+      std::bit_cast<std::uint32_t>(direct_result[index]),
+      std::bit_cast<std::uint32_t>(crop_result[index])
+    ) << "ownership index=" << index;
+    refined += crop_result[index] > candidate[index] + 1.0e-7f ? 1u : 0u;
+  }
+  EXPECT_GT(refined, target_height / 2u)
+    << "The parity fixture must exercise translated full-resolution color loads";
+}
 
 TEST(DepthCoordinateV2GpuTest, LimiterIsExactLeastRowwiseLipschitzMajorant) {
   namespace v2 = models::depth_coordinate_v2;

@@ -2712,6 +2712,7 @@ namespace models {
     UINT reduce_groups = 0;  // threadgroups for the shared moments/range reduction
     int cb_color_mode = -1;  // input_color_space baked into constant buffers
     depth_tensor_content_rect_t cb_tensor_content {};
+    depth_source_rect_t cb_source_region {};
     // TensorRT retains dynamic shape and tensor-address bindings on an execution context. The
     // interop pointer is allowed to change after any map, so cache each piece independently and
     // rebind only the values that actually changed.
@@ -2722,9 +2723,7 @@ namespace models {
     CUdeviceptr ocr_bound_input = 0;
     CUdeviceptr ocr_bound_output = 0;
 
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> rgb_to_nchw_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> rgb_to_nchw_content_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> rgb_to_nchw_pad_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_fused_preprocess_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_pad_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_minmax_ema_cs;
@@ -2746,7 +2745,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_locator_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_condition_prepare_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_condition_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_compare_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_history_owner_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_scene_seed_cs;
@@ -2757,6 +2755,9 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_reuse_depth_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> gpu_trace_cs;
     Microsoft::WRL::ComPtr<ID3D11Buffer> cbuffer;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> source_region_cbuffer;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> fused_preprocess_force_cbuffer;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> fused_preprocess_compare_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> depth_coordinate_v2_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_preprocess_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_resolve_cbuffer;
@@ -3004,8 +3005,11 @@ namespace models {
         requested.analysis_generation = 0u;
         return requested;
       }
-      if (!requested.valid() || requested.width() != input_desc.Width ||
-          requested.height() != input_desc.Height) {
+      // Live ROI analysis samples the exact rectangle directly from the retained full matched
+      // frame. A crop-sized SRV is deliberately rejected: accepting both layouts would make the
+      // same placement metadata select two different physical coordinate systems.
+      if (!requested.valid() || requested.source_width != input_desc.Width ||
+          requested.source_height != input_desc.Height) {
         return {};
       }
       return requested;
@@ -3493,11 +3497,6 @@ namespace models {
       const bool shaders_ready =
         create_shader(
           sources,
-          host_sbs_shader_cache::host_sbs_near_identical_compare,
-          near_identical_compare_cs
-        ) &&
-        create_shader(
-          sources,
           host_sbs_shader_cache::host_sbs_near_identical_resolve,
           near_identical_resolve_cs
         ) &&
@@ -3541,7 +3540,6 @@ namespace models {
         near_identical_cbuffer.ReleaseAndGetAddressOf()
       ));
       if (!constants_ready) {
-        near_identical_compare_cs.Reset();
         near_identical_resolve_cs.Reset();
         near_identical_history_owner_cs.Reset();
         near_identical_scene_seed_cs.Reset();
@@ -4155,7 +4153,7 @@ namespace models {
                  request.baseline_frame_id == last_postprocessed_frame_id;
     }
 
-    bool dispatch_near_identical_detector(
+    bool prepare_near_identical_detector(
       const gpu_adaptive_reuse_request &request,
       const std::uint64_t current_frame_id,
       const depth_input_region_t &input_region,
@@ -4173,7 +4171,7 @@ namespace models {
         !gpu_undecided_baseline_authorized(request) ||
         !processed_input_domain.matches_analysis_domain(input_region, color_space) ||
         !input_region.tensor_content.valid({target_w, target_h}) ||
-        !near_identical_compare_cs || !near_identical_resolve_cs ||
+        !near_identical_fused_preprocess_cs || !near_identical_resolve_cs ||
         !near_identical_cbuffer || !near_identical_tile_uav ||
         !near_identical_tile_srv || !near_identical_history_owner_srv ||
         !near_identical_gpu_decision_buf || !near_identical_gpu_decision_uav ||
@@ -4218,8 +4216,8 @@ namespace models {
         sizeof(transaction_request)
       );
       // One full-record write invalidates every prior proposal/receipt and every indirect arg
-      // before this frame's compare. Optional preprocess starts at zero and is enabled only by a
-      // matching authenticated proposal; a missing/malformed proposal cannot waste OCR work or
+      // before this frame's fused evidence pass. Optional preprocess starts at zero and is enabled
+      // only by a matching authenticated proposal; a missing/malformed proposal cannot waste OCR work or
       // authorize stale OCR output even though CUDA safely fails the mandatory depth branch open.
       context->UpdateSubresource(
         near_identical_gpu_decision_buf.Get(),
@@ -4229,25 +4227,25 @@ namespace models {
         0u,
         0u
       );
+      return true;
+    }
+
+    bool dispatch_near_identical_detector() {
+      if (
+        !near_identical_detector_available ||
+        !near_identical_resolve_cs ||
+        !near_identical_cbuffer || !near_identical_tile_srv ||
+        !near_identical_history_owner_srv ||
+        !near_identical_gpu_decision_uav || !cbuffer
+      ) {
+        return false;
+      }
+
       ID3D11Buffer *constant_buffers[2] = {
         cbuffer.Get(),
         near_identical_cbuffer.Get(),
       };
-      ID3D11ShaderResourceView *compare_inputs[2] = {
-        tensor_in_srv.Get(),
-        tensor_previous_input_srv.Get(),
-      };
-      context->CSSetShader(near_identical_compare_cs.Get(), nullptr, 0u);
       context->CSSetConstantBuffers(0u, 2u, constant_buffers);
-      context->CSSetShaderResources(0u, 2u, compare_inputs);
-      context->CSSetUnorderedAccessViews(
-        0u, 1u, near_identical_tile_uav.GetAddressOf(), nullptr
-      );
-      context->Dispatch(tile_group_width, tile_group_height, 1u);
-      ID3D11ShaderResourceView *null_compare_inputs[2] = {};
-      ID3D11UnorderedAccessView *null_compare_output = nullptr;
-      context->CSSetUnorderedAccessViews(0u, 1u, &null_compare_output, nullptr);
-      context->CSSetShaderResources(0u, 2u, null_compare_inputs);
 
       ID3D11ShaderResourceView *resolve_inputs[4] = {
         nullptr,
@@ -4827,11 +4825,11 @@ namespace models {
         model_coordinate_calibration->preprocess.source_closure_schema ==
           host_sbs_shader_cache::source_closure_schema &&
         model_coordinate_calibration->preprocess.source_file ==
-          host_sbs_shader_cache::rgb_to_nchw.filename &&
+          host_sbs_shader_cache::host_sbs_near_identical_fused_preprocess.filename &&
         model_coordinate_calibration->preprocess.source_entrypoint ==
-          host_sbs_shader_cache::rgb_to_nchw.entrypoint &&
+          host_sbs_shader_cache::host_sbs_near_identical_fused_preprocess.entrypoint &&
         model_coordinate_calibration->preprocess.source_target ==
-          host_sbs_shader_cache::rgb_to_nchw.target &&
+          host_sbs_shader_cache::host_sbs_near_identical_fused_preprocess.target &&
         model_coordinate_calibration->preprocess.source_compile_flags ==
           host_sbs_shader_cache::shader_compile_flags &&
         model_coordinate_calibration->preprocess.source_macro_count == 0u &&
@@ -4901,17 +4899,14 @@ namespace models {
 
       // Create every compute object from bytecode keyed by the one authenticated producer
       // snapshot. Startup prewarm populates these exact cache entries, so the constructor neither
-      // recompiles rgb_to_nchw from its identity-only calibration closure nor compiles the shared
+      // recompiles the fused preprocess from its identity-only calibration closure nor compiles the shared
       // analysis roots once as "core" and then again as V2.
       using producer_shader_e = host_sbs_shader_cache::producer_shader_e;
       const auto shader_output = [&](const producer_shader_e shader) ->
         Microsoft::WRL::ComPtr<ID3D11ComputeShader> * {
         switch (shader) {
-          case producer_shader_e::rgb_to_nchw: return std::addressof(rgb_to_nchw_cs);
-          case producer_shader_e::rgb_to_nchw_content:
-            return std::addressof(rgb_to_nchw_content_cs);
-          case producer_shader_e::rgb_to_nchw_pad:
-            return std::addressof(rgb_to_nchw_pad_cs);
+          case producer_shader_e::host_sbs_near_identical_fused_preprocess:
+            return std::addressof(near_identical_fused_preprocess_cs);
           case producer_shader_e::buffer_to_tex: return std::addressof(buffer_to_tex_cs);
           case producer_shader_e::buffer_to_tex_pad:
             return std::addressof(buffer_to_tex_pad_cs);
@@ -4969,6 +4964,32 @@ namespace models {
         return;
       }
 
+      // The sole preprocess shader runs for every root. Two immutable mode buffers make the
+      // comparison decision explicit at b1 without rebuilding per-frame state: force/bootstrap
+      // exits after canonical NCHW production, while GPU-undecided continues into tile evidence.
+      const auto create_fused_mode_cbuffer = [&] (
+                                                const std::uint32_t enabled,
+                                                Microsoft::WRL::ComPtr<ID3D11Buffer> &output
+                                              ) {
+        const std::array<std::uint32_t, 4u> constants {enabled, 0u, 0u, 0u};
+        D3D11_BUFFER_DESC desc {};
+        desc.Usage = D3D11_USAGE_IMMUTABLE;
+        desc.ByteWidth = static_cast<UINT>(sizeof(constants));
+        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA data {constants.data(), 0u, 0u};
+        return SUCCEEDED(device->CreateBuffer(
+          &desc, &data, output.ReleaseAndGetAddressOf()
+        ));
+      };
+      if (!create_fused_mode_cbuffer(0u, fused_preprocess_force_cbuffer) ||
+          !create_fused_mode_cbuffer(1u, fused_preprocess_compare_cbuffer)) {
+        parallax_v2_producer_failed = true;
+        BOOST_LOG(error)
+          << "Host SBS fused preprocess mode-buffer initialization failed; "
+             "Host SBS will fail flat.";
+        return;
+      }
+
       parallax_v2_producer_shaders_ready = true;
       parallax_v2_shader_provenance =
         std::make_shared<const parallax_v2_shader_provenance_t>(
@@ -4989,6 +5010,8 @@ namespace models {
         << ", requested gain " << parallax_v2_requested_gain
         << "); completed fields remain separately authenticated before rendering.";
       BOOST_LOG(info) << "Host SBS V2 cut-only GPU analysis enabled.";
+      BOOST_LOG(info)
+        << "Host SBS RGB preprocess + near-identical tile fusion is active for every frame.";
 
       if (!cuda.has_conditional_graph_support()) {
         fail_gpu_conditional_bridge_once(
@@ -4996,6 +5019,7 @@ namespace models {
         );
         return;
       }
+
       initialize_near_identical_detector();
       if (!near_identical_detector_available) {
         fail_gpu_conditional_bridge_once(
@@ -5107,8 +5131,9 @@ namespace models {
 
       const bool analysis_ready =
         depth_scene_cut_evidence_cs && depth_scene_cut_resolve_cs && scene_cut_evidence_uav;
-      valid = engine && exec_context && cu_stream && rgb_to_nchw_cs &&
-              rgb_to_nchw_content_cs && rgb_to_nchw_pad_cs &&
+      valid = engine && exec_context && cu_stream &&
+              near_identical_fused_preprocess_cs &&
+              fused_preprocess_force_cbuffer && fused_preprocess_compare_cbuffer &&
               buffer_to_tex_cs &&
               buffer_to_tex_pad_cs &&
               depth_minmax_ema_cs && depth_hist_cs && depth_valid_history_cs &&
@@ -5997,6 +6022,10 @@ namespace models {
       // safe identity copy; ordinary production pairing always supplies it.
       if (pending_source_srv) {
         context->CSSetShader(depth_coordinate_v2_ownership_cs.Get(), nullptr, 0);
+        context->CSSetConstantBuffers(0u, 1u, cbuffer.GetAddressOf());
+        context->CSSetConstantBuffers(
+          2u, 1u, source_region_cbuffer.GetAddressOf()
+        );
         ID3D11ShaderResourceView *ownership_srvs[3] = {
           depth_coordinate_v2_candidate_srv.Get(),
           pending_source_srv.Get(),
@@ -6688,11 +6717,13 @@ namespace models {
       }
       (void) color_space;  // the pending frame owns its transfer mode
       ensure_cbuffers(pending_color_space, pending_input_region);
-      if (!cbuffer) {
+      ensure_source_region_cbuffer(pending_input_region);
+      if (!cbuffer || !source_region_cbuffer) {
         // A persistent constant-buffer allocation failure must latch terminal like every other
         // resource failure; returning empty without latching leaves the caller retrying at the
         // minimum-FPS cadence forever.
-        BOOST_LOG(error) << "Depth constant-buffer creation failed while finishing a pending frame";
+        BOOST_LOG(error)
+          << "Depth/source-region constant-buffer creation failed while finishing a pending frame";
         mark_terminal_failure();
         return make_result();
       }
@@ -6713,8 +6744,8 @@ namespace models {
       bool model_input_snapshot_valid = false;
       bool coordinate_snapshot_valid = false;
       // Dump 3D binds these immutable tensors to pending_input_region. For a video ROI they are
-      // bound to the crop-local source and its exact tensor content rectangle; the package
-      // separately records the full-source embedding.
+      // bound to the logical crop-local analysis domain and its exact tensor content rectangle;
+      // the package separately records the full-source embedding.
       if (snapshot_debug_inputs) {
         coordinate_snapshot_valid = dispatch_parallax_v2_coordinate_diagnostic();
         raw_snapshot_valid = snapshot_buffer(
@@ -6949,6 +6980,43 @@ namespace models {
       D3D11_SUBRESOURCE_DATA sd = {cb, 0, 0};
       cbuffer.Reset();
       device->CreateBuffer(&cb_desc, &sd, &cbuffer);
+    }
+
+    // Bind the physical rectangle inside the retained full matched frame separately from the
+    // analysis-domain constants. All shader resize/ownership math remains crop-local; only its
+    // final integer Texture2D.Load address receives this offset. Translation changes this buffer
+    // without changing temporal analysis-domain identity.
+    void ensure_source_region_cbuffer(const depth_input_region_t &input_region) {
+      const depth_source_rect_t source_region {
+        input_region.left,
+        input_region.top,
+        input_region.right,
+        input_region.bottom,
+      };
+      if (source_region_cbuffer && cb_source_region == source_region) {
+        return;
+      }
+      if (!source_region_cbuffer) {
+        D3D11_BUFFER_DESC cb_desc {};
+        cb_desc.Usage = D3D11_USAGE_DEFAULT;
+        cb_desc.ByteWidth = 16u;
+        cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        if (FAILED(device->CreateBuffer(
+              &cb_desc, nullptr, &source_region_cbuffer
+            ))) {
+          return;
+        }
+      }
+      const std::array<std::uint32_t, 4> constants {
+        source_region.left,
+        source_region.top,
+        source_region.right,
+        source_region.bottom,
+      };
+      context->UpdateSubresource(
+        source_region_cbuffer.Get(), 0u, nullptr, constants.data(), 0u, 0u
+      );
+      cb_source_region = source_region;
     }
 
     void reset_temporal_state_for_input_domain() {
@@ -7793,8 +7861,13 @@ namespace models {
           return {};
         }
 
-        // Clear depth so the range->pixel EMA initializes from a known value.
+        // Clear depth and model-input history so the sole fused preprocess always observes
+        // initialized storage, including the first force/bootstrap frame. Force mode exits before
+        // reading history; this clear remains defense in depth and defines first compare state.
         const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        context->ClearUnorderedAccessViewFloat(
+          tensor_previous_input_uav.Get(), clear_color
+        );
         context->ClearUnorderedAccessViewFloat(depth_uav.Get(), clear_color);
         context->ClearUnorderedAccessViewFloat(depth_previous_uav.Get(), clear_color);
         context->ClearUnorderedAccessViewFloat(depth_cut_history_uav.Get(), clear_color);
@@ -7829,7 +7902,10 @@ namespace models {
         has_previous_frame ? pending_color_space : color_space,
         has_previous_frame ? pending_input_region : input_region
       );
-      if (!cbuffer) {
+      ensure_source_region_cbuffer(
+        has_previous_frame ? pending_input_region : input_region
+      );
+      if (!cbuffer || !source_region_cbuffer) {
         mark_terminal_failure();
         return {};
       }
@@ -7860,7 +7936,8 @@ namespace models {
         pending_source_srv.Reset();
         // Restore the newly supplied frame's transfer mode before its full-resolution preprocess.
         ensure_cbuffers(color_space, input_region);
-        if (!cbuffer) {
+        ensure_source_region_cbuffer(input_region);
+        if (!cbuffer || !source_region_cbuffer) {
           mark_terminal_failure();
           return {};
         }
@@ -7896,7 +7973,8 @@ namespace models {
             "model-input"
           );
           ensure_cbuffers(color_space, input_region);
-          if (!cbuffer) {
+          ensure_source_region_cbuffer(input_region);
+          if (!cbuffer || !source_region_cbuffer) {
             mark_terminal_failure();
             return {};
           }
@@ -7959,7 +8037,11 @@ namespace models {
       // request/receipt buffer and launches the conditional wrapper. These are mandatory pipeline
       // resources: losing one is terminal rather than a reason to bypass the wrapper.
       if (!ensure_near_identical_detector_resources() ||
-          !ensure_near_identical_decision_interop(cuda)) {
+          !ensure_near_identical_decision_interop(cuda) ||
+          !near_identical_fused_preprocess_cs ||
+          !fused_preprocess_force_cbuffer ||
+          !fused_preprocess_compare_cbuffer ||
+          !tensor_previous_input_srv || !near_identical_tile_uav) {
         if (!terminal_failure) {
           fail_gpu_conditional_bridge_once(
             "mandatory GPU transaction resources or interop are unavailable"
@@ -7995,69 +8077,19 @@ namespace models {
         gpu_undecided_host_candidate ?
           adaptive_reuse_request.gpu_reuse_decision_token :
           next_force_infer_transaction_token();
-      mark_d3d_pre_start(d3d_timer);
-      ID3D11ShaderResourceView *analysis_input_srv = input_srv;
 
-      // 1. D3D11 Compute Shader: Resize & Normalize to NCHW FP32 Buffer (for CURRENT frame)
-      context->CSSetShader(rgb_to_nchw_cs.Get(), nullptr, 0);
-      context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-      context->CSSetShaderResources(0, 1, &analysis_input_srv);
-      ID3D11UnorderedAccessView *preprocess_uavs[3] = {
-        tensor_in_uav.Get(),
-        appearance_ordinal_uav.Get(),
-        tensor_exclusion_uav.Get(),
-      };
-      context->CSSetUnorderedAccessViews(0, 3, preprocess_uavs, nullptr);
-
-      const auto &preprocess_content = input_region.tensor_content;
-      const depth_tensor_shape_t preprocess_shape {target_w, target_h};
-      const auto preprocess_area =
-        static_cast<std::uint64_t>(target_w) * static_cast<std::uint64_t>(target_h);
-      const auto preprocess_content_area =
-        static_cast<std::uint64_t>(preprocess_content.width()) *
-        static_cast<std::uint64_t>(preprocess_content.height());
-      const bool specialize_preprocess_padding =
-        preprocess_content.valid(preprocess_shape) &&
-        !preprocess_content.full(preprocess_shape) &&
-        // The second dispatch has a fixed cost. Keep near-matched source/tensor shapes on the
-        // original one-dispatch path; specialize only when at least one eighth of the expensive
-        // source-footprint evaluations can be replaced with cheap boundary copies.
-        (preprocess_area - preprocess_content_area) * 8u >= preprocess_area;
-      if (specialize_preprocess_padding) {
-        // content_main interprets its dispatch ID as content-local for a padded domain. Keeping
-        // this separate preserves main's common full-content bytecode and dispatch topology.
-        context->CSSetShader(rgb_to_nchw_content_cs.Get(), nullptr, 0);
-        context->Dispatch(
-          (static_cast<UINT>(preprocess_content.width()) + 15u) / 16u,
-          (static_cast<UINT>(preprocess_content.height()) + 15u) / 16u,
-          1u
-        );
-        // The content pass has finished all admitted UAV writes. The lightweight pad entry point
-        // copies NCHW/ordinal bits from clamped boundary cells and writes exclusion=1.
-        context->CSSetShader(rgb_to_nchw_pad_cs.Get(), nullptr, 0);
-        context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
-      } else {
-        // Full-content and defensive invalid-content inputs preserve the original full-grid pass.
-        context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
-      }
-
-      ID3D11UnorderedAccessView *null_uavs[3] = {nullptr, nullptr, nullptr};
-      ID3D11ShaderResourceView *null_srv = nullptr;
-      context->CSSetUnorderedAccessViews(0, 3, null_uavs, nullptr);
-      context->CSSetShaderResources(0, 1, &null_srv);
-
-      // Decide only whether this transaction has a complete optional OCR path. This is host-owned
-      // resource/geometry state, never GPU image evidence. The GPU proposal remains solely
-      // responsible for deciding whether an undecided transaction actually runs that path.
+      // Decide whether this transaction has a complete optional OCR path using host-owned
+      // resource/geometry state only. GPU-undecided must publish its RQST before the fused
+      // preprocess can generate image-derived tile evidence.
       const auto current_ocr_roi = fit_subtitle_analysis_geometry(
-        input_desc.Width,
-        input_desc.Height,
+        input_region.width(),
+        input_region.height(),
         {target_w, target_h},
         input_region.tensor_content
       );
       const std::uint32_t ocr_crop_height = subtitle_ocr_source_crop_height(
-        input_desc.Width,
-        input_desc.Height
+        input_region.width(),
+        input_region.height()
       );
       const bool ocr_interop_available =
         ocr_available && ocr_exec_context && ocr_input_uav && ocr_output_srv &&
@@ -8070,24 +8102,67 @@ namespace models {
         near_identical_ocr_abstain_cs && ocr_cell_stats_srv &&
         ocr_cell_stats_uav && ocr_box_record_uav && ocr_resolve_cbuffer &&
         current_ocr_roi.valid() && ocr_crop_height != 0u &&
-        ocr_crop_height <= input_desc.Height;
-
+        ocr_crop_height <= input_region.height();
       const auto subtitle_work = subtitle_transaction_work(
         accepted_optional_work,
         ocr_frame_eligible
       );
-      // GPU-undecided publishes its dense proposal. CPU-known force-infer publishes a complete
-      // authenticated infer PROP/RQST instead. Both records carry the exact subtitle disposition;
-      // only prepared OCR carries the optional-child request, and every completion consumes CBRG.
-      const bool transaction_published =
-        accepted_submission_class == pending_submission_class_e::gpu_undecided ?
-          dispatch_near_identical_detector(
+      if (gpu_undecided_host_candidate && !prepare_near_identical_detector(
             adaptive_reuse_request,
             frame_id,
             input_region,
             color_space,
             subtitle_work
-          ) :
+          )) {
+        fail_gpu_conditional_bridge_once(
+          "GPU near-identical request preparation failed"
+        );
+        mark_d3d_pre_start(d3d_timer);
+        end_d3d_perf(d3d_timer);
+        return {};
+      }
+
+      mark_d3d_pre_start(d3d_timer);
+      ID3D11ShaderResourceView *analysis_input_srv = input_srv;
+
+      // 1. The one authenticated fused entry point is the only RGB-to-NCHW runtime producer.
+      // Force/bootstrap/debug selects a uniform early exit after canonical preprocessing;
+      // GPU-undecided continues into comparison and tile reduction in the same dispatch.
+      context->CSSetShader(near_identical_fused_preprocess_cs.Get(), nullptr, 0u);
+      ID3D11Buffer *preprocess_cbuffers[3] = {
+        cbuffer.Get(),
+        gpu_undecided_host_candidate ?
+          fused_preprocess_compare_cbuffer.Get() :
+          fused_preprocess_force_cbuffer.Get(),
+        source_region_cbuffer.Get(),
+      };
+      context->CSSetConstantBuffers(0u, 3u, preprocess_cbuffers);
+      ID3D11ShaderResourceView *preprocess_srvs[2] = {
+        analysis_input_srv,
+        tensor_previous_input_srv.Get(),
+      };
+      context->CSSetShaderResources(0, 2, preprocess_srvs);
+      ID3D11UnorderedAccessView *preprocess_uavs[4] = {
+        tensor_in_uav.Get(),
+        appearance_ordinal_uav.Get(),
+        tensor_exclusion_uav.Get(),
+        near_identical_tile_uav.Get(),
+      };
+      context->CSSetUnorderedAccessViews(0, 4, preprocess_uavs, nullptr);
+      context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
+
+      ID3D11UnorderedAccessView *null_uavs[4] = {};
+      ID3D11ShaderResourceView *null_srvs[2] = {};
+      ID3D11Buffer *null_preprocess_cbuffers[3] = {};
+      context->CSSetUnorderedAccessViews(0, 4, null_uavs, nullptr);
+      context->CSSetShaderResources(0, 2, null_srvs);
+      context->CSSetConstantBuffers(0u, 3u, null_preprocess_cbuffers);
+      // GPU-undecided publishes its dense proposal. CPU-known force-infer publishes a complete
+      // authenticated infer PROP/RQST instead. Both records carry the exact subtitle disposition;
+      // only prepared OCR carries the optional-child request, and every completion consumes CBRG.
+      const bool transaction_published =
+        accepted_submission_class == pending_submission_class_e::gpu_undecided ?
+          dispatch_near_identical_detector() :
           publish_force_infer_transaction(
             accepted_transaction_token,
             subtitle_work
@@ -8112,13 +8187,13 @@ namespace models {
       );
       if (ocr_frame_eligible) {
         const std::array<std::uint32_t, 8> ocr_constants {
-          input_desc.Width,
-          input_desc.Height,
-          input_desc.Height - ocr_crop_height,
+          input_region.width(),
+          input_region.height(),
+          input_region.height() - ocr_crop_height,
           ocr_crop_height,
           static_cast<std::uint32_t>(color_space),
-          0u,
-          0u,
+          input_region.left,
+          input_region.top,
           0u,
         };
         context->UpdateSubresource(
@@ -8137,7 +8212,7 @@ namespace models {
           near_identical_gpu_optional_preprocess_byte_offset
         );
         context->CSSetUnorderedAccessViews(0, 1, null_uavs, nullptr);
-        context->CSSetShaderResources(0, 1, &null_srv);
+        context->CSSetShaderResources(0, 1, null_srvs);
         ID3D11Buffer *null_cbuffer = nullptr;
         context->CSSetConstantBuffers(0, 1, &null_cbuffer);
       }

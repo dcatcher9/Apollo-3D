@@ -21,7 +21,7 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     import generate_depth_coordinate_v2_contract as generator  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 36
+DUMP_MANIFEST_SCHEMA = 37
 GPU_TRACE_RING_SCHEMA = 3
 GPU_TRACE_CONTRACT_SCHEMA = 3
 GPU_TRACE_DECODED_SCHEMA = 4
@@ -37,7 +37,7 @@ GPU_TRACE_RING_WORD_COUNT = (
     GPU_TRACE_HEADER_WORD_COUNT + GPU_TRACE_CAPACITY * GPU_TRACE_RECORD_WORD_COUNT)
 GPU_TRACE_RING_BYTE_COUNT = GPU_TRACE_RING_WORD_COUNT * 4
 GPU_TRACE_SOURCE_CLOSURE_SHA256 = (
-    "cbb7618fe8332e444cc106b6d1037a00d9bca126e0885f92651cacebb7e4b33f")
+    "422fe351331310fd7c776a2263932da83121b21ce01f6c9a80192468a3ffad34")
 GPU_TRACE_SHADER_SPEC = ("host_sbs_gpu_trace_cs.hlsl", "main", "cs_5_0")
 GPU_TRACE_DECISION_COOKIE = 0xD1EC15A5
 GPU_TRACE_TOKEN_LOW_COOKIE = 0xA3756C91
@@ -131,16 +131,16 @@ SUBTITLE_LOCATOR_EVENT_NONE = 0
 SUBTITLE_LOCATOR_EVENT_BIRTH = 1
 SUBTITLE_LOCATOR_EVENT_DEATH = 2
 SUBTITLE_LOCATOR_EVENT_HANDOFF = 3
-DEPTH_INPUT_REGION_SCHEMA = 3
+DEPTH_INPUT_REGION_SCHEMA = 4
 WINDOW_REGION_SCHEMA = 1
 WINDOW_REGION_AUTHORITY_KINDS = frozenset({"chromium-video", "foreground-client"})
 SHADOW_STATE_DUMP_SCHEMA = 16
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 2
 LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
-    "fce03acecf9a3fbe7bf237321bb4539c6a18b9fc4e215cfa337ac1221106ed12"
+    "c8a2221d4e47ac5b09881069ff18a4f2abe4ef9a6adb165426c38f27c7cfabe1"
 )
 DIAGNOSTIC_SOURCE_CLOSURE_SHA256 = (
-    "31a8347f2a6b7cf46d09fb27fa8f14042f805f98c3c86e3bee4281a38eb10543"
+    "78aa31a8b4c323e439be55f907285ffe2791cfd21c9a9cfc19574792a5f9e14c"
 )
 _CONTRACT = coordinate_contract.load_contract()
 _CONTRACT_TAG = generator.contract_tag(_CONTRACT)
@@ -1317,7 +1317,7 @@ def validate_depth_input_region_document(
                 padded_fraction != expected_padding or
                 analysis.get("fit_method") !=
                 "centered-integer-contain-with-edge-replicated-excluded-padding" or
-                analysis.get("crop_method") != "same-format D3D11 CopySubresourceRegion" or
+                analysis.get("crop_method") != "direct retained-source rectangle sampling" or
                 analysis.get("scene_analysis_domain") != "inference-rectangle-only" or
                 renderer.get("final_parallax_units") != "roi-local-source-u" or
                 scale != expected_scale):
@@ -2245,8 +2245,9 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     input_descriptor = artifacts.get("depth_input_region.json")
     input_preview_descriptor = artifacts.get("depth_input_source.png")
     expected_input_preview_description = (
-        "Spatially exact full-source or cropped color input submitted to the calibrated "
-        "preprocess; transfer-aware PNG is diagnostic only and never numeric model authority."
+        "Spatially exact full-source preview or post-completion reconstruction of the logical "
+        "ROI source. Live ROI preprocessing samples the retained full matched texture directly; "
+        "this transfer-aware PNG is diagnostic only, while model_input.f32 is numeric authority."
     )
     if (not isinstance(input_summary, dict) or set(input_summary) != {
             "available", "artifact", "mode", "geometry_authority", "renderer_authority"} or

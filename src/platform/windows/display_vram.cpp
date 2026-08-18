@@ -1624,7 +1624,7 @@ namespace platf::dxgi {
                     observation_timestamp_us
                   );
                 auto submitted = depth_estimator->estimate_depth(
-                  matched_candidate_slot->depth_input_srv(),
+                  matched_candidate_slot->analysis_input_srv(),
                   input_color_space,
                   frame_id,
                   snapshot_debug_inputs,
@@ -1632,6 +1632,14 @@ namespace platf::dxgi {
                   optional_work,
                   adaptive_request
                 );
+                if (
+                  diagnostics_enabled &&
+                  matched_candidate_slot->depth_input_region.video_region &&
+                  (submitted.inference_enqueued ||
+                   submitted.gpu_undecided_transaction_enqueued)
+                ) {
+                  ++matched_stats_roi_direct_inputs;
+                }
                 if (
                   completion_finalized_before_admission && est.completed_frame_valid &&
                   !submitted.completed_frame_valid
@@ -2482,8 +2490,42 @@ namespace platf::dxgi {
               est.shadow_final_parallax &&
               v2_renderer_selected &&
               models::parallax_v2_result_is_authenticated(est);
+            if (
+              complete_dump_snapshot && est.input_region.video_region &&
+              !matched_render_slot->depth_crop_srv && matched_render_slot->texture
+            ) {
+              D3D11_TEXTURE2D_DESC completed_source_desc {};
+              matched_render_slot->texture->GetDesc(&completed_source_desc);
+              const models::depth_source_rect_t completed_region {
+                est.input_region.left,
+                est.input_region.top,
+                est.input_region.right,
+                est.input_region.bottom,
+              };
+              // This explicit diagnostic copy targets the exact completed slot after all live
+              // timing has closed. Ordinary ROI analysis never allocates or copies a crop.
+              if (
+                completed_source_desc.Width == est.input_region.source_width &&
+                completed_source_desc.Height == est.input_region.source_height
+              ) {
+                (void) copy_video_depth_crop(
+                  *matched_render_slot,
+                  completed_source_desc,
+                  completed_region
+                );
+              }
+            }
+            const bool dump_roi_source_ready =
+              !complete_dump_snapshot || !est.input_region.video_region ||
+              matched_render_slot->depth_crop_srv;
+            if (complete_dump_snapshot && !dump_roi_source_ready) {
+              BOOST_LOG(warning)
+                << "Dump 3D request rejected: the completed ROI has no exact diagnostic "sv
+                   "source crop; live direct ROI analysis remains active."sv;
+              sbs_dumper.reject_pending_request();
+            }
             const bool dump_frame_valid =
-              complete_dump_snapshot &&
+              complete_dump_snapshot && dump_roi_source_ready &&
               sbs_dumper.prepare_requested_v2_frame(est.completed_frame_id);
             if (dump_frame_valid) {
               ID3D11Buffer *completed_constants = sbs_reprojection_cbuffer.get();
@@ -2524,7 +2566,7 @@ namespace platf::dxgi {
                 sbs_debug::frame dump_frame;
                 dump_frame.source = render_input_srv;
                 dump_frame.depth_input_source =
-                  matched_render_slot->depth_input_srv();
+                  matched_render_slot->dump_depth_input_srv();
                 dump_frame.model_input = est.model_input_snapshot.Get();
                 dump_frame.raw_depth = est.raw_model_depth_snapshot.Get();
                 dump_frame.warp_depth = dump_warp_depth;
@@ -2601,6 +2643,12 @@ namespace platf::dxgi {
                 );
               }
             }
+            if (complete_dump_snapshot && est.input_region.video_region) {
+              // maybe_dump has queued every diagnostic-crop staging copy on this immediate
+              // context. Also release a crop when later geometry preparation rejected the dump.
+              matched_render_slot->depth_crop_srv.reset();
+              matched_render_slot->depth_crop_texture.reset();
+            }
           }
 
           if (diagnostics_enabled) {
@@ -2666,6 +2714,9 @@ namespace platf::dxgi {
                               << matched_stats_video_roi_route_outputs << " ("sv
                               << video_roi_pct << "%) age_ms_avg/max="sv
                               << avg_age_ms << '/' << matched_stats_age_max_ms
+                              << " roi_direct_inputs/dump_copies="sv
+                              << matched_stats_roi_direct_inputs << '/'
+                              << matched_stats_roi_dump_copies
                               << " output_warped_new/packed_repeat/flat="sv
                               << matched_stats_output_warped_new << '/'
                               << matched_stats_output_packed_repeat << '/'
@@ -3334,16 +3385,6 @@ namespace platf::dxgi {
       slot->pending = true;
     }
 
-    struct video_depth_crop_failure_key_t {
-      std::uint32_t width = 0u;
-      std::uint32_t height = 0u;
-      DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-      std::uint32_t sample_count = 0u;
-      std::uint32_t sample_quality = 0u;
-
-      bool operator==(const video_depth_crop_failure_key_t &) const = default;
-    };
-
     struct matched_frame_slot_t {
       texture2d_t texture;
       shader_res_t srv;
@@ -3381,7 +3422,11 @@ namespace platf::dxgi {
       bool gpu_undecided_transaction = false;
       bool pending = false;
 
-      ID3D11ShaderResourceView *depth_input_srv() noexcept {
+      ID3D11ShaderResourceView *analysis_input_srv() noexcept {
+        return srv.get();
+      }
+
+      ID3D11ShaderResourceView *dump_depth_input_srv() noexcept {
         return depth_input_region.video_region ? depth_crop_srv.get() : srv.get();
       }
     };
@@ -4322,23 +4367,8 @@ namespace platf::dxgi {
       const models::depth_source_rect_t &rect
     ) {
       if (!slot.texture || source_desc.MipLevels != 1u || source_desc.ArraySize != 1u ||
-          source_desc.SampleDesc.Count != 1u || !rect.valid()) {
-        return false;
-      }
-
-      const video_depth_crop_failure_key_t failure_key {
-        .width = rect.width(),
-        .height = rect.height(),
-        .format = source_desc.Format,
-        .sample_count = source_desc.SampleDesc.Count,
-        .sample_quality = source_desc.SampleDesc.Quality,
-      };
-      if (
-        video_depth_crop_failure_key &&
-        *video_depth_crop_failure_key == failure_key &&
-        video_depth_crop_retry_frames > 0u
-      ) {
-        --video_depth_crop_retry_frames;
+          source_desc.SampleDesc.Count != 1u || !rect.valid() ||
+          rect.right > source_desc.Width || rect.bottom > source_desc.Height) {
         return false;
       }
 
@@ -4374,24 +4404,15 @@ namespace platf::dxgi {
           );
         }
         if (FAILED(status)) {
-          video_depth_crop_failure_key = failure_key;
-          video_depth_crop_retry_frames = 120u;
-          // A crop allocation failure disables this exact window-region route uniformly across both
-          // matched slots. Keeping a cached crop in only one slot would alternate ROI/full
-          // domains and prevent either asynchronous completion from becoming renderable.
-          for (auto &matched_slot : matched_frame_slots) {
-            matched_slot.depth_crop_srv.reset();
-            matched_slot.depth_crop_texture.reset();
-          }
+          slot.depth_crop_srv.reset();
+          slot.depth_crop_texture.reset();
           BOOST_LOG(warning)
-            << "Host SBS could not allocate the window-region depth crop "sv
+            << "Dump 3D could not allocate its diagnostic window-region source crop "sv
             << rect.width() << 'x' << rect.height() << " [0x"sv
             << util::hex(status).to_string_view()
-            << "]; this frame uses full-source V2."sv;
+            << "]; live ROI analysis remains active and this dump request is rejected."sv;
           return false;
         }
-        video_depth_crop_failure_key.reset();
-        video_depth_crop_retry_frames = 0u;
         slot.depth_crop_texture = std::move(crop_texture);
         slot.depth_crop_srv = std::move(crop_srv);
       }
@@ -4414,6 +4435,9 @@ namespace platf::dxgi {
         0u,
         &source_box
       );
+      if (diagnostics_enabled) {
+        ++matched_stats_roi_dump_copies;
+      }
       return true;
     }
 
@@ -4424,6 +4448,8 @@ namespace platf::dxgi {
     ) {
       slot.depth_video_plan.reset();
       slot.depth_input_region = full_depth_input_region(source_desc);
+      slot.depth_crop_srv.reset();
+      slot.depth_crop_texture.reset();
 
       if (slot.window_region) {
         const auto &region = *slot.window_region;
@@ -4463,7 +4489,7 @@ namespace platf::dxgi {
           source_desc.Height,
           active_shape
         );
-        if (plan && copy_video_depth_crop(slot, source_desc, plan->source_rect)) {
+        if (plan) {
           const auto key = make_domain_key(plan->source_rect);
           slot.depth_input_region = models::depth_input_region_t {
             .source_width = source_desc.Width,
@@ -4482,6 +4508,8 @@ namespace platf::dxgi {
       }
 
       if (!slot.depth_input_region.video_region) {
+        slot.depth_crop_srv.reset();
+        slot.depth_crop_texture.reset();
         if (finalize_full_source) {
           depth_analysis_generation_tracker.select_full_source();
         }
@@ -5334,6 +5362,8 @@ namespace platf::dxgi {
       matched_stats_gpu_followup_host_rejected = 0;
       matched_stats_gpu_followup_force_fallbacks = 0;
       matched_stats_video_roi_route_outputs = 0;
+      matched_stats_roi_direct_inputs = 0;
+      matched_stats_roi_dump_copies = 0;
       matched_stats_output_warped_new = 0;
       matched_stats_output_packed_repeat = 0;
       matched_stats_output_flat = 0;
@@ -5434,8 +5464,6 @@ namespace platf::dxgi {
       live_browser_authority_epoch = 0u;
       interactive_move_size_observed = false;
       browser_roi_not_before = {};
-      video_depth_crop_failure_key.reset();
-      video_depth_crop_retry_frames = 0u;
       last_window_region.reset();
       last_window_region_observer_status.reset();
       last_window_region_mapping_status.reset();
@@ -6183,8 +6211,6 @@ namespace platf::dxgi {
     std::uint64_t live_browser_authority_epoch = 0u;
     bool interactive_move_size_observed = false;
     std::chrono::steady_clock::time_point browser_roi_not_before {};
-    std::optional<video_depth_crop_failure_key_t> video_depth_crop_failure_key;
-    unsigned video_depth_crop_retry_frames = 0u;
     std::optional<sbs_debug::window_region_snapshot> last_window_region;
     std::optional<std::string_view> last_window_region_observer_status;
     std::optional<std::string_view> last_window_region_mapping_status;
@@ -6215,6 +6241,8 @@ namespace platf::dxgi {
     unsigned matched_stats_gpu_followup_host_rejected = 0;
     unsigned matched_stats_gpu_followup_force_fallbacks = 0;
     unsigned matched_stats_video_roi_route_outputs = 0;
+    unsigned matched_stats_roi_direct_inputs = 0;
+    unsigned matched_stats_roi_dump_copies = 0;
     unsigned matched_stats_output_warped_new = 0;
     unsigned matched_stats_output_packed_repeat = 0;
     unsigned matched_stats_output_flat = 0;

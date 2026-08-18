@@ -4201,7 +4201,7 @@ namespace platf::sbs_debug {
           static_cast<float>(region.left) / static_cast<float>(region.source_width) :
         1.0f;
       return {
-        {"schema", 3},
+        {"schema", 4},
         {"capture", "same matched source/color/model/depth/render frame as the parent Dump 3D package"},
         {"role", "authoritative analysis-domain placement and live-render embedding contract"},
         {"matched_frame_id", completed.matched_frame_id},
@@ -4241,7 +4241,7 @@ namespace platf::sbs_debug {
             "centered-integer-contain-with-edge-replicated-excluded-padding" :
             "full-tensor"},
           {"crop_method", roi ?
-            "same-format D3D11 CopySubresourceRegion" : "full-source"},
+            "direct retained-source rectangle sampling" : "full-source"},
           {"scene_analysis_domain", roi ?
             "inference-rectangle-only" : "full-source"},
         }},
@@ -5039,7 +5039,7 @@ namespace platf::sbs_debug {
           true,
           false,
           "model-depth input source preview",
-          "Spatially exact full-source or cropped color input submitted to the calibrated preprocess; transfer-aware PNG is diagnostic only and never numeric model authority."
+          "Spatially exact full-source preview or post-completion reconstruction of the logical ROI source. Live ROI preprocessing samples the retained full matched texture directly; this transfer-aware PNG is diagnostic only, while model_input.f32 is numeric authority."
         );
         artifacts["depth_input_region.json"] = hashed_artifact_description(
           true,
@@ -5548,7 +5548,7 @@ namespace platf::sbs_debug {
             *completed.parallax_v2_shader_provenance
           );
         nlohmann::json manifest {
-          {"schema", 36},
+          {"schema", 37},
           {"capture", "one matched, completed Host-SBS frame"},
           {"capture_status", "complete"},
           {"published_atomically", true},
