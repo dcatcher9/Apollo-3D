@@ -33,6 +33,7 @@
 #ifdef _WIN32
   #include <d3d11.h>
   #include <d3dcompiler.h>
+  #include <src/nvenc/nvenc_d3d11.h>
   #include <wrl/client.h>
 
 namespace platf::dxgi {
@@ -7556,6 +7557,73 @@ TEST(NvencConfigTest, RejectsInvalidOrOverflowingRateControl) {
     true
   ));
 }
+
+#ifdef _WIN32
+namespace {
+
+  class nvenc_d3d11_async_event_probe final: public nvenc::nvenc_d3d11 {
+  public:
+    nvenc_d3d11_async_event_probe():
+        nvenc_d3d11(NV_ENC_DEVICE_TYPE_DIRECTX) {
+    }
+
+    ID3D11Texture2D *get_input_texture() override {
+      return nullptr;
+    }
+
+    void apply_mock_async_capability(int capability) {
+      apply_async_encode_capability(capability);
+    }
+
+    HANDLE event_handle() const {
+      return async_event_handle;
+    }
+
+  protected:
+    bool create_and_register_input_buffer() override {
+      return false;
+    }
+  };
+
+  bool is_live_process_handle(HANDLE handle) {
+    DWORD flags = 0;
+    return handle && GetHandleInformation(handle, &flags) != FALSE;
+  }
+
+}  // namespace
+
+TEST(NvencAsyncEventLifetimeTest, CapabilityZeroClosesAndClearsEventImmediately) {
+  HANDLE event = nullptr;
+  {
+    nvenc_d3d11_async_event_probe encoder;
+    event = encoder.event_handle();
+    ASSERT_TRUE(is_live_process_handle(event));
+
+    encoder.apply_mock_async_capability(0);
+
+    EXPECT_EQ(encoder.event_handle(), nullptr);
+    EXPECT_FALSE(is_live_process_handle(event));
+  }
+
+  EXPECT_FALSE(is_live_process_handle(event));
+}
+
+TEST(NvencAsyncEventLifetimeTest, CapabilityOneKeepsEventUntilOwnerDestruction) {
+  HANDLE event = nullptr;
+  {
+    nvenc_d3d11_async_event_probe encoder;
+    event = encoder.event_handle();
+    ASSERT_TRUE(is_live_process_handle(event));
+
+    encoder.apply_mock_async_capability(1);
+
+    EXPECT_EQ(encoder.event_handle(), event);
+    EXPECT_TRUE(is_live_process_handle(event));
+  }
+
+  EXPECT_FALSE(is_live_process_handle(event));
+}
+#endif
 
 TEST(NvencBitrateReconfigureTest, AdmitsOnlyExactGeometryAndCadence) {
   const video::video_mode_change_t active {

@@ -145,6 +145,15 @@ namespace nvenc {
     // Use destroy_encoder() instead
   }
 
+  void nvenc_base::apply_async_encode_capability(int capability) {
+    if (!async_event_handle || capability != 0) {
+      return;
+    }
+
+    BOOST_LOG(warning) << "NvEnc: gpu doesn't support async encode";
+    release_async_event();
+  }
+
   bool nvenc_base::create_encoder(
     const nvenc_config &config,
     const video::config_t &client_config,
@@ -267,9 +276,10 @@ namespace nvenc {
       return false;
     }
 
-    if (async_event_handle && !get_encoder_cap(NV_ENC_CAPS_ASYNC_ENCODE_SUPPORT)) {
-      BOOST_LOG(warning) << "NvEnc: gpu doesn't support async encode";
-      async_event_handle = nullptr;
+    if (async_event_handle) {
+      apply_async_encode_capability(
+        get_encoder_cap(NV_ENC_CAPS_ASYNC_ENCODE_SUPPORT)
+      );
     }
 
     encoder_params.rfi = get_encoder_cap(NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION);

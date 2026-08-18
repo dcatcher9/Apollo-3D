@@ -11,6 +11,7 @@
 
   // local includes
   #include "nvenc_base.h"
+  #include "src/utility.h"
 
 namespace nvenc {
 
@@ -35,8 +36,10 @@ namespace nvenc {
   protected:
     bool init_library() override;
     bool wait_for_async_event(uint32_t timeout_ms) override;
+    void release_async_event() override;
 
   private:
+    util::safe_ptr_v2<void, BOOL, CloseHandle> owned_async_event;
     HMODULE dll = nullptr;
   };
 

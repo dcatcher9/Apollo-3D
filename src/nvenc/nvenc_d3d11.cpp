@@ -12,7 +12,8 @@ namespace nvenc {
 
   nvenc_d3d11::nvenc_d3d11(NV_ENC_DEVICE_TYPE device_type):
       nvenc_base(device_type) {
-    async_event_handle = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    owned_async_event.reset(CreateEvent(nullptr, FALSE, FALSE, nullptr));
+    async_event_handle = owned_async_event.get();
   }
 
   nvenc_d3d11::~nvenc_d3d11() {
@@ -20,9 +21,7 @@ namespace nvenc {
       FreeLibrary(dll);
       dll = nullptr;
     }
-    if (async_event_handle) {
-      CloseHandle(async_event_handle);
-    }
+    release_async_event();
   }
 
   bool nvenc_d3d11::init_library() {
@@ -85,6 +84,11 @@ namespace nvenc {
 
   bool nvenc_d3d11::wait_for_async_event(uint32_t timeout_ms) {
     return WaitForSingleObject(async_event_handle, timeout_ms) == WAIT_OBJECT_0;
+  }
+
+  void nvenc_d3d11::release_async_event() {
+    async_event_handle = nullptr;
+    owned_async_event.reset();
   }
 
 }  // namespace nvenc

@@ -138,6 +138,17 @@ namespace nvenc {
       return false;
     }
 
+    /**
+     * @brief Close the platform-owned async event and clear `async_event_handle`.
+     *        Derived classes that install an async event must implement this operation and call it
+     *        from their destructor. The base also calls it when the selected codec reports that
+     *        asynchronous encoding is unsupported.
+     */
+    virtual void release_async_event() = 0;
+
+    /** Apply the driver's asynchronous-encode capability to the optional event. */
+    void apply_async_encode_capability(int capability);
+
     bool nvenc_failed(NVENCSTATUS status);
 
     const NV_ENC_DEVICE_TYPE device_type;
