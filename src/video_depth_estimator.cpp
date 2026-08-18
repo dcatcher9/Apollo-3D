@@ -2748,10 +2748,7 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_history_owner_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_scene_seed_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_postprocess_args_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader>
-      near_identical_optional_postprocess_args_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_ocr_abstain_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_finalize_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_reuse_depth_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> gpu_trace_cs;
     Microsoft::WRL::ComPtr<ID3D11Buffer> cbuffer;
@@ -3512,18 +3509,8 @@ namespace models {
         ) &&
         create_shader(
           sources,
-          host_sbs_shader_cache::host_sbs_near_identical_postprocess_args,
-          near_identical_postprocess_args_cs
-        ) &&
-        create_shader(
-          sources,
-          host_sbs_shader_cache::host_sbs_near_identical_optional_postprocess_args,
-          near_identical_optional_postprocess_args_cs
-        ) &&
-        create_shader(
-          sources,
-          host_sbs_shader_cache::host_sbs_near_identical_ocr_abstain,
-          near_identical_ocr_abstain_cs
+          host_sbs_shader_cache::host_sbs_near_identical_finalize,
+          near_identical_finalize_cs
         ) &&
         create_shader(
           sources,
@@ -3543,9 +3530,7 @@ namespace models {
         near_identical_resolve_cs.Reset();
         near_identical_history_owner_cs.Reset();
         near_identical_scene_seed_cs.Reset();
-        near_identical_postprocess_args_cs.Reset();
-        near_identical_optional_postprocess_args_cs.Reset();
-        near_identical_ocr_abstain_cs.Reset();
+        near_identical_finalize_cs.Reset();
         near_identical_reuse_depth_cs.Reset();
         near_identical_cbuffer.Reset();
         log_near_identical_detector_failure_once(
@@ -4327,52 +4312,44 @@ namespace models {
       );
     }
 
-    bool dispatch_near_identical_postprocess_args() {
+    bool dispatch_near_identical_finalizer() {
+      const bool subtitle_publication_expected =
+        cuda_conditional_graph::work_flags_value(pending_subtitle_work) != 0u;
       if (
-        !near_identical_optional_postprocess_args_cs ||
+        !near_identical_finalize_cs ||
         !near_identical_gpu_decision_uav ||
         !near_identical_gpu_decision_buf || !near_identical_gpu_dispatch_buf ||
         !near_identical_cbuffer || !cbuffer ||
-        pending_wrapper_transaction_token == 0u
+        pending_wrapper_transaction_token == 0u ||
+        (subtitle_publication_expected &&
+         (!ocr_box_record_uav || !ocr_resolve_cbuffer ||
+          !update_pending_ocr_constants()))
       ) {
         return false;
       }
-      const bool gpu_undecided = gpu_undecided_postprocess_pending();
       update_pending_near_identical_postprocess_constants();
-      ID3D11Buffer *constant_buffers[2] = {
+      ID3D11Buffer *constant_buffers[3] = {
         cbuffer.Get(),
         near_identical_cbuffer.Get(),
+        subtitle_publication_expected ? ocr_resolve_cbuffer.Get() : nullptr,
       };
       ID3D11UnorderedAccessView *outputs[4] = {
         nullptr,
-        nullptr,
+        subtitle_publication_expected ? ocr_box_record_uav.Get() : nullptr,
         nullptr,
         near_identical_gpu_decision_uav.Get(),
       };
-      context->CSSetConstantBuffers(0u, 2u, constant_buffers);
+      context->CSSetConstantBuffers(0u, 3u, constant_buffers);
       context->CSSetUnorderedAccessViews(0u, 4u, outputs, nullptr);
-      context->CSSetShader(
-        near_identical_optional_postprocess_args_cs.Get(), nullptr, 0u
-      );
+      context->CSSetShader(near_identical_finalize_cs.Get(), nullptr, 0u);
       context->Dispatch(1u, 1u, 1u);
-      if (gpu_undecided) {
-        if (!near_identical_postprocess_args_cs) {
-          ID3D11UnorderedAccessView *null_outputs[4] = {};
-          ID3D11Buffer *null_constants[2] = {};
-          context->CSSetUnorderedAccessViews(0u, 4u, null_outputs, nullptr);
-          context->CSSetConstantBuffers(0u, 2u, null_constants);
-          return false;
-        }
-        context->CSSetShader(near_identical_postprocess_args_cs.Get(), nullptr, 0u);
-        context->Dispatch(1u, 1u, 1u);
-      }
       ID3D11UnorderedAccessView *null_outputs[4] = {};
-      ID3D11Buffer *null_constants[2] = {};
+      ID3D11Buffer *null_constants[3] = {};
       context->CSSetUnorderedAccessViews(0u, 4u, null_outputs, nullptr);
-      context->CSSetConstantBuffers(0u, 2u, null_constants);
+      context->CSSetConstantBuffers(0u, 3u, null_constants);
       // CUDA cannot register a DRAWINDIRECT_ARGS buffer. Once the receipt validator has written
-      // every args record into the registerable transaction buffer and unbound its UAV, copy the
-      // complete 256-byte transaction into the D3-only indirect twin consumed below.
+      // every args record and any deterministic abstention into their registerable resources,
+      // copy the complete 256-byte transaction into the D3-only indirect twin consumed below.
       context->CopyResource(
         near_identical_gpu_dispatch_buf.Get(),
         near_identical_gpu_decision_buf.Get()
@@ -6156,8 +6133,8 @@ namespace models {
 
     bool dispatch_ocr_postprocess() {
       const bool optional_child_armed = std::exchange(pending_ocr_submitted, false);
-      if (!near_identical_ocr_abstain_cs || !near_identical_gpu_dispatch_buf ||
-          !ocr_box_record_uav || !update_pending_ocr_constants()) {
+      if (!near_identical_gpu_dispatch_buf || !ocr_box_record_uav ||
+          !ocr_resolve_cbuffer) {
         return false;
       }
       const bool optional_postprocess_ready =
@@ -6197,22 +6174,11 @@ namespace models {
         context->CSSetUnorderedAccessViews(1u, 1u, &null_uav, nullptr);
       }
 
-      // Every authenticated subtitle observation publishes exactly one current OCR8 record. A
-      // fully authenticated OOCR receipt consumes the current TensorRT output above; a scheduled
-      // observation without that receipt takes the deterministic abstention fallback. Ordinary
-      // work is infer-coupled, while cadence-due work may publish alongside depth reuse.
-      context->CSSetShader(near_identical_ocr_abstain_cs.Get(), nullptr, 0u);
-      context->CSSetConstantBuffers(2u, 1u, ocr_resolve_cbuffer.GetAddressOf());
-      context->CSSetUnorderedAccessViews(
-        1u, 1u, ocr_box_record_uav.GetAddressOf(), nullptr
-      );
-      context->DispatchIndirect(
-        near_identical_gpu_dispatch_buf.Get(),
-        near_identical_gpu_infer_without_optional_one_byte_offset
-      );
-      context->CSSetUnorderedAccessViews(1u, 1u, &null_uav, nullptr);
-      ID3D11Buffer *null_buffers[3] = {};
-      context->CSSetConstantBuffers(0u, 3u, null_buffers);
+      // The detector finalizer already published the exact-current abstention for every
+      // authenticated observation without OOCR. Only a matching optional receipt reaches the
+      // resolver above, so there is no second fallback dispatch here.
+      ID3D11Buffer *null_buffer = nullptr;
+      context->CSSetConstantBuffers(0u, 1u, &null_buffer);
       return true;
     }
 
@@ -7136,12 +7102,12 @@ namespace models {
       pending_gpu_trace_append = {};
       const bool subtitle_publication_branch_opaque =
         gpu_undecided_postprocess_pending();
-      if (!dispatch_near_identical_postprocess_args()) {
-        // A conditional completion without a valid args writer must not consume possibly stale
-        // tensor_out or mutate history. This is a mandatory active-path resource failure: retain
-        // prior GPU state but terminally fail flat instead of publishing a fake completion.
+      if (!dispatch_near_identical_finalizer()) {
+        // A conditional completion without its single receipt/argument/abstention finalizer must
+        // not consume possibly stale tensor_out or mutate history. This is a mandatory active-path
+        // resource failure: retain prior GPU state but terminally fail flat.
         fail_gpu_conditional_bridge_once(
-          "GPU-undecided postprocess argument publication failed"
+          "GPU-undecided postprocess finalization failed"
         );
         return false;
       }
@@ -8099,7 +8065,7 @@ namespace models {
          accepted_optional_work == depth_optional_work_mode_e::ordinary_due) &&
         ocr_interop_available && ocr_preprocess_cs && ocr_preprocess_cbuffer &&
         ocr_box_cells_cs && ocr_box_resolve_cs &&
-        near_identical_ocr_abstain_cs && ocr_cell_stats_srv &&
+        near_identical_finalize_cs && ocr_cell_stats_srv &&
         ocr_cell_stats_uav && ocr_box_record_uav && ocr_resolve_cbuffer &&
         current_ocr_roi.valid() && ocr_crop_height != 0u &&
         ocr_crop_height <= input_region.height();

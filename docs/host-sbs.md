@@ -716,8 +716,12 @@ work-mode-gated optional-OCR handle: ordinary OCR is infer-only, while due OCR i
 depth branch. D3D11 buffers marked `DRAWINDIRECT_ARGS` are not
 CUDA-registerable on the production driver, so the registerable transaction has a same-sized
 D3D-only indirect twin. D3D copies it once after proposal resolution for authenticated OCR
-preprocessing (ordinary infer or cadence-due), and again after CUDA unmap and expected-work/receipt
-resolution for all postprocess consumers. The twelve shapes are `reduce`, `one`, `grid16`, `grid8`, `columns`, `rows`,
+preprocessing (ordinary infer or cadence-due). After CUDA unmap, one direct one-thread detector
+finalizer independently validates the stronger depth receipt and the subtitle receipt, writes every
+postprocess shape, and publishes the exact-current OCR abstention when optional output is not
+authorized. It never writes force-infer depth shapes; those stages remain host-authored direct
+dispatches. D3D then copies the finalized transaction once for all indirect consumers. The twelve
+shapes are `reduce`, `one`, `grid16`, `grid8`, `columns`, `rows`,
 `reuse_grid16`, the pre-CUDA OCR-preprocess/post-CUDA complete-conditioner grid, optional OCR cells,
 optional OCR resolve, subtitle-record, and observation-one.
 The
@@ -854,7 +858,7 @@ its depth inference branch and leaves optional OCR TensorRT dormant. Invalid und
 request/receipt evidence cannot advance authenticated depth or subtitle postprocess state. Cleanup
 failure quarantines the affected graph and interop resources. The detector closure is pinned
 independently at SHA-256
-`03cc27be7dfc31c2cba69044ad8e4bd14fe8846df0cf66392ec9215b0eddff18`; a source snapshot or closure
+`68126ae7871f6999da1a88a0b800a1f03f9e75dd346bc4596a9d71b5d1232006`; a source snapshot or closure
 mismatch therefore fails the stream flat instead of disabling adaptive reuse invisibly.
 
 The detector deliberately prefers reuse within the stated depth bounds. A thin, small, localized,

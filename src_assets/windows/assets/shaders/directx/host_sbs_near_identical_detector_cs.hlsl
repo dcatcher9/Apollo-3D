@@ -43,8 +43,9 @@ cbuffer NearIdenticalConstants : register(b1) {
     uint near_identical_timestamp_padding1;
 };
 
-// Bound only for the tiny OCR8 current-abstention helper. Keeping this entry point in this
-// independently authenticated closure avoids changing the canonical OCR producer closure.
+// Bound only for the detector finalizer's exact-current OCR8 abstention publication. Keeping this
+// publication in the independently authenticated detector closure avoids changing the canonical
+// OCR producer closure.
 cbuffer NearIdenticalOcrConstants : register(b2) {
     uint near_identical_ocr_frame_low;
     uint near_identical_ocr_frame_high;
@@ -283,6 +284,92 @@ bool NearIdenticalSubtitleReceiptValid(
     optional_ocr = receipt_valid &&
         optional_marker == NEAR_IDENTICAL_OPTIONAL_RECEIPT_MAGIC;
     return receipt_valid;
+}
+
+// Depth authorization is deliberately stronger than subtitle authorization. The depth branch
+// consumes the owner/tile/reduction authority that made this transaction GPU-undecided, while the
+// independently clocked subtitle branch authenticates only its exact request/receipt disposition.
+bool NearIdenticalDepthReceiptValid(out uint decision) {
+    decision = NearIdenticalDecision.Load(NEAR_IDENTICAL_DECISION_OFFSET);
+    uint decision_token_low = NearIdenticalDecision.Load(
+        NEAR_IDENTICAL_DECISION_TOKEN_LOW_OFFSET);
+    uint decision_token_high = NearIdenticalDecision.Load(
+        NEAR_IDENTICAL_DECISION_TOKEN_HIGH_OFFSET);
+    uint request_token_low = NearIdenticalDecision.Load(
+        NEAR_IDENTICAL_REQUEST_TOKEN_LOW_OFFSET);
+    uint request_token_high = NearIdenticalDecision.Load(
+        NEAR_IDENTICAL_REQUEST_TOKEN_HIGH_OFFSET);
+    bool constants_valid =
+        near_identical_request_flags == NEAR_IDENTICAL_REQUEST_AUTHORIZED &&
+        near_identical_tile_group_width == (target_w + 15u) / 16u &&
+        near_identical_tile_group_height == (target_h + 15u) / 16u &&
+        near_identical_tile_group_count ==
+            near_identical_tile_group_width * near_identical_tile_group_height &&
+        near_identical_reduce_groups == NearIdenticalExpectedReduceGroups() &&
+        near_identical_stream_frame_delta > 0u &&
+        near_identical_stream_frame_delta <= 65535u &&
+        NearIdenticalOwnerIsNewer() &&
+        NearIdenticalWorkValid(near_identical_expected_work) &&
+        near_identical_expected_work_cookie ==
+            (near_identical_expected_work == 0u ? 0u :
+             near_identical_expected_work ^ NEAR_IDENTICAL_WORK_FLAGS_COOKIE) &&
+        request_token_low == near_identical_request_token_low &&
+        request_token_high == near_identical_request_token_high;
+    uint request_work_flags = NearIdenticalDecision.Load(
+        NEAR_IDENTICAL_REQUEST_WORK_FLAGS_OFFSET);
+    bool request_work_valid = NearIdenticalWorkValid(request_work_flags) &&
+        request_work_flags == near_identical_expected_work &&
+        NearIdenticalDecision.Load(NEAR_IDENTICAL_REQUEST_WORK_FLAGS_COOKIE_OFFSET) ==
+            (request_work_flags == 0u ?
+                0u : request_work_flags ^ NEAR_IDENTICAL_WORK_FLAGS_COOKIE) &&
+        NearIdenticalDecision.Load(NEAR_IDENTICAL_REQUEST_RESERVED_OFFSET) == 0u;
+    uint receipt_optional = NearIdenticalDecision.Load(
+        NEAR_IDENTICAL_DECISION_RESERVED_OFFSET);
+    return constants_valid &&
+        NearIdenticalDecision.Load(NEAR_IDENTICAL_DECISION_MAGIC_OFFSET) ==
+            NEAR_IDENTICAL_RECEIPT_MAGIC &&
+        NearIdenticalDecision.Load(NEAR_IDENTICAL_REQUEST_MAGIC_OFFSET) ==
+            NEAR_IDENTICAL_REQUEST_MAGIC &&
+        (decision == NEAR_IDENTICAL_DECISION_REUSE ||
+         decision == NEAR_IDENTICAL_DECISION_INFER) &&
+        NearIdenticalDecision.Load(NEAR_IDENTICAL_DECISION_COOKIE_OFFSET) ==
+            (decision ^ NEAR_IDENTICAL_DECISION_COOKIE ^ receipt_optional) &&
+        decision_token_low == request_token_low &&
+        decision_token_high == request_token_high &&
+        (request_token_low != 0u || request_token_high != 0u) &&
+        NearIdenticalDecision.Load(NEAR_IDENTICAL_DECISION_TOKEN_LOW_COOKIE_OFFSET) ==
+            (decision_token_low ^ NEAR_IDENTICAL_TOKEN_LOW_COOKIE) &&
+        NearIdenticalDecision.Load(NEAR_IDENTICAL_DECISION_TOKEN_HIGH_COOKIE_OFFSET) ==
+            (decision_token_high ^ NEAR_IDENTICAL_TOKEN_HIGH_COOKIE) &&
+        NearIdenticalDecision.Load(NEAR_IDENTICAL_REQUEST_TOKEN_LOW_COOKIE_OFFSET) ==
+            (request_token_low ^ NEAR_IDENTICAL_TOKEN_LOW_COOKIE) &&
+        NearIdenticalDecision.Load(NEAR_IDENTICAL_REQUEST_TOKEN_HIGH_COOKIE_OFFSET) ==
+            (request_token_high ^ NEAR_IDENTICAL_TOKEN_HIGH_COOKIE) &&
+        request_work_valid &&
+        (receipt_optional == 0u ||
+         (receipt_optional == NEAR_IDENTICAL_OPTIONAL_RECEIPT_MAGIC &&
+          ((request_work_flags == NEAR_IDENTICAL_WORK_OPTIONAL_OCR &&
+            decision == NEAR_IDENTICAL_DECISION_INFER) ||
+           request_work_flags == NEAR_IDENTICAL_WORK_OPTIONAL_OCR_DUE)));
+}
+
+void NearIdenticalWriteOcrAbstention() {
+    [loop]
+    for (uint word = 0u; word < V2_OCR_RECORD_WORD_COUNT; ++word) {
+        NearIdenticalOcrRecord[word] = 0u;
+    }
+    NearIdenticalOcrRecord[0u] = V2_OCR_RECORD_SCHEMA;
+    NearIdenticalOcrRecord[1u] = V2_OCR_RECORD_TAG;
+    NearIdenticalOcrRecord[5u] = near_identical_ocr_frame_low;
+    NearIdenticalOcrRecord[6u] = near_identical_ocr_frame_high;
+    NearIdenticalOcrRecord[7u] = near_identical_ocr_analysis_generation_low;
+    NearIdenticalOcrRecord[8u] = near_identical_ocr_analysis_generation_high;
+    NearIdenticalOcrRecord[9u] = near_identical_ocr_source_width;
+    NearIdenticalOcrRecord[10u] = near_identical_ocr_source_height;
+    NearIdenticalOcrRecord[11u] = near_identical_ocr_field_width;
+    NearIdenticalOcrRecord[12u] = near_identical_ocr_field_height;
+    NearIdenticalOcrRecord[13u] = near_identical_ocr_roi_top;
+    NearIdenticalOcrRecord[14u] = near_identical_ocr_roi_bottom;
 }
 
 [numthreads(1, 1, 1)]
@@ -557,12 +644,12 @@ void resolve_main(uint3 group_thread : SV_GroupThreadID) {
     }
 }
 
-// Every wrapper launch validates the root receipt before OCR output may be consumed. Subtitle work
-// has an independently authenticated request disposition. Ordinary work remains infer-coupled;
-// cadence-due OCR publishes on either depth branch. A missing optional
-// receipt on an authorized publication falls open to an exact current abstention.
+// The joined CUDA root has completed and every interop resource is unmapped. One direct finalizer
+// independently validates depth and subtitle authority, publishes every postprocess shape, and
+// writes an exact-current abstention whenever no authenticated optional OCR receipt may be
+// consumed. Force-infer depth work remains host-authored and therefore skips the indirect shapes.
 [numthreads(1, 1, 1)]
-void optional_postprocess_args_main(uint3 dispatch_thread : SV_DispatchThreadID) {
+void finalize_main(uint3 dispatch_thread : SV_DispatchThreadID) {
     uint decision;
     uint request_work_flags;
     bool optional_ocr;
@@ -611,138 +698,56 @@ void optional_postprocess_args_main(uint3 dispatch_thread : SV_DispatchThreadID)
         run_observation ? 1u : 0u,
         1u,
         1u);
-    DeviceMemoryBarrier();
-}
-
-// After CUDA unmap, enable inference postprocess only for a matching authenticated CBRG receipt.
-[numthreads(1, 1, 1)]
-void postprocess_args_main(uint3 dispatch_thread : SV_DispatchThreadID) {
-    uint decision = NearIdenticalDecision.Load(NEAR_IDENTICAL_DECISION_OFFSET);
-    uint decision_token_low = NearIdenticalDecision.Load(
-        NEAR_IDENTICAL_DECISION_TOKEN_LOW_OFFSET);
-    uint decision_token_high = NearIdenticalDecision.Load(
-        NEAR_IDENTICAL_DECISION_TOKEN_HIGH_OFFSET);
-    uint request_token_low = NearIdenticalDecision.Load(
-        NEAR_IDENTICAL_REQUEST_TOKEN_LOW_OFFSET);
-    uint request_token_high = NearIdenticalDecision.Load(
-        NEAR_IDENTICAL_REQUEST_TOKEN_HIGH_OFFSET);
-    bool constants_valid =
-        near_identical_request_flags == NEAR_IDENTICAL_REQUEST_AUTHORIZED &&
-        near_identical_tile_group_width == (target_w + 15u) / 16u &&
-        near_identical_tile_group_height == (target_h + 15u) / 16u &&
-        near_identical_tile_group_count ==
-            near_identical_tile_group_width * near_identical_tile_group_height &&
-        near_identical_reduce_groups == NearIdenticalExpectedReduceGroups() &&
-        near_identical_stream_frame_delta > 0u &&
-        near_identical_stream_frame_delta <= 65535u &&
-        NearIdenticalOwnerIsNewer() &&
-        NearIdenticalWorkValid(near_identical_expected_work) &&
-        near_identical_expected_work_cookie ==
-            (near_identical_expected_work == 0u ? 0u :
-             near_identical_expected_work ^ NEAR_IDENTICAL_WORK_FLAGS_COOKIE) &&
-        request_token_low == near_identical_request_token_low &&
-        request_token_high == near_identical_request_token_high;
-    uint request_work_flags = NearIdenticalDecision.Load(
-        NEAR_IDENTICAL_REQUEST_WORK_FLAGS_OFFSET);
-    bool request_work_valid = NearIdenticalWorkValid(request_work_flags) &&
-        request_work_flags == near_identical_expected_work &&
-        NearIdenticalDecision.Load(NEAR_IDENTICAL_REQUEST_WORK_FLAGS_COOKIE_OFFSET) ==
-            (request_work_flags == 0u ?
-                0u : request_work_flags ^ NEAR_IDENTICAL_WORK_FLAGS_COOKIE) &&
-        NearIdenticalDecision.Load(NEAR_IDENTICAL_REQUEST_RESERVED_OFFSET) == 0u;
-    uint receipt_optional = NearIdenticalDecision.Load(
-        NEAR_IDENTICAL_DECISION_RESERVED_OFFSET);
-    bool receipt_valid = constants_valid &&
-        NearIdenticalDecision.Load(NEAR_IDENTICAL_DECISION_MAGIC_OFFSET) ==
-            NEAR_IDENTICAL_RECEIPT_MAGIC &&
-        NearIdenticalDecision.Load(NEAR_IDENTICAL_REQUEST_MAGIC_OFFSET) ==
-            NEAR_IDENTICAL_REQUEST_MAGIC &&
-        (decision == NEAR_IDENTICAL_DECISION_REUSE ||
-         decision == NEAR_IDENTICAL_DECISION_INFER) &&
-        NearIdenticalDecision.Load(NEAR_IDENTICAL_DECISION_COOKIE_OFFSET) ==
-            (decision ^ NEAR_IDENTICAL_DECISION_COOKIE ^ receipt_optional) &&
-        decision_token_low == request_token_low &&
-        decision_token_high == request_token_high &&
-        (request_token_low != 0u || request_token_high != 0u) &&
-        NearIdenticalDecision.Load(NEAR_IDENTICAL_DECISION_TOKEN_LOW_COOKIE_OFFSET) ==
-            (decision_token_low ^ NEAR_IDENTICAL_TOKEN_LOW_COOKIE) &&
-        NearIdenticalDecision.Load(NEAR_IDENTICAL_DECISION_TOKEN_HIGH_COOKIE_OFFSET) ==
-            (decision_token_high ^ NEAR_IDENTICAL_TOKEN_HIGH_COOKIE) &&
-        NearIdenticalDecision.Load(NEAR_IDENTICAL_REQUEST_TOKEN_LOW_COOKIE_OFFSET) ==
-            (request_token_low ^ NEAR_IDENTICAL_TOKEN_LOW_COOKIE) &&
-        NearIdenticalDecision.Load(NEAR_IDENTICAL_REQUEST_TOKEN_HIGH_COOKIE_OFFSET) ==
-            (request_token_high ^ NEAR_IDENTICAL_TOKEN_HIGH_COOKIE) &&
-        request_work_valid &&
-        (receipt_optional == 0u ||
-         (receipt_optional == NEAR_IDENTICAL_OPTIONAL_RECEIPT_MAGIC &&
-          ((request_work_flags == NEAR_IDENTICAL_WORK_OPTIONAL_OCR &&
-            decision == NEAR_IDENTICAL_DECISION_INFER) ||
-           request_work_flags == NEAR_IDENTICAL_WORK_OPTIONAL_OCR_DUE)));
-    bool run_infer = receipt_valid && decision == NEAR_IDENTICAL_DECISION_INFER;
-    // The depth textures are rotated before these arguments are consumed. A malformed opaque
-    // receipt cannot authorize current inference state, but it must still restore the retained
-    // normalized field into the new target. This bounded hold is device-owned and advances none
-    // of the inference, scene, history, OCR, SLR, or ownership state.
-    bool hold_previous_depth = !run_infer;
-    NearIdenticalWriteDispatchArgs(
-        NEAR_IDENTICAL_INFER_REDUCE_OFFSET,
-        run_infer ? near_identical_reduce_groups : 0u,
-        1u,
-        1u);
-    NearIdenticalWriteDispatchArgs(
-        NEAR_IDENTICAL_INFER_ONE_OFFSET, run_infer ? 1u : 0u, 1u, 1u);
-    NearIdenticalWriteDispatchArgs(
-        NEAR_IDENTICAL_INFER_GRID16_OFFSET,
-        run_infer ? (target_w + 15u) / 16u : 0u,
-        run_infer ? (target_h + 15u) / 16u : 1u,
-        1u);
-    NearIdenticalWriteDispatchArgs(
-        NEAR_IDENTICAL_INFER_GRID8_OFFSET,
-        run_infer ? (target_w + 7u) / 8u : 0u,
-        run_infer ? (target_h + 7u) / 8u : 1u,
-        1u);
-    NearIdenticalWriteDispatchArgs(
-        NEAR_IDENTICAL_INFER_COLUMNS_OFFSET,
-        run_infer ? target_w : 0u,
-        1u,
-        1u);
-    NearIdenticalWriteDispatchArgs(
-        NEAR_IDENTICAL_INFER_ROWS_OFFSET,
-        run_infer ? target_h : 0u,
-        1u,
-        1u);
-    NearIdenticalWriteDispatchArgs(
-        NEAR_IDENTICAL_REUSE_GRID16_OFFSET,
-        hold_previous_depth ? (target_w + 15u) / 16u : 0u,
-        hold_previous_depth ? (target_h + 15u) / 16u : 1u,
-        1u);
-    DeviceMemoryBarrier();
-}
-
-void NearIdenticalWriteOcrAbstention() {
-    [loop]
-    for (uint word = 0u; word < V2_OCR_RECORD_WORD_COUNT; ++word) {
-        NearIdenticalOcrRecord[word] = 0u;
+    if (run_record) {
+        NearIdenticalWriteOcrAbstention();
     }
-    NearIdenticalOcrRecord[0u] = V2_OCR_RECORD_SCHEMA;
-    NearIdenticalOcrRecord[1u] = V2_OCR_RECORD_TAG;
-    NearIdenticalOcrRecord[5u] = near_identical_ocr_frame_low;
-    NearIdenticalOcrRecord[6u] = near_identical_ocr_frame_high;
-    NearIdenticalOcrRecord[7u] = near_identical_ocr_analysis_generation_low;
-    NearIdenticalOcrRecord[8u] = near_identical_ocr_analysis_generation_high;
-    NearIdenticalOcrRecord[9u] = near_identical_ocr_source_width;
-    NearIdenticalOcrRecord[10u] = near_identical_ocr_source_height;
-    NearIdenticalOcrRecord[11u] = near_identical_ocr_field_width;
-    NearIdenticalOcrRecord[12u] = near_identical_ocr_field_height;
-    NearIdenticalOcrRecord[13u] = near_identical_ocr_roi_top;
-    NearIdenticalOcrRecord[14u] = near_identical_ocr_roi_bottom;
-}
 
-// Exact-frame ordinary OCR miss. This entry is dispatched only for an authenticated infer whose
-// optional OCR child did not produce a consumable receipt, or for the force-known fallback above.
-[numthreads(1, 1, 1)]
-void ocr_abstain_main(uint3 dispatch_thread : SV_DispatchThreadID) {
-    NearIdenticalWriteOcrAbstention();
+    // A force-infer root runs every depth postprocess stage with host-authored direct dispatches.
+    // Only an opaque GPU-undecided root may replace these records with receipt-gated arguments.
+    if (near_identical_request_flags == NEAR_IDENTICAL_REQUEST_AUTHORIZED) {
+        uint depth_decision;
+        bool depth_receipt_valid = NearIdenticalDepthReceiptValid(depth_decision);
+        bool run_infer =
+            depth_receipt_valid && depth_decision == NEAR_IDENTICAL_DECISION_INFER;
+        // The depth textures are rotated before these arguments are consumed. A malformed opaque
+        // receipt cannot authorize current inference state, but it must still restore the retained
+        // normalized field into the new target. This bounded hold advances no inference, scene,
+        // history, OCR, SLR, or ownership state.
+        bool hold_previous_depth = !run_infer;
+        NearIdenticalWriteDispatchArgs(
+            NEAR_IDENTICAL_INFER_REDUCE_OFFSET,
+            run_infer ? near_identical_reduce_groups : 0u,
+            1u,
+            1u);
+        NearIdenticalWriteDispatchArgs(
+            NEAR_IDENTICAL_INFER_ONE_OFFSET, run_infer ? 1u : 0u, 1u, 1u);
+        NearIdenticalWriteDispatchArgs(
+            NEAR_IDENTICAL_INFER_GRID16_OFFSET,
+            run_infer ? (target_w + 15u) / 16u : 0u,
+            run_infer ? (target_h + 15u) / 16u : 1u,
+            1u);
+        NearIdenticalWriteDispatchArgs(
+            NEAR_IDENTICAL_INFER_GRID8_OFFSET,
+            run_infer ? (target_w + 7u) / 8u : 0u,
+            run_infer ? (target_h + 7u) / 8u : 1u,
+            1u);
+        NearIdenticalWriteDispatchArgs(
+            NEAR_IDENTICAL_INFER_COLUMNS_OFFSET,
+            run_infer ? target_w : 0u,
+            1u,
+            1u);
+        NearIdenticalWriteDispatchArgs(
+            NEAR_IDENTICAL_INFER_ROWS_OFFSET,
+            run_infer ? target_h : 0u,
+            1u,
+            1u);
+        NearIdenticalWriteDispatchArgs(
+            NEAR_IDENTICAL_REUSE_GRID16_OFFSET,
+            hold_previous_depth ? (target_w + 15u) / 16u : 0u,
+            hold_previous_depth ? (target_h + 15u) / 16u : 1u,
+            1u);
+    }
+    DeviceMemoryBarrier();
 }
 
 [numthreads(16, 16, 1)]

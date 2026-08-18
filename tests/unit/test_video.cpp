@@ -677,7 +677,7 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
   ASSERT_TRUE(p010_y_shader);
   EXPECT_EQ(cache::parallax_v2_live_renderer_specs.size(), 2u);
   EXPECT_EQ(cache::parallax_v2_p010_y_specs.size(), 1u);
-  EXPECT_EQ(cache::near_identical_detector_specs.size(), 7u);
+  EXPECT_EQ(cache::near_identical_detector_specs.size(), 5u);
   EXPECT_EQ(cache::sbs_flat_fallback_specs.size(), 2u);
   EXPECT_EQ(cache::parallax_v2_live_diagnostic_specs.size(), 2u);
 }

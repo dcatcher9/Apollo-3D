@@ -373,7 +373,7 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   // scene, history, OCR, and SLR authority.
   const auto dispatch_begin = estimator.find("void dispatch_infer_postprocess(");
   const auto dispatch_end = estimator.find(
-    "bool dispatch_near_identical_postprocess_args()",
+    "bool dispatch_near_identical_finalizer()",
     dispatch_begin
   );
   ASSERT_NE(dispatch_begin, std::string::npos);
@@ -385,25 +385,41 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   );
   EXPECT_NE(dispatch_body.find("context->Dispatch(direct_x, direct_y, direct_z)"), std::string::npos);
   EXPECT_NE(dispatch_body.find("context->DispatchIndirect("), std::string::npos);
-  const auto optional_args_begin = estimator.find(
-    "bool dispatch_near_identical_postprocess_args()"
+  const auto finalizer_begin = estimator.find(
+    "bool dispatch_near_identical_finalizer()"
   );
-  const auto optional_args_end = estimator.find(
-    "void dispatch_near_identical_reuse_depth()", optional_args_begin
+  const auto finalizer_end = estimator.find(
+    "void dispatch_near_identical_reuse_depth()", finalizer_begin
   );
-  ASSERT_NE(optional_args_begin, std::string::npos);
-  ASSERT_NE(optional_args_end, std::string::npos);
-  const auto optional_args_body = estimator.substr(
-    optional_args_begin, optional_args_end - optional_args_begin
+  ASSERT_NE(finalizer_begin, std::string::npos);
+  ASSERT_NE(finalizer_end, std::string::npos);
+  const auto finalizer_body = estimator.substr(
+    finalizer_begin, finalizer_end - finalizer_begin
   );
-  EXPECT_NE(optional_args_body.find("context->Dispatch(1u, 1u, 1u)"), std::string::npos);
-  EXPECT_NE(
-    optional_args_body.find("near_identical_optional_postprocess_args_cs.Get()"),
+  const auto one_direct_dispatch = finalizer_body.find("context->Dispatch(1u, 1u, 1u)");
+  ASSERT_NE(one_direct_dispatch, std::string::npos);
+  EXPECT_EQ(
+    finalizer_body.find("context->Dispatch(1u, 1u, 1u)", one_direct_dispatch + 1u),
     std::string::npos
   );
-  EXPECT_NE(optional_args_body.find("if (gpu_undecided)"), std::string::npos);
   EXPECT_NE(
-    optional_args_body.find("near_identical_postprocess_args_cs.Get()"),
+    finalizer_body.find("near_identical_finalize_cs.Get()"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    finalizer_body.find("ocr_box_record_uav.Get()"),
+    std::string::npos
+  );
+  EXPECT_NE(finalizer_body.find("update_pending_ocr_constants()"), std::string::npos);
+  EXPECT_EQ(estimator.find("near_identical_optional_postprocess_args_cs"), std::string::npos);
+  EXPECT_EQ(estimator.find("near_identical_postprocess_args_cs"), std::string::npos);
+  EXPECT_EQ(estimator.find("near_identical_ocr_abstain_cs"), std::string::npos);
+  EXPECT_EQ(shader.find("optional_postprocess_args_main"), std::string::npos);
+  EXPECT_EQ(shader.find("postprocess_args_main"), std::string::npos);
+  EXPECT_EQ(shader.find("ocr_abstain_main"), std::string::npos);
+  EXPECT_NE(shader.find("void finalize_main("), std::string::npos);
+  EXPECT_NE(
+    shader.find("word < V2_OCR_RECORD_WORD_COUNT"),
     std::string::npos
   );
   EXPECT_EQ(estimator.find("postprocess_temporal_reset"), std::string::npos);
@@ -503,6 +519,9 @@ namespace {
 
   using decision_words_t =
     std::array<std::uint32_t, models::near_identical_gpu_decision_word_count>;
+  using ocr_record_words_t = std::array<
+    std::uint32_t,
+    models::depth_coordinate_v2::subtitle_ocr_record_word_count>;
   using tile_evidence_t = std::array<std::uint32_t, 4>;
   using tile_records_t = std::array<tile_evidence_t, tile_group_count>;
 
@@ -602,13 +621,7 @@ namespace {
           !compile(shader_path, "resolve_main", resolve_shader_, error) ||
           !compile(shader_path, "history_owner_main", history_owner_shader_, error) ||
           !compile(shader_path, "scene_seed_main", scene_seed_shader_, error) ||
-          !compile(shader_path, "postprocess_args_main", args_shader_, error) ||
-          !compile(
-            shader_path,
-            "optional_postprocess_args_main",
-            optional_args_shader_,
-            error
-          )) {
+          !compile(shader_path, "finalize_main", finalize_shader_, error)) {
         return initialize_result_e::failed;
       }
 
@@ -628,6 +641,11 @@ namespace {
       constants_desc.ByteWidth = 4u * sizeof(std::uint32_t);
       if (FAILED(device_->CreateBuffer(&constants_desc, nullptr, &source_region_constants_))) {
         error = "could not create source-region constant buffer";
+        return initialize_result_e::failed;
+      }
+      constants_desc.ByteWidth = 16u * sizeof(std::uint32_t);
+      if (FAILED(device_->CreateBuffer(&constants_desc, nullptr, &ocr_constants_))) {
+        error = "could not create OCR finalizer constant buffer";
         return initialize_result_e::failed;
       }
       const auto create_fused_mode = [&] (
@@ -667,6 +685,13 @@ namespace {
             scene_evidence_buffer_,
             scene_evidence_srv_,
             scene_evidence_uav_
+          ) ||
+          !create_structured_output(
+            models::depth_coordinate_v2::subtitle_ocr_record_word_count,
+            sizeof(std::uint32_t),
+            ocr_record_buffer_,
+            ocr_record_srv_,
+            ocr_record_uav_
           )) {
         error = "could not create near-identical GPU buffers";
         return initialize_result_e::failed;
@@ -1095,7 +1120,7 @@ namespace {
       return true;
     }
 
-    bool resolve_postprocess_args(
+    bool finalize_depth_receipt(
       const models::near_identical_gpu_branch_e branch,
       const bool valid_receipt,
       decision_words_t &decision,
@@ -1123,6 +1148,7 @@ namespace {
         decision_buffer_.Get(), 0u, nullptr, decision.data(), 0u, 0u
       );
       update_depth_constants();
+      update_ocr_constants();
       update_detector_constants(
         1u,
         tile_group_width,
@@ -1134,15 +1160,18 @@ namespace {
         1u,
         reduce_groups
       );
-      ID3D11Buffer *constants[2] = {depth_constants_.Get(), detector_constants_.Get()};
-      ID3D11UnorderedAccessView *outputs[6] = {
-        nullptr, nullptr, nullptr, decision_uav_.Get(), nullptr, scene_evidence_uav_.Get(),
+      ID3D11Buffer *constants[3] = {
+        depth_constants_.Get(), detector_constants_.Get(), ocr_constants_.Get(),
       };
-      context_->CSSetShader(args_shader_.Get(), nullptr, 0u);
-      context_->CSSetConstantBuffers(0u, 2u, constants);
+      ID3D11UnorderedAccessView *outputs[6] = {
+        nullptr, ocr_record_uav_.Get(), nullptr, decision_uav_.Get(), nullptr,
+        scene_evidence_uav_.Get(),
+      };
+      context_->CSSetShader(finalize_shader_.Get(), nullptr, 0u);
+      context_->CSSetConstantBuffers(0u, 3u, constants);
       context_->CSSetUnorderedAccessViews(0u, 6u, outputs, nullptr);
       context_->Dispatch(1u, 1u, 1u);
-      unbind(0u, 6u, 2u);
+      unbind(0u, 6u, 3u);
       return read_decision(decision, error);
     }
 
@@ -1155,7 +1184,7 @@ namespace {
       return read_decision(decision, error);
     }
 
-    bool resolve_optional_postprocess_args(
+    bool finalize_subtitle_receipt(
       const models::near_identical_gpu_branch_e branch,
       const bool valid_receipt,
       const bool optional_receipt,
@@ -1166,7 +1195,8 @@ namespace {
       const std::uint64_t constants_token = request_token,
       const std::uint32_t request_work = models::near_identical_work_optional_ocr,
       const bool bind_optional_cookie = true,
-      const std::uint32_t expected_work = std::numeric_limits<std::uint32_t>::max()
+      const std::uint32_t expected_work = std::numeric_limits<std::uint32_t>::max(),
+      const std::uint32_t reduce_groups = reduction_group_count
     ) {
       if (!read_decision(decision, error)) return false;
       const auto resolved = static_cast<std::uint32_t>(branch);
@@ -1208,6 +1238,7 @@ namespace {
         decision_buffer_.Get(), 0u, nullptr, decision.data(), 0u, 0u
       );
       update_depth_constants();
+      update_ocr_constants();
       update_detector_constants(
         force_infer ? 2u : 1u,
         tile_group_width,
@@ -1217,20 +1248,34 @@ namespace {
         constants_token,
         current_observation_timestamp_us,
         1u,
-        reduction_group_count,
+        reduce_groups,
         expected_work == std::numeric_limits<std::uint32_t>::max() ?
           request_work : expected_work
       );
-      ID3D11Buffer *constants[2] = {depth_constants_.Get(), detector_constants_.Get()};
-      ID3D11UnorderedAccessView *outputs[4] = {
-        nullptr, nullptr, nullptr, decision_uav_.Get(),
+      ID3D11Buffer *constants[3] = {
+        depth_constants_.Get(), detector_constants_.Get(), ocr_constants_.Get(),
       };
-      context_->CSSetShader(optional_args_shader_.Get(), nullptr, 0u);
-      context_->CSSetConstantBuffers(0u, 2u, constants);
+      ID3D11UnorderedAccessView *outputs[4] = {
+        nullptr, ocr_record_uav_.Get(), nullptr, decision_uav_.Get(),
+      };
+      context_->CSSetShader(finalize_shader_.Get(), nullptr, 0u);
+      context_->CSSetConstantBuffers(0u, 3u, constants);
       context_->CSSetUnorderedAccessViews(0u, 4u, outputs, nullptr);
       context_->Dispatch(1u, 1u, 1u);
-      unbind(0u, 4u, 2u);
+      unbind(0u, 4u, 3u);
       return read_decision(decision, error);
+    }
+
+    void seed_ocr_record(const std::uint32_t value) {
+      ocr_record_words_t words {};
+      words.fill(value);
+      context_->UpdateSubresource(
+        ocr_record_buffer_.Get(), 0u, nullptr, words.data(), 0u, 0u
+      );
+    }
+
+    bool read_ocr_record(ocr_record_words_t &words, std::string &error) {
+      return read_buffer(ocr_record_buffer_.Get(), words, error);
     }
 
   private:
@@ -1385,6 +1430,31 @@ namespace {
       constants[12] = tensor_content.bottom;
       context_->UpdateSubresource(
         depth_constants_.Get(), 0u, nullptr, constants.data(), 0u, 0u
+      );
+    }
+
+    void update_ocr_constants() {
+      constexpr std::uint64_t analysis_generation = 0x1020304050607080ull;
+      const std::array<std::uint32_t, 16> constants {
+        static_cast<std::uint32_t>(current_frame_id),
+        static_cast<std::uint32_t>(current_frame_id >> 32u),
+        static_cast<std::uint32_t>(analysis_generation),
+        static_cast<std::uint32_t>(analysis_generation >> 32u),
+        1920u,
+        1080u,
+        field_width,
+        field_height,
+        900u,
+        180u,
+        content.top,
+        content.bottom,
+        content.left,
+        content.top,
+        content.right,
+        content.bottom,
+      };
+      context_->UpdateSubresource(
+        ocr_constants_.Get(), 0u, nullptr, constants.data(), 0u, 0u
       );
     }
 
@@ -1604,10 +1674,10 @@ namespace {
     ComPtr<ID3D11ComputeShader> resolve_shader_;
     ComPtr<ID3D11ComputeShader> history_owner_shader_;
     ComPtr<ID3D11ComputeShader> scene_seed_shader_;
-    ComPtr<ID3D11ComputeShader> args_shader_;
-    ComPtr<ID3D11ComputeShader> optional_args_shader_;
+    ComPtr<ID3D11ComputeShader> finalize_shader_;
     ComPtr<ID3D11Buffer> depth_constants_;
     ComPtr<ID3D11Buffer> detector_constants_;
+    ComPtr<ID3D11Buffer> ocr_constants_;
     ComPtr<ID3D11Buffer> source_region_constants_;
     ComPtr<ID3D11Buffer> fused_force_constants_;
     ComPtr<ID3D11Buffer> fused_compare_constants_;
@@ -1621,6 +1691,9 @@ namespace {
     ComPtr<ID3D11ShaderResourceView> scene_evidence_srv_;
     ComPtr<ID3D11UnorderedAccessView> scene_evidence_uav_;
     ComPtr<ID3D11Buffer> scene_evidence_staging_;
+    ComPtr<ID3D11Buffer> ocr_record_buffer_;
+    ComPtr<ID3D11ShaderResourceView> ocr_record_srv_;
+    ComPtr<ID3D11UnorderedAccessView> ocr_record_uav_;
     ComPtr<ID3D11Buffer> decision_buffer_;
     ComPtr<ID3D11ShaderResourceView> decision_srv_;
     ComPtr<ID3D11UnorderedAccessView> decision_uav_;
@@ -1764,7 +1837,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, ReductionGroupCountMustMatchTensorShap
   );
 
   ASSERT_TRUE(fixture.run_detector(input, input, history_state(1u), decision, error)) << error;
-  ASSERT_TRUE(fixture.resolve_postprocess_args(
+  ASSERT_TRUE(fixture.finalize_depth_receipt(
     models::near_identical_gpu_branch_e::infer,
     true,
     decision,
@@ -2209,7 +2282,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
     );
   };
 
-  ASSERT_TRUE(fixture.resolve_optional_postprocess_args(
+  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
     models::near_identical_gpu_branch_e::infer,
     true,
     true,
@@ -2224,7 +2297,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
   );
 
   // This is a correctly cookied forged OOCR marker, not merely a missing optional receipt.
-  ASSERT_TRUE(fixture.resolve_optional_postprocess_args(
+  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
     models::near_identical_gpu_branch_e::reuse,
     true,
     true,
@@ -2234,7 +2307,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
   )) << error;
   expect_gates(0u, 0u, 0u, 0u, 0u);
 
-  ASSERT_TRUE(fixture.resolve_optional_postprocess_args(
+  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
     models::near_identical_gpu_branch_e::reuse,
     true,
     false,
@@ -2244,7 +2317,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
   )) << error;
   expect_gates(0u, 0u, 0u, 0u, 0u);
 
-  ASSERT_TRUE(fixture.resolve_optional_postprocess_args(
+  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
     models::near_identical_gpu_branch_e::reuse,
     true,
     true,
@@ -2257,7 +2330,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
   )) << error;
   expect_gates(4u, 1u, 0u, 1u, 7u);
 
-  ASSERT_TRUE(fixture.resolve_optional_postprocess_args(
+  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
     models::near_identical_gpu_branch_e::reuse,
     true,
     false,
@@ -2270,7 +2343,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
   )) << error;
   expect_gates(0u, 0u, 1u, 1u, 7u);
 
-  ASSERT_TRUE(fixture.resolve_optional_postprocess_args(
+  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
     models::near_identical_gpu_branch_e::reuse,
     true,
     false,
@@ -2284,7 +2357,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
   expect_gates(0u, 0u, 1u, 1u, 7u);
 
   // Due observation is branch-independent but can never authenticate an OOCR marker.
-  ASSERT_TRUE(fixture.resolve_optional_postprocess_args(
+  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
     models::near_identical_gpu_branch_e::reuse,
     true,
     true,
@@ -2297,7 +2370,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
   )) << error;
   expect_gates(0u, 0u, 0u, 0u, 0u);
 
-  ASSERT_TRUE(fixture.resolve_optional_postprocess_args(
+  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
     models::near_identical_gpu_branch_e::infer,
     false,
     true,
@@ -2307,7 +2380,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
   )) << error;
   expect_gates(0u, 0u, 0u, 0u, 0u);
 
-  ASSERT_TRUE(fixture.resolve_optional_postprocess_args(
+  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
     models::near_identical_gpu_branch_e::infer,
     false,
     true,
@@ -2317,7 +2390,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
   )) << error;
   expect_gates(0u, 0u, 1u, 1u, 7u);
 
-  ASSERT_TRUE(fixture.resolve_optional_postprocess_args(
+  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
     models::near_identical_gpu_branch_e::infer,
     false,
     false,
@@ -2330,7 +2403,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
   )) << error;
   expect_gates(0u, 0u, 1u, 1u, 7u);
 
-  ASSERT_TRUE(fixture.resolve_optional_postprocess_args(
+  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
     models::near_identical_gpu_branch_e::infer,
     true,
     true,
@@ -2344,7 +2417,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
   )) << error;
   expect_gates(0u, 0u, 0u, 0u, 0u);
 
-  ASSERT_TRUE(fixture.resolve_optional_postprocess_args(
+  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
     models::near_identical_gpu_branch_e::infer,
     true,
     true,
@@ -2356,7 +2429,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
   )) << error;
   expect_gates(0u, 0u, 0u, 0u, 0u);
 
-  ASSERT_TRUE(fixture.resolve_optional_postprocess_args(
+  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
     models::near_identical_gpu_branch_e::infer,
     true,
     true,
@@ -2370,7 +2443,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
   expect_gates(0u, 0u, 0u, 0u, 0u);
 
   // The retired flag-4 mode is correctly cookied but outside the exact work allowlist.
-  ASSERT_TRUE(fixture.resolve_optional_postprocess_args(
+  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
     models::near_identical_gpu_branch_e::reuse,
     true,
     false,
@@ -2383,7 +2456,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
   )) << error;
   expect_gates(0u, 0u, 0u, 0u, 0u);
 
-  ASSERT_TRUE(fixture.resolve_optional_postprocess_args(
+  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
     models::near_identical_gpu_branch_e::reuse,
     true,
     false,
@@ -2395,6 +2468,146 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
     models::near_identical_work_subtitle_observation
   )) << error;
   expect_gates(0u, 0u, 0u, 0u, 0u);
+}
+
+TEST(HostSbsNearIdenticalDetectorGpuTest,
+     FinalizerKeepsDepthSubtitleAndForceAuthorityIndependent) {
+  near_identical_gpu_fixture_t fixture;
+  std::string error;
+  const auto initialized = initialize_fixture(fixture, error);
+  if (initialized == near_identical_gpu_fixture_t::initialize_result_e::d3d_unavailable) {
+    GTEST_SKIP() << error;
+  }
+  ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
+
+  constexpr std::uint32_t poison = 0xa5a5a5a5u;
+  const auto expect_poisoned_record = [&]() {
+    ocr_record_words_t record {};
+    ASSERT_TRUE(fixture.read_ocr_record(record, error)) << error;
+    for (std::size_t index = 0u; index < record.size(); ++index) {
+      EXPECT_EQ(record[index], poison) << "OCR word " << index;
+    }
+  };
+  const auto expect_exact_abstention = [&]() {
+    ocr_record_words_t record {};
+    ASSERT_TRUE(fixture.read_ocr_record(record, error)) << error;
+    EXPECT_EQ(record[0], models::depth_coordinate_v2::subtitle_ocr_record_schema);
+    EXPECT_EQ(record[1], models::depth_coordinate_v2::subtitle_ocr_record_tag);
+    EXPECT_EQ(record[5], static_cast<std::uint32_t>(current_frame_id));
+    EXPECT_EQ(record[6], static_cast<std::uint32_t>(current_frame_id >> 32u));
+    EXPECT_EQ(record[7], 0x50607080u);
+    EXPECT_EQ(record[8], 0x10203040u);
+    EXPECT_EQ(record[9], 1920u);
+    EXPECT_EQ(record[10], 1080u);
+    EXPECT_EQ(record[11], field_width);
+    EXPECT_EQ(record[12], field_height);
+    EXPECT_EQ(record[13], content.top);
+    EXPECT_EQ(record[14], content.bottom);
+    for (std::size_t index = 2u; index < record.size(); ++index) {
+      if (index >= 5u && index <= 14u) continue;
+      EXPECT_EQ(record[index], 0u) << "OCR word " << index;
+    }
+  };
+
+  decision_words_t decision {};
+  ASSERT_TRUE(fixture.initialize_and_read_transaction(
+    models::near_identical_work_subtitle_observation, decision, error
+  )) << error;
+  fixture.seed_ocr_record(poison);
+  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
+    models::near_identical_gpu_branch_e::infer,
+    true,
+    false,
+    false,
+    decision,
+    error,
+    request_token,
+    request_token,
+    models::near_identical_work_subtitle_observation
+  )) << error;
+  expect_exact_abstention();
+  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_one_x)], 1u);
+  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::reuse_grid16_x)], 0u);
+  const auto host_depth_args = decision;
+
+  // A CPU-known force with malformed receipt proof publishes its exact abstention but must not
+  // overwrite any depth dispatch record: force depth stages remain host-authored direct work.
+  fixture.seed_ocr_record(poison);
+  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
+    models::near_identical_gpu_branch_e::infer,
+    false,
+    false,
+    true,
+    decision,
+    error,
+    request_token,
+    request_token,
+    models::near_identical_work_subtitle_observation
+  )) << error;
+  expect_exact_abstention();
+  for (std::size_t index =
+         word(models::near_identical_gpu_decision_word_e::infer_reduce_x);
+       index <= word(models::near_identical_gpu_decision_word_e::reuse_grid16_padding);
+       ++index) {
+    EXPECT_EQ(decision[index], host_depth_args[index]) << "depth arg word " << index;
+  }
+
+  // An authenticated optional receipt enables OCR postprocess without pre-publishing abstention.
+  fixture.seed_ocr_record(poison);
+  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
+    models::near_identical_gpu_branch_e::infer,
+    true,
+    true,
+    false,
+    decision,
+    error
+  )) << error;
+  expect_poisoned_record();
+  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::optional_one_x)], 1u);
+  EXPECT_EQ(
+    decision[word(models::near_identical_gpu_decision_word_e::infer_without_optional_one_x)],
+    0u
+  );
+
+  // A stale token rejects both domains and cannot modify the retained OCR record.
+  fixture.seed_ocr_record(poison);
+  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
+    models::near_identical_gpu_branch_e::infer,
+    true,
+    false,
+    false,
+    decision,
+    error,
+    request_token,
+    request_token + 1u,
+    models::near_identical_work_subtitle_observation_due
+  )) << error;
+  expect_poisoned_record();
+  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_one_x)], 0u);
+  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::reuse_grid16_x)], 7u);
+  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::observation_one_x)], 0u);
+
+  // Malformed depth-only reduction authority must not suppress a separately valid due subtitle
+  // abstention. Depth fails closed to its retained-field copy while subtitle publication advances.
+  fixture.seed_ocr_record(poison);
+  ASSERT_TRUE(fixture.finalize_subtitle_receipt(
+    models::near_identical_gpu_branch_e::reuse,
+    true,
+    false,
+    false,
+    decision,
+    error,
+    request_token,
+    request_token,
+    models::near_identical_work_subtitle_observation_due,
+    true,
+    models::near_identical_work_subtitle_observation_due,
+    reduction_group_count + 1u
+  )) << error;
+  expect_exact_abstention();
+  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_one_x)], 0u);
+  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::reuse_grid16_x)], 7u);
+  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::observation_one_x)], 1u);
 }
 
 TEST(HostSbsNearIdenticalDetectorGpuTest, MalformedUnsupportedTileInfers) {
@@ -2632,7 +2845,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, ReceiptWritesExactIndirectShapes) {
   std::array<std::uint32_t, 10> scene_evidence {};
   scene_evidence.fill(0xA5A5A5A5u);
   fixture.seed_scene_evidence(scene_evidence);
-  ASSERT_TRUE(fixture.resolve_postprocess_args(
+  ASSERT_TRUE(fixture.finalize_depth_receipt(
     models::near_identical_gpu_branch_e::infer, true, decision, error
   )) << error;
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_reduce_x)], 42u);
@@ -2648,7 +2861,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, ReceiptWritesExactIndirectShapes) {
   ASSERT_TRUE(fixture.read_scene_evidence(preserved_scene_evidence, error)) << error;
   EXPECT_EQ(preserved_scene_evidence, scene_evidence);
 
-  ASSERT_TRUE(fixture.resolve_postprocess_args(
+  ASSERT_TRUE(fixture.finalize_depth_receipt(
     models::near_identical_gpu_branch_e::reuse, true, decision, error
   )) << error;
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_one_x)], 0u);
@@ -2658,7 +2871,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, ReceiptWritesExactIndirectShapes) {
   EXPECT_EQ(preserved_scene_evidence, scene_evidence);
 
   ASSERT_TRUE(fixture.run_detector(input, input, history_state(1u), decision, error)) << error;
-  ASSERT_TRUE(fixture.resolve_postprocess_args(
+  ASSERT_TRUE(fixture.finalize_depth_receipt(
     models::near_identical_gpu_branch_e::infer, false, decision, error
   )) << error;
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_one_x)], 0u);
@@ -2666,7 +2879,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, ReceiptWritesExactIndirectShapes) {
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::reuse_grid16_y)], 6u);
 
   ASSERT_TRUE(fixture.run_detector(input, input, history_state(1u), decision, error)) << error;
-  ASSERT_TRUE(fixture.resolve_postprocess_args(
+  ASSERT_TRUE(fixture.finalize_depth_receipt(
     models::near_identical_gpu_branch_e::infer,
     true,
     decision,
@@ -2896,13 +3109,13 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedPreprocessMatchesCanonicalAndSpec
     ASSERT_TRUE(fixture.resolve_seeded_tiles(
       reference.tiles, reference_receipt, error
     )) << error;
-    ASSERT_TRUE(fixture.resolve_postprocess_args(
+    ASSERT_TRUE(fixture.finalize_depth_receipt(
       branch, true, reference_receipt, error
     )) << error;
     ASSERT_TRUE(fixture.resolve_seeded_tiles(
       fused.tiles, fused_receipt, error
     )) << error;
-    ASSERT_TRUE(fixture.resolve_postprocess_args(
+    ASSERT_TRUE(fixture.finalize_depth_receipt(
       branch, true, fused_receipt, error
     )) << error;
     EXPECT_EQ(reference_receipt, fused_receipt) << "receipt/indirect args changed";

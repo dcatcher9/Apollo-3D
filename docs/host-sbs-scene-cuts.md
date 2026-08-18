@@ -101,7 +101,9 @@ SLR-state veto. Ordinary work consumes OCR cells only with complete proposal/req
 receipt proof and otherwise publishes a current abstention on infer; ordinary reuse holds. Due work
 is branch-independent: value `8` consumes current-ready OCR only with the optional receipt, while
 value `16` records the ineligible abstention with the optional handle off. Either due disposition
-then runs the complete conditioner from immutable V2 Base to the atomic final field. A malformed
+then runs the complete conditioner from immutable V2 Base to the atomic final field. One direct
+post-CUDA detector finalizer keeps the stronger depth receipt validation separate from this subtitle
+proof, writes all indirect shapes, and emits the current abstention without a fallback dispatch. A malformed
 force proposal fails depth open to infer without authorizing stale OCR input. A CPU-known force with
 malformed receipt proof publishes an exact-current OCR abstention and complete Base-derived output;
 retained boxes are never relabeled. Invalid opaque receipt evidence instead holds the coherent prior
