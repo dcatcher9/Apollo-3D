@@ -404,6 +404,25 @@ namespace {
     EXPECT_TRUE(state.conversion_required(true, true));
   }
 
+  TEST(WindowsHostSbsP010MrtPolicyTest, RequiresEveryOptionalFastPathAuthority) {
+    using platf::dxgi::detail::host_sbs_p010_y_mrt_eligible;
+    constexpr std::array all_true {true, true, true, true, true, true, true, true};
+    EXPECT_TRUE(host_sbs_p010_y_mrt_eligible(
+      true, true, true, true, true, false, true, true
+    ));
+
+    // Each positive authority is independently fail-open to the established RGB conversion.
+    for (std::size_t missing = 0; missing < all_true.size(); ++missing) {
+      auto values = all_true;
+      values[missing] = false;
+      const bool dump_requested = !values[5];
+      EXPECT_FALSE(host_sbs_p010_y_mrt_eligible(
+        values[0], values[1], values[2], values[3], values[4], dump_requested,
+        values[6], values[7]
+      )) << "missing authority " << missing;
+    }
+  }
+
   TEST(WindowsLocalPresenterRetryTest, BusyFinalSourceSurvivesCaptureTimeout) {
     platf::dxgi::detail::local_presenter_retry_state_t state;
     EXPECT_FALSE(state.should_process(false, false, false));

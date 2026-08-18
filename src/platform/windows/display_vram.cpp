@@ -166,6 +166,8 @@ namespace platf::dxgi {
   // frame timing.
   models::host_sbs_shader_cache::bytecode_t sbs_reprojection_v2_live_ps_hlsl;
   std::string sbs_reprojection_v2_live_source_closure_sha256;
+  models::host_sbs_shader_cache::bytecode_t sbs_reprojection_v2_p010_y_ps_hlsl;
+  std::string sbs_reprojection_v2_p010_y_source_closure_sha256;
   models::host_sbs_shader_cache::bytecode_t sbs_flat_identity_ps_hlsl;
   models::host_sbs_shader_cache::bytecode_t sbs_reprojection_vs_hlsl;
 
@@ -590,7 +592,7 @@ namespace platf::dxgi {
           return -1;
         }
 
-        auto draw = [&](auto &input, const D3D11_VIEWPORT &y_or_yuv_viewport, const D3D11_VIEWPORT &uv_viewport, bool input_is_linear) {
+        auto draw = [&](auto &input, const D3D11_VIEWPORT &y_or_yuv_viewport, const D3D11_VIEWPORT &uv_viewport, bool input_is_linear, bool y_already_written = false) {
           device_ctx->PSSetShaderResources(0, 1, &input);
           ID3D11Buffer *converter_buffers[] = {
             color_matrix.get(),
@@ -600,12 +602,15 @@ namespace platf::dxgi {
           // PS constant-buffer slots, so never rely on stale context state between SBS/RGB draws.
           device_ctx->PSSetConstantBuffers(0, 2, converter_buffers);
 
-          // Draw Y/YUV
-          device_ctx->OMSetRenderTargets(1, &out_Y_or_YUV_rtv, nullptr);
-          device_ctx->VSSetShader(convert_Y_or_YUV_vs.get(), nullptr, 0);
-          device_ctx->PSSetShader(input_is_linear ? convert_Y_or_YUV_fp16_ps.get() : convert_Y_or_YUV_ps.get(), nullptr, 0);
-          device_ctx->RSSetViewports(1, &y_or_yuv_viewport);
-          device_ctx->Draw(3, 0);
+          // The optional HDR Host-SBS MRT has already populated luma while producing the packed
+          // RGB raster. Every other path retains the established standalone Y/YUV draw.
+          if (!y_already_written) {
+            device_ctx->OMSetRenderTargets(1, &out_Y_or_YUV_rtv, nullptr);
+            device_ctx->VSSetShader(convert_Y_or_YUV_vs.get(), nullptr, 0);
+            device_ctx->PSSetShader(input_is_linear ? convert_Y_or_YUV_fp16_ps.get() : convert_Y_or_YUV_ps.get(), nullptr, 0);
+            device_ctx->RSSetViewports(1, &y_or_yuv_viewport);
+            device_ctx->Draw(3, 0);
+          }
 
           // Draw UV if needed
           if (out_UV_rtv) {
@@ -2236,6 +2241,7 @@ namespace platf::dxgi {
           ID3D11ShaderResourceView *final_sbs_srv = nullptr;
           ID3D11Texture2D *final_sbs_texture = nullptr;
           bool final_sbs_is_linear = sbs_intermediate_is_linear;
+          bool final_sbs_has_p010_y = false;
           ID3D11ShaderResourceView *dump_warp_depth = nullptr;
           if (diagnostics_enabled) {
             if (repeat_matched_output) {
@@ -2302,12 +2308,38 @@ namespace platf::dxgi {
             // Only an authenticated V2 stream selects the production warp. Awaiting, stale, and
             // terminal failure states use the independent current-frame identity shader, so V2
             // shader authentication/device-creation failures cannot freeze or end the stream.
-            device_ctx->OMSetRenderTargets(1, &sbs_intermediate_rtv, nullptr);
+            const bool p010_y_mrt_authorized =
+              detail::host_sbs_p010_y_mrt_eligible(
+                v2_live_warp_selected,
+                render_input_is_linear,
+                display_is_hdr,
+                format == DXGI_FORMAT_P010,
+                rgb_present_target == nullptr,
+                snapshot_debug_inputs,
+                sbs_reprojection_v2_p010_y_ps != nullptr,
+                out_Y_or_YUV_rtv != nullptr
+              );
+            const bool p010_y_mrt_selected =
+              p010_y_mrt_authorized && qualify_p010_y_mrt_targets();
+            if (p010_y_mrt_selected && diagnostics_enabled) {
+              ++matched_stats_output_p010_y_mrt;
+            }
+            if (p010_y_mrt_selected) {
+              ID3D11RenderTargetView *targets[] = {
+                sbs_intermediate_rtv.get(),
+                out_Y_or_YUV_rtv.get(),
+              };
+              device_ctx->OMSetRenderTargets((UINT) std::size(targets), targets, nullptr);
+            } else {
+              device_ctx->OMSetRenderTargets(1, &sbs_intermediate_rtv, nullptr);
+            }
             device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
             device_ctx->PSSetShader(
-              v2_live_warp_selected ?
-                sbs_reprojection_v2_live_ps.get() :
-                sbs_flat_identity_ps.get(),
+              p010_y_mrt_selected ?
+                sbs_reprojection_v2_p010_y_ps.get() :
+                v2_live_warp_selected ?
+                  sbs_reprojection_v2_live_ps.get() :
+                  sbs_flat_identity_ps.get(),
               nullptr,
               0
             );
@@ -2324,12 +2356,16 @@ namespace platf::dxgi {
               nullptr,
             };
             device_ctx->PSSetShaderResources(0, (UINT) std::size(srvs), srvs);
+            if (p010_y_mrt_selected) {
+              ID3D11Buffer *matrix = color_matrix.get();
+              device_ctx->PSSetConstantBuffers(0, 1, &matrix);
+            }
             device_ctx->PSSetConstantBuffers(2, 1, &sbs_constants);
             device_ctx->Draw(3, 0);  // Fullscreen triangle
+            final_sbs_has_p010_y = p010_y_mrt_selected;
 
             // Unbind the Render Target so D3D11 doesn't nullify our SRV in the next pass!
-            ID3D11RenderTargetView *null_rtvs[] = {nullptr};
-            device_ctx->OMSetRenderTargets(1, null_rtvs, nullptr);
+            device_ctx->OMSetRenderTargets(0, nullptr, nullptr);
 
             // Clear shader resources
             ID3D11ShaderResourceView *null_srvs[] = {
@@ -2396,7 +2432,13 @@ namespace platf::dxgi {
           } else if (output_conversion_required) {
             // Host SBS accepts identity-oriented sources only. Portrait is represented by actual
             // W < H display dimensions, so this final conversion never rotates a packed 2W frame.
-            draw(final_sbs_srv, out_Y_or_YUV_viewport, out_UV_viewport, final_sbs_is_linear);
+            draw(
+              final_sbs_srv,
+              out_Y_or_YUV_viewport,
+              out_UV_viewport,
+              final_sbs_is_linear,
+              final_sbs_has_p010_y
+            );
             // Native NVENC owns one registered input texture for this whole encode session. The
             // completed draw remains there until a later conversion overwrites it, so a repeated
             // packed SBS frame can be encoded again without identical Y and UV draws.
@@ -2628,6 +2670,8 @@ namespace platf::dxgi {
                               << matched_stats_output_warped_new << '/'
                               << matched_stats_output_packed_repeat << '/'
                               << matched_stats_output_flat
+                              << " p010_y_mrt="sv
+                              << matched_stats_output_p010_y_mrt
                               << " flat_pending_miss="sv
                               << matched_stats_output_flat_pending_miss
                               << " same_frame_repeated_wait_attempt/hit="sv
@@ -3890,6 +3934,10 @@ namespace platf::dxgi {
       sbs_intermediate_texture = std::move(texture);
       sbs_intermediate_rtv = std::move(rtv);
       sbs_intermediate_srv = std::move(srv);
+      // The optional MRT qualification binds the exact view pair. A replacement intermediate
+      // invalidates that evidence even when its dimensions and format are unchanged.
+      p010_y_mrt_targets_checked = false;
+      p010_y_mrt_targets_qualified = false;
       sbs_intermediate_is_linear = false;
       matched_output_valid = false;
       matched_output_source_at = {};
@@ -3901,6 +3949,44 @@ namespace platf::dxgi {
       BOOST_LOG(info) << "Host SBS intermediate storage finalized as "sv
                       << (input_is_linear ? "FP16 linear-capable."sv : "BGRA8 SDR."sv);
       return true;
+    }
+
+    bool qualify_p010_y_mrt_targets() {
+      if (p010_y_mrt_targets_checked) {
+        return p010_y_mrt_targets_qualified;
+      }
+      p010_y_mrt_targets_checked = true;
+      p010_y_mrt_targets_qualified = false;
+      if (!sbs_intermediate_rtv || !out_Y_or_YUV_rtv) {
+        return false;
+      }
+
+      ID3D11RenderTargetView *requested[] = {
+        sbs_intermediate_rtv.get(),
+        out_Y_or_YUV_rtv.get(),
+      };
+      device_ctx->OMSetRenderTargets((UINT) std::size(requested), requested, nullptr);
+      ID3D11RenderTargetView *observed[] = {nullptr, nullptr};
+      device_ctx->OMGetRenderTargets((UINT) std::size(observed), observed, nullptr);
+      p010_y_mrt_targets_qualified =
+        observed[0] == requested[0] && observed[1] == requested[1];
+      for (auto *view : observed) {
+        if (view) {
+          view->Release();
+        }
+      }
+      device_ctx->OMSetRenderTargets(0, nullptr, nullptr);
+
+      if (p010_y_mrt_targets_qualified) {
+        BOOST_LOG(info)
+          << "Host SBS HDR P010 warp+luma MRT enabled; chroma retains the canonical "sv
+             "intermediate-based pass."sv;
+      } else {
+        BOOST_LOG(warning)
+          << "Host SBS HDR P010 warp+luma MRT target qualification failed; retaining the "sv
+             "established RGB-to-P010 path."sv;
+      }
+      return p010_y_mrt_targets_qualified;
     }
 
     matched_frame_slot_t *available_matched_slot(
@@ -5251,6 +5337,7 @@ namespace platf::dxgi {
       matched_stats_output_warped_new = 0;
       matched_stats_output_packed_repeat = 0;
       matched_stats_output_flat = 0;
+      matched_stats_output_p010_y_mrt = 0;
       matched_stats_output_flat_pending_miss = 0;
       matched_stats_same_frame_poll_attempts = 0;
       matched_stats_same_frame_poll_hits = 0;
@@ -5309,6 +5396,9 @@ namespace platf::dxgi {
       sbs_dumper.set_button_request(std::move(sbs_debug_dump_request));
       sbs_flat_identity_ps.reset();
       sbs_reprojection_v2_live_ps.reset();
+      sbs_reprojection_v2_p010_y_ps.reset();
+      p010_y_mrt_targets_checked = false;
+      p010_y_mrt_targets_qualified = false;
       sbs_debug_v2_mapping_ps.Reset();
       sbs_debug_v2_mask_ps.Reset();
       sbs_debug_mapping_texture.Reset();
@@ -5533,6 +5623,21 @@ namespace platf::dxgi {
           BOOST_LOG(error)
             << "Host SBS flat-identity safety renderer is unavailable."sv;
           return -1;
+        }
+        if (format == DXGI_FORMAT_P010 && sbs_reprojection_v2_p010_y_ps_hlsl) {
+          const auto p010_y_status = device->CreatePixelShader(
+            sbs_reprojection_v2_p010_y_ps_hlsl->data(),
+            sbs_reprojection_v2_p010_y_ps_hlsl->size(),
+            nullptr,
+            &sbs_reprojection_v2_p010_y_ps
+          );
+          if (FAILED(p010_y_status)) {
+            BOOST_LOG(warning)
+              << "Host SBS direct P010 luma optimization is unavailable [0x"sv
+              << util::hex(p010_y_status).to_string_view()
+              << "]; retaining the established RGB-to-P010 path."sv;
+            sbs_reprojection_v2_p010_y_ps.reset();
+          }
         }
       }
 
@@ -6040,6 +6145,9 @@ namespace platf::dxgi {
     vs_t sbs_reprojection_vs;
     ps_t sbs_flat_identity_ps;
     ps_t sbs_reprojection_v2_live_ps;
+    ps_t sbs_reprojection_v2_p010_y_ps;
+    bool p010_y_mrt_targets_checked = false;
+    bool p010_y_mrt_targets_qualified = false;
     models::host_sbs_renderer_e host_sbs_renderer =
       models::host_sbs_renderer_e::awaiting_v2;
     buf_t sbs_reprojection_cbuffer;
@@ -6110,6 +6218,7 @@ namespace platf::dxgi {
     unsigned matched_stats_output_warped_new = 0;
     unsigned matched_stats_output_packed_repeat = 0;
     unsigned matched_stats_output_flat = 0;
+    unsigned matched_stats_output_p010_y_mrt = 0;
     unsigned matched_stats_output_flat_pending_miss = 0;
     unsigned matched_stats_same_frame_poll_attempts = 0;
     unsigned matched_stats_same_frame_poll_hits = 0;
@@ -8398,6 +8507,8 @@ namespace platf::dxgi {
     compile_pixel_shader_helper(rgb_present_srgb_to_linear_ps);
     sbs_reprojection_v2_live_ps_hlsl.reset();
     sbs_reprojection_v2_live_source_closure_sha256.clear();
+    sbs_reprojection_v2_p010_y_ps_hlsl.reset();
+    sbs_reprojection_v2_p010_y_source_closure_sha256.clear();
     sbs_flat_identity_ps_hlsl.reset();
     sbs_reprojection_vs_hlsl.reset();
     namespace cache = models::host_sbs_shader_cache;
@@ -8426,6 +8537,29 @@ namespace platf::dxgi {
            "current-frame flat identity (observed closure "sv
         << sbs_reprojection_v2_live_source_closure_sha256 << ", expected "sv
         << cache::parallax_v2_live_renderer_source_closure_sha256 << ")."sv;
+    }
+    const auto p010_y_sources = cache::snapshot_sources(
+      SUNSHINE_SHADERS_DIR,
+      cache::parallax_v2_p010_y_specs
+    );
+    sbs_reprojection_v2_p010_y_source_closure_sha256 =
+      cache::source_closure_sha256(p010_y_sources);
+    const bool p010_y_authenticated =
+      p010_y_sources &&
+      sbs_reprojection_v2_p010_y_source_closure_sha256 ==
+        cache::parallax_v2_p010_y_source_closure_sha256;
+    if (p010_y_authenticated) {
+      sbs_reprojection_v2_p010_y_ps_hlsl = cache::get(
+        p010_y_sources,
+        cache::parallax_v2_p010_y_renderer
+      );
+    }
+    if (!sbs_reprojection_v2_p010_y_ps_hlsl) {
+      BOOST_LOG(info)
+        << "Host SBS direct P010 luma optimization is unavailable; retaining the established "sv
+           "RGB-to-P010 path (observed closure "sv
+        << sbs_reprojection_v2_p010_y_source_closure_sha256 << ", expected "sv
+        << cache::parallax_v2_p010_y_source_closure_sha256 << ")."sv;
     }
     // This independent current-frame identity renderer is the safety net for Host SBS. Its
     // failure must not disable ordinary non-SBS video; a Host SBS device will reject creation

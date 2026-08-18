@@ -73,6 +73,28 @@ namespace platf::dxgi {
   using keyed_mutex_t = util::safe_ptr<IDXGIKeyedMutex, Release<IDXGIKeyedMutex>>;
 
   namespace detail {
+    /** Select the optional HDR Host-SBS warp+luma MRT without weakening the legacy fallback.
+     *
+     * The optimization is deliberately narrower than renderer authorization: only an already
+     * authenticated V2 draw into a native P010 encoder surface may use it. Dump frames and local
+     * RGB presentation retain the canonical RGB path, and any missing optional object fails open
+     * to the established RGB -> Y/UV conversion rather than to flat output.
+     */
+    [[nodiscard]] constexpr bool host_sbs_p010_y_mrt_eligible(
+      const bool authenticated_v2_draw,
+      const bool linear_input,
+      const bool hdr_output,
+      const bool p010_output,
+      const bool native_encoder_output,
+      const bool dump_requested,
+      const bool shader_available,
+      const bool luma_target_available
+    ) noexcept {
+      return authenticated_v2_draw && linear_input && hdr_output && p010_output &&
+             native_encoder_output && !dump_requested && shader_available &&
+             luma_target_available;
+    }
+
     /** Tracks whether a persistent encoder input already contains a converted Host-SBS output.
      *
      * Native NVENC registers one D3D11 input texture for the lifetime of an encode session. A

@@ -58,8 +58,11 @@ schema 69/tag `0x63C49931`, canonical SHA-256
 complete policy below, including all subtitle field/ROI semantics, and producer source-closure
 SHA-256 `620e1dcacc190f7d80749e68bf840eecb759210e2f866afa7d77078af78a2dfe`.
 The live-renderer source-closure SHA-256 is
-`fce03acecf9a3fbe7bf237321bb4539c6a18b9fc4e215cfa337ac1221106ed12`, and dump-only diagnostic
-renderer source-closure SHA-256
+`fce03acecf9a3fbe7bf237321bb4539c6a18b9fc4e215cfa337ac1221106ed12`. The optional HDR
+warp-plus-P010-luma MRT has its own fail-open source closure
+`f7a10d4178726bda6c469c55fdaa43422d7d5a41546052c3a6dcef71c9b02a5f`; its absence or device
+failure retains the canonical RGB-to-P010 path. The dump-only diagnostic renderer source-closure
+SHA-256 is
 `31a8347f2a6b7cf46d09fb27fa8f14042f805f98c3c86e3bee4281a38eb10543`. It admits the following
 production calibration:
 
@@ -145,8 +148,12 @@ The model and the rendered color have different color requirements:
   highlights to `1.0` before inference.
 - The stereo warp applies no transfer function, gamut conversion, sharpening, or post-warp blur.
   Each eye takes one sample from the original source texture in its native linear or encoded domain.
-- The existing encoder conversion stage produces SDR YUV or Rec.2100 PQ and carries the validated
-  HDR metadata. Host SBS does not independently reinterpret the stream's color metadata.
+- The encoder conversion stage produces SDR YUV or Rec.2100 PQ and carries the validated HDR
+  metadata. On the live native-encoder path, an authenticated FP16-to-HDR-P010 encode may use an
+  optional MRT that writes the packed FP16 warp and its bit-equivalent P010 luma together; the
+  established chroma pass still samples that exact packed intermediate. Dump 3D, local RGB,
+  offline conversion/evaluation, SDR, flat, and unavailable-MRT cases retain the canonical separate
+  warp/Y/UV path. Host SBS does not independently reinterpret the stream's color metadata.
 
 Tone-mapped debug PNGs are viewing aids, not numeric HDR evidence. Use the floating-point dump
 artifacts and manifest color fields when auditing the pipeline.
@@ -946,7 +953,10 @@ that used the presentation-only cache is distinguishable from a route/reset inva
 to render identity. GPU timing brackets `matched_frame_copy_gpu` immediately around the private
 `CopyResource`, outside completed-depth postprocess, and `sbs_warp_gpu` covers either the
 authenticated reprojection or the current-frame flat-identity fullscreen pass. Packed repeats
-submit neither fullscreen pass nor a matched-frame copy.
+submit neither fullscreen pass nor a matched-frame copy. On the optional HDR P010 MRT path,
+`sbs_warp_gpu` includes fused luma production and `sbs_output_gpu` contains only the unchanged
+chroma pass; the cadence line reports `p010_y_mrt` so sums can be compared without mistaking that
+timer-boundary shift for a regression.
 Throughput diagnostics also split CPU-known force-infer roots from GPU-undecided roots and report
 host-side optional OCR as *armed*. When diagnostics were enabled, the authenticated GPU trace is
 the exact source for the depth infer/reuse disposition and the independent subtitle result:

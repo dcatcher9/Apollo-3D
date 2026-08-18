@@ -272,6 +272,9 @@ PARALLAX_V2_LIVE_RENDERER_SHADER_SPECS = (
     ("sbs_reprojection_v2_live_ps.hlsl", "main_ps", "ps_5_0"),
     ("sbs_reprojection_vs.hlsl", "main_vs", "vs_5_0"),
 )
+PARALLAX_V2_P010_Y_SHADER_SPECS = (
+    ("sbs_reprojection_v2_p010_y_ps.hlsl", "main_p010_y_ps", "ps_5_0"),
+)
 PARALLAX_V2_DIAGNOSTIC_SHADER_SPECS = (
     ("sbs_reprojection_v2_diagnostics_ps.hlsl", "mapping_ps", "ps_5_0"),
     ("sbs_reprojection_v2_diagnostics_ps.hlsl", "mask_ps", "ps_5_0"),
@@ -279,6 +282,8 @@ PARALLAX_V2_DIAGNOSTIC_SHADER_SPECS = (
 RENDERER_SOURCE_CLOSURE_PINS = (
     ("parallax_v2_live_renderer_source_closure_sha256",
      PARALLAX_V2_LIVE_RENDERER_SHADER_SPECS, "live renderer"),
+    ("parallax_v2_p010_y_source_closure_sha256",
+     PARALLAX_V2_P010_Y_SHADER_SPECS, "optional P010 luma renderer"),
     ("parallax_v2_diagnostic_source_closure_sha256",
      PARALLAX_V2_DIAGNOSTIC_SHADER_SPECS, "diagnostic renderer"),
 )

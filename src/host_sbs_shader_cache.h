@@ -100,6 +100,9 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec parallax_v2_live_renderer {
     "sbs_reprojection_v2_live_ps.hlsl", "main_ps", "ps_5_0"
   };
+  inline constexpr shader_spec parallax_v2_p010_y_renderer {
+    "sbs_reprojection_v2_p010_y_ps.hlsl", "main_p010_y_ps", "ps_5_0"
+  };
   inline constexpr shader_spec parallax_v2_live_mapping {
     "sbs_reprojection_v2_diagnostics_ps.hlsl", "mapping_ps", "ps_5_0"
   };
@@ -117,6 +120,8 @@ namespace models::host_sbs_shader_cache {
   };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
     "fce03acecf9a3fbe7bf237321bb4539c6a18b9fc4e215cfa337ac1221106ed12";
+  inline constexpr std::string_view parallax_v2_p010_y_source_closure_sha256 =
+    "f7a10d4178726bda6c469c55fdaa43422d7d5a41546052c3a6dcef71c9b02a5f";
   inline constexpr std::string_view parallax_v2_diagnostic_source_closure_sha256 =
     "31a8347f2a6b7cf46d09fb27fa8f14042f805f98c3c86e3bee4281a38eb10543";
   inline constexpr std::string_view sbs_flat_fallback_source_closure_sha256 =
@@ -277,6 +282,14 @@ namespace models::host_sbs_shader_cache {
   inline constexpr std::array parallax_v2_live_renderer_specs {
     parallax_v2_live_renderer,
     sbs_reprojection_vertex,
+  };
+
+  // Optional HDR bandwidth optimization. Its closure includes the production V2 renderer via
+  // the shader's quoted include, but remains independent of the required renderer closure: an
+  // edit, compile failure, or unsupported MRT must select the established RGB -> P010 path rather
+  // than latching Host SBS flat.
+  inline constexpr std::array parallax_v2_p010_y_specs {
+    parallax_v2_p010_y_renderer,
   };
 
   // Independent fail-flat closure. Kept separate from the live-renderer closure so an edited V2

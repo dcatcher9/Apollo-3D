@@ -660,7 +660,22 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
     ASSERT_TRUE(first) << flat.filename << ':' << flat.entrypoint;
     EXPECT_EQ(first.get(), second.get()) << flat.filename << ':' << flat.entrypoint;
   }
+  const auto p010_y_sources = cache::snapshot_sources(
+    shader_root,
+    cache::parallax_v2_p010_y_specs
+  );
+  ASSERT_TRUE(p010_y_sources);
+  EXPECT_EQ(
+    cache::source_closure_sha256(p010_y_sources),
+    cache::parallax_v2_p010_y_source_closure_sha256
+  );
+  const auto p010_y_shader = cache::get(
+    p010_y_sources,
+    cache::parallax_v2_p010_y_renderer
+  );
+  ASSERT_TRUE(p010_y_shader);
   EXPECT_EQ(cache::parallax_v2_live_renderer_specs.size(), 2u);
+  EXPECT_EQ(cache::parallax_v2_p010_y_specs.size(), 1u);
   EXPECT_EQ(cache::near_identical_detector_specs.size(), 8u);
   EXPECT_EQ(cache::sbs_flat_fallback_specs.size(), 2u);
   EXPECT_EQ(cache::parallax_v2_live_diagnostic_specs.size(), 2u);

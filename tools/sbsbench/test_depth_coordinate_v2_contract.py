@@ -788,6 +788,10 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             documentation,
         )
         self.assertIn(
+            f"`{renderer_pins['parallax_v2_p010_y_source_closure_sha256']}`",
+            documentation,
+        )
+        self.assertIn(
             f"`{renderer_pins['parallax_v2_diagnostic_source_closure_sha256']}`",
             documentation,
         )
@@ -798,6 +802,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             {
                 "parallax_v2_live_renderer_source_closure_sha256":
                     "fce03acecf9a3fbe7bf237321bb4539c6a18b9fc4e215cfa337ac1221106ed12",
+                "parallax_v2_p010_y_source_closure_sha256":
+                    "f7a10d4178726bda6c469c55fdaa43422d7d5a41546052c3a6dcef71c9b02a5f",
                 "parallax_v2_diagnostic_source_closure_sha256":
                     "31a8347f2a6b7cf46d09fb27fa8f14042f805f98c3c86e3bee4281a38eb10543",
             },
