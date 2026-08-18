@@ -204,32 +204,16 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "named_values": stats,
         }
         vertical_descriptions = {
+            "shadow_coordinate.f32":
+                ("parallax-v2 canonical coordinate diagnostic", True),
             "shadow_candidate_parallax.f32":
                 ("parallax-v2 pre-limiter candidate displacement", True),
             "shadow_ownership_refined_parallax.f32":
                 ("parallax-v2 full-resolution contour ownership refinement", True),
-            "shadow_ownership_refined_parallax_shape.json":
-                ("parallax-v2 full-resolution contour ownership refinement contract", False),
-            "shadow_ownership_refined_parallax.png":
-                ("parallax-v2 full-resolution contour ownership refinement preview", False),
-            "shadow_ownership_refined_parallax_heat.png":
-                ("parallax-v2 full-resolution contour ownership refinement preview", False),
             "shadow_vertical_majorant.f32":
                 ("parallax-v2 vertical shear-limiter intermediate", False),
-            "shadow_vertical_majorant_shape.json":
-                ("parallax-v2 vertical shear-limiter intermediate contract", False),
-            "shadow_vertical_majorant.png":
-                ("parallax-v2 vertical shear-limiter intermediate preview", False),
-            "shadow_vertical_majorant_heat.png":
-                ("parallax-v2 vertical shear-limiter intermediate preview", False),
             "shadow_vertical_conditioned.f32":
                 ("parallax-v2 orientation-selective vertical conditioner", False),
-            "shadow_vertical_conditioned_shape.json":
-                ("parallax-v2 orientation-selective vertical conditioner contract", False),
-            "shadow_vertical_conditioned.png":
-                ("parallax-v2 orientation-selective vertical conditioner preview", False),
-            "shadow_vertical_conditioned_heat.png":
-                ("parallax-v2 orientation-selective vertical conditioner preview", False),
             "shadow_final_parallax.f32":
                 ("parallax-v2 atomic final displacement field", True),
         }
@@ -246,6 +230,11 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "published_atomically": True,
             "matched_frame_id": 41,
             "color_mode": "srgb",
+            "float_previews": {
+                "packaged": False,
+                "generator": "tools/sbsbench/generate_dump_previews.py",
+                "normalization": "finite p2-p98 computed on demand",
+            },
             "subtitle_conditioning": subtitle_none,
             "renderer": {
                 "authority":
@@ -331,7 +320,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     "width": 770, "height": 434,
                     "format": "float32-le structured buffer",
                 },
-                "warp_depth": {
+                "shadow_coordinate": {
                     "width": 770, "height": 434,
                     "format": "DXGI_FORMAT_R32_FLOAT", "format_value": 41,
                 },
@@ -392,13 +381,18 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "final_parallax": {
                 "contract_schema": coordinate.FINAL_PARALLAX.schema,
                 "artifact": "shadow_final_parallax.f32",
-                "warp_artifact": "warp_depth.f32",
+                "warp_input_artifact": "shadow_final_parallax.f32",
                 "authority": coordinate.FINAL_PARALLAX.authority,
                 "publication_policy": coordinate.FINAL_PARALLAX.publication_policy,
                 "reuse_policy": coordinate.FINAL_PARALLAX.reuse_policy,
                 "invalid_policy": coordinate.FINAL_PARALLAX.invalid_policy,
                 "current_rgb_policy": coordinate.FINAL_PARALLAX.current_rgb_policy,
-                "warp_relation": "bit-identical",
+                "warp_relation": "same authenticated artifact",
+            },
+            "warp_map_contract": {
+                "available": False,
+                "schema": 2,
+                "artifact": None,
             },
         }
         self.manifest["artifacts"].update({
@@ -463,6 +457,18 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "available": False,
                 "required": False,
                 "stage": "diagnostic GPU trace wire contract",
+                "description": "optional diagnostic test artifact",
+            },
+            "warp_map.f32": {
+                "available": False,
+                "required": False,
+                "stage": "exact inverse-warp mapping",
+                "description": "optional diagnostic test artifact",
+            },
+            "warp_mask.png": {
+                "available": False,
+                "required": False,
+                "stage": "V2 boundary-extrapolation mask",
                 "description": "optional diagnostic test artifact",
             },
         })
@@ -618,7 +624,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 dump_contract.validate_v2_dump_manifest_document(changed)
 
     def test_current_subtitle_record_and_state_abi_partition_exact_word_counts(self):
-        self.assertEqual(dump_contract.DUMP_MANIFEST_SCHEMA, 38)
+        self.assertEqual(dump_contract.DUMP_MANIFEST_SCHEMA, 39)
         self.assertEqual(dump_contract.DEPTH_INPUT_REGION_SCHEMA, 4)
         self.assertEqual(dump_contract.SUBTITLE_OCR_RECORD_SCHEMA, 3)
         self.assertEqual(dump_contract.SUBTITLE_LOCATOR_STATE_SCHEMA, 13)
@@ -766,27 +772,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "description": "authenticated test unconditioned base field",
                 "sha256": "0" * 64,
             },
-            "shadow_base_final_parallax_shape.json": {
-                "available": True,
-                "required": False,
-                "stage": (
-                    "ordinary post-limiter V2 field contract before SLR13 conditioning"),
-                "description": "authenticated test Base shape contract",
-            },
-            "shadow_base_final_parallax.png": {
-                "available": True,
-                "required": False,
-                "stage": (
-                    "ordinary post-limiter V2 field preview before SLR13 conditioning"),
-                "description": "authenticated test Base grayscale preview",
-            },
-            "shadow_base_final_parallax_heat.png": {
-                "available": True,
-                "required": False,
-                "stage": (
-                    "ordinary post-limiter V2 field preview before SLR13 conditioning"),
-                "description": "authenticated test Base heat preview",
-            },
         })
         manifest["renderer"]["parallax_v2_conditioner_role"] = (
             "least row-wise q >= shadow_vertical_conditioned with horizontal slope <= "
@@ -809,8 +794,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             subtitle["artifact_files"]["conditioned_field"],
             "shadow_final_parallax.f32")
         self.assertEqual(
-            manifest["artifacts"]["shadow_base_final_parallax_shape.json"]["stage"],
-            "ordinary post-limiter V2 field contract before SLR13 conditioning")
+            manifest["artifacts"]["shadow_base_final_parallax.f32"]["stage"],
+            "ordinary post-limiter V2 field before SLR13 conditioning")
         producer = manifest["subtitle_conditioning"]["producer"]
         self.assertEqual(producer["contract_schema"], coordinate.SUBTITLE_OCR.schema)
         self.assertEqual(set(producer["model"]), {
@@ -932,10 +917,12 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 lambda manifest: manifest["dimensions"]
                 ["shadow_base_final_parallax"].update({"width": 769}),
                 "dimensions disagree"),
-            "base-preview-stage": (
-                lambda manifest: manifest["artifacts"]
-                ["shadow_base_final_parallax.png"].update({"stage": "renderer authority"}),
-                "optional Base preview contract"),
+            "retired-base-preview": (
+                lambda manifest: manifest["artifacts"].update({
+                    "shadow_base_final_parallax.png": {
+                        "available": True, "required": False,
+                        "stage": "retired preview", "description": "retired"}}),
+                "retired schema-38 artifact"),
         }
         for name, (mutate, error) in mutations.items():
             with self.subTest(name=name):
@@ -1920,8 +1907,20 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "geometry artifact"):
             dump_contract.validate_v2_dump_manifest_document(changed)
 
+    def test_manifest_requires_shadow_coordinate_descriptor_and_dimensions(self):
+        changed = copy.deepcopy(self.manifest)
+        changed["artifacts"].pop("shadow_coordinate.f32")
+        with self.assertRaisesRegex(ValueError, "geometry artifact"):
+            dump_contract.validate_v2_dump_manifest_document(changed)
+
+        changed = copy.deepcopy(self.manifest)
+        changed["dimensions"].pop("shadow_coordinate")
+        with self.assertRaisesRegex(ValueError, "geometry dimension"):
+            dump_contract.validate_v2_dump_manifest_document(changed)
+
     def test_manifest_requires_content_hashes_for_geometry_fields(self):
         for field in (
+                "shadow_coordinate.f32",
                 "shadow_candidate_parallax.f32",
                 "shadow_final_parallax.f32"):
             changed = copy.deepcopy(self.manifest)
@@ -1932,11 +1931,12 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             changed["artifacts"][field]["sha256"] = "not-a-hash"
             with self.assertRaisesRegex(ValueError, "content sha256"):
                 dump_contract.validate_v2_dump_manifest_document(changed)
-        # Preview and shape descriptors must not silently grow a hash claim.
+        # Schema 39 must not advertise packaged scalar previews at all.
         changed = copy.deepcopy(self.manifest)
-        changed["artifacts"]["shadow_vertical_majorant.png"] = dict(
-            changed["artifacts"]["shadow_vertical_majorant.png"], sha256="0" * 64)
-        with self.assertRaisesRegex(ValueError, "geometry artifact"):
+        changed["artifacts"]["shadow_vertical_majorant.png"] = {
+            "available": True, "required": False, "stage": "retired preview",
+            "description": "retired", "sha256": "0" * 64}
+        with self.assertRaisesRegex(ValueError, "retired schema-38 artifact"):
             dump_contract.validate_v2_dump_manifest_document(changed)
 
     @staticmethod
@@ -2175,7 +2175,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
 
         manifest = copy.deepcopy(self.manifest)
         for name in (
-                "model_input", "raw_depth", "warp_depth",
+                "model_input", "raw_depth",
+                "shadow_coordinate",
                 "shadow_candidate_parallax", "shadow_ownership_refined_parallax",
                 "shadow_vertical_majorant", "shadow_vertical_conditioned",
                 "shadow_final_parallax"):
@@ -2189,6 +2190,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "left": 0, "top": 0, "right": width, "bottom": height,
         }
         fields = {
+            "shadow_coordinate": np.broadcast_to(
+                np.linspace(0.0, 1.0, width, dtype=np.float32),
+                (height, width)).copy(),
             "shadow_candidate_parallax": candidate,
             "shadow_ownership_refined_parallax": ownership,
             "shadow_vertical_majorant": majorant,
@@ -2200,15 +2204,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             (root / f"{name}.f32").write_bytes(payload)
             manifest["artifacts"][f"{name}.f32"]["sha256"] = hashlib.sha256(
                 payload).hexdigest()
-        warp_payload = final.astype("<f4").tobytes()
-        (root / "warp_depth.f32").write_bytes(warp_payload)
-        manifest["artifacts"]["warp_depth.f32"] = {
-            "available": True,
-            "required": True,
-            "stage": "actual displayed parallax field sampled by live V2 reprojection",
-            "description": "authenticated test warp field",
-            "sha256": hashlib.sha256(warp_payload).hexdigest(),
-        }
         region_payload = json.dumps(input_region).encode("utf-8")
         (root / "depth_input_region.json").write_bytes(region_payload)
         manifest["artifacts"]["depth_input_region.json"]["sha256"] = hashlib.sha256(
@@ -2310,7 +2305,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         payload = conditioned.astype("<f4").tobytes()
         self._write_hashed_payload(
             root, manifest, "shadow_final_parallax.f32", payload)
-        self._write_hashed_payload(root, manifest, "warp_depth.f32", payload)
         self._write_subtitle_conditioning_document(root, manifest)
         (root / "dump_manifest.json").write_text(
             json.dumps(manifest), encoding="utf-8")
@@ -2374,9 +2368,14 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "width": 2 * source_width, "height": source_height,
                 "format": "DXGI_FORMAT_R32_FLOAT", "format_value": 41,
             },
+            "warp_mask": {
+                "width": 2 * source_width, "height": source_height,
+                "format": "DXGI_FORMAT_B8G8R8A8_UNORM", "format_value": 87,
+            },
         })
         for name in (
-                "model_input", "raw_depth", "warp_depth",
+                "model_input", "raw_depth",
+                "shadow_coordinate",
                 "shadow_candidate_parallax", "shadow_ownership_refined_parallax",
                 "shadow_vertical_majorant", "shadow_vertical_conditioned",
                 "shadow_final_parallax"):
@@ -2390,6 +2389,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         majorant, conditioned, final = dump_contract._replay_v2_limiter_fields(
             constant, tensor_content[2] - tensor_content[0])
         fields = {
+            "shadow_coordinate": np.broadcast_to(
+                np.linspace(0.0, 1.0, tensor_width, dtype=np.float32),
+                (tensor_height, tensor_width)).copy(),
             "shadow_candidate_parallax": constant,
             "shadow_ownership_refined_parallax": constant,
             "shadow_vertical_majorant": majorant,
@@ -2401,17 +2403,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             (root / f"{name}.f32").write_bytes(payload)
             manifest["artifacts"][f"{name}.f32"]["sha256"] = hashlib.sha256(
                 payload).hexdigest()
-        warp_depth_payload = final.astype("<f4").tobytes()
-        (root / "warp_depth.f32").write_bytes(warp_depth_payload)
-        manifest["artifacts"]["warp_depth.f32"] = {
-            "available": True,
-            "required": True,
-            "stage":
-                "crop-local displayed parallax field embedded by live V2 reprojection",
-            "description": "authenticated test crop-local warp field",
-            "sha256": hashlib.sha256(warp_depth_payload).hexdigest(),
-        }
-
         runtime_scale, vertical_slope = dump_contract._roi_renderer_constants(
             (inference["left"], inference["top"],
              inference["right"], inference["bottom"]),
@@ -2548,14 +2539,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "description": "authenticated test full-source inverse map",
             "sha256": hashlib.sha256(map_payload).hexdigest(),
         }
-        manifest["artifacts"]["warp_map_shape.json"] = {
+        manifest["warp_map_contract"] = {
             "available": True,
-            "required": True,
-            "stage": "inverse-warp mapping contract",
-            "description": "authenticated test map shape",
-        }
-        shape = {
             "schema": 2,
+            "artifact": "warp_map.f32",
             "width": 2 * source_width,
             "height": source_height,
             "eye_width": source_width,
@@ -2583,19 +2570,16 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "(raw_reproject_source_u_normalized - aspect_fitted_unwarped_source_u) * content_scale_x * eye_width",
             "derived_signed_binocular_disparity_px":
                 "invert both eye maps at common source-U samples; x_right - x_left",
-            "displacement_preview": {
-                "file": "warp_displacement_heat.png",
-                "range_px": [-1.0, 1.0],
-                "normalization": "symmetric finite-content p98 absolute displacement",
-                "negative": "blue",
-                "zero": "green",
-                "positive": "red",
-                "bars": "black",
-                "nonfinite": "magenta",
-            },
         }
-        (root / "warp_map_shape.json").write_text(
-            json.dumps(shape), encoding="utf-8")
+        mask_payload = b"synthetic authenticated warp mask"
+        (root / "warp_mask.png").write_bytes(mask_payload)
+        manifest["artifacts"]["warp_mask.png"] = {
+            "available": True,
+            "required": True,
+            "stage": "V2 boundary-extrapolation mask",
+            "description": "authenticated test boundary mask",
+            "sha256": hashlib.sha256(mask_payload).hexdigest(),
+        }
         self._write_subtitle_conditioning_document(root, manifest)
         roi_state = copy.deepcopy(self.live_state)
         roi_state["units"] = {
@@ -2693,6 +2677,123 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             self.assertEqual(summary["width"], 16)
             self.assertEqual(summary["height"], 12)
             self.assertFalse(summary["window_region_verified"])
+
+    def test_schema39_generates_float_previews_on_demand_outside_package(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "dump"
+            previews = Path(temporary) / "previews"
+            root.mkdir()
+            self._write_synthetic_geometry_dump(root)
+
+            summary = dump_contract.generate_float_artifact_previews(
+                root, "shadow_final_parallax.f32", previews)
+
+            self.assertEqual(summary["normalization"], "finite p2-p98")
+            self.assertEqual(len(summary["files"]), 2)
+            self.assertFalse((root / "shadow_final_parallax.png").exists())
+            for filename in summary["files"]:
+                with Image.open(filename) as image:
+                    self.assertEqual(image.size, (16, 12))
+
+            with self.assertRaisesRegex(ValueError, "outside the atomic dump package"):
+                dump_contract.generate_float_artifact_previews(
+                    root, "shadow_final_parallax.f32", root / "previews")
+
+    def test_model_input_preview_authenticates_shape_sidecar_before_normalization(self):
+        import numpy as np
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "dump"
+            previews = Path(temporary) / "model-previews"
+            rejected_previews = Path(temporary) / "rejected-model-previews"
+            root.mkdir()
+            manifest, _ = self._write_synthetic_geometry_dump(root)
+            width = manifest["dimensions"]["model_input"]["width"]
+            height = manifest["dimensions"]["model_input"]["height"]
+            model_input = np.zeros((3, height, width), dtype="<f4").tobytes()
+            (root / "model_input.f32").write_bytes(model_input)
+            manifest["artifacts"]["model_input.f32"] = {
+                "available": True,
+                "required": True,
+                "stage": "exact neural-network input",
+                "description": "authenticated test model input",
+                "sha256": hashlib.sha256(model_input).hexdigest(),
+            }
+            shape = {
+                "schema": 1,
+                "width": width,
+                "height": height,
+                "dtype": "float32-le",
+                "layout": "NCHW",
+                "channels": ["R", "G", "B"],
+                "stage": "after calibrated preprocessing and ImageNet normalization",
+                "imagenet_mean": [0.485, 0.456, 0.406],
+                "imagenet_std": [0.229, 0.224, 0.225],
+            }
+            shape_payload = json.dumps(shape).encode("utf-8")
+            (root / "model_input_shape.json").write_bytes(shape_payload)
+            manifest["artifacts"]["model_input_shape.json"] = {
+                "available": True,
+                "required": True,
+                "stage": "model-input contract",
+                "description": "authenticated test preprocess contract",
+                "sha256": hashlib.sha256(shape_payload).hexdigest(),
+            }
+            (root / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+
+            summary = dump_contract.generate_float_artifact_previews(
+                root, "model_input.f32", previews)
+            self.assertEqual(summary["normalization"],
+                             "channel * imagenet_std + imagenet_mean; clamped to [0,1]")
+            with Image.open(summary["files"][0]) as image:
+                self.assertEqual(image.size, (width, height))
+
+            shape["imagenet_mean"][0] = 0.0
+            (root / "model_input_shape.json").write_text(
+                json.dumps(shape), encoding="utf-8")
+            with self.assertRaisesRegex(
+                    ValueError, "model_input_shape.json content hash mismatch"):
+                dump_contract.generate_float_artifact_previews(
+                    root, "model_input.f32", rejected_previews)
+            self.assertFalse(rejected_previews.exists())
+
+    def test_preview_generation_requires_complete_authenticated_geometry_package(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "dump"
+            previews = Path(temporary) / "previews"
+            root.mkdir()
+            self._write_synthetic_geometry_dump(root)
+            candidate = root / "shadow_candidate_parallax.f32"
+            payload = bytearray(candidate.read_bytes())
+            payload[0] ^= 1
+            candidate.write_bytes(payload)
+
+            with self.assertRaisesRegex(
+                    ValueError, "shadow_candidate_parallax.f32 content hash mismatch"):
+                dump_contract.generate_float_artifact_previews(
+                    root, "shadow_final_parallax.f32", previews)
+            self.assertFalse(previews.exists())
+
+    def test_geometry_verifier_requires_exact_shadow_coordinate_file(self):
+        for mutation, expected in (
+                ("missing", "shadow_coordinate.f32 is missing"),
+                ("corrupt", "shadow_coordinate.f32 content hash mismatch")):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self._write_synthetic_geometry_dump(root)
+                coordinate_path = root / "shadow_coordinate.f32"
+                if mutation == "missing":
+                    coordinate_path.unlink()
+                else:
+                    payload = bytearray(coordinate_path.read_bytes())
+                    payload[-1] ^= 1
+                    coordinate_path.write_bytes(payload)
+                with self.assertRaisesRegex(ValueError, expected):
+                    dump_contract.verify_v2_dump_geometry(root)
 
     def test_geometry_verifier_authenticates_v2_state_artifact_bytes(self):
         for artifact in ("shadow_state.json", "shadow_frame_stats.json"):
@@ -2869,9 +2970,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             self._write_hashed_payload(
                 root, manifest, "shadow_final_parallax.f32",
                 changed.astype("<f4").tobytes())
-            self._write_hashed_payload(
-                root, manifest, "warp_depth.f32",
-                changed.astype("<f4").tobytes())
             (root / "dump_manifest.json").write_text(
                 json.dumps(manifest), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "not the exact content-clamped Base"):
@@ -2915,8 +3013,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             fade_two_payload = fade_two.astype("<f4").tobytes()
             self._write_hashed_payload(
                 root, manifest, "shadow_final_parallax.f32", fade_two_payload)
-            self._write_hashed_payload(
-                root, manifest, "warp_depth.f32", fade_two_payload)
             (root / "dump_manifest.json").write_text(
                 json.dumps(manifest), encoding="utf-8")
             summary = dump_contract.verify_v2_dump_geometry(root)
@@ -2929,8 +3025,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             tampered_payload = tampered.astype("<f4").tobytes()
             self._write_hashed_payload(
                 root, manifest, "shadow_final_parallax.f32", tampered_payload)
-            self._write_hashed_payload(
-                root, manifest, "warp_depth.f32", tampered_payload)
             (root / "dump_manifest.json").write_text(
                 json.dumps(manifest), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "exact SLR13 rectangle-conditioning"):
@@ -2938,8 +3032,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
 
             self._write_hashed_payload(
                 root, manifest, "shadow_final_parallax.f32", fade_two_payload)
-            self._write_hashed_payload(
-                root, manifest, "warp_depth.f32", fade_two_payload)
             final = dump_contract.SUBTITLE_OCR_FINAL_BOX_WORD_OFFSET
             ocr[final] += 1
             self._write_hashed_payload(
@@ -3160,7 +3252,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "shadow_vertical_majorant.f32": majorant,
                 "shadow_vertical_conditioned.f32": conditioned,
                 "shadow_final_parallax.f32": final,
-                "warp_depth.f32": final,
             }
             for name, values in fields.items():
                 self._write_hashed_payload(
@@ -3176,9 +3267,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             # a different exact recurrence and must now fail closed.
             _, _, legacy = dump_contract._replay_v2_limiter_fields(ownership, width)
             self.assertFalse(np.array_equal(final, legacy))
-            for name in ("shadow_final_parallax.f32", "warp_depth.f32"):
-                self._write_hashed_payload(
-                    root, manifest, name, legacy.astype("<f4").tobytes())
+            self._write_hashed_payload(
+                root, manifest, "shadow_final_parallax.f32",
+                legacy.astype("<f4").tobytes())
             (root / "dump_manifest.json").write_text(
                 json.dumps(manifest), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "exact recurrence"):
@@ -3221,7 +3312,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         import numpy as np
 
         mutations = (
-            "region-hash", "border-hash", "map-hash", "map-nonzero",
+            "region-hash", "border-hash", "map-hash", "mask-hash", "map-nonzero",
             "authorization-mismatch", "semantic-mismatch")
         for mutation in mutations:
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
@@ -3232,6 +3323,9 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     document["analysis"]["analysis_generation"] += 1
                     (root / "depth_input_region.json").write_text(json.dumps(document))
                     expected = "depth_input_region.json content hash mismatch"
+                elif mutation == "mask-hash":
+                    (root / "warp_mask.png").write_bytes(b"tampered mask")
+                    expected = "warp_mask.png content hash mismatch"
                 elif mutation in {
                         "border-hash", "authorization-mismatch", "semantic-mismatch"}:
                     document = json.loads((root / "window_region.json").read_text())
@@ -3434,8 +3528,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             final_path.write_bytes(tampered_bytes)
             manifest["artifacts"]["shadow_final_parallax.f32"]["sha256"] = (
                 hashlib.sha256(tampered_bytes).hexdigest())
-            self._write_hashed_payload(
-                root, manifest, "warp_depth.f32", tampered_bytes)
             (root / "dump_manifest.json").write_text(
                 json.dumps(manifest), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "exact recurrence"):

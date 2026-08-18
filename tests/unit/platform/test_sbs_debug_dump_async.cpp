@@ -71,7 +71,6 @@ namespace {
       .bottom = source_height,
       .tensor_content = content,
       .analysis_generation = 17u,
-      .video_region = true,
       .authority = models::depth_analysis_authority_e::foreground_client,
     };
     return frame;
@@ -92,7 +91,6 @@ namespace {
       .bottom = 1080u,
       .tensor_content = {0u, 0u, 770u, 434u},
       .analysis_generation = 0u,
-      .video_region = false,
       .authority = models::depth_analysis_authority_e::full_source,
     };
     return frame;
@@ -1129,7 +1127,7 @@ namespace {
     EXPECT_TRUE(dumper.needs_conversion_poll());
   }
 
-  TEST(SbsDebugDumpAsyncTest, ActiveBasePreviewsAreDeclaredInTheDumpManifest) {
+  TEST(SbsDebugDumpAsyncTest, Schema39PackagesOnlyOneFinalFieldAndNoScalarPreviews) {
     std::ifstream stream(
       std::filesystem::path(SUNSHINE_SOURCE_DIR) /
         "src/platform/windows/sbs_debug_dump.cpp",
@@ -1140,17 +1138,31 @@ namespace {
       std::istreambuf_iterator<char> {stream},
       std::istreambuf_iterator<char> {},
     };
-    for (const std::string_view name : {
-           "shadow_base_final_parallax.f32",
+    EXPECT_NE(
+      source.find("artifacts[\"shadow_base_final_parallax.f32\"]"),
+      std::string::npos
+    );
+    EXPECT_NE(
+      source.find("artifacts[\"shadow_coordinate.f32\"]"),
+      std::string::npos
+    );
+    EXPECT_NE(
+      source.find("dimensions[\"shadow_coordinate\"]"),
+      std::string::npos
+    );
+    for (const std::string_view retired : {
+           "warp_depth.f32",
            "shadow_base_final_parallax_shape.json",
            "shadow_base_final_parallax.png",
            "shadow_base_final_parallax_heat.png",
          }) {
-      EXPECT_NE(
-        source.find("artifacts[\"" + std::string(name) + "\"]"),
-        std::string::npos
-      ) << name;
+      EXPECT_EQ(source.find(retired), std::string::npos) << retired;
     }
+    EXPECT_NE(source.find("{\"schema\", 39}"), std::string::npos);
+    EXPECT_NE(
+      source.find("{\"warp_input_artifact\", \"shadow_final_parallax.f32\"}"),
+      std::string::npos
+    );
   }
 
   TEST(SbsDebugDumpAsyncTest, CollectionChunksAreBoundedAlignedAndComplete) {

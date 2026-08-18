@@ -32,6 +32,7 @@
 
 #include <src/crypto.h>
 #include <src/depth_coordinate_v2.h>
+#include <src/host_sbs_v2_gpu_executor.h>
 #include <src/sbs_bench_depth_coordinate_v2.h>
 #include <src/video_depth_estimator.h>
 
@@ -968,6 +969,174 @@ namespace {
     return true;
   }
 }  // namespace
+
+TEST(HostSbsV2GpuExecutorTest, DispatchCommandsRejectInvalidShapesAndOffsets) {
+  using dispatch_command_t = models::host_sbs_v2_gpu::dispatch_command_t;
+  auto *const arguments = reinterpret_cast<ID3D11Buffer *>(std::uintptr_t {1u});
+
+  EXPECT_FALSE(dispatch_command_t {}.valid());
+  EXPECT_TRUE(dispatch_command_t::direct(1u, 1u, 1u).valid());
+  EXPECT_FALSE(dispatch_command_t::direct(0u, 1u, 1u).valid());
+  EXPECT_FALSE(dispatch_command_t::direct(1u, 0u, 1u).valid());
+  EXPECT_FALSE(dispatch_command_t::direct(1u, 1u, 0u).valid());
+  EXPECT_FALSE(dispatch_command_t::indirect(nullptr, 0u).valid());
+  EXPECT_TRUE(dispatch_command_t::indirect(arguments, 0u).valid());
+  EXPECT_TRUE(dispatch_command_t::indirect(arguments, 4u).valid());
+  EXPECT_FALSE(dispatch_command_t::indirect(arguments, 2u).valid());
+  auto mixed_direct = dispatch_command_t::direct(1u, 1u, 1u);
+  mixed_direct.indirect_byte_offset = 4u;
+  EXPECT_FALSE(mixed_direct.valid());
+  auto mixed_indirect = dispatch_command_t::indirect(arguments, 0u);
+  mixed_indirect.group_count_x = 1u;
+  EXPECT_FALSE(mixed_indirect.valid());
+}
+
+TEST(HostSbsV2GpuExecutorTest, EveryStageRejectsMissingOperandsWithoutRecording) {
+  warp_device_t warp;
+  ASSERT_TRUE(warp.initialize());
+
+  using namespace models::host_sbs_v2_gpu;
+  EXPECT_FALSE(record_moments_frame(warp.context.Get(), moments_frame_command_t {}));
+  EXPECT_FALSE(record_state(warp.context.Get(), state_command_t {}));
+  EXPECT_FALSE(record_map_history(warp.context.Get(), map_history_command_t {}));
+  EXPECT_FALSE(record_ownership(warp.context.Get(), ownership_command_t {}));
+  EXPECT_FALSE(record_vertical(warp.context.Get(), vertical_command_t {}));
+  EXPECT_FALSE(record_horizontal(warp.context.Get(), horizontal_command_t {}));
+}
+
+TEST(HostSbsV2GpuExecutorTest, ExactBindingAndPublicationSeamsStayShared) {
+  const auto source_root = std::filesystem::path(SUNSHINE_SOURCE_DIR) / "src";
+  const auto executor = read_bytes(source_root / "host_sbs_v2_gpu_executor.cpp");
+  const auto replay = read_bytes(source_root / "sbs_bench_depth_coordinate_v2.cpp");
+  const auto live = read_bytes(source_root / "video_depth_estimator.cpp");
+  ASSERT_FALSE(executor.empty());
+  ASSERT_FALSE(replay.empty());
+  ASSERT_FALSE(live.empty());
+
+  const auto count_occurrences = [](
+                                   const std::string_view haystack,
+                                   const std::string_view needle
+                                 ) {
+    std::size_t count = 0u;
+    for (std::size_t position = 0u;
+         (position = haystack.find(needle, position)) != std::string_view::npos;
+         position += needle.size()) {
+      ++count;
+    }
+    return count;
+  };
+  const auto stage = [&executor](
+                       const std::string_view begin,
+                       const std::string_view end
+                     ) {
+    const auto first = executor.find(begin);
+    const auto last = executor.find(end, first + begin.size());
+    EXPECT_NE(first, std::string::npos) << begin;
+    EXPECT_NE(last, std::string::npos) << end;
+    if (first == std::string::npos || last == std::string::npos) {
+      return std::string_view {};
+    }
+    return std::string_view(executor).substr(first, last - first);
+  };
+  const auto compact = [](const std::string_view value) {
+    std::string result;
+    result.reserve(value.size());
+    for (const char character : value) {
+      if (character != ' ' && character != '\t' && character != '\r' &&
+          character != '\n') {
+        result.push_back(character);
+      }
+    }
+    return result;
+  };
+  const auto moments = compact(stage("bool record_moments_frame(", "bool record_state("));
+  const auto state = compact(stage("bool record_state(", "bool record_map_history("));
+  const auto map = compact(stage("bool record_map_history(", "bool record_ownership("));
+  const auto ownership = compact(stage("bool record_ownership(", "bool record_vertical("));
+  const auto vertical = compact(stage("bool record_vertical(", "bool record_horizontal("));
+  const auto horizontal = compact(stage("bool record_horizontal(", "}  // namespace models"));
+
+  EXPECT_NE(moments.find("CSSetShaderResources(0u,2u,moments_inputs)"),
+            std::string::npos);
+  EXPECT_NE(moments.find("CSSetUnorderedAccessViews(0u,1u"), std::string::npos);
+  EXPECT_NE(moments.find("CSSetShaderResources(0u,1u,&command.partials)"),
+            std::string::npos);
+  EXPECT_NE(moments.find("CSSetUnorderedAccessViews(0u,2u"), std::string::npos);
+  EXPECT_NE(state.find("CSSetShaderResources(0u,2u,inputs)"), std::string::npos);
+  EXPECT_NE(state.find("CSSetUnorderedAccessViews(0u,1u"), std::string::npos);
+  EXPECT_NE(compact(executor).find("CSSetConstantBuffers(0u,3u,buffers)"),
+            std::string::npos);
+  EXPECT_NE(map.find("bind_stage_constants(context,command.constants"),
+            std::string::npos);
+  EXPECT_NE(map.find("CSSetShaderResources(0u,8u,inputs)"), std::string::npos);
+  EXPECT_NE(map.find("CSSetUnorderedAccessViews(0u,6u,outputs,nullptr)"),
+            std::string::npos);
+  EXPECT_NE(map.find("CSSetShaderResources(0u,8u,null_inputs)"),
+            std::string::npos);
+  EXPECT_NE(map.find("CSSetUnorderedAccessViews(0u,6u,null_outputs,nullptr)"),
+            std::string::npos);
+  EXPECT_NE(ownership.find("CSSetShaderResources(0u,3u,inputs)"),
+            std::string::npos);
+  EXPECT_NE(ownership.find("CSSetUnorderedAccessViews(0u,1u"),
+            std::string::npos);
+  EXPECT_NE(vertical.find("CSSetShaderResources(0u,1u"), std::string::npos);
+  EXPECT_NE(vertical.find("CSSetUnorderedAccessViews(0u,2u"), std::string::npos);
+  EXPECT_NE(horizontal.find("CSSetShaderResources(0u,1u"), std::string::npos);
+  EXPECT_NE(horizontal.find("CSSetUnorderedAccessViews(0u,1u"),
+            std::string::npos);
+
+  for (const std::string_view recorder : {
+         "record_moments_frame",
+         "record_state",
+         "record_map_history",
+         "record_ownership",
+         "record_vertical",
+         "record_horizontal",
+       }) {
+    EXPECT_EQ(count_occurrences(replay, recorder), 1u) << recorder;
+    EXPECT_EQ(count_occurrences(live, recorder), 1u) << recorder;
+  }
+  EXPECT_EQ(
+    count_occurrences(replay, ".tensor_exclusion = dummy_exclusion_srv.Get()"),
+    3u
+  );
+  EXPECT_EQ(
+    count_occurrences(live, ".tensor_exclusion = tensor_exclusion_srv.Get()"),
+    3u
+  );
+  EXPECT_EQ(replay.find("CSSetShader(moments_shader.Get()"), std::string::npos);
+  EXPECT_EQ(replay.find("CSSetShader(map_shader.Get()"), std::string::npos);
+  EXPECT_EQ(live.find("CSSetShader(depth_coordinate_v2_moments_cs.Get()"),
+            std::string::npos);
+  EXPECT_EQ(live.find("CSSetShader(depth_coordinate_v2_map_cs.Get()"),
+            std::string::npos);
+  EXPECT_NE(live.find("dispatch_command_t::direct("), std::string::npos);
+  EXPECT_NE(live.find("dispatch_command_t::indirect("), std::string::npos);
+  EXPECT_NE(live.find("near_identical_transaction.dispatch.Get()"),
+            std::string::npos);
+  for (const std::string_view offset : {
+         "near_identical_gpu_infer_reduce_byte_offset",
+         "near_identical_gpu_infer_one_byte_offset",
+         "near_identical_gpu_infer_grid16_byte_offset",
+         "near_identical_gpu_infer_grid8_byte_offset",
+         "near_identical_gpu_infer_columns_byte_offset",
+         "near_identical_gpu_infer_rows_byte_offset",
+       }) {
+    EXPECT_NE(live.find(offset), std::string::npos) << offset;
+  }
+  EXPECT_NE(live.find("near_identical_history_owner.uav.Get()"),
+            std::string::npos);
+  EXPECT_NE(live.find(".near_identical_constants = near_identical_cbuffer.Get()"),
+            std::string::npos);
+  EXPECT_NE(live.find("CSSetConstantBuffers(1, 2, null_constants)"),
+            std::string::npos);
+  EXPECT_NE(live.find("depth_coordinate_v2_ownership_tex.Get(),"),
+            std::string::npos);
+  EXPECT_NE(live.find("mark_d3d_parallax_map_start(perf_slot)"),
+            std::string::npos);
+  EXPECT_NE(live.find("mark_d3d_parallax_subtitle_start(perf_slot)"),
+            std::string::npos);
+}
 
 TEST(DepthCoordinateV2GpuTest, DirectRoiOwnershipMatchesPriorCropTextureBitwise) {
   warp_device_t warp;

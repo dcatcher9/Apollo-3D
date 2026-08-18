@@ -10,6 +10,7 @@
 #include "src/gpu_workload_arbiter.h"
 #include "src/offline_sbs_contract.h"
 #include "src/offline_sbs_job.h"
+#include "src/offline_sbs_wire_contract.h"
 #include "src/platform/common.h"
 
 #ifdef _WIN32
@@ -44,6 +45,35 @@ namespace {
     fs::create_directories(path.parent_path());
     std::ofstream output(path, std::ios::binary);
     output.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+  }
+
+  nlohmann::json valid_scene_audit(const std::string_view status) {
+    offline_sbs::scene_plan_t scene;
+    scene.scene_id = 1;
+    scene.semantic_scene_id = 1;
+    scene.start_sequence = 1;
+    scene.end_sequence_exclusive = 11;
+    scene.frame_count = 10;
+    scene.cache_bytes = 1024;
+    scene.evidence.source_frame_count = 10;
+    scene.evidence.depth_update_count = 10;
+    scene.boundary.final_sequence = 11;
+    scene.boundary.decision = offline_sbs::boundary_decision_e::end_of_stream;
+    scene.boundary.reason = "end of stream";
+    scene.boundary.accepted = true;
+    return offline_sbs::wire::to_json(
+      offline_sbs::wire::scene_audit_contract_t {
+        .status = std::string {status},
+        .peak_cache_bytes = 1024,
+        .analysis_source_raster_bytes = 256,
+        .peak_live_raster_bytes = 128,
+        .peak_cache_plus_raster_bytes = 1152,
+        .hard_cap_bytes = 2048,
+        .timeline_contract = {{"mode", "evaluation-only"}},
+        .scenes = {scene},
+        .boundary_revisions = {scene.boundary},
+      }
+    );
   }
 
   std::string sha256_hex(const std::string_view bytes) {
@@ -1423,7 +1453,7 @@ TEST(OfflineSbsJob, ServesOnlyTheBoundedManagerOwnedSceneAudit) {
       });
       write_nonempty(
         context.result_directory / "scene-audit.json",
-        R"({"schema":2,"version":"whole-clip-scene-audit-v2","status":"complete","scenes":[{"scene_id":"managed"}],"boundary_revisions":[]})"
+        valid_scene_audit("complete").dump()
       );
       return offline_sbs::worker_outcome_t {
         .completed = true,
@@ -1453,7 +1483,7 @@ TEST(OfflineSbsJob, ServesOnlyTheBoundedManagerOwnedSceneAudit) {
   const auto audit = service.scene_audit(created.job->id);
   ASSERT_TRUE(audit.ok) << audit.error;
   ASSERT_EQ(audit.audit["scenes"].size(), 1u);
-  EXPECT_EQ(audit.audit["scenes"][0]["scene_id"], "managed");
+  EXPECT_EQ(audit.audit["scenes"][0]["scene_id"], 1);
   EXPECT_EQ(
     service.scene_audit("00000000-0000-0000-0000-000000000000").code,
     offline_sbs::error_code_e::not_found
@@ -1511,7 +1541,7 @@ TEST(OfflineSbsJob, RetainsAnAttestedPartialAuditAfterWorkerFailure) {
       });
       write_nonempty(
         context.result_directory / "scene-audit.json",
-        R"({"schema":2,"version":"whole-clip-scene-audit-v2","status":"running","scenes":[{"scene_id":1}],"boundary_revisions":[]})"
+        valid_scene_audit("running").dump()
       );
       return offline_sbs::worker_outcome_t {
         .error = "injected failure after one finalized scene",

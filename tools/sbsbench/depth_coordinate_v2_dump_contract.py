@@ -16,12 +16,14 @@ from typing import Any, Dict, Tuple
 try:
     from . import depth_coordinate_v2_contract as coordinate_contract
     from . import generate_depth_coordinate_v2_contract as generator
+    from . import host_sbs_shader_manifest as shader_manifest
 except ImportError:  # Direct script/module loading from tools/sbsbench.
     import depth_coordinate_v2_contract as coordinate_contract  # type: ignore
     import generate_depth_coordinate_v2_contract as generator  # type: ignore
+    import host_sbs_shader_manifest as shader_manifest  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 38
+DUMP_MANIFEST_SCHEMA = 39
 GPU_TRACE_RING_SCHEMA = 3
 GPU_TRACE_CONTRACT_SCHEMA = 3
 GPU_TRACE_DECODED_SCHEMA = 4
@@ -36,9 +38,13 @@ GPU_TRACE_CONDITION_WORD_COUNT = 6
 GPU_TRACE_RING_WORD_COUNT = (
     GPU_TRACE_HEADER_WORD_COUNT + GPU_TRACE_CAPACITY * GPU_TRACE_RECORD_WORD_COUNT)
 GPU_TRACE_RING_BYTE_COUNT = GPU_TRACE_RING_WORD_COUNT * 4
-GPU_TRACE_SOURCE_CLOSURE_SHA256 = (
-    "a1e6a21286b5a898b1dcdd419056faa8e3a5351b21edef0ef288d716979c0cb9")
-GPU_TRACE_SHADER_SPEC = ("host_sbs_gpu_trace_cs.hlsl", "main", "cs_5_0")
+GPU_TRACE_SOURCE_CLOSURE_SHA256 = shader_manifest.GPU_TRACE.source_closure_sha256
+_GPU_TRACE_SPEC = shader_manifest.GPU_TRACE.specs[0]
+GPU_TRACE_SHADER_SPEC = (
+    _GPU_TRACE_SPEC.source_file,
+    _GPU_TRACE_SPEC.source_entrypoint,
+    _GPU_TRACE_SPEC.source_target,
+)
 GPU_TRACE_DECISION_COOKIE = 0xD1EC15A5
 GPU_TRACE_TOKEN_LOW_COOKIE = 0xA3756C91
 GPU_TRACE_TOKEN_HIGH_COOKIE = 0x5C8A936E
@@ -137,11 +143,9 @@ WINDOW_REGION_AUTHORITY_KINDS = frozenset({"chromium-video", "foreground-client"
 SHADOW_STATE_DUMP_SCHEMA = 16
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 2
 LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
-    "7553350163dfb80cee85b70689b768a46a5c15b44997e2753e24bebedaa51ffd"
-)
+    shader_manifest.PARALLAX_V2_LIVE_RENDERER.source_closure_sha256)
 DIAGNOSTIC_SOURCE_CLOSURE_SHA256 = (
-    "1c7cb433f667c990e4d55f254a11cc9a40590e3a1e97e62fc261c2e0069b9513"
-)
+    shader_manifest.PARALLAX_V2_LIVE_DIAGNOSTIC.source_closure_sha256)
 _CONTRACT = coordinate_contract.load_contract()
 _CONTRACT_TAG = generator.contract_tag(_CONTRACT)
 _STATE_FIELDS = tuple(_CONTRACT["shadow_state"]["fields"])
@@ -2178,17 +2182,137 @@ def _validate_final_parallax_manifest(document: Dict[str, Any]) -> Dict[str, Any
     expected = {
         "contract_schema": contract.schema,
         "artifact": "shadow_final_parallax.f32",
-        "warp_artifact": "warp_depth.f32",
+        "warp_input_artifact": "shadow_final_parallax.f32",
         "authority": contract.authority,
         "publication_policy": contract.publication_policy,
         "reuse_policy": contract.reuse_policy,
         "invalid_policy": contract.invalid_policy,
         "current_rgb_policy": contract.current_rgb_policy,
-        "warp_relation": "bit-identical",
+        "warp_relation": "same authenticated artifact",
     }
     if final != expected:
         raise ValueError("dump_manifest.json has an invalid final-parallax contract")
     return expected
+
+
+def _validate_warp_map_manifest(
+        document: Dict[str, Any], artifacts: Dict[str, Any],
+        dimensions: Dict[str, Any], input_mode: str) -> Dict[str, Any]:
+    """Validate the manifest-resident replacement for ``warp_map_shape.json``."""
+
+    contract = document.get("warp_map_contract")
+    map_descriptor = artifacts.get("warp_map.f32")
+    mask_descriptor = artifacts.get("warp_mask.png")
+    required = input_mode == "window-region"
+    if not isinstance(contract, dict) or contract.get("schema") != 2:
+        raise ValueError("dump_manifest.json has an invalid warp-map contract")
+    available = contract.get("available")
+    if not isinstance(available, bool):
+        raise ValueError("dump_manifest.json has an invalid warp-map availability flag")
+    if not available:
+        if (contract != {"available": False, "schema": 2, "artifact": None} or
+                required or dimensions.get("warp_map") is not None or
+                dimensions.get("warp_mask") is not None):
+            raise ValueError("dump_manifest.json lacks required inverse-map evidence")
+        for descriptor, stage in (
+                (map_descriptor, "exact inverse-warp mapping"),
+                (mask_descriptor, "V2 boundary-extrapolation mask")):
+            if (not isinstance(descriptor, dict) or set(descriptor) != {
+                    "available", "required", "stage", "description"} or
+                    descriptor.get("available") is not False or
+                    descriptor.get("required") is not False or
+                    descriptor.get("stage") != stage or
+                    not isinstance(descriptor.get("description"), str) or
+                    not descriptor["description"]):
+                raise ValueError("unavailable inverse-map evidence is not canonical")
+        return {"available": False}
+
+    expected_keys = {
+        "available", "schema", "artifact", "width", "height", "eye_width",
+        "eye_height", "source_width", "source_height", "content_scale_x",
+        "content_scale_y", "dtype", "layout", "channels", "validity",
+        "live_sample_source_u_normalized",
+        "derived_inverse_displacement_output_eye_px",
+        "derived_signed_binocular_disparity_px",
+    }
+    expected_validity = {
+        "content": "derive from content_scale_x/content_scale_y and packed output coordinate",
+        "inverse": (
+            "11-step contractive fixed-point solution of crop-local q embedded by "
+            "depth_input_region.json scale and outside-only zero-plane collar"
+            if required else
+            "11-step contractive fixed-point solution of the signed final-parallax field"),
+        "mask": ("warp_mask.png red marks finite-source boundary extrapolation; V2 has no "
+                 "internal owner or synthetic-fill path"),
+    }
+    if (set(contract) != expected_keys or contract.get("artifact") != "warp_map.f32" or
+            contract.get("dtype") != "float32-le" or
+            contract.get("layout") != "row-major" or
+            contract.get("channels") != ["raw_reproject_source_u_normalized"] or
+            contract.get("validity") != expected_validity or
+            contract.get("live_sample_source_u_normalized") !=
+            "clamp(raw_reproject_source_u_normalized, 0, 1)" or
+            contract.get("derived_inverse_displacement_output_eye_px") !=
+            "(raw_reproject_source_u_normalized - aspect_fitted_unwarped_source_u) * "
+            "content_scale_x * eye_width" or
+            contract.get("derived_signed_binocular_disparity_px") !=
+            "invert both eye maps at common source-U samples; x_right - x_left"):
+        raise ValueError("dump_manifest.json has unknown warp-map semantics")
+
+    map_dimensions = dimensions.get("warp_map")
+    mask_dimensions = dimensions.get("warp_mask")
+    packed = dimensions.get("packed_sbs")
+    eye = dimensions.get("eye")
+    source = dimensions.get("source")
+    if not all(isinstance(value, dict) for value in (
+            map_dimensions, mask_dimensions, packed, eye, source)):
+        raise ValueError("inverse-map evidence lacks output/source dimensions")
+    width = _uint32(contract.get("width"), "warp-map width")
+    height = _uint32(contract.get("height"), "warp-map height")
+    eye_width = _uint32(contract.get("eye_width"), "warp-map eye width")
+    eye_height = _uint32(contract.get("eye_height"), "warp-map eye height")
+    source_width = _uint32(contract.get("source_width"), "warp-map source width")
+    source_height = _uint32(contract.get("source_height"), "warp-map source height")
+    scale_x = _finite_number(contract.get("content_scale_x"), "warp-map content scale x")
+    scale_y = _finite_number(contract.get("content_scale_y"), "warp-map content scale y")
+    content_fit = dimensions.get("content_fit")
+    if (width == 0 or height == 0 or eye_width == 0 or eye_height == 0 or
+            width != 2 * eye_width or height != eye_height or
+            map_dimensions != {
+                "width": width, "height": height,
+                "format": "DXGI_FORMAT_R32_FLOAT", "format_value": 41} or
+            mask_dimensions != {
+                "width": width, "height": height,
+                "format": "DXGI_FORMAT_B8G8R8A8_UNORM", "format_value": 87} or
+            packed.get("width") != width or packed.get("height") != height or
+            eye != {"width": eye_width, "height": eye_height} or
+            source.get("width") != source_width or source.get("height") != source_height or
+            not 0.0 < scale_x <= 1.0 or not 0.0 < scale_y <= 1.0 or
+            not isinstance(content_fit, dict) or
+            _finite_number(content_fit.get("scale_x"), "manifest content scale x") != scale_x or
+            _finite_number(content_fit.get("scale_y"), "manifest content scale y") != scale_y):
+        raise ValueError("inverse-map manifest geometry disagrees")
+
+    for descriptor, stage in (
+            (map_descriptor, "exact full-source inverse-warp mapping" if required else
+             "exact inverse-warp mapping"),
+            (mask_descriptor, "V2 boundary-extrapolation mask")):
+        if (not isinstance(descriptor, dict) or set(descriptor) != {
+                "available", "required", "stage", "description", "sha256"} or
+                descriptor.get("available") is not True or
+                descriptor.get("required") is not required or
+                descriptor.get("stage") != stage or
+                not isinstance(descriptor.get("description"), str) or
+                not descriptor["description"] or
+                not _is_sha256_hex(descriptor.get("sha256"))):
+            raise ValueError("dump_manifest.json lacks authenticated inverse-map evidence")
+    return {
+        "available": True,
+        "width": width,
+        "height": height,
+        "content_scale_x": scale_x,
+        "content_scale_y": scale_y,
+    }
 
 
 def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
@@ -2214,6 +2338,21 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     if not all(isinstance(value, dict) for value in
                (renderer, shadow, artifacts, dimensions)):
         raise ValueError("dump_manifest.json is missing its V2 geometry objects")
+
+    preview_contract = document.get("float_previews")
+    if preview_contract != {
+            "packaged": False,
+            "generator": "tools/sbsbench/generate_dump_previews.py",
+            "normalization": "finite p2-p98 computed on demand"}:
+        raise ValueError("dump_manifest.json has an invalid on-demand preview contract")
+    packaged_png_allowlist = {
+        "source.png", "depth_input_source.png", "sbs.png", "warp_mask.png"}
+    for name in artifacts:
+        if ((name.endswith(".png") and name not in packaged_png_allowlist) or
+                (name.endswith("_shape.json") and name != "model_input_shape.json") or
+                name.startswith("warp_depth")):
+            raise ValueError(
+                f"dump_manifest.json advertises retired schema-38 artifact {name}")
 
     shader = coordinate_contract.SHADER_IMPLEMENTATION
     expected_shadow_shader = {
@@ -2277,6 +2416,8 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     subtitle_live = subtitle_conditioning["live"]
     gpu_trace = _validate_gpu_trace_manifest(document, artifacts)
     final_parallax = _validate_final_parallax_manifest(document)
+    warp_map = _validate_warp_map_manifest(
+        document, artifacts, dimensions, input_mode)
 
     active = shadow.get("active")
     selected = renderer.get("parallax_v2_render_selected")
@@ -2294,7 +2435,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     if (not isinstance(requested, bool) or
             not isinstance(mapping_matches, bool) or
             (selected and not requested) or
-            (input_mode == "window-region" and not mapping_matches)):
+            mapping_matches != warp_map["available"]):
         raise ValueError("dump_manifest.json has invalid V2 renderer request attribution")
 
     expected_position = (
@@ -2392,32 +2533,16 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         raise ValueError("dump_manifest.json has unknown V2 conditioner attribution")
 
     expected_artifacts = {
+        "shadow_coordinate.f32": (
+            "parallax-v2 canonical coordinate diagnostic", True),
         "shadow_candidate_parallax.f32": (
             "parallax-v2 pre-limiter candidate displacement", True),
         "shadow_ownership_refined_parallax.f32": (
             "parallax-v2 full-resolution contour ownership refinement", True),
-        "shadow_ownership_refined_parallax_shape.json":
-            ("parallax-v2 full-resolution contour ownership refinement contract", False),
-        "shadow_ownership_refined_parallax.png":
-            ("parallax-v2 full-resolution contour ownership refinement preview", False),
-        "shadow_ownership_refined_parallax_heat.png":
-            ("parallax-v2 full-resolution contour ownership refinement preview", False),
         "shadow_vertical_majorant.f32": (
             "parallax-v2 vertical shear-limiter intermediate", False),
-        "shadow_vertical_majorant_shape.json":
-            ("parallax-v2 vertical shear-limiter intermediate contract", False),
-        "shadow_vertical_majorant.png":
-            ("parallax-v2 vertical shear-limiter intermediate preview", False),
-        "shadow_vertical_majorant_heat.png":
-            ("parallax-v2 vertical shear-limiter intermediate preview", False),
         "shadow_vertical_conditioned.f32":
             ("parallax-v2 orientation-selective vertical conditioner", False),
-        "shadow_vertical_conditioned_shape.json":
-            ("parallax-v2 orientation-selective vertical conditioner contract", False),
-        "shadow_vertical_conditioned.png":
-            ("parallax-v2 orientation-selective vertical conditioner preview", False),
-        "shadow_vertical_conditioned_heat.png":
-            ("parallax-v2 orientation-selective vertical conditioner preview", False),
         "shadow_final_parallax.f32": (
             "parallax-v2 atomic final displacement field", True),
     }
@@ -2444,34 +2569,9 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         if hashed and not _is_sha256_hex(descriptor.get("sha256")):
             raise ValueError(
                 "dump_manifest.json geometry artifact lacks a valid content sha256")
-    # Schema-36 packages captured before the manifest-completeness fix may already contain these
-    # non-authoritative files without descriptors. Accept their absence for compatibility, but
-    # authenticate the exact role of every descriptor a current writer publishes.
-    optional_base_artifacts = {
-        "shadow_base_final_parallax_shape.json":
-            "ordinary post-limiter V2 field contract before SLR13 conditioning",
-        "shadow_base_final_parallax.png":
-            "ordinary post-limiter V2 field preview before SLR13 conditioning",
-        "shadow_base_final_parallax_heat.png":
-            "ordinary post-limiter V2 field preview before SLR13 conditioning",
-    }
-    if subtitle_live:
-        for name, stage in optional_base_artifacts.items():
-            descriptor = artifacts.get(name)
-            if descriptor is None:
-                continue
-            if (not isinstance(descriptor, dict) or
-                    set(descriptor) != {
-                        "available", "required", "stage", "description"} or
-                    descriptor.get("available") is not active or
-                    descriptor.get("required") is not False or
-                    descriptor.get("stage") != stage or
-                    not isinstance(descriptor.get("description"), str) or
-                    not descriptor["description"]):
-                raise ValueError(
-                    "dump_manifest.json has an invalid optional Base preview contract")
     dimension_names = (
-        "shadow_candidate_parallax", "shadow_ownership_refined_parallax",
+        "shadow_coordinate", "shadow_candidate_parallax",
+        "shadow_ownership_refined_parallax",
         "shadow_vertical_majorant",
         "shadow_vertical_conditioned",
         *(('shadow_base_final_parallax',) if subtitle_live else ()),
@@ -2498,7 +2598,6 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
                 "active SLR13 subtitle conditioning requires a calibrated DAV2 field")
         model_dimensions = dimensions.get("model_input")
         raw_dimensions = dimensions.get("raw_depth")
-        warp_dimensions = dimensions.get("warp_depth")
         source_dimensions = dimensions.get("source")
         analysis_source_dimensions = dimensions.get("analysis_source")
         if (not isinstance(model_dimensions, dict) or
@@ -2512,13 +2611,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
                 set(raw_dimensions) != {"width", "height", "format"} or
                 raw_dimensions.get("width") != geometry_width or
                 raw_dimensions.get("height") != geometry_height or
-                raw_dimensions.get("format") != "float32-le structured buffer" or
-                not isinstance(warp_dimensions, dict) or
-                set(warp_dimensions) != {"width", "height", "format", "format_value"} or
-                warp_dimensions.get("width") != geometry_width or
-                warp_dimensions.get("height") != geometry_height or
-                warp_dimensions.get("format") != "DXGI_FORMAT_R32_FLOAT" or
-                warp_dimensions.get("format_value") != 41):
+                raw_dimensions.get("format") != "float32-le structured buffer"):
             raise ValueError("dump_manifest.json crop-local tensor dimensions disagree")
         expected_texture_keys = {"width", "height", "format", "format_value"}
         if (not isinstance(source_dimensions, dict) or
@@ -2556,29 +2649,6 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
             "shadow_base_final_parallax.f32" in artifacts or
             "shadow_base_final_parallax" in dimensions):
         raise ValueError("inactive subtitle conditioning exposes an SLR13 base field")
-
-    if input_mode == "window-region":
-        warp_map_descriptor = artifacts.get("warp_map.f32")
-        warp_map_shape_descriptor = artifacts.get("warp_map_shape.json")
-        if (not isinstance(warp_map_descriptor, dict) or
-                set(warp_map_descriptor) != {
-                    "available", "required", "stage", "description", "sha256"} or
-                warp_map_descriptor.get("available") is not True or
-                warp_map_descriptor.get("required") is not True or
-                warp_map_descriptor.get("stage") != "exact full-source inverse-warp mapping" or
-                not isinstance(warp_map_descriptor.get("description"), str) or
-                not warp_map_descriptor["description"] or
-                not _is_sha256_hex(warp_map_descriptor.get("sha256")) or
-                not isinstance(warp_map_shape_descriptor, dict) or
-                set(warp_map_shape_descriptor) != {
-                    "available", "required", "stage", "description"} or
-                warp_map_shape_descriptor.get("available") is not True or
-                warp_map_shape_descriptor.get("required") is not True or
-                warp_map_shape_descriptor.get("stage") != "inverse-warp mapping contract" or
-                not isinstance(warp_map_shape_descriptor.get("description"), str) or
-                not warp_map_shape_descriptor["description"] or
-                not isinstance(dimensions.get("warp_map"), dict)):
-            raise ValueError("dump_manifest.json lacks authoritative ROI warp-map evidence")
 
     region_summary = document.get("window_region")
     region_descriptor = artifacts.get("window_region.json")
@@ -2639,6 +2709,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         "subtitle_conditioning": subtitle_conditioning,
         "gpu_trace": gpu_trace,
         "final_parallax": final_parallax,
+        "warp_map": warp_map,
         "shadow_state_summary": shadow_state_summary,
     }
 
@@ -2649,6 +2720,7 @@ def _is_sha256_hex(value: Any) -> bool:
 
 
 _GEOMETRY_CHAIN_FIELDS = (
+    "shadow_coordinate",
     "shadow_candidate_parallax",
     "shadow_ownership_refined_parallax",
     "shadow_vertical_majorant",
@@ -3663,7 +3735,6 @@ def _verify_roi_exterior_zero_warp_map(
     """Prove exact-zero exterior samples from the selected full-source inverse map."""
 
     import hashlib
-    import json
     import os
 
     import numpy as np
@@ -3680,18 +3751,12 @@ def _verify_roi_exterior_zero_warp_map(
     if digest != descriptor["sha256"]:
         raise ValueError("warp_map.f32 content hash mismatch")
 
-    try:
-        with open(os.path.join(os.fspath(dump_dir), "warp_map_shape.json"),
-                  encoding="utf-8") as handle:
-            shape = json.load(handle)
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError("authoritative ROI warp_map_shape.json is missing or malformed") from error
-
     dimensions = manifest["dimensions"]
     packed = dimensions.get("packed_sbs")
     eye = dimensions.get("eye")
     source = dimensions.get("source")
     warp_dimensions = dimensions.get("warp_map")
+    shape = manifest.get("warp_map_contract")
     if not all(isinstance(value, dict) for value in (packed, eye, source, warp_dimensions)):
         raise ValueError("ROI warp-map evidence lacks full-source/output dimensions")
     map_width = _uint32(warp_dimensions.get("width"), "warp-map width")
@@ -3700,58 +3765,19 @@ def _verify_roi_exterior_zero_warp_map(
     eye_height = _uint32(eye.get("height"), "eye height")
     source_width = input_region["source_width"]
     source_height = input_region["source_height"]
-    expected_shape_keys = {
-        "schema", "width", "height", "eye_width", "eye_height", "source_width",
-        "source_height", "content_scale_x", "content_scale_y", "dtype", "layout",
-        "channels", "validity", "live_sample_source_u_normalized",
-        "derived_inverse_displacement_output_eye_px",
-        "derived_signed_binocular_disparity_px", "displacement_preview",
-    }
-    expected_validity = {
-        "content": "derive from content_scale_x/content_scale_y and packed output coordinate",
-        "inverse": ("11-step contractive fixed-point solution of crop-local q embedded by "
-                    "depth_input_region.json scale and outside-only zero-plane collar"),
-        "mask": ("warp_mask.png red marks finite-source boundary extrapolation; V2 has no "
-                 "internal owner or synthetic-fill path"),
-    }
-    preview = shape.get("displacement_preview")
-    if (map_width == 0 or map_height == 0 or eye_width == 0 or eye_height == 0 or
+    if (not isinstance(shape, dict) or
+            map_width == 0 or map_height == 0 or eye_width == 0 or eye_height == 0 or
             packed.get("width") != map_width or packed.get("height") != map_height or
             map_width != 2 * eye_width or map_height != eye_height or
             source.get("width") != source_width or source.get("height") != source_height or
             warp_dimensions.get("format") != "DXGI_FORMAT_R32_FLOAT" or
             warp_dimensions.get("format_value") != 41 or
-            set(shape) != expected_shape_keys or
             shape.get("schema") != 2 or shape.get("width") != map_width or
             shape.get("height") != map_height or shape.get("eye_width") != eye_width or
             shape.get("eye_height") != eye_height or
             shape.get("source_width") != source_width or
             shape.get("source_height") != source_height or
-            shape.get("dtype") != "float32-le" or shape.get("layout") != "row-major" or
-            shape.get("channels") != ["raw_reproject_source_u_normalized"] or
-            shape.get("validity") != expected_validity or
-            shape.get("live_sample_source_u_normalized") !=
-            "clamp(raw_reproject_source_u_normalized, 0, 1)" or
-            shape.get("derived_inverse_displacement_output_eye_px") !=
-            "(raw_reproject_source_u_normalized - aspect_fitted_unwarped_source_u) * "
-            "content_scale_x * eye_width" or
-            shape.get("derived_signed_binocular_disparity_px") !=
-            "invert both eye maps at common source-U samples; x_right - x_left" or
-            not isinstance(preview, dict) or set(preview) != {
-                "file", "range_px", "normalization", "negative", "zero", "positive",
-                "bars", "nonfinite"} or
-            preview.get("file") != "warp_displacement_heat.png" or
-            preview.get("normalization") !=
-            "symmetric finite-content p98 absolute displacement" or
-            preview.get("negative") != "blue" or preview.get("zero") != "green" or
-            preview.get("positive") != "red" or preview.get("bars") != "black" or
-            preview.get("nonfinite") != "magenta" or
-            not isinstance(preview.get("range_px"), list) or
-            len(preview["range_px"]) != 2 or
-            not math.isclose(
-                _finite_number(preview["range_px"][0], "displacement preview lower"),
-                -_finite_number(preview["range_px"][1], "displacement preview upper"),
-                rel_tol=0.0, abs_tol=1.0e-7) or preview["range_px"][1] <= 0.0):
+            shape.get("artifact") != "warp_map.f32"):
         raise ValueError("ROI warp-map dimensions/shape contract disagree")
 
     content_scale_x = _finite_number(shape.get("content_scale_x"), "content scale x")
@@ -3773,6 +3799,16 @@ def _verify_roi_exterior_zero_warp_map(
             _finite_number(content_fit.get("scale_y"), "manifest content scale y") !=
             expected_scale_y):
         raise ValueError("ROI warp-map content-fit contract disagrees")
+
+    mask_path = os.path.join(os.fspath(dump_dir), "warp_mask.png")
+    try:
+        with open(mask_path, "rb") as handle:
+            mask_payload = handle.read()
+    except OSError as error:
+        raise ValueError("authoritative ROI warp_mask.png is missing") from error
+    mask_descriptor = artifacts["warp_mask.png"]
+    if hashlib.sha256(mask_payload).hexdigest() != mask_descriptor["sha256"]:
+        raise ValueError("warp_mask.png content hash mismatch")
 
     values = np.frombuffer(payload, dtype="<f4")
     if values.size != map_width * map_height:
@@ -3992,7 +4028,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
          ``vertical_majorant``/``vertical_conditioned``/ordinary Base are bitwise equal to the
          recurrences recomputed from ``ownership_refined``; SLR13's analytic rectangle budget and
          fade exactly reproduce the atomic final field; ownership refinement never lowers the
-         candidate; and ``warp_depth`` equals that final field bit-for-bit.
+         candidate; and the atomic final artifact is the sole warp-input authority.
 
     Returns a summary dict on success; raises ``ValueError`` on the first violation.
     """
@@ -4165,6 +4201,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
     )
     subtitle_live = subtitle_summary["mode"] == _SUBTITLE_MODE_SLR13
     geometry_chain_fields = (
+        "shadow_coordinate",
         "shadow_candidate_parallax",
         "shadow_ownership_refined_parallax",
         "shadow_vertical_majorant",
@@ -4174,13 +4211,8 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
     )
     fields: Dict[str, Any] = {}
     for name in geometry_chain_fields:
-        path = os.path.join(os.fspath(dump_dir), name + ".f32")
-        with open(path, "rb") as handle:
-            payload = handle.read()
-        digest = hashlib.sha256(payload).hexdigest()
-        expected = artifacts[name + ".f32"]["sha256"]
-        if digest != expected:
-            raise ValueError(f"{name}.f32 content hash mismatch: {digest} != {expected}")
+        payload = _read_hashed_artifact(
+            dump_dir, artifacts, name + ".f32")
         values = np.frombuffer(payload, dtype="<f4")
         if values.size != width * height:
             raise ValueError(f"{name}.f32 has {values.size} texels; expected {width * height}")
@@ -4238,22 +4270,6 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
                 "rectangle-conditioning "
                 f"recurrence (minimum max abs diff {minimum_mismatch})")
 
-    warp_depth_path = os.path.join(os.fspath(dump_dir), "warp_depth.f32")
-    try:
-        with open(warp_depth_path, "rb") as handle:
-            warp_depth_payload = handle.read()
-    except OSError as error:
-        raise ValueError("warp_depth.f32 is missing") from error
-    warp_descriptor = artifacts.get("warp_depth.f32")
-    if (not isinstance(warp_descriptor, dict) or
-            hashlib.sha256(warp_depth_payload).hexdigest() != warp_descriptor.get("sha256")):
-        raise ValueError("warp_depth.f32 content hash mismatch")
-    warp_depth = np.frombuffer(warp_depth_payload, dtype="<f4")
-    if (warp_depth.size != width * height or not np.isfinite(warp_depth).all()):
-        raise ValueError("warp_depth.f32 has invalid crop-local geometry")
-    if not np.array_equal(warp_depth.reshape(height, width), fields["shadow_final_parallax"]):
-        raise ValueError("warp_depth.f32 is not the exact atomic final position field")
-
     exterior_zero = None
     if input_region["mode"] == "window-region":
         exterior_zero = _verify_roi_exterior_zero_warp_map(
@@ -4276,6 +4292,145 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
         "subtitle_conditioning": subtitle_summary,
         "gpu_trace": gpu_trace,
         "final_parallax_verified": True,
+    }
+
+
+def generate_float_artifact_previews(
+        dump_dir: Any, artifact_name: str, output_dir: Any) -> Dict[str, Any]:
+    """Generate diagnostic PNGs from one authenticated schema-39 ``.f32`` artifact.
+
+    Preview files are deliberately written outside the atomic package contract. Scalar tensors
+    receive finite-p2/p98 grayscale and jet views; ``model_input.f32`` receives an RGB view by
+    reversing its authenticated ImageNet normalization without applying another sRGB transfer.
+    """
+
+    import hashlib
+    import json
+    import os
+    from pathlib import Path
+
+    import numpy as np
+    from PIL import Image
+
+    if (not isinstance(artifact_name, str) or not artifact_name.endswith(".f32") or
+            Path(artifact_name).name != artifact_name):
+        raise ValueError("preview artifact must be one package-local .f32 filename")
+    root = Path(os.fspath(dump_dir))
+    destination = Path(os.fspath(output_dir))
+    resolved_root = root.resolve()
+    resolved_destination = destination.resolve()
+    if (resolved_destination == resolved_root or
+            resolved_root in resolved_destination.parents):
+        raise ValueError("preview output directory must be outside the atomic dump package")
+    try:
+        manifest = json.loads((root / "dump_manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("dump_manifest.json is missing or malformed") from error
+    validate_v2_dump_manifest_document(manifest)
+    # A preview is presented as derived from an authenticated package, so validate the entire
+    # required geometry/state transaction before creating any output, not just the requested file.
+    verify_v2_dump_geometry(root)
+    descriptor = manifest["artifacts"].get(artifact_name)
+    if (not isinstance(descriptor, dict) or descriptor.get("available") is not True or
+            not _is_sha256_hex(descriptor.get("sha256"))):
+        raise ValueError("requested float artifact is not authenticated by this dump")
+    try:
+        payload = (root / artifact_name).read_bytes()
+    except OSError as error:
+        raise ValueError(f"{artifact_name} is missing") from error
+    if hashlib.sha256(payload).hexdigest() != descriptor["sha256"]:
+        raise ValueError(f"{artifact_name} content hash mismatch")
+
+    stem = artifact_name[:-4]
+    extent = manifest["dimensions"].get(stem)
+    if not isinstance(extent, dict):
+        raise ValueError(f"dump manifest has no dimensions for {artifact_name}")
+    width = _uint32(extent.get("width"), f"{artifact_name} width")
+    height = _uint32(extent.get("height"), f"{artifact_name} height")
+    if width == 0 or height == 0:
+        raise ValueError(f"{artifact_name} has empty dimensions")
+    values = np.frombuffer(payload, dtype="<f4")
+
+    if artifact_name == "model_input.f32":
+        if (extent.get("channels") != 3 or extent.get("layout") != "NCHW" or
+                values.size != width * height * 3):
+            raise ValueError("model_input.f32 dimensions/layout disagree")
+        shape_descriptor = _required_hashed_artifact(
+            manifest["artifacts"], "model_input_shape.json", "model-input shape")
+        if shape_descriptor.get("stage") != "model-input contract":
+            raise ValueError(
+                "dump_manifest.json has an invalid model-input shape artifact descriptor")
+        try:
+            shape_payload = (root / "model_input_shape.json").read_bytes()
+            if hashlib.sha256(shape_payload).hexdigest() != shape_descriptor["sha256"]:
+                raise ValueError("model_input_shape.json content hash mismatch")
+            shape = json.loads(shape_payload.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("model_input_shape.json is missing or malformed") from error
+        means = np.asarray(shape.get("imagenet_mean"), dtype=np.float32)
+        stds = np.asarray(shape.get("imagenet_std"), dtype=np.float32)
+        if (shape.get("width") != width or shape.get("height") != height or
+                shape.get("dtype") != "float32-le" or shape.get("layout") != "NCHW" or
+                shape.get("channels") != ["R", "G", "B"] or
+                means.shape != (3,) or stds.shape != (3,) or
+                not np.isfinite(means).all() or not np.isfinite(stds).all() or
+                not np.all(stds > 0.0)):
+            raise ValueError("model_input_shape.json has invalid ImageNet normalization")
+        planes = values.reshape(3, height, width)
+        rgb = np.moveaxis(planes * stds[:, None, None] + means[:, None, None], 0, 2)
+        nonfinite = ~np.isfinite(rgb).all(axis=2)
+        encoded = np.rint(np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
+        encoded[nonfinite] = np.asarray([255, 0, 255], dtype=np.uint8)
+        destination.mkdir(parents=True, exist_ok=True)
+        path = destination / "model_input.png"
+        Image.fromarray(encoded, mode="RGB").save(path)
+        return {
+            "artifact": artifact_name,
+            "width": width,
+            "height": height,
+            "files": [str(path)],
+            "normalization": "channel * imagenet_std + imagenet_mean; clamped to [0,1]",
+        }
+
+    if values.size != width * height:
+        raise ValueError(f"{artifact_name} byte size disagrees with manifest dimensions")
+    field = values.reshape(height, width)
+    finite = field[np.isfinite(field)]
+    if finite.size == 0:
+        raise ValueError(f"{artifact_name} has no finite values")
+    low, high = np.percentile(finite, (2.0, 98.0)).astype(np.float32)
+    if not float(high) > float(low):
+        low = np.float32(np.min(finite))
+        high = np.float32(np.max(finite))
+    if float(high) > float(low):
+        normalized = np.clip((field - low) / (high - low), 0.0, 1.0)
+    else:
+        normalized = np.full(field.shape, np.float32(0.5), dtype=np.float32)
+    invalid = ~np.isfinite(field)
+    preview_values = np.where(invalid, np.float32(0.0), normalized)
+    gray_values = np.rint(preview_values * 255.0).astype(np.uint8)
+    gray = np.repeat(gray_values[:, :, None], 3, axis=2)
+    jet = np.empty_like(gray)
+    jet[:, :, 0] = np.rint(
+        np.clip(1.5 - np.abs(4.0 * preview_values - 3.0), 0.0, 1.0) * 255.0)
+    jet[:, :, 1] = np.rint(
+        np.clip(1.5 - np.abs(4.0 * preview_values - 2.0), 0.0, 1.0) * 255.0)
+    jet[:, :, 2] = np.rint(
+        np.clip(1.5 - np.abs(4.0 * preview_values - 1.0), 0.0, 1.0) * 255.0)
+    gray[invalid] = jet[invalid] = np.asarray([255, 0, 255], dtype=np.uint8)
+    destination.mkdir(parents=True, exist_ok=True)
+    gray_path = destination / f"{stem}.png"
+    heat_path = destination / f"{stem}_heat.png"
+    Image.fromarray(gray, mode="RGB").save(gray_path)
+    Image.fromarray(jet, mode="RGB").save(heat_path)
+    return {
+        "artifact": artifact_name,
+        "width": width,
+        "height": height,
+        "files": [str(gray_path), str(heat_path)],
+        "normalization": "finite p2-p98",
+        "preview_low": float(low),
+        "preview_high": float(high),
     }
 
 
@@ -4332,6 +4487,7 @@ __all__ = [
     "WINDOW_REGION_AUTHORITY_KINDS",
     "WINDOW_REGION_SCHEMA",
     "camera_center_integrity_bits",
+    "generate_float_artifact_previews",
     "shadow_frame_valid_from_statistics",
     "shadow_state_constant_float32",
     "validate_depth_input_region_document",

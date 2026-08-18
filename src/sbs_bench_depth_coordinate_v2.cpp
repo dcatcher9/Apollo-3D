@@ -28,6 +28,7 @@
   #include "depth_coordinate_v2.h"
   #include "generated/sbs_adaptive_state_contract.h"
   #include "host_sbs_shader_cache.h"
+  #include "host_sbs_v2_gpu_executor.h"
 
   #ifndef SUNSHINE_SHADERS_DIR
     #define SUNSHINE_SHADERS_DIR SUNSHINE_ASSETS_DIR "/shaders/directx"
@@ -38,6 +39,7 @@ using Microsoft::WRL::ComPtr;
 namespace sbs_bench {
   namespace fs = std::filesystem;
   namespace v2 = models::depth_coordinate_v2;
+  namespace v2_gpu = models::host_sbs_v2_gpu;
   namespace shader_cache = models::host_sbs_shader_cache;
 
   namespace {
@@ -1153,37 +1155,42 @@ void main(uint3 id : SV_DispatchThreadID) {
       context->UpdateSubresource(
         cut_state_buffer.Get(), 0, nullptr, cut_state_words.data(), 0, 0);
 
-      ID3D11Buffer *constant_buffers[] = {
-        common_constants_by_color[source_color_mode].Get(), v2_constants.Get()
+      const v2_gpu::base_constants_t base_constants {
+        .depth = common_constants_by_color[source_color_mode].Get(),
+        .coordinate_v2 = v2_constants.Get(),
       };
-      context->CSSetConstantBuffers(0, 2, constant_buffers);
-
-      context->CSSetShader(moments_shader.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *moments_srvs[] = {raw_srv.Get()};
-      ID3D11UnorderedAccessView *moments_uavs[] = {partial_uav.Get()};
-      context->CSSetShaderResources(0, 1, moments_srvs);
-      context->CSSetUnorderedAccessViews(0, 1, moments_uavs, nullptr);
-      context->Dispatch(reduce_groups, 1u, 1u);
-      unbind(1u, 1u);
-
-      context->CSSetShader(frame_shader.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *frame_srvs[] = {partial_srv.Get()};
-      ID3D11UnorderedAccessView *frame_uavs[] = {
-        frame_uav.Get(), normalization_uav.Get(),
+      const v2_gpu::moments_frame_command_t moments_frame_command {
+        .constants = base_constants,
+        .moments_shader = moments_shader.Get(),
+        .frame_resolve_shader = frame_shader.Get(),
+        .raw_depth = raw_srv.Get(),
+        .tensor_exclusion = dummy_exclusion_srv.Get(),
+        .partials_output = partial_uav.Get(),
+        .partials = partial_srv.Get(),
+        .frame_stats_output = frame_uav.Get(),
+        .minmax_raw_output = normalization_uav.Get(),
+        .moments_dispatch = v2_gpu::dispatch_command_t::direct(
+          reduce_groups, 1u, 1u
+        ),
+        .frame_resolve_dispatch = v2_gpu::dispatch_command_t::direct(1u, 1u, 1u),
       };
-      context->CSSetShaderResources(0, 1, frame_srvs);
-      context->CSSetUnorderedAccessViews(0, 2, frame_uavs, nullptr);
-      context->Dispatch(1u, 1u, 1u);
-      unbind(1u, 2u);
+      if (!v2_gpu::record_moments_frame(context.Get(), moments_frame_command)) {
+        error = "shared V2 GPU executor rejected replay moments/frame operands";
+        return false;
+      }
 
-      context->CSSetShader(state_shader.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *state_srvs[] = {
-        frame_srv.Get(), cut_state_srv.Get(),
+      const v2_gpu::state_command_t state_command {
+        .constants = base_constants,
+        .shader = state_shader.Get(),
+        .frame_stats = frame_srv.Get(),
+        .cut_bridge_state = cut_state_srv.Get(),
+        .state_output = state_uav.Get(),
+        .dispatch = v2_gpu::dispatch_command_t::direct(1u, 1u, 1u),
       };
-      context->CSSetShaderResources(0, 2, state_srvs);
-      context->CSSetUnorderedAccessViews(0, 1, state_uav.GetAddressOf(), nullptr);
-      context->Dispatch(1u, 1u, 1u);
-      unbind(2u, 1u);
+      if (!v2_gpu::record_state(context.Get(), state_command)) {
+        error = "shared V2 GPU executor rejected replay state operands";
+        return false;
+      }
 
       ID3D11ShaderResourceView *coordinate_srvs[] = {
         raw_srv.Get(), state_srv.Get(), dummy_exclusion_srv.Get(),
@@ -1196,58 +1203,78 @@ void main(uint3 id : SV_DispatchThreadID) {
       context->Dispatch((width + 15u) / 16u, (height + 15u) / 16u, 1u);
       unbind(3u, 1u);
 
-      context->CSSetShader(map_shader.Get(), nullptr, 0);
-      context->CSSetConstantBuffers(2u, 1u, near_constants.GetAddressOf());
-      ID3D11ShaderResourceView *map_srvs[8] = {
-        raw_srv.Get(),
-        state_srv.Get(),
-        dummy_exclusion_srv.Get(),
-        dummy_minmax_srv.Get(),
-        dummy_current_model_input_srv.Get(),
-        dummy_current_appearance_srv.Get(),
-        cut_state_srv.Get(),
-        dummy_current_depth_srv.Get(),
+      const v2_gpu::map_history_command_t map_history_command {
+        .constants = base_constants,
+        .near_identical_constants = near_constants.Get(),
+        .shader = map_shader.Get(),
+        .raw_depth = raw_srv.Get(),
+        .state = state_srv.Get(),
+        .tensor_exclusion = dummy_exclusion_srv.Get(),
+        .minmax_ema = dummy_minmax_srv.Get(),
+        .current_model_input = dummy_current_model_input_srv.Get(),
+        .current_appearance_ordinal = dummy_current_appearance_srv.Get(),
+        .cut_bridge_state = cut_state_srv.Get(),
+        .current_depth = dummy_current_depth_srv.Get(),
+        .candidate_output = candidate_uav.Get(),
+        .previous_model_input_output = dummy_previous_model_input_uav.Get(),
+        .previous_appearance_ordinal_output = dummy_previous_appearance_uav.Get(),
+        .previous_reliable_depth_output = dummy_previous_depth_uav.Get(),
+        .previous_tensor_exclusion_output = dummy_previous_exclusion_uav.Get(),
+        .history_owner_output = dummy_history_owner_uav.Get(),
+        .dispatch = v2_gpu::dispatch_command_t::direct(
+          (width + 15u) / 16u,
+          (height + 15u) / 16u,
+          1u
+        ),
       };
-      ID3D11UnorderedAccessView *map_uavs[6] = {
-        candidate_uav.Get(),
-        dummy_previous_model_input_uav.Get(),
-        dummy_previous_appearance_uav.Get(),
-        dummy_previous_depth_uav.Get(),
-        dummy_previous_exclusion_uav.Get(),
-        dummy_history_owner_uav.Get(),
+      if (!v2_gpu::record_map_history(context.Get(), map_history_command)) {
+        error = "shared V2 GPU executor rejected replay map/history operands";
+        return false;
+      }
+
+      const v2_gpu::ownership_command_t ownership_command {
+        .constants = base_constants,
+        .source_region_constants = source_region_constants.Get(),
+        .shader = ownership_shader.Get(),
+        .candidate = candidate_srv.Get(),
+        .source_color = source_color,
+        .tensor_exclusion = dummy_exclusion_srv.Get(),
+        .ownership_refined_output = ownership_uav.Get(),
+        .dispatch = v2_gpu::dispatch_command_t::direct(
+          (width + 7u) / 8u,
+          (height + 7u) / 8u,
+          1u
+        ),
       };
-      context->CSSetShaderResources(0, 8, map_srvs);
-      context->CSSetUnorderedAccessViews(0, 6, map_uavs, nullptr);
-      context->Dispatch((width + 15u) / 16u, (height + 15u) / 16u, 1u);
-      unbind(8u, 6u);
+      if (!v2_gpu::record_ownership(context.Get(), ownership_command)) {
+        error = "shared V2 GPU executor rejected replay ownership operands";
+        return false;
+      }
 
-      context->CSSetShader(ownership_shader.Get(), nullptr, 0);
-      context->CSSetConstantBuffers(
-        2u, 1u, source_region_constants.GetAddressOf()
-      );
-      ID3D11ShaderResourceView *ownership_srvs[] = {candidate_srv.Get(), source_color};
-      context->CSSetShaderResources(0, 2, ownership_srvs);
-      context->CSSetUnorderedAccessViews(0, 1, ownership_uav.GetAddressOf(), nullptr);
-      context->Dispatch((width + 7u) / 8u, (height + 7u) / 8u, 1u);
-      unbind(2u, 1u);
-
-      context->CSSetShader(vertical_limit_shader.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *vertical_limit_srvs[] = {ownership_srv.Get()};
-      ID3D11UnorderedAccessView *vertical_limit_uavs[] = {
-        vertical_majorant_uav.Get(), vertical_conditioned_uav.Get(),
+      const v2_gpu::vertical_command_t vertical_command {
+        .constants = base_constants,
+        .shader = vertical_limit_shader.Get(),
+        .ownership_refined = ownership_srv.Get(),
+        .vertical_majorant_output = vertical_majorant_uav.Get(),
+        .vertical_conditioned_output = vertical_conditioned_uav.Get(),
+        .dispatch = v2_gpu::dispatch_command_t::direct(width, 1u, 1u),
       };
-      context->CSSetShaderResources(0, 1, vertical_limit_srvs);
-      context->CSSetUnorderedAccessViews(0, 2, vertical_limit_uavs, nullptr);
-      context->Dispatch(width, 1u, 1u);
-      unbind(1u, 2u);
+      if (!v2_gpu::record_vertical(context.Get(), vertical_command)) {
+        error = "shared V2 GPU executor rejected replay vertical operands";
+        return false;
+      }
 
-      context->CSSetShader(limit_shader.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *limit_srvs[] = {vertical_conditioned_srv.Get()};
-      ID3D11UnorderedAccessView *limit_uavs[] = {final_uav.Get()};
-      context->CSSetShaderResources(0, 1, limit_srvs);
-      context->CSSetUnorderedAccessViews(0, 1, limit_uavs, nullptr);
-      context->Dispatch(height, 1u, 1u);
-      unbind(1u, 1u);
+      const v2_gpu::horizontal_command_t horizontal_command {
+        .constants = base_constants,
+        .shader = limit_shader.Get(),
+        .vertical_conditioned = vertical_conditioned_srv.Get(),
+        .final_output = final_uav.Get(),
+        .dispatch = v2_gpu::dispatch_command_t::direct(height, 1u, 1u),
+      };
+      if (!v2_gpu::record_horizontal(context.Get(), horizontal_command)) {
+        error = "shared V2 GPU executor rejected replay horizontal operands";
+        return false;
+      }
 
       context->CSSetShader(encode_shader.Get(), nullptr, 0);
       ID3D11Buffer *encode_constant = encode_constants.Get();

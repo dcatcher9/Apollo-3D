@@ -17,8 +17,10 @@ from typing import Any, Dict, Optional
 
 try:
     from . import depth_coordinate_v2_contract as coordinate_contract
+    from .depth_coordinate_v2_dump_contract import DUMP_MANIFEST_SCHEMA
 except ImportError:  # Direct execution from tools/sbsbench.
     import depth_coordinate_v2_contract as coordinate_contract  # type: ignore
+    from depth_coordinate_v2_dump_contract import DUMP_MANIFEST_SCHEMA  # type: ignore
 
 
 PROVENANCE_SCHEMA = coordinate_contract.CAPTURE_PROVENANCE_SCHEMA
@@ -113,7 +115,8 @@ def _close_float_vector(actual: Any, expected: tuple[float, float, float]) -> bo
 
 def _validate_model_input_contract(
         dump: Path,
-        calibration: coordinate_contract.ModelCalibration) -> tuple[int, int, str, str]:
+        calibration: coordinate_contract.ModelCalibration,
+        manifest: Dict[str, Any]) -> tuple[int, int, str, str]:
     """Authenticate the exact input artifacts and validate their declared tensor semantics."""
 
     shape_path = dump / "model_input_shape.json"
@@ -148,11 +151,14 @@ def _validate_model_input_contract(
     if input_size != width * height * len(expected.channels) * 4:
         raise ValueError("model_input.f32 byte size disagrees with model_input_shape.json")
 
-    raw_shape = _json_object(dump / "raw_shape.json")
-    if (raw_shape.get("width") != width or raw_shape.get("height") != height or
-            raw_shape.get("dtype") != "float32-le" or
-            raw_shape.get("layout") != "row-major"):
-        raise ValueError("raw_shape.json disagrees with the calibrated model-input geometry")
+    dimensions = manifest.get("dimensions")
+    raw_shape = dimensions.get("raw_depth") if isinstance(dimensions, dict) else None
+    if (not isinstance(raw_shape, dict) or set(raw_shape) != {
+            "width", "height", "format"} or
+            raw_shape.get("width") != width or raw_shape.get("height") != height or
+            raw_shape.get("format") != "float32-le structured buffer"):
+        raise ValueError(
+            "dump_manifest.json raw-depth dimensions disagree with the calibrated model input")
     try:
         raw_size = (dump / "raw_depth.f32").stat().st_size
     except OSError as exc:
@@ -168,6 +174,8 @@ def inspect_dump(dump: Path) -> RawModelProvenance:
     manifest_path = dump / "dump_manifest.json"
     raw_path = dump / "raw_depth.f32"
     manifest = _json_object(manifest_path)
+    if manifest.get("schema") != DUMP_MANIFEST_SCHEMA:
+        raise ValueError("dump_manifest.json is not the current Dump 3D schema")
     config = manifest.get("config")
     if not isinstance(config, dict):
         raise ValueError("dump_manifest.json lacks its authoritative config object")
@@ -235,7 +243,7 @@ def inspect_dump(dump: Path) -> RawModelProvenance:
         raise ValueError(
             "capture-time proof has an unknown calibrated preprocess source closure")
     width, height, input_digest, shape_digest = _validate_model_input_contract(
-        dump, calibration)
+        dump, calibration, manifest)
     if declared_input_digest != input_digest:
         raise ValueError("model_input.f32 SHA-256 does not match its capture-time model binding")
     if declared_shape_digest != shape_digest:

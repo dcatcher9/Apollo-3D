@@ -23,6 +23,7 @@ from PIL import Image
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import audit_depth_transform  # noqa: E402
 import audit_depth_confidence  # noqa: E402
+import authenticated_metric_sources  # noqa: E402
 import make_synth_clips  # noqa: E402
 import prepare_public_datasets  # noqa: E402
 import run_eval  # noqa: E402
@@ -1204,9 +1205,59 @@ class EvalContractTests(unittest.TestCase):
                     "required_gt_depth": True,
                     "gt_depth_kind": "metric", "required_gt_stereo": True,
                 }, fh)
-            migrated = run_eval.load_clip_metadata(clip, suite="extended")
-            self.assertNotIn("required_gt_stereo", migrated)
-            self.assertTrue(migrated["reference_stereo_available"])
+            with self.assertRaisesRegex(
+                    ValueError,
+                    "required_gt_stereo is retired; use reference_stereo_available"):
+                run_eval.load_clip_metadata(clip, suite="extended")
+
+    def test_retired_stereo_key_is_rejected_by_direct_metric_readers(self):
+        with tempfile.TemporaryDirectory() as root:
+            frames = os.path.join(root, "clip")
+            sequence = os.path.join(root, "sequence")
+            os.makedirs(frames)
+            os.makedirs(sequence)
+            Image.fromarray(np.zeros((8, 12, 3), np.uint8)).save(
+                os.path.join(frames, "frame_00001.png"))
+            Image.fromarray(np.zeros((8, 24, 3), np.uint8)).save(
+                os.path.join(sequence, "sbs_00001.png"))
+            with open(os.path.join(frames, "meta.json"), "w", encoding="utf-8") as stream:
+                json.dump({
+                    "name": "retired-stereo-fixture",
+                    "required_gt_stereo": True,
+                }, stream)
+
+            with self.assertRaisesRegex(
+                    ValueError,
+                    "required_gt_stereo is retired; use reference_stereo_available"):
+                sbsbench.measure_sequence(sequence, frames)
+            with self.assertRaisesRegex(
+                    ValueError,
+                    "required_gt_stereo is retired; use reference_stereo_available"):
+                authenticated_metric_sources.discover_clips([root])
+
+    def test_dataset_evidence_flags_are_explicit_typed_and_current(self):
+        with self.assertRaisesRegex(ValueError, "explicit current evidence declarations"):
+            sbsbench.depth_flow_evidence_requirements({"dataset": "public"})
+        with self.assertRaisesRegex(ValueError, "unknown required-GT metadata keys"):
+            sbsbench.depth_flow_evidence_requirements({
+                "dataset": "public",
+                "required_gt_depth": False,
+                "required_gt_flow": False,
+                "required_gt_sterreo": True,
+            })
+        with self.assertRaisesRegex(ValueError, "required_gt_depth must be boolean"):
+            sbsbench.depth_flow_evidence_requirements({
+                "dataset": "public",
+                "required_gt_depth": "false",
+                "required_gt_flow": False,
+            })
+        self.assertEqual(
+            sbsbench.depth_flow_evidence_requirements({
+                "dataset": "public",
+                "required_gt_depth": False,
+                "required_gt_flow": True,
+            }),
+            (False, True))
 
     def test_baseline_context_is_validated_before_harness_use(self):
         with tempfile.TemporaryDirectory() as baseline_dir:
@@ -1595,13 +1646,22 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn("cbuffer_first_frame", estimator)
         self.assertNotIn("depth_history_valid", estimator)
         self.assertNotIn("depth_valid_history_cs", estimator)
-        self.assertIn("CSSetShaderResources(0, 8, map_srvs)", estimator)
-        self.assertIn("CSSetUnorderedAccessViews(0, 6, map_uavs", estimator)
+        self.assertIn("host_sbs_v2_gpu::record_map_history(", estimator)
+        self.assertIn(".previous_model_input_output = tensor_previous_input_uav.Get()", estimator)
         self.assertIn("tensor_previous_input_uav", estimator)
         self.assertNotIn("context->CSSetShader(depth_minmax_cs.Get()", estimator)
         self.assertIn("dispatch_parallax_v2_frame_stats(perf_slot)", estimator)
         self.assertIn("static_cast<std::size_t>(reduce_groups) * 3u", estimator)
         self.assertIn("parallax_frame_stats_end -", estimator)
+
+        with open(os.path.join(repo, "src", "host_sbs_v2_gpu_executor.cpp"),
+                  encoding="utf-8") as fh:
+            executor = fh.read()
+        self.assertIn("bool record_map_history(", executor)
+        self.assertIn("ID3D11ShaderResourceView *inputs[8]", executor)
+        self.assertIn("ID3D11UnorderedAccessView *outputs[6]", executor)
+        self.assertIn("CSSetShaderResources(0u, 8u, inputs)", executor)
+        self.assertIn("CSSetUnorderedAccessViews(0u, 6u, outputs, nullptr)", executor)
 
         shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders",
                                   "directx")
@@ -1709,11 +1769,13 @@ class EvalContractTests(unittest.TestCase):
                   encoding="utf-8") as fh:
             harness = fh.read()
         self.assertIn('a == "--bounded-adaptive-state"', harness)
-        self.assertIn('\\"transport\\":\\"atomic-latest-v1\\"', harness)
-        self.assertIn('\\"retained_history\\":false', harness)
+        self.assertIn('.transport = "atomic-latest-v1"', harness)
+        self.assertIn('.retained_history = false', harness)
+        self.assertIn('offline_sbs::wire::whole_clip_contract_t', harness)
+        self.assertIn('offline_sbs::wire::to_json(', harness)
         whole_contract = harness[harness.index(
-            'std::ofstream contract(fs::path(o.out) / "whole_clip_contract.json")'):]
-        self.assertNotIn('<< "  \\"cut_state\\":', whole_contract)
+            'offline_sbs::wire::whole_clip_resolved_runtime_t'):]
+        self.assertNotIn('"cut_state"', whole_contract)
 
         with open(os.path.join(repo, "src", "offline_sbs_worker.cpp"),
                   encoding="utf-8") as fh:
@@ -2691,7 +2753,9 @@ class EvalContractTests(unittest.TestCase):
             Image.fromarray(np.zeros((16, 16, 3), np.uint8)).save(
                 os.path.join(frames, "frame_00000.png"))
             with open(os.path.join(frames, "meta.json"), "w", encoding="utf-8") as fh:
-                fh.write('{"dataset":"Example Public Dataset","required_gt_depth":true}')
+                fh.write(
+                    '{"dataset":"Example Public Dataset",'
+                    '"required_gt_depth":true,"required_gt_flow":false}')
             with self.assertRaisesRegex(ValueError, "requires GT depth"):
                 sbsbench.measure_sequence(seq, frames)
 

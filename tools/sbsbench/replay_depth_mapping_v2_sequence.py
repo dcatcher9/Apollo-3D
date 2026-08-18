@@ -78,7 +78,7 @@ REPO = SCRIPT_DIR.parent.parent
 # this lossless-only so decoder-specific JPEG rounding cannot flip the ownership shader's hard
 # edge/contrast gates while both sides still attest the same compressed source bytes.
 FRAME_PATTERN = re.compile(r"frame_(\d+)\.png$", re.IGNORECASE)
-SEQUENCE_CONTRACT_SCHEMA = 18
+SEQUENCE_CONTRACT_SCHEMA = 19
 GPU_INPUT_MANIFEST_SCHEMA = 8
 GPU_INPUT_MANIFEST_MODE = "depth-coordinate-v2-production-gpu-sequence-v10"
 SEQUENCE_MAPPING_CONFIG_KEYS = frozenset(asdict(MappingV2Config()).keys())
@@ -122,18 +122,10 @@ IMPLEMENTATION_SOURCE_FILES = (
     "tools/sbsbench/whole_clip_raw_contract.py",
     "tools/sbsbench/replay_depth_mapping_v2_sequence.py",
 )
-LEGACY_STATE_METRICS = (
-    "shot_state_accepted_pulse",
-    "shot_state_contract_support",
-    "shot_state_expected_pulse",
-    "shot_state_initialized_ok",
-    "shot_state_pulse_mismatch",
-    "shot_state_trace_inconsistent",
-)
 RENDERER_SCORE_CONTRACT_FILE = "renderer_quality_score_contract.json"
-RENDERER_SCORE_CONTRACT_SCHEMA = 2
+RENDERER_SCORE_CONTRACT_SCHEMA = 3
 RENDERER_SCORECARD_FILE = "renderer_quality_scorecard.json"
-RAW_SCORECARD_FILE = "legacy_state_diagnostic_scorecard.json"
+FORBIDDEN_RENDERER_SCORE_PREFIXES = ("shot_state_",)
 
 
 def _implementation_sources() -> list[Dict[str, str]]:
@@ -227,54 +219,44 @@ def _diagnostic_summary(rows: Sequence[Dict[str, object]]) -> Dict[str, object]:
 
 
 def _publish_renderer_quality_score(
-        raw_scorecard_path: Path,
+        scorecard_path: Path,
         output: Path) -> Dict[str, object]:
-    """Exclude recomputed legacy controller metrics from authoritative v2 scoring."""
+    """Validate and attest the scorer's direct renderer-quality output."""
 
-    scorecard = _read_json(raw_scorecard_path)
+    renderer_path = output / RENDERER_SCORECARD_FILE
+    if scorecard_path.resolve() != renderer_path.resolve():
+        raise ValueError("renderer scorecard must use the canonical output path")
+    scorecard = _read_json(scorecard_path)
     if (set(scorecard) != {"aggregate", "frames"} or
             not isinstance(scorecard["aggregate"], dict) or
             not isinstance(scorecard["frames"], list) or
             any(not isinstance(row, dict) for row in scorecard["frames"])):
-        raise ValueError("raw renderer scorecard has an unknown schema")
+        raise ValueError("renderer scorecard has an unknown schema")
     all_keys = set(scorecard["aggregate"])
     for row in scorecard["frames"]:
         all_keys.update(row)
-    observed_legacy = sorted(key for key in all_keys if key.startswith("shot_state_"))
-    if set(observed_legacy) - set(LEGACY_STATE_METRICS):
+    forbidden = sorted(
+        key for key in all_keys
+        if any(key.startswith(prefix) for prefix in FORBIDDEN_RENDERER_SCORE_PREFIXES))
+    if forbidden:
         raise ValueError(
-            f"raw scorecard added unknown legacy-state metrics: {observed_legacy}")
+            f"renderer scorecard contains controller-state metrics: {forbidden}")
 
-    sanitized = json.loads(json.dumps(scorecard))
-    for key in LEGACY_STATE_METRICS:
-        sanitized["aggregate"].pop(key, None)
-        for row in sanitized["frames"]:
-            row.pop(key, None)
-    renderer_path = output / RENDERER_SCORECARD_FILE
-    renderer_path.write_text(
-        json.dumps(sanitized, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     metric_contract = _metric_contract_evidence()
     contract = {
         "schema": RENDERER_SCORE_CONTRACT_SCHEMA,
         "scope": "renderer-output-quality-only-v1",
-        "source_scorecard": {
-            "file": RAW_SCORECARD_FILE,
-            "sha256": direct_geometry.file_sha256(str(raw_scorecard_path)),
-            "legacy_state_role": "diagnostic-only-recomputed-on-replay-colors",
-        },
         "renderer_scorecard": {
             "file": RENDERER_SCORECARD_FILE,
             "sha256": direct_geometry.file_sha256(str(renderer_path)),
         },
-        "excluded_metrics": list(LEGACY_STATE_METRICS),
+        "forbidden_metric_prefixes": list(FORBIDDEN_RENDERER_SCORE_PREFIXES),
         "v2_state_authority": {
             "file": STATE_TRACE_FILE,
             "schema": V2_STATE_TRACE_SCHEMA,
         },
         "metric_contract": metric_contract,
-        "reason": (
-            "the second harness recomputes legacy subject/cut state on replay colors; "
-            "those values cannot vote on the authenticated v2 controller"),
+        "reason": "controller state is authenticated only by the v2 state trace",
     }
     contract_path = output / RENDERER_SCORE_CONTRACT_FILE
     contract_path.write_text(
@@ -286,9 +268,6 @@ def _publish_renderer_quality_score(
         "scorecard_sha256": direct_geometry.file_sha256(str(renderer_path)),
         "score_contract_file": RENDERER_SCORE_CONTRACT_FILE,
         "score_contract_sha256": direct_geometry.file_sha256(str(contract_path)),
-        "raw_diagnostic_scorecard_file": RAW_SCORECARD_FILE,
-        "raw_diagnostic_scorecard_sha256": direct_geometry.file_sha256(
-            str(raw_scorecard_path)),
         "metric_contract": metric_contract,
     }
 
@@ -1318,41 +1297,45 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
     elif isinstance(score, dict) and set(score) == {
             "status", "scope", "scorecard_file", "scorecard_sha256",
             "score_contract_file", "score_contract_sha256",
-            "raw_diagnostic_scorecard_file", "raw_diagnostic_scorecard_sha256",
             "score_log_file", "score_log_sha256", "metric_contract"} and (
             score.get("status") == "complete" and
             score.get("scope") == "renderer-output-quality-only-v1"):
         for file_key, hash_key in (
                 ("scorecard_file", "scorecard_sha256"),
                 ("score_contract_file", "score_contract_sha256"),
-                ("raw_diagnostic_scorecard_file", "raw_diagnostic_scorecard_sha256"),
                 ("score_log_file", "score_log_sha256")):
             path = _relative_file(output, score[file_key], file_key)
             if direct_geometry.file_sha256(str(path)) != score[hash_key]:
                 raise ValueError(f"sequence {file_key} hash mismatch")
         _validate_metric_contract_evidence(score["metric_contract"])
         scope_contract = _read_json(output / RENDERER_SCORE_CONTRACT_FILE)
-        if (scope_contract.get("schema") != RENDERER_SCORE_CONTRACT_SCHEMA or
-                scope_contract.get("scope") != "renderer-output-quality-only-v1" or
-                scope_contract.get("excluded_metrics") != list(LEGACY_STATE_METRICS) or
-                scope_contract.get("source_scorecard") != {
-                    "file": RAW_SCORECARD_FILE,
-                    "sha256": score["raw_diagnostic_scorecard_sha256"],
-                    "legacy_state_role": "diagnostic-only-recomputed-on-replay-colors"} or
-                scope_contract.get("renderer_scorecard") != {
+        if scope_contract != {
+                "schema": RENDERER_SCORE_CONTRACT_SCHEMA,
+                "scope": "renderer-output-quality-only-v1",
+                "renderer_scorecard": {
                     "file": RENDERER_SCORECARD_FILE,
-                    "sha256": score["scorecard_sha256"]} or
-                scope_contract.get("v2_state_authority") != {
-                    "file": STATE_TRACE_FILE, "schema": V2_STATE_TRACE_SCHEMA} or
-                scope_contract.get("metric_contract") != score["metric_contract"]):
+                    "sha256": score["scorecard_sha256"]},
+                "forbidden_metric_prefixes": list(FORBIDDEN_RENDERER_SCORE_PREFIXES),
+                "v2_state_authority": {
+                    "file": STATE_TRACE_FILE,
+                    "schema": V2_STATE_TRACE_SCHEMA,
+                },
+                "metric_contract": score["metric_contract"],
+                "reason": "controller state is authenticated only by the v2 state trace",
+        }:
             raise ValueError("sequence renderer score contract has unknown semantics")
         renderer_score = _read_json(output / RENDERER_SCORECARD_FILE)
-        remaining = set(renderer_score.get("aggregate", {}))
+        if (set(renderer_score) != {"aggregate", "frames"} or
+                not isinstance(renderer_score["aggregate"], dict) or
+                not isinstance(renderer_score["frames"], list) or
+                any(not isinstance(row, dict) for row in renderer_score["frames"])):
+            raise ValueError("sequence renderer scorecard has an unknown schema")
+        remaining = set(renderer_score["aggregate"])
         for row in renderer_score.get("frames", []):
-            if isinstance(row, dict):
-                remaining.update(row)
-        if any(key.startswith("shot_state_") for key in remaining):
-            raise ValueError("legacy controller metrics remain in renderer-quality score")
+            remaining.update(row)
+        if any(key.startswith(prefix)
+               for key in remaining for prefix in FORBIDDEN_RENDERER_SCORE_PREFIXES):
+            raise ValueError("controller-state metrics remain in renderer-quality score")
     else:
         raise ValueError("sequence score evidence has unknown semantics")
     return document
@@ -1471,7 +1454,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             raise RuntimeError("replay harness omitted direct manifest reference")
         score_evidence: Dict[str, object] = {"status": "not-run"}
         if not args.skip_score:
-            score_path = output / RAW_SCORECARD_FILE
+            score_path = output / RENDERER_SCORECARD_FILE
             score_log = output / "score.log"
             score_command = [
                 sys.executable, str(SCRIPT_DIR / "sbsbench.py"),

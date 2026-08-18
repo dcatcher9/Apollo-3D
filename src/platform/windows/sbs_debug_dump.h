@@ -37,6 +37,7 @@ namespace platf::sbs_debug {
 
   namespace detail {
     class publication_state;
+    struct diagnostic_roi_crop;
     struct pending_gpu_capture;
 
     /** Maximum staging payload copied by one render-thread polling turn. */
@@ -97,8 +98,9 @@ namespace platf::sbs_debug {
    * @brief One exact, completed Host-SBS frame and all optional diagnostic render passes that
    *        belong to it.
    *
-   * model_input and raw_depth are immutable estimator snapshots. warp_depth is the exact signed,
-   * anisotropically slope-limited final parallax consumed by production V2: full-source-U in the
+   * model_input and raw_depth are immutable estimator snapshots. warp_depth is a non-owning alias
+   * used only to prove that production V2 consumed shadow_final_parallax itself; it is never
+   * staged or serialized separately. That single authenticated final artifact is full-source-U in
    * ordinary mode and ROI-local-U in window-region mode. ROI renderer authority is the pair of
    * that ROI-local field and depth_input_region's scale/outside-collar embedding. The
    * adaptive_state/depth_frame_state pair is optional comparison-only evidence from the retained
@@ -153,7 +155,7 @@ namespace platf::sbs_debug {
     std::uint64_t matched_frame_id = 0;
     /** Exact authenticated analysis domain bound to every model/depth/parallax artifact. */
     models::depth_input_region_t depth_input_region {};
-    /** ROI planner result, present exactly when depth_input_region.video_region is true. */
+    /** ROI planner result, present exactly when depth_input_region.is_video_region() is true. */
     std::optional<models::depth_video_region_plan_t> depth_video_plan;
     /** True when this completion was the first frame after its analysis domain was rearmed. */
     bool input_domain_reset = false;
@@ -232,6 +234,23 @@ namespace platf::sbs_debug {
      */
     bool prepare_requested_v2_frame(std::uint64_t matched_frame_id) noexcept;
 
+    /**
+     * @brief Copy one authenticated completed ROI into dumper-owned diagnostic storage.
+     *
+     * The caller retains completion/authentication ownership and invokes this only after matching
+     * the completed estimator result to its retained source slot. The returned SRV remains valid
+     * until release_diagnostic_roi_crop(), rejection, cancellation, or the next snapshot request.
+     */
+    ID3D11ShaderResourceView *prepare_diagnostic_roi_crop(
+      ID3D11Device *device,
+      ID3D11DeviceContext *ctx,
+      ID3D11Texture2D *source,
+      const models::depth_input_region_t &region
+    ) noexcept;
+
+    /** Release the dump-only ROI source after its staging copy has been queued. */
+    void release_diagnostic_roi_crop() noexcept;
+
     /** Cancel a request that can never complete, such as after permanent estimator failure. */
     void cancel_pending_request() noexcept;
 
@@ -258,6 +277,7 @@ namespace platf::sbs_debug {
     std::filesystem::path dir_;
     std::shared_ptr<detail::publication_state> async_;
     std::unique_ptr<detail::pending_gpu_capture> pending_gpu_capture_;
+    std::unique_ptr<detail::diagnostic_roi_crop> diagnostic_roi_crop_;
     std::shared_ptr<std::atomic<bool>> button_request_;
     bool file_trigger_enabled_ = false;
     mutable bool file_trigger_pending_ = false;

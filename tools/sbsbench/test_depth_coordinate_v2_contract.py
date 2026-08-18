@@ -775,6 +775,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         contract = generator.load_contract()
         renderer_pins = generator.validate_renderer_source_closure_pins()
         documentation = (REPO / "docs" / "host-sbs.md").read_text(encoding="utf-8")
+        closure_manifest = generator.SHADER_MANIFEST
         self.assertIn(
             f"schema {contract['schema']}/tag `0x{generator.contract_tag(contract):08X}`",
             documentation,
@@ -784,8 +785,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             documentation,
         )
         self.assertIn(
-            f"SHA-256 `{contract['shader_implementation']['source_closure_sha256']}`.",
+            generator.shader_manifest_generator.render_doc_block(closure_manifest),
             documentation,
+        )
+        self.assertEqual(
+            contract["shader_implementation"]["source_closure_sha256"],
+            generator.shader_manifest_generator.closure_group(
+                closure_manifest, "parallax_v2_producer"
+            )["source_closure_sha256"],
         )
         self.assertIn(
             f"`{renderer_pins['parallax_v2_live_renderer_source_closure_sha256']}`",
@@ -801,31 +808,35 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         )
 
     def test_renderer_closure_pins_cover_generated_contract_include(self):
+        closure_manifest = generator.SHADER_MANIFEST
+        closure_pin = lambda name: generator.shader_manifest_generator.closure_group(
+            closure_manifest, name
+        )["source_closure_sha256"]
         self.assertEqual(
             generator.validate_renderer_source_closure_pins(),
             {
                 "parallax_v2_live_renderer_source_closure_sha256":
-                    "7553350163dfb80cee85b70689b768a46a5c15b44997e2753e24bebedaa51ffd",
+                    closure_pin("parallax_v2_live_renderer"),
                 "parallax_v2_p010_y_source_closure_sha256":
-                    "f14993382c296ee07ce556c3dbebba29d021d8555ea446fae9a8b06b17a09813",
+                    closure_pin("parallax_v2_p010_y"),
                 "parallax_v2_diagnostic_source_closure_sha256":
-                    "1c7cb433f667c990e4d55f254a11cc9a40590e3a1e97e62fc261c2e0069b9513",
+                    closure_pin("parallax_v2_live_diagnostic"),
             },
         )
 
-        # Both renderer roots reach this generated include. Prove a DVC regeneration cannot pass
-        # the generator check while the independent native renderer pins still name old bytes.
+        # Producer and renderer roots reach this generated include. Prove a DVC regeneration
+        # cannot pass while any named cross-language closure group still names the old bytes.
         with tempfile.TemporaryDirectory() as temporary:
             shader_root = Path(temporary) / "directx"
             shutil.copytree(generator.PREPROCESS_SHADER_ROOT, shader_root)
             generated = (
                 shader_root / "include" / "depth_coordinate_v2_contract.generated.hlsl")
             generated.write_bytes(generated.read_bytes() + b"\n// simulated DVC drift\n")
-            with self.assertRaisesRegex(ValueError, "live renderer source closure pin is stale"):
+            with self.assertRaisesRegex(
+                    ValueError,
+                    "parallax_v2_producer source closure pin is stale"):
                 generator.validate_renderer_source_closure_pins(
-                    shader_root=shader_root,
-                    pin_header=generator.HOST_SBS_SHADER_CACHE_HEADER,
-                )
+                    shader_root=shader_root)
 
     def test_same_count_semantic_reorders_are_rejected_before_generation(self):
         original = generator.load_contract()

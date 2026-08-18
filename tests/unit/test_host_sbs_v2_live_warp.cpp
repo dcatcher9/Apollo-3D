@@ -27,6 +27,7 @@
 #include <src/depth_coordinate_v2.h>
 #include <src/host_sbs_shader_cache.h>
 #include <src/host_sbs_v2_geometry.h>
+#include <src/platform/windows/host_sbs_v2_renderer.h>
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -454,39 +455,31 @@ namespace {
         0.0f,
         1.0f,
       };
-      ID3D11ShaderResourceView *srvs[] = {
-        color_srv.Get(),
-        parallax_srv.Get(),
-        state_srv.Get(),
-        candidate_srv.Get(),
-        nullptr,
-        nullptr,
-      };
-      ID3D11SamplerState *samplers[] = {sampler.Get()};
-      ID3D11Buffer *constants[] = {geometry_buffer.Get()};
-      context->IASetInputLayout(nullptr);
-      context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-      context->VSSetShader(vertex_shader.Get(), nullptr, 0);
-      context->PSSetShader(pixel_shader.Get(), nullptr, 0);
-      context->PSSetShaderResources(0, static_cast<UINT>(std::size(srvs)), srvs);
-      context->PSSetSamplers(0, 1, samplers);
-      context->PSSetConstantBuffers(2, 1, constants);
       if (direct_constants_buffer) {
         ID3D11Buffer *direct_constants[] = {direct_constants_buffer.Get()};
         context->PSSetConstantBuffers(4, 1, direct_constants);
       }
-      context->RSSetViewports(1, &viewport);
-      context->OMSetRenderTargets(1, output_rtv.GetAddressOf(), nullptr);
-      context->Draw(3, 0);
-
-      ID3D11RenderTargetView *null_rtv = nullptr;
-      std::array<ID3D11ShaderResourceView *, 6> null_srvs {};
-      context->OMSetRenderTargets(1, &null_rtv, nullptr);
-      context->PSSetShaderResources(
-        0,
-        static_cast<UINT>(null_srvs.size()),
-        null_srvs.data()
-      );
+      const platf::dxgi::host_sbs_v2_draw_command_t draw_command {
+        .render_targets = {output_rtv.Get(), nullptr},
+        .render_target_count = 1u,
+        .vertex_shader = vertex_shader.Get(),
+        .pixel_shader = pixel_shader.Get(),
+        .viewport = viewport,
+        .sampler = sampler.Get(),
+        .shader_resources = {
+          color_srv.Get(),
+          parallax_srv.Get(),
+          state_srv.Get(),
+          candidate_srv.Get(),
+          nullptr,
+          nullptr,
+        },
+        .geometry_constants = geometry_buffer.Get(),
+      };
+      if (!platf::dxgi::record_host_sbs_v2_draw(context.Get(), draw_command)) {
+        error = "shared Host SBS V2 draw recorder rejected complete operands";
+        return false;
+      }
 
       auto staging_desc = output_desc;
       staging_desc.Usage = D3D11_USAGE_STAGING;

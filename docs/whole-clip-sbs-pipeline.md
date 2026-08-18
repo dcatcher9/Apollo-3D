@@ -231,6 +231,14 @@ Native jobs retain machine-readable evidence under their managed job directory:
 | `timeline-contract.json` | Aggregate no-drift evidence for copied auxiliary streams and chapters |
 | worker progress/result/log files | Durable status, failure provenance, and child-process diagnostics |
 
+Scene plans/caches, whole-clip manifests, scene audits, worker specifications/results, and durable
+job snapshots use one native typed wire-codec module. Maintained producers and consumers share the
+same exact-key and numeric-range checks; duplicate JSON keys are rejected before typed parsing.
+Authenticated worker specifications are still SHA-256 checked before parsing, bounded reads remain
+authoritative, and typed publication keeps the existing atomic replace boundaries. Timeline and
+file-identity objects embedded in these documents remain opaque only because they are separately
+owned authenticated subcontracts with their own validators.
+
 Source, pre-mux, and output FFprobe frame JSON is parsed directly from a bounded child pipe through
 a 64 KiB reader and is never materialized as a file or full JSON DOM. The worker retains only
 compact integer timing records needed for exact equivalence checks. Those records have a 128 MiB

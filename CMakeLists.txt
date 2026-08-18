@@ -103,6 +103,31 @@ add_custom_target(verify_sbs_adaptive_state_contract ALL
         VERBATIM)
 list(APPEND SUNSHINE_TARGET_DEPENDENCIES verify_sbs_adaptive_state_contract)
 
+# Every Host SBS shader root, entry point, target, and closure pin is generated from one named
+# JSON registry. C++, Python, the DVC projection, and the owning documentation consume its views;
+# refusing stale views prevents a hand-updated pin from authenticating a different root order.
+set(HOST_SBS_SHADER_MANIFEST_GENERATOR
+        "${CMAKE_SOURCE_DIR}/tools/sbsbench/generate_host_sbs_shader_manifest.py")
+set(HOST_SBS_SHADER_MANIFEST
+        "${CMAKE_SOURCE_DIR}/tools/sbsbench/contracts/host-sbs-shader-closures-v1.json")
+set(HOST_SBS_SHADER_MANIFEST_CPP
+        "${CMAKE_SOURCE_DIR}/src/generated/host_sbs_shader_manifest.h")
+set(HOST_SBS_SHADER_MANIFEST_PYTHON
+        "${CMAKE_SOURCE_DIR}/tools/sbsbench/host_sbs_shader_manifest.py")
+add_custom_target(verify_host_sbs_shader_manifest ALL
+        COMMAND "${Python3_EXECUTABLE}" "${HOST_SBS_SHADER_MANIFEST_GENERATOR}" --check
+        DEPENDS
+            "${HOST_SBS_SHADER_MANIFEST_GENERATOR}"
+            "${HOST_SBS_SHADER_MANIFEST}"
+            "${HOST_SBS_SHADER_MANIFEST_CPP}"
+            "${HOST_SBS_SHADER_MANIFEST_PYTHON}"
+            "${CMAKE_SOURCE_DIR}/tools/sbsbench/contracts/depth-coordinate-v2-v1.json"
+            "${CMAKE_SOURCE_DIR}/docs/host-sbs.md"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Verifying generated Host SBS shader closure registry"
+        VERBATIM)
+list(APPEND SUNSHINE_TARGET_DEPENDENCIES verify_host_sbs_shader_manifest)
+
 # The complete depth-coordinate-v2 experimental ABI is generated from one manifest. Its semantic
 # tag catches same-sized reorders and meaning/default changes in native, GPU, and diagnostic code.
 set(DEPTH_COORDINATE_V2_GENERATOR
@@ -123,6 +148,7 @@ add_custom_target(verify_depth_coordinate_v2_contract ALL
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
         COMMENT "Verifying generated Host SBS depth-coordinate-v2 contract"
         VERBATIM)
+add_dependencies(verify_depth_coordinate_v2_contract verify_host_sbs_shader_manifest)
 list(APPEND SUNSHINE_TARGET_DEPENDENCIES verify_depth_coordinate_v2_contract)
 
 # setup compile definitions

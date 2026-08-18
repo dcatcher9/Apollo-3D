@@ -26,13 +26,6 @@ class RawModelProvenanceTests(unittest.TestCase):
         dump.mkdir()
         with (dump / "raw_depth.f32").open("wb") as stream:
             stream.truncate(self.WIDTH * self.HEIGHT * 4)
-        (dump / "raw_shape.json").write_text(json.dumps({
-            "schema": 1,
-            "width": self.WIDTH,
-            "height": self.HEIGHT,
-            "dtype": "float32-le",
-            "layout": "row-major",
-        }), encoding="utf-8")
         with (dump / "model_input.f32").open("wb") as stream:
             stream.truncate(3 * self.WIDTH * self.HEIGHT * 4)
         preprocess = self.CALIBRATION.preprocess
@@ -50,6 +43,13 @@ class RawModelProvenanceTests(unittest.TestCase):
         manifest = {
             "schema": dump_contract.DUMP_MANIFEST_SCHEMA,
             "depth_model": self.CALIBRATION.depth_model,
+            "dimensions": {
+                "raw_depth": {
+                    "width": self.WIDTH,
+                    "height": self.HEIGHT,
+                    "format": "float32-le structured buffer",
+                },
+            },
             "config": {
                 "schema": 3,
                 "shared_configured": {"pop_strength": 1.0},
@@ -212,6 +212,26 @@ class RawModelProvenanceTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, message):
                     provenance.inspect_dump(dump)
 
+    def test_raw_depth_shape_authority_is_the_current_manifest(self):
+        for mutation, value in (("width", self.WIDTH + 14), ("format", "float32-le")):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                dump, manifest = self._dump(Path(temporary))
+                manifest[provenance.PROVENANCE_KEY] = self._proof(dump)
+                manifest["dimensions"]["raw_depth"][mutation] = value
+                (dump / "dump_manifest.json").write_text(
+                    json.dumps(manifest), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "raw-depth dimensions disagree"):
+                    provenance.inspect_dump(dump)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            dump, manifest = self._dump(Path(temporary))
+            manifest[provenance.PROVENANCE_KEY] = self._proof(dump)
+            manifest["schema"] = dump_contract.DUMP_MANIFEST_SCHEMA - 1
+            (dump / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "not the current Dump 3D schema"):
+                provenance.inspect_dump(dump)
+
     def test_bound_input_artifacts_cannot_change_after_capture(self):
         with tempfile.TemporaryDirectory() as temporary:
             dump, manifest = self._dump(Path(temporary))
@@ -311,6 +331,12 @@ class RawModelProvenanceTests(unittest.TestCase):
             self.assertEqual(
                 report["config"]["raw_coordinate_scale"],
                 self.CALIBRATION.raw_coordinate_scale)
+            self.assertEqual(
+                report["raw_shape"]["authority"],
+                "dump_manifest.json#dimensions.raw_depth")
+            self.assertEqual(
+                report["source_geometry"]["raw_shape_file"],
+                "dump_manifest.json")
 
     def test_authoritative_floor_comes_only_from_bound_manifest_calibration(self):
         provenance_record = provenance.RawModelProvenance(

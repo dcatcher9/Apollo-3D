@@ -439,10 +439,8 @@ def audit(run_dir, out_dir):
         expected_flow_ids = frame_ids[1:]
         if flow_files:
             require_frame_ids(f"{clip} GT flow", expected_flow_ids, flow_files)
-        require_gt_depth = bool(clip_meta.get(
-            "required_gt_depth", clip_meta.get("dataset")))
-        require_gt_flow = bool(clip_meta.get(
-            "required_gt_flow", clip_meta.get("dataset") == "TartanAir V2"))
+        require_gt_depth, require_gt_flow = sbsbench.depth_flow_evidence_requirements(
+            clip_meta)
         if require_gt_depth and not gt_files:
             raise ValueError(f"{clip}: metadata requires GT depth, but none was found")
         if require_gt_flow and not flow_files:

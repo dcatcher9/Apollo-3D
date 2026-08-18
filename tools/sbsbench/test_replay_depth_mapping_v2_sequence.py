@@ -25,7 +25,8 @@ try:
         GPU_INPUT_MANIFEST_MODE, GPU_INPUT_MANIFEST_SCHEMA,
         PRODUCER_EVIDENCE_BINDING, PRODUCER_EVIDENCE_SCHEMA,
         SEQUENCE_CONTRACT_SCHEMA,
-        LEGACY_STATE_METRICS, RENDERER_SCORECARD_FILE, RENDERER_SCORE_CONTRACT_FILE,
+        FORBIDDEN_RENDERER_SCORE_PREFIXES, RENDERER_SCORECARD_FILE,
+        RENDERER_SCORE_CONTRACT_FILE,
         RENDERER_SCORE_CONTRACT_SCHEMA, MappingV2Config,
         _OrderedSourceRgbFields,
         _diagnostic_summary,
@@ -54,7 +55,8 @@ except ImportError:  # Direct execution from tools/sbsbench.
         GPU_INPUT_MANIFEST_MODE, GPU_INPUT_MANIFEST_SCHEMA,
         PRODUCER_EVIDENCE_BINDING, PRODUCER_EVIDENCE_SCHEMA,
         SEQUENCE_CONTRACT_SCHEMA,
-        LEGACY_STATE_METRICS, RENDERER_SCORECARD_FILE, RENDERER_SCORE_CONTRACT_FILE,
+        FORBIDDEN_RENDERER_SCORE_PREFIXES, RENDERER_SCORECARD_FILE,
+        RENDERER_SCORE_CONTRACT_FILE,
         RENDERER_SCORE_CONTRACT_SCHEMA, MappingV2Config,
         _OrderedSourceRgbFields,
         _diagnostic_summary,
@@ -866,33 +868,41 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                 _validate_producer_evidence_bundle(
                     output, producer_reference, input_contract, gpu_manifest)
 
-    def test_renderer_score_excludes_recomputed_legacy_state_from_voting(self):
+    def test_renderer_score_rejects_controller_state_instead_of_sanitizing(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
-            raw_path = output / "legacy_state_diagnostic_scorecard.json"
-            aggregate = {"source_coverage_pct": 100.0}
-            frame = {"_dump": "sbs_00001.png", "source_coverage_pct": 100.0}
-            for index, key in enumerate(LEGACY_STATE_METRICS):
-                aggregate[key] = float(index)
-                frame[key] = float(index)
-            raw_path.write_text(json.dumps({
-                "aggregate": aggregate, "frames": [frame]}), encoding="utf-8")
+            score_path = output / RENDERER_SCORECARD_FILE
+            score_path.write_text(json.dumps({
+                "aggregate": {
+                    "source_coverage_pct": 100.0,
+                    "shot_state_pulse_mismatch": 0.0,
+                },
+                "frames": [{"_dump": "sbs_00001.png", "source_coverage_pct": 100.0}],
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "controller-state metrics"):
+                _publish_renderer_quality_score(score_path, output)
+            self.assertFalse((output / RENDERER_SCORE_CONTRACT_FILE).exists())
 
-            evidence = _publish_renderer_quality_score(raw_path, output)
-            sanitized = json.loads((output / RENDERER_SCORECARD_FILE).read_text())
+            scorecard = {
+                "aggregate": {"source_coverage_pct": 100.0},
+                "frames": [{"_dump": "sbs_00001.png", "source_coverage_pct": 100.0}],
+            }
+            score_path.write_text(json.dumps(scorecard), encoding="utf-8")
+            evidence = _publish_renderer_quality_score(score_path, output)
             scope_contract = json.loads(
                 (output / RENDERER_SCORE_CONTRACT_FILE).read_text())
             self.assertEqual(evidence["scope"], "renderer-output-quality-only-v1")
+            self.assertNotIn("raw_diagnostic_scorecard_file", evidence)
             self.assertNotIn("scorer_source_sha256", evidence)
             self.assertEqual(evidence["metric_contract"], _metric_contract_evidence())
             self.assertEqual(scope_contract["schema"], RENDERER_SCORE_CONTRACT_SCHEMA)
             self.assertEqual(scope_contract["metric_contract"], evidence["metric_contract"])
-            self.assertEqual(sanitized["aggregate"]["source_coverage_pct"], 100.0)
-            for key in LEGACY_STATE_METRICS:
-                self.assertNotIn(key, sanitized["aggregate"])
-                self.assertNotIn(key, sanitized["frames"][0])
-            original = json.loads(raw_path.read_text())
-            self.assertTrue(all(key in original["aggregate"] for key in LEGACY_STATE_METRICS))
+            self.assertEqual(
+                scope_contract["forbidden_metric_prefixes"],
+                list(FORBIDDEN_RENDERER_SCORE_PREFIXES))
+            self.assertNotIn("excluded_metrics", scope_contract)
+            self.assertNotIn("source_scorecard", scope_contract)
+            self.assertEqual(json.loads(score_path.read_text()), scorecard)
 
     def test_score_provenance_uses_full_canonical_metric_contract(self):
         evidence = _metric_contract_evidence()

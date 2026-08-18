@@ -15,7 +15,7 @@ diagnostic evidence only. HDR color fidelity is not claimed.
 The calibrated spatial projection is composed in a fixed order: compute the column-wise upper and
 lower envelopes, form their authenticated 75/25 orientation-selective share, then apply one
 row-wise horizontal majorant. Vertical shear is expressed as horizontal disparity pixels per
-source-image vertical pixel. This experiment remains full-source-only: schema-38 window-region
+source-image vertical pixel. This experiment remains full-source-only: schema-39 window-region
 captures carry an integer tensor-content rectangle and excluded padding, and fail closed below
 rather than being reinterpreted as full-tensor source geometry.
 """
@@ -200,15 +200,20 @@ def _new_output_directory(path: Path) -> None:
 
 
 def _load_raw_depth(dump: Path) -> tuple[np.ndarray, Dict[str, Any]]:
-    shape = _read_json(dump / "raw_shape.json")
+    manifest = _read_json(dump / "dump_manifest.json")
+    dimensions = manifest.get("dimensions")
+    shape = dimensions.get("raw_depth") if isinstance(dimensions, dict) else None
+    if (manifest.get("schema") != v2_dump_contract.DUMP_MANIFEST_SCHEMA or
+            not isinstance(shape, dict) or set(shape) != {"width", "height", "format"}):
+        raise ValueError("dump_manifest.json lacks current raw-depth dimensions")
     try:
         width = int(shape["width"])
         height = int(shape["height"])
     except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("raw_shape.json lacks positive integer width/height") from exc
-    if width <= 0 or height <= 0 or shape.get("dtype") != "float32-le" or \
-            shape.get("layout") != "row-major":
-        raise ValueError("raw_shape.json is not finite float32-le row-major depth")
+        raise ValueError("dump_manifest.json lacks positive raw-depth width/height") from exc
+    if (width <= 0 or height <= 0 or
+            shape.get("format") != "float32-le structured buffer"):
+        raise ValueError("dump_manifest.json does not describe float32-le raw depth")
     raw_path = dump / "raw_depth.f32"
     try:
         raw = np.fromfile(raw_path, dtype="<f4")
@@ -220,7 +225,13 @@ def _load_raw_depth(dump: Path) -> tuple[np.ndarray, Dict[str, Any]]:
     raw = raw.reshape(height, width)
     if not np.isfinite(raw).all():
         raise ValueError("raw_depth.f32 contains non-finite values")
-    return raw, shape
+    return raw, {
+        "width": width,
+        "height": height,
+        "dtype": "float32-le",
+        "layout": "row-major",
+        "authority": "dump_manifest.json#dimensions.raw_depth",
+    }
 
 
 def _mapping_metrics(result) -> Dict[str, Any]:
@@ -451,9 +462,9 @@ def main(argv: list[str] | None = None) -> int:
                 "authority": "exact-raw-depth-input-to-non-captured-state-recomputation",
                 "raw_depth_file": "raw_depth.f32",
                 "raw_depth_sha256": model_provenance.raw_depth_sha256,
-                "raw_shape_file": "raw_shape.json",
+                "raw_shape_file": "dump_manifest.json",
                 "raw_shape_sha256": raw_model_provenance.file_sha256(
-                    dump / "raw_shape.json"),
+                    dump / "dump_manifest.json"),
                 "model_provenance_status": model_provenance.status,
             },
             "raw_model_provenance": model_provenance.to_dict(),

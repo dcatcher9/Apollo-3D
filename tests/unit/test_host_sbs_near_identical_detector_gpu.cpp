@@ -60,7 +60,7 @@ TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparat
     std::string {SUNSHINE_SOURCE_DIR} + "/src/host_sbs_shader_cache.cpp"
   );
   const auto cache_header = read(
-    std::string {SUNSHINE_SOURCE_DIR} + "/src/host_sbs_shader_cache.h"
+    std::string {SUNSHINE_SOURCE_DIR} + "/src/generated/host_sbs_shader_manifest.h"
   );
   const auto detector = read(
     std::string {SUNSHINE_SHADERS_DIR} +
@@ -136,7 +136,7 @@ TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparat
     std::string::npos
   );
   EXPECT_NE(estimator.find("tensor_previous_input_srv.Get(),"), std::string::npos);
-  EXPECT_NE(estimator.find("near_identical_tile_uav.Get(),"), std::string::npos);
+  EXPECT_NE(estimator.find("near_identical_tile.uav.Get(),"), std::string::npos);
   EXPECT_NE(
     estimator.find("dispatch_near_identical_detector()", route_end),
     std::string::npos
@@ -157,6 +157,54 @@ TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparat
   EXPECT_NE(fused.find("disabled_evidence.admitted = 0u"), std::string::npos);
 }
 
+TEST(HostSbsNearIdenticalPolicyTest, D3dResourcesUseTypedBundlesWithoutChangingCudaRetention) {
+  std::ifstream stream(
+    std::string {SUNSHINE_SOURCE_DIR} + "/src/video_depth_estimator.cpp",
+    std::ios::binary
+  );
+  std::string estimator {
+    std::istreambuf_iterator<char> {stream},
+    std::istreambuf_iterator<char> {}
+  };
+  ASSERT_FALSE(estimator.empty());
+  estimator.erase(
+    std::remove(estimator.begin(), estimator.end(), '\r'),
+    estimator.end()
+  );
+
+  EXPECT_NE(estimator.find("struct d3d_buffer_views_t"), std::string::npos);
+  EXPECT_NE(
+    estimator.find("struct near_identical_transaction_resources_t : d3d_buffer_views_t"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    estimator.find("} near_identical_tile, near_identical_history_owner;"),
+    std::string::npos
+  );
+  EXPECT_NE(estimator.find("} near_identical_transaction;"), std::string::npos);
+  EXPECT_NE(
+    estimator.find("CUgraphicsResource cuda_near_identical_decision_res = nullptr;"),
+    std::string::npos
+  );
+  EXPECT_EQ(estimator.find("near_identical_tile_buf"), std::string::npos);
+  EXPECT_EQ(estimator.find("near_identical_history_owner_buf"), std::string::npos);
+  EXPECT_EQ(estimator.find("near_identical_gpu_decision_buf"), std::string::npos);
+  EXPECT_EQ(estimator.find("near_identical_gpu_dispatch_buf"), std::string::npos);
+
+  const auto retain = estimator.find("const auto retain_all_cuda_backing =");
+  const auto retain_end = estimator.find("};", retain);
+  ASSERT_NE(retain, std::string::npos);
+  ASSERT_NE(retain_end, std::string::npos);
+  const auto retention = estimator.substr(retain, retain_end - retain);
+  const auto uav_detach = retention.find("near_identical_transaction.uav.Detach()");
+  const auto buffer_detach = retention.find("near_identical_transaction.buffer.Detach()");
+  ASSERT_NE(uav_detach, std::string::npos);
+  ASSERT_NE(buffer_detach, std::string::npos);
+  EXPECT_LT(uav_detach, buffer_detach);
+  EXPECT_EQ(retention.find("near_identical_transaction.dispatch.Detach()"), std::string::npos);
+  EXPECT_EQ(retention.find("near_identical_transaction.srv.Detach()"), std::string::npos);
+}
+
 TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
   const auto read = [](const std::string &path) {
     std::ifstream stream(path, std::ios::binary);
@@ -166,7 +214,7 @@ TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
     };
   };
   auto cache_header = read(
-    std::string {SUNSHINE_SOURCE_DIR} + "/src/host_sbs_shader_cache.h"
+    std::string {SUNSHINE_SOURCE_DIR} + "/src/generated/host_sbs_shader_manifest.h"
   );
   auto estimator = read(
     std::string {SUNSHINE_SOURCE_DIR} + "/src/video_depth_estimator.cpp"
@@ -275,6 +323,9 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   const auto estimator = read(
     std::string {SUNSHINE_SOURCE_DIR} + "/src/video_depth_estimator.cpp"
   );
+  const auto executor = read(
+    std::string {SUNSHINE_SOURCE_DIR} + "/src/host_sbs_v2_gpu_executor.cpp"
+  );
   const auto shader = read(
     std::string {SUNSHINE_SHADERS_DIR} +
     "/host_sbs_near_identical_detector_cs.hlsl"
@@ -295,6 +346,7 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
     std::string {SUNSHINE_SHADERS_DIR} + "/depth_coordinate_v2_map_cs.hlsl"
   );
   ASSERT_FALSE(estimator.empty());
+  ASSERT_FALSE(executor.empty());
   ASSERT_FALSE(shader.empty());
   ASSERT_FALSE(compare_contract.empty());
   ASSERT_FALSE(shared_constants.empty());
@@ -320,11 +372,11 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
     std::string::npos
   );
   EXPECT_NE(estimator.find("depth_resource_count"), std::string::npos);
-  EXPECT_NE(estimator.find("near_identical_gpu_dispatch_buf"), std::string::npos);
+  EXPECT_NE(estimator.find("near_identical_transaction.dispatch"), std::string::npos);
   EXPECT_NE(
     estimator.find(
-      "context->CopyResource(\n        near_identical_gpu_dispatch_buf.Get(),\n        "
-      "near_identical_gpu_decision_buf.Get()"
+      "context->CopyResource(\n        near_identical_transaction.dispatch.Get(),\n        "
+      "near_identical_transaction.buffer.Get()"
     ),
     std::string::npos
   );
@@ -351,7 +403,7 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   EXPECT_EQ(estimator.find("ocr_cu_stream"), std::string::npos);
   EXPECT_EQ(estimator.find("ocr_inference_done_event"), std::string::npos);
   const auto submit_begin = estimator.find(
-    "if (bindings_ok && !terminal_failure && !dropped_for_signature_change)"
+    "if (bindings_ok && !is_terminal() && !dropped_for_signature_change)"
   );
   const auto submit_end = estimator.find("CUresult ocr_unmap_res", submit_begin);
   ASSERT_NE(submit_begin, std::string::npos);
@@ -588,8 +640,9 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   EXPECT_NE(fused_map.find("NearIdenticalHistoryOwnerOutput : register(u5)"),
             std::string::npos);
   EXPECT_NE(estimator.find("minmax_ema_srv.Get(),"), std::string::npos);
-  EXPECT_NE(estimator.find("CSSetShaderResources(0, 8, map_srvs)"), std::string::npos);
-  EXPECT_NE(estimator.find("CSSetUnorderedAccessViews(0, 6, map_uavs"), std::string::npos);
+  EXPECT_NE(estimator.find("host_sbs_v2_gpu::record_map_history("), std::string::npos);
+  EXPECT_NE(executor.find("CSSetShaderResources(0u, 8u, inputs)"), std::string::npos);
+  EXPECT_NE(executor.find("CSSetUnorderedAccessViews(0u, 6u, outputs"), std::string::npos);
   EXPECT_NE(estimator.find("CSSetShaderResources(0u, 4u, resolve_inputs)"), std::string::npos);
   EXPECT_EQ(shader.find("NearIdenticalSubtitleCoherentTransition"), std::string::npos);
   EXPECT_EQ(shader.find("NearIdenticalSubtitleStateSteady"), std::string::npos);

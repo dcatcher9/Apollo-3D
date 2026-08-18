@@ -1,0 +1,292 @@
+{
+  "schema": 1,
+  "source_closure_schema": 2,
+  "shader_compile_flags": 34816,
+  "source_macro_count": 0,
+  "specs": [
+    {
+      "name": "buffer_to_tex",
+      "source_file": "buffer_to_tex_cs.hlsl",
+      "source_entrypoint": "main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "buffer_to_tex_pad",
+      "source_file": "buffer_to_tex_cs.hlsl",
+      "source_entrypoint": "pad_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "depth_minmax_ema",
+      "source_file": "depth_minmax_ema_cs.hlsl",
+      "source_entrypoint": "main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "depth_hist",
+      "source_file": "depth_hist_cs.hlsl",
+      "source_entrypoint": "main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "depth_scene_cut_evidence",
+      "source_file": "depth_scene_cut_evidence_cs.hlsl",
+      "source_entrypoint": "main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "depth_scene_cut_resolve",
+      "source_file": "depth_scene_cut_resolve_cs.hlsl",
+      "source_entrypoint": "main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "depth_coordinate_v2_moments",
+      "source_file": "depth_coordinate_v2_moments_cs.hlsl",
+      "source_entrypoint": "main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "depth_coordinate_v2_frame_resolve",
+      "source_file": "depth_coordinate_v2_frame_resolve_cs.hlsl",
+      "source_entrypoint": "main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "depth_coordinate_v2_state_resolve",
+      "source_file": "depth_coordinate_v2_state_resolve_cs.hlsl",
+      "source_entrypoint": "main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "depth_coordinate_v2_map",
+      "source_file": "depth_coordinate_v2_map_cs.hlsl",
+      "source_entrypoint": "main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "depth_coordinate_v2_ownership",
+      "source_file": "depth_coordinate_v2_ownership_cs.hlsl",
+      "source_entrypoint": "main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "depth_coordinate_v2_coordinate_diagnostic",
+      "source_file": "depth_coordinate_v2_map_cs.hlsl",
+      "source_entrypoint": "coordinate_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "depth_coordinate_v2_vertical_limit",
+      "source_file": "depth_coordinate_v2_vertical_limit_cs.hlsl",
+      "source_entrypoint": "main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "depth_coordinate_v2_limit",
+      "source_file": "depth_coordinate_v2_limit_cs.hlsl",
+      "source_entrypoint": "main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_ocr_preprocess",
+      "source_file": "host_sbs_ocr_preprocess_cs.hlsl",
+      "source_entrypoint": "main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_ocr_cells",
+      "source_file": "host_sbs_ocr_boxes_cs.hlsl",
+      "source_entrypoint": "cells_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_ocr_resolve",
+      "source_file": "host_sbs_ocr_boxes_cs.hlsl",
+      "source_entrypoint": "resolve_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_subtitle_locator_resolve",
+      "source_file": "host_sbs_subtitle_locator_cs.hlsl",
+      "source_entrypoint": "resolve_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_subtitle_condition",
+      "source_file": "host_sbs_subtitle_locator_cs.hlsl",
+      "source_entrypoint": "condition_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_near_identical_fused_preprocess",
+      "source_file": "rgb_to_nchw_near_identical_cs.hlsl",
+      "source_entrypoint": "fused_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_near_identical_resolve",
+      "source_file": "host_sbs_near_identical_detector_cs.hlsl",
+      "source_entrypoint": "resolve_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_near_identical_scene_seed",
+      "source_file": "host_sbs_near_identical_detector_cs.hlsl",
+      "source_entrypoint": "scene_seed_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_near_identical_finalize",
+      "source_file": "host_sbs_near_identical_detector_cs.hlsl",
+      "source_entrypoint": "finalize_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_near_identical_reuse_depth",
+      "source_file": "host_sbs_near_identical_detector_cs.hlsl",
+      "source_entrypoint": "reuse_depth_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_gpu_trace",
+      "source_file": "host_sbs_gpu_trace_cs.hlsl",
+      "source_entrypoint": "main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "parallax_v2_live_renderer",
+      "source_file": "sbs_reprojection_v2_live_ps.hlsl",
+      "source_entrypoint": "main_ps",
+      "source_target": "ps_5_0"
+    },
+    {
+      "name": "parallax_v2_p010_y_renderer",
+      "source_file": "sbs_reprojection_v2_p010_y_ps.hlsl",
+      "source_entrypoint": "main_p010_y_ps",
+      "source_target": "ps_5_0"
+    },
+    {
+      "name": "parallax_v2_live_mapping",
+      "source_file": "sbs_reprojection_v2_diagnostics_ps.hlsl",
+      "source_entrypoint": "mapping_ps",
+      "source_target": "ps_5_0"
+    },
+    {
+      "name": "parallax_v2_live_mask",
+      "source_file": "sbs_reprojection_v2_diagnostics_ps.hlsl",
+      "source_entrypoint": "mask_ps",
+      "source_target": "ps_5_0"
+    },
+    {
+      "name": "sbs_reprojection_vertex",
+      "source_file": "sbs_reprojection_vs.hlsl",
+      "source_entrypoint": "main_vs",
+      "source_target": "vs_5_0"
+    },
+    {
+      "name": "sbs_flat_identity",
+      "source_file": "sbs_flat_identity_ps.hlsl",
+      "source_entrypoint": "main_ps",
+      "source_target": "ps_5_0"
+    }
+  ],
+  "groups": [
+    {
+      "name": "preprocess",
+      "description": "Model-calibration identity closure; production compiles the fused root from the full producer closure.",
+      "specs": [
+        "host_sbs_near_identical_fused_preprocess"
+      ],
+      "source_closure_sha256": "1d0e89740921beb645cb8e83bfa6b3ca6f14ce58266bcf6d36dc2dfe8dc5c1bd"
+    },
+    {
+      "name": "parallax_v2_producer",
+      "description": "Complete authenticated DAV2, OCR, subtitle-locator, and final-coordinate producer.",
+      "specs": [
+        "host_sbs_near_identical_fused_preprocess",
+        "buffer_to_tex",
+        "buffer_to_tex_pad",
+        "depth_minmax_ema",
+        "depth_hist",
+        "depth_scene_cut_evidence",
+        "depth_scene_cut_resolve",
+        "depth_coordinate_v2_moments",
+        "depth_coordinate_v2_frame_resolve",
+        "depth_coordinate_v2_state_resolve",
+        "depth_coordinate_v2_map",
+        "depth_coordinate_v2_ownership",
+        "depth_coordinate_v2_vertical_limit",
+        "depth_coordinate_v2_limit",
+        "host_sbs_ocr_preprocess",
+        "host_sbs_ocr_cells",
+        "host_sbs_ocr_resolve",
+        "host_sbs_subtitle_locator_resolve",
+        "host_sbs_subtitle_condition"
+      ],
+      "source_closure_sha256": "11bde7ba05ca8ae8404b8fe21a3afd600ff98549fea248dacb5bf1b5d2156d6b"
+    },
+    {
+      "name": "parallax_v2_coordinate_diagnostic",
+      "description": "Dump-only canonical-coordinate producer entry point.",
+      "specs": [
+        "depth_coordinate_v2_coordinate_diagnostic"
+      ],
+      "source_closure_sha256": "d99263f71448f967a327479d3f15da2532e8e8e203d8873436928e5392f57433"
+    },
+    {
+      "name": "near_identical_detector",
+      "description": "Mandatory GPU reuse arbitration, scene seeding, finalization, and reuse-depth closure.",
+      "specs": [
+        "host_sbs_near_identical_resolve",
+        "host_sbs_near_identical_scene_seed",
+        "host_sbs_near_identical_finalize",
+        "host_sbs_near_identical_reuse_depth"
+      ],
+      "source_closure_sha256": "87b63ffb753e9cc39e90b385ab997134402596eb5c074a4f3a3680619015910b"
+    },
+    {
+      "name": "gpu_trace",
+      "description": "Optional diagnostic GPU completion trace.",
+      "specs": [
+        "host_sbs_gpu_trace"
+      ],
+      "source_closure_sha256": "a1e6a21286b5a898b1dcdd419056faa8e3a5351b21edef0ef288d716979c0cb9"
+    },
+    {
+      "name": "parallax_v2_live_renderer",
+      "description": "Authenticated live signed-parallax renderer and shared fullscreen vertex shader.",
+      "specs": [
+        "parallax_v2_live_renderer",
+        "sbs_reprojection_vertex"
+      ],
+      "source_closure_sha256": "7553350163dfb80cee85b70689b768a46a5c15b44997e2753e24bebedaa51ffd"
+    },
+    {
+      "name": "parallax_v2_p010_y",
+      "description": "Optional fail-open P010 luma MRT renderer.",
+      "specs": [
+        "parallax_v2_p010_y_renderer"
+      ],
+      "source_closure_sha256": "f14993382c296ee07ce556c3dbebba29d021d8555ea446fae9a8b06b17a09813"
+    },
+    {
+      "name": "sbs_flat_fallback",
+      "description": "Independent authenticated flat-identity fallback and shared fullscreen vertex shader.",
+      "specs": [
+        "sbs_flat_identity",
+        "sbs_reprojection_vertex"
+      ],
+      "source_closure_sha256": "7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4"
+    },
+    {
+      "name": "parallax_v2_live_diagnostic",
+      "description": "Dump-only live inverse-map and mask renderers.",
+      "specs": [
+        "parallax_v2_live_mapping",
+        "parallax_v2_live_mask"
+      ],
+      "source_closure_sha256": "1c7cb433f667c990e4d55f254a11cc9a40590e3a1e97e62fc261c2e0069b9513"
+    }
+  ]
+}

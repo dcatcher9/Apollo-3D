@@ -15,6 +15,12 @@ owns evaluation commands and evidence formats, organized as follows:
 | [Optional oracles](ORACLES.md) | FLIP, RAFT-Stereo, SEA-RAFT, and iSQoE diagnostics |
 | [Host SBS scene cuts](../../docs/host-sbs-scene-cuts.md) | Normative cut evidence and state machine |
 
+The native harness shares the typed scene-cache, scene-plan, and whole-clip wire codecs with the
+offline manager/worker. Its fixed-schema JSON is published atomically, duplicate keys and unknown
+fields fail closed on read, and raster dimensions are checked before byte-count arithmetic or GPU
+allocation. The Python evaluators consume those current documents; they do not maintain a second
+native-contract compatibility translator.
+
 ## Required evaluation loop
 
 Run commands from the repository root. The previous clean V2 core references predate the current
@@ -156,20 +162,30 @@ captures directly with:
   --baseline base.json
 ```
 
-See [Dump and replay format](DUMP_FORMAT.md) before interpreting preview PNGs. The reader accepts
-only the current SLR13/OCR8 dump schema; older experimental captures are intentionally unsupported.
-An active schema-38 package authenticates the OCR8/SLR13 tuple for the atomic final field's
-publication frame, ordinary Base, conditioned final field, and the resolver's bounded strict
-fallback placement policy. It replays SLR13 directly into that final field and requires
-`warp_depth` to equal it bit-for-bit. An
+See [Dump and replay format](DUMP_FORMAT.md) before generating or interpreting preview PNGs. The
+reader accepts only the current SLR13/OCR8 dump schema; older experimental captures are
+intentionally unsupported. An active schema-39 package authenticates the OCR8/SLR13 tuple for the
+atomic final field's publication frame, ordinary Base, conditioned final field, and the resolver's
+bounded strict fallback placement policy. It replays SLR13 directly into
+`shadow_final_parallax.f32`, which is authenticated once as both the atomic final field and warp
+input. An
 active resolver also authenticates the strict symmetric bottom-corner ordinary-core qualification
 and its ribbon exemption. An inactive package uses the one canonical `none` descriptor.
 
-Current schema-38 window-region packages preserve the complete authorized source rectangle at any
+Current schema-39 window-region packages preserve the complete authorized source rectangle at any
 aspect ratio. `depth_input_region.json` schema 4 records the centered integer content rectangle in
 the fixed DAV2 tensor and its edge-replicated excluded padding. Quantitative consumers must use
 that content width for limiter and SLR13 steps and must project OCR/SLR geometry only into that
 content rectangle; treating the whole tensor as real source pixels is rejected.
+
+Schema 39 packages no scalar/heat preview PNGs or redundant per-field shape sidecars. Generate a
+verified diagnostic view from any retained authenticated `.f32` artifact outside the package:
+
+```powershell
+& $SbsbenchPython tools/sbsbench/generate_dump_previews.py `
+  E:/ApolloDev/sbs_dump/dump_2026... shadow_final_parallax.f32 `
+  --output-dir E:/ApolloDev/sbs_dump_previews/dump_2026...
+```
 
 ## Whole-clip conversion boundary
 

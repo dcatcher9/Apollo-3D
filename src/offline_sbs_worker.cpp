@@ -12,6 +12,7 @@
 #include "host_sbs_shader_cache.h"
 #include "offline_sbs_contract.h"
 #include "offline_scene_planner.h"
+#include "offline_sbs_wire_contract.h"
 
 #include <algorithm>
 #include <array>
@@ -325,32 +326,6 @@ namespace offline_sbs {
       }
       const auto found = object.find(name);
       return found == object.end() ? nullptr : &*found;
-    }
-
-    std::string required_string(
-      const nlohmann::json &object,
-      const std::string_view name
-    ) {
-      const auto *value = object_member(object, name);
-      if (!value || !value->is_string()) {
-        throw worker_error("worker contract field '" + std::string(name) + "' must be a string");
-      }
-      const auto result = value->get<std::string>();
-      if (result.empty()) {
-        throw worker_error("worker contract field '" + std::string(name) + "' must not be empty");
-      }
-      return result;
-    }
-
-    fs::path required_absolute_path(
-      const nlohmann::json &object,
-      const std::string_view name
-    ) {
-      auto path = path_from_utf8(required_string(object, name));
-      if (!path.is_absolute()) {
-        throw worker_error("worker contract path '" + std::string(name) + "' must be absolute");
-      }
-      return path.lexically_normal();
     }
 
     template<class Input>
@@ -2949,13 +2924,10 @@ namespace offline_sbs {
       const std::string &error
     ) noexcept {
       try {
-        write_json_atomic(spec.result_path, {
-                                              {"schema", 1},
-                                              {"job_id", spec.job_id},
-                                              {"status", "failed"},
-                                              {"error", error.substr(0, 4096)},
-                                              {"python_dependency", false},
-                                            });
+        write_json_atomic(
+          spec.result_path,
+          wire::worker_failure_json(spec.job_id, error)
+        );
       } catch (...) {
       }
     }
@@ -3618,7 +3590,6 @@ namespace offline_sbs {
       std::uint32_t sbs_width = 0;
       std::uint32_t sbs_height = 0;
       std::string extension;
-      nlohmann::json value;
     };
 
     cache_contract_t parse_cache_contract(
@@ -3629,33 +3600,35 @@ namespace offline_sbs {
       const auto value = read_json(
         cache_directory / "scene_cache_contract.json"
       );
-      if (value.value("schema", 0u) != scene_cache_contract_schema || value.value("status", "") != "running" || value.value("first_sequence", 0) != 1 || value.value("processed_count", 0ull) != sequence || !value.value("atomic_frame_publication", false)) {
+      wire::scene_cache_contract_t contract;
+      try {
+        contract = wire::parse_scene_cache_contract(value);
+      } catch (const wire::contract_error &exception) {
+        throw worker_error(
+          std::string {"invalid scene-cache wire contract: "} + exception.what()
+        );
+      }
+      if (contract.status != "running" || contract.processed_count != sequence) {
         throw worker_error("running scene-cache sequence contract mismatch");
       }
-      const auto &source = value.at("source");
-      const auto &depth = value.at("depth");
-      const auto &state = value.at("state");
-      const auto &render = value.at("render_config");
-      const auto &packed = value.at("packed_sbs");
       cache_contract_t result;
       result.processed_count = sequence;
-      result.depth_bytes = depth.at("bytes_per_frame").get<std::uint64_t>();
-      result.state_bytes = state.at("bytes_per_frame").get<std::uint64_t>();
-      result.source_width = source.at("width").get<std::uint32_t>();
-      result.source_height = source.at("height").get<std::uint32_t>();
-      result.sbs_width = packed.at("width").get<std::uint32_t>();
-      result.sbs_height = packed.at("height").get<std::uint32_t>();
-      result.extension = packed.at("file_extension").get<std::string>();
-      result.value = value;
+      result.depth_bytes = static_cast<std::uint64_t>(contract.depth_width) *
+                           contract.depth_height * sizeof(float);
+      result.state_bytes = sizeof(models::depth_coordinate_v2::state_words_t);
+      result.source_width = contract.source.width;
+      result.source_height = contract.source.height;
+      result.sbs_width = contract.packed_sbs.width;
+      result.sbs_height = contract.packed_sbs.height;
+      result.extension = contract.packed_sbs.file_extension;
       const std::string expected_frame_format =
         media.color == media_color_e::sdr ?
           "sRGB-BMP-WIC" :
           "linear-scRGB-f32-pfm";
-      const auto depth_width = depth.at("width").get<std::uint32_t>();
-      const auto depth_height = depth.at("height").get<std::uint32_t>();
-      const auto expected_depth_bytes =
-        static_cast<std::uint64_t>(depth_width) * depth_height * sizeof(float);
-      if (result.source_width != media.width || result.source_height != media.height || source.at("frame_format").get<std::string>() != expected_frame_format || result.sbs_width == 0 || result.sbs_height == 0 || result.sbs_width % 2 != 0 || packed.at("eye_width").get<std::uint32_t>() * 2 != result.sbs_width || packed.at("eye_height").get<std::uint32_t>() != result.sbs_height || !packed.at("atomic_replay_publication").get<bool>() || result.extension != (media.color == media_color_e::sdr ? "png" : "pfm") || depth_width == 0u || depth_height == 0u || result.depth_bytes != expected_depth_bytes || depth.at("dtype").get<std::string>() != "float32-le" || depth.at("dxgi_format").get<std::string>() != "R32_FLOAT" || depth.at("semantics").get<std::string>() != "depth-coordinate-v2-signed-final-parallax-source-u" || state.at("schema").get<int>() != 2 || state.at("contract_schema").get<std::uint32_t>() != models::depth_coordinate_v2::contract_schema || state.at("contract_tag").get<std::uint32_t>() != models::depth_coordinate_v2::contract_tag || state.at("word_count").get<std::size_t>() != models::depth_coordinate_v2::state_words_t {}.size() || result.state_bytes != sizeof(models::depth_coordinate_v2::state_words_t) || render.at("renderer").get<std::string>() != "depth-coordinate-v2-live-signed-parallax" || render.at("producer_source_closure_sha256").get<std::string>() != models::depth_coordinate_v2::shader_source_closure_sha256 || render.at("renderer_source_closure_sha256").get<std::string>() != models::host_sbs_shader_cache::parallax_v2_live_renderer_source_closure_sha256) {
+      if (result.source_width != media.width ||
+          result.source_height != media.height ||
+          contract.source.frame_format != expected_frame_format ||
+          result.extension != (media.color == media_color_e::sdr ? "png" : "pfm")) {
         throw worker_error("scene-cache media/layout contract mismatch");
       }
       const auto stem = "frame_" + frame_id(sequence);
@@ -3669,80 +3642,17 @@ namespace offline_sbs {
     }
 
     nlohmann::json scene_plan_json(const scene_plan_t &scene) {
-      return {
-        {"schema", 2},
-        {"version", "scene-plan-v2"},
-        {"cache_contract_schema", scene_cache_contract_schema},
-        {"scenes", nlohmann::json::array({
-                     {
-                       {"start_sequence", scene.start_sequence},
-                       {"end_sequence_exclusive", scene.end_sequence_exclusive},
-                     },
-                   })},
-      };
+      return wire::to_json(wire::scene_plan_contract_t {
+        .scenes = {{scene.start_sequence, scene.end_sequence_exclusive}},
+      });
     }
 
     nlohmann::json boundary_json(const boundary_audit_t &boundary) {
-      return {
-        {"proposal_sequences", boundary.proposal_sequences},
-        {"proposal_frame_ids", boundary.proposal_frame_ids},
-        {"final_sequence", boundary.final_sequence},
-        {"decision", boundary_decision_name(boundary.decision)},
-        {"reason", boundary.reason},
-        {"accepted", boundary.accepted},
-        {"semantic_cut", boundary.semantic_cut},
-        {"truncated", boundary.truncated},
-        {"budget_forced", boundary.budget_forced},
-        {"revision_depth_updates", boundary.revision_depth_updates},
-        {"revision_source_frames", boundary.revision_source_frames},
-        {"candidate_count", boundary.candidate_count},
-        {"selected_evidence_score", boundary.selected_evidence_score},
-        {"evidence_window_first_sequence",
-         boundary.evidence_window_first_sequence},
-        {"evidence_window_last_sequence",
-         boundary.evidence_window_last_sequence},
-        {"selected_sequence", boundary.selected_sequence},
-        {"selected_frame_id", boundary.selected_frame_id},
-        {"selected_depth_change_fraction",
-         boundary.selected_depth_change_fraction},
-        {"selected_raw_rgb_change_fraction",
-         boundary.selected_raw_rgb_change_fraction},
-        {"selected_structural_change_fraction",
-         boundary.selected_structural_change_fraction},
-        {"selected_appearance_qualified",
-         boundary.selected_appearance_qualified},
-        {"selected_geometry_qualified",
-         boundary.selected_geometry_qualified},
-        {"selected_relative_geometry_spike",
-         boundary.selected_relative_geometry_spike},
-      };
-    }
-
-    nlohmann::json scene_evidence_json(const scene_evidence_t &evidence) {
-      return {
-        {"source_frame_count", evidence.source_frame_count},
-        {"depth_update_count", evidence.depth_update_count},
-        {"appearance_veto_count", evidence.appearance_veto_count},
-        {"depth_change_max", evidence.depth_change_max},
-      };
+      return wire::boundary_audit_json(boundary);
     }
 
     nlohmann::json scene_json(const scene_plan_t &scene) {
-      return {
-        {"scene_id", scene.scene_id},
-        {"semantic_scene_id", scene.semantic_scene_id},
-        {"start_sequence", scene.start_sequence},
-        {"end_sequence_exclusive", scene.end_sequence_exclusive},
-        {"frame_count", scene.frame_count},
-        {"cache_bytes", scene.cache_bytes},
-        {"start_pts_seconds", scene.start_pts_seconds},
-        {"end_pts_seconds_exclusive", scene.end_pts_seconds_exclusive},
-        {"evidence", scene_evidence_json(scene.evidence)},
-        {"boundary", boundary_json(scene.boundary)},
-        {"ground_truth", scene.ground_truth},
-        {"cut_state_semantics", scene.cut_state_semantics},
-        {"known_limit", scene.known_limit},
-      };
+      return wire::scene_record_json(scene);
     }
 
     nlohmann::json scene_progress_json(const scene_plan_t &scene) {
@@ -5243,40 +5153,17 @@ namespace offline_sbs {
       const std::uint64_t hard_cap,
       const nlohmann::json &timeline_contract
     ) {
-      nlohmann::json scene_values = nlohmann::json::array();
-      for (const auto &scene : scenes) {
-        scene_values.push_back(scene_json(scene));
-      }
-      nlohmann::json boundary_values = nlohmann::json::array();
-      for (const auto &boundary : boundaries) {
-        boundary_values.push_back(boundary_json(boundary));
-      }
-      return {
-        {"schema", 2},
-        {"version", "whole-clip-scene-audit-v2"},
-        {"status", status},
-        {"claims", {
-                     {"ground_truth", false},
-                     {"best_parameters", false},
-                   }},
-        {"policy", {
-                     {"implementation", "native-offline-scene-planner"},
-                     {"version", "scene-plan-v2"},
-                     {"lookahead", true},
-                     {"boundary_only", true},
-                     {"python_dependency", false},
-                   }},
-        {"cache", {
-                    {"peak_bytes", peak_cache_bytes},
-                    {"analysis_source_raster_bytes", analysis_source_raster_bytes},
-                    {"peak_live_raster_bytes", peak_live_raster_bytes},
-                    {"peak_cache_plus_raster_bytes", peak_cache_plus_raster_bytes},
-                    {"hard_cap_bytes", hard_cap},
-                  }},
-        {"timeline_contract", timeline_contract},
-        {"scenes", std::move(scene_values)},
-        {"boundary_revisions", std::move(boundary_values)},
-      };
+      return wire::to_json(wire::scene_audit_contract_t {
+        .status = std::string {status},
+        .peak_cache_bytes = peak_cache_bytes,
+        .analysis_source_raster_bytes = analysis_source_raster_bytes,
+        .peak_live_raster_bytes = peak_live_raster_bytes,
+        .peak_cache_plus_raster_bytes = peak_cache_plus_raster_bytes,
+        .hard_cap_bytes = hard_cap,
+        .timeline_contract = timeline_contract,
+        .scenes = scenes,
+        .boundary_revisions = boundaries,
+      });
     }
 
     void account_serialized_record(
@@ -5309,7 +5196,7 @@ namespace offline_sbs {
     }
 
     struct render_result_t {
-      nlohmann::json contract;
+      wire::whole_clip_contract_t contract;
       std::uint64_t peak_live_raster_bytes = 0;
       std::uint64_t peak_cache_plus_raster_bytes = 0;
     };
@@ -5453,34 +5340,41 @@ namespace offline_sbs {
       }
 
       const auto contract = read_json(output / "whole_clip_contract.json");
-      if (contract.value("schema", 0) != 1 || contract.value("artifact_mode", "") != "conversion" || contract.value("source_frame_count", 0ull) != scene.frame_count || contract.value("source_first_sequence", 0ull) != scene.start_sequence || contract.value("inference_mode", "") != "scene-cache-replay" || contract.value("depth_inference_enabled", true) || contract.value("scheduled_depth_update_count", 1ull) != 0 || contract.value("tensorrt_enqueue_count", 1ull) != 0) {
+      wire::whole_clip_contract_t typed_contract;
+      try {
+        typed_contract = wire::parse_whole_clip_contract(contract);
+      } catch (const wire::contract_error &exception) {
+        throw worker_error(
+          std::string {"invalid replay whole-clip contract: "} + exception.what()
+        );
+      }
+      if (typed_contract.artifact_mode != "conversion" ||
+          typed_contract.source_frame_count != scene.frame_count ||
+          typed_contract.source_first_sequence != scene.start_sequence ||
+          typed_contract.inference_mode != "scene-cache-replay" ||
+          typed_contract.depth_inference_enabled ||
+          typed_contract.scheduled_depth_update_count != 0 ||
+          typed_contract.tensorrt_enqueue_count != 0) {
         throw worker_error(
           "scene replay did not attest a zero-inference exact cache replay"
         );
       }
+      const auto &adaptive_state = typed_contract.adaptive_state;
       if (
-        !contract.contains("source_scope") ||
-        !offline_full_frame_source_scope_is_valid(contract["source_scope"])
-      ) {
-        throw worker_error(
-          "scene replay did not attest selected-input full-frame isolation"
-        );
-      }
-      const auto &adaptive_state = contract.at("adaptive_state");
-      if (
-        !adaptive_state.is_object() ||
-        adaptive_state.value("transport", "") != "none" ||
-        adaptive_state.value("retained_history", true) ||
-        adaptive_state.value("frame_count", 1ull) != 0ull ||
-        adaptive_state.size() != 3u ||
+        adaptive_state.transport != "none" ||
+        adaptive_state.retained_history ||
+        adaptive_state.frame_count != 0 ||
         contract.contains("cut_state")
       ) {
         throw worker_error(
           "scene replay falsely attributed adaptive-state evidence"
         );
       }
-      const auto &sbs = contract.at("sbs");
-      if (!sbs.value("enabled", false) || sbs.value("frame_count", 0ull) != scene.frame_count || sbs.value("width", 0u) != expected_sbs_width || sbs.value("height", 0u) != expected_sbs_height || sbs.value("file_pattern", "") != "sbs_<frame-id>." + output_extension) {
+      const auto &sbs = typed_contract.sbs;
+      if (!sbs.enabled || sbs.frame_count != scene.frame_count ||
+          sbs.width != expected_sbs_width || sbs.height != expected_sbs_height ||
+          sbs.file_pattern.value_or("") !=
+            "sbs_<frame-id>." + output_extension) {
         throw worker_error("scene replay SBS raster contract mismatch");
       }
 
@@ -5504,7 +5398,7 @@ namespace offline_sbs {
       // released. It retains only compressed encoder state, never a scene of rasters.
       release_cache_scene(cache, scene);
       return {
-        .contract = contract,
+        .contract = std::move(typed_contract),
         .peak_live_raster_bytes = peak_live_raster_bytes,
         .peak_cache_plus_raster_bytes =
           peak_cache_plus_raster_bytes,
@@ -5850,74 +5744,49 @@ namespace offline_sbs {
   }
 
   worker_spec_t parse_worker_spec(const nlohmann::json &value) {
-    if (!value.is_object() || value.value("schema", 0) != 1 || value.value("python_dependency", true)) {
-      throw worker_error("worker specification is not native schema 1");
+    wire::worker_spec_contract_t contract;
+    try {
+      contract = wire::parse_worker_spec_contract(value);
+    } catch (const wire::contract_error &exception) {
+      throw worker_error(exception.what());
     }
     worker_spec_t spec;
-    spec.job_id = required_string(value, "job_id");
+    spec.job_id = contract.job_id;
     if (spec.job_id.size() > 128) {
       throw worker_error("worker job identity is too long");
     }
-    spec.operation = required_string(value, "operation");
-    if (spec.operation != "evaluate" && spec.operation != "convert") {
-      throw worker_error("worker operation must be evaluate or convert");
-    }
-    spec.input_path = required_absolute_path(value, "input_path");
-    spec.job_directory = required_absolute_path(value, "job_directory");
-    spec.result_directory = required_absolute_path(value, "result_directory");
-    spec.progress_path = required_absolute_path(value, "progress_path");
-    spec.result_path = required_absolute_path(value, "result_path");
+    spec.operation = contract.operation;
+    const auto absolute_path = [](const std::string &text, const std::string_view name) {
+      auto path = path_from_utf8(text);
+      if (!path.is_absolute()) {
+        throw worker_error(
+          "worker contract path '" + std::string {name} + "' must be absolute"
+        );
+      }
+      return path.lexically_normal();
+    };
+    spec.input_path = absolute_path(contract.input_path, "input_path");
+    spec.job_directory = absolute_path(contract.job_directory, "job_directory");
+    spec.result_directory = absolute_path(contract.result_directory, "result_directory");
+    spec.progress_path = absolute_path(contract.progress_path, "progress_path");
+    spec.result_path = absolute_path(contract.result_path, "result_path");
     if (!path_is_within(spec.result_directory, spec.job_directory) || !path_is_within(spec.progress_path, spec.job_directory) || !path_is_within(spec.result_path, spec.job_directory)) {
       throw worker_error(
         "worker state/result paths must remain inside the job directory"
       );
     }
-    const auto *staging = object_member(value, "staging_output");
-    if (staging && !staging->is_null()) {
-      if (!staging->is_string()) {
-        throw worker_error("staging_output must be an absolute path or null");
-      }
-      const auto path = path_from_utf8(staging->get<std::string>());
-      if (!path.is_absolute()) {
-        throw worker_error("staging_output must be absolute");
-      }
-      spec.staging_output = path.lexically_normal();
+    if (contract.staging_output) {
+      spec.staging_output = absolute_path(*contract.staging_output, "staging_output");
     }
-    if ((spec.operation == "convert") != spec.staging_output.has_value()) {
-      throw worker_error(
-        "conversion requires staging_output and evaluation forbids it"
-      );
-    }
-    const auto &sunshine = value.at("sunshine");
-    spec.sunshine_executable =
-      required_absolute_path(sunshine, "executable");
-    spec.sunshine_config = required_absolute_path(sunshine, "config");
-    spec.ffmpeg_executable =
-      required_absolute_path(value.at("ffmpeg"), "path");
-    spec.ffprobe_executable =
-      required_absolute_path(value.at("ffprobe"), "path");
-    spec.codec = required_string(value, "codec");
-    if (spec.codec != "hevc_nvenc" && spec.codec != "av1_nvenc") {
-      throw worker_error("worker codec must be hevc_nvenc or av1_nvenc");
-    }
-    const auto &cache = value.at("scene_cache");
-    spec.scene_cache_hard_cap_bytes =
-      cache.at("hard_cap_bytes").get<std::uint64_t>();
-    if (spec.scene_cache_hard_cap_bytes < 16ull * 1024ull * 1024ull) {
-      throw worker_error("scene-cache hard cap is below 16 MiB");
-    }
-    const auto policy = required_string(cache, "budget_policy");
-    if (policy != "fail" && policy != "split") {
-      throw worker_error("scene-cache budget policy is invalid");
-    }
-    spec.allow_administrative_split = policy == "split";
-    const auto &planner = value.at("planner");
-    if (
-      required_string(planner, "implementation") != "native-offline-scene-planner" ||
-      required_string(planner, "scene_plan_contract") != "scene-plan-v2"
-    ) {
-      throw worker_error("worker scene planner contract is unsupported");
-    }
+    spec.sunshine_executable = absolute_path(
+      contract.sunshine_executable, "sunshine.executable"
+    );
+    spec.sunshine_config = absolute_path(contract.sunshine_config, "sunshine.config");
+    spec.ffmpeg_executable = absolute_path(contract.ffmpeg_path, "ffmpeg.path");
+    spec.ffprobe_executable = absolute_path(contract.ffprobe_path, "ffprobe.path");
+    spec.codec = contract.codec;
+    spec.scene_cache_hard_cap_bytes = contract.scene_cache_hard_cap_bytes;
+    spec.allow_administrative_split = contract.scene_cache_budget_policy == "split";
     return spec;
   }
 
@@ -5938,7 +5807,7 @@ namespace offline_sbs {
       );
     }
     try {
-      auto spec = parse_worker_spec(parse_json_without_duplicate_keys(bytes));
+      auto spec = parse_worker_spec(wire::parse_json_without_duplicate_keys(bytes));
       spec.authenticated_spec_sha256 = actual_sha256;
       return spec;
     } catch (const worker_error &) {
@@ -7447,7 +7316,7 @@ namespace offline_sbs {
       std::uint32_t sbs_width = 0;
       std::uint32_t sbs_height = 0;
       std::vector<scene_plan_t> scenes;
-      std::vector<nlohmann::json> replay_contracts;
+      std::vector<wire::replay_result_contract_t> replay_contracts;
       std::unique_ptr<whole_clip_encoder_t> conversion_encoder;
       std::unique_ptr<scene_planner_t> planner;
       nlohmann::json trace_header;
@@ -7516,7 +7385,7 @@ namespace offline_sbs {
         }
         while (accounted_replay_count < replay_contracts.size()) {
           account_serialized_record(
-            replay_contracts[accounted_replay_count++],
+            wire::to_json(replay_contracts[accounted_replay_count++]),
             worker_result_payload_bytes,
             worker_result_max_bytes,
             "worker result"
@@ -7606,21 +7475,15 @@ namespace offline_sbs {
               rendered.peak_cache_plus_raster_bytes
             );
             replay_contracts.push_back({
-              {"scene_id", scene.scene_id},
-              {"start_sequence", scene.start_sequence},
-              {"end_sequence_exclusive", scene.end_sequence_exclusive},
-              {"inference_mode",
-               rendered.contract.value("inference_mode", "")},
-              {"depth_inference_enabled",
-               rendered.contract.value("depth_inference_enabled", true)},
-              {"scheduled_depth_update_count",
-               rendered.contract.value(
-                 "scheduled_depth_update_count",
-                 1ull
-               )},
-              {"tensorrt_enqueue_count",
-               rendered.contract.value("tensorrt_enqueue_count", 1ull)},
-              {"sbs", rendered.contract.at("sbs")},
+              .scene_id = scene.scene_id,
+              .start_sequence = scene.start_sequence,
+              .end_sequence_exclusive = scene.end_sequence_exclusive,
+              .inference_mode = rendered.contract.inference_mode,
+              .depth_inference_enabled = rendered.contract.depth_inference_enabled,
+              .scheduled_depth_update_count =
+                rendered.contract.scheduled_depth_update_count,
+              .tensorrt_enqueue_count = rendered.contract.tensorrt_enqueue_count,
+              .sbs = rendered.contract.sbs,
             });
             account_contract_records();
             if (scene.cache_bytes > live_cache_bytes) {
@@ -7816,28 +7679,32 @@ namespace offline_sbs {
       }
       const auto analysis_contract =
         read_json(analysis_output / "whole_clip_contract.json");
-      if (analysis_contract.value("schema", 0) != 1 || analysis_contract.value("artifact_mode", "") != "adaptive" || analysis_contract.value("source_frame_count", 0ull) != media.frames.size() || analysis_contract.value("source_first_sequence", 0ull) != 1 || analysis_contract.value("inference_mode", "") != "single-pass-tensorrt" || !analysis_contract.value("depth_inference_enabled", false) || analysis_contract.value("scheduled_depth_update_count", 0ull) != media.frames.size() || analysis_contract.value("tensorrt_enqueue_count", 0ull) != media.frames.size()) {
+      wire::whole_clip_contract_t typed_analysis_contract;
+      try {
+        typed_analysis_contract =
+          wire::parse_whole_clip_contract(analysis_contract);
+      } catch (const wire::contract_error &exception) {
+        throw worker_error(
+          std::string {"invalid analysis whole-clip contract: "} + exception.what()
+        );
+      }
+      if (typed_analysis_contract.artifact_mode != "adaptive" ||
+          typed_analysis_contract.source_frame_count != media.frames.size() ||
+          typed_analysis_contract.source_first_sequence != 1 ||
+          typed_analysis_contract.inference_mode != "single-pass-tensorrt" ||
+          !typed_analysis_contract.depth_inference_enabled ||
+          typed_analysis_contract.scheduled_depth_update_count != media.frames.size() ||
+          typed_analysis_contract.tensorrt_enqueue_count != media.frames.size()) {
         throw worker_error(
           "analysis did not attest exactly one TensorRT enqueue per source frame"
         );
       }
-      if (
-        !analysis_contract.contains("source_scope") ||
-        !offline_full_frame_source_scope_is_valid(
-          analysis_contract["source_scope"]
-        )
-      ) {
-        throw worker_error(
-          "analysis did not attest selected-input full-frame isolation"
-        );
-      }
       // Offline conversion runs the production V2 pipeline: the harness must attest the
       // depth-coordinate V2 live signed-parallax render, not cached scene geometry.
-      const auto &analysis_runtime = analysis_contract.at("resolved_runtime");
+      const auto &analysis_runtime = typed_analysis_contract.resolved_runtime;
       if (
-        !analysis_runtime.is_object() ||
-        !analysis_runtime.value("parallax_v2_render", false) ||
-        !analysis_runtime.value("parallax_v2_live", false)
+        !analysis_runtime.parallax_v2_render ||
+        !analysis_runtime.parallax_v2_live
       ) {
         throw worker_error(
           "analysis did not attest the depth-coordinate V2 live signed-parallax render"
@@ -7846,32 +7713,28 @@ namespace offline_sbs {
       const auto &trace_config = trace_header.at("config");
       if (
         !trace_config.is_object() ||
-        trace_config.value("model", "") != analysis_runtime.value("model", "") ||
-        trace_config.value("model", "") != analysis_contract.value("model", "") ||
+        trace_config.value("model", "") != analysis_runtime.model ||
+        trace_config.value("model", "") != typed_analysis_contract.model ||
         trace_config.value(
           "depth_reuse_interval", 0
-        ) != analysis_runtime.value("depth_reuse_interval", 0) ||
+        ) != analysis_runtime.depth_reuse_interval ||
         trace_config.value(
           "pop_strength", std::numeric_limits<double>::quiet_NaN()
-        ) != analysis_runtime.value(
-          "pop_strength", std::numeric_limits<double>::infinity()
-        )
+        ) != analysis_runtime.pop_strength
       ) {
         throw worker_error(
           "adaptive trace config disagrees with the authenticated analysis runtime"
         );
       }
-      const auto &analysis_state = analysis_contract.at("adaptive_state");
+      const auto &analysis_state = typed_analysis_contract.adaptive_state;
       if (
-        !analysis_state.is_object() ||
-        analysis_state.size() != 7u ||
-        analysis_state.value("transport", "") != "atomic-latest-v1" ||
-        analysis_state.value("header_file", "") != "adaptive_state_header.json" ||
-        analysis_state.value("frame_file", "") != "adaptive_state_frame.json" ||
-        analysis_state.value("retained_history", true) ||
-        analysis_state.value("schema", 0u) != sbs_adaptive_state::schema_version ||
-        analysis_state.value("capture", "") != sbs_adaptive_state::capture ||
-        analysis_state.value("frame_count", 0ull) != media.frames.size() ||
+        analysis_state.transport != "atomic-latest-v1" ||
+        analysis_state.header_file.value_or("") != "adaptive_state_header.json" ||
+        analysis_state.frame_file.value_or("") != "adaptive_state_frame.json" ||
+        analysis_state.retained_history ||
+        analysis_state.schema.value_or(0) != sbs_adaptive_state::schema_version ||
+        analysis_state.capture.value_or("") != sbs_adaptive_state::capture ||
+        analysis_state.frame_count != media.frames.size() ||
         analysis_contract.contains("cut_state")
       ) {
         throw worker_error(
@@ -8025,46 +7888,43 @@ namespace offline_sbs {
       const auto staging_identity = staging_claim ?
                                       staging_claim->identity_json() :
                                       nlohmann::json(nullptr);
-      nlohmann::json result {
-        {"schema", 1},
-        {"job_id", spec.job_id},
-        {"status", "complete"},
-        {"operation", spec.operation},
-        {"codec", spec.codec},
-        {"worker_spec_sha256", spec.authenticated_spec_sha256},
-        {"python_dependency", false},
-        {"source", {
-                     {"width", media.width},
-                     {"height", media.height},
-                     {"frame_count", media.frames.size()},
-                     {"duration_seconds", media.duration_seconds()},
-                     {"variable_frame_rate", media.variable_frame_rate()},
-                     {"color_mode", media.color == media_color_e::sdr ? "sdr" : (media.color == media_color_e::hdr_pq ? "hdr-pq" : "hdr-hlg")},
-                     {"contract", path_utf8(spec.result_directory / "source-contract.json")},
-                   }},
-        {"scene_count", scenes.size()},
-        {"scenes", [&] {
-           nlohmann::json values = nlohmann::json::array();
-           for (const auto &scene : scenes) {
-             values.push_back(scene_json(scene));
-           }
-           return values;
-         }()},
-        {"scene_audit", path_utf8(spec.result_directory / "scene-audit.json")},
-        {"analysis_contract", analysis_contract},
-        {"replay_contracts", replay_contracts},
-        {"cache", {
-                    {"hard_cap_bytes", spec.scene_cache_hard_cap_bytes},
-                    {"peak_bytes", peak_cache_bytes},
-                    {"analysis_source_raster_bytes", analysis_source_raster_bytes.value_or(0)},
-                    {"peak_live_raster_bytes", peak_live_raster_bytes},
-                    {"peak_cache_plus_raster_bytes", peak_cache_plus_raster_bytes},
-                    {"remaining_bytes", live_cache_bytes},
-                  }},
-        {"timeline_contract", timeline_contract},
-        {"staging_identity", std::move(staging_identity)},
-        {"output", spec.staging_output ? nlohmann::json(path_utf8(*spec.staging_output)) : nlohmann::json(nullptr)},
+      wire::worker_result_contract_t result_contract {
+        .job_id = spec.job_id,
+        .operation = spec.operation,
+        .codec = spec.codec,
+        .worker_spec_sha256 = spec.authenticated_spec_sha256,
+        .source = {
+          .width = media.width,
+          .height = media.height,
+          .frame_count = media.frames.size(),
+          .duration_seconds = media.duration_seconds(),
+          .variable_frame_rate = media.variable_frame_rate(),
+          .color_mode = media.color == media_color_e::sdr ?
+                          "sdr" :
+                          (media.color == media_color_e::hdr_pq ? "hdr-pq" : "hdr-hlg"),
+          .contract_path = path_utf8(spec.result_directory / "source-contract.json"),
+        },
+        .scene_audit_path = path_utf8(spec.result_directory / "scene-audit.json"),
+        .analysis_contract = typed_analysis_contract,
+        .replay_contracts = replay_contracts,
+        .cache = {
+          .hard_cap_bytes = spec.scene_cache_hard_cap_bytes,
+          .peak_bytes = peak_cache_bytes,
+          .analysis_source_raster_bytes = analysis_source_raster_bytes.value_or(0),
+          .peak_live_raster_bytes = peak_live_raster_bytes,
+          .peak_cache_plus_raster_bytes = peak_cache_plus_raster_bytes,
+          .remaining_bytes = live_cache_bytes,
+        },
+        .timeline_contract = timeline_contract,
+        .staging_identity = staging_identity.is_null() ?
+                              std::nullopt :
+                              std::optional<nlohmann::json> {staging_identity},
+        .output_path = spec.staging_output ?
+                         std::optional<std::string> {path_utf8(*spec.staging_output)} :
+                         std::nullopt,
       };
+      result_contract.scenes = scenes;
+      const auto result = wire::to_json(result_contract);
       write_json_atomic_bounded(
         spec.result_path,
         result,

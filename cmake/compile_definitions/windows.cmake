@@ -58,6 +58,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_wgc.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/foreground_window_region.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/foreground_window_region.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/host_sbs_v2_renderer.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/host_sbs_v2_renderer.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/video_dom_client.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/video_dom_client.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/sbs_debug_dump.h"

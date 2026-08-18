@@ -81,6 +81,10 @@ def discover_clips(roots):
                 continue
             with open(meta_path, encoding="utf-8") as stream:
                 meta = json.load(stream)
+            if "required_gt_stereo" in meta:
+                raise ValueError(
+                    f"unauthenticated clip {clip_dir}: required_gt_stereo is retired; "
+                    "use reference_stereo_available")
             if not meta.get("name"):
                 raise ValueError(f"unauthenticated clip {clip_dir}: missing name metadata")
             if "required_gt_subtitle_region" in meta and not isinstance(
@@ -157,18 +161,6 @@ def discover_clips(roots):
                             f"{directory}/source frame-id mismatch: missing={missing}, "
                             f"extra={extra}")
             if meta.get("suite"):
-                if "required_gt_stereo" in meta:
-                    retired = meta.pop("required_gt_stereo")
-                    if not isinstance(retired, bool):
-                        raise ValueError(
-                            f"unauthenticated extended clip {clip_dir}: retired "
-                            "required_gt_stereo must be boolean")
-                    if ("reference_stereo_available" in meta and
-                            meta["reference_stereo_available"] != retired):
-                        raise ValueError(
-                            f"unauthenticated extended clip {clip_dir}: conflicting "
-                            "retired/current stereo reference declarations")
-                    meta["reference_stereo_available"] = retired
                 required = ("dataset", "citation", "license_note")
                 missing = [key for key in required if not meta.get(key)]
                 evidence_keys = (

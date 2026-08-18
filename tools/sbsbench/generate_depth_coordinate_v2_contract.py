@@ -13,6 +13,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+try:
+    from . import generate_host_sbs_shader_manifest as shader_manifest_generator
+except ImportError:  # Direct script/module loading from tools/sbsbench.
+    import generate_host_sbs_shader_manifest as shader_manifest_generator  # type: ignore
+
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = (
@@ -28,7 +33,6 @@ HLSL_OCR_ASSERT_TARGET = (
     ROOT / "src_assets" / "windows" / "assets" / "shaders" / "directx" /
     "include" / "depth_coordinate_v2_ocr_assert.generated.hlsl"
 )
-HOST_SBS_SHADER_CACHE_HEADER = ROOT / "src" / "host_sbs_shader_cache.h"
 LIMITER_GROUP_THREADS = 32
 LIMITER_Q_FRACTION_BITS = 30
 LIMITER_Q_SCALE = 1 << LIMITER_Q_FRACTION_BITS
@@ -236,58 +240,16 @@ EXPECTED_SHADOW_STATE_FIELD_NAMES = (
     "mapping_state_reserved_2",
 )
 CONTRACT_TAG_SENTINEL = "contract_tag"
-PREPROCESS_SHADER_ROOT = (
-    ROOT / "src_assets" / "windows" / "assets" / "shaders" / "directx")
-PREPROCESS_SHADER_SPECS = (
-    ("rgb_to_nchw_near_identical_cs.hlsl", "fused_main", "cs_5_0"),
-)
-PARALLAX_V2_SHADER_SPECS = (
-    ("rgb_to_nchw_near_identical_cs.hlsl", "fused_main", "cs_5_0"),
-    ("buffer_to_tex_cs.hlsl", "main", "cs_5_0"),
-    ("buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"),
-    ("depth_minmax_ema_cs.hlsl", "main", "cs_5_0"),
-    ("depth_hist_cs.hlsl", "main", "cs_5_0"),
-    ("depth_scene_cut_evidence_cs.hlsl", "main", "cs_5_0"),
-    ("depth_scene_cut_resolve_cs.hlsl", "main", "cs_5_0"),
-    ("depth_coordinate_v2_moments_cs.hlsl", "main", "cs_5_0"),
-    ("depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"),
-    ("depth_coordinate_v2_state_resolve_cs.hlsl", "main", "cs_5_0"),
-    ("depth_coordinate_v2_map_cs.hlsl", "main", "cs_5_0"),
-    ("depth_coordinate_v2_ownership_cs.hlsl", "main", "cs_5_0"),
-    ("depth_coordinate_v2_vertical_limit_cs.hlsl", "main", "cs_5_0"),
-    ("depth_coordinate_v2_limit_cs.hlsl", "main", "cs_5_0"),
-    ("host_sbs_ocr_preprocess_cs.hlsl", "main", "cs_5_0"),
-    ("host_sbs_ocr_boxes_cs.hlsl", "cells_main", "cs_5_0"),
-    ("host_sbs_ocr_boxes_cs.hlsl", "resolve_main", "cs_5_0"),
-    ("host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"),
-    ("host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"),
-)
-PARALLAX_V2_LIVE_RENDERER_SHADER_SPECS = (
-    ("sbs_reprojection_v2_live_ps.hlsl", "main_ps", "ps_5_0"),
-    ("sbs_reprojection_vs.hlsl", "main_vs", "vs_5_0"),
-)
-PARALLAX_V2_P010_Y_SHADER_SPECS = (
-    ("sbs_reprojection_v2_p010_y_ps.hlsl", "main_p010_y_ps", "ps_5_0"),
-)
-PARALLAX_V2_DIAGNOSTIC_SHADER_SPECS = (
-    ("sbs_reprojection_v2_diagnostics_ps.hlsl", "mapping_ps", "ps_5_0"),
-    ("sbs_reprojection_v2_diagnostics_ps.hlsl", "mask_ps", "ps_5_0"),
-)
-RENDERER_SOURCE_CLOSURE_PINS = (
-    ("parallax_v2_live_renderer_source_closure_sha256",
-     PARALLAX_V2_LIVE_RENDERER_SHADER_SPECS, "live renderer"),
-    ("parallax_v2_p010_y_source_closure_sha256",
-     PARALLAX_V2_P010_Y_SHADER_SPECS, "optional P010 luma renderer"),
-    ("parallax_v2_diagnostic_source_closure_sha256",
-     PARALLAX_V2_DIAGNOSTIC_SHADER_SPECS, "diagnostic renderer"),
-)
-SOURCE_CLOSURE_DOMAIN = b"apollo-host-sbs-source-closure-v2\n"
-SHADER_COMPILE_FLAGS = 0x00008800
-SOURCE_CLOSURE_SCHEMA = 2
+SHADER_MANIFEST = shader_manifest_generator.load_manifest()
+PREPROCESS_SHADER_ROOT = shader_manifest_generator.SHADER_ROOT
+PREPROCESS_SHADER_SPECS = shader_manifest_generator.group_specs(
+    SHADER_MANIFEST, "preprocess")
+PARALLAX_V2_SHADER_SPECS = shader_manifest_generator.group_specs(
+    SHADER_MANIFEST, "parallax_v2_producer")
+SHADER_COMPILE_FLAGS = SHADER_MANIFEST["shader_compile_flags"]
+SOURCE_CLOSURE_SCHEMA = SHADER_MANIFEST["source_closure_schema"]
 ALGORITHM_TAG_SHADER_DIGEST_SENTINEL = (
     "shader-source-closure-sha256-authenticated-separately-v1")
-ANY_INCLUDE = re.compile(rb"^\s*#\s*include\b")
-QUOTED_INCLUDE = re.compile(rb'^\s*#\s*include\s*"([^"]+)"')
 
 
 def _identifier(value: str) -> str:
@@ -301,110 +263,26 @@ def _upper_identifier(value: str) -> str:
     return _identifier(value).upper()
 
 
-def _append_length_prefixed(output: bytearray, value: bytes) -> None:
-    output.extend(len(value).to_bytes(8, "little"))
-    output.extend(value)
-
-
-def shader_source_closure_sha256(
-        root: Path = PREPROCESS_SHADER_ROOT,
-        specs: tuple[tuple[str, str, str], ...] = PREPROCESS_SHADER_SPECS) -> str:
-    """Hash root specs plus the exact reachable quoted-include source closure."""
-
-    canonical_root = root.resolve(strict=True)
-    sources: dict[str, bytes] = {}
-    include_edges: dict[tuple[str, str], str] = {}
-    visited: set[Path] = set()
-
-    def collect(requested: Path) -> None:
-        path = requested.resolve(strict=True)
-        try:
-            relative = path.relative_to(canonical_root).as_posix()
-        except ValueError as exc:
-            raise ValueError(f"shader dependency escapes source root: {path}") from exc
-        if path in visited:
-            return
-        visited.add(path)
-        source = path.read_bytes()
-        sources[relative] = source
-        normalized_for_scan = source.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-        for line in normalized_for_scan.split(b"\n"):
-            match = QUOTED_INCLUDE.search(line)
-            if match is None:
-                if ANY_INCLUDE.search(line) is not None:
-                    raise ValueError(
-                        f"shader uses an unauthenticated non-quoted include: {relative}")
-                continue
-            include = Path(match.group(1).decode("utf-8"))
-            candidate = path.parent / include
-            if not candidate.exists():
-                candidate = canonical_root / include
-            resolved = candidate.resolve(strict=True)
-            try:
-                child = resolved.relative_to(canonical_root).as_posix()
-            except ValueError as exc:
-                raise ValueError(f"shader dependency escapes source root: {resolved}") from exc
-            edge = (relative, match.group(1).decode("utf-8"))
-            previous = include_edges.setdefault(edge, child)
-            if previous != child:
-                raise ValueError(f"shader include edge is ambiguous: {edge!r}")
-            collect(resolved)
-
-    for filename, entrypoint, target in specs:
-        if not filename or not entrypoint or not target:
-            raise ValueError("shader source closure specs must be non-empty")
-        collect(canonical_root / filename)
-
-    canonical = bytearray(SOURCE_CLOSURE_DOMAIN)
-    canonical.extend(b"C")
-    canonical.extend(SHADER_COMPILE_FLAGS.to_bytes(8, "little"))
-    _append_length_prefixed(canonical, b"macros:none")
-    for spec in specs:
-        canonical.extend(b"S")
-        for value in spec:
-            _append_length_prefixed(canonical, value.encode("utf-8"))
-    for (parent, include), child in sorted(include_edges.items()):
-        canonical.extend(b"I")
-        _append_length_prefixed(canonical, parent.encode("utf-8"))
-        _append_length_prefixed(canonical, include.encode("utf-8"))
-        _append_length_prefixed(canonical, child.encode("utf-8"))
-    for path in sorted(sources):
-        canonical.extend(b"F")
-        _append_length_prefixed(canonical, path.encode("utf-8"))
-        normalized = sources[path].replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-        _append_length_prefixed(canonical, normalized)
-    return hashlib.sha256(canonical).hexdigest()
+shader_source_closure_sha256 = shader_manifest_generator.shader_source_closure_sha256
 
 
 def validate_renderer_source_closure_pins(
-        shader_root: Path = PREPROCESS_SHADER_ROOT,
-        pin_header: Path = HOST_SBS_SHADER_CACHE_HEADER) -> dict[str, str]:
-    """Require native renderer pins to match their exact reachable shader closures.
+        shader_root: Path = PREPROCESS_SHADER_ROOT) -> dict[str, str]:
+    """Validate and expose the renderer projection from the named closure manifest."""
 
-    Both renderer closures reach the generated Depth Coordinate V2 HLSL include. Running the
-    contract generator therefore also proves that regenerating that include did not leave either
-    independently authenticated renderer pin stale.
-    """
-
-    try:
-        header = pin_header.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ValueError(f"cannot read renderer closure pin header: {pin_header}") from exc
-    validated: dict[str, str] = {}
-    for name, specs, label in RENDERER_SOURCE_CLOSURE_PINS:
-        matches = re.findall(
-            rf"\b{re.escape(name)}\s*=\s*\"([0-9a-f]{{64}})\";",
-            header,
-        )
-        if len(matches) != 1:
-            raise ValueError(f"{label} source closure pin must appear exactly once")
-        expected = shader_source_closure_sha256(shader_root, specs)
-        if matches[0] != expected:
-            raise ValueError(
-                f"{label} source closure pin is stale: expected {expected}, "
-                f"found {matches[0]}")
-        validated[name] = expected
-    return validated
+    shader_manifest_generator.validate_group_pins(SHADER_MANIFEST, shader_root)
+    groups = {
+        group["name"]: group["source_closure_sha256"]
+        for group in SHADER_MANIFEST["groups"]
+    }
+    return {
+        "parallax_v2_live_renderer_source_closure_sha256":
+            groups["parallax_v2_live_renderer"],
+        "parallax_v2_p010_y_source_closure_sha256":
+            groups["parallax_v2_p010_y"],
+        "parallax_v2_diagnostic_source_closure_sha256":
+            groups["parallax_v2_live_diagnostic"],
+    }
 
 
 def canonical_bytes(contract: dict[str, Any]) -> bytes:
@@ -523,11 +401,11 @@ def validate_contract(
     if (not isinstance(shader_digest, str) or
             re.fullmatch(r"[0-9a-f]{64}", shader_digest) is None):
         raise ValueError("shader_implementation.source_closure_sha256 must be lowercase SHA-256")
-    if (verify_shader_source_closure and
-            shader_digest != shader_source_closure_sha256(
-                specs=PARALLAX_V2_SHADER_SPECS)):
+    producer_closure_pin = shader_manifest_generator.closure_group(
+        SHADER_MANIFEST, "parallax_v2_producer")["source_closure_sha256"]
+    if verify_shader_source_closure and shader_digest != producer_closure_pin:
         raise ValueError(
-            "shader_implementation.source_closure_sha256 is stale for the selected V2 shaders")
+            "shader_implementation.source_closure_sha256 is not the generated producer view")
 
     calibrated_defaults = contract.get("calibrated_defaults")
     if not isinstance(calibrated_defaults, dict) or set(calibrated_defaults) != EXPECTED_DEFAULT_KEYS:
@@ -618,10 +496,12 @@ def validate_contract(
                for name, value in expected_source_identity.items()):
             raise ValueError(
                 f"{prefix}.preprocess shader source identity is unsupported")
+        preprocess_closure_pin = shader_manifest_generator.closure_group(
+            SHADER_MANIFEST, "preprocess")["source_closure_sha256"]
         if (verify_preprocess_source_closure and
-                source_closure_sha256 != shader_source_closure_sha256()):
+                source_closure_sha256 != preprocess_closure_pin):
             raise ValueError(
-                f"{prefix}.preprocess.source_closure_sha256 is stale for the runtime shader")
+                f"{prefix}.preprocess.source_closure_sha256 is not the generated preprocess view")
         if (preprocess.get("model_input_schema") != 1 or
                 preprocess.get("dtype") != "float32-le" or
                 preprocess.get("layout") != "NCHW" or
@@ -818,6 +698,8 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "// Generated by tools/sbsbench/generate_depth_coordinate_v2_contract.py.",
         "// Edit tools/sbsbench/contracts/depth-coordinate-v2-v1.json instead.",
         "#pragma once",
+        "",
+        "#include \"host_sbs_shader_manifest.h\"",
         "",
         "#include <array>",
         "#include <bit>",
@@ -1078,38 +960,20 @@ def render_cpp(contract: dict[str, Any]) -> str:
         "  static_assert(subtitle_target_horizontal_fallback_max_radius_steps == 2u);",
         "  static_assert(subtitle_target_horizontal_step_denominator == 16u);",
         "  static_assert(subtitle_condition_param_word_count == 6u);",
-        f"  inline constexpr std::uint32_t shader_source_closure_schema = "
-        f"{shader_implementation['source_closure_schema']}u;",
-        f"  inline constexpr std::uint32_t shader_source_compile_flags = "
-        f"{shader_implementation['source_compile_flags']}u;",
-        f"  inline constexpr std::uint32_t shader_source_macro_count = "
-        f"{shader_implementation['source_macro_count']}u;",
-        f"  inline constexpr std::string_view shader_source_closure_sha256 = "
-        f"{json.dumps(shader_implementation['source_closure_sha256'])};",
+        "  inline constexpr std::uint32_t shader_source_closure_schema =",
+        "    host_sbs_shader_cache::source_closure_schema;",
+        "  inline constexpr std::uint32_t shader_source_compile_flags =",
+        "    host_sbs_shader_cache::shader_compile_flags;",
+        "  inline constexpr std::uint32_t shader_source_macro_count =",
+        "    host_sbs_shader_cache::source_macro_count;",
+        "  inline constexpr std::string_view shader_source_closure_sha256 =",
+        "    host_sbs_shader_cache::parallax_v2_producer_source_closure_sha256;",
+        "",
+        "  using shader_source_spec_t = host_sbs_shader_cache::shader_spec;",
+        "  inline constexpr auto &shader_source_specs =",
+        "    host_sbs_shader_cache::parallax_v2_producer_specs;",
         "",
     ]
-    lines.extend([
-        "  struct shader_source_spec_t {",
-        "    std::string_view source_file;",
-        "    std::string_view source_entrypoint;",
-        "    std::string_view source_target;",
-        "  };",
-        "",
-        f"  inline constexpr std::array<shader_source_spec_t, "
-        f"{len(shader_implementation['source_specs'])}> shader_source_specs {{{{",
-    ])
-    lines.extend(
-        "    {%s, %s, %s}," % (
-            json.dumps(spec["source_file"]),
-            json.dumps(spec["source_entrypoint"]),
-            json.dumps(spec["source_target"]),
-        )
-        for spec in shader_implementation["source_specs"]
-    )
-    lines.extend([
-        "  }};",
-        "",
-    ])
     lines.extend(
         f"  inline constexpr float {_identifier(name)} = {_float_literal(defaults[name])};"
         for name in EXPECTED_DEFAULT_NAMES
@@ -1914,35 +1778,48 @@ def main(argv: list[str] | None = None) -> int:
     if args.check and args.refresh_shader_identity:
         parser.error("--check and --refresh-shader-identity are mutually exclusive")
     if args.refresh_shader_identity:
+        # First discard any hand-edited shader projection. The named closure manifest owns every
+        # ordered root and pin; the DVC JSON stores only its generated semantic projection. Do not
+        # validate the old pins yet: this is the command used precisely after a shader edit makes
+        # one or more of them stale.
+        shader_manifest = shader_manifest_generator.load_manifest()
+        try:
+            projected = shader_manifest_generator.render_dvc_manifest(
+                shader_manifest, args.manifest.read_text(encoding="utf-8")
+            )
+        except OSError as exc:
+            raise RuntimeError(
+                f"could not read the DVC manifest for shader projection: {exc}"
+            ) from exc
+        args.manifest.write_text(projected, encoding="utf-8", newline="\n")
         contract = load_contract(
             args.manifest,
             verify_shader_source_closure=False,
             verify_preprocess_source_closure=False,
         )
-        preprocess_digest = shader_source_closure_sha256()
-        for calibration in contract["model_calibrations"]:
-            calibration["preprocess"]["source_closure_sha256"] = preprocess_digest
         # The GPU tag deliberately excludes only the shader-body digest, so this first HLSL
-        # generation is final. Hash the complete preprocessing, overlay, cut/history, and
-        # coordinate-producer closure, record that independent
-        # identity, and render again; the second HLSL must be byte-identical by construction.
+        # generation is final. Refresh every named closure against that exact generated include;
+        # the manifest generator then reprojects producer/preprocess identity into DVC.
         first_hlsl = render_hlsl(contract)
         first_ocr_assertions = render_hlsl_ocr_assertions()
         _write_or_check(HLSL_TARGET, first_hlsl, False)
         _write_or_check(HLSL_OCR_ASSERT_TARGET, first_ocr_assertions, False)
-        contract["shader_implementation"]["source_closure_sha256"] = (
-            shader_source_closure_sha256(specs=PARALLAX_V2_SHADER_SPECS))
-        contract = validate_contract(contract)
+        if not shader_manifest_generator.generate(False, True):
+            raise RuntimeError("could not refresh the named Host SBS shader closures")
+        if args.manifest != shader_manifest_generator.DVC_MANIFEST:
+            refreshed_manifest = shader_manifest_generator.load_manifest()
+            refreshed_projection = shader_manifest_generator.render_dvc_manifest(
+                refreshed_manifest, args.manifest.read_text(encoding="utf-8")
+            )
+            args.manifest.write_text(
+                refreshed_projection, encoding="utf-8", newline="\n"
+            )
+        contract = load_contract(args.manifest)
         second_hlsl = render_hlsl(contract)
         second_ocr_assertions = render_hlsl_ocr_assertions()
         if (second_hlsl != first_hlsl or
                 second_ocr_assertions != first_ocr_assertions):
             raise RuntimeError("shader identity refresh is not idempotent")
-        args.manifest.write_text(
-            json.dumps(contract, indent=2, ensure_ascii=True) + "\n",
-            encoding="utf-8",
-            newline="\n",
-        )
     else:
         contract = load_contract(args.manifest)
     valid = _write_or_check(CPP_TARGET, render_cpp(contract), args.check)

@@ -919,17 +919,9 @@ def load_clip_metadata(path, suite=None, required=True):
         raise ValueError(f"invalid clip metadata {meta_path}: root must be an object")
 
     if "required_gt_stereo" in meta:
-        if not isinstance(meta["required_gt_stereo"], bool):
-            raise ValueError(
-                f"invalid clip metadata {meta_path}: retired required_gt_stereo must be boolean")
-        if ("reference_stereo_available" in meta and
-                meta["reference_stereo_available"] != meta["required_gt_stereo"]):
-            raise ValueError(
-                f"invalid clip metadata {meta_path}: conflicting retired/current stereo "
-                "reference declarations")
-        # Existing external prepared caches are immutable inputs. Migrate the retired spelling in
-        # memory, but never publish or interpret it as consumed ground-truth evidence.
-        meta["reference_stereo_available"] = meta.pop("required_gt_stereo")
+        raise ValueError(
+            f"invalid clip metadata {meta_path}: required_gt_stereo is retired; "
+            "use reference_stereo_available")
     requirement_keys = (
         "required_gt_depth", "required_gt_flow", "required_gt_subtitle_region",
         "required_gt_subtitle_tight_mask")

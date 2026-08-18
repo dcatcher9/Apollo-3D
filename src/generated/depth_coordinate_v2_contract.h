@@ -2,6 +2,8 @@
 // Edit tools/sbsbench/contracts/depth-coordinate-v2-v1.json instead.
 #pragma once
 
+#include "host_sbs_shader_manifest.h"
+
 #include <array>
 #include <bit>
 #include <cstddef>
@@ -176,38 +178,18 @@ namespace models::depth_coordinate_v2 {
   static_assert(subtitle_target_horizontal_fallback_max_radius_steps == 2u);
   static_assert(subtitle_target_horizontal_step_denominator == 16u);
   static_assert(subtitle_condition_param_word_count == 6u);
-  inline constexpr std::uint32_t shader_source_closure_schema = 2u;
-  inline constexpr std::uint32_t shader_source_compile_flags = 34816u;
-  inline constexpr std::uint32_t shader_source_macro_count = 0u;
-  inline constexpr std::string_view shader_source_closure_sha256 = "11bde7ba05ca8ae8404b8fe21a3afd600ff98549fea248dacb5bf1b5d2156d6b";
+  inline constexpr std::uint32_t shader_source_closure_schema =
+    host_sbs_shader_cache::source_closure_schema;
+  inline constexpr std::uint32_t shader_source_compile_flags =
+    host_sbs_shader_cache::shader_compile_flags;
+  inline constexpr std::uint32_t shader_source_macro_count =
+    host_sbs_shader_cache::source_macro_count;
+  inline constexpr std::string_view shader_source_closure_sha256 =
+    host_sbs_shader_cache::parallax_v2_producer_source_closure_sha256;
 
-  struct shader_source_spec_t {
-    std::string_view source_file;
-    std::string_view source_entrypoint;
-    std::string_view source_target;
-  };
-
-  inline constexpr std::array<shader_source_spec_t, 19> shader_source_specs {{
-    {"rgb_to_nchw_near_identical_cs.hlsl", "fused_main", "cs_5_0"},
-    {"buffer_to_tex_cs.hlsl", "main", "cs_5_0"},
-    {"buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"},
-    {"depth_minmax_ema_cs.hlsl", "main", "cs_5_0"},
-    {"depth_hist_cs.hlsl", "main", "cs_5_0"},
-    {"depth_scene_cut_evidence_cs.hlsl", "main", "cs_5_0"},
-    {"depth_scene_cut_resolve_cs.hlsl", "main", "cs_5_0"},
-    {"depth_coordinate_v2_moments_cs.hlsl", "main", "cs_5_0"},
-    {"depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"},
-    {"depth_coordinate_v2_state_resolve_cs.hlsl", "main", "cs_5_0"},
-    {"depth_coordinate_v2_map_cs.hlsl", "main", "cs_5_0"},
-    {"depth_coordinate_v2_ownership_cs.hlsl", "main", "cs_5_0"},
-    {"depth_coordinate_v2_vertical_limit_cs.hlsl", "main", "cs_5_0"},
-    {"depth_coordinate_v2_limit_cs.hlsl", "main", "cs_5_0"},
-    {"host_sbs_ocr_preprocess_cs.hlsl", "main", "cs_5_0"},
-    {"host_sbs_ocr_boxes_cs.hlsl", "cells_main", "cs_5_0"},
-    {"host_sbs_ocr_boxes_cs.hlsl", "resolve_main", "cs_5_0"},
-    {"host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"},
-    {"host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"},
-  }};
+  using shader_source_spec_t = host_sbs_shader_cache::shader_spec;
+  inline constexpr auto &shader_source_specs =
+    host_sbs_shader_cache::parallax_v2_producer_specs;
 
   inline constexpr float collapse_abs_epsilon = 1e-06f;
   inline constexpr float far_tau = 0.75f;

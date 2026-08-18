@@ -1597,7 +1597,6 @@ namespace platf::sbs_debug {
       texture_snapshot depth_input_source;
       std::vector<float> model_input;
       std::vector<float> raw_depth;
-      texture_snapshot warp_depth;
       texture_snapshot sbs;
       texture_snapshot shadow_coordinate;
       texture_snapshot shadow_candidate;
@@ -1632,21 +1631,10 @@ namespace platf::sbs_debug {
 
   namespace detail {
 
-    namespace {
-      float normalize_scalar_preview_value(
-        const float value,
-        const float low,
-        const float high,
-        const bool midpoint_when_collapsed
-      ) noexcept {
-        const float span = high - low;
-        const float scale = std::max(1.0f, std::max(std::fabs(low), std::fabs(high)));
-        if (!(span > std::numeric_limits<float>::epsilon() * scale)) {
-          return midpoint_when_collapsed ? 0.5f : std::clamp(value, 0.0f, 1.0f);
-        }
-        return std::clamp((value - low) / span, 0.0f, 1.0f);
-      }
-    }  // namespace
+    struct diagnostic_roi_crop {
+      Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+    };
 
     std::size_t bounded_collection_chunk_bytes(
       const std::size_t remaining_bytes,
@@ -1680,7 +1668,6 @@ namespace platf::sbs_debug {
       scene_decode,
       model_input,
       raw_depth,
-      warp_depth,
       shadow_coordinate,
       shadow_candidate,
       shadow_ownership_refined,
@@ -1708,7 +1695,6 @@ namespace platf::sbs_debug {
       staged_texture depth_input_source;
       staged_buffer model_input;
       staged_buffer raw_depth;
-      staged_texture warp_depth;
       staged_texture sbs;
       staged_texture shadow_coordinate;
       staged_texture shadow_candidate;
@@ -1760,8 +1746,6 @@ namespace platf::sbs_debug {
       std::size_t finite_count = 0;
       float minimum = std::numeric_limits<float>::quiet_NaN();
       float maximum = std::numeric_limits<float>::quiet_NaN();
-      float preview_low = std::numeric_limits<float>::quiet_NaN();
-      float preview_high = std::numeric_limits<float>::quiet_NaN();
     };
 
     struct raw_depth_dump_stats: scalar_stats {
@@ -1769,14 +1753,13 @@ namespace platf::sbs_debug {
       std::uint32_t height = 0;
     };
 
-    struct warp_map_dump_stats: scalar_stats {
+    struct warp_map_dump_stats {
       std::uint32_t width = 0;
       std::uint32_t height = 0;
       std::uint32_t eye_width = 0;
       std::uint32_t eye_height = 0;
       float content_scale_x = 1.0f;
       float content_scale_y = 1.0f;
-      float displacement_preview_abs_px = 0.0f;
     };
 
     std::uint32_t format_bytes_per_pixel(const DXGI_FORMAT format) {
@@ -1884,18 +1867,6 @@ namespace platf::sbs_debug {
       r *= gamut_scale;
       g *= gamut_scale;
       b *= gamut_scale;
-    }
-
-    inline void colormap_jet(float value, std::uint8_t &r, std::uint8_t &g, std::uint8_t &b) {
-      const float t = std::clamp(value, 0.0f, 1.0f);
-      const auto channel = [](const float x) {
-        return static_cast<std::uint8_t>(
-          std::lround(std::clamp(x, 0.0f, 1.0f) * 255.0f)
-        );
-      };
-      r = channel(1.5f - std::fabs(4.0f * t - 3.0f));
-      g = channel(1.5f - std::fabs(4.0f * t - 2.0f));
-      b = channel(1.5f - std::fabs(4.0f * t - 1.0f));
     }
 
     bool write_bytes(
@@ -2460,104 +2431,19 @@ namespace platf::sbs_debug {
 
     scalar_stats calculate_scalar_stats(const std::vector<float> &values);
 
-    struct scalar_preview_normalization_t {
-      float low;
-      float high;
-      bool midpoint_when_collapsed;
-    };
-
-    bool write_normalized_scalar_previews(
-      const std::filesystem::path &gray_path,
-      const std::filesystem::path &heat_path,
-      const std::uint32_t width,
-      const std::uint32_t height,
-      const std::vector<float> &values,
-      const scalar_preview_normalization_t normalization
-    ) {
-      std::vector<std::uint8_t> gray(values.size() * 3u);
-      std::vector<std::uint8_t> heat(values.size() * 3u);
-      for (std::size_t index = 0; index < values.size(); ++index) {
-        if (!std::isfinite(values[index])) {
-          gray[index * 3u + 0u] = heat[index * 3u + 0u] = 255;
-          gray[index * 3u + 1u] = heat[index * 3u + 1u] = 0;
-          gray[index * 3u + 2u] = heat[index * 3u + 2u] = 255;
-          continue;
-        }
-        const float normalized = detail::normalize_scalar_preview_value(
-          values[index],
-          normalization.low,
-          normalization.high,
-          normalization.midpoint_when_collapsed
-        );
-        const std::uint8_t encoded = encode_unit(normalized);
-        gray[index * 3u + 0u] = encoded;
-        gray[index * 3u + 1u] = encoded;
-        gray[index * 3u + 2u] = encoded;
-        colormap_jet(
-          normalized,
-          heat[index * 3u + 0u],
-          heat[index * 3u + 1u],
-          heat[index * 3u + 2u]
-        );
-      }
-      return write_png(gray_path, width, height, gray) &&
-             write_png(heat_path, width, height, heat);
-    }
-
-    bool write_scalar_previews(
-      const std::filesystem::path &gray_path,
-      const std::filesystem::path &heat_path,
+    bool write_float_texture(
+      const std::filesystem::path &data_path,
       const texture_snapshot &snapshot
     ) {
       std::vector<float> values;
       if (!texture_float_values(snapshot, values)) {
         return false;
       }
-      return write_normalized_scalar_previews(
-        gray_path,
-        heat_path,
-        snapshot.desc.Width,
-        snapshot.desc.Height,
-        values,
-        {0.0f, 1.0f, false}
-      );
-    }
-
-    bool write_float_texture_artifacts(
-      const std::filesystem::path &data_path,
-      const std::filesystem::path &shape_path,
-      const texture_snapshot &snapshot,
-      const std::string_view stage
-    ) {
-      std::vector<float> values;
-      if (!texture_float_values(snapshot, values)) {
-        return false;
-      }
       const scalar_stats stats = calculate_scalar_stats(values);
-      if (
-        !write_bytes(
-          data_path,
-          values.data(),
-          values.size() * sizeof(float)
-        )
-      ) {
+      if (stats.finite_count != values.size()) {
         return false;
       }
-      nlohmann::json shape {
-        {"schema", 1},
-        {"width", snapshot.desc.Width},
-        {"height", snapshot.desc.Height},
-        {"dtype", "float32-le"},
-        {"layout", "row-major"},
-        {"stage", std::string(stage)},
-        {"finite_count", stats.finite_count},
-        {"sample_count", values.size()},
-      };
-      if (stats.finite_count != 0) {
-        shape["minimum"] = stats.minimum;
-        shape["maximum"] = stats.maximum;
-      }
-      return write_json(shape_path, shape);
+      return write_bytes(data_path, values.data(), values.size() * sizeof(float));
     }
 
     scalar_stats calculate_scalar_stats(const std::vector<float> &values) {
@@ -2573,50 +2459,10 @@ namespace platf::sbs_debug {
       if (finite.empty()) {
         return stats;
       }
-      std::sort(finite.begin(), finite.end());
-      const auto percentile = [&](const double fraction) {
-        const std::size_t index = static_cast<std::size_t>(
-          std::lround(fraction * static_cast<double>(finite.size() - 1u))
-        );
-        return finite[std::min(index, finite.size() - 1u)];
-      };
-      stats.minimum = finite.front();
-      stats.maximum = finite.back();
-      stats.preview_low = percentile(0.02);
-      stats.preview_high = percentile(0.98);
-      const float scale = std::max(
-        1.0f,
-        std::max(std::fabs(stats.preview_low), std::fabs(stats.preview_high))
-      );
-      if (
-        !(stats.preview_high - stats.preview_low >
-          std::numeric_limits<float>::epsilon() * scale)
-      ) {
-        stats.preview_low = stats.minimum;
-        stats.preview_high = stats.maximum;
-      }
+      const auto bounds = std::minmax_element(finite.begin(), finite.end());
+      stats.minimum = *bounds.first;
+      stats.maximum = *bounds.second;
       return stats;
-    }
-
-    bool write_percentile_previews(
-      const std::filesystem::path &gray_path,
-      const std::filesystem::path &heat_path,
-      const std::uint32_t width,
-      const std::uint32_t height,
-      const std::vector<float> &values,
-      const scalar_stats &stats
-    ) {
-      if (stats.finite_count == 0) {
-        return false;
-      }
-      return write_normalized_scalar_previews(
-        gray_path,
-        heat_path,
-        width,
-        height,
-        values,
-        {stats.preview_low, stats.preview_high, true}
-      );
     }
 
     bool dump_model_input(
@@ -2636,6 +2482,9 @@ namespace platf::sbs_debug {
       }
       if (
         values.size() != static_cast<std::size_t>(pixel_count) * 3u ||
+        !std::all_of(values.begin(), values.end(), [](const float value) {
+          return std::isfinite(value);
+        }) ||
         !write_bytes(
           dir / "model_input.f32",
           values.data(),
@@ -2645,26 +2494,6 @@ namespace platf::sbs_debug {
         return false;
       }
 
-      std::vector<std::uint8_t> rgb(static_cast<std::size_t>(pixel_count) * 3u);
-      const std::size_t plane_size = static_cast<std::size_t>(pixel_count);
-      for (std::size_t pixel = 0; pixel < plane_size; ++pixel) {
-        for (std::size_t channel = 0; channel < 3u; ++channel) {
-          const float normalized = values[channel * plane_size + pixel];
-          if (!std::isfinite(normalized)) {
-            rgb[pixel * 3u + 0u] = 255;
-            rgb[pixel * 3u + 1u] = 0;
-            rgb[pixel * 3u + 2u] = 255;
-            break;
-          }
-          // rgb_to_nchw_cs stores already-sRGB model values after ImageNet normalization.
-          // Reverse only mean/std here; applying the OETF again would corrupt the preview.
-          rgb[pixel * 3u + channel] =
-            encode_unit(
-              normalized * preprocess.imagenet_std[channel] +
-              preprocess.imagenet_mean[channel]
-            );
-        }
-      }
       const nlohmann::json shape {
         {"schema", preprocess.model_input_schema},
         {"width", width},
@@ -2679,20 +2508,8 @@ namespace platf::sbs_debug {
         {"stage", std::string {preprocess.stage}},
         {"imagenet_mean", preprocess.imagenet_mean},
         {"imagenet_std", preprocess.imagenet_std},
-        {"preview", {
-                      {"file", "model_input.png"},
-                      {"operation", "channel * std + mean, clamped to [0,1]"},
-                      {"extra_srgb_oetf", false},
-                      {"nonfinite_color", "magenta"},
-                    }},
       };
-      return write_png(
-               dir / "model_input.png",
-               static_cast<std::uint32_t>(width),
-               static_cast<std::uint32_t>(height),
-               rgb
-             ) &&
-             write_json(dir / "model_input_shape.json", shape);
+      return write_json(dir / "model_input_shape.json", shape);
     }
 
     bool dump_raw_depth(
@@ -2723,66 +2540,20 @@ namespace platf::sbs_debug {
           dir / "raw_depth.f32",
           values.data(),
           values.size() * sizeof(float)
-        ) ||
-        !write_percentile_previews(
-          dir / "raw_depth.png",
-          dir / "raw_depth_heat.png",
-          stats.width,
-          stats.height,
-          values,
-          stats
         )
       ) {
         return false;
       }
-      const nlohmann::json shape {
-        {"schema", 1},
-        {"width", stats.width},
-        {"height", stats.height},
-        {"dtype", "float32-le"},
-        {"layout", "row-major"},
-        {"stage", "raw model output before transform, robust normalization, temporal EMA, or curvature"},
-        {"finite_count", stats.finite_count},
-        {"sample_count", values.size()},
-        {"minimum", stats.minimum},
-        {"maximum", stats.maximum},
-        {"preview_normalization", "finite p2-p98"},
-        {"preview_low", stats.preview_low},
-        {"preview_high", stats.preview_high},
-        {"nonfinite_color", "magenta"},
-      };
-      return write_json(dir / "raw_shape.json", shape);
+      return true;
     }
 
     bool dump_shadow_float_texture(
       const texture_snapshot &snapshot,
       const std::filesystem::path &dir,
-      const std::string_view stem,
-      const std::string_view stage
+      const std::string_view stem
     ) {
-      std::vector<float> values;
-      if (!texture_float_values(snapshot, values)) {
-        return false;
-      }
-      const scalar_stats stats = calculate_scalar_stats(values);
-      if (stats.finite_count != values.size()) {
-        return false;
-      }
       const std::string name(stem);
-      return write_float_texture_artifacts(
-               dir / (name + ".f32"),
-               dir / (name + "_shape.json"),
-               snapshot,
-               stage
-             ) &&
-             write_percentile_previews(
-               dir / (name + ".png"),
-               dir / (name + "_heat.png"),
-               snapshot.desc.Width,
-               snapshot.desc.Height,
-               values,
-               stats
-             );
+      return write_float_texture(dir / (name + ".f32"), snapshot);
     }
 
     bool dump_parallax_v2_state(
@@ -2918,10 +2689,10 @@ namespace platf::sbs_debug {
         {"wire_contract", "authenticated live Host-SBS renderer input; not a client wire contract"},
         {"units", {
                     {"coordinate", "dimensionless canonical coordinate derived from raw depth"},
-                    {"gain", completed.depth_input_region.video_region ?
+                    {"gain", completed.depth_input_region.is_video_region() ?
                       "one-eye ROI-local source-U per curve unit" :
                       "one-eye full-source-U per curve unit"},
-                    {"parallax", completed.depth_input_region.video_region ?
+                    {"parallax", completed.depth_input_region.is_video_region() ?
                       "signed one-eye ROI-local source-U; full-source renderer authority additionally requires depth_input_region embedding" :
                       "signed one-eye full-source-U"},
                   }},
@@ -3156,7 +2927,6 @@ namespace platf::sbs_debug {
       const texture_snapshot &mapping,
       const std::uint32_t source_width,
       const std::uint32_t source_height,
-      const bool video_region,
       const std::filesystem::path &dir,
       warp_map_dump_stats &stats
     ) {
@@ -3180,142 +2950,16 @@ namespace platf::sbs_debug {
         eye_aspect > source_aspect ? source_aspect / eye_aspect : 1.0f;
       stats.content_scale_y =
         eye_aspect < source_aspect ? eye_aspect / source_aspect : 1.0f;
-      static_cast<scalar_stats &>(stats) = calculate_scalar_stats(map);
-
-      std::vector<float> displacement(map.size(), 0.0f);
-      std::vector<float> finite_absolute_displacement;
-      finite_absolute_displacement.reserve(map.size());
-      std::vector<std::uint8_t> content_valid(map.size(), 0u);
-      const float content_lo_x = 0.5f * (1.0f - stats.content_scale_x);
-      const float content_hi_x = content_lo_x + stats.content_scale_x;
-      const float content_lo_y = 0.5f * (1.0f - stats.content_scale_y);
-      const float content_hi_y = content_lo_y + stats.content_scale_y;
-      for (std::uint32_t y = 0; y < stats.height; ++y) {
-        const float output_v =
-          (static_cast<float>(y) + 0.5f) / static_cast<float>(stats.height);
-        for (std::uint32_t x = 0; x < stats.width; ++x) {
-          const std::size_t index =
-            static_cast<std::size_t>(y) * stats.width + x;
-          const std::uint32_t eye_x = x % stats.eye_width;
-          const float output_u =
-            (static_cast<float>(eye_x) + 0.5f) /
-            static_cast<float>(stats.eye_width);
-          if (
-            output_u < content_lo_x || output_u > content_hi_x ||
-            output_v < content_lo_y || output_v > content_hi_y ||
-            !std::isfinite(map[index])
-          ) {
-            continue;
-          }
-          const float unwarped_source_u =
-            (output_u - content_lo_x) / stats.content_scale_x;
-          displacement[index] =
-            (map[index] - unwarped_source_u) *
-            stats.content_scale_x *
-            static_cast<float>(stats.eye_width);
-          if (std::isfinite(displacement[index])) {
-            content_valid[index] = 1u;
-            finite_absolute_displacement.push_back(std::fabs(displacement[index]));
-          }
-        }
-      }
-      if (finite_absolute_displacement.empty()) {
+      if (!std::all_of(map.begin(), map.end(), [](const float value) {
+            return std::isfinite(value);
+          })) {
         return false;
       }
-      std::sort(
-        finite_absolute_displacement.begin(),
-        finite_absolute_displacement.end()
-      );
-      const std::size_t p98_index = static_cast<std::size_t>(
-        std::lround(
-          0.98 * static_cast<double>(finite_absolute_displacement.size() - 1u)
-        )
-      );
-      stats.displacement_preview_abs_px =
-        finite_absolute_displacement[std::min(
-          p98_index,
-          finite_absolute_displacement.size() - 1u
-        )];
-      if (!(stats.displacement_preview_abs_px > 1.0e-6f)) {
-        stats.displacement_preview_abs_px =
-          finite_absolute_displacement.back();
-      }
-      if (!(stats.displacement_preview_abs_px > 1.0e-6f)) {
-        stats.displacement_preview_abs_px = 1.0f;
-      }
-
-      std::vector<std::uint8_t> heat(map.size() * 3u, 0u);
-      for (std::size_t index = 0; index < map.size(); ++index) {
-        if (!content_valid[index]) {
-          if (!std::isfinite(map[index])) {
-            heat[index * 3u + 0u] = 255;
-            heat[index * 3u + 1u] = 0;
-            heat[index * 3u + 2u] = 255;
-          }
-          continue;
-        }
-        const float normalized = std::clamp(
-          0.5f +
-            0.5f * displacement[index] / stats.displacement_preview_abs_px,
-          0.0f,
-          1.0f
-        );
-        colormap_jet(
-          normalized,
-          heat[index * 3u + 0u],
-          heat[index * 3u + 1u],
-          heat[index * 3u + 2u]
-        );
-      }
-      const nlohmann::json shape {
-        {"schema", 2},
-        {"width", stats.width},
-        {"height", stats.height},
-        {"eye_width", stats.eye_width},
-        {"eye_height", stats.eye_height},
-        {"source_width", source_width},
-        {"source_height", source_height},
-        {"content_scale_x", stats.content_scale_x},
-        {"content_scale_y", stats.content_scale_y},
-        {"dtype", "float32-le"},
-        {"layout", "row-major"},
-        {"channels", {"raw_reproject_source_u_normalized"}},
-        {"validity", {
-          {"content", "derive from content_scale_x/content_scale_y and packed output coordinate"},
-          {"inverse", video_region ?
-            "11-step contractive fixed-point solution of crop-local q embedded by depth_input_region.json scale and outside-only zero-plane collar" :
-            "11-step contractive fixed-point solution of the signed final-parallax field"},
-          {"mask", "warp_mask.png red marks finite-source boundary extrapolation; V2 has no internal owner or synthetic-fill path"},
-        }},
-        {"live_sample_source_u_normalized", "clamp(raw_reproject_source_u_normalized, 0, 1)"},
-        {"derived_inverse_displacement_output_eye_px", "(raw_reproject_source_u_normalized - aspect_fitted_unwarped_source_u) * content_scale_x * eye_width"},
-        {"derived_signed_binocular_disparity_px", "invert both eye maps at common source-U samples; x_right - x_left"},
-        {"displacement_preview", {
-                                   {"file", "warp_displacement_heat.png"},
-                                   {"range_px", {
-                                                  -stats.displacement_preview_abs_px,
-                                                  stats.displacement_preview_abs_px,
-                                                }},
-                                   {"normalization", "symmetric finite-content p98 absolute displacement"},
-                                   {"negative", "blue"},
-                                   {"zero", "green"},
-                                   {"positive", "red"},
-                                   {"bars", "black"},
-                                   {"nonfinite", "magenta"},
-                                 }},
-      };
       return write_bytes(
-               dir / "warp_map.f32",
-               map.data(),
-               map.size() * sizeof(float)
-             ) &&
-             write_png(
-               dir / "warp_displacement_heat.png",
-               stats.width,
-               stats.height,
-               heat
-             ) &&
-             write_json(dir / "warp_map_shape.json", shape);
+        dir / "warp_map.f32",
+        map.data(),
+        map.size() * sizeof(float)
+      );
     }
 
     nlohmann::json config_json(
@@ -4064,7 +3708,7 @@ namespace platf::sbs_debug {
           completed.matched_frame_id == 0u) {
         return "missing matched-frame or source identity";
       }
-      if (!region.video_region) {
+      if (!region.is_video_region()) {
         if (completed.depth_video_plan) {
           return "full-source completion carries an ROI planner result";
         }
@@ -4155,7 +3799,7 @@ namespace platf::sbs_debug {
 
     nlohmann::json depth_input_region_document(const frame &completed) {
       const auto &region = completed.depth_input_region;
-      const bool roi = region.video_region;
+      const bool roi = region.is_video_region();
       nlohmann::json authorization = nullptr;
       if (roi) {
         const auto &provenance = *completed.window_region;
@@ -4318,7 +3962,8 @@ namespace platf::sbs_debug {
   }  // namespace detail
 
   dumper::dumper():
-      async_(detail::publication_state::create()) {
+      async_(detail::publication_state::create()),
+      diagnostic_roi_crop_(std::make_unique<detail::diagnostic_roi_crop>()) {
     if (const char *override_dir = std::getenv("APOLLO_SBS_DUMP"); override_dir && *override_dir) {
       dir_ = override_dir;
       file_trigger_enabled_ = config::sunshine.diagnostics_enabled;
@@ -4354,6 +3999,7 @@ namespace platf::sbs_debug {
     snapshot_armed_for_dump_ = false;
     prepared_frame_id_ = 0;
     pending_gpu_capture_.reset();
+    release_diagnostic_roi_crop();
     retry_not_before_ = {};
     if (auto *button = button_request_.get()) {
       button->store(false, std::memory_order_relaxed);
@@ -4376,6 +4022,7 @@ namespace platf::sbs_debug {
     snapshot_armed_for_dump_ = false;
     prepared_frame_id_ = 0;
     pending_gpu_capture_.reset();
+    release_diagnostic_roi_crop();
     retry_not_before_ = {};
     if (auto *button = button_request_.get()) {
       button->store(false, std::memory_order_relaxed);
@@ -4393,6 +4040,7 @@ namespace platf::sbs_debug {
   bool dumper::snapshot_requested() {
     snapshot_armed_for_dump_ = false;
     prepared_frame_id_ = 0;
+    release_diagnostic_roi_crop();
     if (async_ && async_->take_file_retry_pending()) {
       file_trigger_pending_ = true;
     }
@@ -4490,12 +4138,92 @@ namespace platf::sbs_debug {
     return true;
   }
 
+  ID3D11ShaderResourceView *dumper::prepare_diagnostic_roi_crop(
+    ID3D11Device *device,
+    ID3D11DeviceContext *ctx,
+    ID3D11Texture2D *source,
+    const models::depth_input_region_t &region
+  ) noexcept {
+    release_diagnostic_roi_crop();
+    if (!diagnostic_roi_crop_ || !device || !ctx || !source || !region.valid() ||
+        !region.is_video_region()) {
+      return nullptr;
+    }
+
+    D3D11_TEXTURE2D_DESC source_desc {};
+    source->GetDesc(&source_desc);
+    if (source_desc.Width != region.source_width ||
+        source_desc.Height != region.source_height || source_desc.MipLevels != 1u ||
+        source_desc.ArraySize != 1u || source_desc.SampleDesc.Count != 1u ||
+        region.right > source_desc.Width || region.bottom > source_desc.Height) {
+      return nullptr;
+    }
+
+    auto crop_desc = source_desc;
+    crop_desc.Width = region.width();
+    crop_desc.Height = region.height();
+    crop_desc.MipLevels = 1u;
+    crop_desc.ArraySize = 1u;
+    crop_desc.Usage = D3D11_USAGE_DEFAULT;
+    crop_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    crop_desc.CPUAccessFlags = 0u;
+    crop_desc.MiscFlags = 0u;
+
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> crop_texture;
+    auto status = device->CreateTexture2D(&crop_desc, nullptr, &crop_texture);
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> crop_srv;
+    if (SUCCEEDED(status)) {
+      status = device->CreateShaderResourceView(crop_texture.Get(), nullptr, &crop_srv);
+    }
+    if (FAILED(status)) {
+      try {
+        BOOST_LOG(warning)
+          << "Dump 3D could not allocate its diagnostic window-region source crop "sv
+          << region.width() << 'x' << region.height() << " [HRESULT "sv
+          << static_cast<std::uint32_t>(status)
+          << "]; live ROI analysis remains active and this dump request is rejected."sv;
+      } catch (...) {
+      }
+      return nullptr;
+    }
+
+    const D3D11_BOX source_box {
+      region.left,
+      region.top,
+      0u,
+      region.right,
+      region.bottom,
+      1u,
+    };
+    ctx->CopySubresourceRegion(
+      crop_texture.Get(),
+      0u,
+      0u,
+      0u,
+      0u,
+      source,
+      0u,
+      &source_box
+    );
+    diagnostic_roi_crop_->texture = std::move(crop_texture);
+    diagnostic_roi_crop_->srv = std::move(crop_srv);
+    return diagnostic_roi_crop_->srv.Get();
+  }
+
+  void dumper::release_diagnostic_roi_crop() noexcept {
+    if (!diagnostic_roi_crop_) {
+      return;
+    }
+    diagnostic_roi_crop_->srv.Reset();
+    diagnostic_roi_crop_->texture.Reset();
+  }
+
   namespace {
 
   dump_publish_result publish_captured_dump(const captured_dump_job &job) {
     dump_publish_result result;
     const auto &completed = job.completed;
-    const bool video_region = completed.depth_input_region.video_region;
+    const bool video_region = completed.depth_input_region.is_video_region();
     const auto &cfg = job.cfg;
     const auto &capture_preprocess = *job.preprocess;
     const bool hdr =
@@ -4531,10 +4259,9 @@ namespace platf::sbs_debug {
 
       do {
         const auto &source = job.source;
-        const auto &depth_input_source = completed.depth_input_region.video_region ?
+        const auto &depth_input_source = completed.depth_input_region.is_video_region() ?
                                            job.depth_input_source :
                                            job.source;
-        const auto &warp_depth = job.warp_depth;
         const auto &sbs = job.sbs;
         const bool subtitle_slr13_active =
           !job.subtitle_ocr_record.empty() &&
@@ -4584,7 +4311,6 @@ namespace platf::sbs_debug {
         const auto tensor_width = static_cast<std::uint32_t>(completed.model_width);
         const auto tensor_height = static_cast<std::uint32_t>(completed.model_height);
         if (
-          !scalar_tensor_snapshot_matches(warp_depth, tensor_width, tensor_height) ||
           !scalar_tensor_snapshot_matches(
             job.shadow_coordinate,
             tensor_width,
@@ -4620,20 +4346,6 @@ namespace platf::sbs_debug {
           BOOST_LOG(warning)
             << "SBS debug dump: a completed parallax-v2 tensor texture does not match "sv
                "the authenticated model extent/R32_FLOAT contract."sv;
-          break;
-        }
-        const auto exact_scalar_snapshot = [](
-          const texture_snapshot &left,
-          const texture_snapshot &right
-        ) {
-          return left.desc.Width == right.desc.Width &&
-                 left.desc.Height == right.desc.Height &&
-                 left.desc.Format == right.desc.Format &&
-                 left.row_bytes == right.row_bytes && left.bytes == right.bytes;
-        };
-        if (!exact_scalar_snapshot(warp_depth, job.shadow_final)) {
-          BOOST_LOG(warning)
-            << "SBS debug dump: warp_depth is not the exact displayed parallax field."sv;
           break;
         }
         if (sbs.desc.Width < 2u || (sbs.desc.Width & 1u) != 0u) {
@@ -4691,19 +4403,6 @@ namespace platf::sbs_debug {
             completed.raw_height,
             paths.temporary,
             raw_stats
-          ) ||
-          !write_float_texture_artifacts(
-            paths.temporary / "warp_depth.f32",
-            paths.temporary / "warp_depth_shape.json",
-            warp_depth,
-            video_region ?
-              "exact one-eye ROI-local source-U from the orientation-selective vertical conditioner followed by the row majorant; renderer authority requires depth_input_region embedding" :
-              "exact one-eye full-source-U from the orientation-selective vertical conditioner followed by the row majorant sampled by live Host-SBS V2 reprojection"
-          ) ||
-          !write_scalar_previews(
-            paths.temporary / "warp_depth.png",
-            paths.temporary / "warp_depth_heat.png",
-            warp_depth
           ) ||
           !write_color_preview(
             paths.temporary / "sbs.png",
@@ -4791,59 +4490,40 @@ namespace platf::sbs_debug {
         const auto &shadow_final = job.shadow_final;
         nlohmann::json shadow_summary = nullptr;
         if (
-          !dump_shadow_float_texture(
+           !dump_shadow_float_texture(
              shadow_coordinate,
              paths.temporary,
-             "shadow_coordinate",
-             "parallax-v2 canonical unbounded coordinate u; diagnostic only"
+             "shadow_coordinate"
            ) ||
            !dump_shadow_float_texture(
              shadow_candidate,
              paths.temporary,
-             "shadow_candidate_parallax",
-             video_region ?
-               "parallax-v2 immutable signed ROI-local source-U pre-conditioner geometry evidence; never renderer authority without depth_input_region embedding" :
-               "parallax-v2 immutable signed full-source-U pre-conditioner geometry evidence; never geometry authority"
+             "shadow_candidate_parallax"
            ) ||
            !dump_shadow_float_texture(
              shadow_ownership_refined,
              paths.temporary,
-             "shadow_ownership_refined_parallax",
-             video_region ?
-               "parallax-v2 signed ROI-local source-U candidate after conservative full-resolution crop-contour foreground ownership; consumed by the vertical conditioner" :
-               "parallax-v2 signed full-source-U candidate after conservative full-resolution source-contour foreground ownership; consumed by the vertical conditioner"
+             "shadow_ownership_refined_parallax"
            ) ||
            !dump_shadow_float_texture(
              shadow_vertical,
              paths.temporary,
-             "shadow_vertical_majorant",
-             video_region ?
-               "parallax-v2 ROI-local source-U least column-wise upper envelope of the ownership-refined candidate; diagnostic evidence only" :
-               "parallax-v2 full-source-U least column-wise upper envelope of the ownership-refined candidate; diagnostic evidence only"
+             "shadow_vertical_majorant"
            ) ||
            !dump_shadow_float_texture(
              shadow_vertical_conditioned,
              paths.temporary,
-             "shadow_vertical_conditioned",
-             video_region ?
-               "parallax-v2 ROI-local source-U fixed 75/25 share of the column upper/lower envelopes; neutral intermediate consumed by the row majorant" :
-               "parallax-v2 full-source-U fixed 75/25 share of the column upper/lower envelopes; neutral intermediate consumed by the row majorant"
+             "shadow_vertical_conditioned"
            ) ||
            (subtitle_slr13_active && !dump_shadow_float_texture(
              shadow_base_final,
              paths.temporary,
-             "shadow_base_final_parallax",
-             video_region ?
-               "ordinary parallax-v2 crop-local source-U field after the horizontal majorant and before SLR13; renderer authority requires current SLR13 conditioning plus depth_input_region embedding" :
-               "ordinary parallax-v2 full-source-U field after the horizontal majorant and before SLR13 conditioning"
+             "shadow_base_final_parallax"
            )) ||
            !dump_shadow_float_texture(
              shadow_final,
              paths.temporary,
-             "shadow_final_parallax",
-             video_region ?
-               "complete atomic crop-local source-U field after SLR13 conditioning; sampled directly with depth_input_region embedding" :
-               "complete atomic full-source-U field after SLR13 conditioning; sole live V2 render position authority"
+             "shadow_final_parallax"
            ) ||
            !dump_parallax_v2_state(
              completed,
@@ -4856,8 +4536,11 @@ namespace platf::sbs_debug {
           break;
         }
 
-        const bool warp_map_available = job.warp_map_available;
-        const bool warp_mask_available = job.warp_mask_available;
+        // Mapping and boundary attribution form one diagnostic transaction. A partial optional
+        // pass is omitted rather than publishing evidence that the current reader cannot join.
+        const bool warp_map_available =
+          job.warp_map_available && job.warp_mask_available;
+        const bool warp_mask_available = warp_map_available;
         warp_map_dump_stats warp_map_stats;
         const auto &warp_map = job.warp_map;
         const auto &warp_mask = job.warp_mask;
@@ -4886,7 +4569,6 @@ namespace platf::sbs_debug {
              warp_map,
              source.desc.Width,
              source.desc.Height,
-             video_region,
              paths.temporary,
              warp_map_stats
            ))
@@ -4903,23 +4585,29 @@ namespace platf::sbs_debug {
         ) {
           break;
         }
-        std::string warp_map_sha256;
-        if (completed.depth_input_region.video_region) {
+        const std::string warp_map_sha256 = warp_map_available ?
+          models::file_sha256_hex(paths.temporary / "warp_map.f32") : std::string {};
+        const std::string warp_mask_sha256 = warp_mask_available ?
+          models::file_sha256_hex(paths.temporary / "warp_mask.png") : std::string {};
+        if (completed.depth_input_region.is_video_region()) {
           if (!warp_map_available || !warp_mask_available) {
             BOOST_LOG(warning)
               << "SBS debug dump: ROI publication requires a full-source inverse map and "sv
                  "boundary mask; publication aborted."sv;
             break;
           }
-          warp_map_sha256 = models::file_sha256_hex(
-            paths.temporary / "warp_map.f32"
-          );
-          if (warp_map_sha256.empty()) {
+          if (warp_map_sha256.empty() || warp_mask_sha256.empty()) {
             BOOST_LOG(warning)
-              << "SBS debug dump: ROI full-source inverse map could not be hashed; "sv
+              << "SBS debug dump: ROI inverse-map evidence could not be hashed; "sv
                  "publication aborted."sv;
             break;
           }
+        } else if ((warp_map_available && warp_map_sha256.empty()) ||
+                   (warp_mask_available && warp_mask_sha256.empty())) {
+          BOOST_LOG(warning)
+            << "SBS debug dump: optional inverse-map evidence could not be hashed; "sv
+               "publication aborted."sv;
+          break;
         }
 
         if (
@@ -4946,7 +4634,7 @@ namespace platf::sbs_debug {
             if (!window_region_available) {
               BOOST_LOG(warning)
                 << "SBS debug dump: optional matched-frame window-region provenance could not be written; continuing without it."sv;
-            } else if (completed.depth_input_region.video_region) {
+            } else if (completed.depth_input_region.is_video_region()) {
               window_region_sha256 = models::file_sha256_hex(
                 paths.temporary / "window_region.json"
               );
@@ -4959,7 +4647,7 @@ namespace platf::sbs_debug {
           }
         }
         if (
-          completed.depth_input_region.video_region &&
+          completed.depth_input_region.is_video_region() &&
           (!window_region_available || window_region_sha256.empty())
         ) {
           BOOST_LOG(warning)
@@ -4979,18 +4667,10 @@ namespace platf::sbs_debug {
         const float content_scale_y =
           eye_aspect < source_aspect ? eye_aspect / source_aspect : 1.0f;
 
-        const std::string warp_scalar_stage = video_region ?
-          "crop-local final parallax field embedded by live V2 reprojection" :
-          "atomic final parallax field sampled by live V2 reprojection";
-        const std::string warp_scalar_description = video_region ?
-          "Exact complete atomic one-eye ROI-local source-U field. Renderer authority is this field together with depth_input_region.json, which embeds it into the full source and supplies the outside-only zero-plane collar." :
-          "Exact complete atomic one-eye full-source-U field sampled by the live V2 11-step contractive inverse.";
         // Bind every V2 geometry field to the exact bytes written into this transaction
         // directory. Metadata-only descriptors let a truncated or internally inconsistent
         // geometry dump validate cleanly, which silently poisons every downstream offline
         // investigation that trusts validated dumps.
-        const std::string warp_depth_sha256 =
-          models::file_sha256_hex(paths.temporary / "warp_depth.f32");
         const std::string shadow_coordinate_sha256 =
           models::file_sha256_hex(paths.temporary / "shadow_coordinate.f32");
         const std::string shadow_candidate_sha256 =
@@ -5013,7 +4693,7 @@ namespace platf::sbs_debug {
           models::file_sha256_hex(paths.temporary / "shadow_state.json");
         const std::string shadow_frame_stats_sha256 =
           models::file_sha256_hex(paths.temporary / "shadow_frame_stats.json");
-        if (warp_depth_sha256.empty() || shadow_coordinate_sha256.empty() ||
+        if (shadow_coordinate_sha256.empty() ||
             shadow_candidate_sha256.empty() || shadow_ownership_sha256.empty() ||
             shadow_vertical_majorant_sha256.empty() ||
             shadow_vertical_conditioned_sha256.empty() || shadow_final_sha256.empty() ||
@@ -5108,72 +4788,26 @@ namespace platf::sbs_debug {
             "diagnostic GPU trace wire contract",
             "Optional trace contract is absent with the raw diagnostic ring."
           );
-        artifacts["model_input.f32"] = artifact_description(
+        artifacts["model_input.f32"] = hashed_artifact_description(
           true,
           true,
           "exact neural-network input",
-          "Float32-le NCHW tensor after preprocessing and ImageNet normalization."
+          "Float32-le NCHW tensor after preprocessing and ImageNet normalization.",
+          model_input_sha256
         );
-        artifacts["model_input.png"] = artifact_description(
-          true,
-          true,
-          "neural-network input preview",
-          "ImageNet mean/std reversed without a second sRGB transfer function."
-        );
-        artifacts["model_input_shape.json"] = artifact_description(
+        artifacts["model_input_shape.json"] = hashed_artifact_description(
           true,
           true,
           "model-input contract",
-          "Dimensions, layout, normalization, and preview semantics."
+          "Calibrated preprocess dimensions, layout, channels, normalization, and producer stage.",
+          model_input_shape_sha256
         );
-        artifacts["raw_depth.f32"] = artifact_description(
+        artifacts["raw_depth.f32"] = hashed_artifact_description(
           true,
           true,
           "exact model output",
-          "Float32-le raw depth before normalization or temporal processing."
-        );
-        artifacts["raw_depth.png"] = artifact_description(
-          true,
-          true,
-          "raw model output preview",
-          "Finite p2-p98 grayscale preview; not the tensor's numeric contract."
-        );
-        artifacts["raw_depth_heat.png"] = artifact_description(
-          true,
-          true,
-          "raw model output preview",
-          "Finite p2-p98 jet preview."
-        );
-        artifacts["raw_shape.json"] = artifact_description(
-          true,
-          true,
-          "raw-depth contract",
-          "Dimensions, scalar statistics, and preview bounds."
-        );
-        artifacts["warp_depth.png"] = artifact_description(
-          true,
-          true,
-          warp_scalar_stage,
-          "Grayscale preview of the exact orientation-selective conditioned field sampled by the warp."
-        );
-        artifacts["warp_depth.f32"] = hashed_artifact_description(
-          true,
-          true,
-          warp_scalar_stage,
-          warp_scalar_description,
-          warp_depth_sha256
-        );
-        artifacts["warp_depth_shape.json"] = artifact_description(
-          true,
-          true,
-          "actual displayed parallax-field contract",
-          "Dimensions, layout, units, and scalar range for warp_depth.f32."
-        );
-        artifacts["warp_depth_heat.png"] = artifact_description(
-          true,
-          true,
-          warp_scalar_stage,
-          "Jet preview of the exact orientation-selective conditioned field sampled by the warp."
+          "Float32-le raw depth before normalization or temporal processing.",
+          raw_depth_sha256
         );
         artifacts["adaptive_state.json"] = artifact_description(
           adaptive_available,
@@ -5204,24 +4838,6 @@ namespace platf::sbs_debug {
           "Exact float32-le unbounded canonical coordinate u; diagnostic only and never used by the live renderer.",
           shadow_coordinate_sha256
         );
-        artifacts["shadow_coordinate_shape.json"] = artifact_description(
-          true,
-          false,
-          "parallax-v2 canonical coordinate contract",
-          "Dimensions, units, and finite scalar range."
-        );
-        artifacts["shadow_coordinate.png"] = artifact_description(
-          true,
-          false,
-          "parallax-v2 canonical coordinate preview",
-          "Finite p2-p98 grayscale preview; not the numeric contract."
-        );
-        artifacts["shadow_coordinate_heat.png"] = artifact_description(
-          true,
-          false,
-          "parallax-v2 canonical coordinate preview",
-          "Finite p2-p98 jet preview."
-        );
         artifacts["shadow_candidate_parallax.f32"] = hashed_artifact_description(
           true,
           true,
@@ -5230,24 +4846,6 @@ namespace platf::sbs_debug {
             "Exact immutable signed one-eye ROI-local source-U before the spatial limiter; geometry evidence only and never renderer authority without depth_input_region embedding." :
             "Exact immutable signed one-eye full-source-U before the spatial limiter; geometry evidence only, never live render authority.",
           shadow_candidate_sha256
-        );
-        artifacts["shadow_candidate_parallax_shape.json"] = artifact_description(
-          true,
-          false,
-          "parallax-v2 pre-limiter candidate displacement contract",
-          "Dimensions, units, and finite scalar range."
-        );
-        artifacts["shadow_candidate_parallax.png"] = artifact_description(
-          true,
-          false,
-          "parallax-v2 pre-limiter candidate displacement preview",
-          "Finite p2-p98 grayscale preview."
-        );
-        artifacts["shadow_candidate_parallax_heat.png"] = artifact_description(
-          true,
-          false,
-          "parallax-v2 pre-limiter candidate displacement preview",
-          "Finite p2-p98 jet preview."
         );
         artifacts["shadow_ownership_refined_parallax.f32"] = hashed_artifact_description(
           true,
@@ -5258,26 +4856,6 @@ namespace platf::sbs_debug {
             "Exact signed one-eye full-source-U after conservative full-resolution source-contour foreground ownership and before the vertical conditioner. The pass may only raise an authenticated candidate at a uniquely owned far-side boundary texel.",
           shadow_ownership_sha256
         );
-        artifacts["shadow_ownership_refined_parallax_shape.json"] = artifact_description(
-          true,
-          false,
-          "parallax-v2 full-resolution contour ownership refinement contract",
-          video_region ?
-            "Crop-local dimensions, ROI-local source-U units, and finite scalar range for the ownership-refined candidate consumed by the vertical conditioner." :
-            "Full-source dimensions, full-source-U units, and finite scalar range for the ownership-refined candidate consumed by the vertical conditioner."
-        );
-        artifacts["shadow_ownership_refined_parallax.png"] = artifact_description(
-          true,
-          false,
-          "parallax-v2 full-resolution contour ownership refinement preview",
-          "Finite p2-p98 grayscale preview of the ownership-refined candidate."
-        );
-        artifacts["shadow_ownership_refined_parallax_heat.png"] = artifact_description(
-          true,
-          false,
-          "parallax-v2 full-resolution contour ownership refinement preview",
-          "Finite p2-p98 jet preview of the ownership-refined candidate."
-        );
         artifacts["shadow_vertical_majorant.f32"] = hashed_artifact_description(
           true,
           false,
@@ -5287,26 +4865,6 @@ namespace platf::sbs_debug {
             "Exact signed one-eye full-source-U for the least column-wise upper envelope v+ >= ownership-refined candidate with |dv+/dy| <= max_vertical_shear/content_width; diagnostic evidence only.",
           shadow_vertical_majorant_sha256
         );
-        artifacts["shadow_vertical_majorant_shape.json"] = artifact_description(
-          true,
-          false,
-          "parallax-v2 vertical shear-limiter intermediate contract",
-          video_region ?
-            "Crop-local dimensions, ROI-local source-U units, finite scalar range, v >= candidate, and the generated max_vertical_shear bound; not full-source renderer authority." :
-            "Full-source dimensions, full-source-U units, finite scalar range, v >= candidate, and the generated max_vertical_shear bound; not the live renderer position authority."
-        );
-        artifacts["shadow_vertical_majorant.png"] = artifact_description(
-          true,
-          false,
-          "parallax-v2 vertical shear-limiter intermediate preview",
-          "Finite p2-p98 grayscale preview of the exact column-wise majorant."
-        );
-        artifacts["shadow_vertical_majorant_heat.png"] = artifact_description(
-          true,
-          false,
-          "parallax-v2 vertical shear-limiter intermediate preview",
-          "Finite p2-p98 jet preview of the exact column-wise majorant."
-        );
         artifacts["shadow_vertical_conditioned.f32"] = hashed_artifact_description(
           true,
           false,
@@ -5315,26 +4873,6 @@ namespace platf::sbs_debug {
             "Exact signed one-eye ROI-local source-U after the fixed 75/25 share of the column upper/lower envelopes; may raise or lower the crop-local candidate while preserving the vertical shear bound." :
             "Exact signed one-eye full-source-U after the fixed 75/25 share of the column upper/lower envelopes; may raise or lower candidate while preserving the vertical shear bound.",
           shadow_vertical_conditioned_sha256
-        );
-        artifacts["shadow_vertical_conditioned_shape.json"] = artifact_description(
-          true,
-          false,
-          "parallax-v2 orientation-selective vertical conditioner contract",
-          video_region ?
-            "Crop-local dimensions, ROI-local source-U units, finite scalar range, authenticated envelope share, and vertical shear bound; intermediate consumed by the crop-local row majorant." :
-            "Full-source dimensions, full-source-U units, finite scalar range, authenticated envelope share, and vertical shear bound; intermediate consumed by the row majorant."
-        );
-        artifacts["shadow_vertical_conditioned.png"] = artifact_description(
-          true,
-          false,
-          "parallax-v2 orientation-selective vertical conditioner preview",
-          "Finite p2-p98 grayscale preview of the exact vertical share."
-        );
-        artifacts["shadow_vertical_conditioned_heat.png"] = artifact_description(
-          true,
-          false,
-          "parallax-v2 orientation-selective vertical conditioner preview",
-          "Finite p2-p98 jet preview of the exact vertical share."
         );
         if (subtitle_slr13_active) {
           artifacts["shadow_base_final_parallax.f32"] = hashed_artifact_description(
@@ -5346,26 +4884,6 @@ namespace platf::sbs_debug {
               "Exact ordinary full-source-U row-majorant field before SLR13; not selected renderer authority.",
             shadow_base_final_sha256
           );
-          artifacts["shadow_base_final_parallax_shape.json"] = artifact_description(
-            true,
-            false,
-            "ordinary post-limiter V2 field contract before SLR13 conditioning",
-            video_region ?
-              "Crop-local dimensions, ROI-local source-U units, finite scalar range, and limiter bounds for the exact Base consumed by SLR13; not renderer authority without depth_input_region.json and current conditioning." :
-              "Dimensions, full-source-U units, finite scalar range, and limiter bounds for the exact Base consumed by SLR13; not selected renderer authority."
-          );
-          artifacts["shadow_base_final_parallax.png"] = artifact_description(
-            true,
-            false,
-            "ordinary post-limiter V2 field preview before SLR13 conditioning",
-            "Finite p2-p98 grayscale preview of the exact pre-SLR13 Base field."
-          );
-          artifacts["shadow_base_final_parallax_heat.png"] = artifact_description(
-            true,
-            false,
-            "ordinary post-limiter V2 field preview before SLR13 conditioning",
-            "Finite p2-p98 jet preview of the exact pre-SLR13 Base field."
-          );
         }
         artifacts["shadow_final_parallax.f32"] = hashed_artifact_description(
           true,
@@ -5375,30 +4893,6 @@ namespace platf::sbs_debug {
             "Exact complete atomic one-eye ROI-local source-U field. Live renderer authority is this field together with depth_input_region embedding." :
             "Exact complete atomic one-eye full-source-U field; sole live V2 render position authority.",
           shadow_final_sha256
-        );
-        artifacts["shadow_final_parallax_shape.json"] = artifact_description(
-          true,
-          false,
-          "parallax-v2 atomic final displacement contract",
-          video_region ?
-            "Crop-local dimensions, ROI-local source-U units, finite scalar range, authenticated vertical share, and limiter bounds; renderer authority only with depth_input_region.json." :
-            "Dimensions, full-source-U units, finite scalar range, authenticated vertical share, horizontal slope bound, and vertical shear bound; live renderer authority."
-        );
-        artifacts["shadow_final_parallax.png"] = artifact_description(
-          true,
-          false,
-          "parallax-v2 displayed displacement preview",
-          video_region ?
-            "Finite p2-p98 grayscale preview of crop-local q; full-source renderer authority additionally requires depth_input_region.json." :
-            "Finite p2-p98 grayscale preview of the live V2 position field."
-        );
-        artifacts["shadow_final_parallax_heat.png"] = artifact_description(
-          true,
-          false,
-          "parallax-v2 displayed displacement preview",
-          video_region ?
-            "Finite p2-p98 jet preview of crop-local q; full-source renderer authority additionally requires depth_input_region.json." :
-            "Finite p2-p98 jet preview of the live V2 position field."
         );
         artifacts["shadow_state.json"] = hashed_artifact_description(
           true,
@@ -5414,52 +4908,43 @@ namespace platf::sbs_debug {
           "Independent mean/std/min/max state bound to the exact coordinate contract tag.",
           shadow_frame_stats_sha256
         );
-        artifacts["warp_map.f32"] = video_region ?
+        artifacts["warp_map.f32"] = warp_map_available ?
           hashed_artifact_description(
             true,
-            true,
-            "exact full-source inverse-warp mapping",
-            "Raw normalized full-source U selected by production Reproject after crop-local field embedding and the outside-only zero-plane collar.",
+            video_region,
+            video_region ? "exact full-source inverse-warp mapping" :
+                           "exact inverse-warp mapping",
+            video_region ?
+              "Raw normalized full-source U selected by production Reproject after crop-local field embedding and the outside-only zero-plane collar." :
+              "Raw normalized source-U selected by the production Reproject function.",
             warp_map_sha256
           ) :
           artifact_description(
-            warp_map_available,
+            false,
             false,
             "exact inverse-warp mapping",
-            warp_map_available ?
-              "Raw normalized source-U selected by the production Reproject function." :
-              "Unavailable because the matching dump-only mapping pass could not be created."
+            "Unavailable because the matching dump-only mapping pass could not be created."
           );
-        artifacts["warp_map_shape.json"] = artifact_description(
-          warp_map_available,
-          video_region,
-          "inverse-warp mapping contract",
-          warp_map_available ?
-            "Dimensions, content fit, validity rules, and displacement derivation." :
-            "Unavailable with the matching dump-only mapping pass."
-        );
-        artifacts["warp_displacement_heat.png"] = artifact_description(
-          warp_map_available,
-          false,
-          "derived inverse displacement",
-          warp_map_available ?
-            "Signed output-eye-pixel displacement derived from the exact inverse map." :
-            "Unavailable with the matching dump-only mapping pass."
-        );
-        artifacts["warp_mask.png"] = artifact_description(
-          warp_mask_available,
-          false,
-          "V2 boundary-extrapolation mask",
-          warp_mask_available ?
-            "Red marks inverse samples outside the finite source interval that the live renderer clamps to the nearest boundary column; V2 has no internal owner selection or synthetic fill." :
+        artifacts["warp_mask.png"] = warp_mask_available ?
+          hashed_artifact_description(
+            true,
+            video_region,
+            "V2 boundary-extrapolation mask",
+            "Red marks inverse samples outside the finite source interval that the live renderer clamps to the nearest boundary column; V2 has no internal owner selection or synthetic fill.",
+            warp_mask_sha256
+          ) :
+          artifact_description(
+            false,
+            false,
+            "V2 boundary-extrapolation mask",
             "Unavailable because the matching dump-only mask pass could not be created."
+          );
+        artifacts["sbs.png"] = artifact_description(
+          true,
+          true,
+          "packed Host-SBS output",
+          "Final packed stereo preview using the same matched-frame transfer handling as source.png."
         );
-      artifacts["sbs.png"] = artifact_description(
-        true,
-        true,
-        "packed Host-SBS output",
-        "Final packed stereo preview using the same matched-frame transfer handling as source.png."
-      );
         artifacts["meta.txt"] = artifact_description(
           true,
           true,
@@ -5489,7 +4974,6 @@ namespace platf::sbs_debug {
                           {"format", "float32-le structured buffer"},
                         }},
           {"normalized_depth", nullptr},
-          {"warp_depth", texture_description(warp_depth)},
           {"packed_sbs", texture_description(sbs)},
           {"eye", {
                     {"width", eye_width},
@@ -5542,8 +5026,40 @@ namespace platf::sbs_debug {
           parallax_v2_shader_identity_json(
             *completed.parallax_v2_shader_provenance
           );
+        const nlohmann::json warp_map_contract = warp_map_available ?
+          nlohmann::json {
+            {"available", true},
+            {"schema", 2},
+            {"artifact", "warp_map.f32"},
+            {"width", warp_map_stats.width},
+            {"height", warp_map_stats.height},
+            {"eye_width", warp_map_stats.eye_width},
+            {"eye_height", warp_map_stats.eye_height},
+            {"source_width", source.desc.Width},
+            {"source_height", source.desc.Height},
+            {"content_scale_x", warp_map_stats.content_scale_x},
+            {"content_scale_y", warp_map_stats.content_scale_y},
+            {"dtype", "float32-le"},
+            {"layout", "row-major"},
+            {"channels", {"raw_reproject_source_u_normalized"}},
+            {"validity", {
+              {"content", "derive from content_scale_x/content_scale_y and packed output coordinate"},
+              {"inverse", video_region ?
+                "11-step contractive fixed-point solution of crop-local q embedded by depth_input_region.json scale and outside-only zero-plane collar" :
+                "11-step contractive fixed-point solution of the signed final-parallax field"},
+              {"mask", "warp_mask.png red marks finite-source boundary extrapolation; V2 has no internal owner or synthetic-fill path"},
+            }},
+            {"live_sample_source_u_normalized", "clamp(raw_reproject_source_u_normalized, 0, 1)"},
+            {"derived_inverse_displacement_output_eye_px", "(raw_reproject_source_u_normalized - aspect_fitted_unwarped_source_u) * content_scale_x * eye_width"},
+            {"derived_signed_binocular_disparity_px", "invert both eye maps at common source-U samples; x_right - x_left"},
+          } :
+          nlohmann::json {
+            {"available", false},
+            {"schema", 2},
+            {"artifact", nullptr},
+          };
         nlohmann::json manifest {
-          {"schema", 38},
+          {"schema", 39},
           {"capture", "one matched, completed Host-SBS frame"},
           {"capture_status", "complete"},
           {"published_atomically", true},
@@ -5555,7 +5071,11 @@ namespace platf::sbs_debug {
           {"color_preview_transform", color_preview_transform},
           {"hdr_preview", hdr ? color_preview_transform : "not applied"},
           {"cuda_graph_active", completed.cuda_graph_active},
-          {"warp_depth_prefilter_applied", false},
+          {"float_previews", {
+            {"packaged", false},
+            {"generator", "tools/sbsbench/generate_dump_previews.py"},
+            {"normalization", "finite p2-p98 computed on demand"},
+          }},
           {"renderer", {
                          {"authority", video_region ?
                            "authenticated crop-local atomic final field plus depth-input-region embedding" :
@@ -5602,11 +5122,12 @@ namespace platf::sbs_debug {
                             }},
                        }},
           {"dimensions", std::move(dimensions)},
+          {"warp_map_contract", warp_map_contract},
           {"final_parallax", {
             {"contract_schema",
              models::depth_coordinate_v2::final_parallax_contract_schema},
             {"artifact", "shadow_final_parallax.f32"},
-            {"warp_artifact", "warp_depth.f32"},
+            {"warp_input_artifact", "shadow_final_parallax.f32"},
             {"authority", std::string {
               models::depth_coordinate_v2::final_parallax_authority
             }},
@@ -5622,7 +5143,7 @@ namespace platf::sbs_debug {
             {"current_rgb_policy", std::string {
               models::depth_coordinate_v2::final_parallax_current_rgb_policy
             }},
-            {"warp_relation", "bit-identical"},
+            {"warp_relation", "same authenticated artifact"},
           }},
           {"normalization", adaptive_available ?
              nlohmann::json {
@@ -5637,12 +5158,10 @@ namespace platf::sbs_debug {
           {"raw_depth_statistics", {
                                      {"finite_count", raw_stats.finite_count},
                                      {"sample_count", static_cast<std::uint64_t>(raw_stats.width) * raw_stats.height},
-                                     {"finite_fraction", static_cast<double>(raw_stats.finite_count) / (static_cast<double>(raw_stats.width) * raw_stats.height)},
-                                     {"minimum", raw_stats.minimum},
-                                     {"maximum", raw_stats.maximum},
-                                     {"preview_low_p02", raw_stats.preview_low},
-                                     {"preview_high_p98", raw_stats.preview_high},
-                                   }},
+                                      {"finite_fraction", static_cast<double>(raw_stats.finite_count) / (static_cast<double>(raw_stats.width) * raw_stats.height)},
+                                      {"minimum", raw_stats.minimum},
+                                      {"maximum", raw_stats.maximum},
+                                    }},
           {"adaptive_summary", adaptive_available ? adaptive["decoded"] :
                                                      nlohmann::json {nullptr}},
           {"depth_input_region", {
@@ -5739,8 +5258,6 @@ namespace platf::sbs_debug {
              << '\n'
              << "raw_depth_min=" << raw_stats.minimum << '\n'
              << "raw_depth_max=" << raw_stats.maximum << '\n'
-             << "raw_depth_preview_low_p02=" << raw_stats.preview_low << '\n'
-             << "raw_depth_preview_high_p98=" << raw_stats.preview_high << '\n'
              << "cut_bridge_diagnostics_available="
              << (adaptive_available ? "true" : "false") << '\n'
              << "normalization_effective_lower=" << normalization.lower << '\n'
@@ -5749,7 +5266,7 @@ namespace platf::sbs_debug {
              << "normalization_frame_state=" << normalization.frame_state << '\n'
              << "cuda_graph_active="
              << (completed.cuda_graph_active ? "true" : "false") << '\n'
-             << "warp_depth_prefilter_applied=false\n"
+             << "final_parallax_artifact=shadow_final_parallax.f32\n"
              << "warp_map_available=" << (warp_map_available ? "true" : "false")
              << '\n'
              << "warp_mask_available=" << (warp_mask_available ? "true" : "false")
@@ -6209,13 +5726,6 @@ namespace platf::sbs_debug {
                     job.raw_depth,
                     budget
                   ),
-                  stage_e::warp_depth
-                )) return;
-            break;
-
-          case stage_e::warp_depth:
-            if (!collect_required(
-                  collect_texture(ctx, pending.warp_depth, job.warp_depth, budget),
                   stage_e::shadow_coordinate
                 )) return;
             break;
@@ -6463,7 +5973,8 @@ namespace platf::sbs_debug {
         completed.raw_model_provenance->preprocess_source_closure_sha256.empty() ||
         completed.raw_width != completed.model_width ||
         completed.raw_height != completed.model_height ||
-        prepared_frame_id_ != completed.matched_frame_id
+        prepared_frame_id_ != completed.matched_frame_id ||
+        completed.warp_depth != completed.shadow_final_parallax
       ) {
         retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
         return false;
@@ -6578,9 +6089,9 @@ namespace platf::sbs_debug {
       pending->gpu_trace_requested = completed.gpu_trace_ring != nullptr &&
         gpu_trace_shader_identity_matches_contract(completed.gpu_trace_provenance);
       pending->depth_input_source_available =
-        completed.depth_input_region.video_region;
+        completed.depth_input_region.is_video_region();
       pending->retry_token = retry_token;
-      if (completed.depth_input_region.video_region &&
+      if (completed.depth_input_region.is_video_region() &&
           (!job.warp_map_available || !job.warp_mask_available)) {
         BOOST_LOG(warning)
           << "SBS debug dump: ROI completion lacks the required full-source inverse map "sv
@@ -6611,7 +6122,6 @@ namespace platf::sbs_debug {
           static_cast<std::size_t>(raw_values) * sizeof(float),
           pending->raw_depth
         ) &&
-        stage_texture(device, ctx, completed.warp_depth, pending->warp_depth) &&
         stage_texture(device, ctx, completed.sbs, pending->sbs) &&
         stage_texture(
           device, ctx, completed.shadow_coordinate, pending->shadow_coordinate

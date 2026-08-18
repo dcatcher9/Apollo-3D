@@ -61,6 +61,13 @@ import direct_geometry_contract as direct_geometry  # noqa: E402
 import cut_state_contract  # noqa: E402
 
 TEMPORAL_MIN_SUPPORT = 0.1
+CURRENT_REQUIRED_GT_KEYS = frozenset({
+    "required_gt_depth",
+    "required_gt_flow",
+    "required_gt_subtitle_region",
+    "required_gt_subtitle_tight_mask",
+    "required_gt_subtitle_sanitizer_oracle",
+})
 # Minimum GT boundary support (percent of valid pixels) for depth_gt_edge_f1 to gate.
 GT_EDGE_MIN_SUPPORT_PCT = 1.0
 VERTICAL_MISALIGNMENT_QUANTILE = 0.99
@@ -220,6 +227,36 @@ def indexed_files(pattern, prefix):
             raise ValueError(f"duplicate {prefix} frame id {frame_id}: {out[frame_id]} and {path}")
         out[frame_id] = path
     return out
+
+
+def depth_flow_evidence_requirements(clip_meta):
+    """Return current depth/flow declarations without inferring them from dataset names."""
+
+    if not isinstance(clip_meta, dict):
+        raise ValueError("metadata root must be an object")
+    unknown = sorted(
+        key for key in clip_meta
+        if key.startswith("required_gt_") and key not in CURRENT_REQUIRED_GT_KEYS)
+    if unknown:
+        raise ValueError(f"unknown required-GT metadata keys: {unknown}")
+    for key in CURRENT_REQUIRED_GT_KEYS:
+        if key in clip_meta and not isinstance(clip_meta[key], bool):
+            raise ValueError(f"{key} must be boolean")
+    if ("reference_stereo_available" in clip_meta and
+            not isinstance(clip_meta["reference_stereo_available"], bool)):
+        raise ValueError("reference_stereo_available must be boolean")
+    if "dataset" in clip_meta:
+        missing = [
+            key for key in ("required_gt_depth", "required_gt_flow")
+            if key not in clip_meta
+        ]
+        if missing:
+            raise ValueError(
+                f"dataset metadata lacks explicit current evidence declarations: {missing}")
+    return (
+        clip_meta.get("required_gt_depth", False),
+        clip_meta.get("required_gt_flow", False),
+    )
 
 
 def load_cut_state_trace(path):
@@ -2722,39 +2759,18 @@ def measure_sequence(seq_dir, frames_dir=None, compact=False):
             if not isinstance(clip_meta, dict):
                 raise ValueError("metadata root must be an object")
             if "required_gt_stereo" in clip_meta:
-                retired = clip_meta.pop("required_gt_stereo")
-                if not isinstance(retired, bool):
-                    raise ValueError("retired required_gt_stereo must be boolean")
-                if ("reference_stereo_available" in clip_meta and
-                        clip_meta["reference_stereo_available"] != retired):
-                    raise ValueError("conflicting retired/current stereo reference declarations")
-                clip_meta["reference_stereo_available"] = retired
+                raise ValueError(
+                    "required_gt_stereo is retired; use reference_stereo_available")
             gt_kind = clip_meta.get("gt_depth_kind", gt_kind)
-            # Prepared public clips created before schema 5 already carry `dataset`; infer their
-            # evidence contract so upgrading the evaluator cannot silently keep the old fail-open
-            # behavior. Newly prepared clips store the explicit flags below.
-            require_gt_depth = bool(clip_meta.get("required_gt_depth", clip_meta.get("dataset")))
-            require_gt_flow = bool(clip_meta.get(
-                "required_gt_flow", clip_meta.get("dataset") == "TartanAir V2"))
-            if ("required_gt_subtitle_region" in clip_meta and
-                    not isinstance(clip_meta["required_gt_subtitle_region"], bool)):
-                raise ValueError("required_gt_subtitle_region must be boolean")
+            require_gt_depth, require_gt_flow = depth_flow_evidence_requirements(clip_meta)
             require_subtitle_region = clip_meta.get(
                 "required_gt_subtitle_region", False)
-            if ("required_gt_subtitle_tight_mask" in clip_meta and
-                    not isinstance(clip_meta["required_gt_subtitle_tight_mask"], bool)):
-                raise ValueError("required_gt_subtitle_tight_mask must be boolean")
             require_subtitle_tight_mask = clip_meta.get(
                 "required_gt_subtitle_tight_mask", False)
             if require_subtitle_tight_mask and not require_subtitle_region:
                 raise ValueError(
                     "required_gt_subtitle_tight_mask requires "
                     "required_gt_subtitle_region=true")
-            if ("required_gt_subtitle_sanitizer_oracle" in clip_meta and
-                    not isinstance(
-                        clip_meta["required_gt_subtitle_sanitizer_oracle"], bool)):
-                raise ValueError(
-                    "required_gt_subtitle_sanitizer_oracle must be boolean")
             require_subtitle_oracle = clip_meta.get(
                 "required_gt_subtitle_sanitizer_oracle", False)
             reference_stereo_available = bool(

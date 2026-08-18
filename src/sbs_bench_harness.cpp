@@ -2,10 +2,10 @@
  * @file src/sbs_bench_harness.cpp
  * @brief Headless frame-fed SBS benchmark harness (see sbs_bench_harness.h).
  *
- * Duplicates the minimal SBS composite from platform/windows/display_vram.cpp convert()
- * (which lives in an anonymous-namespace class and can't be called directly) but drives it
- * with the REAL video_depth_estimator on a fixed directory of frames. Output PNGs are scored
- * by tools/sbsbench/sbsbench.py. Windows-only (the estimator + shaders are D3D11/TensorRT).
+ * Retains the headless orchestration and D3D11 resources needed for fixed frame directories,
+ * while recording the SBS draw through the same record_host_sbs_v2_draw path as the live host.
+ * Output PNGs are scored by tools/sbsbench/sbsbench.py. Windows-only (the estimator + shaders
+ * are D3D11/TensorRT).
  */
 #include "sbs_bench_harness.h"
 
@@ -52,6 +52,8 @@
   #include "host_sbs_v2_geometry.h"
   #include "logging.h"
   #include "offline_sbs_contract.h"
+  #include "offline_sbs_wire_contract.h"
+  #include "platform/windows/host_sbs_v2_renderer.h"
   #include "sbs_perf.h"
   #include "sbs_bench_depth_coordinate_v2.h"
   #include "video.h"
@@ -1459,94 +1461,48 @@ namespace sbs_bench {
       // |value| <= the pointwise soft-container limit), and "state" carries the 12-word ParallaxState the
       // live renderer authenticates per pixel. Legacy pop/subject/adaptive knobs are gone; the
       // renderer identity and producer closure make the geometry provenance explicit.
-      nlohmann::ordered_json contract = {
-        {"schema", offline_sbs::scene_cache_contract_schema},
-        {"status", status},
-        {"source", {
-          {"width", metadata.source_width},
-          {"height", metadata.source_height},
-          {"frame_format", metadata.input_frame_format},
-          {"texture_format", metadata.input_texture_format},
-          {"color_space", metadata.input_color_space},
-        }},
-        {"depth", {
-          {"width", metadata.depth_width},
-          {"height", metadata.depth_height},
-          {"dxgi_format", "R32_FLOAT"},
-          {"dtype", "float32-le"},
-          {"layout", "row-major"},
-          {"row_order", "top-down"},
-          {"semantics", "depth-coordinate-v2-signed-final-parallax-source-u"},
-          {"source_u_limit",
-           static_cast<double>(models::depth_coordinate_v2::direct_container_limit)},
-          {"file_pattern", "frame_%010d.depth.r32f"},
-          {"bytes_per_frame",
-           static_cast<std::uint64_t>(metadata.depth_width) *
-             metadata.depth_height * sizeof(float)},
-        }},
-        {"state", {
-          {"schema", 2},
-          {"source", "depth_coordinate_v2.ParallaxState[0..2]"},
-          {"word_count", render_state_words_t {}.size()},
-          {"dtype", "uint32-le"},
-          {"layout", "raw-word-order"},
-          {"contract_schema", models::depth_coordinate_v2::contract_schema},
-          {"contract_tag", models::depth_coordinate_v2::contract_tag},
-          {"file_pattern", "frame_%010d.state.u32"},
-          {"bytes_per_frame", sizeof(render_state_words_t)},
-        }},
-        {"render_config", {
-          {"model", metadata.model_name},
-          {"model_url", metadata.model_url},
-          {"renderer", "depth-coordinate-v2-live-signed-parallax"},
-          {"producer_source_closure_sha256",
-           std::string(models::depth_coordinate_v2::shader_source_closure_sha256)},
-          {"renderer_source_closure_sha256",
-           std::string(models::host_sbs_shader_cache::
-                         parallax_v2_live_renderer_source_closure_sha256)},
-          {"pop_strength", metadata.pop_strength},
-          {"simulate_hdr", metadata.simulate_hdr},
-          {"hdr_scale", metadata.hdr_scale},
-          {"depth_reuse_interval", metadata.depth_reuse_interval},
-          {"requested_eye_width", metadata.eye_width},
-          {"requested_eye_height", metadata.eye_height},
-          {"output_scale", metadata.output_scale},
-          {"resolved_max_output_width", metadata.max_output_width},
-        }},
-        {"packed_sbs", {
-          {"eye_width", metadata.output_eye_width},
-          {"eye_height", metadata.output_eye_height},
-          {"width", metadata.output_sbs_width},
-          {"height", metadata.output_sbs_height},
-          {"texture_format", metadata.packed_texture_format},
-          {"frame_format", metadata.output_frame_format},
-          {"file_extension", metadata.output_file_extension},
-          {"file_pattern",
-           "sbs_%010d." + metadata.output_file_extension},
-          {"atomic_replay_publication", true},
-        }},
-        {"first_sequence", 1},
-        {"processed_count", processed_count},
-        {"last_completed_sequence",
-         processed_count > 0u ?
-           nlohmann::ordered_json(processed_count) :
-           nlohmann::ordered_json(nullptr)},
-        {"frame_count",
-         status == "complete" ?
-           nlohmann::ordered_json(metadata.frame_count) :
-           nlohmann::ordered_json(nullptr)},
-        {"atomic_frame_publication", true},
-        {"native_source_deletion", false},
-        {"cache_budget", {
-          {"enforced_by", "wrapper"},
-          {"native_limit_bytes", nullptr},
-          {"on_write_failure", "fail-closed"},
-          {"native_eviction", false},
-        }},
-      };
+      const auto contract = offline_sbs::wire::to_json(
+        offline_sbs::wire::scene_cache_contract_t {
+          .status = std::string {status},
+          .source = {
+            .width = metadata.source_width,
+            .height = metadata.source_height,
+            .frame_format = metadata.input_frame_format,
+            .texture_format = metadata.input_texture_format,
+            .color_space = metadata.input_color_space,
+          },
+          .depth_width = metadata.depth_width,
+          .depth_height = metadata.depth_height,
+          .render = {
+            .model = metadata.model_name,
+            .model_url = metadata.model_url,
+            .pop_strength = metadata.pop_strength,
+            .simulate_hdr = metadata.simulate_hdr,
+            .hdr_scale = metadata.hdr_scale,
+            .depth_reuse_interval = metadata.depth_reuse_interval,
+            .requested_eye_width = metadata.eye_width,
+            .requested_eye_height = metadata.eye_height,
+            .output_scale = metadata.output_scale,
+            .resolved_max_output_width = metadata.max_output_width,
+          },
+          .packed_sbs = {
+            .eye_width = metadata.output_eye_width,
+            .eye_height = metadata.output_eye_height,
+            .width = metadata.output_sbs_width,
+            .height = metadata.output_sbs_height,
+            .texture_format = metadata.packed_texture_format,
+            .frame_format = metadata.output_frame_format,
+            .file_extension = metadata.output_file_extension,
+          },
+          .processed_count = processed_count,
+          .frame_count = status == "complete" ?
+                           std::optional<std::uint64_t> {metadata.frame_count} :
+                           std::nullopt,
+        }
+      );
       return publish_json_atomically(
         directory / "scene_cache_contract.json",
-        contract
+        nlohmann::ordered_json(contract)
       );
     }
 
@@ -1851,145 +1807,66 @@ namespace sbs_bench {
                                    scene_cache_metadata &metadata,
                                    std::string &error) {
       try {
-        std::ifstream stream(directory / "scene_cache_contract.json");
-        nlohmann::json value;
-        if (!stream || !(stream >> value) || !value.is_object() ||
-            value.at("schema").get<unsigned>() != offline_sbs::scene_cache_contract_schema ||
-            (value.at("status").get<std::string>() != "running" &&
-             value.at("status").get<std::string>() != "complete") ||
-            !value.at("processed_count").is_number_integer()) {
-          error = "scene cache contract is not a running/complete schema-3 contract";
+        constexpr std::uintmax_t max_contract_bytes = 256ull * 1024ull;
+        const auto contract_path = directory / "scene_cache_contract.json";
+        std::error_code size_error;
+        const auto contract_size = fs::file_size(contract_path, size_error);
+        if (size_error || contract_size == 0 ||
+            contract_size > max_contract_bytes ||
+            contract_size > static_cast<std::uintmax_t>(
+                              std::numeric_limits<std::size_t>::max())) {
+          error = "scene cache contract exceeds its bounded wire size";
           return false;
         }
-        const std::string status = value.at("status").get<std::string>();
-        const auto processed_count =
-          value.at("processed_count").get<std::int64_t>();
-        std::int64_t frame_count = 0;
-        if (status == "complete") {
-          if (!value.at("frame_count").is_number_integer()) {
-            error = "complete scene cache contract has no frame_count";
-            return false;
-          }
-          frame_count = value.at("frame_count").get<std::int64_t>();
-        } else if (!value.at("frame_count").is_null()) {
-          error = "running scene cache contract must not claim a terminal frame_count";
+        std::ifstream stream(contract_path, std::ios::binary);
+        if (!stream) {
+          error = "scene cache contract is unavailable";
           return false;
         }
-        if (processed_count < 0 ||
-            static_cast<std::uint64_t>(processed_count) > follow_max_sequence ||
-            (status == "complete" &&
-             (frame_count <= 0 ||
-              frame_count != processed_count ||
-              static_cast<std::uint64_t>(frame_count) > follow_max_sequence)) ||
-            value.at("first_sequence").get<int>() != 1 ||
-            !value.at("atomic_frame_publication").get<bool>()) {
+        const std::string bytes {
+          std::istreambuf_iterator<char> {stream},
+          std::istreambuf_iterator<char> {},
+        };
+        const auto contract = offline_sbs::wire::parse_scene_cache_contract(
+          offline_sbs::wire::parse_json_without_duplicate_keys(bytes)
+        );
+        if (contract.processed_count > follow_max_sequence ||
+            (contract.frame_count && *contract.frame_count > follow_max_sequence)) {
           error = "scene cache contract has an invalid durable sequence";
           return false;
         }
-        const auto &source = value.at("source");
-        const auto &depth = value.at("depth");
-        const auto &state = value.at("state");
-        const auto &render = value.at("render_config");
-        const auto &packed = value.at("packed_sbs");
-        metadata.source_width = source.at("width").get<UINT>();
-        metadata.source_height = source.at("height").get<UINT>();
-        metadata.input_frame_format = source.at("frame_format").get<std::string>();
-        metadata.input_texture_format = source.at("texture_format").get<std::string>();
-        metadata.input_color_space = source.at("color_space").get<std::string>();
-        metadata.depth_width = depth.at("width").get<UINT>();
-        metadata.depth_height = depth.at("height").get<UINT>();
-        metadata.model_name = render.at("model").get<std::string>();
-        metadata.model_url = render.at("model_url").get<std::string>();
-        metadata.pop_strength = render.at("pop_strength").get<double>();
-        metadata.simulate_hdr = render.at("simulate_hdr").get<bool>();
-        metadata.hdr_scale = render.at("hdr_scale").get<double>();
-        metadata.depth_reuse_interval =
-          render.at("depth_reuse_interval").get<int>();
-        metadata.eye_width = render.at("requested_eye_width").get<int>();
-        metadata.eye_height = render.at("requested_eye_height").get<int>();
-        metadata.output_scale = render.at("output_scale").get<double>();
-        metadata.max_output_width =
-          render.at("resolved_max_output_width").get<int>();
-        metadata.output_eye_width = packed.at("eye_width").get<UINT>();
-        metadata.output_eye_height = packed.at("eye_height").get<UINT>();
-        metadata.output_sbs_width = packed.at("width").get<UINT>();
-        metadata.output_sbs_height = packed.at("height").get<UINT>();
-        metadata.packed_texture_format =
-          packed.at("texture_format").get<std::string>();
-        metadata.output_frame_format =
-          packed.at("frame_format").get<std::string>();
-        metadata.output_file_extension =
-          packed.at("file_extension").get<std::string>();
-        metadata.status = status;
-        metadata.processed_count =
-          static_cast<std::size_t>(processed_count);
-        metadata.frame_count =
-          frame_count > 0 ? static_cast<std::size_t>(frame_count) : 0u;
-
-        const std::uint64_t depth_bytes =
-          static_cast<std::uint64_t>(metadata.depth_width) *
-          metadata.depth_height * sizeof(float);
-        if (!metadata.source_width || !metadata.source_height ||
-            !metadata.depth_width || !metadata.depth_height ||
-            depth.at("dxgi_format").get<std::string>() != "R32_FLOAT" ||
-            depth.at("dtype").get<std::string>() != "float32-le" ||
-            depth.at("layout").get<std::string>() != "row-major" ||
-            depth.at("row_order").get<std::string>() != "top-down" ||
-            depth.at("file_pattern").get<std::string>() !=
-              "frame_%010d.depth.r32f" ||
-            depth.at("bytes_per_frame").get<std::uint64_t>() != depth_bytes ||
-            depth.at("semantics").get<std::string>() !=
-              "depth-coordinate-v2-signed-final-parallax-source-u" ||
-            depth.at("source_u_limit").get<double>() !=
-              static_cast<double>(
-                models::depth_coordinate_v2::direct_container_limit) ||
-            state.at("schema").get<int>() != 2 ||
-            state.at("source").get<std::string>() !=
-              "depth_coordinate_v2.ParallaxState[0..2]" ||
-            state.at("contract_schema").get<std::uint32_t>() !=
-              models::depth_coordinate_v2::contract_schema ||
-            state.at("contract_tag").get<std::uint32_t>() !=
-              models::depth_coordinate_v2::contract_tag ||
-            state.at("word_count").get<std::size_t>() !=
-              render_state_words_t {}.size() ||
-            state.at("dtype").get<std::string>() != "uint32-le" ||
-            state.at("layout").get<std::string>() != "raw-word-order" ||
-            state.at("file_pattern").get<std::string>() !=
-              "frame_%010d.state.u32" ||
-            state.at("bytes_per_frame").get<std::size_t>() !=
-              sizeof(render_state_words_t) ||
-            render.at("renderer").get<std::string>() !=
-              "depth-coordinate-v2-live-signed-parallax" ||
-            render.at("producer_source_closure_sha256").get<std::string>() !=
-              models::depth_coordinate_v2::shader_source_closure_sha256 ||
-            render.at("renderer_source_closure_sha256").get<std::string>() !=
-              models::host_sbs_shader_cache::
-                parallax_v2_live_renderer_source_closure_sha256 ||
-            !(metadata.pop_strength >= 0.25 &&
-              metadata.pop_strength <= 2.0) ||
-            metadata.depth_reuse_interval != 1 ||
-            !(metadata.output_scale > 0.0 && metadata.output_scale <= 4.0) ||
-            metadata.max_output_width <= 0 ||
-            !metadata.output_eye_width ||
-            !metadata.output_eye_height ||
-            metadata.output_sbs_width !=
-              2u * metadata.output_eye_width ||
-            metadata.output_sbs_height !=
-              metadata.output_eye_height ||
-            (metadata.output_file_extension != "png" &&
-             metadata.output_file_extension != "pfm") ||
-            packed.at("file_pattern").get<std::string>() !=
-              "sbs_%010d." + metadata.output_file_extension ||
-            !packed.at("atomic_replay_publication").get<bool>() ||
-            !std::isfinite(metadata.pop_strength) ||
-            !std::isfinite(metadata.hdr_scale) ||
-            !std::isfinite(metadata.output_scale)) {
-          error = "scene cache contract contains an unsupported layout or render configuration";
-          return false;
-        }
+        metadata.source_width = contract.source.width;
+        metadata.source_height = contract.source.height;
+        metadata.input_frame_format = contract.source.frame_format;
+        metadata.input_texture_format = contract.source.texture_format;
+        metadata.input_color_space = contract.source.color_space;
+        metadata.depth_width = contract.depth_width;
+        metadata.depth_height = contract.depth_height;
+        metadata.model_name = contract.render.model;
+        metadata.model_url = contract.render.model_url;
+        metadata.pop_strength = contract.render.pop_strength;
+        metadata.simulate_hdr = contract.render.simulate_hdr;
+        metadata.hdr_scale = contract.render.hdr_scale;
+        metadata.depth_reuse_interval = contract.render.depth_reuse_interval;
+        metadata.eye_width = contract.render.requested_eye_width;
+        metadata.eye_height = contract.render.requested_eye_height;
+        metadata.output_scale = contract.render.output_scale;
+        metadata.max_output_width = contract.render.resolved_max_output_width;
+        metadata.output_eye_width = contract.packed_sbs.eye_width;
+        metadata.output_eye_height = contract.packed_sbs.eye_height;
+        metadata.output_sbs_width = contract.packed_sbs.width;
+        metadata.output_sbs_height = contract.packed_sbs.height;
+        metadata.packed_texture_format = contract.packed_sbs.texture_format;
+        metadata.output_frame_format = contract.packed_sbs.frame_format;
+        metadata.output_file_extension = contract.packed_sbs.file_extension;
+        metadata.status = contract.status;
+        metadata.processed_count = static_cast<std::size_t>(contract.processed_count);
+        metadata.frame_count = contract.frame_count ?
+                                 static_cast<std::size_t>(*contract.frame_count) :
+                                 0u;
         return true;
-      } catch (const std::exception &) {
-        error = "malformed scene cache contract";
+      } catch (const std::exception &exception) {
+        error = std::string {"malformed scene cache contract: "} + exception.what();
         return false;
       }
     }
@@ -2031,46 +1908,45 @@ namespace sbs_bench {
                          std::vector<scene_plan_entry> &entries,
                          std::string &error) {
       try {
-        std::ifstream stream(path);
-        nlohmann::json value;
-        if (!stream || !(stream >> value) || !value.is_object() ||
-            value.at("schema").get<int>() != 2 ||
-            value.at("version").get<std::string>() != "scene-plan-v2" ||
-            value.at("cache_contract_schema").get<unsigned>() !=
-              offline_sbs::scene_cache_contract_schema ||
-            !value.at("scenes").is_array() ||
-            value.at("scenes").size() != 1u) {
-          error = "scene plan is not a scene-plan-v2 schema-2 document";
+        constexpr std::uintmax_t max_contract_bytes = 64ull * 1024ull;
+        std::error_code size_error;
+        const auto contract_size = fs::file_size(path, size_error);
+        if (size_error || contract_size == 0 ||
+            contract_size > max_contract_bytes ||
+            contract_size > static_cast<std::uintmax_t>(
+                              std::numeric_limits<std::size_t>::max())) {
+          error = "scene plan exceeds its bounded wire size";
           return false;
         }
-        for (const auto &scene : value.at("scenes")) {
-          if (!scene.is_object() ||
-              !scene.at("start_sequence").is_number_integer() ||
-              !scene.at("end_sequence_exclusive").is_number_integer()) {
-            error = "scene plan contains a malformed scene";
-            return false;
-          }
-          const auto start = scene.at("start_sequence").get<std::int64_t>();
-          const auto end =
-            scene.at("end_sequence_exclusive").get<std::int64_t>();
-          if (start <= 0 || end <= start ||
-              static_cast<std::uint64_t>(end - 1) >
-                follow_max_sequence ||
-              static_cast<std::uint64_t>(start) >
+        std::ifstream stream(path, std::ios::binary);
+        if (!stream) {
+          error = "scene plan is unavailable";
+          return false;
+        }
+        const std::string bytes {
+          std::istreambuf_iterator<char> {stream},
+          std::istreambuf_iterator<char> {},
+        };
+        const auto contract = offline_sbs::wire::parse_scene_plan_contract(
+          offline_sbs::wire::parse_json_without_duplicate_keys(bytes)
+        );
+        for (const auto &scene : contract.scenes) {
+          if (scene.end_sequence_exclusive - 1u > follow_max_sequence ||
+              scene.start_sequence >
                 static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()) ||
-              static_cast<std::uint64_t>(end) >
+              scene.end_sequence_exclusive >
                 static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
             error = "scene plan has a gap, overlap, or out-of-range sequence";
             return false;
           }
           entries.push_back({
-            static_cast<std::size_t>(start),
-            static_cast<std::size_t>(end),
+            static_cast<std::size_t>(scene.start_sequence),
+            static_cast<std::size_t>(scene.end_sequence_exclusive),
           });
         }
         return true;
-      } catch (const std::exception &) {
-        error = "malformed scene plan";
+      } catch (const std::exception &exception) {
+        error = std::string {"malformed scene plan: "} + exception.what();
         return false;
       }
     }
@@ -4121,7 +3997,7 @@ namespace sbs_bench {
         if (
           whole_clip_mode &&
           (
-            !est.input_region.valid() || est.input_region.video_region ||
+            !est.input_region.valid() || est.input_region.is_video_region() ||
             est.input_region.authority !=
               models::depth_analysis_authority_e::full_source ||
             est.input_region.source_width != frame_width ||
@@ -4481,26 +4357,31 @@ namespace sbs_bench {
                                est.shadow_final_parallax.Get();
       ID3D11ShaderResourceView *warp_state =
         direct_parallax_mode ? est.cut_state.Get() : est.shadow_state.Get();
-      ctx->OMSetRenderTargets(1, sbs_rtv.GetAddressOf(), nullptr);
-      ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-      ctx->VSSetShader(vs.Get(), nullptr, 0);
-      ctx->PSSetShader(ps.Get(), nullptr, 0);
-      ctx->RSSetViewports(1, &vp);
-      ctx->PSSetSamplers(0, 1, sampler.GetAddressOf());
-
-      ID3D11ShaderResourceView *srvs[] = {in_srv.Get(), warp_depth, warp_state};
-      ctx->PSSetShaderResources(0, 3, srvs);
       ID3D11Buffer *cb = repro_cb.Get();
-      ctx->PSSetConstantBuffers(2, 1, &cb);
       if (direct_parallax_cb) {
         ctx->PSSetConstantBuffers(4, 1, direct_parallax_cb.GetAddressOf());
       }
-      ctx->Draw(3, 0);
-
-      ID3D11RenderTargetView *null_rtv[] = {nullptr};
-      ctx->OMSetRenderTargets(1, null_rtv, nullptr);
-      ID3D11ShaderResourceView *null_srv[] = {nullptr, nullptr, nullptr, nullptr};
-      ctx->PSSetShaderResources(0, 3, null_srv);
+      const platf::dxgi::host_sbs_v2_draw_command_t draw_command {
+        .render_targets = {sbs_rtv.Get(), nullptr},
+        .render_target_count = 1u,
+        .vertex_shader = vs.Get(),
+        .pixel_shader = ps.Get(),
+        .viewport = vp,
+        .sampler = sampler.Get(),
+        .shader_resources = {
+          in_srv.Get(),
+          warp_depth,
+          warp_state,
+          nullptr,
+          nullptr,
+          nullptr,
+        },
+        .geometry_constants = cb,
+      };
+      if (!platf::dxgi::record_host_sbs_v2_draw(ctx.Get(), draw_command)) {
+        BOOST_LOG(error) << "sbs-bench: production V2 draw operands are incomplete";
+        return 6;
+      }
       ID3D11Texture2D *final_sbs_tex = sbs_tex.Get();
       if (time_warp) {
         ctx->End(warp_end.Get());
@@ -4558,6 +4439,8 @@ namespace sbs_bench {
       sbs_perf::tick();
 
       if (o.artifacts == artifact_mode_e::evaluation) {
+        ID3D11RenderTargetView *null_rtv[] = {nullptr};
+        ID3D11ShaderResourceView *null_srv[] = {nullptr, nullptr, nullptr, nullptr};
         // Offline-only mask pass, deliberately outside the production warp timestamp/CPU sample.
         // A contractive map has no internal holes; R marks finite-boundary extrapolation samples
         // that main_ps clamps to the nearest source column.
@@ -5375,250 +5258,207 @@ namespace sbs_bench {
       const std::string output_transfer = pfm_input ? "linear" : "sRGB";
       const std::string output_row_order = pfm_input ? "bottom-up" : "top-down";
 
-      std::ofstream contract(fs::path(o.out) / "whole_clip_contract.json");
-      if (!contract) {
-        BOOST_LOG(error) << "sbs-bench: cannot create whole_clip_contract.json";
-        return 8;
-      }
-      contract.imbue(std::locale::classic());
-      contract << std::setprecision(std::numeric_limits<float>::max_digits10);
-      contract
-        << "{\n"
-        << "  \"schema\": 1,\n"
-        << "  \"source_scope\": {\"frame_source\": "
-        << json_string(offline_sbs::whole_clip_frame_source)
-        << ", \"analysis_region\": "
-        << json_string(offline_sbs::whole_clip_analysis_region)
-        << ", \"active_window_dependency\": false, "
-           "\"window_region_roi\": false},\n"
-        << "  \"observation_timeline\": "
-        << (observation_timestamps.empty() ?
-              std::string {"null"} :
-              std::string {"{\"schema\":"} +
-                std::to_string(models::host_sbs_observation_timeline::schema) +
-                ",\"timestamp_unit\":\"monotonic-source-us-plus-one\",\"count\":" +
-                std::to_string(observation_timestamps.size()) +
-                ",\"sha256\":" + json_string(observation_timeline_sha256) + "}")
-        << ",\n"
-        << "  \"artifact_mode\": " << json_string(artifact_mode_name(o.artifacts)) << ",\n"
-        << "  \"inference_mode\": "
-        << json_string(replay_mode ? "scene-cache-replay" :
-                                    "single-pass-tensorrt")
-        << ",\n"
-        << "  \"depth_inference_enabled\": "
-        << (replay_mode ? "false" : "true") << ",\n"
-        << "  \"scheduled_depth_update_count\": "
-        << (replay_mode ? 0u : tensorrt_enqueue_count) << ",\n"
-        << "  \"tensorrt_enqueue_count\": " << tensorrt_enqueue_count << ",\n"
-        << "  \"depth_provenance\": "
-        << json_string(replay_mode ?
-                         "scene-cache-contract-schema-" +
-                           std::to_string(offline_sbs::scene_cache_contract_schema) +
-                           ":signed-final-parallax-R32_FLOAT" :
-                         std::string {"video_depth_estimator"})
-        << ",\n"
-        << "  \"pipeline_state_provenance\": "
-        << json_string(replay_mode ?
-                         "scene-cache-contract-schema-" +
-                           std::to_string(offline_sbs::scene_cache_contract_schema) +
-                           ":parallax-state-12-words" :
-                         std::string {
-                           "video_depth_estimator:cut-and-health-state-32-words"
-                         })
-        << ",\n"
-        << "  \"model\": " << json_string(model.name) << ",\n"
-        << "  \"source_frame_count\": " << completed_frame_count << ",\n"
-        << "  \"source_width\": " << source_width << ",\n"
-        << "  \"source_height\": " << source_height << ",\n"
-        << "  \"source_first_sequence\": " << follow_first_sequence << ",\n"
-        << "  \"depth_reuse_interval\": " << effective_depth_every << ",\n"
-        << "  \"resolved_runtime\": {\n"
-        << "    \"model\": " << json_string(model.name) << ",\n"
-        << "    \"model_url\": " << json_string(model.url) << ",\n"
-        << "    \"pop_strength\": " << sbs_cfg.pop_strength << ",\n"
-        << "    \"depth_width\": " << est.raw_width << ",\n"
-        << "    \"depth_height\": " << est.raw_height << ",\n"
-        << "    \"depth_reuse_interval\": " << effective_depth_every << ",\n"
-        << "    \"cuda_graph\": "
-        << (inference_wrapper_required ? "true" : "false") << ",\n"
-        << "    \"parallax_v2_shadow\": false,\n"
-        << "    \"parallax_v2_render\": "
-        << "true,\n"
-        << "    \"parallax_v2_live\": true,\n"
-        << "    \"cuda_graph_captured\": "
-        << (cuda_graph_captured ? "true" : "false") << ",\n"
-        << "    \"simulate_hdr\": " << (o.simulate_hdr ? "true" : "false") << ",\n"
-        << "    \"hdr_scale\": " << o.hdr_scale << ",\n"
-        << "    \"input_color_space\": "
-        << json_string(pipeline_color_space) << ",\n"
-        << "    \"input_frame_format\": " << json_string(input_frame_format) << ",\n"
-        << "    \"input_texture_format\": " << json_string(input_texture_format) << ",\n"
-        << "    \"input_transfer\": "
-        << json_string(hdr_texture_input ? "linear" : "sRGB") << ",\n"
-        << "    \"input_primaries\": "
-        << json_string(hdr_texture_input ? "scRGB/BT.709" : "sRGB/BT.709") << ",\n"
-        << "    \"input_reference_white_nits\": "
-        << (hdr_texture_input ? "80" : "null") << ",\n"
-        << "    \"packed_texture_format\": "
-        << json_string(packed_texture_format) << ",\n"
-        << "    \"packed_color_space\": " << json_string(pipeline_color_space) << ",\n"
-        << "    \"packed_transfer\": "
-        << json_string(hdr_texture_input ? "linear" : "sRGB") << ",\n"
-        << "    \"packed_primaries\": "
-        << json_string(hdr_texture_input ? "scRGB/BT.709" : "sRGB/BT.709") << ",\n"
-        << "    \"packed_reference_white_nits\": "
-        << (hdr_texture_input ? "80" : "null") << ",\n"
-        << "    \"output_frame_format\": " << json_string(output_frame_format) << ",\n"
-        << "    \"output_transfer\": " << json_string(output_transfer) << ",\n"
-        << "    \"output_primaries\": "
-        << json_string(pfm_input ? "scRGB/BT.709" : "sRGB/BT.709") << ",\n"
-        << "    \"output_reference_white_nits\": "
-        << (pfm_input ? "80" : "null") << ",\n"
-        << "    \"output_row_order\": " << json_string(output_row_order) << ",\n"
-        << "    \"output_ffmpeg_pixel_format\": "
-        << (pfm_input ? json_string("gbrpf32le") : "null") << ",\n"
-        << "    \"output_scale\": " << o.output_scale << ",\n"
-        << "    \"requested_eye_width\": " << o.eye_w << ",\n"
-        << "    \"requested_eye_height\": " << o.eye_h << ",\n"
-        << "    \"configured_max_encode_width\": "
-        << sbs_cfg.max_encode_width << ",\n"
-        << "    \"resolved_max_output_width\": " << max_width << ",\n"
-        << "    \"input_limit\": " << o.limit << ",\n"
-        << "    \"output_every\": " << o.output_every << ",\n"
-        << "    \"follow_mode\": " << (o.follow ? "true" : "false") << ",\n"
-        << "    \"follow_format\": "
-        << (o.follow ? json_string(o.follow_format) : "null") << ",\n"
-        << "    \"follow_count_bound\": "
-        << (o.follow_count > 0u ? std::to_string(o.follow_count) : "null") << ",\n"
-        << "    \"follow_producer_frame_count\": "
-        << (producer_frame_count ?
-              std::to_string(*producer_frame_count) :
-              "null")
-        << ",\n"
-        << "    \"follow_frame_pattern\": "
-        << (o.follow ?
-              json_string("frame_%010d." + o.follow_format) :
-              "null")
-        << ",\n"
-        << "    \"follow_first_sequence\": "
-        << (o.follow ? std::to_string(follow_first_sequence) : "null") << ",\n"
-        << "    \"follow_poll_interval_ms\": "
-        << (o.follow ? "10" : "null") << ",\n"
-        << "    \"follow_done_sentinel\": "
-        << (o.follow ? json_string(".producer-done.json") : "null") << ",\n"
-        << "    \"follow_failed_sentinel\": "
-        << (o.follow ? json_string(".producer-failed.json") : "null") << ",\n"
-        << "    \"follow_progress_file\": "
-        << (o.follow ? json_string("follow_progress.json") : "null") << ",\n"
-        << "    \"follow_native_input_deletion\": false,\n"
-        << "    \"follow_atomic_sbs_publication\": "
-        << ((o.follow || replay_mode) &&
-            o.artifacts == artifact_mode_e::conversion ?
-              "true" :
-              "false")
-        << ",\n"
-        << "    \"output_eye_width\": " << contract_eye_width << ",\n"
-        << "    \"output_eye_height\": " << contract_eye_height << ",\n"
-        << "    \"output_sbs_width\": " << contract_sbs_width << ",\n"
-        << "    \"output_sbs_height\": " << contract_sbs_height << ",\n"
-        << "    \"content_scale_x\": " << contract_content_scale_x << ",\n"
-        << "    \"content_scale_y\": " << contract_content_scale_y << ",\n"
-        << "    \"scene_cache_write\": "
-        << (!o.scene_cache.empty() ? "true" : "false") << ",\n"
-        << "    \"scene_cache_replay\": "
-        << (replay_mode ? "true" : "false") << ",\n"
-        << "    \"scene_cache_contract_schema\": "
-        << ((!o.scene_cache.empty() || replay_mode) ?
-              std::to_string(offline_sbs::scene_cache_contract_schema) :
-              "null")
-        << ",\n"
-        << "    \"scene_plan_schema\": "
-        << (replay_mode ? "2" : "null") << ",\n"
-        << "    \"scene_plan_version\": "
-        << (replay_mode ? json_string("scene-plan-v2") : "null") << ",\n"
-        << "    \"scene_start_sequence\": "
-        << (replay_mode ?
-              std::to_string(scene_plan.front().start_sequence) :
-              "null")
-        << ",\n"
-        << "    \"scene_end_sequence_exclusive\": "
-        << (replay_mode ?
-              std::to_string(scene_plan.front().end_sequence_exclusive) :
-              "null")
-        << ",\n"
-        << "    \"scene_cache_status_at_replay_start\": "
-        << (replay_mode ?
-              json_string(replay_cache_metadata.status) :
-              "null")
-        << ",\n"
-        << "    \"scene_cache_processed_count_at_replay_start\": "
-        << (replay_mode ?
-              std::to_string(replay_cache_metadata.processed_count) :
-              "null")
-        << "\n"
-        << "  },\n"
-        << "  \"adaptive_state\": {";
+      offline_sbs::wire::whole_clip_resolved_runtime_t resolved_runtime {
+        .model = model.name,
+        .model_url = model.url,
+        .pop_strength = sbs_cfg.pop_strength,
+        .depth_width = est.raw_width,
+        .depth_height = est.raw_height,
+        .depth_reuse_interval = effective_depth_every,
+        .cuda_graph = inference_wrapper_required,
+        .parallax_v2_shadow = false,
+        .parallax_v2_render = true,
+        .parallax_v2_live = true,
+        .cuda_graph_captured = cuda_graph_captured,
+        .simulate_hdr = o.simulate_hdr,
+        .hdr_scale = o.hdr_scale,
+        .input_color_space = pipeline_color_space,
+        .input_frame_format = input_frame_format,
+        .input_texture_format = input_texture_format,
+        .input_transfer = hdr_texture_input ? "linear" : "sRGB",
+        .input_primaries = hdr_texture_input ? "scRGB/BT.709" : "sRGB/BT.709",
+        .input_reference_white_nits = hdr_texture_input ?
+                                        std::optional<double> {80.0} : std::nullopt,
+        .packed_texture_format = packed_texture_format,
+        .packed_color_space = pipeline_color_space,
+        .packed_transfer = hdr_texture_input ? "linear" : "sRGB",
+        .packed_primaries = hdr_texture_input ? "scRGB/BT.709" : "sRGB/BT.709",
+        .packed_reference_white_nits = hdr_texture_input ?
+                                         std::optional<double> {80.0} : std::nullopt,
+        .output_frame_format = output_frame_format,
+        .output_transfer = output_transfer,
+        .output_primaries = pfm_input ? "scRGB/BT.709" : "sRGB/BT.709",
+        .output_reference_white_nits = pfm_input ?
+                                         std::optional<double> {80.0} : std::nullopt,
+        .output_row_order = output_row_order,
+        .output_ffmpeg_pixel_format = pfm_input ?
+                                        std::optional<std::string> {"gbrpf32le"} :
+                                        std::nullopt,
+        .output_scale = o.output_scale,
+        .requested_eye_width = o.eye_w,
+        .requested_eye_height = o.eye_h,
+        .configured_max_encode_width = sbs_cfg.max_encode_width,
+        .resolved_max_output_width = max_width,
+        .input_limit = o.limit,
+        .output_every = static_cast<std::uint64_t>(o.output_every),
+        .follow_mode = o.follow,
+        .follow_format = o.follow ?
+                           std::optional<std::string> {o.follow_format} : std::nullopt,
+        .follow_count_bound = o.follow_count > 0u ?
+                                std::optional<std::uint64_t> {o.follow_count} :
+                                std::nullopt,
+        .follow_producer_frame_count = producer_frame_count,
+        .follow_frame_pattern = o.follow ?
+                                  std::optional<std::string> {
+                                    "frame_%010d." + o.follow_format
+                                  } :
+                                  std::nullopt,
+        .follow_first_sequence = o.follow ?
+                                   std::optional<std::uint64_t> {
+                                     follow_first_sequence
+                                   } :
+                                   std::nullopt,
+        .follow_poll_interval_ms = o.follow ?
+                                     std::optional<std::uint32_t> {10u} :
+                                     std::nullopt,
+        .follow_done_sentinel = o.follow ?
+                                  std::optional<std::string> {".producer-done.json"} :
+                                  std::nullopt,
+        .follow_failed_sentinel = o.follow ?
+                                    std::optional<std::string> {".producer-failed.json"} :
+                                    std::nullopt,
+        .follow_progress_file = o.follow ?
+                                  std::optional<std::string> {"follow_progress.json"} :
+                                  std::nullopt,
+        .follow_native_input_deletion = false,
+        .follow_atomic_sbs_publication =
+          (o.follow || replay_mode) && o.artifacts == artifact_mode_e::conversion,
+        .output_eye_width = contract_eye_width,
+        .output_eye_height = contract_eye_height,
+        .output_sbs_width = contract_sbs_width,
+        .output_sbs_height = contract_sbs_height,
+        .content_scale_x = contract_content_scale_x,
+        .content_scale_y = contract_content_scale_y,
+        .scene_cache_write = !o.scene_cache.empty(),
+        .scene_cache_replay = replay_mode,
+        .scene_cache_contract_schema = !o.scene_cache.empty() || replay_mode ?
+          std::optional<std::uint32_t> {offline_sbs::scene_cache_contract_schema} :
+          std::nullopt,
+        .scene_plan_schema = replay_mode ?
+                               std::optional<std::uint32_t> {2u} : std::nullopt,
+        .scene_plan_version = replay_mode ?
+                                std::optional<std::string> {"scene-plan-v2"} :
+                                std::nullopt,
+        .scene_start_sequence = replay_mode ?
+                                  std::optional<std::uint64_t> {
+                                    scene_plan.front().start_sequence
+                                  } :
+                                  std::nullopt,
+        .scene_end_sequence_exclusive = replay_mode ?
+                                          std::optional<std::uint64_t> {
+                                            scene_plan.front().end_sequence_exclusive
+                                          } :
+                                          std::nullopt,
+        .scene_cache_status_at_replay_start = replay_mode ?
+          std::optional<std::string> {replay_cache_metadata.status} : std::nullopt,
+        .scene_cache_processed_count_at_replay_start = replay_mode ?
+          std::optional<std::uint64_t> {replay_cache_metadata.processed_count} :
+          std::nullopt,
+      };
+      offline_sbs::wire::whole_clip_adaptive_state_t adaptive_state;
       if (replay_mode) {
-        // The analysis child already emitted the authoritative cut trace. Replaying cached V2
-        // geometry runs no cut resolver, so publishing a synthetic CutBridgeState trace here
-        // would be false attribution and unnecessary durable I/O.
-        contract
-          << "\"transport\":\"none\","
-             "\"retained_history\":false,"
-             "\"frame_count\":0";
+        // Replay consumes the analysis child's authoritative trace and must not invent history.
+        adaptive_state = {
+          .transport = "none",
+          .retained_history = false,
+          .frame_count = 0,
+        };
+      } else if (o.bounded_adaptive_state) {
+        adaptive_state = {
+          .transport = "atomic-latest-v1",
+          .header_file = "adaptive_state_header.json",
+          .frame_file = "adaptive_state_frame.json",
+          .retained_history = false,
+          .schema = sbs_adaptive_state::schema_version,
+          .capture = std::string {sbs_adaptive_state::capture},
+          .frame_count = adaptive_state_frame_count,
+        };
       } else {
-        contract
-          << (
-               o.bounded_adaptive_state ?
-                 "\"transport\":\"atomic-latest-v1\","
-                 "\"header_file\":\"adaptive_state_header.json\","
-                 "\"frame_file\":\"adaptive_state_frame.json\","
-                 "\"retained_history\":false," :
-                 "\"transport\":\"jsonl-v1\","
-                 "\"file\":\"adaptive_state.jsonl\","
-                 "\"retained_history\":true,"
-             )
-          << "\"schema\":" << sbs_adaptive_state::schema_version
-          << ",\"capture\":" << json_string(sbs_adaptive_state::capture)
-          << ",\"frame_count\":" << adaptive_state_frame_count;
+        adaptive_state = {
+          .transport = "jsonl-v1",
+          .file = "adaptive_state.jsonl",
+          .retained_history = true,
+          .schema = sbs_adaptive_state::schema_version,
+          .capture = std::string {sbs_adaptive_state::capture},
+          .frame_count = adaptive_state_frame_count,
+        };
       }
-      contract
-        << "},\n"
-        << "  \"sbs\": {\"enabled\": "
-        << (o.artifacts == artifact_mode_e::conversion ? "true" : "false")
-        << ", \"file_pattern\": "
-        << (o.artifacts == artifact_mode_e::conversion ?
-              json_string(pfm_input ?
-                            "sbs_<frame-id>.pfm" :
-                            "sbs_<frame-id>.png") :
-              "null")
-        << ", \"frame_count\": " << written
-        << ", \"width\": " << sbs_w
-        << ", \"height\": " << sbs_h
-        << ", \"frame_format\": " << json_string(output_frame_format)
-        << ", \"transfer\": " << json_string(output_transfer)
-        << ", \"primaries\": "
-        << json_string(pfm_input ? "scRGB/BT.709" : "sRGB/BT.709")
-        << ", \"reference_white_nits\": "
-        << (pfm_input ? "80" : "null")
-        << ", \"row_order\": " << json_string(output_row_order)
-        << ", \"ffmpeg_pixel_format\": "
-        << (pfm_input ? json_string("gbrpf32le") : "null")
-        << ", \"atomic_publication\": "
-        << ((o.follow || replay_mode) &&
-            o.artifacts == artifact_mode_e::conversion ?
-              "true" :
-              "false")
-        << "}\n"
-        << "}\n";
-      contract.flush();
-      if (!contract.good()) {
-        BOOST_LOG(error) << "sbs-bench: failed writing whole_clip_contract.json";
-        return 8;
+      const offline_sbs::wire::whole_clip_sbs_t sbs_contract {
+        .enabled = o.artifacts == artifact_mode_e::conversion,
+        .file_pattern = o.artifacts == artifact_mode_e::conversion ?
+                           std::optional<std::string> {pfm_input ?
+                             "sbs_<frame-id>.pfm" : "sbs_<frame-id>.png"} :
+                           std::nullopt,
+        .frame_count = static_cast<std::uint64_t>(written),
+        .width = sbs_w,
+        .height = sbs_h,
+        .frame_format = output_frame_format,
+        .transfer = output_transfer,
+        .primaries = pfm_input ? "scRGB/BT.709" : "sRGB/BT.709",
+        .reference_white_nits = pfm_input ?
+                                   std::optional<double> {80.0} : std::nullopt,
+        .row_order = output_row_order,
+        .ffmpeg_pixel_format = pfm_input ?
+                                  std::optional<std::string> {"gbrpf32le"} :
+                                  std::nullopt,
+        .atomic_publication =
+          (o.follow || replay_mode) && o.artifacts == artifact_mode_e::conversion,
+      };
+      std::optional<offline_sbs::wire::observation_timeline_contract_t>
+        observation_timeline;
+      if (!observation_timestamps.empty()) {
+        observation_timeline = offline_sbs::wire::observation_timeline_contract_t {
+          .schema = models::host_sbs_observation_timeline::schema,
+          .timestamp_unit = "monotonic-source-us-plus-one",
+          .count = observation_timestamps.size(),
+          .sha256 = observation_timeline_sha256,
+        };
       }
-      contract.close();
-      if (!contract.good()) {
-        BOOST_LOG(error) << "sbs-bench: failed closing whole_clip_contract.json";
+      const auto whole_clip_contract = offline_sbs::wire::to_json(
+        offline_sbs::wire::whole_clip_contract_t {
+          .observation_timeline = std::move(observation_timeline),
+          .artifact_mode = std::string {artifact_mode_name(o.artifacts)},
+          .inference_mode = replay_mode ?
+                              "scene-cache-replay" : "single-pass-tensorrt",
+          .depth_inference_enabled = !replay_mode,
+          .scheduled_depth_update_count = replay_mode ? 0u : tensorrt_enqueue_count,
+          .tensorrt_enqueue_count = tensorrt_enqueue_count,
+          .depth_provenance = replay_mode ?
+            "scene-cache-contract-schema-" +
+              std::to_string(offline_sbs::scene_cache_contract_schema) +
+              ":signed-final-parallax-R32_FLOAT" :
+            std::string {"video_depth_estimator"},
+          .pipeline_state_provenance = replay_mode ?
+            "scene-cache-contract-schema-" +
+              std::to_string(offline_sbs::scene_cache_contract_schema) +
+              ":parallax-state-12-words" :
+            std::string {"video_depth_estimator:cut-and-health-state-32-words"},
+          .model = model.name,
+          .source_frame_count = completed_frame_count,
+          .source_width = source_width,
+          .source_height = source_height,
+          .source_first_sequence = follow_first_sequence,
+          .depth_reuse_interval = effective_depth_every,
+          .resolved_runtime = std::move(resolved_runtime),
+          .adaptive_state = std::move(adaptive_state),
+          .sbs = sbs_contract,
+        }
+      );
+      if (!publish_json_atomically(
+            fs::path(o.out) / "whole_clip_contract.json",
+            nlohmann::ordered_json(whole_clip_contract)
+          )) {
+        BOOST_LOG(error) << "sbs-bench: failed publishing whole_clip_contract.json";
         return 8;
       }
       if (o.follow &&

@@ -37,6 +37,7 @@
 #include "gpu_workload_arbiter.h"
 #include "offline_sbs_contract.h"
 #include "offline_sbs_filesystem.h"
+#include "offline_sbs_wire_contract.h"
 #include "platform/common.h"
 #include "uuid.h"
 
@@ -2140,7 +2141,7 @@ namespace offline_sbs {
       ::close(fd);
 #endif
       try {
-        auto value = nlohmann::json::parse(serialized);
+        auto value = wire::parse_json_without_duplicate_keys(serialized);
         if (!value.is_object()) {
           error = "contract root is not an object";
           return std::nullopt;
@@ -3078,44 +3079,29 @@ namespace offline_sbs {
     }
 
     nlohmann::json worker_spec_json(const worker_context_t &context) {
-      nlohmann::json value {
-        {"schema", 1},
-        {"job_id", context.job_id},
-        {"operation", to_string(context.operation)},
-        {"input_path", path_to_utf8(context.input_path)},
-        {"job_directory", path_to_utf8(context.job_directory)},
-        {"result_directory", path_to_utf8(context.result_directory)},
-        {"progress_path", path_to_utf8(context.worker_progress)},
-        {"result_path", path_to_utf8(context.worker_result)},
-        {"sunshine", {
-          {"executable", path_to_utf8(context.sunshine_executable)},
-          {"config", path_to_utf8(context.sunshine_config)},
-        }},
-        {"ffmpeg", {
-          {"path", path_to_utf8(context.ffmpeg_executable)},
-          {"version", context.ffmpeg_version},
-        }},
-        {"ffprobe", {
-          {"path", path_to_utf8(context.ffprobe_executable)},
-          {"version", context.ffprobe_version},
-        }},
-        {"scene_cache", {
-          {"hard_cap_bytes", context.scene_cache_max_bytes},
-          {"budget_policy", to_string(context.cache_budget_policy)},
-        }},
-        {"codec", context.codec},
-        {"planner", {
-          {"implementation", "native-offline-scene-planner"},
-          {"scene_plan_contract", "scene-plan-v2"},
-        }},
-        {"python_dependency", false},
-      };
-      if (context.staging_output) {
-        value["staging_output"] = path_to_utf8(*context.staging_output);
-      } else {
-        value["staging_output"] = nullptr;
-      }
-      return value;
+      return wire::to_json(wire::worker_spec_contract_t {
+        .job_id = context.job_id,
+        .operation = to_string(context.operation),
+        .input_path = path_to_utf8(context.input_path),
+        .job_directory = path_to_utf8(context.job_directory),
+        .result_directory = path_to_utf8(context.result_directory),
+        .progress_path = path_to_utf8(context.worker_progress),
+        .result_path = path_to_utf8(context.worker_result),
+        .staging_output = context.staging_output ?
+                            std::optional<std::string> {
+                              path_to_utf8(*context.staging_output)
+                            } :
+                            std::nullopt,
+        .sunshine_executable = path_to_utf8(context.sunshine_executable),
+        .sunshine_config = path_to_utf8(context.sunshine_config),
+        .ffmpeg_path = path_to_utf8(context.ffmpeg_executable),
+        .ffmpeg_version = context.ffmpeg_version,
+        .ffprobe_path = path_to_utf8(context.ffprobe_executable),
+        .ffprobe_version = context.ffprobe_version,
+        .codec = context.codec,
+        .scene_cache_hard_cap_bytes = context.scene_cache_max_bytes,
+        .scene_cache_budget_policy = to_string(context.cache_budget_policy),
+      });
     }
 
     bool validate_worker_result_contract(
@@ -3124,49 +3110,30 @@ namespace offline_sbs {
       std::string &error
     ) {
       try {
+        const auto typed_result = wire::parse_worker_result_contract(result);
         if (
-          !result.is_object() ||
-          result.value("schema", 0) != 1 ||
-          result.value("job_id", "") != context.job_id ||
-          result.value("status", "") != "complete" ||
-          result.value("operation", "") != to_string(context.operation) ||
-          result.value("codec", "") != context.codec ||
+          typed_result.job_id != context.job_id ||
+          typed_result.operation != to_string(context.operation) ||
+          typed_result.codec != context.codec ||
           context.worker_spec_sha256.empty() ||
-          result.value("worker_spec_sha256", "") !=
-            context.worker_spec_sha256 ||
-          result.value("python_dependency", true)
+          typed_result.worker_spec_sha256 != context.worker_spec_sha256
         ) {
           error = "worker result identity/configuration attestation mismatch";
           return false;
         }
-        if (
-          !result.contains("source") || !result["source"].is_object() ||
-          !result.contains("scenes") || !result["scenes"].is_array() ||
-          !result.contains("analysis_contract") ||
-          !result["analysis_contract"].is_object() ||
-          !result.contains("replay_contracts") ||
-          !result["replay_contracts"].is_array() ||
-          !result.contains("cache") || !result["cache"].is_object()
-        ) {
-          error = "worker result is missing native analysis/replay attestations";
-          return false;
-        }
-        const auto scene_count = result.at("scene_count").get<std::uint64_t>();
+        const auto scene_count = typed_result.scenes.size();
         if (
           scene_count == 0 ||
-          scene_count != result["scenes"].size() ||
           scene_count > max_scene_count
         ) {
           error = "worker result scene count is invalid";
           return false;
         }
-        const auto &source = result["source"];
+        const auto &source = typed_result.source;
         if (
-          source.value("width", 0u) == 0 ||
-          source.value("height", 0u) == 0 ||
-          source.value("frame_count", 0ull) == 0 ||
-          !std::isfinite(source.value("duration_seconds", 0.0)) ||
-          source.value("duration_seconds", 0.0) <= 0
+          source.width == 0 || source.height == 0 || source.frame_count == 0 ||
+          !std::isfinite(source.duration_seconds) ||
+          source.duration_seconds <= 0
         ) {
           error = "worker source summary is invalid";
           return false;
@@ -3176,9 +3143,9 @@ namespace offline_sbs {
         const auto expected_scene_audit =
           (context.result_directory / "scene-audit.json").lexically_normal();
         if (
-          path_from_utf8(source.at("contract").get<std::string>())
+          path_from_utf8(source.contract_path)
               .lexically_normal() != expected_source_contract ||
-          path_from_utf8(result.at("scene_audit").get<std::string>())
+          path_from_utf8(typed_result.scene_audit_path)
               .lexically_normal() != expected_scene_audit ||
           !regular_nonempty_file(expected_source_contract) ||
           !regular_nonempty_file(expected_scene_audit)
@@ -3186,13 +3153,11 @@ namespace offline_sbs {
           error = "worker result artifact paths are invalid";
           return false;
         }
-        const auto &cache = result["cache"];
-        const auto peak = cache.at("peak_bytes").get<std::uint64_t>();
+        const auto &cache = typed_result.cache;
         if (
-          cache.at("hard_cap_bytes").get<std::uint64_t>() !=
-            context.scene_cache_max_bytes ||
-          cache.at("remaining_bytes").get<std::uint64_t>() != 0 ||
-          peak > context.scene_cache_max_bytes
+          cache.hard_cap_bytes != context.scene_cache_max_bytes ||
+          cache.remaining_bytes != 0 ||
+          cache.peak_bytes > context.scene_cache_max_bytes
         ) {
           error = "worker cache-bound attestation is invalid";
           return false;
@@ -3202,16 +3167,14 @@ namespace offline_sbs {
           if (
             !context.staging_output ||
             !context.final_output ||
-            !result.contains("output") ||
-            !result["output"].is_string() ||
-            !result.contains("staging_identity") ||
-            !result["staging_identity"].is_object() ||
-            path_from_utf8(result["output"].get<std::string>())
+            !typed_result.output_path ||
+            !typed_result.staging_identity ||
+            path_from_utf8(*typed_result.output_path)
                 .lexically_normal() != context.staging_output->lexically_normal() ||
-            result["replay_contracts"].size() != scene_count ||
+            typed_result.replay_contracts.size() != scene_count ||
             !file_matches_publish_identity(
               *context.staging_output,
-              result["staging_identity"]
+              *typed_result.staging_identity
             ) ||
             !regular_nonempty_file(*context.staging_output) ||
             !regular_nonempty_file(
@@ -3221,12 +3184,8 @@ namespace offline_sbs {
             error = "worker conversion output/replay attestation is invalid";
             return false;
           }
-        } else if (
-          (result.contains("output") && !result["output"].is_null()) ||
-          (result.contains("staging_identity") &&
-           !result["staging_identity"].is_null()) ||
-          !result["replay_contracts"].empty()
-        ) {
+        } else if (typed_result.output_path || typed_result.staging_identity ||
+                   !typed_result.replay_contracts.empty()) {
           error = "evaluation worker unexpectedly reported rendered output";
           return false;
         }
@@ -3323,54 +3282,63 @@ namespace offline_sbs {
     }
   }  // namespace
 
+  namespace {
+    wire::job_snapshot_contract_t job_snapshot_wire_contract(
+      const job_snapshot_t &snapshot
+    ) {
+      std::vector<nlohmann::json> decisions;
+      if (snapshot.progress.scene_decisions.is_array()) {
+        decisions.assign(
+          snapshot.progress.scene_decisions.begin(),
+          snapshot.progress.scene_decisions.end()
+        );
+      }
+      return {
+      .id = snapshot.id,
+      .state = to_string(snapshot.state),
+      .operation = to_string(snapshot.operation),
+      .input_path = path_to_utf8(snapshot.input_path),
+      .output_path = snapshot.output_path ?
+                       std::optional<std::string> {
+                         path_to_utf8(*snapshot.output_path)
+                       } :
+                       std::nullopt,
+      .output_location = snapshot.output_location ?
+                           std::optional<std::string> {
+                             to_string(*snapshot.output_location)
+                           } :
+                           std::nullopt,
+      .codec = snapshot.codec,
+      .scene_cache_max_bytes = snapshot.scene_cache_max_bytes,
+      .cache_budget_policy = to_string(snapshot.cache_budget_policy),
+      .progress = {
+        .phase = snapshot.progress.phase,
+        .processed_frames = snapshot.progress.processed_frames,
+        .total_frames = snapshot.progress.total_frames,
+        .source_time_seconds = snapshot.progress.source_time_seconds,
+        .source_duration_seconds = snapshot.progress.source_duration_seconds,
+        .scene_count = snapshot.progress.scene_count,
+        .current_scene = snapshot.progress.current_scene.is_object() ?
+                           std::optional<nlohmann::json> {
+                             snapshot.progress.current_scene
+                           } :
+                           std::nullopt,
+        .scene_decisions = std::move(decisions),
+      },
+      .created_at_unix_ms = snapshot.created_at_unix_ms,
+      .started_at_unix_ms = snapshot.started_at_unix_ms,
+      .ended_at_unix_ms = snapshot.ended_at_unix_ms,
+      .error = snapshot.error.empty() ?
+                 std::nullopt : std::optional<std::string> {snapshot.error},
+      .worker_result = snapshot.worker_result.is_null() ?
+                         std::nullopt :
+                         std::optional<nlohmann::json> {snapshot.worker_result},
+      };
+    }
+  }  // namespace
+
   nlohmann::json job_snapshot_t::json() const {
-    nlohmann::json value {
-      {"schema", 1},
-      {"id", id},
-      {"state", to_string(state)},
-      {"operation", to_string(operation)},
-      {"input_path", path_to_utf8(input_path)},
-      {"output_path", output_path ?
-                        nlohmann::json(path_to_utf8(*output_path)) :
-                        nlohmann::json(nullptr)},
-      {"output_location", output_location ?
-                            nlohmann::json(to_string(*output_location)) :
-                            nlohmann::json(nullptr)},
-      {"codec", codec},
-      {"scene_cache_max_bytes", scene_cache_max_bytes},
-      {"cache_budget_policy", to_string(cache_budget_policy)},
-      {"progress", {
-        {"phase", progress.phase},
-        {"processed_frames", progress.processed_frames},
-        {"total_frames", progress.total_frames ?
-                           nlohmann::json(*progress.total_frames) :
-                           nlohmann::json(nullptr)},
-        {"source_time_seconds", progress.source_time_seconds ?
-                                  nlohmann::json(*progress.source_time_seconds) :
-                                  nlohmann::json(nullptr)},
-        {"source_duration_seconds", progress.source_duration_seconds ?
-                                      nlohmann::json(*progress.source_duration_seconds) :
-                                      nlohmann::json(nullptr)},
-        {"scene_count", progress.scene_count ?
-                          nlohmann::json(*progress.scene_count) :
-                          nlohmann::json(nullptr)},
-        {"current_scene", progress.current_scene.is_object() ?
-                            progress.current_scene :
-                            nlohmann::json(nullptr)},
-      }},
-      {"scene_decisions", progress.scene_decisions},
-      {"created_at_unix_ms", created_at_unix_ms},
-      {"started_at_unix_ms", started_at_unix_ms ?
-                               nlohmann::json(*started_at_unix_ms) :
-                               nlohmann::json(nullptr)},
-      {"ended_at_unix_ms", ended_at_unix_ms ?
-                             nlohmann::json(*ended_at_unix_ms) :
-                             nlohmann::json(nullptr)},
-      {"error", error.empty() ? nlohmann::json(nullptr) : nlohmann::json(error)},
-      {"worker_result", worker_result.is_null() ?
-                          nlohmann::json(nullptr) : worker_result},
-    };
-    return value;
+    return wire::to_json(job_snapshot_wire_contract(*this));
   }
 
   nlohmann::json service_reply_t::json() const {
@@ -3478,24 +3446,27 @@ namespace offline_sbs {
     }
 
     bool persist_locked(const record_t &record, std::string &error) const {
-      auto value = record.snapshot.json();
-      value["retention_sequence"] = record.retention_sequence;
-      value["worker"] = {
-        {"spec", path_to_utf8(record.worker.worker_spec)},
-        {"spec_sha256", record.worker.worker_spec_sha256},
-        {"progress", path_to_utf8(record.worker.worker_progress)},
-        {"result", path_to_utf8(record.worker.worker_result)},
-        {"log", path_to_utf8(record.worker.worker_log)},
-        {"result_directory", path_to_utf8(record.worker.result_directory)},
-        {"staging_output", record.worker.staging_output ?
-                               nlohmann::json(path_to_utf8(
-                                 *record.worker.staging_output)) :
-                               nlohmann::json(nullptr)},
-        {"ffmpeg_path", path_to_utf8(record.worker.ffmpeg_executable)},
-        {"ffmpeg_version", record.worker.ffmpeg_version},
-        {"ffprobe_path", path_to_utf8(record.worker.ffprobe_executable)},
-        {"ffprobe_version", record.worker.ffprobe_version},
-      };
+      const auto value = wire::to_json(wire::persisted_job_contract_t {
+        .snapshot = job_snapshot_wire_contract(record.snapshot),
+        .retention_sequence = record.retention_sequence,
+        .worker = wire::persisted_worker_contract_t {
+          .spec_path = path_to_utf8(record.worker.worker_spec),
+          .spec_sha256 = record.worker.worker_spec_sha256,
+          .progress_path = path_to_utf8(record.worker.worker_progress),
+          .result_path = path_to_utf8(record.worker.worker_result),
+          .log_path = path_to_utf8(record.worker.worker_log),
+          .result_directory = path_to_utf8(record.worker.result_directory),
+          .staging_output = record.worker.staging_output ?
+                              std::optional<std::string> {
+                                path_to_utf8(*record.worker.staging_output)
+                              } :
+                              std::nullopt,
+          .ffmpeg_path = path_to_utf8(record.worker.ffmpeg_executable),
+          .ffmpeg_version = record.worker.ffmpeg_version,
+          .ffprobe_path = path_to_utf8(record.worker.ffprobe_executable),
+          .ffprobe_version = record.worker.ffprobe_version,
+        },
+      });
       return write_json_atomically(record.state_path, value, error);
     }
 
@@ -3504,17 +3475,14 @@ namespace offline_sbs {
       std::string &error
     ) const {
       try {
-        if (value.value("schema", 0) != 1) {
-          error = "unsupported persisted job schema";
-          return std::nullopt;
-        }
+        const auto persisted = wire::parse_persisted_job_contract(value);
+        const auto &contract = persisted.snapshot;
         job_snapshot_t snapshot;
-        snapshot.id = value.at("id").get<std::string>();
-        const auto state = parse_job_state(value.at("state").get<std::string>());
-        const auto operation =
-          parse_operation(value.at("operation").get<std::string>());
+        snapshot.id = contract.id;
+        const auto state = parse_job_state(contract.state);
+        const auto operation = parse_operation(contract.operation);
         const auto policy = parse_budget_policy(
-          value.at("cache_budget_policy").get<std::string>()
+          contract.cache_budget_policy
         );
         if (!valid_job_id(snapshot.id) || !state || !operation || !policy) {
           error = "persisted job enum or identity is invalid";
@@ -3522,8 +3490,7 @@ namespace offline_sbs {
         }
         snapshot.state = *state;
         snapshot.operation = *operation;
-        snapshot.input_path =
-          path_from_utf8(value.at("input_path").get<std::string>());
+        snapshot.input_path = path_from_utf8(contract.input_path);
         std::string persisted_path_error;
         if (!validate_local_path_syntax(
               snapshot.input_path,
@@ -3534,22 +3501,12 @@ namespace offline_sbs {
           error = std::move(persisted_path_error);
           return std::nullopt;
         }
-        if (!value.at("output_path").is_null()) {
-          const auto persisted_output =
-            path_from_utf8(value.at("output_path").get<std::string>());
+        if (contract.output_path) {
+          const auto persisted_output = path_from_utf8(*contract.output_path);
           const auto output_name = path_to_utf8(persisted_output.filename());
           auto output_location = output_location_e::legacy_managed_exports;
-          if (
-            value.contains("output_location") &&
-            !value.at("output_location").is_null()
-          ) {
-            if (!value.at("output_location").is_string()) {
-              error = "persisted output location is invalid";
-              return std::nullopt;
-            }
-            const auto parsed_location = parse_output_location(
-              value.at("output_location").get<std::string>()
-            );
+          if (contract.output_location) {
+            const auto parsed_location = parse_output_location(*contract.output_location);
             if (!parsed_location) {
               error = "persisted output location is unsupported";
               return std::nullopt;
@@ -3574,86 +3531,36 @@ namespace offline_sbs {
           }
           snapshot.output_path = expected_output;
           snapshot.output_location = output_location;
-        } else if (
-          value.contains("output_location") &&
-          !value.at("output_location").is_null()
-        ) {
+        } else if (contract.output_location) {
           error = "persisted evaluation job unexpectedly names an output location";
           return std::nullopt;
         }
-        snapshot.codec = value.at("codec").get<std::string>();
-        snapshot.scene_cache_max_bytes =
-          value.at("scene_cache_max_bytes").get<std::uint64_t>();
+        snapshot.codec = contract.codec;
+        snapshot.scene_cache_max_bytes = contract.scene_cache_max_bytes;
         snapshot.cache_budget_policy = *policy;
-        snapshot.created_at_unix_ms =
-          value.at("created_at_unix_ms").get<std::int64_t>();
-        if (!value.at("started_at_unix_ms").is_null()) {
-          snapshot.started_at_unix_ms =
-            value.at("started_at_unix_ms").get<std::int64_t>();
+        snapshot.created_at_unix_ms = contract.created_at_unix_ms;
+        snapshot.started_at_unix_ms = contract.started_at_unix_ms;
+        snapshot.ended_at_unix_ms = contract.ended_at_unix_ms;
+        snapshot.error = contract.error.value_or("");
+        if (contract.worker_result) {
+          snapshot.worker_result = *contract.worker_result;
         }
-        if (!value.at("ended_at_unix_ms").is_null()) {
-          snapshot.ended_at_unix_ms =
-            value.at("ended_at_unix_ms").get<std::int64_t>();
-        }
-        if (!value.at("error").is_null()) {
-          snapshot.error = value.at("error").get<std::string>();
-        }
-        if (!value.at("worker_result").is_null()) {
-          snapshot.worker_result = value.at("worker_result");
-        }
-        const auto &progress = value.at("progress");
-        snapshot.progress.phase = progress.at("phase").get<std::string>();
-        snapshot.progress.processed_frames =
-          progress.at("processed_frames").get<std::uint64_t>();
-        if (!progress.at("total_frames").is_null()) {
-          snapshot.progress.total_frames =
-            progress.at("total_frames").get<std::uint64_t>();
-        }
-        if (!progress.at("source_time_seconds").is_null()) {
-          snapshot.progress.source_time_seconds =
-            progress.at("source_time_seconds").get<double>();
-        }
-        if (!progress.at("source_duration_seconds").is_null()) {
-          snapshot.progress.source_duration_seconds =
-            progress.at("source_duration_seconds").get<double>();
-        }
-        if (!progress.at("scene_count").is_null()) {
-          snapshot.progress.scene_count =
-            progress.at("scene_count").get<std::uint64_t>();
-          if (*snapshot.progress.scene_count > max_scene_count) {
-            throw std::runtime_error(
-              "persisted scene count exceeds the serialized contract"
-            );
-          }
-        }
-        if (
-          progress.contains("current_scene") &&
-          !progress.at("current_scene").is_null()
-        ) {
-          if (!progress.at("current_scene").is_object()) {
-            throw std::runtime_error("persisted current scene is invalid");
-          }
-          if (
-            progress.at("current_scene").dump().size() >
-            max_current_scene_bytes
-          ) {
+        snapshot.progress.phase = contract.progress.phase;
+        snapshot.progress.processed_frames = contract.progress.processed_frames;
+        snapshot.progress.total_frames = contract.progress.total_frames;
+        snapshot.progress.source_time_seconds = contract.progress.source_time_seconds;
+        snapshot.progress.source_duration_seconds = contract.progress.source_duration_seconds;
+        snapshot.progress.scene_count = contract.progress.scene_count;
+        if (contract.progress.current_scene) {
+          if (contract.progress.current_scene->dump().size() > max_current_scene_bytes) {
             throw std::runtime_error("persisted current scene is too large");
           }
-          snapshot.progress.current_scene = progress.at("current_scene");
+          snapshot.progress.current_scene = *contract.progress.current_scene;
         }
-        if (value.contains("scene_decisions")) {
-          const auto &decisions = value.at("scene_decisions");
-          if (
-            !decisions.is_array() ||
-            decisions.size() > max_progress_scene_decisions ||
-            decisions.dump().size() > max_progress_contract_bytes ||
-            !std::ranges::all_of(decisions, [](const auto &decision) {
-              return decision.is_object();
-            })
-          ) {
-            throw std::runtime_error("persisted scene decisions are invalid");
-          }
-          snapshot.progress.scene_decisions = decisions;
+        snapshot.progress.scene_decisions = contract.progress.scene_decisions;
+        if (snapshot.progress.scene_decisions.dump().size() >
+            max_progress_contract_bytes) {
+          throw std::runtime_error("persisted scene decisions are too large");
         }
         return snapshot;
       } catch (const std::exception &exception) {
@@ -6410,39 +6317,19 @@ namespace offline_sbs {
       };
     }
     try {
-      const auto audit_status = audit->value("status", "");
-      const bool complete_audit = audit_status == "complete";
-      const bool partial_audit = audit_status == "running";
+      const auto typed_audit = wire::parse_scene_audit_contract(*audit);
+      const bool complete_audit = typed_audit.status == "complete";
+      const bool partial_audit = typed_audit.status == "running";
       if (
-        audit->value("schema", 0) != 2 ||
-        audit->value("version", "") != "whole-clip-scene-audit-v2" ||
         (
           completed_job ?
             !complete_audit :
             !(complete_audit || partial_audit)
         ) ||
-        !audit->contains("scenes") ||
-        !audit->at("scenes").is_array() ||
-        audit->at("scenes").size() > max_scene_count ||
         (
           complete_audit &&
           expected_scene_count &&
-          audit->at("scenes").size() != *expected_scene_count
-        ) ||
-        !std::ranges::all_of(
-          audit->at("scenes"),
-          [](const auto &scene) {
-            return scene.is_object();
-          }
-        ) ||
-        !audit->contains("boundary_revisions") ||
-        !audit->at("boundary_revisions").is_array() ||
-        audit->at("boundary_revisions").size() > max_scene_count ||
-        !std::ranges::all_of(
-          audit->at("boundary_revisions"),
-          [](const auto &boundary) {
-            return boundary.is_object();
-          }
+          typed_audit.scenes.size() != *expected_scene_count
         )
       ) {
         return {

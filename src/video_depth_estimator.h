@@ -319,10 +319,9 @@ namespace models {
   /**
    * Exact logical analysis raster and its placement in the retained full source.
    *
-   * video_region=false means the estimator input and final parallax cover the whole source,
-   * authority is full_source, and analysis_generation is zero. video_region remains the legacy
-   * placement name consumed by the renderer and dump path; true now means any bounded analysis ROI.
-   * Such an ROI has a non-full-source authority and a nonzero analysis generation. Its dimensions
+   * full_source authority means the estimator input and final parallax cover the whole source and
+   * analysis_generation is zero. Chromium-video and foreground-client authority mean a bounded
+   * analysis ROI with a nonzero analysis generation. Its dimensions
    * describe crop-local analysis coordinates, while the shaders sample that rectangle directly
    * from the full retained source. Position alone is not part of the analysis domain, so moving an
    * otherwise-identical authority may retain scene state.
@@ -336,8 +335,12 @@ namespace models {
     std::uint32_t bottom = 0u;
     depth_tensor_content_rect_t tensor_content {};
     std::uint64_t analysis_generation = 0u;
-    bool video_region = false;
     depth_analysis_authority_e authority = depth_analysis_authority_e::full_source;
+
+    constexpr bool is_video_region() const noexcept {
+      return authority == depth_analysis_authority_e::chromium_video ||
+             authority == depth_analysis_authority_e::foreground_client;
+    }
 
     constexpr std::uint32_t width() const noexcept {
       return right > left ? right - left : 0u;
@@ -352,10 +355,8 @@ namespace models {
           right > source_width || bottom > source_height || !tensor_content.valid()) {
         return false;
       }
-      if (video_region) {
-        return (authority == depth_analysis_authority_e::chromium_video ||
-                authority == depth_analysis_authority_e::foreground_client) &&
-               analysis_generation != 0u;
+      if (is_video_region()) {
+        return analysis_generation != 0u;
       }
       return authority == depth_analysis_authority_e::full_source &&
              left == 0u && top == 0u && right == source_width &&
@@ -365,8 +366,7 @@ namespace models {
     }
 
     constexpr bool same_analysis_domain(const depth_input_region_t &other) const noexcept {
-      return video_region == other.video_region &&
-             authority == other.authority &&
+      return authority == other.authority &&
              source_width == other.source_width && source_height == other.source_height &&
              width() == other.width() && height() == other.height() &&
              tensor_content == other.tensor_content &&
@@ -757,7 +757,8 @@ namespace models {
     append(region.tensor_content.right);
     append(region.tensor_content.bottom);
     append(region.analysis_generation);
-    append(region.video_region ? 1u : 0u);
+    // Preserve the established serialized/tag ABI bit while deriving it from semantic authority.
+    append(region.is_video_region() ? 1u : 0u);
     append(static_cast<std::uint8_t>(region.authority));
     append(static_cast<std::uint32_t>(color_space));
     append(field_width);

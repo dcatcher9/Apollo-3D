@@ -6,6 +6,7 @@
 #include "generated/sbs_adaptive_state_contract.h"
 #include "host_sbs_gpu_trace.h"
 #include "host_sbs_shader_cache.h"
+#include "host_sbs_v2_gpu_executor.h"
 #include "logging.h"
 #include "model_manager.h"
 #include "platform/windows/misc.h"
@@ -859,7 +860,7 @@ namespace models {
         !input_region.tensor_content.valid(result_shape)) {
       return false;
     }
-    if (input_region.video_region) {
+    if (input_region.is_video_region()) {
       const auto expected = plan_host_sbs_v2_video_region(
         {input_region.left, input_region.top, input_region.right, input_region.bottom},
         input_region.source_width,
@@ -1677,7 +1678,20 @@ namespace models {
     // Depth retains only the captured source CUgraph. Every authoritative depth launch uses the
     // conditional wrapper; there is deliberately no standalone raw depth CUgraphExec.
     tensorrt_cuda_graph_t ocr_inference_graph;
-    bool valid = false;  // all mandatory engine, shader, and session resources are ready
+    enum class lifecycle_state_e : std::uint8_t {
+      unavailable,
+      operational,
+      terminal,
+    };
+    lifecycle_state_e lifecycle_state = lifecycle_state_e::unavailable;
+
+    [[nodiscard]] bool is_operational() const noexcept {
+      return lifecycle_state == lifecycle_state_e::operational;
+    }
+
+    [[nodiscard]] bool is_terminal() const noexcept {
+      return lifecycle_state == lifecycle_state_e::terminal;
+    }
     float parallax_v2_raw_coordinate_scale = 0.0f;
     const float parallax_v2_requested_pop_strength;
     const float parallax_v2_requested_gain;
@@ -2357,7 +2371,7 @@ namespace models {
       auto &cuda = cuda_driver_api::get();
       for (int i = 0; i < perf_evt_ring::N; i++) {
         perf_try_resolve(r, i, cuda);
-        if (terminal_failure) {
+        if (is_terminal()) {
           break;
         }
       }
@@ -2374,7 +2388,7 @@ namespace models {
       }
       int slot = r.head;
       perf_try_resolve(r, slot, cuda);  // reclaim the slot if its prior sample is ready
-      if (terminal_failure || r.busy[slot]) {
+      if (is_terminal() || r.busy[slot]) {
         return -1;  // terminal, or still in flight: do not start another measurement
       }
       if (!r.start[slot]) {
@@ -2755,16 +2769,34 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_resolve_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subtitle_locator_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> near_identical_cbuffer;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> near_identical_tile_buf;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> near_identical_tile_srv;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> near_identical_tile_uav;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> near_identical_history_owner_buf;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> near_identical_history_owner_srv;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> near_identical_history_owner_uav;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> near_identical_gpu_decision_buf;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> near_identical_gpu_decision_srv;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> near_identical_gpu_decision_uav;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> near_identical_gpu_dispatch_buf;
+    struct d3d_buffer_views_t {
+      Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;
+      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+      Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
+
+      [[nodiscard]] bool ready() const noexcept {
+        return buffer && srv && uav;
+      }
+
+      void reset() noexcept {
+        buffer.Reset();
+        srv.Reset();
+        uav.Reset();
+      }
+    } near_identical_tile, near_identical_history_owner;
+
+    struct near_identical_transaction_resources_t : d3d_buffer_views_t {
+      Microsoft::WRL::ComPtr<ID3D11Buffer> dispatch;
+
+      [[nodiscard]] bool ready() const noexcept {
+        return d3d_buffer_views_t::ready() && dispatch;
+      }
+
+      void reset() noexcept {
+        d3d_buffer_views_t::reset();
+        dispatch.Reset();
+      }
+    } near_identical_transaction;
     Microsoft::WRL::ComPtr<ID3D11Buffer> gpu_trace_transaction_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> gpu_trace_transaction_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> gpu_trace_cbuffer;
@@ -2963,7 +2995,6 @@ namespace models {
     // pairwise-near-identical opaque follow-ups.
     std::uint64_t last_gpu_opaque_transaction_frame_id = 0;
     bool stream_error_logged = false;
-    bool terminal_failure = false;
     bool execution_context_poisoned = false;
     bool readiness_preflighted = false;  // can_accept_frame() already counted/queried this source opportunity
     bool depth_context_pooled = false;  // context reused from the pool (modules already loaded -> skip warmup)
@@ -2973,7 +3004,7 @@ namespace models {
       depth_input_region_t requested,
       const D3D11_TEXTURE2D_DESC &input_desc
     ) noexcept {
-      if (!requested.video_region) {
+      if (!requested.is_video_region()) {
         const auto tensor_shape = fit_host_sbs_v2_depth_tensor_shape(
           input_desc.Width,
           input_desc.Height
@@ -3015,7 +3046,7 @@ namespace models {
       clear_pending_inference_event_state();
       execution_context_poisoned =
         execution_context_poisoned || poison_execution_context;
-      terminal_failure = true;
+      lifecycle_state = lifecycle_state_e::terminal;
     }
 
     void mark_ocr_context_failure(
@@ -3137,7 +3168,7 @@ namespace models {
         precondition_failure = "the device transaction records are missing or misaligned";
       }
       if (precondition_failure) {
-        if (!terminal_failure) {
+        if (!is_terminal()) {
           fail_gpu_conditional_bridge_once(precondition_failure);
         }
         return false;
@@ -3157,7 +3188,7 @@ namespace models {
         return true;
       }
 
-      if (!reset_depth_conditional_graph() || terminal_failure) {
+      if (!reset_depth_conditional_graph() || is_terminal()) {
         return false;
       }
       const CUgraph optional_child_for_build =
@@ -3689,14 +3720,14 @@ namespace models {
       if (
         !gpu_conditional_bridge_available ||
         !cuda.has_conditional_graph_support() ||
-        !near_identical_gpu_decision_buf ||
+        !near_identical_transaction.buffer ||
         !cuda.cuGraphicsD3D11RegisterResource
       ) {
         return false;
       }
       const CUresult registered = cuda.cuGraphicsD3D11RegisterResource(
         &cuda_near_identical_decision_res,
-        near_identical_gpu_decision_buf.Get(),
+        near_identical_transaction.buffer.Get(),
         0u
       );
       if (
@@ -3728,14 +3759,8 @@ namespace models {
       if (!near_identical_detector_available || target_w <= 0 || target_h <= 0) {
         return false;
       }
-      if (
-        near_identical_tile_buf && near_identical_tile_srv &&
-        near_identical_tile_uav && near_identical_gpu_decision_buf &&
-        near_identical_gpu_decision_srv && near_identical_gpu_decision_uav &&
-        near_identical_gpu_dispatch_buf &&
-        near_identical_history_owner_buf && near_identical_history_owner_srv &&
-        near_identical_history_owner_uav
-      ) {
+      if (near_identical_tile.ready() && near_identical_transaction.ready() &&
+          near_identical_history_owner.ready()) {
         return true;
       }
 
@@ -3748,16 +3773,9 @@ namespace models {
         return false;
       }
 
-      near_identical_tile_buf.Reset();
-      near_identical_tile_srv.Reset();
-      near_identical_tile_uav.Reset();
-      near_identical_gpu_decision_buf.Reset();
-      near_identical_gpu_decision_srv.Reset();
-      near_identical_gpu_decision_uav.Reset();
-      near_identical_gpu_dispatch_buf.Reset();
-      near_identical_history_owner_buf.Reset();
-      near_identical_history_owner_srv.Reset();
-      near_identical_history_owner_uav.Reset();
+      near_identical_tile.reset();
+      near_identical_transaction.reset();
+      near_identical_history_owner.reset();
 
       constexpr std::uint32_t tile_word_count = 4u;
       const std::uint32_t tile_group_width =
@@ -3809,7 +3827,7 @@ namespace models {
         if (FAILED(device->CreateBuffer(
               &desc,
               &initial_data,
-              near_identical_gpu_decision_buf.ReleaseAndGetAddressOf()
+              near_identical_transaction.buffer.ReleaseAndGetAddressOf()
             ))) {
           return false;
         }
@@ -3821,9 +3839,9 @@ namespace models {
           static_cast<UINT>(near_identical_gpu_decision_word_count);
         uav_desc.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
         if (FAILED(device->CreateUnorderedAccessView(
-              near_identical_gpu_decision_buf.Get(),
+              near_identical_transaction.buffer.Get(),
               &uav_desc,
-              near_identical_gpu_decision_uav.ReleaseAndGetAddressOf()
+              near_identical_transaction.uav.ReleaseAndGetAddressOf()
             ))) {
           return false;
         }
@@ -3835,9 +3853,9 @@ namespace models {
           static_cast<UINT>(near_identical_gpu_decision_word_count);
         srv_desc.BufferEx.Flags = D3D11_BUFFEREX_SRV_FLAG_RAW;
         if (FAILED(device->CreateShaderResourceView(
-              near_identical_gpu_decision_buf.Get(),
+              near_identical_transaction.buffer.Get(),
               &srv_desc,
-              near_identical_gpu_decision_srv.ReleaseAndGetAddressOf()
+              near_identical_transaction.srv.ReleaseAndGetAddressOf()
             ))) {
           return false;
         }
@@ -3846,43 +3864,36 @@ namespace models {
         return SUCCEEDED(device->CreateBuffer(
                  &desc,
                  &initial_data,
-                 near_identical_gpu_dispatch_buf.ReleaseAndGetAddressOf()
+                 near_identical_transaction.dispatch.ReleaseAndGetAddressOf()
                ));
       };
       const bool resources_ready =
         create_structured_uint_buffer(
           tile_group_count * tile_word_count,
           tile_word_count,
-          near_identical_tile_buf,
-          near_identical_tile_srv,
-          near_identical_tile_uav
+          near_identical_tile.buffer,
+          near_identical_tile.srv,
+          near_identical_tile.uav
         ) &&
         create_structured_uint_buffer(
           static_cast<std::uint32_t>(near_identical_history_owner_word_count),
           1u,
-          near_identical_history_owner_buf,
-          near_identical_history_owner_srv,
-          near_identical_history_owner_uav
+          near_identical_history_owner.buffer,
+          near_identical_history_owner.srv,
+          near_identical_history_owner.uav
         ) &&
         create_decision_buffers();
       if (!resources_ready) {
-        near_identical_tile_buf.Reset();
-        near_identical_tile_srv.Reset();
-        near_identical_tile_uav.Reset();
-        near_identical_gpu_decision_buf.Reset();
-        near_identical_gpu_decision_srv.Reset();
-        near_identical_gpu_decision_uav.Reset();
-        near_identical_gpu_dispatch_buf.Reset();
-        near_identical_history_owner_buf.Reset();
-        near_identical_history_owner_srv.Reset();
-        near_identical_history_owner_uav.Reset();
+        near_identical_tile.reset();
+        near_identical_transaction.reset();
+        near_identical_history_owner.reset();
         near_identical_detector_available = false;
         log_near_identical_detector_failure_once("GPU transaction-buffer setup failed");
         return false;
       }
       const UINT zero[4] = {};
       context->ClearUnorderedAccessViewUint(
-        near_identical_history_owner_uav.Get(), zero
+        near_identical_history_owner.uav.Get(), zero
       );
       return true;
     }
@@ -3947,7 +3958,7 @@ namespace models {
       const std::uint64_t token,
       const cuda_conditional_graph::work_flag_e subtitle_work
     ) {
-      if (token == 0u || !near_identical_gpu_decision_buf) {
+      if (token == 0u || !near_identical_transaction.buffer) {
         return false;
       }
       std::array<std::uint32_t, near_identical_gpu_decision_word_count> transaction {};
@@ -3984,7 +3995,7 @@ namespace models {
         )] = 1u;
       }
       context->UpdateSubresource(
-        near_identical_gpu_decision_buf.Get(),
+        near_identical_transaction.buffer.Get(),
         0u,
         nullptr,
         transaction.data(),
@@ -3997,7 +4008,7 @@ namespace models {
     bool dispatch_near_identical_scene_seed() {
       if (
         !near_identical_scene_seed_cs || !near_identical_cbuffer ||
-        !near_identical_history_owner_srv || !scene_cut_evidence_uav || !cbuffer ||
+        !near_identical_history_owner.srv || !scene_cut_evidence_uav || !cbuffer ||
         pending_frame_id == 0u ||
         !pending_input_region.tensor_content.valid({target_w, target_h})
       ) {
@@ -4022,7 +4033,7 @@ namespace models {
         nullptr,
         nullptr,
         nullptr,
-        near_identical_history_owner_srv.Get(),
+        near_identical_history_owner.srv.Get(),
       };
       ID3D11UnorderedAccessView *outputs[6] = {
         nullptr,
@@ -4078,10 +4089,10 @@ namespace models {
         !processed_input_domain.matches_analysis_domain(input_region, color_space) ||
         !input_region.tensor_content.valid({target_w, target_h}) ||
         !near_identical_fused_preprocess_cs || !near_identical_resolve_cs ||
-        !near_identical_cbuffer || !near_identical_tile_uav ||
-        !near_identical_tile_srv || !near_identical_history_owner_srv ||
-        !near_identical_gpu_decision_buf || !near_identical_gpu_decision_uav ||
-        !near_identical_gpu_dispatch_buf ||
+        !near_identical_cbuffer || !near_identical_tile.uav ||
+        !near_identical_tile.srv || !near_identical_history_owner.srv ||
+        !near_identical_transaction.buffer || !near_identical_transaction.uav ||
+        !near_identical_transaction.dispatch ||
         !tensor_in_srv || !tensor_previous_input_srv || !cbuffer
       ) {
         return false;
@@ -4126,7 +4137,7 @@ namespace models {
       // only by a matching authenticated proposal; a missing/malformed proposal cannot waste OCR work or
       // authorize stale OCR output even though CUDA safely fails the mandatory depth branch open.
       context->UpdateSubresource(
-        near_identical_gpu_decision_buf.Get(),
+        near_identical_transaction.buffer.Get(),
         0u,
         nullptr,
         initialized_transaction.data(),
@@ -4140,9 +4151,9 @@ namespace models {
       if (
         !near_identical_detector_available ||
         !near_identical_resolve_cs ||
-        !near_identical_cbuffer || !near_identical_tile_srv ||
-        !near_identical_history_owner_srv ||
-        !near_identical_gpu_decision_uav || !cbuffer
+        !near_identical_cbuffer || !near_identical_tile.srv ||
+        !near_identical_history_owner.srv ||
+        !near_identical_transaction.uav || !cbuffer
       ) {
         return false;
       }
@@ -4156,14 +4167,14 @@ namespace models {
       ID3D11ShaderResourceView *resolve_inputs[4] = {
         nullptr,
         nullptr,
-        near_identical_tile_srv.Get(),
-        near_identical_history_owner_srv.Get(),
+        near_identical_tile.srv.Get(),
+        near_identical_history_owner.srv.Get(),
       };
       ID3D11UnorderedAccessView *resolve_outputs[4] = {
         nullptr,
         nullptr,
         nullptr,
-        near_identical_gpu_decision_uav.Get(),
+        near_identical_transaction.uav.Get(),
       };
       context->CSSetShader(near_identical_resolve_cs.Get(), nullptr, 0u);
       context->CSSetShaderResources(0u, 4u, resolve_inputs);
@@ -4191,11 +4202,32 @@ namespace models {
     ) {
       if (!gpu_undecided_postprocess_pending()) {
         context->Dispatch(direct_x, direct_y, direct_z);
-      } else if (near_identical_gpu_dispatch_buf) {
+      } else if (near_identical_transaction.dispatch) {
         context->DispatchIndirect(
-          near_identical_gpu_dispatch_buf.Get(), indirect_byte_offset
+          near_identical_transaction.dispatch.Get(),
+          indirect_byte_offset
         );
       }
+    }
+
+    [[nodiscard]] host_sbs_v2_gpu::dispatch_command_t
+      parallax_v2_dispatch_command(
+        const UINT direct_x,
+        const UINT direct_y,
+        const UINT direct_z,
+        const std::uint32_t indirect_byte_offset
+      ) const noexcept {
+      if (!gpu_undecided_postprocess_pending()) {
+        return host_sbs_v2_gpu::dispatch_command_t::direct(
+          direct_x,
+          direct_y,
+          direct_z
+        );
+      }
+      return host_sbs_v2_gpu::dispatch_command_t::indirect(
+        near_identical_transaction.dispatch.Get(),
+        indirect_byte_offset
+      );
     }
 
     void update_pending_near_identical_postprocess_constants() {
@@ -4238,8 +4270,8 @@ namespace models {
         cuda_conditional_graph::work_flags_value(pending_subtitle_work) != 0u;
       if (
         !near_identical_finalize_cs ||
-        !near_identical_gpu_decision_uav ||
-        !near_identical_gpu_decision_buf || !near_identical_gpu_dispatch_buf ||
+        !near_identical_transaction.uav ||
+        !near_identical_transaction.buffer || !near_identical_transaction.dispatch ||
         !near_identical_cbuffer || !cbuffer ||
         pending_wrapper_transaction_token == 0u ||
         (subtitle_publication_expected &&
@@ -4258,7 +4290,7 @@ namespace models {
         nullptr,
         subtitle_publication_expected ? ocr_box_record_uav.Get() : nullptr,
         nullptr,
-        near_identical_gpu_decision_uav.Get(),
+        near_identical_transaction.uav.Get(),
       };
       context->CSSetConstantBuffers(0u, 3u, constant_buffers);
       context->CSSetUnorderedAccessViews(0u, 4u, outputs, nullptr);
@@ -4272,8 +4304,8 @@ namespace models {
       // every args record and any deterministic abstention into their registerable resources,
       // copy the complete 256-byte transaction into the D3-only indirect twin consumed below.
       context->CopyResource(
-        near_identical_gpu_dispatch_buf.Get(),
-        near_identical_gpu_decision_buf.Get()
+        near_identical_transaction.dispatch.Get(),
+        near_identical_transaction.buffer.Get()
       );
       return true;
     }
@@ -4281,7 +4313,7 @@ namespace models {
     void dispatch_near_identical_reuse_depth() {
       if (
         !gpu_undecided_postprocess_pending() || !near_identical_reuse_depth_cs ||
-        !near_identical_gpu_dispatch_buf || !depth_previous_srv || !depth_uav ||
+        !near_identical_transaction.dispatch || !depth_previous_srv || !depth_uav ||
         !cbuffer
       ) {
         return;
@@ -4306,7 +4338,7 @@ namespace models {
       context->CSSetShaderResources(0u, 6u, inputs);
       context->CSSetUnorderedAccessViews(0u, 5u, outputs, nullptr);
       context->DispatchIndirect(
-        near_identical_gpu_dispatch_buf.Get(),
+        near_identical_transaction.dispatch.Get(),
         near_identical_gpu_reuse_grid16_byte_offset
       );
       ID3D11ShaderResourceView *null_inputs[6] = {};
@@ -4772,25 +4804,11 @@ namespace models {
         depth_coordinate_v2::shader_source_specs.size() ==
         host_sbs_shader_cache::parallax_v2_producer_specs.size()
       );
-      bool shader_specs_match = true;
-      for (std::size_t index = 0;
-           index < depth_coordinate_v2::shader_source_specs.size();
-           ++index) {
-        const auto &contract_spec = depth_coordinate_v2::shader_source_specs[index];
-        const auto &runtime_spec =
-          host_sbs_shader_cache::parallax_v2_producer_specs[index];
-        shader_specs_match =
-          shader_specs_match &&
-          contract_spec.source_file == runtime_spec.filename &&
-          contract_spec.source_entrypoint == runtime_spec.entrypoint &&
-          contract_spec.source_target == runtime_spec.target;
-      }
       const std::string shader_source_closure_sha256 =
         producer_sources ?
           host_sbs_shader_cache::source_closure_sha256(producer_sources) :
           std::string {};
       const bool shader_identity_matches =
-        shader_specs_match &&
         shader_source_closure_sha256 ==
           depth_coordinate_v2::shader_source_closure_sha256;
 
@@ -5006,15 +5024,15 @@ namespace models {
 
       const bool analysis_ready =
         depth_scene_cut_evidence_cs && depth_scene_cut_resolve_cs && scene_cut_evidence_uav;
-      valid = engine && exec_context && cu_stream &&
-              near_identical_fused_preprocess_cs &&
-              fused_preprocess_force_cbuffer && fused_preprocess_compare_cbuffer &&
-              buffer_to_tex_cs &&
-              buffer_to_tex_pad_cs &&
-              depth_minmax_ema_cs && depth_hist_cs &&
-              minmax_raw_uav && minmax_ema_uav && minmax_ema_srv && hist_uav &&
-              analysis_ready && cut_state_uav && cut_state_srv;
-      if (!valid) {
+      const bool mandatory_resources_ready =
+        engine && exec_context && cu_stream &&
+        near_identical_fused_preprocess_cs &&
+        fused_preprocess_force_cbuffer && fused_preprocess_compare_cbuffer &&
+        buffer_to_tex_cs && buffer_to_tex_pad_cs &&
+        depth_minmax_ema_cs && depth_hist_cs &&
+        minmax_raw_uav && minmax_ema_uav && minmax_ema_srv && hist_uav &&
+        analysis_ready && cut_state_uav && cut_state_srv;
+      if (!mandatory_resources_ready) {
         BOOST_LOG(error) << "Depth estimator failed: required engine or Host SBS GPU resource initialization failed.";
         return;
       }
@@ -5028,10 +5046,10 @@ namespace models {
       // thread -- rather than stalling the first real convert() on the encode thread and
       // freezing the stream when Host SBS first becomes active.
       if (!warmup_inference()) {
-        valid = false;
         BOOST_LOG(error) << "Depth estimator failed: TensorRT execution-context warmup failed.";
         return;
       }
+      lifecycle_state = lifecycle_state_e::operational;
       if (!publish_active_engine_manifest(assets_dir, model.name, artifact)) {
         BOOST_LOG(error) << "Could not publish the active TensorRT engine manifest for model '"
                          << model.name << "'.";
@@ -5080,8 +5098,8 @@ namespace models {
       const auto retain_all_cuda_backing = [&]() noexcept {
         // When CUDA teardown cannot positively release every handle, preserve every possible D3
         // operand rather than let ComPtr destruction create a driver-side use-after-free.
-        (void) near_identical_gpu_decision_uav.Detach();
-        (void) near_identical_gpu_decision_buf.Detach();
+        (void) near_identical_transaction.uav.Detach();
+        (void) near_identical_transaction.buffer.Detach();
         (void) tensor_in_srv.Detach();
         (void) tensor_in_uav.Detach();
         (void) tensor_in_buf.Detach();
@@ -5386,7 +5404,8 @@ namespace models {
     }
     void fail_parallax_v2_producer(std::string_view reason) {
       // The lazy resource initializer is the sole caller, and its sole caller immediately
-      // latches terminal_failure on false. Keep teardown here without a parallel failure flag.
+      // latches the terminal lifecycle state on false. Keep teardown here without a parallel
+      // failure flag.
       BOOST_LOG(error) << "Host SBS V2 producer failed: " << reason
                        << "; this stream will remain live flat identity.";
       release_parallax_v2_resources();
@@ -5786,55 +5805,33 @@ namespace models {
       }
 
       mark_d3d_parallax_frame_stats_start(perf_slot);
-      ID3D11Buffer *constant_buffers[2] = {
-        cbuffer.Get(),
-        depth_coordinate_v2_cbuffer.Get(),
+      const host_sbs_v2_gpu::moments_frame_command_t command {
+        .constants = {
+          .depth = cbuffer.Get(),
+          .coordinate_v2 = depth_coordinate_v2_cbuffer.Get(),
+        },
+        .moments_shader = depth_coordinate_v2_moments_cs.Get(),
+        .frame_resolve_shader = depth_coordinate_v2_frame_resolve_cs.Get(),
+        .raw_depth = tensor_out_srv.Get(),
+        .tensor_exclusion = tensor_exclusion_srv.Get(),
+        .partials_output = depth_coordinate_v2_partials_uav.Get(),
+        .partials = depth_coordinate_v2_partials_srv.Get(),
+        .frame_stats_output = depth_coordinate_v2_frame_stats_uav.Get(),
+        .minmax_raw_output = minmax_raw_uav.Get(),
+        .moments_dispatch = parallax_v2_dispatch_command(reduce_groups, 1u, 1u, near_identical_gpu_infer_reduce_byte_offset),
+        .frame_resolve_dispatch = parallax_v2_dispatch_command(1u, 1u, 1u, near_identical_gpu_infer_one_byte_offset),
       };
-      context->CSSetConstantBuffers(0, 2, constant_buffers);
-
-      // Stable frame mean/std/min/max.
-      context->CSSetShader(depth_coordinate_v2_moments_cs.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *moments_srvs[2] = {
-        tensor_out_srv.Get(),
-        tensor_exclusion_srv.Get(),
-      };
-      context->CSSetShaderResources(0, 2, moments_srvs);
-      context->CSSetUnorderedAccessViews(
-        0,
-        1,
-        depth_coordinate_v2_partials_uav.GetAddressOf(),
-        nullptr
+      const bool recorded = host_sbs_v2_gpu::record_moments_frame(
+        context.Get(),
+        command
       );
-      dispatch_infer_postprocess(
-        reduce_groups,
-        1u,
-        1u,
-        near_identical_gpu_infer_reduce_byte_offset
-      );
-      ID3D11ShaderResourceView *null_srvs3[3] = {nullptr, nullptr, nullptr};
-      ID3D11UnorderedAccessView *null_uavs2[2] = {nullptr, nullptr};
-      context->CSSetShaderResources(0, 2, null_srvs3);
-      context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
-
-      context->CSSetShader(depth_coordinate_v2_frame_resolve_cs.Get(), nullptr, 0);
-      context->CSSetShaderResources(0, 1, depth_coordinate_v2_partials_srv.GetAddressOf());
-      ID3D11UnorderedAccessView *frame_uavs[2] = {
-        depth_coordinate_v2_frame_stats_uav.Get(),
-        minmax_raw_uav.Get(),
-      };
-      context->CSSetUnorderedAccessViews(0, 2, frame_uavs, nullptr);
-      dispatch_infer_postprocess(
-        1u, 1u, 1u, near_identical_gpu_infer_one_byte_offset
-      );
-      context->CSSetShaderResources(0, 1, null_srvs3);
-      context->CSSetUnorderedAccessViews(0, 2, null_uavs2, nullptr);
       mark_d3d_parallax_frame_stats_end(perf_slot);
-      return true;
+      return recorded;
     }
 
     bool dispatch_parallax_v2_producer(d3d_perf_slot *perf_slot) {
       if (!parallax_v2_producer_active || !depth_coordinate_v2_map_cs ||
-          !near_identical_cbuffer || !near_identical_history_owner_uav ||
+          !near_identical_cbuffer || !near_identical_history_owner.uav ||
           !tensor_out_srv || !depth_coordinate_v2_state_srv ||
           !tensor_exclusion_srv || !minmax_ema_srv || !tensor_in_srv ||
           !appearance_ordinal_srv || !cut_state_srv || !depth_srv ||
@@ -5844,33 +5841,30 @@ namespace models {
         return false;
       }
 
-      ID3D11Buffer *constant_buffers[3] = {
-        cbuffer.Get(),
-        depth_coordinate_v2_cbuffer.Get(),
-        near_identical_cbuffer.Get(),
+      const host_sbs_v2_gpu::base_constants_t base_constants {
+        .depth = cbuffer.Get(),
+        .coordinate_v2 = depth_coordinate_v2_cbuffer.Get(),
       };
-      context->CSSetConstantBuffers(0, 3, constant_buffers);
-      ID3D11ShaderResourceView *null_srvs3[3] = {nullptr, nullptr, nullptr};
-      ID3D11UnorderedAccessView *null_uavs2[2] = {nullptr, nullptr};
 
       // Acquire the first usable camera on startup/cut, then hold it until the next authenticated
       // cut. The model scale is fixed. An unusable no-cut frame publishes flat without erasing
       // the retained camera.
-      context->CSSetShader(depth_coordinate_v2_state_resolve_cs.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *state_srvs[2] = {
-        depth_coordinate_v2_frame_stats_srv.Get(),
-        cut_state_srv.Get(),
+      const host_sbs_v2_gpu::state_command_t state_command {
+        .constants = base_constants,
+        .shader = depth_coordinate_v2_state_resolve_cs.Get(),
+        .frame_stats = depth_coordinate_v2_frame_stats_srv.Get(),
+        .cut_bridge_state = cut_state_srv.Get(),
+        .state_output = depth_coordinate_v2_state_uav.Get(),
+        .dispatch = parallax_v2_dispatch_command(
+          1u,
+          1u,
+          1u,
+          near_identical_gpu_infer_one_byte_offset
+        ),
       };
-      context->CSSetShaderResources(0, 2, state_srvs);
-      context->CSSetUnorderedAccessViews(
-        0, 1, depth_coordinate_v2_state_uav.GetAddressOf(),
-        nullptr
-      );
-      dispatch_infer_postprocess(
-        1u, 1u, 1u, near_identical_gpu_infer_one_byte_offset
-      );
-      context->CSSetShaderResources(0, 2, null_srvs3);
-      context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
+      if (!host_sbs_v2_gpu::record_state(context.Get(), state_command)) {
+        return false;
+      }
 
       mark_d3d_parallax_map_start(perf_slot);
 
@@ -5879,77 +5873,71 @@ namespace models {
       // owner. scene_seed_main uploaded the exact b2 words consumed here before cut analysis; no
       // host update occurs between that seed and this dispatch. The full-size canonical-coordinate
       // field is deliberately absent from production; an explicit Dump 3D dispatches it separately.
-      context->CSSetShader(depth_coordinate_v2_map_cs.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *map_srvs[8] = {
-        tensor_out_srv.Get(),
-        depth_coordinate_v2_state_srv.Get(),
-        tensor_exclusion_srv.Get(),
-        minmax_ema_srv.Get(),
-        tensor_in_srv.Get(),
-        appearance_ordinal_srv.Get(),
-        cut_state_srv.Get(),
-        depth_srv.Get(),
+      const host_sbs_v2_gpu::map_history_command_t map_history_command {
+        .constants = base_constants,
+        .near_identical_constants = near_identical_cbuffer.Get(),
+        .shader = depth_coordinate_v2_map_cs.Get(),
+        .raw_depth = tensor_out_srv.Get(),
+        .state = depth_coordinate_v2_state_srv.Get(),
+        .tensor_exclusion = tensor_exclusion_srv.Get(),
+        .minmax_ema = minmax_ema_srv.Get(),
+        .current_model_input = tensor_in_srv.Get(),
+        .current_appearance_ordinal = appearance_ordinal_srv.Get(),
+        .cut_bridge_state = cut_state_srv.Get(),
+        .current_depth = depth_srv.Get(),
+        .candidate_output = depth_coordinate_v2_candidate_uav.Get(),
+        .previous_model_input_output = tensor_previous_input_uav.Get(),
+        .previous_appearance_ordinal_output = previous_appearance_ordinal_uav.Get(),
+        .previous_reliable_depth_output = depth_cut_history_uav.Get(),
+        .previous_tensor_exclusion_output = tensor_previous_exclusion_uav.Get(),
+        .history_owner_output = near_identical_history_owner.uav.Get(),
+        .dispatch = parallax_v2_dispatch_command(
+          (target_w + 15) / 16,
+          (target_h + 15) / 16,
+          1u,
+          near_identical_gpu_infer_grid16_byte_offset
+        ),
       };
-      ID3D11UnorderedAccessView *map_uavs[6] = {
-        depth_coordinate_v2_candidate_uav.Get(),
-        tensor_previous_input_uav.Get(),
-        previous_appearance_ordinal_uav.Get(),
-        depth_cut_history_uav.Get(),
-        tensor_previous_exclusion_uav.Get(),
-        near_identical_history_owner_uav.Get(),
-      };
-      context->CSSetShaderResources(0, 8, map_srvs);
-      context->CSSetUnorderedAccessViews(0, 6, map_uavs, nullptr);
-      dispatch_infer_postprocess(
-        (target_w + 15) / 16,
-        (target_h + 15) / 16,
-        1u,
-        near_identical_gpu_infer_grid16_byte_offset
-      );
-      // SM5 has no grid-wide barrier. Completion of this direct-or-indirect map dispatch followed
-      // by unbinding all six UAVs is the publication boundary for both the tuple and owner tag;
-      // no consumer is permitted in the map dispatch itself.
-      ID3D11ShaderResourceView *null_map_srvs[8] = {};
-      ID3D11UnorderedAccessView *null_map_uavs[6] = {};
-      context->CSSetShaderResources(0, 8, null_map_srvs);
-      context->CSSetUnorderedAccessViews(0, 6, null_map_uavs, nullptr);
+      if (!host_sbs_v2_gpu::record_map_history(
+            context.Get(),
+            map_history_command
+          )) {
+        return false;
+      }
 
       // Candidate -> conservative full-resolution RGB ownership refinement. The retained source
       // SRV belongs to this exact asynchronous raw-depth completion. Missing source evidence is a
       // safe identity copy; ordinary production pairing always supplies it.
       if (pending_source_srv) {
-        context->CSSetShader(depth_coordinate_v2_ownership_cs.Get(), nullptr, 0);
-        context->CSSetConstantBuffers(0u, 1u, cbuffer.GetAddressOf());
-        context->CSSetConstantBuffers(
-          2u, 1u, source_region_cbuffer.GetAddressOf()
-        );
-        ID3D11ShaderResourceView *ownership_srvs[3] = {
-          depth_coordinate_v2_candidate_srv.Get(),
-          pending_source_srv.Get(),
-          tensor_exclusion_srv.Get(),
+        const host_sbs_v2_gpu::ownership_command_t ownership_command {
+          .constants = base_constants,
+          .source_region_constants = source_region_cbuffer.Get(),
+          .shader = depth_coordinate_v2_ownership_cs.Get(),
+          .candidate = depth_coordinate_v2_candidate_srv.Get(),
+          .source_color = pending_source_srv.Get(),
+          .tensor_exclusion = tensor_exclusion_srv.Get(),
+          .ownership_refined_output = depth_coordinate_v2_ownership_uav.Get(),
+          .dispatch = parallax_v2_dispatch_command(
+            (target_w + 7) / 8,
+            (target_h + 7) / 8,
+            1u,
+            near_identical_gpu_infer_grid8_byte_offset
+          ),
         };
-        context->CSSetShaderResources(0, 3, ownership_srvs);
-        context->CSSetUnorderedAccessViews(
-          0,
-          1,
-          depth_coordinate_v2_ownership_uav.GetAddressOf(),
-          nullptr
-        );
         if (perf_slot) {
           perf_slot->has_ownership = true;
           context->End(perf_slot->ownership_start.Get());
         }
-        dispatch_infer_postprocess(
-          (target_w + 7) / 8,
-          (target_h + 7) / 8,
-          1u,
-          near_identical_gpu_infer_grid8_byte_offset
+        const bool ownership_recorded = host_sbs_v2_gpu::record_ownership(
+          context.Get(),
+          ownership_command
         );
         if (perf_slot) {
           context->End(perf_slot->ownership_end.Get());
         }
-        context->CSSetShaderResources(0, 3, null_srvs3);
-        context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
+        if (!ownership_recorded) {
+          return false;
+        }
       } else if (!gpu_undecided_postprocess_pending()) {
         context->CopyResource(
           depth_coordinate_v2_ownership_tex.Get(),
@@ -5959,44 +5947,44 @@ namespace models {
 
       // Produce the exact column upper envelope plus the fixed 75/25 vertical share. The upper
       // remains diagnostic evidence; only the neutral conditioned field feeds live geometry.
-      context->CSSetShader(depth_coordinate_v2_vertical_limit_cs.Get(), nullptr, 0);
-      context->CSSetShaderResources(0, 1, depth_coordinate_v2_ownership_srv.GetAddressOf());
-      ID3D11UnorderedAccessView *vertical_envelope_uavs[2] = {
-        depth_coordinate_v2_vertical_majorant_uav.Get(),
-        depth_coordinate_v2_vertical_conditioned_uav.Get(),
+      const host_sbs_v2_gpu::vertical_command_t vertical_command {
+        .constants = base_constants,
+        .shader = depth_coordinate_v2_vertical_limit_cs.Get(),
+        .ownership_refined = depth_coordinate_v2_ownership_srv.Get(),
+        .vertical_majorant_output = depth_coordinate_v2_vertical_majorant_uav.Get(),
+        .vertical_conditioned_output =
+          depth_coordinate_v2_vertical_conditioned_uav.Get(),
+        .dispatch = parallax_v2_dispatch_command(
+          target_w,
+          1u,
+          1u,
+          near_identical_gpu_infer_columns_byte_offset
+        ),
       };
-      context->CSSetUnorderedAccessViews(0, 2, vertical_envelope_uavs, nullptr);
-      dispatch_infer_postprocess(
-        target_w,
-        1u,
-        1u,
-        near_identical_gpu_infer_columns_byte_offset
-      );
-      context->CSSetShaderResources(0, 1, null_srvs3);
-      context->CSSetUnorderedAccessViews(0, 2, null_uavs2, nullptr);
+      if (!host_sbs_v2_gpu::record_vertical(context.Get(), vertical_command)) {
+        return false;
+      }
 
       // Apply one pure horizontal majorant to the vertically conditioned field. There is no
       // horizontal minorant or completed-2D-envelope blend, so lateral lowering is not added.
-      context->CSSetShader(depth_coordinate_v2_limit_cs.Get(), nullptr, 0);
-      context->CSSetShaderResources(
-        0,
-        1,
-        depth_coordinate_v2_vertical_conditioned_srv.GetAddressOf()
-      );
-      context->CSSetUnorderedAccessViews(
-        0,
-        1,
-        depth_coordinate_v2_final_uav.GetAddressOf(),
-        nullptr
-      );
-      dispatch_infer_postprocess(
-        target_h,
-        1u,
-        1u,
-        near_identical_gpu_infer_rows_byte_offset
-      );
-      context->CSSetShaderResources(0, 1, null_srvs3);
-      context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
+      const host_sbs_v2_gpu::horizontal_command_t horizontal_command {
+        .constants = base_constants,
+        .shader = depth_coordinate_v2_limit_cs.Get(),
+        .vertical_conditioned = depth_coordinate_v2_vertical_conditioned_srv.Get(),
+        .final_output = depth_coordinate_v2_final_uav.Get(),
+        .dispatch = parallax_v2_dispatch_command(
+          target_h,
+          1u,
+          1u,
+          near_identical_gpu_infer_rows_byte_offset
+        ),
+      };
+      if (!host_sbs_v2_gpu::record_horizontal(
+            context.Get(),
+            horizontal_command
+          )) {
+        return false;
+      }
 
       mark_d3d_parallax_subtitle_start(perf_slot);
 
@@ -6053,7 +6041,7 @@ namespace models {
 
     bool dispatch_ocr_postprocess() {
       const bool optional_child_armed = std::exchange(pending_ocr_submitted, false);
-      if (!near_identical_gpu_dispatch_buf || !ocr_box_record_uav ||
+      if (!near_identical_transaction.dispatch || !ocr_box_record_uav ||
           !ocr_resolve_cbuffer) {
         return false;
       }
@@ -6074,7 +6062,7 @@ namespace models {
           0u, 1u, ocr_cell_stats_uav.GetAddressOf(), nullptr
         );
         context->DispatchIndirect(
-          near_identical_gpu_dispatch_buf.Get(),
+          near_identical_transaction.dispatch.Get(),
           near_identical_gpu_optional_cells_byte_offset
         );
         context->CSSetShaderResources(0u, 1u, &null_srv);
@@ -6087,7 +6075,7 @@ namespace models {
           1u, 1u, ocr_box_record_uav.GetAddressOf(), nullptr
         );
         context->DispatchIndirect(
-          near_identical_gpu_dispatch_buf.Get(),
+          near_identical_transaction.dispatch.Get(),
           near_identical_gpu_optional_one_byte_offset
         );
         context->CSSetShaderResources(1u, 1u, &null_srv);
@@ -6114,7 +6102,7 @@ namespace models {
           !depth_coordinate_v2_final_tex || !subtitle_conditioned_tex ||
           !subtitle_condition_params_srv || !subtitle_condition_params_uav ||
           !ocr_box_record_srv ||
-          !cut_state_srv || !near_identical_gpu_dispatch_buf) {
+          !cut_state_srv || !near_identical_transaction.dispatch) {
         return false;
       }
 
@@ -6191,7 +6179,7 @@ namespace models {
       };
       context->CSSetUnorderedAccessViews(2, 3, resolve_uavs, nullptr);
       context->DispatchIndirect(
-        near_identical_gpu_dispatch_buf.Get(),
+        near_identical_transaction.dispatch.Get(),
         near_identical_gpu_observation_one_byte_offset
       );
       context->CSSetShaderResources(0, 8, null_srvs);
@@ -6213,7 +6201,7 @@ namespace models {
       context->CSSetUnorderedAccessViews(3, 1, &condition_output, nullptr);
       context->CSSetShader(subtitle_condition_cs.Get(), nullptr, 0);
       context->DispatchIndirect(
-        near_identical_gpu_dispatch_buf.Get(),
+        near_identical_transaction.dispatch.Get(),
         near_identical_gpu_subtitle_condition_grid16_byte_offset
       );
       context->CSSetShaderResources(0, 5, null_srvs);
@@ -6230,7 +6218,7 @@ namespace models {
       }
       const auto append = std::exchange(pending_gpu_trace_append, {});
       if (!append.valid || !gpu_trace_cs || !gpu_trace_transaction_buf ||
-          !gpu_trace_transaction_srv || !near_identical_gpu_decision_buf ||
+          !gpu_trace_transaction_srv || !near_identical_transaction.buffer ||
           !gpu_trace_cbuffer || !gpu_trace_ring_uav || !subtitle_locator_state_srv ||
           !subtitle_condition_params_srv || !gpu_trace_provenance) {
         return;
@@ -6238,7 +6226,7 @@ namespace models {
       // Snapshot the complete postprocessed CBRG/RQST transaction only for this append, after the
       // production postprocess timer has ended and before the next enqueue can reuse the source.
       context->CopyResource(
-        gpu_trace_transaction_buf.Get(), near_identical_gpu_decision_buf.Get()
+        gpu_trace_transaction_buf.Get(), near_identical_transaction.buffer.Get()
       );
 
       const auto domain_tag = near_identical_input_domain_tag(
@@ -6575,7 +6563,7 @@ namespace models {
       }
       if (diagnostics_enabled) {
         perf_drain(perf_depth_conditional);
-        if (terminal_failure) {
+        if (is_terminal()) {
           return make_result();
         }
       }
@@ -6920,9 +6908,9 @@ namespace models {
       if (tensor_previous_input_uav) {
         context->ClearUnorderedAccessViewFloat(tensor_previous_input_uav.Get(), zero4);
       }
-      if (near_identical_history_owner_uav) {
+      if (near_identical_history_owner.uav) {
         context->ClearUnorderedAccessViewUint(
-          near_identical_history_owner_uav.Get(), zero_uint4
+          near_identical_history_owner.uav.Get(), zero_uint4
         );
       }
       if (previous_appearance_ordinal_uav) {
@@ -7339,7 +7327,7 @@ namespace models {
     // output buffer untouched; estimate() consumes that result after the caller has copied the
     // exact color frame that will own the next inference.
     bool can_accept() {
-      if (!valid || terminal_failure) {
+      if (!is_operational()) {
         return false;
       }
       auto &cuda = cuda_driver_api::get();
@@ -7385,7 +7373,7 @@ namespace models {
       depth_optional_work_mode_e optional_work,
       const gpu_adaptive_reuse_request &adaptive_reuse_request
     ) {
-      if (!valid || terminal_failure || !input_srv) {
+      if (!is_operational() || !input_srv) {
         return {};
       }
       bool completed_frame_valid = false;
@@ -7429,7 +7417,7 @@ namespace models {
       // Resolve completed inference-timing events only for diagnostic runs.
       if (diagnostics_enabled) {
         perf_drain(perf_depth_conditional);
-        if (terminal_failure) {
+        if (is_terminal()) {
           return {};
         }
       }
@@ -7501,16 +7489,9 @@ namespace models {
           mark_terminal_failure(true);
           return {};
         }
-        near_identical_tile_buf.Reset();
-        near_identical_tile_srv.Reset();
-        near_identical_tile_uav.Reset();
-        near_identical_gpu_decision_buf.Reset();
-        near_identical_gpu_decision_srv.Reset();
-        near_identical_gpu_decision_uav.Reset();
-        near_identical_gpu_dispatch_buf.Reset();
-        near_identical_history_owner_buf.Reset();
-        near_identical_history_owner_srv.Reset();
-        near_identical_history_owner_uav.Reset();
+        near_identical_tile.reset();
+        near_identical_transaction.reset();
+        near_identical_history_owner.reset();
 
         BOOST_LOG(info) << "Depth Estimator dynamic resolution set to " << target_w << "x" << target_h;
 
@@ -7856,8 +7837,8 @@ namespace models {
           !near_identical_fused_preprocess_cs ||
           !fused_preprocess_force_cbuffer ||
           !fused_preprocess_compare_cbuffer ||
-          !tensor_previous_input_srv || !near_identical_tile_uav) {
-        if (!terminal_failure) {
+          !tensor_previous_input_srv || !near_identical_tile.uav) {
+        if (!is_terminal()) {
           fail_gpu_conditional_bridge_once(
             "mandatory GPU transaction resources or interop are unavailable"
           );
@@ -7961,7 +7942,7 @@ namespace models {
         tensor_in_uav.Get(),
         appearance_ordinal_uav.Get(),
         tensor_exclusion_uav.Get(),
-        near_identical_tile_uav.Get(),
+        near_identical_tile.uav.Get(),
       };
       context->CSSetUnorderedAccessViews(0, 4, preprocess_uavs, nullptr);
       context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
@@ -7998,7 +7979,7 @@ namespace models {
       // ordinary work on infer, or cadence-due work on either resolved depth branch.
       // Malformed/missing proposals do not consume stale input.
       context->CopyResource(
-        near_identical_gpu_dispatch_buf.Get(), near_identical_gpu_decision_buf.Get()
+        near_identical_transaction.dispatch.Get(), near_identical_transaction.buffer.Get()
       );
       if (ocr_frame_eligible) {
         const std::array<std::uint32_t, 8> ocr_constants {
@@ -8023,7 +8004,7 @@ namespace models {
           nullptr
         );
         context->DispatchIndirect(
-          near_identical_gpu_dispatch_buf.Get(),
+          near_identical_transaction.dispatch.Get(),
           near_identical_gpu_optional_preprocess_byte_offset
         );
         context->CSSetUnorderedAccessViews(0, 1, null_uavs, nullptr);
@@ -8072,7 +8053,7 @@ namespace models {
       }
       CUgraphicsResource ocr_resources[2] = {cuda_ocr_in_res, cuda_ocr_out_res};
       bool ocr_mapped = false;
-      if (terminal_failure) {
+      if (is_terminal()) {
         ocr_frame_eligible = false;
       }
       if (ocr_frame_eligible) {
@@ -8166,7 +8147,7 @@ namespace models {
         (void) observe_joined_cuda_failure(
           "depth mapped-pointer contract", pointer_failure, true
         );
-      } else if (!terminal_failure) {
+      } else if (!is_terminal()) {
         constexpr std::size_t transaction_last_byte =
           near_identical_gpu_request_record_byte_offset +
           sizeof(cuda_conditional_graph::request_record_t) - 1u;
@@ -8216,7 +8197,7 @@ namespace models {
             << "DAV2 interop address changed during a GPU-undecided candidate; "
                "dropping it and rebuilding on the next force-infer transaction.";
         }
-        if (!terminal_failure && !dropped_for_signature_change &&
+        if (!is_terminal() && !dropped_for_signature_change &&
             !select_inference_graph_signature(
               cuda,
               depth_inference_graph,
@@ -8224,7 +8205,7 @@ namespace models {
             )) {
           mark_terminal_failure(true);
         }
-        bool bindings_ok = !terminal_failure && !dropped_for_signature_change;
+        bool bindings_ok = !is_terminal() && !dropped_for_signature_change;
         if (trt_bound_width != target_w || trt_bound_height != target_h) {
           nvinfer1::Dims in_dims = make_input_dims(target_h, target_w);
           bindings_ok = exec_context->setInputShape("pixel_values", in_dims);
@@ -8262,7 +8243,7 @@ namespace models {
             stream_error_logged = true;
           }
         }
-        bool ocr_bindings_ok = !terminal_failure && ocr_mapped &&
+        bool ocr_bindings_ok = !is_terminal() && ocr_mapped &&
                                ocr_pointer_contract_valid && ocr_exec_context;
         constexpr std::size_t expected_ocr_input_bytes =
           static_cast<std::size_t>(3u) * ocr_engine_width * ocr_engine_height *
@@ -8343,7 +8324,7 @@ namespace models {
           }
         }
         if (ocr_mapped && !ocr_bindings_ok && !dropped_for_signature_change &&
-            !terminal_failure) {
+            !is_terminal()) {
           ocr_available = false;
           mark_ocr_context_failure(
             detail::warmed_execution_context_failure_e::pre_enqueue_interop_or_binding
@@ -8357,7 +8338,7 @@ namespace models {
           }
         }
 
-        if (bindings_ok && !terminal_failure && !dropped_for_signature_change) {
+        if (bindings_ok && !is_terminal() && !dropped_for_signature_change) {
           // TensorRT host-side binding/capture remains serialized across estimator instances. The
           // resulting depth and optional OCR children are siblings under one authenticated root;
           // no raw OCR enqueue or CPU-visible branch result exists.
@@ -8407,7 +8388,7 @@ namespace models {
             const int depth_perf_slot = wrapper_ready ?
                                           perf_begin(perf_depth_conditional, cu_stream) :
                                           -1;
-            if (wrapper_ready && !terminal_failure) {
+            if (wrapper_ready && !is_terminal()) {
               const bool launch_ocr_may_participate =
                 optional_child_ready &&
                 (subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr ||
@@ -8434,7 +8415,7 @@ namespace models {
             }
             perf_end(perf_depth_conditional, depth_perf_slot, cu_stream);
           }
-          if (!enqueued && !terminal_failure) {
+          if (!enqueued && !is_terminal()) {
             mark_terminal_failure(true);
             if (!stream_error_logged) {
               BOOST_LOG(error) << "DAV2 conditional-wrapper submission failed; the execution "
@@ -8473,7 +8454,7 @@ namespace models {
       // Record completion after every interop unmap tail. Event polling and the stream-query
       // fallback now prove the same joined depth/OCR transaction and all of its resource release.
       if (
-        enqueued && !terminal_failure && inference_event_poll_available &&
+        enqueued && !is_terminal() && inference_event_poll_available &&
         !record_inference_done_event(
           cuda,
           depth_inference_done_event,
@@ -8487,7 +8468,7 @@ namespace models {
         ocr_armed = false;
       }
 
-      if (terminal_failure) {
+      if (is_terminal()) {
         enqueued = false;
         ocr_armed = false;
       }
@@ -8597,7 +8578,7 @@ namespace models {
   video_depth_estimator::~video_depth_estimator() = default;
 
   bool video_depth_estimator::is_valid() const {
-    return pimpl && pimpl->valid;
+    return pimpl && pimpl->is_operational();
   }
 
   bool video_depth_estimator::can_accept_frame() {
@@ -8605,7 +8586,7 @@ namespace models {
   }
 
   bool video_depth_estimator::has_terminal_failure() const {
-    return !pimpl || !pimpl->valid || pimpl->terminal_failure;
+    return !pimpl || !pimpl->is_operational();
   }
 
   estimate_result video_depth_estimator::estimate_depth(

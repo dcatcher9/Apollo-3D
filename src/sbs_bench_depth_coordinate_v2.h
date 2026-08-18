@@ -4,7 +4,8 @@
  *
  * This is deliberately not a second mapping implementation. The helper loads authenticated raw
  * DAV2 fields and hard-cut generations, keeps one GPU state buffer alive for the sequence, and
- * dispatches the same seven base V2 coordinate entrypoints used by video_depth_estimator. Its
+ * records the same seven base V2 coordinate entrypoints through the non-owning GPU executor used
+ * by video_depth_estimator. Its
  * replay contract supplies canonical full-content analysis geometry and omits the live-only
  * OCR/SLR13 subtitle ownership stage. Its candidate texture is retained as immutable
  * pre-limiter evidence. The column pass publishes

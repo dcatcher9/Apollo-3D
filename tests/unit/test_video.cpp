@@ -912,14 +912,14 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
     v2::shader_source_specs.size(),
     models::host_sbs_shader_cache::parallax_v2_producer_specs.size()
   );
-  for (std::size_t index = 0; index < v2::shader_source_specs.size(); ++index) {
-    const auto &contract_spec = v2::shader_source_specs[index];
-    const auto &runtime_spec =
-      models::host_sbs_shader_cache::parallax_v2_producer_specs[index];
-    EXPECT_EQ(contract_spec.source_file, runtime_spec.filename);
-    EXPECT_EQ(contract_spec.source_entrypoint, runtime_spec.entrypoint);
-    EXPECT_EQ(contract_spec.source_target, runtime_spec.target);
-  }
+  EXPECT_EQ(
+    v2::shader_source_specs.data(),
+    models::host_sbs_shader_cache::parallax_v2_producer_specs.data()
+  ) << "The DVC view must alias the generated producer registry, not mirror it.";
+  EXPECT_EQ(
+    v2::shader_source_closure_sha256,
+    models::host_sbs_shader_cache::parallax_v2_producer_source_closure_sha256
+  );
   EXPECT_EQ(
     v2::find_model_calibration(
       small_calibration.depth_model,
@@ -2336,6 +2336,13 @@ TEST(DepthInputRegionTest, RequiresCanonicalFullSourceOrAuthenticatedRoiAuthorit
     .tensor_content = {0u, 0u, 770u, 434u},
   };
   EXPECT_TRUE(full_source.valid());
+  EXPECT_FALSE(full_source.is_video_region());
+  EXPECT_EQ(
+    models::near_identical_input_domain_tag(
+      full_source, models::input_color_space::srgb, 770u, 434u
+    ),
+    0xE415D56DF26017E3ull
+  ) << "Removing the stored ROI bit must not change the established full-source tag ABI.";
 
   auto partial_without_video_identity = full_source;
   partial_without_video_identity.left = 100u;
@@ -2354,10 +2361,16 @@ TEST(DepthInputRegionTest, RequiresCanonicalFullSourceOrAuthenticatedRoiAuthorit
     .bottom = 1439u,
     .tensor_content = {0u, 0u, 770u, 433u},
     .analysis_generation = 7u,
-    .video_region = true,
     .authority = models::depth_analysis_authority_e::chromium_video,
   };
   EXPECT_TRUE(video_region.valid());
+  EXPECT_TRUE(video_region.is_video_region());
+  EXPECT_EQ(
+    models::near_identical_input_domain_tag(
+      video_region, models::input_color_space::srgb, 770u, 434u
+    ),
+    0xE5292A104A0DCC07ull
+  ) << "The authority-derived ROI bit must preserve the established tag ABI.";
 
   auto video_without_identity = video_region;
   video_without_identity.analysis_generation = 0u;
@@ -2371,6 +2384,7 @@ TEST(DepthInputRegionTest, RequiresCanonicalFullSourceOrAuthenticatedRoiAuthorit
   roi_with_unknown_authority.authority =
     static_cast<models::depth_analysis_authority_e>(0xFFu);
   EXPECT_FALSE(roi_with_unknown_authority.valid());
+  EXPECT_FALSE(roi_with_unknown_authority.is_video_region());
 
   auto foreground_region = video_region;
   foreground_region.authority = models::depth_analysis_authority_e::foreground_client;
@@ -2395,7 +2409,6 @@ TEST(DepthInputRegionTest, AnalysisDomainIgnoresOnlyPurePositionMoves) {
     .bottom = 1439u,
     .tensor_content = {0u, 0u, 770u, 433u},
     .analysis_generation = 7u,
-    .video_region = true,
     .authority = models::depth_analysis_authority_e::chromium_video,
   };
   auto moved = original;
@@ -2425,7 +2438,6 @@ TEST(DepthInputRegionTest, AnalysisDomainIgnoresOnlyPurePositionMoves) {
   EXPECT_FALSE(original.same_analysis_domain(new_source));
 
   auto full_source = original;
-  full_source.video_region = false;
   full_source.left = 0u;
   full_source.top = 0u;
   full_source.right = full_source.source_width;
@@ -2512,7 +2524,6 @@ TEST(DepthInputRegionTest, DomainTransitionDecisionResetsExactlyOncePerStableCha
     .bottom = 1830u,
     .tensor_content = {0u, 0u, 770u, 433u},
     .analysis_generation = first_generation,
-    .video_region = true,
     .authority = models::depth_analysis_authority_e::chromium_video,
   };
   ASSERT_TRUE(roi.valid());
@@ -2770,7 +2781,6 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
     .bottom = 1439u,
     .tensor_content = {0u, 0u, 770u, 433u},
     .analysis_generation = 7u,
-    .video_region = true,
     .authority = models::depth_analysis_authority_e::chromium_video,
   };
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(video_region));
@@ -2915,7 +2925,7 @@ TEST(ParallaxV2ContractTest, DebugDumpUsesNonblockingGpuStagingBeforeCpuPublicat
   );
 }
 
-TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema38Contract) {
+TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema39Contract) {
   const auto source = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
   );
@@ -2939,7 +2949,7 @@ TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema38C
   EXPECT_LT(resolve, condition);
   EXPECT_EQ(resolver.find("condition_prepare_main"), std::string::npos);
 
-  EXPECT_NE(source.find("{\"schema\", 38}"), std::string::npos);
+  EXPECT_NE(source.find("{\"schema\", 39}"), std::string::npos);
   for (const auto *qualification_key : {
          "{\"qualification_policy\", {",
          "{\"corner_filter_applies_to\", \"non-ribbon-ordinary-cores\"}",
@@ -5009,7 +5019,7 @@ TEST(DirectxShaderSourceTest, VideoRoiReuseMemoKeepsTheCompletePixelProofKey) {
     std::string::npos
   );
   EXPECT_NE(
-    memo.find("if (!slot.depth_input_region.video_region)"),
+    memo.find("if (!slot.depth_input_region.is_video_region())"),
     std::string::npos
   );
   EXPECT_NE(memo.find("entry && entry->first == key"), std::string::npos);
@@ -5026,6 +5036,9 @@ TEST(DirectxShaderSourceTest, VideoRoiReuseMemoKeepsTheCompletePixelProofKey) {
 TEST(DirectxShaderSourceTest, VideoRoiSamplesRetainedSourceAndCopiesOnlyForDump) {
   const auto display =
     read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
+  const auto dump = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
+  );
   const auto estimator =
     read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
   const auto preprocess = read_source_file(
@@ -5033,6 +5046,7 @@ TEST(DirectxShaderSourceTest, VideoRoiSamplesRetainedSourceAndCopiesOnlyForDump)
     "/src_assets/windows/assets/shaders/directx/rgb_to_nchw_cs.hlsl"
   );
   ASSERT_FALSE(display.empty());
+  ASSERT_FALSE(dump.empty());
   ASSERT_FALSE(estimator.empty());
   ASSERT_FALSE(preprocess.empty());
 
@@ -5045,25 +5059,44 @@ TEST(DirectxShaderSourceTest, VideoRoiSamplesRetainedSourceAndCopiesOnlyForDump)
   ASSERT_NE(select_begin, std::string::npos);
   ASSERT_NE(select_end, std::string::npos);
   const auto selection = display.substr(select_begin, select_end - select_begin);
-  EXPECT_EQ(selection.find("copy_video_depth_crop("), std::string::npos);
+  EXPECT_EQ(
+    selection.find("prepare_diagnostic_roi_crop("),
+    std::string::npos
+  );
 
   std::size_t diagnostic_crop_references = 0u;
   for (std::size_t offset = 0u;
-       (offset = display.find("copy_video_depth_crop(", offset)) != std::string::npos;
+       (offset = display.find("prepare_diagnostic_roi_crop(", offset)) !=
+       std::string::npos;
        ++offset) {
     ++diagnostic_crop_references;
   }
-  EXPECT_EQ(diagnostic_crop_references, 2u)
-    << "Only the helper definition and completed Dump 3D call may remain";
+  EXPECT_EQ(diagnostic_crop_references, 1u)
+    << "Only the completed Dump 3D call may remain in the live display path";
+  EXPECT_EQ(display.find("depth_crop_texture"), std::string::npos);
+  EXPECT_EQ(display.find("depth_crop_srv"), std::string::npos);
+  EXPECT_NE(dump.find("struct diagnostic_roi_crop"), std::string::npos);
+  EXPECT_NE(
+    dump.find("dumper::prepare_diagnostic_roi_crop("),
+    std::string::npos
+  );
+  EXPECT_NE(
+    dump.find("ctx->CopySubresourceRegion("),
+    std::string::npos
+  );
   const auto dump_begin = display.find("const bool complete_dump_snapshot =");
-  const auto dump_copy = display.find("copy_video_depth_crop(", dump_begin);
+  const auto dump_copy = display.find("prepare_diagnostic_roi_crop(", dump_begin);
   const auto dump_ready = display.find("const bool dump_roi_source_ready", dump_begin);
   ASSERT_NE(dump_begin, std::string::npos);
   ASSERT_NE(dump_copy, std::string::npos);
   ASSERT_NE(dump_ready, std::string::npos);
   EXPECT_LT(dump_copy, dump_ready);
   EXPECT_NE(
-    display.find("matched_render_slot->dump_depth_input_srv()", dump_ready),
+    display.find("dump_frame.depth_input_source = dump_depth_input_source", dump_ready),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.find("sbs_dumper.release_diagnostic_roi_crop()", dump_ready),
     std::string::npos
   );
 
@@ -5187,17 +5220,24 @@ TEST(DirectxShaderSourceTest, V2ProducerFailureUsesTheCanonicalTerminalLatch) {
   );
 
   EXPECT_NE(
-    estimator.find("if (!valid || terminal_failure)"),
+    estimator.find("enum class lifecycle_state_e : std::uint8_t"),
     std::string::npos
   );
   EXPECT_NE(
-    estimator.find("if (!valid || terminal_failure || !input_srv)"),
+    estimator.find("if (!is_operational())"),
     std::string::npos
   );
   EXPECT_NE(
-    estimator.find(
-      "return !pimpl || !pimpl->valid || pimpl->terminal_failure;"
-    ),
+    estimator.find("if (!is_operational() || !input_srv)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    estimator.find("return !pimpl || !pimpl->is_operational();"),
+    std::string::npos
+  );
+  EXPECT_EQ(estimator.find("bool terminal_failure ="), std::string::npos);
+  EXPECT_EQ(
+    estimator.find("bool valid = false;  // all mandatory engine"),
     std::string::npos
   );
 }
@@ -5223,6 +5263,41 @@ TEST(SbsBenchHarnessSourceTest, OfflineWarpTimingReadbackIsBoundedAndExact) {
       "while (ctx->GetData(warp_disjoint.Get(), &timing, sizeof(timing), 0) == "
       "S_FALSE)"
     ),
+    std::string::npos
+  );
+}
+
+TEST(DirectxShaderSourceTest, LiveAndOfflineShareStatelessV2DrawRecorder) {
+  const auto display = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp"
+  );
+  const auto harness = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/sbs_bench_harness.cpp"
+  );
+  const auto recorder = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/host_sbs_v2_renderer.cpp"
+  );
+  ASSERT_FALSE(display.empty());
+  ASSERT_FALSE(harness.empty());
+  ASSERT_FALSE(recorder.empty());
+
+  EXPECT_NE(display.find("record_host_sbs_v2_draw("), std::string::npos);
+  EXPECT_NE(harness.find("record_host_sbs_v2_draw("), std::string::npos);
+  EXPECT_NE(recorder.find("context->OMSetRenderTargets("), std::string::npos);
+  EXPECT_NE(recorder.find("context->IASetInputLayout(nullptr)"), std::string::npos);
+  EXPECT_NE(
+    recorder.find("context->IASetPrimitiveTopology("),
+    std::string::npos
+  );
+  EXPECT_NE(recorder.find("context->PSSetShaderResources("), std::string::npos);
+  EXPECT_NE(recorder.find("context->PSSetConstantBuffers(2u"), std::string::npos);
+  EXPECT_NE(recorder.find("context->Draw(3u, 0u)"), std::string::npos);
+  EXPECT_NE(
+    recorder.find("context->OMSetRenderTargets(0u, nullptr, nullptr)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    recorder.find("std::array<ID3D11ShaderResourceView *, 6u> null_resources"),
     std::string::npos
   );
 }
@@ -5278,15 +5353,58 @@ TEST(DirectxShaderSourceTest, OpaquePackedPresentationCannotSeedSemanticLineage)
   ASSERT_NE(route_gate, std::string::npos);
   const auto route_body = display.substr(route_gate, selection - route_gate);
   for (const auto *required_gate : {
-         "matched_output_input_region.valid()",
-         "matched_output_input_region.source_width == live_source_desc.Width",
-         "matched_output_input_region.source_height == live_source_desc.Height",
-         "matched_output_color_space == input_color_space",
-         "!depth_authority_reprocess_pending",
-         "!producer_terminal",
+         "matched_presentation_cache.route_matches(",
+         "live_source_desc.Width",
+         "live_source_desc.Height",
+         "input_color_space",
+         "depth_authority_reprocess_pending",
+         "producer_terminal",
        }) {
     EXPECT_NE(route_body.find(required_gate), std::string::npos) << required_gate;
   }
+  EXPECT_NE(
+    display.find("class matched_presentation_cache_t {"),
+    std::string::npos
+  );
+  const auto cache_begin = display.find("class matched_presentation_cache_t {");
+  const auto cache_end = display.find("struct matched_frame_slot_t {", cache_begin);
+  ASSERT_NE(cache_end, std::string::npos);
+  const auto cache_body = display.substr(cache_begin, cache_end - cache_begin);
+  for (const auto *operation : {
+         "void invalidate() noexcept",
+         "void reset() noexcept",
+         "void publish(",
+         "bool has_fresh_pixels() const noexcept",
+         "source_age(",
+         "bool route_matches(",
+         "private:",
+       }) {
+    EXPECT_NE(cache_body.find(operation), std::string::npos) << operation;
+  }
+  EXPECT_NE(cache_body.find("std::chrono::steady_clock::duration::max()"),
+            std::string::npos);
+  for (const auto *private_access : {
+         "matched_presentation_cache.valid_",
+         "matched_presentation_cache.source_at_",
+         "matched_presentation_cache.input_region_",
+         "matched_presentation_cache.color_space_",
+       }) {
+    EXPECT_EQ(display.find(private_access), std::string::npos) << private_access;
+  }
+  EXPECT_NE(
+    display.find("matched_presentation_cache.source_age(repeat_now)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.find("matched_presentation_cache.source_matches(current_source_timestamp)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    display.find("matched_presentation_cache.has_fresh_pixels()"),
+    std::string::npos
+  );
+  EXPECT_NE(body.find("matched_presentation_cache.publish("), std::string::npos);
+  EXPECT_EQ(display.find("matched_output_valid"), std::string::npos);
   EXPECT_NE(
     display.find(
       "output_warped_new/packed_repeat/flat=",
@@ -7151,7 +7269,7 @@ TEST(AsyncTeardownLifecycleSourceTests, DrainsTrackedOwnersBeforeProcessGlobals)
   EXPECT_EQ(quit_scope.find(".detach()"), std::string::npos);
 }
 
-TEST(DirectxShaderSourceTest, SubtitleConditionPrepareBindsExactOcrRecordAtT7) {
+TEST(DirectxShaderSourceTest, SubtitleResolveBindsExactOcrRecordAndConditionParams) {
   const auto estimator =
     read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
   ASSERT_FALSE(estimator.empty());
@@ -7162,22 +7280,31 @@ TEST(DirectxShaderSourceTest, SubtitleConditionPrepareBindsExactOcrRecordAtT7) {
   ASSERT_NE(end, std::string::npos);
   const auto dispatch = estimator.substr(begin, end - begin);
   EXPECT_NE(
-    dispatch.find("ID3D11ShaderResourceView *prepare_srvs[8]"),
+    dispatch.find("ID3D11ShaderResourceView *resolve_srvs[8]"),
     std::string::npos
   );
   EXPECT_NE(
     dispatch.find(
-      "subtitle_locator_state_srv.Get(),\n        nullptr,\n        nullptr,\n"
-      "        nullptr,\n        ocr_box_record_srv.Get(),"
+      "nullptr,\n        cut_state_srv.Get(),\n"
+      "        depth_coordinate_v2_final_srv.Get(),\n        nullptr,\n"
+      "        nullptr,\n        nullptr,\n        nullptr,\n"
+      "        ocr_box_record_srv.Get(),"
     ),
     std::string::npos
   );
   EXPECT_NE(
-    dispatch.find("CSSetShaderResources(0, 8, prepare_srvs)"),
+    dispatch.find("CSSetShaderResources(0, 8, resolve_srvs)"),
     std::string::npos
   );
   EXPECT_NE(
-    dispatch.find("CSSetShaderResources(0, 8, null_srvs)"),
+    dispatch.find(
+      "subtitle_locator_state_uav.Get(),\n        nullptr,\n"
+      "        subtitle_condition_params_uav.Get(),"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    dispatch.find("CSSetUnorderedAccessViews(2, 3, resolve_uavs, nullptr)"),
     std::string::npos
   );
 }
