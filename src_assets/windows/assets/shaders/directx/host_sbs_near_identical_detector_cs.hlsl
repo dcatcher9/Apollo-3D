@@ -6,42 +6,16 @@
 
 StructuredBuffer<NearIdenticalTileEvidence> NearIdenticalTileInput : register(t2);
 StructuredBuffer<uint> NearIdenticalHistoryOwner : register(t3);
-StructuredBuffer<float4> NearIdenticalCutBridgeState : register(t4);
 Texture2D<float> NearIdenticalPreviousDepth : register(t5);
-StructuredBuffer<float4> NearIdenticalMinMaxEma : register(t6);
 RWStructuredBuffer<uint> NearIdenticalOcrRecord : register(u1);
-RWStructuredBuffer<uint> NearIdenticalHistoryOwnerOutput : register(u2);
 RWByteAddressBuffer NearIdenticalDecision : register(u3);
 RWTexture2D<float> NearIdenticalReuseDepthOutput : register(u4);
 RWStructuredBuffer<uint> NearIdenticalSceneCutEvidence : register(u5);
 
 #include "include/depth_constants.hlsl"
-#include "include/sbs_adaptive_state_contract.generated.hlsl"
 #include "include/depth_coordinate_v2_contract.generated.hlsl"
-#include "include/depth_valid_history_contract.hlsl"
-
-cbuffer NearIdenticalConstants : register(b1) {
-    uint near_identical_request_flags;
-    uint near_identical_tile_group_width;
-    uint near_identical_tile_group_height;
-    uint near_identical_tile_group_count;
-    uint near_identical_current_frame_low;
-    uint near_identical_current_frame_high;
-    uint near_identical_baseline_frame_low;
-    uint near_identical_baseline_frame_high;
-    uint near_identical_domain_tag_low;
-    uint near_identical_domain_tag_high;
-    uint near_identical_request_token_low;
-    uint near_identical_request_token_high;
-    uint near_identical_reduce_groups;
-    uint near_identical_stream_frame_delta;
-    uint near_identical_expected_work;
-    uint near_identical_expected_work_cookie;
-    uint near_identical_observation_timestamp_low;
-    uint near_identical_observation_timestamp_high;
-    uint near_identical_timestamp_padding0;
-    uint near_identical_timestamp_padding1;
-};
+#include "include/host_sbs_near_identical_constants.hlsl"
+#include "include/host_sbs_near_identical_history_owner.hlsl"
 
 // Bound only for the detector finalizer's exact-current OCR8 abstention publication. Keeping this
 // publication in the independently authenticated detector closure avoids changing the canonical
@@ -72,9 +46,6 @@ cbuffer NearIdenticalOcrConstants : register(b2) {
 #define NEAR_IDENTICAL_MAX_INFER_OWNER_AGE 4u
 #define NEAR_IDENTICAL_MAX_INFER_OWNER_OBSERVATION_AGE_US 100000u
 
-#define NEAR_IDENTICAL_HISTORY_OWNER_TAG 0x3142484Eu
-#define NEAR_IDENTICAL_HISTORY_OWNER_SCHEMA 2u
-
 #define NEAR_IDENTICAL_DECISION_REUSE 0u
 #define NEAR_IDENTICAL_DECISION_INFER 1u
 #define NEAR_IDENTICAL_DECISION_COOKIE 0xD1EC15A5u
@@ -84,11 +55,6 @@ cbuffer NearIdenticalOcrConstants : register(b2) {
 #define NEAR_IDENTICAL_RECEIPT_MAGIC 0x47524243u
 #define NEAR_IDENTICAL_REQUEST_MAGIC 0x54535152u
 #define NEAR_IDENTICAL_OPTIONAL_RECEIPT_MAGIC 0x52434F4Fu
-#define NEAR_IDENTICAL_WORK_FLAGS_COOKIE 0x6F435257u
-#define NEAR_IDENTICAL_WORK_OPTIONAL_OCR (1u << 0u)
-#define NEAR_IDENTICAL_WORK_SUBTITLE_OBSERVATION (1u << 1u)
-#define NEAR_IDENTICAL_WORK_OPTIONAL_OCR_DUE (1u << 3u)
-#define NEAR_IDENTICAL_WORK_SUBTITLE_OBSERVATION_DUE (1u << 4u)
 
 #define NEAR_IDENTICAL_DECISION_OFFSET 0u
 #define NEAR_IDENTICAL_DECISION_COOKIE_OFFSET 4u
@@ -119,17 +85,6 @@ cbuffer NearIdenticalOcrConstants : register(b2) {
 #define NEAR_IDENTICAL_OPTIONAL_ONE_OFFSET 208u
 #define NEAR_IDENTICAL_SUBTITLE_RECORD_ONE_OFFSET 224u
 #define NEAR_IDENTICAL_OBSERVATION_ONE_OFFSET 240u
-
-#define NEAR_IDENTICAL_HISTORY_WORD_CONTRACT_TAG 0u
-#define NEAR_IDENTICAL_HISTORY_WORD_CONTRACT_SCHEMA 1u
-#define NEAR_IDENTICAL_HISTORY_WORD_FRAME_LOW 2u
-#define NEAR_IDENTICAL_HISTORY_WORD_FRAME_HIGH 3u
-#define NEAR_IDENTICAL_HISTORY_WORD_DOMAIN_TAG_LOW 4u
-#define NEAR_IDENTICAL_HISTORY_WORD_DOMAIN_TAG_HIGH 5u
-#define NEAR_IDENTICAL_HISTORY_WORD_TARGET_WIDTH 6u
-#define NEAR_IDENTICAL_HISTORY_WORD_TARGET_HEIGHT 7u
-#define NEAR_IDENTICAL_HISTORY_WORD_OBSERVATION_TIMESTAMP_LOW 8u
-#define NEAR_IDENTICAL_HISTORY_WORD_OBSERVATION_TIMESTAMP_HIGH 9u
 
 groupshared uint4 NearIdenticalResolvePrimary[NEAR_IDENTICAL_RESOLVE_THREADS];
 groupshared uint NearIdenticalResolveFlags[NEAR_IDENTICAL_RESOLVE_THREADS];
@@ -203,14 +158,6 @@ uint NearIdenticalExpectedReduceGroups() {
 
 void NearIdenticalWriteDispatchArgs(uint byte_offset, uint x, uint y, uint z) {
     NearIdenticalDecision.Store4(byte_offset, uint4(x, y, z, 0u));
-}
-
-bool NearIdenticalWorkValid(uint flags) {
-    return flags == 0u ||
-        flags == NEAR_IDENTICAL_WORK_OPTIONAL_OCR ||
-        flags == NEAR_IDENTICAL_WORK_SUBTITLE_OBSERVATION ||
-        flags == NEAR_IDENTICAL_WORK_OPTIONAL_OCR_DUE ||
-        flags == NEAR_IDENTICAL_WORK_SUBTITLE_OBSERVATION_DUE;
 }
 
 bool NearIdenticalSubtitleConstantsValid() {
@@ -372,58 +319,10 @@ void NearIdenticalWriteOcrAbstention() {
     NearIdenticalOcrRecord[14u] = near_identical_ocr_roi_bottom;
 }
 
-[numthreads(1, 1, 1)]
-void history_owner_main(uint3 dispatch_thread : SV_DispatchThreadID) {
-    NearIdenticalHistoryOwnerOutput[NEAR_IDENTICAL_HISTORY_WORD_CONTRACT_TAG] = 0u;
-    float history_state = SBS_STATE_MODEL_INPUT_HISTORY_STATE(
-        NearIdenticalCutBridgeState[SBS_STATE_VECTOR_MODEL_INPUT_HISTORY_STATE]);
-    bool state_valid =
-        asuint(SBS_STATE_CUT_CONTRACT_TAG_BITS(NearIdenticalCutBridgeState[0])) ==
-            SBS_CUT_CONTRACT_TAG &&
-        NearIdenticalFinite(history_state) &&
-        DepthValidHistoryAdvances(NearIdenticalMinMaxEma[0].w, history_state);
-    bool owner_valid =
-        state_valid &&
-        (near_identical_current_frame_low != 0u ||
-         near_identical_current_frame_high != 0u) &&
-        (near_identical_domain_tag_low != 0u ||
-         near_identical_domain_tag_high != 0u) &&
-        (near_identical_observation_timestamp_low != 0u ||
-         near_identical_observation_timestamp_high != 0u) &&
-        DepthAnalysisContentValid() &&
-        near_identical_stream_frame_delta == 0u &&
-        NearIdenticalWorkValid(near_identical_expected_work) &&
-        near_identical_expected_work_cookie ==
-            (near_identical_expected_work == 0u ? 0u :
-             near_identical_expected_work ^ NEAR_IDENTICAL_WORK_FLAGS_COOKIE);
-    NearIdenticalHistoryOwnerOutput[NEAR_IDENTICAL_HISTORY_WORD_CONTRACT_SCHEMA] =
-        NEAR_IDENTICAL_HISTORY_OWNER_SCHEMA;
-    NearIdenticalHistoryOwnerOutput[NEAR_IDENTICAL_HISTORY_WORD_FRAME_LOW] =
-        near_identical_current_frame_low;
-    NearIdenticalHistoryOwnerOutput[NEAR_IDENTICAL_HISTORY_WORD_FRAME_HIGH] =
-        near_identical_current_frame_high;
-    NearIdenticalHistoryOwnerOutput[NEAR_IDENTICAL_HISTORY_WORD_DOMAIN_TAG_LOW] =
-        near_identical_domain_tag_low;
-    NearIdenticalHistoryOwnerOutput[NEAR_IDENTICAL_HISTORY_WORD_DOMAIN_TAG_HIGH] =
-        near_identical_domain_tag_high;
-    NearIdenticalHistoryOwnerOutput[NEAR_IDENTICAL_HISTORY_WORD_TARGET_WIDTH] = target_w;
-    NearIdenticalHistoryOwnerOutput[NEAR_IDENTICAL_HISTORY_WORD_TARGET_HEIGHT] = target_h;
-    NearIdenticalHistoryOwnerOutput[
-        NEAR_IDENTICAL_HISTORY_WORD_OBSERVATION_TIMESTAMP_LOW] =
-            near_identical_observation_timestamp_low;
-    NearIdenticalHistoryOwnerOutput[
-        NEAR_IDENTICAL_HISTORY_WORD_OBSERVATION_TIMESTAMP_HIGH] =
-            near_identical_observation_timestamp_high;
-    DeviceMemoryBarrier();
-    if (owner_valid) {
-        NearIdenticalHistoryOwnerOutput[NEAR_IDENTICAL_HISTORY_WORD_CONTRACT_TAG] =
-            NEAR_IDENTICAL_HISTORY_OWNER_TAG;
-    }
-}
-
 // Seed CutBridge's frame age from the last receipt-authorized infer postprocess, not from the last
-// branch the CPU can name. history_owner_main writes words 1..9 for an accepted infer observation
-// and uses word 0 only to authenticate the narrower model-history baseline. Ignoring word 0 here
+// branch the CPU can name. The completed fused map dispatch writes words 1..9 for an infer
+// observation and uses word 0 only to authenticate the narrower model-history baseline. Ignoring
+// word 0 here
 // therefore yields B-A for opaque infer B, while opaque reuse leaves A in place and yields C-A.
 [numthreads(1, 1, 1)]
 void scene_seed_main(uint3 dispatch_thread : SV_DispatchThreadID) {

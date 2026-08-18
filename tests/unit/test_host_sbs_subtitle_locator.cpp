@@ -8,6 +8,7 @@
 
   #include "src/generated/depth_coordinate_v2_contract.h"
   #include "src/generated/sbs_adaptive_state_contract.h"
+  #include "src/host_sbs_shader_cache.h"
 
   #include <algorithm>
   #include <array>
@@ -17,8 +18,6 @@
   #include <cstdint>
   #include <cstring>
   #include <d3d11.h>
-  #include <d3dcompiler.h>
-  #include <filesystem>
   #include <limits>
   #include <numeric>
   #include <string>
@@ -74,6 +73,16 @@ namespace {
   constexpr std::uint32_t slr_tag = v2::subtitle_locator_state_tag;
   constexpr std::uint32_t cut_tag = sbs_adaptive_state::cut_contract_tag;
   constexpr std::uint32_t final_box_offset = v2::subtitle_ocr_final_box_offset;
+
+  static_assert([] {
+    for (const auto &spec :
+         models::host_sbs_shader_cache::parallax_v2_producer_specs) {
+      if (spec.filename.find("condition_validate_test") != std::string_view::npos) {
+        return false;
+      }
+    }
+    return true;
+  }(), "the adversarial condition validator must remain outside the production closure");
 
   constexpr std::uint32_t flag_owner = 1u;
   constexpr std::uint32_t flag_pending = 2u;
@@ -153,40 +162,25 @@ namespace {
   static_assert(sizeof(v2_constants_t) == 32u);
   static_assert(sizeof(subtitle_constants_t) == 64u);
 
-  bool compile_compute_shader(
+  bool create_compute_shader(
     ID3D11Device *device,
-    const std::filesystem::path &path,
-    const char *entry,
+    const models::host_sbs_shader_cache::source_snapshot_t &sources,
+    const models::host_sbs_shader_cache::shader_spec &spec,
     ComPtr<ID3D11ComputeShader> &shader,
     std::string &error
   ) {
-    ComPtr<ID3DBlob> bytecode;
-    ComPtr<ID3DBlob> diagnostics;
-    const auto status = D3DCompileFromFile(
-      path.c_str(),
-      nullptr,
-      D3D_COMPILE_STANDARD_FILE_INCLUDE,
-      entry,
-      "cs_5_0",
-      D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
-      0u,
-      &bytecode,
-      &diagnostics
-    );
-    if (FAILED(status)) {
-      error = diagnostics ?
-                std::string(
-                  static_cast<const char *>(diagnostics->GetBufferPointer()),
-                  diagnostics->GetBufferSize()
-                ) :
-                std::string("D3DCompileFromFile failed without diagnostics");
+    const auto bytecode = models::host_sbs_shader_cache::get(sources, spec);
+    if (!bytecode || bytecode->empty()) {
+      error = std::string("authenticated shader compilation failed for ") +
+              std::string(spec.filename) + ":" + std::string(spec.entrypoint);
       return false;
     }
     const auto create_status = device->CreateComputeShader(
-      bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &shader
+      bytecode->data(), bytecode->size(), nullptr, &shader
     );
     if (FAILED(create_status)) {
-      error = std::string("CreateComputeShader failed for ") + entry;
+      error = std::string("CreateComputeShader failed for ") +
+              std::string(spec.entrypoint);
       return false;
     }
     return true;
@@ -339,12 +333,34 @@ namespace {
             &context_
           )) || actual < D3D_FEATURE_LEVEL_11_0) return false;
 
-      const auto shader_path = std::filesystem::path(SUNSHINE_SHADERS_DIR) /
-                               "host_sbs_subtitle_locator_cs.hlsl";
-      if (!compile_compute_shader(device_.Get(), shader_path, "resolve_main", resolve_, error) ||
-          !compile_compute_shader(
-            device_.Get(), shader_path, "condition_prepare_main", condition_prepare_, error) ||
-          !compile_compute_shader(device_.Get(), shader_path, "condition_main", condition_, error)) {
+      namespace shader_cache = models::host_sbs_shader_cache;
+      const auto production_sources = shader_cache::snapshot_sources(
+        SUNSHINE_SHADERS_DIR, shader_cache::parallax_v2_producer_specs
+      );
+      static constexpr shader_cache::shader_spec condition_validator_spec {
+        "test/host_sbs_subtitle_locator_condition_validate_test_cs.hlsl",
+        "condition_validate_test_main",
+        "cs_5_0",
+      };
+      const std::array validator_specs {condition_validator_spec};
+      const auto validator_sources = shader_cache::snapshot_sources(
+        SUNSHINE_SHADERS_DIR, validator_specs
+      );
+      if (!create_compute_shader(
+            device_.Get(), production_sources,
+            shader_cache::host_sbs_subtitle_locator_resolve, resolve_, error
+          ) ||
+          !create_compute_shader(
+            device_.Get(),
+            validator_sources,
+            condition_validator_spec,
+            condition_validate_test_,
+            error
+          ) ||
+          !create_compute_shader(
+            device_.Get(), production_sources,
+            shader_cache::host_sbs_subtitle_condition, condition_, error
+          )) {
         return false;
       }
 
@@ -532,7 +548,10 @@ namespace {
         nullptr, cut_srv_.Get(), base_srv_.Get(), nullptr, nullptr, nullptr, nullptr, ocr_srv_.Get()
       };
       context_->CSSetShaderResources(0u, resolve_srvs.size(), resolve_srvs.data());
-      context_->CSSetUnorderedAccessViews(2u, 1u, state_uav_.GetAddressOf(), nullptr);
+      std::array<ID3D11UnorderedAccessView *, 3u> resolve_uavs {
+        state_uav_.Get(), nullptr, condition_params_uav_.Get()
+      };
+      context_->CSSetUnorderedAccessViews(2u, resolve_uavs.size(), resolve_uavs.data(), nullptr);
       context_->Dispatch(1u, 1u, 1u);
       unbind();
 
@@ -545,6 +564,7 @@ namespace {
     }
 
     bool condition_only() {
+      if (!dispatch_condition_validator_for_test()) return false;
       if (!dispatch_conditioner()) return false;
       return read_buffer(
                device_.Get(), context_.Get(), condition_params_buffer_.Get(), condition_params_) &&
@@ -568,6 +588,13 @@ namespace {
         state_buffer_.Get(), 0u, nullptr, state_.data(), 0u, 0u
       );
       return true;
+    }
+
+    void poison_condition_params(const std::uint32_t value) {
+      std::vector<std::uint32_t> poisoned(v2::subtitle_condition_param_word_count, value);
+      context_->UpdateSubresource(
+        condition_params_buffer_.Get(), 0u, nullptr, poisoned.data(), 0u, 0u
+      );
     }
 
     bool swap_state_rectangles(const std::size_t first, const std::size_t second) {
@@ -794,21 +821,25 @@ namespace {
     }
 
    private:
-    bool dispatch_conditioner() {
+    bool dispatch_condition_validator_for_test() {
       ID3D11Buffer *constant_buffers[] = {depth_cb_.Get(), v2_cb_.Get(), subtitle_cb_.Get()};
       context_->CSSetConstantBuffers(0u, 3u, constant_buffers);
 
-      context_->CSSetShader(condition_prepare_.Get(), nullptr, 0u);
-      std::array<ID3D11ShaderResourceView *, 8u> prepare_srvs {
+      context_->CSSetShader(condition_validate_test_.Get(), nullptr, 0u);
+      std::array<ID3D11ShaderResourceView *, 8u> validator_srvs {
         nullptr, cut_srv_.Get(), nullptr, state_srv_.Get(), nullptr, nullptr, nullptr, ocr_srv_.Get()
       };
-      context_->CSSetShaderResources(0u, prepare_srvs.size(), prepare_srvs.data());
+      context_->CSSetShaderResources(0u, validator_srvs.size(), validator_srvs.data());
       context_->CSSetUnorderedAccessViews(
         4u, 1u, condition_params_uav_.GetAddressOf(), nullptr
       );
       context_->Dispatch(1u, 1u, 1u);
       unbind();
+      return true;
+    }
 
+    bool dispatch_conditioner() {
+      ID3D11Buffer *constant_buffers[] = {depth_cb_.Get(), v2_cb_.Get(), subtitle_cb_.Get()};
       context_->CSSetShader(condition_.Get(), nullptr, 0u);
       context_->CSSetConstantBuffers(0u, 3u, constant_buffers);
       std::array<ID3D11ShaderResourceView *, 5u> condition_srvs {
@@ -851,7 +882,7 @@ namespace {
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;
     ComPtr<ID3D11ComputeShader> resolve_;
-    ComPtr<ID3D11ComputeShader> condition_prepare_;
+    ComPtr<ID3D11ComputeShader> condition_validate_test_;
     ComPtr<ID3D11ComputeShader> condition_;
     ComPtr<ID3D11Buffer> state_buffer_;
     ComPtr<ID3D11ShaderResourceView> state_srv_;
@@ -2687,6 +2718,7 @@ namespace {
     EXPECT_NEAR(
       std::bit_cast<float>(tracked_target), target_for_pixels(2.0f), 1.0e-8f
     );
+    fixture.poison_condition_params(0xd1ced1ceu);
     ASSERT_TRUE(fixture.observe(303u, {disjoint}, false, true, false, true));
     EXPECT_EQ(fixture.state()[2u], 0u);
     EXPECT_EQ(fixture.state()[4u], 0u);
@@ -2695,6 +2727,10 @@ namespace {
     EXPECT_EQ(fixture.state()[21u], 2u);
     EXPECT_EQ(fixture.state()[25u], 6u);
     EXPECT_EQ(fixture.state()[18u], tracked_target);
+    EXPECT_TRUE(std::all_of(
+      fixture.condition_params().begin(), fixture.condition_params().end(),
+      [](const auto word) { return word == 0u; }
+    ));
     EXPECT_TRUE(fixture.output_is_exact_base());
 
     // A same-identity no-submit redispatch cannot consume two grace observations. A later distinct
@@ -2724,6 +2760,7 @@ namespace {
     // A hard cut is an explicit lifetime boundary. Invalid same-frame OCR cannot carry grace or
     // target across it and, because it has no geometry, cannot sample a replacement target.
     fixture.set_cut(1u, true);
+    fixture.poison_condition_params(0xc01dc01du);
     ASSERT_TRUE(fixture.observe(307u, {}, false, false));
     EXPECT_EQ(fixture.state()[2u], 0u);
     EXPECT_EQ(fixture.state()[4u], 0u);
@@ -2731,6 +2768,10 @@ namespace {
     EXPECT_EQ(fixture.state()[20u], 0u);
     EXPECT_EQ(fixture.state()[25u], 0u);
     EXPECT_EQ(fixture.state()[18u], 0u);
+    EXPECT_TRUE(std::all_of(
+      fixture.condition_params().begin(), fixture.condition_params().end(),
+      [](const auto word) { return word == 0u; }
+    ));
     EXPECT_TRUE(fixture.output_is_exact_base());
   }
 

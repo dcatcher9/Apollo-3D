@@ -55,7 +55,6 @@ SHADER_SOURCE_SPECS = (
     ("depth_hist_cs.hlsl", "main", "cs_5_0"),
     ("depth_scene_cut_evidence_cs.hlsl", "main", "cs_5_0"),
     ("depth_scene_cut_resolve_cs.hlsl", "main", "cs_5_0"),
-    ("depth_valid_history_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_moments_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_state_resolve_cs.hlsl", "main", "cs_5_0"),
@@ -67,7 +66,6 @@ SHADER_SOURCE_SPECS = (
     ("host_sbs_ocr_boxes_cs.hlsl", "cells_main", "cs_5_0"),
     ("host_sbs_ocr_boxes_cs.hlsl", "resolve_main", "cs_5_0"),
     ("host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"),
-    ("host_sbs_subtitle_locator_cs.hlsl", "condition_prepare_main", "cs_5_0"),
     ("host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"),
 )
 EXPECTED_FINAL_PARALLAX = {

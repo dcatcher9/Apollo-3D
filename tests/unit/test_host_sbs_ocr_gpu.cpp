@@ -375,7 +375,7 @@ namespace {
       if (need_boxes && (!compile_compute_shader(device_.Get(), root / "host_sbs_ocr_boxes_cs.hlsl", "cells_main", cells_, error) || !compile_compute_shader(device_.Get(), root / "host_sbs_ocr_boxes_cs.hlsl", "resolve_main", boxes_, error))) {
         return false;
       }
-      if (need_locator && (!compile_compute_shader(device_.Get(), root / "host_sbs_subtitle_locator_cs.hlsl", "resolve_main", locator_resolve_, error) || !compile_compute_shader(device_.Get(), root / "host_sbs_subtitle_locator_cs.hlsl", "condition_prepare_main", condition_prepare_, error) || !compile_compute_shader(device_.Get(), root / "host_sbs_subtitle_locator_cs.hlsl", "condition_main", condition_, error))) {
+      if (need_locator && (!compile_compute_shader(device_.Get(), root / "host_sbs_subtitle_locator_cs.hlsl", "resolve_main", locator_resolve_, error) || !compile_compute_shader(device_.Get(), root / "host_sbs_subtitle_locator_cs.hlsl", "condition_main", condition_, error))) {
         return false;
       }
 
@@ -546,7 +546,7 @@ namespace {
       const bool reset = false,
       const bool enabled = true
     ) {
-      if (!locator_resolve_ || !condition_prepare_ || !condition_) {
+      if (!locator_resolve_ || !condition_) {
         return false;
       }
       const subtitle_constants_t constants {
@@ -595,29 +595,13 @@ namespace {
         static_cast<UINT>(resolve_srvs.size()),
         resolve_srvs.data()
       );
-      context_->CSSetUnorderedAccessViews(2u, 1u, state_uav_.GetAddressOf(), nullptr);
-      context_->Dispatch(1u, 1u, 1u);
-      unbind();
-
-      context_->CSSetShader(condition_prepare_.Get(), nullptr, 0u);
-      context_->CSSetConstantBuffers(
-        0u,
-        static_cast<UINT>(constant_buffers.size()),
-        constant_buffers.data()
-      );
-      std::array<ID3D11ShaderResourceView *, 8u> prepare_srvs {
-        nullptr, cut_srv_.Get(), nullptr, state_srv_.Get(), nullptr, nullptr, nullptr,
-        record_srv_.Get()
+      std::array<ID3D11UnorderedAccessView *, 3u> resolve_uavs {
+        state_uav_.Get(), nullptr, condition_params_uav_.Get()
       };
-      context_->CSSetShaderResources(
-        0u,
-        static_cast<UINT>(prepare_srvs.size()),
-        prepare_srvs.data()
-      );
       context_->CSSetUnorderedAccessViews(
-        4u,
-        1u,
-        condition_params_uav_.GetAddressOf(),
+        2u,
+        static_cast<UINT>(resolve_uavs.size()),
+        resolve_uavs.data(),
         nullptr
       );
       context_->Dispatch(1u, 1u, 1u);
@@ -879,7 +863,6 @@ namespace {
     ComPtr<ID3D11ComputeShader> cells_;
     ComPtr<ID3D11ComputeShader> boxes_;
     ComPtr<ID3D11ComputeShader> locator_resolve_;
-    ComPtr<ID3D11ComputeShader> condition_prepare_;
     ComPtr<ID3D11ComputeShader> condition_;
     ComPtr<ID3D11Buffer> preprocess_cb_;
     ComPtr<ID3D11Buffer> boxes_cb_;

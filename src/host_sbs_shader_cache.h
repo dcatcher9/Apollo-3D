@@ -30,7 +30,6 @@ namespace models::host_sbs_shader_cache {
   };
   inline constexpr shader_spec depth_minmax_ema {"depth_minmax_ema_cs.hlsl"};
   inline constexpr shader_spec depth_hist {"depth_hist_cs.hlsl"};
-  inline constexpr shader_spec depth_valid_history {"depth_valid_history_cs.hlsl"};
   inline constexpr shader_spec depth_scene_cut_evidence {"depth_scene_cut_evidence_cs.hlsl"};
   inline constexpr shader_spec depth_scene_cut_resolve {"depth_scene_cut_resolve_cs.hlsl"};
   inline constexpr shader_spec depth_coordinate_v2_moments {"depth_coordinate_v2_moments_cs.hlsl"};
@@ -57,9 +56,6 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec host_sbs_subtitle_locator_resolve {
     "host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"
   };
-  inline constexpr shader_spec host_sbs_subtitle_condition_prepare {
-    "host_sbs_subtitle_locator_cs.hlsl", "condition_prepare_main", "cs_5_0"
-  };
   inline constexpr shader_spec host_sbs_subtitle_condition {
     "host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"
   };
@@ -68,9 +64,6 @@ namespace models::host_sbs_shader_cache {
   };
   inline constexpr shader_spec host_sbs_near_identical_resolve {
     "host_sbs_near_identical_detector_cs.hlsl", "resolve_main", "cs_5_0"
-  };
-  inline constexpr shader_spec host_sbs_near_identical_history_owner {
-    "host_sbs_near_identical_detector_cs.hlsl", "history_owner_main", "cs_5_0"
   };
   inline constexpr shader_spec host_sbs_near_identical_scene_seed {
     "host_sbs_near_identical_detector_cs.hlsl", "scene_seed_main", "cs_5_0"
@@ -106,17 +99,17 @@ namespace models::host_sbs_shader_cache {
     "sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"
   };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
-    "c8a2221d4e47ac5b09881069ff18a4f2abe4ef9a6adb165426c38f27c7cfabe1";
+    "7553350163dfb80cee85b70689b768a46a5c15b44997e2753e24bebedaa51ffd";
   inline constexpr std::string_view parallax_v2_p010_y_source_closure_sha256 =
-    "4859d6b8e1d1b52d02066562ce39c8204c1afdae99182b4c5ba5474c94b5f874";
+    "f14993382c296ee07ce556c3dbebba29d021d8555ea446fae9a8b06b17a09813";
   inline constexpr std::string_view parallax_v2_diagnostic_source_closure_sha256 =
-    "78aa31a8b4c323e439be55f907285ffe2791cfd21c9a9cfc19574792a5f9e14c";
+    "1c7cb433f667c990e4d55f254a11cc9a40590e3a1e97e62fc261c2e0069b9513";
   inline constexpr std::string_view sbs_flat_fallback_source_closure_sha256 =
     "7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4";
   inline constexpr std::string_view near_identical_detector_source_closure_sha256 =
-    "68126ae7871f6999da1a88a0b800a1f03f9e75dd346bc4596a9d71b5d1232006";
+    "87b63ffb753e9cc39e90b385ab997134402596eb5c074a4f3a3680619015910b";
   inline constexpr std::string_view gpu_trace_source_closure_sha256 =
-    "422fe351331310fd7c776a2263932da83121b21ce01f6c9a80192468a3ffad34";
+    "a1e6a21286b5a898b1dcdd419056faa8e3a5351b21edef0ef288d716979c0cb9";
 
   // Identity-only minimal closure used to match the model/preprocess calibration. Production
   // bytecode is never compiled from this smaller snapshot: the sole fused entry point is compiled
@@ -137,7 +130,6 @@ namespace models::host_sbs_shader_cache {
     depth_hist,
     depth_scene_cut_evidence,
     depth_scene_cut_resolve,
-    depth_valid_history,
     depth_coordinate_v2_moments,
     depth_coordinate_v2_frame_resolve,
     depth_coordinate_v2_state_resolve,
@@ -149,7 +141,6 @@ namespace models::host_sbs_shader_cache {
     host_sbs_ocr_cells,
     host_sbs_ocr_resolve,
     host_sbs_subtitle_locator_resolve,
-    host_sbs_subtitle_condition_prepare,
     host_sbs_subtitle_condition,
   };
 
@@ -176,7 +167,6 @@ namespace models::host_sbs_shader_cache {
     producer_shader_binding {
       producer_shader_e::depth_scene_cut_resolve, depth_scene_cut_resolve
     },
-    producer_shader_binding {producer_shader_e::depth_valid_history, depth_valid_history},
     producer_shader_binding {
       producer_shader_e::depth_coordinate_v2_moments, depth_coordinate_v2_moments
     },
@@ -207,10 +197,6 @@ namespace models::host_sbs_shader_cache {
     producer_shader_binding {
       producer_shader_e::host_sbs_subtitle_locator_resolve,
       host_sbs_subtitle_locator_resolve
-    },
-    producer_shader_binding {
-      producer_shader_e::host_sbs_subtitle_condition_prepare,
-      host_sbs_subtitle_condition_prepare
     },
     producer_shader_binding {
       producer_shader_e::host_sbs_subtitle_condition, host_sbs_subtitle_condition
@@ -248,7 +234,6 @@ namespace models::host_sbs_shader_cache {
   // submitted outside the conditional wrapper.
   inline constexpr std::array near_identical_detector_specs {
     host_sbs_near_identical_resolve,
-    host_sbs_near_identical_history_owner,
     host_sbs_near_identical_scene_seed,
     host_sbs_near_identical_finalize,
     host_sbs_near_identical_reuse_depth,

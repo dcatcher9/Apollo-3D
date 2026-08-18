@@ -1,5 +1,5 @@
 // One authority for deciding whether the current model-input/appearance/depth tuple becomes the
-// next comparison baseline. Keep the tuple-copy shader and the near-identical owner publisher on
+// next comparison baseline. Keep the fused map root's tuple-copy and near-identical owner paths on
 // this exact predicate: an authenticated owner must never name pixels/depth that were not copied.
 bool DepthValidHistoryAdvances(
     const float current_depth_validity,

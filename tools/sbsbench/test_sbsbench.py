@@ -1594,7 +1594,9 @@ class EvalContractTests(unittest.TestCase):
             estimator = fh.read()
         self.assertNotIn("cbuffer_first_frame", estimator)
         self.assertNotIn("depth_history_valid", estimator)
-        self.assertIn("depth_valid_history_cs", estimator)
+        self.assertNotIn("depth_valid_history_cs", estimator)
+        self.assertIn("CSSetShaderResources(0, 8, map_srvs)", estimator)
+        self.assertIn("CSSetUnorderedAccessViews(0, 6, map_uavs", estimator)
         self.assertIn("tensor_previous_input_uav", estimator)
         self.assertNotIn("context->CSSetShader(depth_minmax_cs.Get()", estimator)
         self.assertIn("dispatch_parallax_v2_frame_stats(perf_slot)", estimator)
@@ -1644,13 +1646,16 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("scale.w < 0.5f", mapper)
         self.assertIn("scale.w > 1.5f ? 1.0f : ema_alpha", mapper)
         self.assertFalse(os.path.exists(os.path.join(shader_dir, "depth_ema_motion_cs.hlsl")))
-        with open(os.path.join(shader_dir, "depth_valid_history_cs.hlsl"),
+        self.assertFalse(os.path.exists(
+            os.path.join(shader_dir, "depth_valid_history_cs.hlsl")))
+        with open(os.path.join(shader_dir, "depth_coordinate_v2_map_cs.hlsl"),
                   encoding="utf-8") as fh:
             history = fh.read()
         self.assertIn(
             "DepthValidHistoryAdvances(MinMaxEma[0].w, history_state)",
             history)
-        self.assertIn("PreviousModelInput[idx + 2u * plane]", history)
+        self.assertIn("PreviousModelInput[raw_index + 2u * plane]", history)
+        self.assertIn("NearIdenticalHistoryOwnerOutput", history)
 
     def test_harness_contract_is_v2_only_and_machine_verified(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

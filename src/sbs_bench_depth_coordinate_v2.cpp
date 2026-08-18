@@ -281,6 +281,28 @@ void main(uint3 id : SV_DispatchThreadID) {
              SUCCEEDED(device->CreateUnorderedAccessView(texture.Get(), nullptr, &uav));
     }
 
+    bool create_uint_texture(
+      ID3D11Device *device,
+      const UINT width,
+      const UINT height,
+      ComPtr<ID3D11Texture2D> &texture,
+      ComPtr<ID3D11ShaderResourceView> &srv,
+      ComPtr<ID3D11UnorderedAccessView> &uav
+    ) {
+      D3D11_TEXTURE2D_DESC desc {};
+      desc.Width = width;
+      desc.Height = height;
+      desc.MipLevels = 1u;
+      desc.ArraySize = 1u;
+      desc.Format = DXGI_FORMAT_R32_UINT;
+      desc.SampleDesc.Count = 1u;
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+      return SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &texture)) &&
+             SUCCEEDED(device->CreateShaderResourceView(texture.Get(), nullptr, &srv)) &&
+             SUCCEEDED(device->CreateUnorderedAccessView(texture.Get(), nullptr, &uav));
+    }
+
     std::vector<std::uint32_t> read_buffer_words(
       ID3D11Device *device,
       ID3D11DeviceContext *context,
@@ -414,6 +436,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     ComPtr<ID3D11ComputeShader> encode_shader;
     std::array<ComPtr<ID3D11Buffer>, 3> common_constants_by_color;
     ComPtr<ID3D11Buffer> v2_constants;
+    ComPtr<ID3D11Buffer> near_constants;
     ComPtr<ID3D11Buffer> source_region_constants;
     ComPtr<ID3D11Buffer> encode_constants;
     ComPtr<ID3D11Buffer> raw_buffer;
@@ -431,6 +454,33 @@ void main(uint3 id : SV_DispatchThreadID) {
     ComPtr<ID3D11UnorderedAccessView> state_uav;
     ComPtr<ID3D11Buffer> cut_state_buffer;
     ComPtr<ID3D11ShaderResourceView> cut_state_srv;
+    ComPtr<ID3D11Buffer> dummy_minmax_buffer;
+    ComPtr<ID3D11ShaderResourceView> dummy_minmax_srv;
+    ComPtr<ID3D11Buffer> dummy_current_model_input_buffer;
+    ComPtr<ID3D11ShaderResourceView> dummy_current_model_input_srv;
+    ComPtr<ID3D11Buffer> dummy_previous_model_input_buffer;
+    ComPtr<ID3D11ShaderResourceView> dummy_previous_model_input_srv;
+    ComPtr<ID3D11UnorderedAccessView> dummy_previous_model_input_uav;
+    ComPtr<ID3D11Buffer> dummy_current_appearance_buffer;
+    ComPtr<ID3D11ShaderResourceView> dummy_current_appearance_srv;
+    ComPtr<ID3D11Buffer> dummy_previous_appearance_buffer;
+    ComPtr<ID3D11ShaderResourceView> dummy_previous_appearance_srv;
+    ComPtr<ID3D11UnorderedAccessView> dummy_previous_appearance_uav;
+    ComPtr<ID3D11Buffer> dummy_history_owner_buffer;
+    ComPtr<ID3D11ShaderResourceView> dummy_history_owner_srv;
+    ComPtr<ID3D11UnorderedAccessView> dummy_history_owner_uav;
+    ComPtr<ID3D11Texture2D> dummy_exclusion_texture;
+    ComPtr<ID3D11ShaderResourceView> dummy_exclusion_srv;
+    ComPtr<ID3D11UnorderedAccessView> dummy_exclusion_uav;
+    ComPtr<ID3D11Texture2D> dummy_previous_exclusion_texture;
+    ComPtr<ID3D11ShaderResourceView> dummy_previous_exclusion_srv;
+    ComPtr<ID3D11UnorderedAccessView> dummy_previous_exclusion_uav;
+    ComPtr<ID3D11Texture2D> dummy_current_depth_texture;
+    ComPtr<ID3D11ShaderResourceView> dummy_current_depth_srv;
+    ComPtr<ID3D11UnorderedAccessView> dummy_current_depth_uav;
+    ComPtr<ID3D11Texture2D> dummy_previous_depth_texture;
+    ComPtr<ID3D11ShaderResourceView> dummy_previous_depth_srv;
+    ComPtr<ID3D11UnorderedAccessView> dummy_previous_depth_uav;
     ComPtr<ID3D11Texture2D> coordinate_texture;
     ComPtr<ID3D11ShaderResourceView> coordinate_srv;
     ComPtr<ID3D11UnorderedAccessView> coordinate_uav;
@@ -847,6 +897,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       const std::array<float, 4> encode_words {{
         v2::direct_container_limit, 0.0f, 0.0f, 0.0f,
       }};
+      const std::array<std::uint32_t, 20> near_words {};
       const std::array<std::uint32_t, 4> source_region_words {{
         0u, 0u, source_width, source_height,
       }};
@@ -860,6 +911,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       }
       if (!common_constants_ready ||
           !create_immutable_constant_buffer(device.Get(), constants, v2_constants) ||
+          !create_immutable_constant_buffer(device.Get(), near_words, near_constants) ||
           !create_immutable_constant_buffer(
             device.Get(), source_region_words, source_region_constants
           ) ||
@@ -914,10 +966,54 @@ void main(uint3 id : SV_DispatchThreadID) {
         }
       }
       auto cut_state_words = sbs_adaptive_state::initial_words;
+      const std::array<float, 4> invalid_minmax {{0.0f, 0.0f, 0.0f, 0.0f}};
       if (!create_structured_buffer(
             device.Get(), sizeof(float) * 4u,
             static_cast<UINT>(sbs_adaptive_state::vector_count), cut_state_words.data(), false,
             cut_state_buffer, cut_state_srv, unused_uav
+          ) ||
+          !create_structured_buffer(
+            device.Get(), sizeof(float) * 4u, 1u, invalid_minmax.data(), false,
+            dummy_minmax_buffer, dummy_minmax_srv, unused_uav
+          ) ||
+          !create_structured_buffer(
+            device.Get(), sizeof(float), 3u * width * height, nullptr, false,
+            dummy_current_model_input_buffer, dummy_current_model_input_srv, unused_uav
+          ) ||
+          !create_structured_buffer(
+            device.Get(), sizeof(float), 3u * width * height, nullptr, true,
+            dummy_previous_model_input_buffer, dummy_previous_model_input_srv,
+            dummy_previous_model_input_uav
+          ) ||
+          !create_structured_buffer(
+            device.Get(), sizeof(float), width * height, nullptr, false,
+            dummy_current_appearance_buffer, dummy_current_appearance_srv, unused_uav
+          ) ||
+          !create_structured_buffer(
+            device.Get(), sizeof(float), width * height, nullptr, true,
+            dummy_previous_appearance_buffer, dummy_previous_appearance_srv,
+            dummy_previous_appearance_uav
+          ) ||
+          !create_structured_buffer(
+            device.Get(), sizeof(std::uint32_t), 10u, nullptr, true,
+            dummy_history_owner_buffer, dummy_history_owner_srv, dummy_history_owner_uav
+          ) ||
+          !create_uint_texture(
+            device.Get(), width, height,
+            dummy_exclusion_texture, dummy_exclusion_srv, dummy_exclusion_uav
+          ) ||
+          !create_uint_texture(
+            device.Get(), width, height,
+            dummy_previous_exclusion_texture, dummy_previous_exclusion_srv,
+            dummy_previous_exclusion_uav
+          ) ||
+          !create_float_texture(
+            device.Get(), width, height,
+            dummy_current_depth_texture, dummy_current_depth_srv, dummy_current_depth_uav
+          ) ||
+          !create_float_texture(
+            device.Get(), width, height,
+            dummy_previous_depth_texture, dummy_previous_depth_srv, dummy_previous_depth_uav
           ) ||
           !create_float_texture(
             device.Get(), width, height,
@@ -952,12 +1048,18 @@ void main(uint3 id : SV_DispatchThreadID) {
         error = "cannot create V2 GPU replay textures or cut-state buffer";
         return false;
       }
+      const UINT zero_uint[4] = {};
+      const float zero_float[4] = {};
+      context->ClearUnorderedAccessViewUint(dummy_exclusion_uav.Get(), zero_uint);
+      context->ClearUnorderedAccessViewUint(dummy_previous_exclusion_uav.Get(), zero_uint);
+      context->ClearUnorderedAccessViewFloat(dummy_current_depth_uav.Get(), zero_float);
+      context->ClearUnorderedAccessViewFloat(dummy_previous_depth_uav.Get(), zero_float);
       return true;
     }
 
     void unbind(const UINT srv_count, const UINT uav_count) {
-      ID3D11ShaderResourceView *null_srvs[4] = {nullptr, nullptr, nullptr, nullptr};
-      ID3D11UnorderedAccessView *null_uavs[2] = {nullptr, nullptr};
+      ID3D11ShaderResourceView *null_srvs[8] = {};
+      ID3D11UnorderedAccessView *null_uavs[6] = {};
       context->CSSetShaderResources(0, srv_count, null_srvs);
       context->CSSetUnorderedAccessViews(0, uav_count, null_uavs, nullptr);
     }
@@ -1083,20 +1185,41 @@ void main(uint3 id : SV_DispatchThreadID) {
       context->Dispatch(1u, 1u, 1u);
       unbind(2u, 1u);
 
-      ID3D11ShaderResourceView *map_srvs[] = {raw_srv.Get(), state_srv.Get()};
+      ID3D11ShaderResourceView *coordinate_srvs[] = {
+        raw_srv.Get(), state_srv.Get(), dummy_exclusion_srv.Get(),
+      };
 
       // The canonical coordinate is a replay diagnostic, matching the live Dump-3D-only pass.
       context->CSSetShader(coordinate_diagnostic_shader.Get(), nullptr, 0);
-      context->CSSetShaderResources(0, 2, map_srvs);
+      context->CSSetShaderResources(0, 3, coordinate_srvs);
       context->CSSetUnorderedAccessViews(0, 1, coordinate_uav.GetAddressOf(), nullptr);
       context->Dispatch((width + 15u) / 16u, (height + 15u) / 16u, 1u);
-      unbind(2u, 1u);
+      unbind(3u, 1u);
 
       context->CSSetShader(map_shader.Get(), nullptr, 0);
-      context->CSSetShaderResources(0, 2, map_srvs);
-      context->CSSetUnorderedAccessViews(0, 1, candidate_uav.GetAddressOf(), nullptr);
+      context->CSSetConstantBuffers(2u, 1u, near_constants.GetAddressOf());
+      ID3D11ShaderResourceView *map_srvs[8] = {
+        raw_srv.Get(),
+        state_srv.Get(),
+        dummy_exclusion_srv.Get(),
+        dummy_minmax_srv.Get(),
+        dummy_current_model_input_srv.Get(),
+        dummy_current_appearance_srv.Get(),
+        cut_state_srv.Get(),
+        dummy_current_depth_srv.Get(),
+      };
+      ID3D11UnorderedAccessView *map_uavs[6] = {
+        candidate_uav.Get(),
+        dummy_previous_model_input_uav.Get(),
+        dummy_previous_appearance_uav.Get(),
+        dummy_previous_depth_uav.Get(),
+        dummy_previous_exclusion_uav.Get(),
+        dummy_history_owner_uav.Get(),
+      };
+      context->CSSetShaderResources(0, 8, map_srvs);
+      context->CSSetUnorderedAccessViews(0, 6, map_uavs, nullptr);
       context->Dispatch((width + 15u) / 16u, (height + 15u) / 16u, 1u);
-      unbind(2u, 1u);
+      unbind(8u, 6u);
 
       context->CSSetShader(ownership_shader.Get(), nullptr, 0);
       context->CSSetConstantBuffers(

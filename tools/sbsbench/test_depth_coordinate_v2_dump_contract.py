@@ -618,7 +618,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 dump_contract.validate_v2_dump_manifest_document(changed)
 
     def test_current_subtitle_record_and_state_abi_partition_exact_word_counts(self):
-        self.assertEqual(dump_contract.DUMP_MANIFEST_SCHEMA, 37)
+        self.assertEqual(dump_contract.DUMP_MANIFEST_SCHEMA, 38)
         self.assertEqual(dump_contract.DEPTH_INPUT_REGION_SCHEMA, 4)
         self.assertEqual(dump_contract.SUBTITLE_OCR_RECORD_SCHEMA, 3)
         self.assertEqual(dump_contract.SUBTITLE_LOCATOR_STATE_SCHEMA, 13)
@@ -891,7 +891,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 manifest["subtitle_conditioning"]["resolver"]
                 ["shader_contract"]["source_specs"]
             ],
-            ["resolve_main", "condition_prepare_main", "condition_main"],
+            ["resolve_main", "condition_main"],
         )
 
     def test_current_slr13_manifest_rejects_provenance_roles_and_base_field_drift(self):

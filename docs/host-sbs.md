@@ -53,17 +53,17 @@ diagnostics that explain how the final field was produced.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 70/tag `0xD84FCD1A`, canonical SHA-256
-`caf07a7202266a858f5c7d68a6b550ebbb80f5640ca3ad6630a2c2ade3e7745b`. It binds the
+schema 71/tag `0x012ECEC1`, canonical SHA-256
+`96195e08c3da309b51503ae09c5ff07e7e5355ec0a7cc008a1e38c9209d67164`. It binds the
 complete policy below, including all subtitle field/ROI semantics, and producer source-closure
-SHA-256 `53042f759cc7043f141995623c3226297566a9c4e66d2d08680319416e41109d`.
+SHA-256 `11bde7ba05ca8ae8404b8fe21a3afd600ff98549fea248dacb5bf1b5d2156d6b`.
 The live-renderer source-closure SHA-256 is
-`c8a2221d4e47ac5b09881069ff18a4f2abe4ef9a6adb165426c38f27c7cfabe1`. The optional HDR
+`7553350163dfb80cee85b70689b768a46a5c15b44997e2753e24bebedaa51ffd`. The optional HDR
 warp-plus-P010-luma MRT has its own fail-open source closure
-`4859d6b8e1d1b52d02066562ce39c8204c1afdae99182b4c5ba5474c94b5f874`; its absence or device
+`f14993382c296ee07ce556c3dbebba29d021d8555ea446fae9a8b06b17a09813`; its absence or device
 failure retains the canonical RGB-to-P010 path. The dump-only diagnostic renderer source-closure
 SHA-256 is
-`78aa31a8b4c323e439be55f907285ffe2791cfd21c9a9cfc19574792a5f9e14c`. It admits the following
+`1c7cb433f667c990e4d55f254a11cc9a40590e3a1e97e62fc261c2e0069b9513`. It admits the following
 production calibration:
 
 | Property | Production value |
@@ -122,7 +122,9 @@ preprocessor treats that exact rectangle as its crop-local logical source and fi
 deterministic centered integer content rectangle. It never stretches or discards pixels from that
 logical source.
 Synthetic tensor pixels outside the content rectangle replicate the nearest content edge and are
-excluded from depth statistics, scene-cut evidence, ownership, history, and OCR authority. Every
+excluded from depth statistics, scene-cut evidence, ownership, history comparison/authority, and
+OCR authority. The fused map still copies the complete raw padded history tuple, with exclusion `1`
+preventing synthetic cells from contributing detector evidence. Every
 domain uses the same canonical full-grid producer dispatch, including heavily padded force-infer
 frames. This deliberately repeats the clamped boundary footprint work instead of retaining a
 second content/padding entry-point topology; the removed specialization was bit-identical, and the
@@ -465,11 +467,13 @@ naturally, and the gap is never converted into one merged rectangle. Because a r
 the complete field width and reaches the field bottom, its only exterior boundary—and therefore its
 only collar—is the corrected top edge. Missing current authority, invalid target
 state, unsupported tensor shape, or any identity failure copies ordinary post-limit V2 exactly.
-One `1x1` preparation dispatch validates the complete 80-word state, requires its scene epoch to
-equal the authenticated CutBridge hard-cut count bound at `t1`, and publishes the six immutable
-condition words actually consumed by rendering: schema, tag, current count/kinds, fade, and target.
-Every accepted OCR/SLR observation then runs the sole complete conditioner over the full field,
-reading immutable Base at `t2` and writing the distinct atomic final field at `u3`. It publishes every cell,
+The one-thread resolver writes the complete 80-word state, issues a device-memory barrier,
+snapshots that just-written state into group memory, validates the snapshot—including equality of
+its scene epoch and the authenticated CutBridge hard-cut count bound at `t1`—and publishes the six
+immutable condition words consumed by rendering: schema, tag, current count/kinds, fade, and target.
+There is no separate preparation dispatch or live validation root. Every accepted OCR/SLR
+observation then runs the unchanged sole complete conditioner over the full field, reading immutable
+Base at `t2` and writing the distinct atomic final field at `u3`. It publishes every cell,
 including bit-exact unchanged Base and exact nearest-content extension into synthetic padding; an
 invalid verdict likewise publishes Base exactly. There is no in-place SRV/UAV alias, indirect
 dispatch-argument buffer, active-region origin, conservative dispatch bound, or preparatory texture
@@ -827,8 +831,15 @@ telemetry copies; already-scheduled telemetry may retire but cannot classify the
 The barrier may admit a fresh same-route DDup-authenticated follow-up bound to the immediately
 preceding opaque transaction. The model-input history owner advances only when that prior root
 inferred and the shared MinMax/history-state validity predicate also advanced the comparison tensor
-and normalized-depth tuple. Any other infer clears the owner, so the next candidate force-infers;
-an authenticated reuse leaves the older infer owner intact. The owner-age gate permits at most four
+and normalized-depth tuple. One fused coordinate-map dispatch first copies all six raw values for
+every cell in the padded target domain—three NCHW planes, appearance ordinal, normalized depth, and
+exclusion—before any coordinate clamp or mapping early exit, while thread zero refreshes the owner
+metadata and commits its tag only under the stricter finite CutBridge/domain/work proof. Completion
+of that direct or indirect dispatch followed by unbinding all six UAVs publishes the tuple and owner;
+the thread-zero tag store alone is not a same-dispatch publication boundary. `coordinate_main`
+remains diagnostic-only and cannot modify either. Any other infer clears the owner, so the next
+candidate force-infers; an authenticated reuse dispatches no map groups and leaves the older infer
+owner intact. The owner-age gate permits at most four
 frame steps only while its observation timestamp is strictly less than `100 ms` old. OCR requests
 remain independent: ordinary reuse freezes the prior
 subtitle tuple, while due reuse publishes current OCR or abstention against retained Base.
@@ -842,9 +853,10 @@ ordinary reusable lineage again.
 The successor's input preparation cannot overwrite the already-published V2 field. It does not
 synthetically reset temporal state: authenticated inference advances depth, ordinary reuse freezes
 both depth and subtitle, and due reuse freezes depth while advancing the independently authenticated
-subtitle publication. The history-owner record's frame/domain/dimension/timestamp words advance only
-on the same receipt-authorized infer and shared MinMax/history-state validity gate that advances
-the comparison tensor and normalized-depth history; a non-advancing infer clears the owner. A
+subtitle publication. The history-owner record's frame/domain/dimension/timestamp words refresh only
+in the same fused map dispatch as the receipt-authorized infer and shared MinMax/history-state
+validity gate that advances the comparison tensor and normalized-depth history; a non-advancing
+infer leaves a zero owner tag. A
 one-thread GPU scene seed uses that owner to compute `current - last_accepted_infer`, so an
 `A -> B -> C` sequence compares C against B when the opaque branch inferred and against A when it
 reused, without CPU branch knowledge or readback. Only a real input-domain transition clears these
@@ -858,7 +870,7 @@ its depth inference branch and leaves optional OCR TensorRT dormant. Invalid und
 request/receipt evidence cannot advance authenticated depth or subtitle postprocess state. Cleanup
 failure quarantines the affected graph and interop resources. The detector closure is pinned
 independently at SHA-256
-`68126ae7871f6999da1a88a0b800a1f03f9e75dd346bc4596a9d71b5d1232006`; a source snapshot or closure
+`87b63ffb753e9cc39e90b385ab997134402596eb5c074a4f3a3680619015910b`; a source snapshot or closure
 mismatch therefore fails the stream flat instead of disabling adaptive reuse invisibly.
 
 The detector deliberately prefers reuse within the stated depth bounds. A thin, small, localized,
@@ -880,7 +892,7 @@ authenticated current-route force-infer completion establishes known state.
 Model preparation, shader compilation, and the live renderer are fail-closed. Live shaders are
 compiled and cached at process startup. Dump-only resources are created lazily and cannot prevent a
 stream from starting. A failure in optional diagnostics has no rendering authority. An armed
-schema-37 dump preserves Base when SLR13 is active, the complete atomic conditioned final field,
+schema-38 dump preserves Base when SLR13 is active, the complete atomic conditioned final field,
 and the selected path's publication resources with ordered D3D11 `CopyResource` operations
 and one terminal event. Submission performs no GPU-to-CPU wait or synchronous Map. Later
 render-thread calls poll with `DONOTFLUSH`, collect staging resources with `DO_NOT_WAIT`, then hand
@@ -981,7 +993,10 @@ chroma pass; the cadence line reports `p010_y_mrt` so sums can be compared witho
 timer-boundary shift for a regression.
 `depth_preprocess_gpu` includes the calibrated RGB-to-NCHW work and GPU-undecided tile comparison
 against the retained matched source. ROI samples therefore appear in that timer
-without a separate live crop allocation or copy. The cadence diagnostics report
+without a separate live crop allocation or copy.
+`depth_parallax_map_gpu` now includes both candidate mapping and the fused six-value padded-history
+copy plus owner publication up to `ownership_start`; that added bandwidth belongs to this existing
+timer and is not a new counter or schema boundary. The cadence diagnostics report
 `roi_direct_inputs/dump_copies`; the first counts admitted direct ROI inputs, while the second can
 increase only for an explicit Dump 3D diagnostic reconstruction after live timing has closed.
 Throughput diagnostics also split CPU-known force-infer roots from GPU-undecided roots and report

@@ -53,6 +53,7 @@ static const uint DEATH_GRACE_OBSERVATIONS =
     V2_SUBTITLE_LOCATOR_DEATH_GRACE_OBSERVATIONS;
 
 groupshared uint PreviousState[V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT];
+groupshared uint ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT];
 groupshared uint4 QualifiedCores[V2_OCR_FINAL_BOX_CAPACITY];
 groupshared uint4 QualifiedCovers[V2_OCR_FINAL_BOX_CAPACITY];
 groupshared uint QualifiedKinds[V2_OCR_FINAL_BOX_CAPACITY];
@@ -1150,8 +1151,7 @@ void PublishState(
         target_valid ? current_count : 0u);
 }
 
-[numthreads(1, 1, 1)]
-void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
+void ResolveObservation() {
     [loop]
     for (uint index = 0u; index < V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT; ++index) {
         PreviousState[index] = LocatorState[index];
@@ -1544,15 +1544,17 @@ bool ValidateConditionRectBlock(uint offset, uint count, out uint4 bbox, out uin
     for (uint slot = 0u; slot < MAX_LINES; ++slot) {
         uint base = offset + slot * 4u;
         uint4 rectangle = uint4(
-            LocatorStateRead[base + 0u], LocatorStateRead[base + 1u],
-            LocatorStateRead[base + 2u], LocatorStateRead[base + 3u]);
+            ConditionStateSnapshot[base + 0u], ConditionStateSnapshot[base + 1u],
+            ConditionStateSnapshot[base + 2u], ConditionStateSnapshot[base + 3u]);
         if (!ValidateAndAccumulateRoiRectangle(
                 rectangle, slot, count, bbox, area)) return false;
         if (slot > 0u && slot < count) {
             uint previous_base = base - 4u;
             uint4 previous = uint4(
-                LocatorStateRead[previous_base + 0u], LocatorStateRead[previous_base + 1u],
-                LocatorStateRead[previous_base + 2u], LocatorStateRead[previous_base + 3u]);
+                ConditionStateSnapshot[previous_base + 0u],
+                ConditionStateSnapshot[previous_base + 1u],
+                ConditionStateSnapshot[previous_base + 2u],
+                ConditionStateSnapshot[previous_base + 3u]);
             if (!CanonicalCoreOrder(previous, rectangle)) return false;
         }
     }
@@ -1560,33 +1562,33 @@ bool ValidateConditionRectBlock(uint offset, uint count, out uint4 bbox, out uin
 }
 
 bool ValidateConditionCurrentBlock(uint count) {
-    uint kinds = (LocatorStateRead[V2_SUBTITLE_LOCATOR_KIND_WORD] >>
+    uint kinds = (ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_KIND_WORD] >>
                   V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT) & V2_SUBTITLE_LOCATOR_KIND_MASK;
     [unroll]
     for (uint slot = 0u; slot < MAX_LINES; ++slot) {
         uint base = V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + slot * 4u;
         uint4 rectangle = uint4(
-            LocatorStateRead[base + 0u], LocatorStateRead[base + 1u],
-            LocatorStateRead[base + 2u], LocatorStateRead[base + 3u]);
+            ConditionStateSnapshot[base + 0u], ConditionStateSnapshot[base + 1u],
+            ConditionStateSnapshot[base + 2u], ConditionStateSnapshot[base + 3u]);
         if (!ValidateCurrentRectangle(rectangle, slot, count, kinds)) return false;
     }
     return true;
 }
 
 bool ConditionStateValid(out uint current_count, out float target, out uint fade_step) {
-    current_count = LocatorStateRead[20u];
-    uint flags = LocatorStateRead[2u];
+    current_count = ConditionStateSnapshot[20u];
+    uint flags = ConditionStateSnapshot[2u];
     bool provisional_current = (flags & FLAG_PROVISIONAL_CURRENT) != 0u;
-    float durable_target = asfloat(LocatorStateRead[18u]);
-    uint durable_fade = LocatorStateRead[24u];
+    float durable_target = asfloat(ConditionStateSnapshot[18u]);
+    uint durable_fade = ConditionStateSnapshot[24u];
     target = provisional_current ?
-        asfloat(LocatorStateRead[V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD]) :
+        asfloat(ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD]) :
         durable_target;
     fade_step = provisional_current ?
-        LocatorStateRead[V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD] : durable_fade;
-    uint owner_count = LocatorStateRead[4u];
-    uint pending_count = LocatorStateRead[12u];
-    uint packed_kinds = LocatorStateRead[V2_SUBTITLE_LOCATOR_KIND_WORD];
+        ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD] : durable_fade;
+    uint owner_count = ConditionStateSnapshot[4u];
+    uint pending_count = ConditionStateSnapshot[12u];
+    uint packed_kinds = ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_KIND_WORD];
     uint known_kind_bits =
         (V2_SUBTITLE_LOCATOR_KIND_MASK << V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT) |
         (V2_SUBTITLE_LOCATOR_KIND_MASK << V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT) |
@@ -1596,23 +1598,28 @@ bool ConditionStateValid(out uint current_count, out float target, out uint fade
     uint scene_epoch = cut_valid ? asuint(SBS_STATE_HARD_CUT_COUNT(
         CutBridge[SBS_STATE_VECTOR_HARD_CUT_COUNT])) : 0u;
     if (!LocatorGeometryValid() ||
-        !cut_valid || LocatorStateRead[26u] != scene_epoch ||
-        LocatorStateRead[0u] != V2_SUBTITLE_LOCATOR_STATE_SCHEMA ||
-        LocatorStateRead[1u] != V2_SUBTITLE_LOCATOR_STATE_TAG ||
+        !cut_valid || ConditionStateSnapshot[26u] != scene_epoch ||
+        ConditionStateSnapshot[0u] != V2_SUBTITLE_LOCATOR_STATE_SCHEMA ||
+        ConditionStateSnapshot[1u] != V2_SUBTITLE_LOCATOR_STATE_TAG ||
         (flags & ~KNOWN_FLAGS) != 0u || (flags & FLAG_OWNER) == 0u ||
         (flags & FLAG_TARGET_VALID) == 0u || (flags & FLAG_TARGET_RESET) != 0u ||
         ((flags & FLAG_PENDING) != 0u) != (pending_count != 0u) ||
         owner_count == 0u || owner_count > MAX_LINES || current_count == 0u ||
         current_count > owner_count || pending_count > MAX_LINES ||
-        LocatorStateRead[3u] == 0u || LocatorStateRead[19u] != LocatorStateRead[3u] ||
-        LocatorStateRead[10u] != locator_frame.z || LocatorStateRead[11u] != locator_frame.w ||
-        LocatorStateRead[22u] != locator_frame.x || LocatorStateRead[23u] != locator_frame.y ||
-        LocatorStateRead[21u] > EVENT_HANDOFF ||
+        ConditionStateSnapshot[3u] == 0u ||
+        ConditionStateSnapshot[19u] != ConditionStateSnapshot[3u] ||
+        ConditionStateSnapshot[10u] != locator_frame.z ||
+        ConditionStateSnapshot[11u] != locator_frame.w ||
+        ConditionStateSnapshot[22u] != locator_frame.x ||
+        ConditionStateSnapshot[23u] != locator_frame.y ||
+        ConditionStateSnapshot[21u] > EVENT_HANDOFF ||
         (durable_fade != 1u && durable_fade != 2u) ||
         (fade_step != 1u && fade_step != 2u) ||
-        LocatorStateRead[25u] > V2_SUBTITLE_TARGET_MAX_UNRELIABLE_HOLDS ||
-        (LocatorStateRead[25u] != 0u && LocatorStateRead[21u] != EVENT_NONE) ||
-        LocatorStateRead[27u] != locator_field.x || LocatorStateRead[28u] != locator_field.y ||
+        ConditionStateSnapshot[25u] > V2_SUBTITLE_TARGET_MAX_UNRELIABLE_HOLDS ||
+        (ConditionStateSnapshot[25u] != 0u &&
+         ConditionStateSnapshot[21u] != EVENT_NONE) ||
+        ConditionStateSnapshot[27u] != locator_field.x ||
+        ConditionStateSnapshot[28u] != locator_field.y ||
         (packed_kinds & ~known_kind_bits) != 0u ||
         !PackedKindsValid(packed_kinds, V2_SUBTITLE_LOCATOR_OWNER_KIND_SHIFT, owner_count) ||
         !PackedKindsValid(packed_kinds, V2_SUBTITLE_LOCATOR_PENDING_KIND_SHIFT, pending_count) ||
@@ -1631,12 +1638,12 @@ bool ConditionStateValid(out uint current_count, out float target, out uint fade
     if (provisional_current) {
         if ((flags & FLAG_PENDING) == 0u || owner_count != 1u || pending_count != 1u ||
             current_count != 1u || owner_kinds != 0u || pending_kinds != 0u ||
-            current_kinds != 0u || LocatorStateRead[21u] != EVENT_NONE ||
-            durable_fade != 2u || LocatorStateRead[25u] != 0u) {
+            current_kinds != 0u || ConditionStateSnapshot[21u] != EVENT_NONE ||
+            durable_fade != 2u || ConditionStateSnapshot[25u] != 0u) {
             return false;
         }
-    } else if (LocatorStateRead[V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD] != 0u ||
-               LocatorStateRead[V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD] != 0u) {
+    } else if (ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD] != 0u ||
+               ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD] != 0u) {
         return false;
     }
     uint4 owner_bbox;
@@ -1649,11 +1656,13 @@ bool ConditionStateValid(out uint current_count, out float target, out uint fade
             V2_SUBTITLE_LOCATOR_PENDING_OFFSET, pending_count, pending_bbox, pending_area) ||
         !ValidateConditionCurrentBlock(current_count) ||
         any(owner_bbox != uint4(
-            LocatorStateRead[5u], LocatorStateRead[6u],
-            LocatorStateRead[7u], LocatorStateRead[8u])) || owner_area != LocatorStateRead[9u] ||
+            ConditionStateSnapshot[5u], ConditionStateSnapshot[6u],
+            ConditionStateSnapshot[7u], ConditionStateSnapshot[8u])) ||
+        owner_area != ConditionStateSnapshot[9u] ||
         any(pending_bbox != uint4(
-            LocatorStateRead[13u], LocatorStateRead[14u],
-            LocatorStateRead[15u], LocatorStateRead[16u])) || pending_area != LocatorStateRead[17u]) {
+            ConditionStateSnapshot[13u], ConditionStateSnapshot[14u],
+            ConditionStateSnapshot[15u], ConditionStateSnapshot[16u])) ||
+        pending_area != ConditionStateSnapshot[17u]) {
         return false;
     }
     if (provisional_current) {
@@ -1663,20 +1672,20 @@ bool ConditionStateValid(out uint current_count, out float target, out uint fade
         uint final_count = 0u;
         if (!ValidateOcrRecord(final_count) || BuildCurrentStack(final_count) != 1u) return false;
         uint4 pending_core = uint4(
-            LocatorStateRead[V2_SUBTITLE_LOCATOR_PENDING_OFFSET + 0u],
-            LocatorStateRead[V2_SUBTITLE_LOCATOR_PENDING_OFFSET + 1u],
-            LocatorStateRead[V2_SUBTITLE_LOCATOR_PENDING_OFFSET + 2u],
-            LocatorStateRead[V2_SUBTITLE_LOCATOR_PENDING_OFFSET + 3u]);
+            ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_PENDING_OFFSET + 0u],
+            ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_PENDING_OFFSET + 1u],
+            ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_PENDING_OFFSET + 2u],
+            ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_PENDING_OFFSET + 3u]);
         uint4 owner_core = uint4(
-            LocatorStateRead[V2_SUBTITLE_LOCATOR_OWNER_OFFSET + 0u],
-            LocatorStateRead[V2_SUBTITLE_LOCATOR_OWNER_OFFSET + 1u],
-            LocatorStateRead[V2_SUBTITLE_LOCATOR_OWNER_OFFSET + 2u],
-            LocatorStateRead[V2_SUBTITLE_LOCATOR_OWNER_OFFSET + 3u]);
+            ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_OWNER_OFFSET + 0u],
+            ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_OWNER_OFFSET + 1u],
+            ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_OWNER_OFFSET + 2u],
+            ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_OWNER_OFFSET + 3u]);
         uint4 current_cover = uint4(
-            LocatorStateRead[V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + 0u],
-            LocatorStateRead[V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + 1u],
-            LocatorStateRead[V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + 2u],
-            LocatorStateRead[V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + 3u]);
+            ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + 0u],
+            ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + 1u],
+            ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + 2u],
+            ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_CURRENT_OFFSET + 3u]);
         if (!ProvisionalSingleLineReplacementRects(owner_core, pending_core) ||
             WorkKinds[STACK_BASE] != 0u || any(WorkRects[STACK_BASE] != pending_core) ||
             any(StackCovers[0u] != current_cover)) {
@@ -1694,17 +1703,16 @@ bool ConditionContentValid() {
         all(locator_content == DepthAnalysisContentCells());
 }
 
-// Authenticate the state once per observation, then publish only the six immutable verdict words
-// consumed by the complete out-of-place writer. Invalid authority publishes canonical zero words;
-// the writer still visits the full field and copies Base exactly.
-[numthreads(1, 1, 1)]
-void condition_prepare_main(uint3 dispatch_id : SV_DispatchThreadID) {
+// Authenticate one immutable state snapshot, then publish only the six verdict words consumed by
+// the complete out-of-place writer. Invalid authority publishes canonical zero words; the writer
+// still visits the full field and copies Base exactly.
+void PublishConditionParamsFromSnapshot() {
     uint current_count;
     float target;
     uint fade_step;
     bool state_valid = ConditionStateValid(current_count, target, fade_step);
     uint current_kinds = state_valid ?
-        ((LocatorStateRead[V2_SUBTITLE_LOCATOR_KIND_WORD] >>
+        ((ConditionStateSnapshot[V2_SUBTITLE_LOCATOR_KIND_WORD] >>
           V2_SUBTITLE_LOCATOR_CURRENT_KIND_SHIFT) & V2_SUBTITLE_LOCATOR_KIND_MASK) : 0u;
 
     ConditionParamsOut[CONDITION_PARAM_SCHEMA_WORD] =
@@ -1716,6 +1724,22 @@ void condition_prepare_main(uint3 dispatch_id : SV_DispatchThreadID) {
     ConditionParamsOut[CONDITION_PARAM_CURRENT_KINDS_WORD] = current_kinds;
     ConditionParamsOut[CONDITION_PARAM_FADE_STEP_WORD] = state_valid ? fade_step : 0u;
     ConditionParamsOut[CONDITION_PARAM_TARGET_WORD] = state_valid ? asuint(target) : 0u;
+}
+
+// The live one-thread resolver owns both compact publications. Keeping the observation body in a
+// helper ensures every reset/abstention return comes back here before the UAV visibility barrier.
+// The complete just-written state is then snapshotted and authenticated without aliasing u2 as an
+// SRV in the same dispatch.
+[numthreads(1, 1, 1)]
+void resolve_main(uint3 dispatch_id : SV_DispatchThreadID) {
+    ResolveObservation();
+    DeviceMemoryBarrierWithGroupSync();
+    [loop]
+    for (uint index = 0u; index < V2_SUBTITLE_LOCATOR_STATE_WORD_COUNT; ++index) {
+        ConditionStateSnapshot[index] = LocatorState[index];
+    }
+    GroupMemoryBarrierWithGroupSync();
+    PublishConditionParamsFromSnapshot();
 }
 
 bool ConditionParamsValid(

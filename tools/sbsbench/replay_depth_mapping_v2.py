@@ -15,7 +15,7 @@ diagnostic evidence only. HDR color fidelity is not claimed.
 The calibrated spatial projection is composed in a fixed order: compute the column-wise upper and
 lower envelopes, form their authenticated 75/25 orientation-selective share, then apply one
 row-wise horizontal majorant. Vertical shear is expressed as horizontal disparity pixels per
-source-image vertical pixel. This experiment remains full-source-only: schema-37 window-region
+source-image vertical pixel. This experiment remains full-source-only: schema-38 window-region
 captures carry an integer tensor-content rectangle and excluded padding, and fail closed below
 rather than being reinterpreted as full-tensor source geometry.
 """

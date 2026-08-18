@@ -322,11 +322,6 @@ namespace platf::sbs_debug {
           },
           {
             {"source_file", "host_sbs_subtitle_locator_cs.hlsl"},
-            {"entrypoint", "condition_prepare_main"},
-            {"target", "cs_5_0"},
-          },
-          {
-            {"source_file", "host_sbs_subtitle_locator_cs.hlsl"},
             {"entrypoint", "condition_main"},
             {"target", "cs_5_0"},
           },
@@ -5548,7 +5543,7 @@ namespace platf::sbs_debug {
             *completed.parallax_v2_shader_provenance
           );
         nlohmann::json manifest {
-          {"schema", 37},
+          {"schema", 38},
           {"capture", "one matched, completed Host-SBS frame"},
           {"capture_status", "complete"},
           {"published_atomically", true},

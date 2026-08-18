@@ -2730,7 +2730,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_hist_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_scene_cut_evidence_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_scene_cut_resolve_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_valid_history_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_moments_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_frame_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_state_resolve_cs;
@@ -2743,10 +2742,8 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> ocr_box_cells_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> ocr_box_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_locator_resolve_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_condition_prepare_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_condition_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_resolve_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_history_owner_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_scene_seed_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_finalize_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_reuse_depth_cs;
@@ -3499,11 +3496,6 @@ namespace models {
         ) &&
         create_shader(
           sources,
-          host_sbs_shader_cache::host_sbs_near_identical_history_owner,
-          near_identical_history_owner_cs
-        ) &&
-        create_shader(
-          sources,
           host_sbs_shader_cache::host_sbs_near_identical_scene_seed,
           near_identical_scene_seed_cs
         ) &&
@@ -3528,7 +3520,6 @@ namespace models {
       ));
       if (!constants_ready) {
         near_identical_resolve_cs.Reset();
-        near_identical_history_owner_cs.Reset();
         near_identical_scene_seed_cs.Reset();
         near_identical_finalize_cs.Reset();
         near_identical_reuse_depth_cs.Reset();
@@ -4007,70 +3998,6 @@ namespace models {
         0u
       );
       return true;
-    }
-
-    void publish_near_identical_history_owner(
-      const std::uint64_t frame_id,
-      const depth_input_region_t &input_region,
-      const input_color_space color_space,
-      const std::uint64_t observation_timestamp_us
-    ) {
-      if (
-        !gpu_conditional_bridge_available ||
-        depth_inference_graph.policy.capture_failed ||
-        !near_identical_detector_available ||
-        !ensure_near_identical_detector_resources() || frame_id == 0u ||
-        !input_region.tensor_content.valid({target_w, target_h}) ||
-        !near_identical_history_owner_cs || !near_identical_cbuffer ||
-        !near_identical_history_owner_uav || !cut_state_srv || !minmax_ema_srv || !cbuffer
-      ) {
-        return;
-      }
-      const auto domain_tag = near_identical_input_domain_tag(
-        input_region,
-        color_space,
-        static_cast<std::uint32_t>(target_w),
-        static_cast<std::uint32_t>(target_h)
-      );
-      update_near_identical_constants(
-        0u, 0u, 0u, frame_id, 0u, domain_tag, 0u, 0u,
-        cuda_conditional_graph::work_flag_e::none,
-        observation_timestamp_us
-      );
-      ID3D11Buffer *constant_buffers[2] = {
-        cbuffer.Get(),
-        near_identical_cbuffer.Get(),
-      };
-      ID3D11ShaderResourceView *inputs[7] = {
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        cut_state_srv.Get(),
-        nullptr,
-        minmax_ema_srv.Get(),
-      };
-      ID3D11UnorderedAccessView *outputs[3] = {
-        nullptr,
-        nullptr,
-        near_identical_history_owner_uav.Get(),
-      };
-      context->CSSetShader(near_identical_history_owner_cs.Get(), nullptr, 0u);
-      context->CSSetConstantBuffers(0u, 2u, constant_buffers);
-      context->CSSetShaderResources(0u, 7u, inputs);
-      context->CSSetUnorderedAccessViews(0u, 3u, outputs, nullptr);
-      dispatch_infer_postprocess(
-        1u,
-        1u,
-        1u,
-        near_identical_gpu_infer_one_byte_offset
-      );
-      ID3D11ShaderResourceView *null_inputs[7] = {};
-      ID3D11UnorderedAccessView *null_outputs[3] = {};
-      ID3D11Buffer *null_constants[2] = {};
-      context->CSSetUnorderedAccessViews(0u, 3u, null_outputs, nullptr);
-      context->CSSetShaderResources(0u, 7u, null_inputs);
-      context->CSSetConstantBuffers(0u, 2u, null_constants);
     }
 
     bool dispatch_near_identical_scene_seed() {
@@ -4893,8 +4820,6 @@ namespace models {
             return std::addressof(depth_scene_cut_evidence_cs);
           case producer_shader_e::depth_scene_cut_resolve:
             return std::addressof(depth_scene_cut_resolve_cs);
-          case producer_shader_e::depth_valid_history:
-            return std::addressof(depth_valid_history_cs);
           case producer_shader_e::depth_coordinate_v2_moments:
             return std::addressof(depth_coordinate_v2_moments_cs);
           case producer_shader_e::depth_coordinate_v2_frame_resolve:
@@ -4917,8 +4842,6 @@ namespace models {
             return std::addressof(ocr_box_resolve_cs);
           case producer_shader_e::host_sbs_subtitle_locator_resolve:
             return std::addressof(subtitle_locator_resolve_cs);
-          case producer_shader_e::host_sbs_subtitle_condition_prepare:
-            return std::addressof(subtitle_condition_prepare_cs);
           case producer_shader_e::host_sbs_subtitle_condition:
             return std::addressof(subtitle_condition_cs);
         }
@@ -5113,7 +5036,7 @@ namespace models {
               fused_preprocess_force_cbuffer && fused_preprocess_compare_cbuffer &&
               buffer_to_tex_cs &&
               buffer_to_tex_pad_cs &&
-              depth_minmax_ema_cs && depth_hist_cs && depth_valid_history_cs &&
+              depth_minmax_ema_cs && depth_hist_cs &&
               minmax_raw_uav && minmax_ema_uav && minmax_ema_srv && hist_uav &&
               analysis_ready && cut_state_uav && cut_state_srv;
       if (!valid) {
@@ -5937,15 +5860,23 @@ namespace models {
     }
 
     bool dispatch_parallax_v2_producer(d3d_perf_slot *perf_slot) {
-      if (!parallax_v2_producer_active) {
+      if (!parallax_v2_producer_active || !depth_coordinate_v2_map_cs ||
+          !near_identical_cbuffer || !near_identical_history_owner_uav ||
+          !tensor_out_srv || !depth_coordinate_v2_state_srv ||
+          !tensor_exclusion_srv || !minmax_ema_srv || !tensor_in_srv ||
+          !appearance_ordinal_srv || !cut_state_srv || !depth_srv ||
+          !depth_coordinate_v2_candidate_uav || !tensor_previous_input_uav ||
+          !previous_appearance_ordinal_uav || !depth_cut_history_uav ||
+          !tensor_previous_exclusion_uav) {
         return false;
       }
 
-      ID3D11Buffer *constant_buffers[2] = {
+      ID3D11Buffer *constant_buffers[3] = {
         cbuffer.Get(),
         depth_coordinate_v2_cbuffer.Get(),
+        near_identical_cbuffer.Get(),
       };
-      context->CSSetConstantBuffers(0, 2, constant_buffers);
+      context->CSSetConstantBuffers(0, 3, constant_buffers);
       ID3D11ShaderResourceView *null_srvs3[3] = {nullptr, nullptr, nullptr};
       ID3D11UnorderedAccessView *null_uavs2[2] = {nullptr, nullptr};
 
@@ -5970,29 +5901,45 @@ namespace models {
 
       mark_d3d_parallax_map_start(perf_slot);
 
-      // Raw depth -> immutable pre-limiter candidate. The full-size canonical-coordinate field
-      // is deliberately absent from production; an explicit Dump 3D dispatches it separately.
+      // Raw depth -> immutable pre-limiter candidate, while the same infer-grid dispatch advances
+      // the complete raw padded appearance/depth history and publishes its narrower authenticated
+      // owner. scene_seed_main uploaded the exact b2 words consumed here before cut analysis; no
+      // host update occurs between that seed and this dispatch. The full-size canonical-coordinate
+      // field is deliberately absent from production; an explicit Dump 3D dispatches it separately.
       context->CSSetShader(depth_coordinate_v2_map_cs.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *map_srvs[3] = {
+      ID3D11ShaderResourceView *map_srvs[8] = {
         tensor_out_srv.Get(),
         depth_coordinate_v2_state_srv.Get(),
         tensor_exclusion_srv.Get(),
+        minmax_ema_srv.Get(),
+        tensor_in_srv.Get(),
+        appearance_ordinal_srv.Get(),
+        cut_state_srv.Get(),
+        depth_srv.Get(),
       };
-      context->CSSetShaderResources(0, 3, map_srvs);
-      context->CSSetUnorderedAccessViews(
-        0,
-        1,
-        depth_coordinate_v2_candidate_uav.GetAddressOf(),
-        nullptr
-      );
+      ID3D11UnorderedAccessView *map_uavs[6] = {
+        depth_coordinate_v2_candidate_uav.Get(),
+        tensor_previous_input_uav.Get(),
+        previous_appearance_ordinal_uav.Get(),
+        depth_cut_history_uav.Get(),
+        tensor_previous_exclusion_uav.Get(),
+        near_identical_history_owner_uav.Get(),
+      };
+      context->CSSetShaderResources(0, 8, map_srvs);
+      context->CSSetUnorderedAccessViews(0, 6, map_uavs, nullptr);
       dispatch_infer_postprocess(
         (target_w + 15) / 16,
         (target_h + 15) / 16,
         1u,
         near_identical_gpu_infer_grid16_byte_offset
       );
-      context->CSSetShaderResources(0, 3, null_srvs3);
-      context->CSSetUnorderedAccessViews(0, 1, null_uavs2, nullptr);
+      // SM5 has no grid-wide barrier. Completion of this direct-or-indirect map dispatch followed
+      // by unbinding all six UAVs is the publication boundary for both the tuple and owner tag;
+      // no consumer is permitted in the map dispatch itself.
+      ID3D11ShaderResourceView *null_map_srvs[8] = {};
+      ID3D11UnorderedAccessView *null_map_uavs[6] = {};
+      context->CSSetShaderResources(0, 8, null_map_srvs);
+      context->CSSetUnorderedAccessViews(0, 6, null_map_uavs, nullptr);
 
       // Candidate -> conservative full-resolution RGB ownership refinement. The retained source
       // SRV belongs to this exact asynchronous raw-depth completion. Missing source evidence is a
@@ -6186,8 +6133,7 @@ namespace models {
       const bool ocr_record_submitted,
       const bool input_domain_reset
     ) {
-      if (!subtitle_locator_resolve_cs || !subtitle_condition_prepare_cs ||
-          !subtitle_condition_cs ||
+      if (!subtitle_locator_resolve_cs || !subtitle_condition_cs ||
           !subtitle_locator_cbuffer || !subtitle_locator_state_srv ||
           !subtitle_locator_state_uav || !subtitle_conditioned_srv ||
           !subtitle_conditioned_uav || !depth_coordinate_v2_final_srv ||
@@ -6265,40 +6211,19 @@ namespace models {
         ocr_box_record_srv.Get(),
       };
       context->CSSetShaderResources(0, 8, resolve_srvs);
-      context->CSSetUnorderedAccessViews(
-        2, 1, subtitle_locator_state_uav.GetAddressOf(),
-        nullptr
-      );
-      context->DispatchIndirect(
-        near_identical_gpu_dispatch_buf.Get(),
-        near_identical_gpu_observation_one_byte_offset
-      );
-      context->CSSetShaderResources(0, 8, null_srvs);
-      context->CSSetUnorderedAccessViews(2, 1, &null_uav, nullptr);
-
-      // Authenticate the complete SLR13 state once, not once per 16x16 field group, and publish
-      // the immutable parameters consumed by the complete out-of-place writer.
-      context->CSSetShader(subtitle_condition_prepare_cs.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *prepare_srvs[8] = {
+      ID3D11UnorderedAccessView *resolve_uavs[3] = {
+        subtitle_locator_state_uav.Get(),
         nullptr,
-        cut_state_srv.Get(),
-        nullptr,
-        subtitle_locator_state_srv.Get(),
-        nullptr,
-        nullptr,
-        nullptr,
-        ocr_box_record_srv.Get(),
+        subtitle_condition_params_uav.Get(),
       };
-      context->CSSetShaderResources(0, 8, prepare_srvs);
-      context->CSSetUnorderedAccessViews(
-        4, 1, subtitle_condition_params_uav.GetAddressOf(), nullptr
-      );
+      context->CSSetUnorderedAccessViews(2, 3, resolve_uavs, nullptr);
       context->DispatchIndirect(
         near_identical_gpu_dispatch_buf.Get(),
         near_identical_gpu_observation_one_byte_offset
       );
       context->CSSetShaderResources(0, 8, null_srvs);
-      context->CSSetUnorderedAccessViews(4, 1, &null_uav, nullptr);
+      ID3D11UnorderedAccessView *null_resolve_uavs[3] = {};
+      context->CSSetUnorderedAccessViews(2, 3, null_resolve_uavs, nullptr);
 
       // Base remains immutable. Every authenticated subtitle observation writes the complete
       // out-of-place field, including authoritative empty/abstaining observations. Ordinary work
@@ -7323,55 +7248,6 @@ namespace models {
         );
         context->CSSetUnorderedAccessViews(0, 2, null_uavs_h2, nullptr);
 
-        // tensor_in_buf, appearance_ordinal_buf and depth_tex still own the matched inputs/result
-        // for this completed inference. Advance the complete appearance/depth tuple only when the
-        // resolve pass selects state 1 or 3. State 2 retains the last structurally reliable tuple
-        // for one black/clipped update, so an immediate supported return compares A against A or B
-        // rather than the empty slate. State 3 advances an accepted persistent-low endpoint.
-        context->CSSetShader(depth_valid_history_cs.Get(), nullptr, 0);
-        context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-        ID3D11ShaderResourceView *history_srvs[6] = {
-          minmax_ema_srv.Get(),
-          tensor_in_srv.Get(),
-          appearance_ordinal_srv.Get(),
-          cut_state_srv.Get(),
-          depth_srv.Get(),
-          tensor_exclusion_srv.Get(),
-        };
-        ID3D11UnorderedAccessView *history_uavs[4] = {
-          tensor_previous_input_uav.Get(),
-          previous_appearance_ordinal_uav.Get(),
-          depth_cut_history_uav.Get(),
-          tensor_previous_exclusion_uav.Get(),
-        };
-        context->CSSetShaderResources(0, 6, history_srvs);
-        context->CSSetUnorderedAccessViews(0, 4, history_uavs, nullptr);
-        dispatch_infer_postprocess(
-          (target_w + 15) / 16,
-          (target_h + 15) / 16,
-          1u,
-          near_identical_gpu_infer_grid16_byte_offset
-        );
-        ID3D11ShaderResourceView *null_history_srvs[6] = {
-          nullptr,
-          nullptr,
-          nullptr,
-          nullptr,
-          nullptr,
-          nullptr
-        };
-        ID3D11UnorderedAccessView *null_history_uavs[4] = {
-          nullptr, nullptr, nullptr,
-          nullptr
-        };
-        context->CSSetShaderResources(0, 6, null_history_srvs);
-        context->CSSetUnorderedAccessViews(0, 4, null_history_uavs, nullptr);
-        publish_near_identical_history_owner(
-          pending_frame_id,
-          pending_input_region,
-          pending_color_space,
-          pending_observation_timestamp_us
-        );
       }
 
       // Production V2 runs after the shared scene-cut bridge and consumes its confirmed-cut

@@ -63,7 +63,8 @@ DAV2 is a relative monocular model. Fullscreen, windowed, or differently surroun
 the same image can produce materially different raw depth. More tensor pixels on the main subject
 do not guarantee a better boundary. Synthetic context must not influence monocular analysis. The
 window-region route therefore uses only the exact client/video pixels: its edge-replicated tensor
-padding is excluded from depth statistics, scene cuts, ownership, history, and OCR authority.
+padding is excluded from depth statistics, scene cuts, ownership, history comparison/authority, and
+OCR authority, although the fused map copies the complete raw padded tuple with exclusion `1`.
 
 ### Foreground window-region ROI boundary
 

@@ -42,7 +42,7 @@ The core package contains:
 | `gpu_trace.json` | Optional chronological decode of the authenticated raw GPU trace |
 | `gpu_trace_contract.json` | Optional exact trace offsets, enums, receipt ABI, and shader provenance |
 
-All `.f32` files are little-endian float32. Schema 37 accepts the canonical inactive descriptor or
+All `.f32` files are little-endian float32. Schema 38 accepts the canonical inactive descriptor or
 the one current `subtitle-slr13` package. It binds the exact current generated Depth Coordinate V2
 identity, producer and renderer closures, OCR model provenance, entrypoints, and four artifact
 roles (OCR record, locator state, Base field, atomic final field). The generated contract is the sole
@@ -64,7 +64,7 @@ ordinary limiter and, when active, SLR13 directly into that final field.
 
 ## Diagnostic GPU completion trace
 
-Schema 37 may carry a diagnostic-only 300-slot GPU completion ring. It records completed accepted
+Schema 38 may carry a diagnostic-only 300-slot GPU completion ring. It records completed accepted
 DAV2 roots, not source frames, presentation frames, busy drops, or every captured desktop update.
 Each 176-word (704-byte) record binds an exact trace ordinal, matched frame, analysis generation,
 analysis-domain tag, transaction token, analysis-source and DAV2-field extents, the immutable
@@ -139,7 +139,7 @@ The resolver descriptor serializes the aggregate-center
 primary policy exactly as `binocular-source-pixels`: two independent 16-sample rows; median indices
 `7/8`; both complete finite in-container rows bypass the IQR gate; a row-median difference of `4`
 is the both-valid mean-versus-maximum-median selection boundary; and a sole valid row is accepted
-only when its Tukey IQR at indices `3/4` and `11/12` is at most `8`. Schema 37 also authenticates
+only when its Tukey IQR at indices `3/4` and `11/12` is at most `8`. Schema 38 also authenticates
 the strict primary-failure fallback: ordinary-core span
 step `W/16`, maximum radius two, negative then positive order, ordinary-over-ribbon placement,
 unclamped 61-cell strips, two coherent rows and at most `4` pixels of intra-probe median separation.
@@ -220,7 +220,7 @@ The maintained reader:
 
 Use `.f32` artifacts for quantitative work. Every generated scalar-field shape sidecar and PNG
 preview is described by `dump_manifest.json`; the pre-SLR13 Base previews remain optional,
-non-authoritative schema-37 diagnostics for compatibility with already captured packages.
+non-authoritative legacy previews in schema-38 packages.
 Independently stretched PNG previews are diagnostic and must not be compared as absolute depth
 values.
 

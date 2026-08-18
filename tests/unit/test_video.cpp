@@ -601,7 +601,6 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_ocr_cells));
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_ocr_resolve));
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_subtitle_locator_resolve));
-  EXPECT_TRUE(has_producer_shader(cache::host_sbs_subtitle_condition_prepare));
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_subtitle_condition));
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_near_identical_fused_preprocess));
 
@@ -677,7 +676,7 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
   ASSERT_TRUE(p010_y_shader);
   EXPECT_EQ(cache::parallax_v2_live_renderer_specs.size(), 2u);
   EXPECT_EQ(cache::parallax_v2_p010_y_specs.size(), 1u);
-  EXPECT_EQ(cache::near_identical_detector_specs.size(), 5u);
+  EXPECT_EQ(cache::near_identical_detector_specs.size(), 4u);
   EXPECT_EQ(cache::sbs_flat_fallback_specs.size(), 2u);
   EXPECT_EQ(cache::parallax_v2_live_diagnostic_specs.size(), 2u);
 }
@@ -829,7 +828,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 70u);
+  EXPECT_EQ(v2::contract_schema, 71u);
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
   EXPECT_EQ(v2::shadow_state_dump_schema, 16u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
@@ -2916,7 +2915,7 @@ TEST(ParallaxV2ContractTest, DebugDumpUsesNonblockingGpuStagingBeforeCpuPublicat
   );
 }
 
-TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema37Contract) {
+TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema38Contract) {
   const auto source = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
   );
@@ -2934,15 +2933,13 @@ TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema37C
   const auto resolver = source.substr(resolver_begin, resolver_end - resolver_begin);
 
   const auto resolve = resolver.find("{\"entrypoint\", \"resolve_main\"}");
-  const auto prepare = resolver.find("{\"entrypoint\", \"condition_prepare_main\"}");
   const auto condition = resolver.find("{\"entrypoint\", \"condition_main\"}");
   ASSERT_NE(resolve, std::string::npos);
-  ASSERT_NE(prepare, std::string::npos);
   ASSERT_NE(condition, std::string::npos);
-  EXPECT_LT(resolve, prepare);
-  EXPECT_LT(prepare, condition);
+  EXPECT_LT(resolve, condition);
+  EXPECT_EQ(resolver.find("condition_prepare_main"), std::string::npos);
 
-  EXPECT_NE(source.find("{\"schema\", 37}"), std::string::npos);
+  EXPECT_NE(source.find("{\"schema\", 38}"), std::string::npos);
   for (const auto *qualification_key : {
          "{\"qualification_policy\", {",
          "{\"corner_filter_applies_to\", \"non-ribbon-ordinary-cores\"}",
@@ -3380,7 +3377,7 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
     std::tuple {"depth_hist_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_scene_cut_evidence_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_scene_cut_resolve_cs.hlsl", "main", "cs_5_0"},
-    std::tuple {"depth_valid_history_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"depth_coordinate_v2_map_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_coordinate_v2_moments_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_coordinate_v2_ownership_cs.hlsl", "main", "cs_5_0"},

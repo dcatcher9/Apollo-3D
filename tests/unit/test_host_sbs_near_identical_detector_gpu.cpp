@@ -163,9 +163,23 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
     std::string {SUNSHINE_SHADERS_DIR} +
     "/include/host_sbs_near_identical_compare.hlsl"
   );
+  const auto shared_constants = read(
+    std::string {SUNSHINE_SHADERS_DIR} +
+    "/include/host_sbs_near_identical_constants.hlsl"
+  );
+  const auto history_owner_contract = read(
+    std::string {SUNSHINE_SHADERS_DIR} +
+    "/include/host_sbs_near_identical_history_owner.hlsl"
+  );
+  const auto fused_map = read(
+    std::string {SUNSHINE_SHADERS_DIR} + "/depth_coordinate_v2_map_cs.hlsl"
+  );
   ASSERT_FALSE(estimator.empty());
   ASSERT_FALSE(shader.empty());
   ASSERT_FALSE(compare_contract.empty());
+  ASSERT_FALSE(shared_constants.empty());
+  ASSERT_FALSE(history_owner_contract.empty());
+  ASSERT_FALSE(fused_map.empty());
   EXPECT_EQ(
     estimator.find("gpu_conditional_bridge_runtime_enabled"),
     std::string::npos
@@ -296,7 +310,7 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
     shader.find("#define NEAR_IDENTICAL_MAX_INFER_OWNER_OBSERVATION_AGE_US 100000u"),
     std::string::npos
   );
-  EXPECT_NE(shader.find("#define NEAR_IDENTICAL_HISTORY_OWNER_SCHEMA 2u"),
+  EXPECT_NE(history_owner_contract.find("#define NEAR_IDENTICAL_HISTORY_OWNER_SCHEMA 2u"),
             std::string::npos);
   EXPECT_NE(shader.find("owner_at_or_before_host_baseline"), std::string::npos);
   EXPECT_NE(shader.find("low_delta <= NEAR_IDENTICAL_MAX_INFER_OWNER_AGE"),
@@ -309,7 +323,10 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   );
   EXPECT_NE(shader.find("near_identical_observation_timestamp_low"), std::string::npos);
   EXPECT_NE(shader.find("near_identical_observation_timestamp_high"), std::string::npos);
-  EXPECT_NE(shader.find("uint near_identical_timestamp_padding1;"), std::string::npos);
+  EXPECT_NE(
+    shared_constants.find("uint near_identical_timestamp_padding1;"),
+    std::string::npos
+  );
   EXPECT_EQ(
     estimator.find("depth_conditional_graph.empty()) {\n                  enqueued ="),
     std::string::npos
@@ -440,20 +457,19 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
     shader.find("NearIdenticalSubtitleLocatorState : register(t6)"),
     std::string::npos
   );
+  EXPECT_EQ(shader.find("NearIdenticalMinMaxEma"), std::string::npos);
+  EXPECT_EQ(shader.find("history_owner_main"), std::string::npos);
   EXPECT_NE(
-    shader.find("NearIdenticalMinMaxEma : register(t6)"),
+    fused_map.find("#include \"include/depth_valid_history_contract.hlsl\""),
     std::string::npos
   );
-  EXPECT_NE(
-    shader.find("#include \"include/depth_valid_history_contract.hlsl\""),
-    std::string::npos
-  );
-  EXPECT_NE(
-    shader.find("DepthValidHistoryAdvances(NearIdenticalMinMaxEma[0].w, history_state)"),
-    std::string::npos
-  );
+  EXPECT_NE(fused_map.find("DepthValidHistoryAdvances("), std::string::npos);
+  EXPECT_NE(fused_map.find("CurrentModelInput : register(t4)"), std::string::npos);
+  EXPECT_NE(fused_map.find("NearIdenticalHistoryOwnerOutput : register(u5)"),
+            std::string::npos);
   EXPECT_NE(estimator.find("minmax_ema_srv.Get(),"), std::string::npos);
-  EXPECT_NE(estimator.find("CSSetShaderResources(0u, 7u, inputs)"), std::string::npos);
+  EXPECT_NE(estimator.find("CSSetShaderResources(0, 8, map_srvs)"), std::string::npos);
+  EXPECT_NE(estimator.find("CSSetUnorderedAccessViews(0, 6, map_uavs"), std::string::npos);
   EXPECT_NE(estimator.find("CSSetShaderResources(0u, 4u, resolve_inputs)"), std::string::npos);
   EXPECT_EQ(shader.find("NearIdenticalSubtitleCoherentTransition"), std::string::npos);
   EXPECT_EQ(shader.find("NearIdenticalSubtitleStateSteady"), std::string::npos);
@@ -525,6 +541,15 @@ namespace {
   using tile_evidence_t = std::array<std::uint32_t, 4>;
   using tile_records_t = std::array<tile_evidence_t, tile_group_count>;
 
+  struct fused_map_result_t {
+    std::vector<float> output;
+    std::vector<float> previous_model_input;
+    std::vector<float> previous_appearance;
+    std::vector<float> previous_depth;
+    std::vector<std::uint32_t> previous_exclusion;
+    std::array<std::uint32_t, models::near_identical_history_owner_word_count> owner {};
+  };
+
   constexpr std::size_t word(const models::near_identical_gpu_decision_word_e value) {
     return models::near_identical_gpu_decision_word_index(value);
   }
@@ -586,6 +611,15 @@ namespace {
     return state;
   }
 
+  models::depth_coordinate_v2::state_words_t authenticated_mapping_state() {
+    namespace v2 = models::depth_coordinate_v2;
+    auto state = v2::state_initial_words;
+    state[v2::inverse_scale] = std::bit_cast<std::uint32_t>(1.0f);
+    state[v2::frame_valid] = std::bit_cast<std::uint32_t>(1.0f);
+    state[v2::renderer_authorization_bits] = v2::contract_tag;
+    return state;
+  }
+
   class near_identical_gpu_fixture_t {
   public:
     enum class initialize_result_e {ready, d3d_unavailable, failed};
@@ -615,11 +649,14 @@ namespace {
         SUNSHINE_SHADERS_DIR "/rgb_to_nchw_cs.hlsl";
       const std::filesystem::path fused_preprocess_path =
         SUNSHINE_SHADERS_DIR "/rgb_to_nchw_near_identical_cs.hlsl";
+      const std::filesystem::path fused_map_path =
+        SUNSHINE_SHADERS_DIR "/depth_coordinate_v2_map_cs.hlsl";
       if (!compile(preprocess_path, "main", preprocess_shader_, error) ||
           !compile_specialized_oracle(error) ||
           !compile(fused_preprocess_path, "fused_main", fused_preprocess_shader_, error) ||
+          !compile(fused_map_path, "main", fused_map_shader_, error) ||
+          !compile(fused_map_path, "coordinate_main", coordinate_shader_, error) ||
           !compile(shader_path, "resolve_main", resolve_shader_, error) ||
-          !compile(shader_path, "history_owner_main", history_owner_shader_, error) ||
           !compile(shader_path, "scene_seed_main", scene_seed_shader_, error) ||
           !compile(shader_path, "finalize_main", finalize_shader_, error)) {
         return initialize_result_e::failed;
@@ -636,6 +673,11 @@ namespace {
       constants_desc.ByteWidth = 20u * sizeof(std::uint32_t);
       if (FAILED(device_->CreateBuffer(&constants_desc, nullptr, &detector_constants_))) {
         error = "could not create detector constant buffers";
+        return initialize_result_e::failed;
+      }
+      constants_desc.ByteWidth = 8u * sizeof(std::uint32_t);
+      if (FAILED(device_->CreateBuffer(&constants_desc, nullptr, &v2_constants_))) {
+        error = "could not create V2 constant buffer";
         return initialize_result_e::failed;
       }
       constants_desc.ByteWidth = 4u * sizeof(std::uint32_t);
@@ -700,6 +742,9 @@ namespace {
         error = "could not create near-identical GPU buffers";
         return initialize_result_e::failed;
       }
+      if (!create_fused_map_resources(error)) {
+        return initialize_result_e::failed;
+      }
       D3D11_BUFFER_DESC staging_desc {};
       decision_buffer_->GetDesc(&staging_desc);
       staging_desc.Usage = D3D11_USAGE_STAGING;
@@ -729,6 +774,145 @@ namespace {
       std::vector<std::uint32_t> exclusion;
       tile_records_t tiles {};
     };
+
+    bool run_fused_map(
+      const std::span<const float> raw,
+      const std::span<const float> current_model_input,
+      const std::span<const float> current_appearance,
+      const std::span<const float> current_depth,
+      const std::span<const std::uint32_t> current_exclusion,
+      const std::array<float, sbs_adaptive_state::word_count> &cut_state,
+      const std::array<float, 4> &minmax_ema,
+      const models::depth_coordinate_v2::state_words_t &mapping_state,
+      const std::uint64_t frame_id,
+      const std::uint64_t observation_timestamp_us,
+      fused_map_result_t &result,
+      std::string &error,
+      const models::depth_tensor_content_rect_t tensor_content = content,
+      const UINT dispatch_groups_x = tile_group_width,
+      const UINT dispatch_groups_y = tile_group_height,
+      const bool coordinate_only = false,
+      const std::uint32_t stream_frame_delta = 0u,
+      const std::uint32_t expected_work = 0u
+    ) {
+      if (raw.size() != field_texels || current_model_input.size() != 3u * field_texels ||
+          current_appearance.size() != field_texels || current_depth.size() != field_texels ||
+          current_exclusion.size() != field_texels ||
+          !tensor_content.valid({field_width, field_height})) {
+        error = "invalid fused map input shape";
+        return false;
+      }
+
+      constexpr float held_float = -73.25f;
+      constexpr std::uint32_t held_uint = 0xa5a5c3c3u;
+      const std::vector<float> held_model(3u * field_texels, held_float);
+      const std::vector<float> held_field(field_texels, held_float);
+      const std::vector<std::uint32_t> held_exclusion(field_texels, held_uint);
+      std::array<std::uint32_t, models::near_identical_history_owner_word_count>
+        held_owner {};
+      held_owner.fill(held_uint);
+
+      context_->UpdateSubresource(map_raw_buffer_.Get(), 0u, nullptr, raw.data(), 0u, 0u);
+      context_->UpdateSubresource(
+        map_state_buffer_.Get(), 0u, nullptr, mapping_state.data(), 0u, 0u
+      );
+      context_->UpdateSubresource(
+        map_minmax_buffer_.Get(), 0u, nullptr, minmax_ema.data(), 0u, 0u
+      );
+      context_->UpdateSubresource(
+        map_current_model_buffer_.Get(), 0u, nullptr, current_model_input.data(), 0u, 0u
+      );
+      context_->UpdateSubresource(
+        map_current_appearance_buffer_.Get(), 0u, nullptr, current_appearance.data(), 0u, 0u
+      );
+      context_->UpdateSubresource(
+        map_cut_buffer_.Get(), 0u, nullptr, cut_state.data(), 0u, 0u
+      );
+      context_->UpdateSubresource(
+        map_exclusion_texture_.Get(), 0u, nullptr, current_exclusion.data(),
+        field_width * sizeof(std::uint32_t), 0u
+      );
+      context_->UpdateSubresource(
+        map_current_depth_texture_.Get(), 0u, nullptr, current_depth.data(),
+        field_width * sizeof(float), 0u
+      );
+      context_->UpdateSubresource(
+        map_previous_model_buffer_.Get(), 0u, nullptr, held_model.data(), 0u, 0u
+      );
+      context_->UpdateSubresource(
+        map_previous_appearance_buffer_.Get(), 0u, nullptr, held_field.data(), 0u, 0u
+      );
+      context_->UpdateSubresource(
+        map_previous_depth_texture_.Get(), 0u, nullptr, held_field.data(),
+        field_width * sizeof(float), 0u
+      );
+      context_->UpdateSubresource(
+        map_previous_exclusion_texture_.Get(), 0u, nullptr, held_exclusion.data(),
+        field_width * sizeof(std::uint32_t), 0u
+      );
+      context_->UpdateSubresource(
+        map_output_texture_.Get(), 0u, nullptr, held_field.data(),
+        field_width * sizeof(float), 0u
+      );
+      context_->UpdateSubresource(
+        history_owner_buffer_.Get(), 0u, nullptr, held_owner.data(), 0u, 0u
+      );
+
+      update_depth_constants(tensor_content);
+      update_detector_constants(
+        0u, 0u, 0u, frame_id, 0u, 0u, observation_timestamp_us,
+        stream_frame_delta, reduction_group_count, expected_work
+      );
+      ID3D11Buffer *constants[3] = {
+        depth_constants_.Get(), v2_constants_.Get(), detector_constants_.Get(),
+      };
+      ID3D11ShaderResourceView *inputs[8] = {
+        map_raw_srv_.Get(),
+        map_state_srv_.Get(),
+        map_exclusion_srv_.Get(),
+        map_minmax_srv_.Get(),
+        map_current_model_srv_.Get(),
+        map_current_appearance_srv_.Get(),
+        map_cut_srv_.Get(),
+        map_current_depth_srv_.Get(),
+      };
+      ID3D11UnorderedAccessView *outputs[6] = {
+        map_output_uav_.Get(),
+        map_previous_model_uav_.Get(),
+        map_previous_appearance_uav_.Get(),
+        map_previous_depth_uav_.Get(),
+        map_previous_exclusion_uav_.Get(),
+        history_owner_uav_.Get(),
+      };
+      context_->CSSetShader(
+        coordinate_only ? coordinate_shader_.Get() : fused_map_shader_.Get(), nullptr, 0u
+      );
+      context_->CSSetConstantBuffers(0u, coordinate_only ? 2u : 3u, constants);
+      context_->CSSetShaderResources(0u, coordinate_only ? 3u : 8u, inputs);
+      context_->CSSetUnorderedAccessViews(
+        0u, coordinate_only ? 1u : 6u, outputs, nullptr
+      );
+      context_->Dispatch(dispatch_groups_x, dispatch_groups_y, 1u);
+      unbind(coordinate_only ? 3u : 8u, coordinate_only ? 1u : 6u,
+             coordinate_only ? 2u : 3u);
+
+      return read_texture_float(map_output_texture_.Get(), result.output, error) &&
+        read_buffer(
+          map_previous_model_buffer_.Get(), result.previous_model_input,
+          3u * field_texels, error
+        ) &&
+        read_buffer(
+          map_previous_appearance_buffer_.Get(), result.previous_appearance,
+          field_texels, error
+        ) &&
+        read_texture_float(
+          map_previous_depth_texture_.Get(), result.previous_depth, error
+        ) &&
+        read_texture_u32(
+          map_previous_exclusion_texture_.Get(), result.previous_exclusion, error
+        ) &&
+        read_buffer(history_owner_buffer_.Get(), result.owner, error);
+    }
 
     bool run_preprocess_and_tile_evidence(
       const bool fused,
@@ -911,44 +1095,30 @@ namespace {
         error = "invalid model input size";
         return false;
       }
-      ComPtr<ID3D11Buffer> state_buffer;
-      ComPtr<ID3D11ShaderResourceView> state_srv;
-      ComPtr<ID3D11Buffer> minmax_buffer;
-      ComPtr<ID3D11ShaderResourceView> minmax_srv;
-      if (!create_structured_srv(
-            std::span<const float> {cut_state},
-            4u * sizeof(float),
-            state_buffer,
-            state_srv
-          ) ||
-          !create_structured_srv(
-            std::span<const float> {minmax_ema},
-            4u * sizeof(float),
-            minmax_buffer,
-            minmax_srv
-          )) {
-        error = "could not create detector inputs";
-        return false;
-      }
       update_depth_constants();
       initialize_transaction(request_work);
-      update_detector_constants(
-        0u, 0u, 0u, owner_frame_id, 0u, 0u, owner_timestamp_us
-      );
-      ID3D11Buffer *constants[2] = {depth_constants_.Get(), detector_constants_.Get()};
-      ID3D11ShaderResourceView *owner_inputs[7] = {
-        nullptr, nullptr, nullptr, nullptr, state_srv.Get(), nullptr, minmax_srv.Get(),
-      };
-      ID3D11UnorderedAccessView *owner_outputs[3] = {
-        nullptr, nullptr, history_owner_uav_.Get(),
-      };
       if (publish_owner) {
-        context_->CSSetShader(history_owner_shader_.Get(), nullptr, 0u);
-        context_->CSSetConstantBuffers(0u, 2u, constants);
-        context_->CSSetShaderResources(0u, 7u, owner_inputs);
-        context_->CSSetUnorderedAccessViews(0u, 3u, owner_outputs, nullptr);
-        context_->Dispatch(1u, 1u, 1u);
-        unbind(7u, 3u, 2u);
+        const std::vector<float> raw(field_texels, 0.5f);
+        const std::vector<float> appearance(field_texels, 0.25f);
+        const std::vector<float> normalized_depth(field_texels, 0.5f);
+        const std::vector<std::uint32_t> exclusion(field_texels, 0u);
+        fused_map_result_t ignored;
+        if (!run_fused_map(
+              raw,
+              current,
+              appearance,
+              normalized_depth,
+              exclusion,
+              cut_state,
+              minmax_ema,
+              authenticated_mapping_state(),
+              owner_frame_id,
+              owner_timestamp_us,
+              ignored,
+              error
+            )) {
+          return false;
+        }
       }
 
       update_detector_constants(
@@ -974,6 +1144,7 @@ namespace {
       ID3D11UnorderedAccessView *resolve_outputs[4] = {
         nullptr, nullptr, nullptr, decision_uav_.Get(),
       };
+      ID3D11Buffer *constants[2] = {depth_constants_.Get(), detector_constants_.Get()};
       context_->CSSetShader(resolve_shader_.Get(), nullptr, 0u);
       context_->CSSetConstantBuffers(0u, 2u, constants);
       context_->CSSetShaderResources(0u, 4u, resolve_inputs);
@@ -1038,44 +1209,27 @@ namespace {
       const std::uint64_t observation_timestamp_us = owner_observation_timestamp_us,
       const std::array<float, 4> &minmax_ema = valid_minmax_ema
     ) {
-      ComPtr<ID3D11Buffer> state_buffer;
-      ComPtr<ID3D11ShaderResourceView> state_srv;
-      ComPtr<ID3D11Buffer> minmax_buffer;
-      ComPtr<ID3D11ShaderResourceView> minmax_srv;
       const auto state = history_state(model_input_history_state);
-      if (!create_structured_srv(
-            std::span<const float> {state},
-            4u * sizeof(float),
-            state_buffer,
-            state_srv
-          ) ||
-          !create_structured_srv(
-            std::span<const float> {minmax_ema},
-            4u * sizeof(float),
-            minmax_buffer,
-            minmax_srv
-          )) {
-        error = "could not create history-owner state";
-        return false;
-      }
-      update_depth_constants();
-      update_detector_constants(
-        0u, 0u, 0u, frame_id, 0u, 0u, observation_timestamp_us
+      const std::vector<float> raw(field_texels, 0.5f);
+      const std::vector<float> model_input(3u * field_texels, 0.25f);
+      const std::vector<float> appearance(field_texels, 0.75f);
+      const std::vector<float> normalized_depth(field_texels, 0.5f);
+      const std::vector<std::uint32_t> exclusion(field_texels, 0u);
+      fused_map_result_t ignored;
+      return run_fused_map(
+        raw,
+        model_input,
+        appearance,
+        normalized_depth,
+        exclusion,
+        state,
+        minmax_ema,
+        authenticated_mapping_state(),
+        frame_id,
+        observation_timestamp_us,
+        ignored,
+        error
       );
-      ID3D11Buffer *constants[2] = {depth_constants_.Get(), detector_constants_.Get()};
-      ID3D11ShaderResourceView *inputs[7] = {
-        nullptr, nullptr, nullptr, nullptr, state_srv.Get(), nullptr, minmax_srv.Get(),
-      };
-      ID3D11UnorderedAccessView *outputs[3] = {
-        nullptr, nullptr, history_owner_uav_.Get(),
-      };
-      context_->CSSetShader(history_owner_shader_.Get(), nullptr, 0u);
-      context_->CSSetConstantBuffers(0u, 2u, constants);
-      context_->CSSetShaderResources(0u, 7u, inputs);
-      context_->CSSetUnorderedAccessViews(0u, 3u, outputs, nullptr);
-      context_->Dispatch(1u, 1u, 1u);
-      unbind(7u, 3u, 2u);
-      return true;
     }
 
     bool seed_scene_from_history_owner(
@@ -1372,6 +1526,96 @@ namespace {
              SUCCEEDED(device_->CreateUnorderedAccessView(buffer.Get(), nullptr, &uav));
     }
 
+    bool create_map_texture(
+      const DXGI_FORMAT format,
+      ComPtr<ID3D11Texture2D> &texture,
+      ComPtr<ID3D11ShaderResourceView> &srv,
+      ComPtr<ID3D11UnorderedAccessView> &uav
+    ) {
+      D3D11_TEXTURE2D_DESC desc {};
+      desc.Width = field_width;
+      desc.Height = field_height;
+      desc.MipLevels = 1u;
+      desc.ArraySize = 1u;
+      desc.Format = format;
+      desc.SampleDesc.Count = 1u;
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+      return SUCCEEDED(device_->CreateTexture2D(&desc, nullptr, &texture)) &&
+             SUCCEEDED(device_->CreateShaderResourceView(texture.Get(), nullptr, &srv)) &&
+             SUCCEEDED(device_->CreateUnorderedAccessView(texture.Get(), nullptr, &uav));
+    }
+
+    bool create_fused_map_resources(std::string &error) {
+      if (!create_structured_output(
+            field_texels, sizeof(float), map_raw_buffer_, map_raw_srv_, map_raw_uav_
+          ) ||
+          !create_structured_output(
+            models::depth_coordinate_v2::state_vector_count,
+            4u * sizeof(float), map_state_buffer_, map_state_srv_, map_state_uav_
+          ) ||
+          !create_structured_output(
+            1u, 4u * sizeof(float), map_minmax_buffer_, map_minmax_srv_, map_minmax_uav_
+          ) ||
+          !create_structured_output(
+            3u * field_texels, sizeof(float), map_current_model_buffer_,
+            map_current_model_srv_, map_current_model_uav_
+          ) ||
+          !create_structured_output(
+            field_texels, sizeof(float), map_current_appearance_buffer_,
+            map_current_appearance_srv_, map_current_appearance_uav_
+          ) ||
+          !create_structured_output(
+            sbs_adaptive_state::vector_count, 4u * sizeof(float), map_cut_buffer_,
+            map_cut_srv_, map_cut_uav_
+          ) ||
+          !create_structured_output(
+            3u * field_texels, sizeof(float), map_previous_model_buffer_,
+            map_previous_model_srv_, map_previous_model_uav_
+          ) ||
+          !create_structured_output(
+            field_texels, sizeof(float), map_previous_appearance_buffer_,
+            map_previous_appearance_srv_, map_previous_appearance_uav_
+          ) ||
+          !create_map_texture(
+            DXGI_FORMAT_R32_UINT, map_exclusion_texture_, map_exclusion_srv_,
+            map_exclusion_uav_
+          ) ||
+          !create_map_texture(
+            DXGI_FORMAT_R32_FLOAT, map_current_depth_texture_, map_current_depth_srv_,
+            map_current_depth_uav_
+          ) ||
+          !create_map_texture(
+            DXGI_FORMAT_R32_FLOAT, map_output_texture_, map_output_srv_, map_output_uav_
+          ) ||
+          !create_map_texture(
+            DXGI_FORMAT_R32_FLOAT, map_previous_depth_texture_, map_previous_depth_srv_,
+            map_previous_depth_uav_
+          ) ||
+          !create_map_texture(
+            DXGI_FORMAT_R32_UINT, map_previous_exclusion_texture_,
+            map_previous_exclusion_srv_, map_previous_exclusion_uav_
+          )) {
+        error = "could not create fused map/history resources";
+        return false;
+      }
+      namespace v2 = models::depth_coordinate_v2;
+      const v2::constants_t constants {
+        v2::model_calibrations.front().raw_coordinate_scale,
+        v2::collapse_abs_epsilon,
+        v2::far_tau,
+        v2::near_log_tau,
+        v2::requested_gain_for_config(v2::reference_pop_strength),
+        v2::max_horizontal_slope,
+        v2::direct_container_limit,
+        v2::convergence_curve_default,
+      };
+      context_->UpdateSubresource(
+        v2_constants_.Get(), 0u, nullptr, &constants, 0u, 0u
+      );
+      return true;
+    }
+
     bool create_raw_decision_buffer() {
       D3D11_BUFFER_DESC desc {};
       desc.ByteWidth = static_cast<UINT>(models::near_identical_gpu_decision_byte_count);
@@ -1534,6 +1778,48 @@ namespace {
       return true;
     }
 
+    bool read_texture_float(
+      ID3D11Texture2D *source,
+      std::vector<float> &output,
+      std::string &error
+    ) {
+      D3D11_TEXTURE2D_DESC desc {};
+      source->GetDesc(&desc);
+      if (desc.Format != DXGI_FORMAT_R32_FLOAT) {
+        error = "fused map float texture has the wrong format";
+        return false;
+      }
+      D3D11_TEXTURE2D_DESC staging_desc = desc;
+      staging_desc.Usage = D3D11_USAGE_STAGING;
+      staging_desc.BindFlags = 0u;
+      staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      staging_desc.MiscFlags = 0u;
+      ComPtr<ID3D11Texture2D> staging;
+      if (FAILED(device_->CreateTexture2D(&staging_desc, nullptr, &staging))) {
+        error = "could not create fused map float staging texture";
+        return false;
+      }
+      context_->CopyResource(staging.Get(), source);
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(context_->Map(
+            staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped
+          )) || !mapped.pData) {
+        error = "could not read fused map float texture";
+        return false;
+      }
+      output.resize(static_cast<std::size_t>(desc.Width) * desc.Height);
+      for (UINT y = 0u; y < desc.Height; ++y) {
+        std::memcpy(
+          output.data() + static_cast<std::size_t>(y) * desc.Width,
+          static_cast<const std::byte *>(mapped.pData) +
+            static_cast<std::size_t>(y) * mapped.RowPitch,
+          static_cast<std::size_t>(desc.Width) * sizeof(float)
+        );
+      }
+      context_->Unmap(staging.Get(), 0u);
+      return true;
+    }
+
     bool read_buffer(
       ID3D11Buffer *source,
       std::vector<float> &output,
@@ -1651,7 +1937,7 @@ namespace {
     }
 
     void unbind(const UINT srv_count, const UINT uav_count, const UINT cbuffer_count) {
-      std::array<ID3D11ShaderResourceView *, 7> null_srvs {};
+      std::array<ID3D11ShaderResourceView *, 8> null_srvs {};
       std::array<ID3D11UnorderedAccessView *, 6> null_uavs {};
       std::array<ID3D11Buffer *, 3> null_constants {};
       if (srv_count != 0u) {
@@ -1671,12 +1957,14 @@ namespace {
     ComPtr<ID3D11ComputeShader> oracle_content_shader_;
     ComPtr<ID3D11ComputeShader> oracle_pad_shader_;
     ComPtr<ID3D11ComputeShader> fused_preprocess_shader_;
+    ComPtr<ID3D11ComputeShader> fused_map_shader_;
+    ComPtr<ID3D11ComputeShader> coordinate_shader_;
     ComPtr<ID3D11ComputeShader> resolve_shader_;
-    ComPtr<ID3D11ComputeShader> history_owner_shader_;
     ComPtr<ID3D11ComputeShader> scene_seed_shader_;
     ComPtr<ID3D11ComputeShader> finalize_shader_;
     ComPtr<ID3D11Buffer> depth_constants_;
     ComPtr<ID3D11Buffer> detector_constants_;
+    ComPtr<ID3D11Buffer> v2_constants_;
     ComPtr<ID3D11Buffer> ocr_constants_;
     ComPtr<ID3D11Buffer> source_region_constants_;
     ComPtr<ID3D11Buffer> fused_force_constants_;
@@ -1698,6 +1986,45 @@ namespace {
     ComPtr<ID3D11ShaderResourceView> decision_srv_;
     ComPtr<ID3D11UnorderedAccessView> decision_uav_;
     ComPtr<ID3D11Buffer> decision_staging_;
+    ComPtr<ID3D11Buffer> map_raw_buffer_;
+    ComPtr<ID3D11ShaderResourceView> map_raw_srv_;
+    ComPtr<ID3D11UnorderedAccessView> map_raw_uav_;
+    ComPtr<ID3D11Buffer> map_state_buffer_;
+    ComPtr<ID3D11ShaderResourceView> map_state_srv_;
+    ComPtr<ID3D11UnorderedAccessView> map_state_uav_;
+    ComPtr<ID3D11Buffer> map_minmax_buffer_;
+    ComPtr<ID3D11ShaderResourceView> map_minmax_srv_;
+    ComPtr<ID3D11UnorderedAccessView> map_minmax_uav_;
+    ComPtr<ID3D11Buffer> map_current_model_buffer_;
+    ComPtr<ID3D11ShaderResourceView> map_current_model_srv_;
+    ComPtr<ID3D11UnorderedAccessView> map_current_model_uav_;
+    ComPtr<ID3D11Buffer> map_current_appearance_buffer_;
+    ComPtr<ID3D11ShaderResourceView> map_current_appearance_srv_;
+    ComPtr<ID3D11UnorderedAccessView> map_current_appearance_uav_;
+    ComPtr<ID3D11Buffer> map_cut_buffer_;
+    ComPtr<ID3D11ShaderResourceView> map_cut_srv_;
+    ComPtr<ID3D11UnorderedAccessView> map_cut_uav_;
+    ComPtr<ID3D11Buffer> map_previous_model_buffer_;
+    ComPtr<ID3D11ShaderResourceView> map_previous_model_srv_;
+    ComPtr<ID3D11UnorderedAccessView> map_previous_model_uav_;
+    ComPtr<ID3D11Buffer> map_previous_appearance_buffer_;
+    ComPtr<ID3D11ShaderResourceView> map_previous_appearance_srv_;
+    ComPtr<ID3D11UnorderedAccessView> map_previous_appearance_uav_;
+    ComPtr<ID3D11Texture2D> map_exclusion_texture_;
+    ComPtr<ID3D11ShaderResourceView> map_exclusion_srv_;
+    ComPtr<ID3D11UnorderedAccessView> map_exclusion_uav_;
+    ComPtr<ID3D11Texture2D> map_current_depth_texture_;
+    ComPtr<ID3D11ShaderResourceView> map_current_depth_srv_;
+    ComPtr<ID3D11UnorderedAccessView> map_current_depth_uav_;
+    ComPtr<ID3D11Texture2D> map_output_texture_;
+    ComPtr<ID3D11ShaderResourceView> map_output_srv_;
+    ComPtr<ID3D11UnorderedAccessView> map_output_uav_;
+    ComPtr<ID3D11Texture2D> map_previous_depth_texture_;
+    ComPtr<ID3D11ShaderResourceView> map_previous_depth_srv_;
+    ComPtr<ID3D11UnorderedAccessView> map_previous_depth_uav_;
+    ComPtr<ID3D11Texture2D> map_previous_exclusion_texture_;
+    ComPtr<ID3D11ShaderResourceView> map_previous_exclusion_srv_;
+    ComPtr<ID3D11UnorderedAccessView> map_previous_exclusion_uav_;
   };
 
   std::vector<float> uniform_model_input(const float pixel = 0.5f) {
@@ -1713,6 +2040,34 @@ namespace {
       );
     }
     return input;
+  }
+
+  struct fused_map_inputs_t {
+    std::vector<float> raw;
+    std::vector<float> model_input;
+    std::vector<float> appearance;
+    std::vector<float> depth;
+    std::vector<std::uint32_t> exclusion;
+  };
+
+  fused_map_inputs_t patterned_fused_map_inputs() {
+    fused_map_inputs_t inputs {
+      std::vector<float>(field_texels),
+      std::vector<float>(3u * field_texels),
+      std::vector<float>(field_texels),
+      std::vector<float>(field_texels),
+      std::vector<std::uint32_t>(field_texels),
+    };
+    for (UINT index = 0u; index < field_texels; ++index) {
+      inputs.raw[index] = -0.5f + static_cast<float>(index % 101u) / 100.0f;
+      inputs.appearance[index] = 1000.25f + static_cast<float>(index);
+      inputs.depth[index] = 2000.5f + static_cast<float>(index);
+      for (UINT plane = 0u; plane < 3u; ++plane) {
+        inputs.model_input[index + plane * field_texels] =
+          static_cast<float>((plane + 1u) * 100000u + index) + 0.125f;
+      }
+    }
+    return inputs;
   }
 
   void add_red_pixel_delta(
@@ -2146,6 +2501,241 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, InferOwnerRequiresN4AndSub100msObserva
     decision[word(models::near_identical_gpu_decision_word_e::decision)],
     static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::infer)
   );
+}
+
+TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapAdvancesCompleteTupleAndOwnerForStatesOneAndThree) {
+  near_identical_gpu_fixture_t fixture;
+  std::string error;
+  const auto initialized = initialize_fixture(fixture, error);
+  if (initialized == near_identical_gpu_fixture_t::initialize_result_e::d3d_unavailable) {
+    GTEST_SKIP() << error;
+  }
+  ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
+
+  const auto inputs = patterned_fused_map_inputs();
+  for (const std::uint32_t history_state_value : {1u, 3u}) {
+    SCOPED_TRACE(::testing::Message() << "history state " << history_state_value);
+    fused_map_result_t result;
+    ASSERT_TRUE(fixture.run_fused_map(
+      inputs.raw,
+      inputs.model_input,
+      inputs.appearance,
+      inputs.depth,
+      inputs.exclusion,
+      history_state(history_state_value),
+      valid_minmax_ema,
+      authenticated_mapping_state(),
+      baseline_frame_id,
+      owner_observation_timestamp_us,
+      result,
+      error,
+      content,
+      tile_group_width,
+      tile_group_height,
+      false,
+      0u,
+      models::near_identical_work_optional_ocr
+    )) << error;
+    EXPECT_EQ(result.previous_model_input, inputs.model_input);
+    EXPECT_EQ(result.previous_appearance, inputs.appearance);
+    EXPECT_EQ(result.previous_depth, inputs.depth);
+    EXPECT_EQ(result.previous_exclusion, inputs.exclusion);
+    ASSERT_EQ(result.owner.size(), models::near_identical_history_owner_word_count);
+    EXPECT_EQ(result.owner[0], models::near_identical_history_owner_contract_tag);
+    EXPECT_EQ(result.owner[1], models::near_identical_history_owner_contract_schema);
+    EXPECT_EQ(result.owner[2], static_cast<std::uint32_t>(baseline_frame_id));
+    EXPECT_EQ(result.owner[3], static_cast<std::uint32_t>(baseline_frame_id >> 32u));
+    EXPECT_EQ(result.owner[4], static_cast<std::uint32_t>(domain_tag));
+    EXPECT_EQ(result.owner[5], static_cast<std::uint32_t>(domain_tag >> 32u));
+    EXPECT_EQ(result.owner[6], field_width);
+    EXPECT_EQ(result.owner[7], field_height);
+    EXPECT_EQ(result.owner[8], static_cast<std::uint32_t>(owner_observation_timestamp_us));
+    EXPECT_EQ(
+      result.owner[9], static_cast<std::uint32_t>(owner_observation_timestamp_us >> 32u)
+    );
+    // The last texel lives in the final partial dispatch group and proves that completion, not
+    // thread (0,0)'s tag store, is the observable tuple/owner publication boundary.
+    EXPECT_EQ(result.previous_model_input.back(), inputs.model_input.back());
+    EXPECT_EQ(result.previous_depth.back(), inputs.depth.back());
+  }
+}
+
+TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapHoldsTupleAndClearsOwnerForHeldOrInvalidHistory) {
+  near_identical_gpu_fixture_t fixture;
+  std::string error;
+  const auto initialized = initialize_fixture(fixture, error);
+  if (initialized == near_identical_gpu_fixture_t::initialize_result_e::d3d_unavailable) {
+    GTEST_SKIP() << error;
+  }
+  ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
+  const auto inputs = patterned_fused_map_inputs();
+  constexpr float held_float = -73.25f;
+  constexpr std::uint32_t held_uint = 0xa5a5c3c3u;
+
+  const auto expect_held = [&](const std::uint32_t state_value,
+                               const std::array<float, 4> &minmax) {
+    SCOPED_TRACE(::testing::Message() << "history state " << state_value
+                                     << ", validity " << minmax[3]);
+    fused_map_result_t result;
+    ASSERT_TRUE(fixture.run_fused_map(
+      inputs.raw, inputs.model_input, inputs.appearance, inputs.depth, inputs.exclusion,
+      history_state(state_value), minmax, authenticated_mapping_state(), baseline_frame_id,
+      owner_observation_timestamp_us, result, error
+    )) << error;
+    EXPECT_TRUE(std::all_of(
+      result.previous_model_input.begin(), result.previous_model_input.end(),
+      [held_float](const float value) { return value == held_float; }
+    ));
+    EXPECT_TRUE(std::all_of(
+      result.previous_appearance.begin(), result.previous_appearance.end(),
+      [held_float](const float value) { return value == held_float; }
+    ));
+    EXPECT_TRUE(std::all_of(
+      result.previous_depth.begin(), result.previous_depth.end(),
+      [held_float](const float value) { return value == held_float; }
+    ));
+    EXPECT_TRUE(std::all_of(
+      result.previous_exclusion.begin(), result.previous_exclusion.end(),
+      [held_uint](const std::uint32_t value) { return value == held_uint; }
+    ));
+    EXPECT_EQ(result.owner[0], 0u);
+    EXPECT_EQ(result.owner[1], models::near_identical_history_owner_contract_schema);
+    EXPECT_EQ(result.owner[2], static_cast<std::uint32_t>(baseline_frame_id));
+  };
+  expect_held(2u, valid_minmax_ema);
+  expect_held(4u, valid_minmax_ema);
+  expect_held(1u, invalid_minmax_ema);
+}
+
+TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapHistoryPrecedesCandidateValidationAndPaddingClamp) {
+  near_identical_gpu_fixture_t fixture;
+  std::string error;
+  const auto initialized = initialize_fixture(fixture, error);
+  if (initialized == near_identical_gpu_fixture_t::initialize_result_e::d3d_unavailable) {
+    GTEST_SKIP() << error;
+  }
+  ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
+  auto inputs = patterned_fused_map_inputs();
+  inputs.raw[0] = std::numeric_limits<float>::quiet_NaN();
+  auto invalid_mapping = authenticated_mapping_state();
+  invalid_mapping[models::depth_coordinate_v2::renderer_authorization_bits] = 0u;
+  auto invalid_tag_state = history_state(1u);
+  invalid_tag_state[sbs_adaptive_state::index(
+    sbs_adaptive_state::word_e::cut_contract_tag_bits
+  )] = std::bit_cast<float>(sbs_adaptive_state::cut_contract_tag ^ 1u);
+
+  fused_map_result_t invalid_result;
+  ASSERT_TRUE(fixture.run_fused_map(
+    inputs.raw, inputs.model_input, inputs.appearance, inputs.depth, inputs.exclusion,
+    invalid_tag_state, valid_minmax_ema, invalid_mapping, baseline_frame_id,
+    owner_observation_timestamp_us, invalid_result, error
+  )) << error;
+  EXPECT_EQ(invalid_result.previous_model_input, inputs.model_input);
+  EXPECT_EQ(invalid_result.previous_depth, inputs.depth);
+  EXPECT_EQ(invalid_result.owner[0], 0u);
+  EXPECT_TRUE(std::all_of(
+    invalid_result.output.begin(), invalid_result.output.end(),
+    [](const float value) { return value == 0.0f; }
+  ));
+
+  // The tuple predicate deliberately preserves its historical NaN asymmetry, while the stricter
+  // owner authentication rejects a non-finite state. This must copy the tuple but leave tag zero.
+  auto nan_history_state = history_state(1u);
+  nan_history_state[sbs_adaptive_state::index(
+    sbs_adaptive_state::word_e::model_input_history_state
+  )] = std::numeric_limits<float>::quiet_NaN();
+  fused_map_result_t nan_state_result;
+  ASSERT_TRUE(fixture.run_fused_map(
+    inputs.raw, inputs.model_input, inputs.appearance, inputs.depth, inputs.exclusion,
+    nan_history_state, valid_minmax_ema, authenticated_mapping_state(), baseline_frame_id,
+    owner_observation_timestamp_us, nan_state_result, error
+  )) << error;
+  EXPECT_EQ(nan_state_result.previous_model_input, inputs.model_input);
+  EXPECT_EQ(nan_state_result.previous_appearance, inputs.appearance);
+  EXPECT_EQ(nan_state_result.previous_depth, inputs.depth);
+  EXPECT_EQ(nan_state_result.previous_exclusion, inputs.exclusion);
+  EXPECT_EQ(nan_state_result.owner[0], 0u);
+
+  constexpr models::depth_tensor_content_rect_t padded_content {8u, 4u, 97u, 81u};
+  for (UINT y = 0u; y < field_height; ++y) {
+    for (UINT x = 0u; x < field_width; ++x) {
+      const bool outside = x < padded_content.left || x >= padded_content.right ||
+                           y < padded_content.top || y >= padded_content.bottom;
+      inputs.exclusion[static_cast<std::size_t>(y) * field_width + x] = outside ? 1u : 0u;
+    }
+  }
+  inputs.raw[0] = -0.25f;
+  const std::size_t clamped_index =
+    static_cast<std::size_t>(padded_content.top) * field_width + padded_content.left;
+  inputs.raw[clamped_index] = 0.375f;
+  fused_map_result_t padded_result;
+  ASSERT_TRUE(fixture.run_fused_map(
+    inputs.raw, inputs.model_input, inputs.appearance, inputs.depth, inputs.exclusion,
+    history_state(1u), valid_minmax_ema, authenticated_mapping_state(), baseline_frame_id,
+    owner_observation_timestamp_us, padded_result, error, padded_content
+  )) << error;
+  EXPECT_FLOAT_EQ(padded_result.output[0], padded_result.output[clamped_index]);
+  EXPECT_FLOAT_EQ(padded_result.previous_model_input[0], inputs.model_input[0]);
+  EXPECT_NE(padded_result.previous_model_input[0], inputs.model_input[clamped_index]);
+  EXPECT_FLOAT_EQ(padded_result.previous_depth[0], inputs.depth[0]);
+  EXPECT_EQ(padded_result.previous_exclusion[0], 1u);
+}
+
+TEST(HostSbsNearIdenticalDetectorGpuTest, CoordinateAndZeroGroupDispatchDoNotMutateHistoryOwner) {
+  near_identical_gpu_fixture_t fixture;
+  std::string error;
+  const auto initialized = initialize_fixture(fixture, error);
+  if (initialized == near_identical_gpu_fixture_t::initialize_result_e::d3d_unavailable) {
+    GTEST_SKIP() << error;
+  }
+  ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
+  const auto inputs = patterned_fused_map_inputs();
+  constexpr float held_float = -73.25f;
+  constexpr std::uint32_t held_uint = 0xa5a5c3c3u;
+
+  const auto expect_untouched = [held_float, held_uint](const fused_map_result_t &result) {
+    EXPECT_TRUE(std::all_of(
+      result.previous_model_input.begin(), result.previous_model_input.end(),
+      [held_float](const float value) { return value == held_float; }
+    ));
+    EXPECT_TRUE(std::all_of(
+      result.previous_appearance.begin(), result.previous_appearance.end(),
+      [held_float](const float value) { return value == held_float; }
+    ));
+    EXPECT_TRUE(std::all_of(
+      result.previous_depth.begin(), result.previous_depth.end(),
+      [held_float](const float value) { return value == held_float; }
+    ));
+    EXPECT_TRUE(std::all_of(
+      result.previous_exclusion.begin(), result.previous_exclusion.end(),
+      [held_uint](const std::uint32_t value) { return value == held_uint; }
+    ));
+    EXPECT_TRUE(std::all_of(
+      result.owner.begin(), result.owner.end(),
+      [held_uint](const std::uint32_t value) { return value == held_uint; }
+    ));
+  };
+
+  fused_map_result_t coordinate;
+  ASSERT_TRUE(fixture.run_fused_map(
+    inputs.raw, inputs.model_input, inputs.appearance, inputs.depth, inputs.exclusion,
+    history_state(1u), valid_minmax_ema, authenticated_mapping_state(), baseline_frame_id,
+    owner_observation_timestamp_us, coordinate, error, content, tile_group_width,
+    tile_group_height, true
+  )) << error;
+  expect_untouched(coordinate);
+
+  fused_map_result_t zero_group;
+  ASSERT_TRUE(fixture.run_fused_map(
+    inputs.raw, inputs.model_input, inputs.appearance, inputs.depth, inputs.exclusion,
+    history_state(1u), valid_minmax_ema, authenticated_mapping_state(), baseline_frame_id,
+    owner_observation_timestamp_us, zero_group, error, content, 0u, 0u, false
+  )) << error;
+  expect_untouched(zero_group);
+  EXPECT_TRUE(std::all_of(
+    zero_group.output.begin(), zero_group.output.end(),
+    [held_float](const float value) { return value == held_float; }
+  ));
 }
 
 TEST(HostSbsNearIdenticalDetectorGpuTest, HistoryOwnerUsesExactValidHistoryPredicate) {

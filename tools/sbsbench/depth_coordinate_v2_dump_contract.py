@@ -21,7 +21,7 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     import generate_depth_coordinate_v2_contract as generator  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 37
+DUMP_MANIFEST_SCHEMA = 38
 GPU_TRACE_RING_SCHEMA = 3
 GPU_TRACE_CONTRACT_SCHEMA = 3
 GPU_TRACE_DECODED_SCHEMA = 4
@@ -37,7 +37,7 @@ GPU_TRACE_RING_WORD_COUNT = (
     GPU_TRACE_HEADER_WORD_COUNT + GPU_TRACE_CAPACITY * GPU_TRACE_RECORD_WORD_COUNT)
 GPU_TRACE_RING_BYTE_COUNT = GPU_TRACE_RING_WORD_COUNT * 4
 GPU_TRACE_SOURCE_CLOSURE_SHA256 = (
-    "422fe351331310fd7c776a2263932da83121b21ce01f6c9a80192468a3ffad34")
+    "a1e6a21286b5a898b1dcdd419056faa8e3a5351b21edef0ef288d716979c0cb9")
 GPU_TRACE_SHADER_SPEC = ("host_sbs_gpu_trace_cs.hlsl", "main", "cs_5_0")
 GPU_TRACE_DECISION_COOKIE = 0xD1EC15A5
 GPU_TRACE_TOKEN_LOW_COOKIE = 0xA3756C91
@@ -137,10 +137,10 @@ WINDOW_REGION_AUTHORITY_KINDS = frozenset({"chromium-video", "foreground-client"
 SHADOW_STATE_DUMP_SCHEMA = 16
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 2
 LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
-    "c8a2221d4e47ac5b09881069ff18a4f2abe4ef9a6adb165426c38f27c7cfabe1"
+    "7553350163dfb80cee85b70689b768a46a5c15b44997e2753e24bebedaa51ffd"
 )
 DIAGNOSTIC_SOURCE_CLOSURE_SHA256 = (
-    "78aa31a8b4c323e439be55f907285ffe2791cfd21c9a9cfc19574792a5f9e14c"
+    "1c7cb433f667c990e4d55f254a11cc9a40590e3a1e97e62fc261c2e0069b9513"
 )
 _CONTRACT = coordinate_contract.load_contract()
 _CONTRACT_TAG = generator.contract_tag(_CONTRACT)
@@ -181,7 +181,6 @@ _SUBTITLE_OCR_SHADER_SPECS = (
 )
 _SUBTITLE_LOCATOR_SHADER_SPECS = (
     ("host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"),
-    ("host_sbs_subtitle_locator_cs.hlsl", "condition_prepare_main", "cs_5_0"),
     ("host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"),
 )
 

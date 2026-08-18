@@ -10,10 +10,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 70u;
-  inline constexpr std::uint32_t contract_tag = 0xD84FCD1Au;
-  inline constexpr std::string_view contract_canonical_sha256 = "caf07a7202266a858f5c7d68a6b550ebbb80f5640ca3ad6630a2c2ade3e7745b";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "d84fcd1adcb43ef1dea09901082d3b382e503612f8363374cdddb42c7ceeaebb";
+  inline constexpr std::uint32_t contract_schema = 71u;
+  inline constexpr std::uint32_t contract_tag = 0x012ECEC1u;
+  inline constexpr std::string_view contract_canonical_sha256 = "96195e08c3da309b51503ae09c5ff07e7e5355ec0a7cc008a1e38c9209d67164";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "012ecec1ff867c4b76aca7c1a1d8afb286d4f2e7a0ae96d71da9bc7e5555fd7e";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -179,7 +179,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::uint32_t shader_source_closure_schema = 2u;
   inline constexpr std::uint32_t shader_source_compile_flags = 34816u;
   inline constexpr std::uint32_t shader_source_macro_count = 0u;
-  inline constexpr std::string_view shader_source_closure_sha256 = "53042f759cc7043f141995623c3226297566a9c4e66d2d08680319416e41109d";
+  inline constexpr std::string_view shader_source_closure_sha256 = "11bde7ba05ca8ae8404b8fe21a3afd600ff98549fea248dacb5bf1b5d2156d6b";
 
   struct shader_source_spec_t {
     std::string_view source_file;
@@ -187,7 +187,7 @@ namespace models::depth_coordinate_v2 {
     std::string_view source_target;
   };
 
-  inline constexpr std::array<shader_source_spec_t, 21> shader_source_specs {{
+  inline constexpr std::array<shader_source_spec_t, 19> shader_source_specs {{
     {"rgb_to_nchw_near_identical_cs.hlsl", "fused_main", "cs_5_0"},
     {"buffer_to_tex_cs.hlsl", "main", "cs_5_0"},
     {"buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"},
@@ -195,7 +195,6 @@ namespace models::depth_coordinate_v2 {
     {"depth_hist_cs.hlsl", "main", "cs_5_0"},
     {"depth_scene_cut_evidence_cs.hlsl", "main", "cs_5_0"},
     {"depth_scene_cut_resolve_cs.hlsl", "main", "cs_5_0"},
-    {"depth_valid_history_cs.hlsl", "main", "cs_5_0"},
     {"depth_coordinate_v2_moments_cs.hlsl", "main", "cs_5_0"},
     {"depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"},
     {"depth_coordinate_v2_state_resolve_cs.hlsl", "main", "cs_5_0"},
@@ -207,7 +206,6 @@ namespace models::depth_coordinate_v2 {
     {"host_sbs_ocr_boxes_cs.hlsl", "cells_main", "cs_5_0"},
     {"host_sbs_ocr_boxes_cs.hlsl", "resolve_main", "cs_5_0"},
     {"host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"},
-    {"host_sbs_subtitle_locator_cs.hlsl", "condition_prepare_main", "cs_5_0"},
     {"host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"},
   }};
 

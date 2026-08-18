@@ -448,7 +448,8 @@ windowed slot selects the complete video rectangle, and the generic foreground-c
 selects the complete root client. Either arbitrary-aspect logical source uses the current full-frame
 authenticated tensor and a deterministic centered integer contain-fit. The source is never stretched
 or further cropped. Tensor cells outside the integer content rectangle replicate the nearest content
-edge and are excluded from depth statistics, scene cuts, ownership, history, and OCR. DAV2, OCR, and
+edge and are excluded from depth statistics, scene cuts, ownership, history comparison/authority,
+and OCR. The fused map copies their raw padded tuple with exclusion `1`; DAV2, OCR, and
 ownership address the exact rectangle directly inside the retained matched full texture, adding its
 integer offset only to final color loads; scene analysis remains ROI-local. There is no ordinary live
 ROI allocation or copy. Dump 3D may reconstruct a same-format crop only after the completed frame is
@@ -467,7 +468,7 @@ translation within one unchanged authority do not.
 This live route currently authorizes only Desktop Duplication. WGC has no `LastPresentTime`
 equivalent for separating content from cursor-only compositor frames and therefore uses full-frame
 V2. Diagnostics may record the selected frame-bound window region and observer/mapping provenance,
-but that observation is not the live renderer authority by itself. Current Dump 3D schema 37 records
+but that observation is not the live renderer authority by itself. Current Dump 3D schema 38 records
 the ROI-local analysis field, integer tensor-content rectangle, padded-area fraction, fit method,
 authority kind, authoritative full-source placement/collar contract, and exact full-source inverse
 map as distinct evidence. The strict reader accepts only the current schema and identity; historical
@@ -506,8 +507,8 @@ external DOM rectangle that Sunshine can query.
 - **Aspect adaptation preserves the complete source.** See
   [the resolution constraint](#a-resolution-constraint-that-will-bite-roi-work). Any admitted ROI
   aspect uses a deterministic centered integer contain-fit inside the fixed authenticated tensor.
-  Nearest-edge replicated padding is synthetic and cannot contribute depth, cut, ownership, history,
-  or OCR evidence.
+  Nearest-edge replicated padding is synthetic and cannot contribute depth, cut, ownership, history
+  comparison/authority, or OCR evidence, although the fused map copies its raw excluded tuple.
 - **Motion is exact-frame attributed.** Rendering consumes only the rectangle attached to the same
   private color/depth slot. Analysis-domain changes reset temporal/camera state, while a pure
   position change of the same-sized ROI retains it. Stale or partially off-monitor geometry uses
@@ -528,7 +529,7 @@ client observer, Chromium-first priority, causal continuity, raw virtual-desktop
 same-output containment, exact-full-source canonicalization, arbitrary-aspect integer contain-fit,
 edge-replicated excluded padding, exact direct-offset DAV2/OCR/ownership sampling, authority-specific state,
 full-source rendering, and the outside-only zero-plane collar are implemented. Active ROI frames are
-represented by current Dump 3D schema 37. Strict replay reproduces the integer content plan and
+represented by current Dump 3D schema 38. Strict replay reproduces the integer content plan and
 validates both the ROI-local and full-source coordinate domains; mismatched evidence fails closed.
 
 ---
@@ -711,7 +712,7 @@ depth statistics, cut evidence, ownership, history, and OCR. Inspect both dispar
 edges: the ROI interior must remain unchanged, the outside-only collar must respect the production
 slope limits, and the farther surround must be exactly zero. A pure window
 translation must retain scene state; ROI/full, authority, identity, size, and transfer-domain changes
-must reset it. Capture a schema-37 ROI Dump 3D and require its tensor-content rectangle, padding
+must reset it. Capture a schema-38 ROI Dump 3D and require its tensor-content rectangle, padding
 fraction, and fit method to reproduce the integer plan; require its full-source inverse map to be
 identity beyond the conservative collar. The ROI-local final field alone is not sufficient evidence.
 
