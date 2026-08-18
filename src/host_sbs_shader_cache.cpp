@@ -709,10 +709,9 @@ namespace models::host_sbs_shader_cache {
     return future.get();
   }
 
-  template<std::size_t Size>
   static bool prewarm_shader_set(
     const std::filesystem::path &shader_root,
-    const std::array<shader_spec, Size> &specs,
+    const std::span<const shader_spec> specs,
     bool &all_compiled
   ) {
     const auto sources = snapshot_sources(shader_root, specs);
@@ -725,20 +724,29 @@ namespace models::host_sbs_shader_cache {
     return true;
   }
 
+  // Preserve the authenticated production startup order. Diagnostic, trace, dump-only, and
+  // optional P010 shaders intentionally remain lazy and independent of host startup success.
+  static constexpr std::array production_prewarm_sets {
+    std::span<const shader_spec> {parallax_v2_producer_specs},
+    std::span<const shader_spec> {near_identical_detector_specs},
+    std::span<const shader_spec> {parallax_v2_live_renderer_specs},
+    std::span<const shader_spec> {sbs_flat_fallback_specs},
+  };
+
   bool prewarm(const std::filesystem::path &assets_dir) {
     const auto statistics_before = cache_statistics();
     const auto shader_root = assets_dir / "shaders" / "directx";
     bool all_compiled = true;
-    if (!prewarm_shader_set(shader_root, parallax_v2_producer_specs, all_compiled) ||
-        !prewarm_shader_set(shader_root, near_identical_detector_specs, all_compiled) ||
-        !prewarm_shader_set(shader_root, parallax_v2_live_renderer_specs, all_compiled) ||
-        !prewarm_shader_set(shader_root, sbs_flat_fallback_specs, all_compiled)) {
-      return false;
+    std::size_t prewarmed_shader_count = 0u;
+    for (const auto specs : production_prewarm_sets) {
+      if (!prewarm_shader_set(shader_root, specs, all_compiled)) {
+        return false;
+      }
+      prewarmed_shader_count += specs.size();
     }
     BOOST_LOG(info)
       << "Prewarmed the complete Host SBS V2 shader set ("
-      << parallax_v2_producer_specs.size() + near_identical_detector_specs.size() +
-           parallax_v2_live_renderer_specs.size() + sbs_flat_fallback_specs.size()
+      << prewarmed_shader_count
       << " production shaders"
       << "; persistent_hits="
       << cache_statistics().persistent_hits - statistics_before.persistent_hits

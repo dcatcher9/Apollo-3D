@@ -121,8 +121,10 @@ namespace models::host_sbs_shader_cache {
   // Complete production V2 producer set. The normalized depth is private scene-cut evidence; the
   // retired subject shaping, hard-mask sanitizer/exclusion, and adaptive-pop paths remain absent.
   // The OCR8 producer and compact SLR13 post-limit conditioner share this authenticated snapshot,
-  // so no analysis or geometry pass can be sampled from a weaker closure.
-  enum class producer_shader_e : std::uint8_t {
+  // so no analysis or geometry pass can be sampled from a weaker closure. This array is the sole
+  // canonical producer registry: its order is authenticated by the generated DVC contract and is
+  // shared unchanged by prewarm, snapshotting, and compute-object creation.
+  inline constexpr std::array parallax_v2_producer_specs {
     host_sbs_near_identical_fused_preprocess,
     buffer_to_tex,
     buffer_to_tex_pad,
@@ -143,82 +145,6 @@ namespace models::host_sbs_shader_cache {
     host_sbs_subtitle_locator_resolve,
     host_sbs_subtitle_condition,
   };
-
-  struct producer_shader_binding {
-    producer_shader_e id;
-    shader_spec spec;
-  };
-
-  inline constexpr std::array parallax_v2_producer_bindings {
-    // Authenticate the complete path from captured RGB preprocessing through cut/history state
-    // and final coordinate limiting. Compile every shared pass from this single immutable
-    // snapshot so no separately sampled source body can feed authenticated V2 geometry.
-    producer_shader_binding {
-      producer_shader_e::host_sbs_near_identical_fused_preprocess,
-      host_sbs_near_identical_fused_preprocess
-    },
-    producer_shader_binding {producer_shader_e::buffer_to_tex, buffer_to_tex},
-    producer_shader_binding {producer_shader_e::buffer_to_tex_pad, buffer_to_tex_pad},
-    producer_shader_binding {producer_shader_e::depth_minmax_ema, depth_minmax_ema},
-    producer_shader_binding {producer_shader_e::depth_hist, depth_hist},
-    producer_shader_binding {
-      producer_shader_e::depth_scene_cut_evidence, depth_scene_cut_evidence
-    },
-    producer_shader_binding {
-      producer_shader_e::depth_scene_cut_resolve, depth_scene_cut_resolve
-    },
-    producer_shader_binding {
-      producer_shader_e::depth_coordinate_v2_moments, depth_coordinate_v2_moments
-    },
-    producer_shader_binding {
-      producer_shader_e::depth_coordinate_v2_frame_resolve, depth_coordinate_v2_frame_resolve
-    },
-    producer_shader_binding {
-      producer_shader_e::depth_coordinate_v2_state_resolve, depth_coordinate_v2_state_resolve
-    },
-    producer_shader_binding {
-      producer_shader_e::depth_coordinate_v2_map, depth_coordinate_v2_map
-    },
-    producer_shader_binding {
-      producer_shader_e::depth_coordinate_v2_ownership, depth_coordinate_v2_ownership
-    },
-    producer_shader_binding {
-      producer_shader_e::depth_coordinate_v2_vertical_limit,
-      depth_coordinate_v2_vertical_limit
-    },
-    producer_shader_binding {
-      producer_shader_e::depth_coordinate_v2_limit, depth_coordinate_v2_limit
-    },
-    producer_shader_binding {
-      producer_shader_e::host_sbs_ocr_preprocess, host_sbs_ocr_preprocess
-    },
-    producer_shader_binding {producer_shader_e::host_sbs_ocr_cells, host_sbs_ocr_cells},
-    producer_shader_binding {producer_shader_e::host_sbs_ocr_resolve, host_sbs_ocr_resolve},
-    producer_shader_binding {
-      producer_shader_e::host_sbs_subtitle_locator_resolve,
-      host_sbs_subtitle_locator_resolve
-    },
-    producer_shader_binding {
-      producer_shader_e::host_sbs_subtitle_condition, host_sbs_subtitle_condition
-    },
-  };
-
-  static_assert([] {
-    for (std::size_t index = 0; index < parallax_v2_producer_bindings.size(); ++index) {
-      if (static_cast<std::size_t>(parallax_v2_producer_bindings[index].id) != index) {
-        return false;
-      }
-    }
-    return true;
-  }(), "producer shader IDs must remain complete and in canonical order");
-
-  inline constexpr auto parallax_v2_producer_specs = [] {
-    std::array<shader_spec, parallax_v2_producer_bindings.size()> specs {};
-    for (std::size_t index = 0; index < specs.size(); ++index) {
-      specs[index] = parallax_v2_producer_bindings[index].spec;
-    }
-    return specs;
-  }();
 
   // The canonical-coordinate field is not a production input or output. Keep its alternate
   // entrypoint outside the authenticated live producer set so a normal frame never depends on

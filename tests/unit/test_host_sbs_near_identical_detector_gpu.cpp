@@ -4,11 +4,14 @@
 #include <src/host_sbs_shader_cache.h>
 #include <src/video_depth_estimator.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <string>
+#include <string_view>
+#include <utility>
 
 TEST(HostSbsNearIdenticalPolicyTest, RawDecisionLayoutMatchesCudaBridge) {
   EXPECT_EQ(models::near_identical_gpu_decision_byte_count, 256u);
@@ -78,10 +81,10 @@ TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparat
   ASSERT_FALSE(fused.empty());
 
   const auto producer_loop = estimator.find(
-    "for (const auto &binding : host_sbs_shader_cache::parallax_v2_producer_bindings)"
+    "for (std::size_t index = 0; index < producer_shader_outputs.size(); ++index)"
   );
   const auto producer_end = estimator.find(
-    "parallax_v2_producer_shaders_ready = true", producer_loop
+    "parallax_v2_shader_provenance =", producer_loop
   );
   ASSERT_NE(producer_loop, std::string::npos);
   ASSERT_NE(producer_end, std::string::npos);
@@ -89,14 +92,24 @@ TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparat
     producer_loop, producer_end - producer_loop
   );
   const auto mandatory_assignment = producer_body.find(
-    "producer_shaders_ok = output && create_shader"
+    "producer_shaders_ok = create_shader"
   );
   ASSERT_NE(mandatory_assignment, std::string::npos);
+  EXPECT_EQ(
+    estimator.find("parallax_v2_producer_shaders_ready"),
+    std::string::npos
+  );
   EXPECT_EQ(producer_body.find("near_identical_fused_preprocess_cs.Reset()"), std::string::npos);
   EXPECT_EQ(producer_body.find("Optional Host SBS fused preprocess"), std::string::npos);
   EXPECT_EQ(cache.find("prewarm_producer_set"), std::string::npos);
+  EXPECT_EQ(cache_header.find("producer_shader_e"), std::string::npos);
+  EXPECT_EQ(cache_header.find("producer_shader_binding"), std::string::npos);
   EXPECT_NE(
-    cache.find("prewarm_shader_set(shader_root, parallax_v2_producer_specs"),
+    cache.find("static constexpr std::array production_prewarm_sets"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    cache.find("std::span<const shader_spec> {parallax_v2_producer_specs}"),
     std::string::npos
   );
 
@@ -142,6 +155,113 @@ TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparat
   EXPECT_EQ(preprocess.find("void pad_main"), std::string::npos);
   EXPECT_NE(fused.find("NearIdenticalEvidenceEnabled"), std::string::npos);
   EXPECT_NE(fused.find("disabled_evidence.admitted = 0u"), std::string::npos);
+}
+
+TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
+  const auto read = [](const std::string &path) {
+    std::ifstream stream(path, std::ios::binary);
+    return std::string {
+      std::istreambuf_iterator<char> {stream},
+      std::istreambuf_iterator<char> {}
+    };
+  };
+  auto cache_header = read(
+    std::string {SUNSHINE_SOURCE_DIR} + "/src/host_sbs_shader_cache.h"
+  );
+  auto estimator = read(
+    std::string {SUNSHINE_SOURCE_DIR} + "/src/video_depth_estimator.cpp"
+  );
+  ASSERT_FALSE(cache_header.empty());
+  ASSERT_FALSE(estimator.empty());
+  cache_header.erase(
+    std::remove(cache_header.begin(), cache_header.end(), '\r'),
+    cache_header.end()
+  );
+  estimator.erase(
+    std::remove(estimator.begin(), estimator.end(), '\r'),
+    estimator.end()
+  );
+
+  const auto specs_begin = cache_header.find(
+    "inline constexpr std::array parallax_v2_producer_specs {"
+  );
+  const auto specs_end = cache_header.find("\n  };", specs_begin);
+  const auto outputs_begin = estimator.find(
+    "const std::array producer_shader_outputs {"
+  );
+  const auto outputs_end = estimator.find("\n      };", outputs_begin);
+  ASSERT_NE(specs_begin, std::string::npos);
+  ASSERT_NE(specs_end, std::string::npos);
+  ASSERT_NE(outputs_begin, std::string::npos);
+  ASSERT_NE(outputs_end, std::string::npos);
+  const auto specs = cache_header.substr(specs_begin, specs_end - specs_begin);
+  const auto outputs = estimator.substr(outputs_begin, outputs_end - outputs_begin);
+
+  const std::array expected_bindings {
+    std::pair {std::string_view {"host_sbs_near_identical_fused_preprocess"},
+               std::string_view {"near_identical_fused_preprocess_cs"}},
+    std::pair {std::string_view {"buffer_to_tex"}, std::string_view {"buffer_to_tex_cs"}},
+    std::pair {std::string_view {"buffer_to_tex_pad"}, std::string_view {"buffer_to_tex_pad_cs"}},
+    std::pair {std::string_view {"depth_minmax_ema"}, std::string_view {"depth_minmax_ema_cs"}},
+    std::pair {std::string_view {"depth_hist"}, std::string_view {"depth_hist_cs"}},
+    std::pair {std::string_view {"depth_scene_cut_evidence"},
+               std::string_view {"depth_scene_cut_evidence_cs"}},
+    std::pair {std::string_view {"depth_scene_cut_resolve"},
+               std::string_view {"depth_scene_cut_resolve_cs"}},
+    std::pair {std::string_view {"depth_coordinate_v2_moments"},
+               std::string_view {"depth_coordinate_v2_moments_cs"}},
+    std::pair {std::string_view {"depth_coordinate_v2_frame_resolve"},
+               std::string_view {"depth_coordinate_v2_frame_resolve_cs"}},
+    std::pair {std::string_view {"depth_coordinate_v2_state_resolve"},
+               std::string_view {"depth_coordinate_v2_state_resolve_cs"}},
+    std::pair {std::string_view {"depth_coordinate_v2_map"},
+               std::string_view {"depth_coordinate_v2_map_cs"}},
+    std::pair {std::string_view {"depth_coordinate_v2_ownership"},
+               std::string_view {"depth_coordinate_v2_ownership_cs"}},
+    std::pair {std::string_view {"depth_coordinate_v2_vertical_limit"},
+               std::string_view {"depth_coordinate_v2_vertical_limit_cs"}},
+    std::pair {std::string_view {"depth_coordinate_v2_limit"},
+               std::string_view {"depth_coordinate_v2_limit_cs"}},
+    std::pair {std::string_view {"host_sbs_ocr_preprocess"},
+               std::string_view {"ocr_preprocess_cs"}},
+    std::pair {std::string_view {"host_sbs_ocr_cells"},
+               std::string_view {"ocr_box_cells_cs"}},
+    std::pair {std::string_view {"host_sbs_ocr_resolve"},
+               std::string_view {"ocr_box_resolve_cs"}},
+    std::pair {std::string_view {"host_sbs_subtitle_locator_resolve"},
+               std::string_view {"subtitle_locator_resolve_cs"}},
+    std::pair {std::string_view {"host_sbs_subtitle_condition"},
+               std::string_view {"subtitle_condition_cs"}},
+  };
+  EXPECT_EQ(
+    static_cast<std::size_t>(std::count(specs.begin(), specs.end(), ',')),
+    expected_bindings.size()
+  );
+  EXPECT_EQ(
+    static_cast<std::size_t>(std::count(outputs.begin(), outputs.end(), ',')),
+    expected_bindings.size()
+  );
+
+  std::size_t spec_cursor = 0u;
+  std::size_t output_cursor = 0u;
+  for (const auto &[spec, output] : expected_bindings) {
+    const auto spec_token = "\n    " + std::string {spec} + ",";
+    const auto output_token =
+      "\n        std::addressof(" + std::string {output} + "),";
+    const auto spec_position = specs.find(spec_token, spec_cursor);
+    const auto output_position = outputs.find(output_token, output_cursor);
+    ASSERT_NE(spec_position, std::string::npos) << spec;
+    ASSERT_NE(output_position, std::string::npos) << output;
+    spec_cursor = spec_position + spec_token.size();
+    output_cursor = output_position + output_token.size();
+  }
+  EXPECT_NE(
+    estimator.find(
+      "producer_shader_outputs.size() ==\n"
+      "        host_sbs_shader_cache::parallax_v2_producer_specs.size()"
+    ),
+    std::string::npos
+  );
 }
 
 TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadback) {

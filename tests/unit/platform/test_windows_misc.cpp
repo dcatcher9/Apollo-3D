@@ -440,12 +440,37 @@ namespace {
     state.record_converted();
     EXPECT_FALSE(state.conversion_pending());
     EXPECT_TRUE(state.presentation_pending());
+    // A busy Present leaves the converted backbuffer as the only pending step.
     EXPECT_TRUE(state.should_process(true, false, false));
     EXPECT_FALSE(state.should_convert(true, false, false));
     state.record_presented();
     EXPECT_FALSE(state.presentation_pending());
     EXPECT_FALSE(state.should_process(true, false, false));
     EXPECT_FALSE(state.should_convert(true, false, false));
+  }
+
+  TEST(WindowsLocalPresenterRetryTest, NewestSourceSupersedesPendingBackbuffer) {
+    platf::dxgi::detail::local_presenter_retry_state_t state;
+    state.observe_source();
+    state.record_converted();
+    ASSERT_TRUE(state.presentation_pending());
+
+    // A newer retained source invalidates the old backbuffer retry and must be converted first.
+    state.observe_source();
+    EXPECT_TRUE(state.conversion_pending());
+    EXPECT_FALSE(state.presentation_pending());
+    EXPECT_TRUE(state.should_process(true, false, false));
+    EXPECT_TRUE(state.should_convert(true, false, false));
+
+    // Re-observing while conversion is already pending is idempotent.
+    state.observe_source();
+    EXPECT_TRUE(state.conversion_pending());
+    EXPECT_FALSE(state.presentation_pending());
+    state.record_converted();
+    EXPECT_FALSE(state.conversion_pending());
+    EXPECT_TRUE(state.presentation_pending());
+    state.record_presented();
+    EXPECT_FALSE(state.should_process(true, false, false));
   }
 
   TEST(WindowsLocalPresenterRetryTest, AsyncDepthRearmsPresentedStaticSource) {

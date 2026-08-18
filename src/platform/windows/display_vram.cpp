@@ -509,7 +509,6 @@ namespace platf::dxgi {
       // worker service lets it finish independently and destroys the unused result there.
       retire_depth_estimator(std::move(depth_estimator));
       retire_depth_estimator_build(std::move(depth_estimator_build));
-      depth_estimator_building = false;
     }
 
     void release_capture_display() noexcept {
@@ -2850,7 +2849,6 @@ namespace platf::dxgi {
     }
 
     void fail_depth_pipeline_flat() {
-      depth_estimator_failed = true;
       host_sbs_renderer = models::fail_host_sbs_renderer_flat(host_sbs_renderer);
       retire_depth_estimator(std::move(depth_estimator));
       for (auto &slot : matched_frame_slots) {
@@ -2889,17 +2887,10 @@ namespace platf::dxgi {
         return true;
       }
 
-      // A failed build streams flat SBS for the rest of this encode device's life instead of
-      // re-kicking a doomed build every frame; a later mode rebuild creates a fresh device.
-      if (depth_estimator_failed) {
-        sbs_dumper.cancel_pending_request();
-        return false;
-      }
-
-      // A build is already in flight: take the result once ready, otherwise keep streaming flat.
-      if (depth_estimator_building) {
+      // An engaged future is the sole owner of an in-flight build. Take the result once ready;
+      // get() invalidates the future, so no parallel flag can drift from the shared state.
+      if (depth_estimator_build.valid()) {
         if (depth_estimator_build.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-          depth_estimator_building = false;
           try {
             depth_estimator = depth_estimator_build.get();
           } catch (const std::exception &e) {
@@ -2980,7 +2971,6 @@ namespace platf::dxgi {
           }
         }
       );
-      depth_estimator_building = true;
       publish_depth_status(3);  // device-specific pipeline initialization (engine is already ready)
       return false;
     }
@@ -3156,7 +3146,7 @@ namespace platf::dxgi {
       const bool producer_active =
         models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer);
       if (!depth_estimator) {
-        if (enabled && (!producer_active || depth_estimator_failed) &&
+        if (enabled && !producer_active &&
             !sbs_telemetry_producer_failure_published) {
           publish_sbs_telemetry_failure();
           sbs_telemetry_producer_failure_published = true;
@@ -6143,8 +6133,6 @@ namespace platf::dxgi {
     // TensorRT context. The process-lifetime tracked worker service owns and joins the worker; the
     // task itself captures owning D3D references, so retiring this future during teardown is safe.
     std::future<std::unique_ptr<models::video_depth_estimator>> depth_estimator_build;
-    bool depth_estimator_building = false;
-    bool depth_estimator_failed = false;  ///< Build threw; stream flat, don't retry on this device.
     unsigned engine_poll_counter = 0;  ///< Rate-limits the startup model-preparation wait warning.
     int sbs_mode = ::video::SBS_OFF;  ///< Host SBS mode for this encode device (set in init_output).
     config::video_t::sbs_t sbs_config {};  ///< Immutable Host SBS settings for this device.

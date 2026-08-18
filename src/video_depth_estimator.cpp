@@ -1684,7 +1684,6 @@ namespace models {
     std::shared_ptr<const raw_model_provenance_t> raw_model_provenance;
     std::shared_ptr<const parallax_v2_shader_provenance_t>
       parallax_v2_shader_provenance;
-    bool parallax_v2_producer_shaders_ready = false;
     bool parallax_v2_producer_active = false;
     bool parallax_v2_producer_failed = false;
 
@@ -4805,56 +4804,41 @@ namespace models {
       // snapshot. Startup prewarm populates these exact cache entries, so the constructor neither
       // recompiles the fused preprocess from its identity-only calibration closure nor compiles the shared
       // analysis roots once as "core" and then again as V2.
-      using producer_shader_e = host_sbs_shader_cache::producer_shader_e;
-      const auto shader_output = [&](const producer_shader_e shader) ->
-        Microsoft::WRL::ComPtr<ID3D11ComputeShader> * {
-        switch (shader) {
-          case producer_shader_e::host_sbs_near_identical_fused_preprocess:
-            return std::addressof(near_identical_fused_preprocess_cs);
-          case producer_shader_e::buffer_to_tex: return std::addressof(buffer_to_tex_cs);
-          case producer_shader_e::buffer_to_tex_pad:
-            return std::addressof(buffer_to_tex_pad_cs);
-          case producer_shader_e::depth_minmax_ema: return std::addressof(depth_minmax_ema_cs);
-          case producer_shader_e::depth_hist: return std::addressof(depth_hist_cs);
-          case producer_shader_e::depth_scene_cut_evidence:
-            return std::addressof(depth_scene_cut_evidence_cs);
-          case producer_shader_e::depth_scene_cut_resolve:
-            return std::addressof(depth_scene_cut_resolve_cs);
-          case producer_shader_e::depth_coordinate_v2_moments:
-            return std::addressof(depth_coordinate_v2_moments_cs);
-          case producer_shader_e::depth_coordinate_v2_frame_resolve:
-            return std::addressof(depth_coordinate_v2_frame_resolve_cs);
-          case producer_shader_e::depth_coordinate_v2_state_resolve:
-            return std::addressof(depth_coordinate_v2_state_resolve_cs);
-          case producer_shader_e::depth_coordinate_v2_map:
-            return std::addressof(depth_coordinate_v2_map_cs);
-          case producer_shader_e::depth_coordinate_v2_ownership:
-            return std::addressof(depth_coordinate_v2_ownership_cs);
-          case producer_shader_e::depth_coordinate_v2_vertical_limit:
-            return std::addressof(depth_coordinate_v2_vertical_limit_cs);
-          case producer_shader_e::depth_coordinate_v2_limit:
-            return std::addressof(depth_coordinate_v2_limit_cs);
-          case producer_shader_e::host_sbs_ocr_preprocess:
-            return std::addressof(ocr_preprocess_cs);
-          case producer_shader_e::host_sbs_ocr_cells:
-            return std::addressof(ocr_box_cells_cs);
-          case producer_shader_e::host_sbs_ocr_resolve:
-            return std::addressof(ocr_box_resolve_cs);
-          case producer_shader_e::host_sbs_subtitle_locator_resolve:
-            return std::addressof(subtitle_locator_resolve_cs);
-          case producer_shader_e::host_sbs_subtitle_condition:
-            return std::addressof(subtitle_condition_cs);
-        }
-        return nullptr;
+      const std::array producer_shader_outputs {
+        std::addressof(near_identical_fused_preprocess_cs),
+        std::addressof(buffer_to_tex_cs),
+        std::addressof(buffer_to_tex_pad_cs),
+        std::addressof(depth_minmax_ema_cs),
+        std::addressof(depth_hist_cs),
+        std::addressof(depth_scene_cut_evidence_cs),
+        std::addressof(depth_scene_cut_resolve_cs),
+        std::addressof(depth_coordinate_v2_moments_cs),
+        std::addressof(depth_coordinate_v2_frame_resolve_cs),
+        std::addressof(depth_coordinate_v2_state_resolve_cs),
+        std::addressof(depth_coordinate_v2_map_cs),
+        std::addressof(depth_coordinate_v2_ownership_cs),
+        std::addressof(depth_coordinate_v2_vertical_limit_cs),
+        std::addressof(depth_coordinate_v2_limit_cs),
+        std::addressof(ocr_preprocess_cs),
+        std::addressof(ocr_box_cells_cs),
+        std::addressof(ocr_box_resolve_cs),
+        std::addressof(subtitle_locator_resolve_cs),
+        std::addressof(subtitle_condition_cs),
       };
+      static_assert(
+        producer_shader_outputs.size() ==
+        host_sbs_shader_cache::parallax_v2_producer_specs.size()
+      );
       bool producer_shaders_ok = producer_sources && shader_identity_matches;
-      for (const auto &binding : host_sbs_shader_cache::parallax_v2_producer_bindings) {
+      for (std::size_t index = 0; index < producer_shader_outputs.size(); ++index) {
         if (!producer_shaders_ok) {
           break;
         }
-        auto *const output = shader_output(binding.id);
-        producer_shaders_ok = output && create_shader(
-          producer_sources, binding.spec, *output);
+        producer_shaders_ok = create_shader(
+          producer_sources,
+          host_sbs_shader_cache::parallax_v2_producer_specs[index],
+          *producer_shader_outputs[index]
+        );
       }
       if (!producer_shaders_ok) {
         parallax_v2_producer_failed = true;
@@ -4890,7 +4874,6 @@ namespace models {
         return;
       }
 
-      parallax_v2_producer_shaders_ready = true;
       parallax_v2_shader_provenance =
         std::make_shared<const parallax_v2_shader_provenance_t>(
           parallax_v2_shader_provenance_t {
@@ -5640,8 +5623,8 @@ namespace models {
       if (parallax_v2_producer_active) {
         return true;
       }
-      if (!parallax_v2_producer_shaders_ready || parallax_v2_producer_failed ||
-          target_w <= 0 || target_h <= 0 || reduce_groups == 0) {
+      if (parallax_v2_producer_failed || target_w <= 0 || target_h <= 0 ||
+          reduce_groups == 0) {
         return false;
       }
       if (!raw_model_provenance || !depth_coordinate_v2::capture_identity_is_calibrated(raw_model_provenance->depth_model, raw_model_provenance->depth_model_url,

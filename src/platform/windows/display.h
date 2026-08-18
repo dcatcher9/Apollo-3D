@@ -137,15 +137,14 @@ namespace platf::dxgi {
     class local_presenter_retry_state_t {
     public:
       constexpr void observe_source() noexcept {
-        conversion_pending_ = true;
+        phase_ = phase_e::conversion_pending;
       }
 
       /** A conversion triggered by an asynchronous pipeline notification can happen after the
        * source was already presented once. Re-arm the output before Present so swapchain
        * backpressure cannot discard that newly rendered result. */
       constexpr void record_converted() noexcept {
-        conversion_pending_ = false;
-        presentation_pending_ = true;
+        phase_ = phase_e::presentation_pending;
       }
 
       [[nodiscard]] constexpr bool should_process(
@@ -154,7 +153,7 @@ namespace platf::dxgi {
         const bool conversion_poll_pending
       ) const noexcept {
         return has_retained_source &&
-               (conversion_pending_ || presentation_pending_ || depth_pipeline_ready ||
+               (phase_ != phase_e::idle || depth_pipeline_ready ||
                 conversion_poll_pending);
       }
 
@@ -164,24 +163,30 @@ namespace platf::dxgi {
         const bool conversion_poll_pending
       ) const noexcept {
         return has_retained_source &&
-               (conversion_pending_ || depth_pipeline_ready || conversion_poll_pending);
+               (phase_ == phase_e::conversion_pending || depth_pipeline_ready ||
+                conversion_poll_pending);
       }
 
       constexpr void record_presented() noexcept {
-        presentation_pending_ = false;
+        phase_ = phase_e::idle;
       }
 
       [[nodiscard]] constexpr bool presentation_pending() const noexcept {
-        return presentation_pending_;
+        return phase_ == phase_e::presentation_pending;
       }
 
       [[nodiscard]] constexpr bool conversion_pending() const noexcept {
-        return conversion_pending_;
+        return phase_ == phase_e::conversion_pending;
       }
 
     private:
-      bool conversion_pending_ = false;
-      bool presentation_pending_ = false;
+      enum class phase_e {
+        idle,
+        conversion_pending,
+        presentation_pending,
+      };
+
+      phase_e phase_ = phase_e::idle;
     };
 
     [[nodiscard]] constexpr bool host_sbs_window_authority_observation_needed(
