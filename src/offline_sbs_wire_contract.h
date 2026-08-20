@@ -16,6 +16,8 @@
 #include <nlohmann/json.hpp>
 
 namespace offline_sbs::wire {
+  inline constexpr std::uint32_t max_raster_dimension = 16384u;
+
   class contract_error: public std::runtime_error {
   public:
     using std::runtime_error::runtime_error;
@@ -23,6 +25,9 @@ namespace offline_sbs::wire {
 
   /** Parse one JSON document while rejecting duplicate object keys. */
   nlohmann::json parse_json_without_duplicate_keys(std::string_view bytes);
+
+  /** Return whether a value is exactly one lowercase SHA-256 hexadecimal digest. */
+  [[nodiscard]] bool valid_sha256_hex(std::string_view value) noexcept;
 
   struct worker_spec_contract_t {
     std::string job_id;

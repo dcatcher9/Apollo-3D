@@ -628,7 +628,7 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
 
   const auto diagnostic_sources = cache::snapshot_sources(
     shader_root,
-    cache::parallax_v2_diagnostic_specs
+    cache::parallax_v2_coordinate_diagnostic_specs
   );
   ASSERT_TRUE(diagnostic_sources);
   const auto coordinate_diagnostic = cache::get(
@@ -886,7 +886,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   ASSERT_TRUE(live_diagnostic_sources);
   EXPECT_EQ(
     models::host_sbs_shader_cache::source_closure_sha256(live_diagnostic_sources),
-    models::host_sbs_shader_cache::parallax_v2_diagnostic_source_closure_sha256
+    models::host_sbs_shader_cache::parallax_v2_live_diagnostic_source_closure_sha256
   );
   const auto flat_fallback_sources =
     models::host_sbs_shader_cache::snapshot_sources(

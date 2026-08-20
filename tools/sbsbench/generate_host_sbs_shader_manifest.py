@@ -67,6 +67,65 @@ def _upper_identifier(value: str) -> str:
     return _identifier(value).upper()
 
 
+def _python_group_identifier(value: str) -> str:
+    return f"{_upper_identifier(value)}_GROUP"
+
+
+def _duplicates(values: Iterable[str]) -> set[str]:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for value in values:
+        if value in seen:
+            duplicates.add(value)
+        seen.add(value)
+    return duplicates
+
+
+def _validate_emitted_identifier_names(
+        spec_names: set[str], group_names: list[str]) -> None:
+    python_spec_identifiers = [_upper_identifier(name) for name in spec_names]
+    python_group_identifiers = [_python_group_identifier(name) for name in group_names]
+    python_spec_names = set(python_spec_identifiers)
+    python_group_names = set(python_group_identifiers)
+    python_reserved_names = {
+        "MANIFEST_SCHEMA", "SOURCE_CLOSURE_SCHEMA", "SHADER_COMPILE_FLAGS",
+        "SOURCE_MACRO_COUNT", "SHADER_SPECS", "CLOSURE_GROUPS",
+    }
+    python_collisions = (
+        _duplicates(python_spec_identifiers) |
+        _duplicates(python_group_identifiers) |
+        (python_spec_names & python_group_names) |
+        ((python_spec_names | python_group_names) & python_reserved_names)
+    )
+    if python_collisions:
+        raise ValueError(
+            "generated Python identifiers collide: " +
+            ", ".join(sorted(python_collisions))
+        )
+
+    cpp_spec_names = set(spec_names)
+    cpp_group_spec_names = {f"{name}_specs" for name in group_names}
+    cpp_group_pin_names = {
+        f"{name}_source_closure_sha256" for name in group_names
+    }
+    cpp_reserved_names = {
+        "source_closure_schema", "shader_compile_flags", "source_macro_count",
+        "shader_spec",
+    }
+    cpp_collisions = (
+        (cpp_spec_names & cpp_group_spec_names) |
+        (cpp_spec_names & cpp_group_pin_names) |
+        (cpp_group_spec_names & cpp_group_pin_names) |
+        ((cpp_spec_names | cpp_group_spec_names | cpp_group_pin_names) &
+         cpp_reserved_names)
+    )
+    if cpp_collisions:
+        raise ValueError(
+            "generated C++ identifiers collide: " +
+            ", ".join(sorted(cpp_collisions))
+        )
+
+
 def _require_exact_keys(value: dict[str, Any], expected: set[str], label: str) -> None:
     actual = set(value)
     if actual != expected:
@@ -157,6 +216,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         )
     if referenced_specs != spec_names:
         raise ValueError(f"unreferenced shader specs: {sorted(spec_names - referenced_specs)}")
+    _validate_emitted_identifier_names(spec_names, group_names)
 
 
 def spec_index(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -296,7 +356,6 @@ def render_cpp(manifest: dict[str, Any]) -> str:
         "",
         "#include <array>",
         "#include <cstdint>",
-        "#include <span>",
         "#include <string_view>",
         "",
         "namespace models::host_sbs_shader_cache {",
@@ -330,29 +389,6 @@ def render_cpp(manifest: dict[str, Any]) -> str:
             "",
         ])
     lines.extend([
-        "  struct closure_group_view {",
-        "    std::string_view name;",
-        "    std::span<const shader_spec> specs;",
-        "    std::string_view source_closure_sha256;",
-        "  };",
-        "",
-    ])
-    for group in manifest["groups"]:
-        name = group["name"]
-        lines.extend([
-            f"  inline constexpr closure_group_view {name}_closure_group {{",
-            f"    {json.dumps(name)},",
-            f"    std::span<const shader_spec> {{{name}_specs}},",
-            f"    {name}_source_closure_sha256,",
-            "  };",
-        ])
-    lines.extend([
-        "",
-        "  inline constexpr std::array closure_groups {",
-    ])
-    lines.extend(f"    {group['name']}_closure_group," for group in manifest["groups"])
-    lines.extend([
-        "  };",
         "}  // namespace models::host_sbs_shader_cache",
         "",
     ])
@@ -373,11 +409,13 @@ def render_python(manifest: dict[str, Any]) -> str:
         f"SHADER_COMPILE_FLAGS = 0x{manifest['shader_compile_flags']:08X}",
         f"SOURCE_MACRO_COUNT = {manifest['source_macro_count']}",
         "",
+        "",
         "@dataclass(frozen=True)",
         "class ShaderSpec:",
         "    source_file: str",
         "    source_entrypoint: str",
         "    source_target: str",
+        "",
         "",
         "@dataclass(frozen=True)",
         "class ClosureGroup:",
@@ -385,6 +423,7 @@ def render_python(manifest: dict[str, Any]) -> str:
         "    description: str",
         "    specs: Tuple[ShaderSpec, ...]",
         "    source_closure_sha256: str",
+        "",
         "",
     ]
     for spec in manifest["specs"]:
@@ -402,11 +441,13 @@ def render_python(manifest: dict[str, Any]) -> str:
     )
     lines.extend(["}", ""])
     for group in manifest["groups"]:
-        upper = _upper_identifier(group["name"])
+        upper = _python_group_identifier(group["name"])
         lines.extend([
             f"{upper} = ClosureGroup(",
             f"    name={json.dumps(group['name'])},",
-            f"    description={json.dumps(group['description'])},",
+            "    description=(",
+            f"        {json.dumps(group['description'])}",
+            "    ),",
             "    specs=(",
         ])
         lines.extend(f"        {_upper_identifier(member)}," for member in group["specs"])
@@ -418,7 +459,7 @@ def render_python(manifest: dict[str, Any]) -> str:
         ])
     lines.append("CLOSURE_GROUPS: Dict[str, ClosureGroup] = {")
     lines.extend(
-        f"    {json.dumps(group['name'])}: {_upper_identifier(group['name'])},"
+        f"    {json.dumps(group['name'])}: {_python_group_identifier(group['name'])},"
         for group in manifest["groups"]
     )
     lines.extend(["}", ""])

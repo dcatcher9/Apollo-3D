@@ -92,6 +92,30 @@ class HostSbsShaderManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unreferenced shader specs"):
             generator.validate_manifest(orphaned)
 
+    def test_generated_python_names_keep_specs_and_groups_distinct(self):
+        manifest = generator.load_manifest()
+        python_view = generator.render_python(manifest)
+        self.assertIn(
+            "PARALLAX_V2_LIVE_RENDERER = ShaderSpec(",
+            python_view,
+        )
+        self.assertIn(
+            "PARALLAX_V2_LIVE_RENDERER_GROUP = ClosureGroup(",
+            python_view,
+        )
+
+        colliding = copy.deepcopy(manifest)
+        trace_spec = next(
+            spec for spec in colliding["specs"]
+            if spec["name"] == "host_sbs_gpu_trace"
+        )
+        trace_spec["name"] = "gpu_trace_group"
+        generator.closure_group(colliding, "gpu_trace")["specs"] = [
+            "gpu_trace_group",
+        ]
+        with self.assertRaisesRegex(ValueError, "generated Python identifiers collide"):
+            generator.validate_manifest(colliding)
+
     def test_order_or_pin_change_requires_closure_refresh(self):
         manifest = generator.load_manifest()
         reordered = copy.deepcopy(manifest)

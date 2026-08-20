@@ -860,7 +860,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       }
       const auto diagnostic_sources = shader_cache::snapshot_sources(
         shader_root,
-        shader_cache::parallax_v2_diagnostic_specs
+        shader_cache::parallax_v2_coordinate_diagnostic_specs
       );
       const auto diagnostic_bytecode = diagnostic_sources ?
         shader_cache::get(

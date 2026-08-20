@@ -6316,7 +6316,7 @@ namespace models {
       if (!depth_coordinate_v2_coordinate_diagnostic_cs) {
         const auto diagnostic_sources = host_sbs_shader_cache::snapshot_sources(
           shader_root,
-          host_sbs_shader_cache::parallax_v2_diagnostic_specs
+          host_sbs_shader_cache::parallax_v2_coordinate_diagnostic_specs
         );
         if (!diagnostic_sources || !create_shader(diagnostic_sources, host_sbs_shader_cache::depth_coordinate_v2_coordinate_diagnostic, depth_coordinate_v2_coordinate_diagnostic_cs)) {
           if (!depth_coordinate_v2_coordinate_diagnostic_error_logged) {
@@ -6877,7 +6877,7 @@ namespace models {
       // are ordered on the owning immediate context; there is no CPU readback or synchronization.
       const std::uint32_t raw_identity[4] = {0xFFFFFFFFu, 0u, 0u, 0u};
       const float zero4[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-      const std::uint32_t zero_uint4[4] = {0u, 0u, 0u, 0u};
+      const UINT zero_uint4[4] = {0u, 0u, 0u, 0u};
       const std::array<std::uint32_t, 256> zero_hist {};
       const std::array<std::uint32_t, 10> zero_cut_evidence {};
       if (minmax_raw_buf) {
@@ -6906,7 +6906,7 @@ namespace models {
         );
       }
       if (tensor_previous_input_uav) {
-        context->ClearUnorderedAccessViewFloat(tensor_previous_input_uav.Get(), zero4);
+        context->ClearUnorderedAccessViewUint(tensor_previous_input_uav.Get(), zero_uint4);
       }
       if (near_identical_history_owner.uav) {
         context->ClearUnorderedAccessViewUint(
@@ -6914,7 +6914,9 @@ namespace models {
         );
       }
       if (previous_appearance_ordinal_uav) {
-        context->ClearUnorderedAccessViewFloat(previous_appearance_ordinal_uav.Get(), zero4);
+        context->ClearUnorderedAccessViewUint(
+          previous_appearance_ordinal_uav.Get(), zero_uint4
+        );
       }
       if (depth_uav) {
         context->ClearUnorderedAccessViewFloat(depth_uav.Get(), zero4);
@@ -6951,6 +6953,12 @@ namespace models {
       for (auto *uav : {
              depth_coordinate_v2_partials_uav.Get(),
              depth_coordinate_v2_frame_stats_uav.Get(),
+           }) {
+        if (uav) {
+          context->ClearUnorderedAccessViewUint(uav, zero_uint4);
+        }
+      }
+      for (auto *uav : {
              depth_coordinate_v2_coordinate_uav.Get(),
              depth_coordinate_v2_candidate_uav.Get(),
              depth_coordinate_v2_ownership_uav.Get(),
@@ -7661,13 +7669,13 @@ namespace models {
         // initialized storage, including the first force/bootstrap frame. Force mode exits before
         // reading history; this clear remains defense in depth and defines first compare state.
         const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        context->ClearUnorderedAccessViewFloat(
-          tensor_previous_input_uav.Get(), clear_color
+        const UINT clear_uint[4] = {0u, 0u, 0u, 0u};
+        context->ClearUnorderedAccessViewUint(
+          tensor_previous_input_uav.Get(), clear_uint
         );
         context->ClearUnorderedAccessViewFloat(depth_uav.Get(), clear_color);
         context->ClearUnorderedAccessViewFloat(depth_previous_uav.Get(), clear_color);
         context->ClearUnorderedAccessViewFloat(depth_cut_history_uav.Get(), clear_color);
-        const UINT clear_uint[4] = {0u, 0u, 0u, 0u};
         context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), clear_uint);
         context->ClearUnorderedAccessViewUint(tensor_exclusion_uav.Get(), clear_uint);
         context->ClearUnorderedAccessViewUint(tensor_previous_exclusion_uav.Get(), clear_uint);

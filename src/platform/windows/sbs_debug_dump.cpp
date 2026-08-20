@@ -5114,7 +5114,7 @@ namespace platf::sbs_debug {
                               {"source_file", std::string {models::host_sbs_shader_cache::parallax_v2_live_renderer.filename}},
                               {"entrypoint", std::string {models::host_sbs_shader_cache::parallax_v2_live_renderer.entrypoint}},
                               {"target", std::string {models::host_sbs_shader_cache::parallax_v2_live_renderer.target}},
-                              {"diagnostic_source_closure_sha256", std::string {models::host_sbs_shader_cache::parallax_v2_diagnostic_source_closure_sha256}},
+                              {"diagnostic_source_closure_sha256", std::string {models::host_sbs_shader_cache::parallax_v2_live_diagnostic_source_closure_sha256}},
                               {"mapping_source_file", std::string {models::host_sbs_shader_cache::parallax_v2_live_mapping.filename}},
                               {"mapping_entrypoint", std::string {models::host_sbs_shader_cache::parallax_v2_live_mapping.entrypoint}},
                               {"mask_source_file", std::string {models::host_sbs_shader_cache::parallax_v2_live_mask.filename}},

@@ -38,8 +38,8 @@ GPU_TRACE_CONDITION_WORD_COUNT = 6
 GPU_TRACE_RING_WORD_COUNT = (
     GPU_TRACE_HEADER_WORD_COUNT + GPU_TRACE_CAPACITY * GPU_TRACE_RECORD_WORD_COUNT)
 GPU_TRACE_RING_BYTE_COUNT = GPU_TRACE_RING_WORD_COUNT * 4
-GPU_TRACE_SOURCE_CLOSURE_SHA256 = shader_manifest.GPU_TRACE.source_closure_sha256
-_GPU_TRACE_SPEC = shader_manifest.GPU_TRACE.specs[0]
+GPU_TRACE_SOURCE_CLOSURE_SHA256 = shader_manifest.GPU_TRACE_GROUP.source_closure_sha256
+_GPU_TRACE_SPEC = shader_manifest.GPU_TRACE_GROUP.specs[0]
 GPU_TRACE_SHADER_SPEC = (
     _GPU_TRACE_SPEC.source_file,
     _GPU_TRACE_SPEC.source_entrypoint,
@@ -143,9 +143,9 @@ WINDOW_REGION_AUTHORITY_KINDS = frozenset({"chromium-video", "foreground-client"
 SHADOW_STATE_DUMP_SCHEMA = 16
 SHADOW_FRAME_STATS_DUMP_SCHEMA = 2
 LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
-    shader_manifest.PARALLAX_V2_LIVE_RENDERER.source_closure_sha256)
+    shader_manifest.PARALLAX_V2_LIVE_RENDERER_GROUP.source_closure_sha256)
 DIAGNOSTIC_SOURCE_CLOSURE_SHA256 = (
-    shader_manifest.PARALLAX_V2_LIVE_DIAGNOSTIC.source_closure_sha256)
+    shader_manifest.PARALLAX_V2_LIVE_DIAGNOSTIC_GROUP.source_closure_sha256)
 _CONTRACT = coordinate_contract.load_contract()
 _CONTRACT_TAG = generator.contract_tag(_CONTRACT)
 _STATE_FIELDS = tuple(_CONTRACT["shadow_state"]["fields"])
@@ -3140,6 +3140,7 @@ def validate_gpu_trace_ring(
                 provisional_target = _float32_bits(
                     locator[SUBTITLE_LOCATOR_PROVISIONAL_TARGET_WORD])
                 provisional_fade = locator[SUBTITLE_LOCATOR_PROVISIONAL_FADE_WORD]
+
                 def trace_rectangle(offset: int) -> Dict[str, int]:
                     return {
                         "left": locator[offset + 0], "top": locator[offset + 1],

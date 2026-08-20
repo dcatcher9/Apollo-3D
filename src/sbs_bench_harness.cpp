@@ -1393,63 +1393,100 @@ namespace sbs_bench {
       std::size_t frame_count = 0;
     };
 
-    struct resolved_sbs_geometry {
-      UINT eye_width = 0;
-      UINT eye_height = 0;
-      UINT sbs_width = 0;
-      UINT sbs_height = 0;
-    };
+  }  // namespace
 
-    resolved_sbs_geometry resolve_sbs_geometry(
-      UINT source_width,
-      UINT source_height,
-      int requested_eye_width,
-      int requested_eye_height,
-      double output_scale,
-      int max_output_width
+  namespace detail {
+    std::optional<resolved_sbs_geometry> resolve_sbs_geometry(
+      const std::uint32_t source_width,
+      const std::uint32_t source_height,
+      const int requested_eye_width,
+      const int requested_eye_height,
+      const double output_scale,
+      const int max_output_width,
+      std::string &error
     ) {
-      const int eye_height_target =
-        requested_eye_height > 0 ?
-          requested_eye_height :
-          std::max(
-            2,
-            static_cast<int>(std::lround(source_height * output_scale))
-          );
-      const float aspect =
-        static_cast<float>(source_width) / source_height;
-      int eye_width =
-        requested_eye_width > 0 ?
-          requested_eye_width :
-          (requested_eye_height > 0 ?
-             std::max(
-               1,
-               static_cast<int>(std::lround(eye_height_target * aspect))
-             ) :
-             std::max(
-               1,
-               static_cast<int>(std::lround(source_width * output_scale))
-             ));
-      int eye_height = eye_height_target;
-      if (requested_eye_width > 0 && requested_eye_height <= 0) {
-        eye_height =
-          std::max(1, static_cast<int>(std::lround(eye_width / aspect)));
+      constexpr std::int64_t max_wire_raster_dimension =
+        offline_sbs::wire::max_raster_dimension;
+      static_assert(
+        max_wire_raster_dimension == D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION,
+        "offline SBS wire and D3D11 raster bounds must agree"
+      );
+      error.clear();
+      if (source_width == 0 || source_height == 0 ||
+          source_width > max_wire_raster_dimension ||
+          source_height > max_wire_raster_dimension ||
+          !std::isfinite(output_scale) || output_scale <= 0.0 || output_scale > 4.0 ||
+          max_output_width <= 0) {
+        error = "source dimensions or output controls are invalid";
+        return std::nullopt;
       }
-      if (2 * eye_width > max_output_width) {
-        const double scale =
-          static_cast<double>(max_output_width) / (2 * eye_width);
-        eye_width = std::max(1, max_output_width / 2);
-        eye_height = std::max(
-          2,
-          static_cast<int>(std::lround(eye_height_target * scale)) & ~1
+
+      const auto rounded_at_least = [](const double value, const std::int64_t minimum) {
+        return std::max(minimum, static_cast<std::int64_t>(std::llround(value)));
+      };
+      const std::int64_t eye_height_target =
+        requested_eye_height > 0 ?
+          static_cast<std::int64_t>(requested_eye_height) :
+          rounded_at_least(source_height * output_scale, 2);
+      // Preserve the legacy float aspect/rounding contract used by both rendering and cache
+      // metadata; only the integer range used to carry intermediate dimensions is widened.
+      const float source_aspect =
+        static_cast<float>(source_width) / static_cast<float>(source_height);
+      std::int64_t eye_width =
+        requested_eye_width > 0 ?
+          static_cast<std::int64_t>(requested_eye_width) :
+          (requested_eye_height > 0 ?
+             rounded_at_least(
+               static_cast<float>(eye_height_target) * source_aspect,
+               1
+             ) :
+             rounded_at_least(source_width * output_scale, 1));
+      std::int64_t eye_height = eye_height_target;
+      if (requested_eye_width > 0 && requested_eye_height <= 0) {
+        eye_height = rounded_at_least(
+          static_cast<float>(eye_width) / source_aspect,
+          1
         );
       }
-      return {
-        static_cast<UINT>(eye_width),
-        static_cast<UINT>(eye_height),
-        static_cast<UINT>(2 * eye_width),
-        static_cast<UINT>(eye_height),
+
+      if (2 * eye_width > static_cast<std::int64_t>(max_output_width)) {
+        const double scale =
+          static_cast<double>(max_output_width) / (2.0 * eye_width);
+        eye_width = std::max<std::int64_t>(1, max_output_width / 2);
+        eye_height = std::max<std::int64_t>(
+          2,
+          static_cast<std::int64_t>(std::llround(eye_height_target * scale)) & ~1ll
+        );
+      }
+
+      const std::int64_t sbs_width = 2 * eye_width;
+      if (eye_width <= 0 || eye_height <= 0 ||
+          sbs_width > max_wire_raster_dimension ||
+          eye_height > max_wire_raster_dimension) {
+        error =
+          "resolved packed SBS geometry " + std::to_string(sbs_width) + "x" +
+          std::to_string(eye_height) + " exceeds the authenticated " +
+          std::to_string(max_wire_raster_dimension) + "x" +
+          std::to_string(max_wire_raster_dimension) + " bound";
+        return std::nullopt;
+      }
+
+      const float eye_aspect =
+        static_cast<float>(eye_width) / static_cast<float>(eye_height);
+      return resolved_sbs_geometry {
+        .eye_width = static_cast<std::uint32_t>(eye_width),
+        .eye_height = static_cast<std::uint32_t>(eye_height),
+        .sbs_width = static_cast<std::uint32_t>(sbs_width),
+        .sbs_height = static_cast<std::uint32_t>(eye_height),
+        .content_scale_x =
+          eye_aspect > source_aspect ? source_aspect / eye_aspect : 1.0f,
+        .content_scale_y =
+          eye_aspect < source_aspect ? eye_aspect / source_aspect : 1.0f,
       };
     }
+  }  // namespace detail
+
+  namespace {
 
     bool publish_scene_cache_contract(const fs::path &directory,
                                       const scene_cache_metadata &metadata,
@@ -1461,49 +1498,55 @@ namespace sbs_bench {
       // |value| <= the pointwise soft-container limit), and "state" carries the 12-word ParallaxState the
       // live renderer authenticates per pixel. Legacy pop/subject/adaptive knobs are gone; the
       // renderer identity and producer closure make the geometry provenance explicit.
-      const auto contract = offline_sbs::wire::to_json(
-        offline_sbs::wire::scene_cache_contract_t {
-          .status = std::string {status},
-          .source = {
-            .width = metadata.source_width,
-            .height = metadata.source_height,
-            .frame_format = metadata.input_frame_format,
-            .texture_format = metadata.input_texture_format,
-            .color_space = metadata.input_color_space,
-          },
-          .depth_width = metadata.depth_width,
-          .depth_height = metadata.depth_height,
-          .render = {
-            .model = metadata.model_name,
-            .model_url = metadata.model_url,
-            .pop_strength = metadata.pop_strength,
-            .simulate_hdr = metadata.simulate_hdr,
-            .hdr_scale = metadata.hdr_scale,
-            .depth_reuse_interval = metadata.depth_reuse_interval,
-            .requested_eye_width = metadata.eye_width,
-            .requested_eye_height = metadata.eye_height,
-            .output_scale = metadata.output_scale,
-            .resolved_max_output_width = metadata.max_output_width,
-          },
-          .packed_sbs = {
-            .eye_width = metadata.output_eye_width,
-            .eye_height = metadata.output_eye_height,
-            .width = metadata.output_sbs_width,
-            .height = metadata.output_sbs_height,
-            .texture_format = metadata.packed_texture_format,
-            .frame_format = metadata.output_frame_format,
-            .file_extension = metadata.output_file_extension,
-          },
-          .processed_count = processed_count,
-          .frame_count = status == "complete" ?
-                           std::optional<std::uint64_t> {metadata.frame_count} :
-                           std::nullopt,
-        }
-      );
-      return publish_json_atomically(
-        directory / "scene_cache_contract.json",
-        nlohmann::ordered_json(contract)
-      );
+      try {
+        const auto contract = offline_sbs::wire::to_json(
+          offline_sbs::wire::scene_cache_contract_t {
+            .status = std::string {status},
+            .source = {
+              .width = metadata.source_width,
+              .height = metadata.source_height,
+              .frame_format = metadata.input_frame_format,
+              .texture_format = metadata.input_texture_format,
+              .color_space = metadata.input_color_space,
+            },
+            .depth_width = metadata.depth_width,
+            .depth_height = metadata.depth_height,
+            .render = {
+              .model = metadata.model_name,
+              .model_url = metadata.model_url,
+              .pop_strength = metadata.pop_strength,
+              .simulate_hdr = metadata.simulate_hdr,
+              .hdr_scale = metadata.hdr_scale,
+              .depth_reuse_interval = metadata.depth_reuse_interval,
+              .requested_eye_width = metadata.eye_width,
+              .requested_eye_height = metadata.eye_height,
+              .output_scale = metadata.output_scale,
+              .resolved_max_output_width = metadata.max_output_width,
+            },
+            .packed_sbs = {
+              .eye_width = metadata.output_eye_width,
+              .eye_height = metadata.output_eye_height,
+              .width = metadata.output_sbs_width,
+              .height = metadata.output_sbs_height,
+              .texture_format = metadata.packed_texture_format,
+              .frame_format = metadata.output_frame_format,
+              .file_extension = metadata.output_file_extension,
+            },
+            .processed_count = processed_count,
+            .frame_count = status == "complete" ?
+                             std::optional<std::uint64_t> {metadata.frame_count} :
+                             std::nullopt,
+          }
+        );
+        return publish_json_atomically(
+          directory / "scene_cache_contract.json",
+          nlohmann::ordered_json(contract)
+        );
+      } catch (const offline_sbs::wire::contract_error &exception) {
+        BOOST_LOG(error) << "sbs-bench: invalid scene cache wire contract: "
+                         << exception.what();
+        return false;
+      }
     }
 
     bool read_exact_file(const fs::path &path, void *data, std::size_t size) {
@@ -3461,6 +3504,7 @@ namespace sbs_bench {
     std::size_t scene_plan_index = 0;
     UINT source_width = 0;
     UINT source_height = 0;
+    std::optional<detail::resolved_sbs_geometry> resolved_output_geometry;
     // Match the depth-override clip layout so a root may hold several clips without filename
     // collisions. External direct replay reads parallax_<id> plus order_<id>.
     const fs::path direct_geometry_root = fs::path(o.direct_parallax_root);
@@ -3588,6 +3632,23 @@ namespace sbs_bench {
                          << " is " << frame_width << "x" << frame_height;
         return 9;
       }
+      if (!resolved_output_geometry) {
+        std::string geometry_error;
+        resolved_output_geometry = detail::resolve_sbs_geometry(
+          source_width,
+          source_height,
+          o.eye_w,
+          o.eye_h,
+          o.output_scale,
+          max_width,
+          geometry_error
+        );
+        if (!resolved_output_geometry) {
+          BOOST_LOG(error) << "sbs-bench: invalid resolved output geometry: "
+                           << geometry_error;
+          return replay_mode ? 6 : 2;
+        }
+      }
       const std::string output_id =
         replay_mode ? follow_frame_id(global_sequence) :
                       frame_id(current_frame, fi);
@@ -3639,28 +3700,14 @@ namespace sbs_bench {
       // size, not a fixed constant, drives eval cost); --eye-h pins a specific output height.
       // The width is still capped at max_encode_width like the live path.
       if (o.artifacts != artifact_mode_e::adaptive && !sbs_tex) {
-        int eh_target = o.eye_h > 0 ? o.eye_h :
-                                      std::max(2, (int) std::lround((double) frame_height * o.output_scale));
-        float aspect = (float) frame_width / (float) frame_height;
-        int eye_w = o.eye_w > 0 ? o.eye_w : (o.eye_h > 0 ? std::max(1, (int) std::lround(eh_target * aspect)) : std::max(1, (int) std::lround((double) frame_width * o.output_scale)));
-        int eye_h = eh_target;
-        if (o.eye_w > 0 && o.eye_h <= 0) {
-          eye_h = std::max(1, (int) std::lround(eye_w / aspect));
-        }
-        if (2 * eye_w > max_width) {
-          const double scale = (double) max_width / (double) (2 * eye_w);
-          eye_w = std::max(1, max_width / 2);
-          eye_h = std::max(2, ((int) std::lround(eh_target * scale)) & ~1);
-        }
-        sbs_w = (UINT) (2 * eye_w);
-        sbs_h = (UINT) eye_h;
+        const auto &geometry = *resolved_output_geometry;
+        sbs_w = geometry.sbs_width;
+        sbs_h = geometry.sbs_height;
         if (replay_mode &&
             (sbs_w != replay_cache_metadata.output_sbs_width ||
              sbs_h != replay_cache_metadata.output_sbs_height ||
-             static_cast<UINT>(eye_w) !=
-               replay_cache_metadata.output_eye_width ||
-             static_cast<UINT>(eye_h) !=
-               replay_cache_metadata.output_eye_height)) {
+             geometry.eye_width != replay_cache_metadata.output_eye_width ||
+             geometry.eye_height != replay_cache_metadata.output_eye_height)) {
           BOOST_LOG(error)
             << "sbs-bench: resolved replay SBS raster does not match cache contract: "
             << sbs_w << 'x' << sbs_h << " vs "
@@ -3668,14 +3715,11 @@ namespace sbs_bench {
             << replay_cache_metadata.output_sbs_height;
           return 6;
         }
-        const float eye_aspect = (float) eye_w / (float) eye_h;
-        const float content_scale_x = eye_aspect > aspect ? aspect / eye_aspect : 1.0f;
-        const float content_scale_y = eye_aspect < aspect ? eye_aspect / aspect : 1.0f;
         // Bench/replay stays full-frame, so ROI is disabled. Upload the exact shared 48-byte
         // production b2 ABI, including its dormant tensor-content register.
         const auto repro_geometry = models::make_host_sbs_v2_full_frame_geometry(
-          content_scale_x,
-          content_scale_y
+          geometry.content_scale_x,
+          geometry.content_scale_y
         );
         repro_cb = const_buffer(dev.Get(), repro_geometry);
         if (!repro_cb) {
@@ -3740,12 +3784,12 @@ namespace sbs_bench {
             << "  \"schema\": 1,\n"
             << "  \"width\": " << sbs_w << ",\n"
             << "  \"height\": " << sbs_h << ",\n"
-            << "  \"eye_width\": " << eye_w << ",\n"
-            << "  \"eye_height\": " << eye_h << ",\n"
+            << "  \"eye_width\": " << geometry.eye_width << ",\n"
+            << "  \"eye_height\": " << geometry.eye_height << ",\n"
             << "  \"source_width\": " << frame_width << ",\n"
             << "  \"source_height\": " << frame_height << ",\n"
-            << "  \"content_scale_x\": " << content_scale_x << ",\n"
-            << "  \"content_scale_y\": " << content_scale_y << ",\n"
+            << "  \"content_scale_x\": " << geometry.content_scale_x << ",\n"
+            << "  \"content_scale_y\": " << geometry.content_scale_y << ",\n"
             << "  \"dtype\": \"float32-le\",\n"
             << "  \"layout\": \"row-major\",\n"
             << "  \"channels\": [\n"
@@ -4194,14 +4238,7 @@ namespace sbs_bench {
             scene_cache_metadata_value.eye_height = o.eye_h;
             scene_cache_metadata_value.output_scale = o.output_scale;
             scene_cache_metadata_value.max_output_width = max_width;
-            const auto cache_geometry = resolve_sbs_geometry(
-              source_width,
-              source_height,
-              o.eye_w,
-              o.eye_h,
-              o.output_scale,
-              max_width
-            );
+            const auto &cache_geometry = *resolved_output_geometry;
             scene_cache_metadata_value.output_eye_width =
               cache_geometry.eye_width;
             scene_cache_metadata_value.output_eye_height =
@@ -5191,55 +5228,14 @@ namespace sbs_bench {
                          << completed_frame_count << " required SBS frames";
         return 8;
       }
+      if (!resolved_output_geometry) {
+        BOOST_LOG(error) << "sbs-bench: completed without authenticated output geometry";
+        return 8;
+      }
 
       // Adaptive-only runs deliberately skip allocating/compositing the packed render target, but
-      // their contract still needs to freeze the geometry that the same resolved configuration
-      // would render. Conversion runs attest the dimensions actually allocated above.
-      UINT contract_eye_width = sbs_w / 2u;
-      UINT contract_eye_height = sbs_h;
-      UINT contract_sbs_width = sbs_w;
-      UINT contract_sbs_height = sbs_h;
-      if (o.artifacts == artifact_mode_e::adaptive &&
-          source_width > 0u && source_height > 0u) {
-        const int requested_eye_height =
-          o.eye_h > 0 ?
-            o.eye_h :
-            std::max(2, (int) std::lround((double) source_height * o.output_scale));
-        const float source_aspect = (float) source_width / (float) source_height;
-        int resolved_eye_width =
-          o.eye_w > 0 ?
-            o.eye_w :
-            (o.eye_h > 0 ?
-               std::max(1, (int) std::lround(requested_eye_height * source_aspect)) :
-               std::max(1, (int) std::lround((double) source_width * o.output_scale)));
-        int resolved_eye_height = requested_eye_height;
-        if (o.eye_w > 0 && o.eye_h <= 0) {
-          resolved_eye_height =
-            std::max(1, (int) std::lround(resolved_eye_width / source_aspect));
-        }
-        if (2 * resolved_eye_width > max_width) {
-          const double scale = (double) max_width / (double) (2 * resolved_eye_width);
-          resolved_eye_width = std::max(1, max_width / 2);
-          resolved_eye_height =
-            std::max(2, ((int) std::lround(requested_eye_height * scale)) & ~1);
-        }
-        contract_eye_width = (UINT) resolved_eye_width;
-        contract_eye_height = (UINT) resolved_eye_height;
-        contract_sbs_width = 2u * contract_eye_width;
-        contract_sbs_height = contract_eye_height;
-      }
-      float contract_content_scale_x = 0.0f;
-      float contract_content_scale_y = 0.0f;
-      if (source_width > 0u && source_height > 0u &&
-          contract_eye_width > 0u && contract_eye_height > 0u) {
-        const float source_aspect = (float) source_width / (float) source_height;
-        const float eye_aspect =
-          (float) contract_eye_width / (float) contract_eye_height;
-        contract_content_scale_x =
-          eye_aspect > source_aspect ? source_aspect / eye_aspect : 1.0f;
-        contract_content_scale_y =
-          eye_aspect < source_aspect ? eye_aspect / source_aspect : 1.0f;
-      }
+      // they attest the same early-authenticated geometry used by conversion and scene caching.
+      const auto &contract_geometry = *resolved_output_geometry;
       const std::string input_frame_format =
         pfm_input ?
           "linear-scRGB-f32-pfm" :
@@ -5333,12 +5329,12 @@ namespace sbs_bench {
         .follow_native_input_deletion = false,
         .follow_atomic_sbs_publication =
           (o.follow || replay_mode) && o.artifacts == artifact_mode_e::conversion,
-        .output_eye_width = contract_eye_width,
-        .output_eye_height = contract_eye_height,
-        .output_sbs_width = contract_sbs_width,
-        .output_sbs_height = contract_sbs_height,
-        .content_scale_x = contract_content_scale_x,
-        .content_scale_y = contract_content_scale_y,
+        .output_eye_width = contract_geometry.eye_width,
+        .output_eye_height = contract_geometry.eye_height,
+        .output_sbs_width = contract_geometry.sbs_width,
+        .output_sbs_height = contract_geometry.sbs_height,
+        .content_scale_x = contract_geometry.content_scale_x,
+        .content_scale_y = contract_geometry.content_scale_y,
         .scene_cache_write = !o.scene_cache.empty(),
         .scene_cache_replay = replay_mode,
         .scene_cache_contract_schema = !o.scene_cache.empty() || replay_mode ?
@@ -5424,41 +5420,47 @@ namespace sbs_bench {
           .sha256 = observation_timeline_sha256,
         };
       }
-      const auto whole_clip_contract = offline_sbs::wire::to_json(
-        offline_sbs::wire::whole_clip_contract_t {
-          .observation_timeline = std::move(observation_timeline),
-          .artifact_mode = std::string {artifact_mode_name(o.artifacts)},
-          .inference_mode = replay_mode ?
-                              "scene-cache-replay" : "single-pass-tensorrt",
-          .depth_inference_enabled = !replay_mode,
-          .scheduled_depth_update_count = replay_mode ? 0u : tensorrt_enqueue_count,
-          .tensorrt_enqueue_count = tensorrt_enqueue_count,
-          .depth_provenance = replay_mode ?
-            "scene-cache-contract-schema-" +
-              std::to_string(offline_sbs::scene_cache_contract_schema) +
-              ":signed-final-parallax-R32_FLOAT" :
-            std::string {"video_depth_estimator"},
-          .pipeline_state_provenance = replay_mode ?
-            "scene-cache-contract-schema-" +
-              std::to_string(offline_sbs::scene_cache_contract_schema) +
-              ":parallax-state-12-words" :
-            std::string {"video_depth_estimator:cut-and-health-state-32-words"},
-          .model = model.name,
-          .source_frame_count = completed_frame_count,
-          .source_width = source_width,
-          .source_height = source_height,
-          .source_first_sequence = follow_first_sequence,
-          .depth_reuse_interval = effective_depth_every,
-          .resolved_runtime = std::move(resolved_runtime),
-          .adaptive_state = std::move(adaptive_state),
-          .sbs = sbs_contract,
+      try {
+        const auto whole_clip_contract = offline_sbs::wire::to_json(
+          offline_sbs::wire::whole_clip_contract_t {
+            .observation_timeline = std::move(observation_timeline),
+            .artifact_mode = std::string {artifact_mode_name(o.artifacts)},
+            .inference_mode = replay_mode ?
+                                "scene-cache-replay" : "single-pass-tensorrt",
+            .depth_inference_enabled = !replay_mode,
+            .scheduled_depth_update_count = replay_mode ? 0u : tensorrt_enqueue_count,
+            .tensorrt_enqueue_count = tensorrt_enqueue_count,
+            .depth_provenance = replay_mode ?
+              "scene-cache-contract-schema-" +
+                std::to_string(offline_sbs::scene_cache_contract_schema) +
+                ":signed-final-parallax-R32_FLOAT" :
+              std::string {"video_depth_estimator"},
+            .pipeline_state_provenance = replay_mode ?
+              "scene-cache-contract-schema-" +
+                std::to_string(offline_sbs::scene_cache_contract_schema) +
+                ":parallax-state-12-words" :
+              std::string {"video_depth_estimator:cut-and-health-state-32-words"},
+            .model = model.name,
+            .source_frame_count = completed_frame_count,
+            .source_width = source_width,
+            .source_height = source_height,
+            .source_first_sequence = follow_first_sequence,
+            .depth_reuse_interval = effective_depth_every,
+            .resolved_runtime = std::move(resolved_runtime),
+            .adaptive_state = std::move(adaptive_state),
+            .sbs = sbs_contract,
+          }
+        );
+        if (!publish_json_atomically(
+              fs::path(o.out) / "whole_clip_contract.json",
+              nlohmann::ordered_json(whole_clip_contract)
+            )) {
+          BOOST_LOG(error) << "sbs-bench: failed publishing whole_clip_contract.json";
+          return 8;
         }
-      );
-      if (!publish_json_atomically(
-            fs::path(o.out) / "whole_clip_contract.json",
-            nlohmann::ordered_json(whole_clip_contract)
-          )) {
-        BOOST_LOG(error) << "sbs-bench: failed publishing whole_clip_contract.json";
+      } catch (const offline_sbs::wire::contract_error &exception) {
+        BOOST_LOG(error) << "sbs-bench: invalid whole-clip wire contract: "
+                         << exception.what();
         return 8;
       }
       if (o.follow &&

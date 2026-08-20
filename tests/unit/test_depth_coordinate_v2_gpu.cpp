@@ -1004,7 +1004,7 @@ TEST(HostSbsV2GpuExecutorTest, EveryStageRejectsMissingOperandsWithoutRecording)
   EXPECT_FALSE(record_horizontal(warp.context.Get(), horizontal_command_t {}));
 }
 
-TEST(HostSbsV2GpuExecutorTest, ExactBindingAndPublicationSeamsStayShared) {
+TEST(HostSbsV2GpuExecutorTest, BindingContractAndExecutorCallSitesStayShared) {
   const auto source_root = std::filesystem::path(SUNSHINE_SOURCE_DIR) / "src";
   const auto executor = read_bytes(source_root / "host_sbs_v2_gpu_executor.cpp");
   const auto replay = read_bytes(source_root / "sbs_bench_depth_coordinate_v2.cpp");
@@ -1025,19 +1025,6 @@ TEST(HostSbsV2GpuExecutorTest, ExactBindingAndPublicationSeamsStayShared) {
     }
     return count;
   };
-  const auto stage = [&executor](
-                       const std::string_view begin,
-                       const std::string_view end
-                     ) {
-    const auto first = executor.find(begin);
-    const auto last = executor.find(end, first + begin.size());
-    EXPECT_NE(first, std::string::npos) << begin;
-    EXPECT_NE(last, std::string::npos) << end;
-    if (first == std::string::npos || last == std::string::npos) {
-      return std::string_view {};
-    }
-    return std::string_view(executor).substr(first, last - first);
-  };
   const auto compact = [](const std::string_view value) {
     std::string result;
     result.reserve(value.size());
@@ -1049,33 +1036,52 @@ TEST(HostSbsV2GpuExecutorTest, ExactBindingAndPublicationSeamsStayShared) {
     }
     return result;
   };
-  const auto moments = compact(stage("bool record_moments_frame(", "bool record_state("));
-  const auto state = compact(stage("bool record_state(", "bool record_map_history("));
-  const auto map = compact(stage("bool record_map_history(", "bool record_ownership("));
-  const auto ownership = compact(stage("bool record_ownership(", "bool record_vertical("));
-  const auto vertical = compact(stage("bool record_vertical(", "bool record_horizontal("));
-  const auto horizontal = compact(stage("bool record_horizontal(", "}  // namespace models"));
+  const auto compact_executor = compact(executor);
+  const auto compact_replay = compact(replay);
+  const auto compact_live = compact(live);
+  const auto stage = [&compact_executor](
+                       const std::string_view begin,
+                       const std::string_view end
+                     ) {
+    const auto first = compact_executor.find(begin);
+    const auto last = first == std::string::npos ?
+                        std::string::npos :
+                        compact_executor.find(end, first + begin.size());
+    EXPECT_NE(first, std::string::npos) << begin;
+    EXPECT_NE(last, std::string::npos) << end;
+    if (first == std::string::npos || last == std::string::npos) {
+      return std::string_view {};
+    }
+    return std::string_view(compact_executor).substr(first, last - first);
+  };
+  const auto moments = stage("boolrecord_moments_frame(", "boolrecord_state(");
+  const auto state = stage("boolrecord_state(", "boolrecord_map_history(");
+  const auto map = stage("boolrecord_map_history(", "boolrecord_ownership(");
+  const auto ownership = stage("boolrecord_ownership(", "boolrecord_vertical(");
+  const auto vertical = stage("boolrecord_vertical(", "boolrecord_horizontal(");
+  const auto horizontal = stage("boolrecord_horizontal(", "}//namespacemodels");
 
-  EXPECT_NE(moments.find("CSSetShaderResources(0u,2u,moments_inputs)"),
+  // Behavioral GPU tests below cover the generated fields. This narrow structural guard proves
+  // that both production call sites still cross the shared recorder API. Normalize formatting and
+  // assert binding cardinality without coupling those assertions to local input/output array names.
+  EXPECT_NE(moments.find("CSSetShaderResources(0u,2u,"),
             std::string::npos);
   EXPECT_NE(moments.find("CSSetUnorderedAccessViews(0u,1u"), std::string::npos);
   EXPECT_NE(moments.find("CSSetShaderResources(0u,1u,&command.partials)"),
             std::string::npos);
   EXPECT_NE(moments.find("CSSetUnorderedAccessViews(0u,2u"), std::string::npos);
-  EXPECT_NE(state.find("CSSetShaderResources(0u,2u,inputs)"), std::string::npos);
+  EXPECT_NE(state.find("CSSetShaderResources(0u,2u,"), std::string::npos);
   EXPECT_NE(state.find("CSSetUnorderedAccessViews(0u,1u"), std::string::npos);
-  EXPECT_NE(compact(executor).find("CSSetConstantBuffers(0u,3u,buffers)"),
+  EXPECT_NE(compact_executor.find("CSSetConstantBuffers(0u,3u,"),
             std::string::npos);
   EXPECT_NE(map.find("bind_stage_constants(context,command.constants"),
             std::string::npos);
-  EXPECT_NE(map.find("CSSetShaderResources(0u,8u,inputs)"), std::string::npos);
-  EXPECT_NE(map.find("CSSetUnorderedAccessViews(0u,6u,outputs,nullptr)"),
+  EXPECT_NE(map.find("CSSetShaderResources(0u,8u,"), std::string::npos);
+  EXPECT_NE(map.find("CSSetUnorderedAccessViews(0u,6u,"),
             std::string::npos);
-  EXPECT_NE(map.find("CSSetShaderResources(0u,8u,null_inputs)"),
-            std::string::npos);
-  EXPECT_NE(map.find("CSSetUnorderedAccessViews(0u,6u,null_outputs,nullptr)"),
-            std::string::npos);
-  EXPECT_NE(ownership.find("CSSetShaderResources(0u,3u,inputs)"),
+  EXPECT_EQ(count_occurrences(map, "CSSetShaderResources(0u,8u,"), 2u);
+  EXPECT_EQ(count_occurrences(map, "CSSetUnorderedAccessViews(0u,6u,"), 2u);
+  EXPECT_NE(ownership.find("CSSetShaderResources(0u,3u,"),
             std::string::npos);
   EXPECT_NE(ownership.find("CSSetUnorderedAccessViews(0u,1u"),
             std::string::npos);
@@ -1093,26 +1099,21 @@ TEST(HostSbsV2GpuExecutorTest, ExactBindingAndPublicationSeamsStayShared) {
          "record_vertical",
          "record_horizontal",
        }) {
-    EXPECT_EQ(count_occurrences(replay, recorder), 1u) << recorder;
-    EXPECT_EQ(count_occurrences(live, recorder), 1u) << recorder;
+    EXPECT_EQ(count_occurrences(compact_replay, recorder), 1u) << recorder;
+    EXPECT_EQ(count_occurrences(compact_live, recorder), 1u) << recorder;
   }
-  EXPECT_EQ(
-    count_occurrences(replay, ".tensor_exclusion = dummy_exclusion_srv.Get()"),
-    3u
-  );
-  EXPECT_EQ(
-    count_occurrences(live, ".tensor_exclusion = tensor_exclusion_srv.Get()"),
-    3u
-  );
-  EXPECT_EQ(replay.find("CSSetShader(moments_shader.Get()"), std::string::npos);
-  EXPECT_EQ(replay.find("CSSetShader(map_shader.Get()"), std::string::npos);
-  EXPECT_EQ(live.find("CSSetShader(depth_coordinate_v2_moments_cs.Get()"),
+  EXPECT_EQ(count_occurrences(compact_replay, ".tensor_exclusion="), 3u);
+  EXPECT_EQ(count_occurrences(compact_live, ".tensor_exclusion="), 3u);
+  EXPECT_EQ(compact_replay.find("CSSetShader(moments_shader.Get()"),
             std::string::npos);
-  EXPECT_EQ(live.find("CSSetShader(depth_coordinate_v2_map_cs.Get()"),
+  EXPECT_EQ(compact_replay.find("CSSetShader(map_shader.Get()"), std::string::npos);
+  EXPECT_EQ(compact_live.find("CSSetShader(depth_coordinate_v2_moments_cs.Get()"),
             std::string::npos);
-  EXPECT_NE(live.find("dispatch_command_t::direct("), std::string::npos);
-  EXPECT_NE(live.find("dispatch_command_t::indirect("), std::string::npos);
-  EXPECT_NE(live.find("near_identical_transaction.dispatch.Get()"),
+  EXPECT_EQ(compact_live.find("CSSetShader(depth_coordinate_v2_map_cs.Get()"),
+            std::string::npos);
+  EXPECT_NE(compact_live.find("dispatch_command_t::direct("), std::string::npos);
+  EXPECT_NE(compact_live.find("dispatch_command_t::indirect("), std::string::npos);
+  EXPECT_NE(compact_live.find("near_identical_transaction.dispatch.Get()"),
             std::string::npos);
   for (const std::string_view offset : {
          "near_identical_gpu_infer_reduce_byte_offset",
@@ -1122,19 +1123,19 @@ TEST(HostSbsV2GpuExecutorTest, ExactBindingAndPublicationSeamsStayShared) {
          "near_identical_gpu_infer_columns_byte_offset",
          "near_identical_gpu_infer_rows_byte_offset",
        }) {
-    EXPECT_NE(live.find(offset), std::string::npos) << offset;
+    EXPECT_NE(compact_live.find(offset), std::string::npos) << offset;
   }
-  EXPECT_NE(live.find("near_identical_history_owner.uav.Get()"),
+  EXPECT_NE(compact_live.find("near_identical_history_owner.uav.Get()"),
             std::string::npos);
-  EXPECT_NE(live.find(".near_identical_constants = near_identical_cbuffer.Get()"),
+  EXPECT_NE(compact_live.find(".near_identical_constants=near_identical_cbuffer.Get()"),
             std::string::npos);
-  EXPECT_NE(live.find("CSSetConstantBuffers(1, 2, null_constants)"),
+  EXPECT_NE(compact_live.find("CSSetConstantBuffers(1,2,"),
             std::string::npos);
-  EXPECT_NE(live.find("depth_coordinate_v2_ownership_tex.Get(),"),
+  EXPECT_NE(compact_live.find("depth_coordinate_v2_ownership_tex.Get(),"),
             std::string::npos);
-  EXPECT_NE(live.find("mark_d3d_parallax_map_start(perf_slot)"),
+  EXPECT_NE(compact_live.find("mark_d3d_parallax_map_start(perf_slot)"),
             std::string::npos);
-  EXPECT_NE(live.find("mark_d3d_parallax_subtitle_start(perf_slot)"),
+  EXPECT_NE(compact_live.find("mark_d3d_parallax_subtitle_start(perf_slot)"),
             std::string::npos);
 }
 

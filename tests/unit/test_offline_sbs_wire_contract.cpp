@@ -339,6 +339,16 @@ TEST(OfflineSbsWireContractTest, JsonParserRejectsDuplicateKeysBeforeCodecUse) {
   );
 }
 
+TEST(OfflineSbsWireContractTest, Sha256ValidatorRequiresExactLowercaseDigest) {
+  EXPECT_TRUE(offline_sbs::wire::valid_sha256_hex(std::string(64u, 'a')));
+  EXPECT_TRUE(offline_sbs::wire::valid_sha256_hex(std::string(64u, '0')));
+  EXPECT_FALSE(offline_sbs::wire::valid_sha256_hex(std::string(63u, 'a')));
+  EXPECT_FALSE(offline_sbs::wire::valid_sha256_hex(std::string(64u, 'A')));
+  EXPECT_FALSE(offline_sbs::wire::valid_sha256_hex(
+    std::string(63u, 'a') + "g"
+  ));
+}
+
 TEST(OfflineSbsWireContractTest, WorkerResultRoundTripsThroughOneExactCodec) {
   const auto original = worker_result();
   const auto encoded = offline_sbs::wire::to_json(original);

@@ -15,14 +15,6 @@
 #include <vector>
 
 namespace models::host_sbs_shader_cache {
-  // Compatibility names for call sites whose public terminology predates the more precise
-  // generated closure-group names. Both aliases derive from the generated manifest; neither owns
-  // a second spec list or closure pin.
-  inline constexpr auto &parallax_v2_diagnostic_specs =
-    parallax_v2_coordinate_diagnostic_specs;
-  inline constexpr std::string_view parallax_v2_diagnostic_source_closure_sha256 =
-    parallax_v2_live_diagnostic_source_closure_sha256;
-
   struct source_snapshot;
   using source_snapshot_t = std::shared_ptr<const source_snapshot>;
   using bytecode_t = std::shared_ptr<const std::vector<unsigned char>>;

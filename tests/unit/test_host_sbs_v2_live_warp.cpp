@@ -181,7 +181,7 @@ namespace {
           models::host_sbs_shader_cache::source_closure_sha256(diagnostic_sources);
         if (closure !=
             models::host_sbs_shader_cache::
-              parallax_v2_diagnostic_source_closure_sha256) {
+              parallax_v2_live_diagnostic_source_closure_sha256) {
           error = "live V2 diagnostic source closure does not match its authenticated pin";
           return false;
         }

@@ -250,15 +250,6 @@ namespace offline_sbs {
       return result;
     }
 
-    bool valid_sha256_hex(const std::string_view value) {
-      return value.size() == 64 &&
-             std::all_of(value.begin(), value.end(), [](const unsigned char character) {
-               return
-                 (character >= '0' && character <= '9') ||
-                 (character >= 'a' && character <= 'f');
-             });
-    }
-
     bool constant_time_equal(
       const std::string_view left,
       const std::string_view right
@@ -328,37 +319,6 @@ namespace offline_sbs {
       return found == object.end() ? nullptr : &*found;
     }
 
-    template<class Input>
-    nlohmann::json parse_json_without_duplicate_keys(Input &&input) {
-      std::map<int, std::set<std::string>> object_keys;
-      const auto callback = [&object_keys](
-                              const int depth,
-                              const nlohmann::json::parse_event_t event,
-                              nlohmann::json &parsed) {
-        if (event == nlohmann::json::parse_event_t::object_start) {
-          object_keys[depth].clear();
-        } else if (event == nlohmann::json::parse_event_t::key) {
-          if (depth <= 0 || !parsed.is_string()) {
-            throw worker_error("JSON object key has invalid parser depth or type");
-          }
-          auto owner = object_keys.find(depth - 1);
-          if (owner == object_keys.end()) {
-            throw worker_error("JSON object key has no owning object");
-          }
-          const auto &key = parsed.get_ref<const std::string &>();
-          if (!owner->second.insert(key).second) {
-            throw worker_error("JSON object contains duplicate key '" + key + "'");
-          }
-        } else if (event == nlohmann::json::parse_event_t::object_end) {
-          object_keys.erase(depth);
-        }
-        return true;
-      };
-      return nlohmann::json::parse(
-        std::forward<Input>(input), callback, true, false
-      );
-    }
-
     nlohmann::json read_json(
       const fs::path &path,
       const std::uintmax_t max_bytes = max_small_contract_bytes
@@ -375,8 +335,25 @@ namespace offline_sbs {
       if (!stream) {
         throw worker_error("cannot open JSON contract: " + path_utf8(path));
       }
+      std::string serialized(static_cast<std::size_t>(bytes), '\0');
+      stream.read(
+        serialized.data(),
+        static_cast<std::streamsize>(serialized.size())
+      );
+      if (stream.gcount() != static_cast<std::streamsize>(serialized.size()) ||
+          stream.bad()) {
+        throw worker_error(
+          "JSON contract changed while being read: " + path_utf8(path)
+        );
+      }
+      char trailing = 0;
+      if (stream.get(trailing)) {
+        throw worker_error(
+          "JSON contract grew beyond its admitted size: " + path_utf8(path)
+        );
+      }
       try {
-        return parse_json_without_duplicate_keys(stream);
+        return wire::parse_json_without_duplicate_keys(serialized);
       } catch (const std::exception &exception) {
         throw worker_error(
           "cannot parse JSON contract " + path_utf8(path) + ": " +
@@ -2771,7 +2748,7 @@ namespace offline_sbs {
         throw worker_error(std::string(description) + " is empty");
       }
       try {
-        return parse_json_without_duplicate_keys(bytes);
+        return wire::parse_json_without_duplicate_keys(bytes);
       } catch (const std::exception &exception) {
         throw worker_error(
           "cannot parse " + std::string(description) + ": " +
@@ -3501,7 +3478,7 @@ namespace offline_sbs {
             try {
               const auto bytes =
                 read_bounded_bytes(snapshot, max_snapshot_bytes);
-              auto value = parse_json_without_duplicate_keys(bytes);
+              auto value = wire::parse_json_without_duplicate_keys(bytes);
               remove_file_checked(snapshot);
               return value;
             } catch (const worker_error &) {
@@ -3567,7 +3544,7 @@ namespace offline_sbs {
 
       nlohmann::json parse_line(const std::string &line) {
         try {
-          return parse_json_without_duplicate_keys(line);
+          return wire::parse_json_without_duplicate_keys(line);
         } catch (const std::exception &exception) {
           throw worker_error(
             std::string {"invalid adaptive trace JSON: "} + exception.what()
@@ -5794,7 +5771,7 @@ namespace offline_sbs {
     const fs::path &path,
     const std::string_view expected_sha256
   ) {
-    if (!valid_sha256_hex(expected_sha256)) {
+    if (!wire::valid_sha256_hex(expected_sha256)) {
       throw worker_error(
         "worker specification SHA-256 must be 64 lowercase hexadecimal characters"
       );

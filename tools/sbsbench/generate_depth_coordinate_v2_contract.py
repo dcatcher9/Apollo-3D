@@ -680,7 +680,6 @@ def render_cpp(contract: dict[str, Any]) -> str:
     digest = contract_digest(contract)
     tag_semantic_digest = contract_tag_semantic_digest(contract)
     calibrations = contract["model_calibrations"]
-    shader_implementation = contract["shader_implementation"]
     subtitle_ocr = contract["subtitle_ocr"]
     final_parallax = contract["final_parallax"]
     ocr_input = subtitle_ocr["input_tensor"]

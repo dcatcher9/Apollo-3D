@@ -809,9 +809,12 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
 
     def test_renderer_closure_pins_cover_generated_contract_include(self):
         closure_manifest = generator.SHADER_MANIFEST
-        closure_pin = lambda name: generator.shader_manifest_generator.closure_group(
-            closure_manifest, name
-        )["source_closure_sha256"]
+
+        def closure_pin(name):
+            return generator.shader_manifest_generator.closure_group(
+                closure_manifest, name
+            )["source_closure_sha256"]
+
         self.assertEqual(
             generator.validate_renderer_source_closure_pins(),
             {

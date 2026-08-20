@@ -4,7 +4,6 @@
 
 #include <array>
 #include <cstdint>
-#include <span>
 #include <string_view>
 
 namespace models::host_sbs_shader_cache {
@@ -129,67 +128,4 @@ namespace models::host_sbs_shader_cache {
   inline constexpr std::string_view parallax_v2_live_diagnostic_source_closure_sha256 =
     "1c7cb433f667c990e4d55f254a11cc9a40590e3a1e97e62fc261c2e0069b9513";
 
-  struct closure_group_view {
-    std::string_view name;
-    std::span<const shader_spec> specs;
-    std::string_view source_closure_sha256;
-  };
-
-  inline constexpr closure_group_view preprocess_closure_group {
-    "preprocess",
-    std::span<const shader_spec> {preprocess_specs},
-    preprocess_source_closure_sha256,
-  };
-  inline constexpr closure_group_view parallax_v2_producer_closure_group {
-    "parallax_v2_producer",
-    std::span<const shader_spec> {parallax_v2_producer_specs},
-    parallax_v2_producer_source_closure_sha256,
-  };
-  inline constexpr closure_group_view parallax_v2_coordinate_diagnostic_closure_group {
-    "parallax_v2_coordinate_diagnostic",
-    std::span<const shader_spec> {parallax_v2_coordinate_diagnostic_specs},
-    parallax_v2_coordinate_diagnostic_source_closure_sha256,
-  };
-  inline constexpr closure_group_view near_identical_detector_closure_group {
-    "near_identical_detector",
-    std::span<const shader_spec> {near_identical_detector_specs},
-    near_identical_detector_source_closure_sha256,
-  };
-  inline constexpr closure_group_view gpu_trace_closure_group {
-    "gpu_trace",
-    std::span<const shader_spec> {gpu_trace_specs},
-    gpu_trace_source_closure_sha256,
-  };
-  inline constexpr closure_group_view parallax_v2_live_renderer_closure_group {
-    "parallax_v2_live_renderer",
-    std::span<const shader_spec> {parallax_v2_live_renderer_specs},
-    parallax_v2_live_renderer_source_closure_sha256,
-  };
-  inline constexpr closure_group_view parallax_v2_p010_y_closure_group {
-    "parallax_v2_p010_y",
-    std::span<const shader_spec> {parallax_v2_p010_y_specs},
-    parallax_v2_p010_y_source_closure_sha256,
-  };
-  inline constexpr closure_group_view sbs_flat_fallback_closure_group {
-    "sbs_flat_fallback",
-    std::span<const shader_spec> {sbs_flat_fallback_specs},
-    sbs_flat_fallback_source_closure_sha256,
-  };
-  inline constexpr closure_group_view parallax_v2_live_diagnostic_closure_group {
-    "parallax_v2_live_diagnostic",
-    std::span<const shader_spec> {parallax_v2_live_diagnostic_specs},
-    parallax_v2_live_diagnostic_source_closure_sha256,
-  };
-
-  inline constexpr std::array closure_groups {
-    preprocess_closure_group,
-    parallax_v2_producer_closure_group,
-    parallax_v2_coordinate_diagnostic_closure_group,
-    near_identical_detector_closure_group,
-    gpu_trace_closure_group,
-    parallax_v2_live_renderer_closure_group,
-    parallax_v2_p010_y_closure_group,
-    sbs_flat_fallback_closure_group,
-    parallax_v2_live_diagnostic_closure_group,
-  };
 }  // namespace models::host_sbs_shader_cache

@@ -5162,7 +5162,7 @@ namespace platf::dxgi {
       );
       const bool diagnostic_sources_authenticated =
         cache::source_closure_sha256(diagnostic_sources) ==
-          cache::parallax_v2_diagnostic_source_closure_sha256;
+          cache::parallax_v2_live_diagnostic_source_closure_sha256;
       const auto mapping_bytecode = diagnostic_sources_authenticated ?
         cache::get(diagnostic_sources, cache::parallax_v2_live_mapping) :
         cache::bytecode_t {};

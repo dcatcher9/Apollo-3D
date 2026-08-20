@@ -22,9 +22,16 @@
 using namespace std::literals;
 
 namespace offline_sbs::wire {
+  bool valid_sha256_hex(const std::string_view value) noexcept {
+    return value.size() == 64 &&
+           std::ranges::all_of(value, [](const unsigned char character) {
+             return (character >= '0' && character <= '9') ||
+                    (character >= 'a' && character <= 'f');
+           });
+  }
+
   namespace {
     using json = nlohmann::json;
-    constexpr std::uint32_t max_wire_raster_dimension = 16384;
 
     std::uint64_t checked_raster_bytes(
       const std::uint32_t width,
@@ -33,8 +40,8 @@ namespace offline_sbs::wire {
       const std::string_view context
     ) {
       if (width == 0 || height == 0 ||
-          width > max_wire_raster_dimension ||
-          height > max_wire_raster_dimension) {
+          width > max_raster_dimension ||
+          height > max_raster_dimension) {
         throw contract_error(
           std::string {context} + " dimensions are outside the authenticated bound"
         );
@@ -101,14 +108,6 @@ namespace offline_sbs::wire {
         );
       }
       return result;
-    }
-
-    bool valid_sha256_hex(const std::string_view value) {
-      return value.size() == 64 &&
-             std::ranges::all_of(value, [](const unsigned char character) {
-               return (character >= '0' && character <= '9') ||
-                      (character >= 'a' && character <= 'f');
-             });
     }
 
     template<class Integer>
