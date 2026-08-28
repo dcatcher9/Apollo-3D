@@ -55,7 +55,19 @@ class ProdZipDepthConvex2xTests(unittest.TestCase):
         self.assertIs(contract["operator"]["zipdepth_use_unfold"], True)
         self.assertEqual(
             contract["sources"]["fused_onnx"]["sha256"],
-            "0547dd046dead55057bb34a356d987559b2d93248e84600245f02df828d8bbb7",
+            "26684c5da8fdd4bdc5f1c9cf919cec8d1e2d027fbe95705a454f85d31eee2c23",
+        )
+        optimization = contract["export"]["model_optimization"]
+        self.assertEqual(
+            optimization["recipe"],
+            "zipdepth-selective-fp16-project-before-resize-dense-group4-v1",
+        )
+        self.assertEqual(optimization["selective_fp16_initializer_count"], 88)
+        self.assertEqual(len(optimization["project_before_resize_nodes"]), 4)
+        self.assertEqual(len(optimization["dense_group4_nodes"]), 10)
+        self.assertEqual(
+            optimization["precision"]["predicted_depth_and_convex_tail"],
+            "float32",
         )
         self.assertIn("graph-cut", contract["authority"]["forbidden"])
         self.assertIn("adaptive-j", contract["authority"]["forbidden"])
@@ -135,6 +147,33 @@ class ProdZipDepthConvex2xTests(unittest.TestCase):
                 "bool-optimization-level": lambda value: value["tensorrt"].update(
                     {"builder_optimization_level": True}),
                 }.items():
+            with self.subTest(name=name):
+                self._assert_contract_rejected(mutate)
+
+    def test_contract_rejects_model_optimization_drift(self):
+        mutations = {
+            "recipe": lambda value: value["export"]["model_optimization"].update(
+                {"recipe": "generic-autocast"}
+            ),
+            "order": lambda value: value["export"]["model_optimization"].update(
+                {"order": list(reversed(
+                    value["export"]["model_optimization"]["order"]
+                ))}
+            ),
+            "feature-precision": lambda value: value["export"][
+                "model_optimization"
+            ]["precision"].update({"zipdepth_feature_mask": "float32"}),
+            "dense-target": lambda value: value["export"]["model_optimization"][
+                "dense_group4_nodes"
+            ].pop(),
+            "tail-target": lambda value: value["export"]["model_optimization"][
+                "frozen_convex_tail_nodes"
+            ].append("node_extra"),
+            "raw-hash": lambda value: value["export"].update(
+                {"raw_zipdepth_branch_onnx_sha256": "0" * 63}
+            ),
+        }
+        for name, mutate in mutations.items():
             with self.subTest(name=name):
                 self._assert_contract_rejected(mutate)
 

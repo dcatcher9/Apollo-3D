@@ -1,9 +1,10 @@
 # Production DAV2 + frozen ZipDepth convex 2x
 
-Status: single-high-I/O implementation candidate. The model graph, TensorRT plan, all-high runtime,
-and six-shape limiter path are implemented. Full native/Python regression, authenticated dump, and
-an initial landscape Galaxy XR execution are clean. A paired evaluator report and explicit visual
-acceptance remain required before this candidate becomes the published production baseline.
+Status: single-high-I/O implementation candidate with the model-only optimization recipe integrated.
+The deterministic ONNX export, six-profile TensorRT build, authenticated model parity, native build,
+all-high runtime, and six-shape limiter path are clean. A paired evaluator report and explicit Galaxy
+XR visual acceptance remain required before this optimized artifact becomes the published production
+baseline.
 
 This note records the implementation based on production commit
 `1a434f379b2a6d39ec9915deefa2277043cbce72`. The live geometry authority remains the generated
@@ -30,6 +31,12 @@ The frozen ZipDepth source is commit `91f3fd21e131641f51e8d35736d1958350180e3a` 
 DAV2 ONNX SHA-256 is
 `2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04`.
 
+The serialized ZipDepth branch is the released base encoder/decoder, not a generic depth model
+substitute. Its encoder stage widths are `[48,96,192,384]`, stage depths are `[2,2,6,2]`, decoder
+widths are `[288,192,144,96,32]`, and the mask head emits 36 logits. The two 1x1 operators after
+global mean pooling form channel attention on a `[1,192,1,1]` tensor; they are not a spatial
+attention convolution. ZipDepth's depth head remains absent.
+
 ## Single-high model boundary
 
 One TensorRT engine and one enqueue expose only the high-resolution tensors:
@@ -48,6 +55,22 @@ high RGB [1,3,2H,2W]
                                                                       |
 coarse depth + 36 logits/cell -> 3x3 convex reconstruction -> high depth [1,2H,2W]
 ```
+
+The production public boundary remains FP32. DAV2 was already mixed precision in its frozen source:
+FP32 input, an entry Cast to FP16, an FP16 DINOv2/DPT body, and an exit Cast restoring FP32
+`predicted_depth`. The postpass does not alter any DAV2 node or initializer. It adds an independent
+FP32-to-FP16 Cast at the ZipDepth RGB seam, converts exactly 88 ZipDepth feature/mask initializers
+(`6,143,503` elements) to FP16, and restores the 36 mask logits to FP32 before reshape, softmax, and
+the convex reconstruction tail. `predicted_depth`, all eleven convex-tail node outputs, and
+`refined_depth` therefore remain FP32.
+
+Two exact algebraic rewrites follow that precision boundary. Four bias-free decoder low-path 1x1
+projections execute before bilinear resize, reducing their projection sites by about 3.97x without
+changing linear real-number semantics. TensorRT otherwise lowers each of ten group-4 pointwise
+convolutions into four loop layers, so their FP16 weights are expanded to exact block-diagonal dense
+weights and `group` is changed from 4 to 1. Live blocks are byte-identical and every off-block value
+is positive zero. The cross-scale pool-before-project rewrite, attention-GEMM, FP8 Q/DQ, and custom
+plugins are not part of the release graph.
 
 The coarse RGB and coarse DAV2 output are internal edges, not public buffers or diagnostic outputs.
 The convex operator retains the released `FastConvexUpsample(scale=2, use_unfold=true)` behavior:
@@ -70,10 +93,12 @@ and ROI cases are therefore explicit evaluation gates rather than assumed parity
 | --- | --- |
 | Logical model | `prod_dav2_zipdepth_c2x_high_opset18` |
 | Engine recipe | `trt-6high-point-l5-v2` |
-| ONNX bytes | `74,279,879` |
-| ONNX SHA-256 | `0547dd046dead55057bb34a356d987559b2d93248e84600245f02df828d8bbb7` |
-| Development plan bytes | `104,277,276` |
-| Development plan SHA-256 | `99165873cc27f6e4457a36a9199b4fe85afac166e3c7ef0691fa9edba95922fc` |
+| Raw ZipDepth branch bytes / SHA-256 | `24,637,932` / `e24779358ed042255036da6d7e0f90783d592f7fd7c5c6d4eac7cb37effafdd2` |
+| Optimized ZipDepth branch bytes / SHA-256 | `12,796,840` / `65e0f0aba0248a29715d99fd32a24014a98a21cca67e00a47af20f37528b3989` |
+| Fused ONNX bytes | `62,438,471` |
+| Fused ONNX SHA-256 | `26684c5da8fdd4bdc5f1c9cf919cec8d1e2d027fbe95705a454f85d31eee2c23` |
+| Six-profile development plan bytes | `108,190,812` |
+| Six-profile development plan SHA-256 | `a16421b2972165efc88bf12f5740826f5769abcf832ed8fba2def6efc64b4fba` |
 
 The plan hash is machine/runtime evidence, not a portable model identity. The ONNX hash, profile
 recipe, TensorRT/GPU compatibility tag, active-engine manifest, and selected plan remain distinct.
@@ -159,10 +184,18 @@ tile seams.
 Completed evidence includes:
 
 - deterministic ONNX export and frozen hash;
-- all six ONNX Runtime and TensorRT profiles;
+- an authenticated architecture audit proving all `888` converted DAV2 nodes and `512` DAV2
+  initializers remain unchanged after the expected input rename;
+- canonical exporter output bit-exact to the selected experimental graph on three authenticated
+  inputs, with CPU correlation `0.9999999874`, mean absolute error `0.0000390`, relative L2
+  `0.0000907`, and maximum absolute error `0.02859` against the prior FP32-ZipDepth graph;
+- a maximum convex-bound violation of `1.43e-6`, with zero values above `1e-5`, and bit-exact repeat
+  inference;
+- strict ONNX checker/type/shape inference and all six TensorRT profiles;
 - graph parity when the retired coarse input equals exact 2x2 average of the high input;
 - the single-high benchmark, live-display, and Dump 3D consumer migrations;
-- complete Python evaluator regression: `769` tests passed with `12` intentional skips;
+- complete Python evaluator regression: `775` tests passed with `12` intentional skips;
+- focused native fused-model/runtime regression: `17` tests passed;
 - complete native regression: `965` of `976` tests passed with `11` intentional skips, plus focused
   engine-contract, near-identical, runtime, ROI, subtitle, limiter, and live-warp coverage;
 - exact `868x2072` vertical-limiter coverage;
@@ -184,21 +217,30 @@ edges, temporal stability, pop, scene cuts, and subtitles. The portrait computat
 maximum portrait reuse allocation are authenticated; a representative physical portrait capture
 remains useful presentation evidence rather than a missing tensor-contract test.
 
-## Efficiency follow-up
+## Model-only optimization result
 
-The measured two-input/two-output precursor took approximately `4.93-5.01 ms` for profile 0 versus
-about `1.61 ms` for legacy DAV2. Layer profiling attributes about 59.5% of fused latency to the
-ZipDepth encoder/decoder and only 1.9% to convex reconstruction. TensorRT tiling levels 0 through 3
-and auxiliary streams produced no latency improvement.
+The frozen FP32-ZipDepth six-profile control averaged `4.93048 ms` at profile 0. Three fresh
+interleaved control/treatment pairs put the canonical optimized six-profile engine at `2.70093 ms`,
+a `45.22%` reduction and `1.825x` speedup; all three pairs won. The fused ONNX shrank by
+`11,841,408` bytes (`15.94%`). The block-diagonal dense weights make the portable six-profile plan
+`3,913,536` bytes larger (`3.75%`), an accepted trade for removing TensorRT's grouped-convolution
+loop lowering. One inference at every landscape and portrait profile produced the exact output
+shape with finite values. Three authenticated TensorRT outputs retained minimum correlation
+`0.999999765`, maximum per-frame mean absolute error `0.000930`, and maximum absolute error
+`0.03869` against the frozen control engine.
 
-After this functional baseline is accepted, the ordered optimization experiments are:
+Rejected experiments remain excluded from the deterministic exporter:
 
-1. selective FP16 for the ZipDepth feature/mask branch while preserving FP32 public I/O, DAV2
-   depth, convex softmax, weighted sum, and final output;
-2. algebraic replacement of group-4 1x1 projections by equivalent block-diagonal dense Conv/GEMM,
-   plus the 1x1 spatial attention Conv by GEMM; and
-3. only if those graph-level changes are insufficient, a CUDA 13.3 Tile C++ TensorRT plugin tuned
-   with CompileIQ.
+- moving the cross-scale average pool before projection regressed matched TensorRT latency by
+  `1.97%`;
+- replacing the channel-attention 1x1 convolutions with GEMM won only two of three pairs, with a
+  noise-scale `0.18%` nominal mean;
+- generic Model Optimizer autocast rewrote DAV2 and raised mean error by `7.37x` versus the guarded
+  FP16 conversion;
+- surgical FP8 Q/DQ required opset 19 and reached holdout relative L2 `0.00477` plus mask-logit
+  relative L2 `0.154`; and
+- a CUDA Tile TensorRT plugin is a runtime/kernel extension and therefore outside this session's
+  serialized-model-only boundary.
 
-Every optimization remains subordinate to paired dump, convex-bound, edge, temporal, and live-XR
-gates. CUDA 13.3 does not automatically accelerate the current ONNX plan.
+The optimization remains subordinate to paired dump, edge, temporal, subtitle, scene-cut, and
+live-XR gates. CUDA 13.3 does not automatically accelerate the ONNX plan.

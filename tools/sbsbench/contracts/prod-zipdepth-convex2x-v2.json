@@ -17,16 +17,72 @@
     "fused_onnx": {
       "logical_model": "prod_dav2_zipdepth_c2x_high_opset18",
       "opset": 18,
-      "bytes": 74279879,
-      "sha256": "0547dd046dead55057bb34a356d987559b2d93248e84600245f02df828d8bbb7",
+      "bytes": 62438471,
+      "sha256": "26684c5da8fdd4bdc5f1c9cf919cec8d1e2d027fbe95705a454f85d31eee2c23",
       "metadata_policy": "strip-nonsemantic-pytorch-source-path-and-line-annotations",
       "deterministic_reexport": true
     }
   },
   "export": {
     "opset": 18,
-    "zipdepth_branch_onnx_bytes": 24637932,
-    "zipdepth_branch_onnx_sha256": "e24779358ed042255036da6d7e0f90783d592f7fd7c5c6d4eac7cb37effafdd2",
+    "raw_zipdepth_branch_onnx_bytes": 24637932,
+    "raw_zipdepth_branch_onnx_sha256": "e24779358ed042255036da6d7e0f90783d592f7fd7c5c6d4eac7cb37effafdd2",
+    "zipdepth_branch_onnx_bytes": 12796840,
+    "zipdepth_branch_onnx_sha256": "65e0f0aba0248a29715d99fd32a24014a98a21cca67e00a47af20f37528b3989",
+    "model_optimization": {
+      "recipe": "zipdepth-selective-fp16-project-before-resize-dense-group4-v1",
+      "order": [
+        "selective-zipdepth-feature-fp16",
+        "decoder-low-project-before-resize",
+        "group4-pointwise-to-block-diagonal-dense"
+      ],
+      "precision": {
+        "public_io": "float32",
+        "dav2": "frozen-source-mixed-fp16-with-fp32-boundary",
+        "zipdepth_feature_mask": "float16",
+        "predicted_depth_and_convex_tail": "float32"
+      },
+      "selective_fp16_initializer_count": 88,
+      "project_before_resize_nodes": [
+        "node_Conv_442",
+        "node_Conv_444",
+        "node_Conv_446",
+        "node_Conv_450"
+      ],
+      "dense_group4_nodes": [
+        "node_Conv_437",
+        "node_Conv_438",
+        "node_Conv_441",
+        "node_Conv_442",
+        "node_Conv_443",
+        "node_Conv_444",
+        "node_Conv_445",
+        "node_Conv_446",
+        "node_Conv_449",
+        "node_Conv_450"
+      ],
+      "frozen_convex_tail_nodes": [
+        "node_view_2",
+        "node_softmax_1",
+        "node_unsqueeze_10",
+        "node_pad",
+        "node_Conv_455",
+        "node_unsqueeze_11",
+        "node_mul_587",
+        "node_sum_1",
+        "node_convolution",
+        "node_select_18",
+        "node_relu_27"
+      ],
+      "final_node_count": 270,
+      "final_initializer_count": 115,
+      "excluded_rewrites": [
+        "crossscale-pool-before-project",
+        "attention-conv-to-gemm",
+        "generic-modelopt-autocast",
+        "cuda-tile-plugin"
+      ]
+    },
     "release_builder_optimization_level": 5
   },
   "operator": {

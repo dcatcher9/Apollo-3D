@@ -7,8 +7,9 @@ import sys
 import tempfile
 import unittest
 
+import numpy as np
 import onnx
-from onnx import helper
+from onnx import helper, numpy_helper
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -99,9 +100,9 @@ class ProdZipDepthExporterTests(unittest.TestCase):
         fused_contract = contract_api.load_contract()["sources"]["fused_onnx"]
         self.assertEqual(
             fused_contract["sha256"],
-            "0547dd046dead55057bb34a356d987559b2d93248e84600245f02df828d8bbb7",
+            "26684c5da8fdd4bdc5f1c9cf919cec8d1e2d027fbe95705a454f85d31eee2c23",
         )
-        self.assertEqual(fused_contract["bytes"], 74279879)
+        self.assertEqual(fused_contract["bytes"], 62438471)
 
     def test_tensorrt_arguments_preserve_six_fixed_profile_order(self):
         command = exporter.point_profile_build_arguments(
@@ -193,6 +194,118 @@ class ProdZipDepthExporterTests(unittest.TestCase):
         branch.graph.output[0].name = "convex_logits"
         with self.assertRaisesRegex(ValueError, "unexpected ZipDepth convex branch boundary"):
             exporter.compose_fused_models(make_dummy_dav2(), branch)
+
+    def test_group4_pointwise_expansion_is_exact_block_diagonal_fp16(self):
+        for output_channels, input_channels_per_group in ((8, 2), (8, 3), (12, 2)):
+            with self.subTest(
+                output_channels=output_channels,
+                input_channels_per_group=input_channels_per_group,
+            ):
+                compact = np.arange(
+                    1,
+                    output_channels * input_channels_per_group + 1,
+                    dtype=np.float16,
+                ).reshape(output_channels, input_channels_per_group, 1, 1)
+                weight = numpy_helper.from_array(compact, name="group4.weight")
+                rebuilt, evidence = exporter.expand_group4_pointwise_weight(weight)
+                dense = numpy_helper.to_array(rebuilt)
+                output_channels_per_group = output_channels // 4
+                dense_input_channels = 4 * input_channels_per_group
+                self.assertEqual(dense.dtype, np.float16)
+                self.assertEqual(
+                    dense.shape,
+                    (output_channels, dense_input_channels, 1, 1),
+                )
+                self.assertEqual(
+                    evidence["source_shape"],
+                    [output_channels, input_channels_per_group, 1, 1],
+                )
+                self.assertEqual(
+                    evidence["dense_shape"],
+                    [output_channels, dense_input_channels, 1, 1],
+                )
+                for group in range(4):
+                    output_start = group * output_channels_per_group
+                    output_end = output_start + output_channels_per_group
+                    input_start = group * input_channels_per_group
+                    input_end = input_start + input_channels_per_group
+                    output_slice = slice(output_start, output_end)
+                    np.testing.assert_array_equal(
+                        dense[output_slice, input_start:input_end],
+                        compact[output_slice],
+                    )
+                    np.testing.assert_array_equal(
+                        dense[output_slice, :input_start],
+                        np.zeros_like(dense[output_slice, :input_start]),
+                    )
+                    np.testing.assert_array_equal(
+                        dense[output_slice, input_end:],
+                        np.zeros_like(dense[output_slice, input_end:]),
+                    )
+                self.assertFalse(np.signbit(dense[dense == 0]).any())
+
+    def test_group4_pointwise_expansion_rejects_wrong_dtype_shape_or_grouping(self):
+        invalid = (
+            np.ones((8, 2, 1, 1), dtype=np.float32),
+            np.ones((8, 2, 3, 3), dtype=np.float16),
+            np.ones((6, 2, 1, 1), dtype=np.float16),
+        )
+        for array in invalid:
+            with self.subTest(dtype=array.dtype, shape=array.shape):
+                with self.assertRaises(ValueError):
+                    exporter.expand_group4_pointwise_weight(
+                        numpy_helper.from_array(array, name="invalid.weight")
+                    )
+
+    def test_production_postpass_recipe_freezes_only_model_graph_rewrites(self):
+        self.assertEqual(
+            exporter.MODEL_OPTIMIZATION_RECIPE,
+            "zipdepth-selective-fp16-project-before-resize-dense-group4-v1",
+        )
+        self.assertEqual(
+            tuple(
+                entry["projection"]
+                for entry in exporter._ZIP_PROJECT_BEFORE_RESIZE
+            ),
+            ("node_Conv_442", "node_Conv_444", "node_Conv_446", "node_Conv_450"),
+        )
+        self.assertEqual(
+            tuple((entry[0], entry[1]) for entry in exporter._ZIP_DENSE_GROUP4),
+            (
+                ("node_Conv_437", "encoder.cross_scale.low_to_high.weight"),
+                ("node_Conv_438", "encoder.cross_scale.high_to_low.weight"),
+                ("node_Conv_441", "decoder.fuse3.proj_high.weight"),
+                ("node_Conv_442", "decoder.fuse3.proj_low.weight"),
+                ("node_Conv_443", "decoder.fuse2.proj_high.weight"),
+                ("node_Conv_444", "decoder.fuse2.proj_low.weight"),
+                ("node_Conv_445", "decoder.fuse1.proj_high.weight"),
+                ("node_Conv_446", "decoder.fuse1.proj_low.weight"),
+                ("node_Conv_449", "decoder.fuse_half.proj_high.weight"),
+                ("node_Conv_450", "decoder.fuse_half.proj_low.weight"),
+            ),
+        )
+
+    def test_raw_and_optimized_export_metadata_versions_are_distinct(self):
+        branch = make_dummy_zip_branch()
+        exporter.canonicalize_export_metadata(
+            branch,
+            "zipdepth_mask_convex2x_dynamic",
+            producer_version=exporter.RAW_BRANCH_EXPORTER_VERSION,
+        )
+        self.assertEqual(branch.producer_version, "2")
+        exporter.canonicalize_export_metadata(
+            branch,
+            "zipdepth_mask_convex2x_dynamic_optimized",
+        )
+        self.assertEqual(branch.producer_version, exporter.EXPORTER_VERSION)
+        self.assertEqual(branch.graph.name, "zipdepth_mask_convex2x_dynamic_optimized")
+
+    def test_production_postpass_rejects_nonproduction_branch_before_mutation(self):
+        branch = make_dummy_zip_branch()
+        original = exporter.deterministic_model_bytes(branch)
+        with self.assertRaisesRegex(ValueError, "value-info count drifted"):
+            exporter.optimize_zipdepth_branch_for_production(branch)
+        self.assertEqual(exporter.deterministic_model_bytes(branch), original)
 
 
 if __name__ == "__main__":

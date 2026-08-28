@@ -20,8 +20,9 @@ import sys
 import time
 from typing import Sequence
 
+import numpy as np
 import onnx
-from onnx import compose, helper, version_converter
+from onnx import TensorProto, compose, helper, numpy_helper, shape_inference, version_converter
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -31,11 +32,96 @@ import prod_zipdepth_convex2x as contract_api  # noqa: E402
 
 
 EXPORTER_NAME = "apollo-prod-zipdepth-convex2x-exporter"
-EXPORTER_VERSION = "2"
+EXPORTER_VERSION = "3"
+RAW_BRANCH_EXPORTER_VERSION = "2"
 OPSET_VERSION = 18
+RAW_BRANCH_FILENAME = "zipdepth_mask_convex2x_dynamic_opset18.raw.onnx"
 BRANCH_FILENAME = "zipdepth_mask_convex2x_dynamic_opset18.onnx"
 FUSED_FILENAME = "prod_dav2_zipdepth_c2x_high_opset18.onnx"
 PLAN_FILENAME = "prod_dav2_zipdepth_c2x_high_six_profiles.plan"
+MODEL_OPTIMIZATION_RECIPE = (
+    "zipdepth-selective-fp16-project-before-resize-dense-group4-v1"
+)
+
+_ZIP_FEATURE_FIRST = "node_Conv_423"
+_ZIP_FEATURE_LAST = "node_conv2d_39"
+_ZIP_INTERNAL_FLOAT_CAST = "node_convert_element_type_default"
+_ZIP_CONVEX_TAIL = (
+    "node_view_2",
+    "node_softmax_1",
+    "node_unsqueeze_10",
+    "node_pad",
+    "node_Conv_455",
+    "node_unsqueeze_11",
+    "node_mul_587",
+    "node_sum_1",
+    "node_convolution",
+    "node_select_18",
+    "node_relu_27",
+)
+_ZIP_GROUP96_NODES = ("node_Conv_426", "node_Conv_427", "node_Conv_429")
+_ZIP_PROJECT_BEFORE_RESIZE = (
+    {
+        "label": "fuse3",
+        "resize": "node_upsample_bilinear2d",
+        "projection": "node_Conv_442",
+        "size_concat": "node_Concat_211",
+        "weight": "decoder.fuse3.proj_low.weight",
+        "low_input": "relu_21",
+        "old_resize_output": "upsample_bilinear2d",
+        "final_output": "conv2d_31",
+        "input_channels": 288,
+        "output_channels": 192,
+    },
+    {
+        "label": "fuse2",
+        "resize": "node_upsample_bilinear2d_1",
+        "projection": "node_Conv_444",
+        "size_concat": "node_Concat_235",
+        "weight": "decoder.fuse2.proj_low.weight",
+        "low_input": "relu_22",
+        "old_resize_output": "upsample_bilinear2d_1",
+        "final_output": "conv2d_33",
+        "input_channels": 192,
+        "output_channels": 144,
+    },
+    {
+        "label": "fuse1",
+        "resize": "node_upsample_bilinear2d_2",
+        "projection": "node_Conv_446",
+        "size_concat": "node_Concat_259",
+        "weight": "decoder.fuse1.proj_low.weight",
+        "low_input": "relu_23",
+        "old_resize_output": "upsample_bilinear2d_2",
+        "final_output": "conv2d_35",
+        "input_channels": 144,
+        "output_channels": 96,
+    },
+    {
+        "label": "fuse_half",
+        "resize": "node_upsample_bilinear2d_3",
+        "projection": "node_Conv_450",
+        "size_concat": "node_Concat_283",
+        "weight": "decoder.fuse_half.proj_low.weight",
+        "low_input": "relu_24",
+        "old_resize_output": "upsample_bilinear2d_3",
+        "final_output": "conv2d_37",
+        "input_channels": 96,
+        "output_channels": 32,
+    },
+)
+_ZIP_DENSE_GROUP4 = (
+    ("node_Conv_437", "encoder.cross_scale.low_to_high.weight", (192, 96, 1, 1)),
+    ("node_Conv_438", "encoder.cross_scale.high_to_low.weight", (384, 48, 1, 1)),
+    ("node_Conv_441", "decoder.fuse3.proj_high.weight", (192, 48, 1, 1)),
+    ("node_Conv_442", "decoder.fuse3.proj_low.weight", (192, 72, 1, 1)),
+    ("node_Conv_443", "decoder.fuse2.proj_high.weight", (144, 24, 1, 1)),
+    ("node_Conv_444", "decoder.fuse2.proj_low.weight", (144, 48, 1, 1)),
+    ("node_Conv_445", "decoder.fuse1.proj_high.weight", (96, 12, 1, 1)),
+    ("node_Conv_446", "decoder.fuse1.proj_low.weight", (96, 36, 1, 1)),
+    ("node_Conv_449", "decoder.fuse_half.proj_high.weight", (32, 6, 1, 1)),
+    ("node_Conv_450", "decoder.fuse_half.proj_low.weight", (32, 24, 1, 1)),
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -208,7 +294,11 @@ def deterministic_model_bytes(model: onnx.ModelProto) -> bytes:
     return model.SerializeToString(deterministic=True)
 
 
-def canonicalize_export_metadata(model: onnx.ModelProto, graph_name: str) -> None:
+def canonicalize_export_metadata(
+    model: onnx.ModelProto,
+    graph_name: str,
+    producer_version: str = EXPORTER_VERSION,
+) -> None:
     """Remove source-path/line metadata without touching executable graph data.
 
     PyTorch records the Python wrapper's absolute path and line numbers on most
@@ -220,7 +310,7 @@ def canonicalize_export_metadata(model: onnx.ModelProto, graph_name: str) -> Non
     model.ClearField("metadata_props")
     model.doc_string = ""
     model.producer_name = EXPORTER_NAME
-    model.producer_version = EXPORTER_VERSION
+    model.producer_version = producer_version
     model.domain = ""
     model.model_version = 1
     model.graph.name = graph_name
@@ -239,6 +329,660 @@ def save_deterministic_model(model: onnx.ModelProto, path: Path) -> onnx.ModelPr
     checked = onnx.load(os.fspath(path))
     onnx.checker.check_model(checked, full_check=True)
     return checked
+
+
+def _copy_model(model: onnx.ModelProto) -> onnx.ModelProto:
+    result = onnx.ModelProto()
+    result.CopyFrom(model)
+    return result
+
+
+def _proto_bytes(value: object) -> bytes:
+    return value.SerializeToString(deterministic=True)
+
+
+def _named_nodes(model: onnx.ModelProto) -> dict[str, onnx.NodeProto]:
+    result: dict[str, onnx.NodeProto] = {}
+    for node in model.graph.node:
+        if not node.name or node.name in result:
+            raise ValueError("production ZipDepth branch requires unique named nodes")
+        result[node.name] = node
+    return result
+
+
+def _initializers(model: onnx.ModelProto) -> dict[str, onnx.TensorProto]:
+    result = {value.name: value for value in model.graph.initializer}
+    if len(result) != len(model.graph.initializer):
+        raise ValueError("production ZipDepth branch has duplicate initializer names")
+    return result
+
+
+def _value_info(model: onnx.ModelProto) -> dict[str, onnx.ValueInfoProto]:
+    values = {
+        value.name: value
+        for value in (
+            *model.graph.input,
+            *model.graph.output,
+            *model.graph.value_info,
+        )
+    }
+    if len(values) != (
+        len(model.graph.input) + len(model.graph.output) + len(model.graph.value_info)
+    ):
+        raise ValueError("production ZipDepth branch has duplicate tensor metadata")
+    return values
+
+
+def _tensor_types(model: onnx.ModelProto) -> dict[str, int]:
+    result = {
+        value.name: value.type.tensor_type.elem_type
+        for value in (
+            *model.graph.input,
+            *model.graph.output,
+            *model.graph.value_info,
+        )
+        if value.type.HasField("tensor_type")
+    }
+    result.update(
+        (initializer.name, initializer.data_type)
+        for initializer in model.graph.initializer
+    )
+    return result
+
+
+def _node_attributes(node: onnx.NodeProto) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for attribute in node.attribute:
+        value = helper.get_attribute_value(attribute)
+        if isinstance(value, bytes):
+            value = value.decode("ascii")
+        result[attribute.name] = value
+    return result
+
+
+def _attribute_int(node: onnx.NodeProto, name: str, default: int | None = None) -> int:
+    matches = [attribute for attribute in node.attribute if attribute.name == name]
+    if not matches:
+        if default is None:
+            raise ValueError(f"node {node.name} has no {name} attribute")
+        return default
+    if len(matches) != 1:
+        raise ValueError(f"node {node.name} repeats the {name} attribute")
+    return int(matches[0].i)
+
+
+def _set_attribute_int(node: onnx.NodeProto, name: str, value: int) -> None:
+    matches = [attribute for attribute in node.attribute if attribute.name == name]
+    if len(matches) != 1:
+        raise ValueError(f"node {node.name} must have exactly one {name} attribute")
+    matches[0].i = value
+
+
+def _consumer_indices(model: onnx.ModelProto) -> dict[str, list[int]]:
+    result: dict[str, list[int]] = {}
+    for index, node in enumerate(model.graph.node):
+        for name in node.input:
+            if name:
+                result.setdefault(name, []).append(index)
+    return result
+
+
+def _consumer_names(model: onnx.ModelProto) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for node in model.graph.node:
+        for name in node.input:
+            if name:
+                result.setdefault(name, []).append(node.name)
+    return result
+
+
+def _require_topological_order(model: onnx.ModelProto) -> None:
+    available = {
+        value.name for value in (*model.graph.input, *model.graph.initializer)
+    }
+    for node in model.graph.node:
+        missing = [name for name in node.input if name and name not in available]
+        if missing:
+            raise ValueError(f"node {node.name} is not topological; missing {missing}")
+        available.update(name for name in node.output if name)
+    missing_outputs = [
+        value.name for value in model.graph.output if value.name not in available
+    ]
+    if missing_outputs:
+        raise ValueError(f"production ZipDepth outputs have no producer: {missing_outputs}")
+
+
+def _strict_shape_inference(model: onnx.ModelProto) -> onnx.ModelProto:
+    return shape_inference.infer_shapes(
+        model,
+        check_type=True,
+        strict_mode=True,
+        data_prop=False,
+    )
+
+
+def _selective_zipdepth_fp16(
+    source: onnx.ModelProto,
+) -> tuple[onnx.ModelProto, dict[str, object]]:
+    nodes = list(source.graph.node)
+    first = next(
+        (index for index, node in enumerate(nodes) if node.name == _ZIP_FEATURE_FIRST),
+        None,
+    )
+    last = next(
+        (index for index, node in enumerate(nodes) if node.name == _ZIP_FEATURE_LAST),
+        None,
+    )
+    if first != 29 or last != 255:
+        raise ValueError(
+            f"production ZipDepth feature landmarks drifted: first={first}, last={last}"
+        )
+    if nodes[256].name != "node_Concat_317" or tuple(
+        node.name for node in nodes[257:]
+    ) != _ZIP_CONVEX_TAIL:
+        raise ValueError("production ZipDepth convex-tail landmarks drifted")
+    if len(nodes) != 268 or len(source.graph.initializer) != 111:
+        raise ValueError("production ZipDepth raw graph counts drifted")
+
+    inferred_source = _strict_shape_inference(source)
+    source_types = _tensor_types(inferred_source)
+    consumers = _consumer_indices(source)
+    initializers = _initializers(source)
+    initializer_names = set(initializers)
+    feature_indices = set(range(first, last + 1))
+    producer: dict[str, int] = {}
+    for index, node in enumerate(source.graph.node):
+        for output in node.output:
+            if output:
+                producer[output] = index
+
+    external_float_inputs: set[str] = set()
+    external_float_outputs: set[str] = set()
+    graph_outputs = {value.name for value in source.graph.output}
+    for index in sorted(feature_indices):
+        node = source.graph.node[index]
+        for input_name in node.input:
+            if not input_name or input_name in initializer_names:
+                continue
+            if (
+                producer.get(input_name) not in feature_indices
+                and source_types.get(input_name) == TensorProto.FLOAT
+            ):
+                external_float_inputs.add(input_name)
+        for output_name in node.output:
+            outside = any(
+                consumer not in feature_indices
+                for consumer in consumers.get(output_name, [])
+            )
+            if (
+                (outside or output_name in graph_outputs)
+                and source_types.get(output_name) == TensorProto.FLOAT
+            ):
+                external_float_outputs.add(output_name)
+    if external_float_inputs != {"zip_pixel_values"}:
+        raise ValueError(
+            f"ZipDepth FP16 feature ingress drifted: {sorted(external_float_inputs)}"
+        )
+    if external_float_outputs != {"conv2d_39"}:
+        raise ValueError(
+            f"ZipDepth FP16 feature egress drifted: {sorted(external_float_outputs)}"
+        )
+
+    selected_initializers = sorted(
+        initializer.name
+        for initializer in source.graph.initializer
+        if initializer.data_type == TensorProto.FLOAT
+        and any(index in feature_indices for index in consumers.get(initializer.name, []))
+        and set(consumers.get(initializer.name, [])).issubset(feature_indices)
+    )
+    if len(selected_initializers) != 88:
+        raise ValueError(
+            "production ZipDepth FP16 initializer count drifted: "
+            f"{len(selected_initializers)}"
+        )
+    if {"neighbor_kernel", "pixel_shuffle_kernel"} & set(selected_initializers):
+        raise ValueError("convex-tail kernels entered the ZipDepth FP16 selection")
+
+    candidate = _copy_model(source)
+    candidate_initializers = _initializers(candidate)
+    converted_elements = 0
+    converted_bytes_before = 0
+    converted_bytes_after = 0
+    for name in selected_initializers:
+        source_array = numpy_helper.to_array(initializers[name])
+        converted = source_array.astype(np.float16)
+        candidate_initializers[name].CopyFrom(
+            numpy_helper.from_array(converted, name=name)
+        )
+        converted_elements += int(source_array.size)
+        converted_bytes_before += int(source_array.nbytes)
+        converted_bytes_after += int(converted.nbytes)
+
+    candidate_nodes = list(candidate.graph.node)
+    first_node = candidate_nodes[first]
+    last_node = candidate_nodes[last]
+    if first_node.input[0] != "zip_pixel_values":
+        raise ValueError("ZipDepth feature input wiring drifted")
+    if list(last_node.output) != ["conv2d_39"]:
+        raise ValueError("ZipDepth mask-logit output wiring drifted")
+    first_node.input[0] = "pixel_values_fp16"
+    last_node.output[0] = "conv2d_39_fp16"
+
+    internal_casts = [
+        (index, node)
+        for index, node in enumerate(candidate_nodes)
+        if node.name == _ZIP_INTERNAL_FLOAT_CAST
+    ]
+    if len(internal_casts) != 1 or internal_casts[0][0] != 206:
+        raise ValueError("ZipDepth adaptive-pool denominator Cast drifted")
+    internal_cast = internal_casts[0][1]
+    if internal_cast.op_type != "Cast" or _attribute_int(internal_cast, "to") != TensorProto.FLOAT:
+        raise ValueError("ZipDepth adaptive-pool denominator is not the frozen FP32 Cast")
+    _set_attribute_int(internal_cast, "to", TensorProto.FLOAT16)
+
+    input_cast = helper.make_node(
+        "Cast",
+        ["zip_pixel_values"],
+        ["pixel_values_fp16"],
+        name="selective_fp16_input_cast",
+        to=TensorProto.FLOAT16,
+    )
+    output_cast = helper.make_node(
+        "Cast",
+        ["conv2d_39_fp16"],
+        ["conv2d_39"],
+        name="selective_fp16_logits_cast",
+        to=TensorProto.FLOAT,
+    )
+    rebuilt_nodes = (
+        candidate_nodes[:first]
+        + [input_cast]
+        + candidate_nodes[first : last + 1]
+        + [output_cast]
+        + candidate_nodes[last + 1 :]
+    )
+    candidate.graph.ClearField("node")
+    candidate.graph.node.extend(rebuilt_nodes)
+
+    feature_outputs = {
+        output
+        for node in source.graph.node[first : last + 1]
+        for output in node.output
+        if output
+    }
+    rewritten_metadata = feature_outputs | set(selected_initializers) | {
+        "pixel_values_fp16",
+        "conv2d_39_fp16",
+    }
+    retained_value_info = [
+        value
+        for value in candidate.graph.value_info
+        if value.name not in rewritten_metadata
+    ]
+    candidate.graph.ClearField("value_info")
+    candidate.graph.value_info.extend(retained_value_info)
+    candidate = _strict_shape_inference(candidate)
+    onnx.checker.check_model(candidate, full_check=True)
+    return candidate, {
+        "feature_node_range": [_ZIP_FEATURE_FIRST, _ZIP_FEATURE_LAST],
+        "feature_node_count": last - first + 1,
+        "converted_initializer_count": len(selected_initializers),
+        "converted_initializer_names": selected_initializers,
+        "converted_elements": converted_elements,
+        "converted_bytes_before": converted_bytes_before,
+        "converted_bytes_after": converted_bytes_after,
+        "input_cast": "selective_fp16_input_cast",
+        "logits_cast": "selective_fp16_logits_cast",
+        "retargeted_internal_cast": _ZIP_INTERNAL_FLOAT_CAST,
+    }
+
+
+def _set_channel(value: onnx.ValueInfoProto, channels: int) -> None:
+    shape = value.type.tensor_type.shape
+    if len(shape.dim) != 4:
+        raise ValueError(f"tensor {value.name} is not NCHW")
+    shape.dim[1].Clear()
+    shape.dim[1].dim_value = channels
+
+
+def _project_before_resize(
+    source: onnx.ModelProto,
+) -> tuple[onnx.ModelProto, list[dict[str, object]]]:
+    candidate = _copy_model(source)
+    nodes = list(candidate.graph.node)
+    named = _named_nodes(candidate)
+    values = _value_info(candidate)
+    initializers = _initializers(candidate)
+    consumers = _consumer_names(candidate)
+    positions = {node.name: index for index, node in enumerate(nodes)}
+    audits: list[dict[str, object]] = []
+
+    for spec in _ZIP_PROJECT_BEFORE_RESIZE:
+        label = str(spec["label"])
+        resize = named[str(spec["resize"])]
+        projection = named[str(spec["projection"])]
+        size_concat = named[str(spec["size_concat"])]
+        resize_index = positions[resize.name]
+        projection_index = positions[projection.name]
+        attributes = _node_attributes(projection)
+        resize_attributes = _node_attributes(resize)
+        if resize.op_type != "Resize" or projection.op_type != "Conv":
+            raise ValueError(f"{label} project-before-resize landmarks drifted")
+        if not resize_index < projection_index or len(projection.input) != 2:
+            raise ValueError(f"{label} low projection is not the frozen bias-free form")
+        if (
+            attributes.get("group") != 4
+            or attributes.get("strides") != [1, 1]
+            or attributes.get("pads") != [0, 0, 0, 0]
+            or attributes.get("dilations") != [1, 1]
+        ):
+            raise ValueError(f"{label} low projection attributes drifted")
+        expected_weight = str(spec["weight"])
+        if projection.input[1] != expected_weight:
+            raise ValueError(f"{label} low projection weight identity drifted")
+        weight = initializers[expected_weight]
+        expected_weight_shape = (
+            int(spec["output_channels"]),
+            int(spec["input_channels"]) // 4,
+            1,
+            1,
+        )
+        if (
+            weight.data_type != TensorProto.FLOAT16
+            or tuple(weight.dims) != expected_weight_shape
+        ):
+            raise ValueError(f"{label} low projection weight shape/dtype drifted")
+        if (
+            projection.input[0] != spec["old_resize_output"]
+            or resize.input[0] != spec["low_input"]
+            or projection.output[0] != spec["final_output"]
+            or resize.output[0] != spec["old_resize_output"]
+            or consumers.get(resize.output[0]) != [projection.name]
+        ):
+            raise ValueError(f"{label} resize/projection wiring drifted")
+        if (
+            resize_attributes.get("mode") != "linear"
+            or resize_attributes.get("coordinate_transformation_mode") != "half_pixel"
+            or len(resize.input) != 4
+            or list(resize.input[1:3]) != ["", ""]
+            or not resize.input[3]
+        ):
+            raise ValueError(f"{label} bilinear Resize attributes drifted")
+        if (
+            size_concat.op_type != "Concat"
+            or _attribute_int(size_concat, "axis") != 0
+            or len(size_concat.input) != 2
+            or resize.input[3] != size_concat.output[0]
+        ):
+            raise ValueError(f"{label} Resize size-vector producer drifted")
+        current_prefix_name = size_concat.input[0]
+        current_prefix = numpy_helper.to_array(initializers[current_prefix_name])
+        expected_prefix = np.asarray([1, int(spec["input_channels"])], dtype=np.int64)
+        if current_prefix.dtype != np.int64 or not np.array_equal(
+            current_prefix, expected_prefix
+        ):
+            raise ValueError(f"{label} Resize size-vector prefix drifted")
+
+        projected_low = f"project_before_resize_{label}_low"
+        size_prefix = f"project_before_resize_{label}_size_prefix"
+        if projected_low in values or size_prefix in initializers:
+            raise ValueError(f"{label} project-before-resize name collision")
+        candidate.graph.initializer.append(
+            numpy_helper.from_array(
+                np.asarray([1, int(spec["output_channels"])], dtype=np.int64),
+                name=size_prefix,
+            )
+        )
+        projection.input[0] = str(spec["low_input"])
+        projection.output[0] = projected_low
+        resize.input[0] = projected_low
+        resize.output[0] = str(spec["final_output"])
+        size_concat.input[0] = size_prefix
+
+        projected_info = onnx.ValueInfoProto()
+        projected_info.CopyFrom(values[str(spec["low_input"])])
+        projected_info.name = projected_low
+        _set_channel(projected_info, int(spec["output_channels"]))
+        old_value_indices = [
+            index
+            for index, value in enumerate(candidate.graph.value_info)
+            if value.name == spec["old_resize_output"]
+        ]
+        if len(old_value_indices) != 1:
+            raise ValueError(f"{label} resized tensor metadata drifted")
+        candidate.graph.value_info[old_value_indices[0]].CopyFrom(projected_info)
+        nodes[resize_index], nodes[projection_index] = (
+            nodes[projection_index],
+            nodes[resize_index],
+        )
+        audits.append(
+            {
+                "label": label,
+                "projection": projection.name,
+                "resize": resize.name,
+                "size_concat": size_concat.name,
+                "weight": expected_weight,
+                "projected_low": projected_low,
+                "size_prefix": size_prefix,
+                "input_channels": int(spec["input_channels"]),
+                "output_channels": int(spec["output_channels"]),
+            }
+        )
+
+    candidate.graph.ClearField("node")
+    candidate.graph.node.extend(nodes)
+    _require_topological_order(candidate)
+    onnx.checker.check_model(candidate, full_check=True)
+    return candidate, audits
+
+
+def expand_group4_pointwise_weight(
+    weight: onnx.TensorProto,
+) -> tuple[onnx.TensorProto, dict[str, object]]:
+    source = numpy_helper.to_array(weight)
+    if source.dtype != np.float16 or source.ndim != 4 or source.shape[2:] != (1, 1):
+        raise ValueError(f"{weight.name} is not an FP16 pointwise kernel")
+    output_channels, input_channels_per_group, _, _ = source.shape
+    if output_channels % 4:
+        raise ValueError(f"{weight.name} output channels are not divisible by four")
+    output_channels_per_group = output_channels // 4
+    dense = np.zeros(
+        (output_channels, input_channels_per_group * 4, 1, 1),
+        dtype=np.float16,
+    )
+    for group in range(4):
+        output_start = group * output_channels_per_group
+        output_end = output_start + output_channels_per_group
+        input_start = group * input_channels_per_group
+        input_end = input_start + input_channels_per_group
+        dense[output_start:output_end, input_start:input_end] = source[
+            output_start:output_end
+        ]
+        if not np.array_equal(
+            dense[output_start:output_end, input_start:input_end],
+            source[output_start:output_end],
+        ):
+            raise ValueError(f"{weight.name} live group block changed")
+        if np.count_nonzero(dense[output_start:output_end, :input_start]) or np.count_nonzero(
+            dense[output_start:output_end, input_end:]
+        ):
+            raise ValueError(f"{weight.name} off-block data is nonzero")
+    if np.count_nonzero(source) != np.count_nonzero(dense):
+        raise ValueError(f"{weight.name} nonzero count changed during expansion")
+    return numpy_helper.from_array(dense, name=weight.name), {
+        "source_shape": list(source.shape),
+        "dense_shape": list(dense.shape),
+        "source_nonzero_count": int(np.count_nonzero(source)),
+        "dense_nonzero_count": int(np.count_nonzero(dense)),
+    }
+
+
+def _densify_group4_pointwise(
+    source: onnx.ModelProto,
+) -> tuple[onnx.ModelProto, list[dict[str, object]]]:
+    candidate = _copy_model(source)
+    named = _named_nodes(candidate)
+    initializers = _initializers(candidate)
+    expected_nodes = {entry[0] for entry in _ZIP_DENSE_GROUP4}
+    actual_nodes = {
+        node.name
+        for node in candidate.graph.node
+        if node.op_type == "Conv" and _attribute_int(node, "group", 1) == 4
+    }
+    if actual_nodes != expected_nodes:
+        raise ValueError(
+            "production ZipDepth group-4 target set drifted: "
+            f"expected={sorted(expected_nodes)}, observed={sorted(actual_nodes)}"
+        )
+
+    audits: list[dict[str, object]] = []
+    for node_name, weight_name, compact_shape in _ZIP_DENSE_GROUP4:
+        node = named[node_name]
+        if (
+            node.op_type != "Conv"
+            or len(node.input) != 2
+            or node.input[1] != weight_name
+            or _attribute_int(node, "group") != 4
+        ):
+            raise ValueError(f"production grouped projection {node_name} drifted")
+        weight = initializers[weight_name]
+        if weight.data_type != TensorProto.FLOAT16 or tuple(weight.dims) != compact_shape:
+            raise ValueError(f"production grouped weight {weight_name} drifted")
+        rebuilt, evidence = expand_group4_pointwise_weight(weight)
+        initializers[weight_name].CopyFrom(rebuilt)
+        _set_attribute_int(node, "group", 1)
+        audits.append(
+            {
+                "node": node_name,
+                "weight": weight_name,
+                "group_before": 4,
+                "group_after": 1,
+                **evidence,
+            }
+        )
+    remaining = [
+        node.name
+        for node in candidate.graph.node
+        if node.op_type == "Conv" and _attribute_int(node, "group", 1) == 4
+    ]
+    if remaining:
+        raise ValueError(f"group-4 Conv remains after production rewrite: {remaining}")
+    onnx.checker.check_model(candidate, full_check=True)
+    return candidate, audits
+
+
+def optimize_zipdepth_branch_for_production(
+    raw_branch: onnx.ModelProto,
+) -> tuple[onnx.ModelProto, dict[str, object]]:
+    """Apply the frozen model-only production optimization recipe.
+
+    The caller authenticates the raw exported bytes before invoking this
+    postpass. These structural checks then fail closed if the expected feature,
+    decoder, or convex-tail topology changes.
+    """
+
+    if [(item.domain, item.version) for item in raw_branch.opset_import] != [
+        ("", OPSET_VERSION)
+    ]:
+        raise ValueError(f"ZipDepth optimization requires opset {OPSET_VERSION}")
+    _require_model_boundary(
+        raw_branch,
+        ("zip_pixel_values", "predicted_depth"),
+        ("refined_depth",),
+        "raw ZipDepth convex branch",
+    )
+    if len(raw_branch.graph.value_info) != 378:
+        raise ValueError("production ZipDepth raw value-info count drifted")
+    _named_nodes(raw_branch)
+    _require_topological_order(raw_branch)
+    onnx.checker.check_model(raw_branch, full_check=True)
+    raw_serialized = deterministic_model_bytes(raw_branch)
+
+    raw_nodes = _named_nodes(raw_branch)
+    raw_initializers = _initializers(raw_branch)
+    frozen_tail = {name: _proto_bytes(raw_nodes[name]) for name in _ZIP_CONVEX_TAIL}
+    frozen_group96 = {
+        name: _proto_bytes(raw_nodes[name]) for name in _ZIP_GROUP96_NODES
+    }
+    public_io = [
+        _proto_bytes(value) for value in (*raw_branch.graph.input, *raw_branch.graph.output)
+    ]
+    convex_initializers = {
+        name: _proto_bytes(raw_initializers[name])
+        for name in ("neighbor_kernel", "pixel_shuffle_kernel")
+    }
+
+    fp16, fp16_report = _selective_zipdepth_fp16(raw_branch)
+    projected, project_report = _project_before_resize(fp16)
+    optimized, dense_report = _densify_group4_pointwise(projected)
+    _require_topological_order(optimized)
+    onnx.checker.check_model(optimized, full_check=True)
+    inferred = _strict_shape_inference(optimized)
+    onnx.checker.check_model(inferred, full_check=True)
+    inferred_types = _tensor_types(inferred)
+
+    required_types = {
+        "zip_pixel_values": TensorProto.FLOAT,
+        "predicted_depth": TensorProto.FLOAT,
+        "pixel_values_fp16": TensorProto.FLOAT16,
+        "conv2d_39_fp16": TensorProto.FLOAT16,
+        "conv2d_39": TensorProto.FLOAT,
+        "refined_depth": TensorProto.FLOAT,
+    }
+    for name, expected in required_types.items():
+        if inferred_types.get(name) != expected:
+            raise ValueError(f"optimized ZipDepth precision drifted for {name}")
+    optimized_nodes = _named_nodes(optimized)
+    for name in _ZIP_CONVEX_TAIL:
+        if _proto_bytes(optimized_nodes[name]) != frozen_tail[name]:
+            raise ValueError(f"optimized ZipDepth changed frozen convex node {name}")
+        for output in optimized_nodes[name].output:
+            if output and inferred_types.get(output) != TensorProto.FLOAT:
+                raise ValueError(f"optimized ZipDepth convex output {output} is not FP32")
+    for name in _ZIP_GROUP96_NODES:
+        if _proto_bytes(optimized_nodes[name]) != frozen_group96[name]:
+            raise ValueError(f"optimized ZipDepth changed frozen group-96 node {name}")
+    if public_io != [
+        _proto_bytes(value)
+        for value in (*optimized.graph.input, *optimized.graph.output)
+    ]:
+        raise ValueError("optimized ZipDepth changed the public branch boundary")
+    optimized_initializers = _initializers(optimized)
+    for name, payload in convex_initializers.items():
+        if _proto_bytes(optimized_initializers[name]) != payload:
+            raise ValueError(f"optimized ZipDepth changed convex initializer {name}")
+    if len(optimized.graph.node) != 270 or len(optimized.graph.initializer) != 115:
+        raise ValueError("optimized ZipDepth final graph counts drifted")
+    repeat_fp16, _ = _selective_zipdepth_fp16(raw_branch)
+    repeat_projected, _ = _project_before_resize(repeat_fp16)
+    repeat_optimized, _ = _densify_group4_pointwise(repeat_projected)
+    if deterministic_model_bytes(optimized) != deterministic_model_bytes(repeat_optimized):
+        raise ValueError("optimized ZipDepth postpass is not deterministic")
+    if deterministic_model_bytes(raw_branch) != raw_serialized:
+        raise ValueError("ZipDepth optimization mutated the authenticated raw branch")
+
+    return optimized, {
+        "recipe": MODEL_OPTIMIZATION_RECIPE,
+        "order": [
+            "selective-zipdepth-feature-fp16",
+            "decoder-low-project-before-resize",
+            "group4-pointwise-to-block-diagonal-dense",
+        ],
+        "selective_fp16": fp16_report,
+        "project_before_resize": project_report,
+        "dense_group4": dense_report,
+        "precision": {
+            "public_io": "float32",
+            "predicted_depth": "float32",
+            "zipdepth_feature_mask": "float16",
+            "mask_logits_and_convex_tail": "float32",
+        },
+        "frozen_convex_tail": list(_ZIP_CONVEX_TAIL),
+        "frozen_group96_nodes": list(_ZIP_GROUP96_NODES),
+        "final_node_count": len(optimized.graph.node),
+        "final_initializer_count": len(optimized.graph.initializer),
+        "crossscale_pool_before_project": "excluded-after-matched-trt-regression",
+    }
 
 
 def compose_fused_models(
@@ -477,7 +1221,14 @@ def export_zipdepth_branch(
             raise ValueError(
                 f"unexpected exported shape for {value_info.name}: {shape_of(value_info)}"
             )
-    canonicalize_export_metadata(branch, "zipdepth_mask_convex2x_dynamic")
+    # Keep the authenticated raw-export identity stable across postpass-only
+    # exporter revisions. Version 3 changes the optimized/fused graph, not the
+    # PyTorch source graph serialized here.
+    canonicalize_export_metadata(
+        branch,
+        "zipdepth_mask_convex2x_dynamic",
+        producer_version=RAW_BRANCH_EXPORTER_VERSION,
+    )
     branch = save_deterministic_model(branch, output_path)
     return {
         "torch": torch.__version__,
@@ -642,21 +1393,42 @@ def main(argv: Sequence[str] | None = None) -> int:
     if license_path.is_file():
         report["sources"]["zipdepth_license"] = file_record(license_path)
 
-    branch_path = output / BRANCH_FILENAME
-    report["zipdepth_branch"] = export_zipdepth_branch(
+    raw_branch_path = output / RAW_BRANCH_FILENAME
+    report["raw_zipdepth_branch"] = export_zipdepth_branch(
         zip_repository,
         checkpoint,
-        branch_path,
+        raw_branch_path,
         args.torch_site_packages.resolve() if args.torch_site_packages else None,
     )
+    report["raw_zipdepth_branch"]["frozen_identity"] = require_artifact_identity(
+        raw_branch_path,
+        int(export_contract["raw_zipdepth_branch_onnx_bytes"]),
+        str(export_contract["raw_zipdepth_branch_onnx_sha256"]),
+        "raw ZipDepth branch ONNX",
+    )
+
+    raw_branch_model = onnx.load(os.fspath(raw_branch_path))
+    branch_model, optimization_report = optimize_zipdepth_branch_for_production(
+        raw_branch_model
+    )
+    canonicalize_export_metadata(
+        branch_model,
+        "zipdepth_mask_convex2x_dynamic_optimized",
+    )
+    branch_path = output / BRANCH_FILENAME
+    branch_model = save_deterministic_model(branch_model, branch_path)
+    report["zipdepth_branch"] = {
+        "optimization": optimization_report,
+        "contract": model_contract(branch_model),
+        "artifact": file_record(branch_path),
+    }
     report["zipdepth_branch"]["frozen_identity"] = require_artifact_identity(
         branch_path,
         int(export_contract["zipdepth_branch_onnx_bytes"]),
         str(export_contract["zipdepth_branch_onnx_sha256"]),
-        "ZipDepth branch ONNX",
+        "optimized ZipDepth branch ONNX",
     )
     dav2_model = onnx.load(os.fspath(dav2_path))
-    branch_model = onnx.load(os.fspath(branch_path))
     fused = compose_fused_models(dav2_model, branch_model)
     fused_path = output / FUSED_FILENAME
     fused = save_deterministic_model(fused, fused_path)
@@ -689,6 +1461,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest = {
         "schema": 1,
         "report": file_record(report_path),
+        "raw_branch_onnx": file_record(raw_branch_path),
         "branch_onnx": file_record(branch_path),
         "fused_onnx": file_record(fused_path),
     }

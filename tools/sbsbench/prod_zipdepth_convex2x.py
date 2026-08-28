@@ -54,6 +54,30 @@ _CONTRACT_KEYS = {
 }
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _GIT_COMMIT = re.compile(r"[0-9a-f]{40}")
+_MODEL_OPTIMIZATION_ORDER = [
+    "selective-zipdepth-feature-fp16",
+    "decoder-low-project-before-resize",
+    "group4-pointwise-to-block-diagonal-dense",
+]
+_PROJECT_BEFORE_RESIZE_NODES = [
+    "node_Conv_442", "node_Conv_444", "node_Conv_446", "node_Conv_450",
+]
+_DENSE_GROUP4_NODES = [
+    "node_Conv_437", "node_Conv_438", "node_Conv_441", "node_Conv_442",
+    "node_Conv_443", "node_Conv_444", "node_Conv_445", "node_Conv_446",
+    "node_Conv_449", "node_Conv_450",
+]
+_FROZEN_CONVEX_TAIL_NODES = [
+    "node_view_2", "node_softmax_1", "node_unsqueeze_10", "node_pad",
+    "node_Conv_455", "node_unsqueeze_11", "node_mul_587", "node_sum_1",
+    "node_convolution", "node_select_18", "node_relu_27",
+]
+_EXCLUDED_MODEL_REWRITES = [
+    "crossscale-pool-before-project",
+    "attention-conv-to-gemm",
+    "generic-modelopt-autocast",
+    "cuda-tile-plugin",
+]
 
 
 def _exact_object(value: object, keys: set[str], label: str) -> dict[str, object]:
@@ -78,6 +102,12 @@ def _hash(value: object, pattern: re.Pattern[str], label: str) -> str:
     if not isinstance(value, str) or pattern.fullmatch(value) is None:
         raise ValueError(f"prod ZipDepth convex2x contract has invalid {label}")
     return value
+
+
+def _exact_string_list(value: object, expected: list[str], label: str) -> None:
+    if (not isinstance(value, list) or value != expected or
+            any(not isinstance(item, str) for item in value)):
+        raise ValueError(f"prod ZipDepth convex2x contract has invalid {label}")
 
 
 def _expected_shape_profiles() -> tuple[tuple[Shape, ...], tuple[Shape, ...]]:
@@ -140,7 +170,9 @@ def _validate_contract(value: object) -> dict[str, object]:
 
     export = _exact_object(
         contract.get("export"),
-        {"opset", "zipdepth_branch_onnx_bytes", "zipdepth_branch_onnx_sha256",
+        {"opset", "raw_zipdepth_branch_onnx_bytes",
+         "raw_zipdepth_branch_onnx_sha256", "zipdepth_branch_onnx_bytes",
+         "zipdepth_branch_onnx_sha256", "model_optimization",
          "release_builder_optimization_level"},
         "export recipe")
     if (_positive_int(export.get("opset"), "export opset") != 18 or
@@ -148,8 +180,61 @@ def _validate_contract(value: object) -> dict[str, object]:
                 export.get("release_builder_optimization_level"),
                 "release builder optimization level") != 5):
         raise ValueError("prod ZipDepth convex2x contract has invalid export recipe")
+    _positive_int(
+        export.get("raw_zipdepth_branch_onnx_bytes"),
+        "raw ZipDepth branch byte count")
+    _hash(
+        export.get("raw_zipdepth_branch_onnx_sha256"),
+        _SHA256,
+        "raw ZipDepth branch hash")
     _positive_int(export.get("zipdepth_branch_onnx_bytes"), "ZipDepth branch byte count")
     _hash(export.get("zipdepth_branch_onnx_sha256"), _SHA256, "ZipDepth branch hash")
+    optimization = _exact_object(
+        export.get("model_optimization"),
+        {"recipe", "order", "precision", "selective_fp16_initializer_count",
+         "project_before_resize_nodes", "dense_group4_nodes",
+         "frozen_convex_tail_nodes", "final_node_count",
+         "final_initializer_count", "excluded_rewrites"},
+        "model optimization recipe")
+    if (optimization.get("recipe") !=
+            "zipdepth-selective-fp16-project-before-resize-dense-group4-v1" or
+            optimization.get("selective_fp16_initializer_count") != 88 or
+            optimization.get("final_node_count") != 270 or
+            optimization.get("final_initializer_count") != 115):
+        raise ValueError(
+            "prod ZipDepth convex2x contract has invalid model optimization recipe")
+    _exact_string_list(
+        optimization.get("order"), _MODEL_OPTIMIZATION_ORDER,
+        "model optimization order")
+    _exact_string_list(
+        optimization.get("project_before_resize_nodes"),
+        _PROJECT_BEFORE_RESIZE_NODES,
+        "project-before-resize nodes")
+    _exact_string_list(
+        optimization.get("dense_group4_nodes"),
+        _DENSE_GROUP4_NODES,
+        "dense group-4 nodes")
+    _exact_string_list(
+        optimization.get("frozen_convex_tail_nodes"),
+        _FROZEN_CONVEX_TAIL_NODES,
+        "frozen convex-tail nodes")
+    _exact_string_list(
+        optimization.get("excluded_rewrites"),
+        _EXCLUDED_MODEL_REWRITES,
+        "excluded model rewrites")
+    precision = _exact_object(
+        optimization.get("precision"),
+        {"public_io", "dav2", "zipdepth_feature_mask",
+         "predicted_depth_and_convex_tail"},
+        "model optimization precision")
+    if precision != {
+            "public_io": "float32",
+            "dav2": "frozen-source-mixed-fp16-with-fp32-boundary",
+            "zipdepth_feature_mask": "float16",
+            "predicted_depth_and_convex_tail": "float32",
+            }:
+        raise ValueError(
+            "prod ZipDepth convex2x contract has invalid model optimization precision")
 
     operator = _exact_object(
         contract.get("operator"),
