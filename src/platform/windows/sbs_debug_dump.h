@@ -152,6 +152,10 @@ namespace platf::sbs_debug {
     int model_height = 0;
     int raw_width = 0;
     int raw_height = 0;
+    int field_width = 0;
+    int field_height = 0;
+    models::depth_tensor_content_rect_t field_content {};
+    bool refined_live_geometry_active = false;
     std::uint64_t matched_frame_id = 0;
     /** Exact authenticated analysis domain bound to every model/depth/parallax artifact. */
     models::depth_input_region_t depth_input_region {};

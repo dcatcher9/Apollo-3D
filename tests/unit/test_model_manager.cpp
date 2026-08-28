@@ -10,6 +10,38 @@
 
 #include <src/model_manager.h>
 
+TEST(ModelManagerTest, DepthEngineRecipesKeepLegacyAndFusedPlansIsolated) {
+  const config::depth_model_info model {
+    .name = "depth_anything_v2_fp16",
+    .url = {},
+  };
+  constexpr std::string_view compatibility_tag = "trt11-sm120-onnxsha";
+  using enum models::prod_zipdepth_convex2x::engine_io_e;
+
+  const auto legacy = models::engine_filename(model, compatibility_tag);
+  EXPECT_EQ(
+    legacy,
+    models::engine_filename(model, production_dav2, compatibility_tag)
+  );
+  EXPECT_EQ(
+    legacy,
+    "depth_anything_v2_fp16.trt-opt770x434-max1036-level5-v3."
+    "trt11-sm120-onnxsha.engine"
+  );
+
+  const auto fused = models::engine_filename(
+    model, production_dav2_zipdepth_convex2x, compatibility_tag
+  );
+  EXPECT_EQ(
+    fused,
+    "depth_anything_v2_fp16.trt-six-point-profiles-level5-v1."
+    "trt11-sm120-onnxsha.engine"
+  );
+  EXPECT_NE(fused, legacy);
+  EXPECT_TRUE(models::engine_filename(model, invalid, compatibility_tag).empty());
+  EXPECT_EQ(models::depth_engine_builder_level, 5);
+}
+
 TEST(ModelManagerTest, OcrEngineFilenameIsBoundedAndCommitsTheCompleteIdentity) {
   const std::string compatibility_tag =
     "trt11_2_1_2-sm120-gpu0123456789abcdef-onnx" + std::string(64, 'a');

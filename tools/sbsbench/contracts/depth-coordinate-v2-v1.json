@@ -1,5 +1,5 @@
 {
-  "schema": 71,
+  "schema": 72,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -7,7 +7,7 @@
     "binding": "raw-depth-model-input-and-preprocess-source-produced-by-calibrated-identity-v3"
   },
   "subtitle_ocr": {
-    "schema": 13,
+    "schema": 14,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
     "artifact_onnx_sha256": "169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44",
@@ -58,6 +58,20 @@
       ]
     },
     "field_policy": {
+      "live_field_shapes": [
+        {
+          "width": 1540,
+          "height": 868
+        },
+        {
+          "width": 2044,
+          "height": 868
+        },
+        {
+          "width": 2072,
+          "height": 868
+        }
+      ],
       "detector_active_probability_threshold": 0.2,
       "detector_min_mean_score": 0.4,
       "locator_max_width_numerator": 9,
@@ -203,6 +217,11 @@
         "source_target": "cs_5_0"
       },
       {
+        "source_file": "prod_zipdepth_convex2x_live_map_cs.hlsl",
+        "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
         "source_file": "depth_coordinate_v2_ownership_cs.hlsl",
         "source_entrypoint": "main",
         "source_target": "cs_5_0"
@@ -243,7 +262,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "11bde7ba05ca8ae8404b8fe21a3afd600ff98549fea248dacb5bf1b5d2156d6b"
+    "source_closure_sha256": "93b457e7cfedd9fe37924d21d44fc21760115cd82e4af57a9e1a7adcd60c0411"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,

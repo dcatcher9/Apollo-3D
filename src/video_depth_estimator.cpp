@@ -11,6 +11,7 @@
 #include "model_manager.h"
 #include "platform/windows/misc.h"
 #include "platform/windows/utils.h"
+#include "prod_zipdepth_convex2x.h"
 #include "sbs_perf.h"
 #include "utility.h"
 
@@ -85,9 +86,6 @@ static void set_model_prepare_status(const std::string &engine_name, models::eng
 static std::mutex g_trt_mutex;
 static std::condition_variable g_trt_context_available;
 static std::mutex g_tensorrt_compile_mutex;
-// One active stream normally needs one context; four permits bounded encoder-transition and
-// failed-warmup recovery without letting repeated rebuilds consume VRAM without bound.
-static constexpr std::size_t kMaxContextsPerEngine = 4;
 static nvinfer1::IRuntime *g_runtime = nullptr;
 static std::once_flag g_cuda_init_once;
 static CUresult g_cuda_init_result = CUDA_ERROR_NOT_READY;
@@ -253,6 +251,8 @@ struct engine_slot {
   models::detail::execution_context_accounting_t context_accounting;
   bool io_validated = false;
   bool io_compatible = false;
+  models::prod_zipdepth_convex2x::engine_io_e io_kind =
+    models::prod_zipdepth_convex2x::engine_io_e::invalid;
 };
 
 static std::map<std::string, engine_slot> g_engines;  // guarded by g_trt_mutex
@@ -261,11 +261,22 @@ static std::size_t allocated_context_count(const engine_slot &slot) {
   return slot.context_accounting.allocated();
 }
 
+// TensorRT 11.2 does not permit one optimization profile to be used concurrently by two
+// execution contexts. The fused engine's six profiles are six shapes, so it has no duplicate
+// profile available for transition concurrency and must remain a one-physical-context lifetime.
+// Invalid is used by OCR slots and deliberately retains the established standard pool cap.
+static std::size_t slot_context_limit(const engine_slot &slot) {
+  const bool fused =
+    slot.io_kind == models::prod_zipdepth_convex2x::engine_io_e::
+                      production_dav2_zipdepth_convex2x;
+  return models::detail::tensorrt_context_limit(fused);
+}
+
 // The object is deliberately leaked because destroying TensorRT interfaces across this compiler
 // boundary corrupts the heap. Removing it from usable accounting prevents a later session from
 // treating a context that never completed warmup, or later suffered an asynchronous execution
 // failure, as reusable; quarantined accounting keeps repeated failures bounded by
-// kMaxContextsPerEngine.
+// the slot-specific physical context limit.
 static void quarantine_execution_context_locked(
   const std::string &engine_key,
   nvinfer1::IExecutionContext *&context,
@@ -311,12 +322,13 @@ static startup_context_reservation_e reserve_startup_context_locked(
   const std::string &engine_key
 ) {
   auto &slot = g_engines[engine_key];
-  if (allocated_context_count(slot) >= kMaxContextsPerEngine) {
+  const std::size_t context_limit = slot_context_limit(slot);
+  if (allocated_context_count(slot) >= context_limit) {
     return slot.context_accounting.warmed() != 0u ?
              startup_context_reservation_e::resident_warmed :
              startup_context_reservation_e::unavailable;
   }
-  slot.context_accounting.reserve(kMaxContextsPerEngine);
+  slot.context_accounting.reserve(context_limit);
   return startup_context_reservation_e::create;
 }
 
@@ -438,12 +450,29 @@ static bool validate_engine_io_locked(nvinfer1::ICudaEngine *engine, engine_slot
   }
 
   slot.io_validated = true;
-  bool have_in = false;
-  bool have_out = false;
-  bool input_fp32 = false;
-  bool output_fp32 = false;
-  bool input_mode_ok = false;
-  bool output_mode_ok = false;
+  slot.io_kind = models::prod_zipdepth_convex2x::engine_io_e::invalid;
+  struct observed_tensor_t {
+    bool present = false;
+    bool fp32 = false;
+    bool mode_ok = false;
+  };
+  observed_tensor_t dav2_input;
+  observed_tensor_t guidance_input;
+  observed_tensor_t coarse_output;
+  observed_tensor_t refined_output;
+  const auto observe = [](
+                         observed_tensor_t &tensor,
+                         const nvinfer1::DataType type,
+                         const nvinfer1::TensorIOMode mode,
+                         const nvinfer1::TensorIOMode expected_mode
+                       ) {
+    // Tensor names are required to be unique. Treat a duplicate defensively as an invalid mode
+    // observation even though TensorRT normally rejects it while parsing/deserializing.
+    const bool first = !tensor.present;
+    tensor.present = true;
+    tensor.fp32 = first && type == nvinfer1::DataType::kFLOAT;
+    tensor.mode_ok = first && mode == expected_mode;
+  };
   for (int i = 0; i < engine->getNbIOTensors(); i++) {
     const char *name = engine->getIOTensorName(i);
     if (!name) {
@@ -451,39 +480,48 @@ static bool validate_engine_io_locked(nvinfer1::ICudaEngine *engine, engine_slot
       continue;
     }
     const auto type = engine->getTensorDataType(name);
-    const bool is_input = engine->getTensorIOMode(name) == nvinfer1::TensorIOMode::kINPUT;
+    const auto mode = engine->getTensorIOMode(name);
+    const bool is_input = mode == nvinfer1::TensorIOMode::kINPUT;
     BOOST_LOG(info) << "Depth engine tensor '" << name << "' " << (is_input ? "(input)" : "(output)")
                     << " dtype=" << tensor_dtype_name(type);
-    if (std::string_view(name) == "pixel_values") {
-      have_in = true;
-      input_fp32 = type == nvinfer1::DataType::kFLOAT;
-      input_mode_ok = is_input;
-      if (!input_mode_ok) {
-        BOOST_LOG(error) << "Depth model tensor 'pixel_values' is not an input; rejecting the engine.";
-      }
-      if (!input_fp32) {
-        BOOST_LOG(error) << "Depth model input 'pixel_values' is " << tensor_dtype_name(type)
-                         << ", not FP32; rejecting the engine. Use a keep_io_types (FP32 I/O) model.";
-      }
-    } else if (std::string_view(name) == "predicted_depth") {
-      have_out = true;
-      output_fp32 = type == nvinfer1::DataType::kFLOAT;
-      output_mode_ok = !is_input;
-      if (!output_mode_ok) {
-        BOOST_LOG(error) << "Depth model tensor 'predicted_depth' is not an output; rejecting the engine.";
-      }
-      if (!output_fp32) {
-        BOOST_LOG(error) << "Depth model output 'predicted_depth' is " << tensor_dtype_name(type)
-                         << ", not FP32; rejecting the engine.";
-      }
+    const std::string_view tensor_name {name};
+    if (tensor_name == models::prod_zipdepth_convex2x::dav2_input) {
+      observe(dav2_input, type, mode, nvinfer1::TensorIOMode::kINPUT);
+    } else if (tensor_name == models::prod_zipdepth_convex2x::guidance_input) {
+      observe(guidance_input, type, mode, nvinfer1::TensorIOMode::kINPUT);
+    } else if (tensor_name == models::prod_zipdepth_convex2x::coarse_output) {
+      observe(coarse_output, type, mode, nvinfer1::TensorIOMode::kOUTPUT);
+    } else if (tensor_name == models::prod_zipdepth_convex2x::refined_output) {
+      observe(refined_output, type, mode, nvinfer1::TensorIOMode::kOUTPUT);
     }
   }
-  if (!have_in || !have_out) {
-    BOOST_LOG(error) << "Depth model is missing the expected tensor name(s) 'pixel_values'/'predicted_depth'; "
-                        "rejecting the engine.";
+  slot.io_kind = models::prod_zipdepth_convex2x::classify_named_io(
+    static_cast<std::uint32_t>(engine->getNbIOTensors()),
+    dav2_input.present,
+    guidance_input.present,
+    coarse_output.present,
+    refined_output.present
+  );
+  const bool required_properties_ok =
+    dav2_input.fp32 && dav2_input.mode_ok &&
+    coarse_output.fp32 && coarse_output.mode_ok &&
+    (slot.io_kind != models::prod_zipdepth_convex2x::engine_io_e::
+                       production_dav2_zipdepth_convex2x ||
+     (guidance_input.fp32 && guidance_input.mode_ok &&
+      refined_output.fp32 && refined_output.mode_ok));
+  const bool fused_profiles_ok =
+    slot.io_kind != models::prod_zipdepth_convex2x::engine_io_e::
+                      production_dav2_zipdepth_convex2x ||
+    engine->getNbOptimizationProfiles() ==
+      static_cast<int>(models::prod_zipdepth_convex2x::fixed_profile_shapes.size());
+  slot.io_compatible =
+    slot.io_kind != models::prod_zipdepth_convex2x::engine_io_e::invalid &&
+    required_properties_ok && fused_profiles_ok;
+  if (!slot.io_compatible) {
+    BOOST_LOG(error)
+      << "Depth engine must expose either the exact legacy two-tensor FP32 contract or the "
+         "exact fused four-tensor FP32 contract with six fixed profiles; rejecting the engine.";
   }
-  slot.io_compatible = have_in && have_out && input_fp32 && output_fp32 &&
-                       input_mode_ok && output_mode_ok;
   return slot.io_compatible;
 }
 
@@ -552,6 +590,7 @@ static bool detach_incompatible_engine_locked(const std::string &engine_key) {
   if (!slot.engine) {
     slot.io_validated = false;
     slot.io_compatible = false;
+    slot.io_kind = models::prod_zipdepth_convex2x::engine_io_e::invalid;
     return allocated_context_count(slot) == 0 && slot.context_pool.empty();
   }
 
@@ -572,6 +611,7 @@ static bool detach_incompatible_engine_locked(const std::string &engine_key) {
   slot.engine = nullptr;  // intentionally leaked; see the ABI note above
   slot.io_validated = false;
   slot.io_compatible = false;
+  slot.io_kind = models::prod_zipdepth_convex2x::engine_io_e::invalid;
   g_trt_context_available.notify_all();
   return true;
 }
@@ -579,9 +619,14 @@ static bool detach_incompatible_engine_locked(const std::string &engine_key) {
 static bool warmup_execution_context(
   cuda_driver_api &cuda,
   CUcontext cuda_ctx,
-  nvinfer1::IExecutionContext *exec_context
+  nvinfer1::IExecutionContext *exec_context,
+  const models::prod_zipdepth_convex2x::engine_io_e io_kind
 ) {
-  if (!exec_context || !cuda.is_valid()) {
+  const bool fused =
+    io_kind == models::prod_zipdepth_convex2x::engine_io_e::
+                 production_dav2_zipdepth_convex2x;
+  if (!exec_context || !cuda.is_valid() ||
+      io_kind == models::prod_zipdepth_convex2x::engine_io_e::invalid) {
     return false;
   }
   if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
@@ -600,25 +645,121 @@ static bool warmup_execution_context(
   constexpr int w = models::depth_engine_opt_width;
   const size_t in_elems = (size_t) 3 * h * w;
   const size_t out_elems = (size_t) h * w;
+  const size_t guidance_in_elems =
+    (size_t) 3 * models::prod_zipdepth_convex2x::scale * h *
+    models::prod_zipdepth_convex2x::scale * w;
+  const size_t refined_out_elems =
+    (size_t) models::prod_zipdepth_convex2x::scale * h *
+    models::prod_zipdepth_convex2x::scale * w;
+  const std::size_t coarse_logical_bytes = out_elems * sizeof(float);
+  const std::size_t refined_logical_bytes = refined_out_elems * sizeof(float);
+  const auto aligned_coarse_bytes =
+    models::detail::checked_tensorrt_output_allocation_bytes(coarse_logical_bytes);
+  const auto aligned_refined_bytes =
+    models::detail::checked_tensorrt_output_allocation_bytes(refined_logical_bytes);
+  if (!aligned_coarse_bytes || !aligned_refined_bytes) {
+    return false;
+  }
+  const std::size_t coarse_capacity =
+    fused ? *aligned_coarse_bytes : coarse_logical_bytes;
+  const std::size_t refined_capacity = *aligned_refined_bytes;
   CUdeviceptr d_in = 0;
   CUdeviceptr d_out = 0;
+  CUdeviceptr d_guidance_in = 0;
+  CUdeviceptr d_refined_out = 0;
   if (cuda.cuMemAlloc(&d_in, in_elems * sizeof(float)) != CUDA_SUCCESS) {
     return false;
   }
   auto free_input = util::fail_guard([&]() {
     cuda.cuMemFree(d_in);
   });
-  if (cuda.cuMemAlloc(&d_out, out_elems * sizeof(float)) != CUDA_SUCCESS) {
+  if (cuda.cuMemAlloc(&d_out, coarse_capacity) != CUDA_SUCCESS) {
     return false;
   }
   auto free_output = util::fail_guard([&]() {
     cuda.cuMemFree(d_out);
   });
+  if (fused &&
+      cuda.cuMemAlloc(
+        &d_guidance_in, guidance_in_elems * sizeof(float)
+      ) != CUDA_SUCCESS) {
+    return false;
+  }
+  auto free_guidance_input = util::fail_guard([&]() {
+    if (d_guidance_in) {
+      cuda.cuMemFree(d_guidance_in);
+    }
+  });
+  if (fused &&
+      cuda.cuMemAlloc(
+        &d_refined_out, refined_capacity
+      ) != CUDA_SUCCESS) {
+    return false;
+  }
+  auto free_refined_output = util::fail_guard([&]() {
+    if (d_refined_out) {
+      cuda.cuMemFree(d_refined_out);
+    }
+  });
 
   const auto input_dims = make_input_dims(h, w);
-  const bool bound = exec_context->setInputShape("pixel_values", input_dims) &&
-                     exec_context->setTensorAddress("pixel_values", (void *) d_in) &&
-                     exec_context->setTensorAddress("predicted_depth", (void *) d_out);
+  const auto guidance_dims = make_input_dims(
+    static_cast<int>(models::prod_zipdepth_convex2x::scale) * h,
+    static_cast<int>(models::prod_zipdepth_convex2x::scale) * w
+  );
+  const bool profile_selection_attempted = fused;
+  const bool profile_selected = !fused ||
+    exec_context->setOptimizationProfileAsync(0, stream);
+  const bool coarse_shape_attempted = profile_selected;
+  const bool coarse_shape_set = coarse_shape_attempted &&
+    exec_context->setInputShape(
+      models::prod_zipdepth_convex2x::dav2_input.data(), input_dims
+    );
+  const bool guidance_shape_attempted = fused && coarse_shape_set;
+  const bool guidance_shape_set = !fused ||
+    (guidance_shape_attempted && exec_context->setInputShape(
+      models::prod_zipdepth_convex2x::guidance_input.data(), guidance_dims
+    ));
+  const bool output_bounds_attempted = fused && coarse_shape_set && guidance_shape_set;
+  std::int64_t coarse_required = -1;
+  std::int64_t refined_required = -1;
+  if (output_bounds_attempted) {
+    coarse_required = exec_context->getMaxOutputSize(
+      models::prod_zipdepth_convex2x::coarse_output.data()
+    );
+    refined_required = exec_context->getMaxOutputSize(
+      models::prod_zipdepth_convex2x::refined_output.data()
+    );
+  }
+  const bool output_bounds_valid = !fused ||
+    (output_bounds_attempted && coarse_required > 0 && refined_required > 0 &&
+     static_cast<std::uint64_t>(coarse_required) <= coarse_capacity &&
+     static_cast<std::uint64_t>(refined_required) <= refined_capacity);
+  const bool address_binding_attempted =
+    coarse_shape_set && guidance_shape_set && output_bounds_valid;
+  const bool coarse_input_address_bound = address_binding_attempted &&
+    exec_context->setTensorAddress(
+      models::prod_zipdepth_convex2x::dav2_input.data(),
+      reinterpret_cast<void *>(d_in)
+    );
+  const bool coarse_output_address_bound = address_binding_attempted &&
+    exec_context->setTensorAddress(
+      models::prod_zipdepth_convex2x::coarse_output.data(),
+      reinterpret_cast<void *>(d_out)
+    );
+  const bool guidance_input_address_bound = !fused ||
+    (address_binding_attempted && exec_context->setTensorAddress(
+      models::prod_zipdepth_convex2x::guidance_input.data(),
+      reinterpret_cast<void *>(d_guidance_in)
+    ));
+  const bool refined_output_address_bound = !fused ||
+    (address_binding_attempted && exec_context->setTensorAddress(
+      models::prod_zipdepth_convex2x::refined_output.data(),
+      reinterpret_cast<void *>(d_refined_out)
+    ));
+  const bool bound = address_binding_attempted &&
+    coarse_input_address_bound && coarse_output_address_bound &&
+    guidance_input_address_bound && refined_output_address_bound;
   bool enqueued = false;
   const bool enqueue_attempted = bound;
   if (bound) {
@@ -626,13 +767,15 @@ static bool warmup_execution_context(
     enqueued = exec_context->enqueueV3(stream);
   }
   CUresult synchronize_result = CUDA_SUCCESS;
-  if (enqueue_attempted) {
+  const bool asynchronous_work_attempted =
+    profile_selection_attempted || enqueue_attempted;
+  if (asynchronous_work_attempted) {
     synchronize_result = cuda.cuStreamSynchronize ?
                            cuda.cuStreamSynchronize(stream) :
                            static_cast<CUresult>(-1);
   }
   const bool stream_quiesced = models::detail::asynchronous_operands_may_be_released(
-    enqueue_attempted,
+    asynchronous_work_attempted,
     cuda.cuStreamSynchronize != nullptr,
     synchronize_result == CUDA_SUCCESS ?
       models::detail::async_stream_readiness_e::ready :
@@ -640,19 +783,45 @@ static bool warmup_execution_context(
   );
   if (!stream_quiesced) {
     // enqueueV3(false) can still mean partial asynchronous submission, and a failed synchronize
-    // may itself be reporting that launch. Without a positive quiescence proof, freeing either
-    // operand or destroying the stream can race live driver work. The caller quarantines the
+    // may itself be reporting that launch. Without a positive quiescence proof, freeing any
+    // startup operand or destroying the stream can race live driver work. The caller quarantines
     // TensorRT context; retain these small startup allocations with it deliberately.
+    free_refined_output.disable();
+    free_guidance_input.disable();
     free_output.disable();
     free_input.disable();
     destroy_stream.disable();
     BOOST_LOG(warning)
       << "Depth startup warmup could not prove stream quiescence (enqueue=" << enqueued
+      << ", profile=" << profile_selected
       << ", synchronize=" << synchronize_result
       << "); retaining its CUDA operands with the quarantined context.";
   }
   const bool synchronized = enqueued && stream_quiesced;
-  BOOST_LOG(info) << "Depth model startup warmup complete (" << w << 'x' << h
+  if (!synchronized) {
+    BOOST_LOG(error)
+      << (fused ? "Fused DAV2 + convex2x" : "DAV2")
+      << " startup warmup diagnostics: profile_attempted="
+      << profile_selection_attempted << " profile_selected=" << profile_selected
+      << " coarse_shape_attempted=" << coarse_shape_attempted
+      << " coarse_shape_set=" << coarse_shape_set
+      << " guidance_shape_attempted=" << guidance_shape_attempted
+      << " guidance_shape_set=" << guidance_shape_set
+      << " output_bounds_attempted=" << output_bounds_attempted
+      << " coarse_required/capacity=" << coarse_required << '/' << coarse_capacity
+      << " refined_required/capacity=" << refined_required << '/' << refined_capacity
+      << " output_bounds_valid=" << output_bounds_valid
+      << " address_binding_attempted=" << address_binding_attempted
+      << " coarse_input_address=" << coarse_input_address_bound
+      << " coarse_output_address=" << coarse_output_address_bound
+      << " guidance_input_address=" << guidance_input_address_bound
+      << " refined_output_address=" << refined_output_address_bound
+      << " enqueue_attempted=" << enqueue_attempted << " enqueued=" << enqueued
+      << " synchronize=" << synchronize_result
+      << " stream_quiesced=" << stream_quiesced << '.';
+  }
+  BOOST_LOG(info) << (fused ? "Fused DAV2 + convex2x" : "DAV2")
+                  << " depth model startup warmup complete (" << w << 'x' << h
                   << (synchronized ? ")." : "); execution failed.");
   return synchronized;
 }
@@ -825,6 +994,40 @@ namespace models {
     static_assert(host_sbs_v2_depth_shape_is_authenticated({434, 1036}));
     static_assert(!host_sbs_v2_depth_shape_is_authenticated({1008, 434}));
 
+    bool r32_float_texture_srv_matches(
+      ID3D11ShaderResourceView *view,
+      const std::uint32_t width,
+      const std::uint32_t height,
+      ID3D11Resource **identity = nullptr
+    ) {
+      if (!view || width == 0u || height == 0u) {
+        return false;
+      }
+      Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+      view->GetResource(&resource);
+      Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+      if (!resource || FAILED(resource.As(&texture)) || !texture) {
+        return false;
+      }
+      D3D11_TEXTURE2D_DESC desc {};
+      texture->GetDesc(&desc);
+      D3D11_SHADER_RESOURCE_VIEW_DESC view_desc {};
+      view->GetDesc(&view_desc);
+      const bool valid =
+        desc.Width == width && desc.Height == height &&
+        desc.MipLevels == 1u && desc.ArraySize == 1u &&
+        desc.Format == DXGI_FORMAT_R32_FLOAT &&
+        desc.SampleDesc.Count == 1u && desc.SampleDesc.Quality == 0u &&
+        view_desc.Format == DXGI_FORMAT_R32_FLOAT &&
+        view_desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D &&
+        view_desc.Texture2D.MostDetailedMip == 0u &&
+        view_desc.Texture2D.MipLevels == 1u;
+      if (valid && identity) {
+        *identity = resource.Detach();
+      }
+      return valid;
+    }
+
   }  // namespace
 
   bool parallax_v2_result_is_authenticated(const estimate_result &result) {
@@ -835,15 +1038,8 @@ namespace models {
         !result.shadow_base_final_parallax || !result.shadow_final_parallax ||
         !result.shadow_state || !result.shadow_frame_stats ||
         !result.raw_model_provenance || !result.parallax_v2_shader_provenance ||
-        result.raw_width <= 0 || result.raw_height <= 0) {
-      return false;
-    }
-    Microsoft::WRL::ComPtr<ID3D11Resource> base_final_resource;
-    Microsoft::WRL::ComPtr<ID3D11Resource> final_resource;
-    result.shadow_base_final_parallax->GetResource(&base_final_resource);
-    result.shadow_final_parallax->GetResource(&final_resource);
-    if (!base_final_resource || !final_resource ||
-        base_final_resource.Get() == final_resource.Get()) {
+        result.raw_width <= 0 || result.raw_height <= 0 ||
+        result.field_width <= 0 || result.field_height <= 0) {
       return false;
     }
 
@@ -853,6 +1049,7 @@ namespace models {
       input_region.source_height
     );
     const depth_tensor_shape_t result_shape {result.raw_width, result.raw_height};
+    const depth_tensor_shape_t field_shape {result.field_width, result.field_height};
     if (!input_region.valid() ||
         !host_sbs_v2_source_resolution_is_supported(
           input_region.source_width, input_region.source_height) ||
@@ -874,6 +1071,71 @@ namespace models {
       }
     } else if (!input_region.tensor_content.full(result_shape)) {
       return false;
+    }
+    const auto expected_refined_shape = host_sbs_convex2x_field_shape(result_shape);
+    const auto expected_refined_content = host_sbs_convex2x_content_rect(
+      input_region.tensor_content,
+      result_shape
+    );
+    if (result.refined_live_geometry_active) {
+      if (!result.composite_depth_runtime_provenance || !expected_refined_shape ||
+          !expected_refined_content || field_shape != *expected_refined_shape ||
+          result.field_content != *expected_refined_content ||
+          !prod_zipdepth_convex2x::live_geometry_shape_relation(
+            static_cast<std::uint32_t>(result.raw_width),
+            static_cast<std::uint32_t>(result.raw_height),
+            static_cast<std::uint32_t>(result.field_width),
+            static_cast<std::uint32_t>(result.field_height)
+          )) {
+        return false;
+      }
+    } else if (field_shape != result_shape ||
+               result.field_content != input_region.tensor_content) {
+      return false;
+    }
+
+    std::array<Microsoft::WRL::ComPtr<ID3D11Resource>, 7u> field_resources;
+    const std::array<ID3D11ShaderResourceView *, 6u> field_views {
+      result.shadow_candidate_parallax.Get(),
+      result.shadow_ownership_refined_parallax.Get(),
+      result.shadow_vertical_majorant.Get(),
+      result.shadow_vertical_conditioned.Get(),
+      result.shadow_base_final_parallax.Get(),
+      result.shadow_final_parallax.Get(),
+    };
+    for (std::size_t index = 0u; index < field_views.size(); ++index) {
+      ID3D11Resource *resource = nullptr;
+      if (!r32_float_texture_srv_matches(
+            field_views[index],
+            static_cast<std::uint32_t>(result.field_width),
+            static_cast<std::uint32_t>(result.field_height),
+            &resource
+          )) {
+        return false;
+      }
+      field_resources[index].Attach(resource);
+      for (std::size_t previous = 0u; previous < index; ++previous) {
+        if (field_resources[previous].Get() == field_resources[index].Get()) {
+          return false;
+        }
+      }
+    }
+    if (result.shadow_coordinate) {
+      ID3D11Resource *resource = nullptr;
+      if (!r32_float_texture_srv_matches(
+            result.shadow_coordinate.Get(),
+            static_cast<std::uint32_t>(result.field_width),
+            static_cast<std::uint32_t>(result.field_height),
+            &resource
+          )) {
+        return false;
+      }
+      field_resources.back().Attach(resource);
+      for (std::size_t previous = 0u; previous + 1u < field_resources.size(); ++previous) {
+        if (field_resources[previous].Get() == field_resources.back().Get()) {
+          return false;
+        }
+      }
     }
     if (!result.ocr_box_record || !result.subtitle_locator_state) {
       return false;
@@ -905,6 +1167,42 @@ namespace models {
         )) {
       return false;
     }
+    if (result.composite_depth_runtime_provenance) {
+      const auto &composite = *result.composite_depth_runtime_provenance;
+      const std::string engine_prefix =
+        std::string {prod_zipdepth_convex2x::logical_model} + "." +
+        std::string {prod_zipdepth_convex2x::engine_recipe} + ".";
+      const std::string engine_suffix =
+        "-onnx" + std::string {prod_zipdepth_convex2x::fused_onnx_sha256} +
+        ".engine";
+      const std::string manifest_name =
+        std::string {prod_zipdepth_convex2x::logical_model} +
+        ".active-engine.json";
+      const auto refined_shape = host_sbs_convex2x_field_shape(result_shape);
+      if (composite.model != prod_zipdepth_convex2x::logical_model ||
+          composite.onnx_sha256 != prod_zipdepth_convex2x::fused_onnx_sha256 ||
+          composite.embedded_dav2_onnx_sha256 !=
+            prod_zipdepth_convex2x::dav2_onnx_sha256 ||
+          composite.embedded_dav2_onnx_sha256 != model.onnx_sha256 ||
+          composite.zipdepth_checkpoint_sha256 !=
+            prod_zipdepth_convex2x::zipdepth_checkpoint_sha256 ||
+          composite.guidance_preprocess_source_closure_sha256 !=
+            model.preprocess_source_closure_sha256 ||
+          composite.engine_recipe != prod_zipdepth_convex2x::engine_recipe ||
+          composite.engine_artifact.size() <=
+            engine_prefix.size() + engine_suffix.size() ||
+          !composite.engine_artifact.starts_with(engine_prefix) ||
+          !composite.engine_artifact.ends_with(engine_suffix) ||
+          composite.active_engine_manifest != manifest_name ||
+          !refined_shape || result.guidance_width != refined_shape->width ||
+          result.guidance_height != refined_shape->height ||
+          result.refined_width != refined_shape->width ||
+          result.refined_height != refined_shape->height ||
+          static_cast<bool>(result.guidance_model_input_snapshot) !=
+            static_cast<bool>(result.refined_model_depth_snapshot)) {
+        return false;
+      }
+    }
     return true;
   }
 
@@ -914,6 +1212,77 @@ namespace models {
     std::filesystem::path source_path;
     std::filesystem::path engine_path;
   };
+
+  struct resolved_depth_runtime_t {
+    config::depth_model_info model;
+    prod_zipdepth_convex2x::engine_io_e expected_io =
+      prod_zipdepth_convex2x::engine_io_e::production_dav2;
+    bool fused = false;
+  };
+
+  /** Select the local fused graph without changing the public Host-SBS DAV2 model identity.
+   *
+   * Absence is the only legacy fallback.  Any directory entry at the frozen composite path must
+   * be a regular file with the exact frozen SHA; unreadable, non-regular, or mismatched assets
+   * fail closed instead of silently running a different graph.
+   */
+  static bool resolve_depth_runtime(
+    const std::filesystem::path &assets_dir,
+    const config::depth_model_info &raw_model,
+    resolved_depth_runtime_t &resolved
+  ) {
+    resolved = {
+      .model = raw_model,
+      .expected_io = prod_zipdepth_convex2x::engine_io_e::production_dav2,
+      .fused = false,
+    };
+    static_assert(depth_coordinate_v2::model_calibrations.size() == 1u);
+    const auto &production_dav2 = depth_coordinate_v2::model_calibrations.front();
+    if (raw_model.name != production_dav2.depth_model ||
+        raw_model.url != production_dav2.depth_model_url) {
+      // The local composite is an implementation detail of the one canonical production DAV2
+      // identity. Never substitute it for a caller-supplied/custom model.
+      return true;
+    }
+    const auto fused_path = assets_dir /
+      (std::string {prod_zipdepth_convex2x::logical_model} + ".onnx");
+    std::error_code status_error;
+    const auto status = std::filesystem::symlink_status(fused_path, status_error);
+    if (status_error) {
+      BOOST_LOG(error) << "Could not inspect optional fused DAV2 + ZipDepth asset "
+                       << fused_path << ": " << status_error.message() << '.';
+      return false;
+    }
+    const bool present = std::filesystem::exists(status);
+    const bool regular_file = present && std::filesystem::is_regular_file(status);
+    const std::string sha256 = regular_file ? file_sha256_hex(fused_path) : std::string {};
+    const auto selection = detail::resolve_composite_depth_asset(
+      present,
+      regular_file,
+      sha256 == prod_zipdepth_convex2x::fused_onnx_sha256
+    );
+    if (selection == detail::composite_depth_asset_resolution_e::legacy) {
+      return true;
+    }
+    if (selection == detail::composite_depth_asset_resolution_e::fail) {
+      BOOST_LOG(error)
+        << "Local fused DAV2 + ZipDepth asset failed its frozen identity at " << fused_path
+        << " (expected SHA-256 " << prod_zipdepth_convex2x::fused_onnx_sha256
+        << ", got " << (sha256.empty() ? "unreadable/non-regular" : sha256)
+        << "); refusing legacy fallback while the invalid asset is present.";
+      return false;
+    }
+    resolved.model = {
+      .name = std::string {prod_zipdepth_convex2x::logical_model},
+      .url = {},
+    };
+    resolved.expected_io =
+      prod_zipdepth_convex2x::engine_io_e::production_dav2_zipdepth_convex2x;
+    resolved.fused = true;
+    BOOST_LOG(info) << "Selected authenticated local fused DAV2 + ZipDepth runtime "
+                    << fused_path.filename() << '.';
+    return true;
+  }
 
   static bool publish_serialized_engine(
     const std::filesystem::path &engine_path,
@@ -955,7 +1324,9 @@ namespace models {
   static bool publish_active_engine_manifest(
     const std::filesystem::path &assets_dir,
     const std::string_view model_name,
-    const engine_artifact &artifact
+    const engine_artifact &artifact,
+    const std::optional<prod_zipdepth_convex2x::engine_io_e> depth_io_kind =
+      std::nullopt
   ) {
     if (artifact.name.empty() || artifact.source_sha256.empty()) {
       return false;
@@ -964,12 +1335,30 @@ namespace models {
     const auto path = assets_dir / (std::string(model_name) + ".active-engine.json");
     auto temporary_path = path;
     temporary_path += ".tmp";
-    const nlohmann::json manifest {
+    nlohmann::json manifest {
       {"schema", 1},
       {"model", std::string(model_name)},
       {"engine", artifact.name},
       {"onnx_sha256", artifact.source_sha256},
     };
+    if (depth_io_kind == prod_zipdepth_convex2x::engine_io_e::
+                           production_dav2_zipdepth_convex2x) {
+      const auto &raw = depth_coordinate_v2::model_calibrations.front();
+      manifest = {
+        {"schema", 2},
+        {"runtime", "dav2_zipdepth_convex2x_composite"},
+        {"model", std::string(model_name)},
+        {"engine", artifact.name},
+        {"engine_recipe", std::string {prod_zipdepth_convex2x::engine_recipe}},
+        {"composite_onnx_sha256", artifact.source_sha256},
+        {"embedded_dav2_onnx_sha256",
+         std::string {prod_zipdepth_convex2x::dav2_onnx_sha256}},
+        {"zipdepth_checkpoint_sha256",
+         std::string {prod_zipdepth_convex2x::zipdepth_checkpoint_sha256}},
+        {"guidance_preprocess_source_closure_sha256",
+         std::string {raw.preprocess.source_closure_sha256}},
+      };
+    }
 
     std::lock_guard lock(g_active_engine_manifest_mutex);
     {
@@ -1021,20 +1410,6 @@ namespace models {
       BOOST_LOG(error) << "Could not hash depth-model source " << artifact.source_path << '.';
       return false;
     }
-    artifact.name = engine_filename(
-      model,
-      engine_compatibility_tag(cuda, cuda_device) + "-onnx" + artifact.source_sha256
-    );
-    artifact.engine_path = assets_dir / artifact.name;
-
-    std::error_code existing_ec;
-    if (std::filesystem::is_regular_file(artifact.engine_path, existing_ec)) {
-      BOOST_LOG(info) << "TensorRT engine cache hit: " << artifact.engine_path.filename();
-      return true;
-    }
-
-    BOOST_LOG(info) << "Building TensorRT engine from ONNX... This will take a few minutes.";
-
     if (CUcontext ctx = primary_context(cuda, cuda_device)) {
       if (cuda.cuCtxSetCurrent(ctx) != CUDA_SUCCESS) {
         BOOST_LOG(error) << "Failed to select the configured CUDA device for TensorRT engine compilation.";
@@ -1052,19 +1427,10 @@ namespace models {
       return false;
     }
     auto network = TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
-    auto config = TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
-    if (!network || !config) {
-      BOOST_LOG(error) << "TensorRT failed to create the network or builder configuration.";
+    if (!network) {
+      BOOST_LOG(error) << "TensorRT failed to create the network.";
       return false;
     }
-
-    // Set memory limit to 4GB
-    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 4ULL << 30);
-    // Level 5 makes TensorRT compare generated kernels against its static tactics. Keep this in
-    // the recipe-specific engine contract: changing the level must never silently reuse a plan
-    // selected under the default level 3 search.
-    config->setBuilderOptimizationLevel(depth_engine_builder_level);
-    BOOST_LOG(info) << "TensorRT builder optimization level " << depth_engine_builder_level << '.';
 
     auto parser = TrtUniquePtr<nvonnxparser::IParser>(nvonnxparser::createParser(*network, gLogger));
     if (!parser) {
@@ -1075,55 +1441,212 @@ namespace models {
       BOOST_LOG(error) << "Failed to parse ONNX file.";
       return false;
     }
-    auto *input = network->getNbInputs() == 1 ? network->getInput(0) : nullptr;
-    if (!input || !input->getName() || std::string_view(input->getName()) != "pixel_values") {
-      BOOST_LOG(error) << "Unsupported depth model input contract; expected one 'pixel_values' tensor.";
-      return false;
+
+    nvinfer1::ITensor *dav2_input_tensor = nullptr;
+    nvinfer1::ITensor *guidance_input_tensor = nullptr;
+    for (int index = 0; index < network->getNbInputs(); ++index) {
+      auto *tensor = network->getInput(index);
+      if (!tensor || !tensor->getName()) {
+        BOOST_LOG(error)
+          << "TensorRT returned a null input tensor while classifying the depth ONNX.";
+        return false;
+      }
+      const std::string_view name {tensor->getName()};
+      if (name == models::prod_zipdepth_convex2x::dav2_input &&
+          !dav2_input_tensor) {
+        dav2_input_tensor = tensor;
+      } else if (name == models::prod_zipdepth_convex2x::guidance_input &&
+                 !guidance_input_tensor) {
+        guidance_input_tensor = tensor;
+      } else {
+        BOOST_LOG(error) << "Unsupported depth-model input tensor '" << name
+                         << "'; refusing an ambiguous engine contract.";
+        return false;
+      }
     }
 
-    // DA-V2 contract: input "pixel_values" [1,3,H,W], output "predicted_depth".
-    auto profile = builder->createOptimizationProfile();
-    if (!profile) {
-      BOOST_LOG(error) << "TensorRT failed to create the depth optimization profile.";
-      return false;
+    using depth_io_e = models::prod_zipdepth_convex2x::engine_io_e;
+    depth_io_e io_kind = depth_io_e::invalid;
+    if (network->getNbInputs() == 1 && dav2_input_tensor &&
+        !guidance_input_tensor) {
+      io_kind = depth_io_e::production_dav2;
+    } else if (network->getNbInputs() == 2 && dav2_input_tensor &&
+               guidance_input_tensor) {
+      io_kind = depth_io_e::production_dav2_zipdepth_convex2x;
     }
-    auto dims_for = [&](int h, int w) {
-      return make_input_dims(h, w);
-    };
-    const bool profile_ok =
-      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMIN, dims_for(14, 14)) &&
-      profile->setDimensions(
-        input->getName(),
-        nvinfer1::OptProfileSelector::kOPT,
-        dims_for(depth_engine_opt_height, depth_engine_opt_width)
-      ) &&
-      profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX, dims_for(depth_engine_max_dim, depth_engine_max_dim));
-    if (!profile_ok || config->addOptimizationProfile(profile) < 0) {
-      BOOST_LOG(error) << "TensorRT rejected the depth optimization profile.";
+    if (io_kind == depth_io_e::invalid ||
+        dav2_input_tensor->getType() != nvinfer1::DataType::kFLOAT ||
+        (io_kind == depth_io_e::production_dav2_zipdepth_convex2x &&
+         guidance_input_tensor->getType() != nvinfer1::DataType::kFLOAT)) {
+      BOOST_LOG(error)
+        << "Depth ONNX must expose either one legacy FP32 input or the exact two fused FP32 "
+           "inputs 'pixel_values'/'zip_pixel_values'.";
       return false;
     }
 
     std::vector<nvinfer1::ITensor *> to_unmark;
-    bool found_depth_output = false;
-    for (int i = 0; i < network->getNbOutputs(); i++) {
-      auto *tensor = network->getOutput(i);
+    nvinfer1::ITensor *coarse_output_tensor = nullptr;
+    nvinfer1::ITensor *refined_output_tensor = nullptr;
+    for (int index = 0; index < network->getNbOutputs(); ++index) {
+      auto *tensor = network->getOutput(index);
       if (!tensor || !tensor->getName()) {
         BOOST_LOG(error) << "TensorRT returned a null output tensor while building the depth engine.";
         return false;
       }
-      if (std::string_view(tensor->getName()) == "predicted_depth") {
-        found_depth_output = true;
+      const std::string_view name {tensor->getName()};
+      if (name == models::prod_zipdepth_convex2x::coarse_output &&
+          !coarse_output_tensor) {
+        coarse_output_tensor = tensor;
+      } else if (
+        io_kind == depth_io_e::production_dav2_zipdepth_convex2x &&
+        name == models::prod_zipdepth_convex2x::refined_output &&
+        !refined_output_tensor
+      ) {
+        refined_output_tensor = tensor;
       } else {
         to_unmark.push_back(tensor);
       }
     }
-    if (!found_depth_output) {
-      BOOST_LOG(error) << "Unsupported depth model output contract; missing 'predicted_depth'.";
+    if (!coarse_output_tensor ||
+        coarse_output_tensor->getType() != nvinfer1::DataType::kFLOAT ||
+        (io_kind == depth_io_e::production_dav2_zipdepth_convex2x &&
+         (!refined_output_tensor ||
+          refined_output_tensor->getType() != nvinfer1::DataType::kFLOAT))) {
+      BOOST_LOG(error)
+        << "Depth ONNX is missing the exact required FP32 output contract for its inputs.";
+      return false;
+    }
+    const bool fused =
+      io_kind == depth_io_e::production_dav2_zipdepth_convex2x;
+    if (fused && !to_unmark.empty()) {
+      BOOST_LOG(error)
+        << "Fused DAV2 + ZipDepth ONNX exposes unexpected or duplicate outputs; "
+           "refusing to prune its frozen exact I/O contract.";
       return false;
     }
     for (auto *tensor : to_unmark) {
       BOOST_LOG(info) << "Depth engine: pruning unsupported output '" << tensor->getName() << "'.";
       network->unmarkOutput(*tensor);
+    }
+
+    const auto classified_io = models::prod_zipdepth_convex2x::classify_named_io(
+      static_cast<std::uint32_t>(
+        network->getNbInputs() + network->getNbOutputs()
+      ),
+      dav2_input_tensor != nullptr,
+      guidance_input_tensor != nullptr,
+      coarse_output_tensor != nullptr,
+      refined_output_tensor != nullptr
+    );
+    if (classified_io != io_kind ||
+        network->getNbOutputs() != (fused ? 2 : 1)) {
+      BOOST_LOG(error)
+        << "Depth ONNX could not be reduced to an exact supported input/output contract.";
+      return false;
+    }
+    if (fused &&
+        (model.name != models::prod_zipdepth_convex2x::logical_model ||
+         artifact.source_sha256 !=
+           models::prod_zipdepth_convex2x::fused_onnx_sha256)) {
+      BOOST_LOG(error)
+        << "Fused DAV2 + ZipDepth ONNX identity does not match the frozen experimental "
+           "contract; refusing to build it.";
+      return false;
+    }
+
+    artifact.name = engine_filename(
+      model,
+      io_kind,
+      engine_compatibility_tag(cuda, cuda_device) + "-onnx" + artifact.source_sha256
+    );
+    if (artifact.name.empty()) {
+      BOOST_LOG(error) << "No TensorRT cache recipe exists for the classified depth ONNX.";
+      return false;
+    }
+    artifact.engine_path = assets_dir / artifact.name;
+
+    std::error_code existing_ec;
+    if (std::filesystem::is_regular_file(artifact.engine_path, existing_ec)) {
+      BOOST_LOG(info) << "TensorRT engine cache hit: " << artifact.engine_path.filename();
+      return true;
+    }
+
+    BOOST_LOG(info) << "Building " << (fused ? "fused DAV2 + convex2x" : "DAV2")
+                    << " TensorRT engine from ONNX... This will take a few minutes.";
+
+    auto config = TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
+    if (!config) {
+      BOOST_LOG(error) << "TensorRT failed to create the builder configuration.";
+      return false;
+    }
+    // Set memory limit to 4GB.
+    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 4ULL << 30);
+    // Both recipes intentionally retain level 5. Changing tactic search must produce a new cache
+    // recipe rather than silently consuming a plan selected under another level.
+    config->setBuilderOptimizationLevel(depth_engine_builder_level);
+    BOOST_LOG(info) << "TensorRT builder optimization level "
+                    << depth_engine_builder_level << '.';
+
+    const auto set_point_dimensions = [](
+                                        nvinfer1::IOptimizationProfile *profile,
+                                        const char *name,
+                                        const nvinfer1::Dims &dimensions
+                                      ) {
+      return profile->setDimensions(
+               name, nvinfer1::OptProfileSelector::kMIN, dimensions
+             ) &&
+             profile->setDimensions(
+               name, nvinfer1::OptProfileSelector::kOPT, dimensions
+             ) &&
+             profile->setDimensions(
+               name, nvinfer1::OptProfileSelector::kMAX, dimensions
+             );
+    };
+    if (!fused) {
+      // Preserve the shipping DAV2 ranged profile exactly.
+      auto *profile = builder->createOptimizationProfile();
+      const bool profile_ok = profile &&
+        profile->setDimensions(
+          dav2_input_tensor->getName(), nvinfer1::OptProfileSelector::kMIN,
+          make_input_dims(14, 14)
+        ) &&
+        profile->setDimensions(
+          dav2_input_tensor->getName(), nvinfer1::OptProfileSelector::kOPT,
+          make_input_dims(depth_engine_opt_height, depth_engine_opt_width)
+        ) &&
+        profile->setDimensions(
+          dav2_input_tensor->getName(), nvinfer1::OptProfileSelector::kMAX,
+          make_input_dims(depth_engine_max_dim, depth_engine_max_dim)
+        );
+      if (!profile_ok || config->addOptimizationProfile(profile) < 0) {
+        BOOST_LOG(error) << "TensorRT rejected the depth optimization profile.";
+        return false;
+      }
+    } else {
+      for (const auto shape :
+           models::prod_zipdepth_convex2x::fixed_profile_shapes) {
+        auto *profile = builder->createOptimizationProfile();
+        const auto coarse_dimensions = make_input_dims(
+          static_cast<int>(shape.height), static_cast<int>(shape.width)
+        );
+        const auto guidance_dimensions = make_input_dims(
+          static_cast<int>(models::prod_zipdepth_convex2x::scale * shape.height),
+          static_cast<int>(models::prod_zipdepth_convex2x::scale * shape.width)
+        );
+        const bool profile_ok = profile &&
+          set_point_dimensions(
+            profile, dav2_input_tensor->getName(), coarse_dimensions
+          ) &&
+          set_point_dimensions(
+            profile, guidance_input_tensor->getName(), guidance_dimensions
+          );
+        if (!profile_ok || config->addOptimizationProfile(profile) < 0) {
+          BOOST_LOG(error)
+            << "TensorRT rejected fused convex2x point profile "
+            << shape.width << 'x' << shape.height << '.';
+          return false;
+        }
+      }
     }
 
     auto serializedModel = TrtUniquePtr<nvinfer1::IHostMemory>(builder->buildSerializedNetwork(*network, *config));
@@ -1305,6 +1828,12 @@ namespace models {
       set_model_prepare_status(status_key, engine_build_status::failed);
     });
 
+    resolved_depth_runtime_t depth_runtime;
+    if (!resolve_depth_runtime(assets_dir, model, depth_runtime)) {
+      return false;
+    }
+    const auto &runtime_model = depth_runtime.model;
+
     // Shader compilation is CPU-only, so do it before TensorRT engine/context preparation can
     // occupy this background worker for several seconds. A concurrent early stream joins the
     // same process-wide cache entry instead of compiling a duplicate on its encoder thread.
@@ -1336,7 +1865,9 @@ namespace models {
     }
 
     engine_artifact artifact;
-    if (!ensure_tensorrt_engine_for_device(assets_dir, model, cuda, cuda_device, artifact)) {
+    if (!ensure_tensorrt_engine_for_device(
+          assets_dir, runtime_model, cuda, cuda_device, artifact
+        )) {
       return false;
     }
     auto engine_path = artifact.engine_path;
@@ -1344,6 +1875,8 @@ namespace models {
 
     nvinfer1::ICudaEngine *engine = nullptr;
     nvinfer1::IExecutionContext *exec_context = nullptr;
+    auto engine_io_kind =
+      models::prod_zipdepth_convex2x::engine_io_e::invalid;
     bool create_context = false;
     bool resident_warmed_context = false;
     bool engine_repair_allowed = true;
@@ -1351,10 +1884,19 @@ namespace models {
       std::lock_guard<std::mutex> lock(g_trt_mutex);
       engine = acquire_engine_locked(engine_key, engine_path, exec_context);
       auto &slot = g_engines[engine_key];
-      if (engine && !validate_engine_io_locked(engine, slot)) {
-        return_execution_context_locked(engine_key, exec_context);
-        engine_repair_allowed = detach_incompatible_engine_locked(engine_key);
-        engine = nullptr;
+      if (engine) {
+        if (!validate_engine_io_locked(engine, slot)) {
+          return_execution_context_locked(engine_key, exec_context);
+          engine_repair_allowed = detach_incompatible_engine_locked(engine_key);
+          engine = nullptr;
+        } else {
+          engine_io_kind = slot.io_kind;
+          if (engine_io_kind != depth_runtime.expected_io) {
+            return_execution_context_locked(engine_key, exec_context);
+            engine_repair_allowed = detach_incompatible_engine_locked(engine_key);
+            engine = nullptr;
+          }
+        }
       }
     }
 
@@ -1375,7 +1917,9 @@ namespace models {
       std::error_code ec;
       std::filesystem::remove(engine_path, ec);
       BOOST_LOG(warning) << "Cached TensorRT plan could not be deserialized; rebuilding " << engine_path.filename() << '.';
-      if (!ensure_tensorrt_engine_for_device(assets_dir, model, cuda, cuda_device, artifact)) {
+      if (!ensure_tensorrt_engine_for_device(
+            assets_dir, runtime_model, cuda, cuda_device, artifact
+          )) {
         return false;
       }
       engine_path = artifact.engine_path;
@@ -1392,6 +1936,12 @@ namespace models {
         detach_incompatible_engine_locked(engine_key);
         return false;
       }
+      engine_io_kind = slot.io_kind;
+      if (engine_io_kind != depth_runtime.expected_io) {
+        return_execution_context_locked(engine_key, exec_context);
+        detach_incompatible_engine_locked(engine_key);
+        return false;
+      }
       if (!exec_context) {
         switch (reserve_startup_context_locked(engine_key)) {
           case startup_context_reservation_e::create:
@@ -1404,7 +1954,16 @@ namespace models {
             // A live session may already have populated the engine before startup preparation
             // finished. Only a context that actually completed warmup can establish readiness;
             // quarantined or still-constructing contexts are not evidence that the plan is usable.
-            BOOST_LOG(error) << "TensorRT context capacity contains no successfully warmed context.";
+            if (slot_context_limit(slot) ==
+                  detail::fused_tensorrt_context_limit &&
+                slot.context_accounting.quarantined() != 0u) {
+              BOOST_LOG(error)
+                << "The sole fused TensorRT execution context is quarantined; process restart "
+                   "is required before its optimization profiles can be owned safely again.";
+            } else {
+              BOOST_LOG(error)
+                << "TensorRT context capacity contains no successfully warmed context.";
+            }
             return false;
         }
       }
@@ -1418,7 +1977,9 @@ namespace models {
         release_context_reservation_locked(engine_key);
         return false;
       }
-      if (!warmup_execution_context(cuda, cuda_ctx, exec_context)) {
+      if (!warmup_execution_context(
+            cuda, cuda_ctx, exec_context, engine_io_kind
+          )) {
         // This context cannot be destroyed across the MinGW/MSVC ABI boundary, but it must never
         // enter the reusable pool: pooled contexts are assumed warmed and skip this operation.
         std::lock_guard<std::mutex> lock(g_trt_mutex);
@@ -1441,13 +2002,16 @@ namespace models {
       BOOST_LOG(error) << "Startup depth-model preparation produced no reusable warmed context.";
       return false;
     }
-    if (!publish_active_engine_manifest(assets_dir, model.name, artifact)) {
+    if (!publish_active_engine_manifest(
+          assets_dir, runtime_model.name, artifact, engine_io_kind
+        )) {
       // Manifest publication is an evaluator/preflight contract, not a reason to discard a model
       // that is already resident and proven usable for production streaming.
       BOOST_LOG(error) << "Could not publish the active TensorRT engine manifest for model '"
-                       << model.name << "'.";
+                        << runtime_model.name << "'.";
     }
-    BOOST_LOG(info) << "Startup depth model '" << model.name << "' is resident and ready.";
+    BOOST_LOG(info) << "Startup depth runtime '" << runtime_model.name
+                    << "' is resident and ready.";
     set_model_prepare_status(status_key, engine_build_status::ready);
     failed.disable();
     return true;
@@ -1637,6 +2201,8 @@ namespace models {
 
     nvinfer1::ICudaEngine *engine = nullptr;
     nvinfer1::IExecutionContext *exec_context = nullptr;
+    models::prod_zipdepth_convex2x::engine_io_e depth_engine_io_kind =
+      models::prod_zipdepth_convex2x::engine_io_e::invalid;
     CUcontext cuda_ctx = nullptr;
     CUstream cu_stream = nullptr;
     CUdevice cuda_device = -1;
@@ -1696,6 +2262,8 @@ namespace models {
     const float parallax_v2_requested_pop_strength;
     const float parallax_v2_requested_gain;
     std::shared_ptr<const raw_model_provenance_t> raw_model_provenance;
+    std::shared_ptr<const composite_depth_runtime_provenance_t>
+      composite_depth_runtime_provenance;
     std::shared_ptr<const parallax_v2_shader_provenance_t>
       parallax_v2_shader_provenance;
     bool parallax_v2_producer_active = false;
@@ -2721,17 +3289,28 @@ namespace models {
     // Caching
     int target_w = 0;
     int target_h = 0;
+    // Spatial publication is selected once with the fixed TensorRT point profile.  Raw DAV2,
+    // scene/camera/history identity and every temporal resource remain target_w/target_h.
+    bool refined_live_geometry_active = false;
+    int field_w = 0;
+    int field_h = 0;
     UINT reduce_groups = 0;  // threadgroups for the shared moments/range reduction
     int cb_color_mode = -1;  // input_color_space baked into constant buffers
     depth_tensor_content_rect_t cb_tensor_content {};
+    int guidance_cb_color_mode = -1;
+    depth_tensor_content_rect_t guidance_cb_tensor_content {};
     depth_source_rect_t cb_source_region {};
     // TensorRT retains dynamic shape and tensor-address bindings on an execution context. The
     // interop pointer is allowed to change after any map, so cache each piece independently and
     // rebind only the values that actually changed.
     int trt_bound_width = 0;
     int trt_bound_height = 0;
+    int trt_bound_profile = -1;
     CUdeviceptr trt_bound_input = 0;
     CUdeviceptr trt_bound_output = 0;
+    CUdeviceptr trt_bound_guidance_input = 0;
+    CUdeviceptr trt_bound_refined_output = 0;
+    bool trt_output_sizes_validated = false;
     CUdeviceptr ocr_bound_input = 0;
     CUdeviceptr ocr_bound_output = 0;
 
@@ -2746,6 +3325,7 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_frame_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_state_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_map_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> prod_zipdepth_convex2x_live_map_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_ownership_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_coordinate_diagnostic_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_vertical_limit_cs;
@@ -2761,6 +3341,7 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_reuse_depth_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> gpu_trace_cs;
     Microsoft::WRL::ComPtr<ID3D11Buffer> cbuffer;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> guidance_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> source_region_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> fused_preprocess_force_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> fused_preprocess_compare_cbuffer;
@@ -2783,7 +3364,7 @@ namespace models {
         srv.Reset();
         uav.Reset();
       }
-    } near_identical_tile, near_identical_history_owner;
+    } near_identical_tile, near_identical_history_owner, guidance_near_identical_tile;
 
     struct near_identical_transaction_resources_t : d3d_buffer_views_t {
       Microsoft::WRL::ComPtr<ID3D11Buffer> dispatch;
@@ -2819,25 +3400,40 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> tensor_in_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_in_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_in_srv;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> guidance_tensor_in_buf;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> guidance_tensor_in_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> guidance_tensor_in_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> tensor_previous_input_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_previous_input_srv;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_previous_input_uav;
     Microsoft::WRL::ComPtr<ID3D11Buffer> appearance_ordinal_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> appearance_ordinal_srv;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> appearance_ordinal_uav;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> guidance_appearance_ordinal_buf;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> guidance_appearance_ordinal_uav;
     Microsoft::WRL::ComPtr<ID3D11Buffer> previous_appearance_ordinal_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> previous_appearance_ordinal_srv;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> previous_appearance_ordinal_uav;
     Microsoft::WRL::ComPtr<ID3D11Buffer> tensor_out_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_out_srv;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> refined_tensor_out_buf;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> refined_tensor_out_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> raw_snapshot_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_snapshot_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> model_input_snapshot_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> model_input_snapshot_srv;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> guidance_model_input_snapshot_buf;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> guidance_model_input_snapshot_srv;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> refined_model_depth_snapshot_buf;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> refined_model_depth_snapshot_srv;
     bool raw_snapshot_error_logged = false;
     bool model_input_snapshot_error_logged = false;
+    bool guidance_model_input_snapshot_error_logged = false;
+    bool refined_model_depth_snapshot_error_logged = false;
     unsigned raw_snapshot_retry_frames = 0;
     unsigned model_input_snapshot_retry_frames = 0;
+    unsigned guidance_model_input_snapshot_retry_frames = 0;
+    unsigned refined_model_depth_snapshot_retry_frames = 0;
 
     // GPU-resident min/max for per-frame disparity normalization (no CPU readback).
     Microsoft::WRL::ComPtr<ID3D11Buffer> minmax_raw_buf;  // min/max bits, valid and unmasked-eligible counts
@@ -2874,6 +3470,9 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> tensor_exclusion_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_exclusion_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_exclusion_srv;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> guidance_tensor_exclusion_tex;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> guidance_tensor_exclusion_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> guidance_tensor_exclusion_srv;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> tensor_previous_exclusion_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_previous_exclusion_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_previous_exclusion_srv;
@@ -2923,6 +3522,8 @@ namespace models {
 
     CUgraphicsResource cuda_in_res = nullptr;
     CUgraphicsResource cuda_out_res = nullptr;
+    CUgraphicsResource cuda_guidance_in_res = nullptr;
+    CUgraphicsResource cuda_refined_out_res = nullptr;
     CUgraphicsResource cuda_near_identical_decision_res = nullptr;
     CUgraphicsResource cuda_ocr_in_res = nullptr;
     CUgraphicsResource cuda_ocr_out_res = nullptr;
@@ -4268,11 +4869,15 @@ namespace models {
     bool dispatch_near_identical_finalizer() {
       const bool subtitle_publication_expected =
         cuda_conditional_graph::work_flags_value(pending_subtitle_work) != 0u;
+      ID3D11Buffer *geometry_cbuffer = refined_live_geometry_active ?
+                                         guidance_cbuffer.Get() :
+                                         cbuffer.Get();
       if (
         !near_identical_finalize_cs ||
         !near_identical_transaction.uav ||
         !near_identical_transaction.buffer || !near_identical_transaction.dispatch ||
-        !near_identical_cbuffer || !cbuffer ||
+        !near_identical_history_owner.srv ||
+        !near_identical_cbuffer || !cbuffer || !geometry_cbuffer ||
         pending_wrapper_transaction_token == 0u ||
         (subtitle_publication_expected &&
          (!ocr_box_record_uav || !ocr_resolve_cbuffer ||
@@ -4281,10 +4886,11 @@ namespace models {
         return false;
       }
       update_pending_near_identical_postprocess_constants();
-      ID3D11Buffer *constant_buffers[3] = {
+      ID3D11Buffer *constant_buffers[4] = {
         cbuffer.Get(),
         near_identical_cbuffer.Get(),
         subtitle_publication_expected ? ocr_resolve_cbuffer.Get() : nullptr,
+        geometry_cbuffer,
       };
       ID3D11UnorderedAccessView *outputs[4] = {
         nullptr,
@@ -4292,14 +4898,23 @@ namespace models {
         nullptr,
         near_identical_transaction.uav.Get(),
       };
-      context->CSSetConstantBuffers(0u, 3u, constant_buffers);
+      context->CSSetConstantBuffers(0u, 4u, constant_buffers);
+      ID3D11ShaderResourceView *receipt_inputs[4] = {
+        nullptr,
+        nullptr,
+        nullptr,
+        near_identical_history_owner.srv.Get(),
+      };
+      context->CSSetShaderResources(0u, 4u, receipt_inputs);
       context->CSSetUnorderedAccessViews(0u, 4u, outputs, nullptr);
       context->CSSetShader(near_identical_finalize_cs.Get(), nullptr, 0u);
       context->Dispatch(1u, 1u, 1u);
       ID3D11UnorderedAccessView *null_outputs[4] = {};
-      ID3D11Buffer *null_constants[3] = {};
+      ID3D11ShaderResourceView *null_inputs[4] = {};
+      ID3D11Buffer *null_constants[4] = {};
       context->CSSetUnorderedAccessViews(0u, 4u, null_outputs, nullptr);
-      context->CSSetConstantBuffers(0u, 3u, null_constants);
+      context->CSSetShaderResources(0u, 4u, null_inputs);
+      context->CSSetConstantBuffers(0u, 4u, null_constants);
       // CUDA cannot register a DRAWINDIRECT_ARGS buffer. Once the receipt validator has written
       // every args record and any deterministic abstention into their registerable resources,
       // copy the complete 256-byte transaction into the D3-only indirect twin consumed below.
@@ -4443,14 +5058,15 @@ namespace models {
       if (!ocr_exec_context) {
         std::unique_lock<std::mutex> lock(g_trt_mutex);
         auto &slot = g_engines[ocr_engine_key];
+        const std::size_t context_limit = slot_context_limit(slot);
         if (slot.context_pool.empty() &&
-            allocated_context_count(slot) >= kMaxContextsPerEngine) {
+            allocated_context_count(slot) >= context_limit) {
           g_trt_context_available.wait_for(
             lock,
             std::chrono::seconds(2),
-            [&slot]() {
+            [&slot, context_limit]() {
               return !slot.context_pool.empty() ||
-                     allocated_context_count(slot) < kMaxContextsPerEngine;
+                     allocated_context_count(slot) < context_limit;
             }
           );
         }
@@ -4459,8 +5075,8 @@ namespace models {
           slot.context_pool.pop_back();
           ocr_context_pooled = true;
           ocr_context_warmed = true;
-        } else if (allocated_context_count(slot) < kMaxContextsPerEngine) {
-          create_context = slot.context_accounting.reserve(kMaxContextsPerEngine);
+        } else if (allocated_context_count(slot) < context_limit) {
+          create_context = slot.context_accounting.reserve(context_limit);
         }
       }
       if (create_context) {
@@ -4586,8 +5202,17 @@ namespace models {
         return;
       }
 
+      resolved_depth_runtime_t depth_runtime;
+      if (!resolve_depth_runtime(assets_dir, model, depth_runtime)) {
+        BOOST_LOG(error) << "Depth estimator failed: composite runtime resolution failed.";
+        return;
+      }
+      const auto &runtime_model = depth_runtime.model;
+
       engine_artifact artifact;
-      if (!ensure_tensorrt_engine_for_device(assets_dir, model, cuda, cuda_device, artifact)) {
+      if (!ensure_tensorrt_engine_for_device(
+            assets_dir, runtime_model, cuda, cuda_device, artifact
+          )) {
         BOOST_LOG(error) << "Depth estimator failed: TensorRT engine preparation failed.";
         return;
       }
@@ -4620,6 +5245,15 @@ namespace models {
           context_warmed = false;
           engine_repair_allowed = detach_incompatible_engine_locked(engine_key);
           engine = nullptr;
+        } else {
+          depth_engine_io_kind = slot.io_kind;
+          if (depth_engine_io_kind != depth_runtime.expected_io) {
+            return_execution_context_locked(engine_key, exec_context);
+            depth_context_pooled = false;
+            context_warmed = false;
+            engine_repair_allowed = detach_incompatible_engine_locked(engine_key);
+            engine = nullptr;
+          }
         }
 
       }  // release g_trt_mutex before the shader/buffer setup and warmup below
@@ -4640,7 +5274,9 @@ namespace models {
         std::filesystem::remove(model_path, ec);
         BOOST_LOG(warning) << "Depth estimator found an unreadable or incompatible TensorRT plan; rebuilding "
                            << model_path.filename() << '.';
-        if (!ensure_tensorrt_engine_for_device(assets_dir, model, cuda, cuda_device, artifact)) {
+        if (!ensure_tensorrt_engine_for_device(
+              assets_dir, runtime_model, cuda, cuda_device, artifact
+            )) {
           return;
         }
         model_path = artifact.engine_path;
@@ -4661,6 +5297,15 @@ namespace models {
             context_warmed = false;
             detach_incompatible_engine_locked(engine_key);
             engine = nullptr;
+          } else {
+            depth_engine_io_kind = slot.io_kind;
+            if (depth_engine_io_kind != depth_runtime.expected_io) {
+              return_execution_context_locked(engine_key, exec_context);
+              depth_context_pooled = false;
+              context_warmed = false;
+              detach_incompatible_engine_locked(engine_key);
+              engine = nullptr;
+            }
           }
         }
         if (!engine) {
@@ -4673,7 +5318,9 @@ namespace models {
         depth_coordinate_v2::find_model_calibration(
           model.name,
           model.url,
-          artifact.source_sha256
+          depth_runtime.fused ?
+            std::string_view {prod_zipdepth_convex2x::dav2_onnx_sha256} :
+            std::string_view {artifact.source_sha256}
         );
       if (engine && !exec_context) {
         // Pool empty. On a back-to-back session rebuild the previous estimator is often
@@ -4696,19 +5343,30 @@ namespace models {
         if (!exec_context) {
           std::unique_lock<std::mutex> lock(g_trt_mutex);
           auto &slot = g_engines[engine_key];
-          if (slot.context_pool.empty() && allocated_context_count(slot) >= kMaxContextsPerEngine) {
+          const std::size_t context_limit = slot_context_limit(slot);
+          if (slot.context_pool.empty() &&
+              allocated_context_count(slot) >= context_limit) {
             BOOST_LOG(warning) << "TensorRT context cap reached for this depth model; waiting for "
                                   "an asynchronous encoder teardown to return one.";
             const bool available = g_trt_context_available.wait_for(
               lock,
               std::chrono::seconds(5),
-              [&slot]() {
-                return !slot.context_pool.empty() || allocated_context_count(slot) < kMaxContextsPerEngine;
+              [&slot, context_limit]() {
+                return !slot.context_pool.empty() ||
+                       allocated_context_count(slot) < context_limit;
               }
             );
             if (!available) {
-              BOOST_LOG(error) << "TensorRT context cap remained saturated; leaving this encode "
-                                  "session flat instead of allocating unbounded GPU memory.";
+              if (context_limit == detail::fused_tensorrt_context_limit &&
+                  slot.context_accounting.quarantined() != 0u) {
+                BOOST_LOG(error)
+                  << "The sole fused TensorRT execution context is quarantined; leaving this "
+                     "session flat until the process restarts.";
+              } else {
+                BOOST_LOG(error)
+                  << "TensorRT context cap remained saturated; leaving this encode session flat "
+                     "instead of allocating unbounded GPU memory.";
+              }
               engine = nullptr;
             }
           }
@@ -4720,7 +5378,7 @@ namespace models {
             BOOST_LOG(info) << "Reusing pooled TensorRT execution context after bounded wait.";
           } else if (engine) {
             // Reserve atomically so concurrent constructors cannot exceed the cap.
-            create_context = slot.context_accounting.reserve(kMaxContextsPerEngine);
+            create_context = slot.context_accounting.reserve(context_limit);
           }
         }
         if (create_context) {
@@ -4769,7 +5427,10 @@ namespace models {
       if (!coordinate_calibration) {
         BOOST_LOG(error)
           << "Host SBS V2 cannot authenticate uncalibrated depth model '"
-          << model.name << "' (ONNX SHA-256 " << artifact.source_sha256
+          << model.name << "' (raw DAV2 ONNX SHA-256 "
+          << (depth_runtime.fused ?
+                std::string_view {prod_zipdepth_convex2x::dav2_onnx_sha256} :
+                std::string_view {artifact.source_sha256})
           << ", preprocess source SHA-256 " << preprocess_source_closure_sha256
           << "); Host SBS will fail flat.";
         return;
@@ -4779,13 +5440,33 @@ namespace models {
         raw_model_provenance_t {
           .depth_model = model.name,
           .depth_model_url = model.url,
-          .onnx_sha256 = artifact.source_sha256,
+          .onnx_sha256 = depth_runtime.fused ?
+                           std::string {prod_zipdepth_convex2x::dav2_onnx_sha256} :
+                           artifact.source_sha256,
           .preprocess_profile = std::string {
             coordinate_calibration->preprocess.profile
           },
           .preprocess_source_closure_sha256 = preprocess_source_closure_sha256,
         }
       );
+      if (depth_runtime.fused) {
+        composite_depth_runtime_provenance =
+          std::make_shared<const composite_depth_runtime_provenance_t>(
+            composite_depth_runtime_provenance_t {
+              .model = runtime_model.name,
+              .onnx_sha256 = artifact.source_sha256,
+              .embedded_dav2_onnx_sha256 =
+                std::string {prod_zipdepth_convex2x::dav2_onnx_sha256},
+              .zipdepth_checkpoint_sha256 =
+                std::string {prod_zipdepth_convex2x::zipdepth_checkpoint_sha256},
+              .guidance_preprocess_source_closure_sha256 =
+                preprocess_source_closure_sha256,
+              .engine_recipe = std::string {prod_zipdepth_convex2x::engine_recipe},
+              .engine_artifact = artifact.name,
+              .active_engine_manifest = runtime_model.name + ".active-engine.json",
+            }
+          );
+      }
 
       const auto producer_sources = host_sbs_shader_cache::snapshot_sources(
         shader_root,
@@ -4828,6 +5509,7 @@ namespace models {
         std::addressof(depth_coordinate_v2_frame_resolve_cs),
         std::addressof(depth_coordinate_v2_state_resolve_cs),
         std::addressof(depth_coordinate_v2_map_cs),
+        std::addressof(prod_zipdepth_convex2x_live_map_cs),
         std::addressof(depth_coordinate_v2_ownership_cs),
         std::addressof(depth_coordinate_v2_vertical_limit_cs),
         std::addressof(depth_coordinate_v2_limit_cs),
@@ -5050,9 +5732,11 @@ namespace models {
         return;
       }
       lifecycle_state = lifecycle_state_e::operational;
-      if (!publish_active_engine_manifest(assets_dir, model.name, artifact)) {
+      if (!publish_active_engine_manifest(
+            assets_dir, runtime_model.name, artifact, depth_engine_io_kind
+          )) {
         BOOST_LOG(error) << "Could not publish the active TensorRT engine manifest for model '"
-                         << model.name << "'.";
+                         << runtime_model.name << "'.";
       }
       BOOST_LOG(info) << "Depth estimator pipeline initialized in "
                       << std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -5079,7 +5763,9 @@ namespace models {
       if (!cuda.is_valid()) {
         return false;
       }
-      if (!warmup_execution_context(cuda, cuda_ctx, exec_context)) {
+      if (!warmup_execution_context(
+            cuda, cuda_ctx, exec_context, depth_engine_io_kind
+          )) {
         std::lock_guard<std::mutex> lock(g_trt_mutex);
         quarantine_execution_context_locked(engine_key, exec_context, false);
         return false;
@@ -5105,6 +5791,11 @@ namespace models {
         (void) tensor_in_buf.Detach();
         (void) tensor_out_srv.Detach();
         (void) tensor_out_buf.Detach();
+        (void) guidance_tensor_in_srv.Detach();
+        (void) guidance_tensor_in_uav.Detach();
+        (void) guidance_tensor_in_buf.Detach();
+        (void) refined_tensor_out_srv.Detach();
+        (void) refined_tensor_out_buf.Detach();
         (void) ocr_input_uav.Detach();
         (void) ocr_input_buf.Detach();
         (void) ocr_output_srv.Detach();
@@ -5244,6 +5935,18 @@ namespace models {
               observe_teardown(
                 unregister_cuda_graphics_resource(cuda, cuda_out_res),
                 "DAV2 output interop unregister"
+              );
+            }
+            if (cuda_teardown_may_continue) {
+              observe_teardown(
+                unregister_cuda_graphics_resource(cuda, cuda_guidance_in_res),
+                "fused guidance input interop unregister"
+              );
+            }
+            if (cuda_teardown_may_continue) {
+              observe_teardown(
+                unregister_cuda_graphics_resource(cuda, cuda_refined_out_res),
+                "fused refined output interop unregister"
               );
             }
             if (cuda_teardown_may_continue) {
@@ -5480,8 +6183,8 @@ namespace models {
       if (!subtitle_conditioned_tex || !subtitle_conditioned_srv ||
           !subtitle_conditioned_uav) {
         D3D11_TEXTURE2D_DESC desc {};
-        desc.Width = static_cast<UINT>(target_w);
-        desc.Height = static_cast<UINT>(target_h);
+        desc.Width = static_cast<UINT>(field_w);
+        desc.Height = static_cast<UINT>(field_h);
         desc.MipLevels = 1;
         desc.ArraySize = 1;
         desc.Format = DXGI_FORMAT_R32_FLOAT;
@@ -5633,7 +6336,23 @@ namespace models {
       if (parallax_v2_producer_active) {
         return true;
       }
-      if (target_w <= 0 || target_h <= 0 || reduce_groups == 0) {
+      if (target_w <= 0 || target_h <= 0 || field_w <= 0 || field_h <= 0 ||
+          reduce_groups == 0) {
+        return false;
+      }
+      if (refined_live_geometry_active &&
+          (depth_engine_io_kind != prod_zipdepth_convex2x::engine_io_e::
+                                     production_dav2_zipdepth_convex2x ||
+           !prod_zipdepth_convex2x::live_geometry_shape_relation(
+             static_cast<std::uint32_t>(target_w),
+             static_cast<std::uint32_t>(target_h),
+             static_cast<std::uint32_t>(field_w),
+             static_cast<std::uint32_t>(field_h)
+           ) ||
+           !refined_tensor_out_srv || !guidance_tensor_exclusion_srv)) {
+        fail_parallax_v2_producer(
+          "convex2x live field resources or landscape shape relation are invalid"sv
+        );
         return false;
       }
       if (!raw_model_provenance || !depth_coordinate_v2::capture_identity_is_calibrated(raw_model_provenance->depth_model, raw_model_provenance->depth_model_url,
@@ -5701,8 +6420,8 @@ namespace models {
                      );
 
       D3D11_TEXTURE2D_DESC texture_desc {};
-      texture_desc.Width = static_cast<UINT>(target_w);
-      texture_desc.Height = static_cast<UINT>(target_h);
+      texture_desc.Width = static_cast<UINT>(field_w);
+      texture_desc.Height = static_cast<UINT>(field_h);
       texture_desc.MipLevels = 1;
       texture_desc.ArraySize = 1;
       texture_desc.Format = DXGI_FORMAT_R32_FLOAT;
@@ -5790,7 +6509,10 @@ namespace models {
       context->ClearUnorderedAccessViewFloat(depth_coordinate_v2_final_uav.Get(), clear);
       parallax_v2_producer_active = true;
       BOOST_LOG(info)
-        << "Host SBS V2 GPU producer active at " << target_w << 'x' << target_h
+        << "Host SBS V2 GPU producer active with coarse analysis "
+        << target_w << 'x' << target_h << " and live field "
+        << field_w << 'x' << field_h
+        << (refined_live_geometry_active ? " (convex2x landscape)" : " (coarse)")
         << "; full-resolution conservative foreground ownership precedes the 75% vertical "
            "upper and 25% vertical lower envelope "
            "followed by one horizontal majorant; the renderer will authenticate its first "
@@ -5837,7 +6559,10 @@ namespace models {
           !appearance_ordinal_srv || !cut_state_srv || !depth_srv ||
           !depth_coordinate_v2_candidate_uav || !tensor_previous_input_uav ||
           !previous_appearance_ordinal_uav || !depth_cut_history_uav ||
-          !tensor_previous_exclusion_uav) {
+          !tensor_previous_exclusion_uav ||
+          (refined_live_geometry_active &&
+           (!prod_zipdepth_convex2x_live_map_cs || !guidance_cbuffer ||
+            !refined_tensor_out_srv || !guidance_tensor_exclusion_srv))) {
         return false;
       }
 
@@ -5905,21 +6630,62 @@ namespace models {
         return false;
       }
 
+      // The coarse map above is the sole history publisher.  In an authenticated landscape
+      // convex2x session, overwrite the spatial candidate with the same frame's raw refined
+      // output using the exact doubled cbuffer/exclusion and the already resolved coarse camera.
+      // The field-sized indirect grid is still receipt-gated by the coarse transaction.
+      if (refined_live_geometry_active) {
+        ID3D11Buffer *field_constants[2] = {
+          guidance_cbuffer.Get(),
+          depth_coordinate_v2_cbuffer.Get(),
+        };
+        ID3D11ShaderResourceView *field_inputs[3] = {
+          refined_tensor_out_srv.Get(),
+          depth_coordinate_v2_state_srv.Get(),
+          guidance_tensor_exclusion_srv.Get(),
+        };
+        context->CSSetShader(prod_zipdepth_convex2x_live_map_cs.Get(), nullptr, 0u);
+        context->CSSetConstantBuffers(0u, 2u, field_constants);
+        context->CSSetShaderResources(0u, 3u, field_inputs);
+        context->CSSetUnorderedAccessViews(
+          0u, 1u, depth_coordinate_v2_candidate_uav.GetAddressOf(), nullptr
+        );
+        dispatch_infer_postprocess(
+          (static_cast<UINT>(field_w) + 15u) / 16u,
+          (static_cast<UINT>(field_h) + 15u) / 16u,
+          1u,
+          near_identical_gpu_infer_grid16_byte_offset
+        );
+        ID3D11ShaderResourceView *null_inputs[3] = {};
+        ID3D11UnorderedAccessView *null_output = nullptr;
+        ID3D11Buffer *null_constants[2] = {};
+        context->CSSetShaderResources(0u, 3u, null_inputs);
+        context->CSSetUnorderedAccessViews(0u, 1u, &null_output, nullptr);
+        context->CSSetConstantBuffers(0u, 2u, null_constants);
+      }
+
+      const host_sbs_v2_gpu::base_constants_t geometry_constants {
+        .depth = refined_live_geometry_active ? guidance_cbuffer.Get() : cbuffer.Get(),
+        .coordinate_v2 = depth_coordinate_v2_cbuffer.Get(),
+      };
+      ID3D11ShaderResourceView *geometry_exclusion = refined_live_geometry_active ?
+        guidance_tensor_exclusion_srv.Get() : tensor_exclusion_srv.Get();
+
       // Candidate -> conservative full-resolution RGB ownership refinement. The retained source
       // SRV belongs to this exact asynchronous raw-depth completion. Missing source evidence is a
       // safe identity copy; ordinary production pairing always supplies it.
       if (pending_source_srv) {
         const host_sbs_v2_gpu::ownership_command_t ownership_command {
-          .constants = base_constants,
+          .constants = geometry_constants,
           .source_region_constants = source_region_cbuffer.Get(),
           .shader = depth_coordinate_v2_ownership_cs.Get(),
           .candidate = depth_coordinate_v2_candidate_srv.Get(),
           .source_color = pending_source_srv.Get(),
-          .tensor_exclusion = tensor_exclusion_srv.Get(),
+          .tensor_exclusion = geometry_exclusion,
           .ownership_refined_output = depth_coordinate_v2_ownership_uav.Get(),
           .dispatch = parallax_v2_dispatch_command(
-            (target_w + 7) / 8,
-            (target_h + 7) / 8,
+            (static_cast<UINT>(field_w) + 7u) / 8u,
+            (static_cast<UINT>(field_h) + 7u) / 8u,
             1u,
             near_identical_gpu_infer_grid8_byte_offset
           ),
@@ -5948,14 +6714,14 @@ namespace models {
       // Produce the exact column upper envelope plus the fixed 75/25 vertical share. The upper
       // remains diagnostic evidence; only the neutral conditioned field feeds live geometry.
       const host_sbs_v2_gpu::vertical_command_t vertical_command {
-        .constants = base_constants,
+        .constants = geometry_constants,
         .shader = depth_coordinate_v2_vertical_limit_cs.Get(),
         .ownership_refined = depth_coordinate_v2_ownership_srv.Get(),
         .vertical_majorant_output = depth_coordinate_v2_vertical_majorant_uav.Get(),
         .vertical_conditioned_output =
           depth_coordinate_v2_vertical_conditioned_uav.Get(),
         .dispatch = parallax_v2_dispatch_command(
-          target_w,
+          static_cast<UINT>(field_w),
           1u,
           1u,
           near_identical_gpu_infer_columns_byte_offset
@@ -5968,12 +6734,12 @@ namespace models {
       // Apply one pure horizontal majorant to the vertically conditioned field. There is no
       // horizontal minorant or completed-2D-envelope blend, so lateral lowering is not added.
       const host_sbs_v2_gpu::horizontal_command_t horizontal_command {
-        .constants = base_constants,
+        .constants = geometry_constants,
         .shader = depth_coordinate_v2_limit_cs.Get(),
         .vertical_conditioned = depth_coordinate_v2_vertical_conditioned_srv.Get(),
         .final_output = depth_coordinate_v2_final_uav.Get(),
         .dispatch = parallax_v2_dispatch_command(
-          target_h,
+          static_cast<UINT>(field_h),
           1u,
           1u,
           near_identical_gpu_infer_rows_byte_offset
@@ -5994,7 +6760,9 @@ namespace models {
     }
 
     bool update_pending_ocr_constants() {
-      if (!ocr_resolve_cbuffer || pending_frame_id == 0u || target_w <= 0 || target_h <= 0) {
+      const auto tensor_content = live_field_content(pending_input_region);
+      if (!ocr_resolve_cbuffer || pending_frame_id == 0u || target_w <= 0 || target_h <= 0 ||
+          !tensor_content) {
         return false;
       }
       const std::uint32_t source_width = pending_input_region.width();
@@ -6002,8 +6770,8 @@ namespace models {
       const auto roi = fit_subtitle_analysis_geometry(
         source_width,
         source_height,
-        {target_w, target_h},
-        pending_input_region.tensor_content
+        live_field_shape(),
+        *tensor_content
       );
       if (!roi.valid()) {
         return false;
@@ -6022,16 +6790,16 @@ namespace models {
         static_cast<std::uint32_t>(pending_input_region.analysis_generation >> 32u),
         source_width,
         source_height,
-        static_cast<std::uint32_t>(target_w),
-        static_cast<std::uint32_t>(target_h),
+        static_cast<std::uint32_t>(field_w),
+        static_cast<std::uint32_t>(field_h),
         source_height - crop_height,
         crop_height,
         roi.roi_top,
         roi.roi_bottom,
-        roi.tensor_content.left,
-        roi.tensor_content.top,
-        roi.tensor_content.right,
-        roi.tensor_content.bottom,
+        tensor_content->left,
+        tensor_content->top,
+        tensor_content->right,
+        tensor_content->bottom,
       };
       context->UpdateSubresource(
         ocr_resolve_cbuffer.Get(), 0u, nullptr, constants.data(), 0u, 0u
@@ -6108,23 +6876,24 @@ namespace models {
 
       const std::uint32_t source_width = pending_input_region.width();
       const std::uint32_t source_height = pending_input_region.height();
-      const std::uint32_t field_width = target_w > 0 ?
-                                          static_cast<std::uint32_t>(target_w) :
+      const std::uint32_t field_width = field_w > 0 ?
+                                          static_cast<std::uint32_t>(field_w) :
                                           0u;
-      const std::uint32_t field_height = target_h > 0 ?
-                                           static_cast<std::uint32_t>(target_h) :
+      const std::uint32_t field_height = field_h > 0 ?
+                                           static_cast<std::uint32_t>(field_h) :
                                            0u;
+      const auto tensor_content = live_field_content(pending_input_region);
       const auto roi = fit_subtitle_analysis_geometry(
         source_width,
         source_height,
-        {target_w, target_h},
-        pending_input_region.tensor_content
+        live_field_shape(),
+        tensor_content.value_or(depth_tensor_content_rect_t {})
       );
       // OCR8/SLR follows the current authenticated analysis field. An unsupported tensor or an
       // unprojectable bottom crop has no subtitle authority; the complete condition writer still
       // publishes Base exactly into the distinct live output texture.
-      const bool locator_geometry_valid = roi.valid();
-      const auto tensor_content = pending_input_region.tensor_content;
+      const bool locator_geometry_valid = tensor_content && roi.valid();
+      const auto field_content = tensor_content.value_or(depth_tensor_content_rect_t {});
       const std::array<std::uint32_t, 16> constants {
         field_width,
         field_height,
@@ -6138,10 +6907,10 @@ namespace models {
         static_cast<std::uint32_t>(pending_frame_id >> 32u),
         static_cast<std::uint32_t>(pending_input_region.analysis_generation),
         static_cast<std::uint32_t>(pending_input_region.analysis_generation >> 32u),
-        tensor_content.left,
-        tensor_content.top,
-        tensor_content.right,
-        tensor_content.bottom,
+        field_content.left,
+        field_content.top,
+        field_content.right,
+        field_content.bottom,
       };
       context->UpdateSubresource(
         subtitle_locator_cbuffer.Get(), 0, nullptr, constants.data(), 0,
@@ -6149,7 +6918,7 @@ namespace models {
       );
 
       ID3D11Buffer *constant_buffers[3] = {
-        cbuffer.Get(),
+        refined_live_geometry_active ? guidance_cbuffer.Get() : cbuffer.Get(),
         depth_coordinate_v2_cbuffer.Get(),
         subtitle_locator_cbuffer.Get(),
       };
@@ -6273,8 +7042,8 @@ namespace models {
         static_cast<std::uint32_t>(append.host_subtitle_outcome),
         pending_input_region.width(),
         pending_input_region.height(),
-        static_cast<std::uint32_t>(target_w),
-        static_cast<std::uint32_t>(target_h),
+        static_cast<std::uint32_t>(field_w),
+        static_cast<std::uint32_t>(field_h),
         static_cast<std::uint32_t>(pending_observation_timestamp_us),
         static_cast<std::uint32_t>(pending_observation_timestamp_us >> 32u),
         0u,
@@ -6330,8 +7099,8 @@ namespace models {
       }
 
       D3D11_TEXTURE2D_DESC desc {};
-      desc.Width = static_cast<UINT>(target_w);
-      desc.Height = static_cast<UINT>(target_h);
+      desc.Width = static_cast<UINT>(field_w);
+      desc.Height = static_cast<UINT>(field_h);
       desc.MipLevels = 1;
       desc.ArraySize = 1;
       desc.Format = DXGI_FORMAT_R32_FLOAT;
@@ -6374,13 +7143,14 @@ namespace models {
       }
 
       ID3D11Buffer *constant_buffers[2] = {
-        cbuffer.Get(),
+        refined_live_geometry_active ? guidance_cbuffer.Get() : cbuffer.Get(),
         depth_coordinate_v2_cbuffer.Get(),
       };
       ID3D11ShaderResourceView *inputs[3] = {
-        tensor_out_srv.Get(),
+        refined_live_geometry_active ? refined_tensor_out_srv.Get() : tensor_out_srv.Get(),
         depth_coordinate_v2_state_srv.Get(),
-        tensor_exclusion_srv.Get(),
+        refined_live_geometry_active ?
+          guidance_tensor_exclusion_srv.Get() : tensor_exclusion_srv.Get(),
       };
       context->CSSetShader(
         depth_coordinate_v2_coordinate_diagnostic_cs.Get(),
@@ -6395,7 +7165,11 @@ namespace models {
         depth_coordinate_v2_coordinate_uav.GetAddressOf(),
         nullptr
       );
-      context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
+      context->Dispatch(
+        (static_cast<UINT>(field_w) + 15u) / 16u,
+        (static_cast<UINT>(field_h) + 15u) / 16u,
+        1u
+      );
 
       ID3D11ShaderResourceView *null_srvs[3] = {nullptr, nullptr, nullptr};
       ID3D11UnorderedAccessView *null_uav = nullptr;
@@ -6416,6 +7190,7 @@ namespace models {
       bool inference_enqueued = false,
       bool raw_snapshot_valid = false,
       bool model_input_snapshot_valid = false,
+      bool composite_snapshots_valid = false,
       bool coordinate_snapshot_valid = false,
       depth_input_region_t completed_input_region = {},
       input_color_space completed_color_space = input_color_space::srgb,
@@ -6438,6 +7213,20 @@ namespace models {
         r.model_input_snapshot = model_input_snapshot_srv;
       }
       r.raw_model_provenance = raw_model_provenance;
+      r.composite_depth_runtime_provenance = composite_depth_runtime_provenance;
+      if (composite_depth_runtime_provenance) {
+        const auto guidance_shape = host_sbs_convex2x_field_shape({target_w, target_h});
+        if (guidance_shape) {
+          r.guidance_width = guidance_shape->width;
+          r.guidance_height = guidance_shape->height;
+          r.refined_width = guidance_shape->width;
+          r.refined_height = guidance_shape->height;
+        }
+        if (composite_snapshots_valid) {
+          r.guidance_model_input_snapshot = guidance_model_input_snapshot_srv;
+          r.refined_model_depth_snapshot = refined_model_depth_snapshot_srv;
+        }
+      }
       if (parallax_v2_producer_active) {
         if (coordinate_snapshot_valid) {
           r.shadow_coordinate = depth_coordinate_v2_coordinate_srv;
@@ -6466,6 +7255,9 @@ namespace models {
       }
       r.raw_width = target_w;
       r.raw_height = target_h;
+      r.field_width = field_w;
+      r.field_height = field_h;
+      r.refined_live_geometry_active = refined_live_geometry_active;
       r.completed_frame_valid = completed_frame_valid;
       r.completed_frame_id = completed_frame_id;
       r.inference_enqueued = inference_enqueued;
@@ -6480,6 +7272,9 @@ namespace models {
         r.color_space = completed_color_space;
         r.input_domain_reset = input_domain_reset;
         r.subtitle_work_suppressed = subtitle_work_suppressed;
+        r.field_content = live_field_content(completed_input_region).value_or(
+          depth_tensor_content_rect_t {}
+        );
       }
       return r;
     }
@@ -6490,7 +7285,8 @@ namespace models {
       Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> &snapshot_srv,
       bool &error_logged,
       unsigned &retry_frames,
-      std::string_view label
+      std::string_view label,
+      const std::optional<UINT> logical_element_count = std::nullopt
     ) {
       if (!source) {
         return false;
@@ -6509,11 +7305,30 @@ namespace models {
         recreate = snapshot_desc.ByteWidth != source_desc.ByteWidth ||
                    snapshot_desc.StructureByteStride != source_desc.StructureByteStride ||
                    snapshot_desc.MiscFlags != source_desc.MiscFlags;
+        if (!recreate && logical_element_count) {
+          D3D11_SHADER_RESOURCE_VIEW_DESC snapshot_srv_desc {};
+          snapshot_srv->GetDesc(&snapshot_srv_desc);
+          recreate = snapshot_srv_desc.ViewDimension != D3D11_SRV_DIMENSION_BUFFER ||
+                     snapshot_srv_desc.Buffer.FirstElement != 0u ||
+                     snapshot_srv_desc.Buffer.NumElements != *logical_element_count;
+        }
       }
       if (recreate) {
         snapshot.Reset();
         snapshot_srv.Reset();
-        if (FAILED(device->CreateBuffer(&source_desc, nullptr, &snapshot)) || FAILED(device->CreateShaderResourceView(snapshot.Get(), nullptr, &snapshot_srv))) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC logical_srv_desc {};
+        const D3D11_SHADER_RESOURCE_VIEW_DESC *srv_desc = nullptr;
+        if (logical_element_count) {
+          logical_srv_desc.Format = DXGI_FORMAT_UNKNOWN;
+          logical_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+          logical_srv_desc.Buffer.FirstElement = 0u;
+          logical_srv_desc.Buffer.NumElements = *logical_element_count;
+          srv_desc = &logical_srv_desc;
+        }
+        if (FAILED(device->CreateBuffer(&source_desc, nullptr, &snapshot)) ||
+            FAILED(device->CreateShaderResourceView(
+              snapshot.Get(), srv_desc, &snapshot_srv
+            ))) {
           snapshot.Reset();
           snapshot_srv.Reset();
           if (!error_logged) {
@@ -6594,6 +7409,7 @@ namespace models {
       dispatch_pending_gpu_completion_trace();
       bool raw_snapshot_valid = false;
       bool model_input_snapshot_valid = false;
+      bool composite_snapshots_valid = false;
       bool coordinate_snapshot_valid = false;
       // Dump 3D binds these immutable tensors to pending_input_region. For a video ROI they are
       // bound to the logical crop-local analysis domain and its exact tensor content rectangle;
@@ -6606,7 +7422,8 @@ namespace models {
           raw_snapshot_srv,
           raw_snapshot_error_logged,
           raw_snapshot_retry_frames,
-          "raw-depth"
+          "raw-depth",
+          static_cast<UINT>(target_w * target_h)
         );
         model_input_snapshot_valid = snapshot_buffer(
           tensor_in_buf.Get(),
@@ -6616,6 +7433,31 @@ namespace models {
           model_input_snapshot_retry_frames,
           "model-input"
         );
+        if (composite_depth_runtime_provenance) {
+          const bool guidance_snapshot_valid = snapshot_buffer(
+            guidance_tensor_in_buf.Get(),
+            guidance_model_input_snapshot_buf,
+            guidance_model_input_snapshot_srv,
+            guidance_model_input_snapshot_error_logged,
+            guidance_model_input_snapshot_retry_frames,
+            "fused-guidance-model-input"
+          );
+          const bool refined_snapshot_valid = snapshot_buffer(
+            refined_tensor_out_buf.Get(),
+            refined_model_depth_snapshot_buf,
+            refined_model_depth_snapshot_srv,
+            refined_model_depth_snapshot_error_logged,
+            refined_model_depth_snapshot_retry_frames,
+            "fused-refined-depth",
+            static_cast<UINT>(
+              prod_zipdepth_convex2x::scale * prod_zipdepth_convex2x::scale *
+              static_cast<std::uint32_t>(target_w) *
+              static_cast<std::uint32_t>(target_h)
+            )
+          );
+          composite_snapshots_valid =
+            guidance_snapshot_valid && refined_snapshot_valid;
+        }
       }
       mark_d3d_pre_start(d3d_timer);
       end_d3d_perf(d3d_timer);
@@ -6651,6 +7493,7 @@ namespace models {
         false,
         raw_snapshot_valid,
         model_input_snapshot_valid,
+        composite_snapshots_valid,
         coordinate_snapshot_valid,
         completed_input_region,
         completed_color_space,
@@ -6832,6 +7675,95 @@ namespace models {
       D3D11_SUBRESOURCE_DATA sd = {cb, 0, 0};
       cbuffer.Reset();
       device->CreateBuffer(&cb_desc, &sd, &cbuffer);
+    }
+
+    [[nodiscard]] depth_tensor_shape_t live_field_shape() const noexcept {
+      return {field_w, field_h};
+    }
+
+    [[nodiscard]] std::optional<depth_tensor_content_rect_t> live_field_content(
+      const depth_input_region_t &input_region
+    ) const noexcept {
+      if (!input_region.tensor_content.valid({target_w, target_h})) {
+        return std::nullopt;
+      }
+      if (!refined_live_geometry_active) {
+        return input_region.tensor_content;
+      }
+      const auto content = host_sbs_convex2x_content_rect(
+        input_region.tensor_content,
+        {target_w, target_h}
+      );
+      if (!content || !content->valid(live_field_shape()) ||
+          !prod_zipdepth_convex2x::live_geometry_shape_relation(
+            static_cast<std::uint32_t>(target_w),
+            static_cast<std::uint32_t>(target_h),
+            static_cast<std::uint32_t>(field_w),
+            static_cast<std::uint32_t>(field_h)
+          )) {
+        return std::nullopt;
+      }
+      return content;
+    }
+
+    bool ensure_guidance_cbuffer(
+      const input_color_space color_space,
+      const depth_input_region_t &input_region
+    ) {
+      if (depth_engine_io_kind != prod_zipdepth_convex2x::engine_io_e::
+                                    production_dav2_zipdepth_convex2x) {
+        return true;
+      }
+      const depth_tensor_shape_t coarse_shape {target_w, target_h};
+      const auto guidance_shape = host_sbs_convex2x_field_shape(coarse_shape);
+      const auto guidance_content = host_sbs_convex2x_content_rect(
+        input_region.tensor_content,
+        coarse_shape
+      );
+      if (!guidance_shape || !guidance_content) {
+        guidance_cbuffer.Reset();
+        return false;
+      }
+      const int color_mode = static_cast<int>(color_space);
+      if (guidance_cbuffer && guidance_cb_color_mode == color_mode &&
+          guidance_cb_tensor_content == *guidance_content) {
+        return true;
+      }
+
+      const std::uint64_t elements =
+        static_cast<std::uint64_t>(guidance_shape->width) * guidance_shape->height;
+      const auto groups = static_cast<std::uint32_t>(
+        std::min<std::uint64_t>(64u, std::max<std::uint64_t>(1u, (elements + 255u) / 256u))
+      );
+      std::array<std::uint32_t, 16> constants {};
+      auto *floating = reinterpret_cast<float *>(constants.data());
+      constants[0] = static_cast<std::uint32_t>(guidance_shape->width);
+      constants[1] = static_cast<std::uint32_t>(guidance_shape->height);
+      constants[2] = static_cast<std::uint32_t>(color_mode);
+      floating[3] = ema_alpha;
+      floating[4] = minmax_alpha;
+      constants[5] = groups * 256u;
+      floating[6] = ema_edge_change;
+      floating[7] = ema_edge_gradient;
+      floating[8] = ema_edge_strength;
+      constants[9] = guidance_content->left;
+      constants[10] = guidance_content->top;
+      constants[11] = guidance_content->right;
+      constants[12] = guidance_content->bottom;
+
+      D3D11_BUFFER_DESC desc {};
+      desc.Usage = D3D11_USAGE_IMMUTABLE;
+      desc.ByteWidth = static_cast<UINT>(sizeof(constants));
+      desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+      D3D11_SUBRESOURCE_DATA data {constants.data(), 0u, 0u};
+      Microsoft::WRL::ComPtr<ID3D11Buffer> replacement;
+      if (FAILED(device->CreateBuffer(&desc, &data, &replacement))) {
+        return false;
+      }
+      guidance_cbuffer = std::move(replacement);
+      guidance_cb_color_mode = color_mode;
+      guidance_cb_tensor_content = *guidance_content;
+      return true;
     }
 
     // Bind the physical rectangle inside the retained full matched frame separately from the
@@ -7388,6 +8320,7 @@ namespace models {
       std::uint64_t completed_frame_id = 0;
       bool raw_snapshot_valid = false;
       bool model_input_snapshot_valid = false;
+      bool composite_snapshots_valid = false;
       bool coordinate_snapshot_valid = false;
       depth_input_region_t completed_input_region {};
       input_color_space completed_color_space = input_color_space::srgb;
@@ -7480,6 +8413,20 @@ namespace models {
         if (input_desc.Width == 0 || input_desc.Height == 0) {
           return {};
         }
+        const bool fused_runtime =
+          depth_engine_io_kind == prod_zipdepth_convex2x::engine_io_e::
+                                    production_dav2_zipdepth_convex2x;
+        const auto fused_profile = prod_zipdepth_convex2x::fixed_profile_index(
+          static_cast<std::uint32_t>(requested_shape.width),
+          static_cast<std::uint32_t>(requested_shape.height)
+        );
+        if (fused_runtime && !fused_profile) {
+          BOOST_LOG(error) << "Fused DAV2 + ZipDepth has no authenticated point profile for "
+                           << requested_shape.width << 'x' << requested_shape.height << '.';
+          mark_terminal_failure();
+          return {};
+        }
+
         // Keep the patch-aligned tensor as close as possible to source aspect while respecting
         // the TensorRT profile, configured aspect cap, and native size.
         target_w = requested_shape.width;
@@ -7493,6 +8440,17 @@ namespace models {
         // frame. Never let optional textures/state from that abandoned shape survive into the
         // retry (whose source aspect may already have changed).
         release_parallax_v2_resources();
+        refined_live_geometry_active = fused_runtime &&
+          prod_zipdepth_convex2x::live_geometry_coarse_shape_is_supported(
+            static_cast<std::uint32_t>(target_w),
+            static_cast<std::uint32_t>(target_h)
+          );
+        field_w = refined_live_geometry_active ?
+                    static_cast<int>(prod_zipdepth_convex2x::scale) * target_w :
+                    target_w;
+        field_h = refined_live_geometry_active ?
+                    static_cast<int>(prod_zipdepth_convex2x::scale) * target_h :
+                    target_h;
         if (!unregister_near_identical_decision_interop(cuda)) {
           mark_terminal_failure(true);
           return {};
@@ -7500,6 +8458,7 @@ namespace models {
         near_identical_tile.reset();
         near_identical_transaction.reset();
         near_identical_history_owner.reset();
+        guidance_near_identical_tile.reset();
 
         BOOST_LOG(info) << "Depth Estimator dynamic resolution set to " << target_w << "x" << target_h;
 
@@ -7507,7 +8466,13 @@ namespace models {
           unregister_cuda_graphics_resource(cuda, cuda_in_res);
         const bool previous_output_unregistered =
           unregister_cuda_graphics_resource(cuda, cuda_out_res);
-        if (!previous_input_unregistered || !previous_output_unregistered) {
+        const bool previous_guidance_input_unregistered =
+          unregister_cuda_graphics_resource(cuda, cuda_guidance_in_res);
+        const bool previous_refined_output_unregistered =
+          unregister_cuda_graphics_resource(cuda, cuda_refined_out_res);
+        if (!previous_input_unregistered || !previous_output_unregistered ||
+            !previous_guidance_input_unregistered ||
+            !previous_refined_output_unregistered) {
           // A retained registration still owns the old D3 backing. Shape setup must not release
           // or overwrite it; quarantine this context and let terminal teardown retry safely.
           execution_context_poisoned = true;
@@ -7585,15 +8550,125 @@ namespace models {
                          &previous_appearance_ordinal_uav
                        ));
 
-        buf_desc.ByteWidth = target_w * target_h * sizeof(float);
+        const std::size_t coarse_output_logical_bytes =
+          static_cast<std::size_t>(target_w) * target_h * sizeof(float);
+        const std::optional<std::size_t> coarse_output_allocation_bytes =
+          fused_runtime ?
+            detail::checked_tensorrt_output_allocation_bytes(
+              coarse_output_logical_bytes
+            ) :
+            std::optional<std::size_t> {coarse_output_logical_bytes};
+        resources_ok = resources_ok && coarse_output_allocation_bytes &&
+          *coarse_output_allocation_bytes <= std::numeric_limits<UINT>::max();
+        buf_desc.ByteWidth = coarse_output_allocation_bytes ?
+                               static_cast<UINT>(*coarse_output_allocation_bytes) :
+                               0u;
         buf_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SHADER_RESOURCE_VIEW_DESC coarse_output_srv_desc {};
+        coarse_output_srv_desc.Format = DXGI_FORMAT_UNKNOWN;
+        coarse_output_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+        coarse_output_srv_desc.Buffer.FirstElement = 0u;
+        coarse_output_srv_desc.Buffer.NumElements =
+          static_cast<UINT>(target_w * target_h);
         resources_ok = resources_ok &&
                        SUCCEEDED(device->CreateBuffer(&buf_desc, nullptr, &tensor_out_buf)) &&
                        SUCCEEDED(device->CreateShaderResourceView(
                          tensor_out_buf.Get(),
-                         nullptr,
+                         &coarse_output_srv_desc,
                          &tensor_out_srv
                        ));
+
+        const auto guidance_shape = fused_runtime ?
+                                      host_sbs_convex2x_field_shape(
+                                        {target_w, target_h}
+                                      ) :
+                                      std::optional<depth_tensor_shape_t> {};
+        if (fused_runtime) {
+          resources_ok = resources_ok && guidance_shape.has_value();
+        }
+        if (resources_ok && guidance_shape) {
+          const auto guidance_width = static_cast<std::uint32_t>(guidance_shape->width);
+          const auto guidance_height = static_cast<std::uint32_t>(guidance_shape->height);
+          const auto guidance_elements = guidance_width * guidance_height;
+
+          D3D11_BUFFER_DESC guidance_desc {};
+          guidance_desc.Usage = D3D11_USAGE_DEFAULT;
+          guidance_desc.ByteWidth = guidance_elements * 3u * sizeof(float);
+          guidance_desc.BindFlags =
+            D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+          guidance_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+          guidance_desc.StructureByteStride = sizeof(float);
+          resources_ok =
+            SUCCEEDED(device->CreateBuffer(
+              &guidance_desc, nullptr, &guidance_tensor_in_buf
+            )) &&
+            SUCCEEDED(device->CreateUnorderedAccessView(
+              guidance_tensor_in_buf.Get(), nullptr, &guidance_tensor_in_uav
+            )) &&
+            SUCCEEDED(device->CreateShaderResourceView(
+              guidance_tensor_in_buf.Get(), nullptr, &guidance_tensor_in_srv
+            ));
+
+          auto guidance_appearance_desc = guidance_desc;
+          guidance_appearance_desc.ByteWidth = guidance_elements * sizeof(float);
+          resources_ok = resources_ok &&
+            SUCCEEDED(device->CreateBuffer(
+              &guidance_appearance_desc, nullptr, &guidance_appearance_ordinal_buf
+            )) &&
+            SUCCEEDED(device->CreateUnorderedAccessView(
+              guidance_appearance_ordinal_buf.Get(), nullptr,
+              &guidance_appearance_ordinal_uav
+            ));
+
+          auto refined_desc = guidance_appearance_desc;
+          const std::size_t refined_output_logical_bytes =
+            static_cast<std::size_t>(guidance_elements) * sizeof(float);
+          const auto refined_output_allocation_bytes =
+            detail::checked_tensorrt_output_allocation_bytes(
+              refined_output_logical_bytes
+            );
+          resources_ok = resources_ok && refined_output_allocation_bytes &&
+            *refined_output_allocation_bytes <= std::numeric_limits<UINT>::max();
+          refined_desc.ByteWidth = refined_output_allocation_bytes ?
+                                     static_cast<UINT>(*refined_output_allocation_bytes) :
+                                     0u;
+          refined_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+          D3D11_SHADER_RESOURCE_VIEW_DESC refined_output_srv_desc {};
+          refined_output_srv_desc.Format = DXGI_FORMAT_UNKNOWN;
+          refined_output_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+          refined_output_srv_desc.Buffer.FirstElement = 0u;
+          refined_output_srv_desc.Buffer.NumElements = guidance_elements;
+          resources_ok = resources_ok &&
+            SUCCEEDED(device->CreateBuffer(
+              &refined_desc, nullptr, &refined_tensor_out_buf
+            )) &&
+            SUCCEEDED(device->CreateShaderResourceView(
+              refined_tensor_out_buf.Get(), &refined_output_srv_desc,
+              &refined_tensor_out_srv
+            ));
+
+          const std::uint32_t tile_count =
+            ((guidance_width + 15u) / 16u) * ((guidance_height + 15u) / 16u);
+          D3D11_BUFFER_DESC tile_desc {};
+          tile_desc.Usage = D3D11_USAGE_DEFAULT;
+          tile_desc.ByteWidth = tile_count * 4u * sizeof(std::uint32_t);
+          tile_desc.BindFlags =
+            D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+          tile_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+          tile_desc.StructureByteStride = 4u * sizeof(std::uint32_t);
+          resources_ok = resources_ok &&
+            SUCCEEDED(device->CreateBuffer(
+              &tile_desc, nullptr, &guidance_near_identical_tile.buffer
+            )) &&
+            SUCCEEDED(device->CreateShaderResourceView(
+              guidance_near_identical_tile.buffer.Get(), nullptr,
+              &guidance_near_identical_tile.srv
+            )) &&
+            SUCCEEDED(device->CreateUnorderedAccessView(
+              guidance_near_identical_tile.buffer.Get(), nullptr,
+              &guidance_near_identical_tile.uav
+            ));
+        }
 
         D3D11_TEXTURE2D_DESC tex_desc = {};
         tex_desc.Width = target_w;
@@ -7651,11 +8726,30 @@ namespace models {
                        SUCCEEDED(device->CreateTexture2D(&mask_desc, nullptr, &tensor_previous_exclusion_tex)) &&
                        SUCCEEDED(device->CreateUnorderedAccessView(tensor_previous_exclusion_tex.Get(), nullptr, &tensor_previous_exclusion_uav)) &&
                        SUCCEEDED(device->CreateShaderResourceView(tensor_previous_exclusion_tex.Get(), nullptr, &tensor_previous_exclusion_srv));
+        if (resources_ok && guidance_shape) {
+          auto guidance_exclusion_desc = mask_desc;
+          guidance_exclusion_desc.Width = static_cast<UINT>(guidance_shape->width);
+          guidance_exclusion_desc.Height = static_cast<UINT>(guidance_shape->height);
+          resources_ok =
+            SUCCEEDED(device->CreateTexture2D(
+              &guidance_exclusion_desc, nullptr, &guidance_tensor_exclusion_tex
+            )) &&
+            SUCCEEDED(device->CreateUnorderedAccessView(
+              guidance_tensor_exclusion_tex.Get(), nullptr,
+              &guidance_tensor_exclusion_uav
+            )) &&
+            SUCCEEDED(device->CreateShaderResourceView(
+              guidance_tensor_exclusion_tex.Get(), nullptr,
+              &guidance_tensor_exclusion_srv
+            ));
+        }
 
         if (!resources_ok) {
           BOOST_LOG(error)
             << "Depth estimator D3D11 resource creation failed; Host SBS V2 will fail flat.";
           target_w = target_h = 0;
+          field_w = field_h = 0;
+          refined_live_geometry_active = false;
           mark_terminal_failure();
           return {};
         }
@@ -7682,17 +8776,39 @@ namespace models {
 
         auto res1 = cuda.cuGraphicsD3D11RegisterResource(&cuda_in_res, tensor_in_buf.Get(), 0);
         auto res2 = cuda.cuGraphicsD3D11RegisterResource(&cuda_out_res, tensor_out_buf.Get(), 0);
-        if (res1 != 0 || res2 != 0) {
-          BOOST_LOG(error) << "cuGraphicsD3D11RegisterResource failed: " << res1 << ", " << res2;
+        const auto res3 = fused_runtime ?
+                            cuda.cuGraphicsD3D11RegisterResource(
+                              &cuda_guidance_in_res, guidance_tensor_in_buf.Get(), 0
+                            ) :
+                            CUDA_SUCCESS;
+        const auto res4 = fused_runtime ?
+                            cuda.cuGraphicsD3D11RegisterResource(
+                              &cuda_refined_out_res, refined_tensor_out_buf.Get(), 0
+                            ) :
+                            CUDA_SUCCESS;
+        if (res1 != CUDA_SUCCESS || res2 != CUDA_SUCCESS ||
+            res3 != CUDA_SUCCESS || res4 != CUDA_SUCCESS) {
+          BOOST_LOG(error) << "Atomic depth TensorRT interop registration failed: "
+                           << res1 << ", " << res2 << ", " << res3 << ", " << res4;
           const bool input_cleanup_ok =
             unregister_cuda_graphics_resource(cuda, cuda_in_res);
           const bool output_cleanup_ok =
             unregister_cuda_graphics_resource(cuda, cuda_out_res);
-          if (!input_cleanup_ok || !output_cleanup_ok) {
+          const bool guidance_input_cleanup_ok =
+            unregister_cuda_graphics_resource(cuda, cuda_guidance_in_res);
+          const bool refined_output_cleanup_ok =
+            unregister_cuda_graphics_resource(cuda, cuda_refined_out_res);
+          if (!input_cleanup_ok || !output_cleanup_ok ||
+              !guidance_input_cleanup_ok || !refined_output_cleanup_ok) {
             execution_context_poisoned = true;
           }
           target_w = target_h = 0;
-          mark_terminal_failure(!input_cleanup_ok || !output_cleanup_ok);
+          field_w = field_h = 0;
+          refined_live_geometry_active = false;
+          mark_terminal_failure(
+            !input_cleanup_ok || !output_cleanup_ok ||
+            !guidance_input_cleanup_ok || !refined_output_cleanup_ok
+          );
           return {};
         }
       }
@@ -7766,7 +8882,8 @@ namespace models {
             raw_snapshot_srv,
             raw_snapshot_error_logged,
             raw_snapshot_retry_frames,
-            "raw-depth"
+            "raw-depth",
+            static_cast<UINT>(target_w * target_h)
           );
           model_input_snapshot_valid = snapshot_buffer(
             tensor_in_buf.Get(),
@@ -7776,6 +8893,31 @@ namespace models {
             model_input_snapshot_retry_frames,
             "model-input"
           );
+          if (composite_depth_runtime_provenance) {
+            const bool guidance_snapshot_valid = snapshot_buffer(
+              guidance_tensor_in_buf.Get(),
+              guidance_model_input_snapshot_buf,
+              guidance_model_input_snapshot_srv,
+              guidance_model_input_snapshot_error_logged,
+              guidance_model_input_snapshot_retry_frames,
+              "fused-guidance-model-input"
+            );
+            const bool refined_snapshot_valid = snapshot_buffer(
+              refined_tensor_out_buf.Get(),
+              refined_model_depth_snapshot_buf,
+              refined_model_depth_snapshot_srv,
+              refined_model_depth_snapshot_error_logged,
+              refined_model_depth_snapshot_retry_frames,
+              "fused-refined-depth",
+              static_cast<UINT>(
+                prod_zipdepth_convex2x::scale * prod_zipdepth_convex2x::scale *
+                static_cast<std::uint32_t>(target_w) *
+                static_cast<std::uint32_t>(target_h)
+              )
+            );
+            composite_snapshots_valid =
+              guidance_snapshot_valid && refined_snapshot_valid;
+          }
           ensure_cbuffers(color_space, input_region);
           ensure_source_region_cbuffer(input_region);
           if (!cbuffer || !source_region_cbuffer) {
@@ -7822,6 +8964,7 @@ namespace models {
           false,
           raw_snapshot_valid,
           model_input_snapshot_valid,
+          composite_snapshots_valid,
           coordinate_snapshot_valid,
           completed_input_region,
           completed_color_space,
@@ -7837,6 +8980,16 @@ namespace models {
         ocr_signature_refresh_required = false;
       }
 
+      const bool fused_runtime =
+        depth_engine_io_kind == prod_zipdepth_convex2x::engine_io_e::
+                                  production_dav2_zipdepth_convex2x;
+      if (fused_runtime && !ensure_guidance_cbuffer(color_space, input_region)) {
+        BOOST_LOG(error)
+          << "Fused DAV2 + ZipDepth could not create its exact 2x guidance constants.";
+        mark_terminal_failure();
+        return {};
+      }
+
       // Every DAV2 transaction, including a CPU-known force-infer, maps the same authenticated
       // request/receipt buffer and launches the conditional wrapper. These are mandatory pipeline
       // resources: losing one is terminal rather than a reason to bypass the wrapper.
@@ -7845,7 +8998,12 @@ namespace models {
           !near_identical_fused_preprocess_cs ||
           !fused_preprocess_force_cbuffer ||
           !fused_preprocess_compare_cbuffer ||
-          !tensor_previous_input_srv || !near_identical_tile.uav) {
+          !tensor_previous_input_srv || !near_identical_tile.uav ||
+          (fused_runtime &&
+           (!guidance_cbuffer || !guidance_tensor_in_uav ||
+            !guidance_appearance_ordinal_uav || !guidance_tensor_exclusion_uav ||
+            !guidance_tensor_exclusion_srv ||
+            !guidance_near_identical_tile.uav || !refined_tensor_out_srv))) {
         if (!is_terminal()) {
           fail_gpu_conditional_bridge_once(
             "mandatory GPU transaction resources or interop are unavailable"
@@ -7885,11 +9043,12 @@ namespace models {
       // Decide whether this transaction has a complete optional OCR path using host-owned
       // resource/geometry state only. GPU-undecided must publish its RQST before the fused
       // preprocess can generate image-derived tile evidence.
+      const auto current_field_content = live_field_content(input_region);
       const auto current_ocr_roi = fit_subtitle_analysis_geometry(
         input_region.width(),
         input_region.height(),
-        {target_w, target_h},
-        input_region.tensor_content
+        live_field_shape(),
+        current_field_content.value_or(depth_tensor_content_rect_t {})
       );
       const std::uint32_t ocr_crop_height = subtitle_ocr_source_crop_height(
         input_region.width(),
@@ -7905,7 +9064,7 @@ namespace models {
         ocr_box_cells_cs && ocr_box_resolve_cs &&
         near_identical_finalize_cs && ocr_cell_stats_srv &&
         ocr_cell_stats_uav && ocr_box_record_uav && ocr_resolve_cbuffer &&
-        current_ocr_roi.valid() && ocr_crop_height != 0u &&
+        current_field_content && current_ocr_roi.valid() && ocr_crop_height != 0u &&
         ocr_crop_height <= input_region.height();
       const auto subtitle_work = subtitle_transaction_work(
         accepted_optional_work,
@@ -7961,6 +9120,43 @@ namespace models {
       context->CSSetUnorderedAccessViews(0, 4, null_uavs, nullptr);
       context->CSSetShaderResources(0, 2, null_srvs);
       context->CSSetConstantBuffers(0u, 3u, null_preprocess_cbuffers);
+      if (fused_runtime) {
+        // The fused tail consumes a second canonical RGB-to-NCHW observation at exactly 2x the
+        // coarse grid. Reuse the already-authenticated producer binary in uniform force mode:
+        // the native source texture and physical source rectangle stay identical, t1 is null, and
+        // all appearance/exclusion/tile side effects land in private 2x scratch.
+        const auto guidance_shape = host_sbs_convex2x_field_shape({target_w, target_h});
+        if (!guidance_shape) {
+          mark_terminal_failure();
+          return {};
+        }
+        ID3D11Buffer *guidance_cbuffers[3] = {
+          guidance_cbuffer.Get(),
+          fused_preprocess_force_cbuffer.Get(),
+          source_region_cbuffer.Get(),
+        };
+        ID3D11ShaderResourceView *guidance_srvs[2] = {
+          analysis_input_srv,
+          nullptr,
+        };
+        ID3D11UnorderedAccessView *guidance_uavs[4] = {
+          guidance_tensor_in_uav.Get(),
+          guidance_appearance_ordinal_uav.Get(),
+          guidance_tensor_exclusion_uav.Get(),
+          guidance_near_identical_tile.uav.Get(),
+        };
+        context->CSSetConstantBuffers(0u, 3u, guidance_cbuffers);
+        context->CSSetShaderResources(0u, 2u, guidance_srvs);
+        context->CSSetUnorderedAccessViews(0u, 4u, guidance_uavs, nullptr);
+        context->Dispatch(
+          (static_cast<UINT>(guidance_shape->width) + 15u) / 16u,
+          (static_cast<UINT>(guidance_shape->height) + 15u) / 16u,
+          1u
+        );
+        context->CSSetUnorderedAccessViews(0u, 4u, null_uavs, nullptr);
+        context->CSSetShaderResources(0u, 2u, null_srvs);
+        context->CSSetConstantBuffers(0u, 3u, null_preprocess_cbuffers);
+      }
       // GPU-undecided publishes its dense proposal. CPU-known force-infer publishes a complete
       // authenticated infer PROP/RQST instead. Both records carry the exact subtitle disposition;
       // only prepared OCR carries the optional-child request, and every completion consumes CBRG.
@@ -8030,12 +9226,14 @@ namespace models {
       // 2. CUDA Execution (for CURRENT frame). Depth remains mandatory. Optional OCR interop maps
       // on the same root stream and its TensorRT graph is embedded as a sibling conditional child;
       // one completion event after both unmap tails therefore covers the exact transaction.
-      std::array<CUgraphicsResource, 3> depth_resources {
+      std::array<CUgraphicsResource, 5> depth_resources {
         cuda_in_res,
         cuda_out_res,
         cuda_near_identical_decision_res,
+        cuda_guidance_in_res,
+        cuda_refined_out_res,
       };
-      constexpr unsigned int depth_resource_count = 3u;
+      const unsigned int depth_resource_count = fused_runtime ? 5u : 3u;
       auto map_res = cuda.cuGraphicsMapResources(
         depth_resource_count, depth_resources.data(), cu_stream
       );
@@ -8049,6 +9247,7 @@ namespace models {
           false,
           raw_snapshot_valid,
           model_input_snapshot_valid,
+          composite_snapshots_valid,
           coordinate_snapshot_valid,
           completed_input_region,
           completed_color_space,
@@ -8086,16 +9285,36 @@ namespace models {
 
       CUdeviceptr d_in = 0;
       CUdeviceptr d_out = 0;
+      CUdeviceptr d_guidance_in = 0;
+      CUdeviceptr d_refined_out = 0;
+      std::size_t input_mapped_bytes = 0u;
+      std::size_t output_mapped_bytes = 0u;
+      std::size_t guidance_input_mapped_bytes = 0u;
+      std::size_t refined_output_mapped_bytes = 0u;
       auto in_ptr_res = cuda.cuGraphicsResourceGetMappedPointer(
         &d_in,
-        nullptr,
+        &input_mapped_bytes,
         cuda_in_res
       );
       auto out_ptr_res = cuda.cuGraphicsResourceGetMappedPointer(
         &d_out,
-        nullptr,
+        &output_mapped_bytes,
         cuda_out_res
       );
+      CUresult guidance_in_ptr_res = CUDA_SUCCESS;
+      CUresult refined_out_ptr_res = CUDA_SUCCESS;
+      if (fused_runtime) {
+        guidance_in_ptr_res = cuda.cuGraphicsResourceGetMappedPointer(
+          &d_guidance_in,
+          &guidance_input_mapped_bytes,
+          cuda_guidance_in_res
+        );
+        refined_out_ptr_res = cuda.cuGraphicsResourceGetMappedPointer(
+          &d_refined_out,
+          &refined_output_mapped_bytes,
+          cuda_refined_out_res
+        );
+      }
       CUdeviceptr d_near_identical_decision = 0u;
       std::size_t near_identical_decision_mapped_bytes = 0u;
       const CUresult near_identical_decision_ptr_res =
@@ -8147,10 +9366,16 @@ namespace models {
       // This is request authority, not merely wrapper topology: a retained superset wrapper may
       // contain the OCR sibling while suppression leaves that child dormant.
       bool ocr_armed = false;
-      if (in_ptr_res != CUDA_SUCCESS || out_ptr_res != CUDA_SUCCESS || !d_in || !d_out) {
+      if (in_ptr_res != CUDA_SUCCESS || out_ptr_res != CUDA_SUCCESS || !d_in || !d_out ||
+          (fused_runtime &&
+           (guidance_in_ptr_res != CUDA_SUCCESS ||
+            refined_out_ptr_res != CUDA_SUCCESS ||
+            !d_guidance_in || !d_refined_out))) {
         const CUresult pointer_failure =
           in_ptr_res != CUDA_SUCCESS ? in_ptr_res :
           out_ptr_res != CUDA_SUCCESS ? out_ptr_res :
+          guidance_in_ptr_res != CUDA_SUCCESS ? guidance_in_ptr_res :
+          refined_out_ptr_res != CUDA_SUCCESS ? refined_out_ptr_res :
           static_cast<CUresult>(-1);
         (void) observe_joined_cuda_failure(
           "depth mapped-pointer contract", pointer_failure, true
@@ -8191,8 +9416,59 @@ namespace models {
         // map. A force-infer transaction may privately recapture that legal new signature. A
         // GPU-undecided transaction cannot bootstrap raw TensorRT work, so retain the old wrapper,
         // drop this candidate after unmap, and require the next transaction to be force-infer.
+        const auto selected_profile = fused_runtime ?
+          prod_zipdepth_convex2x::fixed_profile_index(
+            static_cast<std::uint32_t>(target_w),
+            static_cast<std::uint32_t>(target_h)
+          ) :
+          std::optional<std::uint32_t> {0u};
+        const std::size_t expected_input_bytes =
+          static_cast<std::size_t>(3u) * target_w * target_h * sizeof(float);
+        const std::size_t expected_output_bytes =
+          static_cast<std::size_t>(target_w) * target_h * sizeof(float);
+        const std::size_t expected_guidance_input_bytes =
+          expected_input_bytes * prod_zipdepth_convex2x::scale *
+          prod_zipdepth_convex2x::scale;
+        const std::size_t expected_refined_output_bytes =
+          expected_output_bytes * prod_zipdepth_convex2x::scale *
+          prod_zipdepth_convex2x::scale;
+        const auto expected_output_allocation_bytes =
+          detail::checked_tensorrt_output_allocation_bytes(expected_output_bytes);
+        const auto expected_refined_output_allocation_bytes =
+          detail::checked_tensorrt_output_allocation_bytes(
+            expected_refined_output_bytes
+          );
+        const bool mapped_tensor_sizes_valid =
+          !fused_runtime ||
+          (selected_profile && expected_output_allocation_bytes &&
+           expected_refined_output_allocation_bytes &&
+           input_mapped_bytes >= expected_input_bytes &&
+           output_mapped_bytes >= *expected_output_allocation_bytes &&
+           guidance_input_mapped_bytes >= expected_guidance_input_bytes &&
+           refined_output_mapped_bytes >=
+             *expected_refined_output_allocation_bytes);
+        if (!mapped_tensor_sizes_valid) {
+          BOOST_LOG(error)
+            << "Fused DAV2 + ZipDepth interop buffers violate the exact input/output allocation "
+               "boundary: coarse "
+            << input_mapped_bytes << '/' << expected_input_bytes << " in, "
+            << output_mapped_bytes << '/'
+            << expected_output_allocation_bytes.value_or(0u)
+            << " out (" << expected_output_bytes << " logical); guidance "
+            << guidance_input_mapped_bytes << '/' << expected_guidance_input_bytes << " in, "
+            << refined_output_mapped_bytes << '/'
+            << expected_refined_output_allocation_bytes.value_or(0u)
+            << " out (" << expected_refined_output_bytes << " logical).";
+          mark_terminal_failure();
+        }
         const detail::cuda_graph_signature_t depth_signature {
-          d_in, d_out, target_w, target_h
+          d_in,
+          d_out,
+          target_w,
+          target_h,
+          d_guidance_in,
+          d_refined_out,
+          selected_profile.value_or(0u),
         };
         bool dropped_for_signature_change =
           accepted_submission_class == pending_submission_class_e::gpu_undecided &&
@@ -8214,20 +9490,74 @@ namespace models {
           mark_terminal_failure(true);
         }
         bool bindings_ok = !is_terminal() && !dropped_for_signature_change;
+        bool profile_selection_attempted = false;
+        if (bindings_ok && fused_runtime &&
+            trt_bound_profile != static_cast<int>(*selected_profile)) {
+          profile_selection_attempted = true;
+          bindings_ok = exec_context->setOptimizationProfileAsync(
+            static_cast<int>(*selected_profile), cu_stream
+          );
+          if (bindings_ok) {
+            trt_bound_profile = static_cast<int>(*selected_profile);
+            trt_bound_width = 0;
+            trt_bound_height = 0;
+            trt_bound_input = 0;
+            trt_bound_output = 0;
+            trt_bound_guidance_input = 0;
+            trt_bound_refined_output = 0;
+            trt_output_sizes_validated = false;
+          }
+        }
         if (trt_bound_width != target_w || trt_bound_height != target_h) {
           nvinfer1::Dims in_dims = make_input_dims(target_h, target_w);
-          bindings_ok = exec_context->setInputShape("pixel_values", in_dims);
+          bindings_ok = bindings_ok && exec_context->setInputShape(
+            prod_zipdepth_convex2x::dav2_input.data(), in_dims
+          );
+          if (bindings_ok && fused_runtime) {
+            bindings_ok = exec_context->setInputShape(
+              prod_zipdepth_convex2x::guidance_input.data(),
+              make_input_dims(
+                static_cast<int>(prod_zipdepth_convex2x::scale) * target_h,
+                static_cast<int>(prod_zipdepth_convex2x::scale) * target_w
+              )
+            );
+          }
           if (bindings_ok) {
             trt_bound_width = target_w;
             trt_bound_height = target_h;
+            trt_output_sizes_validated = false;
           } else {
             BOOST_LOG(error) << "TensorRT setInputShape failed for " << target_w << "x" << target_h
                              << " (outside the engine's optimization profile?)";
           }
         }
+        if (bindings_ok && fused_runtime && !trt_output_sizes_validated) {
+          const std::int64_t coarse_required = exec_context->getMaxOutputSize(
+            prod_zipdepth_convex2x::coarse_output.data()
+          );
+          const std::int64_t refined_required = exec_context->getMaxOutputSize(
+            prod_zipdepth_convex2x::refined_output.data()
+          );
+          bindings_ok = expected_output_allocation_bytes &&
+            expected_refined_output_allocation_bytes &&
+            coarse_required > 0 && refined_required > 0 &&
+            static_cast<std::uint64_t>(coarse_required) <=
+              *expected_output_allocation_bytes &&
+            static_cast<std::uint64_t>(refined_required) <=
+              *expected_refined_output_allocation_bytes;
+          trt_output_sizes_validated = bindings_ok;
+          if (!bindings_ok) {
+            BOOST_LOG(error)
+              << "Fused DAV2 + ZipDepth resolved output bounds exceed their registered buffers: "
+              << coarse_required << '/'
+              << expected_output_allocation_bytes.value_or(0u) << " coarse, "
+              << refined_required << '/'
+              << expected_refined_output_allocation_bytes.value_or(0u) << " refined.";
+          }
+        }
         if (bindings_ok && trt_bound_input != d_in) {
           bindings_ok = exec_context->setTensorAddress(
-            "pixel_values",
+            prod_zipdepth_convex2x::dav2_input.data(),
             reinterpret_cast<void *>(d_in)
           );
           if (bindings_ok) {
@@ -8236,15 +9566,35 @@ namespace models {
         }
         if (bindings_ok && trt_bound_output != d_out) {
           bindings_ok = exec_context->setTensorAddress(
-            "predicted_depth",
+            prod_zipdepth_convex2x::coarse_output.data(),
             reinterpret_cast<void *>(d_out)
           );
           if (bindings_ok) {
             trt_bound_output = d_out;
           }
         }
+        if (bindings_ok && fused_runtime &&
+            trt_bound_guidance_input != d_guidance_in) {
+          bindings_ok = exec_context->setTensorAddress(
+            prod_zipdepth_convex2x::guidance_input.data(),
+            reinterpret_cast<void *>(d_guidance_in)
+          );
+          if (bindings_ok) {
+            trt_bound_guidance_input = d_guidance_in;
+          }
+        }
+        if (bindings_ok && fused_runtime &&
+            trt_bound_refined_output != d_refined_out) {
+          bindings_ok = exec_context->setTensorAddress(
+            prod_zipdepth_convex2x::refined_output.data(),
+            reinterpret_cast<void *>(d_refined_out)
+          );
+          if (bindings_ok) {
+            trt_bound_refined_output = d_refined_out;
+          }
+        }
         if (!bindings_ok && !dropped_for_signature_change) {
-          mark_terminal_failure();
+          mark_terminal_failure(profile_selection_attempted);
           if (!stream_error_logged) {
             BOOST_LOG(error)
               << "TensorRT shape/tensor binding failed; Host SBS V2 will fail flat.";
@@ -8553,6 +9903,7 @@ namespace models {
         enqueued && accepted_submission_class == pending_submission_class_e::force_infer,
         raw_snapshot_valid,
         model_input_snapshot_valid,
+        composite_snapshots_valid,
         coordinate_snapshot_valid,
         completed_input_region,
         completed_color_space,
@@ -8617,8 +9968,11 @@ namespace models {
     );
   }
 
-  estimate_result video_depth_estimator::finish_pending_depth_for_evaluation(input_color_space color_space) {
-    return pimpl->finish_pending(color_space);
+  estimate_result video_depth_estimator::finish_pending_depth_for_evaluation(
+    input_color_space color_space,
+    bool snapshot_debug_inputs
+  ) {
+    return pimpl->finish_pending(color_space, snapshot_debug_inputs);
   }
 
   pending_depth_poll_result video_depth_estimator::try_finish_pending_depth_nonblocking(

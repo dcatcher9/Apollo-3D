@@ -411,11 +411,12 @@ namespace {
             cut_buffer_,
             &cut_srv_,
             nullptr
-          )) return false;
+      )) return false;
 
       base_.assign(static_cast<std::size_t>(field_width_) * field_height_, 0.03f);
-      const auto sample_top = std::min(roi_top_ + 5u, field_height_);
-      const auto sample_bottom = std::min(roi_top_ + 32u, field_height_);
+      const auto cell_scale = fixture_field_cell_scale();
+      const auto sample_top = std::min(roi_top_ + 5u * cell_scale, field_height_);
+      const auto sample_bottom = std::min(roi_top_ + 32u * cell_scale, field_height_);
       for (std::uint32_t y = sample_top; y < sample_bottom; ++y) {
         std::fill_n(base_.begin() + static_cast<std::size_t>(y) * field_width_,
                     field_width_, 0.01f);
@@ -614,8 +615,9 @@ namespace {
 
     void set_base(const float value) {
       std::fill(base_.begin(), base_.end(), value);
-      const auto sample_top = std::min(roi_top_ + 5u, field_height_);
-      const auto sample_bottom = std::min(roi_top_ + 32u, field_height_);
+      const auto cell_scale = fixture_field_cell_scale();
+      const auto sample_top = std::min(roi_top_ + 5u * cell_scale, field_height_);
+      const auto sample_bottom = std::min(roi_top_ + 32u * cell_scale, field_height_);
       for (std::uint32_t y = sample_top; y < sample_bottom; ++y) {
         std::fill_n(base_.begin() + static_cast<std::size_t>(y) * field_width_,
                     field_width_, value);
@@ -641,19 +643,23 @@ namespace {
       const float outer_value,
       const float inner_value
     ) {
+      const auto cell_scale = fixture_field_cell_scale();
       const auto outer_y = std::clamp(
-        owner_top >= 10u ? owner_top - 10u : 0u,
+        owner_top >= 10u * cell_scale ? owner_top - 10u * cell_scale : 0u,
         tensor_content_[1u],
         tensor_content_[3u] - 1u
       );
       const auto inner_y = std::clamp(
-        owner_top >= 4u ? owner_top - 4u : 0u,
+        owner_top >= 4u * cell_scale ? owner_top - 4u * cell_scale : 0u,
         tensor_content_[1u],
         tensor_content_[3u] - 1u
       );
       for (std::uint32_t sample = 0u; sample < 16u; ++sample) {
         const auto x = static_cast<std::uint32_t>(std::clamp(
-          std::floor(center - 30.0f + 4.0f * static_cast<float>(sample) + 0.5f),
+          std::floor(
+            center - 30.0f * static_cast<float>(cell_scale) +
+            4.0f * static_cast<float>(cell_scale) * static_cast<float>(sample) + 0.5f
+          ),
           static_cast<float>(tensor_content_[0u]),
           static_cast<float>(tensor_content_[2u] - 1u)
         ));
@@ -671,20 +677,24 @@ namespace {
       const std::array<float, 16u> &outer_values,
       const std::array<float, 16u> &inner_values
     ) {
+      const auto cell_scale = fixture_field_cell_scale();
       const auto outer_y = std::clamp(
-        line.top >= 10u ? line.top - 10u : 0u,
+        line.top >= 10u * cell_scale ? line.top - 10u * cell_scale : 0u,
         tensor_content_[1u],
         tensor_content_[3u] - 1u
       );
       const auto inner_y = std::clamp(
-        line.top >= 4u ? line.top - 4u : 0u,
+        line.top >= 4u * cell_scale ? line.top - 4u * cell_scale : 0u,
         tensor_content_[1u],
         tensor_content_[3u] - 1u
       );
       const auto center = 0.5f * static_cast<float>(line.left + line.right - 1u);
       for (std::uint32_t sample = 0u; sample < 16u; ++sample) {
         const auto x = static_cast<std::uint32_t>(std::clamp(
-          std::floor(center - 30.0f + 4.0f * static_cast<float>(sample) + 0.5f),
+          std::floor(
+            center - 30.0f * static_cast<float>(cell_scale) +
+            4.0f * static_cast<float>(cell_scale) * static_cast<float>(sample) + 0.5f
+          ),
           static_cast<float>(tensor_content_[0u]),
           static_cast<float>(tensor_content_[2u] - 1u)
         ));
@@ -712,19 +722,23 @@ namespace {
       const float first_value,
       const float second_value
     ) {
+      const auto cell_scale = fixture_field_cell_scale();
       const auto outer_y = std::clamp(
-        owner_top >= 10u ? owner_top - 10u : 0u,
+        owner_top >= 10u * cell_scale ? owner_top - 10u * cell_scale : 0u,
         tensor_content_[1u],
         tensor_content_[3u] - 1u
       );
       const auto inner_y = std::clamp(
-        owner_top >= 4u ? owner_top - 4u : 0u,
+        owner_top >= 4u * cell_scale ? owner_top - 4u * cell_scale : 0u,
         tensor_content_[1u],
         tensor_content_[3u] - 1u
       );
       for (std::uint32_t sample = 0u; sample < 16u; ++sample) {
         const auto x = static_cast<std::uint32_t>(std::clamp(
-          std::floor(center - 30.0f + 4.0f * static_cast<float>(sample) + 0.5f),
+          std::floor(
+            center - 30.0f * static_cast<float>(cell_scale) +
+            4.0f * static_cast<float>(cell_scale) * static_cast<float>(sample) + 0.5f
+          ),
           static_cast<float>(tensor_content_[0u]),
           static_cast<float>(tensor_content_[2u] - 1u)
         ));
@@ -776,6 +790,13 @@ namespace {
         line.right - line.left,
         first_value,
         second_value
+      );
+    }
+
+    std::uint32_t fixture_field_cell_scale() const {
+      return std::max(
+        1u,
+        v2::subtitle_locator_field_cell_scale(field_width_, field_height_)
       );
     }
 
@@ -3190,6 +3211,7 @@ namespace {
     constexpr std::array cases {
       field_case_t {1022u, 434u, 2560u, 1080u, 100u, 850u},
       field_case_t {434u, 770u, 1080u, 1920u, 40u, 360u},
+      field_case_t {1540u, 868u, 1920u, 1080u, 200u, 1300u},
     };
 
     std::uint64_t identity = 100u;
@@ -3205,11 +3227,16 @@ namespace {
         field_case.field_height
       );
       ASSERT_TRUE(static_cast<bool>(dynamic_roi));
+      const auto cell_scale = v2::subtitle_locator_field_cell_scale(
+        field_case.field_width,
+        field_case.field_height
+      );
+      ASSERT_NE(cell_scale, 0u);
       const line_box_t line {
         field_case.line_left,
-        dynamic_roi.top + 35u,
+        dynamic_roi.top + 35u * cell_scale,
         field_case.line_right,
-        dynamic_roi.top + 45u,
+        dynamic_roi.top + 45u * cell_scale,
       };
       ASSERT_LE(line.bottom, dynamic_roi.bottom);
 
@@ -3221,6 +3248,8 @@ namespace {
       );
       std::string error;
       ASSERT_TRUE(fixture.initialize(error)) << error;
+      fixture.set_base(0.03f);
+      fixture.set_background_sample_rows(line, 0.01f, 0.01f);
       ASSERT_TRUE(fixture.observe(identity++, {line}, false));
       EXPECT_EQ(fixture.state()[2u], flag_pending);
       EXPECT_TRUE(fixture.output_is_exact_base());
@@ -3230,11 +3259,119 @@ namespace {
       EXPECT_EQ(fixture.state()[20u], 1u);
       EXPECT_EQ(fixture.state()[27u], field_case.field_width);
       EXPECT_EQ(fixture.state()[28u], field_case.field_height);
+      EXPECT_EQ(
+        fixture.state()[18u],
+        std::bit_cast<std::uint32_t>(0.01f)
+      );
       EXPECT_LT(
-        fixture.output_at((line.left + line.right) / 2u, line.top + 4u),
+        fixture.output_at(
+          (line.left + line.right) / 2u,
+          line.top + 4u * cell_scale
+        ),
         0.025f
       );
     }
+  }
+
+  TEST(HostSbsSubtitleSlr13GpuTest, ScalesFixedLineThresholdsOnConvex2xFields) {
+    constexpr std::uint32_t live_width = 1540u;
+    constexpr std::uint32_t live_height = 868u;
+    constexpr std::uint32_t source_width = 1920u;
+    constexpr std::uint32_t source_height = 1080u;
+    constexpr auto cell_scale =
+      v2::subtitle_locator_field_cell_scale(live_width, live_height);
+    static_assert(cell_scale == 2u);
+    constexpr auto dynamic_roi = v2::subtitle_ocr_dynamic_roi(
+      source_width, source_height, live_width, live_height
+    );
+    static_assert(static_cast<bool>(dynamic_roi));
+
+    const line_box_t below_threshold {
+      600u,
+      dynamic_roi.top + 50u,
+      600u + v2::subtitle_locator_min_width_cells * cell_scale - 1u,
+      dynamic_roi.top + 50u +
+        v2::subtitle_locator_min_height_cells * cell_scale - 1u,
+    };
+    slr13_warp_fixture_t rejected(
+      live_width, live_height, source_width, source_height
+    );
+    std::string error;
+    ASSERT_TRUE(rejected.initialize(error)) << error;
+    ASSERT_TRUE(rejected.observe(600u, {below_threshold}, false));
+    ASSERT_TRUE(rejected.observe(601u, {below_threshold}, false));
+    EXPECT_EQ(rejected.state()[2u], 0u);
+    EXPECT_TRUE(rejected.output_is_exact_base());
+
+    const line_box_t exact_threshold {
+      600u,
+      dynamic_roi.top + 50u,
+      600u + v2::subtitle_locator_min_width_cells * cell_scale,
+      dynamic_roi.top + 50u +
+        v2::subtitle_locator_min_height_cells * cell_scale,
+    };
+    slr13_warp_fixture_t accepted(
+      live_width, live_height, source_width, source_height
+    );
+    error.clear();
+    ASSERT_TRUE(accepted.initialize(error)) << error;
+    ASSERT_TRUE(accepted.observe(602u, {exact_threshold}, false));
+    EXPECT_EQ(accepted.state()[2u], flag_pending);
+    ASSERT_TRUE(accepted.observe(603u, {exact_threshold}, false));
+    EXPECT_EQ(accepted.state()[2u], flag_owner | flag_target_valid);
+  }
+
+  TEST(HostSbsSubtitleSlr13GpuTest, ScalesBottomCornerBandOnConvex2xFields) {
+    constexpr std::uint32_t live_width = 1540u;
+    constexpr std::uint32_t live_height = 868u;
+    constexpr std::uint32_t source_width = 1920u;
+    constexpr std::uint32_t source_height = 1080u;
+    constexpr auto cell_scale =
+      v2::subtitle_locator_field_cell_scale(live_width, live_height);
+    static_assert(cell_scale == 2u);
+    constexpr auto dynamic_roi = v2::subtitle_ocr_dynamic_roi(
+      source_width, source_height, live_width, live_height
+    );
+    static_assert(static_cast<bool>(dynamic_roi));
+    constexpr auto edge_threshold =
+      live_width / v2::subtitle_locator_corner_edge_divisor;
+    constexpr auto bottom_threshold =
+      dynamic_roi.bottom - v2::subtitle_locator_corner_bottom_rows * cell_scale;
+    static_assert(edge_threshold == 48u);
+
+    const auto observe_twice = [](slr13_warp_fixture_t &fixture, const ocr_box_t &box) {
+      EXPECT_TRUE(fixture.observe(610u, {box}, false));
+      EXPECT_TRUE(fixture.observe(611u, {box}, false));
+    };
+
+    slr13_warp_fixture_t rejected(
+      live_width, live_height, source_width, source_height
+    );
+    std::string error;
+    ASSERT_TRUE(rejected.initialize(error)) << error;
+    const line_box_t inside_band {
+      edge_threshold - 1u,
+      bottom_threshold - 20u,
+      edge_threshold + 229u,
+      bottom_threshold,
+    };
+    observe_twice(rejected, inside_band);
+    EXPECT_EQ(rejected.state()[2u], 0u);
+    EXPECT_TRUE(rejected.output_is_exact_base());
+
+    slr13_warp_fixture_t accepted(
+      live_width, live_height, source_width, source_height
+    );
+    error.clear();
+    ASSERT_TRUE(accepted.initialize(error)) << error;
+    const line_box_t above_band {
+      edge_threshold - 1u,
+      bottom_threshold - 21u,
+      edge_threshold + 229u,
+      bottom_threshold - 1u,
+    };
+    observe_twice(accepted, above_band);
+    EXPECT_EQ(accepted.state()[2u], flag_owner | flag_target_valid);
   }
 
   TEST(HostSbsSubtitleSlr13GpuTest, AuthenticatesPaddedContentAndExtendsItsBoundary) {
@@ -3315,6 +3452,9 @@ namespace {
       field_case_t {434u, 770u, 1080u, 1920u},
       field_case_t {434u, 1022u, 1080u, 2560u},
       field_case_t {434u, 1036u, 1600u, 3840u},
+      field_case_t {1540u, 868u, 1920u, 1080u},
+      field_case_t {2044u, 868u, 2560u, 1080u},
+      field_case_t {2072u, 868u, 3440u, 1440u},
     };
 
     std::uint64_t identity = 300u;
@@ -3338,12 +3478,18 @@ namespace {
       );
       ASSERT_TRUE(static_cast<bool>(minimum_bottom_result));
       const auto minimum_bottom = minimum_bottom_result.value;
-      ASSERT_GE(minimum_bottom, dynamic_roi.top + 7u);
+      const auto cell_scale = v2::subtitle_locator_field_cell_scale(
+        field_case.field_width,
+        field_case.field_height
+      );
+      ASSERT_NE(cell_scale, 0u);
+      ASSERT_GE(minimum_bottom, dynamic_roi.top + 7u * cell_scale);
       ASSERT_LE(minimum_bottom, dynamic_roi.bottom);
       const auto left = field_case.field_width / 20u;
       const auto right = field_case.field_width - left;
-      const auto core_top = minimum_bottom - 6u;
-      const auto cover_top = core_top > 4u ? core_top - 4u : 0u;
+      const auto core_top = minimum_bottom - 6u * cell_scale;
+      const auto cover_pad = 4u * cell_scale;
+      const auto cover_top = core_top > cover_pad ? core_top - cover_pad : 0u;
       const ocr_box_t boundary_ribbon {
         {left, core_top, right, minimum_bottom},
         {0u, cover_top, field_case.field_width, field_case.field_height},

@@ -1055,13 +1055,13 @@ namespace platf::sbs_debug {
       if (ocr.size() != subtitle_ocr_record_word_count * sizeof(std::uint32_t)) {
         return false;
       }
-      const auto field_width = static_cast<std::uint32_t>(completed.model_width);
-      const auto field_height = static_cast<std::uint32_t>(completed.model_height);
+      const auto field_width = static_cast<std::uint32_t>(completed.field_width);
+      const auto field_height = static_cast<std::uint32_t>(completed.field_height);
       const auto geometry = models::fit_subtitle_analysis_geometry(
         completed.depth_input_region.width(),
         completed.depth_input_region.height(),
-        {completed.model_width, completed.model_height},
-        completed.depth_input_region.tensor_content
+        {completed.field_width, completed.field_height},
+        completed.field_content
       );
       if (!geometry.valid()) {
         return false;
@@ -1114,13 +1114,13 @@ namespace platf::sbs_debug {
           locator.size() != subtitle_locator_state_word_count * sizeof(std::uint32_t)) {
         return false;
       }
-      const auto field_width = static_cast<std::uint32_t>(completed.model_width);
-      const auto field_height = static_cast<std::uint32_t>(completed.model_height);
+      const auto field_width = static_cast<std::uint32_t>(completed.field_width);
+      const auto field_height = static_cast<std::uint32_t>(completed.field_height);
       const auto geometry = models::fit_subtitle_analysis_geometry(
         completed.depth_input_region.width(),
         completed.depth_input_region.height(),
-        {completed.model_width, completed.model_height},
-        completed.depth_input_region.tensor_content
+        {completed.field_width, completed.field_height},
+        completed.field_content
       );
       if (!geometry.valid()) {
         return false;
@@ -1151,6 +1151,7 @@ namespace platf::sbs_debug {
       using namespace models::host_sbs_gpu_trace;
       if (ring.size() != ring_byte_count || completed.matched_frame_id == 0u ||
           completed.model_width <= 0 || completed.model_height <= 0 ||
+          completed.field_width <= 0 || completed.field_height <= 0 ||
           completed.depth_input_region.width() == 0u ||
           completed.depth_input_region.height() == 0u) {
         return false;
@@ -1426,9 +1427,9 @@ namespace platf::sbs_debug {
               record(record_word_e::source_height) !=
                 completed.depth_input_region.height() ||
               record(record_word_e::field_width) !=
-                static_cast<std::uint32_t>(completed.model_width) ||
+                static_cast<std::uint32_t>(completed.field_width) ||
               record(record_word_e::field_height) !=
-                static_cast<std::uint32_t>(completed.model_height) ||
+                static_cast<std::uint32_t>(completed.field_height) ||
               ((flags & input_domain_reset) != 0u) != completed.input_domain_reset) {
             return false;
           }
@@ -3544,8 +3545,8 @@ namespace platf::sbs_debug {
           {"analysis_generation", completed.depth_input_region.analysis_generation},
           {"source_width", completed.depth_input_region.width()},
           {"source_height", completed.depth_input_region.height()},
-          {"field_width", completed.model_width},
-          {"field_height", completed.model_height},
+          {"field_width", completed.field_width},
+          {"field_height", completed.field_height},
           {"sequence", matched_sequence},
         }},
         {"records", std::move(records)},
@@ -4308,8 +4309,8 @@ namespace platf::sbs_debug {
                "not match the authenticated depth input region."sv;
           break;
         }
-        const auto tensor_width = static_cast<std::uint32_t>(completed.model_width);
-        const auto tensor_height = static_cast<std::uint32_t>(completed.model_height);
+        const auto tensor_width = static_cast<std::uint32_t>(completed.field_width);
+        const auto tensor_height = static_cast<std::uint32_t>(completed.field_height);
         if (
           !scalar_tensor_snapshot_matches(
             job.shadow_coordinate,
@@ -5966,6 +5967,10 @@ namespace platf::sbs_debug {
         !completed.raw_depth || !completed.warp_depth || !completed.sbs ||
         completed.model_width <= 0 || completed.model_height <= 0 ||
         completed.raw_width <= 0 || completed.raw_height <= 0 ||
+        completed.field_width <= 0 || completed.field_height <= 0 ||
+        !completed.field_content.valid(
+          {completed.field_width, completed.field_height}
+        ) ||
         !completed.raw_model_provenance ||
         completed.raw_model_provenance->depth_model.empty() ||
         completed.raw_model_provenance->depth_model != completed.depth_model ||
@@ -5976,6 +5981,23 @@ namespace platf::sbs_debug {
         prepared_frame_id_ != completed.matched_frame_id ||
         completed.warp_depth != completed.shadow_final_parallax
       ) {
+        retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
+        return false;
+      }
+      // The existing Dump-3D/DVC2 package identifies one common model/geometry raster.  Live
+      // convex-2x deliberately splits those domains, so reject that diagnostic request until the
+      // package schema and replay tool carry the split explicitly.  Live rendering is unaffected.
+      if (completed.refined_live_geometry_active) {
+        BOOST_LOG(warning)
+          << "SBS debug dump: live convex-2x geometry is active, but the current Dump-3D "sv
+             "schema cannot represent separate coarse-analysis and refined-geometry rasters; "sv
+             "dump rejected without affecting the live refined field."sv;
+        retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
+        return false;
+      }
+      if (completed.field_width != completed.raw_width ||
+          completed.field_height != completed.raw_height ||
+          completed.field_content != completed.depth_input_region.tensor_content) {
         retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
         return false;
       }

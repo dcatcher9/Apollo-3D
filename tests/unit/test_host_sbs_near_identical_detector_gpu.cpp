@@ -53,7 +53,7 @@ TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparat
       std::istreambuf_iterator<char> {}
     };
   };
-  const auto estimator = read(
+  auto estimator = read(
     std::string {SUNSHINE_SOURCE_DIR} + "/src/video_depth_estimator.cpp"
   );
   const auto cache = read(
@@ -79,6 +79,10 @@ TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparat
   ASSERT_FALSE(detector.empty());
   ASSERT_FALSE(preprocess.empty());
   ASSERT_FALSE(fused.empty());
+  estimator.erase(
+    std::remove(estimator.begin(), estimator.end(), '\r'),
+    estimator.end()
+  );
 
   const auto producer_loop = estimator.find(
     "for (std::size_t index = 0; index < producer_shader_outputs.size(); ++index)"
@@ -178,7 +182,9 @@ TEST(HostSbsNearIdenticalPolicyTest, D3dResourcesUseTypedBundlesWithoutChangingC
     std::string::npos
   );
   EXPECT_NE(
-    estimator.find("} near_identical_tile, near_identical_history_owner;"),
+    estimator.find(
+      "} near_identical_tile, near_identical_history_owner, guidance_near_identical_tile;"
+    ),
     std::string::npos
   );
   EXPECT_NE(estimator.find("} near_identical_transaction;"), std::string::npos);
@@ -203,6 +209,92 @@ TEST(HostSbsNearIdenticalPolicyTest, D3dResourcesUseTypedBundlesWithoutChangingC
   EXPECT_LT(uav_detach, buffer_detach);
   EXPECT_EQ(retention.find("near_identical_transaction.dispatch.Detach()"), std::string::npos);
   EXPECT_EQ(retention.find("near_identical_transaction.srv.Detach()"), std::string::npos);
+}
+
+TEST(HostSbsNearIdenticalPolicyTest, CompositeRuntimeUsesAtomicFourTensorBoundary) {
+  std::ifstream stream(
+    std::string {SUNSHINE_SOURCE_DIR} + "/src/video_depth_estimator.cpp",
+    std::ios::binary
+  );
+  std::string estimator {
+    std::istreambuf_iterator<char> {stream},
+    std::istreambuf_iterator<char> {}
+  };
+  ASSERT_FALSE(estimator.empty());
+  estimator.erase(
+    std::remove(estimator.begin(), estimator.end(), '\r'),
+    estimator.end()
+  );
+
+  const auto resolver_begin = estimator.find("static bool resolve_depth_runtime(");
+  const auto resolver_end = estimator.find("static bool publish_serialized_engine(", resolver_begin);
+  ASSERT_NE(resolver_begin, std::string::npos);
+  ASSERT_NE(resolver_end, std::string::npos);
+  const auto resolver = estimator.substr(resolver_begin, resolver_end - resolver_begin);
+  EXPECT_NE(resolver.find("raw_model.name != production_dav2.depth_model"), std::string::npos);
+  EXPECT_NE(resolver.find("raw_model.url != production_dav2.depth_model_url"), std::string::npos);
+  EXPECT_NE(resolver.find("prod_zipdepth_convex2x::logical_model"), std::string::npos);
+  EXPECT_NE(resolver.find("prod_zipdepth_convex2x::fused_onnx_sha256"), std::string::npos);
+  EXPECT_NE(resolver.find("resolve_composite_depth_asset("), std::string::npos);
+  EXPECT_NE(estimator.find("if (fused && !to_unmark.empty())"), std::string::npos)
+    << "the fused builder must reject unexpected outputs instead of pruning them";
+
+  const auto guidance_begin = estimator.find("ID3D11Buffer *guidance_cbuffers[3]");
+  const auto guidance_end = estimator.find("// GPU-undecided publishes", guidance_begin);
+  ASSERT_NE(guidance_begin, std::string::npos);
+  ASSERT_NE(guidance_end, std::string::npos);
+  const auto guidance = estimator.substr(guidance_begin, guidance_end - guidance_begin);
+  EXPECT_NE(guidance.find("guidance_cbuffer.Get()"), std::string::npos);
+  EXPECT_NE(guidance.find("fused_preprocess_force_cbuffer.Get()"), std::string::npos);
+  EXPECT_NE(guidance.find("source_region_cbuffer.Get()"), std::string::npos);
+  EXPECT_NE(guidance.find("analysis_input_srv"), std::string::npos);
+  EXPECT_NE(guidance.find("nullptr"), std::string::npos);
+  EXPECT_NE(guidance.find("guidance_tensor_in_uav.Get()"), std::string::npos);
+  EXPECT_NE(guidance.find("guidance_appearance_ordinal_uav.Get()"), std::string::npos);
+  EXPECT_NE(guidance.find("guidance_tensor_exclusion_uav.Get()"), std::string::npos);
+  EXPECT_NE(guidance.find("guidance_near_identical_tile.uav.Get()"), std::string::npos);
+
+  const auto interop_begin = estimator.find("std::array<CUgraphicsResource, 5> depth_resources");
+  const auto interop_end = estimator.find("if (!bindings_ok && !dropped_for_signature_change)", interop_begin);
+  ASSERT_NE(interop_begin, std::string::npos);
+  ASSERT_NE(interop_end, std::string::npos);
+  const auto interop = estimator.substr(interop_begin, interop_end - interop_begin);
+  for (const std::string_view token : {
+         "cuda_in_res",
+         "cuda_guidance_in_res",
+         "cuda_out_res",
+         "cuda_refined_out_res",
+       }) {
+    EXPECT_NE(interop.find(token), std::string::npos) << token;
+  }
+  EXPECT_NE(interop.find("depth_resource_count, depth_resources.data(), cu_stream"), std::string::npos);
+  EXPECT_NE(interop.find("guidance_input_mapped_bytes"), std::string::npos);
+  EXPECT_NE(interop.find("refined_output_mapped_bytes"), std::string::npos);
+
+  const auto profile = interop.find("setOptimizationProfileAsync(");
+  const auto coarse_shape = interop.find("prod_zipdepth_convex2x::dav2_input.data()", profile);
+  const auto guidance_shape = interop.find("prod_zipdepth_convex2x::guidance_input.data()", coarse_shape);
+  const auto coarse_bound = interop.find("getMaxOutputSize(\n            prod_zipdepth_convex2x::coarse_output.data()", guidance_shape);
+  const auto refined_bound = interop.find("getMaxOutputSize(\n            prod_zipdepth_convex2x::refined_output.data()", coarse_bound);
+  const auto first_address = interop.find("setTensorAddress(", refined_bound);
+  ASSERT_NE(profile, std::string::npos);
+  ASSERT_NE(coarse_shape, std::string::npos);
+  ASSERT_NE(guidance_shape, std::string::npos);
+  ASSERT_NE(coarse_bound, std::string::npos);
+  ASSERT_NE(refined_bound, std::string::npos);
+  ASSERT_NE(first_address, std::string::npos);
+  EXPECT_LT(profile, coarse_shape);
+  EXPECT_LT(coarse_shape, guidance_shape);
+  EXPECT_LT(guidance_shape, coarse_bound);
+  EXPECT_LT(coarse_bound, refined_bound);
+  EXPECT_LT(refined_bound, first_address);
+
+  EXPECT_NE(estimator.find("r.raw_model_depth = tensor_out_srv;"), std::string::npos);
+  EXPECT_EQ(estimator.find("r.raw_model_depth = refined_tensor_out_srv;"), std::string::npos);
+  EXPECT_NE(
+    estimator.find("guidance_snapshot_valid && refined_snapshot_valid"),
+    std::string::npos
+  );
 }
 
 TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
@@ -264,6 +356,8 @@ TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
                std::string_view {"depth_coordinate_v2_state_resolve_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_map"},
                std::string_view {"depth_coordinate_v2_map_cs"}},
+    std::pair {std::string_view {"prod_zipdepth_convex2x_live_map"},
+               std::string_view {"prod_zipdepth_convex2x_live_map_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_ownership"},
                std::string_view {"depth_coordinate_v2_ownership_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_vertical_limit"},
@@ -320,7 +414,7 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
       std::istreambuf_iterator<char> {}
     };
   };
-  const auto estimator = read(
+  auto estimator = read(
     std::string {SUNSHINE_SOURCE_DIR} + "/src/video_depth_estimator.cpp"
   );
   const auto executor = read(
@@ -352,6 +446,10 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   ASSERT_FALSE(shared_constants.empty());
   ASSERT_FALSE(history_owner_contract.empty());
   ASSERT_FALSE(fused_map.empty());
+  estimator.erase(
+    std::remove(estimator.begin(), estimator.end(), '\r'),
+    estimator.end()
+  );
   EXPECT_EQ(
     estimator.find("gpu_conditional_bridge_runtime_enabled"),
     std::string::npos
@@ -364,20 +462,29 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   EXPECT_EQ(estimator.find("gpu_decision_resource_requested"), std::string::npos);
   EXPECT_NE(
     estimator.find(
-      "std::array<CUgraphicsResource, 3> depth_resources {\n"
+      "std::array<CUgraphicsResource, 5> depth_resources {\n"
       "        cuda_in_res,\n"
       "        cuda_out_res,\n"
-      "        cuda_near_identical_decision_res,"
+      "        cuda_near_identical_decision_res,\n"
+      "        cuda_guidance_in_res,\n"
+      "        cuda_refined_out_res,"
     ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    estimator.find("const unsigned int depth_resource_count = fused_runtime ? 5u : 3u;"),
     std::string::npos
   );
   EXPECT_NE(estimator.find("depth_resource_count"), std::string::npos);
   EXPECT_NE(estimator.find("near_identical_transaction.dispatch"), std::string::npos);
+  const auto dispatch_copy = estimator.find("context->CopyResource(");
+  ASSERT_NE(dispatch_copy, std::string::npos);
   EXPECT_NE(
-    estimator.find(
-      "context->CopyResource(\n        near_identical_transaction.dispatch.Get(),\n        "
-      "near_identical_transaction.buffer.Get()"
-    ),
+    estimator.find("near_identical_transaction.dispatch.Get()", dispatch_copy),
+    std::string::npos
+  );
+  EXPECT_NE(
+    estimator.find("near_identical_transaction.buffer.Get()", dispatch_copy),
     std::string::npos
   );
   EXPECT_NE(
@@ -696,6 +803,16 @@ namespace {
   constexpr UINT tile_group_count = tile_group_width * tile_group_height;
   constexpr UINT reduction_group_count = 42u;
   constexpr models::depth_tensor_content_rect_t content {0u, 0u, 97u, 81u};
+  constexpr UINT subtitle_field_width = 770u;
+  constexpr UINT subtitle_field_height = 434u;
+  constexpr UINT subtitle_tile_group_width =
+    (subtitle_field_width + 15u) / 16u;
+  constexpr UINT subtitle_tile_group_height =
+    (subtitle_field_height + 15u) / 16u;
+  constexpr UINT subtitle_reduction_group_count = 64u;
+  constexpr models::depth_tensor_content_rect_t subtitle_content {
+    0u, 0u, subtitle_field_width, subtitle_field_height,
+  };
   constexpr std::uint64_t baseline_frame_id = 0x12345678ffffffffull;
   constexpr std::uint64_t current_frame_id = 0x1234567900000000ull;
   constexpr std::uint64_t domain_tag = 0xfedcba9876543210ull;
@@ -1487,18 +1604,23 @@ namespace {
         1u,
         reduce_groups
       );
-      ID3D11Buffer *constants[3] = {
+      ID3D11Buffer *constants[4] = {
         depth_constants_.Get(), detector_constants_.Get(), ocr_constants_.Get(),
+        depth_constants_.Get(),
+      };
+      ID3D11ShaderResourceView *inputs[4] = {
+        nullptr, nullptr, nullptr, history_owner_srv_.Get(),
       };
       ID3D11UnorderedAccessView *outputs[6] = {
         nullptr, ocr_record_uav_.Get(), nullptr, decision_uav_.Get(), nullptr,
         scene_evidence_uav_.Get(),
       };
       context_->CSSetShader(finalize_shader_.Get(), nullptr, 0u);
-      context_->CSSetConstantBuffers(0u, 3u, constants);
+      context_->CSSetConstantBuffers(0u, 4u, constants);
+      context_->CSSetShaderResources(0u, 4u, inputs);
       context_->CSSetUnorderedAccessViews(0u, 6u, outputs, nullptr);
       context_->Dispatch(1u, 1u, 1u);
-      unbind(0u, 6u, 3u);
+      unbind(4u, 6u, 4u);
       return read_decision(decision, error);
     }
 
@@ -1523,7 +1645,7 @@ namespace {
       const std::uint32_t request_work = models::near_identical_work_optional_ocr,
       const bool bind_optional_cookie = true,
       const std::uint32_t expected_work = std::numeric_limits<std::uint32_t>::max(),
-      const std::uint32_t reduce_groups = reduction_group_count
+      const std::uint32_t reduce_groups = subtitle_reduction_group_count
     ) {
       if (!read_decision(decision, error)) return false;
       const auto resolved = static_cast<std::uint32_t>(branch);
@@ -1564,12 +1686,30 @@ namespace {
       context_->UpdateSubresource(
         decision_buffer_.Get(), 0u, nullptr, decision.data(), 0u, 0u
       );
-      update_depth_constants();
+      update_depth_constants(
+        subtitle_content, subtitle_field_width, subtitle_field_height
+      );
       update_ocr_constants();
+      const std::array<std::uint32_t, models::near_identical_history_owner_word_count>
+        owner {
+          models::near_identical_history_owner_contract_tag,
+          models::near_identical_history_owner_contract_schema,
+          static_cast<std::uint32_t>(baseline_frame_id),
+          static_cast<std::uint32_t>(baseline_frame_id >> 32u),
+          static_cast<std::uint32_t>(domain_tag),
+          static_cast<std::uint32_t>(domain_tag >> 32u),
+          subtitle_field_width,
+          subtitle_field_height,
+          static_cast<std::uint32_t>(owner_observation_timestamp_us),
+          static_cast<std::uint32_t>(owner_observation_timestamp_us >> 32u),
+        };
+      context_->UpdateSubresource(
+        history_owner_buffer_.Get(), 0u, nullptr, owner.data(), 0u, 0u
+      );
       update_detector_constants(
         force_infer ? 2u : 1u,
-        tile_group_width,
-        tile_group_height,
+        subtitle_tile_group_width,
+        subtitle_tile_group_height,
         current_frame_id,
         baseline_frame_id,
         constants_token,
@@ -1579,17 +1719,22 @@ namespace {
         expected_work == std::numeric_limits<std::uint32_t>::max() ?
           request_work : expected_work
       );
-      ID3D11Buffer *constants[3] = {
+      ID3D11Buffer *constants[4] = {
         depth_constants_.Get(), detector_constants_.Get(), ocr_constants_.Get(),
+        depth_constants_.Get(),
+      };
+      ID3D11ShaderResourceView *inputs[4] = {
+        nullptr, nullptr, nullptr, history_owner_srv_.Get(),
       };
       ID3D11UnorderedAccessView *outputs[4] = {
         nullptr, ocr_record_uav_.Get(), nullptr, decision_uav_.Get(),
       };
       context_->CSSetShader(finalize_shader_.Get(), nullptr, 0u);
-      context_->CSSetConstantBuffers(0u, 3u, constants);
+      context_->CSSetConstantBuffers(0u, 4u, constants);
+      context_->CSSetShaderResources(0u, 4u, inputs);
       context_->CSSetUnorderedAccessViews(0u, 4u, outputs, nullptr);
       context_->Dispatch(1u, 1u, 1u);
-      unbind(0u, 4u, 3u);
+      unbind(4u, 4u, 4u);
       return read_decision(decision, error);
     }
 
@@ -1836,11 +1981,13 @@ namespace {
     }
 
     void update_depth_constants(
-      const models::depth_tensor_content_rect_t tensor_content = content
+      const models::depth_tensor_content_rect_t tensor_content = content,
+      const UINT width = field_width,
+      const UINT height = field_height
     ) {
       std::array<std::uint32_t, 16> constants {};
-      constants[0] = field_width;
-      constants[1] = field_height;
+      constants[0] = width;
+      constants[1] = height;
       constants[9] = tensor_content.left;
       constants[10] = tensor_content.top;
       constants[11] = tensor_content.right;
@@ -1859,16 +2006,16 @@ namespace {
         static_cast<std::uint32_t>(analysis_generation >> 32u),
         1920u,
         1080u,
-        field_width,
-        field_height,
+        subtitle_field_width,
+        subtitle_field_height,
         900u,
         180u,
-        content.top,
-        content.bottom,
-        content.left,
-        content.top,
-        content.right,
-        content.bottom,
+        325u,
+        430u,
+        subtitle_content.left,
+        subtitle_content.top,
+        subtitle_content.right,
+        subtitle_content.bottom,
       };
       context_->UpdateSubresource(
         ocr_constants_.Get(), 0u, nullptr, constants.data(), 0u, 0u
@@ -2112,7 +2259,7 @@ namespace {
     void unbind(const UINT srv_count, const UINT uav_count, const UINT cbuffer_count) {
       std::array<ID3D11ShaderResourceView *, 8> null_srvs {};
       std::array<ID3D11UnorderedAccessView *, 6> null_uavs {};
-      std::array<ID3D11Buffer *, 3> null_constants {};
+      std::array<ID3D11Buffer *, 4> null_constants {};
       if (srv_count != 0u) {
         context_->CSSetShaderResources(0u, srv_count, null_srvs.data());
       }
@@ -3053,7 +3200,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
     decision,
     error
   )) << error;
-  expect_gates(4u, 1u, 0u, 1u, 7u);
+  expect_gates(4u, 1u, 0u, 1u, subtitle_tile_group_width);
   EXPECT_EQ(
     decision[word(models::near_identical_gpu_decision_word_e::optional_cells_y)],
     40u
@@ -3091,7 +3238,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
     request_token,
     models::near_identical_work_optional_ocr_due
   )) << error;
-  expect_gates(4u, 1u, 0u, 1u, 7u);
+  expect_gates(4u, 1u, 0u, 1u, subtitle_tile_group_width);
 
   ASSERT_TRUE(fixture.finalize_subtitle_receipt(
     models::near_identical_gpu_branch_e::reuse,
@@ -3104,7 +3251,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
     request_token,
     models::near_identical_work_optional_ocr_due
   )) << error;
-  expect_gates(0u, 0u, 1u, 1u, 7u);
+  expect_gates(0u, 0u, 1u, 1u, subtitle_tile_group_width);
 
   ASSERT_TRUE(fixture.finalize_subtitle_receipt(
     models::near_identical_gpu_branch_e::reuse,
@@ -3117,7 +3264,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
     request_token,
     models::near_identical_work_subtitle_observation_due
   )) << error;
-  expect_gates(0u, 0u, 1u, 1u, 7u);
+  expect_gates(0u, 0u, 1u, 1u, subtitle_tile_group_width);
 
   // Due observation is branch-independent but can never authenticate an OOCR marker.
   ASSERT_TRUE(fixture.finalize_subtitle_receipt(
@@ -3151,7 +3298,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
     decision,
     error
   )) << error;
-  expect_gates(0u, 0u, 1u, 1u, 7u);
+  expect_gates(0u, 0u, 1u, 1u, subtitle_tile_group_width);
 
   ASSERT_TRUE(fixture.finalize_subtitle_receipt(
     models::near_identical_gpu_branch_e::infer,
@@ -3164,7 +3311,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, SubtitlePublicationAuthenticatesOrdina
     request_token,
     models::near_identical_work_subtitle_observation_due
   )) << error;
-  expect_gates(0u, 0u, 1u, 1u, 7u);
+  expect_gates(0u, 0u, 1u, 1u, subtitle_tile_group_width);
 
   ASSERT_TRUE(fixture.finalize_subtitle_receipt(
     models::near_identical_gpu_branch_e::infer,
@@ -3262,10 +3409,10 @@ TEST(HostSbsNearIdenticalDetectorGpuTest,
     EXPECT_EQ(record[8], 0x10203040u);
     EXPECT_EQ(record[9], 1920u);
     EXPECT_EQ(record[10], 1080u);
-    EXPECT_EQ(record[11], field_width);
-    EXPECT_EQ(record[12], field_height);
-    EXPECT_EQ(record[13], content.top);
-    EXPECT_EQ(record[14], content.bottom);
+    EXPECT_EQ(record[11], subtitle_field_width);
+    EXPECT_EQ(record[12], subtitle_field_height);
+    EXPECT_EQ(record[13], 325u);
+    EXPECT_EQ(record[14], 430u);
     for (std::size_t index = 2u; index < record.size(); ++index) {
       if (index >= 5u && index <= 14u) continue;
       EXPECT_EQ(record[index], 0u) << "OCR word " << index;
@@ -3347,7 +3494,10 @@ TEST(HostSbsNearIdenticalDetectorGpuTest,
   )) << error;
   expect_poisoned_record();
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_one_x)], 0u);
-  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::reuse_grid16_x)], 7u);
+  EXPECT_EQ(
+    decision[word(models::near_identical_gpu_decision_word_e::reuse_grid16_x)],
+    subtitle_tile_group_width
+  );
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::observation_one_x)], 0u);
 
   // Malformed depth-only reduction authority must not suppress a separately valid due subtitle
@@ -3369,7 +3519,10 @@ TEST(HostSbsNearIdenticalDetectorGpuTest,
   )) << error;
   expect_exact_abstention();
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_one_x)], 0u);
-  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::reuse_grid16_x)], 7u);
+  EXPECT_EQ(
+    decision[word(models::near_identical_gpu_decision_word_e::reuse_grid16_x)],
+    subtitle_tile_group_width
+  );
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::observation_one_x)], 1u);
 }
 

@@ -5,6 +5,7 @@
 
 #include "config.h"
 #include "generated/depth_coordinate_v2_contract.h"
+#include "prod_zipdepth_convex2x.h"
 
 namespace models {
     // TensorRT tactic-selection target for the shipping landscape DA-V2 path. Both dimensions
@@ -19,6 +20,28 @@ namespace models {
     // 1022x434, both of which the previous 1008 bound forced down to a 420 short side.
     inline constexpr int depth_engine_max_dim = 1036;
     inline constexpr char depth_engine_recipe[] = "trt-opt770x434-max1036-level5-v3";
+    // TensorRT 11.2 cannot compile the dynamic convex gather under the legacy ranged profile.
+    // The fused graph instead owns the six authenticated production shapes as point profiles in
+    // the order frozen by prod_zipdepth_convex2x::fixed_profile_shapes. Keep this cache recipe
+    // distinct from the byte-compatible legacy DAV2 plan.
+    static_assert(
+      prod_zipdepth_convex2x::fixed_profile_shapes.front() ==
+      prod_zipdepth_convex2x::coarse_shape_t {
+        static_cast<std::uint32_t>(depth_engine_opt_width),
+        static_cast<std::uint32_t>(depth_engine_opt_height),
+      }
+    );
+    inline constexpr std::string_view depth_engine_recipe_for(
+        const prod_zipdepth_convex2x::engine_io_e kind) noexcept {
+      switch (kind) {
+        case prod_zipdepth_convex2x::engine_io_e::production_dav2:
+          return depth_engine_recipe;
+        case prod_zipdepth_convex2x::engine_io_e::production_dav2_zipdepth_convex2x:
+          return prod_zipdepth_convex2x::engine_recipe;
+        default:
+          return {};
+      }
+    }
 
     // Production burned-in text detector. The generated DVC2 contract owns its artifact,
     // provenance, boundary dimensions, and engine recipe; keep only the host builder level here.
@@ -44,6 +67,12 @@ namespace models {
      * @brief Recipe-specific cached TensorRT engine filename.
      */
     std::string engine_filename(const config::depth_model_info& model, std::string_view compatibility_tag = {});
+
+    /** Recipe-specific cached engine filename for an already classified depth-model I/O graph. */
+    std::string engine_filename(
+        const config::depth_model_info& model,
+        prod_zipdepth_convex2x::engine_io_e kind,
+        std::string_view compatibility_tag);
 
     /**
      * Bounded cached PP-OCRv6 engine filename. The compatibility tag must bind the complete

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -188,6 +189,60 @@ namespace models {
                             );
   }
 
+  /** Exact spatial realization produced by the experimental frozen convex-2x arm.
+   *
+   * The coarse DAV2 tensor remains the scene/camera/history domain.  Doubling is a deterministic
+   * pixel-shuffle realization of that same observation, not another resolution fit and not an
+   * input-domain transition.  Rejecting non-production coarse shapes keeps this helper from
+   * becoming an unauthenticated general-purpose scaler.
+   */
+  inline constexpr std::optional<depth_tensor_shape_t>
+  host_sbs_convex2x_field_shape(const depth_tensor_shape_t coarse) noexcept {
+    if (!host_sbs_v2_depth_shape_is_authenticated(coarse) ||
+        coarse.width > std::numeric_limits<int>::max() / 2 ||
+        coarse.height > std::numeric_limits<int>::max() / 2) {
+      return std::nullopt;
+    }
+    return depth_tensor_shape_t {2 * coarse.width, 2 * coarse.height};
+  }
+
+  inline constexpr bool host_sbs_convex2x_shape_relation(
+    const depth_tensor_shape_t coarse,
+    const depth_tensor_shape_t refined
+  ) noexcept {
+    const auto expected = host_sbs_convex2x_field_shape(coarse);
+    return expected && *expected == refined;
+  }
+
+  /** Operator/engine shape support only; this does not grant live-rendering authority. */
+  inline constexpr bool host_sbs_convex2x_operator_shape_is_supported(
+    const depth_tensor_shape_t coarse
+  ) noexcept {
+    return host_sbs_convex2x_field_shape(coarse).has_value();
+  }
+
+  /** Double an authenticated coarse content rectangle without a second aspect-ratio fit.
+   *
+   * Re-fitting can move an odd content edge and therefore change the 2x pixel-shuffle phase.
+   * Scaling every half-open edge preserves the exact source/content correspondence.
+   */
+  inline constexpr std::optional<depth_tensor_content_rect_t>
+  host_sbs_convex2x_content_rect(
+    const depth_tensor_content_rect_t coarse_content,
+    const depth_tensor_shape_t coarse_shape
+  ) noexcept {
+    if (!coarse_content.valid(coarse_shape) ||
+        !host_sbs_convex2x_field_shape(coarse_shape)) {
+      return std::nullopt;
+    }
+    return depth_tensor_content_rect_t {
+      2u * coarse_content.left,
+      2u * coarse_content.top,
+      2u * coarse_content.right,
+      2u * coarse_content.bottom,
+    };
+  }
+
   /**
    * Runtime subtitle geometry for one authenticated DAV2 field.
    *
@@ -221,7 +276,11 @@ namespace models {
     const depth_tensor_shape_t field,
     const depth_tensor_content_rect_t tensor_content
   ) noexcept {
-    if (!host_sbs_v2_depth_shape_is_authenticated(field) ||
+    if (!field.valid() ||
+        !depth_coordinate_v2::subtitle_ocr_field_is_calibrated(
+          static_cast<std::uint32_t>(field.width),
+          static_cast<std::uint32_t>(field.height)
+        ) ||
         !tensor_content.valid(field) || source_width == 0u || source_height == 0u) {
       return {};
     }

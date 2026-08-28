@@ -12,10 +12,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 71u;
-  inline constexpr std::uint32_t contract_tag = 0x012ECEC1u;
-  inline constexpr std::string_view contract_canonical_sha256 = "96195e08c3da309b51503ae09c5ff07e7e5355ec0a7cc008a1e38c9209d67164";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "012ecec1ff867c4b76aca7c1a1d8afb286d4f2e7a0ae96d71da9bc7e5555fd7e";
+  inline constexpr std::uint32_t contract_schema = 72u;
+  inline constexpr std::uint32_t contract_tag = 0x9DEA1BF0u;
+  inline constexpr std::string_view contract_canonical_sha256 = "ff94c30e0295fa0d46ea1db7028a920cec640f192d8afb0fdeeb2722281e52f6";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "9dea1bf04628d13aa82f99ffd8a103f8d5cc06490381a75b7b760fb310585525";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -30,7 +30,7 @@ namespace models::depth_coordinate_v2 {
   inline constexpr std::string_view final_parallax_reuse_policy = "ordinary-reuse-holds-complete-depth-ocr-slr-final-tuple-byte-for-byte;authenticated-cadence-due-reuse-holds-depth-and-publishes-current-ocr-or-abstention-slr-final-tuple-against-retained-base";
   inline constexpr std::string_view final_parallax_invalid_policy = "fail-closed-flat";
   inline constexpr std::string_view final_parallax_current_rgb_policy = "always-current-never-retained";
-  inline constexpr std::uint32_t subtitle_ocr_contract_schema = 13u;
+  inline constexpr std::uint32_t subtitle_ocr_contract_schema = 14u;
   inline constexpr std::string_view subtitle_ocr_model_name = "ppocrv6_tiny_det_modelopt_fp16";
   inline constexpr std::string_view subtitle_ocr_asset_path = "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx";
   inline constexpr std::string_view subtitle_ocr_artifact_onnx_sha256 = "169a233ba0ff7cac27f8ec7dccb6a406e614b25b21fe6a5638c423bf2118bb44";
@@ -286,16 +286,34 @@ namespace models::depth_coordinate_v2 {
     {"dav2-small-fp16-standardized-ui-shapes-v3", 434u, 1036u},
   }};
 
-  constexpr bool subtitle_ocr_field_is_calibrated(
+  inline constexpr std::array<std::array<std::uint32_t, 2>, 3> subtitle_ocr_live_field_shapes {{
+    {{1540u, 868u}},
+    {{2044u, 868u}},
+    {{2072u, 868u}},
+  }};
+
+  constexpr std::uint32_t subtitle_locator_field_cell_scale(
     const std::uint32_t width,
     const std::uint32_t height
   ) {
     for (const auto &shape : model_calibrated_shapes) {
       if (shape.width == width && shape.height == height) {
-        return true;
+        return 1u;
       }
     }
-    return false;
+    for (const auto &shape : subtitle_ocr_live_field_shapes) {
+      if (shape[0] == width && shape[1] == height) {
+        return 2u;
+      }
+    }
+    return 0u;
+  }
+
+  constexpr bool subtitle_ocr_field_is_calibrated(
+    const std::uint32_t width,
+    const std::uint32_t height
+  ) {
+    return subtitle_locator_field_cell_scale(width, height) != 0u;
   }
 
   struct subtitle_ocr_roi_t {

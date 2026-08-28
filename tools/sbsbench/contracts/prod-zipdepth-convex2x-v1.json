@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "status": "experimental-no-live-render-authority",
+  "purpose": "Fuse the frozen ZipDepth RGB-to-convex-weight branch with authenticated production DAV2 while preserving the original coarse DAV2 observation.",
+  "sources": {
+    "dav2": {
+      "logical_model": "depth_anything_v2_fp16",
+      "onnx_sha256": "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04"
+    },
+    "zipdepth": {
+      "variant": "base",
+      "repository_commit": "91f3fd21e131641f51e8d35736d1958350180e3a",
+      "checkpoint": "zipdepth_base.pth",
+      "checkpoint_sha256": "a55910bb0b99c8c5e641cb9206e810b269690ad94e8a2ef08c827c4679391a65",
+      "license": "MIT"
+    },
+    "fused_onnx": {
+      "logical_model": "prod_dav2_zipdepth_convex2x_dynamic_opset18",
+      "opset": 18,
+      "bytes": 74279734,
+      "sha256": "959fc90097d7055b9c56cb140f432e0f5aed533476e8cedd6ec2baae097b287f",
+      "metadata_policy": "strip-nonsemantic-pytorch-source-path-and-line-annotations",
+      "deterministic_reexport": true
+    }
+  },
+  "export": {
+    "opset": 18,
+    "zipdepth_branch_onnx_bytes": 24637932,
+    "zipdepth_branch_onnx_sha256": "e097f0c97908971339a102aef65604c24efdcf151d230d1de02e7f0a0f28b598",
+    "release_builder_optimization_level": 5
+  },
+  "operator": {
+    "scale": 2,
+    "neighborhood": [3, 3],
+    "boundary": "replicate",
+    "weight_layout": [9, 4],
+    "weight_normalization": "softmax-over-nine-neighbors-per-output-subpixel",
+    "temperature": 1.0,
+    "zipdepth_use_unfold": true,
+    "subpixel_layout": "pixel-shuffle-row-major-2x2",
+    "output_activation": "relu",
+    "pixel_gate": "none"
+  },
+  "engine_io": {
+    "inputs": [
+      {
+        "name": "pixel_values",
+        "dtype": "float32",
+        "layout": "NCHW",
+        "shape": [1, 3, "H", "W"],
+        "semantics": "authenticated production DAV2 ImageNet-normalized RGB"
+      },
+      {
+        "name": "zip_pixel_values",
+        "dtype": "float32",
+        "layout": "NCHW",
+        "shape": [1, 3, "2H", "2W"],
+        "semantics": "same-frame native-source RGB independently resized to the 2x grid by the authenticated source-cell-overlap or bilinear-upscale policy and ImageNet-normalized"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "predicted_depth",
+        "dtype": "float32",
+        "layout": "NHW",
+        "shape": [1, "H", "W"],
+        "semantics": "graph-identical production DAV2 output used by scene, camera, range, and history; TensorRT parity is an authentication gate because fused-engine tactic selection may differ"
+      },
+      {
+        "name": "refined_depth",
+        "dtype": "float32",
+        "layout": "NHW",
+        "shape": [1, "2H", "2W"],
+        "semantics": "standard 3x3 convex2x reconstruction of predicted_depth using frozen ZipDepth weights"
+      }
+    ]
+  },
+  "coarse_shapes_wh": [
+    [770, 434],
+    [1022, 434],
+    [1036, 434],
+    [434, 770],
+    [434, 1022],
+    [434, 1036]
+  ],
+  "tensorrt": {
+    "minimum_tested_version": "11.2.1",
+    "builder_optimization_level": 5,
+    "profile_strategy": "one-engine-six-fixed-point-profiles",
+    "profile_order": "coarse_shapes_wh",
+    "ranged_profile_status": "unsupported-myelin-dynamic-convex-tail"
+  },
+  "authority": {
+    "coarse": "retain-current-production-analysis-authority",
+    "refined": "diagnostic-until-field-shape-and-limiter-refactor-is-authenticated",
+    "failure": "whole-frame-original-production-path-or-flat-before-render-latch-never-pixel-patchwork",
+    "forbidden": [
+      "graph-cut",
+      "adaptive-j",
+      "per-pixel-hard-confidence-gate",
+      "zipdepth-depth-head",
+      "untrained-dav2-feature-to-weight-substitution"
+    ]
+  }
+}

@@ -36,6 +36,26 @@ cbuffer NearIdenticalOcrConstants : register(b2) {
     uint4 near_identical_ocr_tensor_content;
 };
 
+// The finalizer keeps coarse depth/history authority at b0 while publishing spatial work at the
+// session-latched field realization carried by b3.  This is the same 16-word immutable depth
+// cbuffer layout; only dimensions/content are consumed here.
+cbuffer NearIdenticalGeometryConstants : register(b3) {
+    uint near_identical_geometry_width;
+    uint near_identical_geometry_height;
+    uint near_identical_geometry_color_mode;
+    float near_identical_geometry_ema_alpha;
+    float near_identical_geometry_minmax_alpha;
+    uint near_identical_geometry_reduce_threads;
+    float near_identical_geometry_ema_edge_change;
+    float near_identical_geometry_ema_edge_gradient;
+    float near_identical_geometry_ema_edge_strength;
+    uint near_identical_geometry_content_left;
+    uint near_identical_geometry_content_top;
+    uint near_identical_geometry_content_right;
+    uint near_identical_geometry_content_bottom;
+    uint3 near_identical_geometry_reserved;
+};
+
 #define NEAR_IDENTICAL_REQUEST_AUTHORIZED (1u << 0u)
 #define NEAR_IDENTICAL_REQUEST_FORCE_INFER (1u << 1u)
 #define NEAR_IDENTICAL_RESOLVE_THREADS 64u
@@ -160,8 +180,34 @@ void NearIdenticalWriteDispatchArgs(uint byte_offset, uint x, uint y, uint z) {
     NearIdenticalDecision.Store4(byte_offset, uint4(x, y, z, 0u));
 }
 
-bool NearIdenticalSubtitleConstantsValid() {
+bool NearIdenticalGeometryConstantsValid() {
+    uint4 geometry_content = uint4(
+        near_identical_geometry_content_left,
+        near_identical_geometry_content_top,
+        near_identical_geometry_content_right,
+        near_identical_geometry_content_bottom);
+    bool ordinary =
+        near_identical_geometry_width == target_w &&
+        near_identical_geometry_height == target_h &&
+        all(geometry_content == DepthAnalysisContentCells());
+    bool convex2x_landscape =
+        target_h == V2_MODEL_CALIBRATED_SHAPE_HEIGHT_0 &&
+        (target_w == V2_MODEL_CALIBRATED_SHAPE_WIDTH_0 ||
+         target_w == V2_MODEL_CALIBRATED_SHAPE_WIDTH_1 ||
+         target_w == V2_MODEL_CALIBRATED_SHAPE_WIDTH_2) &&
+        near_identical_geometry_width == 2u * target_w &&
+        near_identical_geometry_height == 2u * target_h &&
+        all(geometry_content == 2u * DepthAnalysisContentCells());
     return
+        near_identical_geometry_width > 0u &&
+        near_identical_geometry_height > 0u &&
+        near_identical_geometry_color_mode == color_mode &&
+        all(near_identical_geometry_reserved == uint3(0u, 0u, 0u)) &&
+        (ordinary || convex2x_landscape);
+}
+
+bool NearIdenticalSubtitleConstantsValid() {
+    bool request_valid =
         (near_identical_request_flags == NEAR_IDENTICAL_REQUEST_AUTHORIZED ||
          near_identical_request_flags == NEAR_IDENTICAL_REQUEST_FORCE_INFER) &&
         (near_identical_request_token_low != 0u ||
@@ -172,6 +218,22 @@ bool NearIdenticalSubtitleConstantsValid() {
         near_identical_expected_work_cookie ==
             (near_identical_expected_work == 0u ? 0u :
              near_identical_expected_work ^ NEAR_IDENTICAL_WORK_FLAGS_COOKIE);
+    if (!request_valid || !NearIdenticalGeometryConstantsValid()) {
+        return false;
+    }
+    if (near_identical_expected_work == 0u) {
+        return true;
+    }
+    return
+        near_identical_ocr_field_width == near_identical_geometry_width &&
+        near_identical_ocr_field_height == near_identical_geometry_height &&
+        all(near_identical_ocr_tensor_content == uint4(
+            near_identical_geometry_content_left,
+            near_identical_geometry_content_top,
+            near_identical_geometry_content_right,
+            near_identical_geometry_content_bottom)) &&
+        V2SubtitleOcrFieldIsCalibrated(
+            near_identical_ocr_field_width, near_identical_ocr_field_height);
 }
 
 // Authenticate the complete subtitle request/receipt pair without CPU readback. Callers use the
@@ -574,8 +636,8 @@ void finalize_main(uint3 dispatch_thread : SV_DispatchThreadID) {
     // conditioner grid only for the authenticated infer observation.
     NearIdenticalWriteDispatchArgs(
         NEAR_IDENTICAL_SUBTITLE_CONDITION_GRID16_OFFSET,
-        run_observation ? (target_w + 15u) / 16u : 0u,
-        run_observation ? (target_h + 15u) / 16u : 1u,
+        run_observation ? (near_identical_geometry_width + 15u) / 16u : 0u,
+        run_observation ? (near_identical_geometry_height + 15u) / 16u : 1u,
         1u);
     NearIdenticalWriteDispatchArgs(
         NEAR_IDENTICAL_OPTIONAL_CELLS_OFFSET,
@@ -607,7 +669,8 @@ void finalize_main(uint3 dispatch_thread : SV_DispatchThreadID) {
         uint depth_decision;
         bool depth_receipt_valid = NearIdenticalDepthReceiptValid(depth_decision);
         bool run_infer =
-            depth_receipt_valid && depth_decision == NEAR_IDENTICAL_DECISION_INFER;
+            depth_receipt_valid && depth_decision == NEAR_IDENTICAL_DECISION_INFER &&
+            NearIdenticalGeometryConstantsValid();
         // The depth textures are rotated before these arguments are consumed. A malformed opaque
         // receipt cannot authorize current inference state, but it must still restore the retained
         // normalized field into the new target. This bounded hold advances no inference, scene,
@@ -622,22 +685,22 @@ void finalize_main(uint3 dispatch_thread : SV_DispatchThreadID) {
             NEAR_IDENTICAL_INFER_ONE_OFFSET, run_infer ? 1u : 0u, 1u, 1u);
         NearIdenticalWriteDispatchArgs(
             NEAR_IDENTICAL_INFER_GRID16_OFFSET,
-            run_infer ? (target_w + 15u) / 16u : 0u,
-            run_infer ? (target_h + 15u) / 16u : 1u,
+            run_infer ? (near_identical_geometry_width + 15u) / 16u : 0u,
+            run_infer ? (near_identical_geometry_height + 15u) / 16u : 1u,
             1u);
         NearIdenticalWriteDispatchArgs(
             NEAR_IDENTICAL_INFER_GRID8_OFFSET,
-            run_infer ? (target_w + 7u) / 8u : 0u,
-            run_infer ? (target_h + 7u) / 8u : 1u,
+            run_infer ? (near_identical_geometry_width + 7u) / 8u : 0u,
+            run_infer ? (near_identical_geometry_height + 7u) / 8u : 1u,
             1u);
         NearIdenticalWriteDispatchArgs(
             NEAR_IDENTICAL_INFER_COLUMNS_OFFSET,
-            run_infer ? target_w : 0u,
+            run_infer ? near_identical_geometry_width : 0u,
             1u,
             1u);
         NearIdenticalWriteDispatchArgs(
             NEAR_IDENTICAL_INFER_ROWS_OFFSET,
-            run_infer ? target_h : 0u,
+            run_infer ? near_identical_geometry_height : 0u,
             1u,
             1u);
         NearIdenticalWriteDispatchArgs(

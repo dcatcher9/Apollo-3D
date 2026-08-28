@@ -61,6 +61,11 @@ namespace {
     platf::sbs_debug::frame frame;
     frame.model_width = 770;
     frame.model_height = 434;
+    frame.raw_width = 770;
+    frame.raw_height = 434;
+    frame.field_width = 770;
+    frame.field_height = 434;
+    frame.field_content = content;
     frame.matched_frame_id = 41u;
     frame.depth_input_region = {
       .source_width = 3840u,
@@ -80,6 +85,11 @@ namespace {
     platf::sbs_debug::frame frame;
     frame.model_width = 770;
     frame.model_height = 434;
+    frame.raw_width = 770;
+    frame.raw_height = 434;
+    frame.field_width = 770;
+    frame.field_height = 434;
+    frame.field_content = {0u, 0u, 770u, 434u};
     frame.matched_frame_id = 41u;
     frame.color_space = models::input_color_space::srgb;
     frame.depth_input_region = {
@@ -187,9 +197,9 @@ namespace {
     set(gpu_trace::record_word_e::source_width, frame.depth_input_region.width());
     set(gpu_trace::record_word_e::source_height, frame.depth_input_region.height());
     set(gpu_trace::record_word_e::field_width,
-        static_cast<std::uint32_t>(frame.model_width));
+        static_cast<std::uint32_t>(frame.field_width));
     set(gpu_trace::record_word_e::field_height,
-        static_cast<std::uint32_t>(frame.model_height));
+        static_cast<std::uint32_t>(frame.field_height));
     set(gpu_trace::record_word_e::transaction_words,
         gpu_trace::transaction_word_count);
     std::memcpy(
@@ -231,8 +241,8 @@ namespace {
     words[locator + 23u] = static_cast<std::uint32_t>(locator_frame_id >> 32u);
     words[locator + 24u] = 1u;
     words[locator + 26u] = subtitle_scene_epoch;
-    words[locator + 27u] = static_cast<std::uint32_t>(frame.model_width);
-    words[locator + 28u] = static_cast<std::uint32_t>(frame.model_height);
+    words[locator + 27u] = static_cast<std::uint32_t>(frame.field_width);
+    words[locator + 28u] = static_cast<std::uint32_t>(frame.field_height);
     const auto condition =
       base + gpu_trace::word_index(gpu_trace::record_word_e::subtitle_condition_begin);
     words[condition + 0u] = v2::subtitle_condition_param_schema;
@@ -283,8 +293,8 @@ namespace {
     );
     words[9] = frame.depth_input_region.width();
     words[10] = frame.depth_input_region.height();
-    words[11] = static_cast<std::uint32_t>(frame.model_width);
-    words[12] = static_cast<std::uint32_t>(frame.model_height);
+    words[11] = static_cast<std::uint32_t>(frame.field_width);
+    words[12] = static_cast<std::uint32_t>(frame.field_height);
     words[13] = geometry.roi_top;
     words[14] = geometry.roi_bottom;
     return words;
@@ -346,8 +356,8 @@ namespace {
     words[23u] = static_cast<std::uint32_t>(frame.matched_frame_id >> 32u);
     words[24u] = 2u;
     words[26u] = subtitle_scene_epoch;
-    words[27u] = static_cast<std::uint32_t>(frame.model_width);
-    words[28u] = static_cast<std::uint32_t>(frame.model_height);
+    words[27u] = static_cast<std::uint32_t>(frame.field_width);
+    words[28u] = static_cast<std::uint32_t>(frame.field_height);
     for (std::size_t index = 0u; index < first.size(); ++index) {
       words[v2::subtitle_locator_owner_offset + index] = first[index];
       words[v2::subtitle_locator_owner_offset + 4u + index] = second[index];
@@ -376,8 +386,8 @@ namespace {
     words[23] = static_cast<std::uint32_t>(frame.matched_frame_id >> 32u);
     words[25] = grace;
     words[26] = subtitle_scene_epoch;
-    words[27] = static_cast<std::uint32_t>(frame.model_width);
-    words[28] = static_cast<std::uint32_t>(frame.model_height);
+    words[27] = static_cast<std::uint32_t>(frame.field_width);
+    words[28] = static_cast<std::uint32_t>(frame.field_height);
     constexpr std::uint32_t left = 120u;
     constexpr std::uint32_t right = 650u;
     const std::uint32_t top = geometry.roi_top + 1u;
@@ -439,6 +449,47 @@ namespace {
     );
     EXPECT_EQ(flags & gpu_trace::dump_forced, 0u)
       << "a dump may harvest a root that was already pending before the request";
+  }
+
+  TEST(SbsDebugDumpGpuTraceTest, RefinedFieldExtentDoesNotChangeCoarseDomainIdentity) {
+    auto frame = gpu_trace_frame();
+    frame.field_width = 1540;
+    frame.field_height = 868;
+    frame.field_content = {0u, 0u, 1540u, 868u};
+    frame.refined_live_geometry_active = true;
+    const auto ring = canonical_gpu_trace_ring(frame);
+    ASSERT_TRUE(dump_detail::gpu_trace_ring_is_canonical(ring, frame));
+
+    const auto base = gpu_trace::record_base(0u);
+    EXPECT_EQ(
+      trace_word(ring, base + gpu_trace::word_index(
+        gpu_trace::record_word_e::field_width)),
+      1540u
+    );
+    EXPECT_EQ(
+      trace_word(ring, base + gpu_trace::word_index(
+        gpu_trace::record_word_e::field_height)),
+      868u
+    );
+    const auto coarse_domain = models::near_identical_input_domain_tag(
+      frame.depth_input_region,
+      frame.color_space,
+      static_cast<std::uint32_t>(frame.model_width),
+      static_cast<std::uint32_t>(frame.model_height)
+    );
+    EXPECT_EQ(
+      gpu_trace::join_u64(
+        trace_word(ring, base + gpu_trace::word_index(
+          gpu_trace::record_word_e::domain_tag_low)),
+        trace_word(ring, base + gpu_trace::word_index(
+          gpu_trace::record_word_e::domain_tag_high))
+      ),
+      coarse_domain
+    );
+
+    auto wrong_field_claim = frame;
+    --wrong_field_claim.field_width;
+    EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(ring, wrong_field_claim));
   }
 
   TEST(SbsDebugDumpGpuTraceTest, HeldOrdinaryReuseAuthenticatesTheOlderPublishedSubtitleTuple) {

@@ -442,7 +442,12 @@ TEST(OfflineSbsWorker, DeviceConditionalReplayUsesSharedProductionTransactionPol
   );
   EXPECT_EQ(source.find("device_conditional_baseline_is_opaque"), std::string::npos);
   EXPECT_NE(
-    source.find("finish_pending_depth_for_evaluation(input_color)"),
+    source.find(
+      "finish_pending_depth_for_evaluation(\n"
+      "          input_color,\n"
+      "          capture_convex2x_diagnostics\n"
+      "        )"
+    ),
     std::string::npos
   );
   EXPECT_NE(
@@ -463,6 +468,16 @@ TEST(OfflineSbsWorker, DeviceConditionalReplayUsesSharedProductionTransactionPol
   );
   EXPECT_NE(source.find("final_parallax_"), std::string::npos);
   EXPECT_NE(source.find("shadow_final_parallax"), std::string::npos);
+  EXPECT_NE(
+    source.find("static_cast<std::uint32_t>(est.field_width)"),
+    std::string::npos
+  );
+  EXPECT_NE(source.find("{\"field_width\", est.field_width}"), std::string::npos);
+  EXPECT_NE(source.find(".depth_width = est.field_width"), std::string::npos);
+  EXPECT_NE(
+    source.find("est.shadow_final_parallax->GetResource"),
+    std::string::npos
+  );
   EXPECT_NE(
     source.find("final_parallax_publication_policy"),
     std::string::npos

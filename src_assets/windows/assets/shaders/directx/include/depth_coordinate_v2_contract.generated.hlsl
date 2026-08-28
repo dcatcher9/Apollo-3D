@@ -3,11 +3,11 @@
 #ifndef DEPTH_COORDINATE_V2_CONTRACT_GENERATED_HLSL
 #define DEPTH_COORDINATE_V2_CONTRACT_GENERATED_HLSL
 
-#define V2_CONTRACT_SCHEMA 71u
-#define V2_CONTRACT_TAG 0x012ECEC1u
+#define V2_CONTRACT_SCHEMA 72u
+#define V2_CONTRACT_TAG 0x9DEA1BF0u
 #define V2_SHADOW_STATE_WORD_COUNT 12u
 #define V2_SHADOW_STATE_VECTOR_COUNT 3u
-#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 13u
+#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 14u
 #define V2_OCR_INPUT_N 1u
 #define V2_OCR_INPUT_C 3u
 #define V2_OCR_INPUT_HEIGHT 160u
@@ -35,6 +35,7 @@
 #define V2_OCR_FINAL_BOX_CAPACITY 8u
 #define V2_MODEL_CALIBRATED_SHAPE_COUNT 6u
 #define V2_MODEL_CALIBRATED_MAX_DIMENSION 1036u
+#define V2_SUBTITLE_LIVE_FIELD_SHAPE_COUNT 3u
 #define V2_LIMITER_GROUP_THREADS 32u
 #define V2_LIMITER_Q_FRACTION_BITS 30u
 #define V2_LIMITER_Q_SCALE 1073741824.0f
@@ -53,6 +54,12 @@
 #define V2_MODEL_CALIBRATED_SHAPE_HEIGHT_4 1022u
 #define V2_MODEL_CALIBRATED_SHAPE_WIDTH_5 434u
 #define V2_MODEL_CALIBRATED_SHAPE_HEIGHT_5 1036u
+#define V2_SUBTITLE_LIVE_FIELD_WIDTH_0 1540u
+#define V2_SUBTITLE_LIVE_FIELD_HEIGHT_0 868u
+#define V2_SUBTITLE_LIVE_FIELD_WIDTH_1 2044u
+#define V2_SUBTITLE_LIVE_FIELD_HEIGHT_1 868u
+#define V2_SUBTITLE_LIVE_FIELD_WIDTH_2 2072u
+#define V2_SUBTITLE_LIVE_FIELD_HEIGHT_2 868u
 #define V2_OCR_SAFE_ROW_TOP 24u
 #define V2_OCR_SAFE_ROW_BOTTOM 155u
 #define V2_OCR_ACTIVE_PROBABILITY_THRESHOLD 0.2f
@@ -117,13 +124,21 @@
 static const float v2_max_vertical_shear = V2_MAX_VERTICAL_SHEAR;
 static const float v2_vertical_majorant_share = V2_VERTICAL_MAJORANT_SHARE;
 
-bool V2SubtitleOcrFieldIsCalibrated(uint field_width, uint field_height) {
-    return (field_width == V2_MODEL_CALIBRATED_SHAPE_WIDTH_0 && field_height == V2_MODEL_CALIBRATED_SHAPE_HEIGHT_0) ||
+uint V2SubtitleLocatorFieldCellScale(uint field_width, uint field_height) {
+    if ((field_width == V2_MODEL_CALIBRATED_SHAPE_WIDTH_0 && field_height == V2_MODEL_CALIBRATED_SHAPE_HEIGHT_0) ||
            (field_width == V2_MODEL_CALIBRATED_SHAPE_WIDTH_1 && field_height == V2_MODEL_CALIBRATED_SHAPE_HEIGHT_1) ||
            (field_width == V2_MODEL_CALIBRATED_SHAPE_WIDTH_2 && field_height == V2_MODEL_CALIBRATED_SHAPE_HEIGHT_2) ||
            (field_width == V2_MODEL_CALIBRATED_SHAPE_WIDTH_3 && field_height == V2_MODEL_CALIBRATED_SHAPE_HEIGHT_3) ||
            (field_width == V2_MODEL_CALIBRATED_SHAPE_WIDTH_4 && field_height == V2_MODEL_CALIBRATED_SHAPE_HEIGHT_4) ||
-           (field_width == V2_MODEL_CALIBRATED_SHAPE_WIDTH_5 && field_height == V2_MODEL_CALIBRATED_SHAPE_HEIGHT_5);
+           (field_width == V2_MODEL_CALIBRATED_SHAPE_WIDTH_5 && field_height == V2_MODEL_CALIBRATED_SHAPE_HEIGHT_5)) return 1u;
+    if ((field_width == V2_SUBTITLE_LIVE_FIELD_WIDTH_0 && field_height == V2_SUBTITLE_LIVE_FIELD_HEIGHT_0) ||
+           (field_width == V2_SUBTITLE_LIVE_FIELD_WIDTH_1 && field_height == V2_SUBTITLE_LIVE_FIELD_HEIGHT_1) ||
+           (field_width == V2_SUBTITLE_LIVE_FIELD_WIDTH_2 && field_height == V2_SUBTITLE_LIVE_FIELD_HEIGHT_2)) return 2u;
+    return 0u;
+}
+
+bool V2SubtitleOcrFieldIsCalibrated(uint field_width, uint field_height) {
+    return V2SubtitleLocatorFieldCellScale(field_width, field_height) != 0u;
 }
 
 // Resolve the authenticated bottom crop without uint64 arithmetic.

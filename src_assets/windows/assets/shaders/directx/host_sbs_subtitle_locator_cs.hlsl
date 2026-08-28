@@ -347,12 +347,14 @@ uint BuildCurrentStack(uint final_count) {
             uint kind = (OcrRecord[raw_offset + 5u] & V2_OCR_BOX_FLAG_RIBBON) != 0u ? 1u : 0u;
             uint width = core.z - core.x;
             uint height = core.w - core.y;
+            uint field_cell_scale =
+                V2SubtitleLocatorFieldCellScale(locator_field.x, locator_field.y);
             // Generic subtitle-line geometry.  In particular, square badges/logos fail the
             // aspect gate without a position- or brand-specific exclusion.
-            // Every calibrated DAV2 tensor has square analysis cells and the same 434-cell short
-            // side, so font/target-sampling distances remain physical cell counts.  Only the
-            // maximum ordinary subtitle span is a fraction of the active field width.  A ribbon
-            // has independent detector topology evidence and may legitimately span the field.
+            // Coarse DAV2 tensors have a 434-cell short side. Exact convex-2x live fields keep
+            // square cells at twice that density, so fixed field-cell thresholds scale by two
+            // to preserve their source-space footprint. Relative width/aspect rules are unchanged.
+            // A ribbon has independent detector topology evidence and may span the field.
             uint maximum_width = LocatorContentWidth() * V2_SUBTITLE_LOCATOR_MAX_WIDTH_NUMERATOR /
                 V2_SUBTITLE_LOCATOR_MAX_WIDTH_DENOMINATOR;
             uint corner_edge_threshold =
@@ -365,11 +367,13 @@ uint BuildCurrentStack(uint final_count) {
             // eligible, and ribbon topology is never filtered by this ordinary-core rule.
             bool bottom_corner_ordinary = kind == 0u &&
                 min(left_clearance, right_clearance) < corner_edge_threshold &&
-                core.w + V2_SUBTITLE_LOCATOR_CORNER_BOTTOM_ROWS >= locator_field.w;
-            if (width >= V2_SUBTITLE_LOCATOR_MIN_WIDTH_CELLS &&
+                core.w + V2_SUBTITLE_LOCATOR_CORNER_BOTTOM_ROWS * field_cell_scale >=
+                    locator_field.w;
+            if (field_cell_scale != 0u &&
+                width >= V2_SUBTITLE_LOCATOR_MIN_WIDTH_CELLS * field_cell_scale &&
                 !bottom_corner_ordinary &&
                 (kind != 0u || width <= maximum_width) &&
-                height >= V2_SUBTITLE_LOCATOR_MIN_HEIGHT_CELLS &&
+                height >= V2_SUBTITLE_LOCATOR_MIN_HEIGHT_CELLS * field_cell_scale &&
                 width * V2_SUBTITLE_LOCATOR_MIN_ASPECT_DENOMINATOR >=
                     V2_SUBTITLE_LOCATOR_MIN_ASPECT_NUMERATOR * height) {
                 QualifiedCores[qualified_count] = core;
@@ -845,14 +849,19 @@ bool SampleTargetProbe(
     out float target
 ) {
     target = 0.0f;
+    uint field_cell_scale =
+        V2SubtitleLocatorFieldCellScale(locator_field.x, locator_field.y);
+    if (field_cell_scale == 0u) return false;
+    float probe_half_span = 30.0f * (float)field_cell_scale;
+    float probe_x_step = 4.0f * (float)field_cell_scale;
     if (require_consistent_rows) {
-        float first_x_float = center - 30.0f;
-        float last_x_float = center - 30.0f + 4.0f * 15.0f;
+        float first_x_float = center - probe_half_span;
+        float last_x_float = center - probe_half_span + probe_x_step * 15.0f;
         if (floor(first_x_float + 0.5f) < (float)locator_content.x ||
             floor(last_x_float + 0.5f) > (float)(locator_content.z - 1u)) return false;
     }
-    uint outer_y_offset = 10u;
-    uint inner_y_offset = 4u;
+    uint outer_y_offset = 10u * field_cell_scale;
+    uint inner_y_offset = 4u * field_cell_scale;
     uint sample_y0 = clamp(
         owner_top >= outer_y_offset ? owner_top - outer_y_offset : 0u,
         locator_content.y,
@@ -865,7 +874,8 @@ bool SampleTargetProbe(
     bool second_row_valid = true;
     [loop]
     for (uint sample_index = 0u; sample_index < 16u; ++sample_index) {
-        float sample_x_float = center - 30.0f + 4.0f * (float)sample_index;
+        float sample_x_float =
+            center - probe_half_span + probe_x_step * (float)sample_index;
         uint sample_x = (uint)clamp(
             floor(sample_x_float + 0.5f),
             (float)locator_content.x,

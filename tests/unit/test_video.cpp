@@ -22,6 +22,7 @@
 #include <src/nvenc/nvenc_base.h>
 #include <src/nvenc/nvenc_config.h>
 #include <src/platform/windows/video_dom_client.h>
+#include <src/prod_zipdepth_convex2x.h>
 #include <src/tracked_async_worker.h>
 #include <src/video.h>
 #include <src/video_colorspace.h>
@@ -113,10 +114,14 @@ namespace {
     if (!input.is_open()) {
       return {};
     }
-    return {
+    std::string source {
       std::istreambuf_iterator<char> {input},
       std::istreambuf_iterator<char> {}
     };
+    // Source-string contracts describe repository text, not the checkout's newline policy.
+    // Normalize Windows CRLF so the same assertions run on native Windows and Unix worktrees.
+    std::erase(source, '\r');
+    return source;
   }
 
   float apply_color_vector(const float (&color_vector)[4], float red, float green, float blue) {
@@ -1624,9 +1629,17 @@ TEST(TensorRtContextLifecycleTest, EstimatorDestructorUsesOnlyBoundedNonblocking
     "unregister_cuda_graphics_resource(cuda, cuda_out_res)",
     depth_input_unregister
   );
+  const auto guidance_input_unregister = destructor.find(
+    "unregister_cuda_graphics_resource(cuda, cuda_guidance_in_res)",
+    depth_output_unregister
+  );
+  const auto refined_output_unregister = destructor.find(
+    "unregister_cuda_graphics_resource(cuda, cuda_refined_out_res)",
+    guidance_input_unregister
+  );
   const auto ocr_input_unregister = destructor.find(
     "unregister_cuda_graphics_resource(cuda, cuda_ocr_in_res)",
-    depth_output_unregister
+    refined_output_unregister
   );
   const auto ocr_output_unregister = destructor.find(
     "unregister_cuda_graphics_resource(cuda, cuda_ocr_out_res)",
@@ -1646,6 +1659,8 @@ TEST(TensorRtContextLifecycleTest, EstimatorDestructorUsesOnlyBoundedNonblocking
   ASSERT_NE(stream_destroy, std::string::npos);
   ASSERT_NE(depth_input_unregister, std::string::npos);
   ASSERT_NE(depth_output_unregister, std::string::npos);
+  ASSERT_NE(guidance_input_unregister, std::string::npos);
+  ASSERT_NE(refined_output_unregister, std::string::npos);
   ASSERT_NE(ocr_input_unregister, std::string::npos);
   ASSERT_NE(ocr_output_unregister, std::string::npos);
   ASSERT_NE(chain_failure, std::string::npos);
@@ -1658,7 +1673,9 @@ TEST(TensorRtContextLifecycleTest, EstimatorDestructorUsesOnlyBoundedNonblocking
   EXPECT_LT(ocr_graph_destroy, stream_destroy);
   EXPECT_LT(stream_destroy, depth_input_unregister);
   EXPECT_LT(depth_input_unregister, depth_output_unregister);
-  EXPECT_LT(depth_output_unregister, ocr_input_unregister);
+  EXPECT_LT(depth_output_unregister, guidance_input_unregister);
+  EXPECT_LT(guidance_input_unregister, refined_output_unregister);
+  EXPECT_LT(refined_output_unregister, ocr_input_unregister);
   EXPECT_LT(ocr_input_unregister, ocr_output_unregister);
   EXPECT_LT(ocr_output_unregister, chain_failure);
   EXPECT_EQ(
@@ -1673,7 +1690,7 @@ TEST(TensorRtContextLifecycleTest, EstimatorDestructorUsesOnlyBoundedNonblocking
   ) {
     ++guarded_followup_count;
   }
-  EXPECT_GE(guarded_followup_count, 9u)
+  EXPECT_GE(guarded_followup_count, 11u)
     << "Every later event/graph/interop teardown operation must be gated by the monotonic chain";
   EXPECT_NE(
     destructor.find("if (cuda_teardown_may_continue && cu_stream)", chain_begin),
@@ -2300,6 +2317,30 @@ TEST(TensorRtContextLifecycleTest, AccountingBoundsQuarantinedAndReusableContext
   EXPECT_EQ(accounting.quarantined(), 2u);
 }
 
+TEST(TensorRtContextLifecycleTest, FusedProfileOwnershipIsOnePhysicalContextLifetime) {
+  EXPECT_EQ(models::detail::tensorrt_context_limit(true), 1u);
+  EXPECT_EQ(models::detail::tensorrt_context_limit(false), 4u);
+
+  models::detail::execution_context_accounting_t fused;
+  ASSERT_TRUE(fused.reserve(models::detail::tensorrt_context_limit(true)));
+  fused.mark_warmed();
+  EXPECT_FALSE(fused.reserve(models::detail::tensorrt_context_limit(true)))
+    << "a second context could concurrently own the same shape profile";
+  fused.quarantine(true);
+  EXPECT_EQ(fused.usable(), 0u);
+  EXPECT_EQ(fused.quarantined(), 1u);
+  EXPECT_FALSE(fused.reserve(models::detail::tensorrt_context_limit(true)))
+    << "a leaked/quarantined profile owner requires process restart";
+
+  models::detail::execution_context_accounting_t legacy;
+  for (std::size_t index = 0u;
+       index < models::detail::tensorrt_context_limit(false);
+       ++index) {
+    EXPECT_TRUE(legacy.reserve(models::detail::tensorrt_context_limit(false)));
+  }
+  EXPECT_FALSE(legacy.reserve(models::detail::tensorrt_context_limit(false)));
+}
+
 TEST(TensorRtCudaGraphPolicyTest, SignatureChangesInvalidateThePrivateCaptureWarmup) {
   using policy_t = models::detail::cuda_graph_replay_policy_t;
   using signature_t = models::detail::cuda_graph_signature_t;
@@ -2307,6 +2348,10 @@ TEST(TensorRtCudaGraphPolicyTest, SignatureChangesInvalidateThePrivateCaptureWar
   policy_t policy;
   const signature_t depth {1u, 2u, 770, 434};
   const signature_t resized {3u, 4u, 518, 294};
+  const signature_t fused {1u, 2u, 770, 434, 3u, 4u, 0u};
+  const signature_t changed_guidance {1u, 2u, 770, 434, 5u, 4u, 0u};
+  const signature_t changed_refined {1u, 2u, 770, 434, 3u, 6u, 0u};
+  const signature_t changed_profile {1u, 2u, 770, 434, 3u, 4u, 1u};
 
   EXPECT_TRUE(models::detail::select_cuda_graph_signature(policy, depth));
   EXPECT_EQ(policy.signature, depth);
@@ -2323,6 +2368,13 @@ TEST(TensorRtCudaGraphPolicyTest, SignatureChangesInvalidateThePrivateCaptureWar
   EXPECT_FALSE(policy.signature_warmed);
   EXPECT_FALSE(models::detail::cuda_graph_signature_matches(policy, resized));
   EXPECT_FALSE(models::detail::select_cuda_graph_signature(policy, resized));
+
+  EXPECT_TRUE(models::detail::select_cuda_graph_signature(policy, fused));
+  policy.signature_warmed = true;
+  EXPECT_TRUE(models::detail::cuda_graph_signature_matches(policy, fused));
+  EXPECT_FALSE(models::detail::cuda_graph_signature_matches(policy, changed_guidance));
+  EXPECT_FALSE(models::detail::cuda_graph_signature_matches(policy, changed_refined));
+  EXPECT_FALSE(models::detail::cuda_graph_signature_matches(policy, changed_profile));
 }
 
 TEST(DepthInputRegionTest, RequiresCanonicalFullSourceOrAuthenticatedRoiAuthority) {
@@ -2622,23 +2674,55 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
   ComPtr<ID3D11Texture2D> texture;
   ComPtr<ID3D11ShaderResourceView> view;
-  ComPtr<ID3D11Texture2D> conditioned_texture;
-  ComPtr<ID3D11ShaderResourceView> conditioned_view;
   ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &texture)));
   ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(texture.Get(), nullptr, &view)));
-  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &conditioned_texture)));
-  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
-    conditioned_texture.Get(), nullptr, &conditioned_view
-  )));
+
+  const auto create_r32_float_view = [&device](
+    const UINT width,
+    const UINT height,
+    ComPtr<ID3D11ShaderResourceView> &created_view
+  ) {
+    D3D11_TEXTURE2D_DESC field_desc {};
+    field_desc.Width = width;
+    field_desc.Height = height;
+    field_desc.MipLevels = 1;
+    field_desc.ArraySize = 1;
+    field_desc.Format = DXGI_FORMAT_R32_FLOAT;
+    field_desc.SampleDesc.Count = 1;
+    field_desc.Usage = D3D11_USAGE_DEFAULT;
+    field_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    ComPtr<ID3D11Texture2D> field_texture;
+    return SUCCEEDED(device->CreateTexture2D(
+             &field_desc, nullptr, &field_texture
+           )) &&
+           SUCCEEDED(device->CreateShaderResourceView(
+             field_texture.Get(), nullptr, &created_view
+           ));
+  };
+  const auto create_field_views = [&create_r32_float_view](
+    const UINT width,
+    const UINT height,
+    std::array<ComPtr<ID3D11ShaderResourceView>, 6u> &views
+  ) {
+    for (auto &field_view : views) {
+      if (!create_r32_float_view(width, height, field_view)) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  std::array<ComPtr<ID3D11ShaderResourceView>, 6u> coarse_field_views;
+  ASSERT_TRUE(create_field_views(770u, 434u, coarse_field_views));
 
   const auto &calibration = v2::model_calibrations.front();
   models::estimate_result result;
-  result.shadow_candidate_parallax = view;
-  result.shadow_ownership_refined_parallax = view;
-  result.shadow_vertical_majorant = view;
-  result.shadow_vertical_conditioned = view;
-  result.shadow_base_final_parallax = view;
-  result.shadow_final_parallax = conditioned_view;
+  result.shadow_candidate_parallax = coarse_field_views[0];
+  result.shadow_ownership_refined_parallax = coarse_field_views[1];
+  result.shadow_vertical_majorant = coarse_field_views[2];
+  result.shadow_vertical_conditioned = coarse_field_views[3];
+  result.shadow_base_final_parallax = coarse_field_views[4];
+  result.shadow_final_parallax = coarse_field_views[5];
   result.shadow_state = view;
   result.shadow_frame_stats = view;
   result.ocr_box_record = view;
@@ -2665,6 +2749,9 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
     );
   result.raw_width = 770;
   result.raw_height = 434;
+  result.field_width = 770;
+  result.field_height = 434;
+  result.field_content = {0u, 0u, 770u, 434u};
   result.completed_frame_valid = true;
   result.completed_frame_id = 1;
   result.parallax_v2_producer_active = true;
@@ -2684,6 +2771,110 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(result));
   EXPECT_TRUE(models::subtitle_evidence_is_exact_frame(result));
 
+  using namespace models::prod_zipdepth_convex2x;
+  auto composite_identity = models::composite_depth_runtime_provenance_t {
+    .model = std::string {logical_model},
+    .onnx_sha256 = std::string {fused_onnx_sha256},
+    .embedded_dav2_onnx_sha256 = std::string {dav2_onnx_sha256},
+    .zipdepth_checkpoint_sha256 = std::string {zipdepth_checkpoint_sha256},
+    .guidance_preprocess_source_closure_sha256 =
+      std::string {calibration.preprocess.source_closure_sha256},
+    .engine_recipe = std::string {engine_recipe},
+    .engine_artifact = std::string {logical_model} + "." +
+                       std::string {engine_recipe} +
+                       ".trt11_2_1_2-sm120-gputest-onnx" +
+                       std::string {fused_onnx_sha256} + ".engine",
+    .active_engine_manifest =
+      std::string {logical_model} + ".active-engine.json",
+  };
+  auto fused_result = result;
+  fused_result.composite_depth_runtime_provenance =
+    std::make_shared<const models::composite_depth_runtime_provenance_t>(
+      composite_identity
+    );
+  fused_result.guidance_width = 1540;
+  fused_result.guidance_height = 868;
+  fused_result.refined_width = 1540;
+  fused_result.refined_height = 868;
+
+  std::array<ComPtr<ID3D11ShaderResourceView>, 6u> refined_field_views;
+  ASSERT_TRUE(create_field_views(1540u, 868u, refined_field_views));
+  auto refined_result = fused_result;
+  refined_result.shadow_candidate_parallax = refined_field_views[0];
+  refined_result.shadow_ownership_refined_parallax = refined_field_views[1];
+  refined_result.shadow_vertical_majorant = refined_field_views[2];
+  refined_result.shadow_vertical_conditioned = refined_field_views[3];
+  refined_result.shadow_base_final_parallax = refined_field_views[4];
+  refined_result.shadow_final_parallax = refined_field_views[5];
+  refined_result.field_width = 1540;
+  refined_result.field_height = 868;
+  refined_result.field_content = {0u, 0u, 1540u, 868u};
+  refined_result.refined_live_geometry_active = true;
+  EXPECT_TRUE(models::parallax_v2_result_is_authenticated(refined_result));
+
+  std::array<ComPtr<ID3D11ShaderResourceView>, 6u> portrait_field_views;
+  ASSERT_TRUE(create_field_views(434u, 770u, portrait_field_views));
+  auto fused_portrait_fallback = fused_result;
+  fused_portrait_fallback.shadow_candidate_parallax = portrait_field_views[0];
+  fused_portrait_fallback.shadow_ownership_refined_parallax = portrait_field_views[1];
+  fused_portrait_fallback.shadow_vertical_majorant = portrait_field_views[2];
+  fused_portrait_fallback.shadow_vertical_conditioned = portrait_field_views[3];
+  fused_portrait_fallback.shadow_base_final_parallax = portrait_field_views[4];
+  fused_portrait_fallback.shadow_final_parallax = portrait_field_views[5];
+  fused_portrait_fallback.raw_width = 434;
+  fused_portrait_fallback.raw_height = 770;
+  fused_portrait_fallback.field_width = 434;
+  fused_portrait_fallback.field_height = 770;
+  fused_portrait_fallback.guidance_width = 868;
+  fused_portrait_fallback.guidance_height = 1540;
+  fused_portrait_fallback.refined_width = 868;
+  fused_portrait_fallback.refined_height = 1540;
+  fused_portrait_fallback.field_content = {0u, 0u, 434u, 770u};
+  fused_portrait_fallback.refined_live_geometry_active = false;
+  fused_portrait_fallback.input_region = {
+    .source_width = 1080u,
+    .source_height = 1920u,
+    .left = 0u,
+    .top = 0u,
+    .right = 1080u,
+    .bottom = 1920u,
+    .tensor_content = {0u, 0u, 434u, 770u},
+  };
+  EXPECT_TRUE(models::parallax_v2_result_is_authenticated(fused_portrait_fallback));
+
+  const auto expect_rejected_composite = [&](const auto &mutate) {
+    auto tampered_identity = composite_identity;
+    mutate(tampered_identity);
+    auto tampered_result = refined_result;
+    tampered_result.composite_depth_runtime_provenance =
+      std::make_shared<const models::composite_depth_runtime_provenance_t>(
+        std::move(tampered_identity)
+      );
+    EXPECT_FALSE(models::parallax_v2_result_is_authenticated(tampered_result));
+  };
+  expect_rejected_composite([](auto &identity) { identity.model += "-wrong"; });
+  expect_rejected_composite([](auto &identity) { identity.onnx_sha256[0] = '0'; });
+  expect_rejected_composite([](auto &identity) {
+    identity.embedded_dav2_onnx_sha256[0] = '0';
+  });
+  expect_rejected_composite([](auto &identity) {
+    identity.zipdepth_checkpoint_sha256[0] = '0';
+  });
+  expect_rejected_composite([](auto &identity) {
+    identity.guidance_preprocess_source_closure_sha256[0] = '0';
+  });
+  expect_rejected_composite([](auto &identity) { identity.engine_recipe += "-wrong"; });
+  expect_rejected_composite([](auto &identity) { identity.engine_artifact += ".wrong"; });
+  expect_rejected_composite([](auto &identity) {
+    identity.active_engine_manifest += ".wrong";
+  });
+  auto wrong_composite_shape = refined_result;
+  wrong_composite_shape.refined_width -= 1;
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_composite_shape));
+  auto half_snapshot = refined_result;
+  half_snapshot.guidance_model_input_snapshot = view;
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(half_snapshot));
+
   auto subtitle_suppressed = result;
   subtitle_suppressed.subtitle_work_suppressed = true;
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(subtitle_suppressed));
@@ -2700,16 +2891,87 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_final));
 
   auto final_aliases_base = result;
-  final_aliases_base.shadow_final_parallax = view;
+  final_aliases_base.shadow_final_parallax = result.shadow_base_final_parallax;
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(final_aliases_base));
+
+  auto wrong_field_extent = result;
+  wrong_field_extent.shadow_candidate_parallax = view;
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_field_extent));
+
+  D3D11_TEXTURE2D_DESC wrong_format_desc {};
+  wrong_format_desc.Width = 770u;
+  wrong_format_desc.Height = 434u;
+  wrong_format_desc.MipLevels = 1u;
+  wrong_format_desc.ArraySize = 1u;
+  wrong_format_desc.Format = DXGI_FORMAT_R16_FLOAT;
+  wrong_format_desc.SampleDesc.Count = 1u;
+  wrong_format_desc.Usage = D3D11_USAGE_DEFAULT;
+  wrong_format_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+  ComPtr<ID3D11Texture2D> wrong_format_texture;
+  ComPtr<ID3D11ShaderResourceView> wrong_format_view;
+  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(
+    &wrong_format_desc, nullptr, &wrong_format_texture
+  )));
+  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
+    wrong_format_texture.Get(), nullptr, &wrong_format_view
+  )));
+  auto wrong_field_format = result;
+  wrong_field_format.shadow_candidate_parallax = wrong_format_view;
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_field_format));
+
+  auto wrong_coarse_field_shape = result;
+  ++wrong_coarse_field_shape.field_width;
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_coarse_field_shape));
+
+  auto wrong_coarse_field_content = result;
+  --wrong_coarse_field_content.field_content.right;
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_coarse_field_content));
+
+  auto refined_without_composite = refined_result;
+  refined_without_composite.composite_depth_runtime_provenance.reset();
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(refined_without_composite));
+
+  auto wrong_refined_field_shape = refined_result;
+  --wrong_refined_field_shape.field_width;
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_refined_field_shape));
+
+  auto wrong_refined_field_content = refined_result;
+  --wrong_refined_field_content.field_content.right;
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_refined_field_content));
+
+  auto refined_field_uses_coarse_texture = refined_result;
+  refined_field_uses_coarse_texture.shadow_candidate_parallax = coarse_field_views[0];
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(refined_field_uses_coarse_texture));
+
+  auto refined_field_aliases_stage = refined_result;
+  refined_field_aliases_stage.shadow_final_parallax =
+    refined_field_aliases_stage.shadow_base_final_parallax;
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(refined_field_aliases_stage));
+
+  auto unsupported_refined_portrait = fused_portrait_fallback;
+  unsupported_refined_portrait.field_width = 868;
+  unsupported_refined_portrait.field_height = 1540;
+  unsupported_refined_portrait.field_content = {0u, 0u, 868u, 1540u};
+  unsupported_refined_portrait.refined_live_geometry_active = true;
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(unsupported_refined_portrait));
 
   auto missing_input_region = result;
   missing_input_region.input_region = {};
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_input_region));
 
   auto dump_augmented = result;
-  dump_augmented.shadow_coordinate = view;
+  ComPtr<ID3D11ShaderResourceView> coordinate_view;
+  ASSERT_TRUE(create_r32_float_view(770u, 434u, coordinate_view));
+  dump_augmented.shadow_coordinate = coordinate_view;
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(dump_augmented));
+
+  auto coordinate_aliases_field = dump_augmented;
+  coordinate_aliases_field.shadow_coordinate = coordinate_aliases_field.shadow_candidate_parallax;
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(coordinate_aliases_field));
+
+  auto wrong_coordinate_extent = dump_augmented;
+  wrong_coordinate_extent.shadow_coordinate = view;
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_coordinate_extent));
 
   auto missing_resource = result;
   missing_resource.shadow_state.Reset();
@@ -2751,9 +3013,28 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
     supported_shape_t {1440u, 3440u, 434, 1036},
   };
   for (const auto &[source_width, source_height, width, height] : supported_shapes) {
+    std::array<ComPtr<ID3D11ShaderResourceView>, 6u> supported_field_views;
+    ASSERT_TRUE(create_field_views(
+      static_cast<UINT>(width),
+      static_cast<UINT>(height),
+      supported_field_views
+    ));
     auto supported_shape = result;
+    supported_shape.shadow_candidate_parallax = supported_field_views[0];
+    supported_shape.shadow_ownership_refined_parallax = supported_field_views[1];
+    supported_shape.shadow_vertical_majorant = supported_field_views[2];
+    supported_shape.shadow_vertical_conditioned = supported_field_views[3];
+    supported_shape.shadow_base_final_parallax = supported_field_views[4];
+    supported_shape.shadow_final_parallax = supported_field_views[5];
     supported_shape.raw_width = width;
     supported_shape.raw_height = height;
+    supported_shape.field_width = width;
+    supported_shape.field_height = height;
+    supported_shape.field_content = {
+      0u, 0u,
+      static_cast<std::uint32_t>(width),
+      static_cast<std::uint32_t>(height),
+    };
     supported_shape.input_region = {
       .source_width = source_width,
       .source_height = source_height,
@@ -2772,6 +3053,7 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   }
 
   auto video_region = result;
+  video_region.field_content = {0u, 0u, 770u, 433u};
   video_region.input_region = {
     .source_width = 3840u,
     .source_height = 2160u,
@@ -5132,6 +5414,43 @@ TEST(DirectxShaderSourceTest, VideoRoiSamplesRetainedSourceAndCopiesOnlyForDump)
     preprocess.find("DepthSourceRegionLoadPosition("),
     std::string::npos
   );
+}
+
+TEST(DirectxShaderSourceTest, Convex2xRoiRendererUsesTheAuthenticatedFieldContent) {
+  const auto display =
+    read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
+  const auto dump = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
+  );
+  ASSERT_FALSE(display.empty());
+  ASSERT_FALSE(dump.empty());
+
+  EXPECT_NE(
+    display.find(
+      "v2_live_warp_selected ? &est.input_region : nullptr,\n"
+      "                  v2_live_warp_selected ? &est.field_content : nullptr"
+    ),
+    std::string::npos
+  );
+  const auto update_begin = display.find("    bool update_sbs_constant_buffer(");
+  const auto update_end = display.find(
+    "    std::uint32_t next_sbs_telemetry_sequence()", update_begin
+  );
+  ASSERT_NE(update_begin, std::string::npos);
+  ASSERT_NE(update_end, std::string::npos);
+  const auto update = display.substr(update_begin, update_end - update_begin);
+  EXPECT_NE(
+    update.find("const models::depth_tensor_content_rect_t *field_content"),
+    std::string::npos
+  );
+  EXPECT_NE(update.find("const auto &renderer_content = field_content ?"), std::string::npos);
+  EXPECT_NE(update.find("geometry.tensor_content_left = renderer_content.left"), std::string::npos);
+  EXPECT_NE(update.find("geometry.tensor_content_bottom = renderer_content.bottom"), std::string::npos);
+
+  EXPECT_NE(
+    dump.find("if (completed.refined_live_geometry_active)"),
+    std::string::npos
+  ) << "Until Dump-3D/DVC2 carries split raster domains, it must reject rather than mislabel a refined live field";
 }
 
 TEST(DirectxShaderSourceTest, PendingCompletionReusesThePreparedConstantBuffer) {

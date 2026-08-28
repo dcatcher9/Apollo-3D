@@ -53,8 +53,8 @@ diagnostics that explain how the final field was produced.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 71/tag `0x012ECEC1`, canonical SHA-256
-`96195e08c3da309b51503ae09c5ff07e7e5355ec0a7cc008a1e38c9209d67164`. It binds the
+schema 72/tag `0x9DEA1BF0`, canonical SHA-256
+`ff94c30e0295fa0d46ea1db7028a920cec640f192d8afb0fdeeb2722281e52f6`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -65,14 +65,14 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `1d0e89740921beb645cb8e83bfa6b3ca6f14ce58266bcf6d36dc2dfe8dc5c1bd` |
-| `parallax_v2_producer` | 19 | `11bde7ba05ca8ae8404b8fe21a3afd600ff98549fea248dacb5bf1b5d2156d6b` |
-| `parallax_v2_coordinate_diagnostic` | 1 | `d99263f71448f967a327479d3f15da2532e8e8e203d8873436928e5392f57433` |
-| `near_identical_detector` | 4 | `87b63ffb753e9cc39e90b385ab997134402596eb5c074a4f3a3680619015910b` |
-| `gpu_trace` | 1 | `a1e6a21286b5a898b1dcdd419056faa8e3a5351b21edef0ef288d716979c0cb9` |
-| `parallax_v2_live_renderer` | 2 | `7553350163dfb80cee85b70689b768a46a5c15b44997e2753e24bebedaa51ffd` |
-| `parallax_v2_p010_y` | 1 | `f14993382c296ee07ce556c3dbebba29d021d8555ea446fae9a8b06b17a09813` |
+| `parallax_v2_producer` | 20 | `93b457e7cfedd9fe37924d21d44fc21760115cd82e4af57a9e1a7adcd60c0411` |
+| `parallax_v2_coordinate_diagnostic` | 1 | `ede845c178b9af0272f2cdc6cb87497b08c13fb97c4ef7530c9e02060c4f4646` |
+| `near_identical_detector` | 4 | `079b9ee89f58d31298971af40fe85c0af02136b80bf4cf2d2262801941d95de2` |
+| `gpu_trace` | 1 | `4933872af7afaf6a5cf56f69e216bb6d26c3494f692cea4fa5797b8b0355234c` |
+| `parallax_v2_live_renderer` | 2 | `259e0beaeee739737763e5799431079320cd5ebac644fd1469f0a10d95734d0f` |
+| `parallax_v2_p010_y` | 1 | `1addae6fa94eef0d19a561bf92c57d0af89526935045399548343c459ea8a43e` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `1c7cb433f667c990e4d55f254a11cc9a40590e3a1e97e62fc261c2e0069b9513` |
+| `parallax_v2_live_diagnostic` | 2 | `21a5a20307e531c55b03d3211efcd348da2ea6dd592b84f75e6977a56c48a3a5` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
 The contract admits the following production calibration:
@@ -308,15 +308,17 @@ SLR13 is a fixed 80-word compact state with schema `13` and little-endian tag by
 containing at most four owner/core rectangles, four
 pending/core rectangles, and four same-frame current cover rectangles. Header word 31 carries
 owner, pending, and current ribbon masks in bits `0..3`, `4..7`, and `8..11`; higher bits are zero.
-Generic ordinary-line geometry requires
-width at least 48 cells, height at least 6 cells, width at least twice height, and width at most
+Generic ordinary-line geometry is expressed in coarse-field cell units. Let `s=1` for a coarse
+DAV2 field and `s=2` for its exact convex-2x live field. It requires width at least `48s` cells,
+height at least `6s` cells, width at least twice height, and width at most
 `floor(9 * field_width / 10)`. The sole positional false-positive filter is symmetric: a non-ribbon
 ordinary core is rejected only when its nearer horizontal content-edge clearance is strictly less
-than `floor(content_width / 32)` and its bottom is at or below `dynamic_ROI_bottom - 16`.
+than `floor(content_width / 32)` and its bottom is at or below `dynamic_ROI_bottom - 16s`.
 Equality at the horizontal threshold remains eligible, and detector-authenticated ribbons are
-exempt. DAV2 field cells remain square
-and every calibrated shape has short side 434, so the lower cell thresholds and sampling offsets
-stay fixed while only the maximum line width follows the long side. Vertically adjacent boxes form
+exempt. Coarse DAV2 shapes have short side 434; the admitted landscape live fields have short side
+868. Both retain square cells, and scaling fixed field-cell thresholds and probe offsets by `s`
+preserves the same source-space footprint while relative width/aspect rules remain unchanged.
+Vertically adjacent boxes form
 one coherent centered, left-aligned, or right-aligned
 stack, chosen deterministically by area. A detected ribbon joins that stack as another tracked
 member, and an observation exceeding four total members abstains rather than dropping one.
@@ -401,7 +403,10 @@ so a seek/reset landing on an already-visible static subtitle acquires on the fo
 observation without an onset edge.
 
 The primary observed-plane probe remains two independent 16-sample rows above the combined
-lower-text owner stack, horizontally placed at the median of all owner-member centers. Only when
+lower-text owner stack, horizontally placed at the median of all owner-member centers. With the
+same field-cell scale `s`, its rows are `10s` and `4s` cells above the owner top and each samples
+from `C-30s` through `C+30s` in `4s`-cell steps. Thus coarse and exact convex-2x fields observe the
+same source-space neighborhood. Only when
 that primary is unreliable, SLR13 performs a bounded near-center search. Let `W` be the horizontal
 span of the ordinary tight cores and let `C` be the unchanged aggregate primary center. It probes
 `C-W/16` then `C+W/16`; if either is reliable, the larger-U reliable result at that radius wins and
@@ -421,8 +426,9 @@ interquartile range—the average of elements 11/12 minus the average of element
 pixels. A sole dispersed row, or no valid row, makes the primary unreliable and activates the
 strict fallback search.
 
-Fallback evidence is deliberately stricter. Its complete rounded 61-cell strip must fit inside the
-analysis content without edge clamping; both rows must be valid and individually pass the same
+Fallback evidence is deliberately stricter. Its complete rounded strip (61 coarse cells or 121
+convex-2x cells, the same source-space width) must fit inside the analysis content without edge
+clamping; both rows must be valid and individually pass the same
 `8`-pixel IQR gate; and their medians must be within `4` pixels, producing their mean. If both
 directions at one radius qualify, their two mean targets must also be within `4` pixels. Agreement
 selects the larger-U mean; disagreement makes the whole observation unreliable and does not search

@@ -33,6 +33,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -59,6 +60,8 @@ import eval_parallel  # noqa: E402  (evaluator scheduling; deliberately not metr
 import direct_geometry_contract as direct_geometry  # noqa: E402
 import cut_state_contract  # noqa: E402
 import whole_clip_raw_contract  # noqa: E402
+import prod_zipdepth_convex2x as prod_convex2x  # noqa: E402
+import prod_zipdepth_convex2x_diagnostics_contract as convex2x_diagnostics  # noqa: E402
 from depth_coordinate_v2_contract import (  # noqa: E402
     CONTRACT_SCHEMA as PARALLAX_V2_CONTRACT_SCHEMA,
     MODEL_CALIBRATIONS,
@@ -75,6 +78,9 @@ EVAL_SCHEMA = whole_clip_raw_contract.EVALUATOR_SCHEMA  # schema 37; harness 22 
 PARALLAX_V2_LIVE_RENDERER = "depth-coordinate-v2-live-signed-parallax"
 BASELINE_SNAPSHOT_SCHEMA = 1
 BASELINE_SNAPSHOT_FILE = "baseline_snapshot.json"
+COMPOSITE_DEPTH_MODEL = "prod_dav2_zipdepth_convex2x_dynamic_opset18"
+COMPOSITE_DEPTH_RUNTIME = "dav2_zipdepth_convex2x_composite"
+COMPOSITE_DEPTH_ENGINE_RECIPE = "trt-six-point-profiles-level5-v1"
 RETIRED_BASELINE_META_KEYS = frozenset({
     "profile", "literal_bestv2", "adaptive_pop", "adaptive_pop_max", "zero_plane",
 })
@@ -213,15 +219,22 @@ def scored_artifact_digests(directory):
     scored_fixed = {
         "contract.json", "sbs_perf.json", "warp_map_shape.json", "hdr_output_stats.json",
         "cut_state.json", "direct_parallax_manifest.json",
+        convex2x_diagnostics.SIDECAR_FILENAME,
     }
     numeric_fixed = {"warp_map_shape.json", "hdr_output_stats.json", "cut_state.json"}
     frame_pattern = re.compile(
         r"^(?:sbs|depth|structure|parallax|warp_map|warp_mask)_\d+\.(?:png|f32)$")
+    diagnostic_frame_pattern = re.compile(
+        r"^(?:raw|refined|zip_model_input)_\d+\.f32$")
+    diagnostic_sidecar_present = os.path.isfile(
+        os.path.join(directory, convex2x_diagnostics.SIDECAR_FILENAME))
     paths = sorted(
         path for path in glob.glob(os.path.join(directory, "*"))
         if os.path.isfile(path) and
         (os.path.basename(path) in scored_fixed or
-         frame_pattern.fullmatch(os.path.basename(path))))
+         frame_pattern.fullmatch(os.path.basename(path)) or
+         (diagnostic_sidecar_present and
+          diagnostic_frame_pattern.fullmatch(os.path.basename(path)))))
     if not paths:
         raise ValueError(f"no scored artifacts in {directory}")
     scored_digest = hashlib.sha256()
@@ -1704,6 +1717,16 @@ def training_label_evidence_gate(results, thresholds=None, *, require_context=Tr
             any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{12}", value)
                 for value in clip_hashes.values())):
         blockers.append("meta.clip_set_sha1")
+    diagnostic_required = (
+        isinstance(meta.get("composite_runtime_provenance"), dict) and
+        meta.get("warp_input") != direct_geometry.WARP_INPUT)
+    diagnostic_manifests = meta.get(convex2x_diagnostics.RESULTS_META_KEY)
+    if diagnostic_required:
+        if (not isinstance(diagnostic_manifests, dict) or
+                set(diagnostic_manifests) != set(clips)):
+            blockers.append(f"meta.{convex2x_diagnostics.RESULTS_META_KEY}")
+    elif diagnostic_manifests is not None:
+        blockers.append(f"meta.{convex2x_diagnostics.RESULTS_META_KEY}.unexpected")
     for clip, entry in clips.items():
         if not isinstance(entry, dict) or not isinstance(entry.get("frames"), list) or not entry[
                 "frames"]:
@@ -1733,6 +1756,13 @@ def training_label_evidence_gate(results, thresholds=None, *, require_context=Tr
                     blockers.append(f"clips.{clip}.frame_labels")
         if len(frame_ids) != len(set(frame_ids)):
             blockers.append(f"clips.{clip}.frame_ids")
+        if diagnostic_required and isinstance(diagnostic_manifests, dict):
+            try:
+                convex2x_diagnostics.validate_manifest(
+                    diagnostic_manifests.get(clip), sorted(frame_ids),
+                    meta["composite_runtime_provenance"])
+            except ValueError:
+                blockers.append(f"clips.{clip}.convex2x_diagnostics")
         source_count = entry_meta.get("source_frame_count")
         if (isinstance(source_count, bool) or not isinstance(source_count, int) or
                 source_count != len(entry["frames"])):
@@ -2241,6 +2271,20 @@ def verify_results_against_artifacts(results, run_dir, clips_root, thresholds,
     if (not isinstance(recorded_clip_hashes, dict) or
             set(recorded_clip_hashes) != set(clips)):
         raise ValueError("meta.clip_set_sha1 must exactly cover the scored clip set")
+    composite_runtime = meta.get("composite_runtime_provenance")
+    diagnostic_manifests = meta.get(convex2x_diagnostics.RESULTS_META_KEY)
+    diagnostic_required = (
+        isinstance(composite_runtime, dict) and
+        meta.get("warp_input") != direct_geometry.WARP_INPUT)
+    if diagnostic_required:
+        if (not isinstance(diagnostic_manifests, dict) or
+                set(diagnostic_manifests) != set(clips)):
+            raise ValueError(
+                f"meta.{convex2x_diagnostics.RESULTS_META_KEY} must exactly cover "
+                "the composite ordinary clip set")
+    elif diagnostic_manifests is not None:
+        raise ValueError(
+            "fused diagnostic manifests are only valid for a composite ordinary run")
 
     expected = copy.deepcopy(results)
     expected_issues = []
@@ -2285,6 +2329,12 @@ def verify_results_against_artifacts(results, run_dir, clips_root, thresholds,
         source_dir = os.path.join(clips_root, clip)
         try:
             actual_clip_hash, source_sha256 = source_evidence_digests(source_dir)
+            source_ids = sorted(sbsbench.indexed_files(
+                os.path.join(source_dir, "frame_*.*"), "frame_"))
+            if diagnostic_required:
+                convex2x_diagnostics.authenticate_manifest_files(
+                    Path(artifact_dir), diagnostic_manifests[clip], source_ids,
+                    composite_runtime)
             actual_artifact_hash, numeric_digest = scored_artifact_digests(artifact_dir)
         except (OSError, ValueError) as exc:
             raise ValueError(
@@ -2320,6 +2370,7 @@ def verify_results_against_artifacts(results, run_dir, clips_root, thresholds,
             "cache_key": cache_key,
             "source_digests": (actual_clip_hash, source_sha256),
             "artifact_digests": (actual_artifact_hash, numeric_digest),
+            "source_ids": source_ids,
             "measured": measured,
         }
         if measured is None:
@@ -2343,6 +2394,10 @@ def verify_results_against_artifacts(results, run_dir, clips_root, thresholds,
         try:
             post_source = source_evidence_digests(verified["source_dir"])
             post_artifact = scored_artifact_digests(verified["artifact_dir"])
+            if diagnostic_required:
+                convex2x_diagnostics.authenticate_manifest_files(
+                    Path(verified["artifact_dir"]), diagnostic_manifests[clip],
+                    verified["source_ids"], composite_runtime)
         except (OSError, ValueError) as exc:
             raise ValueError(
                 f"clips.{clip}: cannot re-authenticate scored artifacts after "
@@ -2586,23 +2641,216 @@ def runtime_shader_sha256(build_dir):
     return digest.hexdigest()
 
 
+def _composite_depth_runtime_spec(model):
+    """Resolve the frozen composite identity only when its optional ONNX is present."""
+
+    contract = prod_convex2x.load_contract()
+    sources = contract.get("sources")
+    if not isinstance(sources, dict):
+        raise ValueError("composite contract sources must be an object")
+    dav2 = sources.get("dav2")
+    zipdepth = sources.get("zipdepth")
+    fused = sources.get("fused_onnx")
+    if not all(isinstance(value, dict) for value in (dav2, zipdepth, fused)):
+        raise ValueError("composite contract source identities must be objects")
+    if len(MODEL_CALIBRATIONS) != 1:
+        raise ValueError("composite runtime requires one authenticated production calibration")
+    calibration = MODEL_CALIBRATIONS[0]
+    if (dav2.get("logical_model") != model or
+            dav2.get("logical_model") != calibration.depth_model or
+            dav2.get("onnx_sha256") != calibration.onnx_sha256):
+        raise ValueError("composite contract does not embed the authenticated production DAV2")
+    if fused.get("logical_model") != COMPOSITE_DEPTH_MODEL:
+        raise ValueError("composite contract logical model is not the frozen production model")
+    return {
+        "model": COMPOSITE_DEPTH_MODEL,
+        "runtime": COMPOSITE_DEPTH_RUNTIME,
+        "engine_recipe": COMPOSITE_DEPTH_ENGINE_RECIPE,
+        "onnx_sha256": fused["sha256"],
+        "embedded_dav2_onnx_sha256": dav2["onnx_sha256"],
+        "zipdepth_checkpoint_sha256": zipdepth["checkpoint_sha256"],
+        "guidance_preprocess_source_closure_sha256":
+            calibration.preprocess.source_closure_sha256,
+    }
+
+
+def _selected_depth_runtime(build_dir, model):
+    """Mirror the host's fail-closed optional-composite selection from local assets."""
+
+    assets = os.path.join(build_dir, "assets")
+    composite_onnx_path = os.path.join(assets, COMPOSITE_DEPTH_MODEL + ".onnx")
+    if not os.path.lexists(composite_onnx_path):
+        return {
+            "kind": "legacy",
+            "model": model,
+            "onnx_path": os.path.join(assets, model + ".onnx"),
+            "manifest_path": os.path.join(assets, model + ".active-engine.json"),
+        }
+    try:
+        composite_mode = os.lstat(composite_onnx_path).st_mode
+    except OSError as exc:
+        raise ValueError(f"cannot inspect composite ONNX path: {exc}") from exc
+    if not stat.S_ISREG(composite_mode):
+        raise ValueError("composite ONNX path is present but is not a regular file")
+
+    spec = _composite_depth_runtime_spec(model)
+    actual_sha256 = file_sha256(composite_onnx_path)
+    if actual_sha256 != spec["onnx_sha256"]:
+        raise ValueError(
+            "composite ONNX SHA-256 does not match the frozen production artifact")
+    return {
+        "kind": "composite",
+        "model": COMPOSITE_DEPTH_MODEL,
+        "onnx_path": composite_onnx_path,
+        "onnx_sha256": actual_sha256,
+        "manifest_path": os.path.join(
+            assets, COMPOSITE_DEPTH_MODEL + ".active-engine.json"),
+        "spec": spec,
+    }
+
+
+def _inspect_depth_engine(build_dir, model):
+    """Return the selected runtime state and every exact-manifest validation issue."""
+
+    assets = os.path.join(build_dir, "assets")
+    exe = os.path.join(build_dir, "sunshine.exe")
+    try:
+        selected = _selected_depth_runtime(build_dir, model)
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        return None, [f"composite runtime selection failed: {exc}"]
+
+    manifest_path = selected["manifest_path"]
+    issues = []
+    try:
+        with open(manifest_path, encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return selected, [
+            f"{os.path.basename(manifest_path)}: missing/invalid manifest ({exc})"]
+    if not isinstance(manifest, dict):
+        return selected, [f"{os.path.basename(manifest_path)}: manifest must be an object"]
+
+    if selected["kind"] == "legacy":
+        if manifest.get("schema") != 1:
+            issues.append(f"manifest schema {manifest.get('schema')!r} != 1")
+        if manifest.get("model") != model:
+            issues.append(f"manifest model {manifest.get('model')!r} != {model!r}")
+        try:
+            actual_onnx_sha = file_sha256(selected["onnx_path"])
+        except OSError as exc:
+            issues.append(f"ONNX source unavailable: {exc}")
+            actual_onnx_sha = None
+        else:
+            if manifest.get("onnx_sha256") != actual_onnx_sha:
+                issues.append("manifest ONNX SHA-256 does not match current source")
+        selected["onnx_sha256"] = actual_onnx_sha
+    else:
+        spec = selected["spec"]
+        expected_fields = {
+            "schema": 2,
+            "runtime": spec["runtime"],
+            "model": spec["model"],
+            "engine_recipe": spec["engine_recipe"],
+            "composite_onnx_sha256": selected["onnx_sha256"],
+            "embedded_dav2_onnx_sha256": spec["embedded_dav2_onnx_sha256"],
+            "zipdepth_checkpoint_sha256": spec["zipdepth_checkpoint_sha256"],
+            "guidance_preprocess_source_closure_sha256":
+                spec["guidance_preprocess_source_closure_sha256"],
+        }
+        for key, expected in expected_fields.items():
+            if manifest.get(key) != expected:
+                issues.append(
+                    f"composite manifest {key} {manifest.get(key)!r} != {expected!r}")
+
+    engine_name = manifest.get("engine")
+    if (not isinstance(engine_name, str) or not engine_name or
+            os.path.basename(engine_name) != engine_name):
+        issues.append("manifest engine must be one filename")
+        engine_name = None
+    if engine_name and selected["kind"] == "composite":
+        spec = selected["spec"]
+        engine_prefix = f"{spec['model']}.{spec['engine_recipe']}."
+        engine_suffix = f"-onnx{spec['onnx_sha256']}.engine"
+        if (len(engine_name) <= len(engine_prefix) + len(engine_suffix) or
+                not engine_name.startswith(engine_prefix) or
+                not engine_name.endswith(engine_suffix)):
+            issues.append(
+                "composite manifest engine artifact does not match the exact "
+                "model/recipe/compatibility/ONNX identity")
+    selected["manifest"] = manifest
+    selected["engine_name"] = engine_name
+    if engine_name:
+        engine_path = os.path.join(assets, engine_name)
+        selected["engine_path"] = engine_path
+        try:
+            engine_ready = os.path.isfile(engine_path) and os.path.getsize(engine_path) > 0
+        except OSError:
+            engine_ready = False
+        if not engine_ready:
+            issues.append(f"exact engine missing/empty: {engine_name}")
+        else:
+            try:
+                if os.path.getmtime(engine_path) > os.path.getmtime(manifest_path):
+                    issues.append("exact engine changed after manifest publication")
+            except OSError as exc:
+                issues.append(f"cannot compare engine/manifest timestamps: {exc}")
+    try:
+        if os.path.getmtime(manifest_path) < os.path.getmtime(exe):
+            issues.append("manifest predates sunshine.exe")
+    except OSError as exc:
+        issues.append(f"cannot compare manifest/executable timestamps: {exc}")
+    return selected, issues
+
+
 def engine_provenance(build_dir, model):
     """Return hashes for the exact model artifacts validated by :func:`check_engines`."""
-    assets = os.path.join(build_dir, "assets")
-    manifest_path = os.path.join(assets, model + ".active-engine.json")
-    with open(manifest_path, encoding="utf-8") as manifest_file:
-        manifest = json.load(manifest_file)
-    engine_name = manifest["engine"]
-    engine_path = os.path.join(assets, engine_name)
-    onnx_path = os.path.join(assets, model + ".onnx")
-    actual_onnx_sha = file_sha256(onnx_path)
-    if manifest.get("onnx_sha256") != actual_onnx_sha:
-        raise ValueError("active engine manifest changed after validation")
+    selected, issues = _inspect_depth_engine(build_dir, model)
+    if issues:
+        raise ValueError("active engine manifest changed after validation: " + "; ".join(issues))
+    engine_sha256 = file_sha256(selected["engine_path"])
+    if selected["kind"] == "legacy":
+        return {
+            "engine_name": selected["engine_name"],
+            "engine_sha256": engine_sha256,
+            "onnx_sha256": selected["onnx_sha256"],
+        }
+
+    spec = selected["spec"]
+    manifest_path = selected["manifest_path"]
     return {
-        "engine_name": engine_name,
-        "engine_sha256": file_sha256(engine_path),
-        "onnx_sha256": actual_onnx_sha,
+        # Preserve raw DAV2 calibration authority at the established top-level identity while
+        # recording the actual fused engine as the active runtime artifact.
+        "engine_name": selected["engine_name"],
+        "engine_sha256": engine_sha256,
+        "onnx_sha256": spec["embedded_dav2_onnx_sha256"],
+        "composite_runtime_provenance": {
+            "schema": 2,
+            "runtime": spec["runtime"],
+            "model": spec["model"],
+            "onnx_sha256": selected["onnx_sha256"],
+            "embedded_dav2_onnx_sha256": spec["embedded_dav2_onnx_sha256"],
+            "zipdepth_checkpoint_sha256": spec["zipdepth_checkpoint_sha256"],
+            "guidance_preprocess_source_closure_sha256":
+                spec["guidance_preprocess_source_closure_sha256"],
+            "engine_recipe": spec["engine_recipe"],
+            "engine_artifact": selected["engine_name"],
+            "engine_sha256": engine_sha256,
+            "active_engine_manifest": os.path.basename(manifest_path),
+            "active_engine_manifest_sha256": file_sha256(manifest_path),
+        },
     }
+
+
+def model_artifacts_from_runtime_identity(identity):
+    """Keep legacy metadata stable and publish optional composite provenance as one record."""
+
+    artifacts = {
+        key: identity[key] for key in ("engine_name", "engine_sha256", "onnx_sha256")
+    }
+    if "composite_runtime_provenance" in identity:
+        artifacts["composite_runtime_provenance"] = copy.deepcopy(
+            identity["composite_runtime_provenance"])
+    return artifacts
 
 
 def runtime_identity_snapshot(exe, build_dir, model):
@@ -2658,52 +2906,7 @@ def check_engines(build_dir, model):
     A glob for ``<model>*.engine`` can therefore bless an engine the current executable will never
     load.  The runtime publishes this manifest only after resolving that full identity.
     """
-    assets = os.path.join(build_dir, "assets")
-    exe = os.path.join(build_dir, "sunshine.exe")
-    manifest_path = os.path.join(assets, model + ".active-engine.json")
-    issues = []
-    try:
-        with open(manifest_path, encoding="utf-8") as fh:
-            manifest = json.load(fh)
-    except (OSError, ValueError) as exc:
-        return [f"{os.path.basename(manifest_path)}: missing/invalid manifest ({exc})"]
-    if manifest.get("schema") != 1:
-        issues.append(f"manifest schema {manifest.get('schema')!r} != 1")
-    if manifest.get("model") != model:
-        issues.append(f"manifest model {manifest.get('model')!r} != {model!r}")
-    engine_name = manifest.get("engine")
-    if (not isinstance(engine_name, str) or not engine_name or
-            os.path.basename(engine_name) != engine_name):
-        issues.append("manifest engine must be one filename")
-        engine_name = None
-    onnx_path = os.path.join(assets, model + ".onnx")
-    recorded_sha = manifest.get("onnx_sha256")
-    try:
-        actual_sha = file_sha256(onnx_path)
-    except OSError as exc:
-        issues.append(f"ONNX source unavailable: {exc}")
-    else:
-        if recorded_sha != actual_sha:
-            issues.append("manifest ONNX SHA-256 does not match current source")
-    if engine_name:
-        engine_path = os.path.join(assets, engine_name)
-        try:
-            engine_ready = os.path.isfile(engine_path) and os.path.getsize(engine_path) > 0
-        except OSError:
-            engine_ready = False
-        if not engine_ready:
-            issues.append(f"exact engine missing/empty: {engine_name}")
-        else:
-            try:
-                if os.path.getmtime(engine_path) > os.path.getmtime(manifest_path):
-                    issues.append("exact engine changed after manifest publication")
-            except OSError as exc:
-                issues.append(f"cannot compare engine/manifest timestamps: {exc}")
-    try:
-        if os.path.getmtime(manifest_path) < os.path.getmtime(exe):
-            issues.append("manifest predates sunshine.exe")
-    except OSError as exc:
-        issues.append(f"cannot compare manifest/executable timestamps: {exc}")
+    _, issues = _inspect_depth_engine(build_dir, model)
     return issues
 
 
@@ -2941,10 +3144,7 @@ def main():
             exe, args.build_dir, expected_model, args.conf)
         shader_sha = evaluation_identity["runtime_shader_sha256"]
         preprocess_source_sha = evaluation_identity["preprocess_source_closure_sha256"]
-        model_artifacts = {
-            key: evaluation_identity[key]
-            for key in ("engine_name", "engine_sha256", "onnx_sha256")
-        }
+        model_artifacts = model_artifacts_from_runtime_identity(evaluation_identity)
         if preprocess_source_sha != expected_preprocess_source_sha:
             fail(
                 "runtime preprocess shader closure differs from the current source tree; "
@@ -3028,6 +3228,7 @@ def main():
     scored_artifact_hashes = {}
     scored_numeric_hashes = {}
     whole_clip_raw_artifacts = {}
+    convex2x_diagnostic_artifacts = {}
     evidence_failures, baseline_updates = [], {}
     prepared_clips = {}
     for clip in clips:
@@ -3200,6 +3401,14 @@ def main():
                 }
             except ValueError as exc:
                 fail(f"{clip}: cannot bind whole-clip raw artifacts: {exc}")
+            composite_runtime = model_artifacts.get("composite_runtime_provenance")
+            if composite_runtime is not None:
+                try:
+                    diagnostic_manifest = convex2x_diagnostics.build_manifest(
+                        Path(out_dir), sorted(source_ids), composite_runtime)
+                    convex2x_diagnostic_artifacts[clip] = diagnostic_manifest
+                except ValueError as exc:
+                    fail(f"{clip}: cannot bind fused convex2x diagnostics: {exc}")
         expected_mapping_contract = {
             "file_pattern": "warp_map_<frame-id>.f32",
             "shape_contract": "warp_map_shape.json",
@@ -3312,6 +3521,7 @@ def main():
             "clip_dir": clip_dir,
             "out_dir": out_dir,
             "clip_meta": clip_meta,
+            "source_ids": sorted(source_ids),
         }
 
     if not direct_parallax_root:
@@ -3350,6 +3560,12 @@ def main():
                 whole_clip_raw_contract.authenticate_manifest_files(
                     Path(prepared_clips[clip]["out_dir"]),
                     whole_clip_raw_artifacts[clip])
+            if clip in convex2x_diagnostic_artifacts:
+                convex2x_diagnostics.authenticate_manifest_files(
+                    Path(prepared_clips[clip]["out_dir"]),
+                    convex2x_diagnostic_artifacts[clip],
+                    prepared_clips[clip]["source_ids"],
+                    model_artifacts["composite_runtime_provenance"])
         except (OSError, ValueError) as exc:
             fail(f"{clip}: cannot re-authenticate inputs after scoring: {exc}")
         try:
@@ -3441,6 +3657,8 @@ def main():
     meta["scored_artifact_sha256"] = scored_artifact_hashes
     if not direct_parallax_root:
         meta[whole_clip_raw_contract.RESULTS_META_KEY] = whole_clip_raw_artifacts
+        if "composite_runtime_provenance" in model_artifacts:
+            meta[convex2x_diagnostics.RESULTS_META_KEY] = convex2x_diagnostic_artifacts
     bind_training_labels_to_evidence_gate(out, thresholds)
     if baseline_snapshot is not None:
         with open(os.path.join(out_root, BASELINE_SNAPSHOT_FILE), "w",

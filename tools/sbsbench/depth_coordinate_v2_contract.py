@@ -59,6 +59,7 @@ SHADER_SOURCE_SPECS = (
     ("depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_state_resolve_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_map_cs.hlsl", "main", "cs_5_0"),
+    ("prod_zipdepth_convex2x_live_map_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_ownership_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_vertical_limit_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_limit_cs.hlsl", "main", "cs_5_0"),
@@ -82,7 +83,7 @@ EXPECTED_FINAL_PARALLAX = {
     "current_rgb_policy": "always-current-never-retained",
 }
 EXPECTED_SUBTITLE_OCR = {
-    "schema": 13,
+    "schema": 14,
     "logical_model": "ppocrv6_tiny_det_modelopt_fp16",
     "asset_path": "models/ppocrv6_tiny_det_modelopt045_mixed_fp16_fp32io.onnx",
     "artifact_onnx_sha256": (
@@ -111,6 +112,11 @@ EXPECTED_SUBTITLE_OCR = {
         "shape": [1, 1, 160, 960],
     },
     "field_policy": {
+        "live_field_shapes": [
+            {"width": 1540, "height": 868},
+            {"width": 2044, "height": 868},
+            {"width": 2072, "height": 868},
+        ],
         "detector_active_probability_threshold": 0.2,
         "detector_min_mean_score": 0.4,
         "locator_max_width_numerator": 9,
@@ -687,13 +693,26 @@ SUBTITLE_OCR = _subtitle_ocr_contract(_CONTRACT)
 MODEL_CALIBRATIONS = _model_calibrations(_CONTRACT)
 
 
-def subtitle_ocr_field_is_calibrated(field_width: int, field_height: int) -> bool:
-    """Return whether a subtitle field is one of the DAV2 model's calibrated shapes."""
+def subtitle_locator_field_cell_scale(field_width: int, field_height: int) -> int:
+    """Return 1 for coarse fields, 2 for convex-2x live fields, or 0 if invalid."""
 
-    return any(
+    coarse = any(
         (field_width, field_height) in calibration.calibrated_input_shapes
         for calibration in MODEL_CALIBRATIONS
     )
+    if coarse:
+        return 1
+    live = any(
+        shape.get("width") == field_width and shape.get("height") == field_height
+        for shape in _CONTRACT["subtitle_ocr"]["field_policy"]["live_field_shapes"]
+    )
+    return 2 if live else 0
+
+
+def subtitle_ocr_field_is_calibrated(field_width: int, field_height: int) -> bool:
+    """Return whether OCR projection may target a coarse or Stage-2 live field."""
+
+    return subtitle_locator_field_cell_scale(field_width, field_height) != 0
 
 
 def subtitle_target_is_representable_source_u(target: float) -> bool:

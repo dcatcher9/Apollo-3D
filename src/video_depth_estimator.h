@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <d3d11.h>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -30,6 +31,23 @@ namespace models {
     std::string onnx_sha256;
     std::string preprocess_profile;
     std::string preprocess_source_closure_sha256;
+  };
+
+  /** Immutable identity of the optional fused runtime wrapped around the raw DAV2 producer.
+   *
+   * Raw DAV2 calibration remains owned by raw_model_provenance_t.  This record deliberately
+   * describes only the separately authenticated composite ONNX/engine artifact selected from
+   * local assets, so a diagnostic consumer cannot mistake the wrapper hash for DAV2 provenance.
+   */
+  struct composite_depth_runtime_provenance_t {
+    std::string model;
+    std::string onnx_sha256;
+    std::string embedded_dav2_onnx_sha256;
+    std::string zipdepth_checkpoint_sha256;
+    std::string guidance_preprocess_source_closure_sha256;
+    std::string engine_recipe;
+    std::string engine_artifact;
+    std::string active_engine_manifest;
   };
 
   /** Immutable identity of the complete producer closure behind a Host SBS parallax result. */
@@ -268,9 +286,75 @@ namespace models {
       std::uint64_t output = 0u;
       int width = 0;
       int height = 0;
+      std::uint64_t guidance_input = 0u;
+      std::uint64_t refined_output = 0u;
+      std::uint32_t optimization_profile = 0u;
 
       constexpr bool operator==(const cuda_graph_signature_t &) const noexcept = default;
     };
+
+    /** Fail-closed selection for the local Stage-1 composite asset. */
+    enum class composite_depth_asset_resolution_e : std::uint8_t {
+      legacy,
+      fused,
+      fail,
+    };
+
+    [[nodiscard]] constexpr composite_depth_asset_resolution_e
+    resolve_composite_depth_asset(
+      const bool present,
+      const bool regular_file,
+      const bool sha256_matches
+    ) noexcept {
+      if (!present) {
+        return composite_depth_asset_resolution_e::legacy;
+      }
+      return regular_file && sha256_matches ?
+               composite_depth_asset_resolution_e::fused :
+               composite_depth_asset_resolution_e::fail;
+    }
+
+    /** TensorRT 11.2 may require a 512-byte output allocation for a logical FP32 tensor.
+     *
+     * Inputs remain exact-sized. Output SRVs still expose only the logical elements; this
+     * checked padding is private storage required by enqueueV3/getMaxOutputSize.
+     */
+    inline constexpr std::size_t tensorrt_output_allocation_alignment = 512u;
+
+    [[nodiscard]] constexpr std::optional<std::size_t>
+    checked_tensorrt_output_allocation_bytes(
+      const std::size_t logical_bytes
+    ) noexcept {
+      const std::size_t remainder =
+        logical_bytes % tensorrt_output_allocation_alignment;
+      if (remainder == 0u) {
+        return logical_bytes;
+      }
+      const std::size_t padding =
+        tensorrt_output_allocation_alignment - remainder;
+      if (logical_bytes > std::numeric_limits<std::size_t>::max() - padding) {
+        return std::nullopt;
+      }
+      return logical_bytes + padding;
+    }
+
+    /** TensorRT 11.2 optimization profiles cannot be shared by concurrent contexts.
+     *
+     * The fused engine's six profiles are shape identities, not concurrency duplicates, so one
+     * physical context owns the engine for the process lifetime. A quarantined fused context
+     * therefore requires process restart. Legacy DAV2 and OCR retain the established transition
+     * pool bound.
+     */
+    inline constexpr std::size_t standard_tensorrt_context_limit = 4u;
+    inline constexpr std::size_t fused_tensorrt_context_limit = 1u;
+
+    [[nodiscard]] constexpr std::size_t tensorrt_context_limit(
+      const bool fused_depth_runtime
+    ) noexcept {
+      return fused_depth_runtime ?
+               fused_tensorrt_context_limit :
+               standard_tensorrt_context_limit;
+    }
 
     struct cuda_graph_replay_policy_t {
       cuda_graph_signature_t signature;
@@ -774,7 +858,11 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth;  ///< Raw model output buffer, before normalization/EMA/curvature; primarily for the offline evaluator.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth_snapshot;  ///< Optional stable copy of the completed frame's raw output for a live Dump 3D request.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> model_input_snapshot;  ///< Optional stable NCHW/ImageNet-normalized input for the same live Dump 3D frame.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> guidance_model_input_snapshot;  ///< Exact-force-only stable fused guidance NCHW [1,3,2H,2W].
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> refined_model_depth_snapshot;  ///< Exact-force-only stable diagnostic refined output [1,2H,2W].
     std::shared_ptr<const raw_model_provenance_t> raw_model_provenance;  ///< Capture-time model-byte identity; copied by pointer on ordinary frames.
+    std::shared_ptr<const composite_depth_runtime_provenance_t>
+      composite_depth_runtime_provenance;  ///< Separate fused ONNX/engine identity; never raw DAV2 calibration authority.
     // Production V2 outputs. candidate_parallax is immutable pre-conditioner evidence;
     // ownership_refined_parallax is the full-resolution source-contour ownership result consumed
     // by the vertical pass, vertical_majorant is the upper-envelope diagnostic,
@@ -808,6 +896,14 @@ namespace models {
       gpu_trace_provenance;  ///< Source identity for gpu_trace_ring when available.
     int raw_width = 0;
     int raw_height = 0;
+    int field_width = 0;  ///< Spatial dimensions of every live parallax texture; raw_* stays coarse DAV2.
+    int field_height = 0;
+    depth_tensor_content_rect_t field_content {};  ///< Exact half-open live-field realization of input_region.tensor_content.
+    int guidance_width = 0;
+    int guidance_height = 0;
+    int refined_width = 0;
+    int refined_height = 0;
+    bool refined_live_geometry_active = false;  ///< Session-latched exact-2x landscape spatial path.
     // A wrapper transaction completed and its GPU normalization passes were submitted. The associated
     // depth_frame_state decides on-GPU whether this completion contains valid depth or must hold
     // the previous matched color/depth output.
@@ -1064,7 +1160,10 @@ namespace models {
      * coordinate production exactly once without enqueueing another inference. This is an
      * offline-evaluation quality path; live capture uses only bounded/nonblocking completion polls.
      */
-    estimate_result finish_pending_depth_for_evaluation(input_color_space color_space = input_color_space::srgb);
+    estimate_result finish_pending_depth_for_evaluation(
+      input_color_space color_space = input_color_space::srgb,
+      bool snapshot_debug_inputs = false
+    );
 
     /** Query the pending joined DAV2/OCR completion fence once and consume the exact unit when ready. */
     pending_depth_poll_result try_finish_pending_depth_nonblocking(

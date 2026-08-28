@@ -972,7 +972,11 @@ namespace platf::dxgi {
                   << ", live renderer closure "sv
                   << sbs_reprojection_v2_live_source_closure_sha256
                   << ", fixed cfg.pop_strength "sv
-                  << est.parallax_v2_requested_pop_strength << ")."sv;
+                  << est.parallax_v2_requested_pop_strength
+                  << ", model shape "sv << est.raw_width << 'x' << est.raw_height
+                  << ", live field "sv << est.field_width << 'x' << est.field_height
+                  << (est.refined_live_geometry_active ? " refined-convex2x"sv : " coarse"sv)
+                  << ")."sv;
               } else {
                 BOOST_LOG(warning)
                   << "Host SBS V2 authentication failed closed; this stream is permanently "sv
@@ -981,6 +985,9 @@ namespace platf::dxgi {
                   << ", producer_active="sv
                   << (est.parallax_v2_producer_active ? "true" : "false")
                   << ", model_shape="sv << est.raw_width << 'x' << est.raw_height
+                  << ", field_shape="sv << est.field_width << 'x' << est.field_height
+                  << ", refined="sv
+                  << (est.refined_live_geometry_active ? "true" : "false")
                   << ")."sv;
                 fail_depth_pipeline_flat();
                 matched_render_slot = nullptr;
@@ -2299,7 +2306,8 @@ namespace platf::dxgi {
             if (!update_sbs_constant_buffer(
                   sbs_content_scale_x,
                   sbs_content_scale_y,
-                  v2_live_warp_selected ? &est.input_region : nullptr
+                  v2_live_warp_selected ? &est.input_region : nullptr,
+                  v2_live_warp_selected ? &est.field_content : nullptr
                 )) {
               return -1;
             }
@@ -2567,6 +2575,11 @@ namespace platf::dxgi {
                 dump_frame.model_height = est.raw_height;
                 dump_frame.raw_width = est.raw_width;
                 dump_frame.raw_height = est.raw_height;
+                dump_frame.field_width = est.field_width;
+                dump_frame.field_height = est.field_height;
+                dump_frame.field_content = est.field_content;
+                dump_frame.refined_live_geometry_active =
+                  est.refined_live_geometry_active;
                 dump_frame.matched_frame_id = est.completed_frame_id;
                 dump_frame.depth_input_region = est.input_region;
                 dump_frame.depth_video_plan = matched_render_slot->depth_video_plan;
@@ -2937,13 +2950,20 @@ namespace platf::dxgi {
     bool update_sbs_constant_buffer(
       const float content_scale_x,
       const float content_scale_y,
-      const models::depth_input_region_t *input_region = nullptr
+      const models::depth_input_region_t *input_region = nullptr,
+      const models::depth_tensor_content_rect_t *field_content = nullptr
     ) {
       auto geometry = models::make_host_sbs_v2_full_frame_geometry(
         content_scale_x,
         content_scale_y
       );
       if (input_region && input_region->is_video_region() && input_region->valid()) {
+        const auto &renderer_content = field_content ?
+                                         *field_content :
+                                         input_region->tensor_content;
+        if (!renderer_content.valid()) {
+          return false;
+        }
         const auto source_width = static_cast<float>(input_region->source_width);
         const auto source_height = static_cast<float>(input_region->source_height);
         geometry.video_roi_active = 1.0f;
@@ -2951,10 +2971,10 @@ namespace platf::dxgi {
         geometry.video_roi_top = static_cast<float>(input_region->top) / source_height;
         geometry.video_roi_right = static_cast<float>(input_region->right) / source_width;
         geometry.video_roi_bottom = static_cast<float>(input_region->bottom) / source_height;
-        geometry.tensor_content_left = input_region->tensor_content.left;
-        geometry.tensor_content_top = input_region->tensor_content.top;
-        geometry.tensor_content_right = input_region->tensor_content.right;
-        geometry.tensor_content_bottom = input_region->tensor_content.bottom;
+        geometry.tensor_content_left = renderer_content.left;
+        geometry.tensor_content_top = renderer_content.top;
+        geometry.tensor_content_right = renderer_content.right;
+        geometry.tensor_content_bottom = renderer_content.bottom;
       }
 
       if (!sbs_reprojection_cbuffer) {

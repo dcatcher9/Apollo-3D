@@ -28,6 +28,7 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec depth_coordinate_v2_frame_resolve {"depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"};
   inline constexpr shader_spec depth_coordinate_v2_state_resolve {"depth_coordinate_v2_state_resolve_cs.hlsl", "main", "cs_5_0"};
   inline constexpr shader_spec depth_coordinate_v2_map {"depth_coordinate_v2_map_cs.hlsl", "main", "cs_5_0"};
+  inline constexpr shader_spec prod_zipdepth_convex2x_live_map {"prod_zipdepth_convex2x_live_map_cs.hlsl", "main", "cs_5_0"};
   inline constexpr shader_spec depth_coordinate_v2_ownership {"depth_coordinate_v2_ownership_cs.hlsl", "main", "cs_5_0"};
   inline constexpr shader_spec depth_coordinate_v2_coordinate_diagnostic {"depth_coordinate_v2_map_cs.hlsl", "coordinate_main", "cs_5_0"};
   inline constexpr shader_spec depth_coordinate_v2_vertical_limit {"depth_coordinate_v2_vertical_limit_cs.hlsl", "main", "cs_5_0"};
@@ -68,6 +69,7 @@ namespace models::host_sbs_shader_cache {
     depth_coordinate_v2_frame_resolve,
     depth_coordinate_v2_state_resolve,
     depth_coordinate_v2_map,
+    prod_zipdepth_convex2x_live_map,
     depth_coordinate_v2_ownership,
     depth_coordinate_v2_vertical_limit,
     depth_coordinate_v2_limit,
@@ -78,13 +80,13 @@ namespace models::host_sbs_shader_cache {
     host_sbs_subtitle_condition,
   };
   inline constexpr std::string_view parallax_v2_producer_source_closure_sha256 =
-    "11bde7ba05ca8ae8404b8fe21a3afd600ff98549fea248dacb5bf1b5d2156d6b";
+    "93b457e7cfedd9fe37924d21d44fc21760115cd82e4af57a9e1a7adcd60c0411";
 
   inline constexpr std::array parallax_v2_coordinate_diagnostic_specs {
     depth_coordinate_v2_coordinate_diagnostic,
   };
   inline constexpr std::string_view parallax_v2_coordinate_diagnostic_source_closure_sha256 =
-    "d99263f71448f967a327479d3f15da2532e8e8e203d8873436928e5392f57433";
+    "ede845c178b9af0272f2cdc6cb87497b08c13fb97c4ef7530c9e02060c4f4646";
 
   inline constexpr std::array near_identical_detector_specs {
     host_sbs_near_identical_resolve,
@@ -93,26 +95,26 @@ namespace models::host_sbs_shader_cache {
     host_sbs_near_identical_reuse_depth,
   };
   inline constexpr std::string_view near_identical_detector_source_closure_sha256 =
-    "87b63ffb753e9cc39e90b385ab997134402596eb5c074a4f3a3680619015910b";
+    "079b9ee89f58d31298971af40fe85c0af02136b80bf4cf2d2262801941d95de2";
 
   inline constexpr std::array gpu_trace_specs {
     host_sbs_gpu_trace,
   };
   inline constexpr std::string_view gpu_trace_source_closure_sha256 =
-    "a1e6a21286b5a898b1dcdd419056faa8e3a5351b21edef0ef288d716979c0cb9";
+    "4933872af7afaf6a5cf56f69e216bb6d26c3494f692cea4fa5797b8b0355234c";
 
   inline constexpr std::array parallax_v2_live_renderer_specs {
     parallax_v2_live_renderer,
     sbs_reprojection_vertex,
   };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
-    "7553350163dfb80cee85b70689b768a46a5c15b44997e2753e24bebedaa51ffd";
+    "259e0beaeee739737763e5799431079320cd5ebac644fd1469f0a10d95734d0f";
 
   inline constexpr std::array parallax_v2_p010_y_specs {
     parallax_v2_p010_y_renderer,
   };
   inline constexpr std::string_view parallax_v2_p010_y_source_closure_sha256 =
-    "f14993382c296ee07ce556c3dbebba29d021d8555ea446fae9a8b06b17a09813";
+    "1addae6fa94eef0d19a561bf92c57d0af89526935045399548343c459ea8a43e";
 
   inline constexpr std::array sbs_flat_fallback_specs {
     sbs_flat_identity,
@@ -126,6 +128,6 @@ namespace models::host_sbs_shader_cache {
     parallax_v2_live_mask,
   };
   inline constexpr std::string_view parallax_v2_live_diagnostic_source_closure_sha256 =
-    "1c7cb433f667c990e4d55f254a11cc9a40590e3a1e97e62fc261c2e0069b9513";
+    "21a5a20307e531c55b03d3211efcd348da2ea6dd592b84f75e6977a56c48a3a5";
 
 }  // namespace models::host_sbs_shader_cache

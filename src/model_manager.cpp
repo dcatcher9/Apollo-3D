@@ -22,7 +22,21 @@ namespace models {
     }
 
     std::string engine_filename(const config::depth_model_info& model, std::string_view compatibility_tag) {
-        std::string filename = model.name + "." + depth_engine_recipe;
+        return engine_filename(
+            model,
+            prod_zipdepth_convex2x::engine_io_e::production_dav2,
+            compatibility_tag);
+    }
+
+    std::string engine_filename(
+        const config::depth_model_info& model,
+        const prod_zipdepth_convex2x::engine_io_e kind,
+        std::string_view compatibility_tag) {
+        const auto recipe = depth_engine_recipe_for(kind);
+        if (recipe.empty()) {
+            return {};
+        }
+        std::string filename = model.name + "." + std::string(recipe);
         if (!compatibility_tag.empty()) {
             filename += ".";
             filename += compatibility_tag;

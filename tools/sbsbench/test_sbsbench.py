@@ -922,7 +922,16 @@ class EvalContractTests(unittest.TestCase):
                            "onnx_sha256": run_eval.file_sha256(onnx)}, fh)
             exe_time = os.path.getmtime(exe)
             os.utime(manifest, (exe_time + 2, exe_time + 2))
-            self.assertEqual(run_eval.check_engines(build, model), [])
+            with mock.patch.object(
+                    run_eval, "_composite_depth_runtime_spec",
+                    side_effect=AssertionError("absent composite must not load its contract")):
+                self.assertEqual(run_eval.check_engines(build, model), [])
+                provenance = run_eval.engine_provenance(build, model)
+            self.assertEqual(provenance["engine_name"], engine_name)
+            self.assertEqual(provenance["onnx_sha256"], run_eval.file_sha256(onnx))
+            self.assertNotIn("composite_runtime_provenance", provenance)
+            self.assertEqual(
+                run_eval.model_artifacts_from_runtime_identity(provenance), provenance)
 
             with open(os.path.join(assets, model + ".unrelated.engine"), "wb") as fh:
                 fh.write(b"unrelated")
@@ -953,17 +962,189 @@ class EvalContractTests(unittest.TestCase):
             self.assertTrue(any("predates sunshine.exe" in issue for issue in issues))
             self.assertTrue(any("ONNX SHA-256" in issue for issue in issues))
 
+    def test_composite_engine_preflight_records_exact_schema_two_runtime(self):
+        with tempfile.TemporaryDirectory() as build:
+            assets = os.path.join(build, "assets")
+            os.makedirs(assets)
+            model = "depth_model"
+            exe = os.path.join(build, "sunshine.exe")
+            fused_onnx = os.path.join(
+                assets, run_eval.COMPOSITE_DEPTH_MODEL + ".onnx")
+            manifest = os.path.join(
+                assets, run_eval.COMPOSITE_DEPTH_MODEL + ".active-engine.json")
+            for path, payload in (
+                    (exe, b"binary"), (fused_onnx, b"fused onnx")):
+                with open(path, "wb") as fh:
+                    fh.write(payload)
+            fused_sha = run_eval.file_sha256(fused_onnx)
+            spec = {
+                "model": run_eval.COMPOSITE_DEPTH_MODEL,
+                "runtime": run_eval.COMPOSITE_DEPTH_RUNTIME,
+                "engine_recipe": run_eval.COMPOSITE_DEPTH_ENGINE_RECIPE,
+                "onnx_sha256": fused_sha,
+                "embedded_dav2_onnx_sha256": "d" * 64,
+                "zipdepth_checkpoint_sha256": "z" * 64,
+                "guidance_preprocess_source_closure_sha256": "p" * 64,
+            }
+            engine_name = (
+                f"{spec['model']}.{spec['engine_recipe']}.trt-test"
+                f"-onnx{spec['onnx_sha256']}.engine"
+            )
+            engine = os.path.join(assets, engine_name)
+            with open(engine, "wb") as fh:
+                fh.write(b"fused engine")
+            with open(manifest, "w", encoding="utf-8") as fh:
+                json.dump({
+                    "schema": 2,
+                    "runtime": spec["runtime"],
+                    "model": spec["model"],
+                    "engine": engine_name,
+                    "engine_recipe": spec["engine_recipe"],
+                    "composite_onnx_sha256": fused_sha,
+                    "embedded_dav2_onnx_sha256":
+                        spec["embedded_dav2_onnx_sha256"],
+                    "zipdepth_checkpoint_sha256": spec["zipdepth_checkpoint_sha256"],
+                    "guidance_preprocess_source_closure_sha256":
+                        spec["guidance_preprocess_source_closure_sha256"],
+                }, fh)
+            exe_time = os.path.getmtime(exe)
+            os.utime(manifest, (exe_time + 2, exe_time + 2))
+
+            with mock.patch.object(
+                    run_eval, "_composite_depth_runtime_spec", return_value=spec):
+                self.assertEqual(run_eval.check_engines(build, model), [])
+                provenance = run_eval.engine_provenance(build, model)
+
+            self.assertEqual(provenance["engine_name"], engine_name)
+            self.assertEqual(
+                provenance["engine_sha256"], run_eval.file_sha256(engine))
+            self.assertEqual(
+                provenance["onnx_sha256"], spec["embedded_dav2_onnx_sha256"])
+            composite = provenance["composite_runtime_provenance"]
+            self.assertEqual(composite["schema"], 2)
+            self.assertEqual(composite["model"], run_eval.COMPOSITE_DEPTH_MODEL)
+            self.assertEqual(composite["onnx_sha256"], fused_sha)
+            self.assertEqual(composite["engine_artifact"], engine_name)
+            self.assertEqual(
+                composite["active_engine_manifest_sha256"],
+                run_eval.file_sha256(manifest))
+            artifacts = run_eval.model_artifacts_from_runtime_identity(provenance)
+            self.assertEqual(artifacts["composite_runtime_provenance"], composite)
+            self.assertIsNot(artifacts["composite_runtime_provenance"], composite)
+
+            with open(manifest, "r", encoding="utf-8") as fh:
+                tampered_manifest = json.load(fh)
+            tampered_manifest["engine"] = spec["model"] + ".exact.engine"
+            with open(manifest, "w", encoding="utf-8") as fh:
+                json.dump(tampered_manifest, fh)
+            os.utime(manifest, (exe_time + 3, exe_time + 3))
+            with mock.patch.object(
+                    run_eval, "_composite_depth_runtime_spec", return_value=spec):
+                issues = run_eval.check_engines(build, model)
+            self.assertTrue(any("engine artifact" in issue for issue in issues))
+
+    def test_present_composite_fails_closed_on_onnx_or_manifest_mismatch(self):
+        with tempfile.TemporaryDirectory() as build:
+            assets = os.path.join(build, "assets")
+            os.makedirs(assets)
+            model = "depth_model"
+            exe = os.path.join(build, "sunshine.exe")
+            fused_onnx = os.path.join(
+                assets, run_eval.COMPOSITE_DEPTH_MODEL + ".onnx")
+            raw_onnx = os.path.join(assets, model + ".onnx")
+            raw_engine_name = model + ".legacy.engine"
+            raw_engine = os.path.join(assets, raw_engine_name)
+            raw_manifest = os.path.join(assets, model + ".active-engine.json")
+            for path, payload in (
+                    (exe, b"binary"), (fused_onnx, b"unexpected fused bytes"),
+                    (raw_onnx, b"legacy onnx"), (raw_engine, b"legacy engine")):
+                with open(path, "wb") as fh:
+                    fh.write(payload)
+            with open(raw_manifest, "w", encoding="utf-8") as fh:
+                json.dump({
+                    "schema": 1, "model": model, "engine": raw_engine_name,
+                    "onnx_sha256": run_eval.file_sha256(raw_onnx),
+                }, fh)
+            exe_time = os.path.getmtime(exe)
+            os.utime(raw_manifest, (exe_time + 2, exe_time + 2))
+
+            mismatched_spec = {
+                "model": run_eval.COMPOSITE_DEPTH_MODEL,
+                "runtime": run_eval.COMPOSITE_DEPTH_RUNTIME,
+                "engine_recipe": run_eval.COMPOSITE_DEPTH_ENGINE_RECIPE,
+                "onnx_sha256": "0" * 64,
+                "embedded_dav2_onnx_sha256": "d" * 64,
+                "zipdepth_checkpoint_sha256": "z" * 64,
+                "guidance_preprocess_source_closure_sha256": "p" * 64,
+            }
+            with mock.patch.object(
+                    run_eval, "_composite_depth_runtime_spec",
+                    return_value=mismatched_spec):
+                issues = run_eval.check_engines(build, model)
+            self.assertTrue(any("composite ONNX SHA-256" in issue for issue in issues))
+            self.assertFalse(any("legacy" in issue for issue in issues))
+
+            exact_spec = dict(
+                mismatched_spec, onnx_sha256=run_eval.file_sha256(fused_onnx))
+            composite_engine_name = (
+                f"{exact_spec['model']}.{exact_spec['engine_recipe']}.trt-test"
+                f"-onnx{exact_spec['onnx_sha256']}.engine"
+            )
+            composite_engine = os.path.join(assets, composite_engine_name)
+            composite_manifest = os.path.join(
+                assets, run_eval.COMPOSITE_DEPTH_MODEL + ".active-engine.json")
+            with open(composite_engine, "wb") as fh:
+                fh.write(b"composite engine")
+            with open(composite_manifest, "w", encoding="utf-8") as fh:
+                json.dump({
+                    "schema": 2,
+                    "runtime": exact_spec["runtime"],
+                    "model": exact_spec["model"],
+                    "engine": composite_engine_name,
+                    "engine_recipe": "wrong-recipe",
+                    "composite_onnx_sha256": exact_spec["onnx_sha256"],
+                    "embedded_dav2_onnx_sha256":
+                        exact_spec["embedded_dav2_onnx_sha256"],
+                    "zipdepth_checkpoint_sha256":
+                        exact_spec["zipdepth_checkpoint_sha256"],
+                    "guidance_preprocess_source_closure_sha256":
+                        exact_spec["guidance_preprocess_source_closure_sha256"],
+                }, fh)
+            os.utime(composite_manifest, (exe_time + 3, exe_time + 3))
+            with mock.patch.object(
+                    run_eval, "_composite_depth_runtime_spec", return_value=exact_spec):
+                issues = run_eval.check_engines(build, model)
+                with self.assertRaisesRegex(ValueError, "engine_recipe"):
+                    run_eval.engine_provenance(build, model)
+            self.assertTrue(any("engine_recipe" in issue for issue in issues))
+
+    def test_present_nonregular_composite_never_falls_back_to_legacy(self):
+        with tempfile.TemporaryDirectory() as build:
+            assets = os.path.join(build, "assets")
+            os.makedirs(assets)
+            composite = os.path.join(
+                assets, run_eval.COMPOSITE_DEPTH_MODEL + ".onnx")
+            os.makedirs(composite)
+
+            issues = run_eval.check_engines(build, "depth_model")
+
+            self.assertTrue(any("not a regular file" in issue for issue in issues))
+            self.assertFalse(any("legacy" in issue for issue in issues))
+
     def test_runtime_pipeline_provenance_covers_shaders_engine_and_onnx(self):
         with tempfile.TemporaryDirectory() as build:
             assets = os.path.join(build, "assets")
             shaders = os.path.join(assets, "shaders", "directx", "include")
             os.makedirs(shaders)
             model = "depth_model"
+            exe = os.path.join(build, "sunshine.exe")
             shader = os.path.join(shaders, "common.hlsl")
             onnx = os.path.join(assets, model + ".onnx")
             engine_name = model + ".exact.engine"
             engine = os.path.join(assets, engine_name)
             manifest = os.path.join(assets, model + ".active-engine.json")
+            with open(exe, "wb") as fh:
+                fh.write(b"binary")
             with open(shader, "wb") as fh:
                 fh.write(b"float x;\r\n")
             with open(onnx, "wb") as fh:
@@ -971,8 +1152,10 @@ class EvalContractTests(unittest.TestCase):
             with open(engine, "wb") as fh:
                 fh.write(b"engine")
             with open(manifest, "w", encoding="utf-8") as fh:
-                json.dump({"engine": engine_name,
+                json.dump({"schema": 1, "model": model, "engine": engine_name,
                            "onnx_sha256": run_eval.file_sha256(onnx)}, fh)
+            exe_time = os.path.getmtime(exe)
+            os.utime(manifest, (exe_time + 2, exe_time + 2))
 
             shader_sha = run_eval.runtime_shader_sha256(build)
             with open(shader, "wb") as fh:
@@ -1571,7 +1754,8 @@ class EvalContractTests(unittest.TestCase):
             report = fh.read()
         self.assertIn('"executable_sha256": file_sha256(exe)', runner)
         self.assertIn('"runtime_shader_sha256": shader_sha', runner)
-        self.assertIn('"engine_sha256": file_sha256(engine_path)', runner)
+        self.assertIn('engine_sha256 = file_sha256(selected["engine_path"])', runner)
+        self.assertIn('"active_engine_manifest_sha256": file_sha256(manifest_path)', runner)
         self.assertIn('"executable_sha256"', report)
         self.assertIn('"runtime_shader_sha256"', report)
         self.assertIn('"engine_sha256"', report)
