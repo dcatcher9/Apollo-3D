@@ -105,6 +105,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             70: "caf07a7202266a858f5c7d68a6b550ebbb80f5640ca3ad6630a2c2ade3e7745b",
             71: "96195e08c3da309b51503ae09c5ff07e7e5355ec0a7cc008a1e38c9209d67164",
             72: "ff94c30e0295fa0d46ea1db7028a920cec640f192d8afb0fdeeb2722281e52f6",
+            73: "4cf03fa21295c65580e3af0b33775fa891dc434df8ec7a7e9881a50084607a75",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -112,14 +113,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x9DEA1BF0)
+        self.assertEqual(generator.contract_tag(contract), 0x3EDD0B65)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "9dea1bf04628d13aa82f99ffd8a103f8d5cc06490381a75b7b760fb310585525",
+            "3edd0b659f45c4aa7ab1beda58ceb604801d76e1ae5184d8522023eb68f40ee2",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "93b457e7cfedd9fe37924d21d44fc21760115cd82e4af57a9e1a7adcd60c0411",
+            "f6d850b391cf145908d9416c51c1ced23a03721dc754eb020cc52236a95629b3",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -384,7 +385,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(calibration.preprocess.source_macro_count, 0)
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
-            "1d0e89740921beb645cb8e83bfa6b3ca6f14ce58266bcf6d36dc2dfe8dc5c1bd")
+            "943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744")
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
             generator.shader_source_closure_sha256())
@@ -510,7 +511,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 72u',
+                'contract_schema = 73u',
                 'final_parallax_contract_schema = 2u',
                 'final_parallax_authority = '
                 '"complete-atomic-subtitle-conditioned-r32f-live-render-authority"',
@@ -589,7 +590,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 72u',
+                '#define V2_CONTRACT_SCHEMA 73u',
                 '#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 14u',
                 '#define V2_OCR_INPUT_WIDTH 960u',
                 '#define V2_OCR_OUTPUT_WIDTH 960u',
@@ -661,6 +662,9 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             ((1920, 1080, 1540, 868), (650, 860), 857, 2),
             ((2560, 1080, 2044, 868), (577, 858), 853, 2),
             ((3440, 1440, 2072, 868), (574, 858), 853, 2),
+            ((1080, 1920, 868, 1540), (1418, 1536), 1534, 2),
+            ((1080, 2560, 868, 2044), (1922, 2040), 2038, 2),
+            ((1440, 3440, 868, 2072), (1950, 2068), 2066, 2),
         )
         for arguments, expected_roi, expected_ribbon_bottom, expected_scale in cases:
             with self.subTest(arguments=arguments):
@@ -684,10 +688,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                     expected_ribbon_bottom)
         self.assertEqual(
             python_contract.subtitle_locator_field_cell_scale(768, 432), 0)
-        self.assertEqual(
-            python_contract.subtitle_locator_field_cell_scale(868, 1540), 0)
         self.assertFalse(python_contract.subtitle_ocr_field_is_calibrated(768, 432))
-        self.assertFalse(python_contract.subtitle_ocr_field_is_calibrated(868, 1540))
         self.assertIsNone(
             python_contract.subtitle_ocr_dynamic_roi(1920, 1080, 768, 432))
         self.assertIsNone(

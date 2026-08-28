@@ -41,6 +41,7 @@
 #include "src/host_sbs_shader_cache.h"
 #include "src/logging.h"
 #include "src/model_manager.h"
+#include "src/prod_zipdepth_convex2x.h"
 #include "src/video_depth_estimator.h"
 #include "sbs_debug_dump_async.h"
 
@@ -3700,6 +3701,50 @@ namespace platf::sbs_debug {
       };
     }
 
+    std::optional<models::depth_tensor_shape_t> calibrated_dav2_shape_for_dump(
+      const frame &completed
+    ) noexcept {
+      const auto &region = completed.depth_input_region;
+      if (region.source_width == 0u || region.source_height == 0u ||
+          completed.model_width <= 0 || completed.model_height <= 0 ||
+          !models::host_sbs_v2_source_resolution_is_supported(
+            region.source_width,
+            region.source_height
+          )) {
+        return std::nullopt;
+      }
+
+      const auto dav2_shape = models::fit_host_sbs_v2_depth_tensor_shape(
+        region.source_width,
+        region.source_height
+      );
+      if (!models::host_sbs_v2_depth_shape_is_authenticated(dav2_shape)) {
+        return std::nullopt;
+      }
+
+      const models::depth_tensor_shape_t capture_shape {
+        completed.model_width,
+        completed.model_height,
+      };
+      if (!completed.refined_live_geometry_active) {
+        return capture_shape == dav2_shape ?
+                 std::optional<models::depth_tensor_shape_t> {dav2_shape} :
+                 std::nullopt;
+      }
+
+      const auto high_shape = models::host_sbs_convex2x_field_shape(dav2_shape);
+      if (!high_shape || capture_shape != *high_shape ||
+          !models::prod_zipdepth_convex2x::live_geometry_shape_relation(
+            static_cast<std::uint32_t>(dav2_shape.width),
+            static_cast<std::uint32_t>(dav2_shape.height),
+            static_cast<std::uint32_t>(capture_shape.width),
+            static_cast<std::uint32_t>(capture_shape.height)
+          )) {
+        return std::nullopt;
+      }
+      return dav2_shape;
+    }
+
     std::string depth_input_region_error(const frame &completed) {
       const auto &region = completed.depth_input_region;
       if (!region.valid()) {
@@ -3709,9 +3754,22 @@ namespace platf::sbs_debug {
           completed.matched_frame_id == 0u) {
         return "missing matched-frame or source identity";
       }
+      const auto calibrated_dav2_shape = calibrated_dav2_shape_for_dump(completed);
+      if (!calibrated_dav2_shape) {
+        return completed.refined_live_geometry_active ?
+                 "single-high fused tensor is not the exact authenticated convex-2x realization" :
+                 "legacy tensor does not match its authenticated DAV2 calibration shape";
+      }
+      const models::depth_tensor_shape_t capture_shape {
+        completed.model_width,
+        completed.model_height,
+      };
       if (!region.is_video_region()) {
         if (completed.depth_video_plan) {
           return "full-source completion carries an ROI planner result";
+        }
+        if (!region.tensor_content.full(capture_shape)) {
+          return "full-source tensor content does not cover the authenticated capture grid";
         }
         return {};
       }
@@ -3747,15 +3805,11 @@ namespace platf::sbs_debug {
           static_cast<std::uint32_t>(provenance.right),
           static_cast<std::uint32_t>(provenance.bottom),
       };
-      const models::depth_tensor_shape_t tensor_shape {
-        completed.model_width,
-        completed.model_height,
-      };
       const auto expected_plan = models::plan_host_sbs_v2_video_region(
         semantic_rect,
         region.source_width,
         region.source_height,
-        tensor_shape
+        *calibrated_dav2_shape
       );
       if (!expected_plan || *expected_plan != *completed.depth_video_plan) {
         return "ROI planner result is not the deterministic authenticated integer contain fit";
@@ -3765,12 +3819,22 @@ namespace platf::sbs_debug {
           region.right != input_rect.right || region.bottom != input_rect.bottom) {
         return "ROI estimator domain does not match its planner input rectangle";
       }
-      if (completed.depth_video_plan->tensor_shape != tensor_shape) {
-        return "ROI planner tensor does not match the completed model/depth tensor";
+      if (completed.depth_video_plan->tensor_shape != *calibrated_dav2_shape) {
+        return "ROI planner tensor does not match the embedded DAV2 calibration grid";
       }
-      if (!region.tensor_content.valid(tensor_shape) ||
-          region.tensor_content != completed.depth_video_plan->tensor_content) {
-        return "ROI tensor-content rectangle does not match its authenticated planner";
+      const auto expected_capture_content = completed.refined_live_geometry_active ?
+        models::host_sbs_convex2x_content_rect(
+          completed.depth_video_plan->tensor_content,
+          *calibrated_dav2_shape
+        ) :
+        std::optional<models::depth_tensor_content_rect_t> {
+          completed.depth_video_plan->tensor_content
+        };
+      if (!expected_capture_content || !region.tensor_content.valid(capture_shape) ||
+          region.tensor_content != *expected_capture_content) {
+        return completed.refined_live_geometry_active ?
+                 "ROI tensor content is not the exact convex-2x realization of its authenticated DAV2 plan" :
+                 "ROI tensor-content rectangle does not match its authenticated planner";
       }
       return {};
     }
@@ -3946,6 +4010,83 @@ namespace platf::sbs_debug {
   }  // namespace
 
   namespace detail {
+
+    bool capture_tensor_grid_is_authenticated(const frame &completed) noexcept {
+      try {
+        return completed.model_width > 0 && completed.model_height > 0 &&
+               completed.raw_width == completed.model_width &&
+               completed.raw_height == completed.model_height &&
+               completed.field_width == completed.raw_width &&
+               completed.field_height == completed.raw_height &&
+               completed.field_content == completed.depth_input_region.tensor_content &&
+               calibrated_dav2_shape_for_dump(completed).has_value() &&
+               depth_input_region_error(completed).empty();
+      } catch (...) {
+        return false;
+      }
+    }
+
+    bool composite_runtime_provenance_is_authenticated(const frame &completed) noexcept {
+      try {
+        if (!completed.refined_live_geometry_active) {
+          return !completed.composite_depth_runtime_provenance;
+        }
+        if (!completed.raw_model_provenance ||
+            !completed.composite_depth_runtime_provenance) {
+          return false;
+        }
+        const auto &raw = *completed.raw_model_provenance;
+        const auto &composite = *completed.composite_depth_runtime_provenance;
+        const std::string engine_prefix =
+          std::string {models::prod_zipdepth_convex2x::logical_model} + "." +
+          std::string {models::prod_zipdepth_convex2x::engine_recipe} + ".";
+        const std::string engine_suffix =
+          "-onnx" +
+          std::string {models::prod_zipdepth_convex2x::fused_onnx_sha256} +
+          ".engine";
+        const std::string active_manifest =
+          std::string {models::prod_zipdepth_convex2x::logical_model} +
+          ".active-engine.json";
+        return composite.model == models::prod_zipdepth_convex2x::logical_model &&
+               composite.onnx_sha256 ==
+                 models::prod_zipdepth_convex2x::fused_onnx_sha256 &&
+               composite.embedded_dav2_onnx_sha256 ==
+                 models::prod_zipdepth_convex2x::dav2_onnx_sha256 &&
+               composite.embedded_dav2_onnx_sha256 == raw.onnx_sha256 &&
+               composite.zipdepth_checkpoint_sha256 ==
+                 models::prod_zipdepth_convex2x::zipdepth_checkpoint_sha256 &&
+               composite.guidance_preprocess_source_closure_sha256 ==
+                 raw.preprocess_source_closure_sha256 &&
+               composite.engine_recipe ==
+                 models::prod_zipdepth_convex2x::engine_recipe &&
+               composite.engine_artifact.size() >
+                 engine_prefix.size() + engine_suffix.size() &&
+               composite.engine_artifact.starts_with(engine_prefix) &&
+               composite.engine_artifact.ends_with(engine_suffix) &&
+               composite.engine_artifact.find_first_of("/\\") ==
+                 std::string::npos &&
+               composite.active_engine_manifest == active_manifest;
+      } catch (...) {
+        return false;
+      }
+    }
+
+    bool subtitle_capture_resources_are_authenticated(const frame &completed) noexcept {
+      const bool ocr_present = completed.ocr_box_record != nullptr;
+      const bool locator_present = completed.subtitle_locator_state != nullptr;
+      if (ocr_present != locator_present) {
+        return false;
+      }
+      const bool active =
+        !completed.subtitle_work_suppressed && ocr_present && locator_present;
+      return !active ||
+             (completed.shadow_base_final_parallax &&
+              completed.model_width > 0 && completed.model_height > 0 &&
+              models::depth_coordinate_v2::subtitle_ocr_field_is_calibrated(
+                static_cast<std::uint32_t>(completed.model_width),
+                static_cast<std::uint32_t>(completed.model_height)
+              ));
+    }
 
     std::string gpu_trace_contract_json(
       const models::host_sbs_gpu_trace_provenance_t &provenance
@@ -4232,6 +4373,23 @@ namespace platf::sbs_debug {
     const bool by_button = job.by_button;
     const bool by_file = job.by_file;
     const auto &model_identity = *completed.raw_model_provenance;
+    nlohmann::json composite_runtime_provenance = nullptr;
+    if (completed.composite_depth_runtime_provenance) {
+      const auto &runtime = *completed.composite_depth_runtime_provenance;
+      composite_runtime_provenance = {
+        {"schema", models::prod_zipdepth_convex2x::contract_schema},
+        {"runtime", "dav2_zipdepth_convex2x_composite"},
+        {"model", runtime.model},
+        {"onnx_sha256", runtime.onnx_sha256},
+        {"embedded_dav2_onnx_sha256", runtime.embedded_dav2_onnx_sha256},
+        {"zipdepth_checkpoint_sha256", runtime.zipdepth_checkpoint_sha256},
+        {"guidance_preprocess_source_closure_sha256",
+         runtime.guidance_preprocess_source_closure_sha256},
+        {"engine_recipe", runtime.engine_recipe},
+        {"engine_artifact", runtime.engine_artifact},
+        {"active_engine_manifest", runtime.active_engine_manifest},
+      };
+    }
 
     const std::filesystem::path &trigger = job.trigger;
     std::error_code error;
@@ -5068,6 +5226,7 @@ namespace platf::sbs_debug {
           {"trigger", trigger_source},
           {"matched_frame_id", completed.matched_frame_id},
           {"depth_model", completed.depth_model},
+          {"composite_runtime_provenance", composite_runtime_provenance},
           {"color_mode", color_mode},
           {"color_preview_transform", color_preview_transform},
           {"hdr_preview", hdr ? color_preview_transform : "not applied"},
@@ -5984,14 +6143,17 @@ namespace platf::sbs_debug {
         retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
         return false;
       }
-      // The existing Dump-3D/DVC2 package identifies one common model/geometry raster.  Live
-      // convex-2x deliberately splits those domains, so reject that diagnostic request until the
-      // package schema and replay tool carry the split explicitly.  Live rendering is unaffected.
-      if (completed.refined_live_geometry_active) {
+      // Both supported runtimes expose one common capture/model/depth/geometry raster. Legacy
+      // DAV2 uses its calibrated grid directly; the fused runtime must use exactly the frozen 2x
+      // realization of that same source-selected DAV2 shape. A stale split-grid frame or an
+      // arbitrary high-resolution claim fails closed instead of being mislabeled in Dump 3D.
+      const auto calibrated_dav2_shape = calibrated_dav2_shape_for_dump(completed);
+      if (!calibrated_dav2_shape ||
+          !detail::capture_tensor_grid_is_authenticated(completed) ||
+          !detail::composite_runtime_provenance_is_authenticated(completed)) {
         BOOST_LOG(warning)
-          << "SBS debug dump: live convex-2x geometry is active, but the current Dump-3D "sv
-             "schema cannot represent separate coarse-analysis and refined-geometry rasters; "sv
-             "dump rejected without affecting the live refined field."sv;
+          << "SBS debug dump: completed model/depth geometry does not match the authenticated "sv
+             "legacy DAV2 or schema-2 single-high fused runtime contract; dump rejected."sv;
         retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
         return false;
       }
@@ -6027,14 +6189,7 @@ namespace platf::sbs_debug {
       const bool subtitle_slr13_active =
         !completed.subtitle_work_suppressed &&
         subtitle_ocr_present && subtitle_locator_present;
-      if (subtitle_ocr_present != subtitle_locator_present ||
-          (subtitle_slr13_active && (
-            !completed.shadow_base_final_parallax ||
-            !models::depth_coordinate_v2::subtitle_ocr_field_is_calibrated(
-              static_cast<std::uint32_t>(completed.model_width),
-              static_cast<std::uint32_t>(completed.model_height)
-            )
-          ))) {
+      if (!detail::subtitle_capture_resources_are_authenticated(completed)) {
         BOOST_LOG(warning)
           << "SBS debug dump: OCR8/SLR13 resources are partial; dump rejected."sv;
         retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
@@ -6065,8 +6220,8 @@ namespace platf::sbs_debug {
           model_identity.onnx_sha256,
           model_identity.preprocess_profile,
           model_identity.preprocess_source_closure_sha256,
-          static_cast<std::uint32_t>(completed.model_width),
-          static_cast<std::uint32_t>(completed.model_height)
+          static_cast<std::uint32_t>(calibrated_dav2_shape->width),
+          static_cast<std::uint32_t>(calibrated_dav2_shape->height)
         );
       if (!capture_calibration) {
         BOOST_LOG(warning)

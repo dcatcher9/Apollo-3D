@@ -2,6 +2,7 @@
 
 #include <src/cuda_conditional_graph.h>
 #include <src/host_sbs_shader_cache.h>
+#include <src/prod_zipdepth_convex2x.h>
 #include <src/video_depth_estimator.h>
 
 #include <algorithm>
@@ -183,7 +184,7 @@ TEST(HostSbsNearIdenticalPolicyTest, D3dResourcesUseTypedBundlesWithoutChangingC
   );
   EXPECT_NE(
     estimator.find(
-      "} near_identical_tile, near_identical_history_owner, guidance_near_identical_tile;"
+      "} near_identical_tile, near_identical_history_owner;"
     ),
     std::string::npos
   );
@@ -211,7 +212,7 @@ TEST(HostSbsNearIdenticalPolicyTest, D3dResourcesUseTypedBundlesWithoutChangingC
   EXPECT_EQ(retention.find("near_identical_transaction.srv.Detach()"), std::string::npos);
 }
 
-TEST(HostSbsNearIdenticalPolicyTest, CompositeRuntimeUsesAtomicFourTensorBoundary) {
+TEST(HostSbsNearIdenticalPolicyTest, CompositeRuntimeUsesSingleHighTensorBoundary) {
   std::ifstream stream(
     std::string {SUNSHINE_SOURCE_DIR} + "/src/video_depth_estimator.cpp",
     std::ios::binary
@@ -220,7 +221,17 @@ TEST(HostSbsNearIdenticalPolicyTest, CompositeRuntimeUsesAtomicFourTensorBoundar
     std::istreambuf_iterator<char> {stream},
     std::istreambuf_iterator<char> {}
   };
+  std::ifstream detector_stream(
+    std::string {SUNSHINE_SHADERS_DIR} +
+      "/host_sbs_near_identical_detector_cs.hlsl",
+    std::ios::binary
+  );
+  const std::string detector {
+    std::istreambuf_iterator<char> {detector_stream},
+    std::istreambuf_iterator<char> {}
+  };
   ASSERT_FALSE(estimator.empty());
+  ASSERT_FALSE(detector.empty());
   estimator.erase(
     std::remove(estimator.begin(), estimator.end(), '\r'),
     estimator.end()
@@ -239,62 +250,130 @@ TEST(HostSbsNearIdenticalPolicyTest, CompositeRuntimeUsesAtomicFourTensorBoundar
   EXPECT_NE(estimator.find("if (fused && !to_unmark.empty())"), std::string::npos)
     << "the fused builder must reject unexpected outputs instead of pruning them";
 
-  const auto guidance_begin = estimator.find("ID3D11Buffer *guidance_cbuffers[3]");
-  const auto guidance_end = estimator.find("// GPU-undecided publishes", guidance_begin);
-  ASSERT_NE(guidance_begin, std::string::npos);
-  ASSERT_NE(guidance_end, std::string::npos);
-  const auto guidance = estimator.substr(guidance_begin, guidance_end - guidance_begin);
-  EXPECT_NE(guidance.find("guidance_cbuffer.Get()"), std::string::npos);
-  EXPECT_NE(guidance.find("fused_preprocess_force_cbuffer.Get()"), std::string::npos);
-  EXPECT_NE(guidance.find("source_region_cbuffer.Get()"), std::string::npos);
-  EXPECT_NE(guidance.find("analysis_input_srv"), std::string::npos);
-  EXPECT_NE(guidance.find("nullptr"), std::string::npos);
-  EXPECT_NE(guidance.find("guidance_tensor_in_uav.Get()"), std::string::npos);
-  EXPECT_NE(guidance.find("guidance_appearance_ordinal_uav.Get()"), std::string::npos);
-  EXPECT_NE(guidance.find("guidance_tensor_exclusion_uav.Get()"), std::string::npos);
-  EXPECT_NE(guidance.find("guidance_near_identical_tile.uav.Get()"), std::string::npos);
+  EXPECT_EQ(estimator.find("guidance_tensor_in_buf"), std::string::npos);
+  EXPECT_EQ(estimator.find("refined_tensor_out_buf"), std::string::npos);
+  EXPECT_EQ(estimator.find("guidance_cbuffer"), std::string::npos);
+  EXPECT_EQ(estimator.find("cuda_guidance_in_res"), std::string::npos);
+  EXPECT_EQ(estimator.find("cuda_refined_out_res"), std::string::npos);
+  EXPECT_NE(estimator.find("field_w = target_w;"), std::string::npos);
+  EXPECT_NE(estimator.find("field_h = target_h;"), std::string::npos);
+  EXPECT_NE(
+    estimator.find("field_w != target_w || field_h != target_h"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    estimator.find("CSSetShader(retired_convex2x_live_map_cs.Get()"),
+    std::string::npos
+  ) << "the closure-only legacy shader must never overwrite the single high model output";
+  EXPECT_EQ(
+    detector.find("NEAR_IDENTICAL_MAX_TILE_GROUP_COUNT"),
+    std::string::npos
+  ) << "the resolver must query its exact SRV capacity instead of freezing a profile ceiling";
+  EXPECT_NE(
+    detector.find(
+      "NearIdenticalTileInput.GetDimensions(tile_buffer_count, tile_buffer_stride)"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    detector.find("tile_buffer_count == expected_tile_count"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    detector.find("tile_buffer_stride == 4u * 4u"),
+    std::string::npos
+  );
+  EXPECT_EQ(detector.find("convex2x_landscape"), std::string::npos)
+    << "single-high geometry must not retain a dormant split-grid authorization path";
 
-  const auto interop_begin = estimator.find("std::array<CUgraphicsResource, 5> depth_resources");
+  const std::string_view preprocess_binding =
+    "context->CSSetShader(near_identical_fused_preprocess_cs.Get(), nullptr, 0u)";
+  const auto preprocess_first = estimator.find(preprocess_binding);
+  ASSERT_NE(preprocess_first, std::string::npos);
+  EXPECT_EQ(
+    estimator.find(preprocess_binding, preprocess_first + preprocess_binding.size()),
+    std::string::npos
+  ) << "one high input must have exactly one RGB-to-NCHW producer dispatch";
+
+  const auto interop_begin = estimator.find("std::array<CUgraphicsResource, 3> depth_resources");
   const auto interop_end = estimator.find("if (!bindings_ok && !dropped_for_signature_change)", interop_begin);
   ASSERT_NE(interop_begin, std::string::npos);
   ASSERT_NE(interop_end, std::string::npos);
   const auto interop = estimator.substr(interop_begin, interop_end - interop_begin);
   for (const std::string_view token : {
          "cuda_in_res",
-         "cuda_guidance_in_res",
          "cuda_out_res",
-         "cuda_refined_out_res",
+         "cuda_near_identical_decision_res",
        }) {
     EXPECT_NE(interop.find(token), std::string::npos) << token;
   }
   EXPECT_NE(interop.find("depth_resource_count, depth_resources.data(), cu_stream"), std::string::npos);
-  EXPECT_NE(interop.find("guidance_input_mapped_bytes"), std::string::npos);
-  EXPECT_NE(interop.find("refined_output_mapped_bytes"), std::string::npos);
+  EXPECT_EQ(interop.find("guidance_input_mapped_bytes"), std::string::npos);
+  EXPECT_EQ(interop.find("refined_output_mapped_bytes"), std::string::npos);
 
   const auto profile = interop.find("setOptimizationProfileAsync(");
-  const auto coarse_shape = interop.find("prod_zipdepth_convex2x::dav2_input.data()", profile);
-  const auto guidance_shape = interop.find("prod_zipdepth_convex2x::guidance_input.data()", coarse_shape);
-  const auto coarse_bound = interop.find("getMaxOutputSize(\n            prod_zipdepth_convex2x::coarse_output.data()", guidance_shape);
-  const auto refined_bound = interop.find("getMaxOutputSize(\n            prod_zipdepth_convex2x::refined_output.data()", coarse_bound);
+  const auto high_shape = interop.find("prod_zipdepth_convex2x::input.data()", profile);
+  const auto refined_bound = interop.find("getMaxOutputSize(\n            prod_zipdepth_convex2x::refined_output.data()", high_shape);
   const auto first_address = interop.find("setTensorAddress(", refined_bound);
   ASSERT_NE(profile, std::string::npos);
-  ASSERT_NE(coarse_shape, std::string::npos);
-  ASSERT_NE(guidance_shape, std::string::npos);
-  ASSERT_NE(coarse_bound, std::string::npos);
+  ASSERT_NE(high_shape, std::string::npos);
   ASSERT_NE(refined_bound, std::string::npos);
   ASSERT_NE(first_address, std::string::npos);
-  EXPECT_LT(profile, coarse_shape);
-  EXPECT_LT(coarse_shape, guidance_shape);
-  EXPECT_LT(guidance_shape, coarse_bound);
-  EXPECT_LT(coarse_bound, refined_bound);
+  EXPECT_LT(profile, high_shape);
+  EXPECT_LT(high_shape, refined_bound);
   EXPECT_LT(refined_bound, first_address);
 
   EXPECT_NE(estimator.find("r.raw_model_depth = tensor_out_srv;"), std::string::npos);
-  EXPECT_EQ(estimator.find("r.raw_model_depth = refined_tensor_out_srv;"), std::string::npos);
   EXPECT_NE(
-    estimator.find("guidance_snapshot_valid && refined_snapshot_valid"),
+    estimator.find(".raw_depth = tensor_out_srv.Get(),"),
     std::string::npos
   );
+  EXPECT_NE(
+    estimator.find("r.guidance_model_input_snapshot = r.model_input_snapshot"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    estimator.find("r.refined_model_depth_snapshot = r.raw_model_depth_snapshot"),
+    std::string::npos
+  );
+}
+
+TEST(HostSbsNearIdenticalPolicyTest, FailurePathsLogExactReasonsWithoutPerFrameSpam) {
+  const auto read = [](const std::string &path) {
+    std::ifstream stream(path, std::ios::binary);
+    return std::string {
+      std::istreambuf_iterator<char> {stream},
+      std::istreambuf_iterator<char> {}
+    };
+  };
+  const auto estimator = read(
+    std::string {SUNSHINE_SOURCE_DIR} + "/src/video_depth_estimator.cpp"
+  );
+  const auto display = read(
+    std::string {SUNSHINE_SOURCE_DIR} + "/src/platform/windows/display_vram.cpp"
+  );
+  ASSERT_FALSE(estimator.empty());
+  ASSERT_FALSE(display.empty());
+
+  EXPECT_NE(
+    estimator.find("Fused single-high input-region realization failed: source="),
+    std::string::npos
+  );
+  EXPECT_NE(estimator.find("fused_input_region_error_logged"), std::string::npos);
+  EXPECT_NE(
+    estimator.find("Depth readiness preflight lacks its CUDA query capability"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    estimator.find("could not unregister prior CUDA interop resources"),
+    std::string::npos
+  );
+  EXPECT_NE(estimator.find("shape_mismatch_warning_logged"), std::string::npos);
+  EXPECT_NE(
+    display.find("Host SBS lost authenticated live-warp authority after parallax-v2 was active"),
+    std::string::npos
+  );
+  EXPECT_NE(display.find("v2_live_warp_loss_logged"), std::string::npos);
 }
 
 TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
@@ -357,7 +436,7 @@ TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
     std::pair {std::string_view {"depth_coordinate_v2_map"},
                std::string_view {"depth_coordinate_v2_map_cs"}},
     std::pair {std::string_view {"prod_zipdepth_convex2x_live_map"},
-               std::string_view {"prod_zipdepth_convex2x_live_map_cs"}},
+               std::string_view {"retired_convex2x_live_map_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_ownership"},
                std::string_view {"depth_coordinate_v2_ownership_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_vertical_limit"},
@@ -462,17 +541,15 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   EXPECT_EQ(estimator.find("gpu_decision_resource_requested"), std::string::npos);
   EXPECT_NE(
     estimator.find(
-      "std::array<CUgraphicsResource, 5> depth_resources {\n"
+      "std::array<CUgraphicsResource, 3> depth_resources {\n"
       "        cuda_in_res,\n"
       "        cuda_out_res,\n"
-      "        cuda_near_identical_decision_res,\n"
-      "        cuda_guidance_in_res,\n"
-      "        cuda_refined_out_res,"
+      "        cuda_near_identical_decision_res,"
     ),
     std::string::npos
   );
   EXPECT_NE(
-    estimator.find("const unsigned int depth_resource_count = fused_runtime ? 5u : 3u;"),
+    estimator.find("constexpr unsigned int depth_resource_count = 3u;"),
     std::string::npos
   );
   EXPECT_NE(estimator.find("depth_resource_count"), std::string::npos);
@@ -1473,6 +1550,53 @@ namespace {
       ID3D11Buffer *constants[2] = {depth_constants_.Get(), detector_constants_.Get()};
       ID3D11ShaderResourceView *resolve_inputs[4] = {
         nullptr, nullptr, tile_srv_.Get(), history_owner_srv_.Get(),
+      };
+      ID3D11UnorderedAccessView *resolve_outputs[4] = {
+        nullptr, nullptr, nullptr, decision_uav_.Get(),
+      };
+      context_->CSSetShader(resolve_shader_.Get(), nullptr, 0u);
+      context_->CSSetConstantBuffers(0u, 2u, constants);
+      context_->CSSetShaderResources(0u, 4u, resolve_inputs);
+      context_->CSSetUnorderedAccessViews(0u, 4u, resolve_outputs, nullptr);
+      context_->Dispatch(1u, 1u, 1u);
+      unbind(4u, 4u, 2u);
+      return read_decision(decision, error);
+    }
+
+    bool resolve_with_tile_buffer_layout(
+      const UINT elements,
+      const UINT stride,
+      decision_words_t &decision,
+      std::string &error
+    ) {
+      ComPtr<ID3D11Buffer> tile_buffer;
+      ComPtr<ID3D11ShaderResourceView> tile_srv;
+      ComPtr<ID3D11UnorderedAccessView> tile_uav;
+      if (!create_structured_output(
+            elements, stride, tile_buffer, tile_srv, tile_uav
+          )) {
+        error = "could not create alternate evidence-tile buffer";
+        return false;
+      }
+      initialize_transaction();
+      update_detector_constants(
+        1u,
+        tile_group_width,
+        tile_group_height,
+        current_frame_id,
+        baseline_frame_id,
+        request_token,
+        current_observation_timestamp_us,
+        0u,
+        reduction_group_count,
+        0u,
+        tile_group_count
+      );
+      ID3D11Buffer *constants[2] = {
+        depth_constants_.Get(), detector_constants_.Get(),
+      };
+      ID3D11ShaderResourceView *resolve_inputs[4] = {
+        nullptr, nullptr, tile_srv.Get(), history_owner_srv_.Get(),
       };
       ID3D11UnorderedAccessView *resolve_outputs[4] = {
         nullptr, nullptr, nullptr, decision_uav_.Get(),
@@ -3671,6 +3795,41 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, MalformedTileShapeFailsClosed) {
     decision[word(models::near_identical_gpu_decision_word_e::decision)],
     static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::reuse)
   ) << "Malformed constants must not remove WARP or poison the next valid resolve";
+}
+
+TEST(HostSbsNearIdenticalDetectorGpuTest, TileSrvCapacityAndStrideFailClosed) {
+  near_identical_gpu_fixture_t fixture;
+  std::string error;
+  const auto initialized = initialize_fixture(fixture, error);
+  if (initialized == near_identical_gpu_fixture_t::initialize_result_e::d3d_unavailable) {
+    GTEST_SKIP() << error;
+  }
+  ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
+  const auto input = uniform_model_input();
+  decision_words_t decision {};
+  ASSERT_TRUE(fixture.run_detector(
+    input, input, history_state(1u), decision, error
+  )) << error;
+
+  const auto expect_infer = [&](const UINT elements, const UINT stride) {
+    ASSERT_TRUE(fixture.resolve_with_tile_buffer_layout(
+      elements, stride, decision, error
+    )) << error;
+    EXPECT_EQ(
+      decision[word(models::near_identical_gpu_decision_word_e::decision)],
+      static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::infer)
+    );
+  };
+  expect_infer(tile_group_count - 1u, 4u * sizeof(std::uint32_t));
+  expect_infer(tile_group_count + 1u, 4u * sizeof(std::uint32_t));
+  expect_infer(tile_group_count, 2u * sizeof(std::uint32_t));
+
+  const auto quiet = quiet_tile_records();
+  ASSERT_TRUE(fixture.resolve_seeded_tiles(quiet, decision, error)) << error;
+  EXPECT_EQ(
+    decision[word(models::near_identical_gpu_decision_word_e::decision)],
+    static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::reuse)
+  ) << "Malformed SRV metadata must not poison the next valid resolve";
 }
 
 TEST(HostSbsNearIdenticalDetectorGpuTest, UnsupportedEdgeTileCannotMaskSupportedHotTile) {

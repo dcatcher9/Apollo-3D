@@ -17,8 +17,12 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 try:
     from .depth_coordinate_v2_contract import MODEL_CALIBRATIONS
+    from . import prod_zipdepth_convex2x as convex2x_contract
+    from . import prod_zipdepth_convex2x_diagnostics_contract as convex2x_diagnostics
 except ImportError:  # Direct execution from tools/sbsbench.
     from depth_coordinate_v2_contract import MODEL_CALIBRATIONS  # type: ignore
+    import prod_zipdepth_convex2x as convex2x_contract  # type: ignore
+    import prod_zipdepth_convex2x_diagnostics_contract as convex2x_diagnostics  # type: ignore
 
 
 EVALUATOR_SCHEMA = 37
@@ -28,6 +32,8 @@ RESULTS_META_KEY = "whole_clip_raw_artifacts"
 BINDING = "schema-37-results-to-schema-22-harness-raw-f32-v1"
 RAW_SHAPE_SCHEMA = 1
 RAW_STAGE = "raw model output before transform/normalization/EMA/curvature"
+LEGACY_CAPTURE_GRID = "legacy-dav2"
+SINGLE_HIGH_CAPTURE_GRID = "single-high-convex2x"
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _RAW_FILE = re.compile(r"raw_(\d+)\.f32")
@@ -142,11 +148,75 @@ def validate_manifest(
     return frames
 
 
-def authenticate_manifest_files(
+def _recomputed_capture_grid(manifest: Mapping[str, Any]) -> Optional[str]:
+    """Recompute calibration and grid kind from the authenticated producer identity/shape.
+
+    A manifest's recorded calibration fields are presentation data, not an authority.  In
+    particular, one of the six exact single-high profiles must never be relabelled as an
+    unsupported-shape abstention to make its schema-2 model-boundary evidence optional.
+    """
+
+    producer_identity = manifest["producer_model_identity"]
+    width = manifest["raw_shape"]["width"]
+    height = manifest["raw_shape"]["height"]
+    calibrations = [
+        value for value in MODEL_CALIBRATIONS
+        if (value.depth_model == producer_identity.get("model") and
+            value.depth_model_url == producer_identity.get("depth_model_url") and
+            value.onnx_sha256 == producer_identity.get("onnx_sha256") and
+            value.preprocess.profile == producer_identity.get("preprocess_profile") and
+            value.preprocess.source_closure_sha256 ==
+            producer_identity.get("preprocess_source_closure_sha256"))
+    ]
+    calibration = calibrations[0] if len(calibrations) == 1 else None
+    extent = width, height
+    supported_high = {
+        (shape.width, shape.height)
+        for shape in convex2x_contract.supported_high_shapes()
+    }
+    coarse_supported = (
+        calibration is not None and extent in calibration.calibrated_input_shapes)
+    single_high_supported = (
+        calibration is not None and extent in supported_high and
+        width % 2 == 0 and height % 2 == 0 and
+        (width // 2, height // 2) in calibration.calibrated_input_shapes)
+
+    if calibration is None:
+        expected = (
+            "abstain-unsupported-model-contract", None,
+            "model/URL/ONNX/preprocess identity has no exact calibration",
+        )
+        capture_grid = None
+    elif coarse_supported:
+        expected = ("calibrated", calibration.calibration_id, None)
+        capture_grid = LEGACY_CAPTURE_GRID
+    elif single_high_supported:
+        expected = ("calibrated", calibration.calibration_id, None)
+        capture_grid = SINGLE_HIGH_CAPTURE_GRID
+    else:
+        expected = (
+            "abstain-unsupported-shape", calibration.calibration_id,
+            f"raw model shape {width}x{height} is not calibrated",
+        )
+        capture_grid = None
+
+    observed = (
+        manifest["calibration_status"], manifest["calibration_id"],
+        manifest["abstention_reason"],
+    )
+    if observed != expected:
+        raise ValueError(
+            "whole-clip raw calibration status disagrees with its exact producer identity "
+            "and shape")
+    return capture_grid
+
+
+def _authenticate_manifest(
         artifact_dir: Path,
         manifest: Mapping[str, Any],
-        expected_frame_ids: Optional[Iterable[int]] = None) -> List[Dict[str, str]]:
-    """Rehash the harness contract, raw shape, and every declared raw tensor."""
+        expected_frame_ids: Optional[Iterable[int]] = None,
+) -> tuple[List[Dict[str, str]], Optional[str]]:
+    """Authenticate files and return ordered records plus the recomputed capture grid."""
 
     frames = validate_manifest(manifest, expected_frame_ids)
     contract_path = artifact_dir / "contract.json"
@@ -171,6 +241,10 @@ def authenticate_manifest_files(
             shape.get("stage") != RAW_STAGE):
         raise ValueError("whole-clip raw shape semantics disagree with their run manifest")
 
+    # Only after the producer contract and raw-shape sidecar have been content-authenticated may
+    # their identity/extent decide calibration and whether fused evidence is mandatory.
+    capture_grid = _recomputed_capture_grid(manifest)
+
     declared_files = {row["file"] for row in frames}
     actual_files = set()
     for path in artifact_dir.glob("raw_*.f32"):
@@ -194,7 +268,28 @@ def authenticate_manifest_files(
         if file_sha256(raw_path) != row["sha256"]:
             raise ValueError(
                 f"whole-clip raw artifact {row['file']} changed after evaluator capture")
+    return frames, capture_grid
+
+
+def authenticate_manifest_files(
+        artifact_dir: Path,
+        manifest: Mapping[str, Any],
+        expected_frame_ids: Optional[Iterable[int]] = None) -> List[Dict[str, str]]:
+    """Rehash the harness contract, raw shape, and every declared raw tensor."""
+
+    frames, _ = _authenticate_manifest(artifact_dir, manifest, expected_frame_ids)
     return frames
+
+
+def authenticate_manifest_capture_grid(
+        artifact_dir: Path,
+        manifest: Mapping[str, Any],
+        expected_frame_ids: Optional[Iterable[int]] = None,
+) -> Optional[str]:
+    """Authenticate a raw manifest and return its recomputed calibrated capture-grid kind."""
+
+    _, capture_grid = _authenticate_manifest(artifact_dir, manifest, expected_frame_ids)
+    return capture_grid
 
 
 def build_manifest(
@@ -254,8 +349,32 @@ def build_manifest(
             (calibration is None or calibration.calibration_id != expected_calibration_id)):
         raise ValueError(
             "whole-clip harness producer identity disagrees with evaluator calibration")
-    shape_supported = (
+    coarse_supported = (
         calibration is not None and (width, height) in calibration.calibrated_input_shapes)
+    supported_high = {
+        (shape.width, shape.height)
+        for shape in convex2x_contract.supported_high_shapes()
+    }
+    single_high_supported = (
+        calibration is not None and (width, height) in supported_high and
+        width % 2 == 0 and height % 2 == 0 and
+        (width // 2, height // 2) in calibration.calibrated_input_shapes)
+    if single_high_supported:
+        expected_composite = model_identity.get("composite_runtime_provenance")
+        if not isinstance(expected_composite, Mapping):
+            raise ValueError(
+                "single-high raw shape requires authenticated composite runtime evidence")
+        # Reuse the model-boundary contract as the sole authority for admitting high raw fields.
+        # This authenticates the schema-2 sidecar hash, exact input/output identity, embedded DAV2
+        # join, every raw output hash, and rejects historical split schema 1.
+        diagnostic_manifest = convex2x_diagnostics.build_manifest(
+            artifact_dir, ids, expected_composite)
+        output_shape = diagnostic_manifest.get("tensor_shapes", {}).get("output")
+        if (diagnostic_manifest.get("schema") != convex2x_diagnostics.MANIFEST_SCHEMA or
+                output_shape != {"width": width, "height": height, "channels": 1}):
+            raise ValueError(
+                "single-high raw shape is not authenticated by active schema-2 fused evidence")
+    shape_supported = coarse_supported or single_high_supported
     if calibration is None:
         calibration_status = "abstain-unsupported-model-contract"
         abstention_reason = "model/URL/ONNX/preprocess identity has no exact calibration"
@@ -294,10 +413,13 @@ __all__ = [
     "BINDING",
     "EVALUATOR_SCHEMA",
     "HARNESS_CONTRACT_SCHEMA",
+    "LEGACY_CAPTURE_GRID",
     "MANIFEST_SCHEMA",
     "RAW_SHAPE_SCHEMA",
     "RAW_STAGE",
     "RESULTS_META_KEY",
+    "SINGLE_HIGH_CAPTURE_GRID",
+    "authenticate_manifest_capture_grid",
     "authenticate_manifest_files",
     "build_manifest",
     "file_sha256",

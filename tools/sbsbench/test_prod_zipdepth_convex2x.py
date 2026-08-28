@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import copy
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -15,24 +19,43 @@ import prod_zipdepth_convex2x as convex  # noqa: E402
 
 
 class ProdZipDepthConvex2xTests(unittest.TestCase):
-    def test_contract_keeps_coarse_and_refined_outputs_in_one_engine(self):
+    def _assert_contract_rejected(self, mutate, expected="contract"):
+        document = copy.deepcopy(convex.load_contract())
+        mutate(document)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "contract.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            with mock.patch.object(convex, "CONTRACT_PATH", path):
+                with self.assertRaisesRegex(ValueError, expected):
+                    convex.load_contract()
+
+    def test_contract_exposes_only_single_high_input_and_output(self):
         contract = convex.load_contract()
         io = contract["engine_io"]
         self.assertEqual(
             convex.tensor_names(io["inputs"]),
-            ("pixel_values", "zip_pixel_values"),
+            ("pixel_values",),
         )
         self.assertEqual(
             convex.tensor_names(io["outputs"]),
-            ("predicted_depth", "refined_depth"),
+            ("refined_depth",),
         )
+        self.assertEqual(
+            convex.tensor_names(io["internal_tensors"]),
+            ("dav2_pixel_values", "predicted_depth"),
+        )
+        downsample = contract["operator"]["input_downsample"]
+        self.assertEqual(downsample["operator"], "AveragePool")
+        self.assertEqual(downsample["dtype"], "float32")
+        self.assertEqual(downsample["kernel"], [2, 2])
+        self.assertEqual(downsample["stride"], [2, 2])
         self.assertEqual(contract["operator"]["pixel_gate"], "none")
         self.assertEqual(contract["sources"]["zipdepth"]["variant"], "base")
         self.assertEqual(contract["operator"]["temperature"], 1.0)
         self.assertIs(contract["operator"]["zipdepth_use_unfold"], True)
         self.assertEqual(
             contract["sources"]["fused_onnx"]["sha256"],
-            "959fc90097d7055b9c56cb140f432e0f5aed533476e8cedd6ec2baae097b287f",
+            "0547dd046dead55057bb34a356d987559b2d93248e84600245f02df828d8bbb7",
         )
         self.assertIn("graph-cut", contract["authority"]["forbidden"])
         self.assertIn("adaptive-j", contract["authority"]["forbidden"])
@@ -55,20 +78,65 @@ class ProdZipDepthConvex2xTests(unittest.TestCase):
         }
         self.assertEqual(actual, expected)
 
-    def test_tensorrt_uses_one_fixed_point_profile_per_shape(self):
+    def test_tensorrt_uses_one_fixed_high_point_profile_per_shape(self):
         contract = convex.load_contract()
         tensorrt = contract["tensorrt"]
         self.assertEqual(
             tensorrt["profile_strategy"],
-            "one-engine-six-fixed-point-profiles",
+            "one-engine-six-fixed-high-point-profiles",
         )
-        self.assertEqual(tensorrt["profile_order"], "coarse_shapes_wh")
+        self.assertEqual(tensorrt["profile_order"], "high_shapes_wh")
         self.assertEqual(tensorrt["builder_optimization_level"], 5)
-        self.assertEqual(len(contract["coarse_shapes_wh"]), 6)
-        for index, shape in enumerate(convex.supported_coarse_shapes()):
+        self.assertEqual(len(contract["high_shapes_wh"]), 6)
+        self.assertEqual(
+            [(shape.width, shape.height) for shape in convex.supported_high_shapes()],
+            [
+                (1540, 868),
+                (2044, 868),
+                (2072, 868),
+                (868, 1540),
+                (868, 2044),
+                (868, 2072),
+            ],
+        )
+        for index, shape in enumerate(convex.supported_high_shapes()):
             self.assertEqual(convex.fixed_profile_index(shape), index)
-        with self.assertRaisesRegex(ValueError, "unsupported coarse shape"):
+        with self.assertRaisesRegex(ValueError, "unsupported high shape"):
             convex.fixed_profile_index(convex.Shape(434, 434))
+
+    def test_contract_rejects_nonexact_or_coerced_profile_tables(self):
+        mutations = {
+            "missing": lambda value: value["high_shapes_wh"].pop(),
+            "duplicate": lambda value: value["high_shapes_wh"].__setitem__(
+                5, list(value["high_shapes_wh"][4])),
+            "wrong-order": lambda value: value["high_shapes_wh"].__setitem__(
+                slice(0, 2), list(reversed(value["high_shapes_wh"][:2]))),
+            "wrong-calibrated-half": lambda value: value["high_shapes_wh"][0].__setitem__(
+                0, 1568),
+            "odd": lambda value: value["high_shapes_wh"][0].__setitem__(0, 1539),
+            "string": lambda value: value["high_shapes_wh"][0].__setitem__(0, "1540"),
+            "float": lambda value: value["high_shapes_wh"][0].__setitem__(0, 1540.0),
+            "boolean": lambda value: value["high_shapes_wh"][0].__setitem__(0, True),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                self._assert_contract_rejected(mutate, "exact ordered six calibrated")
+
+    def test_contract_rejects_profile_strategy_and_io_drift(self):
+        for name, mutate in {
+                "profile-strategy": lambda value: value["tensorrt"].update(
+                    {"profile_strategy": "one-ranged-profile"}),
+                "profile-order": lambda value: value["tensorrt"].update(
+                    {"profile_order": "sorted"}),
+                "input-shape": lambda value: value["engine_io"]["inputs"][0].update(
+                    {"shape": [1, 3, "H", "W"]}),
+                "output-shape": lambda value: value["engine_io"]["outputs"][0].update(
+                    {"shape": [1, "H", "W"]}),
+                "bool-optimization-level": lambda value: value["tensorrt"].update(
+                    {"builder_optimization_level": True}),
+                }.items():
+            with self.subTest(name=name):
+                self._assert_contract_rejected(mutate)
 
     def test_content_edges_are_scaled_not_refitted(self):
         shape = convex.Shape(770, 434)
@@ -107,17 +175,25 @@ class ProdZipDepthConvex2xTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "one unit"):
             convex.convex2x(depth, logits)
 
-    def test_evaluation_harness_exports_fused_diagnostics_without_authority(self):
+    def test_evaluation_harness_exports_one_single_high_model_boundary(self):
         repo = SCRIPT_DIR.parent.parent
         harness = (repo / "src" / "sbs_bench_harness.cpp").read_text(
             encoding="utf-8"
         )
-        self.assertIn('"refined_" + output_id + ".f32"', harness)
-        self.assertIn('"zip_model_input_" + output_id + ".f32"', harness)
+        self.assertIn('"model_input_" + output_id + ".f32"', harness)
         self.assertIn("prod_zipdepth_convex2x_diagnostics.json", harness)
-        self.assertIn("diagnostic-only-never-live-or-scoring-depth", harness)
-        self.assertIn("est.refined_model_depth_snapshot.Get()", harness)
-        self.assertIn("est.guidance_model_input_snapshot.Get()", harness)
+        self.assertIn("single-high-input-output-boundary", harness)
+        self.assertIn("est.model_input_snapshot.Get()", harness)
+        self.assertIn(
+            "est.guidance_model_input_snapshot.Get() ==",
+            harness,
+        )
+        self.assertIn(
+            "est.refined_model_depth_snapshot.Get() ==",
+            harness,
+        )
+        self.assertNotIn('"refined_" + output_id + ".f32"', harness)
+        self.assertNotIn('"zip_model_input_" + output_id + ".f32"', harness)
         self.assertNotIn(
             "warp_depth = est.refined_model_depth_snapshot",
             harness,

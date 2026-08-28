@@ -885,6 +885,91 @@ class EvalContractTests(unittest.TestCase):
                     summaries["clip"]["calibration_status"],
                     "abstain-unsupported-model-contract")
 
+    def test_single_high_diagnostic_requirement_comes_from_authenticated_raw_grid(self):
+        producer = {
+            "model": "depth_anything_v2_fp16",
+            "depth_model_url": "https://example.invalid/dav2.onnx",
+            "onnx_sha256": "a" * 64,
+            "preprocess_profile": "unit-profile",
+            "preprocess_source_closure_sha256": "b" * 64,
+        }
+        raw_manifest = {
+            "raw_shape": {"width": 1540, "height": 868},
+            "producer_model_identity": producer,
+        }
+        frame_ids = {"clip": [1]}
+        raw_key = run_eval.whole_clip_raw_contract.RESULTS_META_KEY
+        diagnostic_key = run_eval.convex2x_diagnostics.RESULTS_META_KEY
+        high_grid = run_eval.whole_clip_raw_contract.SINGLE_HIGH_CAPTURE_GRID
+
+        with mock.patch.object(
+                run_eval.whole_clip_raw_contract,
+                "authenticate_manifest_capture_grid", return_value=high_grid):
+            with self.assertRaisesRegex(ValueError, "composite runtime provenance"):
+                run_eval.authenticate_whole_clip_model_artifacts(
+                    {raw_key: {"clip": raw_manifest}}, frame_ids, "run")
+            with self.assertRaisesRegex(ValueError, "must exactly cover"):
+                run_eval.authenticate_whole_clip_model_artifacts(
+                    {
+                        raw_key: {"clip": raw_manifest},
+                        "composite_runtime_provenance": {"runtime": "unit"},
+                    },
+                    frame_ids,
+                    "run",
+                )
+
+            stale = {
+                "schema": run_eval.convex2x_diagnostics.LEGACY_MANIFEST_SCHEMA,
+            }
+            with self.assertRaisesRegex(ValueError, "schema-2 fused diagnostics"):
+                run_eval.authenticate_whole_clip_model_artifacts(
+                    {
+                        raw_key: {"clip": raw_manifest},
+                        "composite_runtime_provenance": {"runtime": "unit"},
+                        diagnostic_key: {"clip": stale},
+                    },
+                    frame_ids,
+                    "run",
+                )
+
+            active = {
+                "schema": run_eval.convex2x_diagnostics.MANIFEST_SCHEMA,
+                "tensor_shapes": {
+                    "output": {"width": 1540, "height": 868, "channels": 1},
+                },
+                "embedded_dav2_provenance": producer,
+            }
+            with mock.patch.object(
+                    run_eval.convex2x_diagnostics,
+                    "authenticate_manifest_files", return_value=[]) as authenticate_diagnostics:
+                grids = run_eval.authenticate_whole_clip_model_artifacts(
+                    {
+                        raw_key: {"clip": raw_manifest},
+                        "composite_runtime_provenance": {"runtime": "unit"},
+                        diagnostic_key: {"clip": active},
+                    },
+                    frame_ids,
+                    "run",
+                )
+            self.assertEqual(grids, {"clip": high_grid})
+            authenticate_diagnostics.assert_called_once()
+
+    def test_ordinary_result_requires_authenticated_raw_manifest_coverage(self):
+        with self.assertRaisesRegex(ValueError, "must exactly cover"):
+            run_eval.authenticate_whole_clip_model_artifacts(
+                {}, {"clip": [1]}, "run")
+
+        raw_key = run_eval.whole_clip_raw_contract.RESULTS_META_KEY
+        with mock.patch.object(
+                run_eval.whole_clip_raw_contract,
+                "authenticate_manifest_capture_grid",
+                return_value=run_eval.whole_clip_raw_contract.LEGACY_CAPTURE_GRID):
+            self.assertEqual(
+                run_eval.authenticate_whole_clip_model_artifacts(
+                    {raw_key: {"clip": {}}}, {"clip": [1]}, "run"),
+                {"clip": run_eval.whole_clip_raw_contract.LEGACY_CAPTURE_GRID},
+            )
+
     def test_missing_metric_and_perf_evidence_fail_closed(self):
         thresholds = {
             "metrics": {
@@ -1915,8 +2000,8 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('fs::path(o.out) / "contract.json"', harness)
         self.assertIn(
             '(direct_parallax_mode ? direct_geometry_contract_schema : '
-            '(o.device_conditional_replay ? 26u : '
-            '(o.device_conditional_replay_control ? 27u : 22u)))',
+            '(o.device_conditional_replay ? 28u : '
+            '(o.device_conditional_replay_control ? 29u : 22u)))',
             " ".join(harness.split()))
         self.assertIn('direct_geometry_contract_schema = 25u', harness)
         self.assertIn('direct_geometry_manifest_schema = 6u', harness)
@@ -2019,8 +2104,8 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn('SBS_CANDIDATE_GAP_FILL', harness)
         self.assertIn(
             '(direct_parallax_mode ? direct_geometry_contract_schema : '
-            '(o.device_conditional_replay ? 26u : '
-            '(o.device_conditional_replay_control ? 27u : 22u)))',
+            '(o.device_conditional_replay ? 28u : '
+            '(o.device_conditional_replay_control ? 29u : 22u)))',
             " ".join(harness.split()))
         self.assertIn('{"renderer_uses_order", false}', harness)
         self.assertIn(

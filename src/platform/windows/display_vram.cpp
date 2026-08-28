@@ -172,6 +172,93 @@ namespace platf::dxgi {
   models::host_sbs_shader_cache::bytecode_t sbs_flat_identity_ps_hlsl;
   models::host_sbs_shader_cache::bytecode_t sbs_reprojection_vs_hlsl;
 
+  /** Resolve the model-grid realization of one display-selected analysis region.
+   *
+   * The display selects source pixels and semantic authority before the estimator has accepted a
+   * model transaction, so matched slots intentionally retain the calibrated DAV2 content raster.
+   * The single-high fused estimator returns the same source/authority tuple with that content
+   * raster doubled exactly.  Keep that raster conversion explicit: source position, authority and
+   * analysis generation are never inferred from the model output.
+   */
+  [[nodiscard]] static std::optional<models::depth_input_region_t>
+  realize_depth_input_region(
+    const models::depth_input_region_t &submitted_region,
+    const bool refined_live_geometry_active,
+    const int field_width,
+    const int field_height
+  ) noexcept {
+    if (!submitted_region.valid() || field_width <= 0 || field_height <= 0) {
+      return std::nullopt;
+    }
+
+    const auto calibrated_shape = models::fit_host_sbs_v2_depth_tensor_shape(
+      submitted_region.source_width,
+      submitted_region.source_height
+    );
+    if (!models::host_sbs_v2_depth_shape_is_authenticated(calibrated_shape)) {
+      return std::nullopt;
+    }
+
+    auto realized = submitted_region;
+    auto realized_shape = calibrated_shape;
+    if (refined_live_geometry_active) {
+      const auto high_shape = models::host_sbs_convex2x_field_shape(calibrated_shape);
+      const auto high_content = models::host_sbs_convex2x_content_rect(
+        submitted_region.tensor_content,
+        calibrated_shape
+      );
+      if (!high_shape || !high_content) {
+        return std::nullopt;
+      }
+      realized_shape = *high_shape;
+      realized.tensor_content = *high_content;
+    }
+
+    if (field_width != realized_shape.width || field_height != realized_shape.height ||
+        !realized.tensor_content.valid(realized_shape) || !realized.valid()) {
+      return std::nullopt;
+    }
+    return realized;
+  }
+
+  /** Exact completion-to-color binding, including the estimator-owned model-grid raster. */
+  [[nodiscard]] static bool depth_completion_region_matches_submission(
+    const models::estimate_result &estimate,
+    const models::depth_input_region_t &submitted_region
+  ) noexcept {
+    const bool fused_runtime = estimate.composite_depth_runtime_provenance != nullptr;
+    if (!estimate.input_region.valid() ||
+        estimate.refined_live_geometry_active != fused_runtime ||
+        estimate.raw_width != estimate.field_width ||
+        estimate.raw_height != estimate.field_height) {
+      return false;
+    }
+    const auto expected = realize_depth_input_region(
+      submitted_region,
+      estimate.refined_live_geometry_active,
+      estimate.field_width,
+      estimate.field_height
+    );
+    return expected && estimate.input_region == *expected;
+  }
+
+  /** Stable analysis-domain comparison across coarse submission and fused high-grid publication. */
+  [[nodiscard]] static bool depth_analysis_domain_matches_realization(
+    const models::depth_input_region_t &submitted_region,
+    const models::depth_input_region_t &realized_region,
+    const bool refined_live_geometry_active,
+    const int field_width,
+    const int field_height
+  ) noexcept {
+    const auto expected = realize_depth_input_region(
+      submitted_region,
+      refined_live_geometry_active,
+      field_width,
+      field_height
+    );
+    return expected && expected->same_analysis_domain(realized_region);
+  }
+
   struct img_d3d_t: public platf::img_t {
     // These objects are owned by the display_t's ID3D11Device
     texture2d_t capture_texture;
@@ -873,8 +960,10 @@ namespace platf::dxgi {
               !est.completed_frame_valid ||
               est.completed_frame_id != matched_render_slot->frame_id ||
               !gpu_transaction_class_matches(est, *matched_render_slot) ||
-              !est.input_region.valid() ||
-              est.input_region != matched_render_slot->depth_input_region
+              !depth_completion_region_matches_submission(
+                est,
+                matched_render_slot->depth_input_region
+              )
             ) {
               BOOST_LOG(error)
                 << "Host SBS rejected a depth completion whose region or GPU transaction class "sv
@@ -1020,7 +1109,10 @@ namespace platf::dxgi {
               host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2 &&
               models::parallax_v2_result_is_authenticated(est) &&
               est.completed_frame_id == matched_render_slot->frame_id &&
-              est.input_region == matched_render_slot->depth_input_region &&
+              depth_completion_region_matches_submission(
+                est,
+                matched_render_slot->depth_input_region
+              ) &&
               est.color_space == matched_render_slot->color_space &&
               matched_route_matches_current(
                 *matched_render_slot,
@@ -2077,6 +2169,9 @@ namespace platf::dxgi {
             matched_render_slot && matched_candidate_slot &&
             matched_candidate_slot->pending &&
             (
+              // Both operands are display-selected submission regions here. Their calibrated
+              // coarse raster is intentional; no estimator publication participates in this
+              // pending-domain transition check.
               !matched_render_slot->depth_input_region.same_analysis_domain(
                 matched_candidate_slot->depth_input_region
               ) ||
@@ -2222,10 +2317,26 @@ namespace platf::dxgi {
             host_sbs_renderer == models::host_sbs_renderer_e::failed_flat;
           const bool v2_live_resources_complete =
             est.shadow_final_parallax && est.shadow_state;
+          const bool v2_result_authenticated =
+            models::parallax_v2_result_is_authenticated(est);
           const bool v2_live_warp_selected =
             v2_renderer_selected && matched_render_slot &&
-            models::parallax_v2_result_is_authenticated(est) &&
+            v2_result_authenticated &&
             sbs_reprojection_v2_live_ps && v2_live_resources_complete;
+          if (v2_live_warp_selected) {
+            v2_live_warp_seen = true;
+          } else if (v2_renderer_selected && matched_render_slot && v2_live_warp_seen &&
+                     !v2_live_warp_loss_logged) {
+            BOOST_LOG(error)
+              << "Host SBS lost authenticated live-warp authority after parallax-v2 was active"
+              << " (result_authenticated=" << (v2_result_authenticated ? "true" : "false")
+              << ", live_shader=" << (sbs_reprojection_v2_live_ps ? "present" : "missing")
+              << ", final_field=" << (est.shadow_final_parallax ? "present" : "missing")
+              << ", state=" << (est.shadow_state ? "present" : "missing")
+              << "); rendering current-frame flat identity. Further warnings are suppressed for "
+                 "this stream.";
+            v2_live_warp_loss_logged = true;
+          }
           if (cached_current_color_warp && v2_live_warp_selected && diagnostics_enabled) {
             switch (depth_reuse_authorization.kind) {
               case detail::host_sbs_depth_reuse_kind_e::exact_content:
@@ -2389,7 +2500,10 @@ namespace platf::dxgi {
                 matched_render_slot->source_timestamp,
                 rendered_content_timestamp,
                 est.input_region,
-                matched_render_slot->color_space
+                matched_render_slot->color_space,
+                est.refined_live_geometry_active,
+                est.field_width,
+                est.field_height
               );
             } else {
               // Flat identity cannot seed packed presentation continuity. This cache remains
@@ -2568,6 +2682,8 @@ namespace platf::dxgi {
                 dump_frame.shadow_state = est.shadow_state.Get();
                 dump_frame.shadow_frame_stats = est.shadow_frame_stats.Get();
                 dump_frame.raw_model_provenance = est.raw_model_provenance;
+                dump_frame.composite_depth_runtime_provenance =
+                  est.composite_depth_runtime_provenance;
                 dump_frame.parallax_v2_shader_provenance =
                   est.parallax_v2_shader_provenance;
                 dump_frame.gpu_trace_provenance = est.gpu_trace_provenance;
@@ -3358,6 +3474,9 @@ namespace platf::dxgi {
         content_timestamp_.reset();
         input_region_ = {};
         color_space_ = models::input_color_space::srgb;
+        refined_live_geometry_active_ = false;
+        field_width_ = 0;
+        field_height_ = 0;
       }
 
       void reset() noexcept {
@@ -3370,7 +3489,10 @@ namespace platf::dxgi {
         const std::optional<std::chrono::steady_clock::time_point> &presented_source_timestamp,
         const std::optional<std::chrono::steady_clock::time_point> &presented_content_timestamp,
         const models::depth_input_region_t &presented_input_region,
-        const models::input_color_space presented_color_space
+        const models::input_color_space presented_color_space,
+        const bool presented_refined_live_geometry_active,
+        const int presented_field_width,
+        const int presented_field_height
       ) noexcept {
         // A recovered matched completion clears timeout_active at its existing policy site.
         valid_ = true;
@@ -3379,6 +3501,9 @@ namespace platf::dxgi {
         content_timestamp_ = presented_content_timestamp;
         input_region_ = presented_input_region;
         color_space_ = presented_color_space;
+        refined_live_geometry_active_ = presented_refined_live_geometry_active;
+        field_width_ = presented_field_width;
+        field_height_ = presented_field_height;
       }
 
       [[nodiscard]] bool has_fresh_pixels() const noexcept {
@@ -3443,7 +3568,13 @@ namespace platf::dxgi {
         const models::depth_input_region_t &region,
         const models::input_color_space color_space
       ) const noexcept {
-        return valid_ && region.same_analysis_domain(input_region_) &&
+        return valid_ && depth_analysis_domain_matches_realization(
+                           region,
+                           input_region_,
+                           refined_live_geometry_active_,
+                           field_width_,
+                           field_height_
+                         ) &&
                color_space == color_space_;
       }
 
@@ -3454,6 +3585,9 @@ namespace platf::dxgi {
       std::optional<std::chrono::steady_clock::time_point> content_timestamp_;
       models::depth_input_region_t input_region_ {};
       models::input_color_space color_space_ = models::input_color_space::srgb;
+      bool refined_live_geometry_active_ = false;
+      int field_width_ = 0;
+      int field_height_ = 0;
       bool timeout_active_ = false;
     };
 
@@ -3608,7 +3742,10 @@ namespace platf::dxgi {
         return authenticated && estimate.completed_frame_valid &&
                estimate.completed_frame_id == slot.frame_id && estimate.shadow_final_parallax &&
                estimate.shadow_state && estimate.input_region.valid() &&
-               estimate.input_region == slot.depth_input_region &&
+               depth_completion_region_matches_submission(
+                 estimate,
+                 slot.depth_input_region
+               ) &&
                slot.inference_content_timestamp && slot.color_space == current_color_space &&
                source_width == source_desc.Width && source_height == source_desc.Height &&
                mip_levels == source_desc.MipLevels && array_size == source_desc.ArraySize &&
@@ -3863,8 +4000,10 @@ namespace platf::dxgi {
                proof.baseline_damage_token &&
              latest_v2_lineage.slot.frame_id == proof.baseline_frame_id &&
              latest_v2_lineage.estimate.completed_frame_id == proof.baseline_frame_id &&
-             latest_v2_lineage.estimate.input_region ==
-               latest_v2_lineage.slot.depth_input_region &&
+             depth_completion_region_matches_submission(
+               latest_v2_lineage.estimate,
+               latest_v2_lineage.slot.depth_input_region
+             ) &&
              candidate.depth_input_region == latest_v2_lineage.slot.depth_input_region &&
              candidate.color_space == latest_v2_lineage.slot.color_space &&
              latest_v2_lineage_route_matches_current(
@@ -3932,7 +4071,7 @@ namespace platf::dxgi {
     ) {
       const bool completion_route_matches_current =
         slot.inference_content_timestamp && estimate.completed_frame_id == slot.frame_id &&
-        estimate.input_region == slot.depth_input_region &&
+        depth_completion_region_matches_submission(estimate, slot.depth_input_region) &&
         estimate.color_space == slot.color_space && estimate.color_space == current_color_space &&
         estimate.input_region.source_width == completed_source_desc.Width &&
         estimate.input_region.source_height == completed_source_desc.Height &&
@@ -5070,6 +5209,8 @@ namespace platf::dxgi {
       }
       if (
         !sbs_telemetry_input_domain_valid ||
+        // Telemetry admission is keyed before estimator submission, so both operands retain the
+        // display-selected raster. Completed estimator/dump metadata carries est.input_region.
         !slot.depth_input_region.same_analysis_domain(sbs_telemetry_input_region) ||
         slot.color_space != sbs_telemetry_input_color_space
       ) {
@@ -5378,6 +5519,8 @@ namespace platf::dxgi {
       sbs_mode = sbs_mode_param;
       sbs_config = settings;
       host_sbs_renderer = models::host_sbs_renderer_e::awaiting_v2;
+      v2_live_warp_seen = false;
+      v2_live_warp_loss_logged = false;
       diagnostics_enabled = config::sunshine.diagnostics_enabled;
       sbs_depth_status_event = std::move(depth_status_event);
       sbs_depth_pipeline_ready_event = std::move(depth_pipeline_ready_event);
@@ -6130,6 +6273,8 @@ namespace platf::dxgi {
     bool p010_y_mrt_targets_qualified = false;
     models::host_sbs_renderer_e host_sbs_renderer =
       models::host_sbs_renderer_e::awaiting_v2;
+    bool v2_live_warp_seen = false;
+    bool v2_live_warp_loss_logged = false;
     buf_t sbs_reprojection_cbuffer;
     float sbs_content_scale_x = 1.0f;
     float sbs_content_scale_y = 1.0f;

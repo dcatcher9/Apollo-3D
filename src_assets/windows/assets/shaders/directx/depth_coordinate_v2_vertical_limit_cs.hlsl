@@ -21,11 +21,14 @@ RWTexture2D<float> VerticalConditioned : register(u1);
 #define V2_LIMIT_Q30_SCALE V2_LIMITER_Q_SCALE
 #define V2_LIMIT_VERTICAL_STEP_Q30_NUMERATOR \
     V2_LIMITER_VERTICAL_STEP_Q_NUMERATOR
+// The single-high fused runtime supports portrait fields up to 868x2072.  Keep only the
+// forward envelopes in groupshared memory and deterministically reload the immutable source
+// texture for the local/reverse scans.  Two int arrays at this bound consume about 16 KiB;
+// retaining the previous four full-height arrays would exceed the cs_5_0 32 KiB limit.
+#define V2_LIMIT_MAX_VERTICAL_DIMENSION (2u * V2_MODEL_CALIBRATED_MAX_DIMENSION)
 
-groupshared int LineUpperQ30[V2_MODEL_CALIBRATED_MAX_DIMENSION];
-groupshared int LineLowerQ30[V2_MODEL_CALIBRATED_MAX_DIMENSION];
-groupshared int ForwardUpperQ30[V2_MODEL_CALIBRATED_MAX_DIMENSION];
-groupshared int ForwardLowerQ30[V2_MODEL_CALIBRATED_MAX_DIMENSION];
+groupshared int ForwardUpperQ30[V2_LIMIT_MAX_VERTICAL_DIMENSION];
+groupshared int ForwardLowerQ30[V2_LIMIT_MAX_VERTICAL_DIMENSION];
 // {forward upper end, forward lower end, backward upper end, backward lower end}
 groupshared int4 LocalEndsQ30[V2_LIMIT_THREADS];
 // {incoming forward upper, incoming forward lower, incoming backward upper, incoming backward lower}
@@ -78,7 +81,7 @@ void main(
     uint3 group_thread_id : SV_GroupThreadID) {
     uint x = group_id.x;
     if (x >= target_w || target_h == 0u || target_w == 0u ||
-        target_h > V2_MODEL_CALIBRATED_MAX_DIMENSION) {
+        target_h > V2_LIMIT_MAX_VERTICAL_DIMENSION) {
         return;
     }
 
@@ -124,40 +127,37 @@ void main(
     uint content_width = analysis_content_right > analysis_content_left ?
         analysis_content_right - analysis_content_left : 1u;
     int max_step_q30 = V2LimitStepQ30(content_width, max_decay_q30);
-    [loop]
-    for (uint load_y = lane; load_y < target_h; load_y += V2_LIMIT_THREADS) {
-        float candidate = OwnershipRefined[uint2(x, load_y)];
-        LineUpperQ30[load_y] = V2LimitUpperQ30(candidate);
-        LineLowerQ30[load_y] = V2LimitLowerQ30(candidate);
-    }
-    GroupMemoryBarrierWithGroupSync();
 
     uint chunk_start = lane * target_h / V2_LIMIT_THREADS;
     uint chunk_end = (lane + 1u) * target_h / V2_LIMIT_THREADS;
-    int forward_upper_q30 = LineUpperQ30[chunk_start];
-    int forward_lower_q30 = LineLowerQ30[chunk_start];
+    float candidate = OwnershipRefined[uint2(x, chunk_start)];
+    int forward_upper_q30 = V2LimitUpperQ30(candidate);
+    int forward_lower_q30 = V2LimitLowerQ30(candidate);
     [loop]
     for (uint local_forward_y = chunk_start + 1u;
          local_forward_y < chunk_end;
          ++local_forward_y) {
+        candidate = OwnershipRefined[uint2(x, local_forward_y)];
         forward_upper_q30 = max(
-            LineUpperQ30[local_forward_y],
+            V2LimitUpperQ30(candidate),
             forward_upper_q30 - max_step_q30);
         forward_lower_q30 = min(
-            LineLowerQ30[local_forward_y],
+            V2LimitLowerQ30(candidate),
             forward_lower_q30 + max_step_q30);
     }
-    int backward_upper_q30 = LineUpperQ30[chunk_end - 1u];
-    int backward_lower_q30 = LineLowerQ30[chunk_end - 1u];
+    candidate = OwnershipRefined[uint2(x, chunk_end - 1u)];
+    int backward_upper_q30 = V2LimitUpperQ30(candidate);
+    int backward_lower_q30 = V2LimitLowerQ30(candidate);
     [loop]
     for (int local_backward_y = (int)chunk_end - 2;
          local_backward_y >= (int)chunk_start;
          --local_backward_y) {
+        candidate = OwnershipRefined[uint2(x, (uint)local_backward_y)];
         backward_upper_q30 = max(
-            LineUpperQ30[(uint)local_backward_y],
+            V2LimitUpperQ30(candidate),
             backward_upper_q30 - max_step_q30);
         backward_lower_q30 = min(
-            LineLowerQ30[(uint)local_backward_y],
+            V2LimitLowerQ30(candidate),
             backward_lower_q30 + max_step_q30);
     }
     LocalEndsQ30[lane] = int4(
@@ -216,8 +216,9 @@ void main(
     }
     GroupMemoryBarrierWithGroupSync();
 
-    forward_upper_q30 = LineUpperQ30[chunk_start];
-    forward_lower_q30 = LineLowerQ30[chunk_start];
+    candidate = OwnershipRefined[uint2(x, chunk_start)];
+    forward_upper_q30 = V2LimitUpperQ30(candidate);
+    forward_lower_q30 = V2LimitLowerQ30(candidate);
     if (lane != 0u) {
         forward_upper_q30 = max(
             forward_upper_q30,
@@ -232,19 +233,21 @@ void main(
     for (uint replay_forward_y = chunk_start + 1u;
          replay_forward_y < chunk_end;
          ++replay_forward_y) {
+        candidate = OwnershipRefined[uint2(x, replay_forward_y)];
         forward_upper_q30 = max(
-            LineUpperQ30[replay_forward_y],
+            V2LimitUpperQ30(candidate),
             forward_upper_q30 - max_step_q30);
         forward_lower_q30 = min(
-            LineLowerQ30[replay_forward_y],
+            V2LimitLowerQ30(candidate),
             forward_lower_q30 + max_step_q30);
         ForwardUpperQ30[replay_forward_y] = forward_upper_q30;
         ForwardLowerQ30[replay_forward_y] = forward_lower_q30;
     }
     GroupMemoryBarrierWithGroupSync();
 
-    backward_upper_q30 = LineUpperQ30[chunk_end - 1u];
-    backward_lower_q30 = LineLowerQ30[chunk_end - 1u];
+    candidate = OwnershipRefined[uint2(x, chunk_end - 1u)];
+    backward_upper_q30 = V2LimitUpperQ30(candidate);
+    backward_lower_q30 = V2LimitLowerQ30(candidate);
     if (lane + 1u != V2_LIMIT_THREADS) {
         backward_upper_q30 = max(
             backward_upper_q30,
@@ -266,11 +269,12 @@ void main(
     [loop]
     for (int scan_y = (int)chunk_end - 2; scan_y >= (int)chunk_start; --scan_y) {
         write_y = (uint)scan_y;
+        candidate = OwnershipRefined[uint2(x, write_y)];
         backward_upper_q30 = max(
-            LineUpperQ30[write_y],
+            V2LimitUpperQ30(candidate),
             backward_upper_q30 - max_step_q30);
         backward_lower_q30 = min(
-            LineLowerQ30[write_y],
+            V2LimitLowerQ30(candidate),
             backward_lower_q30 + max_step_q30);
         final_upper_q30 = max(ForwardUpperQ30[write_y], backward_upper_q30);
         final_lower_q30 = min(ForwardLowerQ30[write_y], backward_lower_q30);

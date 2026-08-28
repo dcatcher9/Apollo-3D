@@ -99,8 +99,9 @@ class ProdZipDepthExporterTests(unittest.TestCase):
         fused_contract = contract_api.load_contract()["sources"]["fused_onnx"]
         self.assertEqual(
             fused_contract["sha256"],
-            "959fc90097d7055b9c56cb140f432e0f5aed533476e8cedd6ec2baae097b287f",
+            "0547dd046dead55057bb34a356d987559b2d93248e84600245f02df828d8bbb7",
         )
+        self.assertEqual(fused_contract["bytes"], 74279879)
 
     def test_tensorrt_arguments_preserve_six_fixed_profile_order(self):
         command = exporter.point_profile_build_arguments(
@@ -113,27 +114,31 @@ class ProdZipDepthExporterTests(unittest.TestCase):
         self.assertEqual(profiles, [f"--profile={index}" for index in range(6)])
         self.assertIn("--builderOptimizationLevel=5", command)
         self.assertIn(
-            "--minShapes=pixel_values:1x3x434x770,zip_pixel_values:1x3x868x1540",
+            "--minShapes=pixel_values:1x3x868x1540",
             command,
         )
         self.assertIn(
-            "--maxShapes=pixel_values:1x3x1036x434,zip_pixel_values:1x3x2072x868",
+            "--maxShapes=pixel_values:1x3x2072x868",
             command,
         )
-        expected = [(shape.width, shape.height) for shape in contract_api.supported_coarse_shapes()]
+        self.assertFalse(any("zip_pixel_values" in item for item in command))
+        expected = [
+            (shape.width, shape.height)
+            for shape in contract_api.supported_high_shapes()
+        ]
         self.assertEqual(
             expected,
             [
-                (770, 434),
-                (1022, 434),
-                (1036, 434),
-                (434, 770),
-                (434, 1022),
-                (434, 1036),
+                (1540, 868),
+                (2044, 868),
+                (2072, 868),
+                (868, 1540),
+                (868, 2044),
+                (868, 2072),
             ],
         )
 
-    def test_fused_composition_is_deterministic_and_keeps_both_outputs(self):
+    def test_fused_composition_is_deterministic_and_has_single_high_io(self):
         first = exporter.compose_fused_models(make_dummy_dav2(), make_dummy_zip_branch())
         second = exporter.compose_fused_models(make_dummy_dav2(), make_dummy_zip_branch())
         self.assertEqual(
@@ -142,23 +147,41 @@ class ProdZipDepthExporterTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(item.name for item in first.graph.input),
-            ("pixel_values", "zip_pixel_values"),
+            ("pixel_values",),
         )
         self.assertEqual(
             tuple(item.name for item in first.graph.output),
-            ("predicted_depth", "refined_depth"),
+            ("refined_depth",),
         )
-        self.assertEqual(exporter.shape_of(first.graph.input[0]), [1, 3, "height", "width"])
         self.assertEqual(
-            exporter.shape_of(first.graph.input[1]),
+            exporter.shape_of(first.graph.input[0]),
             [1, 3, "2*height", "2*width"],
         )
         self.assertEqual(
-            exporter.shape_of(first.graph.output[0]), [1, "height", "width"]
+            exporter.shape_of(first.graph.output[0]), [1, "2*height", "2*width"]
         )
+        pools = [node for node in first.graph.node if node.op_type == "AveragePool"]
+        self.assertEqual(len(pools), 1)
+        self.assertEqual(pools[0].name, "single_high_io_average_pool_2x2")
+        attributes = {
+            attribute.name: helper.get_attribute_value(attribute)
+            for attribute in pools[0].attribute
+        }
+        self.assertEqual(attributes["kernel_shape"], [2, 2])
+        self.assertEqual(attributes["strides"], [2, 2])
+        self.assertEqual(attributes["pads"], [0, 0, 0, 0])
+        self.assertEqual(attributes["ceil_mode"], 0)
+        self.assertEqual(attributes["count_include_pad"], 0)
+        internal = next(
+            value
+            for value in first.graph.value_info
+            if value.name == "dav2_pixel_values"
+        )
+        self.assertEqual(internal.type.tensor_type.elem_type, onnx.TensorProto.FLOAT)
         self.assertEqual(
-            exporter.shape_of(first.graph.output[1]), [1, "2*height", "2*width"]
+            exporter.shape_of(internal), [1, 3, "height", "width"]
         )
+        self.assertNotIn("predicted_depth", {item.name for item in first.graph.output})
         self.assertEqual(
             [(item.domain, item.version) for item in first.opset_import],
             [("", exporter.OPSET_VERSION)],

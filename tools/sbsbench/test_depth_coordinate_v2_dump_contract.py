@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -59,7 +60,71 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         cls._set_state_word(document, "renderer_authorization_bits", authorization)
         document["decoded"]["renderer_authorization_bits"] = authorization
 
+    @staticmethod
+    def _set_manifest_capture_grid(manifest, width, height):
+        for name in (
+                "shadow_coordinate", "shadow_candidate_parallax",
+                "shadow_ownership_refined_parallax", "shadow_vertical_majorant",
+                "shadow_vertical_conditioned", "shadow_final_parallax"):
+            manifest["dimensions"][name].update({"width": width, "height": height})
+        manifest["dimensions"]["model_input"].update({"width": width, "height": height})
+        manifest["dimensions"]["raw_depth"].update({"width": width, "height": height})
+
+    @staticmethod
+    def _composite_runtime_provenance():
+        contract = dump_contract.convex2x_contract.load_contract()
+        fused = contract["sources"]["fused_onnx"]
+        model = fused["logical_model"]
+        onnx_sha256 = fused["sha256"]
+        recipe = contract["tensorrt"]["engine_recipe"]
+        return {
+            "schema": contract["schema"],
+            "runtime": "dav2_zipdepth_convex2x_composite",
+            "model": model,
+            "onnx_sha256": onnx_sha256,
+            "embedded_dav2_onnx_sha256":
+                contract["sources"]["dav2"]["onnx_sha256"],
+            "zipdepth_checkpoint_sha256":
+                contract["sources"]["zipdepth"]["checkpoint_sha256"],
+            "guidance_preprocess_source_closure_sha256":
+                coordinate.MODEL_CALIBRATIONS[0].preprocess.source_closure_sha256,
+            "engine_recipe": recipe,
+            "engine_artifact": f"{model}.{recipe}.fixture-onnx{onnx_sha256}.engine",
+            "active_engine_manifest": f"{model}.active-engine.json",
+        }
+
     def setUp(self):
+        # Production readers reject every non-calibrated tensor extent. Arithmetic/byte-chain
+        # tests keep their historical 16x12 payloads through this private test-only monkeypatch;
+        # no production validation entry point accepts a fixture-mode flag.
+        self.production_capture_grid_relation = dump_contract._capture_grid_relation
+        self.production_source_capture_grid_relation = (
+            dump_contract.capture_grid_relation_for_source)
+
+        def fixture_capture_grid_relation(width, height):
+            if (width, height) == (16, 12):
+                return "test-only-fixture", 1, width, height
+            return self.production_capture_grid_relation(width, height)
+
+        patcher = mock.patch.object(
+            dump_contract, "_capture_grid_relation",
+            side_effect=fixture_capture_grid_relation)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        def fixture_source_capture_grid_relation(
+                source_width, source_height, width, height):
+            if (width, height) == (16, 12):
+                return "test-only-fixture", 1, width, height
+            return self.production_source_capture_grid_relation(
+                source_width, source_height, width, height)
+
+        source_patcher = mock.patch.object(
+            dump_contract, "capture_grid_relation_for_source",
+            side_effect=fixture_source_capture_grid_relation)
+        source_patcher.start()
+        self.addCleanup(source_patcher.stop)
+
         manifest = coordinate.load_contract()
         tag = generator.contract_tag(manifest)
         defaults = coordinate.CALIBRATED_DEFAULTS
@@ -659,6 +724,140 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             dump_contract.SUBTITLE_LOCATOR_CURRENT_WORD_OFFSET + rectangle_words)
         self.assertEqual(
             struct.pack("<I", dump_contract.SUBTITLE_LOCATOR_STATE_TAG), b"SL13")
+
+    def test_schema39_accepts_exact_single_high_grid_and_rejects_split_or_arbitrary_high(self):
+        high = copy.deepcopy(self.manifest)
+        self._set_manifest_capture_grid(high, 1540, 868)
+        high["composite_runtime_provenance"] = self._composite_runtime_provenance()
+        summary = dump_contract.validate_v2_dump_manifest_document(high)
+        self.assertEqual(summary["capture_grid_kind"], "single-high-convex2x")
+        self.assertEqual(summary["capture_grid_scale"], 2)
+        self.assertEqual(
+            (summary["embedded_dav2_width"], summary["embedded_dav2_height"]),
+            (770, 434))
+        subtitle_high = self._active_slr13_manifest(high)
+        self.assertTrue(dump_contract.validate_v2_dump_manifest_document(
+            subtitle_high)["subtitle_conditioning"]["live"])
+
+        split = copy.deepcopy(high)
+        split["dimensions"]["raw_depth"].update({"width": 770, "height": 434})
+        with self.assertRaisesRegex(ValueError, "tensor dimensions disagree"):
+            dump_contract.validate_v2_dump_manifest_document(split)
+
+        for width, height in ((1568, 868), (1008, 800)):
+            with self.subTest(arbitrary_shape=(width, height)):
+                arbitrary = copy.deepcopy(self.manifest)
+                self._set_manifest_capture_grid(arbitrary, width, height)
+                with self.assertRaisesRegex(ValueError, "neither calibrated DAV2 nor an exact"):
+                    dump_contract.validate_v2_dump_manifest_document(arbitrary)
+
+        missing = copy.deepcopy(high)
+        del missing["composite_runtime_provenance"]
+        with self.assertRaisesRegex(ValueError, "schema-2 fused composite"):
+            dump_contract.validate_v2_dump_manifest_document(missing)
+
+        stale = copy.deepcopy(high)
+        stale["composite_runtime_provenance"]["onnx_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "unauthenticated schema-2 fused composite"):
+            dump_contract.validate_v2_dump_manifest_document(stale)
+
+        legacy_claim = copy.deepcopy(self.manifest)
+        legacy_claim["composite_runtime_provenance"] = (
+            self._composite_runtime_provenance())
+        with self.assertRaisesRegex(ValueError, "legacy DAV2 dump"):
+            dump_contract.validate_v2_dump_manifest_document(legacy_claim)
+
+    def test_source_fitter_binds_all_six_exact_coarse_and_high_profiles(self):
+        cases = (
+            (1920, 1080, 770, 434),
+            (2560, 1080, 1022, 434),
+            (3440, 1440, 1036, 434),
+            (1080, 1920, 434, 770),
+            (1080, 2560, 434, 1022),
+            (1440, 3440, 434, 1036),
+        )
+        for source_width, source_height, coarse_width, coarse_height in cases:
+            with self.subTest(source=(source_width, source_height), scale=1):
+                self.assertEqual(
+                    dump_contract.fit_host_sbs_v2_depth_tensor_shape(
+                        source_width, source_height),
+                    (coarse_width, coarse_height))
+                self.assertEqual(
+                    dump_contract.expected_capture_grid_for_source(
+                        source_width, source_height, scale=1),
+                    (coarse_width, coarse_height))
+                coarse = copy.deepcopy(self.manifest)
+                for name in ("source", "analysis_source"):
+                    coarse["dimensions"][name].update({
+                        "width": source_width, "height": source_height})
+                self._set_manifest_capture_grid(
+                    coarse, coarse_width, coarse_height)
+                summary = dump_contract.validate_v2_dump_manifest_document(coarse)
+                self.assertEqual(summary["capture_grid_kind"], "legacy-dav2")
+
+            high_width, high_height = 2 * coarse_width, 2 * coarse_height
+            with self.subTest(source=(source_width, source_height), scale=2):
+                self.assertEqual(
+                    dump_contract.expected_capture_grid_for_source(
+                        source_width, source_height, scale=2),
+                    (high_width, high_height))
+                high = copy.deepcopy(coarse)
+                self._set_manifest_capture_grid(high, high_width, high_height)
+                high["composite_runtime_provenance"] = (
+                    self._composite_runtime_provenance())
+                summary = dump_contract.validate_v2_dump_manifest_document(high)
+                self.assertEqual(summary["capture_grid_kind"], "single-high-convex2x")
+                self.assertEqual(
+                    (summary["embedded_dav2_width"], summary["embedded_dav2_height"]),
+                    (coarse_width, coarse_height))
+
+    def test_manifest_rejects_a_different_supported_profile_for_the_source(self):
+        for width, height, composite in (
+                (1022, 434, False),
+                (2044, 868, True),
+                (868, 1540, True)):
+            with self.subTest(grid=(width, height)):
+                changed = copy.deepcopy(self.manifest)
+                self._set_manifest_capture_grid(changed, width, height)
+                if composite:
+                    changed["composite_runtime_provenance"] = (
+                        self._composite_runtime_provenance())
+                with self.assertRaisesRegex(ValueError, "exact source-derived production profile"):
+                    dump_contract.validate_v2_dump_manifest_document(changed)
+
+    def test_expected_capture_grid_rejects_unsupported_source_and_scale_types(self):
+        self.assertIsNone(dump_contract.expected_capture_grid_for_source(
+            1160, 496, scale=1))
+        self.assertIsNone(dump_contract.expected_capture_grid_for_source(
+            1160, 496, scale=2))
+        self.assertIsNone(dump_contract.expected_capture_grid_for_source(
+            5121, 1080, scale=1))
+        self.assertIsNone(dump_contract.expected_capture_grid_for_source(
+            True, 1080, scale=1))
+        for scale in (True, 0, 3, 2.0):
+            with self.subTest(scale=scale), self.assertRaisesRegex(
+                    ValueError, "scale must be exactly 1 or 2"):
+                dump_contract.expected_capture_grid_for_source(
+                    1920, 1080, scale=scale)
+
+    def test_production_readers_reject_subcalibration_fixture_grid(self):
+        document = copy.deepcopy(self.depth_input_region)
+        document["analysis"]["tensor_extent_px"] = {"width": 16, "height": 12}
+        document["analysis"]["tensor_content_rect_px"] = {
+            "left": 0, "top": 0, "right": 16, "bottom": 12,
+        }
+        with mock.patch.object(
+                dump_contract, "_capture_grid_relation",
+                self.production_capture_grid_relation), mock.patch.object(
+                    dump_contract, "capture_grid_relation_for_source",
+                    self.production_source_capture_grid_relation):
+            with self.assertRaisesRegex(ValueError, "exact source-derived"):
+                dump_contract.validate_depth_input_region_document(document)
+
+            manifest = copy.deepcopy(self.manifest)
+            self._set_manifest_capture_grid(manifest, 16, 12)
+            with self.assertRaisesRegex(ValueError, "neither calibrated DAV2"):
+                dump_contract.validate_v2_dump_manifest_document(manifest)
 
     def test_subtitle_selection_mirrors_strict_symmetric_corner_filter(self):
         policy = coordinate.SUBTITLE_OCR
@@ -1862,6 +2061,29 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "deterministic authenticated integer contain fit"):
             dump_contract.validate_depth_input_region_document(moved)
 
+        high_plan = dump_contract._plan_host_sbs_v2_window_region(
+            (277, 415, 2813, 1842), 3840, 2160, 1540, 868)
+        self.assertIsNotNone(high_plan)
+        _, high_content, high_padding = high_plan
+        self.assertEqual(high_content, tuple(2 * value for value in content))
+        self.assertEqual(high_padding, padding)
+        high_region = copy.deepcopy(region)
+        high_region["analysis"]["tensor_extent_px"] = {
+            "width": 1540, "height": 868}
+        high_region["analysis"]["tensor_content_rect_px"] = dict(zip(
+            ("left", "top", "right", "bottom"), high_content))
+        high_region["analysis"]["padded_area_fraction"] = high_padding
+        _, high_vertical_slope = dump_contract._roi_renderer_constants(
+            (277, 415, 2813, 1842), 3840, 2160, high_content)
+        high_region["renderer"]["outside"][
+            "vertical_slope_source_u_per_source_v"] = high_vertical_slope
+        high_decoded = dump_contract.validate_depth_input_region_document(
+            high_region, matched_frame_id=41, source_width=3840, source_height=2160,
+            tensor_width=1540, tensor_height=868)
+        self.assertEqual(high_decoded["tensor_content_rect"], high_content)
+        self.assertIsNone(dump_contract._plan_host_sbs_v2_window_region(
+            (277, 415, 2813, 1842), 3840, 2160, 1568, 868))
+
     def test_depth_input_region_rejects_forged_tensor_content_scale_slope_and_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1874,7 +2096,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     "canonical uppercase hexadecimal"),
                 "wrong-tensor": (
                     lambda value: value["analysis"]["tensor_extent_px"].update({"width": 756}),
-                    "deterministic authenticated integer contain fit"),
+                    "does not match the exact source-derived"),
                 "wrong-content": (
                     lambda value: value["analysis"]["tensor_content_rect_px"].update(
                         {"top": value["analysis"]["tensor_content_rect_px"]["top"] + 1}),
@@ -4178,6 +4400,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         at_limit = copy.deepcopy(self.manifest)
         for name in ("source", "analysis_source"):
             at_limit["dimensions"][name].update({"width": 5120, "height": 2160})
+        at_limit_shape = dump_contract.expected_capture_grid_for_source(
+            5120, 2160, scale=1)
+        self.assertIsNotNone(at_limit_shape)
+        self._set_manifest_capture_grid(at_limit, *at_limit_shape)
         dump_contract.validate_v2_dump_manifest_document(at_limit)
 
         invalid_extents = (

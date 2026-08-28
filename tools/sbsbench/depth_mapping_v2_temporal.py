@@ -65,6 +65,8 @@ try:
         CALIBRATED_DEFAULTS as V2_DEFAULTS, CONTRACT_CANONICAL_SHA256,
         CONTRACT_PATH, CONTRACT_SCHEMA, MODEL_CALIBRATIONS)
     from . import cut_state_contract, whole_clip_raw_contract
+    from . import prod_zipdepth_convex2x as convex2x_contract
+    from . import prod_zipdepth_convex2x_diagnostics_contract as convex2x_diagnostics
 except ImportError:  # Direct execution from tools/sbsbench.
     from depth_mapping_v2 import (  # type: ignore
         DIRECT_PARALLAX_SOURCE_U_LIMIT,
@@ -85,6 +87,8 @@ except ImportError:  # Direct execution from tools/sbsbench.
         CONTRACT_PATH, CONTRACT_SCHEMA, MODEL_CALIBRATIONS)
     import cut_state_contract  # type: ignore
     import whole_clip_raw_contract  # type: ignore
+    import prod_zipdepth_convex2x as convex2x_contract  # type: ignore
+    import prod_zipdepth_convex2x_diagnostics_contract as convex2x_diagnostics  # type: ignore
 
 
 RAW_PATTERN = re.compile(r"raw_(\d+)\.f32$")
@@ -461,6 +465,11 @@ def validate_v2_state_trace(
                 rel_tol=0.0, abs_tol=1.0e-12)
             for shape in calibration.calibrated_input_shapes
         }
+        calibrated_shapes.update({
+            (shape.width, shape.height)
+            for shape in convex2x_contract.supported_high_shapes()
+            if (shape.width // 2, shape.height // 2) in calibrated_shapes
+        })
         tensor_shape = producer.get("tensor_shape")
         if (not isinstance(tensor_shape, dict) or
                 set(tensor_shape) != {"width", "height"} or
@@ -1638,12 +1647,15 @@ def _load_run_model_contract(run_root: Path) -> Dict[str, object]:
             f"{run_root}: results.json has incomplete model/engine/pop contract")
     clips = payload.get("clips")
     raw_manifests = meta.get(whole_clip_raw_contract.RESULTS_META_KEY)
+    fused_manifests = meta.get(convex2x_diagnostics.RESULTS_META_KEY)
+    composite_runtime = meta.get("composite_runtime_provenance")
     if (not isinstance(clips, dict) or not clips or
             not isinstance(raw_manifests, dict) or set(raw_manifests) != set(clips)):
         raise ValueError(
             f"{run_root}: schema-{whole_clip_raw_contract.EVALUATOR_SCHEMA} results do not "
             "bind raw artifacts for the exact scored clip set")
     clip_calibrations: Dict[str, object] = {}
+    capture_grid_by_clip: Dict[str, str] = {}
     producer_calibrations: Dict[str, object] = {}
     for clip_name, manifest in raw_manifests.items():
         try:
@@ -1685,11 +1697,60 @@ def _load_run_model_contract(run_root: Path) -> Dict[str, object]:
         calibration = matches[0] if matches else None
         if calibration is not None:
             producer_calibrations[calibration.calibration_id] = calibration
+        raw_extent = raw_shape["width"], raw_shape["height"]
+        coarse_supported = (
+            calibration is not None and raw_extent in calibration.calibrated_input_shapes)
+        supported_high = {
+            (shape.width, shape.height)
+            for shape in convex2x_contract.supported_high_shapes()
+        }
+        single_high_candidate = (
+            calibration is not None and raw_extent in supported_high and
+            raw_extent[0] % 2 == 0 and raw_extent[1] % 2 == 0 and
+            (raw_extent[0] // 2, raw_extent[1] // 2) in
+            calibration.calibrated_input_shapes)
+        single_high_authenticated = False
+        if single_high_candidate:
+            if (not isinstance(composite_runtime, dict) or
+                    not isinstance(fused_manifests, dict) or
+                    set(fused_manifests) != set(clips) or
+                    clip_name not in fused_manifests):
+                raise ValueError(
+                    f"{run_root}/{clip_name}: single-high raw field lacks schema-2 fused evidence")
+            fused_manifest = fused_manifests[clip_name]
+            if (not isinstance(fused_manifest, dict) or
+                    fused_manifest.get("schema") != convex2x_diagnostics.MANIFEST_SCHEMA):
+                raise ValueError(
+                    f"{run_root}/{clip_name}: single-high raw field has stale split fused evidence")
+            try:
+                convex2x_diagnostics.authenticate_manifest_files(
+                    run_root / clip_name,
+                    fused_manifest,
+                    [int(row["frame_id"]) for row in manifest["frames"]],
+                    composite_runtime,
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    f"{run_root}/{clip_name}: invalid single-high fused evidence: {exc}") from exc
+            output_shape = fused_manifest["tensor_shapes"]["output"]
+            embedded = fused_manifest["embedded_dav2_provenance"]
+            projected_identity = {
+                key: producer_identity[key]
+                for key in (
+                    "model", "depth_model_url", "onnx_sha256", "preprocess_profile",
+                    "preprocess_source_closure_sha256")
+            }
+            if (output_shape != {
+                        "width": raw_extent[0], "height": raw_extent[1], "channels": 1} or
+                    embedded != projected_identity):
+                raise ValueError(
+                    f"{run_root}/{clip_name}: fused evidence does not bind this high raw field")
+            single_high_authenticated = True
+
         if calibration is None:
             expected_status = "abstain-unsupported-model-contract"
             expected_calibration_id = None
-        elif ((raw_shape["width"], raw_shape["height"]) not in
-              calibration.calibrated_input_shapes):
+        elif not coarse_supported and not single_high_authenticated:
             expected_status = "abstain-unsupported-shape"
             expected_calibration_id = calibration.calibration_id
         else:
@@ -1701,6 +1762,9 @@ def _load_run_model_contract(run_root: Path) -> Dict[str, object]:
                 f"{run_root}/{clip_name}: raw calibration status disagrees with the exact "
                 "producer identity and shape")
         clip_calibrations[clip_name] = calibration if expected_status == "calibrated" else None
+        if expected_status == "calibrated":
+            capture_grid_by_clip[clip_name] = (
+                "single-high-convex2x" if single_high_authenticated else "legacy-dav2")
 
     all_calibrated = all(
         manifest["calibration_status"] == "calibrated" for manifest in raw_manifests.values())
@@ -1747,6 +1811,7 @@ def _load_run_model_contract(run_root: Path) -> Dict[str, object]:
             [list(value) for value in calibration.calibrated_input_shapes]
             if calibration is not None else []),
         "calibration_by_clip": clip_calibrations,
+        "capture_grid_by_clip": capture_grid_by_clip,
         "whole_clip_raw_artifacts": raw_manifests,
     }
 
@@ -1823,8 +1888,9 @@ def _clip_sequence_input_contract(
             f"{clip_dir}: v2 replay abstains for this clip: "
             f"{manifest['abstention_reason']}")
     clip_calibration = run_model["calibration_by_clip"].get(clip_dir.name)
+    capture_grid = run_model["capture_grid_by_clip"].get(clip_dir.name)
     if (clip_calibration is None or
-            (shape[1], shape[0]) not in clip_calibration.calibrated_input_shapes or
+            capture_grid not in {"legacy-dav2", "single-high-convex2x"} or
             run_model["calibration_id"] != clip_calibration.calibration_id):
         raise ValueError(
             f"{clip_dir}: calibrated raw identity is inconsistent with the run mapping")

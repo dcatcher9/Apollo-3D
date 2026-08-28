@@ -17,10 +17,18 @@ from typing import Any, Dict, Optional
 
 try:
     from . import depth_coordinate_v2_contract as coordinate_contract
-    from .depth_coordinate_v2_dump_contract import DUMP_MANIFEST_SCHEMA
+    from . import prod_zipdepth_convex2x as convex2x_contract
+    from .depth_coordinate_v2_dump_contract import (
+        DUMP_MANIFEST_SCHEMA,
+        validate_composite_runtime_provenance,
+    )
 except ImportError:  # Direct execution from tools/sbsbench.
     import depth_coordinate_v2_contract as coordinate_contract  # type: ignore
-    from depth_coordinate_v2_dump_contract import DUMP_MANIFEST_SCHEMA  # type: ignore
+    import prod_zipdepth_convex2x as convex2x_contract  # type: ignore
+    from depth_coordinate_v2_dump_contract import (  # type: ignore
+        DUMP_MANIFEST_SCHEMA,
+        validate_composite_runtime_provenance,
+    )
 
 
 PROVENANCE_SCHEMA = coordinate_contract.CAPTURE_PROVENANCE_SCHEMA
@@ -68,6 +76,12 @@ class RawModelProvenance:
     model_input_width: Optional[int]
     model_input_height: Optional[int]
     reason: Optional[str]
+    # Schema-39 preserves the embedded DAV2 calibration while allowing the fused runtime to
+    # expose one exact convex-2x input/output grid.  Keep both extents explicit so reports never
+    # imply that a high public tensor is itself a native DAV2 binding.
+    capture_grid_kind: Optional[str] = None
+    embedded_dav2_input_width: Optional[int] = None
+    embedded_dav2_input_height: Optional[int] = None
 
     @property
     def authoritative(self) -> bool:
@@ -113,10 +127,29 @@ def _close_float_vector(actual: Any, expected: tuple[float, float, float]) -> bo
     return True
 
 
+def _capture_grid_relation(
+        calibration: coordinate_contract.ModelCalibration,
+        width: int,
+        height: int) -> tuple[str, int, int] | None:
+    """Classify one exact schema-39 tensor grid without admitting arbitrary upscales."""
+
+    if (width, height) in calibration.calibrated_input_shapes:
+        return "legacy-dav2", width, height
+    supported_high = {
+        (shape.width, shape.height)
+        for shape in convex2x_contract.supported_high_shapes()
+    }
+    if (width, height) in supported_high and width % 2 == 0 and height % 2 == 0:
+        coarse = width // 2, height // 2
+        if coarse in calibration.calibrated_input_shapes:
+            return "single-high-convex2x", coarse[0], coarse[1]
+    return None
+
+
 def _validate_model_input_contract(
         dump: Path,
         calibration: coordinate_contract.ModelCalibration,
-        manifest: Dict[str, Any]) -> tuple[int, int, str, str]:
+        manifest: Dict[str, Any]) -> tuple[int, int, str, str, str, int, int]:
     """Authenticate the exact input artifacts and validate their declared tensor semantics."""
 
     shape_path = dump / "model_input_shape.json"
@@ -130,12 +163,16 @@ def _validate_model_input_contract(
         raise ValueError("model_input_shape.json lacks width/height") from exc
     if (not isinstance(width, int) or isinstance(width, bool) or width <= 0 or
             not isinstance(height, int) or isinstance(height, bool) or height <= 0 or
-            width > expected.maximum_dimension or height > expected.maximum_dimension or
+            width > 2 * expected.maximum_dimension or
+            height > 2 * expected.maximum_dimension or
             width % expected.patch_multiple or height % expected.patch_multiple):
         raise ValueError("model_input_shape.json violates the calibrated spatial contract")
-    if (width, height) not in calibration.calibrated_input_shapes:
+    grid_relation = _capture_grid_relation(calibration, width, height)
+    if grid_relation is None:
         raise ValueError(
-            "model_input_shape.json is not an exact shape covered by the model calibration")
+            "model_input_shape.json is neither an exact calibrated DAV2 shape nor its "
+            "authenticated single-high convex-2x realization")
+    grid_kind, dav2_width, dav2_height = grid_relation
     if (shape.get("schema") != expected.model_input_schema or
             shape.get("dtype") != expected.dtype or
             shape.get("layout") != expected.layout or
@@ -152,7 +189,16 @@ def _validate_model_input_contract(
         raise ValueError("model_input.f32 byte size disagrees with model_input_shape.json")
 
     dimensions = manifest.get("dimensions")
+    model_shape = dimensions.get("model_input") if isinstance(dimensions, dict) else None
     raw_shape = dimensions.get("raw_depth") if isinstance(dimensions, dict) else None
+    if (not isinstance(model_shape, dict) or set(model_shape) != {
+            "width", "height", "channels", "layout", "dtype"} or
+            model_shape.get("width") != width or model_shape.get("height") != height or
+            model_shape.get("channels") != len(expected.channels) or
+            model_shape.get("layout") != "NCHW" or
+            model_shape.get("dtype") != expected.dtype):
+        raise ValueError(
+            "dump_manifest.json model-input dimensions disagree with its shape authority")
     if (not isinstance(raw_shape, dict) or set(raw_shape) != {
             "width", "height", "format"} or
             raw_shape.get("width") != width or raw_shape.get("height") != height or
@@ -165,7 +211,10 @@ def _validate_model_input_contract(
         raise ValueError(f"cannot inspect provenance artifact {dump / 'raw_depth.f32'}: {exc}") from exc
     if raw_size != width * height * 4:
         raise ValueError("raw_depth.f32 byte size disagrees with calibrated model-input geometry")
-    return width, height, file_sha256(input_path), file_sha256(shape_path)
+    return (
+        width, height, file_sha256(input_path), file_sha256(shape_path),
+        grid_kind, dav2_width, dav2_height,
+    )
 
 
 def inspect_dump(dump: Path) -> RawModelProvenance:
@@ -242,13 +291,24 @@ def inspect_dump(dump: Path) -> RawModelProvenance:
     if preprocess_source_closure_sha256 != calibration.preprocess.source_closure_sha256:
         raise ValueError(
             "capture-time proof has an unknown calibrated preprocess source closure")
-    width, height, input_digest, shape_digest = _validate_model_input_contract(
+    (width, height, input_digest, shape_digest, grid_kind,
+     dav2_width, dav2_height) = _validate_model_input_contract(
         dump, calibration, manifest)
     if declared_input_digest != input_digest:
         raise ValueError("model_input.f32 SHA-256 does not match its capture-time model binding")
     if declared_shape_digest != shape_digest:
         raise ValueError(
             "model_input_shape.json SHA-256 does not match its capture-time model binding")
+    composite_runtime = manifest.get("composite_runtime_provenance")
+    if grid_kind == "single-high-convex2x":
+        validate_composite_runtime_provenance(
+            composite_runtime,
+            expected_dav2_onnx_sha256=onnx_digest,
+            expected_preprocess_source_closure_sha256=
+                preprocess_source_closure_sha256)
+    elif composite_runtime is not None:
+        raise ValueError(
+            "legacy DAV2 raw capture must not claim fused composite runtime provenance")
     return RawModelProvenance(
         status="authoritative",
         source="dump_manifest.json",
@@ -268,6 +328,9 @@ def inspect_dump(dump: Path) -> RawModelProvenance:
         model_input_width=width,
         model_input_height=height,
         reason=None,
+        capture_grid_kind=grid_kind,
+        embedded_dav2_input_width=dav2_width,
+        embedded_dav2_input_height=dav2_height,
     )
 
 

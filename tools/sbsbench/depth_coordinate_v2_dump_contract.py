@@ -17,10 +17,12 @@ try:
     from . import depth_coordinate_v2_contract as coordinate_contract
     from . import generate_depth_coordinate_v2_contract as generator
     from . import host_sbs_shader_manifest as shader_manifest
+    from . import prod_zipdepth_convex2x as convex2x_contract
 except ImportError:  # Direct script/module loading from tools/sbsbench.
     import depth_coordinate_v2_contract as coordinate_contract  # type: ignore
     import generate_depth_coordinate_v2_contract as generator  # type: ignore
     import host_sbs_shader_manifest as shader_manifest  # type: ignore
+    import prod_zipdepth_convex2x as convex2x_contract  # type: ignore
 
 
 DUMP_MANIFEST_SCHEMA = 39
@@ -158,8 +160,16 @@ _REQUESTED_GAIN_AUTHENTICATION_TOLERANCE = 1.0e-7
 _PRODUCTION_DEPTH_SHORT_SIDE = 432
 _PRODUCTION_DEPTH_MAX_ASPECT = 4.0
 _PRODUCTION_CALIBRATION = coordinate_contract.MODEL_CALIBRATIONS[0]
-_AUTHENTICATED_TENSOR_SHAPES = frozenset(
+_AUTHENTICATED_DAV2_TENSOR_SHAPES = frozenset(
     _PRODUCTION_CALIBRATION.calibrated_input_shapes)
+_AUTHENTICATED_SINGLE_HIGH_TENSOR_SHAPES = frozenset(
+    (shape.width, shape.height)
+    for shape in convex2x_contract.supported_high_shapes())
+_COMPOSITE_RUNTIME_PROVENANCE_KEYS = {
+    "schema", "runtime", "model", "onnx_sha256", "embedded_dav2_onnx_sha256",
+    "zipdepth_checkpoint_sha256", "guidance_preprocess_source_closure_sha256",
+    "engine_recipe", "engine_artifact", "active_engine_manifest",
+}
 _MAXIMUM_SOURCE_LONG_SIDE = 5120
 _MAXIMUM_SOURCE_PIXELS = 5120 * 2160
 
@@ -1077,8 +1087,8 @@ def _pixel_rect(value: Any, label: str) -> tuple[int, int, int, int]:
     return left, top, right, bottom
 
 
-def _fit_host_sbs_v2_depth_tensor_shape(width: int, height: int) -> tuple[int, int]:
-    """Small dependency-free mirror of the production patch-aligned shape fitter."""
+def fit_host_sbs_v2_depth_tensor_shape(width: int, height: int) -> tuple[int, int]:
+    """Return the exact production DAV2 coarse shape derived from a source extent."""
 
     patch = _PRODUCTION_CALIBRATION.preprocess.patch_multiple
     maximum = _PRODUCTION_CALIBRATION.preprocess.maximum_dimension
@@ -1088,7 +1098,7 @@ def _fit_host_sbs_v2_depth_tensor_shape(width: int, height: int) -> tuple[int, i
         quotient = _float32(_float32(value) / _float32(float(patch)))
         return max(patch, int(math.floor(quotient + 0.5)) * patch)
 
-    if width <= 0 or height <= 0:
+    if type(width) is not int or type(height) is not int or width <= 0 or height <= 0:
         return 0, 0
     aspect = _float32(_float32(float(width)) / _float32(float(height)))
     max_aspect = _float32(_PRODUCTION_DEPTH_MAX_ASPECT)
@@ -1116,6 +1126,113 @@ def _fit_host_sbs_v2_depth_tensor_shape(width: int, height: int) -> tuple[int, i
     return patch, patch
 
 
+def expected_capture_grid_for_source(
+        source_width: int, source_height: int, *, scale: int) -> tuple[int, int] | None:
+    """Return the exact calibrated coarse or single-high grid for a source extent.
+
+    ``scale=1`` selects the legacy DAV2 grid and ``scale=2`` selects the fused public grid.
+    Sources whose fitted DAV2 shape is not one of the six calibrated point profiles have no
+    production grid and return ``None``.
+    """
+
+    if type(scale) is not int or scale not in (1, 2):
+        raise ValueError("capture-grid scale must be exactly 1 or 2")
+    if (type(source_width) is not int or type(source_height) is not int or
+            source_width <= 0 or source_height <= 0 or
+            max(source_width, source_height) > _MAXIMUM_SOURCE_LONG_SIDE or
+            source_width * source_height > _MAXIMUM_SOURCE_PIXELS):
+        return None
+    coarse = fit_host_sbs_v2_depth_tensor_shape(source_width, source_height)
+    if coarse not in _AUTHENTICATED_DAV2_TENSOR_SHAPES:
+        return None
+    if scale == 1:
+        return coarse
+    high = (2 * coarse[0], 2 * coarse[1])
+    return high if high in _AUTHENTICATED_SINGLE_HIGH_TENSOR_SHAPES else None
+
+
+# Retain the private spelling for existing internal callers while keeping one implementation.
+_fit_host_sbs_v2_depth_tensor_shape = fit_host_sbs_v2_depth_tensor_shape
+
+
+def _capture_grid_relation(
+        width: int, height: int) -> tuple[str, int, int, int] | None:
+    """Return ``(kind, scale, DAV2 width, DAV2 height)`` for an exact live grid."""
+
+    if (width, height) in _AUTHENTICATED_DAV2_TENSOR_SHAPES:
+        return "legacy-dav2", 1, width, height
+    if ((width, height) in _AUTHENTICATED_SINGLE_HIGH_TENSOR_SHAPES and
+            width % 2 == 0 and height % 2 == 0 and
+            (width // 2, height // 2) in _AUTHENTICATED_DAV2_TENSOR_SHAPES):
+        return "single-high-convex2x", 2, width // 2, height // 2
+    return None
+
+
+def capture_grid_relation_for_source(
+        source_width: int, source_height: int,
+        width: int, height: int) -> tuple[str, int, int, int] | None:
+    """Classify a grid only when it is the exact profile derived from its source extent."""
+
+    relation = _capture_grid_relation(width, height)
+    if relation is None:
+        return None
+    expected = expected_capture_grid_for_source(
+        source_width, source_height, scale=relation[1])
+    return relation if expected == (width, height) else None
+
+
+def validate_composite_runtime_provenance(
+        value: Any, *, expected_dav2_onnx_sha256: str | None = None,
+        expected_preprocess_source_closure_sha256: str | None = None) -> Dict[str, Any]:
+    """Authenticate schema-2 fused runtime evidence against the frozen production contract."""
+
+    if not isinstance(value, dict) or set(value) != _COMPOSITE_RUNTIME_PROVENANCE_KEYS:
+        raise ValueError(
+            "dump_manifest.json lacks exact schema-2 fused composite runtime provenance")
+    contract = convex2x_contract.load_contract()
+    sources = contract["sources"]
+    fused = sources["fused_onnx"]
+    dav2 = sources["dav2"]
+    zipdepth = sources["zipdepth"]
+    tensorrt = contract["tensorrt"]
+    model = str(fused["logical_model"])
+    onnx_sha256 = str(fused["sha256"])
+    dav2_sha256 = str(dav2["onnx_sha256"])
+    zipdepth_sha256 = str(zipdepth["checkpoint_sha256"])
+    engine_recipe = str(tensorrt["engine_recipe"])
+    engine_prefix = f"{model}.{engine_recipe}."
+    engine_suffix = f"-onnx{onnx_sha256}.engine"
+    engine_artifact = value.get("engine_artifact")
+    active_manifest = f"{model}.active-engine.json"
+    if (value.get("schema") != int(contract["schema"]) or
+            value.get("runtime") != "dav2_zipdepth_convex2x_composite" or
+            value.get("model") != model or
+            value.get("onnx_sha256") != onnx_sha256 or
+            value.get("embedded_dav2_onnx_sha256") != dav2_sha256 or
+            value.get("zipdepth_checkpoint_sha256") != zipdepth_sha256 or
+            value.get("guidance_preprocess_source_closure_sha256") !=
+            _PRODUCTION_CALIBRATION.preprocess.source_closure_sha256 or
+            value.get("engine_recipe") != engine_recipe or
+            not isinstance(engine_artifact, str) or
+            "/" in engine_artifact or "\\" in engine_artifact or
+            len(engine_artifact) <= len(engine_prefix) + len(engine_suffix) or
+            not engine_artifact.startswith(engine_prefix) or
+            not engine_artifact.endswith(engine_suffix) or
+            value.get("active_engine_manifest") != active_manifest):
+        raise ValueError(
+            "dump_manifest.json has unauthenticated schema-2 fused composite runtime provenance")
+    if (expected_dav2_onnx_sha256 is not None and
+            dav2_sha256 != expected_dav2_onnx_sha256):
+        raise ValueError(
+            "dump_manifest.json fused composite does not embed the captured DAV2 model")
+    if (expected_preprocess_source_closure_sha256 is not None and
+            value["guidance_preprocess_source_closure_sha256"] !=
+            expected_preprocess_source_closure_sha256):
+        raise ValueError(
+            "dump_manifest.json fused composite does not bind the captured preprocess closure")
+    return dict(value)
+
+
 def _plan_host_sbs_v2_window_region(
         semantic: tuple[int, int, int, int], source_width: int, source_height: int,
         tensor_width: int, tensor_height: int
@@ -1125,27 +1242,34 @@ def _plan_host_sbs_v2_window_region(
     left, top, right, bottom = semantic
     width = right - left
     height = bottom - top
+    grid = capture_grid_relation_for_source(
+        source_width, source_height, tensor_width, tensor_height)
     if (width <= 0 or height <= 0 or right > source_width or bottom > source_height or
-            (tensor_width, tensor_height) not in _AUTHENTICATED_TENSOR_SHAPES or
-            semantic == (0, 0, source_width, source_height)):
+            grid is None or semantic == (0, 0, source_width, source_height)):
         return None
+
+    # Production chooses the ROI contain fit in the calibrated embedded-DAV2 grid. The fused
+    # single-high path then realizes that exact rectangle at 2x; planning independently in the
+    # high grid would silently authorize rounding variants that the producer cannot emit.
+    _, scale, plan_width, plan_height = grid
 
     content_left = 0
     content_top = 0
-    content_right = tensor_width
-    content_bottom = tensor_height
-    if width * tensor_height > height * tensor_width:
-        content_height = max(1, tensor_width * height // width)
-        content_top = (tensor_height - content_height) // 2
+    content_right = plan_width
+    content_bottom = plan_height
+    if width * plan_height > height * plan_width:
+        content_height = max(1, plan_width * height // width)
+        content_top = (plan_height - content_height) // 2
         content_bottom = content_top + content_height
-    elif width * tensor_height < height * tensor_width:
-        content_width = max(1, tensor_height * width // height)
-        content_left = (tensor_width - content_width) // 2
+    elif width * plan_height < height * plan_width:
+        content_width = max(1, plan_height * width // height)
+        content_left = (plan_width - content_width) // 2
         content_right = content_left + content_width
-    content = (content_left, content_top, content_right, content_bottom)
+    coarse_content = (content_left, content_top, content_right, content_bottom)
     content_area = (content_right - content_left) * (content_bottom - content_top)
     padded_fraction = _float32(
-        1.0 - content_area / (tensor_width * tensor_height))
+        1.0 - content_area / (plan_width * plan_height))
+    content = tuple(scale * value for value in coarse_content)
     return semantic, content, padded_fraction
 
 
@@ -1269,6 +1393,10 @@ def validate_depth_input_region_document(
     if ((tensor_width is not None and tensor_w != tensor_width) or
             (tensor_height is not None and tensor_h != tensor_height)):
         raise ValueError("depth_input_region.json tensor extent does not match dumped geometry")
+    if capture_grid_relation_for_source(width, height, tensor_w, tensor_h) is None:
+        raise ValueError(
+            "depth_input_region.json tensor extent does not match the exact source-derived "
+            "calibrated DAV2 or single-high convex-2x grid")
     tensor_content = _pixel_rect(
         analysis.get("tensor_content_rect_px"), "depth input tensor content rectangle")
     if tensor_content[2] > tensor_w or tensor_content[3] > tensor_h:
@@ -2592,10 +2720,29 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
 
         geometry_width = expected_dimensions["width"]
         geometry_height = expected_dimensions["height"]
-        if subtitle_live and (
-                geometry_width, geometry_height) not in _AUTHENTICATED_TENSOR_SHAPES:
+        capture_grid = _capture_grid_relation(geometry_width, geometry_height)
+        if capture_grid is None:
             raise ValueError(
-                "active SLR13 subtitle conditioning requires a calibrated DAV2 field")
+                "active V2 geometry is neither calibrated DAV2 nor an exact single-high grid")
+        composite_runtime = document.get("composite_runtime_provenance")
+        if capture_grid[0] == "single-high-convex2x":
+            raw_proof = document.get(coordinate_contract.CAPTURE_PROVENANCE_KEY)
+            expected_dav2 = (
+                raw_proof.get("onnx_sha256") if isinstance(raw_proof, dict) else None)
+            expected_preprocess = (
+                raw_proof.get("preprocess_source_closure_sha256")
+                if isinstance(raw_proof, dict) else None)
+            validate_composite_runtime_provenance(
+                composite_runtime,
+                expected_dav2_onnx_sha256=expected_dav2,
+                expected_preprocess_source_closure_sha256=expected_preprocess)
+        elif composite_runtime is not None:
+            raise ValueError(
+                "legacy DAV2 dump must not claim fused composite runtime provenance")
+        if subtitle_live and not coordinate_contract.subtitle_ocr_field_is_calibrated(
+                geometry_width, geometry_height):
+            raise ValueError(
+                "active SLR13 subtitle conditioning requires a calibrated live field")
         model_dimensions = dimensions.get("model_input")
         raw_dimensions = dimensions.get("raw_depth")
         source_dimensions = dimensions.get("source")
@@ -2643,6 +2790,13 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
                     extent_width * extent_height > _MAXIMUM_SOURCE_PIXELS):
                 raise ValueError(
                     f"dump_manifest.json {label} dimensions exceed supported Host SBS V2 bounds")
+        source_capture_grid = capture_grid_relation_for_source(
+            source_dimensions["width"], source_dimensions["height"],
+            geometry_width, geometry_height)
+        if source_capture_grid is None:
+            raise ValueError(
+                "active V2 geometry does not match the exact source-derived production profile")
+        capture_grid = source_capture_grid
     elif any(value is not None for value in geometry_dimensions):
         raise ValueError("dump_manifest.json exposes inactive V2 geometry dimensions")
     if not subtitle_live and (
@@ -2698,6 +2852,11 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         "ownership_refined_available": active,
         "vertical_majorant_available": active,
         "vertical_conditioned_available": active,
+        "capture_grid_kind": capture_grid[0],
+        "capture_grid_scale": capture_grid[1],
+        "embedded_dav2_width": capture_grid[2],
+        "embedded_dav2_height": capture_grid[3],
+        "composite_runtime_authenticated": composite_runtime is not None,
         "depth_input_region_available": True,
         "depth_input_mode": input_mode,
         "position_authority": (
@@ -3640,7 +3799,7 @@ def _replay_slr13_conditioner(
             abs(target32) > np.float32(_DEFAULTS.direct_container_limit)):
         raise ValueError("SLR13 target exceeds its authenticated representation limit")
 
-    if ((width, height) not in _AUTHENTICATED_TENSOR_SHAPES or
+    if (not coordinate_contract.subtitle_ocr_field_is_calibrated(width, height) or
             width != subtitle.get("field_width") or
             height != subtitle.get("field_height")):
         raise ValueError("SLR13 conditioner field does not match its calibrated authority")
@@ -4491,7 +4650,11 @@ __all__ = [
     "generate_float_artifact_previews",
     "shadow_frame_valid_from_statistics",
     "shadow_state_constant_float32",
+    "fit_host_sbs_v2_depth_tensor_shape",
+    "expected_capture_grid_for_source",
+    "capture_grid_relation_for_source",
     "validate_depth_input_region_document",
+    "validate_composite_runtime_provenance",
     "validate_gpu_trace_contract_document",
     "validate_gpu_trace_ring",
     "validate_subtitle_locator_state",

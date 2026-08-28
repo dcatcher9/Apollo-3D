@@ -3,7 +3,7 @@
 
 The script intentionally writes the large ONNX and TensorRT products outside
 the repository.  Source identities and the six point-profile order come from
-``contracts/prod-zipdepth-convex2x-v1.json``; callers cannot silently substitute
+``contracts/prod-zipdepth-convex2x-v2.json``; callers cannot silently substitute
 another DAV2 graph, ZipDepth commit, or checkpoint under the production name.
 """
 
@@ -31,11 +31,11 @@ import prod_zipdepth_convex2x as contract_api  # noqa: E402
 
 
 EXPORTER_NAME = "apollo-prod-zipdepth-convex2x-exporter"
-EXPORTER_VERSION = "1"
+EXPORTER_VERSION = "2"
 OPSET_VERSION = 18
 BRANCH_FILENAME = "zipdepth_mask_convex2x_dynamic_opset18.onnx"
-FUSED_FILENAME = "prod_dav2_zipdepth_convex2x_dynamic_opset18.onnx"
-PLAN_FILENAME = "prod_dav2_zipdepth_convex2x_dynamic_six_profiles.plan"
+FUSED_FILENAME = "prod_dav2_zipdepth_c2x_high_opset18.onnx"
+PLAN_FILENAME = "prod_dav2_zipdepth_c2x_high_six_profiles.plan"
 
 
 def sha256_file(path: Path) -> str:
@@ -245,7 +245,13 @@ def compose_fused_models(
     dav2_original: onnx.ModelProto,
     zip_branch_original: onnx.ModelProto,
 ) -> onnx.ModelProto:
-    """Compose the two frozen graphs while keeping coarse DAV2 public."""
+    """Compose the frozen graphs behind one high-resolution public boundary.
+
+    The host supplies only the exact 2x RGB tensor.  A typed FP32 AveragePool
+    produces DAV2's original coarse input inside the graph; the untouched high
+    tensor independently feeds the frozen ZipDepth mask branch.  DAV2's coarse
+    prediction remains an internal edge into the convex reconstruction.
+    """
 
     if [(item.domain, item.version) for item in dav2_original.opset_import] != [("", 14)]:
         raise ValueError("production DAV2 source must use the frozen opset-14 contract")
@@ -269,7 +275,39 @@ def compose_fused_models(
     dav2 = version_converter.convert_version(dav2_original, OPSET_VERSION)
     zip_branch = onnx.ModelProto()
     zip_branch.CopyFrom(zip_branch_original)
-    set_shape(dav2.graph.input[0], [1, 3, "height", "width"])
+
+    # Retarget the existing DAV2 graph to an internal coarse tensor, then make
+    # its former public input the single 2x tensor. AveragePool inherits FP32
+    # from that input and has no padding, so every supported even-sized point
+    # profile is an exact average over disjoint 2x2 cells.
+    for node in dav2.graph.node:
+        for index, value in enumerate(node.input):
+            if value == "pixel_values":
+                node.input[index] = "dav2_pixel_values"
+    dav2.graph.input[0].name = "pixel_values"
+    set_shape(dav2.graph.input[0], [1, 3, "2*height", "2*width"])
+    dav2.graph.value_info.insert(
+        0,
+        helper.make_tensor_value_info(
+            "dav2_pixel_values",
+            onnx.TensorProto.FLOAT,
+            [1, 3, "height", "width"],
+        ),
+    )
+    dav2.graph.node.insert(
+        0,
+        helper.make_node(
+            "AveragePool",
+            ["pixel_values"],
+            ["dav2_pixel_values"],
+            name="single_high_io_average_pool_2x2",
+            kernel_shape=[2, 2],
+            strides=[2, 2],
+            pads=[0, 0, 0, 0],
+            ceil_mode=0,
+            count_include_pad=0,
+        ),
+    )
     set_shape(dav2.graph.output[0], [1, "height", "width"])
     shared_ir = max(dav2.ir_version, zip_branch.ir_version)
     dav2.ir_version = shared_ir
@@ -279,26 +317,29 @@ def compose_fused_models(
         dav2,
         prefixed,
         io_map=[("predicted_depth", "zip_predicted_depth")],
-        name="prod_dav2_plus_frozen_zipdepth_dynamic_convex2x",
+        name="prod_dav2_plus_frozen_zipdepth_single_high_io_convex2x",
     )
-    rename_value(fused, "zip_zip_pixel_values", "zip_pixel_values")
     rename_value(fused, "zip_refined_depth", "refined_depth")
-    fused.graph.output.insert(
-        0,
-        helper.make_tensor_value_info(
-            "predicted_depth", onnx.TensorProto.FLOAT, [1, "height", "width"]
-        ),
-    )
+
+    # Both branches consume the same public high-resolution tensor. Do this as
+    # an input alias rather than an Identity so TensorRT sees exactly one input
+    # binding and can fuse/plan directly from it.
+    zip_input_name = "zip_zip_pixel_values"
+    for node in fused.graph.node:
+        for index, value in enumerate(node.input):
+            if value == zip_input_name:
+                node.input[index] = "pixel_values"
+    retained_inputs = [item for item in fused.graph.input if item.name != zip_input_name]
+    fused.graph.ClearField("input")
+    fused.graph.input.extend(retained_inputs)
 
     inputs = {item.name: item for item in fused.graph.input}
     outputs = {item.name: item for item in fused.graph.output}
-    if set(inputs) != {"pixel_values", "zip_pixel_values"}:
+    if set(inputs) != {"pixel_values"}:
         raise ValueError(f"unexpected fused inputs: {tuple(inputs)}")
-    if set(outputs) != {"predicted_depth", "refined_depth"}:
+    if set(outputs) != {"refined_depth"}:
         raise ValueError(f"unexpected fused outputs: {tuple(outputs)}")
-    set_shape(inputs["pixel_values"], [1, 3, "height", "width"])
-    set_shape(inputs["zip_pixel_values"], [1, 3, "2*height", "2*width"])
-    set_shape(outputs["predicted_depth"], [1, "height", "width"])
+    set_shape(inputs["pixel_values"], [1, 3, "2*height", "2*width"])
     set_shape(outputs["refined_depth"], [1, "2*height", "2*width"])
 
     # merge_models repeats the identical default-domain opset import. Canonicalize
@@ -306,12 +347,12 @@ def compose_fused_models(
     fused.ClearField("opset_import")
     fused.opset_import.append(helper.make_opsetid("", OPSET_VERSION))
     canonicalize_export_metadata(
-        fused, "prod_dav2_plus_frozen_zipdepth_dynamic_convex2x"
+        fused, "prod_dav2_plus_frozen_zipdepth_single_high_io_convex2x"
     )
     _require_model_boundary(
         fused,
-        ("pixel_values", "zip_pixel_values"),
-        ("predicted_depth", "refined_depth"),
+        ("pixel_values",),
+        ("refined_depth",),
         "fused model",
     )
     onnx.checker.check_model(fused, full_check=True)
@@ -451,11 +492,11 @@ def point_profile_build_arguments(
     onnx_path: Path,
     plan_path: Path,
     builder_optimization_level: int,
-    coarse_shapes: Sequence[contract_api.Shape] | None = None,
+    high_shapes: Sequence[contract_api.Shape] | None = None,
 ) -> list[str]:
     if builder_optimization_level < 0 or builder_optimization_level > 5:
         raise ValueError("TensorRT builder optimization level must be in [0,5]")
-    shapes = tuple(coarse_shapes or contract_api.supported_coarse_shapes())
+    shapes = tuple(high_shapes or contract_api.supported_high_shapes())
     arguments = [
         os.fspath(trtexec),
         f"--onnx={onnx_path}",
@@ -465,10 +506,7 @@ def point_profile_build_arguments(
         "--memPoolSize=workspace:4096",
     ]
     for index, shape in enumerate(shapes):
-        binding_shapes = (
-            f"pixel_values:1x3x{shape.height}x{shape.width},"
-            f"zip_pixel_values:1x3x{2 * shape.height}x{2 * shape.width}"
-        )
+        binding_shapes = f"pixel_values:1x3x{shape.height}x{shape.width}"
         arguments.extend(
             [
                 f"--profile={index}",
@@ -516,10 +554,10 @@ def build_tensorrt_engine(
         "profiles": [
             {
                 "index": index,
-                "coarse_wh": [shape.width, shape.height],
-                "guidance_wh": [2 * shape.width, 2 * shape.height],
+                "high_input_output_wh": [shape.width, shape.height],
+                "internal_dav2_wh": [shape.width // 2, shape.height // 2],
             }
-            for index, shape in enumerate(contract_api.supported_coarse_shapes())
+            for index, shape in enumerate(contract_api.supported_high_shapes())
         ],
         "log": file_record(log_path),
         "plan": file_record(plan_path),

@@ -88,7 +88,8 @@ first requires and verifies the current `sunshine` target, then binds the execut
 runtime shader tree, DAV2
 engine/ONNX, OCR engine/contract ONNX, and generated coordinate contract across both serial legs.
 The default gate requires at least one actual reuse and proves that every reuse retained the
-preceding raw DAV2 field bit-exactly. Ordinary subtitle work also holds SLR80, condition parameters,
+preceding public raw-model field bit-exactly (legacy DAV2 output or fused `refined_depth`). Ordinary
+subtitle work also holds SLR80, condition parameters,
 and `final_parallax_<frame-id>.f32`; cadence-due work may instead publish a current subtitle
 observation on the reused depth. The authenticated trace distinguishes those cases and rejects an
 ordinary OCR marker on reuse. The runner derives GPU history-owner age from both the frame ID and
@@ -109,7 +110,7 @@ This replay deliberately supplies no Desktop Duplication damage history, live wi
 or encode-deadline scheduling. Those remain live admission inputs. Request formation, opaque
 chaining, force-completion release, estimator, conditioner, renderer, and GPU trace are the same
 production code, so the offline path does not maintain a second infer/reuse state machine.
-The runner uses private replay harness schemas 27 (force oracle) and 26 (conditional treatment),
+The runner uses private replay harness schemas 29 (force oracle) and 28 (conditional treatment),
 plus metadata schema 3, leaving formal `run_eval.py` schema 22 and its baseline evidence untouched.
 
 Host SBS V2 has no model/profile selector. Production and the maintained benchmark harness use the

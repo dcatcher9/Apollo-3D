@@ -9,6 +9,7 @@ quickly while changing a metric implementation.
 import ast
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 import tempfile
@@ -1245,6 +1246,18 @@ class ReportEvidenceContractTests(unittest.TestCase):
                     os.path.join(artifact_dir, "depth_00000.png"))
                 mapping.astype("<f4").tofile(
                     os.path.join(artifact_dir, "warp_map_00000.f32"))
+                np.zeros((height, eye_width), dtype="<f4").tofile(
+                    os.path.join(artifact_dir, "raw_00000.f32"))
+                with open(os.path.join(artifact_dir, "raw_shape.json"), "w",
+                          encoding="utf-8") as stream:
+                    json.dump({
+                        "schema": run_eval.whole_clip_raw_contract.RAW_SHAPE_SCHEMA,
+                        "width": eye_width,
+                        "height": height,
+                        "dtype": "float32-le",
+                        "layout": "row-major",
+                        "stage": run_eval.whole_clip_raw_contract.RAW_STAGE,
+                    }, stream)
                 with open(os.path.join(artifact_dir, "warp_map_shape.json"), "w",
                           encoding="utf-8") as stream:
                     json.dump(shape, stream)
@@ -1269,6 +1282,13 @@ class ReportEvidenceContractTests(unittest.TestCase):
                             "legacy_levers_applied": False,
                         },
                         "raw_model_provenance": {
+                            "schema": 1,
+                            "model": "depth_anything_v2_fp16",
+                            "depth_model_url":
+                                "https://example.invalid/depth-anything-v2.onnx",
+                            "onnx_sha256": "2" * 64,
+                            "preprocess_profile": "",
+                            "preprocess_source_closure_sha256": "0" * 64,
                             "raw_width": eye_width,
                             "raw_height": height,
                         },
@@ -1313,7 +1333,7 @@ class ReportEvidenceContractTests(unittest.TestCase):
                 "executable_sha256": "exe",
                 "runtime_shader_sha256": "shader",
                 "engine_sha256": "engine",
-                "onnx_sha256": "onnx",
+                "onnx_sha256": "2" * 64,
                 "model": "depth_anything_v2_fp16",
                 "depth_model_url": "https://example.invalid/depth-anything-v2.onnx",
                 "eval_schema": run_eval.EVAL_SCHEMA,
@@ -1337,6 +1357,19 @@ class ReportEvidenceContractTests(unittest.TestCase):
             def result(run_name, run_dir):
                 meta = dict(common_meta)
                 meta["run_name"] = run_name
+                raw_manifest = run_eval.whole_clip_raw_contract.build_manifest(
+                    Path(run_dir) / "demo", [0], {
+                        "model": meta["model"],
+                        "depth_model_url": meta["depth_model_url"],
+                        "onnx_sha256": meta["onnx_sha256"],
+                        "preprocess_profile": "",
+                        "preprocess_source_closure_sha256":
+                            meta["preprocess_source_closure_sha256"],
+                        "calibration_id": None,
+                    })
+                meta[run_eval.whole_clip_raw_contract.RESULTS_META_KEY] = {
+                    "demo": raw_manifest,
+                }
                 artifact_hash = run_eval.scored_artifact_sha256(os.path.join(run_dir, "demo"))
                 meta["scored_artifact_sha256"] = {"demo": artifact_hash}
                 entry_meta = {
@@ -1354,6 +1387,12 @@ class ReportEvidenceContractTests(unittest.TestCase):
                     "source_artifacts": [
                         "A baked source edge used to verify audit ordering.",
                     ],
+                    "raw_model_identity": {
+                        "calibration_status": raw_manifest["calibration_status"],
+                        "calibration_id": raw_manifest["calibration_id"],
+                        "preprocess_profile": "",
+                        "raw_shape": raw_manifest["raw_shape"],
+                    },
                 }
                 rows, aggregate = sbsbench.measure_sequence(
                     os.path.join(run_dir, "demo"), clip_dir)

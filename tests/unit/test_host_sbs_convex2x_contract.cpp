@@ -4,6 +4,7 @@
  */
 
 #include <src/host_sbs_resolution.h>
+#include <src/model_manager.h>
 #include <src/prod_zipdepth_convex2x.h>
 #include <src/video_depth_estimator.h>
 
@@ -29,6 +30,14 @@ namespace {
       EXPECT_EQ(refined->height, 2 * coarse.height);
       EXPECT_TRUE(models::host_sbs_convex2x_shape_relation(coarse, *refined));
       EXPECT_TRUE(models::host_sbs_convex2x_operator_shape_is_supported(coarse));
+      EXPECT_TRUE(
+        models::prod_zipdepth_convex2x::live_geometry_shape_relation(
+          static_cast<std::uint32_t>(coarse.width),
+          static_cast<std::uint32_t>(coarse.height),
+          static_cast<std::uint32_t>(refined->width),
+          static_cast<std::uint32_t>(refined->height)
+        )
+      );
     }
   }
 
@@ -99,38 +108,88 @@ namespace {
     using enum models::prod_zipdepth_convex2x::engine_io_e;
     using models::prod_zipdepth_convex2x::classify_named_io;
     EXPECT_EQ(
-      classify_named_io(2u, true, false, true, false),
+      classify_named_io(2u, true, true, false),
       production_dav2
     );
     EXPECT_EQ(
-      classify_named_io(4u, true, true, true, true),
+      classify_named_io(2u, true, false, true),
       production_dav2_zipdepth_convex2x
     );
-    EXPECT_EQ(classify_named_io(3u, true, true, true, false), invalid);
-    EXPECT_EQ(classify_named_io(5u, true, true, true, true), invalid);
+    EXPECT_EQ(classify_named_io(3u, true, true, true), invalid);
+    EXPECT_EQ(classify_named_io(2u, true, true, true), invalid);
+    EXPECT_EQ(classify_named_io(2u, false, false, true), invalid);
   }
 
-  TEST(HostSbsConvex2xContract, FreezesOnePointProfilePerProductionShape) {
+  TEST(HostSbsConvex2xContract, FreezesOneHighPointProfilePerProductionShape) {
     using namespace models::prod_zipdepth_convex2x;
     static_assert(fixed_profile_shapes.size() == 6u);
+    constexpr std::array expected {
+      high_shape_t {1540u, 868u},
+      high_shape_t {2044u, 868u},
+      high_shape_t {2072u, 868u},
+      high_shape_t {868u, 1540u},
+      high_shape_t {868u, 2044u},
+      high_shape_t {868u, 2072u},
+    };
+    EXPECT_EQ(fixed_profile_shapes, expected);
     for (std::uint32_t index = 0u; index < fixed_profile_shapes.size(); ++index) {
       const auto shape = fixed_profile_shapes[index];
       EXPECT_EQ(fixed_profile_index(shape.width, shape.height), index);
     }
     EXPECT_FALSE(fixed_profile_index(434u, 434u));
-    EXPECT_FALSE(fixed_profile_index(770u, 436u));
+    EXPECT_FALSE(fixed_profile_index(1540u, 870u));
+  }
+
+  TEST(HostSbsConvex2xContract, EveryProfileFitsCheckedHighGridCapacities) {
+    using namespace models::prod_zipdepth_convex2x;
+    constexpr std::array expected_tile_counts {
+      5335u, 7040u, 7150u, 5335u, 7040u, 7150u,
+    };
+    std::uint32_t observed_maximum = 0u;
+    for (std::size_t index = 0u; index < fixed_profile_shapes.size(); ++index) {
+      const auto shape = fixed_profile_shapes[index];
+      const auto layout = models::detail::checked_near_identical_tile_layout(
+        shape.width, shape.height
+      );
+      ASSERT_TRUE(layout);
+      EXPECT_EQ(layout->group_count, expected_tile_counts[index]);
+      EXPECT_EQ(layout->group_count, near_identical_tile_group_count(shape));
+      EXPECT_EQ(layout->word_count, 4u * layout->group_count);
+      EXPECT_EQ(layout->byte_count, 16u * layout->group_count);
+      EXPECT_LE(layout->group_width, 65535u);
+      EXPECT_LE(layout->group_height, 65535u);
+      EXPECT_LE(shape.width, 65535u);
+      EXPECT_LE(shape.height, 65535u);
+      observed_maximum = std::max(observed_maximum, layout->group_count);
+    }
+    EXPECT_EQ(observed_maximum, near_identical_max_tile_group_count);
+    EXPECT_EQ(observed_maximum, 7150u);
+    EXPECT_TRUE(models::fused_depth_profile_contracts_match);
+    EXPECT_FALSE(models::detail::checked_near_identical_tile_layout(0u, 868u));
+    EXPECT_FALSE(models::detail::checked_near_identical_tile_layout(
+      std::numeric_limits<std::uint32_t>::max(),
+      std::numeric_limits<std::uint32_t>::max()
+    ));
   }
 
   TEST(HostSbsConvex2xContract, FreezesCompositeAndEmbeddedModelIdentity) {
     using namespace models::prod_zipdepth_convex2x;
-    EXPECT_EQ(logical_model, "prod_dav2_zipdepth_convex2x_dynamic_opset18");
+    EXPECT_EQ(contract_schema, 2u);
+    EXPECT_EQ(
+      logical_model,
+      "prod_dav2_zipdepth_c2x_high_opset18"
+    );
+    EXPECT_EQ(
+      engine_recipe,
+      "trt-6high-point-l5-v2"
+    );
     EXPECT_EQ(
       dav2_onnx_sha256,
       "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04"
     );
     EXPECT_EQ(
       fused_onnx_sha256,
-      "959fc90097d7055b9c56cb140f432e0f5aed533476e8cedd6ec2baae097b287f"
+      "0547dd046dead55057bb34a356d987559b2d93248e84600245f02df828d8bbb7"
     );
   }
 

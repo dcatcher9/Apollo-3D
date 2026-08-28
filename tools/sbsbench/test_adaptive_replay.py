@@ -22,9 +22,93 @@ class AdaptiveReplayContractTests(unittest.TestCase):
         words[base + word] = value
         path.write_bytes(struct.pack(f"<{len(words)}I", *words))
 
+    def bind_authenticated_high_grid(
+            self, control: Path, treatment: Path,
+            source_shape=(1920, 1080), field_shape=(1540, 868)):
+        """Upgrade the small trace fixture to one exact production fused-grid identity."""
+
+        calibration = replay.depth_coordinate_v2_contract.MODEL_CALIBRATIONS[0]
+        fused_contract = (
+            replay.depth_coordinate_v2_dump_contract.convex2x_contract.load_contract())
+        sources = fused_contract["sources"]
+        fused = sources["fused_onnx"]
+        recipe = fused_contract["tensorrt"]["engine_recipe"]
+        raw_provenance = {
+            "schema": 1,
+            "model": calibration.depth_model,
+            "depth_model_url": calibration.depth_model_url,
+            "onnx_sha256": calibration.onnx_sha256,
+            "preprocess_profile": calibration.preprocess.profile,
+            "preprocess_source_closure_sha256":
+                calibration.preprocess.source_closure_sha256,
+            "raw_width": field_shape[0],
+            "raw_height": field_shape[1],
+        }
+        composite = {
+            "schema": fused_contract["schema"],
+            "runtime": "dav2_zipdepth_convex2x_composite",
+            "model": fused["logical_model"],
+            "onnx_sha256": fused["sha256"],
+            "embedded_dav2_onnx_sha256": sources["dav2"]["onnx_sha256"],
+            "zipdepth_checkpoint_sha256": sources["zipdepth"]["checkpoint_sha256"],
+            "guidance_preprocess_source_closure_sha256":
+                calibration.preprocess.source_closure_sha256,
+            "engine_recipe": recipe,
+            "engine_artifact": (
+                f"{fused['logical_model']}.{recipe}.fixture-"
+                f"onnx{fused['sha256']}.engine"),
+            "active_engine_manifest": f"{fused['logical_model']}.active-engine.json",
+        }
+        raw_shape = {
+            "schema": 1,
+            "width": field_shape[0],
+            "height": field_shape[1],
+            "dtype": "float32-le",
+            "layout": "row-major",
+            "stage": "raw model output before transform/normalization/EMA/curvature",
+        }
+        for directory in (control, treatment):
+            path = directory / "contract.json"
+            contract = json.loads(path.read_text(encoding="utf-8"))
+            contract["raw_model_provenance"] = raw_provenance
+            contract["composite_runtime_provenance"] = composite
+            path.write_text(json.dumps(contract), encoding="utf-8")
+            (directory / "raw_shape.json").write_text(
+                json.dumps(raw_shape), encoding="utf-8")
+        metadata_path = treatment / "device_conditional_replay.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["capture_match"].update({
+            "source_width": source_shape[0],
+            "source_height": source_shape[1],
+            "field_width": field_shape[0],
+            "field_height": field_shape[1],
+        })
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        for frame_id in (1, 2):
+            for word, value in (
+                    (replay.TRACE_RECORD_SOURCE_WIDTH, source_shape[0]),
+                    (replay.TRACE_RECORD_SOURCE_HEIGHT, source_shape[1]),
+                    (replay.TRACE_RECORD_FIELD_WIDTH, field_shape[0]),
+                    (replay.TRACE_RECORD_FIELD_HEIGHT, field_shape[1])):
+                self.mutate_trace_word(treatment, frame_id, word, value)
+        engine_sha256 = "e" * 64
+        manifest_sha256 = "f" * 64
+        return {
+            "engine_name": composite["engine_artifact"],
+            "engine_sha256": engine_sha256,
+            "onnx_sha256": calibration.onnx_sha256,
+            "preprocess_source_closure_sha256":
+                calibration.preprocess.source_closure_sha256,
+            "composite_runtime_provenance": {
+                **composite,
+                "engine_sha256": engine_sha256,
+                "active_engine_manifest_sha256": manifest_sha256,
+            },
+        }
+
     def make_pair(self, root: Path, modes=("force", "reuse"), corrupt_hold=False,
                   invalid_hold_disposition=False, corrupt_target_hold=False,
-                  corrupt_display=False, timestamps=None):
+                  corrupt_display=False, timestamps=None, analysis_generation=9):
         control = root / "control"
         treatment = root / "treatment"
         control.mkdir()
@@ -58,7 +142,9 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             "observation_timeline": timeline_descriptor,
             "adaptive_conditional": {
                 "request_policy_schema": replay.ADAPTIVE_REQUEST_POLICY_SCHEMA,
-                "near_identical_detector_source_closure_sha256": "d" * 64,
+                "near_identical_detector_source_closure_sha256":
+                    replay.host_sbs_shader_manifest.NEAR_IDENTICAL_DETECTOR_GROUP.
+                    source_closure_sha256,
             },
             "final_parallax_field": {
                 "file_pattern": "final_parallax_<frame-id>.f32",
@@ -76,7 +162,9 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             **shared, "schema": replay.CONTROL_HARNESS_SCHEMA,
             "depth_step": "force-current-adaptive-replay",
             "depth_reuse_interval": 1,
-            "device_conditional_replay_control": {"enabled": True},
+            "device_conditional_replay_control": {
+                "enabled": True, "scope": replay.CONTROL_SCOPE,
+            },
         }), encoding="utf-8")
 
         force_count = sum(mode in ("force", "suppress") for mode in modes)
@@ -87,8 +175,11 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             "depth_reuse_interval": None,
             "device_conditional_replay": {
                 "enabled": True,
-                "metadata": "device_conditional_replay.json",
-                "raw_trace": "device_conditional_gpu_trace_ring.u32",
+                "scope": replay.TREATMENT_SCOPE,
+                "bootstrap": "force-infer",
+                "followup": "gpu-owned-infer-or-reuse",
+                "metadata": replay.METADATA_FILENAME,
+                "raw_trace": replay.TRACE_FILENAME,
                 "force_submissions": force_count,
                 "gpu_undecided_submissions": gpu_count,
             },
@@ -200,6 +291,11 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             words[base + 1] = replay.TRACE_RECORD_TAG
             words[base + 2] = frame_id
             words[base + replay.TRACE_RECORD_FRAME] = frame_id
+            words[base + replay.TRACE_RECORD_ANALYSIS_GENERATION] = (
+                analysis_generation & 0xFFFFFFFF)
+            words[base + replay.TRACE_RECORD_ANALYSIS_GENERATION + 1] = (
+                analysis_generation >> 32)
+            words[base + replay.TRACE_RECORD_DOMAIN_TAG] = 0x1234
             words[base + replay.TRACE_RECORD_SUBMISSION] = submission
             words[base + replay.TRACE_RECORD_DEPTH] = depth
             words[base + replay.TRACE_RECORD_EXPECTED_WORK] = expected_work
@@ -249,6 +345,8 @@ class AdaptiveReplayContractTests(unittest.TestCase):
         (treatment / trace_name).write_bytes(struct.pack(f"<{len(words)}I", *words))
         metadata = {
             "schema": replay.CONDITIONAL_METADATA_SCHEMA,
+            "role": replay.TRACE_ROLE,
+            "raw_trace": replay.TRACE_FILENAME,
             "ring": {
                 "schema": replay.TRACE_RING_SCHEMA,
                 "tag": replay.TRACE_RING_TAG,
@@ -264,9 +362,27 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             "authenticated_subtitle_dispositions": {
                 **subtitle_counts,
             },
+            "capture_match": {
+                "matched_frame_id": frame_count,
+                "analysis_generation": analysis_generation,
+                "source_width": 2,
+                "source_height": 2,
+                "field_width": 2,
+                "field_height": 2,
+                "domain_tag": 0x1234,
+                "input_domain_reset": bool(row_subtitles and
+                    words[replay.TRACE_HEADER_WORDS +
+                          (frame_count - 1) * record_words +
+                          replay.TRACE_RECORD_FLAGS] &
+                    replay.TRACE_FLAG_INPUT_DOMAIN_RESET),
+            },
+            "per_frame_artifact_scope": replay.PER_FRAME_ARTIFACT_SCOPE,
             "gpu_trace_source": {
-                "closure_schema": 2, "compile_flags": 0,
-                "macro_count": 0, "closure_sha256": "c" * 64,
+                "closure_schema": replay.host_sbs_shader_manifest.SOURCE_CLOSURE_SCHEMA,
+                "compile_flags": replay.host_sbs_shader_manifest.SHADER_COMPILE_FLAGS,
+                "macro_count": replay.host_sbs_shader_manifest.SOURCE_MACRO_COUNT,
+                "closure_sha256":
+                    replay.host_sbs_shader_manifest.GPU_TRACE_GROUP.source_closure_sha256,
             },
         }
         (treatment / "device_conditional_replay.json").write_text(
@@ -308,7 +424,7 @@ class AdaptiveReplayContractTests(unittest.TestCase):
         return control, treatment
 
     def validate_pair(self, control: Path, treatment: Path, count: int):
-        metadata, records = replay.validate_contract_and_trace(
+        metadata, records = replay._validate_contract_and_trace(
             control, treatment, count, control.parent / "observation_timeline.sbsotl")
         checks = replay.validate_adaptive_artifacts(control, treatment, records)
         return metadata, records, checks
@@ -350,12 +466,12 @@ class AdaptiveReplayContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             control, treatment = self.make_pair(Path(directory), corrupt_hold=True)
             with self.assertRaisesRegex(replay.EvidenceError, "bit-exactly hold"):
-                replay.validate_contract_and_trace(control, treatment, 2)
+                replay._validate_contract_and_trace(control, treatment, 2)
 
     def test_rejects_treatment_infer_raw_that_differs_from_force_control(self):
         with tempfile.TemporaryDirectory() as directory:
             control, treatment = self.make_pair(Path(directory))
-            _, records = replay.validate_contract_and_trace(control, treatment, 2)
+            _, records = replay._validate_contract_and_trace(control, treatment, 2)
             (treatment / "raw_0000000001.f32").write_bytes(
                 np.ones(4, dtype="<f4").tobytes())
             with self.assertRaisesRegex(replay.EvidenceError, "differs from force control"):
@@ -366,13 +482,13 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             control, treatment = self.make_pair(
                 Path(directory), invalid_hold_disposition=True)
             with self.assertRaisesRegex(replay.EvidenceError, "disposition disagrees"):
-                replay.validate_contract_and_trace(control, treatment, 2)
+                replay._validate_contract_and_trace(control, treatment, 2)
 
     def test_rejects_non_bit_exact_atomic_final_hold(self):
         with tempfile.TemporaryDirectory() as directory:
             control, treatment = self.make_pair(
                 Path(directory), corrupt_target_hold=True)
-            _, records = replay.validate_contract_and_trace(control, treatment, 2)
+            _, records = replay._validate_contract_and_trace(control, treatment, 2)
             with self.assertRaisesRegex(replay.EvidenceError, "atomic final field"):
                 replay.validate_adaptive_artifacts(control, treatment, records)
 
@@ -381,21 +497,21 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             control, treatment = self.make_pair(
                 Path(directory), modes=("force", "reuse"),
                 corrupt_display=True)
-            _, records = replay.validate_contract_and_trace(control, treatment, 2)
+            _, records = replay._validate_contract_and_trace(control, treatment, 2)
             with self.assertRaisesRegex(replay.EvidenceError, "atomic final field"):
                 replay.validate_adaptive_artifacts(control, treatment, records)
 
     def test_rejects_missing_or_misaligned_final_artifact(self):
         with tempfile.TemporaryDirectory() as directory:
             control, treatment = self.make_pair(Path(directory))
-            _, records = replay.validate_contract_and_trace(control, treatment, 2)
+            _, records = replay._validate_contract_and_trace(control, treatment, 2)
             path = treatment / "final_parallax_0000000002.f32"
             path.unlink()
             with self.assertRaisesRegex(replay.EvidenceError, "do not cover"):
                 replay.validate_adaptive_artifacts(control, treatment, records)
         with tempfile.TemporaryDirectory() as directory:
             control, treatment = self.make_pair(Path(directory))
-            _, records = replay.validate_contract_and_trace(control, treatment, 2)
+            _, records = replay._validate_contract_and_trace(control, treatment, 2)
             path = treatment / "final_parallax_0000000002.f32"
             path.write_bytes(path.read_bytes()[:-1])
             with self.assertRaisesRegex(replay.EvidenceError, "misaligned"):
@@ -424,14 +540,14 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                 Path(directory), modes=(
                     "force", "reuse", "reuse", "reuse", "reuse", "reuse"))
             with self.assertRaisesRegex(replay.EvidenceError, "history-owner age"):
-                replay.validate_contract_and_trace(control, treatment, 6)
+                replay._validate_contract_and_trace(control, treatment, 6)
 
     def test_rejects_reuse_at_strict_100ms_owner_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
             control, treatment = self.make_pair(
                 Path(directory), timestamps=[1, 100_001])
             with self.assertRaisesRegex(replay.EvidenceError, "strict authenticated.*time bound"):
-                replay.validate_contract_and_trace(control, treatment, 2)
+                replay._validate_contract_and_trace(control, treatment, 2)
 
     def test_accepts_due_abstention_publication_on_reused_depth(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -452,7 +568,7 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             timeline = Path(directory) / "observation_timeline.sbsotl"
             timeline.write_bytes(timeline.read_bytes() + b"\0")
             with self.assertRaisesRegex(replay.EvidenceError, "timeline"):
-                replay.validate_contract_and_trace(control, treatment, 2, timeline)
+                replay._validate_contract_and_trace(control, treatment, 2, timeline)
 
     def test_rejects_trace_timestamp_that_differs_from_sidecar(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -460,7 +576,27 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             self.mutate_trace_word(
                 treatment, 2, replay.TRACE_RECORD_OBSERVATION_TIMESTAMP, 12345)
             with self.assertRaisesRegex(replay.EvidenceError, "timestamps disagree"):
-                replay.validate_contract_and_trace(control, treatment, 2)
+                replay._validate_contract_and_trace(control, treatment, 2)
+
+    def test_accepts_zero_as_canonical_full_frame_analysis_generation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control, treatment = self.make_pair(
+                Path(directory), analysis_generation=0)
+            metadata, records = replay._validate_contract_and_trace(control, treatment, 2)
+            self.assertEqual(metadata["capture_match"]["analysis_generation"], 0)
+            self.assertEqual([record["analysis_generation"] for record in records], [0, 0])
+
+    def test_rejects_analysis_generation_outside_unsigned_64_bit_range(self):
+        for generation in (-1, replay.UINT64_MAX + 1):
+            with self.subTest(generation=generation), tempfile.TemporaryDirectory() as directory:
+                control, treatment = self.make_pair(Path(directory))
+                metadata_path = treatment / replay.METADATA_FILENAME
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                metadata["capture_match"]["analysis_generation"] = generation
+                metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+                with self.assertRaisesRegex(
+                        replay.EvidenceError, "unsigned 64-bit value"):
+                    replay._validate_contract_and_trace(control, treatment, 2)
 
     def test_rejects_work_that_skips_shared_due_cadence(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -470,7 +606,7 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                 treatment, 3, replay.TRACE_RECORD_EXPECTED_WORK,
                 replay.WORK_OPTIONAL_OCR)
             with self.assertRaisesRegex(replay.EvidenceError, "due-OCR cadence"):
-                replay.validate_contract_and_trace(control, treatment, 3)
+                replay._validate_contract_and_trace(control, treatment, 3)
 
     def test_rejects_stale_trace_schema(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -484,7 +620,7 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             metadata["ring"]["schema"] = 2
             metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
             with self.assertRaisesRegex(replay.EvidenceError, "unexpected trace identity"):
-                replay.validate_contract_and_trace(control, treatment, 2)
+                replay._validate_contract_and_trace(control, treatment, 2)
 
     def test_stages_numeric_subset_once_with_canonical_ids(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -499,6 +635,120 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                 [path.name for path in staged],
                 ["frame_000001.png", "frame_000002.png"])
             self.assertEqual([path.read_bytes() for path in staged], [b"one", b"two"])
+
+    def test_public_validation_binds_exact_source_derived_fused_grid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control, treatment = self.make_pair(Path(directory))
+            runtime_identity = self.bind_authenticated_high_grid(control, treatment)
+            metadata, records = replay.validate_contract_and_trace(
+                control, treatment, 2,
+                Path(directory) / "observation_timeline.sbsotl", (1920, 1080),
+                runtime_identity)
+            self.assertEqual(metadata["capture_match"]["field_width"], 1540)
+            self.assertEqual(records[0]["field_width"], 1540)
+
+    def test_public_validation_rejects_same_byte_count_transpose(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control, treatment = self.make_pair(Path(directory))
+            runtime_identity = self.bind_authenticated_high_grid(
+                control, treatment, field_shape=(868, 1540))
+            with self.assertRaisesRegex(replay.EvidenceError, "preflight-selected fused runtime"):
+                replay.validate_contract_and_trace(
+                    control, treatment, 2,
+                    Path(directory) / "observation_timeline.sbsotl", (1920, 1080),
+                    runtime_identity)
+
+    def test_public_validation_rejects_missing_fused_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control, treatment = self.make_pair(Path(directory))
+            runtime_identity = self.bind_authenticated_high_grid(control, treatment)
+            for path in (control / "contract.json", treatment / "contract.json"):
+                contract = json.loads(path.read_text(encoding="utf-8"))
+                del contract["composite_runtime_provenance"]
+                path.write_text(json.dumps(contract), encoding="utf-8")
+            with self.assertRaisesRegex(replay.EvidenceError, "composite runtime provenance"):
+                replay.validate_contract_and_trace(
+                    control, treatment, 2,
+                    Path(directory) / "observation_timeline.sbsotl", (1920, 1080),
+                    runtime_identity)
+
+    def test_public_validation_rejects_preflight_fused_to_legacy_downgrade(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control, treatment = self.make_pair(Path(directory))
+            runtime_identity = self.bind_authenticated_high_grid(control, treatment)
+            for output in (control, treatment):
+                contract_path = output / "contract.json"
+                contract = json.loads(contract_path.read_text(encoding="utf-8"))
+                contract["raw_model_provenance"]["raw_width"] = 770
+                contract["raw_model_provenance"]["raw_height"] = 434
+                contract["composite_runtime_provenance"] = None
+                contract_path.write_text(json.dumps(contract), encoding="utf-8")
+                shape_path = output / "raw_shape.json"
+                shape = json.loads(shape_path.read_text(encoding="utf-8"))
+                shape["width"], shape["height"] = 770, 434
+                shape_path.write_text(json.dumps(shape), encoding="utf-8")
+            metadata_path = treatment / replay.METADATA_FILENAME
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["capture_match"]["field_width"] = 770
+            metadata["capture_match"]["field_height"] = 434
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+            for frame_id in (1, 2):
+                self.mutate_trace_word(
+                    treatment, frame_id, replay.TRACE_RECORD_FIELD_WIDTH, 770)
+                self.mutate_trace_word(
+                    treatment, frame_id, replay.TRACE_RECORD_FIELD_HEIGHT, 434)
+            with self.assertRaisesRegex(replay.EvidenceError, "downgraded"):
+                replay.validate_contract_and_trace(
+                    control, treatment, 2,
+                    Path(directory) / "observation_timeline.sbsotl", (1920, 1080),
+                    runtime_identity)
+
+    def test_rejects_arbitrary_shader_provenance_and_out_of_tree_trace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control, treatment = self.make_pair(Path(directory))
+            for output in (control, treatment):
+                contract_path = output / "contract.json"
+                contract = json.loads(contract_path.read_text(encoding="utf-8"))
+                contract["adaptive_conditional"][
+                    "near_identical_detector_source_closure_sha256"] = "0" * 64
+                contract_path.write_text(json.dumps(contract), encoding="utf-8")
+            with self.assertRaisesRegex(replay.EvidenceError, "detector identity"):
+                replay._validate_contract_and_trace(control, treatment, 2)
+        with tempfile.TemporaryDirectory() as directory:
+            control, treatment = self.make_pair(Path(directory))
+            metadata_path = treatment / replay.METADATA_FILENAME
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["gpu_trace_source"] = {
+                "macro_count": 0, "closure_sha256": "1" * 64,
+            }
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+            with self.assertRaisesRegex(replay.EvidenceError, "shader provenance"):
+                replay._validate_contract_and_trace(control, treatment, 2)
+        with tempfile.TemporaryDirectory() as directory:
+            control, treatment = self.make_pair(Path(directory))
+            contract_path = treatment / "contract.json"
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            contract["device_conditional_replay"]["raw_trace"] = "../shadow/trace.u32"
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
+            with self.assertRaisesRegex(replay.EvidenceError, "replay authority"):
+                replay._validate_contract_and_trace(control, treatment, 2)
+
+    def test_public_validation_binds_contract_to_actual_preflight_engine(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control, treatment = self.make_pair(Path(directory))
+            runtime_identity = self.bind_authenticated_high_grid(control, treatment)
+            for output in (control, treatment):
+                contract_path = output / "contract.json"
+                contract = json.loads(contract_path.read_text(encoding="utf-8"))
+                contract["composite_runtime_provenance"]["engine_artifact"] = (
+                    contract["composite_runtime_provenance"]["engine_artifact"].replace(
+                        ".fixture-", ".other-"))
+                contract_path.write_text(json.dumps(contract), encoding="utf-8")
+            with self.assertRaisesRegex(replay.EvidenceError, "preflight-selected fused engine"):
+                replay.validate_contract_and_trace(
+                    control, treatment, 2,
+                    Path(directory) / "observation_timeline.sbsotl", (1920, 1080),
+                    runtime_identity)
 
     def test_reports_aligned_per_stage_timing_delta(self):
         with tempfile.TemporaryDirectory() as directory:

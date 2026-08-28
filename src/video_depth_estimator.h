@@ -286,8 +286,6 @@ namespace models {
       std::uint64_t output = 0u;
       int width = 0;
       int height = 0;
-      std::uint64_t guidance_input = 0u;
-      std::uint64_t refined_output = 0u;
       std::uint32_t optimization_profile = 0u;
 
       constexpr bool operator==(const cuda_graph_signature_t &) const noexcept = default;
@@ -336,6 +334,55 @@ namespace models {
         return std::nullopt;
       }
       return logical_bytes + padding;
+    }
+
+    /** Checked 16x16 evidence-buffer layout for the GPU near-identical detector.
+     *
+     * The resolver reads one uint4 per dispatch tile. Keeping every multiply checked here avoids
+     * silently wrapping D3D11 ByteWidth if a future authenticated tensor profile grows.
+     */
+    struct near_identical_tile_layout_t {
+      std::uint32_t group_width;
+      std::uint32_t group_height;
+      std::uint32_t group_count;
+      std::uint32_t word_count;
+      std::uint32_t byte_count;
+
+      constexpr bool operator==(
+        const near_identical_tile_layout_t &
+      ) const noexcept = default;
+    };
+
+    [[nodiscard]] constexpr std::optional<near_identical_tile_layout_t>
+    checked_near_identical_tile_layout(
+      const std::uint32_t width,
+      const std::uint32_t height
+    ) noexcept {
+      if (width == 0u || height == 0u) {
+        return std::nullopt;
+      }
+      const std::uint32_t group_width = width / 16u + (width % 16u != 0u);
+      const std::uint32_t group_height = height / 16u + (height % 16u != 0u);
+      constexpr std::uint32_t words_per_group = 4u;
+      constexpr auto maximum = std::numeric_limits<std::uint32_t>::max();
+      if (group_width == 0u || group_height > maximum / group_width) {
+        return std::nullopt;
+      }
+      const std::uint32_t group_count = group_width * group_height;
+      if (group_count > maximum / words_per_group) {
+        return std::nullopt;
+      }
+      const std::uint32_t word_count = group_count * words_per_group;
+      if (word_count > maximum / sizeof(std::uint32_t)) {
+        return std::nullopt;
+      }
+      return near_identical_tile_layout_t {
+        group_width,
+        group_height,
+        group_count,
+        word_count,
+        word_count * static_cast<std::uint32_t>(sizeof(std::uint32_t)),
+      };
     }
 
     /** TensorRT 11.2 optimization profiles cannot be shared by concurrent contexts.
@@ -855,11 +902,13 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> cut_state;  ///< Cut-analysis state shared with telemetry and coordinate production.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_frame_state;  ///< {min,max,initialized,frame_state}; frame_state 0 means an all-invalid completion held the prior depth.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask;  ///< Edge-selective EMA snap mask.
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth;  ///< Raw model output buffer, before normalization/EMA/curvature; primarily for the offline evaluator.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth;  ///< Public model output buffer, before normalization/EMA/curvature; primarily for the offline evaluator.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth_snapshot;  ///< Optional stable copy of the completed frame's raw output for a live Dump 3D request.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> model_input_snapshot;  ///< Optional stable NCHW/ImageNet-normalized input for the same live Dump 3D frame.
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> guidance_model_input_snapshot;  ///< Exact-force-only stable fused guidance NCHW [1,3,2H,2W].
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> refined_model_depth_snapshot;  ///< Exact-force-only stable diagnostic refined output [1,2H,2W].
+    // Transitional dump compatibility aliases. The single-high fused runtime points these at
+    // model_input_snapshot/raw_model_depth_snapshot; it never allocates or copies a second pair.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> guidance_model_input_snapshot;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> refined_model_depth_snapshot;
     std::shared_ptr<const raw_model_provenance_t> raw_model_provenance;  ///< Capture-time model-byte identity; copied by pointer on ordinary frames.
     std::shared_ptr<const composite_depth_runtime_provenance_t>
       composite_depth_runtime_provenance;  ///< Separate fused ONNX/engine identity; never raw DAV2 calibration authority.
@@ -894,16 +943,18 @@ namespace models {
       parallax_v2_shader_provenance;  ///< Exact producer shader closure when V2 is active.
     std::shared_ptr<const host_sbs_gpu_trace_provenance_t>
       gpu_trace_provenance;  ///< Source identity for gpu_trace_ring when available.
-    int raw_width = 0;
+    int raw_width = 0;  ///< Public model-output width: coarse for legacy DAV2, high for fused.
     int raw_height = 0;
-    int field_width = 0;  ///< Spatial dimensions of every live parallax texture; raw_* stays coarse DAV2.
+    int field_width = 0;  ///< Spatial dimensions of every live parallax texture; equals raw_*.
     int field_height = 0;
     depth_tensor_content_rect_t field_content {};  ///< Exact half-open live-field realization of input_region.tensor_content.
+    // Transitional dump metadata. For fused, each equals raw_width/raw_height; there is no split
+    // coarse/guidance raster. Legacy leaves them zero.
     int guidance_width = 0;
     int guidance_height = 0;
     int refined_width = 0;
     int refined_height = 0;
-    bool refined_live_geometry_active = false;  ///< Session-latched exact-2x landscape spatial path.
+    bool refined_live_geometry_active = false;  ///< True for the single-high fused runtime.
     // A wrapper transaction completed and its GPU normalization passes were submitted. The associated
     // depth_frame_state decides on-GPU whether this completion contains valid depth or must hold
     // the previous matched color/depth output.

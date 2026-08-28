@@ -21,14 +21,41 @@ namespace models {
     inline constexpr int depth_engine_max_dim = 1036;
     inline constexpr char depth_engine_recipe[] = "trt-opt770x434-max1036-level5-v3";
     // TensorRT 11.2 cannot compile the dynamic convex gather under the legacy ranged profile.
-    // The fused graph instead owns the six authenticated production shapes as point profiles in
+    // The fused graph instead owns the six authenticated HIGH public shapes as point profiles in
     // the order frozen by prod_zipdepth_convex2x::fixed_profile_shapes. Keep this cache recipe
-    // distinct from the byte-compatible legacy DAV2 plan.
+    // distinct from both the legacy DAV2 plan and the retired two-input/two-output fused plan.
+    inline constexpr bool fused_depth_profile_contracts_match = []() {
+      if (prod_zipdepth_convex2x::fixed_profile_shapes.size() !=
+            depth_coordinate_v2::model_calibrated_shapes.size() ||
+          prod_zipdepth_convex2x::fixed_profile_shapes.size() !=
+            depth_coordinate_v2::subtitle_ocr_live_field_shapes.size()) {
+        return false;
+      }
+      for (std::size_t index = 0u;
+           index < prod_zipdepth_convex2x::fixed_profile_shapes.size();
+           ++index) {
+        const auto high = prod_zipdepth_convex2x::fixed_profile_shapes[index];
+        const auto coarse = depth_coordinate_v2::model_calibrated_shapes[index];
+        const auto live = depth_coordinate_v2::subtitle_ocr_live_field_shapes[index];
+        if (high.width != prod_zipdepth_convex2x::scale * coarse.width ||
+            high.height != prod_zipdepth_convex2x::scale * coarse.height ||
+            high.width != live[0] || high.height != live[1]) {
+          return false;
+        }
+      }
+      return true;
+    }();
+    static_assert(
+      fused_depth_profile_contracts_match,
+      "DAV2 calibration, fused TensorRT profiles, and high-field policy must stay identical"
+    );
     static_assert(
       prod_zipdepth_convex2x::fixed_profile_shapes.front() ==
-      prod_zipdepth_convex2x::coarse_shape_t {
-        static_cast<std::uint32_t>(depth_engine_opt_width),
-        static_cast<std::uint32_t>(depth_engine_opt_height),
+      prod_zipdepth_convex2x::high_shape_t {
+        static_cast<std::uint32_t>(prod_zipdepth_convex2x::scale) *
+          static_cast<std::uint32_t>(depth_engine_opt_width),
+        static_cast<std::uint32_t>(prod_zipdepth_convex2x::scale) *
+          static_cast<std::uint32_t>(depth_engine_opt_height),
       }
     );
     inline constexpr std::string_view depth_engine_recipe_for(

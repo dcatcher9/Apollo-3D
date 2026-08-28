@@ -15,6 +15,10 @@ cbuffer NearIdenticalFusedMode : register(b1) {
 
 groupshared uint4 FusedNearIdenticalGroupPrimary[NEAR_IDENTICAL_TILE_THREADS];
 
+uint FusedNearIdenticalTileAxisGroups(uint dimension) {
+    return dimension / 16u + (dimension % 16u != 0u ? 1u : 0u);
+}
+
 [numthreads(16, 16, 1)]
 void fused_main(
     uint3 dispatch_thread : SV_DispatchThreadID,
@@ -38,7 +42,7 @@ void fused_main(
             disabled_evidence.medium_changed = 0u;
             disabled_evidence.strong_changed = 0u;
             disabled_evidence.nonfinite = 0u;
-            uint disabled_tile_group_width = (target_w + 15u) / 16u;
+            uint disabled_tile_group_width = FusedNearIdenticalTileAxisGroups(target_w);
             NearIdenticalTileOutput[
                 group_id.y * disabled_tile_group_width + group_id.x] =
                 disabled_evidence;
@@ -86,7 +90,7 @@ void fused_main(
         evidence.medium_changed = FusedNearIdenticalGroupPrimary[0].y;
         evidence.strong_changed = FusedNearIdenticalGroupPrimary[0].z;
         evidence.nonfinite = FusedNearIdenticalGroupPrimary[0].w;
-        uint tile_group_width = (target_w + 15u) / 16u;
+        uint tile_group_width = FusedNearIdenticalTileAxisGroups(target_w);
         NearIdenticalTileOutput[group_id.y * tile_group_width + group_id.x] = evidence;
     }
 }

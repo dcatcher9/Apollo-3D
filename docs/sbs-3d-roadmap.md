@@ -12,10 +12,11 @@ only the current product, its known limitations, and work that may still be just
 | Client SBS | Moonlight 3D on Android XR | Separate client pipeline; unchanged by Host V2 |
 | Local AR glasses | Sunshine 3D local presenter | Reuses Host V2 without network encode/decode |
 
-Host V2 uses authenticated DAV2 Small inference, one scene-latched raw center, literal configured
-pop, a frame-local parallax container, conservative foreground ownership, bounded vertical and
-horizontal cliff conditioning, and a unique contractive inverse. Invalid or unauthenticated
-geometry renders flat; there is no older fallback.
+Host V2 uses an authenticated DAV2 Small backbone with frozen ZipDepth convex-2x reconstruction,
+one high-resolution model input/output and one high-resolution downstream grid. It retains one
+scene-latched raw center, literal configured pop, a frame-local parallax container, conservative
+foreground ownership, bounded vertical and horizontal cliff conditioning, and a unique contractive
+inverse. Invalid or unauthenticated geometry renders flat; there is no older geometry fallback.
 
 On Desktop Duplication, a fresh exact matched-frame rectangle may replace full-frame analysis with
 one same-format crop. The unique largest fully contained `<video>` in the foreground Chrome or Edge
@@ -59,9 +60,11 @@ These are architectural boundaries, not dormant feature flags.
 
 ### Monocular framing dependence
 
-DAV2 is a relative monocular model. Fullscreen, windowed, or differently surrounded versions of
-the same image can produce materially different raw depth. More tensor pixels on the main subject
-do not guarantee a better boundary. Synthetic context must not influence monocular analysis. The
+DAV2 is a relative monocular model. Frozen convex reconstruction improves its spatial realization
+but does not add metric depth or a second independent depth estimate. Fullscreen, windowed, or
+differently surrounded versions of the same image can produce materially different raw depth. More
+tensor pixels on the main subject do not guarantee a better boundary. Synthetic context must not
+influence monocular analysis. The
 window-region route therefore uses only the exact client/video pixels: its edge-replicated tensor
 padding is excluded from depth statistics, scene cuts, ownership, history comparison/authority, and
 OCR authority, although the fused map copies the complete raw padded tuple with exclusion `1`.
@@ -90,7 +93,7 @@ the full-source domain only after exact capture mapping.
 
 The route has no compositor-visible-region oracle. The current subtitle treatment therefore uses
 OCR8 bounded boxes and compact SLR13 owner/pending/current-authority rectangles at the authenticated
-DAV2 field shape. It does not retain the retired row-history or general overlay-detector pipelines.
+active field shape. It does not retain the retired row-history or general overlay-detector pipelines.
 Unsupported identities and shapes preserve ordinary V2 exactly. Dump and replay accept only the
 current SLR13/OCR8 schema. The host does not reconstruct hidden video.
 
@@ -202,7 +205,8 @@ V2 preserves foreground continuity while limiting the slope required by its inve
 large raw cliff this converts one discontinuity into a wider safe ramp. Hair crowns, transparent
 glass rims, and small near-object tops can therefore bend or stretch differently in the two eyes.
 
-The full-resolution ownership pass corrects only a unique, corroborated mixed boundary cell.
+The high-grid ownership pass uses the full-resolution source to correct only a unique,
+corroborated mixed boundary cell.
 Transparent, reflective, thin, or competing contours deliberately abstain. Loosening that policy
 globally would exchange a visible residual for incorrect foreground ownership elsewhere.
 
@@ -215,9 +219,9 @@ sequence. Rapid consecutive cuts and structureless transitions remain important 
 ### Unsupported identities fail flat
 
 Live Host SBS, production conversion, and the maintained evaluator accept only the authenticated
-DAV2 Small model, preprocessing closure, supported
-[resolution fit](host-sbs.md#authenticated-resolution-fitting), producer/state contract, and
-renderer closure. There is no Host SBS model fallback or selector.
+DAV2 Small calibration, fused DAV2/ZipDepth composite identity when selected, preprocessing closure,
+supported [resolution fit](host-sbs.md#authenticated-resolution-fitting), producer/state contract,
+and renderer closure. There is no Host SBS model selector or unauthenticated fallback.
 
 ### Live telemetry is sampled
 
@@ -229,8 +233,8 @@ is interpreted as a controller difference.
 
 Before changing V2 geometry:
 
-1. Reproduce the issue with a current Dump 3D package and identify whether it begins in raw DAV2,
-   ownership, cliff conditioning, or the inverse warp.
+1. Reproduce the issue with a current Dump 3D package and identify whether it begins in the fused
+   raw depth, ownership, cliff conditioning, or the inverse warp.
 2. Run an exact same-input offline A/B. Do not compare independently captured frames as if they
    were pixel-identical.
 3. Run the canonical core and extended evaluator suites and inspect both hard gates and diagnostic
@@ -246,10 +250,13 @@ Before changing V2 geometry:
 5. Confirm the result in Galaxy XR at the intended pop strength before changing the production
    contract or baselines.
 
-The current high-value investigation is a general, precision-first reduction of ambiguous
-small-object crown distortion. A candidate must improve glass-rim and small-near-object witnesses
-without reintroducing the hair/shoulder discontinuity or the hand-boundary halo. If it cannot name
-that safe evidence boundary, retaining the current compromise is preferable.
+The immediate priority is to qualify the single-high fused baseline across paired dumps and Galaxy
+XR, including its high-grid temporal/cut/reuse behavior and small-source bilinear-upscale exception.
+After acceptance, optimize the frozen ZipDepth branch first with selective FP16 and algebraically
+equivalent grouped-1x1 Conv/GEMM rewrites. CUDA Tile/CompileIQ is justified only if those graph-level
+changes leave measured latency above budget. Geometry work remains a precision-first reduction of
+ambiguous small-object crown distortion: a candidate must improve glass-rim and small-near-object
+witnesses without reintroducing the hair/shoulder discontinuity or hand-boundary halo.
 
 ## References
 

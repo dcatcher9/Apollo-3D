@@ -1157,40 +1157,6 @@ namespace sbs_bench {
       return succeeded;
     }
 
-    void dump_raw_model_depth(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv, int width, int height, const fs::path &path, ComPtr<ID3D11Buffer> &stage_cache) {
-      if (!srv || width <= 0 || height <= 0) {
-        return;
-      }
-      ComPtr<ID3D11Resource> res;
-      srv->GetResource(&res);
-      ComPtr<ID3D11Buffer> buf;
-      if (FAILED(res.As(&buf))) {
-        return;
-      }
-      D3D11_BUFFER_DESC d = {};
-      buf->GetDesc(&d);
-      if (!stage_cache) {
-        D3D11_BUFFER_DESC sd = d;
-        sd.Usage = D3D11_USAGE_STAGING;
-        sd.BindFlags = 0;
-        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        sd.MiscFlags = 0;
-        if (FAILED(dev->CreateBuffer(&sd, nullptr, &stage_cache))) {
-          return;
-        }
-      }
-      ctx->CopyResource(stage_cache.Get(), buf.Get());
-      D3D11_MAPPED_SUBRESOURCE m = {};
-      if (FAILED(ctx->Map(stage_cache.Get(), 0, D3D11_MAP_READ, 0, &m))) {
-        return;
-      }
-      std::ofstream out(path, std::ios::binary);
-      if (out) {
-        out.write((const char *) m.pData, (std::streamsize) width * height * sizeof(float));
-      }
-      ctx->Unmap(stage_cache.Get(), 0);
-    }
-
     // V2 evaluation depth artifact. Under host_sbs_v2 the estimator's normalized depth SRV is a
     // private cut field with no geometry authority, so the scored depth_<frame>.png is produced
     // from the authenticated raw model output instead. The container matches the historical
@@ -3174,12 +3140,15 @@ namespace sbs_bench {
     const bool external_direct_parallax_mode = !o.direct_parallax_root.empty();
     const bool direct_parallax_mode =
       external_direct_parallax_mode || depth_coordinate_v2_gpu_mode;
-    // Stage-1 convex2x is diagnostic evidence only. Capture stable same-frame tensors for an
-    // ordinary production evaluation, never for direct geometry, adaptive branch replay, cache
-    // conversion, or a renderer-authority path.
+    // The fused model has one public high-resolution input/output pair. Capture the exact input
+    // snapshot for ordinary production evaluation; raw_<frame-id>.f32 already publishes the same
+    // high-resolution refined output, so diagnostics must not create a second output artifact or
+    // GPU resource. Direct geometry, adaptive branch replay, cache conversion, and renderer-only
+    // paths do not publish this model-boundary evidence.
     const bool capture_convex2x_diagnostics =
       o.artifacts == artifact_mode_e::evaluation && !direct_parallax_mode &&
-      !o.device_conditional_replay && !o.device_conditional_replay_control;
+      !o.device_conditional_replay && !o.device_conditional_replay_control &&
+      o.output_every == 1;
     // This is provenance, not a mode switch. Every inference-producing run requires the joined
     // conditional wrapper. Reference/cache replays perform no TensorRT inference at all.
     const bool inference_wrapper_required = !replay_mode && !direct_parallax_mode;
@@ -3536,8 +3505,7 @@ namespace sbs_bench {
     UINT sbs_w = 0, sbs_h = 0;
     ComPtr<ID3D11Texture2D> ema_mask_stage;
     ComPtr<ID3D11Buffer> raw_depth_stage;
-    ComPtr<ID3D11Buffer> convex2x_refined_stage;
-    ComPtr<ID3D11Buffer> convex2x_guidance_stage;
+    ComPtr<ID3D11Buffer> convex2x_model_input_stage;
     ComPtr<ID3D11Texture2D> structure_field_stage;
     ComPtr<ID3D11Texture2D> final_parallax_field_stage;
     ComPtr<ID3D11Buffer> cut_state_stage;
@@ -3555,12 +3523,8 @@ namespace sbs_bench {
     bool raw_shape_written = false;
     std::shared_ptr<const models::composite_depth_runtime_provenance_t>
       convex2x_runtime_provenance;
-    int convex2x_coarse_width = 0;
-    int convex2x_coarse_height = 0;
-    int convex2x_guidance_width = 0;
-    int convex2x_guidance_height = 0;
-    int convex2x_refined_width = 0;
-    int convex2x_refined_height = 0;
+    int convex2x_high_width = 0;
+    int convex2x_high_height = 0;
     std::size_t convex2x_diagnostic_frame_count = 0u;
     std::string convex2x_diagnostics_sha256;
     bool warp_mapping_shape_written = false;
@@ -4127,12 +4091,21 @@ namespace sbs_bench {
           if (have_composite_runtime) {
             const bool dimensions_are_exact =
               est.raw_width > 0 && est.raw_height > 0 &&
-              est.raw_width <= std::numeric_limits<int>::max() / 2 &&
-              est.raw_height <= std::numeric_limits<int>::max() / 2 &&
-              est.guidance_width == 2 * est.raw_width &&
-              est.guidance_height == 2 * est.raw_height &&
-              est.refined_width == est.guidance_width &&
-              est.refined_height == est.guidance_height;
+              est.field_width == est.raw_width &&
+              est.field_height == est.raw_height &&
+              est.guidance_width == est.raw_width &&
+              est.guidance_height == est.raw_height &&
+              est.refined_width == est.raw_width &&
+              est.refined_height == est.raw_height &&
+              est.refined_live_geometry_active;
+            const bool diagnostic_aliases_are_exact =
+              est.model_input_snapshot && est.raw_model_depth_snapshot &&
+              est.guidance_model_input_snapshot &&
+              est.refined_model_depth_snapshot &&
+              est.guidance_model_input_snapshot.Get() ==
+                est.model_input_snapshot.Get() &&
+              est.refined_model_depth_snapshot.Get() ==
+                est.raw_model_depth_snapshot.Get();
             const auto &runtime = *est.composite_depth_runtime_provenance;
             const std::string expected_active_manifest =
               std::string {models::prod_zipdepth_convex2x::logical_model} +
@@ -4154,24 +4127,19 @@ namespace sbs_bench {
               runtime.embedded_dav2_onnx_sha256 ==
                 est.raw_model_provenance->onnx_sha256 &&
               !runtime.engine_artifact.empty();
-            if (!est.guidance_model_input_snapshot ||
-                !est.refined_model_depth_snapshot || !dimensions_are_exact ||
+            if (!dimensions_are_exact || !diagnostic_aliases_are_exact ||
                 !provenance_complete) {
               BOOST_LOG(error)
-                << "sbs-bench: fused Stage-1 frame " << output_id
-                << " lacks its exact same-frame guidance/refined snapshot, 2x shape, or "
-                   "runtime provenance";
+                << "sbs-bench: fused frame " << output_id
+                << " lacks its exact same-frame single-high input/output snapshot, "
+                   "resource-alias identity, or runtime provenance";
               return 6;
             }
             if (!convex2x_runtime_provenance) {
               convex2x_runtime_provenance =
                 est.composite_depth_runtime_provenance;
-              convex2x_coarse_width = est.raw_width;
-              convex2x_coarse_height = est.raw_height;
-              convex2x_guidance_width = est.guidance_width;
-              convex2x_guidance_height = est.guidance_height;
-              convex2x_refined_width = est.refined_width;
-              convex2x_refined_height = est.refined_height;
+              convex2x_high_width = est.raw_width;
+              convex2x_high_height = est.raw_height;
             } else {
               const auto &latched = *convex2x_runtime_provenance;
               const bool provenance_unchanged =
@@ -4187,49 +4155,32 @@ namespace sbs_bench {
                 latched.engine_artifact == runtime.engine_artifact &&
                 latched.active_engine_manifest == runtime.active_engine_manifest;
               const bool shape_unchanged =
-                convex2x_coarse_width == est.raw_width &&
-                convex2x_coarse_height == est.raw_height &&
-                convex2x_guidance_width == est.guidance_width &&
-                convex2x_guidance_height == est.guidance_height &&
-                convex2x_refined_width == est.refined_width &&
-                convex2x_refined_height == est.refined_height;
+                convex2x_high_width == est.raw_width &&
+                convex2x_high_height == est.raw_height;
               if (!provenance_unchanged || !shape_unchanged) {
                 BOOST_LOG(error)
-                  << "sbs-bench: fused Stage-1 shape/provenance changed within one run at frame "
+                  << "sbs-bench: fused single-high shape/provenance changed within one run at frame "
                   << output_id;
                 return 6;
               }
             }
 
-            const std::size_t guidance_elements =
+            const std::size_t model_input_elements =
               static_cast<std::size_t>(3u) *
-              static_cast<std::size_t>(est.guidance_width) *
-              static_cast<std::size_t>(est.guidance_height);
-            const std::size_t refined_elements =
-              static_cast<std::size_t>(est.refined_width) *
-              static_cast<std::size_t>(est.refined_height);
-            const fs::path guidance_path =
-              fs::path(o.out) / ("zip_model_input_" + output_id + ".f32");
-            const fs::path refined_path =
-              fs::path(o.out) / ("refined_" + output_id + ".f32");
+              static_cast<std::size_t>(est.raw_width) *
+              static_cast<std::size_t>(est.raw_height);
+            const fs::path model_input_path =
+              fs::path(o.out) / ("model_input_" + output_id + ".f32");
             if (!dump_float_buffer(
                   dev.Get(),
                   ctx.Get(),
-                  est.guidance_model_input_snapshot.Get(),
-                  guidance_elements,
-                  guidance_path,
-                  convex2x_guidance_stage
-                ) ||
-                !dump_float_buffer(
-                  dev.Get(),
-                  ctx.Get(),
-                  est.refined_model_depth_snapshot.Get(),
-                  refined_elements,
-                  refined_path,
-                  convex2x_refined_stage
+                  est.model_input_snapshot.Get(),
+                  model_input_elements,
+                  model_input_path,
+                  convex2x_model_input_stage
                 )) {
               BOOST_LOG(error)
-                << "sbs-bench: cannot write fused Stage-1 same-frame diagnostics for frame "
+                << "sbs-bench: cannot write fused single-high model input for frame "
                 << output_id;
               return 6;
             }
@@ -4913,8 +4864,18 @@ namespace sbs_bench {
           }
           char rname[64];
           snprintf(rname, sizeof(rname), "raw_%s.f32", output_id.c_str());
-          dump_raw_model_depth(dev.Get(), ctx.Get(), est.raw_model_depth.Get(), est.raw_width,
-                               est.raw_height, fs::path(o.out) / rname, raw_depth_stage);
+          if (!dump_float_buffer(
+                dev.Get(),
+                ctx.Get(),
+                est.raw_model_depth.Get(),
+                static_cast<std::size_t>(est.raw_width) *
+                  static_cast<std::size_t>(est.raw_height),
+                fs::path(o.out) / rname,
+                raw_depth_stage
+              )) {
+            BOOST_LOG(error) << "sbs-bench: failed writing " << rname;
+            return 6;
+          }
           if (!raw_shape_written && est.raw_width > 0 && est.raw_height > 0) {
             std::ofstream shape(fs::path(o.out) / "raw_shape.json");
             if (shape) {
@@ -5099,51 +5060,50 @@ namespace sbs_bench {
       if (convex2x_diagnostic_frame_count != completed_frame_count ||
           !est.raw_model_provenance) {
         BOOST_LOG(error)
-          << "sbs-bench: fused Stage-1 diagnostics do not exactly cover the completed frame set";
+          << "sbs-bench: fused single-high diagnostics do not exactly cover the completed frame set";
         return 8;
       }
       const auto &runtime = *convex2x_runtime_provenance;
       const auto &raw_provenance = *est.raw_model_provenance;
       nlohmann::ordered_json diagnostics = {
-        {"schema", 1u},
+        {"schema", 2u},
         {"authority", {
-          {"role", "diagnostic-only-stage-1"},
-          {"live_geometry_authority", false},
-          {"scoring_depth_authority", false},
-          {"coarse_dav2_remains_live_authority", true},
+          {"role", "authenticated-single-high-model-io"},
+          {"live_geometry_source", "refined_depth"},
+          {"scoring_depth_source", "raw_<frame-id>.f32"},
+          {"coarse_dav2_public_binding", false},
         }},
         {"same_frame_binding", "completed_frame_id-to-decimal-frame-id"},
         {"frame_count", convex2x_diagnostic_frame_count},
-        {"coarse_dav2", {
-          {"width", convex2x_coarse_width},
-          {"height", convex2x_coarse_height},
+        {"model_input", {
+          {"width", convex2x_high_width},
+          {"height", convex2x_high_height},
           {"tensor_shape_nchw", {
-            1u, 1u, convex2x_coarse_height, convex2x_coarse_width
-          }},
-          {"raw_file_pattern", "raw_<frame-id>.f32"},
-          {"role", "existing-prod-raw-output-and-only-live-depth-authority"},
-        }},
-        {"zip_model_input", {
-          {"width", convex2x_guidance_width},
-          {"height", convex2x_guidance_height},
-          {"tensor_shape_nchw", {
-            1u, 3u, convex2x_guidance_height, convex2x_guidance_width
+            1u, 3u, convex2x_high_height, convex2x_high_width
           }},
           {"dtype", "float32-le"},
           {"layout", "nchw-contiguous"},
-          {"file_pattern", "zip_model_input_<frame-id>.f32"},
-          {"stage", "matched native RGB independently preprocessed on the exact 2x grid"},
+          {"file_pattern", "model_input_<frame-id>.f32"},
+          {"stage", "sole fused ONNX high-resolution pixel_values binding after authenticated preprocess"},
         }},
         {"refined_depth", {
-          {"width", convex2x_refined_width},
-          {"height", convex2x_refined_height},
+          {"width", convex2x_high_width},
+          {"height", convex2x_high_height},
           {"tensor_shape_nchw", {
-            1u, 1u, convex2x_refined_height, convex2x_refined_width
+            1u, 1u, convex2x_high_height, convex2x_high_width
           }},
           {"dtype", "float32-le"},
           {"layout", "nchw-contiguous"},
-          {"file_pattern", "refined_<frame-id>.f32"},
-          {"stage", "fused ONNX refined_depth after frozen ZipDepth convex2x"},
+          {"file_pattern", "raw_<frame-id>.f32"},
+          {"stage", "sole fused ONNX refined_depth binding and live high-resolution depth source"},
+        }},
+        {"diagnostic_aliases", {
+          {"model_input_primary", "model_input_snapshot"},
+          {"model_input_compatibility_alias", "guidance_model_input_snapshot"},
+          {"refined_depth_primary", "raw_model_depth_snapshot"},
+          {"refined_depth_compatibility_alias", "refined_model_depth_snapshot"},
+          {"gpu_resource_policy", "compatibility-aliases-reference-primary-resources"},
+          {"duplicate_gpu_resources", false},
         }},
         {"composite_runtime_provenance", {
           {"model", runtime.model},
@@ -5156,7 +5116,7 @@ namespace sbs_bench {
           {"engine_artifact", runtime.engine_artifact},
           {"active_engine_manifest", runtime.active_engine_manifest},
         }},
-        {"raw_dav2_provenance", {
+        {"embedded_dav2_provenance", {
           {"model", raw_provenance.depth_model},
           {"depth_model_url", raw_provenance.depth_model_url},
           {"onnx_sha256", raw_provenance.onnx_sha256},
@@ -5178,7 +5138,7 @@ namespace sbs_bench {
       diagnostics_stream.flush();
       if (!diagnostics_stream.good()) {
         BOOST_LOG(error)
-          << "sbs-bench: cannot write the fused Stage-1 shape/provenance sidecar";
+          << "sbs-bench: cannot write the fused single-high shape/provenance sidecar";
         return 8;
       }
     }
@@ -5285,7 +5245,7 @@ namespace sbs_bench {
       }
       // Machine-readable execution contract. Evaluation must not scrape human log prose. The
       // independent evaluation-harness schema 22 attests the formal V2-only configuration
-      // surface. Private adaptive replay uses schemas 26 (treatment) and 27 (force oracle) so its
+      // surface. Private adaptive replay uses schemas 28 (treatment) and 29 (force oracle) so its
       // additional exact-field evidence cannot silently expand run_eval's schema-22 contract;
       // it is unrelated to Dump 3D and the independently versioned DVC2 contract (the direct-replay schema stays
       // pinned by its own validator).
@@ -5296,7 +5256,7 @@ namespace sbs_bench {
                  << (direct_parallax_mode ?
                        direct_geometry_contract_schema :
                         (o.device_conditional_replay ?
-                           26u : (o.device_conditional_replay_control ? 27u : 22u)))
+                           28u : (o.device_conditional_replay_control ? 29u : 22u)))
                  << ",\n"
                  << "  \"model\": " << json_string(model.name) << ",\n"
                  << "  \"depth_step\": "
@@ -5351,19 +5311,43 @@ namespace sbs_bench {
             << json_string(provenance.preprocess_source_closure_sha256)
             << ", \"raw_width\": " << est.raw_width
             << ", \"raw_height\": " << est.raw_height << "},\n";
+          if (device_conditional_replay_evidence) {
+            if (est.composite_depth_runtime_provenance) {
+              const auto &runtime = *est.composite_depth_runtime_provenance;
+              contract
+                << "  \"composite_runtime_provenance\": {"
+                   "\"schema\": 2, "
+                   "\"runtime\": \"dav2_zipdepth_convex2x_composite\", "
+                   "\"model\": "
+                << json_string(runtime.model)
+                << ", \"onnx_sha256\": " << json_string(runtime.onnx_sha256)
+                << ", \"embedded_dav2_onnx_sha256\": "
+                << json_string(runtime.embedded_dav2_onnx_sha256)
+                << ", \"zipdepth_checkpoint_sha256\": "
+                << json_string(runtime.zipdepth_checkpoint_sha256)
+                << ", \"guidance_preprocess_source_closure_sha256\": "
+                << json_string(runtime.guidance_preprocess_source_closure_sha256)
+                << ", \"engine_recipe\": " << json_string(runtime.engine_recipe)
+                << ", \"engine_artifact\": " << json_string(runtime.engine_artifact)
+                << ", \"active_engine_manifest\": "
+                << json_string(runtime.active_engine_manifest) << "},\n";
+            } else {
+              contract << "  \"composite_runtime_provenance\": null,\n";
+            }
+          }
           if (convex2x_runtime_provenance) {
             contract
               << "  \"prod_zipdepth_convex2x_diagnostics\": {"
-                 "\"schema\": 1, \"sidecar\": "
+                 "\"schema\": 2, \"sidecar\": "
               << json_string(convex2x_diagnostics_filename)
               << ", \"sidecar_sha256\": "
               << json_string(convex2x_diagnostics_sha256)
               << ", \"frame_count\": " << convex2x_diagnostic_frame_count
-              << ", \"refined_file_pattern\": "
-                 "\"refined_<frame-id>.f32\", "
-                 "\"guidance_file_pattern\": "
-                 "\"zip_model_input_<frame-id>.f32\", "
-                 "\"authority\": \"diagnostic-only-never-live-or-scoring-depth\"},\n";
+              << ", \"input_file_pattern\": "
+                 "\"model_input_<frame-id>.f32\", "
+                 "\"output_file_pattern\": "
+                 "\"raw_<frame-id>.f32\", "
+                 "\"authority\": \"single-high-input-output-boundary\"},\n";
           }
           if (device_conditional_replay_evidence) {
             contract

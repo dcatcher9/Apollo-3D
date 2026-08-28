@@ -36,9 +36,9 @@ cbuffer NearIdenticalOcrConstants : register(b2) {
     uint4 near_identical_ocr_tensor_content;
 };
 
-// The finalizer keeps coarse depth/history authority at b0 while publishing spatial work at the
-// session-latched field realization carried by b3.  This is the same 16-word immutable depth
-// cbuffer layout; only dimensions/content are consumed here.
+// The single-high finalizer binds the same immutable high-grid depth constants at b0 and b3.
+// Keeping the second binding explicit authenticates that every indirect spatial command targets
+// the exact grid/content tuple owned by the current depth history.
 cbuffer NearIdenticalGeometryConstants : register(b3) {
     uint near_identical_geometry_width;
     uint near_identical_geometry_height;
@@ -62,7 +62,6 @@ cbuffer NearIdenticalGeometryConstants : register(b3) {
 #define NEAR_IDENTICAL_REDUCE_ELEMENTS_PER_GROUP 256u
 #define NEAR_IDENTICAL_RESOLVE_FLAG_MALFORMED (1u << 0u)
 #define NEAR_IDENTICAL_RESOLVE_FLAG_LOCAL_VETO (1u << 1u)
-#define NEAR_IDENTICAL_MAX_TILE_GROUP_COUNT 2048u
 #define NEAR_IDENTICAL_MAX_INFER_OWNER_AGE 4u
 #define NEAR_IDENTICAL_MAX_INFER_OWNER_OBSERVATION_AGE_US 100000u
 
@@ -75,6 +74,10 @@ cbuffer NearIdenticalGeometryConstants : register(b3) {
 #define NEAR_IDENTICAL_RECEIPT_MAGIC 0x47524243u
 #define NEAR_IDENTICAL_REQUEST_MAGIC 0x54535152u
 #define NEAR_IDENTICAL_OPTIONAL_RECEIPT_MAGIC 0x52434F4Fu
+
+uint NearIdenticalTileAxisGroups(uint dimension) {
+    return dimension / 16u + (dimension % 16u != 0u ? 1u : 0u);
+}
 
 #define NEAR_IDENTICAL_DECISION_OFFSET 0u
 #define NEAR_IDENTICAL_DECISION_COOKIE_OFFSET 4u
@@ -190,20 +193,12 @@ bool NearIdenticalGeometryConstantsValid() {
         near_identical_geometry_width == target_w &&
         near_identical_geometry_height == target_h &&
         all(geometry_content == DepthAnalysisContentCells());
-    bool convex2x_landscape =
-        target_h == V2_MODEL_CALIBRATED_SHAPE_HEIGHT_0 &&
-        (target_w == V2_MODEL_CALIBRATED_SHAPE_WIDTH_0 ||
-         target_w == V2_MODEL_CALIBRATED_SHAPE_WIDTH_1 ||
-         target_w == V2_MODEL_CALIBRATED_SHAPE_WIDTH_2) &&
-        near_identical_geometry_width == 2u * target_w &&
-        near_identical_geometry_height == 2u * target_h &&
-        all(geometry_content == 2u * DepthAnalysisContentCells());
     return
         near_identical_geometry_width > 0u &&
         near_identical_geometry_height > 0u &&
         near_identical_geometry_color_mode == color_mode &&
         all(near_identical_geometry_reserved == uint3(0u, 0u, 0u)) &&
-        (ordinary || convex2x_landscape);
+        ordinary;
 }
 
 bool NearIdenticalSubtitleConstantsValid() {
@@ -310,8 +305,8 @@ bool NearIdenticalDepthReceiptValid(out uint decision) {
         NEAR_IDENTICAL_REQUEST_TOKEN_HIGH_OFFSET);
     bool constants_valid =
         near_identical_request_flags == NEAR_IDENTICAL_REQUEST_AUTHORIZED &&
-        near_identical_tile_group_width == (target_w + 15u) / 16u &&
-        near_identical_tile_group_height == (target_h + 15u) / 16u &&
+        near_identical_tile_group_width == NearIdenticalTileAxisGroups(target_w) &&
+        near_identical_tile_group_height == NearIdenticalTileAxisGroups(target_h) &&
         near_identical_tile_group_count ==
             near_identical_tile_group_width * near_identical_tile_group_height &&
         near_identical_reduce_groups == NearIdenticalExpectedReduceGroups() &&
@@ -439,19 +434,24 @@ void scene_seed_main(uint3 dispatch_thread : SV_DispatchThreadID) {
 void resolve_main(uint3 group_thread : SV_GroupThreadID) {
     uint linear_thread = group_thread.x;
     uint4 primary = 0u;
-    uint expected_tile_width = (target_w + 15u) / 16u;
-    uint expected_tile_height = (target_h + 15u) / 16u;
+    uint tile_buffer_count = 0u;
+    uint tile_buffer_stride = 0u;
+    NearIdenticalTileInput.GetDimensions(tile_buffer_count, tile_buffer_stride);
+    uint expected_tile_width = NearIdenticalTileAxisGroups(target_w);
+    uint expected_tile_height = NearIdenticalTileAxisGroups(target_h);
     bool expected_tile_count_valid = expected_tile_width != 0u &&
         expected_tile_height <=
-            NEAR_IDENTICAL_MAX_TILE_GROUP_COUNT / max(expected_tile_width, 1u);
+            0xffffffffu / max(expected_tile_width, 1u);
     uint expected_tile_count = expected_tile_count_valid ?
         expected_tile_width * expected_tile_height : 0u;
-    uint resolve_flags = !expected_tile_count_valid ||
+    bool tile_buffer_valid = expected_tile_count_valid &&
+        tile_buffer_stride == 4u * 4u &&
+        tile_buffer_count == expected_tile_count;
+    uint resolve_flags = !tile_buffer_valid ||
         near_identical_tile_group_count != expected_tile_count ?
             NEAR_IDENTICAL_RESOLVE_FLAG_MALFORMED : 0u;
-    uint tile_limit = min(
-        near_identical_tile_group_count,
-        expected_tile_count);
+    uint tile_limit = tile_buffer_valid ?
+        min(near_identical_tile_group_count, tile_buffer_count) : 0u;
     for (uint tile_index = linear_thread;
          tile_index < tile_limit;
          tile_index += NEAR_IDENTICAL_RESOLVE_THREADS) {
@@ -532,11 +532,11 @@ void resolve_main(uint3 group_thread : SV_GroupThreadID) {
                      NEAR_IDENTICAL_WORK_FLAGS_COOKIE)) &&
             NearIdenticalDecision.Load(NEAR_IDENTICAL_REQUEST_RESERVED_OFFSET) == 0u;
         bool tile_shape_valid =
-            near_identical_tile_group_width == (target_w + 15u) / 16u &&
-            near_identical_tile_group_height == (target_h + 15u) / 16u &&
+            tile_buffer_valid &&
+            near_identical_tile_group_width == NearIdenticalTileAxisGroups(target_w) &&
+            near_identical_tile_group_height == NearIdenticalTileAxisGroups(target_h) &&
             near_identical_tile_group_count ==
-                near_identical_tile_group_width * near_identical_tile_group_height &&
-            near_identical_tile_group_count <= NEAR_IDENTICAL_MAX_TILE_GROUP_COUNT;
+                near_identical_tile_group_width * near_identical_tile_group_height;
         bool request_authorized = constants_valid && request_record_valid;
         bool owner_valid =
             request_authorized && NearIdenticalOwnerIsNewer() &&
@@ -705,8 +705,8 @@ void finalize_main(uint3 dispatch_thread : SV_DispatchThreadID) {
             1u);
         NearIdenticalWriteDispatchArgs(
             NEAR_IDENTICAL_REUSE_GRID16_OFFSET,
-            hold_previous_depth ? (target_w + 15u) / 16u : 0u,
-            hold_previous_depth ? (target_h + 15u) / 16u : 1u,
+            hold_previous_depth ? NearIdenticalTileAxisGroups(target_w) : 0u,
+            hold_previous_depth ? NearIdenticalTileAxisGroups(target_h) : 1u,
             1u);
     }
     DeviceMemoryBarrier();

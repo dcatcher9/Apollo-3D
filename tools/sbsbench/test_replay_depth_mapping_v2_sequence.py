@@ -5,6 +5,7 @@ import re
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 from PIL import Image
@@ -30,6 +31,7 @@ try:
         RENDERER_SCORE_CONTRACT_SCHEMA, MappingV2Config,
         _OrderedSourceRgbFields,
         _diagnostic_summary,
+        _exact_source_capture_grid_kind,
         _load_authenticated_cut_pulses, _materialize_gpu_replay_inputs,
         _materialize_producer_evidence_bundle,
         _metric_contract_evidence,
@@ -60,6 +62,7 @@ except ImportError:  # Direct execution from tools/sbsbench.
         RENDERER_SCORE_CONTRACT_SCHEMA, MappingV2Config,
         _OrderedSourceRgbFields,
         _diagnostic_summary,
+        _exact_source_capture_grid_kind,
         _load_authenticated_cut_pulses, _materialize_gpu_replay_inputs,
         _materialize_producer_evidence_bundle,
         _metric_contract_evidence,
@@ -425,6 +428,163 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "expected"):
                 whole_clip_raw_contract.authenticate_manifest_files(clip, manifest, [1])
 
+    def test_single_high_raw_manifest_requires_active_schema_two_fused_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_root = Path(temporary)
+            clip = run_root / "single_high"
+            clip.mkdir()
+            calibration = MODEL_CALIBRATIONS[0]
+            coarse_width, coarse_height = calibration.calibrated_input_shapes[0]
+            width, height = 2 * coarse_width, 2 * coarse_height
+            producer = {
+                "schema": 1,
+                "model": calibration.depth_model,
+                "depth_model_url": calibration.depth_model_url,
+                "onnx_sha256": calibration.onnx_sha256,
+                "preprocess_profile": calibration.preprocess.profile,
+                "preprocess_source_closure_sha256":
+                    calibration.preprocess.source_closure_sha256,
+                "raw_width": width,
+                "raw_height": height,
+            }
+            (clip / "contract.json").write_text(json.dumps({
+                "schema": whole_clip_raw_contract.HARNESS_CONTRACT_SCHEMA,
+                "raw_model_provenance": producer,
+            }), encoding="utf-8")
+            (clip / "raw_shape.json").write_text(json.dumps({
+                "schema": whole_clip_raw_contract.RAW_SHAPE_SCHEMA,
+                "width": width, "height": height, "dtype": "float32-le",
+                "layout": "row-major", "stage": RAW_STAGE,
+            }), encoding="utf-8")
+            np.zeros(width * height, dtype="<f4").tofile(clip / "raw_00001.f32")
+            identity = {
+                "model": calibration.depth_model,
+                "depth_model_url": calibration.depth_model_url,
+                "onnx_sha256": calibration.onnx_sha256,
+                "preprocess_profile": calibration.preprocess.profile,
+                "preprocess_source_closure_sha256":
+                    calibration.preprocess.source_closure_sha256,
+                "calibration_id": calibration.calibration_id,
+            }
+
+            with self.assertRaisesRegex(
+                    ValueError, "requires authenticated composite runtime evidence"):
+                whole_clip_raw_contract.build_manifest(clip, [1], identity)
+
+            expected_composite = {"runtime": "unit-fused-runtime"}
+            active = {
+                "schema": 2,
+                "tensor_shapes": {
+                    "output": {"width": width, "height": height, "channels": 1},
+                },
+                "embedded_dav2_provenance": {
+                    key: producer[key]
+                    for key in (
+                        "model", "depth_model_url", "onnx_sha256", "preprocess_profile",
+                        "preprocess_source_closure_sha256")
+                },
+            }
+            with mock.patch.object(
+                    whole_clip_raw_contract.convex2x_diagnostics, "build_manifest",
+                    return_value=active) as build_diagnostics:
+                admitted = whole_clip_raw_contract.build_manifest(
+                    clip, [1], {
+                        **identity,
+                        "composite_runtime_provenance": expected_composite,
+                    })
+            self.assertEqual(admitted["calibration_status"], "calibrated")
+            build_diagnostics.assert_called_once_with(
+                clip, [1], expected_composite)
+
+            downgraded = json.loads(json.dumps(admitted))
+            downgraded["calibration_status"] = "abstain-unsupported-shape"
+            downgraded["abstention_reason"] = (
+                f"raw model shape {width}x{height} is not calibrated")
+            with self.assertRaisesRegex(
+                    ValueError, "calibration status disagrees"):
+                whole_clip_raw_contract.authenticate_manifest_files(
+                    clip, downgraded, [1])
+
+            stale_split = {
+                "schema": 1,
+                "tensor_shapes": {
+                    "raw": {
+                        "width": coarse_width, "height": coarse_height, "channels": 1,
+                    },
+                    "refined": {"width": width, "height": height, "channels": 1},
+                },
+            }
+            with mock.patch.object(
+                    whole_clip_raw_contract.convex2x_diagnostics, "build_manifest",
+                    return_value=stale_split):
+                with self.assertRaisesRegex(ValueError, "active schema-2 fused evidence"):
+                    whole_clip_raw_contract.build_manifest(
+                        clip, [1], {
+                            **identity,
+                            "composite_runtime_provenance": expected_composite,
+                        })
+
+            raw_summary = {
+                "calibration_status": admitted["calibration_status"],
+                "calibration_id": admitted["calibration_id"],
+                "preprocess_profile": producer["preprocess_profile"],
+                "raw_shape": admitted["raw_shape"],
+            }
+            results = {
+                "meta": {
+                    "eval_schema": whole_clip_raw_contract.EVALUATOR_SCHEMA,
+                    "model": calibration.depth_model,
+                    "depth_model_url": calibration.depth_model_url,
+                    "preprocess_profile": calibration.preprocess.profile,
+                    "preprocess_source_closure_sha256":
+                        calibration.preprocess.source_closure_sha256,
+                    "depth_coordinate_v2_calibration_id": calibration.calibration_id,
+                    "depth_coordinate_v2_raw_shape": {
+                        "height": height, "width": width,
+                    },
+                    "onnx_sha256": calibration.onnx_sha256,
+                    "engine_name": "unit.engine",
+                    "engine_sha256": "e" * 64,
+                    "pop_strength": 1.2,
+                    "composite_runtime_provenance": expected_composite,
+                    whole_clip_raw_contract.RESULTS_META_KEY: {
+                        clip.name: admitted,
+                    },
+                    whole_clip_raw_contract.convex2x_diagnostics.RESULTS_META_KEY: {
+                        clip.name: active,
+                    },
+                },
+                "clips": {
+                    clip.name: {"meta": {"raw_model_identity": raw_summary}},
+                },
+            }
+            results_path = run_root / "results.json"
+
+            missing_results = json.loads(json.dumps(results))
+            del missing_results["meta"][
+                whole_clip_raw_contract.convex2x_diagnostics.RESULTS_META_KEY]
+            results_path.write_text(json.dumps(missing_results), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "lacks schema-2 fused evidence"):
+                _load_run_model_contract(run_root)
+
+            stale_results = json.loads(json.dumps(results))
+            stale_results["meta"][
+                whole_clip_raw_contract.convex2x_diagnostics.RESULTS_META_KEY][clip.name] = {
+                    "schema": 1,
+                }
+            results_path.write_text(json.dumps(stale_results), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "stale split fused evidence"):
+                _load_run_model_contract(run_root)
+
+            results_path.write_text(json.dumps(results), encoding="utf-8")
+            with mock.patch.object(
+                    whole_clip_raw_contract.convex2x_diagnostics,
+                    "authenticate_manifest_files", return_value=[]):
+                run_model = _load_run_model_contract(run_root)
+            self.assertEqual(
+                run_model["capture_grid_by_clip"][clip.name],
+                "single-high-convex2x")
+
     def test_uncalibrated_empty_profile_and_local_url_are_authenticated_abstentions(self):
         with tempfile.TemporaryDirectory() as temporary:
             cases = (
@@ -664,9 +824,9 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             source_one = root / "source_one.png"
             source_two = root / "source_two.png"
             Image.fromarray(
-                np.full((3, 4, 3), 17, dtype=np.uint8), mode="RGB").save(source_one)
+                np.full((1080, 1920, 3), 17, dtype=np.uint8), mode="RGB").save(source_one)
             Image.fromarray(
-                np.full((3, 4, 3), 231, dtype=np.uint8), mode="RGB").save(source_two)
+                np.full((1080, 1920, 3), 231, dtype=np.uint8), mode="RGB").save(source_two)
             source_two_bytes = source_two.read_bytes()
             raw_one_path = root / "raw_00001.f32"
             raw_two_path = root / "raw_00002.f32"
@@ -714,7 +874,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             self.assertEqual(manifest["mode"], GPU_INPUT_MANIFEST_MODE)
             self.assertEqual(manifest["source_color_mode"], 0)
             self.assertEqual(manifest["source_linear_scale"], 1.0)
-            self.assertEqual(manifest["source_shape"], {"width": 4, "height": 3})
+            self.assertEqual(manifest["source_shape"], {"width": 1920, "height": 1080})
             self.assertEqual(
                 manifest["frames"][1]["source_sha256"], rows[1]["input_source_sha256"])
             self.assertEqual(
@@ -819,9 +979,37 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                     "cut-state-hard-cut-generation", input_contract)
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             _validate_frame_source_attestation(output, rows[1], "00002")
-            (output / "input_frames" / "frame_00002.png").write_bytes(b"tampered-current-input")
+            (output / "input_frames" / "frame_00002.png").write_bytes(
+                b"tampered-current-input")
             with self.assertRaisesRegex(ValueError, "input source hash mismatch"):
                 _validate_frame_source_attestation(output, rows[1], "00002")
+
+    def test_sequence_source_binding_accepts_all_six_coarse_and_high_profiles(self):
+        cases = (
+            (1920, 1080, 770, 434),
+            (2560, 1080, 1022, 434),
+            (3440, 1440, 1036, 434),
+            (1080, 1920, 434, 770),
+            (1080, 2560, 434, 1022),
+            (1440, 3440, 434, 1036),
+        )
+        for source_width, source_height, coarse_width, coarse_height in cases:
+            with self.subTest(source=(source_width, source_height), scale=1):
+                self.assertEqual(
+                    _exact_source_capture_grid_kind(
+                        source_width, source_height, coarse_width, coarse_height),
+                    "legacy-dav2")
+            with self.subTest(source=(source_width, source_height), scale=2):
+                self.assertEqual(
+                    _exact_source_capture_grid_kind(
+                        source_width, source_height,
+                        2 * coarse_width, 2 * coarse_height),
+                    "single-high-convex2x")
+
+        for width, height in ((1022, 434), (2044, 868), (868, 1540)):
+            with self.subTest(wrong_supported_grid=(width, height)):
+                with self.assertRaisesRegex(ValueError, "exact source-derived"):
+                    _exact_source_capture_grid_kind(1920, 1080, width, height)
 
     def test_producer_bundle_survives_source_deletion_and_authenticates_cut_authority(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -837,7 +1025,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                 output, clip, run_model)
             source = workspace / "frame_00001.png"
             Image.fromarray(
-                np.full((2, 3, 3), 91, dtype=np.uint8), mode="RGB").save(source)
+                np.full((1080, 1920, 3), 91, dtype=np.uint8), mode="RGB").save(source)
             calibration = MODEL_CALIBRATIONS[0]
             config = MappingV2Config(raw_coordinate_scale=calibration.raw_coordinate_scale)
             _, gpu_path = _materialize_gpu_replay_inputs(

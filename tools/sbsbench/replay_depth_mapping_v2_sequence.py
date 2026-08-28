@@ -33,7 +33,10 @@ from PIL import Image
 try:
     from . import direct_geometry_contract as direct_geometry
     from . import cut_state_contract
+    from . import depth_coordinate_v2_dump_contract as dump_contract
     from . import whole_clip_raw_contract
+    from . import prod_zipdepth_convex2x as convex2x_contract
+    from . import prod_zipdepth_convex2x_diagnostics_contract as convex2x_diagnostics
     from .adaptive_state_contract import COUNTER_MAX as CUT_COUNTER_MAX
     from .depth_coordinate_v2_contract import (
         CONTRACT_CANONICAL_SHA256, CONTRACT_PATH, CONTRACT_SCHEMA)
@@ -53,7 +56,10 @@ try:
 except ImportError:  # Direct execution from tools/sbsbench.
     import direct_geometry_contract as direct_geometry  # type: ignore
     import cut_state_contract  # type: ignore
+    import depth_coordinate_v2_dump_contract as dump_contract  # type: ignore
     import whole_clip_raw_contract  # type: ignore
+    import prod_zipdepth_convex2x as convex2x_contract  # type: ignore
+    import prod_zipdepth_convex2x_diagnostics_contract as convex2x_diagnostics  # type: ignore
     from adaptive_state_contract import COUNTER_MAX as CUT_COUNTER_MAX  # type: ignore
     from depth_coordinate_v2_contract import (  # type: ignore
         CONTRACT_CANONICAL_SHA256, CONTRACT_PATH, CONTRACT_SCHEMA)
@@ -114,9 +120,13 @@ IMPLEMENTATION_SOURCE_FILES = (
     "src_assets/windows/assets/shaders/directx/include/depth_coordinate_v2_contract.generated.hlsl",
     "src_assets/windows/assets/shaders/directx/include/sbs_adaptive_state_contract.generated.hlsl",
     "tools/sbsbench/depth_coordinate_v2_contract.py",
+    "tools/sbsbench/depth_coordinate_v2_dump_contract.py",
     "tools/sbsbench/depth_mapping_v2.py",
     "tools/sbsbench/depth_mapping_v2_temporal.py",
     "tools/sbsbench/direct_geometry_contract.py",
+    "tools/sbsbench/prod_zipdepth_convex2x.py",
+    "tools/sbsbench/prod_zipdepth_convex2x_diagnostics_contract.py",
+    "tools/sbsbench/contracts/prod-zipdepth-convex2x-v2.json",
     "tools/sbsbench/run_eval.py",
     "tools/sbsbench/cut_state_contract.py",
     "tools/sbsbench/whole_clip_raw_contract.py",
@@ -456,6 +466,8 @@ def _materialize_gpu_replay_inputs(
             source_shape = current_source_shape
         elif source_shape != current_source_shape:
             raise ValueError("exact replay source frames have mixed dimensions")
+        _exact_source_capture_grid_kind(
+            source_width, source_height, shape[1], shape[0])
         input_path.write_bytes(source_bytes)
         rendered_path.write_bytes(source_bytes)
         raw_name = f"raw_{frame_text}.f32"
@@ -517,6 +529,21 @@ def _materialize_gpu_replay_inputs(
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return rows, manifest_path
+
+
+def _exact_source_capture_grid_kind(
+        source_width: int, source_height: int,
+        grid_width: int, grid_height: int) -> str:
+    """Require one exact source-derived legacy-coarse or fused-high production profile."""
+
+    actual = grid_width, grid_height
+    for scale, kind in ((1, "legacy-dav2"), (2, "single-high-convex2x")):
+        expected = dump_contract.expected_capture_grid_for_source(
+            source_width, source_height, scale=scale)
+        if expected == actual:
+            return kind
+    raise ValueError(
+        "replay depth grid does not match the exact source-derived production profile")
 
 
 def _materialize_producer_evidence_bundle(
@@ -815,6 +842,9 @@ def _validate_gpu_input_manifest_evidence(
             source_shape["width"] < 1 or source_shape["width"] > 16384 or
             source_shape["height"] < 1 or source_shape["height"] > 16384):
         raise ValueError("GPU input manifest has an invalid source shape")
+    _exact_source_capture_grid_kind(
+        source_shape["width"], source_shape["height"],
+        expected_shape["width"], expected_shape["height"])
     calibration_ref = manifest.get("calibration_contract")
     if (not isinstance(calibration_ref, dict) or
             set(calibration_ref) != {"file", "schema", "sha256"} or
@@ -971,6 +1001,69 @@ def _validate_producer_evidence_bundle(
             reference["raw_shape"]["sha256"] !=
             input_contract.get("raw_shape_json_sha256")):
         raise ValueError("sequence copied raw shape has unknown or inconsistent semantics")
+
+    supported_high = {
+        (shape.width, shape.height)
+        for shape in convex2x_contract.supported_high_shapes()
+    }
+    raw_extent = expected_shape["width"], expected_shape["height"]
+    gpu_source_shape = gpu_manifest.get("source_shape")
+    if (not isinstance(gpu_source_shape, dict) or
+            set(gpu_source_shape) != {"width", "height"}):
+        raise ValueError("sequence copied GPU evidence has an invalid source shape")
+    _exact_source_capture_grid_kind(
+        gpu_source_shape["width"], gpu_source_shape["height"],
+        raw_extent[0], raw_extent[1])
+    if raw_extent in supported_high:
+        composite_runtime = results_meta.get("composite_runtime_provenance")
+        fused_manifests = results_meta.get(convex2x_diagnostics.RESULTS_META_KEY)
+        if (not isinstance(composite_runtime, dict) or
+                not isinstance(fused_manifests, dict) or clip not in fused_manifests):
+            raise ValueError(
+                "sequence copied single-high raw field lacks fused runtime evidence")
+        fused_manifest = fused_manifests[clip]
+        frame_ids = [int(row["frame_id"]) for row in manifest["frames"]]
+        convex2x_diagnostics.validate_manifest(
+            fused_manifest, frame_ids, composite_runtime)
+        if (fused_manifest.get("schema") != convex2x_diagnostics.MANIFEST_SCHEMA or
+                fused_manifest["tensor_shapes"].get("output") != {
+                    "width": raw_extent[0], "height": raw_extent[1], "channels": 1}):
+            raise ValueError(
+                "sequence copied fused evidence does not bind the single-high raw shape")
+        expected_reference = {
+            "schema": convex2x_diagnostics.SIDECAR_SCHEMA,
+            "sidecar": convex2x_diagnostics.SIDECAR_FILENAME,
+            "sidecar_sha256": fused_manifest["sidecar_sha256"],
+            "frame_count": fused_manifest["frame_count"],
+            "input_file_pattern": "model_input_<frame-id>.f32",
+            "output_file_pattern": "raw_<frame-id>.f32",
+            "authority": "single-high-input-output-boundary",
+        }
+        if contract.get("prod_zipdepth_convex2x_diagnostics") != expected_reference:
+            raise ValueError(
+                "sequence copied harness contract does not bind active single-high evidence")
+        embedded = fused_manifest["embedded_dav2_provenance"]
+        projected_identity = {
+            key: manifest["producer_model_identity"][key]
+            for key in (
+                "model", "depth_model_url", "onnx_sha256", "preprocess_profile",
+                "preprocess_source_closure_sha256")
+        }
+        if embedded != projected_identity:
+            raise ValueError(
+                "sequence copied fused evidence disagrees with embedded DAV2 provenance")
+        fused_outputs = [
+            {"frame_id": row["frame_id"],
+             "file": row["output"]["file"], "sha256": row["output"]["sha256"]}
+            for row in fused_manifest["frames"]
+        ]
+        expected_outputs = [
+            {"frame_id": row["frame_id"], "file": row["file"], "sha256": row["sha256"]}
+            for row in manifest["frames"]
+        ]
+        if fused_outputs != expected_outputs:
+            raise ValueError(
+                "sequence copied fused output hashes disagree with raw producer evidence")
 
     manifest_rows = manifest["frames"]
     input_rows = input_contract.get("ordered_raw_fields")
@@ -1202,6 +1295,9 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
         raise ValueError("sequence raw shape is invalid")
     trace = _read_json(output / STATE_TRACE_FILE)
     validate_v2_state_trace(trace, frame_ids)
+    if trace.get("producer", {}).get("tensor_shape") != {
+            "width": raw_shape["width"], "height": raw_shape["height"]}:
+        raise ValueError("sequence native state trace uses a different raw tensor shape")
     if trace["producer"]["manifest_sha256"] != gpu_input_ref.get("sha256"):
         raise ValueError("sequence native state trace names a different GPU input manifest")
     trace_rows = trace["frames"]

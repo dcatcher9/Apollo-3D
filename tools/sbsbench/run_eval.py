@@ -78,9 +78,13 @@ EVAL_SCHEMA = whole_clip_raw_contract.EVALUATOR_SCHEMA  # schema 37; harness 22 
 PARALLAX_V2_LIVE_RENDERER = "depth-coordinate-v2-live-signed-parallax"
 BASELINE_SNAPSHOT_SCHEMA = 1
 BASELINE_SNAPSHOT_FILE = "baseline_snapshot.json"
-COMPOSITE_DEPTH_MODEL = "prod_dav2_zipdepth_convex2x_dynamic_opset18"
+_COMPOSITE_DEPTH_CONTRACT = prod_convex2x.load_contract()
+COMPOSITE_DEPTH_MODEL = str(
+    _COMPOSITE_DEPTH_CONTRACT["sources"]["fused_onnx"]["logical_model"])
 COMPOSITE_DEPTH_RUNTIME = "dav2_zipdepth_convex2x_composite"
-COMPOSITE_DEPTH_ENGINE_RECIPE = "trt-six-point-profiles-level5-v1"
+COMPOSITE_DEPTH_ENGINE_RECIPE = str(
+    _COMPOSITE_DEPTH_CONTRACT["tensorrt"]["engine_recipe"]
+)
 RETIRED_BASELINE_META_KEYS = frozenset({
     "profile", "literal_bestv2", "adaptive_pop", "adaptive_pop_max", "zero_plane",
 })
@@ -224,8 +228,10 @@ def scored_artifact_digests(directory):
     numeric_fixed = {"warp_map_shape.json", "hdr_output_stats.json", "cut_state.json"}
     frame_pattern = re.compile(
         r"^(?:sbs|depth|structure|parallax|warp_map|warp_mask)_\d+\.(?:png|f32)$")
+    # Schema 2 has one high input (model_input_) and reuses raw_ as its sole output. Retain the
+    # schema-1 names so historical two-binding evidence remains content-authenticated.
     diagnostic_frame_pattern = re.compile(
-        r"^(?:raw|refined|zip_model_input)_\d+\.f32$")
+        r"^(?:raw|model_input|refined|zip_model_input)_\d+\.f32$")
     diagnostic_sidecar_present = os.path.isfile(
         os.path.join(directory, convex2x_diagnostics.SIDECAR_FILENAME))
     paths = sorted(
@@ -602,6 +608,109 @@ def finalize_whole_clip_raw_identity(meta, manifests):
     else:
         meta["depth_coordinate_v2_raw_shape"] = None
     return summaries
+
+
+def authenticate_whole_clip_model_artifacts(meta, clip_frame_ids, run_dir):
+    """Authenticate raw fields first, then require fused evidence from their actual grid.
+
+    Top-level composite metadata is not allowed to decide whether diagnostics are required: it is
+    editable results metadata and could simply be removed alongside the diagnostic manifests.  An
+    exact single-high grid, recomputed while authenticating each raw manifest, instead makes the
+    active schema-2 model-boundary evidence mandatory.
+    """
+
+    if not isinstance(meta, dict):
+        raise ValueError("results.meta must be an object")
+    if (not isinstance(clip_frame_ids, dict) or not clip_frame_ids or
+            any(not isinstance(clip, str) or not clip for clip in clip_frame_ids)):
+        raise ValueError("whole-clip authentication requires a non-empty clip/frame mapping")
+    clips = set(clip_frame_ids)
+    raw_manifests = meta.get(whole_clip_raw_contract.RESULTS_META_KEY)
+    diagnostic_manifests = meta.get(convex2x_diagnostics.RESULTS_META_KEY)
+    ordinary_run = meta.get("warp_input") != direct_geometry.WARP_INPUT
+    if not ordinary_run:
+        if raw_manifests is not None or diagnostic_manifests is not None:
+            raise ValueError(
+                "whole-clip raw/fused manifests are invalid for direct-geometry runs")
+        return {}
+    if not isinstance(raw_manifests, dict) or set(raw_manifests) != clips:
+        raise ValueError(
+            f"meta.{whole_clip_raw_contract.RESULTS_META_KEY} must exactly cover "
+            "the ordinary scored clip set")
+
+    capture_grids = {}
+    for clip in clip_frame_ids:
+        try:
+            capture_grids[clip] = (
+                whole_clip_raw_contract.authenticate_manifest_capture_grid(
+                    Path(run_dir) / clip, raw_manifests[clip], clip_frame_ids[clip]))
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                f"clips.{clip}: cannot authenticate whole-clip raw artifacts: {exc}") from exc
+
+    high_clips = {
+        clip for clip, grid in capture_grids.items()
+        if grid == whole_clip_raw_contract.SINGLE_HIGH_CAPTURE_GRID
+    }
+    if high_clips and high_clips != clips:
+        raise ValueError(
+            "single-high raw manifests must cover the exact ordinary scored clip set")
+
+    diagnostic_required = bool(high_clips)
+    if diagnostic_required and not isinstance(meta.get("composite_runtime_provenance"), dict):
+        raise ValueError(
+            "authenticated single-high raw artifacts require composite runtime provenance")
+    if diagnostic_required and (
+            not isinstance(diagnostic_manifests, dict) or
+            set(diagnostic_manifests) != clips):
+        raise ValueError(
+            f"meta.{convex2x_diagnostics.RESULTS_META_KEY} must exactly cover "
+            "the authenticated single-high clip set")
+    if diagnostic_manifests is None:
+        return capture_grids
+    if (not isinstance(diagnostic_manifests, dict) or
+            set(diagnostic_manifests) != clips or
+            not isinstance(meta.get("composite_runtime_provenance"), dict)):
+        raise ValueError("fused diagnostic metadata is incomplete or malformed")
+
+    composite_runtime = meta["composite_runtime_provenance"]
+    for clip in clip_frame_ids:
+        diagnostic_manifest = diagnostic_manifests[clip]
+        if (diagnostic_required and
+                (not isinstance(diagnostic_manifest, dict) or
+                 diagnostic_manifest.get("schema") != convex2x_diagnostics.MANIFEST_SCHEMA)):
+            raise ValueError(
+                f"clips.{clip}: authenticated single-high raw artifacts require "
+                "schema-2 fused diagnostics")
+        try:
+            convex2x_diagnostics.authenticate_manifest_files(
+                Path(run_dir) / clip, diagnostic_manifest, clip_frame_ids[clip],
+                composite_runtime)
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                f"clips.{clip}: cannot authenticate fused diagnostics: {exc}") from exc
+        if diagnostic_required:
+            raw_manifest = raw_manifests[clip]
+            producer = raw_manifest["producer_model_identity"]
+            expected_embedded = {
+                key: producer[key]
+                for key in (
+                    "model", "depth_model_url", "onnx_sha256", "preprocess_profile",
+                    "preprocess_source_closure_sha256")
+            }
+            expected_output = {
+                "width": raw_manifest["raw_shape"]["width"],
+                "height": raw_manifest["raw_shape"]["height"],
+                "channels": 1,
+            }
+            if (diagnostic_manifest.get("tensor_shapes", {}).get("output") !=
+                    expected_output or
+                    diagnostic_manifest.get("embedded_dav2_provenance") !=
+                    expected_embedded):
+                raise ValueError(
+                    f"clips.{clip}: schema-2 fused diagnostics do not bind the "
+                    "authenticated high raw field")
+    return capture_grids
 
 
 def validate_subtitle_transition_contract(path, contract):
@@ -1717,16 +1826,40 @@ def training_label_evidence_gate(results, thresholds=None, *, require_context=Tr
             any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{12}", value)
                 for value in clip_hashes.values())):
         blockers.append("meta.clip_set_sha1")
-    diagnostic_required = (
-        isinstance(meta.get("composite_runtime_provenance"), dict) and
-        meta.get("warp_input") != direct_geometry.WARP_INPUT)
+    raw_manifests = meta.get(whole_clip_raw_contract.RESULTS_META_KEY)
+    ordinary_run = meta.get("warp_input") != direct_geometry.WARP_INPUT
+    high_shapes = {
+        (shape.width, shape.height) for shape in prod_convex2x.supported_high_shapes()
+    }
+    high_clips = set()
+    if raw_manifests is not None:
+        if (not ordinary_run or not isinstance(raw_manifests, dict) or
+                set(raw_manifests) != set(clips)):
+            blockers.append(f"meta.{whole_clip_raw_contract.RESULTS_META_KEY}")
+        else:
+            for clip, manifest in raw_manifests.items():
+                try:
+                    whole_clip_raw_contract.validate_manifest(manifest)
+                    raw_shape = manifest["raw_shape"]
+                    if (raw_shape["width"], raw_shape["height"]) in high_shapes:
+                        high_clips.add(clip)
+                except ValueError:
+                    blockers.append(f"clips.{clip}.whole_clip_raw_artifacts")
+    diagnostic_required = bool(high_clips)
+    if high_clips and high_clips != set(clips):
+        blockers.append("meta.whole_clip_raw_artifacts.mixed_capture_grid")
+    composite_runtime = meta.get("composite_runtime_provenance")
     diagnostic_manifests = meta.get(convex2x_diagnostics.RESULTS_META_KEY)
     if diagnostic_required:
-        if (not isinstance(diagnostic_manifests, dict) or
+        if (not isinstance(composite_runtime, dict) or
+                not isinstance(diagnostic_manifests, dict) or
                 set(diagnostic_manifests) != set(clips)):
             blockers.append(f"meta.{convex2x_diagnostics.RESULTS_META_KEY}")
-    elif diagnostic_manifests is not None:
-        blockers.append(f"meta.{convex2x_diagnostics.RESULTS_META_KEY}.unexpected")
+    elif diagnostic_manifests is not None and (
+            not ordinary_run or not isinstance(composite_runtime, dict) or
+            not isinstance(diagnostic_manifests, dict) or
+            set(diagnostic_manifests) != set(clips)):
+        blockers.append(f"meta.{convex2x_diagnostics.RESULTS_META_KEY}.malformed")
     for clip, entry in clips.items():
         if not isinstance(entry, dict) or not isinstance(entry.get("frames"), list) or not entry[
                 "frames"]:
@@ -1756,12 +1889,23 @@ def training_label_evidence_gate(results, thresholds=None, *, require_context=Tr
                     blockers.append(f"clips.{clip}.frame_labels")
         if len(frame_ids) != len(set(frame_ids)):
             blockers.append(f"clips.{clip}.frame_ids")
-        if diagnostic_required and isinstance(diagnostic_manifests, dict):
+        raw_manifest = (
+            raw_manifests.get(clip) if isinstance(raw_manifests, dict) else None)
+        if raw_manifest is not None:
             try:
+                whole_clip_raw_contract.validate_manifest(raw_manifest, sorted(frame_ids))
+            except ValueError:
+                blockers.append(f"clips.{clip}.whole_clip_raw_artifacts")
+        if isinstance(diagnostic_manifests, dict) and clip in diagnostic_manifests:
+            try:
+                if (diagnostic_required and
+                        diagnostic_manifests[clip].get("schema") !=
+                        convex2x_diagnostics.MANIFEST_SCHEMA):
+                    raise ValueError("single-high evidence must use diagnostics schema 2")
                 convex2x_diagnostics.validate_manifest(
                     diagnostic_manifests.get(clip), sorted(frame_ids),
-                    meta["composite_runtime_provenance"])
-            except ValueError:
+                    composite_runtime)
+            except (AttributeError, ValueError):
                 blockers.append(f"clips.{clip}.convex2x_diagnostics")
         source_count = entry_meta.get("source_frame_count")
         if (isinstance(source_count, bool) or not isinstance(source_count, int) or
@@ -2271,20 +2415,12 @@ def verify_results_against_artifacts(results, run_dir, clips_root, thresholds,
     if (not isinstance(recorded_clip_hashes, dict) or
             set(recorded_clip_hashes) != set(clips)):
         raise ValueError("meta.clip_set_sha1 must exactly cover the scored clip set")
-    composite_runtime = meta.get("composite_runtime_provenance")
-    diagnostic_manifests = meta.get(convex2x_diagnostics.RESULTS_META_KEY)
-    diagnostic_required = (
-        isinstance(composite_runtime, dict) and
-        meta.get("warp_input") != direct_geometry.WARP_INPUT)
-    if diagnostic_required:
-        if (not isinstance(diagnostic_manifests, dict) or
-                set(diagnostic_manifests) != set(clips)):
-            raise ValueError(
-                f"meta.{convex2x_diagnostics.RESULTS_META_KEY} must exactly cover "
-                "the composite ordinary clip set")
-    elif diagnostic_manifests is not None:
-        raise ValueError(
-            "fused diagnostic manifests are only valid for a composite ordinary run")
+    source_frame_ids = {
+        clip: sorted(sbsbench.indexed_files(
+            os.path.join(clips_root, clip, "frame_*.*"), "frame_"))
+        for clip in clips
+    }
+    authenticate_whole_clip_model_artifacts(meta, source_frame_ids, run_dir)
 
     expected = copy.deepcopy(results)
     expected_issues = []
@@ -2329,12 +2465,7 @@ def verify_results_against_artifacts(results, run_dir, clips_root, thresholds,
         source_dir = os.path.join(clips_root, clip)
         try:
             actual_clip_hash, source_sha256 = source_evidence_digests(source_dir)
-            source_ids = sorted(sbsbench.indexed_files(
-                os.path.join(source_dir, "frame_*.*"), "frame_"))
-            if diagnostic_required:
-                convex2x_diagnostics.authenticate_manifest_files(
-                    Path(artifact_dir), diagnostic_manifests[clip], source_ids,
-                    composite_runtime)
+            source_ids = source_frame_ids[clip]
             actual_artifact_hash, numeric_digest = scored_artifact_digests(artifact_dir)
         except (OSError, ValueError) as exc:
             raise ValueError(
@@ -2389,15 +2520,17 @@ def verify_results_against_artifacts(results, run_dir, clips_root, thresholds,
     # Authentication and measurement are separate phases so CPU jobs can overlap. Rehash every
     # input before accepting or caching rows: otherwise a source/artifact mutation during that
     # phase gap could be scored under the digest authenticated before the worker pool started.
+    try:
+        authenticate_whole_clip_model_artifacts(meta, source_frame_ids, run_dir)
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            "cannot re-authenticate whole-clip model artifacts after remeasurement: "
+            f"{exc}") from exc
     for clip in clips:
         verified = verified_clips[clip]
         try:
             post_source = source_evidence_digests(verified["source_dir"])
             post_artifact = scored_artifact_digests(verified["artifact_dir"])
-            if diagnostic_required:
-                convex2x_diagnostics.authenticate_manifest_files(
-                    Path(verified["artifact_dir"]), diagnostic_manifests[clip],
-                    verified["source_ids"], composite_runtime)
         except (OSError, ValueError) as exc:
             raise ValueError(
                 f"clips.{clip}: cannot re-authenticate scored artifacts after "
@@ -3390,6 +3523,8 @@ def main():
                         "calibration_id": (
                             v2_calibration.calibration_id
                             if v2_calibration is not None else None),
+                        "composite_runtime_provenance":
+                            model_artifacts.get("composite_runtime_provenance"),
                     })
                 whole_clip_raw_artifacts[clip] = raw_manifest
                 clip_meta["raw_model_identity"] = {
@@ -3550,22 +3685,28 @@ def main():
 
     # The serial artifact-validation phase and parallel scoring phase are intentionally separate.
     # Prove no early clip/source changed in that gap before its rows can affect gates or baselines.
+    authenticated_capture_grids = {}
+    if not direct_parallax_root:
+        artifact_meta = {
+            **meta,
+            whole_clip_raw_contract.RESULTS_META_KEY: whole_clip_raw_artifacts,
+        }
+        if convex2x_diagnostic_artifacts:
+            artifact_meta[convex2x_diagnostics.RESULTS_META_KEY] = (
+                convex2x_diagnostic_artifacts)
+        try:
+            authenticated_capture_grids = authenticate_whole_clip_model_artifacts(
+                artifact_meta,
+                {clip: prepared_clips[clip]["source_ids"] for clip in clips},
+                out_root)
+        except (OSError, ValueError) as exc:
+            fail(f"cannot re-authenticate whole-clip model artifacts after scoring: {exc}")
     for clip in clips:
         try:
             post_source_digests = source_evidence_digests(
                 prepared_clips[clip]["clip_dir"])
             post_artifact_digests = scored_artifact_digests(
                 prepared_clips[clip]["out_dir"])
-            if clip in whole_clip_raw_artifacts:
-                whole_clip_raw_contract.authenticate_manifest_files(
-                    Path(prepared_clips[clip]["out_dir"]),
-                    whole_clip_raw_artifacts[clip])
-            if clip in convex2x_diagnostic_artifacts:
-                convex2x_diagnostics.authenticate_manifest_files(
-                    Path(prepared_clips[clip]["out_dir"]),
-                    convex2x_diagnostic_artifacts[clip],
-                    prepared_clips[clip]["source_ids"],
-                    model_artifacts["composite_runtime_provenance"])
         except (OSError, ValueError) as exc:
             fail(f"{clip}: cannot re-authenticate inputs after scoring: {exc}")
         try:
@@ -3657,7 +3798,9 @@ def main():
     meta["scored_artifact_sha256"] = scored_artifact_hashes
     if not direct_parallax_root:
         meta[whole_clip_raw_contract.RESULTS_META_KEY] = whole_clip_raw_artifacts
-        if "composite_runtime_provenance" in model_artifacts:
+        if (any(grid == whole_clip_raw_contract.SINGLE_HIGH_CAPTURE_GRID
+                for grid in authenticated_capture_grids.values()) or
+                convex2x_diagnostic_artifacts):
             meta[convex2x_diagnostics.RESULTS_META_KEY] = convex2x_diagnostic_artifacts
     bind_training_labels_to_evidence_gate(out, thresholds)
     if baseline_snapshot is not None:

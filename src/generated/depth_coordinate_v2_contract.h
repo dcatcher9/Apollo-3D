@@ -12,10 +12,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 72u;
-  inline constexpr std::uint32_t contract_tag = 0x9DEA1BF0u;
-  inline constexpr std::string_view contract_canonical_sha256 = "ff94c30e0295fa0d46ea1db7028a920cec640f192d8afb0fdeeb2722281e52f6";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "9dea1bf04628d13aa82f99ffd8a103f8d5cc06490381a75b7b760fb310585525";
+  inline constexpr std::uint32_t contract_schema = 73u;
+  inline constexpr std::uint32_t contract_tag = 0x3EDD0B65u;
+  inline constexpr std::string_view contract_canonical_sha256 = "4cf03fa21295c65580e3af0b33775fa891dc434df8ec7a7e9881a50084607a75";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "3edd0b659f45c4aa7ab1beda58ceb604801d76e1ae5184d8522023eb68f40ee2";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -263,7 +263,7 @@ namespace models::depth_coordinate_v2 {
         "cs_5_0",
         34816u,
         0u,
-        "1d0e89740921beb645cb8e83bfa6b3ca6f14ce58266bcf6d36dc2dfe8dc5c1bd",
+        "943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744",
         1u,
         "float32-le",
         "NCHW",
@@ -286,10 +286,13 @@ namespace models::depth_coordinate_v2 {
     {"dav2-small-fp16-standardized-ui-shapes-v3", 434u, 1036u},
   }};
 
-  inline constexpr std::array<std::array<std::uint32_t, 2>, 3> subtitle_ocr_live_field_shapes {{
+  inline constexpr std::array<std::array<std::uint32_t, 2>, 6> subtitle_ocr_live_field_shapes {{
     {{1540u, 868u}},
     {{2044u, 868u}},
     {{2072u, 868u}},
+    {{868u, 1540u}},
+    {{868u, 2044u}},
+    {{868u, 2072u}},
   }};
 
   constexpr std::uint32_t subtitle_locator_field_cell_scale(

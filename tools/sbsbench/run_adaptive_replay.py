@@ -35,9 +35,11 @@ sys.path.insert(0, str(SCRIPT_DIR))
 import run_eval  # noqa: E402
 import split_video  # noqa: E402
 import depth_coordinate_v2_contract  # noqa: E402
+import depth_coordinate_v2_dump_contract  # noqa: E402
+import host_sbs_shader_manifest  # noqa: E402
 
-CONTROL_HARNESS_SCHEMA = 27
-CONDITIONAL_HARNESS_SCHEMA = 26
+CONTROL_HARNESS_SCHEMA = 29
+CONDITIONAL_HARNESS_SCHEMA = 28
 CONDITIONAL_METADATA_SCHEMA = 3
 TRACE_HEADER_WORDS = 16
 TRACE_RING_SCHEMA = 3
@@ -51,6 +53,8 @@ TRACE_RECORD_EXPECTED_WORK = 14
 TRACE_RECORD_SUBTITLE = 15
 TRACE_RECORD_FLAGS = 16
 TRACE_RECORD_HOST_SUBTITLE_OUTCOME = 17
+TRACE_RECORD_ANALYSIS_GENERATION = 6
+TRACE_RECORD_DOMAIN_TAG = 8
 TRACE_RECORD_SOURCE_WIDTH = 18
 TRACE_RECORD_SOURCE_HEIGHT = 19
 TRACE_RECORD_FIELD_WIDTH = 20
@@ -97,6 +101,7 @@ PARALLAX_CONTAINER = np.float32(0.04)
 MAX_TRACE_FRAMES = 300
 MAX_REUSE_OWNER_AGE = 4
 MAX_REUSE_OWNER_OBSERVATION_AGE_US = 100_000
+UINT64_MAX = (1 << 64) - 1
 OCR_MAX_OBSERVATION_AGE_US = 33_000
 OCR_MAX_DIRTY_HOLDS = 2
 ADAPTIVE_REQUEST_POLICY_SCHEMA = 2
@@ -104,6 +109,27 @@ FRAME_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp"}
 OBSERVATION_TIMELINE_MAGIC = b"SBSOTL1\0"
 OBSERVATION_TIMELINE_SCHEMA = 1
 OBSERVATION_TIMELINE_HEADER_BYTES = 24
+CONTROL_SCOPE = "force-infer oracle for private adaptive replay"
+TREATMENT_SCOPE = "shared estimator transaction/OCR cadence; offline full-frame admission"
+TRACE_ROLE = "shared production estimator transaction and OCR cadence; offline ordered full-frame admission"
+TRACE_FILENAME = "device_conditional_gpu_trace_ring.u32"
+METADATA_FILENAME = "device_conditional_replay.json"
+PER_FRAME_ARTIFACT_SCOPE = {
+    "current_output": "sbs_*.png and authenticated final_parallax_*.f32",
+    "branch_dependent": (
+        "depth/raw/structure/ema artifacts are branch-dependent/frozen: current on infer and "
+        "retained from the last infer on reuse"),
+    "do_not_interpret_as": (
+        "current-frame DAV2 inference evidence without the authenticated trace disposition"),
+}
+CONTRACT_COMPOSITE_PROVENANCE_KEYS = {
+    "schema", "runtime", "model", "onnx_sha256", "embedded_dav2_onnx_sha256",
+    "zipdepth_checkpoint_sha256", "guidance_preprocess_source_closure_sha256",
+    "engine_recipe", "engine_artifact", "active_engine_manifest",
+}
+RUNTIME_COMPOSITE_PROVENANCE_KEYS = CONTRACT_COMPOSITE_PROVENANCE_KEYS | {
+    "engine_sha256", "active_engine_manifest_sha256",
+}
 
 
 class EvidenceError(RuntimeError):
@@ -235,6 +261,28 @@ def corpus_manifest(frames: list[Path]) -> dict:
         "sha256": hashlib.sha256(payload).hexdigest(),
         "frames": records,
     }
+
+
+def corpus_frame_shape(frames: list[Path]) -> tuple[int, int]:
+    """Return the one exact decoded source shape shared by the staged corpus."""
+
+    if not frames:
+        raise EvidenceError("staged corpus is empty")
+    shapes: set[tuple[int, int]] = set()
+    for path in frames:
+        try:
+            with Image.open(path) as image:
+                width, height = image.size
+        except (OSError, ValueError) as exc:
+            raise EvidenceError(f"cannot authenticate staged frame dimensions: {path}") from exc
+        if width <= 0 or height <= 0:
+            raise EvidenceError(f"staged frame has invalid dimensions: {path}")
+        shapes.add((width, height))
+    if len(shapes) != 1:
+        rendered = ", ".join(f"{width}x{height}" for width, height in sorted(shapes))
+        raise EvidenceError(
+            f"staged corpus changes source dimensions across frames: {rendered}")
+    return next(iter(shapes))
 
 
 def safe_clip_name(path: Path, used: set[str]) -> str:
@@ -482,6 +530,11 @@ def decode_trace(path: Path, metadata: dict, expected_frames: int) -> list[dict]
             TRACE_RECORD_TRANSACTION_BEGIN + TRACE_TRANSACTION_WORDS])
         records.append({
             "frame_id": frame_id,
+            "analysis_generation": _join_u64(
+                row[TRACE_RECORD_ANALYSIS_GENERATION],
+                row[TRACE_RECORD_ANALYSIS_GENERATION + 1]),
+            "domain_tag": _join_u64(
+                row[TRACE_RECORD_DOMAIN_TAG], row[TRACE_RECORD_DOMAIN_TAG + 1]),
             "submission": row[TRACE_RECORD_SUBMISSION],
             "depth": row[TRACE_RECORD_DEPTH],
             "expected_work": row[TRACE_RECORD_EXPECTED_WORK],
@@ -607,10 +660,10 @@ def _validate_ocr_cadence(records: list[dict]) -> None:
             dirty_holds = min(dirty_holds + 1, OCR_MAX_DIRTY_HOLDS)
 
 
-def validate_contract_and_trace(control_dir: Path, treatment_dir: Path,
-                                expected_frames: int,
-                                observation_timeline: Path | None = None
-                                ) -> tuple[dict, list[dict]]:
+def _validate_contract_and_trace(control_dir: Path, treatment_dir: Path,
+                                 expected_frames: int,
+                                 observation_timeline: Path | None = None
+                                 ) -> tuple[dict, list[dict]]:
     control = load_json(control_dir / "contract.json")
     treatment = load_json(treatment_dir / "contract.json")
     if (control.get("schema"), control.get("depth_step"),
@@ -618,8 +671,7 @@ def validate_contract_and_trace(control_dir: Path, treatment_dir: Path,
                 CONTROL_HARNESS_SCHEMA, "force-current-adaptive-replay", 1):
         raise EvidenceError("control is not the private force-current adaptive replay oracle")
     control_descriptor = control.get("device_conditional_replay_control")
-    if (not isinstance(control_descriptor, dict) or
-            control_descriptor.get("enabled") is not True):
+    if control_descriptor != {"enabled": True, "scope": CONTROL_SCOPE}:
         raise EvidenceError("control lacks private adaptive replay oracle authority")
     if (treatment.get("schema"), treatment.get("depth_step"),
             treatment.get("depth_reuse_interval")) != (
@@ -634,11 +686,12 @@ def validate_contract_and_trace(control_dir: Path, treatment_dir: Path,
         raise EvidenceError(
             "control/treatment producer, renderer, model, or shader identity differs")
     adaptive = control_identity.get("adaptive_conditional")
-    if (not isinstance(adaptive, dict) or
-            adaptive.get("request_policy_schema") != ADAPTIVE_REQUEST_POLICY_SCHEMA or
-            not re.fullmatch(
-                r"[0-9a-f]{64}",
-                str(adaptive.get("near_identical_detector_source_closure_sha256", "")))):
+    if adaptive != {
+            "request_policy_schema": ADAPTIVE_REQUEST_POLICY_SCHEMA,
+            "near_identical_detector_source_closure_sha256":
+                host_sbs_shader_manifest.NEAR_IDENTICAL_DETECTOR_GROUP.
+                source_closure_sha256,
+            }:
         raise EvidenceError("adaptive request policy or detector identity is stale")
     if observation_timeline is None:
         observation_timeline = control_dir.parent / "observation_timeline.sbsotl"
@@ -671,12 +724,31 @@ def validate_contract_and_trace(control_dir: Path, treatment_dir: Path,
         raise EvidenceError("adaptive final-parallax field contract is stale or incomplete")
 
     descriptor = treatment.get("device_conditional_replay")
-    if not isinstance(descriptor, dict) or descriptor.get("enabled") is not True:
+    expected_descriptor_keys = {
+        "enabled", "scope", "bootstrap", "followup", "raw_trace", "metadata",
+        "force_submissions", "gpu_undecided_submissions",
+    }
+    if (not isinstance(descriptor, dict) or set(descriptor) != expected_descriptor_keys or
+            descriptor.get("enabled") is not True or
+            descriptor.get("scope") != TREATMENT_SCOPE or
+            descriptor.get("bootstrap") != "force-infer" or
+            descriptor.get("followup") != "gpu-owned-infer-or-reuse" or
+            descriptor.get("raw_trace") != TRACE_FILENAME or
+            descriptor.get("metadata") != METADATA_FILENAME):
         raise EvidenceError("treatment contract lacks device_conditional_replay authority")
-    metadata_path = treatment_dir / str(descriptor.get("metadata", ""))
-    trace_path = treatment_dir / str(descriptor.get("raw_trace", ""))
+    metadata_path = treatment_dir / METADATA_FILENAME
+    trace_path = treatment_dir / TRACE_FILENAME
     metadata = load_json(metadata_path)
-    if metadata.get("schema") != CONDITIONAL_METADATA_SCHEMA:
+    expected_metadata_keys = {
+        "schema", "role", "raw_trace", "ring", "capture_match", "submission_counts",
+        "authenticated_device_dispositions", "authenticated_subtitle_dispositions",
+        "per_frame_artifact_scope", "gpu_trace_source",
+    }
+    if (set(metadata) != expected_metadata_keys or
+            metadata.get("schema") != CONDITIONAL_METADATA_SCHEMA or
+            metadata.get("role") != TRACE_ROLE or
+            metadata.get("raw_trace") != TRACE_FILENAME or
+            metadata.get("per_frame_artifact_scope") != PER_FRAME_ARTIFACT_SCOPE):
         raise EvidenceError(
             f"conditional metadata schema must be {CONDITIONAL_METADATA_SCHEMA}")
     submissions = metadata.get("submission_counts")
@@ -701,13 +773,57 @@ def validate_contract_and_trace(control_dir: Path, treatment_dir: Path,
             descriptor.get("gpu_undecided_submissions") != submissions.get("gpu_undecided"):
         raise EvidenceError("contract and metadata submission counts disagree")
     provenance = metadata.get("gpu_trace_source")
-    if (not isinstance(provenance, dict) or provenance.get("macro_count") != 0 or
-            not re.fullmatch(r"[0-9a-f]{64}", str(provenance.get("closure_sha256", "")))):
+    if provenance != {
+            "closure_schema": host_sbs_shader_manifest.SOURCE_CLOSURE_SCHEMA,
+            "compile_flags": host_sbs_shader_manifest.SHADER_COMPILE_FLAGS,
+            "macro_count": host_sbs_shader_manifest.SOURCE_MACRO_COUNT,
+            "closure_sha256": host_sbs_shader_manifest.GPU_TRACE_GROUP.source_closure_sha256,
+            }:
         raise EvidenceError("GPU trace shader provenance is incomplete")
 
     records = decode_trace(trace_path, metadata, expected_frames)
     if [record["observation_timestamp_us"] for record in records] != timeline:
         raise EvidenceError("GPU trace observation timestamps disagree with the media timeline")
+    capture = metadata.get("capture_match")
+    expected_capture_keys = {
+        "matched_frame_id", "analysis_generation", "source_width", "source_height",
+        "field_width", "field_height", "domain_tag", "input_domain_reset",
+    }
+    if not isinstance(capture, dict) or set(capture) != expected_capture_keys:
+        actual_keys = sorted(capture) if isinstance(capture, dict) else type(capture).__name__
+        raise EvidenceError(
+            f"conditional capture_match keys are incomplete: expected "
+            f"{sorted(expected_capture_keys)}, got {actual_keys}")
+    if (type(capture["matched_frame_id"]) is not int or
+            capture["matched_frame_id"] != expected_frames):
+        raise EvidenceError(
+            f"conditional capture matched_frame_id must be {expected_frames}, got "
+            f"{capture['matched_frame_id']!r}")
+    analysis_generation = capture["analysis_generation"]
+    if (type(analysis_generation) is not int or analysis_generation < 0 or
+            analysis_generation > UINT64_MAX):
+        raise EvidenceError(
+            "conditional capture analysis_generation must be an unsigned 64-bit value; "
+            "zero is the canonical full-frame generation")
+    domain_tag = capture["domain_tag"]
+    if type(domain_tag) is not int or domain_tag <= 0 or domain_tag > UINT64_MAX:
+        raise EvidenceError("conditional capture domain_tag must be a nonzero unsigned 64-bit value")
+    if type(capture["input_domain_reset"]) is not bool:
+        raise EvidenceError("conditional capture input_domain_reset must be boolean")
+    for record in records:
+        if record["analysis_generation"] != analysis_generation:
+            raise EvidenceError(
+                f"GPU trace frame {record['frame_id']} analysis_generation "
+                f"{record['analysis_generation']} disagrees with capture {analysis_generation}")
+        if record["domain_tag"] != domain_tag:
+            raise EvidenceError(
+                f"GPU trace frame {record['frame_id']} domain_tag {record['domain_tag']} "
+                f"disagrees with capture {domain_tag}")
+    trace_reset = bool(records[-1]["flags"] & TRACE_FLAG_INPUT_DOMAIN_RESET)
+    if trace_reset != capture["input_domain_reset"]:
+        raise EvidenceError(
+            f"latest GPU trace input-domain reset {trace_reset} disagrees with capture "
+            f"{capture['input_domain_reset']}")
     _validate_ocr_cadence(records)
     reuse_count = 0
     infer_count = 0
@@ -743,6 +859,155 @@ def validate_contract_and_trace(control_dir: Path, treatment_dir: Path,
     if decoded_subtitles != subtitle:
         raise EvidenceError("decoded trace and subtitle disposition summary disagree")
     _authenticated_reuse_owner_ages(records)
+    return metadata, records
+
+
+def _selected_runtime_composite(runtime_identity: dict) -> dict | None:
+    """Return the exact contract projection of the preflight-selected fused runtime."""
+
+    if not isinstance(runtime_identity, dict):
+        raise EvidenceError("adaptive validation lacks its preflight runtime identity")
+    for key in ("engine_name", "engine_sha256", "onnx_sha256",
+                "preprocess_source_closure_sha256"):
+        if not isinstance(runtime_identity.get(key), str) or not runtime_identity[key]:
+            raise EvidenceError(f"adaptive preflight runtime identity lacks {key}")
+    runtime_composite = runtime_identity.get("composite_runtime_provenance")
+    if runtime_composite is None:
+        if "composite_runtime_provenance" in runtime_identity:
+            raise EvidenceError("adaptive preflight composite identity cannot be null")
+        return None
+    if (not isinstance(runtime_composite, dict) or
+            set(runtime_composite) != RUNTIME_COMPOSITE_PROVENANCE_KEYS):
+        raise EvidenceError("adaptive preflight fused runtime provenance is malformed")
+    if (runtime_composite.get("engine_artifact") != runtime_identity["engine_name"] or
+            runtime_composite.get("engine_sha256") != runtime_identity["engine_sha256"] or
+            runtime_composite.get("embedded_dav2_onnx_sha256") !=
+                runtime_identity["onnx_sha256"] or
+            not re.fullmatch(r"[0-9a-f]{64}", runtime_composite["engine_sha256"]) or
+            not re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(runtime_composite.get("active_engine_manifest_sha256", "")))):
+        raise EvidenceError("adaptive preflight fused engine/manifest identity is inconsistent")
+    projected = {
+        key: runtime_composite[key] for key in CONTRACT_COMPOSITE_PROVENANCE_KEYS
+    }
+    try:
+        depth_coordinate_v2_dump_contract.validate_composite_runtime_provenance(
+            projected,
+            expected_dav2_onnx_sha256=runtime_identity["onnx_sha256"],
+            expected_preprocess_source_closure_sha256=
+                runtime_identity["preprocess_source_closure_sha256"],
+        )
+    except ValueError as exc:
+        raise EvidenceError(
+            f"adaptive preflight fused runtime provenance is unauthenticated: {exc}"
+        ) from exc
+    return projected
+
+
+def _validated_adaptive_grid_identity(
+        control_dir: Path, treatment_dir: Path, records: list[dict],
+        expected_source_shape: tuple[int, int], runtime_identity: dict) -> tuple[int, int]:
+    """Bind adaptive evidence to one exact source-derived coarse or fused profile."""
+
+    source_width, source_height = expected_source_shape
+    if (type(source_width) is not int or type(source_height) is not int or
+            source_width <= 0 or source_height <= 0):
+        raise EvidenceError("adaptive source shape must be a positive integer pair")
+    selected_composite = _selected_runtime_composite(runtime_identity)
+    contracts = [
+        load_json(control_dir / "contract.json"),
+        load_json(treatment_dir / "contract.json"),
+    ]
+    provenances = [contract.get("raw_model_provenance") for contract in contracts]
+    expected_provenance_keys = {
+        "schema", "model", "depth_model_url", "onnx_sha256", "preprocess_profile",
+        "preprocess_source_closure_sha256", "raw_width", "raw_height",
+    }
+    if any(not isinstance(value, dict) or set(value) != expected_provenance_keys or
+           value.get("schema") != 1 for value in provenances):
+        raise EvidenceError("adaptive contracts lack exact raw model provenance")
+    if provenances[0] != provenances[1]:
+        raise EvidenceError("adaptive control/treatment raw model provenance differs")
+    provenance = provenances[0]
+    if (provenance["onnx_sha256"] != runtime_identity.get("onnx_sha256") or
+            provenance["preprocess_source_closure_sha256"] !=
+                runtime_identity.get("preprocess_source_closure_sha256")):
+        raise EvidenceError("adaptive raw producer differs from the preflight runtime identity")
+    calibrations = [
+        calibration for calibration in depth_coordinate_v2_contract.MODEL_CALIBRATIONS
+        if (calibration.depth_model == provenance["model"] and
+            calibration.depth_model_url == provenance["depth_model_url"] and
+            calibration.onnx_sha256 == provenance["onnx_sha256"] and
+            calibration.preprocess.profile == provenance["preprocess_profile"] and
+            calibration.preprocess.source_closure_sha256 ==
+            provenance["preprocess_source_closure_sha256"])
+    ]
+    if len(calibrations) != 1:
+        raise EvidenceError("adaptive raw producer has no unique calibrated identity")
+
+    coarse = depth_coordinate_v2_dump_contract.expected_capture_grid_for_source(
+        source_width, source_height, scale=1)
+    high = depth_coordinate_v2_dump_contract.expected_capture_grid_for_source(
+        source_width, source_height, scale=2)
+    observed = provenance["raw_width"], provenance["raw_height"]
+    if any("composite_runtime_provenance" not in contract for contract in contracts):
+        raise EvidenceError("adaptive contracts omit explicit composite runtime provenance")
+    composites = [contract["composite_runtime_provenance"] for contract in contracts]
+    if selected_composite is not None:
+        if observed != high or high is None:
+            raise EvidenceError(
+                "adaptive evidence downgraded the preflight-selected fused runtime")
+        if composites != [selected_composite, selected_composite]:
+            raise EvidenceError(
+                "adaptive contracts do not bind the preflight-selected fused engine")
+    elif observed == coarse and coarse is not None:
+        if composites != [None, None]:
+            raise EvidenceError("legacy adaptive grid unexpectedly claims fused provenance")
+    else:
+        raise EvidenceError(
+            f"adaptive raw grid {observed[0]}x{observed[1]} is not the exact "
+            f"source-derived profile for {source_width}x{source_height}")
+
+    for directory in (control_dir, treatment_dir):
+        shape = load_json(directory / "raw_shape.json")
+        if shape != {
+                "schema": 1,
+                "width": observed[0],
+                "height": observed[1],
+                "dtype": "float32-le",
+                "layout": "row-major",
+                "stage": "raw model output before transform/normalization/EMA/curvature",
+                }:
+            raise EvidenceError("adaptive raw_shape.json disagrees with authenticated profile")
+    for record in records:
+        if ((record["source_width"], record["source_height"]) !=
+                expected_source_shape or
+                (record["field_width"], record["field_height"]) != observed):
+            raise EvidenceError(
+                f"frame {record['frame_id']} trace dimensions disagree with the exact "
+                "source/profile binding")
+    return observed
+
+
+def validate_contract_and_trace(
+        control_dir: Path, treatment_dir: Path, expected_frames: int,
+        observation_timeline: Path, expected_source_shape: tuple[int, int],
+        runtime_identity: dict
+        ) -> tuple[dict, list[dict]]:
+    """Validate production adaptive evidence with mandatory source/profile binding."""
+
+    metadata, records = _validate_contract_and_trace(
+        control_dir, treatment_dir, expected_frames, observation_timeline)
+    observed = _validated_adaptive_grid_identity(
+        control_dir, treatment_dir, records, expected_source_shape, runtime_identity)
+    capture = metadata.get("capture_match")
+    if (not isinstance(capture, dict) or
+            (capture.get("source_width"), capture.get("source_height")) !=
+            expected_source_shape or
+            (capture.get("field_width"), capture.get("field_height")) != observed):
+        raise EvidenceError(
+            "adaptive trace metadata disagrees with the exact source/profile binding")
     return metadata, records
 
 
@@ -1218,6 +1483,7 @@ def main(argv: list[str] | None = None) -> int:
             }
             observation_timeline_sha256 = source_identity["observation_timeline"]["sha256"]
             before = corpus_manifest(frames)
+            source_shape = corpus_frame_shape(frames)
             (clip_root / "corpus_manifest.json").write_text(
                 json.dumps(before, indent=2), encoding="utf-8")
             if runtime_identity is None:
@@ -1258,7 +1524,8 @@ def main(argv: list[str] | None = None) -> int:
                     sha256_file(clip_path) != source_identity["sha256"]):
                 raise EvidenceError(f"source video changed during {name} treatment")
             metadata, records = validate_contract_and_trace(
-                control_dir, treatment_dir, len(frames), observation_timeline)
+                control_dir, treatment_dir, len(frames), observation_timeline,
+                source_shape, runtime_identity)
             artifact_checks = validate_adaptive_artifacts(
                 control_dir, treatment_dir, records)
             final_gate = final_field_gate(artifact_checks)

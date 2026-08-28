@@ -1399,7 +1399,9 @@ TEST(DepthCoordinateV2GpuTest, LimiterIsExactLeastRowwiseLipschitzMajorant) {
   // Exercise every balanced-chunk boundary around powers of two and at all authenticated axis
   // lengths. Impulses immediately before/after boundaries force carries to cross chunks.
   for (const std::uint32_t parallel_width :
-       std::array<std::uint32_t, 8> {33u, 63u, 64u, 65u, 434u, 770u, 1022u, 1036u}) {
+       std::array<std::uint32_t, 9> {
+         33u, 63u, 64u, 65u, 434u, 770u, 1022u, 1036u, 2072u
+       }) {
     std::vector<float> boundary_impulses(parallel_width, -0.039f);
     for (std::uint32_t chunk = 1u; chunk < 32u; ++chunk) {
       const std::uint32_t boundary = chunk * parallel_width / 32u;
@@ -1577,6 +1579,33 @@ TEST(DepthCoordinateV2GpuTest, VerticalPassPublishesExactMajorantAndConditionedS
     );
   }
   verify_case(production_width, production_height, production_boundaries, false);
+
+  // The single-high fused portrait profiles have columns up to 2072 cells.  A narrow field
+  // exercises the full shared-memory/carry length without turning this exact WARP contract test
+  // into a multi-million-pixel fixture.
+  constexpr std::uint32_t high_portrait_width = 7u;
+  constexpr std::uint32_t high_portrait_height = 2072u;
+  std::vector<float> high_portrait_boundaries(
+    static_cast<std::size_t>(high_portrait_width) * high_portrait_height,
+    -0.039f
+  );
+  for (std::uint32_t chunk = 1u; chunk < 32u; ++chunk) {
+    const std::uint32_t boundary = chunk * high_portrait_height / 32u;
+    for (std::uint32_t x = 0u; x < high_portrait_width; ++x) {
+      high_portrait_boundaries[
+        static_cast<std::size_t>(boundary - 1u) * high_portrait_width + x
+      ] = chunk % 2u == 0u ? 0.037f : -0.038f;
+      high_portrait_boundaries[
+        static_cast<std::size_t>(boundary) * high_portrait_width + x
+      ] = chunk % 2u == 0u ? -0.038f : 0.039f;
+    }
+  }
+  verify_case(
+    high_portrait_width,
+    high_portrait_height,
+    high_portrait_boundaries,
+    false
+  );
 
   // The target_h==1 path has no scan iterations and must preserve every column exactly.
   verify_case(3u, 1u, {-0.031f, 0.0f, 0.039f});

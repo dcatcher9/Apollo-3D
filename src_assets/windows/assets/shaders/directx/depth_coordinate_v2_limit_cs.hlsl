@@ -21,9 +21,9 @@ RWTexture2D<float> FinalOut : register(u0);
 #define V2_LIMIT_Q30_SCALE V2_LIMITER_Q_SCALE
 #define V2_LIMIT_HORIZONTAL_STEP_Q30_NUMERATOR \
     V2_LIMITER_HORIZONTAL_STEP_Q_NUMERATOR
-// Initial convex-2x live authority is landscape-only.  Its largest row is exactly twice the
-// calibrated coarse maximum (2072), while its 868-cell columns continue to fit the unchanged
-// vertical limiter.  These two int arrays consume about 16 KiB at the expanded bound.
+// Every authenticated single-high orientation is exactly 2x a calibrated DAV2 profile. Its
+// largest row is therefore twice the generated calibrated maximum (2072). These two int arrays
+// consume about 16 KiB at that derived bound.
 #define V2_LIMIT_MAX_HORIZONTAL_DIMENSION (2u * V2_MODEL_CALIBRATED_MAX_DIMENSION)
 
 groupshared int LineCandidateQ30[V2_LIMIT_MAX_HORIZONTAL_DIMENSION];

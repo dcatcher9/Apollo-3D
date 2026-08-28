@@ -44,6 +44,13 @@ class RawModelProvenanceTests(unittest.TestCase):
             "schema": dump_contract.DUMP_MANIFEST_SCHEMA,
             "depth_model": self.CALIBRATION.depth_model,
             "dimensions": {
+                "model_input": {
+                    "width": self.WIDTH,
+                    "height": self.HEIGHT,
+                    "channels": 3,
+                    "layout": "NCHW",
+                    "dtype": self.CALIBRATION.preprocess.dtype,
+                },
                 "raw_depth": {
                     "width": self.WIDTH,
                     "height": self.HEIGHT,
@@ -81,6 +88,42 @@ class RawModelProvenanceTests(unittest.TestCase):
                 dump / "model_input_shape.json"),
         }
 
+    @staticmethod
+    def _composite_runtime_provenance() -> dict:
+        contract = dump_contract.convex2x_contract.load_contract()
+        fused = contract["sources"]["fused_onnx"]
+        dav2 = contract["sources"]["dav2"]
+        zipdepth = contract["sources"]["zipdepth"]
+        model = fused["logical_model"]
+        onnx_sha256 = fused["sha256"]
+        recipe = contract["tensorrt"]["engine_recipe"]
+        return {
+            "schema": contract["schema"],
+            "runtime": "dav2_zipdepth_convex2x_composite",
+            "model": model,
+            "onnx_sha256": onnx_sha256,
+            "embedded_dav2_onnx_sha256": dav2["onnx_sha256"],
+            "zipdepth_checkpoint_sha256": zipdepth["checkpoint_sha256"],
+            "guidance_preprocess_source_closure_sha256":
+                RawModelProvenanceTests.CALIBRATION.preprocess.source_closure_sha256,
+            "engine_recipe": recipe,
+            "engine_artifact": f"{model}.{recipe}.fixture-onnx{onnx_sha256}.engine",
+            "active_engine_manifest": f"{model}.active-engine.json",
+        }
+
+    @staticmethod
+    def _resize_capture_grid(dump: Path, manifest: dict, width: int, height: int) -> None:
+        with (dump / "raw_depth.f32").open("wb") as stream:
+            stream.truncate(width * height * 4)
+        with (dump / "model_input.f32").open("wb") as stream:
+            stream.truncate(3 * width * height * 4)
+        shape_path = dump / "model_input_shape.json"
+        shape = json.loads(shape_path.read_text(encoding="utf-8"))
+        shape.update({"width": width, "height": height})
+        shape_path.write_text(json.dumps(shape), encoding="utf-8")
+        manifest["dimensions"]["model_input"].update({"width": width, "height": height})
+        manifest["dimensions"]["raw_depth"].update({"width": width, "height": height})
+
     def test_dump_without_capture_time_provenance_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             dump, _ = self._dump(Path(temporary))
@@ -108,7 +151,94 @@ class RawModelProvenanceTests(unittest.TestCase):
                 self.CALIBRATION.raw_coordinate_scale)
             self.assertEqual(observed.model_input_width, self.WIDTH)
             self.assertEqual(observed.model_input_height, self.HEIGHT)
+            self.assertEqual(observed.capture_grid_kind, "legacy-dav2")
+            self.assertEqual(observed.embedded_dav2_input_width, self.WIDTH)
+            self.assertEqual(observed.embedded_dav2_input_height, self.HEIGHT)
             self.assertIsNone(observed.reason)
+
+    def test_single_high_capture_authenticates_embedded_dav2_at_exact_half_shape(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            dump, manifest = self._dump(Path(temporary))
+            high_width, high_height = 2 * self.WIDTH, 2 * self.HEIGHT
+            self._resize_capture_grid(dump, manifest, high_width, high_height)
+            manifest["composite_runtime_provenance"] = (
+                self._composite_runtime_provenance())
+            manifest[provenance.PROVENANCE_KEY] = self._proof(dump)
+            (dump / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+
+            observed = provenance.inspect_dump(dump)
+            self.assertTrue(observed.authoritative)
+            self.assertEqual(observed.capture_grid_kind, "single-high-convex2x")
+            self.assertEqual(observed.model_input_width, high_width)
+            self.assertEqual(observed.model_input_height, high_height)
+            self.assertEqual(observed.embedded_dav2_input_width, self.WIDTH)
+            self.assertEqual(observed.embedded_dav2_input_height, self.HEIGHT)
+            self.assertEqual(
+                observed.calibrated_raw_coordinate_scale,
+                self.CALIBRATION.raw_coordinate_scale)
+
+    def test_single_high_capture_requires_fresh_schema_two_composite_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            dump, manifest = self._dump(Path(temporary))
+            self._resize_capture_grid(dump, manifest, 2 * self.WIDTH, 2 * self.HEIGHT)
+            manifest[provenance.PROVENANCE_KEY] = self._proof(dump)
+            (dump / "dump_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "schema-2 fused composite"):
+                provenance.inspect_dump(dump)
+
+        mutations = {
+            "schema": 1,
+            "onnx_sha256": "0" * 64,
+            "embedded_dav2_onnx_sha256": "0" * 64,
+            "guidance_preprocess_source_closure_sha256": "0" * 64,
+            "active_engine_manifest": "stale.active-engine.json",
+        }
+        for field, value in mutations.items():
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
+                dump, manifest = self._dump(Path(temporary))
+                self._resize_capture_grid(
+                    dump, manifest, 2 * self.WIDTH, 2 * self.HEIGHT)
+                composite = self._composite_runtime_provenance()
+                composite[field] = value
+                manifest["composite_runtime_provenance"] = composite
+                manifest[provenance.PROVENANCE_KEY] = self._proof(dump)
+                (dump / "dump_manifest.json").write_text(
+                    json.dumps(manifest), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "composite"):
+                    provenance.inspect_dump(dump)
+
+    def test_single_high_capture_rejects_stale_split_and_arbitrary_high_shapes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            dump, manifest = self._dump(Path(temporary))
+            self._resize_capture_grid(dump, manifest, 2 * self.WIDTH, 2 * self.HEIGHT)
+            manifest["dimensions"]["raw_depth"]["width"] = self.WIDTH
+            manifest["dimensions"]["raw_depth"]["height"] = self.HEIGHT
+            manifest[provenance.PROVENANCE_KEY] = self._proof(dump)
+            (dump / "dump_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "raw-depth dimensions disagree"):
+                provenance.inspect_dump(dump)
+
+        for width, height in ((2 * self.WIDTH + 28, 2 * self.HEIGHT), (2016, 868)):
+            with self.subTest(shape=(width, height)), tempfile.TemporaryDirectory() as temporary:
+                dump, manifest = self._dump(Path(temporary))
+                self._resize_capture_grid(dump, manifest, width, height)
+                manifest[provenance.PROVENANCE_KEY] = self._proof(dump)
+                (dump / "dump_manifest.json").write_text(
+                    json.dumps(manifest), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "single-high convex-2x realization"):
+                    provenance.inspect_dump(dump)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            dump, manifest = self._dump(Path(temporary))
+            self._resize_capture_grid(dump, manifest, 2 * self.WIDTH, 2 * self.HEIGHT)
+            manifest["dimensions"]["model_input"].update({
+                "width": self.WIDTH, "height": self.HEIGHT})
+            manifest[provenance.PROVENANCE_KEY] = self._proof(dump)
+            (dump / "dump_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "model-input dimensions disagree"):
+                provenance.inspect_dump(dump)
 
     def test_only_current_single_model_config_schema_is_accepted(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -196,7 +326,7 @@ class RawModelProvenanceTests(unittest.TestCase):
             "layout": ("layout", "NHWC", "preprocess contract"),
             "mean": ("imagenet_mean", [0.0, 0.0, 0.0], "preprocess contract"),
             "patch": ("width", 13, "spatial contract"),
-            "uncalibrated_shape": ("width", 1008, "not an exact shape"),
+            "uncalibrated_shape": ("width", 1008, "neither an exact calibrated DAV2"),
         }
         for name, (field, value, message) in mutations.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:

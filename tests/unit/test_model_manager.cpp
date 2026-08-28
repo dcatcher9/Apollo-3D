@@ -34,7 +34,7 @@ TEST(ModelManagerTest, DepthEngineRecipesKeepLegacyAndFusedPlansIsolated) {
   );
   EXPECT_EQ(
     fused,
-    "depth_anything_v2_fp16.trt-six-point-profiles-level5-v1."
+    "depth_anything_v2_fp16.trt-6high-point-l5-v2."
     "trt11-sm120-onnxsha.engine"
   );
   EXPECT_NE(fused, legacy);

@@ -14,7 +14,15 @@ The design goal is deliberately asymmetric:
 
 ## GPU evidence
 
-Every valid matched model-input/depth pair contributes these frame fractions:
+Every valid matched active-model-input/depth pair contributes these frame fractions. The fused
+composite computes them on its single high grid; legacy DAV2 retains its coarse grid:
+
+The fused migration initially retains the established numeric thresholds. Global fractions remain
+dimensionless, but fixed-cell stencils and `16x16` local tiles cover half the source-space extent on
+the exact-2x grid, and the refined field can expose edge motion that the coarse field did not
+represent. Equivalent scene-cut and reuse behavior is therefore an evaluation requirement, not an
+assumption; threshold retuning requires paired corpus and live evidence rather than compensating by
+silently downsampling the active history.
 
 | Evidence | Definition |
 |---|---|
@@ -77,11 +85,12 @@ camera, OCR, and SLR do not advance, and an already-consumed cut pulse cannot be
 real enqueue is forced after 16 skipped deliveries or 250 ms even when the metadata chain remains
 clean; only that successful enqueue establishes the next sequence baseline.
 
-The always-on GPU adaptive path may omit up to four complete DAV2 observations for an authenticated
+The always-on GPU adaptive path may omit up to four complete depth observations for an authenticated
 changed-frame candidate. The host uses only route, identity, cadence and complete retained DDup
 history to classify that frame as GPU-undecided; it does not apply a motion-area or rectangle-shape
-heuristic. A dense GPU comparison against the exact state-1 DAV2 model
-input history then applies finite, global medium/strong, and supported-tile local bounds; there is
+heuristic. A dense GPU comparison against the exact state-1 active model-input history then applies
+finite, global medium/strong, and supported-tile local bounds. That input is the high RGB tensor for
+the fused composite and the coarse RGB tensor for legacy DAV2; there is
 no CutBridge readback or CPU decision. The infer owner is eligible only through frame age `4` and a
 strictly less than `100 ms` source-observation age. The host initial-candidate and opaque-follow-up
 checks share that strict `100 ms` age ceiling.

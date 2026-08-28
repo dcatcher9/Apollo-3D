@@ -1,5 +1,5 @@
 {
-  "schema": 72,
+  "schema": 73,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -70,6 +70,18 @@
         {
           "width": 2072,
           "height": 868
+        },
+        {
+          "width": 868,
+          "height": 1540
+        },
+        {
+          "width": 868,
+          "height": 2044
+        },
+        {
+          "width": 868,
+          "height": 2072
         }
       ],
       "detector_active_probability_threshold": 0.2,
@@ -262,7 +274,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "93b457e7cfedd9fe37924d21d44fc21760115cd82e4af57a9e1a7adcd60c0411"
+    "source_closure_sha256": "f6d850b391cf145908d9416c51c1ced23a03721dc754eb020cc52236a95629b3"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,
@@ -317,7 +329,7 @@
         "source_target": "cs_5_0",
         "source_compile_flags": 34816,
         "source_macro_count": 0,
-        "source_closure_sha256": "1d0e89740921beb645cb8e83bfa6b3ca6f14ce58266bcf6d36dc2dfe8dc5c1bd",
+        "source_closure_sha256": "943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744",
         "model_input_schema": 1,
         "dtype": "float32-le",
         "layout": "NCHW",

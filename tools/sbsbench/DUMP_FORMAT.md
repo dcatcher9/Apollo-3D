@@ -21,8 +21,8 @@ The core package contains:
 | `source.png` | Matched full-source color preview |
 | `depth_input_source.png` | Exact full-source preview, or post-completion reconstruction of the logical window-region analysis source; diagnostic only |
 | `depth_input_region.json` | Required half-open analysis-domain and ROI/full-source placement |
-| `model_input.f32`, `model_input_shape.json` | Exact calibrated DAV2 input and calibrated preprocess authority |
-| `raw_depth.f32` | Exact DAV2 output; dimensions and finite-value statistics live in the manifest |
+| `model_input.f32`, `model_input_shape.json` | Exact public model input and calibrated preprocess authority: legacy DAV2 coarse, or the fused model's sole high-resolution input |
+| `raw_depth.f32` | Exact live depth output on the same grid as `model_input`: legacy DAV2 output, or the fused model's sole high-resolution `refined_depth` output |
 | `shadow_coordinate.f32` | Required exact unbounded canonical-coordinate diagnostic; never renderer authority |
 | `shadow_candidate_parallax.f32` | Pre-limiter V2 candidate |
 | `shadow_ownership_refined_parallax.f32` | Full-resolution contour ownership result |
@@ -51,6 +51,14 @@ owner of those live identities and numeric policy values. The
 sole owner of their runtime and state-machine semantics; this dump-format document copies neither.
 No retired layout is preserved or reinterpreted.
 
+Schema 39 authenticates one capture grid across `model_input`, `raw_depth`, and every V2 field. A
+legacy package uses an exact calibrated DAV2 shape. An active fused package instead uses one exact
+supported convex-2x high shape; halving both dimensions must recover an exact calibrated embedded
+DAV2 shape. The capture-time model provenance continues to authenticate that embedded DAV2
+identity and derived coarse calibration, while the public numeric artifacts remain high-resolution.
+A split coarse/high package, an arbitrary enlarged grid, or a high package without this exact
+half-shape relation is rejected rather than reinterpreted.
+
 ## Atomic final field
 
 The manifest's required `final_parallax` object binds one complete atomic field and the warp input.
@@ -66,9 +74,9 @@ ordinary limiter and, when active, SLR13 directly into that one field.
 ## Diagnostic GPU completion trace
 
 Schema 39 may carry a diagnostic-only 300-slot GPU completion ring. It records completed accepted
-DAV2 roots, not source frames, presentation frames, busy drops, or every captured desktop update.
+depth roots, not source frames, presentation frames, busy drops, or every captured desktop update.
 Each 176-word (704-byte) record binds an exact trace ordinal, matched frame, analysis generation,
-analysis-domain tag, transaction token, analysis-source and DAV2-field extents, the immutable
+analysis-domain tag, transaction token, analysis-source and live-field extents, the immutable
 64-word postprocessed transaction snapshot, all 80 SLR13 words, and all six condition-parameter
 words. The authenticated RQST/CBRG token, cookies, work disposition, optional OOCR marker, and
 submission class determine `infer`, `reuse`, or `invalid`; a force-class reuse receipt is invalid,
@@ -180,6 +188,11 @@ published fields extend the nearest content boundary through it. Crop-local dept
 interpreted as a full-source field. The required full-source inverse map proves that samples beyond
 the conservative collar return to identity.
 
+The deterministic ROI contain fit is planned on the embedded calibrated DAV2 grid. For a fused
+package, each half-open content-rectangle coordinate is then multiplied by exactly two; padding
+fraction is inherited from the coarse plan. Independently rounding a second fit on the high grid is
+not an accepted equivalent.
+
 `window_region.json` schema `1` is the matched-frame provenance behind that planner input, not an
 independent geometry or renderer authority. Its `authority_kind` is decisive:
 
@@ -201,7 +214,8 @@ The maintained reader:
 
 1. rejects every manifest schema except the current one;
 2. checks exact DVC2 contract/tag/source-closure bindings;
-3. verifies every required content hash and numeric extent;
+3. verifies every required content hash and numeric extent, including one common calibrated coarse
+   grid or exact supported convex-2x high grid and its derived embedded-DAV2 half shape;
 4. replays ownership and the schema-selected limiter over the full tensor: serial float32 for
    lines up to 32 elements, otherwise conservative Q30 upper/lower envelopes and horizontal
    majorant with the authenticated 75/25 float32 share, using content width for both steps;
@@ -222,10 +236,16 @@ The maintained reader:
 
 Use `.f32` artifacts for quantitative work. Schema 39 does not package scalar/heat preview PNGs or
 per-field shape sidecars. The sole retained shape sidecar, `model_input_shape.json`, is calibrated
-preprocess authority rather than a preview description. Float dimensions live in
+preprocess authority rather than a preview description. On a fused capture it describes the sole
+high input; the embedded DAV2 calibration is derived from its exact half shape. Float dimensions live in
 `dump_manifest.json`; inverse-map semantics live in its `warp_map_contract`. The package retains
 only the color/evidence PNGs `source.png`, `depth_input_source.png`, `sbs.png`, and, when available,
 `warp_mask.png`.
+
+A single-high package carries `composite_runtime_provenance` schema 2 and authenticates the frozen fused
+ONNX, embedded DAV2, ZipDepth checkpoint, preprocess closure, engine recipe/artifact, and active
+engine manifest as one record. Missing or stale composite evidence rejects a high-grid package;
+legacy DAV2 packages omit the record or serialize it as null.
 
 Generate a non-authoritative diagnostic preview outside the atomic package when needed:
 

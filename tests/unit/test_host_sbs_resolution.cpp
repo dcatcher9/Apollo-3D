@@ -99,34 +99,40 @@ TEST(HostSbsResolutionTest, ProjectsSubtitleSafeRowsIntoEveryAuthenticatedField)
   EXPECT_FALSE(models::fit_subtitle_analysis_geometry(1920u, 0u, {770, 434}).valid());
 }
 
-TEST(HostSbsResolutionTest, AdmitsOnlyExactConvex2xLandscapeSubtitleFields) {
+TEST(HostSbsResolutionTest, AdmitsAllExactConvex2xSubtitleFields) {
   struct geometry_case_t {
     std::uint32_t source_width;
     std::uint32_t source_height;
     int field_width;
+    int field_height;
   };
   constexpr std::array cases {
-    geometry_case_t {1920u, 1080u, 1540},
-    geometry_case_t {2560u, 1080u, 2044},
-    geometry_case_t {3440u, 1440u, 2072},
+    geometry_case_t {1920u, 1080u, 1540, 868},
+    geometry_case_t {2560u, 1080u, 2044, 868},
+    geometry_case_t {3440u, 1440u, 2072, 868},
+    geometry_case_t {1080u, 1920u, 868, 1540},
+    geometry_case_t {1080u, 2560u, 868, 2044},
+    geometry_case_t {1440u, 3440u, 868, 2072},
   };
   for (const auto &test_case : cases) {
-    const models::depth_tensor_shape_t field {test_case.field_width, 868};
+    const models::depth_tensor_shape_t field {
+      test_case.field_width, test_case.field_height,
+    };
     const models::depth_tensor_content_rect_t content {
-      0u, 0u, static_cast<std::uint32_t>(test_case.field_width), 868u,
+      0u,
+      0u,
+      static_cast<std::uint32_t>(test_case.field_width),
+      static_cast<std::uint32_t>(test_case.field_height),
     };
     const auto geometry = models::fit_subtitle_analysis_geometry(
       test_case.source_width, test_case.source_height, field, content
     );
     ASSERT_TRUE(geometry.valid());
     EXPECT_EQ(geometry.field_width, static_cast<std::uint32_t>(test_case.field_width));
-    EXPECT_EQ(geometry.field_height, 868u);
+    EXPECT_EQ(geometry.field_height, static_cast<std::uint32_t>(test_case.field_height));
     EXPECT_EQ(geometry.tensor_content, content);
   }
 
-  EXPECT_FALSE(models::fit_subtitle_analysis_geometry(
-    1080u, 1920u, {868, 1540}, {0u, 0u, 868u, 1540u}
-  ).valid()) << "Stage-2 portrait must remain on its complete coarse production path";
   EXPECT_FALSE(models::fit_subtitle_analysis_geometry(
     1920u, 1080u, {1542, 868}, {0u, 0u, 1542u, 868u}
   ).valid()) << "the live-field allowlist must not become a generic 2x shape predicate";

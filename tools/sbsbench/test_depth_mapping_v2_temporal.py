@@ -606,6 +606,20 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
         }
         validate_v2_state_trace(native, result.frame_ids)
 
+        # The active fused model exposes the sole refined output on the exact 2x grid while
+        # retaining this calibration for its embedded DAV2 input. Native replay must accept
+        # that exact relationship without admitting arbitrary enlarged tensors.
+        high = copy.deepcopy(native)
+        high["producer"]["tensor_shape"] = {
+            "width": width * 2, "height": height * 2,
+        }
+        validate_v2_state_trace(high, result.frame_ids)
+
+        arbitrary_high = copy.deepcopy(high)
+        arbitrary_high["producer"]["tensor_shape"]["width"] += 16
+        with self.assertRaisesRegex(ValueError, "unauthenticated replay tensor shape"):
+            validate_v2_state_trace(arbitrary_high, result.frame_ids)
+
         # The native producer now contains exactly the seven passes that consume or produce V2
         # state/geometry. Reintroducing either former histogram-only pass must fail attribution.
         self.assertNotIn("depth_minmax_cs.hlsl", V2_GPU_SHADER_SEQUENCE)

@@ -29,6 +29,7 @@ namespace models {
   struct parallax_v2_shader_provenance_t;
   struct host_sbs_gpu_trace_provenance_t;
   struct raw_model_provenance_t;
+  struct composite_depth_runtime_provenance_t;
 }
 
 namespace platf::sbs_debug {
@@ -81,6 +82,15 @@ namespace platf::sbs_debug {
       const std::vector<std::uint8_t> &ring,
       const frame &completed
     );
+
+    /** Authenticate the one-grid legacy DAV2 or fused single-high dump tensor geometry. */
+    bool capture_tensor_grid_is_authenticated(const frame &completed) noexcept;
+
+    /** Bind a high-grid dump to the exact schema-2 fused composite runtime identity. */
+    bool composite_runtime_provenance_is_authenticated(const frame &completed) noexcept;
+
+    /** Authenticate the optional OCR8/SLR13 resource set against the active capture field. */
+    bool subtitle_capture_resources_are_authenticated(const frame &completed) noexcept;
 
     /** Serialize the exact GPU-trace wire contract used by Dump 3D diagnostics. */
     std::string gpu_trace_contract_json(
@@ -144,6 +154,8 @@ namespace platf::sbs_debug {
     ID3D11ShaderResourceView *shadow_state = nullptr;
     ID3D11ShaderResourceView *shadow_frame_stats = nullptr;
     std::shared_ptr<const models::raw_model_provenance_t> raw_model_provenance;
+    std::shared_ptr<const models::composite_depth_runtime_provenance_t>
+      composite_depth_runtime_provenance;
     std::shared_ptr<const models::parallax_v2_shader_provenance_t>
       parallax_v2_shader_provenance;
     std::shared_ptr<const models::host_sbs_gpu_trace_provenance_t>
