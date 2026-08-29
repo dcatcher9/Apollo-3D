@@ -414,10 +414,11 @@ TEST(OfflineSbsWorker, DeviceConditionalReplayUsesSharedProductionTransactionPol
     std::ios::binary
   );
   ASSERT_TRUE(stream);
-  const std::string source {
+  std::string source {
     std::istreambuf_iterator<char>(stream),
     std::istreambuf_iterator<char>()
   };
+  source.erase(std::remove(source.begin(), source.end(), '\r'), source.end());
 
   EXPECT_NE(source.find("--device-conditional-replay"), std::string::npos);
   EXPECT_NE(

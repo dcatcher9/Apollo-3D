@@ -246,7 +246,7 @@ PARALLAX_V2_PRODUCER_GROUP = ClosureGroup(
         HOST_SBS_SUBTITLE_LOCATOR_RESOLVE,
         HOST_SBS_SUBTITLE_CONDITION,
     ),
-    source_closure_sha256="e00c710d73aade4db91a0842160203125b6c4378e9d56353df9f732b94577986",
+    source_closure_sha256="563d375d1030d1c852337645685edc8295bd757dc8e4c6ce31a6838942f996da",
 )
 
 PARALLAX_V2_COORDINATE_DIAGNOSTIC_GROUP = ClosureGroup(
@@ -257,7 +257,7 @@ PARALLAX_V2_COORDINATE_DIAGNOSTIC_GROUP = ClosureGroup(
     specs=(
         DEPTH_COORDINATE_V2_COORDINATE_DIAGNOSTIC,
     ),
-    source_closure_sha256="1b4272ce59e03a4b7a7bcf192153475a9c6efb29dca0a9c3d110b1fb0175f327",
+    source_closure_sha256="6565247a2de4326e5d87c76e4a603eecebd66eb3b7b7cf5fee50ddef37412363",
 )
 
 NEAR_IDENTICAL_DETECTOR_GROUP = ClosureGroup(
@@ -271,7 +271,7 @@ NEAR_IDENTICAL_DETECTOR_GROUP = ClosureGroup(
         HOST_SBS_NEAR_IDENTICAL_FINALIZE,
         HOST_SBS_NEAR_IDENTICAL_REUSE_DEPTH,
     ),
-    source_closure_sha256="62317daf8b1e95f0146518c2e3f4be98d32064f02d04e330fb904cd58322fc99",
+    source_closure_sha256="3dde879fb09189715530e6549c2fced103aa8684aec225390d56241be4e00585",
 )
 
 GPU_TRACE_GROUP = ClosureGroup(
@@ -282,7 +282,7 @@ GPU_TRACE_GROUP = ClosureGroup(
     specs=(
         HOST_SBS_GPU_TRACE,
     ),
-    source_closure_sha256="c33fd517228e48e71b3b0126ed169f1010160cf75a2304eeb4c9e80c22502ac4",
+    source_closure_sha256="7f9bc8e48ffe16958e46366c49c80de5c59297577577985886096250e807b1dc",
 )
 
 PARALLAX_V2_LIVE_RENDERER_GROUP = ClosureGroup(
@@ -294,7 +294,7 @@ PARALLAX_V2_LIVE_RENDERER_GROUP = ClosureGroup(
         PARALLAX_V2_LIVE_RENDERER,
         SBS_REPROJECTION_VERTEX,
     ),
-    source_closure_sha256="bf3cdd0ffdd73dbf7148292be31fc37f49e64ea719d58d2ec1bebeedc724ac94",
+    source_closure_sha256="b69d3bdcb555d76cde2174fa5d1a372b557f6b7182a76e2e46c928bf1dec08d5",
 )
 
 PARALLAX_V2_P010_Y_GROUP = ClosureGroup(
@@ -305,7 +305,7 @@ PARALLAX_V2_P010_Y_GROUP = ClosureGroup(
     specs=(
         PARALLAX_V2_P010_Y_RENDERER,
     ),
-    source_closure_sha256="e739f6b42b56a645b2e00af971171f1b6441c2ab16b16c5e72e5df7df85d67a6",
+    source_closure_sha256="ce7207098d17bf3df969b9dbde39f324abdf58e5a529c2042cab34077dafa451",
 )
 
 SBS_FLAT_FALLBACK_GROUP = ClosureGroup(
@@ -329,7 +329,7 @@ PARALLAX_V2_LIVE_DIAGNOSTIC_GROUP = ClosureGroup(
         PARALLAX_V2_LIVE_MAPPING,
         PARALLAX_V2_LIVE_MASK,
     ),
-    source_closure_sha256="941fbd61c554ddad4e5ade613ea1e5909cd059fe5b618400f45841f40ef4f982",
+    source_closure_sha256="b7180a63b0d67004f9b6d2c802e74a01b18e55c4495ac53530b932236bab3160",
 )
 
 CLOSURE_GROUPS: Dict[str, ClosureGroup] = {

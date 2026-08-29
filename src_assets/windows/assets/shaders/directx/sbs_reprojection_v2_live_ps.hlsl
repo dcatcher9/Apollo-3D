@@ -69,44 +69,38 @@ bool ContentToSourceUV(float2 output_uv, out float2 source_uv) {
 
 float SampleVideoRoiParallax(
     float source_x,
-    float source_y,
+    float roi_min_x,
+    float roi_max_x,
     float roi_width,
-    float vertical_budget_per_source_v,
-    uint2 depth_size_u
+    float tensor_u_scale,
+    float tensor_u_bias,
+    float tensor_v,
+    float vertical_collar_budget
 ) {
-    float effective_parallax = 0.0f;
     // The ROI-local field occupies its authenticated integer content rectangle within the fixed
     // DAV2 grid. Convert its local-U displacement to full-source U before constructing the
     // smallest signed exterior collar allowed by the same content-local slope contracts. The
     // projection leaves every point inside the ROI untouched. Outside, soft-thresholding reaches
     // exact zero as quickly as those slopes permit; the summed anisotropic distance gives the
     // corresponding minimum diamond at a corner.
-    float2 roi_min = video_roi_source_uv.xy;
-    float2 roi_max = video_roi_source_uv.zw;
-    float2 source_uv = float2(source_x, source_y);
-    float2 projected_uv = clamp(source_uv, roi_min, roi_max);
-    float2 local_uv = (projected_uv - roi_min) / (roi_max - roi_min);
-    float2 depth_size = max(float2(depth_size_u), float2(1.0f, 1.0f));
-    float2 content_min = float2(video_roi_tensor_content_rect.xy) / depth_size;
-    float2 content_max = float2(video_roi_tensor_content_rect.zw) / depth_size;
-    float2 tensor_uv = lerp(content_min, content_max, local_uv);
+    float projected_x = clamp(source_x, roi_min_x, roi_max_x);
+    float collar_budget =
+        VIDEO_ROI_MAX_HORIZONTAL_SLOPE * abs(source_x - projected_x) +
+        vertical_collar_budget;
+    float tensor_u = projected_x * tensor_u_scale + tensor_u_bias;
     float roi_local_parallax = FinalParallax.SampleLevel(
         LinearSampler,
-        tensor_uv,
+        float2(tensor_u, tensor_v),
         0
     );
     float full_source_parallax = roi_width * roi_local_parallax;
-    float2 outside_distance = abs(source_uv - projected_uv);
-    float collar_budget =
-        VIDEO_ROI_MAX_HORIZONTAL_SLOPE * outside_distance.x +
-        vertical_budget_per_source_v * outside_distance.y;
     float magnitude = abs(full_source_parallax);
     if (collar_budget < magnitude) {
         float retained_magnitude = magnitude - collar_budget;
-        effective_parallax = full_source_parallax < 0.0f ?
+        return full_source_parallax < 0.0f ?
             -retained_magnitude : retained_magnitude;
     }
-    return effective_parallax;
+    return 0.0f;
 }
 
 float2 ReprojectFull(float2 destination_uv, float eye_sign) {
@@ -133,35 +127,54 @@ float2 ReprojectFull(float2 destination_uv, float eye_sign) {
 
 float2 ReprojectVideoRoi(float2 destination_uv, float eye_sign, uint2 depth_size) {
     float source_x = destination_uv.x;
-    float roi_width = video_roi_source_uv.z - video_roi_source_uv.x;
-    float roi_height = video_roi_source_uv.w - video_roi_source_uv.y;
-    uint source_width;
-    uint source_height;
-    SourceColor.GetDimensions(source_width, source_height);
-    uint content_width =
-        video_roi_tensor_content_rect.z - video_roi_tensor_content_rect.x;
-    uint content_height =
-        video_roi_tensor_content_rect.w - video_roi_tensor_content_rect.y;
-    float source_height_in_source_u =
-        (float)source_height / max((float)source_width, 1.0f);
+    float2 roi_min = video_roi_source_uv.xy;
+    float2 roi_max = video_roi_source_uv.zw;
+    float2 roi_extent = roi_max - roi_min;
+    uint2 content_extent =
+        video_roi_tensor_content_rect.zw - video_roi_tensor_content_rect.xy;
+    float2 depth_size_f = float2(depth_size);
+    float2 content_min = float2(video_roi_tensor_content_rect.xy) / depth_size_f;
+    float2 content_max = float2(video_roi_tensor_content_rect.zw) / depth_size_f;
+    // Hoist the ROI-to-tensor affine transform out of the unrolled inverse. Destination V is
+    // invariant across all fixed-point steps, so its projection, tensor coordinate, and vertical
+    // collar contribution are also one-time work.
+    float2 tensor_uv_scale = (content_max - content_min) / roi_extent;
+    float2 tensor_uv_bias = content_min - roi_min * tensor_uv_scale;
+    float projected_y = clamp(destination_uv.y, roi_min.y, roi_max.y);
+    float tensor_v = projected_y * tensor_uv_scale.y + tensor_uv_bias.y;
     // The producer's vertical step is V2_MAX_VERTICAL_SHEAR / content_width per real-source
-    // row. Convert that local-content derivative exactly into full-source coordinates. The
-    // surrounding tensor letterbox is synthetic support and contributes no spatial extent.
-    float roi_pixel_aspect =
-        (roi_width * (float)source_width) /
-        max(roi_height * (float)source_height, 1.0e-6f);
-    float vertical_slope = V2_MAX_VERTICAL_SHEAR * roi_pixel_aspect *
-        ((float)content_height / max((float)content_width, 1.0f));
+    // row. The source-height/source-width factors in the local pixel aspect and source-V
+    // conversion cancel. Rect/content validation proves every divisor here is positive.
     float vertical_budget_per_source_v =
-        vertical_slope * source_height_in_source_u;
+        V2_MAX_VERTICAL_SHEAR * (roi_extent.x / roi_extent.y) *
+        ((float)content_extent.y / (float)content_extent.x);
+    float vertical_collar_budget =
+        vertical_budget_per_source_v * abs(destination_uv.y - projected_y);
+    float maximum_full_source_parallax =
+        roi_extent.x * V2_DIRECT_CONTAINER_LIMIT;
+    // The authenticated final field is bounded by V2_DIRECT_CONTAINER_LIMIT. If even that largest
+    // possible displacement cannot survive the destination's collar, the first inverse step is
+    // exactly the destination again and every later step is identical. Skip all eleven fetches.
+    // Equality also reduced to zero in the original soft-threshold rule.
+    float projected_destination_x = clamp(destination_uv.x, roi_min.x, roi_max.x);
+    float destination_collar_budget =
+        VIDEO_ROI_MAX_HORIZONTAL_SLOPE *
+            abs(destination_uv.x - projected_destination_x) +
+        vertical_collar_budget;
+    if (destination_collar_budget >= maximum_full_source_parallax) {
+        return destination_uv;
+    }
     [unroll]
     for (int iteration = 0; iteration < 11; ++iteration) {
         float next_source_x = destination_uv.x + eye_sign * SampleVideoRoiParallax(
             source_x,
-            destination_uv.y,
-            roi_width,
-            vertical_budget_per_source_v,
-            depth_size
+            roi_min.x,
+            roi_max.x,
+            roi_extent.x,
+            tensor_uv_scale.x,
+            tensor_uv_bias.x,
+            tensor_v,
+            vertical_collar_budget
         );
         bool exactly_settled = asuint(next_source_x) == asuint(source_x);
         source_x = next_source_x;

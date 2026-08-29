@@ -790,9 +790,15 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   EXPECT_EQ(shader.find("ocr_abstain_main"), std::string::npos);
   EXPECT_NE(shader.find("void finalize_main("), std::string::npos);
   EXPECT_NE(
+    shader.find("[numthreads(1, 1, 1)]\nvoid finalize_main"),
+    std::string::npos
+  );
+  EXPECT_NE(
     shader.find("word < V2_OCR_RECORD_WORD_COUNT"),
     std::string::npos
   );
+  EXPECT_EQ(shader.find("NEAR_IDENTICAL_FINALIZE_THREADS"), std::string::npos);
+  EXPECT_EQ(shader.find("NearIdenticalFinalizeRunRecord"), std::string::npos);
   EXPECT_EQ(estimator.find("postprocess_temporal_reset"), std::string::npos);
   EXPECT_EQ(estimator.find("completed_postprocess_temporal_reset"), std::string::npos);
   EXPECT_EQ(estimator.find("pending_force_temporal_reseed"), std::string::npos);
@@ -4110,6 +4116,11 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedPreprocessMatchesCanonicalAndSpec
       "invalid reset domain",
       {16u, 8u, 16u + field_width, 8u + field_height},
       {0u, 0u, 0u, 0u},
+    },
+    parity_case_t {
+      "malformed retained source",
+      {source_width - 1u, 0u, source_width + 1u, source_height},
+      {0u, 0u, field_width, field_height},
     },
   };
 

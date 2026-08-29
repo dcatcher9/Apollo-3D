@@ -33,6 +33,7 @@
 #include <src/crypto.h>
 #include <src/depth_coordinate_v2.h>
 #include <src/host_sbs_v2_gpu_executor.h>
+#include <src/prod_zipdepth_convex2x.h>
 #include <src/sbs_bench_depth_coordinate_v2.h>
 #include <src/video_depth_estimator.h>
 
@@ -1501,6 +1502,7 @@ TEST(DepthCoordinateV2ShapeTest, StandardSourceAspectsFitEveryAuthenticatedTenso
 
 TEST(DepthCoordinateV2GpuTest, EveryAuthenticatedTensorShapeExecutesProductionProducer) {
   namespace fs = std::filesystem;
+  namespace prod = models::prod_zipdepth_convex2x;
   namespace v2 = models::depth_coordinate_v2;
 
   warp_device_t warp;
@@ -1514,12 +1516,28 @@ TEST(DepthCoordinateV2GpuTest, EveryAuthenticatedTensorShapeExecutesProductionPr
   const std::string contract_sha256 = sha256_hex(contract_bytes);
   const auto &calibration = v2::model_calibrations.front();
 
-  std::size_t tested_shapes = 0u;
+  std::vector<prod::high_shape_t> authenticated_shapes;
   for (const auto &shape : v2::model_calibrated_shapes) {
     if (shape.calibration_id != calibration.calibration_id) {
       continue;
     }
-    ++tested_shapes;
+    authenticated_shapes.push_back({shape.width, shape.height});
+  }
+  ASSERT_EQ(authenticated_shapes.size(), 6u);
+  // Exercise the same producer closure at every public grid emitted by the fused runtime, in
+  // addition to retaining the six internal DAV2 calibration-grid replays above.
+  for (const auto shape : prod::fixed_profile_shapes) {
+    ASSERT_TRUE(prod::live_geometry_shape_relation(
+      shape.width / prod::scale,
+      shape.height / prod::scale,
+      shape.width,
+      shape.height
+    ));
+    authenticated_shapes.push_back(shape);
+  }
+  ASSERT_EQ(authenticated_shapes.size(), 12u);
+
+  for (const auto shape : authenticated_shapes) {
     const std::uint32_t width = shape.width;
     const std::uint32_t height = shape.height;
     const std::uint32_t split = width / 2u;
@@ -1606,7 +1624,6 @@ TEST(DepthCoordinateV2GpuTest, EveryAuthenticatedTensorShapeExecutesProductionPr
     EXPECT_EQ(trace["frames"][0]["camera_valid"], true);
     EXPECT_EQ(trace["frames"][0]["calibration_revision"], 1u);
   }
-  EXPECT_EQ(tested_shapes, 6u);
 }
 
 TEST(DepthCoordinateV2GpuTest, ArithmeticMeanCenterLatchesAtCutAndHoldsAcrossLaterFramesOnGpu) {

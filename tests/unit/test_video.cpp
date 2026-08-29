@@ -833,7 +833,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 74u);
+  EXPECT_EQ(v2::contract_schema, 75u);
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
   EXPECT_EQ(v2::shadow_state_dump_schema, 16u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
@@ -7788,6 +7788,30 @@ TEST(DirectxShaderSourceTest, FusedDepthMapperUsesResolvedReferenceGridGradients
   );
   EXPECT_NE(
     mapper.find("reference_gradient >= ema_edge_gradient"),
+    std::string::npos
+  );
+  const auto change_rejection = mapper.find(
+    "if (!(change >= ema_edge_change))"
+  );
+  const auto exclusion_stencil = mapper.find("TensorExclusion[neighbor]");
+  const auto depth_stencil = mapper.find("float gradient = 0.0f");
+  ASSERT_NE(change_rejection, std::string::npos);
+  ASSERT_NE(exclusion_stencil, std::string::npos);
+  ASSERT_NE(depth_stencil, std::string::npos);
+  EXPECT_LT(change_rejection, exclusion_stencil);
+  EXPECT_LT(change_rejection, depth_stencil);
+  EXPECT_NE(
+    mapper.find("float change = abs(current - previous)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    mapper.find(
+      "IsMovingEdge(int2(sample_position), mapped, previous, mm)"
+    ),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    mapper.find("abs(current - PreviousDepth[p])"),
     std::string::npos
   );
   EXPECT_NE(

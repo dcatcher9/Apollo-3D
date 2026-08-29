@@ -52,8 +52,8 @@ diagnostics that explain how the final field was produced.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 74/tag `0x419B307A`, canonical SHA-256
-`6feb4b8dd74cd4a67df8a8f0f6892aac6be93e9e068ce2177f43391563390c3a`. It binds the
+schema 75/tag `0x8753E5C6`, canonical SHA-256
+`7f72195a723c9597db2be23e651b92a028040c0e4e6007accd315eb41c6690c4`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -64,14 +64,14 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744` |
-| `parallax_v2_producer` | 18 | `e00c710d73aade4db91a0842160203125b6c4378e9d56353df9f732b94577986` |
-| `parallax_v2_coordinate_diagnostic` | 1 | `1b4272ce59e03a4b7a7bcf192153475a9c6efb29dca0a9c3d110b1fb0175f327` |
-| `near_identical_detector` | 4 | `62317daf8b1e95f0146518c2e3f4be98d32064f02d04e330fb904cd58322fc99` |
-| `gpu_trace` | 1 | `c33fd517228e48e71b3b0126ed169f1010160cf75a2304eeb4c9e80c22502ac4` |
-| `parallax_v2_live_renderer` | 2 | `bf3cdd0ffdd73dbf7148292be31fc37f49e64ea719d58d2ec1bebeedc724ac94` |
-| `parallax_v2_p010_y` | 1 | `e739f6b42b56a645b2e00af971171f1b6441c2ab16b16c5e72e5df7df85d67a6` |
+| `parallax_v2_producer` | 18 | `563d375d1030d1c852337645685edc8295bd757dc8e4c6ce31a6838942f996da` |
+| `parallax_v2_coordinate_diagnostic` | 1 | `6565247a2de4326e5d87c76e4a603eecebd66eb3b7b7cf5fee50ddef37412363` |
+| `near_identical_detector` | 4 | `3dde879fb09189715530e6549c2fced103aa8684aec225390d56241be4e00585` |
+| `gpu_trace` | 1 | `7f9bc8e48ffe16958e46366c49c80de5c59297577577985886096250e807b1dc` |
+| `parallax_v2_live_renderer` | 2 | `b69d3bdcb555d76cde2174fa5d1a372b557f6b7182a76e2e46c928bf1dec08d5` |
+| `parallax_v2_p010_y` | 1 | `ce7207098d17bf3df969b9dbde39f324abdf58e5a529c2042cab34077dafa451` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `941fbd61c554ddad4e5ade613ea1e5909cd059fe5b618400f45841f40ef4f982` |
+| `parallax_v2_live_diagnostic` | 2 | `b7180a63b0d67004f9b6d2c802e74a01b18e55c4495ac53530b932236bab3160` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
 The contract admits the following production calibration:

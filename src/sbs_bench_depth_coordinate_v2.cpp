@@ -29,6 +29,7 @@
   #include "generated/sbs_adaptive_state_contract.h"
   #include "host_sbs_shader_cache.h"
   #include "host_sbs_v2_gpu_executor.h"
+  #include "prod_zipdepth_convex2x.h"
 
   #ifndef SUNSHINE_SHADERS_DIR
     #define SUNSHINE_SHADERS_DIR SUNSHINE_ASSETS_DIR "/shaders/directx"
@@ -38,6 +39,7 @@ using Microsoft::WRL::ComPtr;
 
 namespace sbs_bench {
   namespace fs = std::filesystem;
+  namespace prod = models::prod_zipdepth_convex2x;
   namespace v2 = models::depth_coordinate_v2;
   namespace v2_gpu = models::host_sbs_v2_gpu;
   namespace shader_cache = models::host_sbs_shader_cache;
@@ -612,19 +614,39 @@ void main(uint3 id : SV_DispatchThreadID) {
         return false;
       }
       model_name = identity["model"].get<std::string>();
-      if (!width || !height ||
-          static_cast<std::uint64_t>(width) * height >
-            std::numeric_limits<UINT>::max() ||
-          !v2::capture_identity_is_calibrated(
+      if (!width || !height || static_cast<std::uint64_t>(width) * height >
+                                   std::numeric_limits<UINT>::max()) {
+        error = "v2 GPU replay raw shape is invalid";
+        return false;
+      }
+      std::uint32_t calibration_width = width;
+      std::uint32_t calibration_height = height;
+      // The fused producer publishes only its exact-2x high field, while the embedded DAV2
+      // identity remains calibrated against the internal coarse fit. Legacy coarse replay
+      // artifacts stay valid; a high field inherits that identity only through its fixed partner.
+      if (prod::live_geometry_field_shape_is_supported(width, height)) {
+        calibration_width = width / prod::scale;
+        calibration_height = height / prod::scale;
+        if (!prod::live_geometry_shape_relation(
+              calibration_width,
+              calibration_height,
+              width,
+              height
+            )) {
+          error = "v2 GPU replay high raw shape has no exact calibrated coarse partner";
+          return false;
+        }
+      }
+      if (!v2::capture_identity_is_calibrated(
             model_name,
             identity["depth_model_url"].get<std::string>(),
             identity["onnx_sha256"].get<std::string>(),
             identity["preprocess_profile"].get<std::string>(),
             identity["preprocess_source_closure_sha256"].get<std::string>(),
-            width,
-            height
+            calibration_width,
+            calibration_height
           )) {
-        error = "v2 GPU replay model identity or raw shape is outside the calibrated allowlist";
+        error = "v2 GPU replay model identity or raw/field shape is outside the calibrated allowlist";
         return false;
       }
       const auto calibration_id = identity["calibration_id"].get<std::string>();
@@ -641,7 +663,11 @@ void main(uint3 id : SV_DispatchThreadID) {
                    identity["preprocess_profile"].get<std::string>() &&
                  candidate.preprocess.source_closure_sha256 ==
                    identity["preprocess_source_closure_sha256"].get<std::string>() &&
-                 v2::model_calibration_supports_shape(candidate, width, height);
+                 v2::model_calibration_supports_shape(
+                   candidate,
+                   calibration_width,
+                   calibration_height
+                 );
         }
       );
       if (calibration == v2::model_calibrations.end()) {

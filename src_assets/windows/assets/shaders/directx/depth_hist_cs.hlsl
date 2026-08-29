@@ -33,16 +33,27 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
     float inv_range = valid_bounds ? (float)NUM_BINS / max(vmax - vmin, 1e-12f) : 0.0f;
 
     uint count = target_w * target_h;
+    // Convert the lane origin and uniform grid stride to 2D once. Advancing the coordinate with
+    // add/carry below preserves the exact row-major visit order without a dynamic udiv per texel.
+    uint position_y = dtid.x / target_w;
+    uint position_x = dtid.x - position_y * target_w;
+    uint stride_y = reduce_threads / target_w;
+    uint stride_x = reduce_threads - stride_y * target_w;
     [loop]
     for (uint idx = dtid.x; idx < count; idx += reduce_threads) {
-        uint2 position = uint2(idx % target_w, idx / target_w);
-        if (TensorExclusion[position] != 0u) {
-            continue;
+        uint2 position = uint2(position_x, position_y);
+        if (TensorExclusion[position] == 0u) {
+            float v = InputBuffer[idx];
+            if (valid_bounds && !isnan(v) && !isinf(v) && v >= 0.0f) {
+                uint bin = min((uint)((v - vmin) * inv_range), NUM_BINS - 1u);
+                InterlockedAdd(g_hist[bin], 1u);
+            }
         }
-        float v = InputBuffer[idx];
-        if (valid_bounds && !isnan(v) && !isinf(v) && v >= 0.0f) {
-            uint bin = min((uint)((v - vmin) * inv_range), NUM_BINS - 1u);
-            InterlockedAdd(g_hist[bin], 1u);
+        position_x += stride_x;
+        position_y += stride_y;
+        if (position_x >= target_w) {
+            position_x -= target_w;
+            position_y++;
         }
     }
 

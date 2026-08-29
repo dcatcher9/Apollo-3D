@@ -39,28 +39,39 @@ void main(uint3 dtid : SV_DispatchThreadID,
     uint normalization_maximum = 0u;
     uint normalization_valid_count = 0u;
 
+    // Convert the lane origin and uniform grid stride to 2D once. Advancing the coordinate with
+    // add/carry below preserves the exact row-major visit order without a dynamic udiv per texel.
+    uint position_y = dtid.x / target_w;
+    uint position_x = dtid.x - position_y * target_w;
+    uint stride_y = reduce_threads / target_w;
+    uint stride_x = reduce_threads - stride_y * target_w;
     [loop]
     for (uint index = dtid.x; index < element_count; index += reduce_threads) {
-        uint2 position = uint2(index % target_w, index / target_w);
-        if (TensorExclusion[position] != 0u) {
-            continue;
-        }
-        eligible++;
-        float value = InputBuffer[index];
-        if (!isnan(value) && !isinf(value)) {
-            count++;
-            float delta = value - mean;
-            mean += delta / (float)count;
-            float delta2 = value - mean;
-            m2 += delta * delta2;
-            minimum = min(minimum, value);
-            maximum = max(maximum, value);
-            if (value >= 0.0f) {
-                uint normalization_bits = asuint(value);
-                normalization_minimum = min(normalization_minimum, normalization_bits);
-                normalization_maximum = max(normalization_maximum, normalization_bits);
-                normalization_valid_count++;
+        uint2 position = uint2(position_x, position_y);
+        if (TensorExclusion[position] == 0u) {
+            eligible++;
+            float value = InputBuffer[index];
+            if (!isnan(value) && !isinf(value)) {
+                count++;
+                float delta = value - mean;
+                mean += delta / (float)count;
+                float delta2 = value - mean;
+                m2 += delta * delta2;
+                minimum = min(minimum, value);
+                maximum = max(maximum, value);
+                if (value >= 0.0f) {
+                    uint normalization_bits = asuint(value);
+                    normalization_minimum = min(normalization_minimum, normalization_bits);
+                    normalization_maximum = max(normalization_maximum, normalization_bits);
+                    normalization_valid_count++;
+                }
             }
+        }
+        position_x += stride_x;
+        position_y += stride_y;
+        if (position_x >= target_w) {
+            position_x -= target_w;
+            position_y++;
         }
     }
 

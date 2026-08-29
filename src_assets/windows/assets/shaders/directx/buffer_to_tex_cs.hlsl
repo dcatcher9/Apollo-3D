@@ -25,8 +25,15 @@ float CurrentDepth(int2 p, float2 mm) {
     return saturate((raw - mm.x) / max(mm.y - mm.x, 1e-6f));
 }
 
-bool IsMovingEdge(int2 p, float current, float2 mm) {
+bool IsMovingEdge(int2 p, float current, float previous, float2 mm) {
     p = ClampPixel(p);
+
+    // Most history texels are stable. Reject them after one history load, before paying for the
+    // four-cell exclusion and current-depth stencils. Negating the ordered comparison preserves
+    // the former final-expression behavior for a non-finite current/history delta.
+    float change = abs(current - previous);
+    if (!(change >= ema_edge_change))
+        return false;
 
     static const int2 neighbor_offsets[4] = {
         int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1)
@@ -41,7 +48,6 @@ bool IsMovingEdge(int2 p, float current, float2 mm) {
         }
     }
 
-    float change = abs(current - PreviousDepth[p]);
     float gradient = 0.0f;
     gradient = max(gradient, abs(current - CurrentDepth(p + int2(-1, 0), mm)));
     gradient = max(gradient, abs(current - CurrentDepth(p + int2( 1, 0), mm)));
@@ -50,7 +56,7 @@ bool IsMovingEdge(int2 p, float current, float2 mm) {
     // ema_edge_gradient is specified in 434-reference-texel units. Keep the motion mask stable
     // when the native depth shape resolves a 392- or 420-short-side grid.
     float reference_gradient = gradient * DepthReferenceTexelScale();
-    return change >= ema_edge_change && reference_gradient >= ema_edge_gradient;
+    return reference_gradient >= ema_edge_gradient;
 }
 
 [numthreads(16, 16, 1)]
@@ -93,7 +99,7 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     bool moving = false;
     if (ema_edge_change > 0.0f && ema_edge_gradient > 0.0f &&
         !(scale.w < 0.5f || scale.w > 1.5f)) {
-        moving = IsMovingEdge(int2(sample_position), mapped, mm);
+        moving = IsMovingEdge(int2(sample_position), mapped, previous, mm);
     }
 
     MotionMask[DTid.xy] = moving ? 1u : 0u;

@@ -796,8 +796,6 @@ namespace {
     const std::vector<float> &roi_local_parallax,
     const UINT depth_width,
     const UINT depth_height,
-    const UINT source_width,
-    const UINT source_height,
     const float source_u,
     const float source_v,
     const host_sbs_v2_geometry_t &geometry
@@ -846,13 +844,8 @@ namespace {
       tensor_v
     );
     const float full_source_parallax = roi_width * local_parallax;
-    const float source_height_in_source_u =
-      static_cast<float>(source_height) / static_cast<float>(source_width);
-    const float roi_pixel_aspect =
-      (roi_width * static_cast<float>(source_width)) /
-      (roi_height * static_cast<float>(source_height));
-    const float vertical_slope =
-      models::depth_coordinate_v2::max_vertical_shear * roi_pixel_aspect *
+    const float vertical_budget_per_source_v =
+      models::depth_coordinate_v2::max_vertical_shear * (roi_width / roi_height) *
       (static_cast<float>(
          geometry.tensor_content_bottom - geometry.tensor_content_top) /
        static_cast<float>(
@@ -860,8 +853,7 @@ namespace {
     const float collar_budget =
       models::depth_coordinate_v2::max_horizontal_slope *
         std::abs(source_u - projected_u) +
-      vertical_slope *
-        std::abs(source_v - projected_v) * source_height_in_source_u;
+      vertical_budget_per_source_v * std::abs(source_v - projected_v);
     const float magnitude = std::abs(full_source_parallax);
     if (collar_budget >= magnitude) {
       return 0.0f;
@@ -1137,7 +1129,6 @@ TEST(HostSbsV2LiveWarpGpuTest, ExecutesAuthenticatedPixelContract) {
 TEST(HostSbsV2LiveWarpGpuTest, RoiLocalFieldUsesMinimumSlopeConstrainedOutsideCollar) {
   namespace v2 = models::depth_coordinate_v2;
   constexpr UINT source_width = 512u;
-  constexpr UINT source_height_for_contract = 256u;
   constexpr UINT depth_width = 64u;
   constexpr UINT depth_height = 32u;
   constexpr float local_parallax = 0.04f;
@@ -1164,8 +1155,6 @@ TEST(HostSbsV2LiveWarpGpuTest, RoiLocalFieldUsesMinimumSlopeConstrainedOutsideCo
       field,
       depth_width,
       depth_height,
-      source_width,
-      source_height_for_contract,
       u,
       v,
       geometry
@@ -1199,8 +1188,6 @@ TEST(HostSbsV2LiveWarpGpuTest, RoiLocalFieldUsesMinimumSlopeConstrainedOutsideCo
       positive_field,
       depth_width,
       depth_height,
-      source_width,
-      source_height_for_contract,
       0.50f,
       0.50f,
       narrow_geometry
@@ -1248,9 +1235,9 @@ TEST(HostSbsV2LiveWarpGpuTest, RoiLocalFieldUsesMinimumSlopeConstrainedOutsideCo
     }
   }
 
-  // Top/bottom use source-width units just like the producer's vertical shear. At this 2:1
-  // source aspect, 0.02 parallax reaches zero 0.02 source-V outside the edge. A corner spends
-  // the horizontal and vertical budgets together, producing the minimum anisotropic diamond.
+  // Top/bottom use source-width units just like the producer's vertical shear. With this 2:1
+  // tensor-content aspect, 0.02 parallax reaches zero 0.02 source-V outside the edge. A corner
+  // spends the horizontal and vertical budgets together, producing the minimum anisotropic diamond.
   constexpr float top_zero = geometry.video_roi_top - 0.02f;
   EXPECT_NEAR(effective(positive_field, 0.50f, top_zero), 0.0f, 1.0e-7f);
   EXPECT_FLOAT_EQ(effective(positive_field, 0.50f, top_zero - 0.001f), 0.0f);
@@ -1299,8 +1286,6 @@ TEST(HostSbsV2LiveWarpGpuTest, RoiLocalFieldUsesMinimumSlopeConstrainedOutsideCo
           positive_field,
           depth_width,
           depth_height,
-          source_width,
-          render_height,
           source_u,
           0.5f,
           geometry
@@ -1425,8 +1410,6 @@ TEST(HostSbsV2LiveWarpGpuTest, RoiMapsOnlyTheIntegerTensorContentRectangle) {
           field,
           depth_width,
           depth_height,
-          source_width,
-          source_height,
           source_u,
           destination_v,
           geometry
@@ -2085,6 +2068,11 @@ TEST(HostSbsV2LiveWarpGpuTest, FullFrameBytecodeSkipsTheRoiDimensionQuery) {
   }
   std::size_t active_compare = std::string::npos;
   std::string active_zero_register;
+  const auto division_count = static_cast<std::size_t>(std::count_if(
+    lines.begin(),
+    lines.end(),
+    [](const std::string &line) { return line.starts_with("div "); }
+  ));
   for (std::size_t index = 0u; index < lines.size(); ++index) {
     const auto &line = lines[index];
     if (line.starts_with("eq ") && line.find("cb2[0].z") != std::string::npos &&
@@ -2115,6 +2103,7 @@ TEST(HostSbsV2LiveWarpGpuTest, FullFrameBytecodeSkipsTheRoiDimensionQuery) {
   bool roi_else = false;
   std::size_t full_resinfo = 0u;
   std::size_t roi_resinfo = 0u;
+  std::size_t source_resinfo = 0u;
   for (std::size_t index = full_branch; index < lines.size(); ++index) {
     const auto &line = lines[index];
     if (line.starts_with("if_") || line.starts_with("loop")) {
@@ -2133,10 +2122,16 @@ TEST(HostSbsV2LiveWarpGpuTest, FullFrameBytecodeSkipsTheRoiDimensionQuery) {
         ++full_resinfo;
       }
     }
+    if (line.find("resinfo") != std::string::npos &&
+        line.find("t0.") != std::string::npos) {
+      ++source_resinfo;
+    }
   }
   EXPECT_TRUE(roi_else);
   EXPECT_EQ(full_resinfo, 0u);
   EXPECT_EQ(roi_resinfo, 1u);
+  EXPECT_EQ(source_resinfo, 0u);
+  EXPECT_LE(division_count, 4u);
 }
 
 TEST(HostSbsV2LiveWarpGpuTest, IndependentFlatShaderIgnoresV2Geometry) {

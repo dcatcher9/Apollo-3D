@@ -107,6 +107,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             72: "ff94c30e0295fa0d46ea1db7028a920cec640f192d8afb0fdeeb2722281e52f6",
             73: "4cf03fa21295c65580e3af0b33775fa891dc434df8ec7a7e9881a50084607a75",
             74: "6feb4b8dd74cd4a67df8a8f0f6892aac6be93e9e068ce2177f43391563390c3a",
+            75: "7f72195a723c9597db2be23e651b92a028040c0e4e6007accd315eb41c6690c4",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -114,14 +115,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x419B307A)
+        self.assertEqual(generator.contract_tag(contract), 0x8753E5C6)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "419b307a6377816ab6f3f925738a561d3fae3996f6b7081bb5a150982ddc2ff0",
+            "8753e5c620344ef25c43c7d946b30c5d1599090b0c3e8dd7efb37096147d6e93",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "e00c710d73aade4db91a0842160203125b6c4378e9d56353df9f732b94577986",
+            "563d375d1030d1c852337645685edc8295bd757dc8e4c6ce31a6838942f996da",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -512,7 +513,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 74u',
+                'contract_schema = 75u',
                 'final_parallax_contract_schema = 2u',
                 'final_parallax_authority = '
                 '"complete-atomic-subtitle-conditioned-r32f-live-render-authority"',
@@ -591,7 +592,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 74u',
+                '#define V2_CONTRACT_SCHEMA 75u',
                 '#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 14u',
                 '#define V2_OCR_INPUT_WIDTH 960u',
                 '#define V2_OCR_OUTPUT_WIDTH 960u',

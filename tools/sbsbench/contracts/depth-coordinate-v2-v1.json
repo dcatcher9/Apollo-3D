@@ -1,5 +1,5 @@
 {
-  "schema": 74,
+  "schema": 75,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -264,7 +264,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "e00c710d73aade4db91a0842160203125b6c4378e9d56353df9f732b94577986"
+    "source_closure_sha256": "563d375d1030d1c852337645685edc8295bd757dc8e4c6ce31a6838942f996da"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,
