@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <optional>
+#include <span>
 
 namespace platf::foreground_window {
   /** A half-open rectangle in physical virtual-screen or capture-pixel coordinates. */
@@ -48,6 +49,8 @@ namespace platf::foreground_window {
   /** One synchronous Win32/DWM observation. Native handles are transported as integers. */
   struct observation_t {
     status_e status {status_e::no_foreground};
+    // `window` remains the foreground top-level root. A structurally proven direct child may
+    // narrow only the analysis source; it never replaces foreground identity authority.
     std::uintptr_t window {};
     std::uint32_t process_id {};
     std::uintptr_t monitor {};
@@ -55,9 +58,25 @@ namespace platf::foreground_window {
     // alongside the HMONITOR lets cloned outputs prove coordinate equivalence without accepting
     // an unrelated monitor merely because its window rectangle happens to fit.
     rect_t monitor_screen_rect {};
+    // Exact root client and selected analysis content in physical screen coordinates. Content is
+    // the client itself unless the conservative direct-child resolver proves a stable viewport.
     rect_t client_screen_rect {};
+    std::uintptr_t content_window {};
+    rect_t content_screen_rect {};
     rect_t frame_screen_rect {};
     std::chrono::steady_clock::time_point observed_at {};
+
+    [[nodiscard]] constexpr bool has_content_source() const noexcept {
+      return content_window != 0 && content_screen_rect.valid();
+    }
+
+    [[nodiscard]] constexpr std::uintptr_t source_window() const noexcept {
+      return has_content_source() ? content_window : window;
+    }
+
+    [[nodiscard]] constexpr rect_t source_screen_rect() const noexcept {
+      return has_content_source() ? content_screen_rect : client_screen_rect;
+    }
   };
 
   /**
@@ -75,9 +94,23 @@ namespace platf::foreground_window {
     std::uintptr_t monitor {};
     rect_t monitor_screen_rect {};
     rect_t client_screen_rect {};
+    std::uintptr_t content_window {};
+    rect_t content_screen_rect {};
     rect_t frame_screen_rect {};
     std::chrono::steady_clock::time_point observed_at {};
     std::chrono::steady_clock::time_point geometry_valid_since {};
+
+    [[nodiscard]] constexpr bool has_content_source() const noexcept {
+      return content_window != 0 && content_screen_rect.valid();
+    }
+
+    [[nodiscard]] constexpr std::uintptr_t source_window() const noexcept {
+      return has_content_source() ? content_window : window;
+    }
+
+    [[nodiscard]] constexpr rect_t source_screen_rect() const noexcept {
+      return has_content_source() ? content_screen_rect : client_screen_rect;
+    }
   };
 
   /** Sample the current foreground root with no worker, blocking IPC, or retained native handle. */
@@ -106,6 +139,8 @@ namespace platf::foreground_window {
       std::uintptr_t monitor {};
       rect_t monitor_screen_rect {};
       rect_t client_screen_rect {};
+      std::uintptr_t content_window {};
+      rect_t content_screen_rect {};
       rect_t frame_screen_rect {};
 
       [[nodiscard]] constexpr bool operator==(const key_t &) const = default;
@@ -188,6 +223,40 @@ namespace platf::foreground_window {
   ) noexcept;
 
   namespace detail {
+    /** One direct-child query normalized for the pure structural viewport policy. */
+    struct child_window_observation_t {
+      std::uintptr_t window {};
+      std::uintptr_t parent {};
+      std::uint32_t process_id {};
+      rect_t screen_rect {};
+      bool query_succeeded {};
+      bool visible {};
+    };
+
+    /** Root fallback or a structurally proven outer content container. */
+    struct content_selection_t {
+      std::uintptr_t window {};
+      rect_t screen_rect {};
+      bool child_selected {};
+
+      [[nodiscard]] explicit constexpr operator bool() const noexcept {
+        return window != 0 && screen_rect.valid();
+      }
+    };
+
+    /**
+     * Select a dominant, center-covering direct child only when separate edge-aligned sibling
+     * chrome corroborates the split. Ambiguity, incomplete enumeration, or weak evidence returns
+     * the complete root client. No executable, window-class, control ID, or pixel inset is known.
+     */
+    [[nodiscard]] content_selection_t select_content_source(
+      std::uintptr_t root_window,
+      std::uint32_t root_process_id,
+      rect_t root_client_screen_rect,
+      std::span<const child_window_observation_t> children,
+      bool enumeration_complete = true
+    ) noexcept;
+
     /**
      * Injectable result of native queries. Production `sample()` fills this record, while unit
      * tests exercise policy without creating or manipulating desktop windows.
@@ -203,6 +272,8 @@ namespace platf::foreground_window {
       std::uintptr_t monitor {};
       rect_t monitor_screen_rect {};
       rect_t client_screen_rect {};
+      std::uintptr_t content_window {};
+      rect_t content_screen_rect {};
       rect_t frame_screen_rect {};
       std::uint64_t extended_style {};
       std::uint32_t layered_flags {};

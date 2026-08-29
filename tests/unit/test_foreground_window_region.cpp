@@ -5,6 +5,7 @@
 
 #include "src/platform/windows/foreground_window_region.h"
 
+#include <array>
 #include <chrono>
 #include <gtest/gtest.h>
 #include <windows.h>
@@ -56,6 +57,119 @@ namespace {
     };
   }
 
+  foreground::detail::child_window_observation_t child_window(
+    const std::uintptr_t window,
+    const foreground::rect_t rect,
+    const std::uintptr_t parent = 0x100u,
+    const std::uint32_t process_id = 42u
+  ) {
+    return {
+      .window = window,
+      .parent = parent,
+      .process_id = process_id,
+      .screen_rect = rect,
+      .query_succeeded = true,
+      .visible = true,
+    };
+  }
+
+  std::array<foreground::detail::child_window_observation_t, 6>
+    player_like_children() {
+    return {
+      // Dominant center pane and a same-sized renderer descendant. The latter must not replace
+      // the stable direct outer container.
+      child_window(0x101u, {103, 134, 897, 518}),
+      child_window(0x102u, {103, 134, 897, 518}, 0x101u),
+      child_window(0x103u, {103, 103, 897, 134}),
+      child_window(0x104u, {103, 519, 897, 541}),
+      child_window(0x105u, {103, 541, 897, 597}),
+      child_window(0x106u, {100, 103, 103, 597}),
+    };
+  }
+
+  TEST(ForegroundWindowContent, SelectsDominantCenterPaneWithEdgeChrome) {
+    const auto children = player_like_children();
+    const auto selected = foreground::detail::select_content_source(
+      0x100u,
+      42u,
+      {100, 100, 900, 600},
+      children
+    );
+    ASSERT_TRUE(selected);
+    EXPECT_TRUE(selected.child_selected);
+    EXPECT_EQ(selected.window, 0x101u);
+    EXPECT_EQ(selected.screen_rect, (foreground::rect_t {103, 134, 897, 518}));
+  }
+
+  TEST(ForegroundWindowContent, FallsBackWhenEnumerationOrCandidateIsUntrusted) {
+    const foreground::rect_t root {100, 100, 900, 600};
+    const auto expect_root = [&](const auto &children, const bool complete = true) {
+      const auto selected = foreground::detail::select_content_source(
+        0x100u,
+        42u,
+        root,
+        children,
+        complete
+      );
+      ASSERT_TRUE(selected);
+      EXPECT_FALSE(selected.child_selected);
+      EXPECT_EQ(selected.window, 0x100u);
+      EXPECT_EQ(selected.screen_rect, root);
+    };
+
+    auto children = player_like_children();
+    expect_root(children, false);
+    children = player_like_children();
+    children[0].visible = false;
+    expect_root(children);
+    children = player_like_children();
+    children[0].query_succeeded = false;
+    expect_root(children);
+    children = player_like_children();
+    ++children[0].process_id;
+    expect_root(children);
+    children = player_like_children();
+    ++children[0].parent;
+    expect_root(children);
+    children = player_like_children();
+    children[0].screen_rect.right = 901;
+    expect_root(children);
+  }
+
+  TEST(ForegroundWindowContent, RequiresCenterDominanceAndSubstantialEdgeSibling) {
+    const foreground::rect_t root {100, 100, 900, 600};
+    const auto expect_root = [&](const auto &children) {
+      const auto selected = foreground::detail::select_content_source(
+        0x100u,
+        42u,
+        root,
+        children
+      );
+      EXPECT_FALSE(selected.child_selected);
+      EXPECT_EQ(selected.screen_rect, root);
+    };
+
+    auto children = player_like_children();
+    children[0].screen_rect = {103, 134, 450, 518};
+    expect_root(children);
+
+    children = player_like_children();
+    // Only a thin frame remains outside the candidate; it is not enough evidence to reinterpret
+    // an ordinary root client as a media viewport.
+    children[2].screen_rect = {100, 100, 900, 103};
+    children[3].visible = false;
+    children[4].visible = false;
+    expect_root(children);
+
+    children = player_like_children();
+    children[1] = child_window(0x107u, {103, 134, 897, 518});
+    expect_root(children);
+
+    children = player_like_children();
+    children[1] = child_window(0x107u, {100, 100, 500, 600});
+    expect_root(children);
+  }
+
   TEST(ForegroundWindowPolicy, AcceptsOnlyCompleteStableOrdinaryWindow) {
     const auto observed_at = std::chrono::steady_clock::time_point {10s};
     const auto result = foreground::detail::classify(
@@ -68,8 +182,30 @@ namespace {
     EXPECT_EQ(result.monitor, 0x200u);
     EXPECT_EQ(result.monitor_screen_rect, (foreground::rect_t {-1920, 0, 0, 1080}));
     EXPECT_EQ(result.client_screen_rect, (foreground::rect_t {-1800, 100, -200, 1000}));
+    EXPECT_EQ(result.content_window, result.window);
+    EXPECT_EQ(result.content_screen_rect, result.client_screen_rect);
     EXPECT_EQ(result.frame_screen_rect, (foreground::rect_t {-1810, 70, -190, 1010}));
     EXPECT_EQ(result.observed_at, observed_at);
+  }
+
+  TEST(ForegroundWindowPolicy, KeepsRootAuthorityWhileExposingChildContent) {
+    const auto observed_at = std::chrono::steady_clock::time_point {10s};
+    auto raw = available_window();
+    raw.content_window = 0x101u;
+    raw.content_screen_rect = {-1790, 140, -210, 900};
+    const auto result = foreground::detail::classify(raw, observed_at);
+    ASSERT_EQ(result.status, foreground::status_e::ok);
+    EXPECT_EQ(result.window, raw.window);
+    EXPECT_EQ(result.client_screen_rect, raw.client_screen_rect);
+    EXPECT_EQ(result.content_window, raw.content_window);
+    EXPECT_EQ(result.source_window(), raw.content_window);
+    EXPECT_EQ(result.source_screen_rect(), raw.content_screen_rect);
+
+    raw.content_screen_rect.right = -100;
+    EXPECT_EQ(
+      foreground::detail::classify(raw, observed_at).status,
+      foreground::status_e::geometry_unavailable
+    );
   }
 
   TEST(ForegroundWindowPolicy, RejectsNoForegroundAndShellSurfaces) {
@@ -318,6 +454,8 @@ namespace {
 
     observation.client_screen_rect.left += 1;
     observation.client_screen_rect.right += 1;
+    observation.content_screen_rect.left += 1;
+    observation.content_screen_rect.right += 1;
     observation.frame_screen_rect.left += 1;
     observation.frame_screen_rect.right += 1;
     observation.observed_at += 50ms;
@@ -343,6 +481,36 @@ namespace {
     const auto after_reset = tracker.update(observation);
     EXPECT_GT(after_reset.generation, reacquired.generation);
     EXPECT_EQ(after_reset.geometry_valid_since, first_at + 250ms);
+  }
+
+  TEST(ForegroundWindowContinuity, ChildLineageAndGeometryAreContinuityEvidence) {
+    foreground::continuity_tracker_t tracker;
+    const auto start = std::chrono::steady_clock::time_point {10s};
+    auto raw = available_window();
+    raw.content_window = 0x101u;
+    raw.content_screen_rect = {-1790, 140, -210, 900};
+    auto observation = foreground::detail::classify(raw, start);
+    const auto first = tracker.update(observation);
+    ASSERT_EQ(first.status, foreground::status_e::ok);
+    EXPECT_EQ(first.window, raw.window);
+    EXPECT_EQ(first.content_window, raw.content_window);
+
+    observation.observed_at += 10ms;
+    const auto stable = tracker.update(observation);
+    EXPECT_EQ(stable.generation, first.generation);
+    EXPECT_EQ(stable.geometry_valid_since, first.geometry_valid_since);
+
+    ++observation.content_window;
+    observation.observed_at += 10ms;
+    const auto replaced = tracker.update(observation);
+    EXPECT_GT(replaced.generation, stable.generation);
+    EXPECT_EQ(replaced.geometry_valid_since, start + 20ms);
+
+    ++observation.content_screen_rect.top;
+    observation.observed_at += 10ms;
+    const auto resized = tracker.update(observation);
+    EXPECT_GT(resized.generation, replaced.generation);
+    EXPECT_EQ(resized.geometry_valid_since, start + 30ms);
   }
 
   TEST(ForegroundWindowMoveSize, BreaksGeometryContinuityUntilTheLoopEnds) {
@@ -476,6 +644,20 @@ namespace {
       resized,
       move_at - 1ms
     ));
+
+    auto child_previous = previous;
+    child_previous.content_window = 0x101u;
+    child_previous.content_screen_rect = {-1790, 140, -210, 900};
+    auto replaced_child = child_previous;
+    ++replaced_child.generation;
+    ++replaced_child.content_window;
+    replaced_child.observed_at = move_at;
+    replaced_child.geometry_valid_since = move_at;
+    EXPECT_FALSE(foreground::requires_full_source_causal_fallback(
+      child_previous,
+      replaced_child,
+      move_at - 1ms
+    ));
   }
 
   TEST(ForegroundWindowMapping, MapsNegativeRawDesktopCoordinatesWithoutClipping) {
@@ -491,6 +673,46 @@ namespace {
     ASSERT_TRUE(mapped);
     EXPECT_EQ(mapped.route, foreground::route_e::roi);
     EXPECT_EQ(mapped.capture_pixels, (foreground::rect_t {120, 100, 1720, 1000}));
+  }
+
+  TEST(ForegroundWindowMapping, MapsSelectedContentButRetainsRootIdentity) {
+    auto snapshot = available_snapshot();
+    snapshot.content_window = 0x101u;
+    snapshot.content_screen_rect = {-1780, 140, -220, 920};
+    const auto mapped = foreground::map_to_capture(
+      snapshot,
+      {
+        .screen_rect = {-1920, 0, 0, 1080},
+        .width = 1920,
+        .height = 1080,
+        .monitor = 0x200u,
+      }
+    );
+    ASSERT_TRUE(mapped);
+    EXPECT_EQ(snapshot.window, 0x100u);
+    EXPECT_EQ(snapshot.source_window(), 0x101u);
+    EXPECT_EQ(mapped.route, foreground::route_e::roi);
+    EXPECT_EQ(mapped.capture_pixels, (foreground::rect_t {140, 140, 1700, 920}));
+  }
+
+  TEST(ForegroundWindowMapping, RejectsSpanningRootEvenWhenSelectedContentFits) {
+    auto snapshot = available_snapshot();
+    snapshot.monitor = 0x300u;
+    snapshot.client_screen_rect = {-100, 100, 1000, 900};
+    snapshot.content_window = 0x101u;
+    snapshot.content_screen_rect = {20, 140, 980, 860};
+    snapshot.frame_screen_rect = {-110, 70, 1010, 910};
+    const auto mapped = foreground::map_to_capture(
+      snapshot,
+      {
+        .screen_rect = {0, 0, 1920, 1080},
+        .width = 1920,
+        .height = 1080,
+        .monitor = 0x300u,
+      }
+    );
+    EXPECT_EQ(mapped.status, foreground::mapping_status_e::partially_outside_capture);
+    EXPECT_EQ(mapped.route, foreground::route_e::none);
   }
 
   TEST(ForegroundWindowMapping, ExactClientExtentSelectsCanonicalFullCapture) {

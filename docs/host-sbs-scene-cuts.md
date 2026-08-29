@@ -65,10 +65,10 @@ histories. DDup damage-guided reuse is not a translation exception: it requires 
 route and every live authority epoch to remain unchanged. A missing, stale, unsupported, spanning,
 partially off-monitor, or other-monitor ROI selects full-frame V2. That resets state when leaving an
 active ROI, but repeated ineligible observations while already full-frame are not domain changes.
-Any selected client rectangle that equals the complete capture is already the canonical full-frame
-domain: it creates no crop, ROI transition, history reset, or camera reacquisition. Chromium may
-reach that result through separate semantic fullscreen evidence; the generic foreground-client
-route reaches the same canonical result through exact geometry alone. The browser helper labels its
+Any selected analysis-source rectangle that equals the complete capture is already the canonical
+full-frame domain: it creates no crop, ROI transition, history reset, or camera reacquisition.
+Chromium may reach that result through separate semantic fullscreen evidence; the generic
+foreground-client route reaches the same canonical result through exact geometry alone. The browser helper labels its
 relaxed full-client evidence `ok-fullscreen`, distinct from strict `ok` video-ROI evidence, and the
 host rejects an `ok-fullscreen` subrectangle. The bottom subtitle locator observes whichever domain
 V2 actually used. Any real input-domain transition resets the subtitle locator together with the
@@ -345,8 +345,8 @@ The committed conformance clips must prove at least these contracts:
   evidence instead of emitting a synthetic cut;
 - a pure on-screen translation of the same-sized ROI retains the camera and cut histories while
   binding geometry to the new exact matched-frame rectangle;
-- any selected client that maps exactly to the capture remains in the ordinary full-frame domain
-  without a reset or camera reacquisition;
+- any selected analysis source that maps exactly to the capture remains in the ordinary full-frame
+  domain without a reset or camera reacquisition;
 - changing an ROI between Chromium-video and foreground-client authority clears detector lineage
   even when its rectangle and dimensions match;
 - a stable lower OCR line stack acquires only after two compatible observations with distinct exact
@@ -387,7 +387,8 @@ Exercise each sequence for at least 20 seconds and finish with five seconds of a
 14. Enter and leave both window-region ROI authorities, including Chromium priority and an
     unsupported-aspect fallback.
 15. Move a same-sized foreground window without changing its content, then resize it across an
-    analysis-domain boundary and switch between Chromium-video and foreground-client authority.
+    analysis-domain boundary, acquire/release a structural content child, and switch between
+    Chromium-video and foreground-client authority.
 16. Enter both semantic Chromium fullscreen and generic exact-full-capture foreground-client routes;
     verify that each preserves ordinary full-frame continuity rather than creating an ROI transition.
     Repeat with desktop focus, a minimized window, a window on another monitor, and a spanning window;

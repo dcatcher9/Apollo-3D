@@ -4370,9 +4370,9 @@ namespace platf::dxgi {
         return static_cast<std::int64_t>(rect.bottom) - rect.top;
       };
       return left.window == right.window && left.process_id == right.process_id &&
-             left.monitor == right.monitor &&
-             width(left.client_screen_rect) == width(right.client_screen_rect) &&
-             height(left.client_screen_rect) == height(right.client_screen_rect);
+             left.monitor == right.monitor && left.source_window() == right.source_window() &&
+             width(left.source_screen_rect()) == width(right.source_screen_rect()) &&
+             height(left.source_screen_rect()) == height(right.source_screen_rect());
     }
 
     void clear_cached_roi_output() noexcept {
@@ -4452,10 +4452,11 @@ namespace platf::dxgi {
           .monitor = reinterpret_cast<std::uintptr_t>(output_desc.Monitor),
           .identity_orientation = true,
         };
-        // Liveness follows the current root/client geometry, not the content-causality gate. A
-        // move must revoke an old positioned completion immediately, while the later private-copy
-        // path still requires geometry_valid_since <= content_timestamp before authorizing a new
-        // foreground ROI. This separation preserves the position-independent DAV2 domain.
+        // Liveness follows the current root/client/content geometry, not the content-causality
+        // gate. A move must revoke an old positioned completion immediately, while the later
+        // private-copy path still requires geometry_valid_since <= content_timestamp before
+        // authorizing a new foreground ROI. This separation preserves the position-independent
+        // DAV2 domain.
         if (foreground_window::map_to_capture(observed, target)) {
           next_region = observed;
         }
@@ -4481,12 +4482,49 @@ namespace platf::dxgi {
       }
       const bool root_changed = changed(live_window_authority, next_root);
       const bool region_changed = changed(live_foreground_region, next_region);
+      const bool analysis_source_description_changed = [&]() {
+        if (!next_root) {
+          return false;
+        }
+        if (!live_window_authority) {
+          return true;
+        }
+        const auto relative_source = [](const foreground_window::snapshot_t &snapshot) {
+          const auto source = snapshot.source_screen_rect();
+          return foreground_window::rect_t {
+            source.left - snapshot.client_screen_rect.left,
+            source.top - snapshot.client_screen_rect.top,
+            source.right - snapshot.client_screen_rect.left,
+            source.bottom - snapshot.client_screen_rect.top,
+          };
+        };
+        return live_window_authority->window != next_root->window ||
+               live_window_authority->process_id != next_root->process_id ||
+               live_window_authority->source_window() != next_root->source_window() ||
+               relative_source(*live_window_authority) != relative_source(*next_root);
+      }();
       const bool analysis_authority_changed =
         live_window_authority &&
         (!next_root ||
          !same_window_analysis_identity_shape(*live_window_authority, *next_root));
       if (root_changed || region_changed) {
         clear_cached_roi_output();
+        if (analysis_source_description_changed) {
+          const auto source_rect = next_root->source_screen_rect();
+          const bool structural_child = next_root->source_window() != next_root->window;
+          BOOST_LOG(info)
+            << "Host SBS foreground analysis source changed: source="sv
+            << (structural_child ? "structural-child"sv : "whole-client"sv)
+            << " root_client="sv << next_root->client_screen_rect.left << ':'
+            << next_root->client_screen_rect.top << '-'
+            << next_root->client_screen_rect.right << ':'
+            << next_root->client_screen_rect.bottom << " analysis="sv
+            << source_rect.left << ':' << source_rect.top << '-'
+            << source_rect.right << ':' << source_rect.bottom << " root_hwnd=0x"sv
+            << util::hex(next_root->window).to_string_view() << " content_hwnd=0x"sv
+            << util::hex(next_root->source_window()).to_string_view()
+            << " generation="sv << next_root->generation << '.';
+        }
       }
       if (
         analysis_authority_changed ||

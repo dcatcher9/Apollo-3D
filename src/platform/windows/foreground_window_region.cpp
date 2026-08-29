@@ -34,24 +34,80 @@ namespace platf::foreground_window {
              std::max(left.top, right.top) < std::min(left.bottom, right.bottom);
     }
 
+    [[nodiscard]] constexpr std::uint64_t span_width(const rect_t rect) noexcept {
+      return rect.valid() ?
+               static_cast<std::uint64_t>(
+                 static_cast<std::int64_t>(rect.right) - rect.left
+               ) :
+               0u;
+    }
+
+    [[nodiscard]] constexpr std::uint64_t span_height(const rect_t rect) noexcept {
+      return rect.valid() ?
+               static_cast<std::uint64_t>(
+                 static_cast<std::int64_t>(rect.bottom) - rect.top
+               ) :
+               0u;
+    }
+
+    [[nodiscard]] constexpr std::uint64_t area(const rect_t rect) noexcept {
+      return span_width(rect) * span_height(rect);
+    }
+
+    [[nodiscard]] constexpr std::uint64_t interval_overlap(
+      const std::int32_t left_a,
+      const std::int32_t right_a,
+      const std::int32_t left_b,
+      const std::int32_t right_b
+    ) noexcept {
+      const auto left = std::max<std::int64_t>(left_a, left_b);
+      const auto right = std::min<std::int64_t>(right_a, right_b);
+      return right > left ? static_cast<std::uint64_t>(right - left) : 0u;
+    }
+
+    [[nodiscard]] constexpr bool covers_center(
+      const rect_t outer,
+      const rect_t inner
+    ) noexcept {
+      if (!outer.valid() || !inner.valid()) {
+        return false;
+      }
+      const auto center_x_twice = static_cast<std::int64_t>(outer.left) + outer.right;
+      const auto center_y_twice = static_cast<std::int64_t>(outer.top) + outer.bottom;
+      return static_cast<std::int64_t>(inner.left) * 2 <= center_x_twice &&
+             static_cast<std::int64_t>(inner.right) * 2 >= center_x_twice &&
+             static_cast<std::int64_t>(inner.top) * 2 <= center_y_twice &&
+             static_cast<std::int64_t>(inner.bottom) * 2 >= center_y_twice;
+    }
+
     [[nodiscard]] constexpr bool observation_has_complete_geometry(
       const observation_t &observation
     ) noexcept {
+      const bool content_pair_valid =
+        (observation.content_window == 0) == !observation.content_screen_rect.valid();
       return carries_geometry(observation.status) && observation.window != 0 &&
              observation.process_id != 0 && observation.monitor != 0 &&
-             observation.client_screen_rect.valid() &&
+             content_pair_valid &&
+             observation.client_screen_rect.valid() && observation.source_window() != 0 &&
+             observation.source_screen_rect().valid() &&
              observation.frame_screen_rect.valid() &&
              contains(observation.frame_screen_rect, observation.client_screen_rect) &&
+             contains(observation.client_screen_rect, observation.source_screen_rect()) &&
              observation.observed_at.time_since_epoch().count() != 0;
     }
 
     [[nodiscard]] constexpr bool snapshot_has_complete_geometry(
       const snapshot_t &snapshot
     ) noexcept {
+      const bool content_pair_valid =
+        (snapshot.content_window == 0) == !snapshot.content_screen_rect.valid();
       return carries_geometry(snapshot.status) && snapshot.generation != 0 &&
              snapshot.window != 0 && snapshot.process_id != 0 && snapshot.monitor != 0 &&
-             snapshot.client_screen_rect.valid() && snapshot.frame_screen_rect.valid() &&
+             content_pair_valid &&
+             snapshot.client_screen_rect.valid() && snapshot.source_window() != 0 &&
+             snapshot.source_screen_rect().valid() && snapshot.frame_screen_rect.valid() &&
              contains(snapshot.frame_screen_rect, snapshot.client_screen_rect) &&
+             contains(snapshot.client_screen_rect, snapshot.source_screen_rect()) &&
              snapshot.observed_at.time_since_epoch().count() != 0 &&
              snapshot.geometry_valid_since.time_since_epoch().count() != 0;
     }
@@ -138,10 +194,125 @@ namespace platf::foreground_window {
   }
 
   namespace detail {
+    content_selection_t select_content_source(
+      const std::uintptr_t root_window,
+      const std::uint32_t root_process_id,
+      const rect_t root_client_screen_rect,
+      const std::span<const child_window_observation_t> children,
+      const bool enumeration_complete
+    ) noexcept {
+      const content_selection_t fallback {
+        .window = root_window,
+        .screen_rect = root_client_screen_rect,
+      };
+      if (
+        root_window == 0 || root_process_id == 0 ||
+        !root_client_screen_rect.valid() || !enumeration_complete
+      ) {
+        return fallback;
+      }
+
+      const auto is_structural_child = [&](const child_window_observation_t &child) {
+        return child.query_succeeded && child.visible && child.window != 0 &&
+               child.window != root_window && child.parent == root_window &&
+               child.process_id == root_process_id && child.screen_rect.valid() &&
+               contains(root_client_screen_rect, child.screen_rect);
+      };
+
+      const child_window_observation_t *winner = nullptr;
+      std::uint64_t winner_area = 0u;
+      bool largest_tied = false;
+      for (const auto &child : children) {
+        if (!is_structural_child(child) || !covers_center(root_client_screen_rect, child.screen_rect)) {
+          continue;
+        }
+        const auto child_area = area(child.screen_rect);
+        if (child_area > winner_area) {
+          winner = &child;
+          winner_area = child_area;
+          largest_tied = false;
+        } else if (child_area == winner_area && child_area != 0u) {
+          largest_tied = true;
+        }
+      }
+
+      const auto root_area = area(root_client_screen_rect);
+      if (
+        !winner || largest_tied || winner->screen_rect == root_client_screen_rect ||
+        winner_area < (root_area / 2u + root_area % 2u)
+      ) {
+        return fallback;
+      }
+
+      std::uint64_t second_area = 0u;
+      for (const auto &child : children) {
+        if (&child == winner || !is_structural_child(child)) {
+          continue;
+        }
+        second_area = std::max(second_area, area(child.screen_rect));
+      }
+      // The content pane must be at least twice the area of every sibling. This rejects split
+      // views, docked side-by-side documents, and large opaque overlays without naming them.
+      if (second_area > winner_area / 2u) {
+        return fallback;
+      }
+
+      const auto candidate_width = span_width(winner->screen_rect);
+      const auto candidate_height = span_height(winner->screen_rect);
+      const auto minimum_chrome_area = root_area / 50u + (root_area % 50u != 0u);
+      bool edge_sibling = false;
+      for (const auto &sibling : children) {
+        if (
+          &sibling == winner || !is_structural_child(sibling) ||
+          area(sibling.screen_rect) < minimum_chrome_area
+        ) {
+          continue;
+        }
+        const auto horizontal_overlap = interval_overlap(
+          winner->screen_rect.left,
+          winner->screen_rect.right,
+          sibling.screen_rect.left,
+          sibling.screen_rect.right
+        );
+        const auto vertical_overlap = interval_overlap(
+          winner->screen_rect.top,
+          winner->screen_rect.bottom,
+          sibling.screen_rect.top,
+          sibling.screen_rect.bottom
+        );
+        const bool horizontal_chrome =
+          (sibling.screen_rect.bottom <= winner->screen_rect.top ||
+           sibling.screen_rect.top >= winner->screen_rect.bottom) &&
+          horizontal_overlap >= (candidate_width / 2u + candidate_width % 2u);
+        const bool vertical_chrome =
+          (sibling.screen_rect.right <= winner->screen_rect.left ||
+           sibling.screen_rect.left >= winner->screen_rect.right) &&
+          vertical_overlap >= (candidate_height / 2u + candidate_height % 2u);
+        if (horizontal_chrome || vertical_chrome) {
+          edge_sibling = true;
+          break;
+        }
+      }
+      if (!edge_sibling) {
+        return fallback;
+      }
+
+      return {
+        .window = winner->window,
+        .screen_rect = winner->screen_rect,
+        .child_selected = true,
+      };
+    }
+
     observation_t classify(
       const raw_observation_t &raw,
       const std::chrono::steady_clock::time_point observed_at
     ) noexcept {
+      const bool content_unspecified =
+        raw.content_window == 0 && !raw.content_screen_rect.valid();
+      const auto content_window = content_unspecified ? raw.window : raw.content_window;
+      const auto content_screen_rect =
+        content_unspecified ? raw.client_screen_rect : raw.content_screen_rect;
       const auto make_result = [&](const status_e status) {
         return observation_t {
           .status = status,
@@ -150,6 +321,8 @@ namespace platf::foreground_window {
           .monitor = raw.monitor,
           .monitor_screen_rect = raw.monitor_screen_rect,
           .client_screen_rect = raw.client_screen_rect,
+          .content_window = content_window,
+          .content_screen_rect = content_screen_rect,
           .frame_screen_rect = raw.frame_screen_rect,
           .observed_at = observed_at,
         };
@@ -219,7 +392,9 @@ namespace platf::foreground_window {
       if (
         !raw.client_rect_succeeded || !raw.frame_rect_succeeded || raw.monitor == 0 ||
         !raw.client_screen_rect.valid() || !raw.frame_screen_rect.valid() ||
-        !contains(raw.frame_screen_rect, raw.client_screen_rect)
+        content_window == 0 || !content_screen_rect.valid() ||
+        !contains(raw.frame_screen_rect, raw.client_screen_rect) ||
+        !contains(raw.client_screen_rect, content_screen_rect)
       ) {
         return make_result(status_e::geometry_unavailable);
       }
@@ -383,6 +558,149 @@ namespace platf::foreground_window {
       }
     }
 
+    raw.content_window = raw.window;
+    raw.content_screen_rect = raw.client_screen_rect;
+    struct negative_content_census_cache_t {
+      std::uintptr_t window {};
+      std::uint32_t process_id {};
+      rect_t client_screen_rect {};
+      std::chrono::steady_clock::time_point retry_at {};
+    };
+    static thread_local negative_content_census_cache_t negative_content_census_cache;
+    const auto content_census_at = std::chrono::steady_clock::now();
+    const bool negative_census_retained =
+      negative_content_census_cache.window == raw.window &&
+      negative_content_census_cache.process_id == raw.process_id &&
+      negative_content_census_cache.client_screen_rect == raw.client_screen_rect &&
+      content_census_at < negative_content_census_cache.retry_at;
+    if (
+      raw.is_window && raw.visible && !raw.minimized &&
+      raw.process_query_succeeded && raw.client_rect_succeeded &&
+      raw.client_screen_rect.valid() && !negative_census_retained
+    ) {
+      constexpr std::size_t maximum_direct_children = 32u;
+      struct direct_child_census_t {
+        std::array<detail::child_window_observation_t, maximum_direct_children> children {};
+        std::size_t count {};
+        bool complete {true};
+      };
+      const auto census_direct_children = [&]() {
+        direct_child_census_t census;
+        HWND child = GetWindow(window, GW_CHILD);
+        while (child) {
+          if (census.count == census.children.size() || GetParent(child) != window) {
+            census.complete = false;
+            break;
+          }
+
+          auto &result = census.children[census.count++];
+          result.window = reinterpret_cast<std::uintptr_t>(child);
+          result.parent = reinterpret_cast<std::uintptr_t>(window);
+          DWORD child_process_id = 0;
+          const DWORD child_thread_id = GetWindowThreadProcessId(child, &child_process_id);
+          result.process_id = child_process_id;
+          result.visible = IsWindowVisible(child) != FALSE;
+          result.query_succeeded =
+            IsWindow(child) != FALSE && child_thread_id != 0 && child_process_id != 0;
+          if (!result.query_succeeded) {
+            census.complete = false;
+            break;
+          }
+          if (result.visible && child_process_id == process_id) {
+            RECT child_rect {};
+            if (GetWindowRect(child, &child_rect) == FALSE) {
+              census.complete = false;
+              break;
+            }
+            result.screen_rect = {
+              child_rect.left,
+              child_rect.top,
+              child_rect.right,
+              child_rect.bottom,
+            };
+          }
+          child = GetWindow(child, GW_HWNDNEXT);
+        }
+        return census;
+      };
+      const auto select_from_census = [&](const direct_child_census_t &census) {
+        return detail::select_content_source(
+          raw.window,
+          raw.process_id,
+          raw.client_screen_rect,
+          std::span<const detail::child_window_observation_t>(
+            census.children.data(),
+            census.count
+          ),
+          census.complete
+        );
+      };
+
+      const auto first_census = census_direct_children();
+      const auto first_selection = select_from_census(first_census);
+      auto selection = first_selection;
+      if (first_selection.child_selected) {
+        // GW_HWNDNEXT can terminate early when a child is destroyed during traversal. Require a
+        // second complete census to reach the same winner before publishing child authority.
+        const auto confirming_census = census_direct_children();
+        const auto confirming_selection = select_from_census(confirming_census);
+        if (
+          !confirming_selection.child_selected ||
+          confirming_selection.window != first_selection.window ||
+          confirming_selection.screen_rect != first_selection.screen_rect
+        ) {
+          selection = {
+            .window = raw.window,
+            .screen_rect = raw.client_screen_rect,
+          };
+        } else {
+          selection = confirming_selection;
+        }
+      }
+      if (selection.child_selected) {
+        negative_content_census_cache = {};
+      } else {
+        // A negative result can only delay an optimization, never authorize a guessed child.
+        // Back it off briefly so HWND-heavy applications do not pay a full census every frame.
+        negative_content_census_cache = {
+          .window = raw.window,
+          .process_id = raw.process_id,
+          .client_screen_rect = raw.client_screen_rect,
+          .retry_at = content_census_at + std::chrono::milliseconds {100},
+        };
+      }
+
+      if (selection.child_selected) {
+        const HWND content_window = reinterpret_cast<HWND>(selection.window);
+        DWORD content_process_id = 0;
+        RECT content_rect {};
+        const bool selection_still_valid =
+          IsWindow(content_window) != FALSE &&
+          IsWindowVisible(content_window) != FALSE &&
+          GetParent(content_window) == window &&
+          GetWindowThreadProcessId(content_window, &content_process_id) != 0 &&
+          content_process_id == process_id &&
+          GetWindowRect(content_window, &content_rect) != FALSE &&
+          rect_t {
+            content_rect.left,
+            content_rect.top,
+            content_rect.right,
+            content_rect.bottom,
+          } == selection.screen_rect;
+        if (selection_still_valid) {
+          raw.content_window = selection.window;
+          raw.content_screen_rect = selection.screen_rect;
+        } else {
+          negative_content_census_cache = {
+            .window = raw.window,
+            .process_id = raw.process_id,
+            .client_screen_rect = raw.client_screen_rect,
+            .retry_at = content_census_at + std::chrono::milliseconds {100},
+          };
+        }
+      }
+    }
+
     recheck_foreground();
 
     return detail::classify(raw, std::chrono::steady_clock::now());
@@ -443,6 +761,8 @@ namespace platf::foreground_window {
       .monitor = observation.monitor,
       .monitor_screen_rect = observation.monitor_screen_rect,
       .client_screen_rect = observation.client_screen_rect,
+      .content_window = observation.source_window(),
+      .content_screen_rect = observation.source_screen_rect(),
       .frame_screen_rect = observation.frame_screen_rect,
     };
     if (
@@ -464,6 +784,8 @@ namespace platf::foreground_window {
       .monitor = observation.monitor,
       .monitor_screen_rect = observation.monitor_screen_rect,
       .client_screen_rect = observation.client_screen_rect,
+      .content_window = observation.source_window(),
+      .content_screen_rect = observation.source_screen_rect(),
       .frame_screen_rect = observation.frame_screen_rect,
       .observed_at = observation.observed_at,
       .geometry_valid_since = geometry_valid_since_,
@@ -504,8 +826,9 @@ namespace platf::foreground_window {
            previous_snapshot.window == current_snapshot.window &&
            previous_snapshot.process_id == current_snapshot.process_id &&
            previous_snapshot.monitor == current_snapshot.monitor &&
-           extent(previous_snapshot.client_screen_rect) ==
-             extent(current_snapshot.client_screen_rect) &&
+           previous_snapshot.source_window() == current_snapshot.source_window() &&
+           extent(previous_snapshot.source_screen_rect()) ==
+             extent(current_snapshot.source_screen_rect()) &&
            content_timestamp &&
            *content_timestamp < current_snapshot.geometry_valid_since;
   }
@@ -561,6 +884,9 @@ namespace platf::foreground_window {
     if (snapshot.monitor != target.monitor && !equivalent_cloned_monitor) {
       return {.status = mapping_status_e::monitor_mismatch};
     }
+    // The root client remains the foreground authority even when a child content pane narrows
+    // analysis. Preserve the established no-clipping rule: a spanning or partially off-output
+    // root must not gain ROI authority merely because one descendant happens to fit.
     if (!contains(target.screen_rect, snapshot.client_screen_rect)) {
       return {
         .status = intersects(target.screen_rect, snapshot.client_screen_rect) ?
@@ -569,13 +895,15 @@ namespace platf::foreground_window {
       };
     }
 
+    const auto source_screen_rect = snapshot.source_screen_rect();
+
     const rect_t capture_pixels {
-      snapshot.client_screen_rect.left - target.screen_rect.left,
-      snapshot.client_screen_rect.top - target.screen_rect.top,
-      snapshot.client_screen_rect.right - target.screen_rect.left,
-      snapshot.client_screen_rect.bottom - target.screen_rect.top,
+      source_screen_rect.left - target.screen_rect.left,
+      source_screen_rect.top - target.screen_rect.top,
+      source_screen_rect.right - target.screen_rect.left,
+      source_screen_rect.bottom - target.screen_rect.top,
     };
-    const bool full_capture = snapshot.client_screen_rect == target.screen_rect;
+    const bool full_capture = source_screen_rect == target.screen_rect;
     return {
       .status = mapping_status_e::ok,
       .route = full_capture ? route_e::full_capture : route_e::roi,

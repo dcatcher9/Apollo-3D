@@ -15,7 +15,7 @@ flowchart LR
     CAPTURE["Matched source frame"]
     REGION["Chromium video or foreground-client observation"]
     MATCH["Priority and exact matched-frame region selection"]
-    DOMAIN["Full frame or exact whole-client/video ROI"]
+    DOMAIN["Full frame or exact client/content/video ROI"]
     PREPROCESS["HDR/SDR model preprocessing"]
     DAV2["Authenticated DAV2 Small + frozen ZipDepth convex 2x"]
     CUT["Cut-only evidence and scene epoch"]
@@ -208,9 +208,9 @@ the zero plane toward itself and is not boosted as an isolated object.
 
 For an authorized window-region ROI, extrema, mean, standard deviation, cut evidence, and all depth
 histories are computed from the cropped analysis domain only. Pixels outside the selected Chromium
-video or foreground client do not pull its scene center. Entering or leaving ROI analysis, changing
-its authority kind, identity or dimensions, or changing its input transfer domain resets the
-temporal and scene-camera state before the new domain is used. Chromium-video and foreground-client
+video or foreground-client content source do not pull its scene center. Entering or leaving ROI
+analysis, changing its authority kind, identity or dimensions, or changing its input transfer
+domain resets the temporal and scene-camera state before the new domain is used. Chromium-video and foreground-client
 authority are distinct even if their rectangles happen to match. Translating the same ROI without
 changing its dimensions is not a new analysis domain, so an ordinary window move does not by itself
 reacquire the camera.
@@ -1083,12 +1083,13 @@ offline evaluator alone may synchronize its private quality transaction before s
 
 Windows Host SBS selects at most one optional analysis region for a matched Desktop Duplication
 frame. A causally authenticated Chromium `<video>` has first priority. When no Chromium video route
-is eligible, the root client rectangle of `GetForegroundWindow()` may authorize the same ROI-local
-V2 path. This is geometric routing only: the generic route has no executable allowlist, media/game
-classifier, playback test, or occlusion reconstruction.
+is eligible, the root client of `GetForegroundWindow()` may authorize the same ROI-local V2 path.
+The selected analysis rectangle is normally that complete client; a conservatively proven native
+content child may narrow it as described below. This is geometric routing only: the generic route
+has no executable allowlist, media/game classifier, playback test, or occlusion reconstruction.
 
-The foreground observer resolves the top-level root, uses the client area rather than the title bar
-or DWM frame as the analysis rectangle, and validates its physical screen geometry under per-monitor
+The foreground observer resolves the top-level root, uses its client rather than the title bar or
+DWM frame as the outer authority boundary, and validates physical screen geometry under per-monitor
 DPI awareness. Screen rectangles are compared against raw
 `DXGI_OUTPUT_DESC::DesktopCoordinates`, including negative virtual-desktop origins, rather than a
 pointer-normalized offset. Distinct `HMONITOR` values from a duplicated output are equivalent only
@@ -1100,8 +1101,24 @@ layered root is admitted only when `GetLayeredWindowAttributes` positively prove
 windows select ordinary full-frame V2. A
 client must be wholly contained by the current identity-oriented capture output. A disjoint client
 on another monitor and a client that partially intersects or spans outputs both select full-frame
-V2; Host SBS never switches the capture monitor or crops the intersection. A client that exactly
-covers the capture canonicalizes to the ordinary full-source domain.
+V2; Host SBS never switches the capture monitor or crops the intersection. When no child is selected,
+a client that exactly covers the capture canonicalizes to the ordinary full-source domain.
+
+The root HWND, process, complete client, and output containment remain the foreground authority. A
+census of at most 32 direct children may select a separate analysis source only when one visible
+same-process child is wholly contained by the client, covers its center, occupies at least half its
+area, and is at least twice the area of every other eligible visible sibling. A separate eligible
+sibling must lie wholly above, below, left, or right of the candidate, occupy at least 2% of the
+root-client area, and overlap at least half the candidate span along the other axis. Equal
+candidates, split views, incomplete or
+overflowing enumeration, failed queries, a replaced child, weak edge evidence, or any containment
+failure retain the complete client. No executable name, window class, control ID, fixed inset, pixel
+color, motion, or playback state participates. Letterbox and pillarbox pixels inside the proven
+child therefore remain part of the content domain. The stable outer content container is preferred;
+a renderer descendant is not made an independent authority. A positive selection requires two
+complete consecutive censuses with the same winning HWND and rectangle, followed by one final
+identity/geometry recheck. Negative census results alone are retained for 100 ms; that can only
+delay acquiring the child optimization and cannot grant child authority.
 
 ### Chromium semantic source
 
@@ -1161,8 +1178,8 @@ mapped back at its physical pixel scale, with the outside-only slope collar desc
 desktop beyond that collar is exactly at zero parallax. Separately, the host grants the helper's
 true-fullscreen authority only when its foreground-client rectangle maps exactly to the capture;
 that case is canonical full-frame V2. The generic foreground-client route follows the same
-canonicalization whenever its client rectangle equals the capture, without claiming Chromium
-semantic authority. Missing, stale or ambiguous selection, non-identity rotation, spanning,
+canonicalization whenever its selected analysis source equals the capture, without claiming
+Chromium semantic authority. Missing, stale or ambiguous selection, non-identity rotation, spanning,
 partially off-monitor, mismatched geometry, or unauthenticated tensor/source-region geometry selects
 ordinary full-frame V2 rather than a guessed ROI; an internal V2 authentication failure
 remains fail-closed flat.
@@ -1182,8 +1199,9 @@ completed depth frame. If the helper becomes unavailable, the ordinary full-fram
 continues unchanged.
 
 The foreground-client observer applies the same causal rule without a helper heartbeat. It records
-the start of each uninterrupted exact `{HWND, process, client rectangle}` run. A newly focused,
-moved, or resized client cannot authorize content presented before that run began; the Desktop
+the start of each uninterrupted exact `{root HWND, process, client rectangle, selected content
+HWND, selected content rectangle}` run. A newly focused, moved, resized, or structurally changed
+client cannot authorize content presented before that run began; the Desktop
 Duplication content timestamp must be at least as new as the run. The root and geometry must still
 be current when bound. This one-observation continuity gate prevents an Alt-Tab or window move from
 attaching new geometry to old pixels while avoiding a blocking drain or second capture. The current
@@ -1263,11 +1281,12 @@ transpose.
 - Scene detection is inferred, not ground truth. Exposure, structureless frames, persistent motion,
   and rapid consecutive cuts require the separate guarded state machine.
 - The ROI route uses at most one current-output region. Chromium accessibility exposes a semantic
-  element box, not exact composited visibility; when that route is unavailable, the generic
-  foreground-client route analyzes the whole client, including any captured application UI or
-  overlay. It does not classify applications or reconstruct pixels hidden by other windows. Shell,
-  desktop, invalid, stale, spanning, partially off-monitor, and background-window rectangles do not
-  authorize an ROI.
+  element box, not exact composited visibility. When that route is unavailable, the generic
+  foreground-client route analyzes either its high-confidence structural content child or the
+  complete client. Single-surface/custom-drawn chrome, overlays inside the selected content child,
+  and ambiguous layouts remain included. It does not classify applications or reconstruct pixels
+  hidden by other windows. Shell, desktop, invalid, stale, spanning, partially off-monitor, and
+  background-window rectangles do not authorize an ROI.
 - The automatic subtitle path accepts all six authenticated logical DAV2 fields (`770x434`,
   `1022x434`, `1036x434`, and their portrait transposes) and all six corresponding exact-2x fused
   public fields. It tracks one coherent bottom stack of at most four line boxes. Any other fitted
