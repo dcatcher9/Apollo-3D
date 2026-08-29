@@ -95,16 +95,15 @@ RAW_PATTERN = re.compile(r"raw_(\d+)\.f32$")
 SELECTED_POLICY = "first"
 RESEARCH_POLICIES = ("aggregate", "slow")
 POLICY_STUDY_POLICIES = (SELECTED_POLICY, *RESEARCH_POLICIES)
-V2_STATE_TRACE_SCHEMA = 18
+V2_STATE_TRACE_SCHEMA = 19
 V2_STATE_TRACE_POLICY = (
-    "immediate-first-usable-arithmetic-mean-zero-fixed-scale-fixed-near-curve-retained-camera-source-ownership-pointwise-soft-container-vertical-share75-row-majorant-v17"
+    "immediate-first-usable-arithmetic-mean-zero-fixed-scale-fixed-near-curve-retained-camera-pointwise-soft-container-vertical-share75-row-majorant-v18"
 )
 V2_GPU_SHADER_SEQUENCE = (
     "depth_coordinate_v2_moments_cs.hlsl",
     "depth_coordinate_v2_frame_resolve_cs.hlsl",
     "depth_coordinate_v2_state_resolve_cs.hlsl",
     "depth_coordinate_v2_map_cs.hlsl",
-    "depth_coordinate_v2_ownership_cs.hlsl",
     "depth_coordinate_v2_vertical_limit_cs.hlsl",
     "depth_coordinate_v2_limit_cs.hlsl",
 )
@@ -134,8 +133,6 @@ V2_STATE_TRACE_FIELDS = (
     "candidate_center_drift_u",
     "predicted_zero_translation_source_u",
     "pre_limiter_max_abs_source_u",
-    "ownership_raised_fraction",
-    "ownership_max_raise_source_u",
     "vertical_majorant_raised_fraction",
     "vertical_majorant_max_raise_source_u",
     "final_max_abs_source_u",
@@ -146,7 +143,6 @@ V2_STATE_TRACE_FIELDS = (
     "final_horizontal_slope_max",
     "final_vertical_shear_max",
     "order_sha256",
-    "ownership_refined_sha256",
     "vertical_majorant_sha256",
     "vertical_conditioned_sha256",
     "parallax_sha256",
@@ -444,7 +440,7 @@ def validate_v2_state_trace(
             raise ValueError("v2 state trace has invalid NumPy producer evidence")
         expected_method = "frame-moment-proxies-not-matched-pixel-affine-v2"
     elif producer_authority == (
-            "authenticated-raw-source-color-plus-seven-v2-compute-shaders-persistent-gpu-state-v8"):
+            "authenticated-raw-depth-plus-six-v2-compute-shaders-persistent-gpu-state-v9"):
         digest_pattern = re.compile(r"[0-9a-f]{64}")
         if (set(producer) != {
                 "authority", "manifest_sha256", "contract_canonical_sha256",
@@ -526,7 +522,6 @@ def validate_v2_state_trace(
                 "observed_raw_maximum",
                  "candidate_center_drift_u", "predicted_zero_translation_source_u",
                  "pre_limiter_max_abs_source_u",
-                 "ownership_raised_fraction", "ownership_max_raise_source_u",
                 "vertical_majorant_raised_fraction",
                 "vertical_majorant_max_raise_source_u", "final_max_abs_source_u",
                 "conditioner_raised_fraction", "conditioner_max_raise_source_u",
@@ -545,7 +540,7 @@ def validate_v2_state_trace(
             raise ValueError(
                 f"v2 state trace {frame_id} has inconsistent input/collapse/frame validity")
         for key in (
-                "order_sha256", "ownership_refined_sha256", "vertical_majorant_sha256",
+                "order_sha256", "vertical_majorant_sha256",
                 "vertical_conditioned_sha256", "parallax_sha256"):
             if (not isinstance(row[key], str) or digest_pattern.fullmatch(row[key]) is None):
                 raise ValueError(f"v2 state trace {frame_id} has invalid {key}")
@@ -590,7 +585,6 @@ def validate_v2_state_trace(
                 rel_tol=2.0e-6, abs_tol=2.0e-8):
             raise ValueError(f"v2 state trace {frame_id} requested gain disagrees with mapping")
         for key in ("pre_limiter_max_abs_source_u",
-                    "ownership_raised_fraction", "ownership_max_raise_source_u",
                     "vertical_majorant_raised_fraction",
                     "vertical_majorant_max_raise_source_u", "final_max_abs_source_u",
                     "conditioner_raised_fraction", "conditioner_max_raise_source_u",
@@ -599,7 +593,7 @@ def validate_v2_state_trace(
             if row[key] < 0.0:
                 raise ValueError(f"v2 state trace {frame_id} has negative {key}")
         for key in (
-                "ownership_raised_fraction", "vertical_majorant_raised_fraction",
+                "vertical_majorant_raised_fraction",
                 "conditioner_raised_fraction",
                 "conditioner_lowered_fraction"):
             if row[key] > 1.0:
@@ -686,409 +680,6 @@ def validate_v2_state_trace(
         prior_convergence_curve = row["convergence_curve"]
 
 
-_OWNERSHIP_PROFILE_SAMPLES = 10
-_OWNERSHIP_COVERAGE_MIN = np.float32(0.10)
-_OWNERSHIP_COVERAGE_MAX = np.float32(0.99)
-_OWNERSHIP_COVERAGE_ERROR = np.float32(0.0002)
-_OWNERSHIP_DIRECTIONS = (
-    (1, 0),
-    (-1, 0),
-    (0, 1),
-    (0, -1),
-)
-
-
-def _ownership_source_rgb(source_rgb: np.ndarray) -> np.ndarray:
-    """Validate one display-referred SDR RGB frame without expanding an 8-bit 4K image."""
-
-    source = np.asarray(source_rgb)
-    if source.ndim != 3 or source.shape[0] == 0 or source.shape[1] == 0 or source.shape[2] != 3:
-        raise ValueError("ownership source RGB must be a non-empty HxWx3 array")
-    if np.iscomplexobj(source) or source.dtype.kind not in "uif":
-        raise ValueError("ownership source RGB must contain real numeric samples")
-    if source.dtype.kind == "f":
-        if not np.isfinite(source).all() or np.any(source < 0.0) or np.any(source > 1.0):
-            raise ValueError("floating ownership source RGB must be finite and lie in [0,1]")
-    elif np.any(source < 0) or np.any(source > 255):
-        raise ValueError("integer ownership source RGB must lie in [0,255]")
-    return source
-
-
-def _ownership_linear_rgb(source: np.ndarray, y: int, x: int) -> np.ndarray:
-    """Mirror DepthSrgbToLinear for one source texel in float32."""
-
-    color = np.asarray(source[y, x], dtype=np.float32)
-    if source.dtype.kind != "f":
-        color = color / np.float32(255.0)
-    color = np.clip(color, np.float32(0.0), np.float32(1.0)).astype(np.float32)
-    low = color / np.float32(12.92)
-    high = np.power(
-        (color + np.float32(0.055)) / np.float32(1.055),
-        np.float32(2.4),
-    ).astype(np.float32)
-    return np.where(color <= np.float32(0.04045), low, high).astype(np.float32)
-
-
-def _ownership_profile_coordinate(index: int) -> np.float32:
-    return np.float32(
-        np.float32(index) * np.float32(0.25) - np.float32(1.625))
-
-
-def _ownership_sample_linear(
-        source: np.ndarray, source_position: np.ndarray) -> np.ndarray:
-    """Mirror the shader's manual linear-light bilinear sample in float32."""
-
-    source_h, source_w = source.shape[:2]
-    texel_position = (
-        np.asarray(source_position, dtype=np.float32) - np.float32(0.5)
-    ).astype(np.float32)
-    lower_position = np.floor(texel_position).astype(np.float32)
-    base_x = int(lower_position[0])
-    base_y = int(lower_position[1])
-    fraction = (texel_position - lower_position).astype(np.float32)
-
-    def sample(dx: int, dy: int) -> np.ndarray:
-        x = min(max(base_x + dx, 0), source_w - 1)
-        y = min(max(base_y + dy, 0), source_h - 1)
-        return _ownership_linear_rgb(source, y, x)
-
-    c00 = sample(0, 0)
-    c10 = sample(1, 0)
-    c01 = sample(0, 1)
-    c11 = sample(1, 1)
-    top = (c00 + fraction[0] * (c10 - c00).astype(np.float32)).astype(np.float32)
-    bottom = (
-        c01 + fraction[0] * (c11 - c01).astype(np.float32)
-    ).astype(np.float32)
-    return (top + fraction[1] * (bottom - top).astype(np.float32)).astype(np.float32)
-
-
-def _ownership_profile_color(
-        source: np.ndarray,
-        profile_coordinate: np.float32,
-        boundary: np.float32,
-        tangent_center: np.float32,
-        normal_step: np.float32,
-        tangent_step: np.float32,
-        normal_sign: int,
-        horizontal_normal: bool) -> np.ndarray:
-    normal_position = np.float32(
-        boundary + profile_coordinate * np.float32(normal_sign) * normal_step)
-    color = np.zeros(3, dtype=np.float32)
-    for tangent_coordinate in (np.float32(-0.25), np.float32(0.25)):
-        tangent_position = np.float32(
-            tangent_center + tangent_coordinate * tangent_step)
-        source_position = np.asarray(
-            (normal_position, tangent_position) if horizontal_normal else
-            (tangent_position, normal_position),
-            dtype=np.float32)
-        color = (
-            color + np.float32(0.5) *
-            _ownership_sample_linear(source, source_position)
-        ).astype(np.float32)
-    return color
-
-
-def _ownership_dot(left: np.ndarray, right: np.ndarray) -> np.float32:
-    """Keep the three-term dot product in the shader's float domain."""
-
-    products = (np.asarray(left, dtype=np.float32) *
-                np.asarray(right, dtype=np.float32)).astype(np.float32)
-    return np.float32(np.float32(products[0] + products[1]) + products[2])
-
-
-def _ownership_foreground_coverage(
-        source: np.ndarray,
-        target_shape: Tuple[int, int],
-        x: int,
-        y: int,
-        near_direction: Tuple[int, int]) -> Optional[np.float32]:
-    """Mirror FullResolutionForegroundCoverage, returning None for exact abstention."""
-
-    target_h, target_w = target_shape
-    source_h, source_w = source.shape[:2]
-    if source_w < target_w or source_h < target_h:
-        return None
-    source_scale = (
-        np.asarray((source_w, source_h), dtype=np.float32) /
-        np.asarray((target_w, target_h), dtype=np.float32)
-    ).astype(np.float32)
-    source_center = (
-        (np.asarray((x, y), dtype=np.float32) + np.float32(0.5)) * source_scale
-    ).astype(np.float32)
-    dx, dy = near_direction
-    horizontal_normal = dx != 0
-    normal_sign = dx if horizontal_normal else dy
-    normal_step = source_scale[0] if horizontal_normal else source_scale[1]
-    tangent_step = source_scale[1] if horizontal_normal else source_scale[0]
-    normal_center = source_center[0] if horizontal_normal else source_center[1]
-    tangent_center = source_center[1] if horizontal_normal else source_center[0]
-    boundary = np.float32(
-        normal_center + np.float32(0.5) * np.float32(normal_sign) * normal_step)
-    colors = np.empty((_OWNERSHIP_PROFILE_SAMPLES, 3), dtype=np.float32)
-    for sample_index in range(_OWNERSHIP_PROFILE_SAMPLES):
-        colors[sample_index] = _ownership_profile_color(
-            source,
-            _ownership_profile_coordinate(sample_index),
-            boundary,
-            tangent_center,
-            normal_step,
-            tangent_step,
-            normal_sign,
-            horizontal_normal)
-
-    # Only the profile endpoints are guaranteed to stay on their declared side across the full
-    # accepted crossing window. Inner plateau averages bias high-coverage contours by mixing
-    # foreground into the far reference at some source-pixel phases.
-    far_color = colors[0]
-    near_color = colors[_OWNERSHIP_PROFILE_SAMPLES - 1]
-    color_axis = (near_color - far_color).astype(np.float32)
-    contrast_squared = _ownership_dot(color_axis, color_axis)
-    if contrast_squared < np.float32(0.01):
-        return None
-
-    projected = np.empty(_OWNERSHIP_PROFILE_SAMPLES, dtype=np.float32)
-    for sample_index in range(_OWNERSHIP_PROFILE_SAMPLES):
-        projected[sample_index] = np.float32(
-            _ownership_dot(
-                (colors[sample_index] - far_color).astype(np.float32), color_axis) /
-            contrast_squared)
-        # A valid two-plateau ownership contour is monotone in its declared far-to-near
-        # direction. Test the raw profile so sub-profile opposite transitions cannot be merged
-        # into one apparently valid contour by the uniqueness filter.
-        if (sample_index > 0 and
-                projected[sample_index] + np.float32(1.0e-5) <
-                projected[sample_index - 1]):
-            return None
-    filtered = np.empty(_OWNERSHIP_PROFILE_SAMPLES, dtype=np.float32)
-    for sample_index in range(_OWNERSHIP_PROFILE_SAMPLES):
-        previous = projected[sample_index - 1] if sample_index > 0 else np.float32(0.0)
-        following = (
-            projected[sample_index + 1]
-            if sample_index + 1 < _OWNERSHIP_PROFILE_SAMPLES else np.float32(0.0))
-        filtered[sample_index] = np.float32(
-            np.float32(0.25) * previous +
-            np.float32(0.5) * projected[sample_index] +
-            np.float32(0.25) * following)
-
-    crossing_count = 0
-    edge_coordinate = np.float32(0.0)
-    edge_interval = -1
-    for crossing_index in range(_OWNERSHIP_PROFILE_SAMPLES - 1):
-        coordinate = _ownership_profile_coordinate(crossing_index)
-        before = filtered[crossing_index]
-        after = filtered[crossing_index + 1]
-        if before < np.float32(0.5) <= after:
-            denominator = max(
-                np.float32(after - before), np.float32(1.0e-8))
-            fraction = np.float32(
-                np.float32(np.float32(0.5) - before) / denominator)
-            edge_coordinate = np.float32(
-                coordinate + fraction *
-                np.float32(
-                    _ownership_profile_coordinate(crossing_index + 1) - coordinate))
-            edge_interval = crossing_index
-            crossing_count += 1
-    if crossing_count != 1:
-        return None
-
-    # Filtering authenticates a unique contour, but it introduces a small crossing bias that can
-    # straddle the minimum-coverage threshold at particular 720p pixel phases. Recover coverage
-    # from the unfiltered samples in that already-authenticated interval. A non-bracketing raw
-    # interval remains an exact, conservative abstention.
-    raw_before = projected[edge_interval]
-    raw_after = projected[edge_interval + 1]
-    if not (raw_before <= np.float32(0.5) <= raw_after):
-        return None
-
-    derivatives = np.empty(_OWNERSHIP_PROFILE_SAMPLES, dtype=np.float32)
-    maximum_derivative = np.float32(-np.finfo(np.float32).max)
-    for derivative_index in range(_OWNERSHIP_PROFILE_SAMPLES):
-        if derivative_index == 0:
-            derivative = np.float32(
-                np.float32(4.0) * np.float32(filtered[1] - filtered[0]))
-        elif derivative_index + 1 == _OWNERSHIP_PROFILE_SAMPLES:
-            derivative = np.float32(
-                np.float32(4.0) * np.float32(
-                    filtered[derivative_index] - filtered[derivative_index - 1]))
-        else:
-            derivative = np.float32(
-                np.float32(2.0) * np.float32(
-                    filtered[derivative_index + 1] -
-                    filtered[derivative_index - 1]))
-        derivatives[derivative_index] = derivative
-        maximum_derivative = max(maximum_derivative, derivative)
-    derivative_threshold = max(
-        np.float32(0.25), np.float32(np.float32(0.20) * maximum_derivative))
-    primary_mass = np.float32(0.0)
-    secondary_mass = np.float32(0.0)
-    cluster_index = 0
-    while cluster_index < _OWNERSHIP_PROFILE_SAMPLES:
-        active = derivatives[cluster_index] > derivative_threshold
-        if not active:
-            cluster_index += 1
-            continue
-        cluster_start = cluster_index
-        cluster_end = cluster_index
-        while (cluster_end + 1 < _OWNERSHIP_PROFILE_SAMPLES and
-               derivatives[cluster_end + 1] > derivative_threshold):
-            cluster_end += 1
-        mass = np.float32(0.0)
-        if cluster_end > cluster_start:
-            for mass_index in range(cluster_start, cluster_end):
-                mass = np.float32(
-                    mass + np.float32(0.5) *
-                    np.float32(
-                        derivatives[mass_index] + derivatives[mass_index + 1]) *
-                    np.float32(0.25))
-        else:
-            mass = np.float32(
-                derivatives[cluster_start] * np.float32(0.25))
-        if mass > primary_mass:
-            secondary_mass = primary_mass
-            primary_mass = mass
-        else:
-            secondary_mass = max(secondary_mass, mass)
-        cluster_index = cluster_end + 1
-    if (primary_mass <= np.float32(0.0) or
-            secondary_mass >= np.float32(0.5) * primary_mass):
-        return None
-
-    # Resolve the accepted raw bracket at sub-profile resolution. Five fixed bisections keep the
-    # result stable when a 4K one-pixel transition is narrower than the coarse 0.25-cell spacing,
-    # while rejected/ambiguous candidates pay no refinement work.
-    low_coordinate = _ownership_profile_coordinate(edge_interval)
-    high_coordinate = _ownership_profile_coordinate(edge_interval + 1)
-    low_projection = raw_before
-    high_projection = raw_after
-    for _ in range(5):
-        middle_coordinate = np.float32(
-            np.float32(0.5) * np.float32(low_coordinate + high_coordinate))
-        middle_color = _ownership_profile_color(
-            source,
-            middle_coordinate,
-            boundary,
-            tangent_center,
-            normal_step,
-            tangent_step,
-            normal_sign,
-            horizontal_normal)
-        middle_projection = np.float32(
-            _ownership_dot(
-                (middle_color - far_color).astype(np.float32), color_axis) /
-            contrast_squared)
-        if not np.isfinite(middle_projection):
-            return None
-        if (middle_projection + np.float32(1.0e-5) < low_projection or
-                middle_projection > high_projection + np.float32(1.0e-5)):
-            return None
-        if middle_projection < np.float32(0.5):
-            low_coordinate = middle_coordinate
-            low_projection = middle_projection
-        else:
-            high_coordinate = middle_coordinate
-            high_projection = middle_projection
-    refined_denominator = max(
-        np.float32(high_projection - low_projection), np.float32(1.0e-8))
-    refined_fraction = np.float32(
-        np.float32(np.float32(0.5) - low_projection) / refined_denominator)
-    edge_coordinate = np.float32(
-        low_coordinate + refined_fraction *
-        np.float32(high_coordinate - low_coordinate))
-    measured_coverage = np.float32(np.clip(-edge_coordinate, 0.0, 1.0))
-    if (measured_coverage <
-            np.float32(_OWNERSHIP_COVERAGE_MIN - _OWNERSHIP_COVERAGE_ERROR) or
-            measured_coverage >
-            np.float32(_OWNERSHIP_COVERAGE_MAX + _OWNERSHIP_COVERAGE_ERROR)):
-        return None
-
-    return np.float32(np.clip(
-        measured_coverage,
-        _OWNERSHIP_COVERAGE_MIN,
-        _OWNERSHIP_COVERAGE_MAX))
-
-
-def ownership_refine_candidate(
-        candidate_parallax: np.ndarray,
-        source_rgb: np.ndarray,
-        config: MappingV2Config = MappingV2Config()) -> np.ndarray:
-    """Apply the production full-resolution source-ownership pass to one candidate field.
-
-    ``source_rgb`` is display-referred SDR RGB: integer samples use the [0,255] range and
-    floating samples use [0,1]. The result is float32 and is an exact identity when the depth or
-    color evidence is ambiguous, matching the shader's fail-closed behavior.
-    """
-
-    candidate = np.asarray(candidate_parallax, dtype=np.float32)
-    if candidate.ndim != 2 or candidate.size == 0 or not np.isfinite(candidate).all():
-        raise ValueError("ownership candidate must be a finite, non-empty 2D array")
-    source = _ownership_source_rgb(source_rgb)
-    height, width = candidate.shape
-    best_jump = np.zeros(candidate.shape, dtype=np.float32)
-    second_jump = np.zeros(candidate.shape, dtype=np.float32)
-    best_direction = np.full(candidate.shape, -1, dtype=np.int8)
-
-    for direction_index, (dx, dy) in enumerate(_OWNERSHIP_DIRECTIONS):
-        neighbor = np.zeros(candidate.shape, dtype=np.float32)
-        valid = np.zeros(candidate.shape, dtype=bool)
-        if dx > 0:
-            neighbor[:, :-1] = candidate[:, 1:]
-            valid[:, :-1] = True
-        elif dx < 0:
-            neighbor[:, 1:] = candidate[:, :-1]
-            valid[:, 1:] = True
-        elif dy > 0:
-            neighbor[:-1, :] = candidate[1:, :]
-            valid[:-1, :] = True
-        else:
-            neighbor[1:, :] = candidate[:-1, :]
-            valid[1:, :] = True
-        jump = (neighbor - candidate).astype(np.float32)
-        better = valid & (jump > best_jump)
-        second_jump = np.where(
-            better, best_jump,
-            np.where(valid, np.maximum(second_jump, jump), second_jump),
-        ).astype(np.float32)
-        best_jump = np.where(better, jump, best_jump).astype(np.float32)
-        best_direction = np.where(
-            better, np.int8(direction_index), best_direction).astype(np.int8)
-
-    cliff_floor = np.float32(
-        np.float32(8.0) * np.float32(config.max_horizontal_slope) /
-        np.float32(max(width, 1)))
-    eligible = (
-        (best_direction >= 0) &
-        (best_jump >= cliff_floor) &
-        (np.float32(2.0) * second_jump < best_jump)
-    )
-    refined = candidate.copy()
-    for y, x in np.argwhere(eligible):
-        direction_index = int(best_direction[y, x])
-        dx, dy = _OWNERSHIP_DIRECTIONS[direction_index]
-        near_x, near_y = x + dx, y + dy
-        near_two_x, near_two_y = x + 2 * dx, y + 2 * dy
-        far_one_x, far_one_y = x - dx, y - dy
-        if not (0 <= near_two_x < width and 0 <= near_two_y < height and
-                0 <= far_one_x < width and 0 <= far_one_y < height):
-            continue
-        center = candidate[y, x]
-        near_value = candidate[near_y, near_x]
-        jump = best_jump[y, x]
-        if (np.float32(4.0) * np.abs(np.float32(
-                    candidate[near_two_y, near_two_x] - near_value)) > jump or
-                np.float32(4.0) * np.abs(np.float32(
-                    center - candidate[far_one_y, far_one_x])) > jump):
-            continue
-        coverage = _ownership_foreground_coverage(
-            source, candidate.shape, int(x), int(y), (dx, dy))
-        if coverage is None:
-            continue
-        mixed = np.float32(
-            center + coverage * np.float32(near_value - center))
-        refined[y, x] = max(center, mixed)
-    return refined.astype("<f4", copy=False)
-
-
 def generate_first_latch_exact_sequence(
         raw_fields: Sequence[np.ndarray],
         frame_ids: Sequence[int],
@@ -1096,8 +687,7 @@ def generate_first_latch_exact_sequence(
         cut_source: str,
         config: MappingV2Config = MappingV2Config(),
         *,
-        confirmed_cut_counts: Optional[Sequence[int]] = None,
-        source_rgb_fields: Optional[Sequence[np.ndarray]] = None) -> ExactSequenceResult:
+        confirmed_cut_counts: Optional[Sequence[int]] = None) -> ExactSequenceResult:
     """Generate comparison-only whole-clip geometry and a NumPy state trace.
 
     This independently mirrors only the selected policy: the first usable field selects a camera,
@@ -1108,8 +698,6 @@ def generate_first_latch_exact_sequence(
 
     if not (len(raw_fields) == len(frame_ids) == len(cuts)):
         raise ValueError("raw fields, frame IDs, and cut flags must have equal length")
-    if source_rgb_fields is not None and len(source_rgb_fields) != len(frame_ids):
-        raise ValueError("source RGB fields and frame IDs must have equal length")
     if not raw_fields:
         raise ValueError("whole-clip exact replay requires at least one frame")
     ids = tuple(int(value) for value in frame_ids)
@@ -1166,8 +754,6 @@ def generate_first_latch_exact_sequence(
         collapsed = bool(candidate is not None and candidate.collapsed)
         frame_valid = bool(input_valid and not collapsed)
         pre_limiter_max_abs = 0.0
-        ownership_raised_fraction = 0.0
-        ownership_max_raise = 0.0
         vertical_majorant_raised_fraction = 0.0
         vertical_majorant_max_raise = 0.0
         final_max_abs = 0.0
@@ -1188,7 +774,6 @@ def generate_first_latch_exact_sequence(
                 convergence_curve = V2_DEFAULTS.convergence_curve_default
             container_scale = 1.0
             canonical = np.zeros(shape, dtype="<f4")
-            ownership_refined = np.zeros(shape, dtype="<f4")
             vertical_majorant = np.zeros(shape, dtype="<f4")
             vertical_conditioned = np.zeros(shape, dtype="<f4")
             parallax = np.zeros(shape, dtype="<f4")
@@ -1209,19 +794,7 @@ def generate_first_latch_exact_sequence(
             effective_gain = config.parallax_gain
             candidate_parallax = pointwise_soft_container(
                 curved * effective_gain, config.direct_container_limit)
-            if source_rgb_fields is not None:
-                candidate_for_ownership = candidate_parallax.astype("<f4")
-                ownership_refined = ownership_refine_candidate(
-                    candidate_for_ownership, source_rgb_fields[index], config)
-                spatial_input = ownership_refined
-                ownership_correction = ownership_refined - candidate_for_ownership
-            else:
-                # Preserve the historical comparison oracle when no authenticated source is
-                # supplied. The native map is still hashed as float32, while the deliberately
-                # higher-precision NumPy spatial oracle keeps its established default behavior.
-                ownership_refined = candidate_parallax.astype("<f4")
-                spatial_input = candidate_parallax
-                ownership_correction = np.zeros(shape, dtype=np.float64)
+            spatial_input = candidate_parallax
             vertical_majorant = vertical_lipschitz_majorant(
                 spatial_input, config.max_vertical_shear / shape[1])
             vertical_minorant = vertical_lipschitz_minorant(
@@ -1240,9 +813,6 @@ def generate_first_latch_exact_sequence(
             tolerance = max(
                 1.0e-12, config.max_horizontal_slope / shape[1] * 1.0e-9)
             pre_limiter_max_abs = float(np.max(np.abs(spatial_input)))
-            ownership_raised_fraction = float(
-                np.mean(ownership_correction > tolerance))
-            ownership_max_raise = max(0.0, float(np.max(ownership_correction)))
             vertical_majorant_raised_fraction = float(
                 np.mean(vertical_correction > vertical_tolerance))
             vertical_majorant_max_raise = float(np.max(vertical_correction))
@@ -1266,7 +836,6 @@ def generate_first_latch_exact_sequence(
 
         encoded = encode_direct_parallax(parallax)
         order_sha = _field_sha256(canonical)
-        ownership_sha = _field_sha256(ownership_refined)
         vertical_majorant_sha = _field_sha256(vertical_majorant)
         vertical_conditioned_sha = _field_sha256(vertical_conditioned)
         parallax_sha = _field_sha256(encoded)
@@ -1311,8 +880,6 @@ def generate_first_latch_exact_sequence(
             "candidate_center_drift_u": candidate_center_drift_u,
             "predicted_zero_translation_source_u": predicted_zero_translation,
             "pre_limiter_max_abs_source_u": pre_limiter_max_abs,
-            "ownership_raised_fraction": ownership_raised_fraction,
-            "ownership_max_raise_source_u": ownership_max_raise,
             "vertical_majorant_raised_fraction": vertical_majorant_raised_fraction,
             "vertical_majorant_max_raise_source_u": vertical_majorant_max_raise,
             "final_max_abs_source_u": final_max_abs,
@@ -1323,7 +890,6 @@ def generate_first_latch_exact_sequence(
             "final_horizontal_slope_max": final_horizontal_slope_max,
             "final_vertical_shear_max": final_vertical_shear_max,
             "order_sha256": order_sha,
-            "ownership_refined_sha256": ownership_sha,
             "vertical_majorant_sha256": vertical_majorant_sha,
             "vertical_conditioned_sha256": vertical_conditioned_sha,
             "parallax_sha256": parallax_sha,

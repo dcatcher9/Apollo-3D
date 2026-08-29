@@ -2666,8 +2666,6 @@ namespace platf::dxgi {
                 dump_frame.shadow_coordinate = est.shadow_coordinate.Get();
                 dump_frame.shadow_candidate_parallax =
                   est.shadow_candidate_parallax.Get();
-                dump_frame.shadow_ownership_refined_parallax =
-                  est.shadow_ownership_refined_parallax.Get();
                 dump_frame.shadow_vertical_majorant =
                   est.shadow_vertical_majorant.Get();
                 dump_frame.shadow_vertical_conditioned =
@@ -4679,6 +4677,56 @@ namespace platf::dxgi {
     }
 
 
+    template <typename CaptureRect>
+    static sbs_debug::window_region_snapshot make_window_region_snapshot(
+      sbs_debug::window_region_snapshot identity,
+      const D3D11_TEXTURE2D_DESC &source_desc,
+      const std::uint64_t frame_id,
+      const CaptureRect &capture_pixels,
+      const std::chrono::steady_clock::time_point observed_at,
+      const std::chrono::steady_clock::time_point geometry_valid_since,
+      const std::chrono::steady_clock::time_point content_timestamp,
+      const std::chrono::steady_clock::time_point captured_at,
+      const std::chrono::milliseconds maximum_age
+    ) noexcept {
+      identity.matched_frame_id = frame_id;
+      identity.source_width = source_desc.Width;
+      identity.source_height = source_desc.Height;
+      identity.left = capture_pixels.left;
+      identity.top = capture_pixels.top;
+      identity.right = capture_pixels.right;
+      identity.bottom = capture_pixels.bottom;
+      identity.latest_observation_age_ms_at_capture = static_cast<std::uint32_t>(
+        std::clamp<std::int64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+            captured_at - observed_at
+          ).count(),
+          0,
+          std::numeric_limits<std::uint32_t>::max()
+        )
+      );
+      identity.maximum_observation_age_ms = static_cast<std::uint32_t>(
+        maximum_age.count()
+      );
+      identity.geometry_continuity_ms_at_capture = static_cast<std::uint64_t>(
+        std::max<std::int64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+            captured_at - geometry_valid_since
+          ).count(),
+          0
+        )
+      );
+      identity.source_content_age_ms_at_capture = static_cast<std::uint64_t>(
+        std::max<std::int64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+            captured_at - content_timestamp
+          ).count(),
+          0
+        )
+      );
+      return identity;
+    }
+
     std::optional<sbs_debug::window_region_snapshot>
     capture_browser_window_region(
       const D3D11_TEXTURE2D_DESC &source_desc,
@@ -4769,44 +4817,24 @@ namespace platf::dxgi {
         return std::nullopt;
       }
 
-      const auto heartbeat_age = std::chrono::duration_cast<std::chrono::milliseconds>(
-        captured_at - observed->received_at
+      return make_window_region_snapshot(
+        {
+          .authority_kind = sbs_debug::window_region_authority_kind_e::chromium_video,
+          .hwnd = observed->window,
+          .process_id = observed->process_id,
+          .document_id = observed->document_id,
+          .video_id = observed->video_id,
+          .generation = observed->generation,
+        },
+        source_desc,
+        frame_id,
+        mapped.capture_pixels,
+        observed->received_at,
+        observed->geometry_valid_since,
+        *content_timestamp,
+        captured_at,
+        maximum_age
       );
-      const auto geometry_continuity = std::chrono::duration_cast<std::chrono::milliseconds>(
-        captured_at - observed->geometry_valid_since
-      );
-      const auto source_content_age = std::chrono::duration_cast<std::chrono::milliseconds>(
-        captured_at - *content_timestamp
-      );
-      return sbs_debug::window_region_snapshot {
-        .authority_kind = sbs_debug::window_region_authority_kind_e::chromium_video,
-        .matched_frame_id = frame_id,
-        .source_width = source_desc.Width,
-        .source_height = source_desc.Height,
-        .left = mapped.capture_pixels.left,
-        .top = mapped.capture_pixels.top,
-        .right = mapped.capture_pixels.right,
-        .bottom = mapped.capture_pixels.bottom,
-        .hwnd = observed->window,
-        .process_id = observed->process_id,
-        .document_id = observed->document_id,
-        .video_id = observed->video_id,
-        .generation = observed->generation,
-        .latest_observation_age_ms_at_capture = static_cast<std::uint32_t>(
-          std::clamp<std::int64_t>(
-            heartbeat_age.count(),
-            0,
-            std::numeric_limits<std::uint32_t>::max()
-          )
-        ),
-        .maximum_observation_age_ms = static_cast<std::uint32_t>(maximum_age.count()),
-        .geometry_continuity_ms_at_capture = static_cast<std::uint64_t>(
-          std::max<std::int64_t>(geometry_continuity.count(), 0)
-        ),
-        .source_content_age_ms_at_capture = static_cast<std::uint64_t>(
-          std::max<std::int64_t>(source_content_age.count(), 0)
-        ),
-      };
     }
 
     std::optional<sbs_debug::window_region_snapshot>
@@ -4860,44 +4888,22 @@ namespace platf::dxgi {
         return std::nullopt;
       }
 
-      const auto observation_age = std::chrono::duration_cast<std::chrono::milliseconds>(
-        captured_at - snapshot.observed_at
+      return make_window_region_snapshot(
+        {
+          .authority_kind = sbs_debug::window_region_authority_kind_e::foreground_client,
+          .hwnd = snapshot.window,
+          .process_id = snapshot.process_id,
+          .generation = snapshot.generation,
+        },
+        source_desc,
+        frame_id,
+        mapped.capture_pixels,
+        snapshot.observed_at,
+        snapshot.geometry_valid_since,
+        *content_timestamp,
+        captured_at,
+        maximum_age
       );
-      const auto geometry_continuity = std::chrono::duration_cast<std::chrono::milliseconds>(
-        captured_at - snapshot.geometry_valid_since
-      );
-      const auto source_content_age = std::chrono::duration_cast<std::chrono::milliseconds>(
-        captured_at - *content_timestamp
-      );
-      return sbs_debug::window_region_snapshot {
-        .authority_kind = sbs_debug::window_region_authority_kind_e::foreground_client,
-        .matched_frame_id = frame_id,
-        .source_width = source_desc.Width,
-        .source_height = source_desc.Height,
-        .left = mapped.capture_pixels.left,
-        .top = mapped.capture_pixels.top,
-        .right = mapped.capture_pixels.right,
-        .bottom = mapped.capture_pixels.bottom,
-        .hwnd = snapshot.window,
-        .process_id = snapshot.process_id,
-        .document_id = 0,
-        .video_id = 0,
-        .generation = snapshot.generation,
-        .latest_observation_age_ms_at_capture = static_cast<std::uint32_t>(
-          std::clamp<std::int64_t>(
-            observation_age.count(),
-            0,
-            std::numeric_limits<std::uint32_t>::max()
-          )
-        ),
-        .maximum_observation_age_ms = static_cast<std::uint32_t>(maximum_age.count()),
-        .geometry_continuity_ms_at_capture = static_cast<std::uint64_t>(
-          std::max<std::int64_t>(geometry_continuity.count(), 0)
-        ),
-        .source_content_age_ms_at_capture = static_cast<std::uint64_t>(
-          std::max<std::int64_t>(source_content_age.count(), 0)
-        ),
-      };
     }
 
     static bool same_window_region(

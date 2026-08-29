@@ -33,10 +33,10 @@ namespace models {
     std::string preprocess_source_closure_sha256;
   };
 
-  /** Immutable identity of the optional fused runtime wrapped around the raw DAV2 producer.
+  /** Immutable identity of the required fused runtime containing the raw DAV2 producer.
    *
    * Raw DAV2 calibration remains owned by raw_model_provenance_t.  This record deliberately
-   * describes only the separately authenticated composite ONNX/engine artifact selected from
+   * describes only the separately authenticated composite ONNX/engine artifact loaded from
    * local assets, so a diagnostic consumer cannot mistake the wrapper hash for DAV2 provenance.
    */
   struct composite_depth_runtime_provenance_t {
@@ -48,6 +48,8 @@ namespace models {
     std::string engine_recipe;
     std::string engine_artifact;
     std::string active_engine_manifest;
+
+    bool operator==(const composite_depth_runtime_provenance_t &) const = default;
   };
 
   /** Immutable identity of the complete producer closure behind a Host SBS parallax result. */
@@ -291,25 +293,13 @@ namespace models {
       constexpr bool operator==(const cuda_graph_signature_t &) const noexcept = default;
     };
 
-    /** Fail-closed selection for the local Stage-1 composite asset. */
-    enum class composite_depth_asset_resolution_e : std::uint8_t {
-      legacy,
-      fused,
-      fail,
-    };
-
-    [[nodiscard]] constexpr composite_depth_asset_resolution_e
-    resolve_composite_depth_asset(
+    /** The production depth runtime exists only when its frozen composite asset authenticates. */
+    [[nodiscard]] constexpr bool composite_depth_asset_is_authenticated(
       const bool present,
       const bool regular_file,
       const bool sha256_matches
     ) noexcept {
-      if (!present) {
-        return composite_depth_asset_resolution_e::legacy;
-      }
-      return regular_file && sha256_matches ?
-               composite_depth_asset_resolution_e::fused :
-               composite_depth_asset_resolution_e::fail;
+      return present && regular_file && sha256_matches;
     }
 
     /** TensorRT 11.2 may require a 512-byte output allocation for a logical FP32 tensor.
@@ -389,8 +379,7 @@ namespace models {
      *
      * The fused engine's six profiles are shape identities, not concurrency duplicates, so one
      * physical context owns the engine for the process lifetime. A quarantined fused context
-     * therefore requires process restart. Legacy DAV2 and OCR retain the established transition
-     * pool bound.
+     * therefore requires process restart. OCR retains the established standard pool bound.
      */
     inline constexpr std::size_t standard_tensorrt_context_limit = 4u;
     inline constexpr std::size_t fused_tensorrt_context_limit = 1u;
@@ -720,10 +709,10 @@ namespace models {
     infer_grid16_y,
     infer_grid16_z,
     infer_grid16_padding,
-    infer_grid8_x,
-    infer_grid8_y,
-    infer_grid8_z,
-    infer_grid8_padding,
+    reserved_dispatch_x,
+    reserved_dispatch_y,
+    reserved_dispatch_z,
+    reserved_dispatch_padding,
     infer_columns_x,
     infer_columns_y,
     infer_columns_z,
@@ -792,10 +781,6 @@ namespace models {
     near_identical_gpu_decision_byte_offset(
       near_identical_gpu_decision_word_e::infer_grid16_x
     );
-  inline constexpr std::uint32_t near_identical_gpu_infer_grid8_byte_offset =
-    near_identical_gpu_decision_byte_offset(
-      near_identical_gpu_decision_word_e::infer_grid8_x
-    );
   inline constexpr std::uint32_t near_identical_gpu_infer_columns_byte_offset =
     near_identical_gpu_decision_byte_offset(
       near_identical_gpu_decision_word_e::infer_columns_x
@@ -844,7 +829,11 @@ namespace models {
   static_assert(near_identical_gpu_infer_reduce_byte_offset == 64u);
   static_assert(near_identical_gpu_infer_one_byte_offset == 80u);
   static_assert(near_identical_gpu_infer_grid16_byte_offset == 96u);
-  static_assert(near_identical_gpu_infer_grid8_byte_offset == 112u);
+  static_assert(
+    near_identical_gpu_decision_byte_offset(
+      near_identical_gpu_decision_word_e::reserved_dispatch_x
+    ) == 112u
+  );
   static_assert(near_identical_gpu_infer_columns_byte_offset == 128u);
   static_assert(near_identical_gpu_infer_rows_byte_offset == 144u);
   static_assert(near_identical_gpu_reuse_grid16_byte_offset == 160u);
@@ -912,9 +901,8 @@ namespace models {
     std::shared_ptr<const raw_model_provenance_t> raw_model_provenance;  ///< Capture-time model-byte identity; copied by pointer on ordinary frames.
     std::shared_ptr<const composite_depth_runtime_provenance_t>
       composite_depth_runtime_provenance;  ///< Separate fused ONNX/engine identity; never raw DAV2 calibration authority.
-    // Production V2 outputs. candidate_parallax is immutable pre-conditioner evidence;
-    // ownership_refined_parallax is the full-resolution source-contour ownership result consumed
-    // by the vertical pass, vertical_majorant is the upper-envelope diagnostic,
+    // Production V2 outputs. candidate_parallax is immutable pre-conditioner evidence consumed by
+    // the vertical pass, vertical_majorant is the upper-envelope diagnostic, and
     // vertical_conditioned is the fixed upper/lower vertical share consumed by the pure row
     // majorant. base_final_parallax is independently observable as the ordinary post-limiter field
     // for explicit diagnostics and padded ROI. Subtitle conditioning always writes a separate
@@ -929,7 +917,6 @@ namespace models {
     // `shadow_*` prefix remains for dump compatibility.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_coordinate;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_candidate_parallax;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_ownership_refined_parallax;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_vertical_majorant;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_vertical_conditioned;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_base_final_parallax;
@@ -943,13 +930,12 @@ namespace models {
       parallax_v2_shader_provenance;  ///< Exact producer shader closure when V2 is active.
     std::shared_ptr<const host_sbs_gpu_trace_provenance_t>
       gpu_trace_provenance;  ///< Source identity for gpu_trace_ring when available.
-    int raw_width = 0;  ///< Public model-output width: coarse for legacy DAV2, high for fused.
+    int raw_width = 0;  ///< Public fused-model output width.
     int raw_height = 0;
     int field_width = 0;  ///< Spatial dimensions of every live parallax texture; equals raw_*.
     int field_height = 0;
     depth_tensor_content_rect_t field_content {};  ///< Exact half-open live-field realization of input_region.tensor_content.
-    // Transitional dump metadata. For fused, each equals raw_width/raw_height; there is no split
-    // coarse/guidance raster. Legacy leaves them zero.
+    // Dump metadata for the fused one-input/one-output boundary. Each equals raw_width/raw_height.
     int guidance_width = 0;
     int guidance_height = 0;
     int refined_width = 0;
@@ -1151,8 +1137,8 @@ namespace models {
      * @param cfg Shared SBS controls; see config::video_t::sbs_t (the estimator consumes
      *            pop_strength; the depth-side analysis parameters are the fixed
      *            config::host_sbs_v2_live_calibration values).
-     * @param model The selected depth model: name/url (which engine to load/build) plus the
-     *            DA-V2-compatible model contract (pixel_values -> predicted_depth).
+     * @param model The selected public DAV2 identity and preprocessing calibration. Production
+     *            resolves it to the authenticated fused pixel_values -> refined_depth runtime.
      */
     video_depth_estimator(
       Microsoft::WRL::ComPtr<ID3D11Device> device,

@@ -21,11 +21,10 @@ The core package contains:
 | `source.png` | Matched full-source color preview |
 | `depth_input_source.png` | Exact full-source preview, or post-completion reconstruction of the logical window-region analysis source; diagnostic only |
 | `depth_input_region.json` | Required half-open analysis-domain and ROI/full-source placement |
-| `model_input.f32`, `model_input_shape.json` | Exact public model input and calibrated preprocess authority: legacy DAV2 coarse, or the fused model's sole high-resolution input |
-| `raw_depth.f32` | Exact live depth output on the same grid as `model_input`: legacy DAV2 output, or the fused model's sole high-resolution `refined_depth` output |
+| `model_input.f32`, `model_input_shape.json` | Exact fused public model input and calibrated high-resolution preprocess authority |
+| `raw_depth.f32` | Exact fused `refined_depth` output on the same high grid as `model_input` |
 | `shadow_coordinate.f32` | Required exact unbounded canonical-coordinate diagnostic; never renderer authority |
 | `shadow_candidate_parallax.f32` | Pre-limiter V2 candidate |
-| `shadow_ownership_refined_parallax.f32` | Full-resolution contour ownership result |
 | `shadow_vertical_majorant.f32` | Vertical upper-envelope diagnostic |
 | `shadow_vertical_conditioned.f32` | Fixed vertical-share result |
 | `shadow_base_final_parallax.f32` | Required in active SLR13 packages; ordinary post-limiter field before subtitle conditioning |
@@ -42,7 +41,7 @@ The core package contains:
 | `gpu_trace.json` | Optional chronological decode of the authenticated raw GPU trace |
 | `gpu_trace_contract.json` | Optional exact trace offsets, enums, receipt ABI, and shader provenance |
 
-All `.f32` files are little-endian float32. Schema 39 accepts the canonical inactive descriptor or
+All `.f32` files are little-endian float32. Schema 40 accepts the canonical inactive descriptor or
 the one current `subtitle-slr13` package. It binds the exact current generated Depth Coordinate V2
 identity, producer and renderer closures, OCR model provenance, entrypoints, and four artifact
 roles (OCR record, locator state, Base field, atomic final field). The generated contract is the sole
@@ -51,10 +50,9 @@ owner of those live identities and numeric policy values. The
 sole owner of their runtime and state-machine semantics; this dump-format document copies neither.
 No retired layout is preserved or reinterpreted.
 
-Schema 39 authenticates one capture grid across `model_input`, `raw_depth`, and every V2 field. A
-legacy package uses an exact calibrated DAV2 shape. An active fused package instead uses one exact
-supported convex-2x high shape; halving both dimensions must recover an exact calibrated embedded
-DAV2 shape. The capture-time model provenance continues to authenticate that embedded DAV2
+Schema 40 authenticates one capture grid across `model_input`, `raw_depth`, and every V2 field. A
+production package uses one exact supported convex-2x high shape; halving both dimensions must
+recover an exact calibrated embedded DAV2 shape. The capture-time model provenance continues to authenticate that embedded DAV2
 identity and derived coarse calibration, while the public numeric artifacts remain high-resolution.
 A split coarse/high package, an arbitrary enlarged grid, or a high package without this exact
 half-shape relation is rejected rather than reinterpreted.
@@ -73,7 +71,7 @@ ordinary limiter and, when active, SLR13 directly into that one field.
 
 ## Diagnostic GPU completion trace
 
-Schema 39 may carry a diagnostic-only 300-slot GPU completion ring. It records completed accepted
+Schema 40 may carry a diagnostic-only 300-slot GPU completion ring. It records completed accepted
 depth roots, not source frames, presentation frames, busy drops, or every captured desktop update.
 Each 176-word (704-byte) record binds an exact trace ordinal, matched frame, analysis generation,
 analysis-domain tag, transaction token, analysis-source and live-field extents, the immutable
@@ -148,7 +146,7 @@ The resolver descriptor serializes the aggregate-center
 primary policy exactly as `binocular-source-pixels`: two independent 16-sample rows; median indices
 `7/8`; both complete finite in-container rows bypass the IQR gate; a row-median difference of `4`
 is the both-valid mean-versus-maximum-median selection boundary; and a sole valid row is accepted
-only when its Tukey IQR at indices `3/4` and `11/12` is at most `8`. Schema 39 also authenticates
+only when its Tukey IQR at indices `3/4` and `11/12` is at most `8`. Schema 40 also authenticates
 the strict primary-failure fallback: ordinary-core span
 step `W/16`, maximum radius two, negative then positive order, ordinary-over-ribbon placement,
 unclamped 61-cell strips, two coherent rows and at most `4` pixels of intra-probe median separation.
@@ -183,7 +181,7 @@ analysis generation, the exact uncropped source rectangle, tensor extent, center
 contain-fit `tensor_content_rect_px`, edge-replicated excluded padding fraction, unit conversion,
 and outside-only collar in `depth_input_region.json` schema `4`. The source rectangle is never
 stretched or trimmed: a wider region pads above/below and a taller region pads left/right. Padding
-does not participate in model statistics, scene-cut evidence, ownership, OCR, or subtitle state;
+does not participate in model statistics, scene-cut evidence, OCR, or subtitle state;
 published fields extend the nearest content boundary through it. Crop-local depth must never be
 interpreted as a full-source field. The required full-source inverse map proves that samples beyond
 the conservative collar return to identity.
@@ -216,7 +214,7 @@ The maintained reader:
 2. checks exact DVC2 contract/tag/source-closure bindings;
 3. verifies every required content hash and numeric extent, including one common calibrated coarse
    grid or exact supported convex-2x high grid and its derived embedded-DAV2 half shape;
-4. replays ownership and the schema-selected limiter over the full tensor: serial float32 for
+4. replays the schema-selected limiter from the candidate over the full tensor: serial float32 for
    lines up to 32 elements, otherwise conservative Q30 upper/lower envelopes and horizontal
    majorant with the authenticated 75/25 float32 share, using content width for both steps;
 5. authenticates `shadow_final_parallax.f32` once as both the atomic final field and the renderer's
@@ -234,7 +232,7 @@ The maintained reader:
    closure and ABI document, chronological wrap/commit structure, raw branch/OCR proof, matched
    analysis domain, and bit-for-bit decoded JSON. An unavailable trace remains valid optional state.
 
-Use `.f32` artifacts for quantitative work. Schema 39 does not package scalar/heat preview PNGs or
+Use `.f32` artifacts for quantitative work. Schema 40 does not package scalar/heat preview PNGs or
 per-field shape sidecars. The sole retained shape sidecar, `model_input_shape.json`, is calibrated
 preprocess authority rather than a preview description. On a fused capture it describes the sole
 high input; the embedded DAV2 calibration is derived from its exact half shape. Float dimensions live in
@@ -242,10 +240,11 @@ high input; the embedded DAV2 calibration is derived from its exact half shape. 
 only the color/evidence PNGs `source.png`, `depth_input_source.png`, `sbs.png`, and, when available,
 `warp_mask.png`.
 
-A single-high package carries `composite_runtime_provenance` schema 2 and authenticates the frozen fused
+A production package carries `composite_runtime_provenance` schema 2 and authenticates the frozen fused
 ONNX, embedded DAV2, ZipDepth checkpoint, preprocess closure, engine recipe/artifact, and active
-engine manifest as one record. Missing or stale composite evidence rejects a high-grid package;
-legacy DAV2 packages omit the record or serialize it as null.
+engine manifest as one record. Missing or stale composite evidence rejects a high-grid package.
+The reader's one-grid legacy DAV2 branch exists only to inspect already-recorded schema-40 evidence;
+it is not a live or conversion runtime fallback.
 
 Generate a non-authoritative diagnostic preview outside the atomic package when needed:
 

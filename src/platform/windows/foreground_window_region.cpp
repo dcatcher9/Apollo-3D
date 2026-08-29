@@ -75,9 +75,9 @@ namespace platf::foreground_window {
       const auto center_x_twice = static_cast<std::int64_t>(outer.left) + outer.right;
       const auto center_y_twice = static_cast<std::int64_t>(outer.top) + outer.bottom;
       return static_cast<std::int64_t>(inner.left) * 2 <= center_x_twice &&
-             static_cast<std::int64_t>(inner.right) * 2 >= center_x_twice &&
+             static_cast<std::int64_t>(inner.right) * 2 > center_x_twice &&
              static_cast<std::int64_t>(inner.top) * 2 <= center_y_twice &&
-             static_cast<std::int64_t>(inner.bottom) * 2 >= center_y_twice;
+             static_cast<std::int64_t>(inner.bottom) * 2 > center_y_twice;
     }
 
     [[nodiscard]] constexpr bool observation_has_complete_geometry(
@@ -302,6 +302,48 @@ namespace platf::foreground_window {
         .screen_rect = winner->screen_rect,
         .child_selected = true,
       };
+    }
+
+    content_selection_t content_census_confirmation_t::update(
+      const std::uintptr_t root_window,
+      const std::uint32_t root_process_id,
+      const rect_t root_client_screen_rect,
+      const content_selection_t census_selection,
+      const std::chrono::steady_clock::time_point observed_at
+    ) noexcept {
+      const content_selection_t fallback {
+        .window = root_window,
+        .screen_rect = root_client_screen_rect,
+      };
+      if (
+        root_window == 0 || root_process_id == 0 ||
+        !root_client_screen_rect.valid() || !census_selection.child_selected ||
+        census_selection.window == 0 || census_selection.window == root_window ||
+        !census_selection.screen_rect.valid() ||
+        observed_at.time_since_epoch().count() == 0
+      ) {
+        reset();
+        return fallback;
+      }
+
+      const key_t current {
+        .root_window = root_window,
+        .root_process_id = root_process_id,
+        .root_client_screen_rect = root_client_screen_rect,
+        .content_window = census_selection.window,
+        .content_screen_rect = census_selection.screen_rect,
+      };
+      const bool fresh = observed_at >= observed_at_ &&
+                         observed_at - observed_at_ <= std::chrono::milliseconds {250};
+      const bool confirmed = provisional_ && fresh && *provisional_ == current;
+      provisional_ = current;
+      observed_at_ = observed_at;
+      return confirmed ? census_selection : fallback;
+    }
+
+    void content_census_confirmation_t::reset() noexcept {
+      provisional_.reset();
+      observed_at_ = {};
     }
 
     observation_t classify(
@@ -567,7 +609,17 @@ namespace platf::foreground_window {
       std::chrono::steady_clock::time_point retry_at {};
     };
     static thread_local negative_content_census_cache_t negative_content_census_cache;
+    static thread_local detail::content_census_confirmation_t content_census_confirmation;
     const auto content_census_at = std::chrono::steady_clock::now();
+    const auto retain_negative_content_census = [&]() noexcept {
+      content_census_confirmation.reset();
+      negative_content_census_cache = {
+        .window = raw.window,
+        .process_id = raw.process_id,
+        .client_screen_rect = raw.client_screen_rect,
+        .retry_at = content_census_at + std::chrono::milliseconds {100},
+      };
+    };
     const bool negative_census_retained =
       negative_content_census_cache.window == raw.window &&
       negative_content_census_cache.process_id == raw.process_id &&
@@ -636,38 +688,24 @@ namespace platf::foreground_window {
         );
       };
 
-      const auto first_census = census_direct_children();
-      const auto first_selection = select_from_census(first_census);
-      auto selection = first_selection;
-      if (first_selection.child_selected) {
-        // GW_HWNDNEXT can terminate early when a child is destroyed during traversal. Require a
-        // second complete census to reach the same winner before publishing child authority.
-        const auto confirming_census = census_direct_children();
-        const auto confirming_selection = select_from_census(confirming_census);
-        if (
-          !confirming_selection.child_selected ||
-          confirming_selection.window != first_selection.window ||
-          confirming_selection.screen_rect != first_selection.screen_rect
-        ) {
-          selection = {
-            .window = raw.window,
-            .screen_rect = raw.client_screen_rect,
-          };
-        } else {
-          selection = confirming_selection;
-        }
-      }
-      if (selection.child_selected) {
+      const auto census = census_direct_children();
+      const auto census_selection = select_from_census(census);
+      const auto selection = content_census_confirmation.update(
+        raw.window,
+        raw.process_id,
+        raw.client_screen_rect,
+        census_selection,
+        content_census_at
+      );
+      if (census_selection.child_selected) {
+        // Carry the provisional winner to the next sample instead of repeating the complete
+        // synchronous census in this one. A published selection is still backed by two
+        // consecutive complete censuses and the final exact HWND/geometry check below.
         negative_content_census_cache = {};
       } else {
         // A negative result can only delay an optimization, never authorize a guessed child.
         // Back it off briefly so HWND-heavy applications do not pay a full census every frame.
-        negative_content_census_cache = {
-          .window = raw.window,
-          .process_id = raw.process_id,
-          .client_screen_rect = raw.client_screen_rect,
-          .retry_at = content_census_at + std::chrono::milliseconds {100},
-        };
+        retain_negative_content_census();
       }
 
       if (selection.child_selected) {
@@ -691,19 +729,17 @@ namespace platf::foreground_window {
           raw.content_window = selection.window;
           raw.content_screen_rect = selection.screen_rect;
         } else {
-          negative_content_census_cache = {
-            .window = raw.window,
-            .process_id = raw.process_id,
-            .client_screen_rect = raw.client_screen_rect,
-            .retry_at = content_census_at + std::chrono::milliseconds {100},
-          };
+          retain_negative_content_census();
         }
       }
     }
 
     recheck_foreground();
-
-    return detail::classify(raw, std::chrono::steady_clock::now());
+    auto observation = detail::classify(raw, std::chrono::steady_clock::now());
+    if (observation.status != status_e::ok) {
+      content_census_confirmation.reset();
+    }
+    return observation;
   }
 
   bool interactive_move_size_active() noexcept {

@@ -189,12 +189,12 @@ namespace models {
                             );
   }
 
-  /** Exact spatial realization produced by the experimental frozen convex-2x arm.
+  /** Exact public high-grid shape produced by the frozen convex-2x composite.
    *
-   * The coarse DAV2 tensor remains the scene/camera/history domain.  Doubling is a deterministic
-   * pixel-shuffle realization of that same observation, not another resolution fit and not an
-   * input-domain transition.  Rejecting non-production coarse shapes keeps this helper from
-   * becoming an unauthenticated general-purpose scaler.
+   * The authenticated coarse DAV2 fit selects the profile; it is not a separately published
+   * runtime domain. The fused engine exposes only the doubled high-grid input/output, and that
+   * high output owns analysis, history, camera state, and publication. Rejecting non-production
+   * coarse fits keeps this helper from becoming an unauthenticated general-purpose scaler.
    */
   inline constexpr std::optional<depth_tensor_shape_t>
   host_sbs_convex2x_field_shape(const depth_tensor_shape_t coarse) noexcept {

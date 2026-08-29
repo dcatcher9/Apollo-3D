@@ -833,7 +833,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 73u);
+  EXPECT_EQ(v2::contract_schema, 74u);
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
   EXPECT_EQ(v2::shadow_state_dump_schema, 16u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
@@ -2210,8 +2210,8 @@ TEST(TensorRtConditionalWrapperGpuTest, AllAuthenticatedShapesBuildAndExecute) {
   struct wrapper_shape_case_t {
     UINT source_width;
     UINT source_height;
-    int tensor_width;
-    int tensor_height;
+    int dav2_width;
+    int dav2_height;
   };
   constexpr std::array wrapper_shapes {
     wrapper_shape_case_t {1920u, 1080u, 770, 434},
@@ -2272,8 +2272,16 @@ TEST(TensorRtConditionalWrapperGpuTest, AllAuthenticatedShapesBuildAndExecute) {
       const auto completed = estimator.finish_pending_depth_for_evaluation();
       ASSERT_TRUE(completed.completed_frame_valid);
       EXPECT_EQ(completed.completed_frame_id, frame_id);
-      EXPECT_EQ(completed.raw_width, shape.tensor_width);
-      EXPECT_EQ(completed.raw_height, shape.tensor_height);
+      const auto high_shape = models::host_sbs_convex2x_field_shape({
+        shape.dav2_width,
+        shape.dav2_height,
+      });
+      ASSERT_TRUE(high_shape);
+      EXPECT_EQ(completed.raw_width, high_shape->width);
+      EXPECT_EQ(completed.raw_height, high_shape->height);
+      EXPECT_EQ(completed.field_width, high_shape->width);
+      EXPECT_EQ(completed.field_height, high_shape->height);
+      EXPECT_TRUE(completed.refined_live_geometry_active);
       EXPECT_FALSE(completed.gpu_undecided_completion);
       EXPECT_FALSE(estimator.has_terminal_failure());
     }
@@ -2690,7 +2698,7 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   const auto create_field_views = [&create_r32_float_view](
     const UINT width,
     const UINT height,
-    std::array<ComPtr<ID3D11ShaderResourceView>, 6u> &views
+    std::array<ComPtr<ID3D11ShaderResourceView>, 5u> &views
   ) {
     for (auto &field_view : views) {
       if (!create_r32_float_view(width, height, field_view)) {
@@ -2700,17 +2708,16 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
     return true;
   };
 
-  std::array<ComPtr<ID3D11ShaderResourceView>, 6u> coarse_field_views;
+  std::array<ComPtr<ID3D11ShaderResourceView>, 5u> coarse_field_views;
   ASSERT_TRUE(create_field_views(770u, 434u, coarse_field_views));
 
   const auto &calibration = v2::model_calibrations.front();
   models::estimate_result result;
   result.shadow_candidate_parallax = coarse_field_views[0];
-  result.shadow_ownership_refined_parallax = coarse_field_views[1];
-  result.shadow_vertical_majorant = coarse_field_views[2];
-  result.shadow_vertical_conditioned = coarse_field_views[3];
-  result.shadow_base_final_parallax = coarse_field_views[4];
-  result.shadow_final_parallax = coarse_field_views[5];
+  result.shadow_vertical_majorant = coarse_field_views[1];
+  result.shadow_vertical_conditioned = coarse_field_views[2];
+  result.shadow_base_final_parallax = coarse_field_views[3];
+  result.shadow_final_parallax = coarse_field_views[4];
   result.shadow_state = view;
   result.shadow_frame_stats = view;
   result.ocr_box_record = view;
@@ -2756,7 +2763,8 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
     .tensor_content = {0u, 0u, 770u, 434u},
   };
   EXPECT_FALSE(result.shadow_coordinate);
-  EXPECT_TRUE(models::parallax_v2_result_is_authenticated(result));
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(result))
+    << "a coarse DAV2 result without the required composite is no longer production authority";
   EXPECT_TRUE(models::subtitle_evidence_is_exact_frame(result));
 
   using namespace models::prod_zipdepth_convex2x;
@@ -2785,15 +2793,14 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   fused_result.refined_width = 1540;
   fused_result.refined_height = 868;
 
-  std::array<ComPtr<ID3D11ShaderResourceView>, 6u> refined_field_views;
+  std::array<ComPtr<ID3D11ShaderResourceView>, 5u> refined_field_views;
   ASSERT_TRUE(create_field_views(1540u, 868u, refined_field_views));
   auto refined_result = fused_result;
   refined_result.shadow_candidate_parallax = refined_field_views[0];
-  refined_result.shadow_ownership_refined_parallax = refined_field_views[1];
-  refined_result.shadow_vertical_majorant = refined_field_views[2];
-  refined_result.shadow_vertical_conditioned = refined_field_views[3];
-  refined_result.shadow_base_final_parallax = refined_field_views[4];
-  refined_result.shadow_final_parallax = refined_field_views[5];
+  refined_result.shadow_vertical_majorant = refined_field_views[1];
+  refined_result.shadow_vertical_conditioned = refined_field_views[2];
+  refined_result.shadow_base_final_parallax = refined_field_views[3];
+  refined_result.shadow_final_parallax = refined_field_views[4];
   refined_result.raw_width = 1540;
   refined_result.raw_height = 868;
   refined_result.field_width = 1540;
@@ -2832,15 +2839,14 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   coarse_content_on_high_grid.field_content = coarse_video_plan->tensor_content;
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(coarse_content_on_high_grid));
 
-  std::array<ComPtr<ID3D11ShaderResourceView>, 6u> portrait_field_views;
+  std::array<ComPtr<ID3D11ShaderResourceView>, 5u> portrait_field_views;
   ASSERT_TRUE(create_field_views(868u, 1540u, portrait_field_views));
   auto fused_portrait_fallback = fused_result;
   fused_portrait_fallback.shadow_candidate_parallax = portrait_field_views[0];
-  fused_portrait_fallback.shadow_ownership_refined_parallax = portrait_field_views[1];
-  fused_portrait_fallback.shadow_vertical_majorant = portrait_field_views[2];
-  fused_portrait_fallback.shadow_vertical_conditioned = portrait_field_views[3];
-  fused_portrait_fallback.shadow_base_final_parallax = portrait_field_views[4];
-  fused_portrait_fallback.shadow_final_parallax = portrait_field_views[5];
+  fused_portrait_fallback.shadow_vertical_majorant = portrait_field_views[1];
+  fused_portrait_fallback.shadow_vertical_conditioned = portrait_field_views[2];
+  fused_portrait_fallback.shadow_base_final_parallax = portrait_field_views[3];
+  fused_portrait_fallback.shadow_final_parallax = portrait_field_views[4];
   fused_portrait_fallback.raw_width = 868;
   fused_portrait_fallback.raw_height = 1540;
   fused_portrait_fallback.field_width = 868;
@@ -2909,32 +2915,32 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
     models::parallax_v2_result_is_authenticated(duplicated_compatibility_snapshot)
   );
 
-  auto subtitle_suppressed = result;
+  auto subtitle_suppressed = refined_result;
   subtitle_suppressed.subtitle_work_suppressed = true;
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(subtitle_suppressed));
   EXPECT_FALSE(models::subtitle_evidence_is_exact_frame(subtitle_suppressed));
 
-  auto gpu_undecided = result;
+  auto gpu_undecided = refined_result;
   gpu_undecided.gpu_undecided_completion = true;
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(gpu_undecided));
   EXPECT_FALSE(models::subtitle_evidence_is_exact_frame(gpu_undecided))
     << "the CPU cannot distinguish an exact infer tuple from a held reuse tuple";
 
-  auto missing_final = result;
+  auto missing_final = refined_result;
   missing_final.shadow_final_parallax.Reset();
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_final));
 
-  auto final_aliases_base = result;
-  final_aliases_base.shadow_final_parallax = result.shadow_base_final_parallax;
+  auto final_aliases_base = refined_result;
+  final_aliases_base.shadow_final_parallax = refined_result.shadow_base_final_parallax;
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(final_aliases_base));
 
-  auto wrong_field_extent = result;
+  auto wrong_field_extent = refined_result;
   wrong_field_extent.shadow_candidate_parallax = view;
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_field_extent));
 
   D3D11_TEXTURE2D_DESC wrong_format_desc {};
-  wrong_format_desc.Width = 770u;
-  wrong_format_desc.Height = 434u;
+  wrong_format_desc.Width = 1540u;
+  wrong_format_desc.Height = 868u;
   wrong_format_desc.MipLevels = 1u;
   wrong_format_desc.ArraySize = 1u;
   wrong_format_desc.Format = DXGI_FORMAT_R16_FLOAT;
@@ -2949,17 +2955,17 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(
     wrong_format_texture.Get(), nullptr, &wrong_format_view
   )));
-  auto wrong_field_format = result;
+  auto wrong_field_format = refined_result;
   wrong_field_format.shadow_candidate_parallax = wrong_format_view;
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_field_format));
 
-  auto wrong_coarse_field_shape = result;
-  ++wrong_coarse_field_shape.field_width;
-  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_coarse_field_shape));
+  auto wrong_field_shape = refined_result;
+  ++wrong_field_shape.field_width;
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_field_shape));
 
-  auto wrong_coarse_field_content = result;
-  --wrong_coarse_field_content.field_content.right;
-  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_coarse_field_content));
+  auto wrong_field_content = refined_result;
+  --wrong_field_content.field_content.right;
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_field_content));
 
   auto refined_without_composite = refined_result;
   refined_without_composite.composite_depth_runtime_provenance.reset();
@@ -2987,13 +2993,13 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   split_grid_portrait.raw_height = 770;
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(split_grid_portrait));
 
-  auto missing_input_region = result;
+  auto missing_input_region = refined_result;
   missing_input_region.input_region = {};
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_input_region));
 
-  auto dump_augmented = result;
+  auto dump_augmented = refined_result;
   ComPtr<ID3D11ShaderResourceView> coordinate_view;
-  ASSERT_TRUE(create_r32_float_view(770u, 434u, coordinate_view));
+  ASSERT_TRUE(create_r32_float_view(1540u, 868u, coordinate_view));
   dump_augmented.shadow_coordinate = coordinate_view;
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(dump_augmented));
 
@@ -3005,27 +3011,23 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   wrong_coordinate_extent.shadow_coordinate = view;
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_coordinate_extent));
 
-  auto missing_resource = result;
+  auto missing_resource = refined_result;
   missing_resource.shadow_state.Reset();
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_resource));
 
-  auto missing_vertical_majorant = result;
+  auto missing_vertical_majorant = refined_result;
   missing_vertical_majorant.shadow_vertical_majorant.Reset();
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_vertical_majorant));
 
-  auto missing_ownership_refined = result;
-  missing_ownership_refined.shadow_ownership_refined_parallax.Reset();
-  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_ownership_refined));
-
-  auto missing_vertical_conditioned = result;
+  auto missing_vertical_conditioned = refined_result;
   missing_vertical_conditioned.shadow_vertical_conditioned.Reset();
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_vertical_conditioned));
 
-  auto missing_ocr_record = result;
+  auto missing_ocr_record = refined_result;
   missing_ocr_record.ocr_box_record.Reset();
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_ocr_record));
 
-  auto missing_subtitle_state = result;
+  auto missing_subtitle_state = refined_result;
   missing_subtitle_state.subtitle_locator_state.Reset();
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_subtitle_state));
 
@@ -3037,31 +3039,34 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   };
 
   const std::array supported_shapes {
-    supported_shape_t {1920u, 1080u, 770, 434},
-    supported_shape_t {2560u, 1080u, 1022, 434},
-    supported_shape_t {3440u, 1440u, 1036, 434},
-    supported_shape_t {1080u, 1920u, 434, 770},
-    supported_shape_t {1080u, 2560u, 434, 1022},
-    supported_shape_t {1440u, 3440u, 434, 1036},
+    supported_shape_t {1920u, 1080u, 1540, 868},
+    supported_shape_t {2560u, 1080u, 2044, 868},
+    supported_shape_t {3440u, 1440u, 2072, 868},
+    supported_shape_t {1080u, 1920u, 868, 1540},
+    supported_shape_t {1080u, 2560u, 868, 2044},
+    supported_shape_t {1440u, 3440u, 868, 2072},
   };
   for (const auto &[source_width, source_height, width, height] : supported_shapes) {
-    std::array<ComPtr<ID3D11ShaderResourceView>, 6u> supported_field_views;
+    std::array<ComPtr<ID3D11ShaderResourceView>, 5u> supported_field_views;
     ASSERT_TRUE(create_field_views(
       static_cast<UINT>(width),
       static_cast<UINT>(height),
       supported_field_views
     ));
-    auto supported_shape = result;
+    auto supported_shape = refined_result;
     supported_shape.shadow_candidate_parallax = supported_field_views[0];
-    supported_shape.shadow_ownership_refined_parallax = supported_field_views[1];
-    supported_shape.shadow_vertical_majorant = supported_field_views[2];
-    supported_shape.shadow_vertical_conditioned = supported_field_views[3];
-    supported_shape.shadow_base_final_parallax = supported_field_views[4];
-    supported_shape.shadow_final_parallax = supported_field_views[5];
+    supported_shape.shadow_vertical_majorant = supported_field_views[1];
+    supported_shape.shadow_vertical_conditioned = supported_field_views[2];
+    supported_shape.shadow_base_final_parallax = supported_field_views[3];
+    supported_shape.shadow_final_parallax = supported_field_views[4];
     supported_shape.raw_width = width;
     supported_shape.raw_height = height;
     supported_shape.field_width = width;
     supported_shape.field_height = height;
+    supported_shape.guidance_width = width;
+    supported_shape.guidance_height = height;
+    supported_shape.refined_width = width;
+    supported_shape.refined_height = height;
     supported_shape.field_content = {
       0u, 0u,
       static_cast<std::uint32_t>(width),
@@ -3084,8 +3089,8 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
       << width << 'x' << height;
   }
 
-  auto video_region = result;
-  video_region.field_content = {0u, 0u, 770u, 433u};
+  auto video_region = refined_result;
+  video_region.field_content = {0u, 0u, 1540u, 866u};
   video_region.input_region = {
     .source_width = 3840u,
     .source_height = 2160u,
@@ -3093,7 +3098,7 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
     .top = 510u,
     .right = 2471u,
     .bottom = 1439u,
-    .tensor_content = {0u, 0u, 770u, 433u},
+    .tensor_content = {0u, 0u, 1540u, 866u},
     .analysis_generation = 7u,
     .authority = models::depth_analysis_authority_e::chromium_video,
   };
@@ -3107,22 +3112,22 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   analysis_shape_mismatch.input_region.right -= 300u;
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(analysis_shape_mismatch));
 
-  auto partial_full_source = result;
+  auto partial_full_source = refined_result;
   partial_full_source.input_region.left = 1u;
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(partial_full_source));
 
-  auto wrong_shape = result;
+  auto wrong_shape = refined_result;
   wrong_shape.raw_width = 1008;
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_shape));
 
-  auto wrong_shader = result;
-  auto shader = *result.parallax_v2_shader_provenance;
+  auto wrong_shader = refined_result;
+  auto shader = *refined_result.parallax_v2_shader_provenance;
   shader.source_closure_sha256 = std::string(64u, '0');
   wrong_shader.parallax_v2_shader_provenance =
     std::make_shared<const models::parallax_v2_shader_provenance_t>(shader);
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_shader));
 
-  auto wrong_gain = result;
+  auto wrong_gain = refined_result;
   wrong_gain.parallax_v2_requested_gain *= 2.0f;
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_gain));
 }
@@ -3239,7 +3244,7 @@ TEST(ParallaxV2ContractTest, DebugDumpUsesNonblockingGpuStagingBeforeCpuPublicat
   );
 }
 
-TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema39Contract) {
+TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema40Contract) {
   const auto source = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
   );
@@ -3263,7 +3268,7 @@ TEST(ParallaxV2ContractTest, DebugDumpSubtitleResolverProvenanceMatchesSchema39C
   EXPECT_LT(resolve, condition);
   EXPECT_EQ(resolver.find("condition_prepare_main"), std::string::npos);
 
-  EXPECT_NE(source.find("{\"schema\", 39}"), std::string::npos);
+  EXPECT_NE(source.find("{\"schema\", 40}"), std::string::npos);
   for (const auto *qualification_key : {
          "{\"qualification_policy\", {",
          "{\"corner_filter_applies_to\", \"non-ribbon-ordinary-cores\"}",
@@ -3704,7 +3709,6 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
     std::tuple {"depth_coordinate_v2_map_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_coordinate_v2_moments_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"},
-    std::tuple {"depth_coordinate_v2_ownership_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"},
     std::tuple {"sbs_reprojection_v2_live_ps.hlsl", "main_ps", "ps_5_0"},
     std::tuple {"sbs_reprojection_v2_diagnostics_ps.hlsl", "mapping_ps", "ps_5_0"},

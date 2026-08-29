@@ -23,7 +23,6 @@ TEST(HostSbsNearIdenticalPolicyTest, RawDecisionLayoutMatchesCudaBridge) {
   EXPECT_EQ(models::near_identical_gpu_infer_reduce_byte_offset, 64u);
   EXPECT_EQ(models::near_identical_gpu_infer_one_byte_offset, 80u);
   EXPECT_EQ(models::near_identical_gpu_infer_grid16_byte_offset, 96u);
-  EXPECT_EQ(models::near_identical_gpu_infer_grid8_byte_offset, 112u);
   EXPECT_EQ(models::near_identical_gpu_infer_columns_byte_offset, 128u);
   EXPECT_EQ(models::near_identical_gpu_infer_rows_byte_offset, 144u);
   EXPECT_EQ(models::near_identical_gpu_reuse_grid16_byte_offset, 160u);
@@ -242,13 +241,18 @@ TEST(HostSbsNearIdenticalPolicyTest, CompositeRuntimeUsesSingleHighTensorBoundar
   ASSERT_NE(resolver_begin, std::string::npos);
   ASSERT_NE(resolver_end, std::string::npos);
   const auto resolver = estimator.substr(resolver_begin, resolver_end - resolver_begin);
-  EXPECT_NE(resolver.find("raw_model.name != production_dav2.depth_model"), std::string::npos);
-  EXPECT_NE(resolver.find("raw_model.url != production_dav2.depth_model_url"), std::string::npos);
+  EXPECT_NE(resolver.find("raw_model.name != embedded_dav2.depth_model"), std::string::npos);
+  EXPECT_NE(resolver.find("raw_model.url != embedded_dav2.depth_model_url"), std::string::npos);
   EXPECT_NE(resolver.find("prod_zipdepth_convex2x::logical_model"), std::string::npos);
   EXPECT_NE(resolver.find("prod_zipdepth_convex2x::fused_onnx_sha256"), std::string::npos);
-  EXPECT_NE(resolver.find("resolve_composite_depth_asset("), std::string::npos);
-  EXPECT_NE(estimator.find("if (fused && !to_unmark.empty())"), std::string::npos)
-    << "the fused builder must reject unexpected outputs instead of pruning them";
+  EXPECT_NE(
+    resolver.find("composite_depth_asset_is_authenticated("),
+    std::string::npos
+  );
+  EXPECT_EQ(resolver.find("legacy"), std::string::npos)
+    << "the required fused asset must not retain a DAV2 fallback";
+  EXPECT_EQ(estimator.find("unmarkOutput"), std::string::npos)
+    << "the exact fused builder must reject rather than prune unexpected outputs";
 
   EXPECT_EQ(estimator.find("guidance_tensor_in_buf"), std::string::npos);
   EXPECT_EQ(estimator.find("refined_tensor_out_buf"), std::string::npos);
@@ -261,10 +265,8 @@ TEST(HostSbsNearIdenticalPolicyTest, CompositeRuntimeUsesSingleHighTensorBoundar
     estimator.find("field_w != target_w || field_h != target_h"),
     std::string::npos
   );
-  EXPECT_EQ(
-    estimator.find("CSSetShader(retired_convex2x_live_map_cs.Get()"),
-    std::string::npos
-  ) << "the closure-only legacy shader must never overwrite the single high model output";
+  EXPECT_EQ(estimator.find("prod_zipdepth_convex2x_live_map"), std::string::npos)
+    << "the retired post-model mapper must not remain in the runtime";
   EXPECT_EQ(
     detector.find("NEAR_IDENTICAL_MAX_TILE_GROUP_COUNT"),
     std::string::npos
@@ -435,10 +437,6 @@ TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
                std::string_view {"depth_coordinate_v2_state_resolve_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_map"},
                std::string_view {"depth_coordinate_v2_map_cs"}},
-    std::pair {std::string_view {"prod_zipdepth_convex2x_live_map"},
-               std::string_view {"retired_convex2x_live_map_cs"}},
-    std::pair {std::string_view {"depth_coordinate_v2_ownership"},
-               std::string_view {"depth_coordinate_v2_ownership_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_vertical_limit"},
                std::string_view {"depth_coordinate_v2_vertical_limit_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_limit"},
@@ -3927,8 +3925,6 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, ReceiptWritesExactIndirectShapes) {
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_one_x)], 1u);
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_grid16_x)], 7u);
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_grid16_y)], 6u);
-  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_grid8_x)], 14u);
-  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_grid8_y)], 12u);
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_columns_x)], 112u);
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_rows_x)], 96u);
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::reuse_grid16_x)], 0u);

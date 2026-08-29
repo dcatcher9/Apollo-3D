@@ -6,10 +6,14 @@ be understood before committing its boundary and replay cache. It uses bounded l
 proposed cut locations, then replays the finalized scene through the same Depth Coordinate V2
 geometry used by live Host SBS.
 
+The replayed geometry core consumes authenticated depth and cut state only. Source pixels, color
+mode, and HDR scaling remain renderer inputs; the source snapshot hash pairs that rendering input
+with the corresponding geometry frame without feeding color into geometry.
+
 Offline lookahead has no independent geometry authority. `sbs_3d_pop_strength` remains the literal
 requested strength, and each finalized scene acquires the same V2 raw center described in
 [Host SBS pipeline](host-sbs.md). The planner can revise a boundary; it cannot modify the renderer's
-curve, pop, ownership, cliff conditioning, or scene-center policy.
+curve, pop, cliff conditioning, or scene-center policy.
 
 The production implementation is a native C++ job manager inside Sunshine 3D plus an isolated
 `sunshine.exe` child worker. It does **not** invoke Python, require Python to be installed, or
@@ -238,6 +242,11 @@ Authenticated worker specifications are still SHA-256 checked before parsing, bo
 authoritative, and typed publication keeps the existing atomic replace boundaries. Timeline and
 file-identity objects embedded in these documents remain opaque only because they are separately
 owned authenticated subcontracts with their own validators.
+
+Worker-result acceptance also validates the relationships between those typed records: scenes are
+a contiguous one-based partition covering every source frame, the analysis contract matches the
+source and one-pass inference count, and each conversion replay exactly matches its paired scene
+and resolved SBS output geometry.
 
 Source, pre-mux, and output FFprobe frame JSON is parsed directly from a bounded child pipe through
 a 64 KiB reader and is never materialized as a file or full JSON DOM. The worker retains only

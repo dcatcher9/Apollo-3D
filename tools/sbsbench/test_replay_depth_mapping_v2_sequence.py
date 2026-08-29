@@ -29,7 +29,6 @@ try:
         FORBIDDEN_RENDERER_SCORE_PREFIXES, RENDERER_SCORECARD_FILE,
         RENDERER_SCORE_CONTRACT_FILE,
         RENDERER_SCORE_CONTRACT_SCHEMA, MappingV2Config,
-        _OrderedSourceRgbFields,
         _diagnostic_summary,
         _exact_source_capture_grid_kind,
         _load_authenticated_cut_pulses, _materialize_gpu_replay_inputs,
@@ -60,7 +59,6 @@ except ImportError:  # Direct execution from tools/sbsbench.
         FORBIDDEN_RENDERER_SCORE_PREFIXES, RENDERER_SCORECARD_FILE,
         RENDERER_SCORE_CONTRACT_FILE,
         RENDERER_SCORE_CONTRACT_SCHEMA, MappingV2Config,
-        _OrderedSourceRgbFields,
         _diagnostic_summary,
         _exact_source_capture_grid_kind,
         _load_authenticated_cut_pulses, _materialize_gpu_replay_inputs,
@@ -168,7 +166,6 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             "src_assets/windows/assets/shaders/directx/include/depth_coordinate_v2_contract.generated.hlsl",
             "src_assets/windows/assets/shaders/directx/include/depth_coordinate_v2.hlsl",
             "src_assets/windows/assets/shaders/directx/include/depth_constants.hlsl",
-            "src_assets/windows/assets/shaders/directx/depth_coordinate_v2_ownership_cs.hlsl",
             "src_assets/windows/assets/shaders/directx/include/depth_color.hlsl",
             "src_assets/windows/assets/shaders/directx/sbs_direct_replay_ps.hlsl",
             "tools/sbsbench/direct_geometry_contract.py",
@@ -720,42 +717,6 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "lossless frame_<id>\\.png"):
                 _source_frames(root)
 
-    def test_numpy_oracle_lazily_decodes_ordered_rgb_and_applies_ownership(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            first_path = root / "frame_00001.png"
-            second_path = root / "frame_00002.png"
-            first = np.zeros((25, 25, 3), dtype=np.uint8)
-            first[8:, :, :] = 255
-            second = np.full((25, 25, 3), 73, dtype=np.uint8)
-            Image.fromarray(first, mode="RGB").save(first_path)
-            Image.fromarray(second, mode="RGB").save(second_path)
-            ordered = _OrderedSourceRgbFields(
-                {2: second_path, 1: first_path}, [1, 2])
-            np.testing.assert_array_equal(ordered[0], first)
-            np.testing.assert_array_equal(ordered[1], second)
-
-            raw = np.zeros((5, 5), dtype=np.float64)
-            raw[2:, :] = 1.0
-            config = MappingV2Config(
-                raw_coordinate_scale=0.5,
-                pop_strength=1.0,
-                gain_per_pop=0.01,
-                max_horizontal_slope=0.001,
-                max_vertical_shear=0.004,
-            )
-            _, identity_encoded, identity_rows = _numpy_oracle_sequence(
-                [raw], [1], [False], [0], "unit-ownership", config)
-            _, refined_encoded, refined_rows = _numpy_oracle_sequence(
-                [raw], [1], [False], [0], "unit-ownership", config,
-                source_rgb_fields=_OrderedSourceRgbFields({1: first_path}, [1]))
-
-            self.assertEqual(identity_rows[0]["ownership_raised_fraction"], 0.0)
-            self.assertGreater(refined_rows[0]["ownership_raised_fraction"], 0.0)
-            self.assertGreater(
-                float(np.max(np.abs(refined_encoded[0] - identity_encoded[0]))),
-                0.0)
-
     def test_cut_labels_never_control_replay_and_generation_recovers_missing_pulse(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -872,8 +833,8 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["schema"], GPU_INPUT_MANIFEST_SCHEMA)
             self.assertEqual(manifest["mode"], GPU_INPUT_MANIFEST_MODE)
-            self.assertEqual(manifest["source_color_mode"], 0)
-            self.assertEqual(manifest["source_linear_scale"], 1.0)
+            self.assertNotIn("source_color_mode", manifest)
+            self.assertNotIn("source_linear_scale", manifest)
             self.assertEqual(manifest["source_shape"], {"width": 1920, "height": 1080})
             self.assertEqual(
                 manifest["frames"][1]["source_sha256"], rows[1]["input_source_sha256"])
@@ -919,8 +880,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             self.assertEqual(validated["schema"], GPU_INPUT_MANIFEST_SCHEMA)
             for name in (
                     "model", "shape", "frame_hash", "source_hash",
-                    "color_mode", "linear_scale", "boolean_color_mode",
-                    "boolean_linear_scale", "oversized_linear_scale",
+                    "retired_color_field",
                     "source_shape", "boolean_source_shape", "zero_source_shape",
                     "oversized_source_shape"):
                 with self.subTest(corruption=name):
@@ -933,18 +893,8 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                         corrupt["frames"][0]["raw_sha256"] = "0" * 64
                     elif name == "source_hash":
                         corrupt["frames"][0]["source_sha256"] = "0" * 64
-                    elif name == "color_mode":
-                        corrupt["source_color_mode"] = 2
-                    elif name == "linear_scale":
-                        corrupt["source_linear_scale"] = 4.0
-                    elif name == "boolean_color_mode":
-                        corrupt["source_color_mode"] = False
-                    elif name == "boolean_linear_scale":
-                        corrupt["source_linear_scale"] = True
-                    elif name == "oversized_linear_scale":
-                        # Large enough that float(int) raises OverflowError, but still below
-                        # Python's default JSON integer-digit safety limit.
-                        corrupt["source_linear_scale"] = 10 ** 4000
+                    elif name == "retired_color_field":
+                        corrupt["source_color_mode"] = 0
                     elif name == "source_shape":
                         corrupt["source_shape"]["width"] += 1
                     elif name == "boolean_source_shape":

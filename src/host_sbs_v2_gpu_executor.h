@@ -92,23 +92,10 @@ namespace models::host_sbs_v2_gpu {
     dispatch_command_t dispatch;
   };
 
-  struct ownership_command_t {
-    base_constants_t constants;
-    /** Exact depth-source-region constants at b2. */
-    ID3D11Buffer *source_region_constants = nullptr;
-    ID3D11ComputeShader *shader = nullptr;
-    ID3D11ShaderResourceView *candidate = nullptr;
-    ID3D11ShaderResourceView *source_color = nullptr;
-    /** Always explicit: live exclusion or replay's zero-cleared exclusion texture. */
-    ID3D11ShaderResourceView *tensor_exclusion = nullptr;
-    ID3D11UnorderedAccessView *ownership_refined_output = nullptr;
-    dispatch_command_t dispatch;
-  };
-
   struct vertical_command_t {
     base_constants_t constants;
     ID3D11ComputeShader *shader = nullptr;
-    ID3D11ShaderResourceView *ownership_refined = nullptr;
+    ID3D11ShaderResourceView *candidate = nullptr;
     ID3D11UnorderedAccessView *vertical_majorant_output = nullptr;
     ID3D11UnorderedAccessView *vertical_conditioned_output = nullptr;
     dispatch_command_t dispatch;
@@ -138,12 +125,6 @@ namespace models::host_sbs_v2_gpu {
   [[nodiscard]] bool record_map_history(
     ID3D11DeviceContext *context,
     const map_history_command_t &command
-  ) noexcept;
-
-  /** Record conservative source-color ownership refinement. */
-  [[nodiscard]] bool record_ownership(
-    ID3D11DeviceContext *context,
-    const ownership_command_t &command
   ) noexcept;
 
   /** Record the column upper/lower envelope and fixed vertical share. */

@@ -493,6 +493,84 @@ namespace offline_sbs::wire {
     return result;
   }
 
+  namespace {
+    void validate_worker_result_relations(const worker_result_contract_t &result) {
+      const auto &source = result.source;
+      const auto &analysis = result.analysis_contract;
+      const auto &runtime = analysis.resolved_runtime;
+      if (
+        !analysis.observation_timeline ||
+        analysis.observation_timeline->count != source.frame_count ||
+        analysis.artifact_mode != "adaptive" ||
+        analysis.inference_mode != "single-pass-tensorrt" ||
+        !analysis.depth_inference_enabled ||
+        analysis.scheduled_depth_update_count != source.frame_count ||
+        analysis.tensorrt_enqueue_count != source.frame_count ||
+        analysis.source_frame_count != source.frame_count ||
+        analysis.source_width != source.width ||
+        analysis.source_height != source.height ||
+        analysis.source_first_sequence != 1 ||
+        analysis.adaptive_state.transport != "atomic-latest-v1" ||
+        analysis.adaptive_state.retained_history ||
+        analysis.adaptive_state.frame_count != source.frame_count ||
+        analysis.sbs.enabled || analysis.sbs.frame_count != 0
+      ) {
+        throw contract_error(
+          "worker analysis attestation disagrees with the source or one-pass contract"
+        );
+      }
+
+      if (source.frame_count == std::numeric_limits<std::uint64_t>::max()) {
+        throw contract_error("worker source frame range overflows");
+      }
+      std::uint64_t expected_start = 1;
+      for (std::size_t index = 0; index < result.scenes.size(); ++index) {
+        const auto &scene = result.scenes[index];
+        if (
+          scene.scene_id != index + 1u ||
+          scene.start_sequence != expected_start ||
+          scene.evidence.source_frame_count != scene.frame_count
+        ) {
+          throw contract_error(
+            "worker scenes are not a contiguous one-based source partition"
+          );
+        }
+        expected_start = scene.end_sequence_exclusive;
+      }
+      if (expected_start != source.frame_count + 1u) {
+        throw contract_error("worker scenes do not cover every source frame exactly once");
+      }
+
+      if (result.operation != "convert") {
+        return;
+      }
+      if (result.replay_contracts.size() != result.scenes.size()) {
+        throw contract_error("worker conversion has no one-to-one scene replay partition");
+      }
+      for (std::size_t index = 0; index < result.scenes.size(); ++index) {
+        const auto &scene = result.scenes[index];
+        const auto &replay = result.replay_contracts[index];
+        if (
+          replay.scene_id != scene.scene_id ||
+          replay.start_sequence != scene.start_sequence ||
+          replay.end_sequence_exclusive != scene.end_sequence_exclusive ||
+          replay.sbs.frame_count != scene.frame_count ||
+          replay.sbs.width != runtime.output_sbs_width ||
+          replay.sbs.height != runtime.output_sbs_height ||
+          replay.sbs.frame_format != runtime.output_frame_format ||
+          replay.sbs.transfer != runtime.output_transfer ||
+          replay.sbs.primaries != runtime.output_primaries ||
+          replay.sbs.row_order != runtime.output_row_order ||
+          !replay.sbs.atomic_publication
+        ) {
+          throw contract_error(
+            "worker replay attestation disagrees with its scene or resolved output"
+          );
+        }
+      }
+    }
+  }  // namespace
+
   nlohmann::json to_json(const worker_result_contract_t &value) {
     json scenes = json::array();
     for (const auto &scene : value.scenes) {
@@ -536,6 +614,7 @@ namespace offline_sbs::wire {
       {"staging_identity", value.staging_identity ? *value.staging_identity : json(nullptr)},
       {"output", value.output_path ? json(*value.output_path) : json(nullptr)},
     };
+    (void) parse_worker_result_contract(result);
     return result;
   }
 
@@ -671,14 +750,14 @@ namespace offline_sbs::wire {
       result.output_path = required_string(value, "output", "worker result");
     }
     if (result.operation == "convert") {
-      if (!result.staging_identity || !result.output_path ||
-          result.replay_contracts.size() != result.scenes.size()) {
-        throw contract_error("conversion result lacks exact output/replay attestations");
+      if (!result.staging_identity || !result.output_path) {
+        throw contract_error("conversion result lacks exact output attestations");
       }
     } else if (result.staging_identity || result.output_path ||
                !result.replay_contracts.empty()) {
       throw contract_error("evaluation result unexpectedly reports conversion output");
     }
+    validate_worker_result_relations(result);
     return result;
   }
 

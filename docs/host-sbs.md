@@ -24,7 +24,6 @@ flowchart LR
     CAMERA["Scene-latched raw center"]
     CURVE["Fixed raw coordinate and curve"]
     CONTAINER["Pointwise soft source-U container"]
-    OWNER["Conservative ownership correction"]
     VERTICAL["75/25 vertical envelope share"]
     ROW["Horizontal majorant"]
     PLANE["Post-limit subtitle plane and analytic collar"]
@@ -35,7 +34,7 @@ flowchart LR
     CAPTURE --> MATCH --> DOMAIN --> PREPROCESS --> DAV2
     REGION -. optional authority .-> MATCH
     DAV2 --> CUT --> CAMERA
-    DAV2 --> CAMERA --> CURVE --> CONTAINER --> OWNER --> VERTICAL --> ROW --> PLANE --> INVERSE
+    DAV2 --> CAMERA --> CURVE --> CONTAINER --> VERTICAL --> ROW --> PLANE --> INVERSE
     CAPTURE -. current-ready ordinary or due work .-> OCR --> LOCATOR
     CAPTURE -. authenticated current abstention .-> LOCATOR
     CUT --> LOCATOR --> PLANE
@@ -46,15 +45,15 @@ flowchart LR
 Only the complete atomic final parallax field has live rendering authority. It is the
 subtitle-conditioned publication selected by an authenticated infer, a CPU-known force/fail-safe
 path, or an authenticated cadence-due subtitle publication on either depth branch, and is sampled
-directly by reprojection. Raw depth, canonical coordinate, candidate parallax,
-ownership-refined parallax, vertical-envelope output, and the unconditioned row majorant are
+directly by reprojection. Raw depth, canonical coordinate, candidate parallax, vertical-envelope
+output, and the unconditioned row majorant are
 diagnostics that explain how the final field was produced.
 
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 73/tag `0x3EDD0B65`, canonical SHA-256
-`4cf03fa21295c65580e3af0b33775fa891dc434df8ec7a7e9881a50084607a75`. It binds the
+schema 74/tag `0x419B307A`, canonical SHA-256
+`6feb4b8dd74cd4a67df8a8f0f6892aac6be93e9e068ce2177f43391563390c3a`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -65,14 +64,14 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744` |
-| `parallax_v2_producer` | 20 | `f6d850b391cf145908d9416c51c1ced23a03721dc754eb020cc52236a95629b3` |
-| `parallax_v2_coordinate_diagnostic` | 1 | `9c52f0e3b70244d6ba7c2865ec14fe5367388fa36dbdcf51b1037f11af3ad5ad` |
-| `near_identical_detector` | 4 | `c4443d416964e1437dd7ca4d78ca4781aea2835b159b03e8856456890ef006a4` |
-| `gpu_trace` | 1 | `ec553c5cd1bb095ae84df2ccbf866413dc0bfe7b251e6dd3591f2a6c74ff96bf` |
-| `parallax_v2_live_renderer` | 2 | `82f983e406d5ac5d034ce86745c923ad9266a8b93a27a598325b7c04c8dd2589` |
-| `parallax_v2_p010_y` | 1 | `ab499f7edf78ba474d5b4e34137200e70391d65ebba43ef85914c8d712c66855` |
+| `parallax_v2_producer` | 18 | `e00c710d73aade4db91a0842160203125b6c4378e9d56353df9f732b94577986` |
+| `parallax_v2_coordinate_diagnostic` | 1 | `1b4272ce59e03a4b7a7bcf192153475a9c6efb29dca0a9c3d110b1fb0175f327` |
+| `near_identical_detector` | 4 | `62317daf8b1e95f0146518c2e3f4be98d32064f02d04e330fb904cd58322fc99` |
+| `gpu_trace` | 1 | `c33fd517228e48e71b3b0126ed169f1010160cf75a2304eeb4c9e80c22502ac4` |
+| `parallax_v2_live_renderer` | 2 | `bf3cdd0ffdd73dbf7148292be31fc37f49e64ea719d58d2ec1bebeedc724ac94` |
+| `parallax_v2_p010_y` | 1 | `e739f6b42b56a645b2e00af971171f1b6441c2ab16b16c5e72e5df7df85d67a6` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `1497c6a7b8bf42e0ec8485d5b810f817f8be9810bb57fed575a8a634973c746b` |
+| `parallax_v2_live_diagnostic` | 2 | `941fbd61c554ddad4e5ade613ea1e5909cd059fe5b618400f45841f40ef4f982` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
 The contract admits the following production calibration:
@@ -100,9 +99,9 @@ state checksum, and renderer closure must also authenticate. The fused engine ha
 input and one FP32 high-grid output; FP32 `2x2` average pooling supplies the internal DAV2 input and
 the coarse DAV2 output never crosses the engine boundary. The same high output owns normalization,
 temporal history, scene-cut evidence, camera state, geometry conditioning, and publication. Live
-Host SBS, production Web UI conversion, and the maintained benchmark harness use this pinned
-composite when its authenticated local asset is present; absence retains the coherent legacy DAV2
-path, while a present invalid asset fails closed. There is no supported Host SBS model selector.
+Host SBS, production Web UI conversion, and the maintained benchmark harness require this pinned
+composite. A missing, non-regular, unreadable, or hash-mismatched asset fails flat; no raw DAV2
+runtime is selected. There is no supported Host SBS model selector.
 
 Fixed-shape shader bytecode is cached across restarts under the executable's trusted configuration
 directory at `shader-cache/host-sbs-v1`. Each artifact filename is keyed by the authenticated source
@@ -143,7 +142,7 @@ preprocessor treats that exact rectangle as its crop-local logical source and fi
 deterministic centered integer content rectangle. It never stretches or discards pixels from that
 logical source.
 Synthetic tensor pixels outside the content rectangle replicate the nearest content edge and are
-excluded from depth statistics, scene-cut evidence, ownership, history comparison/authority, and
+excluded from depth statistics, scene-cut evidence, history comparison/authority, and
 OCR authority. The fused map still copies the complete raw padded history tuple, with exclusion `1`
 preventing synthetic cells from contributing detector evidence. Every
 domain uses the same canonical full-grid producer dispatch, including heavily padded force-infer
@@ -187,9 +186,9 @@ artifacts and manifest color fields when auditing the pipeline.
 
 ## Scene camera and raw coordinate
 
-For each finite public depth field, the producer calculates exact extrema, arithmetic mean, and
-population standard deviation on the active single grid: high for the fused composite and coarse
-for legacy DAV2. Standard deviation is validity evidence only. A field with
+For each finite public high-resolution depth field, the producer calculates exact extrema,
+arithmetic mean, and population standard deviation on the fused composite's single grid. Standard
+deviation is validity evidence only. A field with
 `sigma <= 1e-6` is collapsed and cannot produce current-frame geometry.
 
 The same GPU traversal also produces the raw normalization reduction consumed by the percentile
@@ -536,27 +535,6 @@ The 12-word state layout retains `container_scale` for ABI compatibility. Its on
 exactly `1.0`; all attenuation belongs to the pointwise map above. Dumps, replay traces, and the
 live state validator fail closed on any other value.
 
-## Foreground ownership
-
-DAV2 runs at a lower spatial resolution than its analysis source. A depth boundary can therefore
-land in a mixed model texel whose center belongs to the far side even when most of the source
-footprint belongs to the foreground. Before slope conditioning, the ownership pass checks the
-exact matched full-resolution analysis source along the candidate cliff normal: the full captured
-frame for ordinary V2, or the exact ROI rectangle addressed directly inside that same retained
-full-frame texture. Ownership scale and interpolation remain crop-local; only final integer color
-loads receive the authenticated ROI offset.
-
-It changes a cell only when all of the following evidence agrees:
-
-- the candidate contains one strong, stable near/far cliff;
-- neighboring model cells establish an existing near plateau;
-- the full-resolution source contains one unique, monotone contour at the same boundary; and
-- the correction can only pull the mixed far-side cell toward that existing near plateau.
-
-The pass never lowers parallax, creates a new edge, paints color, or guesses between competing
-contours. Ambiguous evidence is an exact no-op. This precision-first policy intentionally abstains
-on many transparent, reflective, very thin, or highly textured boundaries.
-
 ## Cliff conditioning
 
 A large depth cliff cannot be inverted safely as a single-valued backward warp without either
@@ -816,7 +794,7 @@ change creates a raw-model fallback.
 
 An inference receipt runs the complete depth postprocess chain, including frame statistics,
 normalization reductions and histogram, depth texture publication, scene-cut/history work, and
-every V2 state, mapping, ownership and Base-field pass. Subtitle publication is authenticated
+every V2 state, mapping, limiter, and Base-field pass. Subtitle publication is authenticated
 separately inside the joined transaction. Ordinary work consumes OCR output with complete
 `RQST`/`CBRG`/`OOCR` proof, or publishes its requested abstention, only on infer. Due value `8`
 consumes current OCR on infer or reuse; due value `16` publishes the exact-current abstention on
@@ -912,8 +890,8 @@ mismatch fail the stream flat instead of disabling adaptive reuse invisibly.
 
 These failures are visible. Host-side detector setup failures log once with the actual model
 dimensions, derived tile grid/count, and byte count; model/profile/field failures log their actual
-dimensions and leave the stream flat. An absent fused asset logs a warning naming its path and the
-selected legacy runtime. A present but invalid asset logs the identity failure and cannot fall back.
+dimensions and leave the stream flat. A missing or invalid fused asset logs its path, expected
+identity, and observed status, then leaves Host SBS flat.
 The device-only malformed-SRV check remains nonblocking and fail-to-infer; authenticated diagnostic
 trace validation exposes it without adding a production branch or evidence readback.
 
@@ -936,7 +914,7 @@ authenticated current-route force-infer completion establishes known state.
 Model preparation, shader compilation, and the live renderer are fail-closed. Live shaders are
 compiled and cached at process startup. Dump-only resources are created lazily and cannot prevent a
 stream from starting. A failure in optional diagnostics has no rendering authority. An armed
-schema-39 dump preserves Base when SLR13 is active, the complete atomic conditioned final field,
+schema-40 dump preserves Base when SLR13 is active, the complete atomic conditioned final field,
 and the selected path's publication resources with ordered D3D11 `CopyResource` operations
 and one terminal event. Submission performs no GPU-to-CPU wait or synchronous Map. Later
 render-thread calls poll with `DONOTFLUSH`, collect staging resources with `DO_NOT_WAIT`, then hand
@@ -1050,7 +1028,7 @@ timer-boundary shift for a regression.
 against the retained matched source. ROI samples therefore appear in that timer
 without a separate live crop allocation or copy.
 `depth_parallax_map_gpu` now includes both candidate mapping and the fused six-value padded-history
-copy plus owner publication up to `ownership_start`; that added bandwidth belongs to this existing
+copy plus owner publication up to `parallax_limits_start`; that added bandwidth belongs to this existing
 timer and is not a new counter or schema boundary. The cadence diagnostics report
 `roi_direct_inputs/dump_copies`; the first counts admitted direct ROI inputs, while the second can
 increase only for an explicit Dump 3D diagnostic reconstruction after live timing has closed.
@@ -1115,9 +1093,11 @@ overflowing enumeration, failed queries, a replaced child, weak edge evidence, o
 failure retain the complete client. No executable name, window class, control ID, fixed inset, pixel
 color, motion, or playback state participates. Letterbox and pillarbox pixels inside the proven
 child therefore remain part of the content domain. The stable outer content container is preferred;
-a renderer descendant is not made an independent authority. A positive selection requires two
-complete consecutive censuses with the same winning HWND and rectangle, followed by one final
-identity/geometry recheck. Negative census results alone are retained for 100 ms; that can only
+a renderer descendant is not made an independent authority. A positive selection requires the
+same winning HWND and rectangle in complete censuses from two consecutive samples, followed by one
+final identity/geometry recheck. The censuses must be no more than 250 ms apart. The first sample
+remains provisional, so each sample performs at most one complete child census instead of repeating
+synchronous USER32 traversal. Negative census results alone are retained for 100 ms; that can only
 delay acquiring the child optimization and cannot grant child authority.
 
 ### Chromium semantic source
@@ -1166,9 +1146,9 @@ Immediately before attribution, the host also rechecks that the helper HWND stil
 the foreground root window, and still belongs to the reported process. This cheap Win32 guard
 closes the helper-heartbeat gap on Alt-Tab, close, and HWND reuse without putting COM on the stream.
 
-After exact frame attribution, DAV2 preprocessing, OCR preprocessing, and full-resolution ownership
-sample the selected rectangle directly from the retained full matched texture with one exact integer
-source offset; all resize, contour, cut, center, and history coordinates remain ROI-local. Arbitrary
+After exact frame attribution, DAV2 and OCR preprocessing sample the selected rectangle directly
+from the retained full matched texture with one exact integer source offset; all resize, cut, center,
+and history coordinates remain ROI-local. Arbitrary
 source aspect ratios use the centered integer contain-fit described above, with edge-replicated
 padding excluded from analysis. No ordinary live ROI allocation or copy is submitted. Dump 3D alone
 may reconstruct the exact completed ROI as a same-format `CopySubresourceRegion` artifact after
@@ -1233,9 +1213,8 @@ no DWM/client geometry mapping on that path.
 Dump 3D records one matched current-contract frame: source/model/public raw-model evidence,
 authenticated analysis-region placement, the V2 geometry chain and inverse map, scene/cut
 attribution, packed SBS, and—when selected—the exact OCR8 record and compact SLR13 state used by
-conditioning. `model_input.f32` is the legacy coarse input or the fused model's sole high input;
-`raw_depth.f32` is the legacy DAV2 output or the fused model's sole high `refined_depth` output.
-Fused packages separately bind embedded DAV2 provenance and composite runtime provenance. The
+conditioning. `model_input.f32` is the fused model's sole high input and `raw_depth.f32` is its sole
+high `refined_depth` output. Packages separately bind embedded DAV2 provenance and composite runtime provenance. The
 reader accepts only the current schema and identities. Retired SLR3--SLR9 and GST/OGR/ORS packages
 are not replayed or reinterpreted.
 
@@ -1255,7 +1234,7 @@ source conversion poll so even a completely static desktop receives every later 
 session ends or changes mode first, its unpublished diagnostic batch is cancelled at teardown
 instead of making teardown wait for the GPU.
 
-Use `.f32` artifacts for quantitative comparisons. Schema 39 does not store redundant scalar/heat
+Use `.f32` artifacts for quantitative comparisons. Schema 40 does not store redundant scalar/heat
 preview PNGs or per-field shape sidecars; dimensions and warp-map semantics are authenticated in
 the manifest, while `model_input_shape.json` remains calibrated preprocess authority. Generate
 verified diagnostic previews on demand, outside the atomic package, with
@@ -1276,8 +1255,6 @@ transpose.
   windowed and fullscreen versions of the same content are not guaranteed to be affine-equivalent.
 - Single-frame warping has no observation of newly exposed background. Strong foreground cliffs
   therefore require a visible geometry compromise unless temporal or synthesized fill is added.
-- Transparent, reflective, and sub-grid objects often lack a unique ownership contour. The
-  precision-first ownership pass abstains instead of risking a wrong snap.
 - Scene detection is inferred, not ground truth. Exposure, structureless frames, persistent motion,
   and rapid consecutive cuts require the separate guarded state machine.
 - The ROI route uses at most one current-output region. Chromium accessibility exposes a semantic

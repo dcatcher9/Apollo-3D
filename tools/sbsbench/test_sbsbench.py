@@ -2560,13 +2560,18 @@ class EvalContractTests(unittest.TestCase):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "src", "model_manager.h"), encoding="utf-8") as fh:
             manager = fh.read()
+        with open(os.path.join(repo, "src", "model_manager.cpp"), encoding="utf-8") as fh:
+            manager_impl = fh.read()
+        with open(os.path.join(repo, "src", "prod_zipdepth_convex2x.h"),
+                  encoding="utf-8") as fh:
+            composite = fh.read()
         with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
                   encoding="utf-8") as fh:
             estimator = fh.read()
         self.assertIn("depth_engine_builder_level = 5", manager)
-        self.assertIn("trt-opt770x434-max1036-level5-v3", manager)
-        # The bound belongs in the tag: the cached engine filename encodes only the opt
-        # shape and builder level, so a kMAX change would otherwise reuse a stale engine.
+        self.assertIn("trt-6high-point-l5-v2", composite)
+        self.assertIn("prod_zipdepth_convex2x::engine_recipe", manager_impl)
+        # The bound still owns source-aspect fitting before the exact 2x high profile is selected.
         self.assertIn("depth_engine_max_dim = 1036", manager)
         self.assertIn("setBuilderOptimizationLevel(depth_engine_builder_level)", estimator)
 

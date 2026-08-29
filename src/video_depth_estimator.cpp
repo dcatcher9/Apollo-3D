@@ -457,7 +457,6 @@ static bool validate_engine_io_locked(nvinfer1::ICudaEngine *engine, engine_slot
     bool mode_ok = false;
   };
   observed_tensor_t input;
-  observed_tensor_t legacy_output;
   observed_tensor_t refined_output;
   const auto observe = [](
                          observed_tensor_t &tensor,
@@ -486,8 +485,6 @@ static bool validate_engine_io_locked(nvinfer1::ICudaEngine *engine, engine_slot
     const std::string_view tensor_name {name};
     if (tensor_name == models::prod_zipdepth_convex2x::input) {
       observe(input, type, mode, nvinfer1::TensorIOMode::kINPUT);
-    } else if (tensor_name == models::prod_zipdepth_convex2x::legacy_output) {
-      observe(legacy_output, type, mode, nvinfer1::TensorIOMode::kOUTPUT);
     } else if (tensor_name == models::prod_zipdepth_convex2x::refined_output) {
       observe(refined_output, type, mode, nvinfer1::TensorIOMode::kOUTPUT);
     }
@@ -495,29 +492,21 @@ static bool validate_engine_io_locked(nvinfer1::ICudaEngine *engine, engine_slot
   slot.io_kind = models::prod_zipdepth_convex2x::classify_named_io(
     static_cast<std::uint32_t>(engine->getNbIOTensors()),
     input.present,
-    legacy_output.present,
     refined_output.present
   );
   const bool required_properties_ok =
-    input.fp32 && input.mode_ok &&
-    ((slot.io_kind == models::prod_zipdepth_convex2x::engine_io_e::production_dav2 &&
-      legacy_output.fp32 && legacy_output.mode_ok) ||
-     (slot.io_kind == models::prod_zipdepth_convex2x::engine_io_e::
-                       production_dav2_zipdepth_convex2x &&
-      refined_output.fp32 && refined_output.mode_ok));
-  const bool fused_profiles_ok =
-    slot.io_kind != models::prod_zipdepth_convex2x::engine_io_e::
-                      production_dav2_zipdepth_convex2x ||
+    input.fp32 && input.mode_ok && refined_output.fp32 && refined_output.mode_ok;
+  const bool profiles_ok =
     engine->getNbOptimizationProfiles() ==
       static_cast<int>(models::prod_zipdepth_convex2x::fixed_profile_shapes.size());
   slot.io_compatible =
-    slot.io_kind != models::prod_zipdepth_convex2x::engine_io_e::invalid &&
-    required_properties_ok && fused_profiles_ok;
+    slot.io_kind == models::prod_zipdepth_convex2x::engine_io_e::
+                      production_dav2_zipdepth_convex2x &&
+    required_properties_ok && profiles_ok;
   if (!slot.io_compatible) {
     BOOST_LOG(error)
-      << "Depth engine must expose either the exact legacy two-tensor FP32 contract or the "
-         "exact fused single-high two-tensor FP32 contract with six fixed profiles; rejecting "
-         "the engine.";
+      << "Depth engine must expose the exact fused single-high two-tensor FP32 contract with "
+         "six fixed profiles; rejecting the engine.";
   }
   return slot.io_compatible;
 }
@@ -616,14 +605,9 @@ static bool detach_incompatible_engine_locked(const std::string &engine_key) {
 static bool warmup_execution_context(
   cuda_driver_api &cuda,
   CUcontext cuda_ctx,
-  nvinfer1::IExecutionContext *exec_context,
-  const models::prod_zipdepth_convex2x::engine_io_e io_kind
+  nvinfer1::IExecutionContext *exec_context
 ) {
-  const bool fused =
-    io_kind == models::prod_zipdepth_convex2x::engine_io_e::
-                 production_dav2_zipdepth_convex2x;
-  if (!exec_context || !cuda.is_valid() ||
-      io_kind == models::prod_zipdepth_convex2x::engine_io_e::invalid) {
+  if (!exec_context || !cuda.is_valid()) {
     return false;
   }
   if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
@@ -638,16 +622,12 @@ static bool warmup_execution_context(
     cuda.cuStreamDestroy(stream);
   });
 
-  const int h = fused ?
-                  static_cast<int>(
-                    models::prod_zipdepth_convex2x::fixed_profile_shapes[0].height
-                  ) :
-                  models::depth_engine_opt_height;
-  const int w = fused ?
-                  static_cast<int>(
-                    models::prod_zipdepth_convex2x::fixed_profile_shapes[0].width
-                  ) :
-                  models::depth_engine_opt_width;
+  const int h = static_cast<int>(
+    models::prod_zipdepth_convex2x::fixed_profile_shapes[0].height
+  );
+  const int w = static_cast<int>(
+    models::prod_zipdepth_convex2x::fixed_profile_shapes[0].width
+  );
   const size_t in_elems = (size_t) 3 * h * w;
   const size_t out_elems = (size_t) h * w;
   const std::size_t output_logical_bytes = out_elems * sizeof(float);
@@ -656,8 +636,7 @@ static bool warmup_execution_context(
   if (!aligned_output_bytes) {
     return false;
   }
-  const std::size_t output_capacity =
-    fused ? *aligned_output_bytes : output_logical_bytes;
+  const std::size_t output_capacity = *aligned_output_bytes;
   CUdeviceptr d_in = 0;
   CUdeviceptr d_out = 0;
   if (cuda.cuMemAlloc(&d_in, in_elems * sizeof(float)) != CUDA_SUCCESS) {
@@ -674,36 +653,31 @@ static bool warmup_execution_context(
   });
 
   const auto input_dims = make_input_dims(h, w);
-  const bool profile_selection_attempted = fused;
-  const bool profile_selected = !fused ||
-    exec_context->setOptimizationProfileAsync(0, stream);
+  const bool profile_selection_attempted = true;
+  const bool profile_selected = exec_context->setOptimizationProfileAsync(0, stream);
   const bool shape_attempted = profile_selected;
   const bool shape_set = shape_attempted &&
     exec_context->setInputShape(
       models::prod_zipdepth_convex2x::input.data(), input_dims
     );
-  const bool output_bounds_attempted = fused && shape_set;
+  const bool output_bounds_attempted = shape_set;
   std::int64_t output_required = -1;
   if (output_bounds_attempted) {
     output_required = exec_context->getMaxOutputSize(
       models::prod_zipdepth_convex2x::refined_output.data()
     );
   }
-  const bool output_bounds_valid = !fused ||
-    (output_bounds_attempted && output_required > 0 &&
-     static_cast<std::uint64_t>(output_required) <= output_capacity);
+  const bool output_bounds_valid = output_bounds_attempted && output_required > 0 &&
+    static_cast<std::uint64_t>(output_required) <= output_capacity;
   const bool address_binding_attempted = shape_set && output_bounds_valid;
   const bool input_address_bound = address_binding_attempted &&
     exec_context->setTensorAddress(
       models::prod_zipdepth_convex2x::input.data(),
       reinterpret_cast<void *>(d_in)
     );
-  const auto output_name = fused ?
-                             models::prod_zipdepth_convex2x::refined_output :
-                             models::prod_zipdepth_convex2x::legacy_output;
   const bool output_address_bound = address_binding_attempted &&
     exec_context->setTensorAddress(
-      output_name.data(),
+      models::prod_zipdepth_convex2x::refined_output.data(),
       reinterpret_cast<void *>(d_out)
     );
   const bool bound = address_binding_attempted &&
@@ -746,8 +720,7 @@ static bool warmup_execution_context(
   const bool synchronized = enqueued && stream_quiesced;
   if (!synchronized) {
     BOOST_LOG(error)
-      << (fused ? "Fused DAV2 + convex2x" : "DAV2")
-      << " startup warmup diagnostics: profile_attempted="
+      << "Fused DAV2 + convex2x startup warmup diagnostics: profile_attempted="
       << profile_selection_attempted << " profile_selected=" << profile_selected
       << " shape_attempted=" << shape_attempted
       << " shape_set=" << shape_set
@@ -761,8 +734,8 @@ static bool warmup_execution_context(
       << " synchronize=" << synchronize_result
       << " stream_quiesced=" << stream_quiesced << '.';
   }
-  BOOST_LOG(info) << (fused ? "Fused DAV2 + convex2x" : "DAV2")
-                  << " depth model startup warmup complete (" << w << 'x' << h
+  BOOST_LOG(info) << "Fused DAV2 + convex2x depth model startup warmup complete ("
+                  << w << 'x' << h
                   << (synchronized ? ")." : "); execution failed.");
   return synchronized;
 }
@@ -974,11 +947,11 @@ namespace models {
   bool parallax_v2_result_is_authenticated(const estimate_result &result) {
     if (!result.completed_frame_valid || result.completed_frame_id == 0u ||
         !result.parallax_v2_producer_active || !result.shadow_candidate_parallax ||
-        !result.shadow_ownership_refined_parallax ||
         !result.shadow_vertical_majorant || !result.shadow_vertical_conditioned ||
         !result.shadow_base_final_parallax || !result.shadow_final_parallax ||
         !result.shadow_state || !result.shadow_frame_stats ||
-        !result.raw_model_provenance || !result.parallax_v2_shader_provenance ||
+        !result.raw_model_provenance || !result.composite_depth_runtime_provenance ||
+        !result.parallax_v2_shader_provenance ||
         result.raw_width <= 0 || result.raw_height <= 0 ||
         result.field_width <= 0 || result.field_height <= 0) {
       return false;
@@ -989,22 +962,14 @@ namespace models {
       input_region.source_width,
       input_region.source_height
     );
-    const bool fused_runtime =
-      result.composite_depth_runtime_provenance != nullptr;
-    const auto fused_shape = fused_runtime ?
-                               host_sbs_convex2x_field_shape(calibrated_dav2_shape) :
-                               std::optional<depth_tensor_shape_t> {};
-    const depth_tensor_shape_t expected_result_shape = fused_runtime && fused_shape ?
-                                                         *fused_shape :
-                                                         calibrated_dav2_shape;
+    const auto fused_shape = host_sbs_convex2x_field_shape(calibrated_dav2_shape);
     const depth_tensor_shape_t result_shape {result.raw_width, result.raw_height};
     const depth_tensor_shape_t field_shape {result.field_width, result.field_height};
     if (!input_region.valid() ||
         !host_sbs_v2_source_resolution_is_supported(
           input_region.source_width, input_region.source_height) ||
-        (fused_runtime && !fused_shape) ||
-        expected_result_shape != result_shape ||
-        result.refined_live_geometry_active != fused_runtime ||
+        !fused_shape || *fused_shape != result_shape ||
+        !result.refined_live_geometry_active ||
         !input_region.tensor_content.valid(result_shape)) {
       return false;
     }
@@ -1015,16 +980,11 @@ namespace models {
         input_region.source_height,
         calibrated_dav2_shape
       );
-      const auto expected_content = expected && fused_runtime ?
+      const auto expected_content = expected ?
                                       host_sbs_convex2x_content_rect(
                                         expected->tensor_content,
                                         calibrated_dav2_shape
-                                      ) :
-                                      expected ?
-                                        std::optional<depth_tensor_content_rect_t> {
-                                          expected->tensor_content
-                                        } :
-                                        std::nullopt;
+                                      ) : std::nullopt;
       if (!expected || expected->source_rect != depth_source_rect_t {
             input_region.left, input_region.top, input_region.right, input_region.bottom
           } || !expected_content || *expected_content != input_region.tensor_content) {
@@ -1038,10 +998,9 @@ namespace models {
       return false;
     }
 
-    std::array<Microsoft::WRL::ComPtr<ID3D11Resource>, 7u> field_resources;
-    const std::array<ID3D11ShaderResourceView *, 6u> field_views {
+    std::array<Microsoft::WRL::ComPtr<ID3D11Resource>, 6u> field_resources;
+    const std::array<ID3D11ShaderResourceView *, 5u> field_views {
       result.shadow_candidate_parallax.Get(),
-      result.shadow_ownership_refined_parallax.Get(),
       result.shadow_vertical_majorant.Get(),
       result.shadow_vertical_conditioned.Get(),
       result.shadow_base_final_parallax.Get(),
@@ -1111,46 +1070,41 @@ namespace models {
         )) {
       return false;
     }
-    if (result.composite_depth_runtime_provenance) {
-      const auto &composite = *result.composite_depth_runtime_provenance;
-      const std::string engine_prefix =
-        std::string {prod_zipdepth_convex2x::logical_model} + "." +
-        std::string {prod_zipdepth_convex2x::engine_recipe} + ".";
-      const std::string engine_suffix =
-        "-onnx" + std::string {prod_zipdepth_convex2x::fused_onnx_sha256} +
-        ".engine";
-      const std::string manifest_name =
-        std::string {prod_zipdepth_convex2x::logical_model} +
-        ".active-engine.json";
-      if (composite.model != prod_zipdepth_convex2x::logical_model ||
-          composite.onnx_sha256 != prod_zipdepth_convex2x::fused_onnx_sha256 ||
-          composite.embedded_dav2_onnx_sha256 !=
-            prod_zipdepth_convex2x::dav2_onnx_sha256 ||
-          composite.embedded_dav2_onnx_sha256 != model.onnx_sha256 ||
-          composite.zipdepth_checkpoint_sha256 !=
-            prod_zipdepth_convex2x::zipdepth_checkpoint_sha256 ||
-          composite.guidance_preprocess_source_closure_sha256 !=
-            model.preprocess_source_closure_sha256 ||
-          composite.engine_recipe != prod_zipdepth_convex2x::engine_recipe ||
-          composite.engine_artifact.size() <=
-            engine_prefix.size() + engine_suffix.size() ||
-          !composite.engine_artifact.starts_with(engine_prefix) ||
-          !composite.engine_artifact.ends_with(engine_suffix) ||
-          composite.active_engine_manifest != manifest_name ||
-          result.guidance_width != result_shape.width ||
-          result.guidance_height != result_shape.height ||
-          result.refined_width != result_shape.width ||
-          result.refined_height != result_shape.height ||
-          static_cast<bool>(result.guidance_model_input_snapshot) !=
-            static_cast<bool>(result.refined_model_depth_snapshot) ||
-          (result.guidance_model_input_snapshot &&
-           result.guidance_model_input_snapshot.Get() !=
-             result.model_input_snapshot.Get()) ||
-          (result.refined_model_depth_snapshot &&
-           result.refined_model_depth_snapshot.Get() !=
-             result.raw_model_depth_snapshot.Get())) {
-        return false;
-      }
+    const auto &composite = *result.composite_depth_runtime_provenance;
+    const std::string engine_prefix =
+      std::string {prod_zipdepth_convex2x::logical_model} + "." +
+      std::string {prod_zipdepth_convex2x::engine_recipe} + ".";
+    const std::string engine_suffix =
+      "-onnx" + std::string {prod_zipdepth_convex2x::fused_onnx_sha256} +
+      ".engine";
+    const std::string manifest_name =
+      std::string {prod_zipdepth_convex2x::logical_model} +
+      ".active-engine.json";
+    if (composite.model != prod_zipdepth_convex2x::logical_model ||
+        composite.onnx_sha256 != prod_zipdepth_convex2x::fused_onnx_sha256 ||
+        composite.embedded_dav2_onnx_sha256 !=
+          prod_zipdepth_convex2x::dav2_onnx_sha256 ||
+        composite.embedded_dav2_onnx_sha256 != model.onnx_sha256 ||
+        composite.zipdepth_checkpoint_sha256 !=
+          prod_zipdepth_convex2x::zipdepth_checkpoint_sha256 ||
+        composite.guidance_preprocess_source_closure_sha256 !=
+          model.preprocess_source_closure_sha256 ||
+        composite.engine_recipe != prod_zipdepth_convex2x::engine_recipe ||
+        composite.engine_artifact.size() <= engine_prefix.size() + engine_suffix.size() ||
+        !composite.engine_artifact.starts_with(engine_prefix) ||
+        !composite.engine_artifact.ends_with(engine_suffix) ||
+        composite.active_engine_manifest != manifest_name ||
+        result.guidance_width != result_shape.width ||
+        result.guidance_height != result_shape.height ||
+        result.refined_width != result_shape.width ||
+        result.refined_height != result_shape.height ||
+        static_cast<bool>(result.guidance_model_input_snapshot) !=
+          static_cast<bool>(result.refined_model_depth_snapshot) ||
+        (result.guidance_model_input_snapshot &&
+         result.guidance_model_input_snapshot.Get() != result.model_input_snapshot.Get()) ||
+        (result.refined_model_depth_snapshot &&
+         result.refined_model_depth_snapshot.Get() != result.raw_model_depth_snapshot.Get())) {
+      return false;
     }
     return true;
   }
@@ -1164,73 +1118,52 @@ namespace models {
 
   struct resolved_depth_runtime_t {
     config::depth_model_info model;
-    prod_zipdepth_convex2x::engine_io_e expected_io =
-      prod_zipdepth_convex2x::engine_io_e::production_dav2;
-    bool fused = false;
   };
 
-  /** Select the local fused graph without changing the public Host-SBS DAV2 model identity.
-   *
-   * Absence is the only legacy fallback.  Any directory entry at the frozen composite path must
-   * be a regular file with the exact frozen SHA; unreadable, non-regular, or mismatched assets
-   * fail closed instead of silently running a different graph.
-   */
+  /** Require the local fused graph without changing the public Host-SBS DAV2 model identity. */
   static bool resolve_depth_runtime(
     const std::filesystem::path &assets_dir,
     const config::depth_model_info &raw_model,
     resolved_depth_runtime_t &resolved
   ) {
-    resolved = {
-      .model = raw_model,
-      .expected_io = prod_zipdepth_convex2x::engine_io_e::production_dav2,
-      .fused = false,
-    };
     static_assert(depth_coordinate_v2::model_calibrations.size() == 1u);
-    const auto &production_dav2 = depth_coordinate_v2::model_calibrations.front();
-    if (raw_model.name != production_dav2.depth_model ||
-        raw_model.url != production_dav2.depth_model_url) {
-      // The local composite is an implementation detail of the one canonical production DAV2
-      // identity. Never substitute it for a caller-supplied/custom model.
-      return true;
+    const auto &embedded_dav2 = depth_coordinate_v2::model_calibrations.front();
+    if (raw_model.name != embedded_dav2.depth_model ||
+        raw_model.url != embedded_dav2.depth_model_url) {
+      BOOST_LOG(error)
+        << "The fused Host SBS runtime requires the canonical production DAV2 identity; got '"
+        << raw_model.name << "'.";
+      return false;
     }
     const auto fused_path = assets_dir /
       (std::string {prod_zipdepth_convex2x::logical_model} + ".onnx");
     std::error_code status_error;
     const auto status = std::filesystem::symlink_status(fused_path, status_error);
     if (status_error) {
-      BOOST_LOG(error) << "Could not inspect optional fused DAV2 + ZipDepth asset "
+      BOOST_LOG(error) << "Could not inspect required fused DAV2 + ZipDepth asset "
                        << fused_path << ": " << status_error.message() << '.';
       return false;
     }
     const bool present = std::filesystem::exists(status);
     const bool regular_file = present && std::filesystem::is_regular_file(status);
     const std::string sha256 = regular_file ? file_sha256_hex(fused_path) : std::string {};
-    const auto selection = detail::resolve_composite_depth_asset(
+    if (!detail::composite_depth_asset_is_authenticated(
       present,
       regular_file,
       sha256 == prod_zipdepth_convex2x::fused_onnx_sha256
-    );
-    if (selection == detail::composite_depth_asset_resolution_e::legacy) {
-      BOOST_LOG(warning)
-        << "Authenticated fused DAV2 + ZipDepth asset is absent at " << fused_path
-        << "; selecting the legacy DAV2 runtime for this estimator.";
-      return true;
-    }
-    if (selection == detail::composite_depth_asset_resolution_e::fail) {
+    )) {
       BOOST_LOG(error)
-        << "Local fused DAV2 + ZipDepth asset failed its frozen identity at " << fused_path
+        << "Required fused DAV2 + ZipDepth asset is missing or failed its frozen identity at "
+        << fused_path
         << " (expected SHA-256 " << prod_zipdepth_convex2x::fused_onnx_sha256
         << ", got " << (sha256.empty() ? "unreadable/non-regular" : sha256)
-        << "); refusing legacy fallback while the invalid asset is present.";
+        << "); Host SBS will fail flat.";
       return false;
     }
     resolved.model = {
       .name = std::string {prod_zipdepth_convex2x::logical_model},
       .url = {},
     };
-    resolved.expected_io =
-      prod_zipdepth_convex2x::engine_io_e::production_dav2_zipdepth_convex2x;
-    resolved.fused = true;
     BOOST_LOG(info) << "Selected authenticated local fused DAV2 + ZipDepth runtime "
                     << fused_path.filename() << '.';
     return true;
@@ -1419,82 +1352,25 @@ namespace models {
       return false;
     }
 
-    std::vector<nvinfer1::ITensor *> to_unmark;
-    nvinfer1::ITensor *legacy_output_tensor = nullptr;
-    nvinfer1::ITensor *refined_output_tensor = nullptr;
-    for (int index = 0; index < network->getNbOutputs(); ++index) {
-      auto *tensor = network->getOutput(index);
-      if (!tensor || !tensor->getName()) {
-        BOOST_LOG(error) << "TensorRT returned a null output tensor while building the depth engine.";
-        return false;
-      }
-      const std::string_view name {tensor->getName()};
-      if (name == models::prod_zipdepth_convex2x::legacy_output &&
-          !legacy_output_tensor) {
-        legacy_output_tensor = tensor;
-      } else if (name == models::prod_zipdepth_convex2x::refined_output &&
-                 !refined_output_tensor) {
-        refined_output_tensor = tensor;
-      } else {
-        to_unmark.push_back(tensor);
-      }
-    }
-    using depth_io_e = models::prod_zipdepth_convex2x::engine_io_e;
-    depth_io_e io_kind = models::prod_zipdepth_convex2x::classify_named_io(
-      2u,
-      true,
-      legacy_output_tensor != nullptr,
-      refined_output_tensor != nullptr
-    );
-    if (io_kind == depth_io_e::invalid ||
-        (legacy_output_tensor &&
-         legacy_output_tensor->getType() != nvinfer1::DataType::kFLOAT) ||
-        (refined_output_tensor &&
-         refined_output_tensor->getType() != nvinfer1::DataType::kFLOAT)) {
+    auto *refined_output_tensor = network->getNbOutputs() == 1 ? network->getOutput(0) : nullptr;
+    if (!refined_output_tensor || !refined_output_tensor->getName() ||
+        std::string_view {refined_output_tensor->getName()} !=
+          models::prod_zipdepth_convex2x::refined_output ||
+        refined_output_tensor->getType() != nvinfer1::DataType::kFLOAT) {
       BOOST_LOG(error)
-        << "Depth ONNX is missing the exact required FP32 output contract for its inputs.";
+        << "Depth ONNX must expose exactly one FP32 output 'refined_depth'.";
       return false;
     }
-    const bool fused =
-      io_kind == depth_io_e::production_dav2_zipdepth_convex2x;
-    if (fused && !to_unmark.empty()) {
+    if (model.name != models::prod_zipdepth_convex2x::logical_model ||
+        artifact.source_sha256 != models::prod_zipdepth_convex2x::fused_onnx_sha256) {
       BOOST_LOG(error)
-        << "Fused DAV2 + ZipDepth ONNX exposes unexpected or duplicate outputs; "
-           "refusing to prune its frozen exact I/O contract.";
-      return false;
-    }
-    for (auto *tensor : to_unmark) {
-      BOOST_LOG(info) << "Depth engine: pruning unsupported output '" << tensor->getName() << "'.";
-      network->unmarkOutput(*tensor);
-    }
-
-    const auto classified_io = models::prod_zipdepth_convex2x::classify_named_io(
-      static_cast<std::uint32_t>(
-        network->getNbInputs() + network->getNbOutputs()
-      ),
-      input_tensor != nullptr,
-      legacy_output_tensor != nullptr,
-      refined_output_tensor != nullptr
-    );
-    if (classified_io != io_kind ||
-        network->getNbOutputs() != 1) {
-      BOOST_LOG(error)
-        << "Depth ONNX could not be reduced to an exact supported input/output contract.";
-      return false;
-    }
-    if (fused &&
-        (model.name != models::prod_zipdepth_convex2x::logical_model ||
-         artifact.source_sha256 !=
-           models::prod_zipdepth_convex2x::fused_onnx_sha256)) {
-      BOOST_LOG(error)
-        << "Fused DAV2 + ZipDepth ONNX identity does not match the frozen experimental "
+        << "Fused DAV2 + ZipDepth ONNX identity does not match the frozen production "
            "contract; refusing to build it.";
       return false;
     }
 
     artifact.name = engine_filename(
       model,
-      io_kind,
       engine_compatibility_tag(cuda, cuda_device) + "-onnx" + artifact.source_sha256
     );
     if (artifact.name.empty()) {
@@ -1509,8 +1385,8 @@ namespace models {
       return true;
     }
 
-    BOOST_LOG(info) << "Building " << (fused ? "fused DAV2 + convex2x" : "DAV2")
-                    << " TensorRT engine from ONNX... This will take a few minutes.";
+    BOOST_LOG(info)
+      << "Building fused DAV2 + convex2x TensorRT engine from ONNX... This will take a few minutes.";
 
     auto config = TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
     if (!config) {
@@ -1519,8 +1395,8 @@ namespace models {
     }
     // Set memory limit to 4GB.
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 4ULL << 30);
-    // Both recipes intentionally retain level 5. Changing tactic search must produce a new cache
-    // recipe rather than silently consuming a plan selected under another level.
+    // Changing tactic search must produce a new cache recipe rather than silently consuming a
+    // plan selected under another level.
     config->setBuilderOptimizationLevel(depth_engine_builder_level);
     BOOST_LOG(info) << "TensorRT builder optimization level "
                     << depth_engine_builder_level << '.';
@@ -1540,43 +1416,18 @@ namespace models {
                name, nvinfer1::OptProfileSelector::kMAX, dimensions
              );
     };
-    if (!fused) {
-      // Preserve the shipping DAV2 ranged profile exactly.
+    for (const auto shape : models::prod_zipdepth_convex2x::fixed_profile_shapes) {
       auto *profile = builder->createOptimizationProfile();
+      const auto high_dimensions = make_input_dims(
+        static_cast<int>(shape.height), static_cast<int>(shape.width)
+      );
       const bool profile_ok = profile &&
-        profile->setDimensions(
-          input_tensor->getName(), nvinfer1::OptProfileSelector::kMIN,
-          make_input_dims(14, 14)
-        ) &&
-        profile->setDimensions(
-          input_tensor->getName(), nvinfer1::OptProfileSelector::kOPT,
-          make_input_dims(depth_engine_opt_height, depth_engine_opt_width)
-        ) &&
-        profile->setDimensions(
-          input_tensor->getName(), nvinfer1::OptProfileSelector::kMAX,
-          make_input_dims(depth_engine_max_dim, depth_engine_max_dim)
-        );
+        set_point_dimensions(profile, input_tensor->getName(), high_dimensions);
       if (!profile_ok || config->addOptimizationProfile(profile) < 0) {
-        BOOST_LOG(error) << "TensorRT rejected the depth optimization profile.";
+        BOOST_LOG(error)
+          << "TensorRT rejected fused convex2x point profile "
+          << shape.width << 'x' << shape.height << '.';
         return false;
-      }
-    } else {
-      for (const auto shape :
-           models::prod_zipdepth_convex2x::fixed_profile_shapes) {
-        auto *profile = builder->createOptimizationProfile();
-        const auto high_dimensions = make_input_dims(
-          static_cast<int>(shape.height), static_cast<int>(shape.width)
-        );
-        const bool profile_ok = profile &&
-          set_point_dimensions(
-            profile, input_tensor->getName(), high_dimensions
-          );
-        if (!profile_ok || config->addOptimizationProfile(profile) < 0) {
-          BOOST_LOG(error)
-            << "TensorRT rejected fused convex2x point profile "
-            << shape.width << 'x' << shape.height << '.';
-          return false;
-        }
       }
     }
 
@@ -1822,7 +1673,8 @@ namespace models {
           engine = nullptr;
         } else {
           engine_io_kind = slot.io_kind;
-          if (engine_io_kind != depth_runtime.expected_io) {
+          if (engine_io_kind != prod_zipdepth_convex2x::engine_io_e::
+                                  production_dav2_zipdepth_convex2x) {
             return_execution_context_locked(engine_key, exec_context);
             engine_repair_allowed = detach_incompatible_engine_locked(engine_key);
             engine = nullptr;
@@ -1868,7 +1720,8 @@ namespace models {
         return false;
       }
       engine_io_kind = slot.io_kind;
-      if (engine_io_kind != depth_runtime.expected_io) {
+      if (engine_io_kind != prod_zipdepth_convex2x::engine_io_e::
+                              production_dav2_zipdepth_convex2x) {
         return_execution_context_locked(engine_key, exec_context);
         detach_incompatible_engine_locked(engine_key);
         return false;
@@ -1908,9 +1761,7 @@ namespace models {
         release_context_reservation_locked(engine_key);
         return false;
       }
-      if (!warmup_execution_context(
-            cuda, cuda_ctx, exec_context, engine_io_kind
-          )) {
+      if (!warmup_execution_context(cuda, cuda_ctx, exec_context)) {
         // This context cannot be destroyed across the MinGW/MSVC ABI boundary, but it must never
         // enter the reusable pool: pooled contexts are assumed warmed and skip this operation.
         std::lock_guard<std::mutex> lock(g_trt_mutex);
@@ -2262,9 +2113,8 @@ namespace models {
       Microsoft::WRL::ComPtr<ID3D11Query> parallax_start;
       Microsoft::WRL::ComPtr<ID3D11Query> parallax_end;
       Microsoft::WRL::ComPtr<ID3D11Query> parallax_map_start;
+      Microsoft::WRL::ComPtr<ID3D11Query> parallax_limits_start;
       Microsoft::WRL::ComPtr<ID3D11Query> parallax_subtitle_start;
-      Microsoft::WRL::ComPtr<ID3D11Query> ownership_start;
-      Microsoft::WRL::ComPtr<ID3D11Query> ownership_end;
       Microsoft::WRL::ComPtr<ID3D11Query> pre_start;
       Microsoft::WRL::ComPtr<ID3D11Query> pre_end;
       bool pending = false;
@@ -2272,8 +2122,8 @@ namespace models {
       bool has_parallax_frame_stats = false;
       bool has_parallax = false;
       bool has_parallax_map_start = false;
+      bool has_parallax_limits_start = false;
       bool has_parallax_subtitle_start = false;
-      bool has_ownership = false;
       bool has_pre = false;
       std::uint64_t perf_generation = 0;
     };
@@ -2301,9 +2151,8 @@ namespace models {
             FAILED(device->CreateQuery(&desc, &slot.parallax_start)) ||
             FAILED(device->CreateQuery(&desc, &slot.parallax_end)) ||
             FAILED(device->CreateQuery(&desc, &slot.parallax_map_start)) ||
+            FAILED(device->CreateQuery(&desc, &slot.parallax_limits_start)) ||
             FAILED(device->CreateQuery(&desc, &slot.parallax_subtitle_start)) ||
-            FAILED(device->CreateQuery(&desc, &slot.ownership_start)) ||
-            FAILED(device->CreateQuery(&desc, &slot.ownership_end)) ||
             FAILED(device->CreateQuery(&desc, &slot.pre_start)) ||
             FAILED(device->CreateQuery(&desc, &slot.pre_end))) {
           BOOST_LOG(warning) << "Depth D3D11 timing unavailable: could not create timestamp queries.";
@@ -2343,9 +2192,8 @@ namespace models {
         UINT64 parallax_start = 0;
         UINT64 parallax_end = 0;
         UINT64 parallax_map_start = 0;
+        UINT64 parallax_limits_start = 0;
         UINT64 parallax_subtitle_start = 0;
-        UINT64 ownership_start = 0;
-        UINT64 ownership_end = 0;
         UINT64 pre_start = 0;
         UINT64 pre_end = 0;
         constexpr UINT nonblocking = D3D11_ASYNC_GETDATA_DONOTFLUSH;
@@ -2370,9 +2218,8 @@ namespace models {
         HRESULT parallax_frame_stats_start_status = S_OK;
         HRESULT parallax_frame_stats_end_status = S_OK;
         HRESULT parallax_map_start_status = S_OK;
+        HRESULT parallax_limits_start_status = S_OK;
         HRESULT parallax_subtitle_start_status = S_OK;
-        HRESULT ownership_start_status = S_OK;
-        HRESULT ownership_end_status = S_OK;
         if (slot.has_parallax_frame_stats) {
           parallax_frame_stats_start_status = context->GetData(
             slot.parallax_frame_stats_start.Get(),
@@ -2405,21 +2252,19 @@ namespace models {
             nonblocking
           );
         }
+        if (slot.has_parallax_limits_start) {
+          parallax_limits_start_status = context->GetData(
+            slot.parallax_limits_start.Get(),
+            &parallax_limits_start,
+            sizeof(parallax_limits_start),
+            nonblocking
+          );
+        }
         if (slot.has_parallax_subtitle_start) {
           parallax_subtitle_start_status = context->GetData(
             slot.parallax_subtitle_start.Get(),
             &parallax_subtitle_start,
             sizeof(parallax_subtitle_start),
-            nonblocking
-          );
-        }
-        if (slot.has_ownership) {
-          ownership_start_status = context->GetData(
-            slot.ownership_start.Get(), &ownership_start, sizeof(ownership_start),
-            nonblocking
-          );
-          ownership_end_status = context->GetData(
-            slot.ownership_end.Get(), &ownership_end, sizeof(ownership_end),
             nonblocking
           );
         }
@@ -2430,8 +2275,8 @@ namespace models {
           parallax_frame_stats_end_status == S_FALSE ||
           parallax_start_status == S_FALSE || parallax_end_status == S_FALSE ||
           parallax_map_start_status == S_FALSE ||
-          parallax_subtitle_start_status == S_FALSE ||
-          ownership_start_status == S_FALSE || ownership_end_status == S_FALSE;
+          parallax_limits_start_status == S_FALSE ||
+          parallax_subtitle_start_status == S_FALSE;
         if (any_pending) {
           continue;
         }
@@ -2441,8 +2286,8 @@ namespace models {
             parallax_frame_stats_end_status == S_OK &&
             parallax_start_status == S_OK && parallax_end_status == S_OK &&
             parallax_map_start_status == S_OK &&
+            parallax_limits_start_status == S_OK &&
             parallax_subtitle_start_status == S_OK &&
-            ownership_start_status == S_OK && ownership_end_status == S_OK &&
             !timing.Disjoint && timing.Frequency > 0 && post_end >= post_start &&
             pre_start >= post_end && pre_end >= pre_start &&
             (!slot.has_parallax_frame_stats ||
@@ -2454,18 +2299,18 @@ namespace models {
                post_end >= parallax_end)) &&
             (!slot.has_parallax_map_start ||
              (slot.has_parallax && parallax_map_start >= parallax_start &&
-              parallax_end >= parallax_map_start)) &&
+               parallax_end >= parallax_map_start)) &&
+            (!slot.has_parallax_limits_start ||
+             (slot.has_parallax && parallax_limits_start >= parallax_start &&
+              parallax_end >= parallax_limits_start)) &&
             (!slot.has_parallax_subtitle_start ||
              (slot.has_parallax &&
               parallax_subtitle_start >= parallax_start &&
               parallax_end >= parallax_subtitle_start)) &&
-            (!slot.has_ownership ||
-             (slot.has_parallax && ownership_start >= parallax_start &&
-              ownership_end >= ownership_start && parallax_end >= ownership_end)) &&
-            (!slot.has_parallax_map_start || !slot.has_ownership ||
-             ownership_start >= parallax_map_start) &&
-            (!slot.has_parallax_subtitle_start || !slot.has_ownership ||
-             parallax_subtitle_start >= ownership_end)) {
+            (!slot.has_parallax_map_start || !slot.has_parallax_limits_start ||
+             parallax_limits_start >= parallax_map_start) &&
+            (!slot.has_parallax_subtitle_start || !slot.has_parallax_limits_start ||
+             parallax_subtitle_start >= parallax_limits_start)) {
           const double to_ms = 1000.0 / static_cast<double>(timing.Frequency);
           if (slot.has_post) {
             sbs_perf::add_sample_ms_if_current(
@@ -2500,17 +2345,17 @@ namespace models {
               slot.perf_generation
             );
           }
-          if (slot.has_parallax_map_start && slot.has_ownership) {
+          if (slot.has_parallax_map_start && slot.has_parallax_limits_start) {
             sbs_perf::add_sample_ms_if_current(
               "depth_parallax_map_gpu",
-              static_cast<double>(ownership_start - parallax_map_start) * to_ms,
+              static_cast<double>(parallax_limits_start - parallax_map_start) * to_ms,
               slot.perf_generation
             );
           }
-          if (slot.has_parallax_subtitle_start && slot.has_ownership) {
+          if (slot.has_parallax_subtitle_start && slot.has_parallax_limits_start) {
             sbs_perf::add_sample_ms_if_current(
               "depth_parallax_limits_gpu",
-              static_cast<double>(parallax_subtitle_start - ownership_end) * to_ms,
+              static_cast<double>(parallax_subtitle_start - parallax_limits_start) * to_ms,
               slot.perf_generation
             );
           }
@@ -2518,13 +2363,6 @@ namespace models {
             sbs_perf::add_sample_ms_if_current(
               "depth_parallax_subtitle_gpu",
               static_cast<double>(parallax_end - parallax_subtitle_start) * to_ms,
-              slot.perf_generation
-            );
-          }
-          if (slot.has_ownership) {
-            sbs_perf::add_sample_ms_if_current(
-              "depth_parallax_ownership_gpu",
-              static_cast<double>(ownership_end - ownership_start) * to_ms,
               slot.perf_generation
             );
           }
@@ -2556,8 +2394,8 @@ namespace models {
         slot.has_parallax_frame_stats = false;
         slot.has_parallax = false;
         slot.has_parallax_map_start = false;
+        slot.has_parallax_limits_start = false;
         slot.has_parallax_subtitle_start = false;
-        slot.has_ownership = false;
         slot.has_pre = has_pre;
         slot.perf_generation = sbs_perf::generation();
         context->Begin(slot.disjoint.Get());
@@ -3220,8 +3058,8 @@ namespace models {
     // Caching
     int target_w = 0;
     int target_h = 0;
-    // Fused uses its single public high-resolution tensor throughout. Legacy DAV2 retains the
-    // established coarse tensor. Every analysis/history/publication resource is target_w/target_h.
+    // The required fused runtime uses one public high-resolution tensor throughout. Every
+    // analysis/history/publication resource is target_w/target_h.
     bool refined_live_geometry_active = false;
     int field_w = 0;
     int field_h = 0;
@@ -3241,7 +3079,7 @@ namespace models {
     CUdeviceptr ocr_bound_input = 0;
     CUdeviceptr ocr_bound_output = 0;
 
-    [[nodiscard]] bool fused_runtime_active() const noexcept {
+    [[nodiscard]] bool production_depth_runtime_active() const noexcept {
       return depth_engine_io_kind == prod_zipdepth_convex2x::engine_io_e::
                                        production_dav2_zipdepth_convex2x;
     }
@@ -3250,9 +3088,6 @@ namespace models {
     calibrated_dav2_shape() const noexcept {
       if (target_w <= 0 || target_h <= 0) {
         return std::nullopt;
-      }
-      if (!fused_runtime_active()) {
-        return depth_tensor_shape_t {target_w, target_h};
       }
       if (target_w % static_cast<int>(prod_zipdepth_convex2x::scale) != 0 ||
           target_h % static_cast<int>(prod_zipdepth_convex2x::scale) != 0) {
@@ -3275,10 +3110,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_frame_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_state_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_map_cs;
-    // Retained only because the authenticated producer closure still contains this source. The
-    // single-high runtime never dispatches the retired candidate-overwrite shader.
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> retired_convex2x_live_map_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_ownership_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_coordinate_diagnostic_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_vertical_limit_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_limit_cs;
@@ -3402,7 +3233,7 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> ema_motion_mask_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask_srv;
     // Synthetic letterbox support is visible to DAV2 but excluded from every analysis statistic,
-    // history comparison, ownership decision, and positioned renderer sample.
+    // history comparison and positioned renderer sample.
     Microsoft::WRL::ComPtr<ID3D11Texture2D> tensor_exclusion_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_exclusion_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_exclusion_srv;
@@ -3428,9 +3259,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_coordinate_v2_candidate_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_candidate_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_candidate_srv;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_coordinate_v2_ownership_tex;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_ownership_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_ownership_srv;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_coordinate_v2_vertical_majorant_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_vertical_majorant_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_vertical_majorant_srv;
@@ -3509,10 +3337,6 @@ namespace models {
     bool ocr_shape_bound = false;
     bool ocr_output_size_validated = false;
     bool ocr_error_logged = false;
-    // The accepted input is a private matched-frame texture. Retain its SRV until the exact
-    // asynchronous raw-depth completion has run the full-resolution ownership pass; this adds no
-    // color copy and keeps every RGB/depth lookup on the same D3D11 command stream.
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> pending_source_srv;
     input_color_space pending_color_space = input_color_space::srgb;
     depth_input_region_t pending_input_region {};
     depth_input_domain_tracker_t processed_input_domain;
@@ -3573,7 +3397,7 @@ namespace models {
       const D3D11_TEXTURE2D_DESC &input_desc
     ) {
       auto resolved = resolved_input_region(requested, input_desc);
-      if (!resolved.valid() || !fused_runtime_active()) {
+      if (!resolved.valid() || !production_depth_runtime_active()) {
         return resolved;
       }
       const auto dav2_shape = fit_host_sbs_v2_depth_tensor_shape(
@@ -5254,7 +5078,8 @@ namespace models {
           engine = nullptr;
         } else {
           depth_engine_io_kind = slot.io_kind;
-          if (depth_engine_io_kind != depth_runtime.expected_io) {
+          if (depth_engine_io_kind != prod_zipdepth_convex2x::engine_io_e::
+                                        production_dav2_zipdepth_convex2x) {
             return_execution_context_locked(engine_key, exec_context);
             depth_context_pooled = false;
             context_warmed = false;
@@ -5306,7 +5131,8 @@ namespace models {
             engine = nullptr;
           } else {
             depth_engine_io_kind = slot.io_kind;
-            if (depth_engine_io_kind != depth_runtime.expected_io) {
+            if (depth_engine_io_kind != prod_zipdepth_convex2x::engine_io_e::
+                                          production_dav2_zipdepth_convex2x) {
               return_execution_context_locked(engine_key, exec_context);
               depth_context_pooled = false;
               context_warmed = false;
@@ -5325,9 +5151,7 @@ namespace models {
         depth_coordinate_v2::find_model_calibration(
           model.name,
           model.url,
-          depth_runtime.fused ?
-            std::string_view {prod_zipdepth_convex2x::dav2_onnx_sha256} :
-            std::string_view {artifact.source_sha256}
+          prod_zipdepth_convex2x::dav2_onnx_sha256
         );
       if (engine && !exec_context) {
         // Pool empty. On a back-to-back session rebuild the previous estimator is often
@@ -5435,9 +5259,7 @@ namespace models {
         BOOST_LOG(error)
           << "Host SBS V2 cannot authenticate uncalibrated depth model '"
           << model.name << "' (raw DAV2 ONNX SHA-256 "
-          << (depth_runtime.fused ?
-                std::string_view {prod_zipdepth_convex2x::dav2_onnx_sha256} :
-                std::string_view {artifact.source_sha256})
+          << prod_zipdepth_convex2x::dav2_onnx_sha256
           << ", preprocess source SHA-256 " << preprocess_source_closure_sha256
           << "); Host SBS will fail flat.";
         return;
@@ -5447,33 +5269,29 @@ namespace models {
         raw_model_provenance_t {
           .depth_model = model.name,
           .depth_model_url = model.url,
-          .onnx_sha256 = depth_runtime.fused ?
-                           std::string {prod_zipdepth_convex2x::dav2_onnx_sha256} :
-                           artifact.source_sha256,
+          .onnx_sha256 = std::string {prod_zipdepth_convex2x::dav2_onnx_sha256},
           .preprocess_profile = std::string {
             coordinate_calibration->preprocess.profile
           },
           .preprocess_source_closure_sha256 = preprocess_source_closure_sha256,
         }
       );
-      if (depth_runtime.fused) {
-        composite_depth_runtime_provenance =
-          std::make_shared<const composite_depth_runtime_provenance_t>(
-            composite_depth_runtime_provenance_t {
-              .model = runtime_model.name,
-              .onnx_sha256 = artifact.source_sha256,
-              .embedded_dav2_onnx_sha256 =
-                std::string {prod_zipdepth_convex2x::dav2_onnx_sha256},
-              .zipdepth_checkpoint_sha256 =
-                std::string {prod_zipdepth_convex2x::zipdepth_checkpoint_sha256},
-              .guidance_preprocess_source_closure_sha256 =
-                preprocess_source_closure_sha256,
-              .engine_recipe = std::string {prod_zipdepth_convex2x::engine_recipe},
-              .engine_artifact = artifact.name,
-              .active_engine_manifest = runtime_model.name + ".active-engine.json",
-            }
-          );
-      }
+      composite_depth_runtime_provenance =
+        std::make_shared<const composite_depth_runtime_provenance_t>(
+          composite_depth_runtime_provenance_t {
+            .model = runtime_model.name,
+            .onnx_sha256 = artifact.source_sha256,
+            .embedded_dav2_onnx_sha256 =
+              std::string {prod_zipdepth_convex2x::dav2_onnx_sha256},
+            .zipdepth_checkpoint_sha256 =
+              std::string {prod_zipdepth_convex2x::zipdepth_checkpoint_sha256},
+            .guidance_preprocess_source_closure_sha256 =
+              preprocess_source_closure_sha256,
+            .engine_recipe = std::string {prod_zipdepth_convex2x::engine_recipe},
+            .engine_artifact = artifact.name,
+            .active_engine_manifest = runtime_model.name + ".active-engine.json",
+          }
+        );
 
       const auto producer_sources = host_sbs_shader_cache::snapshot_sources(
         shader_root,
@@ -5516,8 +5334,6 @@ namespace models {
         std::addressof(depth_coordinate_v2_frame_resolve_cs),
         std::addressof(depth_coordinate_v2_state_resolve_cs),
         std::addressof(depth_coordinate_v2_map_cs),
-        std::addressof(retired_convex2x_live_map_cs),
-        std::addressof(depth_coordinate_v2_ownership_cs),
         std::addressof(depth_coordinate_v2_vertical_limit_cs),
         std::addressof(depth_coordinate_v2_limit_cs),
         std::addressof(ocr_preprocess_cs),
@@ -5770,9 +5586,7 @@ namespace models {
       if (!cuda.is_valid()) {
         return false;
       }
-      if (!warmup_execution_context(
-            cuda, cuda_ctx, exec_context, depth_engine_io_kind
-          )) {
+      if (!warmup_execution_context(cuda, cuda_ctx, exec_context)) {
         std::lock_guard<std::mutex> lock(g_trt_mutex);
         quarantine_execution_context_locked(engine_key, exec_context, false);
         return false;
@@ -6071,9 +5885,6 @@ namespace models {
       depth_coordinate_v2_candidate_tex.Reset();
       depth_coordinate_v2_candidate_uav.Reset();
       depth_coordinate_v2_candidate_srv.Reset();
-      depth_coordinate_v2_ownership_tex.Reset();
-      depth_coordinate_v2_ownership_uav.Reset();
-      depth_coordinate_v2_ownership_srv.Reset();
       depth_coordinate_v2_vertical_majorant_tex.Reset();
       depth_coordinate_v2_vertical_majorant_uav.Reset();
       depth_coordinate_v2_vertical_majorant_srv.Reset();
@@ -6093,7 +5904,6 @@ namespace models {
       subtitle_condition_params_uav.Reset();
       subtitle_condition_params_srv.Reset();
       subtitle_locator_cbuffer.Reset();
-      pending_source_srv.Reset();
     }
     void fail_parallax_v2_producer(std::string_view reason) {
       // The lazy resource initializer is the sole caller, and its sole caller immediately
@@ -6336,12 +6146,11 @@ namespace models {
         return false;
       }
       if (field_w != target_w || field_h != target_h ||
-          refined_live_geometry_active != fused_runtime_active()) {
+          !refined_live_geometry_active || !production_depth_runtime_active()) {
         fail_parallax_v2_producer("single-grid model/field identity is invalid"sv);
         return false;
       }
-      if (fused_runtime_active() &&
-          !prod_zipdepth_convex2x::live_geometry_field_shape_is_supported(
+      if (!prod_zipdepth_convex2x::live_geometry_field_shape_is_supported(
             static_cast<std::uint32_t>(field_w),
             static_cast<std::uint32_t>(field_h)
           )) {
@@ -6447,11 +6256,6 @@ namespace models {
                         depth_coordinate_v2_candidate_uav
                       ) &&
                      create_float_texture(
-                       depth_coordinate_v2_ownership_tex,
-                       &depth_coordinate_v2_ownership_srv,
-                       depth_coordinate_v2_ownership_uav
-                     ) &&
-                     create_float_texture(
                        depth_coordinate_v2_vertical_majorant_tex,
                        &depth_coordinate_v2_vertical_majorant_srv,
                        depth_coordinate_v2_vertical_majorant_uav
@@ -6496,7 +6300,6 @@ namespace models {
 
       const float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
       context->ClearUnorderedAccessViewFloat(depth_coordinate_v2_candidate_uav.Get(), clear);
-      context->ClearUnorderedAccessViewFloat(depth_coordinate_v2_ownership_uav.Get(), clear);
       context->ClearUnorderedAccessViewFloat(
         depth_coordinate_v2_vertical_majorant_uav.Get(),
         clear
@@ -6509,10 +6312,8 @@ namespace models {
       parallax_v2_producer_active = true;
       BOOST_LOG(info)
         << "Host SBS V2 GPU producer active on one "
-        << target_w << 'x' << target_h << " analysis/live grid"
-        << (refined_live_geometry_active ? " (fused convex2x)" : " (legacy DAV2)")
-        << "; full-resolution conservative foreground ownership precedes the 75% vertical "
-           "upper and 25% vertical lower envelope "
+        << target_w << 'x' << target_h << " fused convex2x analysis/live grid"
+        << "; the candidate feeds the 75% vertical upper and 25% vertical lower envelope "
            "followed by one horizontal majorant; the renderer will authenticate its first "
            "completed field before the one-time "
            "V2-or-flat latch.";
@@ -6624,59 +6425,22 @@ namespace models {
           )) {
         return false;
       }
+      if (perf_slot) {
+        perf_slot->has_parallax_limits_start = true;
+        context->End(perf_slot->parallax_limits_start.Get());
+      }
 
       const host_sbs_v2_gpu::base_constants_t geometry_constants {
         .depth = cbuffer.Get(),
         .coordinate_v2 = depth_coordinate_v2_cbuffer.Get(),
       };
-      ID3D11ShaderResourceView *geometry_exclusion = tensor_exclusion_srv.Get();
-
-      // Candidate -> conservative full-resolution RGB ownership refinement. The retained source
-      // SRV belongs to this exact asynchronous raw-depth completion. Missing source evidence is a
-      // safe identity copy; ordinary production pairing always supplies it.
-      if (pending_source_srv) {
-        const host_sbs_v2_gpu::ownership_command_t ownership_command {
-          .constants = geometry_constants,
-          .source_region_constants = source_region_cbuffer.Get(),
-          .shader = depth_coordinate_v2_ownership_cs.Get(),
-          .candidate = depth_coordinate_v2_candidate_srv.Get(),
-          .source_color = pending_source_srv.Get(),
-          .tensor_exclusion = geometry_exclusion,
-          .ownership_refined_output = depth_coordinate_v2_ownership_uav.Get(),
-          .dispatch = parallax_v2_dispatch_command(
-            (static_cast<UINT>(field_w) + 7u) / 8u,
-            (static_cast<UINT>(field_h) + 7u) / 8u,
-            1u,
-            near_identical_gpu_infer_grid8_byte_offset
-          ),
-        };
-        if (perf_slot) {
-          perf_slot->has_ownership = true;
-          context->End(perf_slot->ownership_start.Get());
-        }
-        const bool ownership_recorded = host_sbs_v2_gpu::record_ownership(
-          context.Get(),
-          ownership_command
-        );
-        if (perf_slot) {
-          context->End(perf_slot->ownership_end.Get());
-        }
-        if (!ownership_recorded) {
-          return false;
-        }
-      } else if (!gpu_undecided_postprocess_pending()) {
-        context->CopyResource(
-          depth_coordinate_v2_ownership_tex.Get(),
-          depth_coordinate_v2_candidate_tex.Get()
-        );
-      }
 
       // Produce the exact column upper envelope plus the fixed 75/25 vertical share. The upper
       // remains diagnostic evidence; only the neutral conditioned field feeds live geometry.
       const host_sbs_v2_gpu::vertical_command_t vertical_command {
         .constants = geometry_constants,
         .shader = depth_coordinate_v2_vertical_limit_cs.Get(),
-        .ownership_refined = depth_coordinate_v2_ownership_srv.Get(),
+        .candidate = depth_coordinate_v2_candidate_srv.Get(),
         .vertical_majorant_output = depth_coordinate_v2_vertical_majorant_uav.Get(),
         .vertical_conditioned_output =
           depth_coordinate_v2_vertical_conditioned_uav.Get(),
@@ -7188,7 +6952,6 @@ namespace models {
           r.shadow_coordinate = depth_coordinate_v2_coordinate_srv;
         }
         r.shadow_candidate_parallax = depth_coordinate_v2_candidate_srv;
-        r.shadow_ownership_refined_parallax = depth_coordinate_v2_ownership_srv;
         r.shadow_vertical_majorant = depth_coordinate_v2_vertical_majorant_srv;
         r.shadow_vertical_conditioned = depth_coordinate_v2_vertical_conditioned_srv;
         r.shadow_base_final_parallax = depth_coordinate_v2_final_srv;
@@ -7417,9 +7180,6 @@ namespace models {
       pending_gpu_transaction_current_frame_id = 0u;
       pending_gpu_transaction_baseline_frame_id = 0u;
       pending_observation_timestamp_us = 0u;
-      // normalize_depth_output() has submitted and unbound every D3D11 read of this exact source.
-      // Drop our retained reference only after the ownership pass has consumed it.
-      pending_source_srv.Reset();
       if (diagnostics_enabled) {
         throughput_stats_completions++;
       }
@@ -7627,7 +7387,7 @@ namespace models {
     }
 
     // Bind the physical rectangle inside the retained full matched frame separately from the
-    // analysis-domain constants. All shader resize/ownership math remains crop-local; only its
+    // analysis-domain constants. All shader resize/coordinate math remains crop-local; only its
     // final integer Texture2D.Load address receives this offset. Translation changes this buffer
     // without changing temporal analysis-domain identity.
     void ensure_source_region_cbuffer(const depth_input_region_t &input_region) {
@@ -7753,7 +7513,6 @@ namespace models {
       for (auto *uav : {
              depth_coordinate_v2_coordinate_uav.Get(),
              depth_coordinate_v2_candidate_uav.Get(),
-             depth_coordinate_v2_ownership_uav.Get(),
              depth_coordinate_v2_vertical_majorant_uav.Get(),
              depth_coordinate_v2_vertical_conditioned_uav.Get(),
              depth_coordinate_v2_final_uav.Get(),
@@ -8263,28 +8022,23 @@ namespace models {
       if (!input_region.valid()) {
         return make_result();
       }
-      const bool fused_runtime = fused_runtime_active();
       const auto requested_dav2_shape = models::fit_depth_tensor_shape(
         input_region.source_width,
         input_region.source_height,
         depth_short_side,
         max_aspect
       );
-      const auto requested_fused_shape = fused_runtime ?
-                                           host_sbs_convex2x_field_shape(
-                                             requested_dav2_shape
-                                           ) :
-                                           std::optional<depth_tensor_shape_t> {};
-      if (fused_runtime && !requested_fused_shape) {
+      const auto requested_fused_shape = host_sbs_convex2x_field_shape(
+        requested_dav2_shape
+      );
+      if (!requested_fused_shape) {
         BOOST_LOG(error)
           << "Fused DAV2 + ZipDepth cannot derive its authenticated high grid from "
           << requested_dav2_shape.width << 'x' << requested_dav2_shape.height << '.';
         mark_terminal_failure();
         return {};
       }
-      const depth_tensor_shape_t requested_shape = fused_runtime ?
-                                                     *requested_fused_shape :
-                                                     requested_dav2_shape;
+      const depth_tensor_shape_t requested_shape = *requested_fused_shape;
       const bool current_shape_matches =
         target_w == 0 || target_h == 0 ||
         (target_w == requested_shape.width && target_h == requested_shape.height);
@@ -8301,7 +8055,7 @@ namespace models {
           static_cast<std::uint32_t>(requested_shape.width),
           static_cast<std::uint32_t>(requested_shape.height)
         );
-        if (fused_runtime && !fused_profile) {
+        if (!fused_profile) {
           BOOST_LOG(error) << "Fused DAV2 + ZipDepth has no authenticated point profile for "
                            << requested_shape.width << 'x' << requested_shape.height << '.';
           mark_terminal_failure();
@@ -8321,7 +8075,7 @@ namespace models {
         // frame. Never let optional textures/state from that abandoned shape survive into the
         // retry (whose source aspect may already have changed).
         release_parallax_v2_resources();
-        refined_live_geometry_active = fused_runtime;
+        refined_live_geometry_active = true;
         field_w = target_w;
         field_h = target_h;
         if (!unregister_near_identical_decision_interop(cuda)) {
@@ -8425,11 +8179,7 @@ namespace models {
         const std::size_t output_logical_bytes =
           static_cast<std::size_t>(target_w) * target_h * sizeof(float);
         const std::optional<std::size_t> output_allocation_bytes =
-          fused_runtime ?
-            detail::checked_tensorrt_output_allocation_bytes(
-              output_logical_bytes
-            ) :
-            std::optional<std::size_t> {output_logical_bytes};
+          detail::checked_tensorrt_output_allocation_bytes(output_logical_bytes);
         resources_ok = resources_ok && output_allocation_bytes &&
           *output_allocation_bytes <= std::numeric_limits<UINT>::max();
         buf_desc.ByteWidth = output_allocation_bytes ?
@@ -8597,9 +8347,6 @@ namespace models {
           end_d3d_perf(d3d_timer);
           return {};
         }
-        // The ownership dispatch has now consumed and unbound the completed frame's source SRV.
-        // It is safe to release before preprocessing the newly accepted source frame.
-        pending_source_srv.Reset();
         // Restore the newly supplied frame's transfer mode before its full-resolution preprocess.
         ensure_cbuffers(color_space, input_region);
         ensure_source_region_cbuffer(input_region);
@@ -9071,12 +8818,10 @@ namespace models {
         // map. A force-infer transaction may privately recapture that legal new signature. A
         // GPU-undecided transaction cannot bootstrap raw TensorRT work, so retain the old wrapper,
         // drop this candidate after unmap, and require the next transaction to be force-infer.
-        const auto selected_profile = fused_runtime ?
-          prod_zipdepth_convex2x::fixed_profile_index(
-            static_cast<std::uint32_t>(target_w),
-            static_cast<std::uint32_t>(target_h)
-          ) :
-          std::optional<std::uint32_t> {0u};
+        const auto selected_profile = prod_zipdepth_convex2x::fixed_profile_index(
+          static_cast<std::uint32_t>(target_w),
+          static_cast<std::uint32_t>(target_h)
+        );
         const std::size_t expected_input_bytes =
           static_cast<std::size_t>(3u) * target_w * target_h * sizeof(float);
         const std::size_t expected_output_bytes =
@@ -9084,10 +8829,9 @@ namespace models {
         const auto expected_output_allocation_bytes =
           detail::checked_tensorrt_output_allocation_bytes(expected_output_bytes);
         const bool mapped_tensor_sizes_valid =
-          !fused_runtime ||
-          (selected_profile && expected_output_allocation_bytes &&
-           input_mapped_bytes >= expected_input_bytes &&
-           output_mapped_bytes >= *expected_output_allocation_bytes);
+          selected_profile && expected_output_allocation_bytes &&
+          input_mapped_bytes >= expected_input_bytes &&
+          output_mapped_bytes >= *expected_output_allocation_bytes;
         if (!mapped_tensor_sizes_valid) {
           BOOST_LOG(error)
             << "Fused DAV2 + ZipDepth interop buffers violate the exact input/output allocation "
@@ -9126,7 +8870,7 @@ namespace models {
         }
         bool bindings_ok = !is_terminal() && !dropped_for_signature_change;
         bool profile_selection_attempted = false;
-        if (bindings_ok && fused_runtime &&
+        if (bindings_ok &&
             trt_bound_profile != static_cast<int>(*selected_profile)) {
           profile_selection_attempted = true;
           bindings_ok = exec_context->setOptimizationProfileAsync(
@@ -9155,7 +8899,7 @@ namespace models {
                              << " (outside the engine's optimization profile?)";
           }
         }
-        if (bindings_ok && fused_runtime && !trt_output_sizes_validated) {
+        if (bindings_ok && !trt_output_sizes_validated) {
           const std::int64_t required = exec_context->getMaxOutputSize(
             prod_zipdepth_convex2x::refined_output.data()
           );
@@ -9180,11 +8924,8 @@ namespace models {
           }
         }
         if (bindings_ok && trt_bound_output != d_out) {
-          const auto output_name = fused_runtime ?
-                                     prod_zipdepth_convex2x::refined_output :
-                                     prod_zipdepth_convex2x::legacy_output;
           bindings_ok = exec_context->setTensorAddress(
-            output_name.data(),
+            prod_zipdepth_convex2x::refined_output.data(),
             reinterpret_cast<void *>(d_out)
           );
           if (bindings_ok) {
@@ -9443,10 +9184,6 @@ namespace models {
       has_previous_frame = enqueued;
       pending_ocr_submitted = enqueued && ocr_armed;
       if (enqueued) {
-        // Retain the exact private matched-frame color SRV across asynchronous TensorRT execution.
-        // The next normalize_depth_output() uses it for local, full-resolution ownership evidence
-        // and releases it immediately after submitting that D3D11 pass.
-        pending_source_srv = analysis_input_srv;
         pending_color_space = color_space;
         pending_frame_id = frame_id;
         pending_input_region = input_region;
@@ -9491,8 +9228,6 @@ namespace models {
             throughput_stats_ocr_armed++;
           }
         }
-      } else {
-        pending_source_srv.Reset();
       }
 
       return make_result(

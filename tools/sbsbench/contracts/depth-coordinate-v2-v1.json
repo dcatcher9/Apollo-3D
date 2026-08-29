@@ -1,5 +1,5 @@
 {
-  "schema": 73,
+  "schema": 74,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -229,16 +229,6 @@
         "source_target": "cs_5_0"
       },
       {
-        "source_file": "prod_zipdepth_convex2x_live_map_cs.hlsl",
-        "source_entrypoint": "main",
-        "source_target": "cs_5_0"
-      },
-      {
-        "source_file": "depth_coordinate_v2_ownership_cs.hlsl",
-        "source_entrypoint": "main",
-        "source_target": "cs_5_0"
-      },
-      {
         "source_file": "depth_coordinate_v2_vertical_limit_cs.hlsl",
         "source_entrypoint": "main",
         "source_target": "cs_5_0"
@@ -274,7 +264,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "f6d850b391cf145908d9416c51c1ced23a03721dc754eb020cc52236a95629b3"
+    "source_closure_sha256": "e00c710d73aade4db91a0842160203125b6c4378e9d56353df9f732b94577986"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,

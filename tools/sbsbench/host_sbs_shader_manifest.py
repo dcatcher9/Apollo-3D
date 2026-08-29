@@ -76,16 +76,6 @@ DEPTH_COORDINATE_V2_MAP = ShaderSpec(
     source_entrypoint="main",
     source_target="cs_5_0",
 )
-PROD_ZIPDEPTH_CONVEX2X_LIVE_MAP = ShaderSpec(
-    source_file="prod_zipdepth_convex2x_live_map_cs.hlsl",
-    source_entrypoint="main",
-    source_target="cs_5_0",
-)
-DEPTH_COORDINATE_V2_OWNERSHIP = ShaderSpec(
-    source_file="depth_coordinate_v2_ownership_cs.hlsl",
-    source_entrypoint="main",
-    source_target="cs_5_0",
-)
 DEPTH_COORDINATE_V2_COORDINATE_DIAGNOSTIC = ShaderSpec(
     source_file="depth_coordinate_v2_map_cs.hlsl",
     source_entrypoint="coordinate_main",
@@ -198,8 +188,6 @@ SHADER_SPECS: Dict[str, ShaderSpec] = {
     "depth_coordinate_v2_frame_resolve": DEPTH_COORDINATE_V2_FRAME_RESOLVE,
     "depth_coordinate_v2_state_resolve": DEPTH_COORDINATE_V2_STATE_RESOLVE,
     "depth_coordinate_v2_map": DEPTH_COORDINATE_V2_MAP,
-    "prod_zipdepth_convex2x_live_map": PROD_ZIPDEPTH_CONVEX2X_LIVE_MAP,
-    "depth_coordinate_v2_ownership": DEPTH_COORDINATE_V2_OWNERSHIP,
     "depth_coordinate_v2_coordinate_diagnostic": DEPTH_COORDINATE_V2_COORDINATE_DIAGNOSTIC,
     "depth_coordinate_v2_vertical_limit": DEPTH_COORDINATE_V2_VERTICAL_LIMIT,
     "depth_coordinate_v2_limit": DEPTH_COORDINATE_V2_LIMIT,
@@ -250,8 +238,6 @@ PARALLAX_V2_PRODUCER_GROUP = ClosureGroup(
         DEPTH_COORDINATE_V2_FRAME_RESOLVE,
         DEPTH_COORDINATE_V2_STATE_RESOLVE,
         DEPTH_COORDINATE_V2_MAP,
-        PROD_ZIPDEPTH_CONVEX2X_LIVE_MAP,
-        DEPTH_COORDINATE_V2_OWNERSHIP,
         DEPTH_COORDINATE_V2_VERTICAL_LIMIT,
         DEPTH_COORDINATE_V2_LIMIT,
         HOST_SBS_OCR_PREPROCESS,
@@ -260,7 +246,7 @@ PARALLAX_V2_PRODUCER_GROUP = ClosureGroup(
         HOST_SBS_SUBTITLE_LOCATOR_RESOLVE,
         HOST_SBS_SUBTITLE_CONDITION,
     ),
-    source_closure_sha256="f6d850b391cf145908d9416c51c1ced23a03721dc754eb020cc52236a95629b3",
+    source_closure_sha256="e00c710d73aade4db91a0842160203125b6c4378e9d56353df9f732b94577986",
 )
 
 PARALLAX_V2_COORDINATE_DIAGNOSTIC_GROUP = ClosureGroup(
@@ -271,7 +257,7 @@ PARALLAX_V2_COORDINATE_DIAGNOSTIC_GROUP = ClosureGroup(
     specs=(
         DEPTH_COORDINATE_V2_COORDINATE_DIAGNOSTIC,
     ),
-    source_closure_sha256="9c52f0e3b70244d6ba7c2865ec14fe5367388fa36dbdcf51b1037f11af3ad5ad",
+    source_closure_sha256="1b4272ce59e03a4b7a7bcf192153475a9c6efb29dca0a9c3d110b1fb0175f327",
 )
 
 NEAR_IDENTICAL_DETECTOR_GROUP = ClosureGroup(
@@ -285,7 +271,7 @@ NEAR_IDENTICAL_DETECTOR_GROUP = ClosureGroup(
         HOST_SBS_NEAR_IDENTICAL_FINALIZE,
         HOST_SBS_NEAR_IDENTICAL_REUSE_DEPTH,
     ),
-    source_closure_sha256="c4443d416964e1437dd7ca4d78ca4781aea2835b159b03e8856456890ef006a4",
+    source_closure_sha256="62317daf8b1e95f0146518c2e3f4be98d32064f02d04e330fb904cd58322fc99",
 )
 
 GPU_TRACE_GROUP = ClosureGroup(
@@ -296,7 +282,7 @@ GPU_TRACE_GROUP = ClosureGroup(
     specs=(
         HOST_SBS_GPU_TRACE,
     ),
-    source_closure_sha256="ec553c5cd1bb095ae84df2ccbf866413dc0bfe7b251e6dd3591f2a6c74ff96bf",
+    source_closure_sha256="c33fd517228e48e71b3b0126ed169f1010160cf75a2304eeb4c9e80c22502ac4",
 )
 
 PARALLAX_V2_LIVE_RENDERER_GROUP = ClosureGroup(
@@ -308,7 +294,7 @@ PARALLAX_V2_LIVE_RENDERER_GROUP = ClosureGroup(
         PARALLAX_V2_LIVE_RENDERER,
         SBS_REPROJECTION_VERTEX,
     ),
-    source_closure_sha256="82f983e406d5ac5d034ce86745c923ad9266a8b93a27a598325b7c04c8dd2589",
+    source_closure_sha256="bf3cdd0ffdd73dbf7148292be31fc37f49e64ea719d58d2ec1bebeedc724ac94",
 )
 
 PARALLAX_V2_P010_Y_GROUP = ClosureGroup(
@@ -319,7 +305,7 @@ PARALLAX_V2_P010_Y_GROUP = ClosureGroup(
     specs=(
         PARALLAX_V2_P010_Y_RENDERER,
     ),
-    source_closure_sha256="ab499f7edf78ba474d5b4e34137200e70391d65ebba43ef85914c8d712c66855",
+    source_closure_sha256="e739f6b42b56a645b2e00af971171f1b6441c2ab16b16c5e72e5df7df85d67a6",
 )
 
 SBS_FLAT_FALLBACK_GROUP = ClosureGroup(
@@ -343,7 +329,7 @@ PARALLAX_V2_LIVE_DIAGNOSTIC_GROUP = ClosureGroup(
         PARALLAX_V2_LIVE_MAPPING,
         PARALLAX_V2_LIVE_MASK,
     ),
-    source_closure_sha256="1497c6a7b8bf42e0ec8485d5b810f817f8be9810bb57fed575a8a634973c746b",
+    source_closure_sha256="941fbd61c554ddad4e5ade613ea1e5909cd059fe5b618400f45841f40ef4f982",
 )
 
 CLOSURE_GROUPS: Dict[str, ClosureGroup] = {

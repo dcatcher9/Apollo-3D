@@ -108,16 +108,12 @@ namespace {
     using enum models::prod_zipdepth_convex2x::engine_io_e;
     using models::prod_zipdepth_convex2x::classify_named_io;
     EXPECT_EQ(
-      classify_named_io(2u, true, true, false),
-      production_dav2
-    );
-    EXPECT_EQ(
-      classify_named_io(2u, true, false, true),
+      classify_named_io(2u, true, true),
       production_dav2_zipdepth_convex2x
     );
-    EXPECT_EQ(classify_named_io(3u, true, true, true), invalid);
-    EXPECT_EQ(classify_named_io(2u, true, true, true), invalid);
-    EXPECT_EQ(classify_named_io(2u, false, false, true), invalid);
+    EXPECT_EQ(classify_named_io(3u, true, true), invalid);
+    EXPECT_EQ(classify_named_io(2u, true, false), invalid);
+    EXPECT_EQ(classify_named_io(2u, false, true), invalid);
   }
 
   TEST(HostSbsConvex2xContract, FreezesOneHighPointProfilePerProductionShape) {
@@ -193,15 +189,14 @@ namespace {
     );
   }
 
-  TEST(HostSbsConvex2xContract, LocalCompositeSelectionFallsBackOnlyWhenAbsent) {
-    using enum models::detail::composite_depth_asset_resolution_e;
-    using models::detail::resolve_composite_depth_asset;
+  TEST(HostSbsConvex2xContract, LocalCompositeIsMandatoryAndAuthenticated) {
+    using models::detail::composite_depth_asset_is_authenticated;
 
-    EXPECT_EQ(resolve_composite_depth_asset(false, false, false), legacy);
-    EXPECT_EQ(resolve_composite_depth_asset(true, true, true), fused);
-    EXPECT_EQ(resolve_composite_depth_asset(true, true, false), fail);
-    EXPECT_EQ(resolve_composite_depth_asset(true, false, false), fail);
-    EXPECT_EQ(resolve_composite_depth_asset(true, false, true), fail);
+    EXPECT_FALSE(composite_depth_asset_is_authenticated(false, false, false));
+    EXPECT_TRUE(composite_depth_asset_is_authenticated(true, true, true));
+    EXPECT_FALSE(composite_depth_asset_is_authenticated(true, true, false));
+    EXPECT_FALSE(composite_depth_asset_is_authenticated(true, false, false));
+    EXPECT_FALSE(composite_depth_asset_is_authenticated(true, false, true));
   }
 
   TEST(HostSbsConvex2xContract, PadsOnlyTensorRtOutputStorageTo512Bytes) {

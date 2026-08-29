@@ -31,7 +31,6 @@ namespace models::prod_zipdepth_convex2x {
     "26684c5da8fdd4bdc5f1c9cf919cec8d1e2d027fbe95705a454f85d31eee2c23";
 
   inline constexpr std::string_view input = "pixel_values";
-  inline constexpr std::string_view legacy_output = "predicted_depth";
   inline constexpr std::string_view refined_output = "refined_depth";
 
   struct high_shape_t {
@@ -118,7 +117,6 @@ namespace models::prod_zipdepth_convex2x {
 
   enum class engine_io_e : std::uint8_t {
     invalid,
-    production_dav2,
     production_dav2_zipdepth_convex2x,
   };
 
@@ -130,15 +128,9 @@ namespace models::prod_zipdepth_convex2x {
   inline constexpr engine_io_e classify_named_io(
     const std::uint32_t tensor_count,
     const bool has_pixel_values,
-    const bool has_predicted_depth,
     const bool has_refined_output
   ) noexcept {
-    if (tensor_count == 2u && has_pixel_values && has_predicted_depth &&
-        !has_refined_output) {
-      return engine_io_e::production_dav2;
-    }
-    if (tensor_count == 2u && has_pixel_values && !has_predicted_depth &&
-        has_refined_output) {
+    if (tensor_count == 2u && has_pixel_values && has_refined_output) {
       return engine_io_e::production_dav2_zipdepth_convex2x;
     }
     return engine_io_e::invalid;

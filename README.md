@@ -160,7 +160,7 @@ views are available.
 | Feature | What it provides |
 |---|---|
 | **Private virtual display** | An on-demand SudoVDA desktop negotiated from the client’s selected resolution, refresh rate, HDR state, and scale |
-| **Host AI 3D** | A GPU-resident D3D11 → TensorRT → bounded inverse-warp → NVENC pipeline with matched-frame depth and conservative foreground ownership |
+| **Host AI 3D** | A GPU-resident D3D11 → TensorRT → bounded inverse-warp → NVENC pipeline with matched-frame depth and convex-2x edge refinement |
 | **Offline Host 3D conversion** | Converts video to compressed H.265 or AV1 SBS using bounded cut lookahead and the same V2 geometry as live Host 3D |
 | **Scene-aware 3D stability** | Host V2 holds one raw scene center with literal configured pop; Client 3D separately holds its adaptive pop and median plane for the shot |
 | **Responsive quality controls** | Live resolution, frame-rate, and bitrate updates without rebuilding the application, capture, or virtual-display session when the selected mode supports it |

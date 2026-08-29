@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate non-authoritative diagnostic previews from a schema-39 Dump 3D package."""
+"""Generate non-authoritative diagnostic previews from a schema-40 Dump 3D package."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ except ImportError:  # Direct execution from tools/sbsbench.
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("dump", type=Path, help="schema-39 Dump 3D directory")
+    parser.add_argument("dump", type=Path, help="schema-40 Dump 3D directory")
     parser.add_argument("artifact", help="authenticated .f32 artifact filename")
     parser.add_argument(
         "--output-dir", type=Path, required=True,

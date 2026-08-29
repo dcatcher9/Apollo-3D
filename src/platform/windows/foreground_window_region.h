@@ -245,6 +245,38 @@ namespace platf::foreground_window {
     };
 
     /**
+     * Confirm one structural child across consecutive complete censuses.
+     *
+     * The first occurrence remains provisional and returns the root fallback. A matching next
+     * census publishes the child; any root, process, geometry, or winner change starts over.
+     */
+    class content_census_confirmation_t {
+    public:
+      [[nodiscard]] content_selection_t update(
+        std::uintptr_t root_window,
+        std::uint32_t root_process_id,
+        rect_t root_client_screen_rect,
+        content_selection_t census_selection,
+        std::chrono::steady_clock::time_point observed_at
+      ) noexcept;
+      void reset() noexcept;
+
+    private:
+      struct key_t {
+        std::uintptr_t root_window {};
+        std::uint32_t root_process_id {};
+        rect_t root_client_screen_rect {};
+        std::uintptr_t content_window {};
+        rect_t content_screen_rect {};
+
+        [[nodiscard]] constexpr bool operator==(const key_t &) const = default;
+      };
+
+      std::optional<key_t> provisional_;
+      std::chrono::steady_clock::time_point observed_at_ {};
+    };
+
+    /**
      * Select a dominant, center-covering direct child only when separate edge-aligned sibling
      * chrome corroborates the split. Ambiguity, incomplete enumeration, or weak evidence returns
      * the complete root client. No executable, window-class, control ID, or pixel inset is known.

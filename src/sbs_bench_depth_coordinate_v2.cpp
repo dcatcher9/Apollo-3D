@@ -43,12 +43,12 @@ namespace sbs_bench {
   namespace shader_cache = models::host_sbs_shader_cache;
 
   namespace {
-    constexpr std::uint32_t manifest_schema = 8u;
+    constexpr std::uint32_t manifest_schema = 10u;
     constexpr std::string_view manifest_mode =
-      "depth-coordinate-v2-production-gpu-sequence-v10";
+      "depth-coordinate-v2-production-gpu-sequence-v12";
     constexpr float direct_container_limit = v2::direct_container_limit;
 
-    const std::array<const char *, 41> trace_field_names {{
+    const std::array<const char *, 38> trace_field_names {{
       "frame_id",
       "input_source_frame_id",
       "rendered_source_frame_id",
@@ -74,8 +74,6 @@ namespace sbs_bench {
       "candidate_center_drift_u",
       "predicted_zero_translation_source_u",
       "pre_limiter_max_abs_source_u",
-      "ownership_raised_fraction",
-      "ownership_max_raise_source_u",
       "vertical_majorant_raised_fraction",
       "vertical_majorant_max_raise_source_u",
       "final_max_abs_source_u",
@@ -86,7 +84,6 @@ namespace sbs_bench {
       "final_horizontal_slope_max",
       "final_vertical_shear_max",
       "order_sha256",
-      "ownership_refined_sha256",
       "vertical_majorant_sha256",
       "vertical_conditioned_sha256",
       "parallax_sha256",
@@ -412,12 +409,6 @@ void main(uint3 id : SV_DispatchThreadID) {
     std::string manifest_sha256;
     std::string model_name;
     std::string cut_source;
-    std::uint32_t source_color_mode = 0u;
-    // Provenance for linear scaling already applied before the authenticated texture upload.
-    // The ownership shader reads the uploaded FP16 values directly and must not multiply twice.
-    float source_linear_scale = 1.0f;
-    UINT source_width = 0u;
-    UINT source_height = 0u;
     UINT width = 0u;
     UINT height = 0u;
     UINT reduce_groups = 0u;
@@ -431,15 +422,13 @@ void main(uint3 id : SV_DispatchThreadID) {
     ComPtr<ID3D11ComputeShader> frame_shader;
     ComPtr<ID3D11ComputeShader> state_shader;
     ComPtr<ID3D11ComputeShader> map_shader;
-    ComPtr<ID3D11ComputeShader> ownership_shader;
     ComPtr<ID3D11ComputeShader> coordinate_diagnostic_shader;
     ComPtr<ID3D11ComputeShader> vertical_limit_shader;
     ComPtr<ID3D11ComputeShader> limit_shader;
     ComPtr<ID3D11ComputeShader> encode_shader;
-    std::array<ComPtr<ID3D11Buffer>, 3> common_constants_by_color;
+    ComPtr<ID3D11Buffer> common_constants;
     ComPtr<ID3D11Buffer> v2_constants;
     ComPtr<ID3D11Buffer> near_constants;
-    ComPtr<ID3D11Buffer> source_region_constants;
     ComPtr<ID3D11Buffer> encode_constants;
     ComPtr<ID3D11Buffer> raw_buffer;
     ComPtr<ID3D11ShaderResourceView> raw_srv;
@@ -489,9 +478,6 @@ void main(uint3 id : SV_DispatchThreadID) {
     ComPtr<ID3D11Texture2D> candidate_texture;
     ComPtr<ID3D11ShaderResourceView> candidate_srv;
     ComPtr<ID3D11UnorderedAccessView> candidate_uav;
-    ComPtr<ID3D11Texture2D> ownership_texture;
-    ComPtr<ID3D11ShaderResourceView> ownership_srv;
-    ComPtr<ID3D11UnorderedAccessView> ownership_uav;
     ComPtr<ID3D11Texture2D> vertical_majorant_texture;
     ComPtr<ID3D11ShaderResourceView> vertical_majorant_srv;
     ComPtr<ID3D11UnorderedAccessView> vertical_majorant_uav;
@@ -519,10 +505,9 @@ void main(uint3 id : SV_DispatchThreadID) {
         error = std::string("invalid v2 GPU replay manifest JSON: ") + exc.what();
         return false;
       }
-      const std::array<const char *, 11> root_keys {{
+      const std::array<const char *, 9> root_keys {{
         "schema", "mode", "calibration_contract", "model_identity", "raw_shape",
-        "source_shape", "mapping_config", "source_color_mode", "source_linear_scale",
-        "cut_source", "frames",
+        "source_shape", "mapping_config", "cut_source", "frames",
       }};
       if (!root.is_object() || root.size() != root_keys.size() ||
           std::any_of(root_keys.begin(), root_keys.end(), [&](const char *key) {
@@ -626,8 +611,6 @@ void main(uint3 id : SV_DispatchThreadID) {
         error = "v2 GPU replay manifest has invalid source-shape contract";
         return false;
       }
-      source_width = static_cast<UINT>(manifest_source_width);
-      source_height = static_cast<UINT>(manifest_source_height);
       model_name = identity["model"].get<std::string>();
       if (!width || !height ||
           static_cast<std::uint64_t>(width) * height >
@@ -725,15 +708,6 @@ void main(uint3 id : SV_DispatchThreadID) {
             constants.requested_gain
           )) {
         error = "v2 GPU replay mapping differs from the generated production V2 contract";
-        return false;
-      }
-
-      if (!uint32_number(root["source_color_mode"], source_color_mode) ||
-          source_color_mode >= common_constants_by_color.size() ||
-          !finite_number(root["source_linear_scale"], source_linear_scale) ||
-          !(source_linear_scale > 0.0f) || source_linear_scale > 64.0f ||
-          (source_color_mode != 2u && source_linear_scale != 1.0f)) {
-        error = "v2 GPU replay source color interpretation is invalid";
         return false;
       }
 
@@ -838,12 +812,11 @@ void main(uint3 id : SV_DispatchThreadID) {
         const shader_cache::shader_spec *spec;
         ComPtr<ID3D11ComputeShader> *shader;
       };
-      const std::array<shader_target, 7> targets {{
+      const std::array<shader_target, 6> targets {{
         {&shader_cache::depth_coordinate_v2_moments, &moments_shader},
         {&shader_cache::depth_coordinate_v2_frame_resolve, &frame_shader},
         {&shader_cache::depth_coordinate_v2_state_resolve, &state_shader},
         {&shader_cache::depth_coordinate_v2_map, &map_shader},
-        {&shader_cache::depth_coordinate_v2_ownership, &ownership_shader},
         {&shader_cache::depth_coordinate_v2_vertical_limit, &vertical_limit_shader},
         {&shader_cache::depth_coordinate_v2_limit, &limit_shader},
       }};
@@ -900,23 +873,12 @@ void main(uint3 id : SV_DispatchThreadID) {
         v2::direct_container_limit, 0.0f, 0.0f, 0.0f,
       }};
       const std::array<std::uint32_t, 20> near_words {};
-      const std::array<std::uint32_t, 4> source_region_words {{
-        0u, 0u, source_width, source_height,
-      }};
-      bool common_constants_ready = true;
-      for (std::uint32_t color_mode = 0u;
-           color_mode < common_constants_by_color.size();
-           ++color_mode) {
-        common_words[2] = color_mode;
-        common_constants_ready = common_constants_ready && create_immutable_constant_buffer(
-          device.Get(), common_words, common_constants_by_color[color_mode]);
-      }
-      if (!common_constants_ready ||
+      // The shared geometry shaders retain the live depth-cbuffer layout, but none reads the
+      // color-mode slot. Freeze it to zero instead of manufacturing three equivalent buffers.
+      common_words[2] = 0u;
+      if (!create_immutable_constant_buffer(device.Get(), common_words, common_constants) ||
           !create_immutable_constant_buffer(device.Get(), constants, v2_constants) ||
           !create_immutable_constant_buffer(device.Get(), near_words, near_constants) ||
-          !create_immutable_constant_buffer(
-            device.Get(), source_region_words, source_region_constants
-          ) ||
           !create_immutable_constant_buffer(device.Get(), encode_words, encode_constants)) {
         error = "cannot create v2 GPU replay constant buffers";
         return false;
@@ -1027,10 +989,6 @@ void main(uint3 id : SV_DispatchThreadID) {
           ) ||
           !create_float_texture(
             device.Get(), width, height,
-            ownership_texture, ownership_srv, ownership_uav
-          ) ||
-          !create_float_texture(
-            device.Get(), width, height,
             vertical_majorant_texture, vertical_majorant_srv, vertical_majorant_uav
           ) ||
           !create_float_texture(
@@ -1087,9 +1045,6 @@ void main(uint3 id : SV_DispatchThreadID) {
     bool dispatch_frame(
       const std::size_t sequence_index,
       const std::string_view expected_frame_id,
-      ID3D11ShaderResourceView *source_color,
-      const std::uint32_t source_color_mode,
-      const float source_linear_scale,
       const std::string_view expected_source_sha256,
       depth_coordinate_v2_gpu_frame &result,
       std::string &error
@@ -1104,37 +1059,9 @@ void main(uint3 id : SV_DispatchThreadID) {
                 std::to_string(sequence_index);
         return false;
       }
-      ComPtr<ID3D11Resource> source_resource;
-      ComPtr<ID3D11Texture2D> source_texture;
-      if (!source_color || source_color_mode >= common_constants_by_color.size() ||
-          source_color_mode != this->source_color_mode ||
-          std::bit_cast<std::uint32_t>(source_linear_scale) !=
-            std::bit_cast<std::uint32_t>(this->source_linear_scale) ||
-          expected_source_sha256 != frame.source_sha256 ||
-          (source_color->GetResource(&source_resource), !source_resource) ||
-          FAILED(source_resource.As(&source_texture)) || !source_texture) {
-        error =
-          "source color/provenance/interpretation disagrees with v2 GPU replay manifest at sequence index " +
-          std::to_string(sequence_index);
-        return false;
-      }
-      D3D11_TEXTURE2D_DESC source_description {};
-      source_texture->GetDesc(&source_description);
-      D3D11_SHADER_RESOURCE_VIEW_DESC source_view_description {};
-      source_color->GetDesc(&source_view_description);
-      const DXGI_FORMAT expected_source_format = source_color_mode == 0u ?
-                                                   DXGI_FORMAT_B8G8R8A8_UNORM :
-                                                   DXGI_FORMAT_R16G16B16A16_FLOAT;
-      if (source_description.Width != source_width ||
-          source_description.Height != source_height ||
-          source_description.MipLevels != 1u || source_description.ArraySize != 1u ||
-          source_description.SampleDesc.Count != 1u ||
-          source_description.Format != expected_source_format ||
-          source_view_description.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D ||
-          source_view_description.Format != expected_source_format ||
-          source_view_description.Texture2D.MostDetailedMip != 0u ||
-          source_view_description.Texture2D.MipLevels != 1u) {
-        error = "v2 GPU replay source texture disagrees with its authenticated shape/format";
+      if (expected_source_sha256 != frame.source_sha256) {
+        error = "source provenance disagrees with v2 GPU replay manifest at sequence index " +
+                std::to_string(sequence_index);
         return false;
       }
       std::vector<float> raw_values;
@@ -1156,7 +1083,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         cut_state_buffer.Get(), 0, nullptr, cut_state_words.data(), 0, 0);
 
       const v2_gpu::base_constants_t base_constants {
-        .depth = common_constants_by_color[source_color_mode].Get(),
+        .depth = common_constants.Get(),
         .coordinate_v2 = v2_constants.Get(),
       };
       const v2_gpu::moments_frame_command_t moments_frame_command {
@@ -1232,29 +1159,10 @@ void main(uint3 id : SV_DispatchThreadID) {
         return false;
       }
 
-      const v2_gpu::ownership_command_t ownership_command {
-        .constants = base_constants,
-        .source_region_constants = source_region_constants.Get(),
-        .shader = ownership_shader.Get(),
-        .candidate = candidate_srv.Get(),
-        .source_color = source_color,
-        .tensor_exclusion = dummy_exclusion_srv.Get(),
-        .ownership_refined_output = ownership_uav.Get(),
-        .dispatch = v2_gpu::dispatch_command_t::direct(
-          (width + 7u) / 8u,
-          (height + 7u) / 8u,
-          1u
-        ),
-      };
-      if (!v2_gpu::record_ownership(context.Get(), ownership_command)) {
-        error = "shared V2 GPU executor rejected replay ownership operands";
-        return false;
-      }
-
       const v2_gpu::vertical_command_t vertical_command {
         .constants = base_constants,
         .shader = vertical_limit_shader.Get(),
-        .ownership_refined = ownership_srv.Get(),
+        .candidate = candidate_srv.Get(),
         .vertical_majorant_output = vertical_majorant_uav.Get(),
         .vertical_conditioned_output = vertical_conditioned_uav.Get(),
         .dispatch = v2_gpu::dispatch_command_t::direct(width, 1u, 1u),
@@ -1296,8 +1204,6 @@ void main(uint3 id : SV_DispatchThreadID) {
         device.Get(), context.Get(), coordinate_texture.Get(), width, height);
       const auto candidate = read_float_texture(
         device.Get(), context.Get(), candidate_texture.Get(), width, height);
-      const auto ownership = read_float_texture(
-        device.Get(), context.Get(), ownership_texture.Get(), width, height);
       const auto vertical_majorant = read_float_texture(
         device.Get(), context.Get(), vertical_majorant_texture.Get(), width, height);
       const auto vertical_conditioned = read_float_texture(
@@ -1310,7 +1216,6 @@ void main(uint3 id : SV_DispatchThreadID) {
       if (frame_words.size() != v2::frame_stats_float_count ||
           state_words.size() != v2::state_float_count ||
           canonical.size() != element_count || candidate.size() != element_count ||
-          ownership.size() != element_count ||
           vertical_majorant.size() != element_count ||
           vertical_conditioned.size() != element_count ||
           final_values.size() != element_count || encoded.size() != element_count ||
@@ -1323,9 +1228,6 @@ void main(uint3 id : SV_DispatchThreadID) {
           return std::isfinite(value);
         }) &&
         std::all_of(candidate.begin(), candidate.end(), [](const float value) {
-          return std::isfinite(value);
-        }) &&
-        std::all_of(ownership.begin(), ownership.end(), [](const float value) {
           return std::isfinite(value);
         }) &&
         std::all_of(vertical_majorant.begin(), vertical_majorant.end(), [](const float value) {
@@ -1442,9 +1344,6 @@ void main(uint3 id : SV_DispatchThreadID) {
 
       float pre_limiter_max = 0.0f;
       float final_max = 0.0f;
-      float ownership_max_raise = 0.0f;
-      std::size_t ownership_raised = 0u;
-      bool ownership_illegally_lowered = false;
       float vertical_majorant_max_raise = 0.0f;
       std::size_t vertical_majorant_raised = 0u;
       bool vertical_majorant_illegally_lowered = false;
@@ -1477,20 +1376,16 @@ void main(uint3 id : SV_DispatchThreadID) {
         ) : 0.0f;
         pointwise_container_mismatch |=
           std::abs(candidate[index] - expected_candidate) > 2.0e-6f;
-        pre_limiter_max = std::max(pre_limiter_max, std::abs(ownership[index]));
+        pre_limiter_max = std::max(pre_limiter_max, std::abs(candidate[index]));
         final_max = std::max(final_max, std::abs(final_values[index]));
-        const float ownership_raise = ownership[index] - candidate[index];
-        ownership_max_raise = std::max(ownership_max_raise, ownership_raise);
-        ownership_raised += ownership_raise > limiter_tolerance ? 1u : 0u;
-        ownership_illegally_lowered |= ownership_raise < -limiter_tolerance;
-        const float vertical_raise = vertical_majorant[index] - ownership[index];
+        const float vertical_raise = vertical_majorant[index] - candidate[index];
         vertical_majorant_max_raise = std::max(
           vertical_majorant_max_raise,
           vertical_raise
         );
         vertical_majorant_raised += vertical_raise > vertical_tolerance ? 1u : 0u;
         vertical_majorant_illegally_lowered |= vertical_raise < -vertical_tolerance;
-        const float correction = final_values[index] - ownership[index];
+        const float correction = final_values[index] - candidate[index];
         conditioner_max_raise = std::max(conditioner_max_raise, correction);
         conditioner_max_lower = std::max(conditioner_max_lower, -correction);
         conditioner_raised += correction > limiter_tolerance ? 1u : 0u;
@@ -1529,8 +1424,7 @@ void main(uint3 id : SV_DispatchThreadID) {
           return false;
         }
       }
-      if (pointwise_container_mismatch || ownership_illegally_lowered ||
-          vertical_majorant_illegally_lowered ||
+      if (pointwise_container_mismatch || vertical_majorant_illegally_lowered ||
           vertical_conditioned_above_majorant ||
           row_majorant_illegally_lowered ||
           pre_limiter_max > direct_container_limit + 2.0e-7f ||
@@ -1553,7 +1447,7 @@ void main(uint3 id : SV_DispatchThreadID) {
                        std::any_of(canonical.begin(), canonical.end(), [](const float value) {
                          return value != 0.0f;
                        })))) {
-        error = "v2 GPU replay violated pointwise-container, ownership, vertical-share, "
+        error = "v2 GPU replay violated pointwise-container, vertical-share, "
                 "row-majorant, flat, or spatial-bound contract";
         return false;
       }
@@ -1565,10 +1459,6 @@ void main(uint3 id : SV_DispatchThreadID) {
       const std::string candidate_hash = sha256_hex(std::string_view {
         reinterpret_cast<const char *>(candidate.data()),
         candidate.size() * sizeof(float)
-      });
-      const std::string ownership_hash = sha256_hex(std::string_view {
-        reinterpret_cast<const char *>(ownership.data()),
-        ownership.size() * sizeof(float)
       });
       const std::string vertical_majorant_hash = sha256_hex(std::string_view {
         reinterpret_cast<const char *>(vertical_majorant.data()),
@@ -1614,9 +1504,6 @@ void main(uint3 id : SV_DispatchThreadID) {
         {"candidate_center_drift_u", candidate_center_drift},
         {"predicted_zero_translation_source_u", predicted_zero_translation},
         {"pre_limiter_max_abs_source_u", pre_limiter_max},
-        {"ownership_raised_fraction",
-          static_cast<double>(ownership_raised) / static_cast<double>(element_count)},
-        {"ownership_max_raise_source_u", ownership_max_raise},
         {"vertical_majorant_raised_fraction",
           static_cast<double>(vertical_majorant_raised) /
             static_cast<double>(element_count)},
@@ -1631,7 +1518,6 @@ void main(uint3 id : SV_DispatchThreadID) {
         {"final_horizontal_slope_max", horizontal_slope_max},
         {"final_vertical_shear_max", final_vertical_shear_max},
         {"order_sha256", order_hash},
-        {"ownership_refined_sha256", ownership_hash},
         {"vertical_majorant_sha256", vertical_majorant_hash},
         {"vertical_conditioned_sha256", vertical_conditioned_hash},
         {"parallax_sha256", parallax_hash},
@@ -1643,7 +1529,6 @@ void main(uint3 id : SV_DispatchThreadID) {
       result.raw_depth = raw_srv;
       result.canonical_order = coordinate_srv;
       result.candidate_parallax = candidate_srv;
-      result.ownership_refined_parallax = ownership_srv;
       result.vertical_majorant = vertical_majorant_srv;
       result.vertical_conditioned = vertical_conditioned_srv;
       result.encoded_final_parallax = encoded_srv;
@@ -1651,7 +1536,6 @@ void main(uint3 id : SV_DispatchThreadID) {
       result.raw_values = std::move(raw_values);
       result.canonical_values = canonical;
       result.candidate_parallax_values = candidate;
-      result.ownership_refined_parallax_values = ownership;
       result.vertical_majorant_values = vertical_majorant;
       result.vertical_conditioned_values = vertical_conditioned;
       result.encoded_parallax_values = encoded;
@@ -1663,7 +1547,6 @@ void main(uint3 id : SV_DispatchThreadID) {
       result.raw_sha256 = frame.raw_sha256;
       result.order_sha256 = order_hash;
       result.candidate_sha256 = candidate_hash;
-      result.ownership_refined_sha256 = ownership_hash;
       result.vertical_majorant_sha256 = vertical_majorant_hash;
       result.vertical_conditioned_sha256 = vertical_conditioned_hash;
       result.parallax_sha256 = parallax_hash;
@@ -1721,9 +1604,6 @@ void main(uint3 id : SV_DispatchThreadID) {
   bool depth_coordinate_v2_gpu_replay::dispatch(
     const std::size_t sequence_index,
     const std::string_view expected_frame_id,
-    ID3D11ShaderResourceView *source_color,
-    const std::uint32_t source_color_mode,
-    const float source_linear_scale,
     const std::string_view expected_source_sha256,
     depth_coordinate_v2_gpu_frame &result,
     std::string &error
@@ -1731,9 +1611,6 @@ void main(uint3 id : SV_DispatchThreadID) {
     return impl_->dispatch_frame(
       sequence_index,
       expected_frame_id,
-      source_color,
-      source_color_mode,
-      source_linear_scale,
       expected_source_sha256,
       result,
       error
@@ -1779,7 +1656,6 @@ void main(uint3 id : SV_DispatchThreadID) {
           "depth_coordinate_v2_frame_resolve_cs.hlsl",
           "depth_coordinate_v2_state_resolve_cs.hlsl",
           "depth_coordinate_v2_map_cs.hlsl",
-          "depth_coordinate_v2_ownership_cs.hlsl",
           "depth_coordinate_v2_vertical_limit_cs.hlsl",
           "depth_coordinate_v2_limit_cs.hlsl",
         }},

@@ -1602,7 +1602,6 @@ namespace platf::sbs_debug {
       texture_snapshot sbs;
       texture_snapshot shadow_coordinate;
       texture_snapshot shadow_candidate;
-      texture_snapshot shadow_ownership_refined;
       texture_snapshot shadow_vertical;
       texture_snapshot shadow_vertical_conditioned;
       texture_snapshot shadow_base_final;
@@ -1672,7 +1671,6 @@ namespace platf::sbs_debug {
       raw_depth,
       shadow_coordinate,
       shadow_candidate,
-      shadow_ownership_refined,
       shadow_vertical,
       shadow_vertical_conditioned,
       shadow_base_final,
@@ -1700,7 +1698,6 @@ namespace platf::sbs_debug {
       staged_texture sbs;
       staged_texture shadow_coordinate;
       staged_texture shadow_candidate;
-      staged_texture shadow_ownership_refined;
       staged_texture shadow_vertical;
       staged_texture shadow_vertical_conditioned;
       staged_texture shadow_base_final;
@@ -4481,11 +4478,6 @@ namespace platf::sbs_debug {
             tensor_height
           ) ||
           !scalar_tensor_snapshot_matches(
-            job.shadow_ownership_refined,
-            tensor_width,
-            tensor_height
-          ) ||
-          !scalar_tensor_snapshot_matches(
             job.shadow_vertical,
             tensor_width,
             tensor_height
@@ -4642,7 +4634,6 @@ namespace platf::sbs_debug {
 
         const auto &shadow_coordinate = job.shadow_coordinate;
         const auto &shadow_candidate = job.shadow_candidate;
-        const auto &shadow_ownership_refined = job.shadow_ownership_refined;
         const auto &shadow_vertical = job.shadow_vertical;
         const auto &shadow_vertical_conditioned = job.shadow_vertical_conditioned;
         const auto &shadow_base_final = job.shadow_base_final;
@@ -4658,11 +4649,6 @@ namespace platf::sbs_debug {
              shadow_candidate,
              paths.temporary,
              "shadow_candidate_parallax"
-           ) ||
-           !dump_shadow_float_texture(
-             shadow_ownership_refined,
-             paths.temporary,
-             "shadow_ownership_refined_parallax"
            ) ||
            !dump_shadow_float_texture(
              shadow_vertical,
@@ -4834,9 +4820,6 @@ namespace platf::sbs_debug {
           models::file_sha256_hex(paths.temporary / "shadow_coordinate.f32");
         const std::string shadow_candidate_sha256 =
           models::file_sha256_hex(paths.temporary / "shadow_candidate_parallax.f32");
-        const std::string shadow_ownership_sha256 = models::file_sha256_hex(
-          paths.temporary / "shadow_ownership_refined_parallax.f32"
-        );
         const std::string shadow_vertical_majorant_sha256 =
           models::file_sha256_hex(paths.temporary / "shadow_vertical_majorant.f32");
         const std::string shadow_vertical_conditioned_sha256 =
@@ -4853,7 +4836,7 @@ namespace platf::sbs_debug {
         const std::string shadow_frame_stats_sha256 =
           models::file_sha256_hex(paths.temporary / "shadow_frame_stats.json");
         if (shadow_coordinate_sha256.empty() ||
-            shadow_candidate_sha256.empty() || shadow_ownership_sha256.empty() ||
+            shadow_candidate_sha256.empty() ||
             shadow_vertical_majorant_sha256.empty() ||
             shadow_vertical_conditioned_sha256.empty() || shadow_final_sha256.empty() ||
             shadow_state_sha256.empty() || shadow_frame_stats_sha256.empty() ||
@@ -5006,22 +4989,13 @@ namespace platf::sbs_debug {
             "Exact immutable signed one-eye full-source-U before the spatial limiter; geometry evidence only, never live render authority.",
           shadow_candidate_sha256
         );
-        artifacts["shadow_ownership_refined_parallax.f32"] = hashed_artifact_description(
-          true,
-          true,
-          "parallax-v2 full-resolution contour ownership refinement",
-          video_region ?
-            "Exact signed one-eye ROI-local source-U after conservative full-resolution crop-local source-contour foreground ownership and before the vertical conditioner. The pass may only raise an authenticated candidate at a uniquely owned far-side boundary texel." :
-            "Exact signed one-eye full-source-U after conservative full-resolution source-contour foreground ownership and before the vertical conditioner. The pass may only raise an authenticated candidate at a uniquely owned far-side boundary texel.",
-          shadow_ownership_sha256
-        );
         artifacts["shadow_vertical_majorant.f32"] = hashed_artifact_description(
           true,
           false,
           "parallax-v2 vertical shear-limiter intermediate",
           video_region ?
-            "Exact signed one-eye ROI-local source-U for the least column-wise upper envelope v+ >= ownership-refined candidate with |dv+/dy| <= max_vertical_shear/content_width; crop-local diagnostic evidence only." :
-            "Exact signed one-eye full-source-U for the least column-wise upper envelope v+ >= ownership-refined candidate with |dv+/dy| <= max_vertical_shear/content_width; diagnostic evidence only.",
+            "Exact signed one-eye ROI-local source-U for the least column-wise upper envelope v+ >= candidate with |dv+/dy| <= max_vertical_shear/content_width; crop-local diagnostic evidence only." :
+            "Exact signed one-eye full-source-U for the least column-wise upper envelope v+ >= candidate with |dv+/dy| <= max_vertical_shear/content_width; diagnostic evidence only.",
           shadow_vertical_majorant_sha256
         );
         artifacts["shadow_vertical_conditioned.f32"] = hashed_artifact_description(
@@ -5156,8 +5130,6 @@ namespace platf::sbs_debug {
         dimensions["shadow_coordinate"] = texture_description(shadow_coordinate);
         dimensions["shadow_candidate_parallax"] =
           texture_description(shadow_candidate);
-        dimensions["shadow_ownership_refined_parallax"] =
-          texture_description(shadow_ownership_refined);
         dimensions["shadow_vertical_majorant"] =
           texture_description(shadow_vertical);
         dimensions["shadow_vertical_conditioned"] =
@@ -5218,7 +5190,7 @@ namespace platf::sbs_debug {
             {"artifact", nullptr},
           };
         nlohmann::json manifest {
-          {"schema", 39},
+          {"schema", 40},
           {"capture", "one matched, completed Host-SBS frame"},
           {"capture_status", "complete"},
           {"published_atomically", true},
@@ -5247,10 +5219,7 @@ namespace platf::sbs_debug {
                            "shadow_final_parallax + depth_input_region embedding" :
                            "shadow_final_parallax"},
                          {"parallax_v2_coordinate_role", "shadow_coordinate is diagnostic only; it has no renderer authority"},
-                         {"parallax_v2_ownership_refined_role", video_region ?
-                           "conservative full-resolution crop-local source-contour foreground ownership applied to candidate before the vertical conditioner; may only raise uniquely owned far-side boundary texels" :
-                           "conservative full-resolution source-contour foreground ownership applied to candidate before the vertical conditioner; may only raise uniquely owned far-side boundary texels"},
-                         {"parallax_v2_vertical_majorant_role", "least column-wise upper envelope v+ >= ownership-refined candidate with adjacent-row source-U change <= max_vertical_shear/content_width; diagnostic evidence only"},
+                         {"parallax_v2_vertical_majorant_role", "least column-wise upper envelope v+ >= candidate with adjacent-row source-U change <= max_vertical_shear/content_width; diagnostic evidence only"},
                          {"parallax_v2_vertical_conditioned_role", "fixed 75/25 share of column upper/lower envelopes; may raise or lower candidate and feeds the row majorant"},
                          {"parallax_v2_conditioner_role", subtitle_slr13_active ?
                            (video_region ?
@@ -5904,18 +5873,6 @@ namespace platf::sbs_debug {
                   collect_texture(
                     ctx, pending.shadow_candidate, job.shadow_candidate, budget
                   ),
-                  stage_e::shadow_ownership_refined
-                )) return;
-            break;
-
-          case stage_e::shadow_ownership_refined:
-            if (!collect_required(
-                  collect_texture(
-                    ctx,
-                    pending.shadow_ownership_refined,
-                    job.shadow_ownership_refined,
-                    budget
-                  ),
                   stage_e::shadow_vertical
                 )) return;
             break;
@@ -6174,7 +6131,6 @@ namespace platf::sbs_debug {
       if (!completed.parallax_v2_render_selected ||
           !completed.parallax_v2_producer_active ||
           !completed.shadow_candidate_parallax ||
-          !completed.shadow_ownership_refined_parallax ||
           !completed.shadow_vertical_majorant || !completed.shadow_vertical_conditioned ||
           !completed.shadow_final_parallax || !completed.shadow_state ||
           !completed.shadow_frame_stats) {
@@ -6312,12 +6268,6 @@ namespace platf::sbs_debug {
         stage_texture(
           device,
           ctx,
-          completed.shadow_ownership_refined_parallax,
-          pending->shadow_ownership_refined
-        ) &&
-        stage_texture(
-          device,
-          ctx,
           completed.shadow_vertical_majorant,
           pending->shadow_vertical
         ) &&
@@ -6441,7 +6391,6 @@ namespace platf::sbs_debug {
       job.completed.sbs = nullptr;
       job.completed.shadow_coordinate = nullptr;
       job.completed.shadow_candidate_parallax = nullptr;
-      job.completed.shadow_ownership_refined_parallax = nullptr;
       job.completed.shadow_vertical_majorant = nullptr;
       job.completed.shadow_vertical_conditioned = nullptr;
       job.completed.shadow_base_final_parallax = nullptr;

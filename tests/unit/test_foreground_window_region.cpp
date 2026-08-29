@@ -170,6 +170,74 @@ namespace {
     expect_root(children);
   }
 
+  TEST(ForegroundWindowContent, TreatsRightAndBottomCenterEdgesAsExcluded) {
+    const foreground::rect_t root {100, 100, 900, 600};
+    const auto expect_root = [&](const auto &children) {
+      const auto selected = foreground::detail::select_content_source(
+        0x100u,
+        42u,
+        root,
+        children
+      );
+      EXPECT_FALSE(selected.child_selected);
+      EXPECT_EQ(selected.screen_rect, root);
+    };
+
+    const std::array right_edge {
+      child_window(0x101u, {100, 100, 500, 600}),
+      child_window(0x102u, {500, 100, 516, 600}),
+    };
+    expect_root(right_edge);
+
+    const std::array bottom_edge {
+      child_window(0x101u, {100, 100, 900, 350}),
+      child_window(0x102u, {100, 350, 900, 360}),
+    };
+    expect_root(bottom_edge);
+  }
+
+  TEST(ForegroundWindowContent, ConfirmsOneCensusPerConsecutiveSample) {
+    foreground::detail::content_census_confirmation_t confirmation;
+    const foreground::rect_t root {100, 100, 900, 600};
+    const foreground::detail::content_selection_t first_candidate {
+      .window = 0x101u,
+      .screen_rect = {103, 134, 897, 518},
+      .child_selected = true,
+    };
+    auto observed_at = std::chrono::steady_clock::time_point {10s};
+    const auto observe = [&](
+      const foreground::detail::content_selection_t selection,
+      const std::chrono::milliseconds advance = 50ms
+    ) {
+      observed_at += advance;
+      return confirmation.update(0x100u, 42u, root, selection, observed_at);
+    };
+
+    const auto provisional = observe(first_candidate, 0ms);
+    EXPECT_FALSE(provisional.child_selected);
+    EXPECT_EQ(provisional.window, 0x100u);
+    const auto confirmed = observe(first_candidate);
+    EXPECT_TRUE(confirmed.child_selected);
+    EXPECT_EQ(confirmed.window, first_candidate.window);
+
+    EXPECT_FALSE(observe(first_candidate, 300ms).child_selected);
+    EXPECT_TRUE(observe(first_candidate).child_selected);
+
+    auto changed_candidate = first_candidate;
+    ++changed_candidate.screen_rect.left;
+    EXPECT_FALSE(observe(changed_candidate).child_selected);
+    EXPECT_TRUE(observe(changed_candidate).child_selected);
+
+    confirmation.reset();
+    EXPECT_FALSE(observe(changed_candidate).child_selected);
+    const auto negative = observe({
+      .window = 0x100u,
+      .screen_rect = root,
+    });
+    EXPECT_FALSE(negative.child_selected);
+    EXPECT_FALSE(observe(changed_candidate).child_selected);
+  }
+
   TEST(ForegroundWindowPolicy, AcceptsOnlyCompleteStableOrdinaryWindow) {
     const auto observed_at = std::chrono::steady_clock::time_point {10s};
     const auto result = foreground::detail::classify(

@@ -14,8 +14,8 @@ only the current product, its known limitations, and work that may still be just
 
 Host V2 uses an authenticated DAV2 Small backbone with frozen ZipDepth convex-2x reconstruction,
 one high-resolution model input/output and one high-resolution downstream grid. It retains one
-scene-latched raw center, literal configured pop, a frame-local parallax container, conservative
-foreground ownership, bounded vertical and horizontal cliff conditioning, and a unique contractive
+scene-latched raw center, literal configured pop, a frame-local parallax container, bounded
+vertical and horizontal cliff conditioning, and a unique contractive
 inverse. Invalid or unauthenticated geometry renders flat; there is no older geometry fallback.
 
 On Desktop Duplication, a fresh exact matched-frame rectangle may replace full-frame analysis with
@@ -66,7 +66,7 @@ differently surrounded versions of the same image can produce materially differe
 tensor pixels on the main subject do not guarantee a better boundary. Synthetic context must not
 influence monocular analysis. The
 window-region route therefore uses only the exact client/video pixels: its edge-replicated tensor
-padding is excluded from depth statistics, scene cuts, ownership, history comparison/authority, and
+padding is excluded from depth statistics, scene cuts, history comparison/authority, and
 OCR authority, although the fused map copies the complete raw padded tuple with exclusion `1`.
 
 ### Foreground window-region ROI boundary
@@ -205,11 +205,6 @@ V2 preserves foreground continuity while limiting the slope required by its inve
 large raw cliff this converts one discontinuity into a wider safe ramp. Hair crowns, transparent
 glass rims, and small near-object tops can therefore bend or stretch differently in the two eyes.
 
-The high-grid ownership pass uses the full-resolution source to correct only a unique,
-corroborated mixed boundary cell.
-Transparent, reflective, thin, or competing contours deliberately abstain. Loosening that policy
-globally would exchange a visible residual for incorrect foreground ownership elsewhere.
-
 ### Scene-cut uncertainty
 
 Scene cuts are inferred from depth, raw appearance, ordinal structure, and history. Exposure and
@@ -219,7 +214,7 @@ sequence. Rapid consecutive cuts and structureless transitions remain important 
 ### Unsupported identities fail flat
 
 Live Host SBS, production conversion, and the maintained evaluator accept only the authenticated
-DAV2 Small calibration, fused DAV2/ZipDepth composite identity when selected, preprocessing closure,
+DAV2 Small calibration, required fused DAV2/ZipDepth composite identity, preprocessing closure,
 supported [resolution fit](host-sbs.md#authenticated-resolution-fitting), producer/state contract,
 and renderer closure. There is no Host SBS model selector or unauthenticated fallback.
 
@@ -234,7 +229,7 @@ is interpreted as a controller difference.
 Before changing V2 geometry:
 
 1. Reproduce the issue with a current Dump 3D package and identify whether it begins in the fused
-   raw depth, ownership, cliff conditioning, or the inverse warp.
+   raw depth, candidate mapping, cliff conditioning, or the inverse warp.
 2. Run an exact same-input offline A/B. Do not compare independently captured frames as if they
    were pixel-identical.
 3. Run the canonical core and extended evaluator suites and inspect both hard gates and diagnostic

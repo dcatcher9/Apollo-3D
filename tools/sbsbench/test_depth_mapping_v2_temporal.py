@@ -34,7 +34,6 @@ from depth_mapping_v2_temporal import (  # noqa: E402
     generate_first_latch_exact_sequence,
     map_timeline_flat_on_unusable,
     moment_candidate,
-    ownership_refine_candidate,
     parallax_for_state,
     validate_v2_state_trace,
 )
@@ -58,278 +57,6 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
             result = generate_first_latch_exact_sequence(
                 [raw], [0], [False], "unit-test")
         self.assertEqual(result.state_trace["schema"], V2_STATE_TRACE_SCHEMA)
-
-    def test_source_ownership_matches_one_fractional_far_boundary_edit(self):
-        candidate = np.zeros((5, 5), dtype=np.float32)
-        candidate[2:, :] = np.float32(0.01)
-        source = np.zeros((25, 25, 3), dtype=np.uint8)
-        source[8:, :, :] = 255
-        config = MappingV2Config(max_horizontal_slope=0.001)
-
-        refined = ownership_refine_candidate(candidate, source, config)
-
-        expected = candidate.copy()
-        # The filtered profile authenticates one contour; bounded raw refinement recovers the
-        # exact 40% foreground coverage of this synthetic source edge.
-        expected[1, :] = np.float32(0.004)
-        np.testing.assert_allclose(refined, expected, rtol=0.0, atol=1.0e-9)
-
-    def test_source_ownership_720p_has_no_pixel_phase_holes(self):
-        target_shape = (434, 770)
-        source_scale = np.float32(1280.0 / 770.0)
-
-        # Sweep every interior target-cell phase from the 10% admission floor through the 99%
-        # ceiling. Quantization may move an intended edge just outside that interval; those cases
-        # must abstain, while every actually admitted case must recover geometric occupancy.
-        for nominal_coverage in (0.10, 0.20, 0.40, 0.60, 0.80,
-                                 0.90, 0.95, 0.98, 0.99):
-            source = np.ones((720, 1280, 3), dtype=np.float32)
-            previous_edge = 0
-            for split in range(2, target_shape[1] - 1):
-                source_edge = int(round(float(
-                    np.float32(split) * source_scale -
-                    np.float32(nominal_coverage) * source_scale)))
-                source[:, previous_edge:source_edge, :] = np.float32(0.0)
-                previous_edge = source_edge
-                coverage = temporal._ownership_foreground_coverage(
-                    source, target_shape, split - 1, target_shape[0] // 2, (1, 0))
-                expected_coverage = float(np.float32(
-                    (np.float32(split) * source_scale - np.float32(source_edge)) /
-                    source_scale))
-                with self.subTest(
-                        nominal_coverage=nominal_coverage,
-                        split=split,
-                        source_edge=source_edge):
-                    if 0.0998 <= expected_coverage <= 0.9902:
-                        self.assertIsNotNone(coverage)
-                        self.assertAlmostEqual(
-                            float(coverage),
-                            float(np.clip(expected_coverage, 0.10, 0.99)),
-                            delta=2.0e-4)
-                    else:
-                        self.assertIsNone(coverage)
-
-    def test_source_ownership_coverage_range_is_resolution_invariant(self):
-        # Isolate the normal-axis raster phase while keeping the tangent axis uniform. Native GPU
-        # tests separately use full 2D 720p-4K sources and active contours on every allowlisted
-        # landscape/portrait tensor shape.
-        cases = (
-            ("720p", (434, 770), (434, 1280), 0),
-            ("1080p", (434, 770), (434, 1920), 0),
-            ("1440p", (434, 770), (434, 2560), 0),
-            ("4k", (434, 770), (434, 3840), 0),
-            ("ultrawide-1022", (434, 1022), (434, 3440), 0),
-            ("ultrawide-1036", (434, 1036), (434, 3840), 0),
-            ("portrait-770", (770, 434), (1280, 434), 1),
-            ("portrait-1022", (1022, 434), (3440, 434), 1),
-            ("portrait-1036", (1036, 434), (3840, 434), 1),
-        )
-        for name, target_shape, source_shape, axis in cases:
-            target_extent = target_shape[1] if axis == 0 else target_shape[0]
-            source_extent = source_shape[1] if axis == 0 else source_shape[0]
-            source_scale = np.float32(source_extent / target_extent)
-            for nominal_coverage in (0.10, 0.40, 0.80, 0.98):
-                source = np.ones((*source_shape, 3), dtype=np.float32)
-                previous_edge = 0
-                for split in range(2, target_extent - 1, 31):
-                    source_edge = int(round(float(
-                        np.float32(split) * source_scale -
-                        np.float32(nominal_coverage) * source_scale)))
-                    if axis == 0:
-                        source[:, previous_edge:source_edge, :] = np.float32(0.0)
-                        position = (split - 1, target_shape[0] // 2)
-                        direction = (1, 0)
-                    else:
-                        source[previous_edge:source_edge, :, :] = np.float32(0.0)
-                        position = (target_shape[1] // 2, split - 1)
-                        direction = (0, 1)
-                    previous_edge = source_edge
-                    coverage = temporal._ownership_foreground_coverage(
-                        source, target_shape, position[0], position[1], direction)
-                    expected_coverage = float(np.float32(
-                        (np.float32(split) * source_scale - np.float32(source_edge)) /
-                        source_scale))
-                    with self.subTest(
-                            case=name,
-                            nominal_coverage=nominal_coverage,
-                            split=split):
-                        if 0.0998 <= expected_coverage <= 0.9902:
-                            self.assertIsNotNone(coverage)
-                            self.assertAlmostEqual(
-                                float(coverage),
-                                float(np.clip(expected_coverage, 0.10, 0.99)),
-                                delta=2.0e-4)
-                        else:
-                            self.assertIsNone(coverage)
-
-    def test_source_ownership_abstains_on_ambiguous_constant_color(self):
-        candidate = np.zeros((5, 5), dtype=np.float32)
-        candidate[2:, :] = np.float32(0.01)
-        ambiguous = np.full((25, 25, 3), 127, dtype=np.uint8)
-
-        refined = ownership_refine_candidate(
-            candidate, ambiguous, MappingV2Config(max_horizontal_slope=0.001))
-
-        np.testing.assert_array_equal(refined, candidate)
-
-    def test_source_ownership_abstains_when_source_is_smaller_than_model_grid(self):
-        candidate = np.zeros((5, 5), dtype=np.float32)
-        candidate[2:, :] = np.float32(0.01)
-        for source_shape in ((5, 4), (4, 5)):
-            with self.subTest(source_shape=source_shape):
-                undersized = np.zeros((*source_shape, 3), dtype=np.uint8)
-                undersized[source_shape[0] // 2:, :, :] = 255
-                refined = ownership_refine_candidate(
-                    candidate, undersized,
-                    MappingV2Config(max_horizontal_slope=0.001))
-                np.testing.assert_array_equal(refined, candidate)
-
-    def test_source_ownership_competing_contours_have_positive_controls(self):
-        target_shape = (434, 770)
-        split = 385
-        source_a = np.zeros((434, 3840, 3), dtype=np.uint8)
-        source_a[:, 1916:, :] = 208
-        source_b = np.full((434, 3840, 3), 160, dtype=np.uint8)
-        source_b[:, 1918:, :] = 255
-        combined = np.zeros((434, 3840, 3), dtype=np.uint8)
-        combined[:, 1916:1917, :] = 208
-        combined[:, 1917:1918, :] = 160
-        combined[:, 1918:, :] = 255
-
-        coverage_a = temporal._ownership_foreground_coverage(
-            temporal._ownership_source_rgb(source_a), target_shape,
-            split - 1, target_shape[0] // 2, (1, 0))
-        coverage_b = temporal._ownership_foreground_coverage(
-            temporal._ownership_source_rgb(source_b), target_shape,
-            split - 1, target_shape[0] // 2, (1, 0))
-        ambiguous = temporal._ownership_foreground_coverage(
-            temporal._ownership_source_rgb(combined), target_shape,
-            split - 1, target_shape[0] // 2, (1, 0))
-
-        source_scale = 3840.0 / target_shape[1]
-        expected_a = (split * source_scale - 1916.0) / source_scale
-        expected_b = (split * source_scale - 1918.0) / source_scale
-        self.assertAlmostEqual(float(coverage_a), expected_a, delta=2.0e-4)
-        self.assertAlmostEqual(float(coverage_b), expected_b, delta=2.0e-4)
-        self.assertIsNone(ambiguous)
-
-    def test_source_ownership_rejects_subprofile_opposite_transitions(self):
-        target_shape = (434, 770)
-        split = 385
-        first = np.zeros((434, 3840, 3), dtype=np.uint8)
-        first[:, 1917:, :] = 255
-        second = np.zeros((434, 3840, 3), dtype=np.uint8)
-        second[:, 1919:, :] = 255
-        combined = np.zeros((434, 3840, 3), dtype=np.uint8)
-        combined[:, 1917:1918, :] = 255
-        combined[:, 1919:, :] = 255
-        refinement_only = np.zeros((434, 3840, 3), dtype=np.uint8)
-        refinement_only[:, 1916:1917, :] = 255
-        refinement_only[:, 1918:, :] = 255
-
-        position = (split - 1, target_shape[0] // 2, (1, 0))
-        coverage_first = temporal._ownership_foreground_coverage(
-            temporal._ownership_source_rgb(first), target_shape, *position)
-        coverage_second = temporal._ownership_foreground_coverage(
-            temporal._ownership_source_rgb(second), target_shape, *position)
-        ambiguous = temporal._ownership_foreground_coverage(
-            temporal._ownership_source_rgb(combined), target_shape, *position)
-        refinement_ambiguous = temporal._ownership_foreground_coverage(
-            temporal._ownership_source_rgb(refinement_only), target_shape, *position)
-
-        self.assertIsNotNone(coverage_first)
-        self.assertIsNotNone(coverage_second)
-        self.assertIsNone(ambiguous)
-        self.assertIsNone(refinement_ambiguous)
-
-    def test_source_ownership_is_stable_across_capture_resolutions_and_directions(self):
-        config = MappingV2Config(max_horizontal_slope=0.001)
-        # The 5-cell oracle represents calibrated model space. These source extents cover the
-        # normal-axis ratios of 720p, 1080p, 1440p, and 4K capture without depending on a lucky
-        # integer pixel phase.
-        for source_extent in (8, 12, 17, 25):
-            for axis in (0, 1):
-                for reverse in (False, True):
-                    with self.subTest(
-                            source_extent=source_extent, axis=axis, reverse=reverse):
-                        candidate = np.zeros((5, 5), dtype=np.float32)
-                        if axis == 0:
-                            candidate[:, :2] = np.float32(0.01) if reverse else 0.0
-                            candidate[:, 2:] = 0.0 if reverse else np.float32(0.01)
-                        else:
-                            candidate[:2, :] = np.float32(0.01) if reverse else 0.0
-                            candidate[2:, :] = 0.0 if reverse else np.float32(0.01)
-
-                        source = np.zeros(
-                            (source_extent, source_extent, 3), dtype=np.uint8)
-                        scale = np.float32(source_extent / 5.0)
-                        boundary = np.float32(2.0) * scale
-                        edge_offset = np.float32(0.4) * scale
-                        edge = int(round(float(
-                            boundary + edge_offset if reverse else
-                            boundary - edge_offset)))
-                        if axis == 0:
-                            if reverse:
-                                source[:, :edge, :] = 255
-                            else:
-                                source[:, edge:, :] = 255
-                        elif reverse:
-                            source[:edge, :, :] = 255
-                        else:
-                            source[edge:, :, :] = 255
-
-                        refined = ownership_refine_candidate(candidate, source, config)
-                        if axis == 0:
-                            boundary_slice = refined[:, 2] if reverse else refined[:, 1]
-                            original_slice = candidate[:, 2] if reverse else candidate[:, 1]
-                        else:
-                            boundary_slice = refined[2, :] if reverse else refined[1, :]
-                            original_slice = candidate[2, :] if reverse else candidate[1, :]
-                        self.assertTrue(np.all(boundary_slice > original_slice))
-                        self.assertTrue(np.all(boundary_slice < np.float32(0.01)))
-
-    def test_exact_sequence_threads_source_ownership_into_final_geometry(self):
-        raw = np.zeros((5, 5), dtype=np.float64)
-        raw[2:, :] = 1.0
-        source = np.zeros((25, 25, 3), dtype=np.uint8)
-        source[8:, :, :] = 255
-        config = MappingV2Config(
-            raw_coordinate_scale=0.5,
-            pop_strength=1.0,
-            gain_per_pop=0.01,
-            max_horizontal_slope=0.001,
-            max_vertical_shear=0.004,
-        )
-
-        identity = generate_first_latch_exact_sequence(
-            [raw], [0], [False], "unit-ownership", config)
-        refined = generate_first_latch_exact_sequence(
-            [raw], [0], [False], "unit-ownership", config,
-            source_rgb_fields=[source])
-        identity_row = identity.state_trace["frames"][0]
-        refined_row = refined.state_trace["frames"][0]
-
-        self.assertEqual(identity_row["ownership_raised_fraction"], 0.0)
-        self.assertEqual(identity_row["ownership_max_raise_source_u"], 0.0)
-        self.assertGreater(refined_row["ownership_raised_fraction"], 0.0)
-        self.assertGreater(refined_row["ownership_max_raise_source_u"], 0.0)
-        self.assertNotEqual(
-            refined_row["ownership_refined_sha256"],
-            identity_row["ownership_refined_sha256"])
-        self.assertGreater(
-            float(np.max(np.abs(
-                refined.parallax_fields[0] - identity.parallax_fields[0]))),
-            0.0)
-
-    def test_exact_sequence_rejects_source_count_or_shape_mismatch(self):
-        raw = np.asarray([[-1.0, 0.0, 1.0]])
-        with self.assertRaisesRegex(ValueError, "source RGB fields"):
-            generate_first_latch_exact_sequence(
-                [raw], [0], [False], "unit-ownership", source_rgb_fields=[])
-        with self.assertRaisesRegex(ValueError, "HxWx3"):
-            generate_first_latch_exact_sequence(
-                [raw], [0], [False], "unit-ownership",
-                source_rgb_fields=[np.zeros((4, 4), dtype=np.uint8)])
 
     def test_moment_candidate_uses_fixed_scale_and_observes_moments(self):
         raw = np.asarray([[1.0, 2.0], [3.0, 8.0]])
@@ -596,7 +323,7 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
             "gpu-frame-moments-and-rendered-fields-v5")
         native["producer"] = {
             "authority":
-                "authenticated-raw-source-color-plus-seven-v2-compute-shaders-persistent-gpu-state-v8",
+                "authenticated-raw-depth-plus-six-v2-compute-shaders-persistent-gpu-state-v9",
             "manifest_sha256": "0" * 64,
             "contract_canonical_sha256": CONTRACT_CANONICAL_SHA256,
             "tensor_shape": {"width": width, "height": height},
@@ -620,7 +347,7 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unauthenticated replay tensor shape"):
             validate_v2_state_trace(arbitrary_high, result.frame_ids)
 
-        # The native producer now contains exactly the seven passes that consume or produce V2
+        # The native producer contains exactly the six passes that consume or produce V2
         # state/geometry. Reintroducing either former histogram-only pass must fail attribution.
         self.assertNotIn("depth_minmax_cs.hlsl", V2_GPU_SHADER_SEQUENCE)
         self.assertNotIn("depth_hist_cs.hlsl", V2_GPU_SHADER_SEQUENCE)
@@ -656,10 +383,7 @@ class DepthMappingV2TemporalTest(unittest.TestCase):
             validate_v2_state_trace(changed, result.frame_ids)
 
     def test_trace_layout_records_vertical_conditioner_attribution(self):
-        self.assertEqual(len(V2_STATE_TRACE_FIELDS), 41)
-        self.assertIn("ownership_raised_fraction", V2_STATE_TRACE_FIELDS)
-        self.assertIn("ownership_max_raise_source_u", V2_STATE_TRACE_FIELDS)
-        self.assertIn("ownership_refined_sha256", V2_STATE_TRACE_FIELDS)
+        self.assertEqual(len(V2_STATE_TRACE_FIELDS), 38)
         self.assertIn("vertical_majorant_raised_fraction", V2_STATE_TRACE_FIELDS)
         self.assertIn("vertical_majorant_sha256", V2_STATE_TRACE_FIELDS)
         self.assertIn("vertical_conditioned_sha256", V2_STATE_TRACE_FIELDS)

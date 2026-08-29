@@ -98,7 +98,6 @@ uint NearIdenticalTileAxisGroups(uint dimension) {
 #define NEAR_IDENTICAL_INFER_REDUCE_OFFSET 64u
 #define NEAR_IDENTICAL_INFER_ONE_OFFSET 80u
 #define NEAR_IDENTICAL_INFER_GRID16_OFFSET 96u
-#define NEAR_IDENTICAL_INFER_GRID8_OFFSET 112u
 #define NEAR_IDENTICAL_INFER_COLUMNS_OFFSET 128u
 #define NEAR_IDENTICAL_INFER_ROWS_OFFSET 144u
 #define NEAR_IDENTICAL_REUSE_GRID16_OFFSET 160u
@@ -687,11 +686,6 @@ void finalize_main(uint3 dispatch_thread : SV_DispatchThreadID) {
             NEAR_IDENTICAL_INFER_GRID16_OFFSET,
             run_infer ? (near_identical_geometry_width + 15u) / 16u : 0u,
             run_infer ? (near_identical_geometry_height + 15u) / 16u : 1u,
-            1u);
-        NearIdenticalWriteDispatchArgs(
-            NEAR_IDENTICAL_INFER_GRID8_OFFSET,
-            run_infer ? (near_identical_geometry_width + 7u) / 8u : 0u,
-            run_infer ? (near_identical_geometry_height + 7u) / 8u : 1u,
             1u);
         NearIdenticalWriteDispatchArgs(
             NEAR_IDENTICAL_INFER_COLUMNS_OFFSET,

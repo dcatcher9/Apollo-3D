@@ -14,8 +14,8 @@ The design goal is deliberately asymmetric:
 
 ## GPU evidence
 
-Every valid matched active-model-input/depth pair contributes these frame fractions. The fused
-composite computes them on its single high grid; legacy DAV2 retains its coarse grid:
+Every valid matched active-model-input/depth pair contributes these frame fractions on the fused
+composite's single high grid:
 
 The fused migration initially retains the established numeric thresholds. Global fractions remain
 dimensionless, but fixed-cell stencils and `16x16` local tiles cover half the source-space extent on
@@ -89,9 +89,8 @@ The always-on GPU adaptive path may omit up to four complete depth observations 
 changed-frame candidate. The host uses only route, identity, cadence and complete retained DDup
 history to classify that frame as GPU-undecided; it does not apply a motion-area or rectangle-shape
 heuristic. A dense GPU comparison against the exact state-1 active model-input history then applies
-finite, global medium/strong, and supported-tile local bounds. That input is the high RGB tensor for
-the fused composite and the coarse RGB tensor for legacy DAV2; there is
-no CutBridge readback or CPU decision. The infer owner is eligible only through frame age `4` and a
+finite, global medium/strong, and supported-tile local bounds. That input is the fused composite's
+high RGB tensor; there is no CutBridge readback or CPU decision. The infer owner is eligible only through frame age `4` and a
 strictly less than `100 ms` source-observation age. The host initial-candidate and opaque-follow-up
 checks share that strict `100 ms` age ceiling.
 

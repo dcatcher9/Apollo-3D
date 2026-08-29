@@ -223,39 +223,6 @@ namespace models::host_sbs_v2_gpu {
     return true;
   }
 
-  bool record_ownership(
-    ID3D11DeviceContext *context,
-    const ownership_command_t &command
-  ) noexcept {
-    if (!context || !command.constants.valid() || !command.source_region_constants || !command.shader || !command.dispatch.valid()) {
-      return false;
-    }
-    if (!command.candidate || !command.source_color || !command.tensor_exclusion || !command.ownership_refined_output) {
-      return false;
-    }
-
-    bind_stage_constants(context, command.constants, command.source_region_constants);
-    context->CSSetShader(command.shader, nullptr, 0u);
-    ID3D11ShaderResourceView *inputs[3] = {
-      command.candidate,
-      command.source_color,
-      command.tensor_exclusion,
-    };
-    context->CSSetShaderResources(0u, 3u, inputs);
-    context->CSSetUnorderedAccessViews(
-      0u,
-      1u,
-      &command.ownership_refined_output,
-      nullptr
-    );
-    (void) record_dispatch(context, command.dispatch);
-    ID3D11ShaderResourceView *null_inputs[3] = {};
-    ID3D11UnorderedAccessView *null_output = nullptr;
-    context->CSSetShaderResources(0u, 3u, null_inputs);
-    context->CSSetUnorderedAccessViews(0u, 1u, &null_output, nullptr);
-    return true;
-  }
-
   bool record_vertical(
     ID3D11DeviceContext *context,
     const vertical_command_t &command
@@ -263,13 +230,13 @@ namespace models::host_sbs_v2_gpu {
     if (!context || !command.constants.valid() || !command.shader || !command.dispatch.valid()) {
       return false;
     }
-    if (!command.ownership_refined || !command.vertical_majorant_output || !command.vertical_conditioned_output) {
+    if (!command.candidate || !command.vertical_majorant_output || !command.vertical_conditioned_output) {
       return false;
     }
 
     bind_base_constants(context, command.constants);
     context->CSSetShader(command.shader, nullptr, 0u);
-    context->CSSetShaderResources(0u, 1u, &command.ownership_refined);
+    context->CSSetShaderResources(0u, 1u, &command.candidate);
     ID3D11UnorderedAccessView *outputs[2] = {
       command.vertical_majorant_output,
       command.vertical_conditioned_output,

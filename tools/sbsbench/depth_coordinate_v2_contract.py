@@ -59,8 +59,6 @@ SHADER_SOURCE_SPECS = (
     ("depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_state_resolve_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_map_cs.hlsl", "main", "cs_5_0"),
-    ("prod_zipdepth_convex2x_live_map_cs.hlsl", "main", "cs_5_0"),
-    ("depth_coordinate_v2_ownership_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_vertical_limit_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_limit_cs.hlsl", "main", "cs_5_0"),
     ("host_sbs_ocr_preprocess_cs.hlsl", "main", "cs_5_0"),

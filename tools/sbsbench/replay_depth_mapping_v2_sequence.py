@@ -2,9 +2,9 @@
 """Replay a complete depth-coordinate-v2 shot timeline through Apollo's exact D3D SBS path.
 
 Unlike the single-dump witness, this tool uploads every authenticated raw DAV2 field and cut signal
-to one persistent native GPU state. Shared range/histogram passes plus seven base V2 coordinate shaders
-resolve the fixed raw coordinate and scene camera, apply one exact frame-local container and the
-source-color ownership refinement, then compute the vertical upper/lower envelopes, their
+to one persistent native GPU state. Shared range/histogram passes plus six base V2 coordinate shaders
+resolve the fixed raw coordinate and scene camera, apply one exact frame-local container, then
+compute the vertical upper/lower envelopes, their
 authenticated 75/25 share, and one row majorant before handing the final-parallax field directly
 to the D3D renderer.
 NumPy runs afterward as a comparison-only oracle. The native trace authenticates current-color flat
@@ -80,15 +80,14 @@ except ImportError:  # Direct execution from tools/sbsbench.
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO = SCRIPT_DIR.parent.parent
-# Exact replay compares a Pillow-decoded NumPy oracle with a WIC-decoded native replay.  Keep
-# this lossless-only so decoder-specific JPEG rounding cannot flip the ownership shader's hard
-# edge/contrast gates while both sides still attest the same compressed source bytes.
+# Exact replay compares a Pillow-decoded NumPy oracle with a WIC-decoded native replay. Keep this
+# lossless-only so both sides attest the same decoded source pixels.
 FRAME_PATTERN = re.compile(r"frame_(\d+)\.png$", re.IGNORECASE)
-SEQUENCE_CONTRACT_SCHEMA = 19
-GPU_INPUT_MANIFEST_SCHEMA = 8
-GPU_INPUT_MANIFEST_MODE = "depth-coordinate-v2-production-gpu-sequence-v10"
+SEQUENCE_CONTRACT_SCHEMA = 21
+GPU_INPUT_MANIFEST_SCHEMA = 10
+GPU_INPUT_MANIFEST_MODE = "depth-coordinate-v2-production-gpu-sequence-v12"
 SEQUENCE_MAPPING_CONFIG_KEYS = frozenset(asdict(MappingV2Config()).keys())
-NUMPY_COMPARISON_SCHEMA = 3
+NUMPY_COMPARISON_SCHEMA = 4
 PRODUCER_EVIDENCE_SCHEMA = 1
 PRODUCER_EVIDENCE_BINDING = "self-contained-schema36-schema24-raw-producer-v1"
 PRODUCER_EVIDENCE_DIR = "gpu_input/provenance"
@@ -108,7 +107,6 @@ IMPLEMENTATION_SOURCE_FILES = (
     "src_assets/windows/assets/shaders/directx/depth_coordinate_v2_frame_resolve_cs.hlsl",
     "src_assets/windows/assets/shaders/directx/depth_coordinate_v2_state_resolve_cs.hlsl",
     "src_assets/windows/assets/shaders/directx/depth_coordinate_v2_map_cs.hlsl",
-    "src_assets/windows/assets/shaders/directx/depth_coordinate_v2_ownership_cs.hlsl",
     "src_assets/windows/assets/shaders/directx/depth_coordinate_v2_vertical_limit_cs.hlsl",
     "src_assets/windows/assets/shaders/directx/depth_coordinate_v2_limit_cs.hlsl",
     "src_assets/windows/assets/shaders/directx/sbs_direct_replay_ps.hlsl",
@@ -321,28 +319,6 @@ def _source_frames(path: Path) -> Dict[int, Path]:
     return result
 
 
-class _OrderedSourceRgbFields(Sequence[np.ndarray]):
-    """Lazily decode authenticated SDR inputs in replay order.
-
-    A 4K RGB frame is roughly twenty-five megabytes. Keeping paths here and decoding only the
-    frame requested by the temporal oracle prevents a whole-clip comparison from retaining every
-    source image alongside every raw depth field.
-    """
-
-    def __init__(self, sources: Dict[int, Path], frame_ids: Sequence[int]) -> None:
-        missing = [frame_id for frame_id in frame_ids if frame_id not in sources]
-        if missing:
-            raise ValueError(f"source RGB is missing replay frame IDs: {missing}")
-        self._paths = tuple(sources[frame_id] for frame_id in frame_ids)
-
-    def __len__(self) -> int:
-        return len(self._paths)
-
-    def __getitem__(self, index: int) -> np.ndarray:
-        with Image.open(self._paths[index]) as image:
-            return np.asarray(image.convert("RGB"), dtype=np.uint8).copy()
-
-
 def _load_raw_fields(raw_sequence: Path) -> tuple[list[int], list[np.ndarray], tuple[int, int]]:
     shape = _load_shape(raw_sequence)
     files = _raw_files(raw_sequence)
@@ -517,11 +493,6 @@ def _materialize_gpu_replay_inputs(
         },
         "source_shape": source_shape,
         "mapping_config": asdict(config),
-        # Sequence replay currently materializes WIC-decoded sRGB raster frames. Bind the color
-        # interpretation independently of the source-file hash so the same bytes cannot be
-        # replayed through a linear/HDR ownership path without invalidating the manifest.
-        "source_color_mode": 0,
-        "source_linear_scale": 1.0,
         "cut_source": cut_source,
         "frames": manifest_frames,
     }
@@ -601,8 +572,6 @@ def _numpy_oracle_sequence(
         cut_counts: Sequence[int],
         cut_source: str,
         config: MappingV2Config,
-        *,
-        source_rgb_fields: Optional[Sequence[np.ndarray]] = None,
         ) -> tuple[list[np.ndarray], list[np.ndarray], list[Optional[Dict[str, object]]]]:
     """Produce comparison-only fields with the same retained-camera state machine."""
 
@@ -613,7 +582,6 @@ def _numpy_oracle_sequence(
         cut_source,
         config,
         confirmed_cut_counts=cut_counts,
-        source_rgb_fields=source_rgb_fields,
     )
     return (
         [np.asarray(field, dtype="<f4") for field in mapped.canonical_fields],
@@ -630,9 +598,7 @@ def _compare_gpu_with_numpy(
         cut_counts: Sequence[int],
         cut_source: str,
         config: MappingV2Config,
-        gpu_trace: Dict[str, object],
-        *,
-        source_rgb_fields: Optional[Sequence[np.ndarray]] = None) -> Dict[str, object]:
+        gpu_trace: Dict[str, object]) -> Dict[str, object]:
     """Fail closed when native GPU fields leave explicit float32 oracle tolerances."""
 
     tolerances = {
@@ -641,14 +607,12 @@ def _compare_gpu_with_numpy(
         "state_scalar_max_abs": 5.0e-4,
     }
     oracle_orders, oracle_encoded, oracle_rows = _numpy_oracle_sequence(
-        raw_fields, frame_ids, cuts, cut_counts, cut_source, config,
-        source_rgb_fields=source_rgb_fields)
+        raw_fields, frame_ids, cuts, cut_counts, cut_source, config)
     gpu_rows = gpu_trace["frames"]
     state_fields = (
         "center", "inverse_scale", "latched_scale", "convergence_curve",
         "container_scale", "effective_gain", "observed_mean", "observed_std",
         "observed_raw_minimum", "observed_raw_maximum",
-        "ownership_raised_fraction", "ownership_max_raise_source_u",
     )
     comparison_rows: list[Dict[str, object]] = []
     for index, frame_id in enumerate(frame_ids):
@@ -705,7 +669,7 @@ def _compare_gpu_with_numpy(
     document = {
         "schema": NUMPY_COMPARISON_SCHEMA,
         "role": "numpy-comparison-oracle-only-v2",
-        "render_authority": "native-seven-shader-gpu-output",
+        "render_authority": "native-six-shader-gpu-output",
         "tolerances": tolerances,
         "frames": comparison_rows,
         "all_within_float32_tolerances": True,
@@ -798,18 +762,12 @@ def _validate_gpu_input_manifest_evidence(
     manifest = _read_json(reference_path)
     expected_root = {
         "schema", "mode", "calibration_contract", "model_identity", "raw_shape",
-        "source_shape", "mapping_config", "source_color_mode", "source_linear_scale",
-        "cut_source", "frames",
+        "source_shape", "mapping_config", "cut_source", "frames",
     }
     if (set(manifest) != expected_root or
             manifest.get("schema") != GPU_INPUT_MANIFEST_SCHEMA or
             manifest.get("mode") != GPU_INPUT_MANIFEST_MODE or
             manifest.get("mapping_config") != mapping or
-            type(manifest.get("source_color_mode")) is not int or
-            manifest["source_color_mode"] != 0 or
-            isinstance(manifest.get("source_linear_scale"), bool) or
-            not isinstance(manifest.get("source_linear_scale"), (int, float)) or
-            manifest["source_linear_scale"] != 1 or
             manifest.get("cut_source") != cut_source):
         raise ValueError("GPU input manifest does not bind the selected mapping/cut authority")
     expected_identity = {
@@ -1118,7 +1076,7 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
     if (set(document) != expected_root or document.get("schema") != SEQUENCE_CONTRACT_SCHEMA or
             document.get("experiment") != "depth-coordinate-v2-whole-clip-exact-replay" or
             document.get("mapping_implementation") !=
-            "authenticated-raw-source-color-plus-seven-v2-compute-shaders-persistent-gpu-state-v8" or
+            "authenticated-raw-depth-plus-six-v2-compute-shaders-persistent-gpu-state-v9" or
             document.get("unusable_depth_semantics") !=
             "current-color-flat-retain-camera-unless-cut-v2"):
         raise ValueError("sequence contract has missing or unknown semantics")
@@ -1248,7 +1206,7 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
     if (numpy_comparison.get("schema") != NUMPY_COMPARISON_SCHEMA or
             numpy_comparison.get("role") != "numpy-comparison-oracle-only-v2" or
             numpy_comparison.get("render_authority") !=
-            "native-seven-shader-gpu-output" or
+            "native-six-shader-gpu-output" or
             numpy_comparison.get("all_within_float32_tolerances") is not True):
         raise ValueError("NumPy evidence is not a passing comparison-only oracle")
 
@@ -1369,7 +1327,7 @@ def validate_sequence_replay_artifacts(output: Path) -> Dict[str, Any]:
                            float(mapping["pop_strength"]), rtol=0.0, atol=1.0e-7) or
             gpu_execution.get("enabled") is not True or
             gpu_execution.get("execution") !=
-            "authenticated-raw-source-color-plus-seven-v2-compute-shaders-persistent-state-v8" or
+            "authenticated-raw-depth-plus-six-v2-compute-shaders-persistent-state-v9" or
             gpu_execution.get("tensorrt_executed") is not False or
             gpu_execution.get("render_authority") != "gpu-canonical-and-final-fields" or
             gpu_execution.get("numpy_role") != "comparison-only" or
@@ -1541,9 +1499,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             raise RuntimeError("replay harness model differs from raw-sequence model contract")
 
         numpy_comparison = _compare_gpu_with_numpy(
-            output, raw_fields, frame_ids, cuts, cut_counts, cut_source, config, gpu_trace,
-            source_rgb_fields=_OrderedSourceRgbFields(
-                _source_frames(output / "input_frames"), frame_ids))
+            output, raw_fields, frame_ids, cuts, cut_counts, cut_source, config, gpu_trace)
 
         direct_reference = harness_contract.get("direct_parallax_manifest")
         if not isinstance(direct_reference, dict):
@@ -1567,7 +1523,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "schema": SEQUENCE_CONTRACT_SCHEMA,
             "experiment": "depth-coordinate-v2-whole-clip-exact-replay",
             "mapping_implementation":
-                "authenticated-raw-source-color-plus-seven-v2-compute-shaders-persistent-gpu-state-v8",
+                "authenticated-raw-depth-plus-six-v2-compute-shaders-persistent-gpu-state-v9",
             "input_contract": input_contract,
             "mapping_config": asdict(config),
             "pop_strength_authority": pop_strength_authority,

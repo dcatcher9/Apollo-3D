@@ -25,7 +25,7 @@ except ImportError:  # Direct script/module loading from tools/sbsbench.
     import prod_zipdepth_convex2x as convex2x_contract  # type: ignore
 
 
-DUMP_MANIFEST_SCHEMA = 39
+DUMP_MANIFEST_SCHEMA = 40
 GPU_TRACE_RING_SCHEMA = 3
 GPU_TRACE_CONTRACT_SCHEMA = 3
 GPU_TRACE_DECODED_SCHEMA = 4
@@ -2447,8 +2447,8 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     """Validate a supported V2 geometry fragment of ``dump_manifest.json``.
 
     The full package contains color/model metadata owned by other contracts. This reader
-    deliberately validates only the candidate -> full-resolution ownership refinement -> vertical
-    envelopes/share -> row-majorant chain, its analysis domain, and every authenticated
+    deliberately validates only the candidate -> vertical envelopes/share -> row-majorant chain,
+    its analysis domain, and every authenticated
     intermediate.
     """
 
@@ -2602,16 +2602,8 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         "mask_entrypoint": "mask_ps",
     } if selected else None)
     expected_vertical_role = (
-        "least column-wise upper envelope v+ >= ownership-refined candidate with adjacent-row source-U change <= "
+        "least column-wise upper envelope v+ >= candidate with adjacent-row source-U change <= "
         "max_vertical_shear/content_width; diagnostic evidence only"
-        if selected else None
-    )
-    expected_ownership_role = (
-        (("conservative full-resolution crop-local source-contour foreground ownership applied "
-          "to candidate before the vertical conditioner; may only raise uniquely owned far-side "
-          "boundary texels") if input_mode == "window-region" else
-         ("conservative full-resolution source-contour foreground ownership applied to candidate "
-          "before the vertical conditioner; may only raise uniquely owned far-side boundary texels"))
         if selected else None
     )
     expected_conditioned_role = (
@@ -2652,7 +2644,6 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
             renderer.get("live_shader_source") != expected_live_shader_source or
             renderer.get("parallax_v2_coordinate_role") != expected_coordinate_role or
             renderer.get("parallax_v2_position_field") != expected_position or
-            renderer.get("parallax_v2_ownership_refined_role") != expected_ownership_role or
             renderer.get("parallax_v2_vertical_majorant_role") != expected_vertical_role or
             renderer.get("parallax_v2_vertical_conditioned_role") !=
             expected_conditioned_role or
@@ -2665,8 +2656,6 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
             "parallax-v2 canonical coordinate diagnostic", True),
         "shadow_candidate_parallax.f32": (
             "parallax-v2 pre-limiter candidate displacement", True),
-        "shadow_ownership_refined_parallax.f32": (
-            "parallax-v2 full-resolution contour ownership refinement", True),
         "shadow_vertical_majorant.f32": (
             "parallax-v2 vertical shear-limiter intermediate", False),
         "shadow_vertical_conditioned.f32":
@@ -2699,7 +2688,6 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
                 "dump_manifest.json geometry artifact lacks a valid content sha256")
     dimension_names = (
         "shadow_coordinate", "shadow_candidate_parallax",
-        "shadow_ownership_refined_parallax",
         "shadow_vertical_majorant",
         "shadow_vertical_conditioned",
         *(('shadow_base_final_parallax',) if subtitle_live else ()),
@@ -2849,7 +2837,6 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         "rendered_output_selected": selected,
         "mapping_artifacts_match_selected_renderer": mapping_matches,
         "position_field": expected_position,
-        "ownership_refined_available": active,
         "vertical_majorant_available": active,
         "vertical_conditioned_available": active,
         "capture_grid_kind": capture_grid[0],
@@ -2881,7 +2868,6 @@ def _is_sha256_hex(value: Any) -> bool:
 _GEOMETRY_CHAIN_FIELDS = (
     "shadow_coordinate",
     "shadow_candidate_parallax",
-    "shadow_ownership_refined_parallax",
     "shadow_vertical_majorant",
     "shadow_vertical_conditioned",
     "shadow_final_parallax",
@@ -4083,12 +4069,12 @@ def _verify_roi_exterior_zero_warp_map(
     }
 
 
-def _replay_v2_limiter_fields(ownership: Any, content_width: int) -> Tuple[Any, Any, Any]:
+def _replay_v2_limiter_fields(candidate: Any, content_width: int) -> Tuple[Any, Any, Any]:
     """Replay the contract's serial/Q30 limiter branches exactly in NumPy."""
 
     import numpy as np
 
-    values = np.asarray(ownership, dtype=np.float32)
+    values = np.asarray(candidate, dtype=np.float32)
     if values.ndim != 2 or values.size == 0 or content_width <= 0:
         raise ValueError("limiter replay requires a non-empty 2-D field and positive content width")
     height, width = values.shape
@@ -4186,9 +4172,9 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
       2. every field matches the manifest geometry dimensions and is entirely finite;
       3. the conditioning chain is internally consistent with the contract's serial/Q30 branches:
          ``vertical_majorant``/``vertical_conditioned``/ordinary Base are bitwise equal to the
-         recurrences recomputed from ``ownership_refined``; SLR13's analytic rectangle budget and
-         fade exactly reproduce the atomic final field; ownership refinement never lowers the
-         candidate; and the atomic final artifact is the sole warp-input authority.
+         recurrences recomputed from ``candidate``; SLR13's analytic rectangle budget and fade
+         exactly reproduce the atomic final field; and the atomic final artifact is the sole
+         warp-input authority.
 
     Returns a summary dict on success; raises ``ValueError`` on the first violation.
     """
@@ -4363,7 +4349,6 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
     geometry_chain_fields = (
         "shadow_coordinate",
         "shadow_candidate_parallax",
-        "shadow_ownership_refined_parallax",
         "shadow_vertical_majorant",
         "shadow_vertical_conditioned",
         *(('shadow_base_final_parallax',) if subtitle_live else ()),
@@ -4380,16 +4365,13 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
             raise ValueError(f"{name}.f32 contains non-finite values")
         fields[name] = values.reshape(height, width)
     candidate = fields["shadow_candidate_parallax"]
-    ownership = fields["shadow_ownership_refined_parallax"]
-    if np.any(ownership < candidate):
-        raise ValueError("ownership refinement lowered the candidate field")
 
     # Exact replicas of the production serial/Q30 branches (validated bitwise against the GPU
     # intermediates; see docs/host-sbs.md#cliff-conditioning).
     content_left, content_top, content_right, content_bottom = (
         input_region["tensor_content_rect"])
     content_width = content_right - content_left
-    majorant, conditioned, final = _replay_v2_limiter_fields(ownership, content_width)
+    majorant, conditioned, final = _replay_v2_limiter_fields(candidate, content_width)
 
     recurrence_fields = [
         ("shadow_vertical_majorant", majorant),
@@ -4404,7 +4386,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
         if not np.array_equal(fields[name], recomputed):
             mismatch = float(np.max(np.abs(fields[name] - recomputed)))
             raise ValueError(
-                f"{name}.f32 is not the exact recurrence/serial-Q30 limiter replay of the dumped ownership field "
+                f"{name}.f32 is not the exact recurrence/serial-Q30 limiter replay of the dumped candidate field "
                 f"(max abs diff {mismatch})")
 
     if subtitle_live:
@@ -4457,7 +4439,7 @@ def verify_v2_dump_geometry(dump_dir: Any) -> Dict[str, Any]:
 
 def generate_float_artifact_previews(
         dump_dir: Any, artifact_name: str, output_dir: Any) -> Dict[str, Any]:
-    """Generate diagnostic PNGs from one authenticated schema-39 ``.f32`` artifact.
+    """Generate diagnostic PNGs from one authenticated schema-40 ``.f32`` artifact.
 
     Preview files are deliberately written outside the atomic package contract. Scalar tensors
     receive finite-p2/p98 grayscale and jet views; ``model_input.f32`` receives an RGB view by

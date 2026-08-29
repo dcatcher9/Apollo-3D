@@ -371,6 +371,38 @@ TEST(OfflineSbsWireContractTest, WorkerResultRejectsNarrowIntegerOverflow) {
   );
 }
 
+TEST(OfflineSbsWireContractTest, WorkerResultRejectsCrossContractMismatches) {
+  const auto expect_rejected = [](const auto &mutate) {
+    auto encoded = offline_sbs::wire::to_json(worker_result());
+    mutate(encoded);
+    EXPECT_THROW(
+      offline_sbs::wire::parse_worker_result_contract(encoded),
+      offline_sbs::wire::contract_error
+    );
+  };
+
+  expect_rejected([](auto &encoded) {
+    encoded["analysis_contract"]["source_width"] = 1919;
+  });
+  expect_rejected([](auto &encoded) {
+    encoded["scenes"][0]["evidence"]["source_frame_count"] = 1;
+  });
+  expect_rejected([](auto &encoded) {
+    encoded["replay_contracts"][0]["scene_id"] = 2;
+  });
+  expect_rejected([](auto &encoded) {
+    encoded["replay_contracts"][0]["sbs"]["frame_count"] = 1;
+  });
+  expect_rejected([](auto &encoded) {
+    encoded["source"]["frame_count"] = 3;
+    encoded["analysis_contract"]["observation_timeline"]["count"] = 3;
+    encoded["analysis_contract"]["scheduled_depth_update_count"] = 3;
+    encoded["analysis_contract"]["tensorrt_enqueue_count"] = 3;
+    encoded["analysis_contract"]["source_frame_count"] = 3;
+    encoded["analysis_contract"]["adaptive_state"]["frame_count"] = 3;
+  });
+}
+
 TEST(OfflineSbsWireContractTest, ScenePlanRoundTripsAndRejectsMissingFields) {
   const offline_sbs::wire::scene_plan_contract_t original {
     .scenes = {{1, 3}},

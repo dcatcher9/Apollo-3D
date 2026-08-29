@@ -120,19 +120,18 @@ Runtime profile selection is source-derived: the source is fitted once to the ca
 DAV2 shape and that fit is doubled exactly. Another member of the six-profile allowlist, including
 the opposite transpose, is not a valid substitute.
 
-The runtime selects the local composite only for the exact production DAV2 identity and frozen
-composite hash. Absence preserves the coherent legacy DAV2 path; a present but invalid composite
-fails closed. A failed composite enqueue cannot fall back to a separately running DAV2 engine.
+The runtime requires the local composite for the exact production DAV2 identity and frozen
+composite hash. Absence, a non-regular file, or any identity mismatch fails flat. A failed composite
+enqueue cannot fall back to a separately running DAV2 engine.
 
 ## One high-resolution runtime grid
 
-For the fused path, the public output grid is also the only analysis, history, and live geometry
+The public fused output grid is also the only analysis, history, and live geometry
 grid. The following all consume the same high field:
 
 - raw moments, percentile range, normalization, and edge-aware temporal EMA;
-- normalized-depth history, scene-cut evidence, camera acquisition, and near-identical ownership;
+- normalized-depth history, scene-cut evidence, camera acquisition, and near-identical history ownership;
 - pointwise depth-to-parallax mapping and soft container;
-- source-RGB ownership correction;
 - vertical and horizontal slope conditioning;
 - subtitle projection/conditioning; and
 - the final parallax texture sampled by inverse warp.
@@ -140,7 +139,7 @@ grid. The following all consume the same high field:
 This prevents a high-resolution boundary from being quantized back through coarse temporal or
 spatial state. Global statistics do not intrinsically require four times as many samples, but
 retaining a second coarse authority would reintroduce duplicate dimensions, resources, history,
-and reset rules for little measured benefit. Legacy DAV2 keeps its established coarse single grid.
+and reset rules for little measured benefit.
 
 The calibrated raw coordinate scale remains `2.25` DAV2 units. Runtime authentication validates
 the embedded DAV2 identity against the internal `H x W` calibration while publishing and processing
@@ -175,7 +174,7 @@ does not create a new scene.
 All six landscape and portrait shapes are supported, including OCR8/SLR13 projection and Dump 3D
 authentication on the three portrait high fields. The vertical limiter no longer stores four
 full-height arrays. It retains the two forward-envelope arrays plus bounded carry state and
-deterministically rereads immutable ownership input during replay/backward scans. The exact Q30
+deterministically rereads the immutable candidate during replay/backward scans. The exact Q30
 recurrence therefore fits the D3D11 shared-memory limit at height `2072` without approximation or
 tile seams.
 
@@ -203,7 +202,7 @@ Completed evidence includes:
 - a 40-frame predecessor/current A/B whose high inputs are byte-identical, whose refined-depth
   mean correlation is `0.999994`, and whose final SBS mean absolute pixel delta is `0.040/255`;
 - authenticated maximum-profile reuse replays at `2072x868` and `868x2072`: each exact 18-frame
-  still sequence selected `6` inference frames and `12` reuse frames, with bit-exact raw ownership
+  still sequence selected `6` inference frames and `12` reuse frames, with bit-exact raw output
   and zero control/treatment visual residual;
 - an authenticated moving 40-frame `1540x868` replay that selected `30` inference frames and `10`
   reuse frames, passed raw/final-field closure, and reduced mean conditional-transaction time from

@@ -115,8 +115,7 @@ namespace platf::sbs_debug {
    * that ROI-local field and depth_input_region's scale/outside-collar embedding. The
    * adaptive_state/depth_frame_state pair is optional comparison-only evidence from the retained
    * scene-cut bridge; it never authorizes a dump or controls live geometry. The immutable V2
-   * candidate first produces shadow_ownership_refined_parallax from the full-resolution source
-   * contour, then shadow_vertical_majorant (the exact upper-envelope diagnostic) and
+   * candidate feeds shadow_vertical_majorant (the exact upper-envelope diagnostic) and
    * shadow_vertical_conditioned (the fixed 75/25 vertical share), then the row majorant produces
    * shadow_base_final_parallax. When OCR8 and SLR13 are active, the compact publication record and
    * locator state condition that Base into shadow_final_parallax; an empty current-authority block
@@ -131,7 +130,7 @@ namespace platf::sbs_debug {
    */
   struct frame {
     ID3D11ShaderResourceView *source = nullptr;
-    /** Exact full-frame or whole-ROI color texture submitted to DAV2 and ownership. */
+    /** Exact full-frame or whole-ROI color texture submitted to DAV2. */
     ID3D11ShaderResourceView *depth_input_source = nullptr;
     ID3D11ShaderResourceView *model_input = nullptr;
     ID3D11ShaderResourceView *raw_depth = nullptr;
@@ -143,7 +142,6 @@ namespace platf::sbs_debug {
     ID3D11ShaderResourceView *sbs = nullptr;
     ID3D11ShaderResourceView *shadow_coordinate = nullptr;
     ID3D11ShaderResourceView *shadow_candidate_parallax = nullptr;
-    ID3D11ShaderResourceView *shadow_ownership_refined_parallax = nullptr;
     ID3D11ShaderResourceView *shadow_vertical_majorant = nullptr;
     ID3D11ShaderResourceView *shadow_vertical_conditioned = nullptr;
     ID3D11ShaderResourceView *shadow_base_final_parallax = nullptr;

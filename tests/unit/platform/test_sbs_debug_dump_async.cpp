@@ -1456,7 +1456,7 @@ namespace {
     EXPECT_TRUE(dumper.needs_conversion_poll());
   }
 
-  TEST(SbsDebugDumpAsyncTest, Schema39PackagesOnlyOneFinalFieldAndNoScalarPreviews) {
+  TEST(SbsDebugDumpAsyncTest, Schema40PackagesOnlyOneFinalFieldAndNoScalarPreviews) {
     std::ifstream stream(
       std::filesystem::path(SUNSHINE_SOURCE_DIR) /
         "src/platform/windows/sbs_debug_dump.cpp",
@@ -1487,7 +1487,7 @@ namespace {
          }) {
       EXPECT_EQ(source.find(retired), std::string::npos) << retired;
     }
-    EXPECT_NE(source.find("{\"schema\", 39}"), std::string::npos);
+    EXPECT_NE(source.find("{\"schema\", 40}"), std::string::npos);
     EXPECT_NE(
       source.find("{\"warp_input_artifact\", \"shadow_final_parallax.f32\"}"),
       std::string::npos

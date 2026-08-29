@@ -131,7 +131,7 @@ def _capture_grid_relation(
         calibration: coordinate_contract.ModelCalibration,
         width: int,
         height: int) -> tuple[str, int, int] | None:
-    """Classify one exact schema-39 tensor grid without admitting arbitrary upscales."""
+    """Classify one exact schema-40 tensor grid without admitting arbitrary upscales."""
 
     if (width, height) in calibration.calibrated_input_shapes:
         return "legacy-dav2", width, height

@@ -64,7 +64,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
     def _set_manifest_capture_grid(manifest, width, height):
         for name in (
                 "shadow_coordinate", "shadow_candidate_parallax",
-                "shadow_ownership_refined_parallax", "shadow_vertical_majorant",
+                "shadow_vertical_majorant",
                 "shadow_vertical_conditioned", "shadow_final_parallax"):
             manifest["dimensions"][name].update({"width": width, "height": height})
         manifest["dimensions"]["model_input"].update({"width": width, "height": height})
@@ -273,8 +273,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 ("parallax-v2 canonical coordinate diagnostic", True),
             "shadow_candidate_parallax.f32":
                 ("parallax-v2 pre-limiter candidate displacement", True),
-            "shadow_ownership_refined_parallax.f32":
-                ("parallax-v2 full-resolution contour ownership refinement", True),
             "shadow_vertical_majorant.f32":
                 ("parallax-v2 vertical shear-limiter intermediate", False),
             "shadow_vertical_conditioned.f32":
@@ -310,12 +308,8 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 "parallax_v2_position_field": "shadow_final_parallax",
                 "parallax_v2_coordinate_role":
                     "shadow_coordinate is diagnostic only; it has no renderer authority",
-                "parallax_v2_ownership_refined_role":
-                    "conservative full-resolution source-contour foreground ownership applied "
-                    "to candidate before the vertical conditioner; may only raise uniquely "
-                    "owned far-side boundary texels",
                 "parallax_v2_vertical_majorant_role":
-                    "least column-wise upper envelope v+ >= ownership-refined candidate with "
+                    "least column-wise upper envelope v+ >= candidate with "
                     "adjacent-row source-U change <= max_vertical_shear/content_width; "
                     "diagnostic evidence only",
                 "parallax_v2_vertical_conditioned_role":
@@ -390,10 +384,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                     "format": "DXGI_FORMAT_R32_FLOAT", "format_value": 41,
                 },
                 "shadow_candidate_parallax": {
-                    "width": 770, "height": 434,
-                    "format": "DXGI_FORMAT_R32_FLOAT", "format_value": 41,
-                },
-                "shadow_ownership_refined_parallax": {
                     "width": 770, "height": 434,
                     "format": "DXGI_FORMAT_R32_FLOAT", "format_value": 41,
                 },
@@ -591,11 +581,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         stats = dump_contract.validate_shadow_frame_stats_document(self.frame_stats)
         self.assertEqual(stats["valid"], 1.0)
 
-    def test_current_manifest_attributes_ownership_then_vertical_share_and_row_majorant(self):
+    def test_current_manifest_attributes_vertical_share_and_row_majorant(self):
         decoded = dump_contract.validate_v2_dump_manifest_document(self.manifest)
         self.assertTrue(decoded["active"])
         self.assertTrue(decoded["rendered_output_selected"])
-        self.assertTrue(decoded["ownership_refined_available"])
         self.assertTrue(decoded["vertical_majorant_available"])
         self.assertTrue(decoded["vertical_conditioned_available"])
         self.assertEqual(decoded["position_field"], "shadow_final_parallax")
@@ -689,7 +678,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 dump_contract.validate_v2_dump_manifest_document(changed)
 
     def test_current_subtitle_record_and_state_abi_partition_exact_word_counts(self):
-        self.assertEqual(dump_contract.DUMP_MANIFEST_SCHEMA, 39)
+        self.assertEqual(dump_contract.DUMP_MANIFEST_SCHEMA, 40)
         self.assertEqual(dump_contract.DEPTH_INPUT_REGION_SCHEMA, 4)
         self.assertEqual(dump_contract.SUBTITLE_OCR_RECORD_SCHEMA, 3)
         self.assertEqual(dump_contract.SUBTITLE_LOCATOR_STATE_SCHEMA, 13)
@@ -725,7 +714,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertEqual(
             struct.pack("<I", dump_contract.SUBTITLE_LOCATOR_STATE_TAG), b"SL13")
 
-    def test_schema39_accepts_exact_single_high_grid_and_rejects_split_or_arbitrary_high(self):
+    def test_schema40_accepts_exact_single_high_grid_and_rejects_split_or_arbitrary_high(self):
         high = copy.deepcopy(self.manifest)
         self._set_manifest_capture_grid(high, 1540, 868)
         high["composite_runtime_provenance"] = self._composite_runtime_provenance()
@@ -2153,7 +2142,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             changed["artifacts"][field]["sha256"] = "not-a-hash"
             with self.assertRaisesRegex(ValueError, "content sha256"):
                 dump_contract.validate_v2_dump_manifest_document(changed)
-        # Schema 39 must not advertise packaged scalar previews at all.
+        # Schema 40 must not advertise packaged scalar previews at all.
         changed = copy.deepcopy(self.manifest)
         changed["artifacts"]["shadow_vertical_majorant.png"] = {
             "available": True, "required": False, "stage": "retired preview",
@@ -2389,17 +2378,15 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
 
         rng = np.random.default_rng(20260804)
         candidate = (rng.uniform(-0.002, 0.03, (height, width))).astype(np.float32)
-        ownership = candidate.copy()
-        ownership[4, 7] = np.float32(ownership[4, 7] + 0.005)  # raise-only refinement
 
         majorant, conditioned, final = dump_contract._replay_v2_limiter_fields(
-            ownership, width)
+            candidate, width)
 
         manifest = copy.deepcopy(self.manifest)
         for name in (
                 "model_input", "raw_depth",
                 "shadow_coordinate",
-                "shadow_candidate_parallax", "shadow_ownership_refined_parallax",
+                "shadow_candidate_parallax",
                 "shadow_vertical_majorant", "shadow_vertical_conditioned",
                 "shadow_final_parallax"):
             manifest["dimensions"][name] = dict(
@@ -2416,7 +2403,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 np.linspace(0.0, 1.0, width, dtype=np.float32),
                 (height, width)).copy(),
             "shadow_candidate_parallax": candidate,
-            "shadow_ownership_refined_parallax": ownership,
             "shadow_vertical_majorant": majorant,
             "shadow_vertical_conditioned": conditioned,
             "shadow_final_parallax": final,
@@ -2560,10 +2546,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             "mapping_artifacts_match_selected_renderer": True,
             "parallax_v2_position_field":
                 "shadow_final_parallax + depth_input_region embedding",
-            "parallax_v2_ownership_refined_role":
-                "conservative full-resolution crop-local source-contour foreground ownership "
-                "applied to candidate before the vertical conditioner; may only raise uniquely "
-                "owned far-side boundary texels",
             "parallax_v2_conditioner_role":
                 "least row-wise crop-local q >= shadow_vertical_conditioned with horizontal "
                 "slope <= max_horizontal_slope and vertical shear <= max_vertical_shear "
@@ -2598,7 +2580,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         for name in (
                 "model_input", "raw_depth",
                 "shadow_coordinate",
-                "shadow_candidate_parallax", "shadow_ownership_refined_parallax",
+                "shadow_candidate_parallax",
                 "shadow_vertical_majorant", "shadow_vertical_conditioned",
                 "shadow_final_parallax"):
             manifest["dimensions"][name] = dict(
@@ -2615,7 +2597,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 np.linspace(0.0, 1.0, tensor_width, dtype=np.float32),
                 (tensor_height, tensor_width)).copy(),
             "shadow_candidate_parallax": constant,
-            "shadow_ownership_refined_parallax": constant,
             "shadow_vertical_majorant": majorant,
             "shadow_vertical_conditioned": conditioned,
             "shadow_final_parallax": final,
@@ -2900,7 +2881,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             self.assertEqual(summary["height"], 12)
             self.assertFalse(summary["window_region_verified"])
 
-    def test_schema39_generates_float_previews_on_demand_outside_package(self):
+    def test_schema40_generates_float_previews_on_demand_outside_package(self):
         from PIL import Image
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -3464,13 +3445,11 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             candidate = np.zeros((height, width), dtype=np.float32)
             split = left + (right - left) // 2
             candidate[:, split:] = np.float32(0.001)
-            ownership = candidate.copy()
             majorant, conditioned, final = dump_contract._replay_v2_limiter_fields(
-                ownership, right - left)
+                candidate, right - left)
 
             fields = {
                 "shadow_candidate_parallax.f32": candidate,
-                "shadow_ownership_refined_parallax.f32": ownership,
                 "shadow_vertical_majorant.f32": majorant,
                 "shadow_vertical_conditioned.f32": conditioned,
                 "shadow_final_parallax.f32": final,
@@ -3487,7 +3466,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
 
             # The old whole-tensor denominator would propagate the 0.001 cliff leftward. It is
             # a different exact recurrence and must now fail closed.
-            _, _, legacy = dump_contract._replay_v2_limiter_fields(ownership, width)
+            _, _, legacy = dump_contract._replay_v2_limiter_fields(candidate, width)
             self.assertFalse(np.array_equal(final, legacy))
             self._write_hashed_payload(
                 root, manifest, "shadow_final_parallax.f32",
@@ -4309,36 +4288,6 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, expected):
                     dump_contract.verify_v2_dump_geometry(root)
 
-    def test_geometry_verifier_rejects_ownership_lowering(self):
-        import hashlib
-
-        import numpy as np
-
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            manifest, fields = self._write_synthetic_geometry_dump(root)
-            lowered = fields["shadow_ownership_refined_parallax"].copy()
-            lowered[2, 2] = np.float32(lowered[2, 2] - 0.001)
-            payload = lowered.astype("<f4").tobytes()
-            (root / "shadow_ownership_refined_parallax.f32").write_bytes(payload)
-            manifest["artifacts"]["shadow_ownership_refined_parallax.f32"]["sha256"] = (
-                hashlib.sha256(payload).hexdigest())
-            (root / "dump_manifest.json").write_text(
-                json.dumps(manifest), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "lowered the candidate"):
-                dump_contract.verify_v2_dump_geometry(root)
-
-    def test_manifest_requires_the_full_resolution_ownership_intermediate(self):
-        changed = copy.deepcopy(self.manifest)
-        changed["artifacts"].pop("shadow_ownership_refined_parallax.f32")
-        with self.assertRaisesRegex(ValueError, "geometry artifact"):
-            dump_contract.validate_v2_dump_manifest_document(changed)
-
-        changed = copy.deepcopy(self.manifest)
-        changed["dimensions"]["shadow_ownership_refined_parallax"] = None
-        with self.assertRaisesRegex(ValueError, "geometry dimension"):
-            dump_contract.validate_v2_dump_manifest_document(changed)
-
     def test_manifest_authenticates_live_and_diagnostic_renderer_sources(self):
         for key, replacement in (
                 ("source_closure_sha256", "0" * 64),
@@ -4360,8 +4309,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         for key in (
                 "parallax_v2_render_requested",
                 "mapping_artifacts_match_selected_renderer",
-                "parallax_v2_coordinate_role",
-                "parallax_v2_ownership_refined_role"):
+                "parallax_v2_coordinate_role"):
             with self.subTest(key=key):
                 changed = copy.deepcopy(self.manifest)
                 changed["renderer"].pop(key)

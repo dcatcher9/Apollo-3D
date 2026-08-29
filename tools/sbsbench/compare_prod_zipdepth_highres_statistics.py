@@ -7,8 +7,8 @@ decision from the paired coarse DAV2 ``raw_<frame>.f32`` field, matching the pre
 path; the treatment acquires those two values from the refined field.  Consequently, every reported
 parallax delta is caused by moving camera/statistics ownership, not by changing geometry.
 
-The oracle intentionally excludes scene latching/cuts, temporal reuse, RGB ownership refinement,
-subtitle conditioning, reprojection, and live GPU timing.  It cannot make temporal or image-quality
+The oracle intentionally excludes scene latching/cuts, temporal reuse, subtitle conditioning,
+reprojection, and live GPU timing.  It cannot make temporal or image-quality
 claims.  It uses the production V2 curve, pointwise container, and two-axis spatial limiters from
 ``depth_mapping_v2`` so the remaining comparison is small and reviewable.
 """
@@ -407,7 +407,7 @@ def build_report(
             "excluded": [
                 "scene-latched camera state and cut handling",
                 "temporal normalization, motion masks, depth reuse, and fallback",
-                "RGB ownership refinement and subtitle conditioning",
+                "subtitle conditioning",
                 "live GPU arithmetic, renderer/reprojection, image quality, and latency",
             ],
             "temporal_claim_authorized": False,

@@ -123,9 +123,9 @@ rearm rules are owned by [Host SBS scene cuts](host-sbs-scene-cuts.md).
 
 ### Transparent crowns, duplicated edges, or stretched object rims
 
-These are generally occlusion/ownership or raw monocular-depth boundary failures, not encoder
-blur. Capture a Dump 3D package and compare `raw_depth.f32`, ownership-refined parallax,
-vertical-conditioned parallax, final parallax, and the two-eye warp map. PNG heat maps stretch
+These are generally occlusion or raw monocular-depth boundary failures, not encoder blur. Capture a
+Dump 3D package and compare `raw_depth.f32`, candidate parallax, vertical-conditioned parallax,
+final parallax, and the two-eye warp map. PNG heat maps stretch
 their own ranges and cannot prove the size of a depth cliff.
 
 The current limitations and qualification order are tracked in

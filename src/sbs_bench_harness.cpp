@@ -3133,7 +3133,7 @@ namespace sbs_bench {
     const bool replay_mode = !o.render_cache.empty();
     // Direct replay supplies an authenticated, horizontally contractive final field plus an
     // independent canonical order. Native V2 sequence replay runs
-    // the production seven-shader coordinate pipeline and feeds its exact final field through the
+    // the production six-shader coordinate pipeline and feeds its exact final field through the
     // same fixed-point renderer contract.
     const bool depth_coordinate_v2_gpu_mode =
       !o.depth_coordinate_v2_manifest.empty();
@@ -3962,9 +3962,6 @@ namespace sbs_bench {
         if (!depth_coordinate_v2_gpu->dispatch(
               fi,
               output_id,
-              in_srv.Get(),
-              static_cast<std::uint32_t>(input_color),
-              o.simulate_hdr ? static_cast<float>(o.hdr_scale) : 1.0f,
               exact_source_sha256,
               v2_gpu_frame,
               gpu_replay_error
@@ -4142,22 +4139,10 @@ namespace sbs_bench {
               convex2x_high_height = est.raw_height;
             } else {
               const auto &latched = *convex2x_runtime_provenance;
-              const bool provenance_unchanged =
-                latched.model == runtime.model &&
-                latched.onnx_sha256 == runtime.onnx_sha256 &&
-                latched.embedded_dav2_onnx_sha256 ==
-                  runtime.embedded_dav2_onnx_sha256 &&
-                latched.zipdepth_checkpoint_sha256 ==
-                  runtime.zipdepth_checkpoint_sha256 &&
-                latched.guidance_preprocess_source_closure_sha256 ==
-                  runtime.guidance_preprocess_source_closure_sha256 &&
-                latched.engine_recipe == runtime.engine_recipe &&
-                latched.engine_artifact == runtime.engine_artifact &&
-                latched.active_engine_manifest == runtime.active_engine_manifest;
               const bool shape_unchanged =
                 convex2x_high_width == est.raw_width &&
                 convex2x_high_height == est.raw_height;
-              if (!provenance_unchanged || !shape_unchanged) {
+              if (latched != runtime || !shape_unchanged) {
                 BOOST_LOG(error)
                   << "sbs-bench: fused single-high shape/provenance changed within one run at frame "
                   << output_id;

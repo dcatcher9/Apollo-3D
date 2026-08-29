@@ -88,7 +88,8 @@ first requires and verifies the current `sunshine` target, then binds the execut
 runtime shader tree, DAV2
 engine/ONNX, OCR engine/contract ONNX, and generated coordinate contract across both serial legs.
 The default gate requires at least one actual reuse and proves that every reuse retained the
-preceding public raw-model field bit-exactly (legacy DAV2 output or fused `refined_depth`). Ordinary
+preceding fused `refined_depth` field bit-exactly. Native geometry replay authenticates the paired
+source snapshot hash but receives no source texture, color mode, or HDR scale. Ordinary
 subtitle work also holds SLR80, condition parameters,
 and `final_parallax_<frame-id>.f32`; cadence-due work may instead publish a current subtitle
 observation on the reused depth. The authenticated trace distinguishes those cases and rejects an
@@ -165,7 +166,7 @@ captures directly with:
 
 See [Dump and replay format](DUMP_FORMAT.md) before generating or interpreting preview PNGs. The
 reader accepts only the current SLR13/OCR8 dump schema; older experimental captures are
-intentionally unsupported. An active schema-39 package authenticates the OCR8/SLR13 tuple for the
+intentionally unsupported. An active schema-40 package authenticates the OCR8/SLR13 tuple for the
 atomic final field's publication frame, ordinary Base, conditioned final field, and the resolver's
 bounded strict fallback placement policy. It replays SLR13 directly into
 `shadow_final_parallax.f32`, which is authenticated once as both the atomic final field and warp
@@ -173,13 +174,13 @@ input. An
 active resolver also authenticates the strict symmetric bottom-corner ordinary-core qualification
 and its ribbon exemption. An inactive package uses the one canonical `none` descriptor.
 
-Current schema-39 window-region packages preserve the complete authorized source rectangle at any
+Current schema-40 window-region packages preserve the complete authorized source rectangle at any
 aspect ratio. `depth_input_region.json` schema 4 records the centered integer content rectangle in
 the fixed DAV2 tensor and its edge-replicated excluded padding. Quantitative consumers must use
 that content width for limiter and SLR13 steps and must project OCR/SLR geometry only into that
 content rectangle; treating the whole tensor as real source pixels is rejected.
 
-Schema 39 packages no scalar/heat preview PNGs or redundant per-field shape sidecars. Generate a
+Schema 40 packages no scalar/heat preview PNGs or redundant per-field shape sidecars. Generate a
 verified diagnostic view from any retained authenticated `.f32` artifact outside the package:
 
 ```powershell
