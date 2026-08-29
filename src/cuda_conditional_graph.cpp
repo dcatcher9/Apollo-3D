@@ -549,13 +549,15 @@ namespace cuda_conditional_graph {
     move_from(std::move(other));
   }
 
-  executable_t &executable_t::operator=(executable_t &&other) noexcept {
-    if (this != &other) {
-      if (reset()) {
-        move_from(std::move(other));
-      }
+  bool executable_t::adopt_from_empty(executable_t &&other) noexcept {
+    if (this == &other) {
+      return true;
     }
-    return *this;
+    if (!empty()) {
+      return false;
+    }
+    move_from(std::move(other));
+    return true;
   }
 
   void executable_t::move_from(executable_t &&other) noexcept {

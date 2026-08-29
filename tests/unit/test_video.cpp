@@ -1567,6 +1567,66 @@ TEST(TensorRtContextLifecycleTest, ConditionalLaunchFailurePublishesLifetimeBefo
     << "Launch failure must poison execution and retain the possibly-live wrapper";
 }
 
+TEST(TensorRtContextLifecycleTest, ConditionalGraphAdoptionPrecedesPointerPublication) {
+  const auto source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp"
+  );
+  ASSERT_FALSE(source.empty());
+
+  const auto helper_begin = source.find(
+    "[[nodiscard]] bool adopt_depth_conditional_candidate("
+  );
+  const auto helper_end = source.find(
+    "bool ensure_depth_conditional_graph(",
+    helper_begin
+  );
+  ASSERT_NE(helper_begin, std::string::npos);
+  ASSERT_NE(helper_end, std::string::npos);
+  const auto helper = source.substr(helper_begin, helper_end - helper_begin);
+  const auto adoption = helper.find(
+    "if (!depth_conditional_graph.adopt_from_empty(std::move(candidate)))"
+  );
+  const auto decision_pointer = helper.find(
+    "depth_conditional_decision_ptr = decision_record;"
+  );
+  const auto request_pointer = helper.find(
+    "depth_conditional_request_ptr = request_record;"
+  );
+  const auto child_pointer = helper.find(
+    "depth_conditional_child_graph = child_graph;"
+  );
+  const auto optional_pointer = helper.find(
+    "depth_conditional_optional_child_graph = optional_child_graph;"
+  );
+  ASSERT_NE(adoption, std::string::npos);
+  ASSERT_NE(decision_pointer, std::string::npos);
+  ASSERT_NE(request_pointer, std::string::npos);
+  ASSERT_NE(child_pointer, std::string::npos);
+  ASSERT_NE(optional_pointer, std::string::npos);
+  EXPECT_LT(adoption, decision_pointer);
+  EXPECT_LT(adoption, request_pointer);
+  EXPECT_LT(adoption, child_pointer);
+  EXPECT_LT(adoption, optional_pointer);
+  EXPECT_NE(helper.find("candidate.abandon_unsafe();"), std::string::npos)
+    << "An impossible second-owner state must retain the candidate's CUDA dependencies";
+
+  const auto ensure = source.substr(helper_end);
+  const auto failed_build_adoption = ensure.find(
+    "if (!adopt_depth_conditional_candidate("
+  );
+  const auto ready_build_adoption = ensure.find(
+    "if (!adopt_depth_conditional_candidate(",
+    failed_build_adoption + 1u
+  );
+  const auto active_log = ensure.find(
+    "Host SBS GPU near-identical arbitration is active"
+  );
+  ASSERT_NE(failed_build_adoption, std::string::npos);
+  ASSERT_NE(ready_build_adoption, std::string::npos);
+  ASSERT_NE(active_log, std::string::npos);
+  EXPECT_LT(ready_build_adoption, active_log);
+}
+
 TEST(TensorRtContextLifecycleTest, EstimatorDestructorUsesOnlyBoundedNonblockingQuiescence) {
   const auto source = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp"

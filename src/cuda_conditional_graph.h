@@ -391,7 +391,15 @@ namespace cuda_conditional_graph {
     executable_t(const executable_t &) = delete;
     executable_t &operator=(const executable_t &) = delete;
     executable_t(executable_t &&other) noexcept;
-    executable_t &operator=(executable_t &&other) noexcept;
+    executable_t &operator=(executable_t &&other) noexcept = delete;
+
+    /** Transfers ownership from other only when this value owns no CUDA objects.
+     *
+     * This function issues no CUDA calls. A nonempty destination returns false and leaves both
+     * values unchanged, so callers must explicitly reset() and check its status before replacing a
+     * live wrapper. Self-adoption is a successful no-op.
+     */
+    [[nodiscard]] bool adopt_from_empty(executable_t &&other) noexcept;
 
     [[nodiscard]] static executable_t build(
       cuda_driver_api &cuda,

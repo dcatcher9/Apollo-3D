@@ -17,6 +17,7 @@
 #include <iterator>
 #include <limits>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -36,6 +37,9 @@ struct CUgraphNode_st {
 
 namespace {
   using namespace cuda_conditional_graph;
+
+  static_assert(std::is_move_constructible_v<executable_t>);
+  static_assert(!std::is_move_assignable_v<executable_t>);
 
   constexpr char scalar_prefix_consumer_ptx[] = R"ptx(
 .version 8.4
@@ -835,7 +839,7 @@ namespace {
       if (cuda_->cuCtxSetCurrent(nullptr) != CUDA_SUCCESS) {
         return initialize_result_e::failed;
       }
-      bridge_ = executable_t::build(
+      auto bridge_candidate = executable_t::build(
         *cuda_,
         {
           .context = context_,
@@ -846,6 +850,9 @@ namespace {
           .request_record = records_ + sizeof(decision_record_t),
         }
       );
+      if (!bridge_.adopt_from_empty(std::move(bridge_candidate))) {
+        return initialize_result_e::failed;
+      }
       if (!bridge_.ready() && bridge_.cuda_result() == CUDA_ERROR_NOT_SUPPORTED) {
         return initialize_result_e::unavailable;
       }
@@ -1310,7 +1317,7 @@ TEST(CudaConditionalGraphContract, BuilderFailuresExposeNoExecutable) {
   EXPECT_EQ(result.failure(), build_failure_e::invalid_descriptor);
 
   CUgraph_st child;
-  result = executable_t::build(
+  ASSERT_TRUE(result.adopt_from_empty(executable_t::build(
     unavailable,
     {
       .context = reinterpret_cast<CUcontext>(1u),
@@ -1318,12 +1325,12 @@ TEST(CudaConditionalGraphContract, BuilderFailuresExposeNoExecutable) {
       .decision_record = 16u,
       .request_record = 32u,
     }
-  );
+  )));
   EXPECT_FALSE(result.ready());
   EXPECT_EQ(result.failure(), build_failure_e::invalid_descriptor)
     << "The two 32-byte authenticated records must not overlap";
 
-  result = executable_t::build(
+  ASSERT_TRUE(result.adopt_from_empty(executable_t::build(
     unavailable,
     {
       .context = reinterpret_cast<CUcontext>(1u),
@@ -1331,14 +1338,14 @@ TEST(CudaConditionalGraphContract, BuilderFailuresExposeNoExecutable) {
       .decision_record = 16u,
       .request_record = 48u,
     }
-  );
+  )));
   EXPECT_FALSE(result.ready());
   EXPECT_EQ(result.get(), nullptr);
   EXPECT_EQ(result.failure(), build_failure_e::driver_api_unavailable);
 
   constexpr CUdeviceptr last_aligned_address =
     std::numeric_limits<CUdeviceptr>::max() - 15u;
-  result = executable_t::build(
+  ASSERT_TRUE(result.adopt_from_empty(executable_t::build(
     unavailable,
     {
       .context = reinterpret_cast<CUcontext>(1u),
@@ -1346,11 +1353,11 @@ TEST(CudaConditionalGraphContract, BuilderFailuresExposeNoExecutable) {
       .decision_record = last_aligned_address,
       .request_record = 0x1000u,
     }
-  );
+  )));
   EXPECT_EQ(result.failure(), build_failure_e::invalid_descriptor)
     << "The complete 32-byte decision record must not wrap the device address space";
 
-  result = executable_t::build(
+  ASSERT_TRUE(result.adopt_from_empty(executable_t::build(
     unavailable,
     {
       .context = reinterpret_cast<CUcontext>(1u),
@@ -1358,11 +1365,11 @@ TEST(CudaConditionalGraphContract, BuilderFailuresExposeNoExecutable) {
       .decision_record = 0x1000u,
       .request_record = last_aligned_address,
     }
-  );
+  )));
   EXPECT_EQ(result.failure(), build_failure_e::invalid_descriptor)
     << "The complete 32-byte request record must not wrap the device address space";
 
-  result = executable_t::build(
+  ASSERT_TRUE(result.adopt_from_empty(executable_t::build(
     unavailable,
     {
       .context = reinterpret_cast<CUcontext>(1u),
@@ -1370,7 +1377,7 @@ TEST(CudaConditionalGraphContract, BuilderFailuresExposeNoExecutable) {
       .decision_record = std::numeric_limits<CUdeviceptr>::max() - 31u,
       .request_record = 0x1000u,
     }
-  );
+  )));
   EXPECT_EQ(result.failure(), build_failure_e::driver_api_unavailable)
     << "A 32-byte record whose final byte is exactly the address maximum does not wrap";
 }
@@ -1516,6 +1523,90 @@ TEST(CudaConditionalGraphContract, ParentDestroyFailureRetainsEmbeddedMirrorsFor
   transactional_graph_fake = nullptr;
 }
 
+TEST(CudaConditionalGraphContract, AdoptFromEmptyTransfersOwnershipWithoutCudaCalls) {
+  scalar_prefix_graph_t infer;
+  transactional_graph_fake_t state;
+  cuda_driver_api cuda = transactional_graph_api(state);
+  auto source = executable_t::build(
+    cuda,
+    {
+      .context = reinterpret_cast<CUcontext>(1u),
+      .infer_child = &infer.graph,
+      .decision_record = 0x4000u,
+      .request_record = 0x4040u,
+    }
+  );
+  ASSERT_TRUE(source.ready());
+  const CUgraphExec source_handle = source.get();
+  const auto source_audit = source.audit_result();
+  executable_t destination;
+
+  ASSERT_TRUE(destination.adopt_from_empty(std::move(source)));
+  EXPECT_TRUE(destination.ready());
+  EXPECT_EQ(destination.get(), source_handle);
+  EXPECT_EQ(destination.audit_result().failure, source_audit.failure);
+  EXPECT_EQ(destination.audit_result().visited_graphs, source_audit.visited_graphs);
+  EXPECT_TRUE(source.empty());
+  EXPECT_FALSE(source.ready());
+  EXPECT_FALSE(state.executable_destroyed);
+  EXPECT_FALSE(state.graph_destroyed);
+  EXPECT_FALSE(state.module_unloaded);
+  EXPECT_TRUE(state.freed_mirrors.empty());
+
+  EXPECT_TRUE(destination.reset());
+  transactional_graph_fake = nullptr;
+}
+
+TEST(CudaConditionalGraphContract, AdoptFromEmptyRejectsTwoLiveOwners) {
+  scalar_prefix_graph_t destination_infer;
+  transactional_graph_fake_t destination_state;
+  cuda_driver_api destination_cuda = transactional_graph_api(destination_state);
+  auto destination = executable_t::build(
+    destination_cuda,
+    {
+      .context = reinterpret_cast<CUcontext>(1u),
+      .infer_child = &destination_infer.graph,
+      .decision_record = 0x4000u,
+      .request_record = 0x4040u,
+    }
+  );
+  ASSERT_TRUE(destination.ready());
+
+  scalar_prefix_graph_t source_infer;
+  transactional_graph_fake_t source_state;
+  cuda_driver_api source_cuda = transactional_graph_api(source_state);
+  auto source = executable_t::build(
+    source_cuda,
+    {
+      .context = reinterpret_cast<CUcontext>(1u),
+      .infer_child = &source_infer.graph,
+      .decision_record = 0x5000u,
+      .request_record = 0x5040u,
+    }
+  );
+  ASSERT_TRUE(source.ready());
+  const CUgraphExec destination_handle = destination.get();
+  const CUgraphExec source_handle = source.get();
+
+  EXPECT_FALSE(destination.adopt_from_empty(std::move(source)));
+  EXPECT_TRUE(destination.ready());
+  EXPECT_EQ(destination.get(), destination_handle);
+  EXPECT_TRUE(source.ready());
+  EXPECT_EQ(source.get(), source_handle);
+  EXPECT_FALSE(destination_state.executable_destroyed);
+  EXPECT_FALSE(destination_state.graph_destroyed);
+  EXPECT_TRUE(destination_state.freed_mirrors.empty());
+  EXPECT_FALSE(source_state.executable_destroyed);
+  EXPECT_FALSE(source_state.graph_destroyed);
+  EXPECT_TRUE(source_state.freed_mirrors.empty());
+
+  transactional_graph_fake = &destination_state;
+  EXPECT_TRUE(destination.reset());
+  transactional_graph_fake = &source_state;
+  EXPECT_TRUE(source.reset());
+  transactional_graph_fake = nullptr;
+}
+
 TEST(CudaConditionalGraphContract, UnsafeAbandonMakesDestructorIssueNoCudaCalls) {
   scalar_prefix_graph_t infer;
   transactional_graph_fake_t state;
@@ -1640,7 +1731,7 @@ TEST(CudaConditionalGraphContract, RejectsKernelFreeMandatoryAndOptionalInferenc
   CUgraph_st empty_optional {{&empty_node}};
   transactional_graph_fake_t optional_state;
   cuda_driver_api optional_cuda = transactional_graph_api(optional_state);
-  result = executable_t::build(
+  ASSERT_TRUE(result.adopt_from_empty(executable_t::build(
     optional_cuda,
     {
       .context = reinterpret_cast<CUcontext>(1u),
@@ -1649,7 +1740,7 @@ TEST(CudaConditionalGraphContract, RejectsKernelFreeMandatoryAndOptionalInferenc
       .decision_record = 0x4000u,
       .request_record = 0x4040u,
     }
-  );
+  )));
   EXPECT_FALSE(result.ready());
   EXPECT_TRUE(result.empty());
   EXPECT_EQ(

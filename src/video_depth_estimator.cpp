@@ -3530,6 +3530,41 @@ namespace models {
       }
     }
 
+    [[nodiscard]] bool adopt_depth_conditional_candidate(
+      cuda_conditional_graph::executable_t &&candidate,
+      const CUdeviceptr decision_record,
+      const CUdeviceptr request_record,
+      const CUgraph child_graph,
+      const CUgraph optional_child_graph
+    ) {
+      if (!depth_conditional_graph.adopt_from_empty(std::move(candidate))) {
+        // ensure_depth_conditional_graph() proves the destination empty before construction. If
+        // that invariant is ever broken, two wrappers may retain overlapping graph operands and
+        // mapped records. Forget the uninstalled candidate without a CUDA call, retain every
+        // dependency at terminal teardown, and never publish its pointer metadata.
+        candidate.abandon_unsafe();
+        execution_context_poisoned = true;
+        gpu_conditional_bridge_context_failed = true;
+        if (optional_child_graph || depth_conditional_optional_child_graph) {
+          mark_ocr_context_failure(
+            detail::warmed_execution_context_failure_e::unsafe_teardown
+          );
+        }
+        fail_gpu_conditional_bridge_once(
+          "conditional-wrapper adoption found a nonempty destination",
+          CUDA_SUCCESS,
+          true,
+          true
+        );
+        return false;
+      }
+      depth_conditional_decision_ptr = decision_record;
+      depth_conditional_request_ptr = request_record;
+      depth_conditional_child_graph = child_graph;
+      depth_conditional_optional_child_graph = optional_child_graph;
+      return true;
+    }
+
     bool ensure_depth_conditional_graph(
       cuda_driver_api &cuda,
       const CUdeviceptr decision_record,
@@ -3612,11 +3647,15 @@ namespace models {
           // wrapper, take ownership of it so the child graph and mapped records cannot outlive
           // their backing. This estimator is terminal; teardown will retry under its context and
           // deliberately retain dependencies if the driver still refuses destruction.
-          depth_conditional_graph = std::move(candidate);
-          depth_conditional_decision_ptr = decision_record;
-          depth_conditional_request_ptr = request_record;
-          depth_conditional_child_graph = depth_inference_graph.graph;
-          depth_conditional_optional_child_graph = optional_child_for_build;
+          if (!adopt_depth_conditional_candidate(
+                std::move(candidate),
+                decision_record,
+                request_record,
+                depth_inference_graph.graph,
+                optional_child_for_build
+              )) {
+            return false;
+          }
           gpu_conditional_bridge_available = false;
           execution_context_poisoned = true;
           if (optional_child_for_build) {
@@ -3667,11 +3706,15 @@ namespace models {
         );
         return false;
       }
-      depth_conditional_graph = std::move(candidate);
-      depth_conditional_decision_ptr = decision_record;
-      depth_conditional_request_ptr = request_record;
-      depth_conditional_child_graph = depth_inference_graph.graph;
-      depth_conditional_optional_child_graph = optional_child_for_build;
+      if (!adopt_depth_conditional_candidate(
+            std::move(candidate),
+            decision_record,
+            request_record,
+            depth_inference_graph.graph,
+            optional_child_for_build
+          )) {
+        return false;
+      }
       BOOST_LOG(info)
         << "Host SBS GPU near-identical arbitration is active with device-owned branch "
            "selection, optional OCR sibling=" << (optional_child_for_build ? "on" : "off")
