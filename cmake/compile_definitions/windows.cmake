@@ -67,6 +67,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/audio.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/ar_glasses.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/ar_glasses.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/rayneo_wear_monitor.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/rayneo_wear_monitor.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/virtual_display.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/virtual_display.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/utils.h"
@@ -87,10 +89,12 @@ set(OPENSSL_LIBRARIES
 list(PREPEND PLATFORM_LIBRARIES
         ${CURL_STATIC_LIBRARIES}
         avrt
+        cfgmgr32
         d3d11
         D3DCompiler
         dwmapi
         dxgi
+        hid
         iphlpapi
         ksuser
         libssp.a
@@ -99,6 +103,7 @@ list(PREPEND PLATFORM_LIBRARIES
         minhook::minhook
         ntdll
         ole32
+        powrprof
         setupapi
         shlwapi
         synchronization.lib

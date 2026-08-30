@@ -33,6 +33,63 @@ cannot activate for an HDR sink, Sunshine 3D retains the same color-managed SDR 
 Moving the glasses to another GPU/adapter also forces a complete rebuild: the adapter LUID is part
 of both the detected target contract and the presenter's expected output identity.
 
+### RayNeo Air 4 Pro wear state
+
+Wear detection is intentionally model-specific. Sunshine 3D enables it only when the selected
+physical display is exactly `DISPLAY:TCL03D4` and the matching RayNeo Taurus HID device
+(`VID_1BBB&PID_AF50`, vendor usage page `0xFF00`, usage `0x0001`) authenticates as board `0x3A`
+(RayNeo Air 4 Pro). Other approved displays, other RayNeo boards, a missing HID interface, or an
+ambiguous match retain the legacy connected-display behavior.
+
+After board authentication, the host accepts only the exact 65-byte Windows HID sensor report
+shape (`00 99 65`). The little-endian float at vendor-payload byte offset 44 is the wear proximity
+observation. Repeated live worn/off-head A/B captures on the
+authenticated Air 4 Pro established its polarity: finite values in the validated range at or above
+`15000` propose **worn**, and finite nonnegative values at or below `10000` propose **off-head**.
+The lower worn boundary includes the `22835`-to-`23188` band observed during a sustained live 3D
+wear test, while retaining substantial separation from the observed `1545`-to-`3046` off-head band.
+Intermediate, non-finite, or out-of-range proximity proposes **unknown**. The device tick is decoded
+for diagnostics but is not used as the Windows transport-freshness gate; host receipt time of the
+complete report supplies that authority. The observed `65535.0` worn saturation is hardware evidence
+for this unit, not a claim that `65535` is a vendor-documented or universal RayNeo sentinel. The
+hardware 1920x1080 2D / 3840x1080 3D mode does not change this wear signal.
+
+A worn, off-head, or unknown proposal must remain continuous for at least 150 ms before it changes
+the effective state. Each correctly framed report refreshes transport liveness, regardless of its
+device tick. Ten seconds without any valid report also makes the state **unknown**; an explicit HID
+read failure or physical unplug remains immediate. This liveness deadline bounds a silent stream
+failure without treating the Air 4 Pro's observed multi-second quiet intervals as wear-state
+changes. A silent subscription is closed and re-authenticated with bounded `1/2/5/10/30`-second
+recovery backoff instead of repeatedly canceling and reissuing reads on the same possibly stale
+handle. A healthy connection sends its board query and sensor-start command once, then keeps one
+outstanding read and only consumes pushed HID reports; it never polls wear status. Unknown state
+fails open: it cancels sensor-only suppression and permits the same local presentation behavior used
+before wear sensing, rather than guessing that the glasses are worn or leaving a user with a
+permanently blank display.
+
+HID-interface arrival/removal and Windows suspend/resume callbacks interrupt every outstanding
+command or read. Suspend/removal immediately closes the old handle; resume/arrival performs a fresh
+exact-identity discovery, board authentication, and sensor subscription after a short device-settle
+window. When the HID is absent, Windows interface notifications replace the old one-second SetupAPI
+scan; a 30-second SetupAPI enumeration is retained only as a missed-notification safety net. If
+notification registration itself fails, the one-second compatibility fallback remains. SetupAPI
+enumeration is not a hardware/status query. Sunshine 3D cannot synthesize sensor data or reset the
+USB bus when Windows restores only DisplayPort video and never enumerates `VID_1BBB&PID_AF50`; it
+stays fail-open and recovers automatically if that interface later appears.
+
+Confirmed off-head state stops and joins the local presenter, including capture and Host SBS 3D
+conversion, but retains the session's SudoVDA virtual monitor, desktop and windows, physical-output
+isolation, cursor isolation, and live GPU-ownership lease. Confirmed worn state rebuilds the
+presenter resources against that same retained desktop. Wear state is a presenter pause reason
+separate from the display-topology transition pause, so neither reason may resume presentation
+while the other remains active. This gate adds no Host SBS inference, reuse, scene-cut, geometry,
+or temporal rule; resumed resources continue to follow the canonical Host SBS contract.
+
+Off-head is not a disconnect. A true Windows display unplug remains authoritative and follows the
+ordinary full session teardown below: capture stops, the private virtual source is removed, and the
+physical-display topology is restored. Remote virtual-display ownership likewise keeps its existing
+priority over a local session whether that local presenter is running or paused off-head.
+
 Only one presentation path owns an interactive virtual desktop at a time. A connecting or active
 remote virtual-display stream takes priority without being terminated: Sunshine 3D synchronously stops
 local AR before the remote display is created. Sunshine 3D admits only one remote stream. When it

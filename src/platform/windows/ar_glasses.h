@@ -58,6 +58,14 @@ namespace ar_glasses {
   static_assert(classify_mode(3840, 2160) == presentation_mode_e::unsupported);
 
   namespace detail {
+    /** Presenter work is permitted only when neither topology nor wear state requires a pause. */
+    constexpr bool local_presenter_should_run(
+      bool topology_transition_paused,
+      bool off_head_paused
+    ) {
+      return !topology_transition_paused && !off_head_paused;
+    }
+
     /** Remote ownership lasts for the configured client-connect window plus scheduling grace. */
     constexpr std::chrono::milliseconds remote_pending_duration(
       std::chrono::milliseconds connect_timeout

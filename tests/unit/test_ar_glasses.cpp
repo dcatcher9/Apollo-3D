@@ -1,18 +1,46 @@
 #ifdef _WIN32
 
   #include "src/platform/windows/ar_glasses.h"
+  #include "src/platform/windows/rayneo_wear_monitor.h"
   #include "src/platform/windows/virtual_display.h"
 
+  #include <array>
   #include <chrono>
-  #include <thread>
-
-  #include <nlohmann/json.hpp>
-
+  #include <cstring>
   #include <gtest/gtest.h>
+  #include <limits>
+  #include <nlohmann/json.hpp>
+  #include <pbt.h>
+  #include <thread>
 
 using namespace std::chrono_literals;
 
 namespace {
+  std::array<std::uint8_t, 65> rayneo_sensor_report(
+    float proximity,
+    std::uint32_t tick = 1,
+    std::uint8_t fill = 0
+  ) {
+    std::array<std::uint8_t, 65> report {};
+    report.fill(fill);
+    report[0] = 0x00;
+    report[1] = 0x99;
+    report[2] = 0x65;
+    std::memcpy(report.data() + 1 + 40, &tick, sizeof(tick));
+    std::memcpy(report.data() + 1 + 44, &proximity, sizeof(proximity));
+    return report;
+  }
+
+  std::array<std::uint8_t, 65> rayneo_board_info_ack(std::uint8_t board_id) {
+    std::array<std::uint8_t, 65> report {};
+    report[0] = 0x00;
+    report[1] = 0x99;
+    report[2] = 0xC8;
+    report[1 + 8] = 0x00;
+    report[1 + 21] = board_id;
+    return report;
+  }
+
   nlohmann::json legacy_recovery_record(
     std::string device_path = R"(\\?\DISPLAY#TCL03D4#test)"
   ) {
@@ -114,6 +142,289 @@ TEST(ArGlassesOwnership, RenewedRemoteConnectWindowBlocksLocalPresentation) {
 
   ar_glasses::remote_virtual_display_ended(lease);
   EXPECT_FALSE(ar_glasses::remote_virtual_display_blocks_local());
+}
+
+TEST(ArGlassesPresenterPause, RequiresEveryIndependentPauseReasonToClear) {
+  EXPECT_TRUE(ar_glasses::detail::local_presenter_should_run(false, false));
+  EXPECT_FALSE(ar_glasses::detail::local_presenter_should_run(true, false));
+  EXPECT_FALSE(ar_glasses::detail::local_presenter_should_run(false, true));
+  EXPECT_FALSE(ar_glasses::detail::local_presenter_should_run(true, true));
+}
+
+TEST(RayNeoWearReport, DecodesEmpiricallySeparatedWornAndOffHeadBands) {
+  const auto worn = ar_glasses::rayneo::detail::parse_sensor_report_for_test(
+    rayneo_sensor_report(65535.0f, 100)
+  );
+  ASSERT_TRUE(worn);
+  EXPECT_EQ(worn->tick, 100u);
+  EXPECT_FLOAT_EQ(worn->proximity, 65535.0f);
+  EXPECT_EQ(worn->state, ar_glasses::rayneo::wear_state_e::worn);
+
+  const auto live_lower_worn = ar_glasses::rayneo::detail::parse_sensor_report_for_test(
+    rayneo_sensor_report(22835.0f, 101)
+  );
+  ASSERT_TRUE(live_lower_worn);
+  EXPECT_EQ(live_lower_worn->state, ar_glasses::rayneo::wear_state_e::worn);
+
+  const auto off_head = ar_glasses::rayneo::detail::parse_sensor_report_for_test(
+    rayneo_sensor_report(1545.0f, 102)
+  );
+  ASSERT_TRUE(off_head);
+  EXPECT_EQ(off_head->state, ar_glasses::rayneo::wear_state_e::off_head);
+
+  const auto intermediate = ar_glasses::rayneo::detail::parse_sensor_report_for_test(
+    rayneo_sensor_report(12500.0f, 103)
+  );
+  ASSERT_TRUE(intermediate);
+  EXPECT_EQ(intermediate->state, ar_glasses::rayneo::wear_state_e::unknown);
+
+  EXPECT_EQ(
+    ar_glasses::rayneo::detail::parse_sensor_report_for_test(rayneo_sensor_report(10000.0f))->state,
+    ar_glasses::rayneo::wear_state_e::off_head
+  );
+  EXPECT_EQ(
+    ar_glasses::rayneo::detail::parse_sensor_report_for_test(rayneo_sensor_report(10001.0f))->state,
+    ar_glasses::rayneo::wear_state_e::unknown
+  );
+  EXPECT_EQ(
+    ar_glasses::rayneo::detail::parse_sensor_report_for_test(rayneo_sensor_report(14999.0f))->state,
+    ar_glasses::rayneo::wear_state_e::unknown
+  );
+  EXPECT_EQ(
+    ar_glasses::rayneo::detail::parse_sensor_report_for_test(rayneo_sensor_report(15000.0f))->state,
+    ar_glasses::rayneo::wear_state_e::worn
+  );
+}
+
+TEST(RayNeoWearReport, RejectsWrongFramingAndLength) {
+  auto ack = rayneo_sensor_report(65535.0f);
+  ack[2] = 0xC8;
+  EXPECT_FALSE(ar_glasses::rayneo::detail::parse_sensor_report_for_test(ack));
+
+  auto short_report = rayneo_sensor_report(65535.0f);
+  EXPECT_FALSE(ar_glasses::rayneo::detail::parse_sensor_report_for_test(std::span<const std::uint8_t>(short_report).first(64)));
+}
+
+TEST(RayNeoWearReport, MapsImplausibleProximityToUnknown) {
+  for (const auto proximity : {
+         std::numeric_limits<float>::quiet_NaN(),
+         std::numeric_limits<float>::infinity(),
+         -1.0f,
+         65536.0f,
+       }) {
+    const auto parsed = ar_glasses::rayneo::detail::parse_sensor_report_for_test(
+      rayneo_sensor_report(proximity)
+    );
+    ASSERT_TRUE(parsed);
+    EXPECT_EQ(parsed->state, ar_glasses::rayneo::wear_state_e::unknown);
+  }
+}
+
+TEST(RayNeoWearReport, ClassificationDoesNotDependOnImuOrLightBytes) {
+  const auto zero_filled = ar_glasses::rayneo::detail::parse_sensor_report_for_test(
+    rayneo_sensor_report(65535.0f, 200, 0x00)
+  );
+  const auto changed_motion = ar_glasses::rayneo::detail::parse_sensor_report_for_test(
+    rayneo_sensor_report(65535.0f, 201, 0xA5)
+  );
+  ASSERT_TRUE(zero_filled);
+  ASSERT_TRUE(changed_motion);
+  EXPECT_EQ(zero_filled->state, changed_motion->state);
+  EXPECT_EQ(changed_motion->state, ar_glasses::rayneo::wear_state_e::worn);
+}
+
+TEST(RayNeoWearIdentity, RequiresTheAuthenticatedAir4ProBoard) {
+  EXPECT_TRUE(ar_glasses::rayneo::detail::board_info_matches_for_test(rayneo_board_info_ack(0x3A)));
+  EXPECT_FALSE(ar_glasses::rayneo::detail::board_info_matches_for_test(rayneo_board_info_ack(0x39)));
+
+  auto wrong_command = rayneo_board_info_ack(0x3A);
+  wrong_command[1 + 8] = 0x01;
+  EXPECT_FALSE(ar_glasses::rayneo::detail::board_info_matches_for_test(wrong_command));
+  EXPECT_FALSE(ar_glasses::rayneo::detail::board_info_matches_for_test(rayneo_sensor_report(65535.0f)));
+}
+
+TEST(RayNeoWearIdentity, DoesNotStartAHidMonitorForOtherDisplays) {
+  EXPECT_FALSE(ar_glasses::rayneo::create_wear_monitor("DISPLAY:ABC1234"));
+  EXPECT_FALSE(ar_glasses::rayneo::create_wear_monitor("display:tcl03d4"));
+}
+
+TEST(RayNeoWearRecovery, FiltersLifecycleNotificationsToTheExactUsbIdentity) {
+  EXPECT_TRUE(ar_glasses::rayneo::detail::hid_interface_matches_for_test(LR"(\\?\HID#VID_1BBB&PID_AF50&MI_00&COL01#test)"));
+  EXPECT_TRUE(ar_glasses::rayneo::detail::hid_interface_matches_for_test(LR"(\\?\hid#vid_1bbb&pid_af50#test)"));
+  EXPECT_FALSE(ar_glasses::rayneo::detail::hid_interface_matches_for_test(LR"(\\?\hid#vid_1bbb&pid_af51#test)"));
+  EXPECT_FALSE(ar_glasses::rayneo::detail::hid_interface_matches_for_test(LR"(\\?\hid#xvid_1bbb&pid_af50#test)"));
+  EXPECT_FALSE(ar_glasses::rayneo::detail::hid_interface_matches_for_test(LR"(\\?\hid#vid_1bbb&pid_af500#test)"));
+  EXPECT_FALSE(ar_glasses::rayneo::detail::hid_interface_matches_for_test(LR"(\\?\hid#vid_3941&pid_1a04#test)"));
+}
+
+TEST(RayNeoWearRecovery, ClassifiesEveryWindowsSuspendResumeVariant) {
+  using power_event_e = ar_glasses::rayneo::detail::power_event_e;
+  const auto classify = ar_glasses::rayneo::detail::power_event_for_test;
+
+  EXPECT_EQ(classify(PBT_APMSUSPEND), power_event_e::suspend);
+  EXPECT_EQ(classify(PBT_APMRESUMEAUTOMATIC), power_event_e::resume);
+  EXPECT_EQ(classify(PBT_APMRESUMECRITICAL), power_event_e::resume);
+  EXPECT_EQ(classify(PBT_APMRESUMESUSPEND), power_event_e::resume);
+  EXPECT_EQ(classify(PBT_APMPOWERSTATUSCHANGE), power_event_e::none);
+}
+
+TEST(RayNeoWearRecovery, CoalescesThePairedWindowsResumeCallbacks) {
+  const auto requests_recovery = ar_glasses::rayneo::detail::power_event_requests_recovery_for_test;
+
+  EXPECT_TRUE(requests_recovery(PBT_APMSUSPEND, false));
+  EXPECT_TRUE(requests_recovery(PBT_APMRESUMEAUTOMATIC, false));
+  EXPECT_TRUE(requests_recovery(PBT_APMRESUMECRITICAL, false));
+  EXPECT_TRUE(requests_recovery(PBT_APMRESUMESUSPEND, true));
+  EXPECT_FALSE(requests_recovery(PBT_APMRESUMESUSPEND, false));
+}
+
+TEST(RayNeoWearRecovery, UsesEventsWithABoundedSafetyFallback) {
+  const auto retry_delay = ar_glasses::rayneo::detail::recovery_retry_delay_for_test;
+
+  EXPECT_EQ(retry_delay(true, true, 0), 30s);
+  EXPECT_EQ(retry_delay(true, true, 100), 30s);
+  EXPECT_EQ(retry_delay(true, false, 0), 1s);
+  EXPECT_EQ(retry_delay(false, false, 100), 1s);
+
+  EXPECT_EQ(retry_delay(false, true, 0), 1s);
+  EXPECT_EQ(retry_delay(false, true, 1), 2s);
+  EXPECT_EQ(retry_delay(false, true, 2), 5s);
+  EXPECT_EQ(retry_delay(false, true, 3), 10s);
+  EXPECT_EQ(retry_delay(false, true, 4), 30s);
+  EXPECT_EQ(retry_delay(false, true, 100), 30s);
+}
+
+TEST(RayNeoWearDebounce, RequiresContinuousEvidenceAndExpiresStaleStream) {
+  using observation_t = ar_glasses::rayneo::detail::debounce_observation_t;
+  using state_e = ar_glasses::rayneo::wear_state_e;
+  const std::array off_head_samples {
+    observation_t {0ms, 1, state_e::off_head},
+    observation_t {75ms, 2, state_e::off_head},
+    observation_t {149ms, 3, state_e::off_head},
+  };
+  EXPECT_EQ(
+    ar_glasses::rayneo::detail::debounce_observations_for_test(off_head_samples, 149ms),
+    state_e::unknown
+  );
+
+  const std::array confirmed_off_head {
+    observation_t {0ms, 1, state_e::off_head},
+    observation_t {75ms, 2, state_e::off_head},
+    observation_t {150ms, 3, state_e::off_head},
+  };
+  EXPECT_EQ(
+    ar_glasses::rayneo::detail::debounce_observations_for_test(confirmed_off_head, 150ms),
+    state_e::off_head
+  );
+  EXPECT_EQ(
+    ar_glasses::rayneo::detail::debounce_observations_for_test(confirmed_off_head, 10149ms),
+    state_e::off_head
+  );
+  EXPECT_EQ(
+    ar_glasses::rayneo::detail::debounce_observations_for_test(confirmed_off_head, 10150ms),
+    state_e::unknown
+  );
+}
+
+TEST(RayNeoWearDebounce, IrregularDeviceTicksStillConfirmAndRefreshWornState) {
+  using observation_t = ar_glasses::rayneo::detail::debounce_observation_t;
+  using state_e = ar_glasses::rayneo::wear_state_e;
+  const std::array irregular_tick_samples {
+    observation_t {0ms, 100, state_e::worn},
+    observation_t {75ms, 100, state_e::worn},
+    observation_t {150ms, 90, state_e::worn},
+    observation_t {400ms, 0, state_e::worn},
+  };
+
+  EXPECT_EQ(
+    ar_glasses::rayneo::detail::debounce_observations_for_test(irregular_tick_samples, 10399ms),
+    state_e::worn
+  );
+  EXPECT_EQ(
+    ar_glasses::rayneo::detail::debounce_observations_for_test(irregular_tick_samples, 10400ms),
+    state_e::unknown
+  );
+
+  const std::array repeated_tick_off_head {
+    observation_t {0ms, 7, state_e::off_head},
+    observation_t {150ms, 7, state_e::off_head},
+    observation_t {400ms, 7, state_e::off_head},
+  };
+  EXPECT_EQ(
+    ar_glasses::rayneo::detail::debounce_observations_for_test(repeated_tick_off_head, 10399ms),
+    state_e::off_head
+  );
+}
+
+TEST(RayNeoWearDebounce, LiveWornBandsRemainOneContinuousState) {
+  using observation_t = ar_glasses::rayneo::detail::debounce_observation_t;
+  using state_e = ar_glasses::rayneo::wear_state_e;
+  const std::array observations {
+    observation_t {0ms, 1, state_e::worn},
+    observation_t {150ms, 2, state_e::worn},
+    observation_t {500ms, 3, state_e::worn},
+    observation_t {1000ms, 4, state_e::worn},
+    observation_t {1500ms, 5, state_e::worn},
+  };
+
+  EXPECT_EQ(
+    ar_glasses::rayneo::detail::debounce_observations_for_test(observations, 1500ms),
+    state_e::worn
+  );
+}
+
+TEST(RayNeoWearDebounce, AStaleGapRequiresAFreshContinuousProposal) {
+  using observation_t = ar_glasses::rayneo::detail::debounce_observation_t;
+  using state_e = ar_glasses::rayneo::wear_state_e;
+  const std::array before_confirmation {
+    observation_t {0ms, 1, state_e::worn},
+    observation_t {150ms, 2, state_e::worn},
+    observation_t {10200ms, 3, state_e::off_head},
+    observation_t {10349ms, 4, state_e::off_head},
+  };
+  EXPECT_EQ(
+    ar_glasses::rayneo::detail::debounce_observations_for_test(before_confirmation, 10349ms),
+    state_e::unknown
+  );
+
+  const std::array after_confirmation {
+    observation_t {0ms, 1, state_e::worn},
+    observation_t {150ms, 2, state_e::worn},
+    observation_t {10200ms, 3, state_e::off_head},
+    observation_t {10350ms, 4, state_e::off_head},
+  };
+  EXPECT_EQ(
+    ar_glasses::rayneo::detail::debounce_observations_for_test(after_confirmation, 10350ms),
+    state_e::off_head
+  );
+}
+
+TEST(RayNeoWearDebounce, AGlitchRestartsTheOppositeStateWindow) {
+  using observation_t = ar_glasses::rayneo::detail::debounce_observation_t;
+  using state_e = ar_glasses::rayneo::wear_state_e;
+  const std::array before_confirmation {
+    observation_t {0ms, 1, state_e::off_head},
+    observation_t {100ms, 2, state_e::off_head},
+    observation_t {120ms, 3, state_e::unknown},
+    observation_t {200ms, 4, state_e::off_head},
+    observation_t {349ms, 5, state_e::off_head},
+  };
+  EXPECT_EQ(
+    ar_glasses::rayneo::detail::debounce_observations_for_test(before_confirmation, 349ms),
+    state_e::unknown
+  );
+
+  const std::array after_confirmation {
+    observation_t {0ms, 1, state_e::off_head},
+    observation_t {100ms, 2, state_e::off_head},
+    observation_t {120ms, 3, state_e::unknown},
+    observation_t {200ms, 4, state_e::off_head},
+    observation_t {350ms, 5, state_e::off_head},
+  };
+  EXPECT_EQ(
+    ar_glasses::rayneo::detail::debounce_observations_for_test(after_confirmation, 350ms),
+    state_e::off_head
+  );
 }
 
 TEST(ArGlassesOwnership, ProcessSetupPinsLeasePastTheInitialConnectWindow) {
