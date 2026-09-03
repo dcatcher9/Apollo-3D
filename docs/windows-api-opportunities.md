@@ -19,7 +19,7 @@ Owning documents an implementer should read first:
 
 - [Host SBS pipeline](host-sbs.md) — live/offline geometry and the HDR contract.
 - [Host SBS scene cuts](host-sbs-scene-cuts.md) — cut evidence, state, acceptance.
-- [Offline Host 3D conversion](whole-clip-sbs-pipeline.md) — the offline media/cache/HDR contract.
+- [Offline Host 3D conversion](whole-clip-sbs-pipeline.md) — the causal offline media/HDR contract.
 - [SBS 3D status and roadmap](sbs-3d-roadmap.md) — current limitations and active work.
 - [sbsbench](../tools/sbsbench/README.md) — the evaluation workflow and its metric/dump contracts.
 
@@ -43,11 +43,10 @@ important corrections:
 - **W12's claimed movie/game parameter sets no longer exist.** V2 intentionally exposes literal
   strength rather than hidden profiles. Foreground-process information is useful as classification
   evidence, but it must not silently change geometry strength.
-- **Offline subtitle analysis must remain scene-bounded.** The offline converter is designed around
-  scene-level buffered look-ahead. A new whole-clip pre-pass would duplicate work and cross the
-  current ownership boundary. Per-frame tight masks must sanitize input before that frame reaches
-  DAV2; the scene buffer may then revise candidates and finalize stable plan metadata without
-  replacing the tight glyph mask with a flattened rectangle.
+- **Offline subtitle analysis must remain causal and frame-local.** The offline converter runs the
+  same ordered production pass as online, without a scene buffer or whole-clip pre-pass. Per-frame
+  tight masks must sanitize input before that frame reaches DAV2; later frames cannot revise an
+  earlier mask, camera reset, or rendered SBS frame.
 - W8, W10, W11, and W9 are not host-only changes. They require protocol and Moonlight 3D work, so
   they cannot be treated as local edits to one Windows source file.
 

@@ -297,7 +297,7 @@ namespace offline_sbs::wire {
 
   nlohmann::json to_json(const worker_spec_contract_t &value) {
     json result {
-      {"schema", 1},
+      {"schema", 2},
       {"job_id", value.job_id},
       {"operation", value.operation},
       {"input_path", value.input_path},
@@ -318,14 +318,16 @@ namespace offline_sbs::wire {
         {"path", value.ffprobe_path},
         {"version", value.ffprobe_version},
       }},
-      {"scene_cache", {
-        {"hard_cap_bytes", value.scene_cache_hard_cap_bytes},
-        {"budget_policy", value.scene_cache_budget_policy},
+      {"transient_raster", {
+        {"hard_cap_bytes", value.transient_raster_hard_cap_bytes},
       }},
       {"codec", value.codec},
-      {"planner", {
-        {"implementation", "native-offline-scene-planner"},
-        {"scene_plan_contract", "scene-plan-v2"},
+      {"pipeline", {
+        {"implementation", "native-causal-single-pass"},
+        {"cut_state", "authenticated-online-pulse-count"},
+        {"lookahead", false},
+        {"scene_cache", false},
+        {"replay", false},
       }},
       {"python_dependency", false},
     };
@@ -337,12 +339,12 @@ namespace offline_sbs::wire {
       "schema"sv, "job_id"sv, "operation"sv, "input_path"sv,
       "job_directory"sv, "result_directory"sv, "progress_path"sv,
       "result_path"sv, "staging_output"sv, "sunshine"sv, "ffmpeg"sv,
-      "ffprobe"sv, "scene_cache"sv, "codec"sv, "planner"sv,
+      "ffprobe"sv, "transient_raster"sv, "codec"sv, "pipeline"sv,
       "python_dependency"sv,
     };
     require_exact_keys(value, keys, "worker specification");
-    if (value.at("schema") != 1 || value.at("python_dependency") != false) {
-      throw contract_error("worker specification is not native schema 1");
+    if (value.at("schema") != 2 || value.at("python_dependency") != false) {
+      throw contract_error("worker specification is not native schema 2");
     }
     require_exact_keys(
       value.at("sunshine"),
@@ -360,14 +362,15 @@ namespace offline_sbs::wire {
       "worker specification ffprobe"
     );
     require_exact_keys(
-      value.at("scene_cache"),
-      std::array {"hard_cap_bytes"sv, "budget_policy"sv},
-      "worker specification scene cache"
+      value.at("transient_raster"),
+      std::array {"hard_cap_bytes"sv},
+      "worker specification transient raster"
     );
     require_exact_keys(
-      value.at("planner"),
-      std::array {"implementation"sv, "scene_plan_contract"sv},
-      "worker specification planner"
+      value.at("pipeline"),
+      std::array {"implementation"sv, "cut_state"sv, "lookahead"sv,
+                  "scene_cache"sv, "replay"sv},
+      "worker specification causal pipeline"
     );
 
     worker_spec_contract_t result;
@@ -399,11 +402,9 @@ namespace offline_sbs::wire {
     result.ffprobe_version = required_string(
       value.at("ffprobe"), "version", "worker specification ffprobe"
     );
-    result.scene_cache_hard_cap_bytes = unsigned_integer<std::uint64_t>(
-      value.at("scene_cache"), "hard_cap_bytes", "worker specification scene cache"
-    );
-    result.scene_cache_budget_policy = required_string(
-      value.at("scene_cache"), "budget_policy", "worker specification scene cache"
+    result.transient_raster_hard_cap_bytes = unsigned_integer<std::uint64_t>(
+      value.at("transient_raster"), "hard_cap_bytes",
+      "worker specification transient raster"
     );
     result.codec = required_string(value, "codec", "worker specification");
 
@@ -416,18 +417,16 @@ namespace offline_sbs::wire {
     if (result.codec != "hevc_nvenc" && result.codec != "av1_nvenc") {
       throw contract_error("worker codec must be hevc_nvenc or av1_nvenc");
     }
-    if (result.scene_cache_hard_cap_bytes < 16ull * 1024ull * 1024ull) {
-      throw contract_error("scene-cache hard cap is below 16 MiB");
+    if (result.transient_raster_hard_cap_bytes < 16ull * 1024ull * 1024ull) {
+      throw contract_error("transient-raster hard cap is below 16 MiB");
     }
-    if (result.scene_cache_budget_policy != "fail" &&
-        result.scene_cache_budget_policy != "split") {
-      throw contract_error("scene-cache budget policy is invalid");
-    }
-    if (required_string(value.at("planner"), "implementation", "worker specification planner") !=
-          "native-offline-scene-planner" ||
-        required_string(value.at("planner"), "scene_plan_contract", "worker specification planner") !=
-          "scene-plan-v2") {
-      throw contract_error("worker scene planner contract is unsupported");
+    if (value.at("pipeline") != json {
+          {"implementation", "native-causal-single-pass"},
+          {"cut_state", "authenticated-online-pulse-count"},
+          {"lookahead", false},
+          {"scene_cache", false},
+          {"replay", false}}) {
+      throw contract_error("worker causal pipeline contract is unsupported");
     }
     return result;
   }
@@ -498,10 +497,17 @@ namespace offline_sbs::wire {
       const auto &source = result.source;
       const auto &analysis = result.analysis_contract;
       const auto &runtime = analysis.resolved_runtime;
+      const bool converting = result.operation == "convert";
+      const auto expected_follow_format =
+        source.color_mode == "sdr" ? std::string_view {"bmp"} :
+                                     std::string_view {"pfm"};
+      const auto expected_input_frame_format =
+        source.color_mode == "sdr" ? std::string_view {"sRGB-BMP-WIC"} :
+                                     std::string_view {"linear-scRGB-f32-pfm"};
       if (
         !analysis.observation_timeline ||
         analysis.observation_timeline->count != source.frame_count ||
-        analysis.artifact_mode != "adaptive" ||
+        analysis.artifact_mode != (converting ? "conversion" : "adaptive") ||
         analysis.inference_mode != "single-pass-tensorrt" ||
         !analysis.depth_inference_enabled ||
         analysis.scheduled_depth_update_count != source.frame_count ||
@@ -513,11 +519,56 @@ namespace offline_sbs::wire {
         analysis.adaptive_state.transport != "atomic-latest-v1" ||
         analysis.adaptive_state.retained_history ||
         analysis.adaptive_state.frame_count != source.frame_count ||
-        analysis.sbs.enabled || analysis.sbs.frame_count != 0
+        !runtime.parallax_v2_render || !runtime.parallax_v2_live ||
+        !runtime.follow_mode ||
+        runtime.follow_count_bound.value_or(0) != source.frame_count ||
+        runtime.follow_producer_frame_count.value_or(0) != source.frame_count ||
+        runtime.follow_first_sequence.value_or(0) != 1 ||
+        runtime.follow_poll_interval_ms.value_or(
+          std::numeric_limits<std::uint32_t>::max()
+        ) != 0 ||
+        runtime.follow_native_input_deletion ||
+        runtime.follow_format.value_or("") != expected_follow_format ||
+        runtime.follow_frame_pattern.value_or("") !=
+          "frame_%010d." + std::string {expected_follow_format} ||
+        runtime.input_frame_format != expected_input_frame_format ||
+        runtime.scene_cache_write || runtime.scene_cache_replay ||
+        runtime.scene_cache_contract_schema || runtime.scene_plan_schema ||
+        runtime.scene_plan_version || runtime.scene_start_sequence ||
+        runtime.scene_end_sequence_exclusive ||
+        runtime.scene_cache_status_at_replay_start ||
+        runtime.scene_cache_processed_count_at_replay_start ||
+        !result.replay_contracts.empty() || result.cache.peak_bytes != 0 ||
+        result.cache.remaining_bytes != 0 ||
+        result.cache.analysis_source_raster_bytes == 0 ||
+        result.cache.peak_live_raster_bytes <
+          result.cache.analysis_source_raster_bytes ||
+        result.cache.peak_cache_plus_raster_bytes !=
+          result.cache.peak_live_raster_bytes
       ) {
         throw contract_error(
-          "worker analysis attestation disagrees with the source or one-pass contract"
+          "worker causal-pass attestation disagrees with the source or one-pass contract"
         );
+      }
+      if (converting) {
+        const auto &sbs = analysis.sbs;
+        if (!sbs.enabled || sbs.frame_count != source.frame_count ||
+            sbs.width != runtime.output_sbs_width ||
+            sbs.height != runtime.output_sbs_height ||
+            sbs.frame_format != runtime.output_frame_format ||
+            sbs.transfer != runtime.output_transfer ||
+            sbs.primaries != runtime.output_primaries ||
+            sbs.row_order != runtime.output_row_order ||
+            !sbs.atomic_publication || !runtime.follow_atomic_sbs_publication) {
+          throw contract_error(
+            "worker direct SBS attestation disagrees with the causal pass"
+          );
+        }
+      } else if (analysis.sbs.enabled || analysis.sbs.frame_count != 0 ||
+                 analysis.sbs.width != 0 || analysis.sbs.height != 0 ||
+                 analysis.sbs.atomic_publication ||
+                 runtime.follow_atomic_sbs_publication) {
+        throw contract_error("analysis-only worker unexpectedly attests SBS output");
       }
 
       if (source.frame_count == std::numeric_limits<std::uint64_t>::max()) {
@@ -528,11 +579,26 @@ namespace offline_sbs::wire {
         const auto &scene = result.scenes[index];
         if (
           scene.scene_id != index + 1u ||
+          scene.semantic_scene_id != index + 1u ||
           scene.start_sequence != expected_start ||
-          scene.evidence.source_frame_count != scene.frame_count
+          scene.evidence.source_frame_count != scene.frame_count ||
+          scene.cache_bytes != 0 ||
+          scene.cut_state_semantics != "causal-production-exact" ||
+          scene.boundary.decision !=
+            (index + 1u == result.scenes.size() ?
+               boundary_decision_e::end_of_stream :
+               boundary_decision_e::confirmed) ||
+          scene.boundary.semantic_cut !=
+            (index + 1u != result.scenes.size())
         ) {
           throw contract_error(
-            "worker scenes are not a contiguous one-based source partition"
+            "worker scenes are not exact causal production epochs"
+          );
+        }
+        if (index + 1u != result.scenes.size() &&
+            scene.boundary.final_sequence != scene.end_sequence_exclusive) {
+          throw contract_error(
+            "worker causal scene boundary does not start the next epoch"
           );
         }
         expected_start = scene.end_sequence_exclusive;
@@ -541,33 +607,39 @@ namespace offline_sbs::wire {
         throw contract_error("worker scenes do not cover every source frame exactly once");
       }
 
-      if (result.operation != "convert") {
-        return;
-      }
-      if (result.replay_contracts.size() != result.scenes.size()) {
-        throw contract_error("worker conversion has no one-to-one scene replay partition");
-      }
-      for (std::size_t index = 0; index < result.scenes.size(); ++index) {
-        const auto &scene = result.scenes[index];
-        const auto &replay = result.replay_contracts[index];
-        if (
-          replay.scene_id != scene.scene_id ||
-          replay.start_sequence != scene.start_sequence ||
-          replay.end_sequence_exclusive != scene.end_sequence_exclusive ||
-          replay.sbs.frame_count != scene.frame_count ||
-          replay.sbs.width != runtime.output_sbs_width ||
-          replay.sbs.height != runtime.output_sbs_height ||
-          replay.sbs.frame_format != runtime.output_frame_format ||
-          replay.sbs.transfer != runtime.output_transfer ||
-          replay.sbs.primaries != runtime.output_primaries ||
-          replay.sbs.row_order != runtime.output_row_order ||
-          !replay.sbs.atomic_publication
-        ) {
+      const auto timeline_mode = required_string(
+        result.timeline_contract, "mode", "worker result timeline contract"
+      );
+      if (!converting) {
+        if (result.timeline_contract != json {
+              {"mode", "evaluation-only"},
+              {"max_output_ticks", nullptr}}) {
           throw contract_error(
-            "worker replay attestation disagrees with its scene or resolved output"
+            "worker evaluation timeline contract is not evaluation-only"
+          );
+        }
+      } else {
+        const auto exact_mp4 =
+          timeline_mode == "exact-rational" &&
+          result.timeline_contract.value("container", "") == "mp4" &&
+          result.timeline_contract.value("max_output_ticks", -1) == 0;
+        const auto bounded_matroska =
+          timeline_mode == "bounded-output-timebase" &&
+          result.timeline_contract.value("container", "") == "matroska" &&
+          result.timeline_contract.value("max_output_ticks", -1) == 1 &&
+          result.timeline_contract.value("absolute_timestamps", false) &&
+          !result.timeline_contract.value("cumulative_drift_allowed", true);
+        if ((!exact_mp4 && !bounded_matroska) ||
+            !result.timeline_contract.contains("observed_video") ||
+            !result.timeline_contract.at("observed_video").is_object() ||
+            !result.timeline_contract.contains("observed_auxiliary") ||
+            !result.timeline_contract.at("observed_auxiliary").is_object()) {
+          throw contract_error(
+            "worker conversion timeline contract is incomplete"
           );
         }
       }
+
     }
   }  // namespace
 
@@ -581,7 +653,7 @@ namespace offline_sbs::wire {
       replays.push_back(to_json(replay));
     }
     json result {
-      {"schema", 1},
+      {"schema", 2},
       {"job_id", value.job_id},
       {"status", "complete"},
       {"operation", value.operation},
@@ -627,9 +699,9 @@ namespace offline_sbs::wire {
       "staging_identity"sv, "output"sv,
     };
     require_exact_keys(value, keys, "worker result");
-    if (value.at("schema") != 1 || value.at("status") != "complete" ||
+    if (value.at("schema") != 2 || value.at("status") != "complete" ||
         value.at("python_dependency") != false) {
-      throw contract_error("worker result is not a complete native schema-1 result");
+      throw contract_error("worker result is not a complete native schema-2 result");
     }
     require_exact_keys(
       value.at("source"),
@@ -1330,14 +1402,14 @@ namespace offline_sbs::wire {
       boundaries.push_back(boundary_audit_json(boundary));
     }
     return {
-      {"schema", 2},
-      {"version", "whole-clip-scene-audit-v2"},
+      {"schema", 3},
+      {"version", "whole-clip-scene-audit-v3"},
       {"status", value.status},
       {"claims", {{"ground_truth", false}, {"best_parameters", false}}},
       {"policy", {
-        {"implementation", "native-offline-scene-planner"},
-        {"version", "scene-plan-v2"},
-        {"lookahead", true},
+        {"implementation", "native-causal-scene-tracker"},
+        {"version", "causal-scene-epochs-v1"},
+        {"lookahead", false},
         {"boundary_only", true},
         {"python_dependency", false},
       }},
@@ -1376,11 +1448,12 @@ namespace offline_sbs::wire {
                   "hard_cap_bytes"sv},
       "scene audit cache"
     );
-    if (value.at("schema") != 2 || value.at("version") != "whole-clip-scene-audit-v2" ||
+    if (value.at("schema") != 3 || value.at("version") != "whole-clip-scene-audit-v3" ||
         value.at("claims") != json {{"ground_truth", false}, {"best_parameters", false}} ||
         value.at("policy") != json {
-          {"implementation", "native-offline-scene-planner"}, {"version", "scene-plan-v2"},
-          {"lookahead", true}, {"boundary_only", true}, {"python_dependency", false}} ||
+          {"implementation", "native-causal-scene-tracker"},
+          {"version", "causal-scene-epochs-v1"}, {"lookahead", false},
+          {"boundary_only", true}, {"python_dependency", false}} ||
         !value.at("timeline_contract").is_object() || !value.at("scenes").is_array() ||
         !value.at("boundary_revisions").is_array()) {
       throw contract_error("scene audit has unknown policy or document semantics");
@@ -1481,7 +1554,9 @@ namespace offline_sbs::wire {
     if (result.enabled ?
           (!result.file_pattern || result.frame_count == 0 ||
            result.width == 0 || result.height == 0) :
-          (result.file_pattern || result.frame_count != 0)) {
+          (result.file_pattern || result.frame_count != 0 ||
+           result.width != 0 || result.height != 0 ||
+           result.atomic_publication)) {
       throw contract_error("whole-clip SBS enablement disagrees with its raster evidence");
     }
     return result;

@@ -3099,8 +3099,7 @@ namespace offline_sbs {
         .ffprobe_path = path_to_utf8(context.ffprobe_executable),
         .ffprobe_version = context.ffprobe_version,
         .codec = context.codec,
-        .scene_cache_hard_cap_bytes = context.scene_cache_max_bytes,
-        .scene_cache_budget_policy = to_string(context.cache_budget_policy),
+        .transient_raster_hard_cap_bytes = context.scene_cache_max_bytes,
       });
     }
 
@@ -3159,7 +3158,7 @@ namespace offline_sbs {
           cache.remaining_bytes != 0 ||
           cache.peak_bytes > context.scene_cache_max_bytes
         ) {
-          error = "worker cache-bound attestation is invalid";
+          error = "worker transient-raster attestation is invalid";
           return false;
         }
 
@@ -3171,7 +3170,6 @@ namespace offline_sbs {
             !typed_result.staging_identity ||
             path_from_utf8(*typed_result.output_path)
                 .lexically_normal() != context.staging_output->lexically_normal() ||
-            typed_result.replay_contracts.size() != scene_count ||
             !file_matches_publish_identity(
               *context.staging_output,
               *typed_result.staging_identity
@@ -3181,7 +3179,7 @@ namespace offline_sbs {
               context.result_directory / "output-contract.json"
             )
           ) {
-            error = "worker conversion output/replay attestation is invalid";
+            error = "worker direct conversion output attestation is invalid";
             return false;
           }
         } else if (typed_result.output_path || typed_result.staging_identity ||
@@ -3201,7 +3199,7 @@ namespace offline_sbs {
       const worker_context_t &context
     ) {
       // The child-owned worker-result.json and scene-audit.json retain the complete
-      // per-scene/replay evidence. Durable service state stays deliberately small so
+      // per-scene causal evidence. Durable service state stays deliberately small so
       // listing jobs cannot deep-copy a multi-hour clip's full report under the service
       // mutex and job.json remains bounded and restart-safe.
       nlohmann::json compact = nlohmann::json::object();
@@ -5589,7 +5587,7 @@ namespace offline_sbs {
       return {
         .code = error_code_e::invalid_request,
         .error =
-          "scene cache limit must be between 16 MiB and 64 GiB",
+          "transient raster limit must be between 16 MiB and 64 GiB",
       };
     }
     if (
@@ -5789,7 +5787,9 @@ namespace offline_sbs {
     // requirement for evaluate-only jobs.
     snapshot.codec = effective_codec;
     snapshot.scene_cache_max_bytes = request.scene_cache_max_bytes;
-    snapshot.cache_budget_policy = request.cache_budget_policy;
+    // Legacy clients may still send the retired cache policy. Direct causal conversion has
+    // no administrative scene split, so normalize persisted state to the only valid behavior.
+    snapshot.cache_budget_policy = cache_budget_policy_e::fail;
     snapshot.progress.phase = "queued";
     snapshot.created_at_unix_ms = unix_time_ms();
     if (request.operation == operation_e::convert) {
@@ -6660,7 +6660,7 @@ namespace offline_sbs {
   nlohmann::json job_service_t::capabilities() const {
     std::lock_guard lock {impl_->mutex};
     return {
-      {"schema", 1},
+      {"schema", 2},
       {"available", impl_->started && !impl_->stopping},
       {"implementation", "native-sunshine-child"},
       {"python_dependency", false},
@@ -6676,11 +6676,15 @@ namespace offline_sbs {
         "at-conversion-admission-under-exclusive-gpu-lease",
       },
       {"containers", {"mkv", "mp4"}},
-      {"scene_cache", {
-        {"min_bytes", min_cache_bytes},
-        {"max_bytes", max_cache_bytes},
-        {"budget_policies", {"fail", "split"}},
-        {"default_policy", "fail"},
+      {"pipeline", {
+        {"causal_online_logic", true},
+        {"single_estimator_renderer_pass", true},
+        {"lookahead", false},
+        {"scene_cache", false},
+        {"replay", false},
+        {"playback_pacing", false},
+        {"source_order", true},
+        {"persistent_encoder", true},
       }},
       {"retention", {
         {"max_jobs", impl_->config.max_retained_jobs},

@@ -150,7 +150,7 @@ Open the **Convert** page and read its named prerequisite failure. Production co
 - NVENC support for the selected H.265 or AV1 output.
 
 The job manager does not search `PATH`, need Python, or require a separate Windows service. Path,
-HDR, cache, and cancellation behavior are documented in
+HDR, causal processing, transient-storage, and cancellation behavior are documented in
 [Offline Host 3D conversion](whole-clip-sbs-pipeline.md).
 
 ### Conversion waits or refuses to start

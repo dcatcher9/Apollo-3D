@@ -45,8 +45,7 @@ namespace offline_sbs::wire {
     std::string ffprobe_path;
     std::string ffprobe_version;
     std::string codec;
-    std::uint64_t scene_cache_hard_cap_bytes = 0;
-    std::string scene_cache_budget_policy;
+    std::uint64_t transient_raster_hard_cap_bytes = 0;
   };
 
   nlohmann::json to_json(const worker_spec_contract_t &value);

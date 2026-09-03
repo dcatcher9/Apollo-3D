@@ -53,7 +53,7 @@ Moonlight 3D or present it directly to supported local glasses.
 | What you want to do | Best path and payoff |
 |---|---|
 | **🎬 Watch capturable browser or local video in 3D** | When Windows capture can see the decoded frames, choose Host 3D or Client 3D to convert the player output live |
-| **📦 Create a scene-stable 3D video file** | Use the host Web UI to convert a supported video to compressed SBS H.265 or AV1 with offline scene lookahead |
+| **📦 Create a 3D video file** | Use the host Web UI to run the causal production Host SBS path once and encode compressed SBS H.265 or AV1 without playback pacing |
 | **🎮 Turn an existing flat PC game into 3D** | Use the PC GPU with Host 3D or the headset GPU with Client 3D—no game-specific stereo mod or profile required |
 | **🖥️ Use a private spatial Windows desktop** | Stay in 2D for maximum text clarity or enable AI depth when useful; the virtual display negotiates landscape or portrait geometry, refresh rate, HDR state, and scale |
 | **🎞️ Present native SBS games and media** | Select Raw SBS to preserve the source’s authored left/right views without estimating depth again |
@@ -161,7 +161,7 @@ views are available.
 |---|---|
 | **Private virtual display** | An on-demand SudoVDA desktop negotiated from the client’s selected resolution, refresh rate, HDR state, and scale |
 | **Host AI 3D** | A GPU-resident D3D11 → TensorRT → bounded inverse-warp → NVENC pipeline with matched-frame depth and convex-2x edge refinement |
-| **Offline Host 3D conversion** | Converts video to compressed H.265 or AV1 SBS using bounded cut lookahead and the same V2 geometry as live Host 3D |
+| **Offline Host 3D conversion** | Converts video to compressed H.265 or AV1 SBS with the same causal V2 estimator/renderer as live Host 3D, running as fast as decoder/GPU/encoder backpressure permits |
 | **Scene-aware 3D stability** | Host V2 holds one raw scene center with literal configured pop; Client 3D separately holds its adaptive pop and median plane for the shot |
 | **Responsive quality controls** | Live resolution, frame-rate, and bitrate updates without rebuilding the application, capture, or virtual-display session when the selected mode supports it |
 | **Modern video path** | Native H.264 NVENC as the baseline; HEVC, AV1, and 10-bit HDR are enabled only when their capabilities are available |

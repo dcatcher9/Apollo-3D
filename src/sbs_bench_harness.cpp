@@ -29,6 +29,7 @@
   #include <memory>
   #include <optional>
   #include <sstream>
+  #include <stdexcept>
   #include <string>
   #include <string_view>
   #include <thread>
@@ -593,12 +594,57 @@ namespace sbs_bench {
       std::string error;
     };
 
+    class follow_directory_watcher_t {
+    public:
+      explicit follow_directory_watcher_t(const fs::path &directory) {
+        handle_ = FindFirstChangeNotificationW(
+          directory.c_str(),
+          FALSE,
+          FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE |
+            FILE_NOTIFY_CHANGE_LAST_WRITE
+        );
+        if (handle_ == INVALID_HANDLE_VALUE) {
+          throw std::runtime_error(
+            "cannot watch the follow input directory"
+          );
+        }
+      }
+
+      follow_directory_watcher_t(const follow_directory_watcher_t &) = delete;
+      follow_directory_watcher_t &operator=(
+        const follow_directory_watcher_t &
+      ) = delete;
+
+      ~follow_directory_watcher_t() {
+        if (handle_ != INVALID_HANDLE_VALUE) {
+          FindCloseChangeNotification(handle_);
+        }
+      }
+
+      bool wait(std::string &error) {
+        const auto status = WaitForSingleObject(handle_, 1000);
+        if (status == WAIT_TIMEOUT) {
+          return true;
+        }
+        if (status != WAIT_OBJECT_0 ||
+            !FindNextChangeNotification(handle_)) {
+          error = "follow input directory notification failed";
+          return false;
+        }
+        return true;
+      }
+
+    private:
+      HANDLE handle_ = INVALID_HANDLE_VALUE;
+    };
+
     follow_wait_result_t wait_for_follow_frame(const fs::path &directory,
                                                std::string_view format,
                                                std::size_t sequence,
                                                std::size_t first_sequence,
                                                std::size_t processed_count,
-                                               std::size_t count_bound) {
+                                               std::size_t count_bound,
+                                               follow_directory_watcher_t &watcher) {
       const fs::path expected =
         directory / follow_frame_filename(sequence, format);
       const fs::path done_path = directory / ".producer-done.json";
@@ -740,7 +786,10 @@ namespace sbs_bench {
                   "producer completed before publishing expected " +
                     expected.filename().string()};
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::string watch_error;
+        if (!watcher.wait(watch_error)) {
+          return {follow_wait_status_e::error, {}, done_count, watch_error};
+        }
       }
     }
 
@@ -751,6 +800,8 @@ namespace sbs_bench {
                                  std::size_t first_sequence,
                                  std::size_t processed_count,
                                  int sbs_frame_count,
+                                 std::uint32_t sbs_width,
+                                 std::uint32_t sbs_height,
                                  std::optional<std::size_t> producer_frame_count) {
       return publish_file_atomically(path, [&](const fs::path &temporary_path) {
         std::ofstream stream(temporary_path);
@@ -758,7 +809,7 @@ namespace sbs_bench {
           return false;
         }
         stream << "{\n"
-               << "  \"schema\": 1,\n"
+               << "  \"schema\": 2,\n"
                << "  \"status\": " << json_string(status) << ",\n"
                << "  \"input_format\": " << json_string(input_format) << ",\n"
                << "  \"artifact_mode\": " << json_string(artifact_mode) << ",\n"
@@ -785,6 +836,8 @@ namespace sbs_bench {
                << ",\n"
                << "  \"source_frame_count\": " << processed_count << ",\n"
                << "  \"sbs_frame_count\": " << sbs_frame_count << ",\n"
+               << "  \"sbs_width\": " << sbs_width << ",\n"
+               << "  \"sbs_height\": " << sbs_height << ",\n"
                << "  \"producer_frame_count\": ";
         if (producer_frame_count) {
           stream << *producer_frame_count;
@@ -2917,8 +2970,9 @@ namespace sbs_bench {
             {"active_window_dependency", false},
             {"window_region_roi", false},
           }},
-          {"follow_protocol_schema", 1},
+          {"follow_protocol_schema", 2},
           {"follow_global_first_sequence", true},
+          {"follow_wakeup", "windows-directory-change-notification"},
           {"observation_timeline_schema", models::host_sbs_observation_timeline::schema},
           {"observation_timeline_unit", "monotonic-source-us-plus-one"},
           {"adaptive_state_schema", sbs_adaptive_state::schema_version},
@@ -2951,6 +3005,8 @@ namespace sbs_bench {
           }},
           {"render_cache_follow", true},
           {"render_skips_tensorrt", true},
+          {"direct_conversion_follow", true},
+          {"direct_conversion_single_pass", true},
           {"whole_clip_inference_attestation", {
             {"depth_inference_enabled", true},
             {"scheduled_depth_update_count", true},
@@ -3271,6 +3327,8 @@ namespace sbs_bench {
           follow_first_sequence,
           0u,
           0,
+          0u,
+          0u,
           {}
         )) {
       BOOST_LOG(error) << "sbs-bench: cannot initialize atomic follow progress";
@@ -3587,6 +3645,15 @@ namespace sbs_bench {
       }
     }
     std::size_t processed_frame_count = 0;
+    std::optional<follow_directory_watcher_t> follow_watcher;
+    if (o.follow) {
+      try {
+        follow_watcher.emplace(o.frames);
+      } catch (const std::exception &exception) {
+        BOOST_LOG(error) << "sbs-bench: " << exception.what();
+        return 10;
+      }
+    }
     for (size_t fi = 0;; fi++) {
       const std::size_t global_sequence =
         replay_mode ? replay_first_sequence + fi : fi + 1u;
@@ -3598,7 +3665,8 @@ namespace sbs_bench {
           global_sequence,
           replay_mode ? replay_first_sequence : 1u,
           fi,
-          o.follow_count
+          o.follow_count,
+          *follow_watcher
         );
         if (next.status == follow_wait_status_e::error) {
           BOOST_LOG(error) << "sbs-bench: follow queue failed: " << next.error;
@@ -3619,15 +3687,21 @@ namespace sbs_bench {
 
       rgba_image img;
       scrgb_image hdr_img;
-      std::string exact_source_snapshot;
       std::string exact_source_sha256;
       bool loaded = false;
-      if (depth_coordinate_v2_gpu_mode) {
-        // Exact replay hashes and decodes one immutable byte snapshot. Reopening the path after
-        // WIC upload would let an atomic replacement authenticate different pixels than the SRV.
+      const bool snapshot_source = o.follow || depth_coordinate_v2_gpu_mode;
+      if (snapshot_source) {
+        // Follow frames are atomically published and immutable. Decode the same in-memory
+        // snapshot for both SDR and HDR instead of asking WIC to reopen the pathname: filename
+        // decoding can intermittently fail after a directory-change wakeup even though the
+        // complete BMP is already readable. Direct replay additionally hashes this exact byte
+        // snapshot so authentication and the uploaded SRV cannot diverge.
+        std::string exact_source_snapshot;
         loaded = read_file_snapshot(current_frame, exact_source_snapshot);
-        if (loaded) {
+        if (loaded && depth_coordinate_v2_gpu_mode) {
           exact_source_sha256 = sha256_hex(exact_source_snapshot);
+        }
+        if (loaded) {
           loaded = pfm_input ?
                      load_pfm(std::string_view(exact_source_snapshot), hdr_img) :
                      load_png(std::string_view(exact_source_snapshot), img);
@@ -4508,6 +4582,8 @@ namespace sbs_bench {
               follow_first_sequence,
               fi + 1u,
               written,
+              sbs_w,
+              sbs_h,
               producer_frame_count
             )) {
           BOOST_LOG(error) << "sbs-bench: cannot acknowledge adaptive follow frame "
@@ -4888,6 +4964,8 @@ namespace sbs_bench {
               follow_first_sequence,
               fi + 1u,
               written,
+              sbs_w,
+              sbs_h,
               producer_frame_count
             )) {
           BOOST_LOG(error) << "sbs-bench: cannot acknowledge conversion follow frame "
@@ -5520,10 +5598,8 @@ namespace sbs_bench {
       // Adaptive-only runs deliberately skip allocating/compositing the packed render target, but
       // they attest the same early-authenticated geometry used by conversion and scene caching.
       const auto &contract_geometry = *resolved_output_geometry;
-      const std::string input_frame_format =
-        pfm_input ?
-          "linear-scRGB-f32-pfm" :
-          (sdr_raster_format == "jpeg" ? "sRGB-JPEG-WIC" : "sRGB-PNG-WIC");
+      const std::string &input_frame_format =
+        discovered_input_frame_format;
       const std::string input_texture_format =
         hdr_texture_input ? "R16G16B16A16_FLOAT" : "B8G8R8A8_UNORM";
       const std::string pipeline_color_space =
@@ -5599,8 +5675,8 @@ namespace sbs_bench {
                                    } :
                                    std::nullopt,
         .follow_poll_interval_ms = o.follow ?
-                                     std::optional<std::uint32_t> {10u} :
-                                     std::nullopt,
+                                  std::optional<std::uint32_t> {0u} :
+                                  std::nullopt,
         .follow_done_sentinel = o.follow ?
                                   std::optional<std::string> {".producer-done.json"} :
                                   std::nullopt,
@@ -5756,6 +5832,8 @@ namespace sbs_bench {
             follow_first_sequence,
             completed_frame_count,
             written,
+            sbs_w,
+            sbs_h,
             producer_frame_count
           )) {
         BOOST_LOG(error) << "sbs-bench: cannot publish terminal follow progress";

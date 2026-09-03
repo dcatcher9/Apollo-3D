@@ -388,8 +388,6 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
   EXPECT_NE(page.find("const operation = settings.operation"), std::string::npos);
   EXPECT_NE(page.find("one non-empty regular video file"), std::string::npos);
   EXPECT_EQ(page.find("numbered frame directory"), std::string::npos);
-  EXPECT_NE(page.find("min=\"1\""), std::string::npos);
-  EXPECT_NE(page.find("max=\"64\""), std::string::npos);
   EXPECT_NE(page.find("value=\"hevc_nvenc\""), std::string::npos);
   EXPECT_NE(page.find("value=\"av1_nvenc\""), std::string::npos);
   EXPECT_NE(page.find("<strong>H.265 / HEVC</strong>"), std::string::npos);
@@ -400,15 +398,17 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
     page.find("Static HDR uses 10-bit output; SDR uses 8-bit output."),
     std::string::npos
   );
-  EXPECT_NE(page.find("scene_cache_max_bytes"), std::string::npos);
-  EXPECT_NE(page.find("cache_budget_policy"), std::string::npos);
-  EXPECT_NE(
-    page.find("v-if=\"form.operation === 'convert'\" class=\"offline-form-row\""),
-    std::string::npos
-  );
+  EXPECT_EQ(page.find("scene_cache_max_bytes"), std::string::npos);
+  EXPECT_EQ(page.find("cache_budget_policy"), std::string::npos);
   EXPECT_NE(page.find("operation: this.form.operation"), std::string::npos);
-  EXPECT_NE(page.find("value=\"fail\""), std::string::npos);
-  EXPECT_NE(page.find("value=\"split\""), std::string::npos);
+  EXPECT_EQ(page.find("value=\"fail\""), std::string::npos);
+  EXPECT_EQ(page.find("value=\"split\""), std::string::npos);
+  EXPECT_NE(page.find("same causal Host SBS estimator"), std::string::npos);
+  EXPECT_NE(page.find("as fast as the decoder, GPU, and encoder permit"), std::string::npos);
+  EXPECT_NE(page.find("No future frame can"), std::string::npos);
+  EXPECT_EQ(page.find("lookahead"), std::string::npos);
+  EXPECT_EQ(page.find("Budget split"), std::string::npos);
+  EXPECT_NE(page.find("Online hard cut"), std::string::npos);
   EXPECT_NE(page.find("Recent scene decisions"), std::string::npos);
   EXPECT_NE(page.find("retainedAuditAttested"), std::string::npos);
   EXPECT_NE(
@@ -480,14 +480,6 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
   );
   EXPECT_NE(
     page.find("aria-describedby=\"offlineOutputNameHelp\""),
-    std::string::npos
-  );
-  EXPECT_NE(
-    page.find("aria-describedby=\"offlineCacheBudgetHelp\""),
-    std::string::npos
-  );
-  EXPECT_NE(
-    page.find("aria-describedby=\"offlineBudgetPolicyHelp\""),
     std::string::npos
   );
   EXPECT_EQ(api.find("/resume"), std::string::npos);

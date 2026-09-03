@@ -1,378 +1,158 @@
 # Offline Host 3D conversion
 
-Sunshine 3D can convert a supported video into a compressed packed side-by-side (SBS) video from
-the **Convert** page in its Web UI. Unlike live Host 3D, the offline path can wait for a scene to
-be understood before committing its boundary and replay cache. It uses bounded lookahead to revise
-proposed cut locations, then replays the finalized scene through the same Depth Coordinate V2
-geometry used by live Host SBS.
+Sunshine 3D's offline path runs the production Host SBS V2 pipeline causally in source order. It
+does not have a second geometry policy, scene lookahead, a depth/state scene cache, or a render
+replay. The authoritative geometry, camera, scene-cut, OCR, conditioning, and warp contracts remain
+[Host SBS](host-sbs.md) and [Host SBS scene cuts](host-sbs-scene-cuts.md).
 
-The replayed geometry core consumes authenticated depth and cut state only. Source pixels, color
-mode, and HDR scaling remain renderer inputs; the source snapshot hash pairs that rendering input
-with the corresponding geometry frame without feeding color into geometry.
+`sbs_3d_pop_strength` has the same literal meaning online and offline. Offline jobs do not search
+for stronger scene-wide parameters or revise a camera reset after later frames arrive.
 
-Offline lookahead has no independent geometry authority. `sbs_3d_pop_strength` remains the literal
-requested strength, and each finalized scene acquires the same V2 raw center described in
-[Host SBS pipeline](host-sbs.md). The planner can revise a boundary; it cannot modify the renderer's
-curve, pop, cliff conditioning, or scene-center policy.
+## Pipeline
 
-The production implementation is a native C++ job manager inside Sunshine 3D plus an isolated
-`sunshine.exe` child worker. It does **not** invoke Python, require Python to be installed, or
-install a separate Windows Service.
-
-Its pixel source is always the selected video's decoded full frame. Offline conversion does not
-capture the desktop, inspect the active or foreground window, consult Chromium video geometry, or
-activate either live window-region ROI authority. Analysis and replay contracts both attest
-`selected-input-only` plus `full-frame`; the worker fails closed if the native harness does not
-provide that exact source-scope attestation. Active-window and ROI selection remain live-streaming
-behavior only.
-
-> [!IMPORTANT]
-> Offline Host 3D currently requires Windows, an NVIDIA GPU with TensorRT support, and NVIDIA
-> NVENC support for the selected H.265 or AV1 output. There is no software-encode or CPU-depth
-> fallback in the production job. Its source must also pass the shared
-> [authenticated resolution fitting](host-sbs.md#authenticated-resolution-fitting) contract; an
-> unsupported fitted tensor aborts the job rather than producing a flat video.
-
-## Why the offline path is scene based
-
-Live streaming must decide from frames received so far. Offline conversion can hold a proposed
-boundary briefly and check the frames around it:
-
-1. The production cut detector emits a causal proposal.
-2. A bounded native lookahead window checks the proposal's appearance and depth-geometry evidence.
-   It can move the boundary, reject a flash that returns to the same scene, or retain a qualified
-   later geometry change.
-3. Once the boundary is finalized, the worker closes the exact depth/state cache for that scene.
-4. It records the literal configured pop and acquires the V2 scene center from the first usable
-   field after the finalized boundary. It does not derive another scene-level geometry curve.
-5. The scene is replayed from that exact cache without another TensorRT inference,
-   encoded, and released from the cache.
-
-This produces the same shot-stable V2 camera contract as live Host SBS while keeping storage
-bounded. Cut detection is still an estimator, not ground truth. The scene audit records why each
-boundary was moved, retained, rejected, or forced by a resource limit; it does not claim to have
-optimized the scene's pop or convergence.
-
-```mermaid
-flowchart LR
-    SOURCE["Source video"]
-    PROBE["FFprobe<br/>timeline · streams · color · HDR"]
-    ANALYZE["Continuous native analysis<br/>one TensorRT inference pass"]
-    LOOK["Bounded lookahead<br/>revise or reject cut proposal"]
-    CAMERA["V2 scene acquisition<br/>literal pop · raw center"]
-    REPLAY["Exact depth/state replay<br/>zero TensorRT enqueues"]
-    ENCODE["One continuous NVENC process<br/>H.265 or AV1"]
-    MUX["Stream-copy final mux<br/>audio · subtitles · metadata · chapters"]
-    VERIFY["Timeline · stream · HDR verification"]
-    OUTPUT["Verified packed-SBS output"]
-
-    SOURCE --> PROBE --> ANALYZE --> LOOK --> CAMERA --> REPLAY --> ENCODE --> MUX --> VERIFY --> OUTPUT
+```text
+selected video
+  -> one primary ordered decoder
+  -> production causal estimator + V2 renderer
+  -> one atomic SBS raster
+  -> one persistent NVENC encoder
+  -> stream-preserving mux
+  -> timeline/color/stream verification
+  -> atomic output publication
 ```
 
-## Storage and processing model
+The native harness is launched once with follow protocol schema 2. For conversion it uses
+`--artifacts conversion`; Analyze Only uses `--artifacts adaptive`. Both modes consume the same
+decoded full frames and the same source-derived observation timestamps. Every admitted source frame
+runs one authenticated TensorRT update. Conversion additionally publishes the exact SBS raster drawn
+from that estimator state.
 
-The worker does not decode the complete clip into a directory of PNG frames.
+The worker hands each completed SBS raster directly to a persistent FFmpeg/NVENC process, waits
+until the local authenticated frame bridge has served it, and removes both transient rasters. The
+worker never launches a render decoder, scene replay, or second TensorRT pass.
 
-- FFmpeg feeds source frames continuously through bounded pipes.
-- Native analysis caches the compact depth texture and render state only while a scene remains
-  unresolved.
-- After lookahead finalizes a scene, a second continuous source decoder supplies that interval for
-  exact cache replay.
-- Replayed SBS rasters are handed, one at a time, to one persistent FFmpeg/NVENC process over a
-  loopback-only frame feed. At most one live raster is exposed to the encoder; the worker does not
-  create a whole-clip PNG sequence or one compressed file per scene.
-- The worker verifies that every replay reports zero depth-inference work, then removes the
-  consumed depth/state cache records.
-- The persistent encoder writes one compressed video-only intermediate with source-derived
-  presentation timestamps. A final stream-copy mux adds compatible source audio, subtitles,
-  attachments, metadata, non-subtitle dispositions, and chapters without re-encoding the video.
-  Copied subtitle streams remain available but have all dispositions cleared, preventing
-  default/forced disposition flags from driving automatic selection over the packed SBS raster.
-  A player's explicit language or user policy may still select such a stream.
-- The completed file is probed and validated before the job manager atomically publishes it. An
-  existing destination is never overwritten.
+## Causal scene evidence
 
-This is deliberately a single **depth-inference** pass with bounded scene storage. It is not a
-whole-clip raw-frame spool, and the delivered video is never raw.
+Scene records are diagnostic epochs of the online state machine:
 
-### Scene-cache policy
+- the first epoch begins at source sequence 1;
+- an authenticated `hard_cut_pulse` and matching `hard_cut_count` transition at sequence `S`
+  closes `[start, S)` and starts the next epoch at `S`;
+- EOF closes the final epoch; and
+- no future frame may move, reject, merge, or otherwise revise a boundary.
 
-The Web UI exposes a hard limit for the unresolved scene cache:
+The worker rejects a pulse/count disagreement. Reports identify this contract as
+`causal-production-exact`, with `lookahead: false`. Scene records do not control rendering: each SBS
+frame has already been committed from the production causal state before the diagnostic epoch is
+reported.
 
-- **Fail** is the default. If one semantic scene cannot fit, the job stops rather than silently
-  changing its camera contract.
-- **Split** is an explicit storage fallback. It divides a long detected scene into administrative
-  render segments and gives each segment a new camera boundary. The audit labels these
-  non-semantic, budget-forced splits. A persistent pulse train cannot hold the cache open
-  indefinitely: duplicate-pulse clusters have a bounded evidence span, and budget pressure closes
-  pending evidence with an explicit truncated, budget-forced audit before an administrative
-  fallback is considered.
+## Throughput and storage
 
-Choose a larger cache or the default fail policy when preserving one camera for the entire
-detected scene matters more than completing an unusually long shot.
+Offline processing is not paced to source playback time. Decoder, GPU, and encoder run as quickly as
+their completion and backpressure allow. Windows directory-change notifications wake both sides of
+the frame protocol; there is no fixed per-frame polling delay. Frames remain ordered because the
+online temporal state is causal, so throughput does not come from reordering dependent frames.
 
-Both conversion and evaluation also retain at most 524,288 per-frame analysis records for one
-unresolved semantic scene. If a cut-free scene reaches that fixed metadata ceiling, the job fails
-before accepting another frame rather than silently splitting the scene or approximating its
-whole-scene quantiles. At 90 FPS the ceiling is about 97 minutes of one continuous shot; normal
-semantic boundaries release the records as soon as lookahead commits them. Conversion normally
-reaches its explicit depth/state cache policy much earlier.
+At most the current source raster and current SBS raster are live between the harness and worker.
+There is no whole-clip image sequence, unresolved-scene depth cache, or per-scene compressed file.
+The persistent encoder retains only its normal compressed-video state. Legacy cache-limit request
+fields remain accepted for persisted/stale clients and act only as a transient-raster safety bound;
+they cannot split scenes or change geometry.
 
-### Retained-artifact quota
+SDR encoding does not reopen the source video. Static PQ/HLG encoding keeps a second, aligned source
+decode only as an HDR side-data donor because PFM carries pixels but not per-frame mastering-display
+and content-light side data. Every encoded pixel still comes from the direct SBS PFM stream. A
+single-frame donor must not be looped: FFmpeg 8.1.2 does not retain those side-data records on looped
+clones. This correctness-only HDR exception can be optimized only after HEVC and AV1 random-access
+tests prove the metadata survives at every keyframe.
 
-The native manager keeps at most 64 job records and, by default, 4 GiB of aggregate protected
-state, worker diagnostics, probe/audit documents, and failed conversion staging files. It prunes
-the oldest terminal records until both limits are met while preserving the newest record so the
-Web UI can always explain the last outcome. Successfully published videos do not count toward
-this quota. The accounting is conservative logical file size per retained directory entry:
-hard-linked names may be counted more than once, while filesystem allocation overhead and
-alternate data streams are outside the contract.
+## Job types
 
-An output staging file that the child did not identity-attest is never deleted
-automatically because it may be unrelated user data placed beside the selected input. Such a
-retained `.sunshine3d-*.part*` file remains bound to its durable job record and counts toward the
-quota. If it alone pushes usage over the limit, new offline jobs fail closed with a cleanup
-instruction until the signed-in Windows user inspects and removes the retained file. The legacy
-managed export directory remains covered during migration so jobs created by an older build can
-still be recovered safely.
+### Analyze Only
 
-## Start and monitor a conversion
+Analyze Only runs the causal estimator and state machine without publishing SBS video. It emits the
+source contract, causal scene audit, progress, and terminal whole-clip attestation. This is the dry
+run for conversion state, not a future-aware optimizer.
 
-Open `https://localhost:47990`, choose **Convert**, then:
+### Convert Video
 
-The page uses the host's existing Web UI access state. Offline conversion adds no separate
-account, login prompt, daemon, or installed Windows Service; a host intentionally configured
-without Web UI credentials remains that way.
+Convert Video runs the same causal pass and publishes every atomic SBS frame to one persistent
+H.265/HEVC or AV1 NVENC encoder. It then preserves supported auxiliary streams, verifies the encoded
+timeline and color contract, muxes the final container, and publishes the output only after all
+checks pass.
 
-1. Choose **Browse** beside **Input path** and select a video readable by the signed-in Windows
-   account. The picker returns the host path without uploading or copying the source video. An
-   absolute local path can still be entered manually when the Web UI is opened from another device.
-2. Sunshine 3D fills a safe output name such as `movie-3d.mkv` or `movie-3d.mp4`. Edit it or choose
-   another new basename if desired. The final video and its atomic staging file stay in the same
-   directory as the canonical selected input; the HTTP request cannot supply another directory,
-   traverse out of that folder, or overwrite an existing file.
-3. Select **H.265 / HEVC** or **AV1**. Both production options use NVENC. Sunshine 3D checks
-   packaged codec support at startup, then runs the hardware preflight only after this job has
-   acquired the exclusive offline GPU lease. For AV1, the worker writes the lowest defined level
-   that fits NVENC's 64-pixel-aligned packed coded raster and the fastest source frame interval;
-   it refuses content beyond level 6.3 instead of allowing a driver to emit a reserved,
-   decoder-incompatible 7.x level.
-4. Set the open-scene cache limit and choose the fail or split policy.
-5. Start the job and monitor its current phase, source progress, and committed scene decisions.
+## Media contract
 
-Only one offline job runs at a time. The job manager keeps durable job state, supports
-cancellation, and marks an unfinished job as interrupted after a Sunshine 3D restart; it does not
-claim to resume partially encoded work.
+- Input is one non-empty regular video file selected by absolute path.
+- The first video stream is decoded in presentation order with square pixels, progressive scan, a
+  fixed raster, and a stable color description.
+- Source presentation timestamps and durations are represented exactly. MP4 output must match the
+  rational source timeline exactly; Matroska may differ by at most one output tick per frame and may
+  not accumulate drift.
+- SDR remains SDR. Static BT.2020 PQ and HLG use linear-scRGB PFM interchange and 10-bit output.
+- Dolby Vision, dynamic HDR10+, changing HDR metadata, rotation, interlace, alpha, changing raster,
+  and unsupported semantic side data fail closed.
+- Supported audio, subtitle, data, attachment, chapter, language, and title metadata are preserved
+  under the stream-inventory contract. Subtitle dispositions are cleared where container rules
+  require it.
+- Output is `.mkv` or `.mp4`, beside the input, and an existing destination is never overwritten.
 
-Host startup performs no NVENC work, so it cannot contend with a client that connects immediately.
-An offline conversion cannot start during live streaming, and its runtime encoder preflight runs
-under the same GPU exclusion as the conversion itself. Evaluation-only jobs do not require an
-available encoder.
+## Native ownership and isolation
 
-Durable history and worker scratch space are partitioned by the Windows account SID selected when
-the manager starts. Published videos stay beside their selected inputs. Media probing, staging,
-publication, and conversion run with that account's standard interactive token even when Sunshine
-3D itself is elevated. Restart Sunshine 3D after switching Windows accounts; the identity checks
-fail closed instead of launching media tools as a different interactive user.
+The Web UI uses the in-process job manager and launches an authenticated isolated `sunshine.exe`
+child. Python and `tools/sbsbench` do not own production conversion. `ffmpeg.exe` and `ffprobe.exe`
+must be the approved installation-local pair.
 
-Every conversion also emits its scene-level evaluation evidence. The built-in job manager
-additionally supports an evaluation-only operation that performs analysis without publishing an
-encoded video.
+Only one offline job may own the GPU. Admission fails while a live Moonlight stream or local AR
+presentation owns it. Codec preflight runs only after the offline job receives the exclusive GPU
+lease. Ordinary streaming remains available when the offline prerequisites are absent.
 
-## Timeline, audio, and container contract
+The child receives a hashed worker specification, writes only inside its identity-pinned job root
+and claimed staging output, and publishes typed progress/result contracts. Cancellation terminates
+the worker process tree. Startup recovery marks interrupted jobs; version 1 does not resume them.
 
-The native worker obtains frame presentation timestamps and durations from FFprobe before
-inference begins. It preserves constant- or variable-frame-rate timing and verifies that the
-encoded video covers every source frame with equivalent PTS and duration, allowing only the
-rounding tolerance of one output time-base tick.
+## Terminal attestation
 
-The final mux:
+A successful causal pass must attest:
 
-- stream-copies compatible source audio and subtitle streams;
-- preserves compatible Matroska attachments;
-- maps source container and stream metadata, non-subtitle dispositions, and chapters;
-- clears copied subtitle dispositions with FFmpeg `-disposition:s 0` while preserving the streams;
-- does not re-encode the already compressed SBS video; and
-- supports Matroska (`.mkv`) and MP4 (`.mp4`) outputs.
+- `artifact_mode: adaptive` for Analyze Only or `conversion` for Convert Video;
+- `inference_mode: single-pass-tensorrt`;
+- inference enabled with scheduled/enqueued counts equal to source frame count;
+- the selected-input full-frame source scope;
+- the production live V2 signed-parallax renderer;
+- no scene-cache write or replay configuration;
+- atomic SBS publication, complete frame count, and resolved output geometry for conversion; and
+- an empty replay-contract list and zero retained cache bytes.
 
-The worker fails before inference when the requested container cannot preserve an input stream
-exactly. For example, MP4 requires compatible audio and `mov_text` subtitle codecs and cannot
-carry attachments; Matroska is the better preservation target for richer sources. Arbitrary data
-streams are currently rejected because the supported final containers cannot be proven to retain
-them unchanged.
+Conversion success additionally requires encoded-video, final-container, timeline, color/HDR,
+auxiliary-stream, staging-identity, and output-file verification. Any mismatch fails the job before
+publication.
 
-MP4 uses the source video time-base denominator as its track timescale, so video PTS and duration
-must match exactly. Matroska may choose another time base; each video, auxiliary-stream, and
-chapter timestamp may differ by at most one output tick, and the verifier separately rejects any
-cumulative duration drift. Packet counts, codecs, metadata, and non-subtitle stream dispositions
-are also checked before publication; copied subtitle dispositions are required to be empty.
+## Web UI workflow
 
-## HDR contract
+1. Open **Offline 3D Conversion**.
+2. Choose **Convert video** or **Analyze only**.
+3. Select the input file.
+4. For conversion, choose the output name and H.265 or AV1.
+5. Stop any live stream/local presenter and start the job.
+6. Monitor source-frame progress and causal scene epochs.
+7. Download the causal audit or use the atomically published video after completion.
 
-Static HDR is supported rather than tone-mapped to SDR:
+There are no lookahead, cache-size, or administrative-split controls.
 
-- explicitly tagged BT.2020 PQ (`smpte2084`) and HLG (`arib-std-b67`) inputs use a 10-bit
-  `p010le` H.265 or AV1 encode path;
-- color range, matrix, transfer, primaries, mastering-display metadata, and content-light
-  metadata are carried through and verified after encoding; and
-- the output is rejected if its static HDR contract does not match the source.
+## Verification
 
-Sunshine 3D fails closed before TensorRT starts when it sees Dolby Vision, HDR10+, SMPTE ST 2094,
-other dynamic HDR metadata, ambiguous high-bit-depth non-PQ/HLG input, missing required BT.2020
-tags, or rotation. Input must also retain one fixed supported raster geometry for the job. Dynamic
-HDR is not silently flattened to static HDR.
+Native regression coverage must include:
 
-## Audit artifacts
+- causal pulse/count epoch tracking and fail-closed divergence;
+- direct conversion command wiring with no cache, replay, or render decoder;
+- one-pass whole-clip/result contract validation;
+- follow protocol schema 2 geometry and event-driven wakeup;
+- persistent encoder frame ordering and exact timeline checks;
+- SDR, PQ, and HLG color/metadata preservation;
+- HEVC and AV1 admission/output validation; and
+- UI assertions that no lookahead/cache/split controls are exposed.
 
-Native jobs retain machine-readable evidence under their managed job directory:
-
-| Artifact | Purpose |
-|---|---|
-| `source-contract.json` | Compact source raster, color, static-HDR, timeline range, duration extrema, and exact timing SHA-256 |
-| `native-capabilities.json` | Required cache/replay and atomic-publication capabilities |
-| `scene-audit.json` | Committed scenes, revised/rejected boundaries, warnings, and cache use |
-| `output-contract.json` | Compact final codec, raster, HDR, timeline range, duration extrema, and exact timing SHA-256 |
-| `timeline-contract.json` | Aggregate no-drift evidence for copied auxiliary streams and chapters |
-| worker progress/result/log files | Durable status, failure provenance, and child-process diagnostics |
-
-Scene plans/caches, whole-clip manifests, scene audits, worker specifications/results, and durable
-job snapshots use one native typed wire-codec module. Maintained producers and consumers share the
-same exact-key and numeric-range checks; duplicate JSON keys are rejected before typed parsing.
-Authenticated worker specifications are still SHA-256 checked before parsing, bounded reads remain
-authoritative, and typed publication keeps the existing atomic replace boundaries. Timeline and
-file-identity objects embedded in these documents remain opaque only because they are separately
-owned authenticated subcontracts with their own validators.
-
-Worker-result acceptance also validates the relationships between those typed records: scenes are
-a contiguous one-based partition covering every source frame, the analysis contract matches the
-source and one-pass inference count, and each conversion replay exactly matches its paired scene
-and resolved SBS output geometry.
-
-Source, pre-mux, and output FFprobe frame JSON is parsed directly from a bounded child pipe through
-a 64 KiB reader and is never materialized as a file or full JSON DOM. The worker retains only
-compact integer timing records needed for exact equivalence checks. Those records have a 128 MiB
-logical payload ceiling per probed timeline derived from `sizeof(frame_timing_t)`; the
-compile-time contract covers more than the full 12-hour child-process limit at 90 FPS. Source and
-candidate/output timelines coexist during validation, for a 256 MiB bounded timing-vector peak.
-Video metadata, stream inventories, and
-auxiliary packet audits also use bounded pipes instead of raw probe files: 4 MiB for video
-metadata, 8 MiB for stream/tag inventory, and 64 MiB total packet-probe output per source or
-output inventory, shared cumulatively across its audio, subtitle, and data selectors. Packet
-objects are SAX-parsed and discarded one at a time with a 64 KiB per-descriptor ceiling; there is no full
-packet JSON DOM. Packet timing retention is limited to two million compact records and a
-compile-time-checked 128 MiB logical payload per inventory. Source and output inventories coexist
-during final equivalence validation, so that phase has an explicit peak contract of four million
-records and 256 MiB of logical packet-timing payload.
-
-The native worker also avoids retaining duplicate state histories. Standalone benchmark tooling
-may request `adaptive_state.jsonl`, but managed offline analysis uses an atomic latest-record
-transport: one bounded header and one replace-in-place frame snapshot. During analysis, the worker
-consumes and deletes each snapshot before it admits the next source frame. Scene replay runs no cut
-resolver and therefore emits no adaptive-state transport; the analysis trace remains authoritative.
-`cut_state.json` remains an
-evaluation-only artifact and is not generated or advertised by whole-clip jobs. Raw analysis
-transport lives below `native-work`, which the manager removes after every reaped outcome. Each
-worker-owned FFmpeg, FFprobe, and native-harness diagnostic pipe retains an 8 MiB prefix/tail log
-rather than allowing 12 hours of stderr to grow without limit. Serial scene replays reuse one
-`render-current-scene.log`; a failure leaves the current scene's diagnostics available to the
-worker until the managed transient tree is cleaned, while successful scenes cannot accumulate one
-log apiece. The manager's outer `worker.log` has a separate exact
-1 MiB disk cap; crossing it terminates the worker fail-closed while the supervising pipe continues
-to drain so there is no disk overshoot or child backpressure deadlock. Together these contracts
-keep both managed storage and probe memory bounded without weakening frame-by-frame timeline,
-color, HDR, codec, or stream-copy validation.
-
-### Live versus offline state readback
-
-The live Host 3D telemetry shown by a client is intentionally opportunistic. It uses a three-slot
-GPU staging/query ring, never flushes or waits for a result, skips a busy slot, coalesces to the
-newest completed sample, and sends telemetry on an unreliable sequenced channel. Under GPU or
-network load, samples can therefore be missing even though the GPU cut detector and V2 scene state
-continued to update normally. This transport carries cut evidence and depth health, not renderer
-geometry.
-
-Offline evaluation has a different contract: it performs a blocking state read after each
-estimator update and backpressures the next source frame until the worker has consumed that exact
-snapshot. Its cut/state trace is complete for every admitted source frame. Do not compare live and
-offline sample counts or cadence one-for-one, and do not diagnose a controller mismatch from a
-gap in live telemetry. Compare values only at matching sampled frame identities; use the offline
-trace when complete cut attribution and depth-health history are required.
-
-Boundary refinement consumes the same authenticated evidence fields and structural-corroboration
-semantics as the live resolver; [Host SBS scene cuts](host-sbs-scene-cuts.md) is their only
-threshold and state-machine authority. A persistent structureless transition is the explicit
-offline exception: it may bypass the otherwise impossible structural test only when the complete
-trace carries the producer's `geometry_confirmation_candidate` bit. A hard-cut pulse is not a
-substitute for that evidence, and an older or partial trace missing the candidate field fails
-closed instead of inventing planner parity.
-
-The scene audit explicitly records that its boundaries are not ground truth. Use the evidence to
-find suspicious cuts, administrative splits, invalid depth, and scenes whose frame-local container
-repeatedly saturates.
-
-The serialized job contract is deliberately bounded: `worker-result.json` is at most 16 MiB,
-`scene-audit.json` is at most 32 MiB, and a clip may contain at most 1,920 finalized scenes or
-boundary-revision records. That count is derived conservatively from both byte ceilings with
-fixed-document headroom; exact serialized-size checks remain authoritative for unusually large
-merged-boundary evidence. While a job runs, the worker checkpoints the growing audit after
-1, 2, 4, 8, ... finalized scenes instead of rewriting the full prefix after every scene. This
-keeps cumulative audit I/O linear in the final audit size. Completion always replaces the
-checkpoint with the full validated audit, so no final scene or revision is omitted.
-
-A source change still needs controlled before/after output, the authenticated core and extended
-`run_eval.py` gates, and headset review.
-
-### Opt-in production-worker smoke test
-
-Windows developers can exercise the complete production worker contract without Python:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File `
-  tests/integration/Invoke-OfflineSbsWorkerSmoke.ps1 `
-  -Sunshine .\cmake-build-relwithdebinfo\sunshine.exe `
-  -Config E:\ApolloDev\config\sunshine.conf `
-  -Ffmpeg E:\ApolloDev\tools\ffmpeg\ffmpeg-8.1.2-essentials_build\bin\ffmpeg.exe `
-  -Ffprobe E:\ApolloDev\tools\ffmpeg\ffmpeg-8.1.2-essentials_build\bin\ffprobe.exe
-```
-
-Stop live streaming first. The script runs the real D3D11/TensorRT and NVENC path, so it is not
-part of the ordinary CPU-only unit-test target. It builds a deterministic local Matroska fixture
-whose decoded frames are exactly scene A × 8, one exposure flash, scene A × 2, then scene B × 5.
-The contract rejects cut boundaries on the flash and recovery frames, requires the real boundary
-at frame 12, and requires exactly two finalized scenes. The fixture also carries nonzero video
-timestamps, offset audio, a subtitle, chapter metadata, and an attachment. The script
-authenticates the exact worker specification with SHA-256 and validates the full result/audit,
-one-inference-pass replay contract, compressed output, defined codec level, timestamps, copied
-streams, attachment bytes, and failed-job cleanup. All temporary files stay below
-`.offline-sbs-smoke` in the repository and are removed only after an ownership-sentinel check.
-Pass `-KeepArtifacts` to retain one run for diagnosis, `-Codec av1_nvenc` to exercise AV1 instead
-of H.265, or `-FixtureColor pq` / `-FixtureColor hlg` to exercise 10-bit BT.2020 static HDR
-instead of SDR.
-
-Missing NVENC, D3D11, TensorRT, model, or packaged-tool prerequisites fail in an explicitly named
-preflight phase before the production-worker assertion is evaluated.
-
-## Required FFmpeg packaging
-
-Offline jobs require an approved, compatible `ffmpeg.exe` and `ffprobe.exe` pair. The production
-job manager intentionally does not search the user's `PATH` or accept executable paths from a Web
-request. A package must install the tools either:
-
-- beside `sunshine.exe`; or
-- in a `tools` directory beside `sunshine.exe`.
-
-A trusted host-side configuration may supply absolute overrides, but this is not a per-job or
-browser-controlled field. Sunshine 3D verifies that each path is a regular file with the expected
-filename and probes its version before enabling offline jobs.
-
-The FFmpeg build must provide the required input demuxers/decoders, concat support, the filters
-used by the static-HDR path, Matroska/MP4 muxing, and `hevc_nvenc`/`av1_nvenc`. Packagers remain
-responsible for the FFmpeg build's redistribution terms. If the trusted tools are absent or fail
-their probe, offline conversion is unavailable; ordinary Sunshine 3D streaming remains available.
-
-## Evaluator boundary
-
-`tools/sbsbench` measures Host SBS geometry and state; it does not implement another whole-clip
-planner or production media workflow. Production users start conversion from Sunshine 3D's
-**Convert** page. Developers can exercise the native worker with the smoke test above without
-installing Python.
+The production integration smoke must run only when the installed host has released its ports/GPU
+ownership. It creates disposable media and job directories and must never publish into an existing
+user destination.

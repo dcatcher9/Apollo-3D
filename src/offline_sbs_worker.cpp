@@ -1,12 +1,11 @@
 /**
  * @file src/offline_sbs_worker.cpp
- * @brief Native scene-lookahead SBS evaluation/conversion worker.
+ * @brief Native causal SBS evaluation/conversion worker.
  */
 
 #include "offline_sbs_worker.h"
 
 #include "crypto.h"
-#include "depth_coordinate_v2.h"
 #include "generated/sbs_adaptive_state_contract.h"
 #include "host_sbs_observation_timeline.h"
 #include "host_sbs_shader_cache.h"
@@ -473,28 +472,6 @@ namespace offline_sbs {
       std::error_code ec;
       if (!fs::remove(path, ec) || ec) {
         throw worker_error("cannot release temporary file: " + path_utf8(path));
-      }
-    }
-
-    void remove_file_if_present_checked(const fs::path &path) {
-      std::error_code ec;
-      const bool exists = fs::exists(path, ec);
-      if (ec) {
-        throw worker_error(
-          "cannot inspect temporary file: " + path_utf8(path)
-        );
-      }
-      if (exists) {
-        remove_file_checked(path);
-      }
-    }
-
-    void remove_empty_directory_checked(const fs::path &path) {
-      std::error_code ec;
-      if (!fs::remove(path, ec) || ec) {
-        throw worker_error(
-          "cannot release empty temporary directory: " + path_utf8(path)
-        );
       }
     }
 
@@ -2916,30 +2893,120 @@ namespace offline_sbs {
       );
     }
 
+    class directory_change_watcher_t {
+    public:
+      explicit directory_change_watcher_t(const fs::path &directory) {
+#ifdef _WIN32
+        handle_ = FindFirstChangeNotificationW(
+          directory.c_str(),
+          FALSE,
+          FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE |
+            FILE_NOTIFY_CHANGE_LAST_WRITE
+        );
+        if (handle_ == INVALID_HANDLE_VALUE) {
+          throw worker_error("cannot watch native harness output directory");
+        }
+#else
+        (void) directory;
+#endif
+      }
+
+      directory_change_watcher_t(const directory_change_watcher_t &) = delete;
+      directory_change_watcher_t &operator=(
+        const directory_change_watcher_t &
+      ) = delete;
+
+      ~directory_change_watcher_t() {
+#ifdef _WIN32
+        if (handle_ != INVALID_HANDLE_VALUE) {
+          FindCloseChangeNotification(handle_);
+        }
+#endif
+      }
+
+      void wait() {
+#ifdef _WIN32
+        const auto status = WaitForSingleObject(handle_, 1000);
+        if (status == WAIT_TIMEOUT) {
+          return;
+        }
+        if (status != WAIT_OBJECT_0 ||
+            !FindNextChangeNotification(handle_)) {
+          throw worker_error("native harness output notification failed");
+        }
+#else
+        std::this_thread::sleep_for(child_poll);
+#endif
+      }
+
+    private:
+#ifdef _WIN32
+      HANDLE handle_ = INVALID_HANDLE_VALUE;
+#endif
+    };
+
+    bool follow_progress_has_exact_schema(const nlohmann::json &value) {
+      static constexpr std::array<std::string_view, 14> keys {
+        "schema",
+        "status",
+        "input_format",
+        "artifact_mode",
+        "processed_count",
+        "first_sequence",
+        "last_completed_sequence",
+        "last_frame_id",
+        "last_completed_frame_id",
+        "source_frame_count",
+        "sbs_frame_count",
+        "sbs_width",
+        "sbs_height",
+        "producer_frame_count",
+      };
+      if (!value.is_object() || value.size() != keys.size()) {
+        return false;
+      }
+      return std::ranges::all_of(keys, [&](const std::string_view key) {
+        return value.contains(std::string {key});
+      });
+    }
+
     nlohmann::json read_progress(
       const fs::path &path,
       const child_process_t &child,
       const std::uint64_t minimum,
-      const std::string_view description
+      const std::string_view description,
+      directory_change_watcher_t *watcher = nullptr
     ) {
       const auto deadline = std::chrono::steady_clock::now() + child_timeout;
       std::string last_parse_error;
       while (std::chrono::steady_clock::now() < deadline) {
         std::error_code ec;
+        std::optional<nlohmann::json> observed;
         if (fs::is_regular_file(path, ec) && !ec) {
           try {
-            auto value = read_json(path);
-            if (value.value("schema", 0) != 1 || value.value("processed_count", 0ull) < minimum) {
-              std::this_thread::sleep_for(child_poll);
-              continue;
-            }
-            return value;
+            observed = read_json(path);
           } catch (const std::exception &exception) {
-            // Atomic publication means a parse error is not a partial write. Keep the last
-            // error briefly so transient antivirus/file-sharing races do not kill a job.
+            // The file is atomically published, but a short-lived sharing/antivirus race can
+            // still make the open or read fail. Retry I/O/parse failures only; a successfully
+            // parsed contract with the wrong schema fails immediately below.
             last_parse_error = exception.what();
           }
         }
+        if (observed) {
+          const auto &value = *observed;
+          if (!follow_progress_has_exact_schema(value) ||
+              value.at("schema") != 2 ||
+              !value.at("processed_count").is_number_unsigned()) {
+            throw worker_error(
+              "native harness follow progress has an unexpected schema"
+            );
+          }
+          if (value.at("processed_count").get<std::uint64_t>() >= minimum) {
+            return value;
+          }
+        }
+        // A stale but valid ACK is normal while the child is working. Check liveness before
+        // every notification wait so a frame-N failure cannot strand the worker behind ACK N-1.
         if (!child.running()) {
           throw worker_error(
             std::string(description) + " exited before acknowledging frame " +
@@ -2948,7 +3015,11 @@ namespace offline_sbs {
             (last_parse_error.empty() ? "" : ": " + last_parse_error)
           );
         }
-        std::this_thread::sleep_for(child_poll);
+        if (watcher) {
+          watcher->wait();
+        } else {
+          std::this_thread::sleep_for(child_poll);
+        }
       }
       throw worker_error(
         "timed out waiting for " + std::string(description) +
@@ -3195,8 +3266,7 @@ namespace offline_sbs {
     scene_frame_t parse_trace_frame(
       const nlohmann::json &value,
       const frame_timing_t &timing,
-      const rational_t time_base,
-      const std::uint64_t cache_bytes
+      const rational_t time_base
     ) {
       using sbs_adaptive_state::word_e;
       if (!json_object_has_exact_keys(value, sbs_adaptive_state::frame_keys) ||
@@ -3346,10 +3416,12 @@ namespace offline_sbs {
           );
         }
       }
+      frame.hard_cut_count = words[sbs_adaptive_state::index(
+        word_e::hard_cut_count
+      )].get<std::uint32_t>();
       frame.analysis_flags = analysis_flags;
       frame.pts_seconds = time_base.seconds(timing.pts);
       frame.duration_seconds = time_base.seconds(timing.duration);
-      frame.cache_bytes = cache_bytes;
       return frame;
     }
 
@@ -3558,72 +3630,6 @@ namespace offline_sbs {
       std::uint64_t frame_count_ = 0;
     };
 
-    struct cache_contract_t {
-      std::uint64_t processed_count = 0;
-      std::uint64_t depth_bytes = 0;
-      std::uint64_t state_bytes = 0;
-      std::uint32_t source_width = 0;
-      std::uint32_t source_height = 0;
-      std::uint32_t sbs_width = 0;
-      std::uint32_t sbs_height = 0;
-      std::string extension;
-    };
-
-    cache_contract_t parse_cache_contract(
-      const fs::path &cache_directory,
-      const std::uint64_t sequence,
-      const media_contract_t &media
-    ) {
-      const auto value = read_json(
-        cache_directory / "scene_cache_contract.json"
-      );
-      wire::scene_cache_contract_t contract;
-      try {
-        contract = wire::parse_scene_cache_contract(value);
-      } catch (const wire::contract_error &exception) {
-        throw worker_error(
-          std::string {"invalid scene-cache wire contract: "} + exception.what()
-        );
-      }
-      if (contract.status != "running" || contract.processed_count != sequence) {
-        throw worker_error("running scene-cache sequence contract mismatch");
-      }
-      cache_contract_t result;
-      result.processed_count = sequence;
-      result.depth_bytes = static_cast<std::uint64_t>(contract.depth_width) *
-                           contract.depth_height * sizeof(float);
-      result.state_bytes = sizeof(models::depth_coordinate_v2::state_words_t);
-      result.source_width = contract.source.width;
-      result.source_height = contract.source.height;
-      result.sbs_width = contract.packed_sbs.width;
-      result.sbs_height = contract.packed_sbs.height;
-      result.extension = contract.packed_sbs.file_extension;
-      const std::string expected_frame_format =
-        media.color == media_color_e::sdr ?
-          "sRGB-BMP-WIC" :
-          "linear-scRGB-f32-pfm";
-      if (result.source_width != media.width ||
-          result.source_height != media.height ||
-          contract.source.frame_format != expected_frame_format ||
-          result.extension != (media.color == media_color_e::sdr ? "png" : "pfm")) {
-        throw worker_error("scene-cache media/layout contract mismatch");
-      }
-      const auto stem = "frame_" + frame_id(sequence);
-      const auto depth_path = cache_directory / (stem + ".depth.r32f");
-      const auto state_path = cache_directory / (stem + ".state.u32");
-      std::error_code ec;
-      if (!fs::is_regular_file(depth_path, ec) || ec || fs::file_size(depth_path, ec) != result.depth_bytes || ec || !fs::is_regular_file(state_path, ec) || ec || fs::file_size(state_path, ec) != result.state_bytes || ec) {
-        throw worker_error("scene-cache ACK lacks its exact depth/state pair");
-      }
-      return result;
-    }
-
-    nlohmann::json scene_plan_json(const scene_plan_t &scene) {
-      return wire::to_json(wire::scene_plan_contract_t {
-        .scenes = {{scene.start_sequence, scene.end_sequence_exclusive}},
-      });
-    }
-
     nlohmann::json boundary_json(const boundary_audit_t &boundary) {
       return wire::boundary_audit_json(boundary);
     }
@@ -3649,19 +3655,6 @@ namespace offline_sbs {
                        {"revision_source_frames", scene.boundary.revision_source_frames},
                      }},
       };
-    }
-
-    void release_cache_scene(
-      const fs::path &cache,
-      const scene_plan_t &scene
-    ) {
-      for (std::uint64_t sequence = scene.start_sequence;
-           sequence < scene.end_sequence_exclusive;
-           ++sequence) {
-        const auto stem = "frame_" + frame_id(sequence);
-        remove_file_checked(cache / (stem + ".depth.r32f"));
-        remove_file_checked(cache / (stem + ".state.u32"));
-      }
     }
 
     std::string codec_name_for_request(const std::string &codec) {
@@ -3849,6 +3842,10 @@ namespace offline_sbs {
       graph.imbue(std::locale::classic());
       if (hdr) {
         graph
+          // HDR10 static side data has no equivalent in a PFM image. Keep the authenticated
+          // source stream aligned one-for-one as a metadata donor; FFmpeg's frame-loop filters
+          // do not preserve mastering-display/content-light side data on cloned frames.
+          // Pixel values still come exclusively from the direct SBS stream below.
           << "[0:v:0]trim=end_frame=" << media.frames.size() << ','
           << timing_filter << ',' << hdr_decode_filter(media)
           << ",scale=" << sbs_width << ':' << sbs_height
@@ -3897,8 +3894,8 @@ namespace offline_sbs {
         "-copyts",
       };
       if (hdr) {
-        // The original stream is a frame-side-data donor only. Pixel values always come
-        // from the replay PFM (`blend ... =B`).
+        // HDR static side data must accompany every donor frame. Pixel values always come from
+        // the direct causal PFM stream (`blend ... =B`).
         command.insert(command.end(), {
                                         "-protocol_whitelist",
                                         "file",
@@ -5172,215 +5169,6 @@ namespace offline_sbs {
       payload_bytes += bytes;
     }
 
-    struct render_result_t {
-      wire::whole_clip_contract_t contract;
-      std::uint64_t peak_live_raster_bytes = 0;
-      std::uint64_t peak_cache_plus_raster_bytes = 0;
-    };
-
-    fs::path replay_scene_log_path(const fs::path &work) {
-      // Replays are strictly serial. Reuse one bounded diagnostic path so up to 1,920
-      // successful scenes cannot retain 1,920 independent 8 MiB logs.
-      return work / "logs" / "render-current-scene.log";
-    }
-
-    fs::path prepare_replay_scene_log(const fs::path &work) {
-      const auto path = replay_scene_log_path(work);
-      // bounded_child_log_t publishes only after the child exits. Clear the prior scene before
-      // launch so a hard failure while the new child is still running cannot leave stale output
-      // mislabeled as evidence for the current scene.
-      remove_file_if_present_checked(path);
-      return path;
-    }
-
-    render_result_t render_scene(
-      const worker_spec_t &spec,
-      const media_contract_t &media,
-      const scene_plan_t &scene,
-      streaming_decoder_t &render_decoder,
-      whole_clip_encoder_t &encoder,
-      const fs::path &work,
-      const fs::path &cache,
-      const std::uint32_t expected_sbs_width,
-      const std::uint32_t expected_sbs_height,
-      const std::uint64_t live_cache_bytes
-    ) {
-      const std::string output_extension =
-        media.color == media_color_e::sdr ? "png" : "pfm";
-      const auto scene_name =
-        "scene_" + std::string(8 - std::min<std::size_t>(8, std::to_string(scene.scene_id).size()), '0') + std::to_string(scene.scene_id);
-      const auto input = work / "render-input" / scene_name;
-      const auto output = work / "render-output" / scene_name;
-      const auto plan = work / "scene-plans" / (scene_name + ".json");
-      std::error_code ec;
-      fs::create_directories(input, ec);
-      fs::create_directories(output, ec);
-      fs::create_directories(plan.parent_path(), ec);
-      if (ec) {
-        throw worker_error("cannot create scene replay directories");
-      }
-      write_json_atomic(plan, scene_plan_json(scene));
-      std::vector<std::string> command {
-        path_utf8(spec.sunshine_executable),
-        path_utf8(spec.sunshine_config),
-        "--sbs-bench",
-        "--frames",
-        path_utf8(input),
-        "--follow",
-        "--follow-format",
-        render_decoder.format(),
-        "--follow-count",
-        std::to_string(scene.frame_count),
-        "--out",
-        path_utf8(output),
-        "--artifacts",
-        "conversion",
-        "--render-cache",
-        path_utf8(cache),
-        "--scene-plan",
-        path_utf8(plan),
-      };
-      const auto replay_log = prepare_replay_scene_log(work);
-      auto replay = child_process_t::launch(
-        command,
-        spec.sunshine_executable.parent_path(),
-        replay_log
-      );
-      bool producer_done = false;
-      std::uint64_t peak_live_raster_bytes = 0;
-      std::uint64_t peak_cache_plus_raster_bytes = live_cache_bytes;
-      try {
-        for (std::uint64_t sequence = scene.start_sequence;
-             sequence < scene.end_sequence_exclusive;
-             ++sequence) {
-          const auto source = render_decoder.publish_next(input, sequence);
-          const auto progress = read_progress(
-            output / "follow_progress.json",
-            replay,
-            sequence - scene.start_sequence + 1,
-            "scene replay"
-          );
-          if (progress.value("first_sequence", 0ull) != scene.start_sequence || progress.value("last_completed_sequence", 0ull) != sequence || progress.value("artifact_mode", "") != "conversion") {
-            throw worker_error("scene replay global sequence ACK mismatch");
-          }
-          const auto sbs = output /
-                           ("sbs_" + frame_id(sequence) + "." + output_extension);
-          if (!fs::is_regular_file(sbs, ec) || ec || fs::file_size(sbs, ec) == 0 || ec) {
-            throw worker_error("scene replay ACK lacks its atomic SBS frame");
-          }
-          const auto source_bytes = fs::file_size(source, ec);
-          if (ec) {
-            throw worker_error("cannot measure the replay source raster");
-          }
-          const auto sbs_bytes = fs::file_size(sbs, ec);
-          if (ec || source_bytes > std::numeric_limits<std::uint64_t>::max() || sbs_bytes > std::numeric_limits<std::uint64_t>::max()) {
-            throw worker_error("live replay raster size is unsupported");
-          }
-          const auto source_size =
-            static_cast<std::uint64_t>(source_bytes);
-          const auto sbs_size =
-            static_cast<std::uint64_t>(sbs_bytes);
-          if (source_size > spec.scene_cache_hard_cap_bytes || sbs_size > spec.scene_cache_hard_cap_bytes - source_size || live_cache_bytes > spec.scene_cache_hard_cap_bytes - source_size - sbs_size) {
-            throw worker_error(
-              "scene cache plus live replay rasters exceeded the hard cap"
-            );
-          }
-          peak_live_raster_bytes = std::max(
-            peak_live_raster_bytes,
-            source_size + sbs_size
-          );
-          peak_cache_plus_raster_bytes = std::max(
-            peak_cache_plus_raster_bytes,
-            live_cache_bytes + source_size + sbs_size
-          );
-          encoder.publish(sequence, sbs);
-          remove_file_checked(sbs);
-          remove_file_checked(source);
-        }
-        publish_producer_done(input, scene.frame_count);
-        producer_done = true;
-        const int code = replay.wait(
-          std::chrono::duration_cast<std::chrono::milliseconds>(child_timeout)
-        );
-        if (code != 0) {
-          throw worker_error(
-            "scene replay exited " + std::to_string(code)
-          );
-        }
-        replay.terminate();
-      } catch (const std::exception &exception) {
-        if (!producer_done) {
-          publish_producer_failed(input, exception.what());
-        }
-        replay.terminate();
-        throw;
-      }
-
-      const auto contract = read_json(output / "whole_clip_contract.json");
-      wire::whole_clip_contract_t typed_contract;
-      try {
-        typed_contract = wire::parse_whole_clip_contract(contract);
-      } catch (const wire::contract_error &exception) {
-        throw worker_error(
-          std::string {"invalid replay whole-clip contract: "} + exception.what()
-        );
-      }
-      if (typed_contract.artifact_mode != "conversion" ||
-          typed_contract.source_frame_count != scene.frame_count ||
-          typed_contract.source_first_sequence != scene.start_sequence ||
-          typed_contract.inference_mode != "scene-cache-replay" ||
-          typed_contract.depth_inference_enabled ||
-          typed_contract.scheduled_depth_update_count != 0 ||
-          typed_contract.tensorrt_enqueue_count != 0) {
-        throw worker_error(
-          "scene replay did not attest a zero-inference exact cache replay"
-        );
-      }
-      const auto &adaptive_state = typed_contract.adaptive_state;
-      if (
-        adaptive_state.transport != "none" ||
-        adaptive_state.retained_history ||
-        adaptive_state.frame_count != 0 ||
-        contract.contains("cut_state")
-      ) {
-        throw worker_error(
-          "scene replay falsely attributed adaptive-state evidence"
-        );
-      }
-      const auto &sbs = typed_contract.sbs;
-      if (!sbs.enabled || sbs.frame_count != scene.frame_count ||
-          sbs.width != expected_sbs_width || sbs.height != expected_sbs_height ||
-          sbs.file_pattern.value_or("") !=
-            "sbs_<frame-id>." + output_extension) {
-        throw worker_error("scene replay SBS raster contract mismatch");
-      }
-
-      // The contract has been copied into bounded in-memory evidence and every SBS frame has
-      // already been consumed by the persistent encoder. Remove the fixed replay transport
-      // files now so even a clip with many short scenes cannot accumulate one trace snapshot
-      // or progress file per scene while the job is still running.
-      for (const auto &path : {
-             output / "follow_progress.json",
-             output / "sbs_perf.json",
-             output / "whole_clip_contract.json",
-             input / ".producer-done.json",
-             plan,
-           }) {
-        remove_file_if_present_checked(path);
-      }
-      remove_empty_directory_checked(output);
-      remove_empty_directory_checked(input);
-
-      // The persistent encoder has consumed every SBS raster before the scene cache is
-      // released. It retains only compressed encoder state, never a scene of rasters.
-      release_cache_scene(cache, scene);
-      return {
-        .contract = std::move(typed_contract),
-        .peak_live_raster_bytes = peak_live_raster_bytes,
-        .peak_cache_plus_raster_bytes =
-          peak_cache_plus_raster_bytes,
-      };
-    }
   }  // namespace
 
   std::vector<std::string> build_codec_arguments(
@@ -5463,22 +5251,6 @@ namespace offline_sbs {
     }
     const auto result = accumulator.render();
     return std::string(result.begin(), result.end());
-  }
-
-  fs::path replay_scene_log_path_for_test(
-    const fs::path &work,
-    const std::uint64_t scene_id
-  ) {
-    (void) scene_id;
-    return replay_scene_log_path(work);
-  }
-
-  fs::path prepare_replay_scene_log_for_test(
-    const fs::path &work,
-    const std::uint64_t scene_id
-  ) {
-    (void) scene_id;
-    return prepare_replay_scene_log(work);
   }
 
   bool can_retain_auxiliary_packets_for_test(
@@ -5762,8 +5534,8 @@ namespace offline_sbs {
     spec.ffmpeg_executable = absolute_path(contract.ffmpeg_path, "ffmpeg.path");
     spec.ffprobe_executable = absolute_path(contract.ffprobe_path, "ffprobe.path");
     spec.codec = contract.codec;
-    spec.scene_cache_hard_cap_bytes = contract.scene_cache_hard_cap_bytes;
-    spec.allow_administrative_split = contract.scene_cache_budget_policy == "split";
+    spec.transient_raster_hard_cap_bytes =
+      contract.transient_raster_hard_cap_bytes;
     return spec;
   }
 
@@ -6865,29 +6637,6 @@ namespace offline_sbs {
     }
   }
 
-  std::uint64_t analysis_open_cache_limit(
-    const std::uint64_t hard_cap_bytes,
-    const std::uint64_t source_raster_bytes,
-    const std::uint64_t depth_state_pair_bytes
-  ) {
-    if (hard_cap_bytes == 0 || source_raster_bytes == 0 || depth_state_pair_bytes == 0 || source_raster_bytes >= hard_cap_bytes) {
-      throw worker_error("analysis storage budget has an invalid byte contract");
-    }
-    const auto after_source = hard_cap_bytes - source_raster_bytes;
-    if (depth_state_pair_bytes > after_source) {
-      throw worker_error(
-        "analysis hard cap cannot hold the live source raster and depth/state pair"
-      );
-    }
-    const auto open_cache_limit = after_source - depth_state_pair_bytes;
-    if (open_cache_limit < depth_state_pair_bytes) {
-      throw worker_error(
-        "analysis hard cap cannot reserve the next exact depth/state pair"
-      );
-    }
-    return open_cache_limit;
-  }
-
   void validate_avexpr_timeline_exactness(const media_contract_t &media) {
     using boost::multiprecision::cpp_int;
     static const cpp_int max_exact_avexpr_integer {
@@ -7180,7 +6929,10 @@ namespace offline_sbs {
         media_contract_json(media)
       );
 
-      // Refuse to start TensorRT unless the exact cache/replay harness is present.
+      // Refuse to start TensorRT unless the harness can publish each production SBS frame
+      // directly from the same causal estimator/renderer pass. Offline conversion deliberately
+      // removes wall-clock pacing; it does not replace the online camera, cut, OCR, conditioning,
+      // or renderer state machines with an offline replay implementation.
       const auto capabilities_path = spec.result_directory / "native-capabilities.json";
       run_logged(
         {
@@ -7195,8 +6947,8 @@ namespace offline_sbs {
       );
       const auto capabilities = read_json(capabilities_path);
       const auto &native = capabilities.at("native_whole_clip");
-      if (capabilities.value("schema", 0) != 1 || native.value("follow_protocol_schema", 0) != 1 || native.value("adaptive_state_schema", 0u) != sbs_adaptive_state::schema_version || native.value("adaptive_state_contract_tag", 0u) != sbs_adaptive_state::cut_contract_tag || native.value("adaptive_state_contract_canonical_sha256", "") != sbs_adaptive_state::contract_canonical_sha256 || native.value("scene_cache_contract_schema", 0u) != scene_cache_contract_schema || native.value("renderer", "") != "depth-coordinate-v2-live-signed-parallax" || !native.value("render_cache_follow", false) || !native.value("render_skips_tensorrt", false) || !native.value("atomic_sbs_publication", false)) {
-        throw worker_error("native SBS harness lacks the required replay contract");
+      if (capabilities.value("schema", 0) != 1 || native.value("follow_protocol_schema", 0) != 2 || native.value("follow_wakeup", "") != "windows-directory-change-notification" || native.value("adaptive_state_schema", 0u) != sbs_adaptive_state::schema_version || native.value("adaptive_state_contract_tag", 0u) != sbs_adaptive_state::cut_contract_tag || native.value("adaptive_state_contract_canonical_sha256", "") != sbs_adaptive_state::contract_canonical_sha256 || native.value("renderer", "") != "depth-coordinate-v2-live-signed-parallax" || !native.value("direct_conversion_follow", false) || !native.value("direct_conversion_single_pass", false) || !native.value("atomic_sbs_publication", false)) {
+        throw worker_error("native SBS harness lacks the required direct conversion contract");
       }
       if (
         !native.contains("source_scope") ||
@@ -7205,13 +6957,6 @@ namespace offline_sbs {
         throw worker_error(
           "native SBS harness is not isolated to selected-input full-frame processing"
         );
-      }
-      const auto &scene_plan_capability = native.at("scene_plan");
-      if (scene_plan_capability.value("schema", 0) != 2 ||
-          scene_plan_capability.value("version", "") != "scene-plan-v2" ||
-          !scene_plan_capability.value("one_scene_per_replay", false) ||
-          !scene_plan_capability.value("boundary_only", false)) {
-        throw worker_error("native SBS harness lacks boundary-only scene planning");
       }
       nlohmann::json expected_analysis_flag_bits = nlohmann::json::object();
       for (const auto &flag : sbs_adaptive_state::analysis_flag_bits) {
@@ -7225,17 +6970,14 @@ namespace offline_sbs {
       }
 
       const auto analysis_input = work / "analysis-input";
-      // The raw per-frame adaptive trace and harness progress are transient inputs to the
-      // native scene planner. Keep them below native-work so the manager's identity-pinned
-      // cleanup removes them after success, failure, or cancellation. Durable bounded
-      // evidence is emitted separately as scene-audit.json and the worker result contract.
+      // The per-frame adaptive trace, harness progress, and (for conversion) atomic SBS raster
+      // are transient products of one causal production pass. Keep them below native-work so
+      // the manager's identity-pinned cleanup removes them after success, failure, or
+      // cancellation. Durable bounded evidence is emitted separately as scene-audit.json and
+      // the worker result contract.
       const auto analysis_output = work / "analysis-output";
-      const auto cache = work / "scene-cache";
       fs::create_directories(analysis_input, ec);
       fs::create_directories(analysis_output, ec);
-      if (spec.operation == "convert") {
-        fs::create_directories(cache, ec);
-      }
       if (ec) {
         throw worker_error("cannot create analysis directories");
       }
@@ -7244,14 +6986,7 @@ namespace offline_sbs {
         media,
         work / "logs" / "analysis-decoder.log",
       };
-      std::optional<streaming_decoder_t> render_decoder;
-      if (spec.operation == "convert") {
-        render_decoder.emplace(
-          spec,
-          media,
-          work / "logs" / "render-decoder.log"
-        );
-      }
+      directory_change_watcher_t analysis_output_watcher {analysis_output};
       std::vector<std::string> analysis_command {
         path_utf8(spec.sunshine_executable),
         path_utf8(spec.sunshine_config),
@@ -7266,17 +7001,11 @@ namespace offline_sbs {
         "--out",
         path_utf8(analysis_output),
         "--artifacts",
-        "adaptive",
+        spec.operation == "convert" ? "conversion" : "adaptive",
         "--bounded-adaptive-state",
         "--observation-timeline",
         path_utf8(observation_timeline),
       };
-      if (spec.operation == "convert") {
-        analysis_command.insert(
-          analysis_command.end(),
-          {"--scene-cache", path_utf8(cache)}
-        );
-      }
       auto analysis = child_process_t::launch(
         analysis_command,
         spec.sunshine_executable.parent_path(),
@@ -7284,23 +7013,17 @@ namespace offline_sbs {
       );
       trace_tail_t trace(analysis_output, true);
       bool analysis_done = false;
-      std::uint64_t live_cache_bytes = 0;
-      std::uint64_t peak_cache_bytes = 0;
       std::uint64_t peak_live_raster_bytes = 0;
-      std::uint64_t peak_cache_plus_raster_bytes = 0;
       std::optional<std::uint64_t> analysis_source_raster_bytes;
-      std::optional<std::uint64_t> pair_bytes;
       std::uint32_t sbs_width = 0;
       std::uint32_t sbs_height = 0;
       std::vector<scene_plan_t> scenes;
-      std::vector<wire::replay_result_contract_t> replay_contracts;
       std::unique_ptr<whole_clip_encoder_t> conversion_encoder;
-      std::unique_ptr<scene_planner_t> planner;
+      std::unique_ptr<causal_scene_tracker_t> scene_tracker;
       nlohmann::json trace_header;
       std::uint64_t covered_until = 1;
       std::size_t accounted_scene_count = 0;
       std::size_t accounted_boundary_count = 0;
-      std::size_t accounted_replay_count = 0;
       std::uintmax_t scene_audit_payload_bytes = 0;
       std::uintmax_t worker_result_payload_bytes = 0;
       nlohmann::json timeline_contract =
@@ -7325,11 +7048,10 @@ namespace offline_sbs {
 
       const auto account_contract_records = [&] {
         const auto boundary_count =
-          planner ? planner->boundary_audit().size() : 0;
+          scene_tracker ? scene_tracker->boundary_audit().size() : 0;
         if (
           scenes.size() > max_serialized_scene_count ||
-          boundary_count > max_serialized_scene_count ||
-          replay_contracts.size() > max_serialized_scene_count
+          boundary_count > max_serialized_scene_count
         ) {
           throw worker_error(
             "scene/boundary count exceeds the bounded serialized contract"
@@ -7353,37 +7075,21 @@ namespace offline_sbs {
         while (accounted_boundary_count < boundary_count) {
           account_serialized_record(
             boundary_json(
-              planner->boundary_audit()[accounted_boundary_count++]
+              scene_tracker->boundary_audit()[accounted_boundary_count++]
             ),
             scene_audit_payload_bytes,
             scene_audit_max_bytes,
             "scene audit"
           );
         }
-        while (accounted_replay_count < replay_contracts.size()) {
-          account_serialized_record(
-            wire::to_json(replay_contracts[accounted_replay_count++]),
-            worker_result_payload_bytes,
-            worker_result_max_bytes,
-            "worker result"
-          );
-        }
       };
 
-      const auto initialize_planner =
-        [&](const std::uint64_t max_open_cache_bytes) {
-          if (planner || !trace_header.is_object()) {
-            throw worker_error("scene planner initialization is invalid");
-          }
-          scene_planner_config_t planner_config;
-          planner_config.max_open_cache_bytes = max_open_cache_bytes;
-          planner_config.max_open_frames = default_max_open_scene_frames;
-          planner_config.allow_administrative_split =
-            spec.allow_administrative_split;
-          planner = std::make_unique<scene_planner_t>(
-            std::move(planner_config)
-          );
-        };
+      const auto initialize_scene_tracker = [&] {
+        if (scene_tracker || !trace_header.is_object()) {
+          throw worker_error("causal scene tracker initialization is invalid");
+        }
+        scene_tracker = std::make_unique<causal_scene_tracker_t>();
+      };
 
       const auto recent_scene_decisions = [&] {
         nlohmann::json decisions = nlohmann::json::array();
@@ -7394,13 +7100,13 @@ namespace offline_sbs {
         return decisions;
       };
 
-      const auto render_scenes = [&](
+      const auto commit_scenes = [&](
         const std::vector<scene_plan_t> &finalized,
         const std::uint64_t analyzed_through_sequence
       ) {
         for (const auto &scene : finalized) {
           if (scene.start_sequence != covered_until || scene.end_sequence_exclusive <= scene.start_sequence || scene.frame_count != scene.end_sequence_exclusive - scene.start_sequence) {
-            throw worker_error("scene planner produced a gap/overlap");
+            throw worker_error("causal scene tracker produced a gap/overlap");
           }
           if (scenes.size() >= max_serialized_scene_count) {
             throw worker_error(
@@ -7409,69 +7115,10 @@ namespace offline_sbs {
           }
           scenes.push_back(scene);
           account_contract_records();
-          if (spec.operation == "convert") {
-            if (!render_decoder || !sbs_width || !sbs_height) {
-              throw worker_error("scene replay began before cache geometry");
-            }
-            publish_progress(
-              spec,
-              "replay",
-              analyzed_through_sequence,
-              &media,
-              scenes.size(),
-              scene_progress_json(scene),
-              recent_scene_decisions()
-            );
-            if (!conversion_encoder) {
-              conversion_encoder = std::make_unique<whole_clip_encoder_t>(
-                spec,
-                media,
-                work,
-                sbs_width,
-                sbs_height
-              );
-            }
-            const auto rendered = render_scene(
-              spec,
-              media,
-              scene,
-              *render_decoder,
-              *conversion_encoder,
-              work,
-              cache,
-              sbs_width,
-              sbs_height,
-              live_cache_bytes
-            );
-            peak_live_raster_bytes = std::max(
-              peak_live_raster_bytes,
-              rendered.peak_live_raster_bytes
-            );
-            peak_cache_plus_raster_bytes = std::max(
-              peak_cache_plus_raster_bytes,
-              rendered.peak_cache_plus_raster_bytes
-            );
-            replay_contracts.push_back({
-              .scene_id = scene.scene_id,
-              .start_sequence = scene.start_sequence,
-              .end_sequence_exclusive = scene.end_sequence_exclusive,
-              .inference_mode = rendered.contract.inference_mode,
-              .depth_inference_enabled = rendered.contract.depth_inference_enabled,
-              .scheduled_depth_update_count =
-                rendered.contract.scheduled_depth_update_count,
-              .tensorrt_enqueue_count = rendered.contract.tensorrt_enqueue_count,
-              .sbs = rendered.contract.sbs,
-            });
-            account_contract_records();
-            if (scene.cache_bytes > live_cache_bytes) {
-              throw worker_error("scene-cache byte ledger underflow");
-            }
-            live_cache_bytes -= scene.cache_bytes;
-          }
           covered_until = scene.end_sequence_exclusive;
           publish_progress(
             spec,
-            spec.operation == "convert" ? "analysis" : "evaluate",
+            spec.operation == "convert" ? "convert" : "evaluate",
             analyzed_through_sequence,
             &media,
             scenes.size(),
@@ -7483,14 +7130,14 @@ namespace offline_sbs {
               spec.result_directory / "scene-audit.json",
               scene_audit_document(
                 scenes,
-                planner ? planner->boundary_audit() :
+                scene_tracker ? scene_tracker->boundary_audit() :
                           std::vector<boundary_audit_t> {},
                 "running",
-                peak_cache_bytes,
+                0,
                 analysis_source_raster_bytes.value_or(0),
                 peak_live_raster_bytes,
-                peak_cache_plus_raster_bytes,
-                spec.scene_cache_hard_cap_bytes,
+                peak_live_raster_bytes,
+                spec.transient_raster_hard_cap_bytes,
                 timeline_contract
               ),
               scene_audit_max_bytes,
@@ -7501,7 +7148,13 @@ namespace offline_sbs {
       };
 
       try {
-        publish_progress(spec, "analysis", 0, &media, 0);
+        publish_progress(
+          spec,
+          spec.operation == "convert" ? "convert" : "evaluate",
+          0,
+          &media,
+          0
+        );
         for (const auto &timing : media.frames) {
           const auto source = analysis_decoder.publish_next(
             analysis_input,
@@ -7520,96 +7173,131 @@ namespace offline_sbs {
               "fixed-resolution analysis source raster size changed mid-clip"
             );
           }
-          if (current_source_raster_bytes > spec.scene_cache_hard_cap_bytes) {
+          if (
+            current_source_raster_bytes >
+            spec.transient_raster_hard_cap_bytes
+          ) {
             throw worker_error(
-              "live analysis source raster exceeds the hard cap"
+              "live source raster exceeds the transient raster hard cap"
             );
           }
-          peak_live_raster_bytes = std::max(
-            peak_live_raster_bytes,
-            current_source_raster_bytes
-          );
           const auto progress = read_progress(
             analysis_output / "follow_progress.json",
             analysis,
             timing.sequence,
-            "analysis"
+            spec.operation == "convert" ? "conversion" : "analysis",
+            &analysis_output_watcher
           );
-          if (progress.value("first_sequence", 0ull) != 1 || progress.value("last_completed_sequence", 0ull) != timing.sequence || progress.value("artifact_mode", "") != "adaptive") {
-            throw worker_error("analysis global sequence ACK mismatch");
+          const bool converting = spec.operation == "convert";
+          const auto expected_artifact_mode =
+            converting ? std::string_view {"conversion"} :
+                         std::string_view {"adaptive"};
+          const auto expected_frame_id = frame_id(timing.sequence);
+          if (
+            progress.value("status", "") != "running" ||
+            progress.value("input_format", "") !=
+              analysis_decoder.format() ||
+            progress.value("artifact_mode", "") != expected_artifact_mode ||
+            progress.value("processed_count", 0ull) != timing.sequence ||
+            progress.value("source_frame_count", 0ull) != timing.sequence ||
+            progress.value("first_sequence", 0ull) != 1 ||
+            progress.value("last_completed_sequence", 0ull) !=
+              timing.sequence ||
+            progress.value("last_frame_id", "") != expected_frame_id ||
+            progress.value("last_completed_frame_id", "") !=
+              expected_frame_id
+          ) {
+            throw worker_error("causal pass global sequence ACK mismatch");
           }
           if (timing.sequence == 1) {
             trace_header = trace.read_header(analysis);
-            if (spec.operation != "convert") {
-              initialize_planner(std::numeric_limits<std::uint64_t>::max());
-            }
+            initialize_scene_tracker();
           }
-          std::uint64_t current_pair_bytes = 0;
-          if (spec.operation == "convert") {
-            const auto contract = parse_cache_contract(
-              cache,
-              timing.sequence,
-              media
-            );
-            current_pair_bytes = checked_byte_sum(
-              contract.depth_bytes,
-              contract.state_bytes,
-              "depth/state pair"
-            );
-            if (!pair_bytes) {
-              pair_bytes = current_pair_bytes;
-              sbs_width = contract.sbs_width;
-              sbs_height = contract.sbs_height;
-              initialize_planner(analysis_open_cache_limit(
-                spec.scene_cache_hard_cap_bytes,
-                current_source_raster_bytes,
-                current_pair_bytes
-              ));
-            } else if (*pair_bytes != current_pair_bytes || sbs_width != contract.sbs_width || sbs_height != contract.sbs_height) {
-              throw worker_error(
-                "fixed-resolution scene-cache pair/geometry changed mid-clip"
-              );
-            }
-            const auto after_source =
-              spec.scene_cache_hard_cap_bytes - current_source_raster_bytes;
-            if (current_pair_bytes > after_source || live_cache_bytes > after_source - current_pair_bytes) {
-              throw worker_error(
-                "scene cache plus live analysis raster exceeded the hard cap"
-              );
-            }
-            live_cache_bytes += current_pair_bytes;
-            peak_cache_bytes = std::max(peak_cache_bytes, live_cache_bytes);
-          }
-          const auto cache_plus_analysis_raster = checked_byte_sum(
-            live_cache_bytes,
-            current_source_raster_bytes,
-            "analysis cache plus raster"
-          );
-          if (cache_plus_analysis_raster > spec.scene_cache_hard_cap_bytes) {
-            throw worker_error(
-              "analysis cache plus live raster exceeded the hard cap"
-            );
-          }
-          peak_cache_plus_raster_bytes = std::max(
-            peak_cache_plus_raster_bytes,
-            cache_plus_analysis_raster
-          );
           const auto trace_value = trace.read_frame(analysis, timing.sequence);
-          remove_file_checked(source);
-          if (!planner) {
-            throw worker_error("scene planner was not initialized");
+
+          std::uint64_t current_live_raster_bytes =
+            current_source_raster_bytes;
+          if (converting) {
+            const auto progress_sbs_width =
+              progress.value("sbs_width", 0u);
+            const auto progress_sbs_height =
+              progress.value("sbs_height", 0u);
+            if (progress.value("sbs_frame_count", 0ull) != timing.sequence ||
+                progress_sbs_width == 0 || progress_sbs_height == 0) {
+              throw worker_error(
+                "conversion ACK lacks its direct SBS geometry/frame"
+              );
+            }
+            if (timing.sequence == 1) {
+              sbs_width = progress_sbs_width;
+              sbs_height = progress_sbs_height;
+            } else if (sbs_width != progress_sbs_width ||
+                       sbs_height != progress_sbs_height) {
+              throw worker_error(
+                "direct SBS geometry changed during conversion"
+              );
+            }
+            const auto extension =
+              media.color == media_color_e::sdr ? "png" : "pfm";
+            const auto sbs = analysis_output /
+              ("sbs_" + frame_id(timing.sequence) + "." + extension);
+            if (!fs::is_regular_file(sbs, ec) || ec ||
+                fs::file_size(sbs, ec) == 0 || ec) {
+              throw worker_error(
+                "conversion ACK lacks its atomic direct SBS frame"
+              );
+            }
+            const auto raw_sbs_size = fs::file_size(sbs, ec);
+            if (ec || raw_sbs_size > std::numeric_limits<std::uint64_t>::max()) {
+              throw worker_error("cannot measure the direct SBS raster");
+            }
+            current_live_raster_bytes = checked_byte_sum(
+              current_source_raster_bytes,
+              static_cast<std::uint64_t>(raw_sbs_size),
+              "live source plus direct SBS raster"
+            );
+            if (
+              current_live_raster_bytes >
+              spec.transient_raster_hard_cap_bytes
+            ) {
+              throw worker_error(
+                "live source plus direct SBS raster exceeded the transient raster hard cap"
+              );
+            }
+            if (!conversion_encoder) {
+              conversion_encoder = std::make_unique<whole_clip_encoder_t>(
+                spec,
+                media,
+                work,
+                sbs_width,
+                sbs_height
+              );
+            }
+            conversion_encoder->publish(timing.sequence, sbs);
+            remove_file_checked(sbs);
+          } else if (progress.value("sbs_frame_count", 0ull) != 0 ||
+                     progress.value("sbs_width", 0u) != 0 ||
+                     progress.value("sbs_height", 0u) != 0) {
+            throw worker_error("analysis-only ACK unexpectedly reports SBS output");
           }
-          auto finalized = planner->feed(parse_trace_frame(
+          peak_live_raster_bytes = std::max(
+            peak_live_raster_bytes,
+            current_live_raster_bytes
+          );
+          remove_file_checked(source);
+          if (!scene_tracker) {
+            throw worker_error("causal scene tracker was not initialized");
+          }
+          auto finalized = scene_tracker->feed(parse_trace_frame(
             trace_value,
             timing,
-            media.time_base,
-            current_pair_bytes
+            media.time_base
           ));
           account_contract_records();
-          render_scenes(finalized, timing.sequence);
+          commit_scenes(finalized, timing.sequence);
           publish_progress(
             spec,
-            "analysis",
+            converting ? "convert" : "evaluate",
             timing.sequence,
             &media,
             scenes.size(),
@@ -7630,21 +7318,18 @@ namespace offline_sbs {
         analysis.terminate();
         analysis_decoder.finish();
         trace.finish(media.frames.size());
-        if (!planner) {
-          throw worker_error("scene planner received no frames");
+        if (!scene_tracker) {
+          throw worker_error("causal scene tracker received no frames");
         }
-        auto finalized = planner->finish();
+        auto finalized = scene_tracker->finish();
         account_contract_records();
-        render_scenes(finalized, media.frames.size());
+        commit_scenes(finalized, media.frames.size());
       } catch (const std::exception &exception) {
         if (!analysis_done) {
           publish_producer_failed(analysis_input, exception.what());
         }
         analysis.terminate();
         analysis_decoder.abort();
-        if (render_decoder) {
-          render_decoder->abort();
-        }
         if (conversion_encoder) {
           conversion_encoder->abort(exception.what());
         }
@@ -7665,7 +7350,9 @@ namespace offline_sbs {
           std::string {"invalid analysis whole-clip contract: "} + exception.what()
         );
       }
-      if (typed_analysis_contract.artifact_mode != "adaptive" ||
+      const bool converting = spec.operation == "convert";
+      if (typed_analysis_contract.artifact_mode !=
+            (converting ? "conversion" : "adaptive") ||
           typed_analysis_contract.source_frame_count != media.frames.size() ||
           typed_analysis_contract.source_first_sequence != 1 ||
           typed_analysis_contract.inference_mode != "single-pass-tensorrt" ||
@@ -7673,19 +7360,55 @@ namespace offline_sbs {
           typed_analysis_contract.scheduled_depth_update_count != media.frames.size() ||
           typed_analysis_contract.tensorrt_enqueue_count != media.frames.size()) {
         throw worker_error(
-          "analysis did not attest exactly one TensorRT enqueue per source frame"
+          "causal pass did not attest exactly one TensorRT enqueue per source frame"
         );
       }
-      // Offline conversion runs the production V2 pipeline: the harness must attest the
-      // depth-coordinate V2 live signed-parallax render, not cached scene geometry.
+      // Offline conversion runs the production V2 pipeline directly: the harness must attest
+      // the same live signed-parallax renderer and no scene-cache write/replay state.
       const auto &analysis_runtime = typed_analysis_contract.resolved_runtime;
+      const auto expected_follow_format = analysis_decoder.format();
+      const auto expected_input_frame_format =
+        media.color == media_color_e::sdr ?
+          std::string_view {"sRGB-BMP-WIC"} :
+          std::string_view {"linear-scRGB-f32-pfm"};
       if (
         !analysis_runtime.parallax_v2_render ||
-        !analysis_runtime.parallax_v2_live
+        !analysis_runtime.parallax_v2_live ||
+        analysis_runtime.follow_format.value_or("") !=
+          expected_follow_format ||
+        analysis_runtime.follow_frame_pattern.value_or("") !=
+          "frame_%010d." + expected_follow_format ||
+        analysis_runtime.input_frame_format != expected_input_frame_format ||
+        analysis_runtime.scene_cache_write ||
+        analysis_runtime.scene_cache_replay
       ) {
         throw worker_error(
           "analysis did not attest the depth-coordinate V2 live signed-parallax render"
         );
+      }
+      const auto &direct_sbs = typed_analysis_contract.sbs;
+      const auto output_extension =
+        media.color == media_color_e::sdr ? "png" : "pfm";
+      if (converting) {
+        if (!direct_sbs.enabled ||
+            direct_sbs.frame_count != media.frames.size() ||
+            direct_sbs.width != sbs_width ||
+            direct_sbs.height != sbs_height ||
+            direct_sbs.width != analysis_runtime.output_sbs_width ||
+            direct_sbs.height != analysis_runtime.output_sbs_height ||
+            direct_sbs.file_pattern.value_or("") !=
+              "sbs_<frame-id>." + std::string {output_extension} ||
+            !direct_sbs.atomic_publication ||
+            !analysis_runtime.follow_atomic_sbs_publication) {
+          throw worker_error(
+            "causal conversion did not attest its complete direct SBS stream"
+          );
+        }
+      } else if (direct_sbs.enabled || direct_sbs.frame_count != 0 ||
+                 direct_sbs.width != 0 || direct_sbs.height != 0 ||
+                 direct_sbs.atomic_publication ||
+                 analysis_runtime.follow_atomic_sbs_publication) {
+        throw worker_error("analysis-only pass unexpectedly attested SBS output");
       }
       const auto &trace_config = trace_header.at("config");
       if (
@@ -7719,29 +7442,10 @@ namespace offline_sbs {
         );
       }
       if (spec.operation == "convert") {
-        if (!render_decoder) {
-          throw worker_error("conversion lacks its render decoder");
-        }
-        render_decoder->finish();
         if (!conversion_encoder) {
           throw worker_error("conversion produced no whole-clip encoder");
         }
         conversion_encoder->finish();
-        if (live_cache_bytes != 0) {
-          throw worker_error("scene cache was not empty after final replay");
-        }
-        std::uintmax_t cache_media_files = 0;
-        for (const auto &entry : fs::directory_iterator(cache, ec)) {
-          if (entry.is_regular_file()) {
-            const auto extension = lower(entry.path().extension().string());
-            if (extension == ".r32f" || extension == ".u32") {
-              ++cache_media_files;
-            }
-          }
-        }
-        if (cache_media_files != 0) {
-          throw worker_error("scene cache retained depth/state artifacts");
-        }
         publish_progress(
           spec,
           "mux",
@@ -7838,13 +7542,13 @@ namespace offline_sbs {
       account_contract_records();
       const auto audit = scene_audit_document(
         scenes,
-        planner->boundary_audit(),
+        scene_tracker->boundary_audit(),
         "complete",
-        peak_cache_bytes,
+        0,
         analysis_source_raster_bytes.value_or(0),
         peak_live_raster_bytes,
-        peak_cache_plus_raster_bytes,
-        spec.scene_cache_hard_cap_bytes,
+        peak_live_raster_bytes,
+        spec.transient_raster_hard_cap_bytes,
         timeline_contract
       );
       write_json_atomic_bounded(
@@ -7883,14 +7587,14 @@ namespace offline_sbs {
         },
         .scene_audit_path = path_utf8(spec.result_directory / "scene-audit.json"),
         .analysis_contract = typed_analysis_contract,
-        .replay_contracts = replay_contracts,
+        .replay_contracts = {},
         .cache = {
-          .hard_cap_bytes = spec.scene_cache_hard_cap_bytes,
-          .peak_bytes = peak_cache_bytes,
+          .hard_cap_bytes = spec.transient_raster_hard_cap_bytes,
+          .peak_bytes = 0,
           .analysis_source_raster_bytes = analysis_source_raster_bytes.value_or(0),
           .peak_live_raster_bytes = peak_live_raster_bytes,
-          .peak_cache_plus_raster_bytes = peak_cache_plus_raster_bytes,
-          .remaining_bytes = live_cache_bytes,
+          .peak_cache_plus_raster_bytes = peak_live_raster_bytes,
+          .remaining_bytes = 0,
         },
         .timeline_contract = timeline_contract,
         .staging_identity = staging_identity.is_null() ?

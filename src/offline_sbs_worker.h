@@ -1,11 +1,11 @@
 /**
  * @file src/offline_sbs_worker.h
- * @brief Native, bounded-storage offline SBS conversion worker.
+ * @brief Native causal offline SBS conversion worker.
  *
  * The long-lived Sunshine process launches this entry point as a separate process.  The
  * worker deliberately has no Python dependency: FFprobe establishes an exact source
- * contract, FFmpeg supplies two bounded streaming decoders, and the native SBS harness is
- * used once for analysis and then in cache-replay mode for each finalized scene.
+ * contract, FFmpeg supplies the primary bounded streaming decoder, and the native SBS harness runs
+ * the same causal estimator and renderer used online in one unpaced source-order pass.
  */
 #pragma once
 
@@ -76,8 +76,7 @@ namespace offline_sbs {
     // Set only by read_authenticated_worker_spec(). It is the digest supplied on the
     // trusted parent command line, not a field trusted from the JSON document.
     std::string authenticated_spec_sha256;
-    std::uint64_t scene_cache_hard_cap_bytes = 0;
-    bool allow_administrative_split = false;
+    std::uint64_t transient_raster_hard_cap_bytes = 0;
   };
 
   /**
@@ -99,7 +98,7 @@ namespace offline_sbs {
   /**
    * Validate the native harness's selected-file/full-frame source-scope attestation.
    *
-   * Offline analysis and replay must not observe the active window or use either live
+   * Offline evaluation and conversion must not observe the active window or use either live
    * window-region ROI authority. The worker rejects missing, extended, or contradictory
    * attestations before it can publish a conversion.
    */
@@ -128,16 +127,6 @@ namespace offline_sbs {
   void validate_timeline_equivalence(
     const media_contract_t &source,
     const media_contract_t &actual
-  );
-
-  /**
-   * Return the maximum scene-cache ledger that still leaves exact space for the live
-   * analysis source raster and the next depth/state pair.
-   */
-  std::uint64_t analysis_open_cache_limit(
-    std::uint64_t hard_cap_bytes,
-    std::uint64_t source_raster_bytes,
-    std::uint64_t depth_state_pair_bytes
   );
 
   /**
@@ -199,14 +188,6 @@ namespace offline_sbs {
   std::uint64_t retained_packet_payload_limit_for_test();
   std::size_t child_process_log_byte_limit_for_test();
   std::string bound_child_process_log_for_test(std::string_view bytes);
-  std::filesystem::path replay_scene_log_path_for_test(
-    const std::filesystem::path &work,
-    std::uint64_t scene_id
-  );
-  std::filesystem::path prepare_replay_scene_log_for_test(
-    const std::filesystem::path &work,
-    std::uint64_t scene_id
-  );
   bool can_retain_auxiliary_packets_for_test(
     std::uint64_t retained_packets,
     std::uint64_t additional_packets

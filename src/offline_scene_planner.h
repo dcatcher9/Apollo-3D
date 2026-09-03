@@ -1,6 +1,6 @@
 /**
  * @file src/offline_scene_planner.h
- * @brief Bounded-lookahead scene planning for native offline SBS conversion.
+ * @brief Causal scene epochs derived from the authenticated online cut state.
  */
 #pragma once
 
@@ -15,7 +15,6 @@
 
 namespace offline_sbs {
   inline constexpr std::size_t max_scene_frame_id_bytes = 64;
-  inline constexpr std::size_t default_max_open_scene_frames = 524288;
   // Keep this named C++ policy in lockstep with the production shader's
   // STRUCTURAL_GEOMETRY_CUT_FLOOR. HLSL and C++ cannot consume one common
   // declaration without introducing a generated cross-language contract.
@@ -39,20 +38,16 @@ namespace offline_sbs {
   /**
    * One source-frame sample from the native adaptive trace.
    *
-   * `sequence` is one-based and contiguous. Metrics which were not exported must
-   * remain std::nullopt; a missing diagnostic is deliberately different from a
-   * measured zero. The structureless analysis bit alone does not distinguish
-   * the first held low-structure update from its persistent successor. The
-   * planner therefore recognizes the live structureless geometry exception
-   * only when the producer's geometry-candidate bit or causal hard-cut pulse is
-   * also present. A trace missing those diagnostics can retain its own proposal
-   * conservatively, but cannot prove or relocate that held endpoint offline.
+   * `sequence` is one-based and contiguous. The authenticated hard-cut pulse
+   * and count are authoritative; the exported metrics are retained only for
+   * audit summaries of the causal epoch that the online state already chose.
    */
   struct scene_frame_t {
     std::uint64_t sequence = 0;
     std::string frame_id;
     bool depth_updated = false;
     bool hard_cut_pulse = false;
+    std::uint32_t hard_cut_count = 0;
     std::optional<float> depth_change_fraction;
     std::optional<float> raw_rgb_change_fraction;
     std::optional<float> structural_change_fraction;
@@ -62,17 +57,6 @@ namespace offline_sbs {
     std::uint32_t analysis_flags = 0;
     std::optional<double> pts_seconds;
     std::optional<double> duration_seconds;
-    std::uint64_t cache_bytes = 0;
-  };
-
-  struct scene_planner_config_t {
-    std::size_t lookbehind_depth_updates = 4;
-    std::size_t lookahead_depth_updates = 8;
-    std::size_t duplicate_pulse_distance_updates = 2;
-    std::size_t minimum_scene_frames = 2;
-    std::uint64_t max_open_cache_bytes = 8ull * 1024ull * 1024ull * 1024ull;
-    std::size_t max_open_frames = default_max_open_scene_frames;
-    bool allow_administrative_split = false;
   };
 
   enum class boundary_decision_e {
@@ -132,9 +116,9 @@ namespace offline_sbs {
     scene_evidence_t evidence;
     boundary_audit_t boundary;
     bool ground_truth = false;
-    std::string cut_state_semantics = "causal-production-unrevised";
+    std::string cut_state_semantics = "causal-production-exact";
     std::string known_limit =
-      "offline lookahead revises cache/replay boundaries only; V2 geometry remains unchanged";
+      "diagnostic scene epochs only; rendering is committed causally per source frame";
   };
 
   class scene_plan_error: public std::runtime_error {
@@ -142,90 +126,37 @@ namespace offline_sbs {
     using std::runtime_error::runtime_error;
   };
 
-  class scene_cache_budget_error: public scene_plan_error {
-  public:
-    scene_cache_budget_error(
-      std::uint64_t limit_bytes,
-      std::uint64_t live_bytes,
-      std::uint64_t open_start_sequence,
-      std::uint64_t current_sequence
-    );
-
-    std::uint64_t limit_bytes;
-    std::uint64_t live_bytes;
-    std::uint64_t open_start_sequence;
-    std::uint64_t current_sequence;
-  };
-
-  class scene_metadata_budget_error: public scene_plan_error {
-  public:
-    scene_metadata_budget_error(
-      std::size_t limit_frames,
-      std::size_t attempted_frames,
-      std::uint64_t open_start_sequence,
-      std::uint64_t current_sequence
-    );
-
-    std::size_t limit_frames;
-    std::size_t attempted_frames;
-    std::uint64_t open_start_sequence;
-    std::uint64_t current_sequence;
-  };
-
   /**
-   * Delays each causal cut proposal until bounded future depth evidence arrives,
-   * then emits immutable cache/replay boundaries. It never labels its
-   * decisions as ground truth and retains only the unresolved scene.
+   * Builds diagnostic scene epochs from the authenticated production cut state
+   * without revising it. A cut frame starts the new epoch, exactly as the
+   * online camera state does. Only aggregate evidence for the open epoch is
+   * retained.
    */
-  class scene_planner_t {
+  class causal_scene_tracker_t {
   public:
-    explicit scene_planner_t(scene_planner_config_t config);
-    ~scene_planner_t();
-
-    scene_planner_t(const scene_planner_t &) = delete;
-    scene_planner_t &operator=(const scene_planner_t &) = delete;
-    scene_planner_t(scene_planner_t &&) = delete;
-    scene_planner_t &operator=(scene_planner_t &&) = delete;
+    causal_scene_tracker_t() = default;
 
     std::vector<scene_plan_t> feed(scene_frame_t frame);
     std::vector<scene_plan_t> finish();
 
-    [[nodiscard]] std::uint64_t open_cache_bytes() const;
-    [[nodiscard]] std::size_t open_frame_count() const;
-    [[nodiscard]] std::uint64_t open_start_sequence() const;
-    [[nodiscard]] std::size_t pending_proposal_count() const;
     [[nodiscard]] const std::vector<boundary_audit_t> &boundary_audit() const;
 
   private:
-    struct tracked_frame_t;
-    struct proposal_cluster_t;
-
-    scene_planner_config_t config_;
-    std::vector<tracked_frame_t> frames_;
-    std::vector<proposal_cluster_t> pending_;
     std::vector<boundary_audit_t> boundary_audit_;
+    std::optional<scene_frame_t> first_frame_;
+    std::optional<scene_frame_t> last_frame_;
     std::uint64_t next_sequence_ = 1;
-    std::int64_t depth_update_ordinal_ = -1;
-    std::optional<double> timeline_origin_seconds_;
-    std::optional<double> last_depth_pts_seconds_;
     std::uint64_t scene_number_ = 0;
     std::uint64_t semantic_scene_number_ = 1;
-    std::uint64_t open_cache_bytes_ = 0;
+    std::size_t frame_count_ = 0;
+    std::size_t depth_update_count_ = 0;
+    std::size_t appearance_veto_count_ = 0;
+    std::optional<float> depth_change_max_;
+    std::uint32_t previous_hard_cut_count_ = 0;
     bool closed_ = false;
 
-    void add_proposal(const tracked_frame_t &frame);
-    std::vector<scene_plan_t> resolve_mature(bool eof);
-    std::optional<scene_plan_t> resolve_cluster(
-      const proposal_cluster_t &cluster,
-      bool truncated,
-      bool budget_forced = false
-    );
-    std::vector<scene_plan_t> enforce_budget();
-    scene_plan_t finalize_prefix(
-      std::size_t prefix_count,
-      boundary_audit_t boundary,
-      bool increment_semantic_scene = true
-    );
+    void append(scene_frame_t frame);
+    scene_plan_t finalize_open(boundary_audit_t boundary);
   };
 
   const char *boundary_decision_name(boundary_decision_e decision);

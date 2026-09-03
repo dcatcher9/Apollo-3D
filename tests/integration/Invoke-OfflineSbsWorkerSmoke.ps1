@@ -6,8 +6,8 @@ Runs the production native offline-SBS worker end to end on a deterministic loca
 This is an opt-in GPU integration smoke test. It creates all artifacts below the repository's
 .offline-sbs-smoke directory, authenticates the exact worker specification with SHA-256, invokes
 the same sunshine.exe --offline-sbs-worker entry point used by the job manager, and verifies the
-worker result, full scene audit, compressed Matroska output, stream preservation, timestamps,
-attachment bytes, rejected-flash lookahead, an accepted semantic cut, color tags, bit depth, and
+worker result, full causal scene audit, compressed Matroska output, stream preservation, timestamps,
+attachment bytes, exact causal pulse/scene propagation, online flash-veto behavior, color tags, bit depth, and
 failed-job cleanup. The default fixture is SDR. Use -FixtureColor pq or -FixtureColor hlg to opt
 into a tagged 10-bit BT.2020 HDR fixture; both HEVC and AV1 remain selectable with -Codec.
 
@@ -59,7 +59,7 @@ param(
   [string] $FixtureColor = 'sdr',
 
   [ValidateRange(16, 4096)]
-  [int] $SceneCacheMiB = 64,
+  [int] $TransientRasterMiB = 64,
 
   [switch] $KeepArtifacts
 )
@@ -420,8 +420,11 @@ function New-WorkerSpec {
     [Parameter(Mandatory = $true)]
     [string] $InputPath,
 
-    [Parameter(Mandatory = $true)]
-    [string] $StagingOutput,
+    [AllowNull()]
+    [string] $StagingOutput = $null,
+
+    [ValidateSet('evaluate', 'convert')]
+    [string] $Operation = 'convert',
 
     [Parameter(Mandatory = $true)]
     [string] $JobId,
@@ -440,15 +443,15 @@ function New-WorkerSpec {
   New-Item -ItemType Directory -Path $JobDirectory -Force | Out-Null
 
   $spec = [ordered] @{
-    schema = 1
+    schema = 2
     job_id = $JobId
-    operation = 'convert'
+    operation = $Operation
     input_path = $InputPath
     job_directory = $JobDirectory
     result_directory = $resultDirectory
     progress_path = $progressPath
     result_path = $resultPath
-    staging_output = $StagingOutput
+    staging_output = if ($Operation -eq 'convert') { $StagingOutput } else { $null }
     sunshine = [ordered] @{
       executable = $script:SunshinePath
       config = $script:ConfigPath
@@ -461,14 +464,16 @@ function New-WorkerSpec {
       path = $script:FfprobePath
       version = $FfprobeVersion
     }
-    scene_cache = [ordered] @{
-      hard_cap_bytes = ([long] $SceneCacheMiB * 1024L * 1024L)
-      budget_policy = 'fail'
+    transient_raster = [ordered] @{
+      hard_cap_bytes = ([long] $TransientRasterMiB * 1024L * 1024L)
     }
     codec = $Codec
-    planner = [ordered] @{
-      implementation = 'native-offline-scene-planner'
-      scene_plan_contract = 'scene-plan-v2'
+    pipeline = [ordered] @{
+      implementation = 'native-causal-single-pass'
+      cut_state = 'authenticated-online-pulse-count'
+      lookahead = $false
+      scene_cache = $false
+      replay = $false
     }
     python_dependency = $false
   }
@@ -483,7 +488,9 @@ function New-WorkerSpec {
     ResultPath = $resultPath
     ProgressPath = $progressPath
     ResultDirectory = $resultDirectory
-    StagingOutput = $StagingOutput
+    JobDirectory = $JobDirectory
+    StagingOutput = if ($Operation -eq 'convert') { $StagingOutput } else { $null }
+    Operation = $Operation
     JobId = $JobId
   }
 }
@@ -772,7 +779,7 @@ title=Smoke chapter
     -Arguments @(
       '-hide_banner', '-loglevel', 'error', '-y',
       '-f', 'lavfi',
-      '-i', 'testsrc2=size=320x180:rate=1:duration=1',
+      '-i', 'testsrc2=size=1280x720:rate=1:duration=1',
       '-frames:v', '1',
       '-pix_fmt', 'bgr24',
       $sceneAPath
@@ -796,7 +803,7 @@ title=Smoke chapter
     -Arguments @(
       '-hide_banner', '-loglevel', 'error', '-y',
       '-f', 'lavfi',
-      '-i', 'smptehdbars=size=320x180:rate=1:duration=1',
+      '-i', 'smptehdbars=size=1280x720:rate=1:duration=1',
       '-frames:v', '1',
       '-pix_fmt', 'bgr24',
       $sceneBPath
@@ -923,7 +930,7 @@ title=Smoke chapter
     -Arguments @(
       '-hide_banner', '-loglevel', 'error',
       '-f', 'lavfi',
-      '-i', 'color=size=320x180:rate=1:duration=1',
+      '-i', 'color=size=1280x720:rate=1:duration=1',
       '-frames:v', '1',
       '-c:v', $Codec,
       '-pix_fmt', $nvencPixelFormat,
@@ -1020,7 +1027,7 @@ title=Smoke chapter
   }
 
   $result = Read-JsonFile -Path $successWorker.ResultPath
-  Assert-Contract ($result.schema -eq 1) 'worker result schema changed'
+  Assert-Contract ($result.schema -eq 2) 'worker result schema changed'
   Assert-Contract ($result.status -eq 'complete') 'worker result is not complete'
   Assert-Contract ($result.job_id -eq $successWorker.JobId) 'worker result job identity changed'
   Assert-Contract ($result.operation -eq 'convert') 'worker result operation changed'
@@ -1030,22 +1037,94 @@ title=Smoke chapter
   Assert-Contract ([long] $result.source.frame_count -eq 16) 'worker source frame count changed'
   Assert-Contract ([long] $result.scene_count -gt 0) 'worker committed no scenes'
   Assert-Contract (@($result.scenes).Count -eq [long] $result.scene_count) 'worker result scene count is inconsistent'
-  Assert-Contract (@($result.replay_contracts).Count -eq [long] $result.scene_count) 'worker replay contract count is inconsistent'
-  Assert-Contract ([long] $result.cache.remaining_bytes -eq 0) 'worker retained live scene-cache bytes'
+  Assert-Contract (@($result.replay_contracts).Count -eq 0) 'direct conversion unexpectedly published replay contracts'
+  Assert-Contract ([long] $result.cache.peak_bytes -eq 0) 'direct conversion unexpectedly wrote a scene cache'
+  Assert-Contract ([long] $result.cache.remaining_bytes -eq 0) 'direct conversion retained cached frame bytes'
   Assert-Contract (
     [long] $result.cache.peak_cache_plus_raster_bytes -le
     [long] $result.cache.hard_cap_bytes
-  ) 'worker exceeded the exact scene-cache-plus-raster hard cap'
+  ) 'worker exceeded the exact transient-raster hard cap'
+
+  $analysisContract = $result.analysis_contract
+  $runtimeContract = $analysisContract.resolved_runtime
+  $sbsContract = $analysisContract.sbs
+  Assert-Contract ($analysisContract.artifact_mode -eq 'conversion') 'worker did not run the direct conversion artifact path'
+  Assert-Contract ($analysisContract.inference_mode -eq 'single-pass-tensorrt') 'worker did not attest one native conversion pass'
+  Assert-Contract ($analysisContract.depth_inference_enabled -eq $true) 'direct conversion disabled online depth inference'
   Assert-Contract (
-    [long] $result.analysis_contract.tensorrt_enqueue_count -eq 16
-  ) 'analysis did not attest exactly one TensorRT enqueue per frame'
+    [long] $analysisContract.tensorrt_enqueue_count -eq 16
+  ) 'conversion did not attest exactly one TensorRT enqueue per source frame'
   Assert-Contract (
-    [long] $result.analysis_contract.scheduled_depth_update_count -eq 16
-  ) 'analysis did not schedule one depth update per frame'
-  foreach ($replay in @($result.replay_contracts)) {
-    Assert-Contract ($replay.depth_inference_enabled -eq $false) "scene $($replay.scene_id) replay enabled depth inference"
-    Assert-Contract ([long] $replay.tensorrt_enqueue_count -eq 0) "scene $($replay.scene_id) replay enqueued TensorRT"
-    Assert-Contract ([long] $replay.scheduled_depth_update_count -eq 0) "scene $($replay.scene_id) replay scheduled depth inference"
+    [long] $analysisContract.scheduled_depth_update_count -eq 16
+  ) 'conversion did not schedule one online depth update per source frame'
+  Assert-Contract ([long] $analysisContract.source_frame_count -eq 16) 'conversion contract source count changed'
+  Assert-Contract (
+    $runtimeContract.follow_mode -eq $true -and
+    [long] $runtimeContract.follow_poll_interval_ms -eq 0 -and
+    [long] $runtimeContract.follow_count_bound -eq 16 -and
+    [long] $runtimeContract.follow_producer_frame_count -eq 16 -and
+    [long] $runtimeContract.follow_first_sequence -eq 1 -and
+    $runtimeContract.follow_native_input_deletion -eq $false
+  ) 'direct conversion is not using the event-driven unpaced follow path'
+  $expectedFollowFormat = 'bmp'
+  $expectedInputFrameFormat = 'sRGB-BMP-WIC'
+  if ($fixtureIsHdr) {
+    $expectedFollowFormat = 'pfm'
+    $expectedInputFrameFormat = 'linear-scRGB-f32-pfm'
+  }
+  Assert-Contract (
+    $runtimeContract.follow_format -eq $expectedFollowFormat -and
+    $runtimeContract.follow_frame_pattern -eq
+      "frame_%010d.$expectedFollowFormat" -and
+    $runtimeContract.input_frame_format -eq $expectedInputFrameFormat
+  ) 'direct conversion follow raster contract disagrees with the source color mode'
+  Assert-Contract (
+    $runtimeContract.scene_cache_write -eq $false -and
+    $runtimeContract.scene_cache_replay -eq $false -and
+    $null -eq $runtimeContract.scene_cache_contract_schema -and
+    $null -eq $runtimeContract.scene_plan_schema -and
+    $null -eq $runtimeContract.scene_plan_version -and
+    $null -eq $runtimeContract.scene_start_sequence -and
+    $null -eq $runtimeContract.scene_end_sequence_exclusive -and
+    $null -eq $runtimeContract.scene_cache_status_at_replay_start -and
+    $null -eq $runtimeContract.scene_cache_processed_count_at_replay_start
+  ) 'direct conversion unexpectedly enabled a cache, plan, or replay runtime'
+  Assert-Contract (
+    $sbsContract.enabled -eq $true -and
+    [long] $sbsContract.frame_count -eq 16 -and
+    $sbsContract.atomic_publication -eq $true
+  ) 'direct conversion SBS count or atomic-publication contract changed'
+  Assert-Contract (
+    [long] $sbsContract.width -gt 0 -and
+    [long] $sbsContract.height -gt 0 -and
+    [long] $sbsContract.width -eq [long] $runtimeContract.output_sbs_width -and
+    [long] $sbsContract.height -eq [long] $runtimeContract.output_sbs_height -and
+    [long] $runtimeContract.output_sbs_width -eq
+      (2L * [long] $runtimeContract.output_eye_width) -and
+    [long] $runtimeContract.output_sbs_height -eq
+      [long] $runtimeContract.output_eye_height
+  ) 'direct conversion SBS geometry disagrees with its resolved online renderer geometry'
+  Assert-Contract (
+    $sbsContract.frame_format -eq $runtimeContract.output_frame_format -and
+    $sbsContract.transfer -eq $runtimeContract.output_transfer -and
+    $sbsContract.primaries -eq $runtimeContract.output_primaries -and
+    $sbsContract.row_order -eq $runtimeContract.output_row_order -and
+    $runtimeContract.follow_atomic_sbs_publication -eq $true
+  ) 'direct conversion SBS media contract disagrees with its native runtime'
+
+  $nativeWork = Join-Path $successWorker.JobDirectory 'native-work'
+  Assert-Contract (
+    Test-Path -LiteralPath (Join-Path $nativeWork 'logs\analysis-harness.log') -PathType Leaf
+  ) 'direct conversion did not leave its single analysis/conversion harness log'
+  foreach ($forbiddenPath in @(
+      (Join-Path $nativeWork 'scene-cache'),
+      (Join-Path $nativeWork 'render-input'),
+      (Join-Path $nativeWork 'render-output'),
+      (Join-Path $nativeWork 'logs\render-current-scene.log')
+    )) {
+    Assert-Contract (-not (Test-Path -LiteralPath $forbiddenPath)) (
+      "direct conversion unexpectedly created '$forbiddenPath'"
+    )
   }
   # The direct-worker smoke has no manager-held root pin. Its enclosing random
   # workspace is removed in this script's guarded finally block.
@@ -1056,78 +1135,91 @@ title=Smoke chapter
 
   $auditPath = Join-Path $successWorker.ResultDirectory 'scene-audit.json'
   $audit = Read-JsonFile -Path $auditPath
-  Assert-Contract ($audit.schema -eq 2) 'scene audit schema changed'
-  Assert-Contract ($audit.version -eq 'whole-clip-scene-audit-v2') 'scene audit version changed'
+  Assert-Contract ($audit.schema -eq 3) 'scene audit schema changed'
+  Assert-Contract ($audit.version -eq 'whole-clip-scene-audit-v3') 'scene audit version changed'
   Assert-Contract ($audit.status -eq 'complete') 'scene audit is not complete'
   Assert-Contract (@($audit.scenes).Count -eq [long] $result.scene_count) 'full scene audit count differs from result'
   Assert-Contract ($audit.claims.ground_truth -eq $false) 'scene audit incorrectly claims ground truth'
   Assert-Contract ($audit.claims.best_parameters -eq $false) 'scene audit incorrectly claims globally best parameters'
   Assert-Contract (
+    $audit.policy.implementation -eq 'native-causal-scene-tracker' -and
+    $audit.policy.version -eq 'causal-scene-epochs-v1' -and
+    $audit.policy.lookahead -eq $false -and
+    $audit.policy.boundary_only -eq $true -and
+    $audit.policy.python_dependency -eq $false
+  ) 'scene audit is not the causal online hard-cut epoch policy'
+  Assert-Contract ([long] $audit.cache.peak_bytes -eq 0) 'scene audit unexpectedly reports cached frames'
+  Assert-Contract (
     [long] $audit.cache.peak_cache_plus_raster_bytes -le
     [long] $audit.cache.hard_cap_bytes
-  ) 'scene audit reports a hard-cap violation'
+  ) 'scene audit reports a transient-raster hard-cap violation'
   $boundaryRevisions = @($audit.boundary_revisions)
-  $rejectedFlashes = @($boundaryRevisions | Where-Object {
-      $_.decision -eq 'rejected_supported_flash_return' -and
-      $_.accepted -eq $false -and
-      $_.semantic_cut -eq $false
-    })
-  $appearanceVetoCount = 0L
-  foreach ($scene in @($audit.scenes)) {
-    $appearanceVetoCount += [long] $scene.evidence.appearance_veto_count
-  }
+  Assert-Contract (
+    $boundaryRevisions.Count -eq ([long] $result.scene_count - 1L)
+  ) 'causal scene count does not match the authenticated online pulse count'
   $falseFlashCuts = @($boundaryRevisions | Where-Object {
       $_.accepted -eq $true -and
       $_.final_sequence -ge 9 -and $_.final_sequence -le 11
     })
   Assert-Contract (
     $falseFlashCuts.Count -eq 0
-  ) 'one-frame exposure flash created a semantic scene boundary'
-  # The production detector normally vetoes both A->flash and flash->A before a
-  # cut pulse reaches the offline planner. The planner's explicit rejected
-  # decision remains a valid fallback for a causal pulse from another detector.
+  ) 'online hard-cut state treated the one-frame exposure flash as a scene boundary'
+  $causalScenes = @($audit.scenes)
+  $appearanceVetoCount = 0L
+  foreach ($scene in $causalScenes) {
+    $appearanceVetoCount += [long] $scene.evidence.appearance_veto_count
+  }
   Assert-Contract (
-    $rejectedFlashes.Count -ge 1 -or $appearanceVetoCount -ge 2
-  ) 'scene audit did not attest the two-sided exposure-flash veto'
-  $acceptedSemanticCuts = @($boundaryRevisions | Where-Object {
-      $_.accepted -eq $true -and
-      $_.semantic_cut -eq $true -and
-      $_.final_sequence -eq 12
-    })
-  Assert-Contract (
-    $acceptedSemanticCuts.Count -eq 1
-  ) 'scene audit did not accept the later deterministic semantic cut'
-  Assert-Contract (
-    @($boundaryRevisions | Where-Object {
-        $_.accepted -eq $true -and $_.semantic_cut -eq $true
-      }).Count -eq 1
-  ) 'scene audit accepted an extra semantic boundary'
-  Assert-Contract (
-    [long] $result.scene_count -eq 2
-  ) 'accepted semantic cut did not produce exactly two planned scenes'
-  $plannedScenes = @($audit.scenes)
-  Assert-Contract (
-    [long] $plannedScenes[0].start_sequence -eq 1 -and
-    [long] $plannedScenes[0].end_sequence_exclusive -eq 12 -and
-    [long] $plannedScenes[0].frame_count -eq 11
-  ) 'first planned scene does not cover exact A/flash/A prefix [1,12)'
-  Assert-Contract (
-    [long] $plannedScenes[1].start_sequence -eq 12 -and
-    [long] $plannedScenes[1].end_sequence_exclusive -eq 17 -and
-    [long] $plannedScenes[1].frame_count -eq 5
-  ) 'second planned scene does not cover exact B suffix [12,17)'
+    $appearanceVetoCount -gt 0
+  ) 'deterministic flash fixture did not exercise the online appearance-veto path'
+  $expectedSceneStart = 1L
+  for ($sceneIndex = 0; $sceneIndex -lt $causalScenes.Count; ++$sceneIndex) {
+    $scene = $causalScenes[$sceneIndex]
+    $terminalScene = $sceneIndex -eq ($causalScenes.Count - 1)
+    Assert-Contract (
+      [long] $scene.scene_id -eq ($sceneIndex + 1L) -and
+      [long] $scene.start_sequence -eq $expectedSceneStart -and
+      [long] $scene.end_sequence_exclusive -eq
+        ([long] $scene.start_sequence + [long] $scene.frame_count) -and
+      [long] $scene.cache_bytes -eq 0 -and
+      $scene.cut_state_semantics -eq 'causal-production-exact'
+    ) "causal scene $($sceneIndex + 1) is not a contiguous zero-cache online epoch"
+    if ($terminalScene) {
+      Assert-Contract (
+        [long] $scene.end_sequence_exclusive -eq 17 -and
+        $scene.boundary.accepted -eq $true -and
+        $scene.boundary.semantic_cut -eq $false -and
+        $scene.boundary.decision -eq 'end_of_stream'
+      ) 'final causal scene does not close exactly at source EOF'
+    } else {
+      $pulse = $boundaryRevisions[$sceneIndex]
+      Assert-Contract (
+        $scene.boundary.accepted -eq $true -and
+        $scene.boundary.semantic_cut -eq $true -and
+        $scene.boundary.decision -eq 'confirmed' -and
+        [long] $scene.boundary.final_sequence -eq
+          [long] $scene.end_sequence_exclusive -and
+        $pulse.accepted -eq $true -and
+        $pulse.semantic_cut -eq $true -and
+        $pulse.decision -eq 'confirmed' -and
+        [long] $pulse.final_sequence -eq
+          [long] $scene.end_sequence_exclusive
+      ) "causal scene $($sceneIndex + 1) does not end at its exact online hard-cut pulse"
+    }
+    $expectedSceneStart = [long] $scene.end_sequence_exclusive
+  }
 
-  $adaptiveContract = $result.analysis_contract.adaptive_state
+  $adaptiveContract = $analysisContract.adaptive_state
   Assert-Contract (
     $adaptiveContract.transport -eq 'atomic-latest-v1' -and
     $adaptiveContract.retained_history -eq $false -and
     [long] $adaptiveContract.frame_count -eq 16
   ) 'offline analysis did not attest its bounded adaptive-state transport'
   Assert-Contract (
-    $result.analysis_contract.PSObject.Properties.Name -notcontains 'cut_state'
+    $analysisContract.PSObject.Properties.Name -notcontains 'cut_state'
   ) 'whole-clip contract still advertises the suppressed cut-state trace'
   $rawAdaptiveHistory = @(Get-ChildItem -LiteralPath (
-      Join-Path $successWorker.JobDirectory 'native-work'
+      $nativeWork
     ) -Recurse -File | Where-Object {
       $_.Name -eq 'adaptive_state.jsonl' -or
       $_.Name -eq 'cut_state.json'
@@ -1136,7 +1228,7 @@ title=Smoke chapter
     $rawAdaptiveHistory.Count -eq 0
   ) 'offline worker retained an unbounded per-frame state history'
   $boundedSnapshots = @(Get-ChildItem -LiteralPath (
-      Join-Path $successWorker.JobDirectory 'native-work'
+      $nativeWork
     ) -Recurse -File | Where-Object {
       $_.Name -eq 'adaptive_state_header.json' -or
       $_.Name -eq 'adaptive_state_frame.json'
@@ -1200,11 +1292,114 @@ title=Smoke chapter
     (Get-FileHash -LiteralPath $extractedAttachment -Algorithm SHA256).Hash
   ) 'output attachment bytes differ from source'
 
+  Write-Host '[offline-sbs-smoke] running authenticated evaluation worker'
+  $evaluationJobDirectory = Join-Path $runRoot 'evaluation-job'
+  $evaluationWorker = New-WorkerSpec `
+    -Operation 'evaluate' `
+    -JobDirectory $evaluationJobDirectory `
+    -InputPath $sourcePath `
+    -JobId ([guid]::NewGuid().ToString()) `
+    -FfmpegVersion $ffmpegVersion `
+    -FfprobeVersion $ffprobeVersion
+  $evaluationRun = Invoke-Worker -Worker $evaluationWorker
+  if ($evaluationRun.ExitCode -ne 0) {
+    $evaluationFailureDetail = ''
+    if (Test-Path -LiteralPath $evaluationWorker.ResultPath -PathType Leaf) {
+      $failedEvaluation = Read-JsonFile -Path $evaluationWorker.ResultPath
+      $evaluationFailureDetail = "`nWorker result: $($failedEvaluation.error)"
+    }
+    throw (
+      "Production offline evaluation failed with exit code $($evaluationRun.ExitCode)." +
+      "$evaluationFailureDetail`n$($evaluationRun.Text)"
+    )
+  }
+
+  $evaluation = Read-JsonFile -Path $evaluationWorker.ResultPath
+  $evaluationAnalysis = $evaluation.analysis_contract
+  $evaluationRuntime = $evaluationAnalysis.resolved_runtime
+  Assert-Contract (
+    $evaluation.schema -eq 2 -and
+    $evaluation.status -eq 'complete' -and
+    $evaluation.operation -eq 'evaluate' -and
+    $evaluation.worker_spec_sha256 -eq $evaluationWorker.SpecSha256 -and
+    $null -eq $evaluation.output -and
+    $null -eq $evaluation.staging_identity
+  ) 'evaluation result identity or output-absence contract changed'
+  Assert-Contract (
+    $evaluationAnalysis.artifact_mode -eq 'adaptive' -and
+    $evaluationAnalysis.inference_mode -eq 'single-pass-tensorrt' -and
+    $evaluationAnalysis.depth_inference_enabled -eq $true -and
+    [long] $evaluationAnalysis.source_frame_count -eq 16 -and
+    [long] $evaluationAnalysis.scheduled_depth_update_count -eq 16 -and
+    [long] $evaluationAnalysis.tensorrt_enqueue_count -eq 16 -and
+    [long] $evaluationAnalysis.observation_timeline.count -eq 16 -and
+    $evaluationAnalysis.observation_timeline.sha256 -eq
+      $analysisContract.observation_timeline.sha256
+  ) 'evaluation did not run the same frame-driven online estimator pass'
+  Assert-Contract (
+    $evaluationRuntime.follow_mode -eq $true -and
+    $evaluationRuntime.follow_format -eq $expectedFollowFormat -and
+    $evaluationRuntime.follow_frame_pattern -eq
+      "frame_%010d.$expectedFollowFormat" -and
+    $evaluationRuntime.input_frame_format -eq $expectedInputFrameFormat -and
+    [long] $evaluationRuntime.follow_poll_interval_ms -eq 0 -and
+    $evaluationRuntime.parallax_v2_render -eq $true -and
+    $evaluationRuntime.parallax_v2_live -eq $true -and
+    $evaluationRuntime.scene_cache_write -eq $false -and
+    $evaluationRuntime.scene_cache_replay -eq $false
+  ) 'evaluation does not share the direct causal online runtime contract'
+  Assert-Contract (
+    $evaluationAnalysis.sbs.enabled -eq $false -and
+    [long] $evaluationAnalysis.sbs.frame_count -eq 0 -and
+    [long] $evaluationAnalysis.sbs.width -eq 0 -and
+    [long] $evaluationAnalysis.sbs.height -eq 0 -and
+    $evaluationAnalysis.sbs.atomic_publication -eq $false -and
+    $evaluationRuntime.follow_atomic_sbs_publication -eq $false -and
+    @($evaluation.replay_contracts).Count -eq 0 -and
+    [long] $evaluation.cache.peak_bytes -eq 0 -and
+    [long] $evaluation.cache.remaining_bytes -eq 0
+  ) 'evaluation unexpectedly produced SBS, cache, or replay artifacts'
+  Assert-Contract (
+    $evaluation.timeline_contract.mode -eq 'evaluation-only' -and
+    $null -eq $evaluation.timeline_contract.max_output_ticks -and
+    -not (Test-Path -LiteralPath (
+      Join-Path $evaluationWorker.ResultDirectory 'timeline-contract.json'
+    ))
+  ) 'evaluation advertised a conversion timeline or mux artifact'
+  Assert-Contract (
+    [long] $evaluation.scene_count -eq [long] $result.scene_count
+  ) 'evaluation and conversion disagreed on causal online scene count'
+  $evaluationScenes = @($evaluation.scenes)
+  Assert-Contract (
+    $evaluationScenes.Count -eq [long] $evaluation.scene_count
+  ) 'evaluation scene array disagrees with its declared causal scene count'
+  for ($sceneIndex = 0; $sceneIndex -lt $causalScenes.Count; ++$sceneIndex) {
+    Assert-Contract (
+      [long] $evaluationScenes[$sceneIndex].start_sequence -eq
+        [long] $causalScenes[$sceneIndex].start_sequence -and
+      [long] $evaluationScenes[$sceneIndex].end_sequence_exclusive -eq
+        [long] $causalScenes[$sceneIndex].end_sequence_exclusive -and
+      $evaluationScenes[$sceneIndex].boundary.decision -eq
+        $causalScenes[$sceneIndex].boundary.decision -and
+      $evaluationScenes[$sceneIndex].boundary.semantic_cut -eq
+        $causalScenes[$sceneIndex].boundary.semantic_cut
+    ) "evaluation and conversion disagreed on causal scene $($sceneIndex + 1)"
+  }
+  $evaluationAudit = Read-JsonFile -Path (
+    Join-Path $evaluationWorker.ResultDirectory 'scene-audit.json'
+  )
+  Assert-Contract (
+    $evaluationAudit.schema -eq 3 -and
+    $evaluationAudit.policy.implementation -eq 'native-causal-scene-tracker' -and
+    $evaluationAudit.policy.lookahead -eq $false -and
+    @($evaluationAudit.scenes).Count -eq [long] $evaluation.scene_count
+  ) 'evaluation scene audit is not the same no-lookahead causal contract'
+
   $succeeded = $true
   Write-Host (
-    "[offline-sbs-smoke] PASS: $($result.scene_count) scene(s), " +
-    "16 frames, $Codec, $($FixtureColor.ToUpperInvariant()), " +
-    'flash rejected, semantic cut accepted, exact authenticated worker contract'
+    "[offline-sbs-smoke] PASS: conversion + evaluation, $($result.scene_count) " +
+    "causal scene(s), 16 frames each, $Codec, $($FixtureColor.ToUpperInvariant()), " +
+    'flash not cut, no lookahead/cache/replay, exact authenticated worker contracts'
   )
 } catch {
   $scriptExitCode = 1

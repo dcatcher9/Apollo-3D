@@ -8,7 +8,7 @@ only the current product, its known limitations, and work that may still be just
 | Path | Geometry owner | Status |
 |---|---|---|
 | Host SBS live stream | Sunshine 3D on Windows/NVIDIA | V2 production pipeline, including a causally attributed foreground window-region ROI route with Chromium-video priority |
-| Offline Host 3D conversion | Sunshine 3D isolated worker | Same V2 geometry with bounded cut lookahead and compressed H.265/AV1 output |
+| Offline Host 3D conversion | Sunshine 3D isolated worker | Same causal V2 estimator/renderer, unpaced source-order processing, and compressed H.265/AV1 output |
 | Client SBS | Moonlight 3D on Android XR | Separate client pipeline; unchanged by Host V2 |
 | Local AR glasses | Sunshine 3D local presenter | Reuses Host V2 without network encode/decode |
 

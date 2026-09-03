@@ -110,7 +110,7 @@ not write per-frame JSON; the offline harness writes its explicit `sbs_perf.json
 ### Offline conversion
 
 The Web UI conversion path uses an in-process job manager and an isolated `sunshine.exe` worker,
-not Python or a separate Windows service. Its media, cache, HDR, cancellation, and packaging
+not Python or a separate Windows service. Its causal one-pass media, HDR, cancellation, and packaging
 contract is in [Offline Host 3D conversion](docs/whole-clip-sbs-pipeline.md). There is no maintained
 second whole-clip policy in `tools/sbsbench`; evaluator utilities remain diagnostics only.
 

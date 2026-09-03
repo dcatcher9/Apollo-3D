@@ -54,20 +54,23 @@ namespace {
     scene.start_sequence = 1;
     scene.end_sequence_exclusive = 11;
     scene.frame_count = 10;
-    scene.cache_bytes = 1024;
+    scene.cache_bytes = 0;
     scene.evidence.source_frame_count = 10;
     scene.evidence.depth_update_count = 10;
     scene.boundary.final_sequence = 11;
     scene.boundary.decision = offline_sbs::boundary_decision_e::end_of_stream;
     scene.boundary.reason = "end of stream";
     scene.boundary.accepted = true;
+    scene.cut_state_semantics = "causal-production-exact";
+    scene.known_limit =
+      "diagnostic scene epochs only; rendering is committed causally per source frame";
     return offline_sbs::wire::to_json(
       offline_sbs::wire::scene_audit_contract_t {
         .status = std::string {status},
-        .peak_cache_bytes = 1024,
+        .peak_cache_bytes = 0,
         .analysis_source_raster_bytes = 256,
         .peak_live_raster_bytes = 128,
-        .peak_cache_plus_raster_bytes = 1152,
+        .peak_cache_plus_raster_bytes = 256,
         .hard_cap_bytes = 2048,
         .timeline_contract = {{"mode", "evaluation-only"}},
         .scenes = {scene},
@@ -267,6 +270,15 @@ TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
   ASSERT_EQ(persisted["scene_decisions"].size(), 2u);
   EXPECT_EQ(persisted["scene_decisions"][0]["end_sequence_exclusive"], 7);
   const auto capabilities = service.capabilities();
+  EXPECT_EQ(capabilities["schema"], 2);
+  EXPECT_TRUE(capabilities["pipeline"]["causal_online_logic"].get<bool>());
+  EXPECT_TRUE(
+    capabilities["pipeline"]["single_estimator_renderer_pass"].get<bool>()
+  );
+  EXPECT_FALSE(capabilities["pipeline"]["lookahead"].get<bool>());
+  EXPECT_FALSE(capabilities["pipeline"]["scene_cache"].get<bool>());
+  EXPECT_FALSE(capabilities["pipeline"]["replay"].get<bool>());
+  EXPECT_FALSE(capabilities.contains("scene_cache"));
   EXPECT_EQ(capabilities["output_security"]["location"], "input-directory");
   EXPECT_TRUE(
     capabilities["output_security"]["destination_derived_from_input"]
@@ -332,11 +344,11 @@ TEST(OfflineSbsJob, MissingFormerInputDirectoryDoesNotBlockQuotaAccounting) {
   service.shutdown();
 }
 
-TEST(OfflineSbsJob, PublishesFinalizedSceneDuringReplayAtAnalyzedFrontier) {
+TEST(OfflineSbsJob, PublishesCausalSceneDuringDirectConversion) {
   temporary_tree_t tree;
   const auto input = tree.path / "media" / "source.mkv";
   write_nonempty(input, "source");
-  std::atomic_bool replay_published {false};
+  std::atomic_bool causal_scene_published {false};
   std::atomic_bool release_worker {false};
 
   offline_sbs::job_service_t service {
@@ -345,13 +357,13 @@ TEST(OfflineSbsJob, PublishesFinalizedSceneDuringReplayAtAnalyzedFrontier) {
         const std::stop_token stop,
         const offline_sbs::progress_callback_t &progress) {
       progress({
-        .phase = "analysis",
+        .phase = "convert",
         .processed_frames = 183,
         .total_frames = 185,
         .scene_count = 0,
       });
       progress({
-        .phase = "replay",
+        .phase = "convert",
         .processed_frames = 185,
         .total_frames = 185,
         .scene_count = 1,
@@ -369,7 +381,7 @@ TEST(OfflineSbsJob, PublishesFinalizedSceneDuringReplayAtAnalyzedFrontier) {
           },
         },
       });
-      replay_published = true;
+      causal_scene_published = true;
       while (!release_worker && !stop.stop_requested()) {
         std::this_thread::sleep_for(1ms);
       }
@@ -398,15 +410,16 @@ TEST(OfflineSbsJob, PublishesFinalizedSceneDuringReplayAtAnalyzedFrontier) {
   ASSERT_TRUE(created.ok) << created.error;
 
   const auto deadline = std::chrono::steady_clock::now() + 3s;
-  while (!replay_published && std::chrono::steady_clock::now() < deadline) {
+  while (!causal_scene_published &&
+         std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(1ms);
   }
-  ASSERT_TRUE(replay_published);
+  ASSERT_TRUE(causal_scene_published);
   const auto active = service.get(created.job->id);
   ASSERT_TRUE(active.ok);
   ASSERT_TRUE(active.job);
   EXPECT_EQ(active.job->state, offline_sbs::job_state_e::running);
-  EXPECT_EQ(active.job->progress.phase, "replay");
+  EXPECT_EQ(active.job->progress.phase, "convert");
   EXPECT_EQ(active.job->progress.processed_frames, 185u);
   ASSERT_TRUE(active.job->progress.scene_count);
   EXPECT_EQ(*active.job->progress.scene_count, 1u);
@@ -1436,7 +1449,7 @@ TEST(OfflineSbsJob, ServesOnlyTheBoundedManagerOwnedSceneAudit) {
   write_nonempty(input, "source");
   write_nonempty(
     decoy,
-    R"({"schema":2,"version":"whole-clip-scene-audit-v2","scenes":[{"scene_id":"decoy"}],"boundary_revisions":[]})"
+    R"({"schema":3,"version":"whole-clip-scene-audit-v3","scenes":[{"scene_id":"decoy"}],"boundary_revisions":[]})"
   );
 
   offline_sbs::job_service_t service {
@@ -1503,8 +1516,8 @@ TEST(OfflineSbsJob, ServesOnlyTheBoundedManagerOwnedSceneAudit) {
   write_nonempty(
     managed_audit,
     nlohmann::json {
-      {"schema", 2},
-      {"version", "whole-clip-scene-audit-v2"},
+      {"schema", 3},
+      {"version", "whole-clip-scene-audit-v3"},
       {"status", "complete"},
       {"scenes", nlohmann::json::array({{{"scene_id", "managed"}}})},
       {"boundary_revisions", std::move(excessive_boundaries)},

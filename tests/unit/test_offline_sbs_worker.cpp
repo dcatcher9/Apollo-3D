@@ -55,7 +55,7 @@ namespace {
 
   nlohmann::json worker_spec_json() {
     return {
-      {"schema", 1},
+      {"schema", 2},
       {"job_id", "11111111-2222-3333-4444-555555555555"},
       {"operation", "convert"},
       {"input_path", "C:/media/source.mkv"},
@@ -76,15 +76,17 @@ namespace {
                     {"path", "C:/Program Files/Sunshine 3D/tools/ffprobe.exe"},
                     {"version", "ffprobe 7"},
                   }},
-      {"scene_cache", {
-                        {"hard_cap_bytes", 4ull * 1024ull * 1024ull * 1024ull},
-                        {"budget_policy", "fail"},
-                      }},
+      {"transient_raster", {
+                             {"hard_cap_bytes", 4ull * 1024ull * 1024ull * 1024ull},
+                           }},
       {"codec", "hevc_nvenc"},
-      {"planner", {
-                    {"implementation", "native-offline-scene-planner"},
-                    {"scene_plan_contract", "scene-plan-v2"},
-                  }},
+      {"pipeline", {
+                      {"implementation", "native-causal-single-pass"},
+                      {"cut_state", "authenticated-online-pulse-count"},
+                      {"lookahead", false},
+                      {"scene_cache", false},
+                      {"replay", false},
+                    }},
       {"python_dependency", false},
     };
   }
@@ -280,7 +282,7 @@ TEST(OfflineSbsWorker, TreatsClosedNativeStdoutPipeAsEofBeforeProcessSignals) {
 }
 #endif
 
-TEST(OfflineSbsWorker, ReplayProgressUsesMonotonicAnalyzedFrontier) {
+TEST(OfflineSbsWorker, ConversionUsesOneDirectCausalPass) {
   std::ifstream stream(
     fs::path(SUNSHINE_SOURCE_DIR) / "src/offline_sbs_worker.cpp",
     std::ios::binary
@@ -290,40 +292,86 @@ TEST(OfflineSbsWorker, ReplayProgressUsesMonotonicAnalyzedFrontier) {
     std::istreambuf_iterator<char> {stream},
     std::istreambuf_iterator<char> {},
   };
-  const auto render_begin = source.find("const auto render_scenes = [&](");
-  const auto render_end = source.find("\n      try {", render_begin);
-  ASSERT_NE(render_begin, std::string::npos);
-  ASSERT_NE(render_end, std::string::npos);
-  const auto render = source.substr(render_begin, render_end - render_begin);
+  const auto pass_begin = source.find(
+    "const auto analysis_input = work / \"analysis-input\";"
+  );
+  const auto pass_end = source.find(
+    "wire::worker_result_contract_t result_contract",
+    pass_begin
+  );
+  ASSERT_NE(pass_begin, std::string::npos);
+  ASSERT_NE(pass_end, std::string::npos);
+  const auto direct = source.substr(pass_begin, pass_end - pass_begin);
 
-  const auto frontier_parameter = render.find("analyzed_through_sequence");
-  const auto replay_phase = render.find("\"replay\"");
-  const auto replay_frontier = render.find(
-    "analyzed_through_sequence",
-    replay_phase
+  EXPECT_NE(
+    direct.find("spec.operation == \"convert\" ? \"conversion\" : \"adaptive\""),
+    std::string::npos
   );
-  const auto post_replay_frontier = render.find(
-    "analyzed_through_sequence",
-    replay_frontier + 1
+  EXPECT_NE(direct.find("causal_scene_tracker_t"), std::string::npos);
+  EXPECT_NE(
+    direct.find("conversion_encoder->publish(timing.sequence, sbs)"),
+    std::string::npos
   );
-  ASSERT_NE(frontier_parameter, std::string::npos);
-  ASSERT_NE(replay_phase, std::string::npos);
-  ASSERT_NE(replay_frontier, std::string::npos);
-  ASSERT_NE(post_replay_frontier, std::string::npos);
-  EXPECT_LT(frontier_parameter, replay_phase);
-  EXPECT_LT(replay_phase, replay_frontier);
-  EXPECT_LT(replay_frontier, post_replay_frontier);
-  EXPECT_EQ(render.find("scene.start_sequence - 1"), std::string::npos);
+  EXPECT_NE(direct.find("remove_file_checked(sbs)"), std::string::npos);
+  EXPECT_NE(direct.find("directory_change_watcher_t"), std::string::npos);
+  EXPECT_EQ(direct.find("--scene-cache"), std::string::npos);
+  EXPECT_EQ(direct.find("--render-cache"), std::string::npos);
+  EXPECT_EQ(direct.find("render_decoder"), std::string::npos);
+  EXPECT_EQ(direct.find("render_scenes"), std::string::npos);
+  EXPECT_EQ(direct.find("\"replay\""), std::string::npos);
+  EXPECT_NE(
+    direct.find("commit_scenes(finalized, timing.sequence)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    direct.find("commit_scenes(finalized, media.frames.size())"),
+    std::string::npos
+  );
+}
+
+TEST(OfflineSbsWorker, FollowProgressChecksChildExitBeforeWaitingAgain) {
+  std::ifstream stream(
+    fs::path(SUNSHINE_SOURCE_DIR) / "src/offline_sbs_worker.cpp",
+    std::ios::binary
+  );
+  ASSERT_TRUE(stream);
+  std::string source {
+    std::istreambuf_iterator<char> {stream},
+    std::istreambuf_iterator<char> {},
+  };
+  source.erase(std::remove(source.begin(), source.end(), '\r'), source.end());
+
+  const auto function_begin = source.find("nlohmann::json read_progress(");
+  const auto function_end = source.find(
+    "void publish_producer_done(",
+    function_begin
+  );
+  ASSERT_NE(function_begin, std::string::npos);
+  ASSERT_NE(function_end, std::string::npos);
+  const auto function = source.substr(function_begin, function_end - function_begin);
+
+  const auto schema_failure = function.find(
+    "native harness follow progress has an unexpected schema"
+  );
+  const auto liveness_check = function.find("if (!child.running())");
+  const auto notification_wait = function.find("watcher->wait()");
+  ASSERT_NE(schema_failure, std::string::npos);
+  ASSERT_NE(liveness_check, std::string::npos);
+  ASSERT_NE(notification_wait, std::string::npos);
+  EXPECT_LT(schema_failure, liveness_check);
+  EXPECT_LT(liveness_check, notification_wait);
+
+  // A valid but stale ACK must fall through to the liveness check. In particular, do not
+  // reintroduce the old early continue that could hide a dead harness behind ACK N-1 until the
+  // twelve-hour child timeout.
+  const auto stale_ack_branch = function.find(
+    "value.at(\"processed_count\").get<std::uint64_t>() >= minimum"
+  );
+  ASSERT_NE(stale_ack_branch, std::string::npos);
   EXPECT_EQ(
-    render.find("scene.end_sequence_exclusive - 1"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find("render_scenes(finalized, timing.sequence)"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    source.find("render_scenes(finalized, media.frames.size())"),
+    function.substr(stale_ack_branch, liveness_check - stale_ack_branch).find(
+      "continue;"
+    ),
     std::string::npos
   );
 }
@@ -387,6 +435,16 @@ TEST(OfflineSbsWorker, HeadlessHarnessHasNoForegroundWindowObserver) {
   EXPECT_NE(source.find("offline_full_frame_request"), std::string::npos);
   EXPECT_NE(
     source.find("depth_analysis_authority_e::full_source"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find(
+      "const bool snapshot_source = o.follow || depth_coordinate_v2_gpu_mode;"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source.find("load_png(std::string_view(exact_source_snapshot), img)"),
     std::string::npos
   );
 }
@@ -495,7 +553,10 @@ TEST(OfflineSbsWorker, ParsesNativeSpecAndNeverBuildsPythonCommands) {
   const auto spec = offline_sbs::parse_worker_spec(worker_spec_json());
   EXPECT_EQ(spec.operation, "convert");
   EXPECT_EQ(spec.codec, "hevc_nvenc");
-  EXPECT_FALSE(spec.allow_administrative_split);
+  EXPECT_EQ(
+    spec.transient_raster_hard_cap_bytes,
+    4ull * 1024ull * 1024ull * 1024ull
+  );
 
   const auto media = offline_sbs::parse_ffprobe_contract(sdr_probe());
   const auto probe = offline_sbs::build_ffprobe_command(
@@ -796,57 +857,6 @@ TEST(OfflineSbsWorker, BoundsChildLogsWhilePreservingPrefixAndTail) {
     bounded.find("child-log bytes omitted; showing prefix and tail"),
     std::string::npos
   );
-}
-
-TEST(OfflineSbsWorker, ReusesOneBoundedReplayLogAcrossMaximumSceneCount) {
-  constexpr std::uint64_t max_scene_count = 1920;
-  const fs::path work = fs::path("C:/managed-job/native-work");
-  std::vector<fs::path> paths;
-  paths.reserve(max_scene_count);
-  for (std::uint64_t scene_id = 1; scene_id <= max_scene_count; ++scene_id) {
-    paths.push_back(
-      offline_sbs::replay_scene_log_path_for_test(work, scene_id)
-    );
-  }
-  std::ranges::sort(paths);
-  const auto distinct_end = std::ranges::unique(paths).begin();
-  EXPECT_EQ(std::distance(paths.begin(), distinct_end), 1)
-    << "Serial scene replay must retain O(1), not O(scene_count), child logs";
-  EXPECT_EQ(
-    paths.front(),
-    work / "logs" / "render-current-scene.log"
-  );
-}
-
-TEST(OfflineSbsWorker, ClearsStaleReplayLogBeforeStartingTheNextScene) {
-  const auto root =
-    fs::temp_directory_path() /
-    (
-      "offline-sbs-replay-log-" +
-      std::to_string(
-        std::chrono::steady_clock::now().time_since_epoch().count()
-      )
-    );
-  const auto work = root / "native-work";
-  const auto stale_log =
-    offline_sbs::replay_scene_log_path_for_test(work, 41);
-  std::error_code ec;
-  fs::remove_all(root, ec);
-  fs::create_directories(stale_log.parent_path());
-  {
-    std::ofstream output(stale_log, std::ios::binary | std::ios::trunc);
-    ASSERT_TRUE(output.is_open());
-    output << "previous scene evidence";
-  }
-  ASSERT_TRUE(fs::exists(stale_log));
-
-  EXPECT_EQ(
-    offline_sbs::prepare_replay_scene_log_for_test(work, 42),
-    stale_log
-  );
-  EXPECT_FALSE(fs::exists(stale_log));
-
-  fs::remove_all(root, ec);
 }
 
 TEST(OfflineSbsWorker, StreamsHighPacketCountWithoutRetainingJsonDom) {
@@ -1288,21 +1298,6 @@ TEST(OfflineSbsWorker, RejectsPresentationSpansLargerThanInt64) {
 
   EXPECT_THROW(
     offline_sbs::parse_ffprobe_contract(extreme),
-    std::runtime_error
-  );
-}
-
-TEST(OfflineSbsWorker, ReservesExactAnalysisRasterAndNextCachePair) {
-  EXPECT_EQ(
-    offline_sbs::analysis_open_cache_limit(1000, 200, 100),
-    700
-  );
-  EXPECT_THROW(
-    offline_sbs::analysis_open_cache_limit(399, 200, 100),
-    std::runtime_error
-  );
-  EXPECT_THROW(
-    offline_sbs::analysis_open_cache_limit(1000, 0, 100),
     std::runtime_error
   );
 }

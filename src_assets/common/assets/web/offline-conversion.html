@@ -14,8 +14,9 @@
         <p class="apollo-eyebrow">Offline Host SBS</p>
         <h1>Offline 3D Conversion</h1>
         <p class="apollo-page-intro">
-          Analyze one video with scene-level lookahead, or convert it with a bounded open-scene
-          cache. Conversion writes compressed video; neither mode materializes a full PNG clip.
+          Analyze or convert with the same causal Host SBS estimator, camera, cut detection,
+          conditioning, and renderer used online. Offline work is not playback-paced: frames run
+          in source order as fast as the decoder, GPU, and encoder permit.
         </p>
       </div>
       <span
@@ -154,7 +155,7 @@
                   value="convert">
                 <span class="offline-codec-copy">
                   <strong>Convert video</strong>
-                  <small>Analyze each scene, then encode a side-by-side 3D video</small>
+                  <small>Run the causal production pipeline once and encode each SBS frame</small>
                 </span>
                 <span class="badge text-bg-primary">Recommended</span>
               </label>
@@ -169,7 +170,7 @@
                   value="evaluate">
                 <span class="offline-codec-copy">
                   <strong>Analyze only</strong>
-                  <small>Inspect scene cuts and adaptive parameters without encoding video</small>
+                  <small>Inspect the same causal cut and adaptive state without encoding video</small>
                 </span>
               </label>
             </div>
@@ -300,54 +301,6 @@
             </div>
           </fieldset>
 
-          <div v-if="form.operation === 'convert'" class="offline-form-row">
-            <div>
-              <label class="form-label" for="offlineCacheBudget">Open-scene cache</label>
-              <div class="input-group">
-                <input
-                  id="offlineCacheBudget"
-                  v-model.number="form.sceneCacheGiB"
-                  class="form-control"
-                  type="number"
-                  min="1"
-                  max="64"
-                  step="1"
-                  aria-describedby="offlineCacheBudgetHelp"
-                  required>
-                <span class="input-group-text">GiB</span>
-              </div>
-              <div id="offlineCacheBudgetHelp" class="form-text">
-                Stores processed depth and render state until a scene is committed.
-              </div>
-            </div>
-
-            <div>
-              <label class="form-label" for="offlineBudgetPolicy">If the cache fills</label>
-              <select
-                id="offlineBudgetPolicy"
-                v-model="form.cacheBudgetPolicy"
-                class="form-select"
-                aria-describedby="offlineBudgetPolicyHelp">
-                <option value="fail">Stop safely (recommended)</option>
-                <option value="split">Administrative split</option>
-              </select>
-              <div id="offlineBudgetPolicyHelp" class="form-text">
-                Fail preserves scene semantics. Split bounds storage but is explicitly non-semantic.
-              </div>
-            </div>
-          </div>
-
-          <div
-            v-if="form.operation === 'convert' && form.cacheBudgetPolicy === 'split'"
-            class="offline-policy-warning"
-            role="note">
-            <i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i>
-            <p>
-              Administrative splitting can divide one detected scene into multiple render
-              segments. Use it only when a larger cache is not possible.
-            </p>
-          </div>
-
           <div class="offline-form-actions">
             <p
               id="offlineStartHelp"
@@ -458,10 +411,6 @@
                 }}
               </dd>
             </div>
-            <div v-if="jobSettings(selectedJob).operation === 'convert'">
-              <dt>Cache policy</dt>
-              <dd>{{ policyLabel(jobSettings(selectedJob).cache_budget_policy) }}</dd>
-            </div>
           </dl>
 
           <div class="offline-path-summary">
@@ -553,7 +502,7 @@
     <section class="apollo-section" aria-labelledby="scene-decisions-title">
       <div class="apollo-section-heading">
         <div>
-          <p class="apollo-kicker">Auditable lookahead</p>
+          <p class="apollo-kicker">Causal online state</p>
           <h2 id="scene-decisions-title">Recent scene decisions</h2>
         </div>
         <div v-if="selectedJob" class="offline-audit-actions">
@@ -589,8 +538,6 @@
               <th scope="col">Scene</th>
               <th scope="col">Source frames</th>
               <th scope="col">Boundary decision</th>
-              <th scope="col">Pop</th>
-              <th scope="col">Zero plane</th>
               <th scope="col">Audit</th>
             </tr>
           </thead>
@@ -603,8 +550,6 @@
                   {{ decisionLabel(scene.boundary?.decision || scene.decision) }}
                 </span>
               </td>
-              <td>{{ popLabel(scene.absolute_pop_strength ?? scene.render?.absolute_pop_strength) }}</td>
-              <td>{{ anchorLabel(scene.zero_anchor_shift_px ?? scene.render?.zero_anchor_shift_px) }}</td>
               <td>
                 <span
                   v-for="flag in sceneFlags(scene)"
@@ -622,10 +567,10 @@
       <article v-else class="offline-scene-empty">
         <span aria-hidden="true"><i class="fa-solid fa-code-branch"></i></span>
         <div>
-          <h3>Waiting for a finalized scene</h3>
+          <h3>Waiting for a causal scene boundary</h3>
           <p>
-            Proposed cuts remain provisional through bounded lookahead. A row appears only after
-            the boundary and scene-wide camera parameters are committed.
+            Confirmed online cut pulses start the next scene immediately. No future frame can
+            revise, reject, or move a reported boundary.
           </p>
         </div>
       </article>
@@ -826,7 +771,6 @@
   ])
   const INTERRUPTED_STATUSES = new Set(['interrupted', 'abandoned', 'orphaned'])
   const OUTPUT_NAME_PATTERN = /^[^\\/]+\.(?:mkv|mp4)$/i
-  const GIB = 1024 * 1024 * 1024
   let overviewAbortController = null
   let detailAbortController = null
   let pickerAbortController = null
@@ -852,8 +796,6 @@
           inputPath: '',
           outputName: '',
           codec: 'hevc_nvenc',
-          sceneCacheGiB: 8,
-          cacheBudgetPolicy: 'fail',
         },
         capabilities: {},
         jobs: [],
@@ -1387,15 +1329,6 @@
             settings.codec ??
             job?.codec ??
             'hevc_nvenc',
-          scene_cache_max_bytes:
-            finiteNumber(
-              settings.scene_cache_max_bytes,
-              job?.scene_cache_max_bytes,
-            ),
-          cache_budget_policy:
-            settings.cache_budget_policy ??
-            job?.cache_budget_policy ??
-            'fail',
         }
       },
       immutableSettings(job) {
@@ -1414,9 +1347,6 @@
         if (operation === 'convert') {
           immutable.output_name = settings.output_name
           immutable.codec = settings.codec
-          immutable.scene_cache_max_bytes =
-            settings.scene_cache_max_bytes ?? Math.round(this.form.sceneCacheGiB * GIB)
-          immutable.cache_budget_policy = settings.cache_budget_policy
         }
         return immutable
       },
@@ -1429,9 +1359,6 @@
         return this.jobSettings(job).operation === 'evaluate' ?
           'Offline analysis progress' :
           'Offline conversion progress'
-      },
-      policyLabel(policy) {
-        return policy === 'split' ? 'Administrative split' : 'Stop safely'
       },
       jobError(job) {
         return job?.error?.message || job?.error || job?.failure_reason || ''
@@ -1566,9 +1493,6 @@
         if (this.form.operation === 'convert') {
           request.output_name = this.form.outputName.trim()
           request.codec = this.form.codec
-          request.scene_cache_max_bytes =
-            Math.round(Number(this.form.sceneCacheGiB) * GIB)
-          request.cache_budget_policy = this.form.cacheBudgetPolicy
         }
         return request
       },
@@ -1652,26 +1576,9 @@
           .replaceAll('_', ' ')
           .replace(/\b\w/g, character => character.toUpperCase())
       },
-      popLabel(value) {
-        const number = Number(value)
-        return Number.isFinite(number) ? `${number.toFixed(2)}×` : '—'
-      },
-      anchorLabel(value) {
-        const number = Number(value)
-        return Number.isFinite(number) ? `${number.toFixed(2)} px` : '—'
-      },
       sceneFlags(scene) {
-        const flags = []
         const boundary = scene.boundary || {}
-        const decision = String(boundary.decision || scene.decision || '')
-        if (decision.includes('moved')) flags.push('Moved')
-        if (decision.includes('merged')) flags.push('Merged')
-        if (boundary.truncated || scene.truncated) flags.push('Truncated')
-        if (boundary.budget_forced || scene.budget_forced) flags.push('Budget split')
-        if (boundary.semantic_cut === false && boundary.budget_forced) {
-          flags.push('Non-semantic')
-        }
-        return flags
+        return boundary.semantic_cut === true ? ['Online hard cut'] : []
       },
     },
   })
@@ -1684,7 +1591,6 @@
 <style id="offlineConversionStyles">
   .offline-limit-grid,
   .offline-workspace,
-  .offline-form-row,
   .offline-codec-grid {
     display: grid;
     gap: var(--apollo-space-lg);
@@ -1811,8 +1717,7 @@
     margin: 0 0 var(--apollo-space-sm);
   }
 
-  .offline-codec-grid,
-  .offline-form-row {
+  .offline-codec-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1871,7 +1776,6 @@
     justify-self: start;
   }
 
-  .offline-policy-warning,
   .offline-job-error {
     display: flex;
     padding: var(--apollo-space-md);
@@ -1883,7 +1787,6 @@
     background: color-mix(in srgb, var(--apollo-status-warn) 8%, transparent);
   }
 
-  .offline-policy-warning p,
   .offline-job-error p {
     margin-bottom: 0;
     color: var(--apollo-text-secondary);
@@ -2332,7 +2235,6 @@
   @media (max-width: 699.98px) {
     .offline-limit-grid,
     .offline-codec-grid,
-    .offline-form-row,
     .offline-job-facts,
     .offline-recovery-card dl {
       grid-template-columns: 1fr;
