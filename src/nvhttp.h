@@ -48,8 +48,22 @@ namespace nvhttp {
     sbs_mode,
   };
 
+  struct launch_display_options_t {
+    bool virtual_display = false;
+    std::uint32_t scale_factor = 100;
+    int sbs_mode = 0;
+
+    bool operator==(const launch_display_options_t &) const = default;
+  };
+
   std::optional<launch_mode_t> parse_launch_mode(std::string_view mode);
   std::optional<int> parse_launch_int(launch_int_field field, std::string_view value);
+  /** Resolve optional display extensions to native-scale, 2D, and no virtual-display request. */
+  std::optional<launch_display_options_t> parse_launch_display_options(
+    std::optional<std::string_view> virtual_display,
+    std::optional<std::string_view> scale_factor,
+    std::optional<std::string_view> sbs_mode
+  );
   std::optional<crypto::aes_t> parse_remote_input_key(std::string_view key);
   std::optional<std::uint32_t> parse_remote_input_key_id(std::string_view key_id);
   std::optional<std::uint64_t> parse_host_session_id(std::string_view host_session_id);
@@ -61,6 +75,12 @@ namespace nvhttp {
       manual_pin_conflict,
     };
 
+    enum class cancel_admission_e {
+      allowed_by_host_session_id,
+      allowed_by_session_owner,
+      rejected,
+    };
+
     pairing_admission_e pairing_admission(
       std::size_t active_sessions,
       std::size_t maximum_sessions,
@@ -69,10 +89,23 @@ namespace nvhttp {
       bool another_manual_pin_pending
     );
 
-    /** A resume/cancel capability must be present, nonzero, and match the retained process. */
+    /** A supplied resume/cancel capability must be nonzero and match the retained process. */
     constexpr bool host_session_matches(std::uint64_t retained, std::uint64_t presented) {
       return retained != 0 && presented != 0 && retained == presented;
     }
+
+    /**
+     * Admit an exact host-session capability, or a tokenless cancel from the TLS-authenticated
+     * owner of the retained session. A supplied invalid/stale capability never falls back.
+     * Capable clients should still send the capability: a tokenless request cannot distinguish
+     * an older session generation created by the same paired client.
+     */
+    cancel_admission_e cancel_admission(
+      std::optional<std::string_view> presented_host_session_id,
+      std::uint64_t retained_host_session_id,
+      std::string_view retained_client_uuid,
+      std::string_view requesting_client_uuid
+    );
 
     /** UUID is authoritative when supplied; a positive ID must agree with it. */
     bool app_identity_matches(

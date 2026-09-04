@@ -352,21 +352,6 @@
           </button>
         </div>
 
-        <div v-if="jobs.length > 1" class="offline-job-selector">
-          <label class="form-label" for="offlineSelectedJob">Job</label>
-          <select
-            id="offlineSelectedJob"
-            v-model="selectedJobId"
-            class="form-select">
-            <option
-              v-for="job in jobs"
-              :key="jobId(job)"
-              :value="jobId(job)">
-              {{ jobOption(job) }}
-            </option>
-          </select>
-        </div>
-
         <article v-if="selectedJob" class="offline-progress-card">
           <div class="offline-progress-topline">
             <div>
@@ -484,6 +469,18 @@
                 aria-hidden="true"></i>
               {{ cancelBusy ? 'Canceling…' : 'Cancel job' }}
             </button>
+            <button
+              v-if="isClearable(selectedJob)"
+              class="btn btn-apollo-quiet"
+              type="button"
+              :disabled="clearBusy"
+              @click="clearJob(selectedJob)">
+              <i
+                class="fa-solid"
+                :class="clearBusy ? 'fa-spinner fa-spin' : 'fa-trash-can'"
+                aria-hidden="true"></i>
+              {{ clearBusy ? 'Clearing…' : 'Clear job' }}
+            </button>
           </div>
         </article>
 
@@ -498,83 +495,6 @@
         </article>
       </section>
     </div>
-
-    <section class="apollo-section" aria-labelledby="scene-decisions-title">
-      <div class="apollo-section-heading">
-        <div>
-          <p class="apollo-kicker">Causal online state</p>
-          <h2 id="scene-decisions-title">Recent scene decisions</h2>
-        </div>
-        <div v-if="selectedJob" class="offline-audit-actions">
-          <span v-if="sceneTotal !== null" class="offline-decision-count">
-            {{ sceneTotal }} {{ sceneTotal === 1 ? 'scene' : 'scenes' }} total
-            <template v-if="sceneDecisions.length">
-              &middot; latest {{ sceneDecisions.length }} shown
-            </template>
-          </span>
-          <button
-            v-if="sceneAuditAvailable"
-            class="btn btn-apollo-quiet"
-            type="button"
-            :disabled="auditBusy"
-            @click="downloadSceneAudit">
-            <i
-              class="fa-solid"
-              :class="auditBusy ? 'fa-spinner fa-spin' : 'fa-download'"
-              aria-hidden="true"></i>
-            {{
-              auditBusy ?
-                'Preparing audit...' :
-                (sceneAuditPartial ? 'Download retained audit' : 'Download full audit')
-            }}
-          </button>
-        </div>
-      </div>
-
-      <div v-if="sceneDecisions.length" class="offline-scene-table-wrap">
-        <table class="table offline-scene-table">
-          <thead>
-            <tr>
-              <th scope="col">Scene</th>
-              <th scope="col">Source frames</th>
-              <th scope="col">Boundary decision</th>
-              <th scope="col">Audit</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="(scene, index) in sceneDecisions" :key="sceneKey(scene, index)">
-              <td><strong>#{{ scene.scene_id || index + 1 }}</strong></td>
-              <td class="monospace">{{ sceneRange(scene) }}</td>
-              <td>
-                <span class="offline-decision-label">
-                  {{ decisionLabel(scene.boundary?.decision || scene.decision) }}
-                </span>
-              </td>
-              <td>
-                <span
-                  v-for="flag in sceneFlags(scene)"
-                  :key="flag"
-                  class="badge rounded-pill offline-audit-badge">
-                  {{ flag }}
-                </span>
-                <span v-if="!sceneFlags(scene).length" class="offline-muted">Committed</span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <article v-else class="offline-scene-empty">
-        <span aria-hidden="true"><i class="fa-solid fa-code-branch"></i></span>
-        <div>
-          <h3>Waiting for a causal scene boundary</h3>
-          <p>
-            Confirmed online cut pulses start the next scene immediately. No future frame can
-            revise, reject, or move a reported boundary.
-          </p>
-        </div>
-      </article>
-    </section>
 
     <dialog
       ref="pathPickerDialog"
@@ -753,8 +673,8 @@
     OfflineSbsApiError,
     browseOfflineSbsFiles,
     cancelOfflineSbsJob,
+    clearOfflineSbsJob,
     createOfflineSbsJob,
-    downloadOfflineSbsSceneAudit,
     getOfflineSbsJob,
     getOfflineSbsOverview,
   } from './offline-sbs-api'
@@ -770,6 +690,14 @@
     'canceling',
   ])
   const INTERRUPTED_STATUSES = new Set(['interrupted', 'abandoned', 'orphaned'])
+  const TERMINAL_STATUSES = new Set([
+    'canceled',
+    'cancelled',
+    'complete',
+    'completed',
+    'failed',
+    ...INTERRUPTED_STATUSES,
+  ])
   const OUTPUT_NAME_PATTERN = /^[^\\/]+\.(?:mkv|mp4)$/i
   let overviewAbortController = null
   let detailAbortController = null
@@ -808,7 +736,7 @@
         refreshing: false,
         startBusy: false,
         cancelBusy: false,
-        auditBusy: false,
+        clearBusy: false,
         refreshTimer: null,
         overviewRequestSerial: 0,
         detailRequestSerial: 0,
@@ -842,14 +770,10 @@
           ...(detail.progress || {}),
           ...(summary.progress || {}),
         }
-        if (Array.isArray(detail.progress?.scene_decisions)) {
-          progress.scene_decisions = detail.progress.scene_decisions
-        }
         return {
           ...detail,
           ...summary,
           progress,
-          scene_decisions: detail.scene_decisions,
           worker_result: detail.worker_result,
         }
       },
@@ -914,54 +838,6 @@
       canStart() {
         return !this.startDisabledReason
       },
-      sceneDecisions() {
-        const job = this.selectedJob
-        if (!job) return []
-        if (Array.isArray(job.progress?.scene_decisions)) {
-          return job.progress.scene_decisions
-        }
-        if (Array.isArray(job.scene_decisions)) return job.scene_decisions
-        if (Array.isArray(job.scenes)) return job.scenes
-        if (Array.isArray(job.scene_plan?.scenes)) return job.scene_plan.scenes
-        if (Array.isArray(job.worker_result?.scene_decisions)) {
-          return job.worker_result.scene_decisions
-        }
-        if (Array.isArray(job.worker_result?.scenes)) return job.worker_result.scenes
-        return []
-      },
-      sceneTotal() {
-        if (!this.selectedJob) return null
-        const total = finiteNumber(
-          this.selectedJob?.progress?.scene_count,
-          this.selectedJob?.worker_result?.scene_count,
-          this.selectedJob?.scene_count,
-        )
-        return total === null ?
-          this.sceneDecisions.length :
-          Math.max(0, Math.trunc(total))
-      },
-      sceneAuditAvailable() {
-        const status = normalizedStatus(this.selectedJob)
-        const auditHash = String(
-          this.selectedJob?.worker_result?.scene_audit_sha256 || '',
-        )
-        const retainedAuditAttested = /^[0-9a-f]{64}$/i.test(auditHash)
-        return (
-          (this.sceneTotal > 0 || retainedAuditAttested) &&
-          [
-            'complete',
-            'completed',
-            'failed',
-            'canceled',
-            'cancelled',
-            'interrupted',
-          ].includes(status)
-        )
-      },
-      sceneAuditPartial() {
-        const status = normalizedStatus(this.selectedJob)
-        return status !== 'complete' && status !== 'completed'
-      },
     },
     async mounted() {
       await this.loadJobs(false)
@@ -1005,6 +881,9 @@
         return ACTIVE_STATUSES.has(status) &&
                status !== 'canceling' &&
                status !== 'publishing'
+      },
+      isClearable(job) {
+        return TERMINAL_STATUSES.has(normalizedStatus(job))
       },
       codecAvailable(codec) {
         return this.supportedCodecs.includes(String(codec).toLowerCase())
@@ -1379,11 +1258,6 @@
           'Wait for the built-in job manager to mark retained paths safe to remove.'
         )
       },
-      jobOption(job) {
-        const settings = this.jobSettings(job)
-        const name = settings.input_path.replaceAll('\\', '/').split('/').pop()
-        return `${this.statusLabel(job)} · ${name || this.jobId(job)}`
-      },
       async loadJobs(silent = false) {
         // Timer ticks never starve a slow in-flight request. Explicit refreshes and
         // post-action reloads do supersede it, and serial checks reject stale replies.
@@ -1404,16 +1278,10 @@
           if (!this.codecAvailable(this.form.codec) && this.supportedCodecs.length) {
             this.form.codec = this.supportedCodecs[0]
           }
-          const selectionStillExists = jobs.some(
-            job => this.jobId(job) === this.selectedJobId,
-          )
-          let selectionChanged = false
-          if (!selectionStillExists) {
-            const preferred = jobs.find(job => this.isActive(job)) || jobs[0]
-            const preferredId = preferred ? this.jobId(preferred) : ''
-            selectionChanged = preferredId !== this.selectedJobId
-            this.selectedJobId = preferredId
-          }
+          const preferred = jobs.find(job => this.isActive(job)) || jobs[0]
+          const preferredId = preferred ? this.jobId(preferred) : ''
+          const selectionChanged = preferredId !== this.selectedJobId
+          this.selectedJobId = preferredId
           this.apiError = ''
           this.pollWarning = ''
           if (!selectionChanged && this.selectedJobId) {
@@ -1539,46 +1407,45 @@
           this.cancelBusy = false
         }
       },
-      async downloadSceneAudit() {
-        const id = this.jobId(this.selectedJob)
-        if (!id || this.auditBusy) return
-        this.actionError = ''
-        this.auditBusy = true
-        try {
-          const blob = await downloadOfflineSbsSceneAudit(id)
-          const url = URL.createObjectURL(blob)
-          const link = document.createElement('a')
-          link.href = url
-          link.download =
-            `sunshine3d-scene-audit-${id.replace(/[^0-9A-Fa-f-]/g, '')}.json`
-          document.body.appendChild(link)
-          link.click()
-          link.remove()
-          window.setTimeout(() => URL.revokeObjectURL(url), 0)
-        } catch (error) {
-          this.actionError = this.apiMessage(error)
-        } finally {
-          this.auditBusy = false
+      async clearJob(job) {
+        const id = this.jobId(job)
+        if (
+          !id ||
+          this.clearBusy ||
+          !window.confirm(
+            'Clear this finished job? Temporary job files and history will be removed. The converted video will be kept.',
+          )
+        ) {
+          return
         }
-      },
-      sceneKey(scene, index) {
-        return `${scene.scene_id ?? index}-${scene.start_sequence ?? index}`
-      },
-      sceneRange(scene) {
-        const start = Number(scene.start_sequence)
-        const endExclusive = Number(scene.end_sequence_exclusive)
-        if (!Number.isFinite(start) || !Number.isFinite(endExclusive)) return 'Pending'
-        return `${start}–${Math.max(start, endExclusive - 1)}`
+        this.actionError = ''
+        this.clearBusy = true
+        try {
+          await clearOfflineSbsJob(id)
+          if (this.selectedJobId === id) {
+            this.selectedJobId = ''
+            this.selectedJobDetail = null
+          }
+          await this.loadJobs(false)
+        } catch (error) {
+          if (error instanceof OfflineSbsApiError && error.status === 404) {
+            if (this.selectedJobId === id) {
+              this.selectedJobId = ''
+              this.selectedJobDetail = null
+            }
+            await this.loadJobs(false)
+          } else {
+            this.actionError = this.apiMessage(error)
+          }
+        } finally {
+          this.clearBusy = false
+        }
       },
       decisionLabel(decision) {
         if (!decision) return 'Committed'
         return String(decision)
           .replaceAll('_', ' ')
           .replace(/\b\w/g, character => character.toUpperCase())
-      },
-      sceneFlags(scene) {
-        const boundary = scene.boundary || {}
-        return boundary.semantic_cut === true ? ['Online hard cut'] : []
       },
     },
   })
@@ -1674,8 +1541,7 @@
 
   .offline-panel-heading h2,
   .offline-progress-topline h3,
-  .offline-empty-state h3,
-  .offline-scene-empty h3 {
+  .offline-empty-state h3 {
     margin-bottom: 0;
   }
 
@@ -1827,10 +1693,6 @@
     background: transparent;
   }
 
-  .offline-job-selector {
-    margin-bottom: var(--apollo-space-lg);
-  }
-
   .offline-progress-card {
     padding: var(--apollo-space-lg);
     border: 1px solid var(--apollo-border);
@@ -1838,20 +1700,11 @@
     background: var(--apollo-surface);
   }
 
-  .offline-status-label,
-  .offline-decision-count {
+  .offline-status-label {
     display: inline-flex;
     align-items: center;
     gap: var(--apollo-space-sm);
     color: var(--apollo-text-secondary);
-  }
-
-  .offline-audit-actions {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: var(--apollo-space-md);
-    flex-wrap: wrap;
   }
 
   .offline-status-label.is-active {
@@ -1954,8 +1807,7 @@
     text-overflow: ellipsis;
   }
 
-  .offline-empty-state,
-  .offline-scene-empty {
+  .offline-empty-state {
     display: flex;
     min-height: 180px;
     padding: var(--apollo-space-xl);
@@ -1968,44 +1820,9 @@
     background: var(--apollo-surface);
   }
 
-  .offline-empty-state p,
-  .offline-scene-empty p {
+  .offline-empty-state p {
     margin: var(--apollo-space-xs) 0 0;
     color: var(--apollo-text-secondary);
-  }
-
-  .offline-scene-table-wrap {
-    overflow-x: auto;
-    border: 1px solid var(--apollo-border-panel);
-    border-radius: var(--apollo-radius-card);
-    background: var(--apollo-surface-raised);
-    box-shadow: var(--apollo-shadow-card);
-  }
-
-  .offline-scene-table {
-    min-width: 840px;
-    margin-bottom: 0;
-    vertical-align: middle;
-  }
-
-  .offline-scene-table th,
-  .offline-scene-table td {
-    padding: var(--apollo-space-md) var(--apollo-space-lg);
-  }
-
-  .offline-decision-label {
-    text-transform: none;
-  }
-
-  .offline-audit-badge {
-    margin: var(--apollo-space-xs);
-    color: var(--apollo-text-primary);
-    border: 1px solid var(--apollo-border);
-    background: var(--apollo-surface);
-  }
-
-  .offline-muted {
-    color: var(--apollo-text-disabled);
   }
 
   .offline-path-picker:not([open]) {
@@ -2211,16 +2028,6 @@
     display: flex;
     flex: 0 0 auto;
     gap: var(--apollo-space-sm);
-  }
-
-  .offline-scene-empty > span {
-    display: grid;
-    width: var(--apollo-icon-tile);
-    height: var(--apollo-icon-tile);
-    color: var(--apollo-accent);
-    place-items: center;
-    border-radius: var(--apollo-radius-control);
-    background: color-mix(in srgb, var(--apollo-accent) 12%, transparent);
   }
 
   /* The permanent host navigation rail reduces the usable page width by roughly

@@ -694,7 +694,7 @@
             <div class="pair-icon"><i class="fa-solid fa-key"></i></div>
             <div>
               <h3>Enter PIN</h3>
-              <p>Use the PIN displayed on your headset or AR device.</p>
+              <p>Use the PIN displayed in Moonlight 3D.</p>
             </div>
             <span class="pair-method-step">Primary</span>
           </header>
@@ -749,7 +749,7 @@
             <div>
               <div class="pairing-state"><span class="pairing-state-dot"></span> QR open · {{ pairingTimeLabel }}</div>
               <h3>Scan with Moonlight 3D</h3>
-              <p>Open Moonlight 3D on your headset or glasses and scan this code. The device will appear below as
+              <p>Open Moonlight 3D on your device and scan this code. The device will appear below as
                 soon as it is paired.</p>
               <div class="pairing-actions">
                 <a class="btn btn-apollo" :href="deepLink">
@@ -774,7 +774,7 @@
     <section aria-labelledby="remote-devices-heading">
       <div class="section-heading">
         <div>
-          <h2 id="remote-devices-heading">Remote XR devices</h2>
+          <h2 id="remote-devices-heading">Remote devices</h2>
           <p>Paired devices can browse Sunshine 3D, but only one device can stream at a time.</p>
         </div>
       </div>
@@ -841,7 +841,7 @@
                 <div class="access-options">
                   <button type="button" class="access-option" :class="{active: client.editAccessPreset === 'stream_control'}" @click="setAccessPreset(client, 'stream_control')">
                     <strong>Stream &amp; control</strong>
-                    <span>Browse and launch apps, stream video, and use XR, controller, mouse, and keyboard input.</span>
+                    <span>Browse and launch apps, stream video, and use controller, mouse, and keyboard input.</span>
                   </button>
                   <button type="button" class="access-option" :class="{active: client.editAccessPreset === 'view_only'}" @click="setAccessPreset(client, 'view_only')">
                     <strong>View only</strong>
@@ -916,7 +916,7 @@
           <i class="fa-solid fa-headset"></i>
           <div>
             <strong>No paired devices</strong>
-            <div class="small mt-1">Pair Moonlight 3D to start streaming to Android XR.</div>
+            <div class="small mt-1">Pair a device running Moonlight 3D to start streaming.</div>
           </div>
         </div>
       </div>
@@ -1157,7 +1157,7 @@
           await this.refreshClients();
         } catch (error) {
           this.otpStatus = 'warning';
-          this.otpMessage = `The device paired, but its recommended XR defaults could not be saved: ${error.message || error}`;
+          this.otpMessage = `The device paired, but its recommended access defaults could not be saved: ${error.message || error}`;
         }
       },
       async applyArtemisDefaults(client) {

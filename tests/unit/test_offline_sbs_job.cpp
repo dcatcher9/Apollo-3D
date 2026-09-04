@@ -285,6 +285,26 @@ TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
       .get<bool>()
   );
   EXPECT_TRUE(capabilities["output_security"]["legacy_root"].is_string());
+
+  const auto worker_path = tree.path / "worker" / "jobs" / terminal.id;
+  ASSERT_TRUE(fs::is_directory(worker_path));
+  const auto cleared = service.clear(terminal.id);
+  ASSERT_TRUE(cleared.ok) << cleared.error;
+  ASSERT_TRUE(cleared.job);
+  EXPECT_EQ(cleared.job->id, terminal.id);
+  EXPECT_EQ(
+    service.get(terminal.id).code,
+    offline_sbs::error_code_e::not_found
+  );
+  EXPECT_TRUE(service.list().empty());
+  EXPECT_FALSE(fs::exists(state_path.parent_path()));
+  EXPECT_FALSE(fs::exists(worker_path));
+  EXPECT_TRUE(fs::is_regular_file(*terminal.output_path));
+  EXPECT_EQ(fs::file_size(*terminal.output_path), 13u);
+  EXPECT_EQ(
+    service.clear(terminal.id).code,
+    offline_sbs::error_code_e::not_found
+  );
   service.shutdown();
 }
 
@@ -1160,6 +1180,187 @@ TEST(OfflineSbsJob, RestartRetriesForcedStagingDispositionFailure) {
   recovered.shutdown();
 }
 
+TEST(OfflineSbsJob, ClearRetiresAttestedPendingStagingAndKeepsFinalOutput) {
+#ifndef _WIN32
+  GTEST_SKIP() << "exact staging-link retirement is Windows-specific";
+#else
+  temporary_tree_t tree;
+  auto config = service_config(tree.path);
+  config.test_force_staging_disposition_failure = true;
+  const auto input = tree.path / "source.mkv";
+  write_nonempty(input, "source");
+
+  offline_sbs::job_service_t service {
+    config,
+    [](const offline_sbs::worker_context_t &context,
+       std::stop_token,
+       const offline_sbs::progress_callback_t &) {
+      write_nonempty(*context.staging_output, "encoded-video");
+      return offline_sbs::worker_outcome_t {
+        .completed = true,
+        .result = {
+          {"schema", 1},
+          {"job_id", context.job_id},
+          {"status", "complete"},
+          {"scene_count", 1},
+        },
+      };
+    }
+  };
+  std::string error;
+  ASSERT_TRUE(service.start(error)) << error;
+  const auto created = service.create({
+    .input_path = input,
+    .operation = offline_sbs::operation_e::convert,
+    .output_name = "clear-pending.mkv",
+  });
+  ASSERT_TRUE(created.ok) << created.error;
+  const auto terminal = wait_for_terminal(service, created.job->id);
+  ASSERT_EQ(terminal.state, offline_sbs::job_state_e::complete);
+  ASSERT_TRUE(terminal.output_path);
+  ASSERT_TRUE(
+    terminal.worker_result.value("staging_cleanup_pending", false)
+  );
+  const auto staging_output =
+    input.parent_path() /
+    (
+      "clear-pending.sunshine3d-" + created.job->id + ".part.mkv"
+    );
+  ASSERT_TRUE(fs::is_regular_file(staging_output));
+  ASSERT_TRUE(fs::is_regular_file(*terminal.output_path));
+
+  const auto cleared = service.clear(created.job->id);
+  ASSERT_TRUE(cleared.ok) << cleared.error;
+  EXPECT_FALSE(fs::exists(staging_output));
+  EXPECT_TRUE(fs::is_regular_file(*terminal.output_path));
+  EXPECT_EQ(fs::file_size(*terminal.output_path), 13u);
+  EXPECT_EQ(
+    service.get(created.job->id).code,
+    offline_sbs::error_code_e::not_found
+  );
+  service.shutdown();
+#endif
+}
+
+TEST(OfflineSbsJob, ClearAcceptsStalePendingMarkerWhenBothOutputsAreGone) {
+#ifndef _WIN32
+  GTEST_SKIP() << "forced staging disposition failure is Windows-specific";
+#else
+  temporary_tree_t tree;
+  auto config = service_config(tree.path);
+  config.test_force_staging_disposition_failure = true;
+  const auto media_directory = tree.path / "former-media";
+  ASSERT_TRUE(fs::create_directories(media_directory));
+  const auto input = media_directory / "source.mkv";
+  write_nonempty(input, "source");
+
+  offline_sbs::job_service_t service {
+    config,
+    [](const offline_sbs::worker_context_t &context,
+       std::stop_token,
+       const offline_sbs::progress_callback_t &) {
+      write_nonempty(*context.staging_output, "encoded-video");
+      return offline_sbs::worker_outcome_t {
+        .completed = true,
+        .result = {
+          {"schema", 1},
+          {"job_id", context.job_id},
+          {"status", "complete"},
+          {"scene_count", 1},
+        },
+      };
+    }
+  };
+  std::string error;
+  ASSERT_TRUE(service.start(error)) << error;
+  const auto created = service.create({
+    .input_path = input,
+    .operation = offline_sbs::operation_e::convert,
+    .output_name = "clear-missing.mkv",
+  });
+  ASSERT_TRUE(created.ok) << created.error;
+  const auto terminal = wait_for_terminal(service, created.job->id);
+  ASSERT_EQ(terminal.state, offline_sbs::job_state_e::complete);
+  ASSERT_TRUE(terminal.output_path);
+  ASSERT_TRUE(
+    terminal.worker_result.value("staging_cleanup_pending", false)
+  );
+  const auto staging_output =
+    input.parent_path() /
+    (
+      "clear-missing.sunshine3d-" + created.job->id + ".part.mkv"
+  );
+  ASSERT_TRUE(fs::remove(staging_output));
+  ASSERT_TRUE(fs::remove(*terminal.output_path));
+  ASSERT_TRUE(fs::remove(input));
+  ASSERT_TRUE(fs::remove(media_directory));
+
+  const auto cleared = service.clear(created.job->id);
+  ASSERT_TRUE(cleared.ok) << cleared.error;
+  EXPECT_EQ(
+    service.get(created.job->id).code,
+    offline_sbs::error_code_e::not_found
+  );
+  service.shutdown();
+#endif
+}
+
+TEST(OfflineSbsJob, ClearPreservesPendingStagingWhenFinalOutputIsGone) {
+#ifndef _WIN32
+  GTEST_SKIP() << "forced staging disposition failure is Windows-specific";
+#else
+  temporary_tree_t tree;
+  auto config = service_config(tree.path);
+  config.test_force_staging_disposition_failure = true;
+  const auto input = tree.path / "source.mkv";
+  write_nonempty(input, "source");
+
+  offline_sbs::job_service_t service {
+    config,
+    [](const offline_sbs::worker_context_t &context,
+       std::stop_token,
+       const offline_sbs::progress_callback_t &) {
+      write_nonempty(*context.staging_output, "encoded-video");
+      return offline_sbs::worker_outcome_t {
+        .completed = true,
+        .result = {
+          {"schema", 1},
+          {"job_id", context.job_id},
+          {"status", "complete"},
+          {"scene_count", 1},
+        },
+      };
+    }
+  };
+  std::string error;
+  ASSERT_TRUE(service.start(error)) << error;
+  const auto created = service.create({
+    .input_path = input,
+    .operation = offline_sbs::operation_e::convert,
+    .output_name = "keep-last-copy.mkv",
+  });
+  ASSERT_TRUE(created.ok) << created.error;
+  const auto terminal = wait_for_terminal(service, created.job->id);
+  ASSERT_EQ(terminal.state, offline_sbs::job_state_e::complete);
+  ASSERT_TRUE(terminal.output_path);
+  const auto staging_output =
+    input.parent_path() /
+    (
+      "keep-last-copy.sunshine3d-" + created.job->id + ".part.mkv"
+    );
+  ASSERT_TRUE(fs::is_regular_file(staging_output));
+  ASSERT_TRUE(fs::remove(*terminal.output_path));
+
+  const auto cleared = service.clear(created.job->id);
+  EXPECT_FALSE(cleared.ok);
+  EXPECT_EQ(cleared.code, offline_sbs::error_code_e::io_error);
+  EXPECT_NE(cleared.error.find("last intact copy"), std::string::npos);
+  EXPECT_TRUE(fs::is_regular_file(staging_output));
+  EXPECT_TRUE(service.get(created.job->id).ok);
+  service.shutdown();
+#endif
+}
+
 TEST(OfflineSbsJob, RecoveryNeverRetiresAReplacementStagingIdentity) {
   temporary_tree_t tree;
   auto config = service_config(tree.path);
@@ -1230,6 +1431,14 @@ TEST(OfflineSbsJob, RecoveryNeverRetiresAReplacementStagingIdentity) {
     std::istreambuf_iterator<char> {},
   };
   EXPECT_EQ(contents, "replacement-user-data");
+  replacement.close();
+  const auto clear = recovered.clear(created.job->id);
+  EXPECT_FALSE(clear.ok);
+  EXPECT_EQ(clear.code, offline_sbs::error_code_e::io_error);
+  EXPECT_NE(clear.error.find("identity changed"), std::string::npos)
+    << clear.error;
+  EXPECT_TRUE(fs::is_regular_file(staging_output));
+  EXPECT_TRUE(recovered.get(created.job->id).ok);
   recovered.shutdown();
 }
 
@@ -1610,6 +1819,12 @@ TEST(OfflineSbsJob, EnforcesOneActiveJobAndCancelsTheWholeWorkerContract) {
     std::this_thread::sleep_for(2ms);
   }
   ASSERT_TRUE(entered);
+
+  const auto clear_active = service.clear(first.job->id);
+  EXPECT_FALSE(clear_active.ok);
+  EXPECT_EQ(clear_active.code, offline_sbs::error_code_e::conflict);
+  EXPECT_NE(clear_active.error.find("must be canceled"), std::string::npos);
+  EXPECT_TRUE(service.get(first.job->id).ok);
 
   const auto second = service.create({
     .input_path = input,
@@ -2429,6 +2644,12 @@ TEST(OfflineSbsJob, RetainedUnattestedStagingBlocksTheJobRecordCapacity) {
   EXPECT_TRUE(fs::is_regular_file(staging));
   ASSERT_EQ(service.list().size(), 1u);
   EXPECT_EQ(service.list().front().id, failed.job->id);
+  const auto clear = service.clear(failed.job->id);
+  EXPECT_FALSE(clear.ok);
+  EXPECT_EQ(clear.code, offline_sbs::error_code_e::io_error);
+  EXPECT_NE(clear.error.find(".sunshine3d-*.part*"), std::string::npos);
+  EXPECT_TRUE(fs::is_regular_file(staging));
+  EXPECT_TRUE(service.get(failed.job->id).ok);
   service.shutdown();
 }
 

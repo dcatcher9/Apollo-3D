@@ -242,6 +242,52 @@ TEST(WebUiDesign, PresentsSunshineAndMoonlightBrandPair) {
   EXPECT_EQ(pairing.find("Pair Artemis"), std::string::npos);
 }
 
+TEST(WebUiDesign, UsesDeviceNeutralAndThreeDimensionalStatusLanguage) {
+  const auto overview = read_source(web_root / "index.html");
+  const auto pairing = read_source(web_root / "pin.html");
+  const auto essentials =
+    read_source(web_root / "configs/tabs/Essentials.vue");
+
+  EXPECT_NE(overview.find("Ready for 3D"), std::string::npos);
+  EXPECT_NE(overview.find("3D readiness"), std::string::npos);
+  EXPECT_NE(pairing.find(">Remote devices</h2>"), std::string::npos);
+  EXPECT_NE(essentials.find(">3D readiness</p>"), std::string::npos);
+
+  EXPECT_EQ(overview.find("Ready for XR"), std::string::npos);
+  EXPECT_EQ(overview.find("XR readiness"), std::string::npos);
+  EXPECT_EQ(overview.find("XR device"), std::string::npos);
+  EXPECT_EQ(pairing.find("Remote XR devices"), std::string::npos);
+  EXPECT_EQ(pairing.find("use XR"), std::string::npos);
+}
+
+TEST(WebUiDesign, DevicesPageOnlyEmbedsApprovedArGlasses) {
+  const auto glasses =
+    read_source(web_root / "configs/tabs/ArGlasses.vue");
+
+  EXPECT_NE(
+    glasses.find("if (!props.embedded) return devices.value"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    glasses.find(
+      "devices.value.filter(device => device.decision === 'approved')"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    glasses.find("v-for=\"device in visibleDevices\""),
+    std::string::npos
+  );
+  EXPECT_NE(
+    glasses.find("visibleDevices.length > 0"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    glasses.find("v-for=\"device in devices\""),
+    std::string::npos
+  );
+}
+
 TEST(WebUiDesign, LocaleValuesDoNotExposeRetiredProductNames) {
   const std::regex retired_value {
     R"(:\s*"[^"\r\n]*(Apollo|Artemis)[^"\r\n]*")",
@@ -405,20 +451,34 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
   EXPECT_EQ(page.find("value=\"split\""), std::string::npos);
   EXPECT_NE(page.find("same causal Host SBS estimator"), std::string::npos);
   EXPECT_NE(page.find("as fast as the decoder, GPU, and encoder permit"), std::string::npos);
-  EXPECT_NE(page.find("No future frame can"), std::string::npos);
+  EXPECT_EQ(page.find("No future frame can"), std::string::npos);
   EXPECT_EQ(page.find("lookahead"), std::string::npos);
   EXPECT_EQ(page.find("Budget split"), std::string::npos);
-  EXPECT_NE(page.find("Online hard cut"), std::string::npos);
-  EXPECT_NE(page.find("Recent scene decisions"), std::string::npos);
-  EXPECT_NE(page.find("retainedAuditAttested"), std::string::npos);
+  EXPECT_EQ(page.find("Online hard cut"), std::string::npos);
+  EXPECT_EQ(page.find("Recent scene decisions"), std::string::npos);
+  EXPECT_EQ(page.find("scene-decisions-title"), std::string::npos);
+  EXPECT_EQ(page.find("offline-scene-table"), std::string::npos);
+  EXPECT_EQ(page.find("offline-scene-empty"), std::string::npos);
+  EXPECT_EQ(page.find("downloadSceneAudit"), std::string::npos);
+  EXPECT_EQ(page.find("auditBusy"), std::string::npos);
+  EXPECT_EQ(page.find("offline-job-selector"), std::string::npos);
+  EXPECT_EQ(page.find("offlineSelectedJob"), std::string::npos);
+  EXPECT_EQ(page.find("v-for=\"job in jobs\""), std::string::npos);
+  EXPECT_EQ(page.find("jobOption(job)"), std::string::npos);
+  EXPECT_NE(page.find("@click=\"cancelJob(selectedJob)\""), std::string::npos);
+  EXPECT_NE(page.find("v-if=\"isClearable(selectedJob)\""), std::string::npos);
+  EXPECT_NE(page.find("@click=\"clearJob(selectedJob)\""), std::string::npos);
+  EXPECT_NE(page.find("Clear job"), std::string::npos);
+  EXPECT_NE(page.find("The converted video will be kept."), std::string::npos);
   EXPECT_NE(
-    page.find("this.sceneTotal > 0 || retainedAuditAttested"),
+    page.find("const preferred = jobs.find(job => this.isActive(job)) || jobs[0]"),
     std::string::npos
   );
-  EXPECT_NE(page.find("Download full audit"), std::string::npos);
-  EXPECT_NE(page.find("sceneTotal"), std::string::npos);
-  EXPECT_NE(page.find("latest {{ sceneDecisions.length }} shown"), std::string::npos);
-  EXPECT_NE(page.find("@click=\"cancelJob(selectedJob)\""), std::string::npos);
+  EXPECT_EQ(page.find("selectionStillExists"), std::string::npos);
+  EXPECT_NE(
+    page.find("error instanceof OfflineSbsApiError && error.status === 404"),
+    std::string::npos
+  );
   EXPECT_NE(page.find("Interrupted — not resumable in version 1"), std::string::npos);
   EXPECT_NE(page.find("@click=\"restartJob(selectedJob)\""), std::string::npos);
   EXPECT_NE(page.find("Windows and NVIDIA only"), std::string::npos);
@@ -446,6 +506,8 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
   EXPECT_NE(api.find("body: { path, type }"), std::string::npos);
   EXPECT_NE(api.find("createOfflineSbsJob"), std::string::npos);
   EXPECT_NE(api.find("cancelOfflineSbsJob"), std::string::npos);
+  EXPECT_NE(api.find("clearOfflineSbsJob"), std::string::npos);
+  EXPECT_NE(api.find("method: 'DELETE'"), std::string::npos);
   EXPECT_NE(api.find("downloadOfflineSbsSceneAudit"), std::string::npos);
   EXPECT_NE(api.find("/scene-audit"), std::string::npos);
   EXPECT_NE(api.find("getOfflineSbsOverview"), std::string::npos);
@@ -523,6 +585,15 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
     std::string::npos
   );
   EXPECT_NE(http.find("getOfflineSbsSceneAudit"), std::string::npos);
+  EXPECT_NE(http.find("void clearOfflineSbsJob"), std::string::npos);
+  EXPECT_NE(
+    http.find(
+      "server.resource[\"^/api/offline-sbs/jobs/([0-9A-Fa-f-]+)$\"][\"DELETE\"]"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(jobs.find("job_service_t::clear"), std::string::npos);
+  EXPECT_NE(jobs.find("clear_terminal_record_locked"), std::string::npos);
   const auto audit_handler = http.find("void getOfflineSbsSceneAudit");
   const auto cancel_handler = http.find("void cancelOfflineSbsJob", audit_handler);
   ASSERT_NE(audit_handler, std::string::npos);

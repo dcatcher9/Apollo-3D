@@ -332,6 +332,11 @@ namespace nvhttp {
     return it->second;
   }
 
+  static std::optional<std::string_view> find_arg(const args_t &args, const char *name) {
+    const auto it = args.find(name);
+    return it == std::end(args) ? std::nullopt : std::optional<std::string_view> {it->second};
+  }
+
   void save_state() {
     nlohmann::json named_cert_nodes = nlohmann::json::array();
     std::uint64_t snapshot_generation = 0;
@@ -605,6 +610,33 @@ namespace nvhttp {
     return valid ? parsed : std::nullopt;
   }
 
+  std::optional<launch_display_options_t> parse_launch_display_options(
+    std::optional<std::string_view> virtual_display,
+    std::optional<std::string_view> scale_factor,
+    std::optional<std::string_view> sbs_mode
+  ) {
+    const launch_display_options_t defaults;
+    const auto parse_or_default = [](launch_int_field field, std::optional<std::string_view> value, int fallback) {
+      return value ? parse_launch_int(field, *value) : std::optional<int> {fallback};
+    };
+
+    const auto parsed_virtual_display =
+      parse_or_default(launch_int_field::binary_option, virtual_display, defaults.virtual_display);
+    const auto parsed_scale_factor =
+      parse_or_default(launch_int_field::scale_factor, scale_factor, defaults.scale_factor);
+    const auto parsed_sbs_mode =
+      parse_or_default(launch_int_field::sbs_mode, sbs_mode, defaults.sbs_mode);
+    if (!parsed_virtual_display || !parsed_scale_factor || !parsed_sbs_mode) {
+      return std::nullopt;
+    }
+
+    return launch_display_options_t {
+      static_cast<bool>(*parsed_virtual_display),
+      static_cast<std::uint32_t>(*parsed_scale_factor),
+      *parsed_sbs_mode,
+    };
+  }
+
   std::optional<crypto::aes_t> parse_remote_input_key(std::string_view key) {
     if (key.size() != 32) {
       return std::nullopt;
@@ -649,6 +681,28 @@ namespace nvhttp {
     return parsed && *parsed != 0 ? parsed : std::nullopt;
   }
 
+  detail::cancel_admission_e detail::cancel_admission(
+    std::optional<std::string_view> presented_host_session_id,
+    std::uint64_t retained_host_session_id,
+    std::string_view retained_client_uuid,
+    std::string_view requesting_client_uuid
+  ) {
+    if (presented_host_session_id) {
+      const auto parsed_host_session_id = parse_host_session_id(*presented_host_session_id);
+      if (parsed_host_session_id && host_session_matches(retained_host_session_id, *parsed_host_session_id)) {
+        return cancel_admission_e::allowed_by_host_session_id;
+      }
+      return cancel_admission_e::rejected;
+    }
+
+    if (retained_host_session_id != 0 &&
+        !retained_client_uuid.empty() &&
+        retained_client_uuid == requesting_client_uuid) {
+      return cancel_admission_e::allowed_by_session_owner;
+    }
+    return cancel_admission_e::rejected;
+  }
+
   static std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(const args_t &args, const crypto::named_cert_t *named_cert_p) {
     static constexpr std::array required_args {
       "corever",
@@ -656,11 +710,8 @@ namespace nvhttp {
       "mode",
       "rikey",
       "rikeyid",
-      "scaleFactor",
-      "sbsMode",
       "sops",
       "surroundAudioInfo",
-      "virtualDisplay",
     };
     for (const auto name : required_args) {
       if (args.find(name) == args.end()) {
@@ -727,10 +778,15 @@ namespace nvhttp {
     const auto host_audio = parse_launch_int(launch_int_field::binary_option, get_arg(args, "localAudioPlayMode"));
     const auto surround_info = parse_launch_int(launch_int_field::surround_info, get_arg(args, "surroundAudioInfo"));
     const auto enable_hdr = parse_launch_int(launch_int_field::binary_option, get_arg(args, "hdrMode", "0"));
-    const auto virtual_display = parse_launch_int(launch_int_field::binary_option, get_arg(args, "virtualDisplay"));
-    const auto scale_factor = parse_launch_int(launch_int_field::scale_factor, get_arg(args, "scaleFactor"));
-    const auto sbs_mode = parse_launch_int(launch_int_field::sbs_mode, get_arg(args, "sbsMode"));
-    if (!enable_sops || !host_audio || !surround_info || !enable_hdr || !virtual_display || !scale_factor || !sbs_mode) {
+    // These Apollo display extensions are optional for encrypted clients that implement the base
+    // GameStream launch contract. Missing values use conservative defaults, while explicit invalid
+    // values are still rejected.
+    const auto display_options = parse_launch_display_options(
+      find_arg(args, "virtualDisplay"),
+      find_arg(args, "scaleFactor"),
+      find_arg(args, "sbsMode")
+    );
+    if (!enable_sops || !host_audio || !surround_info || !enable_hdr || !display_options) {
       BOOST_LOG(warning) << "Rejecting invalid launch options for client ["sv << named_cert_p->name << ']';
       return nullptr;
     }
@@ -739,7 +795,7 @@ namespace nvhttp {
         static_cast<std::uint32_t>(parsed_mode->width),
         static_cast<std::uint32_t>(parsed_mode->height)
       );
-    if (*sbs_mode == video::SBS_AI && !host_sbs_rejection.empty()) {
+    if (display_options->sbs_mode == video::SBS_AI && !host_sbs_rejection.empty()) {
       const auto fitted = models::fit_host_sbs_v2_depth_tensor_shape(
         static_cast<std::uint32_t>(parsed_mode->width),
         static_cast<std::uint32_t>(parsed_mode->height)
@@ -756,9 +812,9 @@ namespace nvhttp {
     launch_session->host_audio = *host_audio;
     launch_session->surround_info = *surround_info;
     launch_session->enable_hdr = *enable_hdr;
-    launch_session->virtual_display = *virtual_display;
-    launch_session->scale_factor = static_cast<std::uint32_t>(*scale_factor);
-    launch_session->sbs_mode = *sbs_mode;
+    launch_session->virtual_display = display_options->virtual_display;
+    launch_session->scale_factor = display_options->scale_factor;
+    launch_session->sbs_mode = display_options->sbs_mode;
 
     return launch_session;
   }
@@ -1608,6 +1664,9 @@ namespace nvhttp {
 
       if (tree.empty()) {
         BOOST_LOG(error) << EMPTY_PROPERTY_TREE_ERROR_MSG;
+        tree.put("root.resume", 0);
+        tree.put("root.<xmlattr>.status_code", 500);
+        tree.put("root.<xmlattr>.status_message", "Internal server error");
       }
 
       pt::write_xml(data, tree);
@@ -1633,7 +1692,8 @@ namespace nvhttp {
     }
 
     auto args = request->parse_query_string();
-    const auto presented_host_session_id = parse_host_session_id(get_arg(args, "hostSessionId"));
+    const auto host_session_id_arg = find_arg(args, "hostSessionId");
+    const auto presented_host_session_id = host_session_id_arg ? parse_host_session_id(*host_session_id_arg) : std::nullopt;
     if (!presented_host_session_id ||
         !detail::host_session_matches(proc::proc.get_host_session_id(), *presented_host_session_id)) {
       tree.put("root.resume", 0);
@@ -1642,8 +1702,8 @@ namespace nvhttp {
       return;
     }
     const bool appid_supplied = args.find("appid"s) != std::end(args);
-    const auto appid_text = get_arg(args, "appid");
-    const auto appuuid = get_arg(args, "appuuid");
+    const auto appid_text = get_arg(args, "appid", "");
+    const auto appuuid = get_arg(args, "appuuid", "");
     std::optional<int> requested_appid;
     if (appid_supplied && !appid_text.empty()) {
       const auto parsed_appid = parse_launch_int(launch_int_field::app_id, appid_text);
@@ -1815,6 +1875,13 @@ namespace nvhttp {
     auto g = util::fail_guard([&]() {
       std::ostringstream data;
 
+      if (tree.empty()) {
+        BOOST_LOG(error) << EMPTY_PROPERTY_TREE_ERROR_MSG;
+        tree.put("root.cancel", 0);
+        tree.put("root.<xmlattr>.status_code", 500);
+        tree.put("root.<xmlattr>.status_message", "Internal server error");
+      }
+
       pt::write_xml(data, tree);
       response->write(data.str());
       response->close_connection_after_response = true;
@@ -1828,7 +1895,7 @@ namespace nvhttp {
     if (!(named_cert_p->perm & PERM::launch)) {
       BOOST_LOG(debug) << "Permission CancelApp denied for [" << named_cert_p->name << "] (" << (uint32_t) named_cert_p->perm << ")";
 
-      tree.put("root.resume", 0);
+      tree.put("root.cancel", 0);
       tree.put("root.<xmlattr>.status_code", 403);
       tree.put("root.<xmlattr>.status_message", "Permission denied");
 
@@ -1837,19 +1904,30 @@ namespace nvhttp {
 
     std::lock_guard launch_lock(launch_request_mutex);
     const auto args = request->parse_query_string();
-    const auto presented_host_session_id = parse_host_session_id(get_arg(args, "hostSessionId"));
-    if (!presented_host_session_id ||
-        !detail::host_session_matches(proc::proc.get_host_session_id(), *presented_host_session_id)) {
+    const auto process_status = proc::proc.get_status();
+    const auto presented_host_session_id = find_arg(args, "hostSessionId");
+    const auto admission = detail::cancel_admission(
+      presented_host_session_id,
+      process_status.host_session_id,
+      process_status.client_uuid,
+      named_cert_p->uuid
+    );
+    if (admission == detail::cancel_admission_e::rejected) {
+      BOOST_LOG(warning) << "Rejecting cancel request from client [" << named_cert_p->name
+                         << "]: hostSessionId is absent without matching retained-session ownership, malformed, or stale";
       tree.put("root.cancel", 0);
       tree.put("root.<xmlattr>.status_code", 409);
       tree.put("root.<xmlattr>.status_message", "Missing or stale host session ID");
       return;
     }
+    if (admission == detail::cancel_admission_e::allowed_by_session_owner) {
+      BOOST_LOG(info) << "Accepting tokenless cancel from retained session owner [" << named_cert_p->name << ']';
+    }
+
+    terminate_active_session_locked();
 
     tree.put("root.cancel", 1);
     tree.put("root.<xmlattr>.status_code", 200);
-
-    terminate_active_session_locked();
   }
 
   void appasset(resp_https_t response, req_https_t request) {

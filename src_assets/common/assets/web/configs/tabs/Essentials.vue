@@ -22,7 +22,7 @@ const resumeWindows = [0, 30000, 60000, 300000]
 
 const driverState = computed(() => {
   const states = {
-    0: { label: 'Ready', tone: 'success', detail: 'Virtual display is available for XR sessions.' },
+    0: { label: 'Ready', tone: 'success', detail: 'Virtual display is available for private sessions.' },
     1: { label: 'Checking', tone: 'neutral', detail: 'Sunshine 3D has not reported virtual display health yet.' },
     '-1': { label: 'Not initialized', tone: 'warning', detail: 'The virtual display driver is not initialized.' },
     '-2': { label: 'Update required', tone: 'danger', detail: 'The installed virtual display driver is incompatible.' },
@@ -61,7 +61,7 @@ function setOnOff(key, event) {
         <div>
           <p class="settings-eyebrow">Identity</p>
           <h2>This PC</h2>
-          <p>How Sunshine 3D appears to your XR headset and other devices.</p>
+          <p>How Sunshine 3D appears to paired devices.</p>
         </div>
       </div>
 
@@ -121,7 +121,7 @@ function setOnOff(key, event) {
           <option :value="60000">1 minute</option>
           <option :value="300000">5 minutes</option>
         </select>
-        <small>Keeps the single active session ready while a headset reconnects.</small>
+        <small>Keeps the single active session ready while a device reconnects.</small>
       </label>
 
       <label class="simple-field" for="host-3d-strength">
@@ -163,7 +163,7 @@ function setOnOff(key, event) {
       <div class="settings-card-heading compact">
         <div class="settings-icon"><i class="fas fa-vr-cardboard"></i></div>
         <div>
-          <p class="settings-eyebrow">XR readiness</p>
+          <p class="settings-eyebrow">3D readiness</p>
           <h2>Virtual display</h2>
         </div>
         <span class="status-pill" :class="`status-${driverState.tone}`">

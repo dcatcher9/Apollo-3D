@@ -97,7 +97,7 @@ namespace confighttp {
     const std::string_view path
   ) {
     if (
-      method == "POST" &&
+      (method == "POST" || method == "DELETE") &&
       (
         path == "/api/offline-sbs/browse" ||
         path == "/api/offline-sbs/jobs" ||
@@ -2092,6 +2092,18 @@ namespace confighttp {
     );
   }
 
+  void clearOfflineSbsJob(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    const auto reply = offline_sbs::clear(request->path_match[1].str());
+    send_json_response(
+      response,
+      offline_reply_status(reply, SimpleWeb::StatusCode::success_ok),
+      reply.json()
+    );
+  }
+
   /**
    * @brief Start the HTTPS server.
    */
@@ -2141,6 +2153,8 @@ namespace confighttp {
       cancelOfflineSbsJob;
     server.resource["^/api/offline-sbs/jobs/([0-9A-Fa-f-]+)/scene-audit$"]["GET"] =
       getOfflineSbsSceneAudit;
+    server.resource["^/api/offline-sbs/jobs/([0-9A-Fa-f-]+)$"]["DELETE"] =
+      clearOfflineSbsJob;
     server.resource["^/api/offline-sbs/jobs/([0-9A-Fa-f-]+)$"]["GET"] =
       getOfflineSbsJob;
     server.resource["^/api/config$"]["GET"] = getConfig;

@@ -123,6 +123,13 @@ export async function cancelOfflineSbsJob(jobId, { signal } = {}) {
   })
 }
 
+export async function clearOfflineSbsJob(jobId, { signal } = {}) {
+  return request(`${OFFLINE_SBS_JOBS_URL}/${requireJobId(jobId)}`, {
+    method: 'DELETE',
+    signal,
+  })
+}
+
 export async function downloadOfflineSbsSceneAudit(jobId, { signal } = {}) {
   const response = await fetch(
     `${OFFLINE_SBS_JOBS_URL}/${requireJobId(jobId)}/scene-audit`,

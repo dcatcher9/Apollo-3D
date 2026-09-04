@@ -128,6 +128,7 @@ namespace proc {
     bool virtual_display;
     std::uint64_t host_session_id;
     bool enable_hdr;
+    std::string client_uuid;
   };
 
   struct render_size_t {

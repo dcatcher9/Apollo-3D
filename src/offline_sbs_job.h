@@ -247,6 +247,7 @@ namespace offline_sbs {
 
     [[nodiscard]] service_reply_t create(const create_request_t &request);
     [[nodiscard]] service_reply_t cancel(std::string_view id);
+    [[nodiscard]] service_reply_t clear(std::string_view id);
     [[nodiscard]] service_reply_t get(std::string_view id) const;
     [[nodiscard]] scene_audit_reply_t scene_audit(std::string_view id) const;
     [[nodiscard]] browse_reply_t browse(const browse_request_t &request) const;
@@ -275,6 +276,7 @@ namespace offline_sbs {
   void shutdown();
   service_reply_t create(const create_request_t &request);
   service_reply_t cancel(std::string_view id);
+  service_reply_t clear(std::string_view id);
   service_reply_t get(std::string_view id);
   scene_audit_reply_t scene_audit(std::string_view id);
   browse_reply_t browse(const browse_request_t &request);

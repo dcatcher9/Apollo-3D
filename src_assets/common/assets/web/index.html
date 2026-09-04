@@ -13,7 +13,7 @@
       <div>
         <p class="apollo-eyebrow">Host control</p>
         <h1>{{ hostName }}</h1>
-        <p class="apollo-page-intro">Your PC is the one place to pair devices, choose apps, and check XR readiness.</p>
+        <p class="apollo-page-intro">Your PC is the one place to pair devices, choose apps, and check 3D readiness.</p>
       </div>
       <span class="apollo-state-pill" :class="`is-${overallState.tone}`" role="status">
         <span class="apollo-state-dot" aria-hidden="true"></span>
@@ -76,7 +76,7 @@
       <div class="apollo-section-heading">
         <div>
           <p class="apollo-kicker">At a glance</p>
-          <h2 id="readiness-title">XR readiness</h2>
+          <h2 id="readiness-title">3D readiness</h2>
         </div>
         <button class="apollo-refresh-button" type="button" :disabled="refreshing" @click="loadOverview(true)" aria-label="Refresh host status">
           <i class="fa-solid fa-rotate" :class="{ 'fa-spin': refreshing }" aria-hidden="true"></i>
@@ -114,7 +114,7 @@
         <span class="apollo-empty-icon" aria-hidden="true"><i class="fa-solid fa-display"></i></span>
         <div class="apollo-empty-copy">
           <h3>No active session</h3>
-          <p>{{ pairedClients.length ? 'Sunshine 3D is ready when you open this PC in Moonlight 3D.' : 'Pair an Android XR device to start streaming from this PC.' }}</p>
+          <p>{{ pairedClients.length ? 'Sunshine 3D is ready when you open this PC in Moonlight 3D.' : 'Pair a device running Moonlight 3D to start streaming from this PC.' }}</p>
         </div>
         <a class="btn btn-apollo-quiet" :href="pairedClients.length ? './apps' : './pin'">
           {{ pairedClients.length ? 'Open Library' : 'Pair Moonlight 3D' }}
@@ -221,8 +221,8 @@
         return this.activeApp?.name || (this.currentApp ? 'Desktop' : 'Desktop session')
       },
       sessionDeviceName() {
-        if (this.activeClient) return this.activeClient.name || 'XR device'
-        return 'your XR device'
+        if (this.activeClient) return this.activeClient.name || 'remote device'
+        return 'your remote device'
       },
       sessionState() {
         if (this.activeClient) return 'streaming'
@@ -254,9 +254,9 @@
           return { status: this.loading ? 'Checking' : 'Automatic', tone: 'neutral', description: 'Sunshine 3D will use the best available display for the device.' }
         }
         const status = Number(this.config.vdisplayStatus)
-        if (status === 0) return { status: 'Ready', tone: 'success', description: 'A private XR display is available when an app requests it.' }
+        if (status === 0) return { status: 'Ready', tone: 'success', description: 'A private display is available when an app requests it.' }
         if (status === 1 || Number.isNaN(status)) return { status: 'Checking', tone: 'neutral', description: 'Sunshine 3D is checking the private-display driver.' }
-        if (status === -2) return { status: 'Update needed', tone: 'warning', description: 'Update the private-display driver before using isolated XR sessions.' }
+        if (status === -2) return { status: 'Update needed', tone: 'warning', description: 'Update the private-display driver before using isolated streaming sessions.' }
         return { status: 'Needs attention', tone: 'danger', description: 'The private-display driver is not available.' }
       },
       overallState() {
@@ -283,7 +283,7 @@
         if (this.activeClient) {
           return {
             kicker: 'Live now',
-            title: `${this.activeClient.name || 'Your XR device'} is streaming`,
+            title: `${this.activeClient.name || 'Your remote device'} is streaming`,
             description: `${this.activeAppName} is the only active session on this PC.`,
             icon: 'fa-vr-cardboard',
             primaryLabel: 'Manage device',
@@ -297,7 +297,7 @@
           return {
             kicker: 'Quick resume',
             title: 'Session is ready to reconnect',
-            description: `${this.activeAppName} is being kept ready for your XR device.`,
+            description: `${this.activeAppName} is being kept ready for your remote device.`,
             icon: 'fa-clock-rotate-left',
             primaryLabel: 'End session',
             primaryIcon: 'fa-stop',
@@ -309,8 +309,8 @@
         if (!this.pairedClients.length) {
           return {
             kicker: 'Start here',
-            title: 'Pair your first XR device',
-            description: 'Connect Moonlight 3D once, then this PC will be ready whenever you put on your headset or glasses.',
+            title: 'Pair your first device',
+            description: 'Connect through Moonlight 3D once, then this PC will be ready whenever you return.',
             icon: 'fa-link',
             primaryLabel: 'Pair Moonlight 3D',
             primaryIcon: 'fa-qrcode',
@@ -321,7 +321,7 @@
         }
         return {
           kicker: 'Host online',
-          title: 'Ready for XR',
+          title: 'Ready for 3D',
           description: 'Open Sunshine 3D in Moonlight 3D to start this PC’s single streaming session.',
           icon: 'fa-check',
           primaryLabel: 'Pair another device',
@@ -339,13 +339,13 @@
           return { tone: 'danger', icon: 'fa-circle-exclamation', title: 'Sunshine 3D reported a startup problem', message: this.latestFatal, action: 'View logs', href: './troubleshooting#logs' }
         }
         if (this.virtualDisplayStatus.tone === 'danger' || this.virtualDisplayStatus.tone === 'warning') {
-          return { tone: 'warning', icon: 'fa-display', title: 'Private XR display needs attention', message: this.virtualDisplayStatus.description, action: 'Open display settings', href: './config#av' }
+          return { tone: 'warning', icon: 'fa-display', title: 'Private display needs attention', message: this.virtualDisplayStatus.description, action: 'Open display settings', href: './config#av' }
         }
         if (this.depthError) {
           return { tone: 'warning', icon: 'fa-cubes', title: 'AI 3D is not ready', message: '2D streaming is still available while the depth engine is checked.', action: 'View diagnostics', href: './troubleshooting#logs' }
         }
         if (this.connectedClients.length > 1) {
-          return { tone: 'warning', icon: 'fa-users-viewfinder', title: 'More than one device is connected', message: 'Sunshine 3D is designed around one active XR session per PC.', action: 'Manage devices', href: './pin' }
+          return { tone: 'warning', icon: 'fa-users-viewfinder', title: 'More than one device is connected', message: 'Sunshine 3D is designed around one active remote session per PC.', action: 'Manage devices', href: './pin' }
         }
         return null
       },
@@ -353,7 +353,7 @@
         const streaming = this.latestFatal
           ? { status: 'Needs attention', tone: 'danger', description: 'Resolve the startup issue before beginning a stream.' }
           : this.activeClient
-            ? { status: 'Streaming', tone: 'active', description: `Sending ${this.activeAppName} to ${this.activeClient.name || 'your XR device'}.` }
+            ? { status: 'Streaming', tone: 'active', description: `Sending ${this.activeAppName} to ${this.activeClient.name || 'your remote device'}.` }
             : this.encoderReady
               ? { status: 'Ready', tone: 'success', description: 'Hardware video encoding is available for Moonlight 3D.' }
               : { status: this.loading ? 'Checking' : 'Automatic', tone: 'neutral', description: 'Sunshine 3D chooses the best encoder when streaming begins.' }
@@ -436,7 +436,7 @@
       },
       async endSession() {
         if (this.actionBusy) return
-        if (!window.confirm('End the current session on this PC? The connected XR device will be disconnected.')) return
+        if (!window.confirm('End the current session on this PC? The connected device will be disconnected.')) return
         this.actionBusy = 'end'
         this.actionError = ''
         try {

@@ -421,6 +421,7 @@ namespace proc {
       _virtual_display,
       _host_session_id,
       _launch_session && _launch_session->enable_hdr,
+      _launch_session ? _launch_session->unique_id : std::string {},
     };
   }
 

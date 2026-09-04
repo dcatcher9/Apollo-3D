@@ -1,5 +1,5 @@
 <script setup>
-import {onMounted, onUnmounted, ref} from 'vue'
+import {computed, onMounted, onUnmounted, ref} from 'vue'
 
 const props = defineProps({
   embedded: {
@@ -12,6 +12,11 @@ const devices = ref([])
 const error = ref('')
 const savingId = ref('')
 let refreshTimer = null
+
+const visibleDevices = computed(() => {
+  if (!props.embedded) return devices.value
+  return devices.value.filter(device => device.decision === 'approved')
+})
 
 const refresh = async () => {
   try {
@@ -55,7 +60,7 @@ onUnmounted(() => {
 
 <template>
   <section
-    v-if="!props.embedded || devices.length > 0 || error"
+    v-if="!props.embedded || visibleDevices.length > 0 || error"
     id="ar-glasses"
     class="config-page ar-glasses-section"
     :class="{'ar-glasses-embedded': props.embedded}"
@@ -64,7 +69,7 @@ onUnmounted(() => {
       <div>
         <h2 id="ar-glasses-heading">Local AR glasses</h2>
         <p class="text-body-secondary mb-0">
-          Sunshine 3D can present directly to glasses connected as a Windows display. Remote XR streaming
+          Sunshine 3D can present directly to glasses connected as a Windows display. Remote streaming
           temporarily takes priority over local presentation.
         </p>
       </div>
@@ -77,7 +82,7 @@ onUnmounted(() => {
     </div>
 
     <div class="ar-device-grid">
-      <article v-for="device in devices" :key="device.id" class="ar-display-card">
+      <article v-for="device in visibleDevices" :key="device.id" class="ar-display-card">
         <div class="ar-display-header">
           <div class="ar-display-icon"><i class="fa-solid fa-glasses"></i></div>
           <div>

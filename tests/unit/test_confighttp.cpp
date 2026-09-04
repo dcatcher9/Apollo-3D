@@ -96,6 +96,13 @@ TEST(ConfigHttpRequestBoundary, AppliesOfflineLimitBeforeRouteDispatch) {
   );
   EXPECT_EQ(
     confighttp::request_content_length_limit(
+      "DELETE",
+      "/api/offline-sbs/jobs/00000000-0000-0000-0000-000000000000"
+    ),
+    confighttp::OFFLINE_SBS_REQUEST_MAX_BYTES
+  );
+  EXPECT_EQ(
+    confighttp::request_content_length_limit(
       "POST",
       "/api/covers/upload"
     ),

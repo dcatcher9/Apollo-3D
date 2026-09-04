@@ -3741,6 +3741,270 @@ namespace offline_sbs {
       return total;
     }
 
+#ifdef _WIN32
+    bool retire_completed_staging_locked(
+      const std::shared_ptr<record_t> &record,
+      std::string &error
+    ) const {
+      if (
+        record->snapshot.state != job_state_e::complete ||
+        record->snapshot.operation != operation_e::convert ||
+        !record->worker.staging_output ||
+        !record->worker.final_output ||
+        !record->snapshot.worker_result.is_object() ||
+        !record->snapshot.worker_result.value("published", false)
+      ) {
+        error = "completed publication contract is incomplete";
+        return false;
+      }
+
+      bool cleanup_complete = false;
+      std::string cleanup_error;
+      const bool cleanup_accessible = run_user_filesystem_action([&]() {
+        std::optional<std::vector<pinned_handle_t>> output_directory_pins;
+        do {
+          // Check the staging leaf before the final output or its parent. If
+          // the exact staging pathname is already absent, there is nothing
+          // left for the protected record to retire even when the user has
+          // since moved or deleted the whole media directory.
+          bool staging_missing = false;
+          auto staged_file = publication_file_t::open(
+            *record->worker.staging_output,
+            std::nullopt,
+            cleanup_error,
+            &staging_missing
+          );
+          if (staging_missing) {
+            cleanup_error.clear();
+            cleanup_complete = true;
+            break;
+          }
+          if (!staged_file) {
+            break;
+          }
+
+          if (
+            record->snapshot.output_location ==
+              output_location_e::input_directory
+          ) {
+            output_directory_pins = pin_publication_directory(
+              record->worker.final_output->parent_path(),
+              cleanup_error
+            );
+            if (!output_directory_pins) {
+              break;
+            }
+            if (!file_matches_publish_identity(
+                  *record->worker.staging_output,
+                  staged_file->identity()
+                )) {
+              cleanup_error =
+                "retained staging output changed while its directory was "
+                "being pinned";
+              break;
+            }
+          }
+
+          try {
+            const auto &identity =
+              record->snapshot.worker_result.at("publish_identity");
+            if (!identity.is_object()) {
+              cleanup_error =
+                "completed publication identity is not an object";
+              break;
+            }
+            if (staged_file->identity() != identity) {
+              cleanup_error =
+                "retained staging output identity changed after publication";
+              break;
+            }
+            if (!file_matches_publish_identity(
+                  *record->worker.final_output,
+                  identity
+                )) {
+              // The staging link can be the last intact copy if the user moved,
+              // deleted, or replaced the final path. Preserve it rather than
+              // making Clear destructive.
+              cleanup_error =
+                "the converted output is missing or changed; the retained "
+                "staging file may be its last intact copy";
+              break;
+            }
+            cleanup_complete =
+              staged_file->retire_staging_link(cleanup_error);
+          } catch (const std::exception &exception) {
+            cleanup_error =
+              std::string {"invalid completed publication contract: "} +
+              exception.what();
+          }
+        } while (false);
+
+        if (
+          output_directory_pins &&
+          !revalidate_pins(
+            *output_directory_pins,
+            "offline output directory during staging cleanup",
+            cleanup_error
+          )
+        ) {
+          cleanup_complete = false;
+        }
+      }, cleanup_error);
+      if (!cleanup_accessible || !cleanup_complete) {
+        error = cleanup_error.empty() ?
+                  "completed staging cleanup did not finish" :
+                  cleanup_error;
+        return false;
+      }
+      error.clear();
+      return true;
+    }
+#endif
+
+    bool clear_terminal_record_locked(
+      const std::shared_ptr<record_t> &record,
+      std::string &error
+    ) {
+      if (!is_terminal(record->snapshot.state)) {
+        error = "only a finished offline SBS job can be cleared";
+        return false;
+      }
+#ifdef _WIN32
+      const bool staging_cleanup_pending =
+        record->snapshot.worker_result.is_object() &&
+        record->snapshot.worker_result.value(
+          "staging_cleanup_pending",
+          false
+        );
+      if (staging_cleanup_pending) {
+        std::string cleanup_error;
+        if (!retire_completed_staging_locked(record, cleanup_error)) {
+          error = "retained staging cleanup is not safe: " + cleanup_error;
+          return false;
+        }
+        record->snapshot.worker_result["staging_cleanup_pending"] = false;
+        std::string persist_error;
+        if (!persist_locked(*record, persist_error)) {
+          error =
+            "cannot persist completed staging cleanup: " + persist_error;
+          return false;
+        }
+      }
+#endif
+      if (
+        record->snapshot.output_location ==
+          output_location_e::input_directory &&
+        record->worker.staging_output
+      ) {
+        std::optional<std::uint64_t> staging_charge;
+        std::string staging_error;
+        const bool staging_inspected = run_user_filesystem_action([&]() {
+          staging_charge = retained_staging_charge(
+            *record->worker.staging_output,
+            staging_error
+          );
+          if (!staging_charge) {
+            throw std::runtime_error(staging_error);
+          }
+        }, staging_error);
+        if (!staging_inspected || !staging_charge) {
+          error =
+            "the retained staging path could not be inspected safely: " +
+            staging_error;
+          return false;
+        }
+        if (*staging_charge != 0) {
+          // The protected record is the only durable map to a staging name
+          // outside the legacy managed exports root. Preserve it until the
+          // exact path disappears; the manager never deletes an unattested
+          // or possibly replaced user-writable leaf by pathname.
+          error =
+            "remove the retained .sunshine3d-*.part* file before clearing "
+            "this job";
+          return false;
+        }
+      }
+#ifdef _WIN32
+      if (
+        record->snapshot.worker_result.is_object() &&
+        record->snapshot.worker_result.value(
+          "staging_cleanup_pending",
+          false
+        )
+      ) {
+        error =
+          "staging cleanup remains pending because the protected publication "
+          "contract is incomplete";
+        return false;
+      }
+#endif
+
+      std::lock_guard artifact_lock {record->artifact_mutex};
+#ifdef _WIN32
+      if (!revalidate_pins(
+            managed_root_pins,
+            "offline managed roots",
+            error
+          )) {
+        return false;
+      }
+#endif
+      if (!record->worker_artifacts_pruned) {
+#ifdef _WIN32
+        if (!record->worker_result_pin_released_for_prune) {
+          if (record->worker_path_pins.empty()) {
+            error = "worker result path is not identity-pinned";
+          }
+          if (
+            record->worker_path_pins.empty() ||
+            !revalidate_pins(
+              record->worker_path_pins,
+              "offline worker job paths",
+              error
+            )
+          ) {
+            return false;
+          }
+        }
+#endif
+        if (!record->worker_tree) {
+          error = "offline SBS worker tree is not identity-pinned";
+          return false;
+        }
+#ifdef _WIN32
+        // Release the child result pin before the retained tree removes that
+        // exact child by handle. The job-root removal pin remains continuously
+        // held, and a failed pass records the release so it can be retried.
+        record->worker_path_pins.clear();
+        record->worker_result_pin_released_for_prune = true;
+#endif
+        if (!run_user_filesystem_action([&]() {
+              if (!record->worker_tree->remove(error)) {
+                throw std::runtime_error(error);
+              }
+            }, error)) {
+          // Keep durable state, the exact root pin, and the in-memory record so
+          // a later pass can retry without resolving a user-writable pathname.
+          return false;
+        }
+        record->worker_tree.reset();
+        record->worker_artifacts_pruned = true;
+      }
+
+      if (
+        !safe_filesystem::remove_tree_no_follow(
+          record->state_path.parent_path(),
+          error
+        )
+      ) {
+        // The durable record remains recoverable. A restart recognizes a
+        // missing worker tree as an already completed first clear phase.
+        return false;
+      }
+      jobs.erase(record->snapshot.id);
+      return true;
+    }
+
     void prune_history_locked(const std::size_t reserved_job_slots = 0) {
       const auto retained_job_limit =
         reserved_job_slots >= config.max_retained_jobs ?
@@ -3785,52 +4049,6 @@ namespace offline_sbs {
         return left->snapshot.id < right->snapshot.id;
       });
       for (const auto &record : terminal) {
-        if (
-          record->snapshot.output_location ==
-            output_location_e::input_directory &&
-          record->worker.staging_output
-        ) {
-          std::optional<std::uint64_t> staging_charge;
-          std::string staging_error;
-          const bool staging_inspected = run_user_filesystem_action([&]() {
-            staging_charge = retained_staging_charge(
-              *record->worker.staging_output,
-              staging_error
-            );
-            if (!staging_charge) {
-              throw std::runtime_error(staging_error);
-            }
-          }, staging_error);
-          if (!staging_inspected || !staging_charge) {
-            BOOST_LOG(warning)
-              << "Retaining offline SBS record because its input-directory "
-                 "staging path could not be inspected ["sv
-              << record->snapshot.id << "]: "sv << staging_error;
-            continue;
-          }
-          if (*staging_charge != 0) {
-            // The protected record is the only durable map to a staging name
-            // outside the legacy managed exports root. Preserve it until the
-            // exact path disappears; the manager never deletes an unattested
-            // or possibly replaced user-writable leaf by pathname.
-            continue;
-          }
-        }
-#ifdef _WIN32
-        if (
-          record->snapshot.worker_result.is_object() &&
-          record->snapshot.worker_result.value(
-            "staging_cleanup_pending",
-            false
-          )
-        ) {
-          // The protected record is the only durable authority that can prove
-          // which user-writable staging identity is safe to retire. Keep it
-          // until handle-based recovery succeeds; pruning it would turn a
-          // transient disposition failure into a permanent quota leak.
-          continue;
-        }
-#endif
         const auto pressure_requires_prune = [&]() {
           return
             jobs.size() > retained_job_limit ||
@@ -3853,99 +4071,20 @@ namespace offline_sbs {
           continue;
         }
 
-        std::lock_guard artifact_lock {record->artifact_mutex};
-        std::string worker_error;
-#ifdef _WIN32
-        if (!revalidate_pins(
-              managed_root_pins,
-              "offline managed roots",
-              worker_error
-            )) {
-          BOOST_LOG(warning)
-            << "Refusing to prune through changed offline managed roots ["sv
-            << record->snapshot.id << "]: "sv << worker_error;
-          continue;
-        }
-#endif
-        if (!record->worker_artifacts_pruned) {
-#ifdef _WIN32
-          if (!record->worker_result_pin_released_for_prune) {
-            if (record->worker_path_pins.empty()) {
-              worker_error = "worker result path is not identity-pinned";
-            }
-            if (
-              record->worker_path_pins.empty() ||
-              !revalidate_pins(
-                record->worker_path_pins,
-                "offline worker job paths",
-                worker_error
-              )
-            ) {
-              BOOST_LOG(warning)
-                << "Refusing to prune changed offline SBS worker paths ["sv
-                << record->snapshot.id << "]: "sv << worker_error;
-              continue;
-            }
-          }
-#endif
-          if (!record->worker_tree) {
-            BOOST_LOG(warning)
-              << "Refusing to prune unpinned offline SBS worker tree ["sv
-              << record->snapshot.id << "]"sv;
-            continue;
-          }
-#ifdef _WIN32
-          // Release the child result pin before the retained tree removes that
-          // exact child by handle. The job-root removal pin remains continuously
-          // held, and a failed pass records the release so it can be retried.
-          record->worker_path_pins.clear();
-          record->worker_result_pin_released_for_prune = true;
-#endif
-          if (!run_user_filesystem_action([&]() {
-                if (!record->worker_tree->remove(worker_error)) {
-                  throw std::runtime_error(worker_error);
-                }
-              }, worker_error)) {
-            BOOST_LOG(warning)
-              << "Could not prune offline SBS worker artifacts ["sv
-              << record->snapshot.id << "]: "sv << worker_error;
-            // Keep durable state, the exact root pin, and the in-memory record so
-            // a later pass can retry without resolving a user-writable pathname.
-            continue;
-          }
-          record->worker_tree.reset();
-          record->worker_artifacts_pruned = true;
-          quota_error.clear();
-          retained_bytes = retained_artifact_bytes_locked(quota_error);
-          if (!retained_bytes) {
-            BOOST_LOG(warning)
-              << "Could not remeasure retained offline artifacts after worker "
-                 "pruning: "sv
-              << quota_error;
-          }
-        }
-
-        std::string state_error;
-        if (
-          !safe_filesystem::remove_tree_no_follow(
-            record->state_path.parent_path(),
-            state_error
-          )
-        ) {
-          BOOST_LOG(warning)
-            << "Could not prune protected offline SBS state ["sv
-            << record->snapshot.id << "]: "sv << state_error;
-          // The durable record remains recoverable. A restart recognizes a
-          // missing worker tree as an already completed first prune phase.
-          continue;
-        }
-        jobs.erase(record->snapshot.id);
+        std::string prune_error;
+        const bool pruned = clear_terminal_record_locked(record, prune_error);
         quota_error.clear();
         retained_bytes = retained_artifact_bytes_locked(quota_error);
         if (!retained_bytes) {
           BOOST_LOG(warning)
             << "Could not remeasure retained offline artifacts after pruning: "sv
             << quota_error;
+        }
+        if (!pruned) {
+          BOOST_LOG(warning)
+            << "Could not prune offline SBS job ["sv
+            << record->snapshot.id << "]: "sv << prune_error;
+          continue;
         }
       }
     }
@@ -4315,76 +4454,11 @@ namespace offline_sbs {
           // A disposition failure after publication can leave a completed
           // record with two hard links. Retry cleanup on every restart using
           // the protected publish identity and a DELETE-capable handle to the
-          // exact staging file; never unlink a re-resolved pathname.
-          bool cleanup_pending = true;
+          // exact staging file. The shared helper checks for an already-missing
+          // staging leaf before it requires the final video to still exist.
           std::string cleanup_error;
-          if (!run_user_filesystem_action([&]() {
-                std::optional<std::vector<pinned_handle_t>> output_directory_pins;
-                if (
-                  record->snapshot.output_location ==
-                    output_location_e::input_directory
-                ) {
-                  output_directory_pins = pin_publication_directory(
-                    record->worker.final_output->parent_path(),
-                    cleanup_error
-                  );
-                  if (!output_directory_pins) {
-                    return;
-                  }
-                }
-                try {
-                  const auto &identity =
-                    record->snapshot.worker_result.at("publish_identity");
-                  if (
-                    !identity.is_object() ||
-                    !file_matches_publish_identity(
-                      *record->worker.final_output,
-                      identity
-                    )
-                  ) {
-                    cleanup_error =
-                      "completed publication identity no longer matches its "
-                      "final output";
-                    return;
-                  }
-                  bool staging_missing = false;
-                  auto staged_file = publication_file_t::open(
-                    *record->worker.staging_output,
-                    identity,
-                    cleanup_error,
-                    &staging_missing
-                  );
-                  if (staging_missing) {
-                    cleanup_pending = false;
-                    return;
-                  }
-                  if (!staged_file) {
-                    // A mismatched or inaccessible pathname is not ours to
-                    // delete. Leave it quota-visible and retry on a later
-                    // restart in case the failure was transient.
-                    return;
-                  }
-                  cleanup_pending =
-                    !staged_file->retire_staging_link(cleanup_error);
-                } catch (const std::exception &exception) {
-                  cleanup_error =
-                    std::string {
-                      "invalid completed publication contract: "
-                    } + exception.what();
-                }
-                if (
-                  output_directory_pins &&
-                  !revalidate_pins(
-                    *output_directory_pins,
-                    "offline output directory during cleanup recovery",
-                    cleanup_error
-                  )
-                ) {
-                  cleanup_pending = true;
-                }
-              }, cleanup_error)) {
-            cleanup_pending = true;
-          }
+          const bool cleanup_pending =
+            !retire_completed_staging_locked(record, cleanup_error);
           const bool marker_changed =
             record->snapshot.worker_result.value(
               "staging_cleanup_pending",
@@ -6175,6 +6249,45 @@ namespace offline_sbs {
     };
   }
 
+  service_reply_t job_service_t::clear(const std::string_view id) {
+    std::lock_guard lock {impl_->mutex};
+    if (!impl_->started || impl_->stopping) {
+      return {
+        .code = error_code_e::not_initialized,
+        .error = "offline SBS job manager is not running",
+      };
+    }
+    const auto iterator = impl_->jobs.find(std::string {id});
+    if (iterator == impl_->jobs.end()) {
+      return {
+        .code = error_code_e::not_found,
+        .error = "offline SBS job was not found",
+      };
+    }
+    const auto record = iterator->second;
+    if (!is_terminal(record->snapshot.state)) {
+      return {
+        .code = error_code_e::conflict,
+        .error = "an active offline SBS job must be canceled before it can be cleared",
+        .job = record->snapshot,
+      };
+    }
+
+    std::string clear_error;
+    if (!impl_->clear_terminal_record_locked(record, clear_error)) {
+      return {
+        .code = error_code_e::io_error,
+        .error = "offline SBS job could not be cleared safely: " + clear_error,
+        .job = record->snapshot,
+      };
+    }
+    impl_->changed.notify_all();
+    return {
+      .ok = true,
+      .job = record->snapshot,
+    };
+  }
+
   service_reply_t job_service_t::get(const std::string_view id) const {
     std::lock_guard lock {impl_->mutex};
     if (!impl_->started) {
@@ -6202,6 +6315,7 @@ namespace offline_sbs {
     std::shared_ptr<impl_t::record_t> record;
     job_state_e state_at_lookup = job_state_e::queued;
     std::optional<std::uint64_t> expected_scene_count;
+    std::optional<std::string> expected_audit_sha256;
     {
       std::lock_guard lock {impl_->mutex};
       if (!impl_->started) {
@@ -6220,6 +6334,15 @@ namespace offline_sbs {
       record = iterator->second;
       state_at_lookup = record->snapshot.state;
       expected_scene_count = record->snapshot.progress.scene_count;
+      if (
+        record->snapshot.worker_result.is_object() &&
+        record->snapshot.worker_result.contains("scene_audit_sha256") &&
+        record->snapshot.worker_result["scene_audit_sha256"].is_string()
+      ) {
+        expected_audit_sha256 =
+          record->snapshot.worker_result["scene_audit_sha256"]
+            .get<std::string>();
+      }
     }
     if (!is_terminal(state_at_lookup)) {
       return {
@@ -6228,16 +6351,6 @@ namespace offline_sbs {
       };
     }
     const bool completed_job = state_at_lookup == job_state_e::complete;
-    std::optional<std::string> expected_audit_sha256;
-    if (
-      record->snapshot.worker_result.is_object() &&
-      record->snapshot.worker_result.contains("scene_audit_sha256") &&
-      record->snapshot.worker_result["scene_audit_sha256"].is_string()
-    ) {
-      expected_audit_sha256 =
-        record->snapshot.worker_result["scene_audit_sha256"]
-          .get<std::string>();
-    }
     if (
       !expected_audit_sha256 ||
       expected_audit_sha256->size() != 64
@@ -6881,6 +6994,21 @@ namespace offline_sbs {
       };
     }
     return service->cancel(id);
+  }
+
+  service_reply_t clear(const std::string_view id) {
+    std::shared_ptr<job_service_t> service;
+    {
+      std::lock_guard lock {global_mutex};
+      service = global_service;
+    }
+    if (!service) {
+      return {
+        .code = error_code_e::not_initialized,
+        .error = "offline SBS job manager is not initialized",
+      };
+    }
+    return service->clear(id);
   }
 
   service_reply_t get(const std::string_view id) {

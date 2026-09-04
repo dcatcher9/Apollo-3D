@@ -135,8 +135,12 @@ publication.
 3. Select the input file.
 4. For conversion, choose the output name and H.265 or AV1.
 5. Stop any live stream/local presenter and start the job.
-6. Monitor source-frame progress and causal scene epochs.
-7. Download the causal audit or use the atomically published video after completion.
+6. Monitor source-frame progress for the current job.
+7. Use the atomically published video after completion.
+8. Clear the finished job to remove its retained temporary files and history. Published video is
+   preserved. If staging cleanup was interrupted, Clear retires only the identity-attested staging
+   link after confirming the published video still matches; an absent staging link is already clean.
+   A replaced staging path or a staging file that may be the last intact copy is preserved.
 
 There are no lookahead, cache-size, or administrative-split controls.
 

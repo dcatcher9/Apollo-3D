@@ -81,6 +81,27 @@ TEST(NvHttpLaunchParsingTest, ValidatesRetainedHostSessionTokensExactly) {
   EXPECT_FALSE(nvhttp::detail::host_session_matches(42, 41));
 }
 
+TEST(NvHttpLaunchParsingTest, AdmitsCancelByExactHostSessionToken) {
+  using admission = nvhttp::detail::cancel_admission_e;
+  using nvhttp::detail::cancel_admission;
+
+  EXPECT_EQ(cancel_admission("42", 42, "owner", "other-client"), admission::allowed_by_host_session_id);
+  EXPECT_EQ(cancel_admission("41", 42, "owner", "owner"), admission::rejected);
+  EXPECT_EQ(cancel_admission("", 42, "owner", "owner"), admission::rejected);
+  EXPECT_EQ(cancel_admission("invalid", 42, "owner", "owner"), admission::rejected);
+  EXPECT_EQ(cancel_admission("0", 42, "owner", "owner"), admission::rejected);
+}
+
+TEST(NvHttpLaunchParsingTest, AdmitsTokenlessCancelOnlyForRetainedSessionOwner) {
+  using admission = nvhttp::detail::cancel_admission_e;
+  using nvhttp::detail::cancel_admission;
+
+  EXPECT_EQ(cancel_admission(std::nullopt, 42, "owner", "owner"), admission::allowed_by_session_owner);
+  EXPECT_EQ(cancel_admission(std::nullopt, 42, "owner", "other-client"), admission::rejected);
+  EXPECT_EQ(cancel_admission(std::nullopt, 42, "", "owner"), admission::rejected);
+  EXPECT_EQ(cancel_admission(std::nullopt, 0, "owner", "owner"), admission::rejected);
+}
+
 TEST(NvHttpLaunchParsingTest, MatchesCanonicalApplicationIdentity) {
   EXPECT_TRUE(nvhttp::detail::app_identity_matches(7, "ABC-DEF", 7, "abc-def"));
   EXPECT_TRUE(nvhttp::detail::app_identity_matches(std::nullopt, "ABC-DEF", 7, "abc-def"));
@@ -112,4 +133,31 @@ TEST(NvHttpLaunchParsingTest, EnforcesScalarLaunchOptionContracts) {
   EXPECT_EQ(parse_launch_int(field::sbs_mode, "1"), 1);
   EXPECT_FALSE(parse_launch_int(field::sbs_mode, "-1"));
   EXPECT_FALSE(parse_launch_int(field::sbs_mode, "2"));
+}
+
+TEST(NvHttpLaunchParsingTest, DefaultsMissingDisplayExtensionsConservatively) {
+  const auto options = nvhttp::parse_launch_display_options(
+    std::nullopt,
+    std::nullopt,
+    std::nullopt
+  );
+
+  ASSERT_TRUE(options);
+  EXPECT_EQ(*options, (nvhttp::launch_display_options_t {false, 100, 0}));
+}
+
+TEST(NvHttpLaunchParsingTest, ValidatesExplicitDisplayExtensions) {
+  using maybe_value = std::optional<std::string_view>;
+
+  EXPECT_EQ(
+    nvhttp::parse_launch_display_options(
+      maybe_value {"1"},
+      maybe_value {"125"},
+      maybe_value {"1"}
+    ),
+    (nvhttp::launch_display_options_t {true, 125, 1})
+  );
+  EXPECT_FALSE(nvhttp::parse_launch_display_options(maybe_value {"2"}, std::nullopt, std::nullopt));
+  EXPECT_FALSE(nvhttp::parse_launch_display_options(std::nullopt, maybe_value {"201"}, std::nullopt));
+  EXPECT_FALSE(nvhttp::parse_launch_display_options(std::nullopt, std::nullopt, maybe_value {"2"}));
 }
