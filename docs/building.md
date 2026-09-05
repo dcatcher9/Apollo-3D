@@ -20,7 +20,8 @@ The NVIDIA Windows headers use the MSVC interface-vtable layout. After extractin
 apply the repository's idempotent MinGW compatibility patch once before configuring:
 
 ```powershell
-python .\patch_trt.py C:\path\to\TensorRT
+$BuildPython = "C:\absolute\path\to\python.exe"
+& $BuildPython .\patch_trt.py C:\path\to\TensorRT
 ```
 
 Re-running the command is safe and should report zero changed files. Apply it again whenever the
@@ -73,16 +74,24 @@ repository tooling uses it to distinguish generated artifacts.
 
 ## Test
 
+Select the validated evaluator interpreter as `$SbsbenchPython` using the
+[sbsbench runtime procedure](../tools/sbsbench/README.md#required-evaluation-loop).
+The machine-local interpreter and DLL paths belong to [AGENTS.md](../AGENTS.md).
+
 ```powershell
-$env:PATH = "C:\msys64\ucrt64\bin;C:\path\to\TensorRT\bin;C:\Program Files\nodejs;$env:PATH"
+$env:PATH = "C:\msys64\ucrt64\bin;C:\path\to\TensorRT\bin;C:\path\to\TensorRT\lib;C:\Program Files\nodejs;$env:PATH"
 C:\msys64\ucrt64\bin\ninja.exe -C cmake-build-relwithdebinfo test_sunshine
-cmake-build-relwithdebinfo\tests\test_sunshine.exe
-python -m unittest discover -s tools/sbsbench -p "test_*.py"
+Push-Location cmake-build-relwithdebinfo
+& .\tests\test_sunshine.exe
+Pop-Location
+& $SbsbenchPython -m unittest discover -s tools/sbsbench -p "test_*.py"
 ```
 
 GPU-dependent Host SBS and offline-worker checks require a compatible NVIDIA host and are not
 substitutes for the ordinary unit suite. Follow [CLAUDE.md](../CLAUDE.md) and
 [sbsbench](../tools/sbsbench/README.md) for their controlled evaluation loop.
+The [joint workflow gate](joint-workflow-tests.md) runs the focused host/client boundary suites
+and documents the portable CI subset separately from GPU and device checks.
 
 ## Offline media tools
 
@@ -98,8 +107,8 @@ cmake -B cmake-build-relwithdebinfo -G Ninja -S . `
 ```
 
 Sunshine 3D deliberately does not search the user's `PATH` and the Web UI cannot choose executable
-paths. The FFmpeg build must provide the required decoders/demuxers, concat support, static-HDR
-filters, Matroska/MP4 muxers, and `hevc_nvenc`/`av1_nvenc`. The job performs its real NVENC
+paths. The FFmpeg build must provide the codecs, rawvideo pipe formats, filters and muxers required
+by [Offline Host 3D conversion](whole-clip-sbs-pipeline.md). The job performs its real NVENC
 preflight only after acquiring the exclusive offline GPU lease.
 
 ## Package

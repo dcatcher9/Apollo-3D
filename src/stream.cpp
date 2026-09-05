@@ -1029,7 +1029,8 @@ namespace stream {
           auto result = proc::live_video_mode_result_e::unchanged;
           if (proc::proc.live_video_mode_needs_display_change(
                 job->change.width,
-                job->change.height
+                job->change.height,
+                job->change.encodingFramerate
               )) {
             result = proc::proc.apply_live_video_mode(
               job->change.width,
@@ -3769,6 +3770,9 @@ namespace stream {
         }
 
         session.client_policy_generation = generation;
+        if (session.input) {
+          input::update_permissions(session.input, new_permissions);
+        }
         session.permission.store(new_permissions, std::memory_order_release);
         previous_name = session.device_name;
         session.device_name = name;
@@ -3898,7 +3902,7 @@ namespace stream {
     }
 
     int start(session_t &session) {
-      session.input = input::alloc(session.mail);
+      session.input = input::alloc(session.mail, permissions(session));
 
       session.broadcast_ref = broadcast.ref();
       if (!session.broadcast_ref) {

@@ -59,8 +59,8 @@ param(
   [string] $FixtureColor = 'sdr',
 
   [ValidateRange(16, 4096)]
-  # The deterministic 1280x720 SDR fixture needs slightly more than 64 MiB for
-  # the conservative two-source/two-SBS overlap reservation. Keep the default
+  # Keep SDR and HDR fixtures within the conservative two-source/three-SBS raw-memory
+  # overlap reservation by default. Keep the default
   # on the production asynchronous path while allowing callers to exercise the
   # bounded one-source/synchronous-encoder fallback with a smaller explicit
   # value; CPU serialization remains on its one-slot worker thread.
@@ -438,7 +438,9 @@ function New-WorkerSpec {
     [string] $FfmpegVersion,
 
     [Parameter(Mandatory = $true)]
-    [string] $FfprobeVersion
+    [string] $FfprobeVersion,
+
+    [int] $RasterMiB = $TransientRasterMiB
   )
 
   $resultDirectory = Join-Path $JobDirectory 'result'
@@ -470,7 +472,7 @@ function New-WorkerSpec {
       version = $FfprobeVersion
     }
     transient_raster = [ordered] @{
-      hard_cap_bytes = ([long] $TransientRasterMiB * 1024L * 1024L)
+      hard_cap_bytes = ([long] $RasterMiB * 1024L * 1024L)
     }
     codec = $Codec
     pipeline = [ordered] @{
@@ -515,6 +517,40 @@ function Invoke-Worker {
       $Worker.SpecSha256
     ) `
     -WorkingDirectory (Split-Path -Parent $script:SunshinePath)
+}
+
+# This fixture has only 16 frames. Assemble its bounded audit in the test after
+# authenticating each page; production/UI always read one bounded page at a time.
+function Read-VerifiedAudit {
+  param([string] $Path, [string] $ExpectedHash)
+  Assert-Contract ((Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() -eq $ExpectedHash) 'audit manifest digest differs from worker attestation'
+  $manifest = Read-JsonFile -Path $Path
+  Assert-Contract ($manifest.schema -eq 4 -and $manifest.version -eq 'whole-clip-scene-audit-v4') 'paged audit contract changed'
+  Assert-Contract ([long] $manifest.storage.scene_count -le 16) 'smoke audit exceeds fixture bound'
+  $scenes = @()
+  $boundaries = @()
+  $nextScene = 1L
+  $nextSequence = 1L
+  $bytes = 0L
+  foreach ($descriptor in $manifest.pages) {
+    Assert-Contract ([long] $descriptor.index -ge 0 -and [long] $descriptor.index -lt 16) 'audit page index exceeds fixture bound'
+    $pagePath = Join-Path (Split-Path -Parent $Path) "scene-audit-page-$($descriptor.index).json"
+    $file = Get-Item -LiteralPath $pagePath
+    Assert-Contract ($file.Length -eq [long] $descriptor.bytes -and $file.Length -le 2L * 1024 * 1024) 'audit page bytes differ from manifest'
+    Assert-Contract ((Get-FileHash -LiteralPath $pagePath -Algorithm SHA256).Hash.ToLowerInvariant() -eq $descriptor.sha256) 'audit page digest differs from manifest'
+    $page = Read-JsonFile -Path $pagePath
+    Assert-Contract ([long] $descriptor.first_scene_id -eq $nextScene -and [long] $descriptor.start_sequence -eq $nextSequence) 'audit page coverage is not contiguous'
+    Assert-Contract (@($page.scenes).Count -eq [long] $descriptor.scene_count) 'audit page scene count differs from manifest'
+    $scenes += @($page.scenes)
+    $boundaries += @($page.boundary_revisions)
+    $nextScene += [long] $descriptor.scene_count
+    $nextSequence = [long] $descriptor.end_sequence_exclusive
+    $bytes += $file.Length
+  }
+  Assert-Contract ($nextScene - 1 -eq [long] $manifest.storage.scene_count -and $nextSequence -eq 17 -and $bytes -eq [long] $manifest.storage.total_page_bytes) 'audit manifest totals disagree with authenticated pages'
+  $manifest | Add-Member -NotePropertyName scenes -NotePropertyValue $scenes
+  $manifest | Add-Member -NotePropertyName boundary_revisions -NotePropertyValue $boundaries
+  return $manifest
 }
 
 function Assert-SourceFixture {
@@ -974,6 +1010,28 @@ title=Smoke chapter
     (Get-Item -LiteralPath $failureOutput).Length -eq 0
   ) 'failed worker left a nonempty partial encoded output'
 
+  if ($fixtureIsHdr) {
+    Write-Host '[offline-sbs-smoke] checking HDR source/upload budget before allocation'
+    foreach ($budgetOperation in @('convert', 'evaluate')) {
+      $budgetWorker = New-WorkerSpec `
+        -JobDirectory (Join-Path $runRoot "budget-$budgetOperation-job") `
+        -InputPath $sourcePath `
+        -StagingOutput (Join-Path $runRoot "budget-$budgetOperation-output.mkv") `
+        -Operation $budgetOperation `
+        -JobId ([guid]::NewGuid().ToString()) `
+        -FfmpegVersion $ffmpegVersion `
+        -FfprobeVersion $ffprobeVersion `
+        -RasterMiB 16
+      $budgetRun = Invoke-Worker -Worker $budgetWorker
+      Assert-Contract ($budgetRun.ExitCode -eq 2) 'HDR source/upload over-budget worker must fail'
+      $budgetResult = Read-JsonFile -Path $budgetWorker.ResultPath
+      Assert-Contract (
+        $budgetResult.status -eq 'failed' -and
+        $budgetResult.error -like '*HDR upload and decoder pipe*before allocation*'
+      ) 'HDR source/upload budget was not rejected before allocation'
+    }
+  }
+
   Write-Host '[offline-sbs-smoke] checking native D3D11/TensorRT/model prerequisite'
   $preflightFrames = Join-Path $runRoot 'preflight-frames'
   $preflightOutput = Join-Path $runRoot 'preflight-output'
@@ -1032,7 +1090,7 @@ title=Smoke chapter
   }
 
   $result = Read-JsonFile -Path $successWorker.ResultPath
-  Assert-Contract ($result.schema -eq 2) 'worker result schema changed'
+  Assert-Contract ($result.schema -eq 3) 'worker result schema changed'
   Assert-Contract ($result.status -eq 'complete') 'worker result is not complete'
   Assert-Contract ($result.job_id -eq $successWorker.JobId) 'worker result job identity changed'
   Assert-Contract ($result.operation -eq 'convert') 'worker result operation changed'
@@ -1041,7 +1099,7 @@ title=Smoke chapter
   Assert-Contract ($result.python_dependency -eq $false) 'worker unexpectedly reports a Python dependency'
   Assert-Contract ([long] $result.source.frame_count -eq 16) 'worker source frame count changed'
   Assert-Contract ([long] $result.scene_count -gt 0) 'worker committed no scenes'
-  Assert-Contract (@($result.scenes).Count -eq [long] $result.scene_count) 'worker result scene count is inconsistent'
+  Assert-Contract (@($result.scenes).Count -eq [math]::Min(32, [long] $result.scene_count)) 'worker result scene count is inconsistent'
   Assert-Contract (@($result.replay_contracts).Count -eq 0) 'direct conversion unexpectedly published replay contracts'
   Assert-Contract ([long] $result.cache.peak_bytes -eq 0) 'direct conversion unexpectedly wrote a scene cache'
   Assert-Contract ([long] $result.cache.remaining_bytes -eq 0) 'direct conversion retained cached frame bytes'
@@ -1071,16 +1129,16 @@ title=Smoke chapter
     [long] $runtimeContract.follow_first_sequence -eq 1 -and
     $runtimeContract.follow_native_input_deletion -eq $false
   ) 'direct conversion is not using the event-driven unpaced follow path'
-  $expectedFollowFormat = 'bmp'
-  $expectedInputFrameFormat = 'sRGB-BMP-WIC'
+  $expectedFollowFormat = 'bgra8'
+  $expectedInputFrameFormat = 'sRGB-BGRA8-raw'
   if ($fixtureIsHdr) {
-    $expectedFollowFormat = 'pfm'
-    $expectedInputFrameFormat = 'linear-scRGB-f32-pfm'
+    $expectedFollowFormat = 'gbrpf32le'
+    $expectedInputFrameFormat = 'linear-scRGB-f32-planar'
   }
   Assert-Contract (
     $runtimeContract.follow_format -eq $expectedFollowFormat -and
-    $runtimeContract.follow_frame_pattern -eq
-      "frame_%010d.$expectedFollowFormat" -and
+    $null -eq $runtimeContract.follow_frame_pattern -and
+    $runtimeContract.frame_transport -eq 'bounded-raw-memory-v1' -and
     $runtimeContract.input_frame_format -eq $expectedInputFrameFormat
   ) 'direct conversion follow raster contract disagrees with the source color mode'
   Assert-Contract (
@@ -1110,35 +1168,35 @@ title=Smoke chapter
       [long] $runtimeContract.output_eye_height
   ) 'direct conversion SBS geometry disagrees with its resolved online renderer geometry'
 
-  # The overlap reservation includes pipeline-owned CPU residency, not just
-  # files: each of two SBS slots reserves its tight snapshot, serializer
-  # scratch, and serialized artifact. Equality proves this multi-frame smoke
-  # selected the bounded asynchronous path without adding a wire diagnostic.
+  # Raw memory bounds include two source leases, the HDR upload conversion,
+  # three packed readbacks, bounded OS pipes, and one 64 KiB HDR conversion chunk.
   $sbsPixels = [long] $sbsContract.width * [long] $sbsContract.height
+  $sourceBytes = [long] $result.cache.analysis_source_raster_bytes
+  $expectedOverlapBytes = 2L * $sourceBytes + 1024L * 1024 + 64L * 1024
   if ($fixtureIsHdr) {
-    $snapshotBytesPerSlot = 8L * $sbsPixels
-    $serializerScratchBytesPerSlot = 12L * [long] $sbsContract.width
-    $serializedBytesPerSlot = 12L * $sbsPixels + 128L
+    $expectedOverlapBytes += ($sourceBytes / 12L * 8L) + 3L * 8L * $sbsPixels + 64L * 1024
+    $expectedSbsFormat = 'rgba16f'
   } else {
-    $snapshotBytesPerSlot = 4L * $sbsPixels
-    $serializerScratchBytesPerSlot = 4L * $sbsPixels + 1L * 1024L * 1024L
-    $serializedBytesPerSlot = 8L * $sbsPixels + 1L * 1024L * 1024L
+    $expectedOverlapBytes += 3L * 4L * $sbsPixels
+    $expectedSbsFormat = 'bgra8'
   }
-  $expectedOverlapBytes =
-    2L * [long] $result.cache.analysis_source_raster_bytes +
-    2L * (
-      $snapshotBytesPerSlot +
-      $serializerScratchBytesPerSlot +
-      $serializedBytesPerSlot
-    )
+  $packedBytes = $sbsPixels * $(if ($fixtureIsHdr) { 8L } else { 4L })
+  $expectedSerialBytes = $expectedOverlapBytes - $sourceBytes - 2L * $packedBytes
+  $expectedRasterBytes = if ($expectedOverlapBytes -le [long] $result.cache.hard_cap_bytes) {
+    $expectedOverlapBytes
+  } else {
+    $expectedSerialBytes
+  }
   Assert-Contract (
-    $expectedOverlapBytes -le [long] $result.cache.hard_cap_bytes
-  ) 'smoke hard cap no longer selects the bounded asynchronous conversion path'
+    $expectedRasterBytes -le [long] $result.cache.hard_cap_bytes
+  ) 'smoke hard cap cannot hold the minimum serial raster reservation'
   Assert-Contract (
-    [long] $result.cache.peak_live_raster_bytes -eq $expectedOverlapBytes
-  ) 'worker did not attest the complete two-source/two-SBS overlap reservation'
+    [long] $result.cache.peak_live_raster_bytes -eq $expectedRasterBytes
+  ) 'worker did not attest the selected serial or overlapping raw-memory reservation'
   Assert-Contract (
-    $sbsContract.frame_format -eq $runtimeContract.output_frame_format -and
+    $sbsContract.frame_format -eq $expectedSbsFormat -and
+    $null -eq $sbsContract.file_pattern -and
+    $sbsContract.row_order -eq 'top-down' -and
     $sbsContract.transfer -eq $runtimeContract.output_transfer -and
     $sbsContract.primaries -eq $runtimeContract.output_primaries -and
     $sbsContract.row_order -eq $runtimeContract.output_row_order -and
@@ -1146,9 +1204,9 @@ title=Smoke chapter
   ) 'direct conversion SBS media contract disagrees with its native runtime'
 
   $nativeWork = Join-Path $successWorker.JobDirectory 'native-work'
-  Assert-Contract (
-    Test-Path -LiteralPath (Join-Path $nativeWork 'logs\analysis-harness.log') -PathType Leaf
-  ) 'direct conversion did not leave its single analysis/conversion harness log'
+  $rasters = @(Get-ChildItem -LiteralPath (Join-Path $nativeWork 'analysis-input'), (Join-Path $nativeWork 'analysis-output') -File | Where-Object { $_.Extension -in @('.bmp', '.pfm', '.png') })
+  Assert-Contract ($rasters.Count -eq 0) 'raw-memory conversion published a disk raster'
+  Assert-Contract (-not (Test-Path -LiteralPath (Join-Path $nativeWork 'encoded-video.ffconcat'))) 'raw-memory conversion still uses a concat/HTTP frame bridge'
   foreach ($forbiddenPath in @(
       (Join-Path $nativeWork 'scene-cache'),
       (Join-Path $nativeWork 'render-input'),
@@ -1167,9 +1225,9 @@ title=Smoke chapter
   ) 'worker produced no compressed Matroska output'
 
   $auditPath = Join-Path $successWorker.ResultDirectory 'scene-audit.json'
-  $audit = Read-JsonFile -Path $auditPath
-  Assert-Contract ($audit.schema -eq 3) 'scene audit schema changed'
-  Assert-Contract ($audit.version -eq 'whole-clip-scene-audit-v3') 'scene audit version changed'
+  $audit = Read-VerifiedAudit -Path $auditPath -ExpectedHash $result.scene_audit_manifest_sha256
+  Assert-Contract ($audit.schema -eq 4) 'scene audit schema changed'
+  Assert-Contract ($audit.version -eq 'whole-clip-scene-audit-v4') 'scene audit version changed'
   Assert-Contract ($audit.status -eq 'complete') 'scene audit is not complete'
   Assert-Contract (@($audit.scenes).Count -eq [long] $result.scene_count) 'full scene audit count differs from result'
   Assert-Contract ($audit.claims.ground_truth -eq $false) 'scene audit incorrectly claims ground truth'
@@ -1353,7 +1411,7 @@ title=Smoke chapter
   $evaluationAnalysis = $evaluation.analysis_contract
   $evaluationRuntime = $evaluationAnalysis.resolved_runtime
   Assert-Contract (
-    $evaluation.schema -eq 2 -and
+    $evaluation.schema -eq 3 -and
     $evaluation.status -eq 'complete' -and
     $evaluation.operation -eq 'evaluate' -and
     $evaluation.worker_spec_sha256 -eq $evaluationWorker.SpecSha256 -and
@@ -1374,8 +1432,8 @@ title=Smoke chapter
   Assert-Contract (
     $evaluationRuntime.follow_mode -eq $true -and
     $evaluationRuntime.follow_format -eq $expectedFollowFormat -and
-    $evaluationRuntime.follow_frame_pattern -eq
-      "frame_%010d.$expectedFollowFormat" -and
+    $evaluationRuntime.frame_transport -eq 'bounded-raw-memory-v1' -and
+    $null -eq $evaluationRuntime.follow_frame_pattern -and
     $evaluationRuntime.input_frame_format -eq $expectedInputFrameFormat -and
     [long] $evaluationRuntime.follow_poll_interval_ms -eq 0 -and
     $evaluationRuntime.parallax_v2_render -eq $true -and
@@ -1406,7 +1464,7 @@ title=Smoke chapter
   ) 'evaluation and conversion disagreed on causal online scene count'
   $evaluationScenes = @($evaluation.scenes)
   Assert-Contract (
-    $evaluationScenes.Count -eq [long] $evaluation.scene_count
+    $evaluationScenes.Count -eq [math]::Min(32, [long] $evaluation.scene_count)
   ) 'evaluation scene array disagrees with its declared causal scene count'
   for ($sceneIndex = 0; $sceneIndex -lt $causalScenes.Count; ++$sceneIndex) {
     Assert-Contract (
@@ -1420,11 +1478,11 @@ title=Smoke chapter
         $causalScenes[$sceneIndex].boundary.semantic_cut
     ) "evaluation and conversion disagreed on causal scene $($sceneIndex + 1)"
   }
-  $evaluationAudit = Read-JsonFile -Path (
+  $evaluationAudit = Read-VerifiedAudit -Path (
     Join-Path $evaluationWorker.ResultDirectory 'scene-audit.json'
-  )
+  ) -ExpectedHash $evaluation.scene_audit_manifest_sha256
   Assert-Contract (
-    $evaluationAudit.schema -eq 3 -and
+    $evaluationAudit.schema -eq 4 -and
     $evaluationAudit.policy.implementation -eq 'native-causal-scene-tracker' -and
     $evaluationAudit.policy.lookahead -eq $false -and
     @($evaluationAudit.scenes).Count -eq [long] $evaluation.scene_count

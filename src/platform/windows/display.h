@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -30,6 +31,7 @@
 
 // local includes
 #include "src/platform/common.h"
+#include "capture_timing.h"
 #include "src/generated/sbs_adaptive_state_contract.h"
 #include "src/host_sbs_adaptive_submission.h"
 #include "src/utility.h"
@@ -125,68 +127,6 @@ namespace platf::dxgi {
 
     private:
       bool initialized_ = false;
-    };
-
-    /** Retain and retry the newest local-presenter source without imposing a minimum-FPS loop.
-     *
-     * Source conversion and swapchain presentation are separate ownership steps: a busy latency
-     * wait leaves conversion pending, while a busy Present leaves only the already-converted
-     * backbuffer pending. This prevents both losing the final output and reconverting/re-enqueuing
-     * the same pixels merely to retry Present.
-     */
-    class local_presenter_retry_state_t {
-    public:
-      constexpr void observe_source() noexcept {
-        phase_ = phase_e::conversion_pending;
-      }
-
-      /** A conversion triggered by an asynchronous pipeline notification can happen after the
-       * source was already presented once. Re-arm the output before Present so swapchain
-       * backpressure cannot discard that newly rendered result. */
-      constexpr void record_converted() noexcept {
-        phase_ = phase_e::presentation_pending;
-      }
-
-      [[nodiscard]] constexpr bool should_process(
-        const bool has_retained_source,
-        const bool depth_pipeline_ready,
-        const bool conversion_poll_pending
-      ) const noexcept {
-        return has_retained_source &&
-               (phase_ != phase_e::idle || depth_pipeline_ready ||
-                conversion_poll_pending);
-      }
-
-      [[nodiscard]] constexpr bool should_convert(
-        const bool has_retained_source,
-        const bool depth_pipeline_ready,
-        const bool conversion_poll_pending
-      ) const noexcept {
-        return has_retained_source &&
-               (phase_ == phase_e::conversion_pending || depth_pipeline_ready ||
-                conversion_poll_pending);
-      }
-
-      constexpr void record_presented() noexcept {
-        phase_ = phase_e::idle;
-      }
-
-      [[nodiscard]] constexpr bool presentation_pending() const noexcept {
-        return phase_ == phase_e::presentation_pending;
-      }
-
-      [[nodiscard]] constexpr bool conversion_pending() const noexcept {
-        return phase_ == phase_e::conversion_pending;
-      }
-
-    private:
-      enum class phase_e {
-        idle,
-        conversion_pending,
-        presentation_pending,
-      };
-
-      phase_e phase_ = phase_e::idle;
     };
 
     [[nodiscard]] constexpr bool host_sbs_window_authority_observation_needed(
@@ -1056,6 +996,15 @@ namespace platf::dxgi {
 
     capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override;
 
+    // Only local presentation supplies this callback. It is sampled on the capture/presenter
+    // owner thread and bounds waits while that same thread has retained GPU/presentation work.
+    capture_e capture_with_pending_work(
+      const push_captured_image_cb_t &push_captured_image_cb,
+      const pull_free_image_cb_t &pull_free_image_cb,
+      bool *cursor,
+      const std::function<bool()> &has_pending_work
+    );
+
     void set_client_frame_rate(int framerate, int framerate_x100) override;
 
     factory1_t factory;
@@ -1246,7 +1195,7 @@ namespace platf::dxgi {
     ~wgc_capture_t();
 
     int init(display_base_t *display, const ::video::config_t &config);
-    capture_e next_frame(std::chrono::milliseconds timeout, ID3D11Texture2D **out, uint64_t &out_time);
+    capture_e next_frame(std::chrono::milliseconds timeout, ID3D11Texture2D **out, detail::wgc_timestamp_t &out_time);
     capture_e release_frame();
     int set_cursor_visible(bool);
   };

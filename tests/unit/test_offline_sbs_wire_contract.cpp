@@ -1,9 +1,11 @@
 #include "src/offline_sbs_wire_contract.h"
+#include "src/offline_sbs_paged_audit.h"
 
 #include <cstdint>
 #include <limits>
 #include <optional>
 #include <string>
+#include <map>
 
 #include <gtest/gtest.h>
 
@@ -662,4 +664,122 @@ TEST(OfflineSbsWireContractTest, JobSnapshotPreservesAuthoritativeDecisionBound)
     offline_sbs::wire::parse_job_snapshot_contract(encoded, false),
     offline_sbs::wire::contract_error
   );
+}
+
+TEST(OfflineSbsWireContractTest, RawTransportRoundTripsWithoutRasterFilenames) {
+  auto value = worker_result();
+  auto &runtime = value.analysis_contract.resolved_runtime;
+  runtime.frame_transport = "bounded-raw-memory-v1";
+  runtime.input_frame_format = "sRGB-BGRA8-raw";
+  runtime.output_frame_format = "sRGB-BGRA8-raw";
+  runtime.output_ffmpeg_pixel_format = "bgra";
+  runtime.follow_format = "bgra8";
+  runtime.follow_frame_pattern.reset();
+  auto &sbs = value.analysis_contract.sbs;
+  sbs.file_pattern.reset();
+  sbs.frame_format = "bgra8";
+  sbs.ffmpeg_pixel_format = "bgra";
+  auto encoded = offline_sbs::wire::to_json(value);
+  EXPECT_EQ(offline_sbs::wire::parse_worker_result_contract(encoded).analysis_contract.sbs.frame_format, "bgra8");
+  encoded["analysis_contract"]["resolved_runtime"].erase("frame_transport");
+  EXPECT_THROW(offline_sbs::wire::parse_worker_result_contract(encoded), offline_sbs::wire::contract_error);
+  value.analysis_contract.sbs.file_pattern = "frame_%010d.png";
+  EXPECT_THROW(offline_sbs::wire::to_json(value), offline_sbs::wire::contract_error);
+}
+
+namespace {
+  offline_sbs::scene_plan_t paged_scene(const std::uint64_t id, const bool final = false) {
+    auto scene = scene_record();
+    scene.scene_id = scene.semantic_scene_id = id;
+    scene.start_sequence = id * 2 - 1;
+    scene.end_sequence_exclusive = id * 2 + 1;
+    scene.start_pts_seconds.reset();
+    scene.end_pts_seconds_exclusive.reset();
+    scene.boundary.decision = final ? offline_sbs::boundary_decision_e::end_of_stream : offline_sbs::boundary_decision_e::confirmed;
+    scene.boundary.semantic_cut = !final;
+    scene.boundary.final_sequence = scene.end_sequence_exclusive;
+    return scene;
+  }
+  offline_sbs::wire::scene_audit_contract_t paged_summary(const std::string &status = "complete") {
+    offline_sbs::wire::scene_audit_contract_t result;
+    result.status = status;
+    result.hard_cap_bytes = 1000;
+    result.timeline_contract = nlohmann::json::object();
+    return result;
+  }
+}
+
+TEST(OfflineSbsPagedAudit, LongClipKeepsEverySceneWithBoundedPagesAndRecentTail) {
+  std::map<std::string, std::string> files;
+  offline_sbs::paged_scene_audit_writer_t writer([&](std::string_view name, std::string_view bytes) {
+    EXPECT_TRUE(files.emplace(name, bytes).second);
+    EXPECT_LE(bytes.size(), offline_sbs::scene_audit_page_max_bytes);
+    return std::string(64, 'a');
+  });
+  constexpr std::uint64_t count = 2001;
+  for (std::uint64_t id = 1; id <= count; ++id) {
+    writer.append(paged_scene(id, id == count));
+    EXPECT_LE(writer.pending_scene_count(), offline_sbs::scene_audit_page_max_scenes);
+    EXPECT_LE(writer.recent_scenes().size(), offline_sbs::scene_audit_recent_scenes);
+  }
+  const auto manifest = offline_sbs::wire::parse_scene_audit_contract(writer.manifest(paged_summary()));
+  EXPECT_GT(count, offline_sbs::max_serialized_scene_count);
+  EXPECT_EQ(manifest.scene_count, count);
+  EXPECT_EQ(manifest.boundary_count, count - 1);
+  EXPECT_EQ(manifest.covered_end_sequence, count * 2 + 1);
+  EXPECT_EQ(manifest.pages.size(), 16u);
+  EXPECT_TRUE(manifest.scenes.empty());
+  EXPECT_EQ(writer.recent_scenes().front().scene_id, count - 31);
+  std::uint64_t total = 0;
+  for (const auto &descriptor : manifest.pages) {
+    const auto &bytes = files.at(offline_sbs::wire::scene_audit_page_filename(descriptor.index));
+    const auto page = offline_sbs::wire::parse_scene_audit_page(nlohmann::json::parse(bytes));
+    EXPECT_EQ(bytes.size(), descriptor.bytes);
+    EXPECT_NO_THROW(offline_sbs::wire::validate_scene_audit_page(page, descriptor, descriptor.index + 1 == manifest.pages.size()));
+    total += page.scenes.size();
+  }
+  EXPECT_EQ(total, count);
+  EXPECT_THROW(writer.append(paged_scene(count + 1)), std::runtime_error);
+}
+
+TEST(OfflineSbsPagedAudit, ManifestRejectsMissingReorderedOrOverBudgetPages) {
+  offline_sbs::paged_scene_audit_writer_t writer([](auto, auto) { return std::string(64, 'a'); });
+  for (std::uint64_t id = 1; id <= 129; ++id) writer.append(paged_scene(id, id == 129));
+  const auto manifest = writer.manifest(paged_summary());
+  auto changed = manifest;
+  changed["pages"].erase(0);
+  EXPECT_THROW(offline_sbs::wire::parse_scene_audit_contract(changed), offline_sbs::wire::contract_error);
+  changed = manifest;
+  std::swap(changed["pages"][0], changed["pages"][1]);
+  EXPECT_THROW(offline_sbs::wire::parse_scene_audit_contract(changed), offline_sbs::wire::contract_error);
+  changed = manifest;
+  changed["pages"][0]["bytes"] = offline_sbs::scene_audit_page_max_bytes + 1;
+  EXPECT_THROW(offline_sbs::wire::parse_scene_audit_contract(changed), offline_sbs::wire::contract_error);
+  changed = manifest;
+  changed["storage"]["scene_count"] = 130;
+  EXPECT_THROW(offline_sbs::wire::parse_scene_audit_contract(changed), offline_sbs::wire::contract_error);
+}
+
+TEST(OfflineSbsPagedAudit, RejectsOversizeSingleSceneBeforePublication) {
+  int publishes = 0;
+  offline_sbs::paged_scene_audit_writer_t writer([&](auto, auto) { ++publishes; return std::string(64, 'a'); });
+  auto scene = paged_scene(1);
+  scene.known_limit.assign(offline_sbs::scene_audit_page_max_bytes, 'x');
+  EXPECT_THROW(writer.append(scene), std::runtime_error);
+  EXPECT_EQ(publishes, 0);
+  EXPECT_EQ(writer.scene_count(), 0u);
+}
+
+TEST(OfflineSbsPagedAudit, WorkerResultCarriesOnlyAttestedRecentTail) {
+  auto value = worker_result();
+  value.total_scene_count = 1;
+  value.scene_audit_manifest_sha256 = std::string(64, 'a');
+  auto encoded = offline_sbs::wire::to_json(value);
+  EXPECT_EQ(encoded.at("schema"), 3);
+  EXPECT_EQ(offline_sbs::wire::parse_worker_result_contract(encoded).total_scene_count, 1u);
+  encoded["scene_audit_manifest_sha256"] = "bad";
+  EXPECT_THROW(offline_sbs::wire::parse_worker_result_contract(encoded), offline_sbs::wire::contract_error);
+  encoded = offline_sbs::wire::to_json(value);
+  encoded["scene_count"] = 33;
+  EXPECT_THROW(offline_sbs::wire::parse_worker_result_contract(encoded), offline_sbs::wire::contract_error);
 }

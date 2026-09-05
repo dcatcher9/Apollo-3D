@@ -286,6 +286,12 @@ namespace offline_sbs {
     return boundary_audit_;
   }
 
+  std::vector<boundary_audit_t> causal_scene_tracker_t::take_boundary_audit() {
+    std::vector<boundary_audit_t> result;
+    result.swap(boundary_audit_);
+    return result;
+  }
+
   const char *boundary_decision_name(boundary_decision_e decision) {
     switch (decision) {
       case boundary_decision_e::confirmed:

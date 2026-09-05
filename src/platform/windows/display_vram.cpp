@@ -4733,6 +4733,10 @@ namespace platf::dxgi {
       return identity;
     }
 
+    bool has_pending_depth_pipeline_build() const {
+      return depth_estimator_build.valid();
+    }
+
     std::optional<sbs_debug::window_region_snapshot>
     capture_browser_window_region(
       const D3D11_TEXTURE2D_DESC &source_desc,
@@ -7692,7 +7696,16 @@ namespace platf::dxgi {
 
     const auto capture_backend = display->capture_backend();
     const auto capture_started = std::chrono::steady_clock::now();
-    const auto capture_status = display->capture(push_image, pull_image, &capture_cursor);
+    const auto has_pending_work = [&]() {
+      return presenter_retry.should_process(
+        static_cast<bool>(retained_presenter_source),
+        depth_pipeline_ready_event && depth_pipeline_ready_event->peek(),
+        converter.needs_conversion_poll()
+      ) || (retained_presenter_source && converter.has_pending_depth_pipeline_build());
+    };
+    const auto capture_status = dxgi_display->capture_with_pending_work(
+      push_image, pull_image, &capture_cursor, has_pending_work
+    );
     if (config.capture_failover) {
       const auto previous_preference = config.capture_failover->preferred_backend();
       config.capture_failover->note_capture_result(
@@ -8422,14 +8435,17 @@ namespace platf::dxgi {
    */
   capture_e display_wgc_vram_t::snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) {
     texture2d_t src;
-    uint64_t frame_qpc;
+    detail::wgc_timestamp_t frame_time {};
     dup.set_cursor_visible(cursor_visible);
-    auto capture_status = dup.next_frame(timeout, &src, frame_qpc);
+    auto capture_status = dup.next_frame(timeout, &src, frame_time);
     if (capture_status != capture_e::ok) {
       return capture_status;
     }
 
-    auto frame_timestamp = std::chrono::steady_clock::now() - qpc_time_difference(qpc_counter(), frame_qpc);
+    const auto timestamp_now = std::chrono::steady_clock::now();
+    const auto frame_timestamp = timestamp_now - detail::wgc_frame_age(
+      qpc_counter(), qpc_frequency(), frame_time
+    );
     D3D11_TEXTURE2D_DESC desc {};
     src->GetDesc(&desc);
 

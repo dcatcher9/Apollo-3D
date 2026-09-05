@@ -133,15 +133,18 @@ TEST(RtspAnnounceParsingTest, ReservesFecAsParityRelativeToVideoData) {
   EXPECT_EQ(calculate_video_bitrate_budget(1'000, 20, 10'000), 600);
 }
 
-TEST(RtspAnnounceParsingTest, AppliesOnlyValidLowerPacketSizeLimits) {
-  using rtsp_stream::detail::apply_packet_size_limit;
+TEST(RtspAnnounceParsingTest, AcceptsNegotiatedPacketSizeAndRejectsSilentClamp) {
+  using rtsp_stream::detail::announced_packet_size_allowed;
 
-  EXPECT_EQ(apply_packet_size_limit(1392, 0), 1392);
-  EXPECT_EQ(apply_packet_size_limit(1392, 1456), 1392);
-  EXPECT_EQ(apply_packet_size_limit(1392, 1346), 1346);
-  EXPECT_EQ(apply_packet_size_limit(1392, stream::VIDEO_PACKET_SIZE_MIN), stream::VIDEO_PACKET_SIZE_MIN);
-  EXPECT_EQ(apply_packet_size_limit(1392, stream::VIDEO_PACKET_SIZE_MIN - 1), 1392);
-  EXPECT_EQ(apply_packet_size_limit(1392, stream::VIDEO_PACKET_SIZE_MAX + 1), 1392);
+  EXPECT_TRUE(announced_packet_size_allowed(1392, 0));
+  EXPECT_TRUE(announced_packet_size_allowed(1392, 1456));
+  EXPECT_FALSE(announced_packet_size_allowed(1392, 1346));
+  EXPECT_TRUE(announced_packet_size_allowed(1346, 1346));
+  EXPECT_TRUE(announced_packet_size_allowed(200, 200));
+  EXPECT_FALSE(announced_packet_size_allowed(1392, stream::VIDEO_PACKET_SIZE_MIN));
+  EXPECT_FALSE(announced_packet_size_allowed(1392, stream::VIDEO_PACKET_SIZE_MIN - 1));
+  EXPECT_FALSE(announced_packet_size_allowed(1392, stream::VIDEO_PACKET_SIZE_MAX + 1));
+  EXPECT_FALSE(announced_packet_size_allowed(0, 0));
 }
 
 TEST(RtspSetupParsingTest, RejectsTargetsWithoutAStreamSelector) {

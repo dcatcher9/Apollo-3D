@@ -28,7 +28,7 @@ UCRT64 Node package; it is incompatible with the current GCC/libstdc++ combinati
 From a UCRT64 shell:
 
 ```bash
-export PATH="/c/Program Files/nodejs:$PATH"
+export PATH="/ucrt64/bin:/c/Program Files/nodejs:$PATH"
 cmake -B cmake-build-relwithdebinfo -G Ninja -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo
 ninja -C cmake-build-relwithdebinfo
 ```
@@ -53,10 +53,18 @@ cmake-build-relwithdebinfo/tests/test_sunshine.exe --gtest_filter=SuiteName.Test
 ```
 
 Unit tests are under `tests/unit`, integration tests under `tests/integration`, and shared fixtures
-under `tests/fixtures`. Python evaluator tests run with:
+under `tests/fixtures`. The [joint workflow gate](docs/joint-workflow-tests.md) runs focused native,
+evaluator, client packet/FEC and JVM boundary tests from both checkouts. It also documents the portable CI
+subset and the GPU/device evidence it cannot replace.
+Run native tests with the build directory as the working directory when they need relative `assets/`.
+
+For evaluator commands, first select the one validated interpreter as `$SbsbenchPython` using the
+[sbsbench runtime procedure](tools/sbsbench/README.md#required-evaluation-loop). Machine-specific
+paths and DLL environment instructions belong to the local [AGENTS.md](AGENTS.md), when present.
+Use that exact executable for tests and every stage of an evaluation:
 
 ```powershell
-python -m unittest discover -s tools/sbsbench -p "test_*.py"
+& $SbsbenchPython -m unittest discover -s tools/sbsbench -p "test_*.py"
 ```
 
 ## Host SBS changes
@@ -80,7 +88,7 @@ shaders. The V1 baseline set was retired with its renderer, so ordinary developm
 matched comparison rather than treating an old baseline as a verdict:
 
 ```powershell
-python tools/sbsbench/run_eval.py --comparison-only --label control
+& $SbsbenchPython tools/sbsbench/run_eval.py --comparison-only --label control
 ```
 
 Exit codes are `0` for pass, `1` for a named regression, and `2` for setup/provenance failure.
@@ -92,7 +100,7 @@ source, contract, clip, and baseline changes together.
 Useful controlled levers are passed after `--extra`, for example:
 
 ```powershell
-python tools/sbsbench/run_eval.py --comparison-only --label pop-1p0 --extra --pop-strength 1.0
+& $SbsbenchPython tools/sbsbench/run_eval.py --comparison-only --label pop-1p0 --extra --pop-strength 1.0
 ```
 
 The GPU harness remains serial so performance evidence is uncontended. CPU scoring can use

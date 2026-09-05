@@ -228,6 +228,8 @@ namespace platf {
 
   int64_t qpc_counter();
 
+  int64_t qpc_frequency();
+
   std::chrono::nanoseconds qpc_time_difference(int64_t performance_counter1, int64_t performance_counter2);
 
   /**

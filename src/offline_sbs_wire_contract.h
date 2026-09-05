@@ -60,6 +60,7 @@ namespace offline_sbs::wire {
 
   struct whole_clip_resolved_runtime_t {
     std::string model;
+    std::optional<std::string> frame_transport;
     std::string model_url;
     double pop_strength = 1.0;
     int depth_width = 0;
@@ -230,6 +231,9 @@ namespace offline_sbs::wire {
     nlohmann::json timeline_contract;
     std::optional<nlohmann::json> staging_identity;
     std::optional<std::string> output_path;
+    // Present for schema 3: scenes contains only the final bounded tail.
+    std::optional<std::uint64_t> total_scene_count;
+    std::optional<std::string> scene_audit_manifest_sha256;
   };
 
   nlohmann::json to_json(const worker_result_contract_t &value);
@@ -304,6 +308,29 @@ namespace offline_sbs::wire {
   nlohmann::json scene_record_json(const scene_plan_t &value);
   scene_plan_t parse_scene_record(const nlohmann::json &value);
 
+  struct scene_audit_page_descriptor_t {
+    std::uint32_t index = 0;
+    std::uint64_t first_scene_id = 0;
+    std::uint64_t scene_count = 0;
+    std::uint64_t boundary_count = 0;
+    std::uint64_t start_sequence = 0;
+    std::uint64_t end_sequence_exclusive = 0;
+    std::uint64_t bytes = 0;
+    std::string sha256;
+  };
+
+  struct scene_audit_page_t {
+    std::uint32_t index = 0;
+    std::vector<scene_plan_t> scenes;
+    std::vector<boundary_audit_t> boundary_revisions;
+  };
+  std::string scene_audit_page_filename(std::uint32_t index);
+  nlohmann::json to_json(const scene_audit_page_t &value);
+  scene_audit_page_t parse_scene_audit_page(const nlohmann::json &value);
+  void validate_scene_audit_page(const scene_audit_page_t &page,
+                                const scene_audit_page_descriptor_t &descriptor,
+                                bool complete_final_page);
+
   struct scene_audit_contract_t {
     std::string status;
     std::uint64_t peak_cache_bytes = 0;
@@ -314,6 +341,12 @@ namespace offline_sbs::wire {
     nlohmann::json timeline_contract;
     std::vector<scene_plan_t> scenes;
     std::vector<boundary_audit_t> boundary_revisions;
+    bool paged = false;
+    std::uint64_t scene_count = 0;
+    std::uint64_t boundary_count = 0;
+    std::uint64_t covered_end_sequence = 1;
+    std::uint64_t total_page_bytes = 0;
+    std::vector<scene_audit_page_descriptor_t> pages;
   };
 
   nlohmann::json to_json(const scene_audit_contract_t &value);

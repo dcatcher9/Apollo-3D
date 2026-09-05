@@ -459,8 +459,9 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
   EXPECT_EQ(page.find("scene-decisions-title"), std::string::npos);
   EXPECT_EQ(page.find("offline-scene-table"), std::string::npos);
   EXPECT_EQ(page.find("offline-scene-empty"), std::string::npos);
-  EXPECT_EQ(page.find("downloadSceneAudit"), std::string::npos);
-  EXPECT_EQ(page.find("auditBusy"), std::string::npos);
+  EXPECT_NE(page.find("Download manifest"), std::string::npos);
+  EXPECT_NE(page.find("downloadSceneAudit(page.index)"), std::string::npos);
+  EXPECT_NE(page.find("visibleAuditPages"), std::string::npos);
   EXPECT_EQ(page.find("offline-job-selector"), std::string::npos);
   EXPECT_EQ(page.find("offlineSelectedJob"), std::string::npos);
   EXPECT_EQ(page.find("v-for=\"job in jobs\""), std::string::npos);

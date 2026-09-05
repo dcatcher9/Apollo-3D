@@ -4,6 +4,10 @@
  */
 
 #include "offline_sbs_worker.h"
+#include "offline_frame_transport.h"
+#include "offline_sbs_paged_audit.h"
+#include "sbs_bench_harness.h"
+#include "sbs_perf.h"
 
 #include "crypto.h"
 #include "generated/sbs_adaptive_state_contract.h"
@@ -14,6 +18,7 @@
 #include "offline_sbs_wire_contract.h"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <bit>
 #include <boost/multiprecision/cpp_int.hpp>
@@ -61,6 +66,60 @@ namespace offline_sbs {
   using namespace std::chrono_literals;
 
   namespace {
+    class transport_timer_t {
+    public:
+      explicit transport_timer_t(const char *stage): stage_(stage), start_(std::chrono::steady_clock::now()) {}
+      ~transport_timer_t() {
+        sbs_perf::add_sample_ms(stage_, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_).count());
+      }
+    private:
+      const char *stage_;
+      std::chrono::steady_clock::time_point start_;
+    };
+    class process_status_t {
+    public:
+      virtual ~process_status_t() = default;
+      virtual bool running() const = 0;
+      virtual int exit_code() const = 0;
+    };
+
+    // The manager already owns an isolated worker process. Run its only GPU
+    // pipeline here, on one thread, so pixels cross bounded memory channels.
+    class analysis_process_t final: public process_status_t {
+    public:
+      analysis_process_t(std::vector<std::string> arguments, raw_frame_transport &transport): transport_(transport) {
+        thread_ = std::thread([this, arguments = std::move(arguments)]() mutable {
+          std::vector<char *> argv;
+          for (auto &argument : arguments) argv.push_back(argument.data());
+          try { code_.store(sbs_bench::run(static_cast<int>(argv.size()), argv.data(), &transport_)); }
+          catch (...) { code_.store(10); }
+          if (code_.load() != 0) transport_.cancel();
+          running_.store(false, std::memory_order_release);
+        });
+      }
+      ~analysis_process_t() { terminate(); }
+      bool running() const override { return running_.load(std::memory_order_acquire); }
+      int exit_code() const override { return code_.load(); }
+      int wait(std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (running()) {
+          if (std::chrono::steady_clock::now() >= deadline) throw std::runtime_error("causal GPU pass timed out");
+          std::this_thread::sleep_for(10ms);
+        }
+        if (thread_.joinable()) thread_.join();
+        return exit_code();
+      }
+      void terminate() noexcept {
+        transport_.cancel();
+        if (thread_.joinable()) thread_.join();
+      }
+    private:
+      raw_frame_transport &transport_;
+      std::atomic_bool running_ {true};
+      std::atomic_int code_ {-1};
+      std::thread thread_;
+    };
+
     constexpr std::uint64_t max_sequence = 9999999999ull;
     constexpr std::uintmax_t max_spec_bytes = 4ull * 1024ull * 1024ull;
     constexpr std::uintmax_t max_small_contract_bytes = 64ull * 1024ull * 1024ull;
@@ -160,20 +219,6 @@ namespace offline_sbs {
     ) {
       return consumed_bytes <= max_packet_probe_bytes &&
              additional_bytes <= max_packet_probe_bytes - consumed_bytes;
-    }
-
-    std::string secure_frame_bridge_token() {
-      std::array<unsigned char, 32> random {};
-      if (RAND_bytes(random.data(), static_cast<int>(random.size())) != 1) {
-        throw worker_error("cannot generate the loopback frame bridge capability");
-      }
-      static constexpr char hex[] = "0123456789abcdef";
-      std::string token(random.size() * 2, '\0');
-      for (std::size_t index = 0; index < random.size(); ++index) {
-        token[index * 2] = hex[random[index] >> 4];
-        token[index * 2 + 1] = hex[random[index] & 0x0f];
-      }
-      return token;
     }
 
     std::string path_utf8(const fs::path &path) {
@@ -533,48 +578,6 @@ namespace offline_sbs {
       }
     }
 
-    bool open_transient_file_snapshot(const fs::path &path,
-                                      std::ifstream &stream,
-                                      std::uint64_t &size) {
-      size = 0;
-      for (int attempt = 0; attempt < transient_file_io_attempts; ++attempt) {
-        stream.open(path, std::ios::binary | std::ios::ate);
-        if (stream) {
-          const auto end = static_cast<std::streamoff>(stream.tellg());
-          if (end > 0 &&
-              static_cast<std::uintmax_t>(end) <=
-                std::numeric_limits<std::uint64_t>::max()) {
-            size = static_cast<std::uint64_t>(end);
-            stream.seekg(0, std::ios::beg);
-            if (stream) {
-              return true;
-            }
-          }
-        }
-        stream.close();
-        stream.clear();
-        size = 0;
-        if (attempt + 1 < transient_file_io_attempts) {
-          std::this_thread::sleep_for(transient_file_io_retry_delay);
-        }
-      }
-      return false;
-    }
-
-    std::uint64_t measure_transient_file_checked(
-      const fs::path &path,
-      const std::string_view description
-    ) {
-      std::ifstream stream;
-      std::uint64_t size = 0;
-      if (!open_transient_file_snapshot(path, stream, size)) {
-        throw worker_error(
-          "cannot open " + std::string {description} + ": " + path_utf8(path)
-        );
-      }
-      return size;
-    }
-
     void remove_transient_file_checked(const fs::path &path) {
       std::error_code last_error;
       for (int attempt = 0; attempt < transient_file_io_attempts; ++attempt) {
@@ -601,11 +604,6 @@ namespace offline_sbs {
         "cannot release transient file: " + path_utf8(path) +
         (last_error ? ": " + last_error.message() : "")
       );
-    }
-
-    void remove_transient_file_best_effort(const fs::path &path) noexcept {
-      std::error_code ignored;
-      fs::remove(path, ignored);
     }
 
     /**
@@ -1146,27 +1144,6 @@ namespace offline_sbs {
         sbs_pipeline_slot_upper_bound(sbs_width, sbs_height, hdr),
         "offline single-slot raster pipeline"
       );
-    }
-
-    std::uint64_t overlapped_raster_upper_bound(
-      const std::uint64_t source_raster_bytes,
-      const std::uint32_t sbs_width,
-      const std::uint32_t sbs_height,
-      const bool hdr
-    ) {
-      const auto sources = checked_byte_product(
-        source_raster_bytes,
-        offline_source_pipeline_capacity,
-        "offline source pipeline"
-      );
-      const auto sbs_slot =
-        sbs_pipeline_slot_upper_bound(sbs_width, sbs_height, hdr);
-      const auto sbs = checked_byte_product(
-        sbs_slot,
-        2u,
-        "offline SBS pipeline"
-      );
-      return checked_byte_sum(sources, sbs, "offline raster pipeline");
     }
 
     bool rational_ticks_within_actual_ticks(
@@ -1932,7 +1909,15 @@ namespace offline_sbs {
       }
     }
 
-    class child_process_t {
+    std::wstring private_pipe_name() {
+      std::array<unsigned char, 32> random {};
+      if (RAND_bytes(random.data(), static_cast<int>(random.size())) != 1)
+        throw worker_error("cannot create private media pipe identity");
+      const auto token = sha256_hex(std::string_view(reinterpret_cast<const char *>(random.data()), random.size()));
+      return L"\\\\.\\pipe\\sunshine-offline-" + std::wstring(token.begin(), token.end());
+    }
+
+    class child_process_t: public process_status_t {
     public:
       child_process_t() = default;
       child_process_t(const child_process_t &) = delete;
@@ -1948,9 +1933,13 @@ namespace offline_sbs {
           process_ = std::exchange(other.process_, nullptr);
           thread_ = std::exchange(other.thread_, nullptr);
           stdout_read_ = std::exchange(other.stdout_read_, nullptr);
+          stdout_read_event_ = std::exchange(other.stdout_read_event_, nullptr);
+          stdout_child_write_ = std::exchange(other.stdout_child_write_, nullptr);
           stdout_file_ = std::exchange(other.stdout_file_, nullptr);
           log_capture_ = std::move(other.log_capture_);
           stdin_null_ = std::exchange(other.stdin_null_, nullptr);
+          stdin_write_ = std::exchange(other.stdin_write_, nullptr);
+          stdin_write_event_ = std::exchange(other.stdin_write_event_, nullptr);
           job_ = std::exchange(other.job_, nullptr);
         }
         return *this;
@@ -1965,7 +1954,8 @@ namespace offline_sbs {
         const fs::path &working_directory,
         const fs::path &log_path,
         const std::optional<fs::path> &stdout_path = std::nullopt,
-        const bool pipe_stdout = false
+        const bool pipe_stdout = false,
+        const bool pipe_stdin = false
       ) {
         if (arguments.empty()) {
           throw worker_error("cannot launch an empty command");
@@ -1992,12 +1982,24 @@ namespace offline_sbs {
 
         HANDLE stdout_write = log_write;
         if (pipe_stdout) {
-          if (!CreatePipe(&child.stdout_read_, &stdout_write, &inheritable, 1024 * 1024) || !SetHandleInformation(child.stdout_read_, HANDLE_FLAG_INHERIT, 0)) {
-            if (stdout_write && stdout_write != log_write) {
-              CloseHandle(stdout_write);
-            }
+          const auto name = private_pipe_name();
+          child.stdout_read_ = CreateNamedPipeW(name.c_str(),
+            PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            1, 1024 * 1024, 1024 * 1024, 0, nullptr);
+          if (child.stdout_read_ == INVALID_HANDLE_VALUE) {
+            child.stdout_read_ = nullptr;
             throw worker_error("cannot create bounded decoder pipe");
           }
+          child.stdout_read_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+          if (!child.stdout_read_event_) throw worker_error("cannot create decoder read event");
+          child.stdout_child_write_ = CreateFileW(name.c_str(), GENERIC_WRITE, 0, &inheritable,
+                                                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+          if (child.stdout_child_write_ == INVALID_HANDLE_VALUE) {
+            child.stdout_child_write_ = nullptr;
+            throw worker_error("cannot open bounded decoder pipe");
+          }
+          stdout_write = child.stdout_child_write_;
         } else if (stdout_path) {
           fs::create_directories(stdout_path->parent_path(), ec);
           child.stdout_file_ = CreateFileW(
@@ -2016,18 +2018,27 @@ namespace offline_sbs {
           stdout_write = child.stdout_file_;
         }
 
-        child.stdin_null_ = CreateFileW(
-          L"NUL",
-          GENERIC_READ,
-          FILE_SHARE_READ | FILE_SHARE_WRITE,
-          &inheritable,
-          OPEN_EXISTING,
-          FILE_ATTRIBUTE_NORMAL,
-          nullptr
-        );
+        if (pipe_stdin) {
+          const auto name = private_pipe_name();
+          child.stdin_write_ = CreateNamedPipeW(name.c_str(),
+            PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            1, 64 * 1024, 64 * 1024, 0, nullptr);
+          if (child.stdin_write_ == INVALID_HANDLE_VALUE) {
+            child.stdin_write_ = nullptr;
+            throw worker_error("cannot create bounded encoder stdin pipe");
+          }
+          child.stdin_write_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+          if (!child.stdin_write_event_) throw worker_error("cannot create encoder write event");
+          child.stdin_null_ = CreateFileW(name.c_str(), GENERIC_READ, 0, &inheritable,
+                                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        } else {
+          child.stdin_null_ = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                         &inheritable, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        }
         if (child.stdin_null_ == INVALID_HANDLE_VALUE) {
           child.stdin_null_ = nullptr;
-          throw worker_error("cannot open the null device for child stdin");
+          throw worker_error("cannot open child stdin");
         }
         std::vector<HANDLE> inherited_handles {
           child.stdin_null_,
@@ -2097,8 +2108,9 @@ namespace offline_sbs {
         const auto launch_error =
           launched ? ERROR_SUCCESS : GetLastError();
         DeleteProcThreadAttributeList(attribute_list);
-        if (pipe_stdout && stdout_write && stdout_write != log_write) {
-          CloseHandle(stdout_write);
+        if (child.stdout_child_write_) {
+          CloseHandle(child.stdout_child_write_);
+          child.stdout_child_write_ = nullptr;
         }
         // CreateProcess has either inherited its own write handle or failed. Closing the
         // parent's copy lets the drain thread observe EOF as soon as the process tree exits.
@@ -2127,6 +2139,7 @@ namespace offline_sbs {
             std::to_string(error) + ")"
           );
         }
+        if (pipe_stdin) { CloseHandle(child.stdin_null_); child.stdin_null_ = nullptr; }
         child.process_ = process.hProcess;
         child.thread_ = process.hThread;
         return child;
@@ -2148,6 +2161,37 @@ namespace offline_sbs {
         return static_cast<int>(code);
       }
 
+      void write_exact(const void *source, std::size_t size,
+                       const std::chrono::steady_clock::time_point deadline) {
+        if (!stdin_write_) throw worker_error("child has no writable stdin pipe");
+        const auto *bytes = static_cast<const std::uint8_t *>(source);
+        while (size) {
+          if (writes_cancelled_.load() || std::chrono::steady_clock::now() >= deadline)
+            throw worker_error("bounded encoder frame write cancelled or timed out");
+          OVERLAPPED operation {};
+          operation.hEvent = stdin_write_event_;
+          ResetEvent(operation.hEvent);
+          DWORD written = 0;
+          bool succeeded = WriteFile(stdin_write_, bytes, static_cast<DWORD>(std::min<std::size_t>(size, 64 * 1024)), &written, &operation);
+          if (!succeeded && GetLastError() == ERROR_IO_PENDING) {
+            while (WaitForSingleObject(operation.hEvent, 25) == WAIT_TIMEOUT && !writes_cancelled_.load() && running() &&
+                   std::chrono::steady_clock::now() < deadline) {}
+            if (!GetOverlappedResult(stdin_write_, &operation, &written, FALSE)) {
+              CancelIoEx(stdin_write_, &operation);
+              GetOverlappedResult(stdin_write_, &operation, &written, TRUE);
+            } else succeeded = true;
+          }
+          if (!succeeded || !written) throw worker_error("bounded encoder stdin write failed or timed out");
+          bytes += written;
+          size -= written;
+        }
+      }
+      void cancel_writes() noexcept { writes_cancelled_.store(true); }
+      void close_stdin() noexcept {
+        if (stdin_write_) { CloseHandle(stdin_write_); stdin_write_ = nullptr; }
+        if (stdin_write_event_) { CloseHandle(stdin_write_event_); stdin_write_event_ = nullptr; }
+      }
+
       void read_exact(void *destination, const std::size_t size) {
         if (!stdout_read_) {
           throw worker_error("child process has no stdout pipe");
@@ -2157,50 +2201,8 @@ namespace offline_sbs {
         const auto deadline =
           std::chrono::steady_clock::now() + frame_io_timeout;
         while (offset < size) {
-          DWORD available = 0;
-          if (!PeekNamedPipe(
-                stdout_read_,
-                nullptr,
-                0,
-                nullptr,
-                &available,
-                nullptr
-              )) {
-            throw worker_error(
-              "streaming decoder pipe failed inside a frame (" +
-              std::to_string(offset) + " of " + std::to_string(size) +
-              " bytes)"
-            );
-          }
-          if (available == 0) {
-            if (!running()) {
-              throw worker_error(
-                "streaming decoder ended inside a frame (" +
-                std::to_string(offset) + " of " + std::to_string(size) +
-                " bytes)"
-              );
-            }
-            if (std::chrono::steady_clock::now() >= deadline) {
-              throw worker_error(
-                "streaming decoder timed out inside a frame (" +
-                std::to_string(offset) + " of " + std::to_string(size) +
-                " bytes)"
-              );
-            }
-            std::this_thread::sleep_for(child_poll);
-            continue;
-          }
-          const DWORD request = static_cast<DWORD>(
-            std::min<std::size_t>(
-              std::min<std::size_t>(
-                size - offset,
-                std::numeric_limits<DWORD>::max()
-              ),
-              available
-            )
-          );
-          DWORD received = 0;
-          if (!ReadFile(stdout_read_, bytes + offset, request, &received, nullptr) || received == 0) {
+          const auto received = read_some(bytes + offset, size - offset, deadline);
+          if (received == 0) {
             throw worker_error(
               "streaming decoder ended inside a frame (" +
               std::to_string(offset) + " of " + std::to_string(size) +
@@ -2232,65 +2234,36 @@ namespace offline_sbs {
         if (!stdout_read_ || capacity == 0) {
           throw worker_error("child process has no readable stdout pipe");
         }
-        const auto idle_deadline = std::min(
+        const auto deadline = std::min(
           std::chrono::steady_clock::now() + frame_io_timeout,
           absolute_deadline
         );
-        while (true) {
-          DWORD available = 0;
-          if (!PeekNamedPipe(
-                stdout_read_,
-                nullptr,
-                0,
-                nullptr,
-                &available,
-                nullptr
-              )) {
-            const auto error = GetLastError();
-            if (native_stdout_pipe_error_is_eof(error)) {
-              return 0;
-            }
-            throw worker_error("native child stdout pipe failed");
+        if (std::chrono::steady_clock::now() >= deadline)
+          throw worker_error("native child stdout pipe timed out");
+        OVERLAPPED operation {};
+        operation.hEvent = stdout_read_event_;
+        ResetEvent(operation.hEvent);
+        DWORD received = 0;
+        const auto request = static_cast<DWORD>(std::min<std::size_t>(capacity, 1024 * 1024));
+        BOOL succeeded = ReadFile(stdout_read_, destination, request, &received, &operation);
+        if (!succeeded && GetLastError() == ERROR_IO_PENDING) {
+          DWORD status;
+          do {
+            status = WaitForSingleObject(operation.hEvent, 25);
+          } while (status == WAIT_TIMEOUT && std::chrono::steady_clock::now() < deadline);
+          if (status != WAIT_OBJECT_0) {
+            // Drain the canceled operation before its buffer and OVERLAPPED leave scope.
+            CancelIoEx(stdout_read_, &operation);
+            GetOverlappedResult(stdout_read_, &operation, &received, TRUE);
+            throw worker_error("native child stdout pipe timed out or wait failed");
           }
-          if (available != 0) {
-            const auto request = static_cast<DWORD>(
-              std::min<std::size_t>(
-                std::min<std::size_t>(
-                  capacity,
-                  std::numeric_limits<DWORD>::max()
-                ),
-                available
-              )
-            );
-            DWORD received = 0;
-            if (
-              !ReadFile(
-                stdout_read_,
-                destination,
-                request,
-                &received,
-                nullptr
-              )
-            ) {
-              const auto error = GetLastError();
-              if (native_stdout_pipe_error_is_eof(error)) {
-                return 0;
-              }
-              throw worker_error("native child stdout pipe read failed");
-            }
-            if (received == 0) {
-              throw worker_error("native child stdout pipe made no progress");
-            }
-            return received;
-          }
-          if (!running()) {
-            return 0;
-          }
-          if (std::chrono::steady_clock::now() >= idle_deadline) {
-            throw worker_error("native child stdout pipe timed out");
-          }
-          std::this_thread::sleep_for(child_poll);
+          succeeded = GetOverlappedResult(stdout_read_, &operation, &received, FALSE);
         }
+        if (!succeeded) {
+          if (native_stdout_pipe_error_is_eof(GetLastError())) return 0;
+          throw worker_error("native child stdout pipe read failed");
+        }
+        return received;
       }
 
       bool read_one_if_available() {
@@ -2331,6 +2304,7 @@ namespace offline_sbs {
       }
 
       void terminate() noexcept {
+        close_stdin();
         if (job_) {
           TerminateJobObject(job_, 9);
         }
@@ -2349,6 +2323,14 @@ namespace offline_sbs {
         if (stdout_read_) {
           CloseHandle(stdout_read_);
           stdout_read_ = nullptr;
+        }
+        if (stdout_read_event_) {
+          CloseHandle(stdout_read_event_);
+          stdout_read_event_ = nullptr;
+        }
+        if (stdout_child_write_) {
+          CloseHandle(stdout_child_write_);
+          stdout_child_write_ = nullptr;
         }
         if (stdout_file_) {
           CloseHandle(stdout_file_);
@@ -2372,19 +2354,25 @@ namespace offline_sbs {
       HANDLE process_ = nullptr;
       HANDLE thread_ = nullptr;
       HANDLE stdout_read_ = nullptr;
+      HANDLE stdout_read_event_ = nullptr;
+      HANDLE stdout_child_write_ = nullptr;
       HANDLE stdout_file_ = nullptr;
       std::unique_ptr<bounded_child_log_t> log_capture_;
       HANDLE stdin_null_ = nullptr;
+      HANDLE stdin_write_ = nullptr;
+      HANDLE stdin_write_event_ = nullptr;
+      std::atomic_bool writes_cancelled_ {false};
       HANDLE job_ = nullptr;
     };
 #else
-    class child_process_t {
+    class child_process_t: public process_status_t {
     public:
       static child_process_t launch(
         const std::vector<std::string> &,
         const fs::path &,
         const fs::path &,
         const std::optional<fs::path> & = std::nullopt,
+        bool = false,
         bool = false
       ) {
         throw worker_error("offline SBS conversion is Windows-only");
@@ -2399,6 +2387,9 @@ namespace offline_sbs {
       }
 
       void read_exact(void *, std::size_t) {}
+      void write_exact(const void *, std::size_t, std::chrono::steady_clock::time_point) {}
+      void close_stdin() noexcept {}
+      void cancel_writes() noexcept {}
 
       std::string read_line(std::size_t) {
         return {};
@@ -2421,464 +2412,6 @@ namespace offline_sbs {
       }
 
       void terminate() {}
-    };
-#endif
-
-#ifdef _WIN32
-    class scene_frame_server_t {
-    public:
-      scene_frame_server_t(
-        const std::uint64_t first_sequence,
-        const std::uint64_t end_sequence_exclusive,
-        std::string extension
-      ):
-          first_sequence_(first_sequence),
-          end_sequence_exclusive_(end_sequence_exclusive),
-          extension_(std::move(extension)) {
-        if (first_sequence_ == 0 || end_sequence_exclusive_ <= first_sequence_ || (extension_ != "png" && extension_ != "pfm")) {
-          throw worker_error("invalid scene HTTP bridge contract");
-        }
-        WSADATA data {};
-        if (WSAStartup(MAKEWORD(2, 2), &data) != 0) {
-          throw worker_error("cannot initialize the loopback frame bridge");
-        }
-        winsock_started_ = true;
-        try {
-          listener_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-          if (listener_ == INVALID_SOCKET) {
-            throw worker_error("cannot create the loopback frame bridge socket");
-          }
-          BOOL exclusive = TRUE;
-          if (setsockopt(listener_, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char *>(&exclusive), sizeof(exclusive)) != 0) {
-            throw worker_error("cannot make the loopback frame bridge exclusive");
-          }
-          sockaddr_in address {};
-          address.sin_family = AF_INET;
-          address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-          address.sin_port = 0;
-          if (bind(listener_, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0 || listen(listener_, 1) != 0) {
-            throw worker_error("cannot bind the loopback frame bridge");
-          }
-          int address_size = sizeof(address);
-          if (getsockname(listener_, reinterpret_cast<sockaddr *>(&address), &address_size) != 0 || ntohs(address.sin_port) == 0) {
-            throw worker_error("cannot resolve the loopback frame bridge port");
-          }
-          port_ = ntohs(address.sin_port);
-          token_ = secure_frame_bridge_token();
-          next_request_ = first_sequence_;
-          next_publish_ = first_sequence_;
-          thread_ = std::thread([this] {
-            serve();
-          });
-        } catch (...) {
-          if (listener_ != INVALID_SOCKET) {
-            closesocket(listener_);
-            listener_ = INVALID_SOCKET;
-          }
-          cleanup_winsock();
-          throw;
-        }
-      }
-
-      scene_frame_server_t(const scene_frame_server_t &) = delete;
-      scene_frame_server_t &operator=(const scene_frame_server_t &) = delete;
-
-      ~scene_frame_server_t() {
-        abort("scene bridge destroyed");
-      }
-
-      [[nodiscard]] std::string frame_url(
-        const std::uint64_t sequence
-      ) const {
-        if (sequence < first_sequence_ || sequence >= end_sequence_exclusive_) {
-          throw worker_error("scene bridge URL sequence is out of range");
-        }
-        return "http://127.0.0.1:" + std::to_string(port_) + "/" + token_ +
-               "/frame_" + frame_id(sequence) + "." + extension_;
-      }
-
-#ifdef SUNSHINE_TESTS
-      [[nodiscard]] std::uint16_t port_for_test() const {
-        return port_;
-      }
-#endif
-
-      void publish_and_wait(
-        const std::uint64_t sequence,
-        const fs::path &path,
-        const child_process_t &encoder
-      ) {
-        if (sequence < first_sequence_ || sequence >= end_sequence_exclusive_) {
-          throw worker_error("cannot publish an invalid SBS bridge frame");
-        }
-        measure_transient_file_checked(path, "SBS bridge frame");
-        std::unique_lock lock(mutex_);
-        if (!error_.empty()) {
-          throw worker_error("scene bridge failed: " + error_);
-        }
-        if (sequence != next_publish_ || published_path_) {
-          throw worker_error("scene bridge publication is not monotonic");
-        }
-        published_sequence_ = sequence;
-        published_path_ = path;
-        ++next_publish_;
-        condition_.notify_all();
-        const auto deadline =
-          std::chrono::steady_clock::now() + frame_io_timeout;
-        while (served_sequence_ < sequence && error_.empty()) {
-          if (!encoder.running()) {
-            error_ =
-              "whole-clip encoder exited before requesting frame " +
-              std::to_string(sequence) + " (exit " +
-              std::to_string(encoder.exit_code()) + ")";
-            break;
-          }
-          if (std::chrono::steady_clock::now() >= deadline) {
-            error_ = "timed out serving scene frame " +
-                     std::to_string(sequence);
-            break;
-          }
-          condition_.wait_for(lock, child_poll);
-        }
-        if (!error_.empty()) {
-          throw worker_error("scene bridge failed: " + error_);
-        }
-      }
-
-      void finish() {
-        {
-          std::unique_lock lock(mutex_);
-          const auto expected = end_sequence_exclusive_ - 1;
-          if (!error_.empty()) {
-            throw worker_error("scene bridge failed: " + error_);
-          }
-          if (served_sequence_ != expected || next_publish_ != end_sequence_exclusive_) {
-            throw worker_error(
-              "whole-clip encoder did not consume the complete SBS sequence"
-            );
-          }
-          stopping_ = true;
-          condition_.notify_all();
-        }
-        close_sockets();
-        if (thread_.joinable()) {
-          thread_.join();
-        }
-        cleanup_winsock();
-      }
-
-      void abort(const std::string &reason) noexcept {
-        {
-          std::lock_guard lock(mutex_);
-          if (error_.empty()) {
-            error_ = reason;
-          }
-          stopping_ = true;
-          condition_.notify_all();
-        }
-        close_sockets();
-        if (thread_.joinable()) {
-          thread_.join();
-        }
-        cleanup_winsock();
-      }
-
-    private:
-      static bool send_all(
-        const SOCKET socket_handle,
-        const void *data,
-        const std::size_t size
-      ) {
-        const auto *bytes = static_cast<const char *>(data);
-        std::size_t offset = 0;
-        while (offset < size) {
-          const int chunk = static_cast<int>(
-            std::min<std::size_t>(
-              size - offset,
-              static_cast<std::size_t>(
-                std::numeric_limits<int>::max()
-              )
-            )
-          );
-          const int written = send(
-            socket_handle,
-            bytes + offset,
-            chunk,
-            0
-          );
-          if (written <= 0) {
-            return false;
-          }
-          offset += static_cast<std::size_t>(written);
-        }
-        return true;
-      }
-
-      void close_sockets() noexcept {
-        const auto close_one = [](SOCKET &socket_handle) {
-          if (socket_handle != INVALID_SOCKET) {
-            shutdown(socket_handle, SD_BOTH);
-            closesocket(socket_handle);
-            socket_handle = INVALID_SOCKET;
-          }
-        };
-        std::lock_guard socket_lock(socket_mutex_);
-        close_one(active_client_);
-        close_one(listener_);
-      }
-
-      void cleanup_winsock() noexcept {
-        if (winsock_started_) {
-          WSACleanup();
-          winsock_started_ = false;
-        }
-      }
-
-      std::string receive_request(const SOCKET client) {
-        // A capability-bearing local FFmpeg request is emitted immediately. Keep the
-        // unauthenticated header window short so an unrelated loopback process cannot pin the
-        // single scene bridge for the lifetime of a frame.
-        DWORD timeout_ms = 2000;
-        setsockopt(
-          client,
-          SOL_SOCKET,
-          SO_RCVTIMEO,
-          reinterpret_cast<const char *>(&timeout_ms),
-          sizeof(timeout_ms)
-        );
-        std::string request;
-        std::array<char, 2048> buffer {};
-        while (request.find("\r\n\r\n") == std::string::npos) {
-          if (request.size() >= 8192) {
-            throw worker_error("scene bridge received an oversized request");
-          }
-          const int received = recv(
-            client,
-            buffer.data(),
-            static_cast<int>(
-              std::min<std::size_t>(
-                buffer.size(),
-                8192 - request.size()
-              )
-            ),
-            0
-          );
-          if (received <= 0) {
-            throw worker_error("scene bridge request ended early");
-          }
-          request.append(buffer.data(), static_cast<std::size_t>(received));
-        }
-        return request;
-      }
-
-      void send_error(
-        const SOCKET client,
-        const int status,
-        const std::string_view reason
-      ) {
-        const auto response =
-          "HTTP/1.1 " + std::to_string(status) + " " +
-          std::string(reason) +
-          "\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
-        send_all(client, response.data(), response.size());
-      }
-
-      bool serve_frame(
-        const SOCKET client,
-        const fs::path &path,
-        const bool body
-      ) {
-        // The harness publishes each unique SBS name atomically, but a filesystem filter can
-        // still deny a different process's first open after the matching follow ACK arrives.
-        // Open the immutable snapshot before committing an HTTP 200 header, retrying only on
-        // this exceptional path. Once open, the same handle supplies both Content-Length and
-        // the response body.
-        std::ifstream stream;
-        std::uint64_t size = 0;
-        if (!open_transient_file_snapshot(path, stream, size)) {
-          return false;
-        }
-        const std::string header =
-          "HTTP/1.1 200 OK\r\n"
-          "Content-Type: " +
-          std::string(
-            extension_ == "png" ?
-              "image/png" :
-              "image/x-portable-floatmap"
-          ) +
-          "\r\nContent-Length: " + std::to_string(size) +
-          "\r\nCache-Control: no-store\r\n"
-          "X-Content-Type-Options: nosniff\r\n"
-          "Connection: close\r\n\r\n";
-        if (!send_all(client, header.data(), header.size())) {
-          return false;
-        }
-        if (!body) {
-          return true;
-        }
-        std::vector<char> buffer(1024 * 1024);
-        std::uintmax_t sent = 0;
-        while (stream && sent < size) {
-          const auto wanted = static_cast<std::streamsize>(
-            std::min<std::uintmax_t>(buffer.size(), size - sent)
-          );
-          stream.read(buffer.data(), wanted);
-          const auto count = stream.gcount();
-          if (count <= 0 || !send_all(client, buffer.data(), static_cast<std::size_t>(count))) {
-            return false;
-          }
-          sent += static_cast<std::uintmax_t>(count);
-        }
-        return sent == size;
-      }
-
-      void fail(const std::string &message) noexcept {
-        std::lock_guard lock(mutex_);
-        if (error_.empty()) {
-          error_ = message;
-        }
-        stopping_ = true;
-        condition_.notify_all();
-      }
-
-      void serve() noexcept {
-        try {
-          while (next_request_ < end_sequence_exclusive_) {
-            SOCKET listener = INVALID_SOCKET;
-            {
-              std::lock_guard socket_lock(socket_mutex_);
-              listener = listener_;
-            }
-            SOCKET client = accept(listener, nullptr, nullptr);
-            if (client == INVALID_SOCKET) {
-              std::lock_guard lock(mutex_);
-              if (stopping_) {
-                return;
-              }
-              throw worker_error("scene bridge accept failed");
-            }
-            {
-              std::lock_guard socket_lock(socket_mutex_);
-              active_client_ = client;
-            }
-            const auto close_client = [&] {
-              std::lock_guard socket_lock(socket_mutex_);
-              if (active_client_ != INVALID_SOCKET) {
-                shutdown(active_client_, SD_BOTH);
-                closesocket(active_client_);
-                active_client_ = INVALID_SOCKET;
-              }
-            };
-            std::string request;
-            try {
-              request = receive_request(client);
-            } catch (const std::exception &) {
-              // No complete request line means no capability was authenticated. A local port
-              // scanner, early close, oversized header, or idle socket is isolated to this
-              // connection and must never fail the conversion job.
-              send_error(client, 400, "Bad Request");
-              close_client();
-              continue;
-            }
-            const auto line_end = request.find("\r\n");
-            const std::string expected_path =
-              "/" + token_ + "/frame_" + frame_id(next_request_) +
-              "." + extension_;
-            const std::string expected_get =
-              "GET " + expected_path + " HTTP/1.1";
-            const std::string expected_head =
-              "HEAD " + expected_path + " HTTP/1.1";
-            if (line_end == std::string::npos || (request.substr(0, line_end) != expected_get && request.substr(0, line_end) != expected_head)) {
-              send_error(client, 404, "Not Found");
-              close_client();
-              continue;
-            }
-            const bool head_request =
-              request.substr(0, line_end) == expected_head;
-            fs::path published;
-            {
-              std::unique_lock lock(mutex_);
-              condition_.wait(lock, [&] {
-                return stopping_ ||
-                       (!error_.empty()) ||
-                       (published_path_ &&
-                        published_sequence_ == next_request_);
-              });
-              if (stopping_ || !error_.empty()) {
-                send_error(client, 503, "Unavailable");
-                close_client();
-                return;
-              }
-              published = *published_path_;
-            }
-            if (!serve_frame(client, published, !head_request)) {
-              close_client();
-              throw worker_error(
-                "scene bridge failed while serving frame " +
-                std::to_string(next_request_)
-              );
-            }
-            close_client();
-            if (head_request) {
-              continue;
-            }
-            {
-              std::lock_guard lock(mutex_);
-              served_sequence_ = next_request_;
-              published_path_.reset();
-              ++next_request_;
-              condition_.notify_all();
-            }
-          }
-        } catch (const std::exception &exception) {
-          fail(exception.what());
-        }
-      }
-
-      std::uint64_t first_sequence_ = 0;
-      std::uint64_t end_sequence_exclusive_ = 0;
-      std::string extension_;
-      std::uint16_t port_ = 0;
-      std::string token_;
-      SOCKET listener_ = INVALID_SOCKET;
-      SOCKET active_client_ = INVALID_SOCKET;
-      bool winsock_started_ = false;
-      std::thread thread_;
-      std::mutex mutex_;
-      std::condition_variable condition_;
-      std::mutex socket_mutex_;
-      bool stopping_ = false;
-      std::string error_;
-      std::uint64_t next_request_ = 0;
-      std::uint64_t next_publish_ = 0;
-      std::uint64_t published_sequence_ = 0;
-      std::uint64_t served_sequence_ = 0;
-      std::optional<fs::path> published_path_;
-    };
-#else
-    class scene_frame_server_t {
-    public:
-      scene_frame_server_t(std::uint64_t, std::uint64_t, std::string) {
-        throw worker_error("offline SBS conversion is Windows-only");
-      }
-
-      std::string frame_url(std::uint64_t) const {
-        throw worker_error("offline SBS conversion is Windows-only");
-      }
-
-      void publish_and_wait(
-        std::uint64_t,
-        const fs::path &,
-        const child_process_t &
-      ) {
-        throw worker_error("offline SBS conversion is Windows-only");
-      }
-
-      void finish() {
-        throw worker_error("offline SBS conversion is Windows-only");
-      }
-
-      void abort(const std::string &) noexcept {}
     };
 #endif
 
@@ -3138,7 +2671,7 @@ namespace offline_sbs {
       nlohmann::json current_scene = nullptr,
       nlohmann::json scene_decisions = nlohmann::json::array()
     ) {
-      if (scene_count > max_serialized_scene_count) {
+      if (scene_count > max_paged_scene_count) {
         throw worker_error(
           "worker progress scene count exceeds the serialized contract"
         );
@@ -3266,7 +2799,7 @@ namespace offline_sbs {
 
     nlohmann::json read_progress(
       const fs::path &path,
-      const child_process_t &child,
+      const process_status_t &child,
       const std::uint64_t minimum,
       const std::string_view description,
       directory_change_watcher_t *watcher = nullptr
@@ -3346,17 +2879,6 @@ namespace offline_sbs {
       );
     }
 
-    void publish_producer_done(
-      const fs::path &directory,
-      const std::uint64_t frame_count
-    ) {
-      write_json_atomic(directory / ".producer-done.json", {
-                                                             {"schema", 1},
-                                                             {"status", "complete"},
-                                                             {"frame_count", frame_count},
-                                                           });
-    }
-
     void publish_producer_failed(
       const fs::path &directory,
       const std::string &error
@@ -3379,42 +2901,38 @@ namespace offline_sbs {
         const fs::path &log_path
       ):
           media_(media),
-          format_(media.color == media_color_e::sdr ? "bmp" : "pfm"),
+          format_(media.color == media_color_e::sdr ? "bgra8" : "gbrpf32le"),
           process_(child_process_t::launch(build_decoder_command(spec, media), spec.sunshine_executable.parent_path(), log_path, std::nullopt, true)) {
+        const auto source_bytes = std::uint64_t(media.width) * media.height * (media.color == media_color_e::sdr ? 4 : 12);
+        if (source_bytes > spec.transient_raster_hard_cap_bytes)
+          throw worker_error("raw source frame exceeds the transient raster hard cap before allocation");
       }
 
       [[nodiscard]] const std::string &format() const {
         return format_;
       }
 
-      fs::path publish_next(
-        const fs::path &directory,
-        const std::uint64_t sequence
-      ) {
-        if (sequence != next_sequence_ || sequence == 0 || sequence > media_.frames.size()) {
-          throw worker_error(
-            "streaming decoder sequence mismatch: got " +
-            std::to_string(sequence) + ", expected " +
-            std::to_string(next_sequence_)
-          );
-        }
-        std::error_code ec;
-        fs::create_directories(directory, ec);
-        if (ec) {
-          throw worker_error("cannot create native follow directory");
-        }
-        const auto output =
-          directory / ("frame_" + frame_id(sequence) + "." + format_);
-        if (fs::exists(output, ec) || ec) {
-          throw worker_error("refusing to replace a follow frame");
-        }
-        if (format_ == "bmp") {
-          write_bmp(output);
+      raw_frame read_next(const frame_timing_t &timing) {
+        transport_timer_t timer("offline_decode_read");
+        if (timing.sequence != next_sequence_ || timing.sequence > media_.frames.size())
+          throw worker_error("streaming decoder sequence mismatch");
+        raw_frame frame;
+        frame.header = {1, timing.sequence, timing.pts, media_.time_base.numerator,
+                        media_.time_base.denominator, media_.width, media_.height,
+                        media_.color == media_color_e::sdr ? raw_pixel_format::bgra8 : raw_pixel_format::gbrpf32le};
+        const auto pixels = std::size_t(media_.width) * media_.height;
+        if (media_.color == media_color_e::sdr) {
+          frame.bgra.resize(pixels * 4);
+          process_.read_exact(frame.bgra.data(), frame.bgra.size());
         } else {
-          write_pfm(output);
+          frame.gbr32.resize(pixels * 3);
+          process_.read_exact(frame.gbr32.data(), frame.gbr32.size() * sizeof(float));
+          for (float value : frame.gbr32)
+            if (!std::isfinite(value) || std::abs(value) > 65504.0f)
+              throw worker_error("FFmpeg emitted non-finite/out-of-range raw HDR pixels");
         }
         ++next_sequence_;
-        return output;
+        return frame;
       }
 
       void finish() {
@@ -3459,100 +2977,6 @@ namespace offline_sbs {
       }
 
     private:
-      void write_bmp(const fs::path &path) {
-        const auto pixels_size =
-          static_cast<std::uint64_t>(media_.width) *
-          media_.height * 4ull;
-        if (pixels_size > std::numeric_limits<std::size_t>::max() || pixels_size + 54ull > std::numeric_limits<std::uint32_t>::max()) {
-          throw worker_error("source is too large for the BMP follow contract");
-        }
-        std::vector<std::uint8_t> bytes(
-          static_cast<std::size_t>(54ull + pixels_size),
-          0
-        );
-        const auto write16 = [&](const std::size_t offset, const std::uint16_t value) {
-          bytes[offset] = static_cast<std::uint8_t>(value);
-          bytes[offset + 1] = static_cast<std::uint8_t>(value >> 8);
-        };
-        const auto write32 = [&](const std::size_t offset, const std::uint32_t value) {
-          for (std::size_t index = 0; index < 4; ++index) {
-            bytes[offset + index] =
-              static_cast<std::uint8_t>(value >> (8 * index));
-          }
-        };
-        bytes[0] = 'B';
-        bytes[1] = 'M';
-        write32(2, static_cast<std::uint32_t>(bytes.size()));
-        write32(10, 54);
-        write32(14, 40);
-        write32(18, media_.width);
-        write32(
-          22,
-          std::bit_cast<std::uint32_t>(
-            -static_cast<std::int32_t>(media_.height)
-          )
-        );
-        write16(26, 1);
-        write16(28, 32);
-        write32(34, static_cast<std::uint32_t>(pixels_size));
-        process_.read_exact(bytes.data() + 54, static_cast<std::size_t>(pixels_size));
-        write_bytes_atomic(path, bytes, atomic_write_mode_e::transient);
-      }
-
-      void write_pfm(const fs::path &path) {
-        const auto magic = process_.read_line(16);
-        const auto dimensions = process_.read_line(128);
-        const auto scale = process_.read_line(64);
-        if (magic != "PF\n" && magic != "PF\r\n") {
-          throw worker_error("FFmpeg PFM stream is not RGB float32");
-        }
-        std::istringstream dimension_stream(dimensions);
-        std::uint32_t width = 0;
-        std::uint32_t height = 0;
-        std::string trailing;
-        if (!(dimension_stream >> width >> height) || (dimension_stream >> trailing) || width != media_.width || height != media_.height) {
-          throw worker_error("FFmpeg PFM dimensions changed during the clip");
-        }
-        char *end = nullptr;
-        const float scale_value = std::strtof(scale.c_str(), &end);
-        while (end && *end &&
-               std::isspace(static_cast<unsigned char>(*end))) {
-          ++end;
-        }
-        if (!end || *end || scale_value != -1.0f) {
-          throw worker_error(
-            "FFmpeg PFM must be little-endian float32 with scale -1"
-          );
-        }
-        const auto floats =
-          static_cast<std::uint64_t>(width) * height * 3ull;
-        if (floats > std::numeric_limits<std::size_t>::max() / sizeof(float)) {
-          throw worker_error("PFM frame is too large");
-        }
-        const std::string header = magic + dimensions + scale;
-        const auto payload_bytes = static_cast<std::size_t>(floats) * sizeof(float);
-        if (payload_bytes >
-            std::numeric_limits<std::size_t>::max() - header.size()) {
-          throw worker_error("PFM frame is too large");
-        }
-        std::vector<std::uint8_t> bytes(header.size() + payload_bytes);
-        std::memcpy(bytes.data(), header.data(), header.size());
-        process_.read_exact(
-          bytes.data() + header.size(),
-          payload_bytes
-        );
-        for (std::size_t offset = header.size();
-             offset < bytes.size();
-             offset += sizeof(float)) {
-          float value = 0.0f;
-          std::memcpy(&value, bytes.data() + offset, sizeof(value));
-          if (!std::isfinite(value) || std::abs(value) > 65504.0f) {
-            throw worker_error("FFmpeg emitted a non-finite/out-of-range PFM");
-          }
-        }
-        write_bytes_atomic(path, bytes, atomic_write_mode_e::transient);
-      }
-
       const media_contract_t &media_;
       std::string format_;
       child_process_t process_;
@@ -3759,7 +3183,7 @@ namespace offline_sbs {
           bounded_snapshot_(bounded_snapshot) {
       }
 
-      nlohmann::json read_header(const child_process_t &child) {
+      nlohmann::json read_header(const process_status_t &child) {
         nlohmann::json header;
         if (bounded_snapshot_) {
           header = read_snapshot(child, "adaptive_state_header.json");
@@ -3822,7 +3246,7 @@ namespace offline_sbs {
       }
 
       nlohmann::json read_frame(
-        const child_process_t &child,
+        const process_status_t &child,
         const std::uint64_t sequence
       ) {
         auto value = bounded_snapshot_ ?
@@ -3862,7 +3286,7 @@ namespace offline_sbs {
 
     private:
       nlohmann::json read_snapshot(
-        const child_process_t &child,
+        const process_status_t &child,
         const std::string_view filename
       ) {
         constexpr std::uintmax_t max_snapshot_bytes = 1ull * 1024ull * 1024ull;
@@ -3916,7 +3340,7 @@ namespace offline_sbs {
         return value;
       }
 
-      void ensure_open(const child_process_t &child) {
+      void ensure_open(const process_status_t &child) {
         const auto deadline = std::chrono::steady_clock::now() + child_timeout;
         while (std::chrono::steady_clock::now() < deadline) {
           stream_.open(path_, std::ios::binary);
@@ -3932,7 +3356,7 @@ namespace offline_sbs {
         throw worker_error("timed out opening adaptive trace");
       }
 
-      std::string read_complete_line(const child_process_t &child) {
+      std::string read_complete_line(const process_status_t &child) {
         const auto deadline = std::chrono::steady_clock::now() + child_timeout;
         while (std::chrono::steady_clock::now() < deadline) {
           const auto position = stream_.tellg();
@@ -3968,14 +3392,6 @@ namespace offline_sbs {
       std::ifstream stream_;
       std::uint64_t frame_count_ = 0;
     };
-
-    nlohmann::json boundary_json(const boundary_audit_t &boundary) {
-      return wire::boundary_audit_json(boundary);
-    }
-
-    nlohmann::json scene_json(const scene_plan_t &scene) {
-      return wire::scene_record_json(scene);
-    }
 
     nlohmann::json scene_progress_json(const scene_plan_t &scene) {
       return {
@@ -4067,25 +3483,6 @@ namespace offline_sbs {
         return result;
       }
       throw worker_error("unsupported offline codec");
-    }
-
-    void write_whole_clip_concat(
-      const fs::path &path,
-      const scene_frame_server_t &frame_server,
-      const media_contract_t &media
-    ) {
-      std::ostringstream contents;
-      contents.imbue(std::locale::classic());
-      contents << "ffconcat version 1.0\n";
-      for (const auto &timing : media.frames) {
-        const auto sequence = timing.sequence;
-        contents << "file '" << frame_server.frame_url(sequence) << "'\n"
-                 // Image timestamps are deliberately synthetic. The filter script below
-                 // replaces every PTS from source frame N in the source rational time base.
-                 << "option framerate 1/1\n"
-                 << "duration 1\n";
-      }
-      write_text_atomic(path, contents.str());
     }
 
     struct pts_run_t {
@@ -4210,7 +3607,6 @@ namespace offline_sbs {
     std::vector<std::string> build_whole_clip_encode_command(
       const worker_spec_t &spec,
       const media_contract_t &media,
-      const fs::path &concat,
       const fs::path &filter_script,
       const fs::path &encoded_video,
       const std::uint32_t encoded_width,
@@ -4244,13 +3640,21 @@ namespace offline_sbs {
       }
       command.insert(command.end(), {
                                       "-protocol_whitelist",
-                                      "file,http,tcp",
+                                      "pipe",
                                       "-f",
-                                      "concat",
-                                      "-safe",
-                                      "0",
+                                      "rawvideo",
+                                      "-pixel_format",
+                                      hdr ? "gbrpf32le" : "bgra",
+                                      "-video_size",
+                                      std::to_string(encoded_width) + "x" + std::to_string(encoded_height),
+                                      "-framerate",
+                                      "1",
+                                      "-color_primaries",
+                                      hdr || media.color_primaries.empty() ? "bt709" : media.color_primaries,
+                                      "-color_trc",
+                                      hdr ? "linear" : (media.color_transfer.empty() ? "iec61966-2-1" : media.color_transfer),
                                       "-i",
-                                      path_utf8(concat),
+                                      "pipe:0",
                                     });
       command.insert(command.end(), {
                                       "-filter_complex_script",
@@ -4322,16 +3726,9 @@ namespace offline_sbs {
         const std::uint32_t sbs_height,
         const bool asynchronous
       ):
-          frame_server_(
-            1,
-            static_cast<std::uint64_t>(media.frames.size()) + 1,
-            media.color == media_color_e::sdr ? "png" : "pfm"
-          ),
           encoded_video_(work / "encoded-video.mp4"),
           asynchronous_(asynchronous) {
-        const auto concat = work / "encoded-video.ffconcat";
         const auto filter_script = work / "encoded-video-filter.txt";
-        write_whole_clip_concat(concat, frame_server_, media);
         write_whole_clip_filter(
           filter_script,
           media,
@@ -4343,14 +3740,14 @@ namespace offline_sbs {
           build_whole_clip_encode_command(
             spec,
             media,
-            concat,
             filter_script,
             encoded_video_,
             sbs_width,
             sbs_height
           ),
           spec.sunshine_executable.parent_path(),
-          work / "logs" / "encode-whole-clip.log"
+          work / "logs" / "encode-whole-clip.log",
+          std::nullopt, false, true
         );
         if (asynchronous_) {
           consumer_ = std::thread([this] {
@@ -4368,15 +3765,16 @@ namespace offline_sbs {
 
       void publish(
         const std::uint64_t sequence,
-        const fs::path &frame
+        raw_frame frame
       ) {
+        if (sequence != next_sequence_++ || frame.header.sequence != sequence)
+          throw worker_error("raw encoder frame sequence mismatch");
         if (finished_) {
           throw worker_error("cannot publish to a finished whole-clip encoder");
         }
-        measure_transient_file_checked(frame, "queued whole-clip SBS frame");
+        frame.validate(std::numeric_limits<std::uint64_t>::max());
         if (!asynchronous_) {
-          frame_server_.publish_and_wait(sequence, frame, process_);
-          remove_transient_file_checked(frame);
+          write_frame(frame);
           return;
         }
 
@@ -4410,10 +3808,7 @@ namespace offline_sbs {
             outstanding() >= offline_encoder_pipeline_capacity) {
           throw worker_error("whole-clip encoder pipeline is not accepting frames");
         }
-        pending_ = pending_frame_t {
-          .sequence = sequence,
-          .path = frame,
-        };
+        pending_ = std::move(frame);
         condition_.notify_all();
       }
 
@@ -4438,7 +3833,7 @@ namespace offline_sbs {
             throw worker_error("whole-clip encoder pipeline did not drain");
           }
         }
-        frame_server_.finish();
+        process_.close_stdin();
         const int code = process_.wait(
           std::chrono::duration_cast<std::chrono::milliseconds>(child_timeout)
         );
@@ -4451,26 +3846,19 @@ namespace offline_sbs {
         finished_ = true;
       }
 
-      void abort(const std::string &reason) noexcept {
+      void abort(const std::string &) noexcept {
         if (finished_) {
           return;
         }
         if (asynchronous_) {
-          std::optional<fs::path> abandoned;
           {
             std::lock_guard lock(mutex_);
             stopping_ = true;
-            if (pending_) {
-              abandoned = pending_->path;
-              pending_.reset();
-            }
+            pending_.reset();
             condition_.notify_all();
           }
-          if (abandoned) {
-            remove_transient_file_best_effort(*abandoned);
-          }
         }
-        frame_server_.abort(reason);
+        process_.cancel_writes();
         if (consumer_.joinable()) {
           consumer_.join();
         }
@@ -4483,14 +3871,39 @@ namespace offline_sbs {
       }
 
     private:
-      struct pending_frame_t {
-        std::uint64_t sequence = 0;
-        fs::path path;
-      };
+      void write_frame(const raw_frame &frame) {
+        transport_timer_t timer("offline_encoder_write");
+        const auto deadline = std::chrono::steady_clock::now() + frame_io_timeout;
+        if (frame.header.format == raw_pixel_format::bgra8) {
+          process_.write_exact(frame.bgra.data(), frame.bgra.size(), deadline);
+          return;
+        }
+        if (frame.header.format != raw_pixel_format::rgba16f)
+          throw worker_error("encoder received unsupported raw pixel format");
+        // FFmpeg's planar float input has the same values as the former PFM
+        // interchange. Expand bounded chunks, with no full-frame float copy.
+        std::array<float, 16384> chunk;
+        const auto pixels = std::size_t(frame.header.width) * frame.header.height;
+        for (unsigned channel : {1u, 2u, 0u}) {
+          for (std::size_t first = 0; first < pixels; first += chunk.size()) {
+            const auto count = std::min(chunk.size(), pixels - first);
+            for (std::size_t x = 0; x < count; ++x) {
+              const auto h = frame.rgba16[(first + x) * 4 + channel];
+              const auto exponent = (h >> 10) & 31u;
+              const auto mantissa = h & 1023u;
+              if (exponent == 31u) throw worker_error("non-finite raw HDR SBS output");
+              const float value = exponent == 0 ? std::ldexp(float(mantissa), -24) :
+                                                std::ldexp(float(1024u + mantissa), int(exponent) - 25);
+              chunk[x] = (h & 0x8000u) ? -value : value;
+            }
+            process_.write_exact(chunk.data(), count * sizeof(float), deadline);
+          }
+        }
+      }
 
       void consume() noexcept {
         for (;;) {
-          pending_frame_t frame;
+          raw_frame frame;
           {
             std::unique_lock lock(mutex_);
             condition_.wait(lock, [&] {
@@ -4509,15 +3922,9 @@ namespace offline_sbs {
 
           std::string failure;
           try {
-            frame_server_.publish_and_wait(
-              frame.sequence,
-              frame.path,
-              process_
-            );
-            remove_transient_file_checked(frame.path);
+            write_frame(frame);
           } catch (const std::exception &exception) {
             failure = exception.what();
-            remove_transient_file_best_effort(frame.path);
           }
 
           {
@@ -4535,14 +3942,14 @@ namespace offline_sbs {
         }
       }
 
-      scene_frame_server_t frame_server_;
+      std::uint64_t next_sequence_ = 1;
       child_process_t process_;
       fs::path encoded_video_;
       bool asynchronous_ = false;
       std::thread consumer_;
       std::mutex mutex_;
       std::condition_variable condition_;
-      std::optional<pending_frame_t> pending_;
+      std::optional<raw_frame> pending_;
       bool active_ = false;
       bool input_finished_ = false;
       bool stopping_ = false;
@@ -5599,9 +5006,7 @@ namespace offline_sbs {
       }
     }
 
-    nlohmann::json scene_audit_document(
-      const std::vector<scene_plan_t> &scenes,
-      const std::vector<boundary_audit_t> &boundaries,
+    wire::scene_audit_contract_t scene_audit_document(
       const std::string_view status,
       const std::uint64_t peak_cache_bytes,
       const std::uint64_t analysis_source_raster_bytes,
@@ -5610,7 +5015,7 @@ namespace offline_sbs {
       const std::uint64_t hard_cap,
       const nlohmann::json &timeline_contract
     ) {
-      return wire::to_json(wire::scene_audit_contract_t {
+      return wire::scene_audit_contract_t {
         .status = std::string {status},
         .peak_cache_bytes = peak_cache_bytes,
         .analysis_source_raster_bytes = analysis_source_raster_bytes,
@@ -5618,39 +5023,9 @@ namespace offline_sbs {
         .peak_cache_plus_raster_bytes = peak_cache_plus_raster_bytes,
         .hard_cap_bytes = hard_cap,
         .timeline_contract = timeline_contract,
-        .scenes = scenes,
-        .boundary_revisions = boundaries,
-      });
+      };
     }
 
-    void account_serialized_record(
-      const nlohmann::json &record,
-      std::uintmax_t &payload_bytes,
-      const std::uintmax_t document_limit,
-      const std::string_view description
-    ) {
-      const auto serialized = record.dump(2);
-      // Array members gain indentation when embedded in the final document. Eight
-      // extra bytes per line exceeds the nesting delta of both result contracts.
-      const auto bytes =
-        static_cast<std::uintmax_t>(serialized.size()) +
-        static_cast<std::uintmax_t>(
-          std::count(serialized.begin(), serialized.end(), '\n')
-        ) * 8ull +
-        2ull;
-      const auto payload_limit =
-        document_limit - serialized_contract_fixed_reserve_bytes;
-      if (
-        bytes > payload_limit ||
-        payload_bytes > payload_limit - bytes
-      ) {
-        throw worker_error(
-          std::string {description} +
-          " records exceed their bounded serialized contract"
-        );
-      }
-      payload_bytes += bytes;
-    }
 
   }  // namespace
 
@@ -5756,20 +5131,6 @@ namespace offline_sbs {
 
   std::size_t offline_encoder_pipeline_capacity_for_test() {
     return offline_encoder_pipeline_capacity;
-  }
-
-  std::uint64_t offline_overlapped_raster_bound_for_test(
-    const std::uint64_t source_raster_bytes,
-    const std::uint32_t sbs_width,
-    const std::uint32_t sbs_height,
-    const bool hdr
-  ) {
-    return overlapped_raster_upper_bound(
-      source_raster_bytes,
-      sbs_width,
-      sbs_height,
-      hdr
-    );
   }
 
   bool can_retain_auxiliary_packets_for_test(
@@ -5887,77 +5248,6 @@ namespace offline_sbs {
 #endif
   }
 
-#ifdef _WIN32
-  std::string secure_frame_bridge_token_for_test() {
-    return secure_frame_bridge_token();
-  }
-
-  bool frame_bridge_survives_unauthenticated_disconnect_for_test() {
-    scene_frame_server_t server(1, 2, "png");
-    const auto connect_client = [&]() {
-      SOCKET client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-      if (client == INVALID_SOCKET) {
-        return client;
-      }
-      sockaddr_in address {};
-      address.sin_family = AF_INET;
-      address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-      address.sin_port = htons(server.port_for_test());
-      if (connect(
-            client,
-            reinterpret_cast<const sockaddr *>(&address),
-            sizeof(address)
-          ) != 0) {
-        closesocket(client);
-        return INVALID_SOCKET;
-      }
-      return client;
-    };
-
-    SOCKET rogue = connect_client();
-    if (rogue == INVALID_SOCKET) {
-      server.abort("test connection failed");
-      return false;
-    }
-    shutdown(rogue, SD_BOTH);
-    closesocket(rogue);
-
-    SOCKET probe = connect_client();
-    if (probe == INVALID_SOCKET) {
-      server.abort("test probe connection failed");
-      return false;
-    }
-    DWORD timeout_ms = 5000;
-    setsockopt(
-      probe,
-      SOL_SOCKET,
-      SO_RCVTIMEO,
-      reinterpret_cast<const char *>(&timeout_ms),
-      sizeof(timeout_ms)
-    );
-    constexpr std::string_view request {
-      "GET /unauthenticated HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
-    };
-    const bool request_sent =
-      send(
-        probe,
-        request.data(),
-        static_cast<int>(request.size()),
-        0
-      ) == static_cast<int>(request.size());
-    std::array<char, 256> response {};
-    const int received =
-      request_sent ?
-        recv(probe, response.data(), static_cast<int>(response.size()), 0) :
-        -1;
-    shutdown(probe, SD_BOTH);
-    closesocket(probe);
-    server.abort("test completed");
-    return received > 0 &&
-           std::string_view(response.data(), static_cast<std::size_t>(received))
-             .starts_with("HTTP/1.1 404");
-  }
-#endif
 #endif
 
   double rational_t::seconds(const std::int64_t ticks) const {
@@ -7354,10 +6644,10 @@ namespace offline_sbs {
       command.insert(command.end(), {
                                       "-vf",
                                       hdr_decode_filter(media),
-                                      "-c:v",
-                                      "pfm",
+                                      "-pix_fmt",
+                                      "gbrpf32le",
                                       "-f",
-                                      "image2pipe",
+                                      "rawvideo",
                                       "pipe:1",
                                     });
     }
@@ -7500,6 +6790,13 @@ namespace offline_sbs {
       if (ec) {
         throw worker_error("cannot create analysis directories");
       }
+      const auto source_raster_bytes = std::uint64_t(media.width) * media.height * (media.color == media_color_e::sdr ? 4 : 12);
+      const auto source_raster_bound = raw_source_byte_bound(source_raster_bytes, media.color != media_color_e::sdr);
+      if (source_raster_bound > spec.transient_raster_hard_cap_bytes)
+        throw worker_error("raw source, HDR upload and decoder pipe exceed the transient raster hard cap before allocation");
+      // Own the measurement window before either raw transport or the GPU thread starts.
+      sbs_perf::set_enabled(true);
+      sbs_perf::reset();
       streaming_decoder_t analysis_decoder {
         spec,
         media,
@@ -7507,9 +6804,6 @@ namespace offline_sbs {
       };
       directory_change_watcher_t analysis_output_watcher {analysis_output};
       std::vector<std::string> analysis_command {
-        path_utf8(spec.sunshine_executable),
-        path_utf8(spec.sunshine_config),
-        "--sbs-bench",
         "--frames",
         path_utf8(analysis_input),
         "--follow",
@@ -7531,11 +6825,8 @@ namespace offline_sbs {
           std::to_string(spec.transient_raster_hard_cap_bytes),
         });
       }
-      auto analysis = child_process_t::launch(
-        analysis_command,
-        spec.sunshine_executable.parent_path(),
-        work / "logs" / "analysis-harness.log"
-      );
+      raw_frame_transport transport(spec.transient_raster_hard_cap_bytes);
+      analysis_process_t analysis(std::move(analysis_command), transport);
       trace_tail_t trace(analysis_output, true);
       bool analysis_done = false;
       std::uint64_t peak_live_raster_bytes = 0;
@@ -7546,15 +6837,18 @@ namespace offline_sbs {
       std::optional<std::uint64_t> conversion_single_slot_raster_bound;
       std::optional<std::uint64_t> conversion_overlap_raster_bound;
       std::optional<std::uint64_t> conversion_sbs_artifact_bound;
-      std::vector<scene_plan_t> scenes;
+      paged_scene_audit_writer_t audit_writer([&](std::string_view filename, std::string_view bytes) {
+        const auto path = spec.result_directory / std::string(filename);
+        std::error_code page_error;
+        if (fs::exists(path, page_error) || page_error)
+          throw worker_error("refusing to replace a published scene audit page");
+        write_bytes_atomic(path, std::vector<std::uint8_t>(bytes.begin(), bytes.end()));
+        return sha256_hex(bytes);
+      });
       std::unique_ptr<whole_clip_encoder_t> conversion_encoder;
       std::unique_ptr<causal_scene_tracker_t> scene_tracker;
       nlohmann::json trace_header;
       std::uint64_t covered_until = 1;
-      std::size_t accounted_scene_count = 0;
-      std::size_t accounted_boundary_count = 0;
-      std::uintmax_t scene_audit_payload_bytes = 0;
-      std::uintmax_t worker_result_payload_bytes = 0;
       nlohmann::json timeline_contract =
         spec.operation != "convert" ?
           nlohmann::json {
@@ -7575,44 +6869,6 @@ namespace offline_sbs {
                {"cumulative_drift_allowed", false},
              });
 
-      const auto account_contract_records = [&] {
-        const auto boundary_count =
-          scene_tracker ? scene_tracker->boundary_audit().size() : 0;
-        if (
-          scenes.size() > max_serialized_scene_count ||
-          boundary_count > max_serialized_scene_count
-        ) {
-          throw worker_error(
-            "scene/boundary count exceeds the bounded serialized contract"
-          );
-        }
-        while (accounted_scene_count < scenes.size()) {
-          const auto record = scene_json(scenes[accounted_scene_count++]);
-          account_serialized_record(
-            record,
-            scene_audit_payload_bytes,
-            scene_audit_max_bytes,
-            "scene audit"
-          );
-          account_serialized_record(
-            record,
-            worker_result_payload_bytes,
-            worker_result_max_bytes,
-            "worker result"
-          );
-        }
-        while (accounted_boundary_count < boundary_count) {
-          account_serialized_record(
-            boundary_json(
-              scene_tracker->boundary_audit()[accounted_boundary_count++]
-            ),
-            scene_audit_payload_bytes,
-            scene_audit_max_bytes,
-            "scene audit"
-          );
-        }
-      };
-
       const auto initialize_scene_tracker = [&] {
         if (scene_tracker || !trace_header.is_object()) {
           throw worker_error("causal scene tracker initialization is invalid");
@@ -7622,9 +6878,8 @@ namespace offline_sbs {
 
       const auto recent_scene_decisions = [&] {
         nlohmann::json decisions = nlohmann::json::array();
-        const auto first = scenes.size() > 32 ? scenes.size() - 32 : 0;
-        for (std::size_t index = first; index < scenes.size(); ++index) {
-          decisions.push_back(scene_progress_json(scenes[index]));
+        for (const auto &scene : audit_writer.recent_scenes()) {
+          decisions.push_back(scene_progress_json(scene));
         }
         return decisions;
       };
@@ -7637,30 +6892,22 @@ namespace offline_sbs {
           if (scene.start_sequence != covered_until || scene.end_sequence_exclusive <= scene.start_sequence || scene.frame_count != scene.end_sequence_exclusive - scene.start_sequence) {
             throw worker_error("causal scene tracker produced a gap/overlap");
           }
-          if (scenes.size() >= max_serialized_scene_count) {
-            throw worker_error(
-              "scene count exceeds the bounded serialized contract"
-            );
-          }
-          scenes.push_back(scene);
-          account_contract_records();
+          audit_writer.append(scene);
           covered_until = scene.end_sequence_exclusive;
           publish_progress(
             spec,
             spec.operation == "convert" ? "convert" : "evaluate",
             analyzed_through_sequence,
             &media,
-            scenes.size(),
+            audit_writer.scene_count(),
             nullptr,
             recent_scene_decisions()
           );
-          if (is_scene_audit_checkpoint(scenes.size())) {
+          if (scene.boundary.decision != boundary_decision_e::end_of_stream &&
+              is_scene_audit_checkpoint(audit_writer.scene_count())) {
             write_json_atomic_bounded(
               spec.result_directory / "scene-audit.json",
-              scene_audit_document(
-                scenes,
-                scene_tracker ? scene_tracker->boundary_audit() :
-                          std::vector<boundary_audit_t> {},
+              audit_writer.manifest(scene_audit_document(
                 "running",
                 0,
                 analysis_source_raster_bytes.value_or(0),
@@ -7668,7 +6915,7 @@ namespace offline_sbs {
                 peak_live_raster_bytes,
                 spec.transient_raster_hard_cap_bytes,
                 timeline_contract
-              ),
+              )),
               scene_audit_max_bytes,
               "scene audit"
             );
@@ -7686,7 +6933,6 @@ namespace offline_sbs {
         );
         struct queued_source_t {
           const frame_timing_t *timing = nullptr;
-          fs::path path;
           std::uint64_t bytes = 0;
         };
         std::deque<queued_source_t> source_queue;
@@ -7697,15 +6943,9 @@ namespace offline_sbs {
           while (source_queue.size() < source_window_capacity &&
                  next_source_index < media.frames.size()) {
             const auto &timing = media.frames[next_source_index];
-            const auto source = analysis_decoder.publish_next(
-              analysis_input,
-              timing.sequence
-            );
+            auto source = analysis_decoder.read_next(timing);
             try {
-              const auto bytes = measure_transient_file_checked(
-                source,
-                "live analysis source raster"
-              );
+              const auto bytes = source.bytes();
               if (!analysis_source_raster_bytes) {
                 analysis_source_raster_bytes = bytes;
               } else if (*analysis_source_raster_bytes != bytes) {
@@ -7726,12 +6966,12 @@ namespace offline_sbs {
               }
               source_queue.push_back({
                 .timing = &timing,
-                .path = source,
                 .bytes = bytes,
               });
+              transport.source.publish(std::move(source));
               ++next_source_index;
             } catch (...) {
-              remove_transient_file_best_effort(source);
+              transport.cancel();
               throw;
             }
           }
@@ -7741,7 +6981,6 @@ namespace offline_sbs {
         while (!source_queue.empty()) {
           const auto queued_source = source_queue.front();
           const auto &timing = *queued_source.timing;
-          const auto &source = queued_source.path;
           const auto current_source_raster_bytes = queued_source.bytes;
           const auto progress = read_progress(
             analysis_output / "follow_progress.json",
@@ -7777,7 +7016,7 @@ namespace offline_sbs {
           }
           const auto trace_value = trace.read_frame(analysis, timing.sequence);
 
-          std::uint64_t current_live_raster_bytes = live_source_raster_bytes;
+          std::uint64_t current_live_raster_bytes = source_raster_bound;
           if (converting) {
             const auto progress_sbs_width =
               progress.value("sbs_width", 0u);
@@ -7798,32 +7037,24 @@ namespace offline_sbs {
                 "direct SBS geometry changed during conversion"
               );
             }
-            const auto extension =
-              media.color == media_color_e::sdr ? "png" : "pfm";
-            const auto sbs = analysis_output /
-              ("sbs_" + frame_id(timing.sequence) + "." + extension);
-            const auto raw_sbs_size = measure_transient_file_checked(
-              sbs,
-              "atomic direct SBS frame"
-            );
+            auto sbs = transport.sbs.receive(timing.sequence);
+            if (sbs.header.width != sbs_width || sbs.header.height != sbs_height ||
+                sbs.header.pts != timing.pts || sbs.header.time_base_numerator != media.time_base.numerator ||
+                sbs.header.time_base_denominator != media.time_base.denominator ||
+                sbs.header.format != (media.color == media_color_e::sdr ? raw_pixel_format::bgra8 : raw_pixel_format::rgba16f))
+              throw worker_error("raw SBS output header differs from the exact source timeline/geometry/color");
+            const auto raw_sbs_size = sbs.bytes();
             if (!conversion_encoder) {
-              conversion_sbs_artifact_bound = sbs_artifact_upper_bound(
-                sbs_width,
-                sbs_height,
-                media.color != media_color_e::sdr
-              );
+              conversion_sbs_artifact_bound = std::uint64_t(sbs_width) * sbs_height *
+                (media.color == media_color_e::sdr ? 4u : 8u);
               if (raw_sbs_size > *conversion_sbs_artifact_bound) {
                 throw worker_error(
                   "direct SBS artifact exceeded its conservative pipeline bound"
                 );
               }
               conversion_single_slot_raster_bound =
-                offline_single_slot_raster_bound(
-                  *analysis_source_raster_bytes,
-                  sbs_width,
-                  sbs_height,
-                  media.color != media_color_e::sdr
-                );
+                raw_raster_byte_bound(*analysis_source_raster_bytes, sbs_width, sbs_height,
+                                      media.color != media_color_e::sdr, false);
               if (*conversion_single_slot_raster_bound >
                   spec.transient_raster_hard_cap_bytes) {
                 throw worker_error(
@@ -7831,12 +7062,8 @@ namespace offline_sbs {
                 );
               }
               conversion_overlap_raster_bound =
-                overlapped_raster_upper_bound(
-                  *analysis_source_raster_bytes,
-                  sbs_width,
-                  sbs_height,
-                  media.color != media_color_e::sdr
-                );
+                raw_raster_byte_bound(*analysis_source_raster_bytes, sbs_width, sbs_height,
+                                      media.color != media_color_e::sdr, true);
               conversion_overlap_enabled =
                 media.frames.size() > 1u &&
                 *conversion_overlap_raster_bound <=
@@ -7868,9 +7095,9 @@ namespace offline_sbs {
               );
             }
             try {
-              conversion_encoder->publish(timing.sequence, sbs);
+              conversion_encoder->publish(timing.sequence, std::move(sbs));
             } catch (...) {
-              remove_transient_file_best_effort(sbs);
+              transport.cancel();
               throw;
             }
           } else if (progress.value("sbs_frame_count", 0ull) != 0 ||
@@ -7882,7 +7109,7 @@ namespace offline_sbs {
             peak_live_raster_bytes,
             current_live_raster_bytes
           );
-          remove_transient_file_checked(source);
+          transport.source.acknowledge(timing.sequence);
           if (live_source_raster_bytes < current_source_raster_bytes) {
             throw worker_error("live source pipeline accounting underflow");
           }
@@ -7897,19 +7124,19 @@ namespace offline_sbs {
             timing,
             media.time_base
           ));
-          account_contract_records();
+          (void) scene_tracker->take_boundary_audit();
           commit_scenes(finalized, timing.sequence);
           publish_progress(
             spec,
             converting ? "convert" : "evaluate",
             timing.sequence,
             &media,
-            scenes.size(),
+            audit_writer.scene_count(),
             nullptr,
             recent_scene_decisions()
           );
         }
-        publish_producer_done(analysis_input, media.frames.size());
+        transport.source.finish();
         analysis_done = true;
         const int analysis_code = analysis.wait(
           std::chrono::duration_cast<std::chrono::milliseconds>(child_timeout)
@@ -7926,7 +7153,7 @@ namespace offline_sbs {
           throw worker_error("causal scene tracker received no frames");
         }
         auto finalized = scene_tracker->finish();
-        account_contract_records();
+        (void) scene_tracker->take_boundary_audit();
         commit_scenes(finalized, media.frames.size());
       } catch (const std::exception &exception) {
         if (!analysis_done) {
@@ -7973,15 +7200,15 @@ namespace offline_sbs {
       const auto expected_follow_format = analysis_decoder.format();
       const auto expected_input_frame_format =
         media.color == media_color_e::sdr ?
-          std::string_view {"sRGB-BMP-WIC"} :
-          std::string_view {"linear-scRGB-f32-pfm"};
+          std::string_view {"sRGB-BGRA8-raw"} :
+          std::string_view {"linear-scRGB-f32-planar"};
       if (
         !analysis_runtime.parallax_v2_render ||
         !analysis_runtime.parallax_v2_live ||
         analysis_runtime.follow_format.value_or("") !=
           expected_follow_format ||
-        analysis_runtime.follow_frame_pattern.value_or("") !=
-          "frame_%010d." + expected_follow_format ||
+        analysis_runtime.frame_transport.value_or("") != raw_frame_transport::name ||
+        analysis_runtime.follow_frame_pattern.has_value() ||
         analysis_runtime.input_frame_format != expected_input_frame_format ||
         analysis_runtime.scene_cache_write ||
         analysis_runtime.scene_cache_replay
@@ -7991,8 +7218,6 @@ namespace offline_sbs {
         );
       }
       const auto &direct_sbs = typed_analysis_contract.sbs;
-      const auto output_extension =
-        media.color == media_color_e::sdr ? "png" : "pfm";
       if (converting) {
         if (!direct_sbs.enabled ||
             direct_sbs.frame_count != media.frames.size() ||
@@ -8000,8 +7225,7 @@ namespace offline_sbs {
             direct_sbs.height != sbs_height ||
             direct_sbs.width != analysis_runtime.output_sbs_width ||
             direct_sbs.height != analysis_runtime.output_sbs_height ||
-            direct_sbs.file_pattern.value_or("") !=
-              "sbs_<frame-id>." + std::string {output_extension} ||
+            direct_sbs.file_pattern.has_value() ||
             !direct_sbs.atomic_publication ||
             !analysis_runtime.follow_atomic_sbs_publication) {
           throw worker_error(
@@ -8055,7 +7279,7 @@ namespace offline_sbs {
           "mux",
           media.frames.size(),
           &media,
-          scenes.size(),
+          audit_writer.scene_count(),
           nullptr,
           recent_scene_decisions()
         );
@@ -8143,10 +7367,10 @@ namespace offline_sbs {
         );
       }
 
-      account_contract_records();
-      const auto audit = scene_audit_document(
-        scenes,
-        scene_tracker->boundary_audit(),
+      // The harness snapshot precedes the asynchronous encoder's last write. Snapshot again
+      // after the encoder drains so the transport profile covers every source and output frame.
+      sbs_perf::dump_json(path_utf8(analysis_output / "sbs_perf.json"));
+      const auto audit = audit_writer.manifest(scene_audit_document(
         "complete",
         0,
         analysis_source_raster_bytes.value_or(0),
@@ -8154,7 +7378,7 @@ namespace offline_sbs {
         peak_live_raster_bytes,
         spec.transient_raster_hard_cap_bytes,
         timeline_contract
-      );
+      ));
       write_json_atomic_bounded(
         spec.result_directory / "scene-audit.json",
         audit,
@@ -8166,7 +7390,7 @@ namespace offline_sbs {
         "complete",
         media.frames.size(),
         &media,
-        scenes.size(),
+        audit_writer.scene_count(),
         nullptr,
         recent_scene_decisions()
       );
@@ -8208,7 +7432,9 @@ namespace offline_sbs {
                          std::optional<std::string> {path_utf8(*spec.staging_output)} :
                          std::nullopt,
       };
-      result_contract.scenes = scenes;
+      result_contract.scenes = audit_writer.recent_scenes();
+      result_contract.total_scene_count = audit_writer.scene_count();
+      result_contract.scene_audit_manifest_sha256 = sha256_hex(audit.dump(2) + "\n");
       const auto result = wire::to_json(result_contract);
       write_json_atomic_bounded(
         spec.result_path,

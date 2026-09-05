@@ -1057,6 +1057,13 @@ editing the `conf` file in a text editor. Use the examples as reference.
             fragmentation and micro-stutter on low-MTU Wi-Fi or VPN links. Account for tunnel, IP, UDP,
             RTP, and encryption overhead when choosing a value. Smaller packets increase packet and FEC
             overhead, so a lower bitrate may be required.
+            The host advertises <code>x-ss-video[0].maxPacketSize</code> in RTSP DESCRIBE. Updated
+            Moonlight 3D clients first reserve encryption overhead within their network packet budget,
+            then select the lesser of the remaining packet size and this ceiling before
+            ANNOUNCE and initialize FEC with that same size. The ceiling counts the NV video header
+            and encoded payload; it excludes the 16-byte RTP and 32-byte encrypted-video headers.
+            A client that announces a larger size is rejected with an explicit RTSP error; the host
+            never silently changes a size already selected by the client.
         </td>
     </tr>
     <tr>

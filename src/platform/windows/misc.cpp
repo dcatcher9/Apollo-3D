@@ -3417,7 +3417,7 @@ namespace platf {
     return 0;
   }
 
-  std::chrono::nanoseconds qpc_time_difference(int64_t performance_counter1, int64_t performance_counter2) {
+  int64_t qpc_frequency() {
     auto get_frequency = []() {
       LARGE_INTEGER frequency;
       frequency.QuadPart = 0;
@@ -3425,6 +3425,11 @@ namespace platf {
       return frequency.QuadPart;
     };
     static const std::int64_t frequency = get_frequency();
+    return frequency;
+  }
+
+  std::chrono::nanoseconds qpc_time_difference(int64_t performance_counter1, int64_t performance_counter2) {
+    const auto frequency = qpc_frequency();
     if (frequency > 0) {
       const auto seconds = std::chrono::duration<long double> {
         static_cast<long double>(performance_counter1 - performance_counter2) /

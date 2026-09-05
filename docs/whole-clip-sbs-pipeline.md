@@ -1,195 +1,160 @@
 # Offline Host 3D conversion
 
-Sunshine 3D's offline path runs the production Host SBS V2 pipeline causally in source order. It
-does not have a second geometry policy, scene lookahead, a depth/state scene cache, or a render
-replay. The authoritative geometry, camera, scene-cut, OCR, conditioning, and warp contracts remain
-[Host SBS](host-sbs.md) and [Host SBS scene cuts](host-sbs-scene-cuts.md).
+This document owns production offline frame transport, job lifecycle, resource bounds, diagnostics,
+encoding, and publication. [Host SBS](host-sbs.md) owns model, geometry, and color policy;
+[Host SBS scene cuts](host-sbs-scene-cuts.md) owns causal cut decisions. The
+[evaluator guide](../tools/sbsbench/README.md) owns experiments and their evidence requirements.
+[AGENTS.md](../AGENTS.md) owns machine-specific execution instructions.
 
-`sbs_3d_pop_strength` has the same literal meaning online and offline. Offline jobs do not search
-for stronger scene-wide parameters or revise a camera reset after later frames arrive.
+Offline conversion runs the production Host SBS V2 pipeline in source order. Pop strength,
+camera, OCR, conditioning, and warp rules have the same meaning as live conversion. Diagnostic
+scenes cannot revise a rendered frame or choose new geometry parameters.
 
-## Pipeline
+## Pipeline and ownership
 
 ```text
 selected video
-  -> one primary ordered decoder (two-source bounded window)
-  -> production causal estimator + V2 renderer (strictly sequential)
-  -> one-slot ordered CPU serializer
-  -> one-slot ordered handoff to one persistent NVENC encoder
-  -> stream-preserving mux
-  -> timeline/color/stream verification
+  -> one primary FFmpeg decoder, raw stdout pipe
+  -> bounded source-memory channel
+  -> production estimator + V2 renderer on one GPU owner thread
+  -> immutable packed CPU readback, bounded memory handoff
+  -> raw stdin pipe to one persistent FFmpeg/NVENC encoder
+  -> stream-preserving mux and verification
   -> atomic output publication
 ```
 
-The native harness is launched once with follow protocol schema 2. For conversion it uses
-`--artifacts conversion`; Analyze Only uses `--artifacts adaptive`. Both modes consume the same
-decoded full frames and the same source-derived observation timestamps. Every admitted source frame
-runs one authenticated TensorRT update. Conversion additionally publishes the exact SBS raster drawn
-from that estimator state.
+The manager launches an authenticated isolated worker process. That worker calls the real native
+harness once on its GPU thread. Conversion uses `--artifacts conversion`; Analyze Only uses
+`--artifacts adaptive`. Every source frame runs one authenticated TensorRT update and consumes its
+source-derived observation timestamp. All D3D/TensorRT work stays on this single owner.
 
-The harness copies each completed GPU readback into one CPU-owned slot. PNG/PFM serialization for
-frame `N` can therefore overlap the production inference and render of `N+1`; no D3D device or
-context crosses threads. The worker then transfers the atomic SBS artifact to a one-slot ordered
-handoff whose consumer serves it to the persistent FFmpeg/NVENC process and removes it only after a
-complete authenticated GET. NVENC consumption of `N` can likewise overlap production of `N+1`.
-The worker never launches a render decoder, scene replay, or second TensorRT pass.
+Production frame transport is `bounded-raw-memory-v1`, defined in `src/offline_frame_transport.h`.
+Each immutable frame carries schema, sequence, exact PTS and rational time base, width, height,
+and pixel format. Payload size, ordering, and geometry are checked before use. Moving a frame
+transfers ownership of its allocation.
 
-## Causal scene evidence
+| Boundary | SDR | Static PQ/HLG |
+|---|---|---|
+| FFmpeg to worker/harness | Top-down BGRA8, sRGB | Top-down planar GBR float32, linear scRGB |
+| Harness upload | BGRA8 | RGBA16F, using the existing finite FP16 conversion |
+| Packed CPU handoff | Top-down BGRA8 | Top-down RGBA16F |
+| Worker to FFmpeg | Raw BGRA8 | Planar GBR float32, expanded in one 64 KiB buffer |
 
-Scene records are diagnostic epochs of the online state machine:
+HDR reference white and primaries remain owned by Host SBS. Production conversion does not write
+source BMP/PFM or rendered PNG/PFM files, run WIC codecs, or serve pixels over HTTP. The standalone
+evaluator keeps its established file-based harness inputs and outputs.
 
-- the first epoch begins at source sequence 1;
-- an authenticated `hard_cut_pulse` and matching `hard_cut_count` transition at sequence `S`
-  closes `[start, S)` and starts the next epoch at `S`;
-- EOF closes the final epoch; and
-- no future frame may move, reject, merge, or otherwise revise a boundary.
+The source channel has capacity two and the packed-output channel has capacity one. A separate
+source acknowledgement proves the worker consumed that frame's exact adaptive-state snapshot.
+Receiving pixels alone cannot release that acknowledgement. The next snapshot/progress record
+waits for the previous acknowledgement. Analyze Only uses the same evidence barrier. Small state
+and progress files retain atomic snapshots and directory-change notifications; raw pixel transfer
+uses condition-variable backpressure.
 
-The worker rejects a pulse/count disagreement. Reports identify this contract as
-`causal-production-exact`, with `lookahead: false`. Scene records do not control rendering: each SBS
-frame has already been committed from the production causal state before the diagnostic epoch is
-reported.
+The decoder pipe uses bounded overlapped reads, so each available chunk wakes its owner without
+a polling delay. The persistent encoder has one outstanding handoff. Its private inherited pipe
+uses bounded overlapped writes, a reusable event, and explicit cancellation. EOF follows the final admitted
+frame. Premature exit, truncated data, unexpected frame count, header mismatch, non-finite HDR
+values, or a timed-out handoff fails the job before output publication.
 
-## Throughput and storage
+## Throughput and raster bounds
 
-Offline processing is not paced to source playback time. Decoder, GPU, CPU serialization, and
-encoder advance through three bounded ordered stages. At most two decoded source artifacts are
-published, one completed SBS snapshot is being serialized, and one SBS artifact is owned by the
-encoder handoff. The next follow acknowledgement is not published until the worker has removed the
-previous source artifact, proving the previous latest-state snapshot and ACK were consumed before
-they can be replaced. Windows directory-change notifications provide this backpressure without a
-fixed per-frame polling delay.
+Offline execution is unpaced. Independent decode, rendering, and encoding may overlap while GPU
+work remains causal. Before reading pixels, the worker reserves the source, decoder pipe, and
+HDR upload conversion for both Analyze Only and Convert Video. The harness
+authenticates output geometry and the minimum raster reservation before the first SBS readback.
+`raw_source_byte_bound()` and `raw_raster_byte_bound()` define these shared production reservations.
 
-The production estimator and renderer remain strictly causal and execute one frame at a time;
-throughput comes only from overlapping independent decoder, CPU serialization, and NVENC work, not
-from reordering inference or looking ahead. After the first source reveals its exact transport size
-and the shared production geometry resolver establishes the packed output, the harness checks one
-source reservation plus one conservative SBS reservation before inference, rendering, or the first
-SBS output snapshot. A conversion whose minimum single-slot reservation exceeds the configured
-transient-raster hard cap fails closed. Before overlap is enabled, the worker separately checks two
-source reservations plus two conservative SBS reservations. Each SBS reservation includes a tightly
-packed CPU snapshot (BGRA8 for SDR or
-R16G16B16A16_FLOAT for HDR), conservative serializer scratch (a BGRA surface plus codec allowance
-for WIC, or the explicit RGB32F row used by PFM), and its worst-case serialized PNG/PFM artifact.
-This covers the active serializer retaining one snapshot while the main thread maps the next, and
-the encoder retaining one serialized artifact while the serializer publishes the next. The bound
-is for the bounded pipeline handoff residency enumerated above; it is not a claim about total
-process RSS, source-decoder/WIC internals, D3D driver allocations, or NVENC-internal surfaces. If
-the two-slot bound does not fit but the mandatory single-slot bound does, conversion retains one
-source at a time and a synchronous encoder handoff; CPU serialization still runs on its bounded
-worker thread. Peak-raster attestation reports the applicable conservative pipeline bound. There is
-no whole-clip image sequence, unresolved-scene depth cache,
-or per-scene compressed file. Legacy cache-limit request fields remain accepted for persisted/stale
-clients and remain only a transient-raster safety bound; they cannot split scenes or change
-geometry.
+The serial reservation includes one decoded source, the HDR upload conversion when applicable,
+one packed readback, bounded decoder/encoder pipes, and one HDR conversion chunk. Overlap reserves
+two source leases, the HDR upload conversion, and three packed snapshots: encoder-owned, in
+handoff, and newly read back. If overlap exceeds the configured hard cap, the worker uses one
+source and synchronous encoder handoff. If the minimum reservation exceeds the cap, conversion
+fails. The attested peak is this conservative handoff bound, not total process RSS, codec
+internals, TensorRT/D3D allocations, or driver-owned NVENC surfaces.
 
-Per-frame rasters, adaptive-state snapshots, and follow acknowledgements use same-volume atomic
-publication but do not force stable-storage flushes. They are runtime handoffs, never restart
-inputs; interrupted jobs are not resumed. A consumer that is woken while the producer's rename or
-a filesystem filter still holds a transient name retries that same snapshot for a short, bounded
-interval, with no delay on the normal first-read path and no advance to a future frame. Job state,
-retained evidence, result contracts, and final output publication keep their existing durability
-guarantees.
+The retained `sbs_perf.json` snapshot includes decoder-read and encoder-write timings after the
+encoder drains. These measure transfer and backpressure as well as copying; GPU stage timings
+remain separate. Compare matched source/output evidence before attributing a throughput change.
 
-SDR encoding does not reopen the source video. Static PQ/HLG encoding keeps a second, aligned source
-decode only as an HDR side-data donor because PFM carries pixels but not per-frame mastering-display
-and content-light side data. Every encoded pixel still comes from the direct SBS PFM stream. A
-single-frame donor must not be looped: FFmpeg 8.1.2 does not retain those side-data records on looped
-clones. This correctness-only HDR exception can be optimized only after HEVC and AV1 random-access
-tests prove the metadata survives at every keyframe.
+Legacy cache-limit request fields remain accepted for existing clients and persisted jobs. They
+mean only the transient-raster cap. There is no whole-clip image sequence, depth/state cache,
+scene replay, per-scene encoder, or second inference pass.
 
-## Job types
+SDR encoding does not decode the source again. Static HDR keeps a second aligned source decode
+solely to donate per-frame mastering-display and content-light metadata. Every encoded pixel
+comes from the packed raw stream. Replacing this donor requires equivalent HEVC/AV1 evidence at
+every random-access keyframe; a looped single donor frame does not establish that equivalence.
 
-### Analyze Only
+## Causal diagnostic pages
 
-Analyze Only runs the causal estimator and state machine without publishing SBS video. It emits the
-source contract, causal scene audit, progress, and terminal whole-clip attestation. This is the dry
-run for conversion state, not a future-aware optimizer.
+The first epoch begins at sequence 1. An authenticated hard-cut pulse with its matching count
+transition at sequence S closes [start, S) and opens the next epoch at S. EOF closes the final
+epoch. Pulse/count disagreement fails closed. Reports identify this as `causal-production-exact`,
+with `lookahead: false`.
 
-### Convert Video
+Conversion duration is independent of the old 1,920-scene inline-document limit. The worker keeps
+at most 32 recent scenes and one pending page. Immutable pages contain at most 128 scenes and
+2 MiB, with matching boundary records. Finalized pages are never rewritten. The version 4
+`scene-audit.json` manifest records page SHA-256 digests, exact byte counts, contiguous scene/frame
+coverage, and totals. Worker-result schema 3 authenticates that manifest and carries the recent
+tail. Previous inline schemas remain readable for retained jobs.
 
-Convert Video runs the same causal pass and publishes every atomic SBS frame to one persistent
-H.265/HEVC or AV1 NVENC encoder. It then preserves supported auxiliary streams, verifies the encoded
-timeline and color contract, muxes the final container, and publishes the output only after all
-checks pass.
+Storage still has explicit limits: 1 GiB of audit pages, 16,384 page descriptors, a 32 MiB manifest,
+and a 16 MiB worker result. Exhaustion produces a storage error. These limits do not control cuts,
+camera resets, or scene splitting. Checkpoints flush a small page and publish the compact
+manifest; completion publishes the final manifest after output verification.
 
-## Media contract
+The manager validates pages one at a time, including hashes, byte bounds, sequence coverage, and
+the result's final scene tail. Downloads revalidate the selected page. The UI explicitly offers
+the manifest and numbered page downloads, with pagination of the page list. A manifest download
+does not claim to include all scene records.
 
-- Input is one non-empty regular video file selected by absolute path.
-- The first video stream is decoded in presentation order with square pixels, progressive scan, a
-  fixed raster, and a stable color description.
-- Source presentation timestamps and durations are represented exactly. MP4 output must match the
-  rational source timeline exactly; Matroska may differ by at most one output tick per frame and may
-  not accumulate drift.
-- SDR remains SDR. Static BT.2020 PQ and HLG use linear-scRGB PFM interchange and 10-bit output.
-- Dolby Vision, dynamic HDR10+, changing HDR metadata, rotation, interlace, alpha, changing raster,
-  and unsupported semantic side data fail closed.
-- Supported audio, subtitle, data, attachment, chapter, language, and title metadata are preserved
-  under the stream-inventory contract. Subtitle dispositions are cleared where container rules
-  require it.
-- Output is `.mkv` or `.mp4`, beside the input, and an existing destination is never overwritten.
+## Media and publication
 
-## Native ownership and isolation
+- Input is one selected non-empty regular file. Its first video stream must be progressive,
+  square-pixel, fixed-raster, and stable in color description.
+- PTS and durations remain exact rational values. MP4 must match the source exactly; Matroska may
+  differ by at most one output tick per frame, without cumulative drift.
+- SDR remains SDR. Static BT.2020 PQ/HLG retain color and metadata in 10-bit output.
+- Dynamic HDR10+, Dolby Vision, changing HDR metadata/raster, rotation, interlace, alpha, and
+  unsupported semantic side data fail closed.
+- Supported audio, subtitles, data, attachments, chapters, language, and titles are preserved
+  under the stream-inventory contract. Subtitle dispositions are cleared where required.
+- HEVC and AV1 use NVENC. Output is `.mkv` or `.mp4`; existing destinations are never overwritten.
 
-The Web UI uses the in-process job manager and launches an authenticated isolated `sunshine.exe`
-child. Python and `tools/sbsbench` do not own production conversion. `ffmpeg.exe` and `ffprobe.exe`
-must be the approved installation-local pair.
+Analyze Only emits source, scene, progress, and terminal attestations without encoding. Convert
+Video additionally verifies compressed video, muxed streams, timing, HDR/color, staging identity,
+and complete output before publication. Success requires exactly one scheduled/enqueued TensorRT
+update per source frame, selected-input/full-frame scope, the live V2 renderer, complete immutable
+SBS publication, and zero cache/replay use.
 
-Only one offline job may own the GPU. Admission fails while a live Moonlight stream or local AR
-presentation owns it. Codec preflight runs only after the offline job receives the exclusive GPU
-lease. Ordinary streaming remains available when the offline prerequisites are absent.
+## Job ownership and recovery
 
-The child receives a hashed worker specification, writes only inside its identity-pinned job root
-and claimed staging output, and publishes typed progress/result contracts. Cancellation terminates
-the worker process tree. Startup recovery marks interrupted jobs; version 1 does not resume them.
+The native manager owns production conversion; Python and tools/sbsbench own evaluation only.
+FFmpeg/FFprobe must be the approved installation-local pair. One offline job may hold the GPU lease.
+Admission refuses work while streaming or local AR presentation owns it.
 
-## Terminal attestation
+The exact SHA-256 authenticates the worker specification. Job-root and staging-file identity pins
+constrain writes and cleanup. Cancellation terminates the entire worker process tree, including
+an unresponsive GPU owner and media children. Memory handoffs also wake on cancellation. Restart
+marks interrupted jobs; raw frames and transient snapshots are never resumed. Durable job state,
+audit evidence, and output publication retain their existing guarantees.
 
-A successful causal pass must attest:
-
-- `artifact_mode: adaptive` for Analyze Only or `conversion` for Convert Video;
-- `inference_mode: single-pass-tensorrt`;
-- inference enabled with scheduled/enqueued counts equal to source frame count;
-- the selected-input full-frame source scope;
-- the production live V2 signed-parallax renderer;
-- no scene-cache write or replay configuration;
-- atomic SBS publication, complete frame count, and resolved output geometry for conversion; and
-- an empty replay-contract list and zero retained cache bytes.
-
-Conversion success additionally requires encoded-video, final-container, timeline, color/HDR,
-auxiliary-stream, staging-identity, and output-file verification. Any mismatch fails the job before
-publication.
-
-## Web UI workflow
-
-1. Open **Offline 3D Conversion**.
-2. Choose **Convert video** or **Analyze only**.
-3. Select the input file.
-4. For conversion, choose the output name and H.265 or AV1.
-5. Stop any live stream/local presenter and start the job.
-6. Monitor source-frame progress for the current job.
-7. Use the atomically published video after completion.
-8. Clear the finished job to remove its retained temporary files and history. Published video is
-   preserved. If staging cleanup was interrupted, Clear retires only the identity-attested staging
-   link after confirming the published video still matches; an absent staging link is already clean.
-   A replaced staging path or a staging file that may be the last intact copy is preserved.
-
-There are no lookahead, cache-size, or administrative-split controls.
+The Web UI selects a file, operation, output name, and codec; monitors frame progress; downloads
+diagnostic pages; and clears retained job artifacts. Clear preserves published video. Interrupted
+staging cleanup removes only the identity-attested staging link after confirming the published
+file. Replaced paths and a possible last intact copy are preserved.
 
 ## Verification
 
-Native regression coverage must include:
+The joint local gate covers raw handoff ordering/cancellation/bounds, negotiated FEC sizing,
+retained transport generations, permission release, capture clock units/retry scheduling,
+authenticated pages, and client HTTP/presentation transactions.
 
-- causal pulse/count epoch tracking and fail-closed divergence;
-- direct conversion command wiring with no cache, replay, or render decoder;
-- one-pass whole-clip/result contract validation;
-- follow protocol schema 2 geometry and event-driven wakeup;
-- two-source/one-serializer/one-encoder-slot bounds and conservative byte-cap fallback;
-- serializer and encoder overlap without ACK overwrite or D3D cross-thread access;
-- persistent encoder frame ordering and exact timeline checks;
-- SDR, PQ, and HLG color/metadata preservation;
-- HEVC and AV1 admission/output validation; and
-- UI assertions that no lookahead/cache/split controls are exposed.
-
-The production integration smoke must run only when the installed host has released its ports/GPU
-ownership. It creates disposable media and job directories and must never publish into an existing
-user destination.
+The opt-in `tests/integration/Invoke-OfflineSbsWorkerSmoke.ps1` runs the actual worker on a small
+deterministic fixture. It checks raw transport, causal state, page digests, frame order,
+timestamps, auxiliary streams, attachment bytes, output identity, and failed-job publication.
+Run SDR, PQ, and HLG with HEVC/AV1 as appropriate after the installed host releases its ports/GPU.
+GPU smoke, throughput comparisons, and physical XR presentation are separate evidence; portable
+CI does not claim to validate the headset compositor or display hardware.

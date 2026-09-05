@@ -274,8 +274,9 @@ namespace input {
     std::mutex input_queue_lock;
     std::mutex input_dispatch_lock;
     detail::drain_gate_t input_drain_gate;
-    std::uint64_t input_generation = 0;
+    detail::dispatch_generations_t input_generations;
     bool input_reset = false;
+    crypto::PERM permissions = crypto::PERM::_all;
     std::shared_ptr<std::promise<void>> reset_completion;
 
     thread_pool_util::ThreadPool::task_id_t key_repeat_id;
@@ -1458,20 +1459,49 @@ namespace input {
     }
   }
 
-  void release_all_input_state() {
-    for (int x = 0; x < mouse_press.size(); ++x) {
-      if (mouse_press[x]) {
-        platf::button_mouse(platf_input, x, true);
-        mouse_press[x] = false;
+  void release_input_state(input_t &input, crypto::PERM permissions, bool teardown = false) {
+    detail::release_pressed_states(key_press, mouse_press, permissions,
+      [&](key_press_id_t key) {
+        platf::keyboard_update(platf_input, map_keycode(vk_from_kpid(key) & 0x00FF), true, flags_from_kpid(key));
+      }, [&](std::size_t button) {
+        platf::button_mouse(platf_input, static_cast<int>(button), true);
+      });
+    if (!!(permissions & crypto::PERM::input_mouse)) {
+      input.accumulated_vscroll_delta = 0;
+      input.accumulated_hscroll_delta = 0;
+    }
+    if (!!(permissions & crypto::PERM::input_kbd)) {
+      input.pressed_modifiers = 0;
+      input.left_alt_pressed = false;
+      input.right_alt_pressed = false;
+    }
+    if (!!(permissions & crypto::PERM::input_controller)) {
+      if (teardown) {
+        detail::free_gamepads_before_completion(input.gamepads, [&](int id) {
+          free_gamepad(platf_input, id);
+        }, []() {});
+      } else {
+        detail::neutralize_gamepads(input.gamepads, [&](int id, const auto &state) {
+          platf::gamepad_update(platf_input, id, state);
+        });
+      }
+      for (auto &gamepad : input.gamepads) {
+        gamepad.gamepad_state = {};
+        gamepad.back_button_state = button_state_e::NONE;
       }
     }
-
-    for (auto &kp : key_press) {
-      if (!kp.second) {
-        continue;
+    if (input.client_context) {
+      if (!!(permissions & crypto::PERM::input_touch)) {
+        platf::touch_input_t cancel {};
+        cancel.eventType = LI_TOUCH_EVENT_CANCEL_ALL;
+        platf::touch_update(input.client_context.get(), input.touch_port, cancel);
       }
-      platf::keyboard_update(platf_input, map_keycode(vk_from_kpid(kp.first) & 0x00FF), true, flags_from_kpid(kp.first));
-      key_press[kp.first] = false;
+      if (!!(permissions & crypto::PERM::input_pen)) {
+        platf::pen_input_t cancel {};
+        cancel.eventType = LI_TOUCH_EVENT_CANCEL_ALL;
+        cancel.toolType = LI_TOOL_TYPE_UNKNOWN;
+        platf::pen_update(input.client_context.get(), input.touch_port, cancel);
+      }
     }
   }
 
@@ -1485,6 +1515,7 @@ namespace input {
     while (!detail::drain_turn_exhausted(dispatched)) {
       std::optional<std::vector<uint8_t>> entry;
       std::uint64_t generation;
+      crypto::PERM permission;
       {
         std::lock_guard<std::mutex> lg(input->input_queue_lock);
         entry = detail::pop_next_batched_packet(input->input_queue);
@@ -1492,31 +1523,27 @@ namespace input {
           detail::release_if_empty(input->input_drain_gate, true);
           return;
         }
-        generation = input->input_generation;
+        permission = detail::packet_permission(*entry);
+        generation = input->input_generations.current(permission);
       }
 
       if (entry->empty()) {
         std::lock_guard dispatch_guard {input->input_dispatch_lock};
-        release_all_input_state();
-        // Complete virtual-controller teardown before allowing the sole active-session slot to be
-        // released. gamepad_t destructors then see id == -1 and do not enqueue stale frees.
-        detail::free_gamepads_before_completion(
-          input->gamepads,
-          [&](int id) {
-            free_gamepad(platf_input, id);
-          },
-          [&]() {
-            if (input->reset_completion) {
-              input->reset_completion->set_value();
-              input->reset_completion.reset();
-            }
-          }
-        );
+        release_input_state(*input, crypto::PERM::_all_inputs, true);
+        // Every category (including virtual-controller teardown) has completed before the sole
+        // active-session slot can be released.
+        if (input->reset_completion) {
+          input->reset_completion->set_value();
+          input->reset_completion.reset();
+        }
+      } else if (const auto released = detail::release_barrier_permissions(*entry)) {
+        std::lock_guard dispatch_guard {input->input_dispatch_lock};
+        release_input_state(*input, *released);
       } else {
         detail::dispatch_if_current(
           input->input_dispatch_lock,
           generation,
-          input->input_generation,
+          input->input_generations.current(permission),
           [&]() {
           dispatch_input_packet(input, *entry);
           }
@@ -1542,6 +1569,100 @@ namespace input {
     }
   }
 
+  crypto::PERM detail::packet_permission(std::span<const std::uint8_t> packet) noexcept {
+    const auto magic = validated_packet_magic(packet);
+    if (!magic) return crypto::PERM::_no;
+    switch (*magic) {
+      case MULTI_CONTROLLER_MAGIC_GEN5:
+      case SS_CONTROLLER_ARRIVAL_MAGIC:
+      case SS_CONTROLLER_TOUCH_MAGIC:
+      case SS_CONTROLLER_MOTION_MAGIC:
+      case SS_CONTROLLER_BATTERY_MAGIC:
+        return crypto::PERM::input_controller;
+      case MOUSE_MOVE_REL_MAGIC_GEN5:
+      case MOUSE_MOVE_ABS_MAGIC:
+      case MOUSE_BUTTON_DOWN_EVENT_MAGIC_GEN5:
+      case MOUSE_BUTTON_UP_EVENT_MAGIC_GEN5:
+      case SCROLL_MAGIC_GEN5:
+      case SS_HSCROLL_MAGIC:
+        return crypto::PERM::input_mouse;
+      case KEY_DOWN_EVENT_MAGIC:
+      case KEY_UP_EVENT_MAGIC:
+      case UTF8_TEXT_EVENT_MAGIC:
+        return crypto::PERM::input_kbd;
+      case SS_TOUCH_MAGIC:
+        return crypto::PERM::input_touch;
+      case SS_PEN_MAGIC:
+        return crypto::PERM::input_pen;
+      default:
+        return crypto::PERM::_no;
+    }
+  }
+
+  std::optional<crypto::PERM> detail::release_barrier_permissions(std::span<const std::uint8_t> packet) noexcept {
+    // All admitted wire packets contain at least the eight-byte NV_INPUT_HEADER. A four-byte
+    // local record therefore cannot be mistaken for client data or coalesced with it.
+    if (packet.size() != sizeof(std::uint32_t)) return std::nullopt;
+    std::uint32_t mask;
+    std::memcpy(&mask, packet.data(), sizeof(mask));
+    return static_cast<crypto::PERM>(mask) & crypto::PERM::_all_inputs;
+  }
+
+  void detail::queue_permission_release(std::list<std::vector<std::uint8_t>> &packets, crypto::PERM revoked) {
+    packets.remove_if([&](const auto &packet) { return !!(packet_permission(packet) & revoked); });
+    const auto mask = static_cast<std::uint32_t>(revoked);
+    std::vector<std::uint8_t> barrier(sizeof(mask));
+    std::memcpy(barrier.data(), &mask, sizeof(mask));
+    packets.push_front(std::move(barrier));
+  }
+
+  // Caller owns input_dispatch_lock. Invalidate repeats immediately; the OS releases themselves
+  // remain ordered on the one input worker and execute before later authorized input.
+  void cancel_input_continuations(input_t &input, crypto::PERM permissions) {
+    if (!!(permissions & crypto::PERM::input_kbd)) {
+      task_pool.cancel(input.key_repeat_id);
+      input.key_repeat_id = nullptr;
+      ++input.key_repeat_generation;
+    }
+    if (!!(permissions & crypto::PERM::input_mouse)) {
+      ++input.mouse_left_button_generation;
+      const auto pending = input.mouse_left_button_timeout.exchange(nullptr);
+      if (pending != DISABLE_LEFT_BUTTON_DELAY) task_pool.cancel(pending);
+      if (detail::should_flush_pending_left_release(pending, DISABLE_LEFT_BUTTON_DELAY, mouse_press[BUTTON_LEFT])) {
+        // Logical LEFT is already up, but the delayed OS release has not run yet. Preserve the
+        // physical-down debt so the worker's release barrier can discover it.
+        mouse_press[BUTTON_LEFT] = true;
+      }
+    }
+    if (!!(permissions & crypto::PERM::input_controller)) {
+      for (auto &gamepad : input.gamepads) {
+        task_pool.cancel(gamepad.back_timeout_id);
+        task_pool.cancel(gamepad.home_release_id);
+        gamepad.back_timeout_id = nullptr;
+        gamepad.home_release_id = nullptr;
+        ++gamepad.back_action_generation;
+        ++gamepad.home_action_generation;
+      }
+    }
+  }
+
+  void update_permissions(std::shared_ptr<input_t> &input, crypto::PERM permissions) {
+    bool schedule = false;
+    {
+      std::lock_guard dispatch_guard {input->input_dispatch_lock};
+      const auto revoked = static_cast<crypto::PERM>(static_cast<std::uint32_t>(input->permissions) &
+                                                   ~static_cast<std::uint32_t>(permissions)) & crypto::PERM::_all_inputs;
+      input->permissions = permissions;
+      if (input->input_reset || !revoked) return;
+      cancel_input_continuations(*input, revoked);
+      std::lock_guard queue_guard {input->input_queue_lock};
+      input->input_generations.invalidate(revoked);
+      detail::queue_permission_release(input->input_queue, revoked);
+      schedule = input->input_drain_gate.request();
+    }
+    if (schedule) task_pool.push(drain_input_queue, input);
+  }
+
   /**
    * @brief Called on the control stream thread to queue an input message.
    * @param input The input context pointer.
@@ -1565,62 +1686,19 @@ namespace input {
       return;
     }
 
-    // Have some input permission
-    // Otherwise have all input permission
-    if ((permission & crypto::PERM::_all_inputs) != crypto::PERM::_all_inputs) {
-      // Check permission
-      switch (*magic) {
-        case MULTI_CONTROLLER_MAGIC_GEN5:
-        case SS_CONTROLLER_ARRIVAL_MAGIC:
-        case SS_CONTROLLER_TOUCH_MAGIC:
-        case SS_CONTROLLER_MOTION_MAGIC:
-        case SS_CONTROLLER_BATTERY_MAGIC:
-          if (!(permission & crypto::PERM::input_controller)) {
-            return;
-          } else {
-            break;
-          }
-        case MOUSE_MOVE_REL_MAGIC_GEN5:
-        case MOUSE_MOVE_ABS_MAGIC:
-        case MOUSE_BUTTON_DOWN_EVENT_MAGIC_GEN5:
-        case MOUSE_BUTTON_UP_EVENT_MAGIC_GEN5:
-        case SCROLL_MAGIC_GEN5:
-        case SS_HSCROLL_MAGIC:
-          if (!(permission & crypto::PERM::input_mouse)) {
-            return;
-          } else {
-            break;
-          }
-        case KEY_DOWN_EVENT_MAGIC:
-        case KEY_UP_EVENT_MAGIC:
-        case UTF8_TEXT_EVENT_MAGIC:
-          if (!(permission & crypto::PERM::input_kbd)) {
-            return;
-          } else {
-            break;
-          }
-        case SS_TOUCH_MAGIC:
-          if (!(permission & crypto::PERM::input_touch)) {
-            return;
-          } else {
-            break;
-          }
-        case SS_PEN_MAGIC:
-          if (!(permission & crypto::PERM::input_pen)) {
-            return;
-          } else {
-            break;
-          }
-        default:
-          // Unknown input event
-          return;
-      }
-    }
+    const auto required_permission = detail::packet_permission(input_data);
+    if (!(required_permission & permission)) return;
 
     bool schedule_drain;
     {
       std::lock_guard dispatch_guard {input->input_dispatch_lock};
       const auto admitted = detail::admit_if_live(input->input_reset, [&]() {
+        // The control thread's atomic snapshot may predate an administrator update. Admission
+        // uses the rights serialized with dispatch and the queued release barrier as well.
+        if (!(required_permission & input->permissions)) {
+          schedule_drain = false;
+          return;
+        }
         std::lock_guard<std::mutex> lg(input->input_queue_lock);
         input->input_queue.push_back(std::move(input_data));
         schedule_drain = input->input_drain_gate.request();
@@ -1641,43 +1719,16 @@ namespace input {
       std::lock_guard dispatch_guard {input->input_dispatch_lock};
       input->input_reset = true;
       input->reset_completion = completion;
-      task_pool.cancel(input->key_repeat_id);
-      input->key_repeat_id = nullptr;
-      ++input->key_repeat_generation;
-      ++input->mouse_left_button_generation;
-      const auto pending_left_release = input->mouse_left_button_timeout.exchange(nullptr);
-      // The mouse callback uses input_dispatch_lock before clearing its raw ID, so cancelling here
-      // cannot hit a destroyed/reused task address and cannot race a post-reset publication.
-      task_pool.cancel(pending_left_release);
-      for (auto &gamepad : input->gamepads) {
-        // The callbacks take input_dispatch_lock before clearing their raw task IDs. Cancel while
-        // holding that lock so an executed task cannot be destroyed/reused between snapshot and
-        // cancellation (the task pool never holds its mutex while running a callback).
-        task_pool.cancel(gamepad.back_timeout_id);
-        task_pool.cancel(gamepad.home_release_id);
-        gamepad.back_timeout_id = nullptr;
-        gamepad.home_release_id = nullptr;
-        ++gamepad.back_action_generation;
-        ++gamepad.home_action_generation;
-        gamepad.gamepad_state.buttonFlags &= ~platf::HOME;
-      }
+      cancel_input_continuations(*input, crypto::PERM::_all_inputs);
       // An empty queue entry is an ordered reset barrier. Invalidate the current drain generation,
       // clear queued input from the ended session, then enqueue exactly one release operation. A
       // stale drain that is already in flight observes the generation change before dispatching any
       // packet it removed before reset. Input arriving after reset remains behind the barrier.
       std::lock_guard queue_guard {input->input_queue_lock};
-      ++input->input_generation;
+      input->input_generations.invalidate(crypto::PERM::_all_inputs);
       input->input_queue.clear();
       input->input_queue.emplace_back();
-      if (detail::should_flush_pending_left_release(
-            pending_left_release,
-            DISABLE_LEFT_BUTTON_DELAY,
-            mouse_press[BUTTON_LEFT]
-          )) {
-        // The logical LEFT state is already up, so release_all_input_state() cannot discover this
-        // outstanding delayed OS release. Flush it into the ordered reset critical section.
-        platf::button_mouse(platf_input, BUTTON_LEFT, true);
-      }
+
     }
     schedule_input_drain_if_needed(input);
     return future;
@@ -1707,11 +1758,12 @@ namespace input {
     return true;
   }
 
-  std::shared_ptr<input_t> alloc(safe::mail_t mail) {
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, crypto::PERM permissions) {
     auto input = std::make_shared<input_t>(
       mail->event<input::touch_port_t>(mail::touch_port),
       mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback)
     );
+    input->permissions = permissions;
 
     // Workaround to ensure new frames will be captured when a client connects
     task_pool.pushDelayed([]() {

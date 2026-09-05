@@ -215,7 +215,7 @@ namespace platf::dxgi {
    * @param out a texture containing the frame just captured
    * @param out_time the timestamp of the frame just captured
    */
-  capture_e wgc_capture_t::next_frame(std::chrono::milliseconds timeout, ID3D11Texture2D **out, uint64_t &out_time) {
+  capture_e wgc_capture_t::next_frame(std::chrono::milliseconds timeout, ID3D11Texture2D **out, detail::wgc_timestamp_t &out_time) {
     // this CONSUMER runs in the capture thread
     release_frame();
 
@@ -242,7 +242,7 @@ namespace platf::dxgi {
       return capture_e::error;
     }
     capture_access->GetInterface(IID_ID3D11Texture2D, (void **) out);
-    out_time = consumed_frame.SystemRelativeTime().count();  // raw ticks from query performance counter
+    out_time = consumed_frame.SystemRelativeTime();
     return capture_e::ok;
   }
 

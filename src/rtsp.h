@@ -78,7 +78,7 @@ namespace rtsp_stream {
       bool av1_sdr,
       bool av1_hdr
     );
-    int apply_packet_size_limit(int client_packet_size, int configured_limit);
+    bool announced_packet_size_allowed(int client_packet_size, int configured_limit);
     std::optional<std::string_view> parse_setup_stream_type(std::string_view target);
   }  // namespace detail
 

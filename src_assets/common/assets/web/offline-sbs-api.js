@@ -130,9 +130,24 @@ export async function clearOfflineSbsJob(jobId, { signal } = {}) {
   })
 }
 
-export async function downloadOfflineSbsSceneAudit(jobId, { signal } = {}) {
+export async function getOfflineSbsSceneAudit(jobId, { signal } = {}) {
+  const audit = await request(`${OFFLINE_SBS_JOBS_URL}/${requireJobId(jobId)}/scene-audit`, { signal })
+  // Presentation metadata stays local: downloaded pages/manifest retain the exact
+  // authenticated bytes so their SHA-256 digests remain independently checkable.
+  return {
+    ...audit,
+    document_kind: audit.schema === 4 ? 'manifest' : 'inline-audit',
+    availability: audit.status === 'complete' ? 'complete' : 'partial',
+  }
+}
+
+export async function downloadOfflineSbsSceneAudit(jobId, { signal, page } = {}) {
+  if (page !== undefined && (!Number.isSafeInteger(page) || page < 0)) {
+    throw new OfflineSbsApiError('An audit page index must be a nonnegative integer.')
+  }
+  const query = page === undefined ? '' : `?page=${page}`
   const response = await fetch(
-    `${OFFLINE_SBS_JOBS_URL}/${requireJobId(jobId)}/scene-audit`,
+    `${OFFLINE_SBS_JOBS_URL}/${requireJobId(jobId)}/scene-audit${query}`,
     {
       credentials: 'include',
       headers: { Accept: 'application/json' },

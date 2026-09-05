@@ -11,6 +11,7 @@
 #include "src/offline_sbs_contract.h"
 #include "src/offline_sbs_job.h"
 #include "src/offline_sbs_wire_contract.h"
+#include "src/offline_sbs_paged_audit.h"
 #include "src/platform/common.h"
 
 #ifdef _WIN32
@@ -2820,5 +2821,96 @@ TEST(OfflineSbsJob, RefusesAdmissionWhileLiveStreamingOwnsTheGpu) {
     wait_for_terminal(service, admitted.job->id).state,
     offline_sbs::job_state_e::complete
   );
+  service.shutdown();
+}
+
+TEST(OfflineSbsJob, ExportsManifestAndVerifiedPagesAndRejectsChangedOrMissingPage) {
+  temporary_tree_t tree;
+  const auto input = tree.path / "source.mkv";
+  write_nonempty(input, "source");
+  offline_sbs::job_service_t service {
+    service_config(tree.path),
+    [](const offline_sbs::worker_context_t &context, std::stop_token,
+       const offline_sbs::progress_callback_t &progress) {
+      auto summary = offline_sbs::wire::parse_scene_audit_contract(valid_scene_audit("complete"));
+      auto first = summary.scenes.front();
+      first.boundary.decision = offline_sbs::boundary_decision_e::confirmed;
+      first.boundary.semantic_cut = true;
+      auto second = summary.scenes.front();
+      second.scene_id = second.semantic_scene_id = 2;
+      second.start_sequence = 11;
+      second.end_sequence_exclusive = 21;
+      second.boundary.final_sequence = 21;
+      offline_sbs::paged_scene_audit_writer_t writer([&](std::string_view name, std::string_view bytes) {
+        write_nonempty(context.result_directory / std::string(name), bytes);
+        return sha256_hex(bytes);
+      });
+      writer.append(first);
+      writer.flush();
+      writer.append(second);
+      const auto manifest = writer.manifest(summary);
+      write_nonempty(context.result_directory / "scene-audit.json", manifest.dump(2) + "\n");
+      progress({.phase = "analysis", .processed_frames = 20, .total_frames = 20, .scene_count = 2});
+      return offline_sbs::worker_outcome_t {.completed = true};
+    }
+  };
+  std::string error;
+  ASSERT_TRUE(service.start(error)) << error;
+  const auto created = service.create({.input_path = input, .operation = offline_sbs::operation_e::evaluate});
+  ASSERT_TRUE(created.ok) << created.error;
+  ASSERT_EQ(wait_for_terminal(service, created.job->id).state, offline_sbs::job_state_e::complete);
+  const auto manifest = service.scene_audit(created.job->id);
+  ASSERT_TRUE(manifest.ok) << manifest.error;
+  EXPECT_EQ(manifest.audit["document_kind"], "manifest");
+  EXPECT_EQ(manifest.audit["storage"]["scene_count"], 2);
+  EXPECT_EQ(manifest.audit["pages"].size(), 2u);
+  EXPECT_FALSE(manifest.audit.contains("scenes"));
+  ASSERT_TRUE(manifest.serialized_artifact);
+  EXPECT_FALSE(nlohmann::json::parse(*manifest.serialized_artifact).contains("document_kind"));
+  const auto page = service.scene_audit(created.job->id, 1);
+  ASSERT_TRUE(page.ok) << page.error;
+  EXPECT_EQ(page.audit["document_kind"], "page");
+  EXPECT_EQ(page.audit["scenes"][0]["scene_id"], 2);
+  ASSERT_TRUE(page.serialized_artifact);
+  EXPECT_EQ(sha256_hex(*page.serialized_artifact), manifest.audit["pages"][1]["sha256"].get<std::string>());
+  EXPECT_EQ(page.serialized_artifact->size(), manifest.audit["pages"][1]["bytes"].get<std::uint64_t>());
+  EXPECT_EQ(service.scene_audit(created.job->id, 2).code, offline_sbs::error_code_e::not_found);
+  const auto path = tree.path / "worker" / "jobs" / created.job->id / "result" / "scene-audit-page-1.json";
+  auto changed = page.audit;
+  changed["scenes"][0]["known_limit"] = "changed after attestation";
+  write_nonempty(path, changed.dump());
+  const auto tampered = service.scene_audit(created.job->id, 1);
+  EXPECT_FALSE(tampered.ok);
+  EXPECT_NE(tampered.error.find("identity"), std::string::npos);
+  write_nonempty(path, std::string(offline_sbs::scene_audit_page_max_bytes + 1, ' '));
+  EXPECT_FALSE(service.scene_audit(created.job->id, 1).ok);
+  fs::remove(path);
+  EXPECT_FALSE(service.scene_audit(created.job->id, 1).ok);
+  service.shutdown();
+}
+
+TEST(OfflineSbsJob, DoesNotAttestManifestWithMissingPage) {
+  temporary_tree_t tree;
+  const auto input = tree.path / "source.mkv";
+  write_nonempty(input, "source");
+  offline_sbs::job_service_t service {
+    service_config(tree.path),
+    [](const offline_sbs::worker_context_t &context, std::stop_token,
+       const offline_sbs::progress_callback_t &) {
+      auto summary = offline_sbs::wire::parse_scene_audit_contract(valid_scene_audit("complete"));
+      offline_sbs::paged_scene_audit_writer_t writer([](auto, auto) { return std::string(64, 'a'); });
+      writer.append(summary.scenes.front());
+      write_nonempty(context.result_directory / "scene-audit.json", writer.manifest(summary).dump());
+      return offline_sbs::worker_outcome_t {.error = "injected incomplete publication"};
+    }
+  };
+  std::string error;
+  ASSERT_TRUE(service.start(error)) << error;
+  const auto created = service.create({.input_path = input, .operation = offline_sbs::operation_e::evaluate});
+  ASSERT_TRUE(created.ok) << created.error;
+  ASSERT_EQ(wait_for_terminal(service, created.job->id).state, offline_sbs::job_state_e::failed);
+  const auto audit = service.scene_audit(created.job->id);
+  EXPECT_FALSE(audit.ok);
+  EXPECT_NE(audit.error.find("not attested"), std::string::npos);
   service.shutdown();
 }

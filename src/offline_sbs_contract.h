@@ -30,11 +30,18 @@ namespace offline_sbs {
   inline constexpr std::uintmax_t scene_audit_max_bytes =
     32ull * 1024ull * 1024ull;
 
-  // Reserve one MiB for fixed document fields (source/timeline/cache metadata) and
-  // conservatively budget the remaining bytes per finalized scene. A conversion result
-  // carries both a scene record and a replay record; an audit carries a scene record and
-  // its boundary record. Exact serialized-size checks remain authoritative because one
-  // boundary can contain several merged proposals.
+  // Paged diagnostics bound memory independently of movie duration. These are
+  // storage limits, not rendering or scene-detection policy.
+  inline constexpr std::size_t scene_audit_page_max_scenes = 128;
+  inline constexpr std::size_t scene_audit_recent_scenes = 32;
+  inline constexpr std::uintmax_t scene_audit_page_max_bytes = 2ull * 1024 * 1024;
+  inline constexpr std::uintmax_t scene_audit_storage_max_bytes = 1024ull * 1024 * 1024;
+  inline constexpr std::size_t scene_audit_max_pages = 16384;
+  inline constexpr std::size_t max_paged_scene_count =
+    scene_audit_page_max_scenes * scene_audit_max_pages;
+
+  // Legacy inline worker/audit documents remain readable for retained jobs. Their
+  // old per-scene reserves constrain only those schemas, never new paged jobs.
   inline constexpr std::uintmax_t serialized_contract_fixed_reserve_bytes =
     1ull * 1024ull * 1024ull;
   inline constexpr std::uintmax_t worker_result_scene_reserve_bytes =
@@ -50,10 +57,9 @@ namespace offline_sbs {
         scene_audit_scene_reserve_bytes
     ));
 
-  // Running snapshots are written at 1, 2, 4, ... scenes. The sum of all snapshot
-  // prefixes is less than twice the final scene count, eliminating the previous
-  // rewrite-after-every-scene quadratic write amplification. Completion is always
-  // published separately, so the final audit still contains every record.
+  // Running manifest checkpoints are written at 1, 2, 4, ... scenes. Pages are
+  // immutable and published independently; the compact index is rewritten only at
+  // these checkpoints and completion.
   [[nodiscard]] inline constexpr bool is_scene_audit_checkpoint(
     const std::size_t scene_count
   ) noexcept {

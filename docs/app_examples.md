@@ -95,6 +95,13 @@ Sunshine 3D already owns virtual-display resolution and refresh-rate negotiation
 or another display switcher to the **Virtual Display** entry; two independent display owners can
 race and corrupt the retained-monitor lifecycle.
 
+Live changes update the private desktop's resolution and refresh rate together with the encoder.
+A 30-to-60 FPS change at the same resolution must also make that desktop present at 60 Hz; extra
+encoded copies alone cannot increase source motion. If Windows does not advertise the requested
+mode, the client reconnects to renegotiate it. A failed live change restores the previous desktop
+and encoder contract before reporting failure. Reconnecting preserves the retained app's session
+token and windows while replacing the transport identity authorized to request subsequent changes.
+
 ## Choosing a 3D mode
 
 Application entries launch content; the client chooses how it is presented:

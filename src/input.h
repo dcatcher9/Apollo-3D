@@ -5,6 +5,7 @@
 #pragma once
 
 // standard includes
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -66,6 +67,58 @@ namespace input {
     [[nodiscard]] std::optional<std::vector<std::uint8_t>> pop_next_batched_packet(
       std::list<std::vector<std::uint8_t>> &packets
     );
+
+    /** Classify a validated wire packet; internal release barriers have no input permission. */
+    [[nodiscard]] crypto::PERM packet_permission(std::span<const std::uint8_t> packet) noexcept;
+    /** Purge revoked queued input and prepend an ordered category release barrier. */
+    void queue_permission_release(std::list<std::vector<std::uint8_t>> &packets, crypto::PERM revoked);
+    [[nodiscard]] std::optional<crypto::PERM> release_barrier_permissions(std::span<const std::uint8_t> packet) noexcept;
+
+    /** Each category invalidates only its own popped packets; unrelated key-up must survive. */
+    class dispatch_generations_t {
+    public:
+      const std::uint64_t &current(crypto::PERM permission) const noexcept {
+        for (std::size_t i = 0; i < categories.size(); ++i) {
+          if (categories[i] == permission) return generations[i];
+        }
+        return generations.back();  // Internal barriers do not dispatch as wire input.
+      }
+
+      void invalidate(crypto::PERM permissions) noexcept {
+        for (std::size_t i = 0; i < categories.size(); ++i) {
+          if (!!(categories[i] & permissions)) ++generations[i];
+        }
+      }
+
+    private:
+      static constexpr std::array categories {
+        crypto::PERM::input_controller, crypto::PERM::input_touch, crypto::PERM::input_pen,
+        crypto::PERM::input_mouse, crypto::PERM::input_kbd
+      };
+      std::array<std::uint64_t, categories.size() + 1> generations {};
+    };
+
+    /** Release only held state belonging to revoked categories, using the production OS sinks. */
+    template<class KeyStates, class MouseStates, class ReleaseKey, class ReleaseMouse>
+    void release_pressed_states(KeyStates &keys, MouseStates &buttons, crypto::PERM permissions,
+                                ReleaseKey &&release_key, ReleaseMouse &&release_mouse) {
+      if (!!(permissions & crypto::PERM::input_kbd)) {
+        for (auto &[key, pressed] : keys) {
+          if (pressed) {
+            std::invoke(release_key, key);
+            pressed = false;
+          }
+        }
+      }
+      if (!!(permissions & crypto::PERM::input_mouse)) {
+        for (std::size_t button = 1; button < buttons.size(); ++button) {
+          if (buttons[button]) {
+            std::invoke(release_mouse, button);
+            buttons[button] = false;
+          }
+        }
+      }
+    }
 
     /**
      * @brief Edge-trigger state for a single input-queue drain owner.
@@ -220,6 +273,15 @@ namespace input {
       std::invoke(std::forward<Complete>(complete));
     }
 
+    /** Release controller buttons/axes while preserving announced identity for a later grant. */
+    template<class GamepadRange, class Update>
+    void neutralize_gamepads(GamepadRange &gamepads, Update &&update) {
+      for (auto &gamepad : gamepads) {
+        gamepad.gamepad_state = {};
+        if (gamepad.id >= 0) std::invoke(update, gamepad.id, gamepad.gamepad_state);
+      }
+    }
+
     /**
      * Serialize packet admission/dispatch with reset without holding the producer queue mutex
      * across OS injection. A reset that wins this mutex invalidates the old generation first;
@@ -257,6 +319,8 @@ namespace input {
   /** Reset all input and return a completion that becomes ready after the ordered release barrier. */
   [[nodiscard]] std::future<void> reset(std::shared_ptr<input_t> &input);
   void passthrough(std::shared_ptr<input_t> &input, std::vector<std::uint8_t> &&input_data, const crypto::PERM &permission);
+  /** Publish rights under the input dispatch lock and release any categories that lost rights. */
+  void update_permissions(std::shared_ptr<input_t> &input, crypto::PERM permissions);
 
   /**
    * @brief Validate a Gen 5+ Artemis input packet before any typed access.
@@ -268,7 +332,7 @@ namespace input {
 
   bool probe_gamepads();
 
-  std::shared_ptr<input_t> alloc(safe::mail_t mail);
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, crypto::PERM permissions = crypto::PERM::_all);
 
   struct touch_port_t: public platf::touch_port_t {
     int env_width, env_height;

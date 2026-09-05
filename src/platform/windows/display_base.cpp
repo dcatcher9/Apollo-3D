@@ -575,6 +575,15 @@ namespace platf::dxgi {
   }
 
   capture_e display_base_t::capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) {
+    return capture_with_pending_work(push_captured_image_cb, pull_free_image_cb, cursor, {});
+  }
+
+  capture_e display_base_t::capture_with_pending_work(
+    const push_captured_image_cb_t &push_captured_image_cb,
+    const pull_free_image_cb_t &pull_free_image_cb,
+    bool *cursor,
+    const std::function<bool()> &has_pending_work
+  ) {
     auto adjust_client_frame_rate = [&]() -> DXGI_RATIONAL {
       int requested_frame_rate;
       DXGI_RATIONAL requested_frame_rate_strict;
@@ -647,6 +656,9 @@ namespace platf::dxgi {
 
       platf::capture_e status = capture_e::ok;
       std::shared_ptr<img_t> img_out;
+      const detail::capture_wait_policy_t wait_policy {
+        .pending_local_work = has_pending_work && has_pending_work(),
+      };
 
       // Try to continue frame pacing group, snapshot() is called with zero timeout after waiting for client frame interval
       if (frame_pacing_group_start) {
@@ -655,7 +667,9 @@ namespace platf::dxgi {
         const auto sleep_target = *frame_pacing_group_start +
                                   std::chrono::nanoseconds(1s) * seconds +
                                   std::chrono::nanoseconds(1s) * remainder / client_frame_rate_adjusted.Numerator;
-        const auto sleep_period = sleep_target - std::chrono::steady_clock::now();
+        const auto sleep_period = wait_policy.pacing_sleep(
+          sleep_target - std::chrono::steady_clock::now()
+        );
 
         if (sleep_period <= 0ns) {
           // We missed next frame time, invalidating current frame pacing group
@@ -667,8 +681,10 @@ namespace platf::dxgi {
           if (sleep_period >= 2ms) {
             elastic = true;
             timer->sleep_for(sleep_period - 2ms);
-            sleep_overshoot_logger.first_point(sleep_target);
-            sleep_overshoot_logger.second_point_now_and_log();
+            if (!wait_policy.pending_local_work) {
+              sleep_overshoot_logger.first_point(sleep_target);
+              sleep_overshoot_logger.second_point_now_and_log();
+            }
           }
 
           status = snapshot(pull_free_image_cb, img_out, elastic ? 2ms : std::chrono::duration_cast<std::chrono::milliseconds>(sleep_period), *cursor);
@@ -683,8 +699,9 @@ namespace platf::dxgi {
       }
 
       // Start new frame pacing group if necessary, snapshot() is called with non-zero timeout
-      if (status == capture_e::timeout || (status == capture_e::ok && !frame_pacing_group_start)) {
-        status = snapshot(pull_free_image_cb, img_out, 200ms, *cursor);
+      if ((status == capture_e::timeout && wait_policy.retry_after_pacing_timeout()) ||
+          (status == capture_e::ok && !frame_pacing_group_start)) {
+        status = snapshot(pull_free_image_cb, img_out, wait_policy.source_timeout(), *cursor);
 
         if (status == capture_e::ok && img_out) {
           frame_pacing_group_start = img_out->frame_timestamp;
@@ -713,8 +730,12 @@ namespace platf::dxgi {
           // To avoid starving the encoding thread, sleep without the lock held for a little
           // while each time we reach our max frame timeout. This will only happen when nothing
           // is updating the display, so no visible stutter should be introduced by the sleep.
-          std::this_thread::sleep_for(10ms);
+          std::this_thread::sleep_for(wait_policy.idle_backoff());
         }
+      } else if (status == capture_e::timeout && wait_policy.pending_local_work) {
+        // A short pacing probe already timed out. Service retained local work now instead of
+        // entering the ordinary idle wait, while still yielding the unfair capture-device lock.
+        std::this_thread::sleep_for(wait_policy.idle_backoff());
       }
 
       switch (status) {

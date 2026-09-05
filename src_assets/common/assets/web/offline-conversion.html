@@ -422,6 +422,38 @@
             <p>{{ jobError(selectedJob) }}</p>
           </div>
 
+          <section v-if="isTerminal(selectedJob)" class="offline-recovery-card" aria-label="Scene diagnostics">
+            <h4>Scene diagnostics</h4>
+            <button class="btn btn-apollo-quiet" type="button" :disabled="auditBusy" @click="loadSceneAudit">
+              {{ auditBusy ? 'Loading diagnostics…' : 'Show available diagnostics' }}
+            </button>
+            <p v-if="auditError" role="alert">{{ auditError }}</p>
+            <template v-if="sceneAudit">
+              <p v-if="sceneAudit.document_kind === 'manifest'">
+                {{ sceneAudit.storage.scene_count }} scenes in {{ sceneAudit.pages.length }} pages.
+                The manifest lists coverage and page digests; download the pages for the scene records.
+                {{ sceneAudit.availability === 'partial' ? 'These diagnostics cover only the work completed before the job stopped.' : '' }}
+              </p>
+              <button class="btn btn-apollo-quiet" type="button" :disabled="auditBusy" @click="downloadSceneAudit()">
+                {{ sceneAudit.document_kind === 'manifest' ? 'Download manifest' : 'Download full audit' }}
+              </button>
+              <div v-if="sceneAudit.document_kind === 'manifest'">
+                <ul>
+                  <li v-for="page in visibleAuditPages" :key="page.index">
+                    <button class="btn btn-link" type="button" :disabled="auditBusy" @click="downloadSceneAudit(page.index)">
+                      Download page {{ page.index + 1 }} — scenes {{ page.first_scene_id }}–{{ page.first_scene_id + page.scene_count - 1 }}
+                    </button>
+                  </li>
+                </ul>
+                <div v-if="sceneAudit.pages.length > 50">
+                  <button class="btn btn-apollo-quiet" type="button" :disabled="auditListPage === 0" @click="auditListPage--">Previous pages</button>
+                  <span>{{ auditListPage + 1 }} / {{ Math.ceil(sceneAudit.pages.length / 50) }}</span>
+                  <button class="btn btn-apollo-quiet" type="button" :disabled="(auditListPage + 1) * 50 >= sceneAudit.pages.length" @click="auditListPage++">Next pages</button>
+                </div>
+              </div>
+            </template>
+          </section>
+
           <div v-if="isInterrupted(selectedJob)" class="offline-recovery-card">
             <div>
               <span class="offline-recovery-icon" aria-hidden="true">
@@ -677,6 +709,8 @@
     createOfflineSbsJob,
     getOfflineSbsJob,
     getOfflineSbsOverview,
+    getOfflineSbsSceneAudit,
+    downloadOfflineSbsSceneAudit,
   } from './offline-sbs-api'
 
   const ACTIVE_STATUSES = new Set([
@@ -702,6 +736,7 @@
   let overviewAbortController = null
   let detailAbortController = null
   let pickerAbortController = null
+  let auditAbortController = null
 
   function normalizedStatus(job) {
     return String(job?.status || job?.state || 'unknown').trim().toLowerCase()
@@ -729,6 +764,10 @@
         jobs: [],
         selectedJobId: '',
         selectedJobDetail: null,
+        sceneAudit: null,
+        auditBusy: false,
+        auditError: '',
+        auditListPage: 0,
         apiError: '',
         pollWarning: '',
         actionError: '',
@@ -757,6 +796,9 @@
       }
     },
     computed: {
+      visibleAuditPages() {
+        return (this.sceneAudit?.pages || []).slice(this.auditListPage * 50, (this.auditListPage + 1) * 50)
+      },
       selectedJobSummary() {
         return this.jobs.find(job => this.jobId(job) === this.selectedJobId) || null
       },
@@ -844,6 +886,7 @@
       this.refreshTimer = window.setInterval(() => this.loadJobs(true), 2000)
     },
     beforeUnmount() {
+      auditAbortController?.abort()
       if (this.refreshTimer) window.clearInterval(this.refreshTimer)
       overviewAbortController?.abort()
       detailAbortController?.abort()
@@ -858,6 +901,11 @@
       },
       selectedJobId(jobId) {
         this.selectedJobDetail = null
+        auditAbortController?.abort()
+        this.sceneAudit = null
+        this.auditError = ''
+        this.auditBusy = false
+        this.auditListPage = 0
         detailAbortController?.abort()
         if (jobId) {
           this.loadSelectedJob(jobId, false)
@@ -867,6 +915,51 @@
       },
     },
     methods: {
+      isTerminal(job) {
+        return TERMINAL_STATUSES.has(normalizedStatus(job))
+      },
+      async loadSceneAudit() {
+        const id = this.selectedJobId
+        auditAbortController?.abort()
+        const controller = new AbortController()
+        auditAbortController = controller
+        this.auditBusy = true
+        this.auditError = ''
+        try {
+          const audit = await getOfflineSbsSceneAudit(id, { signal: controller.signal })
+          if (id === this.selectedJobId && !controller.signal.aborted) {
+            this.sceneAudit = audit
+            this.auditListPage = 0
+          }
+        } catch (error) {
+          if (!controller.signal.aborted && id === this.selectedJobId) this.auditError = error.message
+        } finally {
+          if (auditAbortController === controller) this.auditBusy = false
+        }
+      },
+      async downloadSceneAudit(page) {
+        const id = this.selectedJobId
+        const controller = new AbortController()
+        auditAbortController?.abort()
+        auditAbortController = controller
+        this.auditBusy = true
+        this.auditError = ''
+        try {
+          const blob = await downloadOfflineSbsSceneAudit(id, { signal: controller.signal, page })
+          if (controller.signal.aborted || id !== this.selectedJobId) return
+          const url = URL.createObjectURL(blob)
+          const link = document.createElement('a')
+          link.href = url
+          const suffix = page === undefined ? (this.sceneAudit?.document_kind === 'manifest' ? '-manifest' : '') : `-page-${page}`
+          link.download = `scene-audit-${id}${suffix}.json`
+          link.click()
+          setTimeout(() => URL.revokeObjectURL(url), 1000)
+        } catch (error) {
+          if (!controller.signal.aborted && id === this.selectedJobId) this.auditError = error.message
+        } finally {
+          if (auditAbortController === controller) this.auditBusy = false
+        }
+      },
       jobId(job) {
         return String(job?.id ?? job?.job_id ?? '')
       },

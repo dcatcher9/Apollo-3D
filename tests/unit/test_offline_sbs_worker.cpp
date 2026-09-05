@@ -341,7 +341,7 @@ TEST(OfflineSbsWorker, ConversionUsesOneDirectCausalPass) {
   );
   EXPECT_NE(direct.find("causal_scene_tracker_t"), std::string::npos);
   EXPECT_NE(
-    direct.find("conversion_encoder->publish(timing.sequence, sbs)"),
+    direct.find("conversion_encoder->publish(timing.sequence, std::move(sbs))"),
     std::string::npos
   );
   EXPECT_EQ(
@@ -401,38 +401,6 @@ TEST(OfflineSbsWorker, OfflineOverlapHasFixedSmallCapacitiesAndByteBound) {
     hdr_single
   );
 
-  // Two decoded source artifacts plus two complete SBS reservations enable
-  // overlap only when the stronger bound fits.
-  EXPECT_EQ(
-    offline_sbs::offline_overlapped_raster_bound_for_test(
-      100u,
-      10u,
-      10u,
-      false
-    ),
-    2u * 100u +
-      2u * (
-        10u * 10u * 4u +
-        (10u * 10u * 4u + 1024u * 1024u) +
-        (10u * 10u * 8u + 1024u * 1024u)
-      )
-  );
-  EXPECT_EQ(
-    offline_sbs::offline_overlapped_raster_bound_for_test(
-      100u,
-      10u,
-      10u,
-      true
-    ),
-    2u * 100u +
-      2u * (
-        10u * 10u * 4u * sizeof(std::uint16_t) +
-        10u * 3u * sizeof(float) +
-        10u * 10u * 3u * sizeof(float) +
-        128u
-      )
-  );
-
   constexpr std::uint64_t low_cap = 16ull * 1024ull * 1024ull;
   EXPECT_GT(
     offline_sbs::offline_single_slot_raster_bound(
@@ -474,7 +442,7 @@ TEST(OfflineSbsWorker, LowCapFailsBeforeFirstSbsOutputSnapshot) {
   );
 
   const auto preflight = harness.find(
-    "required_bytes = offline_sbs::offline_single_slot_raster_bound("
+    "required_bytes = transport ? offline_sbs::raw_raster_byte_bound("
   );
   const auto first_inference = harness.find(
     "estimator->estimate_depth(",
@@ -497,122 +465,6 @@ TEST(OfflineSbsWorker, LowCapFailsBeforeFirstSbsOutputSnapshot) {
     harness.find("before the first SBS output snapshot", preflight),
     std::string::npos
   );
-}
-
-TEST(OfflineSbsWorker, ConversionUsesBoundedThreeStageOrderedPipeline) {
-  const auto worker = read_source_text("src/offline_sbs_worker.cpp");
-  const auto harness = read_source_text("src/sbs_bench_harness.cpp");
-  ASSERT_FALSE(worker.empty());
-  ASSERT_FALSE(harness.empty());
-
-  const auto worker_pass = source_section(
-    worker,
-    "const auto analysis_input = work / \"analysis-input\";",
-    "wire::worker_result_contract_t result_contract"
-  );
-  ASSERT_FALSE(worker_pass.empty());
-  const auto fill = worker_pass.find("const auto fill_source_window = [&]");
-  const auto bounded_fill = worker_pass.find(
-    "source_queue.size() < source_window_capacity",
-    fill
-  );
-  const auto two_sources = worker_pass.find(
-    "offline_source_pipeline_capacity : 1u",
-    bounded_fill
-  );
-  const auto encoder_publish = worker_pass.find(
-    "conversion_encoder->publish(timing.sequence, sbs)",
-    two_sources
-  );
-  const auto release_source = worker_pass.find(
-    "remove_transient_file_checked(source)",
-    encoder_publish
-  );
-  const auto refill = worker_pass.find("fill_source_window();", release_source);
-  ASSERT_NE(fill, std::string::npos);
-  ASSERT_NE(bounded_fill, std::string::npos);
-  ASSERT_NE(two_sources, std::string::npos);
-  ASSERT_NE(encoder_publish, std::string::npos);
-  ASSERT_NE(release_source, std::string::npos);
-  ASSERT_NE(refill, std::string::npos);
-  EXPECT_LT(fill, bounded_fill);
-  EXPECT_LT(two_sources, encoder_publish);
-  EXPECT_LT(encoder_publish, release_source);
-  EXPECT_LT(release_source, refill);
-  EXPECT_NE(
-    worker_pass.find("conversion_overlap_raster_bound"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    worker_pass.find("spec.transient_raster_hard_cap_bytes"),
-    std::string::npos
-  );
-
-  const auto encoder = source_section(
-    worker,
-    "class whole_clip_encoder_t",
-    "struct streaming_probe_stats_t"
-  );
-  ASSERT_FALSE(encoder.empty());
-  EXPECT_NE(encoder.find("consumer_ = std::thread"), std::string::npos);
-  EXPECT_NE(
-    encoder.find("outstanding() >= offline_encoder_pipeline_capacity"),
-    std::string::npos
-  );
-  const auto served = encoder.find("frame_server_.publish_and_wait(");
-  const auto removed = encoder.find("remove_transient_file_checked(frame.path)", served);
-  ASSERT_NE(served, std::string::npos);
-  ASSERT_NE(removed, std::string::npos);
-  EXPECT_LT(served, removed);
-
-  const auto harness_pipeline = source_section(
-    harness,
-    "const bool asynchronous_follow_conversion =",
-    "// Whole-clip input geometry and color format are immutable."
-  );
-  ASSERT_FALSE(harness_pipeline.empty());
-  const auto prior_consumed = harness_pipeline.find(
-    "wait_for_consumed_follow_source("
-  );
-  const auto serialize = harness_pipeline.find(
-    "publish_file_atomically(",
-    prior_consumed
-  );
-  const auto state = harness_pipeline.find(
-    "publish_adaptive_state_snapshot(",
-    serialize
-  );
-  const auto ack = harness_pipeline.find("publish_follow_progress(", state);
-  ASSERT_NE(prior_consumed, std::string::npos);
-  ASSERT_NE(serialize, std::string::npos);
-  ASSERT_NE(state, std::string::npos);
-  ASSERT_NE(ack, std::string::npos);
-  EXPECT_LT(prior_consumed, serialize);
-  EXPECT_LT(serialize, state);
-  EXPECT_LT(state, ack);
-
-  const auto harness_frame_loop = source_section(
-    harness,
-    "for (size_t fi = 0;; fi++)",
-    "if (post_render_pipeline) {"
-  );
-  ASSERT_FALSE(harness_frame_loop.empty());
-  const auto gpu_finish = harness_frame_loop.find(
-    "finish_pending_depth_for_evaluation("
-  );
-  const auto cpu_snapshot = harness_frame_loop.find(
-    "std::optional<post_render_frame_t> asynchronous_output",
-    gpu_finish
-  );
-  const auto submit = harness_frame_loop.find(
-    "post_render_pipeline->submit(",
-    cpu_snapshot
-  );
-  ASSERT_NE(gpu_finish, std::string::npos);
-  ASSERT_NE(cpu_snapshot, std::string::npos);
-  ASSERT_NE(submit, std::string::npos);
-  EXPECT_LT(gpu_finish, cpu_snapshot);
-  EXPECT_LT(cpu_snapshot, submit);
 }
 
 TEST(OfflineSbsWorker, SdrSerializerReusesThreadLifetimeWicFactory) {
@@ -676,7 +528,7 @@ TEST(OfflineSbsWorker, PerFrameBridgeUsesOnlyTransientAtomicWrites) {
   EXPECT_NE(harness_writer.find("FILE_FLAG_WRITE_THROUGH : 0"), std::string::npos);
   EXPECT_NE(harness_writer.find("if (succeeded && durable)"), std::string::npos);
   EXPECT_NE(harness_writer.find("MOVEFILE_WRITE_THROUGH : 0"), std::string::npos);
-  EXPECT_EQ(count_text(worker, "atomic_write_mode_e::transient"), 3u);
+  EXPECT_EQ(count_text(worker, "atomic_write_mode_e::transient"), 1u);
   EXPECT_EQ(count_text(harness, "atomic_write_mode_e::transient"), 7u);
 
   const auto retained_json = source_section(
@@ -705,7 +557,7 @@ TEST(OfflineSbsWorker, FollowProgressChecksChildExitBeforeWaitingAgain) {
 
   const auto function_begin = source.find("nlohmann::json read_progress(");
   const auto function_end = source.find(
-    "void publish_producer_done(",
+    "void publish_producer_failed(",
     function_begin
   );
   ASSERT_NE(function_begin, std::string::npos);
@@ -879,7 +731,7 @@ TEST(OfflineSbsWorker, TransientConsumersRetrySameSnapshotWithoutReparse) {
 
   for (const auto &markers : std::array {
          std::array<std::string_view, 2> {
-           "nlohmann::json read_progress(", "void publish_producer_done("
+           "nlohmann::json read_progress(", "void publish_producer_failed("
          },
          std::array<std::string_view, 2> {
            "nlohmann::json read_snapshot(", "void ensure_open("
@@ -907,14 +759,7 @@ TEST(OfflineSbsWorker, TransientConsumersRetrySameSnapshotWithoutReparse) {
     std::string::npos
   );
 
-  const auto serve = source_section(worker, "bool serve_frame(", "void fail(");
-  ASSERT_FALSE(serve.empty());
-  const auto opened = serve.find("open_transient_file_snapshot(");
-  const auto response = serve.find("const std::string header");
-  ASSERT_NE(opened, std::string::npos);
-  ASSERT_NE(response, std::string::npos);
-  EXPECT_LT(opened, response);
-  EXPECT_EQ(serve.find("std::ifstream stream(path"), std::string::npos);
+
 }
 
 TEST(OfflineSbsWorker, WholeClipReusesOneGpuInputTextureAndView) {
@@ -1588,25 +1433,7 @@ TEST(OfflineSbsWorker, RejectsOversizedFrameBeforeRetainingItsDom) {
   EXPECT_FALSE(fs::exists(path));
 }
 
-#ifdef _WIN32
-TEST(OfflineSbsWorker, FrameBridgeUsesUnpredictableCapabilityTokens) {
-  const auto first = offline_sbs::secure_frame_bridge_token_for_test();
-  const auto second = offline_sbs::secure_frame_bridge_token_for_test();
-  ASSERT_EQ(first.size(), 64u);
-  ASSERT_EQ(second.size(), 64u);
-  EXPECT_NE(first, second);
-  EXPECT_TRUE(std::all_of(first.begin(), first.end(), [](const char value) {
-    return (value >= '0' && value <= '9') ||
-           (value >= 'a' && value <= 'f');
-  }));
-}
 
-TEST(OfflineSbsWorker, RogueLoopbackDisconnectDoesNotAbortFrameBridge) {
-  EXPECT_TRUE(
-    offline_sbs::frame_bridge_survives_unauthenticated_disconnect_for_test()
-  );
-}
-#endif
 
 TEST(OfflineSbsWorker, BoundsVariableFrameRateToOneOutputTick) {
   const auto media = offline_sbs::parse_ffprobe_contract(sdr_probe());
@@ -1677,7 +1504,7 @@ TEST(OfflineSbsWorker, AcceptsStaticBt2020PqAndBuildsLinearScRgbDecode) {
   EXPECT_NE(joined.find("primaries=bt709"), std::string::npos);
   EXPECT_NE(joined.find("transfer=linear"), std::string::npos);
   EXPECT_NE(joined.find("npl=80"), std::string::npos);
-  EXPECT_NE(joined.find("image2pipe"), std::string::npos);
+  EXPECT_NE(joined.find("rawvideo"), std::string::npos);
 }
 
 TEST(OfflineSbsWorker, AcceptsStaticBt2020HlgAndBuildsLinearScRgbDecode) {
@@ -1696,7 +1523,7 @@ TEST(OfflineSbsWorker, AcceptsStaticBt2020HlgAndBuildsLinearScRgbDecode) {
   EXPECT_NE(joined.find("primaries=bt709"), std::string::npos);
   EXPECT_NE(joined.find("transfer=linear"), std::string::npos);
   EXPECT_NE(joined.find("npl=80"), std::string::npos);
-  EXPECT_NE(joined.find("image2pipe"), std::string::npos);
+  EXPECT_NE(joined.find("rawvideo"), std::string::npos);
 }
 
 TEST(OfflineSbsWorker, RejectsRotationDynamicHdrAndAmbiguousTenBitSdr) {

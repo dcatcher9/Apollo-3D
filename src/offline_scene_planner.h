@@ -140,6 +140,7 @@ namespace offline_sbs {
     std::vector<scene_plan_t> finish();
 
     [[nodiscard]] const std::vector<boundary_audit_t> &boundary_audit() const;
+    [[nodiscard]] std::vector<boundary_audit_t> take_boundary_audit();
 
   private:
     std::vector<boundary_audit_t> boundary_audit_;

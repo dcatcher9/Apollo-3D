@@ -2043,7 +2043,16 @@ namespace confighttp {
       return;
     }
     const auto job_id = request->path_match[1].str();
-    const auto reply = offline_sbs::scene_audit(job_id);
+    std::optional<std::uint32_t> page;
+    for (const auto &[name, value] : request->parse_query_string()) {
+      if (name != "page" || page || value.empty() || value.size() > 5 ||
+          value.find_first_not_of("0123456789") != std::string::npos) {
+        bad_request(response, request, "scene audit accepts one nonnegative page index");
+        return;
+      }
+      page = static_cast<std::uint32_t>(std::stoul(value));
+    }
+    const auto reply = offline_sbs::scene_audit(job_id, page);
     if (!reply.ok) {
       const offline_sbs::service_reply_t status_reply {
         .ok = false,
@@ -2062,12 +2071,14 @@ namespace confighttp {
     }
 
     // The route restricts job_id to hexadecimal UUID characters, so it is safe in
-    // this quoted attachment filename. The body is the complete manager-validated
-    // artifact rather than a client-supplied filesystem path.
+    // this quoted attachment filename. Page indices resolve only through the
+    // authenticated manifest, never through a client-supplied filesystem path.
     const SimpleWeb::CaseInsensitiveMultimap headers {
       {"Content-Type", "application/json"},
       {"Content-Disposition",
-       "attachment; filename=\"scene-audit-" + job_id + ".json\""},
+       "attachment; filename=\"scene-audit-" + job_id +
+       (page ? "-page-" + std::to_string(*page) :
+         (reply.audit.value("document_kind", "") == "manifest" ? "-manifest" : "")) + ".json\""},
       {"Cache-Control", "no-store"},
       {"X-Content-Type-Options", "nosniff"},
       {"X-Frame-Options", "DENY"},
@@ -2075,7 +2086,7 @@ namespace confighttp {
     };
     response->write(
       SimpleWeb::StatusCode::success_ok,
-      reply.audit.dump(2),
+      reply.serialized_artifact ? *reply.serialized_artifact : reply.audit.dump(2),
       headers
     );
   }

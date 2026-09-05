@@ -225,11 +225,11 @@ namespace proc {
     );
     /**
      * Non-blocking hint for the serialized live-mode worker: would `apply_live_video_mode` have
-     * real topology work to do? A bitrate-only or frame-rate-only change skips DisplayConfig but
+     * real topology work to do? A bitrate-only change skips DisplayConfig but
      * remains ordered behind any active encoder transaction. This never waits on the process lock;
      * a transition already in flight conservatively answers "yes".
      */
-    bool live_video_mode_needs_display_change(int width, int height) const;
+    bool live_video_mode_needs_display_change(int width, int height, int fps_millihz) const;
     /** Adopt the remote streaming session's virtual-display lease before platform startup. */
     bool activate_remote_virtual_display_lease(std::uint64_t lease);
     void terminate(bool immediate = false, bool needs_refresh = true);
@@ -254,6 +254,9 @@ namespace proc {
 #endif
 
   private:
+#ifdef SUNSHINE_TESTS
+    friend struct process_test_access;
+#endif
     int running_locked();
     bool stream_process_exited_locked();
     void set_display_name_locked(std::string name);
@@ -262,6 +265,8 @@ namespace proc {
     std::string _app_name;
     bool _virtual_display = false;
     std::uint64_t _host_session_id = 0;
+    // The process token/GUID survive resume; the authorized live-control transport does not.
+    std::uint32_t _active_launch_session_id = 0;
 
     boost::process::v1::environment _env;
 

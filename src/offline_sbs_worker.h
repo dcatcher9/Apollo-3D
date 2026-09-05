@@ -203,12 +203,6 @@ namespace offline_sbs {
   std::string bound_child_process_log_for_test(std::string_view bytes);
   std::size_t offline_source_pipeline_capacity_for_test();
   std::size_t offline_encoder_pipeline_capacity_for_test();
-  std::uint64_t offline_overlapped_raster_bound_for_test(
-    std::uint64_t source_raster_bytes,
-    std::uint32_t sbs_width,
-    std::uint32_t sbs_height,
-    bool hdr
-  );
   bool can_retain_auxiliary_packets_for_test(
     std::uint64_t retained_packets,
     std::uint64_t additional_packets
@@ -267,10 +261,6 @@ namespace offline_sbs {
   void validate_windows_command_line_capacity_for_test(
     const std::vector<std::string> &arguments
   );
-#ifdef _WIN32
-  std::string secure_frame_bridge_token_for_test();
-  bool frame_bridge_survives_unauthenticated_disconnect_for_test();
-#endif
 #endif
 
   /**

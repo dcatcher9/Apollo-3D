@@ -1,0 +1,30 @@
+name: Portable workflow boundaries
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable-host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the pinned test dependency
+        run: git submodule update --init third-party/googletest
+      - name: Configure portable boundary tests
+        run: cmake -S tools/joint-workflow -B cmake-build-portable -DCMAKE_BUILD_TYPE=Release
+      - name: Build portable boundary tests
+        run: cmake --build cmake-build-portable --parallel 2
+      - name: Run portable boundary tests
+        run: ctest --test-dir cmake-build-portable --output-on-failure
+      - name: Check generated source contracts without model execution
+        run: |
+          python3 tools/sbsbench/generate_adaptive_state_contract.py --check
+          python3 tools/sbsbench/generate_depth_coordinate_v2_contract.py --check
+          python3 tools/sbsbench/generate_host_sbs_shader_manifest.py --check
+          python3 -m unittest discover -s tools/sbsbench -p test_host_sbs_shader_manifest.py
+          python3 -m unittest tools.sbsbench.test_adaptive_state_contract.AdaptiveStateContractTests.test_schema_version_pins_the_complete_contract tools.sbsbench.test_adaptive_state_contract.AdaptiveStateContractTests.test_generated_native_and_shader_contracts_are_current tools.sbsbench.test_adaptive_state_contract.AdaptiveStateContractTests.test_manifest_is_exact_and_carries_confirmation_state

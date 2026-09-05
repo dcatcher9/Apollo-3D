@@ -19,6 +19,75 @@
 #include "src/config.h"
 #include "src/process.h"
 
+namespace proc {
+  // A retained desktop fixture with no real process, display, or HDR worker. The successful
+  // same-mode apply returns before any Windows call, exercising transport admission itself.
+  struct process_test_access {
+    static void retain(proc_t &process, const std::shared_ptr<rtsp_stream::launch_session_t> &launch) {
+      process._app_id = 1;
+      process._host_session_id = 1234;
+      process._launch_session = launch;
+      process._active_launch_session_id = launch->id;
+    }
+#ifdef _WIN32
+    static void mark_virtual(proc_t &process, bool enabled) {
+      process._virtual_display = enabled;
+      process._virtual_display_gdi_name = enabled ? L"test-only-display" : L"";
+    }
+#endif
+    static void clear(proc_t &process) {
+      process._app_id = 0;
+      process._host_session_id = 0;
+      process._active_launch_session_id = 0;
+      process._launch_session.reset();
+#ifdef _WIN32
+      mark_virtual(process, false);
+#endif
+    }
+  };
+}
+
+TEST(ProcessTest, ResumePublishesNewLiveTransportWithoutChangingRetainedToken) {
+  proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
+  auto original = std::make_shared<rtsp_stream::launch_session_t>();
+  original->id = 11;
+  original->width = 1920;
+  original->height = 1080;
+  original->fps = 60000;
+  proc::process_test_access::retain(process, original);
+  auto cleanup = util::fail_guard([&]() { proc::process_test_access::clear(process); });
+
+  auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
+  resumed->id = 22;
+  resumed->width = 1920;
+  resumed->height = 1080;
+  resumed->fps = 60000;
+  resumed->scale_factor = 100;
+  EXPECT_EQ(process.reconfigure_retained_session(resumed), 0);
+  EXPECT_EQ(process.get_host_session_id(), 1234U);
+  EXPECT_EQ(original->id, 11U);
+#ifdef _WIN32
+  proc::process_test_access::mark_virtual(process, true);
+  EXPECT_EQ(process.apply_live_video_mode(1920, 1080, 60000, 22), proc::live_video_mode_result_e::unchanged);
+  EXPECT_EQ(process.apply_live_video_mode(1920, 1080, 60000, 11), proc::live_video_mode_result_e::needs_reconnect);
+  EXPECT_TRUE(process.live_video_mode_needs_display_change(1920, 1080, 90000));
+  EXPECT_TRUE(process.live_video_mode_needs_display_change(1280, 720, 60000));
+  EXPECT_FALSE(process.live_video_mode_needs_display_change(1920, 1080, 60000));
+  proc::process_test_access::mark_virtual(process, false);
+#endif
+  auto invalid = std::make_shared<rtsp_stream::launch_session_t>();
+  invalid->id = 33;
+  invalid->width = 1;
+  invalid->height = 1;
+  invalid->scale_factor = 20;
+  EXPECT_EQ(process.reconfigure_retained_session(invalid), 400);
+#ifdef _WIN32
+  proc::process_test_access::mark_virtual(process, true);
+  EXPECT_EQ(process.apply_live_video_mode(1920, 1080, 60000, 22), proc::live_video_mode_result_e::unchanged);
+  EXPECT_EQ(process.apply_live_video_mode(1920, 1080, 60000, 33), proc::live_video_mode_result_e::needs_reconnect);
+#endif
+}
+
 TEST(ProcessTest, ExplorerRepairIsOptInByDefault) {
   EXPECT_FALSE(config::default_virtual_display_restart_explorer);
 }
@@ -72,7 +141,7 @@ TEST(ProcessTest, LiveVideoModeIsRefusedWithoutAVirtualDisplay) {
 
   // The control thread's fast-path hint must say "no display work" so a bitrate-only change is
   // never queued behind a topology transition that would not happen anyway.
-  EXPECT_FALSE(process.live_video_mode_needs_display_change(1920, 1080));
+  EXPECT_FALSE(process.live_video_mode_needs_display_change(1920, 1080, 60000));
 }
 
 TEST(ProcessTest, LiveVideoModeFailureIsRetryableOnlyAfterProvenRollback) {

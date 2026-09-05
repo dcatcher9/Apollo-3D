@@ -48,6 +48,13 @@ response fields and should never write configuration files behind Sunshine 3D's 
 | `POST` | `/api/clients/unpair-all` | Remove every paired client |
 | `GET`, `POST` | `/api/ar-glasses` | Inspect or select the Windows local-AR display |
 
+Changing an active client's input permissions takes effect at the input dispatch boundary. Losing
+keyboard, mouse, controller, touch, or pen permission discards queued input for that category and
+releases its held state before later input can run. Categories that retain permission keep their
+held state. Controller revocation sends neutral state while retaining the announced device for a
+later grant; session teardown frees it. Removing both view and launch permissions disconnects the
+stream and releases every category.
+
 ## Configuration
 
 | Method | Route | Purpose |
@@ -66,7 +73,8 @@ The field-level contract is documented in [Configuration](configuration.md).
 | `GET`, `POST` | `/api/offline-sbs/jobs` | List jobs or create a conversion |
 | `GET` | `/api/offline-sbs/jobs/{id}` | Read one job |
 | `POST` | `/api/offline-sbs/jobs/{id}/cancel` | Cancel one job |
-| `GET` | `/api/offline-sbs/jobs/{id}/scene-audit` | Download its bounded scene audit |
+| `GET` | `/api/offline-sbs/jobs/{id}/scene-audit` | Download its scene-audit manifest, or the inline audit for an older retained job |
+| `GET` | `/api/offline-sbs/jobs/{id}/scene-audit?page={index}` | Download one authenticated page listed in the manifest; indices start at zero |
 
 The job schema, path restrictions, media behavior, and GPU lease are owned by
 [Offline Host 3D conversion](whole-clip-sbs-pipeline.md). Do not infer them from this route index.

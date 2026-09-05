@@ -15,11 +15,15 @@ owns evaluation commands and evidence formats, organized as follows:
 | [Optional oracles](ORACLES.md) | FLIP, RAFT-Stereo, SEA-RAFT, and iSQoE diagnostics |
 | [Host SBS scene cuts](../../docs/host-sbs-scene-cuts.md) | Normative cut evidence and state machine |
 
-The native harness shares the typed scene-cache, scene-plan, and whole-clip wire codecs with the
-offline manager/worker. Its fixed-schema JSON is published atomically, duplicate keys and unknown
-fields fail closed on read, and raster dimensions are checked before byte-count arithmetic or GPU
-allocation. The Python evaluators consume those current documents; they do not maintain a second
-native-contract compatibility translator.
+The native harness and offline manager/worker share typed diagnostic and whole-clip wire codecs.
+Compatibility names such as `scene-cache` and `scene-plan` remain evaluator/harness contracts.
+Current production conversion is the causal one-pass
+pipeline owned by [Offline Host 3D conversion](../../docs/whole-clip-sbs-pipeline.md). Fixed-schema
+JSON is published atomically, duplicate keys and unknown fields fail closed on read, and raster
+dimensions are checked before byte-count arithmetic or GPU allocation. The Python evaluators
+consume those current documents without a second native-contract compatibility translator.
+Evaluator file-follow and raster artifacts remain available for reproducible scoring. Production
+conversion's raw frame transport and paged audits are owned by the linked conversion document.
 
 ## Required evaluation loop
 
@@ -37,7 +41,7 @@ report generation, comparisons, and related tests. Record its fingerprint before
 verify the exact same output before the treatment and report:
 
 ```powershell
-& $SbsbenchPython -c "import json, platform, sys, numpy, PIL; print(json.dumps({'executable': sys.executable, 'python': platform.python_version(), 'numpy': numpy.__version__, 'pillow': PIL.__version__}, sort_keys=True))"
+& $SbsbenchPython -c "import sys, numpy, PIL, onnx; print(sys.executable); print(sys.version); print('numpy', numpy.__version__); print('Pillow', PIL.__version__); print('onnx', onnx.__version__)"
 ```
 
 Never switch between bare `python`, `py`, a bundled tool runtime, or another virtual environment
@@ -85,12 +89,12 @@ GPU trace, and writes JSON plus HTML comparison reports:
 Prepared `frame_*.png` directories are also accepted. The numerically ordered selected subset is
 staged once under canonical one-based IDs, then hashed before and after both runs. The runner
 first requires and verifies the current `sunshine` target, then binds the executable, config,
-runtime shader tree, DAV2
+runtime shader tree, production composite
 engine/ONNX, OCR engine/contract ONNX, and generated coordinate contract across both serial legs.
 The default gate requires at least one actual reuse and proves that every reuse retained the
 preceding fused `refined_depth` field bit-exactly. Native geometry replay authenticates the paired
 source snapshot hash but receives no source texture, color mode, or HDR scale. Ordinary
-subtitle work also holds SLR80, condition parameters,
+subtitle work also holds the SLR13 locator state, condition parameters,
 and `final_parallax_<frame-id>.f32`; cadence-due work may instead publish a current subtitle
 observation on the reused depth. The authenticated trace distinguishes those cases and rejects an
 ordinary OCR marker on reuse. The runner derives GPU history-owner age from both the frame ID and
@@ -115,8 +119,10 @@ The runner uses private replay harness schemas 29 (force oracle) and 28 (conditi
 plus metadata schema 3, leaving formal `run_eval.py` schema 22 and its baseline evidence untouched.
 
 Host SBS V2 has no model/profile selector. Production and the maintained benchmark harness use the
-authenticated DAV2 Small calibration. The supported treatments are intentionally narrow and are
-listed by `run_eval.py --help`; unrecognized historical options fail argument parsing.
+single authenticated DAV2 Small + frozen ZipDepth convex 2x composite specified by
+[the Host SBS production contract](../../docs/host-sbs.md#authenticated-production-contract).
+The supported treatments are intentionally narrow and are listed by `run_eval.py --help`;
+unrecognized historical options fail argument parsing.
 
 ### Current subtitle authority
 

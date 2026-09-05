@@ -15,6 +15,8 @@
 #include <optional>
 #include <string>
 
+namespace offline_sbs { struct raw_frame_transport; }
+
 namespace sbs_bench {
 #ifdef _WIN32
   namespace detail {
@@ -42,5 +44,5 @@ namespace sbs_bench {
 
   /// Entry point for the `--sbs-bench` subcommand. argc/argv are the post-flag args
   /// (see config::sunshine.cmd). Returns a process exit code.
-  int run(int argc, char **argv);
+  int run(int argc, char **argv, offline_sbs::raw_frame_transport *transport = nullptr);
 }

@@ -198,3 +198,21 @@ TEST(OfflineCausalSceneTracker, FinalizationClosesTheTracker) {
     offline_sbs::scene_plan_error
   );
 }
+
+TEST(OfflineCausalSceneTracker, DrainingBoundaryAuditDoesNotChangeSubsequentEpochs) {
+  offline_sbs::causal_scene_tracker_t tracker;
+  tracker.feed(causal_sample(1, false, 0));
+  for (std::uint32_t cut = 1; cut <= 2000; ++cut) {
+    const auto scenes = tracker.feed(causal_sample(cut + 1, true, cut));
+    ASSERT_EQ(scenes.size(), 1u);
+    const auto boundaries = tracker.take_boundary_audit();
+    ASSERT_EQ(boundaries.size(), 1u);
+    EXPECT_EQ(boundaries.front().final_sequence, cut + 1);
+    EXPECT_EQ(scenes.front().scene_id, cut);
+    EXPECT_TRUE(tracker.boundary_audit().empty());
+  }
+  const auto final = tracker.finish();
+  ASSERT_EQ(final.size(), 1u);
+  EXPECT_EQ(final.front().scene_id, 2001u);
+  EXPECT_TRUE(tracker.take_boundary_audit().empty());
+}

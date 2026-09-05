@@ -164,6 +164,13 @@ and can make the display oscillate between modes. A policy restriction is logged
 Displays that advertise HDR but do not actually enter HDR (for example, until an on-device HDR10
 setting is enabled) also continue in SDR instead of entering a create/remove retry loop.
 
+While a captured source has pending pipeline construction, depth completion, conversion, or a busy final presentation,
+the local owner limits capture/pacing waits to 5 ms and yields the capture-device lock for 1 ms
+after a timeout. It then retries the retained work even if the desktop never changes again.
+Completion checks remain nonblocking on that same owner thread; retrying a busy Present does not
+reconvert its pixels. Once the work is presented, ordinary idle capture resumes. Remote capture
+keeps its existing idle timeout. These are scheduling bounds, not a GPU completion-time guarantee.
+
 The local path avoids an RGB-to-YUV encode/decode round trip. SDR uses a BGRA8 Rec.709 swapchain.
 When both outputs have stably entered HDR, Sunshine 3D captures linear FP16 scRGB and presents it through
 an FP16 scRGB swapchain; DWM performs the final device-specific HDR10/PQ conversion. Presentation

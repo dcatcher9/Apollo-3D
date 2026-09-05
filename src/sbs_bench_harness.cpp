@@ -8,6 +8,7 @@
  * are D3D11/TensorRT).
  */
 #include "sbs_bench_harness.h"
+#include "offline_frame_transport.h"
 
 #ifdef _WIN32
 
@@ -1640,6 +1641,7 @@ namespace sbs_bench {
     };
 
     struct post_render_frame_t {
+      offline_sbs::raw_frame_header raw_header;
       std::size_t processed_count = 0;
       std::size_t source_index = 0;
       std::string output_id;
@@ -3243,7 +3245,8 @@ namespace sbs_bench {
         }
         if (o.follow_format != "png" &&
             o.follow_format != "bmp" &&
-            o.follow_format != "pfm") {
+            o.follow_format != "pfm" && o.follow_format != "bgra8" &&
+            o.follow_format != "gbrpf32le") {
           BOOST_LOG(error) << "sbs-bench: --follow-format must be png, bmp, or pfm";
           return false;
         }
@@ -3306,7 +3309,7 @@ namespace sbs_bench {
 
   }  // namespace
 
-  int run(int argc, char **argv) {
+  int run(int argc, char **argv, offline_sbs::raw_frame_transport *transport) {
     opts o;
     if (!parse_opts(argc, argv, o)) {
       return 2;
@@ -3333,6 +3336,7 @@ namespace sbs_bench {
             {"active_window_dependency", false},
             {"window_region_roi", false},
           }},
+          {"frame_transport", offline_sbs::raw_frame_transport::name},
           {"follow_protocol_schema", 2},
           {"follow_global_first_sequence", true},
           {"follow_wakeup", "windows-directory-change-notification"},
@@ -3390,7 +3394,16 @@ namespace sbs_bench {
       }
       return 0;
     }
-    if (!wic_init()) {
+    if (transport && (!o.follow || !o.bounded_adaptive_state || o.follow_count == 0 ||
+                      o.artifacts == artifact_mode_e::evaluation || !o.render_cache.empty())) {
+      BOOST_LOG(error) << "sbs-bench: raw transport requires bounded causal whole-clip input";
+      return 2;
+    }
+    if (!transport && (o.follow_format == "bgra8" || o.follow_format == "gbrpf32le")) {
+      BOOST_LOG(error) << "sbs-bench: raw frames require the worker-owned memory transport";
+      return 2;
+    }
+    if (!transport && !wic_init()) {
       BOOST_LOG(error) << "sbs-bench: WIC init failed";
       return 3;
     }
@@ -3410,9 +3423,9 @@ namespace sbs_bench {
       return 4;
     }
     if (o.follow) {
-      found_hdr_pfm = o.follow_format == "pfm";
+      found_hdr_pfm = o.follow_format == "pfm" || o.follow_format == "gbrpf32le";
       found_sdr_raster =
-        o.follow_format == "png" || o.follow_format == "bmp";
+        o.follow_format == "png" || o.follow_format == "bmp" || o.follow_format == "bgra8";
       sdr_raster_format = found_sdr_raster ? o.follow_format : "";
     } else {
       for (auto &e : fs::directory_iterator(o.frames, ec)) {
@@ -3547,8 +3560,10 @@ namespace sbs_bench {
       sbs_cfg.pop_strength = o.pop_strength;
     }
     config::sunshine.diagnostics_enabled = true;  // benchmark processes always measure
-    sbs_perf::set_enabled(true);
-    sbs_perf::reset();
+    if (!transport) {
+      sbs_perf::set_enabled(true);
+      sbs_perf::reset();
+    }
     const auto model = video::host_sbs_v2_depth_model();
     const bool replay_mode = !o.render_cache.empty();
     // Direct replay supplies an authenticated, horizontally contractive final field plus an
@@ -3581,6 +3596,7 @@ namespace sbs_bench {
     const bool writes_adaptive_state = whole_clip_mode && !replay_mode;
     const bool hdr_texture_input = pfm_input || o.simulate_hdr;
     const std::string discovered_input_frame_format =
+      transport ? (pfm_input ? "linear-scRGB-f32-planar" : "sRGB-BGRA8-raw") :
       pfm_input ?
         "linear-scRGB-f32-pfm" :
         (sdr_raster_format == "jpeg" ?
@@ -4011,7 +4027,7 @@ namespace sbs_bench {
     }
     std::size_t processed_frame_count = 0;
     std::optional<follow_directory_watcher_t> follow_watcher;
-    if (o.follow) {
+    if (o.follow && !transport) {
       try {
         follow_watcher.emplace(o.frames);
       } catch (const std::exception &exception) {
@@ -4028,12 +4044,15 @@ namespace sbs_bench {
       post_render_pipeline;
     if (asynchronous_follow_conversion) {
       try {
-        consumption_watcher =
+        if (!transport) consumption_watcher =
           std::make_unique<follow_directory_watcher_t>(o.frames);
         post_render_pipeline = std::make_unique<
           ordered_single_slot_pipeline_t<post_render_frame_t>
         >([&](post_render_frame_t &&frame, const std::atomic_bool &stopping) {
-          if (!frame.previous_source.empty()) {
+          if (transport && frame.processed_count > 1) {
+            transport->source.wait_acknowledged(frame.processed_count - 1);
+          }
+          if (!transport && !frame.previous_source.empty()) {
             std::string release_error;
             if (!wait_for_consumed_follow_source(
                   frame.previous_source,
@@ -4050,7 +4069,17 @@ namespace sbs_bench {
           }
 
           bool frame_written = false;
-          if (frame.pfm) {
+          if (transport) {
+            offline_sbs::raw_frame raw;
+            raw.header = frame.raw_header;
+            raw.header.width = frame.width;
+            raw.header.height = frame.height;
+            raw.header.format = frame.pfm ? offline_sbs::raw_pixel_format::rgba16f : offline_sbs::raw_pixel_format::bgra8;
+            raw.bgra = std::move(frame.bgra);
+            raw.rgba16 = std::move(frame.rgba16);
+            transport->sbs.publish(std::move(raw));
+            frame_written = true;
+          } else if (frame.pfm) {
             frame_written = publish_file_atomically(
               frame.output_path,
               [&](const fs::path &temporary_path) {
@@ -4145,7 +4174,21 @@ namespace sbs_bench {
       const std::size_t global_sequence =
         replay_mode ? replay_first_sequence + fi : fi + 1u;
       fs::path current_frame;
-      if (o.follow) {
+      std::optional<offline_sbs::raw_frame> raw_source;
+      if (transport) {
+        if (fi == o.follow_count) {
+          // Terminal progress must not replace the final running ACK/state
+          // before the worker has consumed that exact frame's evidence.
+          transport->source.wait_acknowledged(fi);
+          break;
+        }
+        // Adaptive snapshots and ACKs must stay coupled even when no SBS is emitted.
+        if (global_sequence > 1 && !asynchronous_follow_conversion)
+          transport->source.wait_acknowledged(global_sequence - 1);
+        raw_source = transport->source.receive(global_sequence);
+        producer_frame_count = o.follow_count;
+        current_frame = fs::path(o.frames) / follow_frame_filename(global_sequence, o.follow_format);
+      } else if (o.follow) {
         const auto next = wait_for_follow_frame(
           o.frames,
           o.follow_format,
@@ -4178,7 +4221,39 @@ namespace sbs_bench {
       std::uint64_t source_raster_bytes = 0;
       bool loaded = false;
       const bool snapshot_source = o.follow || depth_coordinate_v2_gpu_mode;
-      if (snapshot_source) {
+      if (transport) {
+        const auto &header = raw_source->header;
+        source_raster_bytes = raw_source->bytes();
+        if (offline_sbs::raw_source_byte_bound(source_raster_bytes, pfm_input) > transport->byte_limit)
+          throw std::runtime_error("raw source plus HDR upload exceeds the transient raster hard cap");
+        if (pfm_input) {
+          if (header.format != offline_sbs::raw_pixel_format::gbrpf32le)
+            throw std::runtime_error("raw HDR source format changed");
+          hdr_img.w = header.width;
+          hdr_img.h = header.height;
+          const auto pixels = std::size_t(header.width) * header.height;
+          hdr_img.rgba16.resize(pixels * 4);
+          for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
+            for (unsigned channel = 0; channel < 3; ++channel) {
+              const auto plane = channel == 0 ? 2u : channel == 1 ? 0u : 1u;
+              const float value = raw_source->gbr32[plane * pixels + pixel];
+              if (!std::isfinite(value) || std::abs(value) > 65504.0f)
+                throw std::runtime_error("non-finite/out-of-range raw HDR source");
+              hdr_img.rgba16[pixel * 4 + channel] = float_to_half(value);
+            }
+            hdr_img.rgba16[pixel * 4 + 3] = float_to_half(1.0f);
+          }
+          raw_source->gbr32.clear();
+          raw_source->gbr32.shrink_to_fit();
+        } else {
+          if (header.format != offline_sbs::raw_pixel_format::bgra8)
+            throw std::runtime_error("raw SDR source format changed");
+          img.w = header.width;
+          img.h = header.height;
+          img.bgra = std::move(raw_source->bgra);
+        }
+        loaded = true;
+      } else if (snapshot_source) {
         // Follow frames are atomically published and immutable. Decode the same in-memory
         // snapshot for both SDR and HDR instead of asking WIC to reopen the pathname: filename
         // decoding can intermittently fail after a directory-change wakeup even though the
@@ -4272,7 +4347,9 @@ namespace sbs_bench {
         const auto &geometry = *resolved_output_geometry;
         std::uint64_t required_bytes = 0;
         try {
-          required_bytes = offline_sbs::offline_single_slot_raster_bound(
+          required_bytes = transport ? offline_sbs::raw_raster_byte_bound(
+            source_raster_bytes, geometry.sbs_width, geometry.sbs_height, pfm_input, false
+          ) : offline_sbs::offline_single_slot_raster_bound(
             source_raster_bytes,
             geometry.sbs_width,
             geometry.sbs_height,
@@ -5568,7 +5645,8 @@ namespace sbs_bench {
             return 6;
           }
           asynchronous_output->adaptive_state = words;
-          if (global_sequence > follow_first_sequence) {
+          if (transport) asynchronous_output->raw_header = raw_source->header;
+          if (!transport && global_sequence > follow_first_sequence) {
             asynchronous_output->previous_source =
               fs::path(o.frames) /
               follow_frame_filename(global_sequence - 1u, o.follow_format);
@@ -6251,12 +6329,13 @@ namespace sbs_bench {
       const std::string packed_texture_format =
         hdr_texture_input ? "R16G16B16A16_FLOAT" : "B8G8R8A8_UNORM";
       const std::string output_frame_format =
+        transport ? (pfm_input ? "linear-scRGB-f16-raw" : "sRGB-BGRA8-raw") :
         pfm_input ?
           "linear-scRGB-f32-pfm" :
           (o.simulate_hdr ? "tone-mapped-sRGB-BGRA8-PNG-preview" :
                             "sRGB-BGRA8-PNG");
       const std::string output_transfer = pfm_input ? "linear" : "sRGB";
-      const std::string output_row_order = pfm_input ? "bottom-up" : "top-down";
+      const std::string output_row_order = !transport && pfm_input ? "bottom-up" : "top-down";
 
       offline_sbs::wire::whole_clip_resolved_runtime_t resolved_runtime {
         .model = model.name,
@@ -6293,7 +6372,7 @@ namespace sbs_bench {
         .output_row_order = output_row_order,
         .output_ffmpeg_pixel_format = pfm_input ?
                                         std::optional<std::string> {"gbrpf32le"} :
-                                        std::nullopt,
+                                        (transport ? std::optional<std::string> {"bgra"} : std::nullopt),
         .output_scale = o.output_scale,
         .requested_eye_width = o.eye_w,
         .requested_eye_height = o.eye_h,
@@ -6308,7 +6387,7 @@ namespace sbs_bench {
                                 std::optional<std::uint64_t> {o.follow_count} :
                                 std::nullopt,
         .follow_producer_frame_count = producer_frame_count,
-        .follow_frame_pattern = o.follow ?
+        .follow_frame_pattern = o.follow && !transport ?
                                   std::optional<std::string> {
                                     "frame_%010d." + o.follow_format
                                   } :
@@ -6321,10 +6400,10 @@ namespace sbs_bench {
         .follow_poll_interval_ms = o.follow ?
                                   std::optional<std::uint32_t> {0u} :
                                   std::nullopt,
-        .follow_done_sentinel = o.follow ?
+        .follow_done_sentinel = o.follow && !transport ?
                                   std::optional<std::string> {".producer-done.json"} :
                                   std::nullopt,
-        .follow_failed_sentinel = o.follow ?
+        .follow_failed_sentinel = o.follow && !transport ?
                                     std::optional<std::string> {".producer-failed.json"} :
                                     std::nullopt,
         .follow_progress_file = o.follow ?
@@ -6365,6 +6444,7 @@ namespace sbs_bench {
           std::optional<std::uint64_t> {replay_cache_metadata.processed_count} :
           std::nullopt,
       };
+      if (transport) resolved_runtime.frame_transport = offline_sbs::raw_frame_transport::name;
       offline_sbs::wire::whole_clip_adaptive_state_t adaptive_state;
       if (replay_mode) {
         // Replay consumes the analysis child's authoritative trace and must not invent history.
@@ -6395,14 +6475,14 @@ namespace sbs_bench {
       }
       const offline_sbs::wire::whole_clip_sbs_t sbs_contract {
         .enabled = o.artifacts == artifact_mode_e::conversion,
-        .file_pattern = o.artifacts == artifact_mode_e::conversion ?
+        .file_pattern = !transport && o.artifacts == artifact_mode_e::conversion ?
                            std::optional<std::string> {pfm_input ?
                              "sbs_<frame-id>.pfm" : "sbs_<frame-id>.png"} :
                            std::nullopt,
         .frame_count = static_cast<std::uint64_t>(written),
         .width = sbs_w,
         .height = sbs_h,
-        .frame_format = output_frame_format,
+        .frame_format = transport ? (pfm_input ? "rgba16f" : "bgra8") : output_frame_format,
         .transfer = output_transfer,
         .primaries = pfm_input ? "scRGB/BT.709" : "sRGB/BT.709",
         .reference_white_nits = pfm_input ?
@@ -6410,7 +6490,7 @@ namespace sbs_bench {
         .row_order = output_row_order,
         .ffmpeg_pixel_format = pfm_input ?
                                   std::optional<std::string> {"gbrpf32le"} :
-                                  std::nullopt,
+                                  (transport ? std::optional<std::string> {"bgra"} : std::nullopt),
         .atomic_publication =
           (o.follow || replay_mode) && o.artifacts == artifact_mode_e::conversion,
       };
@@ -6492,7 +6572,7 @@ namespace sbs_bench {
 
 #else  // !_WIN32
 namespace sbs_bench {
-  int run(int, char **) {
+  int run(int, char **, offline_sbs::raw_frame_transport *) {
     return 1;
   }
 }  // namespace sbs_bench

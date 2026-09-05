@@ -80,7 +80,7 @@ namespace offline_sbs {
     constexpr std::uintmax_t max_scene_audit_bytes = 32ull * 1024ull * 1024ull;
     constexpr std::uintmax_t max_progress_contract_bytes = 256ull * 1024ull;
     constexpr std::size_t max_current_scene_bytes = 16ull * 1024ull;
-    constexpr std::size_t max_scene_count = max_serialized_scene_count;
+    constexpr std::size_t max_scene_count = max_paged_scene_count;
     constexpr std::size_t max_progress_scene_decisions = 64;
     constexpr std::size_t max_browse_entries = 4096;
     constexpr std::size_t max_browse_path_components = 256;
@@ -1999,7 +1999,9 @@ namespace offline_sbs {
       std::string &error,
       const std::uintmax_t max_bytes = max_contract_bytes,
       std::string *content_sha256 = nullptr,
-      bool *acquisition_failed = nullptr
+      bool *acquisition_failed = nullptr,
+      std::uintmax_t *content_bytes = nullptr,
+      std::string *content_serialized = nullptr
     ) {
       if (acquisition_failed) {
         *acquisition_failed = false;
@@ -2184,11 +2186,58 @@ namespace offline_sbs {
         if (content_sha256) {
           *content_sha256 = sha256_hex(serialized);
         }
+        if (content_bytes) *content_bytes = serialized.size();
+        if (content_serialized) *content_serialized = std::move(serialized);
         return value;
       } catch (const std::exception &exception) {
         error = std::string {"cannot parse contract: "} + exception.what();
         return std::nullopt;
       }
+    }
+
+    std::optional<nlohmann::json> read_audit_page_checked(
+      const fs::path &directory, const wire::scene_audit_contract_t &manifest,
+      const std::uint32_t index, std::string &error,
+      std::string *serialized = nullptr
+    ) {
+      if (!manifest.paged || index >= manifest.pages.size()) {
+        error = "scene audit page was not found";
+        return std::nullopt;
+      }
+      const auto &descriptor = manifest.pages[index];
+      std::string digest;
+      std::uintmax_t bytes = 0;
+      auto page = read_json_contract(directory / wire::scene_audit_page_filename(index),
+        error, scene_audit_page_max_bytes, &digest, nullptr, &bytes, serialized);
+      if (!page) return std::nullopt;
+      try {
+        if (digest != descriptor.sha256 || bytes != descriptor.bytes) {
+          throw std::runtime_error("scene audit page identity differs from its manifest");
+        }
+        wire::validate_scene_audit_page(wire::parse_scene_audit_page(*page), descriptor,
+          manifest.status == "complete" && index + 1 == manifest.pages.size());
+        return page;
+      } catch (const std::exception &exception) {
+        error = exception.what();
+        return std::nullopt;
+      }
+    }
+
+    bool validate_audit_pages(const fs::path &directory,
+                              const wire::scene_audit_contract_t &manifest,
+                              std::string &error,
+                              std::vector<scene_plan_t> *recent = nullptr) {
+      for (const auto &descriptor : manifest.pages) {
+        const auto page = read_audit_page_checked(directory, manifest, descriptor.index, error);
+        if (!page) return false;
+        if (recent) {
+          for (const auto &scene : page->at("scenes")) {
+            recent->push_back(wire::parse_scene_record(scene));
+            if (recent->size() > scene_audit_recent_scenes) recent->erase(recent->begin());
+          }
+        }
+      }
+      return true;
     }
 
     std::string quote_windows_process_argument(const std::string_view argument) {
@@ -3155,7 +3204,7 @@ namespace offline_sbs {
           error = "worker result identity/configuration attestation mismatch";
           return false;
         }
-        const auto scene_count = typed_result.scenes.size();
+        const auto scene_count = typed_result.total_scene_count.value_or(typed_result.scenes.size());
         if (
           scene_count == 0 ||
           scene_count > max_scene_count
@@ -3188,6 +3237,32 @@ namespace offline_sbs {
           return false;
         }
         const auto &cache = typed_result.cache;
+        if (typed_result.total_scene_count) {
+          std::string digest;
+          const auto document = read_json_contract(expected_scene_audit, error, max_scene_audit_bytes, &digest);
+          if (!document || digest != typed_result.scene_audit_manifest_sha256) {
+            error = "worker scene audit manifest identity is invalid: " + error;
+            return false;
+          }
+          const auto manifest = wire::parse_scene_audit_contract(*document);
+          std::vector<scene_plan_t> recent;
+          if (!manifest.paged || manifest.status != "complete" || manifest.scene_count != scene_count ||
+              manifest.covered_end_sequence != source.frame_count + 1 ||
+              !validate_audit_pages(context.result_directory, manifest, error, &recent)) {
+            error = "worker paged audit coverage is invalid: " + error;
+            return false;
+          }
+          if (recent.size() != typed_result.scenes.size()) {
+            error = "worker recent scene tail disagrees with its audit";
+            return false;
+          }
+          for (std::size_t i = 0; i < recent.size(); ++i) {
+            if (wire::scene_record_json(recent[i]) != wire::scene_record_json(typed_result.scenes[i])) {
+              error = "worker recent scene evidence disagrees with its audit";
+              return false;
+            }
+          }
+        }
         if (
           cache.hard_cap_bytes != context.scene_cache_max_bytes ||
           cache.remaining_bytes != 0 ||
@@ -3233,7 +3308,7 @@ namespace offline_sbs {
       const nlohmann::json &result,
       const worker_context_t &context
     ) {
-      // The child-owned worker-result.json and scene-audit.json retain the complete
+      // The child-owned worker result and scene-audit manifest/pages retain the complete
       // per-scene causal evidence. Durable service state stays deliberately small so
       // listing jobs cannot deep-copy a multi-hour clip's full report under the service
       // mutex and job.json remains bounded and restart-safe.
@@ -3248,6 +3323,7 @@ namespace offline_sbs {
         "python_dependency"sv,
         "scene_count"sv,
         "scene_audit"sv,
+        "scene_audit_manifest_sha256"sv,
         "output"sv,
       };
       for (const auto field : scalar_fields) {
@@ -4563,7 +4639,12 @@ namespace offline_sbs {
               max_scene_audit_bytes,
               &audit_hash
             );
-            audit_attested = audit.has_value();
+            if (audit) {
+              try {
+                const auto manifest = wire::parse_scene_audit_contract(*audit);
+                audit_attested = validate_audit_pages(record->worker.result_directory, manifest, audit_error);
+              } catch (const std::exception &) { audit_attested = false; }
+            }
           }, audit_error);
           if (audit_attested) {
             if (!record->snapshot.worker_result.is_object()) {
@@ -5243,7 +5324,21 @@ namespace offline_sbs {
               max_scene_audit_bytes,
               &audit_hash
             );
-            audit_attested = audit.has_value();
+            if (audit) {
+              try {
+                const auto manifest = wire::parse_scene_audit_contract(*audit);
+                const auto expected = record->snapshot.worker_result.is_object() ?
+                  record->snapshot.worker_result.value("scene_audit_manifest_sha256", std::string {}) : std::string {};
+                if (!expected.empty()) {
+                  // Native acceptance already checked every page before publication.
+                  // Recheck its compact manifest identity without re-reading up to
+                  // 1 GiB under the service lock, or rebinding a changed manifest.
+                  audit_attested = manifest.paged && audit_hash == expected;
+                } else {
+                  audit_attested = validate_audit_pages(record->worker.result_directory, manifest, audit_attestation_error);
+                }
+              } catch (const std::exception &) { audit_attested = false; }
+            }
           }, audit_attestation_error);
           if (audit_attested) {
             if (!record->snapshot.worker_result.is_object()) {
@@ -6363,7 +6458,8 @@ namespace offline_sbs {
   }
 
   scene_audit_reply_t job_service_t::scene_audit(
-    const std::string_view id
+    const std::string_view id,
+    const std::optional<std::uint32_t> page
   ) const {
     std::shared_ptr<impl_t::record_t> record;
     job_state_e state_at_lookup = job_state_e::queued;
@@ -6454,6 +6550,8 @@ namespace offline_sbs {
     std::optional<nlohmann::json> audit;
     std::string read_error;
     std::string observed_audit_sha256;
+    std::string serialized_artifact;
+    bool exact_artifact = false;
     if (!run_bound_user_filesystem_action(
           impl_->config.expected_user_id,
           [&]() {
@@ -6461,7 +6559,8 @@ namespace offline_sbs {
             audit_path,
             read_error,
             max_scene_audit_bytes,
-            &observed_audit_sha256
+            &observed_audit_sha256,
+            nullptr, nullptr, &serialized_artifact
           );
         }, read_error)) {
       return {
@@ -6484,6 +6583,7 @@ namespace offline_sbs {
     }
     try {
       const auto typed_audit = wire::parse_scene_audit_contract(*audit);
+      exact_artifact = typed_audit.paged;
       const bool complete_audit = typed_audit.status == "complete";
       const bool partial_audit = typed_audit.status == "running";
       if (
@@ -6495,13 +6595,28 @@ namespace offline_sbs {
         (
           complete_audit &&
           expected_scene_count &&
-          typed_audit.scenes.size() != *expected_scene_count
+          (typed_audit.paged ? typed_audit.scene_count : typed_audit.scenes.size()) != *expected_scene_count
         )
       ) {
         return {
           .code = error_code_e::io_error,
           .error = "scene audit contract is invalid",
         };
+      }
+      if (page) {
+        if (!typed_audit.paged || *page >= typed_audit.pages.size()) {
+          return {.code = error_code_e::not_found, .error = "scene audit page was not found"};
+        }
+        std::optional<nlohmann::json> page_document;
+        if (!run_bound_user_filesystem_action(impl_->config.expected_user_id, [&]() {
+              page_document = read_audit_page_checked(record->worker.result_directory, typed_audit, *page, read_error, &serialized_artifact);
+            }, read_error) || !page_document) {
+          return {.code = error_code_e::io_error, .error = "scene audit page is unavailable: " + read_error};
+        }
+        audit = std::move(page_document);
+        (*audit)["document_kind"] = "page";
+      } else {
+        (*audit)["document_kind"] = typed_audit.paged ? "manifest" : "inline-audit";
       }
       (*audit)["availability"] = complete_audit ? "complete" : "partial";
       (*audit)["job_terminal_state"] = to_string(state_at_lookup);
@@ -6516,6 +6631,7 @@ namespace offline_sbs {
     return {
       .ok = true,
       .audit = std::move(*audit),
+      .serialized_artifact = exact_artifact ? std::optional {std::move(serialized_artifact)} : std::nullopt,
     };
   }
 
@@ -7079,7 +7195,7 @@ namespace offline_sbs {
     return service->get(id);
   }
 
-  scene_audit_reply_t scene_audit(const std::string_view id) {
+  scene_audit_reply_t scene_audit(const std::string_view id, const std::optional<std::uint32_t> page) {
     std::shared_ptr<job_service_t> service;
     {
       std::lock_guard lock {global_mutex};
@@ -7091,7 +7207,7 @@ namespace offline_sbs {
         .error = "offline SBS job manager is not initialized",
       };
     }
-    return service->scene_audit(id);
+    return service->scene_audit(id, page);
   }
 
   browse_reply_t browse(const browse_request_t &request) {

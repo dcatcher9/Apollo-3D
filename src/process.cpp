@@ -10,6 +10,7 @@
 // standard includes
 #include <algorithm>
 #include <condition_variable>
+#include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <mutex>
@@ -926,6 +927,7 @@ namespace proc {
     _app_id = util::from_view(app.id);
     _app_name = app.name;
     _launch_session = launch_session;
+    _active_launch_session_id = launch_session->id;
 
     launch_session->width = render_width;
     launch_session->height = render_height;
@@ -1521,7 +1523,7 @@ namespace proc {
       }
     }
 
-    if (!hdr_configured_by_recreation && !request_hdr_state(launch_session->enable_hdr, 6s)) {
+    if (_virtual_display && !hdr_configured_by_recreation && !request_hdr_state(launch_session->enable_hdr, 6s)) {
       bool rollback_succeeded = true;
       if (display_mode_changed &&
           VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), old_width, old_height, old_fps) != DISP_CHANGE_SUCCESSFUL) {
@@ -1555,10 +1557,11 @@ namespace proc {
     _launch_session->enable_hdr = launch_session->enable_hdr;
     _launch_session->scale_factor = launch_session->scale_factor;
     _launch_session->sbs_mode = launch_session->sbs_mode;
+    _active_launch_session_id = launch_session->id;
     return 0;
   }
 
-  bool proc_t::live_video_mode_needs_display_change(int width, int height) const {
+  bool proc_t::live_video_mode_needs_display_change(int width, int height, int fps_millihz) const {
     std::unique_lock lock(process_state_mutex, std::try_to_lock);
     if (!lock.owns_lock()) {
       // A display transition is already running. Answering conservatively queues this request
@@ -1570,7 +1573,8 @@ namespace proc {
     if (!_virtual_display || !_launch_session || _virtual_display_gdi_name.empty()) {
       return false;
     }
-    return _launch_session->width != width || _launch_session->height != height;
+    return _launch_session->width != width || _launch_session->height != height ||
+           _launch_session->fps != fps_millihz;
 #else
     return false;
 #endif
@@ -1586,7 +1590,7 @@ namespace proc {
     if (width <= 0 || height <= 0 || fps_millihz <= 0) {
       return live_video_mode_result_e::needs_reconnect;
     }
-    if (!_launch_session || _launch_session->id != expected_launch_session_id ||
+    if (!_launch_session || _active_launch_session_id == 0 || _active_launch_session_id != expected_launch_session_id ||
         _app_id <= 0 || _host_session_id == 0) {
       return live_video_mode_result_e::needs_reconnect;
     }
@@ -1603,10 +1607,9 @@ namespace proc {
     const auto old_fps = _launch_session->fps;
     const bool enable_hdr = _launch_session->enable_hdr;
 
-    // Frame-rate-only and bitrate-only changes are owned entirely by capture pacing and the
-    // encoder. Switching the virtual display's refresh rate for them would stall capture and
-    // invalidate the DXGI factory for no benefit.
-    if (old_width == static_cast<std::uint32_t>(width) && old_height == static_cast<std::uint32_t>(height)) {
+    // A cadence change must update the owned desktop too: a 30 Hz desktop cannot provide
+    // 60 unique composited frames merely because the encoder now requests 60 fps.
+    if (old_width == static_cast<std::uint32_t>(width) && old_height == static_cast<std::uint32_t>(height) && old_fps == fps_millihz) {
       return live_video_mode_result_e::unchanged;
     }
 
@@ -1635,7 +1638,7 @@ namespace proc {
 
     // Windows can renumber \\.\DISPLAYn across a mode change, so re-resolve the GDI name from the
     // stable driver identity while waiting for the new geometry to settle.
-    auto settle_at = [&](std::uint32_t target_width, std::uint32_t target_height) {
+    auto settle_at = [&](std::uint32_t target_width, std::uint32_t target_height, int target_fps_millihz) {
       const auto deadline = std::chrono::steady_clock::now() + 3s;
       int stable_observations = 0;
       while (std::chrono::steady_clock::now() < deadline) {
@@ -1655,7 +1658,8 @@ namespace proc {
         DEVMODEW mode {};
         const bool geometry_ready = VDISPLAY::getDeviceSettings(_virtual_display_gdi_name.c_str(), mode) &&
                                     mode.dmPelsWidth == target_width &&
-                                    mode.dmPelsHeight == target_height;
+                                    mode.dmPelsHeight == target_height &&
+                                    std::abs(static_cast<std::int64_t>(mode.dmDisplayFrequency) * 1000 - target_fps_millihz) < 1000;
         if (geometry_ready) {
           if (++stable_observations >= 3) {
             return true;
@@ -1680,7 +1684,7 @@ namespace proc {
       // changeDisplaySettings() reports the DisplayConfig status, so verify the applied geometry
       // rather than trusting the return code on its own.
       bool restored = VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), old_width, old_height, old_fps) == ERROR_SUCCESS &&
-                      settle_at(old_width, old_height);
+                      settle_at(old_width, old_height, old_fps);
       republish_display();
       if (!request_hdr_state(enable_hdr, 6s)) {
         BOOST_LOG(error) << "The virtual display did not hold its HDR contract after rolling back a live mode change."sv;
@@ -1690,7 +1694,7 @@ namespace proc {
     };
 
     const auto change_status = VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), width, height, fps_millihz);
-    if (change_status != ERROR_SUCCESS || !settle_at(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height))) {
+    if (change_status != ERROR_SUCCESS || !settle_at(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), fps_millihz)) {
       BOOST_LOG(error) << "The virtual display did not settle at the requested live mode "sv
                        << width << 'x' << height << "; rolling back."sv;
       const bool rollback_succeeded = roll_back();
@@ -1932,6 +1936,7 @@ namespace proc {
     _app = {};
     _completed_prep_commands = 0;
     _host_session_id = 0;
+    _active_launch_session_id = 0;
     display_name.clear();
     initial_display.clear();
     _launch_session.reset();

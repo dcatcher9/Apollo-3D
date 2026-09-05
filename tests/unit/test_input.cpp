@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <list>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -63,6 +64,109 @@ namespace {
     return {util::endian::big(move->deltaX), util::endian::big(move->deltaY)};
   }
 }  // namespace
+
+TEST(InputPermissionTests, RevocationPurgesQueuedPressesAndReleasesHeldCategoryBeforeRegrant) {
+  std::map<unsigned, bool> keys {{65, true}, {66, false}};
+  std::array<bool, 6> buttons {false, true, false, false, false, false};
+  std::list<std::vector<std::uint8_t>> packets;
+  packets.push_back(make_input_packet(KEY_DOWN_EVENT_MAGIC, sizeof(NV_KEYBOARD_PACKET)));
+  const auto allowed_move = make_relative_mouse_packet(4, 5);
+  packets.push_back(allowed_move);
+  input::detail::queue_permission_release(packets, crypto::PERM::input_kbd);
+  // An immediate regrant's new press must remain after the release of the old hold.
+  const auto regranted_press = make_input_packet(KEY_DOWN_EVENT_MAGIC, sizeof(NV_KEYBOARD_PACKET));
+  packets.push_back(regranted_press);
+
+  std::vector<unsigned> released_keys;
+  std::vector<unsigned> released_buttons;
+  auto barrier = input::detail::pop_next_batched_packet(packets);
+  ASSERT_TRUE(barrier);
+  const auto revoked = input::detail::release_barrier_permissions(*barrier);
+  ASSERT_TRUE(revoked);
+  EXPECT_FALSE(input::validated_packet_magic(*barrier));
+  input::detail::release_pressed_states(keys, buttons, *revoked,
+    [&](unsigned key) { released_keys.push_back(key); },
+    [&](unsigned button) { released_buttons.push_back(button); });
+  EXPECT_EQ(released_keys, (std::vector<unsigned> {65}));
+  EXPECT_TRUE(released_buttons.empty());
+  EXPECT_FALSE(keys[65]);
+  EXPECT_TRUE(buttons[1]);
+  EXPECT_EQ(input::detail::pop_next_batched_packet(packets), allowed_move);
+  EXPECT_EQ(input::detail::pop_next_batched_packet(packets), regranted_press);
+  EXPECT_TRUE(packets.empty());
+
+  input::detail::queue_permission_release(packets, crypto::PERM::input_mouse);
+  barrier = input::detail::pop_next_batched_packet(packets);
+  input::detail::release_pressed_states(keys, buttons, *input::detail::release_barrier_permissions(*barrier),
+    [&](unsigned key) { released_keys.push_back(key); },
+    [&](unsigned button) { released_buttons.push_back(button); });
+  EXPECT_EQ(released_buttons, (std::vector<unsigned> {1}));
+  EXPECT_FALSE(buttons[1]);
+  EXPECT_EQ(released_keys.size(), 1U);
+}
+
+TEST(InputPermissionTests, ReleaseBarriersPreserveOtherRevocationsAndResetOrdering) {
+  std::list<std::vector<std::uint8_t>> packets;
+  packets.push_back(make_input_packet(SS_TOUCH_MAGIC, sizeof(SS_TOUCH_PACKET)));
+  packets.push_back(make_input_packet(SS_PEN_MAGIC, sizeof(SS_PEN_PACKET)));
+  packets.push_back(make_input_packet(MULTI_CONTROLLER_MAGIC_GEN5, sizeof(NV_MULTI_CONTROLLER_PACKET)));
+  input::detail::queue_permission_release(packets, crypto::PERM::input_touch);
+  input::detail::queue_permission_release(packets, crypto::PERM::input_pen);
+  auto first = input::detail::pop_next_batched_packet(packets);
+  auto second = input::detail::pop_next_batched_packet(packets);
+  EXPECT_EQ(input::detail::release_barrier_permissions(*first), crypto::PERM::input_pen);
+  EXPECT_EQ(input::detail::release_barrier_permissions(*second), crypto::PERM::input_touch);
+  const auto remaining = input::detail::pop_next_batched_packet(packets);
+  EXPECT_EQ(input::detail::packet_permission(*remaining), crypto::PERM::input_controller);
+  packets.emplace_back();
+  EXPECT_TRUE(input::detail::pop_next_batched_packet(packets)->empty());
+}
+
+TEST(InputPermissionTests, RevocationKeepsUnrelatedPoppedKeyUpAndInvalidatesOldMouseAfterRegrant) {
+  input::detail::dispatch_generations_t generations;
+  std::mutex dispatch_mutex;
+  const auto popped_key_up = generations.current(crypto::PERM::input_kbd);
+  const auto popped_mouse_down = generations.current(crypto::PERM::input_mouse);
+  generations.invalidate(crypto::PERM::input_mouse);
+  // Regrant does not rewind generations: the old press remains stale after a quick regrant.
+  bool key_released = false;
+  EXPECT_TRUE(input::detail::dispatch_if_current(dispatch_mutex, popped_key_up,
+    generations.current(crypto::PERM::input_kbd), [&]() { key_released = true; }));
+  EXPECT_TRUE(key_released);
+  EXPECT_FALSE(input::detail::dispatch_if_current(dispatch_mutex, popped_mouse_down,
+    generations.current(crypto::PERM::input_mouse), []() { ADD_FAILURE(); }));
+  const auto new_mouse = generations.current(crypto::PERM::input_mouse);
+  EXPECT_TRUE(input::detail::dispatch_if_current(dispatch_mutex, new_mouse,
+    generations.current(crypto::PERM::input_mouse), []() {}));
+  generations.invalidate(crypto::PERM::_all_inputs);
+  EXPECT_FALSE(input::detail::dispatch_if_current(dispatch_mutex, popped_key_up,
+    generations.current(crypto::PERM::input_kbd), []() { ADD_FAILURE(); }));
+  EXPECT_FALSE(input::detail::dispatch_if_current(dispatch_mutex, new_mouse,
+    generations.current(crypto::PERM::input_mouse), []() { ADD_FAILURE(); }));
+}
+
+TEST(InputPermissionTests, ControllerRevocationNeutralizesBeforeRegrantWithoutLosingArrivalIdentity) {
+  struct gamepad_t {
+    int id;
+    platf::gamepad_state_t gamepad_state;
+  };
+  std::array<gamepad_t, 2> gamepads {{{2, {}}, {-1, {}}}};
+  gamepads[0].gamepad_state.buttonFlags = platf::HOME | platf::BACK;
+  gamepads[0].gamepad_state.lt = 255;
+  std::vector<int> updates;
+  input::detail::neutralize_gamepads(gamepads, [&](int id, const auto &state) {
+    EXPECT_EQ(state.buttonFlags, 0U);
+    EXPECT_EQ(state.lt, 0U);
+    updates.push_back(id);
+  });
+  EXPECT_EQ(updates, (std::vector<int> {2}));
+  EXPECT_EQ(gamepads[0].id, 2);  // A later authorized state report still has its arrival device.
+  EXPECT_EQ(gamepads[1].id, -1);
+  EXPECT_EQ(gamepads[0].gamepad_state.buttonFlags, 0U);
+  input::detail::free_gamepads_before_completion(gamepads, [&](int id) { updates.push_back(id); }, []() {});
+  EXPECT_EQ(updates, (std::vector<int> {2, 2}));
+  EXPECT_EQ(gamepads[0].id, -1);  // Full teardown still frees before completing.
+}
 
 TEST(InputPacketValidationTests, AcceptsEveryHandledFixedPacketAtItsExactSize) {
   const std::array packets {

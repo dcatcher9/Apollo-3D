@@ -207,11 +207,10 @@ namespace rtsp_stream {
       }
     }
 
-    int apply_packet_size_limit(int client_packet_size, int configured_limit) {
-      if (!stream::is_valid_video_packet_size(client_packet_size) || configured_limit == 0 || !stream::is_valid_video_packet_size(configured_limit)) {
-        return client_packet_size;
-      }
-      return std::min(client_packet_size, configured_limit);
+    bool announced_packet_size_allowed(int client_packet_size, int configured_limit) {
+      return stream::is_valid_video_packet_size(client_packet_size) &&
+             (configured_limit == 0 ||
+              (stream::is_valid_video_packet_size(configured_limit) && client_packet_size <= configured_limit));
     }
 
     std::optional<std::string_view> parse_setup_stream_type(std::string_view target) {
@@ -1172,6 +1171,12 @@ namespace rtsp_stream {
     ss << "a=x-ss-general.encryptionSupported:" << encryption_flags_supported << std::endl;
     ss << "a=x-ss-general.encryptionRequested:" << encryption_flags_requested << std::endl;
 
+    // The client must select its final packet/FEC shard size before ANNOUNCE and video init.
+    // Silently shrinking ANNOUNCE on the host corrupts recovered interior video fragments.
+    if (::config::stream.packet_size_limit > 0) {
+      ss << "a=x-ss-video[0].maxPacketSize:" << ::config::stream.packet_size_limit << std::endl;
+    }
+
     // Artemis uses reference-picture invalidation to recover packet loss without a full IDR.
     // The native NVENC session falls back to an IDR if the active codec cannot honor a request.
     ss << "a=x-nv-video[0].refPicInvalidation:1"sv << std::endl;
@@ -1323,14 +1328,12 @@ namespace rtsp_stream {
         respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
         return;
       }
-      config.packetsize = detail::apply_packet_size_limit(*packet_size, ::config::stream.packet_size_limit);
-      if (config.packetsize != *packet_size) {
-        if (config.packetsize < 500) {
-          BOOST_LOG(info) << "Configured packetsize limit is small; reduce bitrate if the stream becomes unstable."sv;
-        }
-        BOOST_LOG(info) << "Applying video packetsize limit: "sv << *packet_size << " -> "sv
-                        << config.packetsize << " bytes"sv;
+      if (!detail::announced_packet_size_allowed(*packet_size, ::config::stream.packet_size_limit)) {
+        BOOST_LOG(warning) << "Client ANNOUNCE exceeds the packet-size maximum advertised by DESCRIBE; update the client to negotiate the host packet-size limit."sv;
+        respond(sock, session, &option, 400, "PACKET SIZE EXCEEDS ADVERTISED MAXIMUM", req->sequenceNumber, {});
+        return;
       }
+      config.packetsize = *packet_size;
       config.minRequiredFecPackets = *min_fec_packets;
       const auto client_features = required_int(detail::announce_int_field::feature_flags, "x-ml-general.featureFlags"sv);
       if (!(client_features & ML_FF_SESSION_ID_V1)) {
