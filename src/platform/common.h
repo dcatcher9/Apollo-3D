@@ -258,6 +258,8 @@ namespace platf {
 
     constexpr caps_t pen_touch = 0x01;  // Pen and touch events
     constexpr caps_t controller_touch = 0x02;  // Controller touch events
+    // Correlated 0x3007/0x3008 atomic presentation v2 (Host SBS + quality).
+    constexpr caps_t atomic_presentation_v2 = 0x20000000;
     // Sunshine 3D encrypted Host-SBS telemetry extension (0x3009/0x300A).
     constexpr caps_t sbs_telemetry = 0x40000000;
   };  // namespace platform_caps

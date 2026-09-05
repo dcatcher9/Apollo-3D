@@ -1097,8 +1097,12 @@ a renderer descendant is not made an independent authority. A positive selection
 same winning HWND and rectangle in complete censuses from two consecutive samples, followed by one
 final identity/geometry recheck. The censuses must be no more than 250 ms apart. The first sample
 remains provisional, so each sample performs at most one complete child census instead of repeating
-synchronous USER32 traversal. Negative census results alone are retained for 100 ms; that can only
-delay acquiring the child optimization and cannot grant child authority.
+synchronous USER32 traversal. When the pre-copy authority is the whole client, the matched-frame
+post-copy race closure revalidates only that exact root identity and geometry and does not perform a
+second child census after the pixels have already been retained. An authenticated structural child
+still requires a complete post-copy census and revalidation, preserving its proof that no competing
+eligible sibling appeared during the copy race. Negative census results alone are retained for 100
+ms; that can only delay acquiring the child optimization and cannot grant child authority.
 
 ### Chromium semantic source
 

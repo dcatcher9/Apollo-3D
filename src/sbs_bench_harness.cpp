@@ -14,19 +14,24 @@
   // standard includes
   #include <algorithm>
   #include <array>
+  #include <atomic>
   #include <bit>
   #include <cctype>
+  #include <charconv>
   #include <chrono>
   #include <cmath>
+  #include <condition_variable>
   #include <cstring>
   #include <filesystem>
   #include <fstream>
+  #include <functional>
   #include <iomanip>
   #include <iostream>
   #include <iterator>
   #include <limits>
   #include <locale>
   #include <memory>
+  #include <mutex>
   #include <optional>
   #include <sstream>
   #include <stdexcept>
@@ -53,6 +58,7 @@
   #include "host_sbs_v2_geometry.h"
   #include "logging.h"
   #include "offline_sbs_contract.h"
+  #include "offline_sbs_worker.h"
   #include "offline_sbs_wire_contract.h"
   #include "platform/windows/host_sbs_v2_renderer.h"
   #include "prod_zipdepth_convex2x.h"
@@ -166,15 +172,33 @@ namespace sbs_bench {
     }
 
     bool read_file_snapshot(const fs::path &path, std::string &bytes) {
-      std::ifstream stream(path, std::ios::binary);
+      std::ifstream stream(path, std::ios::binary | std::ios::ate);
       if (!stream) {
         return false;
       }
-      bytes.assign(
-        std::istreambuf_iterator<char>(stream),
-        std::istreambuf_iterator<char>()
-      );
-      return !bytes.empty() && !stream.bad();
+      const auto end = static_cast<std::streamoff>(stream.tellg());
+      if (end <= 0 ||
+          static_cast<std::uintmax_t>(end) >
+            std::numeric_limits<std::size_t>::max() ||
+          static_cast<std::uintmax_t>(end) >
+            static_cast<std::uintmax_t>(
+              std::numeric_limits<std::streamsize>::max()
+            )) {
+        return false;
+      }
+      bytes.resize(static_cast<std::size_t>(end));
+      stream.seekg(0, std::ios::beg);
+      if (!stream ||
+          !stream.read(bytes.data(), static_cast<std::streamsize>(bytes.size()))) {
+        bytes.clear();
+        return false;
+      }
+      char trailing = 0;
+      if (stream.read(&trailing, 1) || !stream.eof()) {
+        bytes.clear();
+        return false;
+      }
+      return true;
     }
 
     uint16_t float_to_half(float value) {
@@ -330,19 +354,29 @@ namespace sbs_bench {
     }
 
     bool load_pfm(std::string_view bytes, scrgb_image &out) {
-      std::istringstream stream(
-        std::string(bytes),
-        std::ios::in | std::ios::binary
-      );
+      class readonly_memory_streambuf_t final: public std::streambuf {
+      public:
+        explicit readonly_memory_streambuf_t(const std::string_view source) {
+          auto *begin = source.empty() ?
+                          &empty_ : const_cast<char *>(source.data());
+          setg(begin, begin, begin + source.size());
+        }
+
+      private:
+        char empty_ = 0;
+      } buffer {bytes};
+      std::istream stream {&buffer};
       return load_pfm_stream(stream, out);
     }
 
     bool save_pfm(const fs::path &path, UINT width, UINT height,
-                  const D3D11_MAPPED_SUBRESOURCE &mapped) {
+                  const std::vector<uint16_t> &rgba16) {
       static_assert(std::endian::native == std::endian::little,
                     "PFM interchange requires a little-endian host");
-      if (!mapped.pData ||
-          mapped.RowPitch < static_cast<size_t>(width) * 4u * sizeof(uint16_t)) {
+      const auto pixels = static_cast<std::uint64_t>(width) * height;
+      if (width == 0u || height == 0u ||
+          pixels > std::numeric_limits<std::size_t>::max() / 4u ||
+          rgba16.size() != static_cast<std::size_t>(pixels) * 4u) {
         return false;
       }
 
@@ -361,10 +395,8 @@ namespace sbs_bench {
       std::vector<float> row(static_cast<size_t>(width) * 3u);
       for (UINT stored_y = 0; stored_y < height; ++stored_y) {
         const UINT top_down_y = height - 1u - stored_y;
-        const auto *src = reinterpret_cast<const uint16_t *>(
-          static_cast<const uint8_t *>(mapped.pData) +
-          static_cast<size_t>(top_down_y) * mapped.RowPitch
-        );
+        const auto *src = rgba16.data() +
+                          static_cast<size_t>(top_down_y) * width * 4u;
         for (UINT x = 0; x < width; ++x) {
           for (size_t channel = 0; channel < 3u; ++channel) {
             const float value = half_to_float(src[static_cast<size_t>(x) * 4u + channel]);
@@ -394,8 +426,17 @@ namespace sbs_bench {
       return true;
     }
 
+    enum class atomic_write_mode_e {
+      durable,
+      transient,
+    };
+
     template<class Writer>
-    bool publish_file_atomically(const fs::path &final_path, Writer &&writer) {
+    bool publish_file_atomically(
+      const fs::path &final_path,
+      Writer &&writer,
+      const atomic_write_mode_e mode = atomic_write_mode_e::durable
+    ) {
       fs::path temporary_path = final_path;
       temporary_path += ".part";
       std::error_code ec;
@@ -407,14 +448,16 @@ namespace sbs_bench {
       // The temporary name is a sibling of the final name, guaranteeing the same volume.
       // MOVEFILE_REPLACE_EXISTING keeps progress replacement and reruns atomic on Windows.
       // A polling reader or filesystem filter can transiently deny replacement after the writer
-      // has already closed the durable .part file. Retry only Windows sharing/locking failures;
+      // has already closed the complete .part file. Retry only Windows sharing/locking failures;
       // permanent path, ACL, and volume errors still fail immediately.
       constexpr int atomic_replace_attempts = 50;
       for (int attempt = 0; attempt < atomic_replace_attempts; ++attempt) {
+        const DWORD move_flags = MOVEFILE_REPLACE_EXISTING |
+          (mode == atomic_write_mode_e::durable ? MOVEFILE_WRITE_THROUGH : 0);
         if (MoveFileExW(
               temporary_path.wstring().c_str(),
               final_path.wstring().c_str(),
-              MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+              move_flags
             )) {
           return true;
         }
@@ -432,14 +475,20 @@ namespace sbs_bench {
       return false;
     }
 
-    bool write_bytes_durably(const fs::path &path, const void *data, std::size_t size) {
+    bool write_bytes(
+      const fs::path &path,
+      const void *data,
+      const std::size_t size,
+      const atomic_write_mode_e mode = atomic_write_mode_e::durable
+    ) {
+      const bool durable = mode == atomic_write_mode_e::durable;
       HANDLE handle = CreateFileW(
         path.wstring().c_str(),
         GENERIC_WRITE,
         0,
         nullptr,
         CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
+        FILE_ATTRIBUTE_NORMAL | (durable ? FILE_FLAG_WRITE_THROUGH : 0),
         nullptr
       );
       if (handle == INVALID_HANDLE_VALUE) {
@@ -460,8 +509,8 @@ namespace sbs_bench {
         }
         offset += written;
       }
-      if (succeeded && !FlushFileBuffers(handle)) {
-        succeeded = false;
+      if (succeeded && durable) {
+        succeeded = FlushFileBuffers(handle);
       }
       if (!CloseHandle(handle)) {
         succeeded = false;
@@ -477,7 +526,7 @@ namespace sbs_bench {
                                  const nlohmann::ordered_json &value) {
       const std::string serialized = value.dump(2) + "\n";
       return publish_file_atomically(path, [&](const fs::path &temporary_path) {
-        return write_bytes_durably(
+        return write_bytes(
           temporary_path,
           serialized.data(),
           serialized.size()
@@ -638,6 +687,141 @@ namespace sbs_bench {
       HANDLE handle_ = INVALID_HANDLE_VALUE;
     };
 
+    template<class Item>
+    class ordered_single_slot_pipeline_t {
+    public:
+      using consumer_t =
+        std::function<void(Item &&, const std::atomic_bool &)>;
+
+      explicit ordered_single_slot_pipeline_t(consumer_t consumer):
+          consumer_(std::move(consumer)) {
+        // Start only after every synchronization member has been constructed.
+        thread_ = std::thread([this] {
+            run();
+          });
+      }
+
+      ordered_single_slot_pipeline_t(
+        const ordered_single_slot_pipeline_t &
+      ) = delete;
+      ordered_single_slot_pipeline_t &operator=(
+        const ordered_single_slot_pipeline_t &
+      ) = delete;
+
+      ~ordered_single_slot_pipeline_t() {
+        abort();
+      }
+
+      void submit(Item item) {
+        std::unique_lock lock(mutex_);
+        if (!condition_.wait_for(
+              lock,
+              std::chrono::minutes(5),
+              [&] {
+                return error_ ||
+                       stopping_.load(std::memory_order_acquire) ||
+                       (!active_ && !pending_);
+              }
+            )) {
+          throw std::runtime_error(
+            "timed out waiting for the ordered post-render slot"
+          );
+        }
+        rethrow_locked();
+        if (stopping_.load(std::memory_order_relaxed) || input_finished_) {
+          throw std::runtime_error(
+            "ordered post-render pipeline is not accepting frames"
+          );
+        }
+        pending_.emplace(std::move(item));
+        condition_.notify_all();
+      }
+
+      void finish() {
+        {
+          std::lock_guard lock(mutex_);
+          input_finished_ = true;
+          condition_.notify_all();
+        }
+        if (thread_.joinable()) {
+          thread_.join();
+        }
+        std::lock_guard lock(mutex_);
+        rethrow_locked();
+        if (pending_ || active_) {
+          throw std::runtime_error(
+            "ordered post-render pipeline did not drain"
+          );
+        }
+      }
+
+      void abort() noexcept {
+        stopping_.store(true, std::memory_order_release);
+        {
+          std::lock_guard lock(mutex_);
+          pending_.reset();
+          condition_.notify_all();
+        }
+        if (thread_.joinable()) {
+          thread_.join();
+        }
+      }
+
+    private:
+      void rethrow_locked() const {
+        if (error_) {
+          std::rethrow_exception(error_);
+        }
+      }
+
+      void run() noexcept {
+        for (;;) {
+          std::optional<Item> item;
+          {
+            std::unique_lock lock(mutex_);
+            condition_.wait(lock, [&] {
+              return stopping_.load(std::memory_order_acquire) || pending_ ||
+                     input_finished_;
+            });
+            if (stopping_.load(std::memory_order_relaxed)) {
+              return;
+            }
+            if (!pending_) {
+              return;
+            }
+            item.emplace(std::move(*pending_));
+            pending_.reset();
+            active_ = true;
+          }
+          try {
+            consumer_(std::move(*item), stopping_);
+          } catch (...) {
+            std::lock_guard lock(mutex_);
+            error_ = std::current_exception();
+            active_ = false;
+            stopping_.store(true, std::memory_order_release);
+            condition_.notify_all();
+            return;
+          }
+          {
+            std::lock_guard lock(mutex_);
+            active_ = false;
+            condition_.notify_all();
+          }
+        }
+      }
+
+      consumer_t consumer_;
+      std::thread thread_;
+      mutable std::mutex mutex_;
+      std::condition_variable condition_;
+      std::optional<Item> pending_;
+      std::exception_ptr error_;
+      std::atomic_bool stopping_ {false};
+      bool active_ = false;
+      bool input_finished_ = false;
+    };
+
     follow_wait_result_t wait_for_follow_frame(const fs::path &directory,
                                                std::string_view format,
                                                std::size_t sequence,
@@ -793,6 +977,55 @@ namespace sbs_bench {
       }
     }
 
+    bool wait_for_consumed_follow_source(
+      const fs::path &source,
+      const fs::path &producer_failure,
+      follow_directory_watcher_t &watcher,
+      const std::atomic_bool &stopping,
+      std::string &error
+    ) {
+      for (;;) {
+        if (stopping.load(std::memory_order_acquire)) {
+          error = "post-render pipeline was stopped";
+          return false;
+        }
+        std::error_code ec;
+        const bool source_exists = fs::exists(source, ec);
+        if (ec) {
+          error = "cannot inspect acknowledged follow source";
+          return false;
+        }
+        if (!source_exists) {
+          return true;
+        }
+        if (!fs::is_regular_file(source, ec) || ec) {
+          error = "acknowledged follow source changed identity";
+          return false;
+        }
+        ec.clear();
+        if (fs::exists(producer_failure, ec)) {
+          if (ec) {
+            error = "cannot inspect producer failure sentinel";
+            return false;
+          }
+          std::string producer_error;
+          if (!read_producer_failure(producer_failure, producer_error)) {
+            error = producer_error;
+            return false;
+          }
+          error = "producer failed: " + producer_error;
+          return false;
+        }
+        if (ec) {
+          error = "cannot inspect producer failure sentinel";
+          return false;
+        }
+        if (!watcher.wait(error)) {
+          return false;
+        }
+      }
+    }
+
     bool publish_follow_progress(const fs::path &path,
                                  std::string_view status,
                                  std::string_view input_format,
@@ -803,12 +1036,14 @@ namespace sbs_bench {
                                  std::uint32_t sbs_width,
                                  std::uint32_t sbs_height,
                                  std::optional<std::size_t> producer_frame_count) {
-      return publish_file_atomically(path, [&](const fs::path &temporary_path) {
-        std::ofstream stream(temporary_path);
-        if (!stream) {
-          return false;
-        }
-        stream << "{\n"
+      return publish_file_atomically(
+        path,
+        [&](const fs::path &temporary_path) {
+          std::ofstream stream(temporary_path);
+          if (!stream) {
+            return false;
+          }
+          stream << "{\n"
                << "  \"schema\": 2,\n"
                << "  \"status\": " << json_string(status) << ",\n"
                << "  \"input_format\": " << json_string(input_format) << ",\n"
@@ -839,15 +1074,17 @@ namespace sbs_bench {
                << "  \"sbs_width\": " << sbs_width << ",\n"
                << "  \"sbs_height\": " << sbs_height << ",\n"
                << "  \"producer_frame_count\": ";
-        if (producer_frame_count) {
-          stream << *producer_frame_count;
-        } else {
-          stream << "null";
-        }
-        stream << "\n}\n";
-        stream.flush();
-        return stream.good();
-      });
+          if (producer_frame_count) {
+            stream << *producer_frame_count;
+          } else {
+            stream << "null";
+          }
+          stream << "\n}\n";
+          stream.flush();
+          return stream.good();
+        },
+        atomic_write_mode_e::transient
+      );
     }
 
     float srgb_to_linear(float value) {
@@ -967,16 +1204,39 @@ namespace sbs_bench {
       return decode_wic_bgra(dec.Get(), out);
     }
 
-    bool save_png(const fs::path &path, UINT w, UINT h, const std::vector<uint8_t> &bgra) {
+    bool read_follow_source_snapshot(const fs::path &path,
+                                     std::string &snapshot) {
+      // A directory-change notification can wake this process while the producer's successful
+      // rename is still returning, and filesystem filters can briefly hold the new final name.
+      // Retry only this already-published immutable filename; never wait before the first attempt
+      // and never advance to a future sequence. A successfully read but malformed snapshot is
+      // immutable producer corruption, so the caller parses it exactly once and fails normally.
+      constexpr int follow_snapshot_attempts = 50;
+      for (int attempt = 0; attempt < follow_snapshot_attempts; ++attempt) {
+        if (read_file_snapshot(path, snapshot)) {
+          return true;
+        }
+        if (attempt + 1 < follow_snapshot_attempts) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+      }
+      return false;
+    }
+
+    bool save_png(IWICImagingFactory *factory, const fs::path &path,
+                  UINT w, UINT h, const std::vector<uint8_t> &bgra) {
+      if (!factory) {
+        return false;
+      }
       ComPtr<IWICStream> stream;
-      if (FAILED(g_wic->CreateStream(&stream))) {
+      if (FAILED(factory->CreateStream(&stream))) {
         return false;
       }
       if (FAILED(stream->InitializeFromFilename(path.wstring().c_str(), GENERIC_WRITE))) {
         return false;
       }
       ComPtr<IWICBitmapEncoder> enc;
-      if (FAILED(g_wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, &enc))) {
+      if (FAILED(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &enc))) {
         return false;
       }
       if (FAILED(enc->Initialize(stream.Get(), WICBitmapEncoderNoCache))) {
@@ -997,6 +1257,11 @@ namespace sbs_bench {
         return false;
       }
       return SUCCEEDED(fe->Commit()) && SUCCEEDED(enc->Commit());
+    }
+
+    bool save_png(const fs::path &path, UINT w, UINT h,
+                  const std::vector<uint8_t> &bgra) {
+      return save_png(g_wic.Get(), path, w, h, bgra);
     }
 
     bool save_gray16_png(const fs::path &path, UINT w, UINT h, const std::vector<uint16_t> &gray) {
@@ -1336,6 +1601,58 @@ namespace sbs_bench {
     }
 
     using adaptive_state_words_t = sbs_adaptive_state::words_t;
+
+    class serializer_wic_context_t {
+    public:
+      serializer_wic_context_t():
+          apartment_(CoInitializeEx(nullptr, COINIT_MULTITHREADED)) {
+        if (SUCCEEDED(apartment_)) {
+          CoCreateInstance(
+            CLSID_WICImagingFactory,
+            nullptr,
+            CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(&factory_)
+          );
+        }
+      }
+
+      serializer_wic_context_t(const serializer_wic_context_t &) = delete;
+      serializer_wic_context_t &operator=(
+        const serializer_wic_context_t &
+      ) = delete;
+
+      ~serializer_wic_context_t() {
+        // Release every apartment-owned interface before balancing the
+        // successful CoInitializeEx on the persistent serializer thread.
+        factory_.Reset();
+        if (SUCCEEDED(apartment_)) {
+          CoUninitialize();
+        }
+      }
+
+      IWICImagingFactory *factory() const noexcept {
+        return factory_.Get();
+      }
+
+    private:
+      HRESULT apartment_ = E_FAIL;
+      ComPtr<IWICImagingFactory> factory_;
+    };
+
+    struct post_render_frame_t {
+      std::size_t processed_count = 0;
+      std::size_t source_index = 0;
+      std::string output_id;
+      fs::path previous_source;
+      fs::path output_path;
+      UINT width = 0;
+      UINT height = 0;
+      bool pfm = false;
+      std::vector<std::uint8_t> bgra;
+      std::vector<std::uint16_t> rgba16;
+      adaptive_state_words_t adaptive_state {};
+      std::optional<std::size_t> producer_frame_count;
+    };
     using render_state_words_t = models::depth_coordinate_v2::state_words_t;
 
     bool valid_adaptive_state_words(const adaptive_state_words_t &words) {
@@ -1387,57 +1704,24 @@ namespace sbs_bench {
       adaptive_state_words_t words {};
     };
 
+    bool read_adaptive_state(ID3D11Device *dev, ID3D11DeviceContext *ctx,
+                             ID3D11ShaderResourceView *srv,
+                             ComPtr<ID3D11Buffer> &stage_cache,
+                             adaptive_state_words_t &words);
+
     // Benchmark-only state trace. This readback is deliberately confined to the synchronous
     // offline harness; the live capture loop must remain free of staging copies and Map calls.
     bool read_cut_state(ID3D11Device *dev, ID3D11DeviceContext *ctx,
                         ID3D11ShaderResourceView *srv,
                         ComPtr<ID3D11Buffer> &stage_cache,
                         adaptive_state_words_t &state_words) {
-      if (!srv) {
-        return false;
-      }
-      ComPtr<ID3D11Resource> resource;
-      srv->GetResource(&resource);
-      ComPtr<ID3D11Buffer> buffer;
-      if (FAILED(resource.As(&buffer))) {
-        return false;
-      }
-      D3D11_BUFFER_DESC desc {};
-      buffer->GetDesc(&desc);
-      if (desc.ByteWidth < sbs_adaptive_state::word_count * sizeof(std::uint32_t) ||
-          desc.StructureByteStride != 4 * sizeof(float)) {
-        return false;
-      }
-      bool recreate = !stage_cache;
-      if (!recreate) {
-        D3D11_BUFFER_DESC stage_desc {};
-        stage_cache->GetDesc(&stage_desc);
-        recreate = stage_desc.ByteWidth != desc.ByteWidth;
-      }
-      if (recreate) {
-        D3D11_BUFFER_DESC stage_desc = desc;
-        stage_desc.Usage = D3D11_USAGE_STAGING;
-        stage_desc.BindFlags = 0;
-        stage_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        stage_desc.MiscFlags = 0;
-        stage_cache.Reset();
-        if (FAILED(dev->CreateBuffer(&stage_desc, nullptr, &stage_cache))) {
-          return false;
-        }
-      }
-      ctx->CopyResource(stage_cache.Get(), buffer.Get());
-      D3D11_MAPPED_SUBRESOURCE mapped {};
-      if (FAILED(ctx->Map(stage_cache.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
-        return false;
-      }
-      const auto *words = static_cast<const std::uint32_t *>(mapped.pData);
-      std::memcpy(
-        state_words.data(),
-        words,
-        state_words.size() * sizeof(std::uint32_t)
+      return read_adaptive_state(
+        dev,
+        ctx,
+        srv,
+        stage_cache,
+        state_words
       );
-      ctx->Unmap(stage_cache.Get(), 0);
-      return valid_adaptive_state_words(state_words);
     }
 
     std::string scene_cache_frame_stem(std::size_t sequence) {
@@ -1725,7 +2009,7 @@ namespace sbs_bench {
               });
       return valid &&
              publish_file_atomically(path, [&](const fs::path &temporary_path) {
-               return write_bytes_durably(
+               return write_bytes(
                  temporary_path,
                  values.data(),
                  values.size() * sizeof(float)
@@ -1790,7 +2074,7 @@ namespace sbs_bench {
         return false;
       }
       return publish_file_atomically(path, [&](const fs::path &temporary_path) {
-        return write_bytes_durably(temporary_path, words.data(), sizeof(words));
+        return write_bytes(temporary_path, words.data(), sizeof(words));
       });
     }
 
@@ -1883,7 +2167,7 @@ namespace sbs_bench {
         return false;
       }
       return publish_file_atomically(path, [&](const fs::path &temporary_path) {
-        return write_bytes_durably(
+        return write_bytes(
           temporary_path,
           values.data(),
           values.size() * sizeof(float)
@@ -2077,11 +2361,12 @@ namespace sbs_bench {
 
     // Whole-clip modes consume the complete append-only state. Slots 16..19 are uint bit
     // patterns, not floats; retaining the raw words prevents counter precision loss and avoids
-    // treating a large counter's bit pattern as a NaN.
-    bool read_adaptive_state(ID3D11Device *dev, ID3D11DeviceContext *ctx,
-                             ID3D11ShaderResourceView *srv,
-                             ComPtr<ID3D11Buffer> &stage_cache,
-                             adaptive_state_words_t &words) {
+    // treating a large counter's bit pattern as a NaN. Conversion can queue this copy before its
+    // production draw and map it after the later SBS readback has already synchronized the GPU.
+    bool queue_adaptive_state_readback(ID3D11Device *dev,
+                                       ID3D11DeviceContext *ctx,
+                                       ID3D11ShaderResourceView *srv,
+                                       ComPtr<ID3D11Buffer> &stage_cache) {
       if (!srv) {
         return false;
       }
@@ -2093,7 +2378,8 @@ namespace sbs_bench {
       }
       D3D11_BUFFER_DESC desc {};
       buffer->GetDesc(&desc);
-      if (desc.ByteWidth < words.size() * sizeof(std::uint32_t) ||
+      if (desc.ByteWidth <
+            sbs_adaptive_state::word_count * sizeof(std::uint32_t) ||
           desc.StructureByteStride != 4 * sizeof(float)) {
         return false;
       }
@@ -2115,13 +2401,59 @@ namespace sbs_bench {
         }
       }
       ctx->CopyResource(stage_cache.Get(), buffer.Get());
+      return true;
+    }
+
+    bool save_pfm(const fs::path &path, UINT width, UINT height,
+                  const D3D11_MAPPED_SUBRESOURCE &mapped) {
+      if (!mapped.pData ||
+          mapped.RowPitch < static_cast<size_t>(width) * 4u * sizeof(uint16_t)) {
+        return false;
+      }
+      const auto pixels = static_cast<std::uint64_t>(width) * height;
+      if (pixels > std::numeric_limits<std::size_t>::max() / 4u) {
+        return false;
+      }
+      std::vector<uint16_t> rgba16(static_cast<std::size_t>(pixels) * 4u);
+      for (UINT y = 0; y < height; ++y) {
+        std::memcpy(
+          rgba16.data() + static_cast<std::size_t>(y) * width * 4u,
+          static_cast<const std::uint8_t *>(mapped.pData) +
+            static_cast<std::size_t>(y) * mapped.RowPitch,
+          static_cast<std::size_t>(width) * 4u * sizeof(std::uint16_t)
+        );
+      }
+      return save_pfm(path, width, height, rgba16);
+    }
+
+    bool map_adaptive_state_readback(ID3D11DeviceContext *ctx,
+                                     ID3D11Buffer *stage,
+                                     adaptive_state_words_t &words) {
+      if (!stage) {
+        return false;
+      }
+      D3D11_BUFFER_DESC desc {};
+      stage->GetDesc(&desc);
+      if (desc.ByteWidth < words.size() * sizeof(std::uint32_t) ||
+          desc.Usage != D3D11_USAGE_STAGING ||
+          (desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ) == 0u) {
+        return false;
+      }
       D3D11_MAPPED_SUBRESOURCE mapped {};
-      if (FAILED(ctx->Map(stage_cache.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+      if (FAILED(ctx->Map(stage, 0, D3D11_MAP_READ, 0, &mapped))) {
         return false;
       }
       std::memcpy(words.data(), mapped.pData, words.size() * sizeof(std::uint32_t));
-      ctx->Unmap(stage_cache.Get(), 0);
+      ctx->Unmap(stage, 0);
       return valid_adaptive_state_words(words);
+    }
+
+    bool read_adaptive_state(ID3D11Device *dev, ID3D11DeviceContext *ctx,
+                             ID3D11ShaderResourceView *srv,
+                             ComPtr<ID3D11Buffer> &stage_cache,
+                             adaptive_state_words_t &words) {
+      return queue_adaptive_state_readback(dev, ctx, srv, stage_cache) &&
+             map_adaptive_state_readback(ctx, stage_cache.Get(), words);
     }
 
     bool read_gpu_trace_ring(
@@ -2535,13 +2867,18 @@ namespace sbs_bench {
         return false;
       }
       const auto bytes = text.str();
-      return publish_file_atomically(path, [&](const fs::path &temporary) {
-        return write_bytes_durably(
-          temporary,
-          bytes.data(),
-          bytes.size()
-        );
-      });
+      return publish_file_atomically(
+        path,
+        [&](const fs::path &temporary) {
+          return write_bytes(
+            temporary,
+            bytes.data(),
+            bytes.size(),
+            atomic_write_mode_e::transient
+          );
+        },
+        atomic_write_mode_e::transient
+      );
     }
 
     bool write_cut_state_trace(
@@ -2721,6 +3058,8 @@ namespace sbs_bench {
       int max_width = 0;  // 0 -> use config max_encode_width
       int limit = 0;  // 0 -> all
       int output_every = 1;  // process every input for temporal state; dump only every Nth
+      // Worker-owned safety cap. Zero is reserved for standalone/non-conversion runs.
+      std::uint64_t transient_raster_hard_cap_bytes = 0;
     };
 
     bool parse_opts(int argc, char **argv, opts &o) {
@@ -2797,6 +3136,21 @@ namespace sbs_bench {
           o.limit = std::stoi(next("--limit"));
         } else if (a == "--output-every") {
           o.output_every = std::max(1, std::stoi(next("--output-every")));
+        } else if (a == "--transient-raster-hard-cap-bytes") {
+          const auto text = next("--transient-raster-hard-cap-bytes");
+          const auto *begin = text.data();
+          const auto *end = begin + text.size();
+          const auto parsed = std::from_chars(
+            begin,
+            end,
+            o.transient_raster_hard_cap_bytes
+          );
+          if (begin == end || parsed.ec != std::errc {} || parsed.ptr != end ||
+              o.transient_raster_hard_cap_bytes == 0) {
+            BOOST_LOG(error)
+              << "sbs-bench: --transient-raster-hard-cap-bytes must be a positive uint64";
+            return false;
+          }
         } else if (a == "--direct-parallax-root") {
           o.direct_parallax_root = next("--direct-parallax-root");
         } else if (a == "--depth-coordinate-v2-manifest") {
@@ -2913,6 +3267,15 @@ namespace sbs_bench {
           << "sbs-bench: --bounded-adaptive-state requires adaptive/conversion --follow";
         return false;
       }
+      if (
+        o.transient_raster_hard_cap_bytes != 0 &&
+        (!o.follow || o.artifacts != artifact_mode_e::conversion ||
+         !o.bounded_adaptive_state)
+      ) {
+        BOOST_LOG(error)
+          << "sbs-bench: --transient-raster-hard-cap-bytes requires bounded conversion --follow";
+        return false;
+      }
       if (!(o.output_scale > 0.0 && o.output_scale <= 4.0)) {
         BOOST_LOG(error) << "sbs-bench: --output-scale must be greater than 0 and at most 4";
         return false;
@@ -3007,6 +3370,7 @@ namespace sbs_bench {
           {"render_skips_tensorrt", true},
           {"direct_conversion_follow", true},
           {"direct_conversion_single_pass", true},
+          {"transient_raster_cap_preflight", true},
           {"whole_clip_inference_attestation", {
             {"depth_inference_enabled", true},
             {"scheduled_depth_update_count", true},
@@ -3607,6 +3971,7 @@ namespace sbs_bench {
     UINT source_width = 0;
     UINT source_height = 0;
     std::optional<detail::resolved_sbs_geometry> resolved_output_geometry;
+    bool conversion_raster_budget_admitted = false;
     // Match the depth-override clip layout so a root may hold several clips without filename
     // collisions. External direct replay reads parallax_<id> plus order_<id>.
     const fs::path direct_geometry_root = fs::path(o.direct_parallax_root);
@@ -3654,6 +4019,128 @@ namespace sbs_bench {
         return 10;
       }
     }
+    const bool asynchronous_follow_conversion =
+      o.follow && !replay_mode &&
+      o.artifacts == artifact_mode_e::conversion &&
+      o.bounded_adaptive_state;
+    std::unique_ptr<follow_directory_watcher_t> consumption_watcher;
+    std::unique_ptr<ordered_single_slot_pipeline_t<post_render_frame_t>>
+      post_render_pipeline;
+    if (asynchronous_follow_conversion) {
+      try {
+        consumption_watcher =
+          std::make_unique<follow_directory_watcher_t>(o.frames);
+        post_render_pipeline = std::make_unique<
+          ordered_single_slot_pipeline_t<post_render_frame_t>
+        >([&](post_render_frame_t &&frame, const std::atomic_bool &stopping) {
+          if (!frame.previous_source.empty()) {
+            std::string release_error;
+            if (!wait_for_consumed_follow_source(
+                  frame.previous_source,
+                  fs::path(o.frames) / ".producer-failed.json",
+                  *consumption_watcher,
+                  stopping,
+                  release_error
+                )) {
+              throw std::runtime_error(release_error);
+            }
+          }
+          if (stopping.load(std::memory_order_acquire)) {
+            throw std::runtime_error("post-render pipeline was stopped");
+          }
+
+          bool frame_written = false;
+          if (frame.pfm) {
+            frame_written = publish_file_atomically(
+              frame.output_path,
+              [&](const fs::path &temporary_path) {
+                return save_pfm(
+                  temporary_path,
+                  frame.width,
+                  frame.height,
+                  frame.rgba16
+                );
+              },
+              atomic_write_mode_e::transient
+            );
+          } else {
+            // This callback always runs on the persistent ordered serializer
+            // thread. Initialize that apartment and its WIC factory once, then
+            // reuse both for every SDR frame until the thread exits.
+            thread_local serializer_wic_context_t writer_wic;
+            if (writer_wic.factory()) {
+              frame_written = publish_file_atomically(
+                frame.output_path,
+                [&](const fs::path &temporary_path) {
+                  return save_png(
+                    writer_wic.factory(),
+                    temporary_path,
+                    frame.width,
+                    frame.height,
+                    frame.bgra
+                  );
+                },
+                atomic_write_mode_e::transient
+              );
+            }
+          }
+          if (!frame_written) {
+            throw std::runtime_error(
+              "cannot serialize required SBS frame " + frame.output_id
+            );
+          }
+          if (stopping.load(std::memory_order_acquire)) {
+            throw std::runtime_error("post-render pipeline was stopped");
+          }
+
+          const auto write_state = [&](std::ostream &out) {
+            return write_adaptive_state_frame(
+              out,
+              frame.output_id,
+              frame.source_index,
+              true,
+              frame.adaptive_state
+            );
+          };
+          if (!publish_adaptive_state_snapshot(
+                adaptive_state_frame_path,
+                write_state
+              )) {
+            throw std::runtime_error(
+              "cannot publish adaptive state for frame " + frame.output_id
+            );
+          }
+          ++adaptive_state_frame_count;
+          if (!publish_follow_progress(
+                follow_progress_path,
+                "running",
+                o.follow_format,
+                artifact_mode_name(o.artifacts),
+                follow_first_sequence,
+                frame.processed_count,
+                static_cast<int>(frame.processed_count),
+                frame.width,
+                frame.height,
+                frame.producer_frame_count
+              )) {
+            throw std::runtime_error(
+              "cannot acknowledge conversion follow frame " +
+              frame.output_id
+            );
+          }
+        });
+      } catch (const std::exception &exception) {
+        BOOST_LOG(error) << "sbs-bench: cannot start bounded post-render pipeline: "
+                         << exception.what();
+        return 10;
+      }
+    }
+    // Whole-clip input geometry and color format are immutable. Keep one upload texture/SRV for
+    // the ordered pass instead of making the D3D runtime allocate and retire both objects for
+    // every frame. The next upload occurs only after this frame's inference, draw, and readback
+    // have completed, so a single resource has no cross-frame consumer hazard.
+    ComPtr<ID3D11Texture2D> in_tex;
+    ComPtr<ID3D11ShaderResourceView> in_srv;
     for (size_t fi = 0;; fi++) {
       const std::size_t global_sequence =
         replay_mode ? replay_first_sequence + fi : fi + 1u;
@@ -3688,6 +4175,7 @@ namespace sbs_bench {
       rgba_image img;
       scrgb_image hdr_img;
       std::string exact_source_sha256;
+      std::uint64_t source_raster_bytes = 0;
       bool loaded = false;
       const bool snapshot_source = o.follow || depth_coordinate_v2_gpu_mode;
       if (snapshot_source) {
@@ -3697,14 +4185,24 @@ namespace sbs_bench {
         // complete BMP is already readable. Direct replay additionally hashes this exact byte
         // snapshot so authentication and the uploaded SRV cannot diverge.
         std::string exact_source_snapshot;
-        loaded = read_file_snapshot(current_frame, exact_source_snapshot);
-        if (loaded && depth_coordinate_v2_gpu_mode) {
-          exact_source_sha256 = sha256_hex(exact_source_snapshot);
+        if (o.follow) {
+          loaded = read_follow_source_snapshot(
+            current_frame,
+            exact_source_snapshot
+          );
+        } else {
+          loaded = read_file_snapshot(current_frame, exact_source_snapshot);
         }
+        source_raster_bytes = static_cast<std::uint64_t>(
+          exact_source_snapshot.size()
+        );
         if (loaded) {
           loaded = pfm_input ?
                      load_pfm(std::string_view(exact_source_snapshot), hdr_img) :
                      load_png(std::string_view(exact_source_snapshot), img);
+        }
+        if (loaded && depth_coordinate_v2_gpu_mode) {
+          exact_source_sha256 = sha256_hex(exact_source_snapshot);
         }
       } else {
         loaded = pfm_input ?
@@ -3767,22 +4265,40 @@ namespace sbs_bench {
           return replay_mode ? 6 : 2;
         }
       }
+      if (
+        o.transient_raster_hard_cap_bytes != 0 &&
+        !conversion_raster_budget_admitted
+      ) {
+        const auto &geometry = *resolved_output_geometry;
+        std::uint64_t required_bytes = 0;
+        try {
+          required_bytes = offline_sbs::offline_single_slot_raster_bound(
+            source_raster_bytes,
+            geometry.sbs_width,
+            geometry.sbs_height,
+            pfm_input
+          );
+        } catch (const std::exception &exception) {
+          BOOST_LOG(error)
+            << "sbs-bench: cannot establish the single-slot transient-raster bound: "
+            << exception.what();
+          return 9;
+        }
+        if (required_bytes > o.transient_raster_hard_cap_bytes) {
+          BOOST_LOG(error)
+            << "sbs-bench: single-source/single-SBS conversion requires "
+            << required_bytes << " transient raster bytes, exceeding the "
+            << o.transient_raster_hard_cap_bytes
+            << "-byte hard cap before the first SBS output snapshot";
+          return 9;
+        }
+        conversion_raster_budget_admitted = true;
+      }
       const std::string output_id =
         replay_mode ? follow_frame_id(global_sequence) :
                       frame_id(current_frame, fi);
 
       // Input texture + SRV.
-      D3D11_TEXTURE2D_DESC id = {};
-      id.Width = frame_width;
-      id.Height = frame_height;
-      id.MipLevels = 1;
-      id.ArraySize = 1;
-      id.Format = hdr_texture_input ?
-                    DXGI_FORMAT_R16G16B16A16_FLOAT :
-                    DXGI_FORMAT_B8G8R8A8_UNORM;
-      id.SampleDesc.Count = 1;
-      id.Usage = D3D11_USAGE_IMMUTABLE;
-      id.BindFlags = D3D11_BIND_SHADER_RESOURCE;
       std::vector<uint16_t> hdr_rgba;
       const void *input_pixels = pfm_input ?
                                    static_cast<const void *>(hdr_img.rgba16.data()) :
@@ -3802,17 +4318,29 @@ namespace sbs_bench {
         input_pixels = hdr_rgba.data();
         input_pitch = frame_width * 8;
       }
-      D3D11_SUBRESOURCE_DATA isd = {input_pixels, input_pitch, 0};
-      ComPtr<ID3D11Texture2D> in_tex;
-      if (FAILED(dev->CreateTexture2D(&id, &isd, &in_tex))) {
-        BOOST_LOG(error) << "sbs-bench: input tex fail";
-        return 6;
+      const auto input_format = hdr_texture_input ?
+                                  DXGI_FORMAT_R16G16B16A16_FLOAT :
+                                  DXGI_FORMAT_B8G8R8A8_UNORM;
+      if (!in_tex) {
+        D3D11_TEXTURE2D_DESC id = {};
+        id.Width = frame_width;
+        id.Height = frame_height;
+        id.MipLevels = 1;
+        id.ArraySize = 1;
+        id.Format = input_format;
+        id.SampleDesc.Count = 1;
+        id.Usage = D3D11_USAGE_DEFAULT;
+        id.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(dev->CreateTexture2D(&id, nullptr, &in_tex))) {
+          BOOST_LOG(error) << "sbs-bench: input texture creation failed";
+          return 6;
+        }
+        if (FAILED(dev->CreateShaderResourceView(in_tex.Get(), nullptr, &in_srv))) {
+          BOOST_LOG(error) << "sbs-bench: input SRV creation failed";
+          return 6;
+        }
       }
-      ComPtr<ID3D11ShaderResourceView> in_srv;
-      if (FAILED(dev->CreateShaderResourceView(in_tex.Get(), nullptr, &in_srv))) {
-        BOOST_LOG(error) << "sbs-bench: input SRV creation failed";
-        return 6;
-      }
+      ctx->UpdateSubresource(in_tex.Get(), 0, nullptr, input_pixels, input_pitch, 0);
 
       // First frame: size the SBS target. Per eye = the input resolution by default (so the clip
       // size, not a fixed constant, drives eval cost); --eye-h pins a specific output height.
@@ -3942,6 +4470,29 @@ namespace sbs_bench {
       // validates the same interval), so every frame is a depth update.
       const bool depth_updated = true;
       adaptive_state_words_t words {};
+      const bool defer_adaptive_state_readback =
+        !replay_mode && o.artifacts == artifact_mode_e::conversion;
+      const auto persist_adaptive_state = [&]() {
+        const auto write_frame = [&](std::ostream &out) {
+          return write_adaptive_state_frame(
+            out,
+            output_id,
+            fi,
+            depth_updated,
+            words
+          );
+        };
+        const bool state_written = o.bounded_adaptive_state ?
+          publish_adaptive_state_snapshot(adaptive_state_frame_path, write_frame) :
+          write_frame(adaptive_state_stream);
+        if (!state_written) {
+          BOOST_LOG(error)
+            << "sbs-bench: cannot write adaptive state for frame " << output_id;
+          return false;
+        }
+        ++adaptive_state_frame_count;
+        return true;
+      };
       ComPtr<ID3D11Texture2D> cached_depth_texture;
       ComPtr<ID3D11Buffer> cached_state_buffer;
       depth_coordinate_v2_gpu_frame v2_gpu_frame;
@@ -4417,9 +4968,15 @@ namespace sbs_bench {
       // artifacts. This makes accepted shot pulses directly testable without adding any
       // synchronization or readback to production.
       if (whole_clip_mode) {
-        if (!replay_mode &&
-            !read_adaptive_state(dev.Get(), ctx.Get(), est.cut_state.Get(),
-                                 cut_state_stage, words)) {
+        const bool adaptive_state_readback_ready = replay_mode ||
+          (defer_adaptive_state_readback ?
+             queue_adaptive_state_readback(
+               dev.Get(), ctx.Get(), est.cut_state.Get(), cut_state_stage
+             ) :
+             read_adaptive_state(
+               dev.Get(), ctx.Get(), est.cut_state.Get(), cut_state_stage, words
+             ));
+        if (!adaptive_state_readback_ready) {
           BOOST_LOG(error) << "sbs-bench: cannot read adaptive state for frame " << output_id;
           return 6;
         }
@@ -4525,28 +5082,9 @@ namespace sbs_bench {
             return 6;
           }
         }
-        if (!replay_mode) {
-          const auto write_frame = [&](std::ostream &out) {
-            return write_adaptive_state_frame(
-              out,
-              output_id,
-              fi,
-              depth_updated,
-              words
-            );
-          };
-          const bool adaptive_state_written =
-            o.bounded_adaptive_state ?
-              publish_adaptive_state_snapshot(
-                adaptive_state_frame_path,
-                write_frame
-              ) :
-              write_frame(adaptive_state_stream);
-          if (!adaptive_state_written) {
-            BOOST_LOG(error) << "sbs-bench: cannot write adaptive state for frame " << output_id;
-            return 6;
-          }
-          ++adaptive_state_frame_count;
+        if (!replay_mode && !defer_adaptive_state_readback &&
+            !persist_adaptive_state()) {
+          return 6;
         }
         if (!o.scene_cache.empty() &&
             !publish_scene_cache_contract(
@@ -4761,17 +5299,56 @@ namespace sbs_bench {
       ctx->CopyResource(sbs_stage.Get(), final_sbs_tex);
       D3D11_MAPPED_SUBRESOURCE m = {};
       bool output_completed = false;
+      std::optional<post_render_frame_t> asynchronous_output;
       if (SUCCEEDED(ctx->Map(sbs_stage.Get(), 0, D3D11_MAP_READ, 0, &m))) {
         bool frame_written = false;
         if (pfm_input) {
           char name[64];
           snprintf(name, sizeof(name), "sbs_%s.pfm", output_id.c_str());
           const fs::path output_path = fs::path(o.out) / name;
-          frame_written = (o.follow || replay_mode) ?
-                            publish_file_atomically(output_path, [&](const fs::path &temporary_path) {
-                              return save_pfm(temporary_path, sbs_w, sbs_h, m);
-                            }) :
-                            save_pfm(output_path, sbs_w, sbs_h, m);
+          if (asynchronous_follow_conversion) {
+            const auto pixels = static_cast<std::uint64_t>(sbs_w) * sbs_h;
+            if (pixels > std::numeric_limits<std::size_t>::max() / 4u ||
+                m.RowPitch < static_cast<std::size_t>(sbs_w) * 4u *
+                               sizeof(std::uint16_t)) {
+              ctx->Unmap(sbs_stage.Get(), 0);
+              BOOST_LOG(error) << "sbs-bench: invalid HDR SBS staging layout";
+              return 6;
+            }
+            post_render_frame_t frame;
+            frame.processed_count = fi + 1u;
+            frame.source_index = fi;
+            frame.output_id = output_id;
+            frame.output_path = output_path;
+            frame.width = sbs_w;
+            frame.height = sbs_h;
+            frame.pfm = true;
+            frame.producer_frame_count = producer_frame_count;
+            frame.rgba16.resize(static_cast<std::size_t>(pixels) * 4u);
+            for (UINT y = 0; y < sbs_h; ++y) {
+              std::memcpy(
+                frame.rgba16.data() +
+                  static_cast<std::size_t>(y) * sbs_w * 4u,
+                static_cast<const std::uint8_t *>(m.pData) +
+                  static_cast<std::size_t>(y) * m.RowPitch,
+                static_cast<std::size_t>(sbs_w) * 4u *
+                  sizeof(std::uint16_t)
+              );
+            }
+            asynchronous_output.emplace(std::move(frame));
+            frame_written = true;
+          } else {
+            frame_written = (o.follow || replay_mode) ?
+                              publish_file_atomically(
+                                output_path,
+                                [&](const fs::path &temporary_path) {
+                                  return save_pfm(temporary_path, sbs_w, sbs_h, m);
+                                },
+                                o.follow ? atomic_write_mode_e::transient :
+                                           atomic_write_mode_e::durable
+                              ) :
+                              save_pfm(output_path, sbs_w, sbs_h, m);
+          }
           ctx->Unmap(sbs_stage.Get(), 0);
           if (!frame_written) {
             BOOST_LOG(error) << "sbs-bench: non-finite or unwritable HDR SBS frame "
@@ -4807,11 +5384,31 @@ namespace sbs_bench {
           char name[64];
           snprintf(name, sizeof(name), "sbs_%s.png", output_id.c_str());
           const fs::path output_path = fs::path(o.out) / name;
-          frame_written = (o.follow || replay_mode) ?
-                            publish_file_atomically(output_path, [&](const fs::path &temporary_path) {
-                              return save_png(temporary_path, sbs_w, sbs_h, buf);
-                            }) :
-                            save_png(output_path, sbs_w, sbs_h, buf);
+          if (asynchronous_follow_conversion) {
+            post_render_frame_t frame;
+            frame.processed_count = fi + 1u;
+            frame.source_index = fi;
+            frame.output_id = output_id;
+            frame.output_path = output_path;
+            frame.width = sbs_w;
+            frame.height = sbs_h;
+            frame.pfm = false;
+            frame.bgra = std::move(buf);
+            frame.producer_frame_count = producer_frame_count;
+            asynchronous_output.emplace(std::move(frame));
+            frame_written = true;
+          } else {
+            frame_written = (o.follow || replay_mode) ?
+                              publish_file_atomically(
+                                output_path,
+                                [&](const fs::path &temporary_path) {
+                                  return save_png(temporary_path, sbs_w, sbs_h, buf);
+                                },
+                                o.follow ? atomic_write_mode_e::transient :
+                                           atomic_write_mode_e::durable
+                              ) :
+                              save_png(output_path, sbs_w, sbs_h, buf);
+          }
           if (whole_clip_mode && !frame_written) {
             BOOST_LOG(error) << "sbs-bench: failed writing required SBS frame "
                              << output_path;
@@ -4950,7 +5547,44 @@ namespace sbs_bench {
           }
         }
       }
-      if (o.follow) {
+      if (defer_adaptive_state_readback) {
+        if (!output_completed) {
+          BOOST_LOG(error)
+            << "sbs-bench: required SBS readback did not complete for frame "
+            << output_id;
+          return 6;
+        }
+        if (!map_adaptive_state_readback(ctx.Get(), cut_state_stage.Get(), words)) {
+          BOOST_LOG(error)
+            << "sbs-bench: cannot map deferred adaptive state for frame "
+            << output_id;
+          return 6;
+        }
+        if (asynchronous_follow_conversion) {
+          if (!asynchronous_output || !post_render_pipeline) {
+            BOOST_LOG(error)
+              << "sbs-bench: asynchronous conversion lost its output snapshot for frame "
+              << output_id;
+            return 6;
+          }
+          asynchronous_output->adaptive_state = words;
+          if (global_sequence > follow_first_sequence) {
+            asynchronous_output->previous_source =
+              fs::path(o.frames) /
+              follow_frame_filename(global_sequence - 1u, o.follow_format);
+          }
+          try {
+            post_render_pipeline->submit(std::move(*asynchronous_output));
+          } catch (const std::exception &exception) {
+            BOOST_LOG(error) << "sbs-bench: bounded post-render pipeline failed: "
+                             << exception.what();
+            return 10;
+          }
+        } else if (!persist_adaptive_state()) {
+          return 6;
+        }
+      }
+      if (o.follow && !asynchronous_follow_conversion) {
         if (!output_completed) {
           BOOST_LOG(error) << "sbs-bench: follow conversion did not finalize SBS frame "
                            << output_id;
@@ -4978,6 +5612,16 @@ namespace sbs_bench {
         BOOST_LOG(info) << "sbs-bench: processed " << (fi + 1)
                         << (o.follow ? " follow frames" :
                                        "/" + std::to_string(frames.size()));
+      }
+    }
+
+    if (post_render_pipeline) {
+      try {
+        post_render_pipeline->finish();
+      } catch (const std::exception &exception) {
+        BOOST_LOG(error) << "sbs-bench: bounded post-render pipeline failed: "
+                         << exception.what();
+        return 10;
       }
     }
 

@@ -276,6 +276,104 @@ namespace {
     );
   }
 
+  TEST(ForegroundWindowPolicy, PostCopyRevalidationRequiresExactRootAuthority) {
+    const auto expected = available_snapshot();
+    ASSERT_TRUE(foreground::detail::post_copy_revalidation_allowed(expected));
+    const auto observed_at = expected.observed_at + 1ms;
+    const auto observed = foreground::detail::classify(
+      available_window(),
+      observed_at
+    );
+    ASSERT_TRUE(foreground::detail::post_copy_revalidation_matches(
+      expected,
+      observed
+    ));
+
+    const auto expect_mismatch = [&](auto mutate) {
+      auto changed = observed;
+      mutate(changed);
+      EXPECT_FALSE(foreground::detail::post_copy_revalidation_matches(
+        expected,
+        changed
+      ));
+    };
+    expect_mismatch([](auto &value) {
+      ++value.window;
+    });
+    expect_mismatch([](auto &value) {
+      ++value.process_id;
+    });
+    expect_mismatch([](auto &value) {
+      ++value.monitor;
+    });
+    expect_mismatch([](auto &value) {
+      ++value.monitor_screen_rect.right;
+    });
+    expect_mismatch([](auto &value) {
+      ++value.client_screen_rect.left;
+    });
+    expect_mismatch([](auto &value) {
+      ++value.frame_screen_rect.bottom;
+    });
+    expect_mismatch([](auto &value) {
+      value.content_window = 0x101u;
+      value.content_screen_rect = {-1790, 140, -210, 900};
+    });
+    expect_mismatch([&](auto &value) {
+      value.observed_at = expected.observed_at - 1ms;
+    });
+    expect_mismatch([](auto &value) {
+      value.status = foreground::status_e::foreground_changed;
+    });
+
+    auto unauthenticated = expected;
+    unauthenticated.generation = 0;
+    EXPECT_FALSE(foreground::detail::post_copy_revalidation_allowed(
+      unauthenticated
+    ));
+    EXPECT_FALSE(foreground::detail::post_copy_revalidation_matches(
+      unauthenticated,
+      observed
+    ));
+    unauthenticated = expected;
+    unauthenticated.geometry_valid_since = {};
+    EXPECT_FALSE(foreground::detail::post_copy_revalidation_matches(
+      unauthenticated,
+      observed
+    ));
+
+    auto narrowed_root = expected;
+    narrowed_root.content_window = narrowed_root.window;
+    narrowed_root.content_screen_rect = narrowed_root.client_screen_rect;
+    ++narrowed_root.content_screen_rect.left;
+    EXPECT_FALSE(foreground::detail::post_copy_revalidation_allowed(
+      narrowed_root
+    ));
+    EXPECT_FALSE(foreground::detail::post_copy_revalidation_matches(
+      narrowed_root,
+      observed
+    ));
+  }
+
+  TEST(ForegroundWindowPolicy, PostCopyRevalidationRejectsStructuralChildAuthority) {
+    auto expected = available_snapshot();
+    expected.content_window = 0x101u;
+    expected.content_screen_rect = {-1790, 140, -210, 900};
+
+    auto raw = available_window();
+    raw.content_window = expected.content_window;
+    raw.content_screen_rect = expected.content_screen_rect;
+    const auto observed = foreground::detail::classify(
+      raw,
+      expected.observed_at + 1ms
+    );
+    EXPECT_FALSE(foreground::detail::post_copy_revalidation_allowed(expected));
+    EXPECT_FALSE(foreground::detail::post_copy_revalidation_matches(
+      expected,
+      observed
+    ));
+  }
+
   TEST(ForegroundWindowPolicy, RejectsNoForegroundAndShellSurfaces) {
     const auto now = std::chrono::steady_clock::time_point {10s};
     auto raw = available_window();

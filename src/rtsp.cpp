@@ -1338,6 +1338,8 @@ namespace rtsp_stream {
       }
       config.client_supports_sbs_telemetry =
         (client_features & stream::CLIENT_FEATURE_SBS_TELEMETRY) != 0;
+      config.client_supports_atomic_presentation_v2 =
+        (client_features & stream::CLIENT_FEATURE_ATOMIC_PRESENTATION_V2) != 0;
       config.audioQosType = required_int(detail::announce_int_field::audio_qos, "x-nv-aqos.qosTrafficType"sv);
       config.videoQosType = required_int(detail::announce_int_field::video_qos, "x-nv-vqos[0].qosTrafficType"sv);
       const auto encryption_flags = required_int(

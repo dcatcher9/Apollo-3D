@@ -6660,6 +6660,27 @@ TEST(EffectiveVideoModePublisherTests, PublishesOnlyCoherentProvenPacingPairs) {
   EXPECT_EQ(pacing.framerate_millihz, 29970);
 }
 
+TEST(EffectiveVideoModePublisherTests, PublishesCompleteAtomicPresentationStateByGeneration) {
+  video::effective_video_mode_publisher_t publisher {{
+    1920, 1080, 6000, 20000, 1920, 1080, 1920, 1080, video::SBS_OFF, 1,
+  }};
+  publisher.publish({
+    4096, 1728, 5994, 38000, 5120, 2160, 8192, 1728, video::SBS_AI,
+    video::next_effective_video_mode_generation(publisher.current().generation),
+  });
+
+  const auto applied = publisher.current();
+  EXPECT_EQ(applied.source_width, 5120);
+  EXPECT_EQ(applied.source_height, 2160);
+  EXPECT_EQ(applied.encoded_width, 8192);
+  EXPECT_EQ(applied.encoded_height, 1728);
+  EXPECT_EQ(applied.sbs_mode, video::SBS_AI);
+  EXPECT_EQ(applied.generation, 2u);
+  EXPECT_EQ(video::next_effective_video_mode_generation(
+              std::numeric_limits<std::uint32_t>::max()),
+            1u);
+}
+
 TEST(EffectiveVideoModePublisherTests, ProductionPublishesAfterEncoderInitialization) {
   const auto source = read_source_file(SUNSHINE_SOURCE_DIR "/src/video.cpp");
   ASSERT_FALSE(source.empty());
@@ -6719,6 +6740,65 @@ TEST(EffectiveVideoModePublisherTests, ProductionPublishesAfterEncoderInitializa
   EXPECT_LT(encoder_init, effective_publish);
   EXPECT_LT(effective_publish, completion_publish);
   EXPECT_LT(encoder_init, hdr_publish);
+}
+
+TEST(AtomicPresentationOrderingTests, AppliesImmutableModeBeforeEncoderAndAcksAfterRollback) {
+  const auto video_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/video.cpp");
+  const auto stream_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/stream.cpp");
+  ASSERT_FALSE(video_source.empty());
+  ASSERT_FALSE(stream_source.empty());
+
+  const auto request_drain = video_source.find("while (video_mode_event->peek())");
+  const auto immutable_mode = video_source.find(
+    "current_sbs_mode = mode->requested_sbs_mode;",
+    request_drain
+  );
+  const auto session_config = video_source.find("config_t session_config = config;", immutable_mode);
+  const auto encoder_success = video_source.find("auto encode_session = make_encode_session(", session_config);
+  const auto state_publish = video_source.find(
+    "config.effective_mode->publish(effective_mode);",
+    encoder_success
+  );
+  const auto completion = video_source.find(
+    "video_mode_applied_queue->raise(video_mode_applied_t",
+    state_publish
+  );
+  ASSERT_NE(request_drain, std::string::npos);
+  ASSERT_NE(immutable_mode, std::string::npos);
+  ASSERT_NE(session_config, std::string::npos);
+  ASSERT_NE(encoder_success, std::string::npos);
+  ASSERT_NE(state_publish, std::string::npos);
+  ASSERT_NE(completion, std::string::npos);
+  EXPECT_LT(immutable_mode, session_config);
+  EXPECT_LT(session_config, encoder_success);
+  EXPECT_LT(encoder_success, state_publish);
+  EXPECT_LT(state_publish, completion);
+
+  const auto rollback_state = stream_source.find("bool rollback_restored_desktop = true;");
+  const auto rollback_call = stream_source.find(
+    "const auto rollback_result = proc::proc.apply_live_video_mode(",
+    rollback_state
+  );
+  const auto rollback_failure = stream_source.find(
+    "rollback_restored_desktop = false;",
+    rollback_call
+  );
+  const auto ack_after_rollback = stream_source.find(
+    "queue_live_video_mode_ack(",
+    rollback_failure
+  );
+  const auto reconnect_status = stream_source.find(
+    "live_video_mode_ack_e::rejected_needs_reconnect",
+    ack_after_rollback
+  );
+  ASSERT_NE(rollback_state, std::string::npos);
+  ASSERT_NE(rollback_call, std::string::npos);
+  ASSERT_NE(rollback_failure, std::string::npos);
+  ASSERT_NE(reconnect_status, std::string::npos);
+  ASSERT_NE(ack_after_rollback, std::string::npos);
+  EXPECT_LT(rollback_call, rollback_failure);
+  EXPECT_LT(rollback_failure, ack_after_rollback);
+  EXPECT_LT(ack_after_rollback, reconnect_status);
 }
 
 TEST(HostSbsSceneCutTest, AppearanceFusionRejectsExposureAndHonorsExactBounds) {
@@ -8326,13 +8406,7 @@ TEST(NvencBitrateReconfigureTest, AdmitsOnlyExactGeometryAndCadence) {
 
   EXPECT_TRUE(video::detail::is_nvenc_bitrate_only_reconfigure_candidate(
     active,
-    requested,
-    false
-  ));
-  EXPECT_FALSE(video::detail::is_nvenc_bitrate_only_reconfigure_candidate(
-    active,
-    requested,
-    true
+    requested
   ));
 
   const auto expect_rebuild = [&](auto mutate) {
@@ -8340,8 +8414,7 @@ TEST(NvencBitrateReconfigureTest, AdmitsOnlyExactGeometryAndCadence) {
     mutate(changed);
     EXPECT_FALSE(video::detail::is_nvenc_bitrate_only_reconfigure_candidate(
       active,
-      changed,
-      false
+      changed
     ));
   };
   expect_rebuild([](auto &mode) { mode.width += 2; });
@@ -8350,6 +8423,18 @@ TEST(NvencBitrateReconfigureTest, AdmitsOnlyExactGeometryAndCadence) {
   expect_rebuild([](auto &mode) { ++mode.framerateX100; });
   expect_rebuild([](auto &mode) { ++mode.encodingFramerate; });
   expect_rebuild([](auto &mode) { mode.bitrate = 0; });
+
+  auto atomic_same_mode = requested;
+  atomic_same_mode.requested_sbs_mode = video::SBS_OFF;
+  EXPECT_TRUE(video::detail::is_nvenc_bitrate_only_reconfigure_candidate(
+    active,
+    atomic_same_mode
+  ));
+  atomic_same_mode.requested_sbs_mode = video::SBS_AI;
+  EXPECT_FALSE(video::detail::is_nvenc_bitrate_only_reconfigure_candidate(
+    active,
+    atomic_same_mode
+  ));
 }
 
 TEST(NvencBitrateReconfigureTest, FailureKeepsRequestOnExistingRebuildPath) {

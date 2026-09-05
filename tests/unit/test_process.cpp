@@ -75,6 +75,17 @@ TEST(ProcessTest, LiveVideoModeIsRefusedWithoutAVirtualDisplay) {
   EXPECT_FALSE(process.live_video_mode_needs_display_change(1920, 1080));
 }
 
+TEST(ProcessTest, LiveVideoModeFailureIsRetryableOnlyAfterProvenRollback) {
+  EXPECT_EQ(
+    proc::live_video_mode_failure_result(true),
+    proc::live_video_mode_result_e::failed
+  );
+  EXPECT_EQ(
+    proc::live_video_mode_failure_result(false),
+    proc::live_video_mode_result_e::needs_reconnect
+  );
+}
+
 #ifdef _WIN32
 TEST(ProcessTest, DriverRemovalRequiresConfirmedDetachWhenDesktopDeactivationWasRequested) {
   EXPECT_FALSE(proc::retiredVirtualDisplayRemovalAllowedForTest(true, false));

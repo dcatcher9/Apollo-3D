@@ -449,10 +449,38 @@ namespace platf::foreground_window {
       }
       return make_result(status_e::ok);
     }
+
+    bool post_copy_revalidation_allowed(const snapshot_t &expected) noexcept {
+      return snapshot_has_complete_geometry(expected) &&
+             expected.source_window() == expected.window &&
+             expected.source_screen_rect() == expected.client_screen_rect;
+    }
+
+    bool post_copy_revalidation_matches(
+      const snapshot_t &expected,
+      const observation_t &observed
+    ) noexcept {
+      return post_copy_revalidation_allowed(expected) &&
+             observation_has_complete_geometry(observed) &&
+             expected.status == status_e::ok && observed.status == status_e::ok &&
+             observed.source_window() == observed.window &&
+             observed.observed_at >= expected.observed_at &&
+             observed.window == expected.window &&
+             observed.process_id == expected.process_id &&
+             observed.monitor == expected.monitor &&
+             observed.monitor_screen_rect == expected.monitor_screen_rect &&
+             observed.client_screen_rect == expected.client_screen_rect &&
+             observed.source_window() == expected.source_window() &&
+             observed.source_screen_rect() == expected.source_screen_rect() &&
+             observed.frame_screen_rect == expected.frame_screen_rect;
+    }
   }  // namespace detail
 
-  observation_t sample() noexcept {
+  static observation_t sample_impl(const snapshot_t *expected) noexcept {
     const auto observed_at = std::chrono::steady_clock::now();
+    if (expected && !detail::post_copy_revalidation_allowed(*expected)) {
+      return {.status = status_e::foreground_changed, .observed_at = observed_at};
+    }
     dpi_scope_t dpi_scope;
     if (!dpi_scope.active()) {
       return {.status = status_e::dpi_unavailable, .observed_at = observed_at};
@@ -610,6 +638,25 @@ namespace platf::foreground_window {
     };
     static thread_local negative_content_census_cache_t negative_content_census_cache;
     static thread_local detail::content_census_confirmation_t content_census_confirmation;
+    if (expected) {
+      // A post-copy guard must validate the authority that admitted this exact frame, not discover
+      // a different content child after the pixels have already been retained. Only whole-client
+      // authority reaches this branch; structural-child authority uses sample() so its complete
+      // direct-child census and sibling-uniqueness proof are repeated.
+      recheck_foreground();
+      auto observation = detail::classify(raw, std::chrono::steady_clock::now());
+      if (
+        observation.status == status_e::ok &&
+        !detail::post_copy_revalidation_matches(*expected, observation)
+      ) {
+        observation.status = status_e::foreground_changed;
+      }
+      if (observation.status != status_e::ok) {
+        content_census_confirmation.reset();
+      }
+      return observation;
+    }
+
     const auto content_census_at = std::chrono::steady_clock::now();
     const auto retain_negative_content_census = [&]() noexcept {
       content_census_confirmation.reset();
@@ -740,6 +787,15 @@ namespace platf::foreground_window {
       content_census_confirmation.reset();
     }
     return observation;
+  }
+
+  observation_t sample() noexcept {
+    return sample_impl(nullptr);
+  }
+
+  observation_t sample_after_copy(const snapshot_t &expected) noexcept {
+    return detail::post_copy_revalidation_allowed(expected) ?
+             sample_impl(&expected) : sample_impl(nullptr);
   }
 
   bool interactive_move_size_active() noexcept {

@@ -132,7 +132,7 @@ namespace video {
     }
   }  // namespace detail
 
-  /* Host-side SBS 3D mode requested by the client via the 0x3003 control message.
+  /* Host-side SBS 3D mode selected at launch or by atomic-presentation v2.
      Must match the SBS_MODE_* wire values in the client's moonlight-common-c Limelight.h. */
   enum sbs_mode_e : int {
     SBS_OFF = 0,  ///< No host depth; encoder emits a plain W x H frame.
@@ -243,10 +243,10 @@ namespace video {
   /** Allocate a nonzero renderer generation. Called for every encode-device rebuild/reset. */
   std::uint32_t next_sbs_telemetry_generation() noexcept;
 
-  /* Live stream geometry/rate change requested by the client via the 0x3007 control message.
-     Resolution and frame-rate changes rebuild the encode session in place, exactly as the 0x3003
-     SBS toggle already does. A strictly bitrate-only NVENC change may reconfigure the proven live
-     session; unsupported or failed reconfiguration falls back to that same rebuild path.
+  /* Atomic live presentation change requested by the client via the v2 0x3007 control message.
+     Resolution, frame rate, and Host SBS mode form one immutable transaction. A strictly
+     bitrate-only NVENC change may reconfigure the proven live session; unsupported or failed
+     reconfiguration falls back to the same rebuild path.
 
      These are post-validation encoder values, not the client's raw request. The control handler
      applies the same clamp and FEC/audio wire-budget deduction that RTSP ANNOUNCE applies, so a
@@ -260,25 +260,26 @@ namespace video {
     int bitrate;  // Encoder budget in kbps, after the wire-budget transformation.
     // Opaque client-generated correlation token. The host never interprets or validates it and
     // never assumes an ordering from it; it exists only to be echoed back in the acknowledgement.
-    int request_id;
+    std::uint32_t request_id;
     // Host-generated transaction identity. Client request ids are opaque and may be duplicated,
     // so end-to-end serialization must never use them to match an encoder completion.
     std::uint64_t transaction_id = 0;
+    // Atomic presentation binds the desired Host SBS mode to this immutable request.
+    int requested_sbs_mode = SBS_OFF;
   };
 
   namespace detail {
     /**
      * Admit only a live request whose complete geometry and cadence already match the running
-     * encoder. The bitrate and opaque request identities are intentionally excluded. A pending
-     * SBS toggle owns a geometry transition and therefore fails this fast path closed.
+     * encoder. The bitrate and opaque request identities are intentionally excluded. A Host SBS
+     * mode difference owns a geometry transition and therefore fails this fast path closed.
      */
     constexpr bool is_nvenc_bitrate_only_reconfigure_candidate(
       const video_mode_change_t &active,
-      const video_mode_change_t &requested,
-      bool sbs_change_pending
+      const video_mode_change_t &requested
     ) noexcept {
-      return !sbs_change_pending &&
-             requested.bitrate > 0 &&
+      return requested.bitrate > 0 &&
+             requested.requested_sbs_mode == active.requested_sbs_mode &&
              requested.width == active.width &&
              requested.height == active.height &&
              requested.framerate == active.framerate &&
@@ -300,7 +301,23 @@ namespace video {
     int height;
     int framerateX100;
     int bitrate;
+    // Complete applied-presentation state used by atomic-presentation v2. The original four
+    // fields stay first for source compatibility with legacy aggregate initializers.
+    int source_width = 0;
+    int source_height = 0;
+    int encoded_width = 0;
+    int encoded_height = 0;
+    int sbs_mode = SBS_OFF;
+    std::uint32_t generation = 0;
   };
+
+  /** Advance a per-session applied-state generation, reserving zero for "not proven yet". */
+  [[nodiscard]] constexpr std::uint32_t next_effective_video_mode_generation(
+    std::uint32_t current
+  ) noexcept {
+    const auto next = current + 1;
+    return next == 0 ? 1 : next;
+  }
 
   /** Coherent bitrate/cadence pair consumed by the packet sender. */
   struct effective_video_pacing_t {
@@ -364,7 +381,7 @@ namespace video {
   };
 
   struct video_mode_request_ref_t {
-    int request_id;
+    std::uint32_t request_id;
     std::uint64_t transaction_id;
   };
 
@@ -420,7 +437,7 @@ namespace video {
     int encodingFramerate;  // Requested display framerate
 
     // APPEND-ONLY (see warning above). Host-side SBS mode (sbs_mode_e). It is selected during
-    // launch/resume and may also be toggled at runtime via the 0x3003 control message.
+    // launch/resume and may also be changed by an atomic-presentation v2 transaction.
     // When != SBS_OFF the encoder output width is doubled to carry the side-by-side frame.
     int sbs_mode = SBS_OFF;
 
@@ -462,9 +479,8 @@ namespace video {
     // consumed by a different Host SBS encoder.
     std::shared_ptr<std::atomic<bool>> sbs_debug_dump_pending;
 
-    // APPEND-ONLY. Session-shared requested Host SBS mode. The encode loop uses this only for a
-    // final geometry compatibility check, closing the race between asynchronous 0x3007 quality
-    // transactions and 0x3003 mode toggles.
+    // APPEND-ONLY. Session-shared Host SBS mode used by control-side diagnostics while the encode
+    // loop owns authoritative application and rollback of atomic-presentation v2 transactions.
     std::shared_ptr<std::atomic<int>> requested_sbs_mode;
   };
 

@@ -2055,7 +2055,7 @@ class EvalContractTests(unittest.TestCase):
             'read_snapshot(child, "adaptive_state_frame.json")',
             worker)
         self.assertIn(
-            'remove_file_checked(snapshot)',
+            'remove_transient_file_checked(snapshot)',
             worker)
 
     def test_depth_reuse_cadence_is_fixed_at_one_inference_per_frame(self):

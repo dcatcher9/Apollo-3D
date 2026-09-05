@@ -909,10 +909,7 @@ namespace video {
     );
     auto idr_events = mail->event<bool>(mail::idr);
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
-    // A pending host SBS mode change means we must rebuild the encode session at the new
-    // resolution. We only peek here; capture_async pops it and applies the new mode.
-    auto sbs_mode_event = mail->event<int>(mail::sbs_mode);
-    // Same contract for a live client-requested resolution/frame-rate/bitrate change (0x3007).
+    // Atomic client-requested mode/geometry/cadence/bitrate changes arrive on one queue.
     auto video_mode_event = mail->queue<video_mode_change_t>(mail::video_mode);
     auto video_mode_applied_queue =
       mail->queue<video_mode_applied_t>(mail::video_mode_applied);
@@ -955,9 +952,14 @@ namespace video {
         video_mode_event->raise(std::move(*requested));
       });
 
-      const video_mode_change_t active {
-        config.sbs_mode != SBS_OFF ? config.width / 2 : config.width,
-        config.height,
+      const auto published_mode = config.effective_mode ?
+                                    config.effective_mode->current() :
+                                    effective_video_mode_t {};
+      video_mode_change_t active {
+        published_mode.source_width > 0 ?
+          published_mode.source_width :
+          (config.sbs_mode != SBS_OFF ? config.width / 2 : config.width),
+        published_mode.source_height > 0 ? published_mode.source_height : config.height,
         config.framerate,
         config.framerateX100,
         config.encodingFramerate,
@@ -965,14 +967,10 @@ namespace video {
         0,
         0,
       };
-      const bool sbs_change_pending =
-        sbs_mode_event->peek() ||
-        (config.requested_sbs_mode &&
-         config.requested_sbs_mode->load(std::memory_order_acquire) != config.sbs_mode);
+      active.requested_sbs_mode = config.sbs_mode;
       if (!detail::is_nvenc_bitrate_only_reconfigure_candidate(
             active,
-            *requested,
-            sbs_change_pending
+            *requested
           )) {
         return false;
       }
@@ -982,12 +980,26 @@ namespace video {
       }
 
       config.bitrate = requested->bitrate;
-      const effective_video_mode_t effective_mode {
-        active.width,
-        active.height,
-        active.framerateX100 > 0 ? active.framerateX100 : active.framerate * 100,
-        requested->bitrate,
-      };
+      effective_video_mode_t effective_mode = config.effective_mode ?
+                                                published_mode :
+                                                effective_video_mode_t {
+                                                  active.width,
+                                                  active.height,
+                                                  active.framerateX100 > 0 ?
+                                                    active.framerateX100 :
+                                                    active.framerate * 100,
+                                                  config.bitrate,
+                                                  requested->width,
+                                                  requested->height,
+                                                  config.width,
+                                                  config.height,
+                                                  config.sbs_mode,
+                                                  0,
+                                                };
+      effective_mode.bitrate = requested->bitrate;
+      effective_mode.generation = next_effective_video_mode_generation(
+        effective_mode.generation
+      );
       if (config.effective_mode) {
         // Publish pacing only after NVENC accepts the new rate-control configuration. The sender
         // can therefore never pace at a bitrate that the live encoder rejected.
@@ -1016,21 +1028,19 @@ namespace video {
       const bool shutting_down = shutdown_event->peek();
       const bool capture_stopped = !images->running();
       const bool display_reinit_pending = reinit_event.peek();
-      const bool sbs_change_pending = sbs_mode_event->peek();
 
       // A completed encode_frame() has no NVENC work in flight, and all calls in this loop run on
       // one thread. Use that serialized seam for a same-geometry/same-cadence bitrate update. Any
       // mismatch, unsupported GPU, or driver failure restores the request and takes the unchanged
       // lifecycle rebuild path below.
       if (!shutting_down && !capture_stopped && !display_reinit_pending &&
-          !sbs_change_pending && video_mode_event->peek() &&
+          video_mode_event->peek() &&
           try_reconfigure_pending_bitrate()) {
         return false;
       }
-      // Both the SBS toggle and a live video-mode change alter the encode geometry/cadence, so
-      // both require the encode session to be rebuilt in place.
-      const bool encode_config_change_pending =
-        sbs_change_pending || video_mode_event->peek();
+      // Any queued atomic presentation change that is not bitrate-only rebuilds the encode
+      // session in place.
+      const bool encode_config_change_pending = video_mode_event->peek();
 
       // If capture has to reinitialize before it has produced a frame, encode the dummy once so
       // Artemis knows the host is alive. An encode-config-only change always rebuilds immediately
@@ -1338,9 +1348,6 @@ namespace video {
     auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
     auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
 
-    // Host SBS toggle (0x3003 control message). The client-negotiated width is the "base"
-    // width; when SBS is on we double it so the encoder emits a 2W x H side-by-side frame.
-    auto sbs_mode_event = mail->event<int>(mail::sbs_mode);
     auto sbs_depth_status_event = mail->event<int>(mail::sbs_depth_status);
     auto sbs_telemetry_event =
       mail->event<sbs_telemetry_snapshot_t>(mail::sbs_telemetry);
@@ -1378,6 +1385,17 @@ namespace video {
           config.framerateX100 = mode->framerateX100;
           config.encodingFramerate = mode->encodingFramerate;
           config.bitrate = mode->bitrate;
+          // Atomic presentation applies its immutable desired mode from this same queue entry.
+          current_sbs_mode = mode->requested_sbs_mode;
+          if (config.requested_sbs_mode) {
+            config.requested_sbs_mode->store(current_sbs_mode, std::memory_order_release);
+          }
+          if (current_sbs_mode == SBS_OFF) {
+            if (config.sbs_debug_dump_pending) {
+              config.sbs_debug_dump_pending->store(false, std::memory_order_release);
+            }
+            sbs_depth_status_event->raise(0);
+          }
           capture_thread_ctx.live_video_mode = std::optional<video_mode_change_t> {*mode};
           config_from_live_video_mode = true;
           if (active_ack_request) {
@@ -1415,22 +1433,14 @@ namespace video {
       // raced the mode change and was created with the previous rate.
       display->set_client_frame_rate(config.framerate, config.framerateX100);
 
-      // Apply the latest requested host SBS mode (drain to the most recent value).
-      while (sbs_mode_event->peek()) {
-        if (auto m = sbs_mode_event->pop(0ms)) {
-          current_sbs_mode = *m;
-        }
-      }
       const auto host_sbs_rejection =
         models::host_sbs_v2_source_resolution_rejection_reason(
           static_cast<std::uint32_t>(base_width),
           static_cast<std::uint32_t>(config.height)
         );
       if (current_sbs_mode != SBS_OFF && !host_sbs_rejection.empty()) {
-        // A mode toggle and a live quality transaction use independent control messages. Even
-        // though both handlers validate, their asynchronous commits can cross. Never construct an
-        // unauthenticated Host SBS geometry: keep the accepted quality in 2D and publish the
-        // authoritative requested-mode correction back to the control/session latch.
+        // Launch state is checked here too, and a live request is rechecked at the final encoder
+        // construction boundary. Never construct an unauthenticated Host SBS geometry.
         BOOST_LOG(warning)
           << "Rejecting Host SBS V2 encode-session construction at "sv
           << base_width << 'x' << config.height << ": "sv
@@ -1558,6 +1568,13 @@ namespace video {
         config.framerateX100 = proven_video_mode->framerateX100;
         config.encodingFramerate = proven_video_mode->encodingFramerate;
         config.bitrate = proven_video_mode->bitrate;
+        current_sbs_mode = proven_video_mode->requested_sbs_mode;
+        if (config.requested_sbs_mode) {
+          config.requested_sbs_mode->store(current_sbs_mode, std::memory_order_release);
+        }
+        if (current_sbs_mode == SBS_OFF) {
+          sbs_depth_status_event->raise(0);
+        }
         capture_thread_ctx.live_video_mode = proven_video_mode;
         config_from_live_video_mode = false;
         // The request never made it into an encode session, so it must not be reported as applied.
@@ -1621,19 +1638,33 @@ namespace video {
         active_ack_request ? active_ack_request->request_id : 0,
         active_ack_request ? active_ack_request->transaction_id : 0,
       };
+      proven_video_mode->requested_sbs_mode = current_sbs_mode;
       config_from_live_video_mode = false;
 
       // Publish what this session really runs. SBS packs two eyes into one encoded frame, so the
       // base per-eye width is half the encoded width; both are reported after the codec-width cap,
       // which can differ from the request. The bitrate is the encoder budget, not the wire budget.
-      const effective_video_mode_t effective_mode {
+      effective_video_mode_t effective_mode {
         session_config.sbs_mode != SBS_OFF ? session_config.width / 2 : session_config.width,
         session_config.height,
         // A launch that never negotiated an exact refresh rate leaves framerateX100 at zero. The
         // client is owed a real rate, so fall back to the whole-frames-per-second figure.
         session_config.framerateX100 > 0 ? session_config.framerateX100 : session_config.framerate * 100,
         session_config.bitrate,
+        config.width,
+        config.height,
+        session_config.width,
+        session_config.height,
+        session_config.sbs_mode,
+        0,
       };
+      if (config.effective_mode) {
+        effective_mode.generation = next_effective_video_mode_generation(
+          config.effective_mode->current().generation
+        );
+      } else {
+        effective_mode.generation = 1;
+      }
       if (config.effective_mode) {
         // This is also the packet sender's pacing publication. It must remain after successful
         // encoder creation: a speculative request that fails never changes effective cadence.

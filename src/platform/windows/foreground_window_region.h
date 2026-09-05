@@ -117,6 +117,15 @@ namespace platf::foreground_window {
   [[nodiscard]] observation_t sample() noexcept;
 
   /**
+   * Close the race after a matched-frame GPU copy. Whole-client authority takes the exact
+   * identity/geometry revalidation fast path; structural-child authority performs an ordinary
+   * complete sample so sibling uniqueness is reproven.
+   */
+  [[nodiscard]] observation_t sample_after_copy(
+    const snapshot_t &expected
+  ) noexcept;
+
+  /**
    * Sample only USER32's native move/size advisory.
    *
    * WGC has no desktop-content timestamp and therefore cannot authorize foreground geometry, but
@@ -334,6 +343,17 @@ namespace platf::foreground_window {
     [[nodiscard]] observation_t classify(
       const raw_observation_t &raw,
       std::chrono::steady_clock::time_point observed_at
+    ) noexcept;
+
+    /** Whether this snapshot may use the whole-client-only post-copy fast path. */
+    [[nodiscard]] bool post_copy_revalidation_allowed(
+      const snapshot_t &expected
+    ) noexcept;
+
+    /** Exact positive authority equality required by the post-copy revalidation fast path. */
+    [[nodiscard]] bool post_copy_revalidation_matches(
+      const snapshot_t &expected,
+      const observation_t &observed
     ) noexcept;
   }  // namespace detail
 }  // namespace platf::foreground_window

@@ -301,6 +301,7 @@ namespace stream {
   constexpr int LIVE_VIDEO_MODE_DIMENSION_MIN = 2;
   constexpr int LIVE_VIDEO_MODE_DIMENSION_MAX = 16384;
   constexpr int LIVE_VIDEO_MODE_FRAMERATE_X100_MIN = 100;
+  // Atomic presentation v2 carries cadence in a u32 but retains a defensive 1000 Hz ceiling.
   constexpr int LIVE_VIDEO_MODE_FRAMERATE_X100_MAX = 100'000;
 
   [[nodiscard]] constexpr bool is_valid_live_video_mode_dimension(int dimension) {
@@ -313,6 +314,36 @@ namespace stream {
     return framerate_x100 >= LIVE_VIDEO_MODE_FRAMERATE_X100_MIN &&
            framerate_x100 <= LIVE_VIDEO_MODE_FRAMERATE_X100_MAX;
   }
+
+  // 0x3007 accepts only the atomic v2 body. The desired Host-SBS state is part of the same
+  // immutable presentation transaction as source geometry, cadence, and bitrate.
+  constexpr std::uint8_t ATOMIC_PRESENTATION_VERSION = 2;
+  constexpr std::size_t ATOMIC_PRESENTATION_V2_REQUEST_PAYLOAD_SIZE = 20;
+  constexpr std::uint16_t ATOMIC_PRESENTATION_V2_REQUEST_FLAGS_KNOWN = 0;
+  constexpr std::uint8_t CLIENT_FEATURE_ATOMIC_PRESENTATION_V2 = 0x08;
+
+  enum class live_video_mode_request_decode_e {
+    v2,
+    invalid,
+    unsupported_version,
+  };
+
+  struct live_video_mode_wire_request_t {
+    std::uint8_t protocol_version = 0;
+    std::uint8_t desired_sbs_mode = video::SBS_OFF;
+    std::uint16_t flags = 0;
+    std::uint32_t request_id = 0;
+    std::uint16_t source_width = 0;
+    std::uint16_t source_height = 0;
+    std::uint32_t framerate_x100 = 0;
+    std::uint32_t bitrate_kbps = 0;
+  };
+
+  /** Decode only the exact 20-byte v2 body; semantic validation follows. */
+  [[nodiscard]] live_video_mode_request_decode_e decode_live_video_mode_request_payload(
+    std::string_view payload,
+    live_video_mode_wire_request_t &request
+  ) noexcept;
 
   namespace detail {
     /**
@@ -387,21 +418,17 @@ namespace stream {
    * LIVE_VIDEO_MODE_ACK_* constants in the client's moonlight-common-c Limelight.h. Treat the
    * numbering as append-only; never renumber or reuse a value.
    */
-  enum class live_video_mode_ack_e : std::uint16_t {
+  enum class live_video_mode_ack_e : std::uint8_t {
     applied = 0,  ///< The requested mode is live on the stream.
     rejected_invalid = 1,  ///< Failed validation. The client must not retry the same request.
-    rejected_needs_reconnect = 2,  ///< Valid, but only a full reconnect can reach this mode.
+    rejected_needs_reconnect = 2,  ///< Reconnect is authoritative; live state may be unproven.
     failed = 3,  ///< Transient failure; the change was rolled back and the client may retry.
   };
 
   /** Map a virtual-display transition outcome onto its wire acknowledgement status. */
   [[nodiscard]] live_video_mode_ack_e live_video_mode_ack_status(proc::live_video_mode_result_e result);
 
-  // The acknowledgement body that follows the control header: u16 request_id, u16 status,
-  // u16 applied_width, u16 applied_height, u16 applied_framerate_x100, u32 applied_bitrate_kbps,
-  // all little-endian. The trailing u32 is deliberately unaligned; the struct is packed and the
-  // body is serialized field by field, so no padding is ever inserted.
-  constexpr std::size_t LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE = 14;
+  constexpr std::size_t ATOMIC_PRESENTATION_V2_ACK_PAYLOAD_SIZE = 28;
 
   // A client cannot have many requests outstanding, and the control thread drains this every
   // iteration. The bound only exists so a pathological client cannot grow the queue without limit.
@@ -411,37 +438,67 @@ namespace stream {
    * One acknowledgement, queued by whichever component decided the outcome and sent by the control
    * thread.
    *
-   * `request_id` is the client's opaque correlation token, echoed verbatim. The `applied_*` fields
-   * always describe the mode that is REALLY in effect, never the request:
+   * `request_id` is the client's opaque correlation token, echoed verbatim. The applied fields
+   * always come from the last encoder-proven mode, never the unproven request:
    *  - on `applied`, that is the running encode session after every host-side transformation, so a
    *    width capped to the codec ceiling reports the capped value and its aspect-scaled height.
-   *    With Host SBS active, `applied_width`/`applied_height` are the base per-eye values before
-   *    the host's SBS doubling. With Host SBS off they are the effective encoded desktop values
-   *    verbatim; this includes a Raw Full client whose desktop is already packed `2W x H`, because
-   *    the host deliberately has no Raw-SBS presentation knowledge. `applied_bitrate_kbps` is the
-   *    derived encoder budget rather than the requested wire budget.
-   *  - on every refusal, that is the mode the session kept, so the client can resynchronize its UI
-   *    to reality instead of being handed zeros or its own rejected request back.
+   *    Source geometry and exact encoded geometry are reported separately, and
+   *    `applied_bitrate_kbps` is the derived encoder budget rather than the requested wire budget.
+   *  - on `rejected_invalid` or `failed`, that proven mode remains in effect and can resynchronize
+   *    the client instead of handing its own rejected request back;
+   *  - on `rejected_needs_reconnect`, the same fields are only the last proven recovery target.
+   *    A failed desktop rollback can make the live source unknowable, so the client must reconnect
+   *    and must not adopt those fields as a statement of current presentation state.
    */
   struct live_video_mode_ack_t {
-    int request_id;
+    std::int64_t request_id;
     live_video_mode_ack_e status;
-    int applied_width;
-    int applied_height;
     int applied_framerate_x100;
     std::int64_t applied_bitrate_kbps;
+    int applied_sbs_mode = video::SBS_OFF;
+    int applied_source_width = 0;
+    int applied_source_height = 0;
+    int applied_encoded_width = 0;
+    int applied_encoded_height = 0;
+    std::uint32_t applied_generation = 0;
   };
+
+  enum class live_video_mode_ack_delivery_e {
+    send,
+    defer_until_initial_proof,
+    fail_closed,
+  };
+
+  /** Generation zero is deferrable only for an immediate v2 refusal, never for APPLIED. */
+  [[nodiscard]] constexpr live_video_mode_ack_delivery_e classify_live_video_mode_ack_delivery(
+    const live_video_mode_ack_t &ack
+  ) noexcept {
+    if (ack.applied_generation != 0) {
+      return live_video_mode_ack_delivery_e::send;
+    }
+    return ack.status == live_video_mode_ack_e::applied ?
+             live_video_mode_ack_delivery_e::fail_closed :
+             live_video_mode_ack_delivery_e::defer_until_initial_proof;
+  }
+
+  /** Build an atomic v2 ACK from one coherent encoder-published state snapshot. */
+  [[nodiscard]] live_video_mode_ack_t make_live_video_mode_ack(
+    std::uint32_t request_id,
+    live_video_mode_ack_e status,
+    const video::effective_video_mode_t &mode
+  ) noexcept;
 
   /**
    * Serialize an acknowledgement body in wire order. No control header is written.
    *
    * @return `false` when a field does not fit its wire width, in which case @p out is untouched.
-   * Every reachable acknowledgement carries an id decoded from the request's own u16 field and a
-   * mode the encoder actually ran, so a rejection here means the caller invented a value.
+   * Every reachable acknowledgement carries an id decoded from the request and a mode the encoder
+   * actually ran, so a rejection here means the caller invented a value.
    */
-  [[nodiscard]] bool encode_live_video_mode_ack_payload(
+  /** Serialize the exact 28-byte atomic-presentation v2 applied-state body. */
+  [[nodiscard]] bool encode_atomic_presentation_ack_payload(
     const live_video_mode_ack_t &ack,
-    std::uint8_t (&out)[LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE]
+    std::uint8_t (&out)[ATOMIC_PRESENTATION_V2_ACK_PAYLOAD_SIZE]
   );
 
   // Artemis host-SBS telemetry control extension:
@@ -543,6 +600,7 @@ namespace stream {
     int audioQosType;
     int videoQosType;
     bool client_supports_sbs_telemetry = false;
+    bool client_supports_atomic_presentation_v2 = false;
   };
 
   namespace session {

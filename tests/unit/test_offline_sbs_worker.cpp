@@ -53,6 +53,38 @@ namespace {
     return false;
   }
 
+  std::string read_source_text(const fs::path &relative) {
+    std::ifstream stream(fs::path(SUNSHINE_SOURCE_DIR) / relative, std::ios::binary);
+    if (!stream) {
+      return {};
+    }
+    std::string source {std::istreambuf_iterator<char> {stream},
+                        std::istreambuf_iterator<char> {}};
+    source.erase(std::remove(source.begin(), source.end(), '\r'), source.end());
+    return source;
+  }
+
+  std::string_view source_section(const std::string &source,
+                                  const std::string_view begin_marker,
+                                  const std::string_view end_marker) {
+    const auto begin = source.find(begin_marker);
+    const auto end = begin == std::string::npos ?
+                       std::string::npos : source.find(end_marker, begin);
+    return begin == std::string::npos || end == std::string::npos || end <= begin ?
+             std::string_view {} : std::string_view {source}.substr(begin, end - begin);
+  }
+
+  std::size_t count_text(const std::string_view text,
+                         const std::string_view needle) {
+    std::size_t count = 0;
+    for (std::size_t offset = 0;
+         (offset = text.find(needle, offset)) != std::string_view::npos;
+         offset += needle.size()) {
+      ++count;
+    }
+    return count;
+  }
+
   nlohmann::json worker_spec_json() {
     return {
       {"schema", 2},
@@ -312,7 +344,10 @@ TEST(OfflineSbsWorker, ConversionUsesOneDirectCausalPass) {
     direct.find("conversion_encoder->publish(timing.sequence, sbs)"),
     std::string::npos
   );
-  EXPECT_NE(direct.find("remove_file_checked(sbs)"), std::string::npos);
+  EXPECT_EQ(
+    direct.find("remove_transient_file_checked(sbs)"),
+    std::string::npos
+  ) << "The asynchronous encoder owns an enqueued SBS artifact";
   EXPECT_NE(direct.find("directory_change_watcher_t"), std::string::npos);
   EXPECT_EQ(direct.find("--scene-cache"), std::string::npos);
   EXPECT_EQ(direct.find("--render-cache"), std::string::npos);
@@ -327,6 +362,333 @@ TEST(OfflineSbsWorker, ConversionUsesOneDirectCausalPass) {
     direct.find("commit_scenes(finalized, media.frames.size())"),
     std::string::npos
   );
+}
+
+TEST(OfflineSbsWorker, OfflineOverlapHasFixedSmallCapacitiesAndByteBound) {
+  EXPECT_EQ(offline_sbs::offline_source_pipeline_capacity_for_test(), 2u);
+  EXPECT_EQ(offline_sbs::offline_encoder_pipeline_capacity_for_test(), 1u);
+
+  // The mandatory fallback reservation is one decoded source artifact plus one
+  // complete SBS slot: tightly packed CPU snapshot, conservative serializer
+  // scratch, and worst-case serialized file.
+  const auto sdr_single =
+    100u +
+    10u * 10u * 4u +
+    (10u * 10u * 4u + 1024u * 1024u) +
+    (10u * 10u * 8u + 1024u * 1024u);
+  EXPECT_EQ(
+    offline_sbs::offline_single_slot_raster_bound(
+      100u,
+      10u,
+      10u,
+      false
+    ),
+    sdr_single
+  );
+  const auto hdr_single =
+    100u +
+    10u * 10u * 4u * sizeof(std::uint16_t) +
+    10u * 3u * sizeof(float) +
+    10u * 10u * 3u * sizeof(float) +
+    128u;
+  EXPECT_EQ(
+    offline_sbs::offline_single_slot_raster_bound(
+      100u,
+      10u,
+      10u,
+      true
+    ),
+    hdr_single
+  );
+
+  // Two decoded source artifacts plus two complete SBS reservations enable
+  // overlap only when the stronger bound fits.
+  EXPECT_EQ(
+    offline_sbs::offline_overlapped_raster_bound_for_test(
+      100u,
+      10u,
+      10u,
+      false
+    ),
+    2u * 100u +
+      2u * (
+        10u * 10u * 4u +
+        (10u * 10u * 4u + 1024u * 1024u) +
+        (10u * 10u * 8u + 1024u * 1024u)
+      )
+  );
+  EXPECT_EQ(
+    offline_sbs::offline_overlapped_raster_bound_for_test(
+      100u,
+      10u,
+      10u,
+      true
+    ),
+    2u * 100u +
+      2u * (
+        10u * 10u * 4u * sizeof(std::uint16_t) +
+        10u * 3u * sizeof(float) +
+        10u * 10u * 3u * sizeof(float) +
+        128u
+      )
+  );
+
+  constexpr std::uint64_t low_cap = 16ull * 1024ull * 1024ull;
+  EXPECT_GT(
+    offline_sbs::offline_single_slot_raster_bound(
+      1920u * 1080u * 4u + 64u,
+      3840u,
+      2160u,
+      false
+    ),
+    low_cap
+  );
+  EXPECT_GT(
+    offline_sbs::offline_single_slot_raster_bound(
+      1920u * 1080u * 3u * sizeof(float) + 128u,
+      3840u,
+      2160u,
+      true
+    ),
+    low_cap
+  );
+}
+
+TEST(OfflineSbsWorker, LowCapFailsBeforeFirstSbsOutputSnapshot) {
+  const auto worker = read_source_text("src/offline_sbs_worker.cpp");
+  const auto harness = read_source_text("src/sbs_bench_harness.cpp");
+  ASSERT_FALSE(worker.empty());
+  ASSERT_FALSE(harness.empty());
+
+  EXPECT_NE(
+    worker.find("\"--transient-raster-hard-cap-bytes\""),
+    std::string::npos
+  );
+  EXPECT_NE(
+    worker.find("conversion_single_slot_raster_bound"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    worker.find("*conversion_single_slot_raster_bound;"),
+    std::string::npos
+  );
+
+  const auto preflight = harness.find(
+    "required_bytes = offline_sbs::offline_single_slot_raster_bound("
+  );
+  const auto first_inference = harness.find(
+    "estimator->estimate_depth(",
+    preflight
+  );
+  const auto first_output_snapshot = harness.find(
+    "std::optional<post_render_frame_t> asynchronous_output;",
+    preflight
+  );
+  ASSERT_NE(preflight, std::string::npos);
+  ASSERT_NE(first_inference, std::string::npos);
+  ASSERT_NE(first_output_snapshot, std::string::npos);
+  EXPECT_LT(preflight, first_inference);
+  EXPECT_LT(preflight, first_output_snapshot);
+  EXPECT_NE(
+    harness.find("exceeding the ", preflight),
+    std::string::npos
+  );
+  EXPECT_NE(
+    harness.find("before the first SBS output snapshot", preflight),
+    std::string::npos
+  );
+}
+
+TEST(OfflineSbsWorker, ConversionUsesBoundedThreeStageOrderedPipeline) {
+  const auto worker = read_source_text("src/offline_sbs_worker.cpp");
+  const auto harness = read_source_text("src/sbs_bench_harness.cpp");
+  ASSERT_FALSE(worker.empty());
+  ASSERT_FALSE(harness.empty());
+
+  const auto worker_pass = source_section(
+    worker,
+    "const auto analysis_input = work / \"analysis-input\";",
+    "wire::worker_result_contract_t result_contract"
+  );
+  ASSERT_FALSE(worker_pass.empty());
+  const auto fill = worker_pass.find("const auto fill_source_window = [&]");
+  const auto bounded_fill = worker_pass.find(
+    "source_queue.size() < source_window_capacity",
+    fill
+  );
+  const auto two_sources = worker_pass.find(
+    "offline_source_pipeline_capacity : 1u",
+    bounded_fill
+  );
+  const auto encoder_publish = worker_pass.find(
+    "conversion_encoder->publish(timing.sequence, sbs)",
+    two_sources
+  );
+  const auto release_source = worker_pass.find(
+    "remove_transient_file_checked(source)",
+    encoder_publish
+  );
+  const auto refill = worker_pass.find("fill_source_window();", release_source);
+  ASSERT_NE(fill, std::string::npos);
+  ASSERT_NE(bounded_fill, std::string::npos);
+  ASSERT_NE(two_sources, std::string::npos);
+  ASSERT_NE(encoder_publish, std::string::npos);
+  ASSERT_NE(release_source, std::string::npos);
+  ASSERT_NE(refill, std::string::npos);
+  EXPECT_LT(fill, bounded_fill);
+  EXPECT_LT(two_sources, encoder_publish);
+  EXPECT_LT(encoder_publish, release_source);
+  EXPECT_LT(release_source, refill);
+  EXPECT_NE(
+    worker_pass.find("conversion_overlap_raster_bound"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    worker_pass.find("spec.transient_raster_hard_cap_bytes"),
+    std::string::npos
+  );
+
+  const auto encoder = source_section(
+    worker,
+    "class whole_clip_encoder_t",
+    "struct streaming_probe_stats_t"
+  );
+  ASSERT_FALSE(encoder.empty());
+  EXPECT_NE(encoder.find("consumer_ = std::thread"), std::string::npos);
+  EXPECT_NE(
+    encoder.find("outstanding() >= offline_encoder_pipeline_capacity"),
+    std::string::npos
+  );
+  const auto served = encoder.find("frame_server_.publish_and_wait(");
+  const auto removed = encoder.find("remove_transient_file_checked(frame.path)", served);
+  ASSERT_NE(served, std::string::npos);
+  ASSERT_NE(removed, std::string::npos);
+  EXPECT_LT(served, removed);
+
+  const auto harness_pipeline = source_section(
+    harness,
+    "const bool asynchronous_follow_conversion =",
+    "// Whole-clip input geometry and color format are immutable."
+  );
+  ASSERT_FALSE(harness_pipeline.empty());
+  const auto prior_consumed = harness_pipeline.find(
+    "wait_for_consumed_follow_source("
+  );
+  const auto serialize = harness_pipeline.find(
+    "publish_file_atomically(",
+    prior_consumed
+  );
+  const auto state = harness_pipeline.find(
+    "publish_adaptive_state_snapshot(",
+    serialize
+  );
+  const auto ack = harness_pipeline.find("publish_follow_progress(", state);
+  ASSERT_NE(prior_consumed, std::string::npos);
+  ASSERT_NE(serialize, std::string::npos);
+  ASSERT_NE(state, std::string::npos);
+  ASSERT_NE(ack, std::string::npos);
+  EXPECT_LT(prior_consumed, serialize);
+  EXPECT_LT(serialize, state);
+  EXPECT_LT(state, ack);
+
+  const auto harness_frame_loop = source_section(
+    harness,
+    "for (size_t fi = 0;; fi++)",
+    "if (post_render_pipeline) {"
+  );
+  ASSERT_FALSE(harness_frame_loop.empty());
+  const auto gpu_finish = harness_frame_loop.find(
+    "finish_pending_depth_for_evaluation("
+  );
+  const auto cpu_snapshot = harness_frame_loop.find(
+    "std::optional<post_render_frame_t> asynchronous_output",
+    gpu_finish
+  );
+  const auto submit = harness_frame_loop.find(
+    "post_render_pipeline->submit(",
+    cpu_snapshot
+  );
+  ASSERT_NE(gpu_finish, std::string::npos);
+  ASSERT_NE(cpu_snapshot, std::string::npos);
+  ASSERT_NE(submit, std::string::npos);
+  EXPECT_LT(gpu_finish, cpu_snapshot);
+  EXPECT_LT(cpu_snapshot, submit);
+}
+
+TEST(OfflineSbsWorker, SdrSerializerReusesThreadLifetimeWicFactory) {
+  const auto harness = read_source_text("src/sbs_bench_harness.cpp");
+  ASSERT_FALSE(harness.empty());
+
+  const auto context = source_section(
+    harness,
+    "class serializer_wic_context_t",
+    "struct post_render_frame_t"
+  );
+  ASSERT_FALSE(context.empty());
+  EXPECT_EQ(count_text(context, "CoInitializeEx("), 1u);
+  EXPECT_EQ(count_text(context, "CoCreateInstance("), 1u);
+  const auto release = context.find("factory_.Reset();");
+  const auto uninitialize = context.find("CoUninitialize();", release);
+  ASSERT_NE(release, std::string::npos);
+  ASSERT_NE(uninitialize, std::string::npos);
+  EXPECT_LT(release, uninitialize)
+    << "Apartment-owned WIC interfaces must be released before COM teardown";
+
+  const auto serializer = source_section(
+    harness,
+    "const bool asynchronous_follow_conversion =",
+    "// Whole-clip input geometry and color format are immutable."
+  );
+  ASSERT_FALSE(serializer.empty());
+  EXPECT_NE(
+    serializer.find("thread_local serializer_wic_context_t writer_wic;"),
+    std::string::npos
+  );
+  EXPECT_EQ(serializer.find("CoInitializeEx("), std::string::npos);
+  EXPECT_EQ(serializer.find("CoCreateInstance("), std::string::npos);
+  EXPECT_EQ(serializer.find("CoUninitialize();"), std::string::npos);
+  EXPECT_GE(count_text(serializer, "writer_wic.factory()"), 2u);
+}
+
+TEST(OfflineSbsWorker, PerFrameBridgeUsesOnlyTransientAtomicWrites) {
+  const auto worker = read_source_text("src/offline_sbs_worker.cpp");
+  const auto harness = read_source_text("src/sbs_bench_harness.cpp");
+  ASSERT_FALSE(worker.empty());
+  ASSERT_FALSE(harness.empty());
+
+  const auto worker_writer = source_section(
+    worker,
+    "enum class atomic_write_mode_e",
+    "void write_json_atomic_bounded("
+  );
+  const auto harness_writer = source_section(
+    harness,
+    "enum class atomic_write_mode_e",
+    "constexpr std::uint64_t follow_max_sequence"
+  );
+  ASSERT_FALSE(worker_writer.empty());
+  ASSERT_FALSE(harness_writer.empty());
+  EXPECT_NE(worker_writer.find("mode = atomic_write_mode_e::durable"), std::string::npos);
+  EXPECT_NE(worker_writer.find("FILE_FLAG_WRITE_THROUGH : 0"), std::string::npos);
+  EXPECT_NE(worker_writer.find("if (ok && durable)"), std::string::npos);
+  EXPECT_NE(worker_writer.find("MOVEFILE_WRITE_THROUGH : 0"), std::string::npos);
+  EXPECT_NE(harness_writer.find("mode = atomic_write_mode_e::durable"), std::string::npos);
+  EXPECT_NE(harness_writer.find("FILE_FLAG_WRITE_THROUGH : 0"), std::string::npos);
+  EXPECT_NE(harness_writer.find("if (succeeded && durable)"), std::string::npos);
+  EXPECT_NE(harness_writer.find("MOVEFILE_WRITE_THROUGH : 0"), std::string::npos);
+  EXPECT_EQ(count_text(worker, "atomic_write_mode_e::transient"), 3u);
+  EXPECT_EQ(count_text(harness, "atomic_write_mode_e::transient"), 7u);
+
+  const auto retained_json = source_section(
+    harness,
+    "bool publish_json_atomically(",
+    "constexpr std::uint64_t follow_max_sequence"
+  );
+  ASSERT_FALSE(retained_json.empty());
+  EXPECT_EQ(
+    retained_json.find("atomic_write_mode_e::transient"),
+    std::string::npos
+  ) << "Retained JSON contracts must keep the durable default";
 }
 
 TEST(OfflineSbsWorker, FollowProgressChecksChildExitBeforeWaitingAgain) {
@@ -447,6 +809,182 @@ TEST(OfflineSbsWorker, HeadlessHarnessHasNoForegroundWindowObserver) {
     source.find("load_png(std::string_view(exact_source_snapshot), img)"),
     std::string::npos
   );
+}
+
+TEST(OfflineSbsWorker, TransientConsumersRetrySameSnapshotWithoutReparse) {
+  const auto worker = read_source_text("src/offline_sbs_worker.cpp");
+  const auto harness = read_source_text("src/sbs_bench_harness.cpp");
+  ASSERT_FALSE(worker.empty());
+  ASSERT_FALSE(harness.empty());
+
+  const auto exact_read = source_section(
+    harness,
+    "bool read_file_snapshot(",
+    "uint16_t float_to_half("
+  );
+  const auto follow_read = source_section(
+    harness,
+    "bool read_follow_source_snapshot(",
+    "bool save_png("
+  );
+  ASSERT_FALSE(exact_read.empty());
+  ASSERT_FALSE(follow_read.empty());
+  EXPECT_NE(exact_read.find("std::ios::binary | std::ios::ate"), std::string::npos);
+  EXPECT_NE(exact_read.find("stream.read(&trailing, 1)"), std::string::npos);
+  const auto follow_attempts = follow_read.find("follow_snapshot_attempts");
+  const auto follow_acquire = follow_read.find("read_file_snapshot(path, snapshot)");
+  const auto follow_retry = follow_read.find("sleep_for(std::chrono::milliseconds(2))");
+  ASSERT_NE(follow_attempts, std::string::npos);
+  ASSERT_NE(follow_acquire, std::string::npos);
+  ASSERT_NE(follow_retry, std::string::npos);
+  EXPECT_LT(follow_attempts, follow_acquire);
+  EXPECT_LT(follow_acquire, follow_retry);
+  EXPECT_EQ(follow_read.find("wait_for_follow_frame("), std::string::npos);
+  EXPECT_EQ(follow_read.find("load_pfm("), std::string::npos);
+  EXPECT_EQ(follow_read.find("load_png("), std::string::npos);
+
+  const auto frame_loop = source_section(
+    harness,
+    "for (size_t fi = 0;; fi++)",
+    "// Input texture + SRV."
+  );
+  ASSERT_FALSE(frame_loop.empty());
+  const auto follow_call = frame_loop.find("read_follow_source_snapshot(");
+  const auto follow_call_end = frame_loop.find(");", follow_call);
+  ASSERT_NE(follow_call, std::string::npos);
+  ASSERT_NE(follow_call_end, std::string::npos);
+  const auto follow_invocation = frame_loop.substr(
+    follow_call,
+    follow_call_end - follow_call
+  );
+  EXPECT_NE(follow_invocation.find("current_frame"), std::string::npos);
+  EXPECT_NE(follow_invocation.find("exact_source_snapshot"), std::string::npos);
+  const auto pfm_parse = frame_loop.find("load_pfm(std::string_view(exact_source_snapshot)");
+  const auto png_parse = frame_loop.find("load_png(std::string_view(exact_source_snapshot)");
+  const auto hash = frame_loop.find("sha256_hex(exact_source_snapshot)");
+  ASSERT_NE(pfm_parse, std::string::npos);
+  ASSERT_NE(png_parse, std::string::npos);
+  ASSERT_NE(hash, std::string::npos);
+  EXPECT_LT(follow_call, pfm_parse);
+  EXPECT_LT(pfm_parse, hash);
+  EXPECT_LT(png_parse, hash);
+  EXPECT_EQ(
+    count_text(frame_loop, "load_pfm(std::string_view(exact_source_snapshot)"),
+    1u
+  );
+  EXPECT_EQ(
+    count_text(frame_loop, "load_png(std::string_view(exact_source_snapshot)"),
+    1u
+  );
+
+  for (const auto &markers : std::array {
+         std::array<std::string_view, 2> {
+           "nlohmann::json read_progress(", "void publish_producer_done("
+         },
+         std::array<std::string_view, 2> {
+           "nlohmann::json read_snapshot(", "void ensure_open("
+         },
+       }) {
+    const auto reader = source_section(worker, markers[0], markers[1]);
+    ASSERT_FALSE(reader.empty());
+    const auto acquired = reader.find("read_bounded_bytes(");
+    const auto retry = reader.find("sleep_for(transient_file_io_retry_delay)");
+    const auto parsed = reader.find("wire::parse_json_without_duplicate_keys(bytes)");
+    ASSERT_NE(acquired, std::string::npos);
+    ASSERT_NE(retry, std::string::npos);
+    ASSERT_NE(parsed, std::string::npos);
+    EXPECT_LT(acquired, retry);
+    EXPECT_LT(retry, parsed);
+    EXPECT_NE(reader.find("&acquisition_failed"), std::string::npos);
+    EXPECT_EQ(
+      count_text(reader, "wire::parse_json_without_duplicate_keys(bytes)"),
+      1u
+    ) << "A successfully acquired atomic snapshot is immutable";
+  }
+  EXPECT_EQ(
+    source_section(worker, "nlohmann::json read_snapshot(", "void ensure_open(")
+      .find("fs::is_regular_file"),
+    std::string::npos
+  );
+
+  const auto serve = source_section(worker, "bool serve_frame(", "void fail(");
+  ASSERT_FALSE(serve.empty());
+  const auto opened = serve.find("open_transient_file_snapshot(");
+  const auto response = serve.find("const std::string header");
+  ASSERT_NE(opened, std::string::npos);
+  ASSERT_NE(response, std::string::npos);
+  EXPECT_LT(opened, response);
+  EXPECT_EQ(serve.find("std::ifstream stream(path"), std::string::npos);
+}
+
+TEST(OfflineSbsWorker, WholeClipReusesOneGpuInputTextureAndView) {
+  const auto source = read_source_text("src/sbs_bench_harness.cpp");
+  ASSERT_FALSE(source.empty());
+
+  const auto resources = source_section(
+    source,
+    "ComPtr<ID3D11Texture2D> in_tex;",
+    "for (size_t fi = 0;; fi++)"
+  );
+  const auto upload = source_section(
+    source,
+    "for (size_t fi = 0;; fi++)",
+    "// First frame: size the SBS target."
+  );
+  ASSERT_FALSE(resources.empty());
+  ASSERT_FALSE(upload.empty());
+  EXPECT_NE(resources.find("ComPtr<ID3D11ShaderResourceView> in_srv;"), std::string::npos);
+  EXPECT_NE(upload.find("if (!in_tex)"), std::string::npos);
+  EXPECT_NE(upload.find("D3D11_USAGE_DEFAULT"), std::string::npos);
+  EXPECT_NE(upload.find("CreateTexture2D(&id, nullptr, &in_tex)"), std::string::npos);
+  EXPECT_NE(upload.find("CreateShaderResourceView(in_tex.Get(), nullptr, &in_srv)"), std::string::npos);
+  EXPECT_NE(upload.find("UpdateSubresource(in_tex.Get()"), std::string::npos);
+  EXPECT_EQ(upload.find("D3D11_USAGE_IMMUTABLE"), std::string::npos);
+  EXPECT_EQ(upload.find("ComPtr<ID3D11Texture2D> in_tex;"), std::string::npos);
+  EXPECT_EQ(upload.find("ComPtr<ID3D11ShaderResourceView> in_srv;"), std::string::npos);
+}
+
+TEST(OfflineSbsWorker, ConversionMapsAdaptiveStateBeforePostRenderHandoff) {
+  const auto source = read_source_text("src/sbs_bench_harness.cpp");
+  ASSERT_FALSE(source.empty());
+
+  const auto frame_loop = source_section(
+    source,
+    "for (size_t fi = 0;; fi++)",
+    "!est.completed_frame_valid || !est.gpu_trace_ring"
+  );
+  ASSERT_FALSE(frame_loop.empty());
+  const auto tail_begin = frame_loop.find("if (defer_adaptive_state_readback) {");
+  const auto tail_end = frame_loop.find("processed_frame_count = fi + 1u;", tail_begin);
+  ASSERT_NE(tail_begin, std::string::npos);
+  ASSERT_NE(tail_end, std::string::npos);
+  const auto conversion_tail = frame_loop.substr(tail_begin, tail_end - tail_begin);
+  const auto policy = frame_loop.find("!replay_mode && o.artifacts == artifact_mode_e::conversion");
+  const auto queued = frame_loop.find("queue_adaptive_state_readback(", policy);
+  const auto sbs_map = frame_loop.find("ctx->Map(sbs_stage.Get(), 0, D3D11_MAP_READ", queued);
+  ASSERT_NE(policy, std::string::npos);
+  ASSERT_NE(queued, std::string::npos);
+  ASSERT_NE(sbs_map, std::string::npos);
+  EXPECT_LT(policy, queued);
+  EXPECT_LT(queued, sbs_map);
+  const auto output_guard = conversion_tail.find("if (!output_completed)");
+  const auto state_map = conversion_tail.find("map_adaptive_state_readback(");
+  const auto attach_state = conversion_tail.find(
+    "asynchronous_output->adaptive_state = words",
+    state_map
+  );
+  const auto submit = conversion_tail.find(
+    "post_render_pipeline->submit(",
+    attach_state
+  );
+  ASSERT_NE(output_guard, std::string::npos);
+  ASSERT_NE(state_map, std::string::npos);
+  ASSERT_NE(attach_state, std::string::npos);
+  ASSERT_NE(submit, std::string::npos);
+  EXPECT_LT(output_guard, state_map);
+  EXPECT_LT(state_map, attach_state);
+  EXPECT_LT(attach_state, submit);
+  EXPECT_EQ(count_text(conversion_tail, "publish_follow_progress("), 1u);
 }
 
 TEST(OfflineSbsWorker, SharedRendererGeometryAbiIsFullFrameOnly) {
@@ -1327,9 +1865,13 @@ TEST(OfflineSbsWorker, SelectsLowestCompatibleDefinedAv1Level) {
   // Packed 3840x1080 at the fixture's fastest 25 FPS interval needs level 5.0.
   EXPECT_EQ(offline_sbs::select_av1_level(media, 3840, 1080), "5.0");
 
-  // Small clips retain a low decoder requirement instead of being over-declared 6.x.
+  // The smoke's packed 2560x720 frame occupies a 2560x768 coded raster, whose
+  // 1,966,080 samples require level 4.0 even at the fixture's low frame rate.
   media.time_base = {1, 8};
   media.frames = {{1, 0, 1}};
+  EXPECT_EQ(offline_sbs::select_av1_level(media, 2560, 720), "4.0");
+
+  // Small clips retain a low decoder requirement instead of being over-declared 6.x.
   EXPECT_EQ(offline_sbs::select_av1_level(media, 640, 180), "2.0");
 
   // NVENC codes 180 visible lines in a 192-line AV1 superblock raster. At

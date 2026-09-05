@@ -1998,8 +1998,12 @@ namespace offline_sbs {
       const fs::path &path,
       std::string &error,
       const std::uintmax_t max_bytes = max_contract_bytes,
-      std::string *content_sha256 = nullptr
+      std::string *content_sha256 = nullptr,
+      bool *acquisition_failed = nullptr
     ) {
+      if (acquisition_failed) {
+        *acquisition_failed = false;
+      }
       std::string serialized;
 #ifdef _WIN32
       const HANDLE handle = CreateFileW(
@@ -2012,6 +2016,9 @@ namespace offline_sbs {
         nullptr
       );
       if (handle == INVALID_HANDLE_VALUE) {
+        if (acquisition_failed) {
+          *acquisition_failed = true;
+        }
         error =
           "cannot open contract without following links (Windows error " +
           std::to_string(GetLastError()) + ")";
@@ -2029,6 +2036,9 @@ namespace offline_sbs {
         (information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
       ) {
         CloseHandle(handle);
+        if (!inspected && acquisition_failed) {
+          *acquisition_failed = true;
+        }
         error =
           "contract is not a no-follow regular file (Windows error " +
           std::to_string(inspect_error) + ")";
@@ -2053,6 +2063,9 @@ namespace offline_sbs {
         ) {
           const auto read_error = GetLastError();
           CloseHandle(handle);
+          if (acquisition_failed) {
+            *acquisition_failed = true;
+          }
           error =
             "cannot read the pinned contract (Windows error " +
             std::to_string(read_error) + ")";
@@ -2064,6 +2077,9 @@ namespace offline_sbs {
       if (!GetFileInformationByHandle(handle, &final_information)) {
         const auto inspect_error = GetLastError();
         CloseHandle(handle);
+        if (acquisition_failed) {
+          *acquisition_failed = true;
+        }
         error =
           "cannot re-inspect the pinned contract (Windows error " +
           std::to_string(inspect_error) + ")";
@@ -2074,6 +2090,9 @@ namespace offline_sbs {
         final_information.nFileSizeLow;
       if (final_bytes != bytes) {
         CloseHandle(handle);
+        if (acquisition_failed) {
+          *acquisition_failed = true;
+        }
         error = "contract size changed while it was being read";
         return std::nullopt;
       }
@@ -2081,18 +2100,25 @@ namespace offline_sbs {
 #else
       const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
       if (fd < 0) {
+        if (acquisition_failed) {
+          *acquisition_failed = true;
+        }
         error =
           "cannot open contract without following links: " +
           std::string {std::strerror(errno)};
         return std::nullopt;
       }
       struct stat information {};
+      const int inspect_status = ::fstat(fd, &information);
       if (
-        ::fstat(fd, &information) != 0 ||
+        inspect_status != 0 ||
         !S_ISREG(information.st_mode)
       ) {
         const auto inspect_error = errno;
         ::close(fd);
+        if (inspect_status != 0 && acquisition_failed) {
+          *acquisition_failed = true;
+        }
         error =
           "contract is not a no-follow regular file: " +
           std::string {std::strerror(inspect_error)};
@@ -2117,6 +2143,9 @@ namespace offline_sbs {
         if (read <= 0) {
           const auto read_error = errno;
           ::close(fd);
+          if (acquisition_failed) {
+            *acquisition_failed = true;
+          }
           error =
             "cannot read the pinned contract: " +
             std::string {std::strerror(read_error)};
@@ -2128,6 +2157,9 @@ namespace offline_sbs {
       if (::fstat(fd, &final_information) != 0) {
         const auto inspect_error = errno;
         ::close(fd);
+        if (acquisition_failed) {
+          *acquisition_failed = true;
+        }
         error =
           "cannot re-inspect the pinned contract: " +
           std::string {std::strerror(inspect_error)};
@@ -2135,6 +2167,9 @@ namespace offline_sbs {
       }
       if (final_information.st_size != information.st_size) {
         ::close(fd);
+        if (acquisition_failed) {
+          *acquisition_failed = true;
+        }
         error = "contract size changed while it was being read";
         return std::nullopt;
       }
@@ -4690,11 +4725,29 @@ namespace offline_sbs {
             !time_error &&
             (force_read || write_time != last_progress_write)
           ) {
-            value = read_json_contract(
-              context.worker_progress,
-              contract_error,
-              max_progress_contract_bytes
-            );
+            // Worker progress is an atomic but intentionally non-durable live handoff. A
+            // filesystem filter can briefly deny the newly replaced name, so retry only this
+            // exceptional read path. There is no delay before a normal progress read.
+            constexpr int transient_progress_read_attempts = 50;
+            for (int attempt = 0;
+                 attempt < transient_progress_read_attempts;
+                 ++attempt) {
+              contract_error.clear();
+              bool acquisition_failure = false;
+              value = read_json_contract(
+                context.worker_progress,
+                contract_error,
+                max_progress_contract_bytes,
+                nullptr,
+                &acquisition_failure
+              );
+              if (value || !acquisition_failure) {
+                break;
+              }
+              if (attempt + 1 < transient_progress_read_attempts) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+              }
+            }
           }
         }, filesystem_error);
         if (!progress_read) {

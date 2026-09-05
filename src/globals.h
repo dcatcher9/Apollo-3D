@@ -48,7 +48,6 @@ namespace mail {
   MAIL(invalidate_ref_frames);
   MAIL(gamepad_feedback);
   MAIL(hdr);
-  MAIL(sbs_mode);
   MAIL(sbs_depth_status);
   MAIL(sbs_telemetry);
   MAIL(video_mode);

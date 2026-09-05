@@ -1693,11 +1693,12 @@ namespace proc {
     if (change_status != ERROR_SUCCESS || !settle_at(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height))) {
       BOOST_LOG(error) << "The virtual display did not settle at the requested live mode "sv
                        << width << 'x' << height << "; rolling back."sv;
-      if (!roll_back()) {
+      const bool rollback_succeeded = roll_back();
+      if (!rollback_succeeded) {
         BOOST_LOG(error) << "The virtual display could not be restored to its previous mode. The "
-                            "session continues, but the client should reconnect."sv;
+                            "live presentation state is unproven; the client must reconnect."sv;
       }
-      return live_video_mode_result_e::failed;
+      return live_video_mode_failure_result(rollback_succeeded);
     }
 
     republish_display();
@@ -1709,11 +1710,12 @@ namespace proc {
                           "mode change; rolling back."sv;
       stop_hdr_worker();
       _hdr_worker_state.reset();
-      if (!roll_back()) {
+      const bool rollback_succeeded = roll_back();
+      if (!rollback_succeeded) {
         BOOST_LOG(error) << "The virtual display could not be restored to its previous mode. The "
-                            "session continues, but the client should reconnect."sv;
+                            "live presentation state is unproven; the client must reconnect."sv;
       }
-      return live_video_mode_result_e::failed;
+      return live_video_mode_failure_result(rollback_succeeded);
     }
 
     // Commit last, exactly like reconfigure_retained_session: every fallible display operation has

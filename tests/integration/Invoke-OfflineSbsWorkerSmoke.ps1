@@ -59,7 +59,12 @@ param(
   [string] $FixtureColor = 'sdr',
 
   [ValidateRange(16, 4096)]
-  [int] $TransientRasterMiB = 64,
+  # The deterministic 1280x720 SDR fixture needs slightly more than 64 MiB for
+  # the conservative two-source/two-SBS overlap reservation. Keep the default
+  # on the production asynchronous path while allowing callers to exercise the
+  # bounded one-source/synchronous-encoder fallback with a smaller explicit
+  # value; CPU serialization remains on its one-slot worker thread.
+  [int] $TransientRasterMiB = 128,
 
   [switch] $KeepArtifacts
 )
@@ -1104,6 +1109,34 @@ title=Smoke chapter
     [long] $runtimeContract.output_sbs_height -eq
       [long] $runtimeContract.output_eye_height
   ) 'direct conversion SBS geometry disagrees with its resolved online renderer geometry'
+
+  # The overlap reservation includes pipeline-owned CPU residency, not just
+  # files: each of two SBS slots reserves its tight snapshot, serializer
+  # scratch, and serialized artifact. Equality proves this multi-frame smoke
+  # selected the bounded asynchronous path without adding a wire diagnostic.
+  $sbsPixels = [long] $sbsContract.width * [long] $sbsContract.height
+  if ($fixtureIsHdr) {
+    $snapshotBytesPerSlot = 8L * $sbsPixels
+    $serializerScratchBytesPerSlot = 12L * [long] $sbsContract.width
+    $serializedBytesPerSlot = 12L * $sbsPixels + 128L
+  } else {
+    $snapshotBytesPerSlot = 4L * $sbsPixels
+    $serializerScratchBytesPerSlot = 4L * $sbsPixels + 1L * 1024L * 1024L
+    $serializedBytesPerSlot = 8L * $sbsPixels + 1L * 1024L * 1024L
+  }
+  $expectedOverlapBytes =
+    2L * [long] $result.cache.analysis_source_raster_bytes +
+    2L * (
+      $snapshotBytesPerSlot +
+      $serializerScratchBytesPerSlot +
+      $serializedBytesPerSlot
+    )
+  Assert-Contract (
+    $expectedOverlapBytes -le [long] $result.cache.hard_cap_bytes
+  ) 'smoke hard cap no longer selects the bounded asynchronous conversion path'
+  Assert-Contract (
+    [long] $result.cache.peak_live_raster_bytes -eq $expectedOverlapBytes
+  ) 'worker did not attest the complete two-source/two-SBS overlap reservation'
   Assert-Contract (
     $sbsContract.frame_format -eq $runtimeContract.output_frame_format -and
     $sbsContract.transfer -eq $runtimeContract.output_transfer -and
@@ -1265,10 +1298,12 @@ title=Smoke chapter
     -RequireTenBit $fixtureIsHdr
   $outputVideo = @(Get-StreamsOfType -Probe $outputProbe -Type 'video')[0]
   if ($Codec -eq 'av1_nvenc') {
+    # The fixed 2560x720 fixture occupies a 2560x768 64x64 coded raster. Its
+    # 1,966,080 samples exceed level 3.1 and fit the level 4.0 limit.
     Assert-Contract (
       $null -ne $outputVideo.PSObject.Properties['level'] -and
-      [int] $outputVideo.level -eq 0
-    ) 'AV1 smoke fixture must use the lowest compatible defined level 2.0'
+      [int] $outputVideo.level -eq 8
+    ) 'AV1 smoke fixture must use the lowest compatible defined level 4.0'
   }
   Assert-VideoTimeline `
     -SourceFrames $sourceFrames `

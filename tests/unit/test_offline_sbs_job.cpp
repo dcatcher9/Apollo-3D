@@ -491,6 +491,38 @@ TEST(OfflineSbsJob, NativeWorkerForcesFinalProgressDrainBeforeExitStatus) {
     runner.find("force_read || write_time != last_progress_write"),
     std::string::npos
   );
+  const auto transient_read_bound = runner.find(
+    "constexpr int transient_progress_read_attempts = 50;"
+  );
+  const auto progress_read = runner.find(
+    "value = read_json_contract(",
+    transient_read_bound
+  );
+  const auto successful_read = runner.find(
+    "if (value || !acquisition_failure)",
+    progress_read
+  );
+  const auto retry_guard = runner.find(
+    "if (attempt + 1 < transient_progress_read_attempts)",
+    successful_read
+  );
+  const auto retry_wait = runner.find(
+    "std::this_thread::sleep_for(std::chrono::milliseconds(2))",
+    retry_guard
+  );
+  ASSERT_NE(transient_read_bound, std::string::npos);
+  ASSERT_NE(progress_read, std::string::npos);
+  ASSERT_NE(successful_read, std::string::npos);
+  ASSERT_NE(retry_guard, std::string::npos);
+  ASSERT_NE(retry_wait, std::string::npos);
+  EXPECT_NE(
+    runner.find("&acquisition_failure", progress_read),
+    std::string::npos
+  );
+  EXPECT_LT(progress_read, successful_read);
+  EXPECT_LT(successful_read, retry_guard)
+    << "A normal read or immutable parse failure must not take the acquisition retry";
+  EXPECT_LT(retry_guard, retry_wait);
 }
 
 TEST(OfflineSbsJob, EvaluationDoesNotRequireOrTrustAnEncoderSelection) {

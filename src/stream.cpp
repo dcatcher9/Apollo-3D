@@ -82,7 +82,6 @@ namespace stream {
     constexpr std::uint16_t frame_fec_status = 0x5502;
     constexpr std::uint16_t set_rgb_led_feedback = 0x5502;
     constexpr std::uint16_t set_adaptive_triggers = 0x5503;
-    constexpr std::uint16_t set_sbs_mode = 0x3003;
     constexpr std::uint16_t sbs_debug_dump = 0x3004;
     constexpr std::uint16_t depth_status = 0x3006;
     // 0x3005 is retired (Set Depth Model); older clients may still emit it, so it is not reused.
@@ -240,28 +239,18 @@ namespace stream {
     std::uint8_t phase;  // 0 idle/failure, 1 engine load/build, 2 ready, 3 device-pipeline init
   };
 
-  // Client->host live stream geometry/rate change (Apollo protocol extension 0x3007). The frame
-  // rate is carried in hundredths of a hertz so fractional rates (23.976, 29.97) survive the trip.
-  // `bitrate_kbps` is the total wire budget, exactly as RTSP ANNOUNCE reports it; the host applies
-  // its own clamp and FEC/audio deduction before the value reaches the encoder.
-  struct control_set_video_mode_t {
-    std::uint16_t width;
-    std::uint16_t height;
-    std::uint16_t framerate_x100;
-    // Opaque client-generated correlation token, echoed verbatim in the 0x3008 acknowledgement.
-    // The host never validates it and never infers an ordering from it.
-    std::uint16_t request_id;
-    std::uint32_t bitrate_kbps;
-  };
-
   // Host->client acknowledgement of a 0x3007 request (Apollo protocol extension 0x3008). The body
   // is a raw byte array so its exact little-endian layout is owned by
-  // encode_live_video_mode_ack_payload() and cannot drift with struct packing.
-  struct control_live_video_mode_ack_t {
+  // encode_atomic_presentation_ack_payload() and cannot drift with struct packing.
+  struct control_live_video_mode_ack_v2_t {
     control_header_v2 header;
 
-    std::uint8_t body[LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE];
+    std::uint8_t body[ATOMIC_PRESENTATION_V2_ACK_PAYLOAD_SIZE];
   };
+  static_assert(
+    sizeof(control_live_video_mode_ack_v2_t) ==
+    sizeof(control_header_v2) + ATOMIC_PRESENTATION_V2_ACK_PAYLOAD_SIZE
+  );
 
   struct control_sbs_telemetry_state_t {
     control_header_v2 header;
@@ -311,33 +300,104 @@ namespace stream {
     return live_video_mode_ack_e::failed;
   }
 
-  bool encode_live_video_mode_ack_payload(
+  live_video_mode_request_decode_e decode_live_video_mode_request_payload(
+    std::string_view payload,
+    live_video_mode_wire_request_t &request
+  ) noexcept {
+    request = {};
+    const auto *bytes = reinterpret_cast<const std::uint8_t *>(payload.data());
+    const auto read_u16 = [&](std::size_t offset) {
+      return static_cast<std::uint16_t>(bytes[offset]) |
+             static_cast<std::uint16_t>(bytes[offset + 1] << 8);
+    };
+    const auto read_u32 = [&](std::size_t offset) {
+      return static_cast<std::uint32_t>(bytes[offset]) |
+             (static_cast<std::uint32_t>(bytes[offset + 1]) << 8) |
+             (static_cast<std::uint32_t>(bytes[offset + 2]) << 16) |
+             (static_cast<std::uint32_t>(bytes[offset + 3]) << 24);
+    };
+
+    if (payload.size() != ATOMIC_PRESENTATION_V2_REQUEST_PAYLOAD_SIZE) {
+      return live_video_mode_request_decode_e::invalid;
+    }
+
+    request.protocol_version = bytes[0];
+    request.desired_sbs_mode = bytes[1];
+    request.flags = read_u16(2);
+    request.request_id = read_u32(4);
+    request.source_width = read_u16(8);
+    request.source_height = read_u16(10);
+    request.framerate_x100 = read_u32(12);
+    request.bitrate_kbps = read_u32(16);
+    return request.protocol_version == ATOMIC_PRESENTATION_VERSION ?
+             live_video_mode_request_decode_e::v2 :
+             live_video_mode_request_decode_e::unsupported_version;
+  }
+
+  live_video_mode_ack_t make_live_video_mode_ack(
+    std::uint32_t request_id,
+    live_video_mode_ack_e status,
+    const video::effective_video_mode_t &mode
+  ) noexcept {
+    return {
+      request_id,
+      status,
+      mode.framerateX100,
+      mode.bitrate,
+      mode.sbs_mode,
+      mode.source_width,
+      mode.source_height,
+      mode.encoded_width,
+      mode.encoded_height,
+      mode.generation,
+    };
+  }
+
+  bool encode_atomic_presentation_ack_payload(
     const live_video_mode_ack_t &ack,
-    std::uint8_t (&out)[LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE]
+    std::uint8_t (&out)[ATOMIC_PRESENTATION_V2_ACK_PAYLOAD_SIZE]
   ) {
     constexpr std::int64_t u16_max = std::numeric_limits<std::uint16_t>::max();
     constexpr std::int64_t u32_max = std::numeric_limits<std::uint32_t>::max();
-    if (ack.request_id < 0 || ack.request_id > u16_max || ack.applied_width < 0 || ack.applied_width > u16_max || ack.applied_height < 0 || ack.applied_height > u16_max || ack.applied_framerate_x100 < 0 || ack.applied_framerate_x100 > u16_max || ack.applied_bitrate_kbps < 0 || ack.applied_bitrate_kbps > u32_max) {
+    if (ack.status < live_video_mode_ack_e::applied ||
+        ack.status > live_video_mode_ack_e::failed ||
+        ack.request_id < 0 || ack.request_id > u32_max ||
+        (ack.applied_sbs_mode != video::SBS_OFF && ack.applied_sbs_mode != video::SBS_AI) ||
+        ack.applied_source_width < 0 || ack.applied_source_width > u16_max ||
+        ack.applied_source_height < 0 || ack.applied_source_height > u16_max ||
+        ack.applied_encoded_width < 0 || ack.applied_encoded_width > u16_max ||
+        ack.applied_encoded_height < 0 || ack.applied_encoded_height > u16_max ||
+        ack.applied_framerate_x100 < 0 || ack.applied_framerate_x100 > u32_max ||
+        ack.applied_bitrate_kbps < 0 || ack.applied_bitrate_kbps > u32_max ||
+        ack.applied_generation == 0) {
       return false;
     }
 
-    const std::uint16_t fields[5] = {
-      static_cast<std::uint16_t>(ack.request_id),
-      static_cast<std::uint16_t>(ack.status),
-      static_cast<std::uint16_t>(ack.applied_width),
-      static_cast<std::uint16_t>(ack.applied_height),
-      static_cast<std::uint16_t>(ack.applied_framerate_x100),
+    std::uint8_t encoded[ATOMIC_PRESENTATION_V2_ACK_PAYLOAD_SIZE] {};
+    const auto write_u16 = [&](std::size_t offset, std::uint16_t value) {
+      encoded[offset] = static_cast<std::uint8_t>(value & 0xFF);
+      encoded[offset + 1] = static_cast<std::uint8_t>((value >> 8) & 0xFF);
     };
-    for (std::size_t i = 0; i < 5; ++i) {
-      out[i * 2] = static_cast<std::uint8_t>(fields[i] & 0xFF);
-      out[i * 2 + 1] = static_cast<std::uint8_t>((fields[i] >> 8) & 0xFF);
-    }
+    const auto write_u32 = [&](std::size_t offset, std::uint32_t value) {
+      encoded[offset] = static_cast<std::uint8_t>(value & 0xFF);
+      encoded[offset + 1] = static_cast<std::uint8_t>((value >> 8) & 0xFF);
+      encoded[offset + 2] = static_cast<std::uint8_t>((value >> 16) & 0xFF);
+      encoded[offset + 3] = static_cast<std::uint8_t>((value >> 24) & 0xFF);
+    };
 
-    const auto bitrate = static_cast<std::uint32_t>(ack.applied_bitrate_kbps);
-    out[10] = static_cast<std::uint8_t>(bitrate & 0xFF);
-    out[11] = static_cast<std::uint8_t>((bitrate >> 8) & 0xFF);
-    out[12] = static_cast<std::uint8_t>((bitrate >> 16) & 0xFF);
-    out[13] = static_cast<std::uint8_t>((bitrate >> 24) & 0xFF);
+    encoded[0] = ATOMIC_PRESENTATION_VERSION;
+    encoded[1] = static_cast<std::uint8_t>(ack.status);
+    encoded[2] = static_cast<std::uint8_t>(ack.applied_sbs_mode);
+    encoded[3] = 0;  // response flags, reserved
+    write_u32(4, static_cast<std::uint32_t>(ack.request_id));
+    write_u32(8, ack.applied_generation);
+    write_u16(12, static_cast<std::uint16_t>(ack.applied_source_width));
+    write_u16(14, static_cast<std::uint16_t>(ack.applied_source_height));
+    write_u16(16, static_cast<std::uint16_t>(ack.applied_encoded_width));
+    write_u16(18, static_cast<std::uint16_t>(ack.applied_encoded_height));
+    write_u32(20, static_cast<std::uint32_t>(ack.applied_framerate_x100));
+    write_u32(24, static_cast<std::uint32_t>(ack.applied_bitrate_kbps));
+    std::copy(std::begin(encoded), std::end(encoded), std::begin(out));
     return true;
   }
 
@@ -655,8 +715,8 @@ namespace stream {
   struct live_video_mode_request_t {
     safe::mail_t mail;
     std::shared_ptr<video_channel_t> video;
-    // What the encode loop is really running. A refused request is answered with this, so the
-    // client learns the mode still in effect instead of getting its rejected request back.
+    // The last encoder-proven mode. A normal refusal leaves it in effect; after an unprovable
+    // desktop rollback it remains only the recovery target carried with NEEDS_RECONNECT.
     std::shared_ptr<video::effective_video_mode_publisher_t> effective_mode;
     video::video_mode_change_t change;
     std::uint32_t launch_session_id;
@@ -722,6 +782,10 @@ namespace stream {
       // session lifetime so worker/encode-thread replies cannot disappear between raise() and
       // the control thread's next drain.
       safe::mail_raw_t::queue_t<live_video_mode_ack_t> live_video_mode_ack_queue;
+      // A syntactically valid v2 control message can arrive just before the initial encoder has
+      // published generation 1. Preserve any immediate validation refusal and correlate it once
+      // a complete applied state exists; v2 never emits an unproven generation-zero ACK.
+      std::vector<live_video_mode_ack_t> deferred_live_video_mode_acks;
       safe::mail_raw_t::event_t<video::sbs_telemetry_snapshot_t> sbs_telemetry_event;
       std::optional<video::sbs_telemetry_snapshot_t> latest_sbs_telemetry;
       std::shared_ptr<video::sbs_telemetry_subscription_t> sbs_telemetry_subscription;
@@ -735,8 +799,8 @@ namespace stream {
     std::string device_uuid;
     std::uint64_t client_policy_generation;
     std::atomic<crypto::PERM> permission;
-    // Runtime request latch, updated by 0x3003 before the encode rebuild completes. Dump 3D is
-    // accepted only while the requesting session is explicitly in Host SBS AI mode.
+    // Session-shared Host SBS mode. Atomic-presentation v2 updates it with the immutable mode
+    // transaction; Dump 3D is accepted only while this session is explicitly in AI mode.
     std::shared_ptr<std::atomic<int>> requested_sbs_mode =
       std::make_shared<std::atomic<int>>(::video::SBS_OFF);
 
@@ -782,7 +846,7 @@ namespace stream {
     void reject_live_video_mode(
       const safe::mail_t &mail,
       const std::shared_ptr<video::effective_video_mode_publisher_t> &effective_mode,
-      int request_id,
+      std::uint32_t request_id,
       live_video_mode_ack_e status
     ) {
       const auto mode = effective_mode ?
@@ -790,14 +854,7 @@ namespace stream {
                           video::effective_video_mode_t {};
       queue_live_video_mode_ack(
         mail,
-        live_video_mode_ack_t {
-          request_id,
-          status,
-          mode.width,
-          mode.height,
-          mode.framerateX100,
-          mode.bitrate,
-        }
+        make_live_video_mode_ack(request_id, status, mode)
       );
     }
 
@@ -943,8 +1000,8 @@ namespace stream {
           }
 
           const auto host_sbs_rejects_geometry = [&]() {
-            return session.requested_sbs_mode->load(std::memory_order_acquire) ==
-                     ::video::SBS_AI &&
+            const int desired_sbs_mode = job->change.requested_sbs_mode;
+            return desired_sbs_mode == ::video::SBS_AI &&
                    !models::host_sbs_v2_source_resolution_is_supported(
                 static_cast<std::uint32_t>(job->change.width),
                 static_cast<std::uint32_t>(job->change.height)
@@ -997,26 +1054,30 @@ namespace stream {
               << "Host SBS V2 became active while live video mode "sv
               << job->change.width << 'x' << job->change.height
               << " was being applied; rejecting the transaction."sv;
+            bool rollback_restored_desktop = true;
             if (display_changed && job->effective_mode) {
               const auto previous = job->effective_mode->current();
               const auto rollback = proc::proc.apply_live_video_mode(
-                previous.width,
-                previous.height,
+                previous.source_width > 0 ? previous.source_width : previous.width,
+                previous.source_height > 0 ? previous.source_height : previous.height,
                 previous.framerateX100 * 10,
                 job->launch_session_id
               );
               if (rollback != proc::live_video_mode_result_e::applied &&
                   rollback != proc::live_video_mode_result_e::unchanged) {
+                rollback_restored_desktop = false;
                 BOOST_LOG(error)
                   << "Could not restore the prior desktop after rejecting a raced Host SBS "sv
-                     "quality transaction."sv;
+                     "quality transaction; the client will be told to reconnect."sv;
               }
             }
             reject_live_video_mode(
               job->mail,
               job->effective_mode,
               job->change.request_id,
-              live_video_mode_ack_e::rejected_invalid
+              rollback_restored_desktop ?
+                live_video_mode_ack_e::rejected_invalid :
+                live_video_mode_ack_e::rejected_needs_reconnect
             );
             std::lock_guard lock(state.mutex);
             (void) state.serial_gate.finish(transaction_id);
@@ -1037,7 +1098,8 @@ namespace stream {
             case proc::live_video_mode_result_e::needs_reconnect:
               BOOST_LOG(warning) << "type [IDX_SET_VIDEO_MODE]: "sv << job->change.width << 'x'
                                  << job->change.height << " cannot be applied without reconnecting for ["sv
-                                 << job->client_name << "]; the stream keeps its current mode."sv;
+                                 << job->client_name
+                                 << "]; the client must reconnect before trusting presentation state."sv;
               reject_live_video_mode(
                 job->mail,
                 job->effective_mode,
@@ -1097,6 +1159,7 @@ namespace stream {
             BOOST_LOG(error) << "Live video-mode completion matched a token but not its client request id."sv;
           }
 
+          bool rollback_restored_desktop = true;
           if (!completion->applied && display_changed) {
             BOOST_LOG(warning) << "Restoring the last encodable virtual desktop mode "
                                << completion->desktop_mode.width << 'x'
@@ -1110,8 +1173,9 @@ namespace stream {
             );
             if (rollback_result != proc::live_video_mode_result_e::applied &&
                 rollback_result != proc::live_video_mode_result_e::unchanged) {
+              rollback_restored_desktop = false;
               BOOST_LOG(error) << "The virtual desktop could not be restored after a live encoder "
-                                  "rollback; a later request may require reconnecting."sv;
+                                  "rollback; the client will be told to reconnect."sv;
             }
           }
 
@@ -1121,16 +1185,15 @@ namespace stream {
           job->video->idr_pacing_plan_logged.store(false, std::memory_order_release);
           queue_live_video_mode_ack(
             job->mail,
-            live_video_mode_ack_t {
+            make_live_video_mode_ack(
               job->change.request_id,
               completion->applied ?
                 live_video_mode_ack_e::applied :
-                live_video_mode_ack_e::failed,
-              completion->mode.width,
-              completion->mode.height,
-              completion->mode.framerateX100,
-              completion->mode.bitrate,
-            }
+                (rollback_restored_desktop ?
+                   live_video_mode_ack_e::failed :
+                   live_video_mode_ack_e::rejected_needs_reconnect),
+              completion->mode
+            )
           );
 
           {
@@ -1846,27 +1909,29 @@ namespace stream {
       return -1;
     }
 
-    control_live_video_mode_ack_t plaintext {};
+    control_live_video_mode_ack_v2_t plaintext {};
     plaintext.header.type = control_packet::live_video_mode_ack;
-    plaintext.header.payloadLength = sizeof(control_live_video_mode_ack_t) - sizeof(control_header_v2);
-    if (!encode_live_video_mode_ack_payload(ack, plaintext.body)) {
-      BOOST_LOG(error) << "Refusing to send a live video-mode acknowledgement that does not fit the wire format"sv;
+    plaintext.header.payloadLength =
+      sizeof(control_live_video_mode_ack_v2_t) - sizeof(control_header_v2);
+    if (!encode_atomic_presentation_ack_payload(ack, plaintext.body)) {
+      BOOST_LOG(error) << "Refusing to send an atomic-presentation acknowledgement that does not fit the v2 wire format"sv;
       return -1;
     }
+    const int send_result = send_control_packet(
+      session,
+      session->broadcast_ref->control_server,
+      plaintext
+    );
 
-    if (send_control_packet(
-          session,
-          session->broadcast_ref->control_server,
-          plaintext
-        ) != 0) {
+    if (send_result != 0) {
       TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
       BOOST_LOG(warning) << "Couldn't send live video-mode acknowledgement to ["sv << addr << ':' << port << ']';
       return -1;
     }
 
-    BOOST_LOG(debug) << "Sent live video-mode ack: request "sv << ack.request_id
-                     << " status="sv << static_cast<int>(ack.status) << ", in effect "sv
-                     << ack.applied_width << 'x' << ack.applied_height
+    BOOST_LOG(debug) << "Sent atomic-presentation v2 ack: request "sv << ack.request_id
+                     << " status="sv << static_cast<int>(ack.status) << ", encoded "sv
+                     << ack.applied_encoded_width << 'x' << ack.applied_encoded_height
                      << '@' << (ack.applied_framerate_x100 / 100.0) << "Hz "sv
                      << ack.applied_bitrate_kbps << "kbps"sv;
     return 0;
@@ -1998,73 +2063,6 @@ namespace stream {
       session->video->invalidate_ref_frames_events->raise(std::make_pair(firstFrame, lastFrame));
     });
 
-    server->map(control_packet::set_sbs_mode, sizeof(std::uint8_t), [server](session_t *session, const std::string_view &payload) {
-      // Host-side SBS mode requested by the client (Apollo protocol extension).
-      // Must match SBS_MODE_* in the client's moonlight-common-c Limelight.h.
-      auto mode = *(uint8_t *) payload.data();
-      if (mode > ::video::SBS_AI) {
-        BOOST_LOG(warning) << "type [IDX_SET_SBS_MODE]: unknown mode "sv << (int) mode
-                           << " from ["sv << session::client_name(*session) << "]; ignored"sv;
-        return;
-      }
-      if (mode == ::video::SBS_AI) {
-        const auto effective_mode = session->config.monitor.effective_mode ?
-                                      session->config.monitor.effective_mode->current() :
-                                      ::video::effective_video_mode_t {
-                                        session->config.monitor.width,
-                                        session->config.monitor.height,
-                                        session->config.monitor.framerateX100,
-                                        session->config.monitor.bitrate,
-                                      };
-        const auto host_sbs_rejection =
-          effective_mode.width > 0 && effective_mode.height > 0 ?
-            models::host_sbs_v2_source_resolution_rejection_reason(
-              static_cast<std::uint32_t>(effective_mode.width),
-              static_cast<std::uint32_t>(effective_mode.height)
-            ) :
-            std::string_view {"source extent is empty"};
-        if (!host_sbs_rejection.empty()) {
-          const auto fitted = effective_mode.width > 0 && effective_mode.height > 0 ?
-                                models::fit_host_sbs_v2_depth_tensor_shape(
-                                  static_cast<std::uint32_t>(effective_mode.width),
-                                  static_cast<std::uint32_t>(effective_mode.height)
-                                ) :
-                                models::depth_tensor_shape_t {};
-          BOOST_LOG(warning) << "Rejecting Host SBS V2 toggle at "sv
-                             << effective_mode.width << 'x' << effective_mode.height
-                             << " for ["sv << session::client_name(*session)
-                             << "]: "sv << host_sbs_rejection
-                             << "; fitted depth tensor "sv << fitted.width << 'x'
-                             << fitted.height << '.';
-          session->mail->event<int>(mail::sbs_depth_status)->raise(0);
-          return;
-        }
-      }
-      std::string_view mode_name = mode == ::video::SBS_OFF ? "OFF"sv : "AI"sv;
-      BOOST_LOG(info) << "type [IDX_SET_SBS_MODE]: client requested host SBS "sv << mode_name
-                      << " ("sv << (int) mode << ") for ["sv
-                      << session::client_name(*session) << ']';
-      session->requested_sbs_mode->store((int) mode, std::memory_order_release);
-      if (mode != ::video::SBS_AI && session->video->sbs_debug_dump_pending) {
-        session->video->sbs_debug_dump_pending->store(false, std::memory_order_release);
-      }
-
-      // Turning SBS off tears down the depth estimator with no replacement, so mark the depth
-      // engine idle here (display_vram only ever sets loading/ready). This clears any "loading"
-      // indicator on the client if the user switches to Normal mid-spin-up.
-      if (mode == ::video::SBS_OFF) {
-        session->mail->event<int>(mail::sbs_depth_status)->raise(0);
-      }
-
-      // Hand the requested mode to this session's video pipeline. capture_async consumes it and
-      // rebuilds the encode device at the new resolution (W x H for OFF, 2W x H for AI). The
-      // pinned authenticated live depth model is prepared once during host startup.
-      // Log the recalculated pacing plan after the output dimensions change.
-      session->video->pacing_plan_logged.store(false, std::memory_order_release);
-      session->video->idr_pacing_plan_logged.store(false, std::memory_order_release);
-      session->mail->event<int>(mail::sbs_mode)->raise((int) mode);
-    });
-
     server->map(control_packet::sbs_telemetry_subscription, [](session_t *session, const std::string_view &payload) {
       if (!session->config.client_supports_sbs_telemetry) {
         BOOST_LOG(warning) << "Ignoring SBS telemetry subscription from a client that did not "
@@ -2133,19 +2131,31 @@ namespace stream {
       }
     });
 
-    server->map(control_packet::set_video_mode, sizeof(control_set_video_mode_t), [](session_t *session, const std::string_view &payload) {
-      // Live resolution/frame-rate/bitrate change requested by the client (Apollo protocol
-      // extension). The encode session is rebuilt in place exactly as the 0x3003 SBS toggle
-      // does; the capture session, the virtual display and the RTSP session all survive.
-      control_set_video_mode_t request {};
-      std::memcpy(&request, payload.data(), sizeof(request));
-      const int width = util::endian::little(request.width);
-      const int height = util::endian::little(request.height);
-      const int framerate_x100 = util::endian::little(request.framerate_x100);
-      // Opaque correlation token. It is never validated, never ordered on, and never acted upon;
-      // it is only carried through to the acknowledgement.
-      const int request_id = util::endian::little(request.request_id);
-      const std::int64_t requested_bitrate_kbps = util::endian::little(request.bitrate_kbps);
+    server->map(control_packet::set_video_mode, [](session_t *session, const std::string_view &payload) {
+      // The current host accepts only the exact 20-byte v2 transaction, which binds OFF/AI to
+      // source geometry, cadence, and wire bitrate. Clients must advertise the matching feature
+      // bit before using this proprietary control.
+      live_video_mode_wire_request_t request;
+      const auto decoded = decode_live_video_mode_request_payload(payload, request);
+      if (decoded == live_video_mode_request_decode_e::invalid) {
+        BOOST_LOG(warning) << "Dropping IDX_SET_VIDEO_MODE body with invalid exact size "sv
+                           << payload.size() << " (expected 20-byte atomic-presentation v2)"sv;
+        return;
+      }
+      if (decoded == live_video_mode_request_decode_e::unsupported_version) {
+        BOOST_LOG(warning) << "Dropping unsupported atomic-presentation version "sv
+                           << static_cast<unsigned>(request.protocol_version);
+        return;
+      }
+      if (!session->config.client_supports_atomic_presentation_v2) {
+        BOOST_LOG(warning) << "Ignoring atomic-presentation v2 request from a client that did not advertise ML_FF_ATOMIC_PRESENTATION_V2"sv;
+        return;
+      }
+
+      const int width = request.source_width;
+      const int height = request.source_height;
+      const auto framerate_x100_u32 = request.framerate_x100;
+      const std::int64_t requested_bitrate_kbps = request.bitrate_kbps;
 
       // A malformed request must never reach the encoder: capture_async cannot recover from a
       // failed non-SBS encoder creation and would tear the whole session down. Every rejection
@@ -2153,15 +2163,24 @@ namespace stream {
       // request and resynchronize instead of waiting out a timeout.
       const auto reject = [&](std::string_view reason) {
         BOOST_LOG(warning) << "type [IDX_SET_VIDEO_MODE]: ignoring "sv << width << 'x' << height
-                           << '@' << (framerate_x100 / 100.0) << " from ["sv
+                           << '@' << (framerate_x100_u32 / 100.0) << " from ["sv
                            << session::client_name(*session) << "]: "sv << reason;
         reject_live_video_mode(
           session->mail,
           session->config.monitor.effective_mode,
-          request_id,
+          request.request_id,
           live_video_mode_ack_e::rejected_invalid
         );
       };
+      if (request.flags != ATOMIC_PRESENTATION_V2_REQUEST_FLAGS_KNOWN) {
+        reject("v2 request flags contain unsupported bits"sv);
+        return;
+      }
+      if (request.desired_sbs_mode != ::video::SBS_OFF &&
+          request.desired_sbs_mode != ::video::SBS_AI) {
+        reject("v2 desired Host SBS mode must be OFF or AI"sv);
+        return;
+      }
       if (!is_valid_live_video_mode_dimension(width) || !is_valid_live_video_mode_dimension(height)) {
         reject("resolution must be even and within 2..16384"sv);
         return;
@@ -2171,16 +2190,18 @@ namespace stream {
           static_cast<std::uint32_t>(width),
           static_cast<std::uint32_t>(height)
         );
-      if (session->requested_sbs_mode->load(std::memory_order_acquire) ==
-            ::video::SBS_AI &&
+      const int desired_sbs_mode = static_cast<int>(request.desired_sbs_mode);
+      if (desired_sbs_mode == ::video::SBS_AI &&
           !host_sbs_rejection.empty()) {
         reject(std::format("Host SBS V2 rejects this resolution: {}", host_sbs_rejection));
         return;
       }
-      if (!is_valid_live_video_mode_framerate_x100(framerate_x100)) {
-        reject("frame rate must be within 1..1000 Hz"sv);
+      if (framerate_x100_u32 < LIVE_VIDEO_MODE_FRAMERATE_X100_MIN ||
+          framerate_x100_u32 > LIVE_VIDEO_MODE_FRAMERATE_X100_MAX) {
+        reject("v2 frame rate must be within 1..1000 Hz"sv);
         return;
       }
+      const int framerate_x100 = static_cast<int>(framerate_x100_u32);
       // Encoder width limits are deliberately not checked here: the encode loop owns the codec
       // capability snapshot and clamps an oversized request the same way it already caps an SBS
       // packed width. Clamping there cannot fail, whereas rejecting a creatable mode here would.
@@ -2213,9 +2234,12 @@ namespace stream {
       change.framerate = (framerate_x100 + 50) / 100;
       change.encodingFramerate = framerate_x100 * 10;
       change.bitrate = (int) bitrate_kbps;
-      change.request_id = request_id;
+      change.request_id = request.request_id;
+      change.requested_sbs_mode = desired_sbs_mode;
 
-      BOOST_LOG(info) << "type [IDX_SET_VIDEO_MODE]: client requested "sv << width << 'x' << height
+      BOOST_LOG(info) << "type [IDX_SET_VIDEO_MODE]: client requested atomic-presentation v2 "sv
+                      << (desired_sbs_mode == ::video::SBS_AI ? "AI "sv : "OFF "sv)
+                      << width << 'x' << height
                       << '@' << (framerate_x100 / 100.0) << "Hz "sv << requested_bitrate_kbps
                       << "kbps (encoder budget "sv << change.bitrate << "kbps) for ["sv
                       << session::client_name(*session) << ']';
@@ -2385,6 +2409,7 @@ namespace stream {
             if (server->_session->peer) {
               enet_peer_disconnect_now(server->_session->peer, 0);
             }
+            session->control.deferred_live_video_mode_acks.clear();
             session->control.peer = nullptr;
             server->_session->peer = nullptr;
             server->_session->session = nullptr;
@@ -2466,7 +2491,42 @@ namespace stream {
             auto &ack_queue = session->control.live_video_mode_ack_queue;
             while (server->_session->peer && ack_queue->peek()) {
               if (auto ack = ack_queue->pop(0ms)) {
-                send_live_video_mode_ack(session, *ack);
+                switch (classify_live_video_mode_ack_delivery(*ack)) {
+                  case live_video_mode_ack_delivery_e::send:
+                    send_live_video_mode_ack(session, *ack);
+                    break;
+                  case live_video_mode_ack_delivery_e::defer_until_initial_proof:
+                    if (session->control.deferred_live_video_mode_acks.size() <
+                        LIVE_VIDEO_MODE_ACK_QUEUE_LIMIT) {
+                      session->control.deferred_live_video_mode_acks.push_back(*ack);
+                    } else {
+                      BOOST_LOG(error) << "Atomic-presentation pre-proof ACK queue exceeded its session bound; closing the session"sv;
+                      session::stop(*session);
+                    }
+                    break;
+                  case live_video_mode_ack_delivery_e::fail_closed:
+                    BOOST_LOG(error) << "An APPLIED atomic-presentation ACK reached the control thread without a proven generation; closing the session"sv;
+                    session::stop(*session);
+                    break;
+                }
+              }
+            }
+            if (server->_session->peer &&
+                !session->control.deferred_live_video_mode_acks.empty() &&
+                session->config.monitor.effective_mode) {
+              const auto proven = session->config.monitor.effective_mode->current();
+              if (proven.generation != 0) {
+                for (const auto &deferred : session->control.deferred_live_video_mode_acks) {
+                  send_live_video_mode_ack(
+                    session,
+                    make_live_video_mode_ack(
+                      static_cast<std::uint32_t>(deferred.request_id),
+                      deferred.status,
+                      proven
+                    )
+                  );
+                }
+                session->control.deferred_live_video_mode_acks.clear();
               }
             }
           }
@@ -2487,6 +2547,7 @@ namespace stream {
       send_termination(*server, *session);
       session->shutdown_event->raise(true);
       session->controlEnd.raise(true);
+      session->control.deferred_live_video_mode_acks.clear();
       session->control.peer = nullptr;
       server->_session->peer = nullptr;
       server->_session->session = nullptr;
@@ -3939,6 +4000,12 @@ namespace stream {
           config.monitor.height,
           config.monitor.framerateX100 > 0 ? config.monitor.framerateX100 : config.monitor.framerate * 100,
           config.monitor.bitrate,
+          config.monitor.width,
+          config.monitor.height,
+          0,
+          0,
+          config.monitor.sbs_mode,
+          0,
         }
       );
       session->config.monitor.sbs_telemetry_subscription =

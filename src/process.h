@@ -153,9 +153,18 @@ namespace proc {
   enum class live_video_mode_result_e : int {
     applied,  ///< The desktop now presents the requested mode.
     unchanged,  ///< Nothing had to change; the encoder may rebuild immediately.
-    needs_reconnect,  ///< Not applicable live; only a fresh launch can deliver this mode.
+    needs_reconnect,  ///< A fresh launch is required; the live desktop may no longer be proven.
     failed,  ///< Attempted and rolled back; the session keeps its previous mode.
   };
+
+  /** A failed apply is retryable only when the previous desktop contract was proven restored. */
+  [[nodiscard]] constexpr live_video_mode_result_e live_video_mode_failure_result(
+    bool rollback_succeeded
+  ) noexcept {
+    return rollback_succeeded ?
+             live_video_mode_result_e::failed :
+             live_video_mode_result_e::needs_reconnect;
+  }
 
   class proc_t {
   public:

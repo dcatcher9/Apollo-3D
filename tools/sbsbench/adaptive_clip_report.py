@@ -302,10 +302,10 @@ def _validate_frame(payload: Any, line_number: int, config: dict[str, Any]) -> d
 class IncrementalTraceDecoder:
     """Validate an adaptive JSONL stream one complete record at a time.
 
-    Native follow-mode progress is published only after its matching trace line is durable. The
-    offline wrapper can therefore feed exactly one line per acknowledged frame without repeatedly
-    reparsing an ever-growing file. ``load_trace`` uses this same decoder so streaming and final
-    validation cannot drift.
+    Native follow-mode progress is published only after its matching trace snapshot is atomically
+    complete. The offline wrapper can therefore feed exactly one line per acknowledged frame
+    without repeatedly reparsing an ever-growing file. ``load_trace`` uses this same decoder so
+    streaming and final validation cannot drift.
     """
 
     def __init__(self) -> None:

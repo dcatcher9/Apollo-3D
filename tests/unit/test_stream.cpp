@@ -383,6 +383,70 @@ TEST(ControlPayloadValidationTests, EnforcesLiveVideoModeFrameRateBounds) {
   EXPECT_FALSE(stream::is_valid_live_video_mode_framerate_x100(stream::LIVE_VIDEO_MODE_FRAMERATE_X100_MAX + 1));
 }
 
+TEST(AtomicPresentationWireTests, DecodesExactV2GoldenVector) {
+  EXPECT_EQ(stream::ATOMIC_PRESENTATION_V2_REQUEST_PAYLOAD_SIZE, 20U);
+  EXPECT_EQ(stream::ATOMIC_PRESENTATION_V2_ACK_PAYLOAD_SIZE, 28U);
+  EXPECT_EQ(stream::ATOMIC_PRESENTATION_VERSION, 2U);
+
+  const std::array<std::uint8_t, 20> v2 {
+    0x02, 0x01, 0x00, 0x00,  // version, AI, flags=0
+    0xEF, 0xCD, 0xAB, 0x89,  // u32 request id
+    0x00, 0x14,  // source width 5120
+    0x70, 0x08,  // source height 2160
+    0x6A, 0x17, 0x00, 0x00,  // 59.94 Hz
+    0x50, 0xC3, 0x00, 0x00,  // 50000 kbps
+  };
+  stream::live_video_mode_wire_request_t request;
+  const auto decoded = stream::decode_live_video_mode_request_payload(
+    {reinterpret_cast<const char *>(v2.data()), v2.size()},
+    request
+  );
+  ASSERT_EQ(decoded, stream::live_video_mode_request_decode_e::v2);
+  EXPECT_EQ(request.protocol_version, stream::ATOMIC_PRESENTATION_VERSION);
+  EXPECT_EQ(request.desired_sbs_mode, video::SBS_AI);
+  EXPECT_EQ(request.flags, 0);
+  EXPECT_EQ(request.request_id, 0x89ABCDEFu);
+  EXPECT_EQ(request.source_width, 5120);
+  EXPECT_EQ(request.source_height, 2160);
+  EXPECT_EQ(request.framerate_x100, 5994u);
+  EXPECT_EQ(request.bitrate_kbps, 50000u);
+}
+
+TEST(AtomicPresentationWireTests, RejectsEveryNonExactBodyAndUnsupportedVersion) {
+  // The retired v1 body was 12 bytes; it is deliberately just another invalid size now.
+  for (const std::size_t size : {0U, 12U, 19U, 21U}) {
+    std::array<char, 21> bytes {};
+    stream::live_video_mode_wire_request_t request;
+    EXPECT_EQ(
+      stream::decode_live_video_mode_request_payload({bytes.data(), size}, request),
+      stream::live_video_mode_request_decode_e::invalid
+    ) << "size=" << size;
+  }
+
+  std::array<char, stream::ATOMIC_PRESENTATION_V2_REQUEST_PAYLOAD_SIZE> future {};
+  future[0] = 3;
+  stream::live_video_mode_wire_request_t request;
+  EXPECT_EQ(
+    stream::decode_live_video_mode_request_payload(
+      {future.data(), future.size()},
+      request
+    ),
+    stream::live_video_mode_request_decode_e::unsupported_version
+  );
+  EXPECT_EQ(request.protocol_version, 3);
+}
+
+TEST(AtomicPresentationNegotiationTests, PublishesMatchingHostAndClientFeatureBits) {
+  EXPECT_EQ(stream::CLIENT_FEATURE_ATOMIC_PRESENTATION_V2, 0x08u);
+  EXPECT_EQ(platf::platform_caps::atomic_presentation_v2, 0x20000000u);
+#ifdef _WIN32
+  EXPECT_NE(
+    platf::get_capabilities() & platf::platform_caps::atomic_presentation_v2,
+    0u
+  );
+#endif
+}
+
 TEST(LiveVideoModeSerialGateTests, CoalescesOnlyPendingRequestsAndWaitsThroughCompletion) {
   stream::detail::live_video_mode_serial_gate_t gate;
 
@@ -473,42 +537,102 @@ TEST(LiveVideoModeAckTests, WireStatusValuesAreFrozen) {
   EXPECT_EQ(static_cast<std::uint16_t>(stream::live_video_mode_ack_e::failed), 3);
 }
 
-TEST(LiveVideoModeAckTests, EncodesTheAppliedModeInWireOrder) {
-  const stream::live_video_mode_ack_t ack {
-    0xBEEF,
-    stream::live_video_mode_ack_e::rejected_needs_reconnect,
-    1920,
-    1080,
-    2997,
-    40000,
+TEST(AtomicPresentationAckTests, EncodesCompleteAppliedStateGoldenVector) {
+  const video::effective_video_mode_t effective {
+    4096,
+    1728,
+    5994,
+    38000,
+    5120,
+    2160,
+    8192,
+    1728,
+    video::SBS_AI,
+    0x10203040u,
   };
+  const auto ack = stream::make_live_video_mode_ack(
+    0x89ABCDEFu,
+    stream::live_video_mode_ack_e::applied,
+    effective
+  );
+  std::uint8_t payload[stream::ATOMIC_PRESENTATION_V2_ACK_PAYLOAD_SIZE] {};
+  ASSERT_TRUE(stream::encode_atomic_presentation_ack_payload(ack, payload));
 
-  std::uint8_t payload[stream::LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE] {};
-  ASSERT_TRUE(stream::encode_live_video_mode_ack_payload(ack, payload));
-
-  // u16 request_id, u16 status, u16 applied_width, u16 applied_height,
-  // u16 applied_framerate_x100, u32 applied_bitrate_kbps -- all little-endian, no padding. The
-  // trailing u32 lands on an odd multiple of two on purpose; the body is packed.
-  const std::uint8_t expected[stream::LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE] = {
-    0xEF,
-    0xBE,  // request_id 0xBEEF echoed verbatim
-    0x02,
-    0x00,  // rejected_needs_reconnect
-    0x80,
-    0x07,  // 1920
-    0x38,
-    0x04,  // 1080
-    0xB5,
-    0x0B,  // 2997
-    0x40,
-    0x9C,
-    0x00,
-    0x00,  // 40000
+  const std::uint8_t expected[stream::ATOMIC_PRESENTATION_V2_ACK_PAYLOAD_SIZE] = {
+    0x02, 0x00, 0x01, 0x00,  // version, applied, AI, flags=0
+    0xEF, 0xCD, 0xAB, 0x89,  // request id
+    0x40, 0x30, 0x20, 0x10,  // applied generation
+    0x00, 0x14, 0x70, 0x08,  // source 5120x2160
+    0x00, 0x20, 0xC0, 0x06,  // exact encoded 8192x1728
+    0x6A, 0x17, 0x00, 0x00,  // 59.94 Hz
+    0x70, 0x94, 0x00, 0x00,  // encoder bitrate 38000 kbps
   };
   EXPECT_TRUE(std::equal(std::begin(payload), std::end(payload), std::begin(expected)));
+
+  // The internal per-eye geometry remains available on the effective state, while the wire
+  // publishes the unmodified source and exact packed encoder extents.
+  EXPECT_EQ(effective.width, 4096);
+  EXPECT_EQ(ack.applied_source_width, 5120);
+  EXPECT_EQ(ack.applied_encoded_width, 8192);
 }
 
-TEST(LiveVideoModeAckTests, ReportsAClampedApplyAsAppliedWithTheClampedMode) {
+TEST(AtomicPresentationAckTests, RequiresACompleteProvenGeneration) {
+  const video::effective_video_mode_t unproven {
+    1920, 1080, 6000, 20000, 1920, 1080, 1920, 1080, video::SBS_OFF, 0,
+  };
+  const auto ack = stream::make_live_video_mode_ack(
+    std::numeric_limits<std::uint32_t>::max(),
+    stream::live_video_mode_ack_e::failed,
+    unproven
+  );
+  std::uint8_t payload[stream::ATOMIC_PRESENTATION_V2_ACK_PAYLOAD_SIZE] {};
+  EXPECT_FALSE(stream::encode_atomic_presentation_ack_payload(ack, payload));
+
+  auto proven = unproven;
+  proven.generation = 7;
+  const auto refusal = stream::make_live_video_mode_ack(
+    std::numeric_limits<std::uint32_t>::max(),
+    stream::live_video_mode_ack_e::rejected_invalid,
+    proven
+  );
+  ASSERT_TRUE(stream::encode_atomic_presentation_ack_payload(refusal, payload));
+  EXPECT_EQ(payload[4], 0xFF);
+  EXPECT_EQ(payload[5], 0xFF);
+  EXPECT_EQ(payload[6], 0xFF);
+  EXPECT_EQ(payload[7], 0xFF);
+  EXPECT_EQ(payload[8], 7);  // unchanged current generation on rejection
+}
+
+TEST(AtomicPresentationAckTests, DefersOnlyPreProofRefusalsAndFailsClosedOnImpossibleApply) {
+  stream::live_video_mode_ack_t ack {
+    7,
+    stream::live_video_mode_ack_e::failed,
+    6000,
+    20000,
+    video::SBS_OFF,
+    1920,
+    1080,
+    1920,
+    1080,
+    0,
+  };
+  EXPECT_EQ(
+    stream::classify_live_video_mode_ack_delivery(ack),
+    stream::live_video_mode_ack_delivery_e::defer_until_initial_proof
+  );
+  ack.status = stream::live_video_mode_ack_e::applied;
+  EXPECT_EQ(
+    stream::classify_live_video_mode_ack_delivery(ack),
+    stream::live_video_mode_ack_delivery_e::fail_closed
+  );
+  ack.applied_generation = 1;
+  EXPECT_EQ(
+    stream::classify_live_video_mode_ack_delivery(ack),
+    stream::live_video_mode_ack_delivery_e::send
+  );
+}
+
+TEST(AtomicPresentationAckTests, ReportsAClampedApplyWithExactSourceAndEncodedGeometry) {
   // The whole point of the applied_* fields: a per-eye 5120x2160 SBS request packs to 10240, which
   // exceeds the 8192 codec ceiling, so the host installs 4096 per eye with an aspect-scaled height.
   // That is a successful apply, not a failure, and the client must be told the clamped geometry so
@@ -517,147 +641,94 @@ TEST(LiveVideoModeAckTests, ReportsAClampedApplyAsAppliedWithTheClampedMode) {
   ASSERT_EQ(packed.width, 8192);
   ASSERT_EQ(packed.height, 1728);
 
-  // The encode loop reports the BASE per-eye geometry, before SBS doubling.
-  const video::effective_video_mode_t effective {packed.width / 2, packed.height, 6000, 38000};
-  const video::video_mode_applied_t report {
-    {{7, 41}},
-    true,
-    effective,
-    {5120, 2160, 60000},
-  };
-
-  const auto status = report.applied ?
-                        stream::live_video_mode_ack_e::applied :
-                        stream::live_video_mode_ack_e::failed;
-  EXPECT_EQ(status, stream::live_video_mode_ack_e::applied);
-
-  const stream::live_video_mode_ack_t ack {
-    report.requests.front().request_id,
-    status,
-    report.mode.width,
-    report.mode.height,
-    report.mode.framerateX100,
-    report.mode.bitrate,
-  };
-  EXPECT_NE(ack.applied_width, 5120);
-  EXPECT_EQ(ack.applied_width, 4096);
-  EXPECT_EQ(ack.applied_height, 1728);
-  EXPECT_EQ(report.desktop_mode.width, 5120);
-  EXPECT_EQ(report.desktop_mode.height, 2160);
-  EXPECT_EQ(report.desktop_mode.framerate_millihz, 60000);
-
-  std::uint8_t payload[stream::LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE] {};
-  ASSERT_TRUE(stream::encode_live_video_mode_ack_payload(ack, payload));
-  EXPECT_EQ(payload[2], 0x00);  // status applied
-  EXPECT_EQ(payload[3], 0x00);
-  EXPECT_EQ(payload[4], 0x00);  // 4096
-  EXPECT_EQ(payload[5], 0x10);
-  EXPECT_EQ(payload[6], 0xC0);  // 1728
-  EXPECT_EQ(payload[7], 0x06);
-}
-
-TEST(LiveVideoModeAckTests, ReportsANonSbsClampAsAppliedWithTheClampedMode) {
-  // Same contract without SBS: H.264 tops out at 4096, so a 5120-wide live request installs 4096
-  // with an aspect-scaled height and still reports success.
-  const auto clamped = video::clamp_encode_dimensions(5120, 2160, 0, 4096);
-  ASSERT_EQ(clamped.width, 4096);
-  ASSERT_EQ(clamped.height, 1728);
-
-  const stream::live_video_mode_ack_t ack {
-    3,
-    stream::live_video_mode_ack_e::applied,
-    clamped.width,
-    clamped.height,
+  const video::effective_video_mode_t effective {
+    packed.width / 2,
+    packed.height,
     6000,
-    25000,
+    38000,
+    5120,
+    2160,
+    packed.width,
+    packed.height,
+    video::SBS_AI,
+    5,
   };
+  const auto ack = stream::make_live_video_mode_ack(
+    7,
+    stream::live_video_mode_ack_e::applied,
+    effective
+  );
 
-  std::uint8_t payload[stream::LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE] {};
-  ASSERT_TRUE(stream::encode_live_video_mode_ack_payload(ack, payload));
-  EXPECT_EQ(static_cast<int>(payload[2]) | (static_cast<int>(payload[3]) << 8), 0);
-  EXPECT_EQ(static_cast<int>(payload[4]) | (static_cast<int>(payload[5]) << 8), 4096);
-  EXPECT_EQ(static_cast<int>(payload[6]) | (static_cast<int>(payload[7]) << 8), 1728);
+  std::uint8_t payload[stream::ATOMIC_PRESENTATION_V2_ACK_PAYLOAD_SIZE] {};
+  ASSERT_TRUE(stream::encode_atomic_presentation_ack_payload(ack, payload));
+  EXPECT_EQ(payload[1], 0);  // applied
+  EXPECT_EQ(payload[2], video::SBS_AI);
+  EXPECT_EQ(static_cast<int>(payload[12]) | (static_cast<int>(payload[13]) << 8), 5120);
+  EXPECT_EQ(static_cast<int>(payload[14]) | (static_cast<int>(payload[15]) << 8), 2160);
+  EXPECT_EQ(static_cast<int>(payload[16]) | (static_cast<int>(payload[17]) << 8), 8192);
+  EXPECT_EQ(static_cast<int>(payload[18]) | (static_cast<int>(payload[19]) << 8), 1728);
 }
 
-TEST(LiveVideoModeAckTests, EncodesTheWireFieldExtremes) {
-  const stream::live_video_mode_ack_t ack {
-    std::numeric_limits<std::uint16_t>::max(),
-    stream::live_video_mode_ack_e::failed,
-    std::numeric_limits<std::uint16_t>::max(),
-    std::numeric_limits<std::uint16_t>::max(),
-    std::numeric_limits<std::uint16_t>::max(),
-    std::numeric_limits<std::uint32_t>::max(),
+TEST(AtomicPresentationAckTests, RefusesValuesThatDoNotFitTheV2WireContract) {
+  const video::effective_video_mode_t effective {
+    1920, 1080, 6000, 20000, 1920, 1080, 1920, 1080, video::SBS_OFF, 1,
+  };
+  const auto valid = stream::make_live_video_mode_ack(
+    1,
+    stream::live_video_mode_ack_e::applied,
+    effective
+  );
+  std::uint8_t payload[stream::ATOMIC_PRESENTATION_V2_ACK_PAYLOAD_SIZE];
+  const auto reject = [&](auto mutate) {
+    auto ack = valid;
+    mutate(ack);
+    std::fill(std::begin(payload), std::end(payload), 0xA5);
+    EXPECT_FALSE(stream::encode_atomic_presentation_ack_payload(ack, payload));
+    EXPECT_TRUE(std::all_of(std::begin(payload), std::end(payload), [](auto byte) {
+      return byte == 0xA5;
+    }));
   };
 
-  std::uint8_t payload[stream::LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE] {};
-  ASSERT_TRUE(stream::encode_live_video_mode_ack_payload(ack, payload));
-  EXPECT_EQ(payload[0], 0xFF);
-  EXPECT_EQ(payload[1], 0xFF);
-  EXPECT_EQ(payload[2], 0x03);
-  EXPECT_EQ(payload[3], 0x00);
-  for (std::size_t i = 4; i < stream::LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE; ++i) {
-    EXPECT_EQ(payload[i], 0xFF);
-  }
-
-  const stream::live_video_mode_ack_t zeroed {0, stream::live_video_mode_ack_e::applied, 0, 0, 0, 0};
-  ASSERT_TRUE(stream::encode_live_video_mode_ack_payload(zeroed, payload));
-  for (const auto byte : payload) {
-    EXPECT_EQ(byte, 0x00);
-  }
+  reject([](auto &ack) { ack.request_id = -1; });
+  reject([](auto &ack) { ack.request_id = 4294967296LL; });
+  reject([](auto &ack) { ack.status = static_cast<stream::live_video_mode_ack_e>(4); });
+  reject([](auto &ack) { ack.applied_sbs_mode = 2; });
+  reject([](auto &ack) { ack.applied_source_width = 65536; });
+  reject([](auto &ack) { ack.applied_source_height = -1; });
+  reject([](auto &ack) { ack.applied_encoded_width = 65536; });
+  reject([](auto &ack) { ack.applied_encoded_height = -1; });
+  reject([](auto &ack) { ack.applied_framerate_x100 = -1; });
+  reject([](auto &ack) { ack.applied_bitrate_kbps = 4294967296LL; });
+  reject([](auto &ack) { ack.applied_generation = 0; });
 }
 
-TEST(LiveVideoModeAckTests, RefusesValuesThatCannotHaveComeOffTheWire) {
-  // Every reachable acknowledgement carries an id decoded from the request's own u16 field and a
-  // mode the encoder actually ran, so these are host bugs rather than client input. The encoder
-  // must not truncate them silently.
-  std::uint8_t payload[stream::LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE] {};
-  const auto reject = [&](const stream::live_video_mode_ack_t &ack) {
-    EXPECT_FALSE(stream::encode_live_video_mode_ack_payload(ack, payload));
-  };
-
-  const auto status = stream::live_video_mode_ack_e::applied;
-  reject({65536, status, 1920, 1080, 6000, 20000});
-  reject({-1, status, 1920, 1080, 6000, 20000});
-  reject({1, status, 65536, 1080, 6000, 20000});
-  reject({1, status, 1920, 65536, 6000, 20000});
-  reject({1, status, 1920, 1080, 65536, 20000});
-  reject({1, status, 1920, 1080, 6000, 4294967296LL});
-  reject({1, status, -1, 1080, 6000, 20000});
-  reject({1, status, 1920, -1, 6000, 20000});
-  reject({1, status, 1920, 1080, -1, 20000});
-  reject({1, status, 1920, 1080, 6000, -1});
-
-  // A refused encode leaves the caller's buffer untouched rather than half-written.
-  for (const auto byte : payload) {
-    EXPECT_EQ(byte, 0x00);
-  }
-}
-
-TEST(LiveVideoModeAckTests, RefusalsReportTheModeStillInEffect) {
-  // A refused request must never be answered with zeros or with the rejected request echoed back:
-  // the client resynchronizes its UI from these fields.
-  video::effective_video_mode_publisher_t publisher {{1920, 1080, 6000, 20000}};
+TEST(AtomicPresentationAckTests, RefusalsReportTheLastProvenMode) {
+  // A refusal reports the last proven mode rather than zeros or the rejected request. Status 2
+  // still makes reconnect authoritative because a failed desktop rollback can invalidate it.
+  video::effective_video_mode_publisher_t publisher {{
+    1920, 1080, 6000, 20000, 1920, 1080, 1920, 1080, video::SBS_OFF, 1,
+  }};
   EXPECT_EQ(publisher.current().width, 1920);
 
-  publisher.publish({2560, 1440, 12000, 45000});
+  publisher.publish({
+    2560, 1440, 12000, 45000, 2560, 1440, 2560, 1440, video::SBS_OFF, 2,
+  });
   const auto in_effect = publisher.current();
   EXPECT_EQ(in_effect.width, 2560);
   EXPECT_EQ(in_effect.height, 1440);
   EXPECT_EQ(in_effect.framerateX100, 12000);
   EXPECT_EQ(in_effect.bitrate, 45000);
 
-  const stream::live_video_mode_ack_t ack {
+  const auto ack = stream::make_live_video_mode_ack(
     42,
     stream::live_video_mode_ack_e::rejected_needs_reconnect,
-    in_effect.width,
-    in_effect.height,
-    in_effect.framerateX100,
-    in_effect.bitrate,
-  };
-  std::uint8_t payload[stream::LIVE_VIDEO_MODE_ACK_PAYLOAD_SIZE] {};
-  ASSERT_TRUE(stream::encode_live_video_mode_ack_payload(ack, payload));
-  EXPECT_EQ(static_cast<int>(payload[0]) | (static_cast<int>(payload[1]) << 8), 42);
-  EXPECT_EQ(static_cast<int>(payload[4]) | (static_cast<int>(payload[5]) << 8), 2560);
+    in_effect
+  );
+  std::uint8_t payload[stream::ATOMIC_PRESENTATION_V2_ACK_PAYLOAD_SIZE] {};
+  ASSERT_TRUE(stream::encode_atomic_presentation_ack_payload(ack, payload));
+  EXPECT_EQ(payload[1], 2);  // needs reconnect
+  EXPECT_EQ(static_cast<int>(payload[4]) | (static_cast<int>(payload[5]) << 8), 42);
+  EXPECT_EQ(static_cast<int>(payload[12]) | (static_cast<int>(payload[13]) << 8), 2560);
 }
 
 TEST(SbsTelemetryWireTests, VersionSizesFlagsAndStatusesAreFrozen) {

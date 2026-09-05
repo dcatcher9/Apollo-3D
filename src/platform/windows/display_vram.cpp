@@ -4382,11 +4382,17 @@ namespace platf::dxgi {
 
     live_window_authority_observation_t observe_live_window_authority(
       const D3D11_TEXTURE2D_DESC &source_desc,
-      const std::optional<std::chrono::steady_clock::time_point> &content_timestamp
+      const std::optional<std::chrono::steady_clock::time_point> &content_timestamp,
+      const foreground_window::snapshot_t *revalidate_expected = nullptr
     ) {
       foreground_window::snapshot_t observed;
       if (content_timestamp) {
-        observed = foreground_window_tracker.update(foreground_window::sample());
+        const auto observation = revalidate_expected ?
+                                   foreground_window::sample_after_copy(
+                                     *revalidate_expected
+                                   ) :
+                                   foreground_window::sample();
+        observed = foreground_window_tracker.update(observation);
       } else {
         const bool interactive_move_size =
           foreground_window::interactive_move_size_active();
@@ -5069,9 +5075,11 @@ namespace platf::dxgi {
       // per-convert observation breaks continuity across busy periods; this second observation
       // closes a focus/move/resize race between admission and CopyResource. During an already
       // authenticated native move/resize, ROI authority has been withdrawn and this frame is
-      // forced to full-source analysis, so repeating the synchronous USER32/DWM sample cannot
-      // improve attribution. If the move starts after the first observation, this recheck still
-      // runs and detects it.
+      // forced to full-source analysis, so repeating the synchronous USER32/DWM guard cannot
+      // improve attribution. For an ordinary positive observation, revalidate only that exact
+      // whole-client identity and geometry, so a provisional content-child candidate cannot cause
+      // a second census in this call. An already authenticated structural child retains the full
+      // census/revalidation because its uniqueness proof includes every eligible sibling.
       const bool pre_copy_interactive_move_size =
         pre_copy_authority.foreground.status ==
         foreground_window::status_e::interactive_move_size;
@@ -5079,7 +5087,8 @@ namespace platf::dxgi {
                                       pre_copy_authority :
                                       observe_live_window_authority(
                                         source_desc,
-                                        content_timestamp
+                                        content_timestamp,
+                                        &pre_copy_authority.foreground
                                       );
       const auto &copied_foreground_snapshot = copied_authority.foreground;
       // A pre-drag ROI completion may still own the estimator after USER32 stops producing desktop

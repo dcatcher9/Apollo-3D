@@ -12,10 +12,10 @@ for stronger scene-wide parameters or revise a camera reset after later frames a
 
 ```text
 selected video
-  -> one primary ordered decoder
-  -> production causal estimator + V2 renderer
-  -> one atomic SBS raster
-  -> one persistent NVENC encoder
+  -> one primary ordered decoder (two-source bounded window)
+  -> production causal estimator + V2 renderer (strictly sequential)
+  -> one-slot ordered CPU serializer
+  -> one-slot ordered handoff to one persistent NVENC encoder
   -> stream-preserving mux
   -> timeline/color/stream verification
   -> atomic output publication
@@ -27,9 +27,12 @@ decoded full frames and the same source-derived observation timestamps. Every ad
 runs one authenticated TensorRT update. Conversion additionally publishes the exact SBS raster drawn
 from that estimator state.
 
-The worker hands each completed SBS raster directly to a persistent FFmpeg/NVENC process, waits
-until the local authenticated frame bridge has served it, and removes both transient rasters. The
-worker never launches a render decoder, scene replay, or second TensorRT pass.
+The harness copies each completed GPU readback into one CPU-owned slot. PNG/PFM serialization for
+frame `N` can therefore overlap the production inference and render of `N+1`; no D3D device or
+context crosses threads. The worker then transfers the atomic SBS artifact to a one-slot ordered
+handoff whose consumer serves it to the persistent FFmpeg/NVENC process and removes it only after a
+complete authenticated GET. NVENC consumption of `N` can likewise overlap production of `N+1`.
+The worker never launches a render decoder, scene replay, or second TensorRT pass.
 
 ## Causal scene evidence
 
@@ -48,16 +51,44 @@ reported.
 
 ## Throughput and storage
 
-Offline processing is not paced to source playback time. Decoder, GPU, and encoder run as quickly as
-their completion and backpressure allow. Windows directory-change notifications wake both sides of
-the frame protocol; there is no fixed per-frame polling delay. Frames remain ordered because the
-online temporal state is causal, so throughput does not come from reordering dependent frames.
+Offline processing is not paced to source playback time. Decoder, GPU, CPU serialization, and
+encoder advance through three bounded ordered stages. At most two decoded source artifacts are
+published, one completed SBS snapshot is being serialized, and one SBS artifact is owned by the
+encoder handoff. The next follow acknowledgement is not published until the worker has removed the
+previous source artifact, proving the previous latest-state snapshot and ACK were consumed before
+they can be replaced. Windows directory-change notifications provide this backpressure without a
+fixed per-frame polling delay.
 
-At most the current source raster and current SBS raster are live between the harness and worker.
-There is no whole-clip image sequence, unresolved-scene depth cache, or per-scene compressed file.
-The persistent encoder retains only its normal compressed-video state. Legacy cache-limit request
-fields remain accepted for persisted/stale clients and act only as a transient-raster safety bound;
-they cannot split scenes or change geometry.
+The production estimator and renderer remain strictly causal and execute one frame at a time;
+throughput comes only from overlapping independent decoder, CPU serialization, and NVENC work, not
+from reordering inference or looking ahead. After the first source reveals its exact transport size
+and the shared production geometry resolver establishes the packed output, the harness checks one
+source reservation plus one conservative SBS reservation before inference, rendering, or the first
+SBS output snapshot. A conversion whose minimum single-slot reservation exceeds the configured
+transient-raster hard cap fails closed. Before overlap is enabled, the worker separately checks two
+source reservations plus two conservative SBS reservations. Each SBS reservation includes a tightly
+packed CPU snapshot (BGRA8 for SDR or
+R16G16B16A16_FLOAT for HDR), conservative serializer scratch (a BGRA surface plus codec allowance
+for WIC, or the explicit RGB32F row used by PFM), and its worst-case serialized PNG/PFM artifact.
+This covers the active serializer retaining one snapshot while the main thread maps the next, and
+the encoder retaining one serialized artifact while the serializer publishes the next. The bound
+is for the bounded pipeline handoff residency enumerated above; it is not a claim about total
+process RSS, source-decoder/WIC internals, D3D driver allocations, or NVENC-internal surfaces. If
+the two-slot bound does not fit but the mandatory single-slot bound does, conversion retains one
+source at a time and a synchronous encoder handoff; CPU serialization still runs on its bounded
+worker thread. Peak-raster attestation reports the applicable conservative pipeline bound. There is
+no whole-clip image sequence, unresolved-scene depth cache,
+or per-scene compressed file. Legacy cache-limit request fields remain accepted for persisted/stale
+clients and remain only a transient-raster safety bound; they cannot split scenes or change
+geometry.
+
+Per-frame rasters, adaptive-state snapshots, and follow acknowledgements use same-volume atomic
+publication but do not force stable-storage flushes. They are runtime handoffs, never restart
+inputs; interrupted jobs are not resumed. A consumer that is woken while the producer's rename or
+a filesystem filter still holds a transient name retries that same snapshot for a short, bounded
+interval, with no delay on the normal first-read path and no advance to a future frame. Job state,
+retained evidence, result contracts, and final output publication keep their existing durability
+guarantees.
 
 SDR encoding does not reopen the source video. Static PQ/HLG encoding keeps a second, aligned source
 decode only as an HDR side-data donor because PFM carries pixels but not per-frame mastering-display
@@ -152,6 +183,8 @@ Native regression coverage must include:
 - direct conversion command wiring with no cache, replay, or render decoder;
 - one-pass whole-clip/result contract validation;
 - follow protocol schema 2 geometry and event-driven wakeup;
+- two-source/one-serializer/one-encoder-slot bounds and conservative byte-cap fallback;
+- serializer and encoder overlap without ACK overwrite or D3D cross-thread access;
 - persistent encoder frame ordering and exact timeline checks;
 - SDR, PQ, and HLG color/metadata preservation;
 - HEVC and AV1 admission/output validation; and
