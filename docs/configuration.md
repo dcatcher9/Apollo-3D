@@ -227,10 +227,13 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Controls runtime performance diagnostics. These diagnostics retain concise frame-pacing,
-            AI inference, SBS warp, encoder/network, and local-display measurements. When disabled,
-            Sunshine 3D does not allocate GPU timing queries or perform diagnostic per-frame clock,
-            counter, or filesystem work.
+            Controls runtime performance diagnostics. These diagnostics retain actual GPU inference
+            and reuse counts, stage timings from capture through encoding and network delivery,
+            and local-display measurements. Fresh and repeated output report their content age
+            separately. When disabled,
+            Sunshine 3D does not allocate GPU timing queries or perform automatic diagnostic
+            per-frame clock, counter, or filesystem work. The explicit Dump 3D button remains
+            available in Host 3D mode; performance history is unavailable when diagnostics is disabled.
         </td>
     </tr>
     <tr>
@@ -1263,9 +1266,9 @@ editing the `conf` file in a text editor. Use the examples as reference.
 ### sbs_3d_max_encode_width
 
 <table>
-    <tr><td>Description</td><td>Cap the packed Host 3D output width. The final output also respects the selected codec's runtime NVENC width and height capabilities; Sunshine 3D preserves each eye's aspect when either axis must scale down.</td></tr>
+    <tr><td>Description</td><td>Cap the packed Host 3D output width. The final output also respects the selected codec's runtime NVENC width and height capabilities; Sunshine 3D fits both axes while preserving each eye's aspect to raster alignment. Packed width is a multiple of four and height is even, so each eye owns complete 4:2:0 chroma cells.</td></tr>
     <tr><td>Default</td><td><code>8192</code></td></tr>
-    <tr><td>Range</td><td><code>256</code>-<code>16384</code> (rounded down to an even value)</td></tr>
+    <tr><td>Range</td><td><code>256</code>-<code>16384</code> (rounded down to a multiple of four)</td></tr>
 </table>
 
 ## NVIDIA NVENC Encoder

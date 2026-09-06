@@ -36,6 +36,87 @@ namespace video {
   namespace {
     std::atomic_uint32_t sbs_telemetry_generation_counter {0};
 
+    void log_diagnostic_elapsed(
+      logging::min_max_avg_periodic_logger<double> &logger,
+      const detail::diagnostic_timestamp_t &started,
+      detail::diagnostic_clock_t::time_point ended
+    ) {
+      if (const auto elapsed = detail::diagnostic_elapsed_ms(started, ended)) {
+        logger.collect_and_log(*elapsed);
+      }
+    }
+
+    // Construct these only inside the diagnostics gate: the existing logger owns strings and
+    // its tracker reads the clock during construction as well as collection.
+    struct capture_stage_diagnostics_t {
+      detail::diagnostic_content_tracker_t content;
+      logging::min_max_avg_periodic_logger<double> new_content_age {
+        info, "Video capture: new content age at handoff", "ms",
+      };
+      logging::min_max_avg_periodic_logger<double> repeated_content_age {
+        info, "Video capture: retained content age at handoff", "ms",
+      };
+
+      void record(platf::img_t &img) {
+        const auto ready = detail::diagnostic_clock_t::now();
+        img.diagnostic_capture_ready_timestamp = ready;
+        const auto timestamp = detail::select_processing_timestamp(img.content_timestamp, img.frame_timestamp);
+        const auto kind = content.observe(timestamp);
+        if (kind != detail::diagnostic_content_e::unknown) {
+          log_diagnostic_elapsed(
+            kind == detail::diagnostic_content_e::new_content ? new_content_age : repeated_content_age,
+            timestamp,
+            ready
+          );
+        }
+      }
+    };
+
+    struct encode_stage_diagnostics_t {
+      detail::diagnostic_content_tracker_t input_content;
+      detail::diagnostic_content_tracker_t input_capture;
+      detail::diagnostic_content_tracker_t output_content;
+      logging::min_max_avg_periodic_logger<double> new_input_age {
+        info, "Video input: new content age at conversion", "ms",
+      };
+      logging::min_max_avg_periodic_logger<double> repeated_input_age {
+        info, "Video input: retained content age at conversion", "ms",
+      };
+      logging::min_max_avg_periodic_logger<double> capture_to_conversion {
+        info, "Video input: capture handoff to first conversion", "ms",
+      };
+      logging::min_max_avg_periodic_logger<double> capture_to_reconversion {
+        info, "Video input: capture handoff to reconversion", "ms",
+      };
+      logging::min_max_avg_periodic_logger<double> conversion_call {
+        info, "Video conversion: CPU call including requested dump work", "ms",
+      };
+      logging::min_max_avg_periodic_logger<double> nvenc_call {
+        info, "Video NVENC: encode and retrieve call", "ms",
+      };
+
+      void begin_conversion(const platf::img_t &img) {
+        const auto entered = detail::diagnostic_clock_t::now();
+        const auto timestamp = detail::select_processing_timestamp(img.content_timestamp, img.frame_timestamp);
+        const auto content_kind = input_content.observe(timestamp);
+        if (content_kind != detail::diagnostic_content_e::unknown) {
+          log_diagnostic_elapsed(
+            content_kind == detail::diagnostic_content_e::new_content ? new_input_age : repeated_input_age,
+            timestamp,
+            entered
+          );
+        }
+        const auto capture_kind = input_capture.observe(img.diagnostic_capture_ready_timestamp);
+        if (capture_kind != detail::diagnostic_content_e::unknown) {
+          log_diagnostic_elapsed(
+            capture_kind == detail::diagnostic_content_e::new_content ? capture_to_conversion : capture_to_reconversion,
+            img.diagnostic_capture_ready_timestamp,
+            entered
+          );
+        }
+      }
+    };
+
     detail::tracked_async_worker_pool_t &async_teardown_workers() {
       static detail::tracked_async_worker_pool_t workers;
       return workers;
@@ -52,20 +133,22 @@ namespace video {
       return snapshot;
     }
 
-    sbs_output_dimensions_t fit_even_encode_dimensions(
+    sbs_output_dimensions_t fit_aligned_encode_dimensions(
       const std::int64_t width,
       const int height,
       const int max_width,
-      const int max_height
+      const int max_height,
+      const int width_alignment = 2
     ) noexcept {
       if (width <= 0 || height <= 0) {
         return {0, 0};
       }
-      const int capped_width = std::max(2, max_width) & ~1;
+      const int width_mask = ~(width_alignment - 1);
+      const int capped_width = std::max(width_alignment, max_width) & width_mask;
       const int capped_height = std::max(2, max_height) & ~1;
       if (width <= capped_width && height <= capped_height) {
         return {
-          std::max(2, static_cast<int>(width) & ~1),
+          std::max(width_alignment, static_cast<int>(width) & width_mask),
           std::max(2, height & ~1),
         };
       }
@@ -74,7 +157,7 @@ namespace video {
         static_cast<double>(capped_height) / height
       );
       return {
-        std::max(2, static_cast<int>(std::lround(width * scale)) & ~1),
+        std::max(width_alignment, static_cast<int>(std::lround(width * scale)) & width_mask),
         std::max(2, static_cast<int>(std::lround(height * scale)) & ~1),
       };
     }
@@ -160,11 +243,18 @@ namespace video {
       runtime_max_height
     );
     const std::int64_t packed_width = static_cast<std::int64_t>(base_width) * 2;
-    return fit_even_encode_dimensions(
+    // Each eye must own complete 4:2:0 chroma cells. An even packed width alone can leave
+    // an odd eye width and one UV cell shared across the eye seam. Align the width cap before
+    // fitting either axis, and reject a cap that cannot contain two even-width eyes.
+    if (packed_width < 4 || base_height < 2 || limits.width < 4 || limits.height < 2) {
+      return {0, 0};
+    }
+    return fit_aligned_encode_dimensions(
       packed_width,
       base_height,
       limits.width,
-      limits.height
+      limits.height,
+      4
     );
   }
 
@@ -181,7 +271,7 @@ namespace video {
       runtime_max_width,
       runtime_max_height
     );
-    return fit_even_encode_dimensions(
+    return fit_aligned_encode_dimensions(
       width,
       height,
       limits.width,
@@ -670,6 +760,9 @@ namespace video {
     platf::adjust_thread_priority(platf::thread_priority_e::critical);
 
     bool capture_cursor = true;
+    auto capture_diagnostics = detail::make_diagnostic_state<capture_stage_diagnostics_t>(
+      config::sunshine.diagnostics_enabled
+    );
     while (capture_ctx_queue->running()) {
       std::uint64_t captured_frames = 0;
       auto push_captured_image_callback = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) -> bool {
@@ -678,6 +771,9 @@ namespace video {
         }
 
         if (frame_captured) {
+          if (capture_diagnostics && img) {
+            capture_diagnostics->record(*img);
+          }
           ++captured_frames;
           capture_ctx->images->raise(std::move(img));
         }
@@ -809,12 +905,18 @@ namespace video {
     safe::mail_raw_t::queue_t<packet_t> &packets,
     const std::shared_ptr<void> &channel_data,
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp,
-    std::optional<std::chrono::steady_clock::time_point> content_timestamp
+    std::optional<std::chrono::steady_clock::time_point> content_timestamp,
+    encode_stage_diagnostics_t *diagnostics,
+    bool converted_frame
   ) {
+    const auto encode_started = detail::diagnostic_timestamp(diagnostics != nullptr, detail::diagnostic_clock_t::now);
     auto encoded_frame = session.encode_frame(
       frame_nr,
       session.acquire_frame_buffer()
     );
+    if (diagnostics) {
+      log_diagnostic_elapsed(diagnostics->nvenc_call, encode_started, detail::diagnostic_clock_t::now());
+    }
     if (encoded_frame.data.empty()) {
       BOOST_LOG(error) << "NvENC returned empty packet";
       session.recycle_frame_buffer(std::move(encoded_frame.data));
@@ -835,6 +937,9 @@ namespace video {
     packet->after_ref_frame_invalidation = encoded_frame.after_ref_frame_invalidation;
     packet->frame_timestamp = frame_timestamp;
     packet->content_timestamp = content_timestamp;
+    if (diagnostics) {
+      packet->diagnostic_content = diagnostics->output_content.observe(content_timestamp, !converted_frame);
+    }
     const bool packet_is_idr = packet->is_idr();
     // A queued IDR can replace stale packets and immediately repair the reference chain. A delta
     // frame cannot: if the queue is full, discard both the stale queue and this delta frame, then
@@ -855,6 +960,10 @@ namespace video {
 
   std::unique_ptr<nvenc_encode_session_t> make_encode_session(const config_t &client_config, std::unique_ptr<platf::nvenc_encode_device_t> encode_device) {
     if (!encode_device->init_encoder(client_config, encode_device->colorspace)) {
+      std::packaged_task<void()> teardown([device = std::move(encode_device)]() mutable {
+        device.reset();
+      });
+      launch_async_teardown_worker(std::move(teardown));
       return nullptr;
     }
 
@@ -937,7 +1046,23 @@ namespace video {
     // the desktop actually changes; the fresh session would encode its dummy (black) prime at
     // min-FPS until then. Re-queue this frame on rebuild so the next session starts with the
     // current desktop instead.
-    std::shared_ptr<platf::img_t> last_img;
+    detail::latest_encode_source_t<std::shared_ptr<platf::img_t>> source;
+    const auto &last_img = source.latest();
+    auto encode_diagnostics = detail::make_diagnostic_state<encode_stage_diagnostics_t>(
+      config::sunshine.diagnostics_enabled
+    );
+    const auto convert_frame = [&](platf::img_t &img, std::optional<std::chrono::steady_clock::time_point> target = std::nullopt) {
+      if (encode_diagnostics) {
+        encode_diagnostics->begin_conversion(img);
+      }
+      // Start after input-stat collection so periodic logger work is not charged to conversion.
+      const auto started = detail::diagnostic_timestamp(encode_diagnostics.has_value(), detail::diagnostic_clock_t::now);
+      const int result = target ? session->convert_with_encode_target(img, *target) : session->convert(img);
+      if (encode_diagnostics) {
+        log_diagnostic_elapsed(encode_diagnostics->conversion_call, started, detail::diagnostic_clock_t::now());
+      }
+      return result;
+    };
 
     auto try_reconfigure_pending_bitrate = [&]() {
       auto requested = video_mode_event->pop(0ms);
@@ -1053,7 +1178,7 @@ namespace video {
       // image across a real display reinitialization because it may own resources from the old
       // display. Do not overwrite a newer frame that capture has already queued.
       if (last_img && !shutting_down && !capture_stopped && !display_reinit_pending && encode_config_change_pending) {
-        images->try_raise(std::move(last_img));
+        images->try_raise(source.release());
       }
 
       return true;
@@ -1085,17 +1210,22 @@ namespace video {
       bool converted_frame = false;
       bool consume_sampled_depth_pipeline_ready = false;
 
-      // Encode at a minimum FPS to avoid image quality issues with static content
+      // Idle keepalives preserve static image quality. Pending retained-source conversion is
+      // serviced at the requested cadence instead of waiting for that slower heartbeat.
       if (!requested_idr_frame || images->peek()) {
-        const auto image_wait = detail::should_poll_ready_depth_without_wait(
-                                  depth_pipeline_ready_event && depth_pipeline_ready_event->peek(),
-                                  static_cast<bool>(last_img)
-                                ) ?
-                                  0ns :
-                                  max_frametime;
-        if (auto img = images->pop(image_wait)) {
-          last_img = img;
-          frame_timestamp = img->frame_timestamp;
+        if (auto img = detail::wait_for_encode_image(
+              *images,
+              max_frametime,
+              encode_frame_threshold,
+              static_cast<bool>(last_img),
+              depth_pipeline_ready_event && depth_pipeline_ready_event->peek(),
+              last_img && session->needs_conversion_poll(),
+              source.pending() ?
+                source.remaining_wait(std::chrono::steady_clock::now(), encode_frame_timestamp) :
+                std::nullopt
+            )) {
+          source.observe(std::move(img));
+          frame_timestamp = last_img->frame_timestamp;
           if (!frame_timestamp) {
             if (!missing_frame_timestamp_warning_logged) {
               BOOST_LOG(warning) << "Encoder received image without frame timestamp; substituting steady_clock::now()"sv;
@@ -1105,7 +1235,7 @@ namespace video {
             // Persist the substitute on the retained image. Host SBS uses this value as the
             // exact source identity when a later encode-thread timeout consumes its pending
             // inference; a local-only timestamp would make that safe completion unmatchable.
-            img->frame_timestamp = frame_timestamp;
+            last_img->frame_timestamp = frame_timestamp;
           }
 
           // Re-check after the potentially blocking image wait and before conversion. On Windows,
@@ -1118,9 +1248,16 @@ namespace video {
           auto current_timestamp = *frame_timestamp;
           auto time_diff = current_timestamp - encode_frame_timestamp;
 
-          // If new frame comes in way too fast, just drop
+          // Defer an early presentation, but retain the source until conversion. If capture
+          // stops here, the pending-source deadline below must still display these final pixels.
           if (time_diff < -frame_variation_threshold) {
-            continue;
+            const auto now = std::chrono::steady_clock::now();
+            if (!source.due(now, encode_frame_timestamp, requested_idr_frame)) {
+              continue;
+            }
+            // A stale capture timestamp must not starve a source whose presentation is due.
+            // This is only the encode schedule; retain the original source/content identity.
+            current_timestamp = now;
           }
 
           const auto schedule = detail::select_encode_frame_schedule(
@@ -1131,16 +1268,43 @@ namespace video {
           );
           consume_sampled_depth_pipeline_ready =
             depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
-          if (session->convert_with_encode_target(*img, schedule.next_encode_target)) {
+          if (convert_frame(*last_img, schedule.next_encode_target)) {
             BOOST_LOG(error) << "Could not convert image"sv;
             break;
           }
           converted_frame = true;
+          source.converted();
 
           *frame_timestamp = schedule.presentation_timestamp;
           encode_frame_timestamp = schedule.next_encode_target;
         } else if (!images->running()) {
           break;
+        }
+      }
+
+      // A final early capture may never be followed by another image event. Convert it when
+      // its scheduled presentation is due, before falling back to the slower idle keepalive.
+      // IDR recovery uses the newest retained source immediately. The single source slot is
+      // replaced by newer captures, so waiting cannot accumulate a queue of deferred images.
+      if (!converted_frame && source.pending() && last_img) {
+        const auto now = std::chrono::steady_clock::now();
+        if (source.due(now, encode_frame_timestamp, requested_idr_frame)) {
+          if (lifecycle_change_requested()) {
+            break;
+          }
+          const auto schedule = detail::select_encode_frame_schedule(
+            now, encode_frame_timestamp, encode_frame_threshold, frame_variation_threshold
+          );
+          consume_sampled_depth_pipeline_ready =
+            depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
+          if (convert_frame(*last_img, schedule.next_encode_target)) {
+            BOOST_LOG(error) << "Could not convert deferred capture image"sv;
+            break;
+          }
+          converted_frame = true;
+          source.converted();
+          frame_timestamp = schedule.presentation_timestamp;
+          encode_frame_timestamp = schedule.next_encode_target;
         }
       }
 
@@ -1154,11 +1318,12 @@ namespace video {
         }
         frame_timestamp = std::chrono::steady_clock::now();
         consume_sampled_depth_pipeline_ready = true;
-        if (session->convert(*last_img)) {
+        if (convert_frame(*last_img)) {
           BOOST_LOG(error) << "Could not activate the initialized Host SBS GPU pipeline"sv;
           break;
         }
         converted_frame = true;
+        source.converted();
       }
 
       // Host SBS inference may still be pending when capture goes idle. Reconvert the retained
@@ -1172,11 +1337,12 @@ namespace video {
         frame_timestamp = std::chrono::steady_clock::now();
         consume_sampled_depth_pipeline_ready =
           depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
-        if (session->convert(*last_img)) {
+        if (convert_frame(*last_img)) {
           BOOST_LOG(error) << "Could not consume pending Host SBS depth for retained source"sv;
           break;
         }
         converted_frame = true;
+        source.converted();
       }
 
       if (converted_frame && consume_sampled_depth_pipeline_ready && depth_pipeline_ready_event) {
@@ -1198,7 +1364,9 @@ namespace video {
         packets,
         channel_data,
         frame_timestamp,
-        session->rendered_content_timestamp()
+        session->rendered_content_timestamp(),
+        encode_diagnostics ? &*encode_diagnostics : nullptr,
+        converted_frame
       );
       if (publish_result.failed) {
         BOOST_LOG(error) << "Could not encode video packet"sv;
@@ -1750,6 +1918,14 @@ namespace video {
     if (!session) {
       return -1;
     }
+    // A probe can time out after NVENC accepted its image just like a live encode. Retain its
+    // complete owner on the same tracked teardown path; never release GPU input on this caller.
+    auto teardown_guard = util::fail_guard([&session] {
+      std::packaged_task<void()> teardown([session = std::move(session)]() mutable {
+        session.reset();
+      });
+      launch_async_teardown_worker(std::move(teardown));
+    });
 
     {
       // Image buffers are large, so we use a separate scope to free it immediately after convert()
@@ -1766,7 +1942,7 @@ namespace video {
       ENCODED_PACKET_QUEUE_LIMIT
     );
     while (!packets->peek()) {
-      if (encode(1, *session, packets, nullptr, {}, {}).failed) {
+      if (encode(1, *session, packets, nullptr, {}, {}, nullptr, true).failed) {
         return -1;
       }
     }

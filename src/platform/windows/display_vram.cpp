@@ -624,6 +624,12 @@ namespace platf::dxgi {
     }
 
     bool needs_conversion_poll() const {
+      // This predicate is sampled on the normal D3D owner: the encode thread for streaming,
+      // or the capture/presentation thread for Local AR. Drain optional outcomes there without
+      // granting diagnostics any conversion demand or changing the caller's wait policy.
+      if (diagnostics_enabled && depth_estimator) {
+        depth_estimator->poll_gpu_outcome_diagnostics();
+      }
       return depth_completion_poll_pending || depth_authority_reprocess_pending ||
              gpu_observation_barrier.active() ||
              sbs_dumper.needs_conversion_poll();
@@ -684,10 +690,11 @@ namespace platf::dxgi {
           ID3D11Buffer *converter_buffers[] = {
             color_matrix.get(),
             sdr_color_transform.get(),
+            subsample_offset.get(),
           };
-          // Bind both converter constants for every shader variant. Other passes use their own
+          // Bind all converter constants for every shader variant. Other passes use their own
           // PS constant-buffer slots, so never rely on stale context state between SBS/RGB draws.
-          device_ctx->PSSetConstantBuffers(0, 2, converter_buffers);
+          device_ctx->PSSetConstantBuffers(0, 3, converter_buffers);
 
           // The optional HDR Host-SBS MRT has already populated luma while producing the packed
           // RGB raster. Every other path retains the established standalone Y/YUV draw.
@@ -811,7 +818,7 @@ namespace platf::dxgi {
             perf && !snapshot_debug_inputs ? begin_sbs_gpu_timer() : nullptr;
 
           // Production uses bounded matched pairing: infer asynchronously from a private color
-          // slot, then warp only its completion. The bounded DDup reuse exception below can prove
+          // slot, then warp only its completion. The exact DDup reuse exception below can prove
           // either an identical full desktop-content timestamp or an exact ROI untouched by every
           // dirty/move record since the accepted crop. It still fresh-warps current color.
           const auto input_color_space = input_is_linear ?
@@ -821,54 +828,14 @@ namespace platf::dxgi {
           const auto current_source_timestamp = img_base.frame_timestamp;
           const auto current_content_timestamp = img_base.content_timestamp;
           const auto &current_ddup_damage = img.ddup_damage;
-          struct reuse_damage_key_t {
-            const detail::ddup_damage_history_t *history;
-            std::uint64_t token;
-            bool present;
-            explicit reuse_damage_key_t(
-              const std::optional<detail::ddup_damage_snapshot_t> &damage
-            ):
-                history {damage ? damage->history.get() : nullptr},
-                token {damage ? damage->token : 0u},
-                present {damage.has_value()} {}
-            bool operator==(const reuse_damage_key_t &) const = default;
-          };
-          struct reuse_key_t {
-            std::optional<std::chrono::steady_clock::time_point> inference_content;
-            reuse_damage_key_t inference_damage;
-            models::depth_input_region_t input_region;
-            std::optional<std::chrono::steady_clock::time_point> current_content;
-            reuse_damage_key_t current_damage;
-            bool operator==(const reuse_key_t &) const = default;
-          };
-          using reuse_entry_t = std::pair<
-            reuse_key_t, detail::host_sbs_ddup_reuse_proof_e>;
-          std::array<std::optional<reuse_entry_t>, 3u> reuse_cache;
-          std::size_t next_reuse_cache_entry = 0u;
-          const auto memoized_input_reuse_kind = [&](const matched_frame_slot_t &slot) {
-            if (!slot.depth_input_region.is_video_region()) {
-              return matched_input_reuse_kind(
-                slot, current_content_timestamp, current_ddup_damage
-              );
-            }
-            const reuse_key_t key {
-              slot.inference_content_timestamp,
-              reuse_damage_key_t {slot.inference_ddup_damage},
-              slot.depth_input_region,
+          // Each lineage copy advances its own transitive proof. Repeated same-token queries
+          // are constant-time, so a cross-slot memo would only leave another copy's anchor stale.
+          const auto current_input_reuse_kind = [&](const matched_frame_slot_t &slot) {
+            return matched_input_reuse_kind(
+              slot,
               current_content_timestamp,
-              reuse_damage_key_t {current_ddup_damage},
-            };
-            for (const auto &entry : reuse_cache) {
-              if (entry && entry->first == key) {
-                return entry->second;
-              }
-            }
-            const auto kind = matched_input_reuse_kind(
-              slot, current_content_timestamp, current_ddup_damage
+              current_ddup_damage
             );
-            reuse_cache[next_reuse_cache_entry] = reuse_entry_t {key, kind};
-            next_reuse_cache_entry = (next_reuse_cache_entry + 1u) % reuse_cache.size();
-            return kind;
           };
           // Once the per-stream estimator exists, observe foreground continuity on every SBS
           // conversion, not merely when TensorRT can accept a new matched frame. Before then
@@ -1089,7 +1056,6 @@ namespace platf::dxgi {
           };
 
           const auto retain_completed_lineage = [&, this](
-                                                  const bool current_reusable_enqueue_pending,
                                                   const bool before_current_admission
                                                 ) {
             if (
@@ -1102,8 +1068,6 @@ namespace platf::dxgi {
             if (matched_render_slot->texture) {
               matched_render_slot->texture->GetDesc(&completed_source_desc);
             }
-            const auto completed_reuse_kind =
-              memoized_input_reuse_kind(*matched_render_slot);
             const bool barrier_force_infer_completion_accepted =
               known_force_infer_completion(est, *matched_render_slot) &&
               host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2 &&
@@ -1123,7 +1087,7 @@ namespace platf::dxgi {
                 live_browser_authority_epoch,
                 interactive_move_size_observed
               );
-            const bool latest_lineage_retained = retain_latest_v2_lineage(
+            (void) retain_latest_v2_lineage(
               est,
               *matched_render_slot,
               completed_source_desc,
@@ -1139,12 +1103,6 @@ namespace platf::dxgi {
               );
             if (before_current_admission && barrier_cleared) {
               early_cleared_barrier_frame_id = barrier_frame_id;
-            }
-            const bool completion_reuse_authorized =
-              latest_lineage_retained &&
-              completed_reuse_kind != detail::host_sbs_ddup_reuse_proof_e::none;
-            if (!completion_reuse_authorized && !current_reusable_enqueue_pending) {
-              content_reuse_refresh.reset();
             }
           };
 
@@ -1212,7 +1170,7 @@ namespace platf::dxgi {
                       validate_completed_slot() &&
                       apply_completed_domain_and_renderer()
                     ) {
-                      retain_completed_lineage(false, true);
+                      retain_completed_lineage(true);
                       completion_finalized_before_admission = true;
                     } else {
                       block_current_submission_after_early_poll = true;
@@ -1246,7 +1204,7 @@ namespace platf::dxgi {
             }
           );
           const auto cached_reuse_kind = latest_v2_route_matches ?
-                                           memoized_input_reuse_kind(
+                                           current_input_reuse_kind(
                                              latest_v2_lineage.slot
                                            ) :
                                            detail::host_sbs_ddup_reuse_proof_e::none;
@@ -1269,10 +1227,12 @@ namespace platf::dxgi {
                 current_ddup_damage
               ) :
               std::optional<matched_motion_damage_t> {};
-          const bool content_refresh_due = content_reuse_refresh.refresh_due(reuse_now);
+          // An authenticated exact DDup proof remains valid until its source/domain changes.
+          // Elapsed time and delivery count alone cannot require new model work.
           depth_reuse_authorization = detail::select_host_sbs_cached_depth_reuse(
-            content_refresh_due || !cache_reuse_gate_open ?
-              detail::host_sbs_ddup_reuse_proof_e::none : cached_reuse_kind,
+            !cache_reuse_gate_open ?
+              detail::host_sbs_ddup_reuse_proof_e::none :
+              cached_reuse_kind,
             latest_v2_lineage.slot.frame_id,
             frame_id
           );
@@ -1314,6 +1274,48 @@ namespace platf::dxgi {
             current_ddup_damage;
           const bool opaque_followup_route_observable =
             opaque_followup_route_matches && !matched_inference_pending_at_entry;
+          const bool completed_current_route_matches =
+            completion_finalized_before_admission && matched_render_slot &&
+            same_source(matched_render_slot->source_timestamp, current_source_timestamp) &&
+            models::parallax_v2_result_is_authenticated(est) &&
+            matched_route_matches_current(
+              *matched_render_slot,
+              live_source_desc,
+              input_color_space,
+              current_root_authority_generation,
+              current_region_authority_generation,
+              current_browser_authority_epoch,
+              current_interactive_move_size
+            );
+          const auto completed_source_action = detail::host_sbs_completed_source_action(
+            current_source_timestamp,
+            dedup_gate_open && !current_interactive_move_size &&
+              host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2,
+            {
+              matched_render_slot ? matched_render_slot->frame_id : 0u,
+              matched_render_slot ? matched_render_slot->source_timestamp : std::nullopt,
+              completed_current_route_matches,
+            },
+            {
+              matched_presentation_cache.frame_id(),
+              opaque_gpu_followup_anchor.source_timestamp,
+              opaque_followup_route_observable &&
+                opaque_gpu_followup_anchor.frame_id == gpu_observation_barrier.conditional_frame_id() &&
+                matched_presentation_cache.frame_id() == opaque_gpu_followup_anchor.frame_id &&
+                current_ddup_damage->history == opaque_gpu_followup_anchor.damage->history &&
+                current_ddup_damage->token == opaque_gpu_followup_anchor.damage->token &&
+                matched_presentation_cache.source_matches(current_source_timestamp) &&
+                matched_presentation_cache.route_matches(
+                  live_source_desc.Width,
+                  live_source_desc.Height,
+                  input_color_space,
+                  depth_authority_reprocess_pending,
+                  producer_terminal
+                ),
+            }
+          );
+          const bool current_source_already_completed =
+            completed_source_action != detail::host_sbs_completed_source_action_e::observe;
           const bool opaque_followup_route_rejected =
             opaque_gpu_followup_anchor.authenticated &&
             !opaque_followup_route_matches;
@@ -1331,16 +1333,16 @@ namespace platf::dxgi {
           }
           if (
             opaque_followup_route_observable &&
-            opaque_gpu_followup_anchor.authenticated
+            opaque_gpu_followup_anchor.authenticated && !current_source_already_completed
           ) {
-            if (!detail::host_sbs_gpu_followup_fresh(
+            if (!detail::host_sbs_gpu_followup_order_valid(
                   opaque_gpu_followup_anchor.frame_id,
                   gpu_observation_barrier.conditional_frame_id(),
                   opaque_gpu_followup_anchor.enqueued_at,
                   reuse_now
                 )) {
               if (diagnostics_enabled) {
-                ++matched_stats_gpu_followup_expired;
+                ++matched_stats_gpu_followup_invalid_owner;
               }
               revoke_adaptive_reuse();
             } else {
@@ -1381,7 +1383,8 @@ namespace platf::dxgi {
           }
           if (
             adaptive_route_observable && !matched_inference_pending_at_entry &&
-            cached_reuse_kind == detail::host_sbs_ddup_reuse_proof_e::none
+            cached_reuse_kind == detail::host_sbs_ddup_reuse_proof_e::none &&
+            !current_source_already_completed
           ) {
             const auto &damage = cached_motion_damage;
             if (!damage || !damage->coverage.known) {
@@ -1487,7 +1490,7 @@ namespace platf::dxgi {
                     current_browser_authority_epoch,
                     current_interactive_move_size
                   )) {
-                const auto reuse_kind = memoized_input_reuse_kind(slot);
+                const auto reuse_kind = current_input_reuse_kind(slot);
                 if (reuse_kind != detail::host_sbs_ddup_reuse_proof_e::none) {
                   unchanged_input_pending_slot = &slot;
                   pending_reuse_kind = reuse_kind;
@@ -1501,7 +1504,13 @@ namespace platf::dxgi {
             // remains fail-open through the bounded packed-output hold (or current flat output once
             // that hold expires); a later convert() adopts the exact completion when its event is
             // ready. Live capture must never turn this retry into an unbounded CUDA stream wait.
-            if (retained_source_pending_slot) {
+            if (current_source_already_completed) {
+              // The early poll already consumed this exact captured image, or its exact packed
+              // pixels are still available. Keep the opaque watermark and scalar follow-up anchor:
+              // a repeated delivery is not a changed-source candidate and cannot force a new root.
+              // No completed geometry becomes host-owned cache or a new inference baseline here.
+              mark_sbs_matched_copy_end(gpu_timer, false);
+            } else if (retained_source_pending_slot) {
               mark_sbs_matched_copy_end(gpu_timer, false);
             } else if (unchanged_input_pending_slot) {
               // Never enqueue an input already represented by the sole pending inference. This is
@@ -1549,7 +1558,7 @@ namespace platf::dxgi {
                         polled.result.completed_frame_id;
                     }
                     const auto completed_reuse_kind =
-                      memoized_input_reuse_kind(*completed_slot);
+                      current_input_reuse_kind(*completed_slot);
                     force_fresh_current_color =
                       completed_reuse_kind != detail::host_sbs_ddup_reuse_proof_e::none;
                     est = std::move(polled.result);
@@ -1670,13 +1679,13 @@ namespace platf::dxgi {
                   !adaptive_gpu_opaque_followup &&
                   adaptive_hold_decision ==
                     detail::host_sbs_adaptive_hold_decision_e::hold_candidate &&
-                  adaptive_hold_cadence.hold_candidate_still_fresh(
+                  adaptive_hold_cadence.hold_candidate_still_valid(
                     current_content_timestamp,
                     final_admission_now
                   );
                 const bool opaque_followup_authority =
                   adaptive_gpu_opaque_followup &&
-                  detail::host_sbs_gpu_followup_fresh(
+                  detail::host_sbs_gpu_followup_order_valid(
                     opaque_gpu_followup_anchor.frame_id,
                     gpu_observation_barrier.conditional_frame_id(),
                     opaque_gpu_followup_anchor.enqueued_at,
@@ -1700,7 +1709,7 @@ namespace platf::dxgi {
                   !adaptive_gpu_followup_rejection_counted
                 ) {
                   if (!opaque_followup_authority) {
-                    ++matched_stats_gpu_followup_expired;
+                    ++matched_stats_gpu_followup_invalid_owner;
                   } else {
                     ++matched_stats_gpu_followup_host_rejected;
                   }
@@ -1803,8 +1812,8 @@ namespace platf::dxgi {
                   opaque_gpu_followup_anchor.record(
                     *matched_candidate_slot,
                     live_source_desc,
-                    // Use the pre-submission observation so the shared owner-age window is
-                    // conservative even when mapping/wrapper submission itself is delayed.
+                    // Keep the pre-submission observation as the ordering anchor even when
+                    // mapping/wrapper submission itself is delayed.
                     final_admission_now
                   );
                   approximate_reuse_since_enqueue =
@@ -1827,14 +1836,11 @@ namespace platf::dxgi {
                   approximate_reuse_since_enqueue =
                     detail::host_sbs_approximate_reuse_provider_e::none;
                   if (
-                    matched_candidate_slot->inference_content_timestamp &&
-                    (!matched_candidate_slot->depth_input_region.is_video_region() ||
-                     matched_candidate_slot->inference_ddup_damage)
+                    !matched_candidate_slot->inference_content_timestamp ||
+                    (matched_candidate_slot->depth_input_region.is_video_region() &&
+                     !matched_candidate_slot->inference_ddup_damage)
                   ) {
-                    content_reuse_refresh.record_successful_enqueue(enqueued_at);
-                  } else {
                     latest_v2_lineage.reset();
-                    content_reuse_refresh.reset();
                   }
                   adaptive_hold_cadence.record_successful_enqueue(
                     current_content_timestamp,
@@ -2055,20 +2061,10 @@ namespace platf::dxgi {
             depth_completion_poll_pending = false;
           }
 
-          if (unchanged_content_submission_suppressed) {
-            switch (depth_reuse_authorization.refresh) {
-              case detail::host_sbs_depth_reuse_refresh_e::none:
-                // Pending-input suppression without a complete typed proof is not cache reuse.
-                break;
-              case detail::host_sbs_depth_reuse_refresh_e::bounded_content:
-                content_reuse_refresh.record_reuse();
-                if (diagnostics_enabled) {
-                  ++matched_stats_content_skips;
-                  if (damage_guided_submission_suppressed) {
-                    ++matched_stats_damage_skips;
-                  }
-                }
-                break;
+          if (unchanged_content_submission_suppressed && depth_reuse_authorization.valid() && diagnostics_enabled) {
+            ++matched_stats_content_skips;
+            if (damage_guided_submission_suppressed) {
+              ++matched_stats_damage_skips;
             }
           }
 
@@ -2087,12 +2083,11 @@ namespace platf::dxgi {
             dedup_gate_open && !gpu_observation_barrier.active();
           const auto post_completion_cache_reuse_kind =
             post_completion_cache_gate_open && post_completion_cache_route_matches ?
-              memoized_input_reuse_kind(latest_v2_lineage.slot) :
+              current_input_reuse_kind(latest_v2_lineage.slot) :
               detail::host_sbs_ddup_reuse_proof_e::none;
           auto post_completion_reuse_authorization =
             detail::select_host_sbs_cached_depth_reuse(
-              content_refresh_due ? detail::host_sbs_ddup_reuse_proof_e::none :
-                                    post_completion_cache_reuse_kind,
+              post_completion_cache_reuse_kind,
               latest_v2_lineage.slot.frame_id,
               frame_id
             );
@@ -2123,7 +2118,7 @@ namespace platf::dxgi {
           const auto fresh_current_color_reuse_kind =
             post_completion_cache_gate_open && force_fresh_current_color &&
                 matched_render_slot ?
-              memoized_input_reuse_kind(*matched_render_slot) :
+              current_input_reuse_kind(*matched_render_slot) :
               detail::host_sbs_ddup_reuse_proof_e::none;
           if (
             post_completion_cache_gate_open && force_fresh_current_color &&
@@ -2216,23 +2211,7 @@ namespace platf::dxgi {
             !completion_finalized_before_admission && matched_render_slot &&
             est.completed_frame_valid && !using_cached_estimate
           ) {
-            const bool current_reusable_enqueue_pending =
-              matched_candidate_slot && matched_candidate_slot->pending &&
-              matched_route_matches_current(
-                *matched_candidate_slot,
-                live_source_desc,
-                input_color_space,
-                authority_generation(live_window_authority),
-                authority_generation(live_foreground_region),
-                live_browser_authority_epoch,
-                interactive_move_size_observed
-              ) &&
-              memoized_input_reuse_kind(*matched_candidate_slot) !=
-                detail::host_sbs_ddup_reuse_proof_e::none;
-            retain_completed_lineage(
-              current_reusable_enqueue_pending,
-              false
-            );
+            retain_completed_lineage(false);
           }
 
           // A busy CUDA stream may legitimately repeat one matched pair for a few source frames,
@@ -2496,6 +2475,7 @@ namespace platf::dxgi {
                   std::nullopt
                 );
               matched_presentation_cache.publish(
+                est.completed_frame_id,
                 matched_render_slot->captured_at,
                 matched_render_slot->source_timestamp,
                 rendered_content_timestamp,
@@ -2844,8 +2824,8 @@ namespace platf::dxgi {
                                << matched_stats_same_frame_poll_timeouts << '/'
                                << matched_stats_same_frame_poll_failures << '/'
                                << matched_stats_same_frame_poll_wait_unavailable_busy
-                               << " opaque_followup_expired/rejected/force_fallback="sv
-                               << matched_stats_gpu_followup_expired << '/'
+                               << " opaque_followup_invalid_owner/rejected/force_fallback="sv
+                               << matched_stats_gpu_followup_invalid_owner << '/'
                                << matched_stats_gpu_followup_host_rejected << '/'
                                << matched_stats_gpu_followup_force_fallbacks;
               reset_matched_stats(now);
@@ -2944,7 +2924,6 @@ namespace platf::dxgi {
       gpu_observation_barrier.reset();
       opaque_gpu_followup_anchor.reset();
       latest_v2_lineage.reset();
-      content_reuse_refresh.reset();
       approximate_reuse_since_enqueue =
         detail::host_sbs_approximate_reuse_provider_e::none;
       reset_adaptive_reuse_runtime();
@@ -3467,6 +3446,7 @@ namespace platf::dxgi {
       void invalidate() noexcept {
         // Pixel continuity can be invalidated without reopening the one-shot timeout log latch.
         valid_ = false;
+        frame_id_ = 0u;
         source_at_ = {};
         source_timestamp_.reset();
         content_timestamp_.reset();
@@ -3483,6 +3463,7 @@ namespace platf::dxgi {
       }
 
       void publish(
+        const std::uint64_t presented_frame_id,
         const std::chrono::steady_clock::time_point presented_at,
         const std::optional<std::chrono::steady_clock::time_point> &presented_source_timestamp,
         const std::optional<std::chrono::steady_clock::time_point> &presented_content_timestamp,
@@ -3494,6 +3475,7 @@ namespace platf::dxgi {
       ) noexcept {
         // A recovered matched completion clears timeout_active at its existing policy site.
         valid_ = true;
+        frame_id_ = presented_frame_id;
         source_at_ = presented_at;
         source_timestamp_ = presented_source_timestamp;
         content_timestamp_ = presented_content_timestamp;
@@ -3506,6 +3488,10 @@ namespace platf::dxgi {
 
       [[nodiscard]] bool has_fresh_pixels() const noexcept {
         return valid_;
+      }
+
+      [[nodiscard]] std::uint64_t frame_id() const noexcept {
+        return valid_ ? frame_id_ : 0u;
       }
 
       [[nodiscard]] std::chrono::steady_clock::duration source_age(
@@ -3578,6 +3564,7 @@ namespace platf::dxgi {
 
     private:
       bool valid_ = false;
+      std::uint64_t frame_id_ = 0u;
       std::chrono::steady_clock::time_point source_at_ {};
       std::optional<std::chrono::steady_clock::time_point> source_timestamp_;
       std::optional<std::chrono::steady_clock::time_point> content_timestamp_;
@@ -3600,6 +3587,8 @@ namespace platf::dxgi {
       // restamp the presentation attribution above, but it must never advance this baseline.
       std::optional<std::chrono::steady_clock::time_point> inference_content_timestamp;
       std::optional<detail::ddup_damage_snapshot_t> inference_ddup_damage;
+      // Advances only exact clean-ROI evidence, never the actual inference attribution above.
+      mutable detail::ddup_unchanged_roi_proof_t unchanged_roi_proof;
       std::chrono::steady_clock::time_point captured_at {};
       std::optional<sbs_debug::window_region_snapshot> window_region;
       std::optional<models::depth_video_region_plan_t> depth_video_plan;
@@ -3631,13 +3620,15 @@ namespace platf::dxgi {
 
     /** Scalar-only authority for one immediately preceding GPU-opaque transaction.
      *
-     * The barrier deliberately prevents this from becoming render, OCR, telemetry, or host-cache
-     * lineage. It retains only the route and DDup tuple needed to let the device compare the next
-     * copied tensor against its private history owner without any branch readback.
+     * The barrier prevents this from becoming geometry, OCR, telemetry, or host-cache lineage.
+     * Its exact source/frame identity may verify an already-packed presentation, never authorize
+     * a new geometry owner or draw. Its route and DDup tuple let the device compare the next copied
+     * tensor against its private history owner without any branch readback.
      */
     struct opaque_gpu_followup_anchor_t {
       std::uint64_t frame_id = 0u;
       models::input_color_space color_space = models::input_color_space::srgb;
+      std::optional<std::chrono::steady_clock::time_point> source_timestamp;
       std::optional<std::chrono::steady_clock::time_point> content_timestamp;
       std::optional<detail::ddup_damage_snapshot_t> damage;
       std::chrono::steady_clock::time_point enqueued_at {};
@@ -3666,6 +3657,7 @@ namespace platf::dxgi {
       ) noexcept {
         frame_id = slot.frame_id;
         color_space = slot.color_space;
+        source_timestamp = slot.source_timestamp;
         content_timestamp = slot.inference_content_timestamp;
         damage = slot.inference_ddup_damage;
         enqueued_at = transaction_enqueued_at;
@@ -3791,6 +3783,7 @@ namespace platf::dxgi {
       destination.content_timestamp = source.content_timestamp;
       destination.inference_content_timestamp = source.inference_content_timestamp;
       destination.inference_ddup_damage = source.inference_ddup_damage;
+      destination.unchanged_roi_proof = source.unchanged_roi_proof;
       destination.captured_at = source.captured_at;
       destination.window_region = source.window_region;
       destination.depth_video_plan = source.depth_video_plan;
@@ -3865,6 +3858,14 @@ namespace platf::dxgi {
       const auto region = damage_region(slot.depth_input_region);
       if (!region) {
         return detail::host_sbs_ddup_reuse_proof_e::none;
+      }
+      if (slot.depth_input_region.is_video_region()) {
+        if (!slot.inference_content_timestamp || !current_content || !slot.unchanged_roi_proof.observe(current_damage, *region)) {
+          return detail::host_sbs_ddup_reuse_proof_e::none;
+        }
+        return slot.inference_content_timestamp == current_content ?
+                 detail::host_sbs_ddup_reuse_proof_e::content_clock :
+                 detail::host_sbs_ddup_reuse_proof_e::roi_damage;
       }
       return detail::classify_host_sbs_ddup_reuse(
         slot.inference_content_timestamp,
@@ -3974,7 +3975,7 @@ namespace platf::dxgi {
                opaque_gpu_followup_anchor.damage->token == proof.baseline_damage_token &&
                opaque_gpu_followup_anchor.input_region == candidate.depth_input_region &&
                opaque_gpu_followup_anchor.color_space == candidate.color_space &&
-               detail::host_sbs_gpu_followup_fresh(
+               detail::host_sbs_gpu_followup_order_valid(
                  opaque_gpu_followup_anchor.frame_id,
                  gpu_observation_barrier.conditional_frame_id(),
                  opaque_gpu_followup_anchor.enqueued_at,
@@ -5283,6 +5284,12 @@ namespace platf::dxgi {
       }
       slot.gpu_undecided_transaction = false;
       slot.pending = false;
+      const auto proof_region = damage_region(slot.depth_input_region);
+      if (slot.depth_input_region.is_video_region() && proof_region) {
+        slot.unchanged_roi_proof.reset(slot.inference_ddup_damage, *proof_region);
+      } else {
+        slot.unchanged_roi_proof.reset();
+      }
       return true;
     }
 
@@ -5516,7 +5523,7 @@ namespace platf::dxgi {
       matched_stats_content_reuses = 0;
       matched_stats_damage_skips = 0;
       matched_stats_damage_reuses = 0;
-      matched_stats_gpu_followup_expired = 0;
+      matched_stats_gpu_followup_invalid_owner = 0;
       matched_stats_gpu_followup_host_rejected = 0;
       matched_stats_gpu_followup_force_fallbacks = 0;
       matched_stats_video_roi_route_outputs = 0;
@@ -5629,7 +5636,6 @@ namespace platf::dxgi {
       last_window_region_mapping_status.reset();
       sbs_frame_sequence = 0;
       latest_v2_lineage.reset();
-      content_reuse_refresh.reset();
       approximate_reuse_since_enqueue =
         detail::host_sbs_approximate_reuse_provider_e::none;
       matched_presentation_cache.reset();
@@ -5830,7 +5836,7 @@ namespace platf::dxgi {
             create_vertex_shader_helper(convert_yuv420_planar_y_vs_hlsl, convert_Y_or_YUV_vs);
             create_pixel_shader_helper(convert_yuv420_planar_y_ps_hlsl, convert_Y_or_YUV_ps);
             create_pixel_shader_helper(convert_yuv420_planar_y_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
-            if (downscaling) {
+            if (downscaling && !sbs_on) {
               create_vertex_shader_helper(convert_yuv420_packed_uv_type0s_vs_hlsl, convert_UV_vs);
               create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_hlsl, convert_UV_ps);
               create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_linear_hlsl, convert_UV_fp16_ps);
@@ -5850,7 +5856,7 @@ namespace platf::dxgi {
             } else {
               create_pixel_shader_helper(convert_yuv420_planar_y_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
             }
-            if (downscaling) {
+            if (downscaling && !sbs_on) {
               create_vertex_shader_helper(convert_yuv420_packed_uv_type0s_vs_hlsl, convert_UV_vs);
               create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_hlsl, convert_UV_ps);
               if (display_is_hdr) {
@@ -5952,7 +5958,27 @@ namespace platf::dxgi {
 
       out_UV_viewport = {offsetX / 2, offsetY / 2, out_width_f / 2, out_height_f / 2, 0.0f, 1.0f};
 
-      float subsample_offset_in[16 / sizeof(float)] {1.0f / (float) out_width_f, 1.0f / (float) out_height_f};  // aligned to 16-byte
+      if (sbs_on && (out_width < 4 || out_width % 4 != 0 || out_height < 2 || out_height % 2 != 0)) {
+        BOOST_LOG(error) << "Packed Host SBS 4:2:0 requires width divisible by four and even height.";
+        return -1;
+      }
+      // The warp has already fitted/resized each eye into this exact packed raster. The chroma
+      // shader must load its real texels and clamp each eye separately, regardless of whether
+      // capture-to-encode sizing was classified as downscaling earlier in initialization.
+      // Ordinary unrotated 1:1 video (including Client SBS input) needs the same transfer-before-
+      // filtering rule, with whole-texture clamping. Actual scaling/rotation retains its generic
+      // sampled-source path; its footprint cannot be inferred from output pixel coordinates.
+      const bool exact_chroma_texels = sbs_on ||
+                                       (out_width == display->width && out_height == display->height &&
+                                        (display->display_rotation == DXGI_MODE_ROTATION_UNSPECIFIED ||
+                                         display->display_rotation == DXGI_MODE_ROTATION_IDENTITY));
+      const ::video::chroma_sampling_t subsample_offset_in {
+        1.0f / out_width_f,
+        1.0f / out_height_f,
+        exact_chroma_texels ? static_cast<unsigned>(out_width) : 0u,
+        exact_chroma_texels ? static_cast<unsigned>(out_height) : 0u,
+        sbs_on ? static_cast<unsigned>(out_width / 2) : 0u,
+      };
       subsample_offset = make_buffer(device.get(), subsample_offset_in);
 
       if (!subsample_offset) {
@@ -6370,7 +6396,6 @@ namespace platf::dxgi {
     std::optional<std::string_view> last_window_region_mapping_status;
     std::uint64_t sbs_frame_sequence = 0;
     latest_v2_lineage_t latest_v2_lineage;
-    detail::host_sbs_content_refresh_state_t content_reuse_refresh;
     detail::host_sbs_approximate_reuse_provider_e approximate_reuse_since_enqueue =
       detail::host_sbs_approximate_reuse_provider_e::none;
     matched_presentation_cache_t matched_presentation_cache;
@@ -6384,7 +6409,7 @@ namespace platf::dxgi {
     unsigned matched_stats_content_reuses = 0;
     unsigned matched_stats_damage_skips = 0;
     unsigned matched_stats_damage_reuses = 0;
-    unsigned matched_stats_gpu_followup_expired = 0;
+    unsigned matched_stats_gpu_followup_invalid_owner = 0;
     unsigned matched_stats_gpu_followup_host_rejected = 0;
     unsigned matched_stats_gpu_followup_force_fallbacks = 0;
     unsigned matched_stats_video_roi_route_outputs = 0;

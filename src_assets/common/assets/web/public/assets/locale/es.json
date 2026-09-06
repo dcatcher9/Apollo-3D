@@ -81,6 +81,10 @@
     "working_dir_desc": "El directorio de trabajo que debe pasarse al proceso. Por ejemplo, algunas aplicaciones usan el directorio de trabajo para buscar archivos de configuración. Si no se establece, Sunshine 3D se establecerá por defecto en el directorio padre del comando"
   },
   "config": {
+    "diagnostics": "Diagnóstico de rendimiento",
+    "diagnostics_desc": "Recopila los recuentos reales de inferencias y reutilizaciones en la GPU, además de los tiempos de captura, conversión, codificación, red y visualización local. La antigüedad del contenido se muestra por separado para los fotogramas nuevos y repetidos. Al desactivarlo, se evitan los relojes y contadores de diagnóstico, las consultas y lecturas de retorno de la GPU y las comprobaciones periódicas del sistema de archivos.",
+    "sbs_3d_max_encode_width": "Anchura máxima del fotograma 3D combinado",
+    "sbs_3d_max_encode_width_desc": "Limita la anchura de la salida con las imágenes una al lado de la otra. El tamaño final respeta los límites de anchura y altura de NVENC para el códec y conserva la relación de aspecto con la precisión del ajuste a píxeles. La anchura se redondea hacia abajo a un múltiplo de cuatro para que las imágenes de ambos ojos tengan una anchura par.",
     "adapter_name": "Nombre del adaptador",
     "adapter_name_desc_windows": "Especifique manualmente una GPU a usar para capturar. Si no está activado, la GPU se elige automáticamente. ¡Recomendamos encarecidamente dejar este campo en blanco para utilizar la selección automática de GPU! Nota: Esta GPU debe tener una pantalla conectada y encendida. Los valores apropiados se pueden encontrar usando el siguiente comando:",
     "adapter_name_placeholder_windows": "Serie RX 580 de Radeon",

@@ -76,6 +76,10 @@
     "working_dir_desc": "Pracovní adresář, který má být předán procesu. Některé aplikace například používají pracovní adresář k vyhledávání konfiguračních souborů. Pokud není nastaven, bude Sunshine 3D implicitně nastaven na nadřazený adresář příkazu"
   },
   "config": {
+    "diagnostics": "Diagnostika výkonu",
+    "diagnostics_desc": "Zaznamenává skutečné počty inferencí a opětovného použití na GPU a časování snímání, převodu, kódování, síťového přenosu a místního zobrazení. Stáří obsahu se vykazuje zvlášť pro nové a opakované snímky. Při vypnutí se nepoužívají diagnostické hodiny, čítače, dotazy na GPU, zpětné čtení z GPU ani pravidelné kontroly souborového systému.",
+    "sbs_3d_max_encode_width": "Maximální šířka spojeného 3D snímku",
+    "sbs_3d_max_encode_width_desc": "Omezuje šířku výstupu s obrazy vedle sebe. Výsledná velikost respektuje limity šířky a výšky NVENC daného kodeku a zachovává poměr stran s přesností danou zarovnáním pixelů. Šířka se zaokrouhluje dolů na násobek čtyř, aby oba obrazy pro oči měly sudou šířku.",
     "adapter_name": "Název adaptéru",
     "adapter_name_desc_windows": "Ruční zadání GPU, která se má použít pro snímání. Pokud není nastaveno, je GPU vybrána automaticky. Důrazně doporučujeme ponechat toto pole prázdné, chcete-li použít automatický výběr GPU! Poznámka: Toto GPU musí mít připojený a zapnutý displej. Příslušné hodnoty lze zjistit pomocí následujícího příkazu:",
     "adapter_name_placeholder_windows": "Řada Radeon RX 580",

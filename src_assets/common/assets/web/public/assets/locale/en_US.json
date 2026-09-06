@@ -76,6 +76,10 @@
     "working_dir_desc": "The working directory that should be passed to the process. For example, some applications use the working directory to search for configuration files. If not set, Sunshine 3D will default to the parent directory of the command"
   },
   "config": {
+    "diagnostics": "Performance diagnostics",
+    "diagnostics_desc": "Collect actual GPU inference/reuse counts and capture, conversion, encoder, network, and local-display timing. Fresh and repeated frames report content age separately. Disabled mode avoids diagnostic clocks, counters, GPU queries/readbacks, and filesystem polling.",
+    "sbs_3d_max_encode_width": "Maximum packed 3D width",
+    "sbs_3d_max_encode_width_desc": "Cap the packed side-by-side output width. The final size respects the codec's NVENC width and height limits and preserves aspect ratio to pixel alignment. Width is rounded down to a multiple of four so both eyes have even widths.",
     "adapter_name": "Adapter Name",
     "adapter_name_desc_windows": "Manually specify a GPU to use for capture. If unset, the GPU is chosen automatically. We strongly recommend leaving this field blank to use automatic GPU selection! Note: This GPU must have a display connected and powered on. The appropriate values can be found using the following command:",
     "adapter_name_placeholder_windows": "Radeon RX 580 Series",

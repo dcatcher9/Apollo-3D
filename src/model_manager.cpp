@@ -2,6 +2,7 @@
 #include "logging.h"
 #include <curl/curl.h>
 #include <openssl/evp.h>
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdint>
@@ -21,17 +22,9 @@ namespace models {
         return fwrite(ptr, size, nmemb, stream);
     }
 
-    std::string engine_filename(const config::depth_model_info& model, std::string_view compatibility_tag) {
-        std::string filename = model.name + "." +
-                               std::string(prod_zipdepth_convex2x::engine_recipe);
-        if (!compatibility_tag.empty()) {
-            filename += ".";
-            filename += compatibility_tag;
-        }
-        return filename + ".engine";
-    }
-
-    std::string ocr_engine_filename(std::string_view compatibility_tag) {
+    static std::string engine_identity_digest(
+        std::string_view domain, std::string_view model, std::string_view recipe,
+        std::string_view compatibility_tag) {
         // Encoding the complete identity verbatim in a Windows path can exceed MAX_PATH once
         // `.part` is appended during atomic publication. The contract retains the readable
         // recipe, while the active-engine manifest publishes this digest-bearing filename and
@@ -57,11 +50,9 @@ namespace models {
                    (field.empty() ||
                     EVP_DigestUpdate(context.get(), field.data(), field.size()) == 1);
         };
-        constexpr std::string_view cache_identity_domain =
-          "sunshine3d/ocr-tensorrt-engine-cache/v1";
-        if (!update_field(cache_identity_domain) ||
-            !update_field(ocr_model_name) ||
-            !update_field(ocr_engine_recipe) ||
+        if (!update_field(domain) ||
+            !update_field(model) ||
+            !update_field(recipe) ||
             !update_field(compatibility_tag) ||
             EVP_DigestFinal_ex(context.get(), digest.data(), &digest_size) != 1 ||
             digest_size != 32u) {
@@ -73,7 +64,53 @@ namespace models {
         for (unsigned int i = 0; i < digest_size; ++i) {
             token << std::setw(2) << static_cast<unsigned int>(digest[i]);
         }
-        return std::string(ocr_model_name) + ".cache-" + token.str() + ".engine";
+        return token.str();
+    }
+
+    std::string engine_filename(const config::depth_model_info& model, std::string_view compatibility_tag) {
+        const auto prefix = model.name + "." + std::string(prod_zipdepth_convex2x::engine_recipe);
+        // The empty-tag name is a preparation status key, never a selected disk cache artifact.
+        if (compatibility_tag.empty()) {
+            return prefix + ".engine";
+        }
+        const auto digest = engine_identity_digest(
+            "sunshine3d/depth-tensorrt-engine-cache/v1", model.name,
+            prod_zipdepth_convex2x::engine_recipe, compatibility_tag);
+        return digest.empty() ? std::string {} : prefix + ".cache-" + digest + ".engine";
+    }
+
+    bool is_current_depth_engine_filename(std::string_view filename) {
+        static const std::string prefix = std::string(prod_zipdepth_convex2x::logical_model) +
+            "." + std::string(prod_zipdepth_convex2x::engine_recipe) + ".cache-";
+        constexpr std::string_view suffix = ".engine";
+        if (filename.size() != prefix.size() + 64u + suffix.size() ||
+            !filename.starts_with(prefix) || !filename.ends_with(suffix)) {
+            return false;
+        }
+        const auto digest = filename.substr(prefix.size(), 64u);
+        return std::all_of(digest.begin(), digest.end(), [](char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        });
+    }
+
+    std::string ocr_engine_filename(std::string_view compatibility_tag) {
+        const auto digest = engine_identity_digest(
+            "sunshine3d/ocr-tensorrt-engine-cache/v1", ocr_model_name,
+            ocr_engine_recipe, compatibility_tag);
+        return digest.empty() ? std::string {} :
+            std::string(ocr_model_name) + ".cache-" + digest + ".engine";
+    }
+
+    bool engine_cache_path_fits_native_limit(const std::filesystem::path& path) {
+        if (path.empty()) return false;
+#ifdef _WIN32
+        std::error_code ec;
+        const auto absolute = std::filesystem::absolute(path, ec);
+        // The native builder's file APIs do not opt into extended-length paths.
+        return !ec && absolute.native().size() + std::string_view(".part").size() < 260u;
+#else
+        return true;
+#endif
     }
 
     std::filesystem::path ensure_onnx_available(const std::filesystem::path& assets_dir, const std::string& model_name, const std::string& model_url) {

@@ -1237,6 +1237,11 @@ namespace models {
       std::uint64_t sampled_frame_id
     );
 
+    /** Service optional cumulative outcome diagnostics on the normal D3D context owner.
+     * Safe during ordinary idle checks: never flushes, waits, or requests a conversion.
+     */
+    void poll_gpu_outcome_diagnostics();
+
   private:
     struct impl;
     std::unique_ptr<impl> pimpl;

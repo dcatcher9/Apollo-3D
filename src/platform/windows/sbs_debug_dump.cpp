@@ -4034,13 +4034,6 @@ namespace platf::sbs_debug {
         }
         const auto &raw = *completed.raw_model_provenance;
         const auto &composite = *completed.composite_depth_runtime_provenance;
-        const std::string engine_prefix =
-          std::string {models::prod_zipdepth_convex2x::logical_model} + "." +
-          std::string {models::prod_zipdepth_convex2x::engine_recipe} + ".";
-        const std::string engine_suffix =
-          "-onnx" +
-          std::string {models::prod_zipdepth_convex2x::fused_onnx_sha256} +
-          ".engine";
         const std::string active_manifest =
           std::string {models::prod_zipdepth_convex2x::logical_model} +
           ".active-engine.json";
@@ -4056,12 +4049,7 @@ namespace platf::sbs_debug {
                  raw.preprocess_source_closure_sha256 &&
                composite.engine_recipe ==
                  models::prod_zipdepth_convex2x::engine_recipe &&
-               composite.engine_artifact.size() >
-                 engine_prefix.size() + engine_suffix.size() &&
-               composite.engine_artifact.starts_with(engine_prefix) &&
-               composite.engine_artifact.ends_with(engine_suffix) &&
-               composite.engine_artifact.find_first_of("/\\") ==
-                 std::string::npos &&
+               models::is_current_depth_engine_filename(composite.engine_artifact) &&
                composite.active_engine_manifest == active_manifest;
       } catch (...) {
         return false;

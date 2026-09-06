@@ -91,13 +91,13 @@ namespace models::host_sbs_shader_cache {
     host_sbs_near_identical_reuse_depth,
   };
   inline constexpr std::string_view near_identical_detector_source_closure_sha256 =
-    "3dde879fb09189715530e6549c2fced103aa8684aec225390d56241be4e00585";
+    "18d4977cbc84088d91158577cac4ad63eaf182bdd978190809c87cb7015e01c6";
 
   inline constexpr std::array gpu_trace_specs {
     host_sbs_gpu_trace,
   };
   inline constexpr std::string_view gpu_trace_source_closure_sha256 =
-    "7f9bc8e48ffe16958e46366c49c80de5c59297577577985886096250e807b1dc";
+    "65a9c42dd0e02ab7e35afdb04d9b8178149623ec5e9180cedc3ce0f004c17854";
 
   inline constexpr std::array parallax_v2_live_renderer_specs {
     parallax_v2_live_renderer,

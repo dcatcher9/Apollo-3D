@@ -76,6 +76,10 @@
     "working_dir_desc": "Thư mục làm việc cần được truyền vào quá trình. Ví dụ, một số ứng dụng sử dụng thư mục làm việc để tìm kiếm các tệp cấu hình. Nếu không được thiết lập, Sunshine 3D sẽ mặc định sử dụng thư mục cha của lệnh."
   },
   "config": {
+    "diagnostics": "Chẩn đoán hiệu năng",
+    "diagnostics_desc": "Thu thập số lần suy luận và tái sử dụng thực tế trên GPU, cùng thời gian chụp hình, chuyển đổi, mã hóa, truyền mạng và hiển thị cục bộ. Thời gian đã trôi qua kể từ khi nội dung được tạo được báo cáo riêng cho khung hình mới và khung hình lặp lại. Khi tắt, không dùng đồng hồ hay bộ đếm chẩn đoán, truy vấn hay đọc lại dữ liệu từ GPU, hoặc kiểm tra hệ thống tệp định kỳ.",
+    "sbs_3d_max_encode_width": "Chiều rộng tối đa của khung hình 3D ghép",
+    "sbs_3d_max_encode_width_desc": "Giới hạn chiều rộng đầu ra với hai hình ảnh đặt cạnh nhau. Kích thước cuối cùng tuân theo giới hạn chiều rộng và chiều cao NVENC của bộ mã hóa, đồng thời giữ tỷ lệ khung hình trong độ chính xác cho phép khi căn chỉnh điểm ảnh. Chiều rộng được làm tròn xuống bội số của bốn để hình ảnh cho cả hai mắt đều có chiều rộng là số chẵn.",
     "adapter_name": "Adapter Name",
     "adapter_name_desc_windows": "Chỉ định GPU cụ thể để sử dụng cho quá trình capture Nếu không được thiết lập, GPU sẽ được chọn tự động. Chúng tôi khuyến nghị để để trống trường này để sử dụng tính năng chọn GPU tự động! Lưu ý: GPU này phải có màn hình kết nối và đang bật nguồn. Các giá trị phù hợp có thể được tìm thấy bằng cách sử dụng lệnh sau:",
     "adapter_name_placeholder_windows": "Radeon RX 580 Series",

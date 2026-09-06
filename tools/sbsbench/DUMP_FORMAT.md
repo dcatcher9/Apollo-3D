@@ -89,11 +89,12 @@ prior coherent tuple. A due reuse is instead `optional_ocr` for work `8` or `abs
 
 The shared live/offline policy makes subtitle work due after two accepted ordinary opaque dirty
 holds or `33 ms` of source observation time since the last guaranteed subtitle observation. The
-device infer owner is reusable through at most four frame steps and only with a nonregressed source
-observation age strictly below `100 ms`; the host's initial-candidate and opaque-follow-up freshness
-checks use the same strict `100 ms` ceiling. Each trace record carries the source-observation
-timestamp; its frame identity and authenticated decision history expose the device half of those
-bounds without a production readback.
+device infer owner remains reusable without age or frame-count expiry, while source observations
+must retain valid ordering and every reuse must compare against that same actual inference input.
+The host's initial-candidate and opaque-follow-up checks preserve owner, route, and time ordering.
+Each trace record carries the source-observation timestamp; its frame identity and authenticated
+decision history expose those guards without a production readback. Replay request policy schema
+`3` authenticates this policy; the trace record layout is unchanged.
 
 The ring writer invalidates the header tag before overwriting any slot, commits payload before the
 record tag, then updates the cursor and republishes the header tag last. The reader reconstructs

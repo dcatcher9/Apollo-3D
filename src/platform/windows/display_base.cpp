@@ -307,6 +307,38 @@ namespace platf::dxgi {
       );
     }
 
+    void ddup_unchanged_roi_proof_t::reset() noexcept {
+      anchor_.reset();
+      region_ = {};
+    }
+
+    void ddup_unchanged_roi_proof_t::reset(
+      const std::optional<ddup_damage_snapshot_t> &baseline,
+      const RECT &region
+    ) {
+      reset();
+      if (baseline && baseline->history && baseline->token != 0u && region.left >= 0 && region.top >= 0 && region.right > region.left && region.bottom > region.top) {
+        anchor_ = baseline;
+        region_ = region;
+      }
+    }
+
+    bool ddup_unchanged_roi_proof_t::observe(
+      const std::optional<ddup_damage_snapshot_t> &current,
+      const RECT &region
+    ) {
+      if (!anchor_) {
+        return false;
+      }
+      if (region.left != region_.left || region.top != region_.top || region.right != region_.right || region.bottom != region_.bottom || query_ddup_damage_between(anchor_, current, region) != ddup_damage_intersection_e::unchanged) {
+        reset();
+        return false;
+      }
+      // Only a complete clean interval advances this proof. The real model owner never moves.
+      anchor_ = current;
+      return true;
+    }
+
     host_sbs_ddup_reuse_proof_e classify_host_sbs_ddup_reuse(
       const std::optional<std::chrono::steady_clock::time_point> &inferred_content,
       const std::optional<ddup_damage_snapshot_t> &inferred_damage,

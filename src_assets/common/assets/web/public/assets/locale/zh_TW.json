@@ -76,6 +76,10 @@
     "working_dir_desc": "這是要傳遞給處理程序的工作目錄。例如，有些應用程式會使用這個目錄來搜尋設定檔。如果沒有設定，Sunshine 3D 會自動使用指令所在的目錄"
   },
   "config": {
+    "diagnostics": "效能診斷",
+    "diagnostics_desc": "收集 GPU 實際執行推論與重複使用的次數，以及擷取、轉換、編碼、網路傳輸和本機顯示的耗時。新影格與重複影格會分別回報內容產生後的經過時間。停用時，不會進行診斷用的計時、計數、GPU 查詢與資料回讀，或定期檢查檔案系統。",
+    "sbs_3d_max_encode_width": "3D 合併影格的最大寬度",
+    "sbs_3d_max_encode_width_desc": "限制左右並排輸出的合併寬度。最終尺寸會遵守編碼器的 NVENC 寬度與高度限制，並在像素對齊所允許的精度內維持長寬比。寬度會向下取整為四的倍數，讓雙眼影像的寬度都是偶數。",
     "adapter_name": "顯示卡名稱",
     "adapter_name_desc_windows": "手動指定用於擷取的 GPU。如果未設定，系統會自動選擇 GPU。我們強烈建議保持此欄位為空，以使用自動 GPU 選擇！注意：此 GPU 必須已連接顯示器並開啟電源。可以使用以下指令來查找適當的值：",
     "adapter_name_placeholder_windows": "Radeon RX 580 系列",

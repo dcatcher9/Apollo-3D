@@ -49,6 +49,152 @@ namespace {
     mode.sourceMode.position = {x, y};
     return mode;
   }
+
+  class VirtualDisplayPublication: public testing::Test {
+  protected:
+    using clock_t = std::chrono::steady_clock;
+    using milliseconds = std::chrono::milliseconds;
+    const clock_t::time_point started_at {std::chrono::seconds(42)};
+    clock_t::time_point current_time = started_at;
+    const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT added = identity(42, 7, 3);
+    const VDISPLAY::display_identity_query_t published {
+      VDISPLAY::display_identity_state_e::present,
+      LR"(\\.\DISPLAY12)",
+      LR"(\\?\DISPLAY#SMKD1CE#added)",
+      L"Virtual Display",
+    };
+    std::vector<milliseconds> query_times;
+    std::vector<milliseconds> wait_targets;
+
+    VDISPLAY::display_identity_query_t poll(
+      const std::function<VDISPLAY::display_identity_query_t()> &query
+    ) {
+      return VDISPLAY::waitForDisplayIdentityForTest(
+        added.AdapterLuid,
+        added.TargetId,
+        [&](const LUID &adapter, uint32_t target) {
+          EXPECT_EQ(adapter.LowPart, added.AdapterLuid.LowPart);
+          EXPECT_EQ(adapter.HighPart, added.AdapterLuid.HighPart);
+          EXPECT_EQ(target, added.TargetId);
+          query_times.push_back(std::chrono::duration_cast<milliseconds>(current_time - started_at));
+          return query();
+        },
+        [&]() {
+          return current_time;
+        },
+        [&](clock_t::time_point deadline) {
+          EXPECT_GT(deadline, current_time);
+          wait_targets.push_back(std::chrono::duration_cast<milliseconds>(deadline - started_at));
+          current_time = deadline;
+        }
+      );
+    }
+  };
+}
+
+TEST_F(VirtualDisplayPublication, ReturnsImmediatePublicationWithoutWaiting) {
+  const auto result = poll([&]() {
+    return published;
+  });
+
+  EXPECT_EQ(result.state, VDISPLAY::display_identity_state_e::present);
+  EXPECT_EQ(result.display_name, published.display_name);
+  EXPECT_EQ(result.device_path, published.device_path);
+  EXPECT_EQ(result.friendly_name, published.friendly_name);
+  EXPECT_EQ(query_times, (std::vector<milliseconds> {milliseconds(0)}));
+  EXPECT_TRUE(wait_targets.empty());
+}
+
+TEST_F(VirtualDisplayPublication, ObservesPublicationDuringTheFinalWait) {
+  const auto result = poll([&]() {
+    return current_time - started_at >= milliseconds(1000) ?
+             published :
+             VDISPLAY::display_identity_query_t {VDISPLAY::display_identity_state_e::absent};
+  });
+
+  EXPECT_EQ(result.state, VDISPLAY::display_identity_state_e::present);
+  EXPECT_EQ(result.display_name, published.display_name);
+  ASSERT_EQ(query_times.size(), 7u);
+  EXPECT_EQ(query_times.back(), milliseconds(1260));
+}
+
+TEST_F(VirtualDisplayPublication, AcceptsPublicationOnTheDeadline) {
+  const auto result = poll([&]() {
+    return current_time - started_at >= milliseconds(1260) ?
+             published :
+             VDISPLAY::display_identity_query_t {VDISPLAY::display_identity_state_e::absent};
+  });
+
+  EXPECT_EQ(result.state, VDISPLAY::display_identity_state_e::present);
+  EXPECT_EQ(current_time - started_at, milliseconds(1260));
+}
+
+TEST_F(VirtualDisplayPublication, TimesOutAfterCheckingTheEntireWaitBudget) {
+  const auto result = poll([]() {
+    return VDISPLAY::display_identity_query_t {VDISPLAY::display_identity_state_e::absent};
+  });
+
+  EXPECT_EQ(result.state, VDISPLAY::display_identity_state_e::absent);
+  EXPECT_TRUE(result.display_name.empty());
+  EXPECT_EQ(query_times, (std::vector<milliseconds> {
+                          milliseconds(0), milliseconds(20), milliseconds(60), milliseconds(140),
+                          milliseconds(300), milliseconds(620), milliseconds(1260),
+                        }));
+  ASSERT_EQ(wait_targets.size(), 6u);
+  EXPECT_EQ(wait_targets.back(), milliseconds(1260));
+  EXPECT_EQ(current_time - started_at, milliseconds(1260));
+}
+
+TEST_F(VirtualDisplayPublication, RetriesTransientIdentityQueryFailures) {
+  const auto result = poll([&]() {
+    switch (query_times.size()) {
+      case 1:
+        return VDISPLAY::display_identity_query_t {};
+      case 2:
+        return VDISPLAY::display_identity_query_t {VDISPLAY::display_identity_state_e::absent};
+      case 3:
+        return VDISPLAY::display_identity_query_t {};
+      default:
+        return published;
+    }
+  });
+
+  EXPECT_EQ(result.state, VDISPLAY::display_identity_state_e::present);
+  EXPECT_EQ(result.display_name, published.display_name);
+  EXPECT_EQ(result.device_path, published.device_path);
+  EXPECT_EQ(query_times.size(), 4u);
+  EXPECT_EQ(current_time - started_at, milliseconds(140));
+}
+
+TEST_F(VirtualDisplayPublication, QueryTimeConsumesTheWaitBudget) {
+  const auto result = poll([&]() {
+    current_time += milliseconds(400);
+    return VDISPLAY::display_identity_query_t {};
+  });
+
+  EXPECT_EQ(result.state, VDISPLAY::display_identity_state_e::indeterminate);
+  EXPECT_EQ(query_times, (std::vector<milliseconds> {
+                          milliseconds(0), milliseconds(420), milliseconds(860),
+                        }));
+  EXPECT_EQ(wait_targets, (std::vector<milliseconds> {milliseconds(420), milliseconds(860)}));
+  EXPECT_EQ(current_time - started_at, milliseconds(1260));
+}
+
+TEST_F(VirtualDisplayPublication, CapsTheFinalWaitToTheRemainingBudget) {
+  const auto result = poll([&]() {
+    current_time += milliseconds(100);
+    return VDISPLAY::display_identity_query_t {};
+  });
+
+  EXPECT_EQ(result.state, VDISPLAY::display_identity_state_e::indeterminate);
+  EXPECT_EQ(wait_targets, (std::vector<milliseconds> {
+                           milliseconds(120), milliseconds(260), milliseconds(440),
+                           milliseconds(700), milliseconds(1120), milliseconds(1260),
+                         }));
+  ASSERT_EQ(query_times.size(), 7u);
+  EXPECT_EQ(query_times.back(), milliseconds(1260));
+  // The final Windows query may itself take time after the wait deadline.
+  EXPECT_EQ(current_time - started_at, milliseconds(1360));
 }
 
 TEST(VirtualDisplayIdentity, RejectsAnUnrelatedSudoOutput) {

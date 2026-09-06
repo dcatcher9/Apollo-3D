@@ -1,11 +1,13 @@
 // Diagnostic-only completion ring. This pass snapshots the immutable postprocessed CBRG/RQST
-// transaction, finalized SLR state, and condition parameters without CPU readback. It has no
-// rendering authority and failure to compile or dispatch must not affect Host SBS production.
+// transaction, finalized SLR state, and condition parameters. A separate cumulative counter
+// buffer permits asynchronous aggregate diagnostics without reading back individual decisions.
+// Neither output has rendering authority; failures must not affect Host SBS production.
 
 ByteAddressBuffer TraceTransaction : register(t0);
 StructuredBuffer<uint> TraceSubtitleLocator : register(t1);
 StructuredBuffer<uint> TraceSubtitleCondition : register(t2);
 RWStructuredBuffer<uint> TraceRing : register(u0);
+RWStructuredBuffer<uint> TraceOutcomeCounters : register(u1);
 
 #include "include/depth_coordinate_v2_contract.generated.hlsl"
 
@@ -41,6 +43,11 @@ cbuffer TraceConstants : register(b0) {
 #define GPU_TRACE_TRANSACTION_WORDS 64u
 #define GPU_TRACE_LOCATOR_WORDS 80u
 #define GPU_TRACE_CONDITION_WORDS 6u
+
+// Independent of the Dump ring ABI: schema, tag, then infer/reuse/invalid low/high pairs.
+#define GPU_OUTCOME_SCHEMA 1u
+#define GPU_OUTCOME_TAG 0x314F5447u
+#define GPU_OUTCOME_WORDS 8u
 
 #define GPU_TRACE_HEADER_SCHEMA 0u
 #define GPU_TRACE_HEADER_TAG 1u
@@ -257,6 +264,30 @@ uint TraceSubtitleDisposition(bool receipt_valid, uint decision, bool optional_o
     return GPU_TRACE_SUBTITLE_INVALID;
 }
 
+void TraceCountOutcome(uint depth_disposition) {
+    uint words = 0u;
+    uint stride = 0u;
+    TraceOutcomeCounters.GetDimensions(words, stride);
+    // An optional counter allocation/readback failure leaves u1 unbound. The Dump ring
+    // continues to work, and an unknown counter buffer is never reinterpreted or repaired.
+    if (words != GPU_OUTCOME_WORDS || stride != 4u) {
+        return;
+    }
+    if (TraceOutcomeCounters[0u] != GPU_OUTCOME_SCHEMA ||
+        TraceOutcomeCounters[1u] != GPU_OUTCOME_TAG) {
+        return;
+    }
+    uint low_word = depth_disposition == GPU_TRACE_DEPTH_INFER ? 2u :
+        depth_disposition == GPU_TRACE_DEPTH_REUSE ? 4u : 6u;
+    // One invocation per ordered trace dispatch owns all counters. Preserve low-word carry
+    // so delayed/skipped CPU samples cannot lose events at uint32 rollover.
+    uint low = TraceOutcomeCounters[low_word] + 1u;
+    TraceOutcomeCounters[low_word] = low;
+    if (low == 0u) {
+        TraceOutcomeCounters[low_word + 1u] += 1u;
+    }
+}
+
 [numthreads(1, 1, 1)]
 void main(uint3 dispatch_thread : SV_DispatchThreadID) {
     bool header_valid = TraceHeaderValid();
@@ -285,6 +316,7 @@ void main(uint3 dispatch_thread : SV_DispatchThreadID) {
     bool receipt_valid = TraceReceiptValid(optional_ocr, decision);
     uint depth_disposition = !receipt_valid ? GPU_TRACE_DEPTH_INVALID :
         decision == 0u ? GPU_TRACE_DEPTH_REUSE : GPU_TRACE_DEPTH_INFER;
+    TraceCountOutcome(depth_disposition);
     uint subtitle_disposition =
         TraceSubtitleDisposition(receipt_valid, decision, optional_ocr);
 

@@ -44,6 +44,99 @@ namespace platf::dxgi {
 
 namespace {
 
+  struct diagnostic_construction_probe_t {
+    static inline unsigned constructions = 0;
+    diagnostic_construction_probe_t() {
+      ++constructions;
+    }
+  };
+
+  TEST(VideoFrameDiagnosticsTest, DisabledDiagnosticsDoNotConstructTrackersOrReadClock) {
+    diagnostic_construction_probe_t::constructions = 0;
+    unsigned clock_reads = 0;
+    const auto clock = [&]() {
+      ++clock_reads;
+      return std::chrono::steady_clock::time_point {10ms};
+    };
+
+    const auto state = video::detail::make_diagnostic_state<diagnostic_construction_probe_t>(false);
+    const auto timestamp = video::detail::diagnostic_timestamp(false, clock);
+    EXPECT_FALSE(state);
+    EXPECT_FALSE(timestamp);
+    EXPECT_EQ(diagnostic_construction_probe_t::constructions, 0u);
+    EXPECT_EQ(clock_reads, 0u);
+  }
+
+  TEST(VideoFrameDiagnosticsTest, EnabledDiagnosticsConstructAndReadOnlyWhenRequested) {
+    diagnostic_construction_probe_t::constructions = 0;
+    unsigned clock_reads = 0;
+    const auto expected = std::chrono::steady_clock::time_point {10ms};
+    const auto state = video::detail::make_diagnostic_state<diagnostic_construction_probe_t>(true);
+    const auto timestamp = video::detail::diagnostic_timestamp(true, [&]() {
+      ++clock_reads;
+      return expected;
+    });
+
+    EXPECT_TRUE(state);
+    EXPECT_EQ(timestamp, expected);
+    EXPECT_EQ(diagnostic_construction_probe_t::constructions, 1u);
+    EXPECT_EQ(clock_reads, 1u);
+  }
+
+  TEST(VideoFrameDiagnosticsTest, MissingAndRegressedTimestampsDoNotFabricateZeroSamples) {
+    const auto started = std::chrono::steady_clock::time_point {10ms};
+    EXPECT_FALSE(video::detail::diagnostic_elapsed_ms(std::nullopt, started));
+    EXPECT_FALSE(video::detail::diagnostic_elapsed_ms(started, started - 1us));
+    EXPECT_EQ(video::detail::diagnostic_elapsed_ms(started, started), 0.0);
+    EXPECT_EQ(video::detail::diagnostic_elapsed_ms(started, started + 250us), 0.25);
+  }
+
+  TEST(VideoFrameDiagnosticsTest, RepeatedOrRegressedContentDoesNotBecomeFresh) {
+    using content = video::detail::diagnostic_content_e;
+    video::detail::diagnostic_content_tracker_t tracker;
+    const auto timestamp = std::chrono::steady_clock::time_point {10ms};
+
+    EXPECT_EQ(tracker.observe(timestamp), content::new_content);
+    EXPECT_EQ(tracker.observe(timestamp), content::repeated_content);
+    EXPECT_EQ(tracker.observe(timestamp - 1ms), content::repeated_content);
+    EXPECT_EQ(tracker.observe(timestamp), content::repeated_content);
+    EXPECT_EQ(tracker.observe(timestamp + 1ms), content::new_content);
+  }
+
+  TEST(VideoFrameDiagnosticsTest, ExplicitIdleRepeatRemainsRepeatedOnFirstObservation) {
+    using content = video::detail::diagnostic_content_e;
+    video::detail::diagnostic_content_tracker_t tracker;
+    const auto timestamp = std::chrono::steady_clock::time_point {10ms};
+
+    EXPECT_EQ(tracker.observe(timestamp, true), content::repeated_content);
+    EXPECT_EQ(tracker.observe(timestamp), content::repeated_content);
+    EXPECT_EQ(tracker.observe(timestamp + 1ms), content::new_content);
+  }
+
+  TEST(VideoFrameDiagnosticsTest, UnknownContentDoesNotResetKnownFreshness) {
+    using content = video::detail::diagnostic_content_e;
+    video::detail::diagnostic_content_tracker_t tracker;
+    const auto timestamp = std::chrono::steady_clock::time_point {10ms};
+
+    EXPECT_EQ(tracker.observe(std::nullopt), content::unknown);
+    EXPECT_EQ(tracker.observe(timestamp), content::new_content);
+    EXPECT_EQ(tracker.observe(std::nullopt, true), content::unknown);
+    EXPECT_EQ(tracker.observe(timestamp), content::repeated_content);
+  }
+
+  TEST(VideoFrameDiagnosticsTest, RepeatedContentAgeStaysSeparateFromEncodedQueueResidence) {
+    using content = video::detail::diagnostic_content_e;
+    video::detail::diagnostic_content_tracker_t tracker;
+    const auto pixels = std::chrono::steady_clock::time_point {100ms};
+    const auto encoded = pixels + 46ms;
+    const auto dequeued = pixels + 48ms;
+
+    EXPECT_EQ(tracker.observe(pixels), content::new_content);
+    EXPECT_EQ(tracker.observe(pixels), content::repeated_content);
+    EXPECT_EQ(video::detail::diagnostic_elapsed_ms(pixels, dequeued), 48.0);
+    EXPECT_EQ(video::detail::diagnostic_elapsed_ms(encoded, dequeued), 2.0);
+  }
+
   TEST(RenderedContentTimestampTest, MatchedT0IsPreservedWhileCurrentCadenceIsT1) {
     const auto t0 = std::chrono::steady_clock::time_point {10ms};
     const auto t1 = std::chrono::steady_clock::time_point {20ms};
@@ -2838,8 +2931,7 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
     .engine_recipe = std::string {engine_recipe},
     .engine_artifact = std::string {logical_model} + "." +
                        std::string {engine_recipe} +
-                       ".trt11_2_1_2-sm120-gputest-onnx" +
-                       std::string {fused_onnx_sha256} + ".engine",
+                       ".cache-" + std::string(64u, 'a') + ".engine",
     .active_engine_manifest =
       std::string {logical_model} + ".active-engine.json",
   };
@@ -5231,78 +5323,6 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
 }
 #endif
 
-TEST(DirectxShaderSourceTest, ConvertsEveryChromaTapBeforeAveraging) {
-  const std::string shader_dir =
-    SUNSHINE_SOURCE_DIR "/src_assets/windows/assets/shaders/directx/";
-
-  struct shader_family_t {
-    const char *entrypoint;
-    const char *converter;
-  };
-
-  constexpr std::array families {
-    shader_family_t {"convert_yuv420_packed_uv_type0_ps.hlsl", "convert_base.hlsl"},
-    shader_family_t {"convert_yuv420_packed_uv_type0s_ps.hlsl", "convert_base.hlsl"},
-    shader_family_t {"convert_yuv420_packed_uv_type0_ps_linear.hlsl", "convert_linear_base.hlsl"},
-    shader_family_t {"convert_yuv420_packed_uv_type0s_ps_linear.hlsl", "convert_linear_base.hlsl"},
-    shader_family_t {
-      "convert_yuv420_packed_uv_type0_ps_perceptual_quantizer.hlsl",
-      "convert_perceptual_quantizer_base.hlsl"
-    },
-    shader_family_t {
-      "convert_yuv420_packed_uv_type0s_ps_perceptual_quantizer.hlsl",
-      "convert_perceptual_quantizer_base.hlsl"
-    },
-  };
-
-  for (const auto &family : families) {
-    const auto path = shader_dir + family.entrypoint;
-    std::ifstream entry_input(path, std::ios::binary);
-    ASSERT_TRUE(entry_input.is_open()) << path;
-    const std::string entry {
-      std::istreambuf_iterator<char> {entry_input},
-      std::istreambuf_iterator<char> {}
-    };
-
-    const auto converter =
-      entry.find(std::string {"#include \"include/"} + family.converter + '"');
-    const auto packed_uv =
-      entry.find("#include \"include/convert_yuv420_packed_uv_ps_base.hlsl\"");
-    ASSERT_NE(converter, std::string::npos) << family.entrypoint;
-    ASSERT_NE(packed_uv, std::string::npos) << family.entrypoint;
-    EXPECT_LT(converter, packed_uv) << family.entrypoint;
-  }
-
-  const auto path = shader_dir + "include/convert_yuv420_packed_uv_ps_base.hlsl";
-  std::ifstream input(path, std::ios::binary);
-  ASSERT_TRUE(input.is_open()) << path;
-
-  const std::string shader {
-    std::istreambuf_iterator<char> {input},
-    std::istreambuf_iterator<char> {}
-  };
-  const auto sample_begin = shader.find("float3 SampleChromaInput");
-  const auto main_begin = shader.find("float2 main_ps", sample_begin);
-  ASSERT_NE(sample_begin, std::string::npos);
-  ASSERT_NE(main_begin, std::string::npos);
-
-  const auto sample_helper = shader.substr(sample_begin, main_begin - sample_begin);
-  EXPECT_NE(
-    sample_helper.find(
-      "return CONVERT_FUNCTION(image.Sample(def_sampler, tex_coord).rgb);"
-    ),
-    std::string::npos
-  );
-  EXPECT_EQ(sample_helper.find("#if"), std::string::npos);
-
-  // All 2/4/6-tap layouts in the shared body must go through the converted sampler. A raw
-  // texture fetch or conversion in main_ps would reintroduce post-average conversion.
-  const auto filter_body = shader.substr(main_begin);
-  EXPECT_EQ(filter_body.find("image.Sample"), std::string::npos);
-  EXPECT_EQ(filter_body.find("CONVERT_FUNCTION"), std::string::npos);
-  EXPECT_EQ(shader.find("CONVERT_CHROMA_PER_TAP"), std::string::npos);
-}
-
 TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorization) {
   const auto display =
     read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
@@ -5403,57 +5423,26 @@ TEST(DirectxShaderSourceTest, HostSbsCompletionBindsTheEstimatorGridToTheSubmitt
   );
 }
 
-TEST(DirectxShaderSourceTest, VideoRoiReuseMemoKeepsTheCompletePixelProofKey) {
+TEST(DirectxShaderSourceTest, VideoRoiExactProofIsIndependentOfInferenceAndPresentationIdentity) {
   const auto display =
     read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
   ASSERT_FALSE(display.empty());
 
-  const auto convert_begin = display.find("    int convert(\n");
-  const auto convert_end = display.find("    bool apply_colorspace(", convert_begin);
-  ASSERT_NE(convert_begin, std::string::npos);
-  ASSERT_NE(convert_end, std::string::npos);
-  const auto convert = display.substr(convert_begin, convert_end - convert_begin);
-  std::size_t memoized_calls = 0u;
-  for (std::size_t offset = 0u;
-       (offset = convert.find("memoized_input_reuse_kind(", offset)) !=
-       std::string::npos;
-       ++offset) {
-    ++memoized_calls;
-  }
-  EXPECT_EQ(memoized_calls, 7u);
+  // A presentation-only copy carries the proof without relabeling its actual inference owner.
+  EXPECT_NE(display.find("destination.unchanged_roi_proof = source.unchanged_roi_proof;"), std::string::npos);
+  EXPECT_NE(display.find("slot.unchanged_roi_proof.reset(slot.inference_ddup_damage, *proof_region);"), std::string::npos);
+  EXPECT_NE(display.find("slot.unchanged_roi_proof.observe(current_damage, *region)"), std::string::npos);
+  EXPECT_EQ(display.find("memoized_input_reuse_kind"), std::string::npos);
 
-  const auto key_begin = convert.find("struct reuse_damage_key_t {");
-  const auto memo_end = convert.find(
-    "// Once the per-stream estimator exists", key_begin
-  );
-  ASSERT_NE(key_begin, std::string::npos);
-  ASSERT_NE(memo_end, std::string::npos);
-  const auto memo = convert.substr(key_begin, memo_end - key_begin);
-  EXPECT_NE(memo.find("inference_content;"), std::string::npos);
-  EXPECT_NE(memo.find("inference_damage;"), std::string::npos);
-  EXPECT_NE(memo.find("models::depth_input_region_t input_region"), std::string::npos);
-  EXPECT_NE(memo.find("current_content;"), std::string::npos);
-  EXPECT_NE(memo.find("current_damage;"), std::string::npos);
-  EXPECT_NE(memo.find("const detail::ddup_damage_history_t *history"), std::string::npos);
-  EXPECT_NE(memo.find("std::uint64_t token"), std::string::npos);
-  EXPECT_NE(memo.find("bool present"), std::string::npos);
-  EXPECT_NE(
-    memo.find("std::array<std::optional<reuse_entry_t>, 3u> reuse_cache;"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    memo.find("if (!slot.depth_input_region.is_video_region())"),
-    std::string::npos
-  );
-  EXPECT_NE(memo.find("entry && entry->first == key"), std::string::npos);
-  std::size_t classifications = 0u;
-  for (std::size_t offset = 0u;
-       (offset = memo.find("matched_input_reuse_kind(", offset)) !=
-       std::string::npos;
-       ++offset) {
-    ++classifications;
-  }
-  EXPECT_EQ(classifications, 2u);
+  const auto reuse_begin = display.find("current_color_reuse_slot.frame_id = est.completed_frame_id;");
+  const auto reuse_end = display.find("depth_reuse_authorization = post_completion_reuse_authorization;", reuse_begin);
+  ASSERT_NE(reuse_begin, std::string::npos);
+  ASSERT_NE(reuse_end, std::string::npos);
+  const auto reuse = display.substr(reuse_begin, reuse_end - reuse_begin);
+  EXPECT_NE(reuse.find("current_color_reuse_slot.captured_at = reuse_now;"), std::string::npos);
+  EXPECT_NE(reuse.find("current_color_reuse_slot.source_timestamp = current_source_timestamp;"), std::string::npos);
+  EXPECT_EQ(reuse.find("inference_content_timestamp"), std::string::npos);
+  EXPECT_EQ(reuse.find("inference_ddup_damage"), std::string::npos);
 }
 
 TEST(DirectxShaderSourceTest, VideoRoiSamplesRetainedSourceAndCopiesOnlyForDump) {
@@ -5803,7 +5792,7 @@ TEST(DirectxShaderSourceTest, OpaquePackedPresentationCannotSeedSemanticLineage)
          "latest_v2_lineage",
          "reusable_ocr_input",
          "gpu_observation_barrier",
-         "content_reuse_refresh",
+         "unchanged_roi_proof",
          "depth_reuse_authorization",
        }) {
     EXPECT_EQ(body.find(forbidden_authority), std::string::npos)
@@ -5951,7 +5940,7 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseIsAlwaysOnAndGpuOwned) {
     std::string::npos
   );
   EXPECT_NE(candidate_body.find("opaque_followup_route_observable"), std::string::npos);
-  EXPECT_NE(candidate_body.find("host_sbs_gpu_followup_fresh("), std::string::npos);
+  EXPECT_NE(candidate_body.find("host_sbs_gpu_followup_order_valid("), std::string::npos);
   EXPECT_NE(
     candidate_body.find("const auto followup_damage = matched_motion_damage("),
     std::string::npos
@@ -5976,7 +5965,7 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseIsAlwaysOnAndGpuOwned) {
     early_retire
   );
   const auto early_retain = display.find(
-    "retain_completed_lineage(false, true);",
+    "retain_completed_lineage(true);",
     early_poll
   );
   ASSERT_NE(early_retire, std::string::npos);
@@ -5992,15 +5981,64 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseIsAlwaysOnAndGpuOwned) {
   ) << "A ready completion consumed before admission must preserve an armed Dump 3D snapshot.";
   EXPECT_LT(early_poll, admission);
   EXPECT_LT(early_retain, admission);
+  const auto completed_source_decision = display.find(
+    "const auto completed_source_action = detail::host_sbs_completed_source_action(",
+    early_retain
+  );
+  ASSERT_NE(completed_source_decision, std::string::npos);
+  EXPECT_LT(completed_source_decision, admission);
+  const auto completed_source_end = display.find(
+    "const bool opaque_followup_route_rejected =",
+    completed_source_decision
+  );
+  ASSERT_NE(completed_source_end, std::string::npos);
+  const auto completed_source_body = display.substr(
+    completed_source_decision,
+    completed_source_end - completed_source_decision
+  );
+  for (const auto *proof : {
+         "current_source_timestamp",
+         "dedup_gate_open",
+         "!current_interactive_move_size",
+         "completed_current_route_matches",
+         "opaque_followup_route_observable",
+         "opaque_gpu_followup_anchor.frame_id == gpu_observation_barrier.conditional_frame_id()",
+         "matched_presentation_cache.frame_id() == opaque_gpu_followup_anchor.frame_id",
+         "current_ddup_damage->history == opaque_gpu_followup_anchor.damage->history",
+         "current_ddup_damage->token == opaque_gpu_followup_anchor.damage->token",
+         "matched_presentation_cache.source_matches(current_source_timestamp)",
+         "depth_authority_reprocess_pending",
+         "producer_terminal",
+       }) {
+    EXPECT_NE(completed_source_body.find(proof), std::string::npos) << proof;
+  }
+  EXPECT_NE(candidate_body.find("authenticated && !current_source_already_completed"), std::string::npos)
+    << "Redelivery cannot revoke the opaque anchor as an invalid changed-source successor.";
   const auto submit_body = display.substr(admission, same_frame_poll - admission);
   EXPECT_NE(submit_body.find("gpu_observation_barrier.active()"), std::string::npos);
   EXPECT_NE(submit_body.find("gpu_observation_barrier.make_request("), std::string::npos);
   EXPECT_NE(submit_body.find("gpu_observation_barrier.record_submission("), std::string::npos);
   EXPECT_NE(
-    submit_body.find("adaptive_hold_cadence.hold_candidate_still_fresh("),
+    submit_body.find("adaptive_hold_cadence.hold_candidate_still_valid("),
     std::string::npos
   );
   const auto private_copy = submit_body.find("copy_matched_frame(");
+  const auto completed_source_skip = submit_body.find("if (current_source_already_completed)");
+  const auto completed_source_skip_end = submit_body.find(
+    "else if (retained_source_pending_slot)",
+    completed_source_skip
+  );
+  ASSERT_NE(completed_source_skip, std::string::npos);
+  ASSERT_NE(completed_source_skip_end, std::string::npos);
+  EXPECT_LT(completed_source_skip_end, private_copy);
+  const auto skip_body = submit_body.substr(
+    completed_source_skip,
+    completed_source_skip_end - completed_source_skip
+  );
+  EXPECT_EQ(skip_body.find("estimate_depth("), std::string::npos);
+  EXPECT_EQ(skip_body.find(".reset("), std::string::npos);
+  EXPECT_EQ(skip_body.find("record_submission("), std::string::npos);
+  EXPECT_EQ(skip_body.find("latest_v2_lineage"), std::string::npos);
   const auto final_route_observation = submit_body.find(
     "adaptive_motion_route_state.observe(current_adaptive_route_epoch())",
     private_copy
@@ -6061,7 +6099,7 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseIsAlwaysOnAndGpuOwned) {
   ) << "Follow-up age must be measured conservatively from before wrapper submission";
   EXPECT_NE(submit_body.find("opaque_gpu_followup_anchor.reset();"), std::string::npos);
   EXPECT_NE(
-    display.find("opaque_followup_expired/rejected/force_fallback="),
+    display.find("opaque_followup_invalid_owner/rejected/force_fallback="),
     std::string::npos
   );
   EXPECT_NE(submit_body.find("if (depth_transaction_enqueued)"), std::string::npos);
@@ -6147,7 +6185,7 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseIsAlwaysOnAndGpuOwned) {
   );
   ASSERT_NE(barrier_acceptance, std::string::npos);
   const auto barrier_acceptance_end = display.find(
-    "const bool latest_lineage_retained =",
+    "(void) retain_latest_v2_lineage(",
     barrier_acceptance
   );
   ASSERT_NE(barrier_acceptance_end, std::string::npos);
@@ -6175,30 +6213,8 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseIsAlwaysOnAndGpuOwned) {
     barrier_acceptance_body.find("current_root_authority_generation"),
     std::string::npos
   );
-  const auto pending_acceptance = display.find(
-    "const bool current_reusable_enqueue_pending =",
-    post_cache
-  );
-  ASSERT_NE(pending_acceptance, std::string::npos);
-  const auto pending_acceptance_end = display.find(
-    "retain_completed_lineage(",
-    pending_acceptance
-  );
-  ASSERT_NE(pending_acceptance_end, std::string::npos);
-  const auto pending_acceptance_body = display.substr(
-    pending_acceptance,
-    pending_acceptance_end - pending_acceptance
-  );
-  EXPECT_NE(
-    pending_acceptance_body.find("authority_generation(live_window_authority)"),
-    std::string::npos
-  );
-  EXPECT_EQ(
-    pending_acceptance_body.find("current_root_authority_generation"),
-    std::string::npos
-  );
   const auto barrier_clear_end = display.find(
-    "const bool completion_reuse_authorized =",
+    "\n          };",
     barrier_clear
   );
   ASSERT_NE(barrier_clear_end, std::string::npos);
@@ -6541,13 +6557,6 @@ TEST(DirectxShaderTest, CompilesContractiveDirectParallaxRendererAndDiagnostics)
             static_cast<const char *>(shader_errors->GetBufferPointer()) :
             "no compiler diagnostics");
   }
-}
-
-TEST(EncodeWaitPolicyTests, ReadyDepthCannotSpinBeforeFirstRealFrame) {
-  EXPECT_FALSE(video::detail::should_poll_ready_depth_without_wait(false, false));
-  EXPECT_FALSE(video::detail::should_poll_ready_depth_without_wait(false, true));
-  EXPECT_FALSE(video::detail::should_poll_ready_depth_without_wait(true, false));
-  EXPECT_TRUE(video::detail::should_poll_ready_depth_without_wait(true, true));
 }
 
 TEST(EncodeWaitPolicyTests, CadenceTargetIsResolvedBeforeConversionWithoutChangingTimestamp) {
@@ -7671,7 +7680,7 @@ TEST(EncodeReadyEventLifecycleSourceTests, ConsumesOnlyReadinessSampledBeforeCon
     flag
   );
   const auto ready_peek = encode_scope.find("depth_pipeline_ready_event->peek();", sample);
-  const auto convert = encode_scope.find("session->convert_with_encode_target(", ready_peek);
+  const auto convert = encode_scope.find("convert_frame(*last_img, schedule.next_encode_target)", ready_peek);
   const auto consume = encode_scope.find(
     "converted_frame && consume_sampled_depth_pipeline_ready && depth_pipeline_ready_event",
     convert
@@ -7763,6 +7772,7 @@ TEST(AsyncTeardownLifecycleSourceTests, DrainsTrackedOwnersBeforeProcessGlobals)
     "auto async_teardown_drain_guard = util::fail_guard("
   );
   const auto ar_guard = main_source.find("auto ar_glasses_deinit_guard = ar_glasses::init();");
+  const auto initial_encoder_probe = main_source.find("if (video::probe_encoders()) {");
   const auto arm_watchdog = main_source.find("task_pool.pushDelayed(task, 10s)", normal_shutdown);
   const auto stop_process = main_source.find("proc::proc.terminate(false, false);", arm_watchdog);
   const auto stop_local = main_source.find("ar_glasses_deinit_guard.reset();", stop_process);
@@ -7775,6 +7785,7 @@ TEST(AsyncTeardownLifecycleSourceTests, DrainsTrackedOwnersBeforeProcessGlobals)
   const auto stop_pool = main_source.find("task_pool.stop();", drain_workers);
   ASSERT_NE(async_drain_guard, std::string::npos);
   ASSERT_NE(ar_guard, std::string::npos);
+  ASSERT_NE(initial_encoder_probe, std::string::npos);
   ASSERT_NE(normal_shutdown, std::string::npos);
   ASSERT_NE(arm_watchdog, std::string::npos);
   ASSERT_NE(stop_process, std::string::npos);
@@ -7785,6 +7796,8 @@ TEST(AsyncTeardownLifecycleSourceTests, DrainsTrackedOwnersBeforeProcessGlobals)
   ASSERT_NE(stop_pool, std::string::npos);
   EXPECT_LT(async_drain_guard, ar_guard)
     << "Early returns must destroy the local presenter before the fallback worker drain.";
+  EXPECT_LT(async_drain_guard, initial_encoder_probe)
+    << "A failed encoder probe can retain submitted GPU work on a teardown worker.";
   EXPECT_LT(arm_watchdog, stop_process);
   EXPECT_LT(stop_process, stop_local);
   EXPECT_LT(stop_local, stop_monitor);
@@ -8745,6 +8758,53 @@ TEST(HostSbsDimensionsTest, UsesMeasuredH264Capability) {
   const auto dimensions = video::host_sbs_output_dimensions(3840, 2160, 0, 8192);
   EXPECT_EQ(dimensions.width, 4096);
   EXPECT_EQ(dimensions.height, 1152);
+}
+
+TEST(HostSbsDimensionsTest, AlignsEachEyeToWholeChromaCells) {
+  const auto odd_eye = video::host_sbs_output_dimensions(1919, 1081, 1, 8192, 8192);
+  EXPECT_EQ(odd_eye.width, 3836);
+  EXPECT_EQ(odd_eye.height, 1080);
+
+  const auto configured = video::host_sbs_output_dimensions(3840, 2160, 1, 3838, 8192);
+  EXPECT_EQ(configured.width, 3836);
+  EXPECT_EQ(configured.height, 1078);
+
+  const auto runtime = video::host_sbs_output_dimensions(3840, 2160, 1, 8192, 3838);
+  EXPECT_EQ(runtime.width, configured.width);
+  EXPECT_EQ(runtime.height, configured.height);
+}
+
+TEST(HostSbsDimensionsTest, HeightLimitedFitAlsoKeepsAnEvenEyeWidth) {
+  const auto dimensions = video::host_sbs_output_dimensions(1919, 3000, 1, 8192, 8192, 2160);
+  EXPECT_EQ(dimensions.width, 2760);
+  EXPECT_EQ(dimensions.height, 2160);
+}
+
+TEST(HostSbsDimensionsTest, NeverRoundsPastRuntimeOrConfiguredCaps) {
+  for (int cap_width = 3800; cap_width <= 3840; ++cap_width) {
+    for (int cap_height = 1075; cap_height <= 1085; ++cap_height) {
+      const auto dimensions = video::host_sbs_output_dimensions(
+        1919,
+        1200,
+        1,
+        cap_width + 2,
+        cap_width,
+        cap_height
+      );
+      EXPECT_LE(dimensions.width, cap_width);
+      EXPECT_LE(dimensions.height, cap_height);
+      EXPECT_EQ(dimensions.width % 4, 0);
+      EXPECT_EQ(dimensions.height % 2, 0);
+      // Alignment costs less than four packed columns and two rows around the aspect fit.
+      EXPECT_LE(std::abs(dimensions.width * 1200 - dimensions.height * 3838), 4 * 1200 + 2 * 3838);
+    }
+  }
+  const auto too_narrow = video::host_sbs_output_dimensions(1920, 1080, 1, 8192, 3);
+  EXPECT_EQ(too_narrow.width, 0);
+  EXPECT_EQ(too_narrow.height, 0);
+  const auto too_short = video::host_sbs_output_dimensions(1920, 1080, 1, 8192, 8192, 1);
+  EXPECT_EQ(too_short.width, 0);
+  EXPECT_EQ(too_short.height, 0);
 }
 
 TEST(ClampEncodeDimensionsTest, PassesThroughAnEncodableMode) {

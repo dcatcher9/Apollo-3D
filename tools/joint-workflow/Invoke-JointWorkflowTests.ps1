@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Builds and runs the host/client workflow boundary gate without a GPU run or a connected headset.
+Builds and runs the host/client workflow boundary gate, including software D3D, without a headset.
 #>
 [CmdletBinding()]
 param(
@@ -82,7 +82,7 @@ try {
     Invoke-GateStage 'host-build' $ninja @('-C', $BuildDirectory, 'sunshine', 'test_sunshine') $HostRoot
   }
   if (-not (Test-Path -LiteralPath $testExecutable -PathType Leaf)) { throw "Build the host test binary first: $testExecutable" }
-  $nativeFilter = 'Offline*:GpuWorkloadArbiter.*:Rtsp*:Input*:ProcessTest.*:WindowsQpc*:WindowsLocalPresenter*:WebUiDesign.*'
+  $nativeFilter = 'Offline*:GpuWorkloadArbiter.*:Rtsp*:Input*:ProcessTest.*:WindowsQpc*:WindowsLocalPresenter*:RemoteEncode*Test.*:HostSbsChromaGpuTest.*:WebUiDesign.*'
   $nativeXml = Join-Path $resultsDirectory 'host.xml'
   Invoke-GateStage 'host' $testExecutable @("--gtest_filter=$nativeFilter", "--gtest_output=xml:$nativeXml") $BuildDirectory
   [xml] $nativeResult = Get-Content -LiteralPath $nativeXml -Raw
@@ -111,6 +111,7 @@ try {
     'com.limelight.nvstream.http.NvHTTP*Test',
     'com.limelight.nvstream.NvConnection*Test',
     'com.limelight.utils.ClientSbs*Test',
+    'com.limelight.sbs.*Test',
     'com.limelight.utils.Stereo3DRendererSchedulingTest',
     'com.limelight.ui.XrStreamPresenterTransitionTest',
     'com.limelight.ui.StreamContainerSurfaceHandoffContractTest',

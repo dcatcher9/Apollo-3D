@@ -365,6 +365,9 @@ namespace platf {
     // Timestamp of the captured desktop/content pixels, excluding cursor-only updates. Capture
     // backends that cannot distinguish the two may leave this empty or equal to frame_timestamp.
     std::optional<std::chrono::steady_clock::time_point> content_timestamp;
+    // Optional diagnostic handoff time. Populated only with diagnostics enabled; never used to
+    // pace, match, reuse, or timestamp production pixels.
+    std::optional<std::chrono::steady_clock::time_point> diagnostic_capture_ready_timestamp;
 
     virtual ~img_t() = default;
   };

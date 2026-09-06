@@ -19,14 +19,23 @@ typedef enum cudaError_enum {
     CUDA_ERROR_NOT_SUPPORTED = 801
 } CUresult;
 typedef enum CUdevice_attribute_enum {
+    CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK = 8,
+    CU_DEVICE_ATTRIBUTE_TEXTURE_ALIGNMENT = 14,
+    CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT = 16,
+    CU_DEVICE_ATTRIBUTE_INTEGRATED = 18,
+    CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH = 37,
+    CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE = 38,
     CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR = 75,
-    CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR = 76
+    CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR = 76,
+    CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR = 81,
+    CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN = 97
 } CUdevice_attribute;
 
 typedef CUresult(__stdcall* PFN_cuInit)(unsigned int Flags);
 typedef CUresult(__stdcall* PFN_cuDeviceGet)(CUdevice* device, int ordinal);
 typedef CUresult(__stdcall* PFN_cuDeviceGetAttribute)(int* pi, CUdevice_attribute attrib, CUdevice dev);
 typedef CUresult(__stdcall* PFN_cuDeviceGetName)(char* name, int len, CUdevice dev);
+typedef CUresult(__stdcall* PFN_cuDriverGetVersion)(int* driverVersion);
 typedef CUresult(__stdcall* PFN_cuDevicePrimaryCtxRetain)(CUcontext* pctx, CUdevice dev);
 typedef CUresult(__stdcall* PFN_cuDevicePrimaryCtxRelease)(CUdevice dev);
 typedef CUresult(__stdcall* PFN_cuCtxCreate)(CUcontext* pctx, unsigned int flags, CUdevice dev);
@@ -213,6 +222,7 @@ struct cuda_driver_api {
     PFN_cuDeviceGet cuDeviceGet = nullptr;
     PFN_cuDeviceGetAttribute cuDeviceGetAttribute = nullptr;
     PFN_cuDeviceGetName cuDeviceGetName = nullptr;
+    PFN_cuDriverGetVersion cuDriverGetVersion = nullptr;
     PFN_cuDevicePrimaryCtxRetain cuDevicePrimaryCtxRetain = nullptr;
     PFN_cuDevicePrimaryCtxRelease cuDevicePrimaryCtxRelease = nullptr;
     PFN_cuCtxCreate cuCtxCreate = nullptr;
@@ -346,6 +356,7 @@ struct cuda_driver_api {
                 api.cuDeviceGet = (PFN_cuDeviceGet)GetProcAddress(api.hMod, "cuDeviceGet");
                 api.cuDeviceGetAttribute = (PFN_cuDeviceGetAttribute)GetProcAddress(api.hMod, "cuDeviceGetAttribute");
                 api.cuDeviceGetName = (PFN_cuDeviceGetName)GetProcAddress(api.hMod, "cuDeviceGetName");
+                api.cuDriverGetVersion = (PFN_cuDriverGetVersion)GetProcAddress(api.hMod, "cuDriverGetVersion");
                 api.cuDevicePrimaryCtxRetain = (PFN_cuDevicePrimaryCtxRetain)GetProcAddress(api.hMod, "cuDevicePrimaryCtxRetain");
                 api.cuDevicePrimaryCtxRelease = (PFN_cuDevicePrimaryCtxRelease)GetProcAddress(api.hMod, "cuDevicePrimaryCtxRelease_v2");
                 if (!api.cuDevicePrimaryCtxRelease) api.cuDevicePrimaryCtxRelease = (PFN_cuDevicePrimaryCtxRelease)GetProcAddress(api.hMod, "cuDevicePrimaryCtxRelease");

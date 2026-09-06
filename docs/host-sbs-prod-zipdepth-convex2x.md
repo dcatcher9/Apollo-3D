@@ -147,9 +147,9 @@ the composite result at `2H x 2W`.
 
 Near-identical reuse compares the current high-grid RGB tensor with the last authenticated infer
 input. An authorized reuse skips the complete fused inference and holds the previous complete
-high-grid depth/cut/camera/history tuple. The existing four-frame and strict `<100 ms` bounds remain
-unchanged. Higher spatial sensitivity may reduce reuse frequency; it must never authorize a depth
-result from an incompatible grid or domain.
+high-grid depth/cut/camera/history tuple. Reuse has no age or frame-count expiry and never promotes
+the candidate to the comparison owner. Higher spatial sensitivity may reduce reuse frequency; it
+must never authorize a depth result from an incompatible grid or domain.
 
 The evidence buffer is allocated from the exact high grid as `ceil(width/16) * ceil(height/16)`
 16-byte records. The six profiles require `5,335`, `7,040`, or `7,150` records, so `7,150` records /

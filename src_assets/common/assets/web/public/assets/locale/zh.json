@@ -97,6 +97,10 @@
     "working_dir_desc": "应传递给进程的工作目录。例如，某些应用程序使用工作目录搜索配置文件。如果不设置，Sunshine 3D 将默认使用命令的父目录"
   },
   "config": {
+    "diagnostics": "性能诊断",
+    "diagnostics_desc": "收集 GPU 实际执行推理与复用的次数，以及采集、转换、编码、网络传输和本地显示的耗时。新帧与重复帧会分别报告内容生成后的经过时间。禁用时，不会进行诊断用的计时、计数、GPU 查询与数据回读，也不会定期检查文件系统。",
+    "sbs_3d_max_encode_width": "3D 合并帧的最大宽度",
+    "sbs_3d_max_encode_width_desc": "限制左右并排输出的合并宽度。最终尺寸遵循编解码器的 NVENC 宽度和高度限制，并在像素对齐允许的精度内保持宽高比。宽度向下取整为四的倍数，使双眼图像的宽度均为偶数。",
     "adapter_name": "适配器名称",
     "adapter_name_desc_windows": "手动指定用于捕获的 GPU 。如果未设置，GPU 将被自动选择。 我们强烈建议将此字段留空以使用自动的 GPU 选择！注意：此GPU 必须连接并开启显示器。 可以使用以下命令找到适当的值：",
     "adapter_name_placeholder_windows": "Radeon RX 580 Series",

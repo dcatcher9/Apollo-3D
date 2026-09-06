@@ -76,6 +76,10 @@
     "working_dir_desc": "A folyamatnak átadandó munkakönyvtár. Egyes alkalmazások például a munkakönyvtárat használják a konfigurációs fájlok keresésére. Ha nincs megadva, a Sunshine 3D alapértelmezés szerint a parancs szülő könyvtárát fogja használni."
   },
   "config": {
+    "diagnostics": "Teljesítménydiagnosztika",
+    "diagnostics_desc": "Rögzíti a GPU-n ténylegesen végzett következtetések és újrafelhasználások számát, valamint a képrögzítés, átalakítás, kódolás, hálózati átvitel és helyi megjelenítés időadatait. Az új és az ismételt képkockák tartalmának korát külön jelzi. Kikapcsolva nem használ diagnosztikai órákat, számlálókat, GPU-lekérdezéseket vagy visszaolvasásokat, és nem ellenőrzi rendszeresen a fájlrendszert.",
+    "sbs_3d_max_encode_width": "Az egyesített 3D képkocka legnagyobb szélessége",
+    "sbs_3d_max_encode_width_desc": "Korlátozza az egymás mellé helyezett képeket tartalmazó kimenet szélességét. A végső méret betartja a kodek NVENC-szélesség- és magasságkorlátait, és a képpontigazítás pontosságával megőrzi a képarányt. A szélességet lefelé kerekíti négy többszörösére, hogy mindkét szem képe páros számú képpont széles legyen.",
     "adapter_name": "Adapter neve",
     "adapter_name_desc_windows": "Kézzel adja meg a rögzítéshez használt GPU-t. Ha nincs megadva, a GPU automatikusan kiválasztásra kerül. A GPU automatikus kiválasztásához javasoljuk, hogy hagyja üresen ezt a mezőt! Megjegyzés: Ehhez a GPU-hoz csatlakoztatott és bekapcsolt kijelzőnek kell lennie. A megfelelő értékeket a következő paranccsal találhatja meg:",
     "adapter_name_placeholder_windows": "Radeon RX 580 sorozat",

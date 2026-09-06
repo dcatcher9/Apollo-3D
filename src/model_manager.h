@@ -76,9 +76,15 @@ namespace models {
         depth_coordinate_v2::subtitle_ocr_engine_recipe;
 
     /**
-     * @brief Recipe-specific cached TensorRT engine filename.
+     * @brief Bounded cached depth filename binding recipe, runtime, device and ONNX identity.
      */
     std::string engine_filename(const config::depth_model_info& model, std::string_view compatibility_tag = {});
+
+    /** Strict current production filename syntax; provenance hashes are validated separately. */
+    bool is_current_depth_engine_filename(std::string_view filename);
+
+    /** Includes the atomic-publication .part suffix and Windows native terminator. */
+    bool engine_cache_path_fits_native_limit(const std::filesystem::path& path);
 
     /**
      * Bounded cached PP-OCRv6 engine filename. The compatibility tag must bind the complete

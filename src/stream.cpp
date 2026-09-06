@@ -55,12 +55,10 @@ using namespace std::literals;
 
 namespace stream {
   bool sbs_debug_dump_request_allowed(
-    bool diagnostics_enabled,
     int requested_sbs_mode,
     bool has_session_request_latch
   ) noexcept {
-    return diagnostics_enabled && requested_sbs_mode == ::video::SBS_AI &&
-           has_session_request_latch;
+    return requested_sbs_mode == ::video::SBS_AI && has_session_request_latch;
   }
 
   namespace control_packet {
@@ -2262,7 +2260,6 @@ namespace stream {
 
     server->map(control_packet::sbs_debug_dump, [](session_t *session, const std::string_view &) {
       if (!sbs_debug_dump_request_allowed(
-            config::sunshine.diagnostics_enabled,
             session->requested_sbs_mode->load(std::memory_order_acquire),
             (bool) session->video->sbs_debug_dump_pending
           )) {
@@ -2657,6 +2654,26 @@ namespace stream {
     logging::time_delta_periodic_logger frame_fec_latency_logger(info, "Network: each FEC block latency");
     logging::time_delta_periodic_logger frame_network_latency_logger(info, "Network: frame's overall network latency");
 
+    struct video_stage_diagnostics_t {
+      logging::min_max_avg_periodic_logger<double> encoded_queue {
+        info, "Video packet: encoded queue residence", "ms",
+      };
+      logging::min_max_avg_periodic_logger<double> new_content_age {
+        info, "Video output: new content age before packetization", "ms",
+      };
+      logging::min_max_avg_periodic_logger<double> repeated_content_age {
+        info, "Video output: repeated content age before packetization", "ms",
+      };
+      logging::min_max_avg_periodic_logger<double> packetization {
+        info, "Video packet: packetization and pacing-plan CPU", "ms",
+      };
+    };
+    // Logger construction itself reads the clock and owns strings. Keep even that work outside
+    // the disabled path, along with all new samples and packet classification.
+    auto stage_diagnostics = video::detail::make_diagnostic_state<video_stage_diagnostics_t>(
+      config::sunshine.diagnostics_enabled
+    );
+
     crypto::aes_t iv(12);
     std::vector<std::uint8_t> packetization_storage;
     fec::rs_cache_t video_rs_cache;
@@ -2699,7 +2716,13 @@ namespace stream {
         channel->idr_events->try_raise(true);
       };
 
-      const auto encoded_packet_age = std::chrono::steady_clock::now() - packet->encoded_timestamp;
+      const auto packet_dequeued_at = std::chrono::steady_clock::now();
+      const auto encoded_packet_age = packet_dequeued_at - packet->encoded_timestamp;
+      if (stage_diagnostics) {
+        if (const auto elapsed = video::detail::diagnostic_elapsed_ms(packet->encoded_timestamp, packet_dequeued_at)) {
+          stage_diagnostics->encoded_queue.collect_and_log(*elapsed);
+        }
+      }
       const auto max_encoded_packet_age = std::chrono::nanoseconds {
         video_packet_max_queue_age_ns(effective_pacing.framerate_millihz)
       };
@@ -2738,15 +2761,26 @@ namespace stream {
           return (uint16_t) std::clamp<decltype(duration_us)>((duration_us + 50) / 100, 0, std::numeric_limits<uint16_t>::max());
         };
 
-        uint16_t latency = duration_to_latency(std::chrono::steady_clock::now() - *processing_timestamp);
+        const auto measured_at = std::chrono::steady_clock::now();
+        uint16_t latency = duration_to_latency(measured_at - *processing_timestamp);
         frame_header.frame_processing_latency = latency;
         frame_processing_latency_logger.collect_and_log(latency / 10.);
+        if (stage_diagnostics && packet->diagnostic_content != video::detail::diagnostic_content_e::unknown) {
+          if (const auto elapsed = video::detail::diagnostic_elapsed_ms(processing_timestamp, measured_at)) {
+            auto &logger = packet->diagnostic_content == video::detail::diagnostic_content_e::new_content ?
+                             stage_diagnostics->new_content_age : stage_diagnostics->repeated_content_age;
+            logger.collect_and_log(*elapsed);
+          }
+        }
       } else {
         frame_header.frame_processing_latency = 0;
       }
 
       auto fecPercentage = config::stream.fec_percentage;
 
+      const auto packetization_started = video::detail::diagnostic_timestamp(
+        stage_diagnostics.has_value(), video::detail::diagnostic_clock_t::now
+      );
       // Insert space for packet headers
       auto blocksize = channel->packet_size + MAX_RTP_HEADER_SIZE;
       auto payload_blocksize = blocksize - sizeof(video_packet_raw_t);
@@ -2861,6 +2895,11 @@ namespace stream {
           send_batch_size,
           pacing_plan.packets_per_quantum,
         });
+        if (stage_diagnostics) {
+          if (const auto elapsed = video::detail::diagnostic_elapsed_ms(packetization_started, video::detail::diagnostic_clock_t::now())) {
+            stage_diagnostics->packetization.collect_and_log(*elapsed);
+          }
+        }
 
         const auto ceiling_label =
           pacing_plan.target_wire_bps == VIDEO_PACING_MAX_WIRE_BPS ? ", ceiling-limited"sv : ""sv;

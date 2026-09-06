@@ -50,6 +50,17 @@ namespace video {
     float range_uv[2];
   };
 
+  /** Shared VS offset / PS chroma constants. A zero source extent selects generic scaling. */
+  struct alignas(16) chroma_sampling_t {
+    float offset_x;
+    float offset_y;
+    unsigned source_width;
+    unsigned source_height;
+    unsigned packed_eye_width;
+    unsigned padding[3] {};
+  };
+  static_assert(sizeof(chroma_sampling_t) == 32);
+
   /**
    * @brief Get static RGB->YUV color conversion matrix.
    *        This matrix expects RGB input in UNORM (0.0 to 1.0) range and doesn't perform any

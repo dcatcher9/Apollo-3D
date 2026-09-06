@@ -98,9 +98,10 @@ subtitle work also holds the SLR13 locator state, condition parameters,
 and `final_parallax_<frame-id>.f32`; cadence-due work may instead publish a current subtitle
 observation on the reused depth. The authenticated trace distinguishes those cases and rejects an
 ordinary OCR marker on reuse. The runner derives GPU history-owner age from both the frame ID and
-the exact source-observation timeline—not from processing speed or a host baseline delta. No run
-may exceed the production four-frame cap or strict `<100 ms` observation-age bound, and every infer
-raw field must match the same-frame force control.
+the exact source-observation timeline—not from processing speed or a host baseline delta. Reuse
+has no age or frame-count expiry: each candidate remains tied to the same actual inference owner,
+with ordered nonzero observations and unchanged domain guards. Every infer raw field must match the
+same-frame force control. Request policy schema `3` distinguishes this policy from older captures.
 Missing, extra, wrong-sized, or misidentified artifacts fail closed. These trace and artifact
 invariants guard the adaptive subtitle-clock bug without image-tuned thresholds or headset
 judgment.

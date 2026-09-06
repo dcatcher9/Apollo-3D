@@ -27,6 +27,19 @@ $BuildPython = "C:\absolute\path\to\python.exe"
 Re-running the command is safe and should report zero changed files. Apply it again whenever the
 TensorRT package is replaced; do not reuse headers patched for a different TensorRT release.
 
+TensorRT engine caches bind the model and build recipe to the TensorRT version, CUDA driver API
+version, GPU name, and checked hardware properties such as compute capability and shared-memory
+limits. Reported total/free GPU memory and the Windows driver package version are excluded:
+changes in memory reservations do not by themselves require an engine rebuild. A change to a keyed
+property selects a new cache automatically at the next process start.
+The device identity is captured once per process so display changes cannot trigger a rebuild in a
+running stream. A failed identity query prevents cache selection rather than falling back to an
+ambiguous filename. Engine filenames use bounded SHA-256 identities; active-engine manifests retain
+the model, recipe, and authenticated source hashes. Old cache files are not overwritten or edited
+to suppress compatibility warnings. TensorRT's own device-property warnings remain visible; a
+warning alone does not establish a functional incompatibility. See NVIDIA's
+[engine compatibility checks](https://docs.nvidia.com/deeplearning/tensorrt/latest/inference-library/engine-compatibility.html#compatibility-checks).
+
 Install the MSYS2 packages from an **MSYS2 UCRT64** shell:
 
 ```bash

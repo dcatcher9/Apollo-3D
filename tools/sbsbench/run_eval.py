@@ -67,6 +67,7 @@ from depth_coordinate_v2_contract import (  # noqa: E402
     MODEL_CALIBRATIONS,
 )
 from depth_coordinate_v2_dump_contract import (  # noqa: E402
+    composite_engine_filename_matches,
     LIVE_RENDERER_SOURCE_CLOSURE_SHA256,
 )
 from generate_depth_coordinate_v2_contract import (  # noqa: E402
@@ -2807,6 +2808,12 @@ def _composite_depth_runtime_spec(model):
     }
 
 
+def _composite_engine_filename_matches(engine_name, spec):
+    """Current digest filenames and historical explicit runtime/device/ONNX filenames."""
+    return composite_engine_filename_matches(
+        engine_name, spec['model'], spec['engine_recipe'], spec['onnx_sha256'])
+
+
 def _selected_depth_runtime(build_dir, model):
     """Mirror the host's fail-closed optional-composite selection from local assets."""
 
@@ -2902,11 +2909,7 @@ def _inspect_depth_engine(build_dir, model):
         engine_name = None
     if engine_name and selected["kind"] == "composite":
         spec = selected["spec"]
-        engine_prefix = f"{spec['model']}.{spec['engine_recipe']}."
-        engine_suffix = f"-onnx{spec['onnx_sha256']}.engine"
-        if (len(engine_name) <= len(engine_prefix) + len(engine_suffix) or
-                not engine_name.startswith(engine_prefix) or
-                not engine_name.endswith(engine_suffix)):
+        if not _composite_engine_filename_matches(engine_name, spec):
             issues.append(
                 "composite manifest engine artifact does not match the exact "
                 "model/recipe/compatibility/ONNX identity")

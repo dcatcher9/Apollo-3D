@@ -10,19 +10,47 @@
 
 #include <src/model_manager.h>
 
-TEST(ModelManagerTest, DepthEngineFilenameUsesTheFusedRecipe) {
+TEST(ModelManagerTest, DepthEngineFilenameIsBoundedAndUsesTheFusedRecipe) {
   const config::depth_model_info model {
     .name = "depth_anything_v2_fp16",
     .url = {},
   };
   constexpr std::string_view compatibility_tag = "trt11-sm120-onnxsha";
   const auto filename = models::engine_filename(model, compatibility_tag);
-  EXPECT_EQ(
-    filename,
-    "depth_anything_v2_fp16.trt-6high-point-l5-v2."
-    "trt11-sm120-onnxsha.engine"
-  );
+  EXPECT_TRUE(filename.starts_with("depth_anything_v2_fp16.trt-6high-point-l5-v2.cache-"));
+  EXPECT_TRUE(filename.ends_with(".engine"));
+  EXPECT_EQ(filename, models::engine_filename(model, compatibility_tag));
+  EXPECT_NE(filename, models::engine_filename(model, std::string(compatibility_tag) + "-changed"));
+  EXPECT_LT(filename.size() + 5u, 128u);
+  EXPECT_EQ(models::engine_filename(model),
+            "depth_anything_v2_fp16.trt-6high-point-l5-v2.engine");
   EXPECT_EQ(models::depth_engine_builder_level, 5);
+}
+
+TEST(ModelManagerTest, CurrentDepthFilenameRejectsTruncatedHashesAndPaths) {
+  const config::depth_model_info model {
+    .name = std::string(models::prod_zipdepth_convex2x::logical_model), .url = {},
+  };
+  const auto filename = models::engine_filename(model, std::string(4096u, 'a'));
+  EXPECT_TRUE(models::is_current_depth_engine_filename(filename));
+  EXPECT_FALSE(models::is_current_depth_engine_filename(filename.substr(1)));
+  EXPECT_FALSE(models::is_current_depth_engine_filename("../" + filename));
+  EXPECT_FALSE(models::is_current_depth_engine_filename("..\\" + filename));
+  EXPECT_FALSE(models::is_current_depth_engine_filename(filename + ".part"));
+  auto nonhex = filename;
+  nonhex[nonhex.size() - std::string_view(".engine").size() - 1u] = 'g';
+  EXPECT_FALSE(models::is_current_depth_engine_filename(nonhex));
+  const std::filesystem::path build_assets {
+    "E:/Git/Repo/Apollo-3D/cmake-build-relwithdebinfo/assets"
+  };
+  EXPECT_LT((build_assets / (filename + ".part")).native().size(), 260u);
+  EXPECT_TRUE(models::engine_cache_path_fits_native_limit(build_assets / filename));
+  EXPECT_FALSE(models::engine_cache_path_fits_native_limit({}));
+#ifdef _WIN32
+  const std::filesystem::path prefix {"C:/"};
+  EXPECT_TRUE(models::engine_cache_path_fits_native_limit(prefix / std::string(251u, 'a')));
+  EXPECT_FALSE(models::engine_cache_path_fits_native_limit(prefix / std::string(252u, 'a')));
+#endif
 }
 
 TEST(ModelManagerTest, OcrEngineFilenameIsBoundedAndCommitsTheCompleteIdentity) {

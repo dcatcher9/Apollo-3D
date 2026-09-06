@@ -76,6 +76,10 @@
     "working_dir_desc": "Katalog roboczy, który powinien zostać przekazany do procesu. Na przykład, niektóre aplikacje używają katalogu roboczego do wyszukiwania plików konfiguracyjnych. Jeśli nie zostanie ustawiony, Sunshine 3D domyślnie wybierze katalog nadrzędny polecenia"
   },
   "config": {
+    "diagnostics": "Diagnostyka wydajności",
+    "diagnostics_desc": "Zbiera rzeczywiste liczby operacji inferencji i ponownego użycia na GPU oraz czasy przechwytywania, konwersji, kodowania, transmisji sieciowej i lokalnego wyświetlania. Wiek treści jest podawany oddzielnie dla nowych i powtarzanych klatek. Po wyłączeniu nie są używane zegary i liczniki diagnostyczne, zapytania do GPU, odczyty zwrotne z GPU ani okresowe sprawdzanie systemu plików.",
+    "sbs_3d_max_encode_width": "Maksymalna szerokość połączonej klatki 3D",
+    "sbs_3d_max_encode_width_desc": "Ogranicza szerokość wyjścia z obrazami ułożonymi obok siebie. Końcowy rozmiar uwzględnia ograniczenia szerokości i wysokości NVENC dla kodeka i zachowuje proporcje z dokładnością wynikającą z wyrównania pikseli. Szerokość jest zaokrąglana w dół do wielokrotności czterech, aby obrazy dla obu oczu miały parzystą szerokość.",
     "adapter_name": "Nazwa adaptera",
     "adapter_name_desc_windows": "Ręczne określenie procesora graficznego używanego do przechwytywania. Jeśli nie zostanie ustawione, procesor graficzny zostanie wybrany automatycznie. Zdecydowanie zalecamy pozostawienie tego pola pustego, aby korzystać z automatycznego wyboru GPU! Uwaga: Ten procesor graficzny musi mieć podłączony i włączony wyświetlacz. Odpowiednie wartości można znaleźć za pomocą następującego polecenia:",
     "adapter_name_placeholder_windows": "Seria Radeon RX 580",

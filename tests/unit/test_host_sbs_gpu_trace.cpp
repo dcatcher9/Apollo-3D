@@ -15,12 +15,14 @@
 
   #include <src/cuda_conditional_graph.h>
   #include <src/generated/depth_coordinate_v2_contract.h>
+  #include <src/host_sbs_gpu_outcomes.h>
   #include <src/host_sbs_gpu_trace.h>
   #include <src/host_sbs_shader_cache.h>
 
 namespace {
   using Microsoft::WRL::ComPtr;
   namespace trace = models::host_sbs_gpu_trace;
+  namespace outcomes = models::host_sbs_gpu_outcomes;
   namespace v2 = models::depth_coordinate_v2;
 
   TEST(HostSbsGpuTraceContractTest, HlslAbiAndAuthenticatedSourceMatchNative) {
@@ -566,6 +568,12 @@ namespace {
       device.Get(), initial_ring.data(), initial_ring.size(),
       D3D11_BIND_UNORDERED_ACCESS, ring_buffer, nullptr, &ring_uav
     ));
+    ComPtr<ID3D11Buffer> outcome_buffer;
+    ComPtr<ID3D11UnorderedAccessView> outcome_uav;
+    ASSERT_TRUE(create_structured_buffer(
+      device.Get(), outcomes::initial_words.data(), outcomes::word_count,
+      D3D11_BIND_UNORDERED_ACCESS, outcome_buffer, nullptr, &outcome_uav
+    ));
     D3D11_BUFFER_DESC staging_desc {};
     staging_desc.Usage = D3D11_USAGE_STAGING;
     staging_desc.ByteWidth = trace::ring_byte_count;
@@ -575,6 +583,14 @@ namespace {
     ComPtr<ID3D11Buffer> staging;
     ASSERT_TRUE(SUCCEEDED(device->CreateBuffer(
       &staging_desc, nullptr, staging.ReleaseAndGetAddressOf()
+    )));
+    D3D11_BUFFER_DESC outcome_staging_desc {};
+    outcome_staging_desc.Usage = D3D11_USAGE_STAGING;
+    outcome_staging_desc.ByteWidth = outcomes::byte_count;
+    outcome_staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Buffer> outcome_staging;
+    ASSERT_TRUE(SUCCEEDED(device->CreateBuffer(
+      &outcome_staging_desc, nullptr, outcome_staging.ReleaseAndGetAddressOf()
     )));
     D3D11_BUFFER_DESC constants_desc {};
     constants_desc.Usage = D3D11_USAGE_DEFAULT;
@@ -596,7 +612,7 @@ namespace {
       1920u, 1080u, 770u, 434u,
       0x89abcdefu, 0x01234567u, 0u, 0u,
     };
-    const auto dispatch = [&] {
+    const auto dispatch = [&](const bool counters_enabled = true) {
       context->UpdateSubresource(
         constants_buffer.Get(), 0u, nullptr, constants.data(), 0u, 0u
       );
@@ -606,14 +622,17 @@ namespace {
       context->CSSetShader(shader.Get(), nullptr, 0u);
       context->CSSetShaderResources(0u, 3u, srvs);
       context->CSSetConstantBuffers(0u, 1u, constants_buffer.GetAddressOf());
-      context->CSSetUnorderedAccessViews(0u, 1u, ring_uav.GetAddressOf(), nullptr);
+      ID3D11UnorderedAccessView *uavs[2] = {
+        ring_uav.Get(), counters_enabled ? outcome_uav.Get() : nullptr
+      };
+      context->CSSetUnorderedAccessViews(0u, 2u, uavs, nullptr);
       context->Dispatch(1u, 1u, 1u);
       ID3D11ShaderResourceView *null_srvs[3] = {};
       ID3D11Buffer *null_constant = nullptr;
-      ID3D11UnorderedAccessView *null_uav = nullptr;
+      ID3D11UnorderedAccessView *null_uavs[2] = {};
       context->CSSetShaderResources(0u, 3u, null_srvs);
       context->CSSetConstantBuffers(0u, 1u, &null_constant);
-      context->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
+      context->CSSetUnorderedAccessViews(0u, 2u, null_uavs, nullptr);
       context->CSSetShader(nullptr, nullptr, 0u);
     };
     const auto read_ring = [&] {
@@ -626,6 +645,19 @@ namespace {
       if (mapped.pData) {
         std::memcpy(words.data(), mapped.pData, trace::ring_byte_count);
         context->Unmap(staging.Get(), 0u);
+      }
+      return words;
+    };
+    const auto read_outcomes = [&] {
+      outcomes::words_t words {};
+      context->CopyResource(outcome_staging.Get(), outcome_buffer.Get());
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      EXPECT_TRUE(SUCCEEDED(context->Map(
+        outcome_staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped
+      )));
+      if (mapped.pData) {
+        std::memcpy(words.data(), mapped.pData, outcomes::byte_count);
+        context->Unmap(outcome_staging.Get(), 0u);
       }
       return words;
     };
@@ -698,6 +730,69 @@ namespace {
     EXPECT_EQ(ring[first + trace::word_index(trace::record_word_e::sequence_low)], 1u);
     EXPECT_EQ(ring[first + trace::word_index(trace::record_word_e::commit_tag)],
               trace::record_tag);
+
+    // Ring wrap/repair cannot erase cumulative outcomes, even without intermediate reads.
+    auto counts = outcomes::decode(read_outcomes());
+    ASSERT_TRUE(counts);
+    EXPECT_EQ(counts->infer, trace::capacity + 1u);
+    EXPECT_EQ(counts->reuse, 1u);
+    EXPECT_EQ(counts->invalid, 0u);
+
+    // A receipt for another token is invalid, regardless of its claimed branch.
+    constants[6u] ^= 1u;
+    dispatch();
+    constants[6u] ^= 1u;
+    transaction_words = transaction(
+      token, cuda_conditional_graph::branch_e::reuse,
+      cuda_conditional_graph::work_flag_e::subtitle_observation, false
+    );
+    context->UpdateSubresource(
+      transaction_buffer.Get(), 0u, nullptr, transaction_words.data(), 0u, 0u
+    );
+    // An authenticated reuse receipt cannot authorize reuse for a force-infer submission.
+    dispatch();
+    counts = outcomes::decode(read_outcomes());
+    ASSERT_TRUE(counts);
+    EXPECT_EQ(counts->infer, trace::capacity + 1u);
+    EXPECT_EQ(counts->reuse, 1u);
+    EXPECT_EQ(counts->invalid, 2u);
+
+    // Exercise the actual shader's uint32 carry for every disposition.
+    auto seeded = outcomes::initial_words;
+    seeded[2u] = seeded[4u] = seeded[6u] = 0xffffffffu;
+    seeded[3u] = 5u;
+    seeded[5u] = 6u;
+    seeded[7u] = 7u;
+    context->UpdateSubresource(outcome_buffer.Get(), 0u, nullptr, seeded.data(), 0u, 0u);
+    dispatch();  // Invalid: force-infer cannot reuse.
+    constants[9u] = static_cast<std::uint32_t>(trace::submission_class_e::gpu_undecided);
+    dispatch();  // Authenticated reuse.
+    transaction_words = transaction(
+      token, cuda_conditional_graph::branch_e::infer,
+      cuda_conditional_graph::work_flag_e::subtitle_observation, false
+    );
+    context->UpdateSubresource(
+      transaction_buffer.Get(), 0u, nullptr, transaction_words.data(), 0u, 0u
+    );
+    dispatch();  // Authenticated infer, despite a GPU-undecided submission.
+    counts = outcomes::decode(read_outcomes());
+    ASSERT_TRUE(counts);
+    EXPECT_EQ(counts->infer, 6ull << 32u);
+    EXPECT_EQ(counts->reuse, 7ull << 32u);
+    EXPECT_EQ(counts->invalid, 8ull << 32u);
+
+    const auto before_unbound = read_outcomes();
+    const auto sequence_before_unbound = read_ring()[4u];
+    dispatch(false);
+    EXPECT_EQ(read_ring()[4u], sequence_before_unbound + 1u);
+    EXPECT_EQ(read_outcomes(), before_unbound);
+
+    // Malformed optional counters stay untouched while the existing Dump trace advances.
+    seeded[0u] = 0u;
+    context->UpdateSubresource(outcome_buffer.Get(), 0u, nullptr, seeded.data(), 0u, 0u);
+    dispatch();
+    EXPECT_EQ(read_ring()[4u], sequence_before_unbound + 2u);
+    EXPECT_EQ(read_outcomes(), seeded);
   }
 }  // namespace
 

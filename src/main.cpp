@@ -410,6 +410,23 @@ int main(int argc, char *argv[]) {
     BOOST_LOG(warning) << "No gamepad input is available"sv;
   }
 
+  // Every return after encoder probing starts must retire tracked GPU/driver workers before
+  // logging, CUDA, TensorRT, or D3D globals are destroyed. Declare this before probing and the AR
+  // guard so reverse destruction stops the presenter first, then drains its device teardown.
+  // The explicit normal-shutdown drain below disables this fallback.
+  auto async_teardown_drain_guard = util::fail_guard([&]() {
+    if (!force_shutdown) {
+      auto task = []() {
+        BOOST_LOG(fatal)
+          << "10 seconds passed draining GPU teardown workers: Forcing shutdown"sv;
+        logging::log_flush();
+        lifetime::debug_trap();
+      };
+      force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
+    }
+    video::drain_async_teardown_workers();
+  });
+
   if (video::probe_encoders()) {
 #ifdef _WIN32
     bool allow_probing = video::allow_encoder_probing();
@@ -560,23 +577,6 @@ int main(int argc, char *argv[]) {
     BOOST_LOG(error) << "Video failed to find working encoder: probing failed."sv;
 #endif
   }
-
-  // Any return after local/streaming video ownership starts must retire tracked estimator and
-  // driver workers before logging, CUDA, TensorRT, or D3D process state is destroyed. Declare this
-  // before the AR guard so reverse destruction stops the presenter first and then drains what its
-  // device teardown enqueued. The explicit normal-shutdown drain below disables this fallback.
-  auto async_teardown_drain_guard = util::fail_guard([&]() {
-    if (!force_shutdown) {
-      auto task = []() {
-        BOOST_LOG(fatal)
-          << "10 seconds passed draining GPU teardown workers: Forcing shutdown"sv;
-        logging::log_flush();
-        lifetime::debug_trap();
-      };
-      force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
-    }
-    video::drain_async_teardown_workers();
-  });
 
 #ifdef _WIN32
   // An approved AR-display hotplug owns a local virtual desktop and local D3D presenter. The guard is

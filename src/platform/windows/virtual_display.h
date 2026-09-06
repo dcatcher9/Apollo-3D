@@ -141,6 +141,13 @@ namespace VDISPLAY {
   };
 
   bool isSudoVirtualDisplayPathForTest(std::wstring_view devicePath);
+  display_identity_query_t waitForDisplayIdentityForTest(
+    const LUID &adapterLuid,
+    uint32_t targetId,
+    const std::function<display_identity_query_t(const LUID &, uint32_t)> &query,
+    const std::function<std::chrono::steady_clock::time_point()> &now,
+    const std::function<void(std::chrono::steady_clock::time_point)> &waitUntil
+  );
   uint32_t watchdogPingIntervalMsForTest(uint32_t timeoutSeconds);
   bool virtualDisplayIdentityMatchesForTest(
     const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &expectedIdentity,

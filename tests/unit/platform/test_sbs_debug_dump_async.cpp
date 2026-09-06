@@ -2,6 +2,11 @@
  * @file tests/unit/platform/test_sbs_debug_dump_async.cpp
  * @brief Behavioral tests for Dump 3D publication lifetime and request ordering.
  */
+#ifdef _WIN32
+  // Boost.Asio must precede Windows headers included by the test and D3D helpers.
+  #include <src/stream.h>
+#endif
+
 #include "../../tests_common.h"
 
 #ifdef _WIN32
@@ -602,9 +607,7 @@ namespace {
     const std::string engine_artifact =
       std::string {models::prod_zipdepth_convex2x::logical_model} + "." +
       std::string {models::prod_zipdepth_convex2x::engine_recipe} +
-      ".fixture-onnx" +
-      std::string {models::prod_zipdepth_convex2x::fused_onnx_sha256} +
-      ".engine";
+      ".cache-" + std::string(64u, 'a') + ".engine";
     high.composite_depth_runtime_provenance =
       std::make_shared<models::composite_depth_runtime_provenance_t>(
         models::composite_depth_runtime_provenance_t {
@@ -1454,6 +1457,30 @@ namespace {
 
     platf::sbs_debug::dumper dumper;
     EXPECT_TRUE(dumper.needs_conversion_poll());
+  }
+
+  TEST(SbsDebugDumpAsyncTest, DiagnosticsDisabledAllowsManualDumpWithoutFilePolling) {
+    scoped_dump_trigger_environment environment;
+    ASSERT_TRUE(environment.ready());
+    config::sunshine.diagnostics_enabled = false;
+
+    platf::sbs_debug::dumper dumper;
+    auto button = std::make_shared<std::atomic<bool>>(false);
+    dumper.set_button_request(button);
+
+    // The fixture creates a file trigger, but diagnostics-off must leave it dormant.
+    EXPECT_FALSE(dumper.needs_conversion_poll());
+    EXPECT_FALSE(dumper.snapshot_requested());
+
+    ASSERT_TRUE(stream::sbs_debug_dump_request_allowed(video::SBS_AI, (bool) button));
+    button->store(true, std::memory_order_release);
+    EXPECT_TRUE(dumper.needs_conversion_poll());
+    EXPECT_TRUE(dumper.snapshot_requested());
+
+    dumper.cancel_pending_request();
+    EXPECT_FALSE(button->load());
+    EXPECT_FALSE(dumper.needs_conversion_poll());
+    EXPECT_FALSE(dumper.snapshot_requested());
   }
 
   TEST(SbsDebugDumpAsyncTest, Schema40PackagesOnlyOneFinalFieldAndNoScalarPreviews) {

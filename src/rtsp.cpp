@@ -539,6 +539,9 @@ namespace rtsp_stream {
 
     void handle_accept(const boost::system::error_code &ec) {
       if (ec) {
+        if (ec == boost::asio::error::operation_aborted && stopping.load(std::memory_order_acquire)) {
+          return;
+        }
         BOOST_LOG(error) << "Couldn't accept incoming connections: "sv << ec.message();
 
         // Stop server
@@ -867,6 +870,9 @@ namespace rtsp_stream {
      * @brief Stop the RTSP server.
      */
     void stop() {
+      // Closing the acceptor completes its pending accept with operation_aborted. That is an
+      // expected shutdown completion, while every other accept error remains visible.
+      stopping.store(true, std::memory_order_release);
       acceptor.close();
       io_context.stop();
       clear();
@@ -948,6 +954,7 @@ namespace rtsp_stream {
     std::unordered_map<std::string, client_policy_t> _client_policies;
 
     boost::asio::io_context io_context;
+    std::atomic_bool stopping {false};
     tcp::acceptor acceptor {io_context};
     boost::asio::steady_timer raised_timer {io_context};
 

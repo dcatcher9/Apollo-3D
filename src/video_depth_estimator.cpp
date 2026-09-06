@@ -2,8 +2,10 @@
 
 #include "cuda_conditional_graph.h"
 #include "cuda_driver_api.h"
+#include "cuda_engine_identity.h"
 #include "depth_coordinate_v2.h"
 #include "generated/sbs_adaptive_state_contract.h"
+#include "host_sbs_gpu_outcomes.h"
 #include "host_sbs_gpu_trace.h"
 #include "host_sbs_shader_cache.h"
 #include "host_sbs_v2_gpu_executor.h"
@@ -206,32 +208,29 @@ static bool cuda_device_for_configured_adapter(
 }
 
 // TensorRT plans are tied to the TensorRT ABI and, unless hardware-compatibility mode is
-// explicitly enabled, the GPU model on which tactics were selected. Keep those identities in the
-// disk filename so another adapter (or a later TensorRT upgrade) never consumes an incompatible
-// serialized plan. The stable name hash avoids filesystem-hostile adapter characters.
+// explicitly enabled, the reported device properties on which tactics were selected. The filename
+// hashes the complete identity. Never substitute a device ordinal or sentinel after a failed query.
 static std::string engine_compatibility_tag(cuda_driver_api &cuda, CUdevice device) {
-  int sm_major = -1;
-  int sm_minor = -1;
-  if (cuda.cuDeviceGetAttribute) {
-    cuda.cuDeviceGetAttribute(&sm_major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device);
-    cuda.cuDeviceGetAttribute(&sm_minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device);
+  // Match the process-lifetime CUDA primary context and engine slots. In particular a display
+  // topology change must not trigger another engine build during an established host process.
+  static std::mutex identity_mutex;
+  static std::map<CUdevice, std::string> identities;
+  std::lock_guard identity_lock(identity_mutex);
+  if (const auto found = identities.find(device); found != identities.end()) {
+    return found->second;
   }
-
-  std::array<char, 256> device_name {};
-  if (!cuda.cuDeviceGetName || cuda.cuDeviceGetName(device_name.data(), (int) device_name.size(), device) != CUDA_SUCCESS) {
-    std::snprintf(device_name.data(), device_name.size(), "cuda-device-%d", (int) device);
+  std::string identity_error;
+  const auto device_identity = models::detail::cuda_engine_device_identity(cuda, device, identity_error);
+  if (device_identity.empty()) {
+    BOOST_LOG(error) << "Cannot select a TensorRT cache identity for CUDA device " << device
+                     << ": " << identity_error << ". Refusing cache reuse and compilation.";
+    return {};
   }
-  std::uint64_t name_hash = 1469598103934665603ULL;
-  for (const unsigned char ch : std::string_view(device_name.data())) {
-    name_hash ^= ch;
-    name_hash *= 1099511628211ULL;
-  }
-
-  std::ostringstream tag;
-  tag << "trt" << NV_TENSORRT_MAJOR << '_' << NV_TENSORRT_MINOR << '_' << NV_TENSORRT_PATCH
-      << '_' << NV_TENSORRT_BUILD
-      << "-sm" << sm_major << sm_minor << "-gpu" << std::hex << name_hash;
-  return tag.str();
+  const auto identity = "trt" + std::to_string(NV_TENSORRT_MAJOR) + '_' +
+         std::to_string(NV_TENSORRT_MINOR) + '_' + std::to_string(NV_TENSORRT_PATCH) + '_' +
+         std::to_string(NV_TENSORRT_BUILD) + '|' + device_identity;
+  identities.emplace(device, identity);
+  return identity;
 }
 
 // One resident engine per CUDA-device/model pair, so multi-adapter sessions never reuse a
@@ -1071,13 +1070,9 @@ namespace models {
       return false;
     }
     const auto &composite = *result.composite_depth_runtime_provenance;
-    const std::string engine_prefix =
-      std::string {prod_zipdepth_convex2x::logical_model} + "." +
-      std::string {prod_zipdepth_convex2x::engine_recipe} + ".";
-    const std::string engine_suffix =
-      "-onnx" + std::string {prod_zipdepth_convex2x::fused_onnx_sha256} +
-      ".engine";
-    const std::string manifest_name =
+    // These names are fixed by the compiled contract, not by the completed frame. Keep their
+    // storage while retaining every resource, provenance, and owner check on each result.
+    static const std::string manifest_name =
       std::string {prod_zipdepth_convex2x::logical_model} +
       ".active-engine.json";
     if (composite.model != prod_zipdepth_convex2x::logical_model ||
@@ -1090,9 +1085,7 @@ namespace models {
         composite.guidance_preprocess_source_closure_sha256 !=
           model.preprocess_source_closure_sha256 ||
         composite.engine_recipe != prod_zipdepth_convex2x::engine_recipe ||
-        composite.engine_artifact.size() <= engine_prefix.size() + engine_suffix.size() ||
-        !composite.engine_artifact.starts_with(engine_prefix) ||
-        !composite.engine_artifact.ends_with(engine_suffix) ||
+        !is_current_depth_engine_filename(composite.engine_artifact) ||
         composite.active_engine_manifest != manifest_name ||
         result.guidance_width != result_shape.width ||
         result.guidance_height != result_shape.height ||
@@ -1369,15 +1362,22 @@ namespace models {
       return false;
     }
 
-    artifact.name = engine_filename(
-      model,
-      engine_compatibility_tag(cuda, cuda_device) + "-onnx" + artifact.source_sha256
-    );
+    const auto compatibility_tag = engine_compatibility_tag(cuda, cuda_device);
+    if (compatibility_tag.empty()) {
+      return false;
+    }
+    artifact.name = engine_filename(model, compatibility_tag + "-onnx" + artifact.source_sha256);
     if (artifact.name.empty()) {
       BOOST_LOG(error) << "No TensorRT cache recipe exists for the classified depth ONNX.";
       return false;
     }
     artifact.engine_path = assets_dir / artifact.name;
+
+    if (!engine_cache_path_fits_native_limit(artifact.engine_path)) {
+      BOOST_LOG(error) << "TensorRT cache path including .part exceeds the native file limit: "
+                       << artifact.engine_path << ". Choose a shorter model assets directory.";
+      return false;
+    }
 
     std::error_code existing_ec;
     if (std::filesystem::is_regular_file(artifact.engine_path, existing_ec)) {
@@ -1474,9 +1474,11 @@ namespace models {
         << "); refusing the packaged artifact without deleting or replacing it.";
       return false;
     }
-    artifact.name = ocr_engine_filename(
-      engine_compatibility_tag(cuda, cuda_device) + "-onnx" + artifact.source_sha256
-    );
+    const auto compatibility_tag = engine_compatibility_tag(cuda, cuda_device);
+    if (compatibility_tag.empty()) {
+      return false;
+    }
+    artifact.name = ocr_engine_filename(compatibility_tag + "-onnx" + artifact.source_sha256);
     if (artifact.name.empty()) {
       BOOST_LOG(error)
         << "Could not derive the bounded PP-OCRv6 tiny TensorRT cache identity; "
@@ -1484,6 +1486,12 @@ namespace models {
       return false;
     }
     artifact.engine_path = assets_dir / artifact.name;
+
+    if (!engine_cache_path_fits_native_limit(artifact.engine_path)) {
+      BOOST_LOG(error) << "PP-OCRv6 cache path including .part exceeds the native file limit: "
+                       << artifact.engine_path << ". Choose a shorter model assets directory.";
+      return false;
+    }
 
     std::error_code existing_ec;
     if (std::filesystem::is_regular_file(artifact.engine_path, existing_ec)) {
@@ -2070,8 +2078,6 @@ namespace models {
     bool telemetry_readback_init_failed = false;
 
     // Throughput telemetry for the permanent stream-cadence matched-frame pipeline.
-    float measured_fps = 0.0f;
-    std::chrono::steady_clock::time_point last_call_time {};
     std::chrono::steady_clock::time_point throughput_stats_start {};
     unsigned throughput_stats_calls = 0;
     unsigned throughput_stats_busy_drops = 0;
@@ -3168,6 +3174,17 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> gpu_trace_ring_uav;
     std::shared_ptr<const host_sbs_gpu_trace_provenance_t> gpu_trace_provenance;
     bool gpu_trace_error_logged = false;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> gpu_outcome_buffer;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> gpu_outcome_uav;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> gpu_outcome_staging;
+    Microsoft::WRL::ComPtr<ID3D11Query> gpu_outcome_readback_query;
+    host_sbs_gpu_outcomes::delta_tracker_t gpu_outcome_counts;
+    std::chrono::steady_clock::time_point gpu_outcome_next_poll {};
+    std::chrono::steady_clock::time_point gpu_outcome_next_log {};
+    bool gpu_outcome_readback_pending = false;
+    bool gpu_outcome_copy_needed = false;
+    bool gpu_outcome_report_pending = false;
+    bool gpu_outcome_error_logged = false;
     struct pending_gpu_trace_append_t {
       host_sbs_gpu_trace::host_subtitle_outcome_e host_subtitle_outcome =
         host_sbs_gpu_trace::host_subtitle_outcome_e::suppressed;
@@ -3346,9 +3363,8 @@ namespace models {
     bool has_last_postprocessed_frame_id = false;
     // Host metadata may authorize only the immediately preceding opaque root. The device history
     // owner remains the branch authority: infer advances it while reuse/invalid leaves it older.
-    // The detector compares cumulatively against that last actual infer for at most four frame
-    // steps and strictly less than 100 ms of source-observation time, so drift cannot be hidden by
-    // pairwise-near-identical opaque follow-ups.
+    // The detector always compares against that last actual infer without age/count expiry,
+    // so pairwise-near-identical opaque follow-ups cannot hide cumulative drift.
     std::uint64_t last_gpu_opaque_transaction_frame_id = 0;
     bool stream_error_logged = false;
     bool fused_input_region_error_logged = false;
@@ -4034,6 +4050,133 @@ namespace models {
       gpu_trace_ring_uav.Reset();
       gpu_trace_provenance.reset();
       pending_gpu_trace_append = {};
+      reset_gpu_outcome_resources();
+    }
+
+    void reset_gpu_outcome_resources() noexcept {
+      gpu_outcome_buffer.Reset();
+      gpu_outcome_uav.Reset();
+      gpu_outcome_staging.Reset();
+      gpu_outcome_readback_query.Reset();
+      gpu_outcome_counts.reset();
+      gpu_outcome_next_poll = {};
+      gpu_outcome_next_log = {};
+      gpu_outcome_readback_pending = false;
+      gpu_outcome_copy_needed = false;
+      gpu_outcome_report_pending = false;
+    }
+
+    void disable_gpu_outcome_logging(const std::string_view reason) {
+      reset_gpu_outcome_resources();
+      if (!gpu_outcome_error_logged) {
+        BOOST_LOG(warning) << "Host SBS diagnostic GPU outcome counters are unavailable ("
+                           << reason << "); completion trace and live rendering are unaffected.";
+        gpu_outcome_error_logged = true;
+      }
+    }
+
+    void initialize_gpu_outcome_resources() {
+      reset_gpu_outcome_resources();
+      D3D11_BUFFER_DESC counter_desc {};
+      counter_desc.Usage = D3D11_USAGE_DEFAULT;
+      counter_desc.ByteWidth = host_sbs_gpu_outcomes::byte_count;
+      counter_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+      counter_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+      counter_desc.StructureByteStride = sizeof(std::uint32_t);
+      D3D11_SUBRESOURCE_DATA initial {host_sbs_gpu_outcomes::initial_words.data(), 0u, 0u};
+      D3D11_BUFFER_DESC staging_desc {};
+      staging_desc.Usage = D3D11_USAGE_STAGING;
+      staging_desc.ByteWidth = host_sbs_gpu_outcomes::byte_count;
+      staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      D3D11_QUERY_DESC query_desc {D3D11_QUERY_EVENT, 0u};
+      if (!SUCCEEDED(device->CreateBuffer(
+            &counter_desc, &initial, gpu_outcome_buffer.ReleaseAndGetAddressOf()
+          )) || !SUCCEEDED(device->CreateUnorderedAccessView(
+            gpu_outcome_buffer.Get(), nullptr, gpu_outcome_uav.ReleaseAndGetAddressOf()
+          )) || !SUCCEEDED(device->CreateBuffer(
+            &staging_desc, nullptr, gpu_outcome_staging.ReleaseAndGetAddressOf()
+          )) || !SUCCEEDED(device->CreateQuery(
+            &query_desc, gpu_outcome_readback_query.ReleaseAndGetAddressOf()
+          ))) {
+        disable_gpu_outcome_logging("optional readback-resource setup failed");
+      }
+    }
+
+    void service_gpu_outcome_logging() {
+      // Only aggregate diagnostic counts cross the GPU/CPU boundary. Never flush, wait, or
+      // expose these observations to the scheduler; a busy readback retains its single slot.
+      if (!diagnostics_enabled || !gpu_outcome_readback_query ||
+          (!gpu_outcome_copy_needed && !gpu_outcome_readback_pending &&
+           !gpu_outcome_report_pending)) {
+        return;
+      }
+      const auto now = std::chrono::steady_clock::now();
+      if (now < gpu_outcome_next_poll) {
+        return;
+      }
+      gpu_outcome_next_poll = now + 1s;
+      if (gpu_outcome_next_log == std::chrono::steady_clock::time_point {}) {
+        gpu_outcome_next_log = now + 5s;
+      }
+      if (gpu_outcome_readback_pending) {
+        BOOL complete = FALSE;
+        const auto ready = context->GetData(
+          gpu_outcome_readback_query.Get(), &complete, sizeof(complete),
+          D3D11_ASYNC_GETDATA_DONOTFLUSH
+        );
+        if (ready == S_FALSE || (ready == S_OK && !complete)) {
+          return;
+        }
+        if (FAILED(ready)) {
+          disable_gpu_outcome_logging("nonblocking readback query failed");
+          return;
+        }
+        D3D11_MAPPED_SUBRESOURCE mapped {};
+        const auto map_result = context->Map(
+          gpu_outcome_staging.Get(), 0u, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped
+        );
+        if (map_result == DXGI_ERROR_WAS_STILL_DRAWING) {
+          return;
+        }
+        if (FAILED(map_result)) {
+          disable_gpu_outcome_logging("nonblocking counter map failed");
+          return;
+        }
+        host_sbs_gpu_outcomes::words_t words {};
+        std::memcpy(words.data(), mapped.pData, host_sbs_gpu_outcomes::byte_count);
+        context->Unmap(gpu_outcome_staging.Get(), 0u);
+        gpu_outcome_readback_pending = false;
+        const auto counts = host_sbs_gpu_outcomes::decode(words);
+        if (!counts) {
+          disable_gpu_outcome_logging("counter schema or tag is invalid");
+          return;
+        }
+        if (gpu_outcome_counts.observe(*counts)) {
+          BOOST_LOG(warning) << "Host SBS diagnostic GPU outcome counters restarted; "
+                                "reporting a new counter epoch.";
+        }
+        gpu_outcome_report_pending = true;
+      }
+      // A final ready sample can be reported by ordinary idle polls even if no more trace
+      // appends arrive. Once drained, idle polls neither sample the clock nor copy unchanged data.
+      if (gpu_outcome_report_pending && now >= gpu_outcome_next_log) {
+        const auto delta = gpu_outcome_counts.take_delta();
+        const auto totals = gpu_outcome_counts.totals();
+        BOOST_LOG(info) << "Host SBS GPU outcomes: infer=" << delta.infer
+                        << " reuse=" << delta.reuse << " invalid=" << delta.invalid
+                        << " reuse_percent=" << std::round(delta.reuse_percent() * 10.0) / 10.0
+                        << " cumulative_infer=" << totals.infer
+                        << " cumulative_reuse=" << totals.reuse
+                        << " cumulative_invalid=" << totals.invalid;
+        gpu_outcome_next_log = now + 5s;
+        gpu_outcome_report_pending = false;
+      }
+      if (gpu_outcome_copy_needed) {
+        context->CopyResource(gpu_outcome_staging.Get(), gpu_outcome_buffer.Get());
+        context->End(gpu_outcome_readback_query.Get());
+        gpu_outcome_readback_pending = true;
+        gpu_outcome_copy_needed = false;
+      }
     }
 
     void initialize_gpu_trace() {
@@ -4138,6 +4281,7 @@ namespace models {
             .source_closure_sha256 = closure_sha256,
           }
         );
+      initialize_gpu_outcome_resources();
       BOOST_LOG(info) << "Host SBS diagnostic GPU completion trace initialized ("
                       << host_sbs_gpu_trace::capacity << " records, "
                       << host_sbs_gpu_trace::record_word_count * sizeof(std::uint32_t)
@@ -6827,18 +6971,25 @@ namespace models {
       context->CSSetShader(gpu_trace_cs.Get(), nullptr, 0u);
       context->CSSetConstantBuffers(0u, 1u, gpu_trace_cbuffer.GetAddressOf());
       context->CSSetShaderResources(0u, 3u, inputs);
+      ID3D11UnorderedAccessView *outputs[2] = {
+        gpu_trace_ring_uav.Get(), gpu_outcome_uav.Get()
+      };
       context->CSSetUnorderedAccessViews(
-        0u, 1u, gpu_trace_ring_uav.GetAddressOf(), nullptr
+        0u, 2u, outputs, nullptr
       );
       context->Dispatch(1u, 1u, 1u);
 
       ID3D11ShaderResourceView *null_inputs[3] = {};
-      ID3D11UnorderedAccessView *null_output = nullptr;
+      ID3D11UnorderedAccessView *null_outputs[2] = {};
       ID3D11Buffer *null_constant = nullptr;
       context->CSSetShaderResources(0u, 3u, null_inputs);
-      context->CSSetUnorderedAccessViews(0u, 1u, &null_output, nullptr);
+      context->CSSetUnorderedAccessViews(0u, 2u, null_outputs, nullptr);
       context->CSSetConstantBuffers(0u, 1u, &null_constant);
       context->CSSetShader(nullptr, nullptr, 0u);
+      if (gpu_outcome_uav) {
+        gpu_outcome_copy_needed = true;
+      }
+      service_gpu_outcome_logging();
     }
 
     bool ensure_parallax_v2_coordinate_diagnostic_resource() {
@@ -7879,15 +8030,7 @@ namespace models {
     // Diagnostics-only accounting for achieved inference throughput and busy drops. Callers
     // bypass this function entirely when diagnostics are disabled, avoiding even a clock read.
     void update_throughput_stats() {
-      auto now = std::chrono::steady_clock::now();
-      if (last_call_time.time_since_epoch().count() != 0) {
-        float dt = std::chrono::duration<float>(now - last_call_time).count();
-        if (dt > 1e-4f && dt < 0.5f) {  // ignore first call and long stalls (paused/occluded)
-          float inst = 1.0f / dt;
-          measured_fps = (measured_fps <= 0.0f) ? inst : (measured_fps * 0.95f + inst * 0.05f);
-        }
-      }
-      last_call_time = now;
+      const auto now = std::chrono::steady_clock::now();
 
       // A five-second window is responsive enough for headset tuning without flooding the log.
       if (throughput_stats_start.time_since_epoch().count() == 0) {
@@ -7896,8 +8039,11 @@ namespace models {
         float stats_seconds = std::chrono::duration<float>(now - throughput_stats_start).count();
         if (stats_seconds >= 5.0f) {
           float calls = (float) std::max(1u, throughput_stats_calls);
-          BOOST_LOG(info) << "Depth throughput: source ~" << (int) (measured_fps + 0.5f)
-                          << "fps, completed ~" << (int) (throughput_stats_completions / stats_seconds + 0.5f)
+          // Admission attempts include retained-source retries. This is neither capture FPS
+          // nor model invocation rate; the GPU outcome counters distinguish infer from reuse.
+          BOOST_LOG(info) << "Depth throughput: admission attempts ~"
+                          << (int) (throughput_stats_calls / stats_seconds + 0.5f)
+                          << "/s, completed ~" << (int) (throughput_stats_completions / stats_seconds + 0.5f)
                           << "fps, enqueued ~" << (int) (throughput_stats_enqueues / stats_seconds + 0.5f)
                           << "fps, busy drops " << (int) (100.0f * throughput_stats_busy_drops / calls + 0.5f)
                           << "% (" << throughput_stats_busy_drops << '/' << throughput_stats_calls
@@ -9375,6 +9521,12 @@ namespace models {
                      snapshot_debug_inputs
                    ) :
                    pending_depth_poll_result {.ready = true};
+  }
+
+  void video_depth_estimator::poll_gpu_outcome_diagnostics() {
+    if (pimpl) {
+      pimpl->service_gpu_outcome_logging();
+    }
   }
 
   depth_telemetry_poll_result video_depth_estimator::poll_depth_telemetry(

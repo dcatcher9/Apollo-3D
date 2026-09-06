@@ -18,7 +18,7 @@ const config = ref(props.config)
 
     <div class="mb-3">
       <label for="sbs_3d_max_encode_width" class="form-label">{{ $t('config.sbs_3d_max_encode_width') }}</label>
-      <input id="sbs_3d_max_encode_width" class="form-control" type="number" min="256" max="16384" step="2"
+      <input id="sbs_3d_max_encode_width" class="form-control" type="number" min="256" max="16384" step="4"
              placeholder="8192" v-model.number="config.sbs_3d_max_encode_width" />
       <div class="form-text">{{ $t('config.sbs_3d_max_encode_width_desc') }}</div>
     </div>

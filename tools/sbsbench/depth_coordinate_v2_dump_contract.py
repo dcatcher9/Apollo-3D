@@ -9,6 +9,7 @@ field layout, so a consumer cannot silently reinterpret a same-sized state buffe
 from __future__ import annotations
 
 import math
+import re
 import struct
 from itertools import product
 from typing import Any, Dict, Tuple
@@ -1181,6 +1182,17 @@ def capture_grid_relation_for_source(
     return relation if expected == (width, height) else None
 
 
+def composite_engine_filename_matches(engine_name, model, recipe, onnx_sha256):
+    """Strict current cache tokens or historical explicit device/ONNX names; never paths."""
+    if not isinstance(engine_name, str):
+        return False
+    prefix = re.escape(f"{model}.{recipe}.")
+    current = prefix + r"cache-[0-9a-f]{64}\.engine"
+    legacy = (prefix + r"trt[0-9]+_[0-9]+_[0-9]+_[0-9]+-sm[0-9]+-gpu[0-9a-f]{1,16}" +
+              re.escape(f"-onnx{onnx_sha256}.engine"))
+    return bool(re.fullmatch(current, engine_name) or re.fullmatch(legacy, engine_name))
+
+
 def validate_composite_runtime_provenance(
         value: Any, *, expected_dav2_onnx_sha256: str | None = None,
         expected_preprocess_source_closure_sha256: str | None = None) -> Dict[str, Any]:
@@ -1200,8 +1212,6 @@ def validate_composite_runtime_provenance(
     dav2_sha256 = str(dav2["onnx_sha256"])
     zipdepth_sha256 = str(zipdepth["checkpoint_sha256"])
     engine_recipe = str(tensorrt["engine_recipe"])
-    engine_prefix = f"{model}.{engine_recipe}."
-    engine_suffix = f"-onnx{onnx_sha256}.engine"
     engine_artifact = value.get("engine_artifact")
     active_manifest = f"{model}.active-engine.json"
     if (value.get("schema") != int(contract["schema"]) or
@@ -1213,11 +1223,7 @@ def validate_composite_runtime_provenance(
             value.get("guidance_preprocess_source_closure_sha256") !=
             _PRODUCTION_CALIBRATION.preprocess.source_closure_sha256 or
             value.get("engine_recipe") != engine_recipe or
-            not isinstance(engine_artifact, str) or
-            "/" in engine_artifact or "\\" in engine_artifact or
-            len(engine_artifact) <= len(engine_prefix) + len(engine_suffix) or
-            not engine_artifact.startswith(engine_prefix) or
-            not engine_artifact.endswith(engine_suffix) or
+            not composite_engine_filename_matches(engine_artifact, model, engine_recipe, onnx_sha256) or
             value.get("active_engine_manifest") != active_manifest):
         raise ValueError(
             "dump_manifest.json has unauthenticated schema-2 fused composite runtime provenance")

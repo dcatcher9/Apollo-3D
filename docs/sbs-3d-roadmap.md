@@ -32,9 +32,9 @@ this route; an internal base-V2 authentication failure still renders flat.
 
 The live DDup path may also reuse authenticated geometry for an already-authorized, exactly
 positioned ROI when a complete contiguous dirty/move sequence proves that every intervening desktop
-change was outside that crop. This bounded optimization changes neither ROI selection nor analysis
-semantics: uncertainty returns to normal inference, and 16 skipped deliveries or 250 ms forces a
-refresh. WGC has no damage-reuse authority.
+change was outside that crop. This optimization changes neither ROI selection nor analysis
+semantics: uncertainty returns to normal inference, while continuously proven unchanged input
+does not require periodic refresh. WGC has no damage-reuse authority.
 
 The complete implementation contract is in [Host SBS pipeline](host-sbs.md). Scene-cut behavior is
 owned by [Host SBS scene cuts](host-sbs-scene-cuts.md).
@@ -124,7 +124,7 @@ holds the prior OCR8/SLR13/final tuple. Due reuse retains depth, cut, camera, an
 but advances the current OCR or abstention, SLR13, and conditioned final field. No mode relabels
 retained boxes as a new OCR observation.
 
-Up to four GPU-undecided deliveries may render private current color through GPU-selected
+Repeated GPU-undecided deliveries may render private current color through GPU-selected
 authenticated V2 geometry. A reuse freezes depth/cut/camera/V2 Base and the complete
 OCR8/SLR13/conditioned-final tuple for ordinary work, while due subtitle work may advance that
 tuple independently. Reprojection consumes the complete atomic final field directly, with no
@@ -137,20 +137,19 @@ presentation continuity. If the next root misses the same-frame completion budge
 be redelivered on the unchanged route/domain instead of flashing flat; it carries no DAV2, OCR,
 SLR, damage, cache-lineage, or follow-up-submission authority.
 A metadata-only anchor may nevertheless send the immediately following complete-history candidate
-back to the GPU when it is strictly under `100 ms`, on the identical route, and
+back to the GPU when it has nonregressed observation ordering, on the identical route, and
 bound to the prior opaque frame and damage history. The device compares cumulatively against the
-last actual infer input; owner age through four frame steps is allowed only while source observation
-age is also strictly under `100 ms`. The fifth step or age boundary forces infer. Initial candidate
-and opaque-follow-up admission share that strict `100 ms` host-age ceiling. Expiry, route/proof
+last actual infer input without an age or delivery-count expiry. Reuse never moves this fixed
+comparison baseline. Invalid ownership, route/proof
 failure, or interop-signature drift still
 forces CPU-known inference and restores ordinary depth lineage.
-Diagnostics count initial and follow-up roots plus host expiry/rejection/fallback, never the private
+Diagnostics count initial and follow-up roots plus host ownership rejection/fallback, never the private
 branch outcome.
 
 Coherent GPU temporal state is not synthetically reset. Every post-bootstrap DAV2 submission,
 including force-infer, uses the same conditional wrapper; wrapper/capability/interop failure is
 terminal flat rather than a hidden raw-TensorRT fallback. The canonical thresholds, ownership,
-four-delivery/`100 ms` depth risk and reset matrix are in
+sub-threshold depth-reuse risk and reset matrix are in
 [Host SBS frame attribution](host-sbs.md#frame-attribution-and-failure-behavior).
 
 OCR instead has a narrower independent cadence. Every accepted ordinary opaque root is
@@ -172,15 +171,15 @@ Completed in schema 67: the schedule-coupled three-phase display recurrence was 
 complete atomic conditioned final field is rendered directly. The recurrence was introduced for the
 earlier infer/reuse clocking hypothesis; removing it eliminates a persistent full-field resource and
 pass, effective field lag, and rendering semantics coupled to reuse-owner age. Keep the GPU history
-owner, four-frame/`100 ms` bound, diagnostic trace, mature
+owner, diagnostic trace, mature
 single-line provisional bridge, and compatible-handoff fade preservation until separate evidence
 justifies changing them.
 
 Phase B is implemented as independently authenticated depth and subtitle choices inside the existing
 joined CUDA graph. Ordinary OCR is infer-coupled; due current-ready OCR (`8`) and due ineligible
 abstention (`16`) publish on either depth branch. The host cadence permits two conservative dirty
-holds or `33 ms`, while the depth history owner permits four frame steps with strict `<100 ms`
-observation age. Live and offline replay share the request/chaining policy and one joined completion
+holds or `33 ms`, while depth reuse continues against its fixed real-inference owner without
+elapsed-time or delivery-count expiry. Live and offline replay share the request/chaining policy and one joined completion
 proof. Do not restore the retired host motion-size, OCR-band, localized-tile, or SLR-state inference
 vetoes.
 
@@ -193,8 +192,9 @@ exceeds the source-texture interop cost. This is expected to offer only a modest
 not a utilization claim, and must pass a weak-GPU contention gate. Remove each superseded HLSL
 implementation after corpus parity rather than maintaining duplicate live/offline algorithms.
 
-Any expansion beyond four consecutive reuses or the strict `<100 ms` observation-age limit requires
-new shared-replay, exact-trace, scene-cut, subtitle-transition, weak-GPU-tail, and live-XR evidence.
+The policy no longer forces an inference after four deliveries or `100 ms`. Qualify prolonged
+comparison against the fixed real-inference owner with shared-replay, exact-trace, cumulative-drift,
+scene-cut, subtitle-transition, weak-GPU-tail, and live-XR evidence.
 The acceptance metric is final SBS readiness and presentation continuity, not the raw CUDA-root
 event time or a promised reuse percentage.
 
@@ -240,8 +240,8 @@ Before changing V2 geometry:
    other-monitor and spanning fallbacks, exact full-capture canonicalization, multiple videos,
    portrait/square/ultrawide contain-fit padding, and both signs at every ROI edge. For DDup damage
    reuse, separately check dirty and move rectangles inside, outside, and touching each half-open ROI
-   edge; repeated and missing sequences; metadata/protected-content failure; WGC fallback; and both
-   the 16-delivery and 250-ms forced-refresh boundaries.
+   edge; repeated and missing sequences; metadata/protected-content failure; WGC fallback; and
+   continuous clean proof beyond the retained history ring versus an evicted unchecked interval.
 5. Confirm the result in Galaxy XR at the intended pop strength before changing the production
    contract or baselines.
 

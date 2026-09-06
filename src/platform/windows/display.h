@@ -136,13 +136,6 @@ namespace platf::dxgi {
       return has_depth_estimator && renderer_uses_depth_pipeline;
     }
 
-    inline constexpr auto host_sbs_full_source_reuse_max_age =
-      std::chrono::milliseconds {250};
-    inline constexpr unsigned host_sbs_full_source_reuse_max_skips = 16u;
-    inline constexpr auto host_sbs_gpu_observation_owner_max_age =
-      std::chrono::microseconds {
-        models::gpu_adaptive_max_infer_owner_observation_age_us
-      };
     // Same-frame completion polling is allowed only inside encode-loop cadence slack. The
     // downstream reserve covers completed-depth postprocess, SBS warp/output, and NVENC submit;
     // late/high-rate frames therefore remain on the ordinary nonblocking path.
@@ -288,11 +281,6 @@ namespace platf::dxgi {
       gpu_undecided,
     };
 
-    enum class host_sbs_depth_reuse_refresh_e : std::uint8_t {
-      none,
-      bounded_content,
-    };
-
     /** CPU-side disposition using host metadata only.
      *
      * Exact DDup proof may reuse the completed cache. An otherwise eligible changed frame is
@@ -305,6 +293,49 @@ namespace platf::dxgi {
       gpu_undecided,
     };
 
+    /** An existing exact captured-source result, not an inference or reusable-depth owner. */
+    struct host_sbs_completed_source_proof_t {
+      std::uint64_t frame_id = 0u;
+      std::optional<std::chrono::steady_clock::time_point> source_timestamp;
+      bool route_matches = false;
+
+      [[nodiscard]] constexpr bool matches(
+        const std::optional<std::chrono::steady_clock::time_point> &current_source
+      ) const noexcept {
+        return frame_id != 0u && route_matches && source_timestamp && current_source &&
+               *source_timestamp == *current_source;
+      }
+    };
+
+    enum class host_sbs_completed_source_action_e : std::uint8_t {
+      observe,
+      render_matched,
+      repeat_packed,
+    };
+
+    /** Consume or redeliver work already completed for this immutable captured image.
+     *
+     * This runs before changed-source arbitration. The result has no raw-depth, OCR or inference
+     * ownership meaning, including when the completed GPU transaction privately chose reuse.
+     * Content timestamps alone are insufficient: a new cursor presentation must still be handled.
+     */
+    [[nodiscard]] constexpr host_sbs_completed_source_action_e host_sbs_completed_source_action(
+      const std::optional<std::chrono::steady_clock::time_point> &current_source,
+      const bool retention_allowed,
+      const host_sbs_completed_source_proof_t &matched,
+      const host_sbs_completed_source_proof_t &packed
+    ) noexcept {
+      if (!retention_allowed) {
+        return host_sbs_completed_source_action_e::observe;
+      }
+      if (matched.matches(current_source)) {
+        return host_sbs_completed_source_action_e::render_matched;
+      }
+      return packed.matches(current_source) ?
+               host_sbs_completed_source_action_e::repeat_packed :
+               host_sbs_completed_source_action_e::observe;
+    }
+
     [[nodiscard]] constexpr host_sbs_depth_admission_e host_sbs_depth_admission(
       const bool cached_reuse_authorized,
       const bool gpu_undecided_eligible,
@@ -314,7 +345,7 @@ namespace platf::dxgi {
       if (must_observe) {
         // The observation barrier continues to block every host-owned cache path. It may admit
         // only the immediately-prior opaque follow-up: the authenticated device history owner
-        // compares after infer and forces inference after reuse/invalid without branch readback.
+        // compares to the last actual infer and rejects invalid owners without branch readback.
         return opaque_followup_authorized && gpu_undecided_eligible ?
                  host_sbs_depth_admission_e::gpu_undecided :
                  host_sbs_depth_admission_e::force_infer;
@@ -326,7 +357,7 @@ namespace platf::dxgi {
                                       host_sbs_depth_admission_e::force_infer;
     }
 
-    [[nodiscard]] constexpr bool host_sbs_gpu_followup_fresh(
+    [[nodiscard]] constexpr bool host_sbs_gpu_followup_order_valid(
       const std::uint64_t anchor_frame_id,
       const std::uint64_t barrier_frame_id,
       const std::chrono::steady_clock::time_point enqueued_at,
@@ -334,8 +365,7 @@ namespace platf::dxgi {
     ) noexcept {
       return anchor_frame_id != 0u && anchor_frame_id == barrier_frame_id &&
              enqueued_at.time_since_epoch().count() != 0 &&
-             now.time_since_epoch().count() != 0 && now >= enqueued_at &&
-             now - enqueued_at < host_sbs_gpu_observation_owner_max_age;
+             now.time_since_epoch().count() != 0 && now >= enqueued_at;
     }
 
     /** Live alias of the shared production/offline conditional transaction policy. */
@@ -345,8 +375,6 @@ namespace platf::dxgi {
     /** One current-color/cache/render authority regardless of proof acquisition path. */
     struct host_sbs_depth_reuse_authorization_t {
       host_sbs_depth_reuse_kind_e kind = host_sbs_depth_reuse_kind_e::none;
-      host_sbs_depth_reuse_refresh_e refresh =
-        host_sbs_depth_reuse_refresh_e::none;
       std::uint64_t baseline_frame_id = 0u;
       std::uint64_t current_frame_id = 0u;
       bool ocr_safe = false;
@@ -363,7 +391,7 @@ namespace platf::dxgi {
             return false;
           case host_sbs_depth_reuse_kind_e::exact_content:
           case host_sbs_depth_reuse_kind_e::exact_roi_damage:
-            return refresh == host_sbs_depth_reuse_refresh_e::bounded_content;
+            return true;
         }
         return false;
       }
@@ -382,14 +410,6 @@ namespace platf::dxgi {
         .current_frame_id = current_frame_id,
         .ocr_safe = ocr_safe,
       };
-      switch (kind) {
-        case host_sbs_depth_reuse_kind_e::none:
-          break;
-        case host_sbs_depth_reuse_kind_e::exact_content:
-        case host_sbs_depth_reuse_kind_e::exact_roi_damage:
-          result.refresh = host_sbs_depth_reuse_refresh_e::bounded_content;
-          break;
-      }
       return result.valid() ? result : host_sbs_depth_reuse_authorization_t {};
     }
 
@@ -512,7 +532,7 @@ namespace platf::dxgi {
     /** Own initial-candidate cadence for GPU near-identical reuse.
      *
      * A candidate consumes the host arm. Device-authenticated opaque follow-ups are governed by
-     * their separate route/age/owner contract; a real observation must be enqueued before another
+     * their separate route/owner contract; a real observation must be enqueued before another
      * initial host candidate may be armed.
      */
     class host_sbs_adaptive_hold_cadence_t {
@@ -549,20 +569,16 @@ namespace platf::dxgi {
           return host_sbs_adaptive_hold_decision_e::infer;
         }
         if (refresh_required_) {
-          const bool fresh = last_enqueued_at_.time_since_epoch().count() != 0 &&
-                             now >= last_enqueued_at_ &&
-                             now - last_enqueued_at_ <
-                               host_sbs_gpu_observation_owner_max_age;
-          if (refresh_identity_ && *identity == *refresh_identity_ && fresh) {
+          const bool ordered = last_enqueued_at_.time_since_epoch().count() != 0 &&
+                               now >= last_enqueued_at_;
+          if (refresh_identity_ && *identity == *refresh_identity_ && ordered) {
             return host_sbs_adaptive_hold_decision_e::hold_same_identity;
           }
           return host_sbs_adaptive_hold_decision_e::infer;
         }
-        const bool fresh = last_enqueued_at_.time_since_epoch().count() != 0 &&
-                           now >= last_enqueued_at_ &&
-                           now - last_enqueued_at_ <
-                             host_sbs_gpu_observation_owner_max_age;
-        if (armed_ && candidate_eligible && fresh) {
+        const bool ordered = last_enqueued_at_.time_since_epoch().count() != 0 &&
+                             now >= last_enqueued_at_;
+        if (armed_ && candidate_eligible && ordered) {
           armed_ = false;
           refresh_required_ = true;
           refresh_identity_ = identity;
@@ -579,18 +595,16 @@ namespace platf::dxgi {
       /** Revalidate the consumed candidate immediately before GPU submission.
        *
        * Private frame copy and live-authority checks happen after `observe_changed()`. A delayed
-       * submit must not extend the shared observation-owner budget merely because the arm was
-       * consumed while it was still fresh.
+       * submit must retain that candidate identity and nonregressed observation ordering.
        */
-      [[nodiscard]] constexpr bool hold_candidate_still_fresh(
+      [[nodiscard]] constexpr bool hold_candidate_still_valid(
         const std::optional<std::chrono::steady_clock::time_point> &identity,
         const std::chrono::steady_clock::time_point now
       ) const noexcept {
         return refresh_required_ && identity && refresh_identity_ &&
                *identity == *refresh_identity_ &&
                last_enqueued_at_.time_since_epoch().count() != 0 &&
-               now >= last_enqueued_at_ &&
-               now - last_enqueued_at_ < host_sbs_gpu_observation_owner_max_age;
+               now >= last_enqueued_at_;
       }
 
     private:
@@ -599,45 +613,6 @@ namespace platf::dxgi {
       std::optional<std::chrono::steady_clock::time_point> last_enqueued_identity_;
       std::optional<std::chrono::steady_clock::time_point> refresh_identity_;
       std::chrono::steady_clock::time_point last_enqueued_at_ {};
-    };
-
-    /** Bounded unchanged-content refresh state. A busy admission attempt is intentionally a no-op;
-     * only a real enqueue resets the saturated age/skip cap. */
-    class host_sbs_content_refresh_state_t {
-    public:
-      constexpr void reset() noexcept {
-        last_enqueued_at_.reset();
-        skipped_ = 0u;
-      }
-
-      constexpr void record_successful_enqueue(
-        const std::chrono::steady_clock::time_point now
-      ) noexcept {
-        last_enqueued_at_ = now;
-        skipped_ = 0u;
-      }
-
-      constexpr void record_reuse() noexcept {
-        if (skipped_ < host_sbs_full_source_reuse_max_skips) {
-          ++skipped_;
-        }
-      }
-
-      [[nodiscard]] constexpr bool refresh_due(
-        const std::chrono::steady_clock::time_point now
-      ) const noexcept {
-        return !last_enqueued_at_ ||
-               skipped_ >= host_sbs_full_source_reuse_max_skips ||
-               now - *last_enqueued_at_ >= host_sbs_full_source_reuse_max_age;
-      }
-
-      [[nodiscard]] constexpr unsigned skipped() const noexcept {
-        return skipped_;
-      }
-
-    private:
-      std::optional<std::chrono::steady_clock::time_point> last_enqueued_at_;
-      unsigned skipped_ = 0u;
     };
 
     /** CPU shadow for an immutable-by-value GPU upload. The caller commits only after the D3D
@@ -858,6 +833,24 @@ namespace platf::dxgi {
       const std::optional<ddup_damage_snapshot_t> &through,
       const RECT &region
     );
+
+    /** Transitive exact ROI proof with one rolling damage anchor, separate from model identity.
+     * Every unchecked interval must remain completely retained; an unknown/dirty interval or
+     * placement change invalidates the proof until a newly captured inference seeds it again.
+     */
+    class ddup_unchanged_roi_proof_t {
+    public:
+      void reset() noexcept;
+      void reset(const std::optional<ddup_damage_snapshot_t> &baseline, const RECT &region);
+      [[nodiscard]] bool observe(
+        const std::optional<ddup_damage_snapshot_t> &current,
+        const RECT &region
+      );
+
+    private:
+      std::optional<ddup_damage_snapshot_t> anchor_;
+      RECT region_ {};
+    };
 
     /** Query conservative accumulated coverage only across one complete retained history range. */
     [[nodiscard]] ddup_damage_coverage_t query_ddup_damage_coverage_between(

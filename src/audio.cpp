@@ -4,10 +4,6 @@
  */
 #include <algorithm>
 #include <chrono>
-#include <cmath>
-#include <cstdint>
-#include <format>
-#include <limits>
 #include <thread>
 
 // lib includes
@@ -31,7 +27,6 @@ namespace audio {
   static void stop_audio_control(audio_ctx_t &);
 
   constexpr auto SAMPLE_RATE = 48000;
-  constexpr auto LEVEL_TELEMETRY_INTERVAL = 5s;
 
   const opus_stream_config_t stream_configs[MAX_STREAM_CONFIG] {
     {
@@ -85,52 +80,6 @@ namespace audio {
   };
 
   namespace {
-    class rolling_level_meter_t {
-    public:
-      void observe(const std::vector<float> &samples) {
-        for (const auto sample : samples) {
-          if (!std::isfinite(sample)) {
-            continue;
-          }
-
-          const auto magnitude = std::abs(sample);
-          peak_ = std::max(peak_, magnitude);
-          sum_squares_ += static_cast<double>(sample) * sample;
-          ++sample_count_;
-        }
-
-        const auto now = std::chrono::steady_clock::now();
-        if (now - interval_start_ < LEVEL_TELEMETRY_INTERVAL) {
-          return;
-        }
-
-        const auto rms = sample_count_ ?
-                           std::sqrt(sum_squares_ / static_cast<double>(sample_count_)) :
-                           0.0;
-        const auto to_dbfs = [](double amplitude) {
-          return amplitude > 0.0 ? 20.0 * std::log10(amplitude) :
-                                   -std::numeric_limits<double>::infinity();
-        };
-
-        BOOST_LOG(info) << std::format(
-          "Pre-Opus audio level (rolling 5 s): peak {:.1f} dBFS, RMS {:.1f} dBFS",
-          to_dbfs(peak_),
-          to_dbfs(rms)
-        );
-
-        interval_start_ = now;
-        sample_count_ = 0;
-        sum_squares_ = 0.0;
-        peak_ = 0.0;
-      }
-
-    private:
-      std::chrono::steady_clock::time_point interval_start_ {std::chrono::steady_clock::now()};
-      std::uint64_t sample_count_ {};
-      double sum_squares_ {};
-      float peak_ {};
-    };
-
     int map_stream(int channels, bool quality) {
       const int shift = quality ? 1 : 0;
       switch (channels) {
@@ -178,9 +127,7 @@ namespace audio {
                     << stream.bitrate / 1000 << " kbps (total), LOWDELAY"sv;
 
     auto frame_size = config.packetDuration * stream.sampleRate / 1000;
-    rolling_level_meter_t level_meter;
     while (auto sample = samples->pop()) {
-      level_meter.observe(*sample);
       buffer_t packet {1400};
 
       int bytes = opus_multistream_encode_float(opus.get(), sample->data(), frame_size, std::begin(packet), packet.size());

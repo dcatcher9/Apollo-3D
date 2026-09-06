@@ -395,9 +395,11 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             if mode.startswith("reuse"):
                 raw = previous_raw
             control_raw = np.full(4, frame_id / 100.0, dtype="<f4")
+            # Long reuse chains still need legal synthetic parallax inside the V2 container.
+            parallax_step = frame_id % 32
             control_final = np.array([
-                frame_id / 1000.0, -frame_id / 1200.0,
-                frame_id / 1400.0, -frame_id / 1600.0,
+                parallax_step / 1000.0, -parallax_step / 1200.0,
+                parallax_step / 1400.0, -parallax_step / 1600.0,
             ], dtype="<f4")
             if row_subtitle != replay.TRACE_SUBTITLE_HELD_WITH_DEPTH:
                 treatment_final = control_final.copy()
@@ -418,7 +420,7 @@ class AdaptiveReplayContractTests(unittest.TestCase):
             previous_raw = raw
 
             image = Image.fromarray(
-                np.full((9, 12, 3), frame_id * 20, dtype=np.uint8))
+                np.full((9, 12, 3), (frame_id * 20) % 256, dtype=np.uint8))
             image.save(control / f"sbs_{frame_id:010d}.png")
             image.save(treatment / f"sbs_{frame_id:010d}.png")
         return control, treatment
@@ -534,20 +536,33 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                  replay.WORK_OPTIONAL_OCR_DUE, replay.WORK_OPTIONAL_OCR,
                  replay.WORK_OPTIONAL_OCR_DUE])
 
-    def test_rejects_more_than_four_consecutive_reuses(self):
+    def test_accepts_prolonged_reuse_against_the_same_authenticated_owner(self):
         with tempfile.TemporaryDirectory() as directory:
             control, treatment = self.make_pair(
-                Path(directory), modes=(
-                    "force", "reuse", "reuse", "reuse", "reuse", "reuse"))
-            with self.assertRaisesRegex(replay.EvidenceError, "history-owner age"):
-                replay._validate_contract_and_trace(control, treatment, 6)
+                Path(directory), modes=("force",) + ("reuse",) * 64)
+            metadata, records, checks = self.validate_pair(control, treatment, 65)
+            self.assertEqual(metadata["authenticated_device_dispositions"]["reuse"], 64)
+            self.assertEqual(checks["authenticated_reuse_owner_ages"],
+                             {str(frame): frame - 1 for frame in range(2, 66)})
 
-    def test_rejects_reuse_at_strict_100ms_owner_boundary(self):
+    def test_accepts_reuse_without_observation_age_expiry(self):
         with tempfile.TemporaryDirectory() as directory:
             control, treatment = self.make_pair(
-                Path(directory), timestamps=[1, 100_001])
-            with self.assertRaisesRegex(replay.EvidenceError, "strict authenticated.*time bound"):
-                replay._validate_contract_and_trace(control, treatment, 2)
+                Path(directory), timestamps=[1, (1 << 32) + 1])
+            _, _, checks = self.validate_pair(control, treatment, 2)
+            self.assertEqual(checks["authenticated_reuse_owner_ages"], {"2": 1})
+
+    def test_rejects_missing_or_regressed_reuse_owner_timestamps(self):
+        for owner_time, current_time in ((0, 1), (1, 0), (2, 1)):
+            with self.subTest(owner_time=owner_time, current_time=current_time):
+                records = [
+                    {"frame_id": 1, "depth": replay.TRACE_DEPTH_INFER,
+                     "observation_timestamp_us": owner_time, "flags": 0},
+                    {"frame_id": 2, "depth": replay.TRACE_DEPTH_REUSE,
+                     "observation_timestamp_us": current_time, "flags": 0},
+                ]
+                with self.assertRaisesRegex(replay.EvidenceError, "time ordering"):
+                    replay._authenticated_reuse_owner_ages(records)
 
     def test_accepts_due_abstention_publication_on_reused_depth(self):
         with tempfile.TemporaryDirectory() as directory:

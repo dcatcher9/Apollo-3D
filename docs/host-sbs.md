@@ -66,8 +66,8 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `preprocess` | 1 | `943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744` |
 | `parallax_v2_producer` | 18 | `563d375d1030d1c852337645685edc8295bd757dc8e4c6ce31a6838942f996da` |
 | `parallax_v2_coordinate_diagnostic` | 1 | `6565247a2de4326e5d87c76e4a603eecebd66eb3b7b7cf5fee50ddef37412363` |
-| `near_identical_detector` | 4 | `3dde879fb09189715530e6549c2fced103aa8684aec225390d56241be4e00585` |
-| `gpu_trace` | 1 | `7f9bc8e48ffe16958e46366c49c80de5c59297577577985886096250e807b1dc` |
+| `near_identical_detector` | 4 | `18d4977cbc84088d91158577cac4ad63eaf182bdd978190809c87cb7015e01c6` |
+| `gpu_trace` | 1 | `65a9c42dd0e02ab7e35afdb04d9b8178149623ec5e9180cedc3ce0f004c17854` |
 | `parallax_v2_live_renderer` | 2 | `b69d3bdcb555d76cde2174fa5d1a372b557f6b7182a76e2e46c928bf1dec08d5` |
 | `parallax_v2_p010_y` | 1 | `ce7207098d17bf3df969b9dbde39f324abdf58e5a529c2042cab34077dafa451` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
@@ -177,7 +177,16 @@ The model and the rendered color have different color requirements:
 - The encoder conversion stage produces SDR YUV or Rec.2100 PQ and carries the validated HDR
   metadata. On the live native-encoder path, an authenticated FP16-to-HDR-P010 encode may use an
   optional MRT that writes the packed FP16 warp and its bit-equivalent P010 luma together; the
-  established chroma pass still samples that exact packed intermediate. Dump 3D, local RGB,
+  chroma pass reads that exact packed intermediate. Its left-sited 4:2:0 filter converts each of
+  six source texels into the target transfer/gamut before applying horizontal `[1,2,1]/4` and
+  vertical `[1,1]/2` weights. Hardware bilinear sampling of linear light before PQ/OETF would
+  change chroma at brightness and color edges. Every horizontal footprint clamps to its own eye,
+  and packed width is divisible by four so no chroma cell serves both eyes. This final pass is
+  always 1:1 with the packed intermediate; any source resizing already happened in the warp.
+  Ordinary unrotated 1:1 host video, including input to Client SBS, uses the same texel-conversion
+  filter with whole-texture clamping. Generic 2D scaling or Windows rotation retains its existing
+  sampled-source conversion; those paths are outside this exact-raster filtering contract.
+  Dump 3D, local RGB,
   offline conversion/evaluation, SDR, flat, and unavailable-MRT cases retain the canonical separate
   warp/Y/UV path. Host SBS does not independently reinterpret the stream's color metadata.
 
@@ -260,7 +269,7 @@ observation. No more than two accepted dirty holds, or `33 ms` of source observa
 last guaranteed observation, may pass before the next accepted root becomes due. If its current OCR
 input, interop, and captured child are ready it requests work `8`; otherwise work `16` publishes the
 current abstention without relabeling retained boxes. Missing or regressed observation time is due.
-This cadence is independent of the four-frame depth-owner bound below and requires no branch
+This cadence is independent of depth-owner reuse and requires no branch
 readback.
 
 During a native USER32 interactive move/size
@@ -598,11 +607,11 @@ invalid active geometry renders current color through flat identity.
 
 Color, raw depth, scene state, and parallax are bound to an exact completed source-frame identity.
 An unusable current field renders the current color flat. It may retain the small scene camera so a
-later usable frame resumes the same coordinate, but outside the bounded DDup proof below it never
+later usable frame resumes the same coordinate, but outside the exact DDup proof below it never
 pairs old per-pixel geometry with new color. A confirmed cut invalidates the old camera; the next
 usable field acquires the new one.
 
-Desktop Duplication has one explicit, bounded current-color reuse exception with two conservative
+Desktop Duplication has one explicit current-color reuse exception with two conservative
 proofs. For full-source V2, when its non-null desktop-content timestamp is unchanged, the source
 format/extent/transfer and complete live authority epoch still match, and an authenticated
 full-source completion for that content is cached, the host may skip a duplicate DAV2/OCR
@@ -624,7 +633,12 @@ updates into that acquisition's metadata. A half-open dirty rectangle intersecti
 or either the reconstructed source or destination of a move rectangle intersecting it, makes the
 proof dirty. Changes and moves wholly outside the ROI are irrelevant because that crop is already
 the complete authenticated analysis domain; damage never creates, chooses, resizes, or translates
-an ROI.
+an ROI. A separate rolling proof anchor advances only after a completely observed clean interval.
+It never changes the real inference's frame, content timestamp, damage token, or geometry owner.
+This retains one bounded anchor even when unrelated desktop updates outlive the damage-history
+ring. Each unchecked interval must still fit in retained history: an evicted range, missing metadata,
+regressed token, capture-epoch change, or dirty interval invalidates the proof until a new inference.
+Repeated delivery of the same proven immutable sequence is idempotent.
 
 Damage-guided reuse additionally requires the exact cached route placement, analysis generation,
 source signature and transfer domain, and complete foreground/browser authority epochs to match the
@@ -633,17 +647,28 @@ analysis history. A missing or out-of-order sequence, capture-epoch change, inco
 metadata, protected-content masking, WGC, dirty or move intersection, authority/placement/source/
 transfer mismatch, armed dump, reprocess transition, terminal producer failure, or incomplete V2
 authentication fails open to the ordinary matched submission path. Only a real successful enqueue
-establishes a new clean sequence baseline; a busy or rejected admission attempt does not clear
+establishes a new inference baseline; a busy or rejected admission attempt does not clear
 dirty or unknown history.
 
-Both proofs share one refresh bound: at most 16 skipped deliveries or 250 ms since the last real
-enqueue, whichever comes first. A reuse may poll the one matching pending inference or render an
+Neither exact proof expires because time passes or more unchanged deliveries arrive. Once a real
+inference establishes authenticated state, a continuously proven unchanged input requires no
+periodic model refresh. Source, transfer, route, placement, authority, dump/reprocess, and producer
+checks still apply on every delivery; the rolling ROI proof is discarded with its owning lineage
+or matched slot on those transitions. A reuse may poll the one matching pending inference or render an
 authenticated cached field against the current captured color, but it does not create a new depth
 observation, relabel the geometry completion, or advance normalization, scene-cut, camera, OCR, or
 SLR state. Any pending completion advances those states at most once under its original exact-frame
-identity. The forced refresh and every fail-open case return through the normal matched copy and
+identity. Every failed proof returns through the normal matched copy and
 enqueue gate rather than using an unbounded GPU wait. A newly accepted frame may still use the
-bounded same-frame completion query below.
+bounded same-frame completion query below. Current composited color is still warped on each reused
+delivery; the separate `250 ms` changing-source presentation fallback is unchanged.
+
+This metadata proof does not compare model pixels. If an application presents identical pixels as
+fresh dirty content, the ordinary GPU near-identical route can still compare against the last real
+inference under its unchanged similarity and authority checks. WGC supplies no DDup candidate
+authority. There is no separate exact-RGB model-output memoization branch
+in the host conditional graph. Visually paused content with capture noise or pixel changes is also
+outside the exact unchanged proof.
 
 That whole-depth exception is distinct from adaptive subtitle cadence. Exact DDup cache reuse
 submits no new root and creates no subtitle observation. Once an adaptive root is accepted, ordinary
@@ -653,10 +678,10 @@ private depth branch.
 A GPU-owned adaptive path runs for every Host SBS depth pipeline. Exact content-clock/ROI reuse
 stays higher priority. Every other authority-valid changed DDup frame with complete retained damage
 history may reach the device detector; the host does not classify motion by size or shape. A
-device-authenticated opaque follow-up may arbitrate again. Device history permits cumulative reuse
-against one actual infer owner through at most four frame steps and only while source observation
-age is strictly less than `100 ms`; either bound failing forces infer. Initial host-candidate and
-opaque-follow-up freshness use that same strict `100 ms` host-age ceiling.
+device-authenticated opaque follow-up may arbitrate again. Device history compares each candidate
+against the last actual infer owner without age or delivery-count expiry. Reuse never promotes a
+candidate into that history, so small pairwise changes cannot hide cumulative change. Missing,
+regressed, or mismatched ownership still forces infer.
 
 ### GPU-owned near-identical transaction
 
@@ -676,8 +701,8 @@ transfer domain, input region, root/region generations and browser epoch; comple
 history and strictly ordered endpoint tokens; no pending depth work; and no native interactive
 move/size. DDup supplies continuity and attribution only; neither accumulated area nor a single
 rectangle's shape decides similarity. Initial cadence is armed by a successful force-infer enqueue;
-a follow-up must be same-route, bound to the immediately prior opaque frame, and strictly less than
-`100 ms` old. Bottom OCR-crop damage is not admission authority: both a clean and dirty crop may
+a follow-up must be same-route, bound to the immediately prior opaque frame, and have nonregressed
+observation ordering. Bottom OCR-crop damage is not admission authority: both a clean and dirty crop may
 enter the GPU-undecided path.
 
 Every submitted root runs the authenticated fused producer in one full-grid dispatch, writing the
@@ -695,9 +720,9 @@ near-identical comparator, or comparison dispatch.
 The fused pass compares the current NCHW tensor against the GPU-owned state-1 model-input history.
 That history and its owner advance only on authenticated infer. The owner may predate the host's
 immediately preceding opaque baseline, but must authenticate the same
-analysis-domain tag and tensor dimensions, be no newer than that host baseline, be at most four
-frame steps older than current, and have a nonregressed source observation timestamp strictly less
-than `100 ms` old. Each `16x16` thread group reduces its admitted, medium-change, strong-change, and
+analysis-domain tag and tensor dimensions, be no newer than that host baseline, strictly precede
+current, and have a nonzero, nonregressed source observation timestamp. Elapsed time and delivery
+count alone do not invalidate this owner. Each `16x16` thread group reduces its admitted, medium-change, strong-change, and
 nonfinite counts in group-shared memory and writes one compact tile record; the comparison uses no
 global atomics. One 64-thread resolve reduces the tile records and rejects any supported tile whose
 strong-change ratio exceeds the local limit. For each admitted texel it reconstructs the maximum
@@ -830,8 +855,8 @@ current subtitle publication independent of that branch: work `8` is current OCR
 current abstention. The diagnostic GPU receipt trace authenticates the exact depth and subtitle
 dispositions without production readback. Suppression remains explicit no-observation.
 
-There is no GPU decision readback, staging map, adaptive evidence poll, CPU wait for the
-decision, or CPU branch knowledge. The CPU submits one transaction exactly as it submits ordinary
+Production admission and rendering perform no GPU decision readback, staging map, adaptive
+evidence poll, or CPU wait for the decision. The CPU submits one transaction exactly as it submits ordinary
 work and later observes only completion readiness. The completed transaction may render its exact
 current matched color using the GPU-produced geometry; a newer force-infer completion may supersede
 it before draw. Once rendered, those self-contained packed SBS pixels may enter a presentation-only
@@ -840,6 +865,19 @@ already-rendered image under the same source dimensions, transfer/analysis domai
 and existing `250 ms` changing-source bound. It cannot become latest authenticated depth-cache
 lineage, a DAV2 damage baseline, subtitle-observation authority, adaptive-submission authority, or a
 telemetry-sampled frame, and it never clears the opaque observation barrier.
+
+Redelivery of the exact same captured image is handled before changed-source arbitration. If an
+early completion poll has already authenticated that image on the current route, conversion renders
+that completion without submitting the same input again. After its first draw, the existing packed
+image can be redelivered when its producing frame ID and captured-source timestamp match the
+immediately preceding opaque anchor and every source/transfer/authority gate still holds. The anchor
+and observation barrier remain unchanged; neither completion readiness nor packed pixels reveal
+whether the device inferred or reused a different real inference owner. This creates no new depth,
+subtitle, cut, or camera observation and never promotes opaque geometry to host cache lineage.
+Capture/presentation identity is required, not merely the desktop-content timestamp: a cursor-only
+capture must still present its new composited color. Dump, reprocess, interactive move/size, route or
+transfer changes, missing identities, and producer failure reject this redelivery shortcut. A new
+captured source follows the ordinary unchanged-input or changed-source admission rules.
 
 Every successful GPU-undecided enqueue arms a frame-ID observation barrier. While it is armed, the
 host blocks exact and host-owned approximate depth-cache reuse and new CutBridge
@@ -855,12 +893,11 @@ of that direct or indirect dispatch followed by unbinding all six UAVs publishes
 the thread-zero tag store alone is not a same-dispatch publication boundary. `coordinate_main`
 remains diagnostic-only and cannot modify either. Any other infer clears the owner, so the next
 candidate force-infers; an authenticated reuse dispatches no map groups and leaves the older infer
-owner intact. The owner-age gate permits at most four
-frame steps only while its observation timestamp is strictly less than `100 ms` old. OCR requests
+owner intact. Cumulative comparison against that owner has no age or count expiry. OCR requests
 remain independent: ordinary reuse freezes the prior
 subtitle tuple, while due reuse publishes current OCR or abstention against retained Base.
 Genuinely changing sequences may continue through device-authenticated infer observations without a
-branch readback. Expiry,
+branch readback. Regressed ownership,
 route/proof failure, signature drift, or final attribution
 failure returns to a CPU-known force-infer transaction. A later authenticated current-route
 force-infer completion newer than the conditional watermark clears the barrier and may establish
@@ -895,15 +932,17 @@ identity, and observed status, then leaves Host SBS flat.
 The device-only malformed-SRV check remains nonblocking and fail-to-infer; authenticated diagnostic
 trace validation exposes it without adding a production branch or evidence readback.
 
-The detector deliberately prefers reuse within the stated depth bounds. A thin, small, localized,
-or sub-threshold semantic change can therefore use up to four deliveries of stale geometry, subject
-also to the strict `<100 ms` observation-age bound. The corpus did not justify the retired OCR-band,
+The detector deliberately prefers reuse within the stated similarity bounds. A thin, small,
+localized, or sub-threshold semantic change can retain the old geometry until cumulative change
+against the fixed real-inference input exceeds a threshold. Elapsed time alone does not force a
+refresh. The corpus did not justify the retired OCR-band,
 localized `2x4`, or SLR-state force-infer rules; subtitle correctness instead comes from the
 independent two-dirty-hold/`33 ms` due cadence. Exact-area WARP,
 compressed/grainy/ticker/rain footage, and live-XR visual acceptance remain required qualification.
-The branch-opaque barrier and device history owner bound accept at most four consecutive depth
-reuses with a valid owner younger than `100 ms`; the fifth frame step, age equality, or greater age
-forces infer, and no host cache can extend either bound.
+Long-lived reuse must preserve the same real-inference owner, complete comparison evidence, and
+the independent subtitle cadence. It does not promise semantic equivalence for every sub-threshold
+change. Sustained held-input, cumulative-drift, scene-cut, subtitle-transition, and live-XR checks
+qualify this policy; removal of a forced refresh is not by itself quality evidence.
 
 The live source signature, transfer domain, root/region generations, browser epoch, interactive
 state, DDup continuity, dump/reprocess state and producer health are observed independently of cache
@@ -923,6 +962,9 @@ SRV must be the same resource at admission; the dump stages and authenticates it
 `shadow_final_parallax.f32`. The verifier replays the ordinary limiter and, when active, SLR13
 directly into that field. The same final-field contract and native renderer are used by live Host
 SBS and the native sbs-bench whole-clip harness.
+
+The manual Dump 3D button works independently of performance diagnostics. File-trigger polling
+requires diagnostics to be enabled; a manual dump does not enable it.
 
 When diagnostics were enabled before reproduction, an optional GPU ring retains the last 300
 completed accepted roots. Diagnostics-off production does not compile the trace shader, allocate
@@ -1005,6 +1047,14 @@ query is busy, empty, invalid, or has an unknown identity, that conversion canno
 changed frame using stale proof; it keeps the pending owner or fails closed and retries admission on
 a later conversion. This query still exposes only joined-root readiness, never the GPU branch.
 
+When remote capture goes idle with conversion still pending, the encoder's image wait is capped
+at the requested frame interval (with a `1 ms` floor), or the configured idle heartbeat interval
+if that is shorter. The retained source is then reconverted on the same encoder owner to check
+completion. Once pending conversion is retired, the ordinary idle heartbeat resumes. This prevents
+a final update from waiting for the default one-fifth-rate heartbeat without spinning or encoding
+repeated frames faster than the requested cadence. Pipeline initialization readiness may bypass
+the wait entirely, but only after a real captured source has been retained.
+
 Diagnostics retain interval counts for repeated-wait hits at `<= 2 ms`, `(2, 2.5] ms`, and
 `(2.5, 3] ms`, plus the cadence-adaptive over-`3 ms` tail and explicit timeout count. The same line
 reports planned-budget average/maximum and splits hard-`8 ms`-cap timeouts from cadence-limited
@@ -1032,12 +1082,55 @@ copy plus owner publication up to `parallax_limits_start`; that added bandwidth 
 timer and is not a new counter or schema boundary. The cadence diagnostics report
 `roi_direct_inputs/dump_copies`; the first counts admitted direct ROI inputs, while the second can
 increase only for an explicit Dump 3D diagnostic reconstruction after live timing has closed.
-Throughput diagnostics also split CPU-known force-infer roots from GPU-undecided roots and report
+Throughput diagnostics report admission attempts per second over the same elapsed window as
+enqueues and completions. Attempts can include retained-source retries, so they are neither
+capture FPS nor actual model invocation rate. They also split CPU-known force-infer roots from GPU-undecided roots and report
 host-side optional OCR as *armed*. When diagnostics were enabled, the authenticated GPU trace is
 the exact source for the depth infer/reuse disposition and the independent subtitle result:
 optional OCR, abstention, held-with-depth, or suppression. It distinguishes ordinary infer-coupled
 work from due branch-independent work. Exact content/damage reuse counts remain host-side work-
 avoidance evidence.
+
+With `diagnostics = enabled`, that same authenticated trace pass also increments a separate small
+GPU buffer of cumulative infer, reuse, and invalid outcomes. The host reads these aggregate counters
+asynchronously and logs interval counts, cumulative counts, and `reuse / (infer + reuse)` as a
+percentage; invalid outcomes are reported separately. These results never
+authorize rendering, scheduling, or depth-cache ownership. A single in-flight staging copy and event
+query keep the readback bounded. Readiness checks use `DONOTFLUSH`, mapping uses `DO_NOT_WAIT`, and
+a busy readback is deferred without waiting or losing accumulated counts. Readback service is
+limited to once per second and reports accumulate for about five seconds. Existing owner-thread
+idle checks can finish a pending report without requesting another conversion; once drained, they
+stop sampling clocks and copying counters. Dump 3D's ring format is unchanged. With diagnostics
+disabled, the counter resources are not allocated and this collection
+path performs no clock reads, counter updates, queries, or readbacks.
+
+The host's CPU stage logs distinguish content age from time spent processing a frame. Content age
+begins at the captured pixels' presentation timestamp, so repeated output can be older even when
+its delivery is fast. Diagnostics report fresh and repeated output separately, along with capture
+handoff, conversion, NVENC encode/retrieve, encoded-packet queue residence, and packetization time.
+NVENC also reports input mapping, picture submission, completion wait, and bitstream lock/copy/
+unlock/unmap separately. CPU stage summaries use the existing twenty-second min/max/average logs.
+The completion wait includes any unfinished input-surface GPU work and the host thread's wakeup
+delay as well as encoding; it is not an isolated NVENC hardware timer. The current serial encoder
+owner completes one output before reusing its single input surface and bitstream buffer.
+These stages complement the existing depth/preprocess/postprocess/warp GPU timers and FEC/send
+timers; nested intervals must not be summed as independent work. The diagnostic metadata and
+loggers are activated only with diagnostics enabled and never alter source timestamps, RTP timing,
+frame pacing, or queue recovery. Missing timestamps or negative elapsed intervals omit a sample
+rather than inventing a zero-latency measurement.
+
+An accepted encode owns its mapped input until picture completion and a successful bitstream lock,
+unlock, and unmap. The streaming completion deadline remains `100 ms`; a timeout ends that encode
+attempt without releasing unfinished GPU resources. The complete failed session retires on a tracked
+teardown worker. It submits EOS, drains the outstanding picture, and waits for separate EOS
+completion before releasing buffers, registrations, events, the device, or the encoder DLL. Picture
+completion is latched so an already-consumed auto-reset event is not awaited again. This follows the
+[NVENC resource lifecycle](https://docs.nvidia.com/video-technologies/video-codec-sdk/13.1/nvenc-video-encoder-api-prog-guide/index.html).
+While failed cleanup retains resources, new encoder creation is blocked. Cleanup retries are bounded;
+if the driver does not recover, the owner remains retained without further driver calls until process
+exit. A restart is then required, and the existing shutdown watchdog bounds the final worker drain.
+The retry bound cannot bound an individual driver call. Successful streaming frames gain no extra
+wait, event query, clock read, or atomic counter operation from this failure handling.
 
 A known force-infer joined hit consumes that exact current frame once, invalidates the older singleton-
 resource attribution, and may render it in the current delivery instead of waiting for the next

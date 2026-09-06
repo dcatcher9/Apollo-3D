@@ -107,7 +107,7 @@ class RawModelProvenanceTests(unittest.TestCase):
             "guidance_preprocess_source_closure_sha256":
                 RawModelProvenanceTests.CALIBRATION.preprocess.source_closure_sha256,
             "engine_recipe": recipe,
-            "engine_artifact": f"{model}.{recipe}.fixture-onnx{onnx_sha256}.engine",
+            "engine_artifact": f"{model}.{recipe}.cache-{'a' * 64}.engine",
             "active_engine_manifest": f"{model}.active-engine.json",
         }
 

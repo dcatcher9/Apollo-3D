@@ -99,12 +99,10 @@ WORK_VALUES = {
 OPTIONAL_OCR_RECEIPT_MAGIC = 0x52434F4F
 PARALLAX_CONTAINER = np.float32(0.04)
 MAX_TRACE_FRAMES = 300
-MAX_REUSE_OWNER_AGE = 4
-MAX_REUSE_OWNER_OBSERVATION_AGE_US = 100_000
 UINT64_MAX = (1 << 64) - 1
 OCR_MAX_OBSERVATION_AGE_US = 33_000
 OCR_MAX_DIRTY_HOLDS = 2
-ADAPTIVE_REQUEST_POLICY_SCHEMA = 2
+ADAPTIVE_REQUEST_POLICY_SCHEMA = 3
 FRAME_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp"}
 OBSERVATION_TIMELINE_MAGIC = b"SBSOTL1\0"
 OBSERVATION_TIMELINE_SCHEMA = 1
@@ -1037,7 +1035,6 @@ def _authenticated_reuse_owner_ages(records: list[dict]) -> dict[int, int]:
     The owner is the most recent authenticated infer-authorized completion in the current input
     domain.  It is deliberately not the host request's baseline delta.
     """
-    max_age = MAX_REUSE_OWNER_AGE
     most_recent_infer_frame_id = None
     most_recent_infer_timestamp_us = None
     result = {}
@@ -1057,14 +1054,15 @@ def _authenticated_reuse_owner_ages(records: list[dict]) -> dict[int, int]:
                     most_recent_infer_timestamp_us is None):
                 raise EvidenceError("reuse has no authenticated infer history owner")
             owner_age = frame_id - most_recent_infer_frame_id
-            if not 1 <= owner_age <= max_age:
+            if owner_age < 1:
                 raise EvidenceError(
                     "reuse has invalid authenticated GPU history-owner age")
             observation_age = (
                 record["observation_timestamp_us"] - most_recent_infer_timestamp_us)
-            if not 0 <= observation_age < MAX_REUSE_OWNER_OBSERVATION_AGE_US:
+            if (most_recent_infer_timestamp_us <= 0 or
+                    record["observation_timestamp_us"] <= 0 or observation_age < 0):
                 raise EvidenceError(
-                    "reuse exceeds the strict authenticated GPU history-owner time bound")
+                    "reuse has invalid authenticated GPU history-owner time ordering")
             result[frame_id] = owner_age
         else:
             raise EvidenceError("cannot derive owner age for invalid depth disposition")
@@ -1355,7 +1353,7 @@ th,td{border:1px solid #bbb;padding:.4rem;text-align:left}code{white-space:pre-w
 </style>
 <h1>Host SBS adaptive replay A/B</h1>
 <p><b>Verdict:</b> %s</p>
-<p>Every accepted depth reuse is bound to the four-frame/strict-100-ms GPU owner policy.
+<p>Every accepted depth reuse compares against the fixed last real-inference input, without age or count expiry.
 Ordinary reuse holds the atomic subtitle/final tuple exactly; cadence-due OCR may independently
 publish a current subtitle tuple over the retained depth. The complete atomic final field is
 sampled directly by the production renderer.

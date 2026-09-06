@@ -658,23 +658,17 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
     estimator.find("constants_desc.ByteWidth = static_cast<UINT>(sizeof(near_identical_constants_t))"),
     std::string::npos
   );
-  EXPECT_NE(shader.find("#define NEAR_IDENTICAL_MAX_INFER_OWNER_AGE 4u"),
+  EXPECT_EQ(shader.find("NEAR_IDENTICAL_MAX_INFER_OWNER_AGE"), std::string::npos);
+  EXPECT_EQ(shader.find("NEAR_IDENTICAL_MAX_INFER_OWNER_OBSERVATION_AGE_US"),
             std::string::npos);
-  EXPECT_NE(
-    shader.find("#define NEAR_IDENTICAL_MAX_INFER_OWNER_OBSERVATION_AGE_US 100000u"),
-    std::string::npos
-  );
   EXPECT_NE(history_owner_contract.find("#define NEAR_IDENTICAL_HISTORY_OWNER_SCHEMA 2u"),
             std::string::npos);
   EXPECT_NE(shader.find("owner_at_or_before_host_baseline"), std::string::npos);
-  EXPECT_NE(shader.find("low_delta <= NEAR_IDENTICAL_MAX_INFER_OWNER_AGE"),
+  EXPECT_NE(shader.find("owner_precedes_current"),
             std::string::npos);
-  EXPECT_NE(
-    shader.find(
-      "observation_delta_low < NEAR_IDENTICAL_MAX_INFER_OWNER_OBSERVATION_AGE_US"
-    ),
-    std::string::npos
-  );
+  EXPECT_NE(shader.find("owner_order_valid && observation_order_valid"),
+            std::string::npos);
+  EXPECT_NE(shader.find("observation_not_regressed"), std::string::npos);
   EXPECT_NE(shader.find("near_identical_observation_timestamp_low"), std::string::npos);
   EXPECT_NE(shader.find("near_identical_observation_timestamp_high"), std::string::npos);
   EXPECT_NE(
@@ -1460,7 +1454,9 @@ namespace {
       const std::uint64_t owner_timestamp_us = owner_observation_timestamp_us,
       const std::uint64_t current_timestamp_us = current_observation_timestamp_us,
       const std::array<float, 4> &minmax_ema = valid_minmax_ema,
-      const bool publish_owner = true
+      const bool publish_owner = true,
+      const std::uint64_t candidate_frame_id = current_frame_id,
+      const std::uint64_t host_baseline_frame_id = baseline_frame_id
     ) {
       if (current.size() != 3u * field_texels || previous.size() != current.size()) {
         error = "invalid model input size";
@@ -1496,8 +1492,8 @@ namespace {
         1u,
         tile_group_width,
         tile_group_height,
-        current_frame_id,
-        baseline_frame_id,
+        candidate_frame_id,
+        host_baseline_frame_id,
         request_token,
         current_timestamp_us,
         0u,
@@ -2841,7 +2837,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, OptionalPreprocessRequiresAuthenticate
   EXPECT_EQ(receipt.reserved, 0u);
 }
 
-TEST(HostSbsNearIdenticalDetectorGpuTest, InferOwnerRequiresN4AndSub100msObservationAge) {
+TEST(HostSbsNearIdenticalDetectorGpuTest, InferOwnerHasNoAgeOrCountExpiryButRejectsInvalidOrder) {
   near_identical_gpu_fixture_t fixture;
   std::string error;
   const auto initialized = initialize_fixture(fixture, error);
@@ -2853,8 +2849,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, InferOwnerRequiresN4AndSub100msObserva
   const auto input = uniform_model_input();
   decision_words_t decision {};
 
-  // The retained infer owner remains authoritative at exactly four source frames when its
-  // observation is still strictly younger than 100 ms.
+  // A valid fixed inference owner does not expire as more source frames or time pass.
   ASSERT_TRUE(fixture.run_detector(
     input,
     input,
@@ -2880,7 +2875,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, InferOwnerRequiresN4AndSub100msObserva
     0u
   );
 
-  // A fifth frame is outside the retained-owner proof even when its timestamp is young.
+  // Crossing the former frame-count limit retains the same owner.
   ASSERT_TRUE(fixture.run_detector(
     input,
     input,
@@ -2895,10 +2890,10 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, InferOwnerRequiresN4AndSub100msObserva
   )) << error;
   EXPECT_EQ(
     decision[word(models::near_identical_gpu_decision_word_e::decision)],
-    static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::infer)
+    static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::reuse)
   );
 
-  // The time bound is strict: exactly 100 ms is stale even at a one-frame owner age.
+  // Equality with the former time limit is also valid.
   ASSERT_TRUE(fixture.run_detector(
     input,
     input,
@@ -2913,8 +2908,27 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, InferOwnerRequiresN4AndSub100msObserva
   )) << error;
   EXPECT_EQ(
     decision[word(models::near_identical_gpu_decision_word_e::decision)],
-    static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::infer)
+    static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::reuse)
   );
+
+  // Exercise high-word frame and timestamp distances; no narrowing delta may expire the owner.
+  ASSERT_TRUE(fixture.run_detector(
+    input, input, history_state(1u), decision, error, reduction_group_count, 0u,
+    1u, owner_observation_timestamp_us,
+    owner_observation_timestamp_us + (std::uint64_t {1} << 32u) + 17u
+  )) << error;
+  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::decision)],
+            static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::reuse));
+
+  // An owner at/after the current frame is never a valid comparison baseline.
+  for (const auto invalid_owner : {std::uint64_t {0u}, current_frame_id, current_frame_id + 1u}) {
+    ASSERT_TRUE(fixture.run_detector(
+      input, input, history_state(1u), decision, error, reduction_group_count, 0u,
+      invalid_owner, owner_observation_timestamp_us, current_observation_timestamp_us
+    )) << error;
+    EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::decision)],
+              static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::infer));
+  }
 
   // Missing or regressed observation clocks cannot authenticate an otherwise matching owner.
   ASSERT_TRUE(fixture.run_detector(
@@ -2949,6 +2963,42 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, InferOwnerRequiresN4AndSub100msObserva
     decision[word(models::near_identical_gpu_decision_word_e::decision)],
     static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::infer)
   );
+}
+
+TEST(HostSbsNearIdenticalDetectorGpuTest, LongReuseChainComparesAgainstUnchangedRealInferenceOwner) {
+  near_identical_gpu_fixture_t fixture;
+  std::string error;
+  const auto initialized = initialize_fixture(fixture, error);
+  if (initialized == near_identical_gpu_fixture_t::initialize_result_e::d3d_unavailable) {
+    GTEST_SKIP() << error;
+  }
+  ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
+  const auto owner = uniform_model_input(0.5f);
+  const auto near_input = uniform_model_input(0.505f);
+  decision_words_t decision {};
+  ASSERT_TRUE(fixture.run_detector(owner, owner, history_state(1u), decision, error)) << error;
+  for (std::uint64_t step = 1u; step <= 64u; ++step) {
+    SCOPED_TRACE(step);
+    ASSERT_TRUE(fixture.run_detector(
+      near_input, owner, history_state(1u), decision, error, reduction_group_count, 0u,
+      baseline_frame_id, owner_observation_timestamp_us,
+      owner_observation_timestamp_us + step * 30'000u, valid_minmax_ema, false,
+      baseline_frame_id + step, baseline_frame_id + step - 1u
+    )) << error;
+    ASSERT_EQ(decision[word(models::near_identical_gpu_decision_word_e::decision)],
+              static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::reuse));
+  }
+  // This increment is near the last candidate, but exceeds the unchanged model owner's limit.
+  // Reuse must not slide the baseline from 0.5 to 0.505 and hide cumulative drift.
+  const auto changed = uniform_model_input(0.52f);
+  ASSERT_TRUE(fixture.run_detector(
+    changed, owner, history_state(1u), decision, error, reduction_group_count, 0u,
+    baseline_frame_id, owner_observation_timestamp_us,
+    owner_observation_timestamp_us + 65u * 30'000u, valid_minmax_ema, false,
+    baseline_frame_id + 65u, baseline_frame_id + 64u
+  )) << error;
+  EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::decision)],
+            static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::infer));
 }
 
 TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapAdvancesCompleteTupleAndOwnerForStatesOneAndThree) {

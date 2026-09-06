@@ -138,6 +138,15 @@ namespace nvenc {
       return false;
     }
 
+    /** Teardown-only EOS event, distinct from the auto-reset picture-completion event. */
+    virtual void *create_flush_event() {
+      return nullptr;
+    }
+
+    virtual bool wait_for_flush_event(uint32_t timeout_ms) {
+      return false;
+    }
+
     /**
      * @brief Close the platform-owned async event and clear `async_event_handle`.
      *        Derived classes that install an async event must implement this operation and call it
@@ -179,6 +188,41 @@ namespace nvenc {
 
   private:
     NV_ENC_OUTPUT_PTR output_bitstream = nullptr;
+    bool async_event_registered = false;
+    void *flush_event_handle = nullptr;
+    bool flush_event_registered = false;
+    bool flush_submitted = false;
+    bool flush_completed = false;
+    bool encoder_used = false;
+    bool cleanup_blocked = false;
+    NV_ENC_INPUT_PTR mapped_input = nullptr;
+    enum class input_phase_t {
+      unmapped,
+      mapped,
+      submitted,
+      completion_seen,
+      locked
+    };
+    input_phase_t input_phase = input_phase_t::unmapped;
+
+    void block_new_encoders();
+    bool cleanup_succeeded(NVENCSTATUS status, const char *operation);
+    bool release_completed_input();
+    bool submit_flush();
+    bool drain_input();
+    bool release_encoder_resources();
+
+    struct stage_diagnostics_t {
+      logging::time_delta_periodic_logger input_map {info, "Video NVENC: input map CPU"};
+      logging::time_delta_periodic_logger submit {info, "Video NVENC: picture submission CPU"};
+      logging::time_delta_periodic_logger completion_wait {info, "Video NVENC: asynchronous completion wait"};
+      logging::time_delta_periodic_logger bitstream_lock {info, "Video NVENC: bitstream lock CPU"};
+      logging::time_delta_periodic_logger bitstream_copy {info, "Video NVENC: bitstream copy CPU"};
+      logging::time_delta_periodic_logger bitstream_unlock {info, "Video NVENC: bitstream unlock CPU"};
+      logging::time_delta_periodic_logger input_unmap {info, "Video NVENC: input unmap CPU"};
+    };
+
+    std::optional<stage_diagnostics_t> stage_diagnostics;
 
     struct {
       uint64_t last_encoded_frame_index = 0;

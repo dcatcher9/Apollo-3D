@@ -26,11 +26,11 @@ using namespace std::chrono_literals;
 
 static_assert(stream::CONTROL_OUTGOING_MAX_WAIT <= 10ms);
 
-TEST(SbsDebugDumpRequestTest, RequiresDiagnosticsAndRuntimeHostSbsOwnership) {
-  EXPECT_TRUE(stream::sbs_debug_dump_request_allowed(true, video::SBS_AI, true));
-  EXPECT_FALSE(stream::sbs_debug_dump_request_allowed(false, video::SBS_AI, true));
-  EXPECT_FALSE(stream::sbs_debug_dump_request_allowed(true, video::SBS_OFF, true));
-  EXPECT_FALSE(stream::sbs_debug_dump_request_allowed(true, video::SBS_AI, false));
+TEST(SbsDebugDumpRequestTest, RequiresRuntimeHostSbsOwnershipAndSessionLatch) {
+  EXPECT_TRUE(stream::sbs_debug_dump_request_allowed(video::SBS_AI, true));
+  EXPECT_FALSE(stream::sbs_debug_dump_request_allowed(video::SBS_OFF, true));
+  EXPECT_FALSE(stream::sbs_debug_dump_request_allowed(video::SBS_AI, false));
+  EXPECT_FALSE(stream::sbs_debug_dump_request_allowed(-1, true));
 }
 
 TEST(PlatformLaunchGuardTest, SerializesConcurrentLaunchPreparation) {

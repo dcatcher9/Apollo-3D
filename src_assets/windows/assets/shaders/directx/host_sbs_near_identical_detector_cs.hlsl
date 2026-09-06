@@ -62,8 +62,6 @@ cbuffer NearIdenticalGeometryConstants : register(b3) {
 #define NEAR_IDENTICAL_REDUCE_ELEMENTS_PER_GROUP 256u
 #define NEAR_IDENTICAL_RESOLVE_FLAG_MALFORMED (1u << 0u)
 #define NEAR_IDENTICAL_RESOLVE_FLAG_LOCAL_VETO (1u << 1u)
-#define NEAR_IDENTICAL_MAX_INFER_OWNER_AGE 4u
-#define NEAR_IDENTICAL_MAX_INFER_OWNER_OBSERVATION_AGE_US 100000u
 
 #define NEAR_IDENTICAL_DECISION_REUSE 0u
 #define NEAR_IDENTICAL_DECISION_INFER 1u
@@ -127,16 +125,15 @@ bool NearIdenticalHistoryOwnerMatchesRequest() {
         (owner_frame_high == near_identical_baseline_frame_high &&
          owner_frame_low <= near_identical_baseline_frame_low);
     // PreviousModelInput and this owner advance only on an authenticated infer. The host baseline
-    // names the immediately preceding opaque root, so allow the GPU-owned infer owner to be older
-    // while the cumulative current-vs-owner comparison is still bounded to four frame steps and
-    // strictly less than 100 ms of source observation time.
-    uint low_delta = near_identical_current_frame_low - owner_frame_low;
-    uint borrow = near_identical_current_frame_low < owner_frame_low ? 1u : 0u;
-    uint high_delta = near_identical_current_frame_high - owner_frame_high - borrow;
-    bool owner_age_valid =
+    // names the immediately preceding opaque root. Every candidate still compares cumulatively
+    // against the same actual infer; elapsed time and frame count never slide or expire that owner.
+    bool owner_precedes_current =
+        owner_frame_high < near_identical_current_frame_high ||
+        (owner_frame_high == near_identical_current_frame_high &&
+         owner_frame_low < near_identical_current_frame_low);
+    bool owner_order_valid =
         (owner_frame_low != 0u || owner_frame_high != 0u) &&
-        owner_at_or_before_host_baseline && high_delta == 0u && low_delta > 0u &&
-        low_delta <= NEAR_IDENTICAL_MAX_INFER_OWNER_AGE;
+        owner_at_or_before_host_baseline && owner_precedes_current;
     uint owner_timestamp_low = NearIdenticalHistoryOwner[
         NEAR_IDENTICAL_HISTORY_WORD_OBSERVATION_TIMESTAMP_LOW];
     uint owner_timestamp_high = NearIdenticalHistoryOwner[
@@ -145,24 +142,17 @@ bool NearIdenticalHistoryOwnerMatchesRequest() {
         near_identical_observation_timestamp_high > owner_timestamp_high ||
         (near_identical_observation_timestamp_high == owner_timestamp_high &&
          near_identical_observation_timestamp_low >= owner_timestamp_low);
-    uint observation_borrow =
-        near_identical_observation_timestamp_low < owner_timestamp_low ? 1u : 0u;
-    uint observation_delta_low =
-        near_identical_observation_timestamp_low - owner_timestamp_low;
-    uint observation_delta_high =
-        near_identical_observation_timestamp_high - owner_timestamp_high - observation_borrow;
-    bool observation_age_valid =
+    bool observation_order_valid =
         (owner_timestamp_low != 0u || owner_timestamp_high != 0u) &&
         (near_identical_observation_timestamp_low != 0u ||
          near_identical_observation_timestamp_high != 0u) &&
-        observation_not_regressed && observation_delta_high == 0u &&
-        observation_delta_low < NEAR_IDENTICAL_MAX_INFER_OWNER_OBSERVATION_AGE_US;
+        observation_not_regressed;
     return
         NearIdenticalHistoryOwner[NEAR_IDENTICAL_HISTORY_WORD_CONTRACT_TAG] ==
             NEAR_IDENTICAL_HISTORY_OWNER_TAG &&
         NearIdenticalHistoryOwner[NEAR_IDENTICAL_HISTORY_WORD_CONTRACT_SCHEMA] ==
             NEAR_IDENTICAL_HISTORY_OWNER_SCHEMA &&
-        owner_age_valid && observation_age_valid &&
+        owner_order_valid && observation_order_valid &&
         NearIdenticalHistoryOwner[NEAR_IDENTICAL_HISTORY_WORD_DOMAIN_TAG_LOW] ==
             near_identical_domain_tag_low &&
         NearIdenticalHistoryOwner[NEAR_IDENTICAL_HISTORY_WORD_DOMAIN_TAG_HIGH] ==

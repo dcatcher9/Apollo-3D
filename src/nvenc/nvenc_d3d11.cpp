@@ -86,9 +86,21 @@ namespace nvenc {
     return WaitForSingleObject(async_event_handle, timeout_ms) == WAIT_OBJECT_0;
   }
 
+  void *nvenc_d3d11::create_flush_event() {
+    if (!owned_flush_event) {
+      owned_flush_event.reset(CreateEvent(nullptr, FALSE, FALSE, nullptr));
+    }
+    return owned_flush_event.get();
+  }
+
+  bool nvenc_d3d11::wait_for_flush_event(uint32_t timeout_ms) {
+    return WaitForSingleObject(owned_flush_event.get(), timeout_ms) == WAIT_OBJECT_0;
+  }
+
   void nvenc_d3d11::release_async_event() {
     async_event_handle = nullptr;
     owned_async_event.reset();
+    owned_flush_event.reset();
   }
 
 }  // namespace nvenc

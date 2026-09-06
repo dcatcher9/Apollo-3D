@@ -1072,8 +1072,7 @@ class EvalContractTests(unittest.TestCase):
                 "guidance_preprocess_source_closure_sha256": "p" * 64,
             }
             engine_name = (
-                f"{spec['model']}.{spec['engine_recipe']}.trt-test"
-                f"-onnx{spec['onnx_sha256']}.engine"
+                f"{spec['model']}.{spec['engine_recipe']}.cache-{'a' * 64}.engine"
             )
             engine = os.path.join(assets, engine_name)
             with open(engine, "wb") as fh:
@@ -1128,6 +1127,20 @@ class EvalContractTests(unittest.TestCase):
                 issues = run_eval.check_engines(build, model)
             self.assertTrue(any("engine artifact" in issue for issue in issues))
 
+    def test_composite_cache_filename_grammar_retains_historical_controls(self):
+        spec = {"model": "depth", "engine_recipe": "recipe", "onnx_sha256": "a" * 64}
+        current = "depth.recipe.cache-" + "b" * 64 + ".engine"
+        legacy = "depth.recipe.trt11_2_1_2-sm120-gpu0123456789abcdef-onnx" + "a" * 64 + ".engine"
+        self.assertTrue(run_eval._composite_engine_filename_matches(current, spec))
+        self.assertTrue(run_eval._composite_engine_filename_matches(legacy, spec))
+        for bad in (current.replace("b" * 64, "b" * 63), current + ".part",
+                    current.replace("b" * 64, "g" * 64), "../" + current,
+                    "..\\" + current, current.replace("recipe", "other"),
+                    legacy.replace("-onnx" + "a" * 64, "-onnx" + "c" * 64),
+                    legacy.replace("gpu0123456789abcdef", "gpuunknown")):
+            with self.subTest(filename=bad):
+                self.assertFalse(run_eval._composite_engine_filename_matches(bad, spec))
+
     def test_present_composite_fails_closed_on_onnx_or_manifest_mismatch(self):
         with tempfile.TemporaryDirectory() as build:
             assets = os.path.join(build, "assets")
@@ -1172,7 +1185,7 @@ class EvalContractTests(unittest.TestCase):
             exact_spec = dict(
                 mismatched_spec, onnx_sha256=run_eval.file_sha256(fused_onnx))
             composite_engine_name = (
-                f"{exact_spec['model']}.{exact_spec['engine_recipe']}.trt-test"
+                f"{exact_spec['model']}.{exact_spec['engine_recipe']}.trt11_2_1_2-sm120-gpu1234"
                 f"-onnx{exact_spec['onnx_sha256']}.engine"
             )
             composite_engine = os.path.join(assets, composite_engine_name)

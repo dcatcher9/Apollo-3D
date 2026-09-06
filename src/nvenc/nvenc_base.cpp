@@ -10,7 +10,10 @@
 #include <array>
 #include <atomic>
 #include <format>
+#include <future>
+#include <mutex>
 #include <string_view>
+#include <thread>
 
 // local includes
 #include "src/logging.h"
@@ -31,6 +34,20 @@ namespace {
 
   std::array<std::atomic<int>, 3> observed_codec_max_widths {};
   std::array<std::atomic<int>, 3> observed_codec_max_heights {};
+  // Only cold creation and failed teardown use these. A failed picture never permits a
+  // reconnect loop to accumulate new GPU owners while the original resources are retained.
+  std::mutex encoder_creation_mutex;
+  std::atomic<unsigned> blocked_encoder_cleanups {0};
+
+  [[noreturn]] void retain_failed_encoder_until_exit() {
+    BOOST_LOG(error) << "NvEnc: bounded cleanup retries exhausted; retaining the failed session "
+                        "without further driver calls. Restart the host to recover.";
+    // No API cancellation proves that the driver released this memory. Keep the full owning
+    // destructor on its tracked worker; shutdown's watchdog terminates a permanently stuck host.
+    std::promise<void> retained_owner;
+    retained_owner.get_future().wait();
+    std::terminate();
+  }
 
   struct quality_preset_t {
     const GUID *guid;
@@ -138,7 +155,8 @@ namespace nvenc {
   }
 
   nvenc_base::nvenc_base(NV_ENC_DEVICE_TYPE device_type):
-      device_type(device_type) {
+      device_type(device_type),
+      stage_diagnostics(video::detail::make_diagnostic_state<stage_diagnostics_t>(config::sunshine.diagnostics_enabled)) {
   }
 
   nvenc_base::~nvenc_base() {
@@ -161,6 +179,18 @@ namespace nvenc {
     NV_ENC_BUFFER_FORMAT buffer_format,
     const std::optional<SS_HDR_METADATA> &hdr_metadata
   ) {
+    if (cleanup_blocked || blocked_encoder_cleanups.load(std::memory_order_acquire)) {
+      BOOST_LOG(error) << "NvEnc: encoder cleanup is still pending; refusing a replacement session";
+      return false;
+    }
+    std::unique_lock creation_lock(encoder_creation_mutex, std::try_to_lock);
+    if (!creation_lock.owns_lock()) {
+      BOOST_LOG(error) << "NvEnc: another encoder initialization is in progress";
+      return false;
+    }
+    if (blocked_encoder_cleanups.load(std::memory_order_acquire)) {
+      return false;
+    }
     if (!nvenc && !init_library()) {
       return false;
     }
@@ -169,7 +199,9 @@ namespace nvenc {
       destroy_encoder();
     }
     auto fail_guard = util::fail_guard([this] {
-      destroy_encoder();
+      // Initialization submitted no pictures. Try cleanup once; failed handles remain owned
+      // for the caller's tracked teardown rather than parking the startup/capture thread here.
+      (void) release_encoder_resources();
     });
 
     encoder_params.width = client_config.width;
@@ -483,6 +515,7 @@ namespace nvenc {
         BOOST_LOG(error) << "NvEnc: NvEncRegisterAsyncEvent() failed: " << last_nvenc_error_string;
         return false;
       }
+      async_event_registered = true;
     }
 
     NV_ENC_CREATE_BITSTREAM_BUFFER create_bitstream_buffer = {NV_ENC_CREATE_BITSTREAM_BUFFER_VER};
@@ -546,33 +579,173 @@ namespace nvenc {
     // installs a pointer to its own candidate copy for the duration of the driver call.
     encoder_state.initialize_params.encodeConfig = nullptr;
     encoder_state.encode_config = enc_config;
+    // A previously admitted encoder can fail while this cold driver initialization runs.
+    // Do not publish another usable session after that failure closes admission.
+    if (blocked_encoder_cleanups.load(std::memory_order_acquire)) {
+      return false;
+    }
     fail_guard.disable();
     return true;
   }
 
+  void nvenc_base::block_new_encoders() {
+    if (!cleanup_blocked) {
+      cleanup_blocked = true;
+      blocked_encoder_cleanups.fetch_add(1, std::memory_order_acq_rel);
+      BOOST_LOG(error) << "NvEnc: retaining unfinished encoder resources until safe teardown; "
+                          "new encoders are blocked. Restart the host if the driver does not recover.";
+    }
+  }
+
+  bool nvenc_base::cleanup_succeeded(NVENCSTATUS status, const char *operation) {
+    if (status == NV_ENC_SUCCESS) {
+      return true;
+    }
+    if (!cleanup_blocked) {
+      nvenc_failed(status);
+      BOOST_LOG(error) << "NvEnc: " << operation << " failed: " << last_nvenc_error_string;
+    }
+    block_new_encoders();
+    return false;
+  }
+
+  bool nvenc_base::release_completed_input() {
+    if (input_phase == input_phase_t::locked) {
+      if (stage_diagnostics) {
+        stage_diagnostics->bitstream_unlock.first_point_now();
+      }
+      const auto status = nvenc->nvEncUnlockBitstream(encoder, output_bitstream);
+      if (status == NV_ENC_SUCCESS) {
+        input_phase = input_phase_t::mapped;
+      }
+      if (stage_diagnostics) {
+        stage_diagnostics->bitstream_unlock.second_point_now_and_log();
+      }
+      if (!cleanup_succeeded(status, "NvEncUnlockBitstream()")) {
+        return false;
+      }
+    }
+    if (input_phase == input_phase_t::mapped) {
+      if (stage_diagnostics) {
+        stage_diagnostics->input_unmap.first_point_now();
+      }
+      const auto status = nvenc->nvEncUnmapInputResource(encoder, mapped_input);
+      if (status == NV_ENC_SUCCESS) {
+        mapped_input = nullptr;
+        input_phase = input_phase_t::unmapped;
+      }
+      if (stage_diagnostics) {
+        stage_diagnostics->input_unmap.second_point_now_and_log();
+      }
+      if (!cleanup_succeeded(status, "NvEncUnmapInputResource()")) {
+        return false;
+      }
+    }
+    return input_phase == input_phase_t::unmapped;
+  }
+
+  bool nvenc_base::submit_flush() {
+    if (!encoder_used || flush_submitted) {
+      return true;
+    }
+    if (async_event_handle && !flush_event_registered) {
+      flush_event_handle = create_flush_event();
+      if (!flush_event_handle) {
+        return false;
+      }
+      NV_ENC_EVENT_PARAMS event {NV_ENC_EVENT_PARAMS_VER};
+      event.completionEvent = flush_event_handle;
+      if (!cleanup_succeeded(nvenc->nvEncRegisterAsyncEvent(encoder, &event), "flush event registration")) {
+        return false;
+      }
+      flush_event_registered = true;
+    }
+    NV_ENC_PIC_PARAMS eos {NV_ENC_PIC_PARAMS_VER};
+    eos.encodePicFlags = NV_ENC_PIC_FLAG_EOS;
+    eos.completionEvent = flush_event_handle;
+    if (!cleanup_succeeded(nvenc->nvEncEncodePicture(encoder, &eos), "EOS submission")) {
+      return false;
+    }
+    flush_submitted = true;
+    flush_completed = !async_event_handle;
+    return true;
+  }
+
+  bool nvenc_base::drain_input() {
+    if (input_phase == input_phase_t::submitted) {
+      if (async_event_handle && !wait_for_async_event(100)) {
+        return false;
+      }
+      input_phase = input_phase_t::completion_seen;
+    }
+    if (input_phase == input_phase_t::completion_seen) {
+      NV_ENC_LOCK_BITSTREAM bitstream {NV_ENC_LOCK_BITSTREAM_VER};
+      bitstream.outputBitstream = output_bitstream;
+      bitstream.doNotWait = 1;
+      if (!cleanup_succeeded(nvenc->nvEncLockBitstream(encoder, &bitstream), "teardown bitstream lock")) {
+        return false;
+      }
+      // Teardown discards this failed frame; a successful lock is still required before unmap.
+      input_phase = input_phase_t::locked;
+    }
+    return release_completed_input();
+  }
+
   void nvenc_base::destroy_encoder() {
+    // Native destruction keeps its texture/device, DLL and both events alive while this runs.
+    // Production submitted sessions retire on a tracked teardown worker, including probes.
+    // A permanently stuck driver retains that owner; process shutdown has its existing watchdog.
+    const auto retry = [this](auto &&operation) {
+      for (unsigned attempts = 0; !operation(); ++attempts) {
+        block_new_encoders();
+        if (attempts == 49) {
+          retain_failed_encoder_until_exit();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+    };
+    retry([&] {
+      return !encoder || (submit_flush() && drain_input() &&
+                          (!encoder_used || flush_completed ||
+                           (flush_completed = wait_for_flush_event(100))));
+    });
+    retry([&] {
+      return release_encoder_resources();
+    });
+  }
+
+  bool nvenc_base::release_encoder_resources() {
     if (output_bitstream) {
-      if (nvenc_failed(nvenc->nvEncDestroyBitstreamBuffer(encoder, output_bitstream))) {
-        BOOST_LOG(error) << "NvEnc: NvEncDestroyBitstreamBuffer() failed: " << last_nvenc_error_string;
+      if (!cleanup_succeeded(nvenc->nvEncDestroyBitstreamBuffer(encoder, output_bitstream), "NvEncDestroyBitstreamBuffer()")) {
+        return false;
       }
       output_bitstream = nullptr;
     }
-    if (encoder && async_event_handle) {
+    if (flush_event_registered) {
+      NV_ENC_EVENT_PARAMS event {NV_ENC_EVENT_PARAMS_VER};
+      event.completionEvent = flush_event_handle;
+      if (!cleanup_succeeded(nvenc->nvEncUnregisterAsyncEvent(encoder, &event), "flush event unregistration")) {
+        return false;
+      }
+      flush_event_registered = false;
+    }
+    if (async_event_registered) {
       NV_ENC_EVENT_PARAMS event_params = {NV_ENC_EVENT_PARAMS_VER};
       event_params.completionEvent = async_event_handle;
-      if (nvenc_failed(nvenc->nvEncUnregisterAsyncEvent(encoder, &event_params))) {
-        BOOST_LOG(error) << "NvEnc: NvEncUnregisterAsyncEvent() failed: " << last_nvenc_error_string;
+      if (!cleanup_succeeded(nvenc->nvEncUnregisterAsyncEvent(encoder, &event_params), "NvEncUnregisterAsyncEvent()")) {
+        return false;
       }
+      async_event_registered = false;
     }
     if (registered_input_buffer) {
-      if (nvenc_failed(nvenc->nvEncUnregisterResource(encoder, registered_input_buffer))) {
-        BOOST_LOG(error) << "NvEnc: NvEncUnregisterResource() failed: " << last_nvenc_error_string;
+      if (!cleanup_succeeded(nvenc->nvEncUnregisterResource(encoder, registered_input_buffer), "NvEncUnregisterResource()")) {
+        return false;
       }
       registered_input_buffer = nullptr;
     }
     if (encoder) {
-      if (nvenc_failed(nvenc->nvEncDestroyEncoder(encoder))) {
-        BOOST_LOG(error) << "NvEnc: NvEncDestroyEncoder() failed: " << last_nvenc_error_string;
+      if (!cleanup_succeeded(nvenc->nvEncDestroyEncoder(encoder), "NvEncDestroyEncoder()")) {
+        return false;
       }
       encoder = nullptr;
     }
@@ -580,6 +753,15 @@ namespace nvenc {
     encoder_state = {};
     encoder_params = {};
     hdr_metadata = {};
+    flush_event_handle = nullptr;
+    flush_submitted = false;
+    flush_completed = false;
+    encoder_used = false;
+    if (cleanup_blocked) {
+      cleanup_blocked = false;
+      blocked_encoder_cleanups.fetch_sub(1, std::memory_order_acq_rel);
+    }
+    return true;
   }
 
   nvenc_encoded_frame nvenc_base::encode_frame(
@@ -587,7 +769,7 @@ namespace nvenc {
     bool force_idr,
     std::vector<std::uint8_t> frame_buffer
   ) {
-    if (!encoder) {
+    if (!encoder || cleanup_blocked || mapped_input) {
       return {};
     }
 
@@ -597,13 +779,24 @@ namespace nvenc {
     NV_ENC_MAP_INPUT_RESOURCE mapped_input_buffer = {NV_ENC_MAP_INPUT_RESOURCE_VER};
     mapped_input_buffer.registeredResource = registered_input_buffer;
 
-    if (nvenc_failed(nvenc->nvEncMapInputResource(encoder, &mapped_input_buffer))) {
+    if (stage_diagnostics) {
+      stage_diagnostics->input_map.first_point_now();
+    }
+    const auto map_status = nvenc->nvEncMapInputResource(encoder, &mapped_input_buffer);
+    if (map_status == NV_ENC_SUCCESS) {
+      mapped_input = mapped_input_buffer.mappedResource;
+      input_phase = input_phase_t::mapped;
+    }
+    if (stage_diagnostics) {
+      stage_diagnostics->input_map.second_point_now_and_log();
+    }
+    if (nvenc_failed(map_status)) {
       BOOST_LOG(error) << "NvEnc: NvEncMapInputResource() failed: " << last_nvenc_error_string;
       return {};
     }
-    auto unmap_guard = util::fail_guard([&] {
-      if (nvenc_failed(nvenc->nvEncUnmapInputResource(encoder, mapped_input_buffer.mappedResource))) {
-        BOOST_LOG(error) << "NvEnc: NvEncUnmapInputResource() failed: " << last_nvenc_error_string;
+    auto unmap_guard = util::fail_guard([this] {
+      if (!release_completed_input()) {
+        block_new_encoders();
       }
     });
 
@@ -630,7 +823,18 @@ namespace nvenc {
         hdr_metadata.content_light_level ? &*hdr_metadata.content_light_level : nullptr;
     }
 
-    if (nvenc_failed(nvenc->nvEncEncodePicture(encoder, &pic_params))) {
+    if (stage_diagnostics) {
+      stage_diagnostics->submit.first_point_now();
+    }
+    const auto submit_status = nvenc->nvEncEncodePicture(encoder, &pic_params);
+    if (submit_status == NV_ENC_SUCCESS || submit_status == NV_ENC_ERR_NEED_MORE_INPUT) {
+      encoder_used = true;
+      input_phase = input_phase_t::submitted;
+    }
+    if (stage_diagnostics) {
+      stage_diagnostics->submit.second_point_now_and_log();
+    }
+    if (nvenc_failed(submit_status)) {
       BOOST_LOG(error) << "NvEnc: NvEncEncodePicture() failed: " << last_nvenc_error_string;
       return {};
     }
@@ -639,12 +843,36 @@ namespace nvenc {
     lock_bitstream.outputBitstream = output_bitstream;
     lock_bitstream.doNotWait = async_event_handle ? 1 : 0;
 
-    if (async_event_handle && !wait_for_async_event(100)) {
-      BOOST_LOG(error) << "NvEnc: frame " << frame_index << " encode wait timeout";
-      return {};
+    if (async_event_handle) {
+      if (stage_diagnostics) {
+        stage_diagnostics->completion_wait.first_point_now();
+      }
+      const bool ready = wait_for_async_event(100);
+      if (ready) {
+        input_phase = input_phase_t::completion_seen;
+      }
+      if (stage_diagnostics) {
+        stage_diagnostics->completion_wait.second_point_now_and_log();
+      }
+      if (!ready) {
+        BOOST_LOG(error) << "NvEnc: frame " << frame_index << " encode wait timeout";
+        return {};
+      }
+    } else {
+      input_phase = input_phase_t::completion_seen;
     }
 
-    if (nvenc_failed(nvenc->nvEncLockBitstream(encoder, &lock_bitstream))) {
+    if (stage_diagnostics) {
+      stage_diagnostics->bitstream_lock.first_point_now();
+    }
+    const auto lock_status = nvenc->nvEncLockBitstream(encoder, &lock_bitstream);
+    if (lock_status == NV_ENC_SUCCESS) {
+      input_phase = input_phase_t::locked;
+    }
+    if (stage_diagnostics) {
+      stage_diagnostics->bitstream_lock.second_point_now_and_log();
+    }
+    if (nvenc_failed(lock_status)) {
       BOOST_LOG(error) << "NvEnc: NvEncLockBitstream() failed: " << last_nvenc_error_string;
       return {};
     }
@@ -655,10 +883,16 @@ namespace nvenc {
     // The ENCODED_PACKET_QUEUE_LIMIT bounds how many of these buffers can be in flight. Reusing
     // their capacity removes a large allocation from the encode path while still copying before
     // NvEncUnlockBitstream(), as required by the NVENC ownership contract.
+    if (stage_diagnostics) {
+      stage_diagnostics->bitstream_copy.first_point_now();
+    }
     frame_buffer.assign(
       data_pointer,
       data_pointer + lock_bitstream.bitstreamSizeInBytes
     );
+    if (stage_diagnostics) {
+      stage_diagnostics->bitstream_copy.second_point_now_and_log();
+    }
     nvenc_encoded_frame encoded_frame {
       std::move(frame_buffer),
       lock_bitstream.outputTimeStamp,
@@ -677,8 +911,10 @@ namespace nvenc {
       BOOST_LOG(debug) << "NvEnc: idr frame " << encoded_frame.frame_index;
     }
 
-    if (nvenc_failed(nvenc->nvEncUnlockBitstream(encoder, lock_bitstream.outputBitstream))) {
-      BOOST_LOG(error) << "NvEnc: NvEncUnlockBitstream() failed: " << last_nvenc_error_string;
+    unmap_guard.disable();
+    if (!release_completed_input()) {
+      block_new_encoders();
+      return {};
     }
 
     encoder_state.frame_size_logger.collect_and_log(encoded_frame.data.size() / 1000.);
@@ -691,7 +927,7 @@ namespace nvenc {
   }
 
   bool nvenc_base::reconfigure_bitrate(int bitrate_kbps) {
-    if (!encoder || !encoder_state.bitrate_reconfiguration_supported) {
+    if (!encoder || cleanup_blocked || !encoder_state.bitrate_reconfiguration_supported) {
       return false;
     }
 
@@ -741,6 +977,9 @@ namespace nvenc {
   }
 
   bool nvenc_base::invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame) {
+    if (cleanup_blocked) {
+      return false;
+    }
     if (!encoder || !encoder_params.rfi) {
       return false;
     }

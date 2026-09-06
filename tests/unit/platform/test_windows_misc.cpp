@@ -20,6 +20,7 @@
   #include <src/host_sbs_resolution.h>
   #include <src/platform/windows/display.h>
   #include <src/platform/windows/misc.h>
+  #include <src/video_depth_estimator.h>
   #include <sddl.h>
   #include <ShlObj.h>
   #include <string>
@@ -250,6 +251,79 @@ namespace {
       platf::dxgi::detail::query_ddup_damage_between(current, recent, roi),
       unchanged
     );
+  }
+
+  TEST(WindowsDdupDamageTest, RollingExactRoiProofOutlivesHistoryWithoutMovingModelOwner) {
+    using namespace platf::dxgi::detail;
+    auto history = std::make_shared<ddup_damage_history_t>();
+    const auto inference = history->commit({true, {}});
+    const RECT roi {0, 0, 100, 100};
+    ddup_unchanged_roi_proof_t proof;
+    proof.reset(inference, roi);
+    auto current = inference;
+    for (std::size_t i = 0u; i < ddup_damage_history_frame_budget * 5u; ++i) {
+      current = history->commit({true, {{300, 300, 340, 340}}});
+      ASSERT_TRUE(proof.observe(current, roi)) << i;
+      ASSERT_TRUE(proof.observe(current, roi)) << "repeated immutable delivery " << i;
+    }
+    EXPECT_EQ(inference.token, 1u);
+    EXPECT_EQ(query_ddup_damage_between(inference, current, roi), ddup_damage_intersection_e::unknown);
+    // A fresh dirty interval cannot be bypassed by later clean metadata.
+    (void) history->commit({true, {{40, 40, 60, 60}}});
+    current = history->commit({true, {{300, 300, 340, 340}}});
+    EXPECT_FALSE(proof.observe(current, roi));
+    EXPECT_FALSE(proof.observe(history->commit({true, {}}), roi));
+    proof.reset(current, roi);  // Only a new inference can seed a new model/proof pair.
+    EXPECT_TRUE(proof.observe(current, roi));
+  }
+
+  TEST(WindowsDdupDamageTest, RollingExactRoiProofRequiresEveryUncheckedInterval) {
+    using namespace platf::dxgi::detail;
+    auto history = std::make_shared<ddup_damage_history_t>();
+    auto current = history->commit({true, {}});
+    const RECT roi {0, 0, 100, 100};
+    ddup_unchanged_roi_proof_t proof;
+    proof.reset(current, roi);
+    // Coalesced deliveries remain valid when every skipped acquisition is fully retained.
+    (void) history->commit({true, {{300, 300, 340, 340}}});
+    current = history->commit({true, {}});
+    EXPECT_TRUE(proof.observe(current, roi));
+    (void) history->commit({false, {}});
+    current = history->commit({true, {}});
+    EXPECT_FALSE(proof.observe(current, roi));
+    EXPECT_FALSE(proof.observe(current, roi));
+    proof.reset(current, roi);
+    for (std::size_t i = 0u; i <= ddup_damage_history_frame_budget; ++i) {
+      current = history->commit({true, {}});
+    }
+    EXPECT_FALSE(proof.observe(current, roi));
+    EXPECT_FALSE(proof.observe(history->commit({true, {}}), roi));
+    proof.reset(current, roi);
+    EXPECT_FALSE(proof.observe(std::nullopt, roi));
+    EXPECT_FALSE(proof.observe(current, roi));
+  }
+
+  TEST(WindowsDdupDamageTest, RollingExactRoiProofRejectsEpochPlacementAndRegressedIdentity) {
+    using namespace platf::dxgi::detail;
+    auto history = std::make_shared<ddup_damage_history_t>();
+    const auto baseline = history->commit({true, {}});
+    const auto current = history->commit({true, {}});
+    const RECT roi {0, 0, 100, 100};
+    ddup_unchanged_roi_proof_t proof;
+    proof.reset(baseline, roi);
+    EXPECT_TRUE(proof.observe(current, roi));
+    EXPECT_FALSE(proof.observe(baseline, roi));
+    EXPECT_FALSE(proof.observe(current, roi));
+    proof.reset(current, roi);
+    EXPECT_FALSE(proof.observe(current, RECT {1, 0, 101, 100}));
+    EXPECT_FALSE(proof.observe(current, roi));
+    proof.reset(current, roi);
+    auto new_epoch = std::make_shared<ddup_damage_history_t>();
+    EXPECT_FALSE(proof.observe(new_epoch->commit({true, {}}), roi));
+    EXPECT_FALSE(proof.observe(current, roi));
+    proof.reset(current, roi);
+    proof.reset();  // Source/transfer/authority revocation destroys the owning lineage.
+    EXPECT_FALSE(proof.observe(current, roi));
   }
 
   TEST(WindowsDdupDamageTest, InvalidAndOversizeMetadataBecomeUnknown) {
@@ -832,17 +906,158 @@ namespace {
     );
   }
 
-  TEST(WindowsHostSbsGpuAdmissionTest, OpaqueFollowupAuthorityUsesSharedStrictHundredMsBound) {
+  TEST(WindowsHostSbsCompletedSourceTest, LateOpaqueCompletionRendersOnceWithoutForcingAnotherObservation) {
     using namespace std::chrono_literals;
-    using platf::dxgi::detail::host_sbs_gpu_followup_fresh;
+    using action_e = platf::dxgi::detail::host_sbs_completed_source_action_e;
+    using proof_t = platf::dxgi::detail::host_sbs_completed_source_proof_t;
+    using platf::dxgi::detail::host_sbs_completed_source_action;
+    using platf::dxgi::detail::host_sbs_depth_admission;
+    using admission_e = platf::dxgi::detail::host_sbs_depth_admission_e;
+    models::gpu_adaptive_transaction_policy_t barrier;
+    models::gpu_adaptive_ocr_cadence_t subtitle;
+    subtitle.record_guaranteed(1000000u);
+    const auto captured = std::chrono::steady_clock::time_point {1100ms};
+    const auto request = barrier.make_request(11u, true, false, 10u, 1100000u);
+    ASSERT_EQ(barrier.record_submission(11u, request, false, true), models::gpu_adaptive_submission_class_e::gpu_undecided);
+    subtitle.record_accepted(models::depth_optional_work_mode_e::ordinary, models::gpu_adaptive_submission_class_e::gpu_undecided, 1100000u);
+
+    // The opaque completion cannot be a CPU-known depth owner. Before the completed-source
+    // decision, its identical retained source therefore fell through to this force request.
+    EXPECT_FALSE(platf::dxgi::detail::host_sbs_latest_v2_completion_retention_allowed(true, true, true, false));
+    EXPECT_EQ(host_sbs_depth_admission(false, false, barrier.active()), admission_e::force_infer);
+
+    const proof_t completed {11u, captured, true};
+    ASSERT_EQ(host_sbs_completed_source_action(captured, true, completed, {}), action_e::render_matched);
+    // Redeliver the same image after its first draw, even long after the changing-source timeout.
+    for (unsigned repeat = 0; repeat < 1000u; ++repeat) {
+      EXPECT_EQ(host_sbs_completed_source_action(captured, true, {}, completed), action_e::repeat_packed);
+    }
+    EXPECT_TRUE(barrier.active());
+    EXPECT_EQ(barrier.conditional_frame_id(), 11u);
+    EXPECT_EQ(subtitle.last_guaranteed_observation_us(), 1000000u);
+    EXPECT_EQ(subtitle.accepted_dirty_holds(), 1u);
+
+    // The next genuinely different capture still compares through the immediately preceding
+    // opaque transaction. It does not get chained to any of the repeated presentation deliveries.
+    EXPECT_EQ(host_sbs_completed_source_action(captured + 40ms, true, {}, completed), action_e::observe);
+    const auto changed = barrier.make_request(1012u, true, true, 11u, 1140000u);
+    EXPECT_TRUE(changed.authorize_gpu_undecided_reuse);
+    EXPECT_EQ(changed.baseline_frame_id, 11u);
+  }
+
+  TEST(WindowsHostSbsCompletedSourceTest, CursorAndContentChangesCannotReusePackedPixels) {
+    using namespace std::chrono_literals;
+    using action_e = platf::dxgi::detail::host_sbs_completed_source_action_e;
+    using proof_t = platf::dxgi::detail::host_sbs_completed_source_proof_t;
+    using platf::dxgi::detail::host_sbs_completed_source_action;
+    const auto content = std::chrono::steady_clock::time_point {1s};
+    const proof_t packed {11u, content, true};
+    const auto cursor_only = platf::dxgi::detail::select_ddup_timestamps<std::chrono::steady_clock::time_point>(
+      std::nullopt,
+      content + 10ms,
+      content
+    );
+    ASSERT_EQ(cursor_only.content_timestamp, content);
+    ASSERT_NE(cursor_only.presentation_timestamp, packed.source_timestamp);
+    EXPECT_EQ(host_sbs_completed_source_action(cursor_only.presentation_timestamp, true, {}, packed), action_e::observe);
+    const auto changed = platf::dxgi::detail::select_ddup_timestamps<std::chrono::steady_clock::time_point>(
+      content + 20ms,
+      std::nullopt,
+      content
+    );
+    EXPECT_EQ(host_sbs_completed_source_action(changed.presentation_timestamp, true, {}, packed), action_e::observe);
+    // A stale source may not replay a newer image or conceal a source-clock regression either.
+    EXPECT_EQ(host_sbs_completed_source_action(content - 1ms, true, {}, packed), action_e::observe);
+  }
+
+  TEST(WindowsHostSbsCompletedSourceTest, MissingIdentityAndRevokedRouteFailOpenToObservation) {
+    using namespace std::chrono_literals;
+    using action_e = platf::dxgi::detail::host_sbs_completed_source_action_e;
+    using proof_t = platf::dxgi::detail::host_sbs_completed_source_proof_t;
+    using platf::dxgi::detail::host_sbs_completed_source_action;
+    const auto captured = std::chrono::steady_clock::time_point {1s};
+    const proof_t valid {11u, captured, true};
+    for (const auto &invalid : {
+           proof_t {0u, captured, true},
+           proof_t {11u, std::nullopt, true},
+           proof_t {11u, captured, false},
+         }) {
+      EXPECT_EQ(host_sbs_completed_source_action(captured, true, invalid, {}), action_e::observe);
+      EXPECT_EQ(host_sbs_completed_source_action(captured, true, {}, invalid), action_e::observe);
+    }
+    EXPECT_EQ(host_sbs_completed_source_action(std::nullopt, true, valid, valid), action_e::observe);
+    // Dump/reprocess, terminal producer, interactive move/size, or an unlatched renderer closes
+    // the same production retention gate regardless of which existing pixels are available.
+    EXPECT_EQ(host_sbs_completed_source_action(captured, false, valid, valid), action_e::observe);
+    EXPECT_EQ(host_sbs_completed_source_action(captured, true, valid, valid), action_e::render_matched);
+  }
+
+  TEST(WindowsHostSbsCompletedSourceTest, RepeatedPresentationCannotBridgeAnyAuthorityEpochChange) {
+    using namespace std::chrono_literals;
+    using action_e = platf::dxgi::detail::host_sbs_completed_source_action_e;
+    using epoch_t = platf::dxgi::detail::host_sbs_adaptive_motion_route_epoch_t;
+    using platf::dxgi::detail::host_sbs_completed_source_action;
+    const auto captured = std::chrono::steady_clock::time_point {1s};
+    epoch_t route {
+      .source_width = 3840u,
+      .source_height = 2160u,
+      .mip_levels = 1u,
+      .array_size = 1u,
+      .source_format = 10u,
+      .sample_count = 1u,
+      .sample_quality = 0u,
+      .input_color_space = 2u,
+      .root_authority_generation = 10u,
+      .region_authority_generation = 20u,
+      .browser_authority_epoch = 30u,
+    };
+    const auto verify_change = [&](const epoch_t &changed) {
+      platf::dxgi::detail::host_sbs_adaptive_motion_route_state_t observer;
+      EXPECT_FALSE(observer.observe(route));
+      EXPECT_TRUE(observer.observe(changed));
+      EXPECT_EQ(host_sbs_completed_source_action(captured, true, {}, {11u, captured, changed == route}), action_e::observe);
+    };
+    for (auto member : {
+           &epoch_t::source_width,
+           &epoch_t::source_height,
+           &epoch_t::mip_levels,
+           &epoch_t::array_size,
+           &epoch_t::source_format,
+           &epoch_t::sample_count,
+           &epoch_t::sample_quality,
+           &epoch_t::input_color_space,
+         }) {
+      auto changed = route;
+      ++(changed.*member);
+      verify_change(changed);
+    }
+    for (auto member : {
+           &epoch_t::root_authority_generation,
+           &epoch_t::region_authority_generation,
+           &epoch_t::browser_authority_epoch,
+         }) {
+      auto changed = route;
+      ++(changed.*member);
+      verify_change(changed);
+    }
+    auto interactive = route;
+    interactive.interactive_move_size = true;
+    verify_change(interactive);
+  }
+
+  TEST(WindowsHostSbsGpuAdmissionTest, OpaqueFollowupAuthorityKeepsOwnerOrderWithoutTimeExpiry) {
+    using namespace std::chrono_literals;
+    using platf::dxgi::detail::host_sbs_gpu_followup_order_valid;
 
     const auto enqueued_at = std::chrono::steady_clock::time_point {1s};
-    EXPECT_TRUE(host_sbs_gpu_followup_fresh(40u, 40u, enqueued_at, enqueued_at + 99ms));
-    EXPECT_FALSE(host_sbs_gpu_followup_fresh(40u, 40u, enqueued_at, enqueued_at + 100ms));
-    EXPECT_FALSE(host_sbs_gpu_followup_fresh(40u, 41u, enqueued_at, enqueued_at + 1ms));
-    EXPECT_FALSE(host_sbs_gpu_followup_fresh(0u, 0u, enqueued_at, enqueued_at + 1ms));
-    EXPECT_FALSE(host_sbs_gpu_followup_fresh(40u, 40u, {}, enqueued_at + 1ms));
-    EXPECT_FALSE(host_sbs_gpu_followup_fresh(40u, 40u, enqueued_at, enqueued_at - 1ms));
+    EXPECT_TRUE(host_sbs_gpu_followup_order_valid(40u, 40u, enqueued_at, enqueued_at + 99ms));
+    EXPECT_TRUE(host_sbs_gpu_followup_order_valid(40u, 40u, enqueued_at, enqueued_at + 100ms));
+    EXPECT_TRUE(host_sbs_gpu_followup_order_valid(40u, 40u, enqueued_at, enqueued_at + 1h));
+    EXPECT_FALSE(host_sbs_gpu_followup_order_valid(40u, 41u, enqueued_at, enqueued_at + 1ms));
+    EXPECT_FALSE(host_sbs_gpu_followup_order_valid(0u, 0u, enqueued_at, enqueued_at + 1ms));
+    EXPECT_FALSE(host_sbs_gpu_followup_order_valid(40u, 40u, {}, enqueued_at + 1ms));
+    EXPECT_FALSE(host_sbs_gpu_followup_order_valid(40u, 40u, enqueued_at, {}));
+    EXPECT_FALSE(host_sbs_gpu_followup_order_valid(40u, 40u, enqueued_at, enqueued_at - 1ms));
   }
 
   TEST(WindowsHostSbsGpuAdmissionTest, BarrierClearsOnlyOnNewerAcceptedForceInferCompletion) {
@@ -943,31 +1158,39 @@ namespace {
     ));
   }
 
-  TEST(WindowsHostSbsContentReuseTest, SuccessfulEnqueueBoundsSkipsAndAge) {
+  TEST(WindowsHostSbsContentReuseTest, ExactContentHasNoDeliveryCountOrClockExpiry) {
+    using namespace platf::dxgi::detail;
     using namespace std::chrono_literals;
-    platf::dxgi::detail::host_sbs_content_refresh_state_t state;
-    const auto start = std::chrono::steady_clock::time_point {1s};
-
-    EXPECT_TRUE(state.refresh_due(start));
-    state.record_successful_enqueue(start);
-    EXPECT_FALSE(state.refresh_due(start));
-    for (unsigned i = 0;
-         i + 1u < platf::dxgi::detail::host_sbs_full_source_reuse_max_skips;
-         ++i) {
-      state.record_reuse();
+    const auto original = std::chrono::steady_clock::time_point {1s};
+    const RECT full_source {0, 0, 3840, 2160};
+    for (const std::uint64_t delivery : {42u, 1000u, 1000000u}) {
+      const auto proof = classify_host_sbs_ddup_reuse(
+        original,
+        std::nullopt,
+        false,
+        full_source,
+        original,
+        std::nullopt
+      );
+      const auto authorization = select_host_sbs_cached_depth_reuse(proof, 40u, delivery);
+      EXPECT_TRUE(authorization.valid());
+      EXPECT_TRUE(host_sbs_cached_geometry_render_allowed(
+        true,
+        true,
+        authorization,
+        40u,
+        delivery,
+        true
+      ));
+      // The exact-current color branch restamps only presentation attribution. An hour-old
+      // inference is not stale when its current input has an independent unchanged proof.
+      EXPECT_TRUE(models::host_sbs_matched_completion_is_current(true, 1h));
     }
-    EXPECT_FALSE(state.refresh_due(start + 249ms));
-    state.record_reuse();
-    EXPECT_TRUE(state.refresh_due(start + 249ms));
-
-    state.record_successful_enqueue(start);
-    EXPECT_FALSE(state.refresh_due(start + 249ms));
-    EXPECT_TRUE(state.refresh_due(start + 250ms));
+    EXPECT_EQ(classify_host_sbs_ddup_reuse(original, std::nullopt, false, full_source, original + 1h, std::nullopt), host_sbs_ddup_reuse_proof_e::none);
   }
 
-  TEST(WindowsHostSbsContentReuseTest, TypedAuthorizationUnifiesProofAndRefreshSemantics) {
+  TEST(WindowsHostSbsContentReuseTest, TypedAuthorizationRequiresExactProofAndIdentity) {
     using kind_e = platf::dxgi::detail::host_sbs_depth_reuse_kind_e;
-    using refresh_e = platf::dxgi::detail::host_sbs_depth_reuse_refresh_e;
     using proof_e = platf::dxgi::detail::host_sbs_ddup_reuse_proof_e;
     using platf::dxgi::detail::select_host_sbs_cached_depth_reuse;
 
@@ -976,7 +1199,6 @@ namespace {
     );
     EXPECT_TRUE(exact.valid());
     EXPECT_EQ(exact.kind, kind_e::exact_content);
-    EXPECT_EQ(exact.refresh, refresh_e::bounded_content);
 
     const auto roi = select_host_sbs_cached_depth_reuse(
       proof_e::roi_damage, 40u, 42u
@@ -1092,7 +1314,7 @@ namespace {
     EXPECT_FALSE(state.observe(changed));
   }
 
-  TEST(WindowsHostSbsAdaptiveMotionTest, SimulatedHoldForcesOneRefreshBeforeRearming) {
+  TEST(WindowsHostSbsAdaptiveMotionTest, InitialCandidateKeepsIdentityWithoutTimeExpiryOrRearming) {
     using namespace std::chrono_literals;
     using decision_e = platf::dxgi::detail::host_sbs_adaptive_hold_decision_e;
     platf::dxgi::detail::host_sbs_adaptive_hold_cadence_t cadence;
@@ -1105,9 +1327,12 @@ namespace {
     cadence.record_successful_enqueue(a, start);
     EXPECT_EQ(cadence.observe_changed(b, true, start + 99ms), decision_e::hold_candidate);
     EXPECT_TRUE(cadence.refresh_required());
-    EXPECT_TRUE(cadence.hold_candidate_still_fresh(b, start + 99ms));
-    EXPECT_FALSE(cadence.hold_candidate_still_fresh(c, start + 99ms));
-    EXPECT_FALSE(cadence.hold_candidate_still_fresh(b, start + 100ms));
+    EXPECT_TRUE(cadence.hold_candidate_still_valid(b, start + 99ms));
+    EXPECT_FALSE(cadence.hold_candidate_still_valid(c, start + 99ms));
+    EXPECT_TRUE(cadence.hold_candidate_still_valid(b, start + 100ms));
+    EXPECT_TRUE(cadence.hold_candidate_still_valid(b, start + 1h));
+    EXPECT_FALSE(cadence.hold_candidate_still_valid(b, start - 1ms));
+    EXPECT_FALSE(cadence.hold_candidate_still_valid({}, start + 1h));
     // The cadence identifies the repeated held identity. GPU admission treats this decision as
     // mandatory inference rather than granting a second approximate hold.
     EXPECT_EQ(
@@ -1120,11 +1345,18 @@ namespace {
     EXPECT_EQ(cadence.observe_changed(d, true, start + 198ms), decision_e::hold_candidate);
 
     cadence.record_successful_enqueue(a, start);
-    EXPECT_EQ(cadence.observe_changed(b, true, start + 100ms), decision_e::infer);
+    EXPECT_EQ(cadence.observe_changed(b, true, start + 1h), decision_e::hold_candidate);
 
     cadence.record_successful_enqueue(a, start);
     ASSERT_EQ(cadence.observe_changed(b, true, start + 99ms), decision_e::hold_candidate);
-    EXPECT_EQ(cadence.observe_changed(b, true, start + 100ms), decision_e::infer);
+    EXPECT_EQ(cadence.observe_changed(b, true, start + 1h), decision_e::hold_same_identity);
+    EXPECT_EQ(cadence.observe_changed(c, true, start + 1h), decision_e::infer);
+
+    cadence.reset();
+    EXPECT_FALSE(cadence.hold_candidate_still_valid(b, start + 1h));
+    EXPECT_EQ(cadence.observe_changed(b, true, start + 1h), decision_e::infer);
+    cadence.record_successful_enqueue(a, start);
+    EXPECT_EQ(cadence.observe_changed(b, true, start - 1ms), decision_e::infer);
   }
 
   TEST(WindowsUploadedValueStateTest, CommitsOnlyExplicitlyAcceptedValue) {

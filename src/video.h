@@ -23,6 +23,8 @@
 #include "platform/common.h"
 #include "thread_safe.h"
 #include "video_colorspace.h"
+#include "video_encode_pacing.h"
+#include "video_frame_diagnostics.h"
 
 namespace video {
   // The broadcast worker should never be allowed to accumulate hundreds of milliseconds of
@@ -83,17 +85,6 @@ namespace video {
       return rendered_content_timestamp ?
                rendered_content_timestamp :
                presentation_timestamp;
-    }
-
-    /** A ready depth pipeline can bypass the image wait only when there is retained source
-     * content to reconvert. Before the first real capture, a zero-duration wait would repeatedly
-     * encode the dummy surface while the ready event remains pending.
-     */
-    constexpr bool should_poll_ready_depth_without_wait(
-      bool depth_pipeline_ready,
-      bool has_retained_source
-    ) noexcept {
-      return depth_pipeline_ready && has_retained_source;
     }
 
     /** A capture reinit wait must yield to either side of its shutdown handoff. */
@@ -532,7 +523,10 @@ namespace video {
     unsigned early_ddup_failures_ = 0;
   };
 
-  /** Compute the codec-safe packed Host SBS size for a negotiated per-eye frame. */
+  /**
+   * Fit the negotiated per-eye frame to codec caps. Packed width is divisible by four and
+   * height is even, so each eye owns whole 4:2:0 chroma cells. Unusable caps return {0, 0}.
+   */
   sbs_output_dimensions_t host_sbs_output_dimensions(
     int base_width,
     int base_height,
@@ -609,6 +603,9 @@ namespace video {
     // Actual desktop/content pixels rendered into this packet. This may predate frame_timestamp
     // for cursor-only capture updates, matched Host SBS output, and repeated encoder input.
     std::optional<std::chrono::steady_clock::time_point> content_timestamp;
+    // Filled only by diagnostic runs; the broadcast worker must preserve the encoder's output
+    // classification instead of inferring freshness from packet delivery order or cadence.
+    detail::diagnostic_content_e diagnostic_content = detail::diagnostic_content_e::unknown;
     // Timestamp after encoding, used independently from the capture timestamp to bound only
     // host-side encoded-packet backlog.
     std::chrono::steady_clock::time_point encoded_timestamp = std::chrono::steady_clock::now();

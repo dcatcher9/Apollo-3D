@@ -10,9 +10,7 @@
 namespace models {
 
   /** Version of the request/chaining policy attested by offline replay artifacts. */
-  inline constexpr std::uint32_t gpu_adaptive_transaction_policy_schema = 2u;
-  inline constexpr std::uint32_t gpu_adaptive_max_infer_owner_frame_age = 4u;
-  inline constexpr std::uint64_t gpu_adaptive_max_infer_owner_observation_age_us = 100000u;
+  inline constexpr std::uint32_t gpu_adaptive_transaction_policy_schema = 3u;
   inline constexpr std::uint64_t gpu_adaptive_ocr_max_observation_age_us = 33000u;
   inline constexpr std::uint32_t gpu_adaptive_ocr_max_dirty_holds = 2u;
 
@@ -24,8 +22,8 @@ namespace models {
     bool authorize_gpu_undecided_reuse = false;
     // A follow-up may name the immediately preceding opaque transaction instead of the last
     // CPU-known infer. The device-owned history owner still decides whether comparison is legal:
-    // infer advances that owner, while reuse retains it so a bounded-age follow-up may compare
-    // cumulatively. Invalid or over-age ownership forces infer without exposing the prior branch
+    // infer advances that owner, while reuse retains it so every follow-up compares cumulatively
+    // without age or count expiry. Invalid ownership forces infer without exposing the prior branch
     // to the CPU.
     bool opaque_followup = false;
     std::uint64_t baseline_frame_id = 0u;
@@ -57,7 +55,7 @@ namespace models {
   /** Common request, chaining, and completion policy for live and offline execution.
    *
    * Capture-specific admission stays outside this class: production proves DDup damage, route,
-   * authority, and freshness, while an offline replay supplies an already-decoded ordered corpus.
+   * authority, and observation ordering, while an offline replay supplies an ordered decoded corpus.
    * Once either caller admits a candidate, this is the single owner of request formation and the
    * opaque observation watermark. Neither caller may infer the private device branch.
    */

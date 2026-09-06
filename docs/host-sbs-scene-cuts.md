@@ -74,25 +74,29 @@ host rejects an `ok-fullscreen` subrectangle. The bottom subtitle locator observ
 V2 actually used. Any real input-domain transition resets the subtitle locator together with the
 ordinary cut and camera histories.
 
-A bounded DDup damage reuse creates no scene observation. Once an authenticated ROI completion owns
+A proven unchanged DDup reuse creates no scene observation. Once an authenticated ROI completion owns
 the exact positioned route, a contiguous and complete sequence of dirty/move metadata may prove
 that every later desktop change was wholly outside that analysis domain. Repeated delivery of one
 immutable capture sequence is idempotent, while a missing or out-of-order sequence, metadata
 failure, protected-content masking, or any dirty rectangle, move source, or move destination that
 intersects the ROI forces the ordinary matched path. WGC supplies no such proof. On a reuse, raw
 appearance, ordinal evidence, normalized-depth comparison, cut confirmation, baselines, scene
-camera, OCR, and SLR do not advance, and an already-consumed cut pulse cannot be applied again. A
-real enqueue is forced after 16 skipped deliveries or 250 ms even when the metadata chain remains
-clean; only that successful enqueue establishes the next sequence baseline.
+camera, OCR, and SLR do not advance, and an already-consumed cut pulse cannot be applied again.
+Continuously proven unchanged content has no age or delivery-count expiry. A separate rolling clean
+damage anchor preserves the transitive proof across unrelated desktop updates without moving the
+real inference owner. Each unchecked interval still requires complete retained metadata, and only
+a new inference can establish a new baseline after dirty or unknown evidence. The exact proof and
+its invalidation rules are owned by [the Host SBS pipeline](host-sbs.md).
 
-The always-on GPU adaptive path may omit up to four complete depth observations for an authenticated
+The always-on GPU adaptive path may omit repeated depth observations for an authenticated
 changed-frame candidate. The host uses only route, identity, cadence and complete retained DDup
 history to classify that frame as GPU-undecided; it does not apply a motion-area or rectangle-shape
 heuristic. A dense GPU comparison against the exact state-1 active model-input history then applies
 finite, global medium/strong, and supported-tile local bounds. That input is the fused composite's
-high RGB tensor; there is no CutBridge readback or CPU decision. The infer owner is eligible only through frame age `4` and a
-strictly less than `100 ms` source-observation age. The host initial-candidate and opaque-follow-up
-checks share that strict `100 ms` age ceiling.
+high RGB tensor; there is no CutBridge readback or CPU decision. The infer owner has no age or
+delivery-count expiry. Every comparison remains relative to the last real inference, with nonzero
+ordered source timestamps and the same authenticated domain and dimensions. Reuse cannot replace
+that owner and conceal cumulative drift.
 
 Depth and OCR remain independent request domains inside one joined completion. Ordinary current-
 ready OCR work `1`, or ordinary ineligible abstention work `2`, publishes only on infer. Cadence-due
@@ -121,20 +125,25 @@ Every GPU-undecided transaction arms a depth observation barrier regardless of i
 Exact depth-cache reuse and new CutBridge telemetry cannot bypass that barrier. The barrier may
 admit a fresh same-route DDup-authenticated follow-up bound to the
 immediately preceding opaque transaction; that scalar anchor is not host cache or branch knowledge.
+An already-completed exact captured image is not a new observation: its matching completion or
+self-contained packed pixels may be delivered again under the current route without submitting
+another root. This preserves the opaque barrier, inference owner, subtitle cadence, and cut state;
+changed cursor/presentation identity cannot use that shortcut. The complete redelivery gates are
+owned by [the Host SBS pipeline](host-sbs.md).
 The device-owned history remains the last actual infer input. It may be older than the immediate
-host anchor, but the cumulative current-to-owner comparison is allowed only through frame age `4`
-and while its source-observation timestamp is strictly less than `100 ms` old. Ordinary reuse
+host anchor, but every candidate still compares against that same actual-inference input without
+age or delivery-count expiry. Ordinary reuse
 freezes the subtitle tuple; due reuse publishes current OCR or abstention independently. A sequence
-that genuinely needs DAV2 may keep submitting within the existing bounded route/time authority.
-Expiry, route or
+that needs DAV2 may keep submitting within the existing bounded queue and authenticated route.
+Regressed ownership, route or
 damage discontinuity, signature drift, or any final
 attribution failure returns to a CPU-known force-infer transaction.
 
 An infer-gated owner record supplies the exact last accepted-infer frame to the next scene seed, so
 the next observation uses C-B after an opaque infer and C-A after an opaque reuse without readback.
-Thus a sub-threshold non-exact change can be absent from CutBridge for at most four deliveries and
-strictly less than `100 ms`; the next frame step or age boundary forces infer and cannot reconsume
-an old pulse. Subtitle observation has the narrower independent bound: every accepted ordinary
+Thus a sub-threshold non-exact change can remain absent from CutBridge while cumulative input
+change against the fixed real owner stays within the similarity thresholds. Reuse never advances
+scene state or reconsumes an old pulse. Subtitle observation retains its independent bound: every accepted ordinary
 opaque root is conservatively one dirty hold, and two such holds or `33 ms` since the last
 guaranteed observation makes the next accepted root due. An eventual CPU-known force completion
 restores host depth-cache lineage without resetting coherent GPU temporal state.

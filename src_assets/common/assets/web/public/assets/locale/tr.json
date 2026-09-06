@@ -76,6 +76,10 @@
     "working_dir_desc": "Sürece aktarılması gereken çalışma dizini. Örneğin, bazı uygulamalar yapılandırma dosyalarını aramak için çalışma dizinini kullanır. Ayarlanmazsa, Sunshine 3D varsayılan olarak komutun üst dizinini kullanır"
   },
   "config": {
+    "diagnostics": "Performans tanılaması",
+    "diagnostics_desc": "GPU'da gerçekleşen çıkarım ve yeniden kullanım sayılarını, ayrıca yakalama, dönüştürme, kodlama, ağ ve yerel görüntüleme sürelerini toplar. İçeriğin yaşı, yeni ve tekrarlanan kareler için ayrı ayrı bildirilir. Devre dışıyken tanılama saatleri, sayaçlar, GPU sorguları ve geri okumaları ile dosya sisteminin düzenli olarak yoklanması kullanılmaz.",
+    "sbs_3d_max_encode_width": "Birleştirilmiş 3B karenin en büyük genişliği",
+    "sbs_3d_max_encode_width_desc": "Yan yana görüntülerden oluşan çıktının genişliğini sınırlar. Son boyut, kodeğin NVENC genişlik ve yükseklik sınırlarına uyar ve piksel hizalamasının izin verdiği doğrulukla en boy oranını korur. Her iki göz görüntüsünün genişliği çift sayı olacak şekilde genişlik dördün katına aşağı yuvarlanır.",
     "adapter_name": "Adaptör Adı",
     "adapter_name_desc_windows": "Yakalama için kullanılacak GPU'yu manuel olarak belirleyin. Ayarlanmamışsa, GPU otomatik olarak seçilir. Otomatik GPU seçimini kullanmak için bu alanı boş bırakmanızı şiddetle tavsiye ederiz! Not: Bu GPU'nun bağlı ve açık bir ekranı olmalıdır. Uygun değerler aşağıdaki komut kullanılarak bulunabilir:",
     "adapter_name_placeholder_windows": "Radeon RX 580 Serisi",

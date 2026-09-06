@@ -41,6 +41,32 @@ namespace VDISPLAY {
       return std::min(thirdOfTimeout, std::chrono::milliseconds(1000));
     }
 
+    template<typename Query, typename Now, typename WaitUntil>
+    display_identity_query_t waitForDisplayIdentity(
+      const LUID &adapterLuid,
+      uint32_t targetId,
+      const Query &query,
+      const Now &now,
+      const WaitUntil &waitUntil
+    ) {
+      // Preserve the original 20+40+80+160+320+640 ms wait budget, but observe publication after
+      // every wait, including the final one. The deadline bounds waits, not Windows API latency.
+      const auto deadline = now() + std::chrono::milliseconds(1260);
+      auto retryInterval = std::chrono::milliseconds(20);
+      for (;;) {
+        auto published = query(adapterLuid, targetId);
+        if (published.state == display_identity_state_e::present) {
+          return published;
+        }
+        const auto observedAt = now();
+        if (observedAt >= deadline) {
+          return published;
+        }
+        waitUntil(std::min(observedAt + retryInterval, deadline));
+        retryInterval *= 2;
+      }
+    }
+
     bool containsCaseInsensitive(std::wstring_view value, std::wstring_view needle) {
       return std::search(
                value.begin(),
@@ -1823,6 +1849,16 @@ bool isSudoVirtualDisplayPathForTest(std::wstring_view devicePath) {
   return isSudoVirtualDisplayPath(devicePath);
 }
 
+display_identity_query_t waitForDisplayIdentityForTest(
+  const LUID &adapterLuid,
+  uint32_t targetId,
+  const std::function<display_identity_query_t(const LUID &, uint32_t)> &query,
+  const std::function<std::chrono::steady_clock::time_point()> &now,
+  const std::function<void(std::chrono::steady_clock::time_point)> &waitUntil
+) {
+  return waitForDisplayIdentity(adapterLuid, targetId, query, now, waitUntil);
+}
+
 bool virtualDisplayIdentityMatchesForTest(
   const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &expectedIdentity,
   std::wstring_view learnedDevicePath,
@@ -2243,16 +2279,18 @@ namespace {
     // out during topology churn.
     result.identity = output;
 
-    uint32_t retryInterval = 20;
-    display_identity_query_t published;
-    while ((published = queryDisplayIdentity(output.AdapterLuid, output.TargetId)).state !=
-           display_identity_state_e::present) {
-      Sleep(retryInterval);
-      if (retryInterval > 320) {
-        printf("[SUDOVDA] Cannot get name for newly added virtual display!\n");
-        return result;
+    auto published = waitForDisplayIdentity(
+      output.AdapterLuid,
+      output.TargetId,
+      queryDisplayIdentity,
+      std::chrono::steady_clock::now,
+      [](std::chrono::steady_clock::time_point deadline) {
+        std::this_thread::sleep_until(deadline);
       }
-      retryInterval *= 2;
+    );
+    if (published.state != display_identity_state_e::present) {
+      printf("[SUDOVDA] Cannot get name for newly added virtual display!\n");
+      return result;
     }
 
     wprintf(L"[SUDOVDA] Virtual display added successfully: %ls\n", published.display_name.c_str());

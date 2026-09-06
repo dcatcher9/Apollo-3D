@@ -271,7 +271,7 @@ NEAR_IDENTICAL_DETECTOR_GROUP = ClosureGroup(
         HOST_SBS_NEAR_IDENTICAL_FINALIZE,
         HOST_SBS_NEAR_IDENTICAL_REUSE_DEPTH,
     ),
-    source_closure_sha256="3dde879fb09189715530e6549c2fced103aa8684aec225390d56241be4e00585",
+    source_closure_sha256="18d4977cbc84088d91158577cac4ad63eaf182bdd978190809c87cb7015e01c6",
 )
 
 GPU_TRACE_GROUP = ClosureGroup(
@@ -282,7 +282,7 @@ GPU_TRACE_GROUP = ClosureGroup(
     specs=(
         HOST_SBS_GPU_TRACE,
     ),
-    source_closure_sha256="7f9bc8e48ffe16958e46366c49c80de5c59297577577985886096250e807b1dc",
+    source_closure_sha256="65a9c42dd0e02ab7e35afdb04d9b8178149623ec5e9180cedc3ce0f004c17854",
 )
 
 PARALLAX_V2_LIVE_RENDERER_GROUP = ClosureGroup(
