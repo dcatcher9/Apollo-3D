@@ -170,3 +170,30 @@ The changed diagnostics and packed-width labels/descriptions are translated in a
 locales (84 additions). English regional variants match `en`; the other 19 use translations. All
 22 JSON files parse and each added key appears once. Android's two removed performance-logging
 strings were already absent from every translation. The full Web UI build passed.
+
+## Host/client telemetry and source-identity follow-up
+
+Host Stats could stop updating during the normal GPU-opaque inference/reuse path: the observation
+barrier blocked new diagnostic snapshots, and only CPU-known inference completions updated their
+sample identity. Health sampling now follows any authenticated completed transaction while keeping
+the production ownership barrier intact. Held cut-pulse bits no longer repeatedly announce the same
+cut. The client subscribes only while Host Stats is visible and rejects late packets after hiding.
+
+The standard processing-latency field previously measured old pixel content age. It now measures the
+current conversion start through send-side packetization admission; a repeated encoder input with
+no conversion reports no new sample. Content-age diagnostics retain their separate measurement.
+The [Host SBS contract](host-sbs.md#performance-observations) defines the exact timing boundary.
+
+A negotiated token in existing reserved frame-header bytes lets Client SBS retain a proven static
+encoder input before model input rendering, classification, color copying and packed presentation.
+The [wire contract](host-sbs.md#client-exact-repeat-transport) is owned here; decoded timestamp
+attribution, GPU-owner confirmation and initial lossy-decoder settling are owned by the client
+architecture document. Legacy sessions follow ordinary local Near reuse. No shader, model, depth
+math, encoder policy or recurring Near expiry changed.
+
+The optimized host and native tests built successfully; all 123 focused tests across 26 suites
+passed. Protocol/FEC CPU tests and 156 client JVM tests also passed, and both client debug ABI APKs
+assembled. Local host evidence is under `cmake-build-relwithdebinfo/source-identity-review-2026-09-06/`;
+client qualification is recorded in its `docs/client-sbs-evaluation.md`. A live reconnect remains
+necessary to verify Host Stats cadence and source-repeat work avoidance on the headset. These tests
+do not establish a change in whole-device GPU utilization.

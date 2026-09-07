@@ -119,13 +119,15 @@ namespace stream {
     // zero padding, such as AV1 (Sunshine extension).
     boost::endian::little_uint16_at lastPayloadLen;
 
-    std::uint8_t unknown[2];
+    // SOURCE_FRAME_ID_V1: nonzero exact encoder-input token, only after negotiation.
+    boost::endian::little_uint16_at source_frame_id;
   };
 
   static_assert(
     sizeof(video_short_frame_header_t) == 8,
     "Short frame header must be 8 bytes"
   );
+  static_assert(offsetof(video_short_frame_header_t, source_frame_id) == 6);
 
   struct video_packet_raw_t {
     uint8_t *payload() {
@@ -471,6 +473,7 @@ namespace stream {
     }
 
     const auto &snapshot = state.snapshot;
+    const auto performance = snapshot.performance ? snapshot.performance->snapshot() : host_sbs_telemetry::sample {};
     const std::array<float, 9> float_fields {
       snapshot.pop_floor,
       snapshot.pop_ceiling,
@@ -502,13 +505,17 @@ namespace stream {
     const auto write_f32 = [&](std::size_t offset, float value) {
       write_u32(offset, std::bit_cast<std::uint32_t>(value));
     };
+    const auto write_u64 = [&](std::size_t offset, std::uint64_t value) {
+      write_u32(offset, static_cast<std::uint32_t>(value));
+      write_u32(offset + 4, static_cast<std::uint32_t>(value >> 32));
+    };
 
     encoded[0] = SBS_TELEMETRY_VERSION;
     encoded[1] = status;
     write_u16(2, state.request_id);
     write_u32(4, snapshot.generation);
     write_u32(8, snapshot.sequence);
-    write_u32(12, snapshot.valid_fields);
+    write_u32(12, snapshot.valid_fields | performance.valid_fields);
     write_u32(16, snapshot.runtime_flags);
     write_u16(20, snapshot.depth_width);
     write_u16(22, snapshot.depth_height);
@@ -529,6 +536,21 @@ namespace stream {
     write_u32(76, snapshot.empty_raw_count);
     write_u32(80, snapshot.collapsed_raw_count);
     write_u32(84, snapshot.sampled_frame_id);
+    write_u32(88, performance.outcome_epoch);
+    write_u32(92, performance.outcome_sequence);
+    write_u32(96, performance.outcome_host_ms);
+    write_u64(104, performance.outcomes.infer);
+    write_u64(112, performance.outcomes.reuse);
+    write_u64(120, performance.outcomes.invalid);
+    write_u32(128, performance.output_host_ms);
+    write_u32(132, performance.warped);
+    write_u32(136, performance.repeated);
+    write_u32(140, performance.flat);
+    for (std::size_t i = 0; i < performance.stages.size(); ++i) {
+      write_f32(144 + i * 12, performance.stages[i].mean_ms);
+      write_u32(148 + i * 12, performance.stages[i].count);
+      write_u32(152 + i * 12, performance.stages[i].latest_host_ms);
+    }
     std::copy(encoded.begin(), encoded.end(), out);
     return true;
   }
@@ -680,6 +702,8 @@ namespace stream {
     std::shared_ptr<std::atomic<bool>> sbs_debug_dump_pending =
       std::make_shared<std::atomic<bool>>(false);
     bool awaiting_recovery_idr {false};
+    bool source_frame_id_negotiated {false};
+    source_frame_id_t source_frame_id;
 
     std::string ping_payload;
     std::uint32_t lowseq;
@@ -2746,30 +2770,40 @@ namespace stream {
       frame_header.frameType = packet->is_idr()                     ? 2 :
                                packet->after_ref_frame_invalidation ? 5 :
                                                                       1;
+      frame_header.source_frame_id = channel->source_frame_id.next_frame(
+        channel->source_frame_id_negotiated,
+        static_cast<std::uint32_t>(packet->frame_index()),
+        packet->encoder_input_retained,
+        packet->is_idr(),
+        packet->after_ref_frame_invalidation
+      );
       frame_header.lastPayloadLen = (payload.size() + sizeof(frame_header)) % (channel->packet_size - sizeof(NV_VIDEO_PACKET));
       if (frame_header.lastPayloadLen == 0) {
         frame_header.lastPayloadLen = channel->packet_size - sizeof(NV_VIDEO_PACKET);
       }
 
-      const auto processing_timestamp = video::detail::select_processing_timestamp(
-        packet->content_timestamp,
-        packet->frame_timestamp
-      );
-      if (processing_timestamp) {
-        auto duration_to_latency = [](const std::chrono::steady_clock::duration &duration) {
-          const auto duration_us = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
-          return (uint16_t) std::clamp<decltype(duration_us)>((duration_us + 50) / 100, 0, std::numeric_limits<uint16_t>::max());
-        };
-
+      if (packet->processing_started || stage_diagnostics) {
         const auto measured_at = std::chrono::steady_clock::now();
-        uint16_t latency = duration_to_latency(measured_at - *processing_timestamp);
+        const auto latency = video::detail::frame_processing_latency_tenths_ms(
+          packet->processing_started,
+          measured_at
+        );
         frame_header.frame_processing_latency = latency;
-        frame_processing_latency_logger.collect_and_log(latency / 10.);
+        if (latency != 0) {
+          frame_processing_latency_logger.collect_and_log(latency / 10.);
+        }
         if (stage_diagnostics && packet->diagnostic_content != video::detail::diagnostic_content_e::unknown) {
-          if (const auto elapsed = video::detail::diagnostic_elapsed_ms(processing_timestamp, measured_at)) {
+          const auto content_timestamp = video::detail::select_content_timestamp(
+            packet->content_timestamp,
+            packet->frame_timestamp
+          );
+          if (const auto elapsed = video::detail::diagnostic_elapsed_ms(content_timestamp, measured_at)) {
             auto &logger = packet->diagnostic_content == video::detail::diagnostic_content_e::new_content ?
                              stage_diagnostics->new_content_age : stage_diagnostics->repeated_content_age;
             logger.collect_and_log(*elapsed);
+            if (packet->sbs_telemetry_performance && packet->diagnostic_content == video::detail::diagnostic_content_e::new_content) {
+              packet->sbs_telemetry_performance->record(host_sbs_telemetry::stage::new_content_age, *elapsed, measured_at);
+            }
           }
         }
       } else {
@@ -4057,6 +4091,7 @@ namespace stream {
       session->video = std::make_shared<video_channel_t>();
       session->video->packet_size = config.packetsize;
       session->video->min_required_fec_packets = config.minRequiredFecPackets;
+      session->video->source_frame_id_negotiated = config.client_supports_source_frame_id_v1;
       session->video->effective_mode = session->config.monitor.effective_mode;
       session->config.monitor.sbs_debug_dump_pending =
         session->video->sbs_debug_dump_pending;

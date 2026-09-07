@@ -19,6 +19,7 @@
 
 // local includes
 #include "config.h"
+#include "host_sbs_telemetry_perf.h"
 #include "input.h"
 #include "platform/common.h"
 #include "thread_safe.h"
@@ -75,16 +76,40 @@ namespace video {
                current_presentation_timestamp;
     }
 
-    /** Timestamp used for host frame-processing latency telemetry. RTP uses the distinct
-     * presentation timestamp directly and must not call this helper.
-     */
-    constexpr optional_frame_time_point_t select_processing_timestamp(
+    /** Select the actual pixel age for content diagnostics, never processing elapsed or RTP. */
+    constexpr optional_frame_time_point_t select_content_timestamp(
       optional_frame_time_point_t rendered_content_timestamp,
       optional_frame_time_point_t presentation_timestamp
     ) noexcept {
       return rendered_content_timestamp ?
                rendered_content_timestamp :
                presentation_timestamp;
+    }
+
+    /** The first output of a replacement encoder has no preceding input-image proof. */
+    [[nodiscard]] constexpr bool encoder_input_was_retained(
+      const bool first_encoder_output,
+      const bool converted_frame
+    ) noexcept {
+      return !first_encoder_output && !converted_frame;
+    }
+
+    /** Wire latency is current conversion-to-send work; retained inputs have no new sample. */
+    [[nodiscard]] constexpr std::uint16_t frame_processing_latency_tenths_ms(
+      optional_frame_time_point_t processing_started,
+      const frame_time_point_t sent_at
+    ) noexcept {
+      if (!processing_started || sent_at < *processing_started) {
+        return 0;
+      }
+      const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                sent_at - *processing_started
+      )
+                                .count();
+      return static_cast<std::uint16_t>(std::min<std::int64_t>(
+        (elapsed_us + 50) / 100,
+        std::numeric_limits<std::uint16_t>::max()
+      ));
     }
 
     /** A capture reinit wait must yield to either side of its shutdown handoff. */
@@ -194,7 +219,7 @@ namespace video {
 
   /**
    * One renderer-produced Host SBS telemetry sample. This is an internal native structure, not a
-   * wire layout; stream.cpp serializes it field-by-field into the fixed 88-byte protocol body.
+   * wire layout; stream.cpp serializes it field-by-field into the fixed 240-byte protocol body.
    */
   struct sbs_telemetry_snapshot_t {
     sbs_telemetry_sample_status_e status = sbs_telemetry_sample_status_e::unavailable;
@@ -220,11 +245,12 @@ namespace video {
     std::uint32_t empty_raw_count = 0;
     std::uint32_t collapsed_raw_count = 0;
     std::uint32_t sampled_frame_id = 0;
+    std::shared_ptr<host_sbs_telemetry::collector> performance;
   };
 
   /** Apply the configured fields shared by unavailable, ready, and failed telemetry snapshots. V2
-   * has fixed pop and no legacy zero-plane/adaptive-pop authority; telemetry v1 receives a stable
-   * neutral plane placeholder because its VALID_CONFIG contract requires a nonzero legacy mode.
+   * has fixed pop and no legacy zero-plane/adaptive-pop authority; telemetry receives a stable
+   * neutral plane placeholder because VALID_CONFIG requires a nonzero configuration mode.
    */
   void apply_sbs_telemetry_config(
     sbs_telemetry_snapshot_t &snapshot,
@@ -473,6 +499,7 @@ namespace video {
     // APPEND-ONLY. Session-shared Host SBS mode used by control-side diagnostics while the encode
     // loop owns authoritative application and rollback of atomic-presentation v2 transactions.
     std::shared_ptr<std::atomic<int>> requested_sbs_mode;
+    std::shared_ptr<host_sbs_telemetry::collector> sbs_telemetry_performance;
   };
 
   // Preserve standard NTSC rates instead of approximating them as finite decimal fractions.
@@ -603,9 +630,16 @@ namespace video {
     // Actual desktop/content pixels rendered into this packet. This may predate frame_timestamp
     // for cursor-only capture updates, matched Host SBS output, and repeated encoder input.
     std::optional<std::chrono::steady_clock::time_point> content_timestamp;
+    // Current conversion-pass start, independent of old source pixels and encode/RTP cadence.
+    // Empty when this packet repeats the retained encoder input without a conversion.
+    detail::optional_frame_time_point_t processing_started;
+    // Conservative exact encoder-input proof. Every conversion and encoder replacement clears
+    // this, including cursor-only updates and conversions that ultimately render cached pixels.
+    bool encoder_input_retained = false;
     // Filled only by diagnostic runs; the broadcast worker must preserve the encoder's output
     // classification instead of inferring freshness from packet delivery order or cadence.
     detail::diagnostic_content_e diagnostic_content = detail::diagnostic_content_e::unknown;
+    std::shared_ptr<host_sbs_telemetry::collector> sbs_telemetry_performance;
     // Timestamp after encoding, used independently from the capture timestamp to bound only
     // host-side encoded-packet backlog.
     std::chrono::steady_clock::time_point encoded_timestamp = std::chrono::steady_clock::now();

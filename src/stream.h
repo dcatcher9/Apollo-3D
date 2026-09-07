@@ -62,6 +62,33 @@ namespace stream {
   constexpr std::chrono::milliseconds CONTROL_OUTGOING_MAX_WAIT {10};
   constexpr std::size_t VIDEO_RS_CONTEXT_CACHE_LIMIT = 8;
   constexpr std::size_t VIDEO_SEND_WORKSPACE_RETAIN_LIMIT = 16 * 1024 * 1024;
+  constexpr std::uint32_t CLIENT_FEATURE_SOURCE_FRAME_ID_V1 = 0x10;
+
+  /** Send-channel identity for a proven retained encoder input, never a content-age heuristic. */
+  class source_frame_id_t {
+  public:
+    [[nodiscard]] constexpr std::uint16_t next_frame(
+      const bool negotiated,
+      const std::uint32_t frame_index,
+      const bool encoder_input_retained,
+      const bool idr,
+      const bool reference_invalidated
+    ) noexcept {
+      if (!negotiated) {
+        return 0;
+      }
+      const bool contiguous = last_frame_index_ && frame_index == *last_frame_index_ + 1u;
+      if (token_ == 0 || !contiguous || !encoder_input_retained || idr || reference_invalidated) {
+        token_ = token_ == std::numeric_limits<std::uint16_t>::max() ? 1 : token_ + 1;
+      }
+      last_frame_index_ = frame_index;
+      return token_;
+    }
+
+  private:
+    std::optional<std::uint32_t> last_frame_index_;
+    std::uint16_t token_ = 0;
+  };
 
   constexpr std::size_t CONTROL_HEADER_V2_SIZE = 2 * sizeof(std::uint16_t);
   constexpr std::size_t CONTROL_GCM_TAG_SIZE = 16;
@@ -503,13 +530,13 @@ namespace stream {
 
   // Artemis host-SBS telemetry control extension:
   //   0x3009 client -> host subscription (8-byte body)
-  //   0x300A host -> client state        (88-byte body)
+  //   0x300A host -> client state        (240-byte body)
   //
   // All values below are wire-visible. Keep their numbering and sizes append-only and in sync
   // with moonlight-common-c's Limelight.h.
-  constexpr std::uint8_t SBS_TELEMETRY_VERSION = 1;
+  constexpr std::uint8_t SBS_TELEMETRY_VERSION = 2;
   constexpr std::size_t SBS_TELEMETRY_SUBSCRIPTION_PAYLOAD_SIZE = 8;
-  constexpr std::size_t SBS_TELEMETRY_STATE_PAYLOAD_SIZE = 88;
+  constexpr std::size_t SBS_TELEMETRY_STATE_PAYLOAD_SIZE = 240;
   constexpr std::uint16_t SBS_TELEMETRY_INTERVAL_MIN_MS = 100;
   constexpr std::uint16_t SBS_TELEMETRY_INTERVAL_MAX_MS = 2000;
   constexpr std::uint16_t SBS_TELEMETRY_INTERVAL_BACKGROUND_MS = 500;
@@ -582,7 +609,7 @@ namespace stream {
     video::sbs_telemetry_snapshot_t snapshot;
   };
 
-  /** Serialize the exact 88-byte little-endian state body; rejects non-finite float fields. */
+  /** Serialize the exact 240-byte little-endian state body; rejects non-finite float fields. */
   [[nodiscard]] bool encode_sbs_telemetry_state_payload(
     const sbs_telemetry_state_t &state,
     std::uint8_t (&out)[SBS_TELEMETRY_STATE_PAYLOAD_SIZE]
@@ -600,6 +627,7 @@ namespace stream {
     int videoQosType;
     bool client_supports_sbs_telemetry = false;
     bool client_supports_atomic_presentation_v2 = false;
+    bool client_supports_source_frame_id_v1 = false;
   };
 
   namespace session {

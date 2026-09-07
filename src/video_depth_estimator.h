@@ -3,6 +3,7 @@
 #include "config.h"
 #include "host_sbs_adaptive_submission.h"
 #include "host_sbs_resolution.h"
+#include "host_sbs_telemetry_perf.h"
 
 #include <chrono>
 #include <cstddef>
@@ -1109,6 +1110,8 @@ namespace models {
     std::uint32_t external_cut_count = 0;
     std::uint32_t empty_raw_count = 0;
     std::uint32_t collapsed_raw_count = 0;
+    // Latest authenticated completed transaction at copy submission. An opaque transaction may
+    // retain the earlier real depth owner; this diagnostic ID never identifies that owner.
     std::uint64_t sampled_frame_id = 0;
     // Exact wall-clock owner of the CopyResource that captured this CutBridge state. Readback may
     // complete much later and must never make old motion evidence look fresh.
@@ -1149,6 +1152,8 @@ namespace models {
     );
 
     ~video_depth_estimator();
+    // Called on the owning render thread before the first submission. Null outside diagnostics.
+    void set_telemetry_performance(std::shared_ptr<host_sbs_telemetry::collector> performance);
 
     /** True only when every mandatory engine, shader, and session resource initialized. */
     bool is_valid() const;

@@ -106,7 +106,7 @@ ordinary reuse freezes the complete OCR8/SLR13/conditioned-final tuple along wit
 camera, and V2 Base. A due reuse freezes the depth tuple but advances the subtitle observation and
 conditions retained immutable Base. Native USER32 suppression publishes neither OCR nor locator
 state and publishes Base as the atomic final field. The private depth branch still cannot become CPU
-depth cache, damage lineage, or telemetry.
+depth cache or damage lineage, and an external health snapshot does not reveal that branch.
 
 The adaptive depth decision deliberately has no OCR-band, localized subtitle-transition, or
 SLR-state veto. Ordinary work consumes OCR cells only with complete proposal/request/optional-
@@ -122,7 +122,10 @@ retained boxes are never relabeled. Invalid opaque receipt evidence instead hold
 tuple. Failure to publish the complete joined tuple is terminal.
 
 Every GPU-undecided transaction arms a depth observation barrier regardless of its opaque branch.
-Exact depth-cache reuse and new CutBridge telemetry cannot bypass that barrier. The barrier may
+Exact depth-cache reuse cannot bypass that barrier. Externally requested nonblocking CutBridge
+health snapshots may observe completed opaque transactions, but their frame ID is diagnostic
+observation identity, never a real inference owner or branch decision. They cannot clear the
+barrier or feed production state. The barrier may
 admit a fresh same-route DDup-authenticated follow-up bound to the
 immediately preceding opaque transaction; that scalar anchor is not host cache or branch knowledge.
 An already-completed exact captured image is not a new observation: its matching completion or

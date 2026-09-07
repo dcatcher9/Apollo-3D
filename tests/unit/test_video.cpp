@@ -191,15 +191,34 @@ namespace {
     );
   }
 
-  TEST(RenderedContentTimestampTest, ProcessingTelemetryPrefersContentButCadenceStaysSeparate) {
+  TEST(RenderedContentTimestampTest, ContentAgePrefersRenderedPixelsButCadenceStaysSeparate) {
     const auto content_t0 = std::chrono::steady_clock::time_point {10ms};
     const auto presentation_t1 = std::chrono::steady_clock::time_point {20ms};
 
     EXPECT_EQ(
-      video::detail::select_processing_timestamp(content_t0, presentation_t1),
+      video::detail::select_content_timestamp(content_t0, presentation_t1),
       content_t0
     );
     EXPECT_EQ(presentation_t1, std::chrono::steady_clock::time_point {20ms});
+  }
+
+  TEST(VideoProcessingLatencyTest, OldContentAndCadenceDoNotInflateCurrentProcessingWork) {
+    const auto content = std::chrono::steady_clock::time_point {10ms};
+    const auto conversion_started = content + 30s;
+    const auto sent = conversion_started + 7250us;
+    EXPECT_EQ(video::detail::frame_processing_latency_tenths_ms(conversion_started, sent), 73u);
+    EXPECT_EQ(video::detail::diagnostic_elapsed_ms(content, sent), 30007.25);
+    // A retained output reports no new processing sample while content age remains observable.
+    EXPECT_EQ(video::detail::frame_processing_latency_tenths_ms(std::nullopt, sent), 0u);
+  }
+
+  TEST(VideoProcessingLatencyTest, MissingRegressedRoundedAndSaturatedDurationsAreBounded) {
+    const auto started = std::chrono::steady_clock::time_point {10ms};
+    EXPECT_EQ(video::detail::frame_processing_latency_tenths_ms(std::nullopt, started), 0u);
+    EXPECT_EQ(video::detail::frame_processing_latency_tenths_ms(started, started - 1us), 0u);
+    EXPECT_EQ(video::detail::frame_processing_latency_tenths_ms(started, started + 49us), 0u);
+    EXPECT_EQ(video::detail::frame_processing_latency_tenths_ms(started, started + 50us), 1u);
+    EXPECT_EQ(video::detail::frame_processing_latency_tenths_ms(started, started + 1h), 65535u);
   }
 
   std::string read_source_file(const std::string &path) {
@@ -215,6 +234,57 @@ namespace {
     // Normalize Windows CRLF so the same assertions run on native Windows and Unix worktrees.
     std::erase(source, '\r');
     return source;
+  }
+
+  TEST(VideoProcessingLatencyTest, PacketPipelineKeepsSourceAgeAndProcessingDistinct) {
+    const auto video_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/video.cpp");
+    const auto stream_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/stream.cpp");
+    ASSERT_FALSE(video_source.empty());
+    ASSERT_FALSE(stream_source.empty());
+    EXPECT_NE(video_source.find("packet->processing_started = processing_started;"), std::string::npos);
+    EXPECT_NE(video_source.find("processing_started.reset();"), std::string::npos);
+    EXPECT_NE(video_source.find("processing_started = std::chrono::steady_clock::now();"), std::string::npos);
+    EXPECT_NE(video_source.find("bool first_encoder_output = true;"), std::string::npos);
+    EXPECT_NE(video_source.find("first_encoder_output = false;"), std::string::npos);
+    const auto wire_start = stream_source.find("if (packet->processing_started || stage_diagnostics)");
+    const auto wire_end = stream_source.find("auto fecPercentage", wire_start);
+    ASSERT_NE(wire_start, std::string::npos);
+    ASSERT_NE(wire_end, std::string::npos);
+    const auto wire_body = stream_source.substr(wire_start, wire_end - wire_start);
+    EXPECT_NE(wire_body.find("packet->processing_started,\n          measured_at"), std::string::npos);
+    EXPECT_NE(wire_body.find("packet->content_timestamp,\n            packet->frame_timestamp"), std::string::npos);
+    EXPECT_NE(wire_body.find("stage_diagnostics->repeated_content_age"), std::string::npos);
+    EXPECT_NE(wire_body.find("frame_header.frame_processing_latency = 0;"), std::string::npos);
+  }
+
+  TEST(HostSbsTelemetryTest, OpaqueCompletedHealthCannotBecomeInferenceAuthority) {
+    const auto display = read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
+    ASSERT_FALSE(display.empty());
+    const auto completion = display.find("const auto retain_completed_lineage =");
+    const auto authority = display.find("const bool barrier_force_infer_completion_accepted", completion);
+    ASSERT_NE(completion, std::string::npos);
+    ASSERT_NE(authority, std::string::npos);
+    const auto observation = display.substr(completion, authority - completion);
+    EXPECT_NE(observation.find("!est.completed_frame_valid"), std::string::npos);
+    EXPECT_NE(observation.find("using_cached_estimate"), std::string::npos);
+    EXPECT_NE(observation.find("models::parallax_v2_result_is_authenticated(est)"), std::string::npos);
+    EXPECT_NE(observation.find("sbs_telemetry_last_sampled_frame_id = est.completed_frame_id;"), std::string::npos);
+    EXPECT_EQ(observation.find("known_force_infer_completion"), std::string::npos);
+    const auto authority_end = display.find("// Retire a ready prior root", authority);
+    ASSERT_NE(authority_end, std::string::npos);
+    const auto authority_body = display.substr(authority, authority_end - authority);
+    EXPECT_NE(authority_body.find("known_force_infer_completion(est, *matched_render_slot)"), std::string::npos);
+    EXPECT_NE(authority_body.find("record_known_force_infer_completion("), std::string::npos);
+    EXPECT_EQ(authority_body.find("sbs_telemetry_last_sampled_frame_id"), std::string::npos);
+    const auto poll = display.find("void poll_sbs_telemetry_after_output()");
+    const auto poll_end = display.find("struct sbs_gpu_timer_slot_t", poll);
+    ASSERT_NE(poll, std::string::npos);
+    ASSERT_NE(poll_end, std::string::npos);
+    const auto poll_body = display.substr(poll, poll_end - poll);
+    EXPECT_NE(poll_body.find("external_due && producer_active && sbs_telemetry_last_sampled_frame_id != 0u"), std::string::npos);
+    EXPECT_EQ(poll_body.find("gpu_observation_barrier."), std::string::npos);
+    EXPECT_EQ(poll_body.find("latest_v2_lineage."), std::string::npos);
+    EXPECT_EQ(poll_body.find("adaptive_hold_cadence."), std::string::npos);
   }
 
   float apply_color_vector(const float (&color_vector)[4], float red, float green, float blue) {
@@ -6337,11 +6407,14 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseIsAlwaysOnAndGpuOwned) {
   const auto telemetry_body = display.substr(telemetry_poll, telemetry_poll_end - telemetry_poll);
   EXPECT_NE(telemetry_body.find("const bool external_available ="), std::string::npos);
   EXPECT_NE(telemetry_body.find("if (!external_available)"), std::string::npos);
-  EXPECT_NE(
+  EXPECT_EQ(
     telemetry_body.find("!gpu_observation_barrier.active()"),
     std::string::npos
   );
-
+  EXPECT_NE(
+    telemetry_body.find("sbs_telemetry_last_sampled_frame_id != 0u"),
+    std::string::npos
+  );
 }
 
 
@@ -8075,7 +8148,7 @@ TEST(DirectxShaderSourceTest, HostTelemetryReadbackIsNonblockingAndCutBridgeCont
     enabled_gate
   );
   const auto external_schedule_gate = display.find(
-    "external_due && producer_active && !gpu_observation_barrier.active()",
+    "external_due && producer_active && sbs_telemetry_last_sampled_frame_id != 0u",
     schedule_declaration
   );
   const auto poll_call =
@@ -8625,7 +8698,7 @@ INSTANTIATE_TEST_SUITE_P(
 TEST(HostSbsTelemetryTest, WireVisibleBitAssignmentsAreFrozen) {
   // stream.cpp serializes these masks and the client mirrors them. New flags are append-only:
   // renumbering an existing bit silently changes a running client's interpretation.
-  EXPECT_EQ(platf::platform_caps::sbs_telemetry, 0x40000000u);
+  EXPECT_EQ(platf::platform_caps::host_sbs_telemetry_v2, 0x40000000u);
   EXPECT_EQ(video::sbs_telemetry_valid_field::config, 1u << 0);
   EXPECT_EQ(video::sbs_telemetry_valid_field::effective_pop, 1u << 1);
   EXPECT_EQ(video::sbs_telemetry_valid_field::edge, 1u << 2);

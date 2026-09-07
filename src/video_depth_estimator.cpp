@@ -2105,6 +2105,7 @@ namespace models {
     };
 
     perf_evt_ring perf_depth_conditional;  // GPU arbitration plus either infer or reuse
+    std::shared_ptr<host_sbs_telemetry::collector> telemetry_performance;
 
     // D3D11 timing for the work around TensorRT. CUDA events above deliberately measure only
     // the inference enqueue; these timestamp queries expose the resize/normalization input pass
@@ -2319,6 +2320,9 @@ namespace models {
              parallax_subtitle_start >= parallax_limits_start)) {
           const double to_ms = 1000.0 / static_cast<double>(timing.Frequency);
           if (slot.has_post) {
+            if (telemetry_performance) {
+              telemetry_performance->record(host_sbs_telemetry::stage::postprocess, static_cast<double>(post_end - post_start) * to_ms, std::chrono::steady_clock::now());
+            }
             sbs_perf::add_sample_ms_if_current(
               "depth_postprocess_gpu",
               static_cast<double>(post_end - post_start) * to_ms,
@@ -2373,6 +2377,9 @@ namespace models {
             );
           }
           if (slot.has_pre) {
+            if (telemetry_performance) {
+              telemetry_performance->record(host_sbs_telemetry::stage::preprocess, static_cast<double>(pre_end - pre_start) * to_ms, std::chrono::steady_clock::now());
+            }
             sbs_perf::add_sample_ms_if_current(
               "depth_preprocess_gpu",
               static_cast<double>(pre_end - pre_start) * to_ms,
@@ -2707,6 +2714,9 @@ namespace models {
         return;
       }
       sbs_perf::add_sample_ms(r.stage, ms);
+      if (telemetry_performance && &r == &perf_depth_conditional) {
+        telemetry_performance->record(host_sbs_telemetry::stage::conditional_transaction, ms, std::chrono::steady_clock::now());
+      }
       r.busy[slot] = false;
     }
 
@@ -3181,6 +3191,7 @@ namespace models {
     host_sbs_gpu_outcomes::delta_tracker_t gpu_outcome_counts;
     std::chrono::steady_clock::time_point gpu_outcome_next_poll {};
     std::chrono::steady_clock::time_point gpu_outcome_next_log {};
+    std::chrono::steady_clock::time_point gpu_outcome_copied_at {};
     bool gpu_outcome_readback_pending = false;
     bool gpu_outcome_copy_needed = false;
     bool gpu_outcome_report_pending = false;
@@ -4054,6 +4065,9 @@ namespace models {
     }
 
     void reset_gpu_outcome_resources() noexcept {
+      if (telemetry_performance) {
+        telemetry_performance->invalidate_outcomes();
+      }
       gpu_outcome_buffer.Reset();
       gpu_outcome_uav.Reset();
       gpu_outcome_staging.Reset();
@@ -4155,6 +4169,9 @@ namespace models {
           BOOST_LOG(warning) << "Host SBS diagnostic GPU outcome counters restarted; "
                                 "reporting a new counter epoch.";
         }
+        if (telemetry_performance) {
+          telemetry_performance->record_outcomes(*counts, gpu_outcome_copied_at);
+        }
         gpu_outcome_report_pending = true;
       }
       // A final ready sample can be reported by ordinary idle polls even if no more trace
@@ -4174,6 +4191,7 @@ namespace models {
       if (gpu_outcome_copy_needed) {
         context->CopyResource(gpu_outcome_staging.Get(), gpu_outcome_buffer.Get());
         context->End(gpu_outcome_readback_query.Get());
+        gpu_outcome_copied_at = now;
         gpu_outcome_readback_pending = true;
         gpu_outcome_copy_needed = false;
       }
@@ -9457,6 +9475,12 @@ namespace models {
       )) {}
 
   video_depth_estimator::~video_depth_estimator() = default;
+
+  void video_depth_estimator::set_telemetry_performance(std::shared_ptr<host_sbs_telemetry::collector> performance) {
+    if (pimpl && pimpl->diagnostics_enabled) {
+      pimpl->telemetry_performance = std::move(performance);
+    }
+  }
 
   bool video_depth_estimator::is_valid() const {
     return pimpl && pimpl->is_operational();

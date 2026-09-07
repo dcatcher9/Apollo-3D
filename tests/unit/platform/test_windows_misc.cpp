@@ -906,6 +906,35 @@ namespace {
     );
   }
 
+  TEST(WindowsHostSbsTelemetryTest, HeldPostCutStateAnnouncesTheEventOnlyOnce) {
+    using platf::dxgi::detail::host_sbs_telemetry_cut_pulse;
+    const std::uint32_t cut_count = 7;
+    EXPECT_TRUE(host_sbs_telemetry_cut_pulse(false, 0, cut_count, true));
+    // Near/idle retention freezes the raw pulse bit, but periodic health copies are not new cuts.
+    for (unsigned copy = 0; copy < 1000; ++copy) {
+      EXPECT_FALSE(host_sbs_telemetry_cut_pulse(true, cut_count, cut_count, true));
+    }
+    EXPECT_FALSE(host_sbs_telemetry_cut_pulse(true, cut_count, cut_count, false));
+  }
+
+  TEST(WindowsHostSbsTelemetryTest, DurableCountFindsACutMissedBySparseHealthCopies) {
+    using platf::dxgi::detail::host_sbs_telemetry_cut_pulse;
+    EXPECT_TRUE(host_sbs_telemetry_cut_pulse(true, 7, 8, false));
+    EXPECT_FALSE(host_sbs_telemetry_cut_pulse(true, 8, 8, false));
+    // Coalesced observations preserve the true cumulative count and emit only one notification.
+    EXPECT_TRUE(host_sbs_telemetry_cut_pulse(true, 8, 11, false));
+    EXPECT_FALSE(host_sbs_telemetry_cut_pulse(true, 11, 11, true));
+  }
+
+  TEST(WindowsHostSbsTelemetryTest, DomainResetDoesNotInventAnEditorialCut) {
+    using platf::dxgi::detail::host_sbs_telemetry_cut_pulse;
+    // Domain reset clears has_sample before the reset counter can reach this publisher.
+    EXPECT_FALSE(host_sbs_telemetry_cut_pulse(false, 11, 0, false));
+    EXPECT_FALSE(host_sbs_telemetry_cut_pulse(true, 0, 0, false));
+    EXPECT_TRUE(host_sbs_telemetry_cut_pulse(true, 0, 1, true));
+    EXPECT_FALSE(host_sbs_telemetry_cut_pulse(true, 1, 1, true));
+  }
+
   TEST(WindowsHostSbsCompletedSourceTest, LateOpaqueCompletionRendersOnceWithoutForcingAnotherObservation) {
     using namespace std::chrono_literals;
     using action_e = platf::dxgi::detail::host_sbs_completed_source_action_e;

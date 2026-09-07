@@ -26,6 +26,76 @@ using namespace std::chrono_literals;
 
 static_assert(stream::CONTROL_OUTGOING_MAX_WAIT <= 10ms);
 
+TEST(SourceFrameIdTest, CapabilityValuesAndLegacyZeroAreStable) {
+  EXPECT_EQ(platf::platform_caps::source_frame_id_v1, 0x10000000u);
+  EXPECT_EQ(stream::CLIENT_FEATURE_SOURCE_FRAME_ID_V1, 0x10u);
+  stream::source_frame_id_t source;
+  for (std::uint32_t frame = 0; frame < 20; ++frame) {
+    EXPECT_EQ(source.next_frame(false, frame, true, false, false), 0u);
+  }
+  EXPECT_EQ(source.next_frame(true, 20, true, false, false), 1u);
+}
+
+TEST(SourceFrameIdTest, OnlyContinuousRetainedInputsKeepTheirToken) {
+  stream::source_frame_id_t source;
+  const auto first = source.next_frame(true, 1, false, false, false);
+  ASSERT_NE(first, 0u);
+  for (std::uint32_t frame = 2; frame <= 1000; ++frame) {
+    EXPECT_EQ(source.next_frame(true, frame, true, false, false), first);
+  }
+  // A conversion is fresh even when the capture content clock is unchanged (e.g. cursor motion).
+  EXPECT_EQ(source.next_frame(true, 1001, false, false, false), first + 1u);
+  EXPECT_EQ(source.next_frame(true, 1002, true, false, false), first + 1u);
+}
+
+TEST(SourceFrameIdTest, IdrAndReferenceRecoveryInvalidateRetainedProofOnce) {
+  stream::source_frame_id_t source;
+  EXPECT_EQ(source.next_frame(true, 1, false, true, true), 1u);
+  EXPECT_EQ(source.next_frame(true, 2, true, true, false), 2u);
+  EXPECT_EQ(source.next_frame(true, 3, true, false, true), 3u);
+  // Multiple reasons to reject reuse still advance only once for this encoded frame.
+  EXPECT_EQ(source.next_frame(true, 4, false, true, true), 4u);
+  EXPECT_EQ(source.next_frame(true, 5, true, false, false), 4u);
+}
+
+TEST(SourceFrameIdTest, MissingRegressedAndDuplicateOutgoingFramesStartNewIdentity) {
+  stream::source_frame_id_t source;
+  EXPECT_EQ(source.next_frame(true, 10, false, false, false), 1u);
+  EXPECT_EQ(source.next_frame(true, 12, true, false, false), 2u);
+  EXPECT_EQ(source.next_frame(true, 12, true, false, false), 3u);
+  EXPECT_EQ(source.next_frame(true, 11, true, false, false), 4u);
+  EXPECT_EQ(source.next_frame(true, 12, true, false, false), 4u);
+}
+
+TEST(SourceFrameIdTest, EncoderReplacementCannotReuseTheOldInputWithoutConversion) {
+  stream::source_frame_id_t source;
+  EXPECT_EQ(source.next_frame(true, 1, video::detail::encoder_input_was_retained(true, false), false, false), 1u);
+  EXPECT_EQ(source.next_frame(true, 2, video::detail::encoder_input_was_retained(false, false), false, false), 1u);
+  // The replacement encoder's first output can be its dummy prime and must be distinct.
+  EXPECT_EQ(source.next_frame(true, 3, video::detail::encoder_input_was_retained(true, false), false, false), 2u);
+  EXPECT_EQ(source.next_frame(true, 4, video::detail::encoder_input_was_retained(false, false), false, false), 2u);
+  EXPECT_EQ(source.next_frame(true, 5, video::detail::encoder_input_was_retained(false, true), false, false), 3u);
+}
+
+TEST(SourceFrameIdTest, TokenWrapSkipsUnknownAndWireFrameWrapRemainsContinuous) {
+  stream::source_frame_id_t source;
+  for (std::uint32_t frame = 1; frame <= 65535; ++frame) {
+    ASSERT_EQ(source.next_frame(true, frame, false, false, false), frame);
+  }
+  EXPECT_EQ(source.next_frame(true, 65536, false, false, false), 1u);
+  EXPECT_EQ(source.next_frame(true, 65537, true, false, false), 1u);
+
+  stream::source_frame_id_t wrapping_frames;
+  const auto token = wrapping_frames.next_frame(
+    true,
+    std::numeric_limits<std::uint32_t>::max(),
+    false,
+    false,
+    false
+  );
+  EXPECT_EQ(wrapping_frames.next_frame(true, 0, true, false, false), token);
+}
+
 TEST(SbsDebugDumpRequestTest, RequiresRuntimeHostSbsOwnershipAndSessionLatch) {
   EXPECT_TRUE(stream::sbs_debug_dump_request_allowed(video::SBS_AI, true));
   EXPECT_FALSE(stream::sbs_debug_dump_request_allowed(video::SBS_OFF, true));
@@ -732,9 +802,9 @@ TEST(AtomicPresentationAckTests, RefusalsReportTheLastProvenMode) {
 }
 
 TEST(SbsTelemetryWireTests, VersionSizesFlagsAndStatusesAreFrozen) {
-  EXPECT_EQ(stream::SBS_TELEMETRY_VERSION, 1);
+  EXPECT_EQ(stream::SBS_TELEMETRY_VERSION, 2);
   EXPECT_EQ(stream::SBS_TELEMETRY_SUBSCRIPTION_PAYLOAD_SIZE, 8);
-  EXPECT_EQ(stream::SBS_TELEMETRY_STATE_PAYLOAD_SIZE, 88);
+  EXPECT_EQ(stream::SBS_TELEMETRY_STATE_PAYLOAD_SIZE, 240);
   EXPECT_EQ(stream::SBS_TELEMETRY_SUBSCRIBE_ENABLED, 1u << 0);
   EXPECT_EQ(stream::SBS_TELEMETRY_SUBSCRIBE_FOCUSED, 1u << 1);
   EXPECT_EQ(stream::CLIENT_FEATURE_SBS_TELEMETRY, 0x04u);
@@ -963,28 +1033,94 @@ TEST(SbsTelemetryWireTests, EncodesEveryStateFieldAtItsFrozenLittleEndianOffset)
   state.snapshot.sampled_frame_id = 0xDEADBEEF;
 
   const std::array<std::uint8_t, stream::SBS_TELEMETRY_STATE_PAYLOAD_SIZE> expected {
-    0x01, 0x02, 0xEF, 0xBE,
-    0x44, 0x33, 0x22, 0x11,
-    0x88, 0x77, 0x66, 0x55,
-    0xD4, 0xC3, 0xB2, 0xA1,
-    0x40, 0x30, 0x20, 0x10,
-    0x02, 0x03, 0xB2, 0x01,
-    0x03, 0x00, 0x00, 0x00,
-    0x9A, 0x99, 0x99, 0x3F,
-    0x00, 0x00, 0x00, 0x40,
-    0x00, 0x00, 0xC0, 0x3F,
-    0x00, 0x00, 0x00, 0x3E,
-    0x00, 0x00, 0x80, 0x3E,
-    0x00, 0x00, 0x20, 0xC0,
-    0x00, 0x00, 0x00, 0x3F,
-    0x00, 0x00, 0x40, 0x3F,
-    0x00, 0x00, 0x80, 0x3D,
-    0x04, 0x03, 0x02, 0x01,
-    0x14, 0x13, 0x12, 0x11,
-    0x24, 0x23, 0x22, 0x21,
-    0x34, 0x33, 0x32, 0x31,
-    0x44, 0x43, 0x42, 0x41,
-    0xEF, 0xBE, 0xAD, 0xDE,
+    0x02,
+    0x02,
+    0xEF,
+    0xBE,
+    0x44,
+    0x33,
+    0x22,
+    0x11,
+    0x88,
+    0x77,
+    0x66,
+    0x55,
+    0xD4,
+    0xC3,
+    0xB2,
+    0xA1,
+    0x40,
+    0x30,
+    0x20,
+    0x10,
+    0x02,
+    0x03,
+    0xB2,
+    0x01,
+    0x03,
+    0x00,
+    0x00,
+    0x00,
+    0x9A,
+    0x99,
+    0x99,
+    0x3F,
+    0x00,
+    0x00,
+    0x00,
+    0x40,
+    0x00,
+    0x00,
+    0xC0,
+    0x3F,
+    0x00,
+    0x00,
+    0x00,
+    0x3E,
+    0x00,
+    0x00,
+    0x80,
+    0x3E,
+    0x00,
+    0x00,
+    0x20,
+    0xC0,
+    0x00,
+    0x00,
+    0x00,
+    0x3F,
+    0x00,
+    0x00,
+    0x40,
+    0x3F,
+    0x00,
+    0x00,
+    0x80,
+    0x3D,
+    0x04,
+    0x03,
+    0x02,
+    0x01,
+    0x14,
+    0x13,
+    0x12,
+    0x11,
+    0x24,
+    0x23,
+    0x22,
+    0x21,
+    0x34,
+    0x33,
+    0x32,
+    0x31,
+    0x44,
+    0x43,
+    0x42,
+    0x41,
+    0xEF,
+    0xBE,
+    0xAD,
+    0xDE,
   };
   std::uint8_t encoded[stream::SBS_TELEMETRY_STATE_PAYLOAD_SIZE] {};
 
@@ -1010,4 +1146,57 @@ TEST(SbsTelemetryWireTests, FailedEncodeLeavesTheCallerBufferUntouched) {
   EXPECT_TRUE(std::all_of(std::begin(encoded), std::end(encoded), [](std::uint8_t byte) {
     return byte == 0xA5;
   }));
+}
+
+TEST(SbsTelemetryWireTests, V2PerformanceOffsetsIncludeActualCountsAndIndependentStageSamples) {
+  using namespace host_sbs_telemetry;
+  stream::sbs_telemetry_state_t state;
+  state.status = stream::sbs_telemetry_status_e::ok;
+  state.snapshot.performance = std::make_shared<collector>();
+  const auto now = host_sbs_telemetry::clock_t::time_point {std::chrono::milliseconds(0x12345678)};
+  state.snapshot.performance->record_outcomes({0x0102030405060708ull, 80, 3}, now);
+  state.snapshot.performance->record_output(false, true, now);
+  state.snapshot.performance->record_output(true, false, now);
+  state.snapshot.performance->record_output(false, false, now);
+  for (std::size_t i = 0; i < 8; ++i) {
+    state.snapshot.performance->record(static_cast<stage>(i), static_cast<double>(i + 1), now);
+  }
+  std::uint8_t encoded[stream::SBS_TELEMETRY_STATE_PAYLOAD_SIZE] {};
+  ASSERT_TRUE(stream::encode_sbs_telemetry_state_payload(state, encoded));
+  auto u32 = [&](std::size_t offset) {
+    return static_cast<std::uint32_t>(encoded[offset]) | static_cast<std::uint32_t>(encoded[offset + 1]) << 8 |
+           static_cast<std::uint32_t>(encoded[offset + 2]) << 16 | static_cast<std::uint32_t>(encoded[offset + 3]) << 24;
+  };
+  EXPECT_EQ(encoded[0], 2u);
+  EXPECT_EQ(u32(12), 0x001FF800u);
+  EXPECT_EQ(u32(88), 1u);
+  EXPECT_EQ(u32(92), 1u);
+  EXPECT_EQ(u32(96), 0x12345678u);
+  EXPECT_EQ(u32(100), 0u);
+  EXPECT_EQ(u32(104), 0x05060708u);
+  EXPECT_EQ(u32(108), 0x01020304u);
+  EXPECT_EQ(u32(112), 80u);
+  EXPECT_EQ(u32(116), 0u);
+  EXPECT_EQ(u32(120), 3u);
+  EXPECT_EQ(u32(124), 0u);
+  EXPECT_EQ(u32(128), 0x12345678u);
+  EXPECT_EQ(u32(132), 1u);
+  EXPECT_EQ(u32(136), 1u);
+  EXPECT_EQ(u32(140), 1u);
+  for (std::size_t i = 0; i < 8; ++i) {
+    const float expected = static_cast<float>(i + 1);
+    std::uint32_t bits;
+    std::memcpy(&bits, &expected, sizeof(bits));
+    EXPECT_EQ(u32(144 + i * 12), bits);
+    EXPECT_EQ(u32(148 + i * 12), 1u);
+    EXPECT_EQ(u32(152 + i * 12), 0x12345678u);
+  }
+  EXPECT_EQ(state.snapshot.performance->snapshot().outcomes.reuse, 80u);
+}
+
+TEST(SbsTelemetryWireTests, RetiredSubscriptionVersionIsUnsupportedWithoutLosingRequestId) {
+  const std::array<std::uint8_t, 8> payload {1, 1, 0x34, 0x12, 0, 0, 0, 0};
+  stream::sbs_telemetry_subscription_request_t request;
+  EXPECT_EQ(stream::decode_sbs_telemetry_subscription_payload(std::string_view {reinterpret_cast<const char *>(payload.data()), payload.size()}, request), stream::sbs_telemetry_subscription_decode_e::unsupported_version);
+  EXPECT_EQ(request.request_id, 0x1234u);
 }

@@ -1765,7 +1765,8 @@ namespace platf {
    */
   platform_caps::caps_t get_capabilities() {
     platform_caps::caps_t caps =
-      platform_caps::atomic_presentation_v2 | platform_caps::sbs_telemetry;
+      platform_caps::source_frame_id_v1 |
+      platform_caps::atomic_presentation_v2 | platform_caps::host_sbs_telemetry_v2;
 
     // We support controller touchpad input as long as we're not emulating X360
     if (config::input.gamepad != "x360"sv) {

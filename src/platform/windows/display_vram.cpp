@@ -1064,6 +1064,12 @@ namespace platf::dxgi {
             ) {
               return;
             }
+            // This is only the observation represented by the diagnostic CutBridge copy. An
+            // authenticated opaque completion may have inferred or retained depth; publishing
+            // its current health never resolves that branch or creates an inference owner.
+            if (models::parallax_v2_result_is_authenticated(est)) {
+              sbs_telemetry_last_sampled_frame_id = est.completed_frame_id;
+            }
             D3D11_TEXTURE2D_DESC completed_source_desc = live_source_desc;
             if (matched_render_slot->texture) {
               matched_render_slot->texture->GetDesc(&completed_source_desc);
@@ -1148,10 +1154,6 @@ namespace platf::dxgi {
                     }
                     matched_render_slot = completed_slot;
                     render_input_srv = completed_slot->srv.get();
-                    if (known_force_infer_completion(polled.result, *completed_slot)) {
-                      sbs_telemetry_last_sampled_frame_id =
-                        polled.result.completed_frame_id;
-                    }
                     est = std::move(polled.result);
                     if (diagnostics_enabled) {
                       const double age_ms =
@@ -1553,10 +1555,6 @@ namespace platf::dxgi {
                     }
                     matched_render_slot = completed_slot;
                     render_input_srv = completed_slot->srv.get();
-                    if (known_force_infer_completion(polled.result, *completed_slot)) {
-                      sbs_telemetry_last_sampled_frame_id =
-                        polled.result.completed_frame_id;
-                    }
                     const auto completed_reuse_kind =
                       current_input_reuse_kind(*completed_slot);
                     force_fresh_current_color =
@@ -1770,9 +1768,6 @@ namespace platf::dxgi {
                   if (matched_render_slot) {
                     matched_render_slot->pending = false;
                     render_input_srv = matched_render_slot->srv.get();
-                    if (known_force_infer_completion(est, *matched_render_slot)) {
-                      sbs_telemetry_last_sampled_frame_id = est.completed_frame_id;
-                    }
                     if (diagnostics_enabled) {
                       const double age_ms = std::chrono::duration<double, std::milli>(
                                               std::chrono::steady_clock::now() - matched_render_slot->captured_at
@@ -2017,13 +2012,6 @@ namespace platf::dxgi {
                       }
                       matched_render_slot = matched_candidate_slot;
                       render_input_srv = matched_candidate_slot->srv.get();
-                      if (known_force_infer_completion(
-                            polled.result,
-                            *matched_candidate_slot
-                          )) {
-                        sbs_telemetry_last_sampled_frame_id =
-                          polled.result.completed_frame_id;
-                      }
                       est = std::move(polled.result);
                       if (diagnostics_enabled) {
                         const double age_ms =
@@ -2830,6 +2818,9 @@ namespace platf::dxgi {
                                << matched_stats_gpu_followup_force_fallbacks;
               reset_matched_stats(now);
             }
+            if (sbs_telemetry_performance) {
+              sbs_telemetry_performance->record_output(repeat_matched_output, v2_live_warp_selected, now);
+            }
           }
 
         } else {
@@ -2952,6 +2943,9 @@ namespace platf::dxgi {
         if (depth_estimator_build.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
           try {
             depth_estimator = depth_estimator_build.get();
+            if (depth_estimator) {
+              depth_estimator->set_telemetry_performance(sbs_telemetry_performance);
+            }
           } catch (const std::exception &e) {
             // Don't let a background-build exception propagate on the encode thread (it would end
             // the stream); log it, clear the client's "loading" indicator, and stream flat.
@@ -3114,6 +3108,7 @@ namespace platf::dxgi {
       snapshot.status = status;
       snapshot.generation = sbs_telemetry_generation;
       snapshot.sequence = next_sbs_telemetry_sequence();
+      snapshot.performance = sbs_telemetry_performance;
       ::video::apply_sbs_telemetry_config(snapshot, sbs_config);
       return snapshot;
     }
@@ -3179,10 +3174,7 @@ namespace platf::dxgi {
       ) {
         snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::appearance_armed;
       }
-      const bool unseen_cut =
-        sbs_telemetry_has_sample &&
-        sample.hard_cut_count != sbs_telemetry_last_hard_cut_count;
-      if (sample.hard_cut_pulse || unseen_cut) {
+      if (detail::host_sbs_telemetry_cut_pulse(sbs_telemetry_has_sample, sbs_telemetry_last_hard_cut_count, sample.hard_cut_count, sample.hard_cut_pulse)) {
         snapshot.runtime_flags |= ::video::sbs_telemetry_runtime_flag::hard_cut_pulse;
       }
       sbs_telemetry_last_hard_cut_count = sample.hard_cut_count;
@@ -3201,7 +3193,6 @@ namespace platf::dxgi {
     }
 
     void poll_sbs_telemetry_after_output() {
-      const auto now = std::chrono::steady_clock::now();
       const bool external_available =
         sbs_telemetry_subscription && sbs_telemetry_event;
       if (!external_available) {
@@ -3209,6 +3200,8 @@ namespace platf::dxgi {
       }
 
       const bool enabled = sbs_telemetry_subscription->enabled();
+      const auto now = enabled ? std::chrono::steady_clock::now() :
+                                 std::chrono::steady_clock::time_point {};
       const bool producer_active =
         models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer);
       if (!depth_estimator) {
@@ -3230,7 +3223,10 @@ namespace platf::dxgi {
         (sbs_telemetry_last_copy.time_since_epoch().count() == 0 ||
          now - sbs_telemetry_last_copy >= interval);
       const bool schedule_snapshot =
-        external_due && producer_active && !gpu_observation_barrier.active();
+        external_due && producer_active && sbs_telemetry_last_sampled_frame_id != 0u;
+      // The opaque barrier limits production depth lineage, not diagnostic observation. The
+      // copy is ordered after completed postprocessing/output on the same D3D queue and only
+      // produces external health telemetry. Neither its payload nor readiness feeds admission.
       auto result = depth_estimator->poll_depth_telemetry(
         schedule_snapshot,
         sbs_telemetry_last_sampled_frame_id
@@ -3364,12 +3360,18 @@ namespace platf::dxgi {
               static_cast<double>(warp_end - warp_start) * to_ms,
               slot.perf_generation
             );
+            if (sbs_telemetry_performance) {
+              sbs_telemetry_performance->record(host_sbs_telemetry::stage::warp, static_cast<double>(warp_end - warp_start) * to_ms, std::chrono::steady_clock::now());
+            }
           }
           sbs_perf::add_sample_ms_if_current(
             "sbs_output_gpu",
             static_cast<double>(convert_end - warp_end) * to_ms,
             slot.perf_generation
           );
+          if (sbs_telemetry_performance) {
+            sbs_telemetry_performance->record(host_sbs_telemetry::stage::output, static_cast<double>(convert_end - warp_end) * to_ms, std::chrono::steady_clock::now());
+          }
         }
         slot.pending = false;
       }
@@ -5570,7 +5572,8 @@ namespace platf::dxgi {
       std::shared_ptr<::video::sbs_telemetry_subscription_t> telemetry_subscription = {},
       std::uint32_t telemetry_generation = 0,
       std::shared_ptr<std::atomic<bool>> sbs_debug_dump_request = {},
-      bool rgb_only = false
+      bool rgb_only = false,
+      std::shared_ptr<host_sbs_telemetry::collector> telemetry_performance = {}
     ) {
       if (frame_texture) {
         // The underlying frame pool owns the texture, so we must reference it for ourselves.
@@ -5590,6 +5593,7 @@ namespace platf::dxgi {
       sbs_depth_pipeline_ready_event = std::move(depth_pipeline_ready_event);
       sbs_telemetry_event = std::move(telemetry_event);
       sbs_telemetry_subscription = std::move(telemetry_subscription);
+      sbs_telemetry_performance = diagnostics_enabled ? std::move(telemetry_performance) : nullptr;
       sbs_dumper.set_button_request(std::move(sbs_debug_dump_request));
       sbs_flat_identity_ps.reset();
       sbs_reprojection_v2_live_ps.reset();
@@ -6331,6 +6335,7 @@ namespace platf::dxgi {
     std::shared_ptr<safe::event_t<bool>> sbs_depth_pipeline_ready_event;
     safe::mail_raw_t::event_t<::video::sbs_telemetry_snapshot_t> sbs_telemetry_event;
     std::shared_ptr<::video::sbs_telemetry_subscription_t> sbs_telemetry_subscription;
+    std::shared_ptr<host_sbs_telemetry::collector> sbs_telemetry_performance;
     std::uint32_t sbs_telemetry_generation = 0;
     std::uint32_t sbs_telemetry_sequence = 0;
     std::uint64_t sbs_telemetry_last_sampled_frame_id = 0;
@@ -7816,7 +7821,9 @@ namespace platf::dxgi {
                client_config.sbs_telemetry_event,
                client_config.sbs_telemetry_subscription,
                client_config.sbs_telemetry_generation,
-               client_config.sbs_debug_dump_pending
+               client_config.sbs_debug_dump_pending,
+               false,
+               client_config.sbs_telemetry_performance
              ) == 0;
     }
 

@@ -258,10 +258,12 @@ namespace platf {
 
     constexpr caps_t pen_touch = 0x01;  // Pen and touch events
     constexpr caps_t controller_touch = 0x02;  // Controller touch events
+    // Negotiated exact retained encoder-input token in short video-frame header bytes 6..7.
+    constexpr caps_t source_frame_id_v1 = 0x10000000;
     // Correlated 0x3007/0x3008 atomic presentation v2 (Host SBS + quality).
     constexpr caps_t atomic_presentation_v2 = 0x20000000;
     // Sunshine 3D encrypted Host-SBS telemetry extension (0x3009/0x300A).
-    constexpr caps_t sbs_telemetry = 0x40000000;
+    constexpr caps_t host_sbs_telemetry_v2 = 0x40000000;
   };  // namespace platform_caps
 
   struct gamepad_state_t {

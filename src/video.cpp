@@ -60,7 +60,7 @@ namespace video {
       void record(platf::img_t &img) {
         const auto ready = detail::diagnostic_clock_t::now();
         img.diagnostic_capture_ready_timestamp = ready;
-        const auto timestamp = detail::select_processing_timestamp(img.content_timestamp, img.frame_timestamp);
+        const auto timestamp = detail::select_content_timestamp(img.content_timestamp, img.frame_timestamp);
         const auto kind = content.observe(timestamp);
         if (kind != detail::diagnostic_content_e::unknown) {
           log_diagnostic_elapsed(
@@ -73,6 +73,7 @@ namespace video {
     };
 
     struct encode_stage_diagnostics_t {
+      std::shared_ptr<host_sbs_telemetry::collector> performance;
       detail::diagnostic_content_tracker_t input_content;
       detail::diagnostic_content_tracker_t input_capture;
       detail::diagnostic_content_tracker_t output_content;
@@ -97,7 +98,7 @@ namespace video {
 
       void begin_conversion(const platf::img_t &img) {
         const auto entered = detail::diagnostic_clock_t::now();
-        const auto timestamp = detail::select_processing_timestamp(img.content_timestamp, img.frame_timestamp);
+        const auto timestamp = detail::select_content_timestamp(img.content_timestamp, img.frame_timestamp);
         const auto content_kind = input_content.observe(timestamp);
         if (content_kind != detail::diagnostic_content_e::unknown) {
           log_diagnostic_elapsed(
@@ -907,7 +908,9 @@ namespace video {
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp,
     std::optional<std::chrono::steady_clock::time_point> content_timestamp,
     encode_stage_diagnostics_t *diagnostics,
-    bool converted_frame
+    bool converted_frame,
+    detail::optional_frame_time_point_t processing_started,
+    bool first_encoder_output
   ) {
     const auto encode_started = detail::diagnostic_timestamp(diagnostics != nullptr, detail::diagnostic_clock_t::now);
     auto encoded_frame = session.encode_frame(
@@ -915,7 +918,13 @@ namespace video {
       session.acquire_frame_buffer()
     );
     if (diagnostics) {
-      log_diagnostic_elapsed(diagnostics->nvenc_call, encode_started, detail::diagnostic_clock_t::now());
+      const auto measured_at = detail::diagnostic_clock_t::now();
+      log_diagnostic_elapsed(diagnostics->nvenc_call, encode_started, measured_at);
+      if (diagnostics->performance) {
+        if (const auto elapsed = detail::diagnostic_elapsed_ms(encode_started, measured_at)) {
+          diagnostics->performance->record(host_sbs_telemetry::stage::encode, *elapsed, measured_at);
+        }
+      }
     }
     if (encoded_frame.data.empty()) {
       BOOST_LOG(error) << "NvENC returned empty packet";
@@ -937,8 +946,14 @@ namespace video {
     packet->after_ref_frame_invalidation = encoded_frame.after_ref_frame_invalidation;
     packet->frame_timestamp = frame_timestamp;
     packet->content_timestamp = content_timestamp;
+    packet->processing_started = processing_started;
+    packet->encoder_input_retained = detail::encoder_input_was_retained(
+      first_encoder_output,
+      converted_frame
+    );
     if (diagnostics) {
       packet->diagnostic_content = diagnostics->output_content.observe(content_timestamp, !converted_frame);
+      packet->sbs_telemetry_performance = diagnostics->performance;
     }
     const bool packet_is_idr = packet->is_idr();
     // A queued IDR can replace stale packets and immediately repair the reference chain. A delta
@@ -1038,6 +1053,8 @@ namespace video {
     std::chrono::steady_clock::time_point encode_frame_timestamp;
     auto next_mouse_keys_refresh = std::chrono::steady_clock::now() + 1s;
     bool missing_frame_timestamp_warning_logged = false;
+    bool first_encoder_output = true;
+    detail::optional_frame_time_point_t processing_started;
     std::size_t encoded_queue_drops_since_log = 0;
     auto next_encoded_queue_drop_log = std::chrono::steady_clock::now();
 
@@ -1051,15 +1068,25 @@ namespace video {
     auto encode_diagnostics = detail::make_diagnostic_state<encode_stage_diagnostics_t>(
       config::sunshine.diagnostics_enabled
     );
+    if (encode_diagnostics) {
+      encode_diagnostics->performance = config.sbs_telemetry_performance;
+    }
     const auto convert_frame = [&](platf::img_t &img, std::optional<std::chrono::steady_clock::time_point> target = std::nullopt) {
       if (encode_diagnostics) {
         encode_diagnostics->begin_conversion(img);
       }
       // Start after input-stat collection so periodic logger work is not charged to conversion.
-      const auto started = detail::diagnostic_timestamp(encode_diagnostics.has_value(), detail::diagnostic_clock_t::now);
+      processing_started = std::chrono::steady_clock::now();
+      const auto started = processing_started;
       const int result = target ? session->convert_with_encode_target(img, *target) : session->convert(img);
       if (encode_diagnostics) {
-        log_diagnostic_elapsed(encode_diagnostics->conversion_call, started, detail::diagnostic_clock_t::now());
+        const auto measured_at = detail::diagnostic_clock_t::now();
+        log_diagnostic_elapsed(encode_diagnostics->conversion_call, started, measured_at);
+        if (encode_diagnostics->performance) {
+          if (const auto elapsed = detail::diagnostic_elapsed_ms(started, measured_at)) {
+            encode_diagnostics->performance->record(host_sbs_telemetry::stage::conversion, *elapsed, measured_at);
+          }
+        }
       }
       return result;
     };
@@ -1208,6 +1235,7 @@ namespace video {
 
       std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
       bool converted_frame = false;
+      processing_started.reset();
       bool consume_sampled_depth_pipeline_ready = false;
 
       // Idle keepalives preserve static image quality. Pending retained-source conversion is
@@ -1366,12 +1394,15 @@ namespace video {
         frame_timestamp,
         session->rendered_content_timestamp(),
         encode_diagnostics ? &*encode_diagnostics : nullptr,
-        converted_frame
+        converted_frame,
+        processing_started,
+        first_encoder_output
       );
       if (publish_result.failed) {
         BOOST_LOG(error) << "Could not encode video packet"sv;
         break;
       }
+      first_encoder_output = false;
       if (publish_result.dropped_packets > 0) {
         encoded_queue_drops_since_log += publish_result.dropped_packets;
         if (publish_result.request_idr) {
@@ -1632,6 +1663,9 @@ namespace video {
       session_config.sbs_config = config::video.sbs;
       session_config.sbs_telemetry_event = sbs_telemetry_event;
       session_config.sbs_telemetry_generation = next_sbs_telemetry_generation();
+      session_config.sbs_telemetry_performance = config::sunshine.diagnostics_enabled && current_sbs_mode != SBS_OFF ?
+                                                   std::make_shared<host_sbs_telemetry::collector>() :
+                                                   nullptr;
       // Invalidate the previous renderer's state before any encoder/GPU initialization work. This
       // is CPU-only and does not activate telemetry sampling; the render path remains completely
       // dormant until the client's subscription latch is enabled.
@@ -1942,7 +1976,7 @@ namespace video {
       ENCODED_PACKET_QUEUE_LIMIT
     );
     while (!packets->peek()) {
-      if (encode(1, *session, packets, nullptr, {}, {}, nullptr, true).failed) {
+      if (encode(1, *session, packets, nullptr, {}, {}, nullptr, true, {}, true).failed) {
         return -1;
       }
     }

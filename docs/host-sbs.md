@@ -880,8 +880,17 @@ transfer changes, missing identities, and producer failure reject this redeliver
 captured source follows the ordinary unchanged-input or changed-source admission rules.
 
 Every successful GPU-undecided enqueue arms a frame-ID observation barrier. While it is armed, the
-host blocks exact and host-owned approximate depth-cache reuse and new CutBridge
-telemetry copies; already-scheduled telemetry may retire but cannot classify the opaque completion.
+host blocks exact and host-owned approximate depth-cache reuse. An explicit external Stats
+subscription may still request a nonblocking CutBridge health copy after completed output work.
+Its sampled frame ID identifies the latest authenticated completed transaction, which may have
+retained an older real inference owner; it never identifies that owner or resolves the GPU branch.
+The copy and decoded health are diagnostic-only and cannot clear the barrier, seed depth-cache
+lineage, change cadence, or authorize another observation. A packed-image redelivery does not
+advance that completed-transaction identity.
+The external cut-event flag is emitted once for the initial sampled pulse, then only when the
+durable cut count changes. Repeated copies of a Near-held pulse do not announce additional cuts;
+the cumulative count still exposes cuts missed between samples. Domain reset clears this
+diagnostic event history without inventing an editorial cut.
 The barrier may admit a fresh same-route DDup-authenticated follow-up bound to the immediately
 preceding opaque transaction. The model-input history owner advances only when that prior root
 inferred and the shared MinMax/history-state validity predicate also advanced the comparison tensor
@@ -1055,6 +1064,37 @@ a final update from waiting for the default one-fifth-rate heartbeat without spi
 repeated frames faster than the requested cadence. Pipeline initialization readiness may bypass
 the wait entirely, but only after a real captured source has been retained.
 
+### Client exact-repeat transport
+
+The optional `SOURCE_FRAME_ID_V1` capability carries a conservative encoder-input identity to
+Client SBS without comparing pixels or adding a per-frame control message. The host advertises
+feature bit `0x10000000`; it writes the extension only when the client's ANNOUNCE also advertises
+bit `0x10`. Bytes 6–7 of the existing eight-byte short video-frame header hold a little-endian
+`uint16` token. Zero is unknown/unsupported, preserving the legacy header layout.
+
+The send channel advances the token once for each changed or unproven encoder input, wrapping
+`65535` to `1`. It retains the token only for consecutive outgoing encoded frame numbers whose
+encoder input was reused without any conversion. Every conversion, including cursor-only updates
+and Host SBS conversions that choose an existing packed output, advances it. IDR, reference
+invalidation, outgoing-frame discontinuity, and the first output from a replacement encoder also
+advance it. The pixel content timestamp is never source-token authority: it intentionally omits
+cursor-only presentations. This initial scope leaves more aggressive DDup/damage proofs local to
+the host.
+
+The token advances at most once per outgoing encoded frame and belongs to the send channel across
+encoder replacements. Equal nonzero tokens remain unambiguous across a positive unsigned 32-bit
+frame-number distance below 65535; a larger gap can conceal a full token cycle and cannot prove
+retention. The client may advance this transport comparison point after each proven repeat without
+changing its real depth-inference owner.
+
+The client must bind tokens to the exact decoded output, require continuity and matching renderer,
+decoder, and transfer generations, and fall back to decoded-pixel arbitration whenever proof is
+missing or stale. A token permits retaining an already-presented matching buffer; it cannot grant
+depth ownership, skip a changed presentation, or replace ordinary decoder recovery. Original
+Sunshine/Apollo sessions remain on their existing local path.
+
+### Performance observations
+
 Diagnostics retain interval counts for repeated-wait hits at `<= 2 ms`, `(2, 2.5] ms`, and
 `(2.5, 3] ms`, plus the cadence-adaptive over-`3 ms` tail and explicit timeout count. The same line
 reports planned-budget average/maximum and splits hard-`8 ms`-cap timeouts from cadence-limited
@@ -1104,10 +1144,63 @@ stop sampling clocks and copying counters. Dump 3D's ring format is unchanged. W
 disabled, the counter resources are not allocated and this collection
 path performs no clock reads, counter updates, queries, or readbacks.
 
+### Headset Host Stats performance telemetry
+
+The supported encrypted telemetry format is version **2**, advertised by
+`HOST_SBS_TELEMETRY_V2` (`0x40000000`). The existing `0x3009` subscription has an exact eight-byte
+body: version u8, flags u8, request ID u16, requested interval ms u16, reserved-zero u16.
+`0x300A` replies and periodic state use an exact **240-byte**, little-endian body. Unsupported
+subscription versions receive the current format with unsupported-version status. The unreleased
+version-1 format is not supported. Hosts without the capability do not receive this subscription.
+
+Bytes 0–87 retain the health/configuration fields serialized by `stream.cpp`. The performance
+fields are:
+
+| Offset | Value |
+| --- | --- |
+| 88, 92, 96 | GPU counter epoch, sample sequence, staging-copy host timestamp ms (u32 each) |
+| 100 | Reserved zero u32 |
+| 104, 112, 120 | Cumulative GPU infer, reuse, invalid outcomes (u64 each) |
+| 128 | Latest output-counter host timestamp ms (u32) |
+| 132, 136, 140 | Cumulative warped, packed-repeat, flat output counts (u32 each) |
+| 144 + 12 × stage | Mean ms f32, sample count u32, newest sample host timestamp ms u32 |
+
+The eight stage records, in order, are conversion CPU, NVENC encode/retrieve CPU, new-content age
+at packetization admission, warp GPU, preprocess GPU, conditional infer-or-reuse transaction GPU,
+postprocess GPU, and output conversion GPU. Means and sample counts accumulate since the current
+encoder generation; they are not a rolling interval. Each stage has independent sample freshness.
+Nested stages overlap and must not be summed. The conditional transaction includes arbitration and
+whichever infer/reuse branch ran; it is not a pure model-inference timer.
+
+Validity mask bits 11 and 12 mark GPU outcomes and output counters. Bits 13–20 mark the eight stage
+records. Missing measurements stay invalid; a valid measured zero is distinct. Host timestamps are
+the low 32 bits of steady-clock milliseconds. Use bounded unsigned differences, never the client
+wall clock. Derive outcome FPS from distinct GPU sample sequences and their copy timestamps, and
+reuse percentage from `delta_reuse / (delta_infer + delta_reuse)` excluding invalid outcomes.
+Reset baselines on renderer generation, GPU counter epoch, or an implausible timestamp interval.
+Repeated sequence heartbeats do not represent another measurement.
+
+Performance collection requires `diagnostics = enabled`. It reuses the existing GPU outcome
+readback and resolved timing queries, adds no GPU passes or readback resources, and never consumes
+the logging counters. Small generation-owned CPU holders aggregate the already-measured values;
+queued packets retain their original holder through encoder rebuilds. With diagnostics disabled,
+these holders are absent and the performance groups are unavailable, while subscribed health still
+works. Hidden Stats does not snapshot, format, or send performance records. Turning Stats on does
+not turn diagnostic GPU collection on. The legacy normalization-ready/range words are not exposed
+as V2 rendered-field authority.
+
 The host's CPU stage logs distinguish content age from time spent processing a frame. Content age
 begins at the captured pixels' presentation timestamp, so repeated output can be older even when
 its delivery is fast. Diagnostics report fresh and repeated output separately, along with capture
 handoff, conversion, NVENC encode/retrieve, encoded-packet queue residence, and packetization time.
+The standard video-header processing-latency field measures the current conversion-pass start
+through send-side packetization admission, including that pass, NVENC, and encoded-packet queue
+residence. It excludes time before this conversion, including a previously pending inference,
+and subsequent packetization, FEC, and network send; it is not end-to-end source latency. Retained
+encoder inputs with no conversion report zero (no new processing sample), as do
+missing or regressed timestamps. One conversion-start clock read supports this field even with
+diagnostics disabled; stage timing, readbacks, and content-age aggregation remain disabled. Actual
+source/content timestamps and RTP cadence are unchanged.
 NVENC also reports input mapping, picture submission, completion wait, and bitstream lock/copy/
 unlock/unmap separately. CPU stage summaries use the existing twenty-second min/max/average logs.
 The completion wait includes any unfinished input-surface GPU work and the host thread's wakeup
