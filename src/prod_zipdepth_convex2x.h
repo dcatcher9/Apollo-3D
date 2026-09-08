@@ -22,7 +22,7 @@ namespace models::prod_zipdepth_convex2x {
   inline constexpr std::string_view logical_model =
     "prod_dav2_zipdepth_c2x_high_opset18";
   inline constexpr std::string_view engine_recipe =
-    "trt-6high-point-l5-v2";
+    "trt-24high-point-l5-v3";
   inline constexpr std::string_view dav2_onnx_sha256 =
     "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04";
   inline constexpr std::string_view zipdepth_checkpoint_sha256 =
@@ -43,7 +43,7 @@ namespace models::prod_zipdepth_convex2x {
   /** Fixed HIGH TensorRT optimization-profile order for the dynamic fused graph.
    *
    * TensorRT 11.2 cannot compile the dynamic convex tail under a ranged H/W profile. Keeping
-   * all six authenticated public 2x shapes as point profiles in one engine preserves one
+   * all authenticated public 2x shapes as point profiles in one engine preserves one
    * input, one output, one context, and one enqueue while making every tail dimension constant.
    */
   inline constexpr std::array fixed_profile_shapes {
@@ -53,6 +53,24 @@ namespace models::prod_zipdepth_convex2x {
     high_shape_t {868u, 1540u},
     high_shape_t {868u, 2044u},
     high_shape_t {868u, 2072u},
+    high_shape_t {1148u, 868u},
+    high_shape_t {1232u, 868u},
+    high_shape_t {1260u, 868u},
+    high_shape_t {1316u, 868u},
+    high_shape_t {1400u, 868u},
+    high_shape_t {1736u, 868u},
+    high_shape_t {1876u, 868u},
+    high_shape_t {1932u, 868u},
+    high_shape_t {1960u, 868u},
+    high_shape_t {868u, 1148u},
+    high_shape_t {868u, 1232u},
+    high_shape_t {868u, 1260u},
+    high_shape_t {868u, 1316u},
+    high_shape_t {868u, 1400u},
+    high_shape_t {868u, 1736u},
+    high_shape_t {868u, 1876u},
+    high_shape_t {868u, 1932u},
+    high_shape_t {868u, 1960u},
   };
 
   inline constexpr std::optional<std::uint32_t> fixed_profile_index(
@@ -86,7 +104,7 @@ namespace models::prod_zipdepth_convex2x {
 
   static_assert(near_identical_max_tile_group_count == 7150u);
 
-  /** All six production orientations have authenticated refined-field limiters. */
+  /** All production orientations have authenticated refined-field limiters. */
   inline constexpr bool live_geometry_coarse_shape_is_supported(
     const std::uint32_t width,
     const std::uint32_t height

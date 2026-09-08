@@ -113,10 +113,10 @@ def _exact_string_list(value: object, expected: list[str], label: str) -> None:
 def _expected_shape_profiles() -> tuple[tuple[Shape, ...], tuple[Shape, ...]]:
     calibration = coordinate_contract.MODEL_CALIBRATIONS[0]
     coarse = tuple(Shape(width, height) for width, height in calibration.calibrated_input_shapes)
-    if (len(coarse) != 6 or len(set(coarse)) != 6 or
+    if (len(coarse) != 24 or len(set(coarse)) != 24 or
             any(not shape.valid() for shape in coarse)):
         raise ValueError(
-            "depth-coordinate-v2 does not expose the exact six production DAV2 profiles")
+            "depth-coordinate-v2 does not expose the exact 24 production DAV2 profiles")
     high = tuple(Shape(2 * shape.width, 2 * shape.height) for shape in coarse)
     return coarse, high
 
@@ -303,14 +303,14 @@ def _validate_contract(value: object) -> dict[str, object]:
 
     high_shapes = contract.get("high_shapes_wh")
     _, expected_high = _expected_shape_profiles()
-    if (not isinstance(high_shapes, list) or len(high_shapes) != 6 or
+    if (not isinstance(high_shapes, list) or len(high_shapes) != len(expected_high) or
             any(not isinstance(item, list) or len(item) != 2 or
                 any(type(component) is not int or component <= 0 or component % 2 != 0
                     for component in item)
                 for item in high_shapes) or
             tuple(Shape(item[0], item[1]) for item in high_shapes) != expected_high):
         raise ValueError(
-            "prod ZipDepth convex2x contract high profiles must be the exact ordered six "
+            "prod ZipDepth convex2x contract high profiles must be the exact ordered 24 "
             "calibrated convex-2x shapes")
 
     tensorrt = _exact_object(
@@ -321,9 +321,9 @@ def _validate_contract(value: object) -> dict[str, object]:
     if (tensorrt.get("minimum_tested_version") != "11.2.1" or
             type(tensorrt.get("builder_optimization_level")) is not int or
             tensorrt["builder_optimization_level"] != 5 or
-            tensorrt.get("engine_recipe") != "trt-6high-point-l5-v2" or
+            tensorrt.get("engine_recipe") != "trt-24high-point-l5-v3" or
             tensorrt.get("profile_strategy") !=
-            "one-engine-six-fixed-high-point-profiles" or
+            "one-engine-fixed-high-point-profiles" or
             tensorrt.get("profile_order") != "high_shapes_wh" or
             tensorrt.get("ranged_profile_status") !=
             "unsupported-myelin-dynamic-convex-tail"):

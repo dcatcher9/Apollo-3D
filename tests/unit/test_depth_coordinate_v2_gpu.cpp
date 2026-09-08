@@ -1468,7 +1468,26 @@ TEST(DepthCoordinateV2ShapeTest, StandardSourceAspectsFitEveryAuthenticatedTenso
     shape_case_t {2160u, 3840u, 434, 770},
     shape_case_t {2160u, 5120u, 434, 1022},
     shape_case_t {1600u, 3840u, 434, 1036},
+    shape_case_t {2048u, 1536u, 574, 434},
+    shape_case_t {2388u, 1668u, 616, 434},
+    shape_case_t {2360u, 1640u, 630, 434},
+    shape_case_t {2160u, 1440u, 658, 434},
+    shape_case_t {1920u, 1200u, 700, 434},
+    shape_case_t {2160u, 1080u, 868, 434},
+    shape_case_t {2340u, 1080u, 938, 434},
+    shape_case_t {2400u, 1080u, 966, 434},
+    shape_case_t {2424u, 1080u, 980, 434},
+    shape_case_t {1536u, 2048u, 434, 574},
+    shape_case_t {1668u, 2388u, 434, 616},
+    shape_case_t {1640u, 2360u, 434, 630},
+    shape_case_t {1440u, 2160u, 434, 658},
+    shape_case_t {1200u, 1920u, 434, 700},
+    shape_case_t {1080u, 2160u, 434, 868},
+    shape_case_t {1080u, 2340u, 434, 938},
+    shape_case_t {1080u, 2400u, 434, 966},
+    shape_case_t {1080u, 2424u, 434, 980},
   };
+  static_assert(cases.size() == 24u);
 
   for (const auto &test_case : cases) {
     SCOPED_TRACE(
@@ -1523,9 +1542,9 @@ TEST(DepthCoordinateV2GpuTest, EveryAuthenticatedTensorShapeExecutesProductionPr
     }
     authenticated_shapes.push_back({shape.width, shape.height});
   }
-  ASSERT_EQ(authenticated_shapes.size(), 6u);
+  ASSERT_EQ(authenticated_shapes.size(), 24u);
   // Exercise the same producer closure at every public grid emitted by the fused runtime, in
-  // addition to retaining the six internal DAV2 calibration-grid replays above.
+  // addition to retaining every internal DAV2 calibration-grid replay above.
   for (const auto shape : prod::fixed_profile_shapes) {
     ASSERT_TRUE(prod::live_geometry_shape_relation(
       shape.width / prod::scale,
@@ -1535,7 +1554,7 @@ TEST(DepthCoordinateV2GpuTest, EveryAuthenticatedTensorShapeExecutesProductionPr
     ));
     authenticated_shapes.push_back(shape);
   }
-  ASSERT_EQ(authenticated_shapes.size(), 12u);
+  ASSERT_EQ(authenticated_shapes.size(), 48u);
 
   for (const auto shape : authenticated_shapes) {
     const std::uint32_t width = shape.width;

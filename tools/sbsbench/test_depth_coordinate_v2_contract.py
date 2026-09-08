@@ -108,6 +108,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             73: "4cf03fa21295c65580e3af0b33775fa891dc434df8ec7a7e9881a50084607a75",
             74: "6feb4b8dd74cd4a67df8a8f0f6892aac6be93e9e068ce2177f43391563390c3a",
             75: "7f72195a723c9597db2be23e651b92a028040c0e4e6007accd315eb41c6690c4",
+            76: "a6769249b05f9123ed725c202b21b56891cc72a822067a859d04e2346ac20150",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -115,14 +116,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 semantics changed without a reviewed schema version",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x8753E5C6)
+        self.assertEqual(generator.contract_tag(contract), 0xFCD67067)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "8753e5c620344ef25c43c7d946b30c5d1599090b0c3e8dd7efb37096147d6e93",
+            "fcd67067a54366a2eedc91cbd7179ff07416ed21abc4039a68d17d657448609c",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "563d375d1030d1c852337645685edc8295bd757dc8e4c6ce31a6838942f996da",
+            "8d159966138e49538f7fde5318f6227332470834c70d3d27ec973885379c29ad",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -393,7 +394,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.shader_source_closure_sha256())
         self.assertEqual(
             calibration.calibration_id,
-            "dav2-small-fp16-standardized-ui-shapes-v3",
+            "dav2-small-fp16-mobile-tablet-ui-shapes-v4",
         )
         self.assertEqual(
             calibration.calibrated_input_shapes,
@@ -404,6 +405,12 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 (434, 770),
                 (434, 1022),
                 (434, 1036),
+                (574, 434), (616, 434), (630, 434),
+                (658, 434), (700, 434), (868, 434),
+                (938, 434), (966, 434), (980, 434),
+                (434, 574), (434, 616), (434, 630),
+                (434, 658), (434, 700), (434, 868),
+                (434, 938), (434, 966), (434, 980),
             ),
         )
         self.assertIs(
@@ -513,7 +520,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 75u',
+                'contract_schema = 76u',
                 'final_parallax_contract_schema = 2u',
                 'final_parallax_authority = '
                 '"complete-atomic-subtitle-conditioned-r32f-live-render-authority"',
@@ -592,7 +599,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 75u',
+                '#define V2_CONTRACT_SCHEMA 76u',
                 '#define V2_SUBTITLE_OCR_CONTRACT_SCHEMA 14u',
                 '#define V2_OCR_INPUT_WIDTH 960u',
                 '#define V2_OCR_OUTPUT_WIDTH 960u',
@@ -611,7 +618,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 '#define V2_SUBTITLE_CONDITION_PARAM_SCHEMA 3u',
                 '#define V2_SUBTITLE_CONDITION_PARAM_TAG 0x33504353u',
                 '#define V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT 6u',
-                '#define V2_MODEL_CALIBRATED_SHAPE_COUNT 6u',
+                '#define V2_MODEL_CALIBRATED_SHAPE_COUNT 24u',
                 '#define V2_LIMITER_GROUP_THREADS 32u',
                 '#define V2_LIMITER_Q_FRACTION_BITS 30u',
                 '#define V2_LIMITER_Q_SCALE 1073741824.0f',
@@ -620,6 +627,10 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 '#define V2_LIMITER_VERTICAL_STEP_Q_NUMERATOR 2147483648u',
                 '#define V2_MODEL_CALIBRATED_SHAPE_WIDTH_5 434u',
                 '#define V2_MODEL_CALIBRATED_SHAPE_HEIGHT_5 1036u',
+                '#define V2_MODEL_CALIBRATED_SHAPE_WIDTH_6 574u',
+                '#define V2_MODEL_CALIBRATED_SHAPE_HEIGHT_6 434u',
+                '#define V2_MODEL_CALIBRATED_SHAPE_WIDTH_23 434u',
+                '#define V2_MODEL_CALIBRATED_SHAPE_HEIGHT_23 980u',
                 '#define V2_OCR_SAFE_ROW_TOP 24u',
                 '#define V2_OCR_SAFE_ROW_BOTTOM 155u',
                 '#define V2_OCR_CROP_ASPECT_WIDTH 6u',
@@ -996,7 +1007,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertIn("model_calibration_supports_shape", cpp)
         for width, height in python_contract.MODEL_CALIBRATIONS[0].calibrated_input_shapes:
             self.assertIn(
-                '{"dav2-small-fp16-standardized-ui-shapes-v3", '
+                '{"dav2-small-fp16-mobile-tablet-ui-shapes-v4", '
                 f'{width}u, {height}u}}',
                 cpp,
             )

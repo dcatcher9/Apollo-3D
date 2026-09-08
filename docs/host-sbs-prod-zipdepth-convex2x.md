@@ -1,8 +1,11 @@
 # Production DAV2 + frozen ZipDepth convex 2x
 
 Status: single-high-I/O implementation candidate with the model-only optimization recipe integrated.
-The deterministic ONNX export, six-profile TensorRT build, authenticated model parity, native build,
-all-high runtime, and six-shape limiter path are clean. A paired evaluator report and explicit Galaxy
+The original deterministic ONNX export, six-profile TensorRT build, authenticated model parity,
+native build, all-high runtime, and six-shape limiter path are clean. The phone/tablet extension
+retains those ONNX bytes and expands the fixed profile recipe to the shapes owned by
+[Authenticated resolution fitting](host-sbs.md#authenticated-resolution-fitting).
+A paired evaluator report and explicit Galaxy
 XR visual acceptance remain required before this optimized artifact becomes the published production
 baseline.
 
@@ -92,32 +95,31 @@ and ROI cases are therefore explicit evaluation gates rather than assumed parity
 | Property | Value |
 | --- | --- |
 | Logical model | `prod_dav2_zipdepth_c2x_high_opset18` |
-| Engine recipe | `trt-6high-point-l5-v2` |
+| Engine recipe | `trt-24high-point-l5-v3` |
 | Raw ZipDepth branch bytes / SHA-256 | `24,637,932` / `e24779358ed042255036da6d7e0f90783d592f7fd7c5c6d4eac7cb37effafdd2` |
 | Optimized ZipDepth branch bytes / SHA-256 | `12,796,840` / `65e0f0aba0248a29715d99fd32a24014a98a21cca67e00a47af20f37528b3989` |
 | Fused ONNX bytes | `62,438,471` |
 | Fused ONNX SHA-256 | `26684c5da8fdd4bdc5f1c9cf919cec8d1e2d027fbe95705a454f85d31eee2c23` |
 | Six-profile development plan bytes | `108,190,812` |
-| Six-profile development plan SHA-256 | `a16421b2972165efc88bf12f5740826f5769abcf832ed8fba2def6efc64b4fba` |
+| Historical six-profile development plan SHA-256 | `a16421b2972165efc88bf12f5740826f5769abcf832ed8fba2def6efc64b4fba` |
 
 The plan hash is machine/runtime evidence, not a portable model identity. The ONNX hash, profile
 recipe, TensorRT/GPU compatibility tag, active-engine manifest, and selected plan remain distinct.
 
 TensorRT 11.2 cannot compile the dynamic convex tail under one ranged H/W profile. The one engine
-therefore contains six exact `min=opt=max` point profiles:
+therefore contains 24 exact `min=opt=max` point profiles. The original six retain their profile
+indices, followed by the nine added landscape shapes and then their portrait transposes. The
+complete source/coarse/high mapping is owned by
+[Authenticated resolution fitting](host-sbs.md#authenticated-resolution-fitting).
+The recipe change invalidates the old six-profile plan; the host builds and caches the expanded
+engine on first use. Model bytes, precision, optimization level, and the exact 2x operator remain
+unchanged.
 
-| Internal DAV2 | Public input/output |
-| --- | --- |
-| `770x434` | `1540x868` |
-| `1022x434` | `2044x868` |
-| `1036x434` | `2072x868` |
-| `434x770` | `868x1540` |
-| `434x1022` | `868x2044` |
-| `434x1036` | `868x2072` |
-
-ONNX checker, ONNX Runtime, and TensorRT execute all six profiles with finite, exact-sized output.
+Historical ONNX checker, ONNX Runtime, and TensorRT evidence below covers the original six profiles.
+The native `TensorRtConditionalWrapperGpuTest.AllAuthenticatedShapesBuildAndExecute` gate covers
+every current profile through the real estimator, joined completion, and authenticated publication.
 Runtime profile selection is source-derived: the source is fitted once to the calibrated internal
-DAV2 shape and that fit is doubled exactly. Another member of the six-profile allowlist, including
+DAV2 shape and that fit is doubled exactly. Another member of the profile allowlist, including
 the opposite transpose, is not a valid substitute.
 
 The runtime requires the local composite for the exact production DAV2 identity and frozen
@@ -152,7 +154,7 @@ the candidate to the comparison owner. Higher spatial sensitivity may reduce reu
 must never authorize a depth result from an incompatible grid or domain.
 
 The evidence buffer is allocated from the exact high grid as `ceil(width/16) * ceil(height/16)`
-16-byte records. The six profiles require `5,335`, `7,040`, or `7,150` records, so `7,150` records /
+16-byte records. The largest supported profile still requires `7,150` records, so `7,150` records /
 `114,400` bytes is the current derived maximum rather than a fixed cap. The resolve shader uses
 `GetDimensions` and accepts only the exact active-grid record count and 16-byte stride; any mismatch
 reads no record and forces inference. Host allocation/layout failures log once with the actual
@@ -171,8 +173,8 @@ It is never fitted a second time. Source rectangle, authority kind/identity, and
 dimensions own the analysis domain; changing only its deterministic coarse/high raster realization
 does not create a new scene.
 
-All six landscape and portrait shapes are supported, including OCR8/SLR13 projection and Dump 3D
-authentication on the three portrait high fields. The vertical limiter no longer stores four
+All authenticated landscape and portrait shapes are supported, including OCR8/SLR13 projection
+and Dump 3D authentication. The vertical limiter no longer stores four
 full-height arrays. It retains the two forward-envelope arrays plus bounded carry state and
 deterministically rereads the immutable candidate during replay/backward scans. The exact Q30
 recurrence therefore fits the D3D11 shared-memory limit at height `2072` without approximation or

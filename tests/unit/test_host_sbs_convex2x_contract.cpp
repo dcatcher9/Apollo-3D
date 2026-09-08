@@ -22,6 +22,24 @@ namespace {
       depth_tensor_shape_t {434, 770},
       depth_tensor_shape_t {434, 1022},
       depth_tensor_shape_t {434, 1036},
+      depth_tensor_shape_t {574, 434},
+      depth_tensor_shape_t {616, 434},
+      depth_tensor_shape_t {630, 434},
+      depth_tensor_shape_t {658, 434},
+      depth_tensor_shape_t {700, 434},
+      depth_tensor_shape_t {868, 434},
+      depth_tensor_shape_t {938, 434},
+      depth_tensor_shape_t {966, 434},
+      depth_tensor_shape_t {980, 434},
+      depth_tensor_shape_t {434, 574},
+      depth_tensor_shape_t {434, 616},
+      depth_tensor_shape_t {434, 630},
+      depth_tensor_shape_t {434, 658},
+      depth_tensor_shape_t {434, 700},
+      depth_tensor_shape_t {434, 868},
+      depth_tensor_shape_t {434, 938},
+      depth_tensor_shape_t {434, 966},
+      depth_tensor_shape_t {434, 980},
     };
     for (const auto coarse : coarse_shapes) {
       const auto refined = models::host_sbs_convex2x_field_shape(coarse);
@@ -118,7 +136,7 @@ namespace {
 
   TEST(HostSbsConvex2xContract, FreezesOneHighPointProfilePerProductionShape) {
     using namespace models::prod_zipdepth_convex2x;
-    static_assert(fixed_profile_shapes.size() == 6u);
+    static_assert(fixed_profile_shapes.size() == 24u);
     constexpr std::array expected {
       high_shape_t {1540u, 868u},
       high_shape_t {2044u, 868u},
@@ -126,6 +144,24 @@ namespace {
       high_shape_t {868u, 1540u},
       high_shape_t {868u, 2044u},
       high_shape_t {868u, 2072u},
+      high_shape_t {1148u, 868u},
+      high_shape_t {1232u, 868u},
+      high_shape_t {1260u, 868u},
+      high_shape_t {1316u, 868u},
+      high_shape_t {1400u, 868u},
+      high_shape_t {1736u, 868u},
+      high_shape_t {1876u, 868u},
+      high_shape_t {1932u, 868u},
+      high_shape_t {1960u, 868u},
+      high_shape_t {868u, 1148u},
+      high_shape_t {868u, 1232u},
+      high_shape_t {868u, 1260u},
+      high_shape_t {868u, 1316u},
+      high_shape_t {868u, 1400u},
+      high_shape_t {868u, 1736u},
+      high_shape_t {868u, 1876u},
+      high_shape_t {868u, 1932u},
+      high_shape_t {868u, 1960u},
     };
     EXPECT_EQ(fixed_profile_shapes, expected);
     for (std::uint32_t index = 0u; index < fixed_profile_shapes.size(); ++index) {
@@ -140,7 +176,10 @@ namespace {
     using namespace models::prod_zipdepth_convex2x;
     constexpr std::array expected_tile_counts {
       5335u, 7040u, 7150u, 5335u, 7040u, 7150u,
+      3960u, 4235u, 4345u, 4565u, 4840u, 5995u, 6490u, 6655u, 6765u,
+      3960u, 4235u, 4345u, 4565u, 4840u, 5995u, 6490u, 6655u, 6765u,
     };
+    static_assert(expected_tile_counts.size() == fixed_profile_shapes.size());
     std::uint32_t observed_maximum = 0u;
     for (std::size_t index = 0u; index < fixed_profile_shapes.size(); ++index) {
       const auto shape = fixed_profile_shapes[index];
@@ -177,7 +216,7 @@ namespace {
     );
     EXPECT_EQ(
       engine_recipe,
-      "trt-6high-point-l5-v2"
+      "trt-24high-point-l5-v3"
     );
     EXPECT_EQ(
       dav2_onnx_sha256,

@@ -20,7 +20,7 @@ namespace models {
     // 1022x434, both of which the previous 1008 bound forced down to a 420 short side.
     inline constexpr int depth_engine_max_dim = 1036;
     // TensorRT 11.2 cannot compile the dynamic convex gather under a ranged profile. The fused
-    // graph owns the six authenticated HIGH public shapes as point profiles in contract order.
+    // graph owns the authenticated HIGH public shapes as point profiles in contract order.
     inline constexpr bool fused_depth_profile_contracts_match = []() {
       if (prod_zipdepth_convex2x::fixed_profile_shapes.size() !=
             depth_coordinate_v2::model_calibrated_shapes.size() ||

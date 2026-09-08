@@ -377,7 +377,7 @@ namespace models {
   /**
    * Preflight a source resolution through the exact production shape fitter and V2 allowlist.
    * This deliberately authenticates the resulting tensor, not an independently maintained list
-   * of stream sizes. All twelve standard Moonlight 3D landscape/portrait choices map to the six
+   * of stream sizes. Standard XR, phone, and tablet landscape/portrait choices map to the
    * calibrated tensors; any custom source that fits another shape fails closed.
    */
   inline std::string_view host_sbs_v2_source_resolution_rejection_reason(

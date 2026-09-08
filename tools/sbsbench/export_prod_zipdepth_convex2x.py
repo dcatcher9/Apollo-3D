@@ -2,7 +2,7 @@
 """Export the frozen production DAV2 + ZipDepth convex-2x TensorRT artifact.
 
 The script intentionally writes the large ONNX and TensorRT products outside
-the repository.  Source identities and the six point-profile order come from
+the repository. Source identities and the fixed point-profile order come from
 ``contracts/prod-zipdepth-convex2x-v2.json``; callers cannot silently substitute
 another DAV2 graph, ZipDepth commit, or checkpoint under the production name.
 """
@@ -38,7 +38,7 @@ OPSET_VERSION = 18
 RAW_BRANCH_FILENAME = "zipdepth_mask_convex2x_dynamic_opset18.raw.onnx"
 BRANCH_FILENAME = "zipdepth_mask_convex2x_dynamic_opset18.onnx"
 FUSED_FILENAME = "prod_dav2_zipdepth_c2x_high_opset18.onnx"
-PLAN_FILENAME = "prod_dav2_zipdepth_c2x_high_six_profiles.plan"
+PLAN_FILENAME = "prod_dav2_zipdepth_c2x_high_24_profiles.plan"
 MODEL_OPTIMIZATION_RECIPE = (
     "zipdepth-selective-fp16-project-before-resize-dense-group4-v1"
 )
@@ -1247,7 +1247,10 @@ def point_profile_build_arguments(
 ) -> list[str]:
     if builder_optimization_level < 0 or builder_optimization_level > 5:
         raise ValueError("TensorRT builder optimization level must be in [0,5]")
-    shapes = tuple(high_shapes or contract_api.supported_high_shapes())
+    expected_shapes = contract_api.supported_high_shapes()
+    shapes = expected_shapes if high_shapes is None else tuple(high_shapes)
+    if shapes != expected_shapes:
+        raise ValueError("TensorRT profiles must match the exact ordered production high shapes")
     arguments = [
         os.fspath(trtexec),
         f"--onnx={onnx_path}",

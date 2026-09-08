@@ -104,7 +104,7 @@ class ProdZipDepthExporterTests(unittest.TestCase):
         )
         self.assertEqual(fused_contract["bytes"], 62438471)
 
-    def test_tensorrt_arguments_preserve_six_fixed_profile_order(self):
+    def test_tensorrt_arguments_preserve_all_24_fixed_profile_shapes_and_order(self):
         command = exporter.point_profile_build_arguments(
             Path("trtexec.exe"),
             Path("fused.onnx"),
@@ -112,7 +112,7 @@ class ProdZipDepthExporterTests(unittest.TestCase):
             5,
         )
         profiles = [item for item in command if item.startswith("--profile=")]
-        self.assertEqual(profiles, [f"--profile={index}" for index in range(6)])
+        self.assertEqual(profiles, [f"--profile={index}" for index in range(24)])
         self.assertIn("--builderOptimizationLevel=5", command)
         self.assertIn(
             "--minShapes=pixel_values:1x3x868x1540",
@@ -136,8 +136,38 @@ class ProdZipDepthExporterTests(unittest.TestCase):
                 (868, 1540),
                 (868, 2044),
                 (868, 2072),
+                (1148, 868), (1232, 868), (1260, 868),
+                (1316, 868), (1400, 868), (1736, 868),
+                (1876, 868), (1932, 868), (1960, 868),
+                (868, 1148), (868, 1232), (868, 1260),
+                (868, 1316), (868, 1400), (868, 1736),
+                (868, 1876), (868, 1932), (868, 1960),
             ],
         )
+        for selector in ("min", "opt", "max"):
+            with self.subTest(selector=selector):
+                self.assertEqual(
+                    [item for item in command if item.startswith(f"--{selector}Shapes=")],
+                    [f"--{selector}Shapes=pixel_values:1x3x{height}x{width}"
+                     for width, height in expected],
+                )
+
+    def test_tensorrt_arguments_reject_incomplete_or_unauthenticated_profiles(self):
+        supported = contract_api.supported_high_shapes()
+        candidates = {
+            "empty": (),
+            "old-six": supported[:6],
+            "reordered": tuple(reversed(supported)),
+            "duplicate": (*supported[:-1], supported[-2]),
+            "asymmetric-mobile": (*supported[:-1], contract_api.Shape(868, 1988)),
+        }
+        for name, shapes in candidates.items():
+            with self.subTest(name=name), self.assertRaisesRegex(
+                    ValueError, "exact ordered production high shapes"):
+                exporter.point_profile_build_arguments(
+                    Path("trtexec.exe"), Path("fused.onnx"), Path("fused.plan"), 5,
+                    high_shapes=shapes,
+                )
 
     def test_fused_composition_is_deterministic_and_has_single_high_io(self):
         first = exporter.compose_fused_models(make_dummy_dav2(), make_dummy_zip_branch())

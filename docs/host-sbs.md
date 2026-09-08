@@ -52,8 +52,8 @@ diagnostics that explain how the final field was produced.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 75/tag `0x8753E5C6`, canonical SHA-256
-`7f72195a723c9597db2be23e651b92a028040c0e4e6007accd315eb41c6690c4`. It binds the
+schema 76/tag `0xFCD67067`, canonical SHA-256
+`a6769249b05f9123ed725c202b21b56891cc72a822067a859d04e2346ac20150`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -64,14 +64,14 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `943f3295e6cdb490d0833d981b153a5cda9a5153696eb5c9ca0042e474d8d744` |
-| `parallax_v2_producer` | 18 | `563d375d1030d1c852337645685edc8295bd757dc8e4c6ce31a6838942f996da` |
-| `parallax_v2_coordinate_diagnostic` | 1 | `6565247a2de4326e5d87c76e4a603eecebd66eb3b7b7cf5fee50ddef37412363` |
-| `near_identical_detector` | 4 | `18d4977cbc84088d91158577cac4ad63eaf182bdd978190809c87cb7015e01c6` |
-| `gpu_trace` | 1 | `65a9c42dd0e02ab7e35afdb04d9b8178149623ec5e9180cedc3ce0f004c17854` |
-| `parallax_v2_live_renderer` | 2 | `b69d3bdcb555d76cde2174fa5d1a372b557f6b7182a76e2e46c928bf1dec08d5` |
-| `parallax_v2_p010_y` | 1 | `ce7207098d17bf3df969b9dbde39f324abdf58e5a529c2042cab34077dafa451` |
+| `parallax_v2_producer` | 18 | `8d159966138e49538f7fde5318f6227332470834c70d3d27ec973885379c29ad` |
+| `parallax_v2_coordinate_diagnostic` | 1 | `ab9964591e531016f39efd23cff47c2f9e2ffef34341bf47a780ce7e711b41dd` |
+| `near_identical_detector` | 4 | `d6472472438918f0005cb52d0a46de2aa2385a02707d0dbe8c3fb63c63257eb0` |
+| `gpu_trace` | 1 | `615704a315e4ba39ef7f65abea2c08d3d48e29b612f5512ffef0ef89fa4a4325` |
+| `parallax_v2_live_renderer` | 2 | `b95cbf9c496715e41aa4f065254072a2f9f0f0ebebbc3c71146e6021b24a9005` |
+| `parallax_v2_p010_y` | 1 | `f4e2a79456c66df3fc6cdc8f6cfd52ff6149d7b9ee6e51d6462417b15b64eb25` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `b7180a63b0d67004f9b6d2c802e74a01b18e55c4495ac53530b932236bab3160` |
+| `parallax_v2_live_diagnostic` | 2 | `a5e1f875bc04e4e72efa4a29ccd2b048d2d966416bcfa18b2dab7399309defd1` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
 The contract admits the following production calibration:
@@ -81,8 +81,8 @@ The contract admits the following production calibration:
 | Calibrated depth estimator | Depth Anything V2 Small FP16 |
 | Calibrated model key | `depth_anything_v2_fp16` |
 | Production composite | `prod_dav2_zipdepth_c2x_high_opset18` |
-| Internal DAV2 shapes | `770x434`, `1022x434`, `1036x434`, and their portrait transposes |
-| Fused public/analysis/live shapes | `1540x868`, `2044x868`, `2072x868`, and their portrait transposes |
+| Internal DAV2 shapes | 12 landscape shapes and their portrait transposes in [Authenticated resolution fitting](#authenticated-resolution-fitting) |
+| Fused public/analysis/live shapes | Exactly twice each internal width and height |
 | Raw coordinate scale | `2.25` DAV2 units |
 | Gain per pop unit | `0.00375` source U |
 | Direct parallax container | `0.04` source U per eye |
@@ -117,10 +117,39 @@ cannot grow without bound.
 
 ### Authenticated resolution fitting
 
-Moonlight 3D's 12 standard XR resolutions all fit one of six calibrated DAV2 logical shapes:
-`770x434`, `1022x434`, `1036x434`, and their portrait transposes. The fused runtime deterministically
-doubles that fit to one of the six public/analysis/live shapes listed above; it never fits the high
-grid independently. Membership in the six-shape high allowlist is not sufficient: the selected high
+Moonlight 3D's 36 standard source resolutions cover XR, phone, and tablet dimensions in landscape
+and portrait. They fit one of 24 calibrated DAV2 logical shapes. The landscape families are below;
+each row also supports the exact transpose of its source and depth dimensions.
+
+| Source examples (width x height) | Internal DAV2 | Fused public/analysis/live |
+| --- | --- | --- |
+| `1920x1080`, `2560x1440`, `3840x2160` | `770x434` | `1540x868` |
+| `2560x1080`, `5120x2160` | `1022x434` | `2044x868` |
+| `3440x1440` | `1036x434` | `2072x868` |
+| `2048x1536`, `2732x2048` (4:3 tablet) | `574x434` | `1148x868` |
+| `2388x1668` (tablet) | `616x434` | `1232x868` |
+| `2360x1640`, `2420x1668` (tablet) | `630x434` | `1260x868` |
+| `2160x1440` (3:2 tablet) | `658x434` | `1316x868` |
+| `1920x1200`, `2560x1600` (16:10 tablet) | `700x434` | `1400x868` |
+| `2160x1080` (18:9 phone) | `868x434` | `1736x868` |
+| `2340x1080` (19.5:9 phone) | `938x434` | `1876x868` |
+| `2400x1080` (20:9 phone) | `966x434` | `1932x868` |
+| `2424x1080` (tall phone) | `980x434` | `1960x868` |
+
+The native-panel examples include [Galaxy S24](https://www.samsung.com/in/smartphones/galaxy-s/galaxy-s24-onyx-black-256gb-sm-s921ezkwins/),
+[Pixel](https://support.google.com/pixelphone/answer/7158570?hl=en), and
+[iPad Pro](https://www.apple.com/ipad-pro/specs/) dimensions. These are source/virtual-display
+choices in the existing XR client; they do not change its Android XR device requirement.
+Every preset has even dimensions for live codec mode changes and fits the existing source-raster
+budget. Native variants fitting the same patch-aligned tensor are also accepted.
+
+Each aspect family has its own fixed depth tensor so full-frame input uses the complete tensor
+without letterbox padding. The model's multiple-of-14 requirement introduces the existing small
+aspect rounding; it does not crop the source. Window-region content still uses the separate
+centered-content policy below.
+
+The fused runtime deterministically doubles the logical fit; it never fits the high grid
+independently. Membership in the 24-shape high allowlist is not sufficient: the selected high
 grid must be exactly twice the one calibrated coarse fit derived from the actual source dimensions.
 A different allowlisted profile, including the opposite transpose, is rejected. A custom source
 resolution is valid when the production fitter maps it exactly to one calibrated logical shape; for

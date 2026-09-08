@@ -261,7 +261,7 @@ static std::size_t allocated_context_count(const engine_slot &slot) {
 }
 
 // TensorRT 11.2 does not permit one optimization profile to be used concurrently by two
-// execution contexts. The fused engine's six profiles are six shapes, so it has no duplicate
+// execution contexts. The fused engine's profiles are distinct shapes, so it has no duplicate
 // profile available for transition concurrency and must remain a one-physical-context lifetime.
 // Invalid is used by OCR slots and deliberately retains the established standard pool cap.
 static std::size_t slot_context_limit(const engine_slot &slot) {
@@ -505,7 +505,7 @@ static bool validate_engine_io_locked(nvinfer1::ICudaEngine *engine, engine_slot
   if (!slot.io_compatible) {
     BOOST_LOG(error)
       << "Depth engine must expose the exact fused single-high two-tensor FP32 contract with "
-         "six fixed profiles; rejecting the engine.";
+         "the authenticated fixed profiles; rejecting the engine.";
   }
   return slot.io_compatible;
 }

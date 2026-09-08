@@ -25,7 +25,7 @@
 #error "Complete generated V2 subtitle target policy is required"
 #endif
 
-#if V2_MODEL_CALIBRATED_SHAPE_COUNT != 6 || \
+#if V2_MODEL_CALIBRATED_SHAPE_COUNT != 24 || \
     V2_OCR_SAFE_ROW_TOP >= V2_OCR_SAFE_ROW_BOTTOM || \
     V2_OCR_SAFE_ROW_BOTTOM > V2_OCR_OUTPUT_HEIGHT || \
     V2_OCR_CROP_ASPECT_WIDTH == 0u || V2_OCR_CROP_ASPECT_HEIGHT == 0u || \

@@ -2582,7 +2582,7 @@ class EvalContractTests(unittest.TestCase):
                   encoding="utf-8") as fh:
             estimator = fh.read()
         self.assertIn("depth_engine_builder_level = 5", manager)
-        self.assertIn("trt-6high-point-l5-v2", composite)
+        self.assertIn("trt-24high-point-l5-v3", composite)
         self.assertIn("prod_zipdepth_convex2x::engine_recipe", manager_impl)
         # The bound still owns source-aspect fitting before the exact 2x high profile is selected.
         self.assertIn("depth_engine_max_dim = 1036", manager)
@@ -3567,6 +3567,12 @@ class EvalContractTests(unittest.TestCase):
             frozenset({
                 (770, 434), (1022, 434), (1036, 434),
                 (434, 770), (434, 1022), (434, 1036),
+                (574, 434), (616, 434), (630, 434),
+                (658, 434), (700, 434), (868, 434),
+                (938, 434), (966, 434), (980, 434),
+                (434, 574), (434, 616), (434, 630),
+                (434, 658), (434, 700), (434, 868),
+                (434, 938), (434, 966), (434, 980),
             }),
         )
         padded = {
@@ -3668,10 +3674,17 @@ class EvalContractTests(unittest.TestCase):
             self.assertTrue(np.all(padded_outside[:, :2]))
             self.assertFalse(np.any(padded_outside[interior]))
 
-    def test_public_dataset_native_unsupported_shape_requires_a_canvas(self):
+    def test_public_dataset_native_tablet_shape_preserves_its_canvas(self):
         clip = {"source_shape": {"width": 640, "height": 480}}
-        with self.assertRaisesRegex(RuntimeError, r"fits unsupported V2 tensor 574x434"):
-            prepare_public_datasets.preparation_geometry_contract("bonn", clip)
+        geometry = prepare_public_datasets.preparation_geometry_contract("tablet", clip)
+        self.assertEqual(geometry["method"], "identity")
+        self.assertEqual(geometry["canvas_shape"], {"width": 640, "height": 480})
+        self.assertEqual(geometry["depth_tensor_shape"], {"width": 574, "height": 434})
+
+    def test_public_dataset_native_unsupported_shape_requires_a_canvas(self):
+        clip = {"source_shape": {"width": 640, "height": 640}}
+        with self.assertRaisesRegex(RuntimeError, r"fits unsupported V2 tensor 434x434"):
+            prepare_public_datasets.preparation_geometry_contract("square", clip)
 
     def test_public_dataset_manifest_paths_are_single_safe_components(self):
         self.assertEqual(

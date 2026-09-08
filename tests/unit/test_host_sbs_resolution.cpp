@@ -28,7 +28,32 @@ TEST(HostSbsResolutionTest, EveryStandardMoonlight3dChoiceMapsToAuthenticatedSha
     resolution_case_t {1080u, 2560u, 434, 1022},
     resolution_case_t {1440u, 3440u, 434, 1036},
     resolution_case_t {2160u, 5120u, 434, 1022},
+    resolution_case_t {2160u, 1080u, 868, 434},
+    resolution_case_t {2340u, 1080u, 938, 434},
+    resolution_case_t {2400u, 1080u, 966, 434},
+    resolution_case_t {2424u, 1080u, 980, 434},
+    resolution_case_t {1920u, 1200u, 700, 434},
+    resolution_case_t {2560u, 1600u, 700, 434},
+    resolution_case_t {2048u, 1536u, 574, 434},
+    resolution_case_t {2732u, 2048u, 574, 434},
+    resolution_case_t {2160u, 1440u, 658, 434},
+    resolution_case_t {2360u, 1640u, 630, 434},
+    resolution_case_t {2388u, 1668u, 616, 434},
+    resolution_case_t {2420u, 1668u, 630, 434},
+    resolution_case_t {1080u, 2160u, 434, 868},
+    resolution_case_t {1080u, 2340u, 434, 938},
+    resolution_case_t {1080u, 2400u, 434, 966},
+    resolution_case_t {1080u, 2424u, 434, 980},
+    resolution_case_t {1200u, 1920u, 434, 700},
+    resolution_case_t {1600u, 2560u, 434, 700},
+    resolution_case_t {1536u, 2048u, 434, 574},
+    resolution_case_t {2048u, 2732u, 434, 574},
+    resolution_case_t {1440u, 2160u, 434, 658},
+    resolution_case_t {1640u, 2360u, 434, 630},
+    resolution_case_t {1668u, 2388u, 434, 616},
+    resolution_case_t {1668u, 2420u, 434, 630},
   };
+  static_assert(cases.size() == 36u);
 
   for (const auto &test_case : cases) {
     SCOPED_TRACE(
@@ -113,7 +138,26 @@ TEST(HostSbsResolutionTest, AdmitsAllExactConvex2xSubtitleFields) {
     geometry_case_t {1080u, 1920u, 868, 1540},
     geometry_case_t {1080u, 2560u, 868, 2044},
     geometry_case_t {1440u, 3440u, 868, 2072},
+    geometry_case_t {2048u, 1536u, 1148, 868},
+    geometry_case_t {2388u, 1668u, 1232, 868},
+    geometry_case_t {2360u, 1640u, 1260, 868},
+    geometry_case_t {2160u, 1440u, 1316, 868},
+    geometry_case_t {1920u, 1200u, 1400, 868},
+    geometry_case_t {2160u, 1080u, 1736, 868},
+    geometry_case_t {2340u, 1080u, 1876, 868},
+    geometry_case_t {2400u, 1080u, 1932, 868},
+    geometry_case_t {2424u, 1080u, 1960, 868},
+    geometry_case_t {1536u, 2048u, 868, 1148},
+    geometry_case_t {1668u, 2388u, 868, 1232},
+    geometry_case_t {1640u, 2360u, 868, 1260},
+    geometry_case_t {1440u, 2160u, 868, 1316},
+    geometry_case_t {1200u, 1920u, 868, 1400},
+    geometry_case_t {1080u, 2160u, 868, 1736},
+    geometry_case_t {1080u, 2340u, 868, 1876},
+    geometry_case_t {1080u, 2400u, 868, 1932},
+    geometry_case_t {1080u, 2424u, 868, 1960},
   };
+  static_assert(cases.size() == 24u);
   for (const auto &test_case : cases) {
     const models::depth_tensor_shape_t field {
       test_case.field_width, test_case.field_height,
@@ -146,10 +190,12 @@ TEST(HostSbsResolutionTest, UsesTensorAuthenticationInsteadOfAStreamSizeAllowlis
     (models::depth_tensor_shape_t {770, 434})
   );
   EXPECT_TRUE(models::host_sbs_v2_source_resolution_is_supported(1280u, 720u));
+  EXPECT_TRUE(models::host_sbs_v2_source_resolution_is_supported(1280u, 800u));
+  EXPECT_TRUE(models::host_sbs_v2_source_resolution_is_supported(800u, 1280u));
 
   // These valid stream rasters fit uncalibrated tensor shapes and must therefore be rejected
   // before Host SBS creates an estimator or silently settles on terminal-flat output.
-  EXPECT_FALSE(models::host_sbs_v2_source_resolution_is_supported(1920u, 1200u));
+  EXPECT_FALSE(models::host_sbs_v2_source_resolution_is_supported(1920u, 1536u));
   EXPECT_FALSE(models::host_sbs_v2_source_resolution_is_supported(3840u, 1080u));
   EXPECT_FALSE(models::host_sbs_v2_source_resolution_is_supported(640u, 360u));
   EXPECT_FALSE(models::host_sbs_v2_source_resolution_is_supported(0u, 2160u));
@@ -166,7 +212,7 @@ TEST(HostSbsResolutionTest, UsesTensorAuthenticationInsteadOfAStreamSizeAllowlis
     "source raster exceeds the exact-area preprocessing budget"
   );
   EXPECT_EQ(
-    models::host_sbs_v2_source_resolution_rejection_reason(1920u, 1200u),
+    models::host_sbs_v2_source_resolution_rejection_reason(1920u, 1536u),
     "fitted depth tensor is not authenticated"
   );
   EXPECT_EQ(

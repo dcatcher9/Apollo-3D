@@ -378,7 +378,7 @@ namespace models {
 
     /** TensorRT 11.2 optimization profiles cannot be shared by concurrent contexts.
      *
-     * The fused engine's six profiles are shape identities, not concurrency duplicates, so one
+     * The fused engine's profiles are shape identities, not concurrency duplicates, so one
      * physical context owns the engine for the process lifetime. A quarantined fused context
      * therefore requires process restart. OCR retains the established standard pool bound.
      */

@@ -38,13 +38,13 @@ class ProdZipDepthConvex2xDiagnosticContractTests(unittest.TestCase):
         "embedded_dav2_onnx_sha256": "d" * 64,
         "zipdepth_checkpoint_sha256": "c" * 64,
         "guidance_preprocess_source_closure_sha256": "b" * 64,
-        "engine_recipe": "trt-6high-point-l5-v2",
+        "engine_recipe": "trt-24high-point-l5-v3",
         "engine_artifact": "fused.test.engine",
         "active_engine_manifest": "fused.active-engine.json",
     }
 
     def setUp(self) -> None:
-        # The production contract admits only six calibrated megapixel profiles. Keep these tiny
+        # The production contract admits only calibrated megapixel profiles. Keep these tiny
         # byte-level fixtures cheap through a private test-only monkeypatch; no production reader
         # or evaluator entry point can request this exception.
         self.production_active_grid_validator = diagnostics._validate_active_grid_calibration
@@ -229,7 +229,7 @@ class ProdZipDepthConvex2xDiagnosticContractTests(unittest.TestCase):
             diagnostics.authenticate_manifest_files(
                 root, manifest, [1], self.expected_runtime())
 
-    def test_production_schema_two_gate_accepts_only_six_calibrated_high_profiles(self):
+    def test_production_schema_two_gate_accepts_only_24_calibrated_high_profiles(self):
         calibration = diagnostics.coordinate_contract.MODEL_CALIBRATIONS[0]
         embedded = {
             "model": calibration.depth_model,
@@ -240,7 +240,7 @@ class ProdZipDepthConvex2xDiagnosticContractTests(unittest.TestCase):
                 calibration.preprocess.source_closure_sha256,
         }
         supported = diagnostics.convex2x_contract.supported_high_shapes()
-        self.assertEqual(len(supported), 6)
+        self.assertEqual(len(supported), 24)
         for high in supported:
             with self.subTest(shape=(high.width, high.height)):
                 self.assertEqual(
@@ -248,8 +248,10 @@ class ProdZipDepthConvex2xDiagnosticContractTests(unittest.TestCase):
                         high.width, high.height, embedded),
                     (high.width // 2, high.height // 2))
 
-        with self.assertRaisesRegex(ValueError, "six supported high profiles"):
-            self.production_active_grid_validator(2016, 868, embedded)
+        for width, height in ((2016, 868), (1988, 868), (1148, 1232), (1960, 869)):
+            with self.subTest(unsupported=(width, height)), self.assertRaisesRegex(
+                    ValueError, "supported high profiles"):
+                self.production_active_grid_validator(width, height, embedded)
         wrong = dict(embedded)
         wrong["preprocess_source_closure_sha256"] = "0" * 64
         with self.assertRaisesRegex(ValueError, "calibrated DAV2 half-shape"):

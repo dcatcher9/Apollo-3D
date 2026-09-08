@@ -17,13 +17,15 @@ TEST(ModelManagerTest, DepthEngineFilenameIsBoundedAndUsesTheFusedRecipe) {
   };
   constexpr std::string_view compatibility_tag = "trt11-sm120-onnxsha";
   const auto filename = models::engine_filename(model, compatibility_tag);
-  EXPECT_TRUE(filename.starts_with("depth_anything_v2_fp16.trt-6high-point-l5-v2.cache-"));
+  constexpr std::string_view prefix = "depth_anything_v2_fp16.trt-24high-point-l5-v3.cache-";
+  EXPECT_TRUE(filename.starts_with(prefix));
   EXPECT_TRUE(filename.ends_with(".engine"));
   EXPECT_EQ(filename, models::engine_filename(model, compatibility_tag));
   EXPECT_NE(filename, models::engine_filename(model, std::string(compatibility_tag) + "-changed"));
-  EXPECT_LT(filename.size() + 5u, 128u);
+  EXPECT_EQ(filename.size(), prefix.size() + 64u + std::string_view(".engine").size());
+  EXPECT_EQ(filename.size(), models::engine_filename(model, std::string(4096u, 'a')).size());
   EXPECT_EQ(models::engine_filename(model),
-            "depth_anything_v2_fp16.trt-6high-point-l5-v2.engine");
+            "depth_anything_v2_fp16.trt-24high-point-l5-v3.engine");
   EXPECT_EQ(models::depth_engine_builder_level, 5);
 }
 
@@ -33,6 +35,15 @@ TEST(ModelManagerTest, CurrentDepthFilenameRejectsTruncatedHashesAndPaths) {
   };
   const auto filename = models::engine_filename(model, std::string(4096u, 'a'));
   EXPECT_TRUE(models::is_current_depth_engine_filename(filename));
+  auto previous_profiles = filename;
+  const auto recipe_offset = previous_profiles.find("trt-24high-point-l5-v3");
+  ASSERT_NE(recipe_offset, std::string::npos);
+  previous_profiles.replace(
+    recipe_offset,
+    std::string_view("trt-24high-point-l5-v3").size(),
+    "trt-6high-point-l5-v2"
+  );
+  EXPECT_FALSE(models::is_current_depth_engine_filename(previous_profiles));
   EXPECT_FALSE(models::is_current_depth_engine_filename(filename.substr(1)));
   EXPECT_FALSE(models::is_current_depth_engine_filename("../" + filename));
   EXPECT_FALSE(models::is_current_depth_engine_filename("..\\" + filename));

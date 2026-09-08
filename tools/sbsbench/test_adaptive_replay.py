@@ -55,8 +55,7 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                 calibration.preprocess.source_closure_sha256,
             "engine_recipe": recipe,
             "engine_artifact": (
-                f"{fused['logical_model']}.{recipe}.fixture-"
-                f"onnx{fused['sha256']}.engine"),
+                f"{fused['logical_model']}.{recipe}.cache-{'a' * 64}.engine"),
             "active_engine_manifest": f"{fused['logical_model']}.active-engine.json",
         }
         raw_shape = {
@@ -757,7 +756,7 @@ class AdaptiveReplayContractTests(unittest.TestCase):
                 contract = json.loads(contract_path.read_text(encoding="utf-8"))
                 contract["composite_runtime_provenance"]["engine_artifact"] = (
                     contract["composite_runtime_provenance"]["engine_artifact"].replace(
-                        ".fixture-", ".other-"))
+                        f".cache-{'a' * 64}", f".cache-{'b' * 64}"))
                 contract_path.write_text(json.dumps(contract), encoding="utf-8")
             with self.assertRaisesRegex(replay.EvidenceError, "preflight-selected fused engine"):
                 replay.validate_contract_and_trace(

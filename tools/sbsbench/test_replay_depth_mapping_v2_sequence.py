@@ -634,7 +634,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             results_path = root / "results.json"
             results = json.loads(results_path.read_text(encoding="utf-8"))
             calibration = MODEL_CALIBRATIONS[0]
-            width, height = 658, 434
+            width, height = 672, 434
             unsupported = root / "unsupported_shape"
             unsupported.mkdir()
             producer = {
@@ -934,7 +934,7 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "input source hash mismatch"):
                 _validate_frame_source_attestation(output, rows[1], "00002")
 
-    def test_sequence_source_binding_accepts_all_six_coarse_and_high_profiles(self):
+    def test_sequence_source_binding_accepts_all_24_coarse_and_high_profiles(self):
         cases = (
             (1920, 1080, 770, 434),
             (2560, 1080, 1022, 434),
@@ -942,7 +942,28 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
             (1080, 1920, 434, 770),
             (1080, 2560, 434, 1022),
             (1440, 3440, 434, 1036),
+            (2048, 1536, 574, 434),
+            (2388, 1668, 616, 434),
+            (2360, 1640, 630, 434),
+            (2266, 1488, 658, 434),
+            (2560, 1600, 700, 434),
+            (2160, 1080, 868, 434),
+            (2340, 1080, 938, 434),
+            (2400, 1080, 966, 434),
+            (2520, 1120, 980, 434),
+            (1536, 2048, 434, 574),
+            (1668, 2388, 434, 616),
+            (1640, 2360, 434, 630),
+            (1488, 2266, 434, 658),
+            (1600, 2560, 434, 700),
+            (1080, 2160, 434, 868),
+            (1080, 2340, 434, 938),
+            (1080, 2400, 434, 966),
+            (1120, 2520, 434, 980),
         )
+        self.assertEqual(
+            tuple((width, height) for _, _, width, height in cases),
+            MODEL_CALIBRATIONS[0].calibrated_input_shapes)
         for source_width, source_height, coarse_width, coarse_height in cases:
             with self.subTest(source=(source_width, source_height), scale=1):
                 self.assertEqual(
@@ -956,7 +977,9 @@ class DepthMappingV2SequenceReplayTest(unittest.TestCase):
                         2 * coarse_width, 2 * coarse_height),
                     "single-high-convex2x")
 
-        for width, height in ((1022, 434), (2044, 868), (868, 1540)):
+        for width, height in (
+                (1022, 434), (2044, 868), (868, 1540),
+                (574, 434), (1148, 868), (868, 1960)):
             with self.subTest(wrong_supported_grid=(width, height)):
                 with self.assertRaisesRegex(ValueError, "exact source-derived"):
                     _exact_source_capture_grid_kind(1920, 1080, width, height)

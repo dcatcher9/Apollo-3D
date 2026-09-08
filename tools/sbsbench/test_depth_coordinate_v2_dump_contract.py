@@ -27,6 +27,34 @@ from replay_depth_mapping_v2 import (  # noqa: E402
 )
 
 
+PRODUCTION_SOURCE_PROFILE_CASES = (
+    (1920, 1080, 770, 434),
+    (2560, 1080, 1022, 434),
+    (3440, 1440, 1036, 434),
+    (1080, 1920, 434, 770),
+    (1080, 2560, 434, 1022),
+    (1440, 3440, 434, 1036),
+    (2048, 1536, 574, 434),
+    (2388, 1668, 616, 434),
+    (2360, 1640, 630, 434),
+    (2266, 1488, 658, 434),
+    (2560, 1600, 700, 434),
+    (2160, 1080, 868, 434),
+    (2340, 1080, 938, 434),
+    (2400, 1080, 966, 434),
+    (2520, 1120, 980, 434),
+    (1536, 2048, 434, 574),
+    (1668, 2388, 434, 616),
+    (1640, 2360, 434, 630),
+    (1488, 2266, 434, 658),
+    (1600, 2560, 434, 700),
+    (1080, 2160, 434, 868),
+    (1080, 2340, 434, 938),
+    (1080, 2400, 434, 966),
+    (1120, 2520, 434, 980),
+)
+
+
 class DepthCoordinateV2DumpContractTests(unittest.TestCase):
     def test_renderer_closure_constants_match_native_authenticated_pins(self):
         pins = generator.validate_renderer_source_closure_pins()
@@ -756,15 +784,11 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "legacy DAV2 dump"):
             dump_contract.validate_v2_dump_manifest_document(legacy_claim)
 
-    def test_source_fitter_binds_all_six_exact_coarse_and_high_profiles(self):
-        cases = (
-            (1920, 1080, 770, 434),
-            (2560, 1080, 1022, 434),
-            (3440, 1440, 1036, 434),
-            (1080, 1920, 434, 770),
-            (1080, 2560, 434, 1022),
-            (1440, 3440, 434, 1036),
-        )
+    def test_source_fitter_binds_all_24_exact_coarse_and_high_profiles(self):
+        cases = PRODUCTION_SOURCE_PROFILE_CASES
+        self.assertEqual(
+            tuple((width, height) for _, _, width, height in cases),
+            coordinate.MODEL_CALIBRATIONS[0].calibrated_input_shapes)
         for source_width, source_height, coarse_width, coarse_height in cases:
             with self.subTest(source=(source_width, source_height), scale=1):
                 self.assertEqual(
@@ -804,7 +828,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         for width, height, composite in (
                 (1022, 434, False),
                 (2044, 868, True),
-                (868, 1540, True)):
+                (868, 1540, True),
+                (574, 434, False),
+                (1148, 868, True),
+                (868, 1960, True)):
             with self.subTest(grid=(width, height)):
                 changed = copy.deepcopy(self.manifest)
                 self._set_manifest_capture_grid(changed, width, height)
@@ -1169,12 +1196,10 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
 
     def test_current_ocr8_slr13_empty_records_accept_all_calibrated_fields(self):
         cases = (
-            (1920, 1080, 770, 434),
-            (2560, 1080, 1022, 434),
-            (3440, 1440, 1036, 434),
-            (1080, 1920, 434, 770),
-            (1080, 2560, 434, 1022),
-            (1440, 3440, 434, 1036),
+            (source_width, source_height, scale * coarse_width, scale * coarse_height)
+            for source_width, source_height, coarse_width, coarse_height
+            in PRODUCTION_SOURCE_PROFILE_CASES
+            for scale in (1, 2)
         )
         for source_width, source_height, field_width, field_height in cases:
             with self.subTest(field=(field_width, field_height)):

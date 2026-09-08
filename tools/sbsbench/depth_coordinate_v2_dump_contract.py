@@ -1132,7 +1132,7 @@ def expected_capture_grid_for_source(
     """Return the exact calibrated coarse or single-high grid for a source extent.
 
     ``scale=1`` selects the legacy DAV2 grid and ``scale=2`` selects the fused public grid.
-    Sources whose fitted DAV2 shape is not one of the six calibrated point profiles have no
+    Sources whose fitted DAV2 shape is not one of the calibrated point profiles have no
     production grid and return ``None``.
     """
 

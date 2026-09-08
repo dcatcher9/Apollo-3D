@@ -12,10 +12,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 75u;
-  inline constexpr std::uint32_t contract_tag = 0x8753E5C6u;
-  inline constexpr std::string_view contract_canonical_sha256 = "7f72195a723c9597db2be23e651b92a028040c0e4e6007accd315eb41c6690c4";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "8753e5c620344ef25c43c7d946b30c5d1599090b0c3e8dd7efb37096147d6e93";
+  inline constexpr std::uint32_t contract_schema = 76u;
+  inline constexpr std::uint32_t contract_tag = 0xFCD67067u;
+  inline constexpr std::string_view contract_canonical_sha256 = "a6769249b05f9123ed725c202b21b56891cc72a822067a859d04e2346ac20150";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "fcd67067a54366a2eedc91cbd7179ff07416ed21abc4039a68d17d657448609c";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -250,7 +250,7 @@ namespace models::depth_coordinate_v2 {
 
   inline constexpr std::array<model_calibration_t, 1> model_calibrations {{
     {
-      "dav2-small-fp16-standardized-ui-shapes-v3",
+      "dav2-small-fp16-mobile-tablet-ui-shapes-v4",
       "depth_anything_v2_fp16",
       "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx",
       "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
@@ -277,22 +277,58 @@ namespace models::depth_coordinate_v2 {
     },
   }};
 
-  inline constexpr std::array<model_calibrated_shape_t, 6> model_calibrated_shapes {{
-    {"dav2-small-fp16-standardized-ui-shapes-v3", 770u, 434u},
-    {"dav2-small-fp16-standardized-ui-shapes-v3", 1022u, 434u},
-    {"dav2-small-fp16-standardized-ui-shapes-v3", 1036u, 434u},
-    {"dav2-small-fp16-standardized-ui-shapes-v3", 434u, 770u},
-    {"dav2-small-fp16-standardized-ui-shapes-v3", 434u, 1022u},
-    {"dav2-small-fp16-standardized-ui-shapes-v3", 434u, 1036u},
+  inline constexpr std::array<model_calibrated_shape_t, 24> model_calibrated_shapes {{
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 770u, 434u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 1022u, 434u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 1036u, 434u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 434u, 770u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 434u, 1022u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 434u, 1036u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 574u, 434u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 616u, 434u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 630u, 434u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 658u, 434u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 700u, 434u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 868u, 434u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 938u, 434u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 966u, 434u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 980u, 434u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 434u, 574u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 434u, 616u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 434u, 630u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 434u, 658u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 434u, 700u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 434u, 868u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 434u, 938u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 434u, 966u},
+    {"dav2-small-fp16-mobile-tablet-ui-shapes-v4", 434u, 980u},
   }};
 
-  inline constexpr std::array<std::array<std::uint32_t, 2>, 6> subtitle_ocr_live_field_shapes {{
+  inline constexpr std::array<std::array<std::uint32_t, 2>, 24> subtitle_ocr_live_field_shapes {{
     {{1540u, 868u}},
     {{2044u, 868u}},
     {{2072u, 868u}},
     {{868u, 1540u}},
     {{868u, 2044u}},
     {{868u, 2072u}},
+    {{1148u, 868u}},
+    {{1232u, 868u}},
+    {{1260u, 868u}},
+    {{1316u, 868u}},
+    {{1400u, 868u}},
+    {{1736u, 868u}},
+    {{1876u, 868u}},
+    {{1932u, 868u}},
+    {{1960u, 868u}},
+    {{868u, 1148u}},
+    {{868u, 1232u}},
+    {{868u, 1260u}},
+    {{868u, 1316u}},
+    {{868u, 1400u}},
+    {{868u, 1736u}},
+    {{868u, 1876u}},
+    {{868u, 1932u}},
+    {{868u, 1960u}},
   }};
 
   constexpr std::uint32_t subtitle_locator_field_cell_scale(

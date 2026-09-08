@@ -188,7 +188,7 @@ def _validate_active_grid_calibration(
     high = convex2x_contract.Shape(width, height)
     if high not in convex2x_contract.supported_high_shapes():
         raise ValueError(
-            "fused diagnostic schema-2 tensor is not one of the six supported high profiles")
+            "fused diagnostic schema-2 tensor is not one of the supported high profiles")
     if width % 2 or height % 2:
         raise ValueError("fused diagnostic schema-2 high profile has no exact DAV2 half-shape")
     coarse = width // 2, height // 2

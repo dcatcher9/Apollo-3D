@@ -80,6 +80,24 @@ class ProdZipDepthConvex2xTests(unittest.TestCase):
             (434, 770): (868, 1540),
             (434, 1022): (868, 2044),
             (434, 1036): (868, 2072),
+            (574, 434): (1148, 868),
+            (616, 434): (1232, 868),
+            (630, 434): (1260, 868),
+            (658, 434): (1316, 868),
+            (700, 434): (1400, 868),
+            (868, 434): (1736, 868),
+            (938, 434): (1876, 868),
+            (966, 434): (1932, 868),
+            (980, 434): (1960, 868),
+            (434, 574): (868, 1148),
+            (434, 616): (868, 1232),
+            (434, 630): (868, 1260),
+            (434, 658): (868, 1316),
+            (434, 700): (868, 1400),
+            (434, 868): (868, 1736),
+            (434, 938): (868, 1876),
+            (434, 966): (868, 1932),
+            (434, 980): (868, 1960),
         }
         actual = {
             (shape.width, shape.height): (
@@ -95,11 +113,12 @@ class ProdZipDepthConvex2xTests(unittest.TestCase):
         tensorrt = contract["tensorrt"]
         self.assertEqual(
             tensorrt["profile_strategy"],
-            "one-engine-six-fixed-high-point-profiles",
+            "one-engine-fixed-high-point-profiles",
         )
         self.assertEqual(tensorrt["profile_order"], "high_shapes_wh")
         self.assertEqual(tensorrt["builder_optimization_level"], 5)
-        self.assertEqual(len(contract["high_shapes_wh"]), 6)
+        self.assertEqual(tensorrt["engine_recipe"], "trt-24high-point-l5-v3")
+        self.assertEqual(len(contract["high_shapes_wh"]), 24)
         self.assertEqual(
             [(shape.width, shape.height) for shape in convex.supported_high_shapes()],
             [
@@ -109,6 +128,12 @@ class ProdZipDepthConvex2xTests(unittest.TestCase):
                 (868, 1540),
                 (868, 2044),
                 (868, 2072),
+                (1148, 868), (1232, 868), (1260, 868),
+                (1316, 868), (1400, 868), (1736, 868),
+                (1876, 868), (1932, 868), (1960, 868),
+                (868, 1148), (868, 1232), (868, 1260),
+                (868, 1316), (868, 1400), (868, 1736),
+                (868, 1876), (868, 1932), (868, 1960),
             ],
         )
         for index, shape in enumerate(convex.supported_high_shapes()):
@@ -125,6 +150,10 @@ class ProdZipDepthConvex2xTests(unittest.TestCase):
                 slice(0, 2), list(reversed(value["high_shapes_wh"][:2]))),
             "wrong-calibrated-half": lambda value: value["high_shapes_wh"][0].__setitem__(
                 0, 1568),
+            "asymmetric-mobile": lambda value: value["high_shapes_wh"].__setitem__(
+                23, [868, 1988]),
+            "duplicate-mobile": lambda value: value["high_shapes_wh"].__setitem__(
+                23, list(value["high_shapes_wh"][22])),
             "odd": lambda value: value["high_shapes_wh"][0].__setitem__(0, 1539),
             "string": lambda value: value["high_shapes_wh"][0].__setitem__(0, "1540"),
             "float": lambda value: value["high_shapes_wh"][0].__setitem__(0, 1540.0),
@@ -132,7 +161,7 @@ class ProdZipDepthConvex2xTests(unittest.TestCase):
         }
         for name, mutate in mutations.items():
             with self.subTest(name=name):
-                self._assert_contract_rejected(mutate, "exact ordered six calibrated")
+                self._assert_contract_rejected(mutate, "exact ordered 24 calibrated")
 
     def test_contract_rejects_profile_strategy_and_io_drift(self):
         for name, mutate in {
@@ -140,6 +169,8 @@ class ProdZipDepthConvex2xTests(unittest.TestCase):
                     {"profile_strategy": "one-ranged-profile"}),
                 "profile-order": lambda value: value["tensorrt"].update(
                     {"profile_order": "sorted"}),
+                "old-engine-recipe": lambda value: value["tensorrt"].update(
+                    {"engine_recipe": "trt-6high-point-l5-v2"}),
                 "input-shape": lambda value: value["engine_io"]["inputs"][0].update(
                     {"shape": [1, 3, "H", "W"]}),
                 "output-shape": lambda value: value["engine_io"]["outputs"][0].update(

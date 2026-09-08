@@ -996,7 +996,7 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
   EXPECT_GT(v2::max_horizontal_slope, 0.0f);
   EXPECT_LT(v2::max_horizontal_slope, 1.0f);
   EXPECT_FLOAT_EQ(v2::vertical_majorant_share, 0.75f);
-  EXPECT_EQ(v2::contract_schema, 75u);
+  EXPECT_EQ(v2::contract_schema, 76u);
   EXPECT_EQ(v2::capture_provenance_schema, 3u);
   EXPECT_EQ(v2::shadow_state_dump_schema, 16u);
   EXPECT_EQ(v2::shadow_frame_stats_dump_schema, 2u);
@@ -1181,6 +1181,24 @@ TEST(ParallaxV2ContractTest, ProductionContractCarriesAttributableState) {
     std::pair {434u, 770u},
     std::pair {434u, 1022u},
     std::pair {434u, 1036u},
+    std::pair {574u, 434u},
+    std::pair {616u, 434u},
+    std::pair {630u, 434u},
+    std::pair {658u, 434u},
+    std::pair {700u, 434u},
+    std::pair {868u, 434u},
+    std::pair {938u, 434u},
+    std::pair {966u, 434u},
+    std::pair {980u, 434u},
+    std::pair {434u, 574u},
+    std::pair {434u, 616u},
+    std::pair {434u, 630u},
+    std::pair {434u, 658u},
+    std::pair {434u, 700u},
+    std::pair {434u, 868u},
+    std::pair {434u, 938u},
+    std::pair {434u, 966u},
+    std::pair {434u, 980u},
   };
   for (const auto &[width, height] : supported_shapes) {
     EXPECT_TRUE(v2::model_calibration_supports_shape(small_calibration, width, height)) << width << 'x' << height;
@@ -2443,7 +2461,28 @@ TEST(TensorRtConditionalWrapperGpuTest, AllAuthenticatedShapesBuildAndExecute) {
     wrapper_shape_case_t {1080u, 1920u, 434, 770},
     wrapper_shape_case_t {1080u, 2560u, 434, 1022},
     wrapper_shape_case_t {1440u, 3440u, 434, 1036},
+    wrapper_shape_case_t {2048u, 1536u, 574, 434},
+    wrapper_shape_case_t {2388u, 1668u, 616, 434},
+    wrapper_shape_case_t {2360u, 1640u, 630, 434},
+    wrapper_shape_case_t {2160u, 1440u, 658, 434},
+    wrapper_shape_case_t {1920u, 1200u, 700, 434},
+    wrapper_shape_case_t {2160u, 1080u, 868, 434},
+    wrapper_shape_case_t {2340u, 1080u, 938, 434},
+    wrapper_shape_case_t {2400u, 1080u, 966, 434},
+    wrapper_shape_case_t {2424u, 1080u, 980, 434},
+    wrapper_shape_case_t {1536u, 2048u, 434, 574},
+    wrapper_shape_case_t {1668u, 2388u, 434, 616},
+    wrapper_shape_case_t {1640u, 2360u, 434, 630},
+    wrapper_shape_case_t {1440u, 2160u, 434, 658},
+    wrapper_shape_case_t {1200u, 1920u, 434, 700},
+    wrapper_shape_case_t {1080u, 2160u, 434, 868},
+    wrapper_shape_case_t {1080u, 2340u, 434, 938},
+    wrapper_shape_case_t {1080u, 2400u, 434, 966},
+    wrapper_shape_case_t {1080u, 2424u, 434, 980},
   };
+  static_assert(
+    wrapper_shapes.size() == models::prod_zipdepth_convex2x::fixed_profile_shapes.size()
+  );
   constexpr auto assets_dir = "assets";
   for (std::size_t shape_index = 0u; shape_index < wrapper_shapes.size(); ++shape_index) {
     const auto &shape = wrapper_shapes[shape_index];
@@ -2504,7 +2543,10 @@ TEST(TensorRtConditionalWrapperGpuTest, AllAuthenticatedShapesBuildAndExecute) {
       EXPECT_EQ(completed.raw_height, high_shape->height);
       EXPECT_EQ(completed.field_width, high_shape->width);
       EXPECT_EQ(completed.field_height, high_shape->height);
+      EXPECT_TRUE(completed.field_content.full(*high_shape))
+        << "Full-frame phone/tablet inference must not introduce tensor padding";
       EXPECT_TRUE(completed.refined_live_geometry_active);
+      EXPECT_TRUE(models::parallax_v2_result_is_authenticated(completed));
       EXPECT_FALSE(completed.gpu_undecided_completion);
       EXPECT_FALSE(estimator.has_terminal_failure());
     }
@@ -3267,6 +3309,24 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
     supported_shape_t {1080u, 1920u, 868, 1540},
     supported_shape_t {1080u, 2560u, 868, 2044},
     supported_shape_t {1440u, 3440u, 868, 2072},
+    supported_shape_t {2048u, 1536u, 1148, 868},
+    supported_shape_t {2388u, 1668u, 1232, 868},
+    supported_shape_t {2360u, 1640u, 1260, 868},
+    supported_shape_t {2160u, 1440u, 1316, 868},
+    supported_shape_t {1920u, 1200u, 1400, 868},
+    supported_shape_t {2160u, 1080u, 1736, 868},
+    supported_shape_t {2340u, 1080u, 1876, 868},
+    supported_shape_t {2400u, 1080u, 1932, 868},
+    supported_shape_t {2424u, 1080u, 1960, 868},
+    supported_shape_t {1536u, 2048u, 868, 1148},
+    supported_shape_t {1668u, 2388u, 868, 1232},
+    supported_shape_t {1640u, 2360u, 868, 1260},
+    supported_shape_t {1440u, 2160u, 868, 1316},
+    supported_shape_t {1200u, 1920u, 868, 1400},
+    supported_shape_t {1080u, 2160u, 868, 1736},
+    supported_shape_t {1080u, 2340u, 868, 1876},
+    supported_shape_t {1080u, 2400u, 868, 1932},
+    supported_shape_t {1080u, 2424u, 868, 1960},
   };
   for (const auto &[source_width, source_height, width, height] : supported_shapes) {
     std::array<ComPtr<ID3D11ShaderResourceView>, 5u> supported_field_views;

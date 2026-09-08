@@ -152,7 +152,7 @@ def _recomputed_capture_grid(manifest: Mapping[str, Any]) -> Optional[str]:
     """Recompute calibration and grid kind from the authenticated producer identity/shape.
 
     A manifest's recorded calibration fields are presentation data, not an authority.  In
-    particular, one of the six exact single-high profiles must never be relabelled as an
+    particular, one of the exact single-high profiles must never be relabelled as an
     unsupported-shape abstention to make its schema-2 model-boundary evidence optional.
     """
 
