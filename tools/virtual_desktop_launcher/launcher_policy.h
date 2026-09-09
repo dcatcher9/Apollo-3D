@@ -1,6 +1,6 @@
 /**
  * @file tools/virtual_desktop_launcher/launcher_policy.h
- * @brief Pure admission and placement rules for explicitly launched desktop applications.
+ * @brief Pure window geometry for the native Windows window router.
  */
 #pragma once
 
@@ -17,35 +17,6 @@ namespace desktop_launcher {
 
     bool operator==(const rectangle_t &) const = default;
   };
-
-  struct window_evidence_t {
-    bool belongs_to_launch_job = false;
-    bool existed_before_launch = false;
-    bool already_handled = false;
-    bool visible = false;
-    bool top_level = false;
-    bool application_window = false;
-    bool cloaked = false;
-    bool minimized = false;
-    bool interactive_move = false;
-    bool exact_target_available = false;
-    bool default_input_desktop = false;
-    std::uint64_t process_created = 0;
-    std::uint64_t launch_started = 0;
-  };
-
-  // Process names, foreground changes, and matching executable paths are deliberately absent:
-  // none proves that an existing application's window belongs to this explicit launch.
-  constexpr bool may_place_window(const window_evidence_t &evidence) {
-    return evidence.belongs_to_launch_job &&
-           !evidence.existed_before_launch &&
-           !evidence.already_handled &&
-           evidence.visible && evidence.top_level && evidence.application_window &&
-           !evidence.cloaked && !evidence.minimized && !evidence.interactive_move &&
-           evidence.exact_target_available && evidence.default_input_desktop &&
-           evidence.launch_started != 0 &&
-           evidence.process_created >= evidence.launch_started;
-  }
 
   constexpr bool contains(const rectangle_t &outer, const rectangle_t &inner) {
     return inner.left >= outer.left && inner.top >= outer.top &&

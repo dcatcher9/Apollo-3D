@@ -3718,6 +3718,9 @@ namespace stream {
           return;
         }
 
+        // Physical input may route native launches too, so the observer must stop when the
+        // stream disconnects even when its apps and monitor remain available for reconnect.
+        proc::proc.stop_window_router();
         invalidate_pending_platform_stop_locked();
         const auto process_status = proc::proc.get_status();
         if (process_status.app_id == 0) {
@@ -3736,8 +3739,8 @@ namespace stream {
 
         // Keep the app and remote virtual-display ownership active during the grace. Capture,
         // encoding, transport, and input are already stopped with the session; retaining process
-        // ownership prevents another presentation path from claiming the display. Keep the
-        // launcher with that monitor too, preserving its app ownership across reconnects.
+        // ownership prevents another presentation path from claiming the display. Native
+        // window routing resumes only when the next stream activates its display lease.
         const auto host_session_id = proc::proc.get_host_session_id();
         warm_process_instance = host_session_id == 0 ? std::nullopt : std::optional<std::uint64_t> {host_session_id};
         // The current launch reservation may still be waiting for its control connection.
@@ -4045,13 +4048,15 @@ namespace stream {
         // Capture input ownership only after admission, under the same lock that
         // protects launch/replacement. A stale handshake must not retain another
         // session's monitor identity or inject its delayed startup mouse nudge.
+        const auto active_process = proc::proc.get_status();
         session.input = input::alloc(
           session.mail,
           permissions(session),
           session.config.client_supports_authored_pcm,
-          session.confine_cursor && proc::proc.get_status().virtual_display ?
+          session.confine_cursor && active_process.virtual_display ?
             std::optional {proc::proc.virtual_display_device_path()} :
-            std::nullopt
+            std::nullopt,
+          active_process.virtual_display ? active_process.host_session_id : 0
         );
       }
 

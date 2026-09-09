@@ -172,20 +172,6 @@ function setOnOff(key, event) {
         </span>
       </div>
       <p class="card-note driver-note">{{ driverState.detail }}</p>
-      <div v-if="platform === 'windows'" class="simple-toggle-row">
-        <div>
-          <strong>{{ $t('config.virtual_display_launcher') }}</strong>
-          <span>{{ $t('config.virtual_display_launcher_desc') }}</span>
-        </div>
-        <label class="form-switch" :aria-label="$t('config.virtual_display_launcher')">
-          <input
-            class="form-check-input"
-            type="checkbox"
-            :checked="isEnabled('virtual_display_launcher', true)"
-            @change="setOnOff('virtual_display_launcher', $event)"
-          />
-        </label>
-      </div>
       <a v-if="driverState.tone !== 'success'" class="quiet-link" href="./troubleshooting">
         Open diagnostics <i class="fas fa-arrow-right"></i>
       </a>

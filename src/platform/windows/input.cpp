@@ -17,6 +17,7 @@
 // local includes
 #include "ds5/ds5_controller_slot.h"
 #include "input_cursor.h"
+#include "input_tag.h"
 #include "keylayout.h"
 #include "misc.h"
 #include "src/config.h"
@@ -471,6 +472,7 @@ namespace platf {
    * @param i The `INPUT` struct to send.
    */
   void send_input(INPUT &i) {
+    detail::apply_input_tag(i);
     const auto sent = detail::run_with_desktop_retry(
       [&]() {
         return SendInput(1, &i, sizeof(INPUT)) == 1;
@@ -580,6 +582,7 @@ namespace platf {
           event.mi.dwFlags = MOUSEEVENTF_MOVE;
           event.mi.dx = dx;
           event.mi.dy = dy;
+          detail::apply_input_tag(event);
           if (SendInput(1, &event, sizeof(event)) == 1) {
             return true;
           }
@@ -744,6 +747,7 @@ namespace platf {
             event.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
             event.mi.dx = detail::cursor_pixel_to_absolute(position->first, GetSystemMetrics(SM_XVIRTUALSCREEN), width);
             event.mi.dy = detail::cursor_pixel_to_absolute(position->second, GetSystemMetrics(SM_YVIRTUALSCREEN), height);
+            detail::apply_input_tag(event);
             return SendInput(1, &event, sizeof(event)) == 1;
           },
           []() {

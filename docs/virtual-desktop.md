@@ -4,47 +4,61 @@ Sunshine 3D's virtual desktop is an additional monitor in the active Windows des
 the signed-in user's applications, keyboard focus, and cursor with the physical monitors. It is
 not a separate Windows login or an isolated Windows session.
 
-The app launcher is enabled by default under the host's **Configuration → Essentials → Virtual
-display**. Cursor confinement is enabled by default in Moonlight 3D's client settings. This
-implementation still needs live Galaxy XR verification,
-including application compatibility and reconnect behavior.
+## Opening applications normally
 
-## Launching applications
+Use Windows Start, Search, the taskbar, desktop shortcuts, Explorer, or Run from the streamed
+virtual monitor. There is no custom application launcher. The host automatically starts a hidden,
+standard-user window router for its virtual display. Both the mouse/keyboard connected to the PC
+and client input can invoke native Windows launches. Standard actionable application controls
+and Enter from an application/terminal on the virtual monitor can also identify an invocation.
+The source monitor decides placement: a qualifying invocation on the virtual display admits the
+next eligible foreground application window there; a gesture on a physical monitor does not.
+Client input carries the host session's tag so it can be recognized alongside ordinary PC input.
+Other injected input is ignored.
 
-While a virtual-display stream is active, a launcher appears on that monitor. Browse to an `.exe`,
-enter optional arguments, and launch it from there. The helper tracks the process it starts and
-attributable child processes, placing their new windows on the streamed monitor. New dialogs and
-additional windows can follow the same placement rule when their origin can be established.
+A launch that activates an existing app may move that selected window from a physical monitor.
+Other document windows in the same process are not moved. The router does not change the primary
+monitor or rearrange existing windows when streaming starts. It does not run applications itself;
+Windows continues to handle shortcuts, arguments, file associations, and application reuse.
 
-Existing windows are excluded from automatic placement. In particular, launching another copy of
-an app never authorizes moving its existing main-monitor window. Changing focus alone does not
-move a window. The launcher does not change the primary monitor or the physical monitors' display
-configuration.
+Activation on a Windows shell surface or an eligible application control starts a short, one-use
+routing opportunity. Pointer clicks must hit a recent, asynchronously inspected actionable item. Desktop and
+Explorer icons also honor Windows' single/double-click setting. Keyboard Enter and native Windows
+shortcuts can invoke the same routing. Empty-space clicks do not authorize a move.
+Unrecognized injected input, pointer input outside the target, a secure-desktop switch,
+or a missing/changed target cancels it. Pointer motion does not create a launch request. Background
+window creation alone does not authorize placement. After the selected foreground root has been
+handled, another launch gesture is required to move another root.
 
-Use the launcher for this behavior. Starting an application through the Windows Start menu, a
-desktop shortcut, or an existing application does not reliably identify it as a virtual-display
-launch.
+Windows does not expose a universal causal link between a shell click and an application window.
+Routing therefore has compatibility limits:
 
-Some applications require additional settings:
+- A launch must present an eligible foreground window within five seconds. Background-only apps,
+  delayed launches, and apps that keep the same foreground window without an activation event
+  can remain where Windows places them. An unrelated application stealing focus during that
+  brief launch interval can be mistaken for the launch result.
+- Mouse routing needs fresh shell-item evidence. If a shell provider is unavailable or too slow,
+  or an item is clicked before its first hover query completes, that launch is left to Windows.
+- The PC's physical mouse/keyboard and the XR mouse/ray path supply routing provenance. Direct
+  native pen/touch injection is not identified by the mouse/keyboard tag.
+- Elevated applications, protected surfaces, and apps that override their own placement may
+  reject the standard-user helper's move. Games with exclusive display selection may need their
+  built-in monitor setting; ordinary windowed/borderless windows use Windows placement.
+- Custom application controls without standard actionable UI Automation metadata, background
+  launches, and other activation paths without an observable invocation cannot be attributed
+  reliably. Owned dialogs can follow a specifically adopted root while interaction remains on
+  the virtual monitor. Moving input to a physical monitor clears that tracking. Other document
+  windows in the same application process are not adopted.
 
-- **Apps with a single running instance:** A new launch may activate an existing window. Use the
-  application's separate-window or separate-instance argument when it supports one. The helper
-  leaves that existing window in place and reports when it cannot find a new attributable window.
-- **Launchers, brokers, and detached processes:** A launch may be handed to an existing service or
-  another process whose origin cannot be established. Those windows are left in place; the
-  launcher reports the compatibility limitation.
-- **Games:** Windowed and borderless modes can accept normal window placement. An
-  exclusive-fullscreen game may select its own output; use the game's monitor setting. Some games
-  also restore their saved window placement after launch.
+The helper stops on disconnect and starts again for the next active stream, including a warm
+reconnect to a retained monitor. Its old routing intent and dialog tracking are discarded.
+Replacing/removing the monitor or stopping the host also ends its work. It never closes user
+applications. Windows may move windows when their monitor is removed, according to its normal
+display-removal behavior.
 
-The launcher and its application tracking survive a reconnect while the same virtual monitor is
-retained. Closing the launcher, replacing the monitor, or ending the retained session stops its
-window management and keeps launched applications running. A new helper does not take ownership
-of an earlier helper's applications. After final virtual-display removal, Windows may move windows
-from the removed monitor according to its normal display-removal behavior.
-
-Set [`virtual_display_launcher = off`](configuration.md#virtual_display_launcher) to disable the
-helper. This setting does not close applications already launched through it.
+This feature needs live Galaxy XR verification with real Start/shortcut launches, existing app
+reuse, reconnects, and a simultaneous local user. Isolated tests do not establish application
+compatibility on the headset.
 
 ## Keeping the remote cursor visible
 

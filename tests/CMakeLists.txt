@@ -137,12 +137,18 @@ add_test(NAME ds5_component_unit_tests COMMAND ds5_component_unit_tests)
 set_tests_properties(ds5_component_unit_tests PROPERTIES TIMEOUT 30)
 
 if(WIN32)
-    add_dependencies(${PROJECT_NAME} sunshine-desktop-launcher)
-    add_test(NAME virtual_desktop_launcher_native
-        COMMAND $<TARGET_FILE:sunshine-desktop-launcher> --self-test)
-    set_tests_properties(virtual_desktop_launcher_native PROPERTIES
+    add_dependencies(${PROJECT_NAME} sunshine-window-router)
+    add_test(NAME native_window_routing
+        COMMAND $<TARGET_FILE:sunshine-window-router> --self-test)
+    set_tests_properties(native_window_routing PROPERTIES
         TIMEOUT 30
-        LABELS "windows;launcher;integration")
+        LABELS "windows;window-routing;integration")
+    add_test(NAME native_shell_item_query
+        COMMAND $<TARGET_FILE:sunshine-window-router> --self-test-shell-items)
+    set_tests_properties(native_shell_item_query PROPERTIES
+        TIMEOUT 15
+        SKIP_RETURN_CODE 77
+        LABELS "windows;window-routing;integration")
 
     # Use the OS Windows PowerShell runtime: the packaged installer scripts target
     # 5.1, and their isolated suites support the already available Pester 3/4.

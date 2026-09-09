@@ -111,7 +111,7 @@ The Web UI also shows QR pairing as a secondary option for compatible clients. M
 normal setup flow uses the PIN. For the direct local path, configure
 [Local AR glasses](./docs/sbs-local-ar-glasses.md) instead; Moonlight 3D is not involved.
 
-The virtual display includes an EXE launcher and remote cursor bounds. See
+The virtual display supports native Windows launches and client-controlled remote cursor bounds. See
 [Virtual desktop interaction](./docs/virtual-desktop.md) for controls, application compatibility,
 and the current live-verification status.
 

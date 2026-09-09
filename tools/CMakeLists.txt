@@ -30,15 +30,17 @@ target_link_libraries(sunshinesvc
 target_compile_options(sunshinesvc PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
 
 if(WIN32)
-    # Session-owned launcher for the streamed virtual monitor. Its launched apps
-    # remain ordinary interactive-user processes after the helper closes.
-    add_executable(sunshine-desktop-launcher WIN32 virtual_desktop_launcher/main.cpp)
-    set_target_properties(sunshine-desktop-launcher PROPERTIES CXX_STANDARD 23)
-    target_compile_definitions(sunshine-desktop-launcher PRIVATE UNICODE _UNICODE)
-    target_link_options(sunshine-desktop-launcher PRIVATE -municode)
-    target_link_libraries(sunshine-desktop-launcher user32 gdi32 shell32 ole32 uuid dwmapi advapi32)
-    target_compile_options(sunshine-desktop-launcher PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
-    install(TARGETS sunshine-desktop-launcher RUNTIME DESTINATION "tools" COMPONENT application)
+    # Session-owned native window routing for the streamed virtual monitor.
+    # Start, taskbar and shortcuts remain ordinary Windows launch surfaces.
+    add_executable(sunshine-window-router WIN32
+        virtual_desktop_launcher/main.cpp
+        virtual_desktop_launcher/native_shell_item.cpp)
+    set_target_properties(sunshine-window-router PROPERTIES CXX_STANDARD 23)
+    target_compile_definitions(sunshine-window-router PRIVATE UNICODE _UNICODE)
+    target_link_options(sunshine-window-router PRIVATE -municode)
+    target_link_libraries(sunshine-window-router user32 gdi32 shell32 ole32 oleaut32 uuid dwmapi advapi32)
+    target_compile_options(sunshine-window-router PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
+    install(TARGETS sunshine-window-router RUNTIME DESTINATION "tools" COMPONENT application)
 
     # Out-of-process Chromium IAccessible2 tag:video geometry helper. Keeping
     # COM traversal outside Sunshine contains slow or hung providers.
