@@ -32,8 +32,8 @@
 #include "video_depth_estimator.h"
 #ifdef _WIN32
   #include "platform/windows/ar_glasses.h"
-  #include "platform/windows/display_recovery_guardian.h"
   #include "platform/windows/misc.h"
+  #include "platform/windows/primary_display.h"
   #include "platform/windows/virtual_display.h"
 #endif
 
@@ -157,12 +157,6 @@ int main(int argc, char *argv[]) {
   SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
 
   setlocale(LC_ALL, "C");
-
-  // The recovery guardian is a separate, minimal process. It must not parse host settings,
-  // initialize drivers/AR/input, bind server ports, or acquire recovery ownership while we live.
-  if (const auto guardian_result = platf::display_recovery_guardian::run_if_requested()) {
-    return *guardian_result;
-  }
 #endif
 
 #pragma GCC diagnostic push
@@ -222,6 +216,15 @@ int main(int argc, char *argv[]) {
 
     return fn->second(argv[0], config::sunshine.cmd.argc, config::sunshine.cmd.argv);
   }
+
+#ifdef _WIN32
+  // Restore a saved display transaction before GPU preparation or platform initialization can
+  // fail. Command-only invocations returned above and must not recover a running host's lease.
+  // The installed service restarts the host after a crash; standalone hosts recover on relaunch.
+  if (!platf::primary_display::recover()) {
+    BOOST_LOG(error) << "Display-configuration recovery is pending; virtual-display launches will wait for restoration."sv;
+  }
+#endif
 
   // Prepare the pinned authenticated live TensorRT model in the background for the long-lived host.
   // Command modes such as --sbs-bench own their TensorRT lifecycle and must not race this work.
@@ -437,8 +440,14 @@ int main(int argc, char *argv[]) {
   if (video::probe_encoders()) {
 #ifdef _WIN32
     bool allow_probing = video::allow_encoder_probing();
+    // Driver initialization may have made saved outputs available since the early recovery.
+    // Do not introduce another display while a previous transaction still needs restoration.
+    const bool display_recovery_ready = platf::primary_display::recover();
+    if (!display_recovery_ready) {
+      BOOST_LOG(warning) << "Skipping temporary encoder-probe display while display recovery remains pending."sv;
+    }
     // Create a temporary virtual display for encoder capability probing
-    if (proc::vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
+    if (proc::vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK && display_recovery_ready) {
       std::string probe_uuid_str = PROBE_DISPLAY_UUID;
       auto probe_uuid = uuid_util::uuid_t::parse(probe_uuid_str);
       auto *probe_guid = (GUID *) (void *) &probe_uuid;

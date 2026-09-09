@@ -66,25 +66,21 @@ pending restoration is reconciled. If an original physical monitor is unplugged,
 the available original monitors and retains the record until the missing monitor returns and the
 remaining settings can be restored. The virtual monitor stays active during that partial recovery.
 
-Before disabling physical displays, the host starts a hidden, independent recovery process and
-waits for its readiness handshake. If it cannot establish that process, the virtual-display-only
-launch fails before physical displays are disabled. The recovery process waits for the actual host
-process to exit; it never restores displays while that host is alive. After a crash it can restore
-the saved physical displays without restarting the host, retrying every five seconds when recovery
-is incomplete. A shared ownership lock prevents it from changing a restarted host's live display
-setup. Each recovery process writes a separate log beside the host configuration file, named
-`<config-file>.display-recovery-<PID>.log`, for example `sunshine.conf.display-recovery-12345.log`.
+The host restores unfinished display transactions early during normal startup, before GPU and
+platform initialization. The existing packaged Windows service restarts the host after an
+unexpected exit, with a three-second retry interval while the service remains running. Recovery
+then uses the saved display record; no additional recovery process or launcher is required.
 
-If a terminal, service wrapper, or development runner keeps the recovery process inside a Windows
-job, the process refuses readiness and records the reason in that log. Virtual-display-only mode
-then fails before disabling physical displays; the host must be started in an environment that
-allows its recovery process to run independently.
+A standalone development host has no automatic restart. After a hard crash, physical displays may
+remain disabled until that host is relaunched with the **same configuration file**. Starting an
+installed copy with a different configuration does not recover the development host's record.
+Normal disconnect and graceful shutdown restore displays without requiring a restart.
 
-The host also checks for unfinished restoration during startup. While a disconnected session
-remains in its reconnect grace period, it retries a failed restore once per second without
-extending that deadline. A new accepted launch or active session cancels those retries. Changed
-physical display arrangements can prevent exact restoration until the saved arrangement is
-available again. Windows can also move windows when their monitor is removed.
+A shared ownership lock prevents another host from restoring a live transaction. While a
+disconnected session remains in its reconnect grace period, the host retries a failed restore once
+per second without extending that deadline. A new accepted launch or active session cancels those
+retries. Changed physical display arrangements can prevent exact restoration until the saved
+arrangement is available again. Windows can also move windows when their monitor is removed.
 
 Virtual-display-only mode still needs live Galaxy XR verification with applications that remember
 a monitor, existing windows, reconnects, and physical display recovery after a host crash. Automated

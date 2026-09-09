@@ -46,7 +46,6 @@
 
 #ifdef _WIN32
   #include "platform/windows/ar_glasses.h"
-  #include "platform/windows/display_recovery_guardian.h"
   // from_utf8() string conversion function
   #include "platform/windows/misc.h"
   #include "platform/windows/primary_display.h"
@@ -274,13 +273,6 @@ namespace proc {
   };
 
   std::unique_ptr<platf::deinit_t> init() {
-#ifdef _WIN32
-    // Recover before encoder probing or the local-AR controller can change the desktop.
-    // Command-only invocations do not initialize proc and must not undo a running host's lease.
-    if (!platf::primary_display::recover()) {
-      BOOST_LOG(error) << "Display-configuration recovery is pending; virtual-display launches will wait for restoration."sv;
-    }
-#endif
     return std::make_unique<deinit_t>();
   }
 
@@ -957,20 +949,12 @@ namespace proc {
   }
 
   bool proc_t::prepare_virtual_display_topology() {
-    // AddVirtualDisplay can restore a remembered topology before explicit promotion. The
-    // independent recovery process must already be ready before any exclusive-session change.
-    if (_virtual_display_only && !platf::display_recovery_guardian::ensure_running()) {
-      BOOST_LOG(error) << "Cannot prepare a virtual-only display without an independent display recovery process."sv;
-      return false;
-    }
+    // AddVirtualDisplay can restore remembered topology before explicit promotion, so persist
+    // the original configuration before creating the monitor.
     return platf::primary_display::prepare(_virtual_display_only);
   }
 
   bool proc_t::promote_virtual_display(bool enable_hdr) {
-    if (_virtual_display_only && !platf::display_recovery_guardian::ensure_running()) {
-      BOOST_LOG(error) << "Cannot disable physical displays without an independent display recovery process."sv;
-      return false;
-    }
     const bool had_hdr_worker = _hdr_worker.joinable();
     stop_hdr_worker();
     _hdr_worker_state.reset();
@@ -1757,14 +1741,6 @@ namespace proc {
     // 60 unique composited frames merely because the encoder now requests 60 fps.
     if (old_width == static_cast<std::uint32_t>(width) && old_height == static_cast<std::uint32_t>(height) && old_fps == fps_millihz) {
       return live_video_mode_result_e::unchanged;
-    }
-
-    if (_virtual_display_only && !platf::display_recovery_guardian::ensure_running()) {
-      BOOST_LOG(error) << "Independent display recovery is unavailable; restoring physical displays before requiring a reconnect."sv;
-      if (!restore_primary_display()) {
-        BOOST_LOG(error) << "Physical-display restoration remains pending after the recovery process failed."sv;
-      }
-      return live_video_mode_result_e::needs_reconnect;
     }
 
     // A locked session or an unreachable display-configuration API is transient, not a property of
