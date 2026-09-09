@@ -774,6 +774,7 @@ namespace stream {
 
   struct session_t {
     config_t config;
+    bool confine_cursor = true;
     std::shared_ptr<microphone::session_t> microphone_receiver;
 
     safe::mail_t mail;
@@ -3735,7 +3736,8 @@ namespace stream {
 
         // Keep the app and remote virtual-display ownership active during the grace. Capture,
         // encoding, transport, and input are already stopped with the session; retaining process
-        // ownership prevents another presentation path from claiming the display.
+        // ownership prevents another presentation path from claiming the display. Keep the
+        // launcher with that monitor too, preserving its app ownership across reconnects.
         const auto host_session_id = proc::proc.get_host_session_id();
         warm_process_instance = host_session_id == 0 ? std::nullopt : std::optional<std::uint64_t> {host_session_id};
         // The current launch reservation may still be waiting for its control connection.
@@ -4019,8 +4021,6 @@ namespace stream {
     }
 
     int start(session_t &session) {
-      session.input = input::alloc(session.mail, permissions(session), session.config.client_supports_authored_pcm);
-
       session.broadcast_ref = broadcast.ref();
       if (!session.broadcast_ref) {
         return -1;
@@ -4042,6 +4042,17 @@ namespace stream {
           remote_session_active = false;
           return -1;
         }
+        // Capture input ownership only after admission, under the same lock that
+        // protects launch/replacement. A stale handshake must not retain another
+        // session's monitor identity or inject its delayed startup mouse nudge.
+        session.input = input::alloc(
+          session.mail,
+          permissions(session),
+          session.config.client_supports_authored_pcm,
+          session.confine_cursor && proc::proc.get_status().virtual_display ?
+            std::optional {proc::proc.virtual_display_device_path()} :
+            std::nullopt
+        );
       }
 
       auto rollback_active_session = []() {
@@ -4112,6 +4123,7 @@ namespace stream {
 
       session->shutdown_event = mail->event<bool>(mail::shutdown);
       session->launch_session_id = launch_session.id;
+      session->confine_cursor = launch_session.confine_cursor;
       session->device_name = launch_session.device_name;
       session->device_uuid = launch_session.unique_id;
       session->client_policy_generation = 0;

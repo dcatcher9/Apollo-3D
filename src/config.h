@@ -145,12 +145,14 @@ namespace config {
   };
 
   inline constexpr bool default_virtual_display_restart_explorer = false;
+  inline constexpr bool default_virtual_display_launcher = true;
 
   struct sunshine_t {
     bool hide_tray_controls;
     bool enable_pairing;
     bool enable_discovery;
     bool virtual_display_restart_explorer;
+    bool virtual_display_launcher;
     std::string locale;
     int min_log_level;
     bool diagnostics_enabled;

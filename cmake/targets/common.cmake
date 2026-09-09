@@ -10,6 +10,9 @@ if(TARGET video-dom-info)
     # therefore has to produce the sibling tool as well as the main executable.
     add_dependencies(sunshine video-dom-info)
 endif()
+if(TARGET sunshine-desktop-launcher)
+    add_dependencies(sunshine sunshine-desktop-launcher)
+endif()
 
 # Apollo supports only the native Windows/NVIDIA host path.
 include(${CMAKE_MODULE_PATH}/targets/windows.cmake)

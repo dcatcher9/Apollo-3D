@@ -39,6 +39,7 @@
 #include <WS2tcpip.h>
 #include <WtsApi32.h>
 #include <sddl.h>
+#include <aclapi.h>
 #include <ShlObj.h>
 // clang-format on
 
@@ -1521,6 +1522,59 @@ namespace platf {
       CoTaskMemFree(value);
     });
     return std::filesystem::path {value};
+  }
+
+  std::error_code grant_process_observation_to_user(HANDLE process, const std::string &user_id) {
+    if (user_id.empty() || !user_id.starts_with("S-1-") || user_id.find('\0') != std::string::npos) {
+      return {ERROR_INVALID_SID, std::system_category()};
+    }
+    PSID user_sid = nullptr;
+    if (!ConvertStringSidToSidW(from_utf8(user_id).c_str(), &user_sid)) {
+      return {static_cast<int>(GetLastError()), std::system_category()};
+    }
+    const auto sid_guard = util::fail_guard([&]() {
+      LocalFree(user_sid);
+    });
+    // The caller captures this SID from the intended user's token. Do not accept a broad
+    // principal accidentally supplied in place of that exact user identity.
+    if (IsWellKnownSid(user_sid, WinWorldSid) || IsWellKnownSid(user_sid, WinAuthenticatedUserSid) ||
+        IsWellKnownSid(user_sid, WinBuiltinUsersSid) || IsWellKnownSid(user_sid, WinBuiltinAdministratorsSid)) {
+      return {ERROR_INVALID_SID, std::system_category()};
+    }
+    PACL existing_dacl = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    const auto queried = GetSecurityInfo(process, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION,
+      nullptr, nullptr, &existing_dacl, nullptr, &descriptor);
+    if (queried != ERROR_SUCCESS) {
+      return {static_cast<int>(queried), std::system_category()};
+    }
+    const auto descriptor_guard = util::fail_guard([&]() {
+      LocalFree(descriptor);
+    });
+    // A NULL DACL already allows the requested access. Replacing it with one ACE would
+    // silently revoke existing permissions, so preserve that object policy exactly.
+    if (!existing_dacl) {
+      return {};
+    }
+    EXPLICIT_ACCESSW observation {};
+    observation.grfAccessPermissions = PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE;
+    observation.grfAccessMode = GRANT_ACCESS;
+    observation.grfInheritance = NO_INHERITANCE;
+    observation.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    observation.Trustee.TrusteeType = TRUSTEE_IS_USER;
+    observation.Trustee.ptstrName = static_cast<LPWSTR>(user_sid);
+    PACL updated_dacl = nullptr;
+    const auto merged = SetEntriesInAclW(1, &observation, existing_dacl, &updated_dacl);
+    if (merged != ERROR_SUCCESS) {
+      return {static_cast<int>(merged), std::system_category()};
+    }
+    const auto acl_guard = util::fail_guard([&]() {
+      LocalFree(updated_dacl);
+    });
+    const auto applied = SetSecurityInfo(process, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION,
+      nullptr, nullptr, updated_dacl, nullptr);
+    return applied == ERROR_SUCCESS ? std::error_code {} :
+                                     std::error_code {static_cast<int>(applied), std::system_category()};
   }
 
   std::optional<std::string> active_user_id() {

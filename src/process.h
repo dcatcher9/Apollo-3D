@@ -232,6 +232,8 @@ namespace proc {
     bool live_video_mode_needs_display_change(int width, int height, int fps_millihz) const;
     /** Adopt the remote streaming session's virtual-display lease before platform startup. */
     bool activate_remote_virtual_display_lease(std::uint64_t lease);
+    /** Exact remote monitor identity for input confinement; empty for a physical desktop. */
+    std::string virtual_display_device_path() const;
     void terminate(bool immediate = false, bool needs_refresh = true);
 
     /** Thread-safe snapshot/update of the display selected by the capture pipeline. */
@@ -315,6 +317,9 @@ namespace proc {
 
     std::shared_ptr<hdr_worker_state_t> _hdr_worker_state;
     std::jthread _hdr_worker;
+    void start_virtual_desktop_launcher_locked();
+    void stop_virtual_desktop_launcher_locked();
+    boost::process::v1::child _desktop_launcher;
 #endif
 
     std::string display_name;

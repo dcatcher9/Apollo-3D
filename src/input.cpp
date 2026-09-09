@@ -266,6 +266,7 @@ namespace input {
 
     std::vector<gamepad_t> gamepads;
     std::unique_ptr<platf::client_input_t> client_context;
+    std::unique_ptr<platf::cursor_confinement_t> cursor_confinement;
 
     safe::mail_raw_t::event_t<input::touch_port_t> touch_port_event;
     platf::feedback_queue_t feedback_queue;
@@ -308,7 +309,11 @@ namespace input {
         platf::button_mouse(platf_input, BUTTON_LEFT, true);
       }
     }
-    platf::move_mouse(platf_input, util::endian::big(packet->deltaX), util::endian::big(packet->deltaY));
+    if (input->cursor_confinement) {
+      input->cursor_confinement->move(util::endian::big(packet->deltaX), util::endian::big(packet->deltaY));
+    } else {
+      platf::move_mouse(platf_input, util::endian::big(packet->deltaX), util::endian::big(packet->deltaY));
+    }
   }
 
   /**
@@ -401,6 +406,15 @@ namespace input {
     }
 
     auto &touch_port = input->touch_port;
+    if (input->cursor_confinement) {
+      // Remove stream letterboxing, then map fractions to the target's current pixel bounds.
+      const auto captured_width = (touch_port.width - 2.0f * touch_port.client_offsetX) * touch_port.scalar_inv;
+      const auto captured_height = (touch_port.height - 2.0f * touch_port.client_offsetY) * touch_port.scalar_inv;
+      if (captured_width > 0 && captured_height > 0) {
+        input->cursor_confinement->absolute(tpcoords->first / captured_width, tpcoords->second / captured_height);
+      }
+      return;
+    }
     platf::touch_port_t abs_port {
       touch_port.offset_x,
       touch_port.offset_y,
@@ -415,6 +429,11 @@ namespace input {
     auto release = util::endian::little(packet->header.magic) == MOUSE_BUTTON_UP_EVENT_MAGIC_GEN5;
     auto button = util::endian::big(packet->button);
     if (!detail::valid_mouse_button(button)) {
+      return;
+    }
+    // A physical mouse can leave the streamed monitor while the remote user is idle. Restore
+    // the remote cursor before a new press; releases must still clear OS state if it disappears.
+    if (!release && input->cursor_confinement && !input->cursor_confinement->restore()) {
       return;
     }
     if (mouse_press[button] != release) {
@@ -680,6 +699,9 @@ namespace input {
    * @param packet The scroll packet.
    */
   void passthrough(std::shared_ptr<input_t> &input, PNV_SCROLL_PACKET packet) {
+    if (input->cursor_confinement && !input->cursor_confinement->restore()) {
+      return;
+    }
     if (config::input.high_resolution_scrolling) {
       platf::scroll(platf_input, util::endian::big(packet->scrollAmt1));
     } else {
@@ -699,6 +721,9 @@ namespace input {
    * @param packet The scroll packet.
    */
   void passthrough(std::shared_ptr<input_t> &input, PSS_HSCROLL_PACKET packet) {
+    if (input->cursor_confinement && !input->cursor_confinement->restore()) {
+      return;
+    }
     if (config::input.high_resolution_scrolling) {
       platf::hscroll(platf_input, util::endian::big(packet->scrollAmount));
     } else {
@@ -1725,6 +1750,9 @@ namespace input {
     {
       std::lock_guard dispatch_guard {input->input_dispatch_lock};
       input->input_reset = true;
+      if (input->cursor_confinement) {
+        input->cursor_confinement->reset();
+      }
       input->reset_completion = completion;
       cancel_input_continuations(*input, crypto::PERM::_all_inputs);
       // An empty queue entry is an ordered reset barrier. Invalidate the current drain generation,
@@ -1765,22 +1793,27 @@ namespace input {
     return true;
   }
 
-  std::shared_ptr<input_t> alloc(safe::mail_t mail, crypto::PERM permissions, bool authored_haptics) {
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, crypto::PERM permissions, bool authored_haptics, std::optional<std::string> confine_display_path) {
     auto input = std::make_shared<input_t>(
       mail->event<input::touch_port_t>(mail::touch_port),
       mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback)
     );
     input->permissions = permissions;
     input->authored_haptics = authored_haptics;
+    if (confine_display_path) {
+      input->cursor_confinement = platf::allocate_cursor_confinement(platf_input, *confine_display_path);
+    }
     input->haptics_feedback_queue =
       mail->queue<platf::gamepad_feedback_msg_t>(mail::ds5_haptics_feedback, 64);
 
     // Workaround to ensure new frames will be captured when a client connects
-    task_pool.pushDelayed([]() {
-      platf::move_mouse(platf_input, 1, 1);
-      platf::move_mouse(platf_input, -1, -1);
-    },
-                          100ms);
+    if (!input->cursor_confinement) {
+      task_pool.pushDelayed([]() {
+        platf::move_mouse(platf_input, 1, 1);
+        platf::move_mouse(platf_input, -1, -1);
+      },
+                            100ms);
+    }
 
     return input;
   }

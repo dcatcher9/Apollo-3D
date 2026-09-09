@@ -32,6 +32,14 @@ editing the `conf` file in a text editor. Use the examples as reference.
 
 ## Essentials
 
+### virtual_display_launcher
+
+<table>
+    <tr><td>Description</td><td>Show an EXE launcher on the virtual display during a remote session. It places new windows attributable to its launches on that display while preserving existing main-monitor windows. Apps that reuse an existing instance, broker their launch through another process, or choose an exclusive-fullscreen monitor may need application-specific settings. See <a href="virtual-desktop.md">Virtual desktop interaction</a> for behavior and compatibility limits.</td></tr>
+    <tr><td>Default</td><td><code>on</code></td></tr>
+    <tr><td>Choices</td><td><code>on</code> / <code>off</code></td></tr>
+</table>
+
 ### sbs_3d_pop_strength
 
 <table>

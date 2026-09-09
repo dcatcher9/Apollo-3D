@@ -385,6 +385,16 @@ namespace proc {
     return display_name;
   }
 
+  std::string proc_t::virtual_display_device_path() const {
+    std::lock_guard lock(process_state_mutex);
+#ifdef _WIN32
+    if (_virtual_display && _launch_session && _launch_session->virtual_display) {
+      return platf::to_utf8(_virtual_display_device_path);
+    }
+#endif
+    return {};
+  }
+
   void proc_t::set_display_name(std::string name) {
     std::lock_guard lock(process_state_mutex);
     set_display_name_locked(std::move(name));
@@ -427,6 +437,98 @@ namespace proc {
   }
 
 #ifdef _WIN32
+  void proc_t::start_virtual_desktop_launcher_locked() {
+    if (!config::sunshine.virtual_display_launcher || !_virtual_display || _virtual_display_device_path.empty()) {
+      return;
+    }
+
+    std::error_code error;
+    if (_desktop_launcher.valid() && _desktop_launcher.running(error)) {
+      return;
+    }
+    _desktop_launcher = boost::process::v1::child {};
+
+    std::wstring module_path(32768, L'\0');
+    const auto length = GetModuleFileNameW(nullptr, module_path.data(), static_cast<DWORD>(module_path.size()));
+    if (!length || length >= module_path.size()) {
+      BOOST_LOG(warning) << "Could not locate the virtual desktop launcher beside Sunshine."sv;
+      return;
+    }
+    module_path.resize(length);
+    const auto helper = std::filesystem::path(module_path).parent_path() / L"tools" / L"sunshine-desktop-launcher.exe";
+    if (!std::filesystem::is_regular_file(helper, error)) {
+      BOOST_LOG(warning) << "Virtual desktop launcher is missing: " << helper;
+      return;
+    }
+
+    const auto user_id = platf::active_user_id();
+    if (!user_id) {
+      BOOST_LOG(warning) << "Could not identify the interactive user for the virtual desktop launcher."sv;
+      return;
+    }
+    // A standard-user helper cannot assume it can open a SYSTEM service process.
+    // Grant only lifetime/identity observation to this exact user, preserving the
+    // host's other process permissions, and bind the launch to the same account.
+    error = platf::grant_process_observation_to_user(GetCurrentProcess(), *user_id);
+    if (error) {
+      BOOST_LOG(warning) << "Could not permit virtual desktop launcher lifetime observation: " << error.message();
+      return;
+    }
+
+    FILETIME created {}, exited {}, kernel {}, user {};
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) {
+      BOOST_LOG(warning) << "Could not establish the virtual desktop launcher's host identity."sv;
+      return;
+    }
+    const auto parent_start = (static_cast<std::uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+    const auto command = platf::to_utf8(
+      platf::escape_argument(helper.native()) + L" --display-path " +
+      platf::escape_argument(_virtual_display_device_path) + L" --parent-pid " +
+      std::to_wstring(GetCurrentProcessId()) + L" --parent-start " + std::to_wstring(parent_start)
+    );
+    auto working_dir = boost::filesystem::path(helper.parent_path().native());
+    // Never put the helper or user-launched apps in the stream's kill-on-close app job.
+    // An elevated host also must not give the launcher its elevated token.
+    error.clear();
+    _desktop_launcher = platf::run_command_unelevated(true, command, working_dir, _env, nullptr, error, nullptr, user_id);
+    if (error) {
+      BOOST_LOG(warning) << "Could not start the virtual desktop launcher: " << error.message();
+    } else {
+      BOOST_LOG(info) << "Virtual desktop launcher started for the remote monitor."sv;
+    }
+  }
+
+  void proc_t::stop_virtual_desktop_launcher_locked() {
+    if (!_desktop_launcher.valid()) {
+      return;
+    }
+    const auto process_handle = _desktop_launcher.native_handle();
+    if (WaitForSingleObject(process_handle, 0) == WAIT_TIMEOUT) {
+      const DWORD pid = _desktop_launcher.id();
+      EnumWindows([](HWND window, LPARAM data) -> BOOL {
+        DWORD window_pid = 0;
+        GetWindowThreadProcessId(window, &window_pid);
+        if (window_pid == static_cast<DWORD>(data)) {
+          PostMessageW(window, WM_CLOSE, 0, 0);
+        }
+        return TRUE;
+      },
+                  static_cast<LPARAM>(pid));
+      // The launcher owns no user-app kill job. A hung picker/helper can be stopped
+      // without terminating the independently launched applications.
+      if (WaitForSingleObject(process_handle, 750) == WAIT_TIMEOUT) {
+        std::error_code error;
+        _desktop_launcher.terminate(error);
+        if (error) {
+          BOOST_LOG(warning) << "Could not stop the virtual desktop launcher: " << error.message();
+          return;
+        }
+        WaitForSingleObject(process_handle, 250);
+      }
+    }
+    _desktop_launcher = boost::process::v1::child {};
+  }
+
   void proc_t::stop_hdr_worker() {
     _hdr_worker.request_stop();
     if (_hdr_worker_state) {
@@ -752,6 +854,12 @@ namespace proc {
     if (!identity) {
       BOOST_LOG(error) << "Cannot retire a virtual display without its stable driver identity."sv;
       return false;
+    }
+
+    if (_virtual_display_identity && sameVirtualDisplayIdentity(*_virtual_display_identity, *identity)) {
+      // Preserve launch jobs across ordinary reconnects, but stop before Windows can
+      // recycle this monitor identity during replacement or final removal.
+      stop_virtual_desktop_launcher_locked();
     }
 
     {
@@ -1744,6 +1852,7 @@ namespace proc {
         return false;
       }
       _remote_virtual_display_lease = lease;
+      start_virtual_desktop_launcher_locked();
     }
 #endif
     return true;
@@ -1752,6 +1861,7 @@ namespace proc {
   void proc_t::terminate(bool immediate, bool needs_refresh) {
     std::lock_guard lock(process_state_mutex);
 #ifdef _WIN32
+    stop_virtual_desktop_launcher_locked();
     // The worker never takes process_state_mutex, so it is safe to join while holding the process
     // state lock. This prevents an old launch from touching a display after teardown or refresh.
     stop_hdr_worker();

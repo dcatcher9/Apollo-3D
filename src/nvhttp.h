@@ -52,17 +52,19 @@ namespace nvhttp {
     bool virtual_display = false;
     std::uint32_t scale_factor = 100;
     int sbs_mode = 0;
+    bool confine_cursor = true;
 
     bool operator==(const launch_display_options_t &) const = default;
   };
 
   std::optional<launch_mode_t> parse_launch_mode(std::string_view mode);
   std::optional<int> parse_launch_int(launch_int_field field, std::string_view value);
-  /** Resolve optional display extensions to native-scale, 2D, and no virtual-display request. */
+  /** Resolve optional display extensions; remote cursor confinement defaults on. */
   std::optional<launch_display_options_t> parse_launch_display_options(
     std::optional<std::string_view> virtual_display,
     std::optional<std::string_view> scale_factor,
-    std::optional<std::string_view> sbs_mode
+    std::optional<std::string_view> sbs_mode,
+    std::optional<std::string_view> confine_cursor = std::nullopt
   );
   std::optional<crypto::aes_t> parse_remote_input_key(std::string_view key);
   std::optional<std::uint32_t> parse_remote_input_key_id(std::string_view key_id);

@@ -8,7 +8,9 @@
 #include <chrono>
 #include <functional>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 
 // platform includes
@@ -226,6 +228,9 @@ namespace platf {
   void print_status(const std::string_view &prefix, HRESULT status);
   bool syncThreadDesktop();
 
+  /** Grant one captured user SID only process identity-query and exit-observation access. */
+  std::error_code grant_process_observation_to_user(HANDLE process, const std::string &user_id);
+
   int64_t qpc_counter();
 
   int64_t qpc_frequency();
@@ -245,4 +250,7 @@ namespace platf {
    * @return The converted UTF-8 string.
    */
   std::string to_utf8(const std::wstring_view &string);
+
+  /** Quote one nonempty argument for the Windows CreateProcess command line. */
+  std::wstring escape_argument(const std::wstring &argument);
 }  // namespace platf

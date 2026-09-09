@@ -613,8 +613,12 @@ namespace nvhttp {
   std::optional<launch_display_options_t> parse_launch_display_options(
     std::optional<std::string_view> virtual_display,
     std::optional<std::string_view> scale_factor,
-    std::optional<std::string_view> sbs_mode
+    std::optional<std::string_view> sbs_mode,
+    std::optional<std::string_view> confine_cursor
   ) {
+    if (confine_cursor && *confine_cursor != "0" && *confine_cursor != "1") {
+      return std::nullopt;
+    }
     const launch_display_options_t defaults;
     const auto parse_or_default = [](launch_int_field field, std::optional<std::string_view> value, int fallback) {
       return value ? parse_launch_int(field, *value) : std::optional<int> {fallback};
@@ -626,7 +630,9 @@ namespace nvhttp {
       parse_or_default(launch_int_field::scale_factor, scale_factor, defaults.scale_factor);
     const auto parsed_sbs_mode =
       parse_or_default(launch_int_field::sbs_mode, sbs_mode, defaults.sbs_mode);
-    if (!parsed_virtual_display || !parsed_scale_factor || !parsed_sbs_mode) {
+    const auto parsed_confine_cursor =
+      parse_or_default(launch_int_field::binary_option, confine_cursor, defaults.confine_cursor);
+    if (!parsed_virtual_display || !parsed_scale_factor || !parsed_sbs_mode || !parsed_confine_cursor) {
       return std::nullopt;
     }
 
@@ -634,6 +640,7 @@ namespace nvhttp {
       static_cast<bool>(*parsed_virtual_display),
       static_cast<std::uint32_t>(*parsed_scale_factor),
       *parsed_sbs_mode,
+      static_cast<bool>(*parsed_confine_cursor),
     };
   }
 
@@ -784,7 +791,8 @@ namespace nvhttp {
     const auto display_options = parse_launch_display_options(
       find_arg(args, "virtualDisplay"),
       find_arg(args, "scaleFactor"),
-      find_arg(args, "sbsMode")
+      find_arg(args, "sbsMode"),
+      find_arg(args, "confineCursor")
     );
     if (!enable_sops || !host_audio || !surround_info || !enable_hdr || !display_options) {
       BOOST_LOG(warning) << "Rejecting invalid launch options for client ["sv << named_cert_p->name << ']';
@@ -813,6 +821,7 @@ namespace nvhttp {
     launch_session->surround_info = *surround_info;
     launch_session->enable_hdr = *enable_hdr;
     launch_session->virtual_display = display_options->virtual_display;
+    launch_session->confine_cursor = display_options->confine_cursor;
     launch_session->scale_factor = display_options->scale_factor;
     launch_session->sbs_mode = display_options->sbs_mode;
 
@@ -1325,6 +1334,7 @@ namespace nvhttp {
 
 #ifdef _WIN32
       tree.put("root.VirtualDisplayCapable", true);
+      tree.put("root.CursorConfinementSupported", 1);
       if (!!(named_cert_p->perm & PERM::_all_actions)) {
         tree.put("root.VirtualDisplayDriverReady", proc::vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK);
       } else {

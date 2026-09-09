@@ -137,6 +137,13 @@ add_test(NAME ds5_component_unit_tests COMMAND ds5_component_unit_tests)
 set_tests_properties(ds5_component_unit_tests PROPERTIES TIMEOUT 30)
 
 if(WIN32)
+    add_dependencies(${PROJECT_NAME} sunshine-desktop-launcher)
+    add_test(NAME virtual_desktop_launcher_native
+        COMMAND $<TARGET_FILE:sunshine-desktop-launcher> --self-test)
+    set_tests_properties(virtual_desktop_launcher_native PROPERTIES
+        TIMEOUT 30
+        LABELS "windows;launcher;integration")
+
     # Use the OS Windows PowerShell runtime: the packaged installer scripts target
     # 5.1, and their isolated suites support the already available Pester 3/4.
     find_program(WINDOWS_POWERSHELL_EXECUTABLE

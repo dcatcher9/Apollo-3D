@@ -16,6 +16,7 @@
 
 // local includes
 #include "ds5/ds5_controller_slot.h"
+#include "input_cursor.h"
 #include "keylayout.h"
 #include "misc.h"
 #include "src/config.h"
@@ -537,6 +538,237 @@ namespace platf {
 
     send_input(i);
   }
+
+  namespace {
+    class cursor_dpi_scope_t {
+    public:
+      cursor_dpi_scope_t():
+          previous_(SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {}
+
+      ~cursor_dpi_scope_t() {
+        if (previous_) {
+          SetThreadDpiAwarenessContext(previous_);
+        }
+      }
+
+      explicit operator bool() const {
+        return previous_ != nullptr;
+      }
+
+    private:
+      DPI_AWARENESS_CONTEXT previous_;
+    };
+
+    class cursor_confinement_raw_t: public cursor_confinement_t {
+    public:
+      explicit cursor_confinement_raw_t(const std::string &device_path):
+          device_path_(from_utf8(device_path)) {}
+
+      bool move(int dx, int dy) override {
+        cursor_dpi_scope_t dpi;
+        if (!dpi) {
+          return false;
+        }
+        const auto bounds = resolve_bounds();
+        const auto observed = current_position();
+        if (bounds && observed && app_has_confined_hidden_cursor(*bounds, *observed)) {
+          // Games that already own a bounded hidden cursor retain raw relative input semantics.
+          // In desktop mode an absolute event avoids Windows acceleration crossing an edge.
+          state_.observe_game_cursor(*observed);
+          INPUT event {};
+          event.type = INPUT_MOUSE;
+          event.mi.dwFlags = MOUSEEVENTF_MOVE;
+          event.mi.dx = dx;
+          event.mi.dy = dy;
+          if (SendInput(1, &event, sizeof(event)) == 1) {
+            return true;
+          }
+          // The next packet must prove the clip and display again on the new input desktop.
+          syncThreadDesktop();
+          return false;
+        }
+        return inject(state_.move(bounds, observed, dx, dy), bounds);
+      }
+
+      bool absolute(float x, float y) override {
+        cursor_dpi_scope_t dpi;
+        if (!dpi) {
+          return false;
+        }
+        const auto bounds = resolve_bounds();
+        return inject(state_.absolute(bounds, x, y), bounds);
+      }
+
+      bool restore() override {
+        cursor_dpi_scope_t dpi;
+        if (!dpi) {
+          return false;
+        }
+        const auto bounds = resolve_bounds();
+        const auto observed = current_position();
+        if (bounds && observed && app_has_confined_hidden_cursor(*bounds, *observed)) {
+          state_.observe_game_cursor(*observed);
+          return true;
+        }
+        const auto position = state_.move(bounds, observed, 0, 0);
+        return inject(position, bounds);
+      }
+
+      void reset() override {
+        active_ = false;
+        monitor_ = nullptr;
+        state_.reset();
+      }
+
+#ifdef SUNSHINE_TESTS
+      std::optional<touch_port_t> query_bounds_for_test() {
+        cursor_dpi_scope_t dpi;
+        const auto bounds = dpi ? resolve_bounds() : std::nullopt;
+        if (!bounds) {
+          return std::nullopt;
+        }
+        return touch_port_t {bounds->x, bounds->y, bounds->width, bounds->height};
+      }
+#endif
+
+    private:
+      static std::optional<detail::cursor_point_t> current_position() {
+        POINT point {};
+        if (!GetCursorPos(&point)) {
+          return std::nullopt;
+        }
+        return detail::cursor_point_t {point.x, point.y};
+      }
+
+      bool app_has_confined_hidden_cursor(const detail::cursor_bounds_t &bounds, detail::cursor_point_t observed) const {
+        CURSORINFO cursor {sizeof(CURSORINFO)};
+        RECT clip {};
+        if (!GetCursorInfo(&cursor) || !GetClipCursor(&clip) || MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONULL) != monitor_) {
+          return false;
+        }
+        return detail::game_cursor_already_confined(
+          bounds,
+          {clip.left, clip.top, clip.right - clip.left, clip.bottom - clip.top},
+          observed,
+          (cursor.flags & (CURSOR_SHOWING | CURSOR_SUPPRESSED)) == 0
+        );
+      }
+
+      std::optional<detail::cursor_bounds_t> verified_bounds(HMONITOR monitor) const {
+        MONITORINFOEXW info {};
+        info.cbSize = sizeof(info);
+        if (!monitor || !GetMonitorInfoW(monitor, &info)) {
+          return std::nullopt;
+        }
+        // GDI names and HMONITORs may be recycled. Verify the monitor interface identity on
+        // every action; never fall back to the primary monitor if the session target disappears.
+        detail::cursor_source_identity_t identity;
+        bool enumeration_complete = false;
+        for (DWORD index = 0; index < 16; ++index) {
+          DISPLAY_DEVICEW device {};
+          device.cb = sizeof(device);
+          if (!EnumDisplayDevicesW(info.szDevice, index, &device, EDD_GET_DEVICE_INTERFACE_NAME)) {
+            enumeration_complete = true;
+            break;
+          }
+          identity.observe((device.StateFlags & DISPLAY_DEVICE_ACTIVE) != 0, _wcsicmp(device.DeviceID, device_path_.c_str()) == 0);
+        }
+        // Multiple active monitor interfaces share one source in clone mode. An incomplete
+        // enumeration also cannot establish that this source is private to the virtual display.
+        if (identity.private_target(enumeration_complete)) {
+          detail::cursor_bounds_t bounds {
+            info.rcMonitor.left,
+            info.rcMonitor.top,
+            info.rcMonitor.right - info.rcMonitor.left,
+            info.rcMonitor.bottom - info.rcMonitor.top
+          };
+          if (bounds.valid()) {
+            return bounds;
+          }
+        }
+        return std::nullopt;
+      }
+
+      std::optional<detail::cursor_bounds_t> resolve_bounds() {
+        if (!active_ || device_path_.empty()) {
+          return std::nullopt;
+        }
+        if (auto bounds = verified_bounds(monitor_)) {
+          return bounds;
+        }
+        monitor_ = nullptr;
+        EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR monitor, HDC, LPRECT, LPARAM context) -> BOOL {
+          auto &self = *reinterpret_cast<cursor_confinement_raw_t *>(context);
+          if (self.verified_bounds(monitor)) {
+            self.monitor_ = monitor;
+            return FALSE;
+          }
+          return TRUE;
+        },
+                            reinterpret_cast<LPARAM>(this));
+        return verified_bounds(monitor_);
+      }
+
+      bool inject(std::optional<detail::cursor_point_t> position, std::optional<detail::cursor_bounds_t> bounds) {
+        if (!position) {
+          return false;
+        }
+        bool retry = false;
+        return detail::run_with_desktop_retry(
+          [&]() {
+            // A desktop switch invalidates the geometry used by the first attempt. Prove the
+            // same monitor identity and rebuild pixel normalization before retrying injection.
+            if (retry) {
+              bounds = resolve_bounds();
+            }
+            retry = true;
+            RECT clip {};
+            if (!bounds || !GetClipCursor(&clip)) {
+              return false;
+            }
+            // An app on the physical monitor may own ClipCursor. SendInput can succeed while
+            // Windows redirects the pointer there, so never allow a click based on that result.
+            const auto allowed = detail::cursor_bounds_intersection(*bounds, {clip.left, clip.top, clip.right - clip.left, clip.bottom - clip.top});
+            if (!allowed) {
+              return false;
+            }
+            position = allowed->clamp(position->first, position->second);
+            state_.observe_game_cursor(*position);
+            const auto width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            const auto height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            if (width <= 0 || height <= 0) {
+              return false;
+            }
+            INPUT event {};
+            event.type = INPUT_MOUSE;
+            event.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+            event.mi.dx = detail::cursor_pixel_to_absolute(position->first, GetSystemMetrics(SM_XVIRTUALSCREEN), width);
+            event.mi.dy = detail::cursor_pixel_to_absolute(position->second, GetSystemMetrics(SM_YVIRTUALSCREEN), height);
+            return SendInput(1, &event, sizeof(event)) == 1;
+          },
+          []() {
+            return syncThreadDesktop();
+          }
+        );
+      }
+
+      const std::wstring device_path_;
+      HMONITOR monitor_ {};
+      bool active_ = true;
+      detail::confined_cursor_state_t state_;
+    };
+  }  // namespace
+
+  std::unique_ptr<cursor_confinement_t> allocate_cursor_confinement(input_t &, const std::string &display_device_path) {
+    return std::make_unique<cursor_confinement_raw_t>(display_device_path);
+  }
+
+#ifdef SUNSHINE_TESTS
+  std::optional<touch_port_t> cursor_confinement_bounds_for_test(const std::string &display_device_path) {
+    cursor_confinement_raw_t context(display_device_path);
+    return context.query_bounds_for_test();
+  }
+#endif
 
   util::point_t get_mouse_loc(input_t &) {
     POINT p {};

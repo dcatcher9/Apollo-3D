@@ -18,6 +18,8 @@ extern "C" {
 #include "../tests_common.h"
 
 #include <src/input.h>
+#include <src/platform/windows/input_cursor.h>
+#include <src/platform/windows/misc.h>
 #include <src/utility.h>
 
 namespace {
@@ -64,6 +66,151 @@ namespace {
     return {util::endian::big(move->deltaX), util::endian::big(move->deltaY)};
   }
 }  // namespace
+
+TEST(InputCursorConfinementTests, RelativeMovementStopsAtEveryEdgeWithNegativeOrigin) {
+  platf::detail::confined_cursor_state_t cursor;
+  const platf::detail::cursor_bounds_t bounds {-1920, -1080, 1920, 1080};
+  EXPECT_EQ(cursor.move(bounds, std::pair {-100, -100}, 32767, 32767), (std::pair {-1, -1}));
+  EXPECT_EQ(cursor.move(bounds, std::nullopt, -32768, -32768), (std::pair {-1920, -1080}));
+  EXPECT_EQ(cursor.move(bounds, std::nullopt, 10, 20), (std::pair {-1910, -1060}));
+}
+
+TEST(InputCursorConfinementTests, AbsoluteRightBottomAndOutOfRangeStayOnLastPixel) {
+  platf::detail::confined_cursor_state_t cursor;
+  const platf::detail::cursor_bounds_t bounds {3840, 100, 1920, 1080};
+  EXPECT_EQ(cursor.absolute(bounds, 1.0f, 1.0f), (std::pair {5759, 1179}));
+  EXPECT_EQ(cursor.absolute(bounds, 2.0f, -1.0f), (std::pair {5759, 100}));
+  EXPECT_FALSE(cursor.absolute(bounds, std::numeric_limits<float>::quiet_NaN(), 0));
+}
+
+TEST(InputCursorConfinementTests, RemotePositionSurvivesPhysicalMovementAndResize) {
+  platf::detail::confined_cursor_state_t cursor;
+  const platf::detail::cursor_bounds_t first {1920, 0, 1920, 1080};
+  EXPECT_EQ(cursor.move(first, std::pair {50, 50}, 0, 0), (std::pair {2880, 540}));
+  EXPECT_EQ(cursor.move(first, std::pair {50, 50}, 10, 0), (std::pair {2890, 540}));
+  // Even stale GetCursorPos observations cannot discard successive queued relative deltas.
+  EXPECT_EQ(cursor.move(first, std::pair {2880, 540}, 10, 0), (std::pair {2900, 540}));
+  EXPECT_EQ(cursor.move(platf::detail::cursor_bounds_t {-800, -600, 800, 600}, std::nullopt, 0, 0), (std::pair {-1, -1}));
+}
+
+TEST(InputCursorConfinementTests, MissingTargetAndResetNeverFallBackToPhysicalDisplay) {
+  platf::detail::confined_cursor_state_t old_session;
+  const platf::detail::cursor_bounds_t bounds {1920, 0, 1920, 1080};
+  ASSERT_TRUE(old_session.absolute(bounds, 0.5f, 0.5f));
+  EXPECT_FALSE(old_session.move(std::nullopt, std::pair {50, 50}, 1, 1));
+  EXPECT_FALSE(old_session.absolute(std::nullopt, 0.5f, 0.5f));
+  EXPECT_FALSE(old_session.move(platf::detail::cursor_bounds_t {0, 0, 0, 0}, std::nullopt, 1, 1));
+  old_session.reset();
+  EXPECT_FALSE(old_session.move(bounds, std::nullopt, 1, 1));
+  EXPECT_FALSE(old_session.absolute(bounds, 0.5f, 0.5f));
+  platf::detail::confined_cursor_state_t replacement_session;
+  EXPECT_EQ(replacement_session.move(bounds, std::nullopt, 0, 0), (std::pair {2880, 540}));
+}
+
+TEST(InputCursorConfinementTests, AbsoluteEncodingKeepsInteriorDisplayEdgesInsideTheirPixel) {
+  for (int pixel : {-3840, -1921, -1920, -1, 0, 1919, 3839}) {
+    const auto normalized = platf::detail::cursor_pixel_to_absolute(pixel, -3840, 7680);
+    const auto decoded = static_cast<int>((static_cast<std::int64_t>(normalized) * 7680) / 65536) - 3840;
+    EXPECT_EQ(decoded, pixel);
+  }
+}
+
+TEST(InputCursorConfinementTests, RawRelativeGameBypassRequiresHiddenCursorAndClipInsideTarget) {
+  const platf::detail::cursor_bounds_t monitor {1920, 0, 1920, 1080};
+  EXPECT_TRUE(platf::detail::game_cursor_already_confined(monitor, monitor, {2880, 540}, true));
+  EXPECT_FALSE(platf::detail::game_cursor_already_confined(monitor, monitor, {2880, 540}, false));
+  EXPECT_FALSE(platf::detail::game_cursor_already_confined(monitor, {0, 0, 3840, 1080}, {2880, 540}, true));
+  EXPECT_FALSE(platf::detail::game_cursor_already_confined(monitor, monitor, {50, 50}, true));
+  EXPECT_FALSE(platf::detail::game_cursor_already_confined(monitor, {1920, 0, 0, 0}, {2880, 540}, true));
+}
+
+TEST(InputCursorConfinementTests, PhysicalAppClipCannotRedirectRemoteInputOntoPhysicalMonitor) {
+  const platf::detail::cursor_bounds_t virtual_monitor {1920, 0, 1920, 1080};
+  EXPECT_FALSE(platf::detail::cursor_bounds_intersection(virtual_monitor, {0, 0, 1920, 1080}));
+  const auto partial = platf::detail::cursor_bounds_intersection(virtual_monitor, {1800, 100, 400, 500});
+  ASSERT_TRUE(partial);
+  EXPECT_EQ(partial->clamp(3000, 900), (std::pair {2199, 599}));
+  EXPECT_EQ(partial->clamp(0, 0), (std::pair {1920, 100}));
+}
+
+TEST(InputCursorConfinementTests, ClonedAndIncompleteSourcesCannotBeAdmittedAsPrivateTargets) {
+  platf::detail::cursor_source_identity_t private_source;
+  private_source.observe(true, true);
+  private_source.observe(false, false);  // A disconnected monitor is not a clone.
+  EXPECT_TRUE(private_source.private_target(true));
+  EXPECT_FALSE(private_source.private_target(false));
+  private_source.observe(true, false);  // Physical output cloned onto the virtual source.
+  EXPECT_FALSE(private_source.private_target(true));
+  platf::detail::cursor_source_identity_t physical_only;
+  physical_only.observe(true, false);
+  EXPECT_FALSE(physical_only.private_target(true));
+  physical_only.observe(true, true);  // Enumeration order cannot admit the same cloned source.
+  EXPECT_FALSE(physical_only.private_target(true));
+}
+
+TEST(InputCursorConfinementTests, NativeMonitorIdentityResolverMatchesActiveInterfacesWithoutInjectingInput) {
+  const auto previous_dpi = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+  ASSERT_NE(previous_dpi, nullptr);
+  const auto restore_dpi = util::fail_guard([previous_dpi]() {
+    SetThreadDpiAwarenessContext(previous_dpi);
+  });
+
+  struct monitor_t {
+    std::string path;
+    RECT bounds;
+    bool private_source;
+  };
+
+  std::vector<monitor_t> monitors;
+  EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR monitor, HDC, LPRECT, LPARAM context) -> BOOL {
+    auto &targets = *reinterpret_cast<std::vector<monitor_t> *>(context);
+    MONITORINFOEXW info {};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(monitor, &info)) {
+      return TRUE;
+    }
+    const auto first = targets.size();
+    unsigned active_interfaces = 0;
+    bool enumeration_complete = false;
+    for (DWORD index = 0; index < 16; ++index) {
+      DISPLAY_DEVICEW device {};
+      device.cb = sizeof(device);
+      if (!EnumDisplayDevicesW(info.szDevice, index, &device, EDD_GET_DEVICE_INTERFACE_NAME)) {
+        enumeration_complete = true;
+        break;
+      }
+      if (device.StateFlags & DISPLAY_DEVICE_ACTIVE) {
+        ++active_interfaces;
+        if (device.DeviceID[0]) {
+          targets.push_back({platf::to_utf8(device.DeviceID), info.rcMonitor, false});
+        }
+      }
+    }
+    for (auto index = first; index < targets.size(); ++index) {
+      targets[index].private_source = enumeration_complete && active_interfaces == 1;
+    }
+    return TRUE;
+  },
+                      reinterpret_cast<LPARAM>(&monitors));
+  if (monitors.empty()) {
+    GTEST_SKIP() << "No active monitor interface is available on this test desktop";
+  }
+  for (const auto &monitor : monitors) {
+    const auto resolved = platf::cursor_confinement_bounds_for_test(monitor.path);
+    if (!monitor.private_source) {
+      EXPECT_FALSE(resolved);
+      continue;
+    }
+    ASSERT_TRUE(resolved);
+    EXPECT_EQ(resolved->offset_x, monitor.bounds.left);
+    EXPECT_EQ(resolved->offset_y, monitor.bounds.top);
+    EXPECT_EQ(resolved->width, monitor.bounds.right - monitor.bounds.left);
+    EXPECT_EQ(resolved->height, monitor.bounds.bottom - monitor.bounds.top);
+    // A replacement identity must never resolve through a previous source/GDI monitor name.
+    EXPECT_FALSE(platf::cursor_confinement_bounds_for_test(monitor.path + "-retired-session"));
+  }
+  EXPECT_FALSE(platf::cursor_confinement_bounds_for_test(""));
+}
 
 TEST(InputPermissionTests, RevocationPurgesQueuedPressesAndReleasesHeldCategoryBeforeRegrant) {
   std::map<unsigned, bool> keys {{65, true}, {66, false}};
