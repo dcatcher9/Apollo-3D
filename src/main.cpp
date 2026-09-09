@@ -32,6 +32,7 @@
 #include "video_depth_estimator.h"
 #ifdef _WIN32
   #include "platform/windows/ar_glasses.h"
+  #include "platform/windows/display_recovery_guardian.h"
   #include "platform/windows/misc.h"
   #include "platform/windows/virtual_display.h"
 #endif
@@ -156,6 +157,12 @@ int main(int argc, char *argv[]) {
   SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
 
   setlocale(LC_ALL, "C");
+
+  // The recovery guardian is a separate, minimal process. It must not parse host settings,
+  // initialize drivers/AR/input, bind server ports, or acquire recovery ownership while we live.
+  if (const auto guardian_result = platf::display_recovery_guardian::run_if_requested()) {
+    return *guardian_result;
+  }
 #endif
 
 #pragma GCC diagnostic push

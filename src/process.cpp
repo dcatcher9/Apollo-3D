@@ -46,6 +46,7 @@
 
 #ifdef _WIN32
   #include "platform/windows/ar_glasses.h"
+  #include "platform/windows/display_recovery_guardian.h"
   // from_utf8() string conversion function
   #include "platform/windows/misc.h"
   #include "platform/windows/primary_display.h"
@@ -277,7 +278,7 @@ namespace proc {
     // Recover before encoder probing or the local-AR controller can change the desktop.
     // Command-only invocations do not initialize proc and must not undo a running host's lease.
     if (!platf::primary_display::recover()) {
-      BOOST_LOG(error) << "Primary-display recovery is pending; virtual-display launches will wait for restoration."sv;
+      BOOST_LOG(error) << "Display-configuration recovery is pending; virtual-display launches will wait for restoration."sv;
     }
 #endif
     return std::make_unique<deinit_t>();
@@ -599,8 +600,8 @@ namespace proc {
       return {};
     }
 
-    if (!platf::primary_display::prepare()) {
-      BOOST_LOG(error) << "Could not save the original primary display before virtual-display recreation."sv;
+    if (!prepare_virtual_display_topology()) {
+      BOOST_LOG(error) << "Could not save the original display configuration before virtual-display recreation."sv;
       return {};
     }
 
@@ -635,10 +636,10 @@ namespace proc {
         retired_virtual_display_gdi_name = current.display_name;
       }
     }
-    // Restore the original primary before detach captures its survivor topology. The retirement
+    // Restore the original displays before detach captures its survivor topology. The retirement
     // record and its autonomous worker retain ownership if Windows cannot restore it yet.
     if (!platf::primary_display::restore(retired_virtual_display_device_path)) {
-      BOOST_LOG(warning) << "Deferring virtual-display removal until primary-display restoration succeeds."sv;
+      BOOST_LOG(warning) << "Deferring virtual-display removal until the original display configuration is restored."sv;
       return false;
     }
     if (retired_virtual_display_remove_ready) {
@@ -955,17 +956,31 @@ namespace proc {
     return false;
   }
 
+  bool proc_t::prepare_virtual_display_topology() {
+    // AddVirtualDisplay can restore a remembered topology before explicit promotion. The
+    // independent recovery process must already be ready before any exclusive-session change.
+    if (_virtual_display_only && !platf::display_recovery_guardian::ensure_running()) {
+      BOOST_LOG(error) << "Cannot prepare a virtual-only display without an independent display recovery process."sv;
+      return false;
+    }
+    return platf::primary_display::prepare(_virtual_display_only);
+  }
+
   bool proc_t::promote_virtual_display(bool enable_hdr) {
+    if (_virtual_display_only && !platf::display_recovery_guardian::ensure_running()) {
+      BOOST_LOG(error) << "Cannot disable physical displays without an independent display recovery process."sv;
+      return false;
+    }
     const bool had_hdr_worker = _hdr_worker.joinable();
     stop_hdr_worker();
     _hdr_worker_state.reset();
-    if (!platf::primary_display::promote(_virtual_display_device_path) || !refresh_virtual_display_binding()) {
+    if (!platf::primary_display::promote(_virtual_display_device_path, _virtual_display_only) || !refresh_virtual_display_binding()) {
       return false;
     }
     if (had_hdr_worker && !request_hdr_state(enable_hdr, 6s)) {
       return false;
     }
-    BOOST_LOG(info) << "Virtual display verified as the Windows primary display: " << display_name;
+    BOOST_LOG(info) << (_virtual_display_only ? "Virtual display verified as the only active Windows display: " : "Virtual display verified as the Windows primary display: ") << display_name;
     return true;
   }
 
@@ -1015,6 +1030,9 @@ namespace proc {
     _app_name = app.name;
     _launch_session = launch_session;
     _active_launch_session_id = launch_session->id;
+#ifdef _WIN32
+    _virtual_display_only = config::sunshine.virtual_display_only;
+#endif
 
     launch_session->width = render_width;
     launch_session->height = render_height;
@@ -1053,7 +1071,7 @@ namespace proc {
         return 503;
       }
       if (!platf::primary_display::recover()) {
-        BOOST_LOG(error) << "Cannot start a virtual display while the previous primary-display restoration is unresolved."sv;
+        BOOST_LOG(error) << "Cannot start a virtual display while the previous display-configuration restoration is unresolved."sv;
         launch_session->virtual_display = false;
         return 503;
       }
@@ -1065,8 +1083,8 @@ namespace proc {
       if (vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
         // Windows can remember that this virtual monitor used to be primary. Capture the
         // physical baseline before Add itself has a chance to restore that remembered state.
-        if (!platf::primary_display::prepare()) {
-          BOOST_LOG(error) << "Could not save the original primary display before virtual-display creation."sv;
+        if (!prepare_virtual_display_topology()) {
+          BOOST_LOG(error) << "Could not save the original display configuration before virtual-display creation."sv;
           return 503;
         }
         std::string device_name;
@@ -1145,7 +1163,7 @@ namespace proc {
 
           config::video.output_name = display_device::map_display_name(this->display_name);
           if (!promote_virtual_display(launch_session->enable_hdr)) {
-            BOOST_LOG(error) << "Could not make the virtual display primary; rolling back the launch."sv;
+            BOOST_LOG(error) << "Could not apply the requested virtual-display topology; rolling back the launch."sv;
             return 503;
           }
         } else {
@@ -1741,6 +1759,14 @@ namespace proc {
       return live_video_mode_result_e::unchanged;
     }
 
+    if (_virtual_display_only && !platf::display_recovery_guardian::ensure_running()) {
+      BOOST_LOG(error) << "Independent display recovery is unavailable; restoring physical displays before requiring a reconnect."sv;
+      if (!restore_primary_display()) {
+        BOOST_LOG(error) << "Physical-display restoration remains pending after the recovery process failed."sv;
+      }
+      return live_video_mode_result_e::needs_reconnect;
+    }
+
     // A locked session or an unreachable display-configuration API is transient, not a property of
     // the requested mode. Report it as retryable so the client is not sent off to reconnect for a
     // mode this display could deliver a moment later.
@@ -1818,6 +1844,10 @@ namespace proc {
         BOOST_LOG(error) << "The virtual display did not hold its HDR contract after rolling back a live mode change."sv;
         restored = false;
       }
+      if (_virtual_display_only && !promote_virtual_display(enable_hdr)) {
+        BOOST_LOG(error) << "Could not verify the virtual-only topology after rolling back a live mode change."sv;
+        restored = false;
+      }
       return restored;
     };
 
@@ -1850,6 +1880,11 @@ namespace proc {
       return live_video_mode_failure_result(rollback_succeeded);
     }
 
+    if (_virtual_display_only && !promote_virtual_display(enable_hdr)) {
+      BOOST_LOG(error) << "The live mode change did not preserve the required virtual-only topology; rolling back."sv;
+      return live_video_mode_failure_result(roll_back());
+    }
+
     // Commit last, exactly like reconfigure_retained_session: every fallible display operation has
     // already succeeded, so the recorded contract now matches what Windows is presenting.
     _launch_session->width = width;
@@ -1873,7 +1908,7 @@ namespace proc {
       }
       _remote_virtual_display_lease = lease;
       if (!promote_virtual_display(_launch_session->enable_hdr)) {
-        BOOST_LOG(error) << "Remote virtual display is not the verified primary display."sv;
+        BOOST_LOG(error) << "Remote virtual display does not match its required Windows display topology."sv;
         platf::primary_display::restore(_virtual_display_device_path);
         ar_glasses::remote_virtual_display_ended(lease);
         _remote_virtual_display_lease.reset();
@@ -2097,6 +2132,7 @@ namespace proc {
     _virtual_display_published = false;
     _virtual_display_retirement_handed_off = false;
     _remote_virtual_display_lease.reset();
+    _virtual_display_only = false;
     _hdr_worker_state.reset();
 #endif
     _virtual_display = false;
@@ -2407,7 +2443,7 @@ namespace proc {
       return local_ar_handoff_e::remote_busy;
     }
     if (!platf::primary_display::recover()) {
-      BOOST_LOG(warning) << "Local AR is waiting for the original primary display to be restored."sv;
+      BOOST_LOG(warning) << "Local AR is waiting for the original display configuration to be restored."sv;
       return local_ar_handoff_e::cleanup_timeout;
     }
     if (!_launch_session || !_launch_session->virtual_display) {

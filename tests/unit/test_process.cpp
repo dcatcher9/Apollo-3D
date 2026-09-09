@@ -35,6 +35,14 @@ namespace proc {
       process._virtual_display_gdi_name = enabled ? L"test-only-display" : L"";
       process._virtual_display_device_path = enabled ? L"test-only-monitor-path" : L"";
     }
+
+    static void set_virtual_display_only(proc_t &process, bool enabled) {
+      process._virtual_display_only = enabled;
+    }
+
+    static bool virtual_display_only(const proc_t &process) {
+      return process._virtual_display_only;
+    }
 #endif
     static void clear(proc_t &process) {
       process._app_id = 0;
@@ -43,6 +51,7 @@ namespace proc {
       process._launch_session.reset();
 #ifdef _WIN32
       mark_virtual(process, false);
+      process._virtual_display_only = false;
 #endif
     }
   };
@@ -88,6 +97,81 @@ TEST(ProcessTest, ResumePublishesNewLiveTransportWithoutChangingRetainedToken) {
   EXPECT_EQ(process.apply_live_video_mode(1920, 1080, 60000, 33), proc::live_video_mode_result_e::needs_reconnect);
 #endif
 }
+
+#ifdef _WIN32
+TEST(ProcessTest, RetainedDisplayPolicySurvivesConfigChangesUntilTermination) {
+  const bool saved_policy = config::sunshine.virtual_display_only;
+  const auto saved_output = config::video.output_name;
+  auto restore_config = util::fail_guard([&]() {
+    config::sunshine.virtual_display_only = saved_policy;
+    config::video.output_name = saved_output;
+  });
+
+  for (const bool captured_policy : {false, true}) {
+    SCOPED_TRACE(captured_policy);
+    proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
+    auto original = std::make_shared<rtsp_stream::launch_session_t>();
+    original->id = 11;
+    original->width = 1920;
+    original->height = 1080;
+    original->fps = 60000;
+    proc::process_test_access::retain(process, original);
+    auto cleanup = util::fail_guard([&]() { proc::process_test_access::clear(process); });
+
+    // Inject only the already-captured policy. This fixture owns no display, so successful
+    // retained reconfiguration and teardown exercise state lifetime without any CCD call.
+    proc::process_test_access::set_virtual_display_only(process, captured_policy);
+    config::sunshine.virtual_display_only = !captured_policy;
+    auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
+    resumed->id = 22;
+    resumed->width = 1920;
+    resumed->height = 1080;
+    resumed->fps = 60000;
+    resumed->scale_factor = 100;
+    ASSERT_EQ(process.reconfigure_retained_session(resumed), 0);
+    EXPECT_EQ(proc::process_test_access::virtual_display_only(process), captured_policy);
+
+    auto invalid = std::make_shared<rtsp_stream::launch_session_t>();
+    invalid->width = 1;
+    invalid->height = 1;
+    invalid->scale_factor = 20;
+    EXPECT_EQ(process.reconfigure_retained_session(invalid), 400);
+    EXPECT_EQ(proc::process_test_access::virtual_display_only(process), captured_policy);
+
+    process.terminate(false, false);
+    EXPECT_FALSE(proc::process_test_access::virtual_display_only(process));
+    EXPECT_EQ(process.get_host_session_id(), 0U);
+  }
+}
+
+TEST(ProcessTest, RejectedNewLaunchClearsPreviousPolicyWithoutCapturingCurrentConfig) {
+  const bool saved_policy = config::sunshine.virtual_display_only;
+  const auto saved_output = config::video.output_name;
+  auto restore_config = util::fail_guard([&]() {
+    config::sunshine.virtual_display_only = saved_policy;
+    config::video.output_name = saved_output;
+  });
+  config::sunshine.virtual_display_only = true;
+
+  proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
+  auto previous = std::make_shared<rtsp_stream::launch_session_t>();
+  previous->id = 11;
+  proc::process_test_access::retain(process, previous);
+  proc::process_test_access::set_virtual_display_only(process, true);
+  auto cleanup = util::fail_guard([&]() { proc::process_test_access::clear(process); });
+
+  proc::ctx_t app {};
+  app.id = "1";
+  app.name = "Invalid exclusive mode test";
+  auto invalid = std::make_shared<rtsp_stream::launch_session_t>();
+  invalid->width = 1;
+  invalid->height = 1;
+  invalid->scale_factor = 20;
+  EXPECT_EQ(process.execute(app, invalid, false), 400);
+  EXPECT_FALSE(proc::process_test_access::virtual_display_only(process));
+  EXPECT_EQ(process.get_host_session_id(), 0U);
+}
+#endif
 
 TEST(ProcessTest, ExplorerRepairIsOptInByDefault) {
   EXPECT_FALSE(config::default_virtual_display_restart_explorer);

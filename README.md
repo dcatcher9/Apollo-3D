@@ -113,7 +113,9 @@ normal setup flow uses the PIN. For the direct local path, configure
 
 While streaming, the virtual display temporarily becomes the Windows primary display, making it
 the default destination for applications that follow primary-monitor placement. Physical monitors
-remain active. Client-controlled remote cursor bounds are enabled by default. See
+remain active by default. An optional host setting uses only the virtual display while streaming,
+blanking physical screens and allowing Windows to move existing windows. Displays are restored on
+disconnect. Client-controlled remote cursor bounds are enabled by default. See
 [Virtual desktop interaction](./docs/virtual-desktop.md) for restoration, application compatibility,
 and live-verification limits.
 

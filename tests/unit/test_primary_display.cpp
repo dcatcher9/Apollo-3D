@@ -6,7 +6,9 @@
 #include "src/platform/windows/primary_display.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -53,6 +55,7 @@ namespace {
       result.modes.push_back(source);
       result.modes.push_back(target);
       result.device_paths.push_back(positions[i].device_path);
+      result.colors.push_back(platf::display_config::advanced_color_state_t {platf::display_config::advanced_color_api_e::modern, false, true, false, false, false, false, 8, DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR});
     }
     return result;
   }
@@ -62,14 +65,19 @@ namespace {
   struct fake_io_t {
     snapshot_t current = make_snapshot(baseline);
     std::optional<journal_t> journal;
+    snapshot_t catalog = make_snapshot(baseline);
+    std::optional<snapshot_t> available_override;
     bool load_ok = true;
     bool save_ok = true;
     bool clear_ok = true;
     bool apply_ok = true;
     bool ignore_apply = false;
+    bool reset_colors_on_apply = false;
+    bool color_set_ok = true;
     int query_count = 0;
     int mutate_on_query = 0;
     std::function<void(snapshot_t &)> mutation;
+    std::function<void(snapshot_t &)> applied_mutation;
     std::vector<std::string> events;
 
     io_t io() {
@@ -86,6 +94,14 @@ namespace {
           EXPECT_TRUE(journal.has_value()) << "A durable recovery record must precede every CCD mutation";
           if (!ignore_apply) {
             current = std::move(next);
+            if (reset_colors_on_apply) {
+              for (auto &color : current.colors) {
+                color = platf::display_config::advanced_color_state_t {platf::display_config::advanced_color_api_e::modern, false, true, false, false, false, false, 8, DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR};
+              }
+            }
+            if (applied_mutation) {
+              applied_mutation(current);
+            }
           }
           return apply_ok;
         },
@@ -107,6 +123,42 @@ namespace {
           }
           return clear_ok;
         },
+        [this]() -> std::optional<snapshot_t> {
+          events.push_back("query_all");
+          if (available_override) {
+            return available_override;
+          }
+          auto result = current;
+          for (size_t i = 0; i < catalog.paths.size(); ++i) {
+            if (std::ranges::find(current.device_paths, catalog.device_paths[i]) != current.device_paths.end()) {
+              continue;
+            }
+            auto path = catalog.paths[i];
+            path.flags &= ~DISPLAYCONFIG_PATH_ACTIVE;
+            path.sourceInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+            path.targetInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+            path.sourceInfo.id += 100;
+            path.targetInfo.id += 1000;
+            result.paths.push_back(path);
+            result.device_paths.push_back(catalog.device_paths[i]);
+          }
+          result.colors.resize(result.paths.size());
+          return result;
+        },
+        [this](const DISPLAYCONFIG_PATH_INFO &path, const platf::display_config::advanced_color_state_t &color) {
+          events.push_back("set_color");
+          if (!color_set_ok) {
+            return false;
+          }
+          for (size_t i = 0; i < current.paths.size(); ++i) {
+            const auto &candidate = current.paths[i];
+            if (candidate.targetInfo.id == path.targetInfo.id && candidate.targetInfo.adapterId.HighPart == path.targetInfo.adapterId.HighPart && candidate.targetInfo.adapterId.LowPart == path.targetInfo.adapterId.LowPart) {
+              current.colors[i] = color;
+              return true;
+            }
+          }
+          return false;
+        },
       };
     }
   };
@@ -120,6 +172,33 @@ namespace {
       EXPECT_EQ(observed->at(i).x, expected[i].x);
       EXPECT_EQ(observed->at(i).y, expected[i].y);
     }
+  }
+
+  size_t named_index(const snapshot_t &snapshot, std::wstring_view identity) {
+    const auto found = std::ranges::find(snapshot.device_paths, identity);
+    EXPECT_NE(found, snapshot.device_paths.end());
+    return static_cast<size_t>(found - snapshot.device_paths.begin());
+  }
+
+  void expect_positions(const snapshot_t &snapshot, const layout_t &expected) {
+    const auto actual = inspect(snapshot);
+    ASSERT_TRUE(actual);
+    ASSERT_EQ(actual->size(), expected.size());
+    for (const auto &position : expected) {
+      const auto index = named_index(snapshot, position.device_path);
+      ASSERT_LT(index, actual->size());
+      EXPECT_EQ(actual->at(index).x, position.x);
+      EXPECT_EQ(actual->at(index).y, position.y);
+    }
+  }
+
+  void start_exclusive(fake_io_t &fake) {
+    manager_t manager(fake.io());
+    ASSERT_TRUE(manager.prepare(true));
+    ASSERT_TRUE(manager.bind_pending(L"virtual"));
+    ASSERT_TRUE(manager.promote(L"virtual", true));
+    ASSERT_EQ(fake.current.paths.size(), 1u);
+    ASSERT_EQ(fake.current.device_paths[0], L"virtual");
   }
 }  // namespace
 
@@ -515,4 +594,324 @@ TEST(PrimaryDisplay, IndependentOwnersCannotRecoverTheSameLiveJournal) {
     EXPECT_TRUE(second.acquire(path));
   }
   EXPECT_FALSE(std::filesystem::exists(path));
+}
+
+TEST(PrimaryDisplayExclusive, ReactivatesInactivePhysicalOutputsAndRetainsVirtualForReconnect) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  ASSERT_TRUE(fake.journal && fake.journal->exclusive_started);
+  EXPECT_EQ(nlohmann::json::parse(serialize(*fake.journal))["version"], 2);
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, baseline);
+  EXPECT_FALSE(fake.journal);
+  // The retained virtual output stays active; reconnect captures a new complete baseline.
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  EXPECT_EQ(fake.current.paths.size(), 1u);
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, baseline);
+}
+
+TEST(PrimaryDisplayExclusive, RepeatedPromotionAndLiveResizeKeepOriginalTopology) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  const auto saved = serialize(*fake.journal);
+  fake.current.modes[0].sourceMode.width = 3840;
+  fake.current.paths[0].targetInfo.refreshRate = {90, 1};
+  manager_t manager(fake.io());
+  EXPECT_TRUE(manager.promote(L"virtual", true));
+  EXPECT_EQ(serialize(*fake.journal), saved);
+  EXPECT_TRUE(manager.restore());
+  const auto index = named_index(fake.current, L"virtual");
+  const auto source = fake.current.paths[index].sourceInfo.sourceModeInfoIdx;
+  EXPECT_EQ(fake.current.modes[source].sourceMode.width, 3840u);
+  EXPECT_EQ(fake.current.paths[index].targetInfo.refreshRate.Numerator, 90u);
+}
+
+TEST(PrimaryDisplayExclusive, ResizedLeftVirtualMovesBesideRestoredPhysicalInsteadOfOverlapping) {
+  fake_io_t fake;
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"virtual", -1920, 0}});
+  start_exclusive(fake);
+  fake.current.modes[0].sourceMode.width = 3840;
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.restore());
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}, {L"virtual", 1920, 0}});
+}
+
+TEST(PrimaryDisplayExclusive, CrashWithNoActiveOutputsRestoresAvailablePhysicalDisplays) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  fake.current = {};
+  manager_t restarted(fake.io());
+  ASSERT_TRUE(restarted.restore());
+  expect_positions(fake.current, {{L"physical-left", -1920, 120}, {L"physical-primary", 0, 0}});
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, UnavailablePrimaryStillLightsOtherPhysicalAndKeepsVirtualAndJournal) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  fake.catalog.paths[1].targetInfo.targetAvailable = FALSE;
+  manager_t manager(fake.io());
+  EXPECT_FALSE(manager.restore());
+  ASSERT_TRUE(fake.journal && fake.journal->pending_restore);
+  ASSERT_EQ(fake.current.paths.size(), 2u);
+  expect_positions(fake.current, {{L"physical-left", 0, 0}, {L"virtual", 3840, -320}});
+  fake.catalog.paths[1].targetInfo.targetAvailable = TRUE;
+  // Windows may reactivate the returned original primary before the next recovery attempt.
+  fake.current = make_snapshot(baseline);
+  fake.current.modes[4].sourceMode.width = 3840;
+  ASSERT_TRUE(manager.restore());
+  expect_positions(fake.current, baseline);
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, UnavailableAllPhysicalOutputsNeverDisablesRemainingVirtual) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  for (auto &path : fake.catalog.paths) {
+    path.targetInfo.targetAvailable = FALSE;
+  }
+  fake.events.clear();
+  manager_t manager(fake.io());
+  EXPECT_FALSE(manager.restore());
+  EXPECT_EQ(fake.current.device_paths, (std::vector<std::wstring> {L"virtual"}));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), 0);
+  EXPECT_TRUE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, FailedRestoreApplyOrReadbackRetainsDurableRecovery) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  fake.ignore_apply = true;
+  manager_t manager(fake.io());
+  EXPECT_FALSE(manager.restore());
+  ASSERT_TRUE(fake.journal && fake.journal->pending_restore);
+  fake.ignore_apply = false;
+  fake.apply_ok = false;
+  EXPECT_FALSE(manager.restore());
+  EXPECT_TRUE(fake.journal);
+  fake.apply_ok = true;
+  EXPECT_TRUE(manager.restore());
+  expect_positions(fake.current, baseline);
+}
+
+TEST(PrimaryDisplayExclusive, FailedIntentOrRecoveryJournalWritePreventsTopologyMutation) {
+  fake_io_t fake;
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  fake.save_ok = false;
+  fake.events.clear();
+  EXPECT_FALSE(manager.promote(L"virtual", true));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), 0);
+  fake.save_ok = true;
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  fake.save_ok = false;
+  fake.events.clear();
+  EXPECT_FALSE(manager.restore());
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), 0);
+  EXPECT_TRUE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, CapturesAndRestoresHdrAfterReactivationAndRetriesColorFailure) {
+  fake_io_t fake;
+  auto &hdr = *fake.current.colors[1];
+  hdr.hdr_user_enabled = true;
+  hdr.advanced_color_active = true;
+  hdr.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  fake.reset_colors_on_apply = true;
+  start_exclusive(fake);
+  fake.color_set_ok = false;
+  manager_t manager(fake.io());
+  EXPECT_FALSE(manager.restore());
+  EXPECT_EQ(fake.current.paths.size(), 3u);
+  EXPECT_TRUE(fake.journal);
+  fake.color_set_ok = true;
+  ASSERT_TRUE(manager.restore());
+  EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"physical-primary")]->hdr_user_enabled);
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, UnknownOriginalColorStateFailsBeforeDisablingPhysicalDisplays) {
+  fake_io_t fake;
+  fake.current.colors[0] = std::nullopt;
+  manager_t manager(fake.io());
+  EXPECT_FALSE(manager.prepare(true));
+  EXPECT_FALSE(fake.journal);
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), 0);
+}
+
+TEST(PrimaryDisplayExclusive, TopologyTransitionsPreserveCurrentVirtualHdrState) {
+  fake_io_t fake;
+  auto &hdr = *fake.current.colors[2];
+  hdr.hdr_user_enabled = true;
+  hdr.advanced_color_active = true;
+  hdr.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  fake.reset_colors_on_apply = true;
+  start_exclusive(fake);
+  EXPECT_TRUE(fake.current.colors[0]->hdr_user_enabled);
+  manager_t manager(fake.io());
+  fake.color_set_ok = false;
+  EXPECT_FALSE(manager.restore());
+  ASSERT_TRUE(fake.journal && fake.journal->pending_restore);
+  const auto virtual_index = named_index(fake.current, L"virtual");
+  EXPECT_FALSE(fake.current.colors[virtual_index]->hdr_user_enabled);
+  const auto pending_index = named_index(*fake.journal->pending_restore, L"virtual");
+  EXPECT_TRUE(fake.journal->pending_restore->colors[pending_index]->hdr_user_enabled);
+  // A concurrent legitimate VD resize is retained while the saved HDR intent is retried.
+  fake.current.modes[fake.current.paths[virtual_index].sourceInfo.sourceModeInfoIdx].sourceMode.width = 3840;
+  fake.color_set_ok = true;
+  ASSERT_TRUE(manager.restore());
+  EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"virtual")]->hdr_user_enabled);
+  EXPECT_EQ(fake.current.modes[fake.current.paths[named_index(fake.current, L"virtual")].sourceInfo.sourceModeInfoIdx].sourceMode.width, 3840u);
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, ExactAddBindingRecoversWindowsRememberedVirtualOnlyTopology) {
+  fake_io_t fake;
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}});
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true));
+  fake.current = make_snapshot({{L"virtual", 0, 0}});
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(fake.journal && fake.journal->exclusive_started);
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}, {L"virtual", 1920, 0}});
+}
+
+TEST(PrimaryDisplayExclusive, PreparedCrashLightsPhysicalWithoutClaimingOrMovingUnknownOutput) {
+  fake_io_t fake;
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}});
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true));
+  fake.current = make_snapshot({{L"unknown", 0, 0}});
+  manager_t restarted(fake.io());
+  EXPECT_FALSE(restarted.restore());
+  expect_positions(fake.current, {{L"unknown", 0, 0}, {L"physical-primary", 1920, 0}});
+  ASSERT_TRUE(fake.journal && fake.journal->prepared && fake.journal->pending_restore);
+  EXPECT_TRUE(fake.journal->promoted_primary.empty());
+  EXPECT_TRUE(deserialize(serialize(*fake.journal)));
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}});
+  EXPECT_TRUE(restarted.restore());
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, PreparedCrashAfterOrphanDisappearsCanReactivateAllInactivePhysicals) {
+  fake_io_t fake;
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}});
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true));
+  fake.current = {};
+  EXPECT_TRUE(manager.restore());
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}});
+}
+
+TEST(PrimaryDisplayExclusive, ExactLateBindingCompletesPreparedPhysicalRecovery) {
+  fake_io_t fake;
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}});
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true));
+  fake.current = make_snapshot({{L"unknown", 0, 0}});
+  EXPECT_FALSE(manager.restore());
+  ASSERT_TRUE(fake.journal && fake.journal->prepared && fake.journal->pending_restore);
+  ASSERT_TRUE(manager.bind_pending(L"unknown"));
+  EXPECT_TRUE(fake.journal->exclusive_started);
+  EXPECT_FALSE(fake.journal->prepared);
+  ASSERT_TRUE(manager.restore(L"unknown"));
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}, {L"unknown", -1920, 0}});
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, UserTopologyEditsAndUnknownActiveOutputsArePreserved) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"virtual", 2000, 300}, {L"new-monitor", 3920, 0}});
+  fake.events.clear();
+  manager_t manager(fake.io());
+  EXPECT_FALSE(manager.restore());
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), 0);
+  EXPECT_TRUE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, InactiveRouteMatchingHandlesSourceConflictsAndRenumberedIds) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  auto routes = make_snapshot(baseline);
+  for (size_t i = 0; i < routes.paths.size(); ++i) {
+    auto &path = routes.paths[i];
+    path.flags &= ~DISPLAYCONFIG_PATH_ACTIVE;
+    path.sourceInfo.adapterId = {50, 1};
+    path.targetInfo.adapterId = {60, 2};
+    path.targetInfo.id += 200;
+    path.sourceInfo.id = i == 2 ? 2 : 0;
+    path.sourceInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+    path.targetInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+  }
+  auto alternate = routes.paths[1];
+  alternate.sourceInfo.id = 1;
+  routes.paths.push_back(alternate);
+  routes.device_paths.push_back(L"physical-primary");
+  fake.available_override = routes;
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.restore());
+  expect_positions(fake.current, baseline);
+  const auto primary = named_index(fake.current, L"physical-primary");
+  EXPECT_EQ(fake.current.paths[primary].sourceInfo.id, 1u);
+  EXPECT_EQ(fake.current.paths[primary].targetInfo.id, 211u);
+  EXPECT_EQ(fake.current.paths[primary].targetInfo.adapterId.LowPart, 60u);
+}
+
+TEST(PrimaryDisplayExclusive, DesktopImageModeRestoresUsingCurrentTargetIdentity) {
+  fake_io_t fake;
+  DISPLAYCONFIG_MODE_INFO desktop {};
+  desktop.infoType = static_cast<DISPLAYCONFIG_MODE_INFO_TYPE>(3);
+  desktop.id = fake.current.paths[1].targetInfo.id;
+  desktop.adapterId = fake.current.paths[1].targetInfo.adapterId;
+  std::array<LONG, 10> fields {1920, 1080, 0, 0, 1920, 1080, 0, 0, 1920, 1080};
+  std::memcpy(&desktop.targetMode, fields.data(), sizeof(fields));
+  fake.current.paths[1].targetInfo.desktopModeInfoIdx = static_cast<UINT32>(fake.current.modes.size());
+  fake.current.modes.push_back(desktop);
+  start_exclusive(fake);
+  const auto encoded = serialize(*fake.journal);
+  ASSERT_TRUE(deserialize(encoded));
+  EXPECT_EQ(serialize(*deserialize(encoded)), encoded);
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.restore());
+  const auto index = named_index(fake.current, L"physical-primary");
+  const auto &path = fake.current.paths[index];
+  const auto &restored = fake.current.modes[path.targetInfo.desktopModeInfoIdx];
+  EXPECT_EQ(restored.id, path.targetInfo.id);
+  EXPECT_NE(restored.id, path.sourceInfo.id);
+  EXPECT_EQ(restored.adapterId.LowPart, path.targetInfo.adapterId.LowPart);
+  std::array<LONG, 10> restored_fields {};
+  std::memcpy(restored_fields.data(), &restored.targetMode, sizeof(restored_fields));
+  EXPECT_EQ(restored_fields, fields);
+}
+
+TEST(PrimaryDisplayExclusive, ExactTimingReadbackMismatchRetainsJournal) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  fake.applied_mutation = [](snapshot_t &snapshot) {
+    auto &path = snapshot.paths[0];
+    snapshot.modes[path.targetInfo.targetModeInfoIdx].targetMode.targetVideoSignalInfo.videoStandard ^= 1;
+  };
+  manager_t manager(fake.io());
+  EXPECT_FALSE(manager.restore());
+  EXPECT_TRUE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, CorruptVersionTwoCcdPayloadIsRejectedAndVersionOneStillLoads) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  auto value = nlohmann::json::parse(serialize(*fake.journal));
+  value["original_topology"]["modes"][0] = "00";
+  EXPECT_FALSE(deserialize(value.dump()));
+  fake_io_t primary_only;
+  manager_t manager(primary_only.io());
+  ASSERT_TRUE(manager.promote(L"virtual"));
+  const auto legacy = serialize(*primary_only.journal);
+  EXPECT_EQ(nlohmann::json::parse(legacy)["version"], 1);
+  EXPECT_TRUE(deserialize(legacy));
 }
