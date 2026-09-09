@@ -99,6 +99,7 @@ try {
     '-I', (Join-Path $commonC 'enet/include'),
     (Join-Path $commonC 'tests/VideoPacketSizeTest.c'),
     (Join-Path $commonC 'src/SdpGenerator.c'),
+    (Join-Path $commonC 'src/Ds5HapticsStream.c'),
     (Join-Path $commonC 'src/RtpVideoQueue.c'), (Join-Path $commonC 'reedsolomon/rs.c'),
     (Join-Path $commonC 'src/VideoDepacketizer.c'), (Join-Path $commonC 'src/PlatformCrypto.c'),
     (Join-Path $commonC 'src/ByteBuffer.c'), (Join-Path $commonC 'src/LinkedBlockingQueue.c'),
