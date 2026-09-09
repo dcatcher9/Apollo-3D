@@ -6,6 +6,12 @@ not a separate Windows login or an isolated Windows session.
 
 ## Opening applications normally
 
+The current router is experimental and uses launch inference. Windows creates applications
+normally; the helper moves a resulting window after detecting its foreground activation. A window
+can briefly appear on another monitor first. This does not yet guarantee that every application
+opens on the virtual display or that an unrelated foreground activation can never be mistaken
+for a launch.
+
 Use Windows Start, Search, the taskbar, desktop shortcuts, Explorer, or Run from the streamed
 virtual monitor. There is no custom application launcher. The host automatically starts a hidden,
 standard-user window router for its virtual display. Both the mouse/keyboard connected to the PC
@@ -22,8 +28,8 @@ monitor or rearrange existing windows when streaming starts. It does not run app
 Windows continues to handle shortcuts, arguments, file associations, and application reuse.
 
 Activation on a Windows shell surface or an eligible application control starts a short, one-use
-routing opportunity. Pointer clicks must hit a recent, asynchronously inspected actionable item. Desktop and
-Explorer icons also honor Windows' single/double-click setting. Keyboard Enter and native Windows
+routing opportunity. Pointer clicks must hit a recent, asynchronously inspected actionable item.
+Desktop and Explorer icons also honor Windows' single/double-click setting. Keyboard Enter and native Windows
 shortcuts can invoke the same routing. Empty-space clicks do not authorize a move.
 Unrecognized injected input, pointer input outside the target, a secure-desktop switch,
 or a missing/changed target cancels it. Pointer motion does not create a launch request. Background
@@ -39,6 +45,10 @@ Routing therefore has compatibility limits:
   brief launch interval can be mistaken for the launch result.
 - Mouse routing needs fresh shell-item evidence. If a shell provider is unavailable or too slow,
   or an item is clicked before its first hover query completes, that launch is left to Windows.
+- An invocation from an ordinary application is skipped if its source window closes, hides, or
+  minimizes before placement. This prevents Close/Minimize actions from adopting the unrelated
+  window exposed behind them, but also skips applications that dismiss themselves while launching
+  another app. Native Start/Search/Run dismissal is handled separately.
 - The PC's physical mouse/keyboard and the XR mouse/ray path supply routing provenance. Direct
   native pen/touch injection is not identified by the mouse/keyboard tag.
 - Elevated applications, protected surfaces, and apps that override their own placement may
@@ -58,7 +68,9 @@ display-removal behavior.
 
 This feature needs live Galaxy XR verification with real Start/shortcut launches, existing app
 reuse, reconnects, and a simultaneous local user. Isolated tests do not establish application
-compatibility on the headset.
+compatibility on the headset. The native fixtures validate self-created windows and an ordinary
+UI Automation button on private desktops. Cross-monitor placement was not exercised on the
+single-monitor test setup; real shell launches and cross-process placement are still unverified.
 
 ## Keeping the remote cursor visible
 

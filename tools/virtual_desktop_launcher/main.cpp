@@ -575,6 +575,65 @@ namespace {
     return candidate == root || root_owner(candidate) == root;
   }
 
+  /** An app control must not claim the foreground window exposed by closing its own app. */
+  class invocation_source_t {
+  public:
+    explicit invocation_source_t(const surface_t &source):
+        root_(source.root),
+        pid_(source.pid) {
+      DWORD pid = 0;
+      thread_ = GetWindowThreadProcessId(root_, &pid);
+      if (!root_ || !thread_ || !pid_ || pid != pid_ || !window_kind_allowed(root_) || IsIconic(root_)) {
+        return;
+      }
+      process_ = owned_handle_t(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid_));
+      if (process_ && WaitForSingleObject(process_.get(), 0) == WAIT_TIMEOUT) {
+        // A destroyed HWND loses its properties, including when the same thread reuses its value.
+        bound_ = SetPropW(root_, property, reinterpret_cast<HANDLE>(this)) != FALSE;
+      }
+    }
+
+    ~invocation_source_t() {
+      if (bound_ && GetPropW(root_, property) == reinterpret_cast<HANDLE>(this)) {
+        RemovePropW(root_, property);
+      }
+    }
+
+    invocation_source_t(const invocation_source_t &) = delete;
+    invocation_source_t &operator=(const invocation_source_t &) = delete;
+
+    bool valid() const {
+      DWORD pid = 0;
+      return bound_ && process_ && WaitForSingleObject(process_.get(), 0) == WAIT_TIMEOUT &&
+             GetWindowThreadProcessId(root_, &pid) == thread_ && pid == pid_ &&
+             reinterpret_cast<ULONG_PTR>(GetPropW(root_, property)) == reinterpret_cast<ULONG_PTR>(this) &&
+             window_kind_allowed(root_) && !IsIconic(root_);
+    }
+
+    static constexpr wchar_t property[] = L"Sunshine3DWindowRouterInvocationSource";
+
+  private:
+    HWND root_ = nullptr;
+    DWORD pid_ = 0, thread_ = 0;
+    owned_handle_t process_;
+    bool bound_ = false;
+  };
+
+  std::unique_ptr<invocation_source_t> application_invocation_source(shell_kind_e shell, bool shortcut, bool app_invocation, const surface_t &source) {
+    if (shell == shell_kind_e::infrastructure || shortcut || !app_invocation) {
+      return nullptr;
+    }
+    return std::make_unique<invocation_source_t>(source);
+  }
+
+  bool claim_foreground(desktop_launcher::native_window_intent_t &intent, const desktop_launcher::native_foreground_t &event, const invocation_source_t *source) {
+    if (source && !source->valid()) {
+      intent.cancel();
+      return false;
+    }
+    return intent.claim(event);
+  }
+
   constexpr wchar_t family_property[] = L"Sunshine3DWindowRouterOwner";
 
   struct family_t {
@@ -649,6 +708,7 @@ namespace {
 
     void cancel() {
       intent_.cancel();
+      invocation_source_.reset();
       virtual_navigation_ = 0;
       last_click_.reset();
       deferred_foreground_.reset();
@@ -738,6 +798,18 @@ namespace {
         const bool app_invocation = application_source &&
                                     (mouse_launch || (event.keyboard && event.key == VK_RETURN));
         const bool shell_source = shell != shell_kind_e::none || shortcut || app_invocation;
+        if (action != desktop_launcher::native_input_action_e::motion) {
+          invocation_source_.reset();
+          // Start, Search and Run normally dismiss their shell surface during a launch.
+          // Ordinary app controls, including Explorer folders, must retain their source app.
+          if (action == desktop_launcher::native_input_action_e::launch) {
+            invocation_source_ = application_invocation_source(shell, shortcut, app_invocation, event.source);
+            if (invocation_source_ && !invocation_source_->valid()) {
+              cancel();
+              continue;
+            }
+          }
+        }
         if (action == desktop_launcher::native_input_action_e::launch) {
           const std::wstring_view name(event.source.name.data());
           taskbar_launch_ = !event.keyboard && (name == L"Shell_TrayWnd" || name == L"Shell_SecondaryTrayWnd" || name == L"TaskListThumbnailWnd");
@@ -760,6 +832,10 @@ namespace {
       }
       route_owned(window);
       if (!intent_.armed()) {
+        return;
+      }
+      if (invocation_source_ && !invocation_source_->valid()) {
+        cancel();
         return;
       }
       // Clicking an active taskbar app can minimize it and expose an unrelated window.
@@ -787,9 +863,11 @@ namespace {
         return;
       }
       deferred_foreground_.reset();
-      if (!intent_.claim({event_tick(timestamp), GetTickCount64(), generation, reinterpret_cast<std::uintptr_t>(window), true, false, GetForegroundWindow() == window, true, idle, observed_serial})) {
+      if (!claim_foreground(intent_, {event_tick(timestamp), GetTickCount64(), generation, reinterpret_cast<std::uintptr_t>(window), true, false, GetForegroundWindow() == window, true, idle, observed_serial}, invocation_source_.get())) {
         return;
       }
+      // Keep the source identity through placement; all exits then remove its property.
+      auto invocation_source = std::move(invocation_source_);
       virtual_navigation_ = 0;
       DWORD current_pid = 0;
       GetWindowThreadProcessId(window, &current_pid);
@@ -799,7 +877,7 @@ namespace {
       // Move only the selected root and its owned dialogs, never all windows of a reused process.
       const auto owner = root_owner(window);
       const auto root = owner && window_kind_allowed(owner) ? owner : window;
-      if (!place_window(root, *target_)) {
+      if ((invocation_source && !invocation_source->valid()) || !place_window(root, *target_)) {
         return;
       }
       if (families_.size() >= 32) {
@@ -812,7 +890,7 @@ namespace {
       if (root_process && SetPropW(root, family_property, marker)) {
         families_.insert_or_assign(root, family_t {std::move(root_process), marker, {root}});
       }
-      if (window != root && observer_->idle_unchanged() && observer_->cancellation() == cancellation_) {
+      if (window != root && observer_->idle_unchanged() && observer_->cancellation() == cancellation_ && (!invocation_source || invocation_source->valid())) {
         if (place_window(window, *target_) && families_.contains(root)) {
           families_.at(root).handled.insert(window);
         }
@@ -904,6 +982,7 @@ namespace {
     HWINEVENTHOOK foreground_hook_ = nullptr, desktop_hook_ = nullptr, show_hook_ = nullptr;
     std::unique_ptr<input_observer_t> observer_;
     desktop_launcher::native_shell_item_query_t shell_items_;
+    std::unique_ptr<invocation_source_t> invocation_source_;
     std::optional<input_event_t> last_click_;
     std::map<HWND, family_t> families_;
     std::uintptr_t family_serial_ = 0;
@@ -980,6 +1059,64 @@ namespace {
       if (IsIconic(root) || MonitorFromWindow(root, MONITOR_DEFAULTTONULL) != target.monitor || (!IsZoomed(root) && !desktop_launcher::contains(rectangle(target.info.rcWork), rectangle(bounds)))) {
         result = 14;
       }
+    }
+    const auto invocation = create(nullptr);
+    if (!invocation) {
+      result = 16;
+    } else if (!result) {
+      desktop_launcher::native_window_intent_t intent;
+      const auto arm = [&] {
+        intent.observe_input({100, reinterpret_cast<std::uintptr_t>(invocation), desktop_launcher::native_input_action_e::launch, true, true, true, true});
+      };
+      const auto claim_exposed_window = [&](const invocation_source_t *source) {
+        return claim_foreground(intent, {101, 101, intent.generation(), reinterpret_cast<std::uintptr_t>(sentinel), true, false, true, true, true}, source);
+      };
+      ShowWindow(invocation, SW_SHOWNOACTIVATE);
+      {
+        const auto source = application_invocation_source(shell_kind_e::none, false, true, surface(invocation));
+        arm();
+        if (!source || !source->valid() || !claim_exposed_window(source.get())) {
+          result = 17;
+        }
+        arm();
+        ShowWindow(invocation, SW_MINIMIZE);
+        if (claim_exposed_window(source.get()) || intent.armed()) {
+          result = 18;
+        }
+        ShowWindow(invocation, SW_SHOWNOACTIVATE);
+        arm();
+        ShowWindow(invocation, SW_HIDE);
+        if (claim_exposed_window(source.get()) || intent.armed()) {
+          result = 19;
+        }
+        ShowWindow(invocation, SW_SHOWNOACTIVATE);
+        arm();
+        RemovePropW(invocation, invocation_source_t::property);
+        if (claim_exposed_window(source.get()) || intent.armed()) {
+          result = 20;
+        }
+      }
+      {
+        // Explorer folder controls use the same guard, unlike transient Start/Run surfaces.
+        const auto folder_source = application_invocation_source(shell_kind_e::folder, false, true, surface(invocation));
+        const auto shell_source = application_invocation_source(shell_kind_e::infrastructure, false, true, surface(invocation));
+        if (!folder_source || !folder_source->valid() || shell_source) {
+          result = 23;
+        }
+        arm();
+        DestroyWindow(invocation);
+        if (claim_exposed_window(folder_source.get()) || intent.armed()) {
+          result = 21;
+        }
+        // Native shell launch surfaces such as Run may legitimately disappear.
+        arm();
+        if (!claim_exposed_window(shell_source.get())) {
+          result = 22;
+        }
+      }
+    }
+    if (IsWindow(invocation)) {
+      DestroyWindow(invocation);
     }
     GetWindowRect(sentinel, &after);
     if (!EqualRect(&before, &after)) {
