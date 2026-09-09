@@ -12,6 +12,9 @@
 #include <string>
 #include <string_view>
 
+// lib includes
+#include <nlohmann/json_fwd.hpp>
+
 // local includes
 #include "thread_safe.h"
 
@@ -45,6 +48,8 @@ namespace confighttp {
     std::string_view method,
     std::string_view path
   );
+
+  void erase_retired_config_options(nlohmann::json &config);
 
   std::string make_auth_cookie(std::string_view token);
   void start();

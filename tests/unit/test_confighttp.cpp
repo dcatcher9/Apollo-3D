@@ -8,11 +8,26 @@
 #include <string>
 #include <string_view>
 
+#include <nlohmann/json.hpp>
 #include <src/confighttp.h>
 
 #include "../tests_common.h"
 
 using confighttp::bounded_content_length_e;
+
+TEST(ConfigHttpMigration, RetiredVirtualDisplayOnlyCannotBeSaved) {
+  nlohmann::json payload {
+    {"sunshine_name", "XR host"},
+    {"virtual_display_only", "on"},
+    {"virtual_display_restart_explorer", "enabled"},
+  };
+
+  confighttp::erase_retired_config_options(payload);
+
+  EXPECT_FALSE(payload.contains("virtual_display_only"));
+  EXPECT_EQ(payload.at("sunshine_name"), "XR host");
+  EXPECT_EQ(payload.at("virtual_display_restart_explorer"), "enabled");
+}
 
 TEST(ConfigHttpRequestBoundary, AcceptsMissingAndInRangeContentLength) {
   EXPECT_EQ(

@@ -717,6 +717,19 @@ namespace nvhttp {
     return cancel_admission_e::rejected;
   }
 
+  bool detail::resolve_resume_virtual_display_only(
+    bool requested,
+    bool retained,
+    std::string_view retained_client_uuid,
+    std::string_view requesting_client_uuid,
+    PERM requesting_permissions
+  ) {
+    const bool retained_owner = !retained_client_uuid.empty() &&
+                                retained_client_uuid == requesting_client_uuid;
+    const bool launch_authorized = !!(requesting_permissions & PERM::launch);
+    return retained_owner || launch_authorized ? requested : retained;
+  }
+
   static std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(const args_t &args, const crypto::named_cert_t *named_cert_p) {
     static constexpr std::array required_args {
       "corever",
@@ -1799,6 +1812,19 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_code", 409);
       tree.put("root.<xmlattr>.status_message", "The requested application does not match the retained host session");
       return;
+    }
+
+    const bool requested_virtual_display_only = launch_session->virtual_display_only;
+    launch_session->virtual_display_only = detail::resolve_resume_virtual_display_only(
+      requested_virtual_display_only,
+      process_status.virtual_display_only,
+      process_status.client_uuid,
+      named_cert_p->uuid,
+      named_cert_p->perm
+    );
+    if (launch_session->virtual_display_only != requested_virtual_display_only) {
+      BOOST_LOG(warning) << "Ignoring a virtual-display-only policy change from view-only client ["
+                         << named_cert_p->name << "]; retaining the current session policy."sv;
     }
 
     if (!rtsp_stream::launch_session_available()) {

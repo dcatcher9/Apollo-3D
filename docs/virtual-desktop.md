@@ -35,8 +35,9 @@ Primary-monitor placement is a default, not a guarantee for every application:
 For applications that keep opening on a physical monitor, enable **Use virtual display only while
 streaming** in Moonlight 3D's **Global Settings → Streaming defaults**. Supporting clients enable
 it by default.
-The client sends its current choice for every launch and resume, so applying changed settings and
-reconnecting also changes the retained session's display mode.
+The client sends its current choice for every launch and resume. The session owner, or another
+client with launch permission, can apply a changed choice by reconnecting. A different view-only
+client inherits the retained session's choice.
 
 With this option on, Sunshine 3D temporarily disables every other active display during a
 virtual-display stream. Physical screens go blank and the virtual monitor becomes the only active
@@ -108,8 +109,10 @@ there is no host configuration toggle.
 An authenticated Windows host `/serverinfo` advertises `VirtualDisplayOnlySupported=1`. Supporting
 clients send the exact query value `virtualDisplayOnly=1` (enabled) or `virtualDisplayOnly=0`
 (disabled) on both `/launch` and `/resume`. The host defaults to disabled when an older client omits
-the parameter. Each accepted resume applies the authenticated client's new choice to that retained
-session; a failed reconfiguration keeps the last accepted choice.
+the parameter. On resume, the retained session owner or a client with launch permission may change
+the choice. A different client with view-only permission can resume the stream but inherits the
+retained choice. A retryable reconfiguration failure keeps the last accepted choice; an
+unrecoverable topology failure terminates the retained session.
 
 Authenticated host `/serverinfo` also advertises `CursorConfinementSupported=1`. A client must
 check this specific capability before presenting confinement as supported; the host-session-token

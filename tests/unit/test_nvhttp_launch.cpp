@@ -102,6 +102,25 @@ TEST(NvHttpLaunchParsingTest, AdmitsTokenlessCancelOnlyForRetainedSessionOwner) 
   EXPECT_EQ(cancel_admission(std::nullopt, 0, "owner", "owner"), admission::rejected);
 }
 
+TEST(NvHttpLaunchParsingTest, ViewOnlyResumeInheritsRetainedVirtualDisplayPolicy) {
+  using nvhttp::detail::resolve_resume_virtual_display_only;
+
+  EXPECT_FALSE(resolve_resume_virtual_display_only(true, false, "owner", "viewer", crypto::PERM::view));
+  EXPECT_TRUE(resolve_resume_virtual_display_only(false, true, "owner", "viewer", crypto::PERM::view));
+  EXPECT_TRUE(resolve_resume_virtual_display_only(true, true, "owner", "viewer", crypto::PERM::view));
+  EXPECT_FALSE(resolve_resume_virtual_display_only(false, false, "owner", "viewer", crypto::PERM::view));
+}
+
+TEST(NvHttpLaunchParsingTest, OwnerOrLaunchPermissionMayChangeVirtualDisplayPolicyOnResume) {
+  using nvhttp::detail::resolve_resume_virtual_display_only;
+
+  EXPECT_TRUE(resolve_resume_virtual_display_only(true, false, "owner", "owner", crypto::PERM::view));
+  EXPECT_FALSE(resolve_resume_virtual_display_only(false, true, "owner", "owner", crypto::PERM::view));
+  EXPECT_TRUE(resolve_resume_virtual_display_only(true, false, "owner", "launcher", crypto::PERM::launch));
+  EXPECT_FALSE(resolve_resume_virtual_display_only(false, true, "owner", "launcher", crypto::PERM::launch));
+  EXPECT_FALSE(resolve_resume_virtual_display_only(true, false, "", "", crypto::PERM::view));
+}
+
 TEST(NvHttpLaunchParsingTest, MatchesCanonicalApplicationIdentity) {
   EXPECT_TRUE(nvhttp::detail::app_identity_matches(7, "ABC-DEF", 7, "abc-def"));
   EXPECT_TRUE(nvhttp::detail::app_identity_matches(std::nullopt, "ABC-DEF", 7, "abc-def"));

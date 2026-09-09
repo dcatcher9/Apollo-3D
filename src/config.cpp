@@ -165,6 +165,10 @@ namespace config {
     return space_tab(ch) || endline(ch);
   }
 
+  bool is_retired_config_option(const std::string_view name) {
+    return name == "virtual_display_only"sv;
+  }
+
   std::string to_string(const char *begin, const char *end) {
     std::string result;
 
@@ -263,7 +267,7 @@ namespace config {
         pos += (*pos == '\r') ? 2 : 1;
       }
 
-      if (!var) {
+      if (!var || is_retired_config_option(var->first)) {
         continue;
       }
 
@@ -616,6 +620,12 @@ namespace config {
   }
 
   void apply_config(std::unordered_map<std::string, std::string> &&vars) {
+    // File parsing already removes retired options. Apply the same boundary to command-line
+    // overrides so an old launch script is silent and cannot repopulate Web UI state.
+    std::erase_if(vars, [](const auto &entry) {
+      return is_retired_config_option(entry.first);
+    });
+
     for (auto &[name, val] : vars) {
 #ifdef _WIN32
       BOOST_LOG(info) << "config: ["sv << name << "] -- ["sv << utf8ToAcp(val) << ']';

@@ -434,6 +434,7 @@ namespace proc {
       _host_session_id,
       _launch_session && _launch_session->enable_hdr,
       _launch_session ? _launch_session->unique_id : std::string {},
+      _launch_session && _launch_session->virtual_display_only,
     };
   }
 
@@ -557,6 +558,14 @@ namespace proc {
   }
 
   bool proc_t::request_hdr_state(bool enable_hdr, std::chrono::milliseconds timeout) {
+  #ifdef SUNSHINE_TESTS
+    if (_display_topology_test_hook) {
+      return _display_topology_test_hook(
+        display_topology_test_operation_e::request_hdr,
+        enable_hdr
+      );
+    }
+  #endif
     if (!_hdr_worker_state || !_hdr_worker.joinable()) {
       // Disconnect stops virtual HDR work before restoring the original primary. A warm resume
       // restarts it only after resolving the exact monitor's current GDI name.
@@ -789,6 +798,14 @@ namespace proc {
     bool final_teardown,
     bool restart_explorer_after_removal
   ) {
+  #ifdef SUNSHINE_TESTS
+    if (_display_topology_test_hook) {
+      return _display_topology_test_hook(
+        display_topology_test_operation_e::retire,
+        final_teardown
+      );
+    }
+  #endif
     if (!identity) {
       BOOST_LOG(error) << "Cannot retire a virtual display without its stable driver identity."sv;
       return false;
@@ -923,6 +940,14 @@ namespace proc {
   }
 
   bool proc_t::refresh_virtual_display_binding() {
+  #ifdef SUNSHINE_TESTS
+    if (_display_topology_test_hook) {
+      return _display_topology_test_hook(
+        display_topology_test_operation_e::refresh_binding,
+        _virtual_display_only
+      );
+    }
+  #endif
     if (!_virtual_display_identity) {
       return false;
     }
@@ -958,7 +983,16 @@ namespace proc {
     const bool had_hdr_worker = _hdr_worker.joinable();
     stop_hdr_worker();
     _hdr_worker_state.reset();
-    if (!platf::primary_display::promote(_virtual_display_device_path, _virtual_display_only) || !refresh_virtual_display_binding()) {
+    const bool promoted =
+  #ifdef SUNSHINE_TESTS
+      _display_topology_test_hook ?
+        _display_topology_test_hook(
+          display_topology_test_operation_e::promote,
+          _virtual_display_only
+        ) :
+  #endif
+        platf::primary_display::promote(_virtual_display_device_path, _virtual_display_only);
+    if (!promoted || !refresh_virtual_display_binding()) {
       return false;
     }
     if (had_hdr_worker && !request_hdr_state(enable_hdr, 6s)) {

@@ -33,14 +33,26 @@ namespace proc {
 #endif
     }
 #ifdef _WIN32
-    static void mark_virtual(proc_t &process, bool enabled) {
+    static void mark_virtual(proc_t &process, bool enabled, bool with_identity = false) {
       process._virtual_display = enabled;
       process._virtual_display_gdi_name = enabled ? L"test-only-display" : L"";
       process._virtual_display_device_path = enabled ? L"test-only-monitor-path" : L"";
+      if (enabled && with_identity) {
+        process._virtual_display_identity.emplace();
+      } else {
+        process._virtual_display_identity.reset();
+      }
     }
 
     static bool virtual_display_only(const proc_t &process) {
       return process._virtual_display_only;
+    }
+
+    static void set_display_topology_hook(
+      proc_t &process,
+      display_topology_test_hook_t hook
+    ) {
+      process._display_topology_test_hook = std::move(hook);
     }
 #endif
     static void clear(proc_t &process) {
@@ -49,6 +61,7 @@ namespace proc {
       process._active_launch_session_id = 0;
       process._launch_session.reset();
 #ifdef _WIN32
+      process._display_topology_test_hook = {};
       mark_virtual(process, false);
       process._virtual_display_only = false;
 #endif
@@ -114,7 +127,9 @@ TEST(ProcessTest, RetainedDisplayPolicyFollowsEachAcceptedClientResume) {
     original->fps = 60000;
     original->virtual_display_only = captured_policy;
     proc::process_test_access::retain(process, original);
-    auto cleanup = util::fail_guard([&]() { proc::process_test_access::clear(process); });
+    auto cleanup = util::fail_guard([&]() {
+      proc::process_test_access::clear(process);
+    });
 
     // This fixture owns no display, so successful retained reconfiguration and teardown exercise
     // client policy lifetime without any CCD call.
@@ -151,6 +166,118 @@ TEST(ProcessTest, RetainedDisplayPolicyFollowsEachAcceptedClientResume) {
     EXPECT_FALSE(proc::process_test_access::virtual_display_only(process));
     EXPECT_EQ(process.get_host_session_id(), 0U);
   }
+}
+
+TEST(ProcessTest, RetainedVirtualDisplayResumeCommitsPolicyAfterPromotionAndRebind) {
+  using operation_e = proc::display_topology_test_operation_e;
+
+  for (const bool previous_policy : {false, true}) {
+    SCOPED_TRACE(previous_policy);
+    proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
+    auto original = std::make_shared<rtsp_stream::launch_session_t>();
+    original->id = 11;
+    original->width = 1920;
+    original->height = 1080;
+    original->fps = 60000;
+    original->virtual_display = true;
+    original->virtual_display_only = previous_policy;
+    proc::process_test_access::retain(process, original);
+    proc::process_test_access::mark_virtual(process, true);
+    auto cleanup = util::fail_guard([&]() {
+      proc::process_test_access::clear(process);
+    });
+
+    std::vector<std::pair<operation_e, bool>> operations;
+    proc::process_test_access::set_display_topology_hook(
+      process,
+      [&](operation_e operation, bool value) {
+        operations.emplace_back(operation, value);
+        return true;
+      }
+    );
+
+    auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
+    resumed->id = 22;
+    resumed->width = 1920;
+    resumed->height = 1080;
+    resumed->fps = 60000;
+    resumed->scale_factor = 100;
+    resumed->virtual_display_only = !previous_policy;
+    ASSERT_EQ(process.reconfigure_retained_session(resumed), 0);
+
+    ASSERT_EQ(operations.size(), 4U);
+    EXPECT_EQ(operations[0], (std::pair {operation_e::refresh_binding, !previous_policy}));
+    EXPECT_EQ(operations[1], (std::pair {operation_e::request_hdr, false}));
+    EXPECT_EQ(operations[2], (std::pair {operation_e::promote, !previous_policy}));
+    EXPECT_EQ(operations[3], (std::pair {operation_e::refresh_binding, !previous_policy}));
+    EXPECT_EQ(proc::process_test_access::virtual_display_only(process), !previous_policy);
+    EXPECT_EQ(original->virtual_display_only, !previous_policy);
+    EXPECT_TRUE(resumed->virtual_display);
+    EXPECT_EQ(process.get_host_session_id(), 1234U);
+  }
+}
+
+TEST(ProcessTest, FailedPostPromotionRebindRequestsRetirementAndClearsSession) {
+  using operation_e = proc::display_topology_test_operation_e;
+
+  const auto saved_output = config::video.output_name;
+  auto restore_config = util::fail_guard([&]() {
+    config::video.output_name = saved_output;
+  });
+
+  proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
+  process.initial_display = saved_output;
+  auto original = std::make_shared<rtsp_stream::launch_session_t>();
+  original->id = 11;
+  original->width = 1920;
+  original->height = 1080;
+  original->fps = 60000;
+  original->virtual_display = true;
+  original->virtual_display_only = false;
+  proc::process_test_access::retain(process, original);
+  proc::process_test_access::mark_virtual(process, true, true);
+  auto cleanup = util::fail_guard([&]() {
+    proc::process_test_access::clear(process);
+  });
+
+  std::vector<std::pair<operation_e, bool>> operations;
+  int refresh_count = 0;
+  proc::process_test_access::set_display_topology_hook(
+    process,
+    [&](operation_e operation, bool value) {
+      operations.emplace_back(operation, value);
+      if (operation == operation_e::refresh_binding) {
+        // The retained binding resolves before promotion, but its required post-promotion
+        // verification fails after Windows accepted the topology change.
+        return ++refresh_count == 1;
+      }
+      return true;
+    }
+  );
+
+  auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
+  resumed->id = 22;
+  resumed->width = 1920;
+  resumed->height = 1080;
+  resumed->fps = 60000;
+  resumed->scale_factor = 100;
+  resumed->virtual_display_only = true;
+  EXPECT_EQ(process.reconfigure_retained_session(resumed), 503);
+
+  ASSERT_EQ(operations.size(), 5U);
+  EXPECT_EQ(operations[0], (std::pair {operation_e::refresh_binding, true}));
+  EXPECT_EQ(operations[1], (std::pair {operation_e::request_hdr, false}));
+  EXPECT_EQ(operations[2], (std::pair {operation_e::promote, true}));
+  EXPECT_EQ(operations[3], (std::pair {operation_e::refresh_binding, true}));
+  // The retirement implementation has lower-level coverage; this process test verifies that a
+  // failed post-promotion rebind requests final retirement before clearing the retained session.
+  EXPECT_EQ(operations[4], (std::pair {operation_e::retire, true}));
+  EXPECT_FALSE(proc::process_test_access::virtual_display_only(process));
+  EXPECT_FALSE(original->virtual_display_only);
+  EXPECT_EQ(process.get_host_session_id(), 0U);
+  const auto status = process.get_status();
+  EXPECT_EQ(status.app_id, 0);
+  EXPECT_FALSE(status.virtual_display);
 }
 
 TEST(ProcessTest, RejectedNewLaunchClearsPreviousClientDisplayPolicy) {

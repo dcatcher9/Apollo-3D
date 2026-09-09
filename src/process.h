@@ -16,6 +16,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <stop_token>
 #include <thread>
@@ -57,6 +58,16 @@ namespace proc {
   };
 
   #ifdef SUNSHINE_TESTS
+  enum class display_topology_test_operation_e {
+    refresh_binding,
+    request_hdr,
+    promote,
+    retire,
+  };
+
+  using display_topology_test_hook_t =
+    std::function<bool(display_topology_test_operation_e, bool)>;
+
   bool retiredVirtualDisplayRemovalAllowedForTest(
     bool desktopDeactivationRequested,
     bool detachConfirmedReady
@@ -129,6 +140,7 @@ namespace proc {
     std::uint64_t host_session_id;
     bool enable_hdr;
     std::string client_uuid;
+    bool virtual_display_only;
   };
 
   struct render_size_t {
@@ -284,6 +296,10 @@ namespace proc {
     bool _virtual_display_retirement_handed_off = false;
     // Client-owned policy for the active launch or resume.
     bool _virtual_display_only = false;
+  #ifdef SUNSHINE_TESTS
+    // Process tests replace display/HDR side effects while preserving resume/teardown control flow.
+    display_topology_test_hook_t _display_topology_test_hook;
+  #endif
     std::optional<std::uint64_t> _remote_virtual_display_lease;
     VDISPLAY::creation_result_t create_retained_virtual_display(
       std::uint32_t width,

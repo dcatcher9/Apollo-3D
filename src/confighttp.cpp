@@ -59,6 +59,20 @@ namespace confighttp {
   using resp_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Response>;
   using req_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Request>;
 
+  void erase_retired_config_options(nlohmann::json &config_tree) {
+    if (!config_tree.is_object()) {
+      return;
+    }
+
+    for (auto option = config_tree.begin(); option != config_tree.end();) {
+      if (config::is_retired_config_option(option.key())) {
+        option = config_tree.erase(option);
+      } else {
+        ++option;
+      }
+    }
+  }
+
   bounded_content_length_e validate_bounded_content_length(
     std::optional<std::string_view> value,
     const std::size_t maximum
@@ -1341,6 +1355,7 @@ namespace confighttp {
       std::stringstream config_stream;
       nlohmann::json output_tree;
       nlohmann::json input_tree = nlohmann::json::parse(ss);
+      erase_retired_config_options(input_tree);
       // This option is live-managed by the AR display decision API rather than the general form.
       input_tree.erase("ar_glass_devices");
       for (const auto &[k, v] : input_tree.items()) {

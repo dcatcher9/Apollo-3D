@@ -111,6 +111,18 @@ namespace nvhttp {
       std::string_view requesting_client_uuid
     );
 
+    /**
+     * Resolve a resume's virtual-only policy without granting a view-only peer display authority.
+     * The retained owner and launch-authorized clients may change it; other viewers inherit it.
+     */
+    bool resolve_resume_virtual_display_only(
+      bool requested,
+      bool retained,
+      std::string_view retained_client_uuid,
+      std::string_view requesting_client_uuid,
+      crypto::PERM requesting_permissions
+    );
+
     /** UUID is authoritative when supplied; a positive ID must agree with it. */
     bool app_identity_matches(
       std::optional<int> requested_app_id,
