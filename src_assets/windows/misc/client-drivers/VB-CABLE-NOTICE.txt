@@ -1,0 +1,28 @@
+VB-CABLE Virtual Audio Device - VB-Audio Software
+Programmed by Vincent Burel / JS-Loezic.
+Copyright Vincent Burel 2010-2024. All rights reserved.
+
+Origin and downloads: https://www.vb-cable.com/
+VB-CABLE is donationware; all contributions are welcome. If you find it useful,
+please donate or pay for your license: https://vb-audio.com/Services/licensing.htm
+
+This optional component contains the original, unmodified base VB-CABLE Pack45
+archive from VB-Audio. The archive's readme.txt contains its end-user license.
+It is separate from Sunshine 3D and is not licensed under Sunshine's GPL license.
+The additional VB-CABLE A+B and C+D packages are not included.
+
+VB-Audio's current "VB-CABLE Distribution with other product" terms permit
+embedding the base package when users can identify VB-Audio and donate/pay for
+their license. Distribution within organizations where end users cannot do so
+requires volume licensing. Distributors remain responsible for meeting these
+terms: https://vb-audio.com/Services/licensing.htm
+These current terms were checked on 2026-09-09; they provide the author agreement
+referenced by the package readme for this form of attributed distribution.
+
+Package: VBCABLE_Driver_Pack45.zip (October 2024)
+Source: https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip
+SHA-256: b950e39f01af1d04ea623c8f6d8eb9b6ea5c477c637295fabf20631c85116bfb
+
+Installation uses the vendor's Windows setup. Its supplied readme
+requires Administrator rights and a Windows restart after installation. Sunshine
+does not uninstall this shared driver or change the default audio devices.

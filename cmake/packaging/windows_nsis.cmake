@@ -1,7 +1,37 @@
 # NSIS Packaging
 # see options at: https://cmake.org/cmake/help/latest/cpack_gen/nsis.html
 
+# The complete TensorRT payload exceeds NSIS's uncompressed solid-block limit.
+# Its optional inner archive supplies solid compression; keep the outer stream
+# non-solid and inexpensive when it carries already compressed archive data.
+if(SUNSHINE_PACKAGE_TENSORRT_ARCHIVE)
+    set(CPACK_NSIS_COMPRESSOR "zlib")
+else()
+    set(CPACK_NSIS_COMPRESSOR "lzma")
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/windows_nsis_template.cmake")
+
 set(CPACK_NSIS_INSTALLED_ICON_NAME "${PROJECT__DIR}\\\\${PROJECT_EXE}")
+
+set(SUNSHINE_NSIS_TENSORRT_SETUP "")
+if(SUNSHINE_PACKAGE_TENSORRT_ARCHIVE)
+    set(SUNSHINE_NSIS_TENSORRT_SETUP
+        "nsExec::ExecToLog '\\\"$UpgradePowerShell\\\" -NoProfile -ExecutionPolicy Bypass -File \\\"$INSTDIR\\\\scripts\\\\install-tensorrt-bundle.ps1\\\" -ArchivePath \\\"$INSTDIR\\\\tools\\\\tensorrt\\\\runtime.7z\\\" -ManifestPath \\\"$INSTDIR\\\\scripts\\\\tensorrt-runtime.json\\\" -SevenZipPath \\\"$INSTDIR\\\\tools\\\\tensorrt\\\\7zip\\\\7z.exe\\\" -DestinationDirectory \\\"$INSTDIR\\\"'
+        Pop $R2
+        StrCmp $R2 0 tensorrt_ready
+        MessageBox MB_OK|MB_ICONSTOP \\\"TensorRT could not be unpacked or verified. Setup will not start the host service. Close Sunshine and run setup again.\\\" /SD IDOK
+        SetErrorLevel 1
+        Abort
+        tensorrt_ready:")
+endif()
+
+set(_sunshine_gamepad_setup "nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File \\\"$INSTDIR\\\\scripts\\\\install-gamepad.ps1\\\"'")
+if(SUNSHINE_PACKAGE_CLIENT_DRIVERS)
+    # The optional-driver sequence also handles ViGEm selection, native
+    # PowerShell, and its synchronous failure/reboot result.
+    set(_sunshine_gamepad_setup "")
+endif()
 
 # Extra install commands
 # Restores permissions on the install directory
@@ -12,12 +42,26 @@ SET(CPACK_NSIS_EXTRA_INSTALL_COMMANDS
         IfSilent +2 0
         # ExecShell 'open' 'https://docs.lizardbyte.dev/projects/sunshine'
         nsExec::ExecToLog 'icacls \\\"$INSTDIR\\\" /reset'
+        ClearErrors
+        WriteRegStr HKLM \\\"Software\\\\${CPACK_PACKAGE_VENDOR}\\\\Sunshine3D Setup\\\" \\\"ConfigurationSource\\\" \\\"$PreviousInstallDirectory\\\"
+        IfErrors config_migration_failed
+        nsExec::ExecToLog '\\\"$UpgradePowerShell\\\" -NoProfile -ExecutionPolicy Bypass -File \\\"$INSTDIR\\\\scripts\\\\migrate-install-config.ps1\\\" -SourceDirectory \\\"$PreviousInstallDirectory\\\" -DestinationDirectory \\\"$INSTDIR\\\"'
+        Pop $R2
+        StrCmp $R2 0 config_migrated
+        config_migration_failed:
+        MessageBox MB_OK|MB_ICONSTOP \\\"Configuration migration failed. Your previous configuration remains in its original folder. Setup will not start the host service.\\\" /SD IDOK
+        SetErrorLevel 1
+        Abort
+        config_migrated:
+        DeleteRegValue HKLM \\\"Software\\\\${CPACK_PACKAGE_VENDOR}\\\\Sunshine3D Setup\\\" \\\"ConfigurationSource\\\"
+        DeleteRegKey /ifempty HKLM \\\"Software\\\\${CPACK_PACKAGE_VENDOR}\\\\Sunshine3D Setup\\\"
+        ${SUNSHINE_NSIS_TENSORRT_SETUP}
         nsExec::ExecToLog '\\\"$INSTDIR\\\\scripts\\\\update-path.bat\\\" add'
         nsExec::ExecToLog '\\\"$INSTDIR\\\\drivers\\\\sudovda\\\\install.bat\\\"'
         nsExec::ExecToLog '\\\"$INSTDIR\\\\scripts\\\\migrate-config.bat\\\"'
         nsExec::ExecToLog '\\\"$INSTDIR\\\\scripts\\\\add-firewall-rule.bat\\\"'
-        nsExec::ExecToLog \
-          'powershell.exe -NoProfile -ExecutionPolicy Bypass -File \\\"$INSTDIR\\\\scripts\\\\install-gamepad.ps1\\\"'
+        ${_sunshine_gamepad_setup}
+        ${SUNSHINE_NSIS_CLIENT_DRIVER_SETUP}
         nsExec::ExecToLog '\\\"$INSTDIR\\\\scripts\\\\install-service.bat\\\"'
         nsExec::ExecToLog '\\\"$INSTDIR\\\\scripts\\\\autostart-service.bat\\\"'
         NoController:
@@ -30,6 +74,7 @@ set(CPACK_NSIS_EXTRA_UNINSTALL_COMMANDS
         nsExec::ExecToLog '\\\"$INSTDIR\\\\scripts\\\\delete-firewall-rule.bat\\\"'
         nsExec::ExecToLog '\\\"$INSTDIR\\\\scripts\\\\uninstall-service.bat\\\"'
         nsExec::ExecToLog '\\\"$INSTDIR\\\\sunshine.exe\\\" --restore-nvprefs-undo'
+        ${SUNSHINE_NSIS_TENSORRT_UNINSTALL}
         MessageBox MB_YESNO|MB_ICONQUESTION \
             'Do you want to remove Virtual Gamepad?' \
             /SD IDNO IDNO NoGamepad

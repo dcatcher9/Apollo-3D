@@ -93,6 +93,7 @@ if (@(Get-ChildItem -LiteralPath $output -Directory).Count -ne 0) {
 }
 $manifest = [ordered]@{
     protocol = 1
+    installer_driver_setup = 1
     sidecar_file = 'Sunshine.Ds5Sidecar.exe'
     sidecar_sha256 = $files['Sunshine.Ds5Sidecar.exe']
     hidmaestro_version = '1.6.2.0'

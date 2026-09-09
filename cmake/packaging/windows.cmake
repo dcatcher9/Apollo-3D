@@ -2,12 +2,7 @@
 install(TARGETS sunshine RUNTIME DESTINATION "." COMPONENT application)
 install(FILES "${PROJECT_SOURCE_DIR}/NOTICE" DESTINATION "." COMPONENT application)
 
-# The Windows TensorRT ZIP keeps runtime and builder-resource DLLs beside the
-# application at run time. The development target copies the same authenticated
-# package set post-build; include it in installed/packaged builds as well.
-if(PROJECT_TENSORRT_DLLS)
-    install(FILES ${PROJECT_TENSORRT_DLLS} DESTINATION "." COMPONENT application)
-endif()
+include("${CMAKE_CURRENT_LIST_DIR}/windows_tensorrt_archive.cmake")
 
 # Hardening: include zlib1.dll (loaded via LoadLibrary() in openssl's libcrypto.a)
 install(FILES "${ZLIB}" DESTINATION "." COMPONENT application)
@@ -91,12 +86,13 @@ execute_process(COMMAND cmd.exe /c mklink /J "${shaders_in_build_dest_native}" "
 
 set(CPACK_PACKAGE_ICON "${CMAKE_SOURCE_DIR}\\\\sunshine3d.ico")
 
-# Rename the product in Windows UI without changing the install directory or upgrade identity.
+# Keep the Apollo upgrade identity while using the product's current name and directory.
 set(CPACK_NSIS_PACKAGE_NAME "${PROJECT_DISPLAY_NAME}")
 set(CPACK_NSIS_DISPLAY_NAME "${PROJECT_DISPLAY_NAME}")
+set(CPACK_PACKAGE_INSTALL_REGISTRY_KEY "Apollo")
 
 # The name of the directory that will be created in C:/Program files/
-set(CPACK_PACKAGE_INSTALL_DIRECTORY "${CPACK_PACKAGE_NAME}")
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "Sunshine3D")
 
 # Setting components groups and dependencies
 set(CPACK_COMPONENT_GROUP_CORE_EXPANDED true)
@@ -146,5 +142,6 @@ set(CPACK_COMPONENT_GAMEPAD_DESCRIPTION "Scripts to install and uninstall Virtua
 set(CPACK_COMPONENT_GAMEPAD_GROUP "Scripts")
 
 # include specific packaging
+include(${CMAKE_MODULE_PATH}/packaging/windows_client_drivers.cmake)
 include(${CMAKE_MODULE_PATH}/packaging/windows_nsis.cmake)
 include(${CMAKE_MODULE_PATH}/packaging/windows_wix.cmake)

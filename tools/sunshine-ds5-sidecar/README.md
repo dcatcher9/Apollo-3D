@@ -57,9 +57,12 @@ Its composite transport bundles unmodified usbip-win2 0.9.7.7 under BSD-2-Clause
 the [upstream notices](https://github.com/hifihedgehog/HIDMaestro/blob/v1.6.2/sdk/HIDMaestro.Core/THIRD-PARTY-NOTICES.txt)
 identify that binary and its digest. The build keeps those notices with the local
 component. The full Core also embeds Windows driver signing/catalog tools. This
-local development recipe does not add Core or its upstream package to the Sunshine
-installer or a Sunshine release asset. Review all embedded payload redistribution
-terms before publishing a binary component containing them.
+local development recipe produces a complete component for local use. The optional Sunshine
+installer packages our helper, its .NET runtime, notices, and the manifest, **excluding
+HIDMaestro.Core.dll**. Its explicit setup script downloads and verifies the upstream archive on the
+end user's PC before adding Core and activating the helper. Review all embedded payload
+redistribution terms before publishing a binary component containing Core; this installer route
+does not redistribute it. See [packaging instructions](../../docs/building.md#package).
 
 ## Runtime setup
 
@@ -74,11 +77,13 @@ directory, verifies the manifest, and rejects modified, incomplete, or additiona
 executable/runtime files. The location is relative to `sunshine.exe`, even when
 the host uses a configuration file in a different directory.
 
-HIDMaestro driver setup remains a separate administrator action performed through
-the pinned upstream runtime. The standard profile requires its UMDF2 driver. The
-composite profile requires usbip-win2 0.9.7.7. Follow
-[the pinned upstream setup documentation](https://github.com/hifihedgehog/HIDMaestro/tree/v1.6.2#quick-start)
-for that system change. Sunshine does not install a driver during controller attach.
+HIDMaestro driver setup runs only as an explicit administrator action, either through the optional
+installer component or `Sunshine.Ds5Sidecar.exe --install-drivers` in a complete verified component.
+The standard profile requires its UMDF2 driver; composite audio also requires usbip-win2 0.9.7.7.
+The install command must be used alone, requires the pinned runtime and a stopped Sunshine host,
+skips installed backends, and reports readiness or partial failure as JSON. It creates no test
+controller. The installer isolates the SDK's extraction cache in a fresh protected temporary
+directory. Sunshine never calls this mode during controller attach or readiness probes.
 
 Select `gamepad = ds5` to opt in. `ds5_audio_haptics = enabled` permits authored PCM
 when both the runtime and client support it. `gamepad = auto` retains the existing

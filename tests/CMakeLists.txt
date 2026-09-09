@@ -135,3 +135,23 @@ target_compile_options(ds5_component_unit_tests PRIVATE ${SUNSHINE_COMPILE_OPTIO
 set_target_properties(ds5_component_unit_tests PROPERTIES CXX_STANDARD 23 LINK_SEARCH_START_STATIC 1)
 add_test(NAME ds5_component_unit_tests COMMAND ds5_component_unit_tests)
 set_tests_properties(ds5_component_unit_tests PROPERTIES TIMEOUT 30)
+
+if(WIN32)
+    # Use the OS Windows PowerShell runtime: the packaged installer scripts target
+    # 5.1, and their isolated suites support the already available Pester 3/4.
+    find_program(WINDOWS_POWERSHELL_EXECUTABLE
+        NAMES powershell.exe
+        PATHS "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0"
+        NO_DEFAULT_PATH)
+    if(NOT WINDOWS_POWERSHELL_EXECUTABLE)
+        message(FATAL_ERROR "Windows PowerShell 5.1 is required for the driver installer tests.")
+    endif()
+    add_test(NAME driver_installer_unit_tests
+        COMMAND "${WINDOWS_POWERSHELL_EXECUTABLE}" -NoProfile -NonInteractive
+            -ExecutionPolicy Bypass
+            -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/run_driver_installer_tests.ps1")
+    set_tests_properties(driver_installer_unit_tests PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        TIMEOUT 120
+        LABELS "windows;installer;unit")
+endif()

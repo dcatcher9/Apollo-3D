@@ -25,7 +25,7 @@ location by modifying the configuration file.
 
 | Host    | Location                                        |
 |---------|-------------------------------------------------|
-| Windows | @code{}%ProgramFiles%\\Apollo\\config@endcode   |
+| Windows | @code{}%ProgramFiles%\\Sunshine3D\\config@endcode |
 
 Although the configuration UI is recommended, Sunshine 3D can also be configured manually by
 editing the `conf` file in a text editor. Use the examples as reference.
@@ -658,7 +658,7 @@ ds5_audio_haptics = enabled
             @tip{To find the Windows audio-device name, run:
             Enter the following command in command prompt or PowerShell.
             @code{}
-            %ProgramFiles%\Apollo\tools\audio-info.exe
+            %ProgramFiles%\Sunshine3D\tools\audio-info.exe
             @endcode
             If you have multiple audio devices with identical names, use the Device ID instead.
             }
@@ -744,7 +744,7 @@ microphone_sink = CABLE Input (VB-Audio Virtual Cable)
             @tip{To find the appropriate Windows value, follow these instructions.
             Enter the following command in command prompt or PowerShell.
             @code{}
-            %ProgramFiles%\Apollo\tools\dxgi-info.exe
+            %ProgramFiles%\Sunshine3D\tools\dxgi-info.exe
             @endcode
             For hybrid graphics systems, DXGI reports the outputs are connected to whichever graphics
             adapter that the application is configured to use, so it's not a reliable indicator of how the

@@ -4,6 +4,11 @@ using System.Text.Json;
 using HIDMaestro;
 using Sunshine.Ds5Sidecar;
 
+// Installation is an explicit, exclusive invocation. Check it before any
+// streaming/probe/test branch so combinations cannot silently select a mode.
+if (args.Contains("--install-drivers", StringComparer.Ordinal))
+    return DriverSetup.Run(args);
+
 var pipeName = "sunshine-ds5-v1";
 var probe = false;
 var probeHost = false;
@@ -43,6 +48,7 @@ if (selfCheck)
         audio_layout = true,
         channel_isolation = true,
         haptics_sample_timeline = true,
+        driver_setup_contract = true,
         protocol_abi = true,
         host_protocol = true,
         microphone_pcm_queue = true,

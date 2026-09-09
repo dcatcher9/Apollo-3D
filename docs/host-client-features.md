@@ -5,9 +5,37 @@ haptics on Windows. Both require a compatible client and a working host backend.
 encrypted Artemis streaming and SBS contracts remain in effect; adding these features does not
 broaden the host's supported client protocols.
 
+## Optional installer components
+
+Windows NSIS packages built with optional client-driver support offer two unchecked components:
+
+- **Microphone forwarding (VB-CABLE)** bundles the original VB-Audio Pack45 ZIP. Setup opens the
+  vendor installer; complete that dialog and reboot before using the cable. The component identifies
+  VB-Audio and its donationware model. Silent setup uses the pinned installer's verified install-only,
+  hidden mode; see the unattended command below.
+- **DualSense haptics (Internet required)** includes the self-contained Sunshine helper and downloads
+  the pinned HIDMaestro 1.6.2 runtime directly from its upstream release when selected. Both archive
+  and DLL hashes are checked before execution. Setup installs missing HIDMaestro/USB-IP backends,
+  verifies readiness, and activates the component only after success. It adds a local signing
+  certificate and USB devices may briefly reconnect. No .NET or Windows SDK installation is needed
+  on the end user's PC.
+
+The installed Sunshine service is stopped for driver setup; close any manually launched host first.
+For unattended setup, run `Sunshine3D.exe /S /CLIENTDRIVERS` from an elevated terminal. Select only
+one feature with `/MICROPHONE` or `/DUALSENSE`. Exit `0` means success, `3010` means success with a
+Windows restart required, and `1` means optional setup failed. No automatic reboot is requested.
+Setup failures are shown and logged in `<install directory>/config/driver-setup`; ordinary streaming
+remains available and setup can be rerun. A failed driver installation can leave partial system
+changes even when the previous helper remains active. The optional drivers are retained when
+Sunshine is uninstalled because other applications may use them. Host feature settings and paired
+client permissions are still configured below; installation does not grant microphone access.
+
+Build/package instructions are in [Building Sunshine 3D](building.md#package). These components do
+not supply missing client microphone capture or PCM rendering implementations.
+
 ## Microphone forwarding
 
-1. Install [VB-CABLE](https://vb-audio.com/Cable/) using the vendor's administrator instructions,
+1. Select the installer component above, or install [VB-CABLE](https://vb-audio.com/Cable/) using the vendor's administrator instructions,
    including its reboot requirement. The driver is a separate dependency.
 2. Run `tools\audio-info.exe` and find the cable's playback endpoint, usually
    `CABLE Input (VB-Audio Virtual Cable)`.
@@ -45,7 +73,8 @@ With Sunshine stopped, place the complete verified component at:
 <directory containing sunshine.exe>/tools/sunshine-ds5-component/active/
 ```
 
-Install the pinned HIDMaestro 1.6.2 runtime drivers using its administrator setup procedure.
+Select the optional installer component above, or install the pinned HIDMaestro 1.6.2 runtime
+drivers using its administrator setup procedure.
 The standard controller profile needs the UMDF2 backend; the composite audio profile also needs
 usbip-win2. The helper runs with the host's existing elevated token. Sunshine does not install or
 elevate drivers during a connection.

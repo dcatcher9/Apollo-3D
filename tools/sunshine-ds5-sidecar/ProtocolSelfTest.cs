@@ -423,6 +423,7 @@ internal static class ProtocolSelfTest
         VerifySensorTimestampEncoding();
         VerifyOutputValidityFlags();
         VerifyOutputValidityGating();
+        DriverSetupSelfTest.Run();
     }
 
     private static void VerifyHidMaestroMicrophoneContract()
