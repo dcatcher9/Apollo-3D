@@ -258,31 +258,40 @@ namespace {
     auto state = std::make_shared<sink_state_t>();
     std::string error;
     auto session = microphone::session_t::start(value, error, [state] {
-      return std::make_unique<test_sink_t>(state);
+      return std::make_unique<test_sink_t>(state, microphone::frame_samples);
     });
     ASSERT_TRUE(session) << error;
     ASSERT_TRUE(session->running());
     boost::asio::io_context io;
     boost::asio::ip::udp::socket sender(io, boost::asio::ip::udp::endpoint(boost::asio::ip::udp::v4(), 0));
     const boost::asio::ip::udp::endpoint receiver(boost::asio::ip::make_address("127.0.0.1"), session->bound_port());
+    const auto first_active_packet = packet(value, 1, opus_packet());
+    microphone::packet_decoder_t reference(value);
+    ASSERT_TRUE(reference.receive(ping(value), value.remote_address, 1234));
+    ASSERT_TRUE(reference.receive(first_active_packet, value.remote_address, 1234));
+    EXPECT_TRUE(reference.playout().empty());
+    EXPECT_TRUE(reference.playout().empty());
+    const auto expected_pcm = reference.playout();
+    ASSERT_EQ(expected_pcm.size(), microphone::frame_samples);
     sender.send_to(boost::asio::buffer(ping(value)), receiver);
     sender.send_to(boost::asio::buffer(packet(value, 0, opus_packet())), receiver);
     {
       std::unique_lock lock(state->mutex);
-      EXPECT_FALSE(state->ready.wait_for(lock, std::chrono::milliseconds(80), [&] {
+      // A dormant SETUP must not create playout debt that consumes the first
+      // newly captured packet when ANNOUNCE activates the receiver.
+      EXPECT_FALSE(state->ready.wait_for(lock, std::chrono::milliseconds(300), [&] {
         return !state->pcm.empty();
       }));
     }
     session->activate();
-    sender.send_to(boost::asio::buffer(packet(value, 1, opus_packet())), receiver);
+    sender.send_to(boost::asio::buffer(first_active_packet), receiver);
     {
       std::unique_lock lock(state->mutex);
       ASSERT_TRUE(state->ready.wait_for(lock, std::chrono::seconds(2), [&] {
         return state->pcm.size() >= microphone::frame_samples;
       }));
-      EXPECT_TRUE(std::any_of(state->pcm.begin(), state->pcm.end(), [](auto sample) {
-        return sample != 0;
-      }));
+      // Nonzero PLC alone does not prove the newly captured packet survived.
+      EXPECT_TRUE(std::equal(expected_pcm.begin(), expected_pcm.end(), state->pcm.begin()));
     }
     std::thread stop_one([&] {
       session->stop();

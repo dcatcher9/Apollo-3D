@@ -277,7 +277,8 @@ namespace microphone {
         std::array<std::uint8_t, max_datagram_size + 1> buffer;
         std::vector<std::int16_t> pending_pcm;
         pending_pcm.reserve(max_pcm_samples);
-        auto next_playout = clock_t::now() + std::chrono::milliseconds(20);
+        clock_t::time_point next_playout;
+        bool playout_started = false;
         while (!stopping.load()) {
           // A flooded socket cannot starve playout, device loss, or teardown.
           for (unsigned count = 0; count < 32 && !stopping.load(); ++count) {
@@ -298,7 +299,14 @@ namespace microphone {
             }
           }
           const auto now = clock_t::now();
-          if (activated.load() && now >= next_playout) {
+          const bool play_audio = activated.load();
+          if (play_audio && !playout_started) {
+            // SETUP may remain dormant before ANNOUNCE. Start the audio clock
+            // here so dormant time cannot discard newly accepted microphone data.
+            next_playout = now + std::chrono::milliseconds(20);
+            playout_started = true;
+          }
+          if (play_audio && now >= next_playout) {
             // Catch up by dropping skipped slots; never burst delayed speech.
             if (now - next_playout >= std::chrono::milliseconds(40)) {
               pending_pcm.clear();
