@@ -135,7 +135,6 @@ namespace config {
     true,  // enable_pairing
     true,  // enable_discovery
     default_virtual_display_restart_explorer,  // virtual_display_restart_explorer
-    default_virtual_display_only,  // virtual_display_only
     "en",  // locale
     2,  // min_log_level
     false,  // diagnostics_enabled
@@ -751,7 +750,6 @@ namespace config {
       "virtual_display_restart_explorer",
       sunshine.virtual_display_restart_explorer
     );
-    bool_f(vars, "virtual_display_only", sunshine.virtual_display_only);
     bool_f(vars, "forward_rumble", input.forward_rumble);
 
     int port = sunshine.port;

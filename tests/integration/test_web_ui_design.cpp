@@ -370,31 +370,6 @@ TEST(WebUiDesign, TaskbarRepairUiMatchesItsOptInNativeDefault) {
   EXPECT_LT(default_off, default_end);
 }
 
-TEST(WebUiDesign, VirtualDisplayOnlyIsOptInAndExplainsItsDesktopEffect) {
-  EXPECT_FALSE(config::default_virtual_display_only);
-  const auto schema = read_source(web_root / "config.html");
-  EXPECT_NE(schema.find("\"virtual_display_only\": \"off\""), std::string::npos);
-
-  const auto essentials = read_source(web_root / "configs/tabs/Essentials.vue");
-  const auto virtual_display = essentials.find("<h2>Virtual display</h2>");
-  ASSERT_NE(virtual_display, std::string::npos);
-  const auto section_end = essentials.find("</section>", virtual_display);
-  ASSERT_NE(section_end, std::string::npos);
-  const auto section = essentials.substr(virtual_display, section_end - virtual_display);
-  EXPECT_NE(section.find("isEnabled('virtual_display_only')"), std::string::npos);
-  EXPECT_NE(section.find("setOnOff('virtual_display_only', $event)"), std::string::npos);
-  EXPECT_NE(section.find("config.virtual_display_only_desc"), std::string::npos);
-
-  const auto locale = read_source(web_root / "public/assets/locale/en.json");
-  const auto description = locale.find("\"virtual_display_only_desc\"");
-  ASSERT_NE(description, std::string::npos);
-  const auto text = locale.substr(description, locale.find('\n', description) - description);
-  EXPECT_NE(text.find("Off by default."), std::string::npos);
-  EXPECT_NE(text.find("physical screens go blank"), std::string::npos);
-  EXPECT_NE(text.find("windows may move or minimize"), std::string::npos);
-  EXPECT_NE(text.find("restores the displays on disconnect"), std::string::npos);
-}
-
 TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
   const auto page = read_source(web_root / "offline-conversion.html");
   const auto api = read_source(web_root / "offline-sbs-api.js");

@@ -6,10 +6,11 @@ not a separate Windows login or an isolated Windows session.
 
 ## Opening applications normally
 
-By default, while a virtual-display stream is active, Sunshine 3D temporarily makes that monitor the
-Windows primary display. Use Windows Start, Search, the taskbar, desktop shortcuts, Explorer, or
-Run normally. Both the mouse/keyboard connected directly to the PC and client input use the same
-Windows launch behavior. There is no custom launcher or background window-routing helper.
+When **Use virtual display only while streaming** is disabled in Moonlight 3D, Sunshine 3D
+temporarily makes the virtual monitor the Windows primary display. Use Windows Start, Search, the
+taskbar, desktop shortcuts, Explorer, or Run normally. Both the mouse/keyboard connected directly
+to the PC and client input use the same Windows launch behavior. There is no custom launcher or
+background window-routing helper.
 
 Applications that default to the primary monitor now open on the virtual display. This changes
 the default for the whole Windows desktop: a launch initiated from a physical monitor may also
@@ -32,13 +33,10 @@ Primary-monitor placement is a default, not a guarantee for every application:
 ## Using only the virtual display
 
 For applications that keep opening on a physical monitor, enable **Use virtual display only while
-streaming** in the host Web UI under **Essentials → Virtual display**, or set
-`virtual_display_only = on`. The default is `off`, so existing configurations keep physical displays
-enabled.
-
-The host captures this choice when a new application session starts. A reconnect keeps the retained
-session's choice even if the host setting changes; stop that session and launch a new one to switch
-between display modes.
+streaming** in Moonlight 3D's **Global Settings → Streaming defaults**. Supporting clients enable
+it by default.
+The client sends its current choice for every launch and resume, so applying changed settings and
+reconnecting also changes the retained session's display mode.
 
 With this option on, Sunshine 3D temporarily disables every other active display during a
 virtual-display stream. Physical screens go blank and the virtual monitor becomes the only active
@@ -82,10 +80,9 @@ per second without extending that deadline. A new accepted launch or active sess
 retries. Changed physical display arrangements can prevent exact restoration until the saved
 arrangement is available again. Windows can also move windows when their monitor is removed.
 
-Virtual-display-only mode still needs live Galaxy XR verification with applications that remember
-a monitor, existing windows, reconnects, and physical display recovery after a host crash. Automated
-lifecycle and geometry tests do not establish every application's placement behavior or replace a
-real multi-monitor test.
+The ordinary virtual-display-only stream and disconnect path has been verified on Galaxy XR.
+Recovery after a hard host crash still requires a live multi-monitor test; automated lifecycle and
+geometry tests cannot establish that Windows and every display driver recover identically.
 
 ## Keeping the remote cursor visible
 
@@ -108,9 +105,15 @@ there is no host configuration toggle.
 
 ## Client protocol
 
-Authenticated host `/serverinfo` advertises `CursorConfinementSupported=1`. A client must check
-this specific capability before presenting confinement as supported; the host-session-token or
-Host SBS capabilities alone do not imply it.
+An authenticated Windows host `/serverinfo` advertises `VirtualDisplayOnlySupported=1`. Supporting
+clients send the exact query value `virtualDisplayOnly=1` (enabled) or `virtualDisplayOnly=0`
+(disabled) on both `/launch` and `/resume`. The host defaults to disabled when an older client omits
+the parameter. Each accepted resume applies the authenticated client's new choice to that retained
+session; a failed reconfiguration keeps the last accepted choice.
+
+Authenticated host `/serverinfo` also advertises `CursorConfinementSupported=1`. A client must
+check this specific capability before presenting confinement as supported; the host-session-token
+or Host SBS capabilities alone do not imply it.
 
 Supporting clients send the exact query value `confineCursor=1` (enabled) or `confineCursor=0`
 (disabled) on both `/launch` and `/resume`. The host defaults to enabled when an older client

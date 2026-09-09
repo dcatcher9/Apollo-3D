@@ -50,6 +50,7 @@ namespace nvhttp {
 
   struct launch_display_options_t {
     bool virtual_display = false;
+    bool virtual_display_only = false;
     std::uint32_t scale_factor = 100;
     int sbs_mode = 0;
     bool confine_cursor = true;
@@ -64,7 +65,8 @@ namespace nvhttp {
     std::optional<std::string_view> virtual_display,
     std::optional<std::string_view> scale_factor,
     std::optional<std::string_view> sbs_mode,
-    std::optional<std::string_view> confine_cursor = std::nullopt
+    std::optional<std::string_view> confine_cursor = std::nullopt,
+    std::optional<std::string_view> virtual_display_only = std::nullopt
   );
   std::optional<crypto::aes_t> parse_remote_input_key(std::string_view key);
   std::optional<std::uint32_t> parse_remote_input_key_id(std::string_view key_id);

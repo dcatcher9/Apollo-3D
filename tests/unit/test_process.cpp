@@ -28,16 +28,15 @@ namespace proc {
       process._host_session_id = 1234;
       process._launch_session = launch;
       process._active_launch_session_id = launch->id;
+#ifdef _WIN32
+      process._virtual_display_only = launch->virtual_display_only;
+#endif
     }
 #ifdef _WIN32
     static void mark_virtual(proc_t &process, bool enabled) {
       process._virtual_display = enabled;
       process._virtual_display_gdi_name = enabled ? L"test-only-display" : L"";
       process._virtual_display_device_path = enabled ? L"test-only-monitor-path" : L"";
-    }
-
-    static void set_virtual_display_only(proc_t &process, bool enabled) {
-      process._virtual_display_only = enabled;
     }
 
     static bool virtual_display_only(const proc_t &process) {
@@ -99,11 +98,9 @@ TEST(ProcessTest, ResumePublishesNewLiveTransportWithoutChangingRetainedToken) {
 }
 
 #ifdef _WIN32
-TEST(ProcessTest, RetainedDisplayPolicySurvivesConfigChangesUntilTermination) {
-  const bool saved_policy = config::sunshine.virtual_display_only;
+TEST(ProcessTest, RetainedDisplayPolicyFollowsEachAcceptedClientResume) {
   const auto saved_output = config::video.output_name;
   auto restore_config = util::fail_guard([&]() {
-    config::sunshine.virtual_display_only = saved_policy;
     config::video.output_name = saved_output;
   });
 
@@ -115,28 +112,40 @@ TEST(ProcessTest, RetainedDisplayPolicySurvivesConfigChangesUntilTermination) {
     original->width = 1920;
     original->height = 1080;
     original->fps = 60000;
+    original->virtual_display_only = captured_policy;
     proc::process_test_access::retain(process, original);
     auto cleanup = util::fail_guard([&]() { proc::process_test_access::clear(process); });
 
-    // Inject only the already-captured policy. This fixture owns no display, so successful
-    // retained reconfiguration and teardown exercise state lifetime without any CCD call.
-    proc::process_test_access::set_virtual_display_only(process, captured_policy);
-    config::sunshine.virtual_display_only = !captured_policy;
+    // This fixture owns no display, so successful retained reconfiguration and teardown exercise
+    // client policy lifetime without any CCD call.
     auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
     resumed->id = 22;
     resumed->width = 1920;
     resumed->height = 1080;
     resumed->fps = 60000;
     resumed->scale_factor = 100;
+    resumed->virtual_display_only = !captured_policy;
     ASSERT_EQ(process.reconfigure_retained_session(resumed), 0);
-    EXPECT_EQ(proc::process_test_access::virtual_display_only(process), captured_policy);
+    EXPECT_EQ(proc::process_test_access::virtual_display_only(process), !captured_policy);
+
+    auto rejected = std::make_shared<rtsp_stream::launch_session_t>();
+    rejected->id = 23;
+    rejected->width = 1920;
+    rejected->height = 1080;
+    rejected->fps = 60000;
+    rejected->scale_factor = 100;
+    rejected->virtual_display = true;
+    rejected->virtual_display_only = captured_policy;
+    EXPECT_EQ(process.reconfigure_retained_session(rejected), 409);
+    EXPECT_EQ(proc::process_test_access::virtual_display_only(process), !captured_policy);
 
     auto invalid = std::make_shared<rtsp_stream::launch_session_t>();
     invalid->width = 1;
     invalid->height = 1;
     invalid->scale_factor = 20;
+    invalid->virtual_display_only = captured_policy;
     EXPECT_EQ(process.reconfigure_retained_session(invalid), 400);
-    EXPECT_EQ(proc::process_test_access::virtual_display_only(process), captured_policy);
+    EXPECT_EQ(proc::process_test_access::virtual_display_only(process), !captured_policy);
 
     process.terminate(false, false);
     EXPECT_FALSE(proc::process_test_access::virtual_display_only(process));
@@ -144,20 +153,17 @@ TEST(ProcessTest, RetainedDisplayPolicySurvivesConfigChangesUntilTermination) {
   }
 }
 
-TEST(ProcessTest, RejectedNewLaunchClearsPreviousPolicyWithoutCapturingCurrentConfig) {
-  const bool saved_policy = config::sunshine.virtual_display_only;
+TEST(ProcessTest, RejectedNewLaunchClearsPreviousClientDisplayPolicy) {
   const auto saved_output = config::video.output_name;
   auto restore_config = util::fail_guard([&]() {
-    config::sunshine.virtual_display_only = saved_policy;
     config::video.output_name = saved_output;
   });
-  config::sunshine.virtual_display_only = true;
 
   proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
   auto previous = std::make_shared<rtsp_stream::launch_session_t>();
   previous->id = 11;
+  previous->virtual_display_only = true;
   proc::process_test_access::retain(process, previous);
-  proc::process_test_access::set_virtual_display_only(process, true);
   auto cleanup = util::fail_guard([&]() { proc::process_test_access::clear(process); });
 
   proc::ctx_t app {};
@@ -167,6 +173,7 @@ TEST(ProcessTest, RejectedNewLaunchClearsPreviousPolicyWithoutCapturingCurrentCo
   invalid->width = 1;
   invalid->height = 1;
   invalid->scale_factor = 20;
+  invalid->virtual_display_only = true;
   EXPECT_EQ(process.execute(app, invalid, false), 400);
   EXPECT_FALSE(proc::process_test_access::virtual_display_only(process));
   EXPECT_EQ(process.get_host_session_id(), 0U);

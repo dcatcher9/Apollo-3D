@@ -40,14 +40,6 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr><td>Range</td><td><code>0.25</code>-<code>2.00</code></td></tr>
 </table>
 
-### virtual_display_only
-
-<table>
-    <tr><td>Description</td><td>On Windows, temporarily use only the streaming virtual display. Other displays are disabled and physical screens go blank. Existing application windows may move or minimize. Sunshine 3D restores the displays on disconnect, but it cannot guarantee application window positions. When off, physical displays remain enabled and the virtual display temporarily becomes primary. Applies only to virtual-display streams; see <a href="virtual-desktop.md">Virtual desktop interaction</a>.</td></tr>
-    <tr><td>Default</td><td><code>off</code></td></tr>
-    <tr><td>Choices</td><td><code>on</code>, <code>off</code></td></tr>
-</table>
-
 ## General
 
 ### locale

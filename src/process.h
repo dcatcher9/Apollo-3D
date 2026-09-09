@@ -282,7 +282,7 @@ namespace proc {
     std::wstring _virtual_display_gdi_name;
     bool _virtual_display_published = false;
     bool _virtual_display_retirement_handed_off = false;
-    // Capture the host policy once per retained application, including all reconnects.
+    // Client-owned policy for the active launch or resume.
     bool _virtual_display_only = false;
     std::optional<std::uint64_t> _remote_virtual_display_lease;
     VDISPLAY::creation_result_t create_retained_virtual_display(

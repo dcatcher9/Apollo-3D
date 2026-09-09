@@ -1015,7 +1015,7 @@ namespace proc {
     _launch_session = launch_session;
     _active_launch_session_id = launch_session->id;
 #ifdef _WIN32
-    _virtual_display_only = config::sunshine.virtual_display_only;
+    _virtual_display_only = launch_session->virtual_display_only;
 #endif
 
     launch_session->width = render_width;
@@ -1415,6 +1415,16 @@ namespace proc {
       return 400;
     }
 
+#ifdef _WIN32
+    const bool previous_virtual_display_only = _virtual_display_only;
+    _virtual_display_only = launch_session->virtual_display_only;
+    auto virtual_display_policy_rollback = util::fail_guard([&]() {
+      if (_app_id > 0 && _launch_session) {
+        _virtual_display_only = previous_virtual_display_only;
+      }
+    });
+#endif
+
     // A retained physical-desktop process cannot be converted into a virtual-display process
     // without changing desktop ownership. A process whose virtual display was forced because no
     // physical output existed remains virtual even if the client again sends virtualDisplay=0.
@@ -1684,9 +1694,13 @@ namespace proc {
     _launch_session->height = launch_session->height;
     _launch_session->fps = launch_session->fps;
     _launch_session->enable_hdr = launch_session->enable_hdr;
+    _launch_session->virtual_display_only = launch_session->virtual_display_only;
     _launch_session->scale_factor = launch_session->scale_factor;
     _launch_session->sbs_mode = launch_session->sbs_mode;
     _active_launch_session_id = launch_session->id;
+#ifdef _WIN32
+    virtual_display_policy_rollback.disable();
+#endif
     primary_rollback.disable();
     return 0;
   }
