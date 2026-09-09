@@ -979,7 +979,7 @@
 
   /**
    * Permissions:
-   * 0x00001F00 - controller, touch, pen, mouse, and keyboard input
+   * 0x00003F00 - controller, touch, pen, mouse, keyboard, and microphone input
    * 0x00030000 - clipboard operations
    * 0x07000000 - list, view, and launch actions
    */
@@ -989,7 +989,8 @@
     input_pen: 0x00000400,
     input_mouse: 0x00000800,
     input_kbd: 0x00001000,
-    _all_inputs: 0x00001F00,
+    input_microphone: 0x00002000,
+    _all_inputs: 0x00003F00,
 
     clipboard_set: 0x00010000,
     clipboard_read: 0x00020000,
@@ -1004,7 +1005,7 @@
 
     _default: 0x03000000,
     _no: 0x00000000,
-    _all: 0x07031F00
+    _all: 0x07033F00
   };
 
   const permissionGroups = [
@@ -1022,7 +1023,8 @@
       { name: 'input_touch', suppressed_by: [] },
       { name: 'input_pen', suppressed_by: [] },
       { name: 'input_mouse', suppressed_by: [] },
-      { name: 'input_kbd', suppressed_by: [] }
+      { name: 'input_kbd', suppressed_by: [] },
+      { name: 'input_microphone', suppressed_by: [] }
     ] }
   ];
 

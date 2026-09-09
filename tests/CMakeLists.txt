@@ -37,6 +37,13 @@ file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS
         ${CMAKE_SOURCE_DIR}/tests/*.h
         ${CMAKE_SOURCE_DIR}/tests/*.cpp)
 
+# The IPC fixtures have their own entry points and do not link the full host.
+list(REMOVE_ITEM TEST_SOURCES
+    "${CMAKE_SOURCE_DIR}/tests/tools/ds5_fake_sidecar.cpp"
+    "${CMAKE_SOURCE_DIR}/tests/tools/ds5_sidecar_test_stubs.cpp"
+    "${CMAKE_SOURCE_DIR}/tests/unit/platform/windows/test_ds5_sidecar_client.cpp"
+    "${CMAKE_SOURCE_DIR}/tests/unit/platform/windows/test_ds5_component.cpp")
+
 set(SUNSHINE_SOURCES
         ${SUNSHINE_TARGET_FILES})
 
@@ -97,3 +104,34 @@ target_link_options(${PROJECT_NAME} PRIVATE)
 # Prefer static libraries since we're linking statically. This fixes libcurl linking errors when
 # using a non-MSYS2 CMake executable.
 set_target_properties(${PROJECT_NAME} PROPERTIES LINK_SEARCH_START_STATIC 1)
+
+# The protocol peer is restricted to the standalone pipe lifecycle tests. The
+# shipping host and full host test executable retain production verification.
+add_executable(ds5_fake_sidecar ${CMAKE_SOURCE_DIR}/tests/tools/ds5_fake_sidecar.cpp)
+set_target_properties(ds5_fake_sidecar PROPERTIES CXX_STANDARD 23 LINK_SEARCH_START_STATIC 1)
+add_executable(ds5_sidecar_client_unit_tests
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/windows/test_ds5_sidecar_client.cpp
+    ${CMAKE_SOURCE_DIR}/tests/tools/ds5_sidecar_test_stubs.cpp
+    ${CMAKE_SOURCE_DIR}/src/platform/windows/ds5/ds5_sidecar_client.cpp)
+target_include_directories(ds5_sidecar_client_unit_tests PRIVATE "${CMAKE_SOURCE_DIR}")
+target_link_libraries(ds5_sidecar_client_unit_tests PRIVATE Boost::log Boost::format Boost::property_tree gtest_main)
+target_compile_definitions(ds5_sidecar_client_unit_tests PRIVATE
+    SUNSHINE_DS5_FAKE_SIDECAR_PATH="$<TARGET_FILE:ds5_fake_sidecar>"
+    SUNSHINE_DS5_SIDECAR_TEST_HOOK)
+target_compile_options(ds5_sidecar_client_unit_tests PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
+set_target_properties(ds5_sidecar_client_unit_tests PROPERTIES CXX_STANDARD 23 LINK_SEARCH_START_STATIC 1)
+add_dependencies(ds5_sidecar_client_unit_tests ds5_fake_sidecar)
+add_test(NAME ds5_sidecar_client_unit_tests COMMAND ds5_sidecar_client_unit_tests)
+set_tests_properties(ds5_sidecar_client_unit_tests PROPERTIES TIMEOUT 60)
+
+add_executable(ds5_component_unit_tests
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/windows/test_ds5_component.cpp
+    ${CMAKE_SOURCE_DIR}/tests/tools/ds5_sidecar_test_stubs.cpp
+    ${CMAKE_SOURCE_DIR}/src/platform/windows/ds5/ds5_sidecar_client.cpp)
+target_include_directories(ds5_component_unit_tests PRIVATE "${CMAKE_SOURCE_DIR}")
+target_link_libraries(ds5_component_unit_tests PRIVATE Boost::log Boost::format Boost::property_tree OpenSSL::Crypto gtest_main)
+target_compile_definitions(ds5_component_unit_tests PRIVATE SUNSHINE_DS5_COMPONENT_TEST)
+target_compile_options(ds5_component_unit_tests PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
+set_target_properties(ds5_component_unit_tests PROPERTIES CXX_STANDARD 23 LINK_SEARCH_START_STATIC 1)
+add_test(NAME ds5_component_unit_tests COMMAND ds5_component_unit_tests)
+set_tests_properties(ds5_component_unit_tests PROPERTIES TIMEOUT 30)

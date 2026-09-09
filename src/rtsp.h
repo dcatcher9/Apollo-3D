@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -17,6 +18,7 @@
 // local includes
 #include "crypto.h"
 #include "gpu_workload_arbiter.h"
+#include "microphone.h"
 #include "thread_safe.h"
 
 #ifdef _WIN32
@@ -106,6 +108,25 @@ namespace rtsp_stream {
     uint32_t scale_factor;
     int sbs_mode = 0;
 
+    // SETUP owns the dormant receiver until a validated ANNOUNCE transfers it.
+    // Revocation closes it even when a copied RTSP socket retains this launch.
+    std::mutex microphone_mutex;
+    std::shared_ptr<microphone::session_t> microphone_receiver;
+    bool microphone_advertised = false;
+
+    void close_microphone() {
+      std::lock_guard lock(microphone_mutex);
+      if (microphone_receiver) {
+        microphone_receiver->stop();
+        microphone_receiver.reset();
+      }
+    }
+
+    std::shared_ptr<microphone::session_t> take_microphone() {
+      std::lock_guard lock(microphone_mutex);
+      return std::exchange(microphone_receiver, nullptr);
+    }
+
     // An accepted socket retains this shared object even after the pending queue is cleared.
     // Keeping revocation here makes teardown visible to every retained copy.
     std::atomic<launch_reservation_state_e> reservation_state {
@@ -124,16 +145,21 @@ namespace rtsp_stream {
 
     void revoke_reservation() {
       reservation_state.store(launch_reservation_state_e::revoked, std::memory_order_release);
+      close_microphone();
     }
 
     [[nodiscard]] bool revoke_pending_reservation() {
       auto expected = launch_reservation_state_e::pending;
-      return reservation_state.compare_exchange_strong(
+      const bool revoked = reservation_state.compare_exchange_strong(
         expected,
         launch_reservation_state_e::revoked,
         std::memory_order_acq_rel,
         std::memory_order_acquire
       );
+      if (revoked) {
+        close_microphone();
+      }
+      return revoked;
     }
 
     [[nodiscard]] launch_reservation_state_e reservation() const {

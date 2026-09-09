@@ -26,6 +26,7 @@ extern "C" {
 #include <boost/bind.hpp>
 
 // local includes
+#include "client_features.h"
 #include "config.h"
 #include "globals.h"
 #include "gpu_workload_arbiter.h"
@@ -85,7 +86,7 @@ namespace rtsp_stream {
           valid = *parsed == 0 || *parsed == 5;
           break;
         case announce_int_field::encryption_flags:
-          valid = in_range(0, SS_ENC_VIDEO | SS_ENC_AUDIO | SS_ENC_CONTROL_V2);
+          valid = in_range(0, SS_ENC_VIDEO | SS_ENC_AUDIO | SS_ENC_CONTROL_V2 | client_features::encryption_microphone);
           break;
         case announce_int_field::viewport_dimension:
           valid = in_range(1, 16384);
@@ -1171,8 +1172,20 @@ namespace rtsp_stream {
     ss << "a=x-ss-general.featureFlags:" << (uint32_t) platf::get_capabilities() << std::endl;
 
     // Modern Artemis encrypts control, audio, and video. Apollo has no plaintext media mode.
-    constexpr uint32_t encryption_flags_supported = SS_ENC_CONTROL_V2 | SS_ENC_AUDIO | SS_ENC_VIDEO;
-    constexpr uint32_t encryption_flags_requested = encryption_flags_supported;
+    uint32_t encryption_flags_supported = SS_ENC_CONTROL_V2 | SS_ENC_AUDIO | SS_ENC_VIDEO;
+    {
+      std::lock_guard lock(session.microphone_mutex);
+      std::string error;
+      session.microphone_advertised =
+        config::audio.microphone_enabled && !!(session.perm & crypto::PERM::input_microphone) &&
+        microphone::sink_available(config::audio.microphone_sink, error);
+      if (session.microphone_advertised) {
+        encryption_flags_supported |= client_features::encryption_microphone;
+      } else if (config::audio.microphone_enabled && !error.empty()) {
+        BOOST_LOG(warning) << "Client microphone unavailable: " << error;
+      }
+    }
+    const uint32_t encryption_flags_requested = encryption_flags_supported;
 
     // Report supported and required encryption flags
     ss << "a=x-ss-general.encryptionSupported:" << encryption_flags_supported << std::endl;
@@ -1256,6 +1269,40 @@ namespace rtsp_stream {
       port = net::map_port(stream::VIDEO_STREAM_PORT);
     } else if (type == "control"sv) {
       port = net::map_port(stream::CONTROL_PORT);
+    } else if (type == "mic"sv) {
+      std::lock_guard lock(session.microphone_mutex);
+      if (!config::audio.microphone_enabled || !session.microphone_advertised || !(session.perm & crypto::PERM::input_microphone) || session.reservation() != launch_reservation_state_e::pending) {
+        cmd_not_found(sock, session, std::move(req));
+        return;
+      }
+      if (!session.microphone_receiver) {
+        const auto bind_address = net::get_bind_address(net::af_from_enum_string(config::sunshine.address_family));
+        boost::system::error_code ec;
+        const auto remote = sock.remote_endpoint(ec);
+        if (!bind_address || ec || session.av_ping_payload.size() != 16 || session.gcm_key.size() != 16 || session.iv.size() < 4) {
+          respond(sock, session, nullptr, 503, "Microphone Unavailable", req->sequenceNumber, {});
+          return;
+        }
+        microphone::options_t options;
+        options.bind_address = *bind_address;
+        options.remote_address = remote.address().to_string();
+        options.sink_endpoint = config::audio.microphone_sink;
+        options.port = net::map_port(stream::MICROPHONE_STREAM_PORT);
+        options.encrypted = true;
+        std::copy_n(session.av_ping_payload.begin(), 16, options.ping_payload.begin());
+        std::copy_n(session.gcm_key.begin(), 16, options.aes_key.begin());
+        for (unsigned i = 0; i < 4; ++i) {
+          options.key_id = (options.key_id << 8) | static_cast<std::uint8_t>(session.iv[i]);
+        }
+        std::string error;
+        session.microphone_receiver = microphone::session_t::start(options, error);
+        if (!session.microphone_receiver) {
+          BOOST_LOG(warning) << "Client microphone setup failed: " << error;
+          respond(sock, session, nullptr, 503, "Microphone Unavailable", req->sequenceNumber, {});
+          return;
+        }
+      }
+      port = session.microphone_receiver->bound_port();
     } else {
       cmd_not_found(sock, session, std::move(req));
 
@@ -1352,6 +1399,12 @@ namespace rtsp_stream {
         (client_features & stream::CLIENT_FEATURE_ATOMIC_PRESENTATION_V2) != 0;
       config.client_supports_source_frame_id_v1 =
         (client_features & stream::CLIENT_FEATURE_SOURCE_FRAME_ID_V1) != 0;
+      if ((client_features & ::client_features::client_authored_pcm) && (client_features & ::client_features::client_authored_ir_v2)) {
+        throw std::invalid_argument("Only one authored haptics format can be selected");
+      }
+      config.client_supports_authored_pcm =
+        (client_features & ::client_features::client_authored_pcm) != 0 &&
+        (platf::get_capabilities() & platf::platform_caps::ds5_haptics_pcm) != 0;
       config.audioQosType = required_int(detail::announce_int_field::audio_qos, "x-nv-aqos.qosTrafficType"sv);
       config.videoQosType = required_int(detail::announce_int_field::video_qos, "x-nv-vqos[0].qosTrafficType"sv);
       const auto encryption_flags = required_int(
@@ -1361,6 +1414,12 @@ namespace rtsp_stream {
       constexpr auto required_encryption = SS_ENC_CONTROL_V2 | SS_ENC_VIDEO | SS_ENC_AUDIO;
       if ((encryption_flags & required_encryption) != required_encryption) {
         throw std::invalid_argument("x-ss-general.encryptionEnabled requires CONTROL_V2, VIDEO, and AUDIO");
+      }
+      {
+        std::lock_guard lock(session.microphone_mutex);
+        if (session.microphone_receiver && (!(encryption_flags & ::client_features::encryption_microphone) || !session.microphone_receiver->running())) {
+          throw std::invalid_argument("Requested microphone requires a ready receiver and microphone encryption");
+        }
       }
 
       config.monitor.height = required_int(detail::announce_int_field::viewport_dimension, "x-nv-video[0].clientViewportHt"sv);

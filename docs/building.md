@@ -12,6 +12,11 @@ targets. Historical platform source remains only for upstream comparison.
 - Official Windows Node.js LTS for the Vue/Vite Web UI
 - A recursive checkout, including `third-party` submodules
 
+The optional virtual DualSense backend has a separate .NET 10 helper build and
+pinned HIDMaestro runtime. Follow the [helper build and runtime setup](../tools/sunshine-ds5-sidecar/README.md)
+to build its local component and inspect driver readiness. The native host builds
+without that component, and ordinary controller support does not require .NET.
+
 Set `TENSORRT_DIR` to the extracted directory containing `include/NvInfer.h` and the TensorRT
 libraries. A CUDA Toolkit is **not** required: the runtime uses the NVIDIA driver API, while CMake
 links the packaged TensorRT libraries and copies their DLLs beside the build output.

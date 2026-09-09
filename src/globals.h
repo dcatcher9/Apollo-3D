@@ -47,6 +47,7 @@ namespace mail {
   MAIL(idr);
   MAIL(invalidate_ref_frames);
   MAIL(gamepad_feedback);
+  MAIL(ds5_haptics_feedback);
   MAIL(hdr);
   MAIL(sbs_depth_status);
   MAIL(sbs_telemetry);

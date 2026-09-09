@@ -50,7 +50,8 @@ namespace crypto {
     input_pen = _input << 2,  // Allow pen input
     input_mouse = _input << 3,  // Allow mouse input
     input_kbd = _input << 4,  // Allow keyboard input
-    _all_inputs = input_controller | input_touch | input_pen | input_mouse | input_kbd,
+    input_microphone = _input << 5,  // Allow client microphone audio into the host
+    _all_inputs = input_controller | input_touch | input_pen | input_mouse | input_kbd | input_microphone,
 
     _operation = _input << 8,  // Operation permission group
     clipboard_set = _operation << 0,  // Allow set clipboard from client

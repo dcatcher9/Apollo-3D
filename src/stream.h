@@ -38,6 +38,7 @@ namespace stream {
   constexpr auto VIDEO_STREAM_PORT = 9;
   constexpr auto CONTROL_PORT = 10;
   constexpr auto AUDIO_STREAM_PORT = 11;
+  constexpr auto MICROPHONE_STREAM_PORT = 12;
 
   // The upper bound keeps a maximum-size encrypted IPv4 UDP datagram legal:
   // 65507 bytes - 16 bytes maximum RTP header - 32 bytes encryption prefix.
@@ -628,6 +629,7 @@ namespace stream {
     bool client_supports_sbs_telemetry = false;
     bool client_supports_atomic_presentation_v2 = false;
     bool client_supports_source_frame_id_v1 = false;
+    bool client_supports_authored_pcm = false;
   };
 
   namespace session {

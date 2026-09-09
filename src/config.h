@@ -65,6 +65,8 @@ namespace config {
   struct audio_t {
     std::string sink;
     std::string virtual_sink;
+    bool microphone_enabled = false;
+    std::string microphone_sink;
   };
 
   struct stream_t {
@@ -113,6 +115,9 @@ namespace config {
     bool native_pen_touch;
 
     bool forward_rumble;
+    // Derived from the explicit gamepad selection; auto keeps the ViGEm path.
+    bool ds5_enabled = false;
+    bool ds5_audio_haptics = true;
   };
 
   namespace flag {

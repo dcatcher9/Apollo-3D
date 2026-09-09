@@ -663,6 +663,8 @@ namespace config {
 
     string_f(vars, "audio_sink", audio.sink);
     string_f(vars, "virtual_sink", audio.virtual_sink);
+    bool_f(vars, "microphone_enabled", audio.microphone_enabled);
+    string_f(vars, "microphone_sink", audio.microphone_sink);
 
     string_restricted_f(vars, "origin_web_ui_allowed", nvhttp.origin_web_ui_allowed, {"pc"sv, "lan"sv, "wan"sv});
 
@@ -729,6 +731,8 @@ namespace config {
     }
 
     string_restricted_f(vars, "gamepad"s, input.gamepad, get_supported_gamepad_options());
+    input.ds5_enabled = input.gamepad == "ds5";
+    bool_f(vars, "ds5_audio_haptics", input.ds5_audio_haptics);
     bool_f(vars, "ds4_back_as_touchpad_click", input.ds4_back_as_touchpad_click);
     bool_f(vars, "motion_as_ds4", input.motion_as_ds4);
     bool_f(vars, "touchpad_as_ds4", input.touchpad_as_ds4);

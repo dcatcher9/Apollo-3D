@@ -5,6 +5,7 @@
 #pragma once
 
 // standard includes
+#include <array>
 #include <bitset>
 #include <chrono>
 #include <filesystem>
@@ -71,6 +72,7 @@ namespace nvenc {
 namespace platf {
   // Limited by bits in activeGamepadMask
   constexpr auto MAX_GAMEPADS = 16;
+  constexpr std::uint16_t DS5_HAPTICS_PCM_CAPABILITY = 0x200;
 
   constexpr std::uint32_t DPAD_UP = 0x0001;
   constexpr std::uint32_t DPAD_DOWN = 0x0002;
@@ -106,6 +108,7 @@ namespace platf {
     set_motion_event_state,  ///< Set motion event state
     set_rgb_led,  ///< Set RGB LED
     set_adaptive_triggers,  ///< Set adaptive triggers
+    ds5_haptics_pcm,  ///< Game-authored stereo actuator PCM
   };
 
   struct gamepad_feedback_msg_t {
@@ -150,6 +153,32 @@ namespace platf {
       return msg;
     }
 
+    static gamepad_feedback_msg_t make_ds5_haptics_pcm(
+      std::uint16_t id,
+      std::uint8_t flags,
+      std::uint16_t frame_count,
+      std::uint32_t sequence,
+      std::uint64_t presentation_time_us,
+      const std::uint8_t *pcm,
+      std::size_t pcm_size
+    ) {
+      gamepad_feedback_msg_t msg {};
+      msg.type = gamepad_feedback_e::ds5_haptics_pcm;
+      msg.id = id;
+      msg.data.ds5_haptics = {};
+      auto &data = msg.data.ds5_haptics;
+      data.flags = flags;
+      data.frame_count = frame_count;
+      data.sequence = sequence;
+      data.presentation_time_us = presentation_time_us;
+      if (frame_count > 240 || pcm_size != static_cast<std::size_t>(frame_count) * 4 || (pcm_size != 0 && pcm == nullptr)) {
+        data.frame_count = UINT16_MAX;  // Rejected by the control serializer.
+      } else if (pcm_size != 0) {
+        std::copy_n(pcm, pcm_size, data.pcm.begin());
+      }
+      return msg;
+    }
+
     gamepad_feedback_e type;
     std::uint16_t id;
 
@@ -183,6 +212,14 @@ namespace platf {
         std::array<uint8_t, 10> left;
         std::array<uint8_t, 10> right;
       } adaptive_triggers;
+
+      struct {
+        std::uint8_t flags;
+        std::uint16_t frame_count;
+        std::uint32_t sequence;
+        std::uint64_t presentation_time_us;
+        std::array<std::uint8_t, 240 * 4> pcm;
+      } ds5_haptics;
     } data;
   };
 
@@ -258,6 +295,8 @@ namespace platf {
 
     constexpr caps_t pen_touch = 0x01;  // Pen and touch events
     constexpr caps_t controller_touch = 0x02;  // Controller touch events
+    constexpr caps_t ds5_haptics_pcm = 0x80;
+    constexpr caps_t ds5_haptics_capabilities_v2 = 0x08000000;
     // Negotiated exact retained encoder-input token in short video-frame header bytes 6..7.
     constexpr caps_t source_frame_id_v1 = 0x10000000;
     // Correlated 0x3007/0x3008 atomic presentation v2 (Host SBS + quality).
@@ -291,6 +330,8 @@ namespace platf {
     std::uint8_t type;
     std::uint16_t capabilities;
     std::uint32_t supportedButtons;
+    // Waveforms must never evict controller state or stop-rumble messages.
+    feedback_queue_t haptics_feedback_queue;
   };
 
   struct gamepad_touch_t {

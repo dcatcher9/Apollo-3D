@@ -40,6 +40,27 @@ cmake --build cmake-build-portable
 ctest --test-dir cmake-build-portable --output-on-failure
 ```
 
+The optional shared-client feature check compiles the production host PCM encoder
+with the actual shared common-C parser from an explicitly selected checkout. It
+checks versioned capability negotiation, all stream flags, empty and maximum-size
+packets, exact samples and 64-bit timing, malformed reserved fields, and copying
+borrowed callback data. It needs C/C++20 compilers and CMake, with no host runtime,
+GoogleTest, headset, Android SDK, or adjacent checkout requirement for ordinary
+host builds:
+
+```text
+cmake -S tools/joint-workflow/client-features -B cmake-build-client-features -DCMAKE_BUILD_TYPE=Release -DCLIENT_COMMON_ROOT=/path/to/moonlight-common-c
+cmake --build cmake-build-client-features
+ctest --test-dir cmake-build-client-features --output-on-failure
+```
+
+`HOST_ROOT` defaults to this host checkout and can also be passed explicitly. In
+the Android checkout, the shared core is at
+`app/src/main/jni/moonlight-core/moonlight-common-c`. On the local Windows machine,
+use the existing UCRT64 compilers and keep their runtime directory on the child
+`PATH` as described in [the build guide](building.md). This source-level check does not
+replace the microphone or physical DualSense acceptance procedure.
+
 The companion Moonlight 3D repository also runs two portable jobs:
 
 - [Transport contracts](https://github.com/dcatcher9/moonlight-android/blob/moonlight-noir/.github/workflows/transport-contracts.yml)

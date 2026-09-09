@@ -340,15 +340,32 @@ editing the `conf` file in a text editor. Use the examples as reference.
             @endcode</td>
     </tr>
     <tr>
-        <td rowspan="2">Choices</td>
+        <td rowspan="3">Choices</td>
         <td>ds4</td>
         <td>DualShock 4 controller (PS4)</td>
+    </tr>
+    <tr>
+        <td>ds5</td>
+        <td>DualSense controller (PS5), using the optional HIDMaestro backend on Windows.
+            See <a href="host-client-features.md">microphone and DualSense setup</a>.</td>
     </tr>
     <tr>
         <td>x360</td>
         <td>Xbox 360 controller</td>
     </tr>
 </table>
+
+### ds5_audio_haptics
+
+Forward game-authored DualSense PCM haptics when `gamepad = ds5`, the optional audio backend is
+ready, and the client negotiates support. Regular rumble remains available without PCM support.
+This does not generate haptics from the desktop audio mix.
+
+Default: `enabled`.
+
+```ini
+ds5_audio_haptics = enabled
+```
 
 ### ds4_back_as_touchpad_click
 
@@ -690,6 +707,32 @@ editing the `conf` file in a text editor. Use the examples as reference.
             @endcode</td>
     </tr>
 </table>
+
+### microphone_enabled
+
+Allow compatible clients to forward microphone audio to a configured Windows virtual cable.
+The paired client must also have **Microphone Input** permission. Availability requires an active
+playback endpoint and its matching capture endpoint; unavailable devices are not advertised.
+Existing paired clients do not automatically gain microphone permission.
+
+Default: `disabled`.
+
+```ini
+microphone_enabled = enabled
+```
+
+### microphone_sink
+
+The exact name or endpoint ID of the VB-Audio cable **playback** device, as listed by
+`tools\audio-info.exe`. Select the matching **recording** device in the PC game or voice application.
+An empty or unavailable endpoint disables microphone forwarding. Physical speakers and default
+device selection are not accepted. See [microphone and DualSense setup](host-client-features.md).
+
+Default: empty.
+
+```ini
+microphone_sink = CABLE Input (VB-Audio Virtual Cable)
+```
 
 ### adapter_name
 

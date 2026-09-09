@@ -269,6 +269,8 @@ namespace input {
 
     safe::mail_raw_t::event_t<input::touch_port_t> touch_port_event;
     platf::feedback_queue_t feedback_queue;
+    platf::feedback_queue_t haptics_feedback_queue;
+    bool authored_haptics = false;
 
     std::list<std::vector<uint8_t>> input_queue;
     std::mutex input_queue_lock;
@@ -736,6 +738,11 @@ namespace input {
       util::endian::little(packet->capabilities),
       util::endian::little(packet->supportedButtonFlags),
     };
+    if (input->authored_haptics) {
+      arrival.haptics_feedback_queue = input->haptics_feedback_queue;
+    } else {
+      arrival.capabilities &= ~platf::DS5_HAPTICS_PCM_CAPABILITY;
+    }
 
     auto id = alloc_id(gamepadMask);
     if (id < 0) {
@@ -1758,12 +1765,15 @@ namespace input {
     return true;
   }
 
-  std::shared_ptr<input_t> alloc(safe::mail_t mail, crypto::PERM permissions) {
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, crypto::PERM permissions, bool authored_haptics) {
     auto input = std::make_shared<input_t>(
       mail->event<input::touch_port_t>(mail::touch_port),
       mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback)
     );
     input->permissions = permissions;
+    input->authored_haptics = authored_haptics;
+    input->haptics_feedback_queue =
+      mail->queue<platf::gamepad_feedback_msg_t>(mail::ds5_haptics_feedback, 64);
 
     // Workaround to ensure new frames will be captured when a client connects
     task_pool.pushDelayed([]() {

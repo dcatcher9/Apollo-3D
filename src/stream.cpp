@@ -28,6 +28,7 @@ extern "C" {
 }
 
 // local includes
+#include "client_features.h"
 #include "config.h"
 #include "crypto.h"
 #include "globals.h"
@@ -773,6 +774,7 @@ namespace stream {
 
   struct session_t {
     config_t config;
+    std::shared_ptr<microphone::session_t> microphone_receiver;
 
     safe::mail_t mail;
 
@@ -799,6 +801,7 @@ namespace stream {
       std::uint32_t seq;
 
       platf::feedback_queue_t feedback_queue;
+      platf::feedback_queue_t haptics_feedback_queue;
       safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;
       // mail_raw_t keeps only a weak reference to each post. Retain this queue for the full
       // session lifetime so worker/encode-thread replies cannot disappear between raise() and
@@ -1848,6 +1851,33 @@ namespace stream {
       std::ranges::copy(msg.data.adaptive_triggers.right, plaintext.right);
 
       send_result = send_control_packet(session, server, plaintext);
+    } else if (msg.type == platf::gamepad_feedback_e::ds5_haptics_pcm) {
+      if (!session->config.client_supports_authored_pcm) {
+        return 0;
+      }
+      const auto &data = msg.data.ds5_haptics;
+      if (data.frame_count > client_features::pcm_max_frames) {
+        return -1;
+      }
+      const auto packet = client_features::encode_pcm({
+        msg.id,
+        data.flags,
+        data.frame_count,
+        data.sequence,
+        data.presentation_time_us,
+        std::span {data.pcm.data(), static_cast<std::size_t>(data.frame_count) * 4},
+      });
+      if (!packet) {
+        return -1;
+      }
+      std::array<std::uint8_t, client_features::pcm_max_control_size + sizeof(control_encrypted_t) + crypto::cipher::tag_size + 16> encrypted_payload;
+      const auto payload = encode_control(session, std::string_view {reinterpret_cast<const char *>(packet->bytes.data()), packet->size}, encrypted_payload);
+      if (payload.empty()) {
+        return -1;
+      }
+      // Old waveforms must not wait behind retransmissions. Sequence/PTS allow
+      // the client to detect loss and schedule the remaining samples.
+      send_result = server.send_unreliable_sequenced(payload, session->control.peer);
     } else {
       BOOST_LOG(error) << "Unknown gamepad feedback message type"sv;
       return -1;
@@ -2442,6 +2472,11 @@ namespace stream {
             auto &feedback_queue = session->control.feedback_queue;
             while (feedback_queue->peek()) {
               auto feedback_msg = feedback_queue->pop();
+              send_feedback_msg(session, *feedback_msg);
+            }
+            auto &haptics_queue = session->control.haptics_feedback_queue;
+            for (unsigned sent = 0; sent < 32 && haptics_queue->peek(); ++sent) {
+              auto feedback_msg = haptics_queue->pop();
               send_feedback_msg(session, *feedback_msg);
             }
 
@@ -3847,6 +3882,9 @@ namespace stream {
           input::update_permissions(session.input, new_permissions);
         }
         session.permission.store(new_permissions, std::memory_order_release);
+        if (!(new_permissions & crypto::PERM::input_microphone) && session.microphone_receiver) {
+          session.microphone_receiver->stop();
+        }
         previous_name = session.device_name;
         session.device_name = name;
         should_stop = revoked || !(new_permissions & crypto::PERM::_allow_view);
@@ -3872,6 +3910,9 @@ namespace stream {
 
       session.video->active.store(false, std::memory_order_release);
       session.audio->active.store(false, std::memory_order_release);
+      if (session.microphone_receiver) {
+        session.microphone_receiver->stop();
+      }
       if (session.control.sbs_telemetry_subscription) {
         session.control.sbs_telemetry_subscription->update(
           false,
@@ -3918,6 +3959,9 @@ namespace stream {
     }
 
     void join(session_t &session) {
+      if (session.microphone_receiver) {
+        session.microphone_receiver->stop();
+      }
       // A live desktop resize owns process/display state and can outlive the control thread.
       // Reap it before arming the NVENC hang watchdog and before releasing the active-session
       // slot, so a successor can never overlap stale work from this launch.
@@ -3975,7 +4019,7 @@ namespace stream {
     }
 
     int start(session_t &session) {
-      session.input = input::alloc(session.mail, permissions(session));
+      session.input = input::alloc(session.mail, permissions(session), session.config.client_supports_authored_pcm);
 
       session.broadcast_ref = broadcast.ref();
       if (!session.broadcast_ref) {
@@ -4044,6 +4088,13 @@ namespace stream {
         session.broadcast_ref->control_server._session->session = &session;
         session.broadcast_ref->control_server._session->peer = nullptr;
         workers.commit(session);
+        if (session.microphone_receiver) {
+          if (!!(permissions(session) & crypto::PERM::input_microphone)) {
+            session.microphone_receiver->activate();
+          } else {
+            session.microphone_receiver->stop();
+          }
+        }
       }
 
       return 0;
@@ -4067,6 +4118,7 @@ namespace stream {
       session->permission.store(launch_session.perm, std::memory_order_relaxed);
 
       session->config = config;
+      session->microphone_receiver = launch_session.take_microphone();
 
       // Seed the effective-mode view with the launch mode so a live request refused before the
       // encode loop has published anything still reports a real mode rather than zeros. The video
@@ -4106,6 +4158,8 @@ namespace stream {
 
       session->control.connect_data = launch_session.control_connect_data;
       session->control.feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback);
+      session->control.haptics_feedback_queue =
+        mail->queue<platf::gamepad_feedback_msg_t>(mail::ds5_haptics_feedback, 64);
       session->control.hdr_queue = mail->event<video::hdr_info_t>(mail::hdr);
       session->control.live_video_mode_ack_queue = mail->queue<live_video_mode_ack_t>(
         mail::live_video_mode_ack,

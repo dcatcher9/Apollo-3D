@@ -3,10 +3,12 @@
  * @brief Tests for RTSP request parsing helpers.
  */
 
-#include <winsock2.h>
+#include <algorithm>
+#include <atomic>
 #include <limits>
 #include <string_view>
 #include <unordered_map>
+#include <winsock2.h>
 
 // Keep Boost.Asio/Winsock2 ahead of rtsp.h's Windows headers.
 // clang-format off
@@ -34,6 +36,47 @@ namespace {
     session->rtsp_iv_counter = 0;
     session->av_ping_payload = "0123456789abcdef";
     return session;
+  }
+
+  class lifecycle_microphone_sink_t: public microphone::pcm_sink_t {
+  public:
+    explicit lifecycle_microphone_sink_t(std::shared_ptr<std::atomic<unsigned>> destroyed):
+        destroyed_(std::move(destroyed)) {}
+
+    ~lifecycle_microphone_sink_t() override {
+      ++*destroyed_;
+    }
+
+    bool open(const std::string &, std::string &) override {
+      return true;
+    }
+
+    int write(std::span<const std::int16_t> pcm) override {
+      return static_cast<int>(pcm.size());
+    }
+
+  private:
+    std::shared_ptr<std::atomic<unsigned>> destroyed_;
+  };
+
+  std::shared_ptr<microphone::session_t> make_lifecycle_microphone(
+    const rtsp_stream::launch_session_t &launch,
+    std::shared_ptr<std::atomic<unsigned>> destroyed,
+    std::uint16_t port = 0
+  ) {
+    microphone::options_t options;
+    options.bind_address = "127.0.0.1";
+    options.remote_address = "127.0.0.1";
+    options.sink_endpoint = "injected-lifecycle-test-sink";
+    options.port = port;
+    options.encrypted = true;
+    std::copy_n(launch.av_ping_payload.begin(), 16, options.ping_payload.begin());
+    std::string error;
+    auto receiver = microphone::session_t::start(options, error, [destroyed] {
+      return std::make_unique<lifecycle_microphone_sink_t>(destroyed);
+    });
+    EXPECT_TRUE(receiver) << error;
+    return receiver;
   }
 }  // namespace
 
@@ -74,6 +117,9 @@ TEST(RtspAnnounceParsingTest, EnforcesNumericSyntaxAndProtocolBounds) {
   EXPECT_FALSE(parse_announce_int(field::video_format, "3"));
   EXPECT_EQ(parse_announce_int(field::binary_option, "1"), 1);
   EXPECT_FALSE(parse_announce_int(field::binary_option, "2"));
+  EXPECT_EQ(parse_announce_int(field::encryption_flags, "7"), 7);
+  EXPECT_EQ(parse_announce_int(field::encryption_flags, "15"), 15);
+  EXPECT_FALSE(parse_announce_int(field::encryption_flags, "16"));
   EXPECT_FALSE(parse_announce_int(field::max_fps, "0"));
   EXPECT_EQ(parse_announce_int(field::max_fps, "1000000"), 1000000);
   EXPECT_FALSE(parse_announce_int(field::max_fps, "1000001"));
@@ -305,4 +351,79 @@ TEST(RtspLaunchReservationTest, FailedClaimedStartupRevokesAndReleasesReservatio
   EXPECT_FALSE(failed->try_claim_reservation());
   EXPECT_TRUE(rtsp_stream::launch_session_available());
   EXPECT_FALSE(rtsp_stream::launch_session_raise(failed));
+}
+
+TEST(RtspMicrophoneLifecycleTest, PendingTeardownClosesReceiverAndStaleLaunchCannotStopReplacement) {
+  auto cleanup = util::fail_guard([] {
+    rtsp_stream::terminate_session();
+  });
+  auto first = make_modern_launch_session(601, "microphone-first");
+  auto destroyed = std::make_shared<std::atomic<unsigned>>(0);
+  first->microphone_receiver = make_lifecycle_microphone(*first, destroyed);
+  ASSERT_TRUE(first->microphone_receiver);
+  const auto retained_receiver = first->microphone_receiver;
+  const auto retained_socket_launch = first;
+  const auto reusable_port = retained_receiver->bound_port();
+  ASSERT_TRUE(rtsp_stream::launch_session_raise(first));
+
+  rtsp_stream::terminate_session();
+  EXPECT_FALSE(retained_receiver->running());
+  EXPECT_FALSE(retained_socket_launch->microphone_receiver);
+  EXPECT_EQ(destroyed->load(), 1u);
+
+  auto replacement = make_modern_launch_session(602, "microphone-replacement");
+  replacement->microphone_receiver = make_lifecycle_microphone(*replacement, destroyed, reusable_port);
+  ASSERT_TRUE(replacement->microphone_receiver) << "Teardown must release the bound UDP port";
+  ASSERT_TRUE(rtsp_stream::launch_session_raise(replacement));
+  retained_socket_launch->revoke_reservation();
+  EXPECT_TRUE(replacement->microphone_receiver->running());
+  EXPECT_EQ(destroyed->load(), 1u);
+  rtsp_stream::launch_session_clear(replacement->id);
+  EXPECT_EQ(destroyed->load(), 2u);
+}
+
+TEST(RtspMicrophoneLifecycleTest, PendingTimeoutStopsReceiverDespiteRetainedSocketAndReceiverReferences) {
+  auto cleanup = util::fail_guard([] {
+    rtsp_stream::terminate_session();
+  });
+  auto launch = make_modern_launch_session(603, "microphone-timeout");
+  auto destroyed = std::make_shared<std::atomic<unsigned>>(0);
+  launch->microphone_receiver = make_lifecycle_microphone(*launch, destroyed);
+  ASSERT_TRUE(launch->microphone_receiver);
+  const auto retained_receiver = launch->microphone_receiver;
+  ASSERT_TRUE(rtsp_stream::launch_session_raise(launch));
+  rtsp_stream::expire_launch_session_for_test(launch->id);
+  EXPECT_FALSE(retained_receiver->running());
+  EXPECT_EQ(destroyed->load(), 1u);
+  EXPECT_EQ(launch->reservation(), rtsp_stream::launch_reservation_state_e::revoked);
+  EXPECT_TRUE(rtsp_stream::launch_session_available());
+}
+
+TEST(RtspMicrophoneLifecycleTest, TransferPreservesReceiverAndActivePermissionRevocationStopsOnlyMicrophone) {
+  auto launch = make_modern_launch_session(604, "microphone-policy");
+  launch->iv.resize(16);
+  launch->perm = crypto::PERM::_all;
+  auto destroyed = std::make_shared<std::atomic<unsigned>>(0);
+  launch->microphone_receiver = make_lifecycle_microphone(*launch, destroyed);
+  ASSERT_TRUE(launch->microphone_receiver);
+  const auto retained_receiver = launch->microphone_receiver;
+  stream::config_t config {};
+  auto active = stream::session::alloc(config, *launch);
+  ASSERT_TRUE(active);
+  EXPECT_FALSE(launch->microphone_receiver);
+  retained_receiver->activate();
+  stream::session::set_state_for_test(*active, stream::session::state_e::RUNNING);
+  launch->revoke_reservation();
+  EXPECT_TRUE(retained_receiver->running()) << "The active stream owns the transferred receiver";
+
+  const auto without_microphone = static_cast<crypto::PERM>(
+    static_cast<std::uint32_t>(crypto::PERM::_all) & ~static_cast<std::uint32_t>(crypto::PERM::input_microphone)
+  );
+  EXPECT_EQ(stream::session::update_client_policy(*active, 1, "microphone-policy", without_microphone, false), stream::session::client_policy_result_e::updated);
+  EXPECT_FALSE(retained_receiver->running());
+  EXPECT_EQ(destroyed->load(), 1u);
+  EXPECT_EQ(stream::session::state(*active), stream::session::state_e::RUNNING);
+  EXPECT_EQ(stream::session::permissions(*active), without_microphone);
+  EXPECT_EQ(stream::session::update_client_policy(*active, 0, "stale-policy", crypto::PERM::_all, false), stream::session::client_policy_result_e::ignored);
+  EXPECT_FALSE(retained_receiver->running());
 }

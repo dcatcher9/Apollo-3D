@@ -50,6 +50,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/misc.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/misc.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/input.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/ds5/ds5_sidecar_client.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/microphone.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_config.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_config.cpp"

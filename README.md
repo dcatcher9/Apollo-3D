@@ -167,6 +167,7 @@ views are available.
 | **Modern video path** | Native H.264 NVENC as the baseline; HEVC, AV1, and 10-bit HDR are enabled only when their capabilities are available |
 | **Secure pairing and permissions** | PIN-first pairing, a secondary QR option for compatible clients, encrypted protocol 13 sessions, and per-device launch/input/clipboard permissions |
 | **Complete interaction** | Desktop audio, stereo or surround sinks, keyboard, mouse, touch, pen, gamepad, and text clipboard synchronization |
+| **Optional microphone and DualSense haptics** | Client microphone routing through VB-CABLE and game-authored DualSense PCM through HIDMaestro, with compatible clients and separately installed drivers |
 | **Warm reconnect** | Keeps the single active app and virtual desktop ready during the configurable `session_resume_grace` window |
 | **Direct AR-glasses output** | Video-only presentation to an approved, non-primary, non-cloned Windows display in 1920×1080 2D or 3840×1080 full SBS |
 
@@ -223,6 +224,7 @@ packaging details.
 |---|---|
 | Install, pair, and stream | [Quick start](#quick-start) |
 | Host settings | [Configuration reference](./docs/configuration.md) |
+| Microphone and DualSense setup | [Optional client features](./docs/host-client-features.md) |
 | Local AR glasses | [Local AR glasses](./docs/sbs-local-ar-glasses.md) |
 | Host AI 3D design | [Host SBS pipeline](./docs/host-sbs.md) |
 | Host AI 3D scene cuts | [Host SBS scene cuts](./docs/host-sbs-scene-cuts.md) |

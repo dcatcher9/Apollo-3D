@@ -15,6 +15,7 @@
 #include <ViGEm/Client.h>
 
 // local includes
+#include "ds5/ds5_sidecar_client.h"
 #include "keylayout.h"
 #include "misc.h"
 #include "src/config.h"
@@ -440,6 +441,7 @@ namespace platf {
 
   struct input_raw_t {
     std::unique_ptr<vigem_t> vigem;
+    std::array<std::unique_ptr<ds5::sidecar_client_t>, MAX_GAMEPADS> ds5_sidecars;
 
     decltype(CreateSyntheticPointerDevice) *fnCreateSyntheticPointerDevice;
     decltype(InjectSyntheticPointerInput) *fnInjectSyntheticPointerInput;
@@ -1165,8 +1167,33 @@ namespace platf {
   int alloc_gamepad(input_t &input, const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback_queue) {
     auto raw = (input_raw_t *) input.get();
 
+    if (id.globalIndex < 0 || id.globalIndex >= MAX_GAMEPADS || id.clientRelativeIndex >= MAX_GAMEPADS) {
+      return -1;
+    }
+    if (config::input.ds5_enabled) {
+      auto &sidecar = raw->ds5_sidecars[id.globalIndex];
+      if (!sidecar) {
+        sidecar = std::make_unique<ds5::sidecar_client_t>();
+      }
+      // Create an audio endpoint only for controllers that accept authored PCM.
+      const bool audio_haptics = config::input.ds5_audio_haptics &&
+                                 (metadata.capabilities & DS5_HAPTICS_PCM_CAPABILITY) && metadata.haptics_feedback_queue &&
+                                 ds5::audio_haptics_available();
+      if (sidecar->alloc(id, feedback_queue, audio_haptics, false, metadata.haptics_feedback_queue) == 0) {
+        if (metadata.capabilities & LI_CCAP_ACCEL) {
+          feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_ACCEL, 100));
+        }
+        if (metadata.capabilities & LI_CCAP_GYRO) {
+          feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_GYRO, 100));
+        }
+        return 0;
+      }
+      sidecar.reset();
+      BOOST_LOG(warning) << "DualSense runtime is unavailable; using the existing ViGEm controller backend"sv;
+    }
+
     if (!raw->vigem) {
-      return 0;
+      return -1;
     }
 
     VIGEM_TARGET_TYPE selectedGamepadType;
@@ -1218,6 +1245,14 @@ namespace platf {
 
   void free_gamepad(input_t &input, int nr) {
     auto raw = (input_raw_t *) input.get();
+
+    if (nr < 0 || nr >= MAX_GAMEPADS) {
+      return;
+    }
+    if (raw->ds5_sidecars[nr]) {
+      raw->ds5_sidecars[nr].reset();
+      return;
+    }
 
     if (!raw->vigem) {
       return;
@@ -1477,6 +1512,14 @@ namespace platf {
    * @param gamepad_state The gamepad button/axis state sent from the client.
    */
   void gamepad_update(input_t &input, int nr, const gamepad_state_t &gamepad_state) {
+    auto *raw = (input_raw_t *) input.get();
+    if (nr < 0 || nr >= MAX_GAMEPADS) {
+      return;
+    }
+    if (raw->ds5_sidecars[nr]) {
+      raw->ds5_sidecars[nr]->submit_input(nr, gamepad_state);
+      return;
+    }
     auto *vigem = ((input_raw_t *) input.get())->vigem.get();
 
     // If there is no gamepad support
@@ -1509,6 +1552,14 @@ namespace platf {
    * @param touch The touch event.
    */
   void gamepad_touch(input_t &input, const gamepad_touch_t &touch) {
+    auto *raw = (input_raw_t *) input.get();
+    if (touch.id.globalIndex < 0 || touch.id.globalIndex >= MAX_GAMEPADS) {
+      return;
+    }
+    if (raw->ds5_sidecars[touch.id.globalIndex]) {
+      raw->ds5_sidecars[touch.id.globalIndex]->submit_touch(touch);
+      return;
+    }
     auto *vigem = ((input_raw_t *) input.get())->vigem.get();
 
     // If there is no gamepad support
@@ -1615,6 +1666,14 @@ namespace platf {
    * @param motion The motion event.
    */
   void gamepad_motion(input_t &input, const gamepad_motion_t &motion) {
+    auto *raw = (input_raw_t *) input.get();
+    if (motion.id.globalIndex < 0 || motion.id.globalIndex >= MAX_GAMEPADS) {
+      return;
+    }
+    if (raw->ds5_sidecars[motion.id.globalIndex]) {
+      raw->ds5_sidecars[motion.id.globalIndex]->submit_motion(motion);
+      return;
+    }
     auto *vigem = ((input_raw_t *) input.get())->vigem.get();
 
     // If there is no gamepad support
@@ -1642,6 +1701,14 @@ namespace platf {
    * @param battery The battery event.
    */
   void gamepad_battery(input_t &input, const gamepad_battery_t &battery) {
+    auto *raw = (input_raw_t *) input.get();
+    if (battery.id.globalIndex < 0 || battery.id.globalIndex >= MAX_GAMEPADS) {
+      return;
+    }
+    if (raw->ds5_sidecars[battery.id.globalIndex]) {
+      raw->ds5_sidecars[battery.id.globalIndex]->submit_battery(battery);
+      return;
+    }
     auto *vigem = ((input_raw_t *) input.get())->vigem.get();
 
     // If there is no gamepad support
@@ -1722,9 +1789,10 @@ namespace platf {
     ) {
       if (!input_initialized) {
         return {
-        supported_gamepad_t {"auto", true, ""},
-        supported_gamepad_t {"x360", false, ""},
-        supported_gamepad_t {"ds4", false, ""},
+          supported_gamepad_t {"auto", true, ""},
+          supported_gamepad_t {"x360", false, ""},
+          supported_gamepad_t {"ds4", false, ""},
+          supported_gamepad_t {"ds5", false, ""},
         };
       }
       const auto reason =
@@ -1749,6 +1817,8 @@ namespace platf {
       true,
       ((input_raw_t *) input)->vigem != nullptr
     );
+    const auto ds5_available = ds5::refresh_component_availability();
+    gamepads.push_back({"ds5", ds5_available, ds5_available ? "" : "gamepads.ds5-sidecar-not-available"});
 
     for (const auto &[name, is_enabled, reason_disabled] : gamepads) {
       if (!is_enabled) {
@@ -1767,6 +1837,10 @@ namespace platf {
     platform_caps::caps_t caps =
       platform_caps::source_frame_id_v1 |
       platform_caps::atomic_presentation_v2 | platform_caps::host_sbs_telemetry_v2;
+
+    if (config::input.ds5_enabled && config::input.ds5_audio_haptics && ds5::refresh_component_availability() && ds5::audio_haptics_available()) {
+      caps |= platform_caps::ds5_haptics_pcm | platform_caps::ds5_haptics_capabilities_v2;
+    }
 
     // We support controller touchpad input as long as we're not emulating X360
     if (config::input.gamepad != "x360"sv) {

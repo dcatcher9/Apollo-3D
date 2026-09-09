@@ -17,12 +17,22 @@ const config = ref(props.config)
       <select id="gamepad" class="form-select" v-model="config.gamepad">
         <option value="auto">{{ $t('_common.auto') }}</option>
         <option value="ds4">{{ $t('config.gamepad_ds4') }}</option>
+        <option value="ds5">{{ $t('config.gamepad_ds5') }}</option>
         <option value="x360">{{ $t('config.gamepad_x360') }}</option>
       </select>
       <div class="form-text">{{ $t('config.gamepad_desc') }}</div>
     </div>
 
     <!-- Additional options based on gamepad type -->
+    <template v-if="config.gamepad === 'ds5'">
+      <div class="alert alert-info">{{ $t('config.gamepad_ds5_desc') }}</div>
+      <Checkbox class="mb-3"
+                id="ds5_audio_haptics"
+                locale-prefix="config"
+                v-model="config.ds5_audio_haptics"
+                default="true"
+      ></Checkbox>
+    </template>
     <template v-if="config.gamepad === 'ds4' || config.gamepad === 'auto'">
       <div class="mb-3 accordion">
         <div class="accordion-item">
