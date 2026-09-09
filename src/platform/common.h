@@ -827,30 +827,6 @@ namespace platf {
    */
   bool process_group_running(std::uintptr_t native_handle);
 
-  /** Scope the session marker to this thread's remote injection, never to unrelated worker tasks. */
-  class input_tag_scope_t {
-  public:
-    explicit input_tag_scope_t(std::uint64_t tag) noexcept:
-        previous_(current_) {
-      current_ = tag;
-    }
-
-    ~input_tag_scope_t() {
-      current_ = previous_;
-    }
-
-    input_tag_scope_t(const input_tag_scope_t &) = delete;
-    input_tag_scope_t &operator=(const input_tag_scope_t &) = delete;
-
-    [[nodiscard]] static std::uint64_t current() noexcept {
-      return current_;
-    }
-
-  private:
-    inline static thread_local std::uint64_t current_ = 0;
-    const std::uint64_t previous_;
-  };
-
   input_t input();
   /**
    * @brief Get the current mouse position on screen

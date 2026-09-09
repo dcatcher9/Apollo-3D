@@ -153,6 +153,38 @@ TEST(SessionWorkerStartTest, RollsBackWhenSecondThreadCannotStart) {
   EXPECT_TRUE(stream::session::worker_start_rollback_for_test());
 }
 
+TEST(PrimaryDisplayRestoreRetryTest, OnlyRetriesTheSameDisconnectedRetainedProcess) {
+  const stream::detail::primary_display_restore_retry_t retry {3, 17};
+  using action = stream::detail::primary_display_restore_retry_t::action_e;
+  EXPECT_EQ(retry.next_action(3, 17, 17, false, false, true), action::restore);
+  // A replacement is protected even before its HTTP launch reservation is published.
+  EXPECT_EQ(retry.next_action(3, 29, 17, false, false, true), action::stop);
+  EXPECT_EQ(retry.next_action(3, 17, 29, false, false, true), action::stop);
+  EXPECT_EQ(retry.next_action(3, 0, 17, false, false, true), action::stop);
+  EXPECT_EQ(retry.next_action(3, 17, std::nullopt, false, false, true), action::stop);
+}
+
+TEST(PrimaryDisplayRestoreRetryTest, ReconnectAndExpiryCancelAnAlreadyDispatchedRetry) {
+  const stream::detail::primary_display_restore_retry_t retry {3, 17};
+  using action = stream::detail::primary_display_restore_retry_t::action_e;
+  // Even reconnecting to the same retained process invalidates the old generation.
+  EXPECT_EQ(retry.next_action(4, 17, 17, false, false, true), action::stop);
+  EXPECT_EQ(retry.next_action(3, 17, 17, true, false, true), action::stop);
+  EXPECT_EQ(retry.next_action(3, 17, 17, false, false, false), action::stop);
+  const stream::detail::primary_display_restore_retry_t unidentified {3, 0};
+  EXPECT_EQ(unidentified.next_action(3, 0, 0, false, false, true), action::stop);
+}
+
+TEST(PrimaryDisplayRestoreRetryTest, FailedWorkerClaimDelaysRestorationWithoutLosingRetryOwnership) {
+  const stream::detail::primary_display_restore_retry_t retry {3, 17};
+  using action = stream::detail::primary_display_restore_retry_t::action_e;
+  EXPECT_EQ(retry.next_action(3, 17, 17, false, true, true), action::wait);
+  EXPECT_EQ(retry.next_action(3, 17, 17, false, false, true), action::restore);
+  // A new launch commit or expiry still cancels the waiting callback immediately.
+  EXPECT_EQ(retry.next_action(4, 17, 17, false, true, true), action::stop);
+  EXPECT_EQ(retry.next_action(3, 17, 17, false, true, false), action::stop);
+}
+
 TEST(ConcatAndInsertTests, ConcatNoInsertionTest) {
   char b1[] = {'a', 'b'};
   char b2[] = {'c', 'd', 'e'};

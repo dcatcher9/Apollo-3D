@@ -6,76 +6,52 @@ not a separate Windows login or an isolated Windows session.
 
 ## Opening applications normally
 
-The current router is experimental and uses launch inference. Windows creates applications
-normally; the helper moves a resulting window after detecting its foreground activation. A window
-can briefly appear on another monitor first. This does not yet guarantee that every application
-opens on the virtual display or that an unrelated foreground activation can never be mistaken
-for a launch.
+While a virtual-display stream is active, Sunshine 3D temporarily makes that virtual monitor the
+Windows primary display. Use Windows Start, Search, the taskbar, desktop shortcuts, Explorer, or
+Run normally. Both the mouse/keyboard connected directly to the PC and client input use the same
+Windows launch behavior. There is no custom launcher or background window-routing helper.
 
-Use Windows Start, Search, the taskbar, desktop shortcuts, Explorer, or Run from the streamed
-virtual monitor. There is no custom application launcher. The host automatically starts a hidden,
-standard-user window router for its virtual display. Both the mouse/keyboard connected to the PC
-and client input can invoke native Windows launches. Standard actionable application controls
-and Enter from an application/terminal on the virtual monitor can also identify an invocation.
-The source monitor decides placement: a qualifying invocation on the virtual display admits the
-next eligible foreground application window there; a gesture on a physical monitor does not.
-Client input carries the host session's tag so it can be recognized alongside ordinary PC input.
-Other injected input is ignored.
+Applications that default to the primary monitor now open on the virtual display. This changes
+the default for the whole Windows desktop: a launch initiated from a physical monitor may also
+open there. It is not a per-launch or per-client placement rule. Sunshine 3D supports one active
+remote session per host.
 
-A launch that activates an existing app may move that selected window from a physical monitor.
-Other document windows in the same process are not moved. The router does not change the primary
-monitor or rearrange existing windows when streaming starts. It does not run applications itself;
-Windows continues to handle shortcuts, arguments, file associations, and application reuse.
+Physical displays remain enabled. The host preserves their relative arrangement and does not
+deliberately move existing application windows. Changing the primary display changes the desktop
+coordinate origin, however, and Windows or individual applications may react to the topology
+change. Existing windows are not guaranteed to remain visually unchanged.
 
-Activation on a Windows shell surface or an eligible application control starts a short, one-use
-routing opportunity. Pointer clicks must hit a recent, asynchronously inspected actionable item.
-Desktop and Explorer icons also honor Windows' single/double-click setting. Keyboard Enter and native Windows
-shortcuts can invoke the same routing. Empty-space clicks do not authorize a move.
-Unrecognized injected input, pointer input outside the target, a secure-desktop switch,
-or a missing/changed target cancels it. Pointer motion does not create a launch request. Background
-window creation alone does not authorize placement. After the selected foreground root has been
-handled, another launch gesture is required to move another root.
+Primary-monitor placement is a default, not a guarantee for every application:
 
-Windows does not expose a universal causal link between a shell click and an application window.
-Routing therefore has compatibility limits:
+- Applications can restore a saved monitor or use explicit window coordinates.
+- A launch that reuses an existing application window can leave that window on its current
+  monitor. Sunshine does not move it automatically.
+- Games with a built-in monitor selector may continue to use their selected display.
+- Owned dialogs and other application windows may follow their parent window.
 
-- A launch must present an eligible foreground window within five seconds. Background-only apps,
-  delayed launches, and apps that keep the same foreground window without an activation event
-  can remain where Windows places them. An unrelated application stealing focus during that
-  brief launch interval can be mistaken for the launch result.
-- Mouse routing needs fresh shell-item evidence. If a shell provider is unavailable or too slow,
-  or an item is clicked before its first hover query completes, that launch is left to Windows.
-- An invocation from an ordinary application is skipped if its source window closes, hides, or
-  minimizes before placement. This prevents Close/Minimize actions from adopting the unrelated
-  window exposed behind them, but also skips applications that dismiss themselves while launching
-  another app. Native Start/Search/Run dismissal is handled separately.
-- The PC's physical mouse/keyboard and the XR mouse/ray path supply routing provenance. Direct
-  native pen/touch injection is not identified by the mouse/keyboard tag.
-- Elevated applications, protected surfaces, and apps that override their own placement may
-  reject the standard-user helper's move. Games with exclusive display selection may need their
-  built-in monitor setting; ordinary windowed/borderless windows use Windows placement.
-- Custom application controls without standard actionable UI Automation metadata, background
-  launches, and other activation paths without an observable invocation cannot be attributed
-  reliably. Owned dialogs can follow a specifically adopted root while interaction remains on
-  the virtual monitor. Moving input to a physical monitor clears that tracking. Other document
-  windows in the same application process are not adopted.
+The host records the original primary display and arrangement before changing them. On disconnect
+it restores the previous primary display, including during the reconnect grace period
+while the application and virtual monitor remain available. Reconnecting makes the virtual
+display primary again before capture resumes. Full session teardown restores the original primary
+display before the virtual monitor is removed.
 
-The helper stops on disconnect and starts again for the next active stream, including a warm
-reconnect to a retained monitor. Its old routing intent and dialog tracking are discarded.
-Replacing/removing the monitor or stopping the host also ends its work. It never closes user
-applications. Windows may move windows when their monitor is removed, according to its normal
-display-removal behavior.
+Recovery information is written to disk before the primary-display change. The host checks for
+unfinished restoration during startup; a crash does not require the previous process to remain
+alive for recovery. A failed restore retains that information for a retry and prevents the host
+from removing the virtual monitor before the pending restoration is reconciled. Disconnected or
+changed physical displays can prevent exact restoration until the display arrangement is available
+again. While the disconnected session remains in its reconnect grace period, the host retries a
+failed restore once per second without extending that deadline. A new pending or active session
+cancels those retries. Windows can also move windows when their monitor is removed.
 
-This feature needs live Galaxy XR verification with real Start/shortcut launches, existing app
-reuse, reconnects, and a simultaneous local user. Isolated tests do not establish application
-compatibility on the headset. The native fixtures validate self-created windows and an ordinary
-UI Automation button on private desktops. Cross-monitor placement was not exercised on the
-single-monitor test setup; real shell launches and cross-process placement are still unverified.
+The change needs live Galaxy XR verification with real Start/shortcut launches, applications that
+remember a monitor, reconnects, and display restoration. Automated lifecycle and geometry tests
+do not establish every application's placement behavior or replace a real multi-monitor test.
 
 ## Keeping the remote cursor visible
 
-Remote cursor movement is bounded to the streamed virtual display so the pointer stops at its
-edges. This applies to relative remote mouse movement as well as absolute pointer placement.
+By default, remote cursor movement is bounded to the streamed virtual display so the pointer stops
+at its edges. This applies to relative remote mouse movement as well as absolute pointer placement.
 If the physical mouse moves the shared cursor onto another monitor, the next remote pointer
 movement brings it back to the streamed display.
 

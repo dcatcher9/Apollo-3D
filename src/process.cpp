@@ -48,6 +48,7 @@
   #include "platform/windows/ar_glasses.h"
   // from_utf8() string conversion function
   #include "platform/windows/misc.h"
+  #include "platform/windows/primary_display.h"
   #include "platform/windows/utils.h"
 
   // _SH constants for _wfsopen()
@@ -272,6 +273,13 @@ namespace proc {
   };
 
   std::unique_ptr<platf::deinit_t> init() {
+#ifdef _WIN32
+    // Recover before encoder probing or the local-AR controller can change the desktop.
+    // Command-only invocations do not initialize proc and must not undo a running host's lease.
+    if (!platf::primary_display::recover()) {
+      BOOST_LOG(error) << "Primary-display recovery is pending; virtual-display launches will wait for restoration."sv;
+    }
+#endif
     return std::make_unique<deinit_t>();
   }
 
@@ -437,99 +445,6 @@ namespace proc {
   }
 
 #ifdef _WIN32
-  void proc_t::start_window_router_locked() {
-    if (!_virtual_display || _virtual_display_device_path.empty() || _host_session_id == 0) {
-      return;
-    }
-
-    std::error_code error;
-    if (_window_router.valid() && _window_router.running(error)) {
-      return;
-    }
-    _window_router = boost::process::v1::child {};
-
-    std::wstring module_path(32768, L'\0');
-    const auto length = GetModuleFileNameW(nullptr, module_path.data(), static_cast<DWORD>(module_path.size()));
-    if (!length || length >= module_path.size()) {
-      BOOST_LOG(warning) << "Could not locate the native window router beside Sunshine."sv;
-      return;
-    }
-    module_path.resize(length);
-    const auto helper = std::filesystem::path(module_path).parent_path() / L"tools" / L"sunshine-window-router.exe";
-    if (!std::filesystem::is_regular_file(helper, error)) {
-      BOOST_LOG(warning) << "Native window router is missing: " << helper;
-      return;
-    }
-
-    const auto user_id = platf::active_user_id();
-    if (!user_id) {
-      BOOST_LOG(warning) << "Could not identify the interactive user for the native window router."sv;
-      return;
-    }
-    // A standard-user helper cannot assume it can open a SYSTEM service process.
-    // Grant only lifetime/identity observation to this exact user, preserving the
-    // host's other process permissions, and bind the launch to the same account.
-    error = platf::grant_process_observation_to_user(GetCurrentProcess(), *user_id);
-    if (error) {
-      BOOST_LOG(warning) << "Could not permit native window router lifetime observation: " << error.message();
-      return;
-    }
-
-    FILETIME created {}, exited {}, kernel {}, user {};
-    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) {
-      BOOST_LOG(warning) << "Could not establish the native window router's host identity."sv;
-      return;
-    }
-    const auto parent_start = (static_cast<std::uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
-    const auto command = platf::to_utf8(
-      platf::escape_argument(helper.native()) + L" --display-path " +
-      platf::escape_argument(_virtual_display_device_path) + L" --parent-pid " +
-      std::to_wstring(GetCurrentProcessId()) + L" --parent-start " + std::to_wstring(parent_start) +
-      L" --input-tag " + std::to_wstring(_host_session_id)
-    );
-    auto working_dir = boost::filesystem::path(helper.parent_path().native());
-    // The router observes ordinary user apps independently of the stream's app job.
-    // An elevated host must not give the router its elevated token.
-    error.clear();
-    _window_router = platf::run_command_unelevated(true, command, working_dir, _env, nullptr, error, nullptr, user_id);
-    if (error) {
-      BOOST_LOG(warning) << "Could not start the native window router: " << error.message();
-    } else {
-      BOOST_LOG(info) << "Native window router started for the remote monitor."sv;
-    }
-  }
-
-  void proc_t::stop_window_router_locked() {
-    if (!_window_router.valid()) {
-      return;
-    }
-    const auto process_handle = _window_router.native_handle();
-    if (WaitForSingleObject(process_handle, 0) == WAIT_TIMEOUT) {
-      const DWORD pid = _window_router.id();
-      EnumWindows([](HWND window, LPARAM data) -> BOOL {
-        DWORD window_pid = 0;
-        GetWindowThreadProcessId(window, &window_pid);
-        if (window_pid == static_cast<DWORD>(data)) {
-          PostMessageW(window, WM_CLOSE, 0, 0);
-        }
-        return TRUE;
-      },
-                  static_cast<LPARAM>(pid));
-      // The router never owns user-app lifetimes. A hung helper can be stopped
-      // without terminating the applications it placed on the virtual monitor.
-      if (WaitForSingleObject(process_handle, 750) == WAIT_TIMEOUT) {
-        std::error_code error;
-        _window_router.terminate(error);
-        if (error) {
-          BOOST_LOG(warning) << "Could not stop the native window router: " << error.message();
-          return;
-        }
-        WaitForSingleObject(process_handle, 250);
-      }
-    }
-    _window_router = boost::process::v1::child {};
-  }
-
   void proc_t::stop_hdr_worker() {
     _hdr_worker.request_stop();
     if (_hdr_worker_state) {
@@ -650,7 +565,12 @@ namespace proc {
 
   bool proc_t::request_hdr_state(bool enable_hdr, std::chrono::milliseconds timeout) {
     if (!_hdr_worker_state || !_hdr_worker.joinable()) {
-      return false;
+      // Disconnect stops virtual HDR work before restoring the original primary. A warm resume
+      // restarts it only after resolving the exact monitor's current GDI name.
+      if (!_virtual_display || display_name.empty()) {
+        return false;
+      }
+      start_hdr_worker(enable_hdr);
     }
 
     std::uint64_t revision;
@@ -679,6 +599,11 @@ namespace proc {
       return {};
     }
 
+    if (!platf::primary_display::prepare()) {
+      BOOST_LOG(error) << "Could not save the original primary display before virtual-display recreation."sv;
+      return {};
+    }
+
     return VDISPLAY::createVirtualDisplayWithRenderAdapter(
       _launch_session->unique_id.c_str(),
       _launch_session->device_name.c_str(),
@@ -696,6 +621,25 @@ namespace proc {
     std::lock_guard retirement_lock(retired_virtual_display_mutex);
     if (!retired_virtual_display_identity) {
       return true;
+    }
+    // Add may succeed before Windows publishes its device path. Resolve only the exact returned
+    // driver identity so a prepared journal can be bound even on the delayed cleanup path.
+    if (retired_virtual_display_device_path.empty()) {
+      const auto current = VDISPLAY::queryVirtualDisplayIdentity(
+        *retired_virtual_display_identity,
+        {},
+        retired_virtual_display_gdi_name
+      );
+      if (current.state == VDISPLAY::display_identity_state_e::present) {
+        retired_virtual_display_device_path = current.device_path;
+        retired_virtual_display_gdi_name = current.display_name;
+      }
+    }
+    // Restore the original primary before detach captures its survivor topology. The retirement
+    // record and its autonomous worker retain ownership if Windows cannot restore it yet.
+    if (!platf::primary_display::restore(retired_virtual_display_device_path)) {
+      BOOST_LOG(warning) << "Deferring virtual-display removal until primary-display restoration succeeds."sv;
+      return false;
     }
     if (retired_virtual_display_remove_ready) {
       return true;
@@ -857,12 +801,6 @@ namespace proc {
       return false;
     }
 
-    if (_virtual_display_identity && sameVirtualDisplayIdentity(*_virtual_display_identity, *identity)) {
-      // Stop before Windows can recycle this monitor identity during replacement
-      // or final removal. Disconnects also stop the helper during warm retention.
-      stop_window_router_locked();
-    }
-
     {
       std::lock_guard retirement_lock(retired_virtual_display_mutex);
       if (retired_virtual_display_identity) {
@@ -991,6 +929,46 @@ namespace proc {
     set_display_name_locked({});
   }
 
+  bool proc_t::refresh_virtual_display_binding() {
+    if (!_virtual_display_identity) {
+      return false;
+    }
+    for (int attempt = 0; attempt < 20; ++attempt) {
+      const auto current = VDISPLAY::queryVirtualDisplayIdentity(
+        *_virtual_display_identity,
+        _virtual_display_device_path,
+        _virtual_display_gdi_name
+      );
+      if (current.state == VDISPLAY::display_identity_state_e::present && !current.display_name.empty()) {
+        _virtual_display_device_path = current.device_path;
+        _virtual_display_gdi_name = current.display_name;
+        _virtual_display_published = true;
+        set_display_name_locked(platf::to_utf8(current.display_name));
+        config::video.output_name = display_device::map_display_name(display_name);
+        return !config::video.output_name.empty();
+      }
+      std::this_thread::sleep_for(50ms);
+    }
+    // Never let a later HDR/mode operation address a recycled DISPLAYn name.
+    _virtual_display_gdi_name.clear();
+    set_display_name_locked({});
+    return false;
+  }
+
+  bool proc_t::promote_virtual_display(bool enable_hdr) {
+    const bool had_hdr_worker = _hdr_worker.joinable();
+    stop_hdr_worker();
+    _hdr_worker_state.reset();
+    if (!platf::primary_display::promote(_virtual_display_device_path) || !refresh_virtual_display_binding()) {
+      return false;
+    }
+    if (had_hdr_worker && !request_hdr_state(enable_hdr, 6s)) {
+      return false;
+    }
+    BOOST_LOG(info) << "Virtual display verified as the Windows primary display: " << display_name;
+    return true;
+  }
+
   void proc_t::adopt_virtual_display(
     VDISPLAY::creation_result_t created_display,
     bool enable_hdr
@@ -1047,6 +1025,10 @@ namespace proc {
       // Restore to user defined output name
       config::video.output_name = this->initial_display;
       terminate();
+#ifdef _WIN32
+      // Also cancel a pre-creation journal when Add never published an identity.
+      platf::primary_display::recover();
+#endif
     });
 
 #ifdef _WIN32
@@ -1070,12 +1052,23 @@ namespace proc {
         launch_session->virtual_display = false;
         return 503;
       }
+      if (!platf::primary_display::recover()) {
+        BOOST_LOG(error) << "Cannot start a virtual display while the previous primary-display restoration is unresolved."sv;
+        launch_session->virtual_display = false;
+        return 503;
+      }
       if (vDisplayDriverStatus != VDISPLAY::DRIVER_STATUS::OK) {
         // Try init driver again
         initVDisplayDriver();
       }
 
       if (vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
+        // Windows can remember that this virtual monitor used to be primary. Capture the
+        // physical baseline before Add itself has a chance to restore that remembered state.
+        if (!platf::primary_display::prepare()) {
+          BOOST_LOG(error) << "Could not save the original primary display before virtual-display creation."sv;
+          return 503;
+        }
         std::string device_name;
         std::string device_uuid_str;
         uuid_util::uuid_t device_uuid;
@@ -1125,13 +1118,18 @@ namespace proc {
         _virtual_display_published = !created_display.display_name.empty();
         _virtual_display_retirement_handed_off = false;
 
+        if (!created_display.device_path.empty() && !platf::primary_display::bind_pending(created_display.device_path)) {
+          BOOST_LOG(error) << "Could not bind primary-display recovery to the created virtual monitor."sv;
+          return 503;
+        }
+
         if (!created_display.display_name.empty()) {
           BOOST_LOG(info) << "Virtual Display created at " << created_display.display_name;
 
           // Don't change display settings when no params are given
           if (launch_session->width && launch_session->height && launch_session->fps) {
             // Apply display settings
-            if (VDISPLAY::changeDisplaySettings(created_display.display_name.c_str(), render_width, render_height, target_fps) != DISP_CHANGE_SUCCESSFUL) {
+            if (VDISPLAY::changeDisplaySettings(created_display.display_name.c_str(), render_width, render_height, target_fps, false) != DISP_CHANGE_SUCCESSFUL) {
               BOOST_LOG(error) << "Windows did not accept the requested virtual-display mode."sv;
               return 503;
             }
@@ -1146,6 +1144,10 @@ namespace proc {
           // empty name when probing graphics cards.
 
           config::video.output_name = display_device::map_display_name(this->display_name);
+          if (!promote_virtual_display(launch_session->enable_hdr)) {
+            BOOST_LOG(error) << "Could not make the virtual display primary; rolling back the launch."sv;
+            return 503;
+          }
         } else {
           BOOST_LOG(error) << (created_display.added() ? "Virtual display was added, but Windows did not publish its display name in time." : "Virtual display creation failed.");
           ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);
@@ -1419,6 +1421,10 @@ namespace proc {
       return 409;
     }
 
+    auto primary_rollback = util::fail_guard([&]() {
+      restore_primary_display();
+    });
+
     const auto old_width = static_cast<std::uint32_t>(_launch_session->width);
     const auto old_height = static_cast<std::uint32_t>(_launch_session->height);
     const auto old_fps = _launch_session->fps;
@@ -1429,7 +1435,7 @@ namespace proc {
 #ifdef _WIN32
     bool hdr_configured_by_recreation = false;
     if (_virtual_display) {
-      if (_virtual_display_gdi_name.empty()) {
+      if (!refresh_virtual_display_binding()) {
         BOOST_LOG(error) << "The retained virtual display no longer has a published Windows display name."sv;
         return 503;
       }
@@ -1448,7 +1454,8 @@ namespace proc {
             _virtual_display_gdi_name.c_str(),
             render_size->width,
             render_size->height,
-            launch_session->fps
+            launch_session->fps,
+            false
           ) == DISP_CHANGE_SUCCESSFUL;
 
         if (!fast_path_succeeded) {
@@ -1464,7 +1471,7 @@ namespace proc {
             }
 
             const bool mode_restored =
-              VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), old_width, old_height, old_fps) == DISP_CHANGE_SUCCESSFUL;
+              VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), old_width, old_height, old_fps, false) == DISP_CHANGE_SUCCESSFUL;
             const bool hdr_restored = request_hdr_state(old_hdr, 6s);
             if (!mode_restored) {
               BOOST_LOG(error) << "Failed to restore the retained display's prior mode after its in-place update failed."sv;
@@ -1551,13 +1558,18 @@ namespace proc {
             );
             if (!candidate.added()) {
               BOOST_LOG(error) << "SudoVDA rejected the retained virtual-display recreation."sv;
+              platf::primary_display::recover();
               return recreation_result_e::clean_failure;
+            }
+            if (!candidate.device_path.empty() && !platf::primary_display::bind_pending(candidate.device_path)) {
+              BOOST_LOG(error) << "Could not bind primary-display recovery to the recreated virtual monitor."sv;
+              return retire_candidate(candidate) ? recreation_result_e::clean_failure : recreation_result_e::fatal_failure;
             }
             if (candidate.display_name.empty()) {
               BOOST_LOG(error) << "The recreated virtual display was added, but Windows did not publish it in time."sv;
               return retire_candidate(candidate) ? recreation_result_e::clean_failure : recreation_result_e::fatal_failure;
             }
-            if (VDISPLAY::changeDisplaySettings(candidate.display_name.c_str(), width, height, fps) != DISP_CHANGE_SUCCESSFUL) {
+            if (VDISPLAY::changeDisplaySettings(candidate.display_name.c_str(), width, height, fps, false) != DISP_CHANGE_SUCCESSFUL) {
               BOOST_LOG(error) << "Windows did not accept the recreated virtual display's requested mode."sv;
               return retire_candidate(candidate) ? recreation_result_e::clean_failure : recreation_result_e::fatal_failure;
             }
@@ -1634,8 +1646,7 @@ namespace proc {
 
     if (_virtual_display && !hdr_configured_by_recreation && !request_hdr_state(launch_session->enable_hdr, 6s)) {
       bool rollback_succeeded = true;
-      if (display_mode_changed &&
-          VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), old_width, old_height, old_fps) != DISP_CHANGE_SUCCESSFUL) {
+      if (display_mode_changed && VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), old_width, old_height, old_fps, false) != DISP_CHANGE_SUCCESSFUL) {
         BOOST_LOG(error) << "Failed to roll back the retained virtual-display mode after HDR reconfiguration failed."sv;
         rollback_succeeded = false;
       }
@@ -1647,6 +1658,13 @@ namespace proc {
         BOOST_LOG(error) << "The retained display contract is incoherent after rollback; terminating the retained session."sv;
         terminate();
       }
+      return 503;
+    }
+    // Failed reconfiguration/rollback paths above leave the disconnected desktop restored.
+    // Promote only a successful reconnect, before capture starts using the new topology.
+    if (_virtual_display && !promote_virtual_display(launch_session->enable_hdr)) {
+      BOOST_LOG(error) << "Could not make the retained virtual display primary; terminating its unproven display contract."sv;
+      terminate();
       return 503;
     }
 #endif
@@ -1667,6 +1685,7 @@ namespace proc {
     _launch_session->scale_factor = launch_session->scale_factor;
     _launch_session->sbs_mode = launch_session->sbs_mode;
     _active_launch_session_id = launch_session->id;
+    primary_rollback.disable();
     return 0;
   }
 
@@ -1792,7 +1811,7 @@ namespace proc {
     auto roll_back = [&]() {
       // changeDisplaySettings() reports the DisplayConfig status, so verify the applied geometry
       // rather than trusting the return code on its own.
-      bool restored = VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), old_width, old_height, old_fps) == ERROR_SUCCESS &&
+      bool restored = VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), old_width, old_height, old_fps, false) == ERROR_SUCCESS &&
                       settle_at(old_width, old_height, old_fps);
       republish_display();
       if (!request_hdr_state(enable_hdr, 6s)) {
@@ -1802,7 +1821,7 @@ namespace proc {
       return restored;
     };
 
-    const auto change_status = VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), width, height, fps_millihz);
+    const auto change_status = VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), width, height, fps_millihz, false);
     if (change_status != ERROR_SUCCESS || !settle_at(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), fps_millihz)) {
       BOOST_LOG(error) << "The virtual display did not settle at the requested live mode "sv
                        << width << 'x' << height << "; rolling back."sv;
@@ -1853,23 +1872,35 @@ namespace proc {
         return false;
       }
       _remote_virtual_display_lease = lease;
-      start_window_router_locked();
+      if (!promote_virtual_display(_launch_session->enable_hdr)) {
+        BOOST_LOG(error) << "Remote virtual display is not the verified primary display."sv;
+        platf::primary_display::restore(_virtual_display_device_path);
+        ar_glasses::remote_virtual_display_ended(lease);
+        _remote_virtual_display_lease.reset();
+        return false;
+      }
     }
 #endif
     return true;
   }
 
-  void proc_t::stop_window_router() {
+  bool proc_t::restore_primary_display() {
     std::lock_guard lock(process_state_mutex);
 #ifdef _WIN32
-    stop_window_router_locked();
+    if (!_virtual_display_device_path.empty()) {
+      stop_hdr_worker();
+      _hdr_worker_state.reset();
+      const bool restored = platf::primary_display::restore(_virtual_display_device_path);
+      refresh_virtual_display_binding();
+      return restored;
+    }
 #endif
+    return true;
   }
 
   void proc_t::terminate(bool immediate, bool needs_refresh) {
     std::lock_guard lock(process_state_mutex);
 #ifdef _WIN32
-    stop_window_router_locked();
     // The worker never takes process_state_mutex, so it is safe to join while holding the process
     // state lock. This prevents an old launch from touching a display after teardown or refresh.
     stop_hdr_worker();
@@ -2374,6 +2405,10 @@ namespace proc {
     });
     if (construction_stop.stop_requested()) {
       return local_ar_handoff_e::remote_busy;
+    }
+    if (!platf::primary_display::recover()) {
+      BOOST_LOG(warning) << "Local AR is waiting for the original primary display to be restored."sv;
+      return local_ar_handoff_e::cleanup_timeout;
     }
     if (!_launch_session || !_launch_session->virtual_display) {
       release_claim.disable();

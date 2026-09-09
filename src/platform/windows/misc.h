@@ -228,9 +228,6 @@ namespace platf {
   void print_status(const std::string_view &prefix, HRESULT status);
   bool syncThreadDesktop();
 
-  /** Grant one captured user SID only process identity-query and exit-observation access. */
-  std::error_code grant_process_observation_to_user(HANDLE process, const std::string &user_id);
-
   int64_t qpc_counter();
 
   int64_t qpc_frequency();

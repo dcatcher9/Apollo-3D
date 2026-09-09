@@ -75,8 +75,9 @@ namespace VDISPLAY {
 
 	LONG getDeviceSettings(const wchar_t* deviceName, DEVMODEW& devMode);
 	LONG testDisplaySettings(const wchar_t* deviceName, int width, int height, int refresh_rate);
-	LONG changeDisplaySettings(const wchar_t* deviceName, int width, int height, int refresh_rate);
-	std::optional<bool> queryDisplayHDRByName(const wchar_t* displayName);
+  // Remote sessions use temporary modes so a live resize cannot persist their primary display.
+  LONG changeDisplaySettings(const wchar_t *deviceName, int width, int height, int refresh_rate, bool persist_settings = true);
+  std::optional<bool> queryDisplayHDRByName(const wchar_t* displayName);
 	bool setDisplayHDRByName(const wchar_t* displayName, bool enableAdvancedColor);
 
 	void closeVDisplayDevice();

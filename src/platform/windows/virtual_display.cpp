@@ -562,7 +562,7 @@ LONG changeBaselineDisplaySettings(
   return ChangeDisplaySettingsExW(deviceName, &devMode, nullptr, flags, nullptr);
 }
 
-LONG applyDisplaySettings(const wchar_t *deviceName, int width, int height, int refresh_rate) {
+LONG applyDisplaySettings(const wchar_t *deviceName, int width, int height, int refresh_rate, bool persist_settings) {
   std::vector<DISPLAYCONFIG_PATH_INFO> pathArray;
   std::vector<DISPLAYCONFIG_MODE_INFO> modeArray;
 
@@ -610,7 +610,7 @@ LONG applyDisplaySettings(const wchar_t *deviceName, int width, int height, int 
             pathArray.data(),
             modeCount,
             modeArray.data(),
-            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_SAVE_TO_DATABASE
+            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | (persist_settings ? SDC_SAVE_TO_DATABASE : 0)
           );
           if (status != ERROR_SUCCESS) {
             wprintf(L"[SUDOVDA] Failed to apply display settings.\n");
@@ -642,7 +642,7 @@ LONG testDisplaySettings(const wchar_t *deviceName, int width, int height, int r
   );
 }
 
-LONG changeDisplaySettings(const wchar_t *deviceName, int width, int height, int refresh_rate) {
+LONG changeDisplaySettings(const wchar_t *deviceName, int width, int height, int refresh_rate, bool persist_settings) {
   const auto refreshRates = baselineRefreshRates(refresh_rate);
   wprintf(L"[SUDOVDA] Applying baseline display mode [%dx%dx%d] for %ls.\n", width, height, refreshRates.preferred, deviceName);
   const auto baselineStatus = changeBaselineDisplaySettings(
@@ -650,7 +650,7 @@ LONG changeDisplaySettings(const wchar_t *deviceName, int width, int height, int
     width,
     height,
     refreshRates,
-    CDS_UPDATEREGISTRY
+    persist_settings ? CDS_UPDATEREGISTRY : 0
   );
   if (baselineStatus == DISP_CHANGE_SUCCESSFUL) {
     wprintf(L"[SUDOVDA] Baseline display mode applied successfully.\n");
@@ -659,7 +659,7 @@ LONG changeDisplaySettings(const wchar_t *deviceName, int width, int height, int
   }
 
   // Apply the exact fractional refresh rate through DisplayConfig.
-  return applyDisplaySettings(deviceName, width, height, refresh_rate);
+  return applyDisplaySettings(deviceName, width, height, refresh_rate, persist_settings);
 }
 
 bool findDisplayIds(const wchar_t *displayName, LUID &adapterId, uint32_t &targetId) {

@@ -243,13 +243,11 @@ namespace input {
 
     input_t(
       safe::mail_raw_t::event_t<input::touch_port_t> touch_port_event,
-      platf::feedback_queue_t feedback_queue,
-      std::uint64_t routing_tag
+      platf::feedback_queue_t feedback_queue
     ):
         pressed_modifiers {},
         gamepads(MAX_GAMEPADS),
         client_context {platf::allocate_client_input_context(platf_input)},
-        routing_tag {routing_tag},
         touch_port_event {std::move(touch_port_event)},
         feedback_queue {std::move(feedback_queue)},
         key_repeat_id {},
@@ -269,7 +267,6 @@ namespace input {
     std::vector<gamepad_t> gamepads;
     std::unique_ptr<platf::client_input_t> client_context;
     std::unique_ptr<platf::cursor_confinement_t> cursor_confinement;
-    const std::uint64_t routing_tag;
 
     safe::mail_raw_t::event_t<input::touch_port_t> touch_port_event;
     platf::feedback_queue_t feedback_queue;
@@ -478,7 +475,6 @@ namespace input {
           // Already released left button
           return;
         }
-        const platf::input_tag_scope_t input_tag {input->routing_tag};
         platf::button_mouse(platf_input, BUTTON_LEFT, release);
 
         mouse_press[BUTTON_LEFT] = false;
@@ -616,7 +612,6 @@ namespace input {
       return;
     }
 
-    const platf::input_tag_scope_t input_tag {input->routing_tag};
     send_key_and_modifiers(key_code, false, flags, synthetic_modifiers);
 
     input->key_repeat_id = task_pool.pushDelayed(
@@ -1447,7 +1442,6 @@ namespace input {
    * @param input The input context pointer.
    */
   void dispatch_input_packet(std::shared_ptr<input_t> &input, std::vector<uint8_t> &entry) {
-    const platf::input_tag_scope_t input_tag {input->routing_tag};
     auto payload = (PNV_INPUT_HEADER) entry.data();
     switch (util::endian::little(payload->magic)) {
       case MOUSE_MOVE_REL_MAGIC_GEN5:
@@ -1498,8 +1492,6 @@ namespace input {
   }
 
   void release_input_state(input_t &input, crypto::PERM permissions, bool teardown = false) {
-    // Cleanup must not look like a fresh request to activate or launch an app.
-    const platf::input_tag_scope_t input_tag {0};
     detail::release_pressed_states(key_press, mouse_press, permissions,
       [&](key_press_id_t key) {
         platf::keyboard_update(platf_input, map_keycode(vk_from_kpid(key) & 0x00FF), true, flags_from_kpid(key));
@@ -1801,11 +1793,10 @@ namespace input {
     return true;
   }
 
-  std::shared_ptr<input_t> alloc(safe::mail_t mail, crypto::PERM permissions, bool authored_haptics, std::optional<std::string> confine_display_path, std::uint64_t routing_tag) {
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, crypto::PERM permissions, bool authored_haptics, std::optional<std::string> confine_display_path) {
     auto input = std::make_shared<input_t>(
       mail->event<input::touch_port_t>(mail::touch_port),
-      mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback),
-      routing_tag
+      mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback)
     );
     input->permissions = permissions;
     input->authored_haptics = authored_haptics;
@@ -1818,7 +1809,6 @@ namespace input {
     // Workaround to ensure new frames will be captured when a client connects
     if (!input->cursor_confinement) {
       task_pool.pushDelayed([]() {
-        const platf::input_tag_scope_t input_tag {0};
         platf::move_mouse(platf_input, 1, 1);
         platf::move_mouse(platf_input, -1, -1);
       },

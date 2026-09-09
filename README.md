@@ -111,9 +111,11 @@ The Web UI also shows QR pairing as a secondary option for compatible clients. M
 normal setup flow uses the PIN. For the direct local path, configure
 [Local AR glasses](./docs/sbs-local-ar-glasses.md) instead; Moonlight 3D is not involved.
 
-The virtual display supports native Windows launches and client-controlled remote cursor bounds. See
-[Virtual desktop interaction](./docs/virtual-desktop.md) for controls, application compatibility,
-and the current live-verification status.
+While streaming, the virtual display temporarily becomes the Windows primary display, making it
+the default destination for applications that follow primary-monitor placement. Physical monitors
+remain active. Client-controlled remote cursor bounds are enabled by default. See
+[Virtual desktop interaction](./docs/virtual-desktop.md) for restoration, application compatibility,
+and live-verification limits.
 
 ## Stable depth from scene to scene
 

@@ -19,7 +19,6 @@ extern "C" {
 
 #include <src/input.h>
 #include <src/platform/windows/input_cursor.h>
-#include <src/platform/windows/input_tag.h>
 #include <src/platform/windows/misc.h>
 #include <src/utility.h>
 
@@ -67,70 +66,6 @@ namespace {
     return {util::endian::big(move->deltaX), util::endian::big(move->deltaY)};
   }
 }  // namespace
-
-TEST(InputRoutingTagTests, NativeMouseAndKeyboardOnlyCarryCurrentSessionTag) {
-  INPUT mouse {};
-  mouse.type = INPUT_MOUSE;
-  INPUT keyboard {};
-  keyboard.type = INPUT_KEYBOARD;
-  const auto stamp = [&]() {
-    platf::detail::apply_input_tag(mouse);
-    platf::detail::apply_input_tag(keyboard);
-  };
-
-  stamp();
-  EXPECT_EQ(mouse.mi.dwExtraInfo, 0);
-  EXPECT_EQ(keyboard.ki.dwExtraInfo, 0);
-  {
-    const platf::input_tag_scope_t session {0x1234567887654321ULL};
-    stamp();
-    EXPECT_EQ(mouse.mi.dwExtraInfo, 0x1234567887654321ULL);
-    EXPECT_EQ(keyboard.ki.dwExtraInfo, 0x1234567887654321ULL);
-  }
-
-  // Reusing native event storage on the same worker must overwrite an old session marker.
-  stamp();
-  EXPECT_EQ(mouse.mi.dwExtraInfo, 0);
-  EXPECT_EQ(keyboard.ki.dwExtraInfo, 0);
-}
-
-TEST(InputRoutingTagTests, NestedSessionAndCleanupScopesRestoreTheirCaller) {
-  EXPECT_EQ(platf::input_tag_scope_t::current(), 0);
-  {
-    const platf::input_tag_scope_t session {17};
-    EXPECT_EQ(platf::input_tag_scope_t::current(), 17);
-    {
-      // Permission/reset releases and the frame nudge are system work, even when nested.
-      const platf::input_tag_scope_t cleanup {0};
-      EXPECT_EQ(platf::input_tag_scope_t::current(), 0);
-      {
-        const platf::input_tag_scope_t replacement {29};
-        EXPECT_EQ(platf::input_tag_scope_t::current(), 29);
-      }
-      EXPECT_EQ(platf::input_tag_scope_t::current(), 0);
-    }
-    EXPECT_EQ(platf::input_tag_scope_t::current(), 17);
-  }
-  EXPECT_EQ(platf::input_tag_scope_t::current(), 0);
-}
-
-TEST(InputRoutingTagTests, OtherWorkersNeverInheritAnActiveSessionMarker) {
-  const platf::input_tag_scope_t session {17};
-  auto other_worker = std::async(std::launch::async, []() {
-    std::array<std::uint64_t, 3> observed {platf::input_tag_scope_t::current(), 0, 0};
-    {
-      const platf::input_tag_scope_t own_session {29};
-      INPUT mouse {};
-      mouse.type = INPUT_MOUSE;
-      platf::detail::apply_input_tag(mouse);
-      observed[1] = mouse.mi.dwExtraInfo;
-    }
-    observed[2] = platf::input_tag_scope_t::current();
-    return observed;
-  });
-  EXPECT_EQ(other_worker.get(), (std::array<std::uint64_t, 3> {0, 29, 0}));
-  EXPECT_EQ(platf::input_tag_scope_t::current(), 17);
-}
 
 TEST(InputCursorConfinementTests, RelativeMovementStopsAtEveryEdgeWithNegativeOrigin) {
   platf::detail::confined_cursor_state_t cursor;

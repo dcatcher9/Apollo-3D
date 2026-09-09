@@ -3631,6 +3631,7 @@ namespace stream {
       bool remote_session_active {};
       std::uint64_t platform_lifecycle_generation {};
       task_pool_util::TaskPool::task_id_t pending_platform_stop {};
+      task_pool_util::TaskPool::task_id_t pending_primary_restore {};
       bool platform_streaming_warm {};
       std::optional<std::uint64_t> warm_process_instance;
 
@@ -3640,6 +3641,41 @@ namespace stream {
           task_pool.cancel(pending_platform_stop);
           pending_platform_stop = nullptr;
         }
+        if (pending_primary_restore) {
+          task_pool.cancel(pending_primary_restore);
+          pending_primary_restore = nullptr;
+        }
+      }
+
+      void schedule_primary_restore_locked(detail::primary_display_restore_retry_t retry) {
+        pending_primary_restore = task_pool.pushDelayed(
+                                             [retry]() {
+                                               std::lock_guard delayed_lock(platform_lifecycle_mutex);
+                                               // A cancelled callback may already be waiting on the lock. Never clear a new
+                                               // generation's task handle, or restore its pending/active session's display.
+                                               if (retry.generation != platform_lifecycle_generation) {
+                                                 return;
+                                               }
+                                               pending_primary_restore = nullptr;
+                                               const auto action = retry.next_action(
+                                                 platform_lifecycle_generation,
+                                                 proc::proc.get_host_session_id(),
+                                                 warm_process_instance,
+                                                 remote_session_active,
+                                                 !rtsp_stream::launch_session_available(),
+                                                 platform_streaming_warm && pending_platform_stop
+                                               );
+                                               if (action == detail::primary_display_restore_retry_t::action_e::stop) {
+                                                 return;
+                                               }
+                                               if (action == detail::primary_display_restore_retry_t::action_e::wait || !proc::proc.restore_primary_display()) {
+                                                 // The existing grace timer remains authoritative; retries never extend it.
+                                                 schedule_primary_restore_locked(retry);
+                                               }
+                                             },
+                                             1s
+        )
+                                    .task_id;
       }
 
       void stop_warm_platform_locked() {
@@ -3673,6 +3709,7 @@ namespace stream {
                                            }
 
                                            pending_platform_stop = nullptr;
+                                           invalidate_pending_platform_stop_locked();
                                            BOOST_LOG(info) << (platform_streaming_warm ? "Streaming session resume grace expired; terminating the retained app." : "Streaming launch handshake expired; terminating the unclaimed app.");
                                            // A reconnect normally reserves the warm state before publishing its RTSP handshake.
                                            // Clear any leftover reservation too so /serverinfo cannot advertise a resumable app
@@ -3718,9 +3755,9 @@ namespace stream {
           return;
         }
 
-        // Physical input may route native launches too, so the observer must stop when the
-        // stream disconnects even when its apps and monitor remain available for reconnect.
-        proc::proc.stop_window_router();
+        // Return the PC's primary display on disconnect, even while the app and
+        // virtual monitor remain warm for a reconnect.
+        const bool primary_restored = proc::proc.restore_primary_display();
         invalidate_pending_platform_stop_locked();
         const auto process_status = proc::proc.get_status();
         if (process_status.app_id == 0) {
@@ -3739,8 +3776,8 @@ namespace stream {
 
         // Keep the app and remote virtual-display ownership active during the grace. Capture,
         // encoding, transport, and input are already stopped with the session; retaining process
-        // ownership prevents another presentation path from claiming the display. Native
-        // window routing resumes only when the next stream activates its display lease.
+        // ownership prevents another presentation path from claiming the display. The next
+        // accepted reconnect makes the virtual display primary again before capture.
         const auto host_session_id = proc::proc.get_host_session_id();
         warm_process_instance = host_session_id == 0 ? std::nullopt : std::optional<std::uint64_t> {host_session_id};
         // The current launch reservation may still be waiting for its control connection.
@@ -3759,6 +3796,9 @@ namespace stream {
                                  std::max(config::stream.session_resume_grace, config::stream.ping_timeout) :
                                  config::stream.session_resume_grace;
         schedule_platform_stop_locked(retention);
+        if (!primary_restored && host_session_id != 0) {
+          schedule_primary_restore_locked({platform_lifecycle_generation, host_session_id});
+        }
       }
     }  // namespace
 
@@ -3803,6 +3843,22 @@ namespace stream {
       }
       _impl->committed = true;
       _impl->lock.unlock();
+    }
+
+    bool platform_launch_guard_t::restore_primary_display() {
+      if (!_impl || !_impl->idle || _impl->committed || !_impl->lock.owns_lock() || remote_session_active) {
+        return false;
+      }
+      const bool launch_pending = !rtsp_stream::launch_session_available();
+      if (!launch_pending && proc::proc.restore_primary_display()) {
+        return true;
+      }
+      const auto host_session_id = proc::proc.get_host_session_id();
+      const detail::primary_display_restore_retry_t retry {platform_lifecycle_generation, host_session_id};
+      if (!pending_primary_restore && retry.next_action(platform_lifecycle_generation, host_session_id, warm_process_instance, remote_session_active, launch_pending, platform_streaming_warm && pending_platform_stop) != detail::primary_display_restore_retry_t::action_e::stop) {
+        schedule_primary_restore_locked(retry);
+      }
+      return false;
     }
 
     platform_launch_guard_t guard_platform_launch() {
@@ -4055,8 +4111,7 @@ namespace stream {
           session.config.client_supports_authored_pcm,
           session.confine_cursor && active_process.virtual_display ?
             std::optional {proc::proc.virtual_display_device_path()} :
-            std::nullopt,
-          active_process.virtual_display ? active_process.host_session_id : 0
+            std::nullopt
         );
       }
 

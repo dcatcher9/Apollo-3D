@@ -374,6 +374,34 @@ namespace stream {
   ) noexcept;
 
   namespace detail {
+    /** A restore retry belongs only to the disconnected process and its current grace timer. */
+    struct primary_display_restore_retry_t {
+      enum class action_e {
+        stop,
+        wait,
+        restore,
+      };
+
+      std::uint64_t generation;
+      std::uint64_t host_session_id;
+
+      [[nodiscard]] action_e next_action(
+        std::uint64_t current_generation,
+        std::uint64_t current_host_session_id,
+        std::optional<std::uint64_t> retained_host_session_id,
+        bool remote_session_active,
+        bool launch_pending,
+        bool grace_timer_active
+      ) const noexcept {
+        if (generation != current_generation || host_session_id == 0 || host_session_id != current_host_session_id || retained_host_session_id != host_session_id || remote_session_active || !grace_timer_active) {
+          return action_e::stop;
+        }
+        // A failed worker start can retain the RTSP claim until its rollback returns.
+        // Keep retry ownership until that claim clears without changing its display.
+        return launch_pending ? action_e::wait : action_e::restore;
+      }
+    };
+
     /**
      * Transaction gate for live 0x3007 mode requests.
      *
@@ -647,6 +675,9 @@ namespace stream {
 
       /** Publish a validated RTSP launch and renew the retained platform deadline. */
       void commit();
+
+      /** Roll back primary-display promotion, retrying within the existing grace deadline. */
+      bool restore_primary_display();
 
     private:
       struct impl_t;

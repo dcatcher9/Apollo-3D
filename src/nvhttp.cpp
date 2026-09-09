@@ -1642,12 +1642,19 @@ namespace nvhttp {
       return;
     }
 
+    // Until RTSP publication owns the handshake timeout, this request owns every launch side
+    // effect, including temporary primary-display promotion. Publication failure must roll back.
+    auto unpublished_process_guard = util::fail_guard([]() {
+      proc::proc.terminate();
+    });
+
     if (!rtsp_stream::launch_session_raise(launch_session)) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 503);
       tree.put("root.<xmlattr>.status_message", "Another streaming handshake is already pending");
       return;
     }
+    unpublished_process_guard.disable();
     unpublished_gpu_guard.disable();
     platform_launch.commit();
 
@@ -1830,6 +1837,12 @@ namespace nvhttp {
     }
 #endif
 
+    // Keep the old grace deadline while undoing a failed resume's primary-display promotion.
+    // The lifecycle guard also arranges retry if Windows cannot restore immediately.
+    auto unpublished_primary_guard = util::fail_guard([&]() {
+      platform_launch.restore_primary_display();
+    });
+
     if (const auto reconfigure_error = proc::proc.reconfigure_retained_session(launch_session)) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", reconfigure_error);
@@ -1858,6 +1871,7 @@ namespace nvhttp {
 #ifdef _WIN32
     remote_virtual_display_guard.disable();
 #endif
+    unpublished_primary_guard.disable();
     platform_launch.commit();
 
     tree.put("root.<xmlattr>.status_code", 200);

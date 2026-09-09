@@ -232,8 +232,8 @@ namespace proc {
     bool live_video_mode_needs_display_change(int width, int height, int fps_millihz) const;
     /** Adopt the remote streaming session's virtual-display lease before platform startup. */
     bool activate_remote_virtual_display_lease(std::uint64_t lease);
-    /** Stop native window routing on disconnect without releasing retained apps or the display. */
-    void stop_window_router();
+    /** Restore the original primary on disconnect, retaining apps/display for a warm reconnect. */
+    bool restore_primary_display();
     /** Exact remote monitor identity for input confinement; empty for a physical desktop. */
     std::string virtual_display_device_path() const;
     void terminate(bool immediate = false, bool needs_refresh = true);
@@ -305,6 +305,8 @@ namespace proc {
     static void schedule_retired_virtual_display_cleanup();
     static bool has_retired_virtual_display();
     void clear_virtual_display_binding();
+    bool refresh_virtual_display_binding();
+    bool promote_virtual_display(bool enable_hdr);
     void adopt_virtual_display(
       VDISPLAY::creation_result_t created_display,
       bool enable_hdr
@@ -319,9 +321,6 @@ namespace proc {
 
     std::shared_ptr<hdr_worker_state_t> _hdr_worker_state;
     std::jthread _hdr_worker;
-    void start_window_router_locked();
-    void stop_window_router_locked();
-    boost::process::v1::child _window_router;
 #endif
 
     std::string display_name;
