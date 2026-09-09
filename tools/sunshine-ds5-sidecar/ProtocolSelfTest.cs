@@ -414,6 +414,9 @@ internal static class ProtocolSelfTest
         VerifyBundledCompositeProfile();
         VerifyProfileSelection();
         VerifyHapticsChannelIsolation();
+        VerifyHapticsSampleTimeline();
+        VerifyHapticsStreamLifecycle();
+        VerifyHapticsStopOrdering();
         VerifyDefaultAudioEndpointClassification();
         VerifyDefaultAudioEndpointPolicy();
         VerifyControllerStateSubmissionPolicy();
@@ -895,8 +898,156 @@ internal static class ProtocolSelfTest
         catch (InvalidDataException)
         {
             // Expected: arbitrary callback fragmentation is reassembled by
-            // ControllerSession before complete frames reach the extractor.
+            // DualSenseHapticsStream before complete frames reach the extractor.
         }
+    }
+
+    private static ulong HapticsTime(Protocol.Message message) =>
+        BinaryPrimitives.ReadUInt64LittleEndian(message.Payload.AsSpan(12, 8));
+
+    private static uint HapticsSequence(Protocol.Message message) =>
+        BinaryPrimitives.ReadUInt32LittleEndian(message.Payload.AsSpan(8, 4));
+
+    private static void VerifyHapticsSampleTimeline()
+    {
+        var messages = new List<Protocol.Message>();
+        long clock = 1_000_000;
+        using var stream = new DualSenseHapticsStream(3, 2, message =>
+        {
+            messages.Add(message);
+            clock += 777; // Emission cost must not become inter-chunk timing.
+        }, () => clock);
+        stream.OnAudioStreamingChanged(null, true);
+        var audio = new byte[600 * DualSenseHapticsAudio.InputFrameBytes];
+        for (var frame = 0; frame < 600; frame++)
+        {
+            WriteSample(audio, frame * 4, short.MaxValue);
+            WriteSample(audio, frame * 4 + 1, short.MinValue);
+            WriteSample(audio, frame * 4 + 2, (short)frame);
+            WriteSample(audio, frame * 4 + 3, (short)-frame);
+        }
+        // Invoke the same callback subscribed directly to HIDMaestro's batched
+        // OUT URBs. This covers extraction, chunking, clocking, and the wire.
+        stream.OnAudioFrames(null, audio);
+        Require(messages.Count == 3, "batched haptics split at 240 frames");
+        var offset = 0;
+        for (var chunk = 0; chunk < 3; chunk++)
+        {
+            var message = messages[chunk];
+            var payload = message.Payload;
+            var frames = chunk < 2 ? 240 : 120;
+            Require(message.Type == Protocol.MessageType.HapticsPcm &&
+                    payload[0] == 3 && payload[1] == 2 && payload[3] == 2 && payload[6] == 16 &&
+                    BinaryPrimitives.ReadUInt16LittleEndian(payload.AsSpan(4, 2)) == frames &&
+                    BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(20, 4)) == 48000 &&
+                    payload.Length == 24 + frames * 4,
+                "batched haptics exact wire shape");
+            Require(HapticsTime(message) == 1_000_000ul + (ulong)chunk * 5_000 &&
+                    HapticsSequence(message) == chunk &&
+                    payload[2] == (chunk == 0 ? (byte)Protocol.HapticsFlags.StreamStart : 0),
+                "consecutive chunks have non-overlapping 5ms presentation times and one START");
+            for (var frame = 0; frame < frames; frame++)
+            {
+                Require(BinaryPrimitives.ReadInt16LittleEndian(payload.AsSpan(24 + frame * 4, 2)) == offset + frame &&
+                        BinaryPrimitives.ReadInt16LittleEndian(payload.AsSpan(26 + frame * 4, 2)) == -(offset + frame),
+                    "batched haptics retain only the exact actuator samples");
+            }
+            offset += frames;
+        }
+        clock += 10_000_000; // Subsequent callback jitter cannot move the sample cursor.
+        stream.OnAudioStreamingChanged(null, true); // Duplicate start is not a new stream.
+        for (var frame = 0; frame < 48; frame++)
+        {
+            stream.OnAudioFrames(null, new byte[DualSenseHapticsAudio.InputFrameBytes]);
+            Require(HapticsTime(messages[^1]) == 1_000_000ul + (600ul + (uint)frame) * 1_000_000 / 48_000,
+                "fractional microseconds use cumulative frames without rounding drift");
+        }
+        stream.OnAudioStreamingChanged(null, false);
+        Require(HapticsTime(messages[^1]) == 1_013_500 &&
+                messages[^1].Payload[2] == (byte)Protocol.HapticsFlags.StreamEnd,
+            "END lands exactly after the last emitted sample");
+    }
+
+    private static void VerifyHapticsStreamLifecycle()
+    {
+        var messages = new List<Protocol.Message>();
+        long clock = 100;
+        using var stream = new DualSenseHapticsStream(0, 0, messages.Add, () => clock);
+        stream.OnAudioStreamingChanged(null, false);
+        stream.InitializeStreamingState(true); // Stale startup snapshot loses to a notification.
+        stream.OnAudioFrames(null, new byte[8]);
+        Require(messages.Count == 0, "stale audio startup snapshot cannot resurrect a stopped stream");
+        stream.OnAudioStreamingChanged(null, true);
+        stream.OnAudioFrames(null, new byte[] { 0x99, 0x88, 0x77 });
+        Require(messages.Count == 0, "partial source frame waits for its remaining bytes");
+        stream.OnAudioStreamingChanged(null, false);
+        Require(messages.Count == 1 && messages[0].Payload[2] == (byte)Protocol.HapticsFlags.StreamEnd,
+            "stopping a partial-only stream emits an empty END");
+        stream.OnAudioStreamingChanged(null, false);
+        stream.OnAudioFrames(null, new byte[16]);
+        Require(messages.Count == 1, "stopped stream ignores late frames and duplicate END");
+
+        clock = 2_000_000;
+        stream.OnAudioStreamingChanged(null, true);
+        var source = new byte[] { 9, 8, 7, 6, 0x34, 0x12, 0x78, 0x56 };
+        stream.OnAudioFrames(null, source.AsMemory(0, 3));
+        stream.OnAudioFrames(null, source.AsMemory(3));
+        Require(messages.Count == 2 && HapticsTime(messages[1]) == 2_000_000 &&
+                HapticsSequence(messages[1]) == 1 &&
+                messages[1].Payload[2] == (byte)Protocol.HapticsFlags.StreamStart &&
+                messages[1].Payload.AsSpan(24).SequenceEqual(source.AsSpan(4)),
+            "restart discards old residual, reanchors time, and retains controller sequence");
+        stream.Dispose();
+        Require(messages.Count == 3 && HapticsTime(messages[2]) == 2_000_020 &&
+                HapticsSequence(messages[2]) == 2 &&
+                messages[2].Payload[2] == (byte)Protocol.HapticsFlags.StreamEnd,
+            "disposing an active stream emits the final sample boundary");
+        stream.OnAudioStreamingChanged(null, true);
+        stream.OnAudioFrames(null, source);
+        stream.Dispose();
+        Require(messages.Count == 3, "disposed haptics stream cannot deliver late callbacks");
+    }
+
+    private static void VerifyHapticsStopOrdering()
+    {
+        var messages = new List<Protocol.Message>();
+        using var firstChunk = new ManualResetEventSlim();
+        using var releaseChunk = new ManualResetEventSlim();
+        using var stopStarted = new ManualResetEventSlim();
+        using var stream = new DualSenseHapticsStream(0, 0, message =>
+        {
+            messages.Add(message);
+            if (messages.Count == 1)
+            {
+                firstChunk.Set();
+                Require(releaseChunk.Wait(TimeSpan.FromSeconds(5)), "release blocked audio chunk");
+            }
+        }, () => 1000);
+        stream.OnAudioStreamingChanged(null, true);
+        var framesTask = Task.Factory.StartNew(
+            () => stream.OnAudioFrames(null, new byte[480 * 8]),
+            CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        Require(firstChunk.Wait(TimeSpan.FromSeconds(5)), "audio batch reaches first chunk");
+        var stopTask = Task.Factory.StartNew(() =>
+        {
+            stopStarted.Set();
+            stream.OnAudioStreamingChanged(null, false);
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        try
+        {
+            Require(stopStarted.Wait(TimeSpan.FromSeconds(5)) && !stopTask.Wait(50),
+                "concurrent END waits for the whole in-flight USB window");
+        }
+        finally
+        {
+            releaseChunk.Set();
+            Require(Task.WaitAll(new[] { framesTask, stopTask }, TimeSpan.FromSeconds(5)),
+                "audio batch and concurrent END finish without deadlock");
+        }
+        Require(messages.Count == 3 && messages[1].Payload[2] == 0 &&
+                messages[2].Payload[2] == (byte)Protocol.HapticsFlags.StreamEnd &&
+                HapticsTime(messages[1]) == 6000 && HapticsTime(messages[2]) == 11000,
+            "END follows the final chunk in sequence and sample time");
     }
 
     private static void WriteSample(Span<byte> frames, int sample, short value) =>

@@ -65,7 +65,10 @@ four-channel controller audio endpoint: only authored haptic channels 3/4 are fo
 native DualSense audio haptics and a client that consumes the PCM callback.
 
 `gamepad = auto` keeps the existing ViGEm selection. An unavailable optional backend falls back
-to ViGEm. Missing audio support or client opt-in withholds PCM while standard controller feedback
+to ViGEm. If a running helper fails and its one restart does not recover, the next controller event
+switches to ViGEm while retaining the controller's host/client indices and feedback queue. Failed
+ViGEm attachment is retried on input at most once per second; controller removal cancels pending
+fallback. Missing audio support or client opt-in withholds PCM while standard controller feedback
 remains available. PCM uses a separate bounded queue and unreliable sequenced control delivery;
 late waveforms cannot accumulate through reliable retransmission or erase queued rumble stops.
 

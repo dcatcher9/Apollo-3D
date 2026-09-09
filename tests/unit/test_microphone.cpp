@@ -221,8 +221,9 @@ namespace {
 
   class test_sink_t: public microphone::pcm_sink_t {
   public:
-    explicit test_sink_t(std::shared_ptr<sink_state_t> state):
-        state_(std::move(state)) {}
+    explicit test_sink_t(std::shared_ptr<sink_state_t> state, std::size_t write_limit = 240):
+        state_(std::move(state)),
+        write_limit_(write_limit) {}
 
     ~test_sink_t() override {
       ++state_->destroyed;
@@ -241,7 +242,7 @@ namespace {
       if (state_->fail_write) {
         return -1;
       }
-      const auto count = std::min<std::size_t>(pcm.size(), 240);
+      const auto count = std::min(pcm.size(), write_limit_);
       state_->pcm.insert(state_->pcm.end(), pcm.begin(), pcm.begin() + count);
       state_->ready.notify_all();
       return static_cast<int>(count);
@@ -249,6 +250,7 @@ namespace {
 
   private:
     std::shared_ptr<sink_state_t> state_;
+    std::size_t write_limit_;
   };
 
   TEST(Microphone, RealUdpRoutesDecodedAudioOnlyAfterActivationAndJoinsOnStop) {
@@ -292,6 +294,51 @@ namespace {
     stop_two.join();
     EXPECT_FALSE(session->running());
     EXPECT_EQ(state->destroyed.load(), 1u);
+  }
+
+  TEST(Microphone, RealUdpMaintainsCaptureCadenceAcrossSchedulerLateness) {
+    const auto value = options(true);
+    auto state = std::make_shared<sink_state_t>();
+    std::string error;
+    auto session = microphone::session_t::start(value, error, [state] {
+      // Consume a complete audio frame so this test measures the receiver's
+      // playout clock independently of output-device backpressure.
+      return std::make_unique<test_sink_t>(state, microphone::frame_samples);
+    });
+    ASSERT_TRUE(session) << error;
+
+    const auto encoded = opus_packet();
+    ASSERT_FALSE(encoded.empty());
+    constexpr std::uint16_t packet_count = 150;
+    std::vector<std::vector<std::uint8_t>> packets;
+    for (std::uint16_t sequence = 0; sequence < packet_count; ++sequence) {
+      packets.push_back(packet(value, sequence, encoded));
+      ASSERT_FALSE(packets.back().empty());
+    }
+    boost::asio::io_context io;
+    boost::asio::ip::udp::socket sender(io, boost::asio::ip::udp::endpoint(boost::asio::ip::udp::v4(), 0));
+    const boost::asio::ip::udp::endpoint receiver(boost::asio::ip::make_address("127.0.0.1"), session->bound_port());
+    sender.send_to(boost::asio::buffer(ping(value)), receiver);
+    session->activate();
+    const auto capture_started = std::chrono::steady_clock::now();
+    for (std::uint16_t sequence = 0; sequence < packet_count; ++sequence) {
+      std::this_thread::sleep_until(capture_started + std::chrono::milliseconds(20 * sequence));
+      sender.send_to(boost::asio::buffer(packets[sequence]), receiver);
+    }
+
+    // Windows condition-variable wakeups can be coarser than the requested
+    // 2 ms poll interval. Every late wake must preserve the 50 Hz timeline;
+    // resetting each deadline to now + 20 ms lost roughly half the speech.
+    // Allow transient scheduling stalls while rejecting sustained clock drift.
+    constexpr std::size_t minimum_samples = packet_count * microphone::frame_samples * 9 / 10;
+    {
+      std::unique_lock lock(state->mutex);
+      EXPECT_TRUE(state->ready.wait_for(lock, std::chrono::seconds(1), [&] {
+        return state->pcm.size() >= minimum_samples;
+      }))
+        << "Delivered " << state->pcm.size() / microphone::frame_samples << " of " << packet_count << " microphone frame slots";
+    }
+    session->stop();
   }
 
   TEST(Microphone, UnavailableSinkFailsSetupAndReleasesPortForNextSession) {

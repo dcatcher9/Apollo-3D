@@ -7,6 +7,11 @@ and lightbar output. The composite profile also presents a four-channel USB audi
 endpoint: channels 1/2 are the controller speaker and channels 3/4 carry authored
 haptic PCM. Only channels 3/4 enter the haptics transport.
 
+PCM presentation timestamps identify the first sample in each packet and advance
+at 48 kHz across callback and packet boundaries. USB batches are split into at
+most 240-frame packets; splitting does not collapse their timestamps. Stream
+restart reanchors the sample timeline, while controller sequence numbers continue.
+
 The helper source is adapted from
 [Sunshine-Foundation 3e142f7d](https://github.com/AlkaidLab/foundation-sunshine/tree/3e142f7d192ea26a4283ca8c9ab7c7d30db62023/tools/sunshine-ds5-sidecar)
 under GPL-3.0-only. It uses the public

@@ -6,6 +6,7 @@
 
   #define WIN32_LEAN_AND_MEAN
   #include "src/config.h"
+  #include "src/platform/windows/ds5/ds5_controller_slot.h"
   #include "src/platform/windows/ds5/ds5_sidecar_client.h"
   #include "src/platform/windows/virtual_device_host/protocol.h"
 
@@ -568,6 +569,158 @@ TEST(Ds5SidecarClientTests, ReallocatesAfterRecoveryFailure) {
     }
   }
   EXPECT_EQ(result, 0);
+}
+
+TEST(Ds5ControllerSlotTests, FailedRecoveryFallsBackOnceWithOriginalControllerAndQueues) {
+  config_scope_t restore_config;
+  restore_config.enable();
+
+  event_namespace_scope_t events(L"slot-fallback");
+  const auto continue_name = L"Local\\sunshine-ds5-test-continue-" + events.suffix;
+  const auto crash_name = L"Local\\sunshine-ds5-test-crash-always-" + events.suffix;
+  handle_scope_t continue_event(CreateEventW(nullptr, FALSE, FALSE, continue_name.c_str()));
+  handle_scope_t crash_event(CreateEventW(nullptr, FALSE, FALSE, crash_name.c_str()));
+  ASSERT_NE(continue_event.handle, nullptr);
+  ASSERT_NE(crash_event.handle, nullptr);
+
+  auto mail = std::make_shared<safe::mail_raw_t>();
+  auto feedback = mail->queue<platf::gamepad_feedback_msg_t>("slot-feedback");
+  auto haptics = mail->queue<platf::gamepad_feedback_msg_t>("slot-haptics");
+  platf::gamepad_id_t id {2, 5};
+  platf::gamepad_arrival_t metadata {2, 0x220, 0x12345678, haptics};
+  platf::ds5::controller_slot_t slot;
+  ASSERT_EQ(slot.alloc(id, metadata, feedback, false), 0);
+  // The slot must retain values, including the session queues, rather than
+  // borrowing the caller's arrival packet or using its global index as client id.
+  id = {7, 8};
+  metadata = {};
+
+  ASSERT_EQ(WaitForSingleObject(crash_event.handle, 5000), WAIT_OBJECT_0);
+  ASSERT_EQ(WaitForSingleObject(crash_event.handle, 5000), WAIT_OBJECT_0);
+  int fallback_calls = 0;
+  auto fallback = [&](const platf::gamepad_id_t &saved_id, const platf::gamepad_arrival_t &saved_metadata, platf::feedback_queue_t saved_feedback) {
+    ++fallback_calls;
+    EXPECT_EQ(saved_id.globalIndex, 2);
+    EXPECT_EQ(saved_id.clientRelativeIndex, 5);
+    EXPECT_EQ(saved_metadata.type, 2);
+    EXPECT_EQ(saved_metadata.capabilities, 0x220);
+    EXPECT_EQ(saved_metadata.supportedButtons, 0x12345678u);
+    EXPECT_EQ(saved_metadata.haptics_feedback_queue, haptics);
+    EXPECT_EQ(saved_feedback, feedback);
+    return 0;
+  };
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (fallback_calls == 0 && std::chrono::steady_clock::now() < deadline) {
+    slot.sidecar_for_input(fallback);
+    if (fallback_calls == 0) {
+      Sleep(10);
+    }
+  }
+  ASSERT_EQ(fallback_calls, 1);
+  // All later state/touch/motion/battery routes must use the existing fallback
+  // controller, without reattaching a helper or allocating another ViGEm target.
+  for (int event = 0; event < 4; ++event) {
+    EXPECT_EQ(slot.sidecar_for_input(fallback), nullptr);
+  }
+  EXPECT_EQ(fallback_calls, 1);
+  slot.reset();
+  EXPECT_EQ(slot.sidecar_for_input(fallback), nullptr);
+  EXPECT_EQ(fallback_calls, 1);
+}
+
+TEST(Ds5ControllerSlotTests, FailedFallbackRetainsSessionAndThrottlesRetry) {
+  config_scope_t restore_config;
+  restore_config.enable();
+
+  event_namespace_scope_t events(L"slot-retry");
+  const auto continue_name = L"Local\\sunshine-ds5-test-continue-" + events.suffix;
+  const auto crash_name = L"Local\\sunshine-ds5-test-crash-always-" + events.suffix;
+  handle_scope_t continue_event(CreateEventW(nullptr, FALSE, FALSE, continue_name.c_str()));
+  handle_scope_t crash_event(CreateEventW(nullptr, FALSE, FALSE, crash_name.c_str()));
+  ASSERT_NE(continue_event.handle, nullptr);
+  ASSERT_NE(crash_event.handle, nullptr);
+
+  auto mail = std::make_shared<safe::mail_raw_t>();
+  auto feedback = mail->queue<platf::gamepad_feedback_msg_t>("slot-retry-feedback");
+  platf::ds5::controller_slot_t slot;
+  ASSERT_EQ(slot.alloc({3, 6}, {}, feedback, false), 0);
+  ASSERT_EQ(WaitForSingleObject(crash_event.handle, 5000), WAIT_OBJECT_0);
+  ASSERT_EQ(WaitForSingleObject(crash_event.handle, 5000), WAIT_OBJECT_0);
+
+  int fallback_calls = 0;
+  auto fallback = [&](const platf::gamepad_id_t &id, const platf::gamepad_arrival_t &, platf::feedback_queue_t saved_feedback) {
+    EXPECT_EQ(id.globalIndex, 3);
+    EXPECT_EQ(id.clientRelativeIndex, 6);
+    EXPECT_EQ(saved_feedback, feedback);
+    return ++fallback_calls == 1 ? -1 : 0;
+  };
+  const auto now = platf::ds5::controller_slot_t::clock_t::now();
+  const auto deadline = now + std::chrono::seconds(5);
+  while (fallback_calls == 0 && std::chrono::steady_clock::now() < deadline) {
+    slot.sidecar_for_input(fallback, now);
+    if (fallback_calls == 0) {
+      Sleep(10);
+    }
+  }
+  ASSERT_EQ(fallback_calls, 1);
+  EXPECT_EQ(slot.sidecar_for_input(fallback, now), nullptr);
+  EXPECT_EQ(slot.sidecar_for_input(fallback, now + std::chrono::milliseconds(999)), nullptr);
+  EXPECT_EQ(fallback_calls, 1);
+  EXPECT_EQ(slot.sidecar_for_input(fallback, now + std::chrono::seconds(1)), nullptr);
+  EXPECT_EQ(fallback_calls, 2);
+  EXPECT_EQ(slot.sidecar_for_input(fallback, now + std::chrono::seconds(2)), nullptr);
+  EXPECT_EQ(fallback_calls, 2);
+}
+
+TEST(Ds5ControllerSlotTests, ResetDuringRecoveryPreventsFallbackIntoReplacementSession) {
+  config_scope_t restore_config;
+  restore_config.enable();
+
+  event_namespace_scope_t events(L"slot-cancel-recovery");
+  const auto continue_name = L"Local\\sunshine-ds5-test-continue-" + events.suffix;
+  const auto crash_name = L"Local\\sunshine-ds5-test-crash-once-" + events.suffix;
+  const auto recovery_started_name = L"Local\\sunshine-ds5-test-recovery-started-" + events.suffix;
+  const auto recovery_wait_name = L"Local\\sunshine-ds5-test-recovery-wait-" + events.suffix;
+  handle_scope_t continue_event(CreateEventW(nullptr, FALSE, FALSE, continue_name.c_str()));
+  handle_scope_t crash_event(CreateEventW(nullptr, TRUE, FALSE, crash_name.c_str()));
+  handle_scope_t recovery_started_event(CreateEventW(nullptr, FALSE, FALSE, recovery_started_name.c_str()));
+  handle_scope_t recovery_wait_event(CreateEventW(nullptr, TRUE, FALSE, recovery_wait_name.c_str()));
+  ASSERT_NE(continue_event.handle, nullptr);
+  ASSERT_NE(crash_event.handle, nullptr);
+  ASSERT_NE(recovery_started_event.handle, nullptr);
+  ASSERT_NE(recovery_wait_event.handle, nullptr);
+
+  auto mail = std::make_shared<safe::mail_raw_t>();
+  auto feedback_a = mail->queue<platf::gamepad_feedback_msg_t>("slot-session-a");
+  auto feedback_b = mail->queue<platf::gamepad_feedback_msg_t>("slot-session-b");
+  platf::ds5::controller_slot_t slot;
+  ASSERT_EQ(slot.alloc({1, 6}, {}, feedback_a, false), 0);
+  ASSERT_EQ(WaitForSingleObject(recovery_started_event.handle, 5000), WAIT_OBJECT_0);
+
+  int fallback_calls = 0;
+  auto fallback = [&](const platf::gamepad_id_t &, const platf::gamepad_arrival_t &, platf::feedback_queue_t) {
+    ++fallback_calls;
+    return 0;
+  };
+  auto *recovering = slot.sidecar_for_input(fallback);
+  ASSERT_NE(recovering, nullptr);
+  EXPECT_TRUE(recovering->owns(1));
+  EXPECT_EQ(fallback_calls, 0);
+  const auto started = std::chrono::steady_clock::now();
+  slot.reset();
+  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(3));
+  EXPECT_EQ(slot.sidecar_for_input(fallback), nullptr);
+  EXPECT_EQ(fallback_calls, 0);
+
+  ASSERT_TRUE(SetEvent(recovery_wait_event.handle));
+  ASSERT_TRUE(SetEvent(continue_event.handle));
+  ASSERT_EQ(slot.alloc({4, 2}, {}, feedback_b, false), 0);
+  auto *replacement = slot.sidecar_for_input(fallback);
+  ASSERT_NE(replacement, nullptr);
+  EXPECT_TRUE(replacement->owns(4));
+  EXPECT_FALSE(replacement->owns(1));
+  EXPECT_EQ(fallback_calls, 0);
+  slot.reset();
 }
 
 #endif

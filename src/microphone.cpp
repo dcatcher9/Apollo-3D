@@ -308,12 +308,19 @@ namespace microphone {
               (void) decoder.playout();
               next_playout += std::chrono::milliseconds(20);
             }
+            if (now - next_playout >= std::chrono::milliseconds(20)) {
+              // Preserve the bounded catch-up after a long suspension or dormant
+              // SETUP; do not carry expired slots into subsequent iterations.
+              next_playout = now;
+            }
             auto pcm = decoder.playout();
             if (pending_pcm.size() + pcm.size() > max_pcm_samples) {
               pending_pcm.clear();
             }
             pending_pcm.insert(pending_pcm.end(), pcm.begin(), pcm.end());
-            next_playout = now + std::chrono::milliseconds(20);
+            // Keep the 48 kHz playout timeline anchored. Basing the next slot on
+            // a late wake accumulates scheduler delays and drops live speech.
+            next_playout += std::chrono::milliseconds(20);
           }
           if (!pending_pcm.empty()) {
             const int written = sink->write(pending_pcm);

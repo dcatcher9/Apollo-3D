@@ -42,6 +42,7 @@ if (selfCheck)
     {
         audio_layout = true,
         channel_isolation = true,
+        haptics_sample_timeline = true,
         protocol_abi = true,
         host_protocol = true,
         microphone_pcm_queue = true,

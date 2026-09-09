@@ -15,7 +15,7 @@
 #include <ViGEm/Client.h>
 
 // local includes
-#include "ds5/ds5_sidecar_client.h"
+#include "ds5/ds5_controller_slot.h"
 #include "keylayout.h"
 #include "misc.h"
 #include "src/config.h"
@@ -264,7 +264,7 @@ namespace platf {
       auto status = vigem_target_add(client.get(), gamepad.gp.get());
       if (!VIGEM_SUCCESS(status)) {
         BOOST_LOG(error) << "Couldn't add Gamepad to ViGEm connection ["sv << util::hex(status).to_string_view() << ']';
-
+        gamepad.gp.reset();
         return -1;
       }
 
@@ -441,7 +441,7 @@ namespace platf {
 
   struct input_raw_t {
     std::unique_ptr<vigem_t> vigem;
-    std::array<std::unique_ptr<ds5::sidecar_client_t>, MAX_GAMEPADS> ds5_sidecars;
+    std::array<ds5::controller_slot_t, MAX_GAMEPADS> ds5_sidecars;
 
     decltype(CreateSyntheticPointerDevice) *fnCreateSyntheticPointerDevice;
     decltype(InjectSyntheticPointerInput) *fnInjectSyntheticPointerInput;
@@ -1164,34 +1164,7 @@ namespace platf {
     }
   }
 
-  int alloc_gamepad(input_t &input, const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback_queue) {
-    auto raw = (input_raw_t *) input.get();
-
-    if (id.globalIndex < 0 || id.globalIndex >= MAX_GAMEPADS || id.clientRelativeIndex >= MAX_GAMEPADS) {
-      return -1;
-    }
-    if (config::input.ds5_enabled) {
-      auto &sidecar = raw->ds5_sidecars[id.globalIndex];
-      if (!sidecar) {
-        sidecar = std::make_unique<ds5::sidecar_client_t>();
-      }
-      // Create an audio endpoint only for controllers that accept authored PCM.
-      const bool audio_haptics = config::input.ds5_audio_haptics &&
-                                 (metadata.capabilities & DS5_HAPTICS_PCM_CAPABILITY) && metadata.haptics_feedback_queue &&
-                                 ds5::audio_haptics_available();
-      if (sidecar->alloc(id, feedback_queue, audio_haptics, false, metadata.haptics_feedback_queue) == 0) {
-        if (metadata.capabilities & LI_CCAP_ACCEL) {
-          feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_ACCEL, 100));
-        }
-        if (metadata.capabilities & LI_CCAP_GYRO) {
-          feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_GYRO, 100));
-        }
-        return 0;
-      }
-      sidecar.reset();
-      BOOST_LOG(warning) << "DualSense runtime is unavailable; using the existing ViGEm controller backend"sv;
-    }
-
+  static int alloc_vigem_gamepad(input_raw_t *raw, const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback_queue) {
     if (!raw->vigem) {
       return -1;
     }
@@ -1243,18 +1216,48 @@ namespace platf {
     return raw->vigem->alloc_gamepad_internal(id, feedback_queue, selectedGamepadType);
   }
 
+  int alloc_gamepad(input_t &input, const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback_queue) {
+    auto raw = (input_raw_t *) input.get();
+
+    if (id.globalIndex < 0 || id.globalIndex >= MAX_GAMEPADS || id.clientRelativeIndex >= MAX_GAMEPADS) {
+      return -1;
+    }
+    if (config::input.ds5_enabled) {
+      ds5::refresh_component_availability();
+      // Create an audio endpoint only for controllers that accept authored PCM.
+      const bool audio_haptics = config::input.ds5_audio_haptics &&
+                                 (metadata.capabilities & DS5_HAPTICS_PCM_CAPABILITY) && metadata.haptics_feedback_queue &&
+                                 ds5::audio_haptics_available();
+      if (raw->ds5_sidecars[id.globalIndex].alloc(id, metadata, feedback_queue, audio_haptics) == 0) {
+        if (metadata.capabilities & LI_CCAP_ACCEL) {
+          feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_ACCEL, 100));
+        }
+        if (metadata.capabilities & LI_CCAP_GYRO) {
+          feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_GYRO, 100));
+        }
+        return 0;
+      }
+      BOOST_LOG(warning) << "DualSense runtime is unavailable; using the existing ViGEm controller backend"sv;
+    }
+    return alloc_vigem_gamepad(raw, id, metadata, std::move(feedback_queue));
+  }
+
+  static ds5::sidecar_client_t *sidecar_for_input(input_raw_t *raw, int nr) {
+    return raw->ds5_sidecars[nr].sidecar_for_input([raw](const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback) {
+      BOOST_LOG(warning) << "DualSense recovery failed for gamepad " << id.globalIndex << "; switching to ViGEm"sv;
+      return alloc_vigem_gamepad(raw, id, metadata, std::move(feedback));
+    });
+  }
+
   void free_gamepad(input_t &input, int nr) {
     auto raw = (input_raw_t *) input.get();
 
     if (nr < 0 || nr >= MAX_GAMEPADS) {
       return;
     }
-    if (raw->ds5_sidecars[nr]) {
-      raw->ds5_sidecars[nr].reset();
-      return;
-    }
+    raw->ds5_sidecars[nr].reset();
 
-    if (!raw->vigem) {
+    if (!raw->vigem || !raw->vigem->gamepads[nr].gp) {
       return;
     }
 
@@ -1516,8 +1519,8 @@ namespace platf {
     if (nr < 0 || nr >= MAX_GAMEPADS) {
       return;
     }
-    if (raw->ds5_sidecars[nr]) {
-      raw->ds5_sidecars[nr]->submit_input(nr, gamepad_state);
+    if (auto *sidecar = sidecar_for_input(raw, nr)) {
+      sidecar->submit_input(nr, gamepad_state);
       return;
     }
     auto *vigem = ((input_raw_t *) input.get())->vigem.get();
@@ -1556,8 +1559,8 @@ namespace platf {
     if (touch.id.globalIndex < 0 || touch.id.globalIndex >= MAX_GAMEPADS) {
       return;
     }
-    if (raw->ds5_sidecars[touch.id.globalIndex]) {
-      raw->ds5_sidecars[touch.id.globalIndex]->submit_touch(touch);
+    if (auto *sidecar = sidecar_for_input(raw, touch.id.globalIndex)) {
+      sidecar->submit_touch(touch);
       return;
     }
     auto *vigem = ((input_raw_t *) input.get())->vigem.get();
@@ -1670,8 +1673,8 @@ namespace platf {
     if (motion.id.globalIndex < 0 || motion.id.globalIndex >= MAX_GAMEPADS) {
       return;
     }
-    if (raw->ds5_sidecars[motion.id.globalIndex]) {
-      raw->ds5_sidecars[motion.id.globalIndex]->submit_motion(motion);
+    if (auto *sidecar = sidecar_for_input(raw, motion.id.globalIndex)) {
+      sidecar->submit_motion(motion);
       return;
     }
     auto *vigem = ((input_raw_t *) input.get())->vigem.get();
@@ -1705,8 +1708,8 @@ namespace platf {
     if (battery.id.globalIndex < 0 || battery.id.globalIndex >= MAX_GAMEPADS) {
       return;
     }
-    if (raw->ds5_sidecars[battery.id.globalIndex]) {
-      raw->ds5_sidecars[battery.id.globalIndex]->submit_battery(battery);
+    if (auto *sidecar = sidecar_for_input(raw, battery.id.globalIndex)) {
+      sidecar->submit_battery(battery);
       return;
     }
     auto *vigem = ((input_raw_t *) input.get())->vigem.get();
