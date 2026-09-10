@@ -191,11 +191,154 @@ TEST(ArGlassesOwnership, RenewedRemoteConnectWindowBlocksLocalPresentation) {
   EXPECT_FALSE(ar_glasses::remote_virtual_display_blocks_local());
 }
 
-TEST(ArGlassesPresenterPause, RequiresEveryIndependentPauseReasonToClear) {
-  EXPECT_TRUE(ar_glasses::detail::local_presenter_should_run(false, false));
-  EXPECT_FALSE(ar_glasses::detail::local_presenter_should_run(true, false));
-  EXPECT_FALSE(ar_glasses::detail::local_presenter_should_run(false, true));
-  EXPECT_FALSE(ar_glasses::detail::local_presenter_should_run(true, true));
+class ArGlassesWearActivation: public testing::Test {
+protected:
+  using policy_t = ar_glasses::detail::local_session_activation_t;
+  using activation_e = ar_glasses::detail::local_session_activation_e;
+  using availability_e = ar_glasses::rayneo::wear_availability_e;
+  using state_e = ar_glasses::rayneo::wear_state_e;
+  using snapshot_t = ar_glasses::rayneo::wear_snapshot_t;
+
+  static constexpr policy_t::clock_t::time_point origin {};
+};
+
+TEST_F(ArGlassesWearActivation, ADisplayWithoutAWearProtocolUsesItsConnectionImmediately) {
+  policy_t policy;
+  EXPECT_EQ(policy.observe(std::nullopt, origin), activation_e::connection);
+  EXPECT_EQ(policy.observe(std::nullopt, origin + 1h), activation_e::connection);
+  EXPECT_TRUE(ar_glasses::detail::local_session_requested(activation_e::connection));
+}
+
+TEST_F(ArGlassesWearActivation, InitialUnknownSensorStatesWaitBeforeConnectionFallback) {
+  for (const auto availability : {availability_e::probing, availability_e::available, availability_e::unavailable}) {
+    SCOPED_TRACE(static_cast<int>(availability));
+    policy_t policy;
+    const snapshot_t snapshot {availability, state_e::unknown};
+    EXPECT_EQ(policy.observe(snapshot, origin), activation_e::waiting_for_sensor);
+    EXPECT_EQ(policy.observe(snapshot, origin + 2999ms), activation_e::waiting_for_sensor);
+    EXPECT_EQ(policy.observe(snapshot, origin + 3s), activation_e::connection);
+    EXPECT_EQ(policy.observe(snapshot, origin + 1h), activation_e::connection);
+  }
+  EXPECT_FALSE(ar_glasses::detail::local_session_requested(activation_e::waiting_for_sensor));
+}
+
+TEST_F(ArGlassesWearActivation, AnInitialOffHeadReportNeverStartsTheVirtualDesktop) {
+  policy_t policy;
+  const snapshot_t off_head {availability_e::available, state_e::off_head};
+  EXPECT_EQ(policy.observe(off_head, origin), activation_e::off_head);
+  EXPECT_EQ(policy.observe(off_head, origin + 1h), activation_e::off_head);
+  EXPECT_FALSE(ar_glasses::detail::local_session_requested(activation_e::off_head));
+}
+
+TEST_F(ArGlassesWearActivation, WornAndOffHeadControlTheWholeSessionWithoutASecondGracePeriod) {
+  policy_t policy;
+  const snapshot_t worn {availability_e::available, state_e::worn};
+  const snapshot_t off_head {availability_e::available, state_e::off_head};
+  EXPECT_EQ(policy.observe(worn, origin), activation_e::worn);
+  EXPECT_EQ(policy.observe(off_head, origin + 250ms), activation_e::off_head);
+  EXPECT_EQ(policy.observe(worn, origin + 500ms), activation_e::worn);
+  EXPECT_TRUE(ar_glasses::detail::local_session_requested(activation_e::worn));
+}
+
+TEST_F(ArGlassesWearActivation, AmbiguousReportsAndTransportRecoveryRetainTheLastConfirmedDecision) {
+  for (const auto confirmed : {state_e::off_head, state_e::worn}) {
+    SCOPED_TRACE(static_cast<int>(confirmed));
+    policy_t policy;
+    const auto expected = confirmed == state_e::worn ? activation_e::worn : activation_e::off_head;
+    ASSERT_EQ(policy.observe(snapshot_t {availability_e::available, confirmed}, origin), expected);
+
+    // These states occur both during a normal proximity transition and during HID removal,
+    // stale-subscription recovery, or reauthentication while DisplayPort remains connected.
+    EXPECT_EQ(policy.observe(snapshot_t {availability_e::available, state_e::unknown}, origin + 1s), expected);
+    EXPECT_EQ(policy.observe(snapshot_t {availability_e::unavailable, state_e::unknown}, origin + 10s), expected);
+    EXPECT_EQ(policy.observe(snapshot_t {availability_e::probing, state_e::unknown}, origin + 30s), expected);
+    EXPECT_EQ(policy.observe(snapshot_t {availability_e::unavailable, state_e::unknown}, origin + 1h), expected);
+  }
+}
+
+TEST_F(ArGlassesWearActivation, ARecoveredSensorTakesAuthorityFromConnectionFallback) {
+  policy_t policy;
+  const snapshot_t unavailable {availability_e::unavailable, state_e::unknown};
+  ASSERT_EQ(policy.observe(unavailable, origin), activation_e::waiting_for_sensor);
+  ASSERT_EQ(policy.observe(unavailable, origin + 3s), activation_e::connection);
+  EXPECT_EQ(policy.observe(snapshot_t {availability_e::available, state_e::off_head}, origin + 4s), activation_e::off_head);
+  EXPECT_EQ(policy.observe(snapshot_t {availability_e::available, state_e::worn}, origin + 5s), activation_e::worn);
+}
+
+TEST_F(ArGlassesWearActivation, OnlyAnAvailableSensorMayChangeTheConfirmedDecision) {
+  policy_t policy;
+  ASSERT_EQ(policy.observe(snapshot_t {availability_e::available, state_e::off_head}, origin), activation_e::off_head);
+  EXPECT_EQ(policy.observe(snapshot_t {availability_e::probing, state_e::worn}, origin + 1s), activation_e::off_head);
+  EXPECT_EQ(policy.observe(snapshot_t {availability_e::unavailable, state_e::worn}, origin + 2s), activation_e::off_head);
+  EXPECT_EQ(policy.observe(snapshot_t {availability_e::available, state_e::worn}, origin + 3s), activation_e::worn);
+}
+
+TEST_F(ArGlassesWearActivation, DisconnectOrTargetReplacementResetsWearAuthorityAndProbeDeadline) {
+  for (const auto previous : {state_e::off_head, state_e::worn}) {
+    SCOPED_TRACE(static_cast<int>(previous));
+    policy_t policy;
+    policy.observe(snapshot_t {availability_e::available, previous}, origin);
+
+    // The controller resets this policy when the selected physical connection disappears or
+    // changes identity; an unrelated/reconnected device must not inherit the old sensor state.
+    policy = {};
+    const auto reconnected_at = origin + 1h;
+    const snapshot_t probing {availability_e::probing, state_e::unknown};
+    EXPECT_EQ(policy.observe(probing, reconnected_at), activation_e::waiting_for_sensor);
+    EXPECT_EQ(policy.observe(probing, reconnected_at + 2999ms), activation_e::waiting_for_sensor);
+    EXPECT_EQ(policy.observe(probing, reconnected_at + 3s), activation_e::connection);
+  }
+}
+
+TEST_F(ArGlassesWearActivation, AConfirmedWearChangeSurvivesUnknownBeforeTheControllerReturns) {
+  for (const auto previous : {state_e::off_head, state_e::worn}) {
+    SCOPED_TRACE(static_cast<int>(previous));
+    const auto changed = previous == state_e::worn ? state_e::off_head : state_e::worn;
+    const auto expected = changed == state_e::worn ? activation_e::worn : activation_e::off_head;
+    policy_t policy;
+    policy.observe(snapshot_t {availability_e::available, previous}, origin);
+
+    // While Windows blocks the controller in setup/teardown, the independent HID worker can
+    // confirm the opposite state and then lose its live sample before the next controller poll.
+    const std::array publications {
+      snapshot_t {availability_e::available, previous},
+      snapshot_t {availability_e::available, changed},
+      snapshot_t {availability_e::available, state_e::unknown},
+      snapshot_t {availability_e::probing, state_e::unknown},
+      snapshot_t {availability_e::unavailable, state_e::unknown},
+    };
+    const auto remembered = ar_glasses::rayneo::detail::last_confirmed_state_for_test(publications);
+    ASSERT_EQ(remembered, changed);
+    EXPECT_EQ(policy.observe(publications.back(), origin + 5s, remembered), expected);
+  }
+}
+
+TEST_F(ArGlassesWearActivation, NewerRememberedAuthorityOverridesAnOlderLiveSnapshot) {
+  policy_t policy;
+  const snapshot_t older_snapshot {availability_e::available, state_e::worn};
+  const std::array publications {
+    older_snapshot,
+    snapshot_t {availability_e::available, state_e::off_head},
+  };
+  // The worker may publish off-head between the controller's snapshot and history reads.
+  const auto remembered = ar_glasses::rayneo::detail::last_confirmed_state_for_test(publications);
+  EXPECT_EQ(policy.observe(older_snapshot, origin, remembered), activation_e::off_head);
+}
+
+TEST_F(ArGlassesWearActivation, UnknownOrUnauthenticatedPublicationsNeverCreateWearAuthority) {
+  const std::array publications {
+    snapshot_t {availability_e::probing, state_e::unknown},
+    snapshot_t {availability_e::available, state_e::unknown},
+    snapshot_t {availability_e::unavailable, state_e::unknown},
+    snapshot_t {availability_e::probing, state_e::worn},
+    snapshot_t {availability_e::unavailable, state_e::off_head},
+  };
+  const auto remembered = ar_glasses::rayneo::detail::last_confirmed_state_for_test(publications);
+  ASSERT_EQ(remembered, state_e::unknown);
+  policy_t policy;
+  EXPECT_EQ(policy.observe(publications.back(), origin, remembered), activation_e::waiting_for_sensor);
+  EXPECT_EQ(policy.observe(publications.back(), origin + 3s, remembered), activation_e::connection);
+  EXPECT_EQ(ar_glasses::rayneo::detail::last_confirmed_state_for_test({}), state_e::unknown);
 }
 
 TEST(RayNeoWearReport, DecodesEmpiricallySeparatedWornAndOffHeadBands) {

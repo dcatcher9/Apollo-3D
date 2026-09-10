@@ -17,6 +17,17 @@ namespace ar_glasses::rayneo {
     worn,
   };
 
+  enum class wear_availability_e {
+    probing,
+    available,
+    unavailable,
+  };
+
+  struct wear_snapshot_t {
+    wear_availability_e availability = wear_availability_e::probing;
+    wear_state_e state = wear_state_e::unknown;
+  };
+
   /** Monitor the supported RayNeo vendor HID collection for an authoritative wear state. */
   class wear_monitor_t {
   public:
@@ -29,6 +40,14 @@ namespace ar_glasses::rayneo {
     wear_monitor_t &operator=(wear_monitor_t &&) = delete;
 
     [[nodiscard]] wear_state_e state() const noexcept;
+
+    /** Read availability and debounced state together. Available requires a valid sensor report;
+     * an ambiguous report remains available with an unknown state. */
+    [[nodiscard]] wear_snapshot_t snapshot() const noexcept;
+
+    /** Last debounced worn/off-head observation for this physical connection, retained across
+     * ambiguous samples and sensor recovery. Unknown means no authoritative sample yet. */
+    [[nodiscard]] wear_state_e last_confirmed_state() const noexcept;
 
   private:
     class impl_t;
@@ -84,6 +103,9 @@ namespace ar_glasses::rayneo {
       bool notifications_available,
       unsigned consecutive_failures
     );
+
+    /** Replay the production publication history without losing authority during HID gaps. */
+    wear_state_e last_confirmed_state_for_test(std::span<const wear_snapshot_t> snapshots);
 
     /** Replay timestamped classified samples through the production debounce/stale policy. */
     wear_state_e debounce_observations_for_test(

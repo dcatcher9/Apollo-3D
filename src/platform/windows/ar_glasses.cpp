@@ -82,6 +82,9 @@ namespace ar_glasses {
     };
 
     std::optional<retired_local_virtual_display_t> retired_local_virtual_display;
+    // Serialize the complete retirement operation, including its callbacks. A later waiter must
+    // take a fresh record after an earlier waiter has certified cleanup and released ownership.
+    std::timed_mutex local_virtual_display_retirement_mutex;
 
     void expire_remote_pending_locked(std::chrono::steady_clock::time_point now) {
       if (remote_session_pending && !remote_session_pending->handoff_in_progress && !remote_session_pending->setup_in_progress && now >= remote_session_pending->until) {
@@ -222,6 +225,19 @@ namespace ar_glasses {
       std::chrono::milliseconds timeout,
       bool retry_remove
     ) {
+      const auto deadline = std::chrono::steady_clock::now() + std::max(timeout, 0ms);
+      {
+        std::lock_guard lock(ownership_mutex);
+        if (!retired_local_virtual_display) {
+          return true;
+        }
+      }
+      // Never hold ownership_mutex while waiting: remote launch publishes its reservation under
+      // that lock before waiting for local retirement. Include lock contention in this budget.
+      std::unique_lock retirement_lock(local_virtual_display_retirement_mutex, std::defer_lock);
+      if (timeout <= 0ms ? !retirement_lock.try_lock() : !retirement_lock.try_lock_until(deadline)) {
+        return false;
+      }
       std::optional<retired_local_virtual_display_t> retiring;
       {
         std::lock_guard lock(ownership_mutex);
@@ -231,7 +247,6 @@ namespace ar_glasses {
         return true;
       }
 
-      const auto deadline = std::chrono::steady_clock::now() + std::max(timeout, 0ms);
       int consecutive_absent_observations = 0;
       bool removal_requested = !retry_remove;
       bool first_observation = true;
@@ -2545,11 +2560,11 @@ namespace ar_glasses {
       std::wstring_view physical_device_path,
       bool expected_hdr,
       std::chrono::milliseconds timeout,
-      std::stop_token stop_token
+      const std::function<bool()> &cancelled
     ) {
       const auto deadline = std::chrono::steady_clock::now() + timeout;
       int stable_observations = 0;
-      while (!stop_token.stop_requested() && std::chrono::steady_clock::now() < deadline) {
+      while (!cancelled() && std::chrono::steady_clock::now() < deadline) {
         bool topology_query_succeeded = false;
         const auto physical_target = find_target(physical_device_path, {}, &topology_query_succeeded);
         if (!topology_query_succeeded) {
@@ -2583,7 +2598,7 @@ namespace ar_glasses {
         } else {
           stable_observations = 0;
         }
-        for (int sleep_step = 0; sleep_step < 4 && !stop_token.stop_requested(); ++sleep_step) {
+        for (int sleep_step = 0; sleep_step < 4 && !cancelled(); ++sleep_step) {
           std::this_thread::sleep_for(50ms);
         }
       }
@@ -2596,14 +2611,14 @@ namespace ar_glasses {
       std::wstring_view physical_device_path,
       bool enable_hdr,
       bool &configured_hdr,
-      std::stop_token stop_token
+      const std::function<bool()> &cancelled
     ) {
       configured_hdr = false;
       // Match the remote-stream workaround: wait for the new mode, force Advanced Color off,
       // then enable it after the first transition has settled. Windows often ignores a direct
       // enable immediately after IddCx output creation or a resolution/topology change.
-      if (!wait_for_virtual_display_mode(display_name, identity, physical_device_path, false, 5s, stop_token)) {
-        if (stop_token.stop_requested()) {
+      if (!wait_for_virtual_display_mode(display_name, identity, physical_device_path, false, 5s, cancelled)) {
+        if (cancelled()) {
           return false;
         }
         BOOST_LOG(warning) << "Local AR virtual display did not settle before HDR configuration."sv;
@@ -2615,8 +2630,8 @@ namespace ar_glasses {
           return false;
         }
       }
-      if (!wait_for_virtual_display_mode(display_name, identity, physical_device_path, false, 5s, stop_token)) {
-        if (stop_token.stop_requested()) {
+      if (!wait_for_virtual_display_mode(display_name, identity, physical_device_path, false, 5s, cancelled)) {
+        if (cancelled()) {
           return false;
         }
         BOOST_LOG(error) << "Local AR virtual display did not reach a stable SDR state."sv;
@@ -2630,12 +2645,12 @@ namespace ar_glasses {
         BOOST_LOG(warning) << "Windows rejected HDR for the local AR virtual display; using color-managed SDR presentation."sv;
         return true;
       }
-      if (!wait_for_virtual_display_mode(display_name, identity, physical_device_path, true, 15s, stop_token)) {
-        if (stop_token.stop_requested()) {
+      if (!wait_for_virtual_display_mode(display_name, identity, physical_device_path, true, 15s, cancelled)) {
+        if (cancelled()) {
           return false;
         }
         BOOST_LOG(warning) << "Local AR virtual display did not reach a stable HDR state; using color-managed SDR presentation."sv;
-        if (!VDISPLAY::setDisplayHDRByName(display_name.c_str(), false) || !wait_for_virtual_display_mode(display_name, identity, physical_device_path, false, 5s, stop_token)) {
+        if (!VDISPLAY::setDisplayHDRByName(display_name.c_str(), false) || !wait_for_virtual_display_mode(display_name, identity, physical_device_path, false, 5s, cancelled)) {
           BOOST_LOG(error) << "Local AR virtual display could not recover to SDR after HDR setup failed."sv;
           return false;
         }
@@ -2647,12 +2662,16 @@ namespace ar_glasses {
 
     class local_session_t {
     public:
-      explicit local_session_t(gpu_workload::lease_t live_gpu_lease):
+      local_session_t(gpu_workload::lease_t live_gpu_lease, std::function<bool()> session_requested):
           live_gpu_lease_(std::move(live_gpu_lease)),
-          exclusive_(config::video.local_ar_virtual_display_only) {
+          exclusive_(config::video.local_ar_virtual_display_only),
+          session_requested_(std::move(session_requested)) {
       }
 
       void initialize(const target_state_t &target, std::stop_token controller_stop_token) {
+        const auto cancelled = [this, controller_stop_token]() {
+          return controller_stop_token.stop_requested() || !session_requested_();
+        };
         original_target_rect_ = target.rect;
         target_device_path_ = target.device_path;
         target_adapter_id_ = target.adapter_id;
@@ -2660,7 +2679,9 @@ namespace ar_glasses {
           BOOST_LOG(error) << "AR glasses detected, but the SudoVDA driver is unavailable."sv;
           return;
         }
-        wear_monitor_ = rayneo::create_wear_monitor(target.device_id);
+        if (cancelled()) {
+          return;
+        }
         auto active_target = target;
 
         if (target.hdr.known) {
@@ -2717,6 +2738,9 @@ namespace ar_glasses {
         static_assert(sizeof(display_guid_) == sizeof(uuid));
         std::memcpy(&display_guid_, &uuid, sizeof(display_guid_));
 
+        if (cancelled()) {
+          return;
+        }
         const auto created_display = VDISPLAY::createVirtualDisplayOnAdapter(
           virtual_display_uuid,
           virtual_display_name,
@@ -2783,10 +2807,10 @@ namespace ar_glasses {
           }
 
           // Let DXGI observe the newly attached output before capture initializes.
-          for (int sleep_step = 0; sleep_step < 6 && !controller_stop_token.stop_requested(); ++sleep_step) {
+          for (int sleep_step = 0; sleep_step < 6 && !cancelled(); ++sleep_step) {
             std::this_thread::sleep_for(50ms);
           }
-          if (controller_stop_token.stop_requested()) {
+          if (cancelled()) {
             return false;
           }
           if (const auto resolved = resolve_virtual_display(virtual_display_identity_, {}, virtual_display_name_)) {
@@ -2806,9 +2830,9 @@ namespace ar_glasses {
               // HDR activation can renumber the target or change its mode. Wait for the stable PnP
               // target rather than polling the now-stale source/target IDs from the original path.
               const auto deadline = std::chrono::steady_clock::now() + 10s;
-              while (!controller_stop_token.stop_requested() &&
+              while (!cancelled() &&
                      std::chrono::steady_clock::now() < deadline && !physical_hdr.active) {
-                for (int sleep_step = 0; sleep_step < 4 && !controller_stop_token.stop_requested(); ++sleep_step) {
+                for (int sleep_step = 0; sleep_step < 4 && !cancelled(); ++sleep_step) {
                   std::this_thread::sleep_for(50ms);
                 }
                 bool topology_query_succeeded = false;
@@ -2828,7 +2852,7 @@ namespace ar_glasses {
                 presentation_target = *current;
                 physical_hdr = active_target.hdr;
               }
-              if (controller_stop_token.stop_requested()) {
+              if (cancelled()) {
                 return false;
               }
               if (!physical_hdr.active) {
@@ -2859,9 +2883,9 @@ namespace ar_glasses {
                 target_device_path_,
                 requested_target_hdr,
                 virtual_hdr_active,
-                controller_stop_token
+                cancelled
               )) {
-            if (controller_stop_token.stop_requested()) {
+            if (cancelled()) {
               return false;
             }
             BOOST_LOG(error) << "Local AR virtual display color-mode configuration failed; rebuilding the session."sv;
@@ -2962,6 +2986,9 @@ namespace ar_glasses {
         presentation_target = *final_target;
         BOOST_LOG(info) << "Local AR desktop layout: "sv
                         << (exclusive_ ? "virtual desktop primary, glasses active, other displays disabled; cursor confined."sv : "extended desktop; physical displays remain active."sv);
+        if (cancelled()) {
+          return;
+        }
         start_presenter(presentation_target);
         ready_ = true;
       }
@@ -2974,14 +3001,6 @@ namespace ar_glasses {
           live_target_->display_name = target->gdi_name;
         }
         refresh_pointer_isolation();
-      }
-
-      void resume_presenter(const target_state_t &target) {
-        start_presenter(target);
-      }
-
-      rayneo::wear_state_e wear_state() const {
-        return wear_monitor_ ? wear_monitor_->state() : rayneo::wear_state_e::unknown;
       }
 
       void refresh_pointer_isolation() {
@@ -3046,11 +3065,13 @@ namespace ar_glasses {
 
       std::optional<target_state_t> reconfigure_target(
         const target_state_t &target,
-        std::stop_token controller_stop_token,
-        bool start_presentation
+        std::stop_token controller_stop_token
       ) {
+        const auto cancelled = [this, controller_stop_token]() {
+          return controller_stop_token.stop_requested() || !session_requested_();
+        };
         stop_presenter();
-        if (controller_stop_token.stop_requested() || target.device_path != target_device_path_ || !same_luid(target.adapter_id, target_adapter_id_) || target.mode == presentation_mode_e::unsupported) {
+        if (cancelled() || target.device_path != target_device_path_ || !same_luid(target.adapter_id, target_adapter_id_) || target.mode == presentation_mode_e::unsupported) {
           return std::nullopt;
         }
 
@@ -3089,10 +3110,10 @@ namespace ar_glasses {
                                << " Hz; continuing with its current source refresh."sv;
           }
 
-          for (int sleep_step = 0; sleep_step < 6 && !controller_stop_token.stop_requested(); ++sleep_step) {
+          for (int sleep_step = 0; sleep_step < 6 && !cancelled(); ++sleep_step) {
             std::this_thread::sleep_for(50ms);
           }
-          if (controller_stop_token.stop_requested() || !refresh_virtual_display_reference()) {
+          if (cancelled() || !refresh_virtual_display_reference()) {
             return false;
           }
 
@@ -3105,7 +3126,7 @@ namespace ar_glasses {
             return false;
           }
           auto wait_for_source_color = [&](bool expected_hdr) {
-            for (int attempt = 0; attempt < 20 && !controller_stop_token.stop_requested(); ++attempt) {
+            for (int attempt = 0; attempt < 20 && !cancelled(); ++attempt) {
               std::this_thread::sleep_for(50ms);
               if (!refresh_virtual_display_reference()) {
                 continue;
@@ -3183,17 +3204,13 @@ namespace ar_glasses {
           return std::nullopt;
         }
         presentation_target = *final_target;
-        if (start_presentation) {
-          start_presenter(*presentation_target);
-          BOOST_LOG(info) << "Local AR presentation switched in place to "sv
-                          << mode_name(presentation_target->mode)
-                          << " without recreating its virtual desktop."sv;
-        } else {
-          pause_presenter(*presentation_target);
-          BOOST_LOG(info) << "Local AR output switched in place to "sv
-                          << mode_name(presentation_target->mode)
-                          << " while off-head; its virtual desktop remains retained and presentation stays paused."sv;
+        if (cancelled()) {
+          return std::nullopt;
         }
+        start_presenter(*presentation_target);
+        BOOST_LOG(info) << "Local AR presentation switched in place to "sv
+                        << mode_name(presentation_target->mode)
+                        << " without recreating its virtual desktop."sv;
         return presentation_target;
       }
 
@@ -3220,8 +3237,6 @@ namespace ar_glasses {
 
       ~local_session_t() {
         stop_presenter();
-        // Stop HID I/O before any retained display/topology state it describes is dismantled.
-        wear_monitor_.reset();
         // The shared clip deliberately survives presenter-only restarts, but whole-session
         // teardown restores it before Windows removes the source rectangle it was based on.
         release_pointer_isolation();
@@ -3550,13 +3565,12 @@ namespace ar_glasses {
       }
 
       GUID display_guid_ {};
-      // Hold the live-workload reservation across presenter restarts, topology transitions, and
-      // off-head pauses. Otherwise an offline TensorRT job can be admitted while the retained
-      // local AR desktop is waiting for an immediate resume.
+      // Hold the live-workload reservation across presenter restarts and topology transitions.
+      // Off-head exits release the complete session, allowing offline work while glasses are idle.
       gpu_workload::lease_t live_gpu_lease_;
       const bool exclusive_;
       bool exclusive_prepared_ = false;
-      std::unique_ptr<rayneo::wear_monitor_t> wear_monitor_;
+      std::function<bool()> session_requested_;
       SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT virtual_display_identity_ {};
       RECT original_target_rect_ {};
       LUID target_adapter_id_ {};
@@ -3608,12 +3622,6 @@ namespace ar_glasses {
         failure_retry_delay_ = std::min(failure_retry_delay_ * 2, maximum_failed_session_retry);
       }
 
-      void arm_presenter_health_window() {
-        // An intentional wear-state resume needs the ordinary startup grace, but it is not a
-        // failure and therefore must not increase exponential failure backoff.
-        presenter_retry_after_ = std::chrono::steady_clock::now() + failure_retry_delay_;
-      }
-
       void schedule_failure_retry() {
         BOOST_LOG(warning) << "Local AR session retry deferred for "sv
                            << std::chrono::duration_cast<std::chrono::seconds>(failure_retry_delay_).count()
@@ -3624,7 +3632,6 @@ namespace ar_glasses {
 
       void stop_session() {
         transition_presenter_paused_ = false;
-        wear_presenter_paused_ = false;
         incompatible_transition_started_.reset();
         std::unique_ptr<local_session_t> retiring_session;
         {
@@ -3668,55 +3675,100 @@ namespace ar_glasses {
         }
       }
 
-      void reconcile_wear_pause(
-        const std::optional<target_state_t> &target,
-        bool topology_ready
-      ) {
-        if (!session_) {
-          wear_presenter_paused_ = false;
+      void progress_inactive_retirement() {
+        const auto now = std::chrono::steady_clock::now();
+        if (session_ || now < retirement_retry_after_) {
           return;
         }
-
-        const auto wear_state = session_->wear_state();
-        if (wear_state == rayneo::wear_state_e::off_head) {
-          if (!wear_presenter_paused_) {
-            wear_presenter_paused_ = true;
-            session_->pause_presenter(target);
-            session_stability_confirmed_ = false;
-            BOOST_LOG(info) << "RayNeo Air 4 Pro reports off-head; local AR capture and 3D conversion are paused while its virtual desktop remains attached."sv;
+        {
+          std::lock_guard lock(ownership_mutex);
+          // Remote handoff already progresses this same barrier. Do not acquire a session or a
+          // GPU lease just to complete cleanup while wear state keeps local presentation off.
+          if (local_session_present || !retired_local_virtual_display || remote_blocks_local_locked(now)) {
+            return;
           }
-          return;
         }
+        // Leave enough time for three absent observations and the final topology-settle check.
+        // Failed work remains owned by the barrier and is retried on the next bounded interval.
+        const bool completed = wait_for_local_virtual_display_retirement_impl(500ms, true);
+        retirement_retry_after_ = std::chrono::steady_clock::now() + failed_session_retry;
+        if (completed) {
+          BOOST_LOG(info) << "Completed pending local AR display cleanup while presentation is inactive."sv;
+        }
+      }
 
-        if (!wear_presenter_paused_) {
+      void monitor_target(const std::optional<target_state_t> &target) {
+        const auto device_path = target ? target->device_path : std::wstring {};
+        if (device_path == wear_device_path_) {
           return;
         }
+        // The physical device owns wear authority. Keep this subscription alive when its virtual
+        // desktop exits off-head or yields to a remote client, and across 2D/SBS mode changes.
+        wear_monitor_.reset();
+        wear_device_path_ = device_path;
+        activation_ = {};
+        logged_activation_.reset();
+        if (target) {
+          wear_monitor_ = rayneo::create_wear_monitor(target->device_id);
+        }
+      }
 
-        const auto resume_reason = wear_state == rayneo::wear_state_e::worn ?
-                                     "RayNeo Air 4 Pro reports worn"sv :
-                                     "RayNeo Air 4 Pro wear authority is unknown (fail-open)"sv;
-        if (transition_presenter_paused_) {
-          // Topology now owns the stopped presenter. Clearing only the wear reason lets the
-          // transition path restart against its freshly re-isolated target, never against stale
-          // geometry.
-          wear_presenter_paused_ = false;
-          BOOST_LOG(info) << resume_reason
-                          << "; local AR presentation will resume after display topology stabilizes."sv;
-          return;
+      bool wear_allows_session() {
+        if (wear_device_path_.empty()) {
+          return false;
         }
-        if (!topology_ready || !target) {
-          return;
+        const auto sensor = wear_monitor_ ? std::make_optional(wear_monitor_->snapshot()) : std::nullopt;
+        // Read remembered authority after the live snapshot: a confirmed event received while
+        // Windows blocked display setup must survive a subsequent unknown/unavailable report.
+        const auto remembered = wear_monitor_ ? wear_monitor_->last_confirmed_state() : rayneo::wear_state_e::unknown;
+        const auto activation = activation_.observe(
+          sensor,
+          std::chrono::steady_clock::now(),
+          remembered
+        );
+        if (activation != logged_activation_) {
+          logged_activation_ = activation;
+          switch (activation) {
+            case detail::local_session_activation_e::waiting_for_sensor:
+              BOOST_LOG(info) << "Local AR is waiting for the glasses' initial wear state before creating a virtual desktop."sv;
+              break;
+            case detail::local_session_activation_e::connection:
+              BOOST_LOG(info) << "No confirmed wear state is available; local AR virtual-desktop activation follows the glasses' display connection."sv;
+              break;
+            case detail::local_session_activation_e::worn:
+              BOOST_LOG(info) << "AR glasses report worn; local AR virtual-desktop activation is on."sv;
+              break;
+            case detail::local_session_activation_e::off_head:
+              BOOST_LOG(info) << "AR glasses report off-head; local AR virtual-desktop activation is off."sv;
+              break;
+          }
         }
+        return detail::local_session_requested(activation);
+      }
 
-        wear_presenter_paused_ = false;
-        session_->resume_presenter(*target);
-        session_stability_confirmed_ = false;
-        arm_presenter_health_window();
-        BOOST_LOG(info) << resume_reason
-                        << "; local AR presentation resumed on its retained virtual desktop."sv;
+      bool stop_off_head_session(const std::optional<target_state_t> &observed, bool topology_known) {
+        const bool requested = wear_allows_session();
+        if (!session_ || requested) {
+          return false;
+        }
+        session_->pause_presenter(observed);
+        transition_presenter_paused_ = true;
+        // Extended mode must record a concurrently resized physical sink before removing SudoVDA.
+        // Exclusive recovery already handles the current sink mode in its topology transaction.
+        if (!config::video.local_ar_virtual_display_only && (!topology_known || (same_physical_output(applied_, observed) && !session_->prepare_same_output_teardown(*observed)))) {
+          return false;
+        }
+        BOOST_LOG(info) << "Exiting the off-head local AR session and restoring the desktop; wear monitoring remains active."sv;
+        stop_session();
+        reset_failure_backoff();
+        applied_.reset();
+        return true;
       }
 
       void start_session(const target_state_t &target, std::stop_token stop_token) {
+        if (stop_token.stop_requested() || !wear_allows_session()) {
+          return;
+        }
         std::stop_source construction_stop;
         std::stop_callback controller_stop_callback(stop_token, [&construction_stop]() {
           construction_stop.request_stop();
@@ -3727,6 +3779,9 @@ namespace ar_glasses {
           BOOST_LOG(info)
             << "Local AR presentation is waiting for the active offline SBS GPU job."sv;
           schedule_failure_retry();
+          return;
+        }
+        if (construction_stop.stop_requested() || !wear_allows_session()) {
           return;
         }
         const auto handoff = proc::proc.prepare_local_ar_handoff(construction_stop);
@@ -3744,7 +3799,7 @@ namespace ar_glasses {
         auto release_claim = util::fail_guard([]() {
           release_local_virtual_display_claim_impl();
         });
-        if (construction_stop.stop_requested()) {
+        if (construction_stop.stop_requested() || !wear_allows_session()) {
           return;
         }
         if (!recover_saved_topology(target.device_path) || construction_stop.stop_requested()) {
@@ -3753,14 +3808,16 @@ namespace ar_glasses {
           return;
         }
 
-        auto candidate =
-          std::make_unique<local_session_t>(std::move(*live_gpu_lease));
+        auto candidate = std::make_unique<local_session_t>(std::move(*live_gpu_lease), [this]() {
+          return wear_allows_session();
+        });
         candidate->initialize(target, construction_stop.get_token());
+        const bool requested = wear_allows_session();
         bool rejected_for_remote = false;
         {
           std::lock_guard lock(ownership_mutex);
           rejected_for_remote = remote_blocks_local_locked(std::chrono::steady_clock::now());
-          if (candidate->valid() && !construction_stop.stop_requested() && !rejected_for_remote) {
+          if (candidate->valid() && requested && !construction_stop.stop_requested() && !rejected_for_remote) {
             session_ = std::move(candidate);
             local_session_construction_stop.reset();
             local_session_present = true;
@@ -3771,7 +3828,6 @@ namespace ar_glasses {
             deferred_for_remote_ = false;
             session_stability_confirmed_ = false;
             transition_presenter_paused_ = false;
-            wear_presenter_paused_ = false;
             incompatible_transition_started_.reset();
             // A spawned thread is not yet a healthy presenter. Arm bounded backoff now and reset it
             // only after the controller observes a sustained run of presented frames.
@@ -3787,7 +3843,7 @@ namespace ar_glasses {
         if (rejected_for_remote) {
           deferred_for_remote_ = true;
         }
-        if (!rejected_for_remote && !construction_stop.stop_requested()) {
+        if (!rejected_for_remote && !construction_stop.stop_requested() && wear_allows_session()) {
           schedule_failure_retry();
         }
       }
@@ -3796,6 +3852,7 @@ namespace ar_glasses {
         stop_session();
         reset_failure_backoff();
         applied_ = target;
+        monitor_target(target);
         if (!target) {
           deferred_for_remote_ = false;
           BOOST_LOG(info) << "Approved AR display disconnected; local presentation is off."sv;
@@ -3818,8 +3875,8 @@ namespace ar_glasses {
 
         BOOST_LOG(info) << "Approved AR display ["sv << target->friendly_name << "] detected at "sv
                         << width << 'x' << height << '@'
-                        << (target->refresh_millihz / 1000.0) << "; starting "sv
-                        << mode_name(target->mode) << " local presentation."sv;
+                        << (target->refresh_millihz / 1000.0) << "; "sv
+                        << mode_name(target->mode) << " local presentation is available."sv;
         start_session(*target, stop_token);
       }
 
@@ -3829,10 +3886,9 @@ namespace ar_glasses {
 
         while (!stop_token.stop_requested()) {
           suspend_for_remote_if_needed();
+          progress_inactive_retirement();
 
-          const std::wstring_view preferred_device_path = applied_ ?
-                                                            std::wstring_view(applied_->device_path) :
-                                                            std::wstring_view {};
+          const std::wstring_view preferred_device_path = wear_device_path_;
           bool topology_query_succeeded = false;
           auto observed = find_target({}, preferred_device_path, &topology_query_succeeded);
           if (!topology_query_succeeded) {
@@ -3847,14 +3903,20 @@ namespace ar_glasses {
             if (incompatible_transition_started_) {
               incompatible_transition_started_ = indeterminate_at;
             }
-            reconcile_wear_pause(applied_, false);
-            if ((transition_presenter_paused_ || wear_presenter_paused_) && session_) {
+            if (stop_off_head_session(applied_, false)) {
+              pending.reset();
+              pending_since = std::chrono::steady_clock::now();
+            }
+            if (transition_presenter_paused_ && session_) {
               session_->refresh_pointer_isolation();
             }
             std::this_thread::sleep_for(topology_poll_interval);
             continue;
           }
           const auto now = std::chrono::steady_clock::now();
+          if (wear_device_path_.empty() && observed) {
+            monitor_target(observed);
+          }
           if (observed != pending) {
             pending = observed;
             pending_since = now;
@@ -3876,11 +3938,31 @@ namespace ar_glasses {
               incompatible_transition_started_.reset();
             }
           }
-          const bool topology_ready_for_wear_resume = pending == applied_ &&
-                                                      now - pending_since >= topology_debounce;
-          reconcile_wear_pause(pending, topology_ready_for_wear_resume);
-          if ((transition_presenter_paused_ || wear_presenter_paused_) && session_) {
+          if (stop_off_head_session(observed, true)) {
+            // Teardown changes physical geometry. Require fresh stable observations before a
+            // later worn event can build a new desktop; pending still describes the old layout.
+            pending.reset();
+            pending_since = std::chrono::steady_clock::now();
+            continue;
+          }
+          if (transition_presenter_paused_ && session_) {
             session_->refresh_pointer_isolation();
+          }
+          if (session_ && !wear_allows_session()) {
+            // Extended-mode recovery may still need a durable sink-mode rebase. Never restart
+            // presentation or mutate to another mode while that off-head teardown is pending.
+            std::this_thread::sleep_for(topology_poll_interval);
+            continue;
+          }
+
+          if (!pending && !wear_device_path_.empty()) {
+            // Keep the sensor and its last authority across brief DP mode-switch gaps, including
+            // when off-head teardown has already removed the virtual desktop.
+            if (now - pending_since >= incompatible_transition_grace) {
+              apply(std::nullopt, stop_token);
+            }
+            std::this_thread::sleep_for(topology_poll_interval);
+            continue;
           }
 
           if (pending != applied_ && now - pending_since >= topology_debounce) {
@@ -3916,14 +3998,9 @@ namespace ar_glasses {
                 std::this_thread::sleep_for(topology_poll_interval);
                 continue;
               }
-              const bool start_presentation = detail::local_presenter_should_run(
-                false,
-                wear_presenter_paused_
-              );
               const auto reconfigured = session_->reconfigure_target(
                 *pending,
-                stop_token,
-                start_presentation
+                stop_token
               );
               if (!reconfigured) {
                 if (session_->virtual_display_authoritatively_absent()) {
@@ -3941,9 +4018,7 @@ namespace ar_glasses {
                 session_stability_confirmed_ = false;
                 transition_presenter_paused_ = false;
                 incompatible_transition_started_.reset();
-                if (start_presentation) {
-                  arm_presenter_retry();
-                }
+                arm_presenter_retry();
               }
             } else if (!session_ || !incompatible_transition_started_ || now - *incompatible_transition_started_ >= incompatible_transition_grace) {
               if (session_ && pending && applied_ && same_physical_output(applied_, pending)) {
@@ -3965,14 +4040,9 @@ namespace ar_glasses {
             // A transient display generation can settle back to the original contract after the
             // old presenter was deliberately paused. Restart resources on the still-attached
             // desktop instead of leaving a valid session silently idle.
-            const bool start_presentation = detail::local_presenter_should_run(
-              false,
-              wear_presenter_paused_
-            );
             const auto reconfigured = session_->reconfigure_target(
               *pending,
-              stop_token,
-              start_presentation
+              stop_token
             );
             if (!reconfigured) {
               if (session_->virtual_display_authoritatively_absent()) {
@@ -3988,17 +4058,15 @@ namespace ar_glasses {
               session_stability_confirmed_ = false;
               transition_presenter_paused_ = false;
               incompatible_transition_started_.reset();
-              if (start_presentation) {
-                arm_presenter_retry();
-              }
+              arm_presenter_retry();
             }
-          } else if (pending == applied_ && session_ && !wear_presenter_paused_ && !session_stability_confirmed_ && session_->stable()) {
+          } else if (pending == applied_ && session_ && !session_stability_confirmed_ && session_->stable()) {
             // Construction only proves that a presenter thread was spawned. Reset exponential
             // retry backoff after sustained scanout so permanent DXGI/swapchain failures cannot
             // recreate the whole topology every two seconds forever.
             session_stability_confirmed_ = true;
             reset_failure_backoff();
-          } else if (pending == applied_ && session_ && !wear_presenter_paused_ && !session_->running() && session_->failed() && now >= retry_after_ && now >= presenter_retry_after_) {
+          } else if (pending == applied_ && session_ && !session_->running() && session_->failed() && now >= retry_after_ && now >= presenter_retry_after_) {
             transition_presenter_paused_ = true;
             session_->pause_presenter(pending);
             if (session_->virtual_display_authoritatively_absent()) {
@@ -4007,7 +4075,7 @@ namespace ar_glasses {
               schedule_failure_retry();
             } else if (pending) {
               BOOST_LOG(warning) << "Local AR presentation failed; restarting presenter resources while retaining its virtual desktop."sv;
-              const auto reconfigured = session_->reconfigure_target(*pending, stop_token, true);
+              const auto reconfigured = session_->reconfigure_target(*pending, stop_token);
               if (reconfigured) {
                 pending = reconfigured;
                 applied_ = reconfigured;
@@ -4019,7 +4087,7 @@ namespace ar_glasses {
                 schedule_failure_retry();
               }
             }
-          } else if (pending == applied_ && applied_ && !session_ && applied_->mode != presentation_mode_e::unsupported && (config::video.local_ar_virtual_display_only || !applied_->is_primary) && !applied_->is_cloned && now >= retry_after_) {
+          } else if (pending == applied_ && applied_ && !session_ && now - pending_since >= topology_debounce && applied_->mode != presentation_mode_e::unsupported && (config::video.local_ar_virtual_display_only || !applied_->is_primary) && !applied_->is_cloned && now >= retry_after_) {
             start_session(*applied_, stop_token);
           }
 
@@ -4033,12 +4101,16 @@ namespace ar_glasses {
       std::unique_ptr<local_session_t> session_;
       std::chrono::steady_clock::time_point retry_after_ {};
       std::chrono::steady_clock::time_point presenter_retry_after_ {};
+      std::chrono::steady_clock::time_point retirement_retry_after_ {};
       std::chrono::seconds failure_retry_delay_ {failed_session_retry};
       bool deferred_for_remote_ = false;
       bool session_stability_confirmed_ = false;
       bool transition_presenter_paused_ = false;
-      bool wear_presenter_paused_ = false;
       std::optional<std::chrono::steady_clock::time_point> incompatible_transition_started_;
+      std::wstring wear_device_path_;
+      std::unique_ptr<rayneo::wear_monitor_t> wear_monitor_;
+      detail::local_session_activation_t activation_;
+      std::optional<detail::local_session_activation_e> logged_activation_;
       std::jthread worker_;
     };
   }  // namespace

@@ -569,6 +569,22 @@ namespace ar_glasses::rayneo {
       bool candidate_initialized_ = false;
     };
 
+    class wear_history_t {
+    public:
+      void observe(wear_snapshot_t snapshot) noexcept {
+        if (snapshot.availability == wear_availability_e::available && snapshot.state != wear_state_e::unknown) {
+          last_confirmed_.store(snapshot.state, std::memory_order_release);
+        }
+      }
+
+      [[nodiscard]] wear_state_e last_confirmed_state() const noexcept {
+        return last_confirmed_.load(std::memory_order_acquire);
+      }
+
+    private:
+      std::atomic<wear_state_e> last_confirmed_ {wear_state_e::unknown};
+    };
+
     constexpr wchar_t ascii_lower(wchar_t character) noexcept {
       return character >= L'A' && character <= L'Z' ?
                static_cast<wchar_t>(character + (L'a' - L'A')) :
@@ -939,6 +955,7 @@ namespace ar_glasses::rayneo {
       if (!stop_event_.valid() || !control_event_.valid() || !start_event_.valid()) {
         BOOST_LOG(error) << "Could not create the RayNeo wear-monitor control events: "sv
                          << GetLastError();
+        publish_availability(wear_availability_e::unavailable);
         return;
       }
       worker_ = std::jthread([this](std::stop_token stop_token) {
@@ -980,7 +997,20 @@ namespace ar_glasses::rayneo {
     }
 
     [[nodiscard]] wear_state_e state() const noexcept {
-      return state_.load(std::memory_order_acquire);
+      return snapshot().state;
+    }
+
+    [[nodiscard]] wear_snapshot_t snapshot() const noexcept {
+      const auto current = snapshot_.load(std::memory_order_acquire);
+      // A device/power callback invalidates the old subscription before its worker can finish
+      // draining the outstanding HID operation. Do not expose a stale worn decision meanwhile.
+      return lifecycle_invalidated() ?
+               wear_snapshot_t {wear_availability_e::probing, wear_state_e::unknown} :
+               current;
+    }
+
+    [[nodiscard]] wear_state_e last_confirmed_state() const noexcept {
+      return history_.last_confirmed_state();
     }
 
   private:
@@ -1168,11 +1198,23 @@ namespace ar_glasses::rayneo {
       ReleaseSRWLockExclusive(&callback_lock_);
     }
 
-    void publish_state(wear_state_e state) {
-      const auto previous = state_.exchange(state, std::memory_order_acq_rel);
-      if (previous != state) {
-        BOOST_LOG(info) << "RayNeo wear sensor state: "sv << wear_state_name(state) << '.';
+    void publish_snapshot(wear_snapshot_t snapshot) {
+      // Publish durable authority first. A controller that reads the live snapshot and then its
+      // history cannot miss a known state erased by a later ambiguous sample or USB interruption.
+      history_.observe(snapshot);
+      const auto previous = snapshot_.exchange(snapshot, std::memory_order_acq_rel);
+      if (previous.state != snapshot.state) {
+        BOOST_LOG(info) << "RayNeo wear sensor state: "sv << wear_state_name(snapshot.state) << '.';
       }
+    }
+
+    void publish_state(wear_state_e state) {
+      const auto current = snapshot_.load(std::memory_order_acquire);
+      publish_snapshot({current.availability, state});
+    }
+
+    void publish_availability(wear_availability_e availability) {
+      publish_snapshot({availability, wear_state_e::unknown});
     }
 
     void log_retry(std::string_view failure) {
@@ -1250,7 +1292,7 @@ namespace ar_glasses::rayneo {
         return {protocol_result_e::interrupted, {}};
       }
 
-      publish_state(wear_state_e::unknown);
+      publish_availability(wear_availability_e::probing);
       wear_debounce_t debounce;
       overlapped_io_t read_operation;
       std::array<std::uint8_t, report_size> report {};
@@ -1342,6 +1384,11 @@ namespace ar_glasses::rayneo {
             continue;
           }
           const auto received_at = std::chrono::steady_clock::now();
+          if (!outcome.had_valid_report) {
+            // Authentication alone does not prove this USB incarnation supplies wear data.
+            // A valid but ambiguous proximity sample does prove that the sensor is available.
+            publish_availability(wear_availability_e::available);
+          }
           outcome.had_valid_report = true;
           valid_report_deadline = received_at + stale_timeout;
           if (const auto changed = debounce.observe(sample->tick, sample->state, received_at)) {
@@ -1371,7 +1418,9 @@ namespace ar_glasses::rayneo {
           ignored_error
         );
       }
-      publish_state(wear_state_e::unknown);
+      publish_availability(
+        lifecycle_invalidated ? wear_availability_e::probing : wear_availability_e::unavailable
+      );
       return outcome;
     }
 
@@ -1386,7 +1435,7 @@ namespace ar_glasses::rayneo {
         // keeps its own pending bit, which wait_for_control() checks before blocking.
         WaitForSingleObject(control_event_.get(), 0);
         if (power_suspended_.load(std::memory_order_acquire)) {
-          publish_state(wear_state_e::unknown);
+          publish_availability(wear_availability_e::probing);
           const auto wait = wait_for_control(stop_token, std::nullopt);
           if (wait == wait_result_e::stopped || wait == wait_result_e::failed) {
             break;
@@ -1413,7 +1462,7 @@ namespace ar_glasses::rayneo {
 
         auto discovery = discover_unique_device();
         if (!discovery.device) {
-          publish_state(wear_state_e::unknown);
+          publish_availability(wear_availability_e::unavailable);
           log_retry(discovery.failure);
           const auto delay = recovery_retry_delay(
             discovery.failure_kind,
@@ -1440,6 +1489,8 @@ namespace ar_glasses::rayneo {
           continue;
         }
 
+        publish_availability(wear_availability_e::probing);
+
         const auto authentication = authenticate_board(
           discovery.device->handle.get(),
           stop_event_.get(),
@@ -1454,7 +1505,7 @@ namespace ar_glasses::rayneo {
           continue;
         }
         if (authentication.result == protocol_result_e::unsupported) {
-          publish_state(wear_state_e::unknown);
+          publish_availability(wear_availability_e::unavailable);
           BOOST_LOG(warning) << "RayNeo wear monitor rejected this HID incarnation: "sv
                              << authentication.failure
                              << "; deferring authentication until a device/power transition or the safety watchdog."sv;
@@ -1467,7 +1518,7 @@ namespace ar_glasses::rayneo {
           continue;
         }
         if (authentication.result != protocol_result_e::complete) {
-          publish_state(wear_state_e::unknown);
+          publish_availability(wear_availability_e::unavailable);
           log_retry(authentication.failure);
           discovery.device.reset();
           const auto delay = recovery_retry_delay(
@@ -1510,6 +1561,8 @@ namespace ar_glasses::rayneo {
         if (stream.had_valid_report) {
           consecutive_failures = 0;
         }
+        // Startup failures can return before monitor_sensor_stream() publishes its final state.
+        publish_availability(wear_availability_e::unavailable);
         log_retry(stream.failure);
         discovery.device.reset();
         const auto delay = recovery_retry_delay(
@@ -1526,10 +1579,11 @@ namespace ar_glasses::rayneo {
           consecutive_failures = 0;
         }
       }
-      publish_state(wear_state_e::unknown);
+      publish_availability(wear_availability_e::unavailable);
     }
 
-    std::atomic<wear_state_e> state_ {wear_state_e::unknown};
+    std::atomic<wear_snapshot_t> snapshot_ {wear_snapshot_t {}};
+    wear_history_t history_;
     std::atomic<std::uint32_t> pending_notifications_ {lifecycle_none};
     std::atomic_bool power_suspended_ {false};
     std::chrono::steady_clock::time_point next_failure_log_ {};
@@ -1556,6 +1610,15 @@ namespace ar_glasses::rayneo {
 
   wear_state_e wear_monitor_t::state() const noexcept {
     return impl_ ? impl_->state() : wear_state_e::unknown;
+  }
+
+  wear_snapshot_t wear_monitor_t::snapshot() const noexcept {
+    return impl_ ? impl_->snapshot() :
+                   wear_snapshot_t {wear_availability_e::unavailable, wear_state_e::unknown};
+  }
+
+  wear_state_e wear_monitor_t::last_confirmed_state() const noexcept {
+    return impl_ ? impl_->last_confirmed_state() : wear_state_e::unknown;
   }
 
   std::unique_ptr<wear_monitor_t> create_wear_monitor(std::string_view display_model_id) {
@@ -1616,6 +1679,14 @@ namespace ar_glasses::rayneo {
       notifications_available,
       consecutive_failures
     );
+  }
+
+  wear_state_e detail::last_confirmed_state_for_test(std::span<const wear_snapshot_t> snapshots) {
+    wear_history_t history;
+    for (const auto &snapshot : snapshots) {
+      history.observe(snapshot);
+    }
+    return history.last_confirmed_state();
   }
 
   wear_state_e detail::debounce_observations_for_test(

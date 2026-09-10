@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rayneo_wear_monitor.h"
 #include "src/platform/common.h"
 
 #include <algorithm>
@@ -58,12 +59,57 @@ namespace ar_glasses {
   static_assert(classify_mode(3840, 2160) == presentation_mode_e::unsupported);
 
   namespace detail {
-    /** Presenter work is permitted only when neither topology nor wear state requires a pause. */
-    constexpr bool local_presenter_should_run(
-      bool topology_transition_paused,
-      bool off_head_paused
-    ) {
-      return !topology_transition_paused && !off_head_paused;
+    enum class local_session_activation_e {
+      waiting_for_sensor,
+      connection,
+      worn,
+      off_head,
+    };
+
+    /** Wear authority belongs to the connected glasses, not the virtual desktop it controls. */
+    class local_session_activation_t {
+    public:
+      using clock_t = std::chrono::steady_clock;
+      static constexpr auto initial_probe_grace = std::chrono::seconds {3};
+
+      local_session_activation_e observe(
+        std::optional<rayneo::wear_snapshot_t> sensor,
+        clock_t::time_point now,
+        rayneo::wear_state_e remembered_state = rayneo::wear_state_e::unknown
+      ) {
+        if (!sensor) {
+          return local_session_activation_e::connection;
+        }
+        if (!probe_started_) {
+          probe_started_ = now;
+        }
+        if (remembered_state != rayneo::wear_state_e::unknown) {
+          // The controller can spend seconds inside Windows topology changes. The HID worker
+          // preserves the latest confirmed state even if its live sample changes again meanwhile.
+          last_confirmed_ = remembered_state;
+        } else if (sensor->availability == rayneo::wear_availability_e::available && sensor->state != rayneo::wear_state_e::unknown) {
+          last_confirmed_ = sensor->state;
+        }
+        // Once the sensor has worked, gaps in its transport or ambiguous samples must not undo
+        // an off-head exit or interrupt a worn session. Only unplug/target replacement resets it.
+        if (last_confirmed_) {
+          return *last_confirmed_ == rayneo::wear_state_e::worn ?
+                   local_session_activation_e::worn :
+                   local_session_activation_e::off_head;
+        }
+        return now - *probe_started_ < initial_probe_grace ?
+                 local_session_activation_e::waiting_for_sensor :
+                 local_session_activation_e::connection;
+      }
+
+    private:
+      std::optional<clock_t::time_point> probe_started_;
+      std::optional<rayneo::wear_state_e> last_confirmed_;
+    };
+
+    constexpr bool local_session_requested(local_session_activation_e activation) {
+      return activation == local_session_activation_e::connection ||
+             activation == local_session_activation_e::worn;
     }
 
     /** Remote ownership lasts for the configured client-connect window plus scheduling grace. */

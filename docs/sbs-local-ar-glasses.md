@@ -42,6 +42,10 @@ cannot activate for an HDR sink, Sunshine 3D retains the same color-managed SDR 
 Moving the glasses to another GPU/adapter also forces a complete rebuild: the adapter LUID is part
 of both the detected target contract and the presenter's expected output identity.
 
+Physical-display absence gets a five-second grace period before the controller treats it as a
+disconnect, preserving the sensor subscription and its last confirmed state across brief hardware
+mode-switch gaps. Failed Windows topology queries do not count as disconnect evidence.
+
 In exclusive mode, switching the glasses' hardware mode can make Windows restore a remembered
 extended layout, including the ordinary physical monitor as primary. Sunshine 3D reconciles the
 recorded display identities, makes the same virtual source primary again, disables ordinary outputs,
@@ -53,8 +57,13 @@ resolved again after promotion before any source mode changes.
 Wear detection is intentionally model-specific. Sunshine 3D enables it only when the selected
 physical display is exactly `DISPLAY:TCL03D4` and the matching RayNeo Taurus HID device
 (`VID_1BBB&PID_AF50`, vendor usage page `0xFF00`, usage `0x0001`) authenticates as board `0x3A`
-(RayNeo Air 4 Pro). Other approved displays, other RayNeo boards, a missing HID interface, or an
-ambiguous match retain the legacy connected-display behavior.
+(RayNeo Air 4 Pro). Other approved displays use their connection as the session signal: the
+connected Windows display starts local presentation after the ordinary topology debounce, and
+disconnecting it exits the local virtual desktop. A recognized RayNeo display first gets a
+three-second sensor discovery grace period, so a late USB interface does not immediately activate
+the virtual desktop. If no worn or off-head state has been confirmed by then, the host uses the
+same connection behavior while sensor discovery continues. This also covers other RayNeo boards,
+a missing HID interface, or an ambiguous match.
 
 After board authentication, the host accepts only the exact 65-byte Windows HID sensor report
 shape (`00 99 65`). The little-endian float at vendor-payload byte offset 44 is the wear proximity
@@ -77,10 +86,12 @@ failure without treating the Air 4 Pro's observed multi-second quiet intervals a
 changes. A silent subscription is closed and re-authenticated with bounded `1/2/5/10/30`-second
 recovery backoff instead of repeatedly canceling and reissuing reads on the same possibly stale
 handle. A healthy connection sends its board query and sensor-start command once, then keeps one
-outstanding read and only consumes pushed HID reports; it never polls wear status. Unknown state
-fails open: it cancels sensor-only suppression and permits the same local presentation behavior used
-before wear sensing, rather than guessing that the glasses are worn or leaving a user with a
-permanently blank display.
+outstanding read and only consumes pushed HID reports; it never polls wear status. Once either
+**worn** or **off-head** has been confirmed for the selected physical display, that last confirmed
+state controls its session until another confirmed state arrives. Unknown samples, stale reports,
+and temporary sensor unavailability leave that decision unchanged. A confirmed display disconnect
+or a different selected device-instance path clears the decision; an ordinary 2D/3D mode change
+on the same physical display does not.
 
 HID-interface arrival/removal and Windows suspend/resume callbacks interrupt every outstanding
 command or read. Suspend/removal immediately closes the old handle; resume/arrival performs a fresh
@@ -90,21 +101,23 @@ scan; a 30-second SetupAPI enumeration is retained only as a missed-notification
 notification registration itself fails, the one-second compatibility fallback remains. SetupAPI
 enumeration is not a hardware/status query. Sunshine 3D cannot synthesize sensor data or reset the
 USB bus when Windows restores only DisplayPort video and never enumerates `VID_1BBB&PID_AF50`; it
-stays fail-open and recovers automatically if that interface later appears.
+keeps the last confirmed wear decision, or the initial connection fallback if no state has ever
+been confirmed, and recovers automatically if that interface later appears.
 
 Confirmed off-head state stops and joins the local presenter, including capture and Host SBS 3D
-conversion, but retains the session's SudoVDA virtual monitor, desktop and windows, physical-output
-isolation, cursor isolation, and live GPU-ownership lease. Confirmed worn state rebuilds the
-presenter resources against that same retained desktop. Wear state is a presenter pause reason
-separate from the display-topology transition pause, so neither reason may resume presentation
-while the other remains active. This gate adds no Host SBS inference, reuse, scene-cut, geometry,
-or temporal rule; resumed resources continue to follow the canonical Host SBS contract.
+conversion, restores the physical-display topology, releases cursor confinement, removes the
+private SudoVDA source, and releases the live GPU-ownership lease. This follows the same verified
+teardown order as a display disconnect. Confirmed worn state starts a new local virtual desktop
+after the connected display topology is stable and display/GPU ownership is available. The
+controller keeps the sensor monitor alive across off-head teardown and remote handoff, so putting
+the glasses on can start the next session without unplugging them. The sensor gate adds no Host
+SBS inference, reuse, scene-cut, geometry, or temporal rule.
 
-Off-head is not a disconnect. A true Windows display unplug remains authoritative and follows the
-ordinary full session teardown below: capture stops, the physical-display topology is restored, and
-the private virtual source is removed in the order required by the active topology policy. Remote
-virtual-display ownership likewise keeps its existing priority over a local session whether that local
-presenter is running or paused off-head.
+While worn, supported 2D/3D mode changes still retain the existing virtual desktop as described
+above. While off-head, mode changes do not create a virtual desktop. A true Windows display unplug
+always exits the session regardless of the last wear state. Remote virtual-display ownership
+retains priority over local presentation; a worn signal cannot interrupt an active or connecting
+remote session.
 
 Only one presentation path owns an interactive virtual desktop at a time. A connecting or active
 remote virtual-display stream takes priority without being terminated: Sunshine 3D synchronously stops
@@ -120,7 +133,7 @@ The remote ownership reservation uses the configured `ping_timeout` connection w
 small scheduling grace), including values longer than one minute; it is not governed by a separate
 fixed lease.
 
-On connect Sunshine 3D:
+When connection or wear state permits a new local session, Sunshine 3D:
 
 1. Captures a complete topology snapshot and durably records the display state before attaching
    SudoVDA. In extended-desktop mode it also computes the deterministic source/sink row, records the
@@ -145,15 +158,15 @@ On connect Sunshine 3D:
 7. Presents a non-activating, borderless, topmost swapchain restricted to that physical output.
 8. Uses passthrough in 1920x1080 or the production matched-frame depth and warp in 3840x1080.
 
-Disconnect, an unsupported resolution, a graphics-adapter change, or Sunshine 3D shutdown
-stops capture before removing the private virtual display. A supported 2D/SBS resolution change and
-ordinary swapchain/capture reinitialization retain it. Unexpected presenter failures retry after a
-delay; repeated setup failures use bounded exponential backoff while the same stable glasses mode
-remains active.
+Confirmed off-head, disconnect, an unsupported resolution, a graphics-adapter change, or Sunshine 3D
+shutdown stops capture before removing the private virtual display. A supported 2D/SBS resolution
+change and ordinary swapchain/capture reinitialization retain it. Unexpected presenter failures retry
+after a delay; repeated setup failures use bounded exponential backoff while the same stable glasses
+mode remains active.
 
-On clean shutdown, disconnect, or an incompatible transition, Sunshine 3D restores the physical
-desktop. The glasses output must remain active during presentation because disabling its display path
-would also stop DP scanout.
+On confirmed off-head, clean shutdown, disconnect, or an incompatible transition, Sunshine 3D restores
+the physical desktop. The glasses output must remain active during presentation because disabling its
+display path would also stop DP scanout.
 
 Exclusive mode records the original complete display topology before attaching the virtual source.
 On teardown it first restores connected ordinary monitors to their saved positions, modes, and color
