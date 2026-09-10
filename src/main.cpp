@@ -6,8 +6,11 @@
 #include <atomic>
 #include <codecvt>
 #include <csignal>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <mutex>
+#include <optional>
 #include <sstream>
 
 // lib includes
@@ -33,6 +36,7 @@
 #include "video_depth_estimator.h"
 #ifdef _WIN32
   #include "platform/windows/ar_glasses.h"
+  #include "platform/windows/exclusive_display_reconcile_retry.h"
   #include "platform/windows/misc.h"
   #include "platform/windows/primary_display.h"
   #include "platform/windows/virtual_display.h"
@@ -86,13 +90,21 @@ namespace {
   constexpr UINT_PTR EXCLUSIVE_CURSOR_MAINTENANCE_TIMER = 2;
   constexpr UINT EXCLUSIVE_CURSOR_REFRESH_DELAY_MS = 100;
   constexpr UINT EXCLUSIVE_CURSOR_MAINTENANCE_MS = 250;
+  constexpr auto EXCLUSIVE_DISPLAY_RECONCILE_RETRY_DELAY = 50ms;
+  constexpr auto EXCLUSIVE_DISPLAY_RECONCILE_RETRY_WINDOW = 1500ms;
+  constexpr std::size_t EXCLUSIVE_DISPLAY_RECONCILE_MAX_ATTEMPTS = 31;
 
   std::atomic<HWND> session_monitor_window {nullptr};
   std::atomic_bool cursor_refresh_posted {false};
   std::atomic_bool cursor_refresh_queued {false};
   std::atomic_bool display_reconcile_posted {false};
-  std::atomic_bool display_reconcile_queued {false};
-  std::atomic_bool display_reconcile_dirty {false};
+  std::mutex display_reconcile_retry_mutex;
+  platf::primary_display::detail::exclusive_reconcile_retry_t display_reconcile_retry {
+    EXCLUSIVE_DISPLAY_RECONCILE_MAX_ATTEMPTS,
+    EXCLUSIVE_DISPLAY_RECONCILE_RETRY_WINDOW,
+  };
+
+  void enqueue_exclusive_display_reconcile();
 
   void request_exclusive_cursor_refresh() {
     const auto hwnd = session_monitor_window.load(std::memory_order_acquire);
@@ -124,33 +136,179 @@ namespace {
     if (!hwnd) {
       return;
     }
-    display_reconcile_dirty.store(true, std::memory_order_release);
+    {
+      std::lock_guard lock(display_reconcile_retry_mutex);
+      display_reconcile_retry.notify();
+    }
     bool expected = false;
     if (!display_reconcile_posted.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
       return;
     }
     if (!PostMessage(hwnd, WM_RECONCILE_EXCLUSIVE_DISPLAY, 0, 0)) {
       display_reconcile_posted.store(false, std::memory_order_release);
+      enqueue_exclusive_display_reconcile();
     }
   }
 
-  void enqueue_exclusive_display_reconcile() {
-    bool expected = false;
-    if (!display_reconcile_queued.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-      return;
-    }
-    task_pool.push([]() {
-      do {
-        display_reconcile_dirty.store(false, std::memory_order_release);
-        platf::primary_display::reconcile_exclusive_display_topology();
-      } while (display_reconcile_dirty.exchange(false, std::memory_order_acq_rel));
-      display_reconcile_queued.store(false, std::memory_order_release);
-      // Close the race between the final dirty check and clearing the in-flight flag. A window
-      // message handled in that interval could not enqueue its own worker.
-      if (display_reconcile_dirty.load(std::memory_order_acquire)) {
-        enqueue_exclusive_display_reconcile();
+  void queue_exclusive_display_reconcile_worker(
+    std::optional<std::uint64_t> expected_session_generation,
+    std::uint64_t scheduler_generation
+  );
+
+  void queue_exclusive_display_reconcile_retry(
+    platf::primary_display::detail::exclusive_reconcile_retry_t::ticket_t ticket
+  ) {
+    task_pool.pushDelayed(
+      [ticket]() {
+        const auto current_session_generation = platf::primary_display::exclusive_session_generation();
+        std::optional<std::uint64_t> retry_scheduler_generation;
+        {
+          std::lock_guard callback_lock(display_reconcile_retry_mutex);
+          retry_scheduler_generation = display_reconcile_retry.dispatch(
+            ticket,
+            current_session_generation
+          );
+        }
+        if (retry_scheduler_generation) {
+          queue_exclusive_display_reconcile_worker(
+            ticket.session_generation,
+            *retry_scheduler_generation
+          );
+        } else {
+          // A replacement session may have invalidated this ticket after its display event was
+          // coalesced into the delayed cycle. Start a fresh generation if work remains unhandled.
+          enqueue_exclusive_display_reconcile();
+        }
+      },
+      EXCLUSIVE_DISPLAY_RECONCILE_RETRY_DELAY
+    );
+  }
+
+  void queue_exclusive_display_reconcile_worker(
+    std::optional<std::uint64_t> expected_session_generation,
+    std::uint64_t scheduler_generation
+  ) {
+    task_pool.push([expected_session_generation, scheduler_generation]() {
+      const auto session_generation = expected_session_generation.value_or(
+        platf::primary_display::exclusive_session_generation()
+      );
+      for (;;) {
+        std::size_t attempt_number = 0;
+        std::uint64_t attempt_event_generation = 0;
+        {
+          std::lock_guard lock(display_reconcile_retry_mutex);
+          if (!display_reconcile_retry.begin_attempt(
+                scheduler_generation,
+                session_generation
+              )) {
+            break;
+          }
+          attempt_number = display_reconcile_retry.attempts();
+          attempt_event_generation = display_reconcile_retry.event_generation();
+        }
+        // Events already visible here are covered by this attempt. A later generation requests a
+        // follow-up, even when its window message was coalesced while this worker owned the cycle.
+        const auto result = platf::primary_display::reconcile_exclusive_display_topology(
+          session_generation
+        );
+        const auto current_session_generation = platf::primary_display::exclusive_session_generation();
+        if (result.generation != session_generation || current_session_generation != session_generation) {
+          std::lock_guard lock(display_reconcile_retry_mutex);
+          display_reconcile_retry.abandon(scheduler_generation);
+          break;
+        }
+
+        using followup_e = platf::primary_display::detail::exclusive_reconcile_followup_e;
+        followup_e followup = followup_e::finish;
+        std::optional<platf::primary_display::detail::exclusive_reconcile_retry_t::ticket_t> retry_ticket;
+        {
+          std::lock_guard lock(display_reconcile_retry_mutex);
+          const auto completed_event_generation = display_reconcile_retry.event_generation();
+          const bool dirty = completed_event_generation != attempt_event_generation;
+          const auto now = platf::primary_display::detail::exclusive_reconcile_retry_t::clock_t::now();
+          const bool can_retry = display_reconcile_retry.can_retry(
+            scheduler_generation,
+            session_generation,
+            now
+          );
+          followup = platf::primary_display::detail::reconcile_followup(
+            result.result,
+            dirty,
+            can_retry
+          );
+          switch (followup) {
+            case followup_e::retry_immediate:
+              display_reconcile_retry.acknowledge(
+                scheduler_generation,
+                attempt_event_generation
+              );
+              break;
+            case followup_e::retry_delayed:
+              // Keep events received during the attempt unhandled. The same-session retry covers
+              // them, while a replacement-session rejection can reopen them as a fresh cycle.
+              retry_ticket = display_reconcile_retry.schedule(
+                scheduler_generation,
+                session_generation,
+                attempt_event_generation,
+                now
+              );
+              if (!retry_ticket) {
+                display_reconcile_retry.finish(
+                  scheduler_generation,
+                  completed_event_generation
+                );
+                followup = followup_e::finish;
+              }
+              break;
+            case followup_e::exhausted:
+            case followup_e::finish:
+              display_reconcile_retry.finish(
+                scheduler_generation,
+                completed_event_generation
+              );
+              break;
+          }
+        }
+
+        switch (followup) {
+          case followup_e::retry_immediate:
+            continue;
+          case followup_e::retry_delayed:
+            if (attempt_number == 1) {
+              BOOST_LOG(warning) << "Windows display topology reconciliation is still settling; retrying with a bounded delay."sv;
+            }
+            // Windows can broadcast the display change from the failed apply itself. Keep that
+            // notification in this bounded cycle and preserve the settle delay before retrying.
+            queue_exclusive_display_reconcile_retry(*retry_ticket);
+            break;
+          case followup_e::exhausted:
+            BOOST_LOG(warning) << "Windows display topology reconciliation did not settle within the retry window; waiting for the next display change."sv;
+            break;
+          case followup_e::finish:
+            break;
+        }
+        break;
       }
+      // A display event arriving after the atomic result transition remains unhandled and starts
+      // here; otherwise the controller rejects this no-op enqueue.
+      enqueue_exclusive_display_reconcile();
     });
+  }
+
+  void enqueue_exclusive_display_reconcile() {
+    std::optional<std::uint64_t> scheduler_generation;
+    {
+      std::lock_guard lock(display_reconcile_retry_mutex);
+      scheduler_generation = display_reconcile_retry.start();
+    }
+    if (scheduler_generation) {
+      queue_exclusive_display_reconcile_worker(std::nullopt, *scheduler_generation);
+    }
+  }
+
+  void stop_exclusive_display_reconcile_retry() {
+    std::lock_guard lock(display_reconcile_retry_mutex);
+    display_reconcile_retry.stop();
   }
 
   void CALLBACK SessionMonitorWinEventProc(
@@ -210,10 +368,10 @@ LRESULT CALLBACK SessionMonitorWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
     case WM_DESTROY:
       KillTimer(hwnd, EXCLUSIVE_CURSOR_DELAY_TIMER);
       KillTimer(hwnd, EXCLUSIVE_CURSOR_MAINTENANCE_TIMER);
+      stop_exclusive_display_reconcile_retry();
       session_monitor_window.store(nullptr, std::memory_order_release);
       cursor_refresh_posted.store(false, std::memory_order_release);
       display_reconcile_posted.store(false, std::memory_order_release);
-      display_reconcile_dirty.store(false, std::memory_order_release);
       PostQuitMessage(0);
       return 0;
     case WM_ENDSESSION:

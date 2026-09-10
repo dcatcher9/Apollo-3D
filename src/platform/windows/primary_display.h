@@ -7,6 +7,7 @@
 #include "display_config.h"
 #include "exclusive_cursor_clip.h"
 
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <optional>
@@ -50,10 +51,71 @@ namespace platf::primary_display {
    */
   bool refresh_exclusive_cursor_clip();
 
-  /** Reassert the owned exclusive topology after Windows reports a display change. */
-  bool reconcile_exclusive_display_topology();
+  enum class exclusive_reconcile_result_e {
+    settled,
+    retry_active,
+    pending_recovery,
+  };
+
+  struct exclusive_reconcile_result_t {
+    exclusive_reconcile_result_e result = exclusive_reconcile_result_e::settled;
+    std::uint64_t generation = 0;
+  };
+
+  /** Monotonic identity for the pending or active exclusive-display session. */
+  std::uint64_t exclusive_session_generation();
+
+  /** Reassert the owned exclusive topology after Windows reports a display change.
+   * The generation overload makes delayed work harmless after restore or replacement.
+   */
+  exclusive_reconcile_result_t reconcile_exclusive_display_topology();
+  exclusive_reconcile_result_t reconcile_exclusive_display_topology(std::uint64_t expected_generation);
 
   namespace detail {
+    enum class exclusive_reconcile_action_e {
+      defer,
+      recover,
+      reconcile,
+    };
+
+    enum class exclusive_restore_action_e {
+      keep,
+      reject,
+      disarm_before,
+      disarm_after_success,
+    };
+
+    /** Process-local ownership state around the durable display journal.
+     * A pending identity prevents recovery from treating a failed promotion attempt as an
+     * abandoned session, while active is reserved for a fully verified promotion.
+     * Access is serialized by the caller's display transaction mutex.
+     */
+    class exclusive_session_state_t {
+    public:
+      void prepared();
+      bool can_use_identity(std::wstring_view device_path) const;
+      void bound(std::wstring_view device_path);
+      bool begin_promotion(std::wstring_view device_path);
+      bool promotion_succeeded(std::wstring_view device_path);
+      exclusive_restore_action_e restore_action(std::wstring_view expected_device_path) const;
+      void restore_finished(exclusive_restore_action_e action, bool restored);
+      void disarm();
+      exclusive_reconcile_action_e reconcile_action() const;
+
+      bool expected() const;
+      const std::optional<std::wstring> &pending_identity() const;
+      const std::optional<std::wstring> &active_identity() const;
+      std::uint64_t generation() const;
+
+    private:
+      void changed();
+
+      std::optional<std::wstring> pending_identity_;
+      std::optional<std::wstring> active_identity_;
+      bool expected_ = false;
+      std::uint64_t generation_ = 0;
+    };
+
     /** A process-lifetime file handle prevents a second host from recovering a live journal. */
     class ownership_t {
     public:

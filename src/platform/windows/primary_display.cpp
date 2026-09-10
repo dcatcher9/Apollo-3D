@@ -845,10 +845,9 @@ namespace platf::primary_display {
     // Access is serialized by transaction_mutex. Session ownership is deliberately separate
     // from both the recovery journal and ClipCursor ownership: a virtual-only session with no
     // active AR output needs hotplug reconciliation, but does not need a cursor clip.
-    std::optional<std::wstring> active_exclusive_display_identity;
+    detail::exclusive_session_state_t exclusive_session_state;
     std::optional<std::wstring> active_cursor_clip_identity;
     std::optional<detail::cursor_bounds_t> active_cursor_clip_bounds;
-    bool exclusive_session_expected = false;
 
     bool set_exclusive_cursor_clip(std::wstring_view identity, std::optional<detail::cursor_bounds_t> bounds) {
       auto &cursor_clip = exclusive_cursor_clip();
@@ -923,6 +922,119 @@ namespace platf::primary_display {
   }  // namespace
 
   namespace detail {
+    void exclusive_session_state_t::changed() {
+      ++generation_;
+    }
+
+    void exclusive_session_state_t::prepared() {
+      if (expected_) {
+        return;
+      }
+      expected_ = true;
+      changed();
+    }
+
+    bool exclusive_session_state_t::can_use_identity(std::wstring_view device_path) const {
+      if (device_path.empty()) {
+        return false;
+      }
+      return (!pending_identity_ || same_device(*pending_identity_, device_path)) &&
+             (!active_identity_ || same_device(*active_identity_, device_path));
+    }
+
+    void exclusive_session_state_t::bound(std::wstring_view device_path) {
+      if (!expected_ || active_identity_ || pending_identity_) {
+        return;
+      }
+      pending_identity_ = device_path;
+      changed();
+    }
+
+    bool exclusive_session_state_t::begin_promotion(std::wstring_view device_path) {
+      if (!can_use_identity(device_path)) {
+        return false;
+      }
+      bool state_changed = false;
+      if (!expected_) {
+        expected_ = true;
+        state_changed = true;
+      }
+      if (!active_identity_ && !pending_identity_) {
+        pending_identity_ = device_path;
+        state_changed = true;
+      }
+      if (state_changed) {
+        changed();
+      }
+      return true;
+    }
+
+    bool exclusive_session_state_t::promotion_succeeded(std::wstring_view device_path) {
+      if (!can_use_identity(device_path)) {
+        return false;
+      }
+      const bool already_active = active_identity_ && same_device(*active_identity_, device_path) && !pending_identity_;
+      expected_ = true;
+      pending_identity_.reset();
+      active_identity_ = device_path;
+      if (!already_active) {
+        changed();
+      }
+      return true;
+    }
+
+    exclusive_restore_action_e exclusive_session_state_t::restore_action(std::wstring_view expected_device_path) const {
+      if (expected_device_path.empty()) {
+        return exclusive_restore_action_e::disarm_before;
+      }
+      if (active_identity_ || pending_identity_) {
+        return can_use_identity(expected_device_path) ? exclusive_restore_action_e::disarm_before :
+                                                        exclusive_restore_action_e::reject;
+      }
+      return expected_ ? exclusive_restore_action_e::disarm_after_success :
+                         exclusive_restore_action_e::keep;
+    }
+
+    void exclusive_session_state_t::restore_finished(exclusive_restore_action_e action, bool restored) {
+      if (restored && action == exclusive_restore_action_e::disarm_after_success) {
+        disarm();
+      }
+    }
+
+    void exclusive_session_state_t::disarm() {
+      if (!expected_ && !pending_identity_ && !active_identity_) {
+        return;
+      }
+      expected_ = false;
+      pending_identity_.reset();
+      active_identity_.reset();
+      changed();
+    }
+
+    exclusive_reconcile_action_e exclusive_session_state_t::reconcile_action() const {
+      if (active_identity_) {
+        return exclusive_reconcile_action_e::reconcile;
+      }
+      return expected_ || pending_identity_ ? exclusive_reconcile_action_e::defer :
+                                              exclusive_reconcile_action_e::recover;
+    }
+
+    bool exclusive_session_state_t::expected() const {
+      return expected_;
+    }
+
+    const std::optional<std::wstring> &exclusive_session_state_t::pending_identity() const {
+      return pending_identity_;
+    }
+
+    const std::optional<std::wstring> &exclusive_session_state_t::active_identity() const {
+      return active_identity_;
+    }
+
+    std::uint64_t exclusive_session_state_t::generation() const {
+      return generation_;
+    }
+
     ownership_t::~ownership_t() {
       if (handle_ != INVALID_HANDLE_VALUE) {
         CloseHandle(handle_);
@@ -2271,23 +2383,16 @@ namespace platf::primary_display {
   bool promote(std::wstring_view device_path, bool exclusive) {
     std::lock_guard lock(transaction_mutex);
     try {
+      if (exclusive && !exclusive_session_state.begin_promotion(device_path)) {
+        BOOST_LOG(warning) << "Refusing to promote a different display while an exclusive display session is pending or active.";
+        return false;
+      }
       const bool promoted = acquire_ownership() && manager().promote(device_path, exclusive);
-      if (exclusive) {
-        exclusive_session_expected = promoted;
-        if (promoted) {
-          active_exclusive_display_identity = device_path;
-        } else if (active_exclusive_display_identity && same_device(*active_exclusive_display_identity, device_path)) {
-          active_exclusive_display_identity.reset();
-        }
+      if (exclusive && promoted && !exclusive_session_state.promotion_succeeded(device_path)) {
+        return false;
       }
       return promoted;
     } catch (const std::exception &exception) {
-      if (exclusive) {
-        exclusive_session_expected = false;
-        if (active_exclusive_display_identity && same_device(*active_exclusive_display_identity, device_path)) {
-          active_exclusive_display_identity.reset();
-        }
-      }
       BOOST_LOG(error) << "Temporary primary-display promotion failed: " << exception.what();
       return false;
     }
@@ -2298,7 +2403,7 @@ namespace platf::primary_display {
     try {
       const bool prepared = acquire_ownership() && manager().prepare(exclusive);
       if (exclusive && prepared) {
-        exclusive_session_expected = true;
+        exclusive_session_state.prepared();
       }
       return prepared;
     } catch (const std::exception &exception) {
@@ -2310,7 +2415,15 @@ namespace platf::primary_display {
   bool bind_pending(std::wstring_view device_path) {
     std::lock_guard lock(transaction_mutex);
     try {
-      return acquire_ownership() && manager().bind_pending(device_path);
+      if (exclusive_session_state.expected() && !exclusive_session_state.can_use_identity(device_path)) {
+        BOOST_LOG(warning) << "Refusing to bind a different display to the pending exclusive display session.";
+        return false;
+      }
+      const bool bound = acquire_ownership() && manager().bind_pending(device_path);
+      if (bound) {
+        exclusive_session_state.bound(device_path);
+      }
+      return bound;
     } catch (const std::exception &exception) {
       BOOST_LOG(error) << "Could not bind primary-display recovery identity: " << exception.what();
       return false;
@@ -2320,12 +2433,16 @@ namespace platf::primary_display {
   bool restore(std::wstring_view expected_device_path) {
     std::lock_guard lock(transaction_mutex);
     try {
-      if (!active_exclusive_display_identity || expected_device_path.empty() ||
-          same_device(*active_exclusive_display_identity, expected_device_path)) {
-        exclusive_session_expected = false;
-        active_exclusive_display_identity.reset();
+      const auto action = exclusive_session_state.restore_action(expected_device_path);
+      if (action == detail::exclusive_restore_action_e::reject) {
+        return false;
       }
-      return acquire_ownership() && manager().restore(expected_device_path);
+      if (action == detail::exclusive_restore_action_e::disarm_before) {
+        exclusive_session_state.disarm();
+      }
+      const bool restored = acquire_ownership() && manager().restore(expected_device_path);
+      exclusive_session_state.restore_finished(action, restored);
+      return restored;
     } catch (const std::exception &exception) {
       BOOST_LOG(error) << "Temporary primary-display recovery failed: " << exception.what();
       return false;
@@ -2354,21 +2471,60 @@ namespace platf::primary_display {
     }
   }
 
-  bool reconcile_exclusive_display_topology() {
+  std::uint64_t exclusive_session_generation() {
     std::lock_guard lock(transaction_mutex);
-    try {
-      if (!active_exclusive_display_identity) {
-        if (exclusive_session_expected) {
-          return true;
-        }
-        // A crash-recovery journal can remain pending while a saved monitor is unplugged. A later
-        // display notification is the earliest safe opportunity to finish that exact restore.
-        return acquire_ownership() && manager().recover_inactive_exclusive();
+    return exclusive_session_state.generation();
+  }
+
+  namespace {
+    exclusive_reconcile_result_t reconcile_exclusive_display_topology_locked(
+      std::optional<std::uint64_t> expected_generation
+    ) {
+      const auto generation = exclusive_session_state.generation();
+      if (expected_generation && generation != *expected_generation) {
+        return {exclusive_reconcile_result_e::settled, generation};
       }
-      return manager().reconcile_active_exclusive(*active_exclusive_display_identity);
-    } catch (const std::exception &exception) {
-      BOOST_LOG(error) << "Could not reassert exclusive virtual-display topology: " << exception.what();
-      return false;
+      try {
+        switch (exclusive_session_state.reconcile_action()) {
+          case detail::exclusive_reconcile_action_e::defer:
+            return {exclusive_reconcile_result_e::settled, generation};
+          case detail::exclusive_reconcile_action_e::recover:
+            // A crash-recovery journal can remain pending while a saved monitor is unplugged. A
+            // later display notification is the earliest safe opportunity to finish that restore.
+            return {
+              acquire_ownership() && manager().recover_inactive_exclusive() ?
+                exclusive_reconcile_result_e::settled :
+                exclusive_reconcile_result_e::pending_recovery,
+              generation,
+            };
+          case detail::exclusive_reconcile_action_e::reconcile:
+            return {
+              manager().reconcile_active_exclusive(*exclusive_session_state.active_identity()) ?
+                exclusive_reconcile_result_e::settled :
+                exclusive_reconcile_result_e::retry_active,
+              generation,
+            };
+        }
+      } catch (const std::exception &exception) {
+        BOOST_LOG(error) << "Could not reassert exclusive virtual-display topology: " << exception.what();
+        return {
+          exclusive_session_state.reconcile_action() == detail::exclusive_reconcile_action_e::reconcile ?
+            exclusive_reconcile_result_e::retry_active :
+            exclusive_reconcile_result_e::pending_recovery,
+          generation,
+        };
+      }
+      return {exclusive_reconcile_result_e::pending_recovery, generation};
     }
+  }  // namespace
+
+  exclusive_reconcile_result_t reconcile_exclusive_display_topology() {
+    std::lock_guard lock(transaction_mutex);
+    return reconcile_exclusive_display_topology_locked(std::nullopt);
+  }
+
+  exclusive_reconcile_result_t reconcile_exclusive_display_topology(std::uint64_t expected_generation) {
+    std::lock_guard lock(transaction_mutex);
+    return reconcile_exclusive_display_topology_locked(expected_generation);
   }
 }  // namespace platf::primary_display

@@ -77,6 +77,7 @@ namespace {
     bool color_set_ok = true;
     int query_count = 0;
     int mutate_on_query = 0;
+    std::set<int> failed_queries;
     std::function<void(snapshot_t &)> mutation;
     std::function<void(snapshot_t &)> applied_mutation;
     std::set<std::wstring> preserved_exclusive;
@@ -86,8 +87,12 @@ namespace {
       return {
         [this]() -> std::optional<snapshot_t> {
           events.push_back("query");
-          if (++query_count == mutate_on_query && mutation) {
+          const int current_query = ++query_count;
+          if (current_query == mutate_on_query && mutation) {
             mutation(current);
+          }
+          if (failed_queries.contains(current_query)) {
+            return std::nullopt;
           }
           return current;
         },
@@ -206,6 +211,100 @@ namespace {
     ASSERT_EQ(fake.current.device_paths[0], L"virtual");
   }
 }  // namespace
+
+TEST(PrimaryDisplayExclusiveState, FailedPromotionRemainsPendingUntilExplicitRestore) {
+  exclusive_session_state_t state;
+  EXPECT_EQ(state.reconcile_action(), exclusive_reconcile_action_e::recover);
+  const auto idle_generation = state.generation();
+
+  state.prepared();
+  EXPECT_TRUE(state.expected());
+  EXPECT_GT(state.generation(), idle_generation);
+  EXPECT_EQ(state.reconcile_action(), exclusive_reconcile_action_e::defer);
+
+  ASSERT_TRUE(state.can_use_identity(L"virtual"));
+  state.bound(L"virtual");
+  ASSERT_TRUE(state.pending_identity());
+  EXPECT_EQ(*state.pending_identity(), L"virtual");
+  state.bound(L"other");
+  EXPECT_EQ(*state.pending_identity(), L"virtual");
+  const auto pending_generation = state.generation();
+
+  // begin_promotion() reserves ownership before platform I/O. A failed attempt deliberately has
+  // no completion transition, so display notifications cannot interpret its journal as inactive.
+  EXPECT_TRUE(state.begin_promotion(L"virtual"));
+  EXPECT_EQ(state.generation(), pending_generation);
+  EXPECT_EQ(state.reconcile_action(), exclusive_reconcile_action_e::defer);
+  EXPECT_FALSE(state.begin_promotion(L"other"));
+  EXPECT_EQ(state.restore_action(L"other"), exclusive_restore_action_e::reject);
+  EXPECT_EQ(state.generation(), pending_generation);
+
+  ASSERT_TRUE(state.promotion_succeeded(L"virtual"));
+  ASSERT_TRUE(state.active_identity());
+  EXPECT_FALSE(state.pending_identity());
+  EXPECT_EQ(state.reconcile_action(), exclusive_reconcile_action_e::reconcile);
+  EXPECT_GT(state.generation(), pending_generation);
+
+  EXPECT_EQ(state.restore_action(L"virtual"), exclusive_restore_action_e::disarm_before);
+  const auto active_generation = state.generation();
+  state.disarm();
+  EXPECT_FALSE(state.expected());
+  EXPECT_FALSE(state.active_identity());
+  EXPECT_GT(state.generation(), active_generation);
+  EXPECT_EQ(state.reconcile_action(), exclusive_reconcile_action_e::recover);
+}
+
+TEST(PrimaryDisplayExclusiveState, UnboundSessionDisarmsOnlyAfterAcceptedRestore) {
+  exclusive_session_state_t state;
+  state.prepared();
+  const auto prepared_generation = state.generation();
+
+  EXPECT_EQ(state.restore_action(L"virtual"), exclusive_restore_action_e::disarm_after_success);
+  EXPECT_TRUE(state.expected());
+  EXPECT_EQ(state.generation(), prepared_generation);
+
+  const auto action = state.restore_action(L"virtual");
+  state.restore_finished(action, false);
+  EXPECT_TRUE(state.expected());
+  EXPECT_EQ(state.generation(), prepared_generation);
+
+  state.restore_finished(action, true);
+  EXPECT_FALSE(state.expected());
+  EXPECT_GT(state.generation(), prepared_generation);
+}
+
+TEST(PrimaryDisplayExclusiveState, FailedPostApplyReadbackCannotTriggerInactiveRecoveryBetweenRetries) {
+  fake_io_t fake;
+  manager_t manager(fake.io());
+  exclusive_session_state_t state;
+
+  ASSERT_TRUE(manager.prepare(true));
+  state.prepared();
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  state.bound(L"virtual");
+  ASSERT_TRUE(state.begin_promotion(L"virtual"));
+
+  // prepare and bind consume queries 1-2; promotion queries the baseline and latest state at 3-4,
+  // applies the exclusive topology, then receives a transient failure for readback 5.
+  fake.failed_queries.insert(5);
+  EXPECT_FALSE(manager.promote(L"virtual", true));
+  EXPECT_EQ(fake.current.paths.size(), 1u);
+  EXPECT_EQ(fake.current.device_paths.front(), L"virtual");
+  EXPECT_EQ(state.reconcile_action(), exclusive_reconcile_action_e::defer);
+
+  int inactive_recoveries = 0;
+  if (state.reconcile_action() == exclusive_reconcile_action_e::recover) {
+    ++inactive_recoveries;
+    manager.recover_inactive_exclusive();
+  }
+  EXPECT_EQ(inactive_recoveries, 0);
+  EXPECT_EQ(fake.current.paths.size(), 1u);
+
+  EXPECT_TRUE(state.begin_promotion(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  ASSERT_TRUE(state.promotion_succeeded(L"virtual"));
+  EXPECT_EQ(state.reconcile_action(), exclusive_reconcile_action_e::reconcile);
+}
 
 TEST(PrimaryDisplay, PromotionTranslatesAllPositionsAndJournalsBeforeApply) {
   fake_io_t fake;
