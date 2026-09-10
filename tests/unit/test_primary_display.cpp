@@ -1370,6 +1370,212 @@ TEST(PrimaryDisplayExclusiveCursor, SoleVirtualOutputDoesNotAcquireGlobalClip) {
   EXPECT_FALSE(clips.back());
 }
 
+TEST(PrimaryDisplayLocalExclusive, SavesExactSinkPolicyAndRejectsUnapprovedTargets) {
+  fake_io_t fake;
+  fake.preserved_exclusive = {L"physical-left", L"physical-primary"};
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"physical-left"));
+  ASSERT_TRUE(fake.journal);
+  EXPECT_EQ(fake.journal->local_sink, L"physical-left");
+  EXPECT_EQ(fake.journal->exclusive_preserved, (std::vector<std::wstring> {L"physical-left"}));
+  const auto decoded = deserialize(serialize(*fake.journal));
+  ASSERT_TRUE(decoded);
+  EXPECT_EQ(decoded->local_sink, L"physical-left");
+  auto malformed = nlohmann::json::parse(serialize(*fake.journal));
+  malformed["local_sink"] = "other-output";
+  EXPECT_FALSE(deserialize(malformed.dump()));
+  fake.journal.reset();
+  fake.preserved_exclusive.clear();
+  EXPECT_FALSE(manager.prepare(true, L"physical-left"));
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayLocalExclusive, PromotesSourceAndConfinesCursorWithOnlySelectedSinkActive) {
+  fake_io_t fake;
+  fake.preserved_exclusive = {L"physical-left", L"physical-primary"};
+  std::optional<cursor_bounds_t> clip;
+  auto io = fake.io();
+  io.cursor_clip = [&](std::wstring_view, std::optional<cursor_bounds_t> bounds) {
+    clip = bounds;
+    return true;
+  };
+  manager_t manager(io);
+  ASSERT_TRUE(manager.prepare(true, L"physical-left"));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  EXPECT_TRUE(manager.is_local_exclusive(L"virtual"));
+  EXPECT_FALSE(manager.is_local_exclusive(L"other-source"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"physical-left", -1920, 0}});
+  EXPECT_EQ(clip, (cursor_bounds_t {0, 0, 1920, 1080}));
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, baseline);
+  EXPECT_FALSE(clip);
+}
+
+TEST(PrimaryDisplayLocalExclusive, ReconcileAdoptsHardwareModeColorAndRestoresSinkPosition) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"physical-left"));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  const auto sink = named_index(fake.current, L"physical-left");
+  auto &source = fake.current.modes[fake.current.paths[sink].sourceInfo.sourceModeInfoIdx].sourceMode;
+  source.width = 3840;
+  source.position.x = -3840;
+  fake.current.paths[sink].targetInfo.refreshRate = {90000, 1000};
+  fake.current.colors[sink]->hdr_user_enabled = true;
+  fake.current.colors[sink]->advanced_color_active = true;
+  fake.current.colors[sink]->active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  const auto expected_color = *fake.current.colors[sink];
+  const auto virtual_index = named_index(fake.current, L"virtual");
+  fake.current.colors[virtual_index] = expected_color;
+  ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"physical-left", -3840, 0}});
+  EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"virtual")]->hdr_user_enabled);
+  EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"physical-left")]->hdr_user_enabled);
+  ASSERT_TRUE(fake.journal);
+  EXPECT_EQ(fake.journal->original_topology->modes[0].sourceMode.width, 1920u);
+  EXPECT_FALSE(fake.journal->original_topology->colors[0]->hdr_user_enabled);
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {{L"physical-left", -3840, 120}, {L"physical-primary", 0, 0}, {L"virtual", 1920, -200}});
+  const auto restored_sink = named_index(fake.current, L"physical-left");
+  EXPECT_EQ(fake.current.paths[restored_sink].targetInfo.refreshRate.Numerator, 90000u);
+  EXPECT_TRUE(fake.current.colors[restored_sink]->hdr_user_enabled);
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayLocalExclusive, UnpluggedSinkDoesNotBlockVerifiedOrdinaryDisplayRestore) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"physical-left"));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  fake.current = make_snapshot({{L"virtual", 0, 0}});
+  fake.catalog.paths[named_index(fake.catalog, L"physical-left")].targetInfo.targetAvailable = FALSE;
+  fake.ignore_apply = true;
+  EXPECT_FALSE(manager.restore(L"virtual"));
+  EXPECT_TRUE(fake.journal);
+  fake.ignore_apply = false;
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}, {L"virtual", 1920, 0}});
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayLocalExclusive, MissingOrdinaryOutputStillRetainsRecoveryBarrier) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"physical-left"));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  fake.catalog.paths[named_index(fake.catalog, L"physical-primary")].targetInfo.targetAvailable = FALSE;
+  EXPECT_FALSE(manager.restore(L"virtual"));
+  EXPECT_TRUE(fake.journal);
+}
+
+TEST(PrimaryDisplayLocalExclusive, SolePrimaryGlassesCanStartAndUnplugToHeadless) {
+  fake_io_t fake;
+  fake.current = make_snapshot({{L"glasses", 0, 0}});
+  fake.catalog = make_snapshot({{L"glasses", 0, 0}, {L"virtual", 1920, 0}});
+  fake.preserved_exclusive.insert(L"glasses");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"glasses"));
+  fake.current = fake.catalog;
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"glasses", -1920, 0}});
+  fake.current = make_snapshot({{L"virtual", 0, 0}});
+  fake.catalog.paths[0].targetInfo.targetAvailable = FALSE;
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayLocalExclusive, NewApprovedGlassesRemainDisabledUnlessTheyAreSelectedSink) {
+  fake_io_t fake;
+  fake.preserved_exclusive = {L"physical-left", L"new-glasses"};
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"physical-left"));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  fake.catalog = make_snapshot({{L"physical-left", -1920, 120}, {L"physical-primary", 0, 0}, {L"virtual", 1920, -200}, {L"new-glasses", 3840, 0}});
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"physical-left", -1920, 0}, {L"new-glasses", 1920, 0}});
+  ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"physical-left", -1920, 0}});
+  ASSERT_TRUE(fake.journal);
+  EXPECT_EQ(fake.journal->exclusive_preserved, (std::vector<std::wstring> {L"physical-left"}));
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  EXPECT_NE(std::ranges::find(fake.current.device_paths, L"new-glasses"), fake.current.device_paths.end());
+}
+
+TEST(PrimaryDisplayLocalExclusive, FreshAddNormalizationKeepsPreAddPhysicalBaseline) {
+  fake_io_t fake;
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"glasses", 1920, 0}});
+  fake.catalog = make_snapshot({{L"physical-primary", 0, 0}, {L"glasses", 1920, 0}, {L"virtual", 3840, 0}});
+  fake.preserved_exclusive.insert(L"glasses");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"glasses"));
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"virtual", 1920, 0}, {L"glasses", 3840, 0}});
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}, {L"glasses", 1920, 0}, {L"virtual", 3840, 0}});
+}
+
+TEST(PrimaryDisplayLocalExclusive, GrowingMiddleSinkRestoresContiguousTopologyWithoutOverlap) {
+  fake_io_t fake;
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"glasses", 1920, 0}, {L"physical-right", 3840, 0}, {L"virtual", 5760, 0}});
+  fake.catalog = fake.current;
+  fake.preserved_exclusive.insert(L"glasses");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"glasses"));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  const auto sink = named_index(fake.current, L"glasses");
+  auto &source = fake.current.modes[fake.current.paths[sink].sourceInfo.sourceModeInfoIdx].sourceMode;
+  source.width = 3840;
+  source.position.x = -3840;
+  ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}, {L"glasses", 1920, 0}, {L"physical-right", 5760, 0}, {L"virtual", 7680, 0}});
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayLocalExclusive, ShrinkingMiddleSinkClosesTheGapBeforeRestore) {
+  fake_io_t fake;
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"glasses", 1920, 0}, {L"physical-right", 5760, 0}, {L"virtual", 7680, 0}});
+  fake.current.modes[fake.current.paths[1].sourceInfo.sourceModeInfoIdx].sourceMode.width = 3840;
+  fake.catalog = fake.current;
+  fake.preserved_exclusive.insert(L"glasses");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"glasses"));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  const auto sink = named_index(fake.current, L"glasses");
+  auto &source = fake.current.modes[fake.current.paths[sink].sourceInfo.sourceModeInfoIdx].sourceMode;
+  source.width = 1920;
+  source.position.x = -1920;
+  ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}, {L"glasses", 1920, 0}, {L"physical-right", 3840, 0}, {L"virtual", 5760, 0}});
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayLocalExclusive, GlassesUnpluggedBeforeAddDoesNotLeavePreparedRecoveryBlocked) {
+  fake_io_t fake;
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"glasses", 1920, 0}});
+  fake.catalog = fake.current;
+  fake.preserved_exclusive.insert(L"glasses");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"glasses"));
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}});
+  fake.catalog.paths[1].targetInfo.targetAvailable = FALSE;
+  ASSERT_TRUE(manager.restore());
+  expect_positions(fake.current, {{L"physical-primary", 0, 0}});
+  EXPECT_FALSE(fake.journal);
+}
+
 TEST(PrimaryDisplayExclusive, DisplayChangeReDisablesAnOrdinaryBaselineMonitor) {
   fake_io_t fake;
   fake.preserved_exclusive.insert(L"physical-left");

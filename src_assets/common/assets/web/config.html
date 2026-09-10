@@ -339,7 +339,10 @@
           :vdisplay="vdisplayStatus"
         ></audio-video>
 
-        <ar-glasses v-if="currentTab === 'ar-glasses'"></ar-glasses>
+        <ar-glasses
+          v-if="currentTab === 'ar-glasses'"
+          :config="config">
+        </ar-glasses>
 
         <network
           v-if="currentTab === 'network'"
@@ -493,7 +496,9 @@
           {
             id: "ar-glasses",
             name: "AR Displays",
-            options: {},
+            options: {
+              "local_ar_virtual_display_only": "enabled",
+            },
           },
           {
             id: "network",

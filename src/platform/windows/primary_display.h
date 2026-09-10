@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/primary_display.h
- * @brief Temporary, recoverable primary-display changes for remote sessions.
+ * @brief Temporary, recoverable primary-display changes for remote and local AR sessions.
  */
 #pragma once
 
@@ -23,6 +23,16 @@ namespace platf::primary_display {
    */
   bool prepare(bool exclusive = false);
 
+  /** Save the local-AR baseline and preserve only this approved presentation sink.
+   * Its on-device mode/color remains user-controlled; ordinary outputs retain full recovery.
+   */
+  bool prepare_local_exclusive(std::wstring_view sink_device_path);
+
+  /** Serialize local source/sink mode changes with display-notification reconciliation.
+   * The callback must not call this namespace. Promotion/verification runs after the callback.
+   */
+  bool run_local_exclusive_update(std::wstring_view source_device_path, const std::function<bool()> &update);
+
   /** Bind a prepared baseline to the exact published AddVirtualDisplay identity.
    * Call before mode changes. Idempotent for an already-bound identity or no pending journal.
    */
@@ -38,6 +48,8 @@ namespace platf::primary_display {
    * Exclusive mode reactivates original physical outputs with saved modes/color and keeps
    * an existing virtual output active at its current mode for retirement or reconnect.
    * If an original monitor is missing, available physical outputs are restored first.
+   * Local AR preserves the selected sink's current mode/color; its absence alone does not
+   * block completion once all ordinary original outputs have been restored and verified.
    * A supplied identity prevents retiring an old display from restoring a newer session.
    * False leaves the journal intact and callers must defer removal of the virtual display.
    */
@@ -159,6 +171,7 @@ namespace platf::primary_display {
       std::optional<snapshot_t> pending_restore;
       std::vector<std::wstring> exclusive_preserved;
       std::optional<snapshot_t> exclusive_topology;
+      std::wstring local_sink;
     };
 
     struct load_result_t {
@@ -185,7 +198,8 @@ namespace platf::primary_display {
     class manager_t {
     public:
       explicit manager_t(io_t io);
-      bool prepare(bool exclusive = false);
+      bool prepare(bool exclusive = false, std::wstring_view local_sink = {});
+      bool is_local_exclusive(std::wstring_view source_device_path);
       bool bind_pending(std::wstring_view device_path);
       bool promote(std::wstring_view device_path, bool exclusive = false);
       bool restore(std::wstring_view expected_device_path = {});

@@ -1,7 +1,13 @@
 <script setup>
-import {computed, onMounted, onUnmounted, ref} from 'vue'
+import {computed, inject, onMounted, onUnmounted, ref} from 'vue'
+
+const $t = inject('i18n').t
 
 const props = defineProps({
+  config: {
+    type: Object,
+    default: null,
+  },
   embedded: {
     type: Boolean,
     default: false,
@@ -12,6 +18,18 @@ const devices = ref([])
 const error = ref('')
 const savingId = ref('')
 let refreshTimer = null
+
+const virtualDisplayOnlyEnabled = computed(() => {
+  const value = props.config?.local_ar_virtual_display_only
+  if (value === undefined || value === null || value === '') return true
+  return value === true || value === 1 || value === '1' || value === 'enabled' || value === 'on' || value === 'true'
+})
+
+const setVirtualDisplayOnly = event => {
+  if (props.config) {
+    props.config.local_ar_virtual_display_only = event.target.checked ? 'enabled' : 'disabled'
+  }
+}
 
 const visibleDevices = computed(() => {
   if (!props.embedded) return devices.value
@@ -76,6 +94,20 @@ onUnmounted(() => {
     </header>
 
     <div v-if="error" class="alert alert-danger">{{ error }}</div>
+    <div v-if="!props.embedded && props.config" class="ar-setting-card">
+      <div>
+        <strong>{{ $t('config.local_ar_virtual_display_only') }}</strong>
+        <span>{{ $t('config.local_ar_virtual_display_only_desc') }}</span>
+      </div>
+      <label class="form-switch" :aria-label="$t('config.local_ar_virtual_display_only')">
+        <input
+          class="form-check-input"
+          type="checkbox"
+          :checked="virtualDisplayOnlyEnabled"
+          @change="setVirtualDisplayOnly"
+        />
+      </label>
+    </div>
     <div v-if="!props.embedded && devices.length === 0" class="ar-empty-state">
       <i class="fa-solid fa-glasses"></i>
       No monitors have been discovered yet.
@@ -168,6 +200,35 @@ onUnmounted(() => {
   display: grid;
   gap: var(--apollo-space-lg);
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.ar-setting-card {
+  align-items: center;
+  background: var(--apollo-surface);
+  border: 1px solid var(--apollo-border);
+  border-radius: var(--apollo-radius-card);
+  display: flex;
+  gap: var(--apollo-space-lg);
+  justify-content: space-between;
+  margin-bottom: var(--apollo-space-lg);
+  padding: var(--apollo-space-lg);
+}
+
+.ar-setting-card > div {
+  display: flex;
+  flex-direction: column;
+  gap: var(--apollo-space-xs);
+}
+
+.ar-setting-card span {
+  color: var(--apollo-text-secondary);
+  font-size: var(--apollo-text-caption);
+  max-width: 52rem;
+}
+
+.ar-setting-card .form-switch {
+  flex: 0 0 auto;
+  margin: 0;
 }
 
 .ar-display-card {

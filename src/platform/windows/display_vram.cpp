@@ -6962,8 +6962,9 @@ namespace platf::dxgi {
           return false;
         }
 
+        const LONG clamped_x = std::clamp(cursor.x, source_rect.left, source_rect.right - 1);
         const LONG clamped_y = std::clamp(cursor.y, source_rect.top, source_rect.bottom - 1);
-        return SetCursorPos(source_rect.right - 1, clamped_y) != FALSE;
+        return SetCursorPos(clamped_x, clamped_y) != FALSE;
       }
 
       void cancel_active_pointer_interaction(HWND sink_window) const {

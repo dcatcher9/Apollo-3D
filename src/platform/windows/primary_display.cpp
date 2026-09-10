@@ -140,6 +140,9 @@ namespace platf::primary_display {
             return false;
           }
         }
+        if (!journal.local_sink.empty() && (!find_position(*saved, journal.local_sink) || journal.exclusive_preserved.size() != 1 || !same_device(journal.exclusive_preserved.front(), journal.local_sink) || same_device(journal.local_sink, journal.promoted_primary))) {
+          return false;
+        }
         if (journal.exclusive_started && (!journal.before_exclusive || !detail::inspect(*journal.before_exclusive) || journal.prepared)) {
           return false;
         }
@@ -172,8 +175,7 @@ namespace platf::primary_display {
         if (journal.pending_restore && ((!journal.exclusive_started && !journal.prepared) || !detail::inspect(*journal.pending_restore))) {
           return false;
         }
-      } else if (journal.exclusive_started || journal.original_topology || journal.before_exclusive || journal.pending_restore ||
-                 !journal.exclusive_preserved.empty() || journal.exclusive_topology) {
+      } else if (journal.exclusive_started || journal.original_topology || journal.before_exclusive || journal.pending_restore || !journal.exclusive_preserved.empty() || journal.exclusive_topology || !journal.local_sink.empty()) {
         return false;
       }
       if (journal.prepared) {
@@ -543,6 +545,18 @@ namespace platf::primary_display {
       }
       if (!find_path(owned, virtual_identity)) {
         return false;
+      }
+      if (!journal.local_sink.empty()) {
+        // The glasses' hardware button may change width, refresh, HDR and the left-edge
+        // attachment simultaneously. Only the exact source/sink identities may enter this
+        // local continuation; the virtual source must still own the primary origin.
+        const auto layout = detail::inspect(owned);
+        const auto *primary = layout ? find_position(*layout, virtual_identity) : nullptr;
+        if (primary && primary->x == 0 && primary->y == 0 && std::ranges::all_of(*layout, [&](const auto &entry) {
+              return same_device(entry.device_path, virtual_identity) || same_device(entry.device_path, journal.local_sink);
+            })) {
+          return true;
+        }
       }
       return owned_subset(owned, *journal.exclusive_topology) ||
              owned_exclusive_layout(owned, virtual_identity, *journal.exclusive_topology) ||
@@ -1115,7 +1129,13 @@ namespace platf::primary_display {
         }
         return result;
       };
-      nlohmann::json result {{"version", journal.exclusive ? 3 : 1}, {"prepared", journal.prepared}, {"original_primary", platf::to_utf8(journal.original_primary)}, {"promoted_primary", platf::to_utf8(journal.promoted_primary)}, {"original", encode(journal.original)}, {"promoted", encode(journal.promoted)}};
+      nlohmann::json result {{"version", !journal.local_sink.empty() ? 4 : journal.exclusive ? 3 :
+                                                                                               1},
+                             {"prepared", journal.prepared},
+                             {"original_primary", platf::to_utf8(journal.original_primary)},
+                             {"promoted_primary", platf::to_utf8(journal.promoted_primary)},
+                             {"original", encode(journal.original)},
+                             {"promoted", encode(journal.promoted)}};
       if (journal.exclusive) {
         result["exclusive"] = true;
         result["exclusive_started"] = journal.exclusive_started;
@@ -1127,6 +1147,9 @@ namespace platf::primary_display {
           result["exclusive_preserved"].push_back(platf::to_utf8(identity));
         }
         result["exclusive_topology"] = journal.exclusive_topology ? encode_snapshot(*journal.exclusive_topology) : nlohmann::json(nullptr);
+        if (!journal.local_sink.empty()) {
+          result["local_sink"] = platf::to_utf8(journal.local_sink);
+        }
       }
       return result.dump();
     }
@@ -1138,7 +1161,7 @@ namespace platf::primary_display {
       try {
         const auto value = nlohmann::json::parse(contents);
         const int version = value.at("version").get<int>();
-        if (version != 1 && version != 2 && version != 3) {
+        if (version != 1 && version != 2 && version != 3 && version != 4) {
           return std::nullopt;
         }
         auto decode = [](const nlohmann::json &entries) {
@@ -1188,6 +1211,12 @@ namespace platf::primary_display {
               result.exclusive_topology = decode_snapshot(value.at("exclusive_topology"));
             }
           }
+          if (version >= 4) {
+            result.local_sink = platf::from_utf8(value.at("local_sink").get<std::string>());
+            if (result.local_sink.empty()) {
+              return std::nullopt;
+            }
+          }
         }
         return valid_journal(result) ? std::make_optional(std::move(result)) : std::nullopt;
       } catch (const std::exception &) {
@@ -1198,7 +1227,10 @@ namespace platf::primary_display {
     manager_t::manager_t(io_t io):
         io_(std::move(io)) {}
 
-    bool manager_t::prepare(bool exclusive) {
+    bool manager_t::prepare(bool exclusive, std::wstring_view local_sink) {
+      if (!local_sink.empty() && !exclusive) {
+        return false;
+      }
       const auto loaded = io_.load();
       if (!loaded.success || loaded.journal) {
         return false;
@@ -1209,7 +1241,7 @@ namespace platf::primary_display {
       }
       if (snapshot->paths.empty() && snapshot->device_paths.empty()) {
         // A headless machine has no original primary display to restore.
-        return true;
+        return local_sink.empty();
       }
       const auto layout = inspect(*snapshot);
       if (!layout) {
@@ -1224,7 +1256,7 @@ namespace platf::primary_display {
         journal.original_topology = *snapshot;
         if (io_.preserve_exclusive) {
           for (size_t i = 0; i < snapshot->paths.size(); ++i) {
-            if (io_.preserve_exclusive(snapshot->paths[i], snapshot->device_paths[i])) {
+            if ((local_sink.empty() || same_device(local_sink, snapshot->device_paths[i])) && io_.preserve_exclusive(snapshot->paths[i], snapshot->device_paths[i])) {
               journal.exclusive_preserved.push_back(snapshot->device_paths[i]);
             }
           }
@@ -1232,8 +1264,16 @@ namespace platf::primary_display {
             return CompareStringOrdinal(left.c_str(), -1, right.c_str(), -1, TRUE) == CSTR_LESS_THAN;
           });
         }
+        journal.local_sink = local_sink;
       }
       return valid_journal(journal) && io_.save(journal);
+    }
+
+    bool manager_t::is_local_exclusive(std::wstring_view source_device_path) {
+      const auto loaded = io_.load();
+      return loaded.success && loaded.journal && valid_journal(*loaded.journal) &&
+             !loaded.journal->local_sink.empty() &&
+             same_device(loaded.journal->promoted_primary, source_device_path);
     }
 
     bool manager_t::bind_pending(std::wstring_view device_path) {
@@ -1256,7 +1296,7 @@ namespace platf::primary_display {
       const auto *target = find_position(*current, device_path);
       const auto *original_primary = find_position(*current, prepared.original_primary);
       const bool new_target = !find_position(prepared.original, device_path);
-      if (prepared.exclusive && target && (!original_primary || current->size() != prepared.original.size() + (new_target ? 1 : 0))) {
+      if (prepared.exclusive && target && (!prepared.local_sink.empty() || !original_primary || current->size() != prepared.original.size() + (new_target ? 1 : 0))) {
         // Windows can restore a previously remembered virtual-only topology inside Add.
         // The exact Add identity is known here; preserve the pre-Add physical snapshot.
         for (const auto &entry : *current) {
@@ -1394,7 +1434,7 @@ namespace platf::primary_display {
         return false;
       }
       auto virtual_spec = display_spec(*snapshot, *virtual_index);
-      if (journal.exclusive_topology) {
+      if (journal.exclusive_topology && journal.local_sink.empty()) {
         const auto prior_virtual = find_path(*journal.exclusive_topology, device_path);
         if (prior_virtual && *prior_virtual < journal.exclusive_topology->colors.size()) {
           virtual_spec.color = journal.exclusive_topology->colors[*prior_virtual];
@@ -1421,8 +1461,13 @@ namespace platf::primary_display {
         }
         auto spec = original_index ? display_spec(*journal.original_topology, *original_index) :
                                      display_spec(*journal.pending_restore, *pending_index);
+        const auto current_index = find_path(*snapshot, identity);
+        if (!journal.local_sink.empty() && same_device(identity, journal.local_sink) && current_index) {
+          // The physical button controls the local presentation mode and color.
+          spec = display_spec(*snapshot, *current_index);
+        }
         const auto prior_index = journal.exclusive_topology ? find_path(*journal.exclusive_topology, identity) : std::nullopt;
-        if (prior_index && *prior_index < journal.exclusive_topology->colors.size()) {
+        if (journal.local_sink.empty() && prior_index && *prior_index < journal.exclusive_topology->colors.size()) {
           spec.color = journal.exclusive_topology->colors[*prior_index];
         }
         preserved.push_back(std::move(spec));
@@ -1586,8 +1631,7 @@ namespace platf::primary_display {
         newly_recorded_output = newly_recorded_output || !pending_index;
         added_outputs.push_back(pending_index ? display_spec(*journal.pending_restore, *pending_index) :
                                                 display_spec(*current, i));
-        if (io_.preserve_exclusive && io_.preserve_exclusive(current->paths[i], identity) &&
-            !preserved_exclusive_identity(journal, identity)) {
+        if (journal.local_sink.empty() && io_.preserve_exclusive && io_.preserve_exclusive(current->paths[i], identity) && !preserved_exclusive_identity(journal, identity)) {
           journal.exclusive_preserved.push_back(identity);
           preservation_changed = true;
         }
@@ -1694,6 +1738,8 @@ namespace platf::primary_display {
       const bool had_added_outputs = !added_outputs.empty();
       std::vector<display_spec_t> wanted;
       bool missing = false;
+      bool missing_local_sink = false;
+      bool local_sink_resized = false;
       size_t physical_count = 0;
       for (size_t i = 0; i < journal.original_topology->paths.size(); ++i) {
         const auto &identity = journal.original_topology->device_paths[i];
@@ -1702,12 +1748,40 @@ namespace platf::primary_display {
         }
         ++physical_count;
         if (!available_identity(identity)) {
-          missing = true;
+          if (!journal.local_sink.empty() && same_device(identity, journal.local_sink)) {
+            missing_local_sink = true;
+          } else {
+            missing = true;
+          }
           continue;
         }
-        wanted.push_back(display_spec(*journal.original_topology, i));
+        auto spec = display_spec(*journal.original_topology, i);
+        const auto sink_index = find_path(*current, identity);
+        if (!journal.local_sink.empty() && same_device(identity, journal.local_sink) && sink_index) {
+          const auto saved_position = spec.source.position;
+          const auto saved_width = spec.source.width;
+          const auto saved_height = spec.source.height;
+          spec = display_spec(*current, *sink_index);
+          local_sink_resized = spec.source.width != saved_width || spec.source.height != saved_height;
+          spec.source.position = saved_position;
+          // A sink originally attached to the primary's left keeps its right edge when
+          // its hardware switches width. Restoring the old left edge would overlap it.
+          if (saved_position.x < 0 && static_cast<std::int64_t>(saved_position.x) + saved_width <= 0) {
+            const auto rebased_x = static_cast<std::int64_t>(saved_position.x) + saved_width - spec.source.width;
+            if (rebased_x < std::numeric_limits<LONG>::min()) {
+              return false;
+            }
+            spec.source.position.x = static_cast<LONG>(rebased_x);
+          }
+        }
+        wanted.push_back(std::move(spec));
       }
       if (physical_count == 0 && added_outputs.empty()) {
+        return io_.clear();
+      }
+      if (missing_local_sink && !missing && physical_count == 1 && wanted.empty() && added_outputs.empty()) {
+        // A PC whose only physical output was these glasses is intentionally headless
+        // after they are unplugged. There is no remaining physical output to restore.
         return io_.clear();
       }
       if (physical_count != 0 && wanted.empty()) {
@@ -1800,7 +1874,58 @@ namespace platf::primary_display {
         // mode and color; it must stay active for orderly retirement and warm reconnect.
         wanted.push_back(std::move(virtual_spec));
       }
-      if (missing) {
+      bool local_restore_overlap = false;
+      if (!journal.local_sink.empty()) {
+        for (size_t i = 0; i < wanted.size(); ++i) {
+          for (size_t j = 0; j < i; ++j) {
+            const auto &a = wanted[i].source;
+            const auto &b = wanted[j].source;
+            local_restore_overlap = local_restore_overlap ||
+                                    (static_cast<std::int64_t>(a.position.x) < static_cast<std::int64_t>(b.position.x) + b.width &&
+                                     static_cast<std::int64_t>(b.position.x) < static_cast<std::int64_t>(a.position.x) + a.width &&
+                                     static_cast<std::int64_t>(a.position.y) < static_cast<std::int64_t>(b.position.y) + b.height &&
+                                     static_cast<std::int64_t>(b.position.y) < static_cast<std::int64_t>(a.position.y) + a.height);
+          }
+        }
+      }
+      bool local_restore_disconnected = false;
+      if (local_sink_resized && !wanted.empty()) {
+        std::vector<bool> connected(wanted.size(), false);
+        connected.front() = true;
+        bool progress = true;
+        while (progress) {
+          progress = false;
+          for (size_t i = 0; i < wanted.size(); ++i) {
+            if (connected[i]) {
+              continue;
+            }
+            const auto &a = wanted[i].source;
+            const auto ar = static_cast<std::int64_t>(a.position.x) + a.width;
+            const auto ab = static_cast<std::int64_t>(a.position.y) + a.height;
+            for (size_t j = 0; j < wanted.size(); ++j) {
+              if (!connected[j]) {
+                continue;
+              }
+              const auto &b = wanted[j].source;
+              const auto br = static_cast<std::int64_t>(b.position.x) + b.width;
+              const auto bb = static_cast<std::int64_t>(b.position.y) + b.height;
+              const bool horizontal = (ar == b.position.x || br == a.position.x) &&
+                                      std::max(a.position.y, b.position.y) < std::min(ab, bb);
+              const bool vertical = (ab == b.position.y || bb == a.position.y) &&
+                                    std::max(a.position.x, b.position.x) < std::min(ar, br);
+              if (horizontal || vertical) {
+                connected[i] = true;
+                progress = true;
+                break;
+              }
+            }
+          }
+        }
+        local_restore_disconnected = std::ranges::any_of(connected, [](bool reached) {
+          return !reached;
+        });
+      }
+      if (missing || missing_local_sink || local_restore_overlap || local_restore_disconnected) {
         // Removing an unavailable monitor from the saved arrangement can leave a hole between
         // survivors. GDI requires one contiguous desktop, so keep the durable original topology
         // for the later complete restore while applying a deterministic temporary row now.
@@ -1878,6 +2003,12 @@ namespace platf::primary_display {
         BOOST_LOG(warning) << "Available physical displays are active; retaining exclusive-display recovery until all original displays and color settings are restored.";
         return false;
       }
+      if (missing_local_sink) {
+        // Only the exact local presentation sink is optional. All connected ordinary
+        // displays were verified above. Temporary CCD state needs no offline mutation;
+        // reconnect starts from the newly published Windows topology and a fresh baseline.
+        BOOST_LOG(info) << "Restored available physical displays after local AR disconnect; the absent presentation sink will use a fresh topology baseline on reconnect.";
+      }
       BOOST_LOG(info) << "Restored physical displays, modes, color settings, and primary display after exclusive streaming.";
       return io_.clear();
     }
@@ -1909,6 +2040,7 @@ namespace platf::primary_display {
       }
       std::vector<display_spec_t> physical;
       bool missing = false;
+      bool missing_local_sink = false;
       for (size_t i = 0; i < journal.original_topology->paths.size(); ++i) {
         const auto &identity = journal.original_topology->device_paths[i];
         bool found = false;
@@ -1918,13 +2050,17 @@ namespace platf::primary_display {
         if (found) {
           physical.push_back(display_spec(*journal.original_topology, i));
         } else {
-          missing = true;
+          if (!journal.local_sink.empty() && same_device(identity, journal.local_sink)) {
+            missing_local_sink = true;
+          } else {
+            missing = true;
+          }
         }
       }
       if (physical.empty()) {
-        return false;
+        return missing_local_sink && !missing && extras.empty() && io_.clear();
       }
-      if (missing) {
+      if (missing || missing_local_sink) {
         std::wstring anchor_identity;
         LONG anchor_x = 0;
         LONG anchor_y = 0;
@@ -2113,8 +2249,7 @@ namespace platf::primary_display {
         }
         discovered_hotplug = true;
         upsert_hotplug(display_spec(*current, i));
-        if (io_.preserve_exclusive && io_.preserve_exclusive(current->paths[i], identity) &&
-            !preserved_exclusive_identity(journal, identity)) {
+        if (journal.local_sink.empty() && io_.preserve_exclusive && io_.preserve_exclusive(current->paths[i], identity) && !preserved_exclusive_identity(journal, identity)) {
           journal.exclusive_preserved.push_back(identity);
         }
       }
@@ -2408,6 +2543,44 @@ namespace platf::primary_display {
       return prepared;
     } catch (const std::exception &exception) {
       BOOST_LOG(error) << "Could not prepare primary-display recovery: " << exception.what();
+      return false;
+    }
+  }
+
+  bool prepare_local_exclusive(std::wstring_view sink_device_path) {
+    if (sink_device_path.empty()) {
+      return false;
+    }
+    std::lock_guard lock(transaction_mutex);
+    try {
+      const bool prepared = acquire_ownership() && manager().prepare(true, sink_device_path);
+      if (prepared) {
+        exclusive_session_state.prepared();
+      }
+      return prepared;
+    } catch (const std::exception &exception) {
+      BOOST_LOG(error) << "Could not prepare local AR display recovery: " << exception.what();
+      return false;
+    }
+  }
+
+  bool run_local_exclusive_update(std::wstring_view source_device_path, const std::function<bool()> &update) {
+    // The callback can refresh the caller's display-name/path strings after Windows
+    // renumbers a source. Keep the transaction identity independent of that storage.
+    const std::wstring source_identity(source_device_path);
+    std::lock_guard lock(transaction_mutex);
+    try {
+      if (!update || !exclusive_session_state.can_use_identity(source_identity) || !acquire_ownership() || !manager().is_local_exclusive(source_identity) || !exclusive_session_state.begin_promotion(source_identity)) {
+        return false;
+      }
+      const bool updated = update();
+      const bool promoted = manager().promote(source_identity, true);
+      if (promoted) {
+        exclusive_session_state.promotion_succeeded(source_identity);
+      }
+      return updated && promoted;
+    } catch (const std::exception &exception) {
+      BOOST_LOG(error) << "Local AR display update failed: " << exception.what();
       return false;
     }
   }

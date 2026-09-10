@@ -175,6 +175,8 @@
     "max_bitrate_desc": "The maximum bitrate (in Kbps) that Sunshine 3D will encode the stream at. If set to 0, it will always use the bitrate requested by the client.",
     "minimum_fps_target": "Minimum FPS Target",
     "minimum_fps_target_desc": "The lowest effective FPS a stream can reach. Set 0 for automatic.",
+    "local_ar_virtual_display_only": "Use only the virtual desktop with local AR glasses",
+    "local_ar_virtual_display_only_desc": "On by default. Makes the private virtual desktop primary and disables other desktop displays while local AR presentation is active. The glasses remain active for video, and the mouse stays confined to the virtual desktop. Turn this off to keep the current extended desktop layout. Save and restart Sunshine 3D to apply changes.",
     "virtual_display_restart_explorer": "Restore the taskbar after virtual display removal",
     "virtual_display_restart_explorer_desc": "Off by default. Enable this only if Windows loses taskbar running-app indicators after the final virtual display is removed. Sunshine 3D will then restart Explorer after future removals. File Explorer windows may close and may not reopen automatically; active Explorer file operations may be interrupted.",
     "misc": "Miscellaneous options",

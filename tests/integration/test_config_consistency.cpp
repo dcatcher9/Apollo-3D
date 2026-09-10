@@ -29,6 +29,7 @@ protected:
       {"General", "general"},
       {"Input", "input"},
       {"Audio/Video", "av"},
+      {"AR Displays", "ar-glasses"},
       {"Network", "network"},
       {"Config Files", "files"},
       {"Advanced", "advanced"},

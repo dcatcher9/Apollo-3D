@@ -923,6 +923,39 @@ microphone_sink = CABLE Input (VB-Audio Virtual Cable)
     </tr>
 </table>
 
+## AR Displays
+
+### local_ar_virtual_display_only
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Choose the Windows desktop topology used while Sunshine 3D presents to approved AR
+            glasses connected to this PC. With this option enabled, the private virtual source is
+            primary, ordinary desktop displays are disabled, the glasses remain active for video
+            scanout, and the shared Windows cursor is confined to the virtual source. Disable it to
+            retain the extended desktop layout used by earlier releases. Save the setting and
+            restart Sunshine 3D before starting a new local AR session.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td rowspan="2">Choices</td>
+        <td>enabled</td>
+        <td>Use only the private virtual source and the AR-glasses output.</td>
+    </tr>
+    <tr>
+        <td>disabled</td>
+        <td>Keep the local AR source and glasses in the current extended desktop.</td>
+    </tr>
+</table>
+
 ## Network
 
 ### address_family

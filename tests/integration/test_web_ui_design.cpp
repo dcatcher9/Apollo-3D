@@ -370,6 +370,41 @@ TEST(WebUiDesign, TaskbarRepairUiMatchesItsOptInNativeDefault) {
   EXPECT_LT(default_off, default_end);
 }
 
+TEST(WebUiDesign, LocalArExclusiveDesktopUiMatchesItsDefaultOnNativePolicy) {
+  const auto schema = read_source(web_root / "config.html");
+  const auto glasses = read_source(web_root / "configs/tabs/ArGlasses.vue");
+  const auto locale = read_source(web_root / "public/assets/locale/en.json");
+  const auto documentation =
+    read_source(fs::path(SUNSHINE_SOURCE_DIR) / "docs/configuration.md");
+
+  EXPECT_NE(
+    schema.find("\"local_ar_virtual_display_only\": \"enabled\""),
+    std::string::npos
+  );
+  EXPECT_NE(
+    glasses.find("config.local_ar_virtual_display_only"),
+    std::string::npos
+  );
+  EXPECT_NE(locale.find("\"On by default."), std::string::npos);
+
+  const auto setting = documentation.find("### local_ar_virtual_display_only");
+  ASSERT_NE(setting, std::string::npos);
+  const auto next_section = documentation.find("\n## ", setting);
+  ASSERT_NE(next_section, std::string::npos);
+  const auto section = documentation.substr(setting, next_section - setting);
+  const auto default_label = section.find("<td>Default</td>");
+  const auto default_code = section.find("@code{}", default_label);
+  const auto default_enabled = section.find("enabled", default_code);
+  const auto default_end = section.find("@endcode", default_enabled);
+  ASSERT_NE(default_label, std::string::npos);
+  ASSERT_NE(default_code, std::string::npos);
+  ASSERT_NE(default_enabled, std::string::npos);
+  ASSERT_NE(default_end, std::string::npos);
+  EXPECT_LT(default_label, default_code);
+  EXPECT_LT(default_code, default_enabled);
+  EXPECT_LT(default_enabled, default_end);
+}
+
 TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolatedAndAuditable) {
   const auto page = read_source(web_root / "offline-conversion.html");
   const auto api = read_source(web_root / "offline-sbs-api.js");

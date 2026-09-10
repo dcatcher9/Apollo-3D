@@ -73,6 +73,7 @@ namespace config {
     true,  // nv_sunshine_high_power_mode
     {},  // adapter_name
     {},  // output_name
+    default_local_ar_virtual_display_only,  // local_ar_virtual_display_only
 
     0,  // max_bitrate
     0,  // minimum_fps_target (0 = max(requested framerate / 5, 10 FPS))
@@ -646,6 +647,7 @@ namespace config {
 
     string_f(vars, "adapter_name", video.adapter_name);
     string_f(vars, "output_name", video.output_name);
+    bool_f(vars, "local_ar_virtual_display_only", video.local_ar_virtual_display_only);
 
     int_f(vars, "max_bitrate", video.max_bitrate);
     double_between_f(vars, "minimum_fps_target", video.minimum_fps_target, {0.0, 1000.0});

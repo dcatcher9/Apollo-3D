@@ -17,6 +17,8 @@
 #include "nvenc/nvenc_config.h"
 
 namespace config {
+  inline constexpr bool default_local_ar_virtual_display_only = true;
+
   // Authenticated Host SBS V2 policy: the fixed inference-shape budget and the private
   // normalized-depth analysis used by scene cuts. This calibration is not configurable; every
   // depth estimator (live, offline conversion, and the evaluation harness) uses these values.
@@ -48,6 +50,9 @@ namespace config {
 
     std::string adapter_name;
     std::string output_name;
+    // Keep a local AR session's private source as the only interactive display while preserving
+    // the glasses output required for scanout.
+    bool local_ar_virtual_display_only;
 
     int max_bitrate;  // Maximum bitrate, sets ceiling in kbps for bitrate requested from client
     double minimum_fps_target;  ///< Lowest framerate used when streaming. Range 0-1000; 0 = max(one fifth of the requested rate, 10 FPS).

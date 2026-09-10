@@ -419,6 +419,10 @@ TEST(ProcessTest, ExplorerRepairIsOptInByDefault) {
   EXPECT_FALSE(config::default_virtual_display_restart_explorer);
 }
 
+TEST(ProcessTest, LocalArVirtualDisplayOnlyIsEnabledByDefault) {
+  EXPECT_TRUE(config::default_local_ar_virtual_display_only);
+}
+
 TEST(ProcessTest, CalculatesEvenScaledRenderDimensions) {
   EXPECT_EQ(proc::calculate_render_size(5120, 2160, 100), (proc::render_size_t {5120, 2160}));
   EXPECT_EQ(proc::calculate_render_size(3552, 3840, 125), (proc::render_size_t {4440, 4800}));

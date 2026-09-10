@@ -9,6 +9,13 @@ cannot be identified safely remains inactive and appears in the web UI's **AR Di
 the user can approve or reject it. Clicking the Windows notification for an unknown monitor opens
 that tab. Both decisions persist across reconnects and connector changes.
 
+The **Use only the virtual desktop with local AR glasses** setting is enabled by default. While a
+local AR session is active, Sunshine 3D makes the private virtual source primary, disables ordinary
+desktop outputs, and leaves only that source and the glasses output active. The glasses must remain
+active for video scanout, so Sunshine 3D confines the shared Windows cursor to the virtual source.
+Disable the setting to retain the extended desktop layout used by earlier releases. Save the setting
+and restart Sunshine 3D before starting a new local AR session.
+
 ## Mode contract
 
 The active physical-monitor resolution selects the presentation mode:
@@ -25,9 +32,11 @@ Other resolutions are rejected. Resolution alone never identifies a monitor as A
 The Windows display topology is polled every 250 ms. A mode or connection change stops the old
 presenter immediately, then must remain stable for 750 ms before Sunshine 3D applies it. A supported
 1920x1080/3840x1080 transition on the same physical output keeps the existing SudoVDA desktop and
-its windows attached; Sunshine 3D updates its refresh in place, rebases the recovery journal to the new
-physical width, re-isolates the source/sink row, and rebuilds only capture/conversion/presentation
-resources. Position, neighboring-monitor, and HDR-state changes likewise reuse the virtual source
+its windows attached. Sunshine 3D updates its refresh in place and reapplies the selected topology
+policy before rebuilding capture, conversion, and presentation resources. In exclusive mode, a sink
+resize that would leave a gap or overlap repacks the source and sink into one contiguous row; otherwise
+their applied positions remain stable. Extended mode rebases its recovery journal and re-isolates its
+source/sink row. Position, neighboring-monitor, and HDR-state changes likewise reuse the virtual source
 whenever the physical PnP target, GPU adapter, and supported mode remain compatible. If virtual HDR
 cannot activate for an HDR sink, Sunshine 3D retains the same color-managed SDR fallback used at startup.
 Moving the glasses to another GPU/adapter also forces a complete rebuild: the adapter LUID is part
@@ -86,9 +95,10 @@ while the other remains active. This gate adds no Host SBS inference, reuse, sce
 or temporal rule; resumed resources continue to follow the canonical Host SBS contract.
 
 Off-head is not a disconnect. A true Windows display unplug remains authoritative and follows the
-ordinary full session teardown below: capture stops, the private virtual source is removed, and the
-physical-display topology is restored. Remote virtual-display ownership likewise keeps its existing
-priority over a local session whether that local presenter is running or paused off-head.
+ordinary full session teardown below: capture stops, the physical-display topology is restored, and
+the private virtual source is removed in the order required by the active topology policy. Remote
+virtual-display ownership likewise keeps its existing priority over a local session whether that local
+presenter is running or paused off-head.
 
 Only one presentation path owns an interactive virtual desktop at a time. A connecting or active
 remote virtual-display stream takes priority without being terminated: Sunshine 3D synchronously stops
@@ -106,23 +116,23 @@ fixed lease.
 
 On connect Sunshine 3D:
 
-1. Computes the deterministic source/sink row from a complete topology snapshot and durably records
-   the exact expected physical rectangle before attaching SudoVDA. It rechecks the plan after the
-   journal write and stops if the desktop changed concurrently.
+1. Captures a complete topology snapshot and durably records the display state before attaching
+   SudoVDA. In extended-desktop mode it also computes the deterministic source/sink row, records the
+   exact expected physical rectangle, and stops if the desktop changed concurrently.
 2. Binds SudoVDA to the physical glasses' GPU and creates a private 1920x1080 display at the
    glasses refresh rate. Sunshine 3D retains the driver-returned adapter/target identity, so Windows GDI
    renumbering cannot redirect presentation to a remote client's same-resolution virtual display.
-3. Builds one deterministic row after the rightmost interactive monitor: interactive desktop,
-   private virtual source, then the physical glasses. The source and sink share a full vertical edge;
-   no absolute coordinates, empty gap, or one-pixel corner contact are used. While this topology is
-   active Sunshine 3D asks Windows to confine the cursor through the virtual source's right edge. If
-   another application owns cursor confinement, Sunshine 3D yields to it and the presenter window uses
-   an event-driven edge clamp as a fallback. Physical-sink input is never reinjected synthetically.
-   If Windows cannot produce a unique non-primary, non-cloned row, local presentation fails closed
-   before attaching the virtual display.
-4. After the first isolated row is durably committed, matches the private source to the physical
+3. With virtual-display-only mode enabled, makes the private source primary, disables ordinary
+   desktop outputs, preserves the glasses output, and confines the shared cursor to the virtual
+   source. With the option disabled, it builds one deterministic row after the rightmost interactive
+   monitor: interactive desktop, private virtual source, then the physical glasses. The source and
+   sink share a full vertical edge; no absolute coordinates, empty gap, or one-pixel corner contact
+   are used. The presenter window retains its event-driven edge clamp as a fallback, and physical-sink
+   input is never reinjected synthetically. If Windows cannot verify the selected topology, local
+   presentation fails closed.
+4. After the selected topology is durably committed, matches the private source to the physical
    output's active color mode. HDR uses the same proven delayed off-then-on Advanced Color workaround
-   as Sunshine 3D's remote virtual-display sessions, followed by another journaled isolation pass.
+   as Sunshine 3D's remote virtual-display sessions, followed by another verified topology pass.
 5. Captures the virtual display on the configured GPU.
 6. Re-queries the selected monitor's exact device-instance path after topology changes, matches its actual
    `IDXGIOutput`, and uses the coordinates Windows applied rather than the requested position.
@@ -135,28 +145,36 @@ ordinary swapchain/capture reinitialization retain it. Unexpected presenter fail
 delay; repeated setup failures use bounded exponential backoff while the same stable glasses mode
 remains active.
 
-On clean shutdown, disconnect, or an incompatible transition, Sunshine 3D removes the private virtual
-source and restores the physical glasses to the desktop position they occupied before the session.
-The physical output must remain active (and therefore visible in Windows Display Settings) because
-disabling its display path would also stop DP scanout.
+On clean shutdown, disconnect, or an incompatible transition, Sunshine 3D restores the physical
+desktop. The glasses output must remain active during presentation because disabling its display path
+would also stop DP scanout.
 
-Before attaching a virtual source or moving a physical output, Sunshine 3D atomically updates a small
-recovery journal beside the active `sunshine.conf`. The journal keeps one entry per exact PnP target.
-A pending transaction owns only its exact requested rectangle; confirmed prior Sunshine 3D rectangles
-remain owned independently. Any other position is preserved as a user/Windows change rather than
-being guessed to belong to Sunshine 3D. Immediately before applying a complete `SetDisplayConfig`
+Exclusive mode records the original complete display topology before attaching the virtual source.
+On teardown it first restores connected ordinary monitors to their saved positions, modes, and color
+states. The selected glasses return to their saved position while retaining their current presentation
+mode and color state. If changed glasses dimensions would make that saved position overlap another
+display or leave a gap in the restored row, Sunshine 3D packs the glasses contiguously beside the
+restored displays instead. Sunshine 3D verifies that restore before removing SudoVDA, so removal-time
+Windows normalization cannot strand the ordinary monitors. If the glasses have disconnected, Sunshine
+3D skips that absent path, verifies the remaining ordinary-display restore, and clears the completed
+recovery record; a later glasses reconnect starts from a fresh baseline.
+
+Extended mode atomically updates a small recovery journal beside the active `sunshine.conf` before
+attaching a virtual source or moving the physical output. The journal keeps one entry per exact PnP
+target. A pending transaction owns only its exact requested rectangle; confirmed prior Sunshine 3D
+rectangles remain owned independently. Any other position is preserved as a user/Windows change rather
+than being guessed to belong to Sunshine 3D. Immediately before applying a complete `SetDisplayConfig`
 snapshot Sunshine 3D re-queries every active path and aborts if anything changed after validation.
 
-On teardown, Sunshine 3D classifies the physical rectangle before removing SudoVDA, then restores that
-decision after the virtual output has fully retired. This prevents removal-time Windows normalization
-from disguising a Sunshine 3D-owned row as a user move. If SudoVDA attachment produces a rectangle other
-than the pre-journaled expected one, Sunshine 3D cannot prove ownership; it preserves the unexpected
-position and aborts the session. If Sunshine 3D, the GPU driver, or Windows exits without normal teardown,
-the next launch restores connected targets only from exact pending or confirmed evidence. A
-disconnected target's entry remains pending until it reconnects, but it does not block presentation
-on another approved pair of glasses. Starting a session waits only for recovery of that same PnP
-target. The former single-target journal format is migrated atomically without discarding its pending
-recovery.
+On extended-mode teardown, Sunshine 3D classifies the physical rectangle before removing SudoVDA,
+then restores that decision after the virtual output has fully retired. If SudoVDA attachment produces
+a rectangle other than the pre-journaled expected one, Sunshine 3D cannot prove ownership; it preserves
+the unexpected position and aborts the session. If Sunshine 3D, the GPU driver, or Windows exits without
+normal teardown, the next launch restores connected targets only from exact pending or confirmed
+evidence. A disconnected target's entry remains pending until it reconnects, but it does not block
+presentation on another approved pair of glasses. Starting a session waits only for recovery of that
+same PnP target. The former single-target journal format is migrated atomically without discarding its
+pending recovery.
 
 If Sunshine 3D enables HDR on the physical glasses, it leaves that per-display Windows preference in
 place. Reverting it during an internal 2D/SBS session rebuild would trigger another topology change
