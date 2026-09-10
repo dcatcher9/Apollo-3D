@@ -3,8 +3,9 @@
 The local gate runs Sunshine 3D native workflow tests, evaluator contract/provenance tests,
 Moonlight 3D native packet/FEC tests and JVM tests in sequence. It checks connection ownership, permissions, mode transitions,
 offline job/transport bounds, and capture/presentation timing without opening the host or using a
-headset. Packed chroma regressions execute the production D3D shaders through WARP's software
-renderer, including transfer order and independent eye boundaries. Run it with both checkouts
+headset. Local AR lifecycle and shared local/remote scheduling ownership are included. Packed chroma
+regressions execute the production D3D shaders through WARP's software renderer, including transfer
+order and independent eye boundaries. Run it with both checkouts
 available and their existing build prerequisites configured:
 
 ```powershell
@@ -29,9 +30,10 @@ Each run writes logs, native XML, both checkout commits, runtime identity and st
 `app/build/test-results/testNonRoot_gameDebugUnitTest/` directory. Uncommitted changes are included
 in a local run, so commit identities alone are not a source-integrity attestation.
 
-The `Portable workflow boundaries` GitHub Actions workflow compiles the same clock, retained
-presentation scheduling, and raw-frame transport tests against the pinned GoogleTest submodule,
-and checks generated source contracts using the Python standard library. It can also be run
+The `Portable workflow boundaries` GitHub Actions workflow compiles the same clock, shared
+presentation-runtime ownership, retained presentation scheduling, and raw-frame transport tests
+against the pinned GoogleTest submodule, and checks generated source contracts using the Python
+standard library. It can also be run
 without the complete host build:
 
 ```text

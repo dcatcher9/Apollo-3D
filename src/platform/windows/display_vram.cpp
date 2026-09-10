@@ -7209,6 +7209,9 @@ namespace platf::dxgi {
                          << config.source_display_name << "; refreshing display topology."sv;
       return local_presenter_result_e::reinit;
     }
+    // Follow the sink's exact milliHz capture cadence. Remote capture's whole-rate fallback only
+    // adapts downward and would turn, for example, 60.120 Hz into 60 fps.
+    dxgi_display->set_local_frame_rate_millihz(config.target_refresh_millihz);
     if (dxgi_display->is_hdr() != config.hdr) {
       BOOST_LOG(info) << "Local AR virtual source has not settled to "sv
                       << (config.hdr ? "HDR"sv : "SDR"sv) << "; reinitializing."sv;

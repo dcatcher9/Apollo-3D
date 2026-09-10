@@ -1574,10 +1574,19 @@ namespace ar_glasses {
       return snapshot;
     }
 
+    int source_refresh_millihz(std::uint32_t numerator, std::uint32_t denominator) {
+      if (!numerator || !denominator) {
+        return 0;
+      }
+      const auto rounded = (static_cast<std::uint64_t>(numerator) * 1000 + denominator / 2) / denominator;
+      return rounded <= std::numeric_limits<int>::max() ? static_cast<int>(rounded) : 0;
+    }
+
     struct resolved_virtual_display_t {
       SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT identity {};
       std::wstring gdi_name;
       std::wstring device_path;
+      int refresh_millihz = 0;
     };
 
     enum class virtual_display_presence_e {
@@ -1661,6 +1670,10 @@ namespace ar_glasses {
           .identity = {source.target.adapter_id, source.target.target_id},
           .gdi_name = source.gdi_name,
           .device_path = source.device_path,
+          .refresh_millihz = source_refresh_millihz(
+            snapshot->paths[source.path_index].targetInfo.refreshRate.Numerator,
+            snapshot->paths[source.path_index].targetInfo.refreshRate.Denominator
+          ),
         },
       };
     }
@@ -2794,8 +2807,8 @@ namespace ar_glasses {
             BOOST_LOG(warning) << "Could not resolve the local AR source after initial display promotion."sv;
             return false;
           }
-          if (VDISPLAY::changeDisplaySettings(virtual_display_name_.c_str(), source_width, source_height, active_target.refresh_millihz, !exclusive_) != DISP_CHANGE_SUCCESSFUL) {
-            BOOST_LOG(warning) << "The local AR virtual desktop rejected its requested mode."sv;
+          if (!configure_source_refresh(active_target.refresh_millihz, cancelled)) {
+            return false;
           }
           if (const auto isolated_target = isolate_target()) {
             presentation_target = *isolated_target;
@@ -3095,19 +3108,8 @@ namespace ar_glasses {
             return false;
           }
 
-          const auto mode_status = VDISPLAY::changeDisplaySettings(
-            virtual_display_name_.c_str(),
-            source_width,
-            source_height,
-            target.refresh_millihz,
-            !exclusive_
-          );
-          if (mode_status != DISP_CHANGE_SUCCESSFUL) {
-            // The source is still usable at its previous refresh. Capture/presentation pacing follows
-            // the physical target, so a rejected refresh update must not destroy the desktop.
-            BOOST_LOG(warning) << "The persistent local AR virtual desktop rejected refresh "sv
-                               << (target.refresh_millihz / 1000.0)
-                               << " Hz; continuing with its current source refresh."sv;
+          if (!configure_source_refresh(target.refresh_millihz, cancelled)) {
+            return false;
           }
 
           for (int sleep_step = 0; sleep_step < 6 && !cancelled(); ++sleep_step) {
@@ -3380,13 +3382,62 @@ namespace ar_glasses {
       }
 
     private:
+      bool configure_source_refresh(int requested_millihz, const std::function<bool()> &cancelled) {
+        // A successful mode setter is not proof of the active cadence. Conversely, a rejected
+        // setter may have applied its baseline mode. Re-resolve the stable source for every
+        // attempt and accept only CCD readback, without recreating the user's retained desktop.
+        for (int attempt = 0; attempt < 3 && !cancelled(); ++attempt) {
+          const auto source = refresh_virtual_display_reference();
+          if (source && source->refresh_millihz == requested_millihz) {
+            return true;
+          }
+          if (source) {
+            VDISPLAY::changeDisplaySettings(
+              source->gdi_name.c_str(),
+              source_width,
+              source_height,
+              requested_millihz,
+              !exclusive_
+            );
+          }
+          for (int poll = 0; poll < 4 && !cancelled(); ++poll) {
+            std::this_thread::sleep_for(50ms);
+            const auto observed = refresh_virtual_display_reference();
+            if (observed && observed->refresh_millihz == requested_millihz) {
+              return true;
+            }
+          }
+        }
+        if (cancelled()) {
+          return false;
+        }
+        const auto source = refresh_virtual_display_reference();
+        if (!source || source->refresh_millihz <= 0) {
+          BOOST_LOG(warning) << "The local AR source mode could not be verified; retaining the desktop for a later topology retry."sv;
+          return false;
+        }
+        // Some drivers cannot apply a new fractional rate in place. Keep the usable desktop
+        // after this bounded repair attempt; a permanent mismatch must not cause a blank retry
+        // loop or migrate its windows. A later real mode change can try again.
+        BOOST_LOG(warning) << "Local AR source refresh remains "sv << (source->refresh_millihz / 1000.0)
+                           << " Hz after requesting "sv << (requested_millihz / 1000.0)
+                           << " Hz; preserving the desktop with its verified source cadence."sv;
+        return true;
+      }
+
       bool final_presentation_contract_matches(const target_state_t &expected, const target_state_t &actual) const {
         // Positions and GDI names may change during final promotion; mode, adapter and color may
         // not. In particular, never start a presenter from the pre-transaction HDR observation.
         if (!presentation_target_contract_matches(expected, actual)) {
           return false;
         }
-        const auto source_hdr = VDISPLAY::queryDisplayHDRByName(virtual_display_name_.c_str());
+        const auto source = resolve_virtual_display(virtual_display_identity_, virtual_display_device_path_, virtual_display_name_);
+        if (!source || source->refresh_millihz <= 0) {
+          return false;
+        }
+        BOOST_LOG(info) << "Local AR verified refresh: source="sv << (source->refresh_millihz / 1000.0)
+                        << " Hz, glasses="sv << (actual.refresh_millihz / 1000.0) << " Hz."sv;
+        const auto source_hdr = VDISPLAY::queryDisplayHDRByName(source->gdi_name.c_str());
         return source_hdr && *source_hdr == virtual_hdr_active_ && (!virtual_hdr_active_ || actual.hdr.active);
       }
 
@@ -3511,7 +3562,7 @@ namespace ar_glasses {
                                       ::video::SBS_AI :
                                       ::video::SBS_OFF;
         presenter_config.sbs_config = config::video.sbs;
-        presenter_config.capture_failover = std::make_shared<::video::capture_backend_failover_t>();
+        presenter_config.capture_failover = capture_failover_;
         presenter_config.live_target = live_target_;
         presented_frames_ = std::make_shared<std::atomic<std::uint64_t>>(0);
         presenter_config.presented_frames = presented_frames_;
@@ -3520,6 +3571,10 @@ namespace ar_glasses {
         failed_.store(false);
         running_.store(true);
         presenter_ = std::jthread([this, presenter_config](std::stop_token stop_token) mutable {
+          // Match the remote conversion owner and keep its process scheduling lease across
+          // capture reinits, instead of restoring and reapplying it for every DXGI attempt.
+          auto presentation_scheduling = platf::acquire_presentation_scheduling();
+          platf::adjust_thread_priority(platf::thread_priority_e::high);
           auto reinit_window_started = std::chrono::steady_clock::now();
           int consecutive_reinits = 0;
           while (!stop_token.stop_requested()) {
@@ -3585,6 +3640,10 @@ namespace ar_glasses {
       std::optional<std::chrono::steady_clock::time_point> virtual_display_absence_started_;
       unsigned virtual_display_absence_observations_ = 0;
       std::shared_ptr<platf::dxgi::local_presenter_config_t::target_t> live_target_;
+      // A 2D/3D mode switch keeps this source. Keep any working capture-backend fallback too.
+      std::shared_ptr<::video::capture_backend_failover_t> capture_failover_ {
+        std::make_shared<::video::capture_backend_failover_t>()
+      };
       std::shared_ptr<std::atomic<std::uint64_t>> presented_frames_;
       std::shared_ptr<platf::dxgi::local_presenter_cursor_clip_t> cursor_clip_;
       std::jthread presenter_;
@@ -4116,6 +4175,10 @@ namespace ar_glasses {
   }  // namespace
 
 #ifdef SUNSHINE_TESTS
+  int detail::local_source_refresh_millihz_for_test(std::uint32_t numerator, std::uint32_t denominator) {
+    return source_refresh_millihz(numerator, denominator);
+  }
+
   bool detail::primary_source_is_authoritative_for_test(
     std::wstring_view primary_gdi_name,
     const std::vector<std::wstring> &active_gdi_names

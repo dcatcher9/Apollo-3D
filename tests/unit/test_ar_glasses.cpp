@@ -117,6 +117,20 @@ TEST(ArGlassesMode, RejectsUnrecognizedModes) {
   );
 }
 
+TEST(ArGlassesSourceRefresh, PreservesFractionalCadenceAndDistinguishesAHalfRateSource) {
+  EXPECT_EQ(ar_glasses::detail::local_source_refresh_millihz_for_test(60000, 1001), 59940);
+  EXPECT_EQ(ar_glasses::detail::local_source_refresh_millihz_for_test(120000, 1001), 119880);
+  EXPECT_EQ(ar_glasses::detail::local_source_refresh_millihz_for_test(60, 1), 60000);
+  EXPECT_EQ(ar_glasses::detail::local_source_refresh_millihz_for_test(120, 1), 120000);
+}
+
+TEST(ArGlassesSourceRefresh, RejectsUnknownAndOverflowingRefreshEvidence) {
+  EXPECT_EQ(ar_glasses::detail::local_source_refresh_millihz_for_test(0, 1), 0);
+  EXPECT_EQ(ar_glasses::detail::local_source_refresh_millihz_for_test(60, 0), 0);
+  EXPECT_EQ(ar_glasses::detail::local_source_refresh_millihz_for_test(std::numeric_limits<std::uint32_t>::max(), 1), 0);
+  EXPECT_EQ(ar_glasses::detail::local_source_refresh_millihz_for_test(120000000, 1000000), 120000);
+}
+
 TEST(ArGlassesDiscovery, RecognizesSpecificModelsAndNames) {
   EXPECT_TRUE(ar_glasses::is_recognized_ar_display("DISPLAY:TCL03D4", "Generic Monitor"));
   EXPECT_TRUE(ar_glasses::is_recognized_ar_display("DISPLAY:ABC1234", "XREAL Air 2 Pro"));

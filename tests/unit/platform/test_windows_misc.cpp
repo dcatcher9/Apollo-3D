@@ -77,6 +77,49 @@ namespace {
     EXPECT_EQ(mutex.release_calls, 0u);
   }
 
+  TEST(WindowsLocalPresenterTimingTest, ExactSinkCadencePreservesUpwardAndMilliHzFractionalRates) {
+    // This exercises the real capture owner's publication without opening a monitor or GPU.
+    platf::dxgi::display_ddup_vram_t capture;
+    std::uint64_t expected_generation = 0;
+    for (const int refresh_millihz : {60120, 59940, 59941, 60000}) {
+      capture.set_local_frame_rate_millihz(refresh_millihz);
+      EXPECT_EQ(capture.client_frame_rate, 60);
+      EXPECT_EQ(capture.client_frame_rate_strict.Numerator, refresh_millihz);
+      EXPECT_EQ(capture.client_frame_rate_strict.Denominator, 1000u);
+      EXPECT_EQ(capture.client_frame_rate_generation.load(), ++expected_generation);
+
+      // Reapplying an unchanged sink contract must not restart the capture pacing group.
+      capture.set_local_frame_rate_millihz(refresh_millihz);
+      EXPECT_EQ(capture.client_frame_rate_generation.load(), expected_generation);
+    }
+  }
+
+  TEST(WindowsLocalPresenterTimingTest, LocalCadenceDoesNotChangeRemoteRateInterpretationOrFallback) {
+    platf::dxgi::display_ddup_vram_t capture;
+    capture.set_local_frame_rate_millihz(59941);
+    capture.set_client_frame_rate(60, 5994);
+    EXPECT_EQ(capture.client_frame_rate_strict.Numerator, 60000u);
+    EXPECT_EQ(capture.client_frame_rate_strict.Denominator, 1001u);
+
+    // A client without an exact rate still gets the established DXGI refresh adaptation.
+    capture.set_client_frame_rate(60, 0);
+    EXPECT_EQ(capture.client_frame_rate, 60);
+    EXPECT_EQ(capture.client_frame_rate_strict.Numerator, 0u);
+    EXPECT_EQ(capture.client_frame_rate_strict.Denominator, 0u);
+  }
+
+  TEST(WindowsLocalPresenterTimingTest, InvalidLocalCadencePreservesLastPublishedRate) {
+    platf::dxgi::display_ddup_vram_t capture;
+    capture.set_local_frame_rate_millihz(60120);
+    const auto generation = capture.client_frame_rate_generation.load();
+    for (const int invalid : {0, -1}) {
+      capture.set_local_frame_rate_millihz(invalid);
+      EXPECT_EQ(capture.client_frame_rate_strict.Numerator, 60120u);
+      EXPECT_EQ(capture.client_frame_rate_strict.Denominator, 1000u);
+      EXPECT_EQ(capture.client_frame_rate_generation.load(), generation);
+    }
+  }
+
   TEST(WindowsDdupTimestampTest, CursorOnlyUpdateRetainsDesktopContentTimestamp) {
     using timestamp_t = std::int64_t;
     const auto initial_present = platf::dxgi::detail::select_ddup_timestamps(

@@ -49,13 +49,14 @@
 
 // local includes
 #include "misc.h"
-#include "utils.h"
 #include "nvprefs/nvprefs_interface.h"
+#include "presentation_scheduling.h"
 #include "src/entry_handler.h"
 #include "src/globals.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
 #include "src/utility.h"
+#include "utils.h"
 
 // UDP_SEND_MSG_SIZE was added in the Windows 10 20H1 SDK
 #ifndef UDP_SEND_MSG_SIZE
@@ -80,7 +81,6 @@ extern "C" {
 
 namespace {
 
-  std::atomic<bool> used_nt_set_timer_resolution = false;
   std::mutex command_resolution_mutex;
   std::mutex active_identity_cache_mutex;
   std::mutex explorer_restart_mutex;
@@ -88,24 +88,6 @@ namespace {
   std::mutex mouse_keys_mutex;
   platf::detail::mouse_keys_controller_t mouse_keys_controller;
   std::chrono::steady_clock::time_point mouse_keys_retry_after;
-
-  bool nt_set_timer_resolution_max() {
-    ULONG minimum, maximum, current;
-    if (!NT_SUCCESS(NtQueryTimerResolution(&minimum, &maximum, &current)) ||
-        !NT_SUCCESS(NtSetTimerResolution(maximum, TRUE, &current))) {
-      return false;
-    }
-    return true;
-  }
-
-  bool nt_set_timer_resolution_min() {
-    ULONG minimum, maximum, current;
-    if (!NT_SUCCESS(NtQueryTimerResolution(&minimum, &maximum, &current)) ||
-        !NT_SUCCESS(NtSetTimerResolution(minimum, TRUE, &current))) {
-      return false;
-    }
-    return true;
-  }
 
 }  // namespace
 
@@ -2772,7 +2754,110 @@ namespace platf {
     }
   }
 
+  namespace {
+    struct presentation_scheduling_operations_t {
+      bool dwm_mmcss_enabled = false;
+      detail::presentation_timer_request_t timer_request;
+      DWORD previous_priority = 0;
+
+      void start() {
+        if (!dwm_mmcss_enabled) {
+          dwm_mmcss_enabled = SUCCEEDED(DwmEnableMMCSS(TRUE));
+        }
+
+        // Retain the exact successfully acquired timer request. A failed cleanup can be retried
+        // after the next presentation lifetime without adding another outstanding request.
+        timer_request.start(
+          []() -> std::optional<std::uint32_t> {
+            ULONG minimum = 0, maximum = 0, current = 0;
+            if (NT_SUCCESS(NtQueryTimerResolution(&minimum, &maximum, &current)) && maximum != 0 && NT_SUCCESS(NtSetTimerResolution(maximum, TRUE, &current))) {
+              return maximum;
+            }
+            return std::nullopt;
+          },
+          []() {
+            BOOST_LOG(warning) << "NtSetTimerResolution() failed, falling back to timeBeginPeriod()."sv;
+            const bool acquired = timeBeginPeriod(1) == TIMERR_NOERROR;
+            if (!acquired) {
+              BOOST_LOG(warning) << "Could not acquire a fine presentation timer period."sv;
+            }
+            return acquired;
+          }
+        );
+
+        const DWORD priority = GetPriorityClass(GetCurrentProcess());
+        // Preserve a caller-selected higher priority and only claim a change with a known undo.
+        if (!previous_priority && priority != 0 && priority != HIGH_PRIORITY_CLASS && priority != REALTIME_PRIORITY_CLASS && SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS)) {
+          previous_priority = priority;
+        }
+
+        // This first-owner transition is serialized with every local/remote acquire and release.
+        // Startup/shutdown profile ownership surrounds both presentation lifetimes in main().
+        if (nvprefs_instance.load()) {
+          if (!nvprefs_instance.owning_undo_file()) {
+            nvprefs_instance.restore_from_and_delete_undo_file_if_exists();
+          }
+          nvprefs_instance.modify_application_profile();
+          nvprefs_instance.modify_global_profile();
+          nvprefs_instance.unload();
+        }
+      }
+
+      void stop() noexcept {
+        if (previous_priority) {
+          const DWORD current_priority = GetPriorityClass(GetCurrentProcess());
+          if (current_priority != 0 && (current_priority != HIGH_PRIORITY_CLASS || SetPriorityClass(GetCurrentProcess(), previous_priority))) {
+            // A later external priority change is not ours to overwrite.
+            previous_priority = 0;
+          }
+        }
+
+        timer_request.stop(
+          [](const std::uint32_t native_resolution) {
+            ULONG current = 0;
+            // FALSE releases our request; requesting a slower period with TRUE does not release it.
+            if (NT_SUCCESS(NtSetTimerResolution(native_resolution, FALSE, &current))) {
+              return true;
+            }
+            BOOST_LOG(warning) << "Could not release the native presentation timer request."sv;
+            return false;
+          },
+          []() {
+            return timeEndPeriod(1) == TIMERR_NOERROR;
+          }
+        );
+        if (dwm_mmcss_enabled && SUCCEEDED(DwmEnableMMCSS(FALSE))) {
+          dwm_mmcss_enabled = false;
+        }
+      }
+    };
+
+    using presentation_scheduling_controller_t =
+      detail::presentation_scheduling_t<presentation_scheduling_operations_t>;
+    // Declaration order keeps this controller alive through remote lease destruction.
+    presentation_scheduling_controller_t presentation_scheduling;
+    std::unique_ptr<deinit_t> remote_presentation_scheduling;
+
+    class presentation_scheduling_lease_t final: public deinit_t {
+    public:
+      presentation_scheduling_lease_t():
+          lease_(presentation_scheduling.acquire()) {
+      }
+
+    private:
+      presentation_scheduling_controller_t::lease_t lease_;
+    };
+  }  // namespace
+
+  std::unique_ptr<deinit_t> acquire_presentation_scheduling() {
+    return std::make_unique<presentation_scheduling_lease_t>();
+  }
+
   void streaming_will_start() {
+    // stream.cpp serializes the remote hooks and retains this lease across reconnect grace.
+    if (!remote_presentation_scheduling) {
+      remote_presentation_scheduling = acquire_presentation_scheduling();
+    }
     static std::once_flag load_wlanapi_once_flag;
     std::call_once(load_wlanapi_once_flag, []() {
       // wlanapi.dll is not installed by default on Windows Server, so we load it dynamically
@@ -2801,31 +2886,6 @@ namespace platf {
         return;
       }
     });
-
-    // Enable MMCSS scheduling for DWM
-    DwmEnableMMCSS(true);
-
-    // Reduce timer period to 0.5ms
-    if (nt_set_timer_resolution_max()) {
-      used_nt_set_timer_resolution = true;
-    } else {
-      BOOST_LOG(error) << "NtSetTimerResolution() failed, falling back to timeBeginPeriod()";
-      timeBeginPeriod(1);
-      used_nt_set_timer_resolution = false;
-    }
-
-    // Promote ourselves to high priority class
-    SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
-
-    // Modify NVIDIA control panel settings again, in case they have been changed externally since sunshine launch
-    if (nvprefs_instance.load()) {
-      if (!nvprefs_instance.owning_undo_file()) {
-        nvprefs_instance.restore_from_and_delete_undo_file_if_exists();
-      }
-      nvprefs_instance.modify_application_profile();
-      nvprefs_instance.modify_global_profile();
-      nvprefs_instance.unload();
-    }
 
     // Enable low latency mode on all connected WLAN NICs if wlanapi.dll is available
     if (fn_WlanOpenHandle) {
@@ -2904,21 +2964,7 @@ namespace platf {
   }
 
   void streaming_will_stop() {
-    // Demote ourselves back to normal priority class
-    SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS);
-
-    // End our 0.5ms timer request
-    if (used_nt_set_timer_resolution) {
-      used_nt_set_timer_resolution = false;
-      if (!nt_set_timer_resolution_min()) {
-        BOOST_LOG(error) << "nt_set_timer_resolution_min() failed even though nt_set_timer_resolution_max() succeeded";
-      }
-    } else {
-      timeEndPeriod(1);
-    }
-
-    // Disable MMCSS scheduling for DWM
-    DwmEnableMMCSS(false);
+    remote_presentation_scheduling.reset();
 
     // Closing our WLAN client handle will undo our optimizations
     if (wlan_handle != nullptr) {

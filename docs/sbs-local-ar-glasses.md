@@ -3,6 +3,13 @@
 Sunshine 3D can automatically own a local presentation session for an AR-glasses monitor connected as a
 Windows display. This is a local D3D11 path: it does not use RTSP, NVENC, Moonlight, or Artemis.
 
+Local RGB presentation and remote NVENC conversion both use `d3d_base_encode_device::convert`
+for depth, frame attribution, reuse, scene state, and warp. Windows scheduling belongs to
+`acquire_presentation_scheduling()`, and initial/live capture cadences use the same publication
+method in `display_base_t`. Changes to these common behaviors belong in those owners. The output
+adapters supply their own deadlines and final RGB or YUV destination; they do not maintain separate
+copies of the processing pipeline.
+
 Monitor decisions are stored by stable EDID/PnP model ID in the managed `ar_glass_devices` option.
 Names specific to common AR-glasses families are approved automatically. A newly seen monitor that
 cannot be identified safely remains inactive and appears in the web UI's **AR Displays** tab, where
@@ -217,6 +224,23 @@ after a timeout. It then retries the retained work even if the desktop never cha
 An early successful capture starts a fresh capture pacing group instead of advancing a full nominal
 frame interval, so cursor updates cannot accumulate a long sleep when pending work clears. Once the
 work is presented, ordinary idle capture resumes. Remote capture keeps its existing idle timeout.
+
+Local presentation and remote streaming share ownership of Windows' fine timer resolution, DWM
+multimedia scheduling, and elevated process priority. These settings stay active until the last
+owner releases them; a remote disconnect cannot remove them from an active local presenter. The
+combined local capture/conversion thread uses the same priority as remote conversion and keeps its
+scheduling ownership through capture reinitialization. Remote WLAN and input setup remains tied to
+remote sessions.
+
+Local capture follows the physical output's requested refresh in exact millihertz, including rates
+slightly above a whole number. It does not apply the remote client's whole-FPS fallback or round-trip
+the rate through the network's hundredths-of-a-frame representation. A successful capture-backend
+fallback also survives supported 2D/SBS mode switches and presenter restarts for the retained virtual
+source, so those transitions do not retry a backend already rejected in that session.
+Source mode changes use active Windows display-configuration readback and bounded in-place retries.
+If the requested refresh remains unsupported, a verified usable source stays attached at its actual
+rate, which is logged alongside the glasses rate. This preserves the desktop without concealing a
+source that runs more slowly than the output.
 
 In 3D the local presenter starts one refresh-interval render budget when DXGI's frame-latency handle
 admits a new draw, then supplies that deadline to the shared bounded same-frame completion policy

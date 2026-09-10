@@ -82,7 +82,7 @@ try {
     Invoke-GateStage 'host-build' $ninja @('-C', $BuildDirectory, 'sunshine', 'test_sunshine') $HostRoot
   }
   if (-not (Test-Path -LiteralPath $testExecutable -PathType Leaf)) { throw "Build the host test binary first: $testExecutable" }
-  $nativeFilter = 'Offline*:GpuWorkloadArbiter.*:Rtsp*:Input*:ProcessTest.*:WindowsQpc*:WindowsLocalPresenter*:RemoteEncode*Test.*:HostSbsChromaGpuTest.*:WebUiDesign.*'
+  $nativeFilter = 'Offline*:GpuWorkloadArbiter.*:Rtsp*:Input*:ProcessTest.*:WindowsQpc*:WindowsLocalPresenter*:PresentationScheduling*:ArGlasses*:RemoteEncode*Test.*:HostSbsChromaGpuTest.*:WebUiDesign.*'
   $nativeXml = Join-Path $resultsDirectory 'host.xml'
   Invoke-GateStage 'host' $testExecutable @("--gtest_filter=$nativeFilter", "--gtest_output=xml:$nativeXml") $BuildDirectory
   [xml] $nativeResult = Get-Content -LiteralPath $nativeXml -Raw

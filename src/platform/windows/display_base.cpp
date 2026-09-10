@@ -593,6 +593,19 @@ namespace platf::dxgi {
       };
     }
 
+    publish_capture_frame_rate(framerate, strict);
+  }
+
+  void display_base_t::set_local_frame_rate_millihz(int refresh_millihz) {
+    if (refresh_millihz <= 0) {
+      return;
+    }
+
+    const auto rounded_rate = std::max<std::int64_t>(1, (static_cast<std::int64_t>(refresh_millihz) + 500) / 1000);
+    publish_capture_frame_rate(static_cast<int>(rounded_rate), {static_cast<UINT>(refresh_millihz), 1000});
+  }
+
+  void display_base_t::publish_capture_frame_rate(int framerate, DXGI_RATIONAL strict) {
     {
       std::lock_guard lock(client_frame_rate_mutex);
       if (client_frame_rate == framerate && client_frame_rate_strict.Numerator == strict.Numerator && client_frame_rate_strict.Denominator == strict.Denominator) {
@@ -1193,15 +1206,7 @@ namespace platf::dxgi {
       }
     }
 
-    client_frame_rate = config.framerate;
-    client_frame_rate_strict = {};
-    if (config.framerateX100 > 0) {
-      const auto framerate = ::video::framerate_x100_to_rational(config.framerateX100);
-      client_frame_rate_strict = {
-        static_cast<UINT>(framerate.num),
-        static_cast<UINT>(framerate.den),
-      };
-    }
+    set_client_frame_rate(config.framerate, config.framerateX100);
     dxgi::output6_t output6 {};
     status = output->QueryInterface(IID_IDXGIOutput6, (void **) &output6);
     if (SUCCEEDED(status)) {

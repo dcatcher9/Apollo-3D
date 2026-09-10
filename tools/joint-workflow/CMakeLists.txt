@@ -8,6 +8,7 @@ set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 add_subdirectory("${HOST_ROOT}/third-party/googletest" googletest EXCLUDE_FROM_ALL)
 add_executable(joint_workflow_portable
+  "${HOST_ROOT}/tests/unit/platform/windows/test_presentation_scheduling.cpp"
   "${HOST_ROOT}/tests/unit/platform/test_windows_capture_timing.cpp"
   "${HOST_ROOT}/tests/unit/test_offline_frame_transport.cpp"
   "${HOST_ROOT}/tests/unit/test_video_encode_pacing.cpp"

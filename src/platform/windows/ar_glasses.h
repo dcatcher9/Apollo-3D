@@ -127,6 +127,9 @@ namespace ar_glasses {
       const std::vector<std::wstring> &active_gdi_names
     );
 
+    /** Decode active source refresh without discarding fractional-Hz CCD evidence. */
+    int local_source_refresh_millihz_for_test(std::uint32_t numerator, std::uint32_t denominator);
+
     struct linear_layout_t {
       RECT virtual_rect {};
       RECT physical_rect {};

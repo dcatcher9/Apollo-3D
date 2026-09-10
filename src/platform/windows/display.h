@@ -1009,6 +1009,10 @@ namespace platf::dxgi {
 
     void set_client_frame_rate(int framerate, int framerate_x100) override;
 
+    // Local presentation follows its physical sink's milliHz contract, without client-rate
+    // rounding or the remote NTSC-rate interpretation.
+    void set_local_frame_rate_millihz(int refresh_millihz);
+
     factory1_t factory;
     adapter_t adapter;
     output_t output;
@@ -1023,7 +1027,7 @@ namespace platf::dxgi {
 
     // Guarded by client_frame_rate_mutex once capture() is running: a live 0x3007 video-mode
     // change republishes the cadence from the encode thread while capture is in flight.
-    int client_frame_rate;
+    int client_frame_rate = 0;
     DXGI_RATIONAL client_frame_rate_strict {};
     // Bumped by set_client_frame_rate() whenever the published cadence actually changes. The
     // capture loop watches it so it can re-derive its pacing interval without a display reinit.
@@ -1100,6 +1104,9 @@ namespace platf::dxgi {
     virtual capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) = 0;
     virtual capture_e release_snapshot() = 0;
     virtual int complete_img(img_t *img, bool dummy) = 0;
+
+  private:
+    void publish_capture_frame_rate(int framerate, DXGI_RATIONAL strict);
   };
 
   /**
