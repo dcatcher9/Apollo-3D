@@ -497,25 +497,26 @@ namespace {
     }
   }
 
-  TEST(WindowsLocalPresenterScheduleTest, EarlySourcesShareTheExistingRefreshBudget) {
+  TEST(WindowsLocalPresenterScheduleTest, EachDxgiAdmissionReceivesItsOwnBoundedBudget) {
     using namespace std::chrono_literals;
     using namespace platf::dxgi::detail;
     const std::chrono::steady_clock::time_point start {};
     local_presenter_schedule_t schedule {60000};
-    const auto first = schedule.begin_frame(start);
-    EXPECT_EQ(first, start + 16'666'666ns);
-    EXPECT_TRUE(host_sbs_same_frame_poll_plan(true, false, first, start).eligible);
-
-    // Multiple cursor sources in one display interval never buy another full-frame budget.
-    for (int offset = 1; offset <= 16; ++offset) {
+    // DXGI can admit the next draw before or after an unrelated software refresh grid. In the
+    // old grid the second admission below had only 1.26 ms left after the output reserve,
+    // repeatedly missing an otherwise fast 2.6 ms depth transaction.
+    for (const auto offset : {0us, 12'400us, 29'100us, 46'500us}) {
+      const auto admitted = start + offset;
+      const auto target = schedule.begin_frame(admitted);
+      EXPECT_EQ(target, admitted + 16'666'666ns);
+      const auto poll_started = admitted + 1ms;
+      const auto plan = host_sbs_same_frame_poll_plan(true, false, target, poll_started);
+      ASSERT_TRUE(plan.eligible);
+      EXPECT_TRUE(plan.limited_by_hard_cap);
+      EXPECT_EQ(plan.budget, 8ms);
+      EXPECT_LE(poll_started + 2600us, plan.deadline);
       schedule.record_presented();
-      EXPECT_EQ(schedule.begin_frame(start + offset * 1ms), first);
     }
-    EXPECT_FALSE(host_sbs_same_frame_poll_plan(true, false, first, start + 14ms).eligible);
-    schedule.record_presented();
-    const auto second = schedule.begin_frame(start + 17ms);
-    EXPECT_EQ(second, start + 33'333'332ns);
-    EXPECT_TRUE(host_sbs_same_frame_poll_plan(true, false, second, start + 17ms).eligible);
   }
 
   TEST(WindowsLocalPresenterScheduleTest, BusyOutputNeverRenewsItsExpiredDeadline) {
@@ -524,17 +525,33 @@ namespace {
     const std::chrono::steady_clock::time_point start {};
     local_presenter_schedule_t schedule {60000};
     const auto target = schedule.begin_frame(start);
+    // Neither a busy Present retry nor a newer source replacing its pixels owns another DXGI
+    // admission. Every begin_frame before successful Present retains the first deadline.
     for (int retry = 1; retry <= 100; ++retry) {
       EXPECT_EQ(schedule.begin_frame(start + retry * 5ms), target);
     }
     EXPECT_FALSE(host_sbs_same_frame_poll_plan(true, false, target, start + 500ms).eligible);
     schedule.record_presented();
     const auto resumed = schedule.begin_frame(start + 500ms);
-    EXPECT_GT(resumed, start + 500ms);
-    EXPECT_LE(resumed, start + 500ms + 16'666'666ns);
+    EXPECT_EQ(resumed, start + 500ms + 16'666'666ns);
   }
 
-  TEST(WindowsLocalPresenterScheduleTest, FractionalRefreshAndLongIdleStayOnTheClockGrid) {
+  TEST(WindowsLocalPresenterScheduleTest, SetupConsumesTheAdmittedBudgetWithoutRenewal) {
+    using namespace std::chrono_literals;
+    using namespace platf::dxgi::detail;
+    const std::chrono::steady_clock::time_point start {};
+    local_presenter_schedule_t schedule {60000};
+    const auto target = schedule.begin_frame(start);
+    const auto last_eligible = target - 3ms - 250us;
+    const auto plan = host_sbs_same_frame_poll_plan(true, false, target, last_eligible);
+    ASSERT_TRUE(plan.eligible);
+    EXPECT_FALSE(plan.limited_by_hard_cap);
+    EXPECT_EQ(plan.budget, 250us);
+    EXPECT_EQ(schedule.begin_frame(last_eligible + 1ns), target);
+    EXPECT_FALSE(host_sbs_same_frame_poll_plan(true, false, target, last_eligible + 1ns).eligible);
+  }
+
+  TEST(WindowsLocalPresenterScheduleTest, FractionalRefreshAndLongIdleHaveNoAccumulatedDebt) {
     using namespace std::chrono_literals;
     using namespace platf::dxgi::detail;
     const std::chrono::steady_clock::time_point start {};
@@ -543,9 +560,13 @@ namespace {
     EXPECT_EQ(schedule.begin_frame(start), start + interval);
     schedule.record_presented();
     const auto resumed = schedule.begin_frame(start + 1h);
-    EXPECT_GT(resumed, start + 1h);
-    EXPECT_LE(resumed, start + 1h + interval);
-    EXPECT_EQ((resumed - start) % interval, 0ns);
+    EXPECT_EQ(resumed, start + 1h + interval);
+    const auto poll_started = start + 1h + 1ms;
+    const auto plan = host_sbs_same_frame_poll_plan(true, false, resumed, poll_started);
+    ASSERT_TRUE(plan.eligible);
+    EXPECT_FALSE(plan.limited_by_hard_cap);
+    EXPECT_EQ(plan.budget, interval - 1ms - 3ms);
+    EXPECT_LT(plan.budget, 8ms);
   }
 
   TEST(WindowsLocalPresenterRetryTest, BusyOutputKeepsItsSlotAndDoesNotReconvertForDepthPolling) {

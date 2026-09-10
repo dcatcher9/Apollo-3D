@@ -7678,6 +7678,8 @@ namespace platf::dxgi {
         presenter_retry.record_slot_acquired();
       }
 
+      // Start the render budget only after DXGI admits this draw. Calls that still own a busy
+      // Present retain their original target, including when a newer captured source replaces it.
       const auto presentation_target = config.sbs_mode == ::video::SBS_AI ?
                                          std::optional {presenter_schedule.begin_frame(std::chrono::steady_clock::now())} :
                                          std::nullopt;

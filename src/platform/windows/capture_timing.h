@@ -25,10 +25,10 @@ namespace platf::dxgi::detail {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(current_time - frame_seconds);
   }
 
-  /** Local presentation owns a refresh grid independently of captured pixel timestamps.
-   * DXGI's latency handle still controls when drawing may start; this grid only budgets the
-   * shared bounded depth-completion query. Early captures cannot advance it, and a busy output
-   * keeps its original deadline even when a newer source replaces its pixels.
+  /** Budget one local draw from its DXGI presentation-slot admission, not a free-running grid.
+   * Call begin_frame only after acquiring the latency handle. A new admitted frame gets one
+   * refresh interval for its work; this is a bounded render deadline, not a predicted vblank.
+   * A busy output keeps that deadline even when a newer source replaces its pixels.
    */
   class local_presenter_schedule_t {
   public:
@@ -38,13 +38,10 @@ namespace platf::dxgi::detail {
 
     std::chrono::steady_clock::time_point begin_frame(std::chrono::steady_clock::time_point now) {
       if (!active_target_) {
-        if (!next_target_) {
-          next_target_ = now + interval_;
-        } else if (*next_target_ <= now) {
-          // Skip expired slots without drifting the refresh grid or accumulating frame debt.
-          next_target_ = now + interval_ - (now - *next_target_) % interval_;
-        }
-        active_target_ = next_target_;
+        // DXGI admission is the pacing authority. An unrelated clock phase can otherwise give
+        // an admitted frame only the scraps of the previous frame's budget, repeatedly forcing
+        // old packed output even though depth would complete well within one refresh interval.
+        active_target_ = now + interval_;
       }
       return *active_target_;
     }
@@ -55,7 +52,6 @@ namespace platf::dxgi::detail {
 
   private:
     std::chrono::steady_clock::duration interval_;
-    std::optional<std::chrono::steady_clock::time_point> next_target_;
     std::optional<std::chrono::steady_clock::time_point> active_target_;
   };
 

@@ -1058,10 +1058,12 @@ After one current matched frame has successfully enqueued, production gives its 
 DAV2/OCR unit or GPU-undecided conditional root one immediate nonblocking completion query. It may repeat
 that status query only when the output owner's next cadence target leaves at least `0.25 ms` of useful
 slack after reserving `3 ms` for completed-depth postprocess, SBS warp/output, and NVENC submission or
-local presentation. Remote streaming uses the encode schedule; local AR uses its presenter-owned
-steady-clock refresh grid. The local grid advances with elapsed time, not cursor captures, and a
-busy output retains its original deadline until Present succeeds. It adds no separate presentation
-wait and does not change 2D passthrough.
+local presentation. Remote streaming uses the encode schedule. Local AR starts one refresh-interval
+render budget when DXGI's frame-latency handle admits a new draw. This bounds the admitted work; it
+does not predict the physical vblank. Each new admission gets its own budget instead of inheriting
+the remainder of an unrelated clock grid. A busy output retains its original deadline until Present
+succeeds, even if a newer capture replaces its pixels. DXGI keeps the single-frame queue bound;
+the render budget adds no separate pacing wait and does not change 2D passthrough.
 Repeated queries use all of that post-reserve cadence slack up to an absolute `8 ms` wait cap, with
 an independent query-count fuse. Thus a low-rate stream may spend its real extra cadence headroom,
 while a late/high-rate frame remains cadence-limited and every stream retains a bounded latency.

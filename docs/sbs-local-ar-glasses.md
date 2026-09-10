@@ -218,14 +218,15 @@ An early successful capture starts a fresh capture pacing group instead of advan
 frame interval, so cursor updates cannot accumulate a long sleep when pending work clears. Once the
 work is presented, ordinary idle capture resumes. Remote capture keeps its existing idle timeout.
 
-The local presenter owns a steady-clock refresh grid, separate from capture/content identity. In
-3D it supplies that grid's upcoming deadline to the shared bounded same-frame completion policy
-documented in [Host SBS](host-sbs.md#frame-attribution-and-failure-behavior). This lets a fast depth
-transaction finish within the current presentation budget instead of always waiting for a later
-display cycle. The grid adds no second pacing wait: DXGI's single-frame latency gate remains the
-drawing gate, and 2D retains its direct presentation path. Early captures do not advance the grid.
-A busy Present retains both its acquired DXGI slot and its original deadline; retries neither acquire
-another slot nor renew the depth budget. Already-converted pixels are retried directly, with late
+In 3D the local presenter starts one refresh-interval render budget when DXGI's frame-latency handle
+admits a new draw, then supplies that deadline to the shared bounded same-frame completion policy
+documented in [Host SBS](host-sbs.md#frame-attribution-and-failure-behavior). The deadline bounds
+the admitted work rather than predicting vblank. This avoids giving a new frame only the remaining
+fraction of an unrelated software-clock interval. The poll still returns immediately when depth is
+ready and obeys the shared cap and downstream reserve. DXGI's single-frame latency gate remains
+the drawing gate, and 2D retains its direct presentation path. A busy Present retains both its
+acquired DXGI slot and its original deadline; retries neither acquire another slot nor renew the
+depth budget. Already-converted pixels are retried directly, with late
 pipeline notifications left armed for the next conversion. A newer source may replace those pixels
 without extending the active deadline. These are scheduling bounds, not a GPU completion-time guarantee.
 
