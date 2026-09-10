@@ -652,6 +652,14 @@ namespace platf::dxgi {
     DXGI_RATIONAL client_frame_rate_adjusted = adjust_client_frame_rate();
     std::optional<std::chrono::steady_clock::time_point> frame_pacing_group_start;
     uint32_t frame_pacing_group_frames = 0;
+    const auto start_frame_pacing_group = [&](const std::shared_ptr<img_t> &image) {
+      frame_pacing_group_start = image->frame_timestamp;
+      if (!frame_pacing_group_start) {
+        BOOST_LOG(warning) << "snapshot() provided image without timestamp";
+        frame_pacing_group_start = std::chrono::steady_clock::now();
+      }
+      frame_pacing_group_frames = 1;
+    };
 
     // Keep the display awake during capture. If the display goes to sleep during
     // capture, best case is that capture stops until it powers back on. However,
@@ -699,9 +707,8 @@ namespace platf::dxgi {
         const auto sleep_target = *frame_pacing_group_start +
                                   std::chrono::nanoseconds(1s) * seconds +
                                   std::chrono::nanoseconds(1s) * remainder / client_frame_rate_adjusted.Numerator;
-        const auto sleep_period = wait_policy.pacing_sleep(
-          sleep_target - std::chrono::steady_clock::now()
-        );
+        const auto requested_sleep = sleep_target - std::chrono::steady_clock::now();
+        const auto sleep_period = wait_policy.pacing_sleep(requested_sleep);
 
         if (sleep_period <= 0ns) {
           // We missed next frame time, invalidating current frame pacing group
@@ -722,7 +729,11 @@ namespace platf::dxgi {
           status = snapshot(pull_free_image_cb, img_out, elastic ? 2ms : std::chrono::duration_cast<std::chrono::milliseconds>(sleep_period), *cursor);
 
           if (status == capture_e::ok && img_out) {
-            frame_pacing_group_frames += 1;
+            if (wait_policy.rebase_after_pacing_snapshot(requested_sleep)) {
+              start_frame_pacing_group(img_out);
+            } else {
+              frame_pacing_group_frames += 1;
+            }
           } else {
             frame_pacing_group_start = std::nullopt;
             frame_pacing_group_frames = 0;
@@ -736,14 +747,7 @@ namespace platf::dxgi {
         status = snapshot(pull_free_image_cb, img_out, wait_policy.source_timeout(), *cursor);
 
         if (status == capture_e::ok && img_out) {
-          frame_pacing_group_start = img_out->frame_timestamp;
-
-          if (!frame_pacing_group_start) {
-            BOOST_LOG(warning) << "snapshot() provided image without timestamp";
-            frame_pacing_group_start = std::chrono::steady_clock::now();
-          }
-
-          frame_pacing_group_frames = 1;
+          start_frame_pacing_group(img_out);
         } else if (status == platf::capture_e::timeout) {
           // The D3D11 device is protected by an unfair lock that is held the entire time that
           // IDXGIOutputDuplication::AcquireNextFrame() is running. This is normally harmless,

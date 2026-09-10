@@ -883,6 +883,19 @@ namespace ar_glasses {
              (exclusive || !right->is_primary) && !right->is_cloned;
     }
 
+    bool presentation_target_contract_matches(const target_state_t &expected, const target_state_t &actual) {
+      // Placement may change GDI names and coordinates, but it must not silently adopt a new
+      // capture/presentation generation or turn the physical sink into the interactive primary.
+      return actual.device_path == expected.device_path &&
+             same_luid(actual.adapter_id, expected.adapter_id) &&
+             actual.mode == expected.mode &&
+             actual.refresh_millihz == expected.refresh_millihz &&
+             actual.rect.right - actual.rect.left == expected.rect.right - expected.rect.left &&
+             actual.rect.bottom - actual.rect.top == expected.rect.bottom - expected.rect.top &&
+             actual.hdr.active == expected.hdr.active &&
+             !actual.is_primary && !actual.is_cloned;
+    }
+
     bool same_presentation_contract(
       const std::optional<target_state_t> &left,
       const std::optional<target_state_t> &right
@@ -904,6 +917,17 @@ namespace ar_glasses {
              left->hdr.supported == right->hdr.supported &&
              left->hdr.active == right->hdr.active &&
              left->hdr.limited_by_policy == right->hdr.limited_by_policy;
+    }
+
+    bool can_re_isolate_local_session(
+      const std::optional<target_state_t> &left,
+      const std::optional<target_state_t> &right,
+      bool transition_presenter_paused
+    ) {
+      // A failed placement/color verification pauses the presenter. The next retained update
+      // must run full mode/color repair; repeating placement alone cannot repair source HDR.
+      return left && right && !transition_presenter_paused &&
+             same_presentation_contract(left, right);
     }
 
     bool contains_case_insensitive(std::wstring_view haystack, std::wstring_view needle) {
@@ -3306,7 +3330,7 @@ namespace ar_glasses {
         return presented_frames_ && presented_frames_->load(std::memory_order_relaxed) >= 60;
       }
 
-      std::optional<target_state_t> re_isolate_target() {
+      std::optional<target_state_t> re_isolate_target(const target_state_t &expected_target) {
         auto source = refresh_virtual_display_reference();
         if (!source) {
           return std::nullopt;
@@ -3317,14 +3341,18 @@ namespace ar_glasses {
           if (!platf::primary_display::promote(source->device_path, true)) {
             return std::nullopt;
           }
-          source = refresh_virtual_display_reference();
-          if (!source) {
-            return std::nullopt;
-          }
         }
         const auto target = exclusive_ ? find_target(target_device_path_) :
                                          isolate_physical_output(source->gdi_name, target_device_path_, original_target_rect_);
-        if (!target) {
+        if (!target || !presentation_target_contract_matches(expected_target, *target)) {
+          return std::nullopt;
+        }
+        source = refresh_virtual_display_reference();
+        if (!source) {
+          return std::nullopt;
+        }
+        const auto source_hdr = VDISPLAY::queryDisplayHDRByName(source->gdi_name.c_str());
+        if (!source_hdr || *source_hdr != virtual_hdr_active_ || (virtual_hdr_active_ && !target->hdr.active)) {
           return std::nullopt;
         }
         if (!live_target_) {
@@ -3340,7 +3368,7 @@ namespace ar_glasses {
       bool final_presentation_contract_matches(const target_state_t &expected, const target_state_t &actual) const {
         // Positions and GDI names may change during final promotion; mode, adapter and color may
         // not. In particular, never start a presenter from the pre-transaction HDR observation.
-        if (actual.device_path != expected.device_path || !same_luid(actual.adapter_id, expected.adapter_id) || actual.mode != expected.mode || actual.refresh_millihz != expected.refresh_millihz || actual.rect.right - actual.rect.left != expected.rect.right - expected.rect.left || actual.rect.bottom - actual.rect.top != expected.rect.bottom - expected.rect.top || actual.hdr.active != expected.hdr.active || actual.is_cloned || (exclusive_ && actual.is_primary)) {
+        if (!presentation_target_contract_matches(expected, actual)) {
           return false;
         }
         const auto source_hdr = VDISPLAY::queryDisplayHDRByName(virtual_display_name_.c_str());
@@ -3856,13 +3884,13 @@ namespace ar_glasses {
           }
 
           if (pending != applied_ && now - pending_since >= topology_debounce) {
-            if (pending && applied_ && same_presentation_contract(pending, applied_)) {
+            if (can_re_isolate_local_session(pending, applied_, transition_presenter_paused_)) {
               if (session_) {
                 if (now < retry_after_) {
                   std::this_thread::sleep_for(topology_poll_interval);
                   continue;
                 }
-                const auto isolated = session_->re_isolate_target();
+                const auto isolated = session_->re_isolate_target(*pending);
                 if (!isolated) {
                   session_->pause_presenter(pending);
                   transition_presenter_paused_ = true;
@@ -3878,15 +3906,6 @@ namespace ar_glasses {
                   pending = isolated;
                   pending_since = now;
                   applied_ = pending;
-                  if (transition_presenter_paused_) {
-                    transition_presenter_paused_ = false;
-                    if (detail::local_presenter_should_run(transition_presenter_paused_, wear_presenter_paused_)) {
-                      session_->resume_presenter(*isolated);
-                      session_stability_confirmed_ = false;
-                      arm_presenter_retry();
-                    }
-                    incompatible_transition_started_.reset();
-                  }
                   BOOST_LOG(info) << "AR display position changed; restored physical-output isolation without recreating its virtual desktop."sv;
                 }
               } else {
@@ -4144,12 +4163,8 @@ namespace ar_glasses {
     }
   }
 
-  bool detail::local_session_can_reconfigure_for_test(
-    const local_session_contract_t &before,
-    const local_session_contract_t &after,
-    bool exclusive
-  ) {
-    auto make_target = [](const local_session_contract_t &contract) {
+  namespace {
+    target_state_t make_test_target(const detail::local_session_contract_t &contract) {
       target_state_t target;
       target.device_path = contract.device_path;
       target.adapter_id = contract.adapter_id;
@@ -4160,9 +4175,33 @@ namespace ar_glasses {
       target.hdr.limited_by_policy = contract.hdr_limited_by_policy;
       target.is_primary = contract.is_primary;
       target.is_cloned = contract.is_cloned;
+      target.rect = contract.rect;
+      target.refresh_millihz = contract.refresh_millihz;
       return target;
-    };
-    return can_reconfigure_local_session(make_target(before), make_target(after), exclusive);
+    }
+  }  // namespace
+
+  bool detail::local_session_can_reconfigure_for_test(
+    const local_session_contract_t &before,
+    const local_session_contract_t &after,
+    bool exclusive
+  ) {
+    return can_reconfigure_local_session(make_test_target(before), make_test_target(after), exclusive);
+  }
+
+  bool detail::local_presenter_target_contract_matches_for_test(
+    const local_session_contract_t &expected,
+    const local_session_contract_t &actual
+  ) {
+    return presentation_target_contract_matches(make_test_target(expected), make_test_target(actual));
+  }
+
+  bool detail::local_session_can_re_isolate_for_test(
+    const local_session_contract_t &before,
+    const local_session_contract_t &after,
+    bool transition_presenter_paused
+  ) {
+    return can_re_isolate_local_session(make_test_target(before), make_test_target(after), transition_presenter_paused);
   }
 
   bool detail::retirement_identity_matches_for_test(

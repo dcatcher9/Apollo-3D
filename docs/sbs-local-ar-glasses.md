@@ -165,6 +165,16 @@ Windows normalization cannot strand the ordinary monitors. If the glasses have d
 3D skips that absent path, verifies the remaining ordinary-display restore, and clears the completed
 recovery record; a later glasses reconnect starts from a fresh baseline.
 
+The exclusive layout has one owner and uses Windows' native temporary
+[`SetDisplayConfig`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setdisplayconfig)
+operation to activate the exact source/sink paths. The recovery journal records the pre-session
+layout because Windows' generic database restore chooses the last saved layout for the monitors
+currently connected, which may differ after a hardware mode change. Removing the glasses from
+the desktop while continuing scanout would instead require a
+[specialized-display compositor](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/specialized-monitors-compositor)
+and a different presentation path. The desktop-swapchain implementation therefore keeps the glasses
+active and confines the cursor to the virtual source.
+
 Extended mode atomically updates a small recovery journal beside the active `sunshine.conf` before
 attaching a virtual source or moving the physical output. The journal keeps one entry per exact PnP
 target. A pending transaction owns only its exact requested rectangle; confirmed prior Sunshine 3D
@@ -191,9 +201,24 @@ setting is enabled) also continue in SDR instead of entering a create/remove ret
 While a captured source has pending pipeline construction, depth completion, conversion, or a busy final presentation,
 the local owner limits capture/pacing waits to 5 ms and yields the capture-device lock for 1 ms
 after a timeout. It then retries the retained work even if the desktop never changes again.
-Completion checks remain nonblocking on that same owner thread; retrying a busy Present does not
-reconvert its pixels. Once the work is presented, ordinary idle capture resumes. Remote capture
-keeps its existing idle timeout. These are scheduling bounds, not a GPU completion-time guarantee.
+An early successful capture starts a fresh capture pacing group instead of advancing a full nominal
+frame interval, so cursor updates cannot accumulate a long sleep when pending work clears. Once the
+work is presented, ordinary idle capture resumes. Remote capture keeps its existing idle timeout.
+
+The local presenter owns a steady-clock refresh grid, separate from capture/content identity. In
+3D it supplies that grid's upcoming deadline to the shared bounded same-frame completion policy
+documented in [Host SBS](host-sbs.md#frame-attribution-and-failure-behavior). This lets a fast depth
+transaction finish within the current presentation budget instead of always waiting for a later
+display cycle. The grid adds no second pacing wait: DXGI's single-frame latency gate remains the
+drawing gate, and 2D retains its direct presentation path. Early captures do not advance the grid.
+A busy Present retains both its acquired DXGI slot and its original deadline; retries neither acquire
+another slot nor renew the depth budget. Already-converted pixels are retried directly, with late
+pipeline notifications left armed for the next conversion. A newer source may replace those pixels
+without extending the active deadline. These are scheduling bounds, not a GPU completion-time guarantee.
+
+With diagnostics enabled, presenter statistics distinguish latency-gate retries from busy Present
+calls. The shared SBS cadence statistics report matched-frame age and same-frame completion outcomes;
+presenter output FPS alone does not measure cursor-to-display latency.
 
 The local path avoids an RGB-to-YUV encode/decode round trip. SDR uses a BGRA8 Rec.709 swapchain.
 When both outputs have stably entered HDR, Sunshine 3D captures linear FP16 scRGB and presents it through

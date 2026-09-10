@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <optional>
 
 namespace platf::dxgi::detail {
 
@@ -23,6 +24,40 @@ namespace platf::dxgi::detail {
     const auto frame_seconds = std::chrono::duration<long double> {frame_time};
     return std::chrono::duration_cast<std::chrono::nanoseconds>(current_time - frame_seconds);
   }
+
+  /** Local presentation owns a refresh grid independently of captured pixel timestamps.
+   * DXGI's latency handle still controls when drawing may start; this grid only budgets the
+   * shared bounded depth-completion query. Early captures cannot advance it, and a busy output
+   * keeps its original deadline even when a newer source replaces its pixels.
+   */
+  class local_presenter_schedule_t {
+  public:
+    explicit local_presenter_schedule_t(int refresh_millihz):
+        interval_(std::chrono::nanoseconds {1'000'000'000'000LL / std::max(1000, refresh_millihz)}) {
+    }
+
+    std::chrono::steady_clock::time_point begin_frame(std::chrono::steady_clock::time_point now) {
+      if (!active_target_) {
+        if (!next_target_) {
+          next_target_ = now + interval_;
+        } else if (*next_target_ <= now) {
+          // Skip expired slots without drifting the refresh grid or accumulating frame debt.
+          next_target_ = now + interval_ - (now - *next_target_) % interval_;
+        }
+        active_target_ = next_target_;
+      }
+      return *active_target_;
+    }
+
+    void record_presented() noexcept {
+      active_target_.reset();
+    }
+
+  private:
+    std::chrono::steady_clock::duration interval_;
+    std::optional<std::chrono::steady_clock::time_point> next_target_;
+    std::optional<std::chrono::steady_clock::time_point> active_target_;
+  };
 
   /** Retain and retry the newest local-presenter source without imposing a minimum-FPS loop.
    *
@@ -59,13 +94,22 @@ namespace platf::dxgi::detail {
       const bool depth_pipeline_ready,
       const bool conversion_poll_pending
     ) const noexcept {
-      return has_retained_source &&
+      return has_retained_source && phase_ != phase_e::presentation_pending &&
              (phase_ == phase_e::conversion_pending || depth_pipeline_ready ||
               conversion_poll_pending);
     }
 
+    [[nodiscard]] constexpr bool needs_presentation_slot() const noexcept {
+      return !slot_acquired_;
+    }
+
+    constexpr void record_slot_acquired() noexcept {
+      slot_acquired_ = true;
+    }
+
     constexpr void record_presented() noexcept {
       phase_ = phase_e::idle;
+      slot_acquired_ = false;
     }
 
     [[nodiscard]] constexpr bool presentation_pending() const noexcept {
@@ -84,6 +128,7 @@ namespace platf::dxgi::detail {
     };
 
     phase_e phase_ = phase_e::idle;
+    bool slot_acquired_ = false;
   };
 
   struct capture_wait_policy_t {
@@ -105,6 +150,14 @@ namespace platf::dxgi::detail {
       return pending_local_work ?
                std::min(requested, std::chrono::steady_clock::duration {source_timeout()}) :
                requested;
+    }
+
+    [[nodiscard]] constexpr bool rebase_after_pacing_snapshot(
+      const std::chrono::steady_clock::duration requested
+    ) const noexcept {
+      // A successful early source probe is not a complete nominal frame interval. Counting it
+      // against the old group would accumulate future pacing debt while the cursor is moving.
+      return pacing_sleep(requested) < requested;
     }
 
     [[nodiscard]] constexpr bool retry_after_pacing_timeout() const noexcept {

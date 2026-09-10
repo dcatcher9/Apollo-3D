@@ -88,4 +88,44 @@ namespace {
     EXPECT_EQ(wait.pacing_sleep(-1ms), -1ms);
     EXPECT_EQ(wait.pacing_sleep(1ms), 1ms);
   }
+
+  TEST(WindowsLocalPresenterTimingTest, MovingCursorDuringPendingWorkDoesNotAccumulateFutureSleep) {
+    constexpr auto frame_interval = std::chrono::nanoseconds {1s} / 60;
+    const capture_wait_policy_t pending {true};
+    const capture_wait_policy_t idle {};
+    auto now = std::chrono::steady_clock::time_point {};
+    auto group_start = now;
+    std::uint32_t group_frames = 1;
+
+    // A continuously moving cursor can satisfy every short source probe before a 60 Hz frame
+    // is due. After one second of these successful probes, completing depth must not reveal
+    // seconds of nominal frame intervals counted ahead of the actual capture timeline.
+    for (int cursor_update = 0; cursor_update < 200; ++cursor_update) {
+      const auto requested_sleep = group_start + group_frames * frame_interval - now;
+      now += pending.pacing_sleep(requested_sleep);
+      if (pending.rebase_after_pacing_snapshot(requested_sleep)) {
+        group_start = now;
+        group_frames = 1;
+      } else {
+        ++group_frames;
+      }
+    }
+
+    EXPECT_EQ(now.time_since_epoch(), 1s);
+    EXPECT_EQ(idle.pacing_sleep(group_start + group_frames * frame_interval - now), frame_interval);
+  }
+
+  TEST(WindowsLocalPresenterTimingTest, OnlyShortenedLocalPacingProbesRebaseTheGroup) {
+    const capture_wait_policy_t pending {true};
+    EXPECT_TRUE(pending.rebase_after_pacing_snapshot(16ms));
+    EXPECT_TRUE(pending.rebase_after_pacing_snapshot(5ms + 1ns));
+    EXPECT_FALSE(pending.rebase_after_pacing_snapshot(5ms));
+    EXPECT_FALSE(pending.rebase_after_pacing_snapshot(1ms));
+    EXPECT_FALSE(pending.rebase_after_pacing_snapshot(-1ms));
+
+    // Remote capture and local idle capture preserve their original fractional-rate group.
+    const capture_wait_policy_t ordinary {};
+    EXPECT_FALSE(ordinary.rebase_after_pacing_snapshot(16ms));
+    EXPECT_FALSE(ordinary.rebase_after_pacing_snapshot(1s));
+  }
 }  // namespace

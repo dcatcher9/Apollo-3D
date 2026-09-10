@@ -610,7 +610,8 @@ namespace platf::dxgi {
       platf::img_t &img,
       ID3D11Texture2D *target_texture,
       ID3D11RenderTargetView *target,
-      bool target_is_linear
+      bool target_is_linear,
+      const std::optional<std::chrono::steady_clock::time_point> presentation_target
     ) {
       rgb_present_texture = target_texture;
       rgb_present_target = target;
@@ -620,7 +621,7 @@ namespace platf::dxgi {
         rgb_present_target = nullptr;
         rgb_present_target_is_linear = false;
       });
-      return convert(img);
+      return convert(img, presentation_target);
     }
 
     bool needs_conversion_poll() const {
@@ -7570,8 +7571,11 @@ namespace platf::dxgi {
     std::uint64_t captured_frames = 0;
     std::uint64_t presented_frames = 0;
     std::uint64_t busy_present_retries = 0;
+    std::uint64_t latency_wait_retries = 0;
+    std::uint64_t present_call_retries = 0;
     std::shared_ptr<platf::img_t> retained_presenter_source;
     detail::local_presenter_retry_state_t presenter_retry;
+    detail::local_presenter_schedule_t presenter_schedule {config.target_refresh_millihz};
     auto present_stats_started = diagnostics_enabled ? std::chrono::steady_clock::now() :
                                                        std::chrono::steady_clock::time_point {};
     auto log_present_stats = [&]() {
@@ -7587,10 +7591,14 @@ namespace platf::dxgi {
       BOOST_LOG(info) << "Local AR presenter stats: captured="sv << captured_frames
                       << " presented="sv << presented_frames
                       << " busy_retries="sv << busy_present_retries
+                      << " latency_wait_retries="sv << latency_wait_retries
+                      << " present_call_retries="sv << present_call_retries
                       << " output_fps="sv << (presented_frames / elapsed_seconds);
       captured_frames = 0;
       presented_frames = 0;
       busy_present_retries = 0;
+      latency_wait_retries = 0;
+      present_call_retries = 0;
       present_stats_started = now;
     };
     auto push_image = [&](std::shared_ptr<platf::img_t> &&image, bool frame_captured) {
@@ -7651,18 +7659,28 @@ namespace platf::dxgi {
       // Never let a slower physical output back-pressure capture, asynchronous depth processing,
       // or the desktop being interacted with. Retain only the newest source and retry it on the
       // next capture timeout if DWM has not retired the previous flip yet.
-      const auto frame_latency_status = WaitForSingleObject(frame_latency_waitable, 0);
-      if (frame_latency_status == WAIT_FAILED) {
-        BOOST_LOG(error) << "Local AR presenter frame-latency wait failed: "sv << GetLastError();
-        return false;
-      }
-      if (frame_latency_status != WAIT_OBJECT_0) {
-        if (diagnostics_enabled) {
-          ++busy_present_retries;
-          log_present_stats();
+      // Acquire one slot for the complete draw/Present transaction. A nonblocking Present retry
+      // must not wait for another slot before submitting the frame that owns this one.
+      if (presenter_retry.needs_presentation_slot()) {
+        const auto frame_latency_status = WaitForSingleObject(frame_latency_waitable, 0);
+        if (frame_latency_status == WAIT_FAILED) {
+          BOOST_LOG(error) << "Local AR presenter frame-latency wait failed: "sv << GetLastError();
+          return false;
         }
-        return true;
+        if (frame_latency_status != WAIT_OBJECT_0) {
+          if (diagnostics_enabled) {
+            ++busy_present_retries;
+            ++latency_wait_retries;
+            log_present_stats();
+          }
+          return true;
+        }
+        presenter_retry.record_slot_acquired();
       }
+
+      const auto presentation_target = config.sbs_mode == ::video::SBS_AI ?
+                                         std::optional {presenter_schedule.begin_frame(std::chrono::steady_clock::now())} :
+                                         std::nullopt;
 
       const bool conversion_required = presenter_retry.should_convert(
         static_cast<bool>(retained_presenter_source),
@@ -7678,12 +7696,7 @@ namespace platf::dxgi {
           // ready during conversion must remain armed for the next static-source timeout.
           depth_pipeline_ready_event->pop(0ms);
         }
-        if (converter.convert_rgb(
-              *retained_presenter_source,
-              backbuffer.Get(),
-              backbuffer_rtv.Get(),
-              config.hdr
-            )) {
+        if (converter.convert_rgb(*retained_presenter_source, backbuffer.Get(), backbuffer_rtv.Get(), config.hdr, presentation_target)) {
           BOOST_LOG(error) << "Local AR presenter failed to convert a captured frame."sv;
           return false;
         }
@@ -7701,6 +7714,7 @@ namespace platf::dxgi {
       if (status == DXGI_ERROR_WAS_STILL_DRAWING) {
         if (diagnostics_enabled) {
           ++busy_present_retries;
+          ++present_call_retries;
           log_present_stats();
         }
         return true;
@@ -7722,6 +7736,7 @@ namespace platf::dxgi {
         config.presented_frames->fetch_add(1, std::memory_order_relaxed);
       }
       presenter_retry.record_presented();
+      presenter_schedule.record_presented();
       return true;
     };
 

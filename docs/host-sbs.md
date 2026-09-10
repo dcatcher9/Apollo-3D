@@ -1056,15 +1056,19 @@ DAV2, any GPU-selected OCR child, and every participating interop-unmap tail.
 The same-frame completion-status poll is separate from adaptive detection and branch selection.
 After one current matched frame has successfully enqueued, production gives its force-infer joined
 DAV2/OCR unit or GPU-undecided conditional root one immediate nonblocking completion query. It may repeat
-that status query only when the encode loop's next cadence target leaves at least `0.25 ms` of useful
-slack after reserving `3 ms` for completed-depth postprocess, SBS warp/output, and NVENC submission.
+that status query only when the output owner's next cadence target leaves at least `0.25 ms` of useful
+slack after reserving `3 ms` for completed-depth postprocess, SBS warp/output, and NVENC submission or
+local presentation. Remote streaming uses the encode schedule; local AR uses its presenter-owned
+steady-clock refresh grid. The local grid advances with elapsed time, not cursor captures, and a
+busy output retains its original deadline until Present succeeds. It adds no separate presentation
+wait and does not change 2D passthrough.
 Repeated queries use all of that post-reserve cadence slack up to an absolute `8 ms` wait cap, with
 an independent query-count fuse. Thus a low-rate stream may spend its real extra cadence headroom,
 while a late/high-rate frame remains cadence-limited and every stream retains a bounded latency.
 After the immediate query, queries are spaced by at
 least `50 us` of yielded steady-clock time so the fuse cannot exhaust before the GPU has a useful
 opportunity to progress. Capture and content timestamps remain pixel identities and are never
-interpreted as an encode deadline. Force-infer work uses joined non-timing CUDA events recorded
+interpreted as an output deadline. Force-infer work uses joined non-timing CUDA events recorded
 after the conditional root and every unmap tail; GPU-undecided work uses the same event even though
 the host never learns which children ran. Between repeated queries the encode thread yields.
 An event-ready finish submits D3D11 postprocess behind the already-issued unmaps without

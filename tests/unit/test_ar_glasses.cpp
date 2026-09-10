@@ -879,6 +879,72 @@ TEST(ArGlassesModeTransition, ExclusiveSessionRepairsATemporarilyPrimarySink) {
   EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, after, true));
 }
 
+TEST(ArGlassesModeTransition, PlacementOnlyUpdatesKeepThePresentationContract) {
+  ar_glasses::detail::local_session_contract_t expected;
+  expected.device_path = LR"(\\?\DISPLAY#TCL03D4#test)";
+  expected.adapter_id.LowPart = 42;
+  expected.mode = ar_glasses::presentation_mode_e::normal;
+  expected.rect = {1920, 0, 3840, 1080};
+  expected.refresh_millihz = 120000;
+
+  auto placed = expected;
+  placed.rect = {-1920, 0, 0, 1080};
+  EXPECT_TRUE(ar_glasses::detail::local_presenter_target_contract_matches_for_test(expected, placed));
+
+  // Even a repairable primary sink cannot become a presenter target until promotion succeeds.
+  placed.is_primary = true;
+  EXPECT_FALSE(ar_glasses::detail::local_presenter_target_contract_matches_for_test(expected, placed));
+  placed = expected;
+  placed.is_cloned = true;
+  EXPECT_FALSE(ar_glasses::detail::local_presenter_target_contract_matches_for_test(expected, placed));
+}
+
+TEST(ArGlassesModeTransition, PlacementCannotAdoptAConcurrentModeOrColorChange) {
+  ar_glasses::detail::local_session_contract_t expected;
+  expected.device_path = LR"(\\?\DISPLAY#TCL03D4#test)";
+  expected.adapter_id.LowPart = 42;
+  expected.mode = ar_glasses::presentation_mode_e::normal;
+  expected.rect = {1920, 0, 3840, 1080};
+  expected.refresh_millihz = 120000;
+
+  auto changed = expected;
+  changed.mode = ar_glasses::presentation_mode_e::sbs_ai;
+  changed.rect.right = changed.rect.left + 3840;
+  changed.refresh_millihz = 60000;
+  EXPECT_FALSE(ar_glasses::detail::local_presenter_target_contract_matches_for_test(expected, changed));
+
+  changed = expected;
+  changed.refresh_millihz = 60000;
+  EXPECT_FALSE(ar_glasses::detail::local_presenter_target_contract_matches_for_test(expected, changed));
+  changed = expected;
+  changed.hdr_active = true;
+  EXPECT_FALSE(ar_glasses::detail::local_presenter_target_contract_matches_for_test(expected, changed));
+  changed = expected;
+  changed.adapter_id.LowPart = 43;
+  EXPECT_FALSE(ar_glasses::detail::local_presenter_target_contract_matches_for_test(expected, changed));
+  changed = expected;
+  changed.device_path = LR"(\\?\DISPLAY#OTHER#test)";
+  EXPECT_FALSE(ar_glasses::detail::local_presenter_target_contract_matches_for_test(expected, changed));
+}
+
+TEST(ArGlassesModeTransition, FailedPlacementRoutesToRetainedModeAndColorRepair) {
+  ar_glasses::detail::local_session_contract_t before;
+  before.device_path = LR"(\\?\DISPLAY#TCL03D4#test)";
+  before.adapter_id.LowPart = 42;
+  before.mode = ar_glasses::presentation_mode_e::normal;
+  before.rect = {1920, 0, 3840, 1080};
+
+  auto moved = before;
+  moved.rect = {-1920, 0, 0, 1080};
+  EXPECT_TRUE(ar_glasses::detail::local_session_can_re_isolate_for_test(before, moved, false));
+
+  // The sink can remain unchanged when placement discovers mismatched source HDR. Pausing on
+  // that failure must select full retained reconfiguration on the next controller retry.
+  EXPECT_FALSE(ar_glasses::detail::local_session_can_re_isolate_for_test(before, moved, true));
+  EXPECT_TRUE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, moved, false));
+  EXPECT_TRUE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, moved, true));
+}
+
 TEST(ArGlassesModeTransition, RetirementDoesNotFollowAReusedPhysicalTargetId) {
   ar_glasses::detail::virtual_display_identity_contract_t retiring;
   retiring.adapter_id.LowPart = 42;

@@ -162,6 +162,8 @@ namespace ar_glasses {
       bool hdr_limited_by_policy = false;
       bool is_primary = false;
       bool is_cloned = false;
+      RECT rect {};
+      int refresh_millihz = 60000;
     };
 
     /** Return whether a mode transition may retain the existing local SudoVDA desktop.
@@ -171,6 +173,19 @@ namespace ar_glasses {
       const local_session_contract_t &before,
       const local_session_contract_t &after,
       bool exclusive
+    );
+
+    /** Reject a new presentation generation after a placement-only topology update. */
+    bool local_presenter_target_contract_matches_for_test(
+      const local_session_contract_t &expected,
+      const local_session_contract_t &actual
+    );
+
+    /** Choose placement-only recovery only before a failed validation pauses the presenter. */
+    bool local_session_can_re_isolate_for_test(
+      const local_session_contract_t &before,
+      const local_session_contract_t &after,
+      bool transition_presenter_paused
     );
 
     struct virtual_display_identity_contract_t {

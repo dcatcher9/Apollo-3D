@@ -497,6 +497,80 @@ namespace {
     }
   }
 
+  TEST(WindowsLocalPresenterScheduleTest, EarlySourcesShareTheExistingRefreshBudget) {
+    using namespace std::chrono_literals;
+    using namespace platf::dxgi::detail;
+    const std::chrono::steady_clock::time_point start {};
+    local_presenter_schedule_t schedule {60000};
+    const auto first = schedule.begin_frame(start);
+    EXPECT_EQ(first, start + 16'666'666ns);
+    EXPECT_TRUE(host_sbs_same_frame_poll_plan(true, false, first, start).eligible);
+
+    // Multiple cursor sources in one display interval never buy another full-frame budget.
+    for (int offset = 1; offset <= 16; ++offset) {
+      schedule.record_presented();
+      EXPECT_EQ(schedule.begin_frame(start + offset * 1ms), first);
+    }
+    EXPECT_FALSE(host_sbs_same_frame_poll_plan(true, false, first, start + 14ms).eligible);
+    schedule.record_presented();
+    const auto second = schedule.begin_frame(start + 17ms);
+    EXPECT_EQ(second, start + 33'333'332ns);
+    EXPECT_TRUE(host_sbs_same_frame_poll_plan(true, false, second, start + 17ms).eligible);
+  }
+
+  TEST(WindowsLocalPresenterScheduleTest, BusyOutputNeverRenewsItsExpiredDeadline) {
+    using namespace std::chrono_literals;
+    using namespace platf::dxgi::detail;
+    const std::chrono::steady_clock::time_point start {};
+    local_presenter_schedule_t schedule {60000};
+    const auto target = schedule.begin_frame(start);
+    for (int retry = 1; retry <= 100; ++retry) {
+      EXPECT_EQ(schedule.begin_frame(start + retry * 5ms), target);
+    }
+    EXPECT_FALSE(host_sbs_same_frame_poll_plan(true, false, target, start + 500ms).eligible);
+    schedule.record_presented();
+    const auto resumed = schedule.begin_frame(start + 500ms);
+    EXPECT_GT(resumed, start + 500ms);
+    EXPECT_LE(resumed, start + 500ms + 16'666'666ns);
+  }
+
+  TEST(WindowsLocalPresenterScheduleTest, FractionalRefreshAndLongIdleStayOnTheClockGrid) {
+    using namespace std::chrono_literals;
+    using namespace platf::dxgi::detail;
+    const std::chrono::steady_clock::time_point start {};
+    local_presenter_schedule_t schedule {120013};
+    const auto interval = std::chrono::nanoseconds {1'000'000'000'000LL / 120013};
+    EXPECT_EQ(schedule.begin_frame(start), start + interval);
+    schedule.record_presented();
+    const auto resumed = schedule.begin_frame(start + 1h);
+    EXPECT_GT(resumed, start + 1h);
+    EXPECT_LE(resumed, start + 1h + interval);
+    EXPECT_EQ((resumed - start) % interval, 0ns);
+  }
+
+  TEST(WindowsLocalPresenterRetryTest, BusyOutputKeepsItsSlotAndDoesNotReconvertForDepthPolling) {
+    platf::dxgi::detail::local_presenter_retry_state_t state;
+    state.observe_source();
+    EXPECT_TRUE(state.needs_presentation_slot());
+    state.record_slot_acquired();
+    state.record_converted();
+
+    // A failed nonblocking Present still owns its writable slot and completed pixels, even if
+    // depth has finished or pipeline construction raises another notification in the meantime.
+    for (int retry = 0; retry < 4; ++retry) {
+      EXPECT_FALSE(state.needs_presentation_slot());
+      EXPECT_TRUE(state.should_process(true, true, true));
+      EXPECT_FALSE(state.should_convert(true, true, true));
+    }
+    state.observe_source();
+    EXPECT_FALSE(state.needs_presentation_slot());
+    EXPECT_TRUE(state.should_convert(true, true, true));
+    state.record_converted();
+    state.record_presented();
+    EXPECT_TRUE(state.needs_presentation_slot());
+    EXPECT_TRUE(state.should_convert(true, true, true));
+  }
+
   TEST(WindowsLocalPresenterRetryTest, BusyFinalSourceSurvivesCaptureTimeout) {
     platf::dxgi::detail::local_presenter_retry_state_t state;
     EXPECT_FALSE(state.should_process(false, false, false));

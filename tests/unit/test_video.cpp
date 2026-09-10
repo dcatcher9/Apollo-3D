@@ -7764,6 +7764,7 @@ TEST(LocalPresenterLifecycleSourceTests, RetainsFinalSourceAndDoesNotSwallowLate
   const auto process_decision = callback.find("presenter_retry.should_process(", ready_sample);
   const auto latency_wait = callback.find("WaitForSingleObject(frame_latency_waitable, 0)", process_decision);
   const auto ready_pop = callback.find("depth_pipeline_ready_event->pop(0ms);", latency_wait);
+  const auto schedule = callback.find("presenter_schedule.begin_frame(std::chrono::steady_clock::now())", latency_wait);
   const auto convert = callback.find("converter.convert_rgb(", ready_pop);
   const auto converted = callback.find("presenter_retry.record_converted();", convert);
   const auto present = callback.find("swapchain->Present1(", converted);
@@ -7775,6 +7776,7 @@ TEST(LocalPresenterLifecycleSourceTests, RetainsFinalSourceAndDoesNotSwallowLate
   ASSERT_NE(process_decision, std::string::npos);
   ASSERT_NE(latency_wait, std::string::npos);
   ASSERT_NE(ready_pop, std::string::npos);
+  ASSERT_NE(schedule, std::string::npos);
   ASSERT_NE(convert, std::string::npos);
   ASSERT_NE(converted, std::string::npos);
   ASSERT_NE(present, std::string::npos);
@@ -7786,6 +7788,15 @@ TEST(LocalPresenterLifecycleSourceTests, RetainsFinalSourceAndDoesNotSwallowLate
   EXPECT_LT(process_decision, latency_wait);
   EXPECT_LT(latency_wait, ready_pop)
     << "A latency-busy return must leave the sampled notification queued.";
+  EXPECT_LT(latency_wait, schedule);
+  EXPECT_LT(schedule, convert);
+  EXPECT_NE(callback.substr(convert, converted - convert).find("presentation_target"), std::string::npos)
+    << "Local 3D must pass its owner cadence deadline to conversion.";
+  const auto rgb_begin = display.find("int convert_rgb(");
+  const auto rgb_end = display.find("bool needs_conversion_poll()", rgb_begin);
+  ASSERT_NE(rgb_begin, std::string::npos);
+  ASSERT_NE(rgb_end, std::string::npos);
+  EXPECT_NE(display.substr(rgb_begin, rgb_end - rgb_begin).find("return convert(img, presentation_target);"), std::string::npos);
   EXPECT_LT(ready_pop, convert);
   EXPECT_LT(convert, converted);
   EXPECT_LT(converted, present);
