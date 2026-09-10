@@ -1,6 +1,7 @@
 #include "virtual_display.h"
 
 #include "display_config.h"
+#include "src/logging.h"
 
 #include <algorithm>
 #include <chrono>
@@ -15,6 +16,7 @@
 #include <mutex>
 #include <optional>
 #include <setupapi.h>
+#include <sstream>
 #include <thread>
 #include <tuple>
 #include <vector>
@@ -1332,6 +1334,41 @@ namespace {
     std::vector<survivor_color_state_t> survivor_color_states;
   };
 
+  std::string describeDetachSurvivorModes(const detach_snapshot_t &snapshot) {
+    std::ostringstream description;
+    for (std::size_t index = 0; index < snapshot.paths.size(); ++index) {
+      const auto &path = snapshot.paths[index];
+      if ((path.flags & DISPLAYCONFIG_PATH_ACTIVE) == 0) {
+        continue;
+      }
+      const bool virtual_indices =
+        (path.flags & DISPLAYCONFIG_PATH_SUPPORT_VIRTUAL_MODE) != 0;
+      const UINT32 mode_index = virtual_indices ?
+                                  path.sourceInfo.sourceModeInfoIdx :
+                                  path.sourceInfo.modeInfoIdx;
+      description << " [path=" << index
+                  << " source=" << path.sourceInfo.adapterId.HighPart << ':'
+                  << path.sourceInfo.adapterId.LowPart << '/' << path.sourceInfo.id
+                  << " target=" << path.targetInfo.adapterId.HighPart << ':'
+                  << path.targetInfo.adapterId.LowPart << '/' << path.targetInfo.id
+                  << " mode=" << mode_index
+                  << " virtual_indices=" << virtual_indices;
+      if (mode_index < snapshot.modes.size()) {
+        const auto &mode = snapshot.modes[mode_index];
+        description << " mode_identity=" << mode.adapterId.HighPart << ':'
+                    << mode.adapterId.LowPart << '/' << mode.id
+                    << " type=" << mode.infoType;
+        if (mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE) {
+          description << " rect=" << mode.sourceMode.position.x << ','
+                      << mode.sourceMode.position.y << '+' << mode.sourceMode.width
+                      << 'x' << mode.sourceMode.height;
+        }
+      }
+      description << ']';
+    }
+    return description.str();
+  }
+
   std::optional<detach_snapshot_t> buildVirtualDisplayDetachSnapshot(
     const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
     std::wstring_view learnedDevicePath
@@ -1348,12 +1385,25 @@ namespace {
         )) {
       snapshot.set_display_config_awareness_flags =
         SDC_VIRTUAL_MODE_AWARE | SDC_VIRTUAL_REFRESH_RATE_AWARE;
-    } else if ((refresh_aware_status == ERROR_INVALID_PARAMETER ||
-                refresh_aware_status == ERROR_NOT_SUPPORTED) &&
-               queryDisplayConfig(base_query_flags, snapshot.paths, snapshot.modes)) {
+    } else if (refresh_aware_status == ERROR_INVALID_PARAMETER || refresh_aware_status == ERROR_NOT_SUPPORTED) {
       // Windows 10 understands virtual modes but not virtual refresh-rate awareness.
+      LONG fallback_status = ERROR_SUCCESS;
+      if (!queryDisplayConfig(
+            base_query_flags,
+            snapshot.paths,
+            snapshot.modes,
+            &fallback_status
+          )) {
+        BOOST_LOG(warning) << "Virtual-display detach snapshot: CCD query failed (flags "
+                           << base_query_flags << ", status " << fallback_status
+                           << "; refresh-aware status " << refresh_aware_status << ").";
+        return std::nullopt;
+      }
       snapshot.set_display_config_awareness_flags = SDC_VIRTUAL_MODE_AWARE;
     } else {
+      BOOST_LOG(warning) << "Virtual-display detach snapshot: CCD query failed (flags "
+                         << (base_query_flags | QDC_VIRTUAL_REFRESH_RATE_AWARE)
+                         << ", status " << refresh_aware_status << ").";
       return std::nullopt;
     }
 
@@ -1365,10 +1415,16 @@ namespace {
       target_name.header.size = sizeof(target_name);
       target_name.header.adapterId = path.targetInfo.adapterId;
       target_name.header.id = path.targetInfo.id;
-      if (DisplayConfigGetDeviceInfo(&target_name.header) != ERROR_SUCCESS ||
-          target_name.monitorDevicePath[0] == L'\0') {
+      const auto target_name_status = DisplayConfigGetDeviceInfo(&target_name.header);
+      if (target_name_status != ERROR_SUCCESS || target_name.monitorDevicePath[0] == L'\0') {
         // A failed target query could be the retiring display after a topology renumber. Treat the
         // whole snapshot as indeterminate instead of detaching a merely similar monitor.
+        BOOST_LOG(warning) << "Virtual-display detach snapshot: target identity lookup failed (adapter "
+                           << path.targetInfo.adapterId.HighPart << ':'
+                           << path.targetInfo.adapterId.LowPart << ", target "
+                           << path.targetInfo.id << ", status " << target_name_status
+                           << ", empty device path "
+                           << (target_name.monitorDevicePath[0] == L'\0') << ").";
         return std::nullopt;
       }
       candidate_device_paths.emplace_back(target_name.monitorDevicePath);
@@ -1383,6 +1439,8 @@ namespace {
     snapshot.state = plan.state;
     if (snapshot.state == detach_plan_e::ready &&
         !rebaseSurvivingSourceModes(snapshot.paths, snapshot.modes)) {
+      BOOST_LOG(warning) << "Virtual-display detach snapshot: surviving source geometry is invalid or disconnected."
+                         << describeDetachSurvivorModes(snapshot);
       return std::nullopt;
     }
     if (snapshot.state == detach_plan_e::ready) {
@@ -1396,6 +1454,10 @@ namespace {
         if (!color_contract) {
           // SetDisplayConfig can change Advanced Color state. Do not mutate a desktop whose
           // surviving target color contract cannot first be captured.
+          BOOST_LOG(warning) << "Virtual-display detach snapshot: could not capture the surviving target's Advanced Color state (adapter "
+                             << path.targetInfo.adapterId.HighPart << ':'
+                             << path.targetInfo.adapterId.LowPart << ", target "
+                             << path.targetInfo.id << ").";
           return std::nullopt;
         }
         snapshot.survivor_color_states.push_back({

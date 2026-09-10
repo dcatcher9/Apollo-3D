@@ -695,8 +695,9 @@ namespace proc {
                               "retrying instead of hot-removing an unverified active path."sv;
         return false;
       case VDISPLAY::desktop_detach_state_e::topology_query_failed:
-        BOOST_LOG(warning) << "Could not query a complete desktop topology before virtual-display "
-                              "removal; retrying instead of hot-removing an unverified active path."sv;
+        BOOST_LOG(warning) << "Could not prepare a verified desktop topology before virtual-display "
+                              "removal; see the detach snapshot diagnostic. Retrying instead of "
+                              "hot-removing an unverified active path."sv;
         return false;
       case VDISPLAY::desktop_detach_state_e::validation_failed:
         BOOST_LOG(warning) << "Windows rejected validation of the temporary virtual-display detach "
