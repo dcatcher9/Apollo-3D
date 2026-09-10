@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="688" viewBox="0 0 960 688" role="img" aria-labelledby="title description">
+<title id="title">Sunshine 3D + Moonlight 3D: where 3D happens</title>
+<desc id="description">Host 3D: a flat picture goes to Sunshine 3D on the PC, which adds AI depth; Moonlight 3D shows stereo on the headset. Client 3D: Sunshine sends the flat picture; Moonlight adds AI depth on the headset. Raw SBS: Sunshine passes through the source&#x27;s authored left and right views, and Moonlight shows them in 3D. In 2D mode, the picture stays flat. Separate PC options are local presentation to connected AR glasses and offline conversion of video into a saved side-by-side file.</desc>
+<rect x="0" y="0" width="960" height="688" rx="18" fill="#101722"/>
+<rect x="30" y="30" width="5" height="54" rx="2" fill="#f0c65b"/>
+<text x="49" y="53" fill="#f1f5fc" font-size="28" font-family="Arial, Helvetica, sans-serif" text-anchor="start" font-weight="700">Sunshine 3D + Moonlight 3D</text>
+<text x="49" y="81" fill="#bccadd" font-size="18" font-family="Arial, Helvetica, sans-serif" text-anchor="start">Choose where a flat picture becomes 3D.</text>
+<text x="256" y="127" fill="#bccadd" font-size="15" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="700">SOURCE</text>
+<text x="504" y="119" fill="#f0c65b" font-size="17" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="700">SUNSHINE 3D</text>
+<text x="504" y="140" fill="#bccadd" font-size="15" font-family="Arial, Helvetica, sans-serif" text-anchor="middle">Windows PC</text>
+<text x="796" y="119" fill="#91c4ff" font-size="17" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="700">MOONLIGHT 3D</text>
+<text x="796" y="140" fill="#bccadd" font-size="15" font-family="Arial, Helvetica, sans-serif" text-anchor="middle">Galaxy XR headset</text>
+<text x="30" y="191" fill="#f1f5fc" font-size="20" font-family="Arial, Helvetica, sans-serif" text-anchor="start" font-weight="700">Host 3D</text>
+<text x="30" y="216" fill="#bccadd" font-size="14" font-family="Arial, Helvetica, sans-serif" text-anchor="start">Depth on PC</text>
+<rect x="173" y="158" width="166" height="80" rx="12" fill="#182332" stroke="#34455c"/>
+<text x="256" y="191" fill="#f1f5fc" font-size="19" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="700">Flat picture</text>
+<text x="256" y="217" fill="#bccadd" font-size="16" font-family="Arial, Helvetica, sans-serif" text-anchor="middle">one view</text>
+<path d="M 349 198 H 375 M 373 193 L 379 198 L 373 203" fill="none" stroke="#bccadd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="392" y="158" width="224" height="80" rx="12" fill="#302b1d" stroke="#f0c65b"/>
+<text x="504" y="191" fill="#f0c65b" font-size="19" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="700">Adds AI depth</text>
+<text x="504" y="217" fill="#bccadd" font-size="16" font-family="Arial, Helvetica, sans-serif" text-anchor="middle">creates stereo</text>
+<path d="M 628 198 H 657 M 655 193 L 661 198 L 655 203" fill="none" stroke="#bccadd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="676" y="158" width="240" height="80" rx="12" fill="#182332" stroke="#34455c"/>
+<text x="796" y="191" fill="#f1f5fc" font-size="19" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="700">Shows 3D</text>
+<text x="796" y="217" fill="#bccadd" font-size="16" font-family="Arial, Helvetica, sans-serif" text-anchor="middle">one view per eye</text>
+<text x="30" y="296" fill="#f1f5fc" font-size="20" font-family="Arial, Helvetica, sans-serif" text-anchor="start" font-weight="700">Client 3D</text>
+<text x="30" y="321" fill="#bccadd" font-size="14" font-family="Arial, Helvetica, sans-serif" text-anchor="start">Depth on headset</text>
+<rect x="173" y="263" width="166" height="80" rx="12" fill="#182332" stroke="#34455c"/>
+<text x="256" y="296" fill="#f1f5fc" font-size="19" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="700">Flat picture</text>
+<text x="256" y="322" fill="#bccadd" font-size="16" font-family="Arial, Helvetica, sans-serif" text-anchor="middle">one view</text>
+<path d="M 349 303 H 375 M 373 298 L 379 303 L 373 308" fill="none" stroke="#bccadd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="392" y="263" width="224" height="80" rx="12" fill="#182332" stroke="#34455c"/>
+<text x="504" y="296" fill="#f1f5fc" font-size="19" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="700">Sends flat video</text>
+<text x="504" y="322" fill="#bccadd" font-size="16" font-family="Arial, Helvetica, sans-serif" text-anchor="middle">one view</text>
+<path d="M 628 303 H 657 M 655 298 L 661 303 L 655 308" fill="none" stroke="#bccadd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="676" y="263" width="240" height="80" rx="12" fill="#1b3149" stroke="#91c4ff"/>
+<text x="796" y="296" fill="#91c4ff" font-size="19" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="700">Adds AI depth</text>
+<text x="796" y="322" fill="#bccadd" font-size="16" font-family="Arial, Helvetica, sans-serif" text-anchor="middle">then shows 3D</text>
+<text x="30" y="401" fill="#f1f5fc" font-size="20" font-family="Arial, Helvetica, sans-serif" text-anchor="start" font-weight="700">Raw SBS</text>
+<text x="30" y="426" fill="#bccadd" font-size="14" font-family="Arial, Helvetica, sans-serif" text-anchor="start">Already in 3D</text>
+<rect x="173" y="368" width="166" height="80" rx="12" fill="#182332" stroke="#34455c"/>
+<text x="256" y="401" fill="#f1f5fc" font-size="19" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="700">Stereo picture</text>
+<text x="256" y="427" fill="#bccadd" font-size="16" font-family="Arial, Helvetica, sans-serif" text-anchor="middle">left + right views</text>
+<path d="M 349 408 H 375 M 373 403 L 379 408 L 373 413" fill="none" stroke="#bccadd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="392" y="368" width="224" height="80" rx="12" fill="#182332" stroke="#34455c"/>
+<text x="504" y="401" fill="#f1f5fc" font-size="19" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="700">Passes stereo</text>
+<text x="504" y="427" fill="#bccadd" font-size="16" font-family="Arial, Helvetica, sans-serif" text-anchor="middle">keeps both views</text>
+<path d="M 628 408 H 657 M 655 403 L 661 408 L 655 413" fill="none" stroke="#bccadd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="676" y="368" width="240" height="80" rx="12" fill="#182332" stroke="#34455c"/>
+<text x="796" y="401" fill="#f1f5fc" font-size="19" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="700">Shows 3D</text>
+<text x="796" y="427" fill="#bccadd" font-size="16" font-family="Arial, Helvetica, sans-serif" text-anchor="middle">one view per eye</text>
+<text x="173" y="477" fill="#bccadd" font-size="15" font-family="Arial, Helvetica, sans-serif" text-anchor="start">SBS = side-by-side: left and right eye views in one video frame.</text>
+<rect x="30" y="497" width="886" height="58" rx="12" fill="#182332" stroke="#34455c"/>
+<text x="48" y="533" fill="#f1f5fc" font-size="20" font-family="Arial, Helvetica, sans-serif" text-anchor="start" font-weight="700">2D</text>
+<text x="111" y="533" fill="#f1f5fc" font-size="17" font-family="Arial, Helvetica, sans-serif" text-anchor="start">Flat picture</text>
+<path d="M 219 527 H 253 M 251 522 L 257 527 L 251 532" fill="none" stroke="#bccadd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="272" y="533" fill="#f1f5fc" font-size="17" font-family="Arial, Helvetica, sans-serif" text-anchor="start">Sunshine sends 2D</text>
+<path d="M 452 527 H 486 M 484 522 L 490 527 L 484 532" fill="none" stroke="#bccadd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="505" y="533" fill="#f1f5fc" font-size="17" font-family="Arial, Helvetica, sans-serif" text-anchor="start">Moonlight shows a flat screen</text>
+<text x="30" y="590" fill="#bccadd" font-size="14" font-family="Arial, Helvetica, sans-serif" text-anchor="start" font-weight="700">MORE OPTIONS ON THE PC</text>
+<rect x="30" y="607" width="432" height="57" rx="10" fill="#182332"/>
+<rect x="478" y="607" width="438" height="57" rx="10" fill="#182332"/>
+<text x="46" y="630" fill="#f1f5fc" font-size="17" font-family="Arial, Helvetica, sans-serif" text-anchor="start" font-weight="700">Local AR glasses</text>
+<text x="46" y="652" fill="#bccadd" font-size="15" font-family="Arial, Helvetica, sans-serif" text-anchor="start">PC to connected glasses: 2D or Host 3D</text>
+<text x="494" y="630" fill="#f1f5fc" font-size="17" font-family="Arial, Helvetica, sans-serif" text-anchor="start" font-weight="700">Offline video conversion</text>
+<text x="494" y="652" fill="#bccadd" font-size="15" font-family="Arial, Helvetica, sans-serif" text-anchor="start">Video file to Host 3D to a saved SBS file</text>
+</svg>
