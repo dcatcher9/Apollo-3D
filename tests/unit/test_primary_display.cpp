@@ -1271,31 +1271,6 @@ TEST(PrimaryDisplayExclusiveCursor, OwnsClipBeforeAnArDisplayCanHotplug) {
   EXPECT_FALSE(clips.back());
 }
 
-TEST(PrimaryDisplayExclusiveCursor, NotificationRefreshAcceptsArHotplugWithoutRewritingJournal) {
-  fake_io_t fake;
-  std::vector<std::optional<cursor_bounds_t>> clips;
-  auto io = fake.io();
-  io.cursor_clip = [&](std::wstring_view identity, std::optional<cursor_bounds_t> bounds) {
-    EXPECT_EQ(identity, L"virtual");
-    clips.push_back(bounds);
-    return true;
-  };
-  manager_t manager(io);
-  ASSERT_TRUE(manager.prepare(true));
-  ASSERT_TRUE(manager.bind_pending(L"virtual"));
-  ASSERT_TRUE(manager.promote(L"virtual", true));
-  ASSERT_TRUE(fake.journal && fake.journal->exclusive_topology);
-  const auto journal_before_hotplug = serialize(*fake.journal);
-
-  // Windows resets ClipCursor when an approved AR target activates. Cursor maintenance follows
-  // the exact live virtual identity without requiring the pre-hotplug topology to remain equal.
-  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"hotplugged-ar", -1920, 0}});
-  ASSERT_TRUE(manager.refresh_active_cursor_clip(L"virtual"));
-  ASSERT_FALSE(clips.empty());
-  EXPECT_EQ(clips.back(), (cursor_bounds_t {0, 0, 1920, 1080}));
-  EXPECT_EQ(serialize(*fake.journal), journal_before_hotplug);
-}
-
 TEST(PrimaryDisplayExclusive, DisplayChangeReDisablesAnOrdinaryBaselineMonitor) {
   fake_io_t fake;
   fake.preserved_exclusive.insert(L"physical-left");

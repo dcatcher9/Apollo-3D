@@ -1938,14 +1938,6 @@ namespace platf::primary_display {
       return io_.cursor_clip(device_path, cursor_bounds_t {source.position.x, source.position.y, static_cast<int>(source.width), static_cast<int>(source.height)});
     }
 
-    bool manager_t::refresh_active_cursor_clip(std::wstring_view device_path) {
-      if (!io_.cursor_clip) {
-        return true;
-      }
-      const auto snapshot = io_.query();
-      return snapshot && clip_cursor_to_display(*snapshot, device_path);
-    }
-
     bool manager_t::reconcile_active_exclusive(std::wstring_view device_path) {
       auto loaded = io_.load();
       if (!loaded.success || (loaded.journal && !valid_journal(*loaded.journal))) {
@@ -2332,7 +2324,12 @@ namespace platf::primary_display {
       if (!active_cursor_clip_identity) {
         return true;
       }
-      return manager().refresh_active_cursor_clip(*active_cursor_clip_identity);
+      if (!active_cursor_clip_bounds) {
+        return false;
+      }
+      const auto identity = *active_cursor_clip_identity;
+      const auto bounds = *active_cursor_clip_bounds;
+      return set_exclusive_cursor_clip(identity, bounds);
     } catch (const std::exception &exception) {
       BOOST_LOG(error) << "Could not refresh exclusive virtual-display cursor isolation: " << exception.what();
       return false;

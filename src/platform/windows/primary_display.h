@@ -127,8 +127,6 @@ namespace platf::primary_display {
       bool bind_pending(std::wstring_view device_path);
       bool promote(std::wstring_view device_path, bool exclusive = false);
       bool restore(std::wstring_view expected_device_path = {});
-      // The caller must separately prove that the live session still owns cursor isolation.
-      bool refresh_active_cursor_clip(std::wstring_view device_path);
       bool reconcile_active_exclusive(std::wstring_view device_path);
       bool recover_inactive_exclusive();
 
