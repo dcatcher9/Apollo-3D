@@ -5,6 +5,7 @@
 #pragma once
 
 #include "display_config.h"
+#include "exclusive_cursor_clip.h"
 
 #include <filesystem>
 #include <functional>
@@ -26,7 +27,8 @@ namespace platf::primary_display {
    */
   bool bind_pending(std::wstring_view device_path);
 
-  /** Make the exact active display primary, or the sole active output when exclusive is true.
+  /** Make the exact active display primary, disabling ordinary outputs when exclusive is true.
+   * Approved AR-glasses outputs remain active so Windows continues driving their scanout.
    * All mutations require durable recovery state and use temporary CCD configuration.
    */
   bool promote(std::wstring_view device_path, bool exclusive = false);
@@ -42,6 +44,14 @@ namespace platf::primary_display {
 
   /** Recover an interrupted transaction on startup, before creating another virtual display. */
   bool recover();
+
+  /** Reapply cursor isolation after Windows resets ClipCursor for a display or focus change.
+   * No-op unless this process currently owns an exclusive-session cursor clip.
+   */
+  bool refresh_exclusive_cursor_clip();
+
+  /** Reassert the owned exclusive topology after Windows reports a display change. */
+  bool reconcile_exclusive_display_topology();
 
   namespace detail {
     /** A process-lifetime file handle prevents a second host from recovering a live journal. */
@@ -85,6 +95,8 @@ namespace platf::primary_display {
       std::optional<snapshot_t> original_topology;
       std::optional<snapshot_t> before_exclusive;
       std::optional<snapshot_t> pending_restore;
+      std::vector<std::wstring> exclusive_preserved;
+      std::optional<snapshot_t> exclusive_topology;
     };
 
     struct load_result_t {
@@ -100,6 +112,8 @@ namespace platf::primary_display {
       std::function<bool()> clear;
       std::function<std::optional<snapshot_t>()> query_all;
       std::function<bool(const DISPLAYCONFIG_PATH_INFO &, const display_config::advanced_color_state_t &)> set_color;
+      std::function<bool(const DISPLAYCONFIG_PATH_INFO &, std::wstring_view)> preserve_exclusive;
+      std::function<bool(std::wstring_view, std::optional<cursor_bounds_t>)> cursor_clip;
     };
 
     std::optional<layout_t> inspect(const snapshot_t &snapshot);
@@ -113,11 +127,17 @@ namespace platf::primary_display {
       bool bind_pending(std::wstring_view device_path);
       bool promote(std::wstring_view device_path, bool exclusive = false);
       bool restore(std::wstring_view expected_device_path = {});
+      // The caller must separately prove that the live session still owns cursor isolation.
+      bool refresh_active_cursor_clip(std::wstring_view device_path);
+      bool reconcile_active_exclusive(std::wstring_view device_path);
+      bool recover_inactive_exclusive();
 
     private:
       io_t io_;
       bool apply_verified(const snapshot_t &before, const layout_t &desired);
       bool promote_exclusive(std::wstring_view device_path);
+      bool refresh_exclusive_cursor_clip(std::wstring_view device_path);
+      bool clip_cursor_to_display(const snapshot_t &snapshot, std::wstring_view device_path);
       bool restore_exclusive(journal_t journal);
       bool recover_prepared_outputs(journal_t journal);
     };

@@ -190,6 +190,13 @@ namespace ar_glasses {
       const RECT &previous_original_rect,
       const RECT &current_rect
     );
+
+    /** Apply the remote exclusive-display preservation policy without querying Windows. */
+    bool preserve_during_remote_virtual_display_for_test(
+      std::string_view model_id,
+      std::string_view friendly_name,
+      const std::vector<device_info_t> &decisions
+    );
 #endif
   }  // namespace detail
 
@@ -201,6 +208,12 @@ namespace ar_glasses {
 
   /** Approve or reject a discovered monitor model. Pending is not accepted from the UI. */
   bool set_device_decision(std::string_view id, device_decision_e decision);
+
+  /** Return whether an active CCD target should remain enabled during remote exclusive streaming. */
+  bool preserve_during_remote_virtual_display(const LUID &adapter_id, UINT32 target_id);
+
+  /** Load persisted preservation decisions without starting the controller or writing config. */
+  void load_preservation_policy();
 
   /** Atomically write a general configuration snapshot while injecting the latest device list. */
   bool write_config_with_devices(std::string_view contents);

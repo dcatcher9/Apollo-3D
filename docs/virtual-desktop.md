@@ -39,16 +39,31 @@ The client sends its current choice for every launch and resume. The session own
 client with launch permission, can apply a changed choice by reconnecting. A different view-only
 client inherits the retained session's choice.
 
-With this option on, Sunshine 3D temporarily disables every other active display during a
-virtual-display stream. Physical screens go blank and the virtual monitor becomes the only active
-Windows display. This affects the entire desktop, including applications that were already open on
-physical monitors: Windows or the application may move or minimize those windows. It does not
-create an isolated desktop or guarantee how an application positions its windows.
+With this option on, Sunshine 3D temporarily disables ordinary physical displays during a
+virtual-display stream and makes the virtual monitor primary. An approved AR-glasses output remains
+active because disabling its Windows display path would stop its scanout. This affects the entire
+desktop, including applications that were already open on disabled monitors: Windows or the
+application may move or minimize those windows. It does not create an isolated desktop or guarantee
+how an application positions its windows.
+
+Windows does not provide a general active-but-hidden state for a normal monitor: an active display
+path participates in the desktop. A black overlay or a powered-off panel would still leave that
+desktop region available to windows and the cursor. Sunshine therefore disables ordinary paths and
+keeps only approved AR outputs active when their glasses require a live scanout.
 
 Sunshine restores the previous displays on disconnect, including during the reconnect grace period.
 Applications may move again when physical displays return, and their exact positions or minimized
-states are not guaranteed to return. Streams using a physical desktop are unaffected. The client
-cursor-confinement setting remains a separate choice.
+states are not guaranteed to return. Streams using a physical desktop are unaffected.
+
+Exclusive mode also applies a Windows cursor boundary around the virtual display. Both the mouse
+connected to the PC and client input are restricted by it, keeping normal pointer movement off the
+active AR display. This boundary applies throughout exclusive mode, including before glasses
+connect, and takes precedence over the client's **Keep cursor on virtual display** setting. Windows
+has one shared cursor and no exclusive owner for its `ClipCursor` boundary. The host repairs the
+boundary after virtual-display resizing, display hotplug, and foreground-window changes and checks
+it periodically. An application that continuously replaces the shared boundary can briefly win
+until the next repair. The host releases its ownership before restoring the desktop on disconnect
+or teardown.
 
 ## Display restoration
 
@@ -92,9 +107,12 @@ at its edges. This applies to relative remote mouse movement as well as absolute
 When other monitors are active, if the physical mouse moves the shared cursor onto one of them,
 the next remote pointer movement brings it back to the streamed display.
 
-Sunshine does not apply a global Windows cursor lock. Someone at the PC can still move the
-physical mouse normally. The remote bounds apply only while input belongs to the virtual-display
-stream; disconnecting or switching away ends that input scope.
+With **Use virtual display only while streaming** disabled, this setting constrains client input;
+someone at the PC can still move the physical mouse normally. With exclusive mode enabled, its
+Windows cursor boundary constrains the shared cursor regardless of this client setting. Existing
+application cursor restrictions are preserved where they overlap the virtual display. Cleanup
+restores the previous restriction only while Sunshine still owns the applied boundary, without
+overwriting another application's replacement.
 
 While confinement is enabled, every relative movement is converted to a bounded absolute position,
 including movement with a hidden game cursor. An application's own cursor lock may change before
@@ -102,7 +120,8 @@ Windows processes queued input, so it cannot provide the remote confinement guar
 application needs unmodified raw-relative input or Windows acceleration, turn off **Keep cursor
 on virtual display** in Moonlight 3D's **Global Settings → Audio & input**. During a stream, use
 the same control in **Session settings**, then **Apply & reconnect**. This is a client choice;
-there is no host configuration toggle.
+there is no host configuration toggle. Turning it off preserves raw-relative client input, but
+exclusive mode's Windows cursor boundary still excludes the AR display.
 
 ## Client protocol
 
@@ -128,6 +147,5 @@ retain ordinary input behavior.
 Clients apply a changed choice through reconnect. Moonlight 3D uses its existing **Apply &
 reconnect** action. There is no custom control packet or live setter for this option.
 
-The cursor is shared Windows state. These controls prevent remote movement from losing the
-pointer on another monitor; they do not provide independent pointers or simultaneous independent
-keyboard focus for local and remote users.
+The cursor is shared Windows state. These controls do not provide independent pointers or
+simultaneous independent keyboard focus for local and remote users.

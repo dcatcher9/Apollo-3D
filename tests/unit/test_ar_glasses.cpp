@@ -130,6 +130,53 @@ TEST(ArGlassesDiscovery, DoesNotGuessFromOrdinaryMonitorNames) {
   EXPECT_FALSE(ar_glasses::is_recognized_ar_display("DISPLAY:ACI9999", "ARZOPA Portable Monitor"));
 }
 
+TEST(ArGlassesRemotePreservation, PreservesApprovedAndRecognizedArDisplays) {
+  const std::vector<ar_glasses::device_info_t> decisions {
+    {.id = "DISPLAY:USR1234", .name = "User selected display", .decision = ar_glasses::device_decision_e::approved},
+  };
+
+  EXPECT_TRUE(ar_glasses::detail::preserve_during_remote_virtual_display_for_test(
+    "DISPLAY:USR1234",
+    "Generic Monitor",
+    decisions
+  ));
+  EXPECT_TRUE(ar_glasses::detail::preserve_during_remote_virtual_display_for_test(
+    "DISPLAY:TCL03D4",
+    "Generic Monitor",
+    {}
+  ));
+}
+
+TEST(ArGlassesRemotePreservation, ExplicitRejectionOverridesRecognition) {
+  const std::vector<ar_glasses::device_info_t> decisions {
+    {.id = "display:tcl03d4", .name = "SmartGlasses", .decision = ar_glasses::device_decision_e::rejected},
+    {.id = "DISPLAY:TCL03D4", .name = "SmartGlasses", .decision = ar_glasses::device_decision_e::approved},
+  };
+
+  EXPECT_FALSE(ar_glasses::detail::preserve_during_remote_virtual_display_for_test(
+    "DISPLAY:TCL03D4",
+    "SmartGlasses",
+    decisions
+  ));
+}
+
+TEST(ArGlassesRemotePreservation, FailsClosedForAmbiguousOrOrdinaryDisplays) {
+  const std::vector<ar_glasses::device_info_t> ambiguous_approval {
+    {.id = "DISPLAY:0:0", .name = "SmartGlasses", .decision = ar_glasses::device_decision_e::approved},
+  };
+
+  EXPECT_FALSE(ar_glasses::detail::preserve_during_remote_virtual_display_for_test(
+    "DISPLAY:0:0",
+    "SmartGlasses",
+    ambiguous_approval
+  ));
+  EXPECT_FALSE(ar_glasses::detail::preserve_during_remote_virtual_display_for_test(
+    "DISPLAY:GSM9E9D",
+    "LG ULTRAGEAR+",
+    {}
+  ));
+}
+
 TEST(ArGlassesOwnership, RenewedRemoteConnectWindowBlocksLocalPresentation) {
   constexpr ar_glasses::remote_virtual_display_lease_t lease = 1001;
   ar_glasses::remote_virtual_display_ended(lease);

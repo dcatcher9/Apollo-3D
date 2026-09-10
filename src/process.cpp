@@ -998,7 +998,7 @@ namespace proc {
     if (had_hdr_worker && !request_hdr_state(enable_hdr, 6s)) {
       return false;
     }
-    BOOST_LOG(info) << (_virtual_display_only ? "Virtual display verified as the only active Windows display: " : "Virtual display verified as the Windows primary display: ") << display_name;
+    BOOST_LOG(info) << (_virtual_display_only ? "Virtual-display-only policy verified with the virtual display primary: " : "Virtual display verified as the Windows primary display: ") << display_name;
     return true;
   }
 

@@ -3,6 +3,7 @@
  * @brief Definitions for the main entry point for Sunshine.
  */
 // standard includes
+#include <atomic>
 #include <codecvt>
 #include <csignal>
 #include <fstream>
@@ -78,12 +79,141 @@ std::map<std::string_view, std::function<int(const char *name, int argc, char **
 };
 
 #ifdef _WIN32
+namespace {
+  constexpr UINT WM_REFRESH_EXCLUSIVE_CURSOR_CLIP = WM_APP + 1;
+  constexpr UINT WM_RECONCILE_EXCLUSIVE_DISPLAY = WM_APP + 2;
+  constexpr UINT_PTR EXCLUSIVE_CURSOR_DELAY_TIMER = 1;
+  constexpr UINT_PTR EXCLUSIVE_CURSOR_MAINTENANCE_TIMER = 2;
+  constexpr UINT EXCLUSIVE_CURSOR_REFRESH_DELAY_MS = 100;
+  constexpr UINT EXCLUSIVE_CURSOR_MAINTENANCE_MS = 250;
+
+  std::atomic<HWND> session_monitor_window {nullptr};
+  std::atomic_bool cursor_refresh_posted {false};
+  std::atomic_bool cursor_refresh_queued {false};
+  std::atomic_bool display_reconcile_posted {false};
+  std::atomic_bool display_reconcile_queued {false};
+  std::atomic_bool display_reconcile_dirty {false};
+
+  void request_exclusive_cursor_refresh() {
+    const auto hwnd = session_monitor_window.load(std::memory_order_acquire);
+    if (!hwnd) {
+      return;
+    }
+    bool expected = false;
+    if (!cursor_refresh_posted.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+      return;
+    }
+    if (!PostMessage(hwnd, WM_REFRESH_EXCLUSIVE_CURSOR_CLIP, 0, 0)) {
+      cursor_refresh_posted.store(false, std::memory_order_release);
+    }
+  }
+
+  void enqueue_exclusive_cursor_refresh() {
+    bool expected = false;
+    if (!cursor_refresh_queued.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+      return;
+    }
+    task_pool.push([]() {
+      platf::primary_display::refresh_exclusive_cursor_clip();
+      cursor_refresh_queued.store(false, std::memory_order_release);
+    });
+  }
+
+  void request_exclusive_display_reconcile() {
+    const auto hwnd = session_monitor_window.load(std::memory_order_acquire);
+    if (!hwnd) {
+      return;
+    }
+    display_reconcile_dirty.store(true, std::memory_order_release);
+    bool expected = false;
+    if (!display_reconcile_posted.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+      return;
+    }
+    if (!PostMessage(hwnd, WM_RECONCILE_EXCLUSIVE_DISPLAY, 0, 0)) {
+      display_reconcile_posted.store(false, std::memory_order_release);
+    }
+  }
+
+  void enqueue_exclusive_display_reconcile() {
+    bool expected = false;
+    if (!display_reconcile_queued.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+      return;
+    }
+    task_pool.push([]() {
+      do {
+        display_reconcile_dirty.store(false, std::memory_order_release);
+        platf::primary_display::reconcile_exclusive_display_topology();
+      } while (display_reconcile_dirty.exchange(false, std::memory_order_acq_rel));
+      display_reconcile_queued.store(false, std::memory_order_release);
+      // Close the race between the final dirty check and clearing the in-flight flag. A window
+      // message handled in that interval could not enqueue its own worker.
+      if (display_reconcile_dirty.load(std::memory_order_acquire)) {
+        enqueue_exclusive_display_reconcile();
+      }
+    });
+  }
+
+  void CALLBACK SessionMonitorWinEventProc(
+    HWINEVENTHOOK,
+    DWORD event,
+    HWND,
+    LONG,
+    LONG,
+    DWORD,
+    DWORD
+  ) {
+    if (event == EVENT_SYSTEM_FOREGROUND) {
+      // Never query displays from the WinEvent callback. The posted message serializes after any
+      // in-flight SetDisplayConfig operation and runs outside the foreground window's activation.
+      request_exclusive_cursor_refresh();
+    }
+  }
+}  // namespace
+
 LRESULT CALLBACK SessionMonitorWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
   switch (uMsg) {
+    case WM_DISPLAYCHANGE:
+      // SetDisplayConfig may synchronously broadcast this while the topology transaction mutex is
+      // held. Defer all display queries to avoid a cross-thread broadcast deadlock.
+      request_exclusive_display_reconcile();
+      request_exclusive_cursor_refresh();
+      return 0;
+    case WM_RECONCILE_EXCLUSIVE_DISPLAY:
+      display_reconcile_posted.store(false, std::memory_order_release);
+      enqueue_exclusive_display_reconcile();
+      return 0;
+    case WM_REFRESH_EXCLUSIVE_CURSOR_CLIP:
+      cursor_refresh_posted.store(false, std::memory_order_release);
+      enqueue_exclusive_cursor_refresh();
+      // Focus handlers can change ClipCursor after EVENT_SYSTEM_FOREGROUND is emitted. A delayed
+      // pass repairs that common ordering before the periodic ownership check runs.
+      if (!SetTimer(hwnd, EXCLUSIVE_CURSOR_DELAY_TIMER, EXCLUSIVE_CURSOR_REFRESH_DELAY_MS, nullptr)) {
+        BOOST_LOG(warning) << "Could not schedule the delayed exclusive cursor-isolation refresh."sv;
+      }
+      return 0;
+    case WM_TIMER:
+      if (wParam == EXCLUSIVE_CURSOR_DELAY_TIMER) {
+        KillTimer(hwnd, EXCLUSIVE_CURSOR_DELAY_TIMER);
+        enqueue_exclusive_cursor_refresh();
+        return 0;
+      }
+      if (wParam == EXCLUSIVE_CURSOR_MAINTENANCE_TIMER) {
+        // ClipCursor is shared process-wide and foreground applications may replace it without a
+        // focus or display event. Repair exclusive-session ownership at a low fixed cadence.
+        enqueue_exclusive_cursor_refresh();
+        return 0;
+      }
+      return DefWindowProc(hwnd, uMsg, wParam, lParam);
     case WM_CLOSE:
       DestroyWindow(hwnd);
       return 0;
     case WM_DESTROY:
+      KillTimer(hwnd, EXCLUSIVE_CURSOR_DELAY_TIMER);
+      KillTimer(hwnd, EXCLUSIVE_CURSOR_MAINTENANCE_TIMER);
+      session_monitor_window.store(nullptr, std::memory_order_release);
+      cursor_refresh_posted.store(false, std::memory_order_release);
+      display_reconcile_posted.store(false, std::memory_order_release);
+      display_reconcile_dirty.store(false, std::memory_order_release);
       PostQuitMessage(0);
       return 0;
     case WM_ENDSESSION:
@@ -221,6 +351,7 @@ int main(int argc, char *argv[]) {
   // Restore a saved display transaction before GPU preparation or platform initialization can
   // fail. Command-only invocations returned above and must not recover a running host's lease.
   // The installed service restarts the host after a crash; standalone hosts recover on relaunch.
+  ar_glasses::load_preservation_policy();
   if (!platf::primary_display::recover()) {
     BOOST_LOG(error) << "Display-configuration recovery is pending; virtual-display launches will wait for restoration."sv;
   }
@@ -318,13 +449,33 @@ int main(int argc, char *argv[]) {
       return;
     }
 
+    session_monitor_window.store(wnd, std::memory_order_release);
     ShowWindow(wnd, SW_HIDE);
+    if (!SetTimer(wnd, EXCLUSIVE_CURSOR_MAINTENANCE_TIMER, EXCLUSIVE_CURSOR_MAINTENANCE_MS, nullptr)) {
+      BOOST_LOG(warning) << "Could not schedule periodic exclusive cursor-isolation maintenance."sv;
+    }
+
+    const auto foreground_hook = SetWinEventHook(
+      EVENT_SYSTEM_FOREGROUND,
+      EVENT_SYSTEM_FOREGROUND,
+      nullptr,
+      SessionMonitorWinEventProc,
+      0,
+      0,
+      WINEVENT_OUTOFCONTEXT
+    );
+    if (!foreground_hook) {
+      BOOST_LOG(warning) << "Could not monitor foreground changes for exclusive cursor isolation: "sv << GetLastError();
+    }
 
     // Run the message loop for our window
     MSG msg {};
     while (GetMessage(&msg, nullptr, 0, 0) > 0) {
       TranslateMessage(&msg);
       DispatchMessage(&msg);
+    }
+    if (foreground_hook && !UnhookWinEvent(foreground_hook)) {
+      BOOST_LOG(warning) << "Could not unregister the exclusive cursor-isolation foreground monitor: "sv << GetLastError();
     }
   });
 

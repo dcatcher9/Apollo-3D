@@ -1061,7 +1061,7 @@ namespace ar_glasses {
       return true;
     }
 
-    void load_devices() {
+    void load_devices(bool persist_cleanup) {
       std::lock_guard lock(device_mutex);
       const auto contents = read_config_file_strict();
       if (!contents) {
@@ -1104,12 +1104,14 @@ namespace ar_glasses {
         device_persistence_retry_after = {};
         if (removed_internal_display) {
           device_persistence_dirty = true;
-          if (persist_devices_locked()) {
-            device_persistence_dirty = false;
-            device_persistence_retry_after = {};
-            BOOST_LOG(info) << "Removed Sunshine 3D's internal virtual desktop from the AR display decision list."sv;
-          } else {
-            device_persistence_retry_after = std::chrono::steady_clock::now() + 2s;
+          if (persist_cleanup) {
+            if (persist_devices_locked()) {
+              device_persistence_dirty = false;
+              device_persistence_retry_after = {};
+              BOOST_LOG(info) << "Removed Sunshine 3D's internal virtual desktop from the AR display decision list."sv;
+            } else {
+              device_persistence_retry_after = std::chrono::steady_clock::now() + 2s;
+            }
           }
         }
       } catch (const std::exception &error) {
@@ -1143,6 +1145,31 @@ namespace ar_glasses {
       fallback << "DISPLAY:" << std::hex << std::uppercase
                << target_name.edidManufactureId << ':' << target_name.edidProductCodeId;
       return fallback.str();
+    }
+
+    template<class Decisions>
+    bool preserve_during_remote_virtual_display_policy(
+      std::string_view model_id,
+      std::string_view friendly_name,
+      const Decisions &decisions
+    ) {
+      if (model_id.empty() || lowercase(model_id) == "display:0:0" ||
+          is_internal_virtual_display(model_id, friendly_name)) {
+        return false;
+      }
+
+      const auto normalized_id = lowercase(model_id);
+      bool approved = false;
+      for (const auto &device : decisions) {
+        if (lowercase(device.id) != normalized_id) {
+          continue;
+        }
+        if (device.decision == device_decision_e::rejected) {
+          return false;
+        }
+        approved = approved || device.decision == device_decision_e::approved;
+      }
+      return approved || is_recognized_ar_display(model_id, friendly_name);
     }
 
     bool primary_source_is_authoritative(
@@ -4062,6 +4089,16 @@ namespace ar_glasses {
     });
   }
 
+#ifdef SUNSHINE_TESTS
+  bool detail::preserve_during_remote_virtual_display_for_test(
+    std::string_view model_id,
+    std::string_view friendly_name,
+    const std::vector<device_info_t> &decisions
+  ) {
+    return preserve_during_remote_virtual_display_policy(model_id, friendly_name, decisions);
+  }
+#endif
+
   std::vector<device_info_t> devices() {
     std::lock_guard lock(device_mutex);
     return {known_devices.begin(), known_devices.end()};
@@ -4096,6 +4133,22 @@ namespace ar_glasses {
                       << "] is "sv << decision_name(decision) << '.';
     }
     return true;
+  }
+
+  bool preserve_during_remote_virtual_display(const LUID &adapter_id, UINT32 target_id) {
+    DISPLAYCONFIG_TARGET_DEVICE_NAME target_name {};
+    target_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+    target_name.header.size = sizeof(target_name);
+    target_name.header.adapterId = adapter_id;
+    target_name.header.id = target_id;
+    if (DisplayConfigGetDeviceInfo(&target_name.header) != ERROR_SUCCESS) {
+      return false;
+    }
+
+    const auto model_id = stable_model_id(target_name);
+    const auto friendly_name = platf::to_utf8(target_name.monitorFriendlyDeviceName);
+    std::lock_guard lock(device_mutex);
+    return preserve_during_remote_virtual_display_policy(model_id, friendly_name, known_devices);
   }
 
   bool write_config_with_devices(std::string_view contents) {
@@ -4249,8 +4302,12 @@ namespace ar_glasses {
     return remote_blocks_local_locked(std::chrono::steady_clock::now());
   }
 
+  void load_preservation_policy() {
+    load_devices(false);
+  }
+
   std::unique_ptr<platf::deinit_t> init() {
-    load_devices();
+    load_devices(true);
     const auto pending_recoveries = recover_connected_saved_topologies();
     if (pending_recoveries != 0) {
       BOOST_LOG(info) << pending_recoveries

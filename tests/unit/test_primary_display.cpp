@@ -12,6 +12,7 @@
 #include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <set>
 
 namespace {
   using namespace platf::primary_display::detail;
@@ -78,6 +79,7 @@ namespace {
     int mutate_on_query = 0;
     std::function<void(snapshot_t &)> mutation;
     std::function<void(snapshot_t &)> applied_mutation;
+    std::set<std::wstring> preserved_exclusive;
     std::vector<std::string> events;
 
     io_t io() {
@@ -158,6 +160,9 @@ namespace {
             }
           }
           return false;
+        },
+        [this](const DISPLAYCONFIG_PATH_INFO &, std::wstring_view identity) {
+          return preserved_exclusive.contains(std::wstring(identity));
         },
       };
     }
@@ -600,7 +605,7 @@ TEST(PrimaryDisplayExclusive, ReactivatesInactivePhysicalOutputsAndRetainsVirtua
   fake_io_t fake;
   start_exclusive(fake);
   ASSERT_TRUE(fake.journal && fake.journal->exclusive_started);
-  EXPECT_EQ(nlohmann::json::parse(serialize(*fake.journal))["version"], 2);
+  EXPECT_EQ(nlohmann::json::parse(serialize(*fake.journal))["version"], 3);
   manager_t manager(fake.io());
   ASSERT_TRUE(manager.restore(L"virtual"));
   expect_positions(fake.current, baseline);
@@ -612,15 +617,232 @@ TEST(PrimaryDisplayExclusive, ReactivatesInactivePhysicalOutputsAndRetainsVirtua
   expect_positions(fake.current, baseline);
 }
 
+TEST(PrimaryDisplayExclusive, KeepsApprovedArOutputActiveAndDisablesOrdinaryMonitors) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  manager_t manager(fake.io());
+
+  ASSERT_TRUE(manager.prepare(true));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  ASSERT_EQ(fake.current.paths.size(), 2u);
+  expect_positions(fake.current, {
+    {L"virtual", 0, 0},
+    {L"physical-left", -1920, 0},
+  });
+  ASSERT_TRUE(fake.journal && fake.journal->exclusive_topology);
+  expect_positions(*fake.journal->exclusive_topology, {
+    {L"virtual", 0, 0},
+    {L"physical-left", -1920, 0},
+  });
+
+  const auto virtual_index = named_index(fake.current, L"virtual");
+  fake.current.modes[fake.current.paths[virtual_index].sourceInfo.sourceModeInfoIdx].sourceMode.width = 3840;
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  ASSERT_EQ(fake.current.paths.size(), 2u);
+
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, baseline);
+  EXPECT_FALSE(fake.journal);
+
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"physical-left", -1920, 0}});
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, baseline);
+}
+
+TEST(PrimaryDisplayExclusive, PacksOnlyAvailablePreservedArOutputsBesideVirtualDisplay) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  fake.preserved_exclusive.insert(L"physical-primary");
+  manager_t manager(fake.io());
+
+  ASSERT_TRUE(manager.prepare(true));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  fake.available_override = fake.current;
+  fake.available_override->paths[named_index(*fake.available_override, L"physical-primary")].targetInfo.targetAvailable = FALSE;
+
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {
+    {L"virtual", 0, 0},
+    {L"physical-left", -1920, 0},
+  });
+}
+
+TEST(PrimaryDisplayExclusive, RememberedVirtualOnlyTopologyReactivatesApprovedArOutput) {
+  fake_io_t fake;
+  fake.current = make_snapshot({{L"physical-left", -1920, 120}, {L"physical-primary", 0, 0}});
+  fake.preserved_exclusive.insert(L"physical-left");
+  manager_t manager(fake.io());
+
+  ASSERT_TRUE(manager.prepare(true));
+  // Windows may restore an old virtual-only arrangement as part of adding the virtual target.
+  fake.current = make_snapshot({{L"virtual", 0, 0}});
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(fake.journal && fake.journal->exclusive_started);
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"physical-left", -1920, 0}});
+  EXPECT_EQ(std::ranges::count(fake.current.device_paths, L"physical-primary"), 0);
+
+  // Ownership is the durable launch-time allowlist, not a later mutable classification.
+  fake.journal = deserialize(serialize(*fake.journal));
+  ASSERT_TRUE(fake.journal);
+  fake.preserved_exclusive.clear();
+  manager_t restarted(fake.io());
+  ASSERT_TRUE(restarted.restore(L"virtual"));
+  expect_positions(fake.current, {
+    {L"physical-left", -1920, 120},
+    {L"physical-primary", 0, 0},
+    {L"virtual", 1920, 0},
+  });
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, RetriesPreservedArColorWithoutReapplyingTopology) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  auto &ar_color = *fake.current.colors[named_index(fake.current, L"physical-left")];
+  ar_color.hdr_user_enabled = true;
+  ar_color.advanced_color_active = true;
+  ar_color.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  fake.reset_colors_on_apply = true;
+  fake.color_set_ok = false;
+  manager_t manager(fake.io());
+
+  ASSERT_TRUE(manager.prepare(true));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  EXPECT_FALSE(manager.promote(L"virtual", true));
+  ASSERT_TRUE(fake.journal && fake.journal->exclusive_topology);
+  EXPECT_FALSE(fake.current.colors[named_index(fake.current, L"physical-left")]->hdr_user_enabled);
+
+  const auto applies = std::ranges::count(fake.events, "apply");
+  fake.color_set_ok = true;
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), applies);
+  EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"physical-left")]->hdr_user_enabled);
+  ASSERT_TRUE(manager.restore(L"virtual"));
+}
+
+TEST(PrimaryDisplayExclusive, KeepsApprovedArOutputThatConnectsDuringStreamActiveOnRestore) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"hotplugged-ar", -1920, 0}});
+  fake.preserved_exclusive.insert(L"hotplugged-ar");
+  manager_t manager(fake.io());
+
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {
+    {L"physical-left", -1920, 120},
+    {L"physical-primary", 0, 0},
+    {L"hotplugged-ar", 1920, 0},
+    {L"virtual", 3840, 0},
+  });
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, HotpluggedArRestoreIntentSurvivesColdRetry) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"hotplugged-ar", -1920, 0}});
+  fake.preserved_exclusive.insert(L"hotplugged-ar");
+  for (size_t i = 0; i < fake.catalog.paths.size(); ++i) {
+    if (fake.catalog.device_paths[i] != L"virtual") {
+      fake.catalog.paths[i].targetInfo.targetAvailable = FALSE;
+    }
+  }
+  manager_t manager(fake.io());
+  fake.events.clear();
+
+  EXPECT_FALSE(manager.restore(L"virtual"));
+  ASSERT_TRUE(fake.journal && fake.journal->pending_restore);
+  EXPECT_NE(
+    std::ranges::find(fake.journal->pending_restore->device_paths, L"hotplugged-ar"),
+    fake.journal->pending_restore->device_paths.end()
+  );
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), 0);
+  fake.journal = deserialize(serialize(*fake.journal));
+  ASSERT_TRUE(fake.journal);
+
+  fake.preserved_exclusive.clear();
+  for (auto &path : fake.catalog.paths) {
+    path.targetInfo.targetAvailable = TRUE;
+  }
+  manager_t restarted(fake.io());
+  ASSERT_TRUE(restarted.restore(L"virtual"));
+  expect_positions(fake.current, {
+    {L"physical-left", -1920, 120},
+    {L"physical-primary", 0, 0},
+    {L"hotplugged-ar", 1920, 0},
+    {L"virtual", 3840, 0},
+  });
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, KeepsApprovedHotpluggedArWhenVirtualDisappearedBeforeRestore) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  fake.current = make_snapshot({{L"hotplugged-ar", 0, 0}});
+  fake.preserved_exclusive.insert(L"hotplugged-ar");
+  manager_t manager(fake.io());
+
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {
+    {L"physical-left", -1920, 120},
+    {L"physical-primary", 0, 0},
+    {L"hotplugged-ar", 1920, 0},
+  });
+  EXPECT_EQ(std::ranges::count(fake.current.device_paths, L"virtual"), 0);
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, WarmResumeKeepsDurablyAdoptedHotpluggedArActive) {
+  fake_io_t fake;
+  start_exclusive(fake);
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"hotplugged-ar", 1920, 0}});
+  fake.preserved_exclusive.insert(L"hotplugged-ar");
+  for (size_t i = 0; i < fake.catalog.paths.size(); ++i) {
+    if (fake.catalog.device_paths[i] != L"virtual") {
+      fake.catalog.paths[i].targetInfo.targetAvailable = FALSE;
+    }
+  }
+  manager_t manager(fake.io());
+
+  ASSERT_FALSE(manager.restore(L"virtual"));
+  ASSERT_TRUE(fake.journal && fake.journal->pending_restore);
+
+  // Resume owns the journaled hotplug even if the live policy cannot be consulted anymore.
+  fake.preserved_exclusive.clear();
+  fake.events.clear();
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"hotplugged-ar", -1920, 0}});
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), 1);
+  ASSERT_TRUE(fake.journal && fake.journal->exclusive_topology);
+  EXPECT_TRUE(deserialize(serialize(*fake.journal)));
+
+  for (auto &path : fake.catalog.paths) {
+    path.targetInfo.targetAvailable = TRUE;
+  }
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  EXPECT_FALSE(fake.journal);
+}
+
 TEST(PrimaryDisplayExclusive, RepeatedPromotionAndLiveResizeKeepOriginalTopology) {
   fake_io_t fake;
   start_exclusive(fake);
-  const auto saved = serialize(*fake.journal);
+  ASSERT_TRUE(fake.journal && fake.journal->original_topology);
+  const auto original_virtual = named_index(*fake.journal->original_topology, L"virtual");
+  const auto original_source = fake.journal->original_topology->paths[original_virtual].sourceInfo.sourceModeInfoIdx;
+  const auto original_width = fake.journal->original_topology->modes[original_source].sourceMode.width;
   fake.current.modes[0].sourceMode.width = 3840;
   fake.current.paths[0].targetInfo.refreshRate = {90, 1};
   manager_t manager(fake.io());
   EXPECT_TRUE(manager.promote(L"virtual", true));
-  EXPECT_EQ(serialize(*fake.journal), saved);
+  ASSERT_TRUE(fake.journal && fake.journal->exclusive_topology);
+  EXPECT_EQ(fake.journal->original_topology->modes[original_source].sourceMode.width, original_width);
+  const auto exclusive_virtual = named_index(*fake.journal->exclusive_topology, L"virtual");
+  const auto exclusive_source = fake.journal->exclusive_topology->paths[exclusive_virtual].sourceInfo.sourceModeInfoIdx;
+  EXPECT_EQ(fake.journal->exclusive_topology->modes[exclusive_source].sourceMode.width, 3840u);
+  EXPECT_EQ(fake.journal->exclusive_topology->paths[exclusive_virtual].targetInfo.refreshRate.Numerator, 90u);
   EXPECT_TRUE(manager.restore());
   const auto index = named_index(fake.current, L"virtual");
   const auto source = fake.current.paths[index].sourceInfo.sourceModeInfoIdx;
@@ -656,13 +878,85 @@ TEST(PrimaryDisplayExclusive, UnavailablePrimaryStillLightsOtherPhysicalAndKeeps
   EXPECT_FALSE(manager.restore());
   ASSERT_TRUE(fake.journal && fake.journal->pending_restore);
   ASSERT_EQ(fake.current.paths.size(), 2u);
-  expect_positions(fake.current, {{L"physical-left", 0, 0}, {L"virtual", 3840, -320}});
+  expect_positions(fake.current, {{L"physical-left", 0, 0}, {L"virtual", 1920, 0}});
   fake.catalog.paths[1].targetInfo.targetAvailable = TRUE;
   // Windows may reactivate the returned original primary before the next recovery attempt.
   fake.current = make_snapshot(baseline);
   fake.current.modes[4].sourceMode.width = 3840;
   ASSERT_TRUE(manager.restore());
   expect_positions(fake.current, baseline);
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, MissingMiddleOutputPacksSurvivorsUntilExactRestoreCanFinish) {
+  const layout_t saved {
+    {L"physical-left", -1920, 0},
+    {L"physical-middle", 0, 0},
+    {L"physical-right", 1920, 0},
+    {L"virtual", 3840, 0},
+  };
+  fake_io_t fake;
+  fake.current = make_snapshot(saved);
+  fake.catalog = fake.current;
+  start_exclusive(fake);
+  fake.catalog.paths[named_index(fake.catalog, L"physical-middle")].targetInfo.targetAvailable = FALSE;
+  manager_t manager(fake.io());
+
+  EXPECT_FALSE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {
+    {L"physical-left", 0, 0},
+    {L"physical-right", 1920, 0},
+    {L"virtual", 3840, 0},
+  });
+  ASSERT_TRUE(fake.journal && fake.journal->pending_restore);
+  expect_positions(*fake.journal->pending_restore, {
+    {L"physical-left", 0, 0},
+    {L"physical-right", 1920, 0},
+    {L"virtual", 3840, 0},
+  });
+  expect_positions(*fake.journal->original_topology, saved);
+  fake.journal = deserialize(serialize(*fake.journal));
+  ASSERT_TRUE(fake.journal);
+
+  fake.catalog.paths[named_index(fake.catalog, L"physical-middle")].targetInfo.targetAvailable = TRUE;
+  manager_t restarted(fake.io());
+  ASSERT_TRUE(restarted.recover_inactive_exclusive());
+  expect_positions(fake.current, saved);
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, PreparedRecoveryPacksAroundUnavailableMiddleOutput) {
+  const layout_t saved {
+    {L"physical-left", -1920, 0},
+    {L"physical-middle", 0, 0},
+    {L"physical-right", 1920, 0},
+  };
+  fake_io_t fake;
+  fake.current = make_snapshot(saved);
+  fake.catalog = fake.current;
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true));
+  fake.current = {};
+  fake.catalog.paths[named_index(fake.catalog, L"physical-middle")].targetInfo.targetAvailable = FALSE;
+
+  EXPECT_FALSE(manager.restore());
+  expect_positions(fake.current, {
+    {L"physical-left", 0, 0},
+    {L"physical-right", 1920, 0},
+  });
+  ASSERT_TRUE(fake.journal && fake.journal->pending_restore);
+  expect_positions(*fake.journal->pending_restore, {
+    {L"physical-left", 0, 0},
+    {L"physical-right", 1920, 0},
+  });
+  expect_positions(*fake.journal->original_topology, saved);
+  fake.journal = deserialize(serialize(*fake.journal));
+  ASSERT_TRUE(fake.journal);
+
+  fake.catalog.paths[named_index(fake.catalog, L"physical-middle")].targetInfo.targetAvailable = TRUE;
+  manager_t restarted(fake.io());
+  ASSERT_TRUE(restarted.restore());
+  expect_positions(fake.current, saved);
   EXPECT_FALSE(fake.journal);
 }
 
@@ -902,16 +1196,377 @@ TEST(PrimaryDisplayExclusive, ExactTimingReadbackMismatchRetainsJournal) {
   EXPECT_TRUE(fake.journal);
 }
 
-TEST(PrimaryDisplayExclusive, CorruptVersionTwoCcdPayloadIsRejectedAndVersionOneStillLoads) {
+TEST(PrimaryDisplayExclusive, CorruptVersionThreeCcdPayloadIsRejectedAndOlderVersionsStillLoad) {
   fake_io_t fake;
   start_exclusive(fake);
   auto value = nlohmann::json::parse(serialize(*fake.journal));
   value["original_topology"]["modes"][0] = "00";
   EXPECT_FALSE(deserialize(value.dump()));
+  value = nlohmann::json::parse(serialize(*fake.journal));
+  value["version"] = 2;
+  value.erase("exclusive_preserved");
+  value.erase("exclusive_topology");
+  EXPECT_TRUE(deserialize(value.dump()));
   fake_io_t primary_only;
   manager_t manager(primary_only.io());
   ASSERT_TRUE(manager.promote(L"virtual"));
   const auto legacy = serialize(*primary_only.journal);
   EXPECT_EQ(nlohmann::json::parse(legacy)["version"], 1);
   EXPECT_TRUE(deserialize(legacy));
+}
+
+TEST(PrimaryDisplayExclusiveCursor, ClipsOnlyVerifiedTopologyAndRefreshesForResizeAndReconnect) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  std::vector<std::optional<cursor_bounds_t>> clips;
+  auto io = fake.io();
+  io.cursor_clip = [&](std::wstring_view identity, std::optional<cursor_bounds_t> bounds) {
+    EXPECT_EQ(identity, L"virtual");
+    fake.events.push_back(bounds ? "cursor_acquire" : "cursor_release");
+    clips.push_back(bounds);
+    if (bounds) {
+      EXPECT_EQ(fake.current.paths.size(), 2u);
+      EXPECT_EQ(fake.current.device_paths[0], L"virtual");
+      EXPECT_EQ(bounds->x, 0);
+      EXPECT_EQ(bounds->y, 0);
+    }
+    return true;
+  };
+  manager_t manager(io);
+  ASSERT_TRUE(manager.prepare(true));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  ASSERT_EQ(clips.back(), (cursor_bounds_t {0, 0, 1920, 1080}));
+  EXPECT_LT(std::ranges::find(fake.events, "apply"), std::ranges::find(fake.events, "cursor_acquire"));
+
+  const auto index = named_index(fake.current, L"virtual");
+  fake.current.modes[fake.current.paths[index].sourceInfo.sourceModeInfoIdx].sourceMode.width = 3840;
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  EXPECT_EQ(clips.back(), (cursor_bounds_t {0, 0, 3840, 1080}));
+  fake.events.clear();
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  ASSERT_FALSE(fake.events.empty());
+  EXPECT_EQ(fake.events.front(), "cursor_release");
+  EXPECT_FALSE(clips.back());
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  EXPECT_TRUE(clips.back());
+}
+
+TEST(PrimaryDisplayExclusiveCursor, OwnsClipBeforeAnArDisplayCanHotplug) {
+  fake_io_t fake;
+  std::vector<std::optional<cursor_bounds_t>> clips;
+  auto io = fake.io();
+  io.cursor_clip = [&](std::wstring_view, std::optional<cursor_bounds_t> bounds) {
+    clips.push_back(bounds);
+    return true;
+  };
+  manager_t manager(io);
+  ASSERT_TRUE(manager.prepare(true));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  EXPECT_EQ(fake.current.paths.size(), 1u);
+  ASSERT_EQ(clips.size(), 1u);
+  EXPECT_EQ(clips.back(), (cursor_bounds_t {0, 0, 1920, 1080}));
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  EXPECT_FALSE(clips.back());
+}
+
+TEST(PrimaryDisplayExclusiveCursor, NotificationRefreshAcceptsArHotplugWithoutRewritingJournal) {
+  fake_io_t fake;
+  std::vector<std::optional<cursor_bounds_t>> clips;
+  auto io = fake.io();
+  io.cursor_clip = [&](std::wstring_view identity, std::optional<cursor_bounds_t> bounds) {
+    EXPECT_EQ(identity, L"virtual");
+    clips.push_back(bounds);
+    return true;
+  };
+  manager_t manager(io);
+  ASSERT_TRUE(manager.prepare(true));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  ASSERT_TRUE(fake.journal && fake.journal->exclusive_topology);
+  const auto journal_before_hotplug = serialize(*fake.journal);
+
+  // Windows resets ClipCursor when an approved AR target activates. Cursor maintenance follows
+  // the exact live virtual identity without requiring the pre-hotplug topology to remain equal.
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"hotplugged-ar", -1920, 0}});
+  ASSERT_TRUE(manager.refresh_active_cursor_clip(L"virtual"));
+  ASSERT_FALSE(clips.empty());
+  EXPECT_EQ(clips.back(), (cursor_bounds_t {0, 0, 1920, 1080}));
+  EXPECT_EQ(serialize(*fake.journal), journal_before_hotplug);
+}
+
+TEST(PrimaryDisplayExclusive, DisplayChangeReDisablesAnOrdinaryBaselineMonitor) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  fake.current = make_snapshot({
+    {L"virtual", 0, 0},
+    {L"physical-left", -1920, 0},
+    {L"physical-primary", 1920, 0},
+  });
+
+  ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"physical-left", -1920, 0}});
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, baseline);
+}
+
+TEST(PrimaryDisplayExclusive, DisconnectRestoresWhenAnOrdinaryMonitorReactivatesFirst) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  fake.current = make_snapshot({
+    {L"virtual", 0, 0},
+    {L"physical-left", -1920, 0},
+    {L"physical-primary", 1920, 0},
+  });
+
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, baseline);
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, DisplayChangeCreatesRecoveryBaselineForAHeadlessSession) {
+  fake_io_t fake;
+  fake.current = make_snapshot({{L"virtual", 0, 0}});
+  fake.catalog = make_snapshot({{L"virtual", 0, 0}, {L"new-monitor", 1920, 0}});
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  EXPECT_FALSE(fake.journal);
+
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"new-monitor", 1920, 0}});
+  ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
+  expect_positions(fake.current, {{L"virtual", 0, 0}});
+  ASSERT_TRUE(fake.journal);
+
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"new-monitor", 1920, 0}});
+}
+
+TEST(PrimaryDisplayExclusive, DisplayChangeDisablesAndLaterRestoresANewOrdinaryOutput) {
+  fake_io_t fake;
+  fake.catalog = make_snapshot({
+    {L"physical-left", -1920, 120},
+    {L"physical-primary", 0, 0},
+    {L"virtual", 1920, -200},
+    {L"hotplugged-monitor", 3840, 0},
+  });
+  start_exclusive(fake);
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"hotplugged-monitor", 1920, 0}});
+  manager_t manager(fake.io());
+
+  ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
+  expect_positions(fake.current, {{L"virtual", 0, 0}});
+  ASSERT_TRUE(fake.journal && fake.journal->pending_restore);
+  EXPECT_NE(
+    std::ranges::find(fake.journal->pending_restore->device_paths, L"hotplugged-monitor"),
+    fake.journal->pending_restore->device_paths.end()
+  );
+
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {
+    {L"physical-left", -1920, 120},
+    {L"physical-primary", 0, 0},
+    {L"hotplugged-monitor", 1920, 0},
+    {L"virtual", 3840, 0},
+  });
+}
+
+TEST(PrimaryDisplayExclusive, DisplayChangeKeepsANewApprovedArOutputAndExcludesItFromCursorBounds) {
+  fake_io_t fake;
+  fake.catalog = make_snapshot({
+    {L"physical-left", -1920, 120},
+    {L"physical-primary", 0, 0},
+    {L"virtual", 1920, -200},
+    {L"hotplugged-ar", 3840, 0},
+  });
+  fake.preserved_exclusive.insert(L"hotplugged-ar");
+  std::vector<std::optional<cursor_bounds_t>> clips;
+  auto io = fake.io();
+  io.cursor_clip = [&](std::wstring_view, std::optional<cursor_bounds_t> bounds) {
+    clips.push_back(bounds);
+    return true;
+  };
+  manager_t manager(io);
+  ASSERT_TRUE(manager.prepare(true));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"hotplugged-ar", 1920, 0}});
+
+  ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"hotplugged-ar", -1920, 0}});
+  ASSERT_FALSE(clips.empty());
+  EXPECT_EQ(clips.back(), (cursor_bounds_t {0, 0, 1920, 1080}));
+  ASSERT_TRUE(fake.journal);
+  EXPECT_NE(
+    std::ranges::find(fake.journal->exclusive_preserved, L"hotplugged-ar"),
+    fake.journal->exclusive_preserved.end()
+  );
+  ASSERT_TRUE(manager.restore(L"virtual"));
+}
+
+TEST(PrimaryDisplayExclusive, DisplayChangeReclassifiesAFormerlyDisconnectedHotplug) {
+  fake_io_t fake;
+  fake.catalog = make_snapshot({
+    {L"physical-left", -1920, 120},
+    {L"physical-primary", 0, 0},
+    {L"virtual", 1920, -200},
+    {L"hotplugged-ar", 3840, 0},
+    {L"hotplugged-monitor", 5760, 0},
+  });
+  fake.preserved_exclusive.insert(L"hotplugged-ar");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"hotplugged-ar", 1920, 0}});
+  ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"hotplugged-ar", -1920, 0}});
+
+  fake.catalog.paths[named_index(fake.catalog, L"hotplugged-ar")].targetInfo.targetAvailable = FALSE;
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"hotplugged-monitor", 1920, 0}});
+  ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
+  expect_positions(fake.current, {{L"virtual", 0, 0}});
+  ASSERT_TRUE(fake.journal && fake.journal->pending_restore && fake.journal->exclusive_topology);
+  EXPECT_EQ(std::ranges::count(fake.journal->exclusive_preserved, L"hotplugged-ar"), 0);
+  EXPECT_EQ(std::ranges::count(fake.journal->exclusive_topology->device_paths, L"hotplugged-ar"), 0);
+  EXPECT_EQ(std::ranges::count(fake.journal->pending_restore->device_paths, L"hotplugged-ar"), 0);
+  EXPECT_EQ(std::ranges::count(fake.journal->pending_restore->device_paths, L"hotplugged-monitor"), 1);
+
+  fake.catalog.paths[named_index(fake.catalog, L"hotplugged-ar")].targetInfo.targetAvailable = TRUE;
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"hotplugged-ar", 1920, 0}});
+  ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"hotplugged-ar", -1920, 0}});
+
+  fake.catalog.paths[named_index(fake.catalog, L"hotplugged-ar")].targetInfo.targetAvailable = FALSE;
+  fake.current = make_snapshot({{L"virtual", 0, 0}});
+  ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {
+    {L"physical-left", -1920, 120},
+    {L"physical-primary", 0, 0},
+    {L"hotplugged-monitor", 1920, 0},
+    {L"virtual", 3840, 0},
+  });
+}
+
+TEST(PrimaryDisplayExclusive, DisconnectMergesANewOutputAfterApprovedArUnplugs) {
+  fake_io_t fake;
+  fake.catalog = make_snapshot({
+    {L"physical-left", -1920, 120},
+    {L"physical-primary", 0, 0},
+    {L"virtual", 1920, -200},
+    {L"hotplugged-ar", 3840, 0},
+    {L"hotplugged-monitor", 5760, 0},
+  });
+  fake.preserved_exclusive.insert(L"hotplugged-ar");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"hotplugged-ar", 1920, 0}});
+  ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
+
+  fake.catalog.paths[named_index(fake.catalog, L"hotplugged-ar")].targetInfo.targetAvailable = FALSE;
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"hotplugged-monitor", 1920, 0}});
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {
+    {L"physical-left", -1920, 120},
+    {L"physical-primary", 0, 0},
+    {L"hotplugged-monitor", 1920, 0},
+    {L"virtual", 3840, 0},
+  });
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, DisconnectRetiresAnUnavailableApprovedHotplugWithoutNotification) {
+  fake_io_t fake;
+  fake.catalog = make_snapshot({
+    {L"physical-left", -1920, 120},
+    {L"physical-primary", 0, 0},
+    {L"virtual", 1920, -200},
+    {L"hotplugged-ar", 3840, 0},
+  });
+  fake.preserved_exclusive.insert(L"hotplugged-ar");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"hotplugged-ar", 1920, 0}});
+  ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
+
+  fake.catalog.paths[named_index(fake.catalog, L"hotplugged-ar")].targetInfo.targetAvailable = FALSE;
+  fake.current = make_snapshot({{L"virtual", 0, 0}});
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, baseline);
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusiveCursor, PrimaryOnlyModeDoesNotAcquireAGlobalClip) {
+  fake_io_t fake;
+  auto io = fake.io();
+  io.cursor_clip = [&](std::wstring_view, std::optional<cursor_bounds_t> bounds) {
+    EXPECT_FALSE(bounds);
+    return true;
+  };
+  manager_t manager(io);
+  EXPECT_TRUE(manager.promote(L"virtual", false));
+  EXPECT_TRUE(manager.restore(L"virtual"));
+}
+
+TEST(PrimaryDisplayExclusiveCursor, FailedTopologyVerificationCannotAcquireClip) {
+  fake_io_t fake;
+  fake.ignore_apply = true;
+  auto io = fake.io();
+  io.cursor_clip = [&](std::wstring_view, std::optional<cursor_bounds_t> bounds) {
+    EXPECT_FALSE(bounds);
+    return true;
+  };
+  manager_t manager(io);
+  ASSERT_TRUE(manager.prepare(true));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  EXPECT_FALSE(manager.promote(L"virtual", true));
+}
+
+TEST(PrimaryDisplayExclusiveCursor, FailedClipAcquisitionRejectsPromotionAndReleasesTentativeOwnership) {
+  fake_io_t fake;
+  std::vector<bool> requested;
+  auto io = fake.io();
+  io.cursor_clip = [&](std::wstring_view, std::optional<cursor_bounds_t> bounds) {
+    requested.push_back(bounds.has_value());
+    return !bounds;
+  };
+  manager_t manager(io);
+  ASSERT_TRUE(manager.prepare(true));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  EXPECT_FALSE(manager.promote(L"virtual", true));
+  EXPECT_EQ(requested, (std::vector<bool> {true, false}));
+  EXPECT_TRUE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusiveCursor, FailedClipReleasePreventsTopologyRestoreUntilRetry) {
+  fake_io_t fake;
+  bool release_ok = false;
+  auto io = fake.io();
+  io.cursor_clip = [&](std::wstring_view, std::optional<cursor_bounds_t> bounds) {
+    return bounds.has_value() || release_ok;
+  };
+  manager_t manager(io);
+  ASSERT_TRUE(manager.prepare(true));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  fake.events.clear();
+  EXPECT_FALSE(manager.restore(L"virtual"));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), 0);
+  EXPECT_TRUE(fake.journal);
+  release_ok = true;
+  EXPECT_TRUE(manager.restore(L"virtual"));
 }
