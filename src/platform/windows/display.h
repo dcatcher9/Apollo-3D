@@ -922,8 +922,7 @@ namespace platf::dxgi {
 
   class gpu_cursor_t {
   public:
-    gpu_cursor_t():
-        cursor_view {0, 0, 0, 0, 0.0f, 1.0f} {};
+    gpu_cursor_t() = default;
 
     void set_pos(LONG topleft_x, LONG topleft_y, LONG display_width, LONG display_height, DXGI_MODE_ROTATION display_rotation, bool visible) {
       this->topleft_x = topleft_x;
@@ -976,21 +975,21 @@ namespace platf::dxgi {
     }
 
     texture2d_t texture;
-    LONG texture_width;
-    LONG texture_height;
+    LONG texture_width = 0;
+    LONG texture_height = 0;
 
-    LONG topleft_x;
-    LONG topleft_y;
+    LONG topleft_x = 0;
+    LONG topleft_y = 0;
 
-    LONG display_width;
-    LONG display_height;
-    DXGI_MODE_ROTATION display_rotation;
+    LONG display_width = 0;
+    LONG display_height = 0;
+    DXGI_MODE_ROTATION display_rotation = DXGI_MODE_ROTATION_IDENTITY;
 
     shader_res_t input_res;
 
-    D3D11_VIEWPORT cursor_view;
+    D3D11_VIEWPORT cursor_view {0, 0, 0, 0, 0.0f, 1.0f};
 
-    bool visible;
+    bool visible = false;
   };
 
   class display_base_t: public display_t {
