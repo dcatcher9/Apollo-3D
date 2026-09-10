@@ -969,19 +969,47 @@ namespace proc {
     return platf::primary_display::prepare(_virtual_display_only);
   }
 
-  bool proc_t::promote_virtual_display(bool enable_hdr) {
+  bool proc_t::promote_virtual_display(
+    bool enable_hdr,
+    std::chrono::milliseconds topology_retry_window
+  ) {
     const bool had_hdr_worker = _hdr_worker.joinable();
     stop_hdr_worker();
     _hdr_worker_state.reset();
-    const bool promoted =
+    const auto promote_once = [&]() {
   #ifdef SUNSHINE_TESTS
-      _display_topology_test_hook ?
-        _display_topology_test_hook(
+      if (_display_topology_test_hook) {
+        return _display_topology_test_hook(
           display_topology_test_operation_e::promote,
           _virtual_display_only
-        ) :
+        );
+      }
   #endif
-        platf::primary_display::promote(_virtual_display_device_path, _virtual_display_only);
+      return platf::primary_display::promote(_virtual_display_device_path, _virtual_display_only);
+    };
+
+    bool promoted = promote_once();
+    int retry_count = 0;
+    if (!promoted && topology_retry_window > 0ms) {
+      const auto deadline = std::chrono::steady_clock::now() + topology_retry_window;
+      BOOST_LOG(warning) << "Windows display topology was still settling after restore; retrying retained virtual-display promotion."sv;
+      while (!promoted) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+          break;
+        }
+        std::this_thread::sleep_for(std::min(
+          50ms,
+          std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
+        ));
+        ++retry_count;
+        promoted = promote_once();
+      }
+      if (promoted) {
+        BOOST_LOG(info) << "Retained virtual-display promotion succeeded after "sv
+                        << retry_count << " topology-settle retry attempt(s)."sv;
+      }
+    }
     if (!promoted || !refresh_virtual_display_binding()) {
       return false;
     }
@@ -1698,7 +1726,9 @@ namespace proc {
     }
     // Failed reconfiguration/rollback paths above leave the disconnected desktop restored.
     // Promote only a successful reconnect, before capture starts using the new topology.
-    if (_virtual_display && !promote_virtual_display(launch_session->enable_hdr)) {
+    // Windows can briefly publish incomplete CCD readback after restore; the durable display
+    // journal makes this bounded promotion replay safe.
+    if (_virtual_display && !promote_virtual_display(launch_session->enable_hdr, 1500ms)) {
       BOOST_LOG(error) << "Could not make the retained virtual display primary; terminating its unproven display contract."sv;
       terminate();
       return 503;

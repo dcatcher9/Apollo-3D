@@ -324,7 +324,10 @@ namespace proc {
     void clear_virtual_display_binding();
     bool refresh_virtual_display_binding();
     bool prepare_virtual_display_topology();
-    bool promote_virtual_display(bool enable_hdr);
+    bool promote_virtual_display(
+      bool enable_hdr,
+      std::chrono::milliseconds topology_retry_window = std::chrono::milliseconds::zero()
+    );
     void adopt_virtual_display(
       VDISPLAY::creation_result_t created_display,
       bool enable_hdr
