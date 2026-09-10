@@ -195,7 +195,6 @@ TEST(NvHttpLaunchParsingTest, VirtualDisplayOnlyDefaultsOffAndAcceptsExactClient
       "1",
       std::nullopt,
       std::nullopt,
-      std::nullopt,
       value
     );
     ASSERT_TRUE(requested);
@@ -206,22 +205,7 @@ TEST(NvHttpLaunchParsingTest, VirtualDisplayOnlyDefaultsOffAndAcceptsExactClient
       "1",
       std::nullopt,
       std::nullopt,
-      std::nullopt,
       value
     )) << value;
-  }
-}
-
-TEST(NvHttpLaunchParsingTest, ClientCursorConfinementDefaultsOnAndAcceptsExplicitOff) {
-  const auto omitted = nvhttp::parse_launch_display_options(std::nullopt, std::nullopt, std::nullopt);
-  ASSERT_TRUE(omitted);
-  EXPECT_TRUE(omitted->confine_cursor);
-  for (const auto value : {"0", "1"}) {
-    const auto requested = nvhttp::parse_launch_display_options("1", std::nullopt, std::nullopt, value);
-    ASSERT_TRUE(requested);
-    EXPECT_EQ(requested->confine_cursor, std::string_view(value) == "1");
-  }
-  for (const auto value : {"", "2", "-1", "-0", "+1", "01", "00", " 1", "true", "false", "1x", "0&virtualDisplay=1"}) {
-    EXPECT_FALSE(nvhttp::parse_launch_display_options("1", std::nullopt, std::nullopt, value)) << value;
   }
 }

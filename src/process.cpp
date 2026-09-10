@@ -386,16 +386,6 @@ namespace proc {
     return display_name;
   }
 
-  std::string proc_t::virtual_display_device_path() const {
-    std::lock_guard lock(process_state_mutex);
-#ifdef _WIN32
-    if (_virtual_display && _launch_session && _launch_session->virtual_display) {
-      return platf::to_utf8(_virtual_display_device_path);
-    }
-#endif
-    return {};
-  }
-
   void proc_t::set_display_name(std::string name) {
     std::lock_guard lock(process_state_mutex);
     set_display_name_locked(std::move(name));

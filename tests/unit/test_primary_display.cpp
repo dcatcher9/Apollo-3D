@@ -1252,7 +1252,7 @@ TEST(PrimaryDisplayExclusiveCursor, ClipsOnlyVerifiedTopologyAndRefreshesForResi
   EXPECT_TRUE(clips.back());
 }
 
-TEST(PrimaryDisplayExclusiveCursor, OwnsClipBeforeAnArDisplayCanHotplug) {
+TEST(PrimaryDisplayExclusiveCursor, SoleVirtualOutputDoesNotAcquireGlobalClip) {
   fake_io_t fake;
   std::vector<std::optional<cursor_bounds_t>> clips;
   auto io = fake.io();
@@ -1266,7 +1266,7 @@ TEST(PrimaryDisplayExclusiveCursor, OwnsClipBeforeAnArDisplayCanHotplug) {
   ASSERT_TRUE(manager.promote(L"virtual", true));
   EXPECT_EQ(fake.current.paths.size(), 1u);
   ASSERT_EQ(clips.size(), 1u);
-  EXPECT_EQ(clips.back(), (cursor_bounds_t {0, 0, 1920, 1080}));
+  EXPECT_FALSE(clips.back());
   ASSERT_TRUE(manager.restore(L"virtual"));
   EXPECT_FALSE(clips.back());
 }
@@ -1373,6 +1373,8 @@ TEST(PrimaryDisplayExclusive, DisplayChangeKeepsANewApprovedArOutputAndExcludesI
   ASSERT_TRUE(manager.prepare(true));
   ASSERT_TRUE(manager.bind_pending(L"virtual"));
   ASSERT_TRUE(manager.promote(L"virtual", true));
+  ASSERT_FALSE(clips.empty());
+  EXPECT_FALSE(clips.back());
   fake.current = make_snapshot({{L"virtual", 0, 0}, {L"hotplugged-ar", 1920, 0}});
 
   ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
@@ -1384,6 +1386,20 @@ TEST(PrimaryDisplayExclusive, DisplayChangeKeepsANewApprovedArOutputAndExcludesI
     std::ranges::find(fake.journal->exclusive_preserved, L"hotplugged-ar"),
     fake.journal->exclusive_preserved.end()
   );
+
+  // Losing the only preserved output releases ClipCursor, while the exclusive session remains
+  // alive so a later display notification can still be reconciled.
+  fake.catalog.paths[named_index(fake.catalog, L"hotplugged-ar")].targetInfo.targetAvailable = FALSE;
+  fake.current = make_snapshot({{L"virtual", 0, 0}});
+  ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
+  expect_positions(fake.current, {{L"virtual", 0, 0}});
+  EXPECT_FALSE(clips.back());
+
+  fake.catalog.paths[named_index(fake.catalog, L"hotplugged-ar")].targetInfo.targetAvailable = TRUE;
+  fake.current = make_snapshot({{L"virtual", 0, 0}, {L"hotplugged-ar", 1920, 0}});
+  ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"hotplugged-ar", -1920, 0}});
+  EXPECT_EQ(clips.back(), (cursor_bounds_t {0, 0, 1920, 1080}));
   ASSERT_TRUE(manager.restore(L"virtual"));
 }
 
@@ -1513,6 +1529,7 @@ TEST(PrimaryDisplayExclusiveCursor, FailedTopologyVerificationCannotAcquireClip)
 
 TEST(PrimaryDisplayExclusiveCursor, FailedClipAcquisitionRejectsPromotionAndReleasesTentativeOwnership) {
   fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
   std::vector<bool> requested;
   auto io = fake.io();
   io.cursor_clip = [&](std::wstring_view, std::optional<cursor_bounds_t> bounds) {
@@ -1529,6 +1546,7 @@ TEST(PrimaryDisplayExclusiveCursor, FailedClipAcquisitionRejectsPromotionAndRele
 
 TEST(PrimaryDisplayExclusiveCursor, FailedClipReleasePreventsTopologyRestoreUntilRetry) {
   fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
   bool release_ok = false;
   auto io = fake.io();
   io.cursor_clip = [&](std::wstring_view, std::optional<cursor_bounds_t> bounds) {

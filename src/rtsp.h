@@ -106,7 +106,6 @@ namespace rtsp_stream {
     bool enable_sops;
     bool virtual_display;
     bool virtual_display_only = false;  ///< Client-owned preference for this launch or resume.
-    bool confine_cursor = true;  ///< Client-owned preference, reapplied for each launch/resume.
     uint32_t scale_factor;
     int sbs_mode = 0;
 

@@ -247,8 +247,6 @@ namespace proc {
     bool activate_remote_virtual_display_lease(std::uint64_t lease);
     /** Restore the original primary on disconnect, retaining apps/display for a warm reconnect. */
     bool restore_primary_display();
-    /** Exact remote monitor identity for input confinement; empty for a physical desktop. */
-    std::string virtual_display_device_path() const;
     void terminate(bool immediate = false, bool needs_refresh = true);
 
     /** Thread-safe snapshot/update of the display selected by the capture pipeline. */

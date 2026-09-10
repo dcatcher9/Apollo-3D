@@ -614,12 +614,8 @@ namespace nvhttp {
     std::optional<std::string_view> virtual_display,
     std::optional<std::string_view> scale_factor,
     std::optional<std::string_view> sbs_mode,
-    std::optional<std::string_view> confine_cursor,
     std::optional<std::string_view> virtual_display_only
   ) {
-    if (confine_cursor && *confine_cursor != "0" && *confine_cursor != "1") {
-      return std::nullopt;
-    }
     if (virtual_display_only && *virtual_display_only != "0" && *virtual_display_only != "1") {
       return std::nullopt;
     }
@@ -636,9 +632,7 @@ namespace nvhttp {
       parse_or_default(launch_int_field::scale_factor, scale_factor, defaults.scale_factor);
     const auto parsed_sbs_mode =
       parse_or_default(launch_int_field::sbs_mode, sbs_mode, defaults.sbs_mode);
-    const auto parsed_confine_cursor =
-      parse_or_default(launch_int_field::binary_option, confine_cursor, defaults.confine_cursor);
-    if (!parsed_virtual_display || !parsed_virtual_display_only || !parsed_scale_factor || !parsed_sbs_mode || !parsed_confine_cursor) {
+    if (!parsed_virtual_display || !parsed_virtual_display_only || !parsed_scale_factor || !parsed_sbs_mode) {
       return std::nullopt;
     }
 
@@ -647,7 +641,6 @@ namespace nvhttp {
       static_cast<bool>(*parsed_virtual_display_only),
       static_cast<std::uint32_t>(*parsed_scale_factor),
       *parsed_sbs_mode,
-      static_cast<bool>(*parsed_confine_cursor),
     };
   }
 
@@ -812,7 +805,6 @@ namespace nvhttp {
       find_arg(args, "virtualDisplay"),
       find_arg(args, "scaleFactor"),
       find_arg(args, "sbsMode"),
-      find_arg(args, "confineCursor"),
       find_arg(args, "virtualDisplayOnly")
     );
     if (!enable_sops || !host_audio || !surround_info || !enable_hdr || !display_options) {
@@ -843,7 +835,6 @@ namespace nvhttp {
     launch_session->enable_hdr = *enable_hdr;
     launch_session->virtual_display = display_options->virtual_display;
     launch_session->virtual_display_only = display_options->virtual_display_only;
-    launch_session->confine_cursor = display_options->confine_cursor;
     launch_session->scale_factor = display_options->scale_factor;
     launch_session->sbs_mode = display_options->sbs_mode;
 
@@ -1357,7 +1348,6 @@ namespace nvhttp {
 #ifdef _WIN32
       tree.put("root.VirtualDisplayCapable", true);
       tree.put("root.VirtualDisplayOnlySupported", 1);
-      tree.put("root.CursorConfinementSupported", 1);
       if (!!(named_cert_p->perm & PERM::_all_actions)) {
         tree.put("root.VirtualDisplayDriverReady", proc::vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK);
       } else {

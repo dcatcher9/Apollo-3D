@@ -40,8 +40,8 @@ namespace {
     cursor_clip_manager_t guard(fake.io());
     ASSERT_TRUE(guard.confine(L"virtual", {0, 0, 1920, 1080}));
     EXPECT_EQ(fake.current, (cursor_bounds_t {0, 0, 1920, 1080}));
-    EXPECT_FALSE(fake.current.contains({-1, 500}));
-    EXPECT_TRUE(fake.current.contains({0, 500}));
+    EXPECT_FALSE(cursor_bounds_intersection(fake.current, {-1, 500, 1, 1}));
+    EXPECT_TRUE(cursor_bounds_intersection(fake.current, {0, 500, 1, 1}));
     fake.desktop = {-1920, 0, 5760, 2160};
     ASSERT_TRUE(guard.confine(L"virtual", {0, 0, 3840, 2160}));
     EXPECT_EQ(fake.current, (cursor_bounds_t {0, 0, 3840, 2160}));
@@ -64,7 +64,7 @@ namespace {
     ASSERT_TRUE(guard.confine(L"virtual", {0, 0, 1920, 1080}));
     ASSERT_EQ(fake.applied.size(), initial_apply_count + 1);
     EXPECT_EQ(fake.current, (cursor_bounds_t {0, 0, 1920, 1080}));
-    EXPECT_FALSE(fake.current.contains({-1, 500}));
+    EXPECT_FALSE(cursor_bounds_intersection(fake.current, {-1, 500, 1, 1}));
   }
 
   TEST(ExclusiveCursorClip, RedundantForegroundRefreshDoesNotRewriteOwnedClip) {

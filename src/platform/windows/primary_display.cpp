@@ -842,9 +842,10 @@ namespace platf::primary_display {
       return cursor_clip;
     }
 
-    // Access is serialized by transaction_mutex. This live ownership proof is deliberately
-    // separate from the recovery journal: an approved AR hotplug changes the active topology,
-    // but does not end the remote session that owns cursor isolation.
+    // Access is serialized by transaction_mutex. Session ownership is deliberately separate
+    // from both the recovery journal and ClipCursor ownership: a virtual-only session with no
+    // active AR output needs hotplug reconciliation, but does not need a cursor clip.
+    std::optional<std::wstring> active_exclusive_display_identity;
     std::optional<std::wstring> active_cursor_clip_identity;
     std::optional<detail::cursor_bounds_t> active_cursor_clip_bounds;
     bool exclusive_session_expected = false;
@@ -891,7 +892,7 @@ namespace platf::primary_display {
                           << bounds->x << ',' << bounds->y << ',' << bounds->width << ',' << bounds->height << "].";
         }
       } else {
-        BOOST_LOG(info) << "Released exclusive virtual-display cursor isolation before restoring the display topology.";
+        BOOST_LOG(info) << "Released exclusive virtual-display cursor isolation.";
       }
       return result;
     }
@@ -2105,6 +2106,11 @@ namespace platf::primary_display {
       } else if (snapshot->paths.size() != 1) {
         return false;
       }
+      // With one active output Windows has nowhere else to move the shared cursor. Avoid taking
+      // ownership of the process-global ClipCursor state until a preserved AR output is active.
+      if (snapshot->paths.size() == 1) {
+        return io_.cursor_clip(device_path, std::nullopt);
+      }
       return clip_cursor_to_display(*snapshot, device_path);
     }
 
@@ -2268,11 +2274,19 @@ namespace platf::primary_display {
       const bool promoted = acquire_ownership() && manager().promote(device_path, exclusive);
       if (exclusive) {
         exclusive_session_expected = promoted;
+        if (promoted) {
+          active_exclusive_display_identity = device_path;
+        } else if (active_exclusive_display_identity && same_device(*active_exclusive_display_identity, device_path)) {
+          active_exclusive_display_identity.reset();
+        }
       }
       return promoted;
     } catch (const std::exception &exception) {
       if (exclusive) {
         exclusive_session_expected = false;
+        if (active_exclusive_display_identity && same_device(*active_exclusive_display_identity, device_path)) {
+          active_exclusive_display_identity.reset();
+        }
       }
       BOOST_LOG(error) << "Temporary primary-display promotion failed: " << exception.what();
       return false;
@@ -2306,7 +2320,11 @@ namespace platf::primary_display {
   bool restore(std::wstring_view expected_device_path) {
     std::lock_guard lock(transaction_mutex);
     try {
-      exclusive_session_expected = false;
+      if (!active_exclusive_display_identity || expected_device_path.empty() ||
+          same_device(*active_exclusive_display_identity, expected_device_path)) {
+        exclusive_session_expected = false;
+        active_exclusive_display_identity.reset();
+      }
       return acquire_ownership() && manager().restore(expected_device_path);
     } catch (const std::exception &exception) {
       BOOST_LOG(error) << "Temporary primary-display recovery failed: " << exception.what();
@@ -2339,7 +2357,7 @@ namespace platf::primary_display {
   bool reconcile_exclusive_display_topology() {
     std::lock_guard lock(transaction_mutex);
     try {
-      if (!active_cursor_clip_identity) {
+      if (!active_exclusive_display_identity) {
         if (exclusive_session_expected) {
           return true;
         }
@@ -2347,7 +2365,7 @@ namespace platf::primary_display {
         // display notification is the earliest safe opportunity to finish that exact restore.
         return acquire_ownership() && manager().recover_inactive_exclusive();
       }
-      return manager().reconcile_active_exclusive(*active_cursor_clip_identity);
+      return manager().reconcile_active_exclusive(*active_exclusive_display_identity);
     } catch (const std::exception &exception) {
       BOOST_LOG(error) << "Could not reassert exclusive virtual-display topology: " << exception.what();
       return false;

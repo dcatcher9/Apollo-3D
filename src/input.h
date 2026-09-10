@@ -332,7 +332,7 @@ namespace input {
 
   bool probe_gamepads();
 
-  std::shared_ptr<input_t> alloc(safe::mail_t mail, crypto::PERM permissions = crypto::PERM::_all, bool authored_haptics = false, std::optional<std::string> confine_display_path = std::nullopt);
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, crypto::PERM permissions = crypto::PERM::_all, bool authored_haptics = false);
 
   struct touch_port_t: public platf::touch_port_t {
     int env_width, env_height;

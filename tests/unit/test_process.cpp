@@ -416,25 +416,6 @@ TEST(ProcessTest, LiveVideoModeIsRefusedWithoutAVirtualDisplay) {
   EXPECT_FALSE(process.live_video_mode_needs_display_change(1920, 1080, 60000));
 }
 
-TEST(ProcessTest, InputConfinementIdentityRequiresOwnedRemoteVirtualDisplay) {
-  proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
-  EXPECT_TRUE(process.virtual_display_device_path().empty());
-#ifdef _WIN32
-  auto launch = std::make_shared<rtsp_stream::launch_session_t>();
-  launch->id = 47;
-  proc::process_test_access::retain(process, launch);
-  auto cleanup = util::fail_guard([&]() {
-    proc::process_test_access::clear(process);
-  });
-  proc::process_test_access::mark_virtual(process, true);
-  EXPECT_TRUE(process.virtual_display_device_path().empty());
-  launch->virtual_display = true;
-  EXPECT_EQ(process.virtual_display_device_path(), "test-only-monitor-path");
-  proc::process_test_access::mark_virtual(process, false);
-  EXPECT_TRUE(process.virtual_display_device_path().empty());
-#endif
-}
-
 TEST(ProcessTest, LiveVideoModeFailureIsRetryableOnlyAfterProvenRollback) {
   EXPECT_EQ(
     proc::live_video_mode_failure_result(true),

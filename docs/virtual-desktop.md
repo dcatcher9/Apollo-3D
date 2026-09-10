@@ -55,15 +55,18 @@ Sunshine restores the previous displays on disconnect, including during the reco
 Applications may move again when physical displays return, and their exact positions or minimized
 states are not guaranteed to return. Streams using a physical desktop are unaffected.
 
-Exclusive mode also applies a Windows cursor boundary around the virtual display. Both the mouse
-connected to the PC and client input are restricted by it, keeping normal pointer movement off the
-active AR display. This boundary applies throughout exclusive mode, including before glasses
-connect, and takes precedence over the client's **Keep cursor on virtual display** setting. Windows
-has one shared cursor and no exclusive owner for its `ClipCursor` boundary. The host repairs the
-boundary after virtual-display resizing, display hotplug, and foreground-window changes and checks
-it periodically. An application that continuously replaces the shared boundary can briefly win
-until the next repair. The host releases its ownership before restoring the desktop on disconnect
-or teardown.
+When the virtual display is the only active output, Windows has no other desktop region for the
+cursor to enter and Sunshine does not call `ClipCursor`. If an approved AR-glasses output must stay
+active, Sunshine applies a Windows cursor boundary around the virtual display. It affects both the
+mouse connected to the PC and client input, keeping normal pointer movement off the AR display.
+Sunshine acquires and releases the boundary as approved AR outputs connect and disconnect while
+keeping display reconciliation active for the whole exclusive session.
+
+Windows has one shared cursor and no exclusive owner for its `ClipCursor` boundary. The host repairs
+an active boundary after virtual-display resizing, display hotplug, and foreground-window changes
+and checks it periodically. An application that continuously replaces the shared boundary can
+briefly win until the next repair. The host releases its ownership before restoring the desktop on
+disconnect or teardown.
 
 ## Display restoration
 
@@ -100,28 +103,18 @@ The ordinary virtual-display-only stream and disconnect path has been verified o
 Recovery after a hard host crash still requires a live multi-monitor test; automated lifecycle and
 geometry tests cannot establish that Windows and every display driver recover identically.
 
-## Keeping the remote cursor visible
+## Cursor behavior
 
-By default, remote cursor movement is bounded to the streamed virtual display so the pointer stops
-at its edges. This applies to relative remote mouse movement as well as absolute pointer placement.
-When other monitors are active, if the physical mouse moves the shared cursor onto one of them,
-the next remote pointer movement brings it back to the streamed display.
+Client mouse input uses the normal Windows relative and absolute input paths. With **Use virtual
+display only while streaming** disabled, the cursor can move across every active monitor in the
+Windows desktop.
 
-With **Use virtual display only while streaming** disabled, this setting constrains client input;
-someone at the PC can still move the physical mouse normally. With exclusive mode enabled, its
-Windows cursor boundary constrains the shared cursor regardless of this client setting. Existing
-application cursor restrictions are preserved where they overlap the virtual display. Cleanup
-restores the previous restriction only while Sunshine still owns the applied boundary, without
-overwriting another application's replacement.
-
-While confinement is enabled, every relative movement is converted to a bounded absolute position,
-including movement with a hidden game cursor. An application's own cursor lock may change before
-Windows processes queued input, so it cannot provide the remote confinement guarantee. If an
-application needs unmodified raw-relative input or Windows acceleration, turn off **Keep cursor
-on virtual display** in Moonlight 3D's **Global Settings → Audio & input**. During a stream, use
-the same control in **Session settings**, then **Apply & reconnect**. This is a client choice;
-there is no host configuration toggle. Turning it off preserves raw-relative client input, but
-exclusive mode's Windows cursor boundary still excludes the AR display.
+Exclusive mode owns cursor isolation automatically. A sole virtual display needs no explicit
+boundary. When an approved AR output remains active, the shared Windows cursor is clipped to the
+virtual display until that output disconnects or the session ends. Existing application cursor
+restrictions are preserved where they overlap the virtual display. Cleanup restores a previous
+restriction only while Sunshine still owns the applied boundary, without overwriting another
+application's replacement.
 
 ## Client protocol
 
@@ -133,19 +126,5 @@ the choice. A different client with view-only permission can resume the stream b
 retained choice. A retryable reconfiguration failure keeps the last accepted choice; an
 unrecoverable topology failure terminates the retained session.
 
-Authenticated host `/serverinfo` also advertises `CursorConfinementSupported=1`. A client must
-check this specific capability before presenting confinement as supported; the host-session-token
-or Host SBS capabilities alone do not imply it.
-
-Supporting clients send the exact query value `confineCursor=1` (enabled) or `confineCursor=0`
-(disabled) on both `/launch` and `/resume`. The host defaults to enabled when an older client
-omits the flag. Other values reject the request before display or application side effects.
-Every accepted resume supplies the new stream's choice rather than inheriting its predecessor's
-setting. Confinement applies only to a host-created virtual monitor; physical desktop streams
-retain ordinary input behavior.
-
-Clients apply a changed choice through reconnect. Moonlight 3D uses its existing **Apply &
-reconnect** action. There is no custom control packet or live setter for this option.
-
-The cursor is shared Windows state. These controls do not provide independent pointers or
+The cursor is shared Windows state. Exclusive isolation does not provide independent pointers or
 simultaneous independent keyboard focus for local and remote users.

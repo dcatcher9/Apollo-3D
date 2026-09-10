@@ -840,19 +840,6 @@ namespace platf {
   void move_mouse(input_t &input, int deltaX, int deltaY);
   void abs_mouse(input_t &input, const touch_port_t &touch_port, float x, float y);
 
-  /** Remote-only monitor confinement. Destruction never changes the physical mouse's bounds. */
-  struct cursor_confinement_t: deinit_t {
-    virtual bool move(int delta_x, int delta_y) = 0;
-    virtual bool absolute(float x_fraction, float y_fraction) = 0;
-    virtual bool restore() = 0;
-    virtual void reset() = 0;
-  };
-
-  std::unique_ptr<cursor_confinement_t> allocate_cursor_confinement(input_t &input, const std::string &display_device_path);
-#ifdef SUNSHINE_TESTS
-  /** Read-only production resolver; never injects input or changes display topology. */
-  std::optional<touch_port_t> cursor_confinement_bounds_for_test(const std::string &display_device_path);
-#endif
   void button_mouse(input_t &input, int button, bool release);
   void scroll(input_t &input, int distance);
   void hscroll(input_t &input, int distance);
