@@ -1562,6 +1562,145 @@ TEST(PrimaryDisplayLocalExclusive, ShrinkingMiddleSinkClosesTheGapBeforeRestore)
   EXPECT_FALSE(fake.journal);
 }
 
+TEST(PrimaryDisplayLocalExclusive, HardwareSbsSwitchRecoversRememberedExtendedLayout) {
+  fake_io_t fake;
+  fake.current = make_snapshot({{L"lg-monitor", 0, 0}, {L"glasses", 5120, 0}});
+  fake.current.modes[0].sourceMode.width = 5120;
+  fake.current.modes[0].sourceMode.height = 2160;
+  fake.current.colors[0]->hdr_user_enabled = true;
+  fake.current.colors[0]->advanced_color_active = true;
+  fake.current.colors[0]->active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  const auto monitor_color = *fake.current.colors[0];
+  fake.preserved_exclusive.insert(L"glasses");
+  std::optional<cursor_bounds_t> clip;
+  auto io = fake.io();
+  io.cursor_clip = [&](std::wstring_view, std::optional<cursor_bounds_t> bounds) {
+    clip = bounds;
+    return true;
+  };
+  manager_t manager(io);
+  ASSERT_TRUE(manager.prepare(true, L"glasses"));
+  fake.current = make_snapshot({{L"lg-monitor", 0, 0}, {L"glasses", 5120, 0}, {L"virtual", 7040, 0}});
+  fake.current.modes[0].sourceMode.width = 5120;
+  fake.current.modes[0].sourceMode.height = 2160;
+  fake.current.colors[0] = monitor_color;
+  fake.catalog = fake.current;
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"glasses", -1920, 0}});
+
+  // Captured Windows state from the physical glasses' 2D -> SBS switch: the LG
+  // becomes primary, the source moves to x=5120, and the wider sink moves to 7040.
+  fake.current = make_snapshot({{L"lg-monitor", 0, 0}, {L"virtual", 5120, 0}, {L"glasses", 7040, 0}});
+  fake.current.modes[0].sourceMode.width = 5120;
+  fake.current.modes[0].sourceMode.height = 2160;
+  fake.current.colors[0] = monitor_color;
+  fake.current.modes[4].sourceMode.width = 3840;
+  fake.current.paths[2].targetInfo.refreshRate = {120013, 1000};
+  ASSERT_TRUE(manager.reconcile_active_exclusive(L"virtual"));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"glasses", -3840, 0}});
+  const auto sink = named_index(fake.current, L"glasses");
+  EXPECT_EQ(fake.current.modes[fake.current.paths[sink].sourceInfo.sourceModeInfoIdx].sourceMode.width, 3840u);
+  EXPECT_EQ(fake.current.paths[sink].targetInfo.refreshRate.Numerator, 120013u);
+  EXPECT_FALSE(fake.current.colors[sink]->hdr_user_enabled);
+  EXPECT_EQ(clip, (cursor_bounds_t {0, 0, 1920, 1080}));
+  ASSERT_TRUE(fake.journal);
+  expect_positions(*fake.journal->original_topology, {{L"lg-monitor", 0, 0}, {L"glasses", 5120, 0}});
+  ASSERT_TRUE(manager.restore(L"virtual"));
+  expect_positions(fake.current, {{L"lg-monitor", 0, 0}, {L"glasses", 5120, 0}, {L"virtual", 8960, 0}});
+  EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"lg-monitor")]->hdr_user_enabled);
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayLocalExclusive, ReassertsSourcePrimaryWhenGlassesHardwareMakesSinkPrimary) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"physical-left"));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  fake.current = make_snapshot({{L"physical-left", 0, 0}, {L"virtual", 3840, 0}});
+  fake.current.modes[0].sourceMode.width = 3840;
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  expect_positions(fake.current, {{L"virtual", 0, 0}, {L"physical-left", -3840, 0}});
+}
+
+TEST(PrimaryDisplayLocalExclusive, DirectPromotionDoesNotAdoptAnUnrecordedOutput) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"physical-left"));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  fake.current = make_snapshot({{L"unrecorded-monitor", 0, 0}, {L"physical-left", 1920, 0}, {L"virtual", 3840, 0}});
+  fake.events.clear();
+  EXPECT_FALSE(manager.promote(L"virtual", true));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), 0);
+}
+
+TEST(PrimaryDisplayExclusive, RemoteModeDoesNotAdoptRepositionedPhysicalModeGeneration) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"physical-left", 1920, 0}, {L"virtual", 5760, 0}});
+  fake.current.modes[2].sourceMode.width = 3840;
+  fake.events.clear();
+  EXPECT_FALSE(manager.reconcile_active_exclusive(L"virtual"));
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), 0);
+}
+
+TEST(PrimaryDisplayLocalExclusive, StartupRecoversHardwareModeSwitchAfterDriverRetiresSource) {
+  fake_io_t fake;
+  fake.current = make_snapshot({{L"lg-monitor", 0, 0}, {L"glasses", 5120, 0}, {L"virtual", 7040, 0}});
+  fake.current.modes[0].sourceMode.width = 5120;
+  fake.current.modes[0].sourceMode.height = 2160;
+  fake.current.colors[0]->hdr_user_enabled = true;
+  fake.current.colors[0]->advanced_color_active = true;
+  fake.current.colors[0]->active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  fake.catalog = fake.current;
+  fake.preserved_exclusive.insert(L"glasses");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"glasses"));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  fake.journal = deserialize(serialize(*fake.journal));
+  ASSERT_TRUE(fake.journal);
+
+  fake.current = make_snapshot({{L"lg-monitor", 0, 0}, {L"glasses", 7040, 0}});
+  fake.current.modes[0].sourceMode.width = 5120;
+  fake.current.modes[0].sourceMode.height = 2160;
+  fake.current.modes[2].sourceMode.width = 3840;
+  fake.current.paths[1].targetInfo.refreshRate = {120013, 1000};
+  manager_t restarted(fake.io());
+  fake.ignore_apply = true;
+  EXPECT_FALSE(restarted.restore());
+  EXPECT_TRUE(fake.journal);
+  fake.ignore_apply = false;
+  ASSERT_TRUE(restarted.restore());
+  expect_positions(fake.current, {{L"lg-monitor", 0, 0}, {L"glasses", 5120, 0}});
+  EXPECT_EQ(fake.current.paths[named_index(fake.current, L"glasses")].targetInfo.refreshRate.Numerator, 120013u);
+  EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"lg-monitor")]->hdr_user_enabled);
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayLocalExclusive, SourceAbsentRecoveryDoesNotAdoptUnknownModeGeneration) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"physical-left"));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"physical-left", 1920, 0}, {L"unrecorded-output", 5760, 0}});
+  fake.current.modes[2].sourceMode.width = 3840;
+  fake.events.clear();
+  EXPECT_FALSE(manager.restore());
+  EXPECT_EQ(std::ranges::count(fake.events, "apply"), 0);
+  EXPECT_TRUE(fake.journal);
+}
+
 TEST(PrimaryDisplayLocalExclusive, GlassesUnpluggedBeforeAddDoesNotLeavePreparedRecoveryBlocked) {
   fake_io_t fake;
   fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"glasses", 1920, 0}});

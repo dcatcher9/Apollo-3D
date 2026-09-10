@@ -808,8 +808,10 @@ TEST(ArGlassesModeTransition, KeepsVirtualDesktopForSupportedModesOnSameOutput) 
   auto after = before;
   after.mode = ar_glasses::presentation_mode_e::sbs_ai;
 
-  EXPECT_TRUE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, after));
-  EXPECT_TRUE(ar_glasses::detail::local_session_can_reconfigure_for_test(after, before));
+  EXPECT_TRUE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, after, false));
+  EXPECT_TRUE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, after, true));
+  EXPECT_TRUE(ar_glasses::detail::local_session_can_reconfigure_for_test(after, before, false));
+  EXPECT_TRUE(ar_glasses::detail::local_session_can_reconfigure_for_test(after, before, true));
 }
 
 TEST(ArGlassesModeTransition, RebuildsOnlyForOutputAdapterOrUnsupportedChanges) {
@@ -821,31 +823,60 @@ TEST(ArGlassesModeTransition, RebuildsOnlyForOutputAdapterOrUnsupportedChanges) 
 
   auto changed = before;
   changed.device_path = LR"(\\?\DISPLAY#OTHER#test)";
-  EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, changed));
+  EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, changed, false));
+  EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, changed, true));
 
   changed = before;
   changed.adapter_id.LowPart = 43;
-  EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, changed));
+  EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, changed, false));
+  EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, changed, true));
 
   changed = before;
   changed.hdr_active = true;
-  EXPECT_TRUE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, changed));
+  EXPECT_TRUE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, changed, false));
+  EXPECT_TRUE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, changed, true));
 
   changed = before;
   changed.hdr_known = false;
-  EXPECT_TRUE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, changed));
+  EXPECT_TRUE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, changed, false));
+  EXPECT_TRUE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, changed, true));
 
   changed = before;
   changed.mode = ar_glasses::presentation_mode_e::unsupported;
-  EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, changed));
+  EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, changed, false));
+  EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, changed, true));
+
+  auto unsupported_before = before;
+  unsupported_before.mode = ar_glasses::presentation_mode_e::unsupported;
+  EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(unsupported_before, before, false));
+  EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(unsupported_before, before, true));
 
   changed = before;
   changed.is_primary = true;
-  EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, changed));
+  EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, changed, false));
 
   changed = before;
   changed.is_cloned = true;
-  EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, changed));
+  EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, changed, false));
+  EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, changed, true));
+}
+
+TEST(ArGlassesModeTransition, ExclusiveSessionRepairsATemporarilyPrimarySink) {
+  ar_glasses::detail::local_session_contract_t before;
+  before.device_path = LR"(\\?\DISPLAY#TCL03D4#test)";
+  before.adapter_id.LowPart = 42;
+  before.adapter_id.HighPart = 7;
+  before.mode = ar_glasses::presentation_mode_e::normal;
+
+  auto after = before;
+  after.mode = ar_glasses::presentation_mode_e::sbs_ai;
+  after.is_primary = true;
+
+  EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, after, false));
+  EXPECT_TRUE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, after, true));
+
+  after.is_cloned = true;
+  EXPECT_FALSE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, after, true));
 }
 
 TEST(ArGlassesModeTransition, RetirementDoesNotFollowAReusedPhysicalTargetId) {

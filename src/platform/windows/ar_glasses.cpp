@@ -874,12 +874,13 @@ namespace ar_glasses {
 
     bool can_reconfigure_local_session(
       const std::optional<target_state_t> &left,
-      const std::optional<target_state_t> &right
+      const std::optional<target_state_t> &right,
+      bool exclusive
     ) {
       return same_physical_output(left, right) &&
              left->mode != presentation_mode_e::unsupported &&
              right->mode != presentation_mode_e::unsupported &&
-             !right->is_primary && !right->is_cloned;
+             (exclusive || !right->is_primary) && !right->is_cloned;
     }
 
     bool same_presentation_contract(
@@ -2739,6 +2740,12 @@ namespace ar_glasses {
 
         auto presentation_target = active_target;
         const bool configured = update_display_topology([&]() -> bool {
+          // Promotion can renumber GDI sources. Resolve the retained driver identity inside the
+          // serialized transaction before the first mode setter, not only after color setup.
+          if (!refresh_virtual_display_reference()) {
+            BOOST_LOG(warning) << "Could not resolve the local AR source after initial display promotion."sv;
+            return false;
+          }
           if (VDISPLAY::changeDisplaySettings(virtual_display_name_.c_str(), source_width, source_height, active_target.refresh_millihz, !exclusive_) != DISP_CHANGE_SUCCESSFUL) {
             BOOST_LOG(warning) << "The local AR virtual desktop rejected its requested mode."sv;
           }
@@ -3280,6 +3287,13 @@ namespace ar_glasses {
         return ready_;
       }
 
+      bool can_reconfigure(
+        const std::optional<target_state_t> &before,
+        const std::optional<target_state_t> &after
+      ) const {
+        return can_reconfigure_local_session(before, after, exclusive_);
+      }
+
       bool running() const {
         return running_.load();
       }
@@ -3293,14 +3307,23 @@ namespace ar_glasses {
       }
 
       std::optional<target_state_t> re_isolate_target() {
-        const auto refreshed_name = refresh_virtual_display_reference();
-        if (!refreshed_name) {
+        auto source = refresh_virtual_display_reference();
+        if (!source) {
           return std::nullopt;
         }
-        if (exclusive_ && !platf::primary_display::promote(virtual_display_device_path_, true)) {
-          return std::nullopt;
+        if (exclusive_) {
+          // The presenter may be reinitializing concurrently. Keep an owned identity/name pair,
+          // never a view into the members that it refreshes under virtual_display_mutex_.
+          if (!platf::primary_display::promote(source->device_path, true)) {
+            return std::nullopt;
+          }
+          source = refresh_virtual_display_reference();
+          if (!source) {
+            return std::nullopt;
+          }
         }
-        const auto target = isolate_target();
+        const auto target = exclusive_ ? find_target(target_device_path_) :
+                                         isolate_physical_output(source->gdi_name, target_device_path_, original_target_rect_);
         if (!target) {
           return std::nullopt;
         }
@@ -3374,7 +3397,7 @@ namespace ar_glasses {
         running_.store(false);
       }
 
-      std::optional<std::wstring> refresh_virtual_display_reference() {
+      std::optional<resolved_virtual_display_t> refresh_virtual_display_reference() {
         std::lock_guard lock(virtual_display_mutex_);
         const auto resolved = resolve_virtual_display(
           virtual_display_identity_,
@@ -3396,7 +3419,7 @@ namespace ar_glasses {
         virtual_display_device_path_ = resolved->device_path;
         virtual_display_absence_started_.reset();
         virtual_display_absence_observations_ = 0;
-        return virtual_display_name_;
+        return resolved;
       }
 
       void start_presenter(const target_state_t &presentation_target) {
@@ -3485,7 +3508,7 @@ namespace ar_glasses {
             // contents must survive DXGI/topology churn, including a physical 2D/SBS mode switch.
             std::this_thread::sleep_for(100ms);
             if (const auto refreshed = refresh_virtual_display_reference()) {
-              presenter_config.source_display_name = platf::to_utf8(*refreshed);
+              presenter_config.source_display_name = platf::to_utf8(refreshed->gdi_name);
             } else {
               BOOST_LOG(error) << "Local AR virtual desktop could not be resolved; pausing for a controller retry."sv;
               break;
@@ -3819,7 +3842,7 @@ namespace ar_glasses {
             // Every distinct incompatible generation gets its own grace period. Churn through
             // several temporary modes must not accumulate enough time to make the newest 750 ms
             // observation look like a stable disconnect.
-            if (session_ && observed != applied_ && !can_reconfigure_local_session(applied_, observed)) {
+            if (session_ && observed != applied_ && !session_->can_reconfigure(applied_, observed)) {
               incompatible_transition_started_ = now;
             } else {
               incompatible_transition_started_.reset();
@@ -3869,7 +3892,7 @@ namespace ar_glasses {
               } else {
                 applied_ = pending;
               }
-            } else if (session_ && can_reconfigure_local_session(applied_, pending)) {
+            } else if (session_ && session_->can_reconfigure(applied_, pending)) {
               if (now < retry_after_) {
                 std::this_thread::sleep_for(topology_poll_interval);
                 continue;
@@ -4123,7 +4146,8 @@ namespace ar_glasses {
 
   bool detail::local_session_can_reconfigure_for_test(
     const local_session_contract_t &before,
-    const local_session_contract_t &after
+    const local_session_contract_t &after,
+    bool exclusive
   ) {
     auto make_target = [](const local_session_contract_t &contract) {
       target_state_t target;
@@ -4138,7 +4162,7 @@ namespace ar_glasses {
       target.is_cloned = contract.is_cloned;
       return target;
     };
-    return can_reconfigure_local_session(make_target(before), make_target(after));
+    return can_reconfigure_local_session(make_target(before), make_target(after), exclusive);
   }
 
   bool detail::retirement_identity_matches_for_test(

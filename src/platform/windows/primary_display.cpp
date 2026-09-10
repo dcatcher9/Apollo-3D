@@ -547,13 +547,13 @@ namespace platf::primary_display {
         return false;
       }
       if (!journal.local_sink.empty()) {
-        // The glasses' hardware button may change width, refresh, HDR and the left-edge
-        // attachment simultaneously. Only the exact source/sink identities may enter this
-        // local continuation; the virtual source must still own the primary origin.
-        const auto layout = detail::inspect(owned);
-        const auto *primary = layout ? find_position(*layout, virtual_identity) : nullptr;
-        if (primary && primary->x == 0 && primary->y == 0 && std::ranges::all_of(*layout, [&](const auto &entry) {
-              return same_device(entry.device_path, virtual_identity) || same_device(entry.device_path, journal.local_sink);
+        // A hardware mode switch can restore Windows' remembered extended layout, including
+        // the ordinary monitor as primary and new positions for both local outputs. The full
+        // snapshot must be valid; after removing only durably recorded ordinary outputs above,
+        // the remaining identities must still be our exact source and selected sink. Promotion
+        // reestablishes the source origin instead of requiring it before recovery can begin.
+        if (detail::inspect(current) && std::ranges::all_of(owned.device_paths, [&](const auto &identity) {
+              return same_device(identity, virtual_identity) || same_device(identity, journal.local_sink);
             })) {
           return true;
         }
@@ -1652,7 +1652,15 @@ namespace platf::primary_display {
                                       journal.exclusive_preserved,
                                       *journal.original_topology
                                     ));
-      const bool owned = owned_current.paths.empty() || owned_exclusive || same_topology(owned_current, *journal.before_exclusive) ||
+      // SudoVDA may retire the source when an older host exits before it can recover a
+      // hardware mode switch. The remaining exact recorded local outputs still need their
+      // saved ordinary layout restored; no replacement or unrecorded output gains ownership.
+      const bool retired_local_source = !journal.local_sink.empty() && !virtual_index &&
+                                        std::ranges::all_of(current->device_paths, [&](const auto &identity) {
+                                          return find_path(*journal.original_topology, identity) ||
+                                                 (journal.pending_restore && find_path(*journal.pending_restore, identity));
+                                        });
+      const bool owned = owned_current.paths.empty() || owned_exclusive || retired_local_source || same_topology(owned_current, *journal.before_exclusive) ||
                          exclusive_continuation_with_recorded_outputs(*current, journal, journal.promoted_primary) ||
                          (journal.pending_restore && owned_subset(owned_current, *journal.pending_restore)) ||
                          (!owned_virtual_index && owned_subset(owned_current, *journal.original_topology));

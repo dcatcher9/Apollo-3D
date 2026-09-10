@@ -164,10 +164,13 @@ namespace ar_glasses {
       bool is_cloned = false;
     };
 
-    /** Return whether a mode transition may retain the existing local SudoVDA desktop. */
+    /** Return whether a mode transition may retain the existing local SudoVDA desktop.
+     * Exclusive sessions may repair a transiently primary sink; extended sessions may not.
+     */
     bool local_session_can_reconfigure_for_test(
       const local_session_contract_t &before,
-      const local_session_contract_t &after
+      const local_session_contract_t &after,
+      bool exclusive
     );
 
     struct virtual_display_identity_contract_t {

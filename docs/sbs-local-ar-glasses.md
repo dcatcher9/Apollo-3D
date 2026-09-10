@@ -42,6 +42,12 @@ cannot activate for an HDR sink, Sunshine 3D retains the same color-managed SDR 
 Moving the glasses to another GPU/adapter also forces a complete rebuild: the adapter LUID is part
 of both the detected target contract and the presenter's expected output identity.
 
+In exclusive mode, switching the glasses' hardware mode can make Windows restore a remembered
+extended layout, including the ordinary physical monitor as primary. Sunshine 3D reconciles the
+recorded display identities, makes the same virtual source primary again, disables ordinary outputs,
+and refreshes cursor confinement without recreating the virtual desktop. GDI display names are
+resolved again after promotion before any source mode changes.
+
 ### RayNeo Air 4 Pro wear state
 
 Wear detection is intentionally model-specific. Sunshine 3D enables it only when the selected
