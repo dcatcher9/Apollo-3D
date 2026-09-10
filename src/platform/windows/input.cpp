@@ -8,6 +8,7 @@
 #include <Windows.h>
 
 // standard includes
+#include <chrono>
 #include <cmath>
 #include <memory>
 
@@ -562,53 +563,61 @@ namespace platf {
     class cursor_confinement_raw_t: public cursor_confinement_t {
     public:
       explicit cursor_confinement_raw_t(const std::string &device_path):
-          device_path_(from_utf8(device_path)) {}
-
-      bool move(int dx, int dy) override {
+          device_path_(from_utf8(device_path)) {
+        // Probe without moving the shared physical cursor. Resolution is revalidated for every
+        // later remote action, so a temporarily unavailable display never becomes a fallback.
         cursor_dpi_scope_t dpi;
         if (!dpi) {
-          return false;
+          report_injection(failure_e::dpi, GetLastError());
+        } else if (!resolve_bounds()) {
+          report_injection(failure_e::identity_bounds);
+        }
+      }
+
+      bool move(int dx, int dy) override {
+        if (!relative_seen_) {
+          relative_seen_ = true;
+          BOOST_LOG(info) << "Remote cursor confinement received relative mouse input; using bounded absolute movement."sv;
+        }
+        cursor_dpi_scope_t dpi;
+        if (!dpi) {
+          return report_injection(failure_e::dpi, GetLastError());
         }
         const auto bounds = resolve_bounds();
-        const auto observed = current_position();
-        if (bounds && observed && app_has_confined_hidden_cursor(*bounds, *observed)) {
-          // Games that already own a bounded hidden cursor retain raw relative input semantics.
-          // In desktop mode an absolute event avoids Windows acceleration crossing an edge.
-          state_.observe_game_cursor(*observed);
-          INPUT event {};
-          event.type = INPUT_MOUSE;
-          event.mi.dwFlags = MOUSEEVENTF_MOVE;
-          event.mi.dx = dx;
-          event.mi.dy = dy;
-          if (SendInput(1, &event, sizeof(event)) == 1) {
-            return true;
-          }
-          // The next packet must prove the clip and display again on the new input desktop.
-          syncThreadDesktop();
-          return false;
+        const auto observed = observe_position(bounds);
+        if (!observed) {
+          return resynchronize_failed_action(failure_e::cursor_query, cursor_query_error_);
         }
+        // A game's ClipCursor rectangle can change before Windows processes queued input.
+        // Confinement must therefore bound every event itself, including hidden cursors.
         return inject(state_.move(bounds, observed, dx, dy), bounds);
       }
 
       bool absolute(float x, float y) override {
+        if (!absolute_seen_) {
+          absolute_seen_ = true;
+          BOOST_LOG(info) << "Remote cursor confinement received absolute mouse input."sv;
+        }
         cursor_dpi_scope_t dpi;
         if (!dpi) {
-          return false;
+          return report_injection(failure_e::dpi, GetLastError());
         }
         const auto bounds = resolve_bounds();
+        // Absolute placement supplies its own destination. An unavailable cursor observation
+        // must not discard that move before a following click uses the accepted position.
+        observe_position(bounds);
         return inject(state_.absolute(bounds, x, y), bounds);
       }
 
       bool restore() override {
         cursor_dpi_scope_t dpi;
         if (!dpi) {
-          return false;
+          return report_injection(failure_e::dpi, GetLastError());
         }
         const auto bounds = resolve_bounds();
-        const auto observed = current_position();
-        if (bounds && observed && app_has_confined_hidden_cursor(*bounds, *observed)) {
-          state_.observe_game_cursor(*observed);
-          return true;
+        const auto observed = observe_position(bounds);
+        if (!observed) {
+          return resynchronize_failed_action(failure_e::cursor_query, cursor_query_error_);
         }
         const auto position = state_.move(bounds, observed, 0, 0);
         return inject(position, bounds);
@@ -632,6 +641,24 @@ namespace platf {
 #endif
 
     private:
+      enum class failure_e {
+        none,
+        identity_bounds,
+        dpi,
+        cursor_query,
+        coordinates,
+        desktop_metrics,
+        desktop_topology,
+        retry_geometry,
+        clip_query,
+        clip_outside,
+        send_input,
+        desktop_sync,
+      };
+
+      enum class cursor_location_e { unavailable, inside, outside };
+      enum class cursor_visibility_e { unavailable, visible, hidden, suppressed };
+
       static std::optional<detail::cursor_point_t> current_position() {
         POINT point {};
         if (!GetCursorPos(&point)) {
@@ -640,18 +667,38 @@ namespace platf {
         return detail::cursor_point_t {point.x, point.y};
       }
 
-      bool app_has_confined_hidden_cursor(const detail::cursor_bounds_t &bounds, detail::cursor_point_t observed) const {
+      std::optional<detail::cursor_point_t> observe_position(const std::optional<detail::cursor_bounds_t> &bounds) {
+        const auto position = current_position();
+        cursor_query_error_ = position ? ERROR_SUCCESS : GetLastError();
         CURSORINFO cursor {sizeof(CURSORINFO)};
-        RECT clip {};
-        if (!GetCursorInfo(&cursor) || !GetClipCursor(&clip) || MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONULL) != monitor_) {
-          return false;
+        const auto visibility = !GetCursorInfo(&cursor) ? cursor_visibility_e::unavailable :
+                                (cursor.flags & CURSOR_SUPPRESSED) ? cursor_visibility_e::suppressed :
+                                (cursor.flags & CURSOR_SHOWING) ? cursor_visibility_e::visible : cursor_visibility_e::hidden;
+        if (reported_visibility_ != visibility) {
+          const char *label = visibility == cursor_visibility_e::visible ? "visible" :
+                              visibility == cursor_visibility_e::hidden ? "hidden" :
+                              visibility == cursor_visibility_e::suppressed ? "suppressed" : "unavailable";
+          BOOST_LOG(info) << "Remote host cursor visibility before input: " << label;
+          reported_visibility_ = visibility;
         }
-        return detail::game_cursor_already_confined(
-          bounds,
-          {clip.left, clip.top, clip.right - clip.left, clip.bottom - clip.top},
-          observed,
-          (cursor.flags & (CURSOR_SHOWING | CURSOR_SUPPRESSED)) == 0
-        );
+        if (!bounds) {
+          return position;
+        }
+        const auto location = !position ? cursor_location_e::unavailable :
+                              bounds->contains(*position) ? cursor_location_e::inside : cursor_location_e::outside;
+        // Record state changes immediately: the user may stop moving after a disappearance.
+        // Repeated positions in the same inside/outside or visibility state produce no output.
+        if (reported_location_ != location) {
+          if (position) {
+            BOOST_LOG(info) << "Remote cursor observation before input: "
+                            << (location == cursor_location_e::inside ? "inside" : "outside")
+                            << " target at " << position->first << ',' << position->second;
+          } else {
+            BOOST_LOG(warning) << "Remote cursor observation before input: GetCursorPos unavailable."sv;
+          }
+          reported_location_ = location;
+        }
+        return position;
       }
 
       std::optional<detail::cursor_bounds_t> verified_bounds(HMONITOR monitor) const {
@@ -694,6 +741,7 @@ namespace platf {
           return std::nullopt;
         }
         if (auto bounds = verified_bounds(monitor_)) {
+          report_bounds(*bounds);
           return bounds;
         }
         monitor_ = nullptr;
@@ -706,55 +754,172 @@ namespace platf {
           return TRUE;
         },
                             reinterpret_cast<LPARAM>(this));
-        return verified_bounds(monitor_);
+        auto bounds = verified_bounds(monitor_);
+        if (bounds) {
+          report_bounds(*bounds);
+        }
+        return bounds;
       }
 
-      bool inject(std::optional<detail::cursor_point_t> position, std::optional<detail::cursor_bounds_t> bounds) {
+      void report_bounds(const detail::cursor_bounds_t &bounds) {
+        const auto now = std::chrono::steady_clock::now();
+        if (reported_bounds_ != bounds && (!reported_bounds_ || now - bounds_log_time_ >= 1s)) {
+          BOOST_LOG(info) << "Remote cursor confinement target bounds: " << bounds.x << ',' << bounds.y
+                          << ' ' << bounds.width << 'x' << bounds.height;
+          reported_bounds_ = bounds;
+          bounds_log_time_ = now;
+        }
+      }
+
+      bool report_injection(failure_e failure, DWORD error = ERROR_SUCCESS) {
+        const auto now = std::chrono::steady_clock::now();
+        if (failure == failure_e::none && !reported_failure_) {
+          return true;
+        }
+        if (reported_failure_ != failure && (!reported_failure_ || now - failure_log_time_ >= 1s)) {
+          const char *stage = "none";
+          switch (failure) {
+            case failure_e::none: break;
+            case failure_e::identity_bounds: stage = "monitor identity/bounds"; break;
+            case failure_e::dpi: stage = "DPI context"; break;
+            case failure_e::cursor_query: stage = "GetCursorPos"; break;
+            case failure_e::coordinates: stage = "input coordinates"; break;
+            case failure_e::desktop_metrics: stage = "desktop metrics"; break;
+            case failure_e::desktop_topology: stage = "desktop topology"; break;
+            case failure_e::retry_geometry: stage = "geometry changed during desktop retry"; break;
+            case failure_e::clip_query: stage = "GetClipCursor"; break;
+            case failure_e::clip_outside: stage = "application clip outside target"; break;
+            case failure_e::send_input: stage = "SendInput"; break;
+            case failure_e::desktop_sync: stage = "input desktop synchronization"; break;
+          }
+          if (failure == failure_e::none) {
+            BOOST_LOG(info) << "Remote cursor confinement resumed bounded input."sv;
+          } else {
+            BOOST_LOG(warning) << "Remote cursor confinement blocked at " << stage << "; error=" << error;
+          }
+          reported_failure_ = failure;
+          failure_log_time_ = now;
+        }
+        return failure == failure_e::none;
+      }
+
+      bool resynchronize_failed_action(failure_e failure, DWORD error = ERROR_SUCCESS) {
+        // Read-side failures can also mean this worker retained an old input desktop. There
+        // is no valid candidate to reuse; synchronize once and let the next packet recompute.
+        SetLastError(ERROR_SUCCESS);
+        if (!syncThreadDesktop()) {
+          return report_injection(failure_e::desktop_sync, GetLastError());
+        }
+        return report_injection(failure, error);
+      }
+
+      bool inject(const std::optional<detail::cursor_point_t> &position, const std::optional<detail::cursor_bounds_t> &bounds) {
+        if (!bounds) {
+          return resynchronize_failed_action(failure_e::identity_bounds);
+        }
         if (!position) {
-          return false;
+          return report_injection(failure_e::coordinates);
         }
         bool retry = false;
-        return detail::run_with_desktop_retry(
+        auto failure = failure_e::none;
+        DWORD error = ERROR_SUCCESS;
+        const bool sent = detail::run_with_desktop_retry(
           [&]() {
-            // A desktop switch invalidates the geometry used by the first attempt. Prove the
-            // same monitor identity and rebuild pixel normalization before retrying injection.
+            // A pixel calculated before a rebase/resize no longer expresses the same movement.
+            // Drop it instead of clamping that old coordinate onto a different target edge.
             if (retry) {
-              bounds = resolve_bounds();
+              const auto resolved = resolve_bounds();
+              if (!detail::cursor_retry_bounds_match(bounds, resolved)) {
+                failure = resolved ? failure_e::retry_geometry : failure_e::identity_bounds;
+                error = ERROR_SUCCESS;
+                return false;
+              }
             }
             retry = true;
             RECT clip {};
-            if (!bounds || !GetClipCursor(&clip)) {
+            if (!GetClipCursor(&clip)) {
+              failure = failure_e::clip_query;
+              error = GetLastError();
+              return false;
+            }
+            const detail::cursor_bounds_t desktop {
+              GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+              GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)
+            };
+            if (!desktop.valid()) {
+              failure = failure_e::desktop_metrics;
+              error = ERROR_SUCCESS;
+              return false;
+            }
+            const detail::cursor_bounds_t application_clip {clip.left, clip.top, clip.right - clip.left, clip.bottom - clip.top};
+            if (!detail::cursor_bounds_intersection(*bounds, application_clip)) {
+              failure = failure_e::clip_outside;
+              error = ERROR_SUCCESS;
               return false;
             }
             // An app on the physical monitor may own ClipCursor. SendInput can succeed while
             // Windows redirects the pointer there, so never allow a click based on that result.
-            const auto allowed = detail::cursor_bounds_intersection(*bounds, {clip.left, clip.top, clip.right - clip.left, clip.bottom - clip.top});
-            if (!allowed) {
-              return false;
-            }
-            position = allowed->clamp(position->first, position->second);
-            state_.observe_game_cursor(*position);
-            const auto width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-            const auto height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-            if (width <= 0 || height <= 0) {
+            const auto injection = detail::make_confined_cursor_injection(
+              *bounds,
+              application_clip,
+              desktop,
+              *position
+            );
+            if (!injection) {
+              failure = failure_e::desktop_topology;
+              error = ERROR_SUCCESS;
               return false;
             }
             INPUT event {};
             event.type = INPUT_MOUSE;
             event.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
-            event.mi.dx = detail::cursor_pixel_to_absolute(position->first, GetSystemMetrics(SM_XVIRTUALSCREEN), width);
-            event.mi.dy = detail::cursor_pixel_to_absolute(position->second, GetSystemMetrics(SM_YVIRTUALSCREEN), height);
-            return SendInput(1, &event, sizeof(event)) == 1;
+            event.mi.dx = injection->absolute.first;
+            event.mi.dy = injection->absolute.second;
+            SetLastError(ERROR_SUCCESS);
+            if (SendInput(1, &event, sizeof(event)) != 1) {
+              failure = failure_e::send_input;
+              error = GetLastError();
+              return false;
+            }
+            state_.observe_injected_cursor(injection->pixel);
+            if (!accepted_logged_) {
+              accepted_logged_ = true;
+              BOOST_LOG(info) << "Remote cursor confinement first accepted target: pixel=" << injection->pixel.first << ',' << injection->pixel.second
+                              << " bounds=" << bounds->x << ',' << bounds->y << ' ' << bounds->width << 'x' << bounds->height
+                              << " absolute=" << injection->absolute.first << ',' << injection->absolute.second;
+            }
+            return true;
           },
-          []() {
-            return syncThreadDesktop();
+          [&]() {
+            // A successfully queried clip outside the target is an application policy conflict,
+            // not evidence of a stale input desktop. Do not reopen desktops for every packet.
+            if (failure == failure_e::clip_outside || failure == failure_e::coordinates) {
+              return false;
+            }
+            // GetClipCursor and desktop metrics can fail on a stale desktop before SendInput.
+            // Synchronize for those failures too; the retry must prove unchanged target bounds.
+            SetLastError(ERROR_SUCCESS);
+            if (!syncThreadDesktop()) {
+              failure = failure_e::desktop_sync;
+              error = GetLastError();
+              return false;
+            }
+            return true;
           }
         );
+        return report_injection(sent ? failure_e::none : failure, error);
       }
 
       const std::wstring device_path_;
       HMONITOR monitor_ {};
       bool active_ = true;
+      bool relative_seen_ = false, absolute_seen_ = false, accepted_logged_ = false;
+      std::optional<detail::cursor_bounds_t> reported_bounds_;
+      std::optional<cursor_location_e> reported_location_;
+      std::optional<cursor_visibility_e> reported_visibility_;
+      std::optional<failure_e> reported_failure_;
+      std::chrono::steady_clock::time_point bounds_log_time_, failure_log_time_;
+      DWORD cursor_query_error_ = ERROR_SUCCESS;
       detail::confined_cursor_state_t state_;
     };
   }  // namespace

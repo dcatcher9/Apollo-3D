@@ -32,6 +32,8 @@ namespace platf::detail {
   struct cursor_bounds_t {
     int x, y, width, height;
 
+    bool operator==(const cursor_bounds_t &) const = default;
+
     [[nodiscard]] bool valid() const {
       return width > 0 && height > 0;
     }
@@ -67,41 +69,40 @@ namespace platf::detail {
   /** No OS-wide lock: only a new remote action may restore this session's saved position. */
   class confined_cursor_state_t {
   public:
+    /** Calculate a candidate; only observe_injected_cursor() commits an accepted OS event. */
     [[nodiscard]] std::optional<cursor_point_t> move(
       const std::optional<cursor_bounds_t> &bounds,
       const std::optional<cursor_point_t> &initial_position,
       int dx,
       int dy
-    ) {
+    ) const {
       if (!active_ || !bounds || !bounds->valid()) {
         return std::nullopt;
       }
-      if (!position_) {
-        position_ = initial_position && bounds->contains(*initial_position) ?
-                      *initial_position :
-                      cursor_point_t {bounds->x + bounds->width / 2, bounds->y + bounds->height / 2};
-      }
-      const auto start = bounds->clamp(position_->first, position_->second);
-      position_ = bounds->clamp(static_cast<std::int64_t>(start.first) + dx, static_cast<std::int64_t>(start.second) + dy);
-      return position_;
+      const auto previous = position_.value_or(
+        initial_position && bounds->contains(*initial_position) ?
+          *initial_position :
+          cursor_point_t {bounds->x + bounds->width / 2, bounds->y + bounds->height / 2}
+      );
+      const auto start = bounds->clamp(previous.first, previous.second);
+      return bounds->clamp(static_cast<std::int64_t>(start.first) + dx, static_cast<std::int64_t>(start.second) + dy);
     }
 
     [[nodiscard]] std::optional<cursor_point_t> absolute(
       const std::optional<cursor_bounds_t> &bounds,
       float x,
       float y
-    ) {
+    ) const {
       if (!active_ || !bounds || !bounds->valid() || !std::isfinite(x) || !std::isfinite(y)) {
         return std::nullopt;
       }
-      position_ = bounds->clamp(
+      return bounds->clamp(
         static_cast<std::int64_t>(bounds->x) + static_cast<std::int64_t>(std::clamp(x, 0.0f, 1.0f) * bounds->width),
         static_cast<std::int64_t>(bounds->y) + static_cast<std::int64_t>(std::clamp(y, 0.0f, 1.0f) * bounds->height)
       );
-      return position_;
     }
 
-    void observe_game_cursor(cursor_point_t position) {
+    void observe_injected_cursor(cursor_point_t position) {
       if (active_) {
         position_ = position;
       }
@@ -126,14 +127,40 @@ namespace platf::detail {
     return static_cast<int>(std::min<std::int64_t>(65535, (relative * 65536 + 32768) / extent));
   }
 
-  [[nodiscard]] inline bool game_cursor_already_confined(
+  struct confined_cursor_injection_t {
+    cursor_point_t pixel;
+    cursor_point_t absolute;
+  };
+
+  /** A computed pixel position may be retried only against the same target geometry. */
+  [[nodiscard]] inline bool cursor_retry_bounds_match(
+    const std::optional<cursor_bounds_t> &original,
+    const std::optional<cursor_bounds_t> &resolved
+  ) {
+    return original && original->valid() && resolved && *original == *resolved;
+  }
+
+  /** Reject mismatched topology snapshots rather than normalizing onto another monitor. */
+  [[nodiscard]] inline std::optional<confined_cursor_injection_t> make_confined_cursor_injection(
     const cursor_bounds_t &monitor,
     const cursor_bounds_t &clip,
-    cursor_point_t cursor,
-    bool cursor_hidden
+    const cursor_bounds_t &desktop,
+    cursor_point_t position
   ) {
-    return cursor_hidden && clip.valid() && monitor.contains(cursor) &&
-           monitor.contains({clip.x, clip.y}) &&
-           monitor.contains({clip.x + clip.width - 1, clip.y + clip.height - 1});
+    if (!monitor.valid() || !desktop.contains({monitor.x, monitor.y}) ||
+        static_cast<std::int64_t>(monitor.x) + monitor.width > static_cast<std::int64_t>(desktop.x) + desktop.width ||
+        static_cast<std::int64_t>(monitor.y) + monitor.height > static_cast<std::int64_t>(desktop.y) + desktop.height) {
+      return std::nullopt;
+    }
+    const auto allowed = cursor_bounds_intersection(monitor, clip);
+    if (!allowed) {
+      return std::nullopt;
+    }
+    const auto pixel = allowed->clamp(position.first, position.second);
+    return confined_cursor_injection_t {
+      pixel,
+      {cursor_pixel_to_absolute(pixel.first, desktop.x, desktop.width),
+       cursor_pixel_to_absolute(pixel.second, desktop.y, desktop.height)}
+    };
   }
 }  // namespace platf::detail

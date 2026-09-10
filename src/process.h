@@ -62,6 +62,7 @@ namespace proc {
     refresh_binding,
     request_hdr,
     promote,
+    restore,
     retire,
   };
 

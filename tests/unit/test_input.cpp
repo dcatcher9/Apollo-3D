@@ -71,7 +71,9 @@ TEST(InputCursorConfinementTests, RelativeMovementStopsAtEveryEdgeWithNegativeOr
   platf::detail::confined_cursor_state_t cursor;
   const platf::detail::cursor_bounds_t bounds {-1920, -1080, 1920, 1080};
   EXPECT_EQ(cursor.move(bounds, std::pair {-100, -100}, 32767, 32767), (std::pair {-1, -1}));
+  cursor.observe_injected_cursor({-1, -1});
   EXPECT_EQ(cursor.move(bounds, std::nullopt, -32768, -32768), (std::pair {-1920, -1080}));
+  cursor.observe_injected_cursor({-1920, -1080});
   EXPECT_EQ(cursor.move(bounds, std::nullopt, 10, 20), (std::pair {-1910, -1060}));
 }
 
@@ -87,9 +89,12 @@ TEST(InputCursorConfinementTests, RemotePositionSurvivesPhysicalMovementAndResiz
   platf::detail::confined_cursor_state_t cursor;
   const platf::detail::cursor_bounds_t first {1920, 0, 1920, 1080};
   EXPECT_EQ(cursor.move(first, std::pair {50, 50}, 0, 0), (std::pair {2880, 540}));
+  cursor.observe_injected_cursor({2880, 540});
   EXPECT_EQ(cursor.move(first, std::pair {50, 50}, 10, 0), (std::pair {2890, 540}));
+  cursor.observe_injected_cursor({2890, 540});
   // Even stale GetCursorPos observations cannot discard successive queued relative deltas.
   EXPECT_EQ(cursor.move(first, std::pair {2880, 540}, 10, 0), (std::pair {2900, 540}));
+  cursor.observe_injected_cursor({2900, 540});
   EXPECT_EQ(cursor.move(platf::detail::cursor_bounds_t {-800, -600, 800, 600}, std::nullopt, 0, 0), (std::pair {-1, -1}));
 }
 
@@ -115,13 +120,76 @@ TEST(InputCursorConfinementTests, AbsoluteEncodingKeepsInteriorDisplayEdgesInsid
   }
 }
 
-TEST(InputCursorConfinementTests, RawRelativeGameBypassRequiresHiddenCursorAndClipInsideTarget) {
-  const platf::detail::cursor_bounds_t monitor {1920, 0, 1920, 1080};
-  EXPECT_TRUE(platf::detail::game_cursor_already_confined(monitor, monitor, {2880, 540}, true));
-  EXPECT_FALSE(platf::detail::game_cursor_already_confined(monitor, monitor, {2880, 540}, false));
-  EXPECT_FALSE(platf::detail::game_cursor_already_confined(monitor, {0, 0, 3840, 1080}, {2880, 540}, true));
-  EXPECT_FALSE(platf::detail::game_cursor_already_confined(monitor, monitor, {50, 50}, true));
-  EXPECT_FALSE(platf::detail::game_cursor_already_confined(monitor, {1920, 0, 0, 0}, {2880, 540}, true));
+TEST(InputCursorConfinementTests, RepeatedLeftInputStaysInsideAfterAppReleasesItsCursorClip) {
+  using platf::detail::cursor_bounds_t;
+  for (const auto &[monitor, desktop] : std::array {
+         std::pair {cursor_bounds_t {0, 0, 1920, 1080}, cursor_bounds_t {-2560, 0, 4480, 1440}},
+         std::pair {cursor_bounds_t {2560, 0, 1920, 1080}, cursor_bounds_t {0, 0, 4480, 1440}},
+         std::pair {cursor_bounds_t {-1920, 0, 1920, 1080}, cursor_bounds_t {-1920, 0, 4480, 1440}},
+         std::pair {cursor_bounds_t {0, 0, 1920, 1080}, cursor_bounds_t {0, 0, 1920, 1080}},
+       }) {
+    platf::detail::confined_cursor_state_t cursor;
+    auto position = cursor.move(monitor, std::nullopt, -32768, 0);
+    ASSERT_TRUE(position);
+    auto injection = platf::detail::make_confined_cursor_injection(monitor, monitor, desktop, *position);
+    ASSERT_TRUE(injection);
+    cursor.observe_injected_cursor(injection->pixel);
+    for (int packet = 0; packet < 20; ++packet) {
+      // A game releases ClipCursor, and Windows/physical input reports an unrelated position.
+      // Every subsequent remote event must still encode the virtual monitor's leftmost pixel.
+      position = cursor.move(monitor, std::pair {desktop.x, desktop.y}, -32768, 0);
+      ASSERT_TRUE(position);
+      injection = platf::detail::make_confined_cursor_injection(monitor, desktop, desktop, *position);
+      ASSERT_TRUE(injection);
+      EXPECT_EQ(injection->pixel.first, monitor.x);
+      const auto decoded_x = desktop.x + static_cast<std::int64_t>(injection->absolute.first) * desktop.width / 65536;
+      const auto decoded_y = desktop.y + static_cast<std::int64_t>(injection->absolute.second) * desktop.height / 65536;
+      EXPECT_EQ(decoded_x, monitor.x);
+      EXPECT_TRUE(monitor.contains({static_cast<int>(decoded_x), static_cast<int>(decoded_y)}));
+      cursor.observe_injected_cursor(injection->pixel);
+    }
+  }
+}
+
+TEST(InputCursorConfinementTests, IncoherentDesktopGeometryAndOutsideAppClipCannotProduceInjection) {
+  const platf::detail::cursor_bounds_t monitor {0, 0, 1920, 1080};
+  const platf::detail::cursor_bounds_t desktop {-2560, 0, 4480, 1440};
+  EXPECT_FALSE(platf::detail::make_confined_cursor_injection(monitor, desktop, {-2560, 0, 2560, 1440}, {0, 500}));
+  EXPECT_FALSE(platf::detail::make_confined_cursor_injection(monitor, desktop, {0, 0, 1280, 720}, {0, 500}));
+  EXPECT_FALSE(platf::detail::make_confined_cursor_injection(monitor, desktop, {0, 0, 0, 0}, {0, 500}));
+  EXPECT_FALSE(platf::detail::make_confined_cursor_injection(monitor, {-2560, 0, 2560, 1440}, desktop, {0, 500}));
+}
+
+TEST(InputCursorConfinementTests, FailedCandidatesDoNotAccumulateBeforeInputRecovers) {
+  platf::detail::confined_cursor_state_t cursor;
+  const platf::detail::cursor_bounds_t bounds {0, 0, 1920, 1080};
+  const auto accepted = cursor.move(bounds, std::pair {900, 500}, 10, 0);
+  ASSERT_TRUE(accepted);
+  cursor.observe_injected_cursor(*accepted);
+  EXPECT_EQ(*accepted, (std::pair {910, 500}));
+
+  // Neither blocked relative input nor a rejected absolute placement changes the saved cursor.
+  for (int packet = 0; packet < 10; ++packet) {
+    EXPECT_EQ(cursor.move(bounds, std::pair {50, 50}, -2000, 0), (std::pair {0, 500}));
+    EXPECT_EQ(cursor.absolute(bounds, 1.0f, 1.0f), (std::pair {1919, 1079}));
+  }
+  const auto recovered = cursor.move(bounds, std::pair {50, 50}, 10, 0);
+  ASSERT_TRUE(recovered);
+  EXPECT_EQ(*recovered, (std::pair {920, 500}));
+  cursor.observe_injected_cursor(*recovered);
+  // Successful queued movement still accumulates even before GetCursorPos catches up.
+  EXPECT_EQ(cursor.move(bounds, std::pair {910, 500}, 10, 0), (std::pair {930, 500}));
+}
+
+TEST(InputCursorConfinementTests, DesktopRetryRejectsRebasedResizedOrMissingBounds) {
+  const platf::detail::cursor_bounds_t original {1920, 100, 1920, 1080};
+  EXPECT_TRUE(platf::detail::cursor_retry_bounds_match(original, original));
+  EXPECT_FALSE(platf::detail::cursor_retry_bounds_match(original, platf::detail::cursor_bounds_t {0, 100, 1920, 1080}));
+  EXPECT_FALSE(platf::detail::cursor_retry_bounds_match(original, platf::detail::cursor_bounds_t {1920, 0, 1920, 1080}));
+  EXPECT_FALSE(platf::detail::cursor_retry_bounds_match(original, platf::detail::cursor_bounds_t {1920, 100, 1280, 720}));
+  EXPECT_FALSE(platf::detail::cursor_retry_bounds_match(original, std::nullopt));
+  EXPECT_FALSE(platf::detail::cursor_retry_bounds_match(std::nullopt, std::nullopt));
+  EXPECT_FALSE(platf::detail::cursor_retry_bounds_match(platf::detail::cursor_bounds_t {0, 0, 0, 0}, platf::detail::cursor_bounds_t {0, 0, 0, 0}));
 }
 
 TEST(InputCursorConfinementTests, PhysicalAppClipCannotRedirectRemoteInputOntoPhysicalMonitor) {
@@ -210,6 +278,47 @@ TEST(InputCursorConfinementTests, NativeMonitorIdentityResolverMatchesActiveInte
     EXPECT_FALSE(platf::cursor_confinement_bounds_for_test(monitor.path + "-retired-session"));
   }
   EXPECT_FALSE(platf::cursor_confinement_bounds_for_test(""));
+}
+
+TEST(InputCursorConfinementTests, DesktopSyncRecoversClipQueryFailureOnlyWithOriginalBounds) {
+  const platf::detail::cursor_bounds_t original {1920, 0, 1920, 1080};
+  for (const bool rebased : {false, true}) {
+    platf::detail::confined_cursor_state_t cursor;
+    cursor.observe_injected_cursor({2500, 500});
+    const auto candidate = cursor.move(original, std::nullopt, 100, 0);
+    ASSERT_TRUE(candidate);
+    auto resolved = original;
+    bool clip_query_available = false;
+    unsigned clip_queries = 0, accepted = 0, synchronizations = 0;
+    const auto sent = platf::detail::run_with_desktop_retry(
+      [&]() {
+        if (!platf::detail::cursor_retry_bounds_match(original, resolved)) {
+          return false;
+        }
+        ++clip_queries;
+        if (!clip_query_available) {
+          return false;
+        }
+        ++accepted;
+        cursor.observe_injected_cursor(*candidate);
+        return true;
+      },
+      [&]() {
+        EXPECT_EQ(accepted, 0u);  // GetClipCursor failed before reaching SendInput.
+        ++synchronizations;
+        clip_query_available = true;
+        if (rebased) {
+          resolved.x = 0;
+        }
+        return true;
+      }
+    );
+    EXPECT_EQ(sent, !rebased);
+    EXPECT_EQ(synchronizations, 1u);
+    EXPECT_EQ(clip_queries, rebased ? 1u : 2u);
+    EXPECT_EQ(accepted, rebased ? 0u : 1u);
+    EXPECT_EQ(cursor.move(original, std::nullopt, 0, 0), (std::pair {rebased ? 2500 : 2600, 500}));
+  }
 }
 
 TEST(InputPermissionTests, RevocationPurgesQueuedPressesAndReleasesHeldCategoryBeforeRegrant) {

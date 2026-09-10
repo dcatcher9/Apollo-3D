@@ -96,9 +96,9 @@ Sunshine does not apply a global Windows cursor lock. Someone at the PC can stil
 physical mouse normally. The remote bounds apply only while input belongs to the virtual-display
 stream; disconnecting or switching away ends that input scope.
 
-For desktop-style relative movement, bounding the resulting pointer position changes the native
-relative-input path and may bypass Windows mouse acceleration. A foreground game that hides its
-cursor and confines it within the virtual display retains its native relative movement. If another
+While confinement is enabled, every relative movement is converted to a bounded absolute position,
+including movement with a hidden game cursor. An application's own cursor lock may change before
+Windows processes queued input, so it cannot provide the remote confinement guarantee. If an
 application needs unmodified raw-relative input or Windows acceleration, turn off **Keep cursor
 on virtual display** in Moonlight 3D's **Global Settings → Audio & input**. During a stream, use
 the same control in **Session settings**, then **Apply & reconnect**. This is a client choice;

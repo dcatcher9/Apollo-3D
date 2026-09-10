@@ -3757,6 +3757,7 @@ namespace stream {
 
         // Return the PC's primary display on disconnect, even while the app and
         // virtual monitor remain warm for a reconnect.
+        BOOST_LOG(info) << "Remote streaming session is inactive; restoring the original display topology."sv;
         const bool primary_restored = proc::proc.restore_primary_display();
         invalidate_pending_platform_stop_locked();
         const auto process_status = proc::proc.get_status();

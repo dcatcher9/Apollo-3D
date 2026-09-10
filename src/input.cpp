@@ -1802,6 +1802,10 @@ namespace input {
     input->authored_haptics = authored_haptics;
     if (confine_display_path) {
       input->cursor_confinement = platf::allocate_cursor_confinement(platf_input, *confine_display_path);
+      BOOST_LOG(info) << "Remote cursor confinement enabled for this stream; virtual monitor identity "
+                      << (confine_display_path->empty() ? "missing (input will remain blocked)." : "supplied for per-action validation.");
+    } else {
+      BOOST_LOG(info) << "Remote cursor confinement disabled for this stream."sv;
     }
     input->haptics_feedback_queue =
       mail->queue<platf::gamepad_feedback_msg_t>(mail::ds5_haptics_feedback, 64);

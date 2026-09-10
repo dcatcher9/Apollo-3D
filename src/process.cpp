@@ -1949,7 +1949,15 @@ namespace proc {
     if (!_virtual_display_device_path.empty()) {
       stop_hdr_worker();
       _hdr_worker_state.reset();
-      const bool restored = platf::primary_display::restore(_virtual_display_device_path);
+      const bool restored =
+  #ifdef SUNSHINE_TESTS
+        _display_topology_test_hook ?
+          _display_topology_test_hook(
+            display_topology_test_operation_e::restore,
+            _virtual_display_only
+          ) :
+  #endif
+          platf::primary_display::restore(_virtual_display_device_path);
       refresh_virtual_display_binding();
       return restored;
     }

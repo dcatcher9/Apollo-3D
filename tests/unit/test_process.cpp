@@ -217,6 +217,59 @@ TEST(ProcessTest, RetainedVirtualDisplayResumeCommitsPolicyAfterPromotionAndRebi
   }
 }
 
+TEST(ProcessTest, RestorePrimaryDisplayPreservesRetainedVirtualDisplayForResume) {
+  using operation_e = proc::display_topology_test_operation_e;
+
+  proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
+  auto original = std::make_shared<rtsp_stream::launch_session_t>();
+  original->id = 11;
+  original->width = 1920;
+  original->height = 1080;
+  original->fps = 60000;
+  original->virtual_display = true;
+  original->virtual_display_only = true;
+  proc::process_test_access::retain(process, original);
+  proc::process_test_access::mark_virtual(process, true);
+  auto cleanup = util::fail_guard([&]() {
+    proc::process_test_access::clear(process);
+  });
+
+  std::vector<std::pair<operation_e, bool>> operations;
+  proc::process_test_access::set_display_topology_hook(
+    process,
+    [&](operation_e operation, bool value) {
+      operations.emplace_back(operation, value);
+      return true;
+    }
+  );
+
+  ASSERT_TRUE(process.restore_primary_display());
+  ASSERT_EQ(operations.size(), 2U);
+  EXPECT_EQ(operations[0], (std::pair {operation_e::restore, true}));
+  EXPECT_EQ(operations[1], (std::pair {operation_e::refresh_binding, true}));
+  EXPECT_EQ(process.get_host_session_id(), 1234U);
+  EXPECT_TRUE(process.get_status().virtual_display);
+  EXPECT_TRUE(proc::process_test_access::virtual_display_only(process));
+
+  operations.clear();
+  auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
+  resumed->id = 22;
+  resumed->width = 1920;
+  resumed->height = 1080;
+  resumed->fps = 60000;
+  resumed->scale_factor = 100;
+  resumed->virtual_display_only = true;
+  ASSERT_EQ(process.reconfigure_retained_session(resumed), 0);
+
+  ASSERT_EQ(operations.size(), 4U);
+  EXPECT_EQ(operations[0], (std::pair {operation_e::refresh_binding, true}));
+  EXPECT_EQ(operations[1], (std::pair {operation_e::request_hdr, false}));
+  EXPECT_EQ(operations[2], (std::pair {operation_e::promote, true}));
+  EXPECT_EQ(operations[3], (std::pair {operation_e::refresh_binding, true}));
+  EXPECT_EQ(process.get_host_session_id(), 1234U);
+  EXPECT_TRUE(process.get_status().virtual_display);
+}
+
 TEST(ProcessTest, FailedPostPromotionRebindRequestsRetirementAndClearsSession) {
   using operation_e = proc::display_topology_test_operation_e;
 
