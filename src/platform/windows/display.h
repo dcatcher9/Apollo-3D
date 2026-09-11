@@ -329,19 +329,45 @@ namespace platf::dxgi {
       repeat_packed,
     };
 
+    /** Separate exact-image completion from DDup's authority to reuse analysis for new images. */
+    struct host_sbs_source_admission_t {
+      bool pipeline_active = false;
+      bool parallax_v2_renderer = false;
+      bool snapshot_debug_inputs = false;
+      bool authority_reprocess_pending = false;
+      bool producer_terminal = false;
+      bool interactive_move_size = false;
+
+      [[nodiscard]] constexpr bool retention_allowed() const noexcept {
+        return pipeline_active && !snapshot_debug_inputs &&
+               !authority_reprocess_pending && !producer_terminal;
+      }
+
+      [[nodiscard]] constexpr bool ddup_reuse_allowed(
+        const std::optional<std::chrono::steady_clock::time_point> &content_timestamp
+      ) const noexcept {
+        return retention_allowed() && content_timestamp.has_value();
+      }
+
+      [[nodiscard]] constexpr bool completed_source_allowed() const noexcept {
+        // WGC has an exact captured-image identity despite lacking a DDup content clock.
+        return retention_allowed() && parallax_v2_renderer && !interactive_move_size;
+      }
+    };
+
     /** Consume or redeliver work already completed for this immutable captured image.
      *
      * This runs before changed-source arbitration. The caller separately proves that retained
-     * pixels were actually analyzed; near reuse of older analysis cannot become permanent here.
+     * pixels belong to this completed publication; real analysis ownership does not advance.
      * Content timestamps alone are insufficient: a new cursor presentation must still be handled.
      */
     [[nodiscard]] constexpr host_sbs_completed_source_action_e host_sbs_completed_source_action(
       const std::optional<std::chrono::steady_clock::time_point> &current_source,
-      const bool retention_allowed,
+      const host_sbs_source_admission_t &admission,
       const host_sbs_completed_source_proof_t &matched,
       const host_sbs_completed_source_proof_t &packed
     ) noexcept {
-      if (!retention_allowed) {
+      if (!admission.completed_source_allowed()) {
         return host_sbs_completed_source_action_e::observe;
       }
       if (matched.matches(current_source)) {

@@ -85,7 +85,8 @@ try {
   $nativeFilter = @(
     'Offline*', 'GpuWorkloadArbiter.*', 'Rtsp*', 'NvHttpLaunchParsingTest.*', 'Input*', 'ProcessTest.*',
     'IdleProcessLifecycleTest.*', 'RetainedDisplayPauseTest.*', 'PlatformLaunchGuardTest.*', 'PrimaryDisplay*', 'VirtualDisplay*', 'DisplayConfigTarget.*', 'SessionResumeLifecycle.*',
-    'SessionWorkerStartTest.*', 'AtomicPresentation*', 'WindowsQpc*', 'WindowsDdup*',
+    'SessionWorker*Test.*', 'AtomicPresentation*', 'WindowsQpc*', 'WindowsDdup*',
+    'WindowsHostSbsCompletedSourceTest.*', 'DirectxShaderSourceTest.AdaptiveReuseUsesExactCurrentPublicationAndActualDepthOwner',
     'WindowsLocalPresenter*', 'PresentationScheduling*', 'ArGlasses*', 'RemoteEncode*Test.*',
     'HostSbsChromaGpuTest.*', 'HostSbsConversionWorkTest.*', 'WebUiDesign.*', 'TestEventListenerTest.*'
   ) -join ':'
@@ -123,6 +124,7 @@ try {
     'com.limelight.sbs.*Test',
     'com.limelight.utils.Stereo3DRendererSchedulingTest',
     'com.limelight.utils.Stereo3DRendererAsyncLifecycleTest',
+    'com.limelight.utils.Stereo3DRendererEntryFailureTest',
     'com.limelight.ui.XrStreamPresenterTransitionTest',
     'com.limelight.ui.XrStreamPresenterVideoModeAckTest',
     'com.limelight.ui.XrStreamPresenterControlTransportTeardownTest',

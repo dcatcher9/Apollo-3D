@@ -6151,6 +6151,16 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseUsesExactCurrentPublicationAndActualD
   ASSERT_NE(exact_completion_end, std::string::npos);
   EXPECT_EQ(display.substr(exact_completion, exact_completion_end - exact_completion)
               .find("gpu_publication_has_exact_analysis"), std::string::npos);
+  // The exact retained WGC image has no DDup content clock. Its completed-source policy must
+  // receive the complete lifecycle admission state, independently of DDup cache eligibility.
+  EXPECT_NE(display.find("source_admission.ddup_reuse_allowed(current_content_timestamp)"), std::string::npos);
+  const auto source_action_end = display.find("const bool current_source_already_completed", exact_completion_end);
+  ASSERT_NE(source_action_end, std::string::npos);
+  const auto source_action = display.substr(exact_completion_end, source_action_end - exact_completion_end);
+  EXPECT_NE(source_action.find("current_source_timestamp,\n            source_admission,"), std::string::npos);
+  // DDup packed-redelivery proof still rejects missing/regressed damage identity.
+  EXPECT_NE(source_action.find("current_ddup_damage && latest_v2_lineage.slot.inference_ddup_damage"), std::string::npos);
+  EXPECT_NE(source_action.find("current_ddup_damage->token == latest_v2_lineage.slot.inference_ddup_damage->token"), std::string::npos);
 
   // Packed or current-color reuse cannot mint a new publication or rename the real depth owner.
   const auto redelivery = display.find("if (current_source_already_completed)", admission);

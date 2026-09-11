@@ -8,8 +8,10 @@ and client reconnect intent/settings transitions are included.
 The gate also exercises exact client Start/Resume/Replace decisions, asynchronous EGL lifecycle,
 stable physical HDR targets, and shared conversion-demand and display-retirement policies. Packed chroma
 regressions execute the production D3D shaders through WARP's software renderer, including transfer
-order and independent eye boundaries. Run it with both checkouts
-available and their existing build prerequisites configured:
+order and independent eye boundaries. Shutdown coverage keeps the streaming watchdog out of app
+cleanup, while retained-source tests cover WGC images without DDup content metadata. Client surface
+failure tests hold renderer locks to verify that timeout recovery remains responsive. Run it with
+both checkouts available and their existing build prerequisites configured:
 
 ```powershell
 & tools/joint-workflow/Invoke-JointWorkflowTests.ps1 `

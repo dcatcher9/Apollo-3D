@@ -921,10 +921,12 @@ that completion without submitting the same input again. After its first draw, t
 image may be redelivered under the same exact source and route. This creates no publication, moves
 neither depth ownership nor the completed-color continuity endpoint, and advances no subtitle, cut
 or camera observation. Capture/presentation identity is required, not merely the desktop-content
-timestamp: a cursor-only capture must still present its new composited color. Dump, reprocess,
-interactive move/size, route or transfer changes, missing identities, and producer failure reject
-this redelivery shortcut. A new captured source follows ordinary unchanged-input or changed-source
-admission.
+timestamp: a cursor-only capture must still present its new composited color. An exact retained WGC
+image may consume its matching completion without a desktop-content timestamp or DDup damage
+metadata; this retires pending conversion without granting reuse authority for a new WGC image.
+Dump, reprocess, interactive move/size, route or transfer changes, missing identities, and producer
+failure reject this redelivery shortcut. A new captured source follows ordinary unchanged-input or
+changed-source admission.
 
 Routine CutBridge health is collected with each completion receipt. An external Stats subscription
 throttles publication of new samples at the requested interval. Repeated output with the same

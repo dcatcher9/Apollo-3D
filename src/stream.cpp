@@ -39,6 +39,7 @@ extern "C" {
 #include "platform/common.h"
 #include "process.h"
 #include "rtsp.h"
+#include "session_join_watchdog.h"
 #include "session_resume_lifecycle.h"
 #include "stream.h"
 #include "sync.h"
@@ -4146,38 +4147,46 @@ namespace stream {
       // Current Nvidia drivers have a bug where NVENC can deadlock the encoder thread with hardware-accelerated
       // GPU scheduling enabled. If this happens, we will terminate ourselves and the service can restart.
       // The alternative is that Sunshine can never start another session until it's manually restarted.
-      auto task = []() {
-        BOOST_LOG(fatal) << "Hang detected! Session failed to terminate in 10 seconds."sv;
-        logging::log_flush();
-        lifetime::debug_trap();
-      };
-      auto force_kill = task_pool.pushDelayed(task, 10s).task_id;
-      auto fg = util::fail_guard([&force_kill]() {
-        // Cancel the kill task if we manage to return from this function
-        task_pool.cancel(force_kill);
-      });
-
-      BOOST_LOG(debug) << "Waiting for video to end..."sv;
-      session.videoThread.join();
-      BOOST_LOG(debug) << "Waiting for audio to end..."sv;
-      session.audioThread.join();
-      BOOST_LOG(debug) << "Waiting for control to end..."sv;
-      session.controlEnd.view();
-      // Reset input on session stop to avoid stuck repeated keys
-      BOOST_LOG(debug) << "Resetting Input..."sv;
-      input::reset(session.input).wait();
-
-      // Release the authoritative active slot only after every media/control worker has joined.
-      // Validated launch work takes the same lock, so a successor cannot overlap teardown.
-      {
-        std::lock_guard lifecycle_lock(platform_lifecycle_mutex);
-        if (!remote_session_active) {
-          BOOST_LOG(error) << "Streaming session ended without owning the active-session slot."sv;
-        } else {
-          remote_session_active = false;
-          retain_or_stop_session_locked();
+      detail::join_workers_before_session_cleanup(
+        []() {
+          return detail::session_join_watchdog_t {
+            [](std::function<void()> expired) {
+              return task_pool.pushDelayed(std::move(expired), 10s).task_id;
+            },
+            [](auto task_id) {
+              task_pool.cancel(task_id);
+            },
+            []() {
+              BOOST_LOG(fatal) << "Hang detected! Session failed to terminate in 10 seconds."sv;
+              logging::log_flush();
+              lifetime::debug_trap();
+            },
+          };
+        },
+        [&session]() {
+          BOOST_LOG(debug) << "Waiting for video to end..."sv;
+          session.videoThread.join();
+          BOOST_LOG(debug) << "Waiting for audio to end..."sv;
+          session.audioThread.join();
+          BOOST_LOG(debug) << "Waiting for control to end..."sv;
+          session.controlEnd.view();
+          // Reset input on session stop to avoid stuck repeated keys.
+          BOOST_LOG(debug) << "Resetting Input..."sv;
+          input::reset(session.input).wait();
+        },
+        []() {
+          // Worker shutdown is complete and its watchdog is disarmed. App exit, undo commands
+          // and display restoration have separate bounds and may legitimately take longer.
+          // Keep the active slot until this lock is held so a successor cannot overlap teardown.
+          std::lock_guard lifecycle_lock(platform_lifecycle_mutex);
+          if (!remote_session_active) {
+            BOOST_LOG(error) << "Streaming session ended without owning the active-session slot."sv;
+          } else {
+            remote_session_active = false;
+            retain_or_stop_session_locked();
+          }
         }
-      }
+      );
 
       BOOST_LOG(debug) << "Session ended"sv;
     }

@@ -11,6 +11,7 @@
 #include <future>
 #include <limits>
 #include <src/process.h>
+#include <src/session_join_watchdog.h>
 #include <src/stream.h>
 #include <src/utility.h>
 #include <string>
@@ -176,6 +177,77 @@ TEST(PlatformLaunchGuardTest, ActiveRemoteSessionRejectsFreshLocalAdmission) {
 
 TEST(SessionWorkerStartTest, RollsBackWhenSecondThreadCannotStart) {
   EXPECT_TRUE(stream::session::worker_start_rollback_for_test());
+}
+
+TEST(SessionWorkerJoinTest, WatchdogStillCoversWorkerShutdown) {
+  std::function<void()> expire;
+  int expirations = 0;
+  bool cancelled = false;
+  bool cleaned_up = false;
+  stream::detail::join_workers_before_session_cleanup(
+    [&]() {
+      return stream::detail::session_join_watchdog_t {
+        [&](auto callback) {
+          expire = std::move(callback);
+          return nullptr;
+        },
+        [&](auto) {
+          cancelled = true;
+        },
+        [&]() {
+          ++expirations;
+        },
+      };
+    },
+    [&]() {
+      EXPECT_FALSE(cancelled);
+      expire();
+      EXPECT_EQ(expirations, 1);
+    },
+    [&]() {
+      EXPECT_TRUE(cancelled);
+      cleaned_up = true;
+    }
+  );
+  EXPECT_TRUE(cleaned_up);
+}
+
+TEST(SessionWorkerJoinTest, DequeuedWatchdogCannotExpireDuringSessionCleanup) {
+  std::function<void()> dequeued_expiry;
+  int expirations = 0;
+  bool cancelled = false;
+  bool workers_joined = false;
+  stream::detail::join_workers_before_session_cleanup(
+    [&]() {
+      return stream::detail::session_join_watchdog_t {
+        [&](auto callback) {
+          // Model a timer already popped by the worker: cancellation cannot recall it.
+          dequeued_expiry = std::move(callback);
+          return nullptr;
+        },
+        [&](auto) {
+          cancelled = true;
+        },
+        [&]() {
+          ++expirations;
+        },
+      };
+    },
+    [&]() {
+      EXPECT_FALSE(cancelled);
+      workers_joined = true;
+    },
+    [&]() {
+      EXPECT_TRUE(workers_joined);
+      EXPECT_TRUE(cancelled);
+      // Display restore or an app's configured undo budget may outlast the former deadline.
+      dequeued_expiry();
+      EXPECT_EQ(expirations, 0);
+    }
+  );
+  // Its shared state also survives destruction of the join's lexical watchdog owner.
+  dequeued_expiry();
+  EXPECT_EQ(expirations, 0);
 }
 
 TEST(PrimaryDisplayRestoreRetryTest, OnlyRetriesTheSameDisconnectedRetainedProcess) {

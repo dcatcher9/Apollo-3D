@@ -1153,10 +1153,18 @@ namespace platf::dxgi {
           }
           const bool producer_terminal =
             depth_estimator && depth_estimator->has_terminal_failure();
+          const detail::host_sbs_source_admission_t source_admission {
+            .pipeline_active = depth_estimator &&
+              models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer),
+            .parallax_v2_renderer =
+              host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2,
+            .snapshot_debug_inputs = snapshot_debug_inputs,
+            .authority_reprocess_pending = depth_authority_reprocess_pending,
+            .producer_terminal = producer_terminal,
+            .interactive_move_size = current_interactive_move_size,
+          };
           const bool dedup_gate_open =
-            depth_estimator && models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer) &&
-            current_content_timestamp && !snapshot_debug_inputs &&
-            !depth_authority_reprocess_pending && !producer_terminal;
+            source_admission.ddup_reuse_allowed(current_content_timestamp);
           const bool cache_reuse_gate_open =
             dedup_gate_open && latest_v2_lineage.known_depth();
           const auto latest_v2_route_matches = latest_v2_lineage_route_matches_current(
@@ -1204,8 +1212,7 @@ namespace platf::dxgi {
             );
           const auto completed_source_action = detail::host_sbs_completed_source_action(
             current_source_timestamp,
-            dedup_gate_open && !current_interactive_move_size &&
-              host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2,
+            source_admission,
             {
               matched_render_slot ? matched_render_slot->frame_id : 0u,
               matched_render_slot ? matched_render_slot->source_timestamp : std::nullopt,

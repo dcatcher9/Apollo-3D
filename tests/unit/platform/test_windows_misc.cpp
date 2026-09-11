@@ -1164,6 +1164,9 @@ namespace {
     using action_e = platf::dxgi::detail::host_sbs_completed_source_action_e;
     using proof_t = platf::dxgi::detail::host_sbs_completed_source_proof_t;
     using platf::dxgi::detail::host_sbs_completed_source_action;
+    const platf::dxgi::detail::host_sbs_source_admission_t admission {
+      .pipeline_active = true, .parallax_v2_renderer = true,
+    };
     namespace receipts = models::host_sbs_gpu_completion_receipt;
     const auto captured = std::chrono::steady_clock::time_point {1100ms};
     const receipts::receipt_t publication {
@@ -1181,11 +1184,11 @@ namespace {
       .subtitle_frame_id = 10u, .subtitle_domain_tag = 1u,
     };
     const proof_t completed {11u, captured, true};
-    EXPECT_EQ(host_sbs_completed_source_action(captured, true, completed, {}), action_e::render_matched);
+    EXPECT_EQ(host_sbs_completed_source_action(captured, admission, completed, {}), action_e::render_matched);
     for (unsigned repeat = 0; repeat < 1000u; ++repeat) {
-      EXPECT_EQ(host_sbs_completed_source_action(captured, true, {}, completed), action_e::repeat_packed);
+      EXPECT_EQ(host_sbs_completed_source_action(captured, admission, {}, completed), action_e::repeat_packed);
     }
-    EXPECT_EQ(host_sbs_completed_source_action(captured + 40ms, true, {}, completed), action_e::observe);
+    EXPECT_EQ(host_sbs_completed_source_action(captured + 40ms, admission, {}, completed), action_e::observe);
     // Even after long idle time, a new eligible dirty image goes to the detector. Time and
     // delivery count never force a full update of the legally held depth/subtitle tuple.
     const auto changed = models::make_gpu_adaptive_request(
@@ -1202,6 +1205,9 @@ namespace {
     using action_e = platf::dxgi::detail::host_sbs_completed_source_action_e;
     using proof_t = platf::dxgi::detail::host_sbs_completed_source_proof_t;
     using platf::dxgi::detail::host_sbs_completed_source_action;
+    const platf::dxgi::detail::host_sbs_source_admission_t admission {
+      .pipeline_active = true, .parallax_v2_renderer = true,
+    };
     const auto content = std::chrono::steady_clock::time_point {1s};
     const proof_t packed {11u, content, true};
     const auto cursor_only = platf::dxgi::detail::select_ddup_timestamps<std::chrono::steady_clock::time_point>(
@@ -1211,15 +1217,15 @@ namespace {
     );
     ASSERT_EQ(cursor_only.content_timestamp, content);
     ASSERT_NE(cursor_only.presentation_timestamp, packed.source_timestamp);
-    EXPECT_EQ(host_sbs_completed_source_action(cursor_only.presentation_timestamp, true, {}, packed), action_e::observe);
+    EXPECT_EQ(host_sbs_completed_source_action(cursor_only.presentation_timestamp, admission, {}, packed), action_e::observe);
     const auto changed = platf::dxgi::detail::select_ddup_timestamps<std::chrono::steady_clock::time_point>(
       content + 20ms,
       std::nullopt,
       content
     );
-    EXPECT_EQ(host_sbs_completed_source_action(changed.presentation_timestamp, true, {}, packed), action_e::observe);
+    EXPECT_EQ(host_sbs_completed_source_action(changed.presentation_timestamp, admission, {}, packed), action_e::observe);
     // A stale source may not replay a newer image or conceal a source-clock regression either.
-    EXPECT_EQ(host_sbs_completed_source_action(content - 1ms, true, {}, packed), action_e::observe);
+    EXPECT_EQ(host_sbs_completed_source_action(content - 1ms, admission, {}, packed), action_e::observe);
   }
 
   TEST(WindowsHostSbsCompletedSourceTest, MissingIdentityAndRevokedRouteFailOpenToObservation) {
@@ -1227,6 +1233,9 @@ namespace {
     using action_e = platf::dxgi::detail::host_sbs_completed_source_action_e;
     using proof_t = platf::dxgi::detail::host_sbs_completed_source_proof_t;
     using platf::dxgi::detail::host_sbs_completed_source_action;
+    const platf::dxgi::detail::host_sbs_source_admission_t admission {
+      .pipeline_active = true, .parallax_v2_renderer = true,
+    };
     const auto captured = std::chrono::steady_clock::time_point {1s};
     const proof_t valid {11u, captured, true};
     for (const auto &invalid : {
@@ -1234,14 +1243,72 @@ namespace {
            proof_t {11u, std::nullopt, true},
            proof_t {11u, captured, false},
          }) {
-      EXPECT_EQ(host_sbs_completed_source_action(captured, true, invalid, {}), action_e::observe);
-      EXPECT_EQ(host_sbs_completed_source_action(captured, true, {}, invalid), action_e::observe);
+      EXPECT_EQ(host_sbs_completed_source_action(captured, admission, invalid, {}), action_e::observe);
+      EXPECT_EQ(host_sbs_completed_source_action(captured, admission, {}, invalid), action_e::observe);
     }
-    EXPECT_EQ(host_sbs_completed_source_action(std::nullopt, true, valid, valid), action_e::observe);
+    EXPECT_EQ(host_sbs_completed_source_action(std::nullopt, admission, valid, valid), action_e::observe);
     // Dump/reprocess, terminal producer, interactive move/size, or an unlatched renderer closes
     // the same production retention gate regardless of which existing pixels are available.
-    EXPECT_EQ(host_sbs_completed_source_action(captured, false, valid, valid), action_e::observe);
-    EXPECT_EQ(host_sbs_completed_source_action(captured, true, valid, valid), action_e::render_matched);
+    EXPECT_EQ(host_sbs_completed_source_action(captured, {}, valid, valid), action_e::observe);
+    EXPECT_EQ(host_sbs_completed_source_action(captured, admission, valid, valid), action_e::render_matched);
+  }
+
+  TEST(WindowsHostSbsCompletedSourceTest, WgcCompletionDoesNotRequireContentClockOrDamage) {
+    using namespace std::chrono_literals;
+    namespace detail = platf::dxgi::detail;
+    const detail::host_sbs_source_admission_t admission {
+      .pipeline_active = true, .parallax_v2_renderer = true,
+    };
+    // These are the actual metadata supplied by display_wgc_vram_t::snapshot(): an immutable
+    // presentation identity, no LastPresentTime-equivalent content clock, and no DDup history.
+    const auto captured = std::chrono::steady_clock::time_point {1s};
+    const std::optional<std::chrono::steady_clock::time_point> content_timestamp;
+    const std::optional<detail::ddup_damage_snapshot_t> damage;
+    const detail::host_sbs_completed_source_proof_t completion {11u, captured, true};
+
+    EXPECT_FALSE(admission.ddup_reuse_allowed(content_timestamp));
+    EXPECT_EQ(detail::classify_host_sbs_ddup_reuse(
+                content_timestamp, damage, false, RECT {0, 0, 1920, 1080},
+                content_timestamp, damage),
+              detail::host_sbs_ddup_reuse_proof_e::none);
+    // Finishing the retained root must render it without submitting the same WGC image again.
+    EXPECT_EQ(detail::host_sbs_completed_source_action(captured, admission, completion, {}),
+              detail::host_sbs_completed_source_action_e::render_matched);
+    // Missing DDup proof remains insufficient to carry that completion onto a new image.
+    EXPECT_EQ(detail::host_sbs_completed_source_action(captured + 10ms, admission, completion, {}),
+              detail::host_sbs_completed_source_action_e::observe);
+  }
+
+  TEST(WindowsHostSbsCompletedSourceTest, WgcCompletionPreservesEveryRetentionRevocation) {
+    using namespace std::chrono_literals;
+    namespace detail = platf::dxgi::detail;
+    using admission_t = detail::host_sbs_source_admission_t;
+    const admission_t admission {.pipeline_active = true, .parallax_v2_renderer = true};
+    const auto captured = std::chrono::steady_clock::time_point {1s};
+    const detail::host_sbs_completed_source_proof_t completion {11u, captured, true};
+    const auto expect_blocked = [&](const admission_t &blocked) {
+      EXPECT_EQ(detail::host_sbs_completed_source_action(captured, blocked, completion, {}),
+                detail::host_sbs_completed_source_action_e::observe);
+    };
+    for (const auto flag : {
+           &admission_t::snapshot_debug_inputs,
+           &admission_t::authority_reprocess_pending,
+           &admission_t::producer_terminal,
+           &admission_t::interactive_move_size,
+         }) {
+      auto blocked = admission;
+      blocked.*flag = true;
+      expect_blocked(blocked);
+    }
+    for (const auto flag : {&admission_t::pipeline_active, &admission_t::parallax_v2_renderer}) {
+      auto blocked = admission;
+      blocked.*flag = false;
+      expect_blocked(blocked);
+    }
+    auto revoked_route = completion;
+    revoked_route.route_matches = false;
+    EXPECT_EQ(detail::host_sbs_completed_source_action(captured, admission, revoked_route, {}),
+              detail::host_sbs_completed_source_action_e::observe);
   }
 
 
