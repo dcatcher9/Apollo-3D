@@ -82,7 +82,13 @@ try {
     Invoke-GateStage 'host-build' $ninja @('-C', $BuildDirectory, 'sunshine', 'test_sunshine') $HostRoot
   }
   if (-not (Test-Path -LiteralPath $testExecutable -PathType Leaf)) { throw "Build the host test binary first: $testExecutable" }
-  $nativeFilter = 'Offline*:GpuWorkloadArbiter.*:Rtsp*:Input*:ProcessTest.*:WindowsQpc*:WindowsLocalPresenter*:PresentationScheduling*:ArGlasses*:RemoteEncode*Test.*:HostSbsChromaGpuTest.*:WebUiDesign.*'
+  $nativeFilter = @(
+    'Offline*', 'GpuWorkloadArbiter.*', 'Rtsp*', 'Input*', 'ProcessTest.*',
+    'IdleProcessLifecycleTest.*', 'PlatformLaunchGuardTest.*', 'PrimaryDisplayRestoreRetryTest.*',
+    'SessionWorkerStartTest.*', 'AtomicPresentation*', 'WindowsQpc*', 'WindowsDdup*',
+    'WindowsLocalPresenter*', 'PresentationScheduling*', 'ArGlasses*', 'RemoteEncode*Test.*',
+    'HostSbsChromaGpuTest.*', 'WebUiDesign.*', 'TestEventListenerTest.*'
+  ) -join ':'
   $nativeXml = Join-Path $resultsDirectory 'host.xml'
   Invoke-GateStage 'host' $testExecutable @("--gtest_filter=$nativeFilter", "--gtest_output=xml:$nativeXml") $BuildDirectory
   [xml] $nativeResult = Get-Content -LiteralPath $nativeXml -Raw
@@ -111,10 +117,13 @@ try {
   foreach ($testClass in @(
     'com.limelight.nvstream.http.NvHTTP*Test',
     'com.limelight.nvstream.NvConnection*Test',
+    'com.limelight.GameReconnectLifecycleTest',
     'com.limelight.utils.ClientSbs*Test',
     'com.limelight.sbs.*Test',
     'com.limelight.utils.Stereo3DRendererSchedulingTest',
     'com.limelight.ui.XrStreamPresenterTransitionTest',
+    'com.limelight.ui.XrStreamPresenterVideoModeAckTest',
+    'com.limelight.ui.XrModeReconnectPolicyTest',
     'com.limelight.ui.StreamContainerSurfaceHandoffContractTest',
     'com.limelight.binding.video.*Test',
     'com.limelight.preferences.XrSessionSettingsControllerTest',

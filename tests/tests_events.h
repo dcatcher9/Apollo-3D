@@ -27,7 +27,7 @@ struct SunshineEventListener: testing::EmptyTestEventListener {
   }
 
   void OnTestPartResult(const testing::TestPartResult &test_part_result) override {
-    std::string file = test_part_result.file_name();
+    const auto file = test_part_result.file_name() ? test_part_result.file_name() : "unknown file";
     BOOST_LOG(tests) << "At " << file << ":" << test_part_result.line_number();
 
     auto result_text = test_part_result.passed()            ? "Success" :

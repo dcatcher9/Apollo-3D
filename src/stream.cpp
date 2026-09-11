@@ -3630,12 +3630,14 @@ namespace stream {
       bool remote_session_active {};
       std::uint64_t platform_lifecycle_generation {};
       task_pool_util::TaskPool::task_id_t pending_platform_stop {};
+      std::optional<std::chrono::steady_clock::time_point> platform_stop_deadline;
       task_pool_util::TaskPool::task_id_t pending_primary_restore {};
       bool platform_streaming_warm {};
       std::optional<std::uint64_t> warm_process_instance;
 
       void invalidate_pending_platform_stop_locked() {
         ++platform_lifecycle_generation;
+        platform_stop_deadline.reset();
         if (pending_platform_stop) {
           task_pool.cancel(pending_platform_stop);
           pending_platform_stop = nullptr;
@@ -3688,43 +3690,73 @@ namespace stream {
         platform_streaming_warm = false;
       }
 
-      void schedule_platform_stop_locked(std::chrono::steady_clock::duration delay) {
+      bool cleanup_exited_idle_session_locked() {
+        // running() owns command-exit cleanup, including prep-command undo and display retirement.
+        // It is safe only after the media workers have joined, or before admitting an idle launch.
+        if (remote_session_active || proc::proc.get_status().app_id == 0 || proc::proc.running() > 0) {
+          return false;
+        }
+        rtsp_stream::clear_pending_launch_session();
+        stop_warm_platform_locked();
+        return true;
+      }
+
+      void schedule_platform_stop_locked(std::chrono::steady_clock::duration delay);
+      void schedule_platform_stop_check_locked();
+
+      void check_platform_stop_locked(std::uint64_t generation) {
+        if (generation != platform_lifecycle_generation || remote_session_active || !platform_stop_deadline) {
+          return;
+        }
+        pending_platform_stop = nullptr;
+        if (cleanup_exited_idle_session_locked()) {
+          return;
+        }
+        if (std::chrono::steady_clock::now() < *platform_stop_deadline) {
+          // Reuse the grace task to observe command exit while disconnected. Polling preserves
+          // both the absolute deadline and the generation that owns primary-display retries.
+          schedule_platform_stop_check_locked();
+          return;
+        }
+
+        // A new /launch can replace the retained process just before publishing its pending RTSP
+        // handshake. Give that successor one fresh window without terminating it in the gap.
+        const auto current_process_instance = proc::proc.get_host_session_id();
+        if (current_process_instance != 0 && current_process_instance != warm_process_instance) {
+          warm_process_instance = current_process_instance;
+          schedule_platform_stop_locked(config::stream.ping_timeout);
+          return;
+        }
+
         invalidate_pending_platform_stop_locked();
+        BOOST_LOG(info) << (platform_streaming_warm ? "Streaming session resume grace expired; terminating the retained app." : "Streaming launch handshake expired; terminating the unclaimed app.");
+        rtsp_stream::clear_pending_launch_session();
+        if (proc::proc.running() > 0) {
+          proc::proc.terminate();
+        }
+        warm_process_instance.reset();
+        if (platform_streaming_warm) {
+          platf::streaming_will_stop();
+          platform_streaming_warm = false;
+        }
+      }
+
+      void schedule_platform_stop_check_locked() {
         const auto generation = platform_lifecycle_generation;
+        const auto remaining = *platform_stop_deadline - std::chrono::steady_clock::now();
+        const auto delay = std::clamp<std::chrono::steady_clock::duration>(remaining, 0s, 1s);
         pending_platform_stop = task_pool.pushDelayed([generation]() {
                                            std::lock_guard delayed_lock(platform_lifecycle_mutex);
-                                           if (generation != platform_lifecycle_generation || remote_session_active) {
-                                             return;
-                                           }
-
-                                           // A new /launch can replace the retained process just before publishing its pending
-                                           // RTSP handshake. Do not terminate that new process in the HTTP -> RTSP gap; give it
-                                           // one fresh handshake window.
-                                            const auto current_process_instance = proc::proc.get_host_session_id();
-                                            if (current_process_instance != 0 && current_process_instance != warm_process_instance) {
-                                             warm_process_instance = current_process_instance;
-                                             schedule_platform_stop_locked(config::stream.ping_timeout);
-                                             return;
-                                           }
-
-                                           pending_platform_stop = nullptr;
-                                           invalidate_pending_platform_stop_locked();
-                                           BOOST_LOG(info) << (platform_streaming_warm ? "Streaming session resume grace expired; terminating the retained app." : "Streaming launch handshake expired; terminating the unclaimed app.");
-                                           // A reconnect normally reserves the warm state before publishing its RTSP handshake.
-                                           // Clear any leftover reservation too so /serverinfo cannot advertise a resumable app
-                                           // after this authoritative expiry point.
-                                           rtsp_stream::clear_pending_launch_session();
-                                            if (proc::proc.running() > 0) {
-                                             proc::proc.terminate();
-                                           }
-                                           warm_process_instance.reset();
-                                           if (platform_streaming_warm) {
-                                             platf::streaming_will_stop();
-                                             platform_streaming_warm = false;
-                                           }
+                                           check_platform_stop_locked(generation);
                                          },
                                                       delay)
                                   .task_id;
+      }
+
+      void schedule_platform_stop_locked(std::chrono::steady_clock::duration delay) {
+        invalidate_pending_platform_stop_locked();
+        platform_stop_deadline = std::chrono::steady_clock::now() + delay;
+        schedule_platform_stop_check_locked();
       }
 
       bool activate_remote_session_locked(std::uint32_t remote_virtual_display_lease) {
@@ -3750,7 +3782,7 @@ namespace stream {
       }
 
       void retain_or_stop_session_locked() {
-        if (remote_session_active) {
+        if (remote_session_active || cleanup_exited_idle_session_locked()) {
           return;
         }
 
@@ -3806,6 +3838,9 @@ namespace stream {
       impl_t():
           lock {platform_lifecycle_mutex},
           idle {!remote_session_active} {
+        // A command can exit while disconnected, after the teardown-time check. Reap it before
+        // HTTP reads the retained identity, without disturbing a live app's existing grace timer.
+        cleanup_exited_idle_session_locked();
       }
 
       std::unique_lock<std::mutex> lock;
@@ -3886,6 +3921,31 @@ namespace stream {
     void release_active_slot_for_test() {
       std::lock_guard lock(platform_lifecycle_mutex);
       remote_session_active = false;
+    }
+
+    void retain_or_stop_session_for_test(bool platform_warm) {
+      std::lock_guard lock(platform_lifecycle_mutex);
+      // Model a previously started platform without acquiring any Windows scheduling/input state.
+      platform_streaming_warm = platform_warm;
+      retain_or_stop_session_locked();
+    }
+
+    std::uint64_t platform_lifecycle_generation_for_test() {
+      std::lock_guard lock(platform_lifecycle_mutex);
+      return platform_lifecycle_generation;
+    }
+
+    std::optional<std::chrono::steady_clock::time_point> platform_stop_deadline_for_test() {
+      std::lock_guard lock(platform_lifecycle_mutex);
+      return platform_stop_deadline;
+    }
+
+    void check_platform_stop_for_test() {
+      std::lock_guard lock(platform_lifecycle_mutex);
+      if (pending_platform_stop) {
+        task_pool.cancel(pending_platform_stop);
+      }
+      check_platform_stop_locked(platform_lifecycle_generation);
     }
 
     bool worker_start_rollback_for_test() {

@@ -207,7 +207,7 @@ namespace proc {
     /** True when the command-backed app ended; does not tear down display/process state. */
     bool stream_process_exited();
 
-    /** Coherent process/session state after refreshing the tracked child lifetime. */
+    /** Coherent process/session snapshot; never tears down an exited app's active media. */
     process_status_t get_status();
 
     ~proc_t();

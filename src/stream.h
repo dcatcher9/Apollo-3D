@@ -690,7 +690,7 @@ namespace stream {
 
     /**
      * Serialize validated launch preparation with sole-session startup and grace expiry.
-     * Destroying an uncommitted guard leaves the existing grace deadline unchanged.
+     * Reaps an exited app only while idle. Otherwise an uncommitted guard preserves its grace.
      */
     platform_launch_guard_t guard_platform_launch();
 
@@ -735,6 +735,10 @@ namespace stream {
     void set_state_for_test(session_t &session, state_e state);
     bool claim_active_slot_for_test();
     void release_active_slot_for_test();
+    void retain_or_stop_session_for_test(bool platform_warm);
+    std::uint64_t platform_lifecycle_generation_for_test();
+    std::optional<std::chrono::steady_clock::time_point> platform_stop_deadline_for_test();
+    void check_platform_stop_for_test();
     bool worker_start_rollback_for_test();
 #endif
   }  // namespace session

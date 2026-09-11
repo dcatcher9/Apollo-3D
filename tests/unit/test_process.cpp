@@ -6,24 +6,34 @@
 
 // standard includes
 #include <algorithm>
+#include <array>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 
 // lib includes
 #include <boost/process/v1/environment.hpp>
 #include <boost/program_options/parsers.hpp>
 #include <boost/token_functions.hpp>
+#ifdef _WIN32
+  #include <boost/process/v1/io.hpp>
+  #include <boost/process/v1/pipe.hpp>
+  #include <boost/process/v1/windows.hpp>
+#endif
 
 // local includes
 #include "src/config.h"
 #include "src/process.h"
+#include "src/stream.h"
 
 namespace proc {
   // A retained desktop fixture with no real process, display, or HDR worker. The successful
   // same-mode apply returns before any Windows call, exercising transport admission itself.
   struct process_test_access {
     static void retain(proc_t &process, const std::shared_ptr<rtsp_stream::launch_session_t> &launch) {
+      process._app = {};
+      process.placebo = false;
       process._app_id = 1;
       process._host_session_id = 1234;
       process._launch_session = launch;
@@ -54,6 +64,33 @@ namespace proc {
     ) {
       process._display_topology_test_hook = std::move(hook);
     }
+
+    static void set_child(proc_t &process, boost::process::v1::child child, bool auto_detach = false) {
+      process._process = std::move(child);
+      process._app = {};
+      process._app.auto_detach = auto_detach;
+      process.placebo = false;
+      process._app_launch_time = std::chrono::steady_clock::now();
+    }
+
+    static void mark_desktop(proc_t &process, bool enabled = true) {
+      process.placebo = enabled;
+    }
+
+    static void wait_for_group(proc_t &process, boost::process::v1::group group) {
+      process._process_group = std::move(group);
+      process._app.wait_all = true;
+    }
+
+    static void stop_child(proc_t &process) {
+      if (process._process.valid()) {
+        std::error_code error;
+        if (process._process.running(error)) {
+          process._process.terminate(error);
+        }
+        process._process.wait(error);
+      }
+    }
 #endif
     static void clear(proc_t &process) {
       process._app_id = 0;
@@ -67,7 +104,7 @@ namespace proc {
 #endif
     }
   };
-}
+}  // namespace proc
 
 TEST(ProcessTest, ResumePublishesNewLiveTransportWithoutChangingRetainedToken) {
   proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
@@ -77,7 +114,9 @@ TEST(ProcessTest, ResumePublishesNewLiveTransportWithoutChangingRetainedToken) {
   original->height = 1080;
   original->fps = 60000;
   proc::process_test_access::retain(process, original);
-  auto cleanup = util::fail_guard([&]() { proc::process_test_access::clear(process); });
+  auto cleanup = util::fail_guard([&]() {
+    proc::process_test_access::clear(process);
+  });
 
   auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
   resumed->id = 22;
@@ -111,6 +150,291 @@ TEST(ProcessTest, ResumePublishesNewLiveTransportWithoutChangingRetainedToken) {
 }
 
 #ifdef _WIN32
+namespace {
+  std::string test_command_interpreter() {
+    std::array<wchar_t, MAX_PATH> system_directory {};
+    const auto length = GetSystemDirectoryW(system_directory.data(), system_directory.size());
+    if (length == 0 || length >= system_directory.size()) {
+      throw std::runtime_error("Unable to locate the Windows system directory");
+    }
+    return (std::filesystem::path(system_directory.data()) / "cmd.exe").string();
+  }
+
+  boost::process::v1::child exited_test_child() {
+    boost::process::v1::child child {
+      test_command_interpreter(),
+      "/d",
+      "/c",
+      "exit /b 0",
+      boost::process::v1::windows::create_no_window
+    };
+    // This build's Boost.Process wait() closes hProcess. Keep the terminated child's handle
+    // valid, matching the production exit-observation path rather than an already-reaped child.
+    if (WaitForSingleObject(child.native_handle(), 5000) != WAIT_OBJECT_0) {
+      throw std::runtime_error("Test command did not exit before its deadline");
+    }
+    return child;
+  }
+
+  class IdleProcessLifecycleTest: public testing::Test {
+  protected:
+    void SetUp() override {
+      stream::session::flush_platform_state();
+      previous_process_ = std::move(proc::proc);
+      proc::proc = proc::proc_t {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
+      previous_driver_status_ = proc::vDisplayDriverStatus.exchange(VDISPLAY::DRIVER_STATUS::OK);
+      previous_apps_path_ = config::stream.file_apps;
+      previous_output_ = config::video.output_name;
+      previous_grace_ = config::stream.session_resume_grace;
+      config::stream.session_resume_grace = std::chrono::seconds {60};
+      apps_path_ = std::filesystem::temp_directory_path() /
+                   ("apollo_idle_process_test_" + std::to_string(GetCurrentProcessId()) + ".json");
+      std::ofstream apps_file(apps_path_);
+      ASSERT_TRUE(apps_file.is_open());
+      apps_file << R"({"version":2,"env":{},"apps":[]})";
+      config::stream.file_apps = apps_path_.string();
+
+      original_ = std::make_shared<rtsp_stream::launch_session_t>();
+      original_->id = 11;
+      original_->width = 1920;
+      original_->height = 1080;
+      original_->fps = 60000;
+      proc::process_test_access::retain(proc::proc, original_);
+    }
+
+    void TearDown() override {
+      stream::session::flush_platform_state();
+      proc::process_test_access::stop_child(proc::proc);
+      proc::proc.terminate(false, false);
+      proc::proc = std::move(previous_process_);
+      proc::vDisplayDriverStatus.store(previous_driver_status_);
+      config::stream.file_apps = previous_apps_path_;
+      config::video.output_name = previous_output_;
+      config::stream.session_resume_grace = previous_grace_;
+      std::error_code error;
+      std::filesystem::remove(apps_path_, error);
+    }
+
+    proc::proc_t previous_process_;
+    VDISPLAY::DRIVER_STATUS previous_driver_status_;
+    std::string previous_apps_path_;
+    std::string previous_output_;
+    std::chrono::milliseconds previous_grace_;
+    std::filesystem::path apps_path_;
+    std::shared_ptr<rtsp_stream::launch_session_t> original_;
+  };
+}  // namespace
+
+TEST_F(IdleProcessLifecycleTest, ExitedAppIsCleanedAfterMediaStopsBeforeWarmRetention) {
+  proc::process_test_access::set_child(proc::proc, exited_test_child());
+  ASSERT_TRUE(proc::proc.stream_process_exited());
+  ASSERT_EQ(proc::proc.get_status().app_id, 1);
+  ASSERT_TRUE(stream::session::claim_active_slot_for_test());
+  {
+    auto release_active = util::fail_guard([]() {
+      stream::session::release_active_slot_for_test();
+    });
+    auto guard = stream::session::guard_platform_launch();
+    EXPECT_FALSE(guard.idle());
+    EXPECT_EQ(proc::proc.get_host_session_id(), 1234U);
+  }
+  stream::session::retain_or_stop_session_for_test(true);
+  EXPECT_EQ(proc::proc.get_status().app_id, 0);
+  EXPECT_EQ(proc::proc.get_host_session_id(), 0U);
+}
+
+TEST_F(IdleProcessLifecycleTest, IdleAdmissionReapsAnAppThatExitedDuringReconnectGrace) {
+  proc::process_test_access::set_child(proc::proc, exited_test_child());
+  auto guard = stream::session::guard_platform_launch();
+  EXPECT_TRUE(guard.idle());
+  EXPECT_EQ(proc::proc.get_status().app_id, 0);
+  EXPECT_EQ(proc::proc.get_host_session_id(), 0U);
+  auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
+  EXPECT_EQ(proc::proc.reconfigure_retained_session(resumed), 409);
+}
+
+TEST_F(IdleProcessLifecycleTest, LiveCommandKeepsItsIdentityAndExistingGraceDeadline) {
+  boost::process::v1::opstream child_input;
+  boost::process::v1::child child {
+    test_command_interpreter(),
+    "/d",
+    "/c",
+    "set /p sunshine_test_wait=",
+    boost::process::v1::std_in < child_input,
+    boost::process::v1::windows::create_no_window
+  };
+  proc::process_test_access::set_child(proc::proc, std::move(child));
+  stream::session::retain_or_stop_session_for_test(true);
+  const auto generation = stream::session::platform_lifecycle_generation_for_test();
+  const auto deadline = stream::session::platform_stop_deadline_for_test();
+  ASSERT_TRUE(deadline);
+  {
+    auto guard = stream::session::guard_platform_launch();
+    EXPECT_TRUE(guard.idle());
+    EXPECT_EQ(proc::proc.get_host_session_id(), 1234U);
+  }
+  EXPECT_EQ(stream::session::platform_lifecycle_generation_for_test(), generation);
+  EXPECT_EQ(stream::session::platform_stop_deadline_for_test(), deadline);
+  proc::process_test_access::stop_child(proc::proc);
+}
+
+TEST_F(IdleProcessLifecycleTest, DesktopPlaceboSurvivesIdleAdmission) {
+  proc::process_test_access::mark_desktop(proc::proc);
+  auto guard = stream::session::guard_platform_launch();
+  EXPECT_TRUE(guard.idle());
+  EXPECT_EQ(proc::proc.get_host_session_id(), 1234U);
+  EXPECT_EQ(proc::proc.get_status().app_id, 1);
+}
+
+TEST_F(IdleProcessLifecycleTest, GraceTaskReapsDisconnectedExitWithoutAnotherClientRequest) {
+  proc::process_test_access::mark_desktop(proc::proc);
+  stream::session::retain_or_stop_session_for_test(true);
+  ASSERT_TRUE(stream::session::platform_stop_deadline_for_test());
+  proc::process_test_access::set_child(proc::proc, exited_test_child());
+  stream::session::check_platform_stop_for_test();
+  EXPECT_EQ(proc::proc.get_status().app_id, 0);
+  EXPECT_EQ(proc::proc.get_host_session_id(), 0U);
+  EXPECT_FALSE(stream::session::platform_stop_deadline_for_test());
+}
+
+TEST_F(IdleProcessLifecycleTest, GraceTaskPreservesDeadlineAndGenerationWhileAppLives) {
+  proc::process_test_access::mark_desktop(proc::proc);
+  stream::session::retain_or_stop_session_for_test(true);
+  const auto deadline = stream::session::platform_stop_deadline_for_test();
+  const auto generation = stream::session::platform_lifecycle_generation_for_test();
+  ASSERT_TRUE(deadline);
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    stream::session::check_platform_stop_for_test();
+    EXPECT_EQ(stream::session::platform_stop_deadline_for_test(), deadline);
+    EXPECT_EQ(stream::session::platform_lifecycle_generation_for_test(), generation);
+    EXPECT_EQ(proc::proc.get_host_session_id(), 1234U);
+  }
+}
+
+TEST_F(IdleProcessLifecycleTest, AutoDetachedCommandSurvivesIdleAdmission) {
+  proc::process_test_access::set_child(proc::proc, exited_test_child(), true);
+  auto guard = stream::session::guard_platform_launch();
+  EXPECT_TRUE(guard.idle());
+  EXPECT_FALSE(proc::proc.stream_process_exited());
+  EXPECT_EQ(proc::proc.get_host_session_id(), 1234U);
+}
+
+TEST_F(IdleProcessLifecycleTest, WaitAllKeepsSessionWhileAnotherGroupMemberRuns) {
+  boost::process::v1::opstream child_input;
+  boost::process::v1::group group;
+  boost::process::v1::child child {
+    test_command_interpreter(),
+    "/d",
+    "/c",
+    "set /p sunshine_test_wait=",
+    group,
+    boost::process::v1::std_in < child_input,
+    boost::process::v1::windows::create_no_window
+  };
+  proc::process_test_access::set_child(proc::proc, exited_test_child());
+  proc::process_test_access::wait_for_group(proc::proc, std::move(group));
+  {
+    auto guard = stream::session::guard_platform_launch();
+    EXPECT_TRUE(guard.idle());
+    EXPECT_FALSE(proc::proc.stream_process_exited());
+    EXPECT_EQ(proc::proc.get_host_session_id(), 1234U);
+  }
+  child.terminate();
+  child.wait();
+}
+
+TEST_F(IdleProcessLifecycleTest, FailedPhysicalHdrRollbackClearsUnprovenSession) {
+  using operation_e = proc::display_topology_test_operation_e;
+  std::vector<bool> requests;
+  proc::process_test_access::set_display_topology_hook(proc::proc, [&](operation_e operation, bool desired) {
+    EXPECT_EQ(operation, operation_e::request_hdr);
+    requests.push_back(desired);
+    return false;
+  });
+  auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
+  resumed->id = 22;
+  resumed->width = 1920;
+  resumed->height = 1080;
+  resumed->fps = 60000;
+  resumed->scale_factor = 100;
+  resumed->enable_hdr = true;
+  EXPECT_EQ(proc::proc.reconfigure_retained_session(resumed), 503);
+  EXPECT_EQ(requests, (std::vector<bool> {true, false}));
+  EXPECT_EQ(proc::proc.get_status().app_id, 0);
+  EXPECT_EQ(proc::proc.get_host_session_id(), 0U);
+}
+
+TEST(ProcessTest, PhysicalResumeAppliesChangedHdrBeforePublishingItsContract) {
+  using operation_e = proc::display_topology_test_operation_e;
+  for (const bool previous_hdr : {false, true}) {
+    proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
+    auto original = std::make_shared<rtsp_stream::launch_session_t>();
+    original->id = 11;
+    original->width = 1920;
+    original->height = 1080;
+    original->fps = 60000;
+    original->enable_hdr = previous_hdr;
+    proc::process_test_access::retain(process, original);
+    auto cleanup = util::fail_guard([&]() {
+      proc::process_test_access::clear(process);
+    });
+    std::vector<bool> requests;
+    proc::process_test_access::set_display_topology_hook(process, [&](operation_e operation, bool desired) {
+      EXPECT_EQ(operation, operation_e::request_hdr);
+      EXPECT_EQ(process.get_status().enable_hdr, previous_hdr);
+      requests.push_back(desired);
+      return true;
+    });
+    auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
+    resumed->id = 22;
+    resumed->width = 1920;
+    resumed->height = 1080;
+    resumed->fps = 60000;
+    resumed->scale_factor = 100;
+    resumed->enable_hdr = !previous_hdr;
+    EXPECT_EQ(process.reconfigure_retained_session(resumed), 0);
+    EXPECT_EQ(requests, (std::vector<bool> {!previous_hdr}));
+    EXPECT_EQ(process.get_status().enable_hdr, !previous_hdr);
+    EXPECT_EQ(process.get_host_session_id(), 1234U);
+    EXPECT_EQ(original->id, 11U);
+  }
+}
+
+TEST(ProcessTest, FailedPhysicalHdrResumeRestoresPreviousHdrAndTransportIdentity) {
+  using operation_e = proc::display_topology_test_operation_e;
+  proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
+  auto original = std::make_shared<rtsp_stream::launch_session_t>();
+  original->id = 11;
+  original->width = 1920;
+  original->height = 1080;
+  original->fps = 60000;
+  proc::process_test_access::retain(process, original);
+  auto cleanup = util::fail_guard([&]() {
+    proc::process_test_access::clear(process);
+  });
+  std::vector<bool> requests;
+  proc::process_test_access::set_display_topology_hook(process, [&](operation_e operation, bool desired) {
+    EXPECT_EQ(operation, operation_e::request_hdr);
+    EXPECT_FALSE(process.get_status().enable_hdr);
+    requests.push_back(desired);
+    return !desired;
+  });
+  auto resumed = std::make_shared<rtsp_stream::launch_session_t>();
+  resumed->id = 22;
+  resumed->width = 1920;
+  resumed->height = 1080;
+  resumed->fps = 60000;
+  resumed->scale_factor = 100;
+  resumed->enable_hdr = true;
+  EXPECT_EQ(process.reconfigure_retained_session(resumed), 503);
+  EXPECT_EQ(requests, (std::vector<bool> {true, false}));
+  EXPECT_FALSE(process.get_status().enable_hdr);
+  EXPECT_EQ(process.get_host_session_id(), 1234U);
+  proc::process_test_access::mark_virtual(process, true);
+  EXPECT_EQ(process.apply_live_video_mode(1920, 1080, 60000, 11), proc::live_video_mode_result_e::unchanged);
+  EXPECT_EQ(process.apply_live_video_mode(1920, 1080, 60000, 22), proc::live_video_mode_result_e::needs_reconnect);
+}
+
 TEST(ProcessTest, RetainedDisplayPolicyFollowsEachAcceptedClientResume) {
   const auto saved_output = config::video.output_name;
   auto restore_config = util::fail_guard([&]() {
@@ -399,7 +723,9 @@ TEST(ProcessTest, RejectedNewLaunchClearsPreviousClientDisplayPolicy) {
   previous->id = 11;
   previous->virtual_display_only = true;
   proc::process_test_access::retain(process, previous);
-  auto cleanup = util::fail_guard([&]() { proc::process_test_access::clear(process); });
+  auto cleanup = util::fail_guard([&]() {
+    proc::process_test_access::clear(process);
+  });
 
   proc::ctx_t app {};
   app.id = "1";
@@ -502,27 +828,11 @@ TEST(ProcessTest, RetirementHandoffMarksOnlyTheBoundDisplayOrAnUnboundCandidate)
 }
 
 TEST(ProcessTest, ExplorerRepairRequiresEveryFinalRetirementProof) {
-  EXPECT_TRUE(proc::explorerRepairAllowedForRetirementForTest(
-    true,
-    true,
-    true
-  ));
+  EXPECT_TRUE(proc::explorerRepairAllowedForRetirementForTest(true, true, true));
 
-  EXPECT_FALSE(proc::explorerRepairAllowedForRetirementForTest(
-    false,
-    true,
-    true
-  )) << "Warm retirement must retain debt without restarting Explorer";
-  EXPECT_FALSE(proc::explorerRepairAllowedForRetirementForTest(
-    true,
-    false,
-    true
-  )) << "The opt-in config must remain suppressible";
-  EXPECT_FALSE(proc::explorerRepairAllowedForRetirementForTest(
-    true,
-    true,
-    false
-  )) << "Cleanup of a path that was never active creates no repair debt";
+  EXPECT_FALSE(proc::explorerRepairAllowedForRetirementForTest(false, true, true)) << "Warm retirement must retain debt without restarting Explorer";
+  EXPECT_FALSE(proc::explorerRepairAllowedForRetirementForTest(true, false, true)) << "The opt-in config must remain suppressible";
+  EXPECT_FALSE(proc::explorerRepairAllowedForRetirementForTest(true, true, false)) << "Cleanup of a path that was never active creates no repair debt";
 }
 #endif
 

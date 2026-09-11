@@ -1709,7 +1709,11 @@ namespace proc {
       }
     }
 
-    if (_virtual_display && !hdr_configured_by_recreation && !request_hdr_state(launch_session->enable_hdr, 6s)) {
+    // Physical displays keep their HDR worker across disconnect. Update that existing worker,
+    // preserving its pre-launch HDR baseline, before publishing a changed reconnect contract.
+    const bool needs_hdr_request = !hdr_configured_by_recreation &&
+                                   (_virtual_display || old_hdr != launch_session->enable_hdr);
+    if (needs_hdr_request && !request_hdr_state(launch_session->enable_hdr, 6s)) {
       bool rollback_succeeded = true;
       if (display_mode_changed && VDISPLAY::changeDisplaySettings(_virtual_display_gdi_name.c_str(), old_width, old_height, old_fps, false) != DISP_CHANGE_SUCCESSFUL) {
         BOOST_LOG(error) << "Failed to roll back the retained virtual-display mode after HDR reconfiguration failed."sv;

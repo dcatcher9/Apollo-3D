@@ -8167,9 +8167,6 @@ namespace platf::dxgi {
         return {nullptr, nullptr};
       }
 
-      // Clear the blank flag now that we're ready to capture into the image
-      d3d_img->blank = false;
-
       return {std::move(d3d_img), std::move(lock_helper)};
     };
 
@@ -8374,12 +8371,18 @@ namespace platf::dxgi {
       old_surface_delayed_destruction.reset();
     }
 
-    if (img_out) {
-      img_out->frame_timestamp = frame_timestamp;
-      img_out->content_timestamp = last_content_timestamp;
+    const auto delivery_status = detail::complete_ddup_image_delivery(
+      img_out,
+      last_frame_action == lfa::nothing && out_frame_action == ofa::forward_last_img,
+      frame_timestamp,
+      last_content_timestamp
+    );
+    if (delivery_status == capture_e::ok && img_out) {
+      // Only newly written outputs may change metadata. The cursor re-entry path also locks an
+      // already-published image to read its cursor-free pixels, so locking alone is not ownership.
+      static_cast<img_d3d_t *>(img_out.get())->blank = false;
     }
-
-    return capture_e::ok;
+    return delivery_status;
   }
 
   capture_e display_ddup_vram_t::release_snapshot() {

@@ -91,6 +91,12 @@ Preparation commands run before the application, and their paired undo commands 
 teardown. Keep them idempotent: reconnect, cancellation, or a failed launch must not leave Windows
 in a different state.
 
+When a command-backed application exits, teardown runs after its stream workers stop; reconnect
+grace does not keep the exited application resumable. The existing grace timer also checks for exit
+while disconnected, without extending the reconnect deadline; launch and resume check once more
+before admission. Desktop entries and commands configured to detach keep their normal reconnect
+behavior.
+
 Sunshine 3D already owns virtual-display resolution and refresh-rate negotiation. Do not add QRes
 or another display switcher to the **Virtual Display** entry; two independent display owners can
 race and corrupt the retained-monitor lifecycle.
@@ -101,6 +107,9 @@ encoded copies alone cannot increase source motion. If Windows does not advertis
 mode, the client reconnects to renegotiate it. A failed live change restores the previous desktop
 and encoder contract before reporting failure. Reconnecting preserves the retained app's session
 token and windows while replacing the transport identity authorized to request subsequent changes.
+An HDR change on reconnect is applied and verified for physical displays as well as virtual ones.
+Failure rolls back to the previous request, and final teardown preserves the display's original HDR
+baseline.
 
 ## Choosing a 3D mode
 

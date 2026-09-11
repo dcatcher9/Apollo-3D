@@ -727,6 +727,30 @@ namespace platf::dxgi {
       return {presentation_timestamp, retained_content_timestamp};
     }
 
+    /** Publish fresh capture pixels without modifying an image already held by the encoder.
+     *
+     * A pointer-only acquisition can forward the existing cursor-free image without writing any
+     * pixels. Treat that acquisition as idle: neither timestamps nor diagnostic handoff metadata
+     * may be rewritten on the shared image. Cursor removal still publishes its freshly copied
+     * image, as do desktop updates and visible cursor composition.
+     */
+    inline capture_e complete_ddup_image_delivery(
+      std::shared_ptr<platf::img_t> &image,
+      const bool reuses_published_image,
+      const std::optional<std::chrono::steady_clock::time_point> frame_timestamp,
+      const std::optional<std::chrono::steady_clock::time_point> content_timestamp
+    ) {
+      if (reuses_published_image) {
+        image.reset();
+        return capture_e::timeout;
+      }
+      if (image) {
+        image->frame_timestamp = frame_timestamp;
+        image->content_timestamp = content_timestamp;
+      }
+      return capture_e::ok;
+    }
+
     inline constexpr std::size_t ddup_damage_history_frame_budget = 128u;
     inline constexpr std::size_t ddup_damage_history_rect_budget = 4096u;
     inline constexpr std::size_t ddup_damage_frame_rect_budget = 512u;

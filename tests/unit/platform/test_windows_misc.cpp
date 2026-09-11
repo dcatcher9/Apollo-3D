@@ -151,6 +151,74 @@ namespace {
     EXPECT_EQ(timestamps.content_timestamp, 300);
   }
 
+  struct captured_ddup_image_t: platf::img_t {
+    platf::dxgi::detail::ddup_damage_snapshot_t damage;
+  };
+
+  TEST(WindowsDdupTimestampTest, InvisiblePointerUpdatesDoNotMutatePublishedImage) {
+    using namespace std::chrono_literals;
+    using platf::dxgi::detail::complete_ddup_image_delivery;
+    const auto captured_at = std::chrono::steady_clock::time_point {1s};
+    auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+    auto retained = std::make_shared<captured_ddup_image_t>();
+    retained->damage = history->commit({true, {RECT {0, 0, 1920, 1080}}});
+    const auto damage_token = retained->damage.token;
+    std::shared_ptr<platf::img_t> delivery = retained;
+    ASSERT_EQ(complete_ddup_image_delivery(delivery, false, captured_at, captured_at), platf::capture_e::ok);
+    retained->diagnostic_capture_ready_timestamp = captured_at + 1ms;
+    delivery.reset();
+
+    // DDup can report more pointer updates after a hidden/off-output cursor's last desktop
+    // image was published. The encode owner still holds that same image while capture forwards
+    // it; finalizing the no-op must not republish it for diagnostics or mutate its source clock.
+    for (const auto elapsed : {10ms, 20ms, 30ms}) {
+      delivery = retained;
+      EXPECT_EQ(complete_ddup_image_delivery(delivery, true, captured_at + elapsed, captured_at), platf::capture_e::timeout);
+      EXPECT_FALSE(delivery);
+      EXPECT_EQ(retained.use_count(), 1);
+      EXPECT_EQ(retained->frame_timestamp, captured_at);
+      EXPECT_EQ(retained->content_timestamp, captured_at);
+      EXPECT_EQ(retained->diagnostic_capture_ready_timestamp, captured_at + 1ms);
+      EXPECT_EQ(retained->damage.history, history);
+      EXPECT_EQ(retained->damage.token, damage_token);
+    }
+  }
+
+  TEST(WindowsDdupTimestampTest, FreshCursorRemovalAndDesktopImagesKeepTheirOwnMetadata) {
+    using namespace std::chrono_literals;
+    using platf::dxgi::detail::complete_ddup_image_delivery;
+    const auto captured_at = std::chrono::steady_clock::time_point {1s};
+    auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+    auto retained = std::make_shared<captured_ddup_image_t>();
+    retained->damage = history->commit({true, {RECT {0, 0, 1920, 1080}}});
+    std::shared_ptr<platf::img_t> delivery = retained;
+    ASSERT_EQ(complete_ddup_image_delivery(delivery, false, captured_at, captured_at), platf::capture_e::ok);
+
+    // First cursor disappearance copies the cursor-free private surface to a different pooled
+    // image. These changed pixels must still publish, with the same desktop/damage identity.
+    auto cursor_removed = std::make_shared<captured_ddup_image_t>();
+    cursor_removed->damage = retained->damage;
+    delivery = cursor_removed;
+    EXPECT_EQ(complete_ddup_image_delivery(delivery, false, captured_at + 10ms, captured_at), platf::capture_e::ok);
+    EXPECT_EQ(delivery.get(), cursor_removed.get());
+    EXPECT_EQ(cursor_removed->frame_timestamp, captured_at + 10ms);
+    EXPECT_EQ(cursor_removed->content_timestamp, captured_at);
+    EXPECT_EQ(cursor_removed->damage.history, retained->damage.history);
+    EXPECT_EQ(cursor_removed->damage.token, retained->damage.token);
+
+    auto changed_desktop = std::make_shared<captured_ddup_image_t>();
+    changed_desktop->damage = history->commit({true, {RECT {50, 50, 100, 100}}});
+    delivery = changed_desktop;
+    EXPECT_EQ(complete_ddup_image_delivery(delivery, false, captured_at + 20ms, captured_at + 20ms), platf::capture_e::ok);
+    EXPECT_EQ(changed_desktop->frame_timestamp, captured_at + 20ms);
+    EXPECT_EQ(changed_desktop->content_timestamp, captured_at + 20ms);
+    EXPECT_NE(changed_desktop->damage.token, retained->damage.token);
+    EXPECT_EQ(retained->frame_timestamp, captured_at);
+    EXPECT_EQ(retained->content_timestamp, captured_at);
+    EXPECT_EQ(cursor_removed->frame_timestamp, captured_at + 10ms);
+    EXPECT_EQ(cursor_removed->content_timestamp, captured_at);
+  }
+
   TEST(WindowsDdupDamageTest, NormalizesDirtyAndBothSidesOfMoveRects) {
     const RECT dirty {10, 20, 30, 40};
     DXGI_OUTDUPL_MOVE_RECT move {};

@@ -3,11 +3,13 @@
  * @brief Test src/logging.*.
  */
 #include "../tests_common.h"
+#include "../tests_events.h"
 #include "../tests_log_checker.h"
 
 #include <format>
 #include <random>
 #include <src/logging.h>
+#include <src/utility.h>
 
 namespace {
   std::array log_levels = {
@@ -44,4 +46,22 @@ TEST_P(LogLevelsTest, PutMessage) {
   BOOST_LOG(logger) << test_message;
 
   ASSERT_TRUE(log_checker::line_contains(log_file, test_message));
+}
+
+TEST(TestEventListenerTest, ReportsExceptionsWithoutASourceLocation) {
+  SunshineEventListener listener;
+  listener.OnTestProgramStart(*testing::UnitTest::GetInstance());
+  auto cleanup = util::fail_guard([&]() {
+    listener.OnTestProgramEnd(*testing::UnitTest::GetInstance());
+  });
+  const testing::TestPartResult result {
+    testing::TestPartResult::kFatalFailure,
+    "",
+    -1,
+    "fixture exception"
+  };
+  ASSERT_EQ(result.file_name(), nullptr);
+  EXPECT_NO_THROW(listener.OnTestPartResult(result));
+  EXPECT_NE(listener.sink_buffer->str().find("unknown file"), std::string::npos);
+  EXPECT_NE(listener.sink_buffer->str().find("fixture exception"), std::string::npos);
 }
