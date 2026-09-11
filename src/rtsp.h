@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -276,6 +277,7 @@ namespace rtsp_stream {
     launch_session_t &launch_session
   );
   void expire_launch_session_for_test(std::uint32_t launch_session_id);
+  std::function<void()> launch_expiry_callback_for_test(std::uint32_t launch_session_id);
 #endif
 
   /** Terminate the pending or active remote streaming session. */

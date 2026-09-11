@@ -597,18 +597,32 @@ namespace rtsp_stream {
         return false;
       }
 
-      // Arm the timer to expire this launch session if the client times out
-      raised_timer.expires_after(config::stream.ping_timeout);
-      raised_timer.async_wait([this, launch_session_id](const boost::system::error_code &ec) {
-        if (!ec) {
-          expire_launch_session(launch_session_id);
-        }
-      });
+      arm_launch_timer_locked(launch_session_id);
       return true;
     }
 
-    void expire_launch_session(std::uint32_t launch_session_id) {
+    void cancel_launch_timer_locked() {
+      ++_launch_timer_generation;
+      raised_timer.cancel();
+    }
+
+    void arm_launch_timer_locked(std::uint32_t launch_session_id) {
+      const auto generation = ++_launch_timer_generation;
+      raised_timer.expires_after(config::stream.ping_timeout);
+      raised_timer.async_wait([this, launch_session_id, generation](const boost::system::error_code &ec) {
+        if (!ec) {
+          expire_launch_session(launch_session_id, generation);
+        }
+      });
+    }
+
+    void expire_launch_session(std::uint32_t launch_session_id, std::uint64_t generation) {
       std::lock_guard lock(_launch_mutex);
+      // Cancellation cannot recall an already queued successful timer completion. A claimed
+      // ANNOUNCE and its later PLAY window must reject the earlier admission timer as stale.
+      if (generation != _launch_timer_generation || _claimed_launch_session) {
+        return;
+      }
       auto pending = launch_event.view(0s);
       if (pending && pending->id == launch_session_id) {
         auto discarded = launch_event.pop(0s);
@@ -633,7 +647,7 @@ namespace rtsp_stream {
         if (launch_session->id != launch_session_id) {
           BOOST_LOG(error) << "Attempted to clear unexpected session: "sv << launch_session_id << " vs "sv << launch_session->id;
         } else {
-          raised_timer.cancel();
+          cancel_launch_timer_locked();
           auto cleared = launch_event.pop();
           // A normal control connection may clear an already claimed launch. Preserve that state
           // for subsequent PLAY, but ensure an unclaimed accepted socket cannot start later.
@@ -646,7 +660,7 @@ namespace rtsp_stream {
 
     void clear_pending_launch_session() {
       std::lock_guard lock(_launch_mutex);
-      raised_timer.cancel();
+      cancel_launch_timer_locked();
       if (launch_event.view(0s)) {
         auto cleared = launch_event.pop(0s);
         cleared->revoke_reservation();
@@ -673,6 +687,9 @@ namespace rtsp_stream {
         return false;
       }
       _claimed_launch_session = std::move(pending);
+      // The client has supplied a valid ANNOUNCE. Synchronous platform startup is host work,
+      // so it must not consume the peer's connection window or revoke the following PLAY.
+      cancel_launch_timer_locked();
       return true;
     }
 
@@ -683,8 +700,7 @@ namespace rtsp_stream {
 
     claimed_live_gpu_transfer_t take_claimed_live_gpu_lease(launch_session_t &launch_session) {
       std::lock_guard lock(_launch_mutex);
-      if (_claimed_launch_session.get() != &launch_session ||
-          launch_session.reservation() != launch_reservation_state_e::claimed) {
+      if (_claimed_launch_session.get() != &launch_session || launch_session.reservation() != launch_reservation_state_e::claimed) {
         return {false, std::nullopt};
       }
       return {true, launch_session.take_live_gpu_lease()};
@@ -701,8 +717,15 @@ namespace rtsp_stream {
         launch_session.pending_live_gpu_lease.reset();
         auto pending = launch_event.view(0s);
         if (pending && pending.get() == &launch_session) {
-          raised_timer.cancel();
+          cancel_launch_timer_locked();
           launch_event.pop(0s);
+        }
+      } else if (launch_session.reservation() == launch_reservation_state_e::claimed) {
+        const auto pending = launch_event.view(0s);
+        if (pending && pending.get() == &launch_session) {
+          // Startup is finished. Retain the RTSP identity for PLAY while bounding a client
+          // that never establishes control. A prior control clear must not be resurrected.
+          arm_launch_timer_locked(launch_session.id);
         }
       }
       _claimed_launch_session.reset();
@@ -734,6 +757,14 @@ namespace rtsp_stream {
     }
 
 #ifdef SUNSHINE_TESTS
+    std::function<void()> launch_expiry_callback(std::uint32_t launch_session_id) {
+      std::lock_guard lock(_launch_mutex);
+      const auto generation = _launch_timer_generation;
+      return [this, launch_session_id, generation]() {
+        expire_launch_session(launch_session_id, generation);
+      };
+    }
+
     /** Test-only active-slot mutation used by authorization concurrency tests. */
     void remove(const std::shared_ptr<stream::session_t> &session) {
       auto lg = _active_session.lock();
@@ -951,6 +982,7 @@ namespace rtsp_stream {
     std::optional<gpu_workload::lease_t> _active_gpu_lease;
     std::mutex _client_policy_mutex;
     std::mutex _launch_mutex;
+    std::uint64_t _launch_timer_generation {};
     std::shared_ptr<launch_session_t> _claimed_launch_session;
     std::unordered_map<std::string, client_policy_t> _client_policies;
 
@@ -1049,7 +1081,11 @@ namespace rtsp_stream {
   }
 
   void expire_launch_session_for_test(std::uint32_t launch_session_id) {
-    server.expire_launch_session(launch_session_id);
+    server.launch_expiry_callback(launch_session_id)();
+  }
+
+  std::function<void()> launch_expiry_callback_for_test(std::uint32_t launch_session_id) {
+    return server.launch_expiry_callback(launch_session_id);
   }
 #endif
 

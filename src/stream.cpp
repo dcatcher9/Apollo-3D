@@ -3624,6 +3624,24 @@ namespace stream {
         std::thread video_;
       };
 
+      template<class Clock>
+      void publish_control_registration(
+        session_t &session,
+        control_server_t::session_slot_t &slot,
+        pending_session_workers_t &workers,
+        std::chrono::milliseconds ping_timeout,
+        Clock &&now
+      ) {
+        // The caller holds the control slot lock. Platform/input setup and worker construction
+        // must not consume the client's connection window before the session is visible.
+        session.pingTimeout = now() + ping_timeout;
+        session.state.store(state_e::RUNNING, std::memory_order_relaxed);
+        session.startup_ready.raise(true);
+        slot.session = &session;
+        slot.peer = nullptr;
+        workers.commit(session);
+      }
+
       // Starting a Windows streaming session reapplies NVIDIA profile settings and can take
       // several seconds. Keep that process-wide platform state warm briefly after disconnect,
       // but also bound an accepted launch that never completes its RTSP handshake. The mutex owns
@@ -4006,6 +4024,45 @@ namespace stream {
       );
       return !prepared && executed.load() == 0 && !workers.has_joinable_worker();
     }
+
+    control_registration_test_result_t control_registration_after_preparation_for_test(
+      std::chrono::milliseconds preparation,
+      std::chrono::milliseconds ping_timeout
+    ) {
+      control_registration_test_result_t result;
+      session_t session;
+      sync_util::sync_t<control_server_t::session_slot_t> slot;
+      auto now = std::chrono::steady_clock::time_point {1s};
+      // Seed the old startup-era deadline, then model platform/input setup taking longer than it.
+      session.pingTimeout = now + ping_timeout;
+      session.state.store(state_e::STOPPED, std::memory_order_relaxed);
+      now += preparation;
+      result.expired_before_publication = now > session.pingTimeout;
+      std::atomic_int ready_workers {};
+      pending_session_workers_t workers;
+      const auto observe_registration = [&]() {
+        auto lock = slot.lock();
+        if (slot->session == &session && !slot->peer && session.state.load(std::memory_order_relaxed) == state_e::RUNNING && session.startup_ready.peek() && session.pingTimeout == now + ping_timeout) {
+          ++ready_workers;
+        }
+      };
+      result.workers_prepared = workers.prepare(observe_registration, observe_registration);
+      if (!result.workers_prepared) {
+        return result;
+      }
+      {
+        auto lock = slot.lock();
+        publish_control_registration(session, *slot, workers, ping_timeout, [&]() {
+          ++result.clock_samples;
+          return now;
+        });
+        result.remaining_ping_budget = session.pingTimeout - now;
+      }
+      session.audioThread.join();
+      session.videoThread.join();
+      result.ready_workers = ready_workers.load();
+      return result;
+    }
 #endif
 
     std::string uuid(const session_t &session) {
@@ -4197,8 +4254,6 @@ namespace stream {
         return -1;
       }
 
-      session.pingTimeout = std::chrono::steady_clock::now() + config::stream.ping_timeout;
-
       // Claim the sole session under the same lifecycle lock used by launch-time display
       // mutation and encoder probing. A stale RTSP handshake therefore cannot create a second
       // capture/encoder/input stack behind the HTTP admission check.
@@ -4258,14 +4313,15 @@ namespace stream {
           return -1;
         }
 
-        session.state.store(state_e::RUNNING, std::memory_order_relaxed);
-
         // A/V capture may already have received its UDP ping. Release it only after display/audio
         // platform state has finished resuming; control_ready independently protects source routing.
-        session.startup_ready.raise(true);
-        session.broadcast_ref->control_server._session->session = &session;
-        session.broadcast_ref->control_server._session->peer = nullptr;
-        workers.commit(session);
+        publish_control_registration(
+          session,
+          *session.broadcast_ref->control_server._session,
+          workers,
+          config::stream.ping_timeout,
+          std::chrono::steady_clock::now
+        );
         if (session.microphone_receiver) {
           if (!!(permissions(session) & crypto::PERM::input_microphone)) {
             session.microphone_receiver->activate();

@@ -752,6 +752,19 @@ namespace stream {
     std::optional<std::chrono::steady_clock::time_point> platform_stop_deadline_for_test();
     void check_platform_stop_for_test();
     bool worker_start_rollback_for_test();
+
+    struct control_registration_test_result_t {
+      bool workers_prepared = false;
+      bool expired_before_publication = false;
+      std::chrono::steady_clock::duration remaining_ping_budget {};
+      int clock_samples = 0;
+      int ready_workers = 0;
+    };
+
+    control_registration_test_result_t control_registration_after_preparation_for_test(
+      std::chrono::milliseconds preparation,
+      std::chrono::milliseconds ping_timeout
+    );
 #endif
   }  // namespace session
 }  // namespace stream

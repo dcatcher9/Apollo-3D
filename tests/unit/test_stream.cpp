@@ -179,6 +179,18 @@ TEST(SessionWorkerStartTest, RollsBackWhenSecondThreadCannotStart) {
   EXPECT_TRUE(stream::session::worker_start_rollback_for_test());
 }
 
+TEST(SessionWorkerStartTest, ControlConnectionGetsFullWindowAfterSlowPlatformPreparation) {
+  for (const auto preparation : {0ms, 11500ms, 120000ms}) {
+    SCOPED_TRACE(preparation.count());
+    const auto result = stream::session::control_registration_after_preparation_for_test(preparation, 10s);
+    ASSERT_TRUE(result.workers_prepared);
+    EXPECT_EQ(result.expired_before_publication, preparation > 10s);
+    EXPECT_EQ(result.clock_samples, 1);
+    EXPECT_EQ(result.remaining_ping_budget, 10s);
+    EXPECT_EQ(result.ready_workers, 2) << "Both workers must observe registration and its fresh deadline";
+  }
+}
+
 TEST(SessionWorkerJoinTest, WatchdogStillCoversWorkerShutdown) {
   std::function<void()> expire;
   int expirations = 0;

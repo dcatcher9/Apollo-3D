@@ -303,6 +303,78 @@ TEST(RtspLaunchReservationTest, ReservationCanBeClaimedOnlyOnce) {
   EXPECT_TRUE(rtsp_stream::launch_session_available());
 }
 
+TEST(RtspLaunchReservationTest, SlowStartupRejectsOldTimeoutAndRetainsBoundedPlayWindow) {
+  auto cleanup = util::fail_guard([] {
+    rtsp_stream::terminate_session();
+  });
+  auto launch = make_modern_launch_session(302, "slow-startup");
+  ASSERT_TRUE(launch->reserve_live_gpu());
+  ASSERT_TRUE(rtsp_stream::launch_session_raise(launch));
+  const auto admission_timeout = rtsp_stream::launch_expiry_callback_for_test(launch->id);
+  ASSERT_TRUE(rtsp_stream::claim_launch_session_for_test(*launch));
+  const auto startup_timer_generation = rtsp_stream::launch_expiry_callback_for_test(launch->id);
+
+  // Model the original deadline elapsing while ANNOUNCE performs slow host startup. Also
+  // deliver that already-queued completion after startup, when cancellation alone is too late.
+  admission_timeout();
+  EXPECT_EQ(launch->reservation(), rtsp_stream::launch_reservation_state_e::claimed);
+  EXPECT_TRUE(gpu_workload::live_stream_active());
+  rtsp_stream::finish_launch_session_for_test(*launch, true);
+  admission_timeout();
+  // Successful finish must create a new timer generation, not simply leave the admission
+  // timer cancelled. Without that rearm, this callback would revoke the PLAY identity.
+  startup_timer_generation();
+  EXPECT_EQ(launch->reservation(), rtsp_stream::launch_reservation_state_e::claimed);
+  EXPECT_FALSE(rtsp_stream::launch_session_available());
+  EXPECT_TRUE(gpu_workload::live_stream_active());
+
+  // A silent client still expires under the fresh post-startup timer, even while an accepted
+  // socket retains its launch object. Successful startup does not remove that bound.
+  rtsp_stream::expire_launch_session_for_test(launch->id);
+  EXPECT_EQ(launch->reservation(), rtsp_stream::launch_reservation_state_e::revoked);
+  EXPECT_TRUE(rtsp_stream::launch_session_available());
+  EXPECT_FALSE(gpu_workload::live_stream_active());
+}
+
+TEST(RtspLaunchReservationTest, ControlClearDuringStartupDoesNotRearmOrRevokePlayIdentity) {
+  auto cleanup = util::fail_guard([] {
+    rtsp_stream::terminate_session();
+  });
+  auto launch = make_modern_launch_session(303, "early-control");
+  ASSERT_TRUE(rtsp_stream::launch_session_raise(launch));
+  const auto old_timeout = rtsp_stream::launch_expiry_callback_for_test(launch->id);
+  ASSERT_TRUE(rtsp_stream::claim_launch_session_for_test(*launch));
+  rtsp_stream::launch_session_clear(launch->id);
+  rtsp_stream::finish_launch_session_for_test(*launch, true);
+  old_timeout();
+  rtsp_stream::expire_launch_session_for_test(launch->id);
+  EXPECT_EQ(launch->reservation(), rtsp_stream::launch_reservation_state_e::claimed);
+  EXPECT_TRUE(rtsp_stream::launch_session_available());
+}
+
+TEST(RtspLaunchReservationTest, ExplicitTeardownDuringSlowStartupCannotRearmReservation) {
+  auto cleanup = util::fail_guard([] {
+    rtsp_stream::terminate_session();
+  });
+  auto launch = make_modern_launch_session(304, "revoked-startup");
+  ASSERT_TRUE(launch->reserve_live_gpu());
+  ASSERT_TRUE(rtsp_stream::launch_session_raise(launch));
+  const auto old_timeout = rtsp_stream::launch_expiry_callback_for_test(launch->id);
+  ASSERT_TRUE(rtsp_stream::claim_launch_session_for_test(*launch));
+  rtsp_stream::terminate_session();
+  rtsp_stream::finish_launch_session_for_test(*launch, true);
+  old_timeout();
+  EXPECT_EQ(launch->reservation(), rtsp_stream::launch_reservation_state_e::revoked);
+  EXPECT_TRUE(rtsp_stream::launch_session_available());
+  EXPECT_FALSE(gpu_workload::live_stream_active());
+
+  auto replacement = make_modern_launch_session(305, "replacement");
+  ASSERT_TRUE(rtsp_stream::launch_session_raise(replacement));
+  old_timeout();
+  EXPECT_EQ(replacement->reservation(), rtsp_stream::launch_reservation_state_e::pending);
+  EXPECT_FALSE(rtsp_stream::launch_session_available());
+}
+
 TEST(RtspLaunchReservationTest, TeardownRevokesClaimedStartupBeforeReplacement) {
   auto launch = make_modern_launch_session(401, "claimed-before-teardown");
 

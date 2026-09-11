@@ -1087,6 +1087,9 @@ microphone_sink = CABLE Input (VB-Audio Virtual Cable)
         <td>Description</td>
         <td colspan="2">
             How long to wait, in milliseconds, for data from Artemis before shutting down the stream.
+            A valid RTSP ANNOUNCE suspends the launch handshake timer during host platform startup.
+            Once startup finishes, PLAY and the initial control connection receive a fresh timeout
+            window. Host initialization time does not consume the client's connection window.
         </td>
     </tr>
     <tr>
